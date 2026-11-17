@@ -168,9 +168,9 @@ Examples:
 		// --body-file provides the message, so we only need recipient.
 		// With decisions the body (the intro above the decisions) is optional.
 		bodyFile, _ := cmd.Flags().GetString("body-file")
-		withChoices := cmd.Flags().Changed("decisions") || cmd.Flags().Changed("decisions-file") ||
+		withDecisions := cmd.Flags().Changed("decisions") || cmd.Flags().Changed("decisions-file") ||
 			cmd.Flags().Changed("choices") || cmd.Flags().Changed("choices-file")
-		if bodyFile != "" || withChoices {
+		if bodyFile != "" || withDecisions {
 			if len(args) < 1 {
 				return fmt.Errorf("recipient is required")
 			}
@@ -241,17 +241,17 @@ Examples:
 		// --choices* aliases): checked and read before the body, so
 		// --decisions-file - owns stdin. The JSON is parsed only for early
 		// errors; the hub is the authority.
-		msgChoicesPayload = nil
+		msgDecisionsPayload = nil
 		agentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
-		if err := validateChoiceFlags(agentTarget, len(groupRecipients) > 0); err != nil {
+		if err := validateDecisionFlags(agentTarget, len(groupRecipients) > 0); err != nil {
 			return err
 		}
-		if choicesRequested() {
-			payload, err := loadChoicesPayload()
+		if decisionsRequested() {
+			payload, err := loadDecisionsPayload()
 			if err != nil {
 				return err
 			}
-			msgChoicesPayload = payload
+			msgDecisionsPayload = payload
 		}
 
 		// Resolve body from --body-file or stdin
@@ -266,8 +266,8 @@ Examples:
 		// the slug. Code spans and quoted lines are left unchanged.
 		message = messages.RewriteAgentMentions(message)
 
-		// Ensure we have a message body (optional with choices)
-		if message == "" && len(msgArtifacts) == 0 && msgChoicesPayload == nil {
+		// Ensure we have a message body (optional with decisions)
+		if message == "" && len(msgArtifacts) == 0 && msgDecisionsPayload == nil {
 			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
 		}
 
@@ -839,7 +839,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		if ref.Kind == messaging.RefEmail {
 			outMsg.Recipient = "user:" + ref.Value
 		}
-		applyChoicesToOutbound(outMsg)
+		applyDecisionsToOutbound(outMsg)
 
 		// DEF-51 principle: the validated probe must match the sent envelope
 		// by construction. Fields the outbound path does not send (Channel,
@@ -857,7 +857,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		}
 		// A decision prompt's type and body are the hub's to set (the body
 		// may be empty), so only an ordinary message is probed.
-		if msgChoicesPayload == nil {
+		if msgDecisionsPayload == nil {
 			if err := messaging.ValidateLegacyMessage(probe); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
@@ -874,7 +874,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
 		// The hub stored the prompt: mark the agent waiting for input.
-		defer afterChoicesSent()
+		defer afterDecisionsSent()
 		if isJSONOutput() {
 			// JSON output with full result (MentionResults included, if any).
 			// outputJSON encodes a nil *OutboundMessageResult as JSON null,
@@ -904,7 +904,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			fmt.Printf("Message dispatched to %s%s (status: %s).\n", ref.Raw, receiptSuffix(result.MessageID, result.ConversationID), result.Status)
 		}
 		// A decision prompt's decisions, whatever the status.
-		printChoiceDecisions(result)
+		printSentDecisions(result)
 		printAttachmentWarnings(result.AttachmentWarnings)
 		return nil
 	}
@@ -1023,7 +1023,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		ThreadID:    msgThreadID,
 		Metadata:    artifactRefsMetadata(msgArtifactRefs),
 	}
-	applyChoicesToOutbound(outMsg)
+	applyDecisionsToOutbound(outMsg)
 
 	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
 	if err != nil {
@@ -1036,7 +1036,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", userRecipient, err))
 	}
 	// The hub stored the prompt: mark the agent waiting for input.
-	defer afterChoicesSent()
+	defer afterDecisionsSent()
 
 	if isJSONOutput() {
 		if result != nil {
@@ -1055,7 +1055,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	// reports its ID.
 	if result != nil {
 		fmt.Printf("Message sent to %s via Hub%s.\n", userRecipient, receiptSuffix(result.MessageID, result.ConversationID))
-		printChoiceDecisions(result)
+		printSentDecisions(result)
 	} else {
 		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
 	}
@@ -2041,9 +2041,9 @@ func init() {
 	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (work product to review, version or find later; use --attach for a file that is part of this message) (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach a file as part of this message, repeatable (use --artifact for work product to review, version or find later). When the hub stores attachments as artifacts, the file is uploaded and an agent recipient gets it in ~/.scion/inbox/<message-id>/; HTML and SVG are refused. Otherwise use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace); attachments the hub cannot read are reported as warnings after an agent's send.")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
-	messageCmd.Flags().StringVar(&msgChoices, "decisions", "", "Send a decision prompt: a JSON array of decisions for a user or conversation to answer (agents only; needs the web.decisions experiment). The body becomes the optional intro")
-	messageCmd.Flags().StringVar(&msgChoicesFile, "decisions-file", "", "Read the --decisions JSON from a file ('-' reads stdin, which then excludes --body-file -)")
-	messageCmd.Flags().BoolVar(&msgChoicesUpdate, "update", false, "With --decisions or --decisions-file: replace decisions whose ids already exist (a new version each); without it, reusing an id is refused. To revise an unanswered set on one card, resend all still-pending keys of that set")
+	messageCmd.Flags().StringVar(&msgDecisions, "decisions", "", "Send a decision prompt: a JSON array of decisions for a user or conversation to answer (agents only; needs the web.decisions experiment). The body becomes the optional intro")
+	messageCmd.Flags().StringVar(&msgDecisionsFile, "decisions-file", "", "Read the --decisions JSON from a file ('-' reads stdin, which then excludes --body-file -)")
+	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions or --decisions-file: replace decisions whose ids already exist (a new version each); without it, reusing an id is refused. To revise an unanswered set on one card, resend all still-pending keys of that set")
 
 	// legacy choices fallback: remove in ptone/scion#8249
 	messageCmd.Flags().StringVar(&msgLegacyChoices, "choices", "", "Deprecated alias of --decisions")

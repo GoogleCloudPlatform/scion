@@ -41,7 +41,7 @@ import (
 const threeDecisions = `[{"id":"D234","question":"Ship the feature now?","choices":["yes","no"],"default":"yes"},{"question":"Which approach?","choices":[{"id":"a","label":"Extend"},{"id":"b","label":"New type"}]},{"id":"ship-now","question":"Deploy today?","choices":["yes","no"],"default":"no"}]`
 
 // submitSet posts a set submit for prompt msgID as u.
-func (f *choicesFixture) submitSet(t *testing.T, u *store.User, msgID, idem string, pairs ...string) *httptest.ResponseRecorder {
+func (f *decisionsFixture) submitSet(t *testing.T, u *store.User, msgID, idem string, pairs ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	answers := []map[string]interface{}{}
 	for i := 0; i+1 < len(pairs); i += 2 {
@@ -56,16 +56,16 @@ func (f *choicesFixture) submitSet(t *testing.T, u *store.User, msgID, idem stri
 
 // sendSetToBob sends the three-decision prompt to bob and returns the
 // response with its message id and rows.
-func (f *choicesFixture) sendSetToBob(t *testing.T) choiceSendResponse {
+func (f *decisionsFixture) sendSetToBob(t *testing.T) decisionSendResponse {
 	t.Helper()
 	resp := f.sendPromptToBob(t, threeDecisions, false)
 	require.Len(t, resp.Decisions, 3)
 	return resp
 }
 
-func decodeSetResponse(t *testing.T, rr *httptest.ResponseRecorder) ChoiceSetAnswerResponse {
+func decodeSetResponse(t *testing.T, rr *httptest.ResponseRecorder) DecisionSetAnswerResponse {
 	t.Helper()
-	var out ChoiceSetAnswerResponse
+	var out DecisionSetAnswerResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
 	return out
 }
@@ -74,8 +74,8 @@ func decodeSetResponse(t *testing.T, rr *httptest.ResponseRecorder) ChoiceSetAns
 // stores and delivers one decision-response listing every answer in position
 // order with labels from the stored rows, marks the recommended choices,
 // and carries the set metadata (not v4's per-decision keys).
-func TestChoiceSetAnswer_RecordsAndDeliversOneResponse(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_RecordsAndDeliversOneResponse(t *testing.T) {
+	f := newDecisionsFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
 	before := len(f.dispatcher.getMessages())
@@ -120,8 +120,8 @@ func TestChoiceSetAnswer_RecordsAndDeliversOneResponse(t *testing.T) {
 
 // Criterion 22: labels come from the stored rows even when the client sends
 // its own.
-func TestChoiceSetAnswer_LabelsFromStoredRows(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_LabelsFromStoredRows(t *testing.T) {
+	f := newDecisionsFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
 	body := map[string]interface{}{"answers": []map[string]interface{}{
@@ -139,8 +139,8 @@ func TestChoiceSetAnswer_LabelsFromStoredRows(t *testing.T) {
 
 // Criterion 19: a set that differs from the actionable set is 409 with fresh
 // views and a reason per row; nothing is stored and nothing is sent.
-func TestChoiceSetAnswer_ChangedSet409(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_ChangedSet409(t *testing.T) {
+	f := newDecisionsFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
 	before := len(f.dispatcher.getMessages())
@@ -168,8 +168,8 @@ func TestChoiceSetAnswer_ChangedSet409(t *testing.T) {
 // Criterion 24: of two set submits one wins and the other gets 409; after an
 // --update repost of one key the old prompt's remaining decisions submit as
 // a smaller set.
-func TestChoiceSetAnswer_SecondSubmitAndSmallerSet(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_SecondSubmitAndSmallerSet(t *testing.T) {
+	f := newDecisionsFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
 	rr := f.submitSet(t, f.bob, resp.MessageID, "", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
@@ -183,7 +183,7 @@ func TestChoiceSetAnswer_SecondSubmitAndSmallerSet(t *testing.T) {
 		assert.Equal(t, store.AnswerSetReasonDecided, reasons[d.RowID])
 	}
 
-	g := newChoicesFixture(t)
+	g := newDecisionsFixture(t)
 	set := g.sendSetToBob(t)
 	s := set.Decisions
 	g.sendPromptToBob(t, `[{"id":"ship-now","question":"Deploy today, really?","choices":["yes","no"]}]`, true)
@@ -196,8 +196,8 @@ func TestChoiceSetAnswer_SecondSubmitAndSmallerSet(t *testing.T) {
 
 // Criterion 20: shape errors are 400; a replay with the same body returns the
 // recorded set, and the same key with another body is 422.
-func TestChoiceSetAnswer_ShapeAndIdempotency(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_ShapeAndIdempotency(t *testing.T) {
+	f := newDecisionsFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
 	other := f.sendPromptToBob(t, `[{"id":"E1","question":"Other?","choices":["yes","no"]},{"id":"E2","question":"Other two?","choices":["yes","no"]}]`, false)
@@ -238,8 +238,8 @@ func TestChoiceSetAnswer_ShapeAndIdempotency(t *testing.T) {
 // Criterion 20: an outsider gets 404; an agent, a visitor and a token get
 // 403 (the token and a federated user the session-only refusal); with the
 // flag off the endpoint is 404.
-func TestChoiceSetAnswer_Authorization(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_Authorization(t *testing.T) {
+	f := newDecisionsFixture(t)
 	_, res := f.topicPrompt(t, threeDecisions, false)
 	msg := res.Decisions[0]
 	d, err := f.store.GetDecision(context.Background(), msg.RowID)
@@ -269,7 +269,7 @@ func TestChoiceSetAnswer_Authorization(t *testing.T) {
 	f.srv.mux.ServeHTTP(agentRec, agentReq.WithContext(agentCtx(agentReq.Context(), f.agent)))
 	assert.Equal(t, http.StatusForbidden, agentRec.Code, "agent: %s", agentRec.Body.String())
 
-	setChoicesExperiment(t, f.srv, false)
+	setDecisionsExperiment(t, f.srv, false)
 	rr = doRequestAsUser(t, f.srv, f.bob, http.MethodPost, path, body)
 	assert.Equal(t, http.StatusNotFound, rr.Code, "flag off: %s", rr.Body.String())
 }
@@ -277,7 +277,7 @@ func TestChoiceSetAnswer_Authorization(t *testing.T) {
 // Criterion 21: the per-decision endpoint refuses any row of a set with 409
 // batch_required, naming the prompt and the rows the caller may answer.
 func TestDecisionAnswer_BatchRequired(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	resp := f.sendPromptToBob(t, twoDecisions, false)
 	rr := f.answer(t, f.bob, resp.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
@@ -294,8 +294,8 @@ func TestDecisionAnswer_BatchRequired(t *testing.T) {
 
 // Criterion 22: a set whose every row is a confirm of the user's own
 // interpreted answers is logged and not delivered.
-func TestChoiceSetAnswer_AllConfirmNotDelivered(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_AllConfirmNotDelivered(t *testing.T) {
+	f := newDecisionsFixture(t)
 	_, res := f.topicPrompt(t, twoDecisions, false)
 	// Each row's own first choice: D234 has 1 and 2, the second decision a and b.
 	f.recordInterpreted(t, f.alice, res.Decisions[0].RowID, "1")
@@ -320,8 +320,8 @@ func TestChoiceSetAnswer_AllConfirmNotDelivered(t *testing.T) {
 // Criterion 18 and design v5 5.2: history marks set and single prompts, and
 // a set's response row carries decisionResponseSet; with the flag off both
 // are omitted.
-func TestChoicesHistory_AnswerModeAndResponseSet(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionsHistory_AnswerModeAndResponseSet(t *testing.T) {
+	f := newDecisionsFixture(t)
 	setMsg, setRes := f.topicPrompt(t, threeDecisions, false)
 	singleMsg, _ := f.topicPrompt(t, `[{"id":"solo","question":"Alone?","choices":["yes","no"]}]`, false)
 	rows := setRes.Decisions
@@ -337,8 +337,8 @@ func TestChoicesHistory_AnswerModeAndResponseSet(t *testing.T) {
 		return h
 	}
 	h := history()
-	assert.Equal(t, ChoiceAnswerModeSet, h.MessageDecisionAnswerModes[setMsg.ID])
-	assert.Equal(t, ChoiceAnswerModeSingle, h.MessageDecisionAnswerModes[singleMsg.ID])
+	assert.Equal(t, DecisionAnswerModeSet, h.MessageDecisionAnswerModes[setMsg.ID])
+	assert.Equal(t, DecisionAnswerModeSingle, h.MessageDecisionAnswerModes[singleMsg.ID])
 	crs, ok := h.MessageDecisionResponseSets[out.ResponseMessageID]
 	require.True(t, ok)
 	assert.Equal(t, setMsg.ID, crs.PromptMessageID)
@@ -350,7 +350,7 @@ func TestChoicesHistory_AnswerModeAndResponseSet(t *testing.T) {
 	_, single := h.MessageDecisionResponses[out.ResponseMessageID]
 	assert.False(t, single, "a set response is not a one-click response")
 
-	setChoicesExperiment(t, f.srv, false)
+	setDecisionsExperiment(t, f.srv, false)
 	h = history()
 	assert.Nil(t, h.MessageDecisionAnswerModes)
 	assert.Nil(t, h.MessageDecisionResponseSets)
@@ -359,8 +359,8 @@ func TestChoicesHistory_AnswerModeAndResponseSet(t *testing.T) {
 // The idempotency key is scoped to the user and the prompt: in a group
 // topic, bob reusing alice's key gets the state result (409, the rows are
 // decided), not 422.
-func TestChoiceSetAnswer_IdempotencyKeyScopedToUser(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_IdempotencyKeyScopedToUser(t *testing.T) {
+	f := newDecisionsFixture(t)
 	msg, res := f.topicPrompt(t, threeDecisions, false)
 	r := res.Decisions
 	rr := f.submitSet(t, f.alice, msg.ID, "k", r[0].RowID, "1", r[1].RowID, "a", r[2].RowID, "1")
@@ -374,8 +374,8 @@ func TestChoiceSetAnswer_IdempotencyKeyScopedToUser(t *testing.T) {
 // Criterion 24: concurrent set submits of one prompt have exactly one
 // winner: one 200, the rest 409 answer_set_changed, one batch, one response
 // message and one delivery.
-func TestChoiceSetAnswer_ConcurrentOneWinner(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_ConcurrentOneWinner(t *testing.T) {
+	f := newDecisionsFixture(t)
 	msg, res := f.topicPrompt(t, threeDecisions, false)
 	r := res.Decisions
 	before := len(f.dispatcher.getMessages())
@@ -439,8 +439,8 @@ func TestChoiceSetAnswer_ConcurrentOneWinner(t *testing.T) {
 // Design v5 5.2: decision.updated is published once per answered row, in
 // position order, and the response row's chat event carries
 // decisionResponseSet.
-func TestChoiceSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
+	f := newDecisionsFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
 	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
@@ -463,7 +463,7 @@ func TestChoiceSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
 		assert.Equal(t, store.DecisionStatusDecided, got.Decision.Status)
 	}
 
-	var set *ChoiceResponseSetView
+	var set *DecisionResponseSetView
 	for _, e := range collectEvents(chat) {
 		var evt UserMessageEvent
 		require.NoError(t, json.Unmarshal(e.Data, &evt))
@@ -481,10 +481,10 @@ func TestChoiceSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
 // The remaining set outcomes over HTTP: a mixed set's delivery lines, the
 // replaced and not_recorded_answerer reasons, MESSAGE_DENIED, and a chat
 // reader without send rights.
-func TestChoiceSetAnswer_Outcomes(t *testing.T) {
+func TestDecisionSetAnswer_Outcomes(t *testing.T) {
 	ctx := context.Background()
 	t.Run("mixed set delivery lines", func(t *testing.T) {
-		f := newChoicesFixture(t)
+		f := newDecisionsFixture(t)
 		msg, res := f.topicPrompt(t, threeDecisions, false)
 		r := res.Decisions
 		f.recordInterpreted(t, f.alice, r[0].RowID, "1")
@@ -500,7 +500,7 @@ func TestChoiceSetAnswer_Outcomes(t *testing.T) {
 		assert.Contains(t, text, `ship-now v1 ("Deploy today?") answer=no (choice 2, recommended)`)
 	})
 	t.Run("replaced row", func(t *testing.T) {
-		f := newChoicesFixture(t)
+		f := newDecisionsFixture(t)
 		msg, res := f.topicPrompt(t, threeDecisions, false)
 		r := res.Decisions
 		f.topicPrompt(t, `[{"id":"ship-now","question":"Deploy today, really?","choices":["yes","no"]}]`, true)
@@ -517,7 +517,7 @@ func TestChoiceSetAnswer_Outcomes(t *testing.T) {
 		assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
 	})
 	t.Run("another user's interpreted row", func(t *testing.T) {
-		f := newChoicesFixture(t)
+		f := newDecisionsFixture(t)
 		msg, res := f.topicPrompt(t, threeDecisions, false)
 		r := res.Decisions
 		f.recordInterpreted(t, f.alice, r[0].RowID, "1")
@@ -538,7 +538,7 @@ func TestChoiceSetAnswer_Outcomes(t *testing.T) {
 		assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
 	})
 	t.Run("asker takes no messages", func(t *testing.T) {
-		f := newChoicesFixture(t)
+		f := newDecisionsFixture(t)
 		msg, res := f.topicPrompt(t, threeDecisions, false)
 		r := res.Decisions
 		agent, err := f.store.GetAgent(ctx, f.agent.ID)
@@ -553,7 +553,7 @@ func TestChoiceSetAnswer_Outcomes(t *testing.T) {
 		assert.Empty(t, d.Answers, "nothing stored")
 	})
 	t.Run("chat reader", func(t *testing.T) {
-		f := newChoicesFixture(t)
+		f := newDecisionsFixture(t)
 		msg, res := f.topicPrompt(t, threeDecisions, false)
 		r := res.Decisions
 		f.makeChatReader(t, f.bob)
@@ -587,12 +587,12 @@ func (s *askerFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent
 
 // newAskerFaultFixture is a choices fixture whose store fails the asking
 // agent's lookup once armed (installed before the audited setup).
-func newAskerFaultFixture(t *testing.T) (*choicesFixture, *askerFaultStore, *storeFaultSwitch) {
+func newAskerFaultFixture(t *testing.T) (*decisionsFixture, *askerFaultStore, *storeFaultSwitch) {
 	t.Helper()
 	srv, s, alice, bob, project, wrapped, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *askerFaultStore {
 		return &askerFaultStore{Store: inner, fault: f}
 	})
-	f := newChoicesFixtureOn(t, srv, s, alice, bob, project)
+	f := newDecisionsFixtureOn(t, srv, s, alice, bob, project)
 	wrapped.agentID = f.agent.ID
 	return f, wrapped, fault
 }
@@ -600,8 +600,8 @@ func newAskerFaultFixture(t *testing.T) (*choicesFixture, *askerFaultStore, *sto
 // A deleted asker (design choices v4: answers are still recorded, and
 // dispatch follows the undeliverable semantics): the set is recorded
 // (200), its one response row is stored failed, and nothing is sent.
-func TestChoiceSetAnswer_AskerGoneRecordsWithoutDelivery(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionSetAnswer_AskerGoneRecordsWithoutDelivery(t *testing.T) {
+	f := newDecisionsFixture(t)
 	ctx := context.Background()
 	msg, res := f.topicPrompt(t, threeDecisions, false)
 	r := res.Decisions
@@ -622,7 +622,7 @@ func TestChoiceSetAnswer_AskerGoneRecordsWithoutDelivery(t *testing.T) {
 	assert.Equal(t, messages.TypeDecisionResponse, m.Type)
 	assert.Equal(t, store.MessageDispatchFailed, m.DispatchState)
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing is sent to a gone asker")
-	// Positive control for assertNoChoiceResponse: the same thread filter
+	// Positive control for assertNoDecisionResponse: the same thread filter
 	// finds this one response row.
 	rows, err := f.store.ListMessages(ctx, store.MessageFilter{ThreadID: f.topicID, Type: messages.TypeDecisionResponse}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
@@ -633,7 +633,7 @@ func TestChoiceSetAnswer_AskerGoneRecordsWithoutDelivery(t *testing.T) {
 // submit with an error response before anything is recorded (500 for this
 // untyped fault): no answer, no response row, nothing sent, and no
 // messaging check skipped.
-func TestChoiceSetAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
+func TestDecisionSetAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
 	f, wrapped, fault := newAskerFaultFixture(t)
 	ctx := context.Background()
 	msg, res := f.topicPrompt(t, threeDecisions, false)
@@ -651,7 +651,7 @@ func TestChoiceSetAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
 		assert.Empty(t, got.Answers, "nothing stored")
 	}
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
-	f.assertNoChoiceResponse(t)
+	f.assertNoDecisionResponse(t)
 }
 
 // The per-decision endpoint (one-decision prompt) gets the same handling:
@@ -674,24 +674,24 @@ func TestDecisionAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got.Answers, "nothing stored")
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing sent")
-	f.assertNoChoiceResponse(t)
+	f.assertNoDecisionResponse(t)
 }
 
-// assertNoChoiceResponse checks that the fixture's topic thread holds no
+// assertNoDecisionResponse checks that the fixture's topic thread holds no
 // decision-response message.
-func (f *choicesFixture) assertNoChoiceResponse(t *testing.T) {
+func (f *decisionsFixture) assertNoDecisionResponse(t *testing.T) {
 	t.Helper()
 	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{ThreadID: f.topicID, Type: messages.TypeDecisionResponse}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.Empty(t, rows.Items, "no decision-response row is stored")
 }
 
-// ptone/scion#7775: ChoiceResponseSetView carries answerer identity,
+// ptone/scion#7775: DecisionResponseSetView carries answerer identity,
 // outcome, per-answer promptMessageId, and previousChoiceLabel on both live
 // SSE and history reloads, and omits top-level promptMessageId when answers
 // span multiple prompts.
-func TestChoiceResponseSetView_AttributionAndOutcomes(t *testing.T) {
-	f := newChoicesFixture(t)
+func TestDecisionResponseSetView_AttributionAndOutcomes(t *testing.T) {
+	f := newDecisionsFixture(t)
 	chat, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.message")
 	defer unsub()
 
@@ -706,7 +706,7 @@ func TestChoiceResponseSetView_AttributionAndOutcomes(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	out := decodeSetResponse(t, rr)
 
-	var liveSet *ChoiceResponseSetView
+	var liveSet *DecisionResponseSetView
 	for _, e := range collectEvents(chat) {
 		var evt UserMessageEvent
 		require.NoError(t, json.Unmarshal(e.Data, &evt))
@@ -723,7 +723,7 @@ func TestChoiceResponseSetView_AttributionAndOutcomes(t *testing.T) {
 	histSet, ok := h.MessageDecisionResponseSets[out.ResponseMessageID]
 	require.True(t, ok, "history carries decisionResponseSet")
 
-	for source, set := range map[string]ChoiceResponseSetView{"live": *liveSet, "history": histSet} {
+	for source, set := range map[string]DecisionResponseSetView{"live": *liveSet, "history": histSet} {
 		assert.Equal(t, msg.ID, set.PromptMessageID, source)
 		require.Len(t, set.Answers, 3, source)
 		for i, a := range set.Answers {
@@ -763,7 +763,7 @@ func TestChoiceResponseSetView_AttributionAndOutcomes(t *testing.T) {
 		"row-a": {ID: "row-a", MessageID: "prompt-1", AskerAgentID: f.agent.ID, Key: "K1", Position: 0},
 		"row-b": {ID: "row-b", MessageID: "prompt-2", AskerAgentID: f.agent.ID, Key: "K2", Position: 1},
 	}
-	multi := choiceResponseSetViewOf([]*store.DecisionAnswer{
+	multi := decisionResponseSetViewOf([]*store.DecisionAnswer{
 		{
 			DecisionRowID: "row-a", AskerAgentID: f.agent.ID, Key: "K1", Version: 1,
 			ChoiceID: "1", ChoiceLabel: "Yes", Provenance: store.DecisionProvenanceAgentInterpreted,

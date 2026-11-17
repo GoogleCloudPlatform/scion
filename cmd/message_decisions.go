@@ -31,61 +31,61 @@ import (
 
 // Decision prompt flags of scion message (design choices v4, 4.3).
 var (
-	msgChoices       string
-	msgChoicesFile   string
-	msgChoicesUpdate bool
+	msgDecisions       string
+	msgDecisionsFile   string
+	msgDecisionsUpdate bool
 	// legacy choices fallback: remove in ptone/scion#8249
 	msgLegacyChoices     string
 	msgLegacyChoicesFile string
-	// msgChoicesPayload is the decisions JSON loaded from --decisions or
+	// msgDecisionsPayload is the decisions JSON loaded from --decisions or
 	// --decisions-file (or their deprecated --choices* aliases) for this
 	// invocation; nil for an ordinary message.
-	msgChoicesPayload json.RawMessage
+	msgDecisionsPayload json.RawMessage
 )
 
-// choicesStdin is where --decisions-file - reads; tests replace it.
-var choicesStdin io.Reader = os.Stdin
+// decisionsStdin is where --decisions-file - reads; tests replace it.
+var decisionsStdin io.Reader = os.Stdin
 
-// runChoicesAskUser is the ask_user side effect after a decision prompt is
+// runDecisionsAskUser is the ask_user side effect after a decision prompt is
 // sent from an agent: the same status update as
 // `sciontool status ask_user "<summary>"`. Tests replace it.
-var runChoicesAskUser = agentstatus.RunAskUser
+var runDecisionsAskUser = agentstatus.RunAskUser
 
-// choicesSummaryMax caps the first question in the ask_user summary.
-const choicesSummaryMax = 120
+// decisionsSummaryMax caps the first question in the ask_user summary.
+const decisionsSummaryMax = 120
 
-// choicesRequested reports whether this invocation sends decisions.
-func choicesRequested() bool {
-	return msgChoices != "" || msgChoicesFile != "" || msgLegacyChoices != "" || msgLegacyChoicesFile != ""
+// decisionsRequested reports whether this invocation sends decisions.
+func decisionsRequested() bool {
+	return msgDecisions != "" || msgDecisionsFile != "" || msgLegacyChoices != "" || msgLegacyChoicesFile != ""
 }
 
-// resetChoiceFlags clears the decision flag state (tests reuse the command).
-func resetChoiceFlags() {
-	msgChoices, msgChoicesFile, msgLegacyChoices, msgLegacyChoicesFile, msgChoicesUpdate, msgChoicesPayload = "", "", "", "", false, nil
+// resetDecisionFlags clears the decision flag state (tests reuse the command).
+func resetDecisionFlags() {
+	msgDecisions, msgDecisionsFile, msgLegacyChoices, msgLegacyChoicesFile, msgDecisionsUpdate, msgDecisionsPayload = "", "", "", "", false, nil
 }
 
-// validateChoiceFlags checks the decision flags against each other and the
+// validateDecisionFlags checks the decision flags against each other and the
 // recipient, before anything is read or sent. agentTarget and group are
 // the recipient kinds a decision prompt may not go to.
-func validateChoiceFlags(agentTarget, group bool) error {
-	if msgChoices != "" && msgLegacyChoices != "" {
+func validateDecisionFlags(agentTarget, group bool) error {
+	if msgDecisions != "" && msgLegacyChoices != "" {
 		return newUsageError("--decisions and --choices are mutually exclusive; use --decisions")
 	}
-	if msgChoicesFile != "" && msgLegacyChoicesFile != "" {
+	if msgDecisionsFile != "" && msgLegacyChoicesFile != "" {
 		return newUsageError("--decisions-file and --choices-file are mutually exclusive; use --decisions-file")
 	}
-	hasInline := msgChoices != "" || msgLegacyChoices != ""
-	hasFile := msgChoicesFile != "" || msgLegacyChoicesFile != ""
+	hasInline := msgDecisions != "" || msgLegacyChoices != ""
+	hasFile := msgDecisionsFile != "" || msgLegacyChoicesFile != ""
 	if hasInline && hasFile {
 		return newUsageError("--decisions and --decisions-file are mutually exclusive")
 	}
-	if !choicesRequested() {
-		if msgChoicesUpdate {
+	if !decisionsRequested() {
+		if msgDecisionsUpdate {
 			return newUsageError("--update is valid only with --decisions or --decisions-file")
 		}
 		return nil
 	}
-	if (msgChoicesFile == "-" || msgLegacyChoicesFile == "-") && msgBodyFile == "-" {
+	if (msgDecisionsFile == "-" || msgLegacyChoicesFile == "-") && msgBodyFile == "-" {
 		return newUsageError("--decisions-file - and --body-file - both read stdin; use a file for one of them")
 	}
 	if agentTarget || group {
@@ -111,31 +111,31 @@ func validateChoiceFlags(agentTarget, group bool) error {
 			return newUsageError("--decisions cannot be combined with %s", f.name)
 		}
 	}
-	if !choicesSenderIsAgent() {
+	if !decisionsSenderIsAgent() {
 		return errors.New("decisions can be sent only by an agent; it works inside an agent container (agent mode, with SCION_AGENT_NAME set)")
 	}
 	return nil
 }
 
-// choicesSenderIsAgent is the one test for "an agent sends this decision
-// prompt", used both to refuse a send (validateChoiceFlags) and to run the
-// ask_user side effect after one (afterChoicesSent). It needs both: agent
+// decisionsSenderIsAgent is the one test for "an agent sends this decision
+// prompt", used both to refuse a send (validateDecisionFlags) and to run the
+// ask_user side effect after one (afterDecisionsSent). It needs both: agent
 // mode, which the side effect is for, and SCION_AGENT_NAME, the agent
 // identity the prompt is sent as (the hub records it as the asker). Agent
 // mode alone would let a send through that has no sender identity; the
 // identity alone would mark a non-agent CLI waiting for input.
-func choicesSenderIsAgent() bool {
+func decisionsSenderIsAgent() bool {
 	return resolveMode() == ModeAgent && os.Getenv("SCION_AGENT_NAME") != ""
 }
 
-// loadChoicesPayload reads the decisions JSON and checks only that it is a
+// loadDecisionsPayload reads the decisions JSON and checks only that it is a
 // JSON array; every rule is the hub's to enforce.
-func loadChoicesPayload() (json.RawMessage, error) {
-	inline := msgChoices
+func loadDecisionsPayload() (json.RawMessage, error) {
+	inline := msgDecisions
 	if inline == "" {
 		inline = msgLegacyChoices
 	}
-	file := msgChoicesFile
+	file := msgDecisionsFile
 	if file == "" {
 		file = msgLegacyChoicesFile
 	}
@@ -144,7 +144,7 @@ func loadChoicesPayload() (json.RawMessage, error) {
 	case inline != "":
 		raw = []byte(inline)
 	case file == "-":
-		b, err := io.ReadAll(choicesStdin)
+		b, err := io.ReadAll(decisionsStdin)
 		if err != nil {
 			return nil, fmt.Errorf("reading --decisions-file from stdin: %w", err)
 		}
@@ -178,10 +178,10 @@ var (
 	mdEmphasisRe = regexp.MustCompile("(^|[\\s(\\[])[*_`~]+|[*_`~]+($|[\\s).,:;!?\\]])")
 )
 
-// choicesSummary is the ask_user message after a decision prompt is sent:
+// decisionsSummary is the ask_user message after a decision prompt is sent:
 // "Decision needed: <first question as plain text, 120 chars>" plus
 // " (+N more)" for further decisions.
-func choicesSummary(payload json.RawMessage) string {
+func decisionsSummary(payload json.RawMessage) string {
 	var decisions []struct {
 		Question string `json:"question"`
 	}
@@ -191,8 +191,8 @@ func choicesSummary(payload json.RawMessage) string {
 		first = decisions[0].Question
 	}
 	first = plainSummaryText(first)
-	if utf8.RuneCountInString(first) > choicesSummaryMax {
-		first = string([]rune(first)[:choicesSummaryMax-1]) + "…"
+	if utf8.RuneCountInString(first) > decisionsSummaryMax {
+		first = string([]rune(first)[:decisionsSummaryMax-1]) + "…"
 	}
 	summary := "Decision needed: " + first
 	if len(decisions) > 1 {
@@ -214,10 +214,10 @@ func plainSummaryText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// choiceDecisionLine is one decision in the text output (design 4.2):
+// decisionSendLine is one decision in the text output (design 4.2):
 // "D234 v1 (new)", "D1 v2 (new, replaces v1 which was pending)" or
 // "D1 v2 (new, replaces v1 which was decided by Pat: yes)".
-func choiceDecisionLine(d hubclient.DecisionSendResult) string {
+func decisionSendLine(d hubclient.DecisionSendResult) string {
 	if d.Replaced == nil {
 		return fmt.Sprintf("%s v%d (new)", d.Key, d.Version)
 	}
@@ -231,34 +231,34 @@ func choiceDecisionLine(d hubclient.DecisionSendResult) string {
 	return fmt.Sprintf("%s v%d (new, replaces v%d which was %s)", d.Key, d.Version, d.Replaced.Version, state)
 }
 
-// printChoiceDecisions prints one line per decision of a sent prompt.
-func printChoiceDecisions(result *hubclient.OutboundMessageResult) {
+// printSentDecisions prints one line per decision of a sent prompt.
+func printSentDecisions(result *hubclient.OutboundMessageResult) {
 	if result == nil {
 		return
 	}
 	for _, d := range result.Decisions {
-		fmt.Println(choiceDecisionLine(d))
+		fmt.Println(decisionSendLine(d))
 	}
 }
 
-// applyChoicesToOutbound puts the loaded decisions on an outbound request.
+// applyDecisionsToOutbound puts the loaded decisions on an outbound request.
 // The hub sets the message type of a decision prompt.
-func applyChoicesToOutbound(out *hubclient.OutboundMessageRequest) {
-	if msgChoicesPayload == nil {
+func applyDecisionsToOutbound(out *hubclient.OutboundMessageRequest) {
+	if msgDecisionsPayload == nil {
 		return
 	}
-	out.Decisions = msgChoicesPayload
-	out.DecisionsUpdate = msgChoicesUpdate
+	out.Decisions = msgDecisionsPayload
+	out.DecisionsUpdate = msgDecisionsUpdate
 	out.Type = ""
 }
 
-// afterChoicesSent runs the ask_user side effect after the hub accepted a
+// afterDecisionsSent runs the ask_user side effect after the hub accepted a
 // decision prompt, in agent mode only (design 4.9). The status update logs
 // its own failures and never fails the send; a refused send (for example
 // 400 experiment_disabled) never reaches here.
-func afterChoicesSent() {
-	if msgChoicesPayload == nil || !choicesSenderIsAgent() {
+func afterDecisionsSent() {
+	if msgDecisionsPayload == nil || !decisionsSenderIsAgent() {
 		return
 	}
-	runChoicesAskUser(choicesSummary(msgChoicesPayload))
+	runDecisionsAskUser(decisionsSummary(msgDecisionsPayload))
 }

@@ -38,7 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func (f *choicesFixture) agentDecisionReq(t *testing.T, agent *store.Agent, method, path string, body interface{}) *httptest.ResponseRecorder {
+func (f *decisionsFixture) agentDecisionReq(t *testing.T, agent *store.Agent, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	var buf bytes.Buffer
 	if body != nil {
@@ -55,7 +55,7 @@ func (f *choicesFixture) agentDecisionReq(t *testing.T, agent *store.Agent, meth
 }
 
 // storeUserReply inserts a user message in threadID strictly after promptTime.
-func (f *choicesFixture) storeUserReply(t *testing.T, u *store.User, threadID, convID, channel, text string) *store.Message {
+func (f *decisionsFixture) storeUserReply(t *testing.T, u *store.User, threadID, convID, channel, text string) *store.Message {
 	t.Helper()
 	time.Sleep(2 * time.Millisecond)
 	m := &store.Message{
@@ -78,7 +78,7 @@ func (f *choicesFixture) storeUserReply(t *testing.T, u *store.User, threadID, c
 	return m
 }
 
-func (f *choicesFixture) bobDMReply(t *testing.T, promptMsgID, text string) *store.Message {
+func (f *decisionsFixture) bobDMReply(t *testing.T, promptMsgID, text string) *store.Message {
 	t.Helper()
 	prompt, err := f.store.GetMessage(context.Background(), promptMsgID)
 	require.NoError(t, err)
@@ -86,12 +86,12 @@ func (f *choicesFixture) bobDMReply(t *testing.T, promptMsgID, text string) *sto
 }
 
 func TestAgentDecisions_ExperimentOffAndAuthz(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	resp := f.sendPromptToBob(t, oneDecision, false)
 	reply := f.bobDMReply(t, resp.MessageID, "D234: yes")
 
 	// Experiment off -> 404 on all 3 routes.
-	setChoicesExperiment(t, f.srv, false)
+	setDecisionsExperiment(t, f.srv, false)
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions", nil).Code)
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/D234", nil).Code)
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
@@ -99,7 +99,7 @@ func TestAgentDecisions_ExperimentOffAndAuthz(t *testing.T) {
 		Answers:         []InterpretedAnswerInput{{Key: "D234", ChoiceID: "1"}},
 	}).Code)
 
-	setChoicesExperiment(t, f.srv, true)
+	setDecisionsExperiment(t, f.srv, true)
 
 	// Unauthenticated -> 401 via RouteAgentToken guard.
 	unauthReq := httptest.NewRequest(http.MethodGet, "/api/v1/agent/decisions", nil)
@@ -143,7 +143,7 @@ func TestAgentDecisions_ExperimentOffAndAuthz(t *testing.T) {
 }
 
 func TestAgentDecisions_ListAndShow(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	ctx := context.Background()
 
 	// Create a second agent in the project to verify agent isolation.
@@ -248,7 +248,7 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 }
 
 func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	ctx := context.Background()
 
 	// Single pair: batch_id omitted, 1 decision-response message, 0 agent deliveries.
@@ -341,9 +341,9 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 	assert.Equal(t, store.MessageDispatchDispatched, batchMsg.DispatchState)
 	assert.Contains(t, batchMsg.Msg, "answers to 3 decisions: D234 yes · "+pSet.Decisions[1].Key+" Extend · EXTRA off, interpreted from their reply")
 
-	// Verify SSE ChoiceResponseSetView omits envelope PromptMessageID (multi-prompt)
+	// Verify SSE DecisionResponseSetView omits envelope PromptMessageID (multi-prompt)
 	// and orders answers canonically with per-answer PromptMessageID!
-	var sseSet *ChoiceResponseSetView
+	var sseSet *DecisionResponseSetView
 	for _, e := range collectEvents(chat) {
 		var evt UserMessageEvent
 		require.NoError(t, json.Unmarshal(e.Data, &evt))
@@ -369,7 +369,7 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 
 	// Verify chat history hydration also omits envelope PromptMessageID and matches canonical order.
 	histResp := &chatHistoryResponse{Messages: []store.Message{*batchMsg}}
-	f.srv.addChoiceHistoryViews(ctx, histResp)
+	f.srv.addDecisionHistoryViews(ctx, histResp)
 	histSet, ok := histResp.MessageDecisionResponseSets[outBatch.ResponseMessageID]
 	require.True(t, ok)
 	assert.Empty(t, histSet.PromptMessageID)
@@ -402,7 +402,7 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 }
 
 func TestAgentDecisions_InterpretedValidationAndConflicts(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	ctx := context.Background()
 
 	dmPrompt := f.sendPromptToBob(t, twoDecisions, false)
@@ -646,7 +646,7 @@ func TestAgentDecisions_SurfaceMappingAndIdempotency(t *testing.T) {
 
 	// HTTP test: gchat source message records google_chat surface, publishes project topic SSE,
 	// and idempotency replays (including after --update repost) / rejects mismatches.
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	promptMsg, _ := f.topicPrompt(t, `[{"id":"GC1","question":"Approve from Google Chat?","choices":["yes","no"]},{"id":"GC2","question":"Second?","choices":["yes","no"]}]`, false)
 	gchatReply := f.storeUserReply(t, f.alice, f.topicID, promptMsg.ConversationID, "gchat", "GC1: yes")
 	otherReply := f.storeUserReply(t, f.alice, f.topicID, promptMsg.ConversationID, "slack", "GC2: no")
@@ -720,7 +720,7 @@ func TestAgentDecisions_SurfaceMappingAndIdempotency(t *testing.T) {
 }
 
 func TestAgentDecisions_ConfirmOverrideAndMixedBatchEndToEnd(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 
 	// 1. Single-decision confirm (not delivered) vs override (delivered) vs wrong user (409 not_recorded_answerer).
 	topicMsg, topicRes := f.topicPrompt(t, `[{"id":"SINGLE-CONF","question":"Confirm me?","choices":["yes","no"]}]`, false)
@@ -807,7 +807,7 @@ func TestAgentDecisions_ConfirmOverrideAndMixedBatchEndToEnd(t *testing.T) {
 	assert.Equal(t, before, len(f.dispatcher.getMessages()), "an all-confirm set submit is not delivered to the agent")
 }
 
-func agentListKeys(t *testing.T, f *choicesFixture, agent *store.Agent, params url.Values) []string {
+func agentListKeys(t *testing.T, f *decisionsFixture, agent *store.Agent, params url.Values) []string {
 	t.Helper()
 	path := "/api/v1/agent/decisions"
 	if len(params) > 0 {
@@ -825,7 +825,7 @@ func agentListKeys(t *testing.T, f *choicesFixture, agent *store.Agent, params u
 }
 
 func TestAgentDecisions_SearchArmsWildcardsPagingAndIsolation(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	ctx := context.Background()
 
 	// Other agent's matching decision must never appear in f.agent's search.
@@ -835,9 +835,9 @@ func TestAgentDecisions_SearchArmsWildcardsPagingAndIsolation(t *testing.T) {
 		Created: time.Now(),
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, otherAgent))
-	otherDecs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"other-canary","question":"Deploy canary shard?","choices":["yes","no"]}]`))
+	otherDecs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"other-canary","question":"Deploy canary shard?","choices":["yes","no"]}]`))
 	require.NoError(t, err)
-	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + otherAgent.Slug, SenderID: otherAgent.ID,
 			Recipient: "chat", ThreadID: f.topicID, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -945,7 +945,7 @@ func TestAgentDecisions_SearchArmsWildcardsPagingAndIsolation(t *testing.T) {
 }
 
 func TestAgentDecisions_SearchValidationTimeoutAndExperimentGate(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	f.topicPrompt(t, oneDecision, false)
 
 	// Bounds validation: 2..256 runes after trim; empty/whitespace means no q.
@@ -995,11 +995,11 @@ func TestAgentDecisions_SearchValidationTimeoutAndExperimentGate(t *testing.T) {
 	assert.Contains(t, rrBadCursor.Body.String(), "invalid cursor")
 
 	// Experiment gating: web.decisions gates agent decisions?q=.
-	setChoicesExperiment(t, f.srv, false)
+	setDecisionsExperiment(t, f.srv, false)
 	rrOff := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q=feature", nil)
 	assert.Equal(t, http.StatusNotFound, rrOff.Code, "web.decisions=false returns 404")
 
-	setChoicesExperiment(t, f.srv, true)
+	setDecisionsExperiment(t, f.srv, true)
 	assert.Equal(t, []string{"D234"}, agentListKeys(t, f, f.agent, url.Values{"q": {"feature"}}),
 		"agent search works when web.decisions=true")
 
@@ -1035,7 +1035,7 @@ func TestAgentDecisions_SearchPostgresCancelAndInterruptMapToSearchTimeout(t *te
 	srv, s, alice, bob, project, wrapped, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *agentDecisionSearchFaultStore {
 		return &agentDecisionSearchFaultStore{Store: inner, fault: f}
 	})
-	f := newChoicesFixtureOn(t, srv, s, alice, bob, project)
+	f := newDecisionsFixtureOn(t, srv, s, alice, bob, project)
 	fault.Arm()
 
 	// Postgres SQLSTATE 57014 -> 503 SEARCH_TIMEOUT.

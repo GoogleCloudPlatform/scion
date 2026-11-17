@@ -1162,7 +1162,7 @@ func (s *Server) classifyProjectOpenPrompts(
 				// Actionable by state: check whether the user's account can
 				// submit an answer in this conversation and to this asker.
 				// Note: confirming an interpreted answer does not deliver to
-				// the asker (choices_answer.go:298), whereas answering a
+				// the asker (decisions_answer.go:298), whereas answering a
 				// pending row delivers when the asker is still live.
 				needsAskerDelivery := !ac.gone && d.EffectiveAnswer() == nil
 				switch {
@@ -1317,7 +1317,7 @@ func (s *Server) buildProjectDecisionPromptViews(
 			AskerAgentID:          p.AskerAgentID,
 			AskerAgentName:        askerName,
 			CreatedAt:             p.CreatedAt,
-			AnswerMode:            choiceAnswerMode(len(p.Decisions)),
+			AnswerMode:            decisionAnswerMode(len(p.Decisions)),
 			WaitingOnYou:          item.waitingOnYou,
 			CanAnswer:             item.canAnswer,
 			DisabledReason:        item.disabledReason,

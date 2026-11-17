@@ -23,7 +23,7 @@ import (
 	"testing"
 )
 
-// parseDecisions decodes a --choices JSON array the way a request field of
+// parseDecisions decodes a --decisions JSON array the way a request field of
 // type []DecisionInput is decoded.
 func parseDecisions(t *testing.T, raw string) []DecisionInput {
 	t.Helper()
@@ -34,19 +34,19 @@ func parseDecisions(t *testing.T, raw string) []DecisionInput {
 	return in
 }
 
-// choiceErrs returns the ChoiceErrors of err, failing the test otherwise.
-func choiceErrs(t *testing.T, err error) ChoiceErrors {
+// decisionErrs returns the DecisionValidationErrors of err, failing the test otherwise.
+func decisionErrs(t *testing.T, err error) DecisionValidationErrors {
 	t.Helper()
-	var ces ChoiceErrors
-	if !errors.As(err, &ces) {
-		t.Fatalf("error %v (%T) is not ChoiceErrors", err, err)
+	var des DecisionValidationErrors
+	if !errors.As(err, &des) {
+		t.Fatalf("error %v (%T) is not DecisionValidationErrors", err, err)
 	}
-	return ces
+	return des
 }
 
-// hasErr reports whether ces holds an error with field and code.
-func hasErr(ces ChoiceErrors, field, code string) bool {
-	for _, e := range ces {
+// hasErr reports whether des holds an error with field and code.
+func hasErr(des DecisionValidationErrors, field, code string) bool {
+	for _, e := range des {
 		if e.Field == field && e.Code == code {
 			return true
 		}
@@ -124,8 +124,8 @@ func TestNormalizeDecisions_DefaultMatching(t *testing.T) {
 		}
 	}
 	_, err := NormalizeDecisions("decisions", []DecisionInput{{Question: "q", Choices: choices, Default: "zzz"}})
-	if ces := choiceErrs(t, err); !hasErr(ces, "decisions[0].default", ChoiceErrNoMatch) {
-		t.Errorf("unknown default: %v", ces)
+	if des := decisionErrs(t, err); !hasErr(des, "decisions[0].default", DecisionErrNoMatch) {
+		t.Errorf("unknown default: %v", des)
 	}
 }
 
@@ -176,42 +176,42 @@ func TestNormalizeDecisions_Rules(t *testing.T) {
 		field string
 		code  string
 	}{
-		{"no decisions", nil, "decisions", ChoiceErrRequired},
+		{"no decisions", nil, "decisions", DecisionErrRequired},
 		{"11 decisions", func() []DecisionInput {
 			out := make([]DecisionInput, 11)
 			for i := range out {
 				out[i] = DecisionInput{Question: "q", Choices: two}
 			}
 			return out
-		}(), "decisions", ChoiceErrTooMany},
-		{"invalid key chars", []DecisionInput{{ID: "D 1", Question: "q", Choices: two}}, "decisions[0].id", ChoiceErrInvalid},
-		{"key too long", []DecisionInput{{ID: strings.Repeat("k", 33), Question: "q", Choices: two}}, "decisions[0].id", ChoiceErrInvalid},
-		{"all-digit key with leading zero", []DecisionInput{{ID: "07", Question: "q", Choices: two}}, "decisions[0].id", ChoiceErrInvalid},
-		{"duplicate keys, case-insensitive", []DecisionInput{{ID: "D1", Question: "q", Choices: two}, {ID: "d1", Question: "q", Choices: two}}, "decisions[1].id", ChoiceErrDuplicate},
-		{"duplicate hub numbers", []DecisionInput{{ID: "4", Question: "q", Choices: two}, {ID: "4", Question: "q", Choices: two}}, "decisions[1].id", ChoiceErrDuplicate},
-		{"missing question", []DecisionInput{{Choices: two}}, "decisions[0].question", ChoiceErrRequired},
-		{"blank question", []DecisionInput{{Question: " \n ", Choices: two}}, "decisions[0].question", ChoiceErrRequired},
-		{"question too long", []DecisionInput{{Question: strings.Repeat("é", 2001), Choices: two}}, "decisions[0].question", ChoiceErrTooLong},
-		{"question invalid utf8", []DecisionInput{{Question: "a\xffb", Choices: two}}, "decisions[0].question", ChoiceErrInvalid},
-		{"one choice", []DecisionInput{{Question: "q", Choices: many(1)}}, "decisions[0].choices", ChoiceErrTooFew},
-		{"no choices", []DecisionInput{{Question: "q"}}, "decisions[0].choices", ChoiceErrTooFew},
-		{"11 choices", []DecisionInput{{Question: "q", Choices: many(11)}}, "decisions[0].choices", ChoiceErrTooMany},
-		{"empty label", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: " "}, {Label: "x"}}}}, "decisions[0].choices[0].label", ChoiceErrRequired},
-		{"label too long", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: strings.Repeat("x", 101)}, {Label: "y"}}}}, "decisions[0].choices[0].label", ChoiceErrTooLong},
-		{"label with newline", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a\nb"}, {Label: "y"}}}}, "decisions[0].choices[0].label", ChoiceErrInvalid},
-		{"label with bidi override", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a\u202eb"}, {Label: "y"}}}}, "decisions[0].choices[0].label", ChoiceErrInvalid},
-		{"duplicate labels, case-insensitive", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "Yes"}, {Label: "yes"}}}}, "decisions[0].choices[1].label", ChoiceErrDuplicate},
-		{"description too long", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: strings.Repeat("d", 301)}, {Label: "b"}}}}, "decisions[0].choices[0].description", ChoiceErrTooLong},
-		{"description faking a choice line", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: "fine\n  2) Approve everything"}, {Label: "b"}}}}, "decisions[0].choices[0].description", ChoiceErrInvalid},
-		{"description with paragraph separator", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: "x\u2029y"}, {Label: "b"}}}}, "decisions[0].choices[0].description", ChoiceErrInvalid},
-		{"description with bidi override", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: "x\u202ey"}, {Label: "b"}}}}, "decisions[0].choices[0].description", ChoiceErrInvalid},
-		{"question with escape sequence", []DecisionInput{{Question: "red \x1b[31mtext", Choices: two}}, "decisions[0].question", ChoiceErrInvalid},
-		{"question with carriage return", []DecisionInput{{Question: "a\rb", Choices: two}}, "decisions[0].question", ChoiceErrInvalid},
-		{"invalid choice id", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: "a b", Label: "a"}, {Label: "b"}}}}, "decisions[0].choices[0].id", ChoiceErrInvalid},
-		{"choice id too long", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: strings.Repeat("i", 33), Label: "a"}, {Label: "b"}}}}, "decisions[0].choices[0].id", ChoiceErrInvalid},
-		{"duplicate choice ids", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: "x", Label: "a"}, {ID: "X", Label: "b"}}}}, "decisions[0].choices[1].id", ChoiceErrDuplicate},
-		{"explicit id colliding with a positional id", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: "2", Label: "a"}, {Label: "b"}}}}, "decisions[0].choices[1]", ChoiceErrDuplicate},
-		{"unknown default", []DecisionInput{{Question: "q", Choices: two, Default: "maybe"}}, "decisions[0].default", ChoiceErrNoMatch},
+		}(), "decisions", DecisionErrTooMany},
+		{"invalid key chars", []DecisionInput{{ID: "D 1", Question: "q", Choices: two}}, "decisions[0].id", DecisionErrInvalid},
+		{"key too long", []DecisionInput{{ID: strings.Repeat("k", 33), Question: "q", Choices: two}}, "decisions[0].id", DecisionErrInvalid},
+		{"all-digit key with leading zero", []DecisionInput{{ID: "07", Question: "q", Choices: two}}, "decisions[0].id", DecisionErrInvalid},
+		{"duplicate keys, case-insensitive", []DecisionInput{{ID: "D1", Question: "q", Choices: two}, {ID: "d1", Question: "q", Choices: two}}, "decisions[1].id", DecisionErrDuplicate},
+		{"duplicate hub numbers", []DecisionInput{{ID: "4", Question: "q", Choices: two}, {ID: "4", Question: "q", Choices: two}}, "decisions[1].id", DecisionErrDuplicate},
+		{"missing question", []DecisionInput{{Choices: two}}, "decisions[0].question", DecisionErrRequired},
+		{"blank question", []DecisionInput{{Question: " \n ", Choices: two}}, "decisions[0].question", DecisionErrRequired},
+		{"question too long", []DecisionInput{{Question: strings.Repeat("é", 2001), Choices: two}}, "decisions[0].question", DecisionErrTooLong},
+		{"question invalid utf8", []DecisionInput{{Question: "a\xffb", Choices: two}}, "decisions[0].question", DecisionErrInvalid},
+		{"one choice", []DecisionInput{{Question: "q", Choices: many(1)}}, "decisions[0].choices", DecisionErrTooFew},
+		{"no choices", []DecisionInput{{Question: "q"}}, "decisions[0].choices", DecisionErrTooFew},
+		{"11 choices", []DecisionInput{{Question: "q", Choices: many(11)}}, "decisions[0].choices", DecisionErrTooMany},
+		{"empty label", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: " "}, {Label: "x"}}}}, "decisions[0].choices[0].label", DecisionErrRequired},
+		{"label too long", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: strings.Repeat("x", 101)}, {Label: "y"}}}}, "decisions[0].choices[0].label", DecisionErrTooLong},
+		{"label with newline", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a\nb"}, {Label: "y"}}}}, "decisions[0].choices[0].label", DecisionErrInvalid},
+		{"label with bidi override", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a\u202eb"}, {Label: "y"}}}}, "decisions[0].choices[0].label", DecisionErrInvalid},
+		{"duplicate labels, case-insensitive", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "Yes"}, {Label: "yes"}}}}, "decisions[0].choices[1].label", DecisionErrDuplicate},
+		{"description too long", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: strings.Repeat("d", 301)}, {Label: "b"}}}}, "decisions[0].choices[0].description", DecisionErrTooLong},
+		{"description faking a choice line", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: "fine\n  2) Approve everything"}, {Label: "b"}}}}, "decisions[0].choices[0].description", DecisionErrInvalid},
+		{"description with paragraph separator", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: "x\u2029y"}, {Label: "b"}}}}, "decisions[0].choices[0].description", DecisionErrInvalid},
+		{"description with bidi override", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: "a", Description: "x\u202ey"}, {Label: "b"}}}}, "decisions[0].choices[0].description", DecisionErrInvalid},
+		{"question with escape sequence", []DecisionInput{{Question: "red \x1b[31mtext", Choices: two}}, "decisions[0].question", DecisionErrInvalid},
+		{"question with carriage return", []DecisionInput{{Question: "a\rb", Choices: two}}, "decisions[0].question", DecisionErrInvalid},
+		{"invalid choice id", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: "a b", Label: "a"}, {Label: "b"}}}}, "decisions[0].choices[0].id", DecisionErrInvalid},
+		{"choice id too long", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: strings.Repeat("i", 33), Label: "a"}, {Label: "b"}}}}, "decisions[0].choices[0].id", DecisionErrInvalid},
+		{"duplicate choice ids", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: "x", Label: "a"}, {ID: "X", Label: "b"}}}}, "decisions[0].choices[1].id", DecisionErrDuplicate},
+		{"explicit id colliding with a positional id", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{ID: "2", Label: "a"}, {Label: "b"}}}}, "decisions[0].choices[1]", DecisionErrDuplicate},
+		{"unknown default", []DecisionInput{{Question: "q", Choices: two, Default: "maybe"}}, "decisions[0].default", DecisionErrNoMatch},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,9 +222,9 @@ func TestNormalizeDecisions_Rules(t *testing.T) {
 			if got != nil {
 				t.Errorf("returned decisions alongside an error")
 			}
-			ces := choiceErrs(t, err)
-			if !hasErr(ces, tc.field, tc.code) {
-				t.Errorf("errors %v lack %s %s", ces, tc.field, tc.code)
+			des := decisionErrs(t, err)
+			if !hasErr(des, tc.field, tc.code) {
+				t.Errorf("errors %v lack %s %s", des, tc.field, tc.code)
 			}
 		})
 	}
@@ -265,8 +265,8 @@ func TestNormalizeDecisions_PayloadCap(t *testing.T) {
 		ds[i] = DecisionInput{Question: strings.Repeat("q", 2000), Choices: cs}
 	}
 	_, err := NormalizeDecisions("decisions", ds)
-	if ces := choiceErrs(t, err); !hasErr(ces, "decisions", ChoiceErrTooLarge) {
-		t.Errorf("payload cap: %v", ces)
+	if des := decisionErrs(t, err); !hasErr(des, "decisions", DecisionErrTooLarge) {
+		t.Errorf("payload cap: %v", des)
 	}
 	// One such decision stays well under it.
 	if _, err := NormalizeDecisions("decisions", ds[:1]); err != nil {
@@ -280,22 +280,22 @@ func TestNormalizeDecisions_UnknownAndReservedFields(t *testing.T) {
 	    "choices": [ "a", { "label": "b", "icon": "x", "multiple": 1 } ] }
 	]`)
 	_, err := NormalizeDecisions("decisions", in)
-	ces := choiceErrs(t, err)
+	des := decisionErrs(t, err)
 	want := []struct{ field, code string }{
-		{"decisions[0].multiple", ChoiceErrReservedField},
-		{"decisions[0].allow_other", ChoiceErrReservedField},
-		{"decisions[0].expires_in", ChoiceErrReservedField},
-		{"decisions[0].colour", ChoiceErrUnknownField},
-		{"decisions[0].choices[1].icon", ChoiceErrUnknownField},
-		{"decisions[0].choices[1].multiple", ChoiceErrReservedField},
+		{"decisions[0].multiple", DecisionErrReservedField},
+		{"decisions[0].allow_other", DecisionErrReservedField},
+		{"decisions[0].expires_in", DecisionErrReservedField},
+		{"decisions[0].colour", DecisionErrUnknownField},
+		{"decisions[0].choices[1].icon", DecisionErrUnknownField},
+		{"decisions[0].choices[1].multiple", DecisionErrReservedField},
 	}
 	for _, w := range want {
-		if !hasErr(ces, w.field, w.code) {
-			t.Errorf("errors %v lack %s %s", ces, w.field, w.code)
+		if !hasErr(des, w.field, w.code) {
+			t.Errorf("errors %v lack %s %s", des, w.field, w.code)
 		}
 	}
-	if len(ces) != len(want) {
-		t.Errorf("got %d errors, want %d: %v", len(ces), len(want), ces)
+	if len(des) != len(want) {
+		t.Errorf("got %d errors, want %d: %v", len(des), len(want), des)
 	}
 }
 
@@ -305,14 +305,14 @@ func TestNormalizeDecisions_ReportsEveryError(t *testing.T) {
 		{Question: "ok", Choices: []ChoiceInput{{Label: "x"}, {Label: "X"}}},
 	}
 	_, err := NormalizeDecisions("decisions", in)
-	ces := choiceErrs(t, err)
+	des := decisionErrs(t, err)
 	for _, f := range []string{"decisions[0].id", "decisions[0].question", "decisions[0].choices", "decisions[1].choices[1].label"} {
 		found := false
-		for _, e := range ces {
+		for _, e := range des {
 			found = found || e.Field == f
 		}
 		if !found {
-			t.Errorf("no error for %s in %v", f, ces)
+			t.Errorf("no error for %s in %v", f, des)
 		}
 	}
 	if !strings.Contains(err.Error(), "decisions[0].id: ") {
@@ -360,7 +360,7 @@ func TestIsHubMintedType(t *testing.T) {
 	}
 }
 
-func TestRenderChoiceFallback_DesignExample(t *testing.T) {
+func TestRenderDecisionFallback_DesignExample(t *testing.T) {
 	ds := []Decision{
 		{Key: "D234", Question: "Ship the feature now?", DefaultChoiceID: "1", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}},
 		{Key: "17", Question: "Which approach?", Choices: []Choice{
@@ -368,7 +368,7 @@ func TestRenderChoiceFallback_DesignExample(t *testing.T) {
 			{ID: "b", Label: "New message type"},
 		}},
 	}
-	msg, introLen := RenderChoiceFallback("Two things before I continue.\n", ds, "https://hub.example/chat/c1?message=m1")
+	msg, introLen := RenderDecisionFallback("Two things before I continue.\n", ds, "https://hub.example/chat/c1?message=m1")
 	want := "Two things before I continue.\n\n" +
 		"**2 decisions needed. Answer all of them together.**\n" +
 		"\n**D234.** Ship the feature now?\n" +
@@ -384,8 +384,8 @@ func TestRenderChoiceFallback_DesignExample(t *testing.T) {
 	if introLen != len("Two things before I continue.\n\n") {
 		t.Errorf("introLen = %d", introLen)
 	}
-	if got := ChoiceIntro(msg, introLen); got != "Two things before I continue." {
-		t.Errorf("ChoiceIntro = %q", got)
+	if got := DecisionIntro(msg, introLen); got != "Two things before I continue." {
+		t.Errorf("DecisionIntro = %q", got)
 	}
 	if !strings.HasPrefix(msg[introLen:], "**2 decisions needed. Answer all of them together.**") {
 		t.Errorf("introLen does not point at the fallback block: %q", msg[introLen:])
@@ -394,13 +394,13 @@ func TestRenderChoiceFallback_DesignExample(t *testing.T) {
 
 // A set without an answer link keeps the one-line-per-decision reply
 // hint; the example names the first two decisions only.
-func TestRenderChoiceFallback_SetNoURL(t *testing.T) {
+func TestRenderDecisionFallback_SetNoURL(t *testing.T) {
 	ds := []Decision{
 		{Key: "a1", Question: "One?", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}},
 		{Key: "b2", Question: "Two?", Choices: []Choice{{ID: "x", Label: "X"}, {ID: "y", Label: "Y"}}},
 		{Key: "c3", Question: "Three?", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}},
 	}
-	msg, _ := RenderChoiceFallback("", ds, "")
+	msg, _ := RenderDecisionFallback("", ds, "")
 	if !strings.HasPrefix(msg, "**3 decisions needed. Answer all of them together.**\n") {
 		t.Errorf("set header missing: %q", msg)
 	}
@@ -413,7 +413,7 @@ func TestRenderChoiceFallback_SetNoURL(t *testing.T) {
 // The largest set (10 decisions) renders every decision, and keys with
 // "_" and "-" appear verbatim in the reply hint's code spans (no markdown
 // escaping inside a code span).
-func TestRenderChoiceFallback_TenDecisionsHintKeys(t *testing.T) {
+func TestRenderDecisionFallback_TenDecisionsHintKeys(t *testing.T) {
 	ds := []Decision{
 		{Key: "ship_now", Question: "Ship?", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}},
 		{Key: "use-new", Question: "New?", Choices: []Choice{{ID: "a", Label: "A"}, {ID: "b", Label: "B"}}},
@@ -421,7 +421,7 @@ func TestRenderChoiceFallback_TenDecisionsHintKeys(t *testing.T) {
 	for i := 3; i <= MaxDecisionsPerMessage; i++ {
 		ds = append(ds, Decision{Key: fmt.Sprintf("k%d", i), Question: "More?", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}})
 	}
-	msg, _ := RenderChoiceFallback("", ds, "https://hub.example/chat/c1?message=m1")
+	msg, _ := RenderDecisionFallback("", ds, "https://hub.example/chat/c1?message=m1")
 	if !strings.HasPrefix(msg, fmt.Sprintf("**%d decisions needed. Answer all of them together.**\n", MaxDecisionsPerMessage)) {
 		t.Errorf("set header missing: %q", msg)
 	}
@@ -435,19 +435,19 @@ func TestRenderChoiceFallback_TenDecisionsHintKeys(t *testing.T) {
 	}
 }
 
-func TestRenderChoiceFallback_NoIntroSingleDecisionNoURL(t *testing.T) {
+func TestRenderDecisionFallback_NoIntroSingleDecisionNoURL(t *testing.T) {
 	ds := []Decision{{Key: "ship_now", Question: "Go?", Choices: []Choice{{ID: "y", Label: "Yes"}, {ID: "n", Label: "No"}}}}
-	msg, introLen := RenderChoiceFallback("  \n", ds, "")
+	msg, introLen := RenderDecisionFallback("  \n", ds, "")
 	want := "**1 decision needed**\n\n**ship\\_now.** Go?\n  y) Yes\n  n) No\n\n_Reply here and the agent will record your answer._"
 	if msg != want {
 		t.Errorf("msg =\n%q\nwant\n%q", msg, want)
 	}
-	if introLen != 0 || ChoiceIntro(msg, introLen) != "" {
-		t.Errorf("introLen = %d, intro %q", introLen, ChoiceIntro(msg, introLen))
+	if introLen != 0 || DecisionIntro(msg, introLen) != "" {
+		t.Errorf("introLen = %d, intro %q", introLen, DecisionIntro(msg, introLen))
 	}
 }
 
-func TestRenderChoiceFallback_NeutralizesMentionsAndEscapesLabels(t *testing.T) {
+func TestRenderDecisionFallback_NeutralizesMentionsAndEscapesLabels(t *testing.T) {
 	ds := []Decision{{
 		Key:      "D1",
 		Question: "@everyone and @here: ping <!channel> or <@U123> and <@&999>? Mail ops@here.example stays.",
@@ -456,7 +456,7 @@ func TestRenderChoiceFallback_NeutralizesMentionsAndEscapesLabels(t *testing.T) 
 			{ID: "2", Label: "a_b ~c~ | d \\ e"},
 		},
 	}}
-	msg, _ := RenderChoiceFallback("hi @everyone", ds, "")
+	msg, _ := RenderDecisionFallback("hi @everyone", ds, "")
 	zw := "\u200b"
 	for _, want := range []string{
 		"@" + zw + "everyone and @" + zw + "here",
@@ -486,33 +486,33 @@ func TestRenderChoiceFallback_NeutralizesMentionsAndEscapesLabels(t *testing.T) 
 	}
 }
 
-func TestChoiceIntro_MultiByteIntro(t *testing.T) {
+func TestDecisionIntro_MultiByteIntro(t *testing.T) {
 	ds := []Decision{{Key: "D1", Question: "q", Choices: []Choice{{ID: "1", Label: "a"}, {ID: "2", Label: "b"}}}}
 	for _, intro := range []string{"Ship it? 🚀🚀", "决定一下：是否发布？", "naïve café — ok"} {
-		msg, introLen := RenderChoiceFallback(intro, ds, "")
+		msg, introLen := RenderDecisionFallback(intro, ds, "")
 		if introLen != len(intro)+2 {
 			t.Errorf("%q: introLen = %d, want %d bytes", intro, introLen, len(intro)+2)
 		}
-		if got := ChoiceIntro(msg, introLen); got != intro {
-			t.Errorf("ChoiceIntro = %q, want %q", got, intro)
+		if got := DecisionIntro(msg, introLen); got != intro {
+			t.Errorf("DecisionIntro = %q, want %q", got, intro)
 		}
 	}
 	// Offsets that do not fit msg yield no intro instead of a broken slice.
-	msg, _ := RenderChoiceFallback("🚀 go", ds, "")
+	msg, _ := RenderDecisionFallback("🚀 go", ds, "")
 	for _, bad := range []int{-1, 0, 1, 2, 3, len(msg) + 1} {
-		if got := ChoiceIntro(msg, bad); got != "" {
-			t.Errorf("ChoiceIntro(msg, %d) = %q, want empty", bad, got)
+		if got := DecisionIntro(msg, bad); got != "" {
+			t.Errorf("DecisionIntro(msg, %d) = %q, want empty", bad, got)
 		}
 	}
 }
 
 func TestNormalizeThenRender_DescriptionsAndQuestionsKeepMarkdown(t *testing.T) {
 	in := parseDecisions(t, `[{"id":"D9","question":"Use **bold** and _it_?","choices":[{"label":"x","description":"keeps `+"`code`"+`"},"y"],"default":"y"}]`)
-	ds, err := NormalizeDecisions("choices", in)
+	ds, err := NormalizeDecisions("decisions", in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg, _ := RenderChoiceFallback("", ds, "")
+	msg, _ := RenderDecisionFallback("", ds, "")
 	for _, want := range []string{"**D9.** Use **bold** and _it_?", "  1) x: keeps `code`", "  2) y _(recommended)_"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("msg lacks %q:\n%s", want, msg)

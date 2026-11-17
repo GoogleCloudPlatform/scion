@@ -22,7 +22,7 @@ import (
 // The decision fields of an outbound send: decisions and decisions_update go
 // out only when set, and the result's decisions decode with the replaced
 // version's answer and who gave it.
-func TestOutboundMessageChoicesWire(t *testing.T) {
+func TestOutboundMessageDecisionsWire(t *testing.T) {
 	plain, err := json.Marshal(OutboundMessageRequest{Recipient: "user:a@example.com", Msg: "hi"})
 	if err != nil {
 		t.Fatal(err)

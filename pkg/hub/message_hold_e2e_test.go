@@ -2380,7 +2380,7 @@ func TestHoldA2_Round1_REQ5_FlagOffStillExpiresHeldRowsWithNotice(t *testing.T) 
 	require.Len(t, f.disp.notices(), 2, "both senders must receive failure notices even with hub.conduit_deliver off")
 }
 
-func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testing.T) {
+func TestHoldA2_Round1_OPT1_DecisionResponsePreservesAgentLineAndMetadata(t *testing.T) {
 	f := newHoldE2EFixture(t)
 	ctx := context.Background()
 	db := openTestMemorySQLite(t, "sqlite")
@@ -2397,7 +2397,7 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 	owner, err := f.store.GetUser(ctx, f.launched.OwnerID)
 	require.NoError(t, err)
 
-	sendChoicePromptFromLaunched := func(rawDecisions string) struct {
+	sendDecisionPromptFromLaunched := func(rawDecisions string) struct {
 		MessageID string               `json:"message_id"`
 		Decisions []DecisionSendResult `json:"decisions"`
 	} {
@@ -2428,7 +2428,7 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 
 	// 1. Single-decision prompt with an agent_interpreted answer ("no" = choice 2),
 	//    then overridden by the user ("yes" = choice 1) while f.launched has no session.
-	singleOut := sendChoicePromptFromLaunched(`[{"id":"D10","question":"Ship the feature now?","choices":["yes","no"],"default":"yes"}]`)
+	singleOut := sendDecisionPromptFromLaunched(`[{"id":"D10","question":"Ship the feature now?","choices":["yes","no"],"default":"yes"}]`)
 	require.Len(t, singleOut.Decisions, 1)
 	singleRowID := singleOut.Decisions[0].RowID
 
@@ -2477,7 +2477,7 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 
 	// 2. Three-decision set prompt answered via POST /api/v1/decision-prompts/{id}/answers
 	//    while f.launched is held in awaiting_session.
-	setOut := sendChoicePromptFromLaunched(`[{"id":"D234","question":"Ship the feature now?","choices":["yes","no"],"default":"yes"},{"question":"Which approach?","choices":[{"id":"a","label":"Extend"},{"id":"b","label":"New type"}]},{"id":"ship-now","question":"Deploy today?","choices":["yes","no"],"default":"no"}]`)
+	setOut := sendDecisionPromptFromLaunched(`[{"id":"D234","question":"Ship the feature now?","choices":["yes","no"],"default":"yes"},{"question":"Which approach?","choices":[{"id":"a","label":"Extend"},{"id":"b","label":"New type"}]},{"id":"ship-now","question":"Deploy today?","choices":["yes","no"],"default":"no"}]`)
 	require.Len(t, setOut.Decisions, 3)
 	setAnsBody, _ := json.Marshal(map[string]any{
 		"answers": []map[string]any{
@@ -2495,7 +2495,7 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 	setBytes, _ := io.ReadAll(setResp.Body)
 	_ = setResp.Body.Close()
 	require.Equal(t, http.StatusOK, setResp.StatusCode, string(setBytes))
-	var setAnsOut ChoiceSetAnswerResponse
+	var setAnsOut DecisionSetAnswerResponse
 	require.NoError(t, json.Unmarshal(setBytes, &setAnsOut))
 	f.waitMessageState(t, setAnsOut.ResponseMessageID, store.MessageDispatchAwaitingSession)
 

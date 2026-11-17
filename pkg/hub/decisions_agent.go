@@ -689,16 +689,16 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 	// Publish the single decision-response to web SSE + member fan-out, and
 	// decision.updated per row. Never deliver back to the asking agent.
 	if len(res.Answers) == 1 {
-		s.publishChoiceResponse(ctx, responseMsg, updatedRows[0], res.Answers[0])
+		s.publishDecisionResponse(ctx, responseMsg, updatedRows[0], res.Answers[0])
 	} else {
-		setView := choiceResponseSetViewOf(res.Answers, rowsByID)
-		s.publishChoiceResponseSet(ctx, responseMsg, &setView)
+		setView := decisionResponseSetViewOf(res.Answers, rowsByID)
+		s.publishDecisionResponseSet(ctx, responseMsg, &setView)
 	}
 	for i, v := range views {
 		if prompt := promptsByID[updatedRows[i].MessageID]; prompt != nil {
-			s.publishChoiceUpdated(ctx, prompt, v)
+			s.publishDecisionUpdated(ctx, prompt, v)
 		} else {
-			s.publishChoiceUpdatedAt(ctx, updatedRows[i].ProjectID, updatedRows[i].MessageID, updatedRows[i].ChatKey, v)
+			s.publishDecisionUpdatedAt(ctx, updatedRows[i].ProjectID, updatedRows[i].MessageID, updatedRows[i].ChatKey, v)
 		}
 	}
 

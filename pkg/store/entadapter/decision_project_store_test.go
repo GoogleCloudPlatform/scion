@@ -52,7 +52,7 @@ func TestProjectDecisionStore_OpenPromptsAndReadableChatKeys(t *testing.T) {
 	// 1. Multi-decision set prompt in #release where D1 has an interpreted answer
 	// (still open awaiting confirm/override) and D2 is pending.
 	setMsgID := uuid.New().String()
-	setRes, err := cs.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	setRes, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID:        setMsgID,
 			ProjectID: projectID,

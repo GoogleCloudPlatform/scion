@@ -58,9 +58,9 @@ func TestValidateLegacyMessage_EmptyMsg(t *testing.T) {
 	}
 }
 
-// A choice prompt may leave out its intro: its body is rendered from its
+// A decision prompt may leave out its intro: its body is rendered from its
 // decisions, so an empty msg is accepted for that type only.
-func TestValidateLegacyMessage_ChoicePromptWithoutIntro(t *testing.T) {
+func TestValidateLegacyMessage_DecisionPromptWithoutIntro(t *testing.T) {
 	msg := validLegacyMessage()
 	msg.Msg = ""
 	msg.Type = messages.TypeDecisionPrompt

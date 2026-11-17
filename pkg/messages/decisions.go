@@ -14,13 +14,13 @@
 
 package messages
 
-// Choices: an agent asks a user to decide between a few options. A decision
+// Decisions: an agent asks a user to decide between a few options. A decision
 // prompt (TypeDecisionPrompt) carries one or more decisions; each decision
 // has a per-agent key, a markdown question and 2 to 10 choices. This file
 // holds the agent-facing input schema (DecisionInput), the canonical stored
 // form (Decision), the normalizer and validator (NormalizeDecisions), and
 // the markdown fallback the hub renders into the prompt's msg
-// (RenderChoiceFallback) so surfaces without cards still show the
+// (RenderDecisionFallback) so surfaces without cards still show the
 // decisions. The hub is the authority on validation; the CLI may call
 // NormalizeDecisions only for early errors.
 
@@ -37,9 +37,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/plaintext"
 )
 
-// Limits of a choice prompt.
+// Limits of a decision prompt.
 const (
-	// MaxDecisionsPerMessage is the most decisions one choice prompt carries.
+	// MaxDecisionsPerMessage is the most decisions one decision prompt carries.
 	MaxDecisionsPerMessage = 10
 	// MinChoicesPerDecision and MaxChoicesPerDecision bound a decision's
 	// choices.
@@ -55,24 +55,24 @@ const (
 	// MaxDecisionKeyLen is the most characters in a decision key or a
 	// choice id.
 	MaxDecisionKeyLen = 32
-	// MaxChoicesPayloadBytes caps the JSON encoding of the normalized
+	// MaxDecisionsPayloadBytes caps the JSON encoding of the normalized
 	// decisions of one message.
-	MaxChoicesPayloadBytes = 32 * 1024
+	MaxDecisionsPayloadBytes = 32 * 1024
 )
 
-// Error codes of a ChoiceError. Handlers map every code to a 400 naming
+// Error codes of a DecisionValidationError. Handlers map every code to a 400 naming
 // the field.
 const (
-	ChoiceErrRequired      = "required"
-	ChoiceErrInvalid       = "invalid"
-	ChoiceErrTooLong       = "too_long"
-	ChoiceErrTooFew        = "too_few"
-	ChoiceErrTooMany       = "too_many"
-	ChoiceErrDuplicate     = "duplicate"
-	ChoiceErrUnknownField  = "unknown_field"
-	ChoiceErrReservedField = "reserved_field"
-	ChoiceErrNoMatch       = "no_match"
-	ChoiceErrTooLarge      = "too_large"
+	DecisionErrRequired      = "required"
+	DecisionErrInvalid       = "invalid"
+	DecisionErrTooLong       = "too_long"
+	DecisionErrTooFew        = "too_few"
+	DecisionErrTooMany       = "too_many"
+	DecisionErrDuplicate     = "duplicate"
+	DecisionErrUnknownField  = "unknown_field"
+	DecisionErrReservedField = "reserved_field"
+	DecisionErrNoMatch       = "no_match"
+	DecisionErrTooLarge      = "too_large"
 )
 
 // identRe is the shape of an agent-supplied decision key and of a choice id.
@@ -154,7 +154,7 @@ func (c ChoiceInput) MarshalJSON() ([]byte, error) {
 	}{c.ID, c.Label, c.Description})
 }
 
-// DecisionInput is one decision as an agent writes it in --choices.
+// DecisionInput is one decision as an agent writes it in --decisions.
 type DecisionInput struct {
 	// ID is the optional decision key. Empty means the hub assigns the
 	// next number from the agent's counter.
@@ -275,21 +275,21 @@ type Decision struct {
 	Choices         []Choice `json:"choices"`
 }
 
-// ChoiceError is one field-specific validation failure. Field is a path
-// rooted at the request field, for example "choices[1].choices[0].label".
-type ChoiceError struct {
+// DecisionValidationError is one field-specific validation failure. Field is a path
+// rooted at the request field, for example "decisions[1].choices[0].label".
+type DecisionValidationError struct {
 	Field   string `json:"field"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
 
-func (e *ChoiceError) Error() string { return e.Field + ": " + e.Message }
+func (e *DecisionValidationError) Error() string { return e.Field + ": " + e.Message }
 
-// ChoiceErrors is every validation failure of one choices payload, in input
+// DecisionValidationErrors is every validation failure of one decisions payload, in input
 // order.
-type ChoiceErrors []*ChoiceError
+type DecisionValidationErrors []*DecisionValidationError
 
-func (es ChoiceErrors) Error() string {
+func (es DecisionValidationErrors) Error() string {
 	parts := make([]string, len(es))
 	for i, e := range es {
 		parts[i] = e.Error()
@@ -326,21 +326,21 @@ func ValidDecisionKey(key string) bool {
 
 // NormalizeDecisions validates the agent's decisions and returns them in
 // canonical form. Every rule of design 4.2 and 4.3 is checked, and every
-// failure is reported (a ChoiceErrors) with its field path under root
-// (the request field name, normally "choices"). Surrounding whitespace of
+// failure is reported (a DecisionValidationErrors) with its field path under root
+// (the request field name, normally "decisions"). Surrounding whitespace of
 // every string is trimmed; choices without an id get their 1-based
 // position; a default naming a label becomes that choice's id.
 func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
-	var errs ChoiceErrors
+	var errs DecisionValidationErrors
 	add := func(field, code, format string, args ...any) {
-		errs = append(errs, &ChoiceError{Field: field, Code: code, Message: fmt.Sprintf(format, args...)})
+		errs = append(errs, &DecisionValidationError{Field: field, Code: code, Message: fmt.Sprintf(format, args...)})
 	}
 	switch {
 	case len(in) == 0:
-		add(root, ChoiceErrRequired, "at least one decision is required")
+		add(root, DecisionErrRequired, "at least one decision is required")
 		return nil, errs
 	case len(in) > MaxDecisionsPerMessage:
-		add(root, ChoiceErrTooMany, "at most %d decisions per message, got %d", MaxDecisionsPerMessage, len(in))
+		add(root, DecisionErrTooMany, "at most %d decisions per message, got %d", MaxDecisionsPerMessage, len(in))
 		return nil, errs
 	}
 
@@ -350,18 +350,18 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 		p := fmt.Sprintf("%s[%d]", root, i)
 		for _, name := range d.extraFields {
 			if reservedDecisionFields[name] {
-				add(p+"."+name, ChoiceErrReservedField, "%q is reserved and not supported", name)
+				add(p+"."+name, DecisionErrReservedField, "%q is reserved and not supported", name)
 			} else {
-				add(p+"."+name, ChoiceErrUnknownField, "unknown field %q", name)
+				add(p+"."+name, DecisionErrUnknownField, "unknown field %q", name)
 			}
 		}
 
 		nd := Decision{Key: strings.TrimSpace(d.ID)}
 		if nd.Key != "" {
 			if !ValidDecisionKey(nd.Key) {
-				add(p+".id", ChoiceErrInvalid, "decision id must match [A-Za-z0-9_-]{1,%d} and contain a non-digit, or be a number the hub assigned to you", MaxDecisionKeyLen)
+				add(p+".id", DecisionErrInvalid, "decision id must match [A-Za-z0-9_-]{1,%d} and contain a non-digit, or be a number the hub assigned to you", MaxDecisionKeyLen)
 			} else if prev, dup := keys[DecisionKeyNorm(nd.Key)]; dup {
-				add(p+".id", ChoiceErrDuplicate, "decision id %q is also used by %s[%d] (ids compare case-insensitively)", nd.Key, root, prev)
+				add(p+".id", DecisionErrDuplicate, "decision id %q is also used by %s[%d] (ids compare case-insensitively)", nd.Key, root, prev)
 			} else {
 				keys[DecisionKeyNorm(nd.Key)] = i
 			}
@@ -370,18 +370,18 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 		nd.Question = strings.TrimSpace(d.Question)
 		switch {
 		case nd.Question == "":
-			add(p+".question", ChoiceErrRequired, "question is required")
+			add(p+".question", DecisionErrRequired, "question is required")
 		case !validQuestionText(nd.Question):
-			add(p+".question", ChoiceErrInvalid, "question must be valid UTF-8 text without control characters (line breaks and tabs are allowed)")
+			add(p+".question", DecisionErrInvalid, "question must be valid UTF-8 text without control characters (line breaks and tabs are allowed)")
 		case utf8.RuneCountInString(nd.Question) > MaxDecisionQuestionLen:
-			add(p+".question", ChoiceErrTooLong, "question is at most %d characters", MaxDecisionQuestionLen)
+			add(p+".question", DecisionErrTooLong, "question is at most %d characters", MaxDecisionQuestionLen)
 		}
 
 		nd.Choices = normalizeChoices(p+".choices", d.Choices, add)
 		if def := strings.TrimSpace(d.Default); def != "" && nd.Choices != nil {
 			id, ok := matchDefault(nd.Choices, def)
 			if !ok {
-				add(p+".default", ChoiceErrNoMatch, "default %q matches no choice id or label", def)
+				add(p+".default", DecisionErrNoMatch, "default %q matches no choice id or label", def)
 			}
 			nd.DefaultChoiceID = id
 		}
@@ -394,8 +394,8 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(enc) > MaxChoicesPayloadBytes {
-		add(root, ChoiceErrTooLarge, "decisions are %d bytes after normalization; the limit is %d", len(enc), MaxChoicesPayloadBytes)
+	if len(enc) > MaxDecisionsPayloadBytes {
+		add(root, DecisionErrTooLarge, "decisions are %d bytes after normalization; the limit is %d", len(enc), MaxDecisionsPayloadBytes)
 		return nil, errs
 	}
 	return out, nil
@@ -406,10 +406,10 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 func normalizeChoices(p string, in []ChoiceInput, add func(field, code, format string, args ...any)) []Choice {
 	switch {
 	case len(in) < MinChoicesPerDecision:
-		add(p, ChoiceErrTooFew, "at least %d choices are required, got %d", MinChoicesPerDecision, len(in))
+		add(p, DecisionErrTooFew, "at least %d choices are required, got %d", MinChoicesPerDecision, len(in))
 		return nil
 	case len(in) > MaxChoicesPerDecision:
-		add(p, ChoiceErrTooMany, "at most %d choices are allowed, got %d", MaxChoicesPerDecision, len(in))
+		add(p, DecisionErrTooMany, "at most %d choices are allowed, got %d", MaxChoicesPerDecision, len(in))
 		return nil
 	}
 	out := make([]Choice, 0, len(in))
@@ -419,9 +419,9 @@ func normalizeChoices(p string, in []ChoiceInput, add func(field, code, format s
 		cp := fmt.Sprintf("%s[%d]", p, j)
 		for _, name := range c.extraFields {
 			if reservedDecisionFields[name] {
-				add(cp+"."+name, ChoiceErrReservedField, "%q is reserved and not supported", name)
+				add(cp+"."+name, DecisionErrReservedField, "%q is reserved and not supported", name)
 			} else {
-				add(cp+"."+name, ChoiceErrUnknownField, "unknown field %q", name)
+				add(cp+"."+name, DecisionErrUnknownField, "unknown field %q", name)
 			}
 		}
 		nc := Choice{
@@ -434,24 +434,24 @@ func normalizeChoices(p string, in []ChoiceInput, add func(field, code, format s
 			nc.ID = strconv.Itoa(j + 1)
 			idField = cp
 		} else if !identRe.MatchString(nc.ID) {
-			add(idField, ChoiceErrInvalid, "choice id must match [A-Za-z0-9_-]{1,%d}", MaxDecisionKeyLen)
+			add(idField, DecisionErrInvalid, "choice id must match [A-Za-z0-9_-]{1,%d}", MaxDecisionKeyLen)
 		}
 		if prev, dup := ids[strings.ToLower(nc.ID)]; dup {
-			add(idField, ChoiceErrDuplicate, "choice id %q is also used by %s[%d] (a choice without an id gets its position)", nc.ID, p, prev)
+			add(idField, DecisionErrDuplicate, "choice id %q is also used by %s[%d] (a choice without an id gets its position)", nc.ID, p, prev)
 		} else {
 			ids[strings.ToLower(nc.ID)] = j
 		}
 
 		switch {
 		case nc.Label == "":
-			add(cp+".label", ChoiceErrRequired, "label is required")
+			add(cp+".label", DecisionErrRequired, "label is required")
 		case !validPlainText(nc.Label):
-			add(cp+".label", ChoiceErrInvalid, "label must be one line of plain text without control characters")
+			add(cp+".label", DecisionErrInvalid, "label must be one line of plain text without control characters")
 		case utf8.RuneCountInString(nc.Label) > MaxChoiceLabelLen:
-			add(cp+".label", ChoiceErrTooLong, "label is at most %d characters", MaxChoiceLabelLen)
+			add(cp+".label", DecisionErrTooLong, "label is at most %d characters", MaxChoiceLabelLen)
 		default:
 			if prev, dup := labels[strings.ToLower(nc.Label)]; dup {
-				add(cp+".label", ChoiceErrDuplicate, "label %q is also used by %s[%d] (labels compare case-insensitively)", nc.Label, p, prev)
+				add(cp+".label", DecisionErrDuplicate, "label %q is also used by %s[%d] (labels compare case-insensitively)", nc.Label, p, prev)
 			} else {
 				labels[strings.ToLower(nc.Label)] = j
 			}
@@ -460,9 +460,9 @@ func normalizeChoices(p string, in []ChoiceInput, add func(field, code, format s
 		switch {
 		case nc.Description == "":
 		case !validPlainText(nc.Description):
-			add(cp+".description", ChoiceErrInvalid, "description must be one line of text without control characters")
+			add(cp+".description", DecisionErrInvalid, "description must be one line of text without control characters")
 		case utf8.RuneCountInString(nc.Description) > MaxChoiceDescriptionLen:
-			add(cp+".description", ChoiceErrTooLong, "description is at most %d characters", MaxChoiceDescriptionLen)
+			add(cp+".description", DecisionErrTooLong, "description is at most %d characters", MaxChoiceDescriptionLen)
 		}
 		out = append(out, nc)
 	}
@@ -549,7 +549,7 @@ func EscapeMarkdownPlain(s string) string {
 	return NeutralizeMentions(markdownSpecialRe.ReplaceAllString(s, `\$1`))
 }
 
-// RenderChoiceFallback renders the choice prompt's msg: the intro (the
+// RenderDecisionFallback renders the decision prompt's msg: the intro (the
 // agent's body, unchanged) followed by the decisions as markdown, so every
 // surface that shows msg shows the decisions. Each decision must already
 // have its key. Questions and descriptions pass through as markdown with
@@ -563,8 +563,8 @@ func EscapeMarkdownPlain(s string) string {
 //
 // introLen is the byte offset in msg where the fallback block starts (0
 // with no intro). The hub stores it on the message's first decision row and
-// recovers the intro with ChoiceIntro.
-func RenderChoiceFallback(intro string, decisions []Decision, answerURL string) (msg string, introLen int) {
+// recovers the intro with DecisionIntro.
+func RenderDecisionFallback(intro string, decisions []Decision, answerURL string) (msg string, introLen int) {
 	var b strings.Builder
 	intro = strings.TrimRight(intro, " \t\r\n")
 	if intro != "" {
@@ -632,13 +632,13 @@ func setReplyExample(decisions []Decision) string {
 	return strings.Join(parts, " and ")
 }
 
-// ChoiceIntro returns the intro of a choice prompt's msg, given the
-// introLen RenderChoiceFallback returned: the agent's body without the
+// DecisionIntro returns the intro of a decision prompt's msg, given the
+// introLen RenderDecisionFallback returned: the agent's body without the
 // fallback block and without the separating blank line. It returns "" when
 // introLen is 0 or does not fit msg (out of range or not on a character
 // boundary). The web never slices msg itself (JavaScript strings are
 // UTF-16); the hub serves this value.
-func ChoiceIntro(msg string, introLen int) string {
+func DecisionIntro(msg string, introLen int) string {
 	if introLen <= 0 || introLen > len(msg) {
 		return ""
 	}

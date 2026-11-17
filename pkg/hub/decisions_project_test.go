@@ -76,17 +76,17 @@ func purgeMessages(t *testing.T, s store.Store, projectID string, msgIDs ...stri
 }
 
 func TestProjectDecisions_ExperimentMatrixAndMethods(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	path := "/api/v1/projects/" + f.project.ID + "/decisions"
 
 	// web.decisions off -> GET 404, non-GET 405, nested suffix 404.
-	setChoicesExperiment(t, f.srv, false)
+	setDecisionsExperiment(t, f.srv, false)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path, nil).Code)
 	assert.Equal(t, http.StatusMethodNotAllowed, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, path, nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path+"/extra", nil).Code)
 
 	// web.decisions on -> GET 200, unsupported methods 405, nested suffix 404.
-	setChoicesExperiment(t, f.srv, true)
+	setDecisionsExperiment(t, f.srv, true)
 	resp := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path, nil))
 	assert.Equal(t, ProjectDecisionCounts{}, resp.Counts)
 	assert.NotNil(t, resp.Prompts)
@@ -102,7 +102,7 @@ func TestProjectDecisions_ExperimentMatrixAndMethods(t *testing.T) {
 // unauthenticated callers, agents, visitors, federated users, and non-members.
 func TestProjectDecisions_TokenAndCallerAuthz(t *testing.T) {
 	f := newChatFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Set f.member as owner/ancestor of f.agentA so f.member's pending prompts
@@ -113,25 +113,25 @@ func TestProjectDecisions_TokenAndCallerAuthz(t *testing.T) {
 	require.NoError(t, f.s.UpdateAgent(ctx, f.agentA))
 
 	// Seed one topic decision in projA and one DM decision with f.member.
-	decsTopic, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"topic-k","question":"Topic choice?","choices":["yes","no"]}]`))
+	decsTopic, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"topic-k","question":"Topic choice?","choices":["yes","no"]}]`))
 	require.NoError(t, err)
 	topicMsg := &store.Message{
 		ID: api.NewUUID(), ProjectID: f.projA, Sender: "agent:" + f.agentA.Slug, SenderID: f.agentA.ID,
 		Recipient: "chat", ThreadID: f.topicA, Channel: "web", CreatedAt: time.Now().UTC().Add(-2 * time.Minute),
 	}
-	_, err = f.s.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: topicMsg, Intro: "Topic intro", AskerAgentID: f.agentA.ID, AskerAgentName: f.agentA.Slug, Decisions: decsTopic,
 	})
 	require.NoError(t, err)
 
 	dmKey := f.dm(t, f.member, "agent", f.agentA.ID)
-	decsDM, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"dm-k","question":"DM choice?","choices":["yes","no"]}]`))
+	decsDM, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"dm-k","question":"DM choice?","choices":["yes","no"]}]`))
 	require.NoError(t, err)
 	dmMsg := &store.Message{
 		ID: api.NewUUID(), ProjectID: f.projA, Sender: "agent:" + f.agentA.Slug, SenderID: f.agentA.ID,
 		Recipient: "user:" + f.member, ThreadID: dmKey, Channel: "web", CreatedAt: time.Now().UTC().Add(-time.Minute),
 	}
-	_, err = f.s.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: dmMsg, Intro: "DM intro", AskerAgentID: f.agentA.ID, AskerAgentName: f.agentA.Slug, Decisions: decsDM,
 	})
 	require.NoError(t, err)
@@ -212,8 +212,8 @@ func TestProjectDecisions_TokenAndCallerAuthz(t *testing.T) {
 // DM decisions never leak to another project member, the project owner/admin,
 // or a Hub super-admin in tab=pending, tab=made, counts, or filter facets.
 func TestProjectDecisions_DMPrivacyAcrossTabsCountsAndFacets(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Create a second agent exclusively used in Bob's private DM so we can also
@@ -239,13 +239,13 @@ func TestProjectDecisions_DMPrivacyAcrossTabsCountsAndFacets(t *testing.T) {
 	// 2. Private DM decision to Bob asked by dmOnlyAgent.
 	dmBobKey, err := messages.DMConversationKey("agent", dmOnlyAgent.ID, "user", f.bob.ID)
 	require.NoError(t, err)
-	decsDM, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"priv-bob","question":"Secret Bob DM?","choices":["approve","reject"]}]`))
+	decsDM, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"priv-bob","question":"Secret Bob DM?","choices":["approve","reject"]}]`))
 	require.NoError(t, err)
 	dmMsg := &store.Message{
 		ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + dmOnlyAgent.Slug, SenderID: dmOnlyAgent.ID,
 		Recipient: "user:" + f.bob.ID, ThreadID: dmBobKey, Channel: "web", CreatedAt: time.Now().UTC(),
 	}
-	dmRes, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	dmRes, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: dmMsg, Intro: "Private DM", AskerAgentID: dmOnlyAgent.ID, AskerAgentName: dmOnlyAgent.Name, Decisions: decsDM,
 	})
 	require.NoError(t, err)
@@ -298,8 +298,8 @@ func TestProjectDecisions_DMPrivacyAcrossTabsCountsAndFacets(t *testing.T) {
 }
 
 func TestProjectDecisions_WaitingClassificationPaginationAndValidation(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -314,14 +314,14 @@ func TestProjectDecisions_WaitingClassificationPaginationAndValidation(t *testin
 	require.NoError(t, err)
 
 	// Prompt 1 (silentBot, pending -> message_denied -> WaitingOnOthers).
-	dSilent, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"d-silent","question":"Silent question?","choices":["yes","no"]}]`))
+	dSilent, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"d-silent","question":"Silent question?","choices":["yes","no"]}]`))
 	require.NoError(t, err)
 	mSilent := &store.Message{
 		ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + silentBot.Slug, SenderID: silentBot.ID,
 		Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Channel: "web",
 		CreatedAt: time.Now().UTC().Add(-3 * time.Minute),
 	}
-	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: mSilent, Intro: "Silent", AskerAgentID: silentBot.ID, AskerAgentName: silentBot.Name, Decisions: dSilent,
 	})
 	require.NoError(t, err)
@@ -397,7 +397,7 @@ func TestProjectDecisions_WaitingClassificationPaginationAndValidation(t *testin
 			if p.PromptMessageID == mMixed.ID {
 				assert.True(t, p.WaitingOnYou)
 				assert.True(t, p.CanAnswer)
-				assert.Equal(t, ChoiceAnswerModeSet, p.AnswerMode)
+				assert.Equal(t, DecisionAnswerModeSet, p.AnswerMode)
 				assert.Len(t, p.Decisions, 2, "all sibling rows of a set prompt are loaded")
 				assert.Equal(t, WaitingReasonOtherUserConfirm, p.WaitingReasons[resMixed.Decisions[0].RowID])
 			}
@@ -444,8 +444,8 @@ func TestProjectDecisions_WaitingClassificationPaginationAndValidation(t *testin
 }
 
 func TestProjectDecisions_PurgedPromptsAndAnswerSurface(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -568,8 +568,8 @@ func TestProjectDecisions_PurgedPromptsAndAnswerSurface(t *testing.T) {
 }
 
 func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -660,13 +660,13 @@ func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testin
 	// Deleted-agent DM test: tempBot sends a DM decision to Bob, then tempBot is SOFT-DELETED and HARD-PURGED!
 	dmTempKey, err := messages.DMConversationKey("agent", tempBot.ID, "user", f.bob.ID)
 	require.NoError(t, err)
-	decsTemp, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"dm-gone-bot","question":"Keep archive?","choices":["keep","drop"]}]`))
+	decsTemp, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"dm-gone-bot","question":"Keep archive?","choices":["keep","drop"]}]`))
 	require.NoError(t, err)
 	dmTempMsg := &store.Message{
 		ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + tempBot.Slug, SenderID: tempBot.ID,
 		Recipient: "user:" + f.bob.ID, ThreadID: dmTempKey, Channel: "web", CreatedAt: time.Now().UTC(),
 	}
-	resTemp, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	resTemp, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: dmTempMsg, Intro: "From tempBot", AskerAgentID: tempBot.ID, AskerAgentName: tempBot.Name, Decisions: decsTemp,
 	})
 	require.NoError(t, err)
@@ -769,8 +769,8 @@ func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testin
 }
 
 func TestProjectDecisions_LimitZeroSkipsFacetsAndPreservesCounts(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
 	_, openRes := f.topicPrompt(t, `[{"id":"lz-open","question":"Open?","choices":["yes","no"]}]`, false)
@@ -804,8 +804,8 @@ func TestProjectDecisions_LimitZeroSkipsFacetsAndPreservesCounts(t *testing.T) {
 }
 
 func TestProjectDecisions_DeletedTopicPreservesAuditLog(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -830,14 +830,14 @@ func TestProjectDecisions_DeletedTopicPreservesAuditLog(t *testing.T) {
 	require.NoError(t, err)
 	incConvID := incConv.ID
 
-	seedInIncidents := func(raw string) *store.ChoicePromptResult {
-		decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, raw))
+	seedInIncidents := func(raw string) *store.DecisionPromptResult {
+		decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, raw))
 		require.NoError(t, err)
 		msg := &store.Message{
 			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
 			Recipient: "chat", ThreadID: incTopicID, ConversationID: incConvID, Channel: "web", CreatedAt: time.Now().UTC(),
 		}
-		res, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		res, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 			Message: msg, Intro: "Incidents", AskerAgentID: f.agent.ID, AskerAgentName: f.agent.Name, Decisions: decs,
 		})
 		require.NoError(t, err)
@@ -892,8 +892,8 @@ func TestProjectDecisions_DeletedTopicPreservesAuditLog(t *testing.T) {
 }
 
 func TestProjectDecisions_LiveDMAgentAuthzAndSoftDeletedAsker(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -909,14 +909,14 @@ func TestProjectDecisions_LiveDMAgentAuthzAndSoftDeletedAsker(t *testing.T) {
 	dmDaveKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", dave.ID)
 	require.NoError(t, err)
 
-	seedDaveDM := func(raw string) *store.ChoicePromptResult {
-		decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, raw))
+	seedDaveDM := func(raw string) *store.DecisionPromptResult {
+		decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, raw))
 		require.NoError(t, err)
 		msg := &store.Message{
 			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
 			Recipient: "user:" + dave.ID, ThreadID: dmDaveKey, Channel: "web", CreatedAt: time.Now().UTC(),
 		}
-		res, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		res, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 			Message: msg, Intro: "DM to Dave", AskerAgentID: f.agent.ID, AskerAgentName: f.agent.Name, Decisions: decs,
 		})
 		require.NoError(t, err)
@@ -927,7 +927,7 @@ func TestProjectDecisions_LiveDMAgentAuthzAndSoftDeletedAsker(t *testing.T) {
 	dmInterp1 := seedDaveDM(`[{"id":"dm-dave-interp-1","question":"Interp DM 1?","choices":["yes","no"]}]`)
 	dmInterp2 := seedDaveDM(`[{"id":"dm-dave-interp-2","question":"Interp DM 2?","choices":["yes","no"]}]`)
 
-	for _, res := range []*store.ChoicePromptResult{dmInterp1, dmInterp2} {
+	for _, res := range []*store.DecisionPromptResult{dmInterp1, dmInterp2} {
 		srcID := api.NewUUID()
 		require.NoError(t, f.store.CreateMessage(ctx, &store.Message{
 			ID: srcID, ProjectID: f.project.ID, Sender: "user:" + dave.ID, SenderID: dave.ID,
@@ -975,7 +975,7 @@ func TestProjectDecisions_LiveDMAgentAuthzAndSoftDeletedAsker(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, f.answer(t, dave, dmOpen.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
 	assert.Equal(t, http.StatusNotFound, f.answer(t, dave, dmInterp2.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
 
-	// Part B: Soft-deleted restrictive asker parity in choiceAsker & classifyProjectOpenPrompts.
+	// Part B: Soft-deleted restrictive asker parity in decisionAsker & classifyProjectOpenPrompts.
 	softBot := &store.Agent{
 		ID: api.NewUUID(), Slug: "soft-deleted-bot", Name: "Soft Deleted Bot",
 		ProjectID: f.project.ID, OwnerID: f.alice.ID, CreatedBy: f.alice.ID, Ancestry: []string{f.alice.ID},
@@ -985,9 +985,9 @@ func TestProjectDecisions_LiveDMAgentAuthzAndSoftDeletedAsker(t *testing.T) {
 
 	conv, err := f.store.GetConversationByExternalRef(ctx, "native", "thread:"+f.project.ID+":"+f.topicID)
 	require.NoError(t, err)
-	decsSoft, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"soft-asker-1","question":"Proceed after soft-delete?","choices":["yes","no"]}]`))
+	decsSoft, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"soft-asker-1","question":"Proceed after soft-delete?","choices":["yes","no"]}]`))
 	require.NoError(t, err)
-	softRes, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	softRes, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + softBot.Slug, SenderID: softBot.ID,
 			Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -1026,8 +1026,8 @@ func TestProjectDecisions_LiveDMAgentAuthzAndSoftDeletedAsker(t *testing.T) {
 }
 
 func TestProjectDecisions_NullChatKeyFallbackToPromptThread(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	_, topicRes := f.topicPrompt(t, `[{"id":"null-topic-1","question":"Fallback topic?","choices":["yes","no"]}]`, false)
@@ -1064,8 +1064,8 @@ func TestProjectDecisions_NullChatKeyFallbackToPromptThread(t *testing.T) {
 }
 
 func TestProjectDecisions_EqualTimestampCursorTieBreak(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -1164,8 +1164,8 @@ func TestProjectDecisions_BatchAgentLookupsNoNPlusOne(t *testing.T) {
 	srv, rawStore, alice, bob, project, counting, _ := setupDemoPolicyTestWithFault(t, func(inner store.Store, _ *storeFaultSwitch) *agentLookupCountingStore {
 		return &agentLookupCountingStore{Store: inner}
 	})
-	f := newChoicesFixtureOn(t, srv, rawStore, alice, bob, project)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixtureOn(t, srv, rawStore, alice, bob, project)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -1226,9 +1226,9 @@ func TestProjectDecisions_BatchAgentLookupsNoNPlusOne(t *testing.T) {
 	require.NoError(t, err)
 
 	// Prompt 2 (by softAsker, stored with empty asker_agent_name so batch lookup populates "Soft Asker Live Name"), then soft-deleted.
-	decsSoft, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"b-soft","question":"Soft asker?","choices":["yes","no"]}]`))
+	decsSoft, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"b-soft","question":"Soft asker?","choices":["yes","no"]}]`))
 	require.NoError(t, err)
-	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + softAsker.Slug, SenderID: softAsker.ID,
 			Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -1243,9 +1243,9 @@ func TestProjectDecisions_BatchAgentLookupsNoNPlusOne(t *testing.T) {
 	// Prompt 3 (DM to Bob by hardAsker), then hard-deleted.
 	dmHardKey, err := messages.DMConversationKey("agent", hardAsker.ID, "user", f.bob.ID)
 	require.NoError(t, err)
-	decsHard, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"b-hard","question":"Hard asker?","choices":["yes","no"]}]`))
+	decsHard, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"b-hard","question":"Hard asker?","choices":["yes","no"]}]`))
 	require.NoError(t, err)
-	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + hardAsker.Slug, SenderID: hardAsker.ID,
 			Recipient: "user:" + f.bob.ID, ThreadID: dmHardKey, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -1300,7 +1300,7 @@ func TestProjectDecisions_BatchAgentLookupsNoNPlusOne(t *testing.T) {
 //   - Enabling web.decisions via PUT /api/v1/admin/experiments prunes the retired
 //     overrides from hub_settings and turns every surface ON.
 func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
 	ctx := context.Background()
 
@@ -1362,7 +1362,7 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	assert.Contains(t, sendOff.Body.String(), "web.decisions")
 
 	histOff := chatHistoryResponse{Messages: []store.Message{*twoMsg}}
-	f.srv.addChoiceHistoryViews(ctx, &histOff)
+	f.srv.addDecisionHistoryViews(ctx, &histOff)
 	assert.Empty(t, histOff.MessageDecisions, "chat history must omit decisions when web.decisions is off")
 
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions", nil).Code)
@@ -1404,7 +1404,7 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	require.True(t, f.srv.experimentEnabled(experiments.Decisions))
 
 	histOn := chatHistoryResponse{Messages: []store.Message{*twoMsg}}
-	f.srv.addChoiceHistoryViews(ctx, &histOn)
+	f.srv.addDecisionHistoryViews(ctx, &histOn)
 	assert.NotEmpty(t, histOn.MessageDecisions, "chat history must attach decisions when web.decisions is on")
 	assert.Equal(t, http.StatusOK, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions", nil).Code)
 	assert.Equal(t, http.StatusOK, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/D234", nil).Code)

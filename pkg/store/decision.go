@@ -25,7 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-// Choices (ptone/scion#7514): an agent's choice prompt carries decisions,
+// Decisions (ptone/scion#7514): an agent's decision prompt carries decisions,
 // each stored as one row per version (Decision), and the answers to them
 // are the decision log (DecisionAnswer).
 
@@ -148,7 +148,7 @@ type ProjectDecisionActor struct {
 }
 
 // ProjectDecisionPrompt groups every decision row (in position order, with
-// Answers loaded) of one choice-prompt message that has at least one open
+// Answers loaded) of one decision-prompt message that has at least one open
 // (pending or unconfirmed agent_interpreted) row in the project.
 type ProjectDecisionPrompt struct {
 	ProjectID              string
@@ -371,7 +371,7 @@ type Decision struct {
 
 	// IntroLength is set on the message's position 0 row only: the byte
 	// offset in the prompt's msg where the markdown fallback starts
-	// (messages.ChoiceIntro recovers the intro).
+	// (messages.DecisionIntro recovers the intro).
 	IntroLength int
 
 	Status       string // DecisionStatus*
@@ -454,9 +454,9 @@ type DecisionAnswer struct {
 	CreatedAt time.Time
 }
 
-// ChoicePromptInput is a decision prompt to store: its message and its
+// DecisionPromptInput is a decision prompt to store: its message and its
 // decisions, normalized by messages.NormalizeDecisions.
-type ChoicePromptInput struct {
+type DecisionPromptInput struct {
 	// Message is the decision-prompt message row. ID and ProjectID are
 	// required; Type is set to messages.TypeDecisionPrompt and Msg to the
 	// rendered markdown fallback (Intro followed by the decisions).
@@ -500,8 +500,8 @@ type DecisionResult struct {
 // Ref is "<agent-uuid>/<key>" for the result's agent.
 func (r DecisionResult) Ref(askerAgentID string) string { return askerAgentID + "/" + r.Key }
 
-// ChoicePromptResult is what CreateChoicePrompt stored.
-type ChoicePromptResult struct {
+// DecisionPromptResult is what CreateDecisionPrompt stored.
+type DecisionPromptResult struct {
 	Decisions []DecisionResult
 	// IntroLength is the stored intro offset (see Decision.IntroLength).
 	IntroLength int
@@ -546,7 +546,7 @@ type AnswerSetItem struct {
 	Outcome       string // DecisionOutcome*; empty means answer
 }
 
-// RecordAnswerSetInput is one set submit of a choice prompt (design choices
+// RecordAnswerSetInput is one set submit of a decision prompt (design choices
 // v5, 4.2): direct answers from the native surface for every actionable
 // row of the prompt message, by one user.
 type RecordAnswerSetInput struct {
@@ -628,7 +628,7 @@ type RecordInterpretedInput struct {
 
 // DecisionStore persists decision prompt decisions and their answers.
 type DecisionStore interface {
-	// CreateChoicePrompt stores a decision prompt in one transaction: it
+	// CreateDecisionPrompt stores a decision prompt in one transaction: it
 	// assigns the next numbers from the agent's counter to decisions
 	// without a key (never reused), refuses an all-digit key the agent
 	// was never issued (DecisionKeyNotIssuedError), and without Update
@@ -644,7 +644,7 @@ type DecisionStore interface {
 	// lock of the key's rows) and a loser retries, a bounded number of
 	// times.
 	// Called inside WithTx it joins that transaction and does not retry.
-	CreateChoicePrompt(ctx context.Context, in *ChoicePromptInput) (*ChoicePromptResult, error)
+	CreateDecisionPrompt(ctx context.Context, in *DecisionPromptInput) (*DecisionPromptResult, error)
 
 	// GetDecision returns one decision version with its answers.
 	// ErrNotFound if it does not exist.
@@ -695,7 +695,7 @@ type DecisionStore interface {
 	GetDecisionRowsByIDs(ctx context.Context, rowIDs []string) (map[string]*Decision, error)
 
 	// GetDecisionAnswersByResponseMessageIDs returns the answer recorded
-	// with each of the given choice-response messages, keyed by message
+	// with each of the given decision-response messages, keyed by message
 	// ID, for history pages. IDs with no answer (or not UUIDs) are absent.
 	GetDecisionAnswersByResponseMessageIDs(ctx context.Context, messageIDs []string) (map[string][]*DecisionAnswer, error)
 
@@ -733,7 +733,7 @@ type DecisionStore interface {
 	// is pending with no existing answer and a valid choice id (returning
 	// *InterpretedAnswersError with all per-key failures and storing nothing
 	// if any fails), orders validated answers canonically by (prompt
-	// CreatedAt, MessageID, Position), inserts one choice-response message,
+	// CreatedAt, MessageID, Position), inserts one decision-response message,
 	// inserts the DecisionAnswer rows (sharing a new BatchID when len >= 2,
 	// empty BatchID when len == 1), and marks every target row decided.
 	RecordInterpretedAnswers(ctx context.Context, in *RecordInterpretedInput) (*AnswerSetResult, error)
@@ -743,7 +743,7 @@ type DecisionStore interface {
 	// agents table are gone), with their newest stored asker_agent_name.
 	ListProjectDecisionAgents(ctx context.Context, projectID string) ([]ProjectDecisionActor, error)
 
-	// ListOpenPrompts returns every choice prompt in projectIDs whose
+	// ListOpenPrompts returns every decision prompt in projectIDs whose
 	// chat_key is in chatKeys and that still has at least one non-settled
 	// decision row (status == pending, or status == decided with no direct
 	// answer). Chat keys are unique across the hub, so chatKeys may be the

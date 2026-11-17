@@ -39,7 +39,7 @@ import (
 // (ptone/scion#7992). The fixture topic is "#sched-topic", asked by
 // "sched-agent"; Alice owns the project and Bob is a member.
 type decisionsSearchFixture struct {
-	*choicesFixture
+	*decisionsFixture
 	dmAgent  *store.Agent
 	dmKey    string
 	dmMsg    *store.Message
@@ -49,8 +49,8 @@ type decisionsSearchFixture struct {
 
 func newDecisionsSearchFixture(t *testing.T) *decisionsSearchFixture {
 	t.Helper()
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	dmAgent := &store.Agent{
@@ -61,23 +61,23 @@ func newDecisionsSearchFixture(t *testing.T) *decisionsSearchFixture {
 	require.NoError(t, f.store.CreateAgent(ctx, dmAgent))
 	dmKey, err := messages.DMConversationKey("agent", dmAgent.ID, "user", f.bob.ID)
 	require.NoError(t, err)
-	decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"rotate-key","question":"Rotate your staging key now?","choices":["rotate","later"]}]`))
+	decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"rotate-key","question":"Rotate your staging key now?","choices":["rotate","later"]}]`))
 	require.NoError(t, err)
 	dmMsg := &store.Message{
 		ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + dmAgent.Slug, SenderID: dmAgent.ID,
 		Recipient: "user:" + f.bob.ID, ThreadID: dmKey, Channel: "web", CreatedAt: time.Now().UTC().Add(-time.Hour),
 	}
-	res, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	res, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: dmMsg, Intro: "DM", AskerAgentID: dmAgent.ID, AskerAgentName: dmAgent.Name, Decisions: decs,
 	})
 	require.NoError(t, err)
 	return &decisionsSearchFixture{
-		choicesFixture: f,
-		dmAgent:        dmAgent,
-		dmKey:          dmKey,
-		dmMsg:          dmMsg,
-		dmRowID:        res.Decisions[0].RowID,
-		basePath:       "/api/v1/projects/" + f.project.ID + "/decisions",
+		decisionsFixture: f,
+		dmAgent:          dmAgent,
+		dmKey:            dmKey,
+		dmMsg:            dmMsg,
+		dmRowID:          res.Decisions[0].RowID,
+		basePath:         "/api/v1/projects/" + f.project.ID + "/decisions",
 	}
 }
 
@@ -319,9 +319,9 @@ func TestDecisionsCore_MultiScope(t *testing.T) {
 	otherTopic := api.NewUUID()
 	strayTopic := api.NewUUID()
 	seed := func(projectID, chatKey, key string) string {
-		decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":["yes","no"]}]`))
+		decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":["yes","no"]}]`))
 		require.NoError(t, err)
-		res, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		res, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 			Message: &store.Message{
 				ID: api.NewUUID(), ProjectID: projectID, Sender: "agent:other-bot", SenderID: otherBot,
 				Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -422,8 +422,8 @@ func TestProjectDecisions_SearchDeadlineWithNonContextErrorIsTimeout(t *testing.
 	srv, rawStore, alice, bob, project, _, _ := setupDemoPolicyTestWithFault(t, func(inner store.Store, _ *storeFaultSwitch) *interruptingDecisionStore {
 		return &interruptingDecisionStore{Store: inner}
 	})
-	f := newChoicesFixtureOn(t, srv, rawStore, alice, bob, project)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixtureOn(t, srv, rawStore, alice, bob, project)
+	setDecisionsExperiment(t, f.srv, true)
 	f.topicPrompt(t, `[{"id":"ship-now","question":"Deploy?","choices":["yes","no"]}]`, false)
 	f.srv.config.ChatSearchTimeout = 50 * time.Millisecond
 

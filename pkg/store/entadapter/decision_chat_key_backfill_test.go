@@ -33,7 +33,7 @@ func seedDecisionPromptForBackfillTest(t *testing.T, cs *CompositeStore, project
 	t.Helper()
 	ctx := context.Background()
 	msgID = uuid.New().String()
-	res, err := cs.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	res, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID:        msgID,
 			ProjectID: projectID,
@@ -78,7 +78,7 @@ func rawDecisionChatKey(t *testing.T, cs *CompositeStore, rowID string) sql.Null
 	return out
 }
 
-func TestCreateChoicePrompt_PopulatesChatKey(t *testing.T) {
+func TestCreateDecisionPrompt_PopulatesChatKey(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
 	projectID := backfillTestProject(t, cs, "decision-chat-key-create")
@@ -239,7 +239,7 @@ func TestRecordAnswerAndSet_SurfaceDecisionsPage(t *testing.T) {
 
 	// Set answer with surface=decisions_page, even after the prompt row in messages is purged!
 	setMsgID := uuid.New().String()
-	setRes, err := cs.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	setRes, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID:        setMsgID,
 			ProjectID: projectID,

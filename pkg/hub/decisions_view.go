@@ -75,10 +75,10 @@ type AnswerView struct {
 	At                  time.Time `json:"at"`
 }
 
-// ChoicePromptView is what a choice-prompt row gains in history and SSE: the
+// DecisionPromptView is what a decision-prompt row gains in history and SSE: the
 // intro (the agent's body without the markdown fallback, sliced by the hub
 // so clients never slice msg by a byte offset) and the decisions.
-type ChoicePromptView struct {
+type DecisionPromptView struct {
 	Intro     string         `json:"intro"`
 	Decisions []DecisionView `json:"decisions"`
 	// AnswerMode is "set" for a prompt with two or more decisions (one
@@ -87,32 +87,32 @@ type ChoicePromptView struct {
 	AnswerMode string `json:"answerMode"`
 }
 
-// Choice prompt answer modes.
+// Decision prompt answer modes.
 const (
-	ChoiceAnswerModeSingle = "single"
-	ChoiceAnswerModeSet    = "set"
+	DecisionAnswerModeSingle = "single"
+	DecisionAnswerModeSet    = "set"
 )
 
-// choiceAnswerMode is the answer mode of a prompt with n decisions.
-func choiceAnswerMode(n int) string {
+// decisionAnswerMode is the answer mode of a prompt with n decisions.
+func decisionAnswerMode(n int) string {
 	if n >= 2 {
-		return ChoiceAnswerModeSet
+		return DecisionAnswerModeSet
 	}
-	return ChoiceAnswerModeSingle
+	return DecisionAnswerModeSingle
 }
 
-// ChoiceResponseSetView is what the choice-response row of a set submit
+// DecisionResponseSetView is what the decision-response row of a set submit
 // gains in history and SSE (design v5 5.1): every answer, in position
 // order. PromptMessageID is omitted when an interpreted batch spans multiple
 // prompt messages; each answer carries its own PromptMessageID.
-type ChoiceResponseSetView struct {
-	PromptMessageID string                    `json:"promptMessageId,omitempty"`
-	BatchID         string                    `json:"batchId"`
-	Answers         []ChoiceResponseSetAnswer `json:"answers"`
+type DecisionResponseSetView struct {
+	PromptMessageID string                      `json:"promptMessageId,omitempty"`
+	BatchID         string                      `json:"batchId"`
+	Answers         []DecisionResponseSetAnswer `json:"answers"`
 }
 
-// ChoiceResponseSetAnswer is one answer of a ChoiceResponseSetView.
-type ChoiceResponseSetAnswer struct {
+// DecisionResponseSetAnswer is one answer of a DecisionResponseSetView.
+type DecisionResponseSetAnswer struct {
 	RowID                string `json:"rowId"`
 	Ref                  string `json:"ref"`
 	Key                  string `json:"key"`
@@ -131,8 +131,8 @@ type ChoiceResponseSetAnswer struct {
 	PreviousChoiceLabel  string `json:"previousChoiceLabel,omitempty"`
 }
 
-// ChoiceResponseView is what a choice-response row gains in history and SSE.
-type ChoiceResponseView struct {
+// DecisionResponseView is what a decision-response row gains in history and SSE.
+type DecisionResponseView struct {
 	RowID                string `json:"rowId"`
 	Ref                  string `json:"ref"`
 	Key                  string `json:"key"`
@@ -213,7 +213,7 @@ func (s *Server) decisionViewFor(ctx context.Context, d *store.Decision) Decisio
 	if d.ReplacedByID != "" {
 		r, err := s.store.GetDecision(ctx, d.ReplacedByID)
 		if err != nil {
-			slog.WarnContext(ctx, "choices: replacing decision unreadable", "row_id", d.ReplacedByID, "error", err)
+			slog.WarnContext(ctx, "decisions: replacing decision unreadable", "row_id", d.ReplacedByID, "error", err)
 		} else {
 			replacedBy = r
 		}
@@ -221,11 +221,11 @@ func (s *Server) decisionViewFor(ctx context.Context, d *store.Decision) Decisio
 	return decisionView(d, replacedBy)
 }
 
-// choicePromptViews returns the ChoicePromptView of every choice-prompt
+// decisionPromptViews returns the DecisionPromptView of every decision-prompt
 // message among msgs, keyed by message id. The decisions are read in one
 // batch. A read failure is logged and leaves the rows without views (the
 // clients then show the markdown body).
-func (s *Server) choicePromptViews(ctx context.Context, msgs []*store.Message) map[string]ChoicePromptView {
+func (s *Server) decisionPromptViews(ctx context.Context, msgs []*store.Message) map[string]DecisionPromptView {
 	var ids []string
 	byID := make(map[string]*store.Message)
 	for _, m := range msgs {
@@ -239,7 +239,7 @@ func (s *Server) choicePromptViews(ctx context.Context, msgs []*store.Message) m
 	}
 	rows, err := s.store.GetDecisionsByMessageIDs(ctx, ids)
 	if err != nil {
-		slog.WarnContext(ctx, "choices: decisions unreadable for history", "error", err)
+		slog.WarnContext(ctx, "decisions: decisions unreadable for history", "error", err)
 		return nil
 	}
 	// The versions that replaced these, in one batch.
@@ -252,15 +252,15 @@ func (s *Server) choicePromptViews(ctx context.Context, msgs []*store.Message) m
 		}
 	}
 	replacedBy := s.decisionRows(ctx, replacedByIDs)
-	out := make(map[string]ChoicePromptView, len(rows))
+	out := make(map[string]DecisionPromptView, len(rows))
 	for id, ds := range rows {
 		if len(ds) == 0 {
 			continue
 		}
-		view := ChoicePromptView{Decisions: make([]DecisionView, 0, len(ds)), AnswerMode: choiceAnswerMode(len(ds))}
+		view := DecisionPromptView{Decisions: make([]DecisionView, 0, len(ds)), AnswerMode: decisionAnswerMode(len(ds))}
 		for _, d := range ds {
 			if d.Position == 0 {
-				view.Intro = messages.ChoiceIntro(byID[id].Msg, d.IntroLength)
+				view.Intro = messages.DecisionIntro(byID[id].Msg, d.IntroLength)
 			}
 			view.Decisions = append(view.Decisions, decisionView(d, replacedBy[d.ReplacedByID]))
 		}
@@ -278,25 +278,25 @@ func (s *Server) decisionRows(ctx context.Context, rowIDs []string) map[string]*
 	}
 	rows, err := s.store.GetDecisionRowsByIDs(ctx, rowIDs)
 	if err != nil {
-		slog.WarnContext(ctx, "choices: decision rows unreadable", "error", err)
+		slog.WarnContext(ctx, "decisions: decision rows unreadable", "error", err)
 		return nil
 	}
 	return rows
 }
 
-// choicePromptViewOf returns the view of one stored choice prompt, or nil.
-func (s *Server) choicePromptViewOf(ctx context.Context, m *store.Message) *ChoicePromptView {
-	views := s.choicePromptViews(ctx, []*store.Message{m})
+// decisionPromptViewOf returns the view of one stored decision prompt, or nil.
+func (s *Server) decisionPromptViewOf(ctx context.Context, m *store.Message) *DecisionPromptView {
+	views := s.decisionPromptViews(ctx, []*store.Message{m})
 	if v, ok := views[m.ID]; ok {
 		return &v
 	}
 	return nil
 }
 
-// choiceResponseViews returns, keyed by message id, the ChoiceResponseView
+// decisionResponseViews returns, keyed by message id, the DecisionResponseView
 // of every one-click decision-response message among msgs and the
-// ChoiceResponseSetView of every set response (its answers share a batch).
-func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message) (map[string]ChoiceResponseView, map[string]ChoiceResponseSetView) {
+// DecisionResponseSetView of every set response (its answers share a batch).
+func (s *Server) decisionResponseViews(ctx context.Context, msgs []*store.Message) (map[string]DecisionResponseView, map[string]DecisionResponseSetView) {
 	var ids []string
 	for _, m := range msgs {
 		if m != nil && m.Type == messages.TypeDecisionResponse {
@@ -308,7 +308,7 @@ func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message)
 	}
 	byResponse, err := s.store.GetDecisionAnswersByResponseMessageIDs(ctx, ids)
 	if err != nil {
-		slog.WarnContext(ctx, "choices: answers unreadable for history", "error", err)
+		slog.WarnContext(ctx, "decisions: answers unreadable for history", "error", err)
 		return nil, nil
 	}
 	var rowIDs []string
@@ -336,7 +336,7 @@ func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message)
 	}
 	if len(overrideMsgIDs) > 0 {
 		if withAnswers, err := s.store.GetDecisionsByMessageIDs(ctx, overrideMsgIDs); err != nil {
-			slog.WarnContext(ctx, "choices: override decisions unreadable for history", "error", err)
+			slog.WarnContext(ctx, "decisions: override decisions unreadable for history", "error", err)
 		} else {
 			for _, ds := range withAnswers {
 				for _, d := range ds {
@@ -345,21 +345,21 @@ func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message)
 			}
 		}
 	}
-	out := map[string]ChoiceResponseView{}
-	var sets map[string]ChoiceResponseSetView
+	out := map[string]DecisionResponseView{}
+	var sets map[string]DecisionResponseSetView
 	for id, as := range byResponse {
 		if len(as) == 0 {
 			continue
 		}
 		if as[0].BatchID != "" {
 			if sets == nil {
-				sets = map[string]ChoiceResponseSetView{}
+				sets = map[string]DecisionResponseSetView{}
 			}
-			sets[id] = choiceResponseSetViewOf(as, prompts)
+			sets[id] = decisionResponseSetViewOf(as, prompts)
 			continue
 		}
 		a := as[0]
-		out[id] = choiceResponseViewOf(a, prompts[a.DecisionRowID])
+		out[id] = decisionResponseViewOf(a, prompts[a.DecisionRowID])
 	}
 	if len(out) == 0 {
 		out = nil
@@ -393,10 +393,10 @@ func previousChoiceLabel(a *store.DecisionAnswer, d *store.Decision) string {
 	return ""
 }
 
-// choiceResponseViewOf builds the ChoiceResponseView of one answer and its
+// decisionResponseViewOf builds the DecisionResponseView of one answer and its
 // decision row (d may be nil if unreadable).
-func choiceResponseViewOf(a *store.DecisionAnswer, d *store.Decision) ChoiceResponseView {
-	v := ChoiceResponseView{
+func decisionResponseViewOf(a *store.DecisionAnswer, d *store.Decision) DecisionResponseView {
+	v := DecisionResponseView{
 		RowID:                a.DecisionRowID,
 		Ref:                  a.AskerAgentID + "/" + a.Key,
 		Key:                  a.Key,
@@ -420,10 +420,10 @@ func choiceResponseViewOf(a *store.DecisionAnswer, d *store.Decision) ChoiceResp
 	return v
 }
 
-// choiceResponseSetAnswerOf builds one item of a ChoiceResponseSetView from a
+// decisionResponseSetAnswerOf builds one item of a DecisionResponseSetView from a
 // stored answer and its decision row (d may be nil if unreadable).
-func choiceResponseSetAnswerOf(a *store.DecisionAnswer, d *store.Decision) ChoiceResponseSetAnswer {
-	item := ChoiceResponseSetAnswer{
+func decisionResponseSetAnswerOf(a *store.DecisionAnswer, d *store.Decision) DecisionResponseSetAnswer {
+	item := DecisionResponseSetAnswer{
 		RowID:                a.DecisionRowID,
 		Ref:                  a.AskerAgentID + "/" + a.Key,
 		Key:                  a.Key,
@@ -448,11 +448,11 @@ func choiceResponseSetAnswerOf(a *store.DecisionAnswer, d *store.Decision) Choic
 	return item
 }
 
-// choiceResponseSetViewOf builds a set response's view from its answers,
+// decisionResponseSetViewOf builds a set response's view from its answers,
 // ordered by prompt creation time and position (read in prompts). When the
 // batch spans multiple prompt messages, PromptMessageID on the envelope is
 // left empty and each answer carries its own PromptMessageID.
-func choiceResponseSetViewOf(as []*store.DecisionAnswer, prompts map[string]*store.Decision) ChoiceResponseSetView {
+func decisionResponseSetViewOf(as []*store.DecisionAnswer, prompts map[string]*store.Decision) DecisionResponseSetView {
 	sorted := append([]*store.DecisionAnswer(nil), as...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		di, dj := prompts[sorted[i].DecisionRowID], prompts[sorted[j].DecisionRowID]
@@ -471,10 +471,10 @@ func choiceResponseSetViewOf(as []*store.DecisionAnswer, prompts map[string]*sto
 		}
 		return pi < pj
 	})
-	v := ChoiceResponseSetView{BatchID: sorted[0].BatchID, Answers: make([]ChoiceResponseSetAnswer, 0, len(sorted))}
+	v := DecisionResponseSetView{BatchID: sorted[0].BatchID, Answers: make([]DecisionResponseSetAnswer, 0, len(sorted))}
 	multiPrompt := false
 	for _, a := range sorted {
-		item := choiceResponseSetAnswerOf(a, prompts[a.DecisionRowID])
+		item := decisionResponseSetAnswerOf(a, prompts[a.DecisionRowID])
 		if item.PromptMessageID != "" {
 			if v.PromptMessageID == "" && !multiPrompt {
 				v.PromptMessageID = item.PromptMessageID
@@ -488,9 +488,9 @@ func choiceResponseSetViewOf(as []*store.DecisionAnswer, prompts map[string]*sto
 	return v
 }
 
-// addChoiceHistoryViews fills the choice fields of a history page. They are
+// addDecisionHistoryViews fills the decision fields of a history page. They are
 // omitted while web.decisions is off, so clients show the markdown body.
-func (s *Server) addChoiceHistoryViews(ctx context.Context, resp *chatHistoryResponse) {
+func (s *Server) addDecisionHistoryViews(ctx context.Context, resp *chatHistoryResponse) {
 	if len(resp.Messages) == 0 || !s.experimentEnabled(experiments.Decisions) {
 		return
 	}
@@ -498,7 +498,7 @@ func (s *Server) addChoiceHistoryViews(ctx context.Context, resp *chatHistoryRes
 	for i := range resp.Messages {
 		msgs[i] = &resp.Messages[i]
 	}
-	if prompts := s.choicePromptViews(ctx, msgs); len(prompts) > 0 {
+	if prompts := s.decisionPromptViews(ctx, msgs); len(prompts) > 0 {
 		resp.MessageDecisions = make(map[string][]DecisionView, len(prompts))
 		for id, v := range prompts {
 			resp.MessageDecisions[id] = v.Decisions
@@ -514,7 +514,7 @@ func (s *Server) addChoiceHistoryViews(ctx context.Context, resp *chatHistoryRes
 			resp.MessageDecisionAnswerModes[id] = v.AnswerMode
 		}
 	}
-	responses, sets := s.choiceResponseViews(ctx, msgs)
+	responses, sets := s.decisionResponseViews(ctx, msgs)
 	if len(responses) > 0 {
 		resp.MessageDecisionResponses = responses
 	}
@@ -523,17 +523,17 @@ func (s *Server) addChoiceHistoryViews(ctx context.Context, resp *chatHistoryRes
 	}
 }
 
-// choiceEventPayload is what a chat message event carries for a choice
+// decisionEventPayload is what a chat message event carries for a decision
 // prompt or response. The handler that stores the message passes it to
-// PublishUserMessage and the member fan-out (withChoiceEvent), so the
+// PublishUserMessage and the member fan-out (withDecisionEvent), so the
 // event publisher needs no store.
-type choiceEventPayload struct {
-	Prompt      *ChoicePromptView
-	Response    *ChoiceResponseView
-	ResponseSet *ChoiceResponseSetView
+type decisionEventPayload struct {
+	Prompt      *DecisionPromptView
+	Response    *DecisionResponseView
+	ResponseSet *DecisionResponseSetView
 }
 
-// withChoiceEvent makes the chat events of a published message carry p.
-func withChoiceEvent(p *choiceEventPayload) ChatEventOption {
-	return func(o *chatEventOptions) { o.choice = p }
+// withDecisionEvent makes the chat events of a published message carry p.
+func withDecisionEvent(p *decisionEventPayload) ChatEventOption {
+	return func(o *chatEventOptions) { o.decision = p }
 }

@@ -101,7 +101,7 @@ func (Decision) Fields() []ent.Field {
 			Nillable().
 			Immutable(),
 		// intro_length is the byte offset in the prompt message's msg where
-		// the markdown fallback starts (messages.RenderChoiceFallback). It is
+		// the markdown fallback starts (messages.RenderDecisionFallback). It is
 		// set on the message's position 0 row only; 0 means no intro.
 		field.Int("intro_length").
 			Default(0).

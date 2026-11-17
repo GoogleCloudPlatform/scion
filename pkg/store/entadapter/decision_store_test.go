@@ -63,8 +63,8 @@ func yesNo(key, question string) messages.Decision {
 	}
 }
 
-func (f *decisionFixture) prompt(intro string, update bool, ds ...messages.Decision) *store.ChoicePromptInput {
-	return &store.ChoicePromptInput{
+func (f *decisionFixture) prompt(intro string, update bool, ds ...messages.Decision) *store.DecisionPromptInput {
+	return &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID:             uuid.NewString(),
 			ProjectID:      f.projectID,
@@ -84,9 +84,9 @@ func (f *decisionFixture) prompt(intro string, update bool, ds ...messages.Decis
 	}
 }
 
-func (f *decisionFixture) create(t *testing.T, update bool, ds ...messages.Decision) *store.ChoicePromptResult {
+func (f *decisionFixture) create(t *testing.T, update bool, ds ...messages.Decision) *store.DecisionPromptResult {
 	t.Helper()
-	res, err := f.cs.CreateChoicePrompt(context.Background(), f.prompt("", update, ds...))
+	res, err := f.cs.CreateDecisionPrompt(context.Background(), f.prompt("", update, ds...))
 	require.NoError(t, err)
 	return res
 }
@@ -115,11 +115,11 @@ func (f *decisionFixture) answer(rowID, choiceID, userID, idem string) *store.Re
 	}
 }
 
-func TestCreateChoicePrompt_StoresMessageAndDecisions(t *testing.T) {
+func TestCreateDecisionPrompt_StoresMessageAndDecisions(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()
 	in := f.prompt("Two things 🚀", false, yesNo("D234", "Ship it?"), yesNo("", "Which approach?"))
-	res, err := f.cs.CreateChoicePrompt(ctx, in)
+	res, err := f.cs.CreateDecisionPrompt(ctx, in)
 	require.NoError(t, err)
 	require.Len(t, res.Decisions, 2)
 
@@ -137,7 +137,7 @@ func TestCreateChoicePrompt_StoresMessageAndDecisions(t *testing.T) {
 	assert.Contains(t, msg.Msg, "**D234.** Ship it?")
 	assert.Contains(t, msg.Msg, "**1.** Which approach?")
 	assert.Equal(t, len("Two things 🚀\n\n"), res.IntroLength)
-	assert.Equal(t, "Two things 🚀", messages.ChoiceIntro(msg.Msg, res.IntroLength))
+	assert.Equal(t, "Two things 🚀", messages.DecisionIntro(msg.Msg, res.IntroLength))
 
 	byMsg, err := f.cs.GetDecisionsByMessageIDs(ctx, []string{in.Message.ID, "not-a-uuid", uuid.NewString()})
 	require.NoError(t, err)
@@ -171,7 +171,7 @@ func TestCreateChoicePrompt_StoresMessageAndDecisions(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestCreateChoicePrompt_HubNumbersAreNeverReused(t *testing.T) {
+func TestCreateDecisionPrompt_HubNumbersAreNeverReused(t *testing.T) {
 	f := newDecisionFixture(t)
 	other := uuid.NewString()
 
@@ -192,17 +192,17 @@ func TestCreateChoicePrompt_HubNumbersAreNeverReused(t *testing.T) {
 
 	// A prompt refused after its numbers were reserved (here for an
 	// all-digit key never issued) rolls the reservation back.
-	_, err := f.cs.CreateChoicePrompt(context.Background(), f.prompt("", false, yesNo("", "d"), yesNo("99", "e")))
+	_, err := f.cs.CreateDecisionPrompt(context.Background(), f.prompt("", false, yesNo("", "d"), yesNo("99", "e")))
 	require.ErrorIs(t, err, store.ErrDecisionKeyNotIssued)
 	r5 := f.create(t, false, yesNo("", "f"))
 	assert.Equal(t, "4", r5.Decisions[0].Key)
 }
 
-func TestCreateChoicePrompt_RejectsUnissuedNumbers(t *testing.T) {
+func TestCreateDecisionPrompt_RejectsUnissuedNumbers(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()
 
-	_, err := f.cs.CreateChoicePrompt(ctx, f.prompt("", true, yesNo("1", "q")))
+	_, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", true, yesNo("1", "q")))
 	var nie *store.DecisionKeyNotIssuedError
 	require.ErrorAs(t, err, &nie)
 	assert.ErrorIs(t, err, store.ErrDecisionKeyNotIssued)
@@ -210,11 +210,11 @@ func TestCreateChoicePrompt_RejectsUnissuedNumbers(t *testing.T) {
 
 	f.create(t, false, yesNo("", "first")) // issues 1
 	// 1 is now issued; 2 is not, even in the same prompt that reserves 2.
-	_, err = f.cs.CreateChoicePrompt(ctx, f.prompt("", true, yesNo("", "new"), yesNo("2", "q")))
+	_, err = f.cs.CreateDecisionPrompt(ctx, f.prompt("", true, yesNo("", "new"), yesNo("2", "q")))
 	require.ErrorAs(t, err, &nie)
 	assert.Equal(t, []string{"2"}, nie.Keys)
 
-	res, err := f.cs.CreateChoicePrompt(ctx, f.prompt("", true, yesNo("1", "repost")))
+	res, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", true, yesNo("1", "repost")))
 	require.NoError(t, err)
 	assert.Equal(t, 2, res.Decisions[0].Version)
 	assert.Equal(t, store.DecisionKeySourceHub, res.Decisions[0].KeySource)
@@ -225,7 +225,7 @@ func TestCreateChoicePrompt_RejectsUnissuedNumbers(t *testing.T) {
 	assert.Equal(t, 2, n)
 }
 
-func TestCreateChoicePrompt_RejectsExistingKeysWithoutUpdate(t *testing.T) {
+func TestCreateDecisionPrompt_RejectsExistingKeysWithoutUpdate(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()
 	first := f.create(t, false, yesNo("D234", "Ship it?"), yesNo("ship-now", "Now?"))
@@ -233,7 +233,7 @@ func TestCreateChoicePrompt_RejectsExistingKeysWithoutUpdate(t *testing.T) {
 	require.NoError(t, err)
 
 	in := f.prompt("", false, yesNo("d234", "again"), yesNo("SHIP-NOW", "again"), yesNo("fresh", "new"))
-	_, err = f.cs.CreateChoicePrompt(ctx, in)
+	_, err = f.cs.CreateDecisionPrompt(ctx, in)
 	var kee *store.DecisionKeyExistsError
 	require.ErrorAs(t, err, &kee)
 	assert.ErrorIs(t, err, store.ErrDecisionKeyExists)
@@ -257,7 +257,7 @@ func TestCreateChoicePrompt_RejectsExistingKeysWithoutUpdate(t *testing.T) {
 	assert.Empty(t, byMsg)
 }
 
-func TestCreateChoicePrompt_UpdateReplacesPendingAndDecided(t *testing.T) {
+func TestCreateDecisionPrompt_UpdateReplacesPendingAndDecided(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()
 	v1 := f.create(t, false, yesNo("D1", "pending one"), yesNo("D2", "decided one"))
@@ -308,7 +308,7 @@ func TestCreateChoicePrompt_UpdateReplacesPendingAndDecided(t *testing.T) {
 	assert.Equal(t, p.RowID, v3.Decisions[0].Replaced.RowID)
 }
 
-func TestCreateChoicePrompt_PendingCap(t *testing.T) {
+func TestCreateDecisionPrompt_PendingCap(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
@@ -320,13 +320,13 @@ func TestCreateChoicePrompt_PendingCap(t *testing.T) {
 	}
 	// 50 pending: a new key is refused, nothing is stored.
 	in := f.prompt("", false, yesNo("one-more", "q"))
-	_, err := f.cs.CreateChoicePrompt(ctx, in)
+	_, err := f.cs.CreateDecisionPrompt(ctx, in)
 	require.ErrorIs(t, err, store.ErrTooManyPendingDecisions)
 	_, err = f.cs.GetMessage(ctx, in.Message.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
 	// An --update of a pending key counts once, so it still fits.
-	_, err = f.cs.CreateChoicePrompt(ctx, f.prompt("", true, yesNo("k0-0", "v2")))
+	_, err = f.cs.CreateDecisionPrompt(ctx, f.prompt("", true, yesNo("k0-0", "v2")))
 	require.NoError(t, err)
 
 	// Answering one frees a slot.
@@ -340,18 +340,18 @@ func TestCreateChoicePrompt_PendingCap(t *testing.T) {
 	}
 	_, _, err = f.cs.RecordAnswer(ctx, f.answer(pendingRow, "1", "user-1", ""))
 	require.NoError(t, err)
-	_, err = f.cs.CreateChoicePrompt(ctx, f.prompt("", false, yesNo("one-more", "q")))
+	_, err = f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, yesNo("one-more", "q")))
 	require.NoError(t, err)
 }
 
-func TestCreateChoicePrompt_ConcurrentUpdatesGiveConsecutiveVersions(t *testing.T) {
+func TestCreateDecisionPrompt_ConcurrentUpdatesGiveConsecutiveVersions(t *testing.T) {
 	testConcurrentUpdates(t, 2)
 }
 
-// TestCreateChoicePrompt_ThreeConcurrentUpdates: the last of n concurrent
+// TestCreateDecisionPrompt_ThreeConcurrentUpdates: the last of n concurrent
 // reposts of one key needs n-1 retries, more than the single retry a
 // two-way race needs.
-func TestCreateChoicePrompt_ThreeConcurrentUpdates(t *testing.T) {
+func TestCreateDecisionPrompt_ThreeConcurrentUpdates(t *testing.T) {
 	testConcurrentUpdates(t, 3)
 }
 
@@ -365,14 +365,14 @@ func testConcurrentUpdates(t *testing.T, n int) {
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	results := make([]*store.ChoicePromptResult, n)
+	results := make([]*store.DecisionPromptResult, n)
 	errs := make([]error, n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			results[i], errs[i] = f.cs.CreateChoicePrompt(ctx, f.prompt("", true, yesNo("D1", fmt.Sprintf("racer %d", i))))
+			results[i], errs[i] = f.cs.CreateDecisionPrompt(ctx, f.prompt("", true, yesNo("D1", fmt.Sprintf("racer %d", i))))
 		}(i)
 	}
 	close(start)
@@ -399,7 +399,7 @@ func testConcurrentUpdates(t *testing.T, n int) {
 	assert.Equal(t, 1, active, "exactly one version stays active")
 }
 
-func TestCreateChoicePrompt_ConcurrentHubNumbersAreDistinct(t *testing.T) {
+func TestCreateDecisionPrompt_ConcurrentHubNumbersAreDistinct(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()
 	const n = 4
@@ -412,7 +412,7 @@ func TestCreateChoicePrompt_ConcurrentHubNumbersAreDistinct(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			res, err := f.cs.CreateChoicePrompt(ctx, f.prompt("", false, yesNo("", "q")))
+			res, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, yesNo("", "q")))
 			errs[i] = err
 			if err == nil {
 				keys[i] = res.Decisions[0].Key
@@ -620,7 +620,7 @@ func TestDecisionRows_SurvivePromptMessageDeletion(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()
 	in := f.prompt("", false, yesNo("D1", "q"))
-	res, err := f.cs.CreateChoicePrompt(ctx, in)
+	res, err := f.cs.CreateDecisionPrompt(ctx, in)
 	require.NoError(t, err)
 	ans := f.answer(res.Decisions[0].RowID, "2", "user-1", "")
 	_, _, err = f.cs.RecordAnswer(ctx, ans)
@@ -642,13 +642,13 @@ func TestDecisionRows_SurvivePromptMessageDeletion(t *testing.T) {
 	assert.Len(t, byMsg[in.Message.ID], 1)
 }
 
-func TestCreateChoicePrompt_JoinsCallerTransaction(t *testing.T) {
+func TestCreateDecisionPrompt_JoinsCallerTransaction(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()
 	in := f.prompt("", false, yesNo("D1", "q"))
 	boom := errors.New("caller rolls back")
 	err := f.cs.WithTx(ctx, func(tx store.Store) error {
-		if _, err := tx.CreateChoicePrompt(ctx, in); err != nil {
+		if _, err := tx.CreateDecisionPrompt(ctx, in); err != nil {
 			return err
 		}
 		return boom
@@ -663,24 +663,24 @@ func TestCreateChoicePrompt_JoinsCallerTransaction(t *testing.T) {
 	f.create(t, false, yesNo("D1", "q"))
 }
 
-func TestCreateChoicePrompt_InvalidInput(t *testing.T) {
+func TestCreateDecisionPrompt_InvalidInput(t *testing.T) {
 	f := newDecisionFixture(t)
 	ctx := context.Background()
-	cases := map[string]func(in *store.ChoicePromptInput){
-		"no message":          func(in *store.ChoicePromptInput) { in.Message = nil },
-		"no project":          func(in *store.ChoicePromptInput) { in.Message.ProjectID = "" },
-		"bad message id":      func(in *store.ChoicePromptInput) { in.Message.ID = "message-1" },
-		"bad project id":      func(in *store.ChoicePromptInput) { in.Message.ProjectID = "project-1" },
-		"bad agent":           func(in *store.ChoicePromptInput) { in.AskerAgentID = "agent-1" },
-		"no decisions":        func(in *store.ChoicePromptInput) { in.Decisions = nil },
-		"invalid key":         func(in *store.ChoicePromptInput) { in.Decisions[0].Key = "a b" },
-		"unnormalized choice": func(in *store.ChoicePromptInput) { in.Decisions[0].Choices = in.Decisions[0].Choices[:1] },
+	cases := map[string]func(in *store.DecisionPromptInput){
+		"no message":          func(in *store.DecisionPromptInput) { in.Message = nil },
+		"no project":          func(in *store.DecisionPromptInput) { in.Message.ProjectID = "" },
+		"bad message id":      func(in *store.DecisionPromptInput) { in.Message.ID = "message-1" },
+		"bad project id":      func(in *store.DecisionPromptInput) { in.Message.ProjectID = "project-1" },
+		"bad agent":           func(in *store.DecisionPromptInput) { in.AskerAgentID = "agent-1" },
+		"no decisions":        func(in *store.DecisionPromptInput) { in.Decisions = nil },
+		"invalid key":         func(in *store.DecisionPromptInput) { in.Decisions[0].Key = "a b" },
+		"unnormalized choice": func(in *store.DecisionPromptInput) { in.Decisions[0].Choices = in.Decisions[0].Choices[:1] },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
 			in := f.prompt("", false, yesNo("D1", "q"))
 			mutate(in)
-			_, err := f.cs.CreateChoicePrompt(ctx, in)
+			_, err := f.cs.CreateDecisionPrompt(ctx, in)
 			assert.ErrorIs(t, err, store.ErrInvalidInput)
 		})
 	}
@@ -924,7 +924,7 @@ func threeDecisions() []messages.Decision {
 func (f *decisionFixture) createSet(t *testing.T, ds ...messages.Decision) (string, []string) {
 	t.Helper()
 	in := f.prompt("", false, ds...)
-	res, err := f.cs.CreateChoicePrompt(context.Background(), in)
+	res, err := f.cs.CreateDecisionPrompt(context.Background(), in)
 	require.NoError(t, err)
 	ids := make([]string, len(res.Decisions))
 	for i, d := range res.Decisions {
@@ -1272,7 +1272,7 @@ func TestListAgentDecisions(t *testing.T) {
 	otherIn.AskerAgentID = otherAgent
 	otherIn.Message.SenderID = otherAgent
 	otherIn.Message.AgentID = otherAgent
-	_, err = f.cs.CreateChoicePrompt(ctx, otherIn)
+	_, err = f.cs.CreateDecisionPrompt(ctx, otherIn)
 	require.NoError(t, err)
 
 	// Default state ("") == pending: D1 v2, D3, D4 (3 rows).
@@ -1394,7 +1394,7 @@ func TestListAgentDecisions_Search(t *testing.T) {
 	otherIn.AskerAgentID = otherAgent
 	otherIn.Message.SenderID = otherAgent
 	otherIn.Message.AgentID = otherAgent
-	_, err = f.cs.CreateChoicePrompt(ctx, otherIn)
+	_, err = f.cs.CreateDecisionPrompt(ctx, otherIn)
 	require.NoError(t, err)
 
 	rowIDs := func(state store.DecisionListState, q string) []string {
@@ -1731,7 +1731,7 @@ func TestRecordInterpretedAnswers_KeyOnlyPairIsAgentScoped(t *testing.T) {
 	otherIn.AskerAgentID = otherAgent
 	otherIn.Message.SenderID = otherAgent
 	otherIn.Message.AgentID = otherAgent
-	otherRes, err := f.cs.CreateChoicePrompt(ctx, otherIn)
+	otherRes, err := f.cs.CreateDecisionPrompt(ctx, otherIn)
 	require.NoError(t, err)
 
 	_, err = f.cs.RecordInterpretedAnswers(ctx, f.interpretedBatch(uuid.NewString(), "user-1", "",

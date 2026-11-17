@@ -29,34 +29,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const choicesTestProject = "project-choices"
+const decisionsTestProject = "project-decisions"
 
-const choicesTwoDecisions = `[{"id":"D234","question":"Ship the **feature** now?","choices":["yes","no"]},{"question":"Which approach?","choices":["a","b"]}]`
+const twoTestDecisions = `[{"id":"D234","question":"Ship the **feature** now?","choices":["yes","no"]},{"question":"Which approach?","choices":["a","b"]}]`
 
-// choicesState isolates the message flags and the ask_user fake for one
+// decisionsState isolates the message flags and the ask_user fake for one
 // test, in agent mode with sender as the agent. It returns the summaries
 // the fake ask_user recorded.
-func choicesState(t *testing.T, sender string) *[]string {
+func decisionsState(t *testing.T, sender string) *[]string {
 	t.Helper()
 	orig := saveMessageTestState()
 	restoreFlags := resetMessageFlags()
-	origFormat, origAsk, origStdin := outputFormat, runChoicesAskUser, choicesStdin
+	origFormat, origAsk, origStdin := outputFormat, runDecisionsAskUser, decisionsStdin
 	outputFormat = ""
 	var asked []string
-	runChoicesAskUser = func(summary string) { asked = append(asked, summary) }
+	runDecisionsAskUser = func(summary string) { asked = append(asked, summary) }
 	t.Cleanup(func() {
 		restoreFlags()
 		orig.restore()
-		outputFormat, runChoicesAskUser, choicesStdin = origFormat, origAsk, origStdin
+		outputFormat, runDecisionsAskUser, decisionsStdin = origFormat, origAsk, origStdin
 	})
 	t.Setenv("SCION_AGENT_NAME", sender)
 	t.Setenv("SCION_CLI_MODE", string(ModeAgent))
 	return &asked
 }
 
-// newChoicesHub is a fake hub whose outbound-message endpoint records the
+// newDecisionsHub is a fake hub whose outbound-message endpoint records the
 // request body and answers with status and body.
-func newChoicesHub(t *testing.T, status int, body map[string]interface{}, got *map[string]interface{}) *HubContext {
+func newDecisionsHub(t *testing.T, status int, body map[string]interface{}, got *map[string]interface{}) *HubContext {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -76,12 +76,12 @@ func newChoicesHub(t *testing.T, status int, body map[string]interface{}, got *m
 	t.Cleanup(srv.Close)
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
-	return &HubContext{Client: client, Endpoint: srv.URL, ProjectID: choicesTestProject}
+	return &HubContext{Client: client, Endpoint: srv.URL, ProjectID: decisionsTestProject}
 }
 
-func choicesSentBody() map[string]interface{} {
+func decisionsSentBody() map[string]interface{} {
 	return map[string]interface{}{
-		"message_id": "msg-choices-1", "status": "sent",
+		"message_id": "msg-decisions-1", "status": "sent",
 		"recipient": "user:alice@example.com", "recipient_id": "uid-alice",
 		"decisions": []map[string]interface{}{
 			{"key": "D234", "version": 1, "ref": "agent-uuid/D234", "replaced": nil},
@@ -90,7 +90,7 @@ func choicesSentBody() map[string]interface{} {
 	}
 }
 
-func TestValidateChoiceFlags(t *testing.T) {
+func TestValidateDecisionFlags(t *testing.T) {
 	cases := []struct {
 		name      string
 		setup     func()
@@ -101,9 +101,9 @@ func TestValidateChoiceFlags(t *testing.T) {
 		wantErr   string
 		wantUsage bool
 	}{
-		{name: "no choices", setup: func() {}},
-		{name: "decisions to a user", setup: func() { msgChoices = "[]" }},
-		{name: "both decision flags", setup: func() { msgChoices = "[]"; msgChoicesFile = "q.json" }, wantErr: "mutually exclusive", wantUsage: true},
+		{name: "no decisions", setup: func() {}},
+		{name: "decisions to a user", setup: func() { msgDecisions = "[]" }},
+		{name: "both decision flags", setup: func() { msgDecisions = "[]"; msgDecisionsFile = "q.json" }, wantErr: "mutually exclusive", wantUsage: true},
 		{name: "decisions and legacy choices", setup: func() {
 			require.NoError(t, messageCmd.Flags().Set("decisions", "[]"))
 			require.NoError(t, messageCmd.Flags().Set("choices", "[]"))
@@ -112,19 +112,19 @@ func TestValidateChoiceFlags(t *testing.T) {
 			require.NoError(t, messageCmd.Flags().Set("decisions-file", "a.json"))
 			require.NoError(t, messageCmd.Flags().Set("choices-file", "b.json"))
 		}, wantErr: "--decisions-file and --choices-file are mutually exclusive", wantUsage: true},
-		{name: "update without decisions", setup: func() { msgChoicesUpdate = true }, wantErr: "--update is valid only with --decisions or --decisions-file", wantUsage: true},
-		{name: "two readers of stdin", setup: func() { msgChoicesFile = "-"; msgBodyFile = "-" }, wantErr: "both read stdin", wantUsage: true},
-		{name: "agent recipient", setup: func() { msgChoices = "[]" }, agent: true, wantErr: "not to an agent", wantUsage: false},
-		{name: "group recipient", setup: func() { msgChoices = "[]" }, group: true, wantErr: "not to an agent or a group", wantUsage: false},
-		{name: "scheduled", setup: func() { msgChoices = "[]"; msgIn = "5m" }, wantErr: "--in or --at", wantUsage: true},
-		{name: "attachments", setup: func() { msgChoices = "[]"; msgAttach = []string{"f"} }, wantErr: "--attach", wantUsage: true},
-		{name: "artifact", setup: func() { msgChoices = "[]"; msgArtifacts = []string{"scion://artifact/a"} }, wantErr: "--artifact", wantUsage: true},
-		{name: "wake", setup: func() { msgChoices = "[]"; msgWake = true }, wantErr: "--wake", wantUsage: true},
-		{name: "cc", setup: func() { msgChoices = "[]"; msgCC = []string{"agent:x"} }, wantErr: "--cc", wantUsage: true},
-		{name: "channel", setup: func() { msgChoices = "[]"; msgChannel = "web" }, wantErr: "--channel", wantUsage: true},
-		{name: "thread id", setup: func() { msgChoices = "[]"; msgThreadID = "t1" }, wantErr: "--thread-id", wantUsage: true},
-		{name: "not an agent", setup: func() { msgChoices = "[]" }, noAgent: true, wantErr: "only by an agent", wantUsage: false},
-		{name: "agent name in human mode", setup: func() { msgChoices = "[]" }, human: true, wantErr: "only by an agent", wantUsage: false},
+		{name: "update without decisions", setup: func() { msgDecisionsUpdate = true }, wantErr: "--update is valid only with --decisions or --decisions-file", wantUsage: true},
+		{name: "two readers of stdin", setup: func() { msgDecisionsFile = "-"; msgBodyFile = "-" }, wantErr: "both read stdin", wantUsage: true},
+		{name: "agent recipient", setup: func() { msgDecisions = "[]" }, agent: true, wantErr: "not to an agent", wantUsage: false},
+		{name: "group recipient", setup: func() { msgDecisions = "[]" }, group: true, wantErr: "not to an agent or a group", wantUsage: false},
+		{name: "scheduled", setup: func() { msgDecisions = "[]"; msgIn = "5m" }, wantErr: "--in or --at", wantUsage: true},
+		{name: "attachments", setup: func() { msgDecisions = "[]"; msgAttach = []string{"f"} }, wantErr: "--attach", wantUsage: true},
+		{name: "artifact", setup: func() { msgDecisions = "[]"; msgArtifacts = []string{"scion://artifact/a"} }, wantErr: "--artifact", wantUsage: true},
+		{name: "wake", setup: func() { msgDecisions = "[]"; msgWake = true }, wantErr: "--wake", wantUsage: true},
+		{name: "cc", setup: func() { msgDecisions = "[]"; msgCC = []string{"agent:x"} }, wantErr: "--cc", wantUsage: true},
+		{name: "channel", setup: func() { msgDecisions = "[]"; msgChannel = "web" }, wantErr: "--channel", wantUsage: true},
+		{name: "thread id", setup: func() { msgDecisions = "[]"; msgThreadID = "t1" }, wantErr: "--thread-id", wantUsage: true},
+		{name: "not an agent", setup: func() { msgDecisions = "[]" }, noAgent: true, wantErr: "only by an agent", wantUsage: false},
+		{name: "agent name in human mode", setup: func() { msgDecisions = "[]" }, human: true, wantErr: "only by an agent", wantUsage: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,14 +132,14 @@ func TestValidateChoiceFlags(t *testing.T) {
 			if tc.noAgent {
 				sender = ""
 			}
-			choicesState(t, sender)
+			decisionsState(t, sender)
 			if tc.human {
 				t.Setenv("SCION_CLI_MODE", string(ModeHuman))
 			}
 			origBody := msgBodyFile
 			t.Cleanup(func() { msgBodyFile = origBody })
 			tc.setup()
-			err := validateChoiceFlags(tc.agent, tc.group)
+			err := validateDecisionFlags(tc.agent, tc.group)
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 				return
@@ -151,49 +151,49 @@ func TestValidateChoiceFlags(t *testing.T) {
 	}
 }
 
-func TestLoadChoicesPayload(t *testing.T) {
-	choicesState(t, "asker")
+func TestLoadDecisionsPayload(t *testing.T) {
+	decisionsState(t, "asker")
 
-	msgChoices = "not json"
-	_, err := loadChoicesPayload()
+	msgDecisions = "not json"
+	_, err := loadDecisionsPayload()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "JSON array")
 	assert.False(t, isUsageError(err))
 
-	msgChoices = "[]"
-	_, err = loadChoicesPayload()
+	msgDecisions = "[]"
+	_, err = loadDecisionsPayload()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one decision")
 	assert.False(t, isUsageError(err))
 
 	// Only the JSON shape is checked: an invalid decision is the hub's to
 	// refuse.
-	msgChoices = `[{"question":"q","choices":["only one"]}]`
-	got, err := loadChoicesPayload()
+	msgDecisions = `[{"question":"q","choices":["only one"]}]`
+	got, err := loadDecisionsPayload()
 	require.NoError(t, err)
-	assert.JSONEq(t, msgChoices, string(got))
+	assert.JSONEq(t, msgDecisions, string(got))
 
-	msgChoices = ""
+	msgDecisions = ""
 	path := filepath.Join(t.TempDir(), "q.json")
-	require.NoError(t, os.WriteFile(path, []byte("  "+choicesTwoDecisions+"\n"), 0o600))
-	msgChoicesFile = path
-	got, err = loadChoicesPayload()
+	require.NoError(t, os.WriteFile(path, []byte("  "+twoTestDecisions+"\n"), 0o600))
+	msgDecisionsFile = path
+	got, err = loadDecisionsPayload()
 	require.NoError(t, err)
-	assert.JSONEq(t, choicesTwoDecisions, string(got))
+	assert.JSONEq(t, twoTestDecisions, string(got))
 
-	msgChoicesFile = "-"
-	choicesStdin = strings.NewReader(choicesTwoDecisions)
-	got, err = loadChoicesPayload()
+	msgDecisionsFile = "-"
+	decisionsStdin = strings.NewReader(twoTestDecisions)
+	got, err = loadDecisionsPayload()
 	require.NoError(t, err)
-	assert.JSONEq(t, choicesTwoDecisions, string(got))
+	assert.JSONEq(t, twoTestDecisions, string(got))
 }
 
-func TestChoicesSummary(t *testing.T) {
-	assert.Equal(t, "Decision needed: Ship the feature now? (+1 more)", choicesSummary(json.RawMessage(choicesTwoDecisions)))
+func TestDecisionsSummary(t *testing.T) {
+	assert.Equal(t, "Decision needed: Ship the feature now? (+1 more)", decisionsSummary(json.RawMessage(twoTestDecisions)))
 	assert.Equal(t, "Decision needed: Read the doc now",
-		choicesSummary(json.RawMessage(`[{"question":"Read [the doc](https://x.example)\n`+"`now`"+`","choices":["a","b"]}]`)))
+		decisionsSummary(json.RawMessage(`[{"question":"Read [the doc](https://x.example)\n`+"`now`"+`","choices":["a","b"]}]`)))
 	long := strings.Repeat("x", 300)
-	s := choicesSummary(json.RawMessage(`[{"question":"` + long + `","choices":["a","b"]}]`))
+	s := decisionsSummary(json.RawMessage(`[{"question":"` + long + `","choices":["a","b"]}]`))
 	assert.Equal(t, 120, len([]rune(strings.TrimPrefix(s, "Decision needed: "))))
 	assert.True(t, strings.HasSuffix(s, "…"))
 
@@ -207,29 +207,29 @@ func TestChoicesSummary(t *testing.T) {
 	} {
 		raw, err := json.Marshal([]map[string]interface{}{{"question": q, "choices": []string{"a", "b"}}})
 		require.NoError(t, err)
-		assert.Equal(t, "Decision needed: "+want, choicesSummary(raw), q)
+		assert.Equal(t, "Decision needed: "+want, decisionsSummary(raw), q)
 	}
 }
 
-func TestChoiceDecisionLine(t *testing.T) {
-	assert.Equal(t, "D234 v1 (new)", choiceDecisionLine(hubclient.DecisionSendResult{Key: "D234", Version: 1}))
-	assert.Equal(t, "D1 v2 (new, replaces v1 which was pending)", choiceDecisionLine(hubclient.DecisionSendResult{
+func TestDecisionSendLine(t *testing.T) {
+	assert.Equal(t, "D234 v1 (new)", decisionSendLine(hubclient.DecisionSendResult{Key: "D234", Version: 1}))
+	assert.Equal(t, "D1 v2 (new, replaces v1 which was pending)", decisionSendLine(hubclient.DecisionSendResult{
 		Key: "D1", Version: 2, Replaced: &hubclient.DecisionReplaced{Version: 1, Status: "pending"}}))
-	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided: yes)", choiceDecisionLine(hubclient.DecisionSendResult{
+	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided: yes)", decisionSendLine(hubclient.DecisionSendResult{
 		Key: "D1", Version: 3, Replaced: &hubclient.DecisionReplaced{Version: 2, Status: "decided", Answer: "yes"}}))
-	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided by Pat: yes)", choiceDecisionLine(hubclient.DecisionSendResult{
+	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided by Pat: yes)", decisionSendLine(hubclient.DecisionSendResult{
 		Key: "D1", Version: 3, Replaced: &hubclient.DecisionReplaced{Version: 2, Status: "decided", Answer: "yes", AnsweredBy: "Pat"}}))
 }
 
 // A decision prompt to a user sends the decisions and --update, prints the
 // message id and one line per decision, and then marks the agent waiting
 // for input with the summary.
-func TestSendOutboundChoices_UserRecipient(t *testing.T) {
-	asked := choicesState(t, "asker")
-	msgChoicesPayload = json.RawMessage(choicesTwoDecisions)
-	msgChoicesUpdate = true
+func TestSendOutboundDecisions_UserRecipient(t *testing.T) {
+	asked := decisionsState(t, "asker")
+	msgDecisionsPayload = json.RawMessage(twoTestDecisions)
+	msgDecisionsUpdate = true
 	var got map[string]interface{}
-	hubCtx := newChoicesHub(t, http.StatusOK, choicesSentBody(), &got)
+	hubCtx := newDecisionsHub(t, http.StatusOK, decisionsSentBody(), &got)
 
 	var err error
 	out := captureStdout(t, func() { err = sendOutboundMessageViaHub(hubCtx, "user:alice@example.com", "", false) })
@@ -238,9 +238,9 @@ func TestSendOutboundChoices_UserRecipient(t *testing.T) {
 	assert.Equal(t, true, got["decisions_update"])
 	assert.NotContains(t, got, "type", "the hub sets a decision prompt's type")
 	raw, _ := json.Marshal(got["decisions"])
-	assert.JSONEq(t, choicesTwoDecisions, string(raw))
+	assert.JSONEq(t, twoTestDecisions, string(raw))
 
-	assert.Contains(t, out, "Message sent to user:alice@example.com via Hub (message msg-choices-1).")
+	assert.Contains(t, out, "Message sent to user:alice@example.com via Hub (message msg-decisions-1).")
 	assert.Contains(t, out, "D234 v1 (new)\n")
 	assert.Equal(t, "D1 v2 (new, replaces v1 which was pending)", lastLine(out))
 	assert.Equal(t, []string{"Decision needed: Ship the feature now? (+1 more)"}, *asked)
@@ -248,12 +248,12 @@ func TestSendOutboundChoices_UserRecipient(t *testing.T) {
 
 // A conv: send carries the decisions too; --json prints the hub's result
 // (message id and decisions) and still runs the side effect.
-func TestSendOutboundChoices_ConversationJSON(t *testing.T) {
-	asked := choicesState(t, "asker")
+func TestSendOutboundDecisions_ConversationJSON(t *testing.T) {
+	asked := decisionsState(t, "asker")
 	outputFormat = "json"
-	msgChoicesPayload = json.RawMessage(choicesTwoDecisions)
+	msgDecisionsPayload = json.RawMessage(twoTestDecisions)
 	var got map[string]interface{}
-	hubCtx := newChoicesHub(t, http.StatusOK, choicesSentBody(), &got)
+	hubCtx := newDecisionsHub(t, http.StatusOK, decisionsSentBody(), &got)
 
 	ref := &messaging.Reference{Kind: messaging.RefConversation, Value: "11111111-1111-1111-1111-111111111111", Raw: "conv:11111111-1111-1111-1111-111111111111"}
 	var err error
@@ -264,19 +264,19 @@ func TestSendOutboundChoices_ConversationJSON(t *testing.T) {
 
 	var res hubclient.OutboundMessageResult
 	require.NoError(t, json.Unmarshal([]byte(out), &res))
-	assert.Equal(t, "msg-choices-1", res.MessageID)
+	assert.Equal(t, "msg-decisions-1", res.MessageID)
 	require.Len(t, res.Decisions, 2)
 	assert.Equal(t, "D234", res.Decisions[0].Key)
 	assert.Len(t, *asked, 1)
 }
 
 // The decisions are printed whatever the send status (here: deferred).
-func TestSendOutboundChoices_NonSentStatusPrintsDecisions(t *testing.T) {
-	choicesState(t, "asker")
-	msgChoicesPayload = json.RawMessage(choicesTwoDecisions)
-	body := choicesSentBody()
+func TestSendOutboundDecisions_NonSentStatusPrintsDecisions(t *testing.T) {
+	decisionsState(t, "asker")
+	msgDecisionsPayload = json.RawMessage(twoTestDecisions)
+	body := decisionsSentBody()
 	body["status"] = "deferred"
-	hubCtx := newChoicesHub(t, http.StatusOK, body, nil)
+	hubCtx := newDecisionsHub(t, http.StatusOK, body, nil)
 
 	ref := &messaging.Reference{Kind: messaging.RefConversation, Value: "11111111-1111-1111-1111-111111111111", Raw: "conv:11111111-1111-1111-1111-111111111111"}
 	var err error
@@ -289,10 +289,10 @@ func TestSendOutboundChoices_NonSentStatusPrintsDecisions(t *testing.T) {
 
 // A refused send (400 experiment_disabled) fails and leaves the agent's
 // activity alone.
-func TestSendOutboundChoices_ExperimentDisabledSkipsAskUser(t *testing.T) {
-	asked := choicesState(t, "asker")
-	msgChoicesPayload = json.RawMessage(choicesTwoDecisions)
-	hubCtx := newChoicesHub(t, http.StatusBadRequest, map[string]interface{}{
+func TestSendOutboundDecisions_ExperimentDisabledSkipsAskUser(t *testing.T) {
+	asked := decisionsState(t, "asker")
+	msgDecisionsPayload = json.RawMessage(twoTestDecisions)
+	hubCtx := newDecisionsHub(t, http.StatusBadRequest, map[string]interface{}{
 		"error": map[string]interface{}{"code": "experiment_disabled", "message": "experiment_disabled: web.decisions is off"},
 	}, nil)
 
@@ -304,11 +304,11 @@ func TestSendOutboundChoices_ExperimentDisabledSkipsAskUser(t *testing.T) {
 }
 
 // Outside agent mode the side effect does not run.
-func TestSendOutboundChoices_HumanModeNoAskUser(t *testing.T) {
-	asked := choicesState(t, "asker")
+func TestSendOutboundDecisions_HumanModeNoAskUser(t *testing.T) {
+	asked := decisionsState(t, "asker")
 	t.Setenv("SCION_CLI_MODE", string(ModeHuman))
-	msgChoicesPayload = json.RawMessage(choicesTwoDecisions)
-	hubCtx := newChoicesHub(t, http.StatusOK, choicesSentBody(), nil)
+	msgDecisionsPayload = json.RawMessage(twoTestDecisions)
+	hubCtx := newDecisionsHub(t, http.StatusOK, decisionsSentBody(), nil)
 	var err error
 	_ = captureStdout(t, func() { err = sendOutboundMessageViaHub(hubCtx, "user:alice@example.com", "", false) })
 	require.NoError(t, err)
@@ -317,9 +317,9 @@ func TestSendOutboundChoices_HumanModeNoAskUser(t *testing.T) {
 
 // The command refuses an agent recipient before anything is sent, and a
 // body is optional with --decisions or its deprecated --choices alias.
-func TestMessageCommand_ChoicesArgs(t *testing.T) {
-	choicesState(t, "asker")
-	require.NoError(t, messageCmd.Flags().Set("decisions", choicesTwoDecisions))
+func TestMessageCommand_DecisionsArgs(t *testing.T) {
+	decisionsState(t, "asker")
+	require.NoError(t, messageCmd.Flags().Set("decisions", twoTestDecisions))
 	assert.NoError(t, messageCmd.Args(messageCmd, []string{"user:alice@example.com"}), "body is optional with --decisions")
 
 	err := messageCmd.RunE(messageCmd, []string{"agent:builder"})
@@ -361,14 +361,14 @@ func TestMessageCommand_ChoicesAliasesDeprecatedAndHidden(t *testing.T) {
 	// End-to-end execution through rootCmd: --decisions-file, --choices-file
 	// (printing deprecation to stderr), and --format json (ptone/scion#8156).
 	t.Run("execute_decisions_file_and_format_json", func(t *testing.T) {
-		asked := choicesState(t, "asker")
+		asked := decisionsState(t, "asker")
 		var got map[string]interface{}
-		hubCtx := newChoicesHub(t, http.StatusOK, choicesSentBody(), &got)
+		hubCtx := newDecisionsHub(t, http.StatusOK, decisionsSentBody(), &got)
 
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("SCION_HUB_ENDPOINT", hubCtx.Endpoint)
 		t.Setenv("SCION_HUB_TOKEN", "test-agent-token")
-		t.Setenv("SCION_PROJECT_ID", choicesTestProject)
+		t.Setenv("SCION_PROJECT_ID", decisionsTestProject)
 		t.Cleanup(func() {
 			rootCmd.SetArgs(nil)
 			if f := rootCmd.PersistentFlags().Lookup("format"); f != nil {
@@ -378,7 +378,7 @@ func TestMessageCommand_ChoicesAliasesDeprecatedAndHidden(t *testing.T) {
 		})
 
 		path := filepath.Join(t.TempDir(), "decisions.json")
-		require.NoError(t, os.WriteFile(path, []byte(choicesTwoDecisions), 0o600))
+		require.NoError(t, os.WriteFile(path, []byte(twoTestDecisions), 0o600))
 
 		var execErr error
 		stdout, stderr := captureStdoutStderr(t, func() {
@@ -390,21 +390,21 @@ func TestMessageCommand_ChoicesAliasesDeprecatedAndHidden(t *testing.T) {
 
 		var res hubclient.OutboundMessageResult
 		require.NoError(t, json.Unmarshal([]byte(stdout), &res), "stdout must be valid JSON: %s", stdout)
-		assert.Equal(t, "msg-choices-1", res.MessageID)
+		assert.Equal(t, "msg-decisions-1", res.MessageID)
 		require.Len(t, res.Decisions, 2)
 		assert.Equal(t, "D234", res.Decisions[0].Key)
 		assert.Equal(t, []string{"Decision needed: Ship the feature now? (+1 more)"}, *asked)
 	})
 
 	t.Run("execute_legacy_choices_file_warns_on_stderr_and_keeps_json_clean", func(t *testing.T) {
-		asked := choicesState(t, "asker")
+		asked := decisionsState(t, "asker")
 		var got map[string]interface{}
-		hubCtx := newChoicesHub(t, http.StatusOK, choicesSentBody(), &got)
+		hubCtx := newDecisionsHub(t, http.StatusOK, decisionsSentBody(), &got)
 
 		t.Setenv("HOME", t.TempDir())
 		t.Setenv("SCION_HUB_ENDPOINT", hubCtx.Endpoint)
 		t.Setenv("SCION_HUB_TOKEN", "test-agent-token")
-		t.Setenv("SCION_PROJECT_ID", choicesTestProject)
+		t.Setenv("SCION_PROJECT_ID", decisionsTestProject)
 		t.Cleanup(func() {
 			rootCmd.SetArgs(nil)
 			if f := rootCmd.PersistentFlags().Lookup("format"); f != nil {
@@ -414,7 +414,7 @@ func TestMessageCommand_ChoicesAliasesDeprecatedAndHidden(t *testing.T) {
 		})
 
 		path := filepath.Join(t.TempDir(), "legacy-choices.json")
-		require.NoError(t, os.WriteFile(path, []byte(choicesTwoDecisions), 0o600))
+		require.NoError(t, os.WriteFile(path, []byte(twoTestDecisions), 0o600))
 
 		var execErr error
 		stdout, stderr := captureStdoutStderr(t, func() {
@@ -426,7 +426,7 @@ func TestMessageCommand_ChoicesAliasesDeprecatedAndHidden(t *testing.T) {
 
 		var res hubclient.OutboundMessageResult
 		require.NoError(t, json.Unmarshal([]byte(stdout), &res), "stdout must stay pure JSON when --choices-file warns on stderr: %s", stdout)
-		assert.Equal(t, "msg-choices-1", res.MessageID)
+		assert.Equal(t, "msg-decisions-1", res.MessageID)
 		require.Len(t, res.Decisions, 2)
 		assert.Len(t, *asked, 1)
 	})

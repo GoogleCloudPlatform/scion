@@ -188,7 +188,7 @@ func TestStripReservedMetadata_StripsSenderTimezone(t *testing.T) {
 
 // The decision response keys are hub-set only: a client-supplied value is
 // stripped before delivery (design choices v4, 4.4).
-func TestStripReservedMetadata_StripsChoiceKeys(t *testing.T) {
+func TestStripReservedMetadata_StripsDecisionKeys(t *testing.T) {
 	md := map[string]string{
 		"foo":                               "bar",
 		messages.MetadataDecisionKey:        "D1",

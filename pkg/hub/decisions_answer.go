@@ -43,9 +43,9 @@ const (
 // decisionsRoutePrefix is the subtree of the decision endpoints.
 const decisionsRoutePrefix = "/api/v1/decisions/"
 
-// choiceResponseQuestionMax caps the question quoted in the line delivered
+// decisionResponseQuestionMax caps the question quoted in the line delivered
 // to the asking agent.
-const choiceResponseQuestionMax = 200
+const decisionResponseQuestionMax = 200
 
 // DecisionAnswerRequest is the body of POST /api/v1/decisions/{rowId}/answer.
 // The client names the choice by id only; the label is always copied from
@@ -141,7 +141,7 @@ func decisionCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 	return user
 }
 
-// choiceAsker reads the asking agent of a choice answer, before anything
+// decisionAsker reads the asking agent of a decision answer, before anything
 // is recorded; both answer endpoints use it. A hard-deleted (store.ErrNotFound)
 // or soft-deleted (!a.DeletedAt.IsZero()) asker is the gone case (design
 // choices v4: the answers are still recorded, and dispatch follows the
@@ -149,7 +149,7 @@ func decisionCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 // delivered. Any other lookup error, or no agent without an error, writes an
 // error response and returns ok false, so the messaging check never runs on a
 // missing agent.
-func (s *Server) choiceAsker(w http.ResponseWriter, ctx context.Context, agentID string) (asker *store.Agent, gone bool, ok bool) {
+func (s *Server) decisionAsker(w http.ResponseWriter, ctx context.Context, agentID string) (asker *store.Agent, gone bool, ok bool) {
 	a, err := s.store.GetAgent(ctx, agentID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -172,7 +172,7 @@ func (s *Server) choiceAsker(w http.ResponseWriter, ctx context.Context, agentID
 // for project readers) to read one, and canonical DM participant + live peer
 // read verification for a DM key. A deleted (hard or soft) agent peer in a DM
 // key remains readable and answerable by the DM participant under gone-asker
-// undeliverable semantics (choiceAsker); for a live agent peer, the caller
+// undeliverable semantics (decisionAsker); for a live agent peer, the caller
 // must hold ActionRead on the agent (live message-mode checks run in the
 // answer handlers after state resolution because confirm needs no delivery).
 func (s *Server) authorizeDecisionChatKey(ctx context.Context, user UserIdentity, key string, answering bool) *chatSendError {
@@ -207,7 +207,7 @@ func (s *Server) authorizeDecisionChatKey(ctx context.Context, user UserIdentity
 				return nil
 			}
 			if err != nil || ag == nil {
-				slog.Warn("choices: DM peer agent lookup failed", "error", err)
+				slog.Warn("decisions: DM peer agent lookup failed", "error", err)
 				return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
 			}
 			if s.authzService == nil || !s.authzService.CheckAccess(ctx, user, agentResource(ag), ActionRead).Allowed {
@@ -412,11 +412,11 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		return
 	}
 
-	asker, askerGone, ok := s.choiceAsker(w, ctx, d.AskerAgentID)
+	asker, askerGone, ok := s.decisionAsker(w, ctx, d.AskerAgentID)
 	if !ok {
 		return
 	}
-	// The choice-response is a message from the user to the asking agent:
+	// The decision-response is a message from the user to the asking agent:
 	// it gets the messaging check of a chat send to an agent
 	// (sendAgentRouted), before anything is recorded. Nothing is delivered
 	// to a gone asker or for a confirm, so those need none.
@@ -430,7 +430,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			return
 		}
 	}
-	responseMsg := choiceResponseStoreMessage(user, d, chatKey, choice, asker, askerGone)
+	responseMsg := decisionResponseStoreMessage(user, d, chatKey, choice, asker, askerGone)
 
 	// Step 5: record the answer and store the response, in one transaction.
 	answer, replayed, err := s.store.RecordAnswer(ctx, &store.RecordAnswerInput{
@@ -488,11 +488,11 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	// Step 6: publish the stored response, deliver it to the asker (not a
 	// confirmation: the agent already acted on that answer), and tell every
 	// open card.
-	s.publishChoiceResponse(ctx, responseMsg, cur, answer)
+	s.publishDecisionResponse(ctx, responseMsg, cur, answer)
 	if !askerGone && outcome != store.DecisionOutcomeConfirm {
-		s.deliverChoiceResponse(ctx, asker, responseMsg, answer, overridden)
+		s.deliverDecisionResponse(ctx, asker, responseMsg, answer, overridden)
 	}
-	s.publishChoiceUpdatedAt(ctx, d.ProjectID, d.MessageID, chatKey, view)
+	s.publishDecisionUpdatedAt(ctx, d.ProjectID, d.MessageID, chatKey, view)
 	writeJSON(w, http.StatusOK, DecisionAnswerResponse{Decision: view, ResponseMessageID: answer.ResponseMessageID})
 }
 
@@ -535,19 +535,19 @@ func (s *Server) writeDecisionAnswered(w http.ResponseWriter, ctx context.Contex
 		map[string]interface{}{"decision": s.decisionViewFor(ctx, d)})
 }
 
-// choiceResponseStoreMessage builds the choice-response row stored with the
+// decisionResponseStoreMessage builds the decision-response row stored with the
 // answer: sender the answering user, recipient the asking agent, in the
 // prompt's conversation. A gone asker (askerGone; asker is then unused) or
 // one that cannot take a message gets the row born failed, as a chat send
 // to it would.
-func choiceResponseStoreMessage(user UserIdentity, d *store.Decision, chatKey string, choice messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
+func decisionResponseStoreMessage(user UserIdentity, d *store.Decision, chatKey string, choice messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
 	m := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      d.ProjectID,
 		Sender:         userSenderAddress(user),
 		SenderID:       user.ID(),
 		RecipientID:    d.AskerAgentID,
-		Msg:            choiceResponseLine(userDisplay(user), d.Key, choice.Label, d.Question),
+		Msg:            decisionResponseLine(userDisplay(user), d.Key, choice.Label, d.Question),
 		Type:           messages.TypeDecisionResponse,
 		AgentID:        d.AskerAgentID,
 		Channel:        "web",
@@ -583,21 +583,21 @@ func userDisplay(user UserIdentity) string {
 	return user.ID()
 }
 
-// choiceResponseLine is the stored body of a decision-response (design 4.4):
+// decisionResponseLine is the stored body of a decision-response (design 4.4):
 // `ptone chose "yes" for D234 "Ship the feature now?"`.
-func choiceResponseLine(who, key, label, question string) string {
-	return fmt.Sprintf("%s chose %q for %s %q", who, label, key, truncateRunes(plainLine(question), choiceResponseQuestionMax))
+func decisionResponseLine(who, key, label, question string) string {
+	return fmt.Sprintf("%s chose %q for %s %q", who, label, key, truncateRunes(plainLine(question), decisionResponseQuestionMax))
 }
 
-// choiceResponseAgentLine is the hub-formatted line delivered to the asking
+// decisionResponseAgentLine is the hub-formatted line delivered to the asking
 // agent (design 4.4): the question is the agent's own text, truncated.
-func choiceResponseAgentLine(a *store.DecisionAnswer, overridden *store.DecisionAnswer) string {
+func decisionResponseAgentLine(a *store.DecisionAnswer, overridden *store.DecisionAnswer) string {
 	who := a.AnsweredByEmail
 	if who == "" {
 		who = a.AnsweredByName
 	}
 	line := fmt.Sprintf("[decision-response] %s v%d (%q) answer=%s (choice %s) by %s",
-		a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), choiceResponseQuestionMax), a.ChoiceLabel, a.ChoiceID, who)
+		a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax), a.ChoiceLabel, a.ChoiceID, who)
 	if overridden != nil {
 		line += ", overriding interpreted answer " + overridden.ChoiceLabel
 	}
@@ -618,12 +618,12 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// publishChoiceResponse emits the chat events of the stored response,
-// carrying its ChoiceResponseView.
-func (s *Server) publishChoiceResponse(ctx context.Context, m *store.Message, d *store.Decision, a *store.DecisionAnswer) {
-	view := choiceResponseViewOf(a, d)
+// publishDecisionResponse emits the chat events of the stored response,
+// carrying its DecisionResponseView.
+func (s *Server) publishDecisionResponse(ctx context.Context, m *store.Message, d *store.Decision, a *store.DecisionAnswer) {
+	view := decisionResponseViewOf(a, d)
 	pubCtx := context.WithoutCancel(ctx)
-	opt := withChoiceEvent(&choiceEventPayload{Response: &view})
+	opt := withDecisionEvent(&decisionEventPayload{Response: &view})
 	s.touchConversationActivity(pubCtx, m.ThreadID, m.ID)
 	s.events.PublishUserMessage(pubCtx, m, nil, nil, opt)
 	if !strings.HasPrefix(m.ThreadID, "dm:") {
@@ -631,11 +631,11 @@ func (s *Server) publishChoiceResponse(ctx context.Context, m *store.Message, d 
 	}
 }
 
-// deliverChoiceResponse dispatches the stored response to the asking agent
-// with the hub-formatted line and the hub-set choice metadata. A stopped or
+// deliverDecisionResponse dispatches the stored response to the asking agent
+// with the hub-formatted line and the hub-set decision metadata. A stopped or
 // deleted asker leaves the row failed (undeliverable semantics); the answer
 // stands either way.
-func (s *Server) deliverChoiceResponse(ctx context.Context, asker *store.Agent, m *store.Message, a *store.DecisionAnswer, overridden *store.DecisionAnswer) {
+func (s *Server) deliverDecisionResponse(ctx context.Context, asker *store.Agent, m *store.Message, a *store.DecisionAnswer, overridden *store.DecisionAnswer) {
 	if asker == nil || m.DispatchState != store.MessageDispatchDispatched {
 		return
 	}
@@ -643,7 +643,7 @@ func (s *Server) deliverChoiceResponse(ctx context.Context, asker *store.Agent, 
 	if dispatcher == nil {
 		return
 	}
-	line := choiceResponseAgentLine(a, overridden)
+	line := decisionResponseAgentLine(a, overridden)
 	sm := &messages.StructuredMessage{
 		Version:        messages.Version,
 		Timestamp:      m.CreatedAt.UTC().Format(time.RFC3339),
@@ -678,21 +678,21 @@ func (s *Server) deliverChoiceResponse(ctx context.Context, asker *store.Agent, 
 	}
 }
 
-// publishChoiceUpdated tells every open card of the decision about its new
+// publishDecisionUpdated tells every open card of the decision about its new
 // state: on project.<id>.chat.decision.updated for a thread, and on
 // user.<id>.chat.decision.updated for each user of a DM, so a DM's decisions reach
 // only its participants.
-func (s *Server) publishChoiceUpdated(ctx context.Context, prompt *store.Message, view DecisionView) {
+func (s *Server) publishDecisionUpdated(ctx context.Context, prompt *store.Message, view DecisionView) {
 	if prompt == nil {
 		return
 	}
-	s.publishChoiceUpdatedAt(ctx, prompt.ProjectID, prompt.ID, prompt.ThreadID, view)
+	s.publishDecisionUpdatedAt(ctx, prompt.ProjectID, prompt.ID, prompt.ThreadID, view)
 }
 
-// publishChoiceUpdatedAt publishes chat.decision.updated using the decision's
+// publishDecisionUpdatedAt publishes chat.decision.updated using the decision's
 // stored project_id, message_id, and chat_key so SSE updates continue to work
 // after chat retention purges the prompt message.
-func (s *Server) publishChoiceUpdatedAt(ctx context.Context, projectID, messageID, threadID string, view DecisionView) {
+func (s *Server) publishDecisionUpdatedAt(ctx context.Context, projectID, messageID, threadID string, view DecisionView) {
 	namedUserID := ""
 	if view.Decision != nil {
 		namedUserID = view.Decision.AnsweredByUserID

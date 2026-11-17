@@ -49,29 +49,29 @@ func rejectHubMintedType(w http.ResponseWriter, msgType string) bool {
 	return true
 }
 
-// choicePromptSend is a validated decision prompt on its way through the
+// decisionPromptSend is a validated decision prompt on its way through the
 // outbound-message handler: its decisions, normalized, and, once stored,
 // the store's result.
-type choicePromptSend struct {
+type decisionPromptSend struct {
 	decisions []messages.Decision
 	update    bool
 	intro     string
-	result    *store.ChoicePromptResult
+	result    *store.DecisionPromptResult
 }
 
-// choiceStoreError is a store failure of a decision prompt the handler answers
+// decisionStoreError is a store failure of a decision prompt the handler answers
 // with its own status and code instead of a 500.
-type choiceStoreError struct{ err error }
+type decisionStoreError struct{ err error }
 
-func (e *choiceStoreError) Error() string { return e.err.Error() }
-func (e *choiceStoreError) Unwrap() error { return e.err }
+func (e *decisionStoreError) Error() string { return e.err.Error() }
+func (e *decisionStoreError) Unwrap() error { return e.err }
 
-// prepareChoicePromptSend checks a send that carries decisions, before any
+// prepareDecisionPromptSend checks a send that carries decisions, before any
 // routing: the experiment (400 experiment_disabled when off, never a silent
 // drop), --update without decisions, a recipient that is an agent or a
 // broadcast, attachments, and the decisions themselves. It returns nil and
 // true for an ordinary send, and false when it wrote the refusal.
-func (s *Server) prepareChoicePromptSend(w http.ResponseWriter, agentID string, req *OutboundMessageRequest) (*choicePromptSend, bool) {
+func (s *Server) prepareDecisionPromptSend(w http.ResponseWriter, agentID string, req *OutboundMessageRequest) (*decisionPromptSend, bool) {
 	decisionsInput := req.Decisions
 	decisionsUpdate := req.DecisionsUpdate
 
@@ -121,11 +121,11 @@ func (s *Server) prepareChoicePromptSend(w http.ResponseWriter, agentID string, 
 	}
 	decisions, err := messages.NormalizeDecisions("decisions", decisionsInput)
 	if err != nil {
-		writeChoiceErrors(w, err)
+		writeDecisionValidationErrors(w, err)
 		return nil, false
 	}
 	// The intro is set from the body once its mentions are rewritten.
-	return &choicePromptSend{decisions: decisions, update: decisionsUpdate}, true
+	return &decisionPromptSend{decisions: decisions, update: decisionsUpdate}, true
 }
 
 // isBroadcastRecipient reports whether a recipient names a broadcast.
@@ -137,10 +137,10 @@ func isBroadcastRecipient(recipient string) bool {
 	return false
 }
 
-// writeChoiceErrors answers 400 with every field error of a NormalizeDecisions
+// writeDecisionValidationErrors answers 400 with every field error of a NormalizeDecisions
 // failure.
-func writeChoiceErrors(w http.ResponseWriter, err error) {
-	var errs messages.ChoiceErrors
+func writeDecisionValidationErrors(w http.ResponseWriter, err error) {
+	var errs messages.DecisionValidationErrors
 	if errors.As(err, &errs) {
 		ValidationError(w, "invalid decisions: "+errs.Error(), map[string]interface{}{"errors": errs})
 		return
@@ -148,10 +148,10 @@ func writeChoiceErrors(w http.ResponseWriter, err error) {
 	ValidationError(w, "invalid decisions: "+err.Error(), nil)
 }
 
-// writeChoiceStoreError answers a CreateChoicePrompt failure. It reports
+// writeDecisionStoreError answers a CreateDecisionPrompt failure. It reports
 // false for an error that is not a decision prompt refusal (the caller answers
 // 500).
-func writeChoiceStoreError(w http.ResponseWriter, err error) bool {
+func writeDecisionStoreError(w http.ResponseWriter, err error) bool {
 	var exists *store.DecisionKeyExistsError
 	var notIssued *store.DecisionKeyNotIssuedError
 	switch {
@@ -182,9 +182,9 @@ func writeChoiceStoreError(w http.ResponseWriter, err error) bool {
 	return false
 }
 
-// choiceAnswerURL is the absolute link to the prompt in web chat, or "" when
+// decisionAnswerURL is the absolute link to the prompt in web chat, or "" when
 // the hub has no public URL or the message has no thread to link to.
-func (s *Server) choiceAnswerURL(m *store.Message) string {
+func (s *Server) decisionAnswerURL(m *store.Message) string {
 	base := strings.TrimRight(s.HubEndpoints().Public, "/")
 	if base == "" || m.ThreadID == "" {
 		return ""
@@ -195,24 +195,24 @@ func (s *Server) choiceAnswerURL(m *store.Message) string {
 	return base + starPermalink(m.ProjectID, m.ThreadID, m.ID)
 }
 
-// storeChoicePrompt stores the prompt message and its decisions in one
-// transaction (CreateChoicePrompt renders msg and sets the type), then
+// storeDecisionPrompt stores the prompt message and its decisions in one
+// transaction (CreateDecisionPrompt renders msg and sets the type), then
 // copies the stored body and type onto the structured message that is
-// published. A refusal comes back as a choiceStoreError.
-func (s *Server) storeChoicePrompt(ctx context.Context, cp *choicePromptSend, agent *store.Agent, storeMsg *store.Message, structuredMsg *messages.StructuredMessage) error {
-	res, err := s.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+// published. A refusal comes back as a decisionStoreError.
+func (s *Server) storeDecisionPrompt(ctx context.Context, dp *decisionPromptSend, agent *store.Agent, storeMsg *store.Message, structuredMsg *messages.StructuredMessage) error {
+	res, err := s.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message:        storeMsg,
-		Intro:          cp.intro,
-		AnswerURL:      s.choiceAnswerURL(storeMsg),
+		Intro:          dp.intro,
+		AnswerURL:      s.decisionAnswerURL(storeMsg),
 		AskerAgentID:   agent.ID,
 		AskerAgentName: agentDisplayName(agent),
-		Decisions:      cp.decisions,
-		Update:         cp.update,
+		Decisions:      dp.decisions,
+		Update:         dp.update,
 	})
 	if err != nil {
-		return &choiceStoreError{err: err}
+		return &decisionStoreError{err: err}
 	}
-	cp.result = res
+	dp.result = res
 	structuredMsg.Msg = storeMsg.Msg
 	structuredMsg.Type = storeMsg.Type
 	return nil
@@ -223,7 +223,7 @@ func (s *Server) storeChoicePrompt(ctx context.Context, cp *choicePromptSend, ag
 // the old row, on its own prompt's subjects (it may be in another thread or
 // DM than the new prompt), with a view that carries replacedBy. Best
 // effort: the send has committed, and history carries the state anyway.
-func (s *Server) publishReplacedDecisions(ctx context.Context, res *store.ChoicePromptResult) {
+func (s *Server) publishReplacedDecisions(ctx context.Context, res *store.DecisionPromptResult) {
 	if res == nil {
 		return
 	}
@@ -249,7 +249,7 @@ func (s *Server) publishReplacedDecisions(ctx context.Context, res *store.Choice
 			s.messageLog.Warn("decisions: replaced decision has no chat_key for decision.updated", "row_id", old.ID, "message_id", old.MessageID)
 			continue
 		}
-		s.publishChoiceUpdatedAt(ctx, old.ProjectID, old.MessageID, chatKey, s.decisionViewFor(ctx, old))
+		s.publishDecisionUpdatedAt(ctx, old.ProjectID, old.MessageID, chatKey, s.decisionViewFor(ctx, old))
 	}
 }
 
@@ -272,8 +272,8 @@ type DecisionReplaced struct {
 	AnsweredBy string `json:"answered_by,omitempty"`
 }
 
-// choiceDecisionResults is the decisions field of the send response.
-func choiceDecisionResults(agentID string, res *store.ChoicePromptResult) []DecisionSendResult {
+// decisionSendResults is the decisions field of the send response.
+func decisionSendResults(agentID string, res *store.DecisionPromptResult) []DecisionSendResult {
 	if res == nil {
 		return nil
 	}

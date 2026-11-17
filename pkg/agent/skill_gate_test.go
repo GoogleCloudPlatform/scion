@@ -439,12 +439,12 @@ func TestInjectPlatformSkills_EmbeddedUngatedSkillsByteIdentical(t *testing.T) {
 	}
 }
 
-// TestInjectPlatformSkills_EmbeddedScionMessagingChoices installs the shipped
+// TestInjectPlatformSkills_EmbeddedScionMessagingDecisions installs the shipped
 // scion-messaging skill with web.decisions off and on (ptone/scion#7830
 // acceptance criterion 1, ptone/scion#8225): off, no Decisions reference and
 // no marker text; on, the reference and the pointer lines, with the markers
 // stripped.
-func TestInjectPlatformSkills_EmbeddedScionMessagingChoices(t *testing.T) {
+func TestInjectPlatformSkills_EmbeddedScionMessagingDecisions(t *testing.T) {
 	const skillsDir = ".agents/skills"
 	for _, on := range []bool{false, true} {
 		home := t.TempDir()

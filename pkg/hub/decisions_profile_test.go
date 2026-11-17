@@ -150,16 +150,16 @@ func profileProjectSlugs(refs []ProjectDecisionProjectRef) []string {
 }
 
 func TestUserMeDecisions_ExperimentMatrixAndMethods(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 
 	// web.decisions off -> GET 404, non-GET 405 before gate, nested suffix 404.
-	setChoicesExperiment(t, f.srv, false)
+	setDecisionsExperiment(t, f.srv, false)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath, nil).Code)
 	assert.Equal(t, http.StatusMethodNotAllowed, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, userMeDecisionsPath, nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"/extra", nil).Code)
 
 	// web.decisions on -> GET 200, unsupported methods 405, nested suffix 404.
-	setChoicesExperiment(t, f.srv, true)
+	setDecisionsExperiment(t, f.srv, true)
 	resp := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath, nil))
 	assert.Equal(t, ProjectDecisionCounts{}, resp.Counts)
 	assert.NotNil(t, resp.Prompts)
@@ -178,7 +178,7 @@ func TestUserMeDecisions_ExperimentMatrixAndMethods(t *testing.T) {
 // federated users.
 func TestUserMeDecisions_TokenAndCallerAuthz(t *testing.T) {
 	f := newChatFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Make f.member also a member of f.projB so the profile roll-up covers two
@@ -193,9 +193,9 @@ func TestUserMeDecisions_TokenAndCallerAuthz(t *testing.T) {
 	}
 
 	seedPrompt := func(projID, chatKey, recipient, key string, agent *store.Agent, at time.Time) {
-		decs, nerr := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":["yes","no"]}]`))
+		decs, nerr := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":["yes","no"]}]`))
 		require.NoError(t, nerr)
-		_, cerr := f.s.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		_, cerr := f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 			Message: &store.Message{
 				ID: api.NewUUID(), ProjectID: projID, Sender: "agent:" + agent.Slug, SenderID: agent.ID,
 				Recipient: recipient, ThreadID: chatKey, Channel: "web", CreatedAt: at,
@@ -288,8 +288,8 @@ func TestUserMeDecisions_TokenAndCallerAuthz(t *testing.T) {
 //     groups, counts, or any facet (including projects when a project's ONLY
 //     decision is another user's private DM).
 func TestUserMeDecisions_DMPrivacyAndMembershipScope(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Create a Hub super-admin who is NOT a member of f.project.
@@ -312,9 +312,9 @@ func TestUserMeDecisions_DMPrivacyAndMembershipScope(t *testing.T) {
 	require.NoError(t, f.store.CreateAgent(ctx, dmOnlyAgent))
 	dmBobKey, err := messages.DMConversationKey("agent", dmOnlyAgent.ID, "user", f.bob.ID)
 	require.NoError(t, err)
-	decsDM, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"p1-bob-dm","question":"Bob secret?","choices":["ok","no"]}]`))
+	decsDM, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"p1-bob-dm","question":"Bob secret?","choices":["ok","no"]}]`))
 	require.NoError(t, err)
-	dmRes, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	dmRes, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + dmOnlyAgent.Slug, SenderID: dmOnlyAgent.ID,
 			Recipient: "user:" + f.bob.ID, ThreadID: dmBobKey, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -347,9 +347,9 @@ func TestUserMeDecisions_DMPrivacyAndMembershipScope(t *testing.T) {
 		Phase: string(state.PhaseRunning), MessageMode: store.MessageModeProject,
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, groupAgent))
-	decsGrp, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"p2-grp","question":"Group release?","choices":["go","hold"]}]`))
+	decsGrp, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"p2-grp","question":"Group release?","choices":["go","hold"]}]`))
 	require.NoError(t, err)
-	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: projGroup.ID, Sender: "agent:" + groupAgent.Slug, SenderID: groupAgent.ID,
 			Recipient: "chat", ThreadID: topicGroupID, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -381,9 +381,9 @@ func TestUserMeDecisions_DMPrivacyAndMembershipScope(t *testing.T) {
 	})
 	require.NoError(t, err)
 	visBotID := api.NewUUID()
-	decsVis, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"p3-vis","question":"Visitor see?","choices":["y","n"]}]`))
+	decsVis, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"p3-vis","question":"Visitor see?","choices":["y","n"]}]`))
 	require.NoError(t, err)
-	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: projVisitorOnly.ID, Sender: "agent:vis-bot", SenderID: visBotID,
 			Recipient: "chat", ThreadID: topicVisID, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -406,9 +406,9 @@ func TestUserMeDecisions_DMPrivacyAndMembershipScope(t *testing.T) {
 	require.NoError(t, f.store.CreateAgent(ctx, dm4Bot))
 	dm4Key, err := messages.DMConversationKey("agent", dm4Bot.ID, "user", f.bob.ID)
 	require.NoError(t, err)
-	decsDM4, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"p4-bob-dm","question":"P4 secret?","choices":["y","n"]}]`))
+	decsDM4, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"p4-bob-dm","question":"P4 secret?","choices":["y","n"]}]`))
 	require.NoError(t, err)
-	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: projDMOnly.ID, Sender: "agent:" + dm4Bot.Slug, SenderID: dm4Bot.ID,
 			Recipient: "user:" + f.bob.ID, ThreadID: dm4Key, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -470,8 +470,8 @@ func TestUserMeDecisions_DMPrivacyAndMembershipScope(t *testing.T) {
 }
 
 func TestUserMeDecisions_PendingSortsPaginationAndProjectFilter(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Rename f.project to Alpha and create Beta (Bob is a member of both) and
@@ -496,10 +496,10 @@ func TestUserMeDecisions_PendingSortsPaginationAndProjectFilter(t *testing.T) {
 	require.NoError(t, f.store.CreateProject(ctx, projGamma))
 
 	base := time.Now().UTC().Truncate(time.Millisecond)
-	seed := func(projID, topicID string, ag *store.Agent, key string, at time.Time) *store.ChoicePromptResult {
-		decs, nerr := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+key+`","question":"Question `+key+`?","choices":["yes","no"]}]`))
+	seed := func(projID, topicID string, ag *store.Agent, key string, at time.Time) *store.DecisionPromptResult {
+		decs, nerr := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+key+`","question":"Question `+key+`?","choices":["yes","no"]}]`))
 		require.NoError(t, nerr)
-		res, cerr := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		res, cerr := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 			Message: &store.Message{
 				ID: api.NewUUID(), ProjectID: projID, Sender: "agent:" + ag.Slug, SenderID: ag.ID,
 				Recipient: "chat", ThreadID: topicID, Channel: "web", CreatedAt: at,
@@ -630,8 +630,8 @@ func TestUserMeDecisions_PendingSortsPaginationAndProjectFilter(t *testing.T) {
 }
 
 func TestUserMeDecisions_MadeSortsOverviewAndSearch(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	f.project.Name = "Alpha"
@@ -650,10 +650,10 @@ func TestUserMeDecisions_MadeSortsOverviewAndSearch(t *testing.T) {
 	require.NoError(t, f.store.CreateAgent(ctx, agentBeta))
 
 	seedAndAnswer := func(projID, topicID string, ag *store.Agent, key, label string) {
-		decs, nerr := messages.NormalizeDecisions("choices", decisionInputs(t,
+		decs, nerr := messages.NormalizeDecisions("decisions", decisionInputs(t,
 			fmt.Sprintf(`[{"id":%q,"question":"Choose for %s?","choices":[{"id":"c1","label":%q},{"id":"c2","label":"skip"}]}]`, key, key, label)))
 		require.NoError(t, nerr)
-		res, cerr := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		res, cerr := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 			Message: &store.Message{
 				ID: api.NewUUID(), ProjectID: projID, Sender: "agent:" + ag.Slug, SenderID: ag.ID,
 				Recipient: "chat", ThreadID: topicID, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -731,12 +731,12 @@ func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
 
-	seedPrompt := func(t *testing.T, f *choicesFixture, p *store.Project, topicID, key string, offsetSec int) string {
+	seedPrompt := func(t *testing.T, f *decisionsFixture, p *store.Project, topicID, key string, offsetSec int) string {
 		t.Helper()
 		botID := api.NewUUID()
-		decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":["yes","no"]}]`))
+		decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":["yes","no"]}]`))
 		require.NoError(t, err)
-		res, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		res, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 			Message: &store.Message{
 				ID: api.NewUUID(), ProjectID: p.ID, Sender: "agent:bot", SenderID: botID,
 				Recipient: "chat", ThreadID: topicID, Channel: "web",
@@ -757,8 +757,8 @@ func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
 	}
 
 	t.Run("new prompt in later group does not skip older items", func(t *testing.T) {
-		f := newChoicesFixture(t)
-		setChoicesExperiment(t, f.srv, true)
+		f := newDecisionsFixture(t)
+		setDecisionsExperiment(t, f.srv, true)
 
 		projB := &store.Project{ID: api.NewUUID(), Name: "Beta", Slug: "beta", Created: base, Updated: base}
 		require.NoError(t, f.store.CreateProject(ctx, projB))
@@ -792,8 +792,8 @@ func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
 	})
 
 	t.Run("inline answer mid-group finishes active group before later groups", func(t *testing.T) {
-		f := newChoicesFixture(t)
-		setChoicesExperiment(t, f.srv, true)
+		f := newDecisionsFixture(t)
+		setDecisionsExperiment(t, f.srv, true)
 
 		projB := &store.Project{ID: api.NewUUID(), Name: "Beta", Slug: "beta", Created: base, Updated: base}
 		require.NoError(t, f.store.CreateProject(ctx, projB))
@@ -836,8 +836,8 @@ func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
 	})
 
 	t.Run("inline answer after crossing group does not repeat finished group", func(t *testing.T) {
-		f := newChoicesFixture(t)
-		setChoicesExperiment(t, f.srv, true)
+		f := newDecisionsFixture(t)
+		setDecisionsExperiment(t, f.srv, true)
 
 		projB := &store.Project{ID: api.NewUUID(), Name: "Beta", Slug: "beta", Created: base, Updated: base}
 		require.NoError(t, f.store.CreateProject(ctx, projB))
@@ -886,8 +886,8 @@ func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
 }
 
 func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
-	f := newChoicesFixture(t)
-	setChoicesExperiment(t, f.srv, true)
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Realistic worst-case cap fixture: 205 member projects x 5 topics per project,
@@ -925,10 +925,10 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 			botID := api.NewUUID()
 			botName := fmt.Sprintf("bot-%03d-%d", i, tpIdx)
 			openKey := fmt.Sprintf("cap-k-%03d-%d", i, tpIdx)
-			decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+openKey+`","question":"`+openKey+`?","choices":["yes","no"]}]`))
+			decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+openKey+`","question":"`+openKey+`?","choices":["yes","no"]}]`))
 			require.NoError(t, err)
 			ts := base.Add(time.Duration(i*20+tpIdx*2) * time.Second)
-			_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+			_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 				Message: &store.Message{
 					ID: api.NewUUID(), ProjectID: p.ID, Sender: "agent:" + botName, SenderID: botID,
 					Recipient: "chat", ThreadID: tpID, Channel: "web",
@@ -939,9 +939,9 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 			require.NoError(t, err)
 
 			madeKey := fmt.Sprintf("cap-m-%03d-%d", i, tpIdx)
-			madeDecs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+madeKey+`","question":"`+madeKey+`?","choices":["yes","no"]}]`))
+			madeDecs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+madeKey+`","question":"`+madeKey+`?","choices":["yes","no"]}]`))
 			require.NoError(t, err)
-			madePrompt, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+			madePrompt, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 				Message: &store.Message{
 					ID: api.NewUUID(), ProjectID: p.ID, Sender: "agent:" + botName, SenderID: botID,
 					Recipient: "chat", ThreadID: tpID, Channel: "web",
@@ -1066,8 +1066,8 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 	intSrv, intStore, intAlice, intBob, intProj, _, _ := setupDemoPolicyTestWithFault(t, func(inner store.Store, _ *storeFaultSwitch) *interruptingDecisionStore {
 		return &interruptingDecisionStore{Store: inner}
 	})
-	intFix := newChoicesFixtureOn(t, intSrv, intStore, intAlice, intBob, intProj)
-	setChoicesExperiment(t, intFix.srv, true)
+	intFix := newDecisionsFixtureOn(t, intSrv, intStore, intAlice, intBob, intProj)
+	setDecisionsExperiment(t, intFix.srv, true)
 	intFix.topicPrompt(t, `[{"id":"ship-now","question":"Deploy?","choices":["yes","no"]}]`, false)
 	intFix.srv.config.ChatSearchTimeout = 50 * time.Millisecond
 	for _, tab := range []string{ProjectDecisionsTabPending, ProjectDecisionsTabMade} {
@@ -1078,7 +1078,7 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 }
 
 func TestWaitingOnYouTotal(t *testing.T) {
-	f := newChoicesFixture(t)
+	f := newDecisionsFixture(t)
 	ctx := context.Background()
 
 	// Empty / unknown user -> (0, 0, nil).
@@ -1110,9 +1110,9 @@ func TestWaitingOnYouTotal(t *testing.T) {
 	require.NoError(t, f.store.CreateAgent(ctx, dmBot))
 	dmKey, err := messages.DMConversationKey("agent", dmBot.ID, "user", f.bob.ID)
 	require.NoError(t, err)
-	decsDM, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"w3","question":"Third?","choices":["ok","skip"]}]`))
+	decsDM, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"w3","question":"Third?","choices":["ok","skip"]}]`))
 	require.NoError(t, err)
-	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: projDM.ID, Sender: "agent:" + dmBot.Slug, SenderID: dmBot.ID,
 			Recipient: "user:" + f.bob.ID, ThreadID: dmKey, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -1135,9 +1135,9 @@ func TestWaitingOnYouTotal(t *testing.T) {
 		Phase: string(state.PhaseRunning), MessageMode: store.MessageModeProject,
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, bot3))
-	decs3, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"other-only","question":"Alice confirm?","choices":["y","n"]}]`))
+	decs3, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"other-only","question":"Alice confirm?","choices":["y","n"]}]`))
 	require.NoError(t, err)
-	res3, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	res3, err := f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: projOthersOnly.ID, Sender: "agent:" + bot3.Slug, SenderID: bot3.ID,
 			Recipient: "chat", ThreadID: tp3ID, Channel: "web", CreatedAt: time.Now().UTC(),
@@ -1151,10 +1151,10 @@ func TestWaitingOnYouTotal(t *testing.T) {
 	projOut := &store.Project{ID: api.NewUUID(), Name: "Outsider", Slug: "outsider", Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, f.store.CreateProject(ctx, projOut))
 	tp4ID := createTestDecisionTopic(t, f.wcs, projOut.ID, "general", f.alice.ID)
-	decs4, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"out-1","question":"Out?","choices":["y","n"]}]`))
+	decs4, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"out-1","question":"Out?","choices":["y","n"]}]`))
 	require.NoError(t, err)
 	outBotID := api.NewUUID()
-	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+	_, err = f.store.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID: api.NewUUID(), ProjectID: projOut.ID, Sender: "agent:out-bot", SenderID: outBotID,
 			Recipient: "chat", ThreadID: tp4ID, Channel: "web", CreatedAt: time.Now().UTC(),
