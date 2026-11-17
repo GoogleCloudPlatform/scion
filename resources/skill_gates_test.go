@@ -198,12 +198,22 @@ func TestParseSkillMarkdown_RejectsMalformedGates(t *testing.T) {
 	}
 }
 
-// TestPlatformSkillGates_ChoicesClaimsAreGated: Choices guidance appears
+// TestPlatformSkillGates_ChoicesClaimsAreGated: Decisions guidance appears
 // only inside web.decisions gates, so an agent on a hub without Decisions
 // is never told to use it (design 3.6, as scion-web-serving does for the
 // page view).
 func TestPlatformSkillGates_ChoicesClaimsAreGated(t *testing.T) {
-	claims := []string{"--choices", "scion decisions", "choice prompt", "choice-response", "references/choices.md"}
+	claims := []string{
+		"--decisions",
+		"--choices",
+		"scion decisions",
+		"decision prompt",
+		"choice prompt",
+		"decision-response",
+		"choice-response",
+		"references/decisions.md",
+		"references/choices.md",
+	}
 	found := 0
 	for _, sm := range platformSkillMarkdown(t) {
 		for _, l := range sm.lines {
@@ -220,14 +230,15 @@ func TestPlatformSkillGates_ChoicesClaimsAreGated(t *testing.T) {
 		}
 	}
 	if found == 0 {
-		t.Error("no embedded platform skill mentions Choices; the scion-messaging content is missing")
+		t.Error("no embedded platform skill mentions Decisions; the scion-messaging content is missing")
 	}
 }
 
-// TestPlatformSkillsFS_ScionMessagingChoices pins the Choices content of
-// scion-messaging (ptone/scion#7830): the reference is file-gated, the two
-// SKILL.md pointers are gated blocks, and the reference keeps the guidance
-// agents need, including the full-set --update rule (ptone/scion#7841).
+// TestPlatformSkillsFS_ScionMessagingChoices pins the Decisions content of
+// scion-messaging (ptone/scion#7830, ptone/scion#8225): the reference is
+// file-gated, the two SKILL.md pointers are gated blocks, and the reference
+// keeps the guidance agents need, including the full-set --update rule
+// (ptone/scion#7841).
 func TestPlatformSkillsFS_ScionMessagingChoices(t *testing.T) {
 	read := func(name string) string {
 		t.Helper()
@@ -237,9 +248,12 @@ func TestPlatformSkillsFS_ScionMessagingChoices(t *testing.T) {
 		}
 		return string(data)
 	}
-	ref := parseSkillMarkdown("references/choices.md", read("scion-messaging/references/choices.md"))
+	if _, err := fs.Stat(PlatformSkillsFS(), "scion-messaging/references/choices.md"); err == nil {
+		t.Fatal("legacy scion-messaging/references/choices.md must not remain embedded")
+	}
+	ref := parseSkillMarkdown("references/decisions.md", read("scion-messaging/references/decisions.md"))
 	if ref.fileGate != experiments.Decisions {
-		t.Errorf("references/choices.md frontmatter gate = %q, want %q", ref.fileGate, experiments.Decisions)
+		t.Errorf("references/decisions.md frontmatter gate = %q, want %q", ref.fileGate, experiments.Decisions)
 	}
 	skill := parseSkillMarkdown("SKILL.md", read("scion-messaging/SKILL.md"))
 	if skill.fileGate != "" {
@@ -263,13 +277,22 @@ func TestPlatformSkillsFS_ScionMessagingChoices(t *testing.T) {
 	}
 	content := strings.Join(strings.Fields(body.String()), " ")
 	for _, want := range []string{
-		"--choices-file <file>",
+		"--decisions-file <file>",
+		"decision prompt",
+		"`decision-prompt`",
 		"```json",
 		"`--update`",
+		"`decision_key_exists`",
 		"resend every still-pending key of that set",
 		"the set is split",
 		"there is no partial submit",
-		"[choice-response]",
+		"[decision-response]",
+		"`decision_key`",
+		"`decision_version`",
+		"`choice_id`",
+		"`decision_provenance`",
+		"`decision_batch`",
+		"`decision_answers`",
 		"scion decisions list",
 		"scion decisions show <key>",
 		"scion decisions record <key> <choice-id> --from <message-id>",
@@ -278,14 +301,14 @@ func TestPlatformSkillsFS_ScionMessagingChoices(t *testing.T) {
 		"send the question as ordinary Markdown",
 	} {
 		if !strings.Contains(content, want) {
-			t.Errorf("embedded scion-messaging/references/choices.md does not contain %q", want)
+			t.Errorf("embedded scion-messaging/references/decisions.md does not contain %q", want)
 		}
 	}
 	// ptone/scion#7842 changes how a recommended choice is shown; the
 	// reference must not describe that rendering.
 	for _, unwanted := range []string{"preselect", "pre-select", "start selected", "outlined"} {
 		if strings.Contains(strings.ToLower(content), unwanted) {
-			t.Errorf("references/choices.md describes recommended-choice rendering (%q); keep it neutral", unwanted)
+			t.Errorf("references/decisions.md describes recommended-choice rendering (%q); keep it neutral", unwanted)
 		}
 	}
 }

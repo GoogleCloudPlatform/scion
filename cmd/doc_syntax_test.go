@@ -123,9 +123,16 @@ func findCommandProblems(lines []string, source string) []string {
 			if name == "" {
 				continue
 			}
-			if cmd.Flags().Lookup(name) == nil {
+			f := cmd.Flags().Lookup(name)
+			if f == nil {
+				f = cmd.InheritedFlags().Lookup(name)
+			}
+			if f == nil {
 				problems = append(problems,
 					fmt.Sprintf("unknown flag --%s: %s (from %s)", name, line, source))
+			} else if f.Deprecated != "" {
+				problems = append(problems,
+					fmt.Sprintf("deprecated flag --%s (%s): %s (from %s)", name, f.Deprecated, line, source))
 			}
 		}
 	}
@@ -180,7 +187,7 @@ func findDenyListProblems(lines []string, denyPatterns []string, source string) 
 func TestDocSyntax(t *testing.T) {
 	docFiles := []string{
 		"../resources/platform_skills/scion-messaging/SKILL.md",
-		"../resources/platform_skills/scion-messaging/references/choices.md",
+		"../resources/platform_skills/scion-messaging/references/decisions.md",
 		"../resources/platform_skills/scion-artifacts/SKILL.md",
 		"../docs-site/src/content/docs/hosted/user/messaging.md",
 		"../docs-site/src/content/docs/reference/cli.md",
@@ -395,22 +402,30 @@ func placeholderFlagProblems(lines []string, source string) []string {
 			if name == "" {
 				continue
 			}
-			if cmd.Flags().Lookup(name) == nil && cmd.InheritedFlags().Lookup(name) == nil {
+			f := cmd.Flags().Lookup(name)
+			if f == nil {
+				f = cmd.InheritedFlags().Lookup(name)
+			}
+			if f == nil {
 				problems = append(problems, fmt.Sprintf("unknown flag --%s for %q: %s (from %s)", name, cmd.CommandPath(), line, source))
+			} else if f.Deprecated != "" {
+				problems = append(problems, fmt.Sprintf("deprecated flag --%s (%s) for %q: %s (from %s)", name, f.Deprecated, cmd.CommandPath(), line, source))
 			}
 		}
 	}
 	return problems
 }
 
-// TestDocSyntax_PlatformSkillChoices checks every fenced scion line of the
-// scion-messaging skill and its Choices reference (ptone/scion#7830),
-// placeholder lines included, against the cobra tree, and that no example
-// passes decisions as inline JSON: the reference teaches --choices-file.
-func TestDocSyntax_PlatformSkillChoices(t *testing.T) {
+// TestDocSyntax_PlatformSkillDecisions checks every fenced scion line of the
+// scion-messaging skill and its Decisions reference (ptone/scion#7830,
+// ptone/scion#8225), placeholder lines included, against the cobra tree,
+// rejects hidden/deprecated aliases (--choices, --choices-file), and verifies
+// that no example passes decisions as inline JSON: the reference teaches
+// --decisions-file.
+func TestDocSyntax_PlatformSkillDecisions(t *testing.T) {
 	files := []string{
 		"../resources/platform_skills/scion-messaging/SKILL.md",
-		"../resources/platform_skills/scion-messaging/references/choices.md",
+		"../resources/platform_skills/scion-messaging/references/decisions.md",
 	}
 	total := 0
 	for _, rel := range files {
@@ -419,9 +434,12 @@ func TestDocSyntax_PlatformSkillChoices(t *testing.T) {
 		for _, p := range placeholderFlagProblems(lines, rel) {
 			t.Error(p)
 		}
+		for _, p := range agentHelpProblems(lines, rel) {
+			t.Error(p)
+		}
 		for _, line := range lines {
-			if strings.Contains(line, "--choices ") || strings.Contains(line, "--choices=") {
-				t.Errorf("fenced example passes inline --choices JSON; use --choices-file <file>: %s (from %s)", line, rel)
+			if strings.Contains(line, "--decisions ") || strings.Contains(line, "--decisions=") {
+				t.Errorf("fenced example passes inline --decisions JSON; use --decisions-file <file>: %s (from %s)", line, rel)
 			}
 		}
 	}
@@ -431,6 +449,15 @@ func TestDocSyntax_PlatformSkillChoices(t *testing.T) {
 		problems := placeholderFlagProblems([]string{"scion decisions record <key> <choice-id> --form <message-id>"}, "test")
 		assert.NotEmpty(t, problems)
 		assert.Empty(t, placeholderFlagProblems([]string{"scion decisions record <key> <choice-id> --from <message-id>"}, "test"))
+	})
+
+	t.Run("catches_deprecated_choices_aliases", func(t *testing.T) {
+		assert.NotEmpty(t, findCommandProblems([]string{`scion message @alice@example.com "hi" --choices '[]'`}, "test"))
+		assert.NotEmpty(t, findCommandProblems([]string{`scion message @alice@example.com "hi" --choices-file /tmp/d.json`}, "test"))
+		assert.Empty(t, findCommandProblems([]string{`scion message @alice@example.com "hi" --decisions-file /tmp/d.json`}, "test"))
+		assert.NotEmpty(t, agentHelpProblems([]string{`scion message "conv:<id>" --choices-file <file>`}, "test"))
+		assert.NotEmpty(t, agentHelpProblems([]string{`scion message "conv:<id>" --choices <json>`}, "test"))
+		assert.Empty(t, agentHelpProblems([]string{`scion message "conv:<id>" --decisions-file <file>`}, "test"))
 	})
 }
 

@@ -2,22 +2,23 @@
 experiment: web.decisions
 ---
 
-# Asking users to decide: choice prompts
+# Asking users to decide: decision prompts
 
-A **choice prompt** is a message that carries one or more keyed decisions. Each
-decision has a question and 2 to 10 choices. In web chat the user answers with a
-click, and the answer comes back to you as a `choice-response` message. Other
-surfaces show a Markdown copy of the same questions and options.
+A **decision prompt** (`decision-prompt`) is a message that carries one or more
+keyed decisions. Each decision has a question and 2 to 10 choices. In web chat
+the user answers with a click, and the answer comes back to you as a
+`decision-response` message. Other surfaces show a Markdown copy of the same
+questions and options.
 
 ## When to use one
 
-Use a choice prompt when the user should pick between a few concrete options and
-you can act on the answer directly: approve or hold a step, pick one of two
+Use a decision prompt when the user should pick between a few concrete options
+and you can act on the answer directly: approve or hold a step, pick one of two
 designs, choose a target. Keep prose for open questions, for options you cannot
 list in a short label, or when you need a discussion rather than a pick.
 
 - Send it to a user or a conversation: `@<email>`, `user:<email>`, `conv:<id>` or
-  `#<thread>`. Choice prompts cannot go to an agent or a `group[...]`.
+  `#<thread>`. Decision prompts cannot go to an agent or a `group[...]`.
 - Only an agent can send one (agent mode, inside an agent container).
 - The message body is optional: it becomes the intro shown above the decisions.
   Put context and your recommendation there.
@@ -32,8 +33,8 @@ list in a short label, or when you need a discussion rather than a pick.
 
 ## Send it from a file
 
-Write the decisions to a JSON file and pass `--choices-file`. This avoids shell
-quoting problems; `--choices '<json>'` takes the same JSON inline.
+Write the decisions to a JSON file and pass `--decisions-file`. This avoids
+shell quoting problems; `--decisions '<json>'` takes the same JSON inline.
 
 ```json
 [
@@ -54,12 +55,12 @@ quoting problems; `--choices '<json>'` takes the same JSON inline.
 ```
 
 ```bash
-scion message "conv:<conversation-id>" --choices-file <file> - <<'EOF_MESSAGE'
+scion message "conv:<conversation-id>" --decisions-file <file> - <<'EOF_MESSAGE'
 The release candidate passed CI. I recommend **staging** first.
 EOF_MESSAGE
 ```
 
-`--choices-file -` reads the JSON from stdin; then the body cannot also come
+`--decisions-file -` reads the JSON from stdin; then the body cannot also come
 from stdin, so use a positional body or `--body-file <path>`.
 
 The JSON is an array of decisions:
@@ -81,15 +82,15 @@ result.
 After a successful send the CLI marks you as waiting for input, the same as
 `sciontool status ask_user`, with the first question as the summary.
 
-You cannot combine choices with `--attach`, `--artifact`, `--wake`, `--in`,
+You cannot combine decisions with `--attach`, `--artifact`, `--wake`, `--in`,
 `--at`, `--cc`, `--channel` or `--thread-id`.
 
 ## Revise a decision: `--update`
 
-Reusing a key you already sent is refused (`choice_key_exists`) unless you pass
-`--update`. With `--update`, each decision whose key exists gets a new version,
-and the old version is marked replaced and can no longer be answered. This works
-for answered decisions too.
+Reusing a key you already sent is refused (`decision_key_exists`) unless you
+pass `--update`. With `--update`, each decision whose key exists gets a new
+version, and the old version is marked replaced and can no longer be answered.
+This works for answered decisions too.
 
 **Revising an unanswered set: resend every still-pending key of that set**, not
 only the one you changed, in one prompt with `--update`. The new prompt then
@@ -98,7 +99,7 @@ the changed key, the set is split: the replaced decision moves to the new prompt
 and the others stay on the old one.
 
 ```bash
-scion message "conv:<conversation-id>" --choices-file <file> --update - <<'EOF_MESSAGE'
+scion message "conv:<conversation-id>" --decisions-file <file> --update - <<'EOF_MESSAGE'
 Updated: canary is no longer an option this week.
 EOF_MESSAGE
 ```
@@ -108,15 +109,19 @@ The output shows what each new version replaced, for example
 
 ## Reading the answer
 
-The answer arrives as a message of type `choice-response`, from the user who
+The answer arrives as a message of type `decision-response`, from the user who
 answered, in the conversation of the prompt.
 
 - One decision:
-  `[choice-response] deploy-target v1 ("Where should ...") answer=Staging (choice staging) by <user>`
+  `[decision-response] deploy-target v1 ("Where should ...") answer=Staging (choice staging) by <user>`
+  with envelope metadata `decision_key`, `decision_version`, `choice_id` and
+  `decision_provenance`.
 - A set: a first line
-  `[choice-response] 2 decisions answered by <user> (prompt <message-id>)`,
+  `[decision-response] 2 decisions answered by <user> (prompt <message-id>)`,
   then one line per decision:
-  `deploy-target v1 ("Where should ...") answer=Staging (choice staging, recommended)`.
+  `deploy-target v1 ("Where should ...") answer=Staging (choice staging, recommended)`,
+  with envelope metadata `decision_batch` and `decision_answers`
+  (`key@version=choiceId,...`).
 
 `recommended` means the answer matched your `default`. Act on the answer, and
 reply in the conversation when the user expects a result.
@@ -168,9 +173,9 @@ scion decisions record --from <message-id> <key>=<choice-id> <key>=<choice-id>
   decisions with `--update` instead of adding new ones.
 - An all-digit key must be a number the Hub assigned to you.
 
-## When choices are off
+## When decisions are off
 
-Choice prompts need the `web.decisions` experiment on the Hub. If a send is
+Decision prompts need the `web.decisions` experiment on the Hub. If a send is
 refused with `experiment_disabled`, or `scion decisions` reports that decisions
 need the `web.decisions` experiment, send the question as ordinary Markdown
 instead: options in a list with their trade-offs, your recommendation, and the

@@ -379,6 +379,63 @@ func TestSendMessageViaConversation_AgentRef_JSONOutputIncludesMentionResults(t 
 	require.Equal(t, "unknown-name", resp.MentionResults[0].Slug)
 }
 
+// TestSendMessageViaConversation_AgentRef_HumanJSONOutputIncludesArtifactWarning
+// covers a human CLI @agent send (no SCION_AGENT_NAME) under --format json:
+// stdout must unmarshal as hubclient.MessageResponse with message_id and
+// artifact_warning, and stderr must not receive the plain-text artifact warning.
+func TestSendMessageViaConversation_AgentRef_HumanJSONOutputIncludesArtifactWarning(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	origFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = origFormat }()
+
+	t.Setenv("SCION_AGENT_NAME", "")
+
+	projectID := "proj-convref-human-json"
+	const wantMsgID = "msg-human-json-1"
+	const wantWarn = "artifact art-999 not attached: permission denied"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents/builder/message":
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":       wantMsgID,
+				"status":           "dispatched",
+				"artifact_warning": wantWarn,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+	ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "builder", Raw: "@builder"}
+
+	var sendErr error
+	var out string
+	errOut := captureStderr(t, func() {
+		out = captureStdout(t, func() {
+			sendErr = sendMessageViaConversation(hubCtx, ref, "please review", false, false, nil)
+		})
+	})
+	require.NoError(t, sendErr)
+
+	var resp hubclient.MessageResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp), "stdout: %s", out)
+	assert.Equal(t, wantMsgID, resp.MessageID)
+	assert.Equal(t, wantWarn, resp.ArtifactWarning)
+	assert.NotContains(t, errOut, wantWarn)
+}
+
 // TestConvRef_ThreadRefAccepted verifies that #<thread> references are
 // accepted and routed through sendMessageViaConversation.
 // DEF-138 P-4 opened the gate that previously rejected these.

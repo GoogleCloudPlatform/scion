@@ -75,7 +75,7 @@ func (s *Server) prepareChoicePromptSend(w http.ResponseWriter, agentID string, 
 	decisionsInput := req.Decisions
 	decisionsUpdate := req.DecisionsUpdate
 
-	// legacy choices fallback: remove in follow-up filed with ptone/scion#8225
+	// legacy choices fallback: remove in ptone/scion#8249
 	if req.Choices != nil && req.Decisions != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"cannot specify both decisions and legacy choices",

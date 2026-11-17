@@ -136,8 +136,6 @@ var interactiveOnlyCommands = map[string]string{
 	"scion server start":              "it runs a long-running server process",
 	"scion server stop":               "it manages a server process",
 	"scion server status":             "it manages a server process",
-	"scion message":                   "it is used for internal agent messaging",
-	"scion msg":                       "it is used for internal agent messaging",
 	"scion cdw":                       "it is a shell integration command",
 	"scion hub auth login":            "it requires interactive browser authentication",
 	"scion hub auth logout":           "it manages authentication state",

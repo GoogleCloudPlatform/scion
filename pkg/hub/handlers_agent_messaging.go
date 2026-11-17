@@ -105,7 +105,7 @@ type OutboundMessageRequest struct {
 	// exist (a new version each). Valid only with Decisions.
 	DecisionsUpdate bool `json:"decisions_update,omitempty"`
 
-	// legacy choices fallback: remove in follow-up filed with ptone/scion#8225
+	// legacy choices fallback: remove in ptone/scion#8249
 	Choices       []messages.DecisionInput `json:"choices,omitempty"`
 	ChoicesUpdate bool                     `json:"choices_update,omitempty"`
 

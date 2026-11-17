@@ -31,7 +31,7 @@ var decisionsClientFactory = func() (hubclient.Client, error) {
 	return client, err
 }
 
-// decisionsCmd is the top-level command group for choice decision self-service.
+// decisionsCmd is the top-level command group for decision self-service.
 var decisionsCmd = newDecisionsCmd()
 
 func newDecisionsCmd() *cobra.Command {

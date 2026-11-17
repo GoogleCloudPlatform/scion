@@ -74,7 +74,7 @@ var windowsAllowed = map[string]bool{
 	"conversation.group.add":    true,
 	"conversation.group.remove": true,
 
-	// Choice decisions (ptone/scion#7797, decision Q1): pure Hub API calls,
+	// Decisions (ptone/scion#7797, decision Q1): pure Hub API calls,
 	// no local writes.
 	"decisions":        true,
 	"decisions.list":   true,
