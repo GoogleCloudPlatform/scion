@@ -22,7 +22,7 @@
 - **Store schema, candidate query, and claim/delivery handshake (`pkg/ent`, `pkg/store`, `pkg/store/entadapter`):**
   - Added two additive nullable columns on `agents`: `last_delivery_at` and
     `idle_suspend_claim_until` (`json:"-"`; no `DowngradeFloor` bump).
-  - Allocated singleton advisory lock `LockAgentIdleSuspend` (`0x5C10001D`) and added
+  - Allocated singleton advisory lock `LockAgentIdleSuspend` (`0x5C100030`) and added
     `ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, after, limit)`,
     selecting non-deleted `running` agents with a suspend-eligible activity, non-null
     `activity_since < cutoff`, non-null `last_seen >= heartbeatRecency`, and
@@ -40,10 +40,14 @@
     in `running`, `stopping`, `stopped`, or `error` (including non-zero exits and multi-replica
     post-stop broker heartbeats) conditioned on the same `run_id`, the exact unexpired `claimUntil`
     lease, `run_intent=stopped` (never `stop-queued`), and no delete/reincarnation/foreign start
-    claim (every user stop, stop-all, suspend, start/stop claim, reincarnation, or deletion clears
-    `idle_suspend_claim_until` in the same write), restoring `RetainedActivity` (`idle`, `completed`,
-    or `harness_error`) alongside `suspend_reason=idle` and never reverting `run_intent` to
-    `running`. Post-stop commit failure, hub crash, and stop-timeout recovery are deferred to
+    claim. Only explicit user lifecycle actions (`SwapRunIntent` for user `stop` / `stop-all` /
+    `suspend` / `delete`, explicit user `ClaimAgentStart` for `start` / `restart`, reincarnation,
+    and deletion) preempt an active `idle_suspend_claim_until`; every background or system writer
+    across replicas (`SwapSystemRunIntent`, `IfNoActiveIdleClaim`, `ClaimAgentStop`,
+    `ConvertUnconfirmedToStop`, `ClaimAgentStart(Wake|Recovery)`, and late launch-failure reports)
+    preserves or yields to an active claim, restoring `RetainedActivity` (`idle`, `completed`, or
+    `harness_error`) alongside `suspend_reason=idle` and never reverting `run_intent` to `running`.
+    Post-stop commit failure, hub crash, and stop-timeout recovery are deferred to
     `ptone/scion#8204` (do not set `server.hub.auto_suspend_idle` with `lifecycle.idle_suspend` on
     in production until `ptone/scion#8204` lands; noted in `pkg/experiments/registry.go`,
     `docs-site/src/content/docs/reference/experiments.md`, and the `autoSuspendAgent` commit point).
@@ -77,15 +81,20 @@
     `errAgentIdleSuspending` / `errDeliveryMarkFailed` as deferrable (keeping or returning rows to
     `awaiting_session` for a later re-drive without waking); `holdOrDispatch` passes pre-dispatch
     `errAgentIdleSuspending` and `errDeliveryMarkFailed` straight through without creating or
-    joining a session hold and refreshes `hold_launch_id` after synchronous auto-wake; and both
-    `TestMessageDispatchCallsMarkAgentDelivery` and `TestHoldOrDispatchCallSites` enforce that
-    persisted dispatches pass through both gates.
+    joining a session hold and refreshes `hold_launch_id` after synchronous auto-wake; existing
+    `awaiting_session` held rows survive an active idle-suspend claim, post-stop runtime reports,
+    and resting `phase=suspended, suspend_reason=idle`, rebind `hold_launch_id` to the resumed
+    `RunID` (`RebindHeldMessagesLaunch`) on manual resume or incoming-DM auto-wake so FIFO re-drive
+    completes once the resumed session connects; and both `TestMessageDispatchCallsMarkAgentDelivery`
+    and `TestHoldOrDispatchCallSites` enforce that persisted dispatches pass through both gates.
 - **Phase 2b review follow-ups folded into phase 3:**
   - **Hub-to-user suspension conversion (`convertHubSuspendToUser`):** gated on
     `lifecycle.idle_suspend`, `POST /api/v1/agents/{id}/suspend` on an `idle`- or
     `stalled`-suspended agent rewrites `suspend_reason` to `user` in place (`IfPhase: suspended`,
-    `IfNoStartClaim: true`, `IfAutoWakeReason: true`, no runtime broker action), refusing with
-    `409 Conflict` when a start claim, idle-suspend claim, or lifecycle op is in flight.
+    `IfNoStartClaim: true`, `IfNoActiveIdleClaim: true`, `IfAutoWakeReason: true`, no runtime
+    broker action), expiring any `awaiting_session` held messages preserved across `suspended(idle)`
+    and refusing with `409 Conflict` when a start claim, idle-suspend claim, or lifecycle op is in
+    flight.
   - **Group-send auto-wake hint (`groupMemberDeliverableError`):** when a `group[]` message
     encounters a suspended member (or one mid-idle-suspend) with `lifecycle.idle_suspend` enabled
     and an auto-waking reason, the refusal directs the sender to message it directly without
