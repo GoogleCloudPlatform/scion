@@ -115,3 +115,56 @@ func TestStoredMessageDispatch(t *testing.T) {
 		}
 	})
 }
+
+func TestShouldTranslateHeldWebMentions(t *testing.T) {
+	base := func() *store.Message {
+		return &store.Message{
+			ID:        uuid.NewString(),
+			ProjectID: uuid.NewString(),
+			Sender:    "user:owner@example.com",
+			SenderID:  uuid.NewString(),
+			Recipient: "agent:worker",
+			Msg:       "Please ask @alice-smith",
+			Type:      messages.TypeInstruction,
+			Channel:   "web",
+		}
+	}
+
+	assert.True(t, shouldTranslateHeldWebMentions(base()))
+
+	replyRow := base()
+	replyRow.Type = messages.TypeReply
+	assert.True(t, shouldTranslateHeldWebMentions(replyRow))
+
+	mentionRow := base()
+	mentionRow.Type = messages.TypeMention
+	assert.True(t, shouldTranslateHeldWebMentions(mentionRow))
+
+	cases := []struct {
+		name   string
+		mutate func(*store.Message)
+	}{
+		{name: "nil row", mutate: nil},
+		{name: "no @ in body", mutate: func(m *store.Message) { m.Msg = "plain prose without mentions" }},
+		{name: "decision response", mutate: func(m *store.Message) { m.Type = messages.TypeDecisionResponse }},
+		{name: "non-web channel", mutate: func(m *store.Message) { m.Channel = "discord" }},
+		{name: "empty channel", mutate: func(m *store.Message) { m.Channel = "" }},
+		{name: "agent sender", mutate: func(m *store.Message) { m.Sender = "agent:peer" }},
+		{name: "empty sender id", mutate: func(m *store.Message) { m.SenderID = "" }},
+		{name: "scheduled event", mutate: func(m *store.Message) { m.ScheduledEventID = uuid.NewString() }},
+		{name: "delegated grant", mutate: func(m *store.Message) { m.DelegationGrantID = uuid.NewString() }},
+		{name: "authorizing user", mutate: func(m *store.Message) { m.AuthorizingUserID = uuid.NewString() }},
+		{name: "empty project id", mutate: func(m *store.Message) { m.ProjectID = "" }},
+		{name: "nil uuid project id", mutate: func(m *store.Message) { m.ProjectID = uuid.Nil.String() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var row *store.Message
+			if tc.mutate != nil {
+				row = base()
+				tc.mutate(row)
+			}
+			assert.False(t, shouldTranslateHeldWebMentions(row))
+		})
+	}
+}

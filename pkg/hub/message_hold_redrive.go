@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // Fixed failure reasons for held messages (ptone/scion#7881, A2-S8, OPT-5).
@@ -726,6 +727,7 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 
 	claimCtx := store.WithRedriveLeaseOwner(ctx, leaseOwner)
 	var pendingSettleIDs []string
+	humanMembersByProject := make(map[string][]chatMemberEntry)
 
 	for {
 		if ctx.Err() != nil || !s.conduitDeliverEnabled() {
@@ -764,7 +766,7 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 				}
 			}
 			row := &claimed[i]
-			outcome := s.processClaimedHeldRow(ctx, dispatcher, agentID, row)
+			outcome := s.processClaimedHeldRow(ctx, dispatcher, agentID, row, humanMembersByProject)
 			switch outcome {
 			case claimedRowDispatched:
 				pendingSettleIDs = append(pendingSettleIDs, row.ID)
@@ -825,6 +827,7 @@ func (s *Server) processClaimedHeldRow(
 	dispatcher AgentDispatcher,
 	agentID string,
 	row *store.Message,
+	humanMembersByProject map[string][]chatMemberEntry,
 ) claimedRowOutcome {
 	if ctx.Err() != nil {
 		s.reholdOrFailClaimedRow(ctx, agentID, row)
@@ -876,6 +879,17 @@ func (s *Server) processClaimedHeldRow(
 		if choiceFailReason != "" {
 			s.failClaimedHeldMessage(ctx, target, row, choiceFailReason)
 			return claimedRowFailed
+		}
+	} else if shouldTranslateHeldWebMentions(row) {
+		if mentionTransientErr := s.enrichHeldWebMentions(ctx, row, sm, humanMembersByProject); mentionTransientErr != nil || ctx.Err() != nil {
+			errToLog := mentionTransientErr
+			if errToLog == nil {
+				errToLog = ctx.Err()
+			}
+			slog.Warn("message-hold: transient error resolving project human mentions; re-holding row",
+				"agent_id", agentID, "message_id", row.ID, "error", errToLog)
+			s.reholdOrFailClaimedRow(ctx, agentID, row)
+			return claimedRowReheldTransient
 		}
 	}
 
@@ -958,6 +972,57 @@ func (s *Server) reholdOrFailClaimedRow(ctx context.Context, agentID string, row
 		}
 	}
 	s.failClaimedHeldMessage(finCtx, target, row, reason)
+}
+
+// shouldTranslateHeldWebMentions reports whether a stored message row came from
+// a project-scoped human web send whose live dispatch runs
+// translateMentionsOutbound (ptone/scion#8212): sendAgentRouted stores the
+// human-facing @display-slug form in row.Msg while dispatching @email to
+// agents, so held web rows must re-derive the agent-facing @email text before
+// RenderDeliveryText and broker dispatch without altering row.Msg.
+func shouldTranslateHeldWebMentions(row *store.Message) bool {
+	if row == nil || row.Type == messages.TypeDecisionResponse {
+		return false
+	}
+	if row.Channel != "web" || !strings.HasPrefix(row.Sender, "user:") || row.SenderID == "" {
+		return false
+	}
+	if row.ScheduledEventID != "" || row.DelegationGrantID != "" || row.AuthorizingUserID != "" {
+		return false
+	}
+	if row.ProjectID == "" || row.ProjectID == uuid.Nil.String() {
+		return false
+	}
+	return strings.Contains(row.Msg, "@")
+}
+
+func (s *Server) enrichHeldWebMentions(
+	ctx context.Context,
+	row *store.Message,
+	sm *messages.StructuredMessage,
+	cache map[string][]chatMemberEntry,
+) error {
+	var (
+		members []chatMemberEntry
+		ok      bool
+	)
+	if cache != nil {
+		members, ok = cache[row.ProjectID]
+	}
+	if !ok {
+		var err error
+		members, err = s.projectHumanMembersStrict(ctx, row.ProjectID)
+		if err != nil {
+			return fmt.Errorf("project human members lookup: %w", err)
+		}
+		if cache != nil {
+			cache[row.ProjectID] = members
+		}
+	}
+	if len(members) > 0 {
+		sm.Msg = translateMentionsOutbound(sm.Msg, members)
+	}
+	return nil
 }
 
 func (s *Server) enrichHeldChoiceResponse(
