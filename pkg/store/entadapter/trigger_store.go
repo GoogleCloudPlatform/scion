@@ -56,14 +56,18 @@ func (s *TriggerStore) LockTriggerQuota(ctx context.Context, projectID string) e
 	if !s.inTx {
 		return fmt.Errorf("%w: LockTriggerQuota must be called inside WithTx", store.ErrInvalidInput)
 	}
+	return lockTriggerQuotaClient(ctx, s.client, projectID)
+}
+
+func lockTriggerQuotaClient(ctx context.Context, client *ent.Client, projectID string) error {
 	if _, err := parseUUID(projectID); err != nil {
 		return err
 	}
-	if !isPostgres(s.client) {
+	if !isPostgres(client) {
 		return nil
 	}
 	var res sql.Result
-	if err := s.client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
+	if err := client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
 		[]any{int32(store.LockTriggerQuota), store.StableProjectHash(projectID)}, &res); err != nil {
 		return fmt.Errorf("lock trigger quota: %w", err)
 	}
@@ -334,6 +338,9 @@ func (s *TriggerStore) DeleteWebhookEndpoint(ctx context.Context, projectID, id 
 		deletedSecretKeys []string
 	)
 	err = s.withClientTx(ctx, func(client *ent.Client) error {
+		if lErr := lockTriggerQuotaClient(ctx, client, pid.String()); lErr != nil {
+			return lErr
+		}
 		ep, getErr := client.WebhookEndpoint.Get(ctx, uid)
 		if getErr != nil {
 			return mapError(getErr)

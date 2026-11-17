@@ -322,6 +322,9 @@ func (s *Server) deleteWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 	audit.BeforeSummary = string(beforeBytes)
 
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
+			return lErr
+		}
 		pausedTriggerIDs, _, dErr := tx.DeleteWebhookEndpoint(ctx, projectID, ep.ID)
 		if dErr != nil {
 			return dErr

@@ -1401,3 +1401,270 @@ func TestTriggersAndWebhookEndpoints_RejectControlAndFormatCharactersInNames(t *
 		assert.Equal(t, http.StatusBadRequest, badDescPatch.Code, "trigger description PATCH with %q must fail validation", bad)
 	}
 }
+
+type triggerTxOrderRecorder struct {
+	store.Store
+	fault    *storeFaultSwitch
+	mu       sync.Mutex
+	beforeTx func()
+	ops      [][]string
+}
+
+func (r *triggerTxOrderRecorder) reset(beforeTx func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.beforeTx = beforeTx
+	r.ops = nil
+}
+
+func (r *triggerTxOrderRecorder) recordedOps() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]string, len(r.ops))
+	for i, s := range r.ops {
+		cp := make([]string, len(s))
+		copy(cp, s)
+		out[i] = cp
+	}
+	return out
+}
+
+func (r *triggerTxOrderRecorder) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if r.fault != nil && !r.fault.Active() {
+		return r.Store.WithTx(ctx, fn)
+	}
+	r.mu.Lock()
+	hook := r.beforeTx
+	r.beforeTx = nil
+	r.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+
+	var txOps []string
+	err := r.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&triggerTxOrderTx{Store: tx, ops: &txOps})
+	})
+	r.mu.Lock()
+	r.ops = append(r.ops, txOps)
+	r.mu.Unlock()
+	return err
+}
+
+type triggerTxOrderTx struct {
+	store.Store
+	ops *[]string
+}
+
+func (t *triggerTxOrderTx) LockTriggerQuota(ctx context.Context, projectID string) error {
+	*t.ops = append(*t.ops, "LockTriggerQuota")
+	return t.Store.LockTriggerQuota(ctx, projectID)
+}
+
+func (t *triggerTxOrderTx) GetWebhookEndpoint(ctx context.Context, id string) (*store.WebhookEndpoint, error) {
+	*t.ops = append(*t.ops, "GetWebhookEndpoint")
+	return t.Store.GetWebhookEndpoint(ctx, id)
+}
+
+func (t *triggerTxOrderTx) DeleteWebhookEndpoint(ctx context.Context, projectID, id string) ([]string, []string, error) {
+	*t.ops = append(*t.ops, "DeleteWebhookEndpoint")
+	return t.Store.DeleteWebhookEndpoint(ctx, projectID, id)
+}
+
+func (t *triggerTxOrderTx) CreateTrigger(ctx context.Context, trigger *store.Trigger) error {
+	*t.ops = append(*t.ops, "CreateTrigger")
+	return t.Store.CreateTrigger(ctx, trigger)
+}
+
+func (t *triggerTxOrderTx) UpdateTrigger(ctx context.Context, trigger *store.Trigger, fields store.TriggerFieldMask, expectedRevision int, expectedRevisionKnown bool, newAttribution *store.InitiatorAttribution) error {
+	*t.ops = append(*t.ops, "UpdateTrigger")
+	return t.Store.UpdateTrigger(ctx, trigger, fields, expectedRevision, expectedRevisionKnown, newAttribution)
+}
+
+func assertOpOrder(t *testing.T, txOps []string, first, second string) {
+	t.Helper()
+	firstIdx, secondIdx := -1, -1
+	for i, op := range txOps {
+		if op == first && firstIdx == -1 {
+			firstIdx = i
+		}
+		if op == second && secondIdx == -1 {
+			secondIdx = i
+		}
+	}
+	require.NotEqual(t, -1, firstIdx, "expected %s in tx ops %v", first, txOps)
+	require.NotEqual(t, -1, secondIdx, "expected %s in tx ops %v", second, txOps)
+	assert.Less(t, firstIdx, secondIdx, "expected %s before %s in tx ops %v", first, second, txOps)
+}
+
+func TestTriggers_EndpointDeleteRaceOrdering(t *testing.T) {
+	srv, baseStore, recStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *triggerTxOrderRecorder {
+		return &triggerTxOrderRecorder{Store: inner, fault: f}
+	})
+	f := setupTriggersTestFixtureOnServer(t, srv, recStore)
+	fault.Arm()
+	ctx := context.Background()
+
+	// Capture reference 404 JSON from an unknown endpoint ID.
+	refNotFoundRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "ref-missing-ep",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: api.NewUUID()},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusNotFound, refNotFoundRec.Code)
+	refNotFoundBody := refNotFoundRec.Body.String()
+
+	createEndpoint := func(t *testing.T, name string) WebhookEndpointCreatedResponse {
+		t.Helper()
+		rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: name})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var ep WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ep))
+		return ep
+	}
+
+	t.Run("delete_endpoint_locks_quota_first", func(t *testing.T) {
+		ep := createEndpoint(t, "race-del-order-ep")
+		recStore.reset(nil)
+		delRec := f.doWebhookEndpoint(t, f.ownerAuth, ep.ID, http.MethodDelete, nil)
+		require.Equal(t, http.StatusNoContent, delRec.Code)
+		ops := recStore.recordedOps()
+		require.Len(t, ops, 1)
+		assertOpOrder(t, ops[0], "LockTriggerQuota", "DeleteWebhookEndpoint")
+	})
+
+	t.Run("create_trigger_locks_before_reread_and_refuses_when_delete_commits_first", func(t *testing.T) {
+		ep := createEndpoint(t, "race-create-del-ep")
+		recStore.reset(func() {
+			// Concurrent DELETE commits after pre-tx resolveTriggerWebhookSource succeeded.
+			delRec := f.doWebhookEndpoint(t, f.ownerAuth, ep.ID, http.MethodDelete, nil)
+			require.Equal(t, http.StatusNoContent, delRec.Code)
+		})
+
+		createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   "race-create-tr",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusNotFound, createRec.Code, createRec.Body.String())
+		assert.JSONEq(t, refNotFoundBody, createRec.Body.String())
+
+		ops := recStore.recordedOps()
+		require.Len(t, ops, 2, "expected inner delete tx then outer create tx: %v", ops)
+		assertOpOrder(t, ops[0], "LockTriggerQuota", "DeleteWebhookEndpoint")
+		assertOpOrder(t, ops[1], "LockTriggerQuota", "GetWebhookEndpoint")
+
+		activeCount, err := baseStore.CountTriggers(ctx, store.TriggerFilter{
+			ProjectID: f.projectID,
+			SourceID:  ep.ID,
+			Status:    store.TriggerStatusActive,
+		})
+		require.NoError(t, err)
+		assert.Zero(t, activeCount, "delete committed first must leave zero active triggers")
+	})
+
+	t.Run("create_trigger_refuses_when_endpoint_disabled_before_tx", func(t *testing.T) {
+		ep := createEndpoint(t, "race-create-disabled-ep")
+		recStore.reset(func() {
+			_, uErr := baseStore.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+				"UPDATE webhook_endpoints SET status = ? WHERE id = ?",
+				store.WebhookEndpointStatusDisabled, ep.ID)
+			require.NoError(t, uErr)
+		})
+
+		createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   "race-disabled-tr",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusNotFound, createRec.Code, createRec.Body.String())
+		assert.JSONEq(t, refNotFoundBody, createRec.Body.String())
+
+		ops := recStore.recordedOps()
+		require.Len(t, ops, 1)
+		assertOpOrder(t, ops[0], "LockTriggerQuota", "GetWebhookEndpoint")
+
+		activeCount, err := baseStore.CountTriggers(ctx, store.TriggerFilter{
+			ProjectID: f.projectID,
+			SourceID:  ep.ID,
+			Status:    store.TriggerStatusActive,
+		})
+		require.NoError(t, err)
+		assert.Zero(t, activeCount)
+	})
+
+	t.Run("resume_trigger_locks_before_reread_and_refuses_when_delete_commits_first", func(t *testing.T) {
+		ep := createEndpoint(t, "race-resume-del-ep")
+		trRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   "race-resume-tr",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+		var tr TriggerResponse
+		require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &tr))
+
+		pauseRec := f.doTrigger(t, f.ownerAuth, tr.ID+"/pause", http.MethodPost, nil)
+		require.Equal(t, http.StatusOK, pauseRec.Code)
+
+		recStore.reset(func() {
+			delRec := f.doWebhookEndpoint(t, f.ownerAuth, ep.ID, http.MethodDelete, nil)
+			require.Equal(t, http.StatusNoContent, delRec.Code)
+		})
+
+		resumeRec := f.doTrigger(t, f.ownerAuth, tr.ID+"/resume", http.MethodPost, nil)
+		require.Equal(t, http.StatusNotFound, resumeRec.Code, resumeRec.Body.String())
+		assert.JSONEq(t, refNotFoundBody, resumeRec.Body.String())
+
+		ops := recStore.recordedOps()
+		require.Len(t, ops, 2)
+		assertOpOrder(t, ops[0], "LockTriggerQuota", "DeleteWebhookEndpoint")
+		assertOpOrder(t, ops[1], "LockTriggerQuota", "GetWebhookEndpoint")
+
+		stored, err := baseStore.GetTrigger(ctx, tr.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.TriggerStatusPaused, stored.Status)
+		assert.Equal(t, store.TriggerStatusReasonSourceDeleted, stored.StatusReason)
+	})
+
+	t.Run("source_patch_locks_before_reread_and_refuses_when_delete_commits_first", func(t *testing.T) {
+		ep1 := createEndpoint(t, "race-patch-ep1")
+		ep2 := createEndpoint(t, "race-patch-ep2")
+		trRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   "race-patch-tr",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep1.ID},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+		var tr TriggerResponse
+		require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &tr))
+
+		recStore.reset(func() {
+			delRec := f.doWebhookEndpoint(t, f.ownerAuth, ep2.ID, http.MethodDelete, nil)
+			require.Equal(t, http.StatusNoContent, delRec.Code)
+		})
+
+		patchRec := f.doTrigger(t, f.ownerAuth, tr.ID, http.MethodPatch, UpdateTriggerRequest{
+			Source: &TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep2.ID},
+		})
+		require.Equal(t, http.StatusNotFound, patchRec.Code, patchRec.Body.String())
+		assert.JSONEq(t, refNotFoundBody, patchRec.Body.String())
+
+		ops := recStore.recordedOps()
+		require.Len(t, ops, 2)
+		assertOpOrder(t, ops[0], "LockTriggerQuota", "DeleteWebhookEndpoint")
+		assertOpOrder(t, ops[1], "LockTriggerQuota", "GetWebhookEndpoint")
+
+		activeOnDeleted, err := baseStore.CountTriggers(ctx, store.TriggerFilter{
+			ProjectID: f.projectID,
+			SourceID:  ep2.ID,
+			Status:    store.TriggerStatusActive,
+		})
+		require.NoError(t, err)
+		assert.Zero(t, activeOnDeleted, "delete committed first must leave zero active triggers on deleted target endpoint")
+
+		stored, err := baseStore.GetTrigger(ctx, tr.ID)
+		require.NoError(t, err)
+		assert.Equal(t, ep1.ID, stored.SourceID)
+	})
+}

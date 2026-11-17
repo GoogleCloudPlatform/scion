@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,9 +39,27 @@ const (
 )
 
 var (
-	errTriggerProjectLimitExceeded = errors.New("project trigger limit exceeded")
-	errTriggerSourceLimitExceeded  = errors.New("source active trigger limit exceeded")
+	errTriggerProjectLimitExceeded  = errors.New("project trigger limit exceeded")
+	errTriggerSourceLimitExceeded   = errors.New("source active trigger limit exceeded")
+	errTriggerWebhookSourceNotFound = errors.New("trigger webhook endpoint source not found")
 )
+
+// verifyActiveWebhookSourceInTx re-reads the resolved webhook endpoint inside
+// WithTx (after LockTriggerQuota) so a concurrent DELETE or status disable
+// cannot leave an active trigger pointing at a deleted/disabled endpoint.
+func verifyActiveWebhookSourceInTx(ctx context.Context, tx store.Store, projectID, endpointID string) error {
+	ep, err := tx.GetWebhookEndpoint(ctx, endpointID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return errTriggerWebhookSourceNotFound
+		}
+		return err
+	}
+	if ep == nil || ep.ProjectID != projectID || ep.Status != store.WebhookEndpointStatusActive {
+		return errTriggerWebhookSourceNotFound
+	}
+	return nil
+}
 
 // CreateTriggerRequest is the request body for POST /triggers.
 type CreateTriggerRequest struct {
@@ -377,6 +396,9 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 			return lErr
 		}
+		if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, trigger.SourceID); vErr != nil {
+			return vErr
+		}
 		if sErr := stampTrigger(ctx, tx, &trigger, fp); sErr != nil {
 			return sErr
 		}
@@ -406,6 +428,8 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 			return
 		}
 		switch {
+		case errors.Is(err, errTriggerWebhookSourceNotFound):
+			writeWebhookEndpointNotFound(w)
 		case errors.Is(err, errTriggerProjectLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("project has reached the maximum of %d triggers", store.MaxTriggersPerProject), nil)
@@ -687,28 +711,35 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
-		if tr.Status == store.TriggerStatusActive &&
-			(tr.SourceID != oldSourceID || tr.SourceKind != oldSourceKind) {
+		if changesFutureDispatch {
 			if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 				return lErr
 			}
-			srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
-				ProjectID:  projectID,
-				SourceKind: tr.SourceKind,
-				SourceID:   tr.SourceID,
-				Status:     store.TriggerStatusActive,
-			})
-			if cErr != nil {
-				return cErr
+			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID); vErr != nil {
+				return vErr
 			}
-			if srcCount >= store.MaxActiveTriggersPerSource {
-				return errTriggerSourceLimitExceeded
+			if tr.Status == store.TriggerStatusActive &&
+				(tr.SourceID != oldSourceID || tr.SourceKind != oldSourceKind) {
+				srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
+					ProjectID:  projectID,
+					SourceKind: tr.SourceKind,
+					SourceID:   tr.SourceID,
+					Status:     store.TriggerStatusActive,
+				})
+				if cErr != nil {
+					return cErr
+				}
+				if srcCount >= store.MaxActiveTriggersPerSource {
+					return errTriggerSourceLimitExceeded
+				}
 			}
 		}
 		return tx.UpdateTrigger(ctx, tr, fields, prevRevision, prevRevisionKnown, newAttr)
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, errTriggerWebhookSourceNotFound):
+			writeWebhookEndpointNotFound(w)
 		case errors.Is(err, store.ErrRevisionConflict):
 			writeError(w, http.StatusConflict, ErrCodeRevisionConflict,
 				"trigger was concurrently modified; refresh and retry", nil)
@@ -811,6 +842,9 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 			return lErr
 		}
+		if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID); vErr != nil {
+			return vErr
+		}
 		srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
 			ProjectID:  projectID,
 			SourceKind: tr.SourceKind,
@@ -827,6 +861,8 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, errTriggerWebhookSourceNotFound):
+			writeWebhookEndpointNotFound(w)
 		case errors.Is(err, store.ErrRevisionConflict):
 			writeError(w, http.StatusConflict, ErrCodeRevisionConflict,
 				"trigger was concurrently modified; refresh and retry", nil)
