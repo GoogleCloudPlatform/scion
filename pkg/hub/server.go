@@ -7188,9 +7188,12 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 
 	if recorded {
 		if detachedFire {
-			// Claim wakeFireRun without touching the DB: an admitted exec run
-			// owns its event and schedule accounting (and stays unfinished on
-			// Hub shutdown so the sweeper recovers its real outcome).
+			// Claim wakeFireRun without touching the DB: a detaching action
+			// returning FireOutcome.Detached must own the terminal write itself
+			// (for example, an admitted exec run whose tracker/sweeper owns
+			// event and schedule accounting), because a firing event claimed
+			// with this no-op is not recovered by the shutdown abandon sweep
+			// (recordAbandonedWakeFires).
 			run.tryRecord(func() {})
 		}
 		return

@@ -820,6 +820,37 @@ func TestFireCoreRefusalLogging(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "projectID=project-shim-log")
 }
 
+func TestFireCoreAuthorityMissingRuleDenialText(t *testing.T) {
+	t.Parallel()
+
+	const projectID = "project-missing-rule"
+	ms := newMockStore()
+	srv := newEventHandlerTestServer(ms)
+	rec := newFireCoreTestAuthority(ms, projectID)
+
+	_, _, err := srv.resolveRecordedAuthority(context.Background(), rec, projectID, "")
+	require.ErrorIs(t, err, errScheduledAuthorityDenied)
+	require.ErrorIs(t, err, errNoRecordedAuthorityRule)
+	assert.ErrorContains(t, err, "action has no recorded authority rule")
+
+	evt := store.ScheduledEvent{
+		ID:                    "evt-unmapped",
+		ProjectID:             projectID,
+		EventType:             "unmapped_type",
+		InitiatorAttribution:  rec.Attribution,
+		AuthorityCeiling:      rec.Ceiling,
+		AuthorizationRevision: rec.Attribution.AuthorizationRevision,
+	}
+	_, _, err = srv.resolveScheduledAuthority(context.Background(), evt)
+	require.ErrorIs(t, err, errScheduledAuthorityDenied)
+	assert.ErrorContains(t, err, `event type "unmapped_type" has no scheduled authority rule`)
+
+	// Ceiling consistency still runs before the permission-rule check.
+	evt.AuthorityCeiling = store.EffectCeiling{}
+	_, _, err = srv.resolveScheduledAuthority(context.Background(), evt)
+	require.ErrorIs(t, err, errScheduledAuthorityUnrecorded)
+}
+
 type fireCoreScheduleStore struct {
 	*mockScheduledEventStore
 	advanceCalls        int

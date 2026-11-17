@@ -150,7 +150,11 @@ type ScheduledAuthority = FireAuthority
 // resolveScheduledAuthority forwards to resolveRecordedAuthority.
 // Removed in PR 2 (ptone/scion#8029).
 func (s *Server) resolveScheduledAuthority(ctx context.Context, evt store.ScheduledEvent) (ScheduledAuthority, Identity, error) {
-	return s.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), evt.ProjectID, scheduledEventPermissions[evt.EventType])
+	auth, identity, err := s.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), evt.ProjectID, scheduledEventPermissions[evt.EventType])
+	if errors.Is(err, errNoRecordedAuthorityRule) {
+		return ScheduledAuthority{}, nil, fmt.Errorf("%w: event type %q has no scheduled authority rule", errScheduledAuthorityDenied, evt.EventType)
+	}
+	return auth, identity, err
 }
 
 // scheduledUserAccount applies the account-status rule (checkUserAccount)
