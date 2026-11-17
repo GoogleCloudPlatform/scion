@@ -358,6 +358,9 @@ func (s *Server) ensureGitHubAppIdentity(ctx context.Context) (*githubapp.AppIde
 
 	s.githubAppIdentity.refreshMu.Lock()
 	defer s.githubAppIdentity.refreshMu.Unlock()
+	// Retry once if a concurrent App config reset (generation counter bump)
+	// discarded the in-flight result, leaving checkedAt zero. Ordinary GET /app
+	// failures set checkedAt and are cached deliberately without retrying.
 	for attempt := 0; attempt < 2; attempt++ {
 		cfg, hasPrivateKey, _ = s.githubAppCredentialPresence(ctx)
 		if cfg.AppID == 0 || !hasPrivateKey {

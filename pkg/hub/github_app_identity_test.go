@@ -393,6 +393,134 @@ func TestGitHubAppIdentity_StartupAndLazyPopulation(t *testing.T) {
 	})
 }
 
+func TestGitHubAppIdentity_LazyFetchRetryAndFailureCaching(t *testing.T) {
+	t.Run("failure_cached_without_second_get_app", func(t *testing.T) {
+		mockGH := newMockAppEndpoint(t, http.StatusBadGateway, `{"message":"bad gateway"}`)
+
+		srv, _ := testServer(t)
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig = GitHubAppServerConfig{
+			AppID:      42,
+			PrivateKey: testGitHubAppPrivateKeyPEM(t),
+			APIBaseURL: mockGH.server.URL,
+		}
+		srv.mu.Unlock()
+
+		ctx := context.Background()
+		id, checkedAt, lastErr := srv.ensureGitHubAppIdentity(ctx)
+		if id != nil {
+			t.Fatalf("expected nil identity on GET /app failure, got %+v", id)
+		}
+		if checkedAt.IsZero() {
+			t.Fatal("expected non-zero checkedAt when GET /app failure is cached")
+		}
+		if lastErr == "" {
+			t.Fatal("expected cached content-free error message on GET /app failure")
+		}
+		if got := mockGH.hits.Load(); got != 1 {
+			t.Fatalf("expected ordinary failure to be cached without retry (1 GET /app), got %d", got)
+		}
+
+		// Follow-up lazy lookups read the cached failure rather than issuing a second GET /app.
+		if _, ok := srv.GitHubAppIdentity(ctx); ok {
+			t.Fatal("expected cached failure to return ok=false")
+		}
+		if got := mockGH.hits.Load(); got != 1 {
+			t.Fatalf("expected no second GET /app after cached failure, got %d", got)
+		}
+	})
+
+	t.Run("generation_change_mid_flight_retried_once", func(t *testing.T) {
+		ctx := context.Background()
+
+		enteredOld := make(chan struct{}, 1)
+		releaseOld := make(chan struct{})
+		var oldHits atomic.Int64
+		oldGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/app" || r.Method != http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			oldHits.Add(1)
+			select {
+			case enteredOld <- struct{}{}:
+			default:
+			}
+			<-releaseOld
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"slug":"stale-old-app","events":["issues"]}`))
+		}))
+		t.Cleanup(func() {
+			select {
+			case <-releaseOld:
+			default:
+				close(releaseOld)
+			}
+			oldGH.Close()
+		})
+
+		newGH := newMockAppEndpoint(t, http.StatusOK, map[string]any{
+			"id":     42,
+			"slug":   "retried-after-reset",
+			"events": []string{"pull_request"},
+		})
+
+		srv, _ := testServer(t)
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig = GitHubAppServerConfig{
+			AppID:      42,
+			PrivateKey: testGitHubAppPrivateKeyPEM(t),
+			APIBaseURL: oldGH.URL,
+		}
+		srv.mu.Unlock()
+
+		var (
+			gotID *githubapp.AppIdentity
+			gotOK bool
+			wg    sync.WaitGroup
+		)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			gotID, gotOK = srv.GitHubAppIdentity(ctx)
+		}()
+
+		select {
+		case <-enteredOld:
+		case <-time.After(5 * time.Second):
+			t.Fatal("lazy GET /app attempt 0 against oldGH never started")
+		}
+
+		// Reset App config (bumps generation) while ensureGitHubAppIdentity's
+		// first attempt is still in flight.
+		newURL := newGH.server.URL
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/github-app", GitHubAppConfigUpdateRequest{
+			APIBaseURL: &newURL,
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT /api/v1/github-app failed: %d %s", rec.Code, rec.Body.String())
+		}
+
+		// Release attempt 0; its stale result is discarded (checkedAt stays zero)
+		// and the same ensureGitHubAppIdentity call retries once against newGH.
+		close(releaseOld)
+		wg.Wait()
+
+		if !gotOK || gotID == nil {
+			t.Fatal("expected in-flight lazy identity fetch to retry once after generation change")
+		}
+		if gotID.Slug != "retried-after-reset" {
+			t.Fatalf("got slug %q, want %q", gotID.Slug, "retried-after-reset")
+		}
+		if got := oldHits.Load(); got != 1 {
+			t.Errorf("expected 1 GET /app to oldGH, got %d", got)
+		}
+		if got := newGH.hits.Load(); got != 1 {
+			t.Errorf("expected 1 retry GET /app to newGH, got %d", got)
+		}
+	})
+}
+
 func TestGitHubAppIdentity_SyncPermissionsAndHealthCheckShareSingleGetApp(t *testing.T) {
 	mockGH := newMockAppEndpoint(t, http.StatusOK, map[string]any{
 		"id":     42,
