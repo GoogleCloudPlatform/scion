@@ -54,7 +54,8 @@ const (
 	MessageDenialAttachmentNotFound              MessageDenialCode = "attachment_not_found"
 	MessageDenialAttachmentUnauthorized          MessageDenialCode = "attachment_unauthorized"
 	MessageDenialDeliveryDuplicate               MessageDenialCode = "delivery_duplicate" // reserved: delivery deduplication guard
-	MessageDenialPolicyRejected                  MessageDenialCode = "message_policy_rejected"
+
+	MessageDenialPolicyRejected MessageDenialCode = "message_policy_rejected"
 )
 
 // MessageDecision captures the outcome of an agent message authorization
