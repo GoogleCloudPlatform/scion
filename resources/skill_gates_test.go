@@ -408,3 +408,34 @@ func TestPlatformSkillsFS_ScionArtifacts(t *testing.T) {
 		t.Errorf("scion-messaging/SKILL.md has %d %s blocks (pointer found: %v), want 1 pointing to the scion-artifacts skill", blocks, experiments.Artifacts, pointer)
 	}
 }
+
+// TestPlatformSkillsFS_ScionMessagingMessagePolicies pins that the
+// scion-messaging message_policy_rejected paragraph is gated on
+// hub.message_policies so agents on hubs without the experiment are not told
+// to run scion message-policy list/get.
+func TestPlatformSkillsFS_ScionMessagingMessagePolicies(t *testing.T) {
+	data, err := fs.ReadFile(PlatformSkillsFS(), "scion-messaging/SKILL.md")
+	if err != nil {
+		t.Fatalf("reading embedded scion-messaging/SKILL.md: %v", err)
+	}
+	msg := parseSkillMarkdown("scion-messaging/SKILL.md", string(data))
+	blocks, cmdMentioned := 0, false
+	prev := ""
+	for _, l := range msg.lines {
+		if l.gate == experiments.MessagePolicies && prev != experiments.MessagePolicies {
+			blocks++
+		}
+		prev = l.gate
+		if strings.Contains(l.text, "scion message-policy") {
+			cmdMentioned = true
+			if l.gate != experiments.MessagePolicies {
+				t.Errorf("scion-messaging/SKILL.md:%d mentions scion message-policy outside a %s gate: %q",
+					l.n, experiments.MessagePolicies, l.text)
+			}
+		}
+	}
+	if blocks != 1 || !cmdMentioned {
+		t.Errorf("scion-messaging/SKILL.md has %d %s blocks (cmdMentioned=%v), want 1 gating scion message-policy guidance",
+			blocks, experiments.MessagePolicies, cmdMentioned)
+	}
+}

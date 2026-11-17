@@ -153,6 +153,7 @@ var dispatchExperimentNames = []string{
 	experiments.CloudRunEphemeralAgents,
 	experiments.Decisions,
 	experiments.Artifacts,
+	experiments.MessagePolicies,
 }
 
 // dispatchExperiments returns the dispatch experiments that are enabled

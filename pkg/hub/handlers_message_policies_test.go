@@ -450,6 +450,7 @@ func TestMessagePolicyHandlers_AuthoringValidation400s(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, rec.Code, "surface %s: %s", surf, rec.Body.String())
 			apiErr := decodeErr(t, rec)
 			assert.Equal(t, messagepolicy.ErrCodeSurfaceNotCovered, apiErr.Code)
+			assert.ElementsMatch(t, []any{"agent_to_user", "agent_to_conversation"}, apiErr.Details["enforced_surfaces"])
 		}
 
 		agentKind := mphValidCreateBody("uncovered-recip-kind")

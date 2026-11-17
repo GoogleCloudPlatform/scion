@@ -537,7 +537,7 @@ func writeMessagePolicyValidationError(w http.ResponseWriter, err error) {
 	var valErr *messagepolicy.ValidationError
 	if errors.As(err, &valErr) {
 		var details map[string]interface{}
-		if valErr.Field != "" || valErr.Line > 0 || valErr.Column > 0 || valErr.Category != "" {
+		if valErr.Field != "" || valErr.Line > 0 || valErr.Column > 0 || valErr.Category != "" || valErr.Code == messagepolicy.ErrCodeSurfaceNotCovered {
 			details = make(map[string]interface{})
 			if valErr.Field != "" {
 				details["field"] = valErr.Field
@@ -553,6 +553,11 @@ func writeMessagePolicyValidationError(w http.ResponseWriter, err error) {
 				if valErr.Code == messagepolicy.ErrCodeUnsupportedDialect {
 					details["reason"] = valErr.Category
 				}
+			}
+			if valErr.Code == messagepolicy.ErrCodeSurfaceNotCovered {
+				cov := messagepolicy.Coverage()
+				details["enforced_surfaces"] = cov.EnforcedSurfaces
+				details["uncovered_agent_paths"] = cov.UncoveredAgentPaths
 			}
 		}
 		code := valErr.Code
@@ -1100,10 +1105,15 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if !messagepolicy.IsCoveredSurface(surface) {
+		cov := messagepolicy.Coverage()
 		writeError(w, http.StatusBadRequest, messagepolicy.ErrCodeSurfaceNotCovered,
 			fmt.Sprintf("sample.surface %q is not covered; enforced surfaces: %s",
-				surface, strings.Join(messagepolicy.Coverage().EnforcedSurfaces, ", ")),
-			map[string]interface{}{"field": "sample.surface"})
+				surface, strings.Join(cov.EnforcedSurfaces, ", ")),
+			map[string]interface{}{
+				"field":                 "sample.surface",
+				"enforced_surfaces":     cov.EnforcedSurfaces,
+				"uncovered_agent_paths": cov.UncoveredAgentPaths,
+			})
 		return
 	}
 
@@ -1141,9 +1151,14 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		}
 	}
 	if recipient.Kind == "agent" {
+		cov := messagepolicy.Coverage()
 		writeError(w, http.StatusBadRequest, messagepolicy.ErrCodeSurfaceNotCovered,
-			"agent recipients are not covered in M1",
-			map[string]interface{}{"field": "sample.recipient.kind"})
+			"agent recipients are not covered by this Hub",
+			map[string]interface{}{
+				"field":                 "sample.recipient.kind",
+				"enforced_surfaces":     cov.EnforcedSurfaces,
+				"uncovered_agent_paths": cov.UncoveredAgentPaths,
+			})
 		return
 	}
 

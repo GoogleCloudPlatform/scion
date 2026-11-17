@@ -46,13 +46,12 @@ func newMessagePolicyCreateCmd() *cobra.Command {
 		Short: "Create a CEL message policy for the project",
 		Long: `Create a CEL message policy for the target project.
 
-M1 message policies evaluate ONLY outbound agent sends on covered surfaces:
-  - agent_to_user
-  - agent_to_conversation
-
-Agent-to-agent sends, broadcasts, scheduled deliveries, user sends, and
-external bridges are NOT covered in M1. Supplying an uncovered surface returns
-400 surface_not_covered.
+Message policies evaluate ONLY outbound agent sends on surfaces enforced by
+this Hub (reported under 'Coverage (this Hub)' by 'scion message-policy list',
+currently agent_to_user and agent_to_conversation). Uncovered agent paths,
+broadcasts, scheduled deliveries, user-originated sends, and inbound external
+bridges are NOT evaluated. Supplying an uncovered surface returns 400
+surface_not_covered.
 
 You may supply policy fields directly with flags or load a YAML/JSON spec file
 with --file (- for stdin) and optionally override fields via flags.
@@ -144,7 +143,7 @@ Examples:
 				return newUsageError("policy name is required (pass <name> or set name in --file)")
 			}
 			if len(req.Scope.Surfaces) == 0 {
-				return newUsageError("at least one --surface is required (M1 covered surfaces: agent_to_user, agent_to_conversation)")
+				return newUsageError("at least one --surface is required (e.g. --surface agent_to_user)")
 			}
 			if strings.TrimSpace(req.ViolationRule) == "" {
 				return newUsageError("a CEL violation rule is required (pass --rule, --rule-file, or violation_rule in --file)")
@@ -179,7 +178,7 @@ Examples:
 	cmd.Flags().StringVar(&description, "description", "", "Human-readable policy description")
 	cmd.Flags().StringVar(&mode, "mode", "", "Enforcement mode: shadow (default) or enforce")
 	cmd.Flags().BoolVar(&enabled, "enabled", true, "Whether the policy is active")
-	cmd.Flags().StringSliceVar(&surfaces, "surface", nil, "Covered surface(s) to evaluate: agent_to_user, agent_to_conversation")
+	cmd.Flags().StringSliceVar(&surfaces, "surface", nil, "Covered surface(s) to evaluate on this Hub (e.g. agent_to_user, agent_to_conversation)")
 	cmd.Flags().StringSliceVar(&senderAgentIDs, "sender-agent", nil, "Restrict policy to specific project sender agent UUID(s)")
 	cmd.Flags().BoolVar(&allAgents, "all-agents", false, "Match all sender agents in the project")
 	cmd.Flags().StringSliceVar(&recipientKinds, "recipient-kind", nil, "Restrict recipient kind(s): user, conversation")

@@ -85,13 +85,25 @@ func TestMessagePolicyCLI_WindowsGateAllowsSubtree(t *testing.T) {
 	}
 }
 
-func TestMessagePolicyCLI_HelpStatesM1CoverageExplicitly(t *testing.T) {
+func TestMessagePolicyCLI_HelpCoverageAndDefaults(t *testing.T) {
 	out, err := runMessagePolicyCLI(t, "--help")
 	require.NoError(t, err)
 	assert.Contains(t, out, "agent_to_user")
 	assert.Contains(t, out, "agent_to_conversation")
 	assert.Contains(t, out, "agent_dm")
 	assert.Contains(t, out, "NOT evaluated")
+	assert.NotContains(t, out, "M1", "user-facing help must not contain internal milestone labels")
+
+	for _, sub := range []string{"create", "list", "get", "delete", "test", "decisions"} {
+		subHelp, subErr := runMessagePolicyCLI(t, sub, "--help")
+		require.NoError(t, subErr)
+		assert.NotContains(t, subHelp, "M1", "subcommand %s --help must not contain internal milestone labels", sub)
+	}
+
+	testHelp, err := runMessagePolicyCLI(t, "test", "--help")
+	require.NoError(t, err)
+	assert.Contains(t, testHelp, "(default: message)")
+	assert.Contains(t, testHelp, "(default: inline-test)")
 }
 
 func TestMessagePolicyCLI_CreateListGetDelete_TextAndJSON(t *testing.T) {
@@ -159,7 +171,8 @@ func TestMessagePolicyCLI_CreateListGetDelete_TextAndJSON(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Contains(t, out, `Created message policy "no-prose-choices"`)
-	assert.Contains(t, out, "Coverage (M1):")
+	assert.Contains(t, out, "Coverage (this Hub):")
+	assert.NotContains(t, out, "M1")
 	assert.Contains(t, out, "enforced_surfaces:     agent_to_user, agent_to_conversation")
 	assert.Contains(t, out, "uncovered_agent_paths: agent_dm, group_post, group_set, mention_fanout, mention_delivery, broadcast")
 
@@ -369,21 +382,42 @@ func TestMessagePolicyCLI_ErrorMapping(t *testing.T) {
 		assert.Contains(t, err.Error(), "undeclared reference to 'unknown_var'")
 	})
 
-	t.Run("400 surface_not_covered names M1 covered surfaces", func(t *testing.T) {
+	t.Run("400 surface_not_covered renders server-supplied enforced_surfaces from error details", func(t *testing.T) {
 		installMockMessagePolicyServer(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":{"code":"surface_not_covered","message":"surface \"agent_dm\" is not covered in M1","details":{"field":"scope.surfaces"}}}`))
+			_, _ = w.Write([]byte(`{"error":{"code":"surface_not_covered","message":"surface \"broadcast\" is not covered","details":{"field":"scope.surfaces","enforced_surfaces":["agent_to_user","agent_to_conversation","agent_dm"]}}}`))
 		})
 
 		_, err := runMessagePolicyCLI(t, "create", "uncovered",
-			"--surface", "agent_dm",
+			"--surface", "broadcast",
 			"--on-failed", "reject",
 			"--rule", "true",
 		)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "surface_not_covered (scope.surfaces)")
-		assert.Contains(t, err.Error(), "agent_to_user, agent_to_conversation")
+		assert.Contains(t, err.Error(), "Coverage (this Hub): agent_to_user, agent_to_conversation, agent_dm")
+		assert.NotContains(t, err.Error(), "M1")
+	})
+
+	t.Run("list renders Hub-reported coverage rather than client compiled Coverage()", func(t *testing.T) {
+		installMockMessagePolicyServer(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.ListMessagePoliciesResponse{
+				Policies: nil,
+				Coverage: messagepolicy.CoverageInfo{
+					EnforcedSurfaces:    []string{"agent_to_user", "agent_to_conversation", "agent_dm"},
+					UncoveredAgentPaths: nil,
+				},
+			})
+		})
+
+		listOut, err := runMessagePolicyCLI(t, "list")
+		require.NoError(t, err)
+		assert.Contains(t, listOut, "Coverage (this Hub):")
+		assert.Contains(t, listOut, "enforced_surfaces:     agent_to_user, agent_to_conversation, agent_dm")
+		assert.Contains(t, listOut, "uncovered_agent_paths: (none)")
+		assert.NotContains(t, listOut, "M1")
 	})
 
 	t.Run("404 route not found explains hub.message_policies experiment is off", func(t *testing.T) {

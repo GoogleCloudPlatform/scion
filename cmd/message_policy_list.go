@@ -36,9 +36,8 @@ func newMessagePolicyListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List CEL message policies for the project",
-		Long: `List message policies configured on the target project, along with the Hub's
-explicit M1 enforcement coverage declaration (agent_to_user and
-agent_to_conversation only).
+		Long: `List message policies configured on the target project, along with this Hub's
+enforcement coverage declaration (enforced_surfaces and uncovered_agent_paths).
 
 Available in both human mode and agent mode (read-only).`,
 		Args: cobra.NoArgs,

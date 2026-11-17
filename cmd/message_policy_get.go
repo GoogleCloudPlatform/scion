@@ -25,8 +25,8 @@ func newMessagePolicyGetCmd() *cobra.Command {
 		Use:   "get <id-or-name>",
 		Short: "Get details of a project message policy",
 		Long: `Inspect a project message policy by UUID or canonical policy name, including
-its CEL violation rule, fallback behavior, and explicit M1 enforcement coverage
-(agent_to_user and agent_to_conversation only).
+its CEL violation rule, fallback behavior, and this Hub's enforcement coverage
+declaration (enforced_surfaces and uncovered_agent_paths).
 
 Available in both human mode and agent mode (read-only).`,
 		Args: cobra.ExactArgs(1),

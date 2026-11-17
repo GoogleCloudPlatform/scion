@@ -77,16 +77,12 @@ func newMessagePolicyCmd() *cobra.Command {
 		Short: "Manage CEL project message policies",
 		Long: `Author, inspect, dry-run test, and audit CEL message policies for a project.
 
-M1 enforcement coverage:
-  Enforced surfaces:     agent_to_user, agent_to_conversation
-  Uncovered agent paths: agent_dm, group_post, group_set, mention_fanout,
-                         mention_delivery, broadcast
-
-Only outbound agent sends on agent_to_user and agent_to_conversation are
-evaluated in M1. Agent-to-agent messages (agent_dm, group_post, group_set,
-mention_fanout, mention_delivery), broadcasts, scheduled deliveries,
-user-originated sends, and inbound external bridges are NOT evaluated by M1
-message policies.
+Each Hub reports its active enforcement coverage (coverage.enforced_surfaces and
+coverage.uncovered_agent_paths) in list and get responses. Currently enforced
+outbound agent surfaces are agent_to_user and agent_to_conversation; uncovered
+agent paths (agent_dm, group_post, group_set, mention_fanout, mention_delivery,
+broadcast), scheduled deliveries, user-originated sends, and inbound external
+bridges are NOT evaluated.
 
 In agent mode, only read-only inspection ('list' and 'get') is available;
 policy authoring, deletion, dry-run testing, and decision log queries are
@@ -195,17 +191,18 @@ func formatMessagePolicyAPIError(err error) error {
 
 	case messagepolicy.ErrCodeSurfaceNotCovered:
 		field := detailString(apiErr.Details, "field")
-		cov := messagepolicy.Coverage()
-		covered := strings.Join(cov.EnforcedSurfaces, ", ")
+		suffix := ""
+		if enforced := detailEnforcedSurfaces(apiErr.Details); len(enforced) > 0 {
+			suffix = fmt.Sprintf(" (Coverage (this Hub): %s)", safeListOrNone(enforced))
+		}
 		if field != "" {
 			return &formattedMessagePolicyError{
-				msg: fmt.Sprintf("surface_not_covered (%s): %s (M1 message policies cover only: %s)",
-					safeText(field), safeText(msg), covered),
+				msg:   fmt.Sprintf("surface_not_covered (%s): %s%s", safeText(field), safeText(msg), suffix),
 				cause: err,
 			}
 		}
 		return &formattedMessagePolicyError{
-			msg:   fmt.Sprintf("surface_not_covered: %s (M1 message policies cover only: %s)", safeText(msg), covered),
+			msg:   fmt.Sprintf("surface_not_covered: %s%s", safeText(msg), suffix),
 			cause: err,
 		}
 	}
@@ -261,16 +258,48 @@ func detailInt(details map[string]interface{}, key string) (int, bool) {
 	}
 }
 
-func normalizeCoverage(cov messagepolicy.CoverageInfo) messagepolicy.CoverageInfo {
-	if len(cov.EnforcedSurfaces) == 0 && len(cov.UncoveredAgentPaths) == 0 {
-		return messagepolicy.Coverage()
+func detailStringSlice(details map[string]interface{}, key string) []string {
+	if len(details) == 0 {
+		return nil
 	}
-	return cov
+	switch raw := details[key].(type) {
+	case []string:
+		out := make([]string, 0, len(raw))
+		for _, item := range raw {
+			if trimmed := strings.TrimSpace(item); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(raw))
+		for _, elem := range raw {
+			if s, ok := elem.(string); ok {
+				if trimmed := strings.TrimSpace(s); trimmed != "" {
+					out = append(out, trimmed)
+				}
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func detailEnforcedSurfaces(details map[string]interface{}) []string {
+	if s := detailStringSlice(details, "enforced_surfaces"); len(s) > 0 {
+		return s
+	}
+	if covMap, ok := details["coverage"].(map[string]interface{}); ok {
+		if s := detailStringSlice(covMap, "enforced_surfaces"); len(s) > 0 {
+			return s
+		}
+	}
+	return nil
 }
 
 func writeMessagePolicyCoverage(out io.Writer, cov messagepolicy.CoverageInfo) {
-	cov = normalizeCoverage(cov)
-	_, _ = fmt.Fprintln(out, "Coverage (M1):")
+	_, _ = fmt.Fprintln(out, "Coverage (this Hub):")
 	_, _ = fmt.Fprintf(out, "  enforced_surfaces:     %s\n", safeListOrNone(cov.EnforcedSurfaces))
 	_, _ = fmt.Fprintf(out, "  uncovered_agent_paths: %s\n", safeListOrNone(cov.UncoveredAgentPaths))
 }

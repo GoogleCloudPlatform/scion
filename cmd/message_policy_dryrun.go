@@ -60,9 +60,9 @@ rule against synthetic message facts without storing any policy, message, or
 decision row.
 
 The sample body is evaluated in-memory on the Hub and is never persisted or
-echoed in the response. M1 dry-run testing covers only M1 enforced surfaces:
-  - agent_to_user (default when --surface is omitted)
-  - agent_to_conversation
+echoed in the response. Dry-run testing evaluates surfaces enforced by this Hub
+(when --surface is omitted, defaults to the policy's first surface or
+agent_to_user).
 
 Examples:
   # Dry-run a stored policy against a sample message body
@@ -273,8 +273,8 @@ Examples:
 	cmd.Flags().StringVarP(&reqFile, "file", "f", "", "YAML or JSON dry-run request file (- for stdin)")
 	cmd.Flags().StringVar(&body, "body", "", "Synthetic sample message body (evaluated in-memory only)")
 	cmd.Flags().StringVar(&bodyFile, "body-file", "", "Read synthetic sample message body from file (- for stdin)")
-	cmd.Flags().StringVar(&surface, "surface", "", "Sample surface: agent_to_user (default) or agent_to_conversation")
-	cmd.Flags().StringVar(&msgType, "type", "", "Sample message type (default: instruction)")
+	cmd.Flags().StringVar(&surface, "surface", "", "Sample surface (default: policy's first surface, or agent_to_user)")
+	cmd.Flags().StringVar(&msgType, "type", "", "Sample message type (default: message)")
 	cmd.Flags().BoolVar(&hasChoices, "has-choices", false, "Set message.has_choices on the synthetic sample")
 	cmd.Flags().BoolVar(&urgent, "urgent", false, "Set message.urgent on the synthetic sample")
 	cmd.Flags().IntVar(&attachmentCount, "attachment-count", 0, "Set message.attachment_count on the synthetic sample")
@@ -286,7 +286,7 @@ Examples:
 	cmd.Flags().StringVar(&convKind, "conv-kind", "", "Synthetic conversation kind")
 
 	// Inline rule / override flags.
-	cmd.Flags().StringVar(&inlineName, "name", "", "Inline policy slug name (default: inline-policy)")
+	cmd.Flags().StringVar(&inlineName, "name", "", "Inline policy slug name (default: inline-test)")
 	cmd.Flags().StringVar(&inlineMode, "mode", "", "Inline or override mode: shadow or enforce")
 	cmd.Flags().StringSliceVar(&inlineSurfaces, "policy-surface", nil, "Inline or override policy scope surface(s)")
 	cmd.Flags().StringVar(&rule, "rule", "", "Inline or override CEL boolean violation expression")
