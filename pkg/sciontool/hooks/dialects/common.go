@@ -19,7 +19,8 @@ func getString(data map[string]interface{}, key string) string {
 // extractTokens populates token usage fields on EventData from raw event data.
 // It checks top-level fields first, then falls back to a nested "usage" object.
 // Supports field names: input_tokens, output_tokens, cached_tokens,
-// cache_read_input_tokens, prompt_tokens, completion_tokens.
+// cache_read_input_tokens, cache_write_tokens, cache_creation_input_tokens,
+// reasoning_tokens, thinking_tokens, prompt_tokens, completion_tokens.
 func extractTokens(data map[string]interface{}, ed *hooks.EventData) {
 	// Try top-level fields first
 	if v := getInt64(data, "input_tokens"); v > 0 {
@@ -35,6 +36,20 @@ func extractTokens(data map[string]interface{}, ed *hooks.EventData) {
 	if ed.CachedTokens == 0 {
 		if v := getInt64(data, "cache_read_input_tokens"); v > 0 {
 			ed.CachedTokens = v
+		}
+	}
+	if ed.CacheWriteTokens == 0 {
+		if v := getInt64(data, "cache_write_tokens"); v > 0 {
+			ed.CacheWriteTokens = v
+		} else if v := getInt64(data, "cache_creation_input_tokens"); v > 0 {
+			ed.CacheWriteTokens = v
+		}
+	}
+	if ed.ReasoningTokens == 0 {
+		if v := getInt64(data, "reasoning_tokens"); v > 0 {
+			ed.ReasoningTokens = v
+		} else if v := getInt64(data, "thinking_tokens"); v > 0 {
+			ed.ReasoningTokens = v
 		}
 	}
 	// OpenAI-style names
@@ -65,6 +80,20 @@ func extractTokens(data map[string]interface{}, ed *hooks.EventData) {
 				if ed.CachedTokens == 0 {
 					if v := getInt64(usage, "cache_read_input_tokens"); v > 0 {
 						ed.CachedTokens = v
+					}
+				}
+				if ed.CacheWriteTokens == 0 {
+					if v := getInt64(usage, "cache_write_tokens"); v > 0 {
+						ed.CacheWriteTokens = v
+					} else if v := getInt64(usage, "cache_creation_input_tokens"); v > 0 {
+						ed.CacheWriteTokens = v
+					}
+				}
+				if ed.ReasoningTokens == 0 {
+					if v := getInt64(usage, "reasoning_tokens"); v > 0 {
+						ed.ReasoningTokens = v
+					} else if v := getInt64(usage, "thinking_tokens"); v > 0 {
+						ed.ReasoningTokens = v
 					}
 				}
 				if ed.InputTokens == 0 {

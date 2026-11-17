@@ -302,3 +302,54 @@ func TestClaudeDialect_CapturedSubagentPayloads(t *testing.T) {
 	require.NoError(t, scanner.Err())
 	assert.Equal(t, len(want), i)
 }
+
+func TestExtractTokens_CacheWriteAndReasoningFallbacks(t *testing.T) {
+	d := NewClaudeDialect()
+
+	t.Run("top-level canonical cache_write_tokens and reasoning_tokens", func(t *testing.T) {
+		event, err := d.Parse(map[string]interface{}{
+			"hook_event_name":    "ModelResponse",
+			"input_tokens":       float64(1000),
+			"output_tokens":      float64(250),
+			"cached_tokens":      float64(400),
+			"cache_write_tokens": float64(60),
+			"reasoning_tokens":   float64(35),
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(1000), event.Data.InputTokens)
+		assert.Equal(t, int64(250), event.Data.OutputTokens)
+		assert.Equal(t, int64(400), event.Data.CachedTokens)
+		assert.Equal(t, int64(60), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(35), event.Data.ReasoningTokens)
+	})
+
+	t.Run("top-level cache_creation_input_tokens and thinking_tokens aliases", func(t *testing.T) {
+		event, err := d.Parse(map[string]interface{}{
+			"hook_event_name":             "ModelResponse",
+			"input_tokens":                float64(900),
+			"output_tokens":               float64(150),
+			"cache_creation_input_tokens": float64(80),
+			"thinking_tokens":             float64(45),
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(80), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(45), event.Data.ReasoningTokens)
+	})
+
+	t.Run("nested usage object cache_write and reasoning aliases", func(t *testing.T) {
+		event, err := d.Parse(map[string]interface{}{
+			"hook_event_name": "ModelResponse",
+			"usage": map[string]interface{}{
+				"input_tokens":                float64(500),
+				"output_tokens":               float64(120),
+				"cache_creation_input_tokens": float64(70),
+				"thinking_tokens":             float64(25),
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(500), event.Data.InputTokens)
+		assert.Equal(t, int64(120), event.Data.OutputTokens)
+		assert.Equal(t, int64(70), event.Data.CacheWriteTokens)
+		assert.Equal(t, int64(25), event.Data.ReasoningTokens)
+	})
+}
