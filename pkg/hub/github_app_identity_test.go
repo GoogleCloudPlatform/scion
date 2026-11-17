@@ -701,6 +701,41 @@ func TestHandleGetGitHubApp_TriggersReadiness(t *testing.T) {
 			t.Error("expected content-free error string when GET /app fails")
 		}
 	})
+
+	t.Run("unconfigured_app_reports_content_free_error", func(t *testing.T) {
+		srv, _ := testServer(t)
+		setGitHubTriggersExperiment(t, srv, true)
+
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/github-app", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/github-app: %d %s", rec.Code, rec.Body.String())
+		}
+		var resp GitHubAppConfigResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if resp.Triggers == nil {
+			t.Fatal("expected triggers block when hub.github_triggers is on")
+		}
+		if resp.Triggers.Ready {
+			t.Error("expected ready=false when GitHub App is not configured")
+		}
+		if resp.Triggers.Error != "GitHub App is not configured." {
+			t.Errorf("triggers.error = %q, want %q", resp.Triggers.Error, "GitHub App is not configured.")
+		}
+		if len(resp.Triggers.MissingEvents) != 0 || len(resp.Triggers.MissingPermissions) != 0 {
+			t.Errorf("expected empty missing slices when unconfigured, got events=%v perms=%v",
+				resp.Triggers.MissingEvents, resp.Triggers.MissingPermissions)
+		}
+		if !resp.Triggers.CheckedAt.IsZero() {
+			t.Errorf("expected zero checked_at when unconfigured, got %v", resp.Triggers.CheckedAt)
+		}
+
+		projView := srv.GitHubTriggersProjectReadiness(context.Background())
+		if projView.Ready || projView.Error != "GitHub App is not configured." {
+			t.Errorf("project readiness = %+v, want ready=false error=%q", projView, "GitHub App is not configured.")
+		}
+	})
 }
 
 func TestWebhook_InstallationNewPermissionsAccepted(t *testing.T) {

@@ -434,10 +434,15 @@ func githubPermissionSatisfies(appLevel, requiredLevel string) bool {
 	}
 }
 
+const githubAppNotConfiguredError = "GitHub App is not configured."
+
 // computeGitHubTriggersReadiness evaluates Stage 3 trigger readiness from the
 // App identity cache and webhook configuration (§10.1, §10.2).
 func (s *Server) computeGitHubTriggersReadiness(ctx context.Context, cfg GitHubAppServerConfig, hasWebhookSecret bool) GitHubTriggersReadiness {
 	id, checkedAt, lastErr := s.ensureGitHubAppIdentity(ctx)
+	if cfg.AppID == 0 || (id == nil && lastErr == "") {
+		lastErr = githubAppNotConfiguredError
+	}
 
 	appSlug := normalizeGitHubMentionHandle(cfg.AppSlug)
 	if appSlug == "" && id != nil {
