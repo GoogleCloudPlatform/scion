@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -669,4 +670,173 @@ func TestTriggerEvents_SinceTerminalCASAndOrphanReconcile(t *testing.T) {
 	gotOrphanRecent, err := cs.GetTriggerEvent(ctx, evOrphanRecent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.TriggerEventStatusPending, gotOrphanRecent.Status)
+}
+
+func TestListTriggerEvents_AgentVisibility_ManyFiresSubquery(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+	pid := uuid.MustParse(projID)
+	agentA := uuid.NewString()
+	agentB := uuid.NewString()
+	userID := uuid.NewString()
+	base := time.Date(2026, 11, 17, 1, 0, 0, 0, time.UTC)
+
+	userEP := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "user-ep",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    userID,
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+	}
+	agentEP := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "agent-a-ep",
+		OwnerPrincipalKind:  store.DelegationPrincipalAgent,
+		OwnerPrincipalID:    agentA,
+		OwnerCredentialKind: store.InitiatorCredentialKindAgent,
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, userEP))
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, agentEP))
+
+	mkAgentTrigger := func(name, principalID, credKind string, attrVer int) *store.Trigger {
+		tr := &store.Trigger{
+			ID:           uuid.NewString(),
+			ProjectID:    projID,
+			Name:         name,
+			SourceKind:   store.TriggerSourceKindWebhook,
+			SourceID:     userEP.ID,
+			MatchTypes:   []string{"webhook.received"},
+			MatchDialect: store.TriggerDialectCEL,
+			ActionType:   store.TriggerActionMessage,
+			SubjectMode:  store.TriggerSubjectModeNew,
+			Status:       store.TriggerStatusActive,
+			InitiatorAttribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+				InitiatorPrincipalID:    principalID,
+				InitiatorCredentialKind: credKind,
+				AttributionVersion:      attrVer,
+				AuthorizationRevision:   1,
+			},
+		}
+		require.NoError(t, cs.CreateTrigger(ctx, tr))
+		return tr
+	}
+
+	trA1 := mkAgentTrigger("tr-a1", agentA, store.InitiatorCredentialKindAgent, 1)
+	trA2 := mkAgentTrigger("tr-a2", agentA, store.InitiatorCredentialKindAgent, 1)
+	trOther := mkAgentTrigger("tr-b", agentB, store.InitiatorCredentialKindAgent, 1)
+	trLegacy := mkAgentTrigger("tr-a-legacy", agentA, store.InitiatorCredentialKindLegacyUnknown, 1)
+
+	mkEvent := func(id, epID, dedup string, receivedAt time.Time) *store.TriggerEvent {
+		ev := &store.TriggerEvent{
+			ID:         id,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    "webhook:" + epID,
+			DedupKey:   dedup,
+			OccurredAt: receivedAt,
+			ReceivedAt: receivedAt,
+			Payload:    `{"ok":true}`,
+			Status:     store.TriggerEventStatusProcessed,
+		}
+		require.NoError(t, cs.CreateTriggerEvent(ctx, ev))
+		return ev
+	}
+
+	ev1 := mkEvent(uuid.NewString(), userEP.ID, "d-ev1", base.Add(time.Second))
+	// Tie-break pair sharing identical ReceivedAt (ordered DESC by ID).
+	ev2Low := mkEvent("00000000-0000-4000-8000-000000000001", userEP.ID, "d-ev2-low", base.Add(2*time.Second))
+	ev2High := mkEvent("ffffffff-ffff-4fff-bfff-ffffffffffff", agentEP.ID, "d-ev2-high", base.Add(2*time.Second))
+	ev3 := mkEvent(uuid.NewString(), userEP.ID, "d-ev3", base.Add(3*time.Second))
+	evHidden := mkEvent(uuid.NewString(), userEP.ID, "d-ev-hidden", base.Add(4*time.Second))
+
+	claimFire := func(tr *store.Trigger, ev *store.TriggerEvent) {
+		claimed, _, err := cs.ClaimTriggerFire(ctx, &store.TriggerFire{
+			ID:                   uuid.NewString(),
+			ProjectID:            projID,
+			TriggerID:            tr.ID,
+			EventID:              ev.ID,
+			Subject:              ev.Subject,
+			ActionType:           store.TriggerActionMessage,
+			Status:               store.TriggerFireStatusFired,
+			LeaseUntil:           base.Add(10 * time.Minute),
+			StartedAt:            base,
+			InitiatorAttribution: tr.InitiatorAttribution,
+		})
+		require.NoError(t, err)
+		require.True(t, claimed)
+	}
+
+	// ev1 is fired by BOTH trA1 and trA2 (must still appear and count once).
+	claimFire(trA1, ev1)
+	claimFire(trA2, ev1)
+	claimFire(trA1, ev2Low)
+	claimFire(trA1, ev3)
+	// evHidden is fired only by another agent's trigger and a legacy-attributed trigger.
+	claimFire(trOther, evHidden)
+	claimFire(trLegacy, evHidden)
+
+	// Seed 66,000 additional fire rows for trA1 (exceeds both SQLite's ~32,766
+	// variable limit and PostgreSQL's 65,535 bind-parameter limit).
+	const bulkFires = 66_000
+	const batchSize = 500
+	trA1UUID := uuid.MustParse(trA1.ID)
+	leaseUntil := base.Add(10 * time.Minute)
+	tx, err := cs.client.Tx(ctx)
+	require.NoError(t, err)
+	for offset := 0; offset < bulkFires; offset += batchSize {
+		builders := make([]*ent.TriggerFireCreate, 0, batchSize)
+		for i := 0; i < batchSize; i++ {
+			builders = append(builders, tx.TriggerFire.Create().
+				SetID(uuid.New()).
+				SetProjectID(pid).
+				SetTriggerID(trA1UUID).
+				SetEventID(uuid.New()).
+				SetSubject("webhook:bulk").
+				SetActionType(store.TriggerActionMessage).
+				SetStatus(store.TriggerFireStatusFired).
+				SetLeaseUntil(leaseUntil).
+				SetStartedAt(base).
+				SetCreated(base),
+			)
+		}
+		require.NoError(t, tx.TriggerFire.CreateBulk(builders...).Exec(ctx))
+	}
+	require.NoError(t, tx.Commit())
+
+	var (
+		gotIDs []string
+		cursor string
+	)
+	for {
+		page, lErr := cs.ListTriggerEvents(ctx, store.TriggerEventFilter{
+			ProjectID:        projID,
+			VisibleToAgentID: agentA,
+		}, store.ListOptions{
+			Limit:  2,
+			Cursor: cursor,
+		})
+		require.NoError(t, lErr)
+		assert.Equal(t, 4, page.TotalCount)
+		for _, item := range page.Items {
+			gotIDs = append(gotIDs, item.ID)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	assert.Equal(t, []string{ev3.ID, ev2High.ID, ev2Low.ID, ev1.ID}, gotIDs)
+
+	hasA, err := cs.AgentHasFiredTriggerForEvent(ctx, ev1.ID, agentA)
+	require.NoError(t, err)
+	assert.True(t, hasA)
+	hasHidden, err := cs.AgentHasFiredTriggerForEvent(ctx, evHidden.ID, agentA)
+	require.NoError(t, err)
+	assert.False(t, hasHidden)
 }
