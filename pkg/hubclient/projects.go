@@ -648,12 +648,12 @@ func (s *projectService) AssignableRoles(ctx context.Context, projectID string) 
 // GitHubTriggersProjectReadiness is the project-scoped GitHub App readiness
 // summary returned on trigger source settings.
 type GitHubTriggersProjectReadiness struct {
-	Ready              bool      `json:"ready"`
-	MissingEvents      []string  `json:"missing_events"`
-	MissingPermissions []string  `json:"missing_permissions"`
-	AppSlug            string    `json:"app_slug,omitempty"`
-	CheckedAt          time.Time `json:"checked_at,omitempty"`
-	Error              string    `json:"error,omitempty"`
+	Ready              bool       `json:"ready"`
+	MissingEvents      []string   `json:"missing_events"`
+	MissingPermissions []string   `json:"missing_permissions"`
+	AppSlug            string     `json:"app_slug,omitempty"`
+	CheckedAt          *time.Time `json:"checked_at,omitempty"`
+	Error              string     `json:"error,omitempty"`
 }
 
 // ProjectGitHubTriggerPrimaryRef identifies the active primary project for a

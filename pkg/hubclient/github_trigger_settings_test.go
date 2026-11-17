@@ -63,8 +63,7 @@ func TestProjectService_GitHubTriggerSettings(t *testing.T) {
 					"ready": true,
 					"missing_events": [],
 					"missing_permissions": [],
-					"app_slug": "scion-bot",
-					"checked_at": "2026-11-17T03:00:00Z"
+					"app_slug": "scion-bot"
 				},
 				"routing": {
 					"primary_project": {"id": "proj-1", "name": "widgets-a"},
@@ -89,7 +88,8 @@ func TestProjectService_GitHubTriggerSettings(t *testing.T) {
 	assert.Equal(t, []string{"issue_comment"}, got.Readiness.MissingEvents)
 	assert.Equal(t, []string{"issues:write"}, got.Readiness.MissingPermissions)
 	assert.Equal(t, "scion-bot", got.Readiness.AppSlug)
-	assert.Equal(t, checkedAt, got.Readiness.CheckedAt)
+	require.NotNil(t, got.Readiness.CheckedAt)
+	assert.Equal(t, checkedAt, *got.Readiness.CheckedAt)
 	assert.Nil(t, got.Routing.PrimaryProject)
 	assert.False(t, got.Routing.IsPrimary)
 	assert.Equal(t, []string{"widgets-b"}, got.Routing.OtherProjects)
@@ -103,6 +103,7 @@ func TestProjectService_GitHubTriggerSettings(t *testing.T) {
 	assert.True(t, updated.UnmatchedCommandReply)
 	assert.Equal(t, "Available: /triage, /review", updated.UnmatchedCommandText)
 	assert.True(t, updated.Readiness.Ready)
+	assert.Nil(t, updated.Readiness.CheckedAt, "omitted checked_at before first fetch decodes to nil")
 	require.NotNil(t, updated.Routing.PrimaryProject)
 	assert.Equal(t, "proj-1", updated.Routing.PrimaryProject.ID)
 	assert.Equal(t, "widgets-a", updated.Routing.PrimaryProject.Name)
