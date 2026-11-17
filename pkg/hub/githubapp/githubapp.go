@@ -113,10 +113,15 @@ func (e *TokenMintError) UpstreamDetail() string {
 	return e.upstream
 }
 
-// upstreamBodyReadLimit bounds how much of a GitHub API response body this
-// package reads. It equals the hub's upstreamErrorBodyReadLimit
+// upstreamBodyReadLimit bounds how much of a GitHub API error response body
+// this package reads. It equals the hub's upstreamErrorBodyReadLimit
 // (pkg/hub/upstream_text.go); keep the two in step.
 const upstreamBodyReadLimit = 4 << 10
+
+// appMetadataReadLimit bounds how much of a 200 OK GET /app response body
+// GetApp reads. Realistic GitHub App payloads (owner URLs, description,
+// subscribed events, and permissions) routinely exceed 4 KiB.
+const appMetadataReadLimit = 1 << 20
 
 // Error codes for token minting failures.
 const (
@@ -705,15 +710,19 @@ func (c *Client) GetApp(ctx context.Context) (map[string]interface{}, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
 	c.trackRateLimit(resp)
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, classifyGitHubError(resp.StatusCode, body)
+		errBody, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+		return nil, classifyGitHubError(resp.StatusCode, errBody)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, appMetadataReadLimit))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	var result map[string]interface{}
