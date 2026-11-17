@@ -380,6 +380,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.StartsInFlight = true
 		case "templatetiers", "template_tiers":
 			caps.TemplateTiers = true
+		case "witargetsv1", "wi_targets_v1":
+			caps.WITargetsV1 = true
 		}
 	}
 	return caps

@@ -141,6 +141,13 @@ type HeartbeatService struct {
 	sentSAMappingsAt  time.Time
 	hubReadsSAHashes  bool
 
+	// workloadIdentityTargets, when set, returns the broker's Kubernetes
+	// runtime targets that have a Workload Identity pool, or nil when they
+	// cannot be read (ptone/scion#3329 phase 5). Sent on every heartbeat
+	// with Capabilities.WITargetsV1. Never consulted in flat mode until the
+	// flat producer exists (phase 5 P3b).
+	workloadIdentityTargets func() []hubclient.WorkloadIdentityTarget
+
 	// defaultProfile, when set, returns the broker's default (active)
 	// profile name, reported on every heartbeat. A nil func, or a nil
 	// result (unknown), omits the field.
@@ -497,6 +504,13 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	}
 	if !s.flat && s.conversionPlan != nil {
 		heartbeat.ConversionPlanPresentation = s.conversionPlan()
+	}
+	if !s.flat && s.workloadIdentityTargets != nil {
+		// A nil list (settings unreadable) is sent as null and keeps the
+		// hub's stored targets; the capability tells the hub that an empty
+		// list means "no pool configured".
+		heartbeat.WorkloadIdentityTargets = s.workloadIdentityTargets()
+		heartbeat.Capabilities.WITargetsV1 = true
 	}
 
 	// Starts in flight are read BEFORE the agents are listed: a start that

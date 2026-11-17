@@ -697,6 +697,11 @@
           "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
           "maxLength": 253,
           "description": "Kubernetes only. The Kubernetes ServiceAccount (KSA) a pod runs as when its GCP identity mode resolves to 'block'. It must be a dedicated KSA the operator provisions with no Workload Identity annotation and no IAM grants, so it is zero-privilege; Scion does not create or check it. Empty or unset means a block pod runs as the namespace's default ServiceAccount. Block pods also get automountServiceAccountToken false and a node selector for Workload Identity nodes. A profile value wins over this one. Read only from the broker's own operator-controlled settings."
+        },
+        "workload_identity_pool": {
+          "type": "string",
+          "pattern": "^$|^[a-z][a-z0-9-]{4,28}[a-z0-9]\\.svc\\.id\\.goog$",
+          "description": "Kubernetes only. The GKE Workload Identity pool of this entry's cluster, <cluster-project-id>.svc.id.goog. The broker reports it with the entry's namespace, and when the hub.k8s_workload_identity_setup experiment is on, a GCP service account the Hub mints is bound (roles/iam.workloadIdentityUser) to the Kubernetes ServiceAccount named after its account ID in that namespace. Read only from the broker's own operator-controlled settings, never from a project's settings.yaml."
         }
       },
       "additionalProperties": false
@@ -1999,6 +2004,11 @@
               "maxLength": 253,
               "description": "Kubernetes only. The Kubernetes ServiceAccount this instance's pods run as when their GCP identity mode resolves to 'block'; a dedicated zero-privilege KSA the operator provisions. Empty or unset means the namespace's default ServiceAccount. Block pods also get automountServiceAccountToken false and a node selector for Workload Identity nodes. Local operator policy: not part of the runtime target identity and never sent to the Hub."
             },
+            "workload_identity_pool": {
+              "type": "string",
+              "pattern": "^$|^[a-z][a-z0-9-]{4,28}[a-z0-9]\\.svc\\.id\\.goog$",
+              "description": "Kubernetes only. The GKE Workload Identity pool of this instance's cluster, <cluster-project-id>.svc.id.goog. Local operator policy: not part of the runtime target identity or the presentation."
+            },
             "kubernetes_service_account_mappings": {
               "type": "object",
               "propertyNames": {
@@ -2174,6 +2184,7 @@
         { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } },
         { "required": ["kubeconfig"], "properties": { "kubeconfig": { "minLength": 1 } } },
         { "required": ["kubernetes_block_service_account"], "properties": { "kubernetes_block_service_account": { "minLength": 1 } } },
+        { "required": ["workload_identity_pool"], "properties": { "workload_identity_pool": { "minLength": 1 } } },
         { "required": ["kubernetes_service_account_mappings"], "properties": { "kubernetes_service_account_mappings": { "minProperties": 1 } } },
         { "required": ["shared_dir_storage_class"], "properties": { "shared_dir_storage_class": { "minLength": 1 } } },
         { "required": ["shared_dir_size"], "properties": { "shared_dir_size": { "minLength": 1 } } },

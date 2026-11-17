@@ -368,6 +368,32 @@ type BrokerHeartbeat struct {
 	// it read-only, only from the broker's own credentials. A flat instance
 	// and an older broker omit it; the Hub then keeps the stored value.
 	ConversionPlanPresentation *api.ConversionPlanPresentation `json:"conversionPlanPresentation,omitempty"`
+	// WorkloadIdentityTargets lists the broker's Kubernetes runtime targets
+	// that have workload_identity_pool set (ptone/scion#3329 phase 5): one
+	// per profile for a legacy broker, at most one for a flat instance. It
+	// is sent on every heartbeat (it is small) together with
+	// Capabilities.WITargetsV1; the Hub stores it only when it changes. It
+	// has no omitempty: a nil list (the settings could not be read, or a
+	// broker that does not produce it) is sent as null and keeps the
+	// Hub's stored list, while an empty list replaces it. An older Hub
+	// ignores it.
+	WorkloadIdentityTargets []WorkloadIdentityTarget `json:"workloadIdentityTargets"`
+}
+
+// WorkloadIdentityTarget is one Kubernetes runtime target with a GKE
+// Workload Identity pool in a heartbeat (store.WorkloadIdentityTarget is its
+// counterpart). The Hub binds a GCP service account it mints to
+// serviceAccount:<Pool>[<Namespace>/<account ID>] for each.
+type WorkloadIdentityTarget struct {
+	// Profile is the legacy broker profile; empty for a flat instance.
+	Profile string `json:"profile,omitempty"`
+	// Pool is the Workload Identity pool, "<project>.svc.id.goog".
+	Pool string `json:"pool"`
+	// Namespace is the namespace the broker runs the target's agents in.
+	Namespace string `json:"namespace"`
+	// KSACreation reports create_service_accounts on the target. Always
+	// false until that setting exists (phase 5 P3).
+	KSACreation bool `json:"ksaCreation,omitempty"`
 }
 
 // StartInFlight identifies one agent start running on a broker.

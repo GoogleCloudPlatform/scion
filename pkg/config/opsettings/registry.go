@@ -725,6 +725,11 @@ func compileSchemas() {
 					"tolerations":                      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
 					"runtime_class_name":               map[string]interface{}{"type": "string"},
 					"kubernetes_block_service_account": map[string]interface{}{"type": "string"},
+
+					// Workload Identity pool reported to the hub for binding
+					// at mint (ptone/scion#3329 phase 5). Value rule:
+					// config.ValidateWorkloadIdentityPool.
+					"workload_identity_pool": map[string]interface{}{"type": "string", "pattern": config.WorkloadIdentityPoolPattern},
 				},
 			},
 		},

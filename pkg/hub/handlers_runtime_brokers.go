@@ -958,6 +958,13 @@ type brokerHeartbeatRequest struct {
 	// itself (ApplyConversionPlan). Omitted by an older broker or a flat
 	// one, in which case the stored value is left unchanged.
 	ConversionPlanPresentation json.RawMessage `json:"conversionPlanPresentation,omitempty"`
+	// WorkloadIdentityTargets refreshes the broker's stored Workload
+	// Identity targets (see hubclient.BrokerHeartbeat.WorkloadIdentityTargets;
+	// ptone/scion#3329 phase 5). Nil (omitted, or null) keeps the stored
+	// list; a non-nil list, empty included, replaces it when it differs.
+	// Accepted from legacy and flat brokers; a flat row's targets have their
+	// profile dropped (normalizeWorkloadIdentityTargets).
+	WorkloadIdentityTargets *[]store.WorkloadIdentityTarget `json:"workloadIdentityTargets,omitempty"`
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -1382,7 +1389,16 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	if brokerSelf {
 		heartbeatVersion = brokerVersionToken(heartbeat.Version)
 	}
-	if heartbeatVersion != "" || heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 {
+	// Workload Identity targets decide which IAM member a mint binds, so
+	// they come only from the broker's own credentials (design §3.8: only
+	// operator-local settings choose the pool and namespace). A user
+	// heartbeat, even with broker.update, never sets them.
+	if !brokerSelf && heartbeat.WorkloadIdentityTargets != nil {
+		s.agentLifecycleLog.Warn("heartbeat: ignoring workloadIdentityTargets sent with a request identity other than the broker itself",
+			"broker_id", id)
+		heartbeat.WorkloadIdentityTargets = nil
+	}
+	if heartbeatVersion != "" || heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 || heartbeat.WorkloadIdentityTargets != nil {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
@@ -1397,6 +1413,22 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				heartbeat.ProfileAttach = nil
 				heartbeat.ProfileSAMappings = nil
 				heartbeat.ProfileSAMappingsHashes = nil
+			}
+			// Workload Identity targets are kept on a flat row, without a
+			// profile.
+			var wiTargets []store.WorkloadIdentityTarget
+			if heartbeat.WorkloadIdentityTargets != nil {
+				var dropped workloadIdentityTargetDrops
+				wiTargets, dropped = normalizeWorkloadIdentityTargets(*heartbeat.WorkloadIdentityTargets, broker.IsFlat())
+				if dropped.profiles > 0 {
+					s.agentLifecycleLog.Warn("heartbeat: ignoring the profile of Workload Identity targets reported for a flat Runtime Broker",
+						"broker_id", id)
+				}
+				if dropped.invalid > 0 || dropped.overCap > 0 {
+					// Counts only: the rejected values are not logged.
+					s.agentLifecycleLog.Warn("heartbeat: ignoring malformed or excess Workload Identity targets reported by a Runtime Broker",
+						"broker_id", id, "invalid", dropped.invalid, "over_cap", dropped.overCap, "max", maxWorkloadIdentityTargets)
+				}
 			}
 			// A broker older than templateTiers ignores the telemetry tiers
 			// dispatch sends; warn once (ptone/scion#4224).
@@ -1437,6 +1469,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					changed = true
 				}
 				if applyProfileAttach(b.Profiles, heartbeat.ProfileAttach) {
+					changed = true
+				}
+				if wiTargets != nil && !reflect.DeepEqual(b.WorkloadIdentityTargets, wiTargets) {
+					b.WorkloadIdentityTargets = wiTargets
 					changed = true
 				}
 				saChanged, requested := applyProfileSAMappings(b.Profiles, heartbeat.ProfileSAMappings, heartbeat.ProfileSAMappingsHashes, time.Now())

@@ -492,7 +492,7 @@ An agent on the Kubernetes runtime gets a GSA only when all of the links below a
 
    Registration checks this once. If you grant the role afterwards, re-run the check with `scion project service-accounts verify <id>` (or `scion service-accounts verify <id> --global`). See [GCP Identity & Hub-Minted Service Accounts](/scion/hosted/single-node/hub-server/#gcp-identity--hub-minted-service-accounts).
 3. **Map the GSA to a KSA on the broker** (broker operator). Add `<email>: <ksa>` to `kubernetes_service_account_mappings` on a `kubernetes`-type runtime entry (its key can be any name) or on a profile, in the broker's global settings. For a broker in the same process as a database-backed Hub, a hub admin sets it through the server config (`PUT /api/v1/admin/server-config`, or the Hub's Settings admin page) instead. The mapping can be skipped when exactly one KSA in the namespace carries the GSA's Workload Identity annotation and the broker may list ServiceAccounts there. See [the mapping setting](#gcp-identity-mode-assign-workload-identity-mapping) and [GKE Workload Identity for GCP Identity Mode Assign](/scion/hosted/ha/setup-gcp/#2i-gke-workload-identity-for-gcp-identity-mode-assign).
-4. **Create the Workload Identity binding for the KSA** (cluster and GCP project admin). Create the KSA in the namespace the runtime entry resolves to, annotate it with `iam.gke.io/gcp-service-account: <email>`, and grant `roles/iam.workloadIdentityUser` on the GSA to that namespace and KSA. Scion does not do this step or check the IAM binding; the broker only reads the annotation, to find the KSA when there is no mapping. See the [`gcloud` and `kubectl` steps](/scion/hosted/ha/setup-gcp/#2i-gke-workload-identity-for-gcp-identity-mode-assign).
+4. **Create the Workload Identity binding for the KSA** (cluster and GCP project admin). Create the KSA in the namespace the runtime entry resolves to, annotate it with `iam.gke.io/gcp-service-account: <email>`, and grant `roles/iam.workloadIdentityUser` on the GSA to that namespace and KSA. Scion does not check the IAM binding; the broker only reads the annotation, to find the KSA when there is no mapping. For a GSA the Hub mints, the Hub can make the IAM grant for you (experimental, see [Workload Identity binding at mint](#workload-identity-binding-at-mint)); the KSA and its annotation are still yours to create. See the [`gcloud` and `kubectl` steps](/scion/hosted/ha/setup-gcp/#2i-gke-workload-identity-for-gcp-identity-mode-assign).
 5. **Optional: set a default** (project admin, or hub admin for the hub default). Without a default, assign the GSA per agent with `--service-account <id|email|name>`. A project can set a project default or, for projects that also use other runtimes, a default per Kubernetes profile; a hub admin can set a hub default, which must name a hub-scoped account. See [Per-Profile Default Service Accounts](/scion/hosted/ha/permissions/#per-profile-default-service-accounts) and [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
 
 To check step 2, run `scion service-accounts show <id>` (add `--global` for a hub-scoped account). It shows whether the Hub's token-creator check passed and, if not, why. For step 3 on a project-scoped account, the `add`, `mint`, `verify` and `list` subcommands of `scion project service-accounts`, and the `gcp-sa-mappings` check of `scion doctor`, warn when no Kubernetes profile of the project maps it (see **Early warning for unmapped service accounts** below); hub-scoped accounts get no such warning. The Hub cannot see the KSA annotation or the IAM binding, so step 4 is confirmed only by a successful dispatch.
@@ -552,13 +552,64 @@ Restricting the pod's outbound access with an egress NetworkPolicy would give a 
 | The request names a `kubernetes.serviceAccountName` other than the block KSA | 400 | `explicit Kubernetes ServiceAccount "<name>" conflicts with GCP identity mode "block"` |
 | On start or restart, the agent now resolves to another runtime, profile, or runtime entry than its `block` identity was resolved for | 409 | `GCP identity mode "block" was resolved for ...` |
 
+#### Workload Identity binding at mint
+
+This is experimental: it needs the [`hub.k8s_workload_identity_setup`](/scion/reference/experiments/#server-experiments-with-notes) experiment, which is off by default. With the experiment off, minting is unchanged.
+
+When a project owner or admin mints a GSA (`scion project service-accounts mint`, or `POST /api/v1/projects/{id}/gcp-service-accounts/mint`), the Hub also grants `roles/iam.workloadIdentityUser` on the new GSA to the Workload Identity member of the conventional KSA, for every Kubernetes runtime target of the project's Runtime Brokers that reports a Workload Identity pool:
+
+```text
+serviceAccount:<pool>[<namespace>/<account ID>]
+```
+
+**KSA naming convention.** The conventional KSA name is the GSA's **account ID**: the part of its email before `@`. A minted GSA's account ID is `scion-<slug>` or a generated `scion-xxxxxxxx`, always a valid KSA name. This is a stable contract: the binding names this KSA, so a KSA with any other name does not get the grant. The binding alone is not enough. A KSA with that name must exist in the namespace, annotated `iam.gke.io/gcp-service-account: <GSA email>`, and the broker must resolve it (a `kubernetes_service_account_mappings` entry, or [discovery by annotation](#gcp-identity-mode-assign-workload-identity-mapping)). Do not create KSAs named `scion-*` in agent namespaces for any other purpose.
+
+**The pool setting.** Set `workload_identity_pool` on each `kubernetes` runtime entry, in the broker's global settings:
+
+```yaml
+runtimes:
+  gke-prod:
+    type: kubernetes
+    namespace: agents
+    workload_identity_pool: my-cluster-project.svc.id.goog
+```
+
+- The value is the pool of the cluster's GCP project, `<cluster-project-id>.svc.id.goog`. It is validated in that form. The cluster's project need not be the Hub's project.
+- It is read only from the broker's global settings, or from the Hub database for a Runtime Broker in the same process as a database-backed Hub (the same source as the namespace). It is never read from a project's `settings.yaml`; a value there is ignored, and an `assign` dispatch logs a warning.
+- It applies to every profile on that runtime entry. The namespace reported with it is the one an `assign` dispatch on the profile resolves (the entry's `namespace`, else the runtime default). A Runtime Broker started with a forced runtime reports no targets.
+- The broker reports the pool and namespace per profile on every heartbeat (`workloadIdentityTargets`, with the capability `wiTargetsV1`), whether the experiment is on or off. The Hub stores only entries whose pool has the form above and whose namespace is a valid Kubernetes namespace name (at most 64 per broker), and drops the rest with a warning. Flat Runtime Broker instances accept `runtime_target.workload_identity_pool` but do not report it yet, so their Kubernetes targets are listed as `no_workload_identity_pool`.
+
+**What the mint does.** After the grants the mint needs (token creator for the Hub, and the optional self `serviceAccountUser`), the Hub adds every member to `roles/iam.workloadIdentityUser` on the new GSA in one update of the GSA's IAM policy. Equal pool and namespace pairs are granted once. The Hub only changes the minted GSA's own policy: it never edits a project IAM policy and never calls Kubernetes. Its existing `roles/iam.serviceAccountAdmin` on the Hub project covers the change.
+
+The grant is best effort. **A failed grant never fails the mint**: the GSA is stored as verified either way. The mint response lists each target in `workloadIdentityBindings`, and the CLI prints one line per entry:
+
+| `state` | `reason` | Meaning |
+| :--- | :--- | :--- |
+| `bound` | | The member was added. |
+| `skipped` | `permission_denied` | The Hub may not change the GSA's IAM policy. |
+| `skipped` | `pool_not_found` | IAM does not know the pool: Workload Identity is not enabled in that project, or `workload_identity_pool` is misspelt. The other targets are still granted. |
+| `skipped` | `no_workload_identity_pool` | A Kubernetes profile or flat instance of a project broker reports no pool: none is configured, the broker is too old to report one, or it is a flat instance, which does not report one yet (`detail` says which). |
+| `failed` | `iam_error` | Any other IAM error. |
+
+Each entry that is not `bound` carries a `manualStep`, the command that makes the grant by hand, with its arguments in single quotes. For a `no_workload_identity_pool` entry, fill in the cluster project and namespace:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding '<GSA email>' \
+  --role roles/iam.workloadIdentityUser \
+  --member 'serviceAccount:<CLUSTER_PROJECT>.svc.id.goog[<NAMESPACE>/<account ID>]'
+```
+
+A new binding can take a few minutes to take effect, so the first token request of an agent started right after the mint can fail. Brokers added to the project after the mint, and GSAs minted before the experiment was on, get no binding: use the manual command. Hub-scoped mints are not bound yet.
+
+**Who can act as the GSA.** Workload Identity authorises by member, not by annotation: anyone who can create a KSA with the conventional name in that namespace, or run a pod as it, can act as the GSA. This is the same as a binding made by hand. Use a namespace dedicated to Scion agents, where only the broker's identity can create ServiceAccounts and pods.
+
 #### GCP Identity Mode "assign" (Workload Identity mapping)
 
 On every other runtime, `assign` runs the sciontool metadata server emulator inside the agent. On Kubernetes it does not: the broker sets the pod's `spec.serviceAccountName` to the KSA mapped to (or discovered for) the assigned GSA, and GCP client libraries in the container reach the GKE metadata server directly. The emulator environment is not set for these pods: `SCION_METADATA_MODE` is `passthrough`, and `GCE_METADATA_HOST`, `GCE_METADATA_ROOT`, and `SCION_METADATA_PORT` are absent. `SCION_METADATA_SA_EMAIL` and `SCION_METADATA_PROJECT_ID` are still set. Some harnesses read them (for example the project ID for Vertex AI), but they do not change the pod's identity.
 
 The Hub-side checks on who may assign a GSA (`actAs` and hub-scoped service accounts) are the same on every runtime.
 
-**Operator prerequisites.** Scion never creates, annotates, or binds KSAs. Apart from reading the annotation for discovery (below), it does not check that these steps were done. For each GSA you assign to agents on a cluster:
+**Operator prerequisites.** Scion never creates or annotates KSAs, and binds them only for GSAs the Hub mints while [`hub.k8s_workload_identity_setup`](#workload-identity-binding-at-mint) is on (step 4 below). Apart from reading the annotation for discovery (below), it does not check that these steps were done. For each GSA you assign to agents on a cluster:
 
 1. Workload Identity Federation is enabled on the cluster, and every node pool that runs agent pods uses the `GKE_METADATA` metadata server. GKE Autopilot clusters have both by default.
 2. A KSA exists in the namespace the agent pods run in (see **Namespace** below).

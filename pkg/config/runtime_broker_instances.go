@@ -124,6 +124,9 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 			if err := ValidateKubernetesServiceAccountMappings(t.KubernetesServiceAccountMappings); err != nil {
 				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubernetes_service_account_mappings", Message: err.Error()})
 			}
+			if err := ValidateWorkloadIdentityPool(t.WorkloadIdentityPool); err != nil {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.workload_identity_pool", Message: err.Error()})
+			}
 			if err := ValidateSharedDirSize(t.SharedDirSize); err != nil {
 				errs = append(errs, ValidationError{Path: p + ".runtime_target.shared_dir_size", Message: err.Error()})
 			}
@@ -161,6 +164,7 @@ func kubernetesOnlyFieldsSet(t *V1RuntimeTargetConfig) []string {
 		{"shared_dir_storage_class", t.SharedDirStorageClass != ""}, {"shared_dir_size", t.SharedDirSize != ""},
 		{"priority_class_name", t.PriorityClassName != ""}, {"runtime_class_name", t.RuntimeClassName != ""},
 		{"kubernetes_service_account_mappings", len(t.KubernetesServiceAccountMappings) > 0},
+		{"workload_identity_pool", t.WorkloadIdentityPool != ""},
 		{"gke", t.GKE}, {"safe_to_evict", t.SafeToEvict != nil},
 		{"node_selector", len(t.NodeSelector) > 0}, {"tolerations", len(t.Tolerations) > 0}} {
 		if f.set {
@@ -581,7 +585,7 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 				return fmt.Errorf("%s.runtime_target must be a mapping", p)
 			}
 			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace", "kubeconfig",
-				"kubernetes_block_service_account",
+				"kubernetes_block_service_account", "workload_identity_pool",
 				"shared_dir_storage_class", "shared_dir_size", "priority_class_name", "runtime_class_name",
 				"shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf",
 				"project_id", "region", "service_account", "block_service_account", "network", "subnetwork", "credentials_file"); err != nil {
@@ -1044,6 +1048,7 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				Kubeconfig:                       i.RuntimeTarget.Kubeconfig,
 				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
 				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
+				WorkloadIdentityPool:             i.RuntimeTarget.WorkloadIdentityPool,
 				SharedDirStorageClass:            i.RuntimeTarget.SharedDirStorageClass,
 				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
 				GKE:                              i.RuntimeTarget.GKE,
@@ -1099,6 +1104,7 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				Kubeconfig:                       i.RuntimeTarget.Kubeconfig,
 				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
 				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
+				WorkloadIdentityPool:             i.RuntimeTarget.WorkloadIdentityPool,
 				SharedDirStorageClass:            i.RuntimeTarget.SharedDirStorageClass,
 				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
 				GKE:                              i.RuntimeTarget.GKE,

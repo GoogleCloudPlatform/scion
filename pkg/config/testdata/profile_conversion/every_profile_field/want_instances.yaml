@@ -12,6 +12,7 @@ server:
           kubernetes_service_account_mappings:
             agent@proj.iam.gserviceaccount.com: ksa-agent
           kubernetes_block_service_account: zero-priv
+          workload_identity_pool: cluster-project.svc.id.goog
         agent_defaults:
           default_harness_config: claude
           image_registry: registry.example/team

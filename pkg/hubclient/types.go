@@ -491,6 +491,13 @@ type BrokerCapabilities struct {
 	// create/start/restart as policy above everything. A hub may stop writing those values into
 	// InlineConfig only for a broker that reports this (ptone/scion#4222).
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// WITargetsV1 indicates the broker reports its Workload Identity
+	// targets in every heartbeat (BrokerHeartbeat.WorkloadIdentityTargets,
+	// the wi_targets_v1 capability, ptone/scion#3329 phase 5), so an empty
+	// list means no workload_identity_pool is configured rather than an
+	// older broker. Sent only on the heartbeat
+	// (store.BrokerCapabilities.WITargetsV1 is its counterpart).
+	WITargetsV1 bool `json:"wiTargetsV1,omitempty"`
 	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY, the node env
 	// layer of image_registry that beats every settings value for agents
 	// this broker runs (ptone/scion#3916). It is a node configuration value

@@ -22,7 +22,9 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -550,8 +552,57 @@ func runSAMint(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  Verified:  %v\n", sa.Verified)
 	fmt.Printf("  Managed:   %v\n", sa.Managed)
+	printWorkloadIdentityBindings(os.Stdout, sa.WorkloadIdentityBindings)
 
 	return nil
+}
+
+// printWorkloadIdentityBindings prints one line per Workload Identity
+// binding entry of a mint response, with the manual gcloud command for an
+// entry that is not bound. Nothing is printed when there are none.
+func printWorkloadIdentityBindings(w io.Writer, bindings []api.WorkloadIdentityBinding) {
+	if len(bindings) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "  Workload Identity bindings:")
+	anyBound := false
+	for _, b := range bindings {
+		where := wiOneLine(strings.Join(b.Profiles, ", "))
+		if b.State == api.WorkloadIdentityBindingBound {
+			anyBound = true
+			_, _ = fmt.Fprintf(w, "    bound    %s (%s)\n", wiOneLine(b.Member), where)
+			continue
+		}
+		target := wiOneLine(b.Member)
+		if target == "" {
+			target = where
+		} else if where != "" {
+			target += " (" + where + ")"
+		}
+		_, _ = fmt.Fprintf(w, "    %-8s %s: %s", wiOneLine(b.State), target, wiOneLine(b.Reason))
+		if b.Detail != "" {
+			_, _ = fmt.Fprintf(w, " - %s", wiOneLine(b.Detail))
+		}
+		_, _ = fmt.Fprintln(w)
+		if b.ManualStep != "" {
+			_, _ = fmt.Fprintf(w, "             to grant it by hand: %s\n", wiOneLine(b.ManualStep))
+		}
+	}
+	if anyBound {
+		_, _ = fmt.Fprintln(w, "  A new Workload Identity binding can take a few minutes to take effect.")
+	}
+}
+
+// wiOneLine replaces control characters (newlines and terminal escapes
+// included) with spaces, so a value from the Hub cannot add or rewrite a
+// line of the output.
+func wiOneLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 func runSAVerify(cmd *cobra.Command, args []string) error {

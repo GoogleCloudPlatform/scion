@@ -2995,6 +2995,17 @@ type mockGCPServiceAccountAdmin struct {
 
 	// Track IAM mutations for assertions.
 	iamPolicies []mockIAMPolicyCall // SA-level SetIAMPolicy calls
+
+	// addMembersCalls records each AddRoleMembers call; addMembersErr,
+	// when set, returns the error of a call (nil succeeds).
+	addMembersCalls []mockAddRoleMembersCall
+	addMembersErr   func(call int, members []string) error
+}
+
+type mockAddRoleMembersCall struct {
+	SAEmail string
+	Role    string
+	Members []string
 }
 
 func testServerWithMinting(t *testing.T) (*Server, store.Store, *mockGCPServiceAccountAdmin) {
@@ -5850,6 +5861,16 @@ func (m *mockGCPServiceAccountAdmin) SetIAMPolicy(_ context.Context, saEmail, me
 		Role:    role,
 	})
 	return m.policyErr
+}
+
+func (m *mockGCPServiceAccountAdmin) AddRoleMembers(_ context.Context, saEmail, role string, members []string) error {
+	m.addMembersCalls = append(m.addMembersCalls, mockAddRoleMembersCall{
+		SAEmail: saEmail, Role: role, Members: append([]string(nil), members...),
+	})
+	if m.addMembersErr != nil {
+		return m.addMembersErr(len(m.addMembersCalls), members)
+	}
+	return nil
 }
 
 type mockIAMPolicyCall struct {

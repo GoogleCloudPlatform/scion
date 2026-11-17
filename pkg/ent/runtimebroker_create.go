@@ -218,6 +218,20 @@ func (_c *RuntimeBrokerCreate) SetNillableHealth(v *string) *RuntimeBrokerCreate
 	return _c
 }
 
+// SetWorkloadIdentityTargets sets the "workload_identity_targets" field.
+func (_c *RuntimeBrokerCreate) SetWorkloadIdentityTargets(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetWorkloadIdentityTargets(v)
+	return _c
+}
+
+// SetNillableWorkloadIdentityTargets sets the "workload_identity_targets" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableWorkloadIdentityTargets(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetWorkloadIdentityTargets(*v)
+	}
+	return _c
+}
+
 // SetLabels sets the "labels" field.
 func (_c *RuntimeBrokerCreate) SetLabels(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetLabels(v)
@@ -824,6 +838,10 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_spec.SetField(runtimebroker.FieldHealth, field.TypeString, value)
 		_node.Health = value
 	}
+	if value, ok := _c.mutation.WorkloadIdentityTargets(); ok {
+		_spec.SetField(runtimebroker.FieldWorkloadIdentityTargets, field.TypeString, value)
+		_node.WorkloadIdentityTargets = value
+	}
 	if value, ok := _c.mutation.Labels(); ok {
 		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 		_node.Labels = value
@@ -1225,6 +1243,24 @@ func (u *RuntimeBrokerUpsert) UpdateHealth() *RuntimeBrokerUpsert {
 // ClearHealth clears the value of the "health" field.
 func (u *RuntimeBrokerUpsert) ClearHealth() *RuntimeBrokerUpsert {
 	u.SetNull(runtimebroker.FieldHealth)
+	return u
+}
+
+// SetWorkloadIdentityTargets sets the "workload_identity_targets" field.
+func (u *RuntimeBrokerUpsert) SetWorkloadIdentityTargets(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldWorkloadIdentityTargets, v)
+	return u
+}
+
+// UpdateWorkloadIdentityTargets sets the "workload_identity_targets" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateWorkloadIdentityTargets() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldWorkloadIdentityTargets)
+	return u
+}
+
+// ClearWorkloadIdentityTargets clears the value of the "workload_identity_targets" field.
+func (u *RuntimeBrokerUpsert) ClearWorkloadIdentityTargets() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldWorkloadIdentityTargets)
 	return u
 }
 
@@ -2042,6 +2078,27 @@ func (u *RuntimeBrokerUpsertOne) UpdateHealth() *RuntimeBrokerUpsertOne {
 func (u *RuntimeBrokerUpsertOne) ClearHealth() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearHealth()
+	})
+}
+
+// SetWorkloadIdentityTargets sets the "workload_identity_targets" field.
+func (u *RuntimeBrokerUpsertOne) SetWorkloadIdentityTargets(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetWorkloadIdentityTargets(v)
+	})
+}
+
+// UpdateWorkloadIdentityTargets sets the "workload_identity_targets" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateWorkloadIdentityTargets() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateWorkloadIdentityTargets()
+	})
+}
+
+// ClearWorkloadIdentityTargets clears the value of the "workload_identity_targets" field.
+func (u *RuntimeBrokerUpsertOne) ClearWorkloadIdentityTargets() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearWorkloadIdentityTargets()
 	})
 }
 
@@ -3107,6 +3164,27 @@ func (u *RuntimeBrokerUpsertBulk) UpdateHealth() *RuntimeBrokerUpsertBulk {
 func (u *RuntimeBrokerUpsertBulk) ClearHealth() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearHealth()
+	})
+}
+
+// SetWorkloadIdentityTargets sets the "workload_identity_targets" field.
+func (u *RuntimeBrokerUpsertBulk) SetWorkloadIdentityTargets(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetWorkloadIdentityTargets(v)
+	})
+}
+
+// UpdateWorkloadIdentityTargets sets the "workload_identity_targets" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateWorkloadIdentityTargets() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateWorkloadIdentityTargets()
+	})
+}
+
+// ClearWorkloadIdentityTargets clears the value of the "workload_identity_targets" field.
+func (u *RuntimeBrokerUpsertBulk) ClearWorkloadIdentityTargets() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearWorkloadIdentityTargets()
 	})
 }
 

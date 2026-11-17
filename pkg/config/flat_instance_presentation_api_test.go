@@ -109,6 +109,7 @@ var presentationNeverKeys = []string{
 	"context", "kubeconfig",
 	"kubernetes_service_account_mappings", "kubernetesServiceAccountMappings",
 	"kubernetes_block_service_account", "kubernetesBlockServiceAccount",
+	"workload_identity_pool", "workloadIdentityPool",
 	"home_storage_leaf", "homeStorageLeaf",
 	"project_id", "projectId",
 	"service_account", "serviceAccount",

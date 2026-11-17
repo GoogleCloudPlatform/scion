@@ -43,7 +43,7 @@ var fc4aRows = map[string]map[string]string{
 		"type": fc4AsIs, "display_name": fc4AsIs, "namespace": fc4AsIs,
 		"context": fc4Never, "kubeconfig": fc4Never,
 		"kubernetes_service_account_mappings": fc4Never, "kubernetes_block_service_account": fc4Never,
-		"gke": fc4AsIs, "priority_class_name": fc4AsIs, "shared_dir_storage_class": fc4AsIs,
+		"workload_identity_pool": fc4Never, "gke": fc4AsIs, "priority_class_name": fc4AsIs, "shared_dir_storage_class": fc4AsIs,
 		"shared_dir_size": fc4AsIs, "safe_to_evict": fc4AsIs,
 		"shared_dir_storage_backend": fc4AsIs, "shared_dir_storage_backends": fc4AsIs,
 		"home_storage_backend": fc4AsIs, "home_storage_leaf": fc4Never,

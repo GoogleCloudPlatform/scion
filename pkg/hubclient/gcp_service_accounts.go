@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -151,6 +152,12 @@ type GCPServiceAccount struct {
 	// (kubernetes_service_account_mappings). Never an error, and absent on
 	// other responses.
 	Warnings []string `json:"warnings,omitempty"`
+
+	// WorkloadIdentityBindings reports, on a mint response, the
+	// roles/iam.workloadIdentityUser grants the Hub made or skipped on the
+	// new account (hub.k8s_workload_identity_setup; ptone/scion#3329 phase
+	// 5). Absent on other responses and when the experiment is off.
+	WorkloadIdentityBindings []api.WorkloadIdentityBinding `json:"workloadIdentityBindings,omitempty"`
 
 	// Mapping summarizes the listed project's Kubernetes broker profiles that
 	// map this account. Present on project-scope lists only.

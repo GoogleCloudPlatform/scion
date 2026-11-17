@@ -581,6 +581,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.K8sNFSHome:                   testAdminPolicyDeny,
 	experiments.CloudRunNativeIdentity:       testAdminPolicyDeny,
 	experiments.CloudRunEphemeralAgents:      testAdminPolicyDeny,
+	experiments.K8sWorkloadIdentitySetup:     testAdminPolicyDeny,
 	experiments.FlatRuntimeBrokers:           testAdminPolicyDeny,
 	experiments.FlatCloudRunTarget:           testAdminPolicyDeny,
 	experiments.Artifacts:                    testAdminPolicyDeny,

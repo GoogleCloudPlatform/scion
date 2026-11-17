@@ -1256,6 +1256,15 @@ type RuntimeBroker struct {
 	// has never reported it (an older broker).
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
 
+	// WorkloadIdentityTargets are the Kubernetes runtime targets of the
+	// broker that have a GKE Workload Identity pool configured, as the
+	// broker last reported them in its heartbeat (ptone/scion#3329 phase
+	// 5): one per profile for a legacy broker, at most one (with no
+	// profile) for a flat instance. Written only when it changes (stored as
+	// JSON). Nil means never reported (an older broker, or one that has not
+	// sent the field); an empty list means the broker reports none.
+	WorkloadIdentityTargets []WorkloadIdentityTarget `json:"workloadIdentityTargets,omitempty"`
+
 	// RuntimeTargetPresentation is the publishable configuration a flat
 	// Runtime Broker instance last reported
 	// (.design/flat-runtime-brokers/contract-appendix-p3.md FC4-a;
@@ -1539,12 +1548,35 @@ type BrokerCapabilities struct {
 	// does the hub stop writing those values into InlineConfig
 	// (ptone/scion#4222). Refreshed by every heartbeat.
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// WITargetsV1 indicates the broker reports its Workload Identity
+	// targets in every heartbeat (the wi_targets_v1 capability,
+	// ptone/scion#3329 phase 5), so a broker that reports none has no
+	// workload_identity_pool configured rather than being too old to report
+	// one. Refreshed by every heartbeat.
+	WITargetsV1 bool `json:"wiTargetsV1,omitempty"`
 	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY: the node env
 	// layer the hub resolves this broker's dispatches with
 	// (ptone/scion#3916). It is a node configuration value, not a feature
 	// flag. Sent at registration and in every heartbeat with capabilities;
 	// empty (an old broker, or none set) means no node env.
 	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
+}
+
+// WorkloadIdentityTarget is one Kubernetes runtime target of a broker with a
+// GKE Workload Identity pool (hubclient.WorkloadIdentityTarget): where an
+// agent of that target runs, so the hub can bind a GCP service account it
+// mints to the conventional Kubernetes ServiceAccount there.
+type WorkloadIdentityTarget struct {
+	// Profile is the legacy broker profile; empty for a flat instance.
+	Profile string `json:"profile,omitempty"`
+	// Pool is the Workload Identity pool, "<project>.svc.id.goog".
+	Pool string `json:"pool"`
+	// Namespace is the namespace the broker runs the target's agents in.
+	Namespace string `json:"namespace"`
+	// KSACreation reports that the broker may create the conventional
+	// Kubernetes ServiceAccount (create_service_accounts). Always false
+	// until that setting exists (ptone/scion#3329 phase 5, P3).
+	KSACreation bool `json:"ksaCreation,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
