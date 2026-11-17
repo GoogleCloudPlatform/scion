@@ -32,6 +32,7 @@ vi.mock('./api.js', async (importOriginal) => {
 });
 
 import { apiFetch } from './api.js';
+import { chatDMsLoad } from './chat-list-cache.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import {
   fetchPaletteDms,
@@ -46,6 +47,7 @@ import {
   PaletteLoadError,
   ChatPaletteDataController,
   AGENT_DMS_CACHE_MS,
+  PALETTE_DMS_MAX_AGE_MS,
   PEOPLE_SEARCH_MIN_CHARS,
   type PaletteAgentSource,
   type RawPaletteDm,
@@ -78,6 +80,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   apiFetchMock.mockReset();
+  chatDMsLoad.invalidate();
   resetUserDirectory();
   vi.useRealTimers();
 });
@@ -99,7 +102,7 @@ describe('fetchPaletteDms', () => {
   it('throws PaletteLoadError, not a raw SyntaxError, on a non-JSON body', async () => {
     apiFetchMock.mockResolvedValue(new Response('not json', { status: 200 }));
     await expect(fetchPaletteDms()).rejects.toThrow(PaletteLoadError);
-    await expect(fetchPaletteDms()).rejects.toThrow(/not valid JSON/);
+    await expect(fetchPaletteDms()).rejects.not.toBeInstanceOf(SyntaxError);
   });
 
   it('an abort landing during the body read rejects with the original AbortError, not PaletteLoadError', async () => {
@@ -132,7 +135,7 @@ describe('fetchPaletteDms', () => {
     apiFetchMock.mockResolvedValueOnce(new Response('not json', { status: 200 }));
     await expect(fetchPaletteDms(liveSignal)).rejects.toBeInstanceOf(PaletteLoadError);
     apiFetchMock.mockResolvedValueOnce(new Response('not json', { status: 200 }));
-    await expect(fetchPaletteDms(liveSignal)).rejects.toThrow(/not valid JSON/);
+    await expect(fetchPaletteDms(liveSignal)).rejects.not.toBeInstanceOf(SyntaxError);
   });
 
   it('returns an empty list for a malformed (non-array) dms field instead of throwing or returning it as-is', () => {
@@ -172,6 +175,35 @@ describe('fetchPaletteDms', () => {
     await expect(fetchPaletteDms()).rejects.toBeInstanceOf(PaletteLoadError);
     apiFetchMock.mockResolvedValueOnce(jsonResponse(42));
     await expect(fetchPaletteDms()).rejects.toBeInstanceOf(PaletteLoadError);
+  });
+
+  it('joins an in-flight chatDMsLoad request and returns a defensive copy', async () => {
+    let resolveDms!: (v: Response) => void;
+    apiFetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveDms = resolve;
+        })
+    );
+
+    const sharedInFlight = chatDMsLoad.load();
+    const palettePromise = fetchPaletteDms();
+    palettePromise.catch(() => {});
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+
+    resolveDms(
+      jsonResponse({
+        dms: [
+          { conversationKey: 'k1', peerId: 'a1', peerKind: 'agent' },
+          { conversationKey: 'k2', peerId: 'a2', peerKind: 'agent' },
+        ],
+      })
+    );
+    const [sharedBody, paletteDms] = await Promise.all([sharedInFlight, palettePromise]);
+    expect(paletteDms).toHaveLength(2);
+    // Mutating/sorting the palette's array must not mutate chatDMsLoad's shared body.
+    paletteDms.reverse();
+    expect((sharedBody?.dms as Array<{ conversationKey: string }>)[0].conversationKey).toBe('k1');
   });
 });
 
@@ -672,27 +704,26 @@ describe('ChatPaletteDataController: Agents group from the agent store', () => {
 
   it('a DM fetch that hangs is aborted after the idle bound and surfaces a PaletteLoadError', async () => {
     vi.useFakeTimers();
-    let dmAborted = false;
-    apiFetchMock.mockImplementationOnce((_url, options) => {
-      return new Promise((_resolve, reject) => {
-        options?.signal?.addEventListener('abort', () => {
-          dmAborted = true;
-          reject(new DOMException('aborted', 'AbortError'));
-        });
-      });
-    });
+    apiFetchMock.mockImplementationOnce(() => new Promise<Response>(() => {}));
     const { source, pending } = fakeAgentSource();
     const controller = new ChatPaletteDataController(source);
+    let settled = false;
     const load = controller.loadAgentsGroup();
-    load.catch(() => {});
+    load.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      }
+    );
     pending[0]?.resolve(snapshot([CODER]));
 
     await vi.advanceTimersByTimeAsync(89_999);
-    expect(dmAborted).toBe(false);
+    expect(settled).toBe(false);
 
     const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
     await vi.advanceTimersByTimeAsync(2);
-    expect(dmAborted).toBe(true);
     await expectation;
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -1181,7 +1212,8 @@ describe('ChatPaletteDataController: People group from the recent-users page', (
     expect(users[0].searchParams.has('cursor')).toBe(false);
   });
 
-  it('a later load inside the directory TTL reuses the page: only the DM list is fetched again', async () => {
+  it('a later load inside the directory TTL reuses the recent-users page and shared DMs within PALETTE_DMS_MAX_AGE_MS, then refetches DMs only', async () => {
+    vi.useFakeTimers();
     routeUsers({
       recent: () => Promise.resolve(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] })),
     });
@@ -1190,10 +1222,15 @@ describe('ChatPaletteDataController: People group from the recent-users page', (
     await controller.loadPeopleGroup('self-user');
 
     expect(recentCalls()).toHaveLength(1);
-    const dmCalls = apiFetchMock.mock.calls
-      .map(requestUrl)
-      .filter((u) => u.pathname === '/api/v1/chat/dms');
-    expect(dmCalls).toHaveLength(2);
+    const dmCallsCount = (): number =>
+      apiFetchMock.mock.calls.map(requestUrl).filter((u) => u.pathname === '/api/v1/chat/dms')
+        .length;
+    expect(dmCallsCount()).toBe(1);
+
+    vi.advanceTimersByTime(PALETTE_DMS_MAX_AGE_MS + 1);
+    await controller.loadPeopleGroup('self-user');
+    expect(recentCalls()).toHaveLength(1);
+    expect(dmCallsCount()).toBe(2);
   });
 
   it('a failed recent-users page fails the group with a PaletteLoadError', async () => {
@@ -1276,28 +1313,43 @@ describe('ChatPaletteDataController: People group from the recent-users page', (
     expect(recentCalls()).toHaveLength(1);
   });
 
-  it('cancelling Agents does not abort a concurrently in-flight People DM fetch', async () => {
-    let peopleDmSignal: AbortSignal | undefined;
-    apiFetchMock.mockImplementation((path, options) => {
+  it('cancelling Agents does not abort a concurrently in-flight People DM fetch, and both groups share one /chat/dms request', async () => {
+    let resolveDms!: (v: Response) => void;
+    apiFetchMock.mockImplementation((path) => {
       const url = new URL(String(path), 'http://hub.test');
-      if (isRecentUsersUrl(url)) return Promise.resolve(jsonResponse({ users: [] }));
-      peopleDmSignal = options?.signal ?? undefined;
-      return new Promise(() => {});
+      if (isRecentUsersUrl(url)) {
+        return Promise.resolve(jsonResponse({ users: [{ id: 'u0', displayName: 'Alice' }] }));
+      }
+      return new Promise<Response>((resolve) => {
+        resolveDms = resolve;
+      });
     });
     const { source, pending } = fakeAgentSource();
     const controller = new ChatPaletteDataController(source);
-    controller.loadAgentsGroup().catch(() => {});
-    void controller.loadPeopleGroup('self-user');
+    const firstAgents = controller.loadAgentsGroup();
+    firstAgents.catch(() => {});
+    const peopleLoad = controller.loadPeopleGroup('self-user');
     await vi.waitFor(() => {
       expect(pending[0]).toBeDefined();
-      expect(peopleDmSignal).toBeDefined();
+      expect(resolveDms).toBeDefined();
     });
     const agentsSignal = pending[0]!.signal!;
 
-    controller.loadAgentsGroup().catch(() => {});
-
+    const secondAgents = controller.loadAgentsGroup();
     expect(agentsSignal.aborted).toBe(true);
-    expect(peopleDmSignal!.aborted).toBe(false);
+
+    pending[1]!.resolve(snapshot([CODER]));
+    resolveDms(jsonResponse({ dms: [] }));
+
+    await expect(firstAgents).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(peopleLoad).resolves.toMatchObject([expect.objectContaining({ label: 'Alice' })]);
+    await expect(secondAgents).resolves.toMatchObject([
+      expect.objectContaining({ label: 'Coder' }),
+    ]);
+    const dmCalls = apiFetchMock.mock.calls
+      .map(requestUrl)
+      .filter((u) => u.pathname === '/api/v1/chat/dms');
+    expect(dmCalls).toHaveLength(1);
   });
 });
 

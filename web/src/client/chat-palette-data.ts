@@ -31,6 +31,7 @@
 
 import { apiFetch } from './api.js';
 import type { ApiFetchOptions } from './api.js';
+import { chatDMsLoad, chatLoadClock, type SharedLoadOptions } from './chat-list-cache.js';
 import { agentStore } from './agent-store.js';
 import type { AgentListSnapshot, AgentStore } from './agent-store.js';
 import { canMessageAgent } from '../shared/types.js';
@@ -129,41 +130,40 @@ export class PaletteLoadError extends Error {
   }
 }
 
+/** Max age of a shared `/api/v1/chat/dms` response reused by the palette. */
+export const PALETTE_DMS_MAX_AGE_MS = 10_000;
+
 /**
- * Fetch the current user's DM list. Failure here propagates and fails the
- * whole Agents group at the call site ({@link ChatPaletteDataController.loadAgentsGroup}) —
- * silently degrading every agent to `activityMs=0` would read as "no agent
- * has a DM yet" rather than "recency is unknown right now".
+ * Fetch the current user's DM list via the shared `chatDMsLoad` loader.
+ * Failure here propagates and fails the whole Agents/People group at the call
+ * site ({@link ChatPaletteDataController.loadAgentsGroup}) — silently
+ * degrading every candidate to `activityMs=0` would read as "no DM yet"
+ * rather than "recency is unknown right now".
  */
-export async function fetchPaletteDms(signal?: AbortSignal): Promise<RawPaletteDm[]> {
-  const options: ApiFetchOptions | undefined = signal ? { signal } : undefined;
-  const res = await apiFetch('/api/v1/chat/dms', options);
-  if (!res.ok) {
-    throw new PaletteLoadError(`dm list request failed: ${res.status}`);
-  }
-  let raw: unknown;
-  try {
-    raw = await res.json();
-  } catch (err) {
-    // A cancelled or superseded load aborts `signal` out from under an
-    // in-flight body read: `res.json()` then rejects with an AbortError,
-    // not because the body was malformed. Rethrow it as-is so the caller's
-    // AbortError handling (see ChatPaletteDataController) sees "no update,"
-    // not a load failure; only a genuinely bad body becomes a
-    // PaletteLoadError.
-    if (signal?.aborted) {
-      throw err;
-    }
-    throw new PaletteLoadError('dm list response was not valid JSON');
+export async function fetchPaletteDms(
+  signal?: AbortSignal,
+  options?: Pick<SharedLoadOptions, 'startedAfter'>
+): Promise<RawPaletteDm[]> {
+  const loadOptions: SharedLoadOptions = {
+    maxAgeMs: PALETTE_DMS_MAX_AGE_MS,
+    ...(options?.startedAfter !== undefined ? { startedAfter: options.startedAfter } : {}),
+  };
+  const raw: unknown = signal
+    ? await untilAborted(chatDMsLoad.load(loadOptions), signal)
+    : await chatDMsLoad.load(loadOptions);
+  if (signal?.aborted) {
+    throw new DOMException('load aborted', 'AbortError');
   }
   // A JSON body can be null, an array or a primitive and still parse; none
   // of those is a DM list, and treating one as "zero DMs" would silently
   // hide a misconfigured endpoint. Reject anything that isn't an object.
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new PaletteLoadError('dm list response body was not an object');
+    if (raw !== null) chatDMsLoad.invalidate();
+    throw new PaletteLoadError('dm list could not be loaded');
   }
   const data = raw as DmListResponse;
-  return Array.isArray(data.dms) ? data.dms : [];
+  // Copy the array so callers cannot mutate `chatDMsLoad`'s shared body.
+  return Array.isArray(data.dms) ? [...data.dms] : [];
 }
 
 /**
@@ -574,6 +574,7 @@ export class ChatPaletteDataController {
   private agentDms: RawPaletteDm[] | null = null;
   private agentDmsAt = 0;
   private agentDmsStale = false;
+  private agentDmsStaleAt = -Infinity;
   /** Bumped by {@link markAgentDmsStale}, so a mark during a DM fetch is not lost. */
   private agentDmsMarks = 0;
   private peopleGeneration = 0;
@@ -679,11 +680,15 @@ export class ChatPaletteDataController {
       let dms = this.freshAgentDms();
       if (!dms) {
         const marks = this.agentDmsMarks;
+        const staleAt = this.agentDmsStale ? this.agentDmsStaleAt : undefined;
         idleTimer = setTimeout(
           () => controller.abort(AGENTS_IDLE_TIMEOUT_REASON),
           AGENTS_IDLE_TIMEOUT_MS
         );
-        dms = await fetchPaletteDms(controller.signal);
+        dms = await fetchPaletteDms(
+          controller.signal,
+          staleAt !== undefined ? { startedAfter: staleAt } : undefined
+        );
         if (!isCurrent()) {
           throw new DOMException('superseded by a later load', 'AbortError');
         }
@@ -739,6 +744,7 @@ export class ChatPaletteDataController {
   /** A chat or DM change may have moved recency: the next Agents load fetches the DM list. */
   markAgentDmsStale(): void {
     this.agentDmsStale = true;
+    this.agentDmsStaleAt = Math.max(this.agentDmsStaleAt, chatLoadClock());
     this.agentDmsMarks++;
   }
 
@@ -773,7 +779,10 @@ export class ChatPaletteDataController {
         throw new PaletteLoadError('recent users could not be loaded');
       }
 
-      const dms = await fetchPaletteDms(controller.signal);
+      const dms = await fetchPaletteDms(
+        controller.signal,
+        this.agentDmsStale ? { startedAfter: this.agentDmsStaleAt } : undefined
+      );
 
       if (!isCurrent()) {
         throw new DOMException('superseded by a later load', 'AbortError');

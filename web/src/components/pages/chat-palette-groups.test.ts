@@ -48,6 +48,7 @@ import {
   agent,
   createHarness,
 } from '../../client/__fixtures__/agent-store-harness.js';
+import { chatDMsLoad } from '../../client/chat-list-cache.js';
 import { chatRecentFiles } from '../../client/chat-recent-files.js';
 import { resetUserDirectory } from '../../client/user-directory.js';
 import type { RecentFile, RecentFilesSnapshot } from '../../client/chat-recent-files.js';
@@ -104,8 +105,9 @@ beforeAll(async () => {
 
 beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
-  // The recent-users page is cached page-wide; each test serves its own.
+  // The recent-users page and DM list are cached page-wide; each test serves its own.
   resetUserDirectory();
+  chatDMsLoad.invalidate();
   vi.mocked(navigateTo).mockReset();
   fakeState.agents.clear();
   // Several tests capture "the URL before" and assert it is unchanged after
