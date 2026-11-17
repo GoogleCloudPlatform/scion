@@ -656,6 +656,11 @@ func (w *ingressLockOrderStore) WithTx(ctx context.Context, fn func(tx store.Sto
 	})
 }
 
+func (w *ingressLockOrderStore) DurableQueueStats(ctx context.Context, kind, projectID string, now time.Time) (store.DurableQueueStats, error) {
+	w.record("outer.DurableQueueStats")
+	return w.DurableQueueStore.DurableQueueStats(ctx, kind, projectID, now)
+}
+
 func (w *ingressLockOrderStore) EnqueueDurableItem(ctx context.Context, tx store.Tx, row store.DurableQueueRow) (int64, error) {
 	w.record("tx.EnqueueDurableItem")
 	if wrappedTx, ok := tx.(*ingressLockOrderTxStore); ok {

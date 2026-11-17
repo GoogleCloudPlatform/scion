@@ -486,8 +486,9 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 8: per-project verified bucket (50/s burst 300), hub-wide verified
-	// bucket (200/s burst 1000), then per-project pending queue cap (5000).
+	// Step 8: per-project verified bucket (50/s burst 300) and hub-wide verified
+	// bucket (200/s burst 1000). The per-project pending queue cap (5000) is
+	// checked once authoritatively inside WithTx under LockTriggerQuota below.
 	if !h.limiter.AllowProjectVerified(ep.ProjectID) {
 		h.rejectedRateLimit.Add(1)
 		writeRateLimited(w, "1", "rate limit exceeded")
@@ -498,20 +499,8 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeRateLimited(w, "1", "rate limit exceeded")
 		return
 	}
-	stats, err := h.queueStore.DurableQueueStats(ctx, EventQueueKind, ep.ProjectID, now)
-	if err != nil {
-		h.failedStore.Add(1)
-		h.logger.Error("Failed to read trigger queue stats", "project_id", ep.ProjectID, "error", err)
-		apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeInternalError, "internal server error", nil)
-		return
-	}
-	if stats.Pending >= MaxPendingEventsPerProject {
-		h.rejectedQueueFull.Add(1)
-		writeRateLimited(w, "30", "queue full")
-		return
-	}
 
-	// Step 9: construct TriggerEvent (§8.2) and insert + enqueue in one transaction (§6.2).
+	// Step 9: construct TriggerEvent (§8.2) and check pending cap + insert + enqueue in one transaction (§6.2).
 	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, body, now, h.newEventID)
 	if !attrOK {
 		h.rejectedBadHeader.Add(1)
