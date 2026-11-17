@@ -1369,9 +1369,16 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/D234", nil).Code)
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{}).Code)
 
+	setAnswersBody := map[string]interface{}{
+		"answers": []map[string]interface{}{
+			{"decision_row_id": twoRes.Decisions[0].RowID, "choice_id": "1"},
+			{"decision_row_id": twoRes.Decisions[1].RowID, "choice_id": "a"},
+		},
+	}
+
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+rowID, nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decisions/"+rowID+"/answer", map[string]interface{}{"choice_id": "1"}).Code)
-	assert.Equal(t, http.StatusNotFound, f.submitSet(t, f.bob, twoMsg.ID, "", twoRes.Decisions[0].RowID, "1", twoRes.Decisions[1].RowID, "a").Code)
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/choice-prompts/"+twoMsg.ID+"/answers", setAnswersBody).Code)
 
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions", nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/users/me/decisions", nil).Code)
@@ -1415,5 +1422,9 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	assert.Equal(t, http.StatusOK, sendOn.Code, sendOn.Body.String())
 
 	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decisions/"+rowID+"/answer", map[string]interface{}{"choice_id": "1"}).Code)
-	assert.Equal(t, http.StatusOK, f.submitSet(t, f.bob, twoMsg.ID, "", twoRes.Decisions[0].RowID, "1", twoRes.Decisions[1].RowID, "a").Code)
+	setAnsOn := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/choice-prompts/"+twoMsg.ID+"/answers", setAnswersBody)
+	assert.NotEqual(t, http.StatusNotFound, setAnsOn.Code, "POST /api/v1/choice-prompts/{id}/answers must be reachable when web.decisions is on")
+	assert.Equal(t, http.StatusOK, setAnsOn.Code, setAnsOn.Body.String())
+	interpOn := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{})
+	assert.NotEqual(t, http.StatusNotFound, interpOn.Code, "POST /api/v1/agent/decisions/interpreted must be reachable when web.decisions is on")
 }
