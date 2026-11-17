@@ -190,41 +190,39 @@ func (s *Server) handleProjectTriggerSourcesRoutes(w http.ResponseWriter, r *htt
 // handleProjectGitHubTriggerSettings handles GET and PUT
 // /api/v1/projects/{id}/trigger-sources/github.
 func (s *Server) handleProjectGitHubTriggerSettings(w http.ResponseWriter, r *http.Request, projectID string) {
-	s.requireGitHubTriggers(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet, http.MethodPut:
-		default:
-			MethodNotAllowed(w, http.MethodGet, http.MethodPut)
-			return
-		}
+	switch r.Method {
+	case http.MethodGet, http.MethodPut:
+	default:
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
+		return
+	}
 
-		ctx := r.Context()
-		if GetAgentIdentityFromContext(ctx) != nil {
-			Forbidden(w)
-			return
-		}
-		if isVisitorIdentity(GetIdentityFromContext(ctx)) {
-			writeVisitorRefusal(w)
-			return
-		}
+	ctx := r.Context()
+	if GetAgentIdentityFromContext(ctx) != nil {
+		Forbidden(w)
+		return
+	}
+	if isVisitorIdentity(GetIdentityFromContext(ctx)) {
+		writeVisitorRefusal(w)
+		return
+	}
 
-		project, err := s.store.GetProject(ctx, projectID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				NotFound(w, "Project")
-				return
-			}
-			writeErrorFromErr(w, err, "")
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Project")
 			return
 		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
 
-		switch r.Method {
-		case http.MethodGet:
-			s.handleGetProjectGitHubTriggerSettings(w, r, project)
-		case http.MethodPut:
-			s.handlePutProjectGitHubTriggerSettings(w, r, project)
-		}
-	})(w, r)
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetProjectGitHubTriggerSettings(w, r, project)
+	case http.MethodPut:
+		s.handlePutProjectGitHubTriggerSettings(w, r, project)
+	}
 }
 
 func (s *Server) handleGetProjectGitHubTriggerSettings(w http.ResponseWriter, r *http.Request, project *store.Project) {
