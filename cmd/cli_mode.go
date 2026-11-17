@@ -217,6 +217,7 @@ var agentAllowed = map[string]bool{
 	// Hub routes enforce hub.triggers and caller-scoped ownership for agents.
 	"trigger":                true,
 	"trigger.create":         true,
+	"trigger.get":            true,
 	"trigger.list":           true,
 	"trigger.delete":         true,
 	"trigger.pause":          true,

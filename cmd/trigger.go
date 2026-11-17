@@ -15,9 +15,12 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -27,16 +30,20 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
+
+const maxTriggerWhereFileBytes = 64 * 1024
 
 var (
 	triggerName        string
 	triggerDescription string
 	triggerWebhookRef  string
 	triggerMatchTypes  []string
-	triggerWhereExpr   string
+	triggerWhereRules  []string
+	triggerWhereFile   string
 	triggerAgent       string
 	triggerMessage     string
 	triggerInterrupt   bool
@@ -57,7 +64,7 @@ var (
 var triggerCmd = &cobra.Command{
 	Use:   "trigger",
 	Short: "Manage event triggers and webhook endpoints",
-	Long:  `Create, list, pause, resume, and delete event triggers and webhook endpoints for the current project.`,
+	Long:  `Create, inspect, list, pause, resume, and delete event triggers and webhook endpoints for the current project.`,
 }
 
 var triggerCreateCmd = &cobra.Command{
@@ -65,10 +72,21 @@ var triggerCreateCmd = &cobra.Command{
 	Short: "Create an event trigger",
 	Long: `Create an event trigger attached to a webhook endpoint. Requires --name, --webhook, --agent, and --message.
 
-CEL Rules & Regex Guidance:
-  --where (bool, <= 4096 bytes) and --subject (string, <= 1024 bytes) are CEL
-  expressions compiled at authoring time against event.{id,type,source.kind,
-  source.id,subject,occurred_at,received_at,attributes,payload} and
+Ordered Match Rules & CEL Guidance:
+  --where [<dialect>:]<expr> is repeatable (1-8 elements, <= 4096 bytes each;
+  total encoded rule list <= 16 KiB). Rules are logically AND'd and evaluated
+  strictly in order of appearance, short-circuiting on the first false result.
+  Put cheap CEL guards first so inexpensive deterministic checks filter events
+  before heavier predicates run. Alternatively, pass --where-file <path> with a
+  JSON array of {"dialect": "...", "expr": "..."} objects.
+
+  A [<dialect>:] prefix is recognized only for registered dialect names (cel,
+  system_one); any other prefix is treated as part of the CEL expression text.
+  --subject (string, <= 1024 bytes) is a scalar CEL expression deriving the
+  concurrency subject.
+
+  CEL expressions are compiled at authoring time against event.{id,type,
+  source.kind,source.id,subject,occurred_at,received_at,attributes,payload} and
   trigger.{id,name,project_id}. Guard optional JSON payload fields or optional
   attributes with has(...) (for example has(event.payload.env) or
   has(event.attributes.subject)) so absent keys evaluate cleanly instead of
@@ -90,9 +108,11 @@ Examples:
   # Match specific event types
   scion trigger create --name prod-deploy --webhook deploys --type webhook.deploy.finished --agent lead --message "Production deploy finished"
 
-  # Filter with a CEL predicate and derive a concurrency subject from a guarded field
+  # Filter with ordered CEL predicates (put cheap CEL guards first; short-circuits on false)
+  # and derive a concurrency subject from a guarded field
   scion trigger create --name prod-service-deploy --webhook deploys \
-    --where 'has(event.attributes.subject) && event.attributes.subject.matches("^release/") && has(event.payload) && has(event.payload.env) && event.payload.env == "prod"' \
+    --where 'has(event.payload) && has(event.payload.env) && event.payload.env == "prod"' \
+    --where 'has(event.attributes.subject) && event.attributes.subject.matches("^release/")' \
     --subject 'has(event.payload) && has(event.payload.service) ? string(event.payload.service) : string(event.subject)' \
     --agent lead --message "Inspect production release event"`,
 	RunE: runTriggerCreate,
@@ -190,6 +210,44 @@ func formatTriggerRuleError(err error) error {
 	if slot == "" {
 		slot = "trigger"
 	}
+	if rawElems, ok := apiErr.Details["elements"].([]any); ok && len(rawElems) > 0 {
+		var parts []string
+		for _, raw := range rawElems {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			elemIdx, _ := triggerDetailInt(m, "element")
+			if line, hasLine := triggerDetailInt(m, "line"); hasLine {
+				col, _ := triggerDetailInt(m, "column")
+				cat := triggerDetailString(m, "category")
+				msg := triggerDetailString(m, "message")
+				if cat != "" {
+					parts = append(parts, fmt.Sprintf("invalid %s rule [element %d] at line %d, column %d (%s): %s", slot, elemIdx, line, col, cat, msg))
+				} else {
+					parts = append(parts, fmt.Sprintf("invalid %s rule [element %d] at line %d, column %d: %s", slot, elemIdx, line, col, msg))
+				}
+				continue
+			}
+			if dialect := triggerDetailString(m, "dialect"); dialect != "" {
+				reason := triggerDetailString(m, "reason")
+				if reason != "" {
+					parts = append(parts, fmt.Sprintf("unsupported %s dialect %q [element %d]: %s", slot, dialect, elemIdx, reason))
+				} else {
+					parts = append(parts, fmt.Sprintf("unsupported %s dialect %q [element %d]", slot, dialect, elemIdx))
+				}
+			}
+		}
+		if len(parts) > 0 {
+			joined := strings.Join(parts, "; ")
+			if apiErr.Message != joined {
+				cp := *apiErr
+				cp.Message = joined
+				return &cp
+			}
+		}
+		return err
+	}
 	if line, hasLine := triggerDetailInt(apiErr.Details, "line"); hasLine {
 		col, _ := triggerDetailInt(apiErr.Details, "column")
 		posNeedle := fmt.Sprintf("line %d, column %d", line, col)
@@ -216,6 +274,74 @@ func formatTriggerRuleError(err error) error {
 		return &cp
 	}
 	return err
+}
+
+const triggerDialectSystemOne = "system_one"
+
+func isRegisteredTriggerDialect(name string) bool {
+	return name == ruleengine.DialectCEL || name == triggerDialectSystemOne
+}
+
+// parseTriggerWhereArg parses a --where value in [<dialect>:]<expr> form.
+// The prefix is recognized only when <dialect> is a registered dialect name
+// ("cel" or "system_one") followed by ':'; otherwise the whole value is treated
+// as CEL expression text (mixed-rule-arrays §2.3).
+func parseTriggerWhereArg(raw string) hubclient.TriggerMatchRuleSpec {
+	if idx := strings.IndexByte(raw, ':'); idx > 0 {
+		prefix := raw[:idx]
+		if isRegisteredTriggerDialect(prefix) {
+			return hubclient.TriggerMatchRuleSpec{
+				Dialect: prefix,
+				Expr:    raw[idx+1:],
+			}
+		}
+	}
+	return hubclient.TriggerMatchRuleSpec{
+		Dialect: ruleengine.DialectCEL,
+		Expr:    raw,
+	}
+}
+
+func readTriggerWhereFile(path string) ([]hubclient.TriggerMatchRuleSpec, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, newUsageError("failed to open --where-file %q: %v", path, err)
+	}
+	defer f.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(f, maxTriggerWhereFileBytes+1))
+	if err != nil {
+		return nil, newUsageError("failed to read --where-file %q: %v", path, err)
+	}
+	if len(raw) > maxTriggerWhereFileBytes {
+		return nil, newUsageError("--where-file %q exceeds %d byte limit", path, maxTriggerWhereFileBytes)
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, newUsageError("invalid --where-file %q: expected JSON array of {dialect, expr} rule objects", path)
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	var rules []hubclient.TriggerMatchRuleSpec
+	if err := dec.Decode(&rules); err != nil {
+		return nil, newUsageError("invalid --where-file %q: %v", path, err)
+	}
+	if dec.More() {
+		return nil, newUsageError("invalid --where-file %q: unexpected trailing JSON data", path)
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, newUsageError("invalid --where-file %q: unexpected trailing JSON data", path)
+	}
+	for i := range rules {
+		if strings.TrimSpace(rules[i].Dialect) == "" {
+			rules[i].Dialect = ruleengine.DialectCEL
+		}
+	}
+	if rules == nil {
+		rules = []hubclient.TriggerMatchRuleSpec{}
+	}
+	return rules, nil
 }
 
 func wrapTriggerHubError(hubCtx *HubContext, err error) error {
@@ -366,10 +492,31 @@ func buildCreateTriggerRequest() (*hubclient.CreateTriggerRequest, error) {
 		Action: action,
 	}
 
-	if len(triggerMatchTypes) > 0 || triggerWhereExpr != "" {
+	whereFile := strings.TrimSpace(triggerWhereFile)
+	if len(triggerWhereRules) > 0 && whereFile != "" {
+		return nil, newUsageError("--where and --where-file cannot be used together")
+	}
+	var matchRules []hubclient.TriggerMatchRuleSpec
+	hasMatchRules := false
+	if whereFile != "" {
+		parsed, err := readTriggerWhereFile(whereFile)
+		if err != nil {
+			return nil, err
+		}
+		matchRules = parsed
+		hasMatchRules = true
+	} else if len(triggerWhereRules) > 0 {
+		matchRules = make([]hubclient.TriggerMatchRuleSpec, len(triggerWhereRules))
+		for i, raw := range triggerWhereRules {
+			matchRules[i] = parseTriggerWhereArg(raw)
+		}
+		hasMatchRules = true
+	}
+
+	if len(triggerMatchTypes) > 0 || hasMatchRules {
 		req.Match = &hubclient.TriggerMatchSpec{
 			Types: append([]string(nil), triggerMatchTypes...),
-			Expr:  triggerWhereExpr,
+			Rules: matchRules,
 		}
 	}
 	if triggerSubjectExpr != "" || triggerOnSubject != "" {
@@ -411,8 +558,14 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Name:    %s\n", created.Name)
 	fmt.Printf("  Source:  %s:%s\n", created.Source.Kind, created.Source.ID)
 	fmt.Printf("  Types:   %s\n", strings.Join(created.Match.Types, ", "))
-	if created.Match.Expr != "" {
-		fmt.Printf("  Where:   %s\n", created.Match.Expr)
+	rules := effectiveTriggerMatchRules(created.Match)
+	if len(rules) == 1 {
+		fmt.Printf("  Where:   1/1 [%s] %s\n", rules[0].Dialect, rules[0].Expr)
+	} else if len(rules) > 1 {
+		fmt.Printf("  Where:\n")
+		for i, r := range rules {
+			fmt.Printf("    %d/%d [%s] %s\n", i+1, len(rules), r.Dialect, r.Expr)
+		}
 	}
 	if created.Subject.Expr != "" {
 		fmt.Printf("  Subject: %s\n", created.Subject.Expr)
@@ -671,6 +824,7 @@ func init() {
 	rootCmd.AddCommand(triggerCmd)
 
 	triggerCmd.AddCommand(triggerCreateCmd)
+	triggerCmd.AddCommand(triggerGetCmd)
 	triggerCmd.AddCommand(triggerListCmd)
 	triggerCmd.AddCommand(triggerDeleteCmd)
 	triggerCmd.AddCommand(triggerPauseCmd)
@@ -682,7 +836,8 @@ func init() {
 	triggerCreateCmd.Flags().StringVar(&triggerDescription, "description", "", "Optional trigger description")
 	triggerCreateCmd.Flags().StringVar(&triggerWebhookRef, "webhook", "", "Webhook endpoint ID or name (required)")
 	triggerCreateCmd.Flags().StringSliceVar(&triggerMatchTypes, "type", nil, "Event type pattern to match (repeatable; default webhook.received)")
-	triggerCreateCmd.Flags().StringVar(&triggerWhereExpr, "where", "", "Optional CEL filter predicate (bool, <= 4096B; run matches() on event.attributes.<k> or one event.payload.<field>, not whole payload)")
+	triggerCreateCmd.Flags().StringArrayVar(&triggerWhereRules, "where", nil, "Ordered match rule [<dialect>:]<expr> (repeatable, 1-8 rules, <= 4096B each; put cheap CEL guards first; run matches() on event.attributes.<k> or one event.payload.<field>, not whole payload)")
+	triggerCreateCmd.Flags().StringVar(&triggerWhereFile, "where-file", "", "Path to JSON file containing an ordered array of {dialect, expr} match rules")
 	triggerCreateCmd.Flags().StringVar(&triggerAgent, "agent", "", "Target agent name or ID (required)")
 	triggerCreateCmd.Flags().StringVar(&triggerMessage, "message", "", "Message delivered to the target agent (required)")
 	triggerCreateCmd.Flags().BoolVar(&triggerInterrupt, "interrupt", false, "Interrupt the target agent")

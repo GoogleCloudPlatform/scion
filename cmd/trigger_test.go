@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -46,6 +48,7 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 	paths := []string{
 		"trigger",
 		"trigger.create",
+		"trigger.get",
 		"trigger.list",
 		"trigger.delete",
 		"trigger.pause",
@@ -80,6 +83,7 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 	applyPlatformRestrictions(winTree, "windows")
 	for _, args := range [][]string{
 		{"trigger", "list"},
+		{"trigger", "get", "t1"},
 		{"trigger", "create", "--name", "t1", "--webhook", "wh1", "--agent", "lead", "--message", "hi"},
 		{"trigger", "delete", "t1"},
 		{"trigger", "pause", "t1"},
@@ -112,13 +116,13 @@ func TestTriggerWebhookCreateHelp_DisclosuresAndSigningExample(t *testing.T) {
 
 func TestBuildCreateTriggerRequest(t *testing.T) {
 	origName, origDesc, origWebhook := triggerName, triggerDescription, triggerWebhookRef
-	origTypes, origWhere := triggerMatchTypes, triggerWhereExpr
+	origTypes, origWhere, origWhereFile := triggerMatchTypes, triggerWhereRules, triggerWhereFile
 	origAgent, origMessage := triggerAgent, triggerMessage
 	origInt, origWake, origPlain := triggerInterrupt, triggerWake, triggerPlain
 	origSubj, origOnSubj := triggerSubjectExpr, triggerOnSubject
 	t.Cleanup(func() {
 		triggerName, triggerDescription, triggerWebhookRef = origName, origDesc, origWebhook
-		triggerMatchTypes, triggerWhereExpr = origTypes, origWhere
+		triggerMatchTypes, triggerWhereRules, triggerWhereFile = origTypes, origWhere, origWhereFile
 		triggerAgent, triggerMessage = origAgent, origMessage
 		triggerInterrupt, triggerWake, triggerPlain = origInt, origWake, origPlain
 		triggerSubjectExpr, triggerOnSubject = origSubj, origOnSubj
@@ -129,7 +133,8 @@ func TestBuildCreateTriggerRequest(t *testing.T) {
 		triggerDescription = "Deploy trigger"
 		triggerWebhookRef = "deploys"
 		triggerMatchTypes = nil
-		triggerWhereExpr = ""
+		triggerWhereRules = nil
+		triggerWhereFile = ""
 		triggerAgent = "lead"
 		triggerMessage = "check deploy"
 		triggerInterrupt = false
@@ -181,27 +186,86 @@ func TestBuildCreateTriggerRequest(t *testing.T) {
 		assert.Empty(t, req.Action.AgentName)
 	})
 
-	t.Run("optional match, subject, and action flags", func(t *testing.T) {
+	t.Run("optional match, repeatable where, registered dialect prefix, subject, and action flags", func(t *testing.T) {
 		resetFlags()
-		triggerMatchTypes = []string{"webhook.deploy.*", "webhook.release"}
-		triggerWhereExpr = `data.env == "prod"`
-		triggerSubjectExpr = `data.service`
-		triggerOnSubject = "skip"
-		triggerInterrupt = true
-		triggerWake = true
-		triggerPlain = true
+		// Exercise real Cobra flag parsing so StringArrayVar comma preservation and order are verified.
+		require.NoError(t, triggerCreateCmd.Flags().Parse([]string{
+			"--name", "deploy-hook",
+			"--webhook", "deploys",
+			"--agent", "lead",
+			"--message", "check deploy",
+			"--type", "webhook.deploy.*,webhook.release",
+			"--where", `event.type in ["webhook.deploy.started", "webhook.deploy.finished"]`,
+			"--where", `cel:event.attributes["subject"] == "svc:api"`,
+			"--where", `system_one:Does this change touch billing?`,
+			"--where", `unknown_prefix:still_cel_text`,
+			"--subject", `data.service`,
+			"--on-subject", "skip",
+			"--interrupt",
+			"--wake",
+			"--plain",
+		}))
 
 		req, err := buildCreateTriggerRequest()
 		require.NoError(t, err)
 		require.NotNil(t, req.Match)
 		assert.Equal(t, []string{"webhook.deploy.*", "webhook.release"}, req.Match.Types)
-		assert.Equal(t, `data.env == "prod"`, req.Match.Expr)
+		assert.Empty(t, req.Match.Expr)
+		assert.Equal(t, []hubclient.TriggerMatchRuleSpec{
+			{Dialect: "cel", Expr: `event.type in ["webhook.deploy.started", "webhook.deploy.finished"]`},
+			{Dialect: "cel", Expr: `event.attributes["subject"] == "svc:api"`},
+			{Dialect: "system_one", Expr: `Does this change touch billing?`},
+			{Dialect: "cel", Expr: `unknown_prefix:still_cel_text`},
+		}, req.Match.Rules)
 		require.NotNil(t, req.Subject)
 		assert.Equal(t, `data.service`, req.Subject.Expr)
 		assert.Equal(t, "skip", req.Subject.Mode)
 		assert.True(t, req.Action.Interrupt)
 		assert.True(t, req.Action.Wake)
 		assert.True(t, req.Action.Plain)
+	})
+
+	t.Run("where-file JSON array and conflict with --where", func(t *testing.T) {
+		resetFlags()
+		dir := t.TempDir()
+		validFile := filepath.Join(dir, "rules.json")
+		require.NoError(t, os.WriteFile(validFile, []byte(`[
+			{"expr": "event.type == 'webhook.received'"},
+			{"dialect": "cel", "expr": "has(event.payload.pr)"},
+			{"dialect": "system_one", "expr": "Is this security-relevant?"}
+		]`), 0o600))
+
+		triggerWhereFile = validFile
+		req, err := buildCreateTriggerRequest()
+		require.NoError(t, err)
+		require.NotNil(t, req.Match)
+		assert.Equal(t, []hubclient.TriggerMatchRuleSpec{
+			{Dialect: "cel", Expr: "event.type == 'webhook.received'"},
+			{Dialect: "cel", Expr: "has(event.payload.pr)"},
+			{Dialect: "system_one", Expr: "Is this security-relevant?"},
+		}, req.Match.Rules)
+
+		// Passing both --where and --where-file is rejected as a usage error.
+		triggerWhereRules = []string{"true"}
+		_, err = buildCreateTriggerRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--where and --where-file cannot be used together")
+
+		// Non-array JSON or unknown fields in --where-file are rejected.
+		resetFlags()
+		badObjFile := filepath.Join(dir, "bad-obj.json")
+		require.NoError(t, os.WriteFile(badObjFile, []byte(`{"dialect":"cel","expr":"true"}`), 0o600))
+		triggerWhereFile = badObjFile
+		_, err = buildCreateTriggerRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "expected JSON array")
+
+		badUnknownFile := filepath.Join(dir, "bad-field.json")
+		require.NoError(t, os.WriteFile(badUnknownFile, []byte(`[{"dialect":"cel","expression":"true"}]`), 0o600))
+		triggerWhereFile = badUnknownFile
+		_, err = buildCreateTriggerRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown field")
 	})
 }
 
@@ -913,7 +977,10 @@ func TestTriggerHistoryCLI_NameAndUUIDResolutionFlagsAndFormats(t *testing.T) {
 func TestTriggerCreateHelp_RegexAndCELAuthorGuidance(t *testing.T) {
 	help := strings.Join(strings.Fields(triggerCreateCmd.Long), " ")
 	assert.Contains(t, help, "--where")
+	assert.Contains(t, help, "--where-file")
 	assert.Contains(t, help, "--subject")
+	assert.Contains(t, help, "Put cheap CEL guards first")
+	assert.Contains(t, help, "short-circuit")
 	assert.Contains(t, help, "source.kind")
 	assert.Contains(t, help, "source.id")
 	assert.Contains(t, help, "occurred_at")
@@ -932,8 +999,12 @@ func TestTriggerCreateHelp_RegexAndCELAuthorGuidance(t *testing.T) {
 
 	whereFlag := triggerCreateCmd.Flags().Lookup("where")
 	require.NotNil(t, whereFlag)
+	assert.Contains(t, whereFlag.Usage, "cheap CEL guards first")
 	assert.Contains(t, whereFlag.Usage, "event.attributes.<k>")
 	assert.Contains(t, whereFlag.Usage, "event.payload.<field>")
+
+	whereFileFlag := triggerCreateCmd.Flags().Lookup("where-file")
+	require.NotNil(t, whereFileFlag)
 
 	subjectFlag := triggerCreateCmd.Flags().Lookup("subject")
 	require.NotNil(t, subjectFlag)
@@ -943,9 +1014,8 @@ func TestTriggerCreateHelp_RegexAndCELAuthorGuidance(t *testing.T) {
 func TestTriggerCreateHelp_ExampleCompilesAndEvaluatesOnWebhookEvent(t *testing.T) {
 	help := triggerCreateCmd.Long
 
-	whereMatch := regexp.MustCompile(`--where '([^']+)'`).FindStringSubmatch(help)
-	require.Len(t, whereMatch, 2, "expected --where '<cel>' example in triggerCreateCmd.Long")
-	whereExpr := whereMatch[1]
+	whereMatches := regexp.MustCompile(`--where '([^']+)'`).FindAllStringSubmatch(help, -1)
+	require.GreaterOrEqual(t, len(whereMatches), 2, "expected repeatable --where '<cel>' example in triggerCreateCmd.Long")
 
 	subjectMatch := regexp.MustCompile(`--subject '([^']+)'`).FindStringSubmatch(help)
 	require.Len(t, subjectMatch, 2, "expected --subject '<cel>' example in triggerCreateCmd.Long")
@@ -955,10 +1025,13 @@ func TestTriggerCreateHelp_ExampleCompilesAndEvaluatesOnWebhookEvent(t *testing.
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	whereRule := triggerrule.Rule{Dialect: "cel", Expr: whereExpr}
+	whereRules := make([]triggerrule.Rule, len(whereMatches))
+	for i, m := range whereMatches {
+		parsed := parseTriggerWhereArg(m[1])
+		whereRules[i] = triggerrule.Rule{Dialect: parsed.Dialect, Expr: parsed.Expr}
+		require.NoError(t, rules.CompileMatch(ctx, whereRules[i]), "element %d", i)
+	}
 	subjectRule := triggerrule.Rule{Dialect: "cel", Expr: subjectExpr}
-
-	require.NoError(t, rules.CompileMatch(ctx, whereRule))
 	require.NoError(t, rules.CompileSubject(ctx, subjectRule))
 
 	now := time.Date(2026, 11, 17, 0, 30, 0, 0, time.UTC)
@@ -998,24 +1071,28 @@ func TestTriggerCreateHelp_ExampleCompilesAndEvaluatesOnWebhookEvent(t *testing.
 	matchingAct, err := triggerrule.NewActivation(matchingEvent, trRef)
 	require.NoError(t, err)
 
-	matched, err := rules.Match(ctx, scope, whereRule, matchingAct)
+	matchRes, err := rules.MatchAll(ctx, scope, whereRules, matchingAct)
 	require.NoError(t, err)
-	assert.True(t, matched, "help --where example should match §8.2 prod release event")
+	assert.True(t, matchRes.Matched, "help --where list should match §8.2 prod release event")
+	assert.Equal(t, len(whereRules), matchRes.Through)
+	assert.Equal(t, triggerrule.MatchClassMatched, matchRes.Class)
 
 	derivedSubj, err := rules.Subject(ctx, scope, subjectRule, matchingAct)
 	require.NoError(t, err)
 	assert.Equal(t, "billing", derivedSubj)
 
-	// §8.2-shaped webhook event with missing optional JSON keys evaluates cleanly to false / fallback (not missing_input).
+	// §8.2-shaped webhook event with missing optional JSON keys short-circuits on element 1 cleanly to false (not missing_input).
 	sparseEvent := matchingEvent
 	sparseEvent.ID = "ffffffff-1111-4222-8333-444444444444"
 	sparseEvent.Payload = []byte(`{}`)
 	sparseAct, err := triggerrule.NewActivation(sparseEvent, trRef)
 	require.NoError(t, err)
 
-	sparseMatched, err := rules.Match(ctx, scope, whereRule, sparseAct)
+	sparseRes, err := rules.MatchAll(ctx, scope, whereRules, sparseAct)
 	require.NoError(t, err, "missing optional payload keys must evaluate cleanly to false, not missing_input")
-	assert.False(t, sparseMatched)
+	assert.False(t, sparseRes.Matched)
+	assert.Equal(t, 1, sparseRes.Through, "cheap first CEL guard must short-circuit before element 2")
+	assert.Equal(t, triggerrule.MatchClassFalse, sparseRes.Class)
 
 	fallbackSubj, err := rules.Subject(ctx, scope, subjectRule, sparseAct)
 	require.NoError(t, err)
@@ -1028,11 +1105,11 @@ func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
 
 	origFormat := outputFormat
 	origName, origWebhook, origAgent, origMsg := triggerName, triggerWebhookRef, triggerAgent, triggerMessage
-	origWhere, origSubject := triggerWhereExpr, triggerSubjectExpr
+	origWhere, origWhereFile, origSubject := triggerWhereRules, triggerWhereFile, triggerSubjectExpr
 	t.Cleanup(func() {
 		outputFormat = origFormat
 		triggerName, triggerWebhookRef, triggerAgent, triggerMessage = origName, origWebhook, origAgent, origMsg
-		triggerWhereExpr, triggerSubjectExpr = origWhere, origSubject
+		triggerWhereRules, triggerWhereFile, triggerSubjectExpr = origWhere, origWhereFile, origSubject
 	})
 
 	const (
@@ -1053,17 +1130,21 @@ func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
 		switch mode {
 		case "ok":
 			w.WriteHeader(http.StatusCreated)
+			matchResp := hubclient.TriggerMatchSpec{
+				Types: []string{"webhook.received"},
+				Rules: lastReq.Match.Rules,
+			}
+			if len(lastReq.Match.Rules) == 1 {
+				matchResp.Dialect = lastReq.Match.Rules[0].Dialect
+				matchResp.Expr = lastReq.Match.Rules[0].Expr
+			}
 			_ = json.NewEncoder(w).Encode(hubclient.Trigger{
 				ID:        trID,
 				ProjectID: "proj-1",
 				Name:      lastReq.Name,
 				Status:    "active",
 				Source:    hubclient.TriggerSourceSpec{Kind: "webhook", ID: epID},
-				Match: hubclient.TriggerMatchSpec{
-					Types:   []string{"webhook.received"},
-					Dialect: "cel",
-					Expr:    lastReq.Match.Expr,
-				},
+				Match:     matchResp,
 				Subject: hubclient.TriggerSubjectSpec{
 					Dialect: "cel",
 					Expr:    lastReq.Subject.Expr,
@@ -1086,6 +1167,31 @@ func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
 						"message":  "undeclared reference to 'unknown_var' (in container '')",
 						"line":     2,
 						"column":   7,
+					},
+				},
+			})
+		case "compile_err_multi_elements":
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"code":    "invalid_rule",
+					"message": "multiple invalid elements",
+					"details": map[string]any{
+						"field": "match",
+						"elements": []map[string]any{
+							{
+								"element":  0,
+								"category": "syntax",
+								"message":  "Syntax error",
+								"line":     1,
+								"column":   4,
+							},
+							{
+								"element": 1,
+								"dialect": "system_one",
+								"reason":  "dialect_not_allowed",
+							},
+						},
 					},
 				},
 			})
@@ -1127,17 +1233,20 @@ func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
 	triggerWebhookRef = "deploys"
 	triggerAgent = "lead"
 	triggerMessage = "check deploy"
-	triggerWhereExpr = `has(event.payload) && event.payload.env == "prod"`
+	triggerWhereFile = ""
+	triggerWhereRules = []string{`has(event.payload) && event.payload.env == "prod"`}
 	triggerSubjectExpr = `string(event.payload.service)`
 
 	out := captureStdout(t, func() {
 		require.NoError(t, runTriggerCreate(triggerCreateCmd, nil))
 	})
 	require.NotNil(t, lastReq.Match)
-	assert.Equal(t, `has(event.payload) && event.payload.env == "prod"`, lastReq.Match.Expr)
+	assert.Equal(t, []hubclient.TriggerMatchRuleSpec{
+		{Dialect: "cel", Expr: `has(event.payload) && event.payload.env == "prod"`},
+	}, lastReq.Match.Rules)
 	require.NotNil(t, lastReq.Subject)
 	assert.Equal(t, `string(event.payload.service)`, lastReq.Subject.Expr)
-	assert.Contains(t, out, "Where:   has(event.payload) && event.payload.env == \"prod\"")
+	assert.Contains(t, out, "Where:   1/1 [cel] has(event.payload) && event.payload.env == \"prod\"")
 	assert.Contains(t, out, "Subject: string(event.payload.service)")
 
 	// Position-bearing compile error formatted from details when message lacks line/column.
@@ -1148,6 +1257,13 @@ func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "line 2, column 7")
 	assert.Contains(t, err.Error(), "unknown_variable")
 	assert.Contains(t, err.Error(), "unknown_var")
+
+	// Multi-element details.elements[] error reports every failing element with index, position, and dialect reason.
+	mode = "compile_err_multi_elements"
+	err = runTriggerCreate(triggerCreateCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "[element 0] at line 1, column 4 (syntax)")
+	assert.Contains(t, err.Error(), `[element 1]: dialect_not_allowed`)
 
 	// Position-bearing compile error from Hub message preserved without duplicating position.
 	mode = "compile_err_full_hub"
@@ -1161,4 +1277,110 @@ func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
 	err = runTriggerCreate(triggerCreateCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "dialect_not_allowed")
+}
+
+func TestTriggerCLI_GetNumberedElementsAndJSON(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 16, 6, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+
+	origFormat := outputFormat
+	t.Cleanup(func() { outputFormat = origFormat })
+
+	const (
+		epID    = "bbbbbbbb-1111-4222-8333-444444444444"
+		multiID = "cccccccc-1111-4222-8333-444444444444"
+		emptyID = "dddddddd-1111-4222-8333-444444444444"
+	)
+
+	multiTr := hubclient.Trigger{
+		ID:                    multiID,
+		ProjectID:             "proj-1",
+		Name:                  "ordered-guard",
+		Description:           "Cheap CEL before semantic",
+		Status:                "active",
+		AuthorizationRevision: 3,
+		Source:                hubclient.TriggerSourceSpec{Kind: "webhook", ID: epID},
+		Match: hubclient.TriggerMatchSpec{
+			Types: []string{"webhook.received"},
+			Rules: []hubclient.TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `event.attributes["event"] == "pull_request"`},
+				{Dialect: "cel", Expr: `has(event.payload.pr)`},
+				{Dialect: "system_one", Expr: `Does this PR touch auth?`},
+			},
+		},
+		Subject: hubclient.TriggerSubjectSpec{
+			Dialect: "cel",
+			Expr:    `event.subject`,
+			Mode:    "new",
+		},
+		Action:    hubclient.TriggerActionSpec{Type: "message", AgentName: "lead", Message: "review PR"},
+		CreatedAt: fixedNow,
+		UpdatedAt: fixedNow,
+	}
+
+	emptyTr := hubclient.Trigger{
+		ID:                    emptyID,
+		ProjectID:             "proj-1",
+		Name:                  "types-only",
+		Status:                "active",
+		AuthorizationRevision: 1,
+		Source:                hubclient.TriggerSourceSpec{Kind: "webhook", ID: epID},
+		Match: hubclient.TriggerMatchSpec{
+			Types: []string{"webhook.received"},
+			Rules: []hubclient.TriggerMatchRuleSpec{},
+		},
+		Action:    hubclient.TriggerActionSpec{Type: "message", AgentName: "lead", Message: "ping"},
+		CreatedAt: fixedNow,
+		UpdatedAt: fixedNow,
+	}
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+			switch r.URL.Query().Get("name") {
+			case "ordered-guard":
+				_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{Triggers: []hubclient.Trigger{multiTr}, TotalCount: 1})
+			case "types-only":
+				_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{Triggers: []hubclient.Trigger{emptyTr}, TotalCount: 1})
+			default:
+				_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{Triggers: []hubclient.Trigger{multiTr, emptyTr}, TotalCount: 2})
+			}
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+multiID:
+			_ = json.NewEncoder(w).Encode(multiTr)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+emptyID:
+			_ = json.NewEncoder(w).Encode(emptyTr)
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindOAuth)
+
+	// 1. Human-readable `scion trigger get <name>` numbers elements 1/N..N/N in evaluation order.
+	outputFormat = ""
+	humanOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerGet(triggerGetCmd, []string{"ordered-guard"}))
+	})
+	idx1 := strings.Index(humanOut, `1/3 [cel] event.attributes["event"] == "pull_request"`)
+	idx2 := strings.Index(humanOut, `2/3 [cel] has(event.payload.pr)`)
+	idx3 := strings.Index(humanOut, `3/3 [system_one] Does this PR touch auth?`)
+	require.NotEqual(t, -1, idx1, humanOut)
+	require.NotEqual(t, -1, idx2, humanOut)
+	require.NotEqual(t, -1, idx3, humanOut)
+	assert.Less(t, idx1, idx2)
+	assert.Less(t, idx2, idx3)
+
+	// 2. Types-only trigger shows "none (types only)" in human output and `"rules": []` in --json.
+	emptyHumanOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerGet(triggerGetCmd, []string{"types-only"}))
+	})
+	assert.Contains(t, emptyHumanOut, "Rules:       none (types only)")
+
+	outputFormat = "json"
+	emptyJSONOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerGet(triggerGetCmd, []string{emptyID}))
+	})
+	var rawMap map[string]any
+	require.NoError(t, json.Unmarshal([]byte(emptyJSONOut), &rawMap))
+	matchObj := rawMap["match"].(map[string]any)
+	assert.Equal(t, []any{}, matchObj["rules"])
 }
