@@ -522,16 +522,15 @@ const githubAssociationReportPath = "association-report"
 
 // githubAssociationReportEntry is one associated project in the report.
 type githubAssociationReportEntry struct {
-	ProjectID          string `json:"project_id"`
-	ProjectName        string `json:"project_name"`
-	GitRemote          string `json:"git_remote"`
-	InstallationID     int64  `json:"installation_id"`
-	Authorized         bool   `json:"authorized"`
-	Basis              string `json:"basis,omitempty"`
-	WriteAllowed       bool   `json:"write_allowed"`
-	ErrorCode          string `json:"error_code,omitempty"`
-	Reason             string `json:"reason,omitempty"`
-	AppStatusErrorCode string `json:"-"`
+	ProjectID      string `json:"project_id"`
+	ProjectName    string `json:"project_name"`
+	GitRemote      string `json:"git_remote"`
+	InstallationID int64  `json:"installation_id"`
+	Authorized     bool   `json:"authorized"`
+	Basis          string `json:"basis,omitempty"`
+	WriteAllowed   bool   `json:"write_allowed"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	Reason         string `json:"reason,omitempty"`
 }
 
 // Admin association report bounds. A full build enumerates every project
@@ -634,9 +633,6 @@ func (s *Server) githubAssociationReportEntryFor(ctx context.Context, p *store.P
 		ProjectName:    p.Name,
 		GitRemote:      p.GitRemote,
 		InstallationID: *p.GitHubInstallationID,
-	}
-	if p.GitHubAppStatus != nil {
-		e.AppStatusErrorCode = p.GitHubAppStatus.ErrorCode
 	}
 	grant, authzErr := s.authorizeGitHubAppAssociation(ctx, p, *p.GitHubInstallationID)
 	if authzErr != nil {
