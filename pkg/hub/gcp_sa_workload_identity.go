@@ -364,6 +364,9 @@ func (s *Server) addWorkloadIdentityMembers(ctx context.Context, saEmail string,
 	if err != nil && isIAMPolicyConflict(err) {
 		err = retryIAMGrant(ctx, op)
 	}
+	if err == nil {
+		s.wiRoleMembersCache.invalidate(saEmail)
+	}
 	return err
 }
 

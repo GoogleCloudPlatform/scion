@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -52,9 +53,11 @@ const (
 	GCPSAMappingNotReported = "not_reported"
 )
 
-// Workload Identity binding states. Only "unknown" is produced today: the hub
-// does not read IAM policy for this view, and the binding is never reported
-// as bound without evidence.
+// Workload Identity binding states. When hub.k8s_workload_identity_setup is
+// enabled, minted accounts read the GSA's IAM policy and report "bound" or
+// "not_bound" per target, while bring-your-own accounts stay "unknown" ("not
+// minted by this hub"); with the experiment off only "unknown" ("not checked")
+// is returned.
 const (
 	GCPSABindingBound    = "bound"
 	GCPSABindingNotBound = "not_bound"
@@ -143,12 +146,16 @@ type GCPServiceAccountProfileMapping struct {
 	// reason (SAMappingReason*), for example report_stale or
 	// ambiguous_mapping.
 	UnknownReason string `json:"unknownReason,omitempty"`
+	// WorkloadIdentityBinding is this profile's Workload Identity IAM binding
+	// state when hub.k8s_workload_identity_setup is enabled; omitted when off.
+	WorkloadIdentityBinding *GCPServiceAccountProfileBinding `json:"workloadIdentityBinding,omitempty"`
 }
 
 // GCPServiceAccountBinding is the Workload Identity binding state.
 type GCPServiceAccountBinding struct {
-	State  string `json:"state"`
-	Reason string `json:"reason,omitempty"`
+	State   string                           `json:"state"`
+	Reason  string                           `json:"reason,omitempty"`
+	Targets []GCPServiceAccountBindingTarget `json:"targets,omitempty"`
 }
 
 // GCPServiceAccountDefault names one default that points at the account.
@@ -235,29 +242,36 @@ func (s *Server) getGCPServiceAccountStatus(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	status := s.buildGCPServiceAccountStatus(ctx, project, sa,
-		s.projectKubernetesProfileMappings(ctx, projectID))
+	brokers, _ := s.projectProviderBrokers(ctx, projectID)
+	status := s.buildGCPServiceAccountStatus(ctx, project, sa, brokers)
 	status.Agents = s.gcpServiceAccountAgents(ctx, projectID, sa.ID)
 	writeJSON(w, http.StatusOK, status)
 }
 
 // buildGCPServiceAccountStatus assembles every section except agents, which
 // needs the caller's identity.
-func (s *Server) buildGCPServiceAccountStatus(ctx context.Context, project *store.Project, sa *store.GCPServiceAccount, profiles []kubernetesProfileMappings) GCPServiceAccountStatus {
+func (s *Server) buildGCPServiceAccountStatus(ctx context.Context, project *store.Project, sa *store.GCPServiceAccount, brokers []*store.RuntimeBroker) GCPServiceAccountStatus {
+	now := gcpSAWIBindingNow()
+	profiles := s.brokerKubernetesProfileMappings(brokers)
+	mappings := gcpSAProfileMappings(sa.Email, profiles, now)
+	binding := GCPServiceAccountBinding{
+		State:  GCPSABindingUnknown,
+		Reason: "not checked",
+	}
+	if s.experimentEnabled(experiments.K8sWorkloadIdentitySetup) {
+		binding = s.evaluateWorkloadIdentityStatus(ctx, sa, brokers, mappings, now)
+	}
 	st := GCPServiceAccountStatus{
 		Account: GCPServiceAccountStatusIdentity{
 			ID: sa.ID, DisplayName: sa.DisplayName, Scope: sa.Scope, Email: sa.Email,
 		},
-		Verification: gcpSAVerificationOf(sa),
-		Mappings:     gcpSAProfileMappings(sa.Email, profiles, time.Now()),
-		WorkloadIdentityBinding: GCPServiceAccountBinding{
-			State:  GCPSABindingUnknown,
-			Reason: "not checked",
-		},
-		DefaultFor: s.gcpSADefaultsFor(project, sa.ID),
-		Agents:     GCPServiceAccountAgents{Names: []string{}},
+		Verification:            gcpSAVerificationOf(sa),
+		Mappings:                mappings,
+		WorkloadIdentityBinding: binding,
+		DefaultFor:              s.gcpSADefaultsFor(project, sa.ID),
+		Agents:                  GCPServiceAccountAgents{Names: []string{}},
 	}
-	st.NextStep = gcpSANextStep(st.Verification.Verified, st.Mappings, st.DefaultFor)
+	st.NextStep = gcpSANextStepForBinding(st.Verification.Verified, st.Mappings, st.DefaultFor, st.WorkloadIdentityBinding.State)
 	return st
 }
 
@@ -379,6 +393,10 @@ func (s *Server) gcpSADefaultsFor(project *store.Project, saID string) []GCPServ
 // it).
 // The Workload Identity binding is not checked, so it never produces a step.
 func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault) GCPServiceAccountNextStep {
+	return gcpSANextStepForBinding(verified, mappings, defaults, GCPSABindingUnknown)
+}
+
+func gcpSANextStepForBinding(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault, bindingState string) GCPServiceAccountNextStep {
 	if !verified {
 		return GCPServiceAccountNextStep{
 			Code: GCPSANextStepNotVerified,
@@ -414,9 +432,16 @@ func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, de
 	if !anyMapped && firstUnmapped != nil {
 		return gcpSANotMappedStep(firstUnmapped)
 	}
+	msg := "Nothing missing that the hub can check. The Workload Identity binding is not checked."
+	switch bindingState {
+	case GCPSABindingBound:
+		msg = "Nothing missing that the hub can check."
+	case GCPSABindingNotBound:
+		msg = "Verification and mapping have nothing missing; one or more Workload Identity targets are not bound."
+	}
 	return GCPServiceAccountNextStep{
 		Code:    GCPSANextStepNone,
-		Message: "Nothing missing that the hub can check. The Workload Identity binding is not checked.",
+		Message: msg,
 	}
 }
 

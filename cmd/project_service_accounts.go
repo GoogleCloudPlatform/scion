@@ -469,11 +469,12 @@ func printSAStatus(w io.Writer, st *hubclient.GCPServiceAccountStatus) {
 	}
 
 	p("\nWorkload Identity binding:\n")
-	binding := strings.ReplaceAll(st.WorkloadIdentityBinding.State, "_", " ")
+	binding := wiOneLine(strings.ReplaceAll(st.WorkloadIdentityBinding.State, "_", " "))
 	if st.WorkloadIdentityBinding.Reason != "" {
-		binding += fmt.Sprintf(" (%s)", st.WorkloadIdentityBinding.Reason)
+		binding += fmt.Sprintf(" (%s)", wiOneLine(st.WorkloadIdentityBinding.Reason))
 	}
 	p("  %s\n", binding)
+	printSAStatusBindingTargets(w, st.WorkloadIdentityBinding.Targets)
 
 	p("\nDefault for:\n")
 	if len(st.DefaultFor) == 0 {
@@ -501,6 +502,60 @@ func printSAStatus(w io.Writer, st *hubclient.GCPServiceAccountStatus) {
 
 	p("\nNext step:\n")
 	p("  %s\n", st.NextStep.Message)
+}
+
+func saTargetStaleReasonText(reason string) string {
+	switch reason {
+	case "broker_no_longer_reports":
+		return "the broker no longer reports Workload Identity targets"
+	case "broker_heartbeat_stale":
+		return "the broker heartbeat is stale"
+	default:
+		return "stored from an earlier broker heartbeat"
+	}
+}
+
+func printSAStatusBindingTargets(w io.Writer, targets []hubclient.GCPServiceAccountBindingTarget) {
+	if len(targets) == 0 {
+		return
+	}
+	p := func(format string, a ...interface{}) { _, _ = fmt.Fprintf(w, format, a...) }
+	p("  stored targets (from broker heartbeats):\n")
+	for _, t := range targets {
+		stateText := wiOneLine(strings.ReplaceAll(t.State, "_", " "))
+		where := wiOneLine(strings.Join(t.Profiles, ", "))
+		target := wiOneLine(t.Member)
+		if target == "" {
+			target = where
+		} else if where != "" {
+			target += " (" + where + ")"
+		}
+		var notes []string
+		if t.Reason != "" {
+			if t.Reason == api.WorkloadIdentityReasonNoPool {
+				notes = append(notes, "no Workload Identity pool reported")
+			} else {
+				notes = append(notes, wiOneLine(strings.ReplaceAll(t.Reason, "_", " ")))
+			}
+		}
+		if t.Stale {
+			staleMsg := "stored target: " + saTargetStaleReasonText(t.StaleReason)
+			if t.LastHeartbeat != nil && !t.LastHeartbeat.IsZero() {
+				staleMsg += " (last heartbeat " + clitime.Ago(*t.LastHeartbeat) + ")"
+			}
+			notes = append(notes, staleMsg)
+		} else if t.LastHeartbeat != nil && !t.LastHeartbeat.IsZero() {
+			notes = append(notes, "broker heartbeat "+clitime.Ago(*t.LastHeartbeat))
+		}
+		line := fmt.Sprintf("    %-10s %s", stateText, target)
+		if len(notes) > 0 {
+			line += "; " + strings.Join(notes, "; ")
+		}
+		p("%s\n", line)
+		if t.ManualStep != "" {
+			p("               to grant it by hand: %s\n", wiOneLine(t.ManualStep))
+		}
+	}
 }
 
 func runSARemove(cmd *cobra.Command, args []string) error {

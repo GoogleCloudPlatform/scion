@@ -16,9 +16,11 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -28,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/api/googleapi"
 	iamv1 "google.golang.org/api/iam/v1"
+	"google.golang.org/api/option"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -61,6 +64,10 @@ func (a *wiStubAdmin) AddRoleMembers(_ context.Context, _, role string, members 
 		return a.fail(len(a.calls), members)
 	}
 	return nil
+}
+
+func (a *wiStubAdmin) RoleMembers(context.Context, string, string) ([]string, error) {
+	return nil, errors.New("unexpected RoleMembers")
 }
 
 const wiTestGSA = "scion-foo@hub-proj.iam.gserviceaccount.com"
@@ -260,6 +267,50 @@ func TestAddPolicyRoleMembers(t *testing.T) {
 	assert.True(t, addPolicyRoleMembers(fresh, roleWorkloadIdentityUser, []string{"m1", "m2"}))
 	require.Len(t, fresh.Bindings, 1)
 	assert.True(t, slices.Equal([]string{"m1", "m2"}, fresh.Bindings[0].Members))
+}
+
+func TestPolicyRoleMembers(t *testing.T) {
+	assert.Empty(t, policyRoleMembers(nil, roleWorkloadIdentityUser))
+	policy := &iamv1.Policy{Bindings: []*iamv1.Binding{
+		{Role: roleWorkloadIdentityUser, Members: []string{"serviceAccount:p.svc.id.goog[a/cond]"}, Condition: &iamv1.Expr{Expression: "true"}},
+		{Role: roleWorkloadIdentityUser, Members: []string{"serviceAccount:p.svc.id.goog[a/one]", "serviceAccount:p.svc.id.goog[a/two]"}},
+		{Role: "roles/iam.serviceAccountTokenCreator", Members: []string{"serviceAccount:hub@x"}},
+	}}
+	assert.Equal(t, []string{
+		"serviceAccount:p.svc.id.goog[a/one]",
+		"serviceAccount:p.svc.id.goog[a/two]",
+	}, policyRoleMembers(policy, roleWorkloadIdentityUser), "conditional bindings and other roles are excluded")
+}
+
+// IAMAdminClient.RoleMembers reads only the service account's own resource
+// policy (projects/-/serviceAccounts/<email>:getIamPolicy), never a project
+// policy.
+func TestIAMAdminClient_RoleMembers_ResourceLevelOnly(t *testing.T) {
+	var seenMethod, seenPath string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenMethod = r.Method
+		seenPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&iamv1.Policy{
+			Bindings: []*iamv1.Binding{
+				{Role: roleWorkloadIdentityUser, Members: []string{"serviceAccount:p.svc.id.goog[agents/scion-foo]"}},
+				{Role: roleWorkloadIdentityUser, Members: []string{"serviceAccount:p.svc.id.goog[agents/cond]"}, Condition: &iamv1.Expr{Expression: "true"}},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	client, err := NewIAMAdminClient(context.Background(),
+		option.WithHTTPClient(ts.Client()),
+		option.WithEndpoint(ts.URL),
+	)
+	require.NoError(t, err)
+
+	members, err := client.RoleMembers(context.Background(), wiTestGSA, roleWorkloadIdentityUser)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, seenMethod)
+	assert.Equal(t, "/v1/projects/-/serviceAccounts/"+wiTestGSA+":getIamPolicy", seenPath)
+	assert.Equal(t, []string{"serviceAccount:p.svc.id.goog[agents/scion-foo]"}, members)
 }
 
 func TestNormalizeWorkloadIdentityTargets(t *testing.T) {

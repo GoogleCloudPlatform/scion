@@ -191,6 +191,10 @@ func (m *countingMockAdmin) AddRoleMembers(_ context.Context, _, _ string, _ []s
 	return nil
 }
 
+func (m *countingMockAdmin) RoleMembers(_ context.Context, _, _ string) ([]string, error) {
+	return nil, nil
+}
+
 func TestMintGCPServiceAccount_Success(t *testing.T) {
 	srv, _, mock := testServerWithMinting(t)
 	projectID := createTestProjectForSA(t, srv, nil)

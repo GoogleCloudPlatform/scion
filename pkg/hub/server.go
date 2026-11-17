@@ -2482,6 +2482,9 @@ type Server struct {
 
 	// GCP IAM admin for minting service accounts (nil = minting disabled)
 	gcpIAMAdmin GCPServiceAccountAdmin
+	// Short-lived cache (60s) of roles/iam.workloadIdentityUser members per
+	// minted GSA email for the per-account status view (ptone/scion#7968).
+	wiRoleMembersCache wiRoleMembersCache
 
 	// Caller-permission checker for the agent service-account assignment
 	// surface, and the mode gating whether it is consulted. Both are ALWAYS
@@ -5349,6 +5352,7 @@ func (s *Server) SetGCPServiceAccountAdmin(a GCPServiceAccountAdmin) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gcpIAMAdmin = a
+	s.wiRoleMembersCache.clear()
 }
 
 // DenyUnknownFailOpen returns the configured deny-unknown fallback policy.

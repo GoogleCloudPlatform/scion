@@ -214,8 +214,9 @@ type GCPServiceAccountStatus struct {
 	Mappings []GCPServiceAccountProfileMapping `json:"mappings"`
 	// WorkloadIdentityBinding.State is "bound", "not_bound" or "unknown".
 	WorkloadIdentityBinding struct {
-		State  string `json:"state"`
-		Reason string `json:"reason,omitempty"`
+		State   string                           `json:"state"`
+		Reason  string                           `json:"reason,omitempty"`
+		Targets []GCPServiceAccountBindingTarget `json:"targets,omitempty"`
 	} `json:"workloadIdentityBinding"`
 	// DefaultFor lists the defaults that name the account. Kind is
 	// "project", "profile" (with Profile set) or "hub".
@@ -268,6 +269,36 @@ type GCPServiceAccountProfileMapping struct {
 	// runtime key the hub cannot tell is Kubernetes) or "ambiguous_mapping".
 	// Clients should show a newer code they do not know as-is.
 	UnknownReason string `json:"unknownReason,omitempty"`
+	// WorkloadIdentityBinding is this profile's Workload Identity IAM binding
+	// state when hub.k8s_workload_identity_setup is enabled.
+	WorkloadIdentityBinding *GCPServiceAccountProfileBinding `json:"workloadIdentityBinding,omitempty"`
+}
+
+// GCPServiceAccountBindingTarget is one stored Kubernetes runtime target's
+// Workload Identity IAM binding state in the per-account status view.
+type GCPServiceAccountBindingTarget struct {
+	Pool          string     `json:"pool,omitempty"`
+	Namespace     string     `json:"namespace,omitempty"`
+	KSA           string     `json:"ksa,omitempty"`
+	Member        string     `json:"member,omitempty"`
+	Profiles      []string   `json:"profiles,omitempty"`
+	State         string     `json:"state"`
+	Reason        string     `json:"reason,omitempty"`
+	ManualStep    string     `json:"manualStep,omitempty"`
+	LastHeartbeat *time.Time `json:"lastHeartbeat,omitempty"`
+	Stale         bool       `json:"stale,omitempty"`
+	StaleReason   string     `json:"staleReason,omitempty"`
+}
+
+// GCPServiceAccountProfileBinding is one Kubernetes broker profile's Workload
+// Identity IAM binding state in the per-account status view.
+type GCPServiceAccountProfileBinding struct {
+	State       string `json:"state"`
+	Reason      string `json:"reason,omitempty"`
+	Pool        string `json:"pool,omitempty"`
+	Member      string `json:"member,omitempty"`
+	Stale       bool   `json:"stale,omitempty"`
+	StaleReason string `json:"staleReason,omitempty"`
 }
 
 // IsHubScoped reports whether the account belongs to the hub rather than to a
