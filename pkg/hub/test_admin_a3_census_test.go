@@ -180,7 +180,7 @@ func TestTestAdminA3_AgentMintCensus(t *testing.T) {
 	for key := range agentScopeCensusExempt {
 		assert.True(t, used[key], "stale agent mint exemption %s", key)
 	}
-	for _, want := range []string{"agent_token_mint.go:AuthorizeAgentToken", "scheduled_authority.go:resolveScheduledAgent",
+	for _, want := range []string{"agent_token_mint.go:AuthorizeAgentToken", "firecore_authority.go:resolveFireAgent",
 		"skill_dispatch_resolve.go:creatorIdentityForAgent", "artifacts_recipient.go:recipientIdentity"} {
 		assert.True(t, sites[want], "scope site %s found", want)
 	}

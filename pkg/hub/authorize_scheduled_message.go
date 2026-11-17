@@ -263,21 +263,8 @@ func (s *Server) scheduledTargetReadable(ctx context.Context, identity Identity,
 // exercises; scheduledEventPermissions maps the message event type to it.
 const scheduledMessagePermission = "agent.message"
 
-// authorizeScheduledMessageFire authorizes a scheduled message event at fire
-// time, immediately before dispatch, under auth and identity: the authority
-// and identity resolveScheduledAuthority returned for evt. CreatedBy is
-// history only and is never read for authority.
-//
-// It refuses when the target agent is nil or deleted, when the target is in
-// another project and cross-project messaging is disabled, when a user
-// principal's revision ceiling does not allow agent.message, or when
-// authorizeAgentMessage (isSystemPlane=false) denies identity the send. On a
-// refusal the caller must fail the event with no dispatch.
-//
-// The revision ceiling is read for user principals only. agent.message is
-// not covered by any agent scope, so an agent's bounded ceiling never lists
-// it; an agent principal's send is decided by the agent message rule
-// (authorizeAgentToAgent), as a live send by that agent is.
+// authorizeScheduledMessageFire is the store.ScheduledEvent compatibility shim
+// over authorizeMessageFire for held-message re-drive and existing unit tests.
 func (s *Server) authorizeScheduledMessageFire(
 	ctx context.Context,
 	evt store.ScheduledEvent,
@@ -285,20 +272,45 @@ func (s *Server) authorizeScheduledMessageFire(
 	identity Identity,
 	agent *store.Agent,
 ) error {
-	// Fail closed if the target agent was deleted between scheduling and fire.
+	return s.authorizeMessageFire(ctx, evt.ProjectID, auth, identity, agent)
+}
+
+// authorizeMessageFire authorizes a deferred message fire immediately before
+// dispatch under auth and identity: the authority and identity
+// resolveRecordedAuthority returned for the fire. CreatedBy is history only and
+// is never read for authority.
+//
+// It refuses when the target agent is nil or deleted, when the target is in
+// another project and cross-project messaging is disabled, when a user
+// principal's revision ceiling does not allow agent.message, or when
+// authorizeAgentMessage (isSystemPlane=false) denies identity the send. On a
+// refusal the caller must refuse the fire with no dispatch.
+//
+// The revision ceiling is read for user principals only. agent.message is
+// not covered by any agent scope, so an agent's bounded ceiling never lists
+// it; an agent principal's send is decided by the agent message rule
+// (authorizeAgentToAgent), as a live send by that agent is.
+func (s *Server) authorizeMessageFire(
+	ctx context.Context,
+	projectID string,
+	auth FireAuthority,
+	identity Identity,
+	agent *store.Agent,
+) error {
+	// Fail closed if the target agent was deleted between authoring and fire.
 	if agent == nil {
 		return fmt.Errorf("%s: target agent is nil; may have been deleted since scheduling",
 			MessageDenialScheduledTargetDeleted)
 	}
 
 	// Phase 5 D3: Cross-project scheduled messages are allowed when the
-	// Hub feature is enabled. The event's project is the sender's project;
+	// Hub feature is enabled. projectID is the sender's project;
 	// the target agent may be in a different project.
-	if agent.ProjectID != evt.ProjectID {
+	if agent.ProjectID != projectID {
 		ops := s.GetOperationalSettings()
 		if ops == nil || !ops.CrossProjectMessagingEnabled() {
 			return fmt.Errorf("%s: cross-project messaging is disabled; target agent %q is in project %q, event is in project %q",
-				MessageDenialCrossProjectScheduledDisabled, agent.ID, agent.ProjectID, evt.ProjectID)
+				MessageDenialCrossProjectScheduledDisabled, agent.ID, agent.ProjectID, projectID)
 		}
 		// Check if target has been deleted since scheduling.
 		if !agent.DeletedAt.IsZero() {
@@ -321,7 +333,7 @@ func (s *Server) authorizeScheduledMessageFire(
 	}
 
 	// The production messaging authorization choke point.
-	// isSystemPlane=false: scheduled messages are request-derived.
+	// isSystemPlane=false: deferred messages are request-derived.
 	allowed, reason, _ := s.authorizeAgentMessage(ctx, identity, agent, false)
 	if !allowed {
 		return fmt.Errorf("scheduled_message_denied: %s", reason)

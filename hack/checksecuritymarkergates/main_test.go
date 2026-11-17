@@ -274,6 +274,7 @@ func prepareOverlayWorkspace(t *testing.T, root, relPath, mutatedContent string)
 		"pkg/hub/broker_inbound_sender.go",
 		"pkg/hub/notifications.go",
 		"pkg/hub/server.go",
+		"pkg/hub/action_message.go",
 	}
 
 	handlerGlob, _ := filepath.Glob(filepath.Join(root, "pkg/hub/handlers_*.go"))

@@ -4544,6 +4544,7 @@ func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
 
 	// Initialize the scheduler (normally done by Server.Start)
 	srv.scheduler = NewScheduler(s, slog.Default())
+	srv.scheduler.srv = srv
 	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
 
 	project := &store.Project{
@@ -4595,6 +4596,7 @@ func initScheduleTest(t *testing.T, srv *Server, s store.Store) (*Server, store.
 	ctx := context.Background()
 
 	srv.scheduler = NewScheduler(s, slog.Default())
+	srv.scheduler.srv = srv
 	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
 
 	project := &store.Project{

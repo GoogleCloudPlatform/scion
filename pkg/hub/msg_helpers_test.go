@@ -132,10 +132,10 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "notifications.go", function: "dispatchToAgent", symbol: "dispatchWithBrokerRetry",
 		class: "exempt", reason: "UNGUARDED notification fan-out (F-RS6-08); subscription-only authz; deferred to RS6/AH"},
 
-	// server.go: messageEventHandler — GUARDED after C1 containment.
-	// authorizeScheduledMessageFire calls authorizeAgentMessage before dispatch.
-	{file: "server.go", function: "messageEventHandler", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "C1 containment: authorizeScheduledMessageFire before dispatch"},
+	// action_message.go: deliverMessageAction — GUARDED after C1 containment.
+	// messageAction.Authorize calls authorizeMessageFire -> authorizeAgentMessage before dispatch.
+	{file: "action_message.go", function: "deliverMessageAction", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "C1 containment: authorizeMessageFire before dispatch"},
 
 	// message_hold_redrive.go: dispatchClaimedHeldMessage — GUARDED (ptone/scion#7881, A2-S4).
 	// revalidateClaimedHeldMessage re-evaluates target incarnation, delegation grant,

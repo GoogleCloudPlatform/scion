@@ -54,9 +54,10 @@ func main() {
 	bisPath := "pkg/hub/broker_inbound_sender.go"
 	notifPath := "pkg/hub/notifications.go"
 	serverPath := "pkg/hub/server.go"
+	actMsgPath := "pkg/hub/action_message.go"
 
 	// File-existence precheck (exit 2).
-	for _, f := range []string{hamPath, hcvPath, mbPath, hbiPath, hbirPath, hbiaPath, bisPath, notifPath, serverPath} {
+	for _, f := range []string{hamPath, hcvPath, mbPath, hbiPath, hbirPath, hbiaPath, bisPath, notifPath, serverPath, actMsgPath} {
 		if _, err := os.Stat(f); err != nil {
 			fmt.Fprintf(os.Stderr, "ABORT: guarded file not found or not readable: %s\n", f)
 			fmt.Fprintf(os.Stderr, "  Nothing was analysed. This is an environment/rename issue, not a guard failure.\n")
@@ -85,6 +86,7 @@ func main() {
 	bis := mustParse(bisPath)
 	notif := mustParse(notifPath)
 	srv := mustParse(serverPath)
+	actMsg := mustParse(actMsgPath)
 
 	// =========================================================================
 	// SECTION 1: Existing security-marker gates (B5, #1322, #1338, #1347, #1371)
@@ -551,11 +553,11 @@ func main() {
 	// Exempt emitters: functions that construct server messages without
 	// ValidateLegacyMessage. Each entry documents WHY the bypass is safe.
 	exemptEmitters := map[string]string{
-		"processMentions":     "derivative of validated primary message (mention fan-out)",
-		"dispatchToAgent":     "server-internal lifecycle signal (notification dispatch)",
-		"dispatchToChannels":  "server-internal lifecycle signal (channel notification)",
-		"publishToBroker":     "server-internal lifecycle signal (broker notification)",
-		"messageEventHandler": "scheduled payload validated at creation time",
+		"processMentions":           "derivative of validated primary message (mention fan-out)",
+		"dispatchToAgent":           "server-internal lifecycle signal (notification dispatch)",
+		"dispatchToChannels":        "server-internal lifecycle signal (channel notification)",
+		"publishToBroker":           "server-internal lifecycle signal (broker notification)",
+		"buildMessageActionMessage": "deferred message payload validated at authoring and fire time",
 	}
 
 	// Files to scan for exempt emitter enforcement.
@@ -565,6 +567,7 @@ func main() {
 		{hbiPath, hbi},
 		{notifPath, notif},
 		{serverPath, srv},
+		{actMsgPath, actMsg},
 	}
 
 	// Track which exempt emitters were actually found, to detect stale entries.

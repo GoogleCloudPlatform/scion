@@ -120,4 +120,11 @@ type FireOutcome struct {
 	ResultRef string // message id, created agent id, or exec run id
 	// AfterRecord runs after the caller has persisted the fire outcome.
 	AfterRecord func(ctx context.Context)
+	// Detached indicates that the action owns the fire's terminal outcome write
+	// (for example, an admitted scheduled exec run recorded by its tracker or
+	// sweeper); the caller must not record the outcome immediately. A detaching
+	// action that returns Detached: true must own the terminal write itself: in
+	// runScheduleFire, claiming wakeFireRun with a no-op means a provisional
+	// firing event is not recovered by the shutdown abandon sweep.
+	Detached bool
 }

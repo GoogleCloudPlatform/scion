@@ -79,6 +79,7 @@ func newExecRouteFixtureWith(t *testing.T, srvMod func(*Server)) *execRouteFixtu
 	// The scheduler is created by StartBackgroundServices, which test
 	// servers do not run: build one with the exec handler.
 	sched := NewScheduler(f.store, slog.Default())
+	sched.srv = f.srv
 	sched.RegisterEventHandler(scheduledEventTypeExec, f.srv.execEventHandler())
 	f.srv.mu.Lock()
 	f.srv.scheduler = sched

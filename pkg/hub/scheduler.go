@@ -24,11 +24,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// EventHandler processes a one-shot scheduled event of a specific type.
-type EventHandler func(ctx context.Context, evt store.ScheduledEvent) error
 
 // scheduledSkip is the error an event handler returns when the fire ran
 // nothing because a precondition did not hold (target not running, no
@@ -166,8 +164,13 @@ type Scheduler struct {
 	// RegisterLaunchReaper's doc comment for why.
 	launchReaper *launchReaperRegistration
 
-	// Event type handlers for one-shot events
-	eventHandlers map[string]EventHandler
+	// srv is the owning Hub server when wired (nil in standalone scheduler tests).
+	srv *Server
+
+	// legacyHandlers backs standalone NewScheduler unit tests where srv is nil.
+	// When srv is wired, Server.actions is the single action registry.
+	// Removed in PR 2 (ptone/scion#8029).
+	legacyHandlers map[string]EventHandler
 
 	// Tick counter (monotonically increasing). Written by the ticker loop and
 	// read concurrently by handler goroutines and Status(), so it is atomic.
@@ -248,7 +251,6 @@ func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Sc
 		MaxJitter:      maxJitter,
 		MaxConcurrency: defaultMaxConcurrency,
 		timers:         make(map[string]*scheduledTimer),
-		eventHandlers:  make(map[string]EventHandler),
 		log:            log,
 		stopCh:         make(chan struct{}),
 	}
@@ -263,17 +265,20 @@ func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Sc
 	return s
 }
 
-// RegisterEventHandler registers a handler for a specific event type.
-// Must be called before Start(). Not safe for concurrent use: after Start,
-// eventHandlers is read without a lock.
-func (s *Scheduler) RegisterEventHandler(eventType string, handler EventHandler) {
-	s.eventHandlers[eventType] = handler
-}
-
-// GetEventHandler returns the handler for the given event type, if registered.
-func (s *Scheduler) GetEventHandler(eventType string) (EventHandler, bool) {
-	handler, ok := s.eventHandlers[eventType]
-	return handler, ok
+func (s *Scheduler) fireAction(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+	if s.srv != nil {
+		return s.srv.fireAction(ctx, req)
+	}
+	if h, ok := s.legacyHandlers[req.ActionType]; ok {
+		if req.Executor.Kind != "" || req.Executor.ID != "" {
+			ctx = ContextWithExecutor(ctx, req.Executor)
+		}
+		return (&legacyAction{actionType: req.ActionType, handler: h}).run(ctx, req)
+	}
+	return hubfire.FireOutcome{
+		Status: hubfire.FireStatusFailed,
+		Error:  unknownActionTypeError(req.ActionType),
+	}
 }
 
 // RegisterRecurring registers a recurring handler that runs every intervalMinutes
@@ -680,7 +685,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// Hooks run after the final status write below, on every return path
 	// after the claim; a lost claim registers none.
 	defer afterRecord.run()
-	wakeFire := evt.EventType == "message" && scheduledPayloadWakes(evt.Payload)
+	wakeFire := s.eventFireDetaches(evt)
 	var scope *oneShotFireScope
 	if wakeFire {
 		// Registered before handlerCtx and before final persistence so
@@ -813,14 +818,22 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	persist()
 }
 
-// executeEvent dispatches the event to the appropriate handler based on its
+// executeEvent dispatches the event through the fire core based on its
 // EventType. Unknown event types return an error.
 func (s *Scheduler) executeEvent(ctx context.Context, evt store.ScheduledEvent) error {
-	handler, ok := s.eventHandlers[evt.EventType]
-	if !ok {
-		return fmt.Errorf("unknown event type: %s", evt.EventType)
+	exec := ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID}
+	if existing, ok := ExecutorContextFromContext(ctx); ok {
+		exec = existing
 	}
-	return handler(ctx, evt)
+	fireCtx := withFireHistoryCreator(withLegacyScheduledEvent(ctx, evt), evt.CreatedBy)
+	out := s.fireAction(fireCtx, scheduledFireRequest(s.srv, evt, exec, nil))
+	if out.AfterRecord != nil {
+		after := out.AfterRecord
+		afterScheduledRecord(ctx, func() {
+			after(context.WithoutCancel(ctx))
+		})
+	}
+	return scheduledFireError(evt.EventType, out)
 }
 
 // ScheduleEvent creates a new one-shot scheduled event. The event is persisted
@@ -894,9 +907,14 @@ func (s *Scheduler) Status() SchedulerStatus {
 		}
 	}
 
-	eventHandlers := make([]string, 0, len(s.eventHandlers))
-	for t := range s.eventHandlers {
-		eventHandlers = append(eventHandlers, t)
+	var eventHandlers []string
+	if s.srv != nil {
+		eventHandlers = s.srv.actions.Types()
+	} else {
+		eventHandlers = make([]string, 0, len(s.legacyHandlers))
+		for k := range s.legacyHandlers {
+			eventHandlers = append(eventHandlers, k)
+		}
 	}
 
 	s.mu.Lock()

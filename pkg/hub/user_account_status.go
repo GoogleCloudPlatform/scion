@@ -39,8 +39,8 @@ import (
 //   - the user access token checks (ValidateToken, bearerStillValid);
 //   - the live-connection checks (conduitUserStatus, relayUserIdentity,
 //     conduitRenewalIdentity);
-//   - the scheduled-run principal check (scheduledUserAccount, called by
-//     resolveScheduledUser).
+//   - the deferred-fire principal check (scheduledUserAccount, called by
+//     resolveFireUser).
 //
 // For the checks listed above, checkUserAccount is the one implementation
 // of the rule: none of them reads the account status itself.

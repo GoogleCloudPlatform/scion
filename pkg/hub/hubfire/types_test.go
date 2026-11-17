@@ -124,7 +124,14 @@ func TestFireOutcomeAndStatuses(t *testing.T) {
 	}
 	assert.Equal(t, hubfire.FireStatusFired, out.Status)
 	assert.Equal(t, "msg-1", out.ResultRef)
+	assert.False(t, out.Detached)
 	require.NotNil(t, out.AfterRecord)
 	out.AfterRecord(context.Background())
 	assert.True(t, called)
+
+	detached := hubfire.FireOutcome{
+		Status:   hubfire.FireStatusFired,
+		Detached: true,
+	}
+	assert.True(t, detached.Detached)
 }
