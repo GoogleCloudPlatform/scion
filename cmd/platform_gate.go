@@ -95,6 +95,17 @@ var windowsAllowed = map[string]bool{
 	"trigger.webhook.list":   true,
 	"trigger.webhook.delete": true,
 
+	// Project message policies (ptone/scion#8047): pure Hub API calls and
+	// read-only user input files (--file, --rule-file, --body-file); no local
+	// writes.
+	"message-policy":           true,
+	"message-policy.create":    true,
+	"message-policy.list":      true,
+	"message-policy.get":       true,
+	"message-policy.delete":    true,
+	"message-policy.test":      true,
+	"message-policy.decisions": true,
+
 	// 'scion use' and its alias 'scion project use' run on Windows. Their
 	// local writes all go through the private-file primitives:
 	// ~/.scion/context.yaml with its directory and lock (Tree.MkdirAll

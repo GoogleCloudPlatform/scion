@@ -309,10 +309,13 @@ func (m *mockProdHubClient) TestIdentityDelegations() hubclient.TestIdentityDele
 func (m *mockProdHubClient) AgentDelegations() hubclient.AgentDelegationService       { return nil }
 func (m *mockProdHubClient) Decisions() hubclient.DecisionService                     { return nil }
 func (m *mockProdHubClient) ProjectDecisions(string) hubclient.ProjectDecisionService { return nil }
-func (m *mockProdHubClient) MyDecisions() hubclient.MyDecisionService                 { return nil }
-func (m *mockProdHubClient) SystemOne() hubclient.SystemOneService                    { return nil }
-func (m *mockProdHubClient) GitHubApp() hubclient.GitHubAppService                    { return nil }
-func (m *mockProdHubClient) TriggerPresets() hubclient.TriggerPresetService           { return nil }
+func (m *mockProdHubClient) ProjectMessagePolicies(string) hubclient.MessagePolicyService {
+	return nil
+}
+func (m *mockProdHubClient) MyDecisions() hubclient.MyDecisionService       { return nil }
+func (m *mockProdHubClient) SystemOne() hubclient.SystemOneService          { return nil }
+func (m *mockProdHubClient) GitHubApp() hubclient.GitHubAppService          { return nil }
+func (m *mockProdHubClient) TriggerPresets() hubclient.TriggerPresetService { return nil }
 func (m *mockProdHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }

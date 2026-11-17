@@ -738,3 +738,36 @@ func TestServerOpenCmd_HumanModeOnly(t *testing.T) {
 	applyModeRestrictions(human, resolveMode())
 	assert.NotNil(t, resolveCommandPath(human, "server.open"), "human mode keeps server open")
 }
+
+// ptone/scion#8047 (decision m1-agent-cli v1): in agent mode, ONLY read-only
+// inspection (message-policy, message-policy.list, message-policy.get) is
+// available; create, delete, test, and decisions are removed.
+func TestMessagePolicyCommands_AgentModeReadOnly(t *testing.T) {
+	real := resolveCommandPath(rootCmd, "message-policy")
+	require.NotNil(t, real, "message-policy must exist in the real command tree")
+
+	for _, allowed := range []string{"message-policy", "message-policy.list", "message-policy.get"} {
+		assert.True(t, agentAllowed[allowed], "agentAllowed must contain %s", allowed)
+		assert.NotNil(t, resolveCommandPath(rootCmd, allowed), "%s must resolve to a real command", allowed)
+	}
+	for _, blocked := range []string{
+		"message-policy.create",
+		"message-policy.delete",
+		"message-policy.test",
+		"message-policy.decisions",
+	} {
+		assert.False(t, agentAllowed[blocked], "agentAllowed must NOT contain %s", blocked)
+		assert.NotNil(t, resolveCommandPath(rootCmd, blocked), "%s must resolve to a real command in human mode", blocked)
+	}
+
+	root := &cobra.Command{Use: "scion"}
+	root.AddCommand(cloneCommandShape(real))
+	t.Setenv("SCION_CLI_MODE", "agent")
+	applyModeRestrictions(root, resolveMode())
+
+	assert.Equal(t,
+		[]string{"message-policy", "message-policy.get", "message-policy.list"},
+		collectCommandNames(root),
+		"agent mode must keep ONLY message-policy, list, and get",
+	)
+}

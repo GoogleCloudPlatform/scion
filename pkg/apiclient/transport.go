@@ -628,6 +628,13 @@ func (t *Transport) Patch(ctx context.Context, path string, body interface{}, he
 	return t.doJSON(ctx, http.MethodPatch, path, body, headers)
 }
 
+// PatchNoRetry performs an HTTP PATCH request with a JSON body via DoNoRetry:
+// exactly one attempt, no retry on network error or 5xx, no redirect
+// following.
+func (t *Transport) PatchNoRetry(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return t.doJSONVia(ctx, t.DoNoRetry, http.MethodPatch, path, body, headers)
+}
+
 // Delete performs an HTTP DELETE request.
 func (t *Transport) Delete(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, t.buildURL(path, nil), nil)
@@ -640,6 +647,21 @@ func (t *Transport) Delete(ctx context.Context, path string, headers http.Header
 	}
 
 	return t.Do(ctx, req)
+}
+
+// DeleteNoRetry performs an HTTP DELETE request via DoNoRetry: exactly one
+// attempt, no retry on network error or 5xx, no redirect following.
+func (t *Transport) DeleteNoRetry(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, t.buildURL(path, nil), nil)
+	if err != nil {
+		return nil, redactURLError(err)
+	}
+
+	for k, v := range headers {
+		req.Header[k] = v
+	}
+
+	return t.DoNoRetry(ctx, req)
 }
 
 // DeleteJSON performs an HTTP DELETE request with a JSON body, for

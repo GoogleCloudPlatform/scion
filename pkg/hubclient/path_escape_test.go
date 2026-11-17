@@ -207,6 +207,36 @@ func TestPathEscape_ProjectScopedServices(t *testing.T) {
 			func(ctx context.Context, c Client, id string) { _, _ = c.ProjectPreStartHooks(id).Activate(ctx, id) }},
 		{"PreStartHooks/Delete", "/api/v1/projects/{id}/pre-start-hooks/{id}",
 			func(ctx context.Context, c Client, id string) { _ = c.ProjectPreStartHooks(id).Delete(ctx, id) }},
+		{"MessagePolicies/List", "/api/v1/projects/{id}/message-policies",
+			func(ctx context.Context, c Client, id string) { _, _ = c.ProjectMessagePolicies(id).List(ctx, nil) }},
+		{"MessagePolicies/Create", "/api/v1/projects/{id}/message-policies",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = c.ProjectMessagePolicies(id).Create(ctx, &CreateMessagePolicyRequest{})
+			}},
+		{"MessagePolicies/Get", "/api/v1/projects/{id}/message-policies/{id}",
+			func(ctx context.Context, c Client, id string) { _, _ = c.ProjectMessagePolicies(id).Get(ctx, id) }},
+		{"MessagePolicies/Update", "/api/v1/projects/{id}/message-policies/{id}",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = c.ProjectMessagePolicies(id).Update(ctx, id, &PatchMessagePolicyRequest{})
+			}},
+		{"MessagePolicies/Delete", "/api/v1/projects/{id}/message-policies/{id}",
+			func(ctx context.Context, c Client, id string) { _ = c.ProjectMessagePolicies(id).Delete(ctx, id) }},
+		{"MessagePolicies/Test", "/api/v1/projects/{id}/message-policies/test",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = c.ProjectMessagePolicies(id).Test(ctx, &TestMessagePolicyRequest{})
+			}},
+		{"MessagePolicies/TestPolicy", "/api/v1/projects/{id}/message-policies/{id}/test",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = c.ProjectMessagePolicies(id).TestPolicy(ctx, id, &TestMessagePolicyRequest{})
+			}},
+		{"MessagePolicies/ListDecisions", "/api/v1/projects/{id}/message-policies/decisions",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = c.ProjectMessagePolicies(id).ListDecisions(ctx, nil)
+			}},
+		{"MessagePolicies/ListPolicyDecisions", "/api/v1/projects/{id}/message-policies/{id}/decisions",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = c.ProjectMessagePolicies(id).ListPolicyDecisions(ctx, id, nil)
+			}},
 	})
 }
 

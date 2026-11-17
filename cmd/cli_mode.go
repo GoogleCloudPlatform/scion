@@ -225,6 +225,15 @@ var agentAllowed = map[string]bool{
 	"trigger.webhook.create": true,
 	"trigger.webhook.list":   true,
 	"trigger.webhook.delete": true,
+
+	// Project message policy read-only inspection (ptone/scion#8047,
+	// maintainer decision m1-agent-cli v1): agents may inspect active project
+	// policies with list and get. Authoring, deletion, dry-run testing, and
+	// decision log queries (create, delete, test, decisions) are deliberately
+	// absent and remain human-mode only.
+	"message-policy":      true,
+	"message-policy.list": true,
+	"message-policy.get":  true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

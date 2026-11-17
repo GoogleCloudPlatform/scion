@@ -86,6 +86,20 @@ func TestParseErrorResponse_MessageDeniedReason(t *testing.T) {
 	}
 }
 
+func TestParseErrorResponse_MessagePolicyRejected(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Type", "application/json")
+	rec.WriteHeader(http.StatusUnprocessableEntity)
+	_, _ = rec.WriteString(`{"error":{"code":"message_policy_rejected","message":"Prose choices are not allowed.",` +
+		`"details":{"policy":"no-prose-choices","policy_revision":2,"class":"violation","remediation":"Re-send using structured choice options."}}}`)
+
+	apiErr := ParseErrorResponse(rec.Result())
+	want := "message_policy_rejected: Prose choices are not allowed. [policy: no-prose-choices; remediation: Re-send using structured choice options.] (status: 422)"
+	if got := apiErr.Error(); got != want {
+		t.Errorf("Error() = %q\nwant      %q", got, want)
+	}
+}
+
 func TestParseErrorResponse_NilResponse(t *testing.T) {
 	got := ParseErrorResponse(nil)
 	if got == nil {
