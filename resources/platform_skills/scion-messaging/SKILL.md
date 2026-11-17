@@ -94,9 +94,9 @@ user-facing format. Agent-only messages do not require it.
 - **Make decisions easy to read.** Put options in a list with their trade-offs and
   your recommendation. Put the actual question on its own line.
 <!-- scion:experiment web.decisions -->
-- **Ask with choices.** For a decision the user should answer by picking an option,
-  send it with `scion message --choices-file <file>` instead of prose, so the user
-  can answer with a click. See `references/choices.md`.
+- **Ask with a decision prompt.** For a decision the user should answer by picking
+  an option, send it with `scion message --decisions-file <file>` instead of prose,
+  so the user can answer with a click. See `references/decisions.md`.
 <!-- scion:end-experiment -->
 - **Keep details useful.** Avoid dense UUIDs, code line numbers and internal status
   codes unless the user needs them to act. Prefer descriptive Markdown links to
@@ -285,9 +285,9 @@ on `ask_user` status notifications to deliver the request.
   queue until the current turn ends); use for mid-turn stop or scope-change corrections,
   and omit on routine messages.
 <!-- scion:experiment web.decisions -->
-- `--choices-file <file>` sends a choice prompt (keyed decisions the user answers
-  with a click); `--update` revises one. `scion decisions` lists your decisions and
-  records answers given in words. See `references/choices.md`.
+- `--decisions-file <file>` sends a decision prompt (keyed decisions the user
+  answers with a click); `--update` revises one. `scion decisions` lists your
+  decisions and records answers given in words. See `references/decisions.md`.
 <!-- scion:end-experiment -->
 - `scion schedule create` schedules messages; see `scion-scheduler`.
 - `scion notifications subscribe` subscribes to agent state changes.
