@@ -89,8 +89,8 @@ type CloudRunRuntime struct {
 	// can reach the Instances API without a mounted NFS export.
 	provisionNFS func(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error)
 	// testActAs overrides how the doctor check asks IAM whether the caller
-	// may act as the instance service account. Nil in production
-	// (testActAsIAM); tests inject a stub.
+	// may act as configured agent service accounts. Nil in production
+	// (newIAMActAsTester); tests inject a stub.
 	testActAs actAsTester
 	// readyBoundsForTest overrides the bounds and clock of the wait for an
 	// instance after a create or start. Nil in production

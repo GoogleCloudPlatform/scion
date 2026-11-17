@@ -94,7 +94,7 @@ func (r *CloudRunRuntime) RunDiagnostics(opts DiagnosticOpts) DiagnosticReport {
 	// Its own timeout, so a slow API check above cannot starve it.
 	iamCtx, iamCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer iamCancel()
-	report.Checks = append(report.Checks, cloudRunActAsCheckForAccounts(iamCtx, cloudRunAgentServiceAccounts(r.config), tester))
+	report.Checks = append(report.Checks, cloudRunActAsCheckForAccounts(iamCtx, cloudRunAgentServiceAccounts(r.config), tester, len(r.clientOpts) > 0))
 
 	return report
 }
@@ -125,13 +125,6 @@ func newIAMActAsTester(opts ...option.ClientOption) actAsTester {
 		}
 		return slices.Contains(resp.Permissions, actAsPermission), nil
 	}
-}
-
-// testActAsIAM asks IAM (testIamPermissions on the service account) whether
-// the ambient credentials doctor runs with may act as sa. It is read-only and
-// needs no permission of its own.
-func testActAsIAM(ctx context.Context, sa string) (bool, error) {
-	return newIAMActAsTester()(ctx, sa)
 }
 
 // cloudRunAgentServiceAccounts returns the unique normalized agent service
@@ -166,22 +159,24 @@ func normalizeCloudRunServiceAccounts(raw []string) []string {
 
 // cloudRunActAsCheck checks that the caller may act as sa.
 func cloudRunActAsCheck(ctx context.Context, sa string, test actAsTester) CheckResult {
-	return cloudRunActAsCheckForAccounts(ctx, normalizeCloudRunServiceAccounts([]string{sa}), test)
+	return cloudRunActAsCheckForAccounts(ctx, normalizeCloudRunServiceAccounts([]string{sa}), test, false)
 }
 
 // cloudRunActAsCheckForAccounts checks that the caller may act as every
 // configured Cloud Run agent service account. Without iam.serviceAccounts.actAs
 // on a target account, starts as that account fail with "Permission
 // 'iam.serviceaccounts.actAs' denied on service account <sa> (or it may not
-// exist)", including when it is the hub's own service account.
-func cloudRunActAsCheckForAccounts(ctx context.Context, accounts []string, test actAsTester) CheckResult {
+// exist)", including when it is the hub's own service account. When
+// flatCredentials is true, doctor is already running with the flat instance's
+// runtime_target.credentials_file principal rather than ambient Hub ADC.
+func cloudRunActAsCheckForAccounts(ctx context.Context, accounts []string, test actAsTester, flatCredentials bool) CheckResult {
 	check := CheckResult{Name: "Cloud Run Instance Service Account (actAs)"}
 	if len(accounts) == 0 {
 		check.Status = "skip"
 		check.Message = "cloudrun.service_account is not set; Instances run as the project's default service account"
 		return check
 	}
-	if len(accounts) == 1 {
+	if len(accounts) == 1 && !flatCredentials {
 		sa := accounts[0]
 		remediation := fmt.Sprintf("Grant the identity that starts agents (the hub's service account, even when it is %s itself) roles/iam.serviceAccountUser on %s: "+
 			"gcloud iam service-accounts add-iam-policy-binding %s --member=serviceAccount:HUB_SA_EMAIL --role=roles/iam.serviceAccountUser", sa, sa, sa)
@@ -202,6 +197,10 @@ func cloudRunActAsCheckForAccounts(ctx context.Context, accounts []string, test 
 		return check
 	}
 
+	memberPlaceholder := "HUB_SA_EMAIL"
+	if flatCredentials {
+		memberPlaceholder = "INSTANCE_CREDENTIAL_PRINCIPAL"
+	}
 	var (
 		parts    []string
 		affected []string
@@ -213,11 +212,11 @@ func cloudRunActAsCheckForAccounts(ctx context.Context, accounts []string, test 
 		case err != nil:
 			affected = append(affected, sa)
 			parts = append(parts, fmt.Sprintf("could not check %s on %s: %v", actAsPermission, sa, err))
-			cmds = append(cmds, fmt.Sprintf("gcloud iam service-accounts add-iam-policy-binding %s --member=serviceAccount:HUB_SA_EMAIL --role=roles/iam.serviceAccountUser", sa))
+			cmds = append(cmds, fmt.Sprintf("gcloud iam service-accounts add-iam-policy-binding %s --member=serviceAccount:%s --role=roles/iam.serviceAccountUser", sa, memberPlaceholder))
 		case !granted:
 			affected = append(affected, sa)
-			parts = append(parts, fmt.Sprintf("lack %s on %s (starts as this account fail with \"Permission 'iam.serviceaccounts.actAs' denied on service account %s (or it may not exist)\")", actAsPermission, sa, sa))
-			cmds = append(cmds, fmt.Sprintf("gcloud iam service-accounts add-iam-policy-binding %s --member=serviceAccount:HUB_SA_EMAIL --role=roles/iam.serviceAccountUser", sa))
+			parts = append(parts, fmt.Sprintf("missing %s on %s (starts as this account fail with \"Permission 'iam.serviceaccounts.actAs' denied on service account %s (or it may not exist)\")", actAsPermission, sa, sa))
+			cmds = append(cmds, fmt.Sprintf("gcloud iam service-accounts add-iam-policy-binding %s --member=serviceAccount:%s --role=roles/iam.serviceAccountUser", sa, memberPlaceholder))
 		}
 	}
 	if len(affected) == 0 {
@@ -227,8 +226,13 @@ func cloudRunActAsCheckForAccounts(ctx context.Context, accounts []string, test 
 		return check
 	}
 	check.Status = "warn"
-	check.Message = fmt.Sprintf("The credentials doctor runs with %s; if these are not the credentials that start agents, run doctor with the broker's credentials.",
-		strings.Join(parts, "; "))
+	if flatCredentials {
+		check.Message = fmt.Sprintf("Using the credentials doctor runs with: %s.",
+			strings.Join(parts, "; "))
+	} else {
+		check.Message = fmt.Sprintf("Using the credentials doctor runs with: %s; if these are not the credentials that start agents, run doctor with the broker's credentials.",
+			strings.Join(parts, "; "))
+	}
 	check.Remediation = fmt.Sprintf("Grant the identity that starts agents roles/iam.serviceAccountUser on each affected account (%s): %s",
 		strings.Join(affected, ", "), strings.Join(cmds, " ; "))
 	return check

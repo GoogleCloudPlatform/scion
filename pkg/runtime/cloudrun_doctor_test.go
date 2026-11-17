@@ -207,21 +207,26 @@ func TestCloudRunRunDiagnostics_ChecksAllConfiguredAgentAccounts(t *testing.T) {
 			t.Fatalf("Status = %q, want warn (%+v)", found.Status, *found)
 		}
 		for _, want := range []string{
+			"Using the credentials doctor runs with: ",
 			"Permission 'iam.serviceaccounts.actAs' denied on service account " + assignSA1 + " (or it may not exist)",
 			assignSA2,
 			"iam boom",
+			"if these are not the credentials that start agents, run doctor with the broker's credentials.",
 		} {
 			if !strings.Contains(found.Message, want) {
 				t.Errorf("Message %q lacks %q", found.Message, want)
 			}
 		}
 		for _, want := range []string{
-			"gcloud iam service-accounts add-iam-policy-binding " + assignSA1,
-			"roles/iam.serviceAccountUser",
+			"gcloud iam service-accounts add-iam-policy-binding " + assignSA1 + " --member=serviceAccount:HUB_SA_EMAIL --role=roles/iam.serviceAccountUser",
+			"gcloud iam service-accounts add-iam-policy-binding " + assignSA2 + " --member=serviceAccount:HUB_SA_EMAIL --role=roles/iam.serviceAccountUser",
 		} {
 			if !strings.Contains(found.Remediation, want) {
 				t.Errorf("Remediation %q lacks %q", found.Remediation, want)
 			}
+		}
+		if strings.Contains(found.Remediation, "INSTANCE_CREDENTIAL_PRINCIPAL") {
+			t.Errorf("legacy ADC Remediation %q unexpectedly contains INSTANCE_CREDENTIAL_PRINCIPAL", found.Remediation)
 		}
 		if strings.Contains(found.Remediation, "\n") {
 			t.Errorf("Remediation spans lines: %q", found.Remediation)
@@ -318,5 +323,119 @@ func TestFlatCloudRunRunDiagnostics_UsesInstanceCredentialsNotADC(t *testing.T) 
 		if want := "Bearer " + instanceToken; gotAuth != want {
 			t.Errorf("request %d Authorization = %q, want %q", i, gotAuth, want)
 		}
+	}
+}
+
+func TestFlatCloudRunRunDiagnostics_RemediationUsesInstancePrincipalAndInitFailureHint(t *testing.T) {
+	const (
+		workSA   = "sa-work@test-project.iam.gserviceaccount.com"
+		blockSA  = "sa-block@test-project.iam.gserviceaccount.com"
+		assignSA = "sa-assign@test-project.iam.gserviceaccount.com"
+	)
+
+	creds := auth.NewCredentials(&auth.CredentialsOptions{
+		TokenProvider: fixedBearerTokenProvider("flat-token"),
+	})
+	rt, err := NewFlatCloudRunRuntime(config.CloudRunConfig{
+		ProjectID:                 "test-project",
+		Location:                  "us-central1",
+		ServiceAccount:            workSA,
+		BlockServiceAccount:       blockSA,
+		AssignableServiceAccounts: []string{assignSA},
+	}, creds)
+	if err != nil {
+		t.Fatalf("NewFlatCloudRunRuntime: %v", err)
+	}
+	rt.newClient = func(context.Context) (cloudrun.InstancesAPI, error) {
+		return nil, errors.New("client init boom")
+	}
+	rt.testActAs = func(_ context.Context, sa string) (bool, error) {
+		switch sa {
+		case blockSA:
+			return false, nil
+		case assignSA:
+			return false, errors.New("iam init boom")
+		default:
+			return true, nil
+		}
+	}
+
+	report := rt.RunDiagnostics(DiagnosticOpts{})
+
+	var apiCheck, actAsCheck *CheckResult
+	for i := range report.Checks {
+		switch report.Checks[i].Name {
+		case "Cloud Run API & Configuration":
+			apiCheck = &report.Checks[i]
+		case "Cloud Run Instance Service Account (actAs)":
+			actAsCheck = &report.Checks[i]
+		}
+	}
+	if apiCheck == nil {
+		t.Fatalf("missing Cloud Run API & Configuration check in %+v", report.Checks)
+	}
+	if apiCheck.Status != "fail" {
+		t.Fatalf("API check Status = %q, want fail (%+v)", apiCheck.Status, *apiCheck)
+	}
+	if want := "Verify runtime_target.credentials_file for this Cloud Run instance."; apiCheck.Remediation != want {
+		t.Errorf("flat API init failure Remediation = %q, want %q", apiCheck.Remediation, want)
+	}
+
+	// Contrast with legacy ADC init-failure remediation (kills M8 in both directions).
+	legacyRT, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID:      "test-project",
+		Location:       "us-central1",
+		ServiceAccount: workSA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRT.newClient = func(context.Context) (cloudrun.InstancesAPI, error) {
+		return nil, errors.New("legacy init boom")
+	}
+	legacyRT.testActAs = func(context.Context, string) (bool, error) { return true, nil }
+	legacyReport := legacyRT.RunDiagnostics(DiagnosticOpts{})
+	for _, c := range legacyReport.Checks {
+		if c.Name == "Cloud Run API & Configuration" {
+			if want := "Verify GCP credentials (e.g., gcloud auth application-default login)."; c.Remediation != want {
+				t.Errorf("legacy API init failure Remediation = %q, want %q", c.Remediation, want)
+			}
+		}
+	}
+
+	if actAsCheck == nil {
+		t.Fatalf("missing actAs check in %+v", report.Checks)
+	}
+	if actAsCheck.Status != "warn" {
+		t.Fatalf("actAs check Status = %q, want warn (%+v)", actAsCheck.Status, *actAsCheck)
+	}
+	for _, want := range []string{
+		"Using the credentials doctor runs with: ",
+		"Permission 'iam.serviceaccounts.actAs' denied on service account " + blockSA + " (or it may not exist)",
+		"could not check iam.serviceAccounts.actAs on " + assignSA + ": iam init boom",
+	} {
+		if !strings.Contains(actAsCheck.Message, want) {
+			t.Errorf("flat actAs Message %q lacks %q", actAsCheck.Message, want)
+		}
+	}
+	for _, unwanted := range []string{
+		"run doctor with the broker's credentials",
+		"run doctor with the hub's credentials",
+		"HUB_SA_EMAIL",
+	} {
+		if strings.Contains(actAsCheck.Message, unwanted) || strings.Contains(actAsCheck.Remediation, unwanted) {
+			t.Errorf("flat actAs check (%+v) unexpectedly contains %q", *actAsCheck, unwanted)
+		}
+	}
+	for _, want := range []string{
+		"gcloud iam service-accounts add-iam-policy-binding " + blockSA + " --member=serviceAccount:INSTANCE_CREDENTIAL_PRINCIPAL --role=roles/iam.serviceAccountUser",
+		"gcloud iam service-accounts add-iam-policy-binding " + assignSA + " --member=serviceAccount:INSTANCE_CREDENTIAL_PRINCIPAL --role=roles/iam.serviceAccountUser",
+	} {
+		if !strings.Contains(actAsCheck.Remediation, want) {
+			t.Errorf("flat actAs Remediation %q lacks %q", actAsCheck.Remediation, want)
+		}
+	}
+	if strings.Contains(actAsCheck.Remediation, "\n") {
+		t.Errorf("flat actAs Remediation spans lines: %q", actAsCheck.Remediation)
 	}
 }
