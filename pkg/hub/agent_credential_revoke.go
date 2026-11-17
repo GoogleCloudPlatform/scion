@@ -282,7 +282,9 @@ func isConfirmedStartNotActedOnError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, errStartBrokerNotConnected) || errors.Is(err, errStartRequestNotSent) {
+	if errors.Is(err, errStartBrokerNotConnected) || errors.Is(err, errStartRequestNotSent) ||
+		errors.Is(err, ErrBrokerLacksHomeFiles) || errors.Is(err, ErrHomeFilesEnvGatherDeferred) ||
+		errors.Is(err, ErrHomeFilesCreateNotDeferrable) {
 		return true
 	}
 	// A secret resolution error stops the dispatch in buildStartEnv, before

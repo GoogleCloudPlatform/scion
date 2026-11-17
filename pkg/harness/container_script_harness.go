@@ -1256,14 +1256,16 @@ const HarnessProvisionHookFilename = "20-harness-provision"
 
 // Paths in the agent home, relative to the home, for pkg/agenthome.
 const (
-	// bundleRel is the staged harness bundle directory.
-	bundleRel = ".scion/harness"
+	// StagedBundleRel is the staged harness bundle directory, relative to the agent home.
+	StagedBundleRel = ".scion/harness"
+	bundleRel       = StagedBundleRel
 	// inputsRel, secretsRel and manifestRel are in the bundle.
 	inputsRel   = bundleRel + "/inputs"
 	secretsRel  = bundleRel + "/secrets"
 	manifestRel = bundleRel + "/manifest.json"
-	// hookDirRel is the pre-start hook directory.
-	hookDirRel = ".scion/hooks/pre-start.d"
+	// PreStartHookDirRel is the pre-start hook directory, relative to the agent home.
+	PreStartHookDirRel = ".scion/hooks/pre-start.d"
+	hookDirRel         = PreStartHookDirRel
 	// provisionHookRel is the staged provisioner wrapper.
 	provisionHookRel = hookDirRel + "/" + HarnessProvisionHookFilename
 )

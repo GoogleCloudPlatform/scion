@@ -159,6 +159,10 @@ type BrokerCapabilities struct {
 	// create/start/restart as policy above everything. A hub may stop writing those values into
 	// InlineConfig only for a broker that reports this (ptone/scion#4222).
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// HomeFiles indicates this broker writes create-time HomeFiles entries into
+	// the newly provisioned agent's home directory under .scion/ before
+	// starting the harness (ptone/scion#8058).
+	HomeFiles bool `json:"homeFiles,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -485,6 +489,11 @@ type CreateAgentRequest struct {
 	// LaunchKeepaliveSeconds is the Hub's configured keepalive interval. The
 	// broker defaults to 15 when absent (design §3.7).
 	LaunchKeepaliveSeconds int `json:"launchKeepaliveSeconds,omitempty"`
+
+	// HomeFiles carries small control-plane files the Hub asks the broker to
+	// write under .scion/ in the newly provisioned agent's home directory on
+	// create only (ptone/scion#8058). Content is base64-encoded on the wire.
+	HomeFiles []api.HomeFile `json:"homeFiles,omitempty"`
 }
 
 // CreateAgentConfig contains configuration for agent creation.

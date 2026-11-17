@@ -160,8 +160,12 @@ func (g *Generic) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 	return result, nil
 }
 
+// GenericSystemPromptRel is the default system prompt path written by the
+// generic harness, relative to the agent home.
+const GenericSystemPromptRel = ".scion/system_prompt.md"
+
 func (g *Generic) InjectSystemPrompt(agentHome string, content []byte) error {
-	target := filepath.Join(agentHome, ".scion", "system_prompt.md")
+	target := filepath.Join(agentHome, filepath.FromSlash(GenericSystemPromptRel))
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		return fmt.Errorf("failed to create directory for system prompt: %w", err)
 	}

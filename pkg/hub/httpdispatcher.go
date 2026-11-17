@@ -926,6 +926,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		req.ExpectedRuntimeTargetID = agent.PinnedRuntimeTargetID
 	}
 	req.Persistence = dispatchPersistence(agent)
+	req.HomeFiles = createHomeFilesFromContext(ctx)
 
 	// Propagate attach mode from applied config
 	if agent.AppliedConfig != nil {
@@ -2097,6 +2098,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreate", failOnSecretResolutionError)
 	if err != nil {
@@ -2238,6 +2243,9 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
 		return err
 	}
+	if err := d.createHomeFilesPrecheck(ctx, agent, reprovision); err != nil {
+		return err
+	}
 
 	// Provision and reprovision keep going on a secret resolution error:
 	// the broker's provision never reads the resolved secrets, and the
@@ -2268,6 +2276,9 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	}()
 	req.ProvisionOnly = true
 	req.Reprovision = reprovision
+	if reprovision {
+		req.HomeFiles = nil
+	}
 	req.ExpectExistingNFSWorkspace = expectNFSWorkspace
 	req.MoveReincarnationID = moveReincarnationID
 	if reprovision && reset.ResetHome {
@@ -2407,6 +2418,16 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			return fmt.Errorf("%s: broker did not confirm the home reset (it may not support resetting an agent home; its reported capabilities may be stale): %w", callerName, errReprovisionHomeIntact)
 		}
 		d.log.InfoContext(ctx, callerName+": reprovision confirmed", "agent_id", agent.ID, "home_reset", finalResp.HomeReset)
+	} else if len(createHomeFilesFromContext(ctx)) > 0 {
+		// HomeFiles exist only on this dispatch's ctx: if the broker answered 202
+		// with unresolved env needs instead of provisioning, fail closed rather
+		// than returning nil and losing HomeFiles on a later start.
+		if finalNeeds != nil && len(finalNeeds.Needs) > 0 {
+			return &homeFilesEnvGatherDeferredError{needs: finalNeeds.Needs}
+		}
+		if finalResp == nil {
+			return fmt.Errorf("%s: broker returned no confirmation for homeFiles provision (%w)", callerName, ErrHomeFilesEnvGatherDeferred)
+		}
 	}
 	// Record gathered as_needed names for the reincarnation start that
 	// follows: both in-place reprovisions (reprovision=true) and cross-broker
@@ -2473,6 +2494,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
+	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
 		return nil, err
 	}
 
@@ -2575,10 +2599,21 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 			}
 			var stillMissing *ErrEnvStillMissing
 			if errors.As(err, &stillMissing) {
+				if len(createHomeFilesFromContext(ctx)) > 0 {
+					var missing []string
+					if stillMissing.Requirements != nil {
+						missing = stillMissing.Requirements.Needs
+					}
+					return nil, &homeFilesEnvGatherDeferredError{needs: missing}
+				}
 				return envReqsResult(stillMissing.Requirements), nil // Partial; remaining needs returned
 			}
 			return nil, err
 		}
+	}
+
+	if envReqs != nil && len(envReqs.Needs) > 0 && len(createHomeFilesFromContext(ctx)) > 0 {
+		return nil, &homeFilesEnvGatherDeferredError{needs: envReqs.Needs}
 	}
 
 	return envReqsResult(envReqs), nil
@@ -2586,7 +2621,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 
 // deferredCreateWithGather handles a cross-node create-with-gather via durable dispatch.
 func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
-	result, err := d.deferredDataOpResult(ctx, agent, "create", &CreateWithGatherDispatchArgs{})
+	result, err := d.deferredDataOpResult(ctx, agent, "create", &CreateWithGatherDispatchArgs{
+		HomeFiles: createHomeFilesFromContext(ctx),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -2674,6 +2711,9 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		return nil, err
 	}
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
+	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
 		return nil, err
 	}
 
@@ -2812,7 +2852,10 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 // The owner's result carries Launch when its send was accepted for
 // asynchronous launch.
 func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
-	result, err := d.deferredDataOpResult(ctx, agent, "finalize_env", &FinalizeEnvDispatchArgs{Env: env})
+	result, err := d.deferredDataOpResult(ctx, agent, "finalize_env", &FinalizeEnvDispatchArgs{
+		Env:       env,
+		HomeFiles: createHomeFilesFromContext(ctx),
+	})
 	if err != nil {
 		return nil, err
 	}

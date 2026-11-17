@@ -37,6 +37,10 @@ const EnvVar = "SCION_STAGED_SECRETS"
 // runtimes reserve the name: an environment-type secret never supplies it.
 const HubTokenStagedEnvVar = "SCION_HUB_TOKEN_STAGED"
 
+// VariableSecretsFileName is the file under ~/.scion/ where variable secrets
+// are written by sciontool init and read into the agent environment.
+const VariableSecretsFileName = "secrets.json"
+
 // FileSecret describes a single file-type secret in the staged blob.
 type FileSecret struct {
 	Name   string `json:"name"`
@@ -256,7 +260,7 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 		// Anchored at scionDirFd (which may have resolved homeDir through a
 		// trusted ancestor symlink), not by re-resolving secretsPath as a
 		// string — see the file-secret leaf write above for why.
-		werr := dirfd.WriteAtNoFollowWithChown(scionDirFd, "secrets.json", filepath.Join(scionDir, "secrets.json"), data, 0600, uid, gid, dirfd.RefuseSymlink, dirfd.Fchown)
+		werr := dirfd.WriteAtNoFollowWithChown(scionDirFd, VariableSecretsFileName, filepath.Join(scionDir, VariableSecretsFileName), data, 0600, uid, gid, dirfd.RefuseSymlink, dirfd.Fchown)
 		_ = dirfd.Close(scionDirFd)
 		if werr != nil {
 			return fmt.Errorf("failed to write secrets.json: %w", werr)

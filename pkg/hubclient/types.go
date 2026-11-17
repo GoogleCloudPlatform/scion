@@ -429,6 +429,11 @@ type BrokerCapabilities struct {
 	// deliveries (ptone/scion#4596; store.BrokerCapabilities.AttachmentDelivery
 	// is its counterpart).
 	AttachmentDelivery bool `json:"attachmentDelivery"`
+	// HomeFiles indicates the broker writes create-time HomeFiles entries into
+	// the newly provisioned agent's home directory under .scion/ before
+	// starting the harness (ptone/scion#8058; store.BrokerCapabilities.HomeFiles
+	// is its counterpart).
+	HomeFiles bool `json:"homeFiles,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent workspace in place
 	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).

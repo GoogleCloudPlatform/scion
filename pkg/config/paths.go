@@ -25,8 +25,9 @@ import (
 )
 
 const (
-	DotScion  = ".scion"
-	GlobalDir = ".scion"
+	DotScion         = ".scion"
+	GlobalDir        = ".scion"
+	SettingsFileName = "settings.yaml"
 
 	ProjectConfigsDir = projectkeys.ProjectConfigsDir
 	ProjectsDir       = projectkeys.ProjectsDir

@@ -463,6 +463,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,
+			// Create-time HomeFiles provisioning (ptone/scion#8058).
+			HomeFiles: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -1048,6 +1050,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if req.ResetHome != (req.ResetHomeID != "") || req.ResetHome && !api.ValidResetHomeID(req.ResetHomeID) {
 		ValidationError(w, "resetHome needs a resetHomeId of 1 to 64 characters of A-Z, a-z, 0-9 and '-'", nil)
 		return
+	}
+	if len(req.HomeFiles) > 0 {
+		if req.Reprovision {
+			ValidationError(w, "homeFiles is not valid on a reprovision request", nil)
+			return
+		}
+		if err := agent.ValidateHomeFiles(req.HomeFiles); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
 	}
 	// No volume in the request may reach a Runtime Broker control path;
 	// refused before beginCreateAttempt, so the refusal has no side effect.
@@ -1804,6 +1816,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		RunID:              req.RunID,
 		PreviousProjectIDs: req.PreviousProjectIDs,
 		Persistence:        req.Persistence,
+		HomeFiles:          req.HomeFiles,
 		HTTPRequest:        r,
 		Operation:          opCreate,
 		OwnedAbandon:       ownedAbandon,
@@ -1842,6 +1855,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// buildStartContext computed for opCreate.
 	if req.Reprovision {
 		opts.FreshProvision = false
+		opts.HomeFiles = nil
 	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())

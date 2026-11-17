@@ -1262,6 +1262,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
 	}
 
+	// Stage create-only HomeFiles under .scion/ after the home exists and
+	// before the harness/container starts. Never rewritten on resume, start,
+	// or restart (opts.FreshProvision is false on all non-create paths).
+	if opts.FreshProvision && !opts.Resume && len(opts.HomeFiles) > 0 {
+		if err := writeAgentHome(ctx, func() error { return writeProvisionHomeFiles(agentHome, opts.HomeFiles) }); err != nil {
+			return nil, fmt.Errorf("stage create home files: %w", err)
+		}
+	}
+
 	// Resolve auth metadata for the config-driven env var pipeline.
 	// Prefer the on-disk harness config (already resolved above for image/
 	// user); fall back to the settings entry.
@@ -3174,6 +3183,11 @@ func workspacePlacementFor(in workspacePlacementInput) string {
 // The writes are confined to the agent home (pkg/agenthome), through one
 // handle opened on the home: a link at the token file or its temp file is
 // replaced, never written through, and a linked .scion is refused.
+const (
+	agentTokenFileRel    = ".scion/scion-token"
+	agentTokenTmpFileRel = ".scion/scion-token.tmp"
+)
+
 func writeAgentTokenFile(agentHome, token string) error {
 	scionDir := filepath.Join(agentHome, ".scion")
 	home, err := agenthome.OpenCreate(agentHome, 0700)
@@ -3185,17 +3199,16 @@ func writeAgentTokenFile(agentHome, token string) error {
 		return fmt.Errorf("create agent token directory %s: %w", scionDir, err)
 	}
 
-	const tokenRel, tmpRel = ".scion/scion-token", ".scion/scion-token.tmp"
-	tokenPath := filepath.Join(scionDir, "scion-token")
-	tmp := tokenPath + ".tmp"
-	if err := home.WriteFile(tmpRel, []byte(token), 0600); err != nil {
-		_ = home.Remove(tmpRel)
+	tokenPath := filepath.Join(agentHome, filepath.FromSlash(agentTokenFileRel))
+	tmp := filepath.Join(agentHome, filepath.FromSlash(agentTokenTmpFileRel))
+	if err := home.WriteFile(agentTokenTmpFileRel, []byte(token), 0600); err != nil {
+		_ = home.Remove(agentTokenTmpFileRel)
 		return fmt.Errorf("write agent token file %s: %w", tmp, err)
 	}
-	if err := home.Rename(tmpRel, tokenRel); err != nil {
+	if err := home.Rename(agentTokenTmpFileRel, agentTokenFileRel); err != nil {
 		// Best effort: the temp file holds the credential, so leaving it behind
 		// on a path we are about to abort on is worse than a lost error here.
-		_ = home.Remove(tmpRel)
+		_ = home.Remove(agentTokenTmpFileRel)
 		return fmt.Errorf("install agent token file %s from %s: %w", tokenPath, tmp, err)
 	}
 
@@ -3288,7 +3301,7 @@ func removeAgentTokenFile(agentHome string) error {
 		return err
 	}
 	defer func() { _ = home.Close() }()
-	for _, rel := range []string{".scion/scion-token.tmp", ".scion/scion-token"} {
+	for _, rel := range []string{agentTokenTmpFileRel, agentTokenFileRel} {
 		if err := home.Remove(rel); err != nil {
 			return err
 		}
