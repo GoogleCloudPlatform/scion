@@ -1477,6 +1477,9 @@ func (s *Server) handleExistingAgent(
 	// which the whole-row post-start writes would persist. storedPhase is
 	// the stored phase, for the post-start "did the broker set a phase"
 	// checks.
+	if !req.ProvisionOnly && existingAgent.IdleSuspendClaimActive {
+		s.waitForIdleSuspendBeforeUserStart(ctx, existingAgent)
+	}
 	rest := store.EffectiveRestingPhase(existingAgent)
 	storedPhase := existingAgent.Phase
 
@@ -1493,8 +1496,9 @@ func (s *Server) handleExistingAgent(
 		cleanupMode = "strict"
 	}
 
-	// Branch 1: Suspended agents are restarted in-place (not deleted), preserving harness state.
-	if !req.ProvisionOnly && rest == string(state.PhaseSuspended) {
+	// Branch 1: Suspended agents (or agents mid-idle-suspend claim that have not yet settled)
+	// are restarted in-place (not deleted), preserving harness state.
+	if !req.ProvisionOnly && (rest == string(state.PhaseSuspended) || existingAgent.IdleSuspendClaimActive) {
 		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 			existingAgent.RuntimeBrokerID = runtimeBrokerID
 		}
@@ -1530,7 +1534,7 @@ func (s *Server) handleExistingAgent(
 		extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
-		resume := rest == string(state.PhaseSuspended)
+		resume := rest == string(state.PhaseSuspended) || existingAgent.IdleSuspendClaimActive
 		// The post-start write runs inside the start claim, before it is
 		// released, so it never overwrites a newer start's status.
 		var afterErr error // a post-start write error, answered after the start

@@ -407,8 +407,8 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 			assert.Equal(t, string(state.SuspendReasonUser), after.SuspendReason)
 		})
 
-		t.Run("ClaimAgentStart, ClaimAgentStop, ClaimAgentReincarnation, and UpdateAgentDeletion invalidate claim", func(t *testing.T) {
-			// ClaimAgentStart
+		t.Run("user start/reincarnation/deletion preempt claim while system ClaimAgentStop yields until expiry", func(t *testing.T) {
+			// User ClaimAgentStart preempts and clears idle claim.
 			aStart, condStart := makeEligible("claim-start-invalidates")
 			_, _, cuStart, err := s.ClaimIdleSuspend(ctx, aStart.ID, condStart)
 			require.NoError(t, err)
@@ -421,18 +421,33 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 			})
 			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
 
-			// ClaimAgentStop
-			aStop, condStop := makeEligible("claim-stop-invalidates")
+			// System ClaimAgentStop yields while idle claim is active, preserving the claim
+			// so IfIdleSuspendCommit succeeds; once an idle claim expires, ClaimAgentStop takes over.
+			aStop, condStop := makeEligible("claim-stop-yields")
 			_, intentAt, cuStop, err := s.ClaimIdleSuspend(ctx, aStop.ID, condStop)
 			require.NoError(t, err)
-			_, err = s.ClaimAgentStop(ctx, aStop.ID, "hub-1", intentAt, 30*time.Second)
+			_, err = s.ClaimAgentStop(ctx, aStop.ID, "hub-2", intentAt, 30*time.Second)
+			assert.ErrorIs(t, err, store.ErrClaimPredicate)
+			afterYield, err := s.GetAgent(ctx, aStop.ID)
 			require.NoError(t, err)
-			err = s.UpdateAgentStatus(ctx, aStop.ID, store.AgentStatusUpdate{
+			require.NotNil(t, afterYield.IdleSuspendClaimUntil)
+			assert.True(t, afterYield.IdleSuspendClaimActive)
+			require.NoError(t, s.UpdateAgentStatus(ctx, aStop.ID, store.AgentStatusUpdate{
 				Phase:               string(state.PhaseSuspended),
+				RetainedActivity:    string(state.ActivityIdle),
 				SuspendReason:       string(state.SuspendReasonIdle),
+				IfRunID:             aStop.RunID,
 				IfIdleSuspendCommit: &cuStop,
-			})
-			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+			}))
+
+			aStopExp, condStopExp := makeEligible("claim-stop-after-expiry")
+			condStopExp.ClaimTTL = 5 * time.Millisecond
+			_, intentAtExp, _, err := s.ClaimIdleSuspend(ctx, aStopExp.ID, condStopExp)
+			require.NoError(t, err)
+			time.Sleep(15 * time.Millisecond)
+			stopClaim, err := s.ClaimAgentStop(ctx, aStopExp.ID, "hub-2", intentAtExp, 30*time.Second)
+			require.NoError(t, err)
+			assert.Equal(t, store.StartClaimStop, stopClaim.Kind)
 
 			// ClaimAgentReincarnation
 			aReinc, condReinc := makeEligible("claim-reinc-invalidates")
@@ -638,4 +653,242 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestAgentStore_ClaimAgentStartWakeYieldsToActiveIdleClaim(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	cs := NewCompositeStore(s.client)
+	now := time.Now().UTC()
+	idleSince := now.Add(-20 * time.Minute).Truncate(time.Microsecond)
+
+	makeClaimed := func(slug string, ttl time.Duration) (*store.Agent, time.Time) {
+		a := makeAgent(projectID, slug)
+		a.Phase = string(state.PhaseRunning)
+		a.Activity = string(state.ActivityIdle)
+		a.RunID = "run-" + slug
+		a.LastSeen = now.Add(-15 * time.Second)
+		require.NoError(t, s.CreateAgent(ctx, a))
+		_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+			SetRunIntent(string(store.RunIntentRunning)).
+			SetRunIntentAt(now.Add(-30 * time.Minute)).
+			SetActivitySince(idleSince).
+			Save(ctx)
+		require.NoError(t, err)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		_, _, cu, err := s.ClaimIdleSuspend(ctx, a.ID, store.IdleSuspendCondition{
+			RunID:            got.RunID,
+			Activity:         got.Activity,
+			ActivitySince:    *got.ActivitySince,
+			IdleSuspendAfter: 15 * time.Minute,
+			HeartbeatRecency: 2 * time.Minute,
+			ClaimTTL:         ttl,
+		})
+		require.NoError(t, err)
+		return got, cu
+	}
+
+	// 1. System wake and recovery start claims yield while an idle claim is active,
+	// without clearing idle_suspend_claim_until.
+	for _, kind := range []store.StartClaimKind{store.StartClaimWake, store.StartClaimRecovery} {
+		a, cu := makeClaimed("wake-yield-"+string(kind), 30*time.Second)
+		_, err := s.ClaimAgentStart(ctx, a.ID, "hub-wake", kind, "", 30*time.Second)
+		assert.ErrorIs(t, err, store.ErrClaimPredicate)
+
+		after, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, after.IdleSuspendClaimUntil)
+		assert.True(t, after.IdleSuspendClaimActive)
+		assert.Equal(t, store.RunIntentStopped, after.RunIntent)
+
+		// SwapSystemRunIntent also yields without clearing the active claim.
+		_, _, err = s.SwapSystemRunIntent(ctx, a.ID, store.RunIntentRunning)
+		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+		_, _, err = s.SwapSystemRunIntent(ctx, a.ID, store.RunIntentStopped)
+		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+		// Stale container/agent starting report preserves the active claim.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:              string(state.PhaseStarting),
+			ReportSource:       store.StatusReportSourceAgent,
+			ReportRunID:        a.RunID,
+			ReportAgentToken:   true,
+			GuardReincarnation: true,
+		}))
+		// ConvertUnconfirmedToStop yields while the idle claim is active.
+		_, err = s.ConvertUnconfirmedToStop(ctx, a.ID, "missing-claim", "hub-reaper", 30*time.Second)
+		assert.ErrorIs(t, err, store.ErrClaimPredicate)
+
+		// Move back to stopping via agent report and commit suspended(idle) cleanly.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:              string(state.PhaseStopping),
+			ReportSource:       store.StatusReportSourceAgent,
+			ReportRunID:        a.RunID,
+			ReportAgentToken:   true,
+			GuardReincarnation: true,
+		}))
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:               string(state.PhaseSuspended),
+			RetainedActivity:    string(state.ActivityIdle),
+			SuspendReason:       string(state.SuspendReasonIdle),
+			IfRunID:             a.RunID,
+			IfIdleSuspendCommit: &cu,
+		}))
+	}
+
+	// 2. Active AgentHold during IfIdleSuspendCommit omits suspend_reason so held
+	// agents land in suspended(reason="") and never auto-wake.
+	aHeld, cuHeld := makeClaimed("commit-with-hold", 30*time.Second)
+	_, err := s.client.AgentHold.Create().
+		SetAgentID(uuid.MustParse(aHeld.ID)).
+		SetProjectID(uuid.MustParse(projectID)).
+		SetCause("owner_access_ended").
+		SetTrigger("member_remove").
+		SetRootPrincipalType("user").
+		SetRootPrincipalID("u-hold").
+		Save(ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateAgentStatus(ctx, aHeld.ID, store.AgentStatusUpdate{
+		Phase:               string(state.PhaseSuspended),
+		RetainedActivity:    string(state.ActivityIdle),
+		SuspendReason:       string(state.SuspendReasonIdle),
+		IfRunID:             aHeld.RunID,
+		IfIdleSuspendCommit: &cuHeld,
+	}))
+	afterHeld, err := s.GetAgent(ctx, aHeld.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), afterHeld.Phase)
+	assert.Empty(t, afterHeld.SuspendReason, "membership-held agent must not get suspend_reason=idle")
+
+	// 3. ListAgents stop-all filter (Phase=running OR OrRunIntent=running) matches
+	// active idle claims (with IdleSuspendClaimActive=true) and ignores expired claims.
+	aActiveFilter, _ := makeClaimed("stopall-active-claim", 30*time.Second)
+	require.NoError(t, s.UpdateAgentStatus(ctx, aActiveFilter.ID, store.AgentStatusUpdate{
+		Phase:        string(state.PhaseStopped),
+		ReportSource: store.StatusReportSourceRuntime,
+		ReportRunID:  aActiveFilter.RunID,
+	}))
+	aExpiredFilter, _ := makeClaimed("stopall-expired-claim", 5*time.Millisecond)
+	require.NoError(t, s.UpdateAgentStatus(ctx, aExpiredFilter.ID, store.AgentStatusUpdate{
+		Phase:        string(state.PhaseStopped),
+		ReportSource: store.StatusReportSourceRuntime,
+		ReportRunID:  aExpiredFilter.RunID,
+	}))
+	time.Sleep(15 * time.Millisecond)
+
+	listed, err := s.ListAgents(ctx, store.AgentFilter{
+		ProjectID:   projectID,
+		Phase:       string(state.PhaseRunning),
+		OrRunIntent: string(store.RunIntentRunning),
+	}, store.ListOptions{})
+	require.NoError(t, err)
+	listedMap := map[string]store.Agent{}
+	for _, item := range listed.Items {
+		listedMap[item.ID] = item
+	}
+	require.Contains(t, listedMap, aActiveFilter.ID, "active idle claim must be matched by stop-all filter")
+	assert.True(t, listedMap[aActiveFilter.ID].IdleSuspendClaimActive, "ListAgents must populate IdleSuspendClaimActive")
+	assert.NotContains(t, listedMap, aExpiredFilter.ID, "expired idle claim must NOT be matched by stop-all filter")
+
+	// 4. Held awaiting_session messages survive active idle claim and suspended(idle),
+	// rebind cleanly via RebindHeldMessagesLaunch, and still expire on user suspend.
+	aMsg := makeAgent(projectID, "hold-survive-store")
+	aMsg.Phase = string(state.PhaseRunning)
+	aMsg.Activity = string(state.ActivityIdle)
+	aMsg.RunID = "run-msg-1"
+	aMsg.LastSeen = now.Add(-10 * time.Second)
+	require.NoError(t, s.CreateAgent(ctx, aMsg))
+	_, err = s.SetAgentRunID(ctx, aMsg.ID, "run-msg-1", nil)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(uuid.MustParse(aMsg.ID)).
+		SetRunIntent(string(store.RunIntentRunning)).
+		SetRunIntentAt(now.Add(-30 * time.Minute)).
+		SetActivitySince(idleSince).
+		Save(ctx)
+	require.NoError(t, err)
+
+	msg := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     projectID,
+		AgentID:       aMsg.ID,
+		Sender:        "user:u1",
+		SenderID:      "u1",
+		Recipient:     "agent:" + aMsg.Slug,
+		RecipientID:   aMsg.ID,
+		Msg:           "survive-idle-suspend",
+		Type:          "instruction",
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     now,
+	}
+	require.NoError(t, cs.CreateMessage(ctx, msg))
+	_, err = cs.PrepareOrHoldMessage(ctx, aMsg.ID, msg.ID, 100)
+	require.NoError(t, err)
+	bindRes, err := cs.BindMessageDelivery(ctx, aMsg.ID, "deliv-1", []string{msg.ID}, now)
+	require.NoError(t, err)
+	require.Equal(t, store.DeliveryBound, bindRes.Result)
+	require.NoError(t, cs.UnbindMessageDeliveryWithProof(ctx, "deliv-1", []string{msg.ID}, store.MessageNotReachedNoSession))
+	heldOK, err := cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   msg.ID,
+		AgentID:     aMsg.ID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     100,
+	})
+	require.NoError(t, err)
+	require.True(t, heldOK)
+
+	gotMsgAgent, err := s.GetAgent(ctx, aMsg.ID)
+	require.NoError(t, err)
+	_, _, cuMsg, err := s.ClaimIdleSuspend(ctx, aMsg.ID, store.IdleSuspendCondition{
+		RunID:            gotMsgAgent.RunID,
+		Activity:         gotMsgAgent.Activity,
+		ActivitySince:    *gotMsgAgent.ActivitySince,
+		IdleSuspendAfter: 15 * time.Minute,
+		HeartbeatRecency: 2 * time.Minute,
+		ClaimTTL:         30 * time.Second,
+	})
+	require.NoError(t, err)
+
+	// Container post-stop report moves phase to stopped; ExpireHeldMessagesForAgent("agent stopped") preserves row!
+	require.NoError(t, s.UpdateAgentStatus(ctx, aMsg.ID, store.AgentStatusUpdate{
+		Phase:        string(state.PhaseStopped),
+		ReportSource: store.StatusReportSourceRuntime,
+		ReportRunID:  aMsg.RunID,
+	}))
+	expDuringClaim, err := cs.ExpireHeldMessagesForAgent(ctx, aMsg.ID, "agent stopped")
+	require.NoError(t, err)
+	assert.Empty(t, expDuringClaim, "held row must survive post-stop report while idle claim is active")
+
+	// Commit suspended(idle) and clear claim; ExpireHeldMessagesForAgent("agent stopped") STILL preserves row!
+	require.NoError(t, s.UpdateAgentStatus(ctx, aMsg.ID, store.AgentStatusUpdate{
+		Phase:               string(state.PhaseSuspended),
+		RetainedActivity:    string(state.ActivityIdle),
+		SuspendReason:       string(state.SuspendReasonIdle),
+		IfRunID:             aMsg.RunID,
+		IfIdleSuspendCommit: &cuMsg,
+	}))
+	require.NoError(t, s.ClearIdleSuspendClaim(ctx, aMsg.ID))
+	expWhileIdleSuspended, err := cs.ExpireHeldMessagesForAgent(ctx, aMsg.ID, "agent stopped")
+	require.NoError(t, err)
+	assert.Empty(t, expWhileIdleSuspended, "held row must survive resting phase=suspended, suspend_reason=idle")
+
+	// RebindHeldMessagesLaunch rebinds hold_launch_id to resumed RunID.
+	rebound, err := cs.RebindHeldMessagesLaunch(ctx, aMsg.ID, "run-msg-1", "run-msg-2")
+	require.NoError(t, err)
+	assert.Equal(t, 1, rebound)
+	gotMsg, err := cs.GetMessage(ctx, msg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchAwaitingSession, gotMsg.DispatchState)
+	assert.Equal(t, "run-msg-2", gotMsg.HoldLaunchID)
+
+	// Converting to suspended(user) makes ExpireHeldMessagesForAgent("agent stopped") expire the row.
+	require.NoError(t, s.UpdateAgentStatus(ctx, aMsg.ID, store.AgentStatusUpdate{
+		Phase:         string(state.PhaseSuspended),
+		SuspendReason: string(state.SuspendReasonUser),
+	}))
+	expUserSuspend, err := cs.ExpireHeldMessagesForAgent(ctx, aMsg.ID, "agent stopped")
+	require.NoError(t, err)
+	require.Len(t, expUserSuspend, 1)
+	assert.Equal(t, msg.ID, expUserSuspend[0].ID)
 }

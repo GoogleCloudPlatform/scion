@@ -1534,15 +1534,16 @@ func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action st
 			"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current)
 		return false, nil
 	}
-	if errors.Is(err, store.ErrIdleSuspendPrecondition) {
-		s.agentLifecycleLog.Info("Agent "+action+": idle-suspend commit guard rejected after stop dispatch; not recording the "+action,
+	if errors.Is(err, store.ErrIdleSuspendPrecondition) || errors.Is(err, store.ErrClaimPredicate) {
+		s.agentLifecycleLog.Info("Agent "+action+": claim/commit guard rejected after stop dispatch; not recording the "+action,
 			"agent_id", agentID, "stopped_run_id", runID)
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if upd.Phase != "" && !heldMessageTargetPhaseEligible(upd.Phase) {
+	if upd.Phase != "" && !heldMessageTargetPhaseEligible(upd.Phase) &&
+		!(upd.Phase == string(state.PhaseSuspended) && upd.SuspendReason == string(state.SuspendReasonIdle)) {
 		s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
 	}
 	return true, nil
@@ -6080,7 +6081,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			ClaimTTL:         idleSuspendClaimLease(),
 		}
 	default:
-		if agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
+		if agent.IdleSuspendClaimActive || agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
 			slog.Info("Scheduler: skipping auto-suspend; agent no longer stalled in the same run",
 				"agent_id", agent.ID, "agent_name", agent.Name, "phase", agent.Phase, "activity", agent.Activity)
 			return false
@@ -6181,7 +6182,13 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			}
 		}()
 	} else {
-		priorIntent, intentAt, err = s.swapRunIntent(ctx, agent, store.RunIntentStopped)
+		priorIntent, intentAt, err = s.swapSystemRunIntent(ctx, agent, store.RunIntentStopped)
+		if errors.Is(err, store.ErrIdleSuspendPrecondition) {
+			s.clearWorkspaceAtStop(ctx, agent)
+			slog.Info("Scheduler: skipping stalled auto-suspend; active idle-suspend claim holds agent",
+				"agent_id", agent.ID, "agent_name", agent.Name)
+			return false
+		}
 		if err != nil {
 			s.clearWorkspaceAtStop(ctx, agent)
 			slog.Error("Scheduler: auto-suspend intent write failed",
@@ -6233,6 +6240,8 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	}
 	if reason == state.SuspendReasonIdle {
 		statusUpdate.IfIdleSuspendCommit = &claimUntil
+	} else {
+		statusUpdate.IfNoActiveIdleClaim = true
 	}
 	// ClaimIdleSuspend is the single commit point for idle auto-suspend: once
 	// DispatchAgentStop succeeds, the stop is irreversible and run_intent is
@@ -6279,6 +6288,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(reason))
 	if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
 		agent.Activity = fresh.Activity
+		agent.SuspendReason = fresh.SuspendReason
 	}
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation (ptone/scion#1963) and its

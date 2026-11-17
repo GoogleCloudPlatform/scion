@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
@@ -1154,7 +1155,7 @@ func sortedUniqueUUIDs(ids []string) ([]uuid.UUID, error) {
 // legacy path, unchanged; opts.SortBy set to "created" or "updated" is the
 // real-SQL sorted-mode path the global endpoint's sorted mode uses directly.
 func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
-	preds, err := agentFilterPredicates(filter)
+	preds, err := s.agentFilterPredicates(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -1205,6 +1206,9 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 		for _, a := range rows {
 			items = append(items, *entAgentToStore(a))
 		}
+		if err := s.populateListIdleSuspendClaimActive(ctx, items); err != nil {
+			return nil, err
+		}
 
 		result := &store.ListResult[store.Agent]{TotalCount: totalCount}
 		if len(items) > limit {
@@ -1253,6 +1257,9 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 	for _, a := range rows {
 		items = append(items, *entAgentToStore(a))
 	}
+	if err := s.populateListIdleSuspendClaimActive(ctx, items); err != nil {
+		return nil, err
+	}
 
 	result := &store.ListResult[store.Agent]{TotalCount: totalCount}
 	if len(items) > limit {
@@ -1273,7 +1280,7 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 // global endpoint's stats population is the same SQL scope predicate that
 // already authorizes the request, with no per-row read filter.
 func (s *AgentStore) CountAgentsByPhaseIDs(ctx context.Context, filter store.AgentFilter) ([]store.IDPhase, error) {
-	preds, err := agentFilterPredicates(filter)
+	preds, err := s.agentFilterPredicates(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -1298,7 +1305,7 @@ func (s *AgentStore) CountAgentsByPhaseIDs(ctx context.Context, filter store.Age
 // a cheap COUNT before any member row is read, so a candidate pool above the
 // ceiling costs no more than one query.
 func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) (int, error) {
-	preds, err := agentFilterPredicates(filter)
+	preds, err := s.agentFilterPredicates(ctx, filter)
 	if err != nil {
 		return 0, err
 	}
@@ -1391,7 +1398,7 @@ func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFil
 		return nil, fmt.Errorf("ListAgentMembers: invalid dir %q: %w", dir, store.ErrInvalidInput)
 	}
 
-	preds, err := agentFilterPredicates(filter)
+	preds, err := s.agentFilterPredicates(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -1504,9 +1511,37 @@ func agentBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.Ag
 	return keysetBeforeCursor(agent.FieldCreated, agent.FieldID, cursorCreated, cursorID)
 }
 
+// populateListIdleSuspendClaimActive populates IdleSuspendClaimActive against
+// a single store-clock read when at least one listed row carries a non-nil
+// IdleSuspendClaimUntil. Common-case listings without idle claims incur zero
+// extra queries.
+func (s *AgentStore) populateListIdleSuspendClaimActive(ctx context.Context, items []store.Agent) error {
+	needClock := false
+	for i := range items {
+		if items[i].IdleSuspendClaimUntil != nil {
+			needClock = true
+			break
+		}
+	}
+	if !needClock {
+		return nil
+	}
+	now, err := s.driverStoreNow(ctx)
+	if err != nil {
+		return err
+	}
+	now = claimTime(now)
+	for i := range items {
+		if items[i].IdleSuspendClaimUntil != nil {
+			items[i].IdleSuspendClaimActive = now.Before(*items[i].IdleSuspendClaimUntil)
+		}
+	}
+	return nil
+}
+
 // agentFilterPredicates translates a store.AgentFilter into Ent predicates,
 // preserving the exact OR/AND composition of the legacy SQLite query.
-func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) {
+func (s *AgentStore) agentFilterPredicates(ctx context.Context, filter store.AgentFilter) ([]predicate.Agent, error) {
 	var preds []predicate.Agent
 
 	switch {
@@ -1557,10 +1592,17 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	}
 	switch {
 	case filter.Phase != "" && filter.OrRunIntent != "":
+		now, err := s.driverStoreNow(ctx)
+		if err != nil {
+			return nil, err
+		}
 		preds = append(preds, agent.Or(
 			agent.PhaseEQ(filter.Phase),
 			agent.RunIntentEQ(filter.OrRunIntent),
-			agent.IdleSuspendClaimUntilNotNil(),
+			agent.And(
+				agent.IdleSuspendClaimUntilNotNil(),
+				agent.IdleSuspendClaimUntilGT(claimTime(now)),
+			),
 		))
 	case filter.Phase != "":
 		preds = append(preds, agent.PhaseEQ(filter.Phase))
@@ -1720,16 +1762,37 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if su.IfAutoWakeReason && (current.SuspendReason == nil || !state.SuspendReason(*current.SuspendReason).AutoWakes()) {
 		return store.ErrPhaseMismatch
 	}
-	if su.IfNoStartClaim || su.IfIdleSuspendCommit != nil {
+	clearSuspendReasonForHold := false
+	if su.IfNoStartClaim || su.IfNoActiveIdleClaim || su.IfIdleSuspendCommit != nil {
 		storeClock, err := entTxStoreNow(ctx, tx, s.dialect() == dialect.Postgres)
 		if err != nil {
 			return err
 		}
-		if su.IfNoStartClaim && (heldClaimError(current) != nil || (current.IdleSuspendClaimUntil != nil && storeClock.Before(*current.IdleSuspendClaimUntil))) {
+		idleActive := current.IdleSuspendClaimUntil != nil && storeClock.Before(*current.IdleSuspendClaimUntil)
+		if su.IfNoActiveIdleClaim && idleActive {
 			return store.ErrClaimPredicate
 		}
-		if su.IfIdleSuspendCommit != nil && !checkIdleSuspendCommit(current, *su.IfIdleSuspendCommit, storeClock) {
-			return store.ErrIdleSuspendPrecondition
+		if su.IfNoStartClaim && (heldClaimError(current) != nil || idleActive) {
+			return store.ErrClaimPredicate
+		}
+		if su.IfIdleSuspendCommit != nil {
+			if !checkIdleSuspendCommit(current, *su.IfIdleSuspendCommit, storeClock) {
+				return store.ErrIdleSuspendPrecondition
+			}
+			// If a membership-loss hold took effect while the idle claim's
+			// container stop was in flight, finish moving the row out of
+			// running/stopping/stopped/error into suspended, but leave
+			// suspend_reason NULL so the held agent never auto-wakes.
+			held, herr := tx.AgentHold.Query().
+				Where(agenthold.AgentIDEQ(current.ID), agenthold.ClearedAtIsNil()).
+				Exist(ctx)
+			if herr != nil {
+				return mapError(herr)
+			}
+			if held {
+				su.SuspendReason = ""
+				clearSuspendReasonForHold = true
+			}
 		}
 	}
 
@@ -1908,8 +1971,12 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	if su.Phase != "" {
 		upd.SetPhase(su.Phase)
-		if strings.EqualFold(su.Phase, string(state.PhaseSuspended)) && su.SuspendReason != "" {
-			upd.SetSuspendReason(su.SuspendReason)
+		if strings.EqualFold(su.Phase, string(state.PhaseSuspended)) {
+			if su.SuspendReason != "" {
+				upd.SetSuspendReason(su.SuspendReason)
+			} else if clearSuspendReasonForHold {
+				upd.ClearSuspendReason()
+			}
 		}
 	}
 
@@ -2074,12 +2141,10 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// Any hub-authored lifecycle write (stop, stop-all, suspend, restart, hold,
 	// queued stop, limits stop, start) other than the idle-suspend commit
 	// itself invalidates an in-flight idle-suspend claim so a concurrent idle
-	// worker can never overwrite a user or hub lifecycle action with
-	// suspended(idle). Container and runtime reports (isAgentReport) preserve
-	// the claim unless transitioning to starting.
-	if (!isAgentReport(su) && su.IfIdleSuspendCommit == nil &&
-		(su.Phase != "" || su.ContainerStatus == store.ContainerStatusStopQueued || su.SuspendReason != "")) ||
-		su.Phase == string(state.PhaseStarting) {
+	// worker can never overwrite a user lifecycle action with suspended(idle).
+	// Container and runtime reports (isAgentReport) always preserve the claim.
+	if !isAgentReport(su) && su.IfIdleSuspendCommit == nil &&
+		(su.Phase != "" || su.ContainerStatus == store.ContainerStatusStopQueued || su.SuspendReason != "") {
 		upd.ClearIdleSuspendClaimUntil()
 	}
 

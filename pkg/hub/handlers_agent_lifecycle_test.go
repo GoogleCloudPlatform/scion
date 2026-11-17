@@ -321,7 +321,7 @@ func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
 	// SuspendReason (ptone/scion#7826) qualifies a Phase write and writes
 	// nothing on its own.
 	statusUpdatePreconditionFields := map[string]bool{"IfPhase": true, "IfRunID": true, "IfIdleSuspendCommit": true,
-		"IfNoStartClaim": true, "IfAutoWakeReason": true, "StartWrite": true, "GuardReincarnation": true,
+		"IfNoStartClaim": true, "IfNoActiveIdleClaim": true, "IfAutoWakeReason": true, "StartWrite": true, "GuardReincarnation": true,
 		"ReportSource": true, "ReportRunID": true, "ReportAgentToken": true, "Restore": true, "Result": true,
 		"SuspendReason": true, "RetainedActivity": true}
 

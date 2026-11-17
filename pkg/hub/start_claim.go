@@ -357,7 +357,11 @@ type claimedDispatch func(ctx context.Context, fence func() error) (handoff bool
 // it records run intent running and runs dispatch as before.
 func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind store.StartClaimKind, existing *startClaimRun, dispatch claimedDispatch) error {
 	if !s.startClaimsEnabled() {
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+		if kind == store.StartClaimWake || kind == store.StartClaimRecovery {
+			if _, _, err := s.swapSystemRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+				return err
+			}
+		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			return err
 		}
 		_, err := dispatch(ctx, func() error { return nil })
@@ -499,6 +503,11 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	// the dispatch, while no launch is active.
 	rest := store.EffectiveRestingPhase(agent)
 	provisioned := rest == string(state.PhaseCreated) || rest == string(state.PhaseProvisioning)
+	resumedIdleFromRunID := ""
+	if opts.Resume && !opts.NewGeneration && opts.Kind != store.StartClaimRestart &&
+		((rest == string(state.PhaseSuspended) && agent.SuspendReason == string(state.SuspendReasonIdle)) || agent.IdleSuspendClaimActive) {
+		resumedIdleFromRunID = agent.RunID
+	}
 	// Taken before the dispatch, which may record a new placement: a start
 	// replacing a previous run's ephemeral workspace warns about it
 	// (ptone/scion#3819). A provisioned agent has no previous run, and a
@@ -597,6 +606,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			// no started status, and hand the claim to the launch, whose
 			// end settles it.
 			sd.settle()
+			s.rebindIdleSuspendedHeldMessages(ctx, agent, resumedIdleFromRunID)
 			accepted = true
 			if opts.OnLaunchAccepted != nil {
 				opts.OnLaunchAccepted(ctx, agent)
@@ -608,9 +618,17 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		sd.settle()
 		st := startedState{ClearRemnants: opts.NewGeneration || sd.wroteStarting(), EndOp: endOp}
 		if opts.AfterStart != nil {
-			return false, opts.AfterStart(ctx, st)
+			if err := opts.AfterStart(ctx, st); err != nil {
+				return false, err
+			}
+			s.rebindIdleSuspendedHeldMessages(ctx, agent, resumedIdleFromRunID)
+			return false, nil
 		}
-		return false, s.writeStartedStatus(ctx, agent, st.ClearRemnants)
+		if err := s.writeStartedStatus(ctx, agent, st.ClearRemnants); err != nil {
+			return false, err
+		}
+		s.rebindIdleSuspendedHeldMessages(ctx, agent, resumedIdleFromRunID)
+		return false, nil
 	})
 	if err != nil && !errors.Is(err, errStartedStatusWrite) {
 		// A start refused before its dispatch ran (a held or lost claim, a
@@ -622,6 +640,9 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	if err == nil || errors.Is(err, errStartedStatusWrite) {
 		s.addEphemeralWorkspaceStartWarning(ctx, agent, hadEphemeral)
 		s.noteStartPendingOutcome(ctx, agent, stillPending)
+		if !accepted && resumedIdleFromRunID != "" {
+			s.maybeScheduleHeldMessageRedriveIfConnected(agent.ID)
+		}
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
 		// A start handed off to an asynchronous launch is still launching:
@@ -655,6 +676,31 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		s.settleFailedProvisionedStart(ctx, agent.ID, *agent.RunIntentAt, refusedStartMessage(err))
 	}
 	return err
+}
+
+func (s *Server) rebindIdleSuspendedHeldMessages(ctx context.Context, agent *store.Agent, fromRunID string) {
+	if s == nil || s.store == nil || agent == nil || fromRunID == "" {
+		return
+	}
+	finCtx, finCancel := finalizationContext(ctx)
+	defer finCancel()
+	hasHold, err := s.store.HasAgentDeliveryHold(finCtx, agent.ID)
+	if err != nil || !hasHold {
+		return
+	}
+	toRunID := agent.RunID
+	if toRunID == "" || toRunID == fromRunID {
+		if fresh, gerr := s.store.GetAgent(finCtx, agent.ID); gerr == nil && fresh != nil && fresh.RunID != "" {
+			toRunID = fresh.RunID
+		}
+	}
+	if toRunID == "" || toRunID == fromRunID {
+		return
+	}
+	if _, err := s.store.RebindHeldMessagesLaunch(finCtx, agent.ID, fromRunID, toRunID); err != nil {
+		slog.Warn("message-hold: rebind held messages on idle resume failed",
+			"agent_id", agent.ID, "from_run_id", fromRunID, "to_run_id", toRunID, "error", err)
+	}
 }
 
 // startRefusedBeforeRun reports whether err is a start refused before

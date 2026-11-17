@@ -1126,11 +1126,20 @@ type AgentStore interface {
 
 	// SwapRunIntent is SetRunIntent that also returns the intent the row
 	// held before the write ("" for none), read under the same row lock.
+	// Used for user-initiated lifecycle actions, which preempt any active
+	// idle-suspend claim in the same write.
 	//
 	// SetRunIntent and SwapRunIntent return ErrDeleteInProgress, and write
 	// nothing, for RunIntentRunning on a row a delete holds
 	// (DeletionHoldsRow) or a soft-deleted row (ptone/scion#2550).
 	SwapRunIntent(ctx context.Context, agentID string, intent RunIntent) (prior RunIntent, at time.Time, err error)
+
+	// SwapSystemRunIntent is SwapRunIntent for system-initiated writers (such as
+	// stalled auto-suspend and membership-loss hold): it yields with
+	// ErrIdleSuspendPrecondition, writing nothing and preserving
+	// idle_suspend_claim_until, whenever an unexpired idle-suspend claim is held
+	// on the locked row.
+	SwapSystemRunIntent(ctx context.Context, agentID string, intent RunIntent) (prior RunIntent, at time.Time, err error)
 
 	// RevertRunIntent sets run_intent to `to` only if the row still holds
 	// `from` written at exactly fromAt (the value SetRunIntent returned);
@@ -1626,9 +1635,16 @@ type AgentStatusUpdate struct {
 	// json:"-".
 	RetainedActivity string `json:"-"`
 	// IfNoStartClaim, when true, makes the update conditional on no start
-	// claim being held on the locked row; otherwise UpdateAgentStatus returns
-	// ErrClaimPredicate and writes nothing. Internal to the hub — json:"-".
+	// claim (or active idle-suspend claim) being held on the locked row;
+	// otherwise UpdateAgentStatus returns ErrClaimPredicate and writes nothing.
+	// Internal to the hub — json:"-".
 	IfNoStartClaim bool `json:"-"`
+	// IfNoActiveIdleClaim, when true, makes the update conditional on no
+	// unexpired idle-suspend claim being held on the locked row (without
+	// rejecting an unconfirmed start claim belonging to the run being stopped);
+	// otherwise UpdateAgentStatus returns ErrClaimPredicate and writes nothing.
+	// Internal to the hub — json:"-".
+	IfNoActiveIdleClaim bool `json:"-"`
 	// IfAutoWakeReason, when true, makes the update conditional on the stored
 	// suspend_reason being an auto-waking reason (idle or stalled); otherwise
 	// UpdateAgentStatus returns ErrPhaseMismatch and writes nothing. Internal
@@ -2265,6 +2281,13 @@ type MessageHoldStore interface {
 	// reason, syncs or removes agentID's hold marker in the same transaction,
 	// and returns the rows that transitioned (RV3-R1).
 	ExpireHeldMessagesPastDeadlineForAgent(ctx context.Context, agentID, reason string) ([]Message, error)
+
+	// RebindHeldMessagesLaunch atomically updates hold_launch_id from
+	// fromLaunchID to toLaunchID on awaiting_session messages for agentID (and
+	// syncs agent_delivery_holds.launch_id) when an idle-suspended agent resumes
+	// into a newly minted run incarnation, preserving each row's hold_until and
+	// FIFO order.
+	RebindHeldMessagesLaunch(ctx context.Context, agentID, fromLaunchID, toLaunchID string) (int, error)
 }
 
 type redriveLeaseOwnerKey struct{}

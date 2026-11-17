@@ -57,6 +57,7 @@ func (s *Server) stopAgentsRunningWithIntentStopped(ctx context.Context, brokerI
 			continue
 		}
 		if a.RunIntent != store.RunIntentStopped || a.RunIntentAt == nil || a.StartClaimID != "" ||
+			a.IdleSuspendClaimActive ||
 			!a.DeletedAt.IsZero() || a.DeletionActive(time.Now()) ||
 			reincarnationInFlight(a) || s.lifecycleOps.active(a.ID) {
 			continue

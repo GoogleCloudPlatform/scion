@@ -497,6 +497,9 @@ func (s *Server) sweepHeldMessages(parentCtx context.Context) {
 			s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
 			continue
 		}
+		if agent.IdleSuspendClaimActive || !heldMessageTargetPhaseEligible(agent.Phase) {
+			continue
+		}
 		if !conduitDeliverOn {
 			continue
 		}
@@ -506,9 +509,6 @@ func (s *Server) sweepHeldMessages(parentCtx context.Context) {
 		}
 		switch sessState {
 		case agentDeliverSessionReady:
-			if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
-				continue
-			}
 			s.scheduleHeldMessageRedrive(agentID)
 		case agentDeliverSessionUnsupported:
 			s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonCannotReceiveConduit)
@@ -604,11 +604,22 @@ func (s *Server) notifyExpiredHeldMessages(ctx context.Context, expired []store.
 	}
 }
 
+func heldTargetIdlePreserved(target *store.Agent) bool {
+	if target == nil {
+		return false
+	}
+	if target.IdleSuspendClaimActive {
+		return true
+	}
+	return target.Phase == string(state.PhaseSuspended) &&
+		target.SuspendReason == string(state.SuspendReasonIdle)
+}
+
 func (s *Server) heldTargetEligible(ctx context.Context, target *store.Agent) (bool, error) {
 	if target == nil || !target.DeletedAt.IsZero() ||
 		target.DeletionHoldsRow(time.Now()) ||
 		reincarnationInFlight(target) ||
-		!heldMessageTargetPhaseEligible(target.Phase) {
+		(!heldMessageTargetPhaseEligible(target.Phase) && !heldTargetIdlePreserved(target)) {
 		return false, nil
 	}
 	held, err := s.agentHeld(ctx, target.ID)
@@ -662,7 +673,7 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 		s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
 		return
 	}
-	if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
+	if agent.IdleSuspendClaimActive || !heldMessageTargetPhaseEligible(agent.Phase) {
 		return
 	}
 
@@ -1410,8 +1421,8 @@ func (s *Server) revalidateClaimedHeldMessage(
 	if !eligible {
 		return target, holdFailReasonAgentStopped, nil
 	}
-	if s.idleSuspendDeliveryGateActive() && target.IdleSuspendClaimActive {
-		return nil, "", errors.New("target agent has an active idle-suspend claim")
+	if target.IdleSuspendClaimActive || !heldMessageTargetPhaseEligible(target.Phase) {
+		return nil, "", errors.New("target agent has an active idle-suspend claim or is idle-suspended")
 	}
 
 	// Launch incarnation match (A2-S4, R2): empty hold_launch_id or empty

@@ -40,6 +40,15 @@ func (s *AgentStore) SetRunIntent(ctx context.Context, agentID string, intent st
 
 // SwapRunIntent implements store.AgentStore.SwapRunIntent.
 func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
+	return s.swapRunIntent(ctx, agentID, intent, true)
+}
+
+// SwapSystemRunIntent implements store.AgentStore.SwapSystemRunIntent.
+func (s *AgentStore) SwapSystemRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
+	return s.swapRunIntent(ctx, agentID, intent, false)
+}
+
+func (s *AgentStore) swapRunIntent(ctx context.Context, agentID string, intent store.RunIntent, preemptIdleClaim bool) (store.RunIntent, time.Time, error) {
 	if !intent.Valid() {
 		return "", time.Time{}, fmt.Errorf("%w: unknown run intent %q", store.ErrInvalidInput, intent)
 	}
@@ -69,6 +78,7 @@ func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent s
 		q = q.ForUpdate()
 	}
 	current, err := q.Select(agent.FieldRunIntent, agent.FieldRunIntentAt,
+		agent.FieldIdleSuspendClaimUntil,
 		agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).Only(ctx)
 	if err != nil {
 		return "", time.Time{}, mapError(err)
@@ -93,14 +103,19 @@ func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent s
 	if err != nil {
 		return "", time.Time{}, err
 	}
+	if !preemptIdleClaim && current.IdleSuspendClaimUntil != nil && claimTime(now).Before(*current.IdleSuspendClaimUntil) {
+		return "", time.Time{}, store.ErrIdleSuspendPrecondition
+	}
 	at := nextRunIntentAt(now, current.RunIntentAt)
 
-	if _, err := ltx.client.Agent.UpdateOneID(uid).
+	upd := ltx.client.Agent.UpdateOneID(uid).
 		SetRunIntent(string(intent)).
 		SetRunIntentAt(at).
-		SetRunIntentMarkedAt(at).
-		ClearIdleSuspendClaimUntil().
-		Save(ctx); err != nil {
+		SetRunIntentMarkedAt(at)
+	if preemptIdleClaim {
+		upd.ClearIdleSuspendClaimUntil()
+	}
+	if _, err := upd.Save(ctx); err != nil {
 		return "", time.Time{}, mapError(err)
 	}
 	if err := ltx.tx.Commit(); err != nil {

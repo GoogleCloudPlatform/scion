@@ -667,7 +667,8 @@ func (s *Server) writeMembershipLossAudit(ctx context.Context, st store.Store, c
 // nothing tries to bring it back up. A failure is logged; the hold refuses
 // every start regardless, and the stop retry records the intent again.
 func (s *Server) recordHeldRunIntent(ctx context.Context, agentID string) {
-	if _, _, err := s.store.SwapRunIntent(ctx, agentID, store.RunIntentStopped); err != nil &&
+	if _, _, err := s.store.SwapSystemRunIntent(ctx, agentID, store.RunIntentStopped); err != nil &&
+		!errors.Is(err, store.ErrIdleSuspendPrecondition) &&
 		!errors.Is(err, store.ErrDeleteInProgress) && !errors.Is(err, store.ErrNotFound) {
 		slog.Warn("membership loss: recording the stopped run intent of a held agent failed",
 			"agent_id", agentID, "error", err)
@@ -676,9 +677,12 @@ func (s *Server) recordHeldRunIntent(ctx context.Context, agentID string) {
 
 // heldAgentNeedsStop reports whether a held agent still has a container the
 // hub should stop: its run intent is stopped and its phase is not one in
-// which no container runs.
+// which no container runs. An active idle-suspend claim already owns stopping
+// the container (and commits phase=suspended with suspend_reason=NULL when
+// agent_holds is active); if that claim rolls back or expires, retryHeldAgentStops
+// picks the agent up.
 func heldAgentNeedsStop(a *store.Agent) bool {
-	if a == nil || !a.DeletedAt.IsZero() || a.RuntimeBrokerID == "" {
+	if a == nil || !a.DeletedAt.IsZero() || a.RuntimeBrokerID == "" || a.IdleSuspendClaimActive {
 		return false
 	}
 	switch state.Phase(a.Phase) {
@@ -710,7 +714,10 @@ func (s *Server) stopHeldAgent(ctx context.Context, agentID string, attempt int)
 	}
 
 	defer s.beginLifecycleOp(agent.ID)()
-	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+	if _, _, err := s.swapSystemRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+		if errors.Is(err, store.ErrIdleSuspendPrecondition) {
+			return nil
+		}
 		slog.Warn("membership loss: recording run intent before the stop failed; will retry",
 			"agent_id", agentID, "attempt", attempt, "error", err)
 		return err
@@ -743,9 +750,10 @@ func (s *Server) stopHeldAgent(ctx context.Context, agentID string, attempt int)
 	// No SuspendReason: a hold suspension is neither the user's nor the idle
 	// policy's, and leaving it NULL means it never auto-wakes.
 	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "hold", store.AgentStatusUpdate{
-		Phase:           newPhase,
-		ContainerStatus: "stopped",
-		Activity:        "",
+		Phase:               newPhase,
+		ContainerStatus:     "stopped",
+		Activity:            "",
+		IfNoActiveIdleClaim: true,
 	})
 	if err != nil {
 		return err

@@ -279,7 +279,7 @@ func TestLifecycleDispatchCallsRecordRunIntent(t *testing.T) {
 		if rule.recordedBy != "" {
 			recorder = rule.recordedBy
 		}
-		if funcs[recorder]["recordRunIntent"]+funcs[recorder]["swapRunIntent"]+funcs[recorder]["claimIdleSuspend"] == 0 {
+		if funcs[recorder]["recordRunIntent"]+funcs[recorder]["swapRunIntent"]+funcs[recorder]["swapSystemRunIntent"]+funcs[recorder]["claimIdleSuspend"] == 0 {
 			t.Errorf("%s dispatches a lifecycle operation but %s does not call recordRunIntent", name, recorder)
 		}
 	}

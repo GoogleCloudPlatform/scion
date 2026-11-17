@@ -3110,20 +3110,25 @@ func TestHold_IdleSuspend_HoldOrDispatchPassesPreDispatchErrorsThroughWithoutCre
 		require.Nil(t, dmErr)
 		require.NotNil(t, res)
 
-		// Old run's held message was expired when recordStopStatus committed suspended.
-		f.waitMessageState(t, seededOld.ID, store.MessageDispatchFailed)
+		// Old run's held message survives idle auto-suspend and is rebound to wokenAgent.RunID.
+		survivedOld := f.waitMessageState(t, seededOld.ID, store.MessageDispatchAwaitingSession)
 
-		// New woken DM enters awaiting_session on the new RunID (since no Conduit
+		// New woken DM enters awaiting_session behind seededOld on the new RunID (since no Conduit
 		// session has connected for newRunID yet), with HoldLaunchID == wokenAgent.RunID!
 		wokenAgent, err := f.store.GetAgent(ctx, f.launched.ID)
 		require.NoError(t, err)
 		require.NotEqual(t, oldRunID, wokenAgent.RunID)
+		assert.Equal(t, wokenAgent.RunID, survivedOld.HoldLaunchID, "surviving held row must rebind to the woken RunID")
 		heldWakeMsg := f.waitMessageState(t, res.MessageID, store.MessageDispatchAwaitingSession)
 		assert.Equal(t, wokenAgent.RunID, heldWakeMsg.HoldLaunchID, "refreshHoldLaunchAfterWake must stamp the woken RunID")
 
-		// Connect Conduit session for the woken run -> re-drive delivers cleanly!
-		f.connectDeliverSession(t, f.public.URL, true, nil)
+		// Connect Conduit session for the woken run -> re-drive delivers both in FIFO order!
+		ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+		f.waitMessageState(t, seededOld.ID, store.MessageDispatchDelivered)
 		f.waitMessageState(t, res.MessageID, store.MessageDispatchDelivered)
+		pasted := strings.Join(ca.tmux.pastedTexts(), "\n")
+		assert.Less(t, strings.Index(pasted, "old-run-held"), strings.Index(pasted, "wake-conduit-dm-new-run"),
+			"surviving pre-idle held row must re-drive ahead of the post-wake message")
 	})
 }
 
