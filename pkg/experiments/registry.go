@@ -171,9 +171,10 @@ const ConduitDeliver = "hub.conduit_deliver"
 // .design/conduit/exec-control-routes.md). It requires hub.conduit: the hub
 // sends it to agents at launch only while conduit is served, and an agent
 // launched with it registers the two routes. The hub checks both flags when
-// an exec event is created and again when it fires (a fire with either off
-// is skipped); turning either off stops new runs but not the outcome
-// recovery of runs already started (ptone/scion#7883).
+// an exec schedule or event is created, updated or resumed and again when it
+// fires (a fire with either off is skipped); turning either off stops new
+// runs but not the outcome recovery of runs already started (ptone/scion#7883),
+// and the web UI shows the exec authoring option only while it is on.
 const ExecSchedules = "hub.exec_schedules"
 
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
@@ -722,9 +723,9 @@ var compiled = []Experiment{
 	{
 		Name:        ExecSchedules,
 		Title:       "Exec schedules",
-		Description: "Exec-only schedules: run a command in an agent's container at a scheduled time, over the agent's Conduit session, with no message and no LLM turn. Requires hub.conduit. One-shot exec events only for now (API: eventType exec on scheduled-events); the creator needs attach permission on the target agent, at creation and at every fire. Command output is not stored, and the command is shown only to callers who may attach to the target. Agents launched while it is on advertise the exec-start and exec-status control routes; agents started before it was turned on do not until they restart, and their runs are skipped. While either flag is off, exec events are refused at creation and skipped when they fire.",
+		Description: "Exec-only schedules: run a command in an agent's container on a recurring schedule or as a one-shot event, over the agent's Conduit session, with no message and no LLM turn. Requires hub.conduit. Covers one-shot and recurring exec schedules (API: eventType exec on scheduled-events and schedules) and the web authoring option (LayerWeb); the creator needs attach permission on the target agent, checked at creation, dispatch-changing edits, and every fire. Command output is not stored, and the command is shown only to callers who may attach to the target. Agents launched while it is on advertise the exec-start and exec-status control routes; agents started before it was turned on do not until they restart, and their runs are skipped. While either flag is off, exec schedules and events are refused on creation, update, and resume, and skipped when they fire.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
+		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#7818",
 		Owner:       "@ptone",

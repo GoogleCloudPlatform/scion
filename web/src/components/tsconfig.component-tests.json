@@ -59,7 +59,8 @@
     "shared/decisions-filter-panel.test.ts",
     "pages/harness-config-detail-source.test.ts",
     "profile/profile-nav.test.ts",
-    "pages/profile-decisions.test.ts"
+    "pages/profile-decisions.test.ts",
+    "shared/schedule-exec.test.ts"
   ],
   "exclude": []
 }
