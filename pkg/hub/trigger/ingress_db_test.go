@@ -316,3 +316,123 @@ func TestIngress_EndToEndStoreAndQueue(t *testing.T) {
 	assert.Equal(t, 5, epAfterFlush.RejectCount)  // 413 + 415 + bad-JSON 400 + unsigned 401 + bad-header 400
 	require.NotNil(t, epAfterFlush.LastReceivedAt)
 }
+
+func TestIngress_IPv6Slash48SprayDoesNotLockOutLegitimateSender(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	now := time.Date(2026, 11, 17, 3, 0, 0, 0, time.UTC)
+
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return now }))
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   projID,
+		Name: "spray-proj",
+		Slug: "spray-" + projID[:8],
+	}))
+
+	makeEndpoint := func(name string) *store.WebhookEndpoint {
+		ep := &store.WebhookEndpoint{
+			ID:                  uuid.NewString(),
+			ProjectID:           projID,
+			Name:                name,
+			OwnerPrincipalKind:  store.DelegationPrincipalUser,
+			OwnerPrincipalID:    uuid.NewString(),
+			OwnerCredentialKind: "session",
+			SecretVersion:       1,
+			SignatureMode:       store.WebhookSignatureModeScionV1,
+			Status:              store.WebhookEndpointStatusActive,
+			CreatedBy:           "user-1",
+		}
+		require.NoError(t, cs.CreateWebhookEndpoint(ctx, ep))
+		return ep
+	}
+	epHealthy := makeEndpoint("healthy-ep")
+	epTargeted := makeEndpoint("targeted-ep")
+
+	const epSecret = "c3ByYXktdGVzdC13ZWJob29rLXNlY3JldC0zMmJ5dGVz"
+	lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+		MaxEntries:       64,
+		RejectionRate:    10,
+		RejectionBurst:   25,
+		PerEndpointRate:  1,
+		PerEndpointBurst: 5,
+		Now:              func() time.Time { return now },
+	})
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      cs,
+		QueueStore: cs,
+		Queue:      q,
+		LoadSecret: func(_ context.Context, _, _ string, _ int) (string, error) {
+			return epSecret, nil
+		},
+		ClientIP: func(r *http.Request) string { return r.RemoteAddr },
+		Limiter:  lim,
+		Enabled:  func() bool { return true },
+		Audit:    &memAuditSink{},
+		Now:      func() time.Time { return now },
+	})
+
+	payload := []byte(`{"ok":true}`)
+
+	// 1. Spray 100 distinct /64 subnets from one IPv6 /48 against unknown IDs at fixed `now`:
+	// per-IP fills at 64 entries and fails open, while the rejection tier still caps unknown IDs at 25 (404 -> 429).
+	notFoundCount, rateLimitedCount := 0, 0
+	for i := 0; i < 100; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+uuid.NewString(), bytes.NewReader(payload))
+		req.RemoteAddr = "2001:db8:48:" + strconv.FormatInt(int64(i+1), 16) + "::1"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		ing.ServeHTTP(rec, req)
+		switch rec.Code {
+		case http.StatusNotFound:
+			notFoundCount++
+		case http.StatusTooManyRequests:
+			rateLimitedCount++
+		default:
+			t.Fatalf("unexpected status %d on spray %d", rec.Code, i)
+		}
+	}
+	assert.Equal(t, 25, notFoundCount)
+	assert.Equal(t, 75, rateLimitedCount)
+	assert.Equal(t, 64, lim.PerIPLen())
+
+	// 2. With per-IP completely full AND rejection completely exhausted at the same timestamp,
+	// a legitimate signed webhook from a brand-new sender IP to epHealthy still succeeds with 202.
+	sendSignedFrom := func(epID, remoteIP, delivery string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+epID, bytes.NewReader(payload))
+		req.RemoteAddr = remoteIP
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(trigger.HeaderDelivery, delivery)
+		req.Header.Set(trigger.HeaderSignature, trigger.SignScionV1(epSecret, now.Unix(), delivery, "", "", payload))
+		rec := httptest.NewRecorder()
+		ing.ServeHTTP(rec, req)
+		return rec
+	}
+	recHealthy1 := sendSignedFrom(epHealthy.ID, "198.51.100.200", "healthy-1")
+	require.Equal(t, http.StatusAccepted, recHealthy1.Code, recHealthy1.Body.String())
+
+	// 3. Even while per-IP fails open, spraying unsigned requests from new /64s against
+	// epTargeted is still capped by epTargeted's per-endpoint bucket (5 -> 401, then 429),
+	// without affecting epHealthy from another new sender IP.
+	unauthCount, epLimitedCount := 0, 0
+	for i := 0; i < 10; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+epTargeted.ID, bytes.NewReader(payload))
+		req.RemoteAddr = "2001:db8:49:" + strconv.FormatInt(int64(i+1), 16) + "::1"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		ing.ServeHTTP(rec, req)
+		switch rec.Code {
+		case http.StatusUnauthorized:
+			unauthCount++
+		case http.StatusTooManyRequests:
+			epLimitedCount++
+		default:
+			t.Fatalf("unexpected status %d on targeted spray %d", rec.Code, i)
+		}
+	}
+	assert.Equal(t, 5, unauthCount)
+	assert.Equal(t, 5, epLimitedCount)
+
+	recHealthy2 := sendSignedFrom(epHealthy.ID, "198.51.100.201", "healthy-2")
+	require.Equal(t, http.StatusAccepted, recHealthy2.Code, recHealthy2.Body.String())
+}

@@ -37,8 +37,6 @@ const (
 	LimiterMaxEntries      = 10000
 	LimiterMaxAge          = 30 * time.Minute
 	LimiterCleanupInterval = 5 * time.Minute
-
-	globalBucketKey = "*"
 )
 
 // ClientRateKey returns the per-client-IP bucket key: the IPv4 address as-is,
@@ -59,22 +57,77 @@ type tokenBucket struct {
 	lastCheck time.Time
 }
 
-type keyedBucketSet struct {
-	mu         sync.Mutex
-	buckets    map[string]*tokenBucket
-	rate       float64
-	burst      int
-	maxEntries int
-	maxAge     time.Duration
+// singleTokenBucket is a concurrency-safe global token bucket (used for the
+// hub-wide rejection and hub-wide verified tiers, which have no caller key and
+// therefore no map-capacity bound).
+type singleTokenBucket struct {
+	mu          sync.Mutex
+	tokens      float64
+	lastCheck   time.Time
+	initialized bool
+	rate        float64
+	burst       int
 }
 
-func newKeyedBucketSet(rate float64, burst, maxEntries int, maxAge time.Duration) *keyedBucketSet {
+func newSingleTokenBucket(rate float64, burst int) *singleTokenBucket {
+	return &singleTokenBucket{
+		rate:  rate,
+		burst: burst,
+	}
+}
+
+func (b *singleTokenBucket) allow(now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.burst < 1 {
+		return false
+	}
+	if !b.initialized {
+		b.initialized = true
+		b.tokens = float64(b.burst) - 1
+		b.lastCheck = now
+		return true
+	}
+	elapsed := now.Sub(b.lastCheck).Seconds()
+	if elapsed > 0 {
+		b.tokens += elapsed * b.rate
+		if b.tokens > float64(b.burst) {
+			b.tokens = float64(b.burst)
+		}
+		b.lastCheck = now
+	}
+	if b.tokens >= 1 {
+		b.tokens--
+		return true
+	}
+	return false
+}
+
+type keyedBucketSet struct {
+	mu               sync.Mutex
+	buckets          map[string]*tokenBucket
+	rate             float64
+	burst            int
+	refillPeriod     time.Duration
+	maxEntries       int
+	maxAge           time.Duration
+	failOpenWhenFull bool
+}
+
+func newKeyedBucketSet(rate float64, burst, maxEntries int, maxAge time.Duration, failOpenWhenFull bool) *keyedBucketSet {
+	var refillPeriod time.Duration
+	if rate > 0 && burst > 0 {
+		refillPeriod = time.Duration(float64(time.Second) * float64(burst) / rate)
+	}
 	return &keyedBucketSet{
-		buckets:    make(map[string]*tokenBucket),
-		rate:       rate,
-		burst:      burst,
-		maxEntries: maxEntries,
-		maxAge:     maxAge,
+		buckets:          make(map[string]*tokenBucket),
+		rate:             rate,
+		burst:            burst,
+		refillPeriod:     refillPeriod,
+		maxEntries:       maxEntries,
+		maxAge:           maxAge,
+		failOpenWhenFull: failOpenWhenFull,
 	}
 }
 
@@ -82,17 +135,20 @@ func (s *keyedBucketSet) allow(key string, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.burst < 1 {
+		return false
+	}
+
 	b, ok := s.buckets[key]
 	if !ok {
 		if len(s.buckets) >= s.maxEntries {
-			// Try evicting expired entries first; if still full, fail closed.
-			s.cleanupLocked(now)
+			// Evict buckets that have fully refilled (idle >= burst/rate, or
+			// accumulated tokens >= burst); dropping a full bucket changes no
+			// admission decision for any timestamp >= now.
+			s.evictRefilledLocked(now)
 			if len(s.buckets) >= s.maxEntries {
-				return false
+				return s.failOpenWhenFull
 			}
-		}
-		if s.burst < 1 {
-			return false
 		}
 		s.buckets[key] = &tokenBucket{
 			tokens:    float64(s.burst) - 1,
@@ -116,19 +172,36 @@ func (s *keyedBucketSet) allow(key string, now time.Time) bool {
 	return false
 }
 
-func (s *keyedBucketSet) cleanup(now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.cleanupLocked(now)
+func (s *keyedBucketSet) isRefilled(b *tokenBucket, now time.Time) bool {
+	idle := now.Sub(b.lastCheck)
+	if idle <= 0 {
+		return b.tokens >= float64(s.burst)
+	}
+	if s.refillPeriod > 0 && idle >= s.refillPeriod {
+		return true
+	}
+	return b.tokens+idle.Seconds()*s.rate >= float64(s.burst)
 }
 
-func (s *keyedBucketSet) cleanupLocked(now time.Time) {
+func (s *keyedBucketSet) evictRefilledLocked(now time.Time) {
 	cutoff := now.Add(-s.maxAge)
 	for k, b := range s.buckets {
-		if b.lastCheck.Before(cutoff) {
+		if b.lastCheck.Before(cutoff) || s.isRefilled(b, now) {
 			delete(s.buckets, k)
 		}
 	}
+}
+
+func (s *keyedBucketSet) cleanup(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.evictRefilledLocked(now)
+}
+
+func (s *keyedBucketSet) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.buckets)
 }
 
 // LimiterConfig overrides default token-bucket parameters for tests. Zero
@@ -158,10 +231,10 @@ type LimiterConfig struct {
 //  5. Hub-wide verified (200/s burst 1000) ONLY after per-project verified passes
 type IngressLimiter struct {
 	perIP              *keyedBucketSet
-	rejection          *keyedBucketSet
+	rejection          *singleTokenBucket
 	perEndpoint        *keyedBucketSet
 	perProjectVerified *keyedBucketSet
-	hubVerified        *keyedBucketSet
+	hubVerified        *singleTokenBucket
 	cleanupInterval    time.Duration
 	now                func() time.Time
 }
@@ -196,24 +269,28 @@ func NewIngressLimiter(cfg LimiterConfig) *IngressLimiter {
 	}
 
 	return &IngressLimiter{
-		perIP:              newKeyedBucketSet(valFloat(cfg.PerIPRate, PerIPRatePerSecond), valInt(cfg.PerIPBurst, PerIPBurst), maxEntries, maxAge),
-		rejection:          newKeyedBucketSet(valFloat(cfg.RejectionRate, RejectionRatePerSecond), valInt(cfg.RejectionBurst, RejectionBurst), 1, maxAge),
-		perEndpoint:        newKeyedBucketSet(valFloat(cfg.PerEndpointRate, PerEndpointRatePerSecond), valInt(cfg.PerEndpointBurst, PerEndpointBurst), maxEntries, maxAge),
-		perProjectVerified: newKeyedBucketSet(valFloat(cfg.PerProjectVerifiedRate, PerProjectVerifiedRatePerSecond), valInt(cfg.PerProjectVerifiedBurst, PerProjectVerifiedBurst), maxEntries, maxAge),
-		hubVerified:        newKeyedBucketSet(valFloat(cfg.HubVerifiedRate, HubVerifiedRatePerSecond), valInt(cfg.HubVerifiedBurst, HubVerifiedBurst), 1, maxAge),
+		perIP:              newKeyedBucketSet(valFloat(cfg.PerIPRate, PerIPRatePerSecond), valInt(cfg.PerIPBurst, PerIPBurst), maxEntries, maxAge, true),
+		rejection:          newSingleTokenBucket(valFloat(cfg.RejectionRate, RejectionRatePerSecond), valInt(cfg.RejectionBurst, RejectionBurst)),
+		perEndpoint:        newKeyedBucketSet(valFloat(cfg.PerEndpointRate, PerEndpointRatePerSecond), valInt(cfg.PerEndpointBurst, PerEndpointBurst), maxEntries, maxAge, false),
+		perProjectVerified: newKeyedBucketSet(valFloat(cfg.PerProjectVerifiedRate, PerProjectVerifiedRatePerSecond), valInt(cfg.PerProjectVerifiedBurst, PerProjectVerifiedBurst), maxEntries, maxAge, false),
+		hubVerified:        newSingleTokenBucket(valFloat(cfg.HubVerifiedRate, HubVerifiedRatePerSecond), valInt(cfg.HubVerifiedBurst, HubVerifiedBurst)),
 		cleanupInterval:    cleanupInterval,
 		now:                nowFn,
 	}
 }
 
 // AllowClientIP charges the per-client-IP bucket (keyed via ClientRateKey).
+// When the bounded per-IP table is full even after evicting refilled buckets,
+// the per-IP tier fails open so an IPv6 /48 subnet spray cannot lock out
+// legitimate new senders hub-wide; the rejection, per-endpoint, verified, and
+// pending-cap tiers remain enforced downstream.
 func (l *IngressLimiter) AllowClientIP(clientIP string) bool {
 	return l.perIP.allow(ClientRateKey(clientIP), l.now())
 }
 
 // AllowRejection charges the hub-wide rejection bucket (unknown/disabled IDs only).
 func (l *IngressLimiter) AllowRejection() bool {
-	return l.rejection.allow(globalBucketKey, l.now())
+	return l.rejection.allow(l.now())
 }
 
 // AllowEndpoint charges the per-endpoint bucket for a known active endpoint.
@@ -228,7 +305,12 @@ func (l *IngressLimiter) AllowProjectVerified(projectID string) bool {
 
 // AllowHubVerified charges the hub-wide verified bucket after per-project verified admission.
 func (l *IngressLimiter) AllowHubVerified() bool {
-	return l.hubVerified.allow(globalBucketKey, l.now())
+	return l.hubVerified.allow(l.now())
+}
+
+// PerIPLen returns the current number of tracked per-client-IP buckets.
+func (l *IngressLimiter) PerIPLen() int {
+	return l.perIP.len()
 }
 
 // Cleanup evicts stale keyed buckets as of now.

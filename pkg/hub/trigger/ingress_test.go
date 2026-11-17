@@ -252,6 +252,95 @@ func TestIngressLimiter_SplitBucketsRefillAndCleanup(t *testing.T) {
 	assert.True(t, lim.AllowClientIP("2001:db8:1:2::2"))
 }
 
+func TestIngressLimiter_IPv6Slash48SprayDoesNotLockOutNewSenders(t *testing.T) {
+	t.Run("sustained /48 spray (~5.5 req/s) evicts refilled buckets and admits new senders", func(t *testing.T) {
+		now := time.Date(2026, 11, 17, 1, 0, 0, 0, time.UTC)
+		lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+			Now: func() time.Time { return now },
+		})
+
+		// Spray 15,000 distinct /64 subnets from one IPv6 /48 at ~5.55 req/s
+		// (180ms apart -> 10,000 subnets in 1,800s = 30m). Previously, every
+		// new sender IP after #10,000 was refused for up to 30m.
+		for i := 0; i < trigger.LimiterMaxEntries+5000; i++ {
+			subnetIP := fmt.Sprintf("2001:db8:cafe:%04x::1", i)
+			require.True(t, lim.AllowClientIP(subnetIP), "spray request %d", i)
+			if i == trigger.LimiterMaxEntries {
+				// Legitimate new IPv4 and IPv6 senders right past the 10,000 mark must be admitted.
+				assert.True(t, lim.AllowClientIP("198.51.100.55"))
+				assert.True(t, lim.AllowClientIP("2001:db8:9999:1::1"))
+				assert.LessOrEqual(t, lim.PerIPLen(), trigger.LimiterMaxEntries)
+			}
+			now = now.Add(180 * time.Millisecond)
+		}
+
+		assert.True(t, lim.AllowClientIP("203.0.113.77"))
+		assert.LessOrEqual(t, lim.PerIPLen(), trigger.LimiterMaxEntries)
+
+		// A single abusive /64 still hits its 100-request burst cap.
+		for i := 0; i < trigger.PerIPBurst; i++ {
+			require.True(t, lim.AllowClientIP("2001:db8:dead:beef::1"))
+		}
+		assert.False(t, lim.AllowClientIP("2001:db8:dead:beef::99"))
+	})
+
+	t.Run("instantaneous >10,000 /64 burst fails open on per-IP only while keyed endpoint/project tiers stay fail-closed", func(t *testing.T) {
+		now := time.Date(2026, 11, 17, 2, 0, 0, 0, time.UTC)
+		lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+			Now: func() time.Time { return now },
+		})
+
+		// Fill all 10,000 per-IP slots at elapsed == 0 so zero buckets have refilled.
+		for i := 0; i < trigger.LimiterMaxEntries; i++ {
+			require.True(t, lim.AllowClientIP(fmt.Sprintf("2001:db8:beef:%04x::1", i)))
+		}
+		assert.Equal(t, trigger.LimiterMaxEntries, lim.PerIPLen())
+
+		// Tracked abusive /64 still enforces its burst limit.
+		for i := 1; i < trigger.PerIPBurst; i++ {
+			require.True(t, lim.AllowClientIP("2001:db8:beef:0000::2"))
+		}
+		assert.False(t, lim.AllowClientIP("2001:db8:beef:0000::3"))
+
+		// Brand-new legitimate sender fails open on per-IP without growing the map past MaxEntries.
+		assert.True(t, lim.AllowClientIP("203.0.113.88"))
+		assert.True(t, lim.AllowClientIP("2001:db8:aaaa:1::1"))
+		assert.Equal(t, trigger.LimiterMaxEntries, lim.PerIPLen())
+
+		// Keyed per-endpoint and per-project maps stay fail-closed while unrefilled,
+		// and evict idle >= burst/rate (6s) rather than waiting 30m.
+		smallNow := now
+		smallLim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+			MaxEntries:              8,
+			PerEndpointRate:         10,
+			PerEndpointBurst:        60, // burst/rate = 6s
+			PerProjectVerifiedRate:  50,
+			PerProjectVerifiedBurst: 300, // burst/rate = 6s
+			Now:                     func() time.Time { return smallNow },
+		})
+		for i := 0; i < 8; i++ {
+			// Spend all burst tokens on each of the 8 keys so only idle >= burst/rate can refill them.
+			epKey := fmt.Sprintf("ep-%d", i)
+			projKey := fmt.Sprintf("proj-%d", i)
+			for j := 0; j < 60; j++ {
+				require.True(t, smallLim.AllowEndpoint(epKey))
+			}
+			for j := 0; j < 300; j++ {
+				require.True(t, smallLim.AllowProjectVerified(projKey))
+			}
+		}
+		// Still unrefilled at t+5s (< 6s): 9th endpoint and 9th project fail closed.
+		smallNow = now.Add(5 * time.Second)
+		assert.False(t, smallLim.AllowEndpoint("ep-overflow"))
+		assert.False(t, smallLim.AllowProjectVerified("proj-overflow"))
+
+		// At t+6s (== burst/rate, well below 30m MaxAge): refilled buckets are evicted and new keys succeed.
+		smallNow = now.Add(6 * time.Second)
+		assert.True(t, smallLim.AllowEndpoint("ep-overflow"))
+		assert.True(t, smallLim.AllowProjectVerified("proj-overflow"))
+	})
+}
+
 type stubCacheStore struct {
 	store.TriggerStore
 	endpoints map[string]*store.WebhookEndpoint
