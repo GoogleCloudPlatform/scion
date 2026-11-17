@@ -177,6 +177,7 @@ export function buildFixture() {
           'hub.artifacts_open_review_check': false,
           'hub.attachment_artifacts': false,
           'hub.chat_retention': false,
+          'hub.exec_schedules': false,
           'hub.flat_runtime_brokers': false,
           'hub.user_delete_force_cascade': false,
           'hub.welcome_project': false,
