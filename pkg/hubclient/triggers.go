@@ -149,10 +149,11 @@ type TriggerMatchRuleSpec struct {
 
 // TriggerMatchSpec holds the event-type filter and ordered match rule list.
 type TriggerMatchSpec struct {
-	Types   []string               `json:"types,omitempty"`
-	Dialect string                 `json:"dialect,omitempty"`
-	Expr    string                 `json:"expr,omitempty"`
-	Rules   []TriggerMatchRuleSpec `json:"rules"`
+	Types       []string               `json:"types,omitempty"`
+	Dialect     string                 `json:"dialect,omitempty"`
+	Expr        string                 `json:"expr,omitempty"`
+	Rules       []TriggerMatchRuleSpec `json:"rules"`
+	RulesBroken bool                   `json:"rulesBroken,omitempty"`
 }
 
 // TriggerMatchPatchSpec holds partial updates to a trigger's match block.

@@ -1180,14 +1180,14 @@ func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
 						"field": "match",
 						"elements": []map[string]any{
 							{
-								"element":  0,
+								"element":  1,
 								"category": "syntax",
 								"message":  "Syntax error",
 								"line":     1,
 								"column":   4,
 							},
 							{
-								"element": 1,
+								"element": 2,
 								"dialect": "system_one",
 								"reason":  "dialect_not_allowed",
 							},
@@ -1258,12 +1258,12 @@ func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown_variable")
 	assert.Contains(t, err.Error(), "unknown_var")
 
-	// Multi-element details.elements[] error reports every failing element with index, position, and dialect reason.
+	// Multi-element details.elements[] error reports every failing element with 1-based index, position, and dialect reason.
 	mode = "compile_err_multi_elements"
 	err = runTriggerCreate(triggerCreateCmd, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "[element 0] at line 1, column 4 (syntax)")
-	assert.Contains(t, err.Error(), `[element 1]: dialect_not_allowed`)
+	assert.Contains(t, err.Error(), "[element 1] at line 1, column 4 (syntax)")
+	assert.Contains(t, err.Error(), `[element 2]: dialect_not_allowed`)
 
 	// Position-bearing compile error from Hub message preserved without duplicating position.
 	mode = "compile_err_full_hub"
@@ -1287,9 +1287,10 @@ func TestTriggerCLI_GetNumberedElementsAndJSON(t *testing.T) {
 	t.Cleanup(func() { outputFormat = origFormat })
 
 	const (
-		epID    = "bbbbbbbb-1111-4222-8333-444444444444"
-		multiID = "cccccccc-1111-4222-8333-444444444444"
-		emptyID = "dddddddd-1111-4222-8333-444444444444"
+		epID     = "bbbbbbbb-1111-4222-8333-444444444444"
+		multiID  = "cccccccc-1111-4222-8333-444444444444"
+		emptyID  = "dddddddd-1111-4222-8333-444444444444"
+		brokenID = "eeeeeeee-1111-4222-8333-444444444444"
 	)
 
 	multiTr := hubclient.Trigger{
@@ -1334,6 +1335,23 @@ func TestTriggerCLI_GetNumberedElementsAndJSON(t *testing.T) {
 		UpdatedAt: fixedNow,
 	}
 
+	brokenTr := hubclient.Trigger{
+		ID:                    brokenID,
+		ProjectID:             "proj-1",
+		Name:                  "corrupt-rules",
+		Status:                "paused",
+		AuthorizationRevision: 1,
+		Source:                hubclient.TriggerSourceSpec{Kind: "webhook", ID: epID},
+		Match: hubclient.TriggerMatchSpec{
+			Types:       []string{"webhook.received"},
+			Rules:       []hubclient.TriggerMatchRuleSpec{},
+			RulesBroken: true,
+		},
+		Action:    hubclient.TriggerActionSpec{Type: "message", AgentName: "lead", Message: "ping"},
+		CreatedAt: fixedNow,
+		UpdatedAt: fixedNow,
+	}
+
 	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -1343,13 +1361,17 @@ func TestTriggerCLI_GetNumberedElementsAndJSON(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{Triggers: []hubclient.Trigger{multiTr}, TotalCount: 1})
 			case "types-only":
 				_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{Triggers: []hubclient.Trigger{emptyTr}, TotalCount: 1})
+			case "corrupt-rules":
+				_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{Triggers: []hubclient.Trigger{brokenTr}, TotalCount: 1})
 			default:
-				_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{Triggers: []hubclient.Trigger{multiTr, emptyTr}, TotalCount: 2})
+				_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{Triggers: []hubclient.Trigger{multiTr, emptyTr, brokenTr}, TotalCount: 3})
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+multiID:
 			_ = json.NewEncoder(w).Encode(multiTr)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+emptyID:
 			_ = json.NewEncoder(w).Encode(emptyTr)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+brokenID:
+			_ = json.NewEncoder(w).Encode(brokenTr)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1383,4 +1405,12 @@ func TestTriggerCLI_GetNumberedElementsAndJSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(emptyJSONOut), &rawMap))
 	matchObj := rawMap["match"].(map[string]any)
 	assert.Equal(t, []any{}, matchObj["rules"])
+
+	// 3. Corrupt stored rules render a content-free broken state instead of "none (types only)".
+	outputFormat = ""
+	brokenHumanOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerGet(triggerGetCmd, []string{"corrupt-rules"}))
+	})
+	assert.Contains(t, brokenHumanOut, "Rules:       broken (stored match rules cannot be parsed)")
+	assert.NotContains(t, brokenHumanOut, "none (types only)")
 }

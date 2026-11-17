@@ -115,6 +115,29 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 	assert.Equal(t, []any{}, matchMap["rules"], "0-element TriggerResponse.match.rules must serialize as []")
 	assert.NotContains(t, matchMap, "dialect", "0-element TriggerResponse.match must not mirror dialect")
 	assert.NotContains(t, matchMap, "expr", "0-element TriggerResponse.match must not mirror expr")
+	assert.NotContains(t, matchMap, "rulesBroken", "healthy TriggerResponse.match must omit rulesBroken")
+
+	corruptRaw, err := json.Marshal(buildTriggerResponse(store.Trigger{
+		ID:                "tr-corrupt",
+		ProjectID:         "proj-1",
+		Name:              "corrupt-rule",
+		Status:            store.TriggerStatusPaused,
+		SourceKind:        store.TriggerSourceKindWebhook,
+		SourceID:          "ep-1",
+		MatchTypes:        []string{"webhook.received"},
+		MatchRule:         "legacy-must-not-leak",
+		MatchRulesCorrupt: true,
+		ActionType:        "message",
+	}))
+	require.NoError(t, err)
+	assert.NotContains(t, string(corruptRaw), "legacy-must-not-leak")
+	var corruptMap map[string]any
+	require.NoError(t, json.Unmarshal(corruptRaw, &corruptMap))
+	corruptMatch := corruptMap["match"].(map[string]any)
+	assert.Equal(t, []any{}, corruptMatch["rules"])
+	assert.Equal(t, true, corruptMatch["rulesBroken"])
+	assert.NotContains(t, corruptMatch, "dialect")
+	assert.NotContains(t, corruptMatch, "expr")
 
 	oneRuleRaw, err := json.Marshal(buildTriggerResponse(store.Trigger{
 		ID:         "tr-one",

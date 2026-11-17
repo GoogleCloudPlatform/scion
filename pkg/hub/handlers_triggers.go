@@ -582,11 +582,18 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		changesFutureDispatch = true
 	}
 	if req.Match != nil {
-		if req.Match.Rules != nil && (req.Match.Expr != nil || req.Match.Dialect != nil) {
+		var patchDialect, patchExpr string
+		if req.Match.Dialect != nil {
+			patchDialect = *req.Match.Dialect
+		}
+		if req.Match.Expr != nil {
+			patchExpr = *req.Match.Expr
+		}
+		if req.Match.Rules != nil && hasAmbiguousScalarWithRules(patchDialect, patchExpr) {
 			writeAmbiguousTriggerMatchError(w)
 			return
 		}
-		existingRules := triggerMatchRules(*tr)
+		existingRules, existingRulesErr := triggerMatchRules(*tr)
 		merged := TriggerMatchSpec{
 			Types: tr.MatchTypes,
 		}
@@ -604,15 +611,22 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		case req.Match.Rules != nil:
 			merged.Rules = *req.Match.Rules
 			updatingRules = true
-		case req.Match.Expr != nil || req.Match.Dialect != nil:
+		case req.Match.Expr != nil || strings.TrimSpace(patchDialect) != "":
 			updatingRules = true
-			if req.Match.Expr == nil && len(existingRules) > 1 {
-				writeAmbiguousTriggerMatchError(w)
-				return
-			}
-			if len(existingRules) == 1 {
-				merged.Dialect = existingRules[0].Dialect
-				merged.Expr = existingRules[0].Expr
+			if existingRulesErr != nil {
+				if req.Match.Expr == nil {
+					writeCorruptTriggerMatchRulesError(w)
+					return
+				}
+			} else {
+				if req.Match.Expr == nil && len(existingRules) > 1 {
+					writeAmbiguousTriggerMatchError(w)
+					return
+				}
+				if len(existingRules) == 1 {
+					merged.Dialect = existingRules[0].Dialect
+					merged.Expr = existingRules[0].Expr
+				}
 			}
 			if req.Match.Dialect != nil {
 				merged.Dialect = *req.Match.Dialect
@@ -622,6 +636,10 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 				merged.Expr = *req.Match.Expr
 			}
 		default:
+			if existingRulesErr != nil {
+				writeCorruptTriggerMatchRulesError(w)
+				return
+			}
 			merged.Rules = triggerRulesToSpecs(existingRules)
 		}
 		matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, &merged, false, explicitMatchDialect)
@@ -631,6 +649,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		tr.MatchTypes = matchTypes
 		if updatingRules {
 			tr.MatchRules = matchRules
+			tr.MatchRulesCorrupt = false
 			tr.MatchDialect = ""
 			tr.MatchRule = ""
 			fields.MatchRules = true
@@ -699,9 +718,14 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			}
 		}
 		if req.Match == nil {
+			existingRules, rErr := triggerMatchRules(*tr)
+			if rErr != nil {
+				writeCorruptTriggerMatchRulesError(w)
+				return
+			}
 			if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
 				Types: tr.MatchTypes,
-				Rules: triggerRulesToSpecs(triggerMatchRules(*tr)),
+				Rules: triggerRulesToSpecs(existingRules),
 			}, false, false); !ok {
 				return
 			}
@@ -841,9 +865,14 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
 		return
 	}
+	existingRules, rErr := triggerMatchRules(*tr)
+	if rErr != nil {
+		writeCorruptTriggerMatchRulesError(w)
+		return
+	}
 	if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
 		Types: tr.MatchTypes,
-		Rules: triggerRulesToSpecs(triggerMatchRules(*tr)),
+		Rules: triggerRulesToSpecs(existingRules),
 	}, false, false); !ok {
 		return
 	}

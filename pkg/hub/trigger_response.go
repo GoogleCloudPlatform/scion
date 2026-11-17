@@ -80,12 +80,14 @@ type TriggerMatchRuleSpec struct {
 // TriggerMatchSpec holds the event-type filter and ordered match rule list.
 // On requests, scalar Dialect/Expr is sugar for a single-element Rules list;
 // on responses, Rules is always populated ([] when empty) and Dialect/Expr are
-// mirrored only when len(Rules) == 1 (mixed-rule-arrays §2.2).
+// mirrored only when len(Rules) == 1 (mixed-rule-arrays §2.2). RulesBroken is
+// a content-free response-only flag set when stored match_rules is corrupt.
 type TriggerMatchSpec struct {
-	Types   []string               `json:"types,omitempty"`
-	Dialect string                 `json:"dialect,omitempty"`
-	Expr    string                 `json:"expr,omitempty"`
-	Rules   []TriggerMatchRuleSpec `json:"rules"`
+	Types       []string               `json:"types,omitempty"`
+	Dialect     string                 `json:"dialect,omitempty"`
+	Expr        string                 `json:"expr,omitempty"`
+	Rules       []TriggerMatchRuleSpec `json:"rules"`
+	RulesBroken bool                   `json:"rulesBroken,omitempty"`
 }
 
 // TriggerActionSpec holds the action executed when a trigger matches.
@@ -251,7 +253,7 @@ func buildTriggerActionSpec(actionType, rawPayload string) TriggerActionSpec {
 func buildTriggerResponse(tr store.Trigger) TriggerResponse {
 	types := make([]string, len(tr.MatchTypes))
 	copy(types, tr.MatchTypes)
-	normRules := triggerMatchRules(tr)
+	normRules, rulesErr := triggerMatchRules(tr)
 	respRules := make([]TriggerMatchRuleSpec, len(normRules))
 	for i, r := range normRules {
 		respRules[i] = TriggerMatchRuleSpec{
@@ -260,10 +262,11 @@ func buildTriggerResponse(tr store.Trigger) TriggerResponse {
 		}
 	}
 	matchSpec := TriggerMatchSpec{
-		Types: types,
-		Rules: respRules,
+		Types:       types,
+		Rules:       respRules,
+		RulesBroken: rulesErr != nil,
 	}
-	if len(respRules) == 1 {
+	if rulesErr == nil && len(respRules) == 1 {
 		matchSpec.Dialect = respRules[0].Dialect
 		matchSpec.Expr = respRules[0].Expr
 	}

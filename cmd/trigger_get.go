@@ -103,7 +103,9 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 	fmt.Printf("  Types:       %s\n", strings.Join(tr.Match.Types, ", "))
 
 	rules := effectiveTriggerMatchRules(tr.Match)
-	if len(rules) == 0 {
+	if tr.Match.RulesBroken {
+		fmt.Printf("  Rules:       broken (stored match rules cannot be parsed)\n")
+	} else if len(rules) == 0 {
 		fmt.Printf("  Rules:       none (types only)\n")
 	} else {
 		fmt.Printf("  Rules:       %d\n", len(rules))

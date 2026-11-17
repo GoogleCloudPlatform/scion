@@ -217,24 +217,29 @@ func formatTriggerRuleError(err error) error {
 			if !ok {
 				continue
 			}
-			elemIdx, _ := triggerDetailInt(m, "element")
+			// details.elements[].element is 1-based (1..N), matching `trigger get`
+			// numbering (1/N..N/N) and triggerrule.MatchResult.Through.
+			elemNum, _ := triggerDetailInt(m, "element")
+			if elemNum <= 0 {
+				elemNum = 1
+			}
 			if line, hasLine := triggerDetailInt(m, "line"); hasLine {
 				col, _ := triggerDetailInt(m, "column")
 				cat := triggerDetailString(m, "category")
 				msg := triggerDetailString(m, "message")
 				if cat != "" {
-					parts = append(parts, fmt.Sprintf("invalid %s rule [element %d] at line %d, column %d (%s): %s", slot, elemIdx, line, col, cat, msg))
+					parts = append(parts, fmt.Sprintf("invalid %s rule [element %d] at line %d, column %d (%s): %s", slot, elemNum, line, col, cat, msg))
 				} else {
-					parts = append(parts, fmt.Sprintf("invalid %s rule [element %d] at line %d, column %d: %s", slot, elemIdx, line, col, msg))
+					parts = append(parts, fmt.Sprintf("invalid %s rule [element %d] at line %d, column %d: %s", slot, elemNum, line, col, msg))
 				}
 				continue
 			}
 			if dialect := triggerDetailString(m, "dialect"); dialect != "" {
 				reason := triggerDetailString(m, "reason")
 				if reason != "" {
-					parts = append(parts, fmt.Sprintf("unsupported %s dialect %q [element %d]: %s", slot, dialect, elemIdx, reason))
+					parts = append(parts, fmt.Sprintf("unsupported %s dialect %q [element %d]: %s", slot, dialect, elemNum, reason))
 				} else {
-					parts = append(parts, fmt.Sprintf("unsupported %s dialect %q [element %d]", slot, dialect, elemIdx))
+					parts = append(parts, fmt.Sprintf("unsupported %s dialect %q [element %d]", slot, dialect, elemNum))
 				}
 			}
 		}
