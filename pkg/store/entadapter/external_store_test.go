@@ -17,7 +17,9 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -726,6 +728,22 @@ func TestExternalStore_GitHubInstallationTriggerRouting(t *testing.T) {
 	got, err = s.GetGitHubInstallation(ctx, 777)
 	require.NoError(t, err)
 	assert.Empty(t, got.TriggerRouting)
+
+	// Corrupt stored trigger_routing JSON logs a content-free warning with installation_id only.
+	const corruptRaw = "{corrupt-SECRET-PAYLOAD"
+	_, err = s.client.GithubInstallation.UpdateOneID(777).SetTriggerRouting(corruptRaw).Save(ctx)
+	require.NoError(t, err)
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	got, err = s.GetGitHubInstallation(ctx, 777)
+	require.NoError(t, err)
+	assert.Empty(t, got.TriggerRouting)
+	assert.Contains(t, logBuf.String(), "installation_id=777")
+	assert.NotContains(t, logBuf.String(), "SECRET-PAYLOAD")
 }
 
 func TestCompositeStore_DeleteProject_CleansGitHubTriggerRoutes(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -411,13 +412,15 @@ func marshalTriggerRouting(routing map[string]store.GitHubTriggerRoute) string {
 	return string(b)
 }
 
-func unmarshalTriggerRouting(raw string) map[string]store.GitHubTriggerRoute {
+func unmarshalTriggerRouting(installationID int64, raw string) map[string]store.GitHubTriggerRoute {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" || trimmed == "{}" {
 		return nil
 	}
 	var parsed map[string]store.GitHubTriggerRoute
 	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+		slog.Warn("corrupt github_installations.trigger_routing JSON; treating as empty",
+			"installation_id", installationID)
 		return nil
 	}
 	return normalizeTriggerRouting(parsed)
@@ -448,7 +451,7 @@ func entGitHubToStore(e *ent.GithubInstallation) *store.GitHubInstallation {
 		AccountLogin:   e.AccountLogin,
 		AccountType:    e.AccountType,
 		AppID:          e.AppID,
-		TriggerRouting: unmarshalTriggerRouting(e.TriggerRouting),
+		TriggerRouting: unmarshalTriggerRouting(e.ID, e.TriggerRouting),
 		Status:         e.Status,
 		CreatedAt:      e.Created,
 		UpdatedAt:      e.Updated,
@@ -617,7 +620,7 @@ func (s *ExternalStore) SetGitHubInstallationTriggerRoute(ctx context.Context, i
 		if err != nil {
 			return mapError(err)
 		}
-		routing := unmarshalTriggerRouting(row.TriggerRouting)
+		routing := unmarshalTriggerRouting(row.ID, row.TriggerRouting)
 		if routing == nil {
 			routing = make(map[string]store.GitHubTriggerRoute, 1)
 		}
@@ -649,7 +652,7 @@ func (s *ExternalStore) DeleteGitHubInstallationTriggerRoute(ctx context.Context
 		if err != nil {
 			return mapError(err)
 		}
-		routing := unmarshalTriggerRouting(row.TriggerRouting)
+		routing := unmarshalTriggerRouting(row.ID, row.TriggerRouting)
 		for k := range routing {
 			if strings.EqualFold(k, key) {
 				delete(routing, k)
@@ -697,7 +700,7 @@ func (s *ExternalStore) DeleteGitHubTriggerRoutesByProject(ctx context.Context, 
 		}
 		now := time.Now()
 		for _, row := range rows {
-			routing := unmarshalTriggerRouting(row.TriggerRouting)
+			routing := unmarshalTriggerRouting(row.ID, row.TriggerRouting)
 			rowChanged := false
 			for k, v := range routing {
 				if v.PrimaryProjectID == projectID {
