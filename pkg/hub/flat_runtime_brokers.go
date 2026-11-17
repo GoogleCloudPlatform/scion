@@ -556,9 +556,17 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 		// Flat Cloud Run agents in passthrough mode run as
 		// runtime_target.service_account, never the Hub host process's own
 		// metadata identity. Write that account as the detected GCP host pair
-		// (admin-pinned values set or cleared via PATCH win with a warning) and
-		// skip recording HostIdentity so the Hub host's metadata identity does
-		// not produce a permanent mismatch.
+		// (admin-pinned values set or cleared via PATCH win with a warning),
+		// clear any pre-I5a stored HostObservation so upgraded rows do not
+		// retain a stale mismatch, and skip recording HostIdentity.
+		if row.HostObservation != nil {
+			if err := s.store.RecordRuntimeBrokerHostObservation(ctx, row.ID, store.HostIdentityObservation{}); err != nil {
+				slog.Warn("failed to clear host identity observation on flat Cloud Run Runtime Broker",
+					"runtime_broker_id", row.ID, "error", err)
+			} else if stored, err := s.store.GetRuntimeBroker(ctx, row.ID); err == nil {
+				row = stored
+			}
+		}
 		if email, projectID := config.FlatCloudRunGCPHostPair(inst); email != "" {
 			applied, err := s.store.SetRuntimeBrokerGCPHostDetected(ctx, row.ID, email, projectID)
 			if err != nil {

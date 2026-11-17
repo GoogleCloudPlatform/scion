@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -185,4 +186,65 @@ func TestBrokerDisplay_FlatCloudRunRedactsGCPHostPairOnlyForNonUpdaters(t *testi
 	require.Equal(t, http.StatusOK, oboRec.Code, oboRec.Body.String())
 	assert.NotContains(t, oboRec.Body.String(), "cr-sa@cr-proj.iam.gserviceaccount.com")
 	assert.NotContains(t, oboRec.Body.String(), "cr-proj")
+
+	// 4. handleProjectRegister (POST /api/v1/projects/register) & registerProjectBrokerForDisplay:
+	//    - HTTP register-project against a flat Cloud Run broker is refused before writing a Broker
+	//      payload and never echoes gcpHostServiceAccountEmail or gcpHostProjectId to a non-updater;
+	//    - registerProjectBrokerForDisplay omits the flat Cloud Run GCP host pair for a non-updater
+	//      and for a broker OBO request on behalf of a non-updater, while keeping it for owner and
+	//      pure brokerSelf;
+	//    - HTTP register-project over broker OBO on a legacy broker with WorkspaceStorage applies
+	//      pureSelf=false (redacting WorkspaceStorage for an OBO user lacking hub.config.read).
+	regFlatRec := doRequestAsUser(t, srv, reader, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:      "redact-reg-flat-cr-proj",
+		GitRemote: "github.com/org/redact-reg-flat-cr-proj",
+		BrokerID:  flatCR.ID,
+	})
+	assert.Equal(t, http.StatusConflict, regFlatRec.Code, regFlatRec.Body.String())
+	assert.NotContains(t, regFlatRec.Body.String(), "cr-sa@cr-proj.iam.gserviceaccount.com")
+	assert.NotContains(t, regFlatRec.Body.String(), "cr-proj")
+
+	readerOnlyCtx := contextWithIdentity(ctx, readerIdent)
+	shownReader := srv.registerProjectBrokerForDisplay(readerOnlyCtx, flatCR)
+	assert.Empty(t, shownReader.GCPHostServiceAccountEmail, "registerProjectBrokerForDisplay must redact flat Cloud Run SA email for non-updater")
+	assert.Empty(t, shownReader.GCPHostProjectID, "registerProjectBrokerForDisplay must redact flat Cloud Run project ID for non-updater")
+
+	shownOBO := srv.registerProjectBrokerForDisplay(oboCtx, flatCR)
+	assert.Empty(t, shownOBO.GCPHostServiceAccountEmail, "registerProjectBrokerForDisplay must redact flat Cloud Run SA email on OBO non-updater")
+	assert.Empty(t, shownOBO.GCPHostProjectID, "registerProjectBrokerForDisplay must redact flat Cloud Run project ID on OBO non-updater")
+
+	ownerIdent := userIdentityFor(owner)
+	shownOwner := srv.registerProjectBrokerForDisplay(contextWithIdentity(ctx, ownerIdent), flatCR)
+	assert.Equal(t, "cr-sa@cr-proj.iam.gserviceaccount.com", shownOwner.GCPHostServiceAccountEmail)
+	assert.Equal(t, "cr-proj", shownOwner.GCPHostProjectID)
+
+	selfOnlyCtx := contextWithIdentity(contextWithBrokerIdentity(ctx, brokerIdent), brokerIdent)
+	shownSelf := srv.registerProjectBrokerForDisplay(selfOnlyCtx, flatCR)
+	assert.Equal(t, "cr-sa@cr-proj.iam.gserviceaccount.com", shownSelf.GCPHostServiceAccountEmail)
+	assert.Equal(t, "cr-proj", shownSelf.GCPHostProjectID)
+
+	legacyBroker.WorkspaceStorage = &api.BrokerWorkspaceStorage{
+		Backend: "nfs",
+		Homes:   "nfs",
+		NFS:     &api.BrokerNFSWorkspaceStorage{Server: "10.9.8.7", Export: "/srv/nfs", Healthy: true},
+	}
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, legacyBroker))
+	regBody, err := json.Marshal(RegisterProjectRequest{
+		Name:      "redact-reg-obo-legacy",
+		GitRemote: "github.com/org/redact-reg-obo-legacy",
+		BrokerID:  legacyBroker.ID,
+	})
+	require.NoError(t, err)
+	legacyBrokerIdent := NewBrokerIdentity(legacyBroker.ID)
+	regOBOReq := httptest.NewRequest(http.MethodPost, "/api/v1/projects/register", bytes.NewReader(regBody))
+	regOBOReq.Header.Set("Content-Type", "application/json")
+	regOBOCtx := contextWithBrokerIdentity(regOBOReq.Context(), legacyBrokerIdent)
+	regOBOCtx = context.WithValue(regOBOCtx, userContextKey{}, ownerIdent)
+	regOBOCtx = contextWithIdentity(regOBOCtx, ownerIdent)
+	regOBOCtx = contextWithBrokerOnBehalfOf(regOBOCtx, BrokerOnBehalfOf{Broker: legacyBrokerIdent, BrokerID: legacyBroker.ID})
+	regOBOReq = regOBOReq.WithContext(regOBOCtx)
+	regOBORec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(regOBORec, regOBOReq)
+	require.Equal(t, http.StatusOK, regOBORec.Code, regOBORec.Body.String())
+	assert.NotContains(t, regOBORec.Body.String(), "10.9.8.7", "handleProjectRegister must pass pureSelf=false on broker OBO reads")
 }

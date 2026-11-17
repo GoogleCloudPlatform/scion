@@ -234,7 +234,16 @@ func TestHostIdentityState_EmbeddedFlatCloudRunWritesGCPHostAndSkipsObservation(
 	assert.Nil(t, row.HostObservation, "cloudrun embedded flat rows must not record host metadata observation")
 	assert.Equal(t, HostIdentityUnobserved, hostIdentityState(row))
 
-	// 2. Config change across re-activation refreshes the detected GCP host pair.
+	// 2. Pre-seed a stale pre-I5a HostObservation on the cloudrun row (as an
+	// older Hub binary recorded before I5a) and re-activate with a changed
+	// service_account: activation refreshes the detected GCP host pair AND
+	// clears the stale HostObservation back to unobserved instead of leaving a
+	// permanent mismatch.
+	require.NoError(t, f.s.RecordRuntimeBrokerHostObservation(ctx, row.ID, *obs))
+	staleRow, err := f.s.GetRuntimeBroker(ctx, row.ID)
+	require.NoError(t, err)
+	require.Equal(t, HostIdentityMismatch, hostIdentityState(staleRow), "precondition: pre-I5a observation causes mismatch")
+
 	row, err = f.srv.RegisterEmbeddedFlatRuntimeBroker(ctx, id, instFor(saNext), EmbeddedFlatRegistrationOptions{
 		Endpoint:     "http://localhost:9800",
 		HostIdentity: obs,
@@ -243,7 +252,8 @@ func TestHostIdentityState_EmbeddedFlatCloudRunWritesGCPHostAndSkipsObservation(
 	assert.Equal(t, saNext, row.GCPHostServiceAccountEmail)
 	assert.Equal(t, "cr-proj-b", row.GCPHostProjectID)
 	assert.Equal(t, store.GCPHostSourceDetected, row.GCPHostSource)
-	assert.Nil(t, row.HostObservation)
+	assert.Nil(t, row.HostObservation, "re-activation must clear pre-I5a HostObservation on cloudrun rows")
+	assert.Equal(t, HostIdentityUnobserved, hostIdentityState(row))
 
 	// 3. Admin-pinned set value (GCPHostSourceAdmin) wins over config and logs a warning.
 	_, err = f.s.SetRuntimeBrokerGCPHost(ctx, row.ID, saPinned, "cr-proj-pin")
