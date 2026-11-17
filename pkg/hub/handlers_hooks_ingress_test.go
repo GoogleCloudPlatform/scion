@@ -839,3 +839,74 @@ func TestWebhookIngress_SyntheticTestRegistryBootsAndAnswers404(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+func TestWebhookIngress_RefusesNonInternalSecretRow(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+	ep := createTestWebhookEndpointViaAPI(t, f, f.projectID, "non-internal-secret-hook")
+	key := store.WebhookEndpointSecretKey(f.projectID, ep.ID, 1)
+	hubID := f.srv.HubID()
+
+	plantedPlaintext := base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	plantedSealed, err := f.srv.sealWebhookEndpointSecret(plantedPlaintext)
+	require.NoError(t, err)
+
+	payload := []byte(`{"planted":true}`)
+	now := time.Now().Unix()
+
+	for _, tc := range []struct {
+		secretType string
+		target     string
+	}{
+		{secretType: store.SecretTypeEnvironment},
+		{secretType: store.SecretTypeVariable},
+		{secretType: store.SecretTypeFile, target: "/tmp/planted-secret"},
+	} {
+		require.NoError(t, f.store.UpdateSecret(ctx, &store.Secret{
+			Key:            key,
+			Scope:          store.ScopeHub,
+			ScopeID:        hubID,
+			SecretType:     tc.secretType,
+			Target:         tc.target,
+			EncryptedValue: plantedSealed,
+			UpdatedBy:      "test-admin",
+		}))
+
+		_, loadErr := f.srv.loadWebhookEndpointSecret(ctx, f.projectID, ep.ID, 1)
+		require.ErrorIs(t, loadErr, errWebhookSecretTypeMismatch, "type=%s", tc.secretType)
+
+		recPlanted := sendSignedHookHTTP(f.srv, ep.ID, plantedPlaintext, now, "deliv-"+tc.secretType, "push", "", "application/json", "", nil, payload)
+		assert.Equal(t, http.StatusServiceUnavailable, recPlanted.Code, "non-internal secret row (%s) must fail closed with 503", tc.secretType)
+		assert.NotContains(t, recPlanted.Body.String(), plantedPlaintext)
+		assert.NotContains(t, recPlanted.Body.String(), ep.Secret)
+
+		recOrig := sendSignedHookHTTP(f.srv, ep.ID, ep.Secret, now, "deliv-orig-"+tc.secretType, "push", "", "application/json", "", nil, payload)
+		assert.Equal(t, http.StatusServiceUnavailable, recOrig.Code, "non-internal secret row (%s) must fail closed before HMAC check", tc.secretType)
+	}
+
+	evs, err := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: f.projectID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Zero(t, evs.TotalCount, "refused requests must persist no trigger_events rows")
+
+	dqs, ok := f.store.(store.DurableQueueStore)
+	require.True(t, ok)
+	stats, err := dqs.DurableQueueStats(ctx, trigger.EventQueueKind, f.projectID, time.Now().UTC())
+	require.NoError(t, err)
+	assert.Zero(t, stats.Pending, "refused requests must enqueue no durable_queue_items rows")
+
+	// Restoring SecretTypeInternal recovers immediately because secret-load
+	// errors are never cached in EndpointCache.
+	origSealed, err := f.srv.sealWebhookEndpointSecret(ep.Secret)
+	require.NoError(t, err)
+	require.NoError(t, f.store.UpdateSecret(ctx, &store.Secret{
+		Key:            key,
+		Scope:          store.ScopeHub,
+		ScopeID:        hubID,
+		SecretType:     store.SecretTypeInternal,
+		EncryptedValue: origSealed,
+		UpdatedBy:      "test-admin",
+	}))
+
+	recRecovered := sendSignedHookHTTP(f.srv, ep.ID, ep.Secret, time.Now().Unix(), "deliv-recovered", "push", "", "application/json", "", nil, payload)
+	assert.Equal(t, http.StatusAccepted, recRecovered.Code, recRecovered.Body.String())
+}

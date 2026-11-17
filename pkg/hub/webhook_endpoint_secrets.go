@@ -104,6 +104,12 @@ func (s *Server) unsealWebhookEndpointSecret(encrypted string) (string, error) {
 	return s.webhookSecretCipher().Decrypt(encrypted)
 }
 
+// errWebhookSecretTypeMismatch is returned when a secret row under the
+// webhook_endpoint.* key namespace does not carry SecretTypeInternal
+// (1b1-rev-2 O3). Ingress fails closed (503) rather than using a non-internal
+// secret row for HMAC verification.
+var errWebhookSecretTypeMismatch = errors.New("webhook endpoint secret row is not SecretTypeInternal")
+
 // loadWebhookEndpointSecret loads and unseals the hub-scoped SecretTypeInternal
 // signing secret row for (projectID, endpointID, version) (§4.1, §8.1 step 6).
 func (s *Server) loadWebhookEndpointSecret(ctx context.Context, projectID, endpointID string, version int) (string, error) {
@@ -116,12 +122,19 @@ func (s *Server) loadWebhookEndpointSecret(ctx context.Context, projectID, endpo
 	if err != nil {
 		return "", err
 	}
-	if meta.SecretType != store.SecretTypeInternal {
-		return "", fmt.Errorf("webhook endpoint secret row has unexpected type %q", meta.SecretType)
+	if meta == nil || meta.SecretType != store.SecretTypeInternal {
+		gotType := ""
+		if meta != nil {
+			gotType = meta.SecretType
+		}
+		return "", fmt.Errorf("%w: got %q", errWebhookSecretTypeMismatch, gotType)
 	}
 	encrypted, err := s.store.GetSecretValue(ctx, key, store.ScopeHub, hubID)
 	if err != nil {
 		return "", err
+	}
+	if encrypted != meta.EncryptedValue {
+		return "", errors.New("webhook endpoint secret row changed concurrently during load")
 	}
 	return s.unsealWebhookEndpointSecret(encrypted)
 }
