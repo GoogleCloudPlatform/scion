@@ -1801,17 +1801,55 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		}
 	}
 
-	// The halted phase: sticky against reports, and the halt rule itself.
-	// See haltedStickyDrop and evaluateHalt. Only a broker heartbeat is
-	// evidence of how a run ended: the agent's own reports never halt it and
-	// never change a halted row's exit reason.
+	// The suspended and halted phases: sticky against reports, and the halt
+	// rule itself. See haltedStickyDrop and evaluateHalt. Only a broker
+	// heartbeat is evidence of how a run ended: the agent's own reports never
+	// halt it and never change a halted row's exit reason.
 	halting := false
 	var haltedFrom string
 	// A hub rollback (Restore) is never a report; the check documents that
 	// a restore never halts.
 	if isAgentReport(su) && !su.Restore {
-		if current.Phase == string(state.PhaseHalted) {
+		switch state.Phase(current.Phase) {
+		case state.PhaseSuspended:
+			// Suspended is sticky against agent and runtime reports on the
+			// locked row (ptone/scion#8256), mirroring haltedStickyDrop
+			// without the start-claim exception (suspend releases a
+			// superseded start claim after recording phase=suspended, and
+			// resume moves the row to starting before launching the new
+			// container).
+			//
+			// Field decisions:
+			//   - Phase: dropped, keeping phase=suspended so
+			//     entc.ClearSuspendReasonHook never sees a phase change that
+			//     would clear suspend_reason.
+			//   - Activity: dropped (both terminal activities such as
+			//     crashed/limits_exceeded and live/other activities), so any
+			//     retained suspend activity (completed, idle, harness_error)
+			//     is preserved, ToolName and StalledFromActivity remain
+			//     empty, and LastActivityEvent is untouched.
+			//   - ExitReason / ExitCode: dropped; the hub stopped the
+			//     container intentionally to suspend it, so teardown signals
+			//     or exit codes do not refine a suspension.
+			//   - ContainerStatus: exited/stopped statuses apply to confirm
+			//     teardown, while a live status ("running", "Up ...") is held
+			//     unless run intent is running, matching
+			//     heartbeatContainerStatusHeld (ptone/scion#3607).
+			//   - Other harmless fields (Message, ConnectionState,
+			//     RuntimeState, TaskSummary, CurrentTurns, CurrentModelCalls,
+			//     StartedAt, LiveWork timestamps, LastSeen, Updated) still
+			//     apply, matching haltedStickyDrop and Guard 0.
+			statusOwned = false
+			su.Phase = ""
+			su.Activity = ""
+			su.ExitReason = ""
+			su.ExitCode = nil
+			if !runIntentRunning(current) && containerStatusIsLive(su.ContainerStatus) {
+				su.ContainerStatus = ""
+			}
+		case state.PhaseHalted:
 			if haltedStickyDrop(current, su) {
+				statusOwned = false
 				su.Phase = ""
 				su.Activity = ""
 				// Only a broker heartbeat's halt evidence may refine why
@@ -1822,13 +1860,15 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 					su.ExitCode = nil
 				}
 			}
-		} else if isBrokerHeartbeat(su) {
-			// The agent's own report applies as before, never as a halt.
-			if ok, from := evaluateHalt(current, su); ok {
-				halting = true
-				haltedFrom = from
-				su.Phase = string(state.PhaseHalted)
-				su.Activity = ""
+		default:
+			if isBrokerHeartbeat(su) {
+				// The agent's own report applies as before, never as a halt.
+				if ok, from := evaluateHalt(current, su); ok {
+					halting = true
+					haltedFrom = from
+					su.Phase = string(state.PhaseHalted)
+					su.Activity = ""
+				}
 			}
 		}
 	}
@@ -2078,13 +2118,26 @@ func statusWriteHints(su store.AgentStatusUpdate) store.AgentWriteHints {
 
 // isAgentReport reports whether su is a status report about the agent's
 // run (ReportSource set by the broker heartbeat handler or the agent's
-// status endpoint). Reports are subject to the run check and to halted's
-// stickiness; of them, only a runtime report can halt
-// (isBrokerHeartbeat). Hub-internal writers (stop recordings, the launch
-// reaper, the failed launch report, the delete engine, reincarnation, the
-// start path) leave ReportSource empty.
+// status endpoint). Reports are subject to the run check and to
+// suspended's and halted's stickiness; of them, only a runtime report can
+// halt (isBrokerHeartbeat). Hub-internal writers (stop recordings, the
+// launch reaper, the failed launch report, the delete engine,
+// reincarnation, the start path) leave ReportSource empty.
 func isAgentReport(su store.AgentStatusUpdate) bool {
 	return su.ReportSource != ""
+}
+
+// runIntentRunning reports whether the locked row's run_intent is running.
+func runIntentRunning(a *ent.Agent) bool {
+	return a.RunIntent != nil && store.RunIntent(*a.RunIntent) == store.RunIntentRunning
+}
+
+// containerStatusIsLive reports whether cs describes a confirmed live
+// container ("running" or "Up ..."), matching heartbeatContainerStatusHeld
+// in pkg/hub.
+func containerStatusIsLive(cs string) bool {
+	s := strings.ToLower(cs)
+	return strings.HasPrefix(s, "up") || s == "running"
 }
 
 // isPreRunningPhase reports whether phase is one a run passes through

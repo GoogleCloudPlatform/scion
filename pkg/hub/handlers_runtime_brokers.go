@@ -1582,7 +1582,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// revert the suspended phase (which would defeat resume on the next
 			// /start). Like the terminal case, suppress any phase change and any
 			// terminal activity (crashed, etc.) from the heartbeat. Only explicit
-			// start/stop lifecycle actions may leave the suspended phase.
+			// start/stop lifecycle actions may leave the suspended phase. This is
+			// the handler-side fast path (keeping reconcileBrokerQuotaOnPhaseChange
+			// below from acting on the reported phase); UpdateAgentStatus repeats
+			// the check on the locked row (ptone/scion#8256).
 			agentSuspended := agent.Phase == string(state.PhaseSuspended)
 
 			// Reincarnation in flight is sticky like suspension (design §3.4

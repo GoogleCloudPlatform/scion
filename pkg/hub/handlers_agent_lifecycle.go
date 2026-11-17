@@ -106,11 +106,11 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// The report descriptor is set first, from the caller's identity (never
 	// from the body), so the restart-window guard below and the store read
 	// the same values. The report is the agent's own: it is subject to the
-	// run check and halted's stickiness, and never halts. ReportRunID is the
-	// run of the token that sent it (the store drops a report of another
-	// run, ptone/scion#4853). Only the agent's own token marks a run-less
-	// report as an agent's: a user or service with update access sends no
-	// run either. statusUpdateIsEmpty ignores all three.
+	// run check and to suspended's and halted's stickiness, and never halts.
+	// ReportRunID is the run of the token that sent it (the store drops a
+	// report of another run, ptone/scion#4853). Only the agent's own token
+	// marks a run-less report as an agent's: a user or service with update
+	// access sends no run either. statusUpdateIsEmpty ignores all three.
 	status.ReportSource = store.StatusReportSourceAgent
 	status.ReportRunID = presentedAgentTokenRunID(ctx)
 	_, status.ReportAgentToken = identity.(AgentIdentity)
@@ -419,7 +419,10 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	// not clobber the suspended phase — otherwise a subsequent /start would not
 	// see suspended and would skip the harness --continue (resume) flag.
 	// Only explicit start/stop lifecycle actions may leave the suspended phase,
-	// and those write phase directly without going through this guard.
+	// and those write phase directly without going through this guard. This is
+	// the handler-side fast path; UpdateAgentStatus repeats the check on the
+	// locked row so a suspend recorded between the read and the write still
+	// wins (ptone/scion#8256).
 	if currentPhase == state.PhaseSuspended {
 		status.Phase = ""
 		status.Activity = ""

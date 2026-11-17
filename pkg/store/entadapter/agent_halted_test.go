@@ -220,7 +220,7 @@ func TestAgentHalted_NoHalt(t *testing.T) {
 			su.ExitReason = "limits_exceeded"
 			return su
 		}(), "stopped"},
-		{"suspended row", running(func(r *haltRow) { r.phase, r.activity = "suspended", "" }), heartbeat("stopped", "preempted", nil), "stopped"},
+		{"suspended row", running(func(r *haltRow) { r.phase, r.activity = "suspended", "" }), heartbeat("stopped", "preempted", nil), "suspended"},
 		{"report of a running phase", stopped(nil), heartbeat("running", "preempted", nil), "running"},
 	}
 	for _, tc := range cases {

@@ -2067,7 +2067,7 @@ func TestUpdateAgentStatus_ExitFieldsKeptOutsidePreRunningToRunning(t *testing.T
 		wantReason string
 	}{
 		{"stopping to running", exited("stopping"), heartbeat("running", "", nil), "running", intp(137), "crashed"},
-		{"suspended to running", exited("suspended"), heartbeat("running", "", nil), "running", intp(137), "crashed"},
+		{"suspended to running", exited("suspended"), store.AgentStatusUpdate{Phase: "running"}, "running", intp(137), "crashed"},
 		{"explicit code and reason", exited("starting"), heartbeat("running", "limits_exceeded", intp(2)), "running", intp(2), "limits_exceeded"},
 		// The two partial rows also check the rule: the field not given is
 		// cleared.
