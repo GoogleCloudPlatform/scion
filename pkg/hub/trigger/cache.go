@@ -55,21 +55,21 @@ type EndpointCacheConfig struct {
 	MaxPositiveEntries int
 	MaxNegativeEntries int
 	Now                func() time.Time
+	OnEvictScan        func(steps int)
 }
 
 // EndpointCache caches webhook endpoint rows, unsealed secrets keyed by
 // (endpoint_id, secret_version), and a bounded negative cache of unknown IDs
 // per replica (§8.1 step 3, F4, F14).
 type EndpointCache struct {
-	mu        sync.Mutex
-	endpoints map[string]cachedEndpoint
-	secrets   map[secretCacheKey]cachedSecret
-	unknown   map[string]time.Time
-	posTTL    time.Duration
-	negTTL    time.Duration
-	maxPos    int
-	maxNeg    int
-	now       func() time.Time
+	mu             sync.Mutex
+	endpoints      *boundedTable[string, cachedEndpoint]
+	secrets        *boundedTable[secretCacheKey, cachedSecret]
+	secretVersions map[string]map[int]struct{}
+	unknown        *boundedTable[string, time.Time]
+	posTTL         time.Duration
+	negTTL         time.Duration
+	now            func() time.Time
 }
 
 // NewEndpointCache constructs a per-replica EndpointCache.
@@ -94,16 +94,23 @@ func NewEndpointCache(cfg EndpointCacheConfig) *EndpointCache {
 	if nowFn == nil {
 		nowFn = time.Now
 	}
-	return &EndpointCache{
-		endpoints: make(map[string]cachedEndpoint),
-		secrets:   make(map[secretCacheKey]cachedSecret),
-		unknown:   make(map[string]time.Time),
-		posTTL:    posTTL,
-		negTTL:    negTTL,
-		maxPos:    maxPos,
-		maxNeg:    maxNeg,
-		now:       nowFn,
+	c := &EndpointCache{
+		endpoints:      newBoundedTable[string, cachedEndpoint](maxPos, cfg.OnEvictScan, nil),
+		secretVersions: make(map[string]map[int]struct{}),
+		unknown:        newBoundedTable[string, time.Time](maxNeg, cfg.OnEvictScan, nil),
+		posTTL:         posTTL,
+		negTTL:         negTTL,
+		now:            nowFn,
 	}
+	c.secrets = newBoundedTable[secretCacheKey, cachedSecret](maxPos, cfg.OnEvictScan, func(k secretCacheKey, _ cachedSecret) {
+		if vers := c.secretVersions[k.endpointID]; vers != nil {
+			delete(vers, k.version)
+			if len(vers) == 0 {
+				delete(c.secretVersions, k.endpointID)
+			}
+		}
+	})
+	return c
 }
 
 // LookupEndpoint resolves endpointID from the cache or ts.GetWebhookEndpoint.
@@ -114,20 +121,22 @@ func (c *EndpointCache) LookupEndpoint(ctx context.Context, ts store.TriggerStor
 	now := c.now()
 
 	c.mu.Lock()
-	if exp, neg := c.unknown[endpointID]; neg {
+	if exp, neg := c.unknown.get(endpointID); neg {
 		if now.Before(exp) {
+			c.unknown.recordScan(0)
 			c.mu.Unlock()
 			return nil, store.ErrNotFound
 		}
-		delete(c.unknown, endpointID)
+		c.unknown.delete(endpointID)
 	}
-	if entry, ok := c.endpoints[endpointID]; ok {
+	if entry, ok := c.endpoints.get(endpointID); ok {
 		if now.Before(entry.expiresAt) {
+			c.endpoints.recordScan(0)
 			ep := entry.ep
 			c.mu.Unlock()
 			return &ep, nil
 		}
-		delete(c.endpoints, endpointID)
+		c.endpoints.delete(endpointID)
 	}
 	c.mu.Unlock()
 
@@ -148,61 +157,17 @@ func (c *EndpointCache) LookupEndpoint(ctx context.Context, ts store.TriggerStor
 func (c *EndpointCache) putUnknown(endpointID string, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if _, exists := c.unknown[endpointID]; !exists && len(c.unknown) >= c.maxNeg {
-		var oldestKey string
-		var oldestExp time.Time
-		evictedExpired := false
-		for k, exp := range c.unknown {
-			if !now.Before(exp) {
-				delete(c.unknown, k)
-				evictedExpired = true
-				if len(c.unknown) < c.maxNeg {
-					break
-				}
-				continue
-			}
-			if oldestKey == "" || exp.Before(oldestExp) {
-				oldestKey = k
-				oldestExp = exp
-			}
-		}
-		if !evictedExpired && len(c.unknown) >= c.maxNeg && oldestKey != "" {
-			delete(c.unknown, oldestKey)
-		}
-	}
-	c.unknown[endpointID] = now.Add(c.negTTL)
+	c.unknown.putEvictOldest(endpointID, now.Add(c.negTTL))
 }
 
 func (c *EndpointCache) putEndpoint(ep store.WebhookEndpoint, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	delete(c.unknown, ep.ID)
-	if _, exists := c.endpoints[ep.ID]; !exists && len(c.endpoints) >= c.maxPos {
-		var oldestKey string
-		var oldestExp time.Time
-		for k, v := range c.endpoints {
-			if !now.Before(v.expiresAt) {
-				delete(c.endpoints, k)
-				if len(c.endpoints) < c.maxPos {
-					break
-				}
-				continue
-			}
-			if oldestKey == "" || v.expiresAt.Before(oldestExp) {
-				oldestKey = k
-				oldestExp = v.expiresAt
-			}
-		}
-		if len(c.endpoints) >= c.maxPos && oldestKey != "" {
-			delete(c.endpoints, oldestKey)
-		}
-	}
-	c.endpoints[ep.ID] = cachedEndpoint{
+	c.unknown.delete(ep.ID)
+	c.endpoints.putEvictOldest(ep.ID, cachedEndpoint{
 		ep:        ep,
 		expiresAt: now.Add(c.posTTL),
-	}
+	})
 }
 
 // SecretLoader loads and unseals the plaintext secret string for
@@ -217,13 +182,14 @@ func (c *EndpointCache) LookupSecret(ctx context.Context, loader SecretLoader, p
 	key := secretCacheKey{endpointID: endpointID, version: version}
 
 	c.mu.Lock()
-	if entry, ok := c.secrets[key]; ok {
+	if entry, ok := c.secrets.get(key); ok {
 		if now.Before(entry.expiresAt) {
+			c.secrets.recordScan(0)
 			sec := entry.secret
 			c.mu.Unlock()
 			return sec, nil
 		}
-		delete(c.secrets, key)
+		c.secrets.delete(key)
 	}
 	c.mu.Unlock()
 
@@ -239,31 +205,17 @@ func (c *EndpointCache) LookupSecret(ctx context.Context, loader SecretLoader, p
 	}
 
 	c.mu.Lock()
-	if _, exists := c.secrets[key]; !exists && len(c.secrets) >= c.maxPos {
-		var oldestKey secretCacheKey
-		var oldestExp time.Time
-		hasOldest := false
-		for k, v := range c.secrets {
-			if !now.Before(v.expiresAt) {
-				delete(c.secrets, k)
-				if len(c.secrets) < c.maxPos {
-					break
-				}
-				continue
-			}
-			if !hasOldest || v.expiresAt.Before(oldestExp) {
-				oldestKey = k
-				oldestExp = v.expiresAt
-				hasOldest = true
-			}
-		}
-		if len(c.secrets) >= c.maxPos && hasOldest {
-			delete(c.secrets, oldestKey)
-		}
-	}
-	c.secrets[key] = cachedSecret{
+	c.secrets.putEvictOldest(key, cachedSecret{
 		secret:    sec,
 		expiresAt: c.now().Add(c.posTTL),
+	})
+	if c.secrets.len() > 0 {
+		vers := c.secretVersions[endpointID]
+		if vers == nil {
+			vers = make(map[int]struct{})
+			c.secretVersions[endpointID] = vers
+		}
+		vers[version] = struct{}{}
 	}
 	c.mu.Unlock()
 
@@ -271,19 +223,19 @@ func (c *EndpointCache) LookupSecret(ctx context.Context, loader SecretLoader, p
 }
 
 // Invalidate evicts cached endpoint metadata, negative entries, and any cached
-// secret versions for endpointID on this replica.
+// secret versions for endpointID on this replica in O(versions for endpointID).
 func (c *EndpointCache) Invalidate(endpointID string) {
 	if c == nil || endpointID == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.endpoints, endpointID)
-	delete(c.unknown, endpointID)
-	for k := range c.secrets {
-		if k.endpointID == endpointID {
-			delete(c.secrets, k)
-		}
+	c.endpoints.delete(endpointID)
+	c.unknown.delete(endpointID)
+	vers := c.secretVersions[endpointID]
+	delete(c.secretVersions, endpointID)
+	for v := range vers {
+		c.secrets.delete(secretCacheKey{endpointID: endpointID, version: v})
 	}
 }
 
@@ -291,7 +243,21 @@ func (c *EndpointCache) Invalidate(endpointID string) {
 func (c *EndpointCache) NegativeLen() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.unknown)
+	return c.unknown.len()
+}
+
+// PositiveLen returns the current positive endpoint-cache entry count (for tests).
+func (c *EndpointCache) PositiveLen() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.endpoints.len()
+}
+
+// SecretLen returns the current secret-cache entry count (for tests).
+func (c *EndpointCache) SecretLen() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.secrets.len()
 }
 
 type endpointCounterDelta struct {

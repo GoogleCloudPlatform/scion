@@ -593,3 +593,218 @@ func TestSlogAuditSink_ContentFreeAndSignatureFailureRateLimit(t *testing.T) {
 	assert.Equal(t, "ep-1", postWindow["endpoint_id"])
 	assert.Equal(t, float64(9), postWindow["suppressed_count"])
 }
+
+func TestBoundedTables_ConstantWorkUnderFullTableFlood(t *testing.T) {
+	const totalKeys = 50000 // N >> 10,000 (5x default 10,000 table capacity)
+	ctx := context.Background()
+
+	t.Run("per-IP limiter unrefilled flood and refilling /48 spray stay <= 8 probes/req", func(t *testing.T) {
+		now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+		var maxSteps, evictCalls int
+		lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+			Now: func() time.Time { return now },
+			OnEvictScan: func(steps int) {
+				if steps > 0 {
+					evictCalls++
+				}
+				if steps > maxSteps {
+					maxSteps = steps
+				}
+			},
+		})
+		// Instantaneous 50,000-key flood at elapsed == 0 (0 buckets refilled -> worst-case probe).
+		for i := range totalKeys {
+			ip := fmt.Sprintf("2001:db8:flood:%04x::1", i)
+			if i >= 65536 {
+				ip = fmt.Sprintf("2001:db8:flood2:%04x::1", i-65536)
+			}
+			require.True(t, lim.AllowClientIP(ip))
+		}
+		assert.Equal(t, trigger.LimiterMaxEntries, lim.PerIPLen())
+		assert.Equal(t, totalKeys-trigger.LimiterMaxEntries, evictCalls)
+		assert.LessOrEqual(t, maxSteps, 8, "per-IP full-table probe must do O(1) bounded work per request")
+
+		// Sustained 50,000-key spray advancing 180ms/req (~5.55 req/s): oldest bucket is always refilled -> 1 probe/req.
+		maxSteps = 0
+		evictCalls = 0
+		limRefill := trigger.NewIngressLimiter(trigger.LimiterConfig{
+			Now: func() time.Time { return now },
+			OnEvictScan: func(steps int) {
+				if steps > 0 {
+					evictCalls++
+				}
+				if steps > maxSteps {
+					maxSteps = steps
+				}
+			},
+		})
+		for i := range totalKeys {
+			ip := fmt.Sprintf("198.18.%d.%d", (i>>8)&0xff, i&0xff)
+			require.True(t, limRefill.AllowClientIP(ip))
+			now = now.Add(180 * time.Millisecond)
+		}
+		assert.Equal(t, trigger.LimiterMaxEntries, limRefill.PerIPLen())
+		assert.Equal(t, totalKeys-trigger.LimiterMaxEntries, evictCalls)
+		assert.Equal(t, 1, maxSteps, "sustained spray with refilled head must evict in 1 step")
+	})
+
+	t.Run("per-endpoint and per-project-verified limiters stay <= 8 probes/req and clock-evict refilled entries behind exhausted ones", func(t *testing.T) {
+		now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+		var maxSteps, evictCalls int
+		lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+			Now: func() time.Time { return now },
+			OnEvictScan: func(steps int) {
+				if steps > 0 {
+					evictCalls++
+				}
+				if steps > maxSteps {
+					maxSteps = steps
+				}
+			},
+		})
+		// Spend all 60 tokens on the first 20 endpoints (need 6s to refill), then 1 token on 9,980 endpoints (need 0.1s to refill).
+		for i := range 20 {
+			epID := fmt.Sprintf("ep-exhausted-%d", i)
+			for range trigger.PerEndpointBurst {
+				require.True(t, lim.AllowEndpoint(epID))
+			}
+		}
+		for i := 20; i < trigger.LimiterMaxEntries; i++ {
+			require.True(t, lim.AllowEndpoint(fmt.Sprintf("ep-light-%d", i)))
+		}
+
+		// At +200ms, the first 20 are still unrefilled while the 9,980 behind them ARE refilled.
+		// Clock rotation advances past the 20 exhausted entries in <= 8 steps/req and admits new keys without dropping the 20 exhausted buckets.
+		now = now.Add(200 * time.Millisecond)
+		admitted := 0
+		for i := range totalKeys - trigger.LimiterMaxEntries {
+			if lim.AllowEndpoint(fmt.Sprintf("ep-new-%d", i)) {
+				admitted++
+			}
+			now = now.Add(10 * time.Millisecond)
+		}
+		assert.Greater(t, admitted, totalKeys-trigger.LimiterMaxEntries-10)
+		assert.Equal(t, totalKeys-trigger.LimiterMaxEntries, evictCalls)
+		assert.LessOrEqual(t, maxSteps, 8)
+	})
+
+	t.Run("negative endpoint cache, positive endpoint cache, secret cache, and failure audit sink stay at 1 step/req", func(t *testing.T) {
+		now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+
+		// Negative endpoint cache (50,000 unknown IDs within 60s TTL -> 40,000 evictions, maxSteps == 1).
+		var negMaxSteps, negEvicts int
+		negCache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
+			Now: func() time.Time { return now },
+			OnEvictScan: func(steps int) {
+				if steps > 0 {
+					negEvicts++
+				}
+				if steps > negMaxSteps {
+					negMaxSteps = steps
+				}
+			},
+		})
+		emptyStore := &stubCacheStore{endpoints: map[string]*store.WebhookEndpoint{}}
+		for i := range totalKeys {
+			_, err := negCache.LookupEndpoint(ctx, emptyStore, fmt.Sprintf("unknown-%06d", i))
+			require.ErrorIs(t, err, store.ErrNotFound)
+		}
+		assert.Equal(t, trigger.MaxNegativeCacheEntries, negCache.NegativeLen())
+		assert.Equal(t, totalKeys-trigger.MaxNegativeCacheEntries, negEvicts)
+		assert.Equal(t, 1, negMaxSteps, "putUnknown must evict oldest in 1 step")
+
+		// Positive endpoint cache + secret cache (50,000 active endpoints within 5m TTL -> 40,000 evictions each, maxSteps == 1).
+		var posMaxSteps, posEvicts int
+		posCache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
+			Now: func() time.Time { return now },
+			OnEvictScan: func(steps int) {
+				if steps > 0 {
+					posEvicts++
+				}
+				if steps > posMaxSteps {
+					posMaxSteps = steps
+				}
+			},
+		})
+		posStore := &stubCacheStore{endpoints: make(map[string]*store.WebhookEndpoint, totalKeys)}
+		for i := range totalKeys {
+			id := fmt.Sprintf("ep-%06d", i)
+			posStore.endpoints[id] = &store.WebhookEndpoint{
+				ID:            id,
+				ProjectID:     "proj-1",
+				SecretVersion: 1,
+				SignatureMode: store.WebhookSignatureModeScionV1,
+				Status:        store.WebhookEndpointStatusActive,
+			}
+			_, err := posCache.LookupEndpoint(ctx, posStore, id)
+			require.NoError(t, err)
+			_, err = posCache.LookupSecret(ctx, func(_ context.Context, _, epID string, v int) (string, error) {
+				return fmt.Sprintf("sec-%s-%d", epID, v), nil
+			}, "proj-1", id, 1)
+			require.NoError(t, err)
+		}
+		assert.Equal(t, trigger.MaxPositiveCacheEntries, posCache.PositiveLen())
+		assert.Equal(t, trigger.MaxPositiveCacheEntries, posCache.SecretLen())
+		assert.Equal(t, 2*(totalKeys-trigger.MaxPositiveCacheEntries), posEvicts)
+		assert.Equal(t, 1, posMaxSteps, "putEndpoint and LookupSecret must evict oldest in 1 step")
+
+		// Signature-failure audit sink (50,000 distinct endpoint IDs within 1m window -> 40,000 evictions, maxSteps == 1).
+		var auditMaxSteps, auditEvicts int
+		discardLogger := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), &slog.HandlerOptions{Level: slog.LevelError}))
+		sink := trigger.NewSlogAuditSink(trigger.SlogAuditConfig{
+			Logger: loggerOrDiscard(discardLogger),
+			Now:    func() time.Time { return now },
+			OnEvictScan: func(steps int) {
+				if steps > 0 {
+					auditEvicts++
+				}
+				if steps > auditMaxSteps {
+					auditMaxSteps = steps
+				}
+			},
+		})
+		for i := range totalKeys {
+			sink.RecordSignatureFailure(ctx, trigger.SignatureFailureAuditRecord{
+				ProjectID:  "proj-1",
+				EndpointID: fmt.Sprintf("audit-ep-%06d", i),
+				RemoteIP:   "198.51.100.1",
+			})
+		}
+		assert.Equal(t, 10000, sink.FailureWindowLen())
+		assert.Equal(t, totalKeys-10000, auditEvicts)
+		assert.Equal(t, 1, auditMaxSteps, "RecordSignatureFailure must evict oldest window in 1 step")
+	})
+}
+
+func loggerOrDiscard(l *slog.Logger) *slog.Logger { return l }
+
+func BenchmarkBoundedEviction_FullTable(b *testing.B) {
+	now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	b.Run("PerIPLimiter_FullUnrefilled", func(b *testing.B) {
+		lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+			Now: func() time.Time { return now },
+		})
+		for i := range trigger.LimiterMaxEntries {
+			lim.AllowClientIP(fmt.Sprintf("198.18.%d.%d", (i>>8)&0xff, i&0xff))
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			n := trigger.LimiterMaxEntries + i
+			lim.AllowClientIP(fmt.Sprintf("198.19.%d.%d", (n>>8)&0xff, n&0xff))
+		}
+	})
+	b.Run("NegativeCache_FullUnexpired", func(b *testing.B) {
+		ctx := context.Background()
+		cache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
+			Now: func() time.Time { return now },
+		})
+		st := &stubCacheStore{endpoints: map[string]*store.WebhookEndpoint{}}
+		for i := range trigger.MaxNegativeCacheEntries {
+			_, _ = cache.LookupEndpoint(ctx, st, strconv.Itoa(i))
+		}
+		b.ResetTimer()
+		for i := range b.N {
+			_, _ = cache.LookupEndpoint(ctx, st, strconv.Itoa(trigger.MaxNegativeCacheEntries+i))
+		}
+	})
+}

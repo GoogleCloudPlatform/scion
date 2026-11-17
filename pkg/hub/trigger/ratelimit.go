@@ -106,7 +106,7 @@ func (b *singleTokenBucket) allow(now time.Time) bool {
 
 type keyedBucketSet struct {
 	mu               sync.Mutex
-	buckets          map[string]*tokenBucket
+	buckets          *boundedTable[string, *tokenBucket]
 	rate             float64
 	burst            int
 	refillPeriod     time.Duration
@@ -115,13 +115,13 @@ type keyedBucketSet struct {
 	failOpenWhenFull bool
 }
 
-func newKeyedBucketSet(rate float64, burst, maxEntries int, maxAge time.Duration, failOpenWhenFull bool) *keyedBucketSet {
+func newKeyedBucketSet(rate float64, burst, maxEntries int, maxAge time.Duration, failOpenWhenFull bool, onScan func(int)) *keyedBucketSet {
 	var refillPeriod time.Duration
 	if rate > 0 && burst > 0 {
 		refillPeriod = time.Duration(float64(time.Second) * float64(burst) / rate)
 	}
 	return &keyedBucketSet{
-		buckets:          make(map[string]*tokenBucket),
+		buckets:          newBoundedTable[string, *tokenBucket](maxEntries, onScan, nil),
 		rate:             rate,
 		burst:            burst,
 		refillPeriod:     refillPeriod,
@@ -139,24 +139,25 @@ func (s *keyedBucketSet) allow(key string, now time.Time) bool {
 		return false
 	}
 
-	b, ok := s.buckets[key]
+	b, ok := s.buckets.get(key)
 	if !ok {
-		if len(s.buckets) >= s.maxEntries {
-			// Evict buckets that have fully refilled (idle >= burst/rate, or
-			// accumulated tokens >= burst); dropping a full bucket changes no
-			// admission decision for any timestamp >= now.
-			s.evictRefilledLocked(now)
-			if len(s.buckets) >= s.maxEntries {
-				return s.failOpenWhenFull
-			}
-		}
-		s.buckets[key] = &tokenBucket{
+		cutoff := now.Add(-s.maxAge)
+		nb := &tokenBucket{
 			tokens:    float64(s.burst) - 1,
 			lastCheck: now,
+		}
+		// Evict a refilled/expired bucket in O(1) bounded probes; dropping a
+		// fully refilled bucket changes no admission decision for timestamps >= now.
+		inserted := s.buckets.tryPutEvictWhere(key, nb, boundedEvictProbes, func(_ string, cand *tokenBucket) bool {
+			return cand.lastCheck.Before(cutoff) || s.isRefilled(cand, now)
+		})
+		if !inserted {
+			return s.failOpenWhenFull
 		}
 		return true
 	}
 
+	s.buckets.recordScan(0)
 	elapsed := now.Sub(b.lastCheck).Seconds()
 	if elapsed > 0 {
 		b.tokens += elapsed * s.rate
@@ -164,6 +165,7 @@ func (s *keyedBucketSet) allow(key string, now time.Time) bool {
 			b.tokens = float64(s.burst)
 		}
 		b.lastCheck = now
+		s.buckets.touch(key)
 	}
 	if b.tokens >= 1 {
 		b.tokens--
@@ -183,25 +185,19 @@ func (s *keyedBucketSet) isRefilled(b *tokenBucket, now time.Time) bool {
 	return b.tokens+idle.Seconds()*s.rate >= float64(s.burst)
 }
 
-func (s *keyedBucketSet) evictRefilledLocked(now time.Time) {
-	cutoff := now.Add(-s.maxAge)
-	for k, b := range s.buckets {
-		if b.lastCheck.Before(cutoff) || s.isRefilled(b, now) {
-			delete(s.buckets, k)
-		}
-	}
-}
-
 func (s *keyedBucketSet) cleanup(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.evictRefilledLocked(now)
+	cutoff := now.Add(-s.maxAge)
+	s.buckets.deleteWhere(func(_ string, b *tokenBucket) bool {
+		return b.lastCheck.Before(cutoff) || s.isRefilled(b, now)
+	})
 }
 
 func (s *keyedBucketSet) len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.buckets)
+	return s.buckets.len()
 }
 
 // LimiterConfig overrides default token-bucket parameters for tests. Zero
@@ -221,6 +217,7 @@ type LimiterConfig struct {
 	MaxAge                  time.Duration
 	CleanupInterval         time.Duration
 	Now                     func() time.Time
+	OnEvictScan             func(steps int)
 }
 
 // IngressLimiter enforces the five split token-bucket budgets of §8.1:
@@ -269,10 +266,10 @@ func NewIngressLimiter(cfg LimiterConfig) *IngressLimiter {
 	}
 
 	return &IngressLimiter{
-		perIP:              newKeyedBucketSet(valFloat(cfg.PerIPRate, PerIPRatePerSecond), valInt(cfg.PerIPBurst, PerIPBurst), maxEntries, maxAge, true),
+		perIP:              newKeyedBucketSet(valFloat(cfg.PerIPRate, PerIPRatePerSecond), valInt(cfg.PerIPBurst, PerIPBurst), maxEntries, maxAge, true, cfg.OnEvictScan),
 		rejection:          newSingleTokenBucket(valFloat(cfg.RejectionRate, RejectionRatePerSecond), valInt(cfg.RejectionBurst, RejectionBurst)),
-		perEndpoint:        newKeyedBucketSet(valFloat(cfg.PerEndpointRate, PerEndpointRatePerSecond), valInt(cfg.PerEndpointBurst, PerEndpointBurst), maxEntries, maxAge, false),
-		perProjectVerified: newKeyedBucketSet(valFloat(cfg.PerProjectVerifiedRate, PerProjectVerifiedRatePerSecond), valInt(cfg.PerProjectVerifiedBurst, PerProjectVerifiedBurst), maxEntries, maxAge, false),
+		perEndpoint:        newKeyedBucketSet(valFloat(cfg.PerEndpointRate, PerEndpointRatePerSecond), valInt(cfg.PerEndpointBurst, PerEndpointBurst), maxEntries, maxAge, false, cfg.OnEvictScan),
+		perProjectVerified: newKeyedBucketSet(valFloat(cfg.PerProjectVerifiedRate, PerProjectVerifiedRatePerSecond), valInt(cfg.PerProjectVerifiedBurst, PerProjectVerifiedBurst), maxEntries, maxAge, false, cfg.OnEvictScan),
 		hubVerified:        newSingleTokenBucket(valFloat(cfg.HubVerifiedRate, HubVerifiedRatePerSecond), valInt(cfg.HubVerifiedBurst, HubVerifiedBurst)),
 		cleanupInterval:    cleanupInterval,
 		now:                nowFn,

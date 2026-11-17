@@ -73,14 +73,16 @@ type SlogAuditSink struct {
 	interval time.Duration
 
 	mu       sync.Mutex
-	failures map[string]failureAuditWindow
+	failures *boundedTable[string, failureAuditWindow]
 }
 
 // SlogAuditConfig configures a SlogAuditSink.
 type SlogAuditConfig struct {
 	Logger          *slog.Logger
 	FailureInterval time.Duration
+	MaxEntries      int
 	Now             func() time.Time
+	OnEvictScan     func(steps int)
 }
 
 // NewSlogAuditSink constructs a SlogAuditSink with Stage 1 defaults.
@@ -93,6 +95,10 @@ func NewSlogAuditSink(cfg SlogAuditConfig) *SlogAuditSink {
 	if interval <= 0 {
 		interval = FailureAuditInterval
 	}
+	maxEntries := cfg.MaxEntries
+	if maxEntries <= 0 {
+		maxEntries = maxFailureAuditEntries
+	}
 	nowFn := cfg.Now
 	if nowFn == nil {
 		nowFn = time.Now
@@ -101,7 +107,7 @@ func NewSlogAuditSink(cfg SlogAuditConfig) *SlogAuditSink {
 		log:      l,
 		now:      nowFn,
 		interval: interval,
-		failures: make(map[string]failureAuditWindow),
+		failures: newBoundedTable[string, failureAuditWindow](maxEntries, cfg.OnEvictScan, nil),
 	}
 }
 
@@ -137,39 +143,19 @@ func (s *SlogAuditSink) RecordSignatureFailure(ctx context.Context, rec Signatur
 	now := s.now()
 
 	s.mu.Lock()
-	win, exists := s.failures[rec.EndpointID]
+	win, exists := s.failures.get(rec.EndpointID)
 	if exists && now.Sub(win.lastEmitted) < s.interval {
 		win.suppressed++
-		s.failures[rec.EndpointID] = win
+		s.failures.setInPlace(rec.EndpointID, win)
+		s.failures.recordScan(0)
 		s.mu.Unlock()
 		return
 	}
-	if !exists && len(s.failures) >= maxFailureAuditEntries {
-		// Evict expired windows first; if still at capacity, drop oldest.
-		var oldestID string
-		var oldestAt time.Time
-		for k, v := range s.failures {
-			if now.Sub(v.lastEmitted) >= s.interval {
-				delete(s.failures, k)
-				if len(s.failures) < maxFailureAuditEntries {
-					break
-				}
-				continue
-			}
-			if oldestID == "" || v.lastEmitted.Before(oldestAt) {
-				oldestID = k
-				oldestAt = v.lastEmitted
-			}
-		}
-		if len(s.failures) >= maxFailureAuditEntries && oldestID != "" {
-			delete(s.failures, oldestID)
-		}
-	}
 	suppressed := win.suppressed
-	s.failures[rec.EndpointID] = failureAuditWindow{
+	s.failures.putEvictOldest(rec.EndpointID, failureAuditWindow{
 		lastEmitted: now,
 		suppressed:  0,
-	}
+	})
 	s.mu.Unlock()
 
 	attrs := []slog.Attr{
@@ -185,4 +171,14 @@ func (s *SlogAuditSink) RecordSignatureFailure(ctx context.Context, rec Signatur
 		attrs = append(attrs, slog.String(logging.AttrRequestID, reqID))
 	}
 	s.log.LogAttrs(ctx, slog.LevelWarn, AuditEventSignatureFailed, attrs...)
+}
+
+// FailureWindowLen returns the number of tracked endpoint failure windows (for tests).
+func (s *SlogAuditSink) FailureWindowLen() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failures.len()
 }
