@@ -205,8 +205,10 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 }
 
 // TestBuiltInRoles_HubAdminRevision pins the hub-admin revision and its
-// latest additions: revision 14 adds trigger.* and webhook_endpoint.*
-// (ptone/scion#8028), revision 13 adds system_one_instance.{read,create,delete,execute}
+// latest additions: revision 15 adds project.manage_message_policies and
+// project.read_message_policies (ptone/scion#8047), revision 14 adds trigger.*
+// and webhook_endpoint.* (ptone/scion#8028), revision 13 adds
+// system_one_instance.{read,create,delete,execute}
 // (ptone/scion#8044), revision 12 adds template.create_global,
 // template.update_global, and template.delete_global while keeping plain
 // template.* out (ptone/scion#1713), revision 11 adds skill.update_global and
@@ -216,7 +218,9 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 // (ptone/scion#4603).
 func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
-	assert.Equal(t, 14, admin.Revision)
+	assert.Equal(t, 15, admin.Revision)
+	assert.Contains(t, admin.Permissions, "project.manage_message_policies")
+	assert.Contains(t, admin.Permissions, "project.read_message_policies")
 	assert.Contains(t, admin.Permissions, "trigger.read")
 	assert.Contains(t, admin.Permissions, "trigger.list")
 	assert.Contains(t, admin.Permissions, "trigger.create")
@@ -1088,8 +1092,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"github_trigger.comment", "github_trigger.configure",
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
-				"project.chat_post", "project.delete", "project.list", "project.manage", "project.manage_visitors",
-				"project.read", "project.secret_read", "project.set_messaging_policy", "project.update",
+				"project.chat_post", "project.delete", "project.list", "project.manage", "project.manage_message_policies", "project.manage_visitors",
+				"project.read", "project.read_message_policies", "project.secret_read", "project.set_messaging_policy", "project.update",
 				"scheduled_event.create", "scheduled_event.delete",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
 				"skill.create", "skill.delete", "skill.list", "skill.read",
@@ -1116,8 +1120,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"github_trigger.comment", "github_trigger.configure",
 				"harness_config.create",
 				"harness_config.list", "harness_config.read", "harness_config.update",
-				"project.chat_post", "project.list", "project.manage", "project.manage_visitors",
-				"project.read", "project.secret_read", "project.update",
+				"project.chat_post", "project.list", "project.manage", "project.manage_message_policies", "project.manage_visitors",
+				"project.read", "project.read_message_policies", "project.secret_read", "project.update",
 				"scheduled_event.create",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
 				"skill.create", "skill.list", "skill.read",
@@ -1137,7 +1141,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"gcp_service_account.assign",
 				"github_trigger.comment",
 				"harness_config.create", "harness_config.list", "harness_config.read",
-				"project.chat_post", "project.list", "project.read",
+				"project.chat_post", "project.list", "project.read", "project.read_message_policies",
 				"scheduled_event.create", "scheduled_event.list", "scheduled_event.read",
 				"skill.list", "skill.read",
 				"template.create", "template.list", "template.read",
@@ -1155,7 +1159,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			// project.chat_post, agent.create or agent.message.
 			name:  "project-viewer",
 			perms: projectViewerPermissionIDs(),
-			want:  []string{"agent.list", "agent.read", "project.list", "project.read"},
+			want:  []string{"agent.list", "agent.read", "project.list", "project.read", "project.read_message_policies"},
 		},
 	}
 	for _, tt := range tests {
@@ -1169,11 +1173,11 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   13,
-		store.ProjectRoleAdmin:   11,
-		store.ProjectRoleMember:  8,
+		store.ProjectRoleOwner:   14,
+		store.ProjectRoleAdmin:   12,
+		store.ProjectRoleMember:  9,
 		store.ProjectRoleVisitor: 1,
-		store.ProjectRoleViewer:  1,
+		store.ProjectRoleViewer:  2,
 	}
 	for _, role := range BuiltInRoles() {
 		if role.ScopeType != store.RoleScopeProject {
@@ -1196,11 +1200,11 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 13, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 11, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 8, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 14, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 12, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 9, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
-		{store.ProjectRoleViewer, 1, projectViewerPermissionIDs},
+		{store.ProjectRoleViewer, 2, projectViewerPermissionIDs},
 	}
 
 	for _, pr := range projectRoles {

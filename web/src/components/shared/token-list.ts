@@ -852,6 +852,21 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'project:manage_message_policies',
+    label: 'project:manage_message_policies',
+    description:
+      "Create, update, delete, dry-run test, and inspect decisions for a project's message policies (project owner/admin or hub admin)",
+    resource: 'project',
+    isAlias: false,
+  },
+  {
+    value: 'project:read_message_policies',
+    label: 'project:read_message_policies',
+    description: "List and read a project's message policies and surface coverage",
+    resource: 'project',
+    isAlias: false,
+  },
+  {
     value: 'quota:create',
     label: 'quota:create',
     description: 'Create limit definitions and entitlement bindings',

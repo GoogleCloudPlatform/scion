@@ -335,25 +335,170 @@ func (s *Server) handleProjectMessagePolicies(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// authorizeMessagePolicyRead enforces read admission on GET list/get.
-// Slice 2 upgrades this to project.read_message_policies and the full §4
-// credential matrix.
+// messagePolicyManageRuleMessage is the denial text when a caller lacks active
+// project owner, project admin, or unscoped local Hub admin authority to manage
+// a project's message policies.
+const messagePolicyManageRuleMessage = "Only active project owners, project administrators, or local Hub administrators can manage message policies"
+
+// messagePolicyManageCredentialAllowed reports whether the request's identity
+// and credential kind may attempt message policy management (create, patch,
+// delete, test, decisions):
+//   - a local user or dev identity with an interactive session or dev credential;
+//   - a scoped user identity with a user access token (UAT).
+//
+// Agents, agent-delegated credentials, broker credentials (including broker
+// on-behalf-of), hub-delivery credentials, federated credentials, and visitors
+// are refused with 403.
+func messagePolicyManageCredentialAllowed(ctx context.Context, identity Identity) bool {
+	if isNilIdentity(identity) {
+		return false
+	}
+	if _, federated := identity.(FederatedIdentity); federated {
+		return false
+	}
+	kind := requestCredentialKind(ctx, identity)
+	if IsScopedUserIdentity(identity) {
+		if identity.Type() != "user" {
+			return false
+		}
+		_, ok := identity.(UserIdentity)
+		return ok && kind == CredentialKindUAT
+	}
+	switch identity.Type() {
+	case "user", "dev":
+		_, ok := identity.(UserIdentity)
+		return ok && allowedMutationCredentials[kind]
+	default:
+		return false
+	}
+}
+
+// messagePolicyReadCredentialAllowed reports whether the request's identity and
+// credential kind may attempt message policy reads (list, get): every
+// credential admitted by messagePolicyManageCredentialAllowed, plus an agent of
+// projectID presenting its own agent JWT (never an agent-delegated credential
+// or a cross-project agent).
+func messagePolicyReadCredentialAllowed(ctx context.Context, identity Identity, projectID string) bool {
+	if messagePolicyManageCredentialAllowed(ctx, identity) {
+		return true
+	}
+	if isNilIdentity(identity) || IsScopedUserIdentity(identity) {
+		return false
+	}
+	if _, federated := identity.(FederatedIdentity); federated {
+		return false
+	}
+	if identity.Type() != "agent" {
+		return false
+	}
+	agentIdent, ok := identity.(AgentIdentity)
+	if !ok || agentIdent.ProjectID() != projectID {
+		return false
+	}
+	return requestCredentialKind(ctx, identity) == CredentialKindAgentJWT
+}
+
+// messagePolicyOwnerOrAdminRule reports whether identity's underlying user is
+// an active project owner or project admin on projectID, or an unscoped local
+// Hub administrator (super-admin or hub-admin). It applies across interactive
+// sessions, dev credentials, and user access tokens.
+func (s *Server) messagePolicyOwnerOrAdminRule(ctx context.Context, identity Identity, projectID string) bool {
+	if isNilIdentity(identity) || s.authzService == nil {
+		return false
+	}
+	if _, federated := identity.(FederatedIdentity); federated {
+		return false
+	}
+	switch identity.Type() {
+	case "user", "dev":
+	default:
+		return false
+	}
+	userIdent, ok := identity.(UserIdentity)
+	if !ok {
+		return false
+	}
+	if IsUnscopedLocalPlatformAdmin(userIdent) {
+		return true
+	}
+	if !IsScopedUserIdentity(userIdent) && s.authzService.IsHubAdmin(ctx, userIdent.ID()) {
+		return true
+	}
+	return s.authzService.isProjectOwnerOrAdmin(ctx, userIdent.ID(), projectID)
+}
+
+// authorizeMessagePolicyRead enforces read admission on GET list/get per the
+// M1 §4 credential matrix: project.read_message_policies on the project for
+// user/dev callers (or project.manage_message_policies for a scoped UAT held by
+// an active owner/admin or local Hub admin), and project.read (via the agent's
+// own hub-signed JWT carrying project:read plus its delegation ceiling) for an
+// agent of the project.
 func (s *Server) authorizeMessagePolicyRead(w http.ResponseWriter, r *http.Request, project *store.Project) bool {
-	return s.authorize(w, r, projectResource(project), ActionRead)
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		Unauthorized(w)
+		return false
+	}
+	res := projectResource(project)
+	if !messagePolicyReadCredentialAllowed(ctx, identity, project.ID) {
+		logAuthzDenial(r, identity, res, ActionReadMessagePolicies, "credential or principal kind cannot read message policies")
+		writeForbiddenStructured(w, "", res.Type, ActionReadMessagePolicies)
+		return false
+	}
+	if identity.Type() == "agent" {
+		decision := s.authzService.CheckAccess(ctx, identity, res, ActionRead)
+		if decision.Allowed {
+			return true
+		}
+		logAuthzDenial(r, identity, res, ActionReadMessagePolicies, decision.Reason)
+		writeForbiddenStructuredDenialCause(w, "", res.Type, ActionReadMessagePolicies, decision.DeniedBy, decision.adoptionDetailsCause())
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, res, ActionReadMessagePolicies)
+	if decision.Allowed {
+		return true
+	}
+	// §4 row 3: an owner/admin UAT carrying project:manage_message_policies on
+	// a covering boundary also satisfies read without requiring a separate
+	// project:read_message_policies selector.
+	if IsScopedUserIdentity(identity) {
+		manageDec := s.authzService.CheckAccess(ctx, identity, res, ActionManageMessagePolicies)
+		if manageDec.Allowed && s.messagePolicyOwnerOrAdminRule(ctx, identity, project.ID) {
+			return true
+		}
+	}
+	logAuthzDenial(r, identity, res, ActionReadMessagePolicies, decision.Reason)
+	writeForbiddenStructuredDenialCause(w, "", res.Type, ActionReadMessagePolicies, decision.DeniedBy, decision.adoptionDetailsCause())
+	return false
 }
 
 // authorizeMessagePolicyManage enforces management admission on create, patch,
-// delete, test, and decisions. Slice 2 upgrades this to
-// project.manage_message_policies + the owner/admin rule across every
-// credential kind.
+// delete, test, and decisions per the M1 §4 credential matrix:
+// project.manage_message_policies on the project followed by
+// messagePolicyOwnerOrAdminRule on the underlying user across every credential.
 func (s *Server) authorizeMessagePolicyManage(w http.ResponseWriter, r *http.Request, project *store.Project) (string, bool) {
-	if !s.authorize(w, r, projectResource(project), ActionManage) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		Unauthorized(w)
 		return "", false
 	}
-	if id := GetIdentityFromContext(r.Context()); id != nil {
-		return id.ID(), true
+	res := projectResource(project)
+	if !messagePolicyManageCredentialAllowed(ctx, identity) {
+		logAuthzDenial(r, identity, res, ActionManageMessagePolicies, "credential or principal kind cannot manage message policies")
+		writeForbiddenStructured(w, "", res.Type, ActionManageMessagePolicies)
+		return "", false
 	}
-	return "", true
+	if !s.authorizeMsg(w, r, res, ActionManageMessagePolicies, messagePolicyManageRuleMessage) {
+		return "", false
+	}
+	if !s.messagePolicyOwnerOrAdminRule(ctx, identity, project.ID) {
+		logAuthzDenial(r, identity, res, ActionManageMessagePolicies, "caller is not an active project owner, project admin, or local hub admin")
+		writeForbiddenStructured(w, messagePolicyManageRuleMessage, res.Type, ActionManageMessagePolicies)
+		return "", false
+	}
+	return identity.ID(), true
 }
 
 func (s *Server) resolveProjectMessagePolicy(ctx context.Context, projectID, ref string) (*store.MessagePolicy, error) {
@@ -894,10 +1039,7 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 			scope = inline.Scope.Clone()
 		} else {
 			scope = store.MessagePolicyScope{
-				Surfaces: []string{
-					store.MessagePolicySurfaceAgentToUser,
-					store.MessagePolicySurfaceAgentToConversation,
-				},
+				Surfaces: messagepolicy.Coverage().EnforcedSurfaces,
 			}
 		}
 		effective = store.MessagePolicy{
@@ -952,8 +1094,8 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	}
 	if !messagepolicy.IsCoveredSurface(surface) {
 		writeError(w, http.StatusBadRequest, messagepolicy.ErrCodeSurfaceNotCovered,
-			fmt.Sprintf("sample.surface %q is not covered in M1; enforced surfaces are %s and %s",
-				surface, messagepolicy.SurfaceAgentToUser, messagepolicy.SurfaceAgentToConversation),
+			fmt.Sprintf("sample.surface %q is not covered; enforced surfaces: %s",
+				surface, strings.Join(messagepolicy.Coverage().EnforcedSurfaces, ", ")),
 			map[string]interface{}{"field": "sample.surface"})
 		return
 	}

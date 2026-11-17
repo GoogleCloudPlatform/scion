@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -62,14 +63,21 @@ func newMPHFixture(t *testing.T, policiesOn bool) *mphFixture {
 		Slug:      "mph-agent",
 		Name:      "mph-agent",
 		ProjectID: project,
+		CreatedBy: owner,
+		OwnerID:   owner,
 	}))
+	seedRecordedDelegationEdge(t, s, "user", owner, "agent", projectAgent, store.RoleScopeProject, project, string(AgentRoleBaseline))
+
 	otherAgent := tid("mph-other-agent")
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID:        otherAgent,
 		Slug:      "mph-other-agent",
 		Name:      "mph-other-agent",
 		ProjectID: otherProject,
+		CreatedBy: owner,
+		OwnerID:   owner,
 	}))
+	seedRecordedDelegationEdge(t, s, "user", owner, "agent", otherAgent, store.RoleScopeProject, otherProject, string(AgentRoleBaseline))
 
 	return &mphFixture{
 		srv:          srv,
@@ -377,7 +385,7 @@ func TestMessagePolicyHandlers_AuthoringValidation400s(t *testing.T) {
 		assert.Equal(t, "unknown_variable", apiErr.Details["category"])
 
 		nonBoolBody := mphValidCreateBody("bad-result-type")
-		nonBoolBody.ViolationRule = `message.body`
+		nonBoolBody.ViolationRule = `sender.slug`
 		rec = mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, nonBoolBody)
 		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		apiErr = decodeErr(t, rec)
@@ -469,16 +477,27 @@ func TestMessagePolicyHandlers_AuthoringValidation400s(t *testing.T) {
 		require.NoError(t, err)
 		celDialect, err := ruleengine.NewCELDialect(celEng)
 		require.NoError(t, err)
-		// Engine has CEL dialect, but "message_policy" consumer is NOT registered.
-		unregEngine := ruleengine.NewEngine()
-		require.NoError(t, unregEngine.Register(celDialect))
-		ev, err := messagepolicy.New(unregEngine)
+		reEng := ruleengine.NewEngine()
+		require.NoError(t, reEng.Register(celDialect))
+		require.NoError(t, reEng.AllowConsumerDialects(messagepolicy.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)))
+		ev, err := messagepolicy.New(reEng)
 		require.NoError(t, err)
+		// Revoke CEL grant after evaluator construction so authoring hits
+		// dialect_not_allowed and surfaces the structured reason.
+		require.NoError(t, reEng.AllowConsumerDialects(messagepolicy.ConsumerName))
 		fUnreg.srv.messagePolicyGate.evaluator = ev
 
-		rec := mphSessionDo(t, fUnreg.srv, fUnreg.owner, http.MethodPost, fUnreg.basePath(), mphValidCreateBody("unregistered-consumer"))
+		rec := mphSessionDo(t, fUnreg.srv, fUnreg.owner, http.MethodPost, fUnreg.basePath(), mphValidCreateBody("dialect-revoked"))
 		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		apiErr := decodeErr(t, rec)
+		assert.Equal(t, messagepolicy.ErrCodeUnsupportedDialect, apiErr.Code)
+		assert.Equal(t, string(ruleengine.ReasonDialectNotAllowed), apiErr.Details["reason"])
+
+		// Missing evaluator surfaces consumer_not_registered.
+		fUnreg.srv.messagePolicyGate.evaluator = nil
+		rec = mphSessionDo(t, fUnreg.srv, fUnreg.owner, http.MethodPost, fUnreg.basePath(), mphValidCreateBody("unregistered-consumer"))
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		apiErr = decodeErr(t, rec)
 		assert.Equal(t, messagepolicy.ErrCodeUnsupportedDialect, apiErr.Code)
 		assert.Equal(t, string(ruleengine.ReasonConsumerNotRegistered), apiErr.Details["reason"])
 	})
@@ -497,17 +516,17 @@ func TestMessagePolicyHandlers_TestEndpoint_16KiBAndContentFree(t *testing.T) {
 	base := f.basePath()
 
 	const sentinel = "SUPER_SECRET_INLINE_SAMPLE_SENTINEL_99182"
-	prefix := strings.Repeat("Routine engineering progress report line with normal prose.\n", 260)
+	prefix := strings.Repeat("Routine engineering progress report line with normal prose.\n", 300)
 	tail := "\nWould you prefer Option A or Option B? (" + sentinel + ")"
 	require.Less(t, len(tail), messagepolicy.MaxBodyBytes)
 	full16KiB := prefix[:messagepolicy.MaxBodyBytes-len(tail)] + tail
 	require.Equal(t, messagepolicy.MaxBodyBytes, len(full16KiB))
 
 	testReq := TestMessagePolicyRequest{
-		Mode:          store.MessagePolicyModeEnforce,
-		ViolationRule: `!message.has_choices && message.body.matches("(?i)(option a|option b|choose one|pick one|1\\)|2\\))")`,
-		OnFailed:      store.MessagePolicyOutcomeReject,
-		RejectReason:  "Blocked by {policy} for {recipient}",
+		Mode:              store.MessagePolicyModeEnforce,
+		ViolationRule:     `!message.has_choices && message.body.matches("(?i)(option a|option b|choose one|pick one|1\\)|2\\))")`,
+		OnFailed:          store.MessagePolicyOutcomeReject,
+		RejectReason:      "Blocked by {policy} for {recipient}",
 		RejectRemediation: "Use scion message --choices",
 		Sample: &MessagePolicyTestSample{
 			Surface:   store.MessagePolicySurfaceAgentToUser,
@@ -619,8 +638,8 @@ func TestMessagePolicyHandlers_DecisionsContentFreeAndFiltered(t *testing.T) {
 		SenderKind:     "agent",
 		SenderID:       f.projectAgent,
 		RecipientKind:  "conversation",
-		RecipientID:    "conv-123",
-		MessageID:      "msg-456",
+		RecipientID:    tid("mph-conv-123"),
+		MessageID:      tid("mph-msg-456"),
 		Class:          store.MessagePolicyClassPass,
 		Action:         store.MessagePolicyActionShadow,
 		ElapsedMs:      1,
@@ -663,4 +682,395 @@ func TestMessagePolicyHandlers_DecisionsContentFreeAndFiltered(t *testing.T) {
 		assert.NotContains(t, m, "msg")
 		assert.NotContains(t, m, "message_body")
 	}
+}
+
+func mphIdentityDo(t *testing.T, srv *Server, identity Identity, cred CredentialContext, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var raw []byte
+	if body != nil {
+		var err error
+		raw, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+	ctx := context.Background()
+	if identity != nil {
+		ctx = contextWithIdentity(ctx, identity)
+	}
+	if cred.Kind != "" {
+		ctx = contextWithCredentialContext(ctx, cred)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(raw)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestMessagePolicyAuthz_Target7_CredentialMatrix verifies the full M1 §4
+// authorization and credential matrix across Write (POST/PATCH/DELETE), Read
+// (GET list and GET by ID), and Decisions/test (GET decisions, GET
+// {policyId}/decisions, POST test, POST {policyId}/test), plus 401/405 method
+// controls and UAT scope listing (`hub token scopes`).
+func TestMessagePolicyAuthz_Target7_CredentialMatrix(t *testing.T) {
+	f := newMPHFixture(t, true)
+	base := f.basePath()
+	ctx := context.Background()
+
+	// Seed users across all §4 roles.
+	admin := projectOpsUser(t, f.s, "mph-admin", false)
+	projectOpsGrant(t, f.s, admin, f.project, store.ProjectRoleAdmin)
+
+	member := projectOpsUser(t, f.s, "mph-member", false)
+	projectOpsGrant(t, f.s, member, f.project, store.ProjectRoleMember)
+
+	viewer := projectOpsUser(t, f.s, "mph-viewer", false)
+	projectOpsGrant(t, f.s, viewer, f.project, store.ProjectRoleViewer)
+
+	nonMember := projectOpsUser(t, f.s, "mph-outsider", false)
+
+	localSuperAdmin := tid("mph-superadmin")
+	createTestUserWithRole(t, f.s, localSuperAdmin, localSuperAdmin+"@test.com", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	ensureHubMembership(ctx, f.s, localSuperAdmin)
+
+	localHubAdmin := tid("mph-hubadmin")
+	createTestUserWithRole(t, f.s, localHubAdmin, localHubAdmin+"@test.com", "member", store.SystemRoleHubAdmin)
+	ensureHubMembership(ctx, f.s, localHubAdmin)
+
+	// Seed a baseline policy so Read/PATCH/DELETE/{policyId}/test/{policyId}/decisions
+	// always have a live target.
+	seedRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, mphValidCreateBody("baseline-policy"))
+	require.Equal(t, http.StatusCreated, seedRec.Code, seedRec.Body.String())
+	var baseline MessagePolicyResponse
+	require.NoError(t, json.Unmarshal(seedRec.Body.Bytes(), &baseline))
+
+	testPayload := map[string]any{
+		"violation_rule": `message.body.contains("option a")`,
+		"on_failed":      "reject",
+		"sample":         map[string]any{"body": "pick option a"},
+	}
+	storedTestPayload := map[string]any{
+		"sample": map[string]any{"body": "benign status"},
+	}
+
+	type callFn func(method, path string, body any) *httptest.ResponseRecorder
+	sessionCaller := func(userID, userRole string) callFn {
+		return func(method, path string, body any) *httptest.ResponseRecorder {
+			ident := NewAuthenticatedUser(userID, userID+"@test.com", userID, userRole, string(ClientTypeAPI))
+			return mphIdentityDo(t, f.srv, ident, CredentialContext{Kind: CredentialKindInteractive, ID: "sess-" + userID}, method, path, body)
+		}
+	}
+	devCaller := func(userID, userRole string) callFn {
+		return func(method, path string, body any) *httptest.ResponseRecorder {
+			ident := NewAuthenticatedUser(userID, userID+"@test.com", userID, userRole, string(ClientTypeCLI))
+			return mphIdentityDo(t, f.srv, ident, CredentialContext{Kind: CredentialKindDev, ID: "dev-" + userID}, method, path, body)
+		}
+	}
+	tokenCaller := func(token string) callFn {
+		return func(method, path string, body any) *httptest.ResponseRecorder {
+			return doRequestWithToken(t, f.srv, token, method, path, body)
+		}
+	}
+
+	seq := 0
+	assertMatrix := func(t *testing.T, label string, call callFn, wantWriteOK, wantReadOK, wantManageOpsOK bool) {
+		t.Helper()
+		seq++
+		polName := "matrix-pol-" + strings.ReplaceAll(strings.ToLower(label), " ", "-") + "-" + string(rune('a'+(seq%20)))
+		polName = strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				return r
+			}
+			return '-'
+		}, polName)
+		for strings.Contains(polName, "--") {
+			polName = strings.ReplaceAll(polName, "--", "-")
+		}
+		polName = strings.Trim(polName, "-")
+		if len(polName) > 48 {
+			polName = strings.Trim(polName[:48], "-")
+		}
+
+		// --- Read column (list + get) ---
+		listRec := call(http.MethodGet, base, nil)
+		getRec := call(http.MethodGet, base+"/"+baseline.ID, nil)
+		if wantReadOK {
+			assert.Equal(t, http.StatusOK, listRec.Code, "%s GET list: %s", label, listRec.Body.String())
+			assert.Equal(t, http.StatusOK, getRec.Code, "%s GET by ID: %s", label, getRec.Body.String())
+		} else {
+			assert.Equal(t, http.StatusForbidden, listRec.Code, "%s GET list must be 403: %s", label, listRec.Body.String())
+			assert.Equal(t, http.StatusForbidden, getRec.Code, "%s GET by ID must be 403: %s", label, getRec.Body.String())
+		}
+
+		// --- Decisions / test column ---
+		decRec := call(http.MethodGet, base+"/decisions", nil)
+		polDecRec := call(http.MethodGet, base+"/"+baseline.ID+"/decisions", nil)
+		inlineTestRec := call(http.MethodPost, base+"/test", testPayload)
+		storedTestRec := call(http.MethodPost, base+"/"+baseline.ID+"/test", storedTestPayload)
+		if wantManageOpsOK {
+			assert.Equal(t, http.StatusOK, decRec.Code, "%s GET decisions: %s", label, decRec.Body.String())
+			assert.Equal(t, http.StatusOK, polDecRec.Code, "%s GET policy decisions: %s", label, polDecRec.Body.String())
+			assert.Equal(t, http.StatusOK, inlineTestRec.Code, "%s POST test: %s", label, inlineTestRec.Body.String())
+			assert.Equal(t, http.StatusOK, storedTestRec.Code, "%s POST policy test: %s", label, storedTestRec.Body.String())
+		} else {
+			assert.Equal(t, http.StatusForbidden, decRec.Code, "%s GET decisions must be 403: %s", label, decRec.Body.String())
+			assert.Equal(t, http.StatusForbidden, polDecRec.Code, "%s GET policy decisions must be 403: %s", label, polDecRec.Body.String())
+			assert.Equal(t, http.StatusForbidden, inlineTestRec.Code, "%s POST test must be 403: %s", label, inlineTestRec.Body.String())
+			assert.Equal(t, http.StatusForbidden, storedTestRec.Code, "%s POST policy test must be 403: %s", label, storedTestRec.Body.String())
+		}
+
+		// --- Write column (create, patch, delete) ---
+		if wantWriteOK {
+			cRec := call(http.MethodPost, base, mphValidCreateBody(polName))
+			require.Equal(t, http.StatusCreated, cRec.Code, "%s POST create (%s): %s", label, polName, cRec.Body.String())
+			var created MessagePolicyResponse
+			require.NoError(t, json.Unmarshal(cRec.Body.Bytes(), &created))
+
+			desc := "updated by " + label
+			pRec := call(http.MethodPatch, base+"/"+created.ID, PatchMessagePolicyRequest{Description: &desc})
+			assert.Equal(t, http.StatusOK, pRec.Code, "%s PATCH: %s", label, pRec.Body.String())
+
+			dRec := call(http.MethodDelete, base+"/"+created.ID, nil)
+			assert.Equal(t, http.StatusNoContent, dRec.Code, "%s DELETE: %s", label, dRec.Body.String())
+		} else {
+			cRec := call(http.MethodPost, base, mphValidCreateBody(polName))
+			assert.Equal(t, http.StatusForbidden, cRec.Code, "%s POST create must be 403: %s", label, cRec.Body.String())
+
+			desc := "denied update"
+			pRec := call(http.MethodPatch, base+"/"+baseline.ID, PatchMessagePolicyRequest{Description: &desc})
+			assert.Equal(t, http.StatusForbidden, pRec.Code, "%s PATCH must be 403: %s", label, pRec.Body.String())
+
+			dRec := call(http.MethodDelete, base+"/"+baseline.ID, nil)
+			assert.Equal(t, http.StatusForbidden, dRec.Code, "%s DELETE must be 403: %s", label, dRec.Body.String())
+		}
+	}
+
+	// Row 1: Owner or admin, interactive session -> allow / allow / allow.
+	t.Run("owner and admin interactive sessions", func(t *testing.T) {
+		assertMatrix(t, "owner-session", sessionCaller(f.owner, "member"), true, true, true)
+		assertMatrix(t, "admin-session", sessionCaller(admin, "member"), true, true, true)
+	})
+
+	// Row 2: Owner or admin, dev credential (workstation hub) -> allow / allow / allow.
+	t.Run("owner and admin dev credentials", func(t *testing.T) {
+		assertMatrix(t, "owner-dev", devCaller(f.owner, "member"), true, true, true)
+		assertMatrix(t, "admin-dev", devCaller(admin, "member"), true, true, true)
+
+		// Also verify the workstation DevUser struct itself.
+		projectOpsGrant(t, f.s, DevUserID, f.project, store.ProjectRoleOwner)
+		devUser := NewDevUser(DevUserConfig{Username: "workstation-dev", Email: "dev@localhost"})
+		assertMatrix(t, "workstation-devuser", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, devUser, CredentialContext{Kind: CredentialKindDev, ID: "dev-tok"}, method, path, body)
+		}, true, true, true)
+	})
+
+	// Row 3: Owner or admin UAT with project:manage_message_policies (project or hub boundary)
+	// -> allow / allow (manage satisfies read!) / allow; and with project:read_message_policies
+	// only -> 403 / allow / 403.
+	t.Run("owner and admin scoped UATs with manage or read selectors", func(t *testing.T) {
+		for _, boundary := range []TokenBoundary{projectBoundary(f.project), hubBoundary()} {
+			ownerManageTok := projectOpsMint(t, f.srv, f.owner, boundary, "project:manage_message_policies")
+			assertMatrix(t, "owner-uat-manage-"+string(boundary.Kind), tokenCaller(ownerManageTok), true, true, true)
+
+			adminManageTok := projectOpsMint(t, f.srv, admin, boundary, "project:manage_message_policies")
+			assertMatrix(t, "admin-uat-manage-"+string(boundary.Kind), tokenCaller(adminManageTok), true, true, true)
+
+			ownerReadTok := projectOpsMint(t, f.srv, f.owner, boundary, "project:read_message_policies")
+			assertMatrix(t, "owner-uat-read-"+string(boundary.Kind), tokenCaller(ownerReadTok), false, true, false)
+		}
+	})
+
+	// Row 4: Owner or admin UAT without the selector, or bounded to another project -> 403.
+	t.Run("owner UAT without selector or with other-project boundary", func(t *testing.T) {
+		noSelectorTok := projectOpsMint(t, f.srv, f.owner, projectBoundary(f.project), "project:read", "project:manage")
+		assertMatrix(t, "owner-uat-no-selector", tokenCaller(noSelectorTok), false, false, false)
+
+		otherProjManageTok := projectOpsMint(t, f.srv, f.owner, projectBoundary(f.otherProject),
+			"project:manage_message_policies", "project:read_message_policies")
+		assertMatrix(t, "owner-uat-other-project", tokenCaller(otherProjManageTok), false, false, false)
+	})
+
+	// Row 5 & Row 6: Project member (any user credential) and viewer -> 403 / allow / 403;
+	// non-member -> 403 / 403 / 403.
+	t.Run("member viewer and non-member", func(t *testing.T) {
+		assertMatrix(t, "member-session", sessionCaller(member, "member"), false, true, false)
+		assertMatrix(t, "member-dev", devCaller(member, "member"), false, true, false)
+
+		memberReadTok := projectOpsMint(t, f.srv, member, projectBoundary(f.project), "project:read_message_policies")
+		assertMatrix(t, "member-uat-read", tokenCaller(memberReadTok), false, true, false)
+
+		memberNoSelTok := projectOpsMint(t, f.srv, member, projectBoundary(f.project), "project:read")
+		assertMatrix(t, "member-uat-no-selector", tokenCaller(memberNoSelTok), false, false, false)
+
+		// Member cannot mint project:manage_message_policies.
+		_, _, mintErr := f.srv.uatService.CreateTokenWithParams(rs4MintContext(member), CreateTokenParams{
+			UserID:   member,
+			Name:     "member-illegal-manage",
+			Boundary: projectBoundary(f.project),
+			Scopes:   []string{"project:manage_message_policies"},
+		})
+		assert.Error(t, mintErr, "member must not be able to mint project:manage_message_policies")
+
+		// Defense-in-depth: even if a non-owner/non-admin holds a custom role
+		// granting project.manage_message_policies, messagePolicyOwnerOrAdminRule
+		// still denies Write and Decisions/test with 403.
+		customRoleID := tid("mph-custom-role")
+		_, err := f.s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			ID:          customRoleID,
+			Name:        "custom-mp-mgr",
+			Description: "Custom MP Mgr",
+			ScopeType:   store.RoleScopeProject,
+			Permissions: []string{"project.manage_message_policies", "project.read_message_policies"},
+		})
+		require.NoError(t, err)
+		customHolder := projectOpsUser(t, f.s, "mph-custom-holder", false)
+		_, err = f.s.CreateRoleBinding(ctx, &store.RoleBinding{
+			ID:               tid("mph-custom-rb"),
+			RoleDefinitionID: customRoleID,
+			PrincipalType:    "user",
+			PrincipalID:      customHolder,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          f.project,
+		})
+		require.NoError(t, err)
+		assertMatrix(t, "custom-role-not-owner-admin", sessionCaller(customHolder, "member"), false, true, false)
+
+		assertMatrix(t, "viewer-session", sessionCaller(viewer, "member"), false, true, false)
+		viewerReadTok := projectOpsMint(t, f.srv, viewer, projectBoundary(f.project), "project:read_message_policies")
+		assertMatrix(t, "viewer-uat-read", tokenCaller(viewerReadTok), false, true, false)
+
+		assertMatrix(t, "outsider-session", sessionCaller(nonMember, "member"), false, false, false)
+	})
+
+	// Row 7: Agent of the project (own credential) -> 403 / allow / 403;
+	// cross-project agent and scope-less agent -> 403 / 403 / 403.
+	t.Run("project agent own credential vs cross-project or missing scope", func(t *testing.T) {
+		projAgentIdent := dcAgentIdentity(f.projectAgent, f.project, AgentRoleBaseline)
+		assertMatrix(t, "project-agent-own-jwt", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, projAgentIdent, CredentialContext{Kind: CredentialKindAgentJWT, ID: "ajwt-1"}, method, path, body)
+		}, false, true, false)
+
+		noScopeClaims := &AgentTokenClaims{
+			ProjectID: f.project,
+			Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate},
+		}
+		noScopeClaims.Subject = f.projectAgent
+		noScopeAgentIdent := &agentIdentityWrapper{noScopeClaims}
+		assertMatrix(t, "project-agent-without-project-read", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, noScopeAgentIdent, CredentialContext{Kind: CredentialKindAgentJWT, ID: "ajwt-noscope"}, method, path, body)
+		}, false, false, false)
+
+		crossAgentIdent := dcAgentIdentity(f.otherAgent, f.otherProject, AgentRoleBaseline)
+		assertMatrix(t, "other-project-agent", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, crossAgentIdent, CredentialContext{Kind: CredentialKindAgentJWT, ID: "ajwt-other"}, method, path, body)
+		}, false, false, false)
+	})
+
+	// Row 8: Agent-delegated credential, broker / broker on-behalf-of,
+	// hub-delivery, federation, and visitor -> 403 across ALL columns.
+	t.Run("disallowed credentials and principals get 403 across all columns", func(t *testing.T) {
+		delegated := &DelegatedAgentIdentity{
+			agentID:           f.projectAgent,
+			agentProjectID:    f.project,
+			authorizingUserID: f.owner,
+			grantID:           "grant-1",
+			credentialID:      "dcred-1",
+			ceiling: permissions.FrozenPermissionCeiling{
+				Version:       permissions.CeilingVersionV1,
+				PermissionIDs: []string{"project.read_message_policies", "project.manage_message_policies"},
+			},
+		}
+		assertMatrix(t, "agent-delegated", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, delegated, CredentialContext{Kind: CredentialKindDelegatedAgent, ID: "dcred-1"}, method, path, body)
+		}, false, false, false)
+
+		brokerIdent := NewBrokerIdentity(tid("mph-broker"))
+		assertMatrix(t, "broker-direct", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, brokerIdent, CredentialContext{Kind: CredentialKindBroker, ID: "brk-1"}, method, path, body)
+		}, false, false, false)
+
+		ownerUser := NewAuthenticatedUser(f.owner, f.owner+"@test.com", f.owner, "member", string(ClientTypeAPI))
+		assertMatrix(t, "broker-on-behalf-of-owner", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, ownerUser, CredentialContext{Kind: CredentialKindBroker, ID: "brk-obo"}, method, path, body)
+		}, false, false, false)
+
+		assertMatrix(t, "hub-delivery", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, ownerUser, CredentialContext{Kind: CredentialKindHubDelivery, ID: "hdel-1"}, method, path, body)
+		}, false, false, false)
+
+		fedUser := NewFederatedUserIdentity("https://issuer.example", "fed-sub", f.owner+"@test.com", "Fed Owner", "admin", nil)
+		assertMatrix(t, "federated-user", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, fedUser, CredentialContext{Kind: CredentialKindFederation, ID: "fed-1"}, method, path, body)
+		}, false, false, false)
+
+		fedAgent := NewFederatedAgentIdentity("https://issuer.example", f.projectAgent, f.project, "mph-agent", f.owner, nil, nil)
+		assertMatrix(t, "federated-agent", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, fedAgent, CredentialContext{Kind: CredentialKindFederation, ID: "fed-ag"}, method, path, body)
+		}, false, false, false)
+
+		issuer := "https://issuer.example"
+		visEmail := "visitor@example.com"
+		visUser := &store.User{
+			DisplayName: "Visitor", Kind: store.UserKindFederated, Status: store.UserStatusActive,
+			HomeIssuer: &issuer, FederatedEmail: &visEmail,
+		}
+		require.NoError(t, f.s.CreateFederatedUser(ctx, visUser))
+		_, err := f.s.CreateVisitorRoleBinding(ctx, &store.RoleBinding{
+			PrincipalType: store.RoleBindingPrincipalUser,
+			PrincipalID:   visUser.ID,
+			ScopeType:     store.RoleScopeProject,
+			ScopeID:       f.project,
+			CreatedBy:     f.owner,
+		})
+		require.NoError(t, err)
+		visitorIdent := NewVisitorIdentity(visUser.ID, issuer, "vis-sub", visEmail, "Visitor")
+		assertMatrix(t, "visitor", func(method, path string, body any) *httptest.ResponseRecorder {
+			return mphIdentityDo(t, f.srv, visitorIdent, CredentialContext{Kind: CredentialKindFederation, ID: "vis-1"}, method, path, body)
+		}, false, false, false)
+	})
+
+	// Row 9: Unscoped local Hub admin (both super-admin and hub-admin) -> allow / allow / allow.
+	t.Run("unscoped local hub admins", func(t *testing.T) {
+		assertMatrix(t, "local-super-admin", sessionCaller(localSuperAdmin, store.UserRoleAdmin), true, true, true)
+		assertMatrix(t, "local-hub-admin", sessionCaller(localHubAdmin, "member"), true, true, true)
+	})
+
+	// Unauthenticated (nil identity) -> 401; unsupported HTTP methods with
+	// experiment ON -> 405; and UAT scope listing (`hub token scopes`) exposes
+	// both selectors with accurate per-caller eligibility.
+	t.Run("unauthenticated 401 unsupported method 405 and token scopes listing", func(t *testing.T) {
+		unauthRec := mphIdentityDo(t, f.srv, nil, CredentialContext{}, http.MethodGet, base, nil)
+		assert.Equal(t, http.StatusUnauthorized, unauthRec.Code)
+
+		methodChecks := []struct {
+			method string
+			path   string
+		}{
+			{http.MethodPut, base},
+			{http.MethodDelete, base},
+			{http.MethodGet, base + "/test"},
+			{http.MethodPost, base + "/decisions"},
+			{http.MethodPut, base + "/" + baseline.ID},
+			{http.MethodPost, base + "/" + baseline.ID},
+			{http.MethodGet, base + "/" + baseline.ID + "/test"},
+			{http.MethodPost, base + "/" + baseline.ID + "/decisions"},
+		}
+		for _, mc := range methodChecks {
+			rec := mphSessionDo(t, f.srv, f.owner, mc.method, mc.path, nil)
+			assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "%s %s should return 405: %s", mc.method, mc.path, rec.Body.String())
+		}
+
+		// Verify permissions.UATScopeOptions(false) and GET /api/v1/auth/scopes.
+		pickerScopes := make([]string, 0)
+		for _, opt := range permissions.UATScopeOptions(false) {
+			pickerScopes = append(pickerScopes, opt.UATScope)
+		}
+		assert.Contains(t, pickerScopes, "project:manage_message_policies")
+		assert.Contains(t, pickerScopes, "project:read_message_policies")
+
+		ownerScopesRec := mphSessionDo(t, f.srv, f.owner, http.MethodGet,
+			"/api/v1/auth/scopes?boundary=project&projectId="+f.project, nil)
+		require.Equal(t, http.StatusOK, ownerScopesRec.Code, ownerScopesRec.Body.String())
+		assert.Contains(t, ownerScopesRec.Body.String(), `"project:manage_message_policies"`)
+		assert.Contains(t, ownerScopesRec.Body.String(), `"project:read_message_policies"`)
+	})
 }
