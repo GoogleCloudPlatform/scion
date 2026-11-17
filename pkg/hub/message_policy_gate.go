@@ -56,6 +56,15 @@ const (
 	// maxDecisionCELReasonBytes matches the Ent schema MaxLen(64) on
 	// message_policy_decisions.cel_error_reason.
 	maxDecisionCELReasonBytes = 64
+
+	// reasonPolicyCapExceeded classifies matching enforce policies past the
+	// per-send evaluation cap (store.MaxActiveMatchingMessagePolicies = 10)
+	// as failed rather than silently skipping them (fail-closed via on_failed).
+	reasonPolicyCapExceeded = "policy_cap_exceeded"
+
+	// reasonFactsUnavailable classifies policy evaluations when a store read
+	// needed to populate mention or conversation participant facts fails.
+	reasonFactsUnavailable = "facts_unavailable"
 )
 
 // OTelMessagePolicyMetrics exports content-free message policy counters and
@@ -131,6 +140,22 @@ func (s *Server) recordMessagePolicyShadowDrop(projectID string, policyCount int
 	)
 }
 
+func (s *Server) recordMessagePolicyShadowCapDrop(projectID string, droppedCount int) {
+	if droppedCount <= 0 {
+		return
+	}
+	s.messagePolicyShadowDrops.Add(int64(droppedCount))
+	if m := s.messagePolicyMetrics.Load(); m != nil {
+		m.shadowDrops.Add(context.Background(), int64(droppedCount), metric.WithAttributes(
+			attribute.String("reason", reasonPolicyCapExceeded),
+		))
+	}
+	slog.Warn("message policy shadow per-send cap exceeded; dropping excess shadow policies",
+		"project_id", projectID,
+		"dropped_count", droppedCount,
+	)
+}
+
 func (s *Server) recordMessagePolicyAdmissionError(projectID, policyID, policyName, reason string) {
 	s.messagePolicyAdmissionErrors.Add(1)
 	if m := s.messagePolicyMetrics.Load(); m != nil {
@@ -166,11 +191,13 @@ type messagePolicyGateRuntime struct {
 }
 
 type messagePolicyShadowJob struct {
-	policies      []store.MessagePolicy
-	snapshot      h2FactSnapshot
-	activation    messagepolicy.Activation
-	hasActivation bool
-	messageID     string
+	policies         []store.MessagePolicy
+	snapshot         h2FactSnapshot
+	activation       messagepolicy.Activation
+	hasActivation    bool
+	factsUnavailable bool
+	droppedCount     int
+	messageID        string
 }
 
 type h2FactSnapshot struct {
@@ -196,12 +223,13 @@ type h2PolicyInput struct {
 	routing             *routingResult
 	hasChoices          bool
 	artifactAttachments int
-	messageID           string
 }
 
 type h2PolicyOutcome struct {
 	humanMembers       []chatMemberEntry
 	humanMembersLoaded bool
+	admittedDecisions  []*store.MessagePolicyDecision
+	shadowJob          *messagePolicyShadowJob
 }
 
 // initMessagePolicyGate binds the gate to the Server's shared ruleengine.Engine.
@@ -270,20 +298,46 @@ func (s *Server) runMessagePolicyShadowWorker(ctx context.Context, ch <-chan mes
 }
 
 func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messagePolicyShadowJob) {
+	if ctx.Err() != nil {
+		return
+	}
+	factsUnavailable := job.factsUnavailable
 	act := job.activation
-	if !job.hasActivation {
-		facts, _, _ := s.buildH2MessagePolicyFacts(ctx, job.snapshot, nil, false)
-		act = messagepolicy.NewActivation(facts)
+	if !job.hasActivation && !factsUnavailable {
+		facts, _, _, factsErr := s.buildH2MessagePolicyFacts(ctx, job.snapshot, nil, false)
+		if ctx.Err() != nil {
+			return
+		}
+		if factsErr != nil {
+			factsUnavailable = true
+		} else {
+			act = messagepolicy.NewActivation(facts)
+		}
 	}
 	budget := s.messagePolicyGate.makeSendBudget()
 	tplData := messagepolicy.TemplateData{
 		Recipient: job.snapshot.recipientSlug,
 	}
 	for i := range job.policies {
+		if ctx.Err() != nil {
+			return
+		}
 		pol := &job.policies[i]
-		start := time.Now()
-		classification := s.evalOneMessagePolicy(ctx, pol, act, budget)
-		elapsed := time.Since(start)
+		var classification messagepolicy.Classification
+		var elapsed time.Duration
+		if factsUnavailable {
+			classification = messagepolicy.Classification{
+				Class:  messagepolicy.ClassFailed,
+				Reason: reasonFactsUnavailable,
+			}
+		} else {
+			start := time.Now()
+			classification = s.evalOneMessagePolicy(ctx, pol, act, budget)
+			elapsed = time.Since(start)
+		}
+		if ctx.Err() != nil {
+			return
+		}
 
 		s.recordMessagePolicyEvalMetric(classification.Class, store.MessagePolicyModeShadow, job.snapshot.surface, elapsed)
 		if classification.AdmissionError {
@@ -391,7 +445,7 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 
 	var enforcePols []store.MessagePolicy
 	var shadowPols []store.MessagePolicy
-	matchedCount := 0
+	droppedShadow := 0
 	for i := range polList.Items {
 		p := &polList.Items[i]
 		if !p.Matches(snap.surface, snap.senderID, snap.recipientKind, "") {
@@ -399,32 +453,35 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		}
 		if p.Mode == store.MessagePolicyModeEnforce {
 			enforcePols = append(enforcePols, *p)
-		} else {
+		} else if len(shadowPols) < store.MaxActiveMatchingMessagePolicies {
 			shadowPols = append(shadowPols, *p)
-		}
-		matchedCount++
-		if matchedCount >= store.MaxActiveMatchingMessagePolicies {
-			break
+		} else {
+			droppedShadow++
 		}
 	}
 
-	if matchedCount == 0 {
+	if len(enforcePols) == 0 && len(shadowPols) == 0 {
 		return h2PolicyOutcome{}, true
 	}
 
-	// Fast path: only shadow policies matched. Enqueue off the hot path without
-	// blocking or running participant/mention lookups synchronously.
+	// Fast path: only shadow policies matched. Defer enqueueing until the
+	// message is persisted so shadow decision rows never reference an unstored
+	// message UUID, and avoid running participant/mention lookups on the hot path.
 	if len(enforcePols) == 0 {
-		s.enqueueMessagePolicyShadow(messagePolicyShadowJob{
-			policies:  shadowPols,
-			snapshot:  snap,
-			messageID: in.messageID,
-		})
-		return h2PolicyOutcome{}, true
+		return h2PolicyOutcome{
+			shadowJob: &messagePolicyShadowJob{
+				policies:     shadowPols,
+				snapshot:     snap,
+				droppedCount: droppedShadow,
+			},
+		}, true
 	}
 
-	facts, humanMembers, humanMembersLoaded := s.buildH2MessagePolicyFacts(ctx, snap, nil, false)
-	act := messagepolicy.NewActivation(facts)
+	facts, humanMembers, humanMembersLoaded, factsErr := s.buildH2MessagePolicyFacts(ctx, snap, nil, false)
+	var act messagepolicy.Activation
+	if factsErr == nil {
+		act = messagepolicy.NewActivation(facts)
+	}
 	budget := s.messagePolicyGate.makeSendBudget()
 
 	type enforceEvalResult struct {
@@ -439,9 +496,24 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 
 	for i := range enforcePols {
 		pol := &enforcePols[i]
-		start := time.Now()
-		classification := s.evalOneMessagePolicy(ctx, pol, act, budget)
-		elapsed := time.Since(start)
+		var classification messagepolicy.Classification
+		var elapsed time.Duration
+		switch {
+		case i >= store.MaxActiveMatchingMessagePolicies:
+			classification = messagepolicy.Classification{
+				Class:  messagepolicy.ClassFailed,
+				Reason: reasonPolicyCapExceeded,
+			}
+		case factsErr != nil:
+			classification = messagepolicy.Classification{
+				Class:  messagepolicy.ClassFailed,
+				Reason: reasonFactsUnavailable,
+			}
+		default:
+			start := time.Now()
+			classification = s.evalOneMessagePolicy(ctx, pol, act, budget)
+			elapsed = time.Since(start)
+		}
 
 		s.recordMessagePolicyEvalMetric(classification.Class, store.MessagePolicyModeEnforce, snap.surface, elapsed)
 		if classification.AdmissionError {
@@ -467,47 +539,42 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		}
 	}
 
-	// message_id is NULL (empty) whenever the send is rejected so decision rows
-	// never reference an unpersisted message UUID.
-	recordedMsgID := in.messageID
-	if firstReject != nil {
-		recordedMsgID = ""
-	}
-
 	tplData := messagepolicy.TemplateData{
 		Recipient: snap.recipientSlug,
 	}
-	for i := range results {
-		r := &results[i]
-		tplData.Policy = r.policy.Name
-		action := store.MessagePolicyActionAdmitted
-		if r.outcome == messagepolicy.OutcomeReject {
-			action = store.MessagePolicyActionRejected
-		}
-		dec := buildMessagePolicyDecisionRecord(
-			r.policy,
-			snap,
-			recordedMsgID,
-			r.classification,
-			action,
-			r.outcome,
-			tplData,
-			r.elapsed,
-		)
-		s.persistMessagePolicyDecision(ctx, dec)
-	}
-
-	if len(shadowPols) > 0 {
-		s.enqueueMessagePolicyShadow(messagePolicyShadowJob{
-			policies:      shadowPols,
-			snapshot:      snap,
-			activation:    act,
-			hasActivation: true,
-			messageID:     recordedMsgID,
-		})
-	}
 
 	if firstReject != nil {
+		for i := range results {
+			r := &results[i]
+			tplData.Policy = r.policy.Name
+			action := store.MessagePolicyActionAdmitted
+			if r.outcome == messagepolicy.OutcomeReject {
+				action = store.MessagePolicyActionRejected
+			}
+			dec := buildMessagePolicyDecisionRecord(
+				r.policy,
+				snap,
+				"",
+				r.classification,
+				action,
+				r.outcome,
+				tplData,
+				r.elapsed,
+			)
+			s.persistMessagePolicyDecision(ctx, dec)
+		}
+		if len(shadowPols) > 0 {
+			s.recordMessagePolicyShadowCapDrop(snap.projectID, droppedShadow)
+			s.enqueueMessagePolicyShadow(messagePolicyShadowJob{
+				policies:         shadowPols,
+				snapshot:         snap,
+				activation:       act,
+				hasActivation:    factsErr == nil,
+				factsUnavailable: factsErr != nil,
+				messageID:        "",
+			})
+		}
+
 		pol := firstReject.policy
 		tplData.Policy = pol.Name
 		reason := renderPolicyRejectReason(pol, tplData)
@@ -537,10 +604,64 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		return h2PolicyOutcome{}, false
 	}
 
+	admittedDecisions := make([]*store.MessagePolicyDecision, 0, len(results))
+	for i := range results {
+		r := &results[i]
+		tplData.Policy = r.policy.Name
+		admittedDecisions = append(admittedDecisions, buildMessagePolicyDecisionRecord(
+			r.policy,
+			snap,
+			"",
+			r.classification,
+			store.MessagePolicyActionAdmitted,
+			r.outcome,
+			tplData,
+			r.elapsed,
+		))
+	}
+
+	var shadowJob *messagePolicyShadowJob
+	if len(shadowPols) > 0 {
+		shadowJob = &messagePolicyShadowJob{
+			policies:         shadowPols,
+			snapshot:         snap,
+			activation:       act,
+			hasActivation:    factsErr == nil,
+			factsUnavailable: factsErr != nil,
+			droppedCount:     droppedShadow,
+		}
+	}
+
 	return h2PolicyOutcome{
 		humanMembers:       humanMembers,
 		humanMembersLoaded: humanMembersLoaded,
+		admittedDecisions:  admittedDecisions,
+		shadowJob:          shadowJob,
 	}, true
+}
+
+// recordAdmittedH2PolicyDecisions persists admitted enforce decisions and
+// enqueues matching shadow policies once the outbound message has been stored
+// (or accepted by the in-process persisting broker subscriber, which stores
+// the pre-assigned PersistMessageID). Deferring until after storage prevents
+// decision rows from referencing a message_id that failed channel validation,
+// broker admission, or database persistence.
+func (s *Server) recordAdmittedH2PolicyDecisions(ctx context.Context, out *h2PolicyOutcome, persistedMessageID string) {
+	if out == nil {
+		return
+	}
+	for _, dec := range out.admittedDecisions {
+		dec.MessageID = persistedMessageID
+		s.persistMessagePolicyDecision(ctx, dec)
+	}
+	out.admittedDecisions = nil
+	if out.shadowJob != nil {
+		job := *out.shadowJob
+		job.messageID = persistedMessageID
+		out.shadowJob = nil
+		s.recordMessagePolicyShadowCapDrop(job.snapshot.projectID, job.droppedCount)
+		s.enqueueMessagePolicyShadow(job)
+	}
 }
 
 func (s *Server) evalOneMessagePolicy(
@@ -556,19 +677,11 @@ func (s *Server) evalOneMessagePolicy(
 	}
 	ev := s.messagePolicyGate.evaluator
 	if ev == nil {
-		re := s.RuleEngine()
-		if re == nil {
-			return messagepolicy.ClassifyError(&ruleengine.UnsupportedDialectError{
-				Dialect:  ruleengine.DialectCEL,
-				Consumer: messagepolicy.ConsumerName,
-				Reason:   ruleengine.ReasonConsumerNotRegistered,
-			})
-		}
-		var err error
-		ev, err = messagepolicy.New(re)
-		if err != nil {
-			return messagepolicy.ClassifyError(err)
-		}
+		return messagepolicy.ClassifyError(&ruleengine.UnsupportedDialectError{
+			Dialect:  ruleengine.DialectCEL,
+			Consumer: messagepolicy.ConsumerName,
+			Reason:   ruleengine.ReasonConsumerNotRegistered,
+		})
 	}
 	return ev.EvaluateViolation(ctx, pol.ID, pol.Revision, pol.ViolationRule, act, messagepolicy.WithBudget(budget))
 }
@@ -636,12 +749,17 @@ func (s *Server) buildH2MessagePolicyFacts(
 	snap h2FactSnapshot,
 	preloadedHumans []chatMemberEntry,
 	humansLoaded bool,
-) (messagepolicy.Facts, []chatMemberEntry, bool) {
+) (messagepolicy.Facts, []chatMemberEntry, bool, error) {
+	var factsErr error
+
 	var mentionedAgentIDs []string
 	if snap.projectID != "" && strings.Contains(snap.msgBody, "@") {
 		proseAgentMentions := dropSelfMentionName(messages.ExtractProseMentions(snap.msgBody), snap.senderSlug)
 		if len(proseAgentMentions) > 0 {
-			if agents, err := listAllProjectAgents(ctx, s.store, snap.projectID); err == nil && len(agents) > 0 {
+			agents, err := listAllProjectAgents(ctx, s.store, snap.projectID)
+			if err != nil {
+				factsErr = errors.Join(factsErr, err)
+			} else if len(agents) > 0 {
 				slugToID := make(map[string]string, len(agents))
 				for i := range agents {
 					if agents[i].Slug != "" {
@@ -664,17 +782,27 @@ func (s *Server) buildH2MessagePolicyFacts(
 	if snap.projectID != "" && strings.Contains(snap.msgBody, "@") {
 		if wrapped := messages.ExtractProseWrappedMentions(snap.msgBody); len(wrapped) > 0 {
 			if !humansLoaded {
-				humans = s.resolveProjectHumanMembers(ctx, snap.projectID)
-				humansLoaded = true
+				loadedHumans, err := s.projectHumanMembersStrict(ctx, snap.projectID)
+				if err != nil {
+					factsErr = errors.Join(factsErr, err)
+				} else {
+					humans = loadedHumans
+					humansLoaded = true
+				}
 			}
-			mentionedUserIDs = mentionedHumanIDs(humans, wrapped, "")
+			if humansLoaded {
+				mentionedUserIDs = mentionedHumanIDs(humans, wrapped, "")
+			}
 		}
 	}
 
 	var agentParticipantIDs []string
 	var userParticipantIDs []string
 	if snap.convKind == "group" && snap.convID != "" {
-		if parts, err := s.store.ListParticipants(ctx, snap.convID); err == nil {
+		parts, err := s.store.ListParticipants(ctx, snap.convID)
+		if err != nil {
+			factsErr = errors.Join(factsErr, err)
+		} else {
 			for _, p := range parts {
 				if p.PrincipalID == "" {
 					continue
@@ -687,6 +815,14 @@ func (s *Server) buildH2MessagePolicyFacts(
 				}
 			}
 		}
+	}
+
+	if factsErr != nil && ctx.Err() == nil {
+		s.messageLog.Warn("message policy gate: fact lookup failed",
+			"project_id", snap.projectID,
+			"surface", snap.surface,
+			"error", factsErr,
+		)
 	}
 
 	facts := messagepolicy.Facts{
@@ -717,7 +853,7 @@ func (s *Server) buildH2MessagePolicyFacts(
 			UserParticipantIDs:  userParticipantIDs,
 		},
 	}
-	return facts, humans, humansLoaded
+	return facts, humans, humansLoaded, factsErr
 }
 
 func renderPolicyRejectReason(pol *store.MessagePolicy, tplData messagepolicy.TemplateData) string {

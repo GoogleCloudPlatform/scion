@@ -1357,7 +1357,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		routing:             result,
 		hasChoices:          decisionSend != nil,
 		artifactAttachments: len(artifactAttachments),
-		messageID:           outboundMessageID,
 	})
 	if !h2Allowed {
 		return
@@ -1569,6 +1568,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// recordLogged reports that the delivery path wrote this message's
 	// record to the message log ("user message delivered via broker").
 	recordLogged := false
+	persistedMessageID := storeMsg.ID
 
 	// Dispatch based on delivery path.
 	switch result.DeliveryPath {
@@ -1657,6 +1657,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 				// spokes already have the message, so a cancelled request
 				// must not stop the store and SSE event either.
 				if err := storeOutboundRow(context.WithoutCancel(ctx)); err != nil {
+					persistedMessageID = ""
 					s.messageLog.Error("Failed to persist outbound message after broker publish",
 						"agent_id", agent.ID, "recipient_id", result.RecipientID,
 						"project_id", agent.ProjectID, "error", err)
@@ -1664,6 +1665,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			}
 			s.messageLog.Info("Outbound message dispatched through broker",
 				"agent_id", agent.ID, "recipient_id", result.RecipientID, "project_id", agent.ProjectID)
+		} else {
+			persistedMessageID = ""
 		}
 
 	case deliveryUserDirect:
@@ -1683,6 +1686,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			cr.Dispatch(ctx, structuredMsg)
 		}
 	}
+
+	s.recordAdmittedH2PolicyDecisions(ctx, &h2PolicyRes, persistedMessageID)
 
 	// Agent-authored @mention fan-out: the primary already succeeded (both
 	// delivery-path branches above return early on failure), so fan-out

@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -70,13 +71,20 @@ func mpgSetExperiment(t testing.TB, srv *Server, policiesOn, choicesOn bool) {
 	require.Equal(t, policiesOn, srv.experimentEnabled(experiments.MessagePolicies))
 }
 
-// mpgFaultStore tracks and optionally fails MessagePolicyStore reads/writes so
-// tests can prove the gate loads nothing when hub.message_policies is off.
+// mpgFaultStore tracks and optionally fails MessagePolicyStore and fact/message
+// store calls so tests can exercise flag-off isolation, facts_unavailable
+// fail-closed behaviour, and unstored-message decision suppression without ever
+// reassigning srv.store.
 type mpgFaultStore struct {
 	store.Store
-	fault         *storeFaultSwitch
-	listCalls     atomic.Int64
-	decisionCalls atomic.Int64
+	fault                  *storeFaultSwitch
+	listCalls              atomic.Int64
+	decisionCalls          atomic.Int64
+	onAfterListPolicies    func()
+	failListAgents         atomic.Bool
+	failListProjectMembers atomic.Bool
+	failListParticipants   atomic.Bool
+	failCreateMessage      atomic.Bool
 }
 
 func (f *mpgFaultStore) ListMessagePolicies(ctx context.Context, filter store.MessagePolicyFilter, opts store.ListOptions) (*store.ListResult[store.MessagePolicy], error) {
@@ -84,7 +92,11 @@ func (f *mpgFaultStore) ListMessagePolicies(ctx context.Context, filter store.Me
 	if f.fault.Active() {
 		return nil, errors.New("unexpected ListMessagePolicies call while experiment is off")
 	}
-	return f.Store.ListMessagePolicies(ctx, filter, opts)
+	res, err := f.Store.ListMessagePolicies(ctx, filter, opts)
+	if fn := f.onAfterListPolicies; fn != nil {
+		fn()
+	}
+	return res, err
 }
 
 func (f *mpgFaultStore) CreateMessagePolicyDecision(ctx context.Context, d *store.MessagePolicyDecision) error {
@@ -93,6 +105,34 @@ func (f *mpgFaultStore) CreateMessagePolicyDecision(ctx context.Context, d *stor
 		return errors.New("unexpected CreateMessagePolicyDecision call while experiment is off")
 	}
 	return f.Store.CreateMessagePolicyDecision(ctx, d)
+}
+
+func (f *mpgFaultStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
+	if f.failListAgents.Load() {
+		return nil, errors.New("injected ListAgents fault")
+	}
+	return f.Store.ListAgents(ctx, filter, opts)
+}
+
+func (f *mpgFaultStore) ListProjectMembers(ctx context.Context, projectID string) ([]*store.ProjectMembership, error) {
+	if f.failListProjectMembers.Load() {
+		return nil, errors.New("injected ListProjectMembers fault")
+	}
+	return f.Store.ListProjectMembers(ctx, projectID)
+}
+
+func (f *mpgFaultStore) ListParticipants(ctx context.Context, conversationID string) ([]store.ConversationParticipant, error) {
+	if f.failListParticipants.Load() {
+		return nil, errors.New("injected ListParticipants fault")
+	}
+	return f.Store.ListParticipants(ctx, conversationID)
+}
+
+func (f *mpgFaultStore) CreateMessage(ctx context.Context, msg *store.Message) error {
+	if f.failCreateMessage.Load() {
+		return errors.New("injected CreateMessage fault")
+	}
+	return f.Store.CreateMessage(ctx, msg)
 }
 
 // mpgRecordingChannel captures channel deliveries on the direct user path.
@@ -558,60 +598,221 @@ func TestMessagePolicyGate_DefaultReasonAndOmitEmptyRemediation(t *testing.T) {
 }
 
 // TestMessagePolicyGate_MultipleEnforceOrderingAndCap10 verifies deterministic
-// name-order evaluation across multiple enforce policies, first-violation
-// selection for the 422 response, recording of all evaluated policies, and the
-// per-send cap of 10 active matching policies.
+// name-order evaluation across multiple enforce policies, fail-closed
+// policy_cap_exceeded handling for matching enforce policies past the 10-policy
+// per-send cap, and separate mode-split capping so earlier-named shadow
+// policies never crowd out enforce policies (review R1).
 func TestMessagePolicyGate_MultipleEnforceOrderingAndCap10(t *testing.T) {
-	f := newMpgFixture(t, true)
-	ctx := context.Background()
+	t.Run("first_violation_in_name_order_and_excess_enforce_recorded_as_policy_cap_exceeded", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
 
-	// Seed 12 enabled matching policies (p01..p12); p02 and p05 violate.
-	for i := 1; i <= 12; i++ {
-		name := fmt.Sprintf("p%02d", i)
-		rule := "false"
-		if i == 2 || i == 5 {
-			rule = "true"
+		// Seed 12 enabled matching enforce policies (p01..p12); p02 and p05
+		// violate; p11 sets on_failed=reject, p12 sets on_failed=admit.
+		for i := 1; i <= 12; i++ {
+			name := fmt.Sprintf("p%02d", i)
+			rule := "false"
+			if i == 2 || i == 5 {
+				rule = "true"
+			}
+			onFailed := messagepolicy.OutcomeReject
+			if i == 12 {
+				onFailed = messagepolicy.OutcomeAdmit
+			}
+			require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+				ProjectID: f.project.ID,
+				Name:      name,
+				Enabled:   true,
+				Mode:      store.MessagePolicyModeEnforce,
+				Scope: store.MessagePolicyScope{
+					Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+					Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+				},
+				ViolationRule: rule,
+				OnFailed:      onFailed,
+				RejectReason:  "rejected by {policy}",
+			}))
 		}
-		require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "test multi-policy ordering",
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+		assert.Equal(t, "p02", errResp.Error.Details["policy"], "first violating policy in name ASC order wins the 422 response")
+		assert.Equal(t, messagepolicy.ClassViolation, errResp.Error.Details["class"])
+		assert.Equal(t, "rejected by p02", errResp.Error.Message)
+
+		decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{ProjectID: f.project.ID}, store.ListOptions{Limit: 20})
+		require.NoError(t, err)
+		require.Len(t, decs.Items, 12, "all 12 matching enforce policies must produce decision rows (none silently skipped)")
+
+		byName := make(map[string]store.MessagePolicyDecision, len(decs.Items))
+		for _, d := range decs.Items {
+			byName[d.PolicyName] = d
+			assert.Empty(t, d.MessageID, "overall send was rejected so every decision row must have empty message_id")
+		}
+		assert.Equal(t, store.MessagePolicyActionAdmitted, byName["p01"].Action)
+		assert.Equal(t, store.MessagePolicyClassPass, byName["p01"].Class)
+		assert.Equal(t, store.MessagePolicyActionRejected, byName["p02"].Action)
+		assert.Equal(t, store.MessagePolicyClassViolation, byName["p02"].Class)
+		assert.Equal(t, store.MessagePolicyActionRejected, byName["p05"].Action)
+		assert.Equal(t, store.MessagePolicyClassViolation, byName["p05"].Class)
+
+		assert.Equal(t, store.MessagePolicyClassFailed, byName["p11"].Class)
+		assert.Equal(t, reasonPolicyCapExceeded, byName["p11"].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionRejected, byName["p11"].Action)
+
+		assert.Equal(t, store.MessagePolicyClassFailed, byName["p12"].Class)
+		assert.Equal(t, reasonPolicyCapExceeded, byName["p12"].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionAdmitted, byName["p12"].Action)
+	})
+
+	t.Run("p11_only_beyond_cap_fails_closed_via_on_failed", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		// p01..p10 pass; p11 is past the 10-policy cap with on_failed=reject.
+		var p11 *store.MessagePolicy
+		for i := 1; i <= 11; i++ {
+			pol := &store.MessagePolicy{
+				ProjectID: f.project.ID,
+				Name:      fmt.Sprintf("p%02d", i),
+				Enabled:   true,
+				Mode:      store.MessagePolicyModeEnforce,
+				Scope: store.MessagePolicyScope{
+					Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+					Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+				},
+				ViolationRule: "false",
+				OnFailed:      messagepolicy.OutcomeReject,
+				RejectReason:  "cap exceeded on {policy}",
+			}
+			if i == 11 {
+				pol.ViolationRule = "true"
+				p11 = pol
+			}
+			require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+		}
+
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "must not admit when p11 exceeds cap",
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "body: %s", rr.Body.String())
+
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+		assert.Equal(t, "p11", errResp.Error.Details["policy"])
+		assert.Equal(t, messagepolicy.ClassFailed, errResp.Error.Details["class"])
+		assert.Equal(t, "cap exceeded on p11", errResp.Error.Message)
+
+		msgs, err := f.s.ListMessages(ctx, store.MessageFilter{SenderID: f.sender.ID}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		assert.Empty(t, msgs.Items, "cap-exceeded reject must persist zero message rows")
+
+		// Override policy_cap_exceeded -> admit on p11; send now admits and still
+		// records p11 as failed{policy_cap_exceeded}.
+		p11.OnFailedReasons = map[string]string{
+			reasonPolicyCapExceeded: messagepolicy.OutcomeAdmit,
+		}
+		require.NoError(t, f.s.UpdateMessagePolicy(ctx, p11))
+
+		rrAdmit := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "admitted via explicit on_failed_reasons override",
+		})
+		require.Equal(t, http.StatusOK, rrAdmit.Code, "body: %s", rrAdmit.Body.String())
+
+		p11Decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
 			ProjectID: f.project.ID,
-			Name:      name,
+			PolicyID:  p11.ID,
+		}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		require.Len(t, p11Decs.Items, 2)
+		assert.Equal(t, store.MessagePolicyClassFailed, p11Decs.Items[0].Class)
+		assert.Equal(t, reasonPolicyCapExceeded, p11Decs.Items[0].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionAdmitted, p11Decs.Items[0].Action)
+		assert.NotEmpty(t, p11Decs.Items[0].MessageID)
+	})
+
+	t.Run("ten_shadow_sorting_ahead_of_one_enforce_never_disables_enforce", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		// Seed 12 shadow policies sorting ahead of z-enforce-01; shadow is capped
+		// separately at 10 and must not consume enforce capacity.
+		for i := 1; i <= 12; i++ {
+			require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+				ProjectID: f.project.ID,
+				Name:      fmt.Sprintf("a-trial-%02d", i),
+				Enabled:   true,
+				Mode:      store.MessagePolicyModeShadow,
+				Scope: store.MessagePolicyScope{
+					Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+					Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+				},
+				ViolationRule: "false",
+				OnFailed:      messagepolicy.OutcomeAdmit,
+			}))
+		}
+		enforcePol := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "z-enforce-01",
 			Enabled:   true,
 			Mode:      store.MessagePolicyModeEnforce,
 			Scope: store.MessagePolicyScope{
 				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
 				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
 			},
-			ViolationRule: rule,
+			ViolationRule: "true",
 			OnFailed:      messagepolicy.OutcomeReject,
-			RejectReason:  "rejected by {policy}",
-		}))
-	}
+			RejectReason:  "blocked by {policy}",
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, enforcePol))
 
-	rr := f.sendOutbound(t, OutboundMessageRequest{
-		Recipient: "user:" + f.alice.Email,
-		Msg:       "test multi-policy ordering",
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "shadow policies must not crowd out z-enforce-01",
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "body: %s", rr.Body.String())
+
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+		assert.Equal(t, "z-enforce-01", errResp.Error.Details["policy"])
+		assert.Equal(t, messagepolicy.ClassViolation, errResp.Error.Details["class"])
+
+		msgs, err := f.s.ListMessages(ctx, store.MessageFilter{SenderID: f.sender.ID}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		assert.Empty(t, msgs.Items)
+
+		// Wait for the capped 10 shadow decisions + 1 enforce decision to persist.
+		require.Eventually(t, func() bool {
+			decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+				ProjectID: f.project.ID,
+			}, store.ListOptions{Limit: 25})
+			return err == nil && len(decs.Items) == 1+store.MaxActiveMatchingMessagePolicies
+		}, 3*time.Second, 15*time.Millisecond)
+
+		decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+		}, store.ListOptions{Limit: 25})
+		require.NoError(t, err)
+		byName := make(map[string]store.MessagePolicyDecision, len(decs.Items))
+		for _, d := range decs.Items {
+			byName[d.PolicyName] = d
+			assert.Empty(t, d.MessageID)
+		}
+		assert.Equal(t, store.MessagePolicyActionRejected, byName["z-enforce-01"].Action)
+		assert.Contains(t, byName, "a-trial-10")
+		assert.NotContains(t, byName, "a-trial-11", "shadow policies are capped separately at 10")
+		assert.NotContains(t, byName, "a-trial-12")
+		assert.Equal(t, int64(2), f.srv.messagePolicyShadowDrops.Load(),
+			"excess shadow policies beyond the separate 10-policy cap must be counted as dropped")
 	})
-	require.Equal(t, http.StatusUnprocessableEntity, rr.Code)
-
-	var errResp ErrorResponse
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-	assert.Equal(t, "p02", errResp.Error.Details["policy"], "first violating policy in name ASC order wins the 422 response")
-	assert.Equal(t, "rejected by p02", errResp.Error.Message)
-
-	decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{ProjectID: f.project.ID}, store.ListOptions{Limit: 20})
-	require.NoError(t, err)
-	require.Len(t, decs.Items, store.MaxActiveMatchingMessagePolicies, "at most 10 active matching policies are evaluated per send")
-
-	byName := make(map[string]store.MessagePolicyDecision, len(decs.Items))
-	for _, d := range decs.Items {
-		byName[d.PolicyName] = d
-		assert.Empty(t, d.MessageID, "overall send was rejected so every decision row must have empty message_id")
-	}
-	assert.NotContains(t, byName, "p11")
-	assert.NotContains(t, byName, "p12")
-	assert.Equal(t, store.MessagePolicyActionAdmitted, byName["p01"].Action)
-	assert.Equal(t, store.MessagePolicyActionRejected, byName["p02"].Action)
-	assert.Equal(t, store.MessagePolicyActionRejected, byName["p05"].Action)
 }
 
 // TestMessagePolicyGate_ShadowMode_DeliversAndRecordsOffHotPath verifies Target 3:
@@ -1342,6 +1543,415 @@ func TestMessagePolicyDecisionTrimJob(t *testing.T) {
 	})
 }
 
+// TestMessagePolicyGate_FactsUnavailableFailsClosed verifies review O1: when a
+// fact lookup (ListParticipants, ListAgents, or ListProjectMembers) fails, H2
+// never evaluates enforce policies against false empty lists; instead each
+// policy classifies as failed{facts_unavailable} and maps through on_failed /
+// on_failed_reasons.
+func TestMessagePolicyGate_FactsUnavailableFailsClosed(t *testing.T) {
+	t.Run("participant_lookup_fault_fails_closed", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		// A rule that would admit if conversation.agent_participant_ids were
+		// evaluated as [] (violation_rule == false on empty list).
+		pol := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "require-mentioned-participants",
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeEnforce,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToConversation},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: `size(conversation.agent_participant_ids) > 0 && size(mentioned_agent_ids) == 0`,
+			OnFailed:      messagepolicy.OutcomeReject,
+			RejectReason:  "facts unavailable on {policy}",
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+
+		// Arm ListParticipants fault right after ListMessagePolicies runs (so
+		// upstream conversation routing succeeds and the fault hits H2 facts).
+		f.faultWrapper.onAfterListPolicies = func() {
+			f.faultWrapper.failListParticipants.Store(true)
+		}
+		t.Cleanup(func() {
+			f.faultWrapper.onAfterListPolicies = nil
+			f.faultWrapper.failListParticipants.Store(false)
+		})
+
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			ConversationRef: "conv:" + f.groupConv.ID,
+			Msg:             fmt.Sprintf("Hello @%s", f.defaultAgent.Slug),
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "body: %s", rr.Body.String())
+
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+		assert.Equal(t, string(MessageDenialPolicyRejected), errResp.Error.Code)
+		assert.Equal(t, messagepolicy.ClassFailed, errResp.Error.Details["class"])
+		assert.Equal(t, "facts unavailable on require-mentioned-participants", errResp.Error.Message)
+
+		f.faultWrapper.onAfterListPolicies = nil
+		f.faultWrapper.failListParticipants.Store(false)
+
+		msgs, err := f.s.ListMessages(ctx, store.MessageFilter{SenderID: f.sender.ID}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		assert.Empty(t, msgs.Items, "facts_unavailable reject must persist zero message rows")
+
+		decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+			PolicyID:  pol.ID,
+		}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		require.Len(t, decs.Items, 1)
+		assert.Equal(t, store.MessagePolicyClassFailed, decs.Items[0].Class)
+		assert.Equal(t, reasonFactsUnavailable, decs.Items[0].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionRejected, decs.Items[0].Action)
+		assert.Empty(t, decs.Items[0].MessageID)
+	})
+
+	t.Run("agent_and_member_mention_faults_and_on_failed_reasons_override", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		pol := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "mention-facts-guard",
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeEnforce,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: "false",
+			OnFailed:      messagepolicy.OutcomeReject,
+			RejectReason:  "mention facts unavailable",
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+
+		// 1. ListAgents fault on @peer-agent mention -> 422 failed{facts_unavailable}.
+		f.faultWrapper.onAfterListPolicies = func() {
+			f.faultWrapper.failListAgents.Store(true)
+		}
+		rrAgent := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "cc @" + f.peerAgent.Slug,
+		})
+		f.faultWrapper.onAfterListPolicies = nil
+		f.faultWrapper.failListAgents.Store(false)
+		require.Equal(t, http.StatusUnprocessableEntity, rrAgent.Code)
+
+		// 2. ListProjectMembers fault on @alice@example.com mention -> 422 failed{facts_unavailable}.
+		f.faultWrapper.onAfterListPolicies = func() {
+			f.faultWrapper.failListProjectMembers.Store(true)
+		}
+		rrHuman := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "cc @" + f.alice.Email,
+		})
+		f.faultWrapper.onAfterListPolicies = nil
+		f.faultWrapper.failListProjectMembers.Store(false)
+		require.Equal(t, http.StatusUnprocessableEntity, rrHuman.Code)
+
+		// 3. Explicit on_failed_reasons["facts_unavailable"] = "admit" admits and records failed{facts_unavailable}.
+		pol.OnFailedReasons = map[string]string{
+			reasonFactsUnavailable: messagepolicy.OutcomeAdmit,
+		}
+		require.NoError(t, f.s.UpdateMessagePolicy(ctx, pol))
+
+		f.faultWrapper.onAfterListPolicies = func() {
+			f.faultWrapper.failListProjectMembers.Store(true)
+		}
+		rrAdmit := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "cc @" + f.alice.Email,
+		})
+		f.faultWrapper.onAfterListPolicies = nil
+		f.faultWrapper.failListProjectMembers.Store(false)
+		require.Equal(t, http.StatusOK, rrAdmit.Code, "body: %s", rrAdmit.Body.String())
+
+		decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+			PolicyID:  pol.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, decs.Items, 3)
+		assert.Equal(t, store.MessagePolicyClassFailed, decs.Items[0].Class)
+		assert.Equal(t, reasonFactsUnavailable, decs.Items[0].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionAdmitted, decs.Items[0].Action)
+		assert.NotEmpty(t, decs.Items[0].MessageID)
+	})
+}
+
+// TestMessagePolicyGate_ShutdownDrainAndCancel verifies review O3:
+//  1. stopMessagePolicyGate drains queued shadow jobs cleanly when they finish
+//     within the shutdown deadline, and refuses new submissions afterward.
+//  2. When the shutdown deadline expires and workerCtx is canceled mid-job,
+//     stopMessagePolicyGate returns promptly and workers stop without recording
+//     spurious failed/canceled shadow decision rows.
+func TestMessagePolicyGate_ShutdownDrainAndCancel(t *testing.T) {
+	t.Run("drains_queued_shadow_jobs_within_deadline", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		pol := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "shadow-drain-ok",
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeShadow,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: "true",
+			OnFailed:      messagepolicy.OutcomeReject,
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+
+		workerEntered := make(chan struct{}, 1)
+		releaseWorker := make(chan struct{})
+		f.srv.messagePolicyGate.testShadowBeforeEval = func() {
+			select {
+			case workerEntered <- struct{}{}:
+			default:
+			}
+			<-releaseWorker
+		}
+
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "queued before shutdown drain",
+		})
+		require.Equal(t, http.StatusOK, rr.Code)
+		<-workerEntered
+
+		// Release worker shortly after stopMessagePolicyGate begins draining.
+		go func() {
+			time.Sleep(15 * time.Millisecond)
+			close(releaseWorker)
+		}()
+
+		stopCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		f.srv.stopMessagePolicyGate(stopCtx)
+
+		decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+			PolicyID:  pol.ID,
+		}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		require.Len(t, decs.Items, 1, "drained shadow job must persist its decision row")
+		assert.Equal(t, store.MessagePolicyClassViolation, decs.Items[0].Class)
+		assert.Equal(t, store.MessagePolicyActionShadow, decs.Items[0].Action)
+		assert.NotEmpty(t, decs.Items[0].MessageID)
+
+		// Enqueue after stop is a safe no-op.
+		f.srv.enqueueMessagePolicyShadow(messagePolicyShadowJob{
+			policies:  []store.MessagePolicy{*pol},
+			snapshot:  h2FactSnapshot{projectID: f.project.ID, surface: messagepolicy.SurfaceAgentToUser, senderID: f.sender.ID, recipientKind: "user", recipientID: f.alice.ID},
+			messageID: api.NewUUID(),
+		})
+		decsAfter, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+			PolicyID:  pol.ID,
+		}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		assert.Len(t, decsAfter.Items, 1)
+	})
+
+	t.Run("drain_timeout_cancels_without_recording_spurious_canceled_rows", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		// Three shadow policies in one job: s01 completes before cancel; s02
+		// blocks until workerCtx is canceled (returning failed/canceled from
+		// ClassifyError); s03 trails in the same job, plus a second queued job.
+		for i := 1; i <= 3; i++ {
+			require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+				ProjectID: f.project.ID,
+				Name:      fmt.Sprintf("s%02d", i),
+				Enabled:   true,
+				Mode:      store.MessagePolicyModeShadow,
+				Scope: store.MessagePolicyScope{
+					Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+					Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+				},
+				ViolationRule: "false",
+				OnFailed:      messagepolicy.OutcomeReject,
+			}))
+		}
+
+		s02Blocked := make(chan struct{}, 1)
+		f.srv.messagePolicyGate.evalOverride = func(evalCtx context.Context, p *store.MessagePolicy, _ messagepolicy.Activation, _ *ruleengine.BudgetTracker) (messagepolicy.Classification, bool) {
+			if p.Name == "s01" {
+				return messagepolicy.Classification{Class: messagepolicy.ClassPass}, true
+			}
+			select {
+			case s02Blocked <- struct{}{}:
+			default:
+			}
+			<-evalCtx.Done()
+			return messagepolicy.ClassifyError(evalCtx.Err()), true
+		}
+
+		// Queue multiple sends so workers are mid-job and backlog sits in shadowCh.
+		f.srv.chatSendLimiter = nil
+		for i := 0; i < 4; i++ {
+			rr := f.sendOutbound(t, OutboundMessageRequest{
+				Recipient: "user:" + f.alice.Email,
+				Msg:       fmt.Sprintf("in-flight shadow %d", i),
+			})
+			require.Equal(t, http.StatusOK, rr.Code)
+		}
+		<-s02Blocked
+
+		shortCtx, cancel := context.WithTimeout(ctx, 25*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		f.srv.stopMessagePolicyGate(shortCtx)
+		elapsed := time.Since(start)
+		assert.Less(t, elapsed, time.Second, "stopMessagePolicyGate must return promptly once ctx expires")
+
+		// Idempotent second call.
+		f.srv.stopMessagePolicyGate(ctx)
+
+		decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+		}, store.ListOptions{Limit: 25})
+		require.NoError(t, err)
+		for _, d := range decs.Items {
+			assert.NotEqual(t, store.MessagePolicyClassFailed, d.Class,
+				"shutdown cancellation must never persist spurious failed/canceled shadow rows (got %+v)", d)
+			assert.NotEqual(t, celengine.ReasonCanceled, d.CELErrorReason)
+			assert.Equal(t, "s01", d.PolicyName)
+		}
+	})
+}
+
+// TestMessagePolicyGate_UnstoredSendDoesNotRecordDanglingMessageID verifies
+// review O4 and N1:
+//  1. When an H2-admitted send later fails before persistence (e.g. reserved
+//     channel 400 or CreateMessage store 500), neither shadow nor admitted
+//     enforce decision rows are recorded referencing an unstored message_id.
+//  2. When nil evaluator is encountered defensively, evalOneMessagePolicy
+//     returns failed{consumer_not_registered} directly (N1).
+func TestMessagePolicyGate_UnstoredSendDoesNotRecordDanglingMessageID(t *testing.T) {
+	f := newMpgFixture(t, true)
+	ctx := context.Background()
+
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+		ProjectID: f.project.ID,
+		Name:      "enforce-pass",
+		Enabled:   true,
+		Mode:      store.MessagePolicyModeEnforce,
+		Scope: store.MessagePolicyScope{
+			Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+			Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+		},
+		ViolationRule: "false",
+		OnFailed:      messagepolicy.OutcomeReject,
+	}))
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+		ProjectID: f.project.ID,
+		Name:      "shadow-watch",
+		Enabled:   true,
+		Mode:      store.MessagePolicyModeShadow,
+		Scope: store.MessagePolicyScope{
+			Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+			Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+		},
+		ViolationRule: "true",
+		OnFailed:      messagepolicy.OutcomeAdmit,
+	}))
+
+	// 1. Direct path store failure (500): message is never stored, so zero
+	// decision rows may reference it.
+	f.srv.chatSendLimiter = nil
+	f.faultWrapper.failCreateMessage.Store(true)
+	rrStoreFail := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       "store will fail with 500",
+	})
+	f.faultWrapper.failCreateMessage.Store(false)
+	require.Equal(t, http.StatusInternalServerError, rrStoreFail.Code)
+
+	// 2. Shadow-only fast path store failure (500): disable enforce-pass, fault
+	// CreateMessage again, verify shadow fast path also records nothing when unstored.
+	enfPol, err := f.s.GetMessagePolicyByName(ctx, f.project.ID, "enforce-pass")
+	require.NoError(t, err)
+	enfPol.Enabled = false
+	require.NoError(t, f.s.UpdateMessagePolicy(ctx, enfPol))
+
+	f.faultWrapper.failCreateMessage.Store(true)
+	rrShadowFail := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       "shadow-only store will fail with 500",
+	})
+	f.faultWrapper.failCreateMessage.Store(false)
+	require.Equal(t, http.StatusInternalServerError, rrShadowFail.Code)
+
+	// Re-enable enforce-pass and also test reserved channel 400 via choices/D2 broker path.
+	enfPol.Enabled = true
+	require.NoError(t, f.s.UpdateMessagePolicy(ctx, enfPol))
+
+	bus := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = bus.Close() })
+	bp := NewMessageBrokerProxy(bus, f.srv.store, f.srv.events, f.srv.GetDispatcher, slog.Default())
+	t.Cleanup(bp.Stop)
+	f.srv.SetMessageBrokerProxy(bp)
+
+	rrReserved := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Channel:   eventbus.InProcessBusName,
+		Msg:       "reserved channel must fail with 400",
+	})
+	require.Equal(t, http.StatusBadRequest, rrReserved.Code)
+	f.srv.SetMessageBrokerProxy(nil)
+
+	// Give background workers a moment to ensure nothing was queued.
+	time.Sleep(40 * time.Millisecond)
+	decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+		ProjectID: f.project.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, decs.Items, "failed sends must not persist admitted or shadow decisions pointing at unstored messages")
+
+	// 3. Subsequent healthy send persists message and records both enforce-admitted and shadow with message_id.
+	rrOK := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       "stored cleanly",
+	})
+	require.Equal(t, http.StatusOK, rrOK.Code, "body: %s", rrOK.Body.String())
+	var okBody struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rrOK.Body.Bytes(), &okBody))
+	require.NotEmpty(t, okBody.MessageID)
+
+	require.Eventually(t, func() bool {
+		got, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+		}, store.ListOptions{Limit: 10})
+		return err == nil && len(got.Items) == 2
+	}, 3*time.Second, 15*time.Millisecond)
+
+	decsOK, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+		ProjectID: f.project.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	for _, d := range decsOK.Items {
+		assert.Equal(t, okBody.MessageID, d.MessageID)
+	}
+
+	// 4. N1: nil evaluator on a bare Server fails closed with consumer_not_registered.
+	bareSrv := &Server{}
+	c := bareSrv.evalOneMessagePolicy(ctx, enfPol, messagepolicy.Activation{}, nil)
+	assert.Equal(t, messagepolicy.ClassFailed, c.Class)
+	assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, c.Reason)
+	assert.True(t, c.AdmissionError)
+}
+
 func mpgSeedShadowBenchmarkPolicies(tb testing.TB, ctx context.Context, s store.Store, projectID string) []*store.MessagePolicy {
 	tb.Helper()
 	specs := []struct {
@@ -1415,17 +2025,18 @@ func TestMessagePolicyGate_ShadowOverheadP99Under5ms(t *testing.T) {
 		RecipientID: f.alice.ID,
 	}
 	evalInput := &h2PolicyInput{
-		agent:     f.sender,
-		req:       req,
-		routing:   route,
-		messageID: "00000000-0000-4000-8000-000000000001",
+		agent:   f.sender,
+		req:     req,
+		routing: route,
 	}
+	const msgID = "00000000-0000-4000-8000-000000000001"
 
 	// Warm program cache and SQLite pages.
 	for i := 0; i < 5; i++ {
 		rr := httptest.NewRecorder()
-		_, ok := f.srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+		out, ok := f.srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
 		require.True(t, ok)
+		f.srv.recordAdmittedH2PolicyDecisions(ctx, &out, msgID)
 	}
 
 	const N = 80
@@ -1433,7 +2044,8 @@ func TestMessagePolicyGate_ShadowOverheadP99Under5ms(t *testing.T) {
 	for i := 0; i < N; i++ {
 		rr := httptest.NewRecorder()
 		start := time.Now()
-		_, ok := f.srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+		out, ok := f.srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+		f.srv.recordAdmittedH2PolicyDecisions(ctx, &out, msgID)
 		durations[i] = time.Since(start)
 		require.True(t, ok)
 	}
@@ -1504,22 +2116,24 @@ func BenchmarkMessagePolicyGate_ShadowOnly(b *testing.B) {
 		RecipientID: alice.ID,
 	}
 	evalInput := &h2PolicyInput{
-		agent:     sender,
-		req:       req,
-		routing:   route,
-		messageID: "00000000-0000-4000-8000-000000000001",
+		agent:   sender,
+		req:     req,
+		routing: route,
 	}
+	const msgID = "00000000-0000-4000-8000-000000000001"
 
 	rr := httptest.NewRecorder()
 	// Warm program cache.
-	_, _ = srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+	outWarm, _ := srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+	srv.recordAdmittedH2PolicyDecisions(ctx, &outWarm, msgID)
 
 	durations := make([]time.Duration, 0, b.N)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		t0 := time.Now()
-		_, ok := srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+		out, ok := srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+		srv.recordAdmittedH2PolicyDecisions(ctx, &out, msgID)
 		d := time.Since(t0)
 		if !ok {
 			b.Fatal("unexpected shadow gate rejection")
