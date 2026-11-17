@@ -123,9 +123,16 @@ func findCommandProblems(lines []string, source string) []string {
 			if name == "" {
 				continue
 			}
-			if cmd.Flags().Lookup(name) == nil {
+			f := cmd.Flags().Lookup(name)
+			if f == nil {
+				f = cmd.InheritedFlags().Lookup(name)
+			}
+			if f == nil {
 				problems = append(problems,
 					fmt.Sprintf("unknown flag --%s: %s (from %s)", name, line, source))
+			} else if f.Deprecated != "" {
+				problems = append(problems,
+					fmt.Sprintf("deprecated flag --%s (%s): %s (from %s)", name, f.Deprecated, line, source))
 			}
 		}
 	}
@@ -395,8 +402,14 @@ func placeholderFlagProblems(lines []string, source string) []string {
 			if name == "" {
 				continue
 			}
-			if cmd.Flags().Lookup(name) == nil && cmd.InheritedFlags().Lookup(name) == nil {
+			f := cmd.Flags().Lookup(name)
+			if f == nil {
+				f = cmd.InheritedFlags().Lookup(name)
+			}
+			if f == nil {
 				problems = append(problems, fmt.Sprintf("unknown flag --%s for %q: %s (from %s)", name, cmd.CommandPath(), line, source))
+			} else if f.Deprecated != "" {
+				problems = append(problems, fmt.Sprintf("deprecated flag --%s (%s) for %q: %s (from %s)", name, f.Deprecated, cmd.CommandPath(), line, source))
 			}
 		}
 	}
@@ -439,6 +452,9 @@ func TestDocSyntax_PlatformSkillDecisions(t *testing.T) {
 	})
 
 	t.Run("catches_deprecated_choices_aliases", func(t *testing.T) {
+		assert.NotEmpty(t, findCommandProblems([]string{`scion message @alice@example.com "hi" --choices '[]'`}, "test"))
+		assert.NotEmpty(t, findCommandProblems([]string{`scion message @alice@example.com "hi" --choices-file /tmp/d.json`}, "test"))
+		assert.Empty(t, findCommandProblems([]string{`scion message @alice@example.com "hi" --decisions-file /tmp/d.json`}, "test"))
 		assert.NotEmpty(t, agentHelpProblems([]string{`scion message "conv:<id>" --choices-file <file>`}, "test"))
 		assert.NotEmpty(t, agentHelpProblems([]string{`scion message "conv:<id>" --choices <json>`}, "test"))
 		assert.Empty(t, agentHelpProblems([]string{`scion message "conv:<id>" --decisions-file <file>`}, "test"))
