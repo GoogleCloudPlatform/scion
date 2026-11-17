@@ -1,0 +1,152 @@
+{
+  "handled": true,
+  "source_kind": "github",
+  "source_id": "987654",
+  "delivery_id": "00000000-0000-4000-8000-created-issue",
+  "type": "github.issue_comment.created",
+  "subject": "github:octo-org/octo-repo#19",
+  "occurred_at": "2026-05-01T11:00:00Z",
+  "installation_id": 987654,
+  "repo_full_name": "octo-org/octo-repo",
+  "sender_login": "hubot",
+  "sender_id": 203,
+  "sender_type": "User",
+  "payload_bytes": 1730,
+  "truncated": false,
+  "attributes": {
+    "action": "created",
+    "author": "octocat",
+    "author_association": "MEMBER",
+    "body": "Looks reproducible.\n\n```sh\n@scion /ignored-in-fence\n```\n\n@scion /implement include regression test",
+    "command": "implement",
+    "command_args": "include regression test",
+    "command_line": "@scion /implement include regression test",
+    "comment_id": "700101",
+    "comment_url": "https://github.com/octo-org/octo-repo/issues/19#issuecomment-700101",
+    "created_at": "2026-05-01T11:00:00Z",
+    "default_branch": "main",
+    "delivery": "00000000-0000-4000-8000-created-issue",
+    "event": "issue_comment",
+    "html_url": "https://github.com/octo-org/octo-repo/issues/19#issuecomment-700101",
+    "installation_id": "987654",
+    "is_pull_request": "false",
+    "issue_state": "open",
+    "issue_title": "Webhook delivery retries should preserve idempotency",
+    "issue_url": "https://github.com/octo-org/octo-repo/issues/19",
+    "mention": "true",
+    "milestone": "v0.9.0",
+    "number": "19",
+    "provider": "github",
+    "repo": "octo-org/octo-repo",
+    "repo_name": "octo-repo",
+    "repo_owner": "octo-org",
+    "repo_private": "false",
+    "sender": "hubot",
+    "sender_id": "203",
+    "sender_type": "User",
+    "state": "open",
+    "title": "Webhook delivery retries should preserve idempotency",
+    "updated_at": "2026-05-01T11:00:02Z"
+  },
+  "lists": {
+    "assignees": [
+      "monalisa"
+    ],
+    "labels": [
+      "bug",
+      "area:triggers"
+    ]
+  },
+  "projected_payload": {
+    "action": "created",
+    "comment": {
+      "author_association": "MEMBER",
+      "body": "Looks reproducible.\n\n```sh\n@scion /ignored-in-fence\n```\n\n@scion /implement include regression test",
+      "created_at": "2026-05-01T11:00:00Z",
+      "html_url": "https://github.com/octo-org/octo-repo/issues/19#issuecomment-700101",
+      "id": 700101,
+      "node_id": "IC_kwDOA12345",
+      "updated_at": "2026-05-01T11:00:02Z",
+      "user": {
+        "html_url": "https://github.com/hubot",
+        "id": 203,
+        "login": "hubot",
+        "node_id": "MDQ6VXNlcj203",
+        "site_admin": false,
+        "type": "User"
+      }
+    },
+    "installation": {
+      "id": 987654
+    },
+    "issue": {
+      "assignees": [
+        {
+          "html_url": "https://github.com/monalisa",
+          "id": 201,
+          "login": "monalisa",
+          "node_id": "MDQ6VXNlcj201",
+          "site_admin": false,
+          "type": "User"
+        }
+      ],
+      "author_association": "COLLABORATOR",
+      "body": "Context on duplicate deliveries.\n\n@scion /plan outline schema impacts",
+      "closed_at": null,
+      "created_at": "2026-05-01T09:00:00Z",
+      "html_url": "https://github.com/octo-org/octo-repo/issues/19",
+      "id": 600019,
+      "labels": [
+        {
+          "color": "d73a4a",
+          "default": false,
+          "id": 902,
+          "name": "bug"
+        },
+        {
+          "color": "0e8a16",
+          "default": false,
+          "id": 901,
+          "name": "area:triggers"
+        }
+      ],
+      "locked": false,
+      "milestone": {
+        "html_url": "https://github.com/octo-org/octo-repo/milestone/3",
+        "id": 401,
+        "number": 3,
+        "title": "v0.9.0"
+      },
+      "number": 19,
+      "state": "open",
+      "title": "Webhook delivery retries should preserve idempotency",
+      "updated_at": "2026-05-01T09:20:00Z",
+      "user": {
+        "html_url": "https://github.com/octocat",
+        "id": 202,
+        "login": "octocat",
+        "node_id": "MDQ6VXNlcj202",
+        "site_admin": false,
+        "type": "User"
+      }
+    },
+    "repository": {
+      "default_branch": "main",
+      "full_name": "octo-org/octo-repo",
+      "html_url": "https://github.com/octo-org/octo-repo",
+      "id": 1296269,
+      "name": "octo-repo",
+      "owner": {
+        "id": 100,
+        "login": "octo-org",
+        "type": "Organization"
+      },
+      "private": false
+    },
+    "sender": {
+      "id": 203,
+      "login": "hubot",
+      "type": "User"
+    }
+  }
+}
