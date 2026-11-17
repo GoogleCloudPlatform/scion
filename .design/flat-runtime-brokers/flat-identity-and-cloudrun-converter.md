@@ -1,9 +1,9 @@
 # Flat Runtime Brokers: GCP identity on flat targets, and the Cloud Run converter
 
-Status: accepted design. Part A accepted 2026-11-13; Part B accepted 2026-11-16 (maintainer, revision r11 of the working draft); Q5 (passthrough gate) ruled 2026-11-16 and folded in as revision r13. This document amends `p5-cloudrun-amendment.md` (CR3 per-agent identity bullet / E-10, CR4 `service_account` storage as the private GCP host pair, CR9 instance keys, CR10 identity keys) and `contract-appendix-p3.md` FC10 (Hub default per Runtime Broker). Where it differs from those texts on these subjects, it is authoritative. No production code is supplied here.
+Status: accepted design. Part A accepted 2026-11-13; Part B accepted 2026-11-16 (maintainer, revision r11 of the working draft); Q5 (passthrough gate) ruled 2026-11-16 and folded in as revision r13 (r14: provider-grant path narrowed to brokers the caller can dispatch to). This document amends `p5-cloudrun-amendment.md` (CR3 per-agent identity bullet / E-10, CR4 `service_account` storage as the private GCP host pair, CR9 instance keys, CR10 identity keys) and `contract-appendix-p3.md` FC10 (Hub default per Runtime Broker). Where it differs from those texts on these subjects, it is authoritative. No production code is supplied here.
 
 - **Issues:** ptone/scion#7764 (per-agent GCP identity on flat Cloud Run), ptone/scion#4895 (Hub default GCP service account per flat Runtime Broker), ptone/scion#7308 remainder (Phase 2 converter, Phase 3 CR8 region, live E2E). Parent: ptone/scion#2926.
-- **Implementation issues:** C1 ptone/scion#7801, C2 ptone/scion#7802, C3 ptone/scion#7803 (under ptone/scion#7308); I1 ptone/scion#8182, I2 ptone/scion#8183, I4 ptone/scion#8186, I5 ptone/scion#8187 (under ptone/scion#7764); I3 ptone/scion#8184, I3w ptone/scion#8185 (under ptone/scion#4895).
+- **Implementation issues:** C1 ptone/scion#7801, C2 ptone/scion#7802, C3 ptone/scion#7803 (under ptone/scion#7308); I1 ptone/scion#8182, I2 ptone/scion#8183, I4 ptone/scion#8186, I5 ptone/scion#8187 (under ptone/scion#7764); I3 ptone/scion#8184, I3w ptone/scion#8185 (under ptone/scion#4895); I5a ptone/scion#8238 (under ptone/scion#7764).
 
 ## Decisions (maintainer, dated)
 
@@ -238,16 +238,17 @@ Today `evaluatePassthroughIdentity` (`pkg/hub/passthrough_gate.go`) runs (1) bro
 ```
 check1 := isAdmin || broker.CreatedBy == caller
        || (projectID != "" && !hostIdentityIsHubOwn(broker) &&
-           s.brokerProviderHasOwnerConsent(ctx, broker, projectID))
+           s.brokerProviderHasOwnerConsent(ctx, broker, projectID) &&
+           s.canUseBrokerForProject(ctx, broker, project))   // r14: never broader than dispatch
 // hostIdentityIsHubOwn: s.isEmbeddedBroker(broker.ID) && !flatCloudRunBroker(broker),
 //   i.e. the pair is the Hub process's own metadata identity; it keeps today's admin-only rule.
 ```
 
-`evaluatePassthroughIdentity` gains a `projectID` parameter. Each surface passes the agent's or target project: create → request project; PATCH → agent's project; project default → that project; translation/review → agent's project; move → destination project. Callers already enforce project agent-create rights. `brokerProviderHasOwnerConsent` is the existing dispatch owner-consent test: an operator-provisioned broker with no owner, `LinkedBy` = owner, `auto-provide`, or an active super-admin linker. Reusing it keeps one definition of "the owner granted this broker to the project". The denial message changes to "requires broker ownership, Hub admin, or the broker being provided to this project by its owner".
+`evaluatePassthroughIdentity` gains a `projectID` parameter. Each surface passes the agent's or target project: create → request project; PATCH → agent's project; project default → that project; translation/review → agent's project; move → destination project. Callers already enforce project agent-create rights. `brokerProviderHasOwnerConsent` is the existing dispatch owner-consent test: an operator-provisioned broker with no owner, `LinkedBy` = owner, `auto-provide`, or an active super-admin linker. Reusing it keeps one definition of "the owner granted this broker to the project". **r14:** the path also requires `canUseBrokerForProject`. For legacy rows that is already implied by consent. For flat rows, where a consented link alone does not admit dispatch (`canDispatchToBroker`: AutoProvide or `broker.dispatch`), it keeps passthrough from being broader than create on every surface. Without it, a non-owner could PATCH passthrough onto a flat broker they cannot create on. The denial message changes to "requires broker ownership, Hub admin, or the broker being provided to this project by its owner".
 
 **4. Checks 2 and 3 are unchanged and never skipped.** They still run before dispatch, so no agent is provisioned without actAs on the account. Start and restart of an existing agent are not re-gated (today's behavior; default accepted by silence).
 
-Audit: the allow log records which check-1 path passed (`admin`, `owner`, `provider_grant`).
+Audit: the allow log, and the denial log when check 1 passed but actAs failed, records `authPath` (`owner` > `admin` > `provider_grant`, by precedence). `store.SAAssignmentEvent` is unchanged.
 
 ## B.5 Alternatives considered (B)
 
@@ -286,10 +287,10 @@ Audit: the allow log records which check-1 path passed (`admin`, `owner`, `provi
 | **I3w** | Web: project settings per-broker list + inherited-identity hint | S | I3 |
 | **I4** | Converter folds `assignable_service_accounts` / `block_service_account` (replaces C1 transitional refusal; split instances on differing values). `block_service_account` is now CR2-required: a `cloudrun` entry without it → blocking `flat_target_field_required` at `runtimes.<r>.cloudrun.block_service_account` (has a legacy source); a `cloudrun-instances`-only instance → notice `flat_target_operator_input_required` (no legacy source, as A.3.4). Also retire/adjust the web `FINDING_TEXTS.field_not_valid_for_target_type` copy written for the transitional refusal (C2 review follow-up) and the CLI `findingTexts` / docs wording that mention ptone/scion#7764 | S | C1, I2 |
 | **I5** | Docs (server-config, multi-broker, experiments note that `hub.cloudrun_native_identity` does not apply to flat), contract amendments in `.design/flat-runtime-brokers/`, doctor actAs with instance creds, live GCP identity E2E (assign, block, unset, not-attachable refusal, default rung; run in the Cloud Run lane's environment, as with C3) | S–M | I2, I3 |
-| **I5a** (proposed; placement in the tracker decided by the delivery owner) | §B.4.5: flat Cloud Run GCP host pair from `runtime_target.service_account` (embedded detected-style write with no host observation for cloudrun rows; remote `register --instance` sends the pair); display redaction of the pair for flat Cloud Run non-updaters; gate check 1 provider-grant path with `projectID` on all six surfaces; audit path label; tests per §B.9 Q5 rows | S–M (Hub gate + registration + display; no schema/migration) | I2. Must land before I5 Step B docs describe passthrough authorization; the I5 live E2E adds one passthrough case after it |
+| **I5a** (ptone/scion#8238) | §B.4.5: flat Cloud Run GCP host pair from `runtime_target.service_account` (embedded detected-style write with no host observation for cloudrun rows; remote `register --instance` sends the pair); display redaction of the pair for flat Cloud Run non-updaters; gate check 1 provider-grant path with `projectID` on all six surfaces; audit path label; tests per §B.9 Q5 rows | S–M (Hub gate + registration + display; no schema/migration) | I2. Must land before I5 Step B docs describe passthrough authorization; the I5 live E2E adds one passthrough case after it |
 
 
-**Tracker:** I1 = ptone/scion#8182, I2 = ptone/scion#8183, I4 = ptone/scion#8186, I5 = ptone/scion#8187 (sub-issues of ptone/scion#7764); I3 = ptone/scion#8184, I3w = ptone/scion#8185 (sub-issues of ptone/scion#4895). Blocked-by: I2←I1, I3w←I3, I4←I2, I5←I2+I3.
+**Tracker:** I1 = ptone/scion#8182, I2 = ptone/scion#8183, I4 = ptone/scion#8186, I5 = ptone/scion#8187 (sub-issues of ptone/scion#7764); I3 = ptone/scion#8184, I3w = ptone/scion#8185 (sub-issues of ptone/scion#4895). I5a = ptone/scion#8238 (sub-issue of ptone/scion#7764). Blocked-by: I2←I1, I3w←I3, I4←I2, I5a←I2, I5←I2+I3+I5a (I5a blocks only I5's passthrough wording and passthrough E2E case).
 
 Fan-out from I1 (I2, I4) is conditional on I1 being validated (tests + review + one live no-identity create running as the block account on GCP, in the Cloud Run lane's environment if available).
 
@@ -306,5 +307,5 @@ Fan-out from I1 (I2, I4) is conditional on I1 being validated (tests + review + 
 - No SA email or the new fields appear in any presentation/public broker response (extend `TestFlat_CloudRunHubRecordsOmitCloudFields`).
 - **Q5 (I5a):** co-located flat Cloud Run row's GCP host pair = `runtime_target.service_account` and project, refreshed on activation, admin-pinned value kept; no host observation recorded for cloudrun rows. Remote `register --instance` fills it under the existing actAs claim rule.
 - **Q5:** broker GET/list for a reader without update shows no flat Cloud Run GCP host pair; owner/admin sees it; legacy rows unchanged.
-- **Q5 gate matrix** (each surface: create, PATCH, project default, translation, review, move): owner + actAs → allow; admin + actAs → allow; non-owner project member + owner-consented provider link + actAs → allow (`provider_grant` in log); same without actAs → deny, no dispatch; non-owner + link with empty/placeholder `LinkedBy` → deny; non-owner + no link → deny; legacy embedded broker + non-admin + link → deny (unchanged); flat Cloud Run passthrough checks actAs on `service_account`, not the Hub host account.
+- **Q5 gate matrix** (each surface: create, PATCH, project default, translation, review, move): owner + actAs → allow; admin + actAs → allow; non-owner project member + owner-consented provider link + actAs → allow (`provider_grant` in log); same without actAs → deny, no dispatch; non-owner + link with empty/placeholder `LinkedBy` → deny; flat row, consented link, AutoProvide off, non-owner without `broker.dispatch` → deny; same with AutoProvide on + actAs → allow; non-owner + no link → deny; legacy embedded broker + non-admin + link → deny (unchanged); flat Cloud Run passthrough checks actAs on `service_account`, not the Hub host account.
 - `TestNewFlatInstancePolicy_CopiesEveryReferenceField` and `TestPresentInstance_EveryFieldHasAnFC4aRow` updated.
