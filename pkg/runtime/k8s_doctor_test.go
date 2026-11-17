@@ -370,3 +370,93 @@ func TestRunDiagnostics_NamespaceAccessWithNamespacedPermissions(t *testing.T) {
 		})
 	}
 }
+
+func TestRunDiagnostics_ServiceAccountPermissionsWhenCreateEnabled(t *testing.T) {
+	t.Run("omitted when CreateServiceAccounts is false", func(t *testing.T) {
+		report := doctorWithAccess(func(*authv1.ResourceAttributes) (bool, error) { return true, nil }).
+			RunDiagnostics(DiagnosticOpts{Namespace: "agents", CreateServiceAccounts: false})
+		for _, c := range report.Checks {
+			if c.Name == "serviceaccount-permissions" {
+				t.Fatalf("unexpected serviceaccount-permissions check when CreateServiceAccounts is false: %+v", c)
+			}
+		}
+	})
+
+	t.Run("passes when get list create on serviceaccounts are allowed", func(t *testing.T) {
+		var verbs []string
+		report := doctorWithAccess(func(a *authv1.ResourceAttributes) (bool, error) {
+			if a.Resource == "serviceaccounts" {
+				verbs = append(verbs, a.Verb)
+			}
+			return true, nil
+		}).RunDiagnostics(DiagnosticOpts{Namespace: "agents", CreateServiceAccounts: true})
+
+		var found *CheckResult
+		for i := range report.Checks {
+			if report.Checks[i].Name == "serviceaccount-permissions" {
+				found = &report.Checks[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Fatal("serviceaccount-permissions check not in report")
+		}
+		if found.Status != "pass" || found.Remediation != "" {
+			t.Errorf("got status=%q remediation=%q, want pass with empty remediation", found.Status, found.Remediation)
+		}
+		if strings.Join(verbs, ",") != "get,list,create" {
+			t.Errorf("checked verbs = %v, want [get list create]", verbs)
+		}
+	})
+
+	t.Run("fails with namespaced broker Role remediation when create is denied", func(t *testing.T) {
+		report := doctorWithAccess(func(a *authv1.ResourceAttributes) (bool, error) {
+			if a.Resource == "serviceaccounts" && a.Verb == "create" {
+				return false, nil
+			}
+			return true, nil
+		}).RunDiagnostics(DiagnosticOpts{Namespace: "agents", CreateServiceAccounts: true})
+
+		var found *CheckResult
+		for i := range report.Checks {
+			if report.Checks[i].Name == "serviceaccount-permissions" {
+				found = &report.Checks[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Fatal("serviceaccount-permissions check not in report")
+		}
+		if found.Status != "fail" {
+			t.Fatalf("status = %q, want fail", found.Status)
+		}
+		assertBrokerRoleRemediation(t, found.Name, found.Remediation)
+		if !strings.HasPrefix(found.Remediation, `Grant "create" permission on serviceaccounts. `) {
+			t.Errorf("remediation = %q, want Grant create prefix", found.Remediation)
+		}
+	})
+
+	t.Run("warns with namespaced broker Role remediation on review error", func(t *testing.T) {
+		report := doctorWithAccess(func(a *authv1.ResourceAttributes) (bool, error) {
+			if a.Resource == "serviceaccounts" {
+				return false, errors.New("apiserver unavailable")
+			}
+			return true, nil
+		}).RunDiagnostics(DiagnosticOpts{Namespace: "agents", CreateServiceAccounts: true})
+
+		var found *CheckResult
+		for i := range report.Checks {
+			if report.Checks[i].Name == "serviceaccount-permissions" {
+				found = &report.Checks[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Fatal("serviceaccount-permissions check not in report")
+		}
+		if found.Status != "warn" {
+			t.Fatalf("status = %q, want warn", found.Status)
+		}
+		assertBrokerRoleRemediation(t, found.Name, found.Remediation)
+	})
+}

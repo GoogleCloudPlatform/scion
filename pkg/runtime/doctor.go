@@ -51,6 +51,11 @@ type DiagnosticOpts struct {
 	// shared_dir_storage_class is used.
 	SharedDirStorageShared bool
 
+	// CreateServiceAccounts is true when the active Kubernetes runtime entry
+	// in global settings sets create_service_accounts, so doctor checks get,
+	// list, and create permissions on serviceaccounts in the agent namespace.
+	CreateServiceAccounts bool
+
 	// Server is the global server settings (server.*), or nil when they
 	// could not be read. The cloudrun runtime reads its homes setting.
 	Server *config.V1ServerConfig

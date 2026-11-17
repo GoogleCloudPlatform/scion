@@ -391,8 +391,7 @@ type WorkloadIdentityTarget struct {
 	Pool string `json:"pool"`
 	// Namespace is the namespace the broker runs the target's agents in.
 	Namespace string `json:"namespace"`
-	// KSACreation reports create_service_accounts on the target. Always
-	// false until that setting exists (phase 5 P3).
+	// KSACreation reports create_service_accounts on the target (ptone/scion#7966).
 	KSACreation bool `json:"ksaCreation,omitempty"`
 }
 

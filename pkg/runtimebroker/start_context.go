@@ -645,9 +645,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 
 	// GCP identity mode "assign" on the Kubernetes runtime uses Workload
 	// Identity instead of the sciontool metadata emulator: the pod runs as a
-	// Kubernetes ServiceAccount (KSA) the operator has already bound to the
-	// requested GSA via Workload Identity, out of band. Scion never creates,
-	// annotates, or binds KSAs itself (see docs-site/.../ha/setup-gcp.md).
+	// Kubernetes ServiceAccount (KSA) bound to the requested GSA via Workload
+	// Identity (from kubernetes_service_account_mappings, annotation
+	// discovery, or — when runtimes.<entry>.create_service_accounts and the
+	// Hub's per-dispatch CreateKSA flag are both on — opt-in creation of the
+	// conventional <gsa-account-id> KSA; see docs-site/.../ha/setup-gcp.md).
 	// Resolved here, alongside the block rejection above and before any env
 	// or pod work, for the same reason: it can reject the dispatch outright.
 	// It rewrites gcpMetadataMode to "passthrough" so the env-emission switch
