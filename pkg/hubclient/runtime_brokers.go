@@ -478,6 +478,11 @@ type CreateBrokerRequest struct {
 	// RuntimeTarget is the flat Runtime Broker registration descriptor
 	// (.design/flat-runtime-brokers-contract.md section 6); nil is legacy.
 	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
+	// GCPHostServiceAccountEmail and GCPHostProjectID claim the broker row's
+	// private GCP host pair on registration (subject to Hub actAs evaluation
+	// and fill-only-while-unset semantics).
+	GCPHostServiceAccountEmail string `json:"gcpHostServiceAccountEmail,omitempty"`
+	GCPHostProjectID           string `json:"gcpHostProjectId,omitempty"`
 	// JoinTokenTTLSeconds is the join token lifetime in seconds. Zero uses
 	// the hub default; otherwise the hub accepts 300 to 86400.
 	JoinTokenTTLSeconds int `json:"joinTokenTtlSeconds,omitempty"`

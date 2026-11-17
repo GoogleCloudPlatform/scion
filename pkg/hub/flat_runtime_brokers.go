@@ -552,7 +552,34 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 	if err := brokeridentity.CheckActivationAck(id, "embedded", row.ID, row.RuntimeTarget); err != nil {
 		return nil, err
 	}
-	if o.HostIdentity != nil {
+	if flatCloudRunBroker(row) {
+		// Flat Cloud Run agents in passthrough mode run as
+		// runtime_target.service_account, never the Hub host process's own
+		// metadata identity. Write that account as the detected GCP host pair
+		// (admin-pinned values set or cleared via PATCH win with a warning) and
+		// skip recording HostIdentity so the Hub host's metadata identity does
+		// not produce a permanent mismatch.
+		if email, projectID := config.FlatCloudRunGCPHostPair(inst); email != "" {
+			applied, err := s.store.SetRuntimeBrokerGCPHostDetected(ctx, row.ID, email, projectID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to update flat Cloud Run Runtime Broker %s GCP host fields: %w", row.ID, err)
+			}
+			if !applied {
+				if !strings.EqualFold(email, row.GCPHostServiceAccountEmail) || projectID != row.GCPHostProjectID {
+					slog.Warn("embedded flat Cloud Run Runtime Broker keeping admin-pinned GCP host pair over configured runtime_target.service_account",
+						"runtime_broker_id", row.ID,
+						"broker_name", row.Name,
+						"configured_email", row.GCPHostServiceAccountEmail,
+						"configured_project_id", row.GCPHostProjectID,
+						"target_service_account", email,
+						"target_project_id", projectID,
+					)
+				}
+			} else if stored, err := s.store.GetRuntimeBroker(ctx, row.ID); err == nil {
+				row = stored
+			}
+		}
+	} else if o.HostIdentity != nil {
 		s.recordHostObservation(ctx, row.ID, *o.HostIdentity)
 		if stored, err := s.store.GetRuntimeBroker(ctx, row.ID); err == nil {
 			row = stored

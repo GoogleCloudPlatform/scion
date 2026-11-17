@@ -67,6 +67,11 @@ type Options struct {
 	Labels map[string]string
 	// WorkspaceStorage is the instance's workspace storage descriptor.
 	WorkspaceStorage *api.BrokerWorkspaceStorage
+	// GCPHostServiceAccountEmail and GCPHostProjectID are sent on the
+	// registration when set, or derived from a cloudrun instance's
+	// runtime_target.service_account when empty.
+	GCPHostServiceAccountEmail string
+	GCPHostProjectID           string
 	// TransportMode and TransportAudience are saved with the credentials.
 	TransportMode     string
 	TransportAudience string
@@ -157,15 +162,21 @@ func RegisterInstance(ctx context.Context, client hubclient.Client, inst config.
 	}
 
 	descriptor := descriptorFor(inst, id)
+	gcpEmail, gcpProject := o.GCPHostServiceAccountEmail, o.GCPHostProjectID
+	if gcpEmail == "" && gcpProject == "" {
+		gcpEmail, gcpProject = config.FlatCloudRunGCPHostPair(inst)
+	}
 
 	// Step 3: registration, then its acknowledgement.
 	createResp, err := client.RuntimeBrokers().Create(ctx, &hubclient.CreateBrokerRequest{
-		BrokerID:      id.RuntimeBrokerID,
-		Name:          inst.Name,
-		Capabilities:  o.Capabilities,
-		Labels:        o.Labels,
-		AutoProvide:   o.AutoProvide,
-		RuntimeTarget: descriptor,
+		BrokerID:                   id.RuntimeBrokerID,
+		Name:                       inst.Name,
+		Capabilities:               o.Capabilities,
+		Labels:                     o.Labels,
+		AutoProvide:                o.AutoProvide,
+		RuntimeTarget:              descriptor,
+		GCPHostServiceAccountEmail: gcpEmail,
+		GCPHostProjectID:           gcpProject,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("flat Runtime Broker registration failed: %w", err)

@@ -17,8 +17,10 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -26,6 +28,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -173,4 +178,133 @@ func TestHostIdentityState_Unknown(t *testing.T) {
 	require.NotNil(t, hi)
 	assert.Equal(t, HostIdentityUnknown, hi.State)
 	assert.False(t, hostIdentityIsProblem(hi.State))
+}
+
+func TestHostIdentityState_EmbeddedFlatCloudRunWritesGCPHostAndSkipsObservation(t *testing.T) {
+	f := newFlatRegFixture(t, true)
+	setFlatExperiments(t, f.srv, true, true)
+	ctx := context.Background()
+
+	target := cloudRunTargetFor("embedded-cr")
+	id := &brokeridentity.Identity{
+		SchemaVersion:   brokeridentity.SchemaVersion,
+		InstanceKey:     "local-cr",
+		RuntimeBrokerID: tid("embedded-flat-cr-row"),
+		RuntimeTarget:   *target,
+		ExecutionScope: brokeridentity.ExecutionScope{
+			Type:     config.RuntimeTargetTypeCloudRun,
+			CloudRun: &brokeridentity.CloudRunScope{ProjectNumber: "123456789012", Region: "us-central1"},
+		},
+	}
+	instFor := func(sa string) config.V1RuntimeBrokerInstanceConfig {
+		return config.V1RuntimeBrokerInstanceConfig{
+			Key:  "local-cr",
+			Name: "local-cr",
+			RuntimeTarget: &config.V1RuntimeTargetConfig{
+				Type:           config.RuntimeTargetTypeCloudRun,
+				DisplayName:    "Embedded Cloud Run",
+				ProjectID:      "cr-proj-a",
+				Region:         "us-central1",
+				ServiceAccount: sa,
+			},
+		}
+	}
+	obs := &store.HostIdentityObservation{
+		Outcome:    store.HostObservationPresent,
+		Email:      "hub-vm-host@hub-proj.iam.gserviceaccount.com",
+		ObservedAt: time.Now(),
+	}
+
+	const (
+		saInitial = "agents-init@cr-proj-a.iam.gserviceaccount.com"
+		saNext    = "agents-next@cr-proj-b.iam.gserviceaccount.com"
+		saPinned  = "pinned-admin@cr-proj-pin.iam.gserviceaccount.com"
+	)
+
+	// 1. Initial activation writes runtime_target.service_account + project via
+	// SetRuntimeBrokerGCPHostDetected and does NOT record HostObservation.
+	row, err := f.srv.RegisterEmbeddedFlatRuntimeBroker(ctx, id, instFor(saInitial), EmbeddedFlatRegistrationOptions{
+		Endpoint:     "http://localhost:9800",
+		HostIdentity: obs,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, saInitial, row.GCPHostServiceAccountEmail)
+	assert.Equal(t, "cr-proj-a", row.GCPHostProjectID)
+	assert.Equal(t, store.GCPHostSourceDetected, row.GCPHostSource)
+	assert.Nil(t, row.HostObservation, "cloudrun embedded flat rows must not record host metadata observation")
+	assert.Equal(t, HostIdentityUnobserved, hostIdentityState(row))
+
+	// 2. Config change across re-activation refreshes the detected GCP host pair.
+	row, err = f.srv.RegisterEmbeddedFlatRuntimeBroker(ctx, id, instFor(saNext), EmbeddedFlatRegistrationOptions{
+		Endpoint:     "http://localhost:9800",
+		HostIdentity: obs,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, saNext, row.GCPHostServiceAccountEmail)
+	assert.Equal(t, "cr-proj-b", row.GCPHostProjectID)
+	assert.Equal(t, store.GCPHostSourceDetected, row.GCPHostSource)
+	assert.Nil(t, row.HostObservation)
+
+	// 3. Admin-pinned set value (GCPHostSourceAdmin) wins over config and logs a warning.
+	_, err = f.s.SetRuntimeBrokerGCPHost(ctx, row.ID, saPinned, "cr-proj-pin")
+	require.NoError(t, err)
+
+	var logBuf bytes.Buffer
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(origLogger) })
+
+	row, err = f.srv.RegisterEmbeddedFlatRuntimeBroker(ctx, id, instFor(saNext), EmbeddedFlatRegistrationOptions{
+		Endpoint:     "http://localhost:9800",
+		HostIdentity: obs,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, saPinned, row.GCPHostServiceAccountEmail)
+	assert.Equal(t, "cr-proj-pin", row.GCPHostProjectID)
+	assert.Equal(t, store.GCPHostSourceAdmin, row.GCPHostSource)
+	assert.Contains(t, logBuf.String(), saNext, "warning must note the configured vs admin-pinned difference")
+
+	// 4. Admin-pinned cleared value (GCPHostSourceAdmin with empty pair) also wins and logs a warning.
+	_, err = f.s.SetRuntimeBrokerGCPHost(ctx, row.ID, "", "")
+	require.NoError(t, err)
+	logBuf.Reset()
+
+	row, err = f.srv.RegisterEmbeddedFlatRuntimeBroker(ctx, id, instFor(saNext), EmbeddedFlatRegistrationOptions{
+		Endpoint:     "http://localhost:9800",
+		HostIdentity: obs,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, row.GCPHostServiceAccountEmail)
+	assert.Empty(t, row.GCPHostProjectID)
+	assert.Equal(t, store.GCPHostSourceAdmin, row.GCPHostSource)
+	assert.Contains(t, logBuf.String(), saNext, "warning must note the configured vs admin-cleared difference")
+	assert.Nil(t, row.HostObservation)
+
+	// 5. Non-cloudrun embedded flat rows keep recording HostObservation unchanged.
+	dockerTarget := &api.RuntimeTargetDescriptor{ID: tid("docker-target-embedded"), Type: config.RuntimeTargetTypeDocker, DisplayName: "Embedded Docker"}
+	dockerID := &brokeridentity.Identity{
+		SchemaVersion:   brokeridentity.SchemaVersion,
+		InstanceKey:     "local-docker",
+		RuntimeBrokerID: tid("embedded-flat-docker-row"),
+		RuntimeTarget:   *dockerTarget,
+		ExecutionScope: brokeridentity.ExecutionScope{
+			Type:   config.RuntimeTargetTypeDocker,
+			Docker: &brokeridentity.DockerScope{DaemonID: "daemon-1", Endpoint: "unix:///var/run/docker.sock"},
+		},
+	}
+	dockerInst := config.V1RuntimeBrokerInstanceConfig{
+		Key:  "local-docker",
+		Name: "local-docker",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{
+			Type:        config.RuntimeTargetTypeDocker,
+			DisplayName: "Embedded Docker",
+		},
+	}
+	dockerRow, err := f.srv.RegisterEmbeddedFlatRuntimeBroker(ctx, dockerID, dockerInst, EmbeddedFlatRegistrationOptions{
+		Endpoint:     "http://localhost:9800",
+		HostIdentity: obs,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, dockerRow.HostObservation, "non-cloudrun embedded flat rows must still record HostObservation")
+	assert.Equal(t, obs.Email, dockerRow.HostObservation.Email)
 }

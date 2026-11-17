@@ -811,3 +811,96 @@ func TestSettingsSchema_CloudRunParity(t *testing.T) {
 		})
 	}
 }
+
+func TestFlatCloudRunGCPHostPair(t *testing.T) {
+	cases := []struct {
+		name        string
+		inst        V1RuntimeBrokerInstanceConfig
+		wantEmail   string
+		wantProject string
+	}{
+		{
+			name: "canonical cloudrun user-managed SA",
+			inst: V1RuntimeBrokerInstanceConfig{
+				Key: "cr-west",
+				RuntimeTarget: &V1RuntimeTargetConfig{
+					Type:           RuntimeTargetTypeCloudRun,
+					ServiceAccount: "agents-sa@my-cr-proj.iam.gserviceaccount.com",
+				},
+			},
+			wantEmail:   "agents-sa@my-cr-proj.iam.gserviceaccount.com",
+			wantProject: "my-cr-proj",
+		},
+		{
+			name: "mixed case and surrounding whitespace normalized",
+			inst: V1RuntimeBrokerInstanceConfig{
+				Key: "cr-west",
+				RuntimeTarget: &V1RuntimeTargetConfig{
+					Type:           RuntimeTargetTypeCloudRun,
+					ServiceAccount: "  Agents-SA@My-CR-Proj.iam.gserviceaccount.com \n",
+				},
+			},
+			wantEmail:   "agents-sa@my-cr-proj.iam.gserviceaccount.com",
+			wantProject: "my-cr-proj",
+		},
+		{
+			name: "non-cloudrun target ignored",
+			inst: V1RuntimeBrokerInstanceConfig{
+				Key: "local-docker",
+				RuntimeTarget: &V1RuntimeTargetConfig{
+					Type:           RuntimeTargetTypeDocker,
+					ServiceAccount: "agents-sa@my-cr-proj.iam.gserviceaccount.com",
+				},
+			},
+			wantEmail:   "",
+			wantProject: "",
+		},
+		{
+			name:        "nil target",
+			inst:        V1RuntimeBrokerInstanceConfig{Key: "none"},
+			wantEmail:   "",
+			wantProject: "",
+		},
+		{
+			name: "empty service account",
+			inst: V1RuntimeBrokerInstanceConfig{
+				Key:           "cr-empty",
+				RuntimeTarget: &V1RuntimeTargetConfig{Type: RuntimeTargetTypeCloudRun},
+			},
+			wantEmail:   "",
+			wantProject: "",
+		},
+		{
+			name: "malformed service account without iam domain",
+			inst: V1RuntimeBrokerInstanceConfig{
+				Key: "cr-bad",
+				RuntimeTarget: &V1RuntimeTargetConfig{
+					Type:           RuntimeTargetTypeCloudRun,
+					ServiceAccount: "not-an-iam-sa@example.com",
+				},
+			},
+			wantEmail:   "",
+			wantProject: "",
+		},
+		{
+			name: "malformed service account missing local name or project",
+			inst: V1RuntimeBrokerInstanceConfig{
+				Key: "cr-bad-empty",
+				RuntimeTarget: &V1RuntimeTargetConfig{
+					Type:           RuntimeTargetTypeCloudRun,
+					ServiceAccount: "@.iam.gserviceaccount.com",
+				},
+			},
+			wantEmail:   "",
+			wantProject: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotEmail, gotProject := FlatCloudRunGCPHostPair(tc.inst)
+			if gotEmail != tc.wantEmail || gotProject != tc.wantProject {
+				t.Fatalf("FlatCloudRunGCPHostPair() = (%q, %q), want (%q, %q)", gotEmail, gotProject, tc.wantEmail, tc.wantProject)
+			}
+		})
+	}
+}
