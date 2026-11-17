@@ -727,7 +727,7 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 
 	claimCtx := store.WithRedriveLeaseOwner(ctx, leaseOwner)
 	var pendingSettleIDs []string
-	humanMembersByProject := make(map[string][]chatMemberEntry)
+	webMentionCache := newHeldWebMentionCache()
 
 	for {
 		if ctx.Err() != nil || !s.conduitDeliverEnabled() {
@@ -766,7 +766,7 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 				}
 			}
 			row := &claimed[i]
-			outcome := s.processClaimedHeldRow(ctx, dispatcher, agentID, row, humanMembersByProject)
+			outcome := s.processClaimedHeldRow(ctx, dispatcher, agentID, row, webMentionCache)
 			switch outcome {
 			case claimedRowDispatched:
 				pendingSettleIDs = append(pendingSettleIDs, row.ID)
@@ -827,7 +827,7 @@ func (s *Server) processClaimedHeldRow(
 	dispatcher AgentDispatcher,
 	agentID string,
 	row *store.Message,
-	humanMembersByProject map[string][]chatMemberEntry,
+	webMentionCache *heldWebMentionCache,
 ) claimedRowOutcome {
 	if ctx.Err() != nil {
 		s.reholdOrFailClaimedRow(ctx, agentID, row)
@@ -881,7 +881,7 @@ func (s *Server) processClaimedHeldRow(
 			return claimedRowFailed
 		}
 	} else if shouldTranslateHeldWebMentions(row) {
-		if mentionTransientErr := s.enrichHeldWebMentions(ctx, row, sm, humanMembersByProject); mentionTransientErr != nil || ctx.Err() != nil {
+		if mentionTransientErr := s.enrichHeldWebMentions(ctx, row, sm, webMentionCache); mentionTransientErr != nil || ctx.Err() != nil {
 			errToLog := mentionTransientErr
 			if errToLog == nil {
 				errToLog = ctx.Err()
@@ -974,12 +974,34 @@ func (s *Server) reholdOrFailClaimedRow(ctx context.Context, agentID string, row
 	s.failClaimedHeldMessage(finCtx, target, row, reason)
 }
 
-// shouldTranslateHeldWebMentions reports whether a stored message row came from
-// a project-scoped human web send whose live dispatch runs
-// translateMentionsOutbound (ptone/scion#8212): sendAgentRouted stores the
-// human-facing @display-slug form in row.Msg while dispatching @email to
-// agents, so held web rows must re-derive the agent-facing @email text before
-// RenderDeliveryText and broker dispatch without altering row.Msg.
+type heldWebMentionCache struct {
+	membersByProject map[string][]chatMemberEntry
+	topicsByProjKey  map[string]bool
+}
+
+func newHeldWebMentionCache() *heldWebMentionCache {
+	return &heldWebMentionCache{
+		membersByProject: make(map[string][]chatMemberEntry),
+		topicsByProjKey:  make(map[string]bool),
+	}
+}
+
+// shouldTranslateHeldWebMentions reports whether row is a candidate native
+// chat-v2 human message whose live dispatch in sendAgentRouted runs
+// translateMentionsOutbound (ptone/scion#8212).
+//
+// In live delivery, translateMentionsOutbound runs only on native chat-v2
+// conversation sends (sendChatMessage -> authorizeChatSend / chatKeyReadAudience
+// -> sendAgentRouted), which always carry Channel="web" and a chat-v2
+// conversation key in ThreadID: either a canonical agent DM key
+// (dm:agent:<agentUUID>:user:<senderUUID>) or a project webchat_topic ID
+// (confirmed against WebChatStore in enrichHeldWebMentions). Direct
+// POST /api/v1/agents/{id}/message sends from browser clients
+// (handleAgentMessage + processMentions, e.g. quick-message-dialog and
+// agent-message-viewer) also stamp Channel="web" when ClientType()=="web",
+// but carry no chat-v2 conversation key (ThreadID is "", wave-1 "agent:<id>",
+// or non-topic external refs) and deliver verbatim on live send, so re-drive
+// must leave them verbatim too.
 func shouldTranslateHeldWebMentions(row *store.Message) bool {
 	if row == nil || row.Type == messages.TypeDecisionResponse {
 		return false
@@ -987,27 +1009,68 @@ func shouldTranslateHeldWebMentions(row *store.Message) bool {
 	if row.Channel != "web" || !strings.HasPrefix(row.Sender, "user:") || row.SenderID == "" {
 		return false
 	}
-	if row.ScheduledEventID != "" || row.DelegationGrantID != "" || row.AuthorizingUserID != "" {
+	if row.Broadcasted || row.GroupID != "" ||
+		row.ScheduledEventID != "" || row.DelegationGrantID != "" || row.AuthorizingUserID != "" {
 		return false
 	}
 	if row.ProjectID == "" || row.ProjectID == uuid.Nil.String() {
 		return false
 	}
+	if !hasCandidateChatV2Key(row.ThreadID, row.SenderID) {
+		return false
+	}
 	return strings.Contains(row.Msg, "@")
+}
+
+// hasCandidateChatV2Key mirrors chatKeyReadAudience + authorizeDMKeyParticipant
+// + authorizeDMPeer (handlers_chat_send.go) and isWebThreadMessage
+// (chat_member_fanout.go / events.go) on pure row fields: either a canonical
+// chat-v2 agent DM key naming senderID, or a valid non-"agent:" candidate
+// topic key to be verified against WebChatStore.
+func hasCandidateChatV2Key(key, senderID string) bool {
+	if !validChatTopicKey(key) {
+		return false
+	}
+	if strings.HasPrefix(key, "dm:") {
+		return isCanonicalChatAgentDMKey(key, senderID)
+	}
+	return !strings.HasPrefix(key, "agent:")
+}
+
+func isCanonicalChatAgentDMKey(key, senderID string) bool {
+	if senderID == "" || !validDMKey(key) {
+		return false
+	}
+	agentID, userID := parseDMKeyIDs(key)
+	if agentID == "" || userID != senderID {
+		return false
+	}
+	canonical, err := messages.DMConversationKey("agent", agentID, "user", userID)
+	return err == nil && canonical == key
 }
 
 func (s *Server) enrichHeldWebMentions(
 	ctx context.Context,
 	row *store.Message,
 	sm *messages.StructuredMessage,
-	cache map[string][]chatMemberEntry,
+	cache *heldWebMentionCache,
 ) error {
+	if !strings.HasPrefix(row.ThreadID, "dm:") {
+		isTopic, err := s.isProjectChatV2Topic(ctx, row.ProjectID, row.ThreadID, cache)
+		if err != nil {
+			return err
+		}
+		if !isTopic {
+			return nil
+		}
+	}
+
 	var (
 		members []chatMemberEntry
 		ok      bool
 	)
-	if cache != nil {
-		members, ok = cache[row.ProjectID]
+	if cache != nil && cache.membersByProject != nil {
+		members, ok = cache.membersByProject[row.ProjectID]
 	}
 	if !ok {
 		var err error
@@ -1015,14 +1078,47 @@ func (s *Server) enrichHeldWebMentions(
 		if err != nil {
 			return fmt.Errorf("project human members lookup: %w", err)
 		}
-		if cache != nil {
-			cache[row.ProjectID] = members
+		if cache != nil && cache.membersByProject != nil {
+			cache.membersByProject[row.ProjectID] = members
 		}
 	}
 	if len(members) > 0 {
 		sm.Msg = translateMentionsOutbound(sm.Msg, members)
 	}
 	return nil
+}
+
+func (s *Server) isProjectChatV2Topic(
+	ctx context.Context,
+	projectID, topicID string,
+	cache *heldWebMentionCache,
+) (bool, error) {
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return false, nil
+	}
+	cacheKey := projectID + "\x00" + topicID
+	if cache != nil && cache.topicsByProjKey != nil {
+		if isTopic, ok := cache.topicsByProjKey[cacheKey]; ok {
+			return isTopic, nil
+		}
+	}
+	_, err := wcs.GetTopicConversationIDIncludingDeletedInProject(ctx, projectID, topicID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			if cache != nil && cache.topicsByProjKey != nil {
+				cache.topicsByProjKey[cacheKey] = false
+			}
+			return false, nil
+		}
+		return false, fmt.Errorf("webchat topic lookup: %w", err)
+	}
+	if cache != nil && cache.topicsByProjKey != nil {
+		cache.topicsByProjKey[cacheKey] = true
+	}
+	return true, nil
 }
 
 func (s *Server) enrichHeldChoiceResponse(

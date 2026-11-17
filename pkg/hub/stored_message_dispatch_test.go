@@ -117,16 +117,20 @@ func TestStoredMessageDispatch(t *testing.T) {
 }
 
 func TestShouldTranslateHeldWebMentions(t *testing.T) {
+	senderID := uuid.NewString()
+	agentID := uuid.NewString()
+	topicID := uuid.NewString()
 	base := func() *store.Message {
 		return &store.Message{
 			ID:        uuid.NewString(),
 			ProjectID: uuid.NewString(),
 			Sender:    "user:owner@example.com",
-			SenderID:  uuid.NewString(),
+			SenderID:  senderID,
 			Recipient: "agent:worker",
 			Msg:       "Please ask @alice-smith",
 			Type:      messages.TypeInstruction,
 			Channel:   "web",
+			ThreadID:  topicID,
 		}
 	}
 
@@ -140,6 +144,18 @@ func TestShouldTranslateHeldWebMentions(t *testing.T) {
 	mentionRow.Type = messages.TypeMention
 	assert.True(t, shouldTranslateHeldWebMentions(mentionRow))
 
+	dmKey, err := messages.DMConversationKey("agent", agentID, "user", senderID)
+	require.NoError(t, err)
+	dmRow := base()
+	dmRow.ThreadID = dmKey
+	assert.True(t, shouldTranslateHeldWebMentions(dmRow))
+
+	otherUser := uuid.NewString()
+	userDMKey, err := messages.DMConversationKey("user", senderID, "user", otherUser)
+	require.NoError(t, err)
+	otherAgentDMKey, err := messages.DMConversationKey("agent", agentID, "user", otherUser)
+	require.NoError(t, err)
+
 	cases := []struct {
 		name   string
 		mutate func(*store.Message)
@@ -149,8 +165,17 @@ func TestShouldTranslateHeldWebMentions(t *testing.T) {
 		{name: "decision response", mutate: func(m *store.Message) { m.Type = messages.TypeDecisionResponse }},
 		{name: "non-web channel", mutate: func(m *store.Message) { m.Channel = "discord" }},
 		{name: "empty channel", mutate: func(m *store.Message) { m.Channel = "" }},
+		{name: "empty thread id from POST /agents/{id}/message", mutate: func(m *store.Message) { m.ThreadID = "" }},
+		{name: "wave-1 agent thread id", mutate: func(m *store.Message) { m.ThreadID = "agent:" + agentID }},
+		{name: "invalid topic key with NUL", mutate: func(m *store.Message) { m.ThreadID = "topic\x00bad" }},
+		{name: "user-to-user dm key", mutate: func(m *store.Message) { m.ThreadID = userDMKey }},
+		{name: "agent dm key for different sender", mutate: func(m *store.Message) { m.ThreadID = otherAgentDMKey }},
+		{name: "non-canonical dm key order", mutate: func(m *store.Message) { m.ThreadID = "dm:user:" + senderID + ":agent:" + agentID }},
+		{name: "malformed dm key", mutate: func(m *store.Message) { m.ThreadID = "dm:malformed" }},
 		{name: "agent sender", mutate: func(m *store.Message) { m.Sender = "agent:peer" }},
 		{name: "empty sender id", mutate: func(m *store.Message) { m.SenderID = "" }},
+		{name: "broadcasted row", mutate: func(m *store.Message) { m.Broadcasted = true }},
+		{name: "group message row", mutate: func(m *store.Message) { m.GroupID = uuid.NewString() }},
 		{name: "scheduled event", mutate: func(m *store.Message) { m.ScheduledEventID = uuid.NewString() }},
 		{name: "delegated grant", mutate: func(m *store.Message) { m.DelegationGrantID = uuid.NewString() }},
 		{name: "authorizing user", mutate: func(m *store.Message) { m.AuthorizingUserID = uuid.NewString() }},
