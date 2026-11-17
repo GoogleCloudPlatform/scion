@@ -135,7 +135,7 @@ the recipient argument (agent:x or user:x for one, group[...] for several).
 In the JSON, an accepted recipient has status "delivered" and is counted
 under "delivered".
 
-Choice prompts (--choices or --choices-file, from an agent to a user or a
+Decision prompts (--decisions or --decisions-file, from an agent to a user or a
 conversation) print one line per decision with its key and version. With
 --format json the output is the Hub's full send result: message_id and
 decisions, plus every other field of an ordinary send. With --update, only
@@ -166,9 +166,10 @@ Examples:
 			return errRawFlagRemoved
 		}
 		// --body-file provides the message, so we only need recipient.
-		// With choices the body (the intro above the decisions) is optional.
+		// With decisions the body (the intro above the decisions) is optional.
 		bodyFile, _ := cmd.Flags().GetString("body-file")
-		withChoices := cmd.Flags().Changed("choices") || cmd.Flags().Changed("choices-file")
+		withChoices := cmd.Flags().Changed("decisions") || cmd.Flags().Changed("decisions-file") ||
+			cmd.Flags().Changed("choices") || cmd.Flags().Changed("choices-file")
 		if bodyFile != "" || withChoices {
 			if len(args) < 1 {
 				return fmt.Errorf("recipient is required")
@@ -236,9 +237,10 @@ Examples:
 			return newUsageError("--body-file and positional message arguments are mutually exclusive")
 		}
 
-		// Choice prompts (--choices, --choices-file, --update): checked and
-		// read before the body, so --choices-file - owns stdin. The JSON is
-		// parsed only for early errors; the hub is the authority.
+		// Decision prompts (--decisions, --decisions-file, --update, plus legacy
+		// --choices* aliases): checked and read before the body, so
+		// --decisions-file - owns stdin. The JSON is parsed only for early
+		// errors; the hub is the authority.
 		msgChoicesPayload = nil
 		agentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
 		if err := validateChoiceFlags(agentTarget, len(groupRecipients) > 0); err != nil {
@@ -940,14 +942,16 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	if err != nil {
 		return agentMessageSendError(ref.Value, err)
 	}
-	// This path prints no JSON body, so the warning goes to stderr in
-	// either output mode.
+	if isJSONOutput() {
+		if humanResp != nil {
+			return outputJSON(humanResp)
+		}
+		return nil
+	}
 	if humanResp != nil {
 		printArtifactWarning(humanResp.ArtifactWarning)
 	}
-	if !isJSONOutput() {
-		printAgentSendConfirmation(ref.Value, fmt.Sprintf("'%s'", ref.Value), humanResp)
-	}
+	printAgentSendConfirmation(ref.Value, fmt.Sprintf("'%s'", ref.Value), humanResp)
 	return nil
 }
 
@@ -2037,9 +2041,15 @@ func init() {
 	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (work product to review, version or find later; use --attach for a file that is part of this message) (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach a file as part of this message, repeatable (use --artifact for work product to review, version or find later). When the hub stores attachments as artifacts, the file is uploaded and an agent recipient gets it in ~/.scion/inbox/<message-id>/; HTML and SVG are refused. Otherwise use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace); attachments the hub cannot read are reported as warnings after an agent's send.")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
-	messageCmd.Flags().StringVar(&msgChoices, "choices", "", "Send a choice prompt: a JSON array of decisions for a user or conversation to answer (agents only; needs the web.decisions experiment). The body becomes the optional intro")
-	messageCmd.Flags().StringVar(&msgChoicesFile, "choices-file", "", "Read the --choices JSON from a file ('-' reads stdin, which then excludes --body-file -)")
-	messageCmd.Flags().BoolVar(&msgChoicesUpdate, "update", false, "With choices: replace decisions whose ids already exist (a new version each); without it, reusing an id is refused. To revise an unanswered set on one card, resend all still-pending keys of that set")
+	messageCmd.Flags().StringVar(&msgChoices, "decisions", "", "Send a decision prompt: a JSON array of decisions for a user or conversation to answer (agents only; needs the web.decisions experiment). The body becomes the optional intro")
+	messageCmd.Flags().StringVar(&msgChoicesFile, "decisions-file", "", "Read the --decisions JSON from a file ('-' reads stdin, which then excludes --body-file -)")
+	messageCmd.Flags().BoolVar(&msgChoicesUpdate, "update", false, "With --decisions or --decisions-file: replace decisions whose ids already exist (a new version each); without it, reusing an id is refused. To revise an unanswered set on one card, resend all still-pending keys of that set")
+
+	// legacy choices fallback: remove in ptone/scion#8249
+	messageCmd.Flags().StringVar(&msgLegacyChoices, "choices", "", "Deprecated alias of --decisions")
+	messageCmd.Flags().StringVar(&msgLegacyChoicesFile, "choices-file", "", "Deprecated alias of --decisions-file")
+	_ = messageCmd.Flags().MarkDeprecated("choices", "use --decisions")
+	_ = messageCmd.Flags().MarkDeprecated("choices-file", "use --decisions-file")
 
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward

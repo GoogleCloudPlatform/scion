@@ -102,9 +102,17 @@ func TestValidateChoiceFlags(t *testing.T) {
 		wantUsage bool
 	}{
 		{name: "no choices", setup: func() {}},
-		{name: "choices to a user", setup: func() { msgChoices = "[]" }},
-		{name: "both choice flags", setup: func() { msgChoices = "[]"; msgChoicesFile = "q.json" }, wantErr: "mutually exclusive", wantUsage: true},
-		{name: "update without choices", setup: func() { msgChoicesUpdate = true }, wantErr: "--update is valid only", wantUsage: true},
+		{name: "decisions to a user", setup: func() { msgChoices = "[]" }},
+		{name: "both decision flags", setup: func() { msgChoices = "[]"; msgChoicesFile = "q.json" }, wantErr: "mutually exclusive", wantUsage: true},
+		{name: "decisions and legacy choices", setup: func() {
+			require.NoError(t, messageCmd.Flags().Set("decisions", "[]"))
+			require.NoError(t, messageCmd.Flags().Set("choices", "[]"))
+		}, wantErr: "--decisions and --choices are mutually exclusive", wantUsage: true},
+		{name: "decisions-file and legacy choices-file", setup: func() {
+			require.NoError(t, messageCmd.Flags().Set("decisions-file", "a.json"))
+			require.NoError(t, messageCmd.Flags().Set("choices-file", "b.json"))
+		}, wantErr: "--decisions-file and --choices-file are mutually exclusive", wantUsage: true},
+		{name: "update without decisions", setup: func() { msgChoicesUpdate = true }, wantErr: "--update is valid only with --decisions or --decisions-file", wantUsage: true},
 		{name: "two readers of stdin", setup: func() { msgChoicesFile = "-"; msgBodyFile = "-" }, wantErr: "both read stdin", wantUsage: true},
 		{name: "agent recipient", setup: func() { msgChoices = "[]" }, agent: true, wantErr: "not to an agent", wantUsage: false},
 		{name: "group recipient", setup: func() { msgChoices = "[]" }, group: true, wantErr: "not to an agent or a group", wantUsage: false},
@@ -308,11 +316,11 @@ func TestSendOutboundChoices_HumanModeNoAskUser(t *testing.T) {
 }
 
 // The command refuses an agent recipient before anything is sent, and a
-// body is optional with choices.
+// body is optional with --decisions or its deprecated --choices alias.
 func TestMessageCommand_ChoicesArgs(t *testing.T) {
 	choicesState(t, "asker")
-	require.NoError(t, messageCmd.Flags().Set("choices", choicesTwoDecisions))
-	assert.NoError(t, messageCmd.Args(messageCmd, []string{"user:alice@example.com"}), "body is optional with choices")
+	require.NoError(t, messageCmd.Flags().Set("decisions", choicesTwoDecisions))
+	assert.NoError(t, messageCmd.Args(messageCmd, []string{"user:alice@example.com"}), "body is optional with --decisions")
 
 	err := messageCmd.RunE(messageCmd, []string{"agent:builder"})
 	require.Error(t, err)
@@ -323,6 +331,103 @@ func TestMessageCommand_ChoicesArgs(t *testing.T) {
 func TestMessageCommand_UpdateHelpDocumentsFullSet(t *testing.T) {
 	flag := messageCmd.Flags().Lookup("update")
 	require.NotNil(t, flag)
+	assert.Contains(t, flag.Usage, "--decisions")
 	assert.Contains(t, flag.Usage, "still-pending keys")
+	assert.Contains(t, messageCmd.Long, "Decision prompts (--decisions or --decisions-file")
 	assert.Contains(t, messageCmd.Long, "still-pending keys")
+}
+
+// TestMessageCommand_ChoicesAliasesDeprecatedAndHidden covers the S3 CLI
+// rename (ptone/scion#8225): --decisions and --decisions-file are visible,
+// while --choices and --choices-file remain working, hidden, deprecated
+// aliases whose deprecation notice goes to stderr.
+func TestMessageCommand_ChoicesAliasesDeprecatedAndHidden(t *testing.T) {
+	for _, tc := range []struct {
+		alias       string
+		replacement string
+	}{
+		{"choices", "use --decisions"},
+		{"choices-file", "use --decisions-file"},
+	} {
+		f := messageCmd.Flags().Lookup(tc.alias)
+		require.NotNil(t, f, "--%s flag must exist", tc.alias)
+		assert.True(t, f.Hidden, "--%s must be hidden", tc.alias)
+		assert.Equal(t, tc.replacement, f.Deprecated, "--%s deprecation message", tc.alias)
+		assert.NotContains(t, messageCmd.Flags().FlagUsages(), "--"+tc.alias)
+	}
+	assert.Contains(t, messageCmd.Flags().FlagUsages(), "--decisions ")
+	assert.Contains(t, messageCmd.Flags().FlagUsages(), "--decisions-file ")
+
+	// End-to-end execution through rootCmd: --decisions-file, --choices-file
+	// (printing deprecation to stderr), and --format json (ptone/scion#8156).
+	t.Run("execute_decisions_file_and_format_json", func(t *testing.T) {
+		asked := choicesState(t, "asker")
+		var got map[string]interface{}
+		hubCtx := newChoicesHub(t, http.StatusOK, choicesSentBody(), &got)
+
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("SCION_HUB_ENDPOINT", hubCtx.Endpoint)
+		t.Setenv("SCION_HUB_TOKEN", "test-agent-token")
+		t.Setenv("SCION_PROJECT_ID", choicesTestProject)
+		t.Cleanup(func() {
+			rootCmd.SetArgs(nil)
+			if f := rootCmd.PersistentFlags().Lookup("format"); f != nil {
+				_ = f.Value.Set(f.DefValue)
+				f.Changed = false
+			}
+		})
+
+		path := filepath.Join(t.TempDir(), "decisions.json")
+		require.NoError(t, os.WriteFile(path, []byte(choicesTwoDecisions), 0o600))
+
+		var execErr error
+		stdout, stderr := captureStdoutStderr(t, func() {
+			rootCmd.SetArgs([]string{"message", "user:alice@example.com", "--decisions-file", path, "--format", "json"})
+			execErr = rootCmd.Execute()
+		})
+		require.NoError(t, execErr)
+		assert.Empty(t, stderr)
+
+		var res hubclient.OutboundMessageResult
+		require.NoError(t, json.Unmarshal([]byte(stdout), &res), "stdout must be valid JSON: %s", stdout)
+		assert.Equal(t, "msg-choices-1", res.MessageID)
+		require.Len(t, res.Decisions, 2)
+		assert.Equal(t, "D234", res.Decisions[0].Key)
+		assert.Equal(t, []string{"Decision needed: Ship the feature now? (+1 more)"}, *asked)
+	})
+
+	t.Run("execute_legacy_choices_file_warns_on_stderr_and_keeps_json_clean", func(t *testing.T) {
+		asked := choicesState(t, "asker")
+		var got map[string]interface{}
+		hubCtx := newChoicesHub(t, http.StatusOK, choicesSentBody(), &got)
+
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("SCION_HUB_ENDPOINT", hubCtx.Endpoint)
+		t.Setenv("SCION_HUB_TOKEN", "test-agent-token")
+		t.Setenv("SCION_PROJECT_ID", choicesTestProject)
+		t.Cleanup(func() {
+			rootCmd.SetArgs(nil)
+			if f := rootCmd.PersistentFlags().Lookup("format"); f != nil {
+				_ = f.Value.Set(f.DefValue)
+				f.Changed = false
+			}
+		})
+
+		path := filepath.Join(t.TempDir(), "legacy-choices.json")
+		require.NoError(t, os.WriteFile(path, []byte(choicesTwoDecisions), 0o600))
+
+		var execErr error
+		stdout, stderr := captureStdoutStderr(t, func() {
+			rootCmd.SetArgs([]string{"msg", "user:alice@example.com", "--choices-file", path, "--format", "json"})
+			execErr = rootCmd.Execute()
+		})
+		require.NoError(t, execErr)
+		assert.Contains(t, stderr, "Flag --choices-file has been deprecated, use --decisions-file")
+
+		var res hubclient.OutboundMessageResult
+		require.NoError(t, json.Unmarshal([]byte(stdout), &res), "stdout must stay pure JSON when --choices-file warns on stderr: %s", stdout)
+		assert.Equal(t, "msg-choices-1", res.MessageID)
+		require.Len(t, res.Decisions, 2)
+		assert.Len(t, *asked, 1)
+	})
 }

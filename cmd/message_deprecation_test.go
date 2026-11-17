@@ -71,7 +71,7 @@ func resetMessageFlags() func() {
 	msgArtifacts = nil
 	msgArtifactRefs = nil
 	resetChoiceFlags()
-	for _, name := range []string{"choices", "choices-file", "update"} {
+	for _, name := range []string{"decisions", "decisions-file", "choices", "choices-file", "update"} {
 		_ = messageCmd.Flags().Lookup(name).Value.Set(messageCmd.Flags().Lookup(name).DefValue)
 		messageCmd.Flags().Lookup(name).Changed = false
 	}
@@ -94,7 +94,7 @@ func resetMessageFlags() func() {
 		msgArtifacts = orig.artifacts
 		msgArtifactRefs = nil
 		resetChoiceFlags()
-		for _, name := range []string{"choices", "choices-file", "update"} {
+		for _, name := range []string{"decisions", "decisions-file", "choices", "choices-file", "update"} {
 			_ = messageCmd.Flags().Lookup(name).Value.Set(messageCmd.Flags().Lookup(name).DefValue)
 			messageCmd.Flags().Lookup(name).Changed = false
 		}
@@ -686,6 +686,7 @@ func TestDeprecatedFlags_Hidden(t *testing.T) {
 		"broadcast", "all", // removed, still registered to avoid "unknown flag" errors
 		"in", "at", "plain", "raw",
 		"notify", "channel", "thread-id", "cc",
+		"choices", "choices-file",
 	}
 	for _, name := range deprecatedFlags {
 		f := messageCmd.Flags().Lookup(name)
@@ -698,6 +699,7 @@ func TestDeprecatedFlags_Hidden(t *testing.T) {
 func TestRetainedFlags_NotHidden(t *testing.T) {
 	retainedFlags := []string{
 		"interrupt", "wake", "attach",
+		"decisions", "decisions-file", "update",
 	}
 	for _, name := range retainedFlags {
 		f := messageCmd.Flags().Lookup(name)

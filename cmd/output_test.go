@@ -233,7 +233,6 @@ func TestInteractiveOnlyCommands(t *testing.T) {
 		"scion broker stop",
 		"scion server start",
 		"scion cdw",
-		"scion message",
 	}
 
 	for _, cmd := range expectedCommands {
@@ -252,6 +251,8 @@ func TestInteractiveOnlyCommands(t *testing.T) {
 		"scion stop",
 		"scion delete",
 		"scion look",
+		"scion message",
+		"scion msg",
 	}
 
 	for _, cmd := range nonInteractiveCmds {

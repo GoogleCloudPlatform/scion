@@ -29,20 +29,24 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/agentstatus"
 )
 
-// Choice prompt flags of scion message (design choices v4, 4.3).
+// Decision prompt flags of scion message (design choices v4, 4.3).
 var (
 	msgChoices       string
 	msgChoicesFile   string
 	msgChoicesUpdate bool
-	// msgChoicesPayload is the decisions JSON loaded from --choices or
-	// --choices-file for this invocation; nil for an ordinary message.
+	// legacy choices fallback: remove in ptone/scion#8249
+	msgLegacyChoices     string
+	msgLegacyChoicesFile string
+	// msgChoicesPayload is the decisions JSON loaded from --decisions or
+	// --decisions-file (or their deprecated --choices* aliases) for this
+	// invocation; nil for an ordinary message.
 	msgChoicesPayload json.RawMessage
 )
 
-// choicesStdin is where --choices-file - reads; tests replace it.
+// choicesStdin is where --decisions-file - reads; tests replace it.
 var choicesStdin io.Reader = os.Stdin
 
-// runChoicesAskUser is the ask_user side effect after a choice prompt is
+// runChoicesAskUser is the ask_user side effect after a decision prompt is
 // sent from an agent: the same status update as
 // `sciontool status ask_user "<summary>"`. Tests replace it.
 var runChoicesAskUser = agentstatus.RunAskUser
@@ -50,39 +54,47 @@ var runChoicesAskUser = agentstatus.RunAskUser
 // choicesSummaryMax caps the first question in the ask_user summary.
 const choicesSummaryMax = 120
 
-// choicesRequested reports whether this invocation sends choices.
+// choicesRequested reports whether this invocation sends decisions.
 func choicesRequested() bool {
-	return msgChoices != "" || msgChoicesFile != ""
+	return msgChoices != "" || msgChoicesFile != "" || msgLegacyChoices != "" || msgLegacyChoicesFile != ""
 }
 
-// resetChoiceFlags clears the choice flag state (tests reuse the command).
+// resetChoiceFlags clears the decision flag state (tests reuse the command).
 func resetChoiceFlags() {
-	msgChoices, msgChoicesFile, msgChoicesUpdate, msgChoicesPayload = "", "", false, nil
+	msgChoices, msgChoicesFile, msgLegacyChoices, msgLegacyChoicesFile, msgChoicesUpdate, msgChoicesPayload = "", "", "", "", false, nil
 }
 
-// validateChoiceFlags checks the choice flags against each other and the
+// validateChoiceFlags checks the decision flags against each other and the
 // recipient, before anything is read or sent. agentTarget and group are
-// the recipient kinds a choice prompt may not go to.
+// the recipient kinds a decision prompt may not go to.
 func validateChoiceFlags(agentTarget, group bool) error {
-	if msgChoices != "" && msgChoicesFile != "" {
-		return newUsageError("--choices and --choices-file are mutually exclusive")
+	if msgChoices != "" && msgLegacyChoices != "" {
+		return newUsageError("--decisions and --choices are mutually exclusive; use --decisions")
+	}
+	if msgChoicesFile != "" && msgLegacyChoicesFile != "" {
+		return newUsageError("--decisions-file and --choices-file are mutually exclusive; use --decisions-file")
+	}
+	hasInline := msgChoices != "" || msgLegacyChoices != ""
+	hasFile := msgChoicesFile != "" || msgLegacyChoicesFile != ""
+	if hasInline && hasFile {
+		return newUsageError("--decisions and --decisions-file are mutually exclusive")
 	}
 	if !choicesRequested() {
 		if msgChoicesUpdate {
-			return newUsageError("--update is valid only with --choices or --choices-file")
+			return newUsageError("--update is valid only with --decisions or --decisions-file")
 		}
 		return nil
 	}
-	if msgChoicesFile == "-" && msgBodyFile == "-" {
-		return newUsageError("--choices-file - and --body-file - both read stdin; use a file for one of them")
+	if (msgChoicesFile == "-" || msgLegacyChoicesFile == "-") && msgBodyFile == "-" {
+		return newUsageError("--decisions-file - and --body-file - both read stdin; use a file for one of them")
 	}
 	if agentTarget || group {
-		return errors.New("choices can be sent only to a user or a conversation (user:<email>, @<email>, conv:<id>, #<thread>), not to an agent or a group")
+		return errors.New("decisions can be sent only to a user or a conversation (user:<email>, @<email>, conv:<id>, #<thread>), not to an agent or a group")
 	}
 	if msgIn != "" || msgAt != "" {
-		return newUsageError("--choices cannot be combined with --in or --at")
+		return newUsageError("--decisions cannot be combined with --in or --at")
 	}
-	// The hub refuses these too (attachments) or ignores them for a choice
+	// The hub refuses these too (attachments) or ignores them for a decision
 	// prompt; refuse them here, before anything is read or sent.
 	for _, f := range []struct {
 		name string
@@ -96,16 +108,16 @@ func validateChoiceFlags(agentTarget, group bool) error {
 		{"--thread-id", msgThreadID != ""},
 	} {
 		if f.set {
-			return newUsageError("--choices cannot be combined with %s", f.name)
+			return newUsageError("--decisions cannot be combined with %s", f.name)
 		}
 	}
 	if !choicesSenderIsAgent() {
-		return errors.New("choices can be sent only by an agent; it works inside an agent container (agent mode, with SCION_AGENT_NAME set)")
+		return errors.New("decisions can be sent only by an agent; it works inside an agent container (agent mode, with SCION_AGENT_NAME set)")
 	}
 	return nil
 }
 
-// choicesSenderIsAgent is the one test for "an agent sends this choice
+// choicesSenderIsAgent is the one test for "an agent sends this decision
 // prompt", used both to refuse a send (validateChoiceFlags) and to run the
 // ask_user side effect after one (afterChoicesSent). It needs both: agent
 // mode, which the side effect is for, and SCION_AGENT_NAME, the agent
@@ -119,30 +131,38 @@ func choicesSenderIsAgent() bool {
 // loadChoicesPayload reads the decisions JSON and checks only that it is a
 // JSON array; every rule is the hub's to enforce.
 func loadChoicesPayload() (json.RawMessage, error) {
+	inline := msgChoices
+	if inline == "" {
+		inline = msgLegacyChoices
+	}
+	file := msgChoicesFile
+	if file == "" {
+		file = msgLegacyChoicesFile
+	}
 	var raw []byte
 	switch {
-	case msgChoices != "":
-		raw = []byte(msgChoices)
-	case msgChoicesFile == "-":
+	case inline != "":
+		raw = []byte(inline)
+	case file == "-":
 		b, err := io.ReadAll(choicesStdin)
 		if err != nil {
-			return nil, fmt.Errorf("reading --choices-file from stdin: %w", err)
+			return nil, fmt.Errorf("reading --decisions-file from stdin: %w", err)
 		}
 		raw = b
 	default:
-		b, err := os.ReadFile(msgChoicesFile)
+		b, err := os.ReadFile(file)
 		if err != nil {
-			return nil, fmt.Errorf("reading --choices-file: %w", err)
+			return nil, fmt.Errorf("reading --decisions-file: %w", err)
 		}
 		raw = b
 	}
 	raw = bytes.TrimSpace(raw)
 	var probe []json.RawMessage
 	if err := json.Unmarshal(raw, &probe); err != nil {
-		return nil, fmt.Errorf("choices must be a JSON array of decisions: %v", err)
+		return nil, fmt.Errorf("--decisions must be a JSON array of decisions: %v", err)
 	}
 	if len(probe) == 0 {
-		return nil, errors.New("choices must hold at least one decision")
+		return nil, errors.New("--decisions must hold at least one decision")
 	}
 	return json.RawMessage(raw), nil
 }
