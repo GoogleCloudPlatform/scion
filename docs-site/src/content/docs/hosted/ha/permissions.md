@@ -237,7 +237,7 @@ GCP identity failures carry a stable `code`. The message names the step that fai
 | `identity_not_verified` | 400 (422 when setting the hub default) | An agent is created, patched, reincarnated or started with an account the Hub cannot obtain tokens for. Also returned when a project default (400) or the hub default (422, like the hub settings' other validation errors) is set to an unverified account. | A project admin grants the Hub's service account `roles/iam.serviceAccountTokenCreator` on the account, then verifies it (`scion service-accounts verify <id>`). A hub admin does this for a hub-scoped account (`--global`). |
 | `identity_default_invalid` | 400 | A configured default (project, per-broker, per-profile or hub) names an account that is not available in the project or not verified. | Names the default (`project default`, `project default for Runtime Broker "<broker>"`, `project default for profile "<profile>"` or `hub default`), the setting to change (`defaultGCPIdentityServiceAccountID`, the broker's entry in `defaultGCPIdentityServiceAccountIDByBroker` / `scion project identity default set\|unset --broker <brokerId>`, the profile's entry in `defaultGCPIdentityServiceAccountIDByProfile`, or `agent_defaults.default_gcp_identity_service_account_id`) and who changes it (a project admin, or a hub admin for the hub default). |
 | `identity_assign_denied` | 403 | The caller may not assign the account. Also returned, still as 403, when an agent is started, restarted or reincarnated with a hub-scoped account that `gcp_iam_check_mode` no longer allows. | Names what is missing: `gcp_service_account.assign` (a project owner or admin grants it by adding the caller to the project; for a hub-scoped account, a hub admin adds the caller to the hub's members), `iam.serviceAccounts.actAs` on the account (an IAM admin of the account's GCP project grants it, for example with `roles/iam.serviceAccountUser`), or `gcp_iam_check_mode: enforce` for a hub-scoped account (a hub admin sets it). Delegation-chain denials for agents keep their own messages. |
-| `identity_not_mapped`, `identity_ksa_mismatch` | 400 | Kubernetes Workload Identity mapping errors. | See [assign on Kubernetes](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping). |
+| `identity_not_mapped`, `identity_ksa_mismatch`, `identity_ksa_conflict` | 400 | Kubernetes Workload Identity mapping and KSA conflict errors. | See [assign on Kubernetes](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping). |
 | `identity_ambiguous` | 400 | A service account reference matches more than one account. | Retry with one of the listed ids. |
 
 An account that does not exist, or that the caller cannot see from the project, is still refused with `400 validation_error` and the same "not available" message as before.
@@ -307,14 +307,19 @@ ServiceAccount (KSA) already bound to the resolved GSA, and no
 The `actAs` and hub-scoped-service-account gates above are unchanged and evaluated
 exactly the same way regardless of runtime — they authorize *who may be assigned* a
 GSA, independent of how the runtime later establishes that identity. What differs on
-Kubernetes is a separate, broker-side requirement: the resolved GSA must have a KSA
-mapped to it in `kubernetes_service_account_mappings` (runtime or profile level, in the
-broker's own global settings — this mapping is operator-configured only and is
-never read from a project's settings), pre-provisioned by the operator — Scion does not
-create, annotate, or bind KSAs itself. Without a mapping, the broker uses the one KSA in
-the agent's namespace annotated `iam.gke.io/gcp-service-account` with the GSA, if there is
-exactly one (this needs read-only `list` access to `serviceaccounts` in that namespace).
-A dispatch whose GSA has neither fails before any pod is created, naming the setting to add. See
+Kubernetes is a separate, broker-side requirement: the resolved GSA must resolve to a KSA
+through one of: (1) an explicit entry in `kubernetes_service_account_mappings` (runtime or
+profile level, in the broker's own global settings — never read from a project's settings),
+pre-provisioned by the operator (Scion never creates or modifies KSAs listed in mappings);
+(2) annotation discovery of the single KSA in the agent's namespace annotated
+`iam.gke.io/gcp-service-account` with the GSA (needs read-only `list` access to
+`serviceaccounts` in that namespace); or (3) opt-in creation of the conventional
+`<account ID>` KSA on first start when both `runtimes.<entry>.create_service_accounts: true`
+on the broker and `hub.k8s_workload_identity_setup` on the Hub are enabled and the GSA was
+minted by the Hub (needs `get`, `list`, and `create` on `serviceaccounts` in a namespace
+dedicated to Scion agents; existing KSAs are never modified and name collisions fail with
+`400 identity_ksa_conflict`). A dispatch whose GSA matches none of these fails before any
+pod is created. See
 [Running Scion on Kubernetes](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping)
 and [setup-gcp.md §2i](/scion/hosted/ha/setup-gcp/#2i-gke-workload-identity-for-gcp-identity-mode-assign).
 
