@@ -34,7 +34,7 @@ const {
   fetchAskerAnswerability,
   GENERIC_ANSWER_DENIED_REASON,
   READ_ONLY_ANSWER_REASON,
-} = await import('./chat-choices.js');
+} = await import('./decision-prompts.js');
 
 const LINEAGE =
   'release-bot is in lineage mode and only accepts messages from users in its ancestry. You are not in its lineage.';

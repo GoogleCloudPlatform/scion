@@ -15,7 +15,7 @@
  */
 
 /**
- * `<scion-chat-choice-response>` and `<scion-chat-message>` choice-response
+ * `<scion-chat-decision-response>` and `<scion-chat-message>` decision-response
  * attribution (ptone/scion#7673, ptone/scion#7775, design §4.6 & Mock P2-7):
  * single and set lines, `answeredByUserId` attribution, interpreted
  * provenance, confirmed, overridden/changed, not delivered, View reply,
@@ -25,17 +25,17 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { DECISIONS_FLAG, setFeatureFlag } from '../../../utils/feature-flags.js';
 import type {
-  ChoiceResponseSetAnswer,
-  ChoiceResponseSetView,
-  ChoiceResponseView,
+  DecisionResponseSetAnswer,
+  DecisionResponseSetView,
+  DecisionResponseView,
 } from '../../../shared/types.js';
 
-await import('./chat-choice-response.js');
+await import('./chat-decision-response.js');
 await import('./chat-message.js');
-type ScionChatChoiceResponse = import('./chat-choice-response.js').ScionChatChoiceResponse;
+type ScionChatDecisionResponse = import('./chat-decision-response.js').ScionChatDecisionResponse;
 type ScionChatMessage = import('./chat-message.js').ScionChatMessage;
 
-function single(over: Partial<ChoiceResponseView> = {}): ChoiceResponseView {
+function single(over: Partial<DecisionResponseView> = {}): DecisionResponseView {
   return {
     rowId: 'r1',
     ref: 'D234',
@@ -50,7 +50,7 @@ function single(over: Partial<ChoiceResponseView> = {}): ChoiceResponseView {
   };
 }
 
-function setAnswer(over: Partial<ChoiceResponseSetAnswer> = {}): ChoiceResponseSetAnswer {
+function setAnswer(over: Partial<DecisionResponseSetAnswer> = {}): DecisionResponseSetAnswer {
   const key = over.key ?? 'D234';
   const label = over.label ?? 'Yes';
   return {
@@ -68,7 +68,7 @@ function setAnswer(over: Partial<ChoiceResponseSetAnswer> = {}): ChoiceResponseS
   };
 }
 
-function set(over: Partial<ChoiceResponseSetView> = {}): ChoiceResponseSetView {
+function set(over: Partial<DecisionResponseSetView> = {}): DecisionResponseSetView {
   return {
     promptMessageId: 'p2',
     batchId: 'b1',
@@ -84,7 +84,7 @@ function set(over: Partial<ChoiceResponseSetView> = {}): ChoiceResponseSetView {
 async function mount(
   props: Partial<
     Pick<
-      ScionChatChoiceResponse,
+      ScionChatDecisionResponse,
       | 'response'
       | 'responseSet'
       | 'answererName'
@@ -94,8 +94,8 @@ async function mount(
       | 'timestamp'
     >
   >
-): Promise<ScionChatChoiceResponse> {
-  const el = document.createElement('scion-chat-choice-response');
+): Promise<ScionChatDecisionResponse> {
+  const el = document.createElement('scion-chat-decision-response');
   el.answererName = 'alice';
   el.timestamp = '2026-11-12T15:42:00Z';
   Object.assign(el, props);
@@ -104,7 +104,7 @@ async function mount(
   return el;
 }
 
-const root = (el: ScionChatChoiceResponse): ShadowRoot => el.shadowRoot!;
+const root = (el: ScionChatDecisionResponse): ShadowRoot => el.shadowRoot!;
 const text = (n: Element | null): string => n?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
 
 function jumps(el: HTMLElement): string[] {
@@ -385,8 +385,8 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
     Object.assign(msg, props);
     document.body.appendChild(msg);
     await msg.updateComplete;
-    const inner = msg.shadowRoot?.querySelector<ScionChatChoiceResponse>(
-      'scion-chat-choice-response'
+    const inner = msg.shadowRoot?.querySelector<ScionChatDecisionResponse>(
+      'scion-chat-decision-response'
     );
     if (inner) await inner.updateComplete;
     return msg;
@@ -400,8 +400,8 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
       routedTo: 'release-bot',
       decisionResponse: single({ answeredByUserId: 'u-alice', answeredByName: 'Alice' }),
     });
-    expect(ownMsg.shadowRoot!.querySelector('.choice-response-row.own')).not.toBeNull();
-    const ownLine = ownMsg.shadowRoot!.querySelector('scion-chat-choice-response')!;
+    expect(ownMsg.shadowRoot!.querySelector('.decision-response-row.own')).not.toBeNull();
+    const ownLine = ownMsg.shadowRoot!.querySelector('scion-chat-decision-response')!;
     expect(text(ownLine.shadowRoot!.querySelector('.line'))).toContain('you chose Yes for D234');
 
     const bobMsg = await mountMsg({
@@ -411,8 +411,8 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
       routedTo: 'release-bot',
       decisionResponse: single({ answeredByUserId: 'u-bob', answeredByName: 'Bob' }),
     });
-    expect(bobMsg.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
-    const bobLine = bobMsg.shadowRoot!.querySelector('scion-chat-choice-response')!;
+    expect(bobMsg.shadowRoot!.querySelector('.decision-response-row.other')).not.toBeNull();
+    const bobLine = bobMsg.shadowRoot!.querySelector('scion-chat-decision-response')!;
     expect(text(bobLine.shadowRoot!.querySelector('.line'))).toContain('Bob chose Yes for D234');
   });
 
@@ -423,8 +423,8 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
       senderName: 'Alice',
       decisionResponse: single({ answeredByUserId: 'u-alice', answeredByName: 'Alice' }),
     });
-    expect(msg.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
-    const line = msg.shadowRoot!.querySelector('scion-chat-choice-response')!;
+    expect(msg.shadowRoot!.querySelector('.decision-response-row.other')).not.toBeNull();
+    const line = msg.shadowRoot!.querySelector('scion-chat-decision-response')!;
     expect(text(line.shadowRoot!.querySelector('.line'))).toContain('Alice chose Yes for D234');
     expect(text(line.shadowRoot!.querySelector('.line'))).not.toContain('you chose');
   });
@@ -441,9 +441,9 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
           senderName: 'Alice',
           decisionResponse: response,
         });
-        expect(msg.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
-        expect(msg.shadowRoot!.querySelector('.choice-response-row.own')).toBeNull();
-        const line = msg.shadowRoot!.querySelector('scion-chat-choice-response')!;
+        expect(msg.shadowRoot!.querySelector('.decision-response-row.other')).not.toBeNull();
+        expect(msg.shadowRoot!.querySelector('.decision-response-row.own')).toBeNull();
+        const line = msg.shadowRoot!.querySelector('scion-chat-decision-response')!;
         expect(text(line.shadowRoot!.querySelector('.line'))).toContain(
           'Old User chose Yes for D234'
         );
@@ -467,8 +467,8 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
         sourceMessageId: 'reply-42',
       }),
     });
-    expect(ownInterp.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
-    const ownLine = ownInterp.shadowRoot!.querySelector('scion-chat-choice-response')!;
+    expect(ownInterp.shadowRoot!.querySelector('.decision-response-row.other')).not.toBeNull();
+    const ownLine = ownInterp.shadowRoot!.querySelector('scion-chat-decision-response')!;
     expect(ownLine.getAttribute('lane')).toBe('other');
     expect(text(ownLine.shadowRoot!.querySelector('.line'))).toMatch(
       /^release-bot recorded your answer Yes for D234 from your reply · \d\d:\d\d · View reply · Jump$/
@@ -505,9 +505,9 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
         ],
       }),
     });
-    expect(bobInterpSet.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
+    expect(bobInterpSet.shadowRoot!.querySelector('.decision-response-row.other')).not.toBeNull();
     const bobSummary = bobInterpSet
-      .shadowRoot!.querySelector('scion-chat-choice-response')!
+      .shadowRoot!.querySelector('scion-chat-decision-response')!
       .shadowRoot!.querySelector('summary')!;
     expect(text(bobSummary)).toMatch(
       /^release-bot recorded Bob's answers to 2 decisions from their reply · \d\d:\d\d · Show answers ▸$/

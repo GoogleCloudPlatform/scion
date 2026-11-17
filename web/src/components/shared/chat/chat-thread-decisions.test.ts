@@ -19,7 +19,7 @@
  * double gate (hub fields and the web.decisions browser flag), the
  * history side maps and live chat.message fields, and the version-guarded
  * patch from `decision-updated` (another tab's answer over SSE) and from the
- * card's own `choice-answered`.
+ * card's own `decision-answered`.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -51,7 +51,7 @@ vi.mock('../../../client/api.js', () => ({
   apiErrorMessageFromBody: (): undefined => undefined,
 }));
 
-const { CHOICE_REPLACEMENT_ELSEWHERE_TOAST, MESSAGE_UNAVAILABLE_TOAST } =
+const { DECISION_REPLACEMENT_ELSEWHERE_TOAST, MESSAGE_UNAVAILABLE_TOAST } =
   await import('./chat-thread.js');
 type ScionChatThread = import('./chat-thread.js').ScionChatThread;
 
@@ -152,7 +152,7 @@ async function messageEl(thread: ScionChatThread, id = 'p1'): Promise<HTMLElemen
 function cardOf(msgEl: HTMLElement) {
   return msgEl.shadowRoot!.querySelector<
     HTMLElement & { updateComplete: Promise<boolean>; shadowRoot: ShadowRoot }
-  >('scion-chat-choices');
+  >('scion-chat-decisions');
 }
 
 async function footText(msgEl: HTMLElement): Promise<string> {
@@ -200,7 +200,7 @@ describe('choice prompt rendering', () => {
     // The hub's markdown fallback is hidden.
     expect(text).not.toContain('recommended)_');
     expect(text).not.toContain('**D234.**');
-    expect(el.shadowRoot!.querySelector('.bubble.choice')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('.bubble.decision')).not.toBeNull();
   });
 
   it('renders the fallback markdown as today with the browser flag off', async () => {
@@ -210,7 +210,7 @@ describe('choice prompt rendering', () => {
 
     expect(cardOf(el)).toBeNull();
     expect(bodyText(el)).toContain('Ship it?');
-    expect(el.shadowRoot!.querySelector('.bubble.choice')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.bubble.decision')).toBeNull();
   });
 
   it('renders the fallback when the hub sends no choice fields (experiment off)', async () => {
@@ -234,7 +234,7 @@ describe('choice prompt rendering', () => {
 
     expect(cardOf(el)).toBeNull();
     expect(bodyText(el)).toContain('Ship it?');
-    expect(el.shadowRoot!.querySelector('.bubble.choice')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.bubble.decision')).toBeNull();
   });
 
   it('renders the card for a live chat.message with inline decision fields', async () => {
@@ -320,12 +320,12 @@ describe('decision-updated', () => {
     expect(await footText(el)).toMatch(/^Answered by Bob/);
   });
 
-  it('holds the view of the card’s own answer (choice-answered)', async () => {
+  it('holds the view of the card’s own answer (decision-answered)', async () => {
     const thread = await open();
     const el = await messageEl(thread);
 
     cardOf(el)!.dispatchEvent(
-      new CustomEvent('choice-answered', {
+      new CustomEvent('decision-answered', {
         detail: { messageId: 'p1', decisions: [decided('Me')], responseMessageId: 'resp-1' },
         bubbles: true,
         composed: true,
@@ -381,7 +381,7 @@ describe('set prompts and jump links', () => {
     expect(counter?.trim()).toBe('1 remaining · 1 answered by Bob');
   });
 
-  it('scrolls to the replacement when a card emits choice-jump', async () => {
+  it('scrolls to the replacement when a card emits decision-jump', async () => {
     const thread = await open();
     const el = await messageEl(thread);
     const scroll = vi
@@ -389,14 +389,14 @@ describe('set prompts and jump links', () => {
       .mockImplementation(() => Promise.resolve());
 
     cardOf(el)!.dispatchEvent(
-      new CustomEvent('choice-jump', {
+      new CustomEvent('decision-jump', {
         detail: { messageId: 'p2' },
         bubbles: true,
         composed: true,
       })
     );
 
-    expect(scroll).toHaveBeenCalledWith('p2', true, false, CHOICE_REPLACEMENT_ELSEWHERE_TOAST);
+    expect(scroll).toHaveBeenCalledWith('p2', true, false, DECISION_REPLACEMENT_ELSEWHERE_TOAST);
   });
 
   it('says the new version is in another conversation when this one does not have it', async () => {
@@ -414,7 +414,7 @@ describe('set prompts and jump links', () => {
     });
 
     cardOf(el)!.dispatchEvent(
-      new CustomEvent('choice-jump', {
+      new CustomEvent('decision-jump', {
         detail: { messageId: 'p-dm-v2' },
         bubbles: true,
         composed: true,
@@ -422,7 +422,7 @@ describe('set prompts and jump links', () => {
     );
 
     await vi.waitFor(() =>
-      expect(showToast).toHaveBeenCalledWith(CHOICE_REPLACEMENT_ELSEWHERE_TOAST, 'warning')
+      expect(showToast).toHaveBeenCalledWith(DECISION_REPLACEMENT_ELSEWHERE_TOAST, 'warning')
     );
     expect(showToast).not.toHaveBeenCalledWith(MESSAGE_UNAVAILABLE_TOAST, 'warning');
   });
@@ -586,7 +586,7 @@ describe('mobile touch on choice cards (ptone/scion#7839)', () => {
     await thread.updateComplete;
     expect(hasOpenMenu(thread)).toBe(false);
 
-    // Tapping the message intro outside <scion-chat-choices> still opens the message menu.
+    // Tapping the message intro outside <scion-chat-decisions> still opens the message menu.
     const msgBody =
       descEl.shadowRoot!.querySelector<HTMLElement>('.message-content, .msg-body') ?? descEl;
     msgBody.dispatchEvent(

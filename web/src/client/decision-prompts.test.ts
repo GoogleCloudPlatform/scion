@@ -29,11 +29,11 @@ const {
   actionableReason,
   answerDecision,
   answerDecisionSet,
-  applyChoiceHistoryMaps,
-  carryChoiceFields,
+  applyDecisionHistoryMaps,
+  carryDecisionFields,
   newerDecisionView,
   patchDecisions,
-} = await import('./chat-choices.js');
+} = await import('./decision-prompts.js');
 
 function view(over: Partial<DecisionView> = {}): DecisionView {
   return {
@@ -239,12 +239,12 @@ describe('patchDecisions', () => {
   });
 });
 
-describe('applyChoiceHistoryMaps', () => {
+describe('applyDecisionHistoryMaps', () => {
   it('copies the five side maps onto their messages', () => {
     const prompt = msg();
     const resp = msg({ id: 'm2', type: 'decision-response' });
     const respSet = msg({ id: 'm3', type: 'decision-response' });
-    applyChoiceHistoryMaps([prompt, resp, respSet], {
+    applyDecisionHistoryMaps([prompt, resp, respSet], {
       messageDecisions: { m1: [view()] },
       messageDecisionIntros: { m1: 'Intro' },
       messageDecisionAnswerModes: { m1: 'single' },
@@ -272,31 +272,31 @@ describe('applyChoiceHistoryMaps', () => {
 
   it('leaves messages untouched without maps (experiment off)', () => {
     const m = msg();
-    applyChoiceHistoryMaps([m], {});
+    applyDecisionHistoryMaps([m], {});
     expect(m.decisions).toBeUndefined();
     expect(m.decisionIntro).toBeUndefined();
   });
 });
 
-describe('carryChoiceFields', () => {
+describe('carryDecisionFields', () => {
   it('keeps an answered row when an older copy of the prompt arrives', () => {
     const existing = msg({ decisions: [decided()] });
     const incoming = msg({ decisions: [view()] });
-    carryChoiceFields(existing, incoming);
+    carryDecisionFields(existing, incoming);
     expect(incoming.decisions?.[0]?.status).toBe('decided');
   });
 
   it('takes newer rows', () => {
     const existing = msg({ decisions: [view()] });
     const incoming = msg({ decisions: [decided()] });
-    carryChoiceFields(existing, incoming);
+    carryDecisionFields(existing, incoming);
     expect(incoming.decisions?.[0]?.status).toBe('decided');
   });
 
   it('keeps the held choice fields when the incoming copy has none', () => {
     const existing = msg({ decisions: [view()], decisionIntro: 'Intro', answerMode: 'single' });
     const incoming = msg();
-    carryChoiceFields(existing, incoming);
+    carryDecisionFields(existing, incoming);
     expect(incoming.decisions).toBe(existing.decisions);
     expect(incoming.decisionIntro).toBe('Intro');
     expect(incoming.answerMode).toBe('single');

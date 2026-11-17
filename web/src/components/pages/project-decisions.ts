@@ -285,7 +285,7 @@ export class ScionPageProjectDecisions extends LitElement {
               renderPromptCard(p, {
                 currentUserId: this.ctrl.currentUserId,
                 defaultProjectId: this.projectId,
-                onAnswered: this.ctrl.onPromptChoiceAnswered,
+                onAnswered: this.ctrl.onPromptDecisionAnswered,
                 onJump: this.ctrl.onPromptMessageJump,
               })
           )}

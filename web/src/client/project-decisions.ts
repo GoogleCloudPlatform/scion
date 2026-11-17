@@ -17,20 +17,20 @@
 /**
  * Project Decisions API client & types (ptone/scion#7800, Plan §5.1–§5.2).
  *
- * Mirrors `pkg/hub/choices_project.go` (`GET /api/v1/projects/{id}/decisions`).
+ * Mirrors `pkg/hub/decisions_project.go` (`GET /api/v1/projects/{id}/decisions`).
  */
 
 import { apiFetch, parseApiError } from './api.js';
-import type { ChoiceAnswerMode, DecisionView } from '../shared/types.js';
+import type { DecisionAnswerMode, DecisionView } from '../shared/types.js';
 
 /** Error code returned by the Hub when bounded decisions search times out (D9). */
 export const DECISIONS_SEARCH_TIMEOUT_CODE = 'SEARCH_TIMEOUT';
 
-/** Minimum and maximum rune counts accepted for `q` by `pkg/hub/choices_project.go` (D1). */
+/** Minimum and maximum rune counts accepted for `q` by `pkg/hub/decisions_project.go` (D1). */
 export const MIN_DECISIONS_SEARCH_RUNES = 2;
 export const MAX_DECISIONS_SEARCH_RUNES = 256;
 
-/** Maximum UTF-8 byte length accepted for `conversation` by `pkg/hub/choices_project.go`. */
+/** Maximum UTF-8 byte length accepted for `conversation` by `pkg/hub/decisions_project.go`. */
 export const MAX_DECISIONS_CONVERSATION_BYTES = 256;
 
 const AGENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -87,7 +87,7 @@ export interface ProjectDecisionPromptView {
   askerAgentId: string;
   askerAgentName: string;
   createdAt: string;
-  answerMode: ChoiceAnswerMode | (string & {});
+  answerMode: DecisionAnswerMode | (string & {});
   waitingOnYou: boolean;
   canAnswer: boolean;
   disabledReason?: string;

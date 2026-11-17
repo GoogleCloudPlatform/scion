@@ -15,14 +15,14 @@
  */
 
 /**
- * `<scion-chat-choices>` in single mode (ptone/scion#7673, design §4.2,
+ * `<scion-chat-decisions>` in single mode (ptone/scion#7673, design §4.2,
  * §4.3, §4.7): pending with the recommended choice outlined, submitting,
  * answered, the 409 and error toasts, and Enter on the focused card.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DecisionView } from '../../../shared/types.js';
-import type { ChoiceAnsweredDetail } from '../../../client/chat-choices.js';
+import type { DecisionAnsweredDetail } from '../../../client/decision-prompts.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
@@ -34,8 +34,8 @@ vi.mock('../../../client/api.js', async (orig) => ({
 }));
 vi.mock('../../../utils/toast.js', () => ({ showToast }));
 
-await import('./chat-choices.js');
-type ScionChatChoices = import('./chat-choices.js').ScionChatChoices;
+await import('./chat-decisions.js');
+type ScionChatDecisions = import('./chat-decisions.js').ScionChatDecisions;
 
 function view(over: Partial<DecisionView> = {}): DecisionView {
   return {
@@ -87,8 +87,8 @@ function res(status: number, body: unknown): Response {
   } as unknown as Response;
 }
 
-async function mount(decisions: DecisionView[]): Promise<ScionChatChoices> {
-  const el = document.createElement('scion-chat-choices');
+async function mount(decisions: DecisionView[]): Promise<ScionChatDecisions> {
+  const el = document.createElement('scion-chat-decisions');
   el.messageId = 'm1';
   el.currentUserId = 'u-me';
   el.decisions = decisions;
@@ -97,14 +97,14 @@ async function mount(decisions: DecisionView[]): Promise<ScionChatChoices> {
   return el;
 }
 
-const root = (el: ScionChatChoices): ShadowRoot => el.shadowRoot!;
-const button = (el: ScionChatChoices, id: string): HTMLElement =>
+const root = (el: ScionChatDecisions): ShadowRoot => el.shadowRoot!;
+const button = (el: ScionChatDecisions, id: string): HTMLElement =>
   root(el).querySelector<HTMLElement>(`[data-choice="${id}"]`)!;
-const foot = (el: ScionChatChoices): string =>
+const foot = (el: ScionChatDecisions): string =>
   root(el).querySelector('.row-foot')?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-const card = (el: ScionChatChoices): HTMLElement => root(el).querySelector<HTMLElement>('.card')!;
+const card = (el: ScionChatDecisions): HTMLElement => root(el).querySelector<HTMLElement>('.card')!;
 
-async function settle(el: ScionChatChoices): Promise<void> {
+async function settle(el: ScionChatDecisions): Promise<void> {
   await getMarkdownRenderer();
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
@@ -178,13 +178,13 @@ describe('pending', () => {
 });
 
 describe('answering', () => {
-  it('shows submitting, then the 200 view, and emits choice-answered', async () => {
+  it('shows submitting, then the 200 view, and emits decision-answered', async () => {
     let resolve!: (r: Response) => void;
     apiFetch.mockImplementation(() => new Promise<Response>((r) => (resolve = r)));
     const el = await mount([view()]);
-    const events: ChoiceAnsweredDetail[] = [];
-    el.addEventListener('choice-answered', (e) =>
-      events.push((e as CustomEvent<ChoiceAnsweredDetail>).detail)
+    const events: DecisionAnsweredDetail[] = [];
+    el.addEventListener('decision-answered', (e) =>
+      events.push((e as CustomEvent<DecisionAnsweredDetail>).detail)
     );
 
     button(el, 'no').click();
@@ -280,7 +280,7 @@ describe('answering', () => {
     );
     const el = await mount([view()]);
     const events: unknown[] = [];
-    el.addEventListener('choice-answered', (e) => events.push(e));
+    el.addEventListener('decision-answered', (e) => events.push(e));
     button(el, 'no').click();
     await settle(el);
 
@@ -345,7 +345,7 @@ describe('Enter on the focused card', () => {
 });
 
 describe('agent-written markdown in the card', () => {
-  async function rendered(el: ScionChatChoices): Promise<void> {
+  async function rendered(el: ScionChatDecisions): Promise<void> {
     await vi.waitFor(
       () => {
         if (!root(el).querySelector('.desc strong')) throw new Error('markdown not rendered yet');

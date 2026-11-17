@@ -68,7 +68,7 @@ function jsonResponse(body: unknown, status = 200): Promise<Response> {
 
 await import('./project-decisions.js');
 type ScionPageProjectDecisions = import('./project-decisions.js').ScionPageProjectDecisions;
-type ScionChatChoices = import('../shared/chat/chat-choices.js').ScionChatChoices;
+type ScionChatDecisions = import('../shared/chat/chat-decisions.js').ScionChatDecisions;
 type ScionDecisionsFilterPanel =
   import('../shared/decisions-filter-panel.js').ScionDecisionsFilterPanel;
 
@@ -152,7 +152,7 @@ async function settle(el: ScionPageProjectDecisions, ms = 15): Promise<void> {
   );
   await panel?.updateComplete;
   for (const card of Array.from(
-    el.shadowRoot?.querySelectorAll<ScionChatChoices>('scion-chat-choices') ?? []
+    el.shadowRoot?.querySelectorAll<ScionChatDecisions>('scion-chat-decisions') ?? []
   )) {
     await card.updateComplete;
   }
@@ -445,7 +445,7 @@ describe('<scion-page-project-decisions>', () => {
     );
     expect(topicCard.querySelector('[data-purged-note]')).toBeNull();
 
-    const topicChoices = topicCard.querySelector<ScionChatChoices>('scion-chat-choices')!;
+    const topicChoices = topicCard.querySelector<ScionChatDecisions>('scion-chat-decisions')!;
     expect(topicChoices.surface).toBe('decisions_page');
     topicChoices.shadowRoot?.querySelector<HTMLElement>('[data-action="view-reply"]')?.click();
     expect(navEvents).toContain('/chat/space/p-1/thread/topic-rel#msg-msg-reply-9');
@@ -461,7 +461,7 @@ describe('<scion-page-project-decisions>', () => {
       'Original message no longer available'
     );
 
-    const dmChoices = dmCard.querySelector<ScionChatChoices>('scion-chat-choices')!;
+    const dmChoices = dmCard.querySelector<ScionChatDecisions>('scion-chat-decisions')!;
     dmChoices.shadowRoot?.querySelector<HTMLElement>('[data-choice="yes"]')?.click();
     await settle(el, 90);
 
@@ -1115,7 +1115,7 @@ describe('<scion-page-project-decisions>', () => {
     expect(pRoot.querySelector('[data-clear-filters]')).toBeNull();
   });
 
-  it('preserves the exact <scion-chat-choices> DOM element for surviving cards via keyed repeat()', async () => {
+  it('preserves the exact <scion-chat-decisions> DOM element for surviving cards via keyed repeat()', async () => {
     enableDecisionsFlag();
     const card1 = makePrompt({
       promptMessageId: 'p-1',
@@ -1144,11 +1144,11 @@ describe('<scion-page-project-decisions>', () => {
     const el = await mount();
     const root = el.shadowRoot!;
 
-    const p1ChoicesBefore = root.querySelector<ScionChatChoices>(
-      '[data-prompt-card="p-1"] scion-chat-choices'
+    const p1ChoicesBefore = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="p-1"] scion-chat-decisions'
     )!;
-    const p2ChoicesBefore = root.querySelector<ScionChatChoices>(
-      '[data-prompt-card="p-2"] scion-chat-choices'
+    const p2ChoicesBefore = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="p-2"] scion-chat-decisions'
     )!;
     expect(p1ChoicesBefore).not.toBeNull();
     expect(p2ChoicesBefore).not.toBeNull();
@@ -1185,8 +1185,8 @@ describe('<scion-page-project-decisions>', () => {
 
     expect(root.querySelector('[data-prompt-card="p-1"]')).toBeNull();
     expect(p1ChoicesBefore.isConnected).toBe(false);
-    const p2ChoicesAfter = root.querySelector<ScionChatChoices>(
-      '[data-prompt-card="p-2"] scion-chat-choices'
+    const p2ChoicesAfter = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="p-2"] scion-chat-decisions'
     )!;
     expect(p2ChoicesAfter).toBe(p2ChoicesBefore);
   });

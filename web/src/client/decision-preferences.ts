@@ -15,14 +15,14 @@
  */
 
 /**
- * The signed-in user's choices-card preference
+ * The signed-in user's decision-card preference
  * (`preferences.preselectRecommendedChoices`, ptone/scion#7842).
  *
  * Off by default: a multi-decision card only outlines recommended choices
  * and nothing is selected until the user clicks. On: each recommended
  * choice starts selected. The app shell sets it from `/auth/me`; the
  * profile settings page sets it after its PATCH. It has no dependencies so
- * the app shell can import it without the choices code.
+ * the app shell can import it without the decisions code.
  */
 
 import type { ReactiveController, ReactiveControllerHost } from 'lit';
@@ -30,7 +30,7 @@ import type { ReactiveController, ReactiveControllerHost } from 'lit';
 let preselect = false;
 
 /** Dispatched on `window` when the preference changes. */
-export const CHOICE_PREFERENCES_CHANGED_EVENT = 'scion-choice-preferences-changed';
+export const DECISION_PREFERENCES_CHANGED_EVENT = 'scion-decision-preferences-changed';
 
 /** Whether multi-decision cards start with recommended choices selected. */
 export function preselectRecommendedChoices(): boolean {
@@ -43,12 +43,12 @@ export function setPreselectRecommendedChoices(value: boolean | null | undefined
   if (next === preselect) return;
   preselect = next;
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new Event(CHOICE_PREFERENCES_CHANGED_EVENT));
+    window.dispatchEvent(new Event(DECISION_PREFERENCES_CHANGED_EVENT));
   }
 }
 
 /** Re-renders its host when the preference changes. */
-export class ChoicePreferencesController implements ReactiveController {
+export class DecisionPreferencesController implements ReactiveController {
   private readonly host: ReactiveControllerHost;
 
   constructor(host: ReactiveControllerHost) {
@@ -61,10 +61,10 @@ export class ChoicePreferencesController implements ReactiveController {
   };
 
   hostConnected(): void {
-    window.addEventListener(CHOICE_PREFERENCES_CHANGED_EVENT, this.handleChange);
+    window.addEventListener(DECISION_PREFERENCES_CHANGED_EVENT, this.handleChange);
   }
 
   hostDisconnected(): void {
-    window.removeEventListener(CHOICE_PREFERENCES_CHANGED_EVENT, this.handleChange);
+    window.removeEventListener(DECISION_PREFERENCES_CHANGED_EVENT, this.handleChange);
   }
 }

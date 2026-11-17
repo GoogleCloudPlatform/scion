@@ -28,8 +28,8 @@ import { apiFetch } from '../../client/api.js';
 import {
   actionableReason,
   patchDecisions,
-  type ChoiceAnsweredDetail,
-} from '../../client/chat-choices.js';
+  type DecisionAnsweredDetail,
+} from '../../client/decision-prompts.js';
 import { chatConversationPath } from '../../client/chat-routes.js';
 import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import {
@@ -52,7 +52,7 @@ import {
   buildProfileDecisionsUrlSearch,
   cleanProfileProjectValue,
   defaultProfileDecisionsSort,
-  isChoicePromptMessageEvent,
+  isDecisionPromptMessageEvent,
   parseProfileDecisionsUrlState,
   type ProfileDecisionActorView,
   type ProfileDecisionMadeGroupView,
@@ -229,7 +229,7 @@ export class DecisionsPageController implements ReactiveController {
     void this.bootIfEnabled();
   };
 
-  private readonly boundOnChoiceUpdated = (e: Event): void => {
+  private readonly boundOnDecisionUpdated = (e: Event): void => {
     if (!this.enabled || !this.canOperate()) return;
     const raw = (e as CustomEvent).detail as {
       data?: {
@@ -251,7 +251,7 @@ export class DecisionsPageController implements ReactiveController {
 
   private readonly boundOnChatMessageReceived = (e: Event): void => {
     if (!this.enabled || !this.canOperate()) return;
-    if (!isChoicePromptMessageEvent(e)) return;
+    if (!isDecisionPromptMessageEvent(e)) return;
     const raw = (e as CustomEvent).detail as {
       data?: { projectId?: string };
       projectId?: string;
@@ -301,7 +301,7 @@ export class DecisionsPageController implements ReactiveController {
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
     window.addEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.boundOnTimezoneChanged);
     window.addEventListener('keydown', this.boundOnKeydown);
-    stateManager.addEventListener('decision-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('decision-updated', this.boundOnDecisionUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
     void this.bootIfEnabled();
   }
@@ -310,7 +310,7 @@ export class DecisionsPageController implements ReactiveController {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
     window.removeEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.boundOnTimezoneChanged);
     window.removeEventListener('keydown', this.boundOnKeydown);
-    stateManager.removeEventListener('decision-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('decision-updated', this.boundOnDecisionUpdated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.teardownActiveLoads();
   }
@@ -1311,9 +1311,9 @@ export class DecisionsPageController implements ReactiveController {
     }
   }
 
-  onPromptChoiceAnswered = (
+  onPromptDecisionAnswered = (
     prompt: ProjectDecisionPromptView,
-    e: CustomEvent<ChoiceAnsweredDetail>
+    e: CustomEvent<DecisionAnsweredDetail>
   ): void => {
     this.applyIncomingDecisionPatch(
       e.detail.messageId || prompt.promptMessageId,

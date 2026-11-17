@@ -4,7 +4,7 @@ import { DECISIONS_FLAG, setFeatureFlag } from '../../utils/feature-flags.js';
 import {
   preselectRecommendedChoices,
   setPreselectRecommendedChoices,
-} from '../../client/choice-preferences.js';
+} from '../../client/decision-preferences.js';
 
 // ── Fetch mock ──
 

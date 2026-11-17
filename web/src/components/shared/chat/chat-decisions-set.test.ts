@@ -15,7 +15,7 @@
  */
 
 /**
- * `<scion-chat-choices>` in set mode (ptone/scion#7673, design §4.2, §4.3,
+ * `<scion-chat-decisions>` in set mode (ptone/scion#7673, design §4.2, §4.3,
  * §4.7): the highlight-only default and the preselect profile setting
  * (ptone/scion#7842), local selection, the "N remaining" counter,
  * Submit gating and its missing-keys hint, the set POST, the submitted
@@ -25,8 +25,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DecisionView } from '../../../shared/types.js';
-import type { ChoiceAnsweredDetail } from '../../../client/chat-choices.js';
-import { setPreselectRecommendedChoices } from '../../../client/choice-preferences.js';
+import type { DecisionAnsweredDetail } from '../../../client/decision-prompts.js';
+import { setPreselectRecommendedChoices } from '../../../client/decision-preferences.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
 const showToast = vi.hoisted(() => vi.fn());
@@ -37,8 +37,8 @@ vi.mock('../../../client/api.js', async (orig) => ({
 }));
 vi.mock('../../../utils/toast.js', () => ({ showToast }));
 
-await import('./chat-choices.js');
-type ScionChatChoices = import('./chat-choices.js').ScionChatChoices;
+await import('./chat-decisions.js');
+type ScionChatDecisions = import('./chat-decisions.js').ScionChatDecisions;
 
 const AT = '2026-11-12T15:44:00Z';
 
@@ -117,8 +117,8 @@ function res(status: number, body: unknown): Response {
   } as unknown as Response;
 }
 
-async function mount(decisions: DecisionView[]): Promise<ScionChatChoices> {
-  const el = document.createElement('scion-chat-choices');
+async function mount(decisions: DecisionView[]): Promise<ScionChatDecisions> {
+  const el = document.createElement('scion-chat-decisions');
   el.messageId = 'm1';
   el.currentUserId = ME.id;
   el.answerMode = 'set';
@@ -128,23 +128,23 @@ async function mount(decisions: DecisionView[]): Promise<ScionChatChoices> {
   return el;
 }
 
-const root = (el: ScionChatChoices): ShadowRoot => el.shadowRoot!;
+const root = (el: ScionChatDecisions): ShadowRoot => el.shadowRoot!;
 const text = (n: Element | null | undefined): string =>
   n?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-const rowEl = (el: ScionChatChoices, rowId: string): HTMLElement =>
+const rowEl = (el: ScionChatDecisions, rowId: string): HTMLElement =>
   root(el).querySelector<HTMLElement>(`.row[data-row="${rowId}"]`)!;
-const choice = (el: ScionChatChoices, rowId: string, id: string): HTMLElement =>
+const choice = (el: ScionChatDecisions, rowId: string, id: string): HTMLElement =>
   rowEl(el, rowId).querySelector<HTMLElement>(`[data-choice="${id}"]`)!;
-const submit = (el: ScionChatChoices): HTMLElement =>
+const submit = (el: ScionChatDecisions): HTMLElement =>
   root(el).querySelector<HTMLElement>('sl-button.submit')!;
-const counter = (el: ScionChatChoices): string => text(root(el).querySelector('.counter'));
+const counter = (el: ScionChatDecisions): string => text(root(el).querySelector('.counter'));
 
-async function settle(el: ScionChatChoices): Promise<void> {
+async function settle(el: ScionChatDecisions): Promise<void> {
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
 }
 
-async function click(el: ScionChatChoices, node: HTMLElement): Promise<void> {
+async function click(el: ScionChatDecisions, node: HTMLElement): Promise<void> {
   node.click();
   await settle(el);
 }
@@ -255,7 +255,7 @@ describe('set card, pending, preselect setting on', () => {
   });
 
   it('treats 2+ decisions as a set even without answerMode', async () => {
-    const el = document.createElement('scion-chat-choices');
+    const el = document.createElement('scion-chat-decisions');
     el.decisions = set();
     document.body.appendChild(el);
     await el.updateComplete;
@@ -364,9 +364,9 @@ describe('set card, submit', () => {
     let release: (r: Response) => void = () => {};
     apiFetch.mockReturnValueOnce(new Promise((r) => (release = r)));
     const el = await mount(set());
-    const events: ChoiceAnsweredDetail[] = [];
-    el.addEventListener('choice-answered', (e) =>
-      events.push((e as CustomEvent<ChoiceAnsweredDetail>).detail)
+    const events: DecisionAnsweredDetail[] = [];
+    el.addEventListener('decision-answered', (e) =>
+      events.push((e as CustomEvent<DecisionAnsweredDetail>).detail)
     );
     await click(el, choice(el, 'r2', 'a'));
     await click(el, submit(el));
@@ -582,7 +582,7 @@ describe('set card, replaced rows', () => {
     expect(submit(el).hasAttribute('disabled')).toBe(false);
 
     const jumps: string[] = [];
-    el.addEventListener('choice-jump', (e) =>
+    el.addEventListener('decision-jump', (e) =>
       jumps.push((e as CustomEvent<{ messageId: string }>).detail.messageId)
     );
     await click(el, r2.querySelector<HTMLElement>('a.jump')!);

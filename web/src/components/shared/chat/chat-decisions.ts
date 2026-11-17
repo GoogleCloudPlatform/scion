@@ -15,13 +15,13 @@
  */
 
 /**
- * `<scion-chat-choices>`: the card a decision-prompt message renders under
+ * `<scion-chat-decisions>`: the card a decision-prompt message renders under
  * web.decisions (ptone/scion#7673, design §4.1–§4.3).
  *
  * Single mode: one click records the answer through
  * `POST /api/v1/decisions/{rowId}/answer`; Enter on the focused card picks
  * the recommended choice. The card applies the 200's view at once and emits
- * `choice-answered` so the thread holds the same view; other tabs get it
+ * `decision-answered` so the thread holds the same view; other tabs get it
  * over `chat.decision.updated`.
  *
  * Set mode (`answerMode=set`): clicks only select. Recommended choices are
@@ -33,13 +33,13 @@
  * `answer_set_changed` takes the fresh views and names the changed rows
  * inline; rows answered elsewhere lock as their updates arrive.
  *
- * Replaced rows link to their new version (`choice-jump`); an
+ * Replaced rows link to their new version (`decision-jump`); an
  * agent-interpreted answer renders read-only.
  *
  * Answerability (design §4.5): the thread passes `answerability` for the
  * prompt's asker. A blocked card disables every choice (`aria-disabled`),
  * and a set's Submit, and shows the reason inline; a 403 on a click or a
- * set submit blocks it the same way and emits `choice-answer-denied`. A
+ * set submit blocks it the same way and emits `decision-answer-denied`. A
  * gone asker stays answerable with a note.
  */
 
@@ -57,26 +57,26 @@ import {
   answerDecisionSet,
   answerabilityFromDenial,
   newerDecisionView,
-} from '../../../client/chat-choices.js';
+} from '../../../client/decision-prompts.js';
 import {
-  ChoicePreferencesController,
+  DecisionPreferencesController,
   preselectRecommendedChoices,
-} from '../../../client/choice-preferences.js';
+} from '../../../client/decision-preferences.js';
 import type {
   AskerAnswerability,
-  ChoiceAnswerDeniedDetail,
-  ChoiceAnsweredDetail,
-  ChoiceAnswerSurface,
+  DecisionAnswerDeniedDetail,
+  DecisionAnsweredDetail,
+  DecisionAnswerSurface,
   SetAnswer,
-} from '../../../client/chat-choices.js';
-import type { ChoiceAnswerMode, ChoiceOption, DecisionView } from '../../../shared/types.js';
+} from '../../../client/decision-prompts.js';
+import type { DecisionAnswerMode, ChoiceOption, DecisionView } from '../../../shared/types.js';
 
 let hintSeq = 0;
 
-@customElement('scion-chat-choices')
-export class ScionChatChoices extends LitElement {
+@customElement('scion-chat-decisions')
+export class ScionChatDecisions extends LitElement {
   readonly _zone = new DisplayZoneController(this);
-  readonly _choicePrefs = new ChoicePreferencesController(this);
+  readonly _decisionPrefs = new DecisionPreferencesController(this);
 
   /** The decision-prompt message id. */
   @property()
@@ -92,7 +92,7 @@ export class ScionChatChoices extends LitElement {
 
   /** The prompt's answer mode; two or more decisions are a set either way. */
   @property()
-  answerMode: ChoiceAnswerMode | undefined = undefined;
+  answerMode: DecisionAnswerMode | undefined = undefined;
 
   /** Whether the viewer can answer this prompt's asker (design §4.5). */
   @property({ attribute: false })
@@ -100,7 +100,7 @@ export class ScionChatChoices extends LitElement {
 
   /** Surface recorded on answers submitted from this card (`native` or `decisions_page`). */
   @property({ type: String })
-  surface: ChoiceAnswerSurface = 'native';
+  surface: DecisionAnswerSurface = 'native';
 
   /**
    * What this card's own 403 said, authoritative over `answerability`
@@ -147,9 +147,9 @@ export class ScionChatChoices extends LitElement {
   @state()
   private answeredElsewhere = new Map<string, string>();
 
-  private readonly hintId = `choice-hint-${++hintSeq}`;
-  private readonly submitHintId = `choice-submit-hint-${hintSeq}`;
-  private readonly reasonId = `choice-reason-${hintSeq}`;
+  private readonly hintId = `decision-hint-${++hintSeq}`;
+  private readonly submitHintId = `decision-submit-hint-${hintSeq}`;
+  private readonly reasonId = `decision-reason-${hintSeq}`;
 
   static override styles = css`
     :host {
@@ -1023,7 +1023,7 @@ export class ScionChatChoices extends LitElement {
     const answerability = answerabilityFromDenial(code, reason, d.askerAgentName);
     this.denied = answerability;
     showToast(blockedText(answerability), 'warning');
-    const detail: ChoiceAnswerDeniedDetail = {
+    const detail: DecisionAnswerDeniedDetail = {
       messageId: this.messageId,
       askerAgentId: d.askerAgentId,
       code,
@@ -1031,7 +1031,7 @@ export class ScionChatChoices extends LitElement {
       answerability,
     };
     this.dispatchEvent(
-      new CustomEvent<ChoiceAnswerDeniedDetail>('choice-answer-denied', {
+      new CustomEvent<DecisionAnswerDeniedDetail>('decision-answer-denied', {
         detail,
         bubbles: true,
         composed: true,
@@ -1043,13 +1043,13 @@ export class ScionChatChoices extends LitElement {
     const next = new Map(this.local);
     next.set(view.rowId, view);
     this.local = next;
-    const detail: ChoiceAnsweredDetail = {
+    const detail: DecisionAnsweredDetail = {
       messageId: this.messageId,
       decisions: [view],
       ...(responseMessageId ? { responseMessageId } : {}),
     };
     this.dispatchEvent(
-      new CustomEvent<ChoiceAnsweredDetail>('choice-answered', {
+      new CustomEvent<DecisionAnsweredDetail>('decision-answered', {
         detail,
         bubbles: true,
         composed: true,
@@ -1542,11 +1542,11 @@ export class ScionChatChoices extends LitElement {
     return id;
   }
 
-  /** Asks the thread to scroll to a replacement version (design §4.1 `choice-jump`). */
+  /** Asks the thread to scroll to a replacement version (design §4.1 `decision-jump`). */
   private jump(e: Event, messageId: string): void {
     e.preventDefault();
     this.dispatchEvent(
-      new CustomEvent<{ messageId: string }>('choice-jump', {
+      new CustomEvent<{ messageId: string }>('decision-jump', {
         detail: { messageId },
         bubbles: true,
         composed: true,
@@ -1678,13 +1678,13 @@ export class ScionChatChoices extends LitElement {
     const next = new Map(this.local);
     for (const v of views) next.set(v.rowId, v);
     this.local = next;
-    const detail: ChoiceAnsweredDetail = {
+    const detail: DecisionAnsweredDetail = {
       messageId: this.messageId,
       decisions: views,
       ...(responseMessageId ? { responseMessageId } : {}),
     };
     this.dispatchEvent(
-      new CustomEvent<ChoiceAnsweredDetail>('choice-answered', {
+      new CustomEvent<DecisionAnsweredDetail>('decision-answered', {
         detail,
         bubbles: true,
         composed: true,
@@ -2093,6 +2093,6 @@ function plainText(md: string): string {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'scion-chat-choices': ScionChatChoices;
+    'scion-chat-decisions': ScionChatDecisions;
   }
 }

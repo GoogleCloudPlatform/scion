@@ -17,7 +17,7 @@
 /**
  * Profile Decisions API client & URL state helpers (ptone/scion#7996, Design §4.3 R1–R7, D10, §5.1, §7).
  *
- * Mirrors `pkg/hub/choices_profile.go` (`GET /api/v1/users/me/decisions`).
+ * Mirrors `pkg/hub/decisions_profile.go` (`GET /api/v1/users/me/decisions`).
  */
 
 import { apiFetch, parseApiError } from './api.js';
@@ -40,7 +40,7 @@ import {
 } from './project-decisions.js';
 import { stateManager } from './state.js';
 
-/** Maximum UTF-8 byte length accepted for `project` by `pkg/hub/choices_profile.go`. */
+/** Maximum UTF-8 byte length accepted for `project` by `pkg/hub/decisions_profile.go`. */
 export const MAX_PROFILE_DECISIONS_PROJECT_BYTES = 128;
 
 /** Window event dispatched whenever the caller's unfiltered `counts.waitingOnYou` changes. */
@@ -54,7 +54,7 @@ export const PROFILE_DECISION_PROBE_TTL_MS = 30_000;
  * structured decision prompt (`UserMessageEvent` in `pkg/hub/events.go` emits
  * `type: 'decision-prompt'` and top-level `decisions`).
  */
-export function isChoicePromptMessageEvent(e: Event): boolean {
+export function isDecisionPromptMessageEvent(e: Event): boolean {
   const raw = (e as CustomEvent).detail as {
     data?: {
       type?: unknown;
@@ -369,7 +369,7 @@ function ensureProbeInvalidationListeners(): void {
     cachedProfileDecisionProbeDirty = true;
   });
   stateManager.addEventListener('chat-message-received', (e: Event) => {
-    if (isChoicePromptMessageEvent(e)) {
+    if (isDecisionPromptMessageEvent(e)) {
       ++probeInvalidationSeq;
       cachedProfileDecisionProbeDirty = true;
     }

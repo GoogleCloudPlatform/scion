@@ -15,7 +15,7 @@
  */
 
 /**
- * `<scion-chat-choice-response>`: the compact line a decision-response
+ * `<scion-chat-decision-response>`: the compact line a decision-response
  * message renders under web.decisions instead of a bubble
  * (ptone/scion#7673, design §4.6).
  *
@@ -32,25 +32,25 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import type {
-  ChoiceResponseSetAnswer,
-  ChoiceResponseSetView,
-  ChoiceResponseView,
+  DecisionResponseSetAnswer,
+  DecisionResponseSetView,
+  DecisionResponseView,
 } from '../../../shared/types.js';
 
 /** The provenance of an answer an agent recorded from a user's reply. */
 const INTERPRETED = 'agent_interpreted';
 
-@customElement('scion-chat-choice-response')
-export class ScionChatChoiceResponse extends LitElement {
+@customElement('scion-chat-decision-response')
+export class ScionChatDecisionResponse extends LitElement {
   readonly _zone = new DisplayZoneController(this);
 
   /** A one-click answer's response. */
   @property({ attribute: false })
-  response: ChoiceResponseView | undefined = undefined;
+  response: DecisionResponseView | undefined = undefined;
 
   /** A set submit's response; wins over `response` when both are set. */
   @property({ attribute: false })
-  responseSet: ChoiceResponseSetView | undefined = undefined;
+  responseSet: DecisionResponseSetView | undefined = undefined;
 
   /** Who answered, as the line names them ("you" for the viewer). */
   @property()
@@ -255,7 +255,7 @@ export class ScionChatChoiceResponse extends LitElement {
       </button>`;
   }
 
-  private renderSingle(r: ChoiceResponseView): TemplateResult {
+  private renderSingle(r: DecisionResponseView): TemplateResult {
     if (r.provenance === INTERPRETED) {
       const agent = this.agentName || 'the agent';
       const whose = this.own ? 'your' : `${this.who}'s`;
@@ -315,7 +315,7 @@ export class ScionChatChoiceResponse extends LitElement {
     </div>`;
   }
 
-  private renderSetItemNote(a: ChoiceResponseSetAnswer): TemplateResult | typeof nothing {
+  private renderSetItemNote(a: DecisionResponseSetAnswer): TemplateResult | typeof nothing {
     if (a.provenance !== INTERPRETED) {
       if (a.outcome === 'confirm') {
         return html` <i>(confirmed)</i>`;
@@ -332,7 +332,7 @@ export class ScionChatChoiceResponse extends LitElement {
     return nothing;
   }
 
-  private renderSet(rs: ChoiceResponseSetView): TemplateResult {
+  private renderSet(rs: DecisionResponseSetView): TemplateResult {
     const answers = rs.answers ?? [];
     const n = answers.length;
     const interpreted = answers.some((a) => a.provenance === INTERPRETED);
@@ -433,6 +433,6 @@ export class ScionChatChoiceResponse extends LitElement {
 
 declare global {
   interface HTMLElementTagNameMap {
-    'scion-chat-choice-response': ScionChatChoiceResponse;
+    'scion-chat-decision-response': ScionChatDecisionResponse;
   }
 }

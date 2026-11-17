@@ -15,7 +15,7 @@
  */
 
 /**
- * `<scion-chat-choices>` answerability (ptone/scion#7673, design §4.3
+ * `<scion-chat-decisions>` answerability (ptone/scion#7673, design §4.3
  * "Pending, blocked" and "Asker gone", §4.5, §4.7): blocked before the
  * click with a visible reason, read-only, each 403 code on click, and the
  * gone asker's note.
@@ -23,7 +23,10 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DecisionView } from '../../../shared/types.js';
-import type { AskerAnswerability, ChoiceAnswerDeniedDetail } from '../../../client/chat-choices.js';
+import type {
+  AskerAnswerability,
+  DecisionAnswerDeniedDetail,
+} from '../../../client/decision-prompts.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
 const showToast = vi.hoisted(() => vi.fn());
@@ -35,9 +38,9 @@ vi.mock('../../../client/api.js', async (orig) => ({
 vi.mock('../../../utils/toast.js', () => ({ showToast }));
 
 const { deniedAnswerability, readOnlyAnswerability } =
-  await import('../../../client/chat-choices.js');
-await import('./chat-choices.js');
-type ScionChatChoices = import('./chat-choices.js').ScionChatChoices;
+  await import('../../../client/decision-prompts.js');
+await import('./chat-decisions.js');
+type ScionChatDecisions = import('./chat-decisions.js').ScionChatDecisions;
 
 const LINEAGE =
   'release-bot is in lineage mode and only accepts messages from users in its ancestry. You are not in its lineage.';
@@ -89,8 +92,8 @@ function res(status: number, body: unknown): Response {
 async function mount(
   answerability?: AskerAnswerability,
   decisions: DecisionView[] = [view()]
-): Promise<ScionChatChoices> {
-  const el = document.createElement('scion-chat-choices');
+): Promise<ScionChatDecisions> {
+  const el = document.createElement('scion-chat-decisions');
   el.messageId = 'm1';
   el.currentUserId = 'u-me';
   el.decisions = decisions;
@@ -100,20 +103,20 @@ async function mount(
   return el;
 }
 
-const root = (el: ScionChatChoices): ShadowRoot => el.shadowRoot!;
-const button = (el: ScionChatChoices, id: string): HTMLElement =>
+const root = (el: ScionChatDecisions): ShadowRoot => el.shadowRoot!;
+const button = (el: ScionChatDecisions, id: string): HTMLElement =>
   root(el).querySelector<HTMLElement>(`[data-choice="${id}"]`)!;
-const card = (el: ScionChatChoices): HTMLElement => root(el).querySelector<HTMLElement>('.card')!;
-const reason = (el: ScionChatChoices): HTMLElement | null =>
+const card = (el: ScionChatDecisions): HTMLElement => root(el).querySelector<HTMLElement>('.card')!;
+const reason = (el: ScionChatDecisions): HTMLElement | null =>
   root(el).querySelector<HTMLElement>('.reason');
 const text = (n: Element | null): string => n?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
 
-async function settle(el: ScionChatChoices): Promise<void> {
+async function settle(el: ScionChatDecisions): Promise<void> {
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
 }
 
-function expectBlocked(el: ScionChatChoices): void {
+function expectBlocked(el: ScionChatDecisions): void {
   expect(el.answerBlocked).toBe(true);
   for (const id of ['yes', 'no']) {
     const b = button(el, id);
@@ -206,11 +209,11 @@ describe('403 on click (authoritative)', () => {
 
   async function clickDenied(
     response: Response
-  ): Promise<{ el: ScionChatChoices; events: ChoiceAnswerDeniedDetail[] }> {
+  ): Promise<{ el: ScionChatDecisions; events: DecisionAnswerDeniedDetail[] }> {
     const el = await mount();
-    const events: ChoiceAnswerDeniedDetail[] = [];
-    el.addEventListener('choice-answer-denied', (e) =>
-      events.push((e as CustomEvent<ChoiceAnswerDeniedDetail>).detail)
+    const events: DecisionAnswerDeniedDetail[] = [];
+    el.addEventListener('decision-answer-denied', (e) =>
+      events.push((e as CustomEvent<DecisionAnswerDeniedDetail>).detail)
     );
     apiFetch.mockResolvedValue(response);
     button(el, 'no').click();

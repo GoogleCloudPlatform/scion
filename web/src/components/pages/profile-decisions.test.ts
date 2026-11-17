@@ -73,7 +73,7 @@ import '@shoelace-style/shoelace/dist/components/radio-group/radio-group.js';
 import '@shoelace-style/shoelace/dist/components/radio-button/radio-button.js';
 await import('./profile-decisions.js');
 type ScionPageProfileDecisions = import('./profile-decisions.js').ScionPageProfileDecisions;
-type ScionChatChoices = import('../shared/chat/chat-choices.js').ScionChatChoices;
+type ScionChatDecisions = import('../shared/chat/chat-decisions.js').ScionChatDecisions;
 type ScionDecisionsFilterPanel =
   import('../shared/decisions-filter-panel.js').ScionDecisionsFilterPanel;
 type ScionFacetCombobox = import('../shared/facet-combobox.js').ScionFacetCombobox;
@@ -172,7 +172,7 @@ async function settle(el: ScionPageProfileDecisions, ms = 15): Promise<void> {
     await cbx.updateComplete;
   }
   for (const card of Array.from(
-    el.shadowRoot?.querySelectorAll<ScionChatChoices>('scion-chat-choices') ?? []
+    el.shadowRoot?.querySelectorAll<ScionChatDecisions>('scion-chat-decisions') ?? []
   )) {
     await card.updateComplete;
   }
@@ -704,10 +704,10 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
       );
       expect(el.shadowRoot?.querySelectorAll('[data-prompt-card]')).toHaveLength(2);
 
-      // Answer r-1 inline via <scion-chat-choices>
+      // Answer r-1 inline via <scion-chat-decisions>
       answeredR1 = true;
-      const firstCard = el.shadowRoot?.querySelector<ScionChatChoices>(
-        '[data-prompt-card="m-page1"] scion-chat-choices'
+      const firstCard = el.shadowRoot?.querySelector<ScionChatDecisions>(
+        '[data-prompt-card="m-page1"] scion-chat-decisions'
       );
       expect(firstCard?.getAttribute('surface')).toBe('decisions_page');
       const yesBtn = firstCard?.shadowRoot?.querySelector<HTMLElement>('[data-choice="yes"]');

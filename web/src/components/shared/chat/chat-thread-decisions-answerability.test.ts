@@ -18,7 +18,7 @@
  * Choices in the thread, phases 4 and 5 (ptone/scion#7673, design §4.5,
  * §4.6): one cached asker read per thread load, the read-only thread, a
  * card's 403 reaching the asker's other cards and the composer, and the
- * compact choice-response lines with their jump to the prompt.
+ * compact decision-response lines with their jump to the prompt.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -158,7 +158,7 @@ async function messageEl(thread: ScionChatThread, id: string): Promise<HTMLEleme
 
 async function cardOf(thread: ScionChatThread, id: string): Promise<Card> {
   const el = await messageEl(thread, id);
-  const card = el.shadowRoot!.querySelector<Card>('scion-chat-choices')!;
+  const card = el.shadowRoot!.querySelector<Card>('scion-chat-decisions')!;
   expect(card).not.toBeNull();
   await card.updateComplete;
   return card;
@@ -424,7 +424,7 @@ describe('decision-response lines', () => {
 
   function lineOf(el: HTMLElement) {
     return el.shadowRoot!.querySelector<HTMLElement & { updateComplete: Promise<boolean> }>(
-      'scion-chat-choice-response'
+      'scion-chat-decision-response'
     );
   }
 
@@ -432,7 +432,7 @@ describe('decision-response lines', () => {
     const thread = await open();
     const own = await messageEl(thread, 'c1');
     expect(own.shadowRoot!.querySelector('.bubble')).toBeNull();
-    expect(own.shadowRoot!.querySelector('.choice-response-row.own')).not.toBeNull();
+    expect(own.shadowRoot!.querySelector('.decision-response-row.own')).not.toBeNull();
     const line = lineOf(own)!;
     await line.updateComplete;
     expect(text(line.shadowRoot!.querySelector('.line'))).toMatch(
@@ -440,7 +440,7 @@ describe('decision-response lines', () => {
     );
 
     const other = await messageEl(thread, 'c2');
-    expect(other.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
+    expect(other.shadowRoot!.querySelector('.decision-response-row.other')).not.toBeNull();
     const setLine = lineOf(other)!;
     await setLine.updateComplete;
     expect(text(setLine.shadowRoot!.querySelector('summary'))).toContain('answered 1 decision');

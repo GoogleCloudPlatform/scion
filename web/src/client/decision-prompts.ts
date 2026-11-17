@@ -24,15 +24,15 @@ import { apiFetch, apiErrorMessageFromBody } from './api.js';
 import { getDenialMessage } from '../shared/message-mode.js';
 import type {
   Agent,
-  ChoiceAnswerMode,
-  ChoiceResponseSetView,
-  ChoiceResponseView,
+  DecisionAnswerMode,
+  DecisionResponseSetView,
+  DecisionResponseView,
   DecisionView,
   Message,
 } from '../shared/types.js';
 
 /** Web surface submitting a decision answer (`native` in chat, `decisions_page` on `/projects/:id/decisions`). */
-export type ChoiceAnswerSurface = 'native' | 'decisions_page';
+export type DecisionAnswerSurface = 'native' | 'decisions_page';
 
 /** A decision whose state can no longer change back to pending. */
 export function isTerminalDecision(view: DecisionView): boolean {
@@ -113,12 +113,12 @@ export function patchDecisions(
 }
 
 /** The decision side maps of a chat history response. */
-export interface ChoiceHistoryMaps {
+export interface DecisionHistoryMaps {
   messageDecisions?: Record<string, DecisionView[]>;
   messageDecisionIntros?: Record<string, string>;
-  messageDecisionAnswerModes?: Record<string, ChoiceAnswerMode>;
-  messageDecisionResponses?: Record<string, ChoiceResponseView>;
-  messageDecisionResponseSets?: Record<string, ChoiceResponseSetView>;
+  messageDecisionAnswerModes?: Record<string, DecisionAnswerMode>;
+  messageDecisionResponses?: Record<string, DecisionResponseView>;
+  messageDecisionResponseSets?: Record<string, DecisionResponseSetView>;
 }
 
 /**
@@ -126,7 +126,7 @@ export interface ChoiceHistoryMaps {
  * The hub omits the maps while web.decisions is off, which leaves the
  * messages untouched.
  */
-export function applyChoiceHistoryMaps(items: Message[], data: ChoiceHistoryMaps): void {
+export function applyDecisionHistoryMaps(items: Message[], data: DecisionHistoryMaps): void {
   const decisions = data.messageDecisions;
   const intros = data.messageDecisionIntros;
   const modes = data.messageDecisionAnswerModes;
@@ -152,7 +152,7 @@ export function applyChoiceHistoryMaps(items: Message[], data: ChoiceHistoryMaps
  * arrives again: the newer decision views per row (out-of-order guard), and
  * the held fields when the incoming copy carries none.
  */
-export function carryChoiceFields(existing: Message | undefined, incoming: Message): void {
+export function carryDecisionFields(existing: Message | undefined, incoming: Message): void {
   if (!existing?.decisions) return;
   if (!incoming.decisions) {
     incoming.decisions = existing.decisions;
@@ -169,18 +169,18 @@ export function carryChoiceFields(existing: Message | undefined, incoming: Messa
   });
 }
 
-/** Detail of the `choice-answered` event a card emits after its own POST. */
-export interface ChoiceAnsweredDetail {
+/** Detail of the `decision-answered` event a card emits after its own POST. */
+export interface DecisionAnsweredDetail {
   messageId: string;
   decisions: DecisionView[];
   responseMessageId?: string;
 }
 
 /**
- * Detail of the `choice-answer-denied` event a card emits when an answer
+ * Detail of the `decision-answer-denied` event a card emits when an answer
  * endpoint refused the viewer with 403 (design §4.5 step 3).
  */
-export interface ChoiceAnswerDeniedDetail {
+export interface DecisionAnswerDeniedDetail {
   messageId: string;
   askerAgentId: string;
   /** The error code: message_denied, chat_post_denied, or another. */
@@ -215,7 +215,7 @@ export async function answerDecision(
   rowId: string,
   choiceId: string,
   idempotencyKey: string,
-  surface?: ChoiceAnswerSurface
+  surface?: DecisionAnswerSurface
 ): Promise<AnswerDecisionResult> {
   let res: Response;
   try {
@@ -297,7 +297,7 @@ export async function answerDecisionSet(
   messageId: string,
   answers: readonly SetAnswer[],
   idempotencyKey: string,
-  surface?: ChoiceAnswerSurface
+  surface?: DecisionAnswerSurface
 ): Promise<AnswerDecisionSetResult> {
   let res: Response;
   try {

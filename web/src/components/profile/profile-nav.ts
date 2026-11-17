@@ -33,7 +33,7 @@ import {
   fetchProfileDecisionProbe,
   getCachedProfileDecisionProbe,
   getLastKnownProfileDecisionAvailability,
-  isChoicePromptMessageEvent,
+  isDecisionPromptMessageEvent,
   scheduleSharedProfileDecisionProbeRefresh,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
@@ -174,7 +174,7 @@ export class ScionProfileNav extends LitElement {
     }
   };
 
-  private boundOnChoiceUpdated = (): void => {
+  private boundOnDecisionUpdated = (): void => {
     if (!this.decisionsEnabled || this.decisionsNavVisibility === 'hidden') return;
     if (this.isActive('/profile/decisions')) return;
     scheduleSharedProfileDecisionProbeRefresh();
@@ -183,7 +183,7 @@ export class ScionProfileNav extends LitElement {
   private boundOnChatMessageReceived = (e: Event): void => {
     if (!this.decisionsEnabled || this.decisionsNavVisibility === 'hidden') return;
     if (this.isActive('/profile/decisions')) return;
-    if (!isChoicePromptMessageEvent(e)) return;
+    if (!isDecisionPromptMessageEvent(e)) return;
     scheduleSharedProfileDecisionProbeRefresh();
   };
 
@@ -644,7 +644,7 @@ export class ScionProfileNav extends LitElement {
       PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
       this.boundOnProfileDecisionsCountChanged
     );
-    stateManager.addEventListener('decision-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('decision-updated', this.boundOnDecisionUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
   }
 
@@ -662,7 +662,7 @@ export class ScionProfileNav extends LitElement {
       PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
       this.boundOnProfileDecisionsCountChanged
     );
-    stateManager.removeEventListener('decision-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('decision-updated', this.boundOnDecisionUpdated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
   }
 

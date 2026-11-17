@@ -15,7 +15,7 @@
  */
 
 /**
- * `<scion-chat-choices>` single-card replaced and interpreted states
+ * `<scion-chat-decisions>` single-card replaced and interpreted states
  * (ptone/scion#7673, design §4.3): the replaced card's version, faded
  * disabled choices and jump link; an agent-interpreted answer read-only.
  */
@@ -25,8 +25,8 @@ import type { DecisionView } from '../../../shared/types.js';
 
 vi.mock('../../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
-await import('./chat-choices.js');
-type ScionChatChoices = import('./chat-choices.js').ScionChatChoices;
+await import('./chat-decisions.js');
+type ScionChatDecisions = import('./chat-decisions.js').ScionChatDecisions;
 
 function view(over: Partial<DecisionView> = {}): DecisionView {
   return {
@@ -73,8 +73,8 @@ function interpreted(by: { id: string; name: string }, over: Partial<DecisionVie
   });
 }
 
-async function mount(d: DecisionView): Promise<ScionChatChoices> {
-  const el = document.createElement('scion-chat-choices');
+async function mount(d: DecisionView): Promise<ScionChatDecisions> {
+  const el = document.createElement('scion-chat-decisions');
   el.messageId = 'm1';
   el.currentUserId = 'u-me';
   el.decisions = [d];
@@ -83,10 +83,10 @@ async function mount(d: DecisionView): Promise<ScionChatChoices> {
   return el;
 }
 
-const root = (el: ScionChatChoices): ShadowRoot => el.shadowRoot!;
+const root = (el: ScionChatDecisions): ShadowRoot => el.shadowRoot!;
 const text = (n: Element | null | undefined): string =>
   n?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-const button = (el: ScionChatChoices, id: string): HTMLElement =>
+const button = (el: ScionChatDecisions, id: string): HTMLElement =>
   root(el).querySelector<HTMLElement>(`[data-choice="${id}"]`)!;
 
 afterEach(() => {
@@ -106,7 +106,7 @@ describe('replaced single card', () => {
     expect(root(el).querySelector('.card')!.hasAttribute('aria-describedby')).toBe(false);
   });
 
-  it('reads "Replaced by v2 · time · Jump to v2" and the link emits choice-jump', async () => {
+  it('reads "Replaced by v2 · time · Jump to v2" and the link emits decision-jump', async () => {
     const el = await mount(replacedView());
     const foot = root(el).querySelector('.row-foot')!;
     expect(text(foot)).toMatch(/^Replaced by v2 · \d\d:\d\d · Jump to v2$/);
@@ -115,10 +115,10 @@ describe('replaced single card', () => {
     const link = foot.querySelector<HTMLAnchorElement>('a.jump')!;
     expect(link.getAttribute('href')).toBe('#msg-m2');
     const onJump = vi.fn();
-    document.body.addEventListener('choice-jump', onJump);
+    document.body.addEventListener('decision-jump', onJump);
     const click = new MouseEvent('click', { bubbles: true, cancelable: true, composed: true });
     link.dispatchEvent(click);
-    document.body.removeEventListener('choice-jump', onJump);
+    document.body.removeEventListener('decision-jump', onJump);
     expect(click.defaultPrevented).toBe(true);
     expect(onJump).toHaveBeenCalledTimes(1);
     expect((onJump.mock.calls[0]![0] as CustomEvent).detail).toEqual({ messageId: 'm2' });
@@ -163,7 +163,7 @@ describe('interpreted answer', () => {
   });
 
   it('renders read-only in a set too', async () => {
-    const el = document.createElement('scion-chat-choices');
+    const el = document.createElement('scion-chat-decisions');
     el.currentUserId = 'u-me';
     el.answerMode = 'set';
     el.decisions = [

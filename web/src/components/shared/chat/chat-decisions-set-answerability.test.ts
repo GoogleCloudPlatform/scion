@@ -23,8 +23,11 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DecisionView } from '../../../shared/types.js';
-import type { AskerAnswerability, ChoiceAnswerDeniedDetail } from '../../../client/chat-choices.js';
-import { setPreselectRecommendedChoices } from '../../../client/choice-preferences.js';
+import type {
+  AskerAnswerability,
+  DecisionAnswerDeniedDetail,
+} from '../../../client/decision-prompts.js';
+import { setPreselectRecommendedChoices } from '../../../client/decision-preferences.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
 const showToast = vi.hoisted(() => vi.fn());
@@ -35,8 +38,8 @@ vi.mock('../../../client/api.js', async (orig) => ({
 }));
 vi.mock('../../../utils/toast.js', () => ({ showToast }));
 
-await import('./chat-choices.js');
-type ScionChatChoices = import('./chat-choices.js').ScionChatChoices;
+await import('./chat-decisions.js');
+type ScionChatDecisions = import('./chat-decisions.js').ScionChatDecisions;
 
 function row(rowId: string, key: string, over: Partial<DecisionView> = {}): DecisionView {
   return {
@@ -83,8 +86,8 @@ function res(status: number, body: unknown): Response {
 async function mount(
   decisions: DecisionView[],
   answerability?: AskerAnswerability
-): Promise<ScionChatChoices> {
-  const el = document.createElement('scion-chat-choices');
+): Promise<ScionChatDecisions> {
+  const el = document.createElement('scion-chat-decisions');
   el.messageId = 'm1';
   el.currentUserId = 'u-me';
   el.answerMode = 'set';
@@ -95,17 +98,17 @@ async function mount(
   return el;
 }
 
-const root = (el: ScionChatChoices): ShadowRoot => el.shadowRoot!;
-const submit = (el: ScionChatChoices): HTMLElement =>
+const root = (el: ScionChatDecisions): ShadowRoot => el.shadowRoot!;
+const submit = (el: ScionChatDecisions): HTMLElement =>
   root(el).querySelector<HTMLElement>('sl-button.submit')!;
-const submitOrNull = (el: ScionChatChoices): HTMLElement | null =>
+const submitOrNull = (el: ScionChatDecisions): HTMLElement | null =>
   root(el).querySelector<HTMLElement>('sl-button.submit');
 
 /**
  * A blocked set (mock s10): nothing selected, the recommended choice
  * outlined, and no counter or Submit; the reason line is the footer.
  */
-function expectBlockedLook(el: ScionChatChoices): void {
+function expectBlockedLook(el: ScionChatDecisions): void {
   for (const r of ['r1', 'r2']) {
     const yes = choice(el, r, 'yes');
     expect(yes.tagName).toBe('BUTTON');
@@ -117,10 +120,10 @@ function expectBlockedLook(el: ScionChatChoices): void {
   expect(root(el).querySelector('.card-foot')).toBeNull();
   expect(root(el).querySelector('.counter')).toBeNull();
 }
-const choice = (el: ScionChatChoices, rowId: string, id: string): HTMLElement =>
+const choice = (el: ScionChatDecisions, rowId: string, id: string): HTMLElement =>
   root(el).querySelector<HTMLElement>(`[data-row="${rowId}"] [data-choice="${id}"]`)!;
 
-async function settle(el: ScionChatChoices): Promise<void> {
+async function settle(el: ScionChatDecisions): Promise<void> {
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
 }
@@ -268,7 +271,7 @@ describe('gone asker on a set card', () => {
 });
 
 describe('403 on the set submit', () => {
-  it('message_denied blocks the card, toasts and emits choice-answer-denied', async () => {
+  it('message_denied blocks the card, toasts and emits decision-answer-denied', async () => {
     apiFetch.mockResolvedValue(
       res(403, {
         error: {
@@ -279,9 +282,9 @@ describe('403 on the set submit', () => {
       })
     );
     const el = await mount(set());
-    const events: ChoiceAnswerDeniedDetail[] = [];
-    el.addEventListener('choice-answer-denied', (e) =>
-      events.push((e as CustomEvent<ChoiceAnswerDeniedDetail>).detail)
+    const events: DecisionAnswerDeniedDetail[] = [];
+    el.addEventListener('decision-answer-denied', (e) =>
+      events.push((e as CustomEvent<DecisionAnswerDeniedDetail>).detail)
     );
 
     submit(el).click();
