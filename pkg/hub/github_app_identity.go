@@ -115,6 +115,11 @@ type githubAppIdentityState struct {
 	checkedAt    time.Time
 	lastErr      string
 	lastSlugWarn time.Time
+
+	startupMu      sync.Mutex
+	startupCancel  context.CancelFunc
+	startupStopped bool
+	startupWG      sync.WaitGroup
 }
 
 func (c *githubAppIdentityState) reset() {
@@ -229,13 +234,17 @@ func (s *Server) refreshGitHubAppIdentityLocked(ctx context.Context) (*githubapp
 	}
 	now = timeNow().UTC()
 	if err != nil {
-		msg := githubAppIdentityErrorMessage(err)
-		s.githubAppIdentity.mu.Lock()
-		s.githubAppIdentity.appID = appID
-		s.githubAppIdentity.identity = nil
-		s.githubAppIdentity.checkedAt = now
-		s.githubAppIdentity.lastErr = msg
-		s.githubAppIdentity.mu.Unlock()
+		// Do not poison the shared cache when the caller's own context was
+		// canceled or expired (e.g. an aborted HTTP request or server shutdown).
+		if ctx.Err() == nil {
+			msg := githubAppIdentityErrorMessage(err)
+			s.githubAppIdentity.mu.Lock()
+			s.githubAppIdentity.appID = appID
+			s.githubAppIdentity.identity = nil
+			s.githubAppIdentity.checkedAt = now
+			s.githubAppIdentity.lastErr = msg
+			s.githubAppIdentity.mu.Unlock()
+		}
 		return nil, fmt.Errorf("failed to fetch app info from GitHub: %w", err)
 	}
 
@@ -254,10 +263,10 @@ func (s *Server) refreshGitHubAppIdentityLocked(ctx context.Context) (*githubapp
 	return &cloned, nil
 }
 
-// initGitHubAppIdentity populates the GitHub App identity cache on server
-// startup when AppID and a private key are already available (§10.2). When
-// startup has no key, the cache stays unfetched and lazy-populates on first
-// use once credentials are configured.
+// initGitHubAppIdentity populates the GitHub App identity cache when AppID and
+// a private key are already available (§10.2). When startup has no key, the
+// cache stays unfetched and lazy-populates on first use once credentials are
+// configured.
 func (s *Server) initGitHubAppIdentity(ctx context.Context) {
 	cfg, hasPrivateKey, _ := s.githubAppCredentialPresence(ctx)
 	if cfg.AppID == 0 || !hasPrivateKey {
@@ -267,6 +276,53 @@ func (s *Server) initGitHubAppIdentity(ctx context.Context) {
 		slog.Warn("GitHub App startup identity fetch failed",
 			"app_id", cfg.AppID, "error", upstreamText(err.Error()))
 	}
+}
+
+// startGitHubAppIdentityInit runs initGitHubAppIdentity asynchronously when
+// hub.github_triggers is enabled so an unreachable GitHub/GHES endpoint never
+// delays listener bind on startup. When hub.github_triggers is off at startup,
+// ensureGitHubAppIdentity lazily fetches on first use if the experiment is
+// later enabled at runtime.
+func (s *Server) startGitHubAppIdentityInit(ctx context.Context) {
+	if !s.githubTriggersEnabled() {
+		return
+	}
+	st := &s.githubAppIdentity
+	runCtx, cancel := context.WithCancel(ctx)
+	st.startupMu.Lock()
+	if st.startupStopped || st.startupCancel != nil {
+		st.startupMu.Unlock()
+		cancel()
+		return
+	}
+	st.startupCancel = cancel
+	st.startupWG.Add(1)
+	st.startupMu.Unlock()
+
+	go func() {
+		defer st.startupWG.Done()
+		defer cancel()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("GitHub App startup identity fetch: recovered from panic", "panic", fmt.Sprint(r))
+			}
+		}()
+		s.initGitHubAppIdentity(runCtx)
+	}()
+}
+
+// stopGitHubAppIdentityInit cancels any in-flight startup identity fetch and
+// waits for its goroutine to exit.
+func (s *Server) stopGitHubAppIdentityInit() {
+	st := &s.githubAppIdentity
+	st.startupMu.Lock()
+	st.startupStopped = true
+	cancel := st.startupCancel
+	st.startupMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	st.startupWG.Wait()
 }
 
 // ensureGitHubAppIdentity returns the cached AppIdentity snapshot, performing a

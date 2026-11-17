@@ -226,6 +226,90 @@ func TestGitHubAppIdentity_StartupAndLazyPopulation(t *testing.T) {
 			t.Errorf("expected cached follow-up read (hits=1), got %d", got)
 		}
 	})
+
+	t.Run("startup_background_skips_when_off_and_runs_async_when_on", func(t *testing.T) {
+		ctx := context.Background()
+
+		// 1. Flag off -> startGitHubAppIdentityInit skips GET /app completely.
+		offGH := newMockAppEndpoint(t, http.StatusOK, map[string]any{
+			"id":   42,
+			"slug": "off-at-start",
+		})
+		srvOff, _ := testServer(t)
+		srvOff.mu.Lock()
+		srvOff.config.GitHubAppConfig = GitHubAppServerConfig{
+			AppID:      42,
+			PrivateKey: testGitHubAppPrivateKeyPEM(t),
+			APIBaseURL: offGH.server.URL,
+		}
+		srvOff.mu.Unlock()
+
+		srvOff.startGitHubAppIdentityInit(ctx)
+		srvOff.stopGitHubAppIdentityInit()
+		if got := offGH.hits.Load(); got != 0 {
+			t.Fatalf("expected 0 GET /app calls at startup while hub.github_triggers is off, got %d", got)
+		}
+
+		// 2. Flag on -> startGitHubAppIdentityInit returns immediately without blocking on GET /app.
+		entered := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var asyncHits atomic.Int64
+		blockingGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/app" || r.Method != http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			asyncHits.Add(1)
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"slug":"async-scion","events":["issues"]}`))
+		}))
+		t.Cleanup(func() {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+			blockingGH.Close()
+		})
+
+		srvOn, _ := testServer(t)
+		t.Cleanup(srvOn.stopGitHubAppIdentityInit)
+		setGitHubTriggersExperiment(t, srvOn, true)
+		srvOn.mu.Lock()
+		srvOn.config.GitHubAppConfig = GitHubAppServerConfig{
+			AppID:      42,
+			PrivateKey: testGitHubAppPrivateKeyPEM(t),
+			APIBaseURL: blockingGH.URL,
+		}
+		srvOn.mu.Unlock()
+
+		// Must return without waiting for release.
+		srvOn.startGitHubAppIdentityInit(ctx)
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("background startup identity fetch never started")
+		}
+
+		// Release the mock response and wait for the background fetch to finish
+		// before invoking shutdown cancellation (stopGitHubAppIdentityInit).
+		close(release)
+		srvOn.githubAppIdentity.startupWG.Wait()
+		srvOn.stopGitHubAppIdentityInit()
+
+		id, ok := srvOn.GitHubAppIdentity(ctx)
+		if !ok || id == nil || id.Slug != "async-scion" {
+			t.Fatalf("expected async startup identity async-scion, got %+v (ok=%v)", id, ok)
+		}
+		if got := asyncHits.Load(); got != 1 {
+			t.Errorf("expected 1 GET /app call across async startup + cached read, got %d", got)
+		}
+	})
 }
 
 func TestGitHubAppIdentity_SyncPermissionsAndHealthCheckShareSingleGetApp(t *testing.T) {

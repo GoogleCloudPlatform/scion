@@ -7719,7 +7719,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler = sched
 	s.mu.Unlock()
 	s.registerSchedulerHandlers()
-	s.initGitHubAppIdentity(ctx)
+	s.startGitHubAppIdentityInit(ctx)
 
 	// Check stored timestamps (SQLite) and, when some are not canonical UTC,
 	// run utc-timestamp-normalize once, after a snapshot. It runs in the
@@ -8074,6 +8074,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// it (bounded by its own grace) so that a snapshot being copied is
 		// interrupted and its temporary file removed before the process exits.
 		s.stopStoredTimestampCheck()
+		s.stopGitHubAppIdentityInit()
 
 		// Likewise for an auto-suspend in flight; the cancelled ctx above
 		// already stops new ones from starting.
