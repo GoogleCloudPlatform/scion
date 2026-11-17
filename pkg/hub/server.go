@@ -2995,9 +2995,10 @@ type Server struct {
 	rules      *ruleengine.Engine
 	celDialect *ruleengine.CELDialect
 
-	// Message policy outbound gate, bounded shadow worker pool, and metrics
-	// (message_policy_gate.go; gated on experiments.MessagePolicies).
+	// Message policy outbound gate, bounded shadow worker pool, decision trim
+	// loop, and metrics (message_policy_gate.go, message_policy_trim.go).
 	messagePolicyGate            messagePolicyGateRuntime
+	messagePolicyTrim            messagePolicyDecisionTrimRuntime
 	messagePolicyMetrics         atomic.Pointer[OTelMessagePolicyMetrics]
 	messagePolicyShadowDrops     atomic.Int64
 	messagePolicyAdmissionErrors atomic.Int64
@@ -7844,6 +7845,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// It runs with native chat enabled, whether or not the experiment is.
 	s.startMessageStarUpkeep(ctx)
 
+	// Start the periodic message-policy decision retention trim loop
+	// (exits when ctx is cancelled; bounded batches).
+	s.startMessagePolicyDecisionTrim(ctx)
+
 	// Start the migration of personal chat thread groups into project
 	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
 	s.startThreadGroupMigrationSweeper(ctx)
@@ -8104,6 +8109,10 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 
 		// Likewise for a starred-message upkeep pass (bounded at 5 s).
 		s.stopMessageStarUpkeep()
+
+		// Stop the periodic message-policy decision retention trim loop and
+		// wait for any bounded batch in progress while the store is open.
+		s.stopMessagePolicyDecisionTrim()
 
 		// Drain and join the bounded message-policy shadow worker pool while
 		// the store is still open.

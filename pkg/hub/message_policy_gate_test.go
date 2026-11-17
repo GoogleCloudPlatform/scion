@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,6 +44,8 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const mpgOneDecision = `[{"id":"D234","question":"Ship the **feature** now?","choices":["yes","no"],"default":"yes"}]`
@@ -957,4 +960,637 @@ func TestMessagePolicyGate_FactsActivationOnGroupConversation(t *testing.T) {
 		Attachments:     []string{f.stagedPath},
 	})
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "body: %s", rr.Body.String())
+}
+
+// mpgLogCaptureHandler records slog records emitted during a test so we can
+// verify structured slog.Error emissions and confirm no message body leaks.
+type mpgLogCaptureHandler struct {
+	mu      sync.Mutex
+	records []mpgCapturedLog
+}
+
+type mpgCapturedLog struct {
+	level slog.Level
+	msg   string
+	attrs map[string]string
+}
+
+func (h *mpgLogCaptureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *mpgLogCaptureHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]string)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.records = append(h.records, mpgCapturedLog{
+		level: r.Level,
+		msg:   r.Message,
+		attrs: attrs,
+	})
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *mpgLogCaptureHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *mpgLogCaptureHandler) WithGroup(_ string) slog.Handler      { return h }
+
+func (h *mpgLogCaptureHandler) snapshot() []mpgCapturedLog {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]mpgCapturedLog, len(h.records))
+	copy(out, h.records)
+	return out
+}
+
+func mpgSumInt64Metric(t *testing.T, rm metricdata.ResourceMetrics, name string) int64 {
+	t.Helper()
+	var total int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "expected int64 Sum for %s, got %T", name, m.Data)
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+		}
+	}
+	return total
+}
+
+// TestMessagePolicyGate_AdmissionFailureAndWrappedErrors verifies Slice 2
+// robustness requirements (Targets 4c & 9a):
+//  1. Evaluation-time UnsupportedDialectError records class="failed" with the
+//     admission reason, emits slog.Error + OTel admission-error counter, never
+//     admits by default, and never logs message text.
+//  2. Wrapped ruleengine errors (fmt.Errorf("%w: %w", ErrBudgetExhausted, ...)
+//     and errors.Join(*FailedError)) unpack accurately via errors.Is/errors.As
+//     through the H2 gate.
+func TestMessagePolicyGate_AdmissionFailureAndWrappedErrors(t *testing.T) {
+	t.Run("eval_time_unsupported_dialect_logs_metrics_and_never_admits_by_default", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		reader := sdkmetric.NewManualReader()
+		mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+		t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+		otelMetrics, err := NewOTelMessagePolicyMetrics(mp)
+		require.NoError(t, err)
+		f.srv.SetMessagePolicyMetrics(otelMetrics)
+
+		pol := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "admission-guard-policy",
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeEnforce,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: "false",
+			OnFailed:      messagepolicy.OutcomeReject,
+			RejectReason:  "admission failure failed closed",
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+
+		// Simulate an evaluation-time consumer admission misconfiguration by
+		// replacing message_policy's grants with an unrelated dialect so CEL is
+		// denied with ReasonDialectNotAllowed.
+		require.NoError(t, f.srv.RuleEngine().AllowConsumerDialects(
+			messagepolicy.ConsumerName,
+			ruleengine.Grant("other_dialect"),
+		))
+		t.Cleanup(func() {
+			_ = f.srv.RuleEngine().AllowConsumerDialects(
+				messagepolicy.ConsumerName,
+				ruleengine.Grant(ruleengine.DialectCEL),
+			)
+		})
+
+		logCap := &mpgLogCaptureHandler{}
+		prevLogger := slog.Default()
+		slog.SetDefault(slog.New(logCap))
+		t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+		const secretText = "SENSITIVE-ADMISSION-ERROR-BODY-778899"
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       secretText,
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "body: %s", rr.Body.String())
+
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		assert.Equal(t, string(MessageDenialPolicyRejected), resp.Error.Code)
+		assert.Equal(t, store.MessagePolicyClassFailed, resp.Error.Details["class"])
+
+		// Verify atomic counter + OTel counter incremented.
+		assert.Equal(t, int64(1), f.srv.messagePolicyAdmissionErrors.Load())
+		var rm metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(ctx, &rm))
+		assert.Equal(t, int64(1), mpgSumInt64Metric(t, rm, "scion.message_policy.admission.errors"))
+		assert.Equal(t, int64(1), mpgSumInt64Metric(t, rm, "scion.message_policy.evaluations"))
+
+		// Verify slog.Error emitted with structured fields and zero message body text.
+		var foundErrLog bool
+		for _, rec := range logCap.snapshot() {
+			if rec.level >= slog.LevelError && strings.Contains(rec.msg, "message policy evaluation encountered ruleengine consumer admission failure") {
+				foundErrLog = true
+				assert.Equal(t, f.project.ID, rec.attrs["project_id"])
+				assert.Equal(t, pol.ID, rec.attrs["policy_id"])
+				assert.Equal(t, pol.Name, rec.attrs["policy"])
+				assert.Equal(t, ruleengine.ReasonDialectNotAllowed, rec.attrs["reason"])
+				for k, v := range rec.attrs {
+					assert.NotContains(t, v, secretText, "slog.Error attr %s leaked message body", k)
+				}
+			}
+		}
+		assert.True(t, foundErrLog, "expected slog.Error for evaluation-time admission failure")
+
+		// Verify persisted decision row has class=failed, reason=dialect_not_allowed, action=rejected.
+		decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+			PolicyID:  pol.ID,
+		}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		require.Len(t, decs.Items, 1)
+		assert.Equal(t, store.MessagePolicyClassFailed, decs.Items[0].Class)
+		assert.Equal(t, ruleengine.ReasonDialectNotAllowed, decs.Items[0].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionRejected, decs.Items[0].Action)
+		assert.Empty(t, decs.Items[0].MessageID)
+
+		// Also verify ResolveOutcome never admits by default when onFailed is empty.
+		assert.Equal(t, messagepolicy.OutcomeReject, messagepolicy.ResolveOutcome(
+			messagepolicy.ClassFailed, ruleengine.ReasonDialectNotAllowed, "", "", nil,
+		))
+	})
+
+	t.Run("wrapped_ruleengine_errors_through_gate", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		pol1 := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "01-wrapped-budget",
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeEnforce,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: "false",
+			OnFailed:      messagepolicy.OutcomeAdmit,
+		}
+		pol2 := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "02-joined-failed",
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeEnforce,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: "false",
+			OnFailed:      messagepolicy.OutcomeAdmit,
+		}
+		pol3 := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "03-wrapped-admission",
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeEnforce,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: "false",
+			OnFailed:      messagepolicy.OutcomeReject,
+			RejectReason:  "wrapped admission rejected",
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, pol1))
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, pol2))
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, pol3))
+
+		f.srv.messagePolicyGate.evalOverride = func(_ context.Context, p *store.MessagePolicy, _ messagepolicy.Activation, _ *ruleengine.BudgetTracker) (messagepolicy.Classification, bool) {
+			switch p.Name {
+			case "01-wrapped-budget":
+				wrapped := fmt.Errorf("outer gate: %w",
+					fmt.Errorf("%w: %w", ruleengine.ErrBudgetExhausted, &ruleengine.FailedError{Reason: celengine.ReasonTimeout}),
+				)
+				return messagepolicy.ClassifyDecision(false, celengine.EvalStats{}, wrapped), true
+			case "02-joined-failed":
+				joined := errors.Join(
+					errors.New("wrapper"),
+					&ruleengine.FailedError{
+						Reason: celengine.ReasonCostLimit,
+						Cause:  errors.Join(errors.New("inner"), &celengine.EvalError{Reason: celengine.ReasonCostLimit}),
+					},
+				)
+				return messagepolicy.ClassifyDecision(false, celengine.EvalStats{}, joined), true
+			default:
+				wrappedUnsup := fmt.Errorf("wrapped admission: %w", &ruleengine.UnsupportedDialectError{
+					Dialect:  ruleengine.DialectCEL,
+					Consumer: messagepolicy.ConsumerName,
+					Reason:   ruleengine.ReasonConsumerNotRegistered,
+				})
+				return messagepolicy.ClassifyDecision(false, celengine.EvalStats{}, wrappedUnsup), true
+			}
+		}
+
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "exercise wrapped ruleengine errors",
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code)
+		assert.Equal(t, int64(1), f.srv.messagePolicyAdmissionErrors.Load())
+
+		decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, decs.Items, 3)
+
+		byPolicy := make(map[string]store.MessagePolicyDecision, 3)
+		for _, d := range decs.Items {
+			byPolicy[d.PolicyName] = d
+		}
+		assert.Equal(t, messagepolicy.ReasonBudgetExhausted, byPolicy["01-wrapped-budget"].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionAdmitted, byPolicy["01-wrapped-budget"].Action)
+		assert.Equal(t, celengine.ReasonCostLimit, byPolicy["02-joined-failed"].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionAdmitted, byPolicy["02-joined-failed"].Action)
+		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, byPolicy["03-wrapped-admission"].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionRejected, byPolicy["03-wrapped-admission"].Action)
+	})
+}
+
+// TestMessagePolicyDecisionTrimJob verifies the periodic bounded decision trim
+// job (Target 8): aged decisions (> 7d) and excess per-project rows are trimmed
+// while recent rows survive, and the background loop starts/stops cleanly.
+func TestMessagePolicyDecisionTrimJob(t *testing.T) {
+	t.Run("manual_pass_trims_aged_and_overflow_decisions", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		now := time.Now().UTC().Truncate(time.Second)
+		f.srv.messagePolicyTrim.nowFunc = func() time.Time { return now }
+		f.srv.messagePolicyTrim.maxRowsPerProject = 2
+
+		policyID := api.NewUUID()
+		seedDecision := func(createdAt time.Time) string {
+			d := &store.MessagePolicyDecision{
+				ProjectID:      f.project.ID,
+				PolicyID:       policyID,
+				PolicyName:     "trim-policy",
+				PolicyRevision: 1,
+				Mode:           store.MessagePolicyModeShadow,
+				Surface:        store.MessagePolicySurfaceAgentToUser,
+				SenderID:       f.sender.ID,
+				RecipientKind:  "user",
+				RecipientID:    f.alice.ID,
+				Class:          store.MessagePolicyClassPass,
+				Action:         store.MessagePolicyActionShadow,
+				CreatedAt:      createdAt,
+			}
+			require.NoError(t, f.s.CreateMessagePolicyDecision(ctx, d))
+			return d.ID
+		}
+
+		// 2 aged decisions (> DefaultMessagePolicyDecisionMaxAge = 7 days).
+		_ = seedDecision(now.Add(-8 * 24 * time.Hour))
+		_ = seedDecision(now.Add(-9 * 24 * time.Hour))
+
+		// 4 fresh decisions (cap = 2 -> 2 overflow deleted, 2 newest kept).
+		_ = seedDecision(now.Add(-4 * time.Hour))
+		_ = seedDecision(now.Add(-3 * time.Hour))
+		keepOldest := seedDecision(now.Add(-2 * time.Hour))
+		keepNewest := seedDecision(now.Add(-1 * time.Hour))
+
+		trimRes, ran, err := f.srv.messagePolicyDecisionTrimPass(ctx)
+		require.NoError(t, err)
+		assert.True(t, ran)
+		assert.Equal(t, 2, trimRes.AgedDeleted)
+		assert.Equal(t, 2, trimRes.OverflowDeleted)
+		assert.False(t, trimRes.More)
+
+		rem, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, rem.Items, 2)
+		assert.Equal(t, keepNewest, rem.Items[0].ID)
+		assert.Equal(t, keepOldest, rem.Items[1].ID)
+	})
+
+	t.Run("periodic_loop_ticks_and_stops_idempotently", func(t *testing.T) {
+		f := newMpgFixture(t, false) // trim runs even when experiment is toggled off
+		ctx := context.Background()
+
+		now := time.Now().UTC()
+		policyID := api.NewUUID()
+		aged := &store.MessagePolicyDecision{
+			ProjectID:      f.project.ID,
+			PolicyID:       policyID,
+			PolicyName:     "aged-shadow",
+			PolicyRevision: 1,
+			Mode:           store.MessagePolicyModeShadow,
+			Surface:        store.MessagePolicySurfaceAgentToUser,
+			SenderID:       f.sender.ID,
+			RecipientKind:  "user",
+			RecipientID:    f.alice.ID,
+			Class:          store.MessagePolicyClassViolation,
+			Action:         store.MessagePolicyActionShadow,
+			CreatedAt:      now.Add(-10 * 24 * time.Hour),
+		}
+		fresh := &store.MessagePolicyDecision{
+			ProjectID:      f.project.ID,
+			PolicyID:       policyID,
+			PolicyName:     "fresh-shadow",
+			PolicyRevision: 1,
+			Mode:           store.MessagePolicyModeShadow,
+			Surface:        store.MessagePolicySurfaceAgentToUser,
+			SenderID:       f.sender.ID,
+			RecipientKind:  "user",
+			RecipientID:    f.alice.ID,
+			Class:          store.MessagePolicyClassPass,
+			Action:         store.MessagePolicyActionShadow,
+			CreatedAt:      now.Add(-30 * time.Minute),
+		}
+		require.NoError(t, f.s.CreateMessagePolicyDecision(ctx, aged))
+		require.NoError(t, f.s.CreateMessagePolicyDecision(ctx, fresh))
+
+		f.srv.messagePolicyTrim.tickInterval = 15 * time.Millisecond
+		loopCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		f.srv.startMessagePolicyDecisionTrim(loopCtx)
+		// Second start call must be a safe no-op.
+		f.srv.startMessagePolicyDecisionTrim(loopCtx)
+
+		require.Eventually(t, func() bool {
+			rem, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+				ProjectID: f.project.ID,
+			}, store.ListOptions{Limit: 10})
+			return err == nil && len(rem.Items) == 1 && rem.Items[0].ID == fresh.ID
+		}, 2*time.Second, 15*time.Millisecond, "periodic trim loop did not delete aged decision")
+
+		// Idempotent stop.
+		f.srv.stopMessagePolicyDecisionTrim()
+		f.srv.stopMessagePolicyDecisionTrim()
+	})
+}
+
+func mpgSeedShadowBenchmarkPolicies(tb testing.TB, ctx context.Context, s store.Store, projectID string) []*store.MessagePolicy {
+	tb.Helper()
+	specs := []struct {
+		name string
+		rule string
+	}{
+		{
+			name: "shadow-01-no-prose-choices",
+			rule: `recipient.kind != "agent" && !message.has_choices && message.body.matches("(?i)(\\bchoose\\s+(between|one\\s+of)\\b|\\boption\\s+[a-d1-4]\\b)")`,
+		},
+		{
+			name: "shadow-02-urgent-attachment-guard",
+			rule: `message.urgent && message.attachment_count > 3 && sender.slug != "release-bot"`,
+		},
+		{
+			name: "shadow-03-mention-fanout-watch",
+			rule: `size(mentioned_user_ids) > 2 && message.body.contains("@")`,
+		},
+	}
+	out := make([]*store.MessagePolicy, 0, len(specs))
+	for _, sp := range specs {
+		pol := &store.MessagePolicy{
+			ProjectID: projectID,
+			Name:      sp.name,
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeShadow,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: sp.rule,
+			OnFailed:      messagepolicy.OutcomeAdmit,
+		}
+		require.NoError(tb, s.CreateMessagePolicy(ctx, pol))
+		out = append(out, pol)
+	}
+	return out
+}
+
+func mpgPercentileDuration(samples []time.Duration, pct float64) time.Duration {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := slices.Clone(samples)
+	slices.Sort(sorted)
+	idx := int(float64(len(sorted)-1) * pct)
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+// TestMessagePolicyGate_ShadowOverheadP99Under5ms verifies Target 3 during unit
+// test runs: warm H2 gate overhead with active shadow policies stays under 5 ms
+// at p99.
+func TestMessagePolicyGate_ShadowOverheadP99Under5ms(t *testing.T) {
+	f := newMpgFixture(t, true)
+	ctx := context.Background()
+	mpgSeedShadowBenchmarkPolicies(t, ctx, f.s, f.project.ID)
+
+	req := &OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       strings.Repeat("Build and test suite completed cleanly across packages. ", 18) + "Option B looks ready.",
+		Type:      "input-needed",
+	}
+	route := &routingResult{
+		Recipient:   "user:" + f.alice.Email,
+		RecipientID: f.alice.ID,
+	}
+	evalInput := &h2PolicyInput{
+		agent:     f.sender,
+		req:       req,
+		routing:   route,
+		messageID: "00000000-0000-4000-8000-000000000001",
+	}
+
+	// Warm program cache and SQLite pages.
+	for i := 0; i < 5; i++ {
+		rr := httptest.NewRecorder()
+		_, ok := f.srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+		require.True(t, ok)
+	}
+
+	const N = 80
+	durations := make([]time.Duration, N)
+	for i := 0; i < N; i++ {
+		rr := httptest.NewRecorder()
+		start := time.Now()
+		_, ok := f.srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+		durations[i] = time.Since(start)
+		require.True(t, ok)
+	}
+	p50 := mpgPercentileDuration(durations, 0.50)
+	p99 := mpgPercentileDuration(durations, 0.99)
+	t.Logf("H2 shadow gate warm latency (N=%d, 3 shadow policies): p50=%s p99=%s", N, p50, p99)
+	assert.Less(t, p99, 5*time.Millisecond, "shadow-only H2 gate p99 must stay under 5 ms (got %s)", p99)
+}
+
+func newMpgBenchmarkEnv(b *testing.B) (*Server, store.Store, *store.Project, *store.Agent, *store.User, []*store.MessagePolicy) {
+	b.Helper()
+	ctx := context.Background()
+	s, err := newTestStore(b, ":memory:")
+	require.NoError(b, err)
+
+	srv, err := New(ServerConfig{}, s)
+	require.NoError(b, err)
+	b.Cleanup(func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.CleanupResources(shutCtx)
+		_ = s.Close()
+	})
+	mpgSetExperiment(b, srv, true, true)
+
+	proj := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "Bench Project",
+		Slug: "bench-project",
+	}
+	require.NoError(b, s.CreateProject(ctx, proj))
+
+	alice := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "alice-bench@example.com",
+		DisplayName: "Alice Bench",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(b, s.CreateUser(ctx, alice))
+
+	sender := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "bench-sender",
+		Name:      "Bench Sender",
+		ProjectID: proj.ID,
+		Phase:     "running",
+	}
+	require.NoError(b, s.CreateAgent(ctx, sender))
+
+	policies := mpgSeedShadowBenchmarkPolicies(b, ctx, s, proj.ID)
+	return srv, s, proj, sender, alice, policies
+}
+
+// BenchmarkMessagePolicyGate_ShadowOnly measures hot-path H2 gate latency when
+// only shadow policies are active (Target 3: p99 < 5 ms).
+func BenchmarkMessagePolicyGate_ShadowOnly(b *testing.B) {
+	srv, _, _, sender, alice, _ := newMpgBenchmarkEnv(b)
+	ctx := context.Background()
+
+	req := &OutboundMessageRequest{
+		Recipient: "user:" + alice.Email,
+		Msg:       strings.Repeat("Build and test suite completed cleanly across packages. ", 18) + "Option B looks ready.",
+		Type:      "input-needed",
+	}
+	route := &routingResult{
+		Recipient:   "user:" + alice.Email,
+		RecipientID: alice.ID,
+	}
+	evalInput := &h2PolicyInput{
+		agent:     sender,
+		req:       req,
+		routing:   route,
+		messageID: "00000000-0000-4000-8000-000000000001",
+	}
+
+	rr := httptest.NewRecorder()
+	// Warm program cache.
+	_, _ = srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+
+	durations := make([]time.Duration, 0, b.N)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		t0 := time.Now()
+		_, ok := srv.evaluateH2MessagePolicies(ctx, rr, evalInput)
+		d := time.Since(t0)
+		if !ok {
+			b.Fatal("unexpected shadow gate rejection")
+		}
+		durations = append(durations, d)
+	}
+	b.StopTimer()
+
+	p50 := mpgPercentileDuration(durations, 0.50)
+	p99 := mpgPercentileDuration(durations, 0.99)
+	b.ReportMetric(float64(p50.Nanoseconds())/1e6, "p50_ms")
+	b.ReportMetric(float64(p99.Nanoseconds())/1e6, "p99_ms")
+	if p99 >= 5*time.Millisecond {
+		b.Fatalf("shadow gate p99 %s exceeded 5ms target", p99)
+	}
+}
+
+// BenchmarkMessagePolicyGate_ShadowCacheMiss measures synchronous CEL recompile
+// + evaluate latency when the scoped 1 MiB program cache misses on every evaluation
+// (implementation brief §1, Target 3).
+func BenchmarkMessagePolicyGate_ShadowCacheMiss(b *testing.B) {
+	srv, _, proj, sender, alice, policies := newMpgBenchmarkEnv(b)
+	ctx := context.Background()
+
+	pol := policies[0]
+	act := messagepolicy.NewActivation(messagepolicy.Facts{
+		Surface: messagepolicy.SurfaceAgentToUser,
+		Sender: messagepolicy.SenderFacts{
+			ID:        sender.ID,
+			Slug:      sender.Slug,
+			ProjectID: proj.ID,
+		},
+		Recipient: messagepolicy.RecipientFacts{
+			Kind: "user",
+			ID:   alice.ID,
+			Slug: alice.Email,
+		},
+		Message: messagepolicy.MessageFacts{
+			Type: "input-needed",
+			Body: strings.Repeat("Build and test suite completed cleanly across packages. ", 18) + "Option B looks ready.",
+		},
+		Conversation: messagepolicy.ConversationFacts{
+			Kind: "direct",
+		},
+	})
+
+	durations := make([]time.Duration, 0, b.N)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		srv.RuleEngine().Invalidate(ruleengine.DialectCEL, messagepolicy.EnvironmentName, celengine.CacheScope{
+			Consumer: messagepolicy.ConsumerName,
+			ID:       pol.ID,
+			Revision: pol.Revision,
+		})
+		budget := messagepolicy.NewSendBudget()
+		b.StartTimer()
+
+		t0 := time.Now()
+		c := srv.evalOneMessagePolicy(ctx, pol, act, budget)
+		d := time.Since(t0)
+		if c.Class != messagepolicy.ClassViolation {
+			b.Fatalf("expected ClassViolation on cache-miss eval, got %+v", c)
+		}
+		durations = append(durations, d)
+	}
+	b.StopTimer()
+
+	p50 := mpgPercentileDuration(durations, 0.50)
+	p99 := mpgPercentileDuration(durations, 0.99)
+	b.ReportMetric(float64(p50.Nanoseconds())/1e6, "p50_ms")
+	b.ReportMetric(float64(p99.Nanoseconds())/1e6, "p99_ms")
 }
