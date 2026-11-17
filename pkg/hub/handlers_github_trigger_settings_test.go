@@ -159,25 +159,28 @@ func TestGitHubTriggerPermissions_RoleMatrixAndTestAdminPolicy(t *testing.T) {
 		})
 	}
 
-	// test_super_admin is denied exercise of both permissions at step 0c,
-	// while still permitted to grant project-owner / project-admin / project-member.
-	for _, perm := range []struct {
-		action string
-		id     string
-	}{
-		{permissions.ActionComment, "github_trigger.comment"},
-		{permissions.ActionConfigure, "github_trigger.configure"},
-	} {
-		d := srv.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(testSuperIdent),
-			Credential: credentialContextForIdentity(testSuperIdent),
-			Resource:   res,
-			Action:     Action(perm.action),
-			Permission: perm.id,
-		})
-		assert.False(t, d.Allowed, "test_super_admin must be denied %s", perm.id)
-		assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "test_super_admin %s denial reason: %s", perm.id, d.Reason)
-	}
+	// github_trigger.comment is allow under test-admin policy (like project.chat_post,
+	// preserving group-based project-member delegation; exercise still needs
+	// hub.github_triggers, which is deny for test admins), while github_trigger.configure
+	// is denied at step 0c and remains grantable at project scope.
+	dComment := srv.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(testSuperIdent),
+		Credential: credentialContextForIdentity(testSuperIdent),
+		Resource:   res,
+		Action:     Action(permissions.ActionComment),
+		Permission: "github_trigger.comment",
+	})
+	assert.True(t, dComment.Allowed, "test_super_admin github_trigger.comment should pass step 0c: %s", dComment.Reason)
+
+	dConfigure := srv.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(testSuperIdent),
+		Credential: credentialContextForIdentity(testSuperIdent),
+		Resource:   res,
+		Action:     Action(permissions.ActionConfigure),
+		Permission: "github_trigger.configure",
+	})
+	assert.False(t, dConfigure.Allowed, "test_super_admin must be denied github_trigger.configure")
+	assert.Equal(t, DeniedByTestAdminPolicy, dConfigure.DeniedBy, "test_super_admin github_trigger.configure denial reason: %s", dConfigure.Reason)
 
 	for _, roleName := range []string{store.ProjectRoleOwner, store.ProjectRoleAdmin, store.ProjectRoleMember} {
 		rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
