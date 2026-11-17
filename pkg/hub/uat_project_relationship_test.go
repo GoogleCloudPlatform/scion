@@ -976,11 +976,11 @@ func TestProjectRoles_AttachAndPortAccessLockIn(t *testing.T) {
 	// R6/R6/R5 added artifact.read and artifact.create; R8/R7 added agent
 	// delegation grant management for project-bounded grants; R9/R8 added
 	// project.manage_visitors; owner R10 added artifact.steward;
-	// R11/R9/R6 added project.chat_post.
+	// R11/R9/R6 added project.chat_post; R12/R10/R7 added github_trigger.{comment,configure}.
 	revisions := map[string]int{
-		store.ProjectRoleOwner:  11,
-		store.ProjectRoleAdmin:  9,
-		store.ProjectRoleMember: 6,
+		store.ProjectRoleOwner:  12,
+		store.ProjectRoleAdmin:  10,
+		store.ProjectRoleMember: 7,
 	}
 	portAccess := map[string]bool{
 		store.ProjectRoleOwner: true,
