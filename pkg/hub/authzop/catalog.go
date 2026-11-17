@@ -619,7 +619,6 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteProjectVisitorRulesByProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "Delete", Symbol: "DeleteProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/handlers_webhook_endpoints.go", Function: "createWebhookEndpoint", Symbol: "CreateSecret", OperationID: "webhookendpoint.create"},
-	{File: "pkg/hub/webhook_endpoint_secrets.go", Function: "loadWebhookEndpointSecret", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Webhook ingress loads the endpoint's hub-scoped SecretTypeInternal signing secret solely to verify inbound scion_v1 HMAC-SHA256; secret material never leaves the verifier", Scope: "pkg/hub/webhook_endpoint_secrets.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
 

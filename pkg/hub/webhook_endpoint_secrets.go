@@ -111,14 +111,14 @@ func (s *Server) unsealWebhookEndpointSecret(encrypted string) (string, error) {
 var errWebhookSecretTypeMismatch = errors.New("webhook endpoint secret row is not SecretTypeInternal")
 
 // loadWebhookEndpointSecret loads and unseals the hub-scoped SecretTypeInternal
-// signing secret row for (projectID, endpointID, version) (§4.1, §8.1 step 6).
+// signing secret row for (projectID, endpointID, version) in a single GetSecret
+// query (§4.1, §8.1 step 6).
 func (s *Server) loadWebhookEndpointSecret(ctx context.Context, projectID, endpointID string, version int) (string, error) {
 	if s == nil || s.store == nil {
 		return "", errors.New("hub store is not configured")
 	}
-	hubID := s.HubID()
 	key := store.WebhookEndpointSecretKey(projectID, endpointID, version)
-	meta, err := s.store.GetSecret(ctx, key, store.ScopeHub, hubID)
+	meta, err := s.store.GetSecret(ctx, key, store.ScopeHub, s.HubID())
 	if err != nil {
 		return "", err
 	}
@@ -129,14 +129,10 @@ func (s *Server) loadWebhookEndpointSecret(ctx context.Context, projectID, endpo
 		}
 		return "", fmt.Errorf("%w: got %q", errWebhookSecretTypeMismatch, gotType)
 	}
-	encrypted, err := s.store.GetSecretValue(ctx, key, store.ScopeHub, hubID)
-	if err != nil {
-		return "", err
+	if meta.EncryptedValue == "" {
+		return "", errors.New("webhook endpoint secret row has empty value")
 	}
-	if encrypted != meta.EncryptedValue {
-		return "", errors.New("webhook endpoint secret row changed concurrently during load")
-	}
-	return s.unsealWebhookEndpointSecret(encrypted)
+	return s.unsealWebhookEndpointSecret(meta.EncryptedValue)
 }
 
 // newWebhookEndpointSecretRow constructs the hub-scoped SecretTypeInternal row
