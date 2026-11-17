@@ -528,8 +528,10 @@ func Spec() []TableFixture {
 			{
 				"installation_id": int64(987654), "account_login": "example-org",
 				"account_type": "Organization", "app_id": int64(112233),
-				"repositories": `["example/platform","example/infra"]`, "status": "active",
-				"created_at": baseTime, "updated_at": baseTime,
+				"repositories":    `["example/platform","example/infra"]`,
+				"trigger_routing": `{"example/platform":{"primary_project_id":"` + projectID + `","set_by":"` + userID + `","set_at":"2026-01-15T10:00:00Z"}}`,
+				"status":          "active",
+				"created_at":      baseTime, "updated_at": baseTime,
 			},
 		}},
 

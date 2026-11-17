@@ -261,7 +261,8 @@ func init() {
 			KoanfPaths: []string{
 				"server.github_app", "server.github_app.app_id", "server.github_app.api_base_url",
 				"server.github_app.webhooks_enabled", "server.github_app.installation_url",
-				"server.github_app.private_key_path",
+				"server.github_app.private_key_path", "server.github_app.app_slug",
+				"server.github_app.command_mention_aliases",
 			},
 			New: func() any { return &GitHubAppSettings{} },
 			// The agent dispatcher sets up its GitHub App token minter at

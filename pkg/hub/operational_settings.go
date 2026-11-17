@@ -203,11 +203,13 @@ type Layer1Snapshot struct {
 	ContentURLAllowSameSite bool
 
 	// GitHub App (non-secret fields only)
-	GitHubAppID           int64
-	GitHubAPIBaseURL      string
-	GitHubWebhooksEnabled bool
-	GitHubInstallationURL string
-	GitHubPrivateKeyPath  string
+	GitHubAppID                 int64
+	GitHubAPIBaseURL            string
+	GitHubWebhooksEnabled       bool
+	GitHubInstallationURL       string
+	GitHubPrivateKeyPath        string
+	GitHubAppSlug               string
+	GitHubCommandMentionAliases []string
 
 	// Notifications
 	NotificationChannels []config.V1NotificationChannelConfig
@@ -1404,6 +1406,8 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.GitHubWebhooksEnabled = k.Bool("server.github_app.webhooks_enabled")
 	snap.GitHubInstallationURL = k.String("server.github_app.installation_url")
 	snap.GitHubPrivateKeyPath = k.String("server.github_app.private_key_path")
+	snap.GitHubAppSlug = k.String("server.github_app.app_slug")
+	snap.GitHubCommandMentionAliases = k.Strings("server.github_app.command_mention_aliases")
 
 	// Notifications
 	if k.Exists("server.notification_channels") {
@@ -1523,6 +1527,8 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap.GitHubWebhooksEnabled = gc.GitHubApp.WebhooksEnabled
 	snap.GitHubInstallationURL = gc.GitHubApp.InstallationURL
 	snap.GitHubPrivateKeyPath = gc.GitHubApp.PrivateKeyPath
+	snap.GitHubAppSlug = gc.GitHubApp.AppSlug
+	snap.GitHubCommandMentionAliases = slices.Clone(gc.GitHubApp.CommandMentionAliases)
 
 	// Project defaults — read from settings.yaml project_defaults section
 	snap.DefaultScratchpad = gc.DefaultScratchpad
@@ -1889,6 +1895,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		gh.InstallationURL = snap.GitHubInstallationURL
 		if snap.GitHubPrivateKeyPath != "" {
 			gh.PrivateKeyPath = snap.GitHubPrivateKeyPath
+		}
+		gh.AppSlug = snap.GitHubAppSlug
+		gh.CommandMentionAliases = slices.Clone(snap.GitHubCommandMentionAliases)
+	} else {
+		if snap.GitHubAppSlug != "" {
+			gh.AppSlug = snap.GitHubAppSlug
+		}
+		if len(snap.GitHubCommandMentionAliases) > 0 {
+			gh.CommandMentionAliases = slices.Clone(snap.GitHubCommandMentionAliases)
 		}
 	}
 	if s.setGitHubAppPublicLocked(gh) {

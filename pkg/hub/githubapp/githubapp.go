@@ -29,6 +29,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -112,10 +113,15 @@ func (e *TokenMintError) UpstreamDetail() string {
 	return e.upstream
 }
 
-// upstreamBodyReadLimit bounds how much of a GitHub API response body this
-// package reads. It equals the hub's upstreamErrorBodyReadLimit
+// upstreamBodyReadLimit bounds how much of a GitHub API error response body
+// this package reads. It equals the hub's upstreamErrorBodyReadLimit
 // (pkg/hub/upstream_text.go); keep the two in step.
 const upstreamBodyReadLimit = 4 << 10
+
+// appMetadataReadLimit bounds how much of a 200 OK GET /app response body
+// GetApp reads. Realistic GitHub App payloads (owner URLs, description,
+// subscribed events, and permissions) routinely exceed 4 KiB.
+const appMetadataReadLimit = 1 << 20
 
 // Error codes for token minting failures.
 const (
@@ -704,15 +710,19 @@ func (c *Client) GetApp(ctx context.Context) (map[string]interface{}, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
 	c.trackRateLimit(resp)
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, classifyGitHubError(resp.StatusCode, body)
+		errBody, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+		return nil, classifyGitHubError(resp.StatusCode, errBody)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, appMetadataReadLimit))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	var result map[string]interface{}
@@ -721,4 +731,107 @@ func (c *Client) GetApp(ctx context.Context) (map[string]interface{}, error) {
 	}
 
 	return result, nil
+}
+
+// AppIdentity holds the GitHub App's metadata, subscribed webhook events, and
+// permissions returned by GET /app.
+type AppIdentity struct {
+	AppID       int64             `json:"app_id"`
+	Slug        string            `json:"slug"`
+	BotLogin    string            `json:"bot_login"`
+	Events      []string          `json:"events"`
+	Permissions map[string]string `json:"permissions"`
+	FetchedAt   time.Time         `json:"fetched_at"`
+}
+
+// Clone returns a deep copy of id so callers cannot mutate cached slices or maps.
+func (id AppIdentity) Clone() AppIdentity {
+	events := make([]string, len(id.Events))
+	copy(events, id.Events)
+	perms := make(map[string]string, len(id.Permissions))
+	for k, v := range id.Permissions {
+		perms[k] = v
+	}
+	return AppIdentity{
+		AppID:       id.AppID,
+		Slug:        id.Slug,
+		BotLogin:    id.BotLogin,
+		Events:      events,
+		Permissions: perms,
+		FetchedAt:   id.FetchedAt,
+	}
+}
+
+// ParseAppIdentity extracts an AppIdentity from a decoded GET /app response.
+func ParseAppIdentity(raw map[string]interface{}, fetchedAt time.Time) AppIdentity {
+	out := AppIdentity{
+		Events:      []string{},
+		Permissions: map[string]string{},
+		FetchedAt:   fetchedAt.UTC(),
+	}
+	if raw == nil {
+		return out
+	}
+
+	switch v := raw["id"].(type) {
+	case float64:
+		out.AppID = int64(v)
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			out.AppID = n
+		}
+	case int64:
+		out.AppID = v
+	case int:
+		out.AppID = int64(v)
+	}
+
+	if slug, ok := raw["slug"].(string); ok {
+		slug = strings.TrimSpace(slug)
+		out.Slug = slug
+		if slug != "" {
+			out.BotLogin = slug + "[bot]"
+		}
+	}
+
+	seenEvents := make(map[string]struct{})
+	addEvent := func(ev string) {
+		ev = strings.TrimSpace(ev)
+		if ev == "" {
+			return
+		}
+		if _, dup := seenEvents[ev]; dup {
+			return
+		}
+		seenEvents[ev] = struct{}{}
+		out.Events = append(out.Events, ev)
+	}
+	switch evs := raw["events"].(type) {
+	case []interface{}:
+		for _, item := range evs {
+			if s, ok := item.(string); ok {
+				addEvent(s)
+			}
+		}
+	case []string:
+		for _, s := range evs {
+			addEvent(s)
+		}
+	}
+	sort.Strings(out.Events)
+
+	switch perms := raw["permissions"].(type) {
+	case map[string]interface{}:
+		for k, v := range perms {
+			if vs, ok := v.(string); ok {
+				out.Permissions[k] = vs
+			}
+		}
+	case map[string]string:
+		for k, v := range perms {
+			out.Permissions[k] = v
+		}
+	}
+
+	return out
 }

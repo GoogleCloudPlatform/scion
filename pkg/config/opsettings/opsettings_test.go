@@ -546,6 +546,34 @@ func TestGitHubAppExtractExcludesSecrets(t *testing.T) {
 	}
 }
 
+func TestGitHubAppSlugAndMentionAliasesRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.github_app.app_id":                  42,
+		"server.github_app.app_slug":                "scion-enterprise",
+		"server.github_app.command_mention_aliases": []string{"scion", "scion-bot"},
+	}, "."), nil)
+
+	raw, err := ExtractSectionFromKoanf(k, "github_app")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if errs := Validate("github_app", raw); len(errs) != 0 {
+		t.Fatalf("validate: %v", errs)
+	}
+
+	loaded, err := LoadSectionsIntoKoanf(map[string]json.RawMessage{"github_app": raw})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := loaded.String("server.github_app.app_slug"); got != "scion-enterprise" {
+		t.Fatalf("app_slug = %q, want %q", got, "scion-enterprise")
+	}
+	if got := loaded.Strings("server.github_app.command_mention_aliases"); len(got) != 2 || got[0] != "scion" || got[1] != "scion-bot" {
+		t.Fatalf("command_mention_aliases = %v, want [scion scion-bot]", got)
+	}
+}
+
 // --- Round-trip tests ---
 
 func TestRoundTrip(t *testing.T) {

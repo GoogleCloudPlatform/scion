@@ -1457,13 +1457,15 @@ type SchedulerConfig struct {
 
 // GitHubAppConfig holds configuration for the Hub's GitHub App integration.
 type GitHubAppConfig struct {
-	AppID           int64  `json:"appId" yaml:"appId" koanf:"appId"`
-	PrivateKeyPath  string `json:"privateKeyPath,omitempty" yaml:"privateKeyPath,omitempty" koanf:"privateKeyPath"`
-	PrivateKey      string `json:"privateKey,omitempty" yaml:"privateKey,omitempty" koanf:"privateKey"`
-	WebhookSecret   string `json:"webhookSecret,omitempty" yaml:"webhookSecret,omitempty" koanf:"webhookSecret"`
-	APIBaseURL      string `json:"apiBaseUrl,omitempty" yaml:"apiBaseUrl,omitempty" koanf:"apiBaseUrl"`
-	WebhooksEnabled bool   `json:"webhooksEnabled,omitempty" yaml:"webhooksEnabled,omitempty" koanf:"webhooksEnabled"`
-	InstallationURL string `json:"installationUrl,omitempty" yaml:"installationUrl,omitempty" koanf:"installationUrl"`
+	AppID                 int64    `json:"appId" yaml:"appId" koanf:"appId"`
+	PrivateKeyPath        string   `json:"privateKeyPath,omitempty" yaml:"privateKeyPath,omitempty" koanf:"privateKeyPath"`
+	PrivateKey            string   `json:"privateKey,omitempty" yaml:"privateKey,omitempty" koanf:"privateKey"`
+	WebhookSecret         string   `json:"webhookSecret,omitempty" yaml:"webhookSecret,omitempty" koanf:"webhookSecret"`
+	APIBaseURL            string   `json:"apiBaseUrl,omitempty" yaml:"apiBaseUrl,omitempty" koanf:"apiBaseUrl"`
+	WebhooksEnabled       bool     `json:"webhooksEnabled,omitempty" yaml:"webhooksEnabled,omitempty" koanf:"webhooksEnabled"`
+	InstallationURL       string   `json:"installationUrl,omitempty" yaml:"installationUrl,omitempty" koanf:"installationUrl"`
+	AppSlug               string   `json:"appSlug,omitempty" yaml:"appSlug,omitempty" koanf:"appSlug"`
+	CommandMentionAliases []string `json:"commandMentionAliases,omitempty" yaml:"commandMentionAliases,omitempty" koanf:"commandMentionAliases"`
 }
 
 // SecretsConfig holds configuration for the secrets backend.

@@ -4236,16 +4236,25 @@ func (g *Project) ToAPI() *api.ProjectInfo {
 // GitHub App Integration
 // =============================================================================
 
+// GitHubTriggerRoute designates a primary project for GitHub App trigger
+// webhook fan-out on one repository within an installation (§8.4).
+type GitHubTriggerRoute struct {
+	PrimaryProjectID string    `json:"primary_project_id"`
+	SetBy            string    `json:"set_by,omitempty"`
+	SetAt            time.Time `json:"set_at"`
+}
+
 // GitHubInstallation represents a GitHub App installation registered on the Hub.
 type GitHubInstallation struct {
-	InstallationID int64     `json:"installation_id"`
-	AccountLogin   string    `json:"account_login"`
-	AccountType    string    `json:"account_type"` // "Organization" or "User"
-	AppID          int64     `json:"app_id"`
-	Repositories   []string  `json:"repositories,omitempty"`
-	Status         string    `json:"status"` // "active", "suspended", "deleted"
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	InstallationID int64                         `json:"installation_id"`
+	AccountLogin   string                        `json:"account_login"`
+	AccountType    string                        `json:"account_type"` // "Organization" or "User"
+	AppID          int64                         `json:"app_id"`
+	Repositories   []string                      `json:"repositories,omitempty"`
+	TriggerRouting map[string]GitHubTriggerRoute `json:"-"`
+	Status         string                        `json:"status"` // "active", "suspended", "deleted"
+	CreatedAt      time.Time                     `json:"created_at"`
+	UpdatedAt      time.Time                     `json:"updated_at"`
 }
 
 // GitHub installation status constants.

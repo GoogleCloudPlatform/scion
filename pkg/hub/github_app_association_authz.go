@@ -655,7 +655,8 @@ func (s *Server) githubAssociationReport(ctx context.Context, refresh bool) (git
 
 	now := timeNow()
 	c.mu.Lock()
-	fresh := c.valid && now.Before(c.generatedAt.Add(githubAssociationReportTTL))
+	valid := c.valid
+	fresh := valid && now.Before(c.generatedAt.Add(githubAssociationReportTTL))
 	nextBuild := c.lastFullBuild.Add(githubAssociationReportMinRebuildInterval)
 	limited := !c.lastFullBuild.IsZero() && now.Before(nextBuild)
 	startSeq := c.seq
@@ -667,7 +668,7 @@ func (s *Server) githubAssociationReport(ctx context.Context, refresh bool) (git
 
 	switch {
 	case refresh || !fresh:
-		if limited && (refresh || !c.valid) {
+		if limited && (refresh || !valid) {
 			return githubAssociationReport{}, nextBuild.Sub(now), errGitHubAssociationReportRateLimited
 		}
 		if !limited {

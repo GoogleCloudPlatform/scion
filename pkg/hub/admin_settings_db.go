@@ -381,6 +381,8 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.GitHubApp.WebhooksEnabled = snap.GitHubWebhooksEnabled
 	resp.Server.GitHubApp.InstallationURL = snap.GitHubInstallationURL
 	resp.Server.GitHubApp.PrivateKeyPath = snap.GitHubPrivateKeyPath
+	resp.Server.GitHubApp.AppSlug = snap.GitHubAppSlug
+	resp.Server.GitHubApp.CommandMentionAliases = slices.Clone(snap.GitHubCommandMentionAliases)
 
 	// Notifications — always set from snapshot so an explicit empty DB
 	// value overrides file-loaded channels.
@@ -2994,6 +2996,10 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			}
 			d.InstallationURL = ga.InstallationURL
 			d.PrivateKeyPath = ga.PrivateKeyPath
+			d.AppSlug = ga.AppSlug
+			if len(ga.CommandMentionAliases) > 0 {
+				d.CommandMentionAliases = slices.Clone(ga.CommandMentionAliases)
+			}
 		}
 		doc = d
 

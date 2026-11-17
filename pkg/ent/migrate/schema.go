@@ -1760,6 +1760,7 @@ var (
 		{Name: "account_type", Type: field.TypeString, Default: "Organization"},
 		{Name: "app_id", Type: field.TypeInt64},
 		{Name: "repositories", Type: field.TypeString, Default: "[]"},
+		{Name: "trigger_routing", Type: field.TypeString, Default: "{}"},
 		{Name: "status", Type: field.TypeString, Default: "active"},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},

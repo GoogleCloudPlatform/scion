@@ -504,6 +504,13 @@ const WelcomeProject = "hub.welcome_project"
 // kept. The design names it "hub.system-one"; NamePattern allows no hyphen.
 const SystemOne = "hub.system_one"
 
+// GitHubTriggers gates routing GitHub App webhook deliveries into the trigger
+// system, GitHub trigger presets, App readiness reporting, and repository
+// primary-project routing (ptone/scion#836). Requires hub.triggers to be
+// enabled as well; while off, content events remain ignored, GitHub trigger
+// routes answer 404, and the web section is hidden.
+const GitHubTriggers = "hub.github_triggers"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -996,6 +1003,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#8044",
 		Owner:       "system-one",
 		ReviewBy:    "2027-02-15",
+	},
+	{
+		Name:        GitHubTriggers,
+		Title:       "GitHub App events as triggers",
+		Description: "Routes GitHub App webhook deliveries into the trigger system and enables GitHub trigger authoring, presets, App readiness reporting, and primary-project repository routing. Requires hub.triggers to be enabled as well: the hub checks both flags server-side, while the web flag affects presentation only. While off, the webhook route keeps returning ignored for content events, github triggers cannot be created, presets/status/settings/repo-routing routes answer 404, the web section is hidden, and existing github triggers and queued events wait.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#836",
+		Owner:       "triggers",
+		ReviewBy:    "2027-05-31",
 	},
 }
 

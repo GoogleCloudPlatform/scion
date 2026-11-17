@@ -74,6 +74,11 @@ func Repositories(v string) predicate.GithubInstallation {
 	return predicate.GithubInstallation(sql.FieldEQ(FieldRepositories, v))
 }
 
+// TriggerRouting applies equality check predicate on the "trigger_routing" field. It's identical to TriggerRoutingEQ.
+func TriggerRouting(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldEQ(FieldTriggerRouting, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.GithubInstallation {
 	return predicate.GithubInstallation(sql.FieldEQ(FieldStatus, v))
@@ -322,6 +327,71 @@ func RepositoriesEqualFold(v string) predicate.GithubInstallation {
 // RepositoriesContainsFold applies the ContainsFold predicate on the "repositories" field.
 func RepositoriesContainsFold(v string) predicate.GithubInstallation {
 	return predicate.GithubInstallation(sql.FieldContainsFold(FieldRepositories, v))
+}
+
+// TriggerRoutingEQ applies the EQ predicate on the "trigger_routing" field.
+func TriggerRoutingEQ(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldEQ(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingNEQ applies the NEQ predicate on the "trigger_routing" field.
+func TriggerRoutingNEQ(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldNEQ(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingIn applies the In predicate on the "trigger_routing" field.
+func TriggerRoutingIn(vs ...string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldIn(FieldTriggerRouting, vs...))
+}
+
+// TriggerRoutingNotIn applies the NotIn predicate on the "trigger_routing" field.
+func TriggerRoutingNotIn(vs ...string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldNotIn(FieldTriggerRouting, vs...))
+}
+
+// TriggerRoutingGT applies the GT predicate on the "trigger_routing" field.
+func TriggerRoutingGT(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldGT(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingGTE applies the GTE predicate on the "trigger_routing" field.
+func TriggerRoutingGTE(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldGTE(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingLT applies the LT predicate on the "trigger_routing" field.
+func TriggerRoutingLT(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldLT(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingLTE applies the LTE predicate on the "trigger_routing" field.
+func TriggerRoutingLTE(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldLTE(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingContains applies the Contains predicate on the "trigger_routing" field.
+func TriggerRoutingContains(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldContains(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingHasPrefix applies the HasPrefix predicate on the "trigger_routing" field.
+func TriggerRoutingHasPrefix(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldHasPrefix(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingHasSuffix applies the HasSuffix predicate on the "trigger_routing" field.
+func TriggerRoutingHasSuffix(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldHasSuffix(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingEqualFold applies the EqualFold predicate on the "trigger_routing" field.
+func TriggerRoutingEqualFold(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldEqualFold(FieldTriggerRouting, v))
+}
+
+// TriggerRoutingContainsFold applies the ContainsFold predicate on the "trigger_routing" field.
+func TriggerRoutingContainsFold(v string) predicate.GithubInstallation {
+	return predicate.GithubInstallation(sql.FieldContainsFold(FieldTriggerRouting, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

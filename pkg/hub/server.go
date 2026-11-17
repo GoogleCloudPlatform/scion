@@ -715,9 +715,11 @@ type GitHubAppServerConfig struct {
 	// RawBaseURL overrides the origin used to build raw file-content URLs
 	// (default https://raw.githubusercontent.com). Set alongside APIBaseURL
 	// for GitHub Enterprise or for tests that serve fixture content.
-	RawBaseURL      string
-	WebhooksEnabled bool
-	InstallationURL string
+	RawBaseURL            string
+	WebhooksEnabled       bool
+	InstallationURL       string
+	AppSlug               string
+	CommandMentionAliases []string
 }
 
 // DefaultServerConfig returns the default server configuration.
@@ -2715,6 +2717,10 @@ type Server struct {
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
+	// githubAppIdentity caches GET /app metadata, subscribed events, and
+	// permissions for GitHub App trigger readiness and mention detection
+	// (github_app_identity.go).
+	githubAppIdentity githubAppIdentityState
 
 	// githubAccessCache caches GitHub-side repository access checks made
 	// with a project creator's own token (github_app_association_authz.go).
@@ -7713,6 +7719,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler = sched
 	s.mu.Unlock()
 	s.registerSchedulerHandlers()
+	s.startGitHubAppIdentityInit(ctx)
 
 	// Check stored timestamps (SQLite) and, when some are not canonical UTC,
 	// run utc-timestamp-normalize once, after a snapshot. It runs in the
@@ -8067,6 +8074,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// it (bounded by its own grace) so that a snapshot being copied is
 		// interrupted and its temporary file removed before the process exits.
 		s.stopStoredTimestampCheck()
+		s.stopGitHubAppIdentityInit()
 
 		// Likewise for an auto-suspend in flight; the cancelled ctx above
 		// already stops new ones from starting.
@@ -8639,6 +8647,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/v1/github-app/installations/", s.guarded("DELETE /api/v1/github-app/installations/", s.handleGitHubAppInstallationByIDWrite))
 	s.mux.HandleFunc("POST /api/v1/github-app/installations/discover", s.guarded("POST /api/v1/github-app/installations/discover", s.handleGitHubAppDiscover))
 	s.mux.HandleFunc("POST /api/v1/github-app/sync-permissions", s.guarded("POST /api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
+	s.mux.HandleFunc("GET /api/v1/github-app/repo-routing", s.guarded("GET /api/v1/github-app/repo-routing", s.requireGitHubTriggers(s.handleListGitHubAppRepoRouting)))
+	s.mux.HandleFunc("PUT /api/v1/github-app/repo-routing/{owner}/{repo}", s.guarded("PUT /api/v1/github-app/repo-routing/{owner}/{repo}", s.requireGitHubTriggers(s.handlePutGitHubAppRepoRouting)))
+	s.mux.HandleFunc("DELETE /api/v1/github-app/repo-routing/{owner}/{repo}", s.guarded("DELETE /api/v1/github-app/repo-routing/{owner}/{repo}", s.requireGitHubTriggers(s.handleDeleteGitHubAppRepoRouting)))
 
 	// Hub test identities (ptone/scion#4240). Always registered; each
 	// handler returns 404 unless --test-mode is member or above.

@@ -17,7 +17,9 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -641,4 +643,146 @@ func TestExternalStore_BackfillGCPVerificationStatus_DoesNotClobberLiveFailures(
 func TestExternalStore_BackfillGCPVerificationStatus_EmptyTable(t *testing.T) {
 	s := newTestExternalStore(t)
 	assert.NoError(t, s.BackfillGCPVerificationStatus(context.Background()))
+}
+
+func TestExternalStore_GitHubInstallationTriggerRouting(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	// CreateGitHubInstallation ignores TriggerRouting on input (single-writer).
+	inst := &store.GitHubInstallation{
+		InstallationID: 777,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          42,
+		Repositories:   []string{"Acme/Widgets", "Acme/Other"},
+		TriggerRouting: map[string]store.GitHubTriggerRoute{
+			"acme/widgets": {PrimaryProjectID: "ignored-on-create"},
+		},
+	}
+	require.NoError(t, s.CreateGitHubInstallation(ctx, inst))
+	created, err := s.GetGitHubInstallation(ctx, 777)
+	require.NoError(t, err)
+	assert.Empty(t, created.TriggerRouting, "CreateGitHubInstallation must never write trigger_routing")
+
+	setAt := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, s.SetGitHubInstallationTriggerRoute(ctx, 777, "Acme/Widgets", store.GitHubTriggerRoute{
+		PrimaryProjectID: "proj-1",
+		SetBy:            "admin-1",
+		SetAt:            setAt,
+	}))
+
+	// Missing installation returns ErrNotFound.
+	err = s.SetGitHubInstallationTriggerRoute(ctx, 999999, "Acme/Widgets", store.GitHubTriggerRoute{
+		PrimaryProjectID: "proj-1",
+	})
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Stored under lowercased owner/repo key.
+	got, err := s.GetGitHubInstallation(ctx, 777)
+	require.NoError(t, err)
+	require.Contains(t, got.TriggerRouting, "acme/widgets")
+	assert.Equal(t, "proj-1", got.TriggerRouting["acme/widgets"].PrimaryProjectID)
+	assert.Equal(t, "admin-1", got.TriggerRouting["acme/widgets"].SetBy)
+	assert.True(t, setAt.Equal(got.TriggerRouting["acme/widgets"].SetAt))
+
+	// UpdateGitHubInstallation always preserves stored routes regardless of TriggerRouting field value.
+	for _, tc := range []struct {
+		name    string
+		routing map[string]store.GitHubTriggerRoute
+	}{
+		{name: "nil map", routing: nil},
+		{name: "empty non-nil map", routing: map[string]store.GitHubTriggerRoute{}},
+		{name: "conflicting map", routing: map[string]store.GitHubTriggerRoute{
+			"acme/widgets": {PrimaryProjectID: "clobbered-proj", SetBy: "attacker"},
+		}},
+	} {
+		require.NoError(t, s.UpdateGitHubInstallation(ctx, &store.GitHubInstallation{
+			InstallationID: 777,
+			AccountLogin:   "acme",
+			AccountType:    "Organization",
+			AppID:          42,
+			Repositories:   []string{"Acme/Widgets"},
+			TriggerRouting: tc.routing,
+			Status:         store.GitHubInstallationStatusActive,
+		}), tc.name)
+		got, err = s.GetGitHubInstallation(ctx, 777)
+		require.NoError(t, err, tc.name)
+		require.Contains(t, got.TriggerRouting, "acme/widgets", tc.name)
+		assert.Equal(t, "proj-1", got.TriggerRouting["acme/widgets"].PrimaryProjectID, tc.name)
+		assert.Equal(t, "admin-1", got.TriggerRouting["acme/widgets"].SetBy, tc.name)
+	}
+
+	// DeleteGitHubInstallationTriggerRoute is case-insensitive and reports whether an entry existed.
+	removed, err := s.DeleteGitHubInstallationTriggerRoute(ctx, 777, "ACME/WIDGETS")
+	require.NoError(t, err)
+	assert.True(t, removed)
+
+	removed, err = s.DeleteGitHubInstallationTriggerRoute(ctx, 777, "acme/widgets")
+	require.NoError(t, err)
+	assert.False(t, removed)
+
+	_, err = s.DeleteGitHubInstallationTriggerRoute(ctx, 999999, "acme/widgets")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	got, err = s.GetGitHubInstallation(ctx, 777)
+	require.NoError(t, err)
+	assert.Empty(t, got.TriggerRouting)
+
+	// Corrupt stored trigger_routing JSON logs a content-free warning with installation_id only.
+	const corruptRaw = "{corrupt-SECRET-PAYLOAD"
+	_, err = s.client.GithubInstallation.UpdateOneID(777).SetTriggerRouting(corruptRaw).Save(ctx)
+	require.NoError(t, err)
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	got, err = s.GetGitHubInstallation(ctx, 777)
+	require.NoError(t, err)
+	assert.Empty(t, got.TriggerRouting)
+	assert.Contains(t, logBuf.String(), "installation_id=777")
+	assert.NotContains(t, logBuf.String(), "SECRET-PAYLOAD")
+}
+
+func TestCompositeStore_DeleteProject_CleansGitHubTriggerRoutes(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	proj1 := uuid.NewString()
+	proj2 := uuid.NewString()
+	for i, id := range []string{proj1, proj2} {
+		require.NoError(t, cs.CreateProject(ctx, &store.Project{
+			ID:      id,
+			Name:    "proj-" + string(rune('a'+i)),
+			Slug:    "proj-" + string(rune('a'+i)),
+			Created: time.Now(),
+			Updated: time.Now(),
+		}))
+	}
+
+	require.NoError(t, cs.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: 1001,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          42,
+		Repositories:   []string{"acme/one", "acme/two"},
+	}))
+	require.NoError(t, cs.SetGitHubInstallationTriggerRoute(ctx, 1001, "acme/one", store.GitHubTriggerRoute{
+		PrimaryProjectID: proj1,
+		SetBy:            "admin",
+	}))
+	require.NoError(t, cs.SetGitHubInstallationTriggerRoute(ctx, 1001, "acme/two", store.GitHubTriggerRoute{
+		PrimaryProjectID: proj2,
+		SetBy:            "admin",
+	}))
+
+	require.NoError(t, cs.DeleteProject(ctx, proj1))
+
+	got, err := cs.GetGitHubInstallation(ctx, 1001)
+	require.NoError(t, err)
+	assert.NotContains(t, got.TriggerRouting, "acme/one", "deleted project's primary route must be removed")
+	require.Contains(t, got.TriggerRouting, "acme/two", "other project's primary route must remain intact")
+	assert.Equal(t, proj2, got.TriggerRouting["acme/two"].PrimaryProjectID)
 }

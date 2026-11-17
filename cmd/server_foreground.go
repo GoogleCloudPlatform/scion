@@ -2987,13 +2987,15 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		TelemetryConfig:  config.ConvertV1TelemetryToAPI(cfg.TelemetryConfig),
 		BrokerAuthConfig: hub.DefaultBrokerAuthConfig(),
 		GitHubAppConfig: hub.GitHubAppServerConfig{
-			AppID:           cfg.GitHubApp.AppID,
-			PrivateKeyPath:  cfg.GitHubApp.PrivateKeyPath,
-			PrivateKey:      cfg.GitHubApp.PrivateKey,
-			WebhookSecret:   cfg.GitHubApp.WebhookSecret,
-			APIBaseURL:      cfg.GitHubApp.APIBaseURL,
-			WebhooksEnabled: cfg.GitHubApp.WebhooksEnabled,
-			InstallationURL: cfg.GitHubApp.InstallationURL,
+			AppID:                 cfg.GitHubApp.AppID,
+			PrivateKeyPath:        cfg.GitHubApp.PrivateKeyPath,
+			PrivateKey:            cfg.GitHubApp.PrivateKey,
+			WebhookSecret:         cfg.GitHubApp.WebhookSecret,
+			APIBaseURL:            cfg.GitHubApp.APIBaseURL,
+			WebhooksEnabled:       cfg.GitHubApp.WebhooksEnabled,
+			InstallationURL:       cfg.GitHubApp.InstallationURL,
+			AppSlug:               cfg.GitHubApp.AppSlug,
+			CommandMentionAliases: append([]string(nil), cfg.GitHubApp.CommandMentionAliases...),
 		},
 		OAuthConfig: hub.OAuthConfig{
 			Web: hub.OAuthClientConfig{

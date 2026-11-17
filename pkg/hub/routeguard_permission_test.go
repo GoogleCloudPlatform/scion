@@ -498,6 +498,9 @@ func TestGitHubAppRouteMethodMatrix(t *testing.T) {
 		{name: "POST installations discover", method: "POST", path: "/api/v1/github-app/installations/discover", wantAdmin: 503, wantMember: 403, wantUnauth: 401},
 		{name: "POST sync-permissions", method: "POST", path: "/api/v1/github-app/sync-permissions", wantAdmin: 502, wantMember: 403, wantUnauth: 401},
 		{name: "DELETE installation", method: "DELETE", path: "/api/v1/github-app/installations/999", wantAdmin: 404, wantMember: 403, wantUnauth: 401},
+		{name: "GET repo-routing", method: "GET", path: "/api/v1/github-app/repo-routing", wantAdmin: 404, wantMember: 403, wantUnauth: 401},
+		{name: "PUT repo-routing", method: "PUT", path: "/api/v1/github-app/repo-routing/acme/widgets", wantAdmin: 404, wantMember: 403, wantUnauth: 401},
+		{name: "DELETE repo-routing", method: "DELETE", path: "/api/v1/github-app/repo-routing/acme/widgets", wantAdmin: 404, wantMember: 403, wantUnauth: 401},
 	}
 
 	for _, tt := range tests {

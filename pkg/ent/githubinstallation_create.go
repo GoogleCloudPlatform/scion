@@ -62,6 +62,20 @@ func (_c *GithubInstallationCreate) SetNillableRepositories(v *string) *GithubIn
 	return _c
 }
 
+// SetTriggerRouting sets the "trigger_routing" field.
+func (_c *GithubInstallationCreate) SetTriggerRouting(v string) *GithubInstallationCreate {
+	_c.mutation.SetTriggerRouting(v)
+	return _c
+}
+
+// SetNillableTriggerRouting sets the "trigger_routing" field if the given value is not nil.
+func (_c *GithubInstallationCreate) SetNillableTriggerRouting(v *string) *GithubInstallationCreate {
+	if v != nil {
+		_c.SetTriggerRouting(*v)
+	}
+	return _c
+}
+
 // SetStatus sets the "status" field.
 func (_c *GithubInstallationCreate) SetStatus(v string) *GithubInstallationCreate {
 	_c.mutation.SetStatus(v)
@@ -153,6 +167,10 @@ func (_c *GithubInstallationCreate) defaults() {
 		v := githubinstallation.DefaultRepositories
 		_c.mutation.SetRepositories(v)
 	}
+	if _, ok := _c.mutation.TriggerRouting(); !ok {
+		v := githubinstallation.DefaultTriggerRouting
+		_c.mutation.SetTriggerRouting(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := githubinstallation.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -185,6 +203,9 @@ func (_c *GithubInstallationCreate) check() error {
 	}
 	if _, ok := _c.mutation.Repositories(); !ok {
 		return &ValidationError{Name: "repositories", err: errors.New(`ent: missing required field "GithubInstallation.repositories"`)}
+	}
+	if _, ok := _c.mutation.TriggerRouting(); !ok {
+		return &ValidationError{Name: "trigger_routing", err: errors.New(`ent: missing required field "GithubInstallation.trigger_routing"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "GithubInstallation.status"`)}
@@ -243,6 +264,10 @@ func (_c *GithubInstallationCreate) createSpec() (*GithubInstallation, *sqlgraph
 	if value, ok := _c.mutation.Repositories(); ok {
 		_spec.SetField(githubinstallation.FieldRepositories, field.TypeString, value)
 		_node.Repositories = value
+	}
+	if value, ok := _c.mutation.TriggerRouting(); ok {
+		_spec.SetField(githubinstallation.FieldTriggerRouting, field.TypeString, value)
+		_node.TriggerRouting = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(githubinstallation.FieldStatus, field.TypeString, value)
@@ -359,6 +384,18 @@ func (u *GithubInstallationUpsert) SetRepositories(v string) *GithubInstallation
 // UpdateRepositories sets the "repositories" field to the value that was provided on create.
 func (u *GithubInstallationUpsert) UpdateRepositories() *GithubInstallationUpsert {
 	u.SetExcluded(githubinstallation.FieldRepositories)
+	return u
+}
+
+// SetTriggerRouting sets the "trigger_routing" field.
+func (u *GithubInstallationUpsert) SetTriggerRouting(v string) *GithubInstallationUpsert {
+	u.Set(githubinstallation.FieldTriggerRouting, v)
+	return u
+}
+
+// UpdateTriggerRouting sets the "trigger_routing" field to the value that was provided on create.
+func (u *GithubInstallationUpsert) UpdateTriggerRouting() *GithubInstallationUpsert {
+	u.SetExcluded(githubinstallation.FieldTriggerRouting)
 	return u
 }
 
@@ -497,6 +534,20 @@ func (u *GithubInstallationUpsertOne) SetRepositories(v string) *GithubInstallat
 func (u *GithubInstallationUpsertOne) UpdateRepositories() *GithubInstallationUpsertOne {
 	return u.Update(func(s *GithubInstallationUpsert) {
 		s.UpdateRepositories()
+	})
+}
+
+// SetTriggerRouting sets the "trigger_routing" field.
+func (u *GithubInstallationUpsertOne) SetTriggerRouting(v string) *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetTriggerRouting(v)
+	})
+}
+
+// UpdateTriggerRouting sets the "trigger_routing" field to the value that was provided on create.
+func (u *GithubInstallationUpsertOne) UpdateTriggerRouting() *GithubInstallationUpsertOne {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateTriggerRouting()
 	})
 }
 
@@ -805,6 +856,20 @@ func (u *GithubInstallationUpsertBulk) SetRepositories(v string) *GithubInstalla
 func (u *GithubInstallationUpsertBulk) UpdateRepositories() *GithubInstallationUpsertBulk {
 	return u.Update(func(s *GithubInstallationUpsert) {
 		s.UpdateRepositories()
+	})
+}
+
+// SetTriggerRouting sets the "trigger_routing" field.
+func (u *GithubInstallationUpsertBulk) SetTriggerRouting(v string) *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.SetTriggerRouting(v)
+	})
+}
+
+// UpdateTriggerRouting sets the "trigger_routing" field to the value that was provided on create.
+func (u *GithubInstallationUpsertBulk) UpdateTriggerRouting() *GithubInstallationUpsertBulk {
+	return u.Update(func(s *GithubInstallationUpsert) {
+		s.UpdateTriggerRouting()
 	})
 }
 

@@ -21,9 +21,11 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -592,5 +594,198 @@ func TestTrackRateLimit_UpdatesOnAPIResponse(t *testing.T) {
 	}
 	if rl.Used != 1 {
 		t.Errorf("Used: got %d, want 1", rl.Used)
+	}
+}
+
+func TestParseAppIdentity(t *testing.T) {
+	fetchedAt := time.Date(2026, 11, 16, 19, 30, 0, 0, time.UTC)
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(`{
+		"id": 98765,
+		"slug": "scion-app",
+		"events": ["pull_request", "issue_comment", "issues", "pull_request"],
+		"permissions": {
+			"contents": "write",
+			"issues": "read",
+			"metadata": "read",
+			"pull_requests": "write"
+		}
+	}`), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	id := ParseAppIdentity(raw, fetchedAt)
+	if id.AppID != 98765 {
+		t.Errorf("AppID = %d, want 98765", id.AppID)
+	}
+	if id.Slug != "scion-app" {
+		t.Errorf("Slug = %q, want scion-app", id.Slug)
+	}
+	if id.BotLogin != "scion-app[bot]" {
+		t.Errorf("BotLogin = %q, want scion-app[bot]", id.BotLogin)
+	}
+	wantEvents := []string{"issue_comment", "issues", "pull_request"}
+	if len(id.Events) != len(wantEvents) {
+		t.Fatalf("Events = %v, want %v", id.Events, wantEvents)
+	}
+	for i, ev := range wantEvents {
+		if id.Events[i] != ev {
+			t.Errorf("Events[%d] = %q, want %q", i, id.Events[i], ev)
+		}
+	}
+	if id.Permissions["issues"] != "read" || id.Permissions["contents"] != "write" {
+		t.Errorf("Permissions = %v", id.Permissions)
+	}
+	if !id.FetchedAt.Equal(fetchedAt) {
+		t.Errorf("FetchedAt = %v, want %v", id.FetchedAt, fetchedAt)
+	}
+
+	clone := id.Clone()
+	clone.Events[0] = "mutated"
+	clone.Permissions["issues"] = "write"
+	if id.Events[0] != "issue_comment" || id.Permissions["issues"] != "read" {
+		t.Error("Clone shared backing slice or map with original")
+	}
+}
+
+func TestGetApp_LargeBody(t *testing.T) {
+	pemData, _ := generateTestKey(t)
+
+	payloadMap := map[string]interface{}{
+		"id":           424242,
+		"slug":         "scion-enterprise-bot",
+		"node_id":      "MDM6QXBwNDI0MjQy",
+		"name":         "Scion Enterprise Bot",
+		"description":  strings.Repeat("GitHub App integration for Scion automated agent workflows and pull request triggers. ", 24),
+		"external_url": "https://scion.example.com",
+		"html_url":     "https://github.com/apps/scion-enterprise-bot",
+		"created_at":   "2026-01-15T10:00:00Z",
+		"updated_at":   "2026-11-16T18:00:00Z",
+		"owner": map[string]interface{}{
+			"login":               "acme-corp",
+			"id":                  1001,
+			"node_id":             "MDEyOk9yZ2FuaXphdGlvbjEwMDE=",
+			"avatar_url":          "https://avatars.githubusercontent.com/u/1001?v=4",
+			"gravatar_id":         "",
+			"url":                 "https://api.github.com/users/acme-corp",
+			"html_url":            "https://github.com/acme-corp",
+			"followers_url":       "https://api.github.com/users/acme-corp/followers",
+			"following_url":       "https://api.github.com/users/acme-corp/following{/other_user}",
+			"gists_url":           "https://api.github.com/users/acme-corp/gists{/gist_id}",
+			"starred_url":         "https://api.github.com/users/acme-corp/starred{/owner}{/repo}",
+			"subscriptions_url":   "https://api.github.com/users/acme-corp/subscriptions",
+			"organizations_url":   "https://api.github.com/users/acme-corp/orgs",
+			"repos_url":           "https://api.github.com/users/acme-corp/repos",
+			"events_url":          "https://api.github.com/users/acme-corp/events{/privacy}",
+			"received_events_url": "https://api.github.com/users/acme-corp/received_events",
+			"type":                "Organization",
+			"site_admin":          false,
+		},
+		"permissions": map[string]string{
+			"actions":                     "read",
+			"administration":              "read",
+			"checks":                      "write",
+			"contents":                    "write",
+			"deployments":                 "read",
+			"discussions":                 "write",
+			"environments":                "read",
+			"issues":                      "write",
+			"merge_queues":                "read",
+			"metadata":                    "read",
+			"members":                     "read",
+			"organization_administration": "read",
+			"packages":                    "read",
+			"pages":                       "read",
+			"pull_requests":               "write",
+			"repository_hooks":            "read",
+			"security_events":             "read",
+			"statuses":                    "write",
+			"vulnerability_alerts":        "read",
+			"workflows":                   "write",
+		},
+		"events": []string{
+			"branch_protection_rule",
+			"check_run",
+			"check_suite",
+			"commit_comment",
+			"create",
+			"delete",
+			"deployment",
+			"deployment_status",
+			"discussion",
+			"discussion_comment",
+			"fork",
+			"issue_comment",
+			"issues",
+			"label",
+			"merge_group",
+			"milestone",
+			"page_build",
+			"public",
+			"pull_request",
+			"pull_request_review",
+			"pull_request_review_comment",
+			"pull_request_review_thread",
+			"push",
+			"release",
+			"repository",
+			"status",
+			"workflow_run",
+		},
+	}
+	prettyBody, err := json.MarshalIndent(payloadMap, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if len(prettyBody) <= upstreamBodyReadLimit {
+		t.Fatalf("test fixture must exceed %d bytes, got %d", upstreamBodyReadLimit, len(prettyBody))
+	}
+
+	var returnError bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if returnError {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"message":"Bad credentials","pad":"` + strings.Repeat("x", upstreamBodyReadLimit*2) + `"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(prettyBody)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		AppID:      424242,
+		APIBaseURL: server.URL,
+	}, pemData)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	raw, err := client.GetApp(context.Background())
+	if err != nil {
+		t.Fatalf("GetApp failed on %d-byte response: %v", len(prettyBody), err)
+	}
+
+	id := ParseAppIdentity(raw, time.Date(2026, 11, 17, 4, 0, 0, 0, time.UTC))
+	if id.AppID != 424242 || id.Slug != "scion-enterprise-bot" || id.BotLogin != "scion-enterprise-bot[bot]" {
+		t.Fatalf("unexpected parsed identity: %+v", id)
+	}
+	if id.Permissions["pull_requests"] != "write" || id.Permissions["issues"] != "write" {
+		t.Errorf("unexpected permissions: %v", id.Permissions)
+	}
+
+	// Non-200 responses stay capped at upstreamBodyReadLimit (4 KiB).
+	returnError = true
+	_, err = client.GetApp(context.Background())
+	var mintErr *TokenMintError
+	if !errors.As(err, &mintErr) {
+		t.Fatalf("expected TokenMintError on 401, got %T: %v", err, err)
+	}
+	if len(mintErr.UpstreamDetail()) > upstreamBodyReadLimit {
+		t.Errorf("error upstream detail exceeded %d bytes: got %d", upstreamBodyReadLimit, len(mintErr.UpstreamDetail()))
 	}
 }

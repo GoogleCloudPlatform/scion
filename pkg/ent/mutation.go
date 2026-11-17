@@ -51723,21 +51723,22 @@ func (m *GitHubResolutionCacheMutation) ResetEdge(name string) error {
 // GithubInstallationMutation represents an operation that mutates the GithubInstallation nodes in the graph.
 type GithubInstallationMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *int64
-	account_login *string
-	account_type  *string
-	app_id        *int64
-	addapp_id     *int64
-	repositories  *string
-	status        *string
-	created       *time.Time
-	updated       *time.Time
-	clearedFields map[string]struct{}
-	done          bool
-	oldValue      func(context.Context) (*GithubInstallation, error)
-	predicates    []predicate.GithubInstallation
+	op              Op
+	typ             string
+	id              *int64
+	account_login   *string
+	account_type    *string
+	app_id          *int64
+	addapp_id       *int64
+	repositories    *string
+	trigger_routing *string
+	status          *string
+	created         *time.Time
+	updated         *time.Time
+	clearedFields   map[string]struct{}
+	done            bool
+	oldValue        func(context.Context) (*GithubInstallation, error)
+	predicates      []predicate.GithubInstallation
 }
 
 var _ ent.Mutation = (*GithubInstallationMutation)(nil)
@@ -52008,6 +52009,42 @@ func (m *GithubInstallationMutation) ResetRepositories() {
 	m.repositories = nil
 }
 
+// SetTriggerRouting sets the "trigger_routing" field.
+func (m *GithubInstallationMutation) SetTriggerRouting(s string) {
+	m.trigger_routing = &s
+}
+
+// TriggerRouting returns the value of the "trigger_routing" field in the mutation.
+func (m *GithubInstallationMutation) TriggerRouting() (r string, exists bool) {
+	v := m.trigger_routing
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTriggerRouting returns the old "trigger_routing" field's value of the GithubInstallation entity.
+// If the GithubInstallation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GithubInstallationMutation) OldTriggerRouting(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTriggerRouting is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTriggerRouting requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTriggerRouting: %w", err)
+	}
+	return oldValue.TriggerRouting, nil
+}
+
+// ResetTriggerRouting resets all changes to the "trigger_routing" field.
+func (m *GithubInstallationMutation) ResetTriggerRouting() {
+	m.trigger_routing = nil
+}
+
 // SetStatus sets the "status" field.
 func (m *GithubInstallationMutation) SetStatus(s string) {
 	m.status = &s
@@ -52150,7 +52187,7 @@ func (m *GithubInstallationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GithubInstallationMutation) Fields() []string {
-	fields := make([]string, 0, 7)
+	fields := make([]string, 0, 8)
 	if m.account_login != nil {
 		fields = append(fields, githubinstallation.FieldAccountLogin)
 	}
@@ -52162,6 +52199,9 @@ func (m *GithubInstallationMutation) Fields() []string {
 	}
 	if m.repositories != nil {
 		fields = append(fields, githubinstallation.FieldRepositories)
+	}
+	if m.trigger_routing != nil {
+		fields = append(fields, githubinstallation.FieldTriggerRouting)
 	}
 	if m.status != nil {
 		fields = append(fields, githubinstallation.FieldStatus)
@@ -52188,6 +52228,8 @@ func (m *GithubInstallationMutation) Field(name string) (ent.Value, bool) {
 		return m.AppID()
 	case githubinstallation.FieldRepositories:
 		return m.Repositories()
+	case githubinstallation.FieldTriggerRouting:
+		return m.TriggerRouting()
 	case githubinstallation.FieldStatus:
 		return m.Status()
 	case githubinstallation.FieldCreated:
@@ -52211,6 +52253,8 @@ func (m *GithubInstallationMutation) OldField(ctx context.Context, name string) 
 		return m.OldAppID(ctx)
 	case githubinstallation.FieldRepositories:
 		return m.OldRepositories(ctx)
+	case githubinstallation.FieldTriggerRouting:
+		return m.OldTriggerRouting(ctx)
 	case githubinstallation.FieldStatus:
 		return m.OldStatus(ctx)
 	case githubinstallation.FieldCreated:
@@ -52253,6 +52297,13 @@ func (m *GithubInstallationMutation) SetField(name string, value ent.Value) erro
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetRepositories(v)
+		return nil
+	case githubinstallation.FieldTriggerRouting:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTriggerRouting(v)
 		return nil
 	case githubinstallation.FieldStatus:
 		v, ok := value.(string)
@@ -52350,6 +52401,9 @@ func (m *GithubInstallationMutation) ResetField(name string) error {
 		return nil
 	case githubinstallation.FieldRepositories:
 		m.ResetRepositories()
+		return nil
+	case githubinstallation.FieldTriggerRouting:
+		m.ResetTriggerRouting()
 		return nil
 	case githubinstallation.FieldStatus:
 		m.ResetStatus()

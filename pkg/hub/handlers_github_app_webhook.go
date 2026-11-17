@@ -214,6 +214,19 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 
 		// Clear error state — will be validated on next token mint
 		s.updateProjectsForInstallation(ctx, installationID, store.GitHubAppStateUnchecked, "", "")
+
+	case "new_permissions_accepted":
+		if s.githubTriggersEnabled() {
+			// Refresh cached App identity (events + permissions) and reset
+			// degraded/permission_denied projects on this installation back to
+			// unchecked so the next mint validates the newly accepted permissions
+			// (§10.3, §11 G12).
+			if _, err := s.refreshGitHubAppIdentity(ctx); err != nil {
+				slog.Warn("Failed to refresh GitHub App identity after new_permissions_accepted",
+					"installation_id", installationID, "error", upstreamText(err.Error()))
+			}
+			s.resetPermissionDeniedProjectsForInstallation(ctx, installationID)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -589,6 +602,70 @@ func (s *Server) updateProjectsForInstallation(ctx context.Context, installation
 	}
 }
 
+// resetPermissionDeniedProjectsPageSize is the ListProjects page size used by
+// resetPermissionDeniedProjectsForInstallation (a variable so tests can force
+// multi-page traversal without inserting thousands of rows).
+var resetPermissionDeniedProjectsPageSize = githubAssociationReportPageSize
+
+// resetPermissionDeniedProjectsForInstallation clears degraded or
+// permission_denied GitHubAppStatus back to unchecked for projects associated
+// with installationID (§10.3). Other error states (for example suspended or
+// repo_not_accessible) and active projects are left untouched.
+func (s *Server) resetPermissionDeniedProjectsForInstallation(ctx context.Context, installationID int64) {
+	pageSize := resetPermissionDeniedProjectsPageSize
+	if pageSize <= 0 {
+		pageSize = githubAssociationReportPageSize
+	}
+
+	now := timeNow()
+	cursor := ""
+	for {
+		page, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
+			Limit:          pageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			slog.Error("Failed to list projects for permission acceptance reset", "error", err)
+			return
+		}
+
+		for i := range page.Items {
+			project := &page.Items[i]
+			if project.GitHubInstallationID == nil || *project.GitHubInstallationID != installationID {
+				continue
+			}
+			if project.GitHubAppStatus == nil {
+				continue
+			}
+			if project.GitHubAppStatus.State != store.GitHubAppStateDegraded &&
+				project.GitHubAppStatus.ErrorCode != githubapp.ErrCodePermissionDenied {
+				continue
+			}
+
+			lastTokenMint := project.GitHubAppStatus.LastTokenMint
+			project.GitHubAppStatus = &store.GitHubAppProjectStatus{
+				State:         store.GitHubAppStateUnchecked,
+				LastChecked:   now,
+				LastTokenMint: lastTokenMint,
+			}
+
+			if err := s.store.UpdateProject(ctx, project); err != nil {
+				slog.Error("Failed to reset project GitHub App status after new_permissions_accepted",
+					"project_id", project.ID, "error", err)
+				continue
+			}
+			s.invalidateGitHubAssociation(project.ID)
+			s.events.PublishProjectUpdated(ctx, project)
+		}
+
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+}
+
 // checkProjectsForRemovedRepos checks if any projects using the given installation
 // have lost access to their repository. removedRepos is keyed by lowercased
 // owner/repo.
@@ -626,6 +703,7 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 			slog.Error("Failed to update project after repo removal",
 				"project_id", project.ID, "error", err)
 		} else {
+			s.invalidateGitHubAssociation(project.ID)
 			s.events.PublishProjectUpdated(ctx, &project)
 		}
 	}

@@ -1243,7 +1243,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/runtime-brokers/{id}/agents/{agentId}/deliver":            {"id": f.runtimeBroker, "agentId": f.agent},
 
 		// --- github app family ---
-		"/api/v1/github-app/installations/{id}": {"id": f.githubInstallationID},
+		"/api/v1/github-app/installations/{id}":          {"id": f.githubInstallationID},
+		"/api/v1/github-app/repo-routing/{owner}/{repo}": {"owner": "li-account", "repo": "li-repo"},
 
 		// --- role family (role.definition.delete is re-pointed at the
 		// disposable instance by opPatternOverrides) ---

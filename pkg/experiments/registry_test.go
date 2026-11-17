@@ -806,3 +806,28 @@ func TestSystemOneExperimentRegistered(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestGitHubTriggersExperimentRegistered pins hub.github_triggers
+// (ptone/scion#836, Stage 3 §8.2): server+web layers, alpha, default off,
+// naming its requirement on hub.triggers.
+func TestGitHubTriggersExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(GitHubTriggers)
+	if !ok {
+		t.Fatalf("%s is not registered", GitHubTriggers)
+	}
+	if GitHubTriggers != "hub.github_triggers" {
+		t.Fatalf("frozen name changed: %q", GitHubTriggers)
+	}
+	if e.Default {
+		t.Fatal("hub.github_triggers must default to off")
+	}
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must have both LayerServer and LayerWeb, got %v", e.Layers)
+	}
+	if e.Title != "GitHub App events as triggers" || e.Issue != "ptone/scion#836" || e.Stage != StageAlpha || e.Owner != "triggers" || e.ReviewBy != "2027-05-31" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+	if !strings.Contains(e.Description, "hub.triggers") {
+		t.Fatalf("description must name the requirement on hub.triggers: %q", e.Description)
+	}
+}
