@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
 
@@ -27,17 +26,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Fire flow of exec events (ptone/scion#7883, design "Fire flow"):
+// Fire flow and recovery of exec events (ptone/scion#7883, design "Fire flow";
+// moved to execAction in action_exec.go in PR 2a, ptone/scion#8029):
 //
-//	execEventHandler (one-shot: fireEvent, after the pending→fired claim)
-//	  flag off → skipped; payload invalid → failed; > 10 min late → skipped;
-//	  authorizeScheduledExecFire denied → failed "exec refused";
-//	  target not running / reincarnating / managed → skipped;
-//	  tracked-run bound full → skipped "capacity";
+//	execAction (action_exec.go, registered on Server.actions)
+//	  ValidatePayload invalid -> failed; Preauthorize flag off / > 10 min late -> skipped;
+//	  resolveRecordedAuthority + Authorize (authorizeExecFire) denied -> refused "exec refused";
+//	  Authorize preflight (not running / reincarnating / managed) -> skipped;
+//	  Fire: tracked-run bound full -> skipped "capacity";
 //	  INSERT scheduled_exec_runs (starting); exec-start, one attempt
 //	  (StartAgentExecRun: launch-pinned, gated on both hub flags);
-//	  then a detached tracker polls exec-status until the run finishes or
-//	  its lease ends, and records the outcome with a compare-and-set.
+//	  then a detached tracker started via FireOutcome.AfterRecord polls
+//	  exec-status until the run finishes or its lease ends, and records the
+//	  outcome with a compare-and-set.
 //	the run sweeper (singleton, every minute) polls the unfinished runs no
 //	  tracker on this replica owns, so a hub restart still records the real
 //	  outcome, and records runs past their lease as abandoned.
@@ -169,246 +170,6 @@ func (s *Server) stopScheduledExecRuns(ctx context.Context) {
 	if n := s.execRuns.work.stop(ctx, execSeamDuration(&scheduledExecStopGrace)); n > 0 {
 		slog.Info("Scheduled exec runs still tracked at shutdown; the sweeper records their outcome after the restart",
 			"running", n)
-	}
-}
-
-// execEventHandler returns the EventHandler of exec events.
-func (s *Server) execEventHandler() EventHandler {
-	return func(ctx context.Context, evt store.ScheduledEvent) error {
-		return s.fireScheduledExec(ctx, evt)
-	}
-}
-
-// fireScheduledExec runs one exec event fire. A returned scheduledSkip
-// records the event skipped; another error records it failed with the
-// error's (generic) text; nil records it fired, and a tracker started after
-// that write records the run's outcome.
-func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent) error {
-	log := slog.With("subsystem", "scheduler", "eventID", evt.ID, "projectID", evt.ProjectID)
-
-	p, err := decodeScheduledExecPayload(evt.Payload)
-	if err == nil && p.AgentID == "" {
-		err = &scheduledExecPayloadError{field: "agentId"}
-	}
-	if err != nil {
-		// Fail closed on a stored row that no longer validates.
-		log.Warn("Scheduler: exec event payload invalid", "error", err)
-		return errScheduledExecPayloadInvalid
-	}
-
-	skip := func(reason, detail string) error {
-		a := newScheduledExecFireAudit(ctx, ScheduledExecAuditSkipped, evt, p)
-		a.Reason = detail
-		s.auditScheduledExec(ctx, a)
-		log.Info("Scheduler: exec event skipped", "agent_id", p.AgentID, "reason", detail)
-		return skipScheduledFire(reason)
-	}
-
-	if !s.execSchedulesEnabled() {
-		return skip(execReasonDisabled, "experiment_off")
-	}
-	if !evt.FireAt.IsZero() && time.Since(evt.FireAt) > scheduledExecMaxWindow {
-		return skip(execReasonMissedWindow, "missed_window")
-	}
-
-	auth, _, target, err := s.authorizeScheduledExecFire(ctx, evt, p)
-	if err != nil {
-		a := newScheduledExecFireAudit(ctx, ScheduledExecAuditRefused, evt, p)
-		a.Reason = err.Error()
-		s.auditScheduledExec(ctx, a)
-		log.Warn("Scheduler: exec event refused at fire time",
-			"agent_id", p.AgentID,
-			"principal_kind", auth.PrincipalKind, "principal_id", auth.PrincipalID,
-			"authorization_revision", evt.AuthorizationRevision, "error", err)
-		return errors.New(execReasonRefused)
-	}
-
-	// Preflight (D4): running targets only. The phase reasons are the
-	// shared deliverability rule's (validateAgentDeliverable,
-	// ptone/scion#7825); the event records the generic text.
-	if isManagedAgentRuntime(target.Runtime) {
-		return skip(execReasonTargetNotRunning, "managed_runtime")
-	}
-	if phaseErr := s.validateAgentDeliverable(target); phaseErr != nil {
-		return skip(execReasonTargetNotRunning, "phase_"+store.EffectiveRestingPhase(target))
-	}
-	if reincarnationInFlight(target) {
-		return skip(execReasonTargetNotRunning, "reincarnating")
-	}
-
-	// Admission: the replica's tracked-run bound (never waits) and the
-	// shutdown gate. The slot and ownership pass to the tracker, or are
-	// released when no tracker starts.
-	if !s.execRuns.acquire(evt.ID) {
-		return skip(execReasonCapacity, "tracked_run_capacity")
-	}
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			s.execRuns.release(evt.ID)
-		}
-	}()
-	workCtx, endWork, admitted := s.execRuns.work.begin()
-	if !admitted {
-		log.Warn("Scheduler: exec event not started: the hub is shutting down")
-		return errors.New(execReasonShuttingDown)
-	}
-	defer endWork()
-
-	executor, _ := ExecutorContextFromContext(ctx)
-	now := time.Now()
-	timeout := p.timeout()
-	run := store.ScheduledExecRun{
-		EventID:                 evt.ID,
-		ProjectID:               evt.ProjectID,
-		ScheduleID:              evt.ScheduleID,
-		TargetAgentID:           target.ID,
-		InitiatorPrincipalKind:  evt.InitiatorPrincipalKind,
-		InitiatorPrincipalID:    evt.InitiatorPrincipalID,
-		InitiatorCredentialKind: evt.InitiatorCredentialKind,
-		InitiatorCredentialID:   evt.InitiatorCredentialID,
-		AuthorizationRevision:   evt.AuthorizationRevision,
-		ExecutorKind:            executor.Kind,
-		ExecutorID:              executor.ID,
-		CommandSHA256:           agentcontrol.ExecArgvDigest(p.Command),
-		Argc:                    len(p.Command),
-		TimeoutSeconds:          timeout,
-		StartedAt:               now,
-		NotAfter:                now.Add(execSeamDuration(&scheduledExecNotAfter)),
-		LeaseUntil:              now.Add(time.Duration(timeout)*time.Second + execSeamDuration(&scheduledExecLeaseGrace)),
-		Outcome:                 store.ScheduledExecOutcomeStarting,
-		Runtime:                 target.Runtime,
-		LaunchID:                target.RunID,
-	}
-	if err := s.store.CreateScheduledExecRun(ctx, &run); err != nil {
-		if errors.Is(err, store.ErrScheduledExecOverlap) {
-			return skip(execReasonOverlap, "db_overlap_lease")
-		}
-		// Nothing was sent. An existing run means this event was admitted
-		// before: it is never started again.
-		log.Error("Scheduler: exec run record not written; nothing started", "error", err)
-		return errors.New(execReasonDispatchFailed)
-	}
-	s.auditScheduledExec(ctx, newScheduledExecFireAudit(ctx, ScheduledExecAuditAdmit, evt, p))
-	scheduledExecFireStage(scheduledExecStageAdmitted, evt.ID)
-
-	// From here on the run row exists, so another replica's sweeper may
-	// record the outcome at any moment. Every outcome is therefore recorded
-	// here through the run's compare-and-set, with the event in the same
-	// transaction (and the event only while it is still fired or expired),
-	// and fireEvent writes nothing after the handler (outcomeRecorded): a
-	// recorded outcome is never overwritten (R1, ptone/scion#7883).
-	terminal := func(outcome string, res *agentcontrol.ExecResult, eventStatus, reason string, result error) error {
-		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-		defer cancel()
-		if _, err := s.finishScheduledExecRun(recordCtx, run, outcome, res, eventStatus, reason); err != nil {
-			// The run stays unfinished; the sweeper resolves it.
-			log.Warn("Scheduler: exec run outcome not recorded at fire; left to the sweeper", "error", err)
-		}
-		return outcomeRecorded(result)
-	}
-	skipRun := func(reason, detail string) error {
-		return terminal(store.ScheduledExecOutcomeSkipped, nil, store.ScheduledEventSkipped, reason, skip(reason, detail))
-	}
-	failRun := func(reason string) error {
-		return terminal(store.ScheduledExecOutcomeError, nil, store.ScheduledEventFailed, reason, errors.New(reason))
-	}
-	track := func() error {
-		handedOff = true
-		afterScheduledRecord(ctx, func() { s.trackScheduledExecRun(run) })
-		// The claim already recorded the event as fired (or expired).
-		return outcomeRecorded(nil)
-	}
-
-	// Dispatch guard (P3-R1): a fire delayed after the insert must not
-	// start a run that recovery has already finished, or whose frozen
-	// start deadline has passed. A pause between this check and the send
-	// cannot start it late either: exec-start carries the frozen
-	// not_after, and sciontool refuses a start received after not_after +
-	// tolerance, which is also when recovery treats it as absent.
-	checkCtx, cancelCheck := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-	current, checkErr := s.store.GetScheduledExecRun(checkCtx, evt.ID)
-	cancelCheck()
-	switch {
-	case checkErr != nil:
-		log.Warn("Scheduler: exec run not re-read before dispatch; nothing sent", "error", checkErr)
-		return failRun(execReasonDispatchFailed)
-	case current.FinishedAt != nil:
-		log.Warn("Scheduler: exec run already finished before dispatch; nothing sent", "outcome", current.Outcome)
-		return outcomeRecorded(nil)
-	case time.Now().After(run.NotAfter):
-		log.Warn("Scheduler: exec run start deadline passed before dispatch; nothing sent")
-		return failRun(execReasonStartExpired)
-	}
-	scheduledExecFireStage(scheduledExecStageChecked, evt.ID)
-
-	// One exec-start attempt, with the frozen deadline. It runs past the
-	// fire handler's deadline on the call's own timeout, and is cancelled
-	// only when the shutdown gives up waiting (workCtx); an ambiguous
-	// result is only ever polled.
-	startCtx, cancelStart := context.WithCancel(context.WithoutCancel(ctx))
-	stopStart := context.AfterFunc(workCtx, cancelStart)
-	res, startErr := s.StartAgentExecRun(startCtx, target.ID, target.RunID, agentcontrol.ExecStartRequest{
-		RunID:          evt.ID,
-		ScheduleID:     evt.ScheduleID,
-		Argv:           p.Command,
-		TimeoutS:       timeout,
-		NotAfterUnixMS: run.NotAfter.UnixMilli(),
-	})
-	stopStart()
-	cancelStart()
-	scheduledExecFireStage(scheduledExecStageStarted, evt.ID)
-
-	if startErr != nil {
-		switch {
-		case errors.Is(startErr, ErrExecSchedulesDisabled):
-			return skipRun(execReasonDisabled, "experiment_off_at_start")
-		case errors.Is(startErr, router.ErrNoSession), errors.Is(startErr, ErrAgentControlNotAdvertised),
-			errors.Is(startErr, ErrAgentExecLaunchChanged), errors.Is(startErr, store.ErrNotFound):
-			return skipRun(execReasonUnavailable, "executor_unavailable")
-		case isExecFieldError(startErr):
-			return failRun(errScheduledExecPayloadInvalid.Error())
-		case errors.Is(startErr, agentcontrol.ErrExecSchema):
-			log.Warn("Scheduler: exec-start answer outside the schema", "error", startErr)
-			return failRun(execReasonDispatchFailed)
-		default:
-			// Timeout or transport error after the send: the run may have
-			// started. Never resend; the tracker resolves it.
-			log.Warn("Scheduler: exec-start result unknown; tracking the run", "error", startErr)
-			return track()
-		}
-	}
-
-	switch res.Status {
-	case http.StatusAccepted, http.StatusOK:
-		if res.Finished() {
-			// start_failed at 202, or a replay of a finished run.
-			outcome, status, reason := scheduledExecFinalOutcome(res, timeout)
-			var result error
-			if status == store.ScheduledEventFailed {
-				result = errors.New(reason)
-			}
-			return terminal(outcome, &res, status, reason, result)
-		}
-		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-		if changed, err := s.store.MarkScheduledExecRunRunning(recordCtx, evt.ID); err == nil && changed {
-			run.Outcome = store.ScheduledExecOutcomeRunning
-		}
-		cancel()
-		return track()
-	case http.StatusConflict:
-		switch res.Outcome {
-		case agentcontrol.ExecOutcomeOverlap:
-			return skipRun(execReasonOverlap, "agent_overlap")
-		case agentcontrol.ExecOutcomeBusy:
-			return skipRun(execReasonCapacity, "agent_busy")
-		default: // mismatch
-			return failRun(execReasonDispatchFailed)
-		}
-	case http.StatusRequestTimeout:
-		return failRun(execReasonStartExpired)
-	default: // 400
-		return failRun(errScheduledExecPayloadInvalid.Error())
 	}
 }
 

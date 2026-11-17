@@ -208,7 +208,7 @@ func (a *legacyAction) run(ctx context.Context, req hubfire.FireRequest) hubfire
 func (s *Server) registerFireActions() {
 	s.RegisterAction(&messageAction{srv: s})
 	s.RegisterAction(newLegacyAction("dispatch_agent", s.dispatchAgentEventHandler()))
-	s.RegisterAction(newLegacyAction(scheduledEventTypeExec, s.execEventHandler()))
+	s.RegisterAction(&execAction{srv: s})
 }
 
 func (s *Server) scheduleFireDetaches(sched store.Schedule, evt store.ScheduledEvent) bool {
@@ -248,6 +248,8 @@ func scheduledKnownError(msg string) error {
 	switch msg {
 	case errScheduledAuthorityUnrecorded.Error():
 		return errScheduledAuthorityUnrecorded
+	case errScheduledExecPayloadInvalid.Error():
+		return errScheduledExecPayloadInvalid
 	case errScheduledMessageRefused.Error():
 		return errScheduledMessageRefused
 	case errScheduledWakeNotReady.Error():

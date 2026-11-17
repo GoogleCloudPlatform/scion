@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -229,24 +230,30 @@ func (s *Server) auditScheduleExecMutation(ctx context.Context, action string, s
 	s.auditScheduledExec(ctx, newScheduleExecAuthoringAudit(ctx, action, sc, p))
 }
 
-// newScheduledExecFireAudit returns the record of a fire action on evt,
-// with the initiator from the event's authorization revision and the
-// executor from ctx. p may be nil (a payload that does not decode).
-func newScheduledExecFireAudit(ctx context.Context, action string, evt store.ScheduledEvent, p *scheduledExecPayload) *ScheduledExecEvent {
+// newExecFireAudit returns the record of a deferred exec fire action on req,
+// with the initiator from req.Authority.Attribution and the executor from ctx.
+// ScheduleID is set only when DefinitionKind == "schedule". p may be nil (a
+// payload that does not decode).
+func newExecFireAudit(ctx context.Context, action string, req hubfire.FireRequest, p *scheduledExecPayload) *ScheduledExecEvent {
 	executor, _ := ExecutorContextFromContext(ctx)
+	var scheduleID string
+	if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule {
+		scheduleID = req.Authority.DefinitionID
+	}
+	attr := req.Authority.Attribution
 	e := &ScheduledExecEvent{
 		Action:                  action,
-		InitiatorPrincipalKind:  evt.InitiatorPrincipalKind,
-		InitiatorPrincipalID:    evt.InitiatorPrincipalID,
-		InitiatorCredentialKind: evt.InitiatorCredentialKind,
-		InitiatorCredentialID:   evt.InitiatorCredentialID,
-		AuthorizationRevision:   evt.AuthorizationRevision,
+		InitiatorPrincipalKind:  attr.InitiatorPrincipalKind,
+		InitiatorPrincipalID:    attr.InitiatorPrincipalID,
+		InitiatorCredentialKind: attr.InitiatorCredentialKind,
+		InitiatorCredentialID:   attr.InitiatorCredentialID,
+		AuthorizationRevision:   attr.AuthorizationRevision,
 		ExecutorKind:            executor.Kind,
 		ExecutorID:              executor.ID,
-		ProjectID:               evt.ProjectID,
-		ScheduleID:              evt.ScheduleID,
-		EventID:                 evt.ID,
-		OperationID:             evt.ID,
+		ProjectID:               req.ProjectID,
+		ScheduleID:              scheduleID,
+		EventID:                 req.Authority.FireID,
+		OperationID:             req.Authority.FireID,
 		Timestamp:               time.Now().UTC(),
 	}
 	if p != nil {
@@ -254,6 +261,16 @@ func newScheduledExecFireAudit(ctx context.Context, action string, evt store.Sch
 		e.withCommand(p.Command, p.timeout())
 	}
 	return e
+}
+
+// newScheduledExecFireAudit returns the record of a fire action on evt,
+// with the initiator from the event's authorization revision and the
+// executor from ctx. p may be nil (a payload that does not decode).
+func newScheduledExecFireAudit(ctx context.Context, action string, evt store.ScheduledEvent, p *scheduledExecPayload) *ScheduledExecEvent {
+	return newExecFireAudit(ctx, action, hubfire.FireRequest{
+		ProjectID: evt.ProjectID,
+		Authority: scheduledRecordedAuthority(evt),
+	}, p)
 }
 
 // newScheduledExecRunAudit returns the record of a run's outcome from its

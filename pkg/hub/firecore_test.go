@@ -585,6 +585,17 @@ func TestFireCoreContainment(t *testing.T) {
 			"Detaches",
 			"deliverMessageAction",
 		},
+		"action_exec.go": {
+			"Validate",
+			"ValidatePayload",
+			"Preauthorize",
+			"OnAuthorityRefused",
+			"Authorize",
+			"Fire",
+			"Detaches",
+			"authorizeExecFire",
+			"dispatchExecAction",
+		},
 	}
 	forbiddenStoreTypes := map[string]bool{
 		"ScheduledEvent": true,
