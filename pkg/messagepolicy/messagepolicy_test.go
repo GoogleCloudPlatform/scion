@@ -492,6 +492,7 @@ func TestAuthoringValidationAndCoverage(t *testing.T) {
 	// Every known failure reason in the closed set (including policy_cap_exceeded
 	// and facts_unavailable) is accepted as an on_failed_reasons key.
 	knownReasons := messagepolicy.KnownFailureReasons()
+	assert.Contains(t, knownReasons, messagepolicy.ReasonBodyTruncated)
 	assert.Contains(t, knownReasons, messagepolicy.ReasonBudgetExhausted)
 	assert.Contains(t, knownReasons, messagepolicy.ReasonPolicyCapExceeded)
 	assert.Contains(t, knownReasons, messagepolicy.ReasonFactsUnavailable)

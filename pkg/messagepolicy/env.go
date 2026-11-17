@@ -73,6 +73,7 @@ const (
 
 // Failure reason codes produced or consumed by message_policy (consumer design §§5.3, 5.5, 5.8).
 const (
+	ReasonBodyTruncated          = "body_truncated"
 	ReasonBudgetExhausted        = "budget_exhausted"
 	ReasonPolicyCapExceeded      = "policy_cap_exceeded"
 	ReasonFactsUnavailable       = "facts_unavailable"

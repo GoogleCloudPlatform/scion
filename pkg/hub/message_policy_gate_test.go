@@ -2729,6 +2729,205 @@ func (lw *mpgLockedWriter) Write(p []byte) (int, error) {
 	return lw.w.Write(p)
 }
 
+// TestMessagePolicyGate_BodyExceedsMaxBodyBytes_FailsBodyTruncated verifies
+// security finding M-1 (baseline): when the outbound message body exceeds
+// messagepolicy.MaxBodyBytes (16 KiB), every matching policy classifies as
+// failed/body_truncated and resolves through on_failed / on_failed_reasons:
+//  1. Multibyte-padded body (>16 KiB, <16,000 runes) with a contains() enforce
+//     rule gives failed/body_truncated, and on_failed=reject returns HTTP 422.
+//  2. Guarded has(message.body) rules (both && and !has(...) ||) still classify
+//     as failed/body_truncated (never pass).
+//  3. Body-independent rules on a >16 KiB body also classify as
+//     failed/body_truncated (documented baseline), and on_failed_reasons accepts
+//     body_truncated.
+func TestMessagePolicyGate_BodyExceedsMaxBodyBytes_FailsBodyTruncated(t *testing.T) {
+	// 5,462 3-byte runes ("界") = 16,386 bytes (> MaxBodyBytes 16,384) while
+	// staying well under messages.MaxMessageLength (16,000 runes).
+	paddedForbidden := strings.Repeat("界", 5462) + " FORBIDDEN_TOKEN_991"
+	require.Greater(t, len(paddedForbidden), messagepolicy.MaxBodyBytes)
+	require.Less(t, len([]rune(paddedForbidden)), messages.MaxMessageLength)
+
+	paddedBenign := strings.Repeat("界", 5462) + " routine status report"
+	require.Greater(t, len(paddedBenign), messagepolicy.MaxBodyBytes)
+	require.Less(t, len([]rune(paddedBenign)), messages.MaxMessageLength)
+
+	t.Run("contains_rule_and_guarded_has_body_rules_fail_body_truncated_422", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			rule string
+			body string
+		}{
+			{
+				name: "contains_rule",
+				rule: `message.body.contains("FORBIDDEN_TOKEN_991")`,
+				body: paddedForbidden,
+			},
+			{
+				name: "guarded_has_body_and",
+				rule: `has(message.body) && message.body.contains("FORBIDDEN_TOKEN_991")`,
+				body: paddedBenign,
+			},
+			{
+				name: "guarded_not_has_body_or",
+				rule: `!has(message.body) || message.body.contains("FORBIDDEN_TOKEN_991")`,
+				body: paddedForbidden,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newMpgFixture(t, true)
+				ctx := context.Background()
+
+				pol := &store.MessagePolicy{
+					ProjectID: f.project.ID,
+					Name:      "m1-" + strings.ReplaceAll(tc.name, "_", "-"),
+					Enabled:   true,
+					Mode:      store.MessagePolicyModeEnforce,
+					Scope: store.MessagePolicyScope{
+						Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+						Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+					},
+					ViolationRule: tc.rule,
+					OnFailed:      messagepolicy.OutcomeReject,
+					RejectReason:  "Oversize message rejected by {policy}",
+				}
+				require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+
+				rr := f.sendOutbound(t, OutboundMessageRequest{
+					Recipient: "user:" + f.alice.Email,
+					Msg:       tc.body,
+				})
+				require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "body: %s", rr.Body.String())
+				assert.NotContains(t, rr.Body.String(), "FORBIDDEN_TOKEN_991")
+
+				var errResp ErrorResponse
+				require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+				assert.Equal(t, string(MessageDenialPolicyRejected), errResp.Error.Code)
+				assert.Equal(t, messagepolicy.ClassFailed, errResp.Error.Details["class"])
+
+				assert.Zero(t, f.recordChannel.count(), "rejected padded send must not deliver")
+				msgs, err := f.s.ListMessages(ctx, store.MessageFilter{SenderID: f.sender.ID}, store.ListOptions{Limit: 10})
+				require.NoError(t, err)
+				assert.Empty(t, msgs.Items)
+
+				decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+					ProjectID: f.project.ID,
+					PolicyID:  pol.ID,
+				}, store.ListOptions{Limit: 10})
+				require.NoError(t, err)
+				require.Len(t, decs.Items, 1)
+				assert.Equal(t, store.MessagePolicyClassFailed, decs.Items[0].Class)
+				assert.Equal(t, messagepolicy.ReasonBodyTruncated, decs.Items[0].CELErrorReason)
+				assert.Equal(t, store.MessagePolicyActionRejected, decs.Items[0].Action)
+			})
+		}
+	})
+
+	t.Run("body_independent_rule_also_fails_body_truncated_and_respects_on_failed_reasons", func(t *testing.T) {
+		f := newMpgFixture(t, true)
+		ctx := context.Background()
+
+		// Verify a short non-urgent message passes this body-independent rule.
+		pol := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "body-independent-urgent-guard",
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeEnforce,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: `message.urgent && recipient.kind == "user"`,
+			OnFailed:      messagepolicy.OutcomeReject,
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+
+		shadowPol := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      "shadow-body-independent",
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeShadow,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: `message.has_choices`,
+			OnFailed:      messagepolicy.OutcomeReject,
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, shadowPol))
+
+		rrShort := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "short non-urgent update",
+			Urgent:    false,
+		})
+		require.Equal(t, http.StatusOK, rrShort.Code)
+
+		// Long body (>16 KiB) with Urgent=false STILL classifies as
+		// failed/body_truncated (documented baseline) and rejects under on_failed=reject.
+		rrLongReject := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       paddedBenign,
+			Urgent:    false,
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rrLongReject.Code, "body: %s", rrLongReject.Body.String())
+
+		// Validate authoring accepts on_failed_reasons["body_truncated"] = "admit",
+		// then confirm both enforce and shadow record failed/body_truncated.
+		_, valErr := f.srv.MessagePolicyEvaluator().ValidateAuthoring(ctx, messagepolicy.AuthoringSpec{
+			Name:            pol.Name,
+			Mode:            pol.Mode,
+			Scope:           messagepolicy.Scope{Surfaces: []string{messagepolicy.SurfaceAgentToUser}},
+			ViolationRule:   pol.ViolationRule,
+			OnFailed:        messagepolicy.OutcomeReject,
+			OnFailedReasons: map[string]string{messagepolicy.ReasonBodyTruncated: messagepolicy.OutcomeAdmit},
+		})
+		require.NoError(t, valErr)
+
+		pol.OnFailedReasons = map[string]string{messagepolicy.ReasonBodyTruncated: messagepolicy.OutcomeAdmit}
+		require.NoError(t, f.s.UpdateMessagePolicy(ctx, pol))
+
+		rrLongAdmit := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       paddedBenign,
+			Urgent:    false,
+		})
+		require.Equal(t, http.StatusOK, rrLongAdmit.Code, "body: %s", rrLongAdmit.Body.String())
+
+		require.Eventually(t, func() bool {
+			shDecs, listErr := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+				ProjectID: f.project.ID,
+				PolicyID:  shadowPol.ID,
+				Class:     store.MessagePolicyClassFailed,
+			}, store.ListOptions{Limit: 10})
+			return listErr == nil && len(shDecs.Items) >= 2
+		}, 3*time.Second, 15*time.Millisecond)
+
+		enfDecs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+			PolicyID:  pol.ID,
+			Class:     store.MessagePolicyClassFailed,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, enfDecs.Items, 2)
+		actions := []string{enfDecs.Items[0].Action, enfDecs.Items[1].Action}
+		assert.ElementsMatch(t, []string{store.MessagePolicyActionRejected, store.MessagePolicyActionAdmitted}, actions)
+		for _, d := range enfDecs.Items {
+			assert.Equal(t, messagepolicy.ReasonBodyTruncated, d.CELErrorReason)
+		}
+
+		shDecs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+			PolicyID:  shadowPol.ID,
+			Class:     store.MessagePolicyClassFailed,
+		}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		for _, d := range shDecs.Items {
+			assert.Equal(t, store.MessagePolicyActionShadow, d.Action)
+			assert.Equal(t, messagepolicy.ReasonBodyTruncated, d.CELErrorReason)
+		}
+	})
+}
+
 func mpgSeedShadowBenchmarkPolicies(tb testing.TB, ctx context.Context, s store.Store, projectID string) []*store.MessagePolicy {
 	tb.Helper()
 	specs := []struct {

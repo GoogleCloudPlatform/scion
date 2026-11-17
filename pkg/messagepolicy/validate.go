@@ -142,6 +142,7 @@ var knownFailureReasons = []string{
 	celengine.ReasonRuntime,
 	celengine.ReasonTimeout,
 	celengine.ReasonType,
+	ReasonBodyTruncated,
 	ReasonBudgetExhausted,
 	ReasonCompileError,
 	ReasonFactsUnavailable,

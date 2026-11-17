@@ -330,9 +330,10 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 	if ctx.Err() != nil {
 		return
 	}
+	bodyTruncated := len(job.snapshot.msgBody) > messagepolicy.MaxBodyBytes
 	factsUnavailable := job.factsUnavailable
 	act := job.activation
-	if !job.hasActivation && !factsUnavailable {
+	if !bodyTruncated && !job.hasActivation && !factsUnavailable {
 		facts, _, _, factsErr := s.buildH2MessagePolicyFacts(ctx, job.snapshot, nil, false)
 		if ctx.Err() != nil {
 			return
@@ -354,12 +355,18 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 		pol := &job.policies[i]
 		var classification messagepolicy.Classification
 		var elapsed time.Duration
-		if factsUnavailable {
+		switch {
+		case bodyTruncated:
+			classification = messagepolicy.Classification{
+				Class:  messagepolicy.ClassFailed,
+				Reason: messagepolicy.ReasonBodyTruncated,
+			}
+		case factsUnavailable:
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonFactsUnavailable,
 			}
-		} else {
+		default:
 			start := time.Now()
 			classification = s.evalOneMessagePolicy(ctx, pol, act, budget)
 			elapsed = time.Since(start)
@@ -513,10 +520,19 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		}, true
 	}
 
-	facts, humanMembers, humanMembersLoaded, factsErr := s.buildH2MessagePolicyFacts(ctx, snap, nil, false)
-	var act messagepolicy.Activation
-	if factsErr == nil {
-		act = messagepolicy.NewActivation(facts)
+	bodyTruncated := len(snap.msgBody) > messagepolicy.MaxBodyBytes
+	var (
+		facts              messagepolicy.Facts
+		humanMembers       []chatMemberEntry
+		humanMembersLoaded bool
+		factsErr           error
+		act                messagepolicy.Activation
+	)
+	if !bodyTruncated {
+		facts, humanMembers, humanMembersLoaded, factsErr = s.buildH2MessagePolicyFacts(ctx, snap, nil, false)
+		if factsErr == nil {
+			act = messagepolicy.NewActivation(facts)
+		}
 	}
 	budget := s.messagePolicyGate.makeSendBudget()
 
@@ -539,6 +555,11 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonPolicyCapExceeded,
+			}
+		case bodyTruncated:
+			classification = messagepolicy.Classification{
+				Class:  messagepolicy.ClassFailed,
+				Reason: messagepolicy.ReasonBodyTruncated,
 			}
 		case factsErr != nil:
 			classification = messagepolicy.Classification{
@@ -605,7 +626,7 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 				policies:         shadowPols,
 				snapshot:         snap,
 				activation:       act,
-				hasActivation:    factsErr == nil,
+				hasActivation:    !bodyTruncated && factsErr == nil,
 				factsUnavailable: factsErr != nil,
 				messageID:        "",
 			})
@@ -662,7 +683,7 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			policies:         shadowPols,
 			snapshot:         snap,
 			activation:       act,
-			hasActivation:    factsErr == nil,
+			hasActivation:    !bodyTruncated && factsErr == nil,
 			factsUnavailable: factsErr != nil,
 			droppedCount:     droppedShadow,
 		}

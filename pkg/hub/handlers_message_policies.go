@@ -1245,14 +1245,23 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	}
 	act := messagepolicy.NewActivation(facts)
 
-	ev := s.MessagePolicyEvaluator()
-	start := time.Now()
-	cls := ev.EvaluateExpr(ctx, effective.ViolationRule, act,
-		messagepolicy.WithBudget(messagepolicy.NewSendBudget()),
-	)
-	elapsedMs := time.Since(start).Milliseconds()
-	if elapsedMs < 0 {
-		elapsedMs = 0
+	var cls messagepolicy.Classification
+	var elapsedMs int64
+	if bodyTruncated {
+		cls = messagepolicy.Classification{
+			Class:  messagepolicy.ClassFailed,
+			Reason: messagepolicy.ReasonBodyTruncated,
+		}
+	} else {
+		ev := s.MessagePolicyEvaluator()
+		start := time.Now()
+		cls = ev.EvaluateExpr(ctx, effective.ViolationRule, act,
+			messagepolicy.WithBudget(messagepolicy.NewSendBudget()),
+		)
+		elapsedMs = time.Since(start).Milliseconds()
+		if elapsedMs < 0 {
+			elapsedMs = 0
+		}
 	}
 
 	outcome := messagepolicy.ResolveOutcome(
