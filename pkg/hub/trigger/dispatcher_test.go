@@ -54,7 +54,7 @@ func (c *fakeCore) Experiment(name string) bool {
 	return false
 }
 
-func (c *fakeCore) AdmitFire(ctx context.Context) (context.Context, func(), bool) {
+func (c *fakeCore) AdmitFire(ctx, _ context.Context) (context.Context, func(), bool) {
 	if c.admitFn != nil {
 		return c.admitFn(ctx)
 	}

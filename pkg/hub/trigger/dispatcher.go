@@ -75,9 +75,9 @@ type Core interface {
 // FireAdmitter is an optional interface Core implementations may satisfy so
 // long-running trigger fires (such as message --wake) register with hub
 // shutdown admission and receive hub shutdown-abort signals while remaining
-// bounded by the queue item's lifetime.
+// bounded by itemCtx (the queue item's lifetime, Stage 1 ledger L3).
 type FireAdmitter interface {
-	AdmitFire(ctx context.Context) (context.Context, func(), bool)
+	AdmitFire(ctx, itemCtx context.Context) (context.Context, func(), bool)
 }
 
 // DispatcherConfig configures a trigger event Dispatcher.
@@ -597,7 +597,7 @@ func (t *triggerFireTracker) Admit(ctx context.Context) (context.Context, func()
 		return ctx, func() {}, false
 	}
 	if adm, ok := t.core.(FireAdmitter); ok {
-		admittedCtx, done, admitted := adm.AdmitFire(ctx)
+		admittedCtx, done, admitted := adm.AdmitFire(ctx, t.itemCtx)
 		if !admitted {
 			return ctx, func() {}, false
 		}

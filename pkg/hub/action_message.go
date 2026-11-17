@@ -224,13 +224,18 @@ func (a *messageAction) Fire(ctx context.Context, req hubfire.FireRequest, autho
 	return a.srv.deliverMessageAction(ctx, req, ma)
 }
 
-func buildMessageActionMessage(agent *store.Agent, payload MessageEventPayload) *messages.StructuredMessage {
+func buildMessageActionMessage(agent *store.Agent, payload MessageEventPayload, req hubfire.FireRequest) (*messages.StructuredMessage, error) {
 	structuredMsg := messages.NewSystemMessage("scheduler", "agent:"+agent.Slug, payload.Message, messages.SystemCategoryScheduler)
 	structuredMsg.SenderID = "SCHEDULER"
 	structuredMsg.RecipientID = agent.ID
 	structuredMsg.Plain = payload.Plain
 	structuredMsg.Urgent = payload.Interrupt
-	return structuredMsg
+	if req.Event != nil {
+		if err := ApplyDispatchedEventEnvelope(structuredMsg, req); err != nil {
+			return nil, err
+		}
+	}
+	return structuredMsg, nil
 }
 
 func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireRequest, ma *messageAuthorized) (hubfire.FireOutcome, error) {
@@ -287,7 +292,10 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 	}
 
 	// Reconstruct structured message from payload to preserve traits like Plain.
-	structuredMsg := buildMessageActionMessage(agent, payload)
+	structuredMsg, err := buildMessageActionMessage(agent, payload, req)
+	if err != nil {
+		return hubfire.FireOutcome{}, err
+	}
 
 	// A wake fire may have spent the handler's deadline on the resume
 	// (wakeFireTarget runs on its own budget); its persist and dispatch get a
