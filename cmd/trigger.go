@@ -307,7 +307,7 @@ func readTriggerWhereFile(path string) ([]hubclient.TriggerMatchRuleSpec, error)
 	if err != nil {
 		return nil, newUsageError("failed to open --where-file %q: %v", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	raw, err := io.ReadAll(io.LimitReader(f, maxTriggerWhereFileBytes+1))
 	if err != nil {

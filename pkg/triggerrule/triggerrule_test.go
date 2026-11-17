@@ -1690,12 +1690,6 @@ func (d *slowFakeDialect) observations() []slowCallObservation {
 	return slices.Clone(d.observed)
 }
 
-func (d *slowFakeDialect) resetObservations() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.observed = nil
-}
-
 func (d *slowFakeDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
 	return ruleengine.NewCompiled(env.Consumer, d.name, kind, rule), nil
 }
@@ -2026,7 +2020,7 @@ func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
 		}
 	}
 	// Each successive element must see a strictly smaller remaining budget than the previous one.
-	if !(obs[2].budgetMaxEvalTime < obs[1].budgetMaxEvalTime && obs[1].budgetMaxEvalTime < obs[0].budgetMaxEvalTime) {
+	if obs[2].budgetMaxEvalTime >= obs[1].budgetMaxEvalTime || obs[1].budgetMaxEvalTime >= obs[0].budgetMaxEvalTime {
 		t.Fatalf("expected decreasing clamped MaxEvalTime across shared tracker, got %v -> %v -> %v",
 			obs[0].budgetMaxEvalTime, obs[1].budgetMaxEvalTime, obs[2].budgetMaxEvalTime)
 	}
