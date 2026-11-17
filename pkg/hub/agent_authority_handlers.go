@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -50,14 +49,7 @@ const agentListIncludeAuthority = "authority"
 // include values are ignored, as legacy list callers never got a 400 for
 // an unknown parameter.
 func agentListIncludesAuthority(query url.Values) bool {
-	for _, v := range query["include"] {
-		for _, part := range strings.Split(v, ",") {
-			if strings.TrimSpace(part) == agentListIncludeAuthority {
-				return true
-			}
-		}
-	}
-	return false
+	return agentListQueryIncludes(query, agentListIncludeAuthority)
 }
 
 // agentAuthorityReader answers authority states for one reader within one

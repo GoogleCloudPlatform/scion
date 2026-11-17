@@ -2817,10 +2817,12 @@ func TestHubStatusToPhaseActivity_SuspendedAndRetainedActivities(t *testing.T) {
 }
 
 func TestListAgentsViaHub_JSONIncludesHarnessCapabilities(t *testing.T) {
+	var gotIncludes []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/agents"):
+			gotIncludes = append(gotIncludes, r.URL.Query().Get("include"))
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"agents": []map[string]any{
 					{
@@ -2906,4 +2908,12 @@ func TestListAgentsViaHub_JSONIncludesHarnessCapabilities(t *testing.T) {
 	_, hasCaps := olderRaw["harnessCapabilities"]
 	assert.False(t, hasResolved, "omitted when Hub omits resolvedHarness")
 	assert.False(t, hasCaps, "omitted when Hub omits harnessCapabilities")
+	assert.Equal(t, []string{"authority,capabilities"}, gotIncludes, "JSON output requests include=capabilities alongside authority")
+
+	gotIncludes = nil
+	outputFormat = ""
+	_, _ = captureStdoutStderr(t, func() {
+		require.NoError(t, listAgentsViaHub(hubCtx))
+	})
+	assert.Equal(t, []string{"authority"}, gotIncludes, "text table output does not request include=capabilities")
 }

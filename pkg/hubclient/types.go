@@ -99,12 +99,16 @@ type Agent struct {
 	Authority *api.AgentAuthority `json:"authority,omitempty"`
 
 	// ResolvedHarness is the underlying harness type the Hub resolved for
-	// this agent (stamped harness first, then harness-config resolution).
+	// this agent (stamped harness first, then harness-config resolution):
+	// always on a single-agent Get, and on listed agents when
+	// ListAgentsOptions.IncludeCapabilities is set.
 	ResolvedHarness string `json:"resolvedHarness,omitempty"`
 
 	// HarnessCapabilities describes the feature matrix of ResolvedHarness
-	// (including resume support), populated on single-agent and full-view
-	// list responses.
+	// (including resume support, which reflects Hub suspend eligibility and
+	// allows agents that name no harness): always on a single-agent Get, and
+	// on full-view listed agents when ListAgentsOptions.IncludeCapabilities
+	// is set.
 	HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 }
 

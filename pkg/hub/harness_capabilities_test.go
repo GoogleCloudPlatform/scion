@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -432,7 +433,11 @@ func TestGetAgent_HarnessCapabilitiesMatchSuspendWhenCatalogDrifts(t *testing.T)
 // TestListAgents_FullViewExposesHarnessCapabilities verifies that full-view
 // agent list endpoints populate resolvedHarness and harnessCapabilities using
 // the stamped-first resolver (so scion list --format json can report resume
-// support per agent, ptone/scion#8227), while compact list items omit both.
+// TestListAgents_FullViewExposesHarnessCapabilities verifies that Hub agent
+// list endpoints omit resolvedHarness and harnessCapabilities by default (and
+// on unknown/other include tokens), populate both on full-view responses when
+// include=capabilities is passed (composing with include=authority and ignoring
+// unknown tokens), and always omit both on view=compact (ptone/scion#8227).
 func TestListAgents_FullViewExposesHarnessCapabilities(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
@@ -480,61 +485,102 @@ func TestListAgents_FullViewExposesHarnessCapabilities(t *testing.T) {
 	}
 	modes := []string{"", "sort=updated&fit=500"}
 
+	withQuery := func(base, mode, extra string) string {
+		var parts []string
+		if mode != "" {
+			parts = append(parts, mode)
+		}
+		if extra != "" {
+			parts = append(parts, extra)
+		}
+		if len(parts) == 0 {
+			return base
+		}
+		return base + "?" + strings.Join(parts, "&")
+	}
+
+	assertOmitsCapabilities := func(path string) {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
+		var raw struct {
+			Agents []map[string]json.RawMessage `json:"agents"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+		require.NotEmpty(t, raw.Agents, path)
+		for _, item := range raw.Agents {
+			_, hasResolved := item["resolvedHarness"]
+			_, hasCaps := item["harnessCapabilities"]
+			assert.False(t, hasResolved, "%s: must omit resolvedHarness", path)
+			assert.False(t, hasCaps, "%s: must omit harnessCapabilities", path)
+		}
+	}
+
 	for _, base := range endpoints {
 		for _, mode := range modes {
-			fullPath := base
-			if mode != "" {
-				fullPath += "?" + mode
-			}
-			rec := doRequest(t, srv, http.MethodGet, fullPath, nil)
-			require.Equal(t, http.StatusOK, rec.Code, "%s: %s", fullPath, rec.Body.String())
-
-			var resp ListAgentsResponse
-			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-			byID := map[string]AgentWithCapabilities{}
-			for _, a := range resp.Agents {
-				byID[a.ID] = a
+			// Default full-view list, include=authority alone, and unknown
+			// include values must all omit capability fields.
+			for _, extra := range []string{"", "include=authority", "include=bogus", "include=capabilitiesx"} {
+				assertOmitsCapabilities(withQuery(base, mode, extra))
 			}
 
-			gotRes, ok := byID[resumable.ID]
-			require.True(t, ok, "%s: expected resumable agent", fullPath)
-			assert.Equal(t, "claude", gotRes.ResolvedHarness, fullPath)
-			require.NotNil(t, gotRes.HarnessCapabilities, fullPath)
-			assert.Equal(t, api.SupportYes, gotRes.HarnessCapabilities.Resume.Support, fullPath)
-			assert.Empty(t, gotRes.HarnessCapabilities.Resume.Reason, fullPath)
+			// Opt-in include=capabilities (alone, composed with authority, or
+			// alongside unknown tokens) populates resolvedHarness and
+			// harnessCapabilities matching suspend.
+			for _, tc := range []struct {
+				query         string
+				wantAuthority bool
+			}{
+				{query: "include=capabilities"},
+				{query: "include=authority,capabilities", wantAuthority: true},
+				{query: "include=bogus,%20capabilities"},
+				{query: "include=authority&include=capabilities", wantAuthority: true},
+			} {
+				fullPath := withQuery(base, mode, tc.query)
+				rec := doRequest(t, srv, http.MethodGet, fullPath, nil)
+				require.Equal(t, http.StatusOK, rec.Code, "%s: %s", fullPath, rec.Body.String())
 
-			gotNon, ok := byID[nonResumable.ID]
-			require.True(t, ok, "%s: expected non-resumable agent", fullPath)
-			assert.Equal(t, "generic", gotNon.ResolvedHarness, fullPath)
-			require.NotNil(t, gotNon.HarnessCapabilities, fullPath)
-			assert.Equal(t, api.SupportNo, gotNon.HarnessCapabilities.Resume.Support, fullPath)
-			assert.NotEmpty(t, gotNon.HarnessCapabilities.Resume.Reason, fullPath)
+				var resp ListAgentsResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				byID := map[string]AgentWithCapabilities{}
+				for _, a := range resp.Agents {
+					byID[a.ID] = a
+				}
 
-			compactPath := base + "?view=compact"
-			if mode != "" {
-				compactPath = base + "?" + mode + "&view=compact"
+				gotRes, ok := byID[resumable.ID]
+				require.True(t, ok, "%s: expected resumable agent", fullPath)
+				assert.Equal(t, "claude", gotRes.ResolvedHarness, fullPath)
+				require.NotNil(t, gotRes.HarnessCapabilities, fullPath)
+				assert.Equal(t, api.SupportYes, gotRes.HarnessCapabilities.Resume.Support, fullPath)
+				assert.Empty(t, gotRes.HarnessCapabilities.Resume.Reason, fullPath)
+				if tc.wantAuthority {
+					assert.NotNil(t, gotRes.Authority, "%s: include=authority must compose with capabilities", fullPath)
+				} else {
+					assert.Nil(t, gotRes.Authority, fullPath)
+				}
+
+				gotNon, ok := byID[nonResumable.ID]
+				require.True(t, ok, "%s: expected non-resumable agent", fullPath)
+				assert.Equal(t, "generic", gotNon.ResolvedHarness, fullPath)
+				require.NotNil(t, gotNon.HarnessCapabilities, fullPath)
+				assert.Equal(t, api.SupportNo, gotNon.HarnessCapabilities.Resume.Support, fullPath)
+				assert.NotEmpty(t, gotNon.HarnessCapabilities.Resume.Reason, fullPath)
 			}
-			compRec := doRequest(t, srv, http.MethodGet, compactPath, nil)
-			require.Equal(t, http.StatusOK, compRec.Code, "%s: %s", compactPath, compRec.Body.String())
-			var raw struct {
-				Agents []map[string]json.RawMessage `json:"agents"`
-			}
-			require.NoError(t, json.Unmarshal(compRec.Body.Bytes(), &raw))
-			for _, item := range raw.Agents {
-				_, hasResolved := item["resolvedHarness"]
-				_, hasCaps := item["harnessCapabilities"]
-				assert.False(t, hasResolved, "%s: compact view must omit resolvedHarness", compactPath)
-				assert.False(t, hasCaps, "%s: compact view must omit harnessCapabilities", compactPath)
-			}
+
+			// Compact view never populates capability fields, even when
+			// include=capabilities is supplied.
+			assertOmitsCapabilities(withQuery(base, mode, "view=compact"))
+			assertOmitsCapabilities(withQuery(base, mode, "view=compact&include=capabilities"))
 		}
 	}
 }
 
 // TestAgentWithoutConfiguredHarness_APICapabilitiesMatchSuspend ensures that an
 // agent whose record names no harness and no harness-config at all reports
-// resume.support = "yes" on both single-agent GET and full-view list endpoints,
-// matching manual/auto suspend (which allows suspending unnamed agents) and
-// without contaminating named "generic" agents in the same list (ptone/scion#8227).
+// resume.support = "yes" on single-agent GET and on full-view list endpoints
+// with include=capabilities, matching manual/auto suspend (which allows
+// suspending unnamed agents) without contaminating named "generic" agents in
+// the same list (ptone/scion#8227).
 func TestAgentWithoutConfiguredHarness_APICapabilitiesMatchSuspend(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
@@ -562,7 +608,8 @@ func TestAgentWithoutConfiguredHarness_APICapabilitiesMatchSuspend(t *testing.T)
 	assert.Equal(t, api.SupportYes, gotGet.HarnessCapabilities.Resume.Support)
 	assert.Empty(t, gotGet.HarnessCapabilities.Resume.Reason)
 
-	for _, listPath := range []string{"/api/v1/agents", "/api/v1/projects/" + proj.ID + "/agents"} {
+	for _, basePath := range []string{"/api/v1/agents", "/api/v1/projects/" + proj.ID + "/agents"} {
+		listPath := basePath + "?include=capabilities"
 		listRec := doRequest(t, srv, http.MethodGet, listPath, nil)
 		require.Equal(t, http.StatusOK, listRec.Code, "%s: %s", listPath, listRec.Body.String())
 		var listResp ListAgentsResponse

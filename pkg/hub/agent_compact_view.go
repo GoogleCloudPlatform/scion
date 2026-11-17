@@ -18,6 +18,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -29,6 +30,40 @@ const (
 	agentListViewFull    = "full"
 	agentListViewCompact = "compact"
 )
+
+// agentListIncludeCapabilities is the include= value that adds each item's
+// resolvedHarness and harnessCapabilities to a full-view agent list
+// (ptone/scion#8227).
+const agentListIncludeCapabilities = "capabilities"
+
+// agentListIncludes selects optional per-item enrichments on full-view agent
+// list responses.
+type agentListIncludes struct {
+	authority    bool
+	capabilities bool
+}
+
+func agentListQueryIncludes(query url.Values, token string) bool {
+	for _, v := range query["include"] {
+		for _, part := range strings.Split(v, ",") {
+			if strings.TrimSpace(part) == token {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func agentListIncludesCapabilities(query url.Values) bool {
+	return agentListQueryIncludes(query, agentListIncludeCapabilities)
+}
+
+func parseAgentListIncludes(query url.Values) agentListIncludes {
+	return agentListIncludes{
+		authority:    agentListIncludesAuthority(query),
+		capabilities: agentListIncludesCapabilities(query),
+	}
+}
 
 // AgentCompactItem is one agent in a view=compact agent list: the fields a
 // graph or tree consumer needs (identity, project, status, detail message,
@@ -163,17 +198,19 @@ func legacyAgentListView(query url.Values) string {
 // view. It is the last step of every agent list response on both
 // endpoints: everything that decides membership, order, cursors, counts,
 // stats and capabilities has already run, identically for both views, and
-// only the per-item shape differs. It first sets every item's resolved
-// harness, harness vendor and model size (setAgentListBadges), the same for
-// both views, so every list path carries the badges. On the full view it also
-// populates harnessCapabilities (setAgentListCapabilities) and, with
-// includeAuthority, each item's authority state (setAgentListAuthority); the
-// compact view never does, so it makes no authority reads.
-func (s *Server) writeAgentList(ctx context.Context, w http.ResponseWriter, view string, includeAuthority bool, resp ListAgentsResponse) {
-	s.setAgentListBadges(ctx, resp.Agents)
+// only the per-item shape differs. It first sets every item's harness
+// vendor and model size (setAgentListBadges), the same for both views, so
+// every list path carries the badges. On the full view, inc.capabilities
+// adds resolvedHarness and harnessCapabilities (populateAgentListCapabilities)
+// and inc.authority adds each item's authority state (setAgentListAuthority);
+// the compact view never does either.
+func (s *Server) writeAgentList(ctx context.Context, w http.ResponseWriter, view string, inc agentListIncludes, resp ListAgentsResponse) {
+	memo := s.setAgentListBadges(ctx, resp.Agents)
 	if view != agentListViewCompact {
-		setAgentListCapabilities(resp.Agents)
-		if includeAuthority {
+		if inc.capabilities {
+			s.populateAgentListCapabilities(ctx, resp.Agents, memo)
+		}
+		if inc.authority {
 			s.setAgentListAuthority(ctx, resp.Agents)
 		}
 		writeJSON(w, http.StatusOK, resp)

@@ -275,13 +275,14 @@ func agentModelSize(agent *store.Agent) string {
 	return agent.AppliedConfig.ModelSize
 }
 
-// setAgentListBadges sets ResolvedHarness, HarnessVendor and ModelSize on every
-// item of an agent list. The harness comes from effectiveAgentHarnessTypeMemo
-// with a memo shared by the whole list: no store lookup when storedAgentHarness
-// names it, and otherwise at most one lookup per distinct project-scope
-// (project, reference) and one per distinct global-scope reference across the
-// list.
-func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapabilities) {
+// setAgentListBadges sets HarnessVendor and ModelSize on every item of an
+// agent list and returns the per-request harness lookup memo so opt-in list
+// capability enrichment (include=capabilities) can reuse it without extra
+// store reads. The harness comes from effectiveAgentHarnessTypeMemo: no store
+// lookup when storedAgentHarness names it, and otherwise at most one lookup
+// per distinct project-scope (project, reference) and one per distinct
+// global-scope reference across the list.
+func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapabilities) *harnessTypeMemo {
 	var memo *harnessTypeMemo
 	for i := range agents {
 		a := &agents[i].Agent
@@ -289,10 +290,25 @@ func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapab
 			memo = newHarnessTypeMemo()
 		}
 		resolved := s.effectiveAgentHarnessTypeMemo(ctx, a, memo)
-		agents[i].ResolvedHarness = resolved
 		agents[i].HarnessVendor = harness.Vendor(resolved)
 		agents[i].ModelSize = agentModelSize(a)
 	}
+	return memo
+}
+
+// populateAgentListCapabilities sets ResolvedHarness and HarnessCapabilities
+// on every item of a full-view agent list when include=capabilities is
+// requested, reusing memo from setAgentListBadges so no store lookup runs
+// twice.
+func (s *Server) populateAgentListCapabilities(ctx context.Context, agents []AgentWithCapabilities, memo *harnessTypeMemo) {
+	for i := range agents {
+		a := &agents[i].Agent
+		if storedAgentHarness(a) == "" && memo == nil {
+			memo = newHarnessTypeMemo()
+		}
+		agents[i].ResolvedHarness = s.effectiveAgentHarnessTypeMemo(ctx, a, memo)
+	}
+	setAgentListCapabilities(agents)
 }
 
 type listCapsKey struct {

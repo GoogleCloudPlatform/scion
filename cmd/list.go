@@ -125,10 +125,11 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	}
 
 	opts := &hubclient.ListAgentsOptions{
-		IncludeDeleted:   listDeleted,
-		Phase:            filterPhase,
-		Labels:           parsedLabels,
-		IncludeAuthority: cliShowsAgentAuthority(resolveMode()),
+		IncludeDeleted:      listDeleted,
+		Phase:               filterPhase,
+		Labels:              parsedLabels,
+		IncludeAuthority:    cliShowsAgentAuthority(resolveMode()),
+		IncludeCapabilities: isJSONOutput(),
 	}
 	if listCount > 0 {
 		opts.Page.Limit = listCount
