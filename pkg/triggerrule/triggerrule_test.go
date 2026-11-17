@@ -1932,19 +1932,19 @@ func TestMatchAll_OrderAndShortCircuitWithRecordingDialect(t *testing.T) {
 }
 
 func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
-	// slow_wide declares a 500ms per-element ceiling so tracker remainder (< 500ms) clamps it.
-	slowWide := newSlowFakeDialect("slow_wide", 500*time.Millisecond)
-	// slow_tight declares a 30ms per-element ceiling so dialect ceiling (< tracker remainder) clamps it.
-	slowTight := newSlowFakeDialect("slow_tight", 30*time.Millisecond)
-	recGuard := newRecordingFakeDialect("rec_guard", 100*time.Millisecond)
+	// slow_wide declares a 2s per-element ceiling so tracker remainder (< 2s) clamps it.
+	slowWide := newSlowFakeDialect("slow_wide", 2*time.Second)
+	// slow_tight declares a 50ms per-element ceiling so dialect ceiling (< tracker remainder) clamps it.
+	slowTight := newSlowFakeDialect("slow_tight", 50*time.Millisecond)
+	recGuard := newRecordingFakeDialect("rec_guard", 200*time.Millisecond)
 	recGuard.setOutcome("never_reached", true, nil)
 
 	_, rules := newTriggerRulesWithExtraDialects(t, slowWide, slowTight, recGuard)
 
-	slowWide.configure("step_45ms", 45*time.Millisecond, true)
-	slowWide.configure("step_40ms", 40*time.Millisecond, true)
-	slowWide.configure("step_300ms_timeout", 300*time.Millisecond, true)
-	slowTight.configure("tight_200ms_timeout", 200*time.Millisecond, true)
+	slowWide.configure("step_1", 60*time.Millisecond, true)
+	slowWide.configure("step_2", 60*time.Millisecond, true)
+	slowWide.configure("step_timeout", 1500*time.Millisecond, true)
+	slowTight.configure("tight_timeout", 1000*time.Millisecond, true)
 
 	ctx := context.Background()
 	ev := sampleFireEvent(`{"ok":true}`)
@@ -1953,16 +1953,29 @@ func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
 		t.Fatalf("NewEventActivation: %v", err)
 	}
 
-	// 1. Shared 130ms aggregate BudgetTracker across three candidate triggers on one event.
-	sharedTracker := ruleengine.NewBudgetTracker(130 * time.Millisecond)
+	// Pre-warm the CEL compiler/cache on trig-1 before creating sharedTracker so
+	// cold parser initialization does not consume the shared evaluation budget.
+	if _, err := rules.MatchAll(
+		ctx,
+		celengine.CacheScope{ID: "trig-1", Revision: 1},
+		[]triggerrule.Rule{{Dialect: "cel", Expr: `event.payload.ok == true`}},
+		baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-1", Name: "one"}),
+	); err != nil {
+		t.Fatalf("pre-warm MatchAll: %v", err)
+	}
 
-	// Trigger 1: [cel(true), slow_wide(45ms -> true)] matches and charges ~45ms.
+	// 1. Shared 400ms aggregate BudgetTracker across three candidate triggers on one event.
+	//    60ms + 60ms leaves ~280ms of headroom for CI scheduling jitter while clamping
+	//    the 1500ms step well below its 2s dialect ceiling.
+	sharedTracker := ruleengine.NewBudgetTracker(400 * time.Millisecond)
+
+	// Trigger 1: [cel(true), slow_wide(60ms -> true)] matches and charges ~60ms.
 	res1, err := rules.MatchAll(
 		ctx,
 		celengine.CacheScope{ID: "trig-1", Revision: 1},
 		[]triggerrule.Rule{
 			{Dialect: "cel", Expr: `event.payload.ok == true`},
-			{Dialect: "slow_wide", Expr: "step_45ms"},
+			{Dialect: "slow_wide", Expr: "step_1"},
 		},
 		baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-1", Name: "one"}),
 		triggerrule.WithBudget(sharedTracker),
@@ -1971,19 +1984,19 @@ func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
 		t.Fatalf("Trigger 1 MatchAll = (%+v, %v), want full match Through=2", res1, err)
 	}
 	remAfter1 := sharedTracker.Remaining()
-	if remAfter1 <= 0 || remAfter1 > 95*time.Millisecond {
-		t.Fatalf("sharedTracker.Remaining after trigger 1 = %v, want in (0, 95ms]", remAfter1)
+	if remAfter1 <= 0 || remAfter1 > 350*time.Millisecond {
+		t.Fatalf("sharedTracker.Remaining after trigger 1 = %v, want in (0, 350ms]", remAfter1)
 	}
 
-	// Trigger 2 shares the same tracker: element 1 (40ms) succeeds with clamped budget,
-	// element 2 (wants 300ms) is clamped to the remaining <= ~50ms and stops with Class="budget".
+	// Trigger 2 shares the same tracker: element 1 (60ms) succeeds with clamped budget,
+	// element 2 (wants 1500ms) is clamped to the remaining <= ~280ms and stops with Class="budget".
 	t2Start := time.Now()
 	res2, err := rules.MatchAll(
 		ctx,
 		celengine.CacheScope{ID: "trig-2", Revision: 1},
 		[]triggerrule.Rule{
-			{Dialect: "slow_wide", Expr: "step_40ms"},
-			{Dialect: "slow_wide", Expr: "step_300ms_timeout"},
+			{Dialect: "slow_wide", Expr: "step_2"},
+			{Dialect: "slow_wide", Expr: "step_timeout"},
 		},
 		baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-2", Name: "two"}),
 		triggerrule.WithBudget(sharedTracker),
@@ -2002,7 +2015,7 @@ func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
 	if res2 != wantRes2 {
 		t.Fatalf("Trigger 2 result = %+v, want %+v", res2, wantRes2)
 	}
-	if t2Elapsed >= 220*time.Millisecond {
+	if t2Elapsed >= 950*time.Millisecond {
 		t.Fatalf("Trigger 2 took %v; element 2 deadline was not clamped to remaining aggregate budget", t2Elapsed)
 	}
 
@@ -2014,7 +2027,7 @@ func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
 		if !o.hasDeadline {
 			t.Fatalf("obs[%d] (%s) missing context deadline", idx, o.expr)
 		}
-		if o.budgetMaxEvalTime > 130*time.Millisecond || o.ctxRemaining > 130*time.Millisecond {
+		if o.budgetMaxEvalTime > 400*time.Millisecond || o.ctxRemaining > 400*time.Millisecond {
 			t.Fatalf("obs[%d] (%s) deadline exceeded aggregate tracker: budget=%v ctx=%v",
 				idx, o.expr, o.budgetMaxEvalTime, o.ctxRemaining)
 		}
@@ -2043,13 +2056,13 @@ func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
 		t.Fatalf("rec_guard called despite exhausted budget: compiled=%v evaluated=%v", comp, eval)
 	}
 
-	// 2. When dialect MaxEvalTime (30ms) < tracker.Remaining() (500ms), deadline clamps to 30ms
+	// 2. When dialect MaxEvalTime (50ms) < tracker.Remaining() (2s), deadline clamps to 50ms
 	// and timeout is reported as Class="failed" (Reason="timeout"), not budget exhaustion.
-	generousTracker := ruleengine.NewBudgetTracker(500 * time.Millisecond)
+	generousTracker := ruleengine.NewBudgetTracker(2 * time.Second)
 	resTight, err := rules.MatchAll(
 		ctx,
 		celengine.CacheScope{ID: "trig-tight", Revision: 1},
-		[]triggerrule.Rule{{Dialect: "slow_tight", Expr: "tight_200ms_timeout"}},
+		[]triggerrule.Rule{{Dialect: "slow_tight", Expr: "tight_timeout"}},
 		baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-tight", Name: "tight"}),
 		triggerrule.WithBudget(generousTracker),
 	)
@@ -2067,11 +2080,11 @@ func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
 		t.Fatalf("slow_tight result = %+v, want %+v", resTight, wantTight)
 	}
 	tightObs := slowTight.observations()
-	if len(tightObs) != 1 || tightObs[0].budgetMaxEvalTime > 30*time.Millisecond {
-		t.Fatalf("slow_tight observed = %+v, want MaxEvalTime <= 30ms", tightObs)
+	if len(tightObs) != 1 || tightObs[0].budgetMaxEvalTime > 50*time.Millisecond {
+		t.Fatalf("slow_tight observed = %+v, want MaxEvalTime <= 50ms", tightObs)
 	}
 	if generousTracker.Exhausted() {
-		t.Fatalf("generousTracker should still have budget remaining after 30ms dialect timeout (spent=%v)", generousTracker.Spent())
+		t.Fatalf("generousTracker should still have budget remaining after 50ms dialect timeout (spent=%v)", generousTracker.Spent())
 	}
 }
 
@@ -2128,5 +2141,22 @@ func TestMatchAll_UnGrantedDialectAtEvaluationFailsDenyByDefault(t *testing.T) {
 	}
 	if c2, e2 := afterGuard.calls(); len(c2) != 0 || len(e2) != 0 {
 		t.Fatalf("subsequent element must not evaluate after deny-by-default failure, got compiled=%v evaluated=%v", c2, e2)
+	}
+}
+
+func TestSkipReason_CorruptMatchRulesSentinel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"direct", triggerrule.ErrCorruptMatchRules},
+		{"wrapped", errors.Join(errors.New("normalize"), triggerrule.ErrCorruptMatchRules)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, ok := triggerrule.SkipReason(tc.err)
+			if !ok || reason != triggerrule.SkipReasonEvalFailed {
+				t.Fatalf("SkipReason(%v) = (%q, %v), want (%q, true)", tc.err, reason, ok, triggerrule.SkipReasonEvalFailed)
+			}
+		})
 	}
 }

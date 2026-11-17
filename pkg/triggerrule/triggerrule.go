@@ -87,6 +87,13 @@ const (
 	SkipReasonBudgetExhausted  = "rule budget exhausted"
 )
 
+// ErrCorruptMatchRules is the sentinel error returned when a stored trigger's
+// match_rules column cannot be parsed as a JSON rule array. Normalization fails
+// closed with this error (never degrading to an empty Types-only rule list), and
+// SkipReason maps it to SkipReasonEvalFailed ("rule evaluation failed") for 3b-2
+// dispatch history recording.
+var ErrCorruptMatchRules = errors.New("triggerrule: stored match_rules is corrupt")
+
 // Rule pairs a dialect tag (empty defaults to "cel") with a rule expression.
 type Rule struct {
 	Dialect string
@@ -594,6 +601,9 @@ func classifyMatchErrorTopDown(err error) (class, reason string, matched bool) {
 	if err == ruleengine.ErrBudgetExhausted {
 		return MatchClassBudget, SkipReasonBudgetExhausted, true
 	}
+	if err == ErrCorruptMatchRules {
+		return MatchClassFailed, SkipReasonEvalFailed, true
+	}
 	switch e := err.(type) {
 	case *ruleengine.UncertainError:
 		rsn := e.Reason
@@ -786,6 +796,9 @@ func classifyRuleErrorTopDown(err error) (reason string, isSkip bool, matched bo
 	// still reached in outermost-first order by the Unwrap recursion below.
 	if err == ruleengine.ErrBudgetExhausted {
 		return SkipReasonBudgetExhausted, true, true
+	}
+	if err == ErrCorruptMatchRules {
+		return SkipReasonEvalFailed, true, true
 	}
 	switch e := err.(type) {
 	case *ruleengine.FailedError:

@@ -1121,6 +1121,31 @@ func TestTriggerStore_OrderedMatchRulesRoundTripAndEmptyScalars(t *testing.T) {
 	got3, err := cs.GetTrigger(ctx, tr.ID)
 	require.NoError(t, err)
 	assert.Empty(t, got3.MatchRules)
+	assert.False(t, got3.MatchRulesCorrupt)
 	assert.Empty(t, got3.MatchDialect)
 	assert.Empty(t, got3.MatchRule)
+
+	// Corrupt stored match_rules payloads must mark MatchRulesCorrupt=true (fail-closed)
+	// rather than silently degrading to a Types-only trigger.
+	trUUID := uuid.MustParse(tr.ID)
+	for _, corruptRaw := range []string{"{not-json", "null", "{}", "[null]", "[123]", `[{"dialect":123}]`} {
+		require.NoError(t, cs.client.Trigger.UpdateOneID(trUUID).SetMatchRules(corruptRaw).Exec(ctx))
+		corruptGot, gErr := cs.GetTrigger(ctx, tr.ID)
+		require.NoError(t, gErr)
+		assert.Nil(t, corruptGot.MatchRules, "corrupt payload %q must not yield partial rules", corruptRaw)
+		assert.True(t, corruptGot.MatchRulesCorrupt, "corrupt payload %q must set MatchRulesCorrupt", corruptRaw)
+	}
+
+	// Replacing MatchRules on a corrupt in-memory Trigger clears MatchRulesCorrupt both in-place and on reload.
+	corruptToRepair, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	require.True(t, corruptToRepair.MatchRulesCorrupt)
+	corruptToRepair.MatchRules = []store.TriggerMatchRule{{Dialect: "cel", Expr: "true"}}
+	newAttr.AuthorizationRevision = 4
+	require.NoError(t, cs.UpdateTrigger(ctx, corruptToRepair, store.TriggerFieldMask{MatchRules: true}, 3, true, &newAttr))
+	assert.False(t, corruptToRepair.MatchRulesCorrupt)
+	repaired, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.False(t, repaired.MatchRulesCorrupt)
+	assert.Equal(t, []store.TriggerMatchRule{{Dialect: "cel", Expr: "true"}}, repaired.MatchRules)
 }

@@ -466,45 +466,64 @@ func marshalMatchRules(rules []store.TriggerMatchRule) (string, error) {
 	return string(raw), nil
 }
 
-func unmarshalMatchRules(raw string) []store.TriggerMatchRule {
-	if raw == "" || raw == "[]" {
-		return nil
+func unmarshalMatchRules(raw string) ([]store.TriggerMatchRule, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "[]" {
+		return nil, false
 	}
-	var out []store.TriggerMatchRule
-	if err := json.Unmarshal([]byte(raw), &out); err != nil || len(out) == 0 {
-		return nil
+	if trimmed[0] != '[' {
+		return nil, true
 	}
-	return out
+	var rawElems []json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &rawElems); err != nil {
+		return nil, true
+	}
+	if len(rawElems) == 0 {
+		return nil, false
+	}
+	out := make([]store.TriggerMatchRule, len(rawElems))
+	for i, elemRaw := range rawElems {
+		et := bytes.TrimSpace(elemRaw)
+		if len(et) == 0 || et[0] != '{' {
+			return nil, true
+		}
+		if err := json.Unmarshal(et, &out[i]); err != nil {
+			return nil, true
+		}
+	}
+	return out, false
 }
 
 func entTriggerToStore(e *ent.Trigger) *store.Trigger {
+	matchRules, matchRulesCorrupt := unmarshalMatchRules(e.MatchRules)
 	tr := &store.Trigger{
-		ID:             e.ID.String(),
-		ProjectID:      e.ProjectID.String(),
-		Name:           e.Name,
-		Description:    e.Description,
-		SourceKind:     e.SourceKind,
-		SourceID:       e.SourceID,
-		MatchTypes:     unmarshalMatchTypes(e.MatchTypes),
-		MatchDialect:   e.MatchDialect,
-		MatchRule:      e.MatchRule,
-		MatchRules:     unmarshalMatchRules(e.MatchRules),
-		ActionType:     e.ActionType,
-		ActionPayload:  e.ActionPayload,
-		SubjectDialect: e.SubjectDialect,
-		SubjectRule:    e.SubjectRule,
-		SubjectMode:    e.SubjectMode,
-		Status:         e.Status,
-		StatusReason:   e.StatusReason,
-		LastFireAt:     e.LastFireAt,
-		LastFireStatus: e.LastFireStatus,
-		LastFireError:  e.LastFireError,
-		FireCount:      e.FireCount,
-		ErrorCount:     e.ErrorCount,
-		CreatedBy:      e.CreatedBy,
-		CreatedAt:      e.Created,
-		UpdatedAt:      e.Updated,
-		Fixture:        fixtureProvenanceFromColumns(e.FixtureRootID, e.FixtureIssuerID),
+		ID:                e.ID.String(),
+		ProjectID:         e.ProjectID.String(),
+		Name:              e.Name,
+		Description:       e.Description,
+		SourceKind:        e.SourceKind,
+		SourceID:          e.SourceID,
+		MatchTypes:        unmarshalMatchTypes(e.MatchTypes),
+		MatchDialect:      e.MatchDialect,
+		MatchRule:         e.MatchRule,
+		MatchRules:        matchRules,
+		MatchRulesCorrupt: matchRulesCorrupt,
+		ActionType:        e.ActionType,
+		ActionPayload:     e.ActionPayload,
+		SubjectDialect:    e.SubjectDialect,
+		SubjectRule:       e.SubjectRule,
+		SubjectMode:       e.SubjectMode,
+		Status:            e.Status,
+		StatusReason:      e.StatusReason,
+		LastFireAt:        e.LastFireAt,
+		LastFireStatus:    e.LastFireStatus,
+		LastFireError:     e.LastFireError,
+		FireCount:         e.FireCount,
+		ErrorCount:        e.ErrorCount,
+		CreatedBy:         e.CreatedBy,
+		CreatedAt:         e.Created,
+		UpdatedAt:         e.Updated,
+		Fixture:           fixtureProvenanceFromColumns(e.FixtureRootID, e.FixtureIssuerID),
 	}
 	tr.InitiatorAttribution = initiatorAttributionFromColumns(
 		e.InitiatorPrincipalKind, e.InitiatorPrincipalID,
@@ -972,6 +991,9 @@ func (s *TriggerStore) UpdateTrigger(
 	tr.UpdatedAt = updated.Updated
 	tr.Status = updated.Status
 	tr.StatusReason = updated.StatusReason
+	if fields.MatchRules {
+		tr.MatchRules, tr.MatchRulesCorrupt = unmarshalMatchRules(updated.MatchRules)
+	}
 	return nil
 }
 

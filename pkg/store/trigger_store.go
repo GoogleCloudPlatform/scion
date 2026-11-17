@@ -164,6 +164,10 @@ type Trigger struct {
 	InitiatorAttribution `json:"-"`
 	AuthorityCeiling     EffectCeiling     `json:"-"`
 	Fixture              FixtureProvenance `json:"-"`
+	// MatchRulesCorrupt is true when the stored match_rules column contains
+	// unparseable JSON. Callers must fail closed rather than treating an empty
+	// MatchRules slice as a Types-only trigger.
+	MatchRulesCorrupt bool `json:"-"`
 }
 
 // TriggerFilter selects triggers in ListTriggers and CountTriggers.
