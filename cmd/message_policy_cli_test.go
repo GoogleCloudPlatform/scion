@@ -525,3 +525,10 @@ sample:
 	assert.Contains(t, out, "Policy:          nested-spec")
 	assert.Equal(t, 1, serverCalls)
 }
+
+func TestMessagePolicyCreateHelp_DocumentsContentTriggeredFailuresAndBodyTruncated(t *testing.T) {
+	out, err := runMessagePolicyCLI(t, "create", "--help")
+	require.NoError(t, err)
+	assert.Contains(t, out, "body_truncated")
+	assert.Contains(t, out, "cost_limit, timeout, budget_exhausted and body_truncated can be triggered by message content; admit lets such messages through.")
+}

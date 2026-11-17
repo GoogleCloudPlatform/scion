@@ -2928,6 +2928,89 @@ func TestMessagePolicyGate_BodyExceedsMaxBodyBytes_FailsBodyTruncated(t *testing
 	})
 }
 
+// TestMessagePolicyGate_RequestCanceledDuringEval_AbortsWithoutDelivery verifies
+// security finding L-2(a): when the HTTP request context is canceled during H2
+// evaluation, evaluateH2MessagePolicies aborts without delivery even when
+// on_failed=admit (and on_failed_reasons["canceled"]="admit") and even when
+// MessageBrokerProxy is active (whose subscriber persists on a detached context).
+func TestMessagePolicyGate_RequestCanceledDuringEval_AbortsWithoutDelivery(t *testing.T) {
+	f := newMpgFixture(t, true)
+	ctx := context.Background()
+
+	slackSpoke := &mpgRecordingSpokeBus{}
+	inprocBus := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = inprocBus.Close() })
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inprocBus},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+		{Name: "slack", Bus: slackSpoke},
+	}, slog.Default())
+	proxy := NewMessageBrokerProxy(fanout, f.srv.store, f.srv.events, f.srv.GetDispatcher, slog.Default())
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	f.srv.SetMessageBrokerProxy(proxy)
+	f.srv.mu.RLock()
+	proxy.webChatStore = f.srv.webChatStore
+	f.srv.mu.RUnlock()
+	proxy.subscribeProjectUserMessages(f.project.ID)
+
+	pol := &store.MessagePolicy{
+		ProjectID: f.project.ID,
+		Name:      "fail-open-on-cancel-test",
+		Enabled:   true,
+		Mode:      store.MessagePolicyModeEnforce,
+		Scope: store.MessagePolicyScope{
+			Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+			Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+		},
+		ViolationRule:   `true`,
+		OnFailed:        messagepolicy.OutcomeAdmit,
+		OnFailedReasons: map[string]string{celengine.ReasonCanceled: messagepolicy.OutcomeAdmit},
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+
+	f.srv.messagePolicyGate.evalOverride = func(evalCtx context.Context, p *store.MessagePolicy, act messagepolicy.Activation, tracker *ruleengine.BudgetTracker) (messagepolicy.Classification, bool) {
+		cancelReq()
+		c := f.srv.MessagePolicyEvaluator().EvaluateViolation(evalCtx, p.ID, p.Revision, p.ViolationRule, act, messagepolicy.WithBudget(tracker))
+		require.Equal(t, messagepolicy.ClassFailed, c.Class)
+		require.Equal(t, celengine.ReasonCanceled, c.Reason)
+		return c, true
+	}
+	t.Cleanup(func() { f.srv.messagePolicyGate.evalOverride = nil })
+
+	raw, err := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Channel:   "slack",
+		Msg:       "must never deliver on canceled request",
+	})
+	require.NoError(t, err)
+	httpReq := httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/"+f.project.ID+"/agents/"+f.sender.ID+"/outbound-message",
+		bytes.NewReader(raw))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq = httpReq.WithContext(contextWithIdentity(reqCtx, &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: f.sender.ID},
+		ProjectID: f.project.ID,
+		Ancestry:  f.sender.Ancestry,
+	}}))
+	rr := httptest.NewRecorder()
+	f.srv.handleAgentOutboundMessage(rr, httpReq, f.sender.ID)
+
+	assert.Equal(t, 499, rr.Code, "canceled request must abort without admitting; body: %s", rr.Body.String())
+	assert.Empty(t, slackSpoke.snapshot(), "canceled request must never publish to channel spoke")
+	assert.Zero(t, f.recordChannel.count(), "canceled request must never deliver")
+
+	// Poll briefly to ensure no detached broker subscriber persisted the message.
+	for deadline := time.Now().Add(150 * time.Millisecond); time.Now().Before(deadline); time.Sleep(15 * time.Millisecond) {
+		msgs, listErr := f.s.ListMessages(ctx, store.MessageFilter{SenderID: f.sender.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, listErr)
+		require.Empty(t, msgs.Items, "canceled request must persist zero message rows")
+	}
+}
+
 func mpgSeedShadowBenchmarkPolicies(tb testing.TB, ctx context.Context, s store.Store, projectID string) []*store.MessagePolicy {
 	tb.Helper()
 	specs := []struct {

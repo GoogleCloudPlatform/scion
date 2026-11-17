@@ -458,6 +458,10 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 	if in == nil || in.agent == nil || in.agent.ProjectID == "" || in.req == nil || in.routing == nil {
 		return h2PolicyOutcome{}, true
 	}
+	if ctx.Err() != nil {
+		writeError(w, 499, "request_canceled", "request context done", nil)
+		return h2PolicyOutcome{}, false
+	}
 
 	snap := deriveH2FactSnapshot(in)
 	if snap.uncoveredPath != "" {
@@ -483,6 +487,10 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			"error", err,
 		)
 		writeErrorFromErr(w, err, "")
+		return h2PolicyOutcome{}, false
+	}
+	if ctx.Err() != nil {
+		writeError(w, 499, "request_canceled", "request context done", nil)
 		return h2PolicyOutcome{}, false
 	}
 
@@ -594,6 +602,11 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		if outcome == messagepolicy.OutcomeReject && firstReject == nil {
 			firstReject = &results[len(results)-1]
 		}
+	}
+
+	if ctx.Err() != nil {
+		writeError(w, 499, "request_canceled", "request context done", nil)
+		return h2PolicyOutcome{}, false
 	}
 
 	tplData := messagepolicy.TemplateData{
