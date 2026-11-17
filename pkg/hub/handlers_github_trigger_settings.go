@@ -254,8 +254,22 @@ func (s *Server) handlePutProjectGitHubTriggerSettings(w http.ResponseWriter, r 
 		return
 	}
 
+	s.persistProjectGitHubTriggerSettings(w, r, project, req)
+}
+
+func (s *Server) persistProjectGitHubTriggerSettings(
+	w http.ResponseWriter,
+	r *http.Request,
+	project *store.Project,
+	req ProjectGitHubTriggerSettingsUpdateRequest,
+) {
 	ctx := r.Context()
-	actor := auditActorFromContext(ctx)
+	actorID := strings.TrimSpace(auditActorFromContext(ctx).PrincipalID)
+	if actorID == "" {
+		InternalError(w)
+		return
+	}
+
 	var updated *store.Project
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		cur, txErr := tx.GetProject(ctx, project.ID)
@@ -274,9 +288,7 @@ func (s *Server) handlePutProjectGitHubTriggerSettings(w http.ResponseWriter, r 
 		} else {
 			nextAnnotations[AnnotationGitHubTriggersUnmatchedText] = req.UnmatchedCommandText
 		}
-		if actor.PrincipalID != "" {
-			nextAnnotations[AnnotationGitHubTriggersUpdatedBy] = actor.PrincipalID
-		}
+		nextAnnotations[AnnotationGitHubTriggersUpdatedBy] = actorID
 		cur.Annotations = nextAnnotations
 
 		if txErr := tx.UpdateProject(ctx, cur); txErr != nil {

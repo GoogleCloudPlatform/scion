@@ -375,6 +375,28 @@ func TestProjectGitHubTriggerSettings_RoundTripValidationAndAudit(t *testing.T) 
 
 	rr = doRawTriggerSettingsAsUser(t, srv, owner, http.MethodPut, path, []byte(`{"unmatched_command_reply":"not-a-bool"}`))
 	assert.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+
+	// Empty actor principal on write is refused content-free (500) rather than
+	// leaving the previous editor's updated-by stamped on a new mutation.
+	emptyPrincipalReq := httptest.NewRequest(http.MethodPut, path, nil)
+	emptyPrincipalRR := httptest.NewRecorder()
+	srv.persistProjectGitHubTriggerSettings(emptyPrincipalRR, emptyPrincipalReq, stored, ProjectGitHubTriggerSettingsUpdateRequest{
+		UnmatchedCommandReply: true,
+		UnmatchedCommandText:  "must-not-persist-or-echo",
+	})
+	assert.Equal(t, http.StatusInternalServerError, emptyPrincipalRR.Code, emptyPrincipalRR.Body.String())
+	assert.NotContains(t, emptyPrincipalRR.Body.String(), "must-not-persist-or-echo")
+
+	storedAfterRefusal, err := s.GetProject(ctx, projID)
+	require.NoError(t, err)
+	assert.Equal(t, "false", storedAfterRefusal.Annotations[AnnotationGitHubTriggersUnmatchedReply])
+	assert.Equal(t, admin.ID, storedAfterRefusal.Annotations[AnnotationGitHubTriggersUpdatedBy])
+	audits, total, err = s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: githubTriggerSettingsAuditMutation,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, audits, 2)
 }
 
 func TestProjectGitHubTriggerSettings_ProtectedAnnotationPatchGuardAndClone(t *testing.T) {
