@@ -143,6 +143,7 @@ All icons use the Shoelace `<sl-icon>` component, which provides [Bootstrap Icon
 | **Groups** | `diagram-3` | Navigation, group lists, group detail |
 | **Settings** | `gear` | Navigation, project settings |
 | **Dashboard** | `house` | Navigation |
+| **Console** | `grid-1x2` | Header mode switcher |
 
 ### Project Variant Icons
 
