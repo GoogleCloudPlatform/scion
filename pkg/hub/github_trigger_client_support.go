@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -155,6 +156,25 @@ func (s *Server) AllowGitHubComment(projectID string) error {
 		return ErrGitHubCommentRateLimited
 	}
 	return nil
+}
+
+// PostGitHubCommentIdempotent posts an idempotent GitHub issue/PR or
+// review-thread comment for a trigger fire, populating opts.ExpectedAuthorLogin
+// from G5's GitHub App identity cache (and falling back to suffix-only marker
+// matching when the App bot login is unknown).
+func (s *Server) PostGitHubCommentIdempotent(
+	ctx context.Context,
+	installationToken string,
+	opts githubapp.PostCommentOptions,
+) (*githubapp.IssueComment, error) {
+	client, err := s.getGitHubAppClient()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(opts.ExpectedAuthorLogin) == "" {
+		opts.ExpectedAuthorLogin = s.GitHubAppBotLogin(ctx)
+	}
+	return client.PostCommentIdempotent(ctx, installationToken, opts)
 }
 
 type githubInstallationTokenCacheKey struct {

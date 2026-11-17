@@ -99,13 +99,20 @@ func (e *CommentAPIError) UpstreamDetail() string {
 	return e.upstream
 }
 
+// CommentUser identifies the GitHub account that authored a comment.
+type CommentUser struct {
+	Login string `json:"login"`
+	Type  string `json:"type,omitempty"`
+}
+
 // IssueComment represents a GitHub issue, PR conversation, or PR review comment.
 type IssueComment struct {
-	ID        int64     `json:"id"`
-	Body      string    `json:"body"`
-	HTMLURL   string    `json:"html_url"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        int64       `json:"id"`
+	Body      string      `json:"body"`
+	HTMLURL   string      `json:"html_url"`
+	User      CommentUser `json:"user"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
 }
 
 type createCommentRequest struct {
@@ -135,13 +142,13 @@ func FireMarker(fireID string) (string, error) {
 	return fireMarkerPrefix + fireID + fireMarkerSuffix, nil
 }
 
-// HasFireMarker reports whether commentBody contains the exact fire marker for fireID.
+// HasFireMarker reports whether commentBody ends with the exact fire marker for fireID.
 func HasFireMarker(commentBody, fireID string) bool {
 	marker, err := FireMarker(fireID)
 	if err != nil {
 		return false
 	}
-	return strings.Contains(commentBody, marker)
+	return strings.HasSuffix(commentBody, marker)
 }
 
 // AppendFireMarker appends `<!-- scion fire:<fire_id> -->` to body while
@@ -210,6 +217,13 @@ type PostCommentOptions struct {
 	ReviewCommentID int64
 	Body            string
 	FireID          string
+	// ExpectedAuthorLogin, when non-empty, restricts retry deduplication
+	// marker matches to comments authored by the App's bot login (matched
+	// case-insensitively on user.login), preventing untrusted commenters from
+	// suppressing a retry by quoting or planting a fire marker. When empty
+	// (App identity unknown), deduplication falls back to suffix marker
+	// matching only.
+	ExpectedAuthorLogin string
 	// Attempts is the 1-based fire delivery attempt count. When Attempts > 1,
 	// existing comments since Since are checked for FireID's marker before posting.
 	Attempts int
@@ -219,7 +233,8 @@ type PostCommentOptions struct {
 // PostCommentIdempotent appends the fire marker to opts.Body and posts the
 // comment to GitHub. When opts.Attempts > 1, it first lists up to 100 comments
 // since opts.Since and returns the existing comment without posting if one
-// already carries `<!-- scion fire:<fire_id> -->`.
+// already ends with `<!-- scion fire:<fire_id> -->` and (when
+// opts.ExpectedAuthorLogin is non-empty) was authored by that GitHub login.
 func (c *Client) PostCommentIdempotent(ctx context.Context, installationToken string, opts PostCommentOptions) (*IssueComment, error) {
 	markedBody, err := AppendFireMarker(opts.Body, opts.FireID)
 	if err != nil {
@@ -236,11 +251,16 @@ func (c *Client) PostCommentIdempotent(ctx context.Context, installationToken st
 		if err != nil {
 			return nil, err
 		}
+		expectedAuthor := strings.TrimSpace(opts.ExpectedAuthorLogin)
 		for i := range existing {
-			if HasFireMarker(existing[i].Body, opts.FireID) {
-				found := existing[i]
-				return &found, nil
+			if !HasFireMarker(existing[i].Body, opts.FireID) {
+				continue
 			}
+			if expectedAuthor != "" && !strings.EqualFold(strings.TrimSpace(existing[i].User.Login), expectedAuthor) {
+				continue
+			}
+			found := existing[i]
+			return &found, nil
 		}
 	}
 

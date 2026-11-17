@@ -55,6 +55,9 @@ func TestAppendFireMarker_BoundsAndValidation(t *testing.T) {
 		if HasFireMarker(got, "fire-abc") {
 			t.Fatal("HasFireMarker matched prefix fire-abc against fire-abc-123")
 		}
+		if HasFireMarker("> "+got+"\nTrailing user text", "fire-abc-123") {
+			t.Fatal("HasFireMarker matched mid-body quoted marker instead of suffix only")
+		}
 	})
 
 	t.Run("idempotent when marker already present", func(t *testing.T) {
@@ -113,10 +116,11 @@ func TestAppendFireMarker_BoundsAndValidation(t *testing.T) {
 }
 
 type fakeGitHubCommentsServer struct {
-	mu             sync.Mutex
-	issueComments  []IssueComment
-	reviewComments []IssueComment
-	nextID         int64
+	mu              sync.Mutex
+	issueComments   []IssueComment
+	reviewComments  []IssueComment
+	nextID          int64
+	postAuthorLogin string
 
 	issueGetCalls   int
 	issuePostCalls  int
@@ -129,7 +133,10 @@ type fakeGitHubCommentsServer struct {
 
 func newFakeGitHubCommentsServer(t *testing.T) (*fakeGitHubCommentsServer, *httptest.Server) {
 	t.Helper()
-	fake := &fakeGitHubCommentsServer{nextID: 1000}
+	fake := &fakeGitHubCommentsServer{
+		nextID:          1000,
+		postAuthorLogin: "scion-triggers[bot]",
+	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fake.mu.Lock()
 		defer fake.mu.Unlock()
@@ -165,6 +172,7 @@ func newFakeGitHubCommentsServer(t *testing.T) (*fakeGitHubCommentsServer, *http
 				ID:        fake.nextID,
 				Body:      req.Body,
 				HTMLURL:   "https://github.com/acme/widgets/issues/42#issuecomment-created",
+				User:      CommentUser{Login: fake.postAuthorLogin, Type: "Bot"},
 				CreatedAt: time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC),
 				UpdatedAt: time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC),
 			}
@@ -190,6 +198,7 @@ func newFakeGitHubCommentsServer(t *testing.T) (*fakeGitHubCommentsServer, *http
 				ID:        fake.nextID,
 				Body:      req.Body,
 				HTMLURL:   "https://github.com/acme/widgets/pull/42#discussion_r-created",
+				User:      CommentUser{Login: fake.postAuthorLogin, Type: "Bot"},
 				CreatedAt: time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC),
 				UpdatedAt: time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC),
 			}
@@ -240,30 +249,33 @@ func TestPostCommentIdempotent_IssueAndReviewThread(t *testing.T) {
 		}
 	})
 
-	t.Run("retry with existing marker returns existing comment and does not post", func(t *testing.T) {
+	t.Run("retry with existing marker authored by App bot returns existing comment and does not post", func(t *testing.T) {
 		fake, ts := newFakeGitHubCommentsServer(t)
 		fake.issueComments = []IssueComment{
 			{
 				ID:      501,
 				Body:    "Unrelated comment\n<!-- scion fire:fire-10 -->",
 				HTMLURL: "https://github.com/acme/widgets/issues/42#issuecomment-501",
+				User:    CommentUser{Login: "scion-triggers[bot]", Type: "Bot"},
 			},
 			{
 				ID:      502,
 				Body:    "Started review agent\n<!-- scion fire:fire-1 -->",
 				HTMLURL: "https://github.com/acme/widgets/issues/42#issuecomment-502",
+				User:    CommentUser{Login: "scion-triggers[bot]", Type: "Bot"},
 			},
 		}
 		client := newCommentTestClient(t, ts.URL)
 
 		got, err := client.PostCommentIdempotent(context.Background(), token, PostCommentOptions{
-			Owner:       "acme",
-			Repo:        "widgets",
-			IssueNumber: 42,
-			Body:        "Started review agent",
-			FireID:      "fire-1",
-			Attempts:    2,
-			Since:       since,
+			Owner:               "acme",
+			Repo:                "widgets",
+			IssueNumber:         42,
+			Body:                "Started review agent",
+			FireID:              "fire-1",
+			ExpectedAuthorLogin: "Scion-Triggers[bot]",
+			Attempts:            2,
+			Since:               since,
 		})
 		if err != nil {
 			t.Fatalf("PostCommentIdempotent: %v", err)
@@ -279,6 +291,87 @@ func TestPostCommentIdempotent_IssueAndReviewThread(t *testing.T) {
 		}
 		if got.ID != 502 || got.HTMLURL != "https://github.com/acme/widgets/issues/42#issuecomment-502" {
 			t.Errorf("got comment (%d, %q), want (502, issuecomment-502)", got.ID, got.HTMLURL)
+		}
+	})
+
+	t.Run("retry ignores planted marker from non-App author or mid-body quote and posts once", func(t *testing.T) {
+		fake, ts := newFakeGitHubCommentsServer(t)
+		fake.issueComments = []IssueComment{
+			{
+				ID:      501,
+				Body:    "Spoofed by untrusted user\n<!-- scion fire:fire-1 -->",
+				HTMLURL: "https://github.com/acme/widgets/issues/42#issuecomment-501",
+				User:    CommentUser{Login: "mallory", Type: "User"},
+			},
+			{
+				ID:      502,
+				Body:    "> Started review agent\n> <!-- scion fire:fire-1 -->\nBot follow-up text",
+				HTMLURL: "https://github.com/acme/widgets/issues/42#issuecomment-502",
+				User:    CommentUser{Login: "scion-triggers[bot]", Type: "Bot"},
+			},
+		}
+		client := newCommentTestClient(t, ts.URL)
+
+		got, err := client.PostCommentIdempotent(context.Background(), token, PostCommentOptions{
+			Owner:               "acme",
+			Repo:                "widgets",
+			IssueNumber:         42,
+			Body:                "Started review agent",
+			FireID:              "fire-1",
+			ExpectedAuthorLogin: "scion-triggers[bot]",
+			Attempts:            2,
+			Since:               since,
+		})
+		if err != nil {
+			t.Fatalf("PostCommentIdempotent: %v", err)
+		}
+		if fake.issueGetCalls != 1 {
+			t.Errorf("issueGetCalls = %d, want 1", fake.issueGetCalls)
+		}
+		if fake.issuePostCalls != 1 {
+			t.Errorf("issuePostCalls = %d, want 1 when only spoofed/quoted markers exist", fake.issuePostCalls)
+		}
+		if got.ID != 1001 || got.User.Login != "scion-triggers[bot]" {
+			t.Errorf("got created comment (%d, %q), want (1001, scion-triggers[bot])", got.ID, got.User.Login)
+		}
+	})
+
+	t.Run("retry with unknown App bot login falls back to suffix marker match only", func(t *testing.T) {
+		fake, ts := newFakeGitHubCommentsServer(t)
+		fake.issueComments = []IssueComment{
+			{
+				ID:      501,
+				Body:    "> Quoted <!-- scion fire:fire-fallback -->\nNot a suffix",
+				HTMLURL: "https://github.com/acme/widgets/issues/42#issuecomment-501",
+				User:    CommentUser{Login: "anyone", Type: "User"},
+			},
+			{
+				ID:      502,
+				Body:    "Posted before identity cache warmed\n<!-- scion fire:fire-fallback -->",
+				HTMLURL: "https://github.com/acme/widgets/issues/42#issuecomment-502",
+				User:    CommentUser{Login: "unknown-bot[bot]", Type: "Bot"},
+			},
+		}
+		client := newCommentTestClient(t, ts.URL)
+
+		got, err := client.PostCommentIdempotent(context.Background(), token, PostCommentOptions{
+			Owner:               "acme",
+			Repo:                "widgets",
+			IssueNumber:         42,
+			Body:                "Posted before identity cache warmed",
+			FireID:              "fire-fallback",
+			ExpectedAuthorLogin: "",
+			Attempts:            2,
+			Since:               since,
+		})
+		if err != nil {
+			t.Fatalf("PostCommentIdempotent: %v", err)
+		}
+		if fake.issueGetCalls != 1 || fake.issuePostCalls != 0 {
+			t.Fatalf("calls: get=%d post=%d, want 1/0", fake.issueGetCalls, fake.issuePostCalls)
+		}
+		if got.ID != 502 {
+			t.Fatalf("got ID %d, want 502 (suffix match, skipping mid-body 501)", got.ID)
 		}
 	})
 
@@ -338,14 +431,15 @@ func TestPostCommentIdempotent_IssueAndReviewThread(t *testing.T) {
 		}
 
 		second, err := client.PostCommentIdempotent(context.Background(), token, PostCommentOptions{
-			Owner:           "acme",
-			Repo:            "widgets",
-			IssueNumber:     42,
-			ReviewCommentID: 777,
-			Body:            "Replying in review thread",
-			FireID:          "fire-review-1",
-			Attempts:        2,
-			Since:           since,
+			Owner:               "acme",
+			Repo:                "widgets",
+			IssueNumber:         42,
+			ReviewCommentID:     777,
+			Body:                "Replying in review thread",
+			FireID:              "fire-review-1",
+			ExpectedAuthorLogin: "scion-triggers[bot]",
+			Attempts:            2,
+			Since:               since,
 		})
 		if err != nil {
 			t.Fatalf("second PostCommentIdempotent: %v", err)

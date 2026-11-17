@@ -216,3 +216,116 @@ func TestGitHubInstallationTokenCache_HitExpiryInvalidationPermissionsAndNoLogs(
 		assert.NotContains(t, logged, tok)
 	}
 }
+
+func TestServerPostGitHubCommentIdempotent_UsesIdentityBotLoginAndFallback(t *testing.T) {
+	ctx := context.Background()
+	since := time.Date(2026, 11, 17, 1, 0, 0, 0, time.UTC)
+
+	t.Run("uses G5 identity cache bot login to reject non-App marker spoof", func(t *testing.T) {
+		srv, _ := testServer(t)
+		var postCalls atomic.Int32
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":77,"slug":"scion-helper"}`))
+		})
+		mux.HandleFunc("/repos/acme/widgets/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.Method {
+			case http.MethodGet:
+				// Untrusted commenter planted the exact suffix marker first.
+				_ = json.NewEncoder(w).Encode([]githubapp.IssueComment{
+					{
+						ID:      900,
+						Body:    "Spoofed\n<!-- scion fire:fire-srv-1 -->",
+						HTMLURL: "https://github.com/acme/widgets/issues/12#issuecomment-900",
+						User:    githubapp.CommentUser{Login: "mallory", Type: "User"},
+					},
+				})
+			case http.MethodPost:
+				postCalls.Add(1)
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(githubapp.IssueComment{
+					ID:      901,
+					Body:    "Real bot reply\n<!-- scion fire:fire-srv-1 -->",
+					HTMLURL: "https://github.com/acme/widgets/issues/12#issuecomment-901",
+					User:    githubapp.CommentUser{Login: "scion-helper[bot]", Type: "Bot"},
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		})
+		gh := httptest.NewServer(mux)
+		t.Cleanup(gh.Close)
+
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+		srv.config.GitHubAppConfig.AppID = 77
+		srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+		srv.mu.Unlock()
+
+		got, err := srv.PostGitHubCommentIdempotent(ctx, "ghs_install_tok", githubapp.PostCommentOptions{
+			Owner:       "acme",
+			Repo:        "widgets",
+			IssueNumber: 12,
+			Body:        "Real bot reply",
+			FireID:      "fire-srv-1",
+			Attempts:    2,
+			Since:       since,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int32(1), postCalls.Load(), "spoofed marker by mallory must not suppress bot retry")
+		assert.Equal(t, int64(901), got.ID)
+	})
+
+	t.Run("falls back to suffix match when App identity is unknown", func(t *testing.T) {
+		srv, _ := testServer(t)
+		var postCalls atomic.Int32
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+		})
+		mux.HandleFunc("/repos/acme/widgets/issues/12/comments", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.Method {
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode([]githubapp.IssueComment{
+					{
+						ID:      950,
+						Body:    "Earlier delivery\n<!-- scion fire:fire-srv-unknown -->",
+						HTMLURL: "https://github.com/acme/widgets/issues/12#issuecomment-950",
+						User:    githubapp.CommentUser{Login: "unverified-app[bot]", Type: "Bot"},
+					},
+				})
+			case http.MethodPost:
+				postCalls.Add(1)
+				w.WriteHeader(http.StatusCreated)
+			default:
+				http.NotFound(w, r)
+			}
+		})
+		gh := httptest.NewServer(mux)
+		t.Cleanup(gh.Close)
+
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+		srv.config.GitHubAppConfig.AppID = 77
+		srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+		srv.mu.Unlock()
+
+		got, err := srv.PostGitHubCommentIdempotent(ctx, "ghs_install_tok", githubapp.PostCommentOptions{
+			Owner:       "acme",
+			Repo:        "widgets",
+			IssueNumber: 12,
+			Body:        "Earlier delivery",
+			FireID:      "fire-srv-unknown",
+			Attempts:    2,
+			Since:       since,
+		})
+		require.NoError(t, err)
+		assert.Zero(t, postCalls.Load(), "when App identity is unknown, suffix match must still deduplicate")
+		assert.Equal(t, int64(950), got.ID)
+	})
+}
