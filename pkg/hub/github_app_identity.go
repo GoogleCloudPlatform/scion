@@ -63,26 +63,26 @@ var githubTriggersRequiredPermissions = []githubRequiredPermission{
 // webhook settings, subscribed events, and permissions required for GitHub
 // triggers (§10.1, §10.2).
 type GitHubTriggersReadiness struct {
-	Ready              bool      `json:"ready"`
-	WebhooksEnabled    bool      `json:"webhooks_enabled"`
-	HasWebhookSecret   bool      `json:"has_webhook_secret"`
-	MissingEvents      []string  `json:"missing_events"`
-	MissingPermissions []string  `json:"missing_permissions"`
-	AppSlug            string    `json:"app_slug"`
-	CheckedAt          time.Time `json:"checked_at"`
-	Error              string    `json:"error,omitempty"`
+	Ready              bool       `json:"ready"`
+	WebhooksEnabled    bool       `json:"webhooks_enabled"`
+	HasWebhookSecret   bool       `json:"has_webhook_secret"`
+	MissingEvents      []string   `json:"missing_events"`
+	MissingPermissions []string   `json:"missing_permissions"`
+	AppSlug            string     `json:"app_slug"`
+	CheckedAt          *time.Time `json:"checked_at,omitempty"`
+	Error              string     `json:"error,omitempty"`
 }
 
 // GitHubTriggersProjectReadiness is the project-scoped readiness view (§10.2):
 // project members see overall readiness and missing App items without hub-level
 // webhook configuration fields.
 type GitHubTriggersProjectReadiness struct {
-	Ready              bool      `json:"ready"`
-	MissingEvents      []string  `json:"missing_events"`
-	MissingPermissions []string  `json:"missing_permissions"`
-	AppSlug            string    `json:"app_slug,omitempty"`
-	CheckedAt          time.Time `json:"checked_at,omitempty"`
-	Error              string    `json:"error,omitempty"`
+	Ready              bool       `json:"ready"`
+	MissingEvents      []string   `json:"missing_events"`
+	MissingPermissions []string   `json:"missing_permissions"`
+	AppSlug            string     `json:"app_slug,omitempty"`
+	CheckedAt          *time.Time `json:"checked_at,omitempty"`
+	Error              string     `json:"error,omitempty"`
 }
 
 // githubTriggersEnabled reports whether GitHub App triggers are enabled.
@@ -501,6 +501,12 @@ func (s *Server) computeGitHubTriggersReadiness(ctx context.Context, cfg GitHubA
 		len(missingEvents) == 0 &&
 		len(missingPerms) == 0
 
+	var checkedAtPtr *time.Time
+	if !checkedAt.IsZero() {
+		t := checkedAt
+		checkedAtPtr = &t
+	}
+
 	return GitHubTriggersReadiness{
 		Ready:              ready,
 		WebhooksEnabled:    cfg.WebhooksEnabled,
@@ -508,7 +514,7 @@ func (s *Server) computeGitHubTriggersReadiness(ctx context.Context, cfg GitHubA
 		MissingEvents:      missingEvents,
 		MissingPermissions: missingPerms,
 		AppSlug:            appSlug,
-		CheckedAt:          checkedAt,
+		CheckedAt:          checkedAtPtr,
 		Error:              lastErr,
 	}
 }
@@ -518,12 +524,17 @@ func (s *Server) computeGitHubTriggersReadiness(ctx context.Context, cfg GitHubA
 func (s *Server) GitHubTriggersProjectReadiness(ctx context.Context) GitHubTriggersProjectReadiness {
 	cfg, _, hasWebhookSecret := s.githubAppCredentialPresence(ctx)
 	full := s.computeGitHubTriggersReadiness(ctx, cfg, hasWebhookSecret)
+	var checkedAtPtr *time.Time
+	if full.CheckedAt != nil {
+		t := *full.CheckedAt
+		checkedAtPtr = &t
+	}
 	return GitHubTriggersProjectReadiness{
 		Ready:              full.Ready,
 		MissingEvents:      full.MissingEvents,
 		MissingPermissions: full.MissingPermissions,
 		AppSlug:            full.AppSlug,
-		CheckedAt:          full.CheckedAt,
+		CheckedAt:          checkedAtPtr,
 		Error:              full.Error,
 	}
 }

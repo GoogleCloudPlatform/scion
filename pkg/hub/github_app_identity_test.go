@@ -660,15 +660,28 @@ func TestHandleGetGitHubApp_TriggersReadiness(t *testing.T) {
 		if !reflect.DeepEqual(resp.Triggers.MissingPermissions, wantMissingPerms) {
 			t.Errorf("missing_permissions = %v, want %v", resp.Triggers.MissingPermissions, wantMissingPerms)
 		}
-		if resp.Triggers.CheckedAt.IsZero() {
-			t.Error("expected non-zero checked_at")
+		if resp.Triggers.CheckedAt == nil || resp.Triggers.CheckedAt.IsZero() {
+			t.Errorf("expected non-zero checked_at after fetch, got %v", resp.Triggers.CheckedAt)
 		}
 		if resp.Triggers.Error != "" {
 			t.Errorf("expected empty error, got %q", resp.Triggers.Error)
 		}
 
+		var rawResp map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &rawResp); err != nil {
+			t.Fatalf("unmarshal raw response: %v", err)
+		}
+		if triggersRaw, ok := rawResp["triggers"].(map[string]any); !ok {
+			t.Fatalf("expected triggers JSON object, got %T", rawResp["triggers"])
+		} else if _, has := triggersRaw["checked_at"]; !has {
+			t.Errorf("expected checked_at in triggers JSON after fetch: %s", rec.Body.String())
+		}
+
 		// Project-level readiness omits hub-level webhook config fields.
 		projView := srv.GitHubTriggersProjectReadiness(context.Background())
+		if projView.CheckedAt == nil || projView.CheckedAt.IsZero() {
+			t.Errorf("expected non-zero project readiness checked_at after fetch, got %v", projView.CheckedAt)
+		}
 		projJSON, err := json.Marshal(projView)
 		if err != nil {
 			t.Fatalf("marshal project readiness: %v", err)
@@ -682,6 +695,9 @@ func TestHandleGetGitHubApp_TriggersReadiness(t *testing.T) {
 		}
 		if _, has := projMap["has_webhook_secret"]; has {
 			t.Errorf("project readiness must omit has_webhook_secret: %s", string(projJSON))
+		}
+		if _, has := projMap["checked_at"]; !has {
+			t.Errorf("project readiness must include checked_at after fetch: %s", string(projJSON))
 		}
 	})
 
@@ -808,13 +824,41 @@ func TestHandleGetGitHubApp_TriggersReadiness(t *testing.T) {
 			t.Errorf("expected empty missing slices when unconfigured, got events=%v perms=%v",
 				resp.Triggers.MissingEvents, resp.Triggers.MissingPermissions)
 		}
-		if !resp.Triggers.CheckedAt.IsZero() {
-			t.Errorf("expected zero checked_at when unconfigured, got %v", resp.Triggers.CheckedAt)
+		if resp.Triggers.CheckedAt != nil {
+			t.Errorf("expected nil checked_at before first fetch, got %v", resp.Triggers.CheckedAt)
+		}
+		if strings.Contains(rec.Body.String(), "0001-01-01") {
+			t.Errorf("response must omit checked_at rather than emitting Go zero time: %s", rec.Body.String())
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("unmarshal raw response: %v", err)
+		}
+		triggersMap, ok := raw["triggers"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected triggers JSON object, got %T", raw["triggers"])
+		}
+		if _, has := triggersMap["checked_at"]; has {
+			t.Errorf("expected checked_at omitted before first fetch, got %v in %s", triggersMap["checked_at"], rec.Body.String())
 		}
 
 		projView := srv.GitHubTriggersProjectReadiness(context.Background())
 		if projView.Ready || projView.Error != "GitHub App is not configured." {
 			t.Errorf("project readiness = %+v, want ready=false error=%q", projView, "GitHub App is not configured.")
+		}
+		if projView.CheckedAt != nil {
+			t.Errorf("expected nil project readiness checked_at before first fetch, got %v", projView.CheckedAt)
+		}
+		projJSON, err := json.Marshal(projView)
+		if err != nil {
+			t.Fatalf("marshal project readiness: %v", err)
+		}
+		var projMap map[string]any
+		if err := json.Unmarshal(projJSON, &projMap); err != nil {
+			t.Fatalf("unmarshal project readiness: %v", err)
+		}
+		if _, has := projMap["checked_at"]; has {
+			t.Errorf("expected project readiness checked_at omitted before first fetch: %s", string(projJSON))
 		}
 	})
 }
