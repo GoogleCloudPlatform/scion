@@ -174,15 +174,12 @@ func perDMReferenceEntries(t *testing.T, srv *Server, wcs WebChatStore, userID s
 		}
 		if last, err := srv.nativeDMLastMessage(ctx, dm.ConversationKey); err == nil && last != nil {
 			entry.LastMessageID = last.ID
-			entry.LastMessagePreview = truncatePreview(last.Msg, 120)
-			entry.LastMessageSender = last.Sender
 		}
 		switch dm.PeerKind {
 		case "user":
 			if u, err := srv.store.GetUser(ctx, dm.PeerID); err == nil {
 				entry.PeerName = u.DisplayName
 				entry.PeerEmail = u.Email
-				entry.PeerAvatar = u.AvatarURL
 			}
 		case "agent":
 			a, err := srv.store.GetAgent(ctx, dm.PeerID)
@@ -465,12 +462,37 @@ func TestChatDMs_BatchedMatchesPerDMLookups(t *testing.T) {
 			check("dmmix-tie", tieWant, true, false)
 			check("dmmix-gone-agent", tid("dmmix-gone-agent-1"), true, false)
 			check("DM Mix Human", tid("dmmix-human-1"), true, false)
-			if e := byPeer["DM Mix Human"]; e.PeerEmail != "dmmix-human@example.com" || len(e.LastMessagePreview) > 125 {
+			if e := byPeer["DM Mix Human"]; e.PeerEmail != "dmmix-human@example.com" {
 				t.Errorf("human peer entry: %+v", e)
 			}
 			// The missing agent has no name; it is the only unnamed DM.
 			if e, ok := byPeer[""]; !ok || e.LastMessageID != tid("dmmix-missing-agent-1") {
 				t.Errorf("missing-agent entry: %+v (present=%v)", e, ok)
+			}
+
+			// Unused wire fields must not be serialized even when messages,
+			// avatars, and read watermarks exist on the underlying rows.
+			rawRec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
+			if rawRec.Code != http.StatusOK {
+				t.Fatalf("raw list: %d %s", rawRec.Code, rawRec.Body.String())
+			}
+			var rawDoc struct {
+				DMs []map[string]any `json:"dms"`
+			}
+			if err := json.Unmarshal(rawRec.Body.Bytes(), &rawDoc); err != nil {
+				t.Fatal(err)
+			}
+			for i, item := range rawDoc.DMs {
+				for _, dropped := range []string{
+					"peerAvatar",
+					"lastMessagePreview",
+					"lastMessageSender",
+					"lastReadMessageId",
+				} {
+					if v, present := item[dropped]; present {
+						t.Errorf("entry %d still serializes dropped field %q = %v", i, dropped, v)
+					}
+				}
 			}
 
 			// Ordering is the ListDMs order: newest activity first.

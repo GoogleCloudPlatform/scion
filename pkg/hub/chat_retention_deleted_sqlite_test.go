@@ -265,8 +265,8 @@ func (f *chatRetentionHubFixture) dms() map[string]chatDMEntry {
 
 // TestChatRetention_ListsAndUnreadAfterPurgeSQLite covers design §8.5 and
 // §8.6 after a purge:
-//   - a DM whose messages are all purged is still listed, with no preview
-//     line, its last_activity_at kept, and no unread dot;
+//   - a DM whose messages are all purged is still listed, with no lastMessageId,
+//     its last_activity_at kept, and no unread dot;
 //   - a DM whose read watermark was purged but which has a newer message
 //     shows that message and is unread, until it is read;
 //   - an unread mention after a purged watermark still counts, and one
@@ -316,7 +316,6 @@ func TestChatRetention_ListsAndUnreadAfterPurgeSQLite(t *testing.T) {
 	before := f.dms()
 	require.Contains(t, before, keyGone)
 	assert.Equal(t, g2, before[keyGone].LastMessageID)
-	assert.NotEmpty(t, before[keyGone].LastMessagePreview)
 	assert.True(t, before[keyGone].HasUnread)
 
 	f.srv.chatRetentionHandler()(f.ctx)
@@ -328,14 +327,15 @@ func TestChatRetention_ListsAndUnreadAfterPurgeSQLite(t *testing.T) {
 	require.Contains(t, after, keyGone, "a DM whose messages are all purged is still listed")
 	gone := after[keyGone]
 	assert.Empty(t, gone.LastMessageID)
-	assert.Empty(t, gone.LastMessagePreview, "no preview line")
-	assert.Empty(t, gone.LastMessageSender)
 	assert.True(t, gone.LastActivityAt.Equal(goneActivity), "last_activity_at kept: %v, want %v", gone.LastActivityAt, goneActivity)
 	assert.False(t, gone.HasUnread)
 
 	require.Contains(t, after, keyNew)
 	assert.Equal(t, n2, after[keyNew].LastMessageID)
-	assert.Equal(t, n1, after[keyNew].LastReadMessageID, "the purged watermark is not rewritten")
+	rsNew, err := f.wcs.GetReadState(f.ctx, f.alice.ID, keyNew)
+	require.NoError(t, err)
+	require.NotNil(t, rsNew)
+	assert.Equal(t, n1, rsNew.LastReadMessageID, "the purged watermark is not rewritten")
 	assert.True(t, after[keyNew].HasUnread, "a newer message after a purged watermark is unread")
 	require.NoError(t, f.wcs.SetReadState(f.ctx, f.alice.ID, keyNew, n2))
 	assert.False(t, f.dms()[keyNew].HasUnread)
