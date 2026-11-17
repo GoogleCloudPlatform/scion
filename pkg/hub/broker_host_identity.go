@@ -99,10 +99,27 @@ func withHostIdentity(b store.RuntimeBroker, detail bool) store.RuntimeBroker {
 	return b
 }
 
+// brokerForDisplayWithDetail is brokerForDisplay plus the host identity state,
+// keeping host-identity detail and a flat Cloud Run row's private GCP host pair
+// only when detail is true (callers allowed to update the broker, or pure
+// brokerSelf).
+func brokerForDisplayWithDetail(b store.RuntimeBroker, detail bool) store.RuntimeBroker {
+	shown := withHostIdentity(brokerForDisplayBase(b), detail)
+	return redactFlatCloudRunGCPHost(shown, detail)
+}
+
+func redactFlatCloudRunGCPHost(b store.RuntimeBroker, detail bool) store.RuntimeBroker {
+	if !detail && flatCloudRunBroker(&b) {
+		b.GCPHostServiceAccountEmail = ""
+		b.GCPHostProjectID = ""
+	}
+	return b
+}
+
 // brokerForDisplayWithCap is brokerForDisplay plus the host identity state,
 // with detail for callers whose capabilities include update.
 func brokerForDisplayWithCap(b store.RuntimeBroker, caps *Capabilities) store.RuntimeBroker {
-	return withHostIdentity(brokerForDisplay(b), caps != nil && capabilityAllows(caps, ActionUpdate))
+	return brokerForDisplayWithDetail(b, caps != nil && capabilityAllows(caps, ActionUpdate))
 }
 
 // recordHostObservation is RecordHostObservation on the server's store.

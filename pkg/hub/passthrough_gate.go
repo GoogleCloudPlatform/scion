@@ -77,6 +77,41 @@ func isValidServiceAccountEmail(email string) bool {
 	}
 }
 
+const passthroughCheck1DeniedMsg = "GCP identity passthrough requires broker ownership, Hub admin, or the broker being provided to this project by its owner."
+
+// callerCanSeeBrokerGCPHost applies the same capability rule as display
+// redaction (§B.4.5 items 2 & 3b): on flat Cloud Run brokers, only callers who
+// hold ActionUpdate on the broker may see the configured service_account in
+// user-facing gate refusal messages. Legacy and non-Cloud-Run brokers keep
+// naming target.Email unchanged.
+func (s *Server) callerCanSeeBrokerGCPHost(ctx context.Context, ident Identity, broker *store.RuntimeBroker) bool {
+	if !flatCloudRunBroker(broker) {
+		return true
+	}
+	if ident == nil || s.authzService == nil {
+		return false
+	}
+	caps := s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
+	return caps != nil && capabilityAllows(caps, ActionUpdate)
+}
+
+// hostIdentityIsHubOwn reports whether broker's GCP host pair represents a Hub
+// process's own metadata identity (the legacy embedded broker and co-located
+// non-Cloud-Run flat instances, whether registered in this Hub process or
+// persisted by another Hub replica with CreatedBy=="" and
+// scion.io/broker-role=embedded). Co-located flat Cloud Run rows bind
+// runtime_target.service_account instead, so they participate in the
+// provider-grant path while Hub-host brokers keep the admin-only rule.
+func (s *Server) hostIdentityIsHubOwn(broker *store.RuntimeBroker) bool {
+	if broker == nil || flatCloudRunBroker(broker) {
+		return false
+	}
+	if s.isEmbeddedBroker(broker.ID) {
+		return true
+	}
+	return broker.CreatedBy == "" && broker.Labels[store.BrokerRoleLabel] == store.BrokerRoleEmbedded
+}
+
 // authorizePassthroughIdentity gates passthrough mode for a caller against a
 // broker: evaluatePassthroughIdentity, with a refusal written to w.
 //
@@ -86,9 +121,10 @@ func (s *Server) authorizePassthroughIdentity(
 	w http.ResponseWriter,
 	r *http.Request,
 	broker *store.RuntimeBroker,
+	projectID string,
 	surface string,
 ) bool {
-	d := s.evaluatePassthroughIdentity(r.Context(), r, broker, surface)
+	d := s.evaluatePassthroughIdentity(r.Context(), r, broker, projectID, surface)
 	if d == nil {
 		return true
 	}
@@ -117,18 +153,20 @@ func (d *passthroughDenial) write(w http.ResponseWriter) { writeForbidden(w, d.m
 // passthrough gate, with the caller taken from the identity on ctx. It
 // enforces TWO INDEPENDENT CHECKS, neither of which alone is sufficient:
 //
-//  1. Broker-owner/admin restriction — the caller must be the broker owner or
-//     a hub admin.
+//  1. Broker authority — the caller must be the broker owner, a Hub admin, or
+//     a user acting in a project to which a non-Hub-host broker has been
+//     provided with its owner's consent (and on which the caller may dispatch
+//     for that project).
 //  2. actAs on broker host SA — the caller's GCP principal must have
 //     iam.serviceAccounts.actAs on the broker's registered host service
 //     account. If the broker has no host SA registered, the request is denied
 //     with a configuration error (fail-closed).
 //
-// Both checks are required and independent. A broker owner who lacks actAs is
-// denied; an admin who lacks actAs is denied.
+// Both checks are required and independent. A broker owner, admin, or
+// project-granted caller who lacks actAs is denied before dispatch.
 //
-// surface names the call site for audit — SurfacePassthroughCreate or
-// SurfacePassthroughPatch. It affects labelling only, never the decision.
+// surface names the call site for audit. It affects labelling only, never the
+// decision.
 //
 // It returns nil when passthrough is allowed. r is used only to name the
 // request in denial logs and may be nil for callers with no HTTP request.
@@ -136,20 +174,23 @@ func (s *Server) evaluatePassthroughIdentity(
 	ctx context.Context,
 	r *http.Request,
 	broker *store.RuntimeBroker,
+	projectID string,
 	surface string,
 ) *passthroughDenial {
 	// -------------------------------------------------------------------
-	// Check 1: Broker-owner/admin restriction.
+	// Check 1: Broker owner, Hub admin, or owner-consented project grant.
 	// -------------------------------------------------------------------
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
-		// Agents and brokers are not users and cannot own a broker.
+		// Agents and brokers are not users and cannot use passthrough.
 		logAuthzDenial(r, GetIdentityFromContext(ctx),
 			Resource{Type: "broker", ID: broker.ID}, ActionDispatch,
-			"passthrough is restricted to broker owners and admins")
-		return &passthroughDenial{msg: "GCP identity passthrough requires broker ownership. " +
-			"Only the broker owner can expose the broker's GCP identity to agents."}
+			"passthrough is restricted to users with broker authority")
+		return &passthroughDenial{msg: passthroughCheck1DeniedMsg}
 	}
+
+	caller := userIdent.ID()
+	isOwner := caller != "" && broker.CreatedBy != "" && broker.CreatedBy == caller
 
 	// Permission-based admin check via Decide replaces the former
 	// inline role check. The super-admin bypass and scoped-admin access
@@ -179,11 +220,22 @@ func (s *Server) evaluatePassthroughIdentity(
 		isAdmin = true
 	}
 
-	if !isAdmin && broker.CreatedBy != userIdent.ID() {
+	// Deterministic audit path precedence: owner > admin > provider_grant.
+	authPath := ""
+	switch {
+	case isOwner:
+		authPath = "owner"
+	case isAdmin:
+		authPath = "admin"
+	case projectID != "" && !s.hostIdentityIsHubOwn(broker) &&
+		s.brokerProviderHasOwnerConsent(ctx, broker, projectID) &&
+		s.canUseBrokerForProject(ctx, broker, &store.Project{ID: projectID}):
+		authPath = "provider_grant"
+	}
+	if authPath == "" {
 		logAuthzDenial(r, userIdent, brokerResource(broker), ActionDispatch,
-			"not broker owner or admin")
-		return &passthroughDenial{msg: "GCP identity passthrough requires broker ownership. " +
-			"Only the broker owner can expose the broker's GCP identity to agents."}
+			"not broker owner, admin, or owner-consented project provider")
+		return &passthroughDenial{msg: passthroughCheck1DeniedMsg}
 	}
 
 	// -------------------------------------------------------------------
@@ -191,7 +243,7 @@ func (s *Server) evaluatePassthroughIdentity(
 	// -------------------------------------------------------------------
 	if broker.GCPHostServiceAccountEmail == "" {
 		slog.Warn("passthrough denied: broker has no host service account registered",
-			"surface", surface, "broker", broker.ID)
+			"surface", surface, "authPath", authPath, "broker", broker.ID)
 		return &passthroughDenial{msg: "GCP identity passthrough requires the broker's host service account to be " +
 			"registered. Set gcpHostServiceAccountEmail on the broker before using passthrough."}
 	}
@@ -224,7 +276,7 @@ func (s *Server) evaluatePassthroughIdentity(
 	}, target)
 	if err != nil {
 		slog.Warn("passthrough: caller-permission check failed",
-			"surface", surface, "caller", principal.ID,
+			"surface", surface, "authPath", authPath, "caller", principal.ID,
 			"targetSA", target.Email, "error", err.Error())
 	}
 
@@ -233,7 +285,7 @@ func (s *Server) evaluatePassthroughIdentity(
 			Resource{Type: "broker", ID: broker.ID}, ActionDispatch,
 			"actAs "+result.Outcome.String()+" ("+result.Mechanism+"): "+result.Reason)
 		slog.Warn("passthrough denied",
-			"surface", surface, "callerKind", principal.Kind.String(),
+			"surface", surface, "authPath", authPath, "callerKind", principal.Kind.String(),
 			"caller", principal.ID, "targetSA", target.Email,
 			"outcome", result.Outcome.String(), "mechanism", result.Mechanism,
 			"reason", result.Reason)
@@ -249,13 +301,17 @@ func (s *Server) evaluatePassthroughIdentity(
 			return &passthroughDenial{msg: "Could not verify your permission to use passthrough " +
 				"because the check did not complete; try again", retryable: true}
 		default:
+			if !s.callerCanSeeBrokerGCPHost(ctx, userIdent, broker) {
+				return &passthroughDenial{msg: "You don't have permission to use passthrough on this broker (" +
+					store.PermissionActAs + " is required on the broker's host service account)"}
+			}
 			return &passthroughDenial{msg: "You don't have permission to use passthrough on this broker (" +
 				store.PermissionActAs + " is required on " + target.Email + ")"}
 		}
 	}
 
 	slog.Info("passthrough allowed",
-		"surface", surface, "callerKind", principal.Kind.String(),
+		"surface", surface, "authPath", authPath, "callerKind", principal.Kind.String(),
 		"caller", principal.ID, "targetSA", target.Email,
 		"mechanism", result.Mechanism)
 	return nil

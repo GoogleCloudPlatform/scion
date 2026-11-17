@@ -231,6 +231,31 @@ var (
 // default service account, <project_id>@appspot.gserviceaccount.com.
 const cloudRunAppEngineDefaultSADomain = "@appspot.gserviceaccount.com"
 
+const cloudRunIAMServiceAccountSuffix = ".iam.gserviceaccount.com"
+
+// FlatCloudRunGCPHostPair parses the normalized GCP host service account email
+// and project ID from a flat Cloud Run instance's runtime_target.service_account
+// (<name>@<project>.iam.gserviceaccount.com). Non-cloudrun targets, nil targets,
+// and empty or malformed addresses return ("", "") without panicking.
+func FlatCloudRunGCPHostPair(inst V1RuntimeBrokerInstanceConfig) (email, projectID string) {
+	if inst.RuntimeTarget == nil || inst.RuntimeTarget.Type != RuntimeTargetTypeCloudRun {
+		return "", ""
+	}
+	normalized := strings.ToLower(strings.TrimSpace(inst.RuntimeTarget.ServiceAccount))
+	if normalized == "" {
+		return "", ""
+	}
+	name, domain, ok := strings.Cut(normalized, "@")
+	if !ok || name == "" || !strings.HasSuffix(domain, cloudRunIAMServiceAccountSuffix) {
+		return "", ""
+	}
+	proj := strings.TrimSuffix(domain, cloudRunIAMServiceAccountSuffix)
+	if proj == "" {
+		return "", ""
+	}
+	return normalized, proj
+}
+
 // cloudRunDefaultServiceAccount reports whether sa is one of the two project
 // default service account forms of contract amendment P5-CR, CR2: the
 // compute default (<number>-compute@developer.gserviceaccount.com) or the

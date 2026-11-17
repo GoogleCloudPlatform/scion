@@ -23,6 +23,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerhost"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
@@ -170,22 +171,52 @@ func registerConfiguredFlatInstance(ctx context.Context, settings *config.Settin
 	}
 	hostname, _ := os.Hostname()
 
-	creds, err := registerFlatInstance(ctx, client, inst, id, hubName, brokerregistration.InstanceCredentialsDir(globalDir, key), brokerregistration.Options{
-		Hostname:          hostname,
-		Version:           version.Short(),
-		Capabilities:      runtimebroker.StaticCapabilityNames(rt),
-		AutoProvide:       brokerAutoProvide,
-		Labels:            map[string]string{brokerownership.LabelBrokerRole: "remote"},
-		WorkspaceStorage:  loadBrokerRegistrationWorkspaceStorage(),
-		TransportMode:     transportMode,
-		TransportAudience: transportAudience,
-		HubEndpoint:       endpoint,
-		Out:               out,
-	})
+	creds, err := registerFlatInstance(ctx, client, inst, id, hubName, brokerregistration.InstanceCredentialsDir(globalDir, key),
+		flatInstanceRegistrationOptions(
+			inst,
+			hostname,
+			runtimebroker.StaticCapabilityNames(rt),
+			brokerAutoProvide,
+			loadBrokerRegistrationWorkspaceStorage(),
+			transportMode,
+			transportAudience,
+			endpoint,
+			out,
+		))
 	if err != nil {
 		return nil, nil, err
 	}
 	return creds, id, nil
+}
+
+// flatInstanceRegistrationOptions builds the brokerregistration.Options sent by
+// 'scion broker register --instance' (and 'runtime-broker convert --apply'),
+// populating the GCP host pair from runtime_target.service_account for cloudrun
+// targets.
+func flatInstanceRegistrationOptions(
+	inst config.V1RuntimeBrokerInstanceConfig,
+	hostname string,
+	capabilities []string,
+	autoProvide bool,
+	workspaceStorage *api.BrokerWorkspaceStorage,
+	transportMode, transportAudience, endpoint string,
+	out io.Writer,
+) brokerregistration.Options {
+	gcpEmail, gcpProject := config.FlatCloudRunGCPHostPair(inst)
+	return brokerregistration.Options{
+		Hostname:                   hostname,
+		Version:                    version.Short(),
+		Capabilities:               capabilities,
+		AutoProvide:                autoProvide,
+		Labels:                     map[string]string{brokerownership.LabelBrokerRole: "remote"},
+		WorkspaceStorage:           workspaceStorage,
+		GCPHostServiceAccountEmail: gcpEmail,
+		GCPHostProjectID:           gcpProject,
+		TransportMode:              transportMode,
+		TransportAudience:          transportAudience,
+		HubEndpoint:                endpoint,
+		Out:                        out,
+	}
 }
 
 // registerFlatInstance is brokerregistration.RegisterInstance; a variable so

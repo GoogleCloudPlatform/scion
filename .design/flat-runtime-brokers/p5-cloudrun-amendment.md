@@ -86,7 +86,7 @@ The numbers P1 to P15 name activation checks only; they are not delivery phases.
 
 P1 to P6 make no cloud call and no metadata call: credentials are not parsed and the runtime is not built until they pass.
 
-**CR4: §6.** "The scope record, endpoint, kubeconfig path and credentials are never sent" also covers `project_id`, `service_account`, `network`, `subnetwork` and `credentials_file`. The descriptor stays `{id, type, displayName}`.
+**CR4: §6.** "The scope record, endpoint, kubeconfig path and credentials are never sent" also covers `project_id`, `network`, `subnetwork` and `credentials_file`. `service_account` is never sent in the descriptor or presentation. It is stored as the row's private GCP host pair and shown only to the broker's updaters. The descriptor stays `{id, type, displayName}`.
 
 **CR5: §14.** A second server-layer experiment, `hub.flat_cloudrun_target` (`experiments.FlatCloudRunTarget`), Default false, Stage alpha, Owner `runtime-broker`.
 - With it off, a new flat registration whose target type is `cloudrun`, and agent create on a flat Runtime Broker whose stored target type is `cloudrun`, are refused with `experiment_disabled` naming it.

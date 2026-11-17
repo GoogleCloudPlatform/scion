@@ -34,6 +34,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
@@ -187,4 +189,135 @@ func TestRegisterInstance_CapabilitiesBeforeFirstHeartbeat(t *testing.T) {
 	assert.True(t, row.Capabilities.ClearedFields, "clearedFields is known before the first heartbeat")
 	assert.True(t, row.Capabilities.AsyncLaunch, "asyncLaunch is known before the first heartbeat")
 	assert.True(t, row.Capabilities.EmptyPerAgentWorkspace, "a Docker instance supports empty-per-agent workspaces")
+}
+
+type stubGCPTokenGen struct{ email string }
+
+func (g *stubGCPTokenGen) GenerateAccessToken(context.Context, string, []string) (*hub.GCPAccessToken, error) {
+	return nil, errors.New("unused")
+}
+func (g *stubGCPTokenGen) GenerateIDToken(context.Context, string, string) (*hub.GCPIDToken, error) {
+	return nil, errors.New("unused")
+}
+func (g *stubGCPTokenGen) VerifyImpersonation(context.Context, string) error { return nil }
+func (g *stubGCPTokenGen) ServiceAccountEmail() string                       { return g.email }
+
+// newCloudRunRealHub starts an in-process Hub with both flat experiments on
+// and returns the Hub server, httptest server, and backing store so actAs claim
+// enforcement can be wired and inspected.
+func newCloudRunRealHub(t *testing.T, checker store.CallerPermissionChecker) (*hub.Server, *httptest.Server, store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	dbName := fmt.Sprintf("%s_%d", strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()), realHubSeq.Add(1))
+	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{MaxOpenConns: 1})
+	require.NoError(t, err)
+	require.NoError(t, entc.AutoMigrate(ctx, client))
+	s := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, err = s.UpsertHubSetting(ctx, "experiments",
+		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:true,%q:true}}`, experiments.FlatRuntimeBrokers, experiments.FlatCloudRunTarget)), "test", -1, "managed")
+	require.NoError(t, err)
+
+	cfg := hub.DefaultServerConfig()
+	cfg.DevAuthToken = realHubDevToken
+	cfg.DisableCloudLogQuery = true
+	cfg.DevUserConfig = hub.DevUserConfig{Username: "dev", DisplayName: "Development User", Email: "dev@localhost"}
+	cfg.GCPIAMCheckMode = hub.SAAssignCheckEnforce
+	srv, err := hub.New(cfg, s)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	if checker != nil {
+		srv.SetGCPTokenGenerator(&stubGCPTokenGen{email: "hub@test.iam.gserviceaccount.com"})
+		srv.SetSAAssignChecker(checker)
+	}
+	ops := hub.NewOperationalSettings(s, koanf.New("."), koanf.New("."))
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return srv, ts, s
+}
+
+func newCloudRunTestInstance(t *testing.T, serviceAccount string) *testInstance {
+	t.Helper()
+	globalDir := t.TempDir()
+	inst := config.V1RuntimeBrokerInstanceConfig{
+		Key:  "cr-remote",
+		Name: "cr-remote",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{
+			Type:           config.RuntimeTargetTypeCloudRun,
+			DisplayName:    "Remote Cloud Run",
+			ProjectID:      "cr-proj-1",
+			Region:         "us-central1",
+			ServiceAccount: serviceAccount,
+		},
+	}
+	scope := brokeridentity.ExecutionScope{
+		Type:     config.RuntimeTargetTypeCloudRun,
+		CloudRun: &brokeridentity.CloudRunScope{ProjectNumber: "123456789012", Region: "us-central1"},
+	}
+	id, err := brokeridentity.LoadOrCreate(brokeridentity.InstanceDir(globalDir, inst.Key), inst.Key, config.RuntimeTargetTypeCloudRun, scope, nil)
+	require.NoError(t, err)
+	return &testInstance{globalDir: globalDir, inst: inst, id: id, credDir: InstanceCredentialsDir(globalDir, inst.Key)}
+}
+
+func TestRegisterInstance_CloudRunSendsAndEnforcesGCPHostPair(t *testing.T) {
+	ctx := context.Background()
+	const (
+		saA = "agents-a@cr-proj-1.iam.gserviceaccount.com"
+		saB = "agents-b@cr-proj-2.iam.gserviceaccount.com"
+	)
+
+	t.Run("denied without actAs on runtime_target.service_account", func(t *testing.T) {
+		checker := store.NewFakeCallerPermissionChecker() // denies all targets
+		_, ts, s := newCloudRunRealHub(t, checker)
+		ti := newCloudRunTestInstance(t, saA)
+
+		creds, err := RegisterInstance(ctx, userClient(t, ts.URL), ti.inst, ti.id, testHubName, ti.credDir)
+		require.Error(t, err)
+		assert.Nil(t, creds)
+		var apiErr *apiclient.APIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, 403, apiErr.StatusCode)
+		assert.GreaterOrEqual(t, checker.CallCount(), 1)
+
+		_, getErr := s.GetRuntimeBroker(ctx, ti.id.RuntimeBrokerID)
+		assert.ErrorIs(t, getErr, store.ErrNotFound, "denied registration creates no row")
+	})
+
+	t.Run("fills unset pair with actAs and emits KeptSetting on mismatch", func(t *testing.T) {
+		checker := store.NewFakeCallerPermissionChecker().AllowTarget(saA).AllowTarget(saB)
+		_, ts, s := newCloudRunRealHub(t, checker)
+		ti := newCloudRunTestInstance(t, saA)
+
+		var out strings.Builder
+		_, err := RegisterInstance(ctx, userClient(t, ts.URL), ti.inst, ti.id, testHubName, ti.credDir,
+			WithOptions(Options{Out: &out}))
+		require.NoError(t, err)
+		assert.Empty(t, out.String())
+
+		row, err := s.GetRuntimeBroker(ctx, ti.id.RuntimeBrokerID)
+		require.NoError(t, err)
+		assert.Equal(t, saA, row.GCPHostServiceAccountEmail)
+		assert.Equal(t, "cr-proj-1", row.GCPHostProjectID)
+		assert.Equal(t, store.GCPHostSourceRegistration, row.GCPHostSource)
+
+		// Re-registering with a changed service_account keeps the stored pair
+		// (fill-only-while-unset) and prints KeptSettings.
+		ti.inst.RuntimeTarget.ServiceAccount = saB
+		out.Reset()
+		_, err = RegisterInstance(ctx, userClient(t, ts.URL), ti.inst, ti.id, testHubName, ti.credDir,
+			WithOptions(Options{Out: &out}))
+		require.NoError(t, err)
+		assert.Contains(t, out.String(), "gcpHostServiceAccountEmail")
+		assert.Contains(t, out.String(), saA)
+
+		rowAfter, err := s.GetRuntimeBroker(ctx, ti.id.RuntimeBrokerID)
+		require.NoError(t, err)
+		assert.Equal(t, saA, rowAfter.GCPHostServiceAccountEmail)
+		assert.Equal(t, "cr-proj-1", rowAfter.GCPHostProjectID)
+	})
 }

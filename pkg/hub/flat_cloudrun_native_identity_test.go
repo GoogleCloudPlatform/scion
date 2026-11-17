@@ -413,24 +413,51 @@ func TestFlatCloudRunNativeIdentity_TokensWithheldAndMintRefused(t *testing.T) {
 }
 
 // TestFlat_CloudRunHubRecordsOmitCloudFields verifies end to end from
-// config.PresentInstance through Hub heartbeat storage and public/operator GET
-// responses (/api/v1/runtime-brokers/{id} and /api/v1/runtime-brokers) that
-// region and type are presented while service_account, block_service_account,
-// assignable_service_accounts (both keys and SA emails), project_id, network,
-// subnetwork, and credentials_file never appear on the Hub.
+// config.PresentInstance through Hub heartbeat storage and GET responses
+// (/api/v1/runtime-brokers/{id}, /api/v1/runtime-brokers, and
+// /api/v1/runtime-brokers?projectId=...) that region and type are presented
+// while block_service_account, assignable_service_accounts, network,
+// subnetwork, and credentials_file never appear on the Hub, and that
+// service_account (stored as the row's private GCP host pair) is omitted for
+// non-updater readers and shown only to updaters (broker owner or Hub admin).
 func TestFlat_CloudRunHubRecordsOmitCloudFields(t *testing.T) {
+	ctx := context.Background()
 	f := newFlatRegFixture(t, true)
 	setFlatExperiments(t, f.srv, true, true)
 	grantDevUserRuntimeBrokerAccess(t, f.s)
 
 	brokerID := tid("cr-present-broker")
 	target := cloudRunTargetFor("present-broker")
+	const (
+		crDefaultSA = "never-default-sa@never-gcp-proj.iam.gserviceaccount.com"
+		crProjectID = "never-gcp-proj"
+	)
 	regRec := f.register(t, f.operator, CreateBrokerRegistrationRequest{
-		BrokerID:      brokerID,
-		Name:          "cr-west",
-		RuntimeTarget: target,
+		BrokerID:                   brokerID,
+		Name:                       "cr-west",
+		RuntimeTarget:              target,
+		GCPHostServiceAccountEmail: crDefaultSA,
+		GCPHostProjectID:           crProjectID,
 	})
 	require.Equal(t, http.StatusCreated, regRec.Code, regRec.Body.String())
+
+	project := &store.Project{
+		ID:        tid("cr-present-project"),
+		Name:      "CR Present Project",
+		Slug:      "cr-present-project",
+		OwnerID:   f.operator.ID,
+		CreatedBy: f.operator.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, f.s.CreateProject(ctx, project))
+	require.NoError(t, f.s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   brokerID,
+		BrokerName: "cr-west",
+		Status:     store.BrokerStatusOnline,
+		LinkedBy:   f.operator.ID,
+	}))
 
 	inst := config.V1RuntimeBrokerInstanceConfig{
 		Key:  "cr-west",
@@ -438,9 +465,9 @@ func TestFlat_CloudRunHubRecordsOmitCloudFields(t *testing.T) {
 		RuntimeTarget: &config.V1RuntimeTargetConfig{
 			Type:                "cloudrun",
 			DisplayName:         "Cloud Run West",
-			ProjectID:           "never-gcp-proj",
+			ProjectID:           crProjectID,
 			Region:              "us-central1",
-			ServiceAccount:      "never-default-sa@never-gcp-proj.iam.gserviceaccount.com",
+			ServiceAccount:      crDefaultSA,
 			BlockServiceAccount: "never-block-sa@never-gcp-proj.iam.gserviceaccount.com",
 			AssignableServiceAccounts: []string{
 				"never-assign-a@never-gcp-proj.iam.gserviceaccount.com",
@@ -454,25 +481,24 @@ func TestFlat_CloudRunHubRecordsOmitCloudFields(t *testing.T) {
 	pres := config.PresentInstance(inst).API()
 	sendAsBroker(t, f.srv, brokerID, presentationBeat(&pres, target.ID, 1, 1, nil))
 
-	stored, err := f.s.GetRuntimeBroker(context.Background(), brokerID)
+	stored, err := f.s.GetRuntimeBroker(ctx, brokerID)
 	require.NoError(t, err)
 	require.NotNil(t, stored.RuntimeTargetPresentation)
 	require.NotNil(t, stored.RuntimeTargetPresentation.Target)
 	assert.Equal(t, "cloudrun", stored.RuntimeTargetPresentation.Target.Type)
 	assert.Equal(t, "us-central1", stored.RuntimeTargetPresentation.Target.Region)
+	assert.Equal(t, crDefaultSA, stored.GCPHostServiceAccountEmail)
+	assert.Equal(t, crProjectID, stored.GCPHostProjectID)
 
-	forbiddenSubstrings := []string{
-		"never-gcp-proj",
-		"never-default-sa",
+	alwaysForbidden := []string{
 		"never-block-sa",
 		"never-assign-a",
 		"never-assign-b",
-		"iam.gserviceaccount.com",
 		"never-vpc",
 		"never-subnet",
 		"/etc/never/key.json",
 		"serviceAccount",
-		"service_account",
+		"service_account", // distinct from gcp_host_service_account_email: check via exact JSON key/substring carefully below
 		"blockServiceAccount",
 		"block_service_account",
 		"assignableServiceAccounts",
@@ -480,28 +506,96 @@ func TestFlat_CloudRunHubRecordsOmitCloudFields(t *testing.T) {
 		"credentialsFile",
 		"credentials_file",
 		"projectId",
-		"project_id",
 		"subnetwork",
 	}
-
-	storedRaw, err := json.Marshal(stored)
-	require.NoError(t, err)
-	for _, bad := range forbiddenSubstrings {
-		assert.NotContains(t, string(storedRaw), bad, "stored RuntimeBroker JSON must not contain %q", bad)
+	readerForbidden := []string{
+		crProjectID,
+		"never-default-sa",
+		"iam.gserviceaccount.com",
+		"gcp_host_service_account_email",
+		"gcp_host_project_id",
+		"project_id",
+		"service_account",
 	}
 
-	for _, path := range []string{
+	presRaw, err := json.Marshal(stored.RuntimeTargetPresentation)
+	require.NoError(t, err)
+	for _, bad := range append([]string{}, readerForbidden...) {
+		assert.NotContains(t, string(presRaw), bad, "stored RuntimeTargetPresentation JSON must not contain %q", bad)
+	}
+	for _, bad := range alwaysForbidden {
+		assert.NotContains(t, string(presRaw), bad, "stored RuntimeTargetPresentation JSON must not contain %q", bad)
+	}
+
+	paths := []string{
 		"/api/v1/runtime-brokers/" + brokerID,
 		"/api/v1/runtime-brokers",
-	} {
-		rec := doRequest(t, f.srv, http.MethodGet, path, nil)
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		"/api/v1/runtime-brokers?projectId=" + project.ID,
+	}
+
+	// Non-updater reader (f.other holds broker.read via hub membership, not broker.update):
+	// the private GCP host pair is redacted on every GET and list surface.
+	for _, path := range paths {
+		rec := doRequestAsUser(t, f.srv, f.other, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
 		body := rec.Body.String()
 		assert.Contains(t, body, `"us-central1"`, "%s should expose presented region", path)
-		for _, bad := range forbiddenSubstrings {
-			assert.NotContains(t, body, bad, "%s response must not contain %q", path, bad)
+		for _, bad := range readerForbidden {
+			assert.NotContains(t, body, bad, "reader %s response must not contain %q", path, bad)
+		}
+		for _, bad := range alwaysForbidden {
+			assert.NotContains(t, body, bad, "reader %s response must not contain %q", path, bad)
 		}
 	}
+
+	// Updaters — broker owner (f.operator) and Hub admin (dev super-admin) — see
+	// gcp_host_service_account_email and gcp_host_project_id, while all other
+	// Cloud Run fields remain absent.
+	updaterForbidden := []string{
+		"never-block-sa",
+		"never-assign-a",
+		"never-assign-b",
+		"never-vpc",
+		"never-subnet",
+		"/etc/never/key.json",
+		`"serviceAccount"`,
+		`"service_account"`,
+		"blockServiceAccount",
+		"block_service_account",
+		"assignableServiceAccounts",
+		"assignable_service_accounts",
+		"credentialsFile",
+		"credentials_file",
+		`"projectId"`,
+		`"project_id"`,
+		"subnetwork",
+	}
+	for _, path := range paths {
+		for name, doReq := range map[string]func(string) *httptest.ResponseRecorder{
+			"owner": func(p string) *httptest.ResponseRecorder {
+				return doRequestAsUser(t, f.srv, f.operator, http.MethodGet, p, nil)
+			},
+			"admin": func(p string) *httptest.ResponseRecorder {
+				return doRequest(t, f.srv, http.MethodGet, p, nil)
+			},
+		} {
+			rec := doReq(path)
+			require.Equal(t, http.StatusOK, rec.Code, "%s %s: %s", name, path, rec.Body.String())
+			body := rec.Body.String()
+			assert.Contains(t, body, `"us-central1"`, "%s %s should expose presented region", name, path)
+			assert.Contains(t, body, `"gcp_host_service_account_email":"`+crDefaultSA+`"`, "%s %s must show GCP host SA email", name, path)
+			assert.Contains(t, body, `"gcp_host_project_id":"`+crProjectID+`"`, "%s %s must show GCP host project ID", name, path)
+			for _, bad := range updaterForbidden {
+				assert.NotContains(t, body, bad, "%s %s response must not contain %q", name, path, bad)
+			}
+		}
+	}
+
+	// Stored value in DB remains intact after redacted reads.
+	storedAfter, err := f.s.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, crDefaultSA, storedAfter.GCPHostServiceAccountEmail)
+	assert.Equal(t, crProjectID, storedAfter.GCPHostProjectID)
 }
 
 // TestFlatCloudRunNativeIdentity_EndToEndHubHTTPAssignPassthroughAndRefusal
