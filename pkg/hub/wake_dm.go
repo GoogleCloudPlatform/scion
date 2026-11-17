@@ -98,9 +98,6 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
 			return nil, startInProgressDMError(agent, err)
 		}
-		if state.Phase(agent.Phase) == state.PhaseRunning {
-			return &WakeResult{Outcome: WakeAlreadyRunning}, nil
-		}
 	}
 	// The effective resting phase (ptone/scion#4669): an error row that
 	// remembers the suspended phase a failed asynchronous resume began from

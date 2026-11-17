@@ -779,14 +779,6 @@ func (s *Server) idleSuspendSettings() (bool, time.Duration) {
 	return enabled, after
 }
 
-func (s *Server) autoSuspendIdleEnabled() bool {
-	if s == nil {
-		return false
-	}
-	enabled, _ := s.idleSuspendSettings()
-	return enabled
-}
-
 // idleSuspendDeliveryGateActive reports whether the lifecycle.idle_suspend
 // experiment is enabled. Whenever the experiment is on, message delivery stamps
 // last_delivery_at via MarkAgentDelivery even while server.hub.auto_suspend_idle

@@ -2076,3 +2076,70 @@ func TestIdleSuspend_SettingsToggleDuringClaimAndStaleReplica(t *testing.T) {
 		assert.Nil(t, recordedWorkspaceAtStop(after), "aborted pre-claim workspace-at-stop annotation must be cleared")
 	})
 }
+
+// TestIdleSuspend_OwnershipMatrix_PostCommitClearIdleSuspendClaim pins the
+// two-step commit-then-clear lifecycle: UpdateAgentStatus(IfIdleSuspendCommit)
+// commits phase=suspended, suspend_reason=idle while preserving
+// idle_suspend_claim_until during post-commit credential/grant/quota release
+// (so MarkAgentDelivery still reports claimActive=true and convertHubSuspendToUser
+// refuses with 409), and the subsequent post-commit ClearIdleSuspendClaim
+// (and autoSuspendAgent's full execution) clears idle_suspend_claim_until to nil.
+func TestIdleSuspend_OwnershipMatrix_PostCommitClearIdleSuspendClaim(t *testing.T) {
+	ctx := context.Background()
+	srvA, s := testServer(t)
+	isoEnableIdleSweep(t, srvA, 15*time.Minute)
+	srvB := isoSecondReplica(t, s, &isoCallbackDispatcher{st: s})
+
+	_, _, agent := isoSetupIdleAgent(t, s, "post-commit-clear", string(state.ActivityIdle))
+	u := wakeLifecycleUser(t, s, "iso-post-commit-user", agent.ProjectID, "agent.lifecycle", "agent.read")
+	_, _, claimUntil := isoClaimIdleDirectly(t, s, agent, 45*time.Second)
+
+	recorded, err := srvA.recordStopStatus(ctx, agent.ID, agent.RunID, "auto-suspend", store.AgentStatusUpdate{
+		Phase:               string(state.PhaseSuspended),
+		ContainerStatus:     "stopped",
+		RetainedActivity:    string(state.ActivityIdle),
+		SuspendReason:       string(state.SuspendReasonIdle),
+		IfIdleSuspendCommit: &claimUntil,
+	})
+	require.NoError(t, err)
+	require.True(t, recorded)
+
+	// Immediately after IfIdleSuspendCommit, phase=suspended(idle) is committed
+	// while idle_suspend_claim_until remains active until ClearIdleSuspendClaim.
+	mid, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), mid.Phase)
+	assert.Equal(t, string(state.SuspendReasonIdle), mid.SuspendReason)
+	require.NotNil(t, mid.IdleSuspendClaimUntil, "IfIdleSuspendCommit must keep idle_suspend_claim_until set until post-commit release finishes")
+	assert.True(t, mid.IdleSuspendClaimActive)
+
+	snap, claimActive, err := s.MarkAgentDelivery(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.True(t, claimActive, "MarkAgentDelivery must continue reporting claimActive during post-commit window")
+	assert.Nil(t, snap.LastDeliveryAt)
+
+	rec := requestAsIdentity(t, srvB, authUser(u), http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, "convertHubSuspendToUser returns 409 while post-commit claim is still active")
+
+	// Post-commit ClearIdleSuspendClaim releases the claim, unblocking conversion and wake.
+	require.NoError(t, s.ClearIdleSuspendClaim(ctx, agent.ID))
+	cleared, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Nil(t, cleared.IdleSuspendClaimUntil)
+	assert.False(t, cleared.IdleSuspendClaimActive)
+
+	recOK := requestAsIdentity(t, srvB, authUser(u), http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+	require.Equal(t, http.StatusOK, recOK.Code, recOK.Body.String())
+
+	// Also verify end-to-end autoSuspendAgent(idle) clears idle_suspend_claim_until on success.
+	_, _, e2eAgent := isoSetupIdleAgent(t, s, "post-commit-e2e", string(state.ActivityCompleted))
+	disp := &isoCallbackDispatcher{st: s}
+	srvA.SetDispatcher(disp)
+	assert.True(t, srvA.autoSuspendAgent(ctx, disp, e2eAgent, state.SuspendReasonIdle))
+	e2eAfter, err := s.GetAgent(ctx, e2eAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), e2eAfter.Phase)
+	assert.Equal(t, string(state.SuspendReasonIdle), e2eAfter.SuspendReason)
+	assert.Nil(t, e2eAfter.IdleSuspendClaimUntil, "autoSuspendAgent success path must clear idle_suspend_claim_until via ClearIdleSuspendClaim")
+	assert.False(t, e2eAfter.IdleSuspendClaimActive)
+}
