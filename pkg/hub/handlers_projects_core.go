@@ -3694,6 +3694,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
+	// Project PATCH does not currently apply annotations; this guard is defense in depth and must stay in place if it ever does.
 	if len(updates.Annotations) > 0 {
 		var patchedAnnotations map[string]string
 		if err := json.Unmarshal(updates.Annotations, &patchedAnnotations); err != nil {
