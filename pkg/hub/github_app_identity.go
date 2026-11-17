@@ -110,6 +110,7 @@ type githubAppIdentityState struct {
 	refreshMu sync.Mutex
 
 	mu           sync.RWMutex
+	gen          uint64
 	appID        int64
 	identity     *githubapp.AppIdentity
 	checkedAt    time.Time
@@ -124,11 +125,18 @@ type githubAppIdentityState struct {
 
 func (c *githubAppIdentityState) reset() {
 	c.mu.Lock()
+	c.gen++
 	c.appID = 0
 	c.identity = nil
 	c.checkedAt = time.Time{}
 	c.lastErr = ""
 	c.mu.Unlock()
+}
+
+func (c *githubAppIdentityState) generation() uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.gen
 }
 
 func (c *githubAppIdentityState) snapshot(appID int64) (*githubapp.AppIdentity, time.Time, string) {
@@ -207,6 +215,7 @@ func (s *Server) refreshGitHubAppIdentity(ctx context.Context) (*githubapp.AppId
 func (s *Server) refreshGitHubAppIdentityLocked(ctx context.Context) (*githubapp.AppIdentity, error) {
 	s.mu.RLock()
 	appID := s.config.GitHubAppConfig.AppID
+	startGen := s.githubAppIdentity.generation()
 	s.mu.RUnlock()
 
 	now := timeNow().UTC()
@@ -214,10 +223,12 @@ func (s *Server) refreshGitHubAppIdentityLocked(ctx context.Context) (*githubapp
 	if err != nil {
 		if appID != 0 {
 			s.githubAppIdentity.mu.Lock()
-			s.githubAppIdentity.appID = appID
-			s.githubAppIdentity.identity = nil
-			s.githubAppIdentity.checkedAt = now
-			s.githubAppIdentity.lastErr = "GitHub App credentials are not valid or not configured."
+			if s.githubAppIdentity.gen == startGen {
+				s.githubAppIdentity.appID = appID
+				s.githubAppIdentity.identity = nil
+				s.githubAppIdentity.checkedAt = now
+				s.githubAppIdentity.lastErr = "GitHub App credentials are not valid or not configured."
+			}
 			s.githubAppIdentity.mu.Unlock()
 		}
 		return nil, fmt.Errorf("GitHub App not configured: %w", err)
@@ -235,14 +246,17 @@ func (s *Server) refreshGitHubAppIdentityLocked(ctx context.Context) (*githubapp
 	now = timeNow().UTC()
 	if err != nil {
 		// Do not poison the shared cache when the caller's own context was
-		// canceled or expired (e.g. an aborted HTTP request or server shutdown).
+		// canceled or expired (e.g. an aborted HTTP request or server shutdown),
+		// or when a concurrent config reset invalidated startGen.
 		if ctx.Err() == nil {
 			msg := githubAppIdentityErrorMessage(err)
 			s.githubAppIdentity.mu.Lock()
-			s.githubAppIdentity.appID = appID
-			s.githubAppIdentity.identity = nil
-			s.githubAppIdentity.checkedAt = now
-			s.githubAppIdentity.lastErr = msg
+			if s.githubAppIdentity.gen == startGen {
+				s.githubAppIdentity.appID = appID
+				s.githubAppIdentity.identity = nil
+				s.githubAppIdentity.checkedAt = now
+				s.githubAppIdentity.lastErr = msg
+			}
 			s.githubAppIdentity.mu.Unlock()
 		}
 		return nil, fmt.Errorf("failed to fetch app info from GitHub: %w", err)
@@ -253,10 +267,12 @@ func (s *Server) refreshGitHubAppIdentityLocked(ctx context.Context) (*githubapp
 		parsed.AppID = appID
 	}
 	s.githubAppIdentity.mu.Lock()
-	s.githubAppIdentity.appID = appID
-	s.githubAppIdentity.identity = &parsed
-	s.githubAppIdentity.checkedAt = now
-	s.githubAppIdentity.lastErr = ""
+	if s.githubAppIdentity.gen == startGen {
+		s.githubAppIdentity.appID = appID
+		s.githubAppIdentity.identity = &parsed
+		s.githubAppIdentity.checkedAt = now
+		s.githubAppIdentity.lastErr = ""
+	}
 	s.githubAppIdentity.mu.Unlock()
 
 	cloned := parsed.Clone()
@@ -342,13 +358,23 @@ func (s *Server) ensureGitHubAppIdentity(ctx context.Context) (*githubapp.AppIde
 
 	s.githubAppIdentity.refreshMu.Lock()
 	defer s.githubAppIdentity.refreshMu.Unlock()
-	if id, checkedAt, lastErr := s.githubAppIdentity.snapshot(cfg.AppID); !checkedAt.IsZero() {
-		return id, checkedAt, lastErr
+	for attempt := 0; attempt < 2; attempt++ {
+		cfg, hasPrivateKey, _ = s.githubAppCredentialPresence(ctx)
+		if cfg.AppID == 0 || !hasPrivateKey {
+			return nil, time.Time{}, ""
+		}
+		if id, checkedAt, lastErr := s.githubAppIdentity.snapshot(cfg.AppID); !checkedAt.IsZero() {
+			return id, checkedAt, lastErr
+		}
+		if _, err := s.refreshGitHubAppIdentityLocked(ctx); err != nil {
+			slog.Warn("GitHub App lazy identity fetch failed",
+				"app_id", cfg.AppID, "error", upstreamText(err.Error()))
+		}
+		if id, checkedAt, lastErr := s.githubAppIdentity.snapshot(cfg.AppID); !checkedAt.IsZero() || ctx.Err() != nil {
+			return id, checkedAt, lastErr
+		}
 	}
-	if _, err := s.refreshGitHubAppIdentityLocked(ctx); err != nil {
-		slog.Warn("GitHub App lazy identity fetch failed",
-			"app_id", cfg.AppID, "error", upstreamText(err.Error()))
-	}
+	cfg, _, _ = s.githubAppCredentialPresence(ctx)
 	return s.githubAppIdentity.snapshot(cfg.AppID)
 }
 

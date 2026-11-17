@@ -310,6 +310,87 @@ func TestGitHubAppIdentity_StartupAndLazyPopulation(t *testing.T) {
 			t.Errorf("expected 1 GET /app call across async startup + cached read, got %d", got)
 		}
 	})
+
+	t.Run("reset_during_in_flight_refresh_discards_stale_result", func(t *testing.T) {
+		ctx := context.Background()
+
+		enteredOld := make(chan struct{}, 1)
+		releaseOld := make(chan struct{})
+		oldGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/app" || r.Method != http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			select {
+			case enteredOld <- struct{}{}:
+			default:
+			}
+			<-releaseOld
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"slug":"stale-old-app","events":["issues"]}`))
+		}))
+		t.Cleanup(func() {
+			select {
+			case <-releaseOld:
+			default:
+				close(releaseOld)
+			}
+			oldGH.Close()
+		})
+
+		newGH := newMockAppEndpoint(t, http.StatusOK, map[string]any{
+			"id":     42,
+			"slug":   "fresh-new-app",
+			"events": []string{"pull_request"},
+		})
+
+		srv, _ := testServer(t)
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig = GitHubAppServerConfig{
+			AppID:      42,
+			PrivateKey: testGitHubAppPrivateKeyPEM(t),
+			APIBaseURL: oldGH.URL,
+		}
+		srv.mu.Unlock()
+
+		var refreshDone sync.WaitGroup
+		refreshDone.Add(1)
+		go func() {
+			defer refreshDone.Done()
+			_, _ = srv.refreshGitHubAppIdentity(ctx)
+		}()
+
+		select {
+		case <-enteredOld:
+		case <-time.After(5 * time.Second):
+			t.Fatal("in-flight refresh against oldGH never started")
+		}
+
+		// Update APIBaseURL on the SAME AppID while oldGH's GET /app is in flight.
+		newURL := newGH.server.URL
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/github-app", GitHubAppConfigUpdateRequest{
+			APIBaseURL: &newURL,
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT /api/v1/github-app failed: %d %s", rec.Code, rec.Body.String())
+		}
+
+		// Let the stale in-flight refresh finish AFTER reset(): its generation is
+		// stale so it must not populate the cache with "stale-old-app".
+		close(releaseOld)
+		refreshDone.Wait()
+
+		id, ok := srv.GitHubAppIdentity(ctx)
+		if !ok || id == nil {
+			t.Fatal("expected GitHubAppIdentity to lazily fetch from newGH after stale refresh was discarded")
+		}
+		if id.Slug != "fresh-new-app" {
+			t.Fatalf("expected fresh-new-app after config reset, got %q", id.Slug)
+		}
+		if got := newGH.hits.Load(); got != 1 {
+			t.Errorf("expected 1 GET /app call to newGH, got %d", got)
+		}
+	})
 }
 
 func TestGitHubAppIdentity_SyncPermissionsAndHealthCheckShareSingleGetApp(t *testing.T) {

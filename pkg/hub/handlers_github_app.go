@@ -118,6 +118,7 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 		// Update in-memory config so it's immediately available
 		s.mu.Lock()
 		s.config.GitHubAppConfig.PrivateKey = *req.PrivateKey
+		s.githubAppIdentity.reset()
 		s.mu.Unlock()
 	}
 
@@ -145,11 +146,11 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	if req.InstallationURL != nil {
 		s.config.GitHubAppConfig.InstallationURL = *req.InstallationURL
 	}
-	cfg := s.config.GitHubAppConfig
-	s.mu.Unlock()
-	if (req.PrivateKey != nil && *req.PrivateKey != "") || req.AppID != nil || req.APIBaseURL != nil {
+	if req.AppID != nil || req.APIBaseURL != nil {
 		s.githubAppIdentity.reset()
 	}
+	cfg := s.config.GitHubAppConfig
+	s.mu.Unlock()
 
 	// Persist the non-sensitive config. Whenever OperationalSettings is wired
 	// (every DB driver, SQLite included, since #1432) the durable home for
