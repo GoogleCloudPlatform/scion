@@ -1543,7 +1543,7 @@ func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action st
 		return false, err
 	}
 	if upd.Phase != "" && !heldMessageTargetPhaseEligible(upd.Phase) &&
-		!(upd.Phase == string(state.PhaseSuspended) && upd.SuspendReason == string(state.SuspendReasonIdle)) {
+		(upd.Phase != string(state.PhaseSuspended) || upd.SuspendReason != string(state.SuspendReasonIdle)) {
 		s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
 	}
 	return true, nil
