@@ -389,7 +389,7 @@ func TestGCPSANextStep(t *testing.T) {
 	t.Run("IAM read failure says could not be checked (O5)", func(t *testing.T) {
 		got := gcpSANextStepForBinding(true, []GCPServiceAccountProfileMapping{m("a", GCPSAMappingMapped)}, nil, GCPServiceAccountBinding{
 			State:  GCPSABindingUnknown,
-			Reason: "IAM policy read failed",
+			Reason: GCPSABindingReasonIAMReadFailed,
 		})
 		assert.Equal(t, GCPSANextStepNone, got.Code)
 		assert.Contains(t, got.Message, "could not be checked")

@@ -33,11 +33,12 @@ import (
 // only RoleMembers (and AddRoleMembers when testing cache invalidation) may be
 // called. Any project-level or SA lifecycle call fails.
 type wiReadStubAdmin struct {
-	readCalls  []string
-	readRoles  []string
-	membersFn  func(call int, saEmail, role string) ([]string, error)
-	writeCalls int
-	writeErr   error
+	readCalls    []string
+	readRoles    []string
+	membersFn    func(call int, saEmail, role string) ([]string, error)
+	membersCtxFn func(ctx context.Context, call int, saEmail, role string) ([]string, error)
+	writeCalls   int
+	writeErr     error
 }
 
 func (a *wiReadStubAdmin) CreateServiceAccount(context.Context, string, string, string, string) (string, string, error) {
@@ -57,9 +58,12 @@ func (a *wiReadStubAdmin) AddRoleMembers(context.Context, string, string, []stri
 	return a.writeErr
 }
 
-func (a *wiReadStubAdmin) RoleMembers(_ context.Context, saEmail, role string) ([]string, error) {
+func (a *wiReadStubAdmin) RoleMembers(ctx context.Context, saEmail, role string) ([]string, error) {
 	a.readCalls = append(a.readCalls, saEmail)
 	a.readRoles = append(a.readRoles, role)
+	if a.membersCtxFn != nil {
+		return a.membersCtxFn(ctx, len(a.readCalls), saEmail, role)
+	}
 	if a.membersFn != nil {
 		return a.membersFn(len(a.readCalls), saEmail, role)
 	}
@@ -365,4 +369,94 @@ func TestGCPServiceAccountWIBinding_MissingReasonsAndPartialUnknown(t *testing.T
 	assert.Equal(t, "broker_too_old", noPoolBinding.Targets[2].Reason)
 	assert.Equal(t, "no_workload_identity_pool", noPoolMappings[0].WorkloadIdentityBinding.Reason)
 	assert.Equal(t, "broker_too_old", noPoolMappings[1].WorkloadIdentityBinding.Reason)
+}
+
+// Review 2: cachedWorkloadIdentityMembers bounds getIamPolicy with a short
+// timeout and degrades to "unknown" ("IAM policy read failed") without caching.
+func TestWIRoleMembersCache_PolicyReadTimeoutDegradesToUnknown(t *testing.T) {
+	base := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	withWIBindingClock(t, base)
+	prevTimeout := gcpSAWIBindingReadTimeout
+	gcpSAWIBindingReadTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { gcpSAWIBindingReadTimeout = prevTimeout })
+
+	var sawDeadline bool
+	admin := &wiReadStubAdmin{
+		membersCtxFn: func(ctx context.Context, call int, _, _ string) ([]string, error) {
+			_, sawDeadline = ctx.Deadline()
+			if call == 1 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(500 * time.Millisecond):
+					return nil, errors.New("RoleMembers call had no read timeout")
+				}
+			}
+			return []string{"serviceAccount:pool-one.svc.id.goog[agents/scion-foo]"}, nil
+		},
+	}
+	s := &Server{gcpIAMAdmin: admin}
+	b := wiLegacyBroker("a", true, []store.WorkloadIdentityTarget{
+		{Profile: "gke", Pool: "pool-one.svc.id.goog", Namespace: "agents"},
+	}, wiK8sProfile("gke"))
+	b.LastHeartbeat = base.Add(-time.Minute)
+	sa := &store.GCPServiceAccount{ID: "sa-1", Email: wiTestGSA, Managed: true}
+	mappings := []GCPServiceAccountProfileMapping{{BrokerID: b.ID, BrokerName: b.Name, Profile: "gke", State: GCPSAMappingMapped}}
+
+	binding := s.evaluateWorkloadIdentityStatus(context.Background(), sa, []*store.RuntimeBroker{b}, mappings, base)
+	assert.True(t, sawDeadline, "RoleMembers must be called with a bounded context deadline")
+	assert.Equal(t, GCPSABindingUnknown, binding.State)
+	assert.Equal(t, GCPSABindingReasonIAMReadFailed, binding.Reason)
+	require.NotNil(t, mappings[0].WorkloadIdentityBinding)
+	assert.Equal(t, GCPSABindingUnknown, mappings[0].WorkloadIdentityBinding.State)
+	assert.Equal(t, GCPSABindingReasonIAMReadFailed, mappings[0].WorkloadIdentityBinding.Reason)
+	step := gcpSANextStepForBinding(true, mappings, nil, binding)
+	assert.Equal(t, GCPSANextStepNone, step.Code)
+	assert.Contains(t, step.Message, "could not be checked (IAM policy read failed)")
+
+	// Timeout error is not cached: subsequent read within 60s retries and succeeds.
+	bindingAfter := s.evaluateWorkloadIdentityStatus(context.Background(), sa, []*store.RuntimeBroker{b}, mappings, base)
+	assert.Equal(t, GCPSABindingBound, bindingAfter.State)
+	assert.Len(t, admin.readCalls, 2)
+}
+
+// Review 2 R1: When two profiles share a (pool, namespace) but one maps to a
+// custom KSA while the other uses the conventional KSA, each profile's actual
+// dispatch identity appears as its own target and drives both summary and nextStep.
+func TestGCPServiceAccountWIBinding_MixedConventionalAndMappedKSAOnSamePool(t *testing.T) {
+	base := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	withWIBindingClock(t, base)
+
+	b := wiLegacyBroker("a", true, []store.WorkloadIdentityTarget{
+		{Profile: "gke-custom", Pool: "pool-one.svc.id.goog", Namespace: "agents"},
+		{Profile: "gke-conv", Pool: "pool-one.svc.id.goog", Namespace: "agents"},
+	}, wiK8sProfile("gke-custom"), wiK8sProfile("gke-conv"))
+	b.LastHeartbeat = base.Add(-time.Minute)
+
+	admin := &wiReadStubAdmin{
+		membersFn: func(int, string, string) ([]string, error) {
+			return []string{"serviceAccount:pool-one.svc.id.goog[agents/scion-foo]"}, nil
+		},
+	}
+	s := &Server{gcpIAMAdmin: admin}
+	sa := &store.GCPServiceAccount{ID: "sa-1", Email: wiTestGSA, Managed: true}
+	mappings := []GCPServiceAccountProfileMapping{
+		{BrokerID: b.ID, BrokerName: b.Name, Profile: "gke-conv", State: GCPSAMappingMapped},
+		{BrokerID: b.ID, BrokerName: b.Name, Profile: "gke-custom", State: GCPSAMappingMapped, KubernetesServiceAccount: "custom-ksa", Namespace: "agents"},
+	}
+
+	binding := s.evaluateWorkloadIdentityStatus(context.Background(), sa, []*store.RuntimeBroker{b}, mappings, base)
+	assert.Equal(t, GCPSABindingNotBound, binding.State)
+	assert.Equal(t, "1 of 2 targets bound", binding.Reason)
+	require.Len(t, binding.Targets, 2)
+	assert.Equal(t, "custom-ksa", binding.Targets[0].KSA)
+	assert.Equal(t, []string{"a/gke-custom"}, binding.Targets[0].Profiles)
+	assert.Equal(t, GCPSABindingNotBound, binding.Targets[0].State)
+	assert.Equal(t, "scion-foo", binding.Targets[1].KSA)
+	assert.Equal(t, []string{"a/gke-conv"}, binding.Targets[1].Profiles)
+	assert.Equal(t, GCPSABindingBound, binding.Targets[1].State)
+
+	step := gcpSANextStepForBinding(true, mappings, nil, binding)
+	assert.Equal(t, GCPSANextStepNotBound, step.Code)
+	assert.Contains(t, step.Message, "serviceAccount:pool-one.svc.id.goog[agents/custom-ksa] (a/gke-custom)")
 }

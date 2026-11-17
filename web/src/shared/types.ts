@@ -2163,6 +2163,7 @@ export interface GCPServiceAccountProfileBinding {
   reason?: string;
   pool?: string;
   member?: string;
+  manualStep?: string;
   stale?: boolean;
   staleReason?: string;
 }

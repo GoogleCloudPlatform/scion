@@ -259,7 +259,7 @@ func (s *Server) buildGCPServiceAccountStatus(ctx context.Context, project *stor
 	mappings := gcpSAProfileMappings(sa.Email, profiles, now)
 	binding := GCPServiceAccountBinding{
 		State:  GCPSABindingUnknown,
-		Reason: "not checked",
+		Reason: GCPSABindingReasonNotChecked,
 	}
 	if s.experimentEnabled(experiments.K8sWorkloadIdentitySetup) {
 		binding = s.evaluateWorkloadIdentityStatus(ctx, sa, brokers, mappings, now)
@@ -399,7 +399,7 @@ func (s *Server) gcpSADefaultsFor(project *store.Project, saID string) []GCPServ
 func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault) GCPServiceAccountNextStep {
 	return gcpSANextStepForBinding(verified, mappings, defaults, GCPServiceAccountBinding{
 		State:  GCPSABindingUnknown,
-		Reason: "not checked",
+		Reason: GCPSABindingReasonNotChecked,
 	})
 }
 
@@ -505,13 +505,13 @@ func gcpSANotBoundStep(binding GCPServiceAccountBinding) GCPServiceAccountNextSt
 
 func gcpSAUnknownBindingNextStepMessage(binding GCPServiceAccountBinding) string {
 	switch binding.Reason {
-	case "", "not checked":
+	case "", GCPSABindingReasonNotChecked:
 		return "Nothing missing that the hub can check. The Workload Identity binding is not checked."
 	case GCPSABindingReasonNotMinted:
 		return "Nothing missing that the hub can check. The Workload Identity binding is not checked (not minted by this hub)."
-	case "no Kubernetes targets in this project":
+	case GCPSABindingReasonNoKubernetesTargets:
 		return "Nothing missing that the hub can check."
-	case "IAM policy client not configured", "permission denied reading IAM policy", "IAM policy read failed":
+	case GCPSABindingReasonIAMClientUnconfigured, GCPSABindingReasonPermissionDenied, GCPSABindingReasonIAMReadFailed:
 		return fmt.Sprintf("Verification and mapping have nothing missing; the Workload Identity binding could not be checked (%s).", binding.Reason)
 	default:
 		return fmt.Sprintf("Verification and mapping have nothing missing; the Workload Identity binding could not be checked for every Kubernetes target (%s).", binding.Reason)

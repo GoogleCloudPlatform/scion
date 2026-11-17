@@ -299,6 +299,7 @@ type GCPServiceAccountProfileBinding struct {
 	Reason      string `json:"reason,omitempty"`
 	Pool        string `json:"pool,omitempty"`
 	Member      string `json:"member,omitempty"`
+	ManualStep  string `json:"manualStep,omitempty"`
 	Stale       bool   `json:"stale,omitempty"`
 	StaleReason string `json:"staleReason,omitempty"`
 }

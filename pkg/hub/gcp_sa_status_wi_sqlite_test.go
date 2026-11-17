@@ -277,25 +277,50 @@ func TestGCPSAStatus_WIBinding_ProfileUsesMappedKSA(t *testing.T) {
 	})
 	sa := createStatusTestSA(t, s, store.ScopeProject, projectID, email, true)
 
-	// Conventional KSA is bound, custom-ksa is NOT bound.
+	// Direction 1: Conventional KSA is bound, mapped custom-ksa is NOT bound.
+	// Both the profile row, the dispatch target, the summary state, and nextStep
+	// must report not_bound for custom-ksa (never "bound / Nothing missing").
 	mock.setRoleMembers(email, roleWorkloadIdentityUser, []string{
 		"serviceAccount:cluster-project.svc.id.goog[agents/scion-worker]",
 	})
 	st := getSAStatus(t, srv, projectID, sa.ID)
+	customMember := "serviceAccount:cluster-project.svc.id.goog[agents/custom-ksa]"
+	customManual := workloadIdentityManualStep(email, customMember)
 	require.Len(t, st.Mappings, 1)
 	require.NotNil(t, st.Mappings[0].WorkloadIdentityBinding)
 	assert.Equal(t, GCPSABindingNotBound, st.Mappings[0].WorkloadIdentityBinding.State)
-	assert.Equal(t, "serviceAccount:cluster-project.svc.id.goog[agents/custom-ksa]", st.Mappings[0].WorkloadIdentityBinding.Member)
+	assert.Equal(t, customMember, st.Mappings[0].WorkloadIdentityBinding.Member)
+	assert.Equal(t, customManual, st.Mappings[0].WorkloadIdentityBinding.ManualStep)
+	assert.Equal(t, GCPSABindingNotBound, st.WorkloadIdentityBinding.State)
+	require.Len(t, st.WorkloadIdentityBinding.Targets, 1)
+	assert.Equal(t, GCPSABindingNotBound, st.WorkloadIdentityBinding.Targets[0].State)
+	assert.Equal(t, "custom-ksa", st.WorkloadIdentityBinding.Targets[0].KSA)
+	assert.Equal(t, customMember, st.WorkloadIdentityBinding.Targets[0].Member)
+	assert.Equal(t, customManual, st.WorkloadIdentityBinding.Targets[0].ManualStep)
+	assert.Equal(t, GCPSANextStepNotBound, st.NextStep.Code)
+	assert.Contains(t, st.NextStep.Message, customManual)
+	assert.NotContains(t, st.NextStep.Message, "Nothing missing")
 
-	// Once custom-ksa is also granted, the profile row reports bound.
+	// Direction 2 (reverse): Mapped custom-ksa IS bound, while the unused
+	// conventional KSA member is NOT bound. Because custom-ksa is the only
+	// dispatch identity in this project, the summary is bound and nextStep
+	// does not ask for an unneeded grant on scion-worker.
 	mock.setRoleMembers(email, roleWorkloadIdentityUser, []string{
-		"serviceAccount:cluster-project.svc.id.goog[agents/scion-worker]",
-		"serviceAccount:cluster-project.svc.id.goog[agents/custom-ksa]",
+		customMember,
 	})
 	*now = now.Add(gcpSAWIBindingCacheTTL + time.Second)
 	st = getSAStatus(t, srv, projectID, sa.ID)
 	require.NotNil(t, st.Mappings[0].WorkloadIdentityBinding)
 	assert.Equal(t, GCPSABindingBound, st.Mappings[0].WorkloadIdentityBinding.State)
+	assert.Empty(t, st.Mappings[0].WorkloadIdentityBinding.ManualStep)
+	assert.Equal(t, GCPSABindingBound, st.WorkloadIdentityBinding.State)
+	assert.Empty(t, st.WorkloadIdentityBinding.Reason)
+	require.Len(t, st.WorkloadIdentityBinding.Targets, 1)
+	assert.Equal(t, GCPSABindingBound, st.WorkloadIdentityBinding.Targets[0].State)
+	assert.Equal(t, customMember, st.WorkloadIdentityBinding.Targets[0].Member)
+	assert.Empty(t, st.WorkloadIdentityBinding.Targets[0].ManualStep)
+	assert.Equal(t, GCPSANextStepNone, st.NextStep.Code)
+	assert.Equal(t, "Nothing missing that the hub can check.", st.NextStep.Message)
 }
 
 // §3.7: The list view never reads IAM policies, even with assignStatus=true

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -49,12 +50,22 @@ const (
 	// role members are cached for the per-account status view (design §3.7).
 	gcpSAWIBindingCacheTTL = 60 * time.Second
 
+	// defaultWIBindingReadTimeout bounds a single getIamPolicy read in the
+	// per-account status view so a slow IAM backend degrades to "unknown"
+	// ("IAM policy read failed") instead of stalling the response.
+	defaultWIBindingReadTimeout = 10 * time.Second
+
 	// maxWIRoleMembersCacheEntries bounds the in-memory policy cache size.
 	maxWIRoleMembersCacheEntries = 1024
 
-	// GCPSABindingReasonNotMinted is the reason returned for bring-your-own
-	// (registered, non-managed) GSAs when hub.k8s_workload_identity_setup is on.
-	GCPSABindingReasonNotMinted = "not minted by this hub"
+	// Summary and profile Workload Identity binding reasons.
+	GCPSABindingReasonNotChecked            = "not checked"
+	GCPSABindingReasonNotMinted             = "not minted by this hub"
+	GCPSABindingReasonNoKubernetesTargets   = "no Kubernetes targets in this project"
+	GCPSABindingReasonNoPoolReported        = "no Workload Identity pool reported"
+	GCPSABindingReasonIAMClientUnconfigured = "IAM policy client not configured"
+	GCPSABindingReasonPermissionDenied      = "permission denied reading IAM policy"
+	GCPSABindingReasonIAMReadFailed         = "IAM policy read failed"
 
 	// Staleness reasons for stored Workload Identity targets (FYI-4).
 	GCPSABindingTargetStaleBrokerNoLongerReports = "broker_no_longer_reports"
@@ -69,6 +80,10 @@ const (
 // gcpSAWIBindingNow is the clock for the Workload Identity binding cache and
 // target freshness checks; a variable so tests can advance it.
 var gcpSAWIBindingNow = time.Now
+
+// gcpSAWIBindingReadTimeout bounds a single IAM RoleMembers read; a variable
+// so unit tests can exercise timeout degradation quickly.
+var gcpSAWIBindingReadTimeout = defaultWIBindingReadTimeout
 
 // GCPServiceAccountBindingTarget is the Workload Identity binding state of one
 // Kubernetes runtime target (pool and namespace) as last reported by the
@@ -94,6 +109,7 @@ type GCPServiceAccountProfileBinding struct {
 	Reason      string `json:"reason,omitempty"`
 	Pool        string `json:"pool,omitempty"`
 	Member      string `json:"member,omitempty"`
+	ManualStep  string `json:"manualStep,omitempty"`
 	Stale       bool   `json:"stale,omitempty"`
 	StaleReason string `json:"staleReason,omitempty"`
 }
@@ -185,7 +201,9 @@ func (s *Server) cachedWorkloadIdentityMembers(ctx context.Context, saEmail stri
 	if cached, ok := s.wiRoleMembersCache.get(saEmail, now); ok {
 		return cached, nil
 	}
-	list, err := s.gcpIAMAdmin.RoleMembers(ctx, saEmail, roleWorkloadIdentityUser)
+	readCtx, cancel := context.WithTimeout(ctx, gcpSAWIBindingReadTimeout)
+	defer cancel()
+	list, err := s.gcpIAMAdmin.RoleMembers(readCtx, saEmail, roleWorkloadIdentityUser)
 	if err != nil {
 		return nil, err
 	}
@@ -200,9 +218,24 @@ func (s *Server) cachedWorkloadIdentityMembers(ctx context.Context, saEmail stri
 type storedProfileWITarget struct {
 	pool          string
 	namespace     string
+	ksa           string
 	lastHeartbeat *time.Time
 	stale         bool
 	staleReason   string
+}
+
+func resolveDispatchIdentity(defaultNS, defaultKSA string, m GCPServiceAccountProfileMapping, isMapped bool) (string, string) {
+	ns, ksa := defaultNS, defaultKSA
+	if !isMapped {
+		return ns, ksa
+	}
+	if m.KubernetesServiceAccount != "" && len(validation.IsDNS1123Subdomain(m.KubernetesServiceAccount)) == 0 {
+		ksa = m.KubernetesServiceAccount
+	}
+	if m.Namespace != "" && len(validation.IsDNS1123Label(m.Namespace)) == 0 {
+		ns = m.Namespace
+	}
+	return ns, ksa
 }
 
 // brokerWITargetFreshness evaluates whether a broker's stored
@@ -287,11 +320,22 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		}
 	}
 
-	// Sanitize stored targets as defence in depth and index freshness per
-	// (pool, namespace) and per (brokerID, profile).
+	conventionalKSA := gcpAccountID(sa.Email)
+	mappedProfiles := make(map[string]GCPServiceAccountProfileMapping, len(mappings))
+	for i := range mappings {
+		if mappings[i].State == GCPSAMappingMapped {
+			mappedProfiles[mappings[i].BrokerID+"\x00"+mappings[i].Profile] = mappings[i]
+		}
+	}
+
+	// Sanitize stored targets as defence in depth, resolve each runtime target's
+	// actual dispatch identity (mapped KSA/namespace when the profile is mapped,
+	// else the conventional <account ID>), and index freshness per target and
+	// per (brokerID, profile).
 	sanitized := make([]*store.RuntimeBroker, 0, len(brokers))
 	brokerByID := make(map[string]*store.RuntimeBroker, len(brokers))
-	targetMeta := map[string]*GCPServiceAccountBindingTarget{}
+	var dispatchTargets []GCPServiceAccountBindingTarget
+	dispatchByKey := map[string]int{}
 	profileTargets := map[string]storedProfileWITarget{}
 
 	for _, b := range brokers {
@@ -300,6 +344,13 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		}
 		brokerByID[b.ID] = b
 		hb, stale, staleReason := brokerWITargetFreshness(b, now)
+		flat := b.IsFlat()
+		label := func(profile string) string {
+			if flat || profile == "" {
+				return b.Name
+			}
+			return b.Name + "/" + profile
+		}
 		cp := *b
 		if len(b.WorkloadIdentityTargets) > 0 {
 			clean := make([]store.WorkloadIdentityTarget, 0, len(b.WorkloadIdentityTargets))
@@ -308,33 +359,42 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 				if !ok {
 					continue
 				}
-				if b.IsFlat() {
+				if flat {
 					t.Profile = ""
 				}
 				clean = append(clean, t)
-				key := t.Pool + "\x00" + t.Namespace
-				meta, seen := targetMeta[key]
-				if !seen {
-					meta = &GCPServiceAccountBindingTarget{}
-					targetMeta[key] = meta
-				}
-				var hbCopy *time.Time
-				if hb != nil {
-					v := *hb
-					hbCopy = &v
-				}
-				mergeWITargetFreshness(meta, !seen, hbCopy, stale, staleReason)
-				if !b.IsFlat() && t.Profile != "" {
+				effNS, effKSA := t.Namespace, conventionalKSA
+				if !flat && t.Profile != "" {
+					m, isMapped := mappedProfiles[b.ID+"\x00"+t.Profile]
+					effNS, effKSA = resolveDispatchIdentity(t.Namespace, conventionalKSA, m, isMapped)
 					var profHB *time.Time
 					if hb != nil {
 						v := *hb
 						profHB = &v
 					}
 					profileTargets[b.ID+"\x00"+t.Profile] = storedProfileWITarget{
-						pool: t.Pool, namespace: t.Namespace,
+						pool: t.Pool, namespace: effNS, ksa: effKSA,
 						lastHeartbeat: profHB, stale: stale, staleReason: staleReason,
 					}
 				}
+				key := t.Pool + "\x00" + effNS + "\x00" + effKSA
+				idx, seen := dispatchByKey[key]
+				if !seen {
+					idx = len(dispatchTargets)
+					dispatchByKey[key] = idx
+					dispatchTargets = append(dispatchTargets, GCPServiceAccountBindingTarget{
+						Pool:      t.Pool,
+						Namespace: effNS,
+						KSA:       effKSA,
+					})
+				}
+				dispatchTargets[idx].Profiles = append(dispatchTargets[idx].Profiles, label(t.Profile))
+				var hbCopy *time.Time
+				if hb != nil {
+					v := *hb
+					hbCopy = &v
+				}
+				mergeWITargetFreshness(&dispatchTargets[idx], !seen, hbCopy, stale, staleReason)
 			}
 			cp.WorkloadIdentityTargets = clean
 		}
@@ -342,7 +402,6 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 	}
 
 	plan := workloadIdentityMintPlanFor(sanitized)
-	ksa := gcpAccountID(sa.Email)
 
 	if plan.empty() {
 		for i := range mappings {
@@ -353,11 +412,11 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		}
 		return GCPServiceAccountBinding{
 			State:  GCPSABindingUnknown,
-			Reason: "no Kubernetes targets in this project",
+			Reason: GCPSABindingReasonNoKubernetesTargets,
 		}
 	}
 
-	if len(plan.targets) == 0 {
+	if len(dispatchTargets) == 0 {
 		for i := range mappings {
 			mappings[i].WorkloadIdentityBinding = &GCPServiceAccountProfileBinding{
 				State:  GCPSABindingUnknown,
@@ -367,7 +426,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		targets := make([]GCPServiceAccountBindingTarget, 0, len(plan.missing))
 		for _, m := range plan.missing {
 			targets = append(targets, GCPServiceAccountBindingTarget{
-				KSA:      ksa,
+				KSA:      conventionalKSA,
 				Profiles: m.profiles,
 				State:    GCPSABindingUnknown,
 				Reason:   wiMissingStatusReason(m.why),
@@ -375,26 +434,38 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		}
 		return GCPServiceAccountBinding{
 			State:   GCPSABindingUnknown,
-			Reason:  "no Workload Identity pool reported",
+			Reason:  GCPSABindingReasonNoPoolReported,
 			Targets: targets,
 		}
 	}
 
+	for i := range dispatchTargets {
+		sort.Strings(dispatchTargets[i].Profiles)
+	}
+	sort.Slice(dispatchTargets, func(i, j int) bool {
+		if dispatchTargets[i].Pool != dispatchTargets[j].Pool {
+			return dispatchTargets[i].Pool < dispatchTargets[j].Pool
+		}
+		if dispatchTargets[i].Namespace != dispatchTargets[j].Namespace {
+			return dispatchTargets[i].Namespace < dispatchTargets[j].Namespace
+		}
+		return dispatchTargets[i].KSA < dispatchTargets[j].KSA
+	})
+
 	if s.gcpIAMAdmin == nil {
-		const reason = "IAM policy client not configured"
-		setProfileBindingsUnknown(mappings, profileTargets, brokerByID, reason)
+		setProfileBindingsUnknown(mappings, profileTargets, brokerByID, GCPSABindingReasonIAMClientUnconfigured)
 		return GCPServiceAccountBinding{
 			State:  GCPSABindingUnknown,
-			Reason: reason,
+			Reason: GCPSABindingReasonIAMClientUnconfigured,
 		}
 	}
 
 	members, err := s.cachedWorkloadIdentityMembers(ctx, sa.Email)
 	if err != nil {
 		slog.WarnContext(ctx, "GCP SA status: reading IAM policy failed", "sa_email", sa.Email, "error", err)
-		reason := "IAM policy read failed"
+		reason := GCPSABindingReasonIAMReadFailed
 		if workloadIdentityErrorReason(err) == api.WorkloadIdentityReasonPermissionDenied {
-			reason = "permission denied reading IAM policy"
+			reason = GCPSABindingReasonPermissionDenied
 		}
 		setProfileBindingsUnknown(mappings, profileTargets, brokerByID, reason)
 		return GCPServiceAccountBinding{
@@ -403,29 +474,17 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		}
 	}
 
-	targets := make([]GCPServiceAccountBindingTarget, 0, len(plan.targets)+len(plan.missing))
+	targets := make([]GCPServiceAccountBindingTarget, 0, len(dispatchTargets)+len(plan.missing))
 	boundCount := 0
 	staleCount := 0
-	for _, t := range plan.targets {
-		member := workloadIdentityMember(t.pool, t.namespace, ksa)
-		entry := GCPServiceAccountBindingTarget{
-			Pool:      t.pool,
-			Namespace: t.namespace,
-			KSA:       ksa,
-			Member:    member,
-			Profiles:  t.profiles,
-			State:     GCPSABindingNotBound,
-		}
-		if members[member] {
+	for _, entry := range dispatchTargets {
+		entry.Member = workloadIdentityMember(entry.Pool, entry.Namespace, entry.KSA)
+		if members[entry.Member] {
 			entry.State = GCPSABindingBound
 			boundCount++
 		} else {
-			entry.ManualStep = workloadIdentityManualStep(sa.Email, member)
-		}
-		if meta := targetMeta[t.pool+"\x00"+t.namespace]; meta != nil {
-			entry.LastHeartbeat = meta.LastHeartbeat
-			entry.Stale = meta.Stale
-			entry.StaleReason = meta.StaleReason
+			entry.State = GCPSABindingNotBound
+			entry.ManualStep = workloadIdentityManualStep(sa.Email, entry.Member)
 		}
 		if entry.Stale {
 			staleCount++
@@ -434,7 +493,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 	}
 	for _, m := range plan.missing {
 		targets = append(targets, GCPServiceAccountBindingTarget{
-			KSA:      ksa,
+			KSA:      conventionalKSA,
 			Profiles: m.profiles,
 			State:    GCPSABindingUnknown,
 			Reason:   wiMissingStatusReason(m.why),
@@ -450,25 +509,19 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 			}
 			continue
 		}
-		profKSA := ksa
-		profNS := pt.namespace
-		if mappings[i].State == GCPSAMappingMapped {
-			if mappings[i].KubernetesServiceAccount != "" {
-				profKSA = mappings[i].KubernetesServiceAccount
-			}
-			if mappings[i].Namespace != "" && len(validation.IsDNS1123Label(mappings[i].Namespace)) == 0 {
-				profNS = mappings[i].Namespace
-			}
-		}
-		profMember := workloadIdentityMember(pt.pool, profNS, profKSA)
+		profMember := workloadIdentityMember(pt.pool, pt.namespace, pt.ksa)
 		profState := GCPSABindingNotBound
+		var manualStep string
 		if members[profMember] {
 			profState = GCPSABindingBound
+		} else {
+			manualStep = workloadIdentityManualStep(sa.Email, profMember)
 		}
 		mappings[i].WorkloadIdentityBinding = &GCPServiceAccountProfileBinding{
 			State:       profState,
 			Pool:        pt.pool,
 			Member:      profMember,
+			ManualStep:  manualStep,
 			Stale:       pt.stale,
 			StaleReason: pt.staleReason,
 		}
@@ -478,9 +531,9 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 	state := GCPSABindingNotBound
 	var reasons []string
 	switch {
-	case boundCount < len(plan.targets):
+	case boundCount < len(dispatchTargets):
 		if boundCount > 0 {
-			reasons = append(reasons, fmt.Sprintf("%d of %d targets bound", boundCount, len(plan.targets)))
+			reasons = append(reasons, fmt.Sprintf("%d of %d targets bound", boundCount, len(dispatchTargets)))
 		}
 	case missingProfiles > 0:
 		state = GCPSABindingUnknown
