@@ -606,3 +606,23 @@ func TestStoredAgentHarness_CanonicalizesStampedNames(t *testing.T) {
 	assert.Equal(t, "gemini-cli", resolved)
 	assert.Equal(t, api.SupportYes, caps.Resume.Support)
 }
+
+func TestSetAgentListCapabilities_IsolatesPerAgentCopies(t *testing.T) {
+	agents := []AgentWithCapabilities{
+		{
+			Agent:           store.Agent{ID: "a1", AppliedConfig: &store.AgentAppliedConfig{Harness: "claude"}},
+			ResolvedHarness: "claude",
+		},
+		{
+			Agent:           store.Agent{ID: "a2", AppliedConfig: &store.AgentAppliedConfig{Harness: "claude"}},
+			ResolvedHarness: "claude",
+		},
+	}
+	setAgentListCapabilities(agents)
+	require.NotNil(t, agents[0].HarnessCapabilities)
+	require.NotNil(t, agents[1].HarnessCapabilities)
+	assert.NotSame(t, agents[0].HarnessCapabilities, agents[1].HarnessCapabilities)
+
+	agents[0].HarnessCapabilities.Resume.Reason = "mutated"
+	assert.Empty(t, agents[1].HarnessCapabilities.Resume.Reason)
+}

@@ -316,25 +316,26 @@ func agentHarnessCapabilities(agent *store.Agent, resolvedHarness string) api.Ha
 
 // setAgentListCapabilities populates HarnessCapabilities on every item of a
 // full-view agent list from its already-resolved ResolvedHarness, memoizing
-// capability parsing per distinct (harness, named) pair across the list.
+// capability parsing per distinct (harness, named) pair across the list while
+// giving each agent its own struct copy so callers cannot mutate siblings.
 func setAgentListCapabilities(agents []AgentWithCapabilities) {
-	var capsByKey map[listCapsKey]*api.HarnessAdvancedCapabilities
+	var capsByKey map[listCapsKey]api.HarnessAdvancedCapabilities
 	for i := range agents {
 		resolved := agents[i].ResolvedHarness
 		if resolved == "" {
 			continue
 		}
 		if capsByKey == nil {
-			capsByKey = make(map[listCapsKey]*api.HarnessAdvancedCapabilities)
+			capsByKey = make(map[listCapsKey]api.HarnessAdvancedCapabilities)
 		}
 		key := listCapsKey{harness: resolved, named: agentNamesHarness(&agents[i].Agent)}
 		caps, ok := capsByKey[key]
 		if !ok {
-			c := agentHarnessCapabilities(&agents[i].Agent, resolved)
-			caps = &c
+			caps = agentHarnessCapabilities(&agents[i].Agent, resolved)
 			capsByKey[key] = caps
 		}
-		agents[i].HarnessCapabilities = caps
+		copied := caps
+		agents[i].HarnessCapabilities = &copied
 	}
 }
 
