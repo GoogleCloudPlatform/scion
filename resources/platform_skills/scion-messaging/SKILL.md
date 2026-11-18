@@ -28,7 +28,11 @@ the original conversation unanswered.
 
 For a new user-facing message about an existing issue or workstream, use its
 conversation when one exists. Leads give their teams that conversation ID in their
-briefs. Use a separate user DM only for a deliberately separate exchange.
+briefs: a group conversation of the project, not the lead's own direct conversation
+with the user. Only its two parties can post to a direct conversation; anyone else gets
+`conversation_ref could not be resolved`, the same answer as for an ID that does not
+exist, and should message the user directly instead. Use a separate user DM only for a
+deliberately separate exchange.
 
 ### Messages to agents
 
