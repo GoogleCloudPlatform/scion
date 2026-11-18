@@ -2123,7 +2123,10 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 		}, nil
 	}
 
-	now := time.Now().UTC()
+	// Truncate to microsecond precision (Postgres TIMESTAMPTZ resolution) so the
+	// WithdrawnAt returned in the first response matches subsequent DB reads and
+	// idempotent retries on both SQLite and Postgres.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	withdrawnOut := make([]*store.Decision, len(pendingRows))
 	for i, r := range pendingRows {
 		upd := client.Decision.Update().

@@ -1816,6 +1816,8 @@ func TestWithdrawDecisions_RowStatesValidationAndIdempotency(t *testing.T) {
 	require.NotNil(t, res1.Withdrawn[0].WithdrawnAt)
 	assert.Equal(t, "CI found a regression — café", res1.Withdrawn[0].WithdrawnReason)
 	firstWithdrawnAt := *res1.Withdrawn[0].WithdrawnAt
+	assert.Zero(t, firstWithdrawnAt.Nanosecond()%int(time.Microsecond),
+		"withdrawn_at is microsecond-aligned so first response and Postgres TIMESTAMPTZ reads agree")
 
 	// Idempotent retry with a DIFFERENT reason reports AlreadyWithdrawn and
 	// preserves the original timestamp and reason (first withdrawal wins).
