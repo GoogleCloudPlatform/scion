@@ -546,6 +546,100 @@ func TestAgentStore_MarkStalledAgents(t *testing.T) {
 	assert.Equal(t, "executing", gotActive.Activity)
 }
 
+func TestAgentStore_MarkStalledAgents_NoHookSinceStartHint(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	now := time.Now()
+	staleStart := now.Add(-30 * time.Minute)
+	activityThreshold := now.Add(-15 * time.Minute)
+	heartbeatRecency := now.Add(-2 * time.Minute)
+
+	mkCandidate := func(slug, activity, msg string, startedAt, lastAct time.Time, turns int) *store.Agent {
+		a := makeAgent(projectID, slug)
+		a.Phase = string(state.PhaseRunning)
+		a.Activity = activity
+		a.Message = msg
+		a.StartedAt = startedAt
+		a.LastActivityEvent = lastAct
+		a.LastSeen = now
+		a.CurrentTurns = turns
+		require.NoError(t, s.CreateAgent(ctx, a))
+		return a
+	}
+
+	// Agents that never reported a hook event since start get the hint.
+	initOnly := mkCandidate("init-only", string(state.ActivityInitializing), "Agent started", staleStart, staleStart, 0)
+	settleReady := mkCandidate("settle-ready", string(state.ActivityWorking), "Harness started", staleStart, staleStart.Add(8*time.Second), 0)
+	deadlineReady := mkCandidate("deadline-ready", string(state.ActivityWorking), "Harness readiness not confirmed by deadline; assuming ready", staleStart, staleStart.Add(90*time.Second), 0)
+	startTimestampOnly := mkCandidate("start-ts-only", string(state.ActivityWorking), "", staleStart.Truncate(time.Second), staleStart, 0)
+
+	// Agents that reported hook activity before stalling do NOT get the hint.
+	sessionStarted := mkCandidate("session-started", string(state.ActivityWorking), "Session started", staleStart, staleStart.Add(2*time.Second), 0)
+	afterTurnReady := mkCandidate("after-turn-ready", string(state.ActivityWorking), "Ready", staleStart, staleStart.Add(5*time.Minute), 0)
+	thinking := mkCandidate("thinking", string(state.ActivityThinking), "Processing", staleStart, staleStart.Add(3*time.Minute), 0)
+	executing := mkCandidate("executing", string(state.ActivityExecuting), "Executing: Bash", staleStart, staleStart.Add(4*time.Minute), 0)
+	hadTurns := mkCandidate("had-turns", string(state.ActivityWorking), "Harness started", staleStart, staleStart.Add(8*time.Second), 1)
+
+	updated, err := s.MarkStalledAgents(ctx, activityThreshold, heartbeatRecency)
+	require.NoError(t, err)
+	require.Len(t, updated, 9)
+
+	byID := make(map[string]store.Agent, len(updated))
+	for _, a := range updated {
+		byID[a.ID] = a
+	}
+
+	for _, wantHint := range []*store.Agent{initOnly, settleReady, deadlineReady, startTimestampOnly} {
+		got := byID[wantHint.ID]
+		assert.Equal(t, string(state.ActivityStalled), got.Activity, wantHint.Slug)
+		assert.Equal(t, state.StalledNoHookActivityHint, got.Message, "%s returned row should carry no-hook hint", wantHint.Slug)
+		persisted, err := s.GetAgent(ctx, wantHint.ID)
+		require.NoError(t, err)
+		assert.Equal(t, state.StalledNoHookActivityHint, persisted.Message, "%s persisted row should carry no-hook hint", wantHint.Slug)
+	}
+
+	for _, noHint := range []*store.Agent{sessionStarted, afterTurnReady, thinking, executing, hadTurns} {
+		got := byID[noHint.ID]
+		assert.Equal(t, string(state.ActivityStalled), got.Activity, noHint.Slug)
+		assert.Equal(t, noHint.Message, got.Message, "%s returned row must not get no-hook hint", noHint.Slug)
+		persisted, err := s.GetAgent(ctx, noHint.ID)
+		require.NoError(t, err)
+		assert.Equal(t, noHint.Message, persisted.Message, "%s persisted row must not get no-hook hint", noHint.Slug)
+	}
+
+	// Recovery without an explicit message (e.g. response-complete or live-work unstall)
+	// clears the stall hint so a recovered agent does not keep displaying it.
+	require.NoError(t, s.UpdateAgentStatus(ctx, initOnly.ID, store.AgentStatusUpdate{
+		Activity:    string(state.ActivityCompleted),
+		TaskSummary: "Done",
+	}))
+	gotCompleted, err := s.GetAgent(ctx, initOnly.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityCompleted), gotCompleted.Activity)
+	assert.Empty(t, gotCompleted.Message)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, settleReady.ID, store.AgentStatusUpdate{
+		Heartbeat:    true,
+		LiveWork:     &store.LiveWork{Kind: "tool", SuppressStall: true},
+		ReportSource: store.StatusReportSourceAgent,
+	}))
+	gotUnstalled, err := s.GetAgent(ctx, settleReady.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityWorking), gotUnstalled.Activity)
+	assert.Empty(t, gotUnstalled.Message)
+
+	// Recovery with an explicit hook message replaces the hint with the hook's message.
+	require.NoError(t, s.UpdateAgentStatus(ctx, deadlineReady.ID, store.AgentStatusUpdate{
+		Activity: string(state.ActivityThinking),
+		Message:  "Processing",
+	}))
+	gotThinking, err := s.GetAgent(ctx, deadlineReady.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityThinking), gotThinking.Activity)
+	assert.Equal(t, "Processing", gotThinking.Message)
+}
+
 // TestAgentStore_MarkStalledAgents_HarnessErrorExcluded pins that a
 // harness_error agent is never marked stalled (its reported reason must not
 // be replaced), but is still swept to offline when its heartbeats stop.

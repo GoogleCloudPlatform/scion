@@ -21,6 +21,8 @@ import {
   agentStatusBadge,
   harnessErrorHint,
   isProvisionedOnly,
+  STALLED_NO_HOOK_ACTIVITY_HINT,
+  stalledHint,
   stateLabel,
   suspendedActivityLabel,
 } from './agent-state-display.js';
@@ -174,6 +176,45 @@ describe('harness_error status (ptone/scion#7858)', () => {
       name: 'a',
       phase: 'running',
       activity: 'working',
+      detail: { message: 'Ready' },
+    });
+    expect(el.hasAttribute('title')).toBe(false);
+  });
+});
+
+describe('stalled no-hook-since-start hint (ptone/scion#4556)', () => {
+  const badge = (agent: Partial<Agent>): Element => {
+    const host = document.createElement('div');
+    render(agentStatusBadge(agent as Agent), host);
+    return host.querySelector('scion-status-badge')!;
+  };
+
+  it('shows the no-hook-since-start hint as the badge tooltip when stalled', () => {
+    const el = badge({
+      name: 'a',
+      phase: 'running',
+      activity: 'stalled',
+      detail: { message: STALLED_NO_HOOK_ACTIVITY_HINT },
+    });
+    expect(el.getAttribute('status')).toBe('stalled');
+    expect(el.getAttribute('label')).toBe('stalled');
+    expect(el.getAttribute('title')).toBe(STALLED_NO_HOOK_ACTIVITY_HINT);
+    expect(stalledHint({ message: STALLED_NO_HOOK_ACTIVITY_HINT }, 'stalled')).toBe(
+      STALLED_NO_HOOK_ACTIVITY_HINT
+    );
+  });
+
+  it('does not show stale pre-stall messages on stalled badges or non-stalled statuses', () => {
+    expect(stalledHint({ detail: { message: 'Ready' } }, 'stalled')).toBeUndefined();
+    expect(stalledHint({ detail: { message: 'Harness started' } }, 'stalled')).toBeUndefined();
+    expect(
+      stalledHint({ detail: { message: STALLED_NO_HOOK_ACTIVITY_HINT } }, 'working')
+    ).toBeUndefined();
+
+    const el = badge({
+      name: 'a',
+      phase: 'running',
+      activity: 'stalled',
       detail: { message: 'Ready' },
     });
     expect(el.hasAttribute('title')).toBe(false);

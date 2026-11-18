@@ -2161,6 +2161,13 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetMessage(su.Message)
 	} else if su.ClearMessageIf != "" && current.Message == su.ClearMessageIf {
 		upd.SetMessage("")
+	} else if current.Message == state.StalledNoHookActivityHint &&
+		((activityProvided && su.Activity != string(state.ActivityStalled)) ||
+			unstalled ||
+			halting ||
+			store.IsTerminalPhase(su.Phase) ||
+			(current.Phase == string(state.PhaseSuspended) && (su.Phase == string(state.PhaseStarting) || su.Phase == string(state.PhaseRunning)))) {
+		upd.SetMessage("")
 	}
 	if su.ConnectionState != "" {
 		upd.SetConnectionState(su.ConnectionState)
@@ -3192,16 +3199,23 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 	updated := make([]store.Agent, 0, len(candidates))
 	for _, a := range candidates {
 		prevActivity := a.Activity
+		noHookSinceStart := stalledWithoutHookSinceStart(a)
 		upd := tx.Agent.UpdateOneID(a.ID).
 			SetStalledFromActivity(prevActivity).
 			SetActivity("stalled").
 			SetUpdated(now)
+		if noHookSinceStart {
+			upd.SetMessage(state.StalledNoHookActivityHint)
+		}
 		stampActivitySince(upd.Mutation(), a.Phase, prevActivity, now)
 		if err := upd.Exec(ctx); err != nil {
 			return nil, err
 		}
 		a.StalledFromActivity = prevActivity
 		a.Activity = "stalled"
+		if noHookSinceStart {
+			a.Message = state.StalledNoHookActivityHint
+		}
 		a.ActivitySince = &now
 		a.Updated = now
 		updated = append(updated, *entAgentToStore(a))
@@ -3211,6 +3225,42 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 		return nil, err
 	}
 	return updated, nil
+}
+
+// stalledWithoutHookSinceStart reports whether candidate row a is stalling
+// without having reported any harness hook event since start (ptone/scion#4556).
+//
+// At startup, sciontool init reports initializing/"Agent started" (setting
+// started_at) and watchHarnessReady transitions to working with either
+// "Harness started" (settle mode) or "Harness readiness not confirmed by
+// deadline; assuming ready" (hook-mode timeout when no ready hook fired).
+// Every harness hook event updates activity and/or replaces message (e.g.
+// "Session started", "Processing", "Executing: ...", "Ready"), so an agent
+// still at initializing, at working with one of those init-only startup
+// messages, or at working with an empty message whose last_activity_event
+// has not moved past started_at has never reported a hook event since start.
+func stalledWithoutHookSinceStart(a *ent.Agent) bool {
+	if a.CurrentTurns > 0 || a.CurrentModelCalls > 0 {
+		return false
+	}
+	switch state.Activity(a.Activity) {
+	case state.ActivityInitializing:
+		return true
+	case state.ActivityWorking:
+		if state.IsPreHookStartupMessage(a.Message) {
+			return true
+		}
+		if a.Message == "" && a.StartedAt != nil && a.LastActivityEvent != nil {
+			diff := a.LastActivityEvent.Sub(*a.StartedAt)
+			if diff < 0 {
+				diff = -diff
+			}
+			return diff <= 2*time.Second
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 // entTxStoreNow reads the store clock inside an *ent.Tx, following storeNow

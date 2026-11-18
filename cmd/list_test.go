@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -2582,6 +2583,16 @@ func TestFormatAgentLastActivity(t *testing.T) {
 			name:     "stalled shows the activity it stalled from",
 			agent:    api.AgentInfo{Activity: "stalled", StalledFromActivity: "executing"},
 			expected: "stalled (was executing), 2m ago",
+		},
+		{
+			name:     "stalled ignores stale pre-stall detail message",
+			agent:    api.AgentInfo{Activity: "stalled", StalledFromActivity: "working", Detail: &api.AgentDetail{Message: "Ready"}},
+			expected: "stalled (was working), 2m ago",
+		},
+		{
+			name:     "stalled shows no-hook-since-start hint",
+			agent:    api.AgentInfo{Activity: "stalled", StalledFromActivity: "working", Detail: &api.AgentDetail{Message: state.StalledNoHookActivityHint}},
+			expected: "stalled (was working): " + state.StalledNoHookActivityHint + ", 2m ago",
 		},
 		{
 			name:     "other activities are unchanged",

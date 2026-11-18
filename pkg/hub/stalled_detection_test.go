@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -601,4 +602,168 @@ func TestAgentStalledDetectionHandler_SchedulerIntegration(t *testing.T) {
 	time.Sleep(130 * time.Millisecond)
 
 	scheduler.Stop()
+}
+
+func TestAgentStalledDetectionHandler_NoHookSinceStartHintAndHeartbeatRetention(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.config.StalledThreshold = 5 * time.Minute
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	srv.SetEventPublisher(pub)
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "No Hook Hint Project",
+		Slug: "no-hook-hint-project",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	broker := &store.RuntimeBroker{
+		ID:     api.NewUUID(),
+		Name:   "No Hook Hint Broker",
+		Slug:   "no-hook-hint-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create broker: %v", err)
+	}
+
+	staleStart := time.Now().Add(-10 * time.Minute).UTC()
+	recentHB := time.Now().Add(-30 * time.Second).UTC()
+
+	noHookAgent := &store.Agent{
+		ID:                api.NewUUID(),
+		Slug:              "no-hook-agent",
+		Name:              "No Hook Agent",
+		Template:          "claude",
+		ProjectID:         project.ID,
+		RuntimeBrokerID:   broker.ID,
+		Phase:             string(state.PhaseRunning),
+		Activity:          string(state.ActivityWorking),
+		Message:           "Harness started",
+		StartedAt:         staleStart,
+		LastActivityEvent: staleStart.Add(8 * time.Second),
+		LastSeen:          recentHB,
+	}
+	if err := s.CreateAgent(ctx, noHookAgent); err != nil {
+		t.Fatalf("failed to create noHookAgent: %v", err)
+	}
+
+	activeThenStalled := &store.Agent{
+		ID:                api.NewUUID(),
+		Slug:              "active-then-stalled",
+		Name:              "Active Then Stalled",
+		Template:          "claude",
+		ProjectID:         project.ID,
+		RuntimeBrokerID:   broker.ID,
+		Phase:             string(state.PhaseRunning),
+		Activity:          string(state.ActivityWorking),
+		Message:           "Ready",
+		StartedAt:         staleStart,
+		LastActivityEvent: staleStart.Add(2 * time.Minute),
+		LastSeen:          recentHB,
+	}
+	if err := s.CreateAgent(ctx, activeThenStalled); err != nil {
+		t.Fatalf("failed to create activeThenStalled: %v", err)
+	}
+
+	subscriber := &store.Agent{
+		ID:                api.NewUUID(),
+		Slug:              "owner-agent",
+		Name:              "Owner Agent",
+		ProjectID:         project.ID,
+		RuntimeBrokerID:   broker.ID,
+		Phase:             string(state.PhaseRunning),
+		Activity:          string(state.ActivityBlocked),
+		LastActivityEvent: time.Now(),
+		LastSeen:          recentHB,
+	}
+	if err := s.CreateAgent(ctx, subscriber); err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	for _, target := range []*store.Agent{noHookAgent, activeThenStalled} {
+		sub := newNotifySubscription(project.ID, store.SubscriberTypeAgent, subscriber.Slug, "test")
+		sub.AgentID = target.ID
+		sub.CreatedAt = staleStart.Add(-time.Minute)
+		if err := s.CreateNotificationSubscription(ctx, sub); err != nil {
+			t.Fatalf("failed to create subscription for %s: %v", target.Slug, err)
+		}
+	}
+
+	recorder := &recordingDispatcher{}
+	nd := NewNotificationDispatcher(s, pub, func() AgentDispatcher { return recorder }, slog.Default())
+	nd.Start()
+	t.Cleanup(nd.Stop)
+
+	srv.agentStalledDetectionHandler()(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(recorder.getCalls()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	calls := recorder.getCalls()
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 notification dispatches, got %d", len(calls))
+	}
+
+	gotNoHook, err := s.GetAgent(ctx, noHookAgent.ID)
+	if err != nil {
+		t.Fatalf("failed to get noHookAgent: %v", err)
+	}
+	if gotNoHook.Activity != string(state.ActivityStalled) {
+		t.Fatalf("noHookAgent activity = %q, want stalled", gotNoHook.Activity)
+	}
+	if gotNoHook.Message != state.StalledNoHookActivityHint {
+		t.Errorf("noHookAgent message = %q, want %q", gotNoHook.Message, state.StalledNoHookActivityHint)
+	}
+
+	gotActive, err := s.GetAgent(ctx, activeThenStalled.ID)
+	if err != nil {
+		t.Fatalf("failed to get activeThenStalled: %v", err)
+	}
+	if gotActive.Activity != string(state.ActivityStalled) {
+		t.Fatalf("activeThenStalled activity = %q, want stalled", gotActive.Activity)
+	}
+	if gotActive.Message != "Ready" {
+		t.Errorf("activeThenStalled message = %q, want Ready (no startup hint)", gotActive.Message)
+	}
+
+	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeAgent, subscriber.Slug, false)
+	if err != nil {
+		t.Fatalf("failed to list notifications: %v", err)
+	}
+	notifByAgent := map[string]string{}
+	for _, n := range notifs {
+		notifByAgent[n.AgentID] = n.Message
+	}
+	if msg := notifByAgent[noHookAgent.ID]; msg == "" || !strings.Contains(msg, state.StalledNoHookActivityHint) {
+		t.Errorf("noHookAgent notification = %q, want substring %q", msg, state.StalledNoHookActivityHint)
+	}
+	if msg := notifByAgent[activeThenStalled.ID]; strings.Contains(msg, state.StalledNoHookActivityHint) || strings.Contains(msg, "Ready") {
+		t.Errorf("activeThenStalled notification = %q, must not include startup hint or stale Ready", msg)
+	}
+
+	// A broker heartbeat repeating the stale pre-stall activity/message from
+	// agent-info.json must not clobber the stall hint while still stalled.
+	if code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:     noHookAgent.Slug,
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+		Message:  "Harness started",
+	}); code != 200 {
+		t.Fatalf("sendHeartbeat code = %d, want 200", code)
+	}
+	afterHB, err := s.GetAgent(ctx, noHookAgent.ID)
+	if err != nil {
+		t.Fatalf("failed to get noHookAgent after heartbeat: %v", err)
+	}
+	if afterHB.Activity != string(state.ActivityStalled) {
+		t.Errorf("after heartbeat activity = %q, want stalled", afterHB.Activity)
+	}
+	if afterHB.Message != state.StalledNoHookActivityHint {
+		t.Errorf("after heartbeat message = %q, want %q", afterHB.Message, state.StalledNoHookActivityHint)
+	}
 }

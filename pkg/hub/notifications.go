@@ -879,14 +879,20 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 		}
 		return msg
 	case "STALLED":
-		// The message is left over from before the stall ("Ready",
-		// "Harness started") and would mislead, so it is not appended.
+		// Pre-stall messages ("Ready", "Harness started") are stale and would
+		// mislead, so only the stall detector's no-hook-since-start hint is
+		// included (ptone/scion#4556).
 		msg := fmt.Sprintf("%s has STALLED", agent.Slug)
 		if agent.StalledFromActivity != "" {
 			msg += " (was " + agent.StalledFromActivity + ")"
 		}
 		if !agent.LastActivityEvent.IsZero() {
 			msg += ": no activity for " + formatStallAge(time.Since(agent.LastActivityEvent))
+			if agent.Message == state.StalledNoHookActivityHint {
+				msg += " (" + agent.Message + ")"
+			}
+		} else if agent.Message == state.StalledNoHookActivityHint {
+			msg += ": " + agent.Message
 		}
 		return msg
 	case NotificationStatusHarnessError:

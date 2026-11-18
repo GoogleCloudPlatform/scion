@@ -1889,6 +1889,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							statusUpdate.Activity = agentHB.Activity
 						}
 					}
+					if agent.Activity == string(state.ActivityStalled) && statusUpdate.Activity == "" &&
+						hbPhase != state.PhaseStopped && hbPhase != state.PhaseError {
+						statusUpdate.Message = ""
+					}
 				}
 			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating && !agentDeleting {
 				// Legacy path: no structured fields, derive from ContainerStatus
