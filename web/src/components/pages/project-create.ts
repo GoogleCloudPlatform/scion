@@ -874,7 +874,7 @@ export class ScionPageProjectCreate extends LitElement {
     }
 
     .badge-override.active {
-      color: #fff;
+      color: var(--sl-color-neutral-0, #fff);
       background: var(--sl-color-warning-600, #d97706);
       border-color: var(--sl-color-warning-600, #d97706);
     }

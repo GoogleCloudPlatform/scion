@@ -20,8 +20,8 @@
  * (ptone/scion#6800, ptone/scion#7774, ptone/scion#3773, ptone/scion#8353).
  */
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, relative, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -388,4 +388,39 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
       });
     });
   }
+
+  it('never pairs an inverted --sl-color-*-500/600/700 fill with a bare white foreground', () => {
+    const srcDir = resolve(__dirname, '..');
+    const walk = (dir: string): string[] => {
+      const out: string[] = [];
+      for (const name of readdirSync(dir)) {
+        if (name === '__fixtures__') continue;
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) out.push(...walk(p));
+        else if (/\.(ts|css)$/.test(name) && !/\.test\.ts$/.test(name) && name !== 'theme.css') {
+          out.push(p);
+        }
+      }
+      return out;
+    };
+
+    const violations: string[] = [];
+    for (const file of walk(srcDir).sort()) {
+      const clean = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+      for (const m of clean.matchAll(/([^{}]*\{[^{}]*\})/g)) {
+        const ruleText = m[1];
+        if (
+          /background(?:-color)?\s*:\s*var\(\s*--sl-color-(?:primary|success|warning|danger|neutral)-(?:500|600|700)/.test(
+            ruleText
+          ) &&
+          /(?:^|[;\s{])color\s*:\s*(?:#fff(?:fff)?\b|white\b)/i.test(ruleText)
+        ) {
+          violations.push(
+            `${relative(srcDir, file).split(sep).join('/')}: ${ruleText.trim().replace(/\s+/g, ' ')}`
+          );
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
 });

@@ -499,13 +499,13 @@ export class ScionChatDecisions extends LitElement {
     .opt.chosen {
       border-color: var(--sl-color-primary-600, #2563eb);
       background: var(--sl-color-primary-600, #2563eb);
-      color: #fff;
+      color: var(--sl-color-neutral-0, #fff);
       opacity: 1;
     }
 
     .opt.chosen .lbl,
     .opt.chosen .desc {
-      color: #fff;
+      color: var(--sl-color-neutral-0, #fff);
     }
 
     .row-foot {
@@ -727,7 +727,7 @@ export class ScionChatDecisions extends LitElement {
     }
 
     .opt.chosen .mark {
-      color: #fff;
+      color: var(--sl-color-neutral-0, #fff);
     }
 
     .badge {
