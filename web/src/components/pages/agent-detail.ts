@@ -491,6 +491,17 @@ export class ScionPageAgentDetail extends LitElement {
       padding-top: 1.5rem;
     }
 
+    /* The chat thread's message list is its own scroller, so the thread needs
+     * a bounded height, as it has on the chat page. Unbounded, it grows to
+     * fit every message: the composer ends up below the fold and the wheel
+     * over the messages does nothing, because the list's
+     * overscroll-behavior: contain keeps it from reaching the page. 24rem is
+     * the page above the thread plus the tab panel's and the shell's bottom
+     * padding. */
+    .messages-chat-thread {
+      height: calc(var(--scion-app-height, 100dvh) - 24rem);
+    }
+
     /* ---- Cards ---- */
     .reincarnate-help {
       margin: 0 0 1rem;
@@ -1763,6 +1774,7 @@ export class ScionPageAgentDetail extends LitElement {
         </sl-radio-group>
       </div>
       <scion-chat-thread
+        class="messages-chat-thread"
         agentId=${this.agentId}
         agentName=${agent.name || ''}
         .conversationKey=${this.currentUserId
