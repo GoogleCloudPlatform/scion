@@ -204,6 +204,14 @@
     "want": "not_actionable"
   },
   {
+    "name": "withdrawn (no answer)",
+    "userId": "u1",
+    "status": "withdrawn",
+    "answers": [],
+    "decision": null,
+    "want": "withdrawn"
+  },
+  {
     "name": "dismissed (signed-in user)",
     "userId": "u1",
     "status": "dismissed",

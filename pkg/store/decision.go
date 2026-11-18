@@ -164,6 +164,7 @@ const (
 	DecisionListStatePending   DecisionListState = "pending"
 	DecisionListStateDecided   DecisionListState = "decided"
 	DecisionListStateWithdrawn DecisionListState = "withdrawn"
+	DecisionListStateDismissed DecisionListState = "dismissed"
 	DecisionListStateAll       DecisionListState = "all"
 
 	DefaultDecisionListLimit = 50
@@ -171,12 +172,13 @@ const (
 )
 
 // ProjectDecisionProvenance* values filter ListDecisionAnswers by
-// answer provenance + outcome (Plan Phase 3, §5.1).
+// answer provenance + outcome (Plan Phase 3, §5.1; design-8194 §4.3).
 const (
 	ProjectDecisionProvenanceDirect      = "direct"
 	ProjectDecisionProvenanceInterpreted = "interpreted"
 	ProjectDecisionProvenanceConfirmed   = "confirmed"
 	ProjectDecisionProvenanceOverridden  = "overridden"
+	ProjectDecisionProvenanceDismissed   = "dismissed"
 )
 
 // ProjectDecisionActor identifies an agent or user referenced by a project's
@@ -236,6 +238,7 @@ const (
 	InterpretedReasonAlreadyAnswered = "already_answered"
 	InterpretedReasonReplaced        = "replaced"
 	InterpretedReasonWithdrawn       = "withdrawn"
+	InterpretedReasonDismissed       = "dismissed"
 	InterpretedReasonInvalidChoice   = "invalid_choice"
 	InterpretedReasonNotFound        = "decision_not_found"
 )
@@ -273,6 +276,7 @@ func (e *InterpretedAnswersError) Unwrap() error { return ErrInterpretedAnswersF
 // Per-key failure reasons in WithdrawDecisionsError.
 const (
 	WithdrawReasonAlreadyAnswered = "already_answered"
+	WithdrawReasonDismissed       = "dismissed"
 	WithdrawReasonNotFound        = "decision_not_found"
 )
 
@@ -421,13 +425,17 @@ type ExistingDecisionKey struct {
 	Status  string
 	// Answer is the effective answer of a decided version, else nil.
 	Answer *DecisionAnswer
+	// Dismissal is the outcome=dismiss row of a dismissed version, else nil.
+	Dismissal *DecisionAnswer
 }
 
 // Hint is the one-line description of the existing key, for example
-// "D234 already exists (v1, decided by ptone: yes)".
+// "D234 already exists (v1, decided by ptone: yes)" or
+// "D234 already exists (v1, dismissed by alice)".
 func (e ExistingDecisionKey) Hint() string {
 	state := e.Status
-	if e.Answer != nil {
+	switch {
+	case e.Answer != nil:
 		who := e.Answer.AnsweredByName
 		if who == "" {
 			who = e.Answer.AnsweredByEmail
@@ -436,6 +444,15 @@ func (e ExistingDecisionKey) Hint() string {
 			who = "a user"
 		}
 		state = fmt.Sprintf("decided by %s: %s", who, e.Answer.ChoiceLabel)
+	case e.Status == DecisionStatusDismissed && e.Dismissal != nil:
+		who := e.Dismissal.AnsweredByName
+		if who == "" {
+			who = e.Dismissal.AnsweredByEmail
+		}
+		if who == "" {
+			who = "a user"
+		}
+		state = fmt.Sprintf("dismissed by %s", who)
 	}
 	return fmt.Sprintf("%s already exists (v%d, %s)", e.Key, e.Version, state)
 }

@@ -483,3 +483,134 @@ func TestDecisionRace_RepostWaitsForDismissInFlight(t *testing.T) {
 	assert.Equal(t, store.DecisionStatusDismissed, d1.Status)
 	assert.Equal(t, r.res.Decisions[0].RowID, d1.ReplacedByID)
 }
+
+// TestDecisionRace_DismissWaitsForAnswerInFlight: an answer holds the decision
+// row's lock; a concurrent dismiss waits for it and then gets
+// DismissChangedError with reason "decided", storing nothing.
+func TestDecisionRace_DismissWaitsForAnswerInFlight(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	p := f.create(t, false, yesNo("DD3", "v1"))
+	row := p.Decisions[0].RowID
+	d0, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	t5m := d0.CreatedAt.Add(store.DecisionDismissMinAge)
+
+	tx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, _, err = newTxCompositeStore(tx).recordAnswerTx(ctx, f.answer(row, "1", "user-1", ""))
+	require.NoError(t, err)
+
+	dsmIn := f.dismissInput(d0.MessageID, "user-1", "Too late", func() time.Time { return t5m })
+	dsmIn.RowIDs = []string{row}
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.cs.DismissDecisions(ctx, dsmIn)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the dismiss did not wait for the answer lock: %v", err)
+	case <-time.After(blockedFor):
+	}
+	require.NoError(t, tx.Commit())
+
+	var changed *store.DismissChangedError
+	err = <-done
+	require.ErrorAs(t, err, &changed)
+	assert.Equal(t, map[string]string{row: store.AnswerSetReasonDecided}, changed.Reasons)
+	_, err = f.cs.GetMessage(ctx, dsmIn.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestDecisionRace_WithdrawWaitsForDismissInFlight: a dismiss holds the
+// decision row's lock; a concurrent withdraw waits for it and then gets
+// WithdrawDecisionsError with per-key reason "dismissed", storing nothing.
+func TestDecisionRace_WithdrawWaitsForDismissInFlight(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	p := f.create(t, false, yesNo("DD4", "v1"))
+	row := p.Decisions[0].RowID
+	d0, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	t5m := d0.CreatedAt.Add(store.DecisionDismissMinAge)
+
+	tx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = newTxCompositeStore(tx).dismissDecisionsTx(ctx, f.dismissInput(d0.MessageID, "user-1", "Stale", func() time.Time { return t5m }))
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+			AskerAgentID: f.agentID,
+			Keys:         []string{"DD4"},
+			Reason:       "Too late withdraw",
+		})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the withdraw did not wait for the dismiss lock: %v", err)
+	case <-time.After(blockedFor):
+	}
+	require.NoError(t, tx.Commit())
+
+	var wdErr *store.WithdrawDecisionsError
+	err = <-done
+	require.ErrorAs(t, err, &wdErr)
+	require.Len(t, wdErr.Failures, 1)
+	assert.Equal(t, store.WithdrawReasonDismissed, wdErr.Failures[0].Reason)
+	d, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusDismissed, d.Status)
+}
+
+// TestDecisionRace_DismissWaitsForWithdrawInFlight: a withdraw holds the
+// decision row's lock; a concurrent dismiss waits for it and then gets
+// DismissChangedError with reason "withdrawn", storing nothing.
+func TestDecisionRace_DismissWaitsForWithdrawInFlight(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	p := f.create(t, false, yesNo("DD5", "v1"))
+	row := p.Decisions[0].RowID
+	d0, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	t5m := d0.CreatedAt.Add(store.DecisionDismissMinAge)
+
+	tx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = newTxCompositeStore(tx).withdrawDecisionsTx(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"DD5"},
+		Reason:       "Agent retired first",
+	})
+	require.NoError(t, err)
+
+	dsmIn := f.dismissInput(d0.MessageID, "user-1", "Too late dismiss", func() time.Time { return t5m })
+	dsmIn.RowIDs = []string{row}
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.cs.DismissDecisions(ctx, dsmIn)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the dismiss did not wait for the withdraw lock: %v", err)
+	case <-time.After(blockedFor):
+	}
+	require.NoError(t, tx.Commit())
+
+	var changed *store.DismissChangedError
+	err = <-done
+	require.ErrorAs(t, err, &changed)
+	assert.Equal(t, map[string]string{row: store.AnswerSetReasonWithdrawn}, changed.Reasons)
+	_, err = f.cs.GetMessage(ctx, dsmIn.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}

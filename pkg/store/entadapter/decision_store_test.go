@@ -2264,12 +2264,22 @@ func TestDismissDecisions_WholePromptAndMinimumAge(t *testing.T) {
 		}(),
 		func() *store.DismissDecisionsInput {
 			in := f.dismissInput(msgID, "user-1", "", nil)
-			in.RowIDs = []string{rows[0]}
+			in.RowIDs = []string{uuid.NewString()}
 			return in
 		}(),
 		func() *store.DismissDecisionsInput {
 			in := f.dismissInput(msgID, "user-1", "", nil)
-			in.IdempotencyKey = "not-yet"
+			in.RowIDs = []string{rows[0], rows[0]}
+			return in
+		}(),
+		func() *store.DismissDecisionsInput {
+			in := f.dismissInput(msgID, "user-1", "", nil)
+			in.RowIDs = []string{"not-a-uuid"}
+			return in
+		}(),
+		func() *store.DismissDecisionsInput {
+			in := f.dismissInput(msgID, "user-1", "", nil)
+			in.IdempotencyKey = strings.Repeat("k", store.MaxDecisionIdempotencyKeyLen+1)
 			return in
 		}(),
 	} {
@@ -2320,10 +2330,12 @@ func TestDismissDecisions_WholePromptAndMinimumAge(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, store.DecisionStatusDismissed, got.Status)
 		require.NotNil(t, got.DismissedAt)
-		assert.True(t, availAt.Equal(*got.DismissedAt))
+		assert.True(t, availAt.Truncate(time.Microsecond).Equal(*got.DismissedAt))
+		assert.Equal(t, res.Dismissed[i].DismissedAt.UTC(), got.DismissedAt.UTC())
 		assert.Nil(t, got.EffectiveAnswer(), "EffectiveAnswer must skip outcome=dismiss and return nil on dismissed rows")
 		dsm := got.Dismissal()
 		require.NotNil(t, dsm)
+		assert.Equal(t, res.Dismissed[i].Dismissal().CreatedAt.UTC(), dsm.CreatedAt.UTC())
 		assert.Equal(t, messages.ChoiceIDDismissed, dsm.ChoiceID)
 		assert.Equal(t, messages.ChoiceLabelDismissed, dsm.ChoiceLabel)
 		assert.Equal(t, store.DecisionOutcomeDismiss, dsm.Outcome)
@@ -2469,4 +2481,399 @@ func TestDismissDecisions_FreesPendingCapacity(t *testing.T) {
 	overRes, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, yesNo("DCAP-OVER", "Fits now?")))
 	require.NoError(t, err)
 	require.Len(t, overRes.Decisions, 1)
+}
+
+func (f *decisionFixture) createTopicSet(t *testing.T, ds ...messages.Decision) (string, []string) {
+	t.Helper()
+	in := f.prompt("", false, ds...)
+	in.Message.ThreadID = "topic:general"
+	res, err := f.cs.CreateDecisionPrompt(context.Background(), in)
+	require.NoError(t, err)
+	ids := make([]string, len(res.Decisions))
+	for i, d := range res.Decisions {
+		ids[i] = d.RowID
+	}
+	return in.Message.ID, ids
+}
+
+func TestDismissDecisions_SubsetsAllOrNothingAndEmptyRowIDs(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	msgID, rows := f.createTopicSet(t,
+		yesNo("DSM-SUB-1", "First?"),
+		yesNo("DSM-SUB-2", "Second?"),
+		yesNo("DSM-SUB-3", "Third?"),
+	)
+	d0, err := f.cs.GetDecision(ctx, rows[0])
+	require.NoError(t, err)
+	createdAt := d0.CreatedAt
+	t5m := createdAt.Add(store.DecisionDismissMinAge)
+
+	// Explicit subset before 5 minutes -> DismissChangedError with reason "too_recent", nothing stored.
+	earlySub := f.dismissInput(msgID, "user-1", "Too early subset", func() time.Time {
+		return createdAt.Add(4*time.Minute + 59*time.Second)
+	})
+	earlySub.RowIDs = []string{rows[0], rows[2]}
+	_, err = f.cs.DismissDecisions(ctx, earlySub)
+	var changedErr *store.DismissChangedError
+	require.ErrorAs(t, err, &changedErr)
+	assert.Equal(t, map[string]string{
+		rows[0]: store.AnswerSetReasonTooRecent,
+		rows[2]: store.AnswerSetReasonTooRecent,
+	}, changedErr.Reasons)
+	_, err = f.cs.GetMessage(ctx, earlySub.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Explicit subset at +5m -> dismisses rows[0] and rows[2] in prompt position order; leaves rows[1] pending.
+	subIn := f.dismissInput(msgID, "user-1", "Subset dismiss", func() time.Time { return t5m })
+	subIn.RowIDs = []string{rows[2], rows[0]} // out-of-order input returns prompt position order
+	subRes, err := f.cs.DismissDecisions(ctx, subIn)
+	require.NoError(t, err)
+	require.Len(t, subRes.Dismissed, 2)
+	assert.Equal(t, "DSM-SUB-1", subRes.Dismissed[0].Key)
+	assert.Equal(t, "DSM-SUB-3", subRes.Dismissed[1].Key)
+	assert.Empty(t, subRes.AlreadyDismissed)
+
+	stillOpen, err := f.cs.GetDecision(ctx, rows[1])
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusPending, stillOpen.Status)
+
+	// Prompt remains in ListOpenPrompts because rows[1] is still pending.
+	openPrompts, err := f.cs.ListOpenPrompts(ctx, []string{f.projectID}, []string{"topic:general"})
+	require.NoError(t, err)
+	require.Len(t, openPrompts, 1)
+
+	// Answer rows[1] directly, then try explicit subset [rows[0], rows[1]]:
+	// rows[0] is already dismissed (allowed), rows[1] is decided (refused) -> all-or-nothing DismissChangedError!
+	_, err = f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-2", "", rows[1], "1"))
+	require.NoError(t, err)
+
+	mixedIn := f.dismissInput(msgID, "user-1", "Should fail", func() time.Time { return t5m.Add(time.Minute) })
+	mixedIn.RowIDs = []string{rows[0], rows[1]}
+	_, err = f.cs.DismissDecisions(ctx, mixedIn)
+	require.ErrorAs(t, err, &changedErr)
+	assert.Equal(t, map[string]string{rows[1]: store.AnswerSetReasonDecided}, changedErr.Reasons)
+
+	// Explicit subset naming only already-dismissed rows -> 200 idempotent AlreadyDismissed, nothing stored.
+	repeatSub := f.dismissInput(msgID, "user-1", "Ignored", func() time.Time { return t5m.Add(2 * time.Minute) })
+	repeatSub.RowIDs = []string{rows[0], rows[2]}
+	repeatRes, err := f.cs.DismissDecisions(ctx, repeatSub)
+	require.NoError(t, err)
+	assert.Empty(t, repeatRes.Dismissed)
+	require.Len(t, repeatRes.AlreadyDismissed, 2)
+	_, err = f.cs.GetMessage(ctx, repeatSub.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Empty RowIDs skips too-recent open rows when another open row is >= 5m,
+	// and returns DecisionTooRecentError with earliest AvailableAt once only too-recent rows remain.
+	pAge := f.create(t, false, yesNo("DSM-AGE-1", "Mature?"))
+	dAge0, err := f.cs.GetDecision(ctx, pAge.Decisions[0].RowID)
+	require.NoError(t, err)
+	msg2 := dAge0.MessageID
+	msg2UUID, err := uuid.Parse(msg2)
+	require.NoError(t, err)
+	projUUID, err := uuid.Parse(f.projectID)
+	require.NoError(t, err)
+	agentUUID, err := uuid.Parse(f.agentID)
+	require.NoError(t, err)
+	freshCreatedAt := dAge0.CreatedAt.Add(3 * time.Minute).Truncate(time.Microsecond)
+	_, err = f.cs.client.Decision.Create().
+		SetID(uuid.New()).
+		SetProjectID(projUUID).
+		SetChatKey("topic:general").
+		SetMessageID(msg2UUID).
+		SetPosition(1).
+		SetAskerAgentID(agentUUID).
+		SetAskerAgentName("architect").
+		SetKey("DSM-AGE-2").
+		SetKeyNorm("dsm-age-2").
+		SetKeySource(store.DecisionKeySourceAgent).
+		SetVersion(1).
+		SetQuestion("Fresh?").
+		SetChoices(dAge0.Choices).
+		SetCreatedAt(freshCreatedAt).
+		Save(ctx)
+	require.NoError(t, err)
+
+	tAge := dAge0.CreatedAt.Add(store.DecisionDismissMinAge)
+	partialRes, err := f.cs.DismissDecisions(ctx, f.dismissInput(msg2, "user-1", "Mature only", func() time.Time { return tAge }))
+	require.NoError(t, err)
+	require.Len(t, partialRes.Dismissed, 1)
+	assert.Equal(t, "DSM-AGE-1", partialRes.Dismissed[0].Key)
+
+	// Now only DSM-AGE-2 is open and still < 5m old -> DecisionTooRecentError with DSM-AGE-2's AvailableAt.
+	_, err = f.cs.DismissDecisions(ctx, f.dismissInput(msg2, "user-1", "Too soon for second", func() time.Time { return tAge }))
+	var tooRecent *store.DecisionTooRecentError
+	require.ErrorAs(t, err, &tooRecent)
+	assert.True(t, freshCreatedAt.Add(store.DecisionDismissMinAge).Equal(tooRecent.AvailableAt))
+}
+
+func TestDismissDecisions_IdempotencyReplayAndMismatch(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	msgID, rows := f.createSet(t, yesNo("DSM-IDEM-1", "Q1?"), yesNo("DSM-IDEM-2", "Q2?"))
+	d0, err := f.cs.GetDecision(ctx, rows[0])
+	require.NoError(t, err)
+	t5m := d0.CreatedAt.Add(store.DecisionDismissMinAge)
+
+	firstIn := f.dismissInput(msgID, "user-1", "  Same trimmed reason  ", func() time.Time { return t5m })
+	firstIn.RowIDs = []string{rows[0]}
+	firstIn.IdempotencyKey = "idem-key-1"
+	firstRes, err := f.cs.DismissDecisions(ctx, firstIn)
+	require.NoError(t, err)
+	assert.False(t, firstRes.Replayed)
+	require.Len(t, firstRes.Dismissed, 1)
+
+	// Exact retry with same key, row set, and trimmed reason replays without storing a new message.
+	retryIn := f.dismissInput(msgID, "user-1", "Same trimmed reason", func() time.Time { return t5m.Add(time.Minute) })
+	retryIn.RowIDs = []string{rows[0]}
+	retryIn.IdempotencyKey = "idem-key-1"
+	retryRes, err := f.cs.DismissDecisions(ctx, retryIn)
+	require.NoError(t, err)
+	assert.True(t, retryRes.Replayed)
+	assert.Equal(t, firstRes.BatchID, retryRes.BatchID)
+	require.Len(t, retryRes.Dismissed, 1)
+	assert.Equal(t, firstIn.ResponseMessage.ID, retryRes.Dismissed[0].Dismissal().ResponseMessageID)
+	_, err = f.cs.GetMessage(ctx, retryIn.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Mismatch on reason -> ErrIdempotencyMismatch.
+	diffReasonIn := f.dismissInput(msgID, "user-1", "Different reason", func() time.Time { return t5m.Add(time.Minute) })
+	diffReasonIn.RowIDs = []string{rows[0]}
+	diffReasonIn.IdempotencyKey = "idem-key-1"
+	_, err = f.cs.DismissDecisions(ctx, diffReasonIn)
+	require.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	// Mismatch on explicit row set -> ErrIdempotencyMismatch.
+	diffRowsIn := f.dismissInput(msgID, "user-1", "Same trimmed reason", func() time.Time { return t5m.Add(time.Minute) })
+	diffRowsIn.RowIDs = []string{rows[0], rows[1]}
+	diffRowsIn.IdempotencyKey = "idem-key-1"
+	_, err = f.cs.DismissDecisions(ctx, diffRowsIn)
+	require.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	// Mismatch calling empty RowIDs under a key that only dismissed a subset while rows[1] was eligible -> ErrIdempotencyMismatch.
+	emptyRowsIn := f.dismissInput(msgID, "user-1", "Same trimmed reason", func() time.Time { return t5m.Add(time.Minute) })
+	emptyRowsIn.IdempotencyKey = "idem-key-1"
+	_, err = f.cs.DismissDecisions(ctx, emptyRowsIn)
+	require.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	// Another user using the same key string on the same prompt does NOT collide with user-1's key.
+	otherUserIn := f.dismissInput(msgID, "user-2", "User 2 dismisses Q2", func() time.Time { return t5m.Add(time.Minute) })
+	otherUserIn.RowIDs = []string{rows[1]}
+	otherUserIn.IdempotencyKey = "idem-key-1"
+	otherRes, err := f.cs.DismissDecisions(ctx, otherUserIn)
+	require.NoError(t, err)
+	assert.False(t, otherRes.Replayed)
+	require.Len(t, otherRes.Dismissed, 1)
+	assert.Equal(t, "DSM-IDEM-2", otherRes.Dismissed[0].Key)
+}
+
+func TestDismissDecisions_InterpretedWithdrawReuseMadeAndAgentList(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// 1. D6: interpreted-awaiting-confirm row can be dismissed by the named user,
+	// keeping the interpreted row in decision_answers and transitioning status to dismissed.
+	msgID, rows := f.createTopicSet(t, yesNo("D-INT-1", "Ship today?"), yesNo("D-INT-2", "Run migration?"))
+	d0, err := f.cs.GetDecision(ctx, rows[0])
+	require.NoError(t, err)
+	t5m := d0.CreatedAt.Add(store.DecisionDismissMinAge)
+
+	srcMsg := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     f.projectID,
+		ThreadID:      "topic:general",
+		Sender:        "user:user-1",
+		SenderID:      "user-1",
+		Recipient:     "group:topic",
+		RecipientID:   "topic:general",
+		Msg:           "looks good",
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     d0.CreatedAt.Add(time.Minute),
+	}
+	require.NoError(t, f.cs.CreateMessage(ctx, srcMsg))
+
+	_, err = f.cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agentID,
+		SourceMessageID:      srcMsg.ID,
+		AnsweredByUserID:     "user-1",
+		AnsweredByName:       "Pat",
+		AnsweredByEmail:      "pat@example.com",
+		Surface:              store.DecisionSurfaceNative,
+		Answers:              []store.InterpretedAnswerPair{{Key: "D-INT-1", ChoiceID: "1"}},
+		ResponseMessage: &store.Message{
+			ID:            uuid.NewString(),
+			ProjectID:     f.projectID,
+			ThreadID:      "topic:general",
+			Sender:        "agent:architect",
+			SenderID:      f.agentID,
+			Recipient:     "group:topic",
+			RecipientID:   "topic:general",
+			Msg:           "interpreted D-INT-1",
+			DispatchState: store.MessageDispatchDispatched,
+			CreatedAt:     d0.CreatedAt.Add(2 * time.Minute),
+		},
+	})
+	require.NoError(t, err)
+
+	// Another user cannot dismiss an interpreted row naming user-1 -> not_recorded_answerer.
+	wrongUserIn := f.dismissInput(msgID, "user-2", "Not mine", func() time.Time { return t5m })
+	wrongUserIn.RowIDs = []string{rows[0]}
+	_, err = f.cs.DismissDecisions(ctx, wrongUserIn)
+	var changedErr *store.DismissChangedError
+	require.ErrorAs(t, err, &changedErr)
+	assert.Equal(t, store.AnswerSetReasonNotRecordedAnswerer, changedErr.Reasons[rows[0]])
+
+	// Named user still cannot dismiss before version age reaches 5m (age counts from version creation, 4.4a).
+	tooSoonInterp := f.dismissInput(msgID, "user-1", "Too soon", func() time.Time {
+		return d0.CreatedAt.Add(4*time.Minute + 59*time.Second)
+	})
+	tooSoonInterp.RowIDs = []string{rows[0]}
+	_, err = f.cs.DismissDecisions(ctx, tooSoonInterp)
+	require.ErrorAs(t, err, &changedErr)
+	assert.Equal(t, store.AnswerSetReasonTooRecent, changedErr.Reasons[rows[0]])
+
+	// Named user dismisses rows[0] at +5m -> status becomes dismissed, interpreted row stays in Answers!
+	dsmInterpIn := f.dismissInput(msgID, "user-1", "Misread reply — xylophone check", func() time.Time { return t5m })
+	dsmInterpIn.RowIDs = []string{rows[0]}
+	dsmInterpRes, err := f.cs.DismissDecisions(ctx, dsmInterpIn)
+	require.NoError(t, err)
+	require.Len(t, dsmInterpRes.Dismissed, 1)
+
+	gotInterp, err := f.cs.GetDecision(ctx, rows[0])
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusDismissed, gotInterp.Status)
+	assert.Nil(t, gotInterp.EffectiveAnswer())
+	require.NotNil(t, gotInterp.Dismissal())
+	require.Len(t, gotInterp.Answers, 2, "interpreted answer row must remain in the log alongside the dismissal")
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, gotInterp.Answers[0].Provenance)
+	assert.Equal(t, store.DecisionOutcomeDismiss, gotInterp.Answers[1].Outcome)
+
+	// 2. Set submit including dismissed row fails with reason "dismissed"; submitting remaining row succeeds!
+	_, err = f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-1", "", rows[0], "1", rows[1], "2"))
+	var setChanged *store.AnswerSetChangedError
+	require.ErrorAs(t, err, &setChanged)
+	assert.Equal(t, map[string]string{rows[0]: store.AnswerSetReasonDismissed}, setChanged.Reasons)
+
+	_, err = f.cs.RecordAnswerSet(ctx, f.answerSet(msgID, "user-1", "", rows[1], "2"))
+	require.NoError(t, err)
+
+	// 3. Agent interpreted answer on a dismissed key fails with per-key "dismissed".
+	_, err = f.cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agentID,
+		SourceMessageID:      srcMsg.ID,
+		AnsweredByUserID:     "user-1",
+		AnsweredByName:       "Pat",
+		Surface:              store.DecisionSurfaceNative,
+		Answers:              []store.InterpretedAnswerPair{{Key: "D-INT-1", ChoiceID: "2"}},
+		ResponseMessage: &store.Message{
+			ID:            uuid.NewString(),
+			ProjectID:     f.projectID,
+			ThreadID:      "topic:general",
+			Sender:        "agent:architect",
+			SenderID:      f.agentID,
+			Recipient:     "group:topic",
+			RecipientID:   "topic:general",
+			Msg:           "should not store",
+			DispatchState: store.MessageDispatchDispatched,
+		},
+	})
+	var iaErr *store.InterpretedAnswersError
+	require.ErrorAs(t, err, &iaErr)
+	require.Len(t, iaErr.Failures, 1)
+	assert.Equal(t, "D-INT-1", iaErr.Failures[0].Key)
+	assert.Equal(t, store.InterpretedReasonDismissed, iaErr.Failures[0].Reason)
+
+	// 4. Withdraw interaction (section 4.8): explicit dismissed key fails all-or-nothing with "dismissed";
+	// WholeSet (--set) from a pending sibling skips dismissed siblings!
+	wdMsgID, wdRows := f.createTopicSet(t, yesNo("D-WD-1", "Obsolete 1?"), yesNo("D-WD-2", "Obsolete 2?"))
+	dWd0, err := f.cs.GetDecision(ctx, wdRows[0])
+	require.NoError(t, err)
+	dsmWdIn := f.dismissInput(wdMsgID, "user-1", "User dismissed first", func() time.Time {
+		return dWd0.CreatedAt.Add(store.DecisionDismissMinAge)
+	})
+	dsmWdIn.RowIDs = []string{wdRows[0]}
+	_, err = f.cs.DismissDecisions(ctx, dsmWdIn)
+	require.NoError(t, err)
+
+	_, err = f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"D-WD-1", "D-WD-2"},
+		Reason:       "Try withdraw both",
+	})
+	var wdErr *store.WithdrawDecisionsError
+	require.ErrorAs(t, err, &wdErr)
+	require.Len(t, wdErr.Failures, 1)
+	assert.Equal(t, "D-WD-1", wdErr.Failures[0].Key)
+	assert.Equal(t, store.WithdrawReasonDismissed, wdErr.Failures[0].Reason)
+
+	// WholeSet on pending D-WD-2 withdraws D-WD-2 and skips dismissed sibling D-WD-1!
+	wdSetRes, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"D-WD-2"},
+		WholeSet:     true,
+		Reason:       "Withdraw remaining open",
+	})
+	require.NoError(t, err)
+	require.Len(t, wdSetRes.Withdrawn, 1)
+	assert.Equal(t, "D-WD-2", wdSetRes.Withdrawn[0].Key)
+
+	gotWd0, err := f.cs.GetDecision(ctx, wdRows[0])
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusDismissed, gotWd0.Status, "dismissed sibling stays dismissed")
+
+	// 5. Reusing a dismissed key without --update gives hint "D-WD-1 already exists (v1, dismissed by Pat)".
+	_, err = f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, yesNo("D-WD-1", "Reuse without update?")))
+	var keyExists *store.DecisionKeyExistsError
+	require.ErrorAs(t, err, &keyExists)
+	require.Len(t, keyExists.Existing, 1)
+	assert.Equal(t, "D-WD-1 already exists (v1, dismissed by Pat)", keyExists.Existing[0].Hint())
+
+	// 6. Made log (ListDecisionAnswers): provenance=dismissed includes only dismiss rows;
+	// other provenances exclude dismiss rows; Query matches dismiss_reason!
+	dsmEntries, _, err := f.cs.ListDecisionAnswers(ctx, []string{f.projectID}, []string{"topic:general"}, store.ProjectDecisionAnswerFilter{
+		Provenance: store.ProjectDecisionProvenanceDismissed,
+	}, "", 50)
+	require.NoError(t, err)
+	require.Len(t, dsmEntries, 2)
+	for _, e := range dsmEntries {
+		assert.Equal(t, store.DecisionOutcomeDismiss, e.Answer.Outcome)
+	}
+
+	for _, otherProv := range []string{
+		store.ProjectDecisionProvenanceDirect,
+		store.ProjectDecisionProvenanceInterpreted,
+		store.ProjectDecisionProvenanceConfirmed,
+		store.ProjectDecisionProvenanceOverridden,
+	} {
+		entries, _, err := f.cs.ListDecisionAnswers(ctx, []string{f.projectID}, []string{"topic:general"}, store.ProjectDecisionAnswerFilter{
+			Provenance: otherProv,
+		}, "", 50)
+		require.NoError(t, err)
+		for _, e := range entries {
+			assert.NotEqual(t, store.DecisionOutcomeDismiss, e.Answer.Outcome, "provenance=%s must exclude dismiss rows", otherProv)
+		}
+	}
+
+	reasonEntries, _, err := f.cs.ListDecisionAnswers(ctx, []string{f.projectID}, []string{"topic:general"}, store.ProjectDecisionAnswerFilter{
+		Query: "xylophone",
+	}, "", 50)
+	require.NoError(t, err)
+	require.Len(t, reasonEntries, 1)
+	assert.Equal(t, "D-INT-1", reasonEntries[0].Decision.Key)
+	assert.Equal(t, "Misread reply — xylophone check", reasonEntries[0].Answer.DismissReason)
+
+	// 7. Agent ListAgentDecisions (DecisionListStateDismissed + query) and GetAgentDecisionVersions.
+	dsmList, _, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateDismissed, "", "", 50)
+	require.NoError(t, err)
+	require.Len(t, dsmList, 2)
+	assert.Equal(t, "D-WD-1", dsmList[0].Key)
+	assert.Equal(t, "D-INT-1", dsmList[1].Key)
+
+	dsmSearch, _, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateDismissed, "xylophone", "", 50)
+	require.NoError(t, err)
+	require.Len(t, dsmSearch, 1)
+	assert.Equal(t, "D-INT-1", dsmSearch[0].Key)
 }
