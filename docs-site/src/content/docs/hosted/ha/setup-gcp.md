@@ -1112,7 +1112,9 @@ for all backends and fields.
 :::
 
 :::caution[Cloud Run Timeout Warning]
-We explicitly set `--timeout=900` (15 minutes). When dispatching the very first agent, GKE Autopilot triggers node provisioning to scale up from 0 nodes, which routinely takes 5-10 minutes. The default Cloud Run timeout (300 seconds) will prematurely kill the request, return a `503 Service Unavailable`, and tear down the initiating container. Set the timeout to at least 900 seconds to prevent this.
+We explicitly set `--timeout=900` (15 minutes). When dispatching the very first agent, GKE Autopilot triggers node provisioning to scale up from 0 nodes, which routinely takes 5-10 minutes. The default Cloud Run timeout (300 seconds) will prematurely kill the request, return a `503 Service Unavailable`, and tear down the initiating container. Set the timeout to at least 900 seconds to prevent this, and pair it with `server.hub.platform_request_timeout: "900s"` in `settings.yaml` so the Hub closes long-lived events streams and Conduit sessions cleanly before Cloud Run cuts them.
+
+For multi-user deployments, also raise `--concurrency` (to `250` or higher) and `--memory` (to `1Gi` or higher): every open web UI events stream, terminal session, and agent tunnel holds one `containerConcurrency` slot for its entire lifetime, and Cloud Run's default concurrency of `80` saturates with HTTP `429` errors under moderate UI and agent load. See [Sizing for Long-Lived Connections](/scion/hosted/ha/sizing/) for the slot formula, recommended settings pairing, and worked examples.
 :::
 
 ---

@@ -210,6 +210,7 @@ export default defineConfig({
 							label: 'Admin Guide',
 							items: [
 								{ label: 'HA Overview', slug: 'hosted/ha/overview' },
+								{ label: 'Sizing for Long-Lived Connections', slug: 'hosted/ha/sizing' },
 								{ label: 'Deploy on GCP (Cloud Run + GKE)', slug: 'hosted/ha/setup-gcp' },
 								{ label: 'Multi-Hub HA with Terraform', slug: 'hosted/ha/terraform' },
 								{ label: 'Deploy via Helm (GKE)', slug: 'hosted/ha/helm' },
