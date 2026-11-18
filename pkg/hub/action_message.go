@@ -330,7 +330,7 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 	renderMessageID := ""
 	renderCreatedAt := time.Now().UTC()
 	dispatchCtx := retryCtx
-	if s.conduitDeliverEnabled() {
+	if s.conduitDeliverEnabled() && !DispatchedEventUsesPhaseANoRow(req) {
 		var persistErr error
 		storeMsg, persistErr = s.persistScheduledMessageEvent(retryCtx, req.ProjectID, fireID, agent, payload, structuredMsg)
 		if persistErr != nil {

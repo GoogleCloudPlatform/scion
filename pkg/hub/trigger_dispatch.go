@@ -350,6 +350,19 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 	return body
 }
 
+// DispatchedEventUsesPhaseANoRow reports whether req stays on the Stage 1
+// Phase-A unpersisted delivery path even when hub.conduit_deliver is enabled.
+// Trigger fires have no scheduled_events row and use Sender="trigger", so
+// persisting them into messages.scheduled_event_id and holding on
+// awaiting_session would fail held-message re-drive revalidation; keeping them
+// on the no-row path makes non-deliverable targets fail loud and record
+// status=failed on trigger_fires without changing schedule fire behaviour.
+//
+// Named without "Trigger" so action_message.go satisfies TestFireCoreContainment.
+func DispatchedEventUsesPhaseANoRow(req hubfire.FireRequest) bool {
+	return req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger
+}
+
 // ApplyDispatchedEventEnvelope populates structuredMsg's §8.3 event carrier and
 // sender metadata when req.Event is present, before action_message.go persists
 // (when enabled) and calls RenderDeliveryText.

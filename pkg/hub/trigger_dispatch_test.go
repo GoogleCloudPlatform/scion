@@ -1092,3 +1092,175 @@ func TestTriggerDispatchSecurity_ClientSuppliedEventNeverReachesDeliveryText(t *
 		}
 	})
 }
+
+func TestTriggerDispatchE2E_ConduitDeliverAwaitingSessionSkipsHoldAndFailsLoud(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+
+	setHoldTestSettings(t, f.srv, map[string]bool{
+		conduitExperiment:             true,
+		experiments.ConduitDeliver:    true,
+		experiments.ChatScheduledSend: true,
+		experiments.Triggers:          true,
+	})
+	require.True(t, f.srv.conduitDeliverEnabled(), "precondition: hub.conduit_deliver must be enabled")
+
+	// Place f.launched into an active awaiting_session hold (no Conduit session connected).
+	heldControl := f.seedHeldMessage(t, "user:"+f.launched.OwnerID, f.launched.OwnerID, "held-control", time.Now().UTC().Add(5*time.Minute))
+	require.Equal(t, store.MessageDispatchAwaitingSession, heldControl.DispatchState)
+
+	// 1. Control: schedule fire behaviour is unchanged — persists a store.Message
+	// row with ScheduledEventID and holds behind awaiting_session without calling the broker.
+	schedPayload, err := json.Marshal(MessageEventPayload{
+		AgentName: f.launched.Slug,
+		Message:   "sched-still-holds",
+	})
+	require.NoError(t, err)
+	schedEvt := withAgentRevision(t, f.srv, store.ScheduledEvent{
+		ID:        api.NewUUID(),
+		ProjectID: f.launched.ProjectID,
+		EventType: "message",
+		Payload:   string(schedPayload),
+		Status:    store.ScheduledEventPending,
+		CreatedBy: f.agent.ID,
+	}, f.agent.ID)
+	require.NoError(t, f.store.CreateScheduledEvent(ctx, &schedEvt))
+	require.NoError(t, f.srv.messageEventHandler()(ctx, schedEvt))
+	assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug), "schedule fire still holds behind awaiting_session")
+
+	beforeMsgs, err := f.store.ListMessages(ctx, store.MessageFilter{AgentID: f.launched.ID}, store.ListOptions{Limit: 20})
+	require.NoError(t, err)
+	require.Len(t, beforeMsgs.Items, 2, "expected control held message + scheduled held message")
+
+	// Helper to seed and execute one trigger fire against the awaiting-session f.launched target.
+	fireTriggerOnce := func(t *testing.T, suffix string, interrupt bool) store.TriggerFire {
+		t.Helper()
+		now := time.Now().UTC()
+		epID := api.NewUUID()
+		require.NoError(t, f.store.CreateWebhookEndpoint(ctx, &store.WebhookEndpoint{
+			ID:                  epID,
+			ProjectID:           f.launched.ProjectID,
+			Name:                "conduit-ep-" + suffix,
+			OwnerPrincipalKind:  store.DelegationPrincipalUser,
+			OwnerPrincipalID:    f.launched.OwnerID,
+			OwnerCredentialKind: store.InitiatorCredentialKindSession,
+			SecretVersion:       1,
+			SignatureMode:       store.WebhookSignatureModeScionV1,
+			Status:              store.WebhookEndpointStatusActive,
+			CreatedAt:           now,
+			UpdatedAt:           now,
+		}))
+
+		actRaw, err := json.Marshal(MessageEventPayload{
+			AgentID:   f.launched.ID,
+			Message:   "trigger-no-row-" + suffix,
+			Interrupt: interrupt,
+		})
+		require.NoError(t, err)
+
+		trID := api.NewUUID()
+		require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+			ID:            trID,
+			ProjectID:     f.launched.ProjectID,
+			Name:          "conduit-tr-" + suffix,
+			SourceKind:    store.TriggerSourceKindWebhook,
+			SourceID:      epID,
+			MatchTypes:    []string{"webhook.received"},
+			MatchDialect:  store.TriggerDialectCEL,
+			ActionType:    store.TriggerActionMessage,
+			ActionPayload: string(actRaw),
+			SubjectMode:   store.TriggerSubjectModeNew,
+			Status:        store.TriggerStatusActive,
+			InitiatorAttribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+				InitiatorPrincipalID:    f.launched.OwnerID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+				AttributionVersion:      1,
+				AuthorizationRevision:   1,
+			},
+			AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}))
+
+		ev := &store.TriggerEvent{
+			ID:           api.NewUUID(),
+			ProjectID:    f.launched.ProjectID,
+			SourceKind:   store.TriggerSourceKindWebhook,
+			SourceID:     epID,
+			Type:         "webhook.received",
+			Subject:      "webhook:" + epID,
+			DedupKey:     "conduit-deliv-" + suffix,
+			OccurredAt:   now,
+			ReceivedAt:   now,
+			Attributes:   map[string]string{"endpoint_name": "conduit-ep-" + suffix, "signature_mode": "scion_v1"},
+			Payload:      `{"ok":true}`,
+			PayloadBytes: len(`{"ok":true}`),
+			CreatedAt:    now,
+		}
+		q := f.srv.TriggerEventQueue()
+		require.NotNil(t, q)
+		var itemSeq int64
+		require.NoError(t, f.store.WithTx(ctx, func(tx store.Store) error {
+			var enqErr error
+			itemSeq, enqErr = trigger.EnqueueEvent(ctx, tx, tx, q, ev)
+			return enqErr
+		}))
+		rawPayload, err := json.Marshal(trigger.EventQueuePayload{
+			Version: trigger.EventQueuePayloadVersion,
+			EventID: ev.ID,
+		})
+		require.NoError(t, err)
+		disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+			Core:  serverTriggerCore{srv: f.srv},
+			Store: f.store,
+		})
+		require.NoError(t, err)
+		res := disp.HandleItem(ctx, durablequeue.Item{
+			Seq:       itemSeq,
+			Kind:      trigger.EventQueueKind,
+			DedupKey:  ev.ID,
+			ProjectID: ev.ProjectID,
+			Payload:   rawPayload,
+		}, staticQueueLease{})
+		require.NoError(t, res.Err)
+		assert.True(t, res.Done)
+
+		fires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: trID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, fires.Items, 1)
+		return fires.Items[0]
+	}
+
+	// 2. Real broker + AgentManager on Cloud Run (Interrupt=true): skips store.Message
+	// persist and awaiting_session hold, fails loud because unpersisted messages have
+	// no hub row ID and Cloud Run has no exec, and records status=failed.
+	fireInt := fireTriggerOnce(t, "interrupt", true)
+	assert.Equal(t, store.TriggerFireStatusFailed, fireInt.Status)
+	assert.NotEmpty(t, fireInt.Error)
+	assert.Equal(t, 1, f.disp.dispatchCount(f.launched.Slug), "trigger fire must bypass awaiting_session hold and attempt direct dispatch")
+
+	// 3. Non-interrupt trigger fire against an awaiting-session broker returning
+	// ErrAwaitingSession: also skips persist + hold (instead of holding a row with
+	// ScheduledEventID=fireID and Sender=trigger), fails loud, and records failed.
+	f.srv.SetDispatcher(&ctxBlockingWakeDispatcher{
+		onMessage: func(_ context.Context, _ *store.Agent, msg *messages.StructuredMessage) error {
+			require.NotNil(t, msg)
+			assert.Empty(t, msg.StoredMessageID, "trigger fire must stay on Phase-A no-row path")
+			return agent.ErrAwaitingSession
+		},
+	})
+	fireNonInt := fireTriggerOnce(t, "non-interrupt", false)
+	assert.Equal(t, store.TriggerFireStatusFailed, fireNonInt.Status)
+	assert.Contains(t, fireNonInt.Error, agent.ErrAwaitingSession.Error())
+
+	// Confirm zero store.Message rows were persisted for either trigger fire.
+	afterMsgs, err := f.store.ListMessages(ctx, store.MessageFilter{AgentID: f.launched.ID}, store.ListOptions{Limit: 20})
+	require.NoError(t, err)
+	assert.Len(t, afterMsgs.Items, len(beforeMsgs.Items), "trigger fires in Stage 1 must not persist or hold store.Message rows")
+	for _, m := range afterMsgs.Items {
+		assert.NotEqual(t, "trigger", m.Sender, "no store.Message row may be persisted with Sender=trigger")
+		assert.NotEqual(t, fireInt.ID, m.ScheduledEventID)
+		assert.NotEqual(t, fireNonInt.ID, m.ScheduledEventID)
+	}
+}
