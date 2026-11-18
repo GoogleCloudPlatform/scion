@@ -28,8 +28,6 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/protobuf/types/known/timestamppb"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
@@ -51,24 +49,18 @@ func sanitizedErrorText(err error) string {
 	return SanitizeText(fmt.Sprint(err))
 }
 
-// validCloudTime reports whether t lies within Cloud Logging's accepted
-// timestamp range ([0001-01-01T00:00:00Z, 9999-12-31T23:59:59.999999999Z])
-// and encodes cleanly as strict RFC 3339.
+// validCloudTime reports whether t encodes cleanly as strict RFC 3339 (matching
+// encoding/json's Time.MarshalJSON check on year [0, 9999] and zone offset).
 func validCloudTime(t time.Time) bool {
-	if !timestamppb.New(t).IsValid() {
-		return false
-	}
 	_, err := t.MarshalText()
 	return err == nil
 }
 
 // cloudAttrValue returns the Cloud Logging payload value for v, a resolved
 // value that is not a group: an error as its sanitized text, any value (or
-// nested element) that cannot be encoded for Cloud Logging replaced with a
-// string while keeping surrounding composite values intact, and valid values
-// unchanged.
+// nested element) that encoding/json rejects replaced with a string while
+// keeping surrounding composite values intact, and valid values unchanged.
 func cloudAttrValue(v slog.Value) any {
-	v = v.Resolve()
 	switch v.Kind() {
 	case slog.KindString, slog.KindInt64, slog.KindUint64, slog.KindBool, slog.KindDuration:
 		return v.Any()
@@ -84,12 +76,6 @@ func cloudAttrValue(v slog.Value) any {
 			return SanitizeText(t.Round(0).String())
 		}
 		return t
-	case slog.KindGroup:
-		m := make(map[string]any)
-		for _, ga := range v.Group() {
-			addAttrToMap(m, ga)
-		}
-		return m
 	}
 	a := v.Any()
 	if a == nil {
@@ -133,108 +119,16 @@ func tryMarshalText(tm encoding.TextMarshaler) (raw []byte, err error) {
 }
 
 func validCloudPayloadValue(a any) bool {
-	if _, err := tryJSONMarshal(a); err != nil {
-		return false
-	}
-	return !containsInvalidCloudTime(reflect.ValueOf(a), make(map[reflect.Type]bool))
-}
-
-func canContainTime(t reflect.Type, seen map[reflect.Type]bool) bool {
-	if t == timeType {
-		return true
-	}
-	if seen[t] {
-		return false
-	}
-	seen[t] = true
-	if t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) {
-		return false
-	}
-	switch t.Kind() {
-	case reflect.Interface:
-		return true
-	case reflect.Pointer, reflect.Slice, reflect.Array:
-		return canContainTime(t.Elem(), seen)
-	case reflect.Map:
-		return canContainTime(t.Key(), seen) || canContainTime(t.Elem(), seen)
-	case reflect.Struct:
-		for i := range t.NumField() {
-			sf := t.Field(i)
-			if sf.Tag.Get("json") == "-" {
-				continue
-			}
-			if !sf.IsExported() && !sf.Anonymous {
-				continue
-			}
-			if canContainTime(sf.Type, seen) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// containsInvalidCloudTime reports whether rv, a value that already marshals
-// cleanly as JSON (so it is acyclic), contains a time.Time outside Cloud
-// Logging's accepted timestamp range (such as year 0).
-func containsInvalidCloudTime(rv reflect.Value, seenTypes map[reflect.Type]bool) bool {
-	for rv.Kind() == reflect.Interface {
-		if rv.IsNil() {
-			return false
-		}
-		rv = rv.Elem()
-	}
-	if !rv.IsValid() || !canContainTime(rv.Type(), collectTypeCache(seenTypes)) {
-		return false
-	}
-	if rv.Type() == timeType {
-		if !rv.CanInterface() {
-			return false
-		}
-		return !validCloudTime(rv.Interface().(time.Time))
-	}
-	switch rv.Kind() {
-	case reflect.Pointer:
-		if rv.IsNil() {
-			return false
-		}
-		return containsInvalidCloudTime(rv.Elem(), seenTypes)
-	case reflect.Slice, reflect.Array:
-		for i := range rv.Len() {
-			if containsInvalidCloudTime(rv.Index(i), seenTypes) {
-				return true
-			}
-		}
-	case reflect.Map:
-		iter := rv.MapRange()
-		for iter.Next() {
-			if containsInvalidCloudTime(iter.Key(), seenTypes) || containsInvalidCloudTime(iter.Value(), seenTypes) {
-				return true
-			}
-		}
-	case reflect.Struct:
-		rt := rv.Type()
-		for i := range rt.NumField() {
-			sf := rt.Field(i)
-			if sf.Tag.Get("json") == "-" || (!sf.IsExported() && !sf.Anonymous) {
-				continue
-			}
-			if containsInvalidCloudTime(rv.Field(i), seenTypes) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func collectTypeCache(m map[reflect.Type]bool) map[reflect.Type]bool {
-	clear(m)
-	return m
+	_, err := tryJSONMarshal(a)
+	return err == nil
 }
 
 // sanitizeCloudReflect clones only the composite path leading to unencodable
-// or out-of-range values, leaving valid subtrees untouched and omitting
-// unexported and json:"-" struct fields.
+// values, leaving valid subtrees untouched and omitting unexported and
+// json:"-" struct fields. It runs only after validCloudPayloadValue failed on
+// the outer attribute, and re-tests each subtree with validCloudPayloadValue
+// (O(n*depth) on already-broken values) so valid siblings and cycles hidden
+// behind custom marshalers pass through without descent.
 func sanitizeCloudReflect(rv reflect.Value, visiting map[visitKey]bool) any {
 	for rv.Kind() == reflect.Interface {
 		if rv.IsNil() {
@@ -377,18 +271,12 @@ func formatCloudMapKey(k reflect.Value) string {
 		return strconv.FormatUint(k.Uint(), 10)
 	}
 	if k.CanInterface() {
-		if k.Type() == timeType {
-			t := k.Interface().(time.Time)
-			if validCloudTime(t) {
-				if b, err := t.MarshalText(); err == nil {
-					return string(b)
-				}
-			}
-			return SanitizeText(t.Round(0).String())
-		}
 		if tm, ok := k.Interface().(encoding.TextMarshaler); ok {
 			if b, err := tryMarshalText(tm); err == nil {
 				return string(b)
+			}
+			if k.Type() == timeType {
+				return SanitizeText(k.Interface().(time.Time).Round(0).String())
 			}
 		}
 		if k.Kind() == reflect.Struct || (k.Kind() == reflect.Pointer && !k.IsNil() && k.Elem().Kind() == reflect.Struct) {
@@ -399,6 +287,9 @@ func formatCloudMapKey(k reflect.Value) string {
 	return "<" + k.Type().String() + ">"
 }
 
+// sanitizeCloudStructFields performs a best-effort field-by-field repair of a
+// struct that already failed json.Marshal, honoring exported visibility,
+// json:"-", explicit field names, basic omitempty, and anonymous embedding.
 func sanitizeCloudStructFields(rv reflect.Value, out map[string]any, visiting map[visitKey]bool, inlined bool) {
 	rt := rv.Type()
 	for i := range rt.NumField() {

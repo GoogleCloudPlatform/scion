@@ -432,6 +432,32 @@ func (b badMarshalerWithSecret) MarshalJSON() ([]byte, error) {
 	return nil, errors.New("cannot encode value")
 }
 
+// pointerReceiverCycleMarshaler reproduces review-1 R1: *cycW implements
+// json.Marshaler while cycW holds a cyclic slice and a time.Time field, so
+// json.Marshal([]cycW) succeeds without following the cycle.
+type pointerReceiverCycleMarshaler struct {
+	Items []any
+	When  time.Time
+}
+
+func (w *pointerReceiverCycleMarshaler) MarshalJSON() ([]byte, error) {
+	return []byte(`"w"`), nil
+}
+
+func runWithin(t *testing.T, timeout time.Duration, name string, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatalf("%s did not complete within %v (cycle guard broken?)", name, timeout)
+	}
+}
+
 // TestCloudHandler_UnencodableAttrsReplacedEntryWritten verifies that the
 // Cloud Logging slog handlers replace only the unencodable value (such as a
 // NaN nested in a map attribute or an out-of-range time.Time) and still
@@ -508,7 +534,7 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 		}
 	})
 
-	t.Run("out-of-range time direct and nested", func(t *testing.T) {
+	t.Run("out-of-range time direct and nested, valid and year-0 preserved", func(t *testing.T) {
 		errBuf.Reset()
 		validTime := time.Date(2026, 10, 12, 17, 0, 0, 0, time.UTC)
 		year10000 := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -521,16 +547,16 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 			"valid_time", validTime,
 			slog.Time("year_10000", year10000),
 			"negative_year", negYear,
-			"year_zero", yearZero,
+			slog.Time("year_zero", yearZero),
 			"bad_zone", badZone,
 			"nested", map[string]any{
 				"ok":         "still-here",
 				"far_future": time.Unix(1<<50, 0).UTC(),
-				"before_min": yearZero,
+				"year_zero":  yearZero,
 			},
 			"year_zero_only_map", map[string]any{
-				"ok":         "still-here",
-				"before_min": yearZero,
+				"ok":        "still-here",
+				"year_zero": yearZero,
 			},
 		)
 		if err := gcpLogger.Flush(); err != nil {
@@ -550,7 +576,10 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 		if got["valid_time"] != "2026-10-12T17:00:00Z" {
 			t.Errorf("valid_time = %#v, want RFC3339 string", got["valid_time"])
 		}
-		for _, k := range []string{"year_10000", "negative_year", "year_zero", "bad_zone"} {
+		if got["year_zero"] != "0000-06-15T12:00:00Z" {
+			t.Errorf("year_zero = %#v, want preserved RFC3339 string", got["year_zero"])
+		}
+		for _, k := range []string{"year_10000", "negative_year", "bad_zone"} {
 			if s, ok := got[k].(string); !ok || s == "" {
 				t.Errorf("%s = %#v (%T), want non-empty string replacement", k, got[k], got[k])
 			}
@@ -559,17 +588,15 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 		if !ok || nested["ok"] != "still-here" {
 			t.Fatalf("nested = %#v (%T), want preserved map object", got["nested"], got["nested"])
 		}
-		for _, k := range []string{"far_future", "before_min"} {
-			if s, ok := nested[k].(string); !ok || s == "" {
-				t.Errorf("nested.%s = %#v (%T), want non-empty string replacement", k, nested[k], nested[k])
-			}
+		if s, ok := nested["far_future"].(string); !ok || s == "" {
+			t.Errorf("nested.far_future = %#v (%T), want non-empty string replacement", nested["far_future"], nested["far_future"])
+		}
+		if nested["year_zero"] != "0000-06-15T12:00:00Z" {
+			t.Errorf("nested.year_zero = %#v, want preserved RFC3339 string", nested["year_zero"])
 		}
 		yzMap, ok := got["year_zero_only_map"].(map[string]any)
-		if !ok || yzMap["ok"] != "still-here" {
-			t.Fatalf("year_zero_only_map = %#v (%T), want preserved map object", got["year_zero_only_map"], got["year_zero_only_map"])
-		}
-		if s, ok := yzMap["before_min"].(string); !ok || s == "" || strings.HasSuffix(s, "Z") {
-			t.Errorf("year_zero_only_map.before_min = %#v, want replaced non-RFC3339 string", yzMap["before_min"])
+		if !ok || yzMap["ok"] != "still-here" || yzMap["year_zero"] != "0000-06-15T12:00:00Z" {
+			t.Errorf("year_zero_only_map = %#v, want preserved map and RFC3339 year-0 time", got["year_zero_only_map"])
 		}
 	})
 
@@ -596,24 +623,38 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 		cyclicNode.Next = cyclicNode
 		cyclic := map[string]any{"ok": "yes"}
 		cyclic["self"] = cyclic
+		cyclicSlice := make([]any, 2)
+		cyclicSlice[0] = "ok"
+		cyclicSlice[1] = cyclicSlice
 
-		log.Info("composite check",
-			"struct_val", sampleStruct{
-				hiddenEmbed: hiddenEmbed{
-					Promoted: 3.5,
-					secret:   "do-not-log-embed-secret",
+		ws := []pointerReceiverCycleMarshaler{{}}
+		ws[0].Items = []any{ws}
+
+		runWithin(t, 2*time.Second, "composite and cycle log", func() {
+			log.Info("composite check",
+				"struct_val", sampleStruct{
+					hiddenEmbed: hiddenEmbed{
+						Promoted: 3.5,
+						secret:   "do-not-log-embed-secret",
+					},
+					Count:      7,
+					Ratio:      math.NaN(),
+					Hidden:     "do-not-log-json-dash",
+					unexported: "do-not-log-unexported",
 				},
-				Count:      7,
-				Ratio:      math.NaN(),
-				Hidden:     "do-not-log-json-dash",
-				unexported: "do-not-log-unexported",
-			},
-			"bad_marshaler", badMarshalerWithSecret{secret: "do-not-log-marshaler-secret"},
-			"slice_val", []float64{1.25, math.NaN(), 2.5},
-			"acyclic_node", acyclicNode,
-			"cyclic_node", cyclicNode,
-			"cyclic", cyclic,
-		)
+				"bad_marshaler", badMarshalerWithSecret{secret: "do-not-log-marshaler-secret"},
+				"slice_val", []float64{1.25, math.NaN(), 2.5},
+				"acyclic_node", acyclicNode,
+				"cyclic_node", cyclicNode,
+				"cyclic", cyclic,
+				"cyclic_slice", cyclicSlice,
+				"ptr_marshaler_cycle", ws,
+				"ptr_marshaler_cycle_in_broken_map", map[string]any{
+					"wrapped": ws,
+					"bad":     math.NaN(),
+				},
+			)
+		})
 		if err := gcpLogger.Flush(); err != nil {
 			t.Fatalf("Flush failed: %v (stderr: %s)", err, errBuf.String())
 		}
@@ -658,6 +699,51 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 		cm, ok := got["cyclic"].(map[string]any)
 		if !ok || cm["ok"] != "yes" || cm["self"] != "<cycle>" {
 			t.Errorf("cyclic = %#v", got["cyclic"])
+		}
+		cs, ok := got["cyclic_slice"].([]any)
+		if !ok || len(cs) != 2 || cs[0] != "ok" || cs[1] != "<cycle>" {
+			t.Errorf("cyclic_slice = %#v", got["cyclic_slice"])
+		}
+		pmc, ok := got["ptr_marshaler_cycle"].([]any)
+		if !ok || len(pmc) != 1 || pmc[0] != "w" {
+			t.Errorf("ptr_marshaler_cycle = %#v, want [\"w\"]", got["ptr_marshaler_cycle"])
+		}
+		pmcMap, ok := got["ptr_marshaler_cycle_in_broken_map"].(map[string]any)
+		if !ok || pmcMap["bad"] != "NaN" {
+			t.Fatalf("ptr_marshaler_cycle_in_broken_map = %#v", got["ptr_marshaler_cycle_in_broken_map"])
+		}
+		if wrapped, ok := pmcMap["wrapped"].([]any); !ok || len(wrapped) != 1 || wrapped[0] != "w" {
+			t.Errorf("ptr_marshaler_cycle_in_broken_map.wrapped = %#v, want [\"w\"]", pmcMap["wrapped"])
+		}
+	})
+
+	t.Run("valid composites encode identically to json.Marshal", func(t *testing.T) {
+		type validItem struct {
+			Name string    `json:"name"`
+			At   time.Time `json:"at"`
+			Tags []string  `json:"tags,omitempty"`
+		}
+		composite := map[string]any{
+			"items": []validItem{
+				{Name: "one", At: time.Date(2026, 11, 18, 12, 30, 0, 0, time.UTC), Tags: []string{"a", "b"}},
+				{Name: "epoch0", At: time.Date(0, 1, 1, 0, 0, 0, 0, time.UTC)},
+			},
+			"counts": map[string]int{"x": 1, "y": 2},
+		}
+		var got any
+		runWithin(t, time.Second, "valid composite fast path", func() {
+			got = cloudAttrValue(slog.AnyValue(composite))
+		})
+		wantJSON, err := json.Marshal(composite)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gotJSON, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotJSON) != string(wantJSON) {
+			t.Errorf("valid composite JSON changed:\n got %s\nwant %s", gotJSON, wantJSON)
 		}
 	})
 
