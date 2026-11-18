@@ -353,6 +353,10 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			return durablequeue.Result{Err: errors.New("trigger: claim fire failed")}
 		}
 		if !claimed {
+			// Display-only counter: on a lost-lease re-handle, if an earlier
+			// attempt's claimed row is still in status "firing" (or transitions to
+			// "fired" after this check), fire_count on trigger_events can
+			// undercount; trigger_fires rows remain the authoritative fire log.
 			if existing != nil && existing.Status == store.TriggerFireStatusFired {
 				fireCount++
 			}

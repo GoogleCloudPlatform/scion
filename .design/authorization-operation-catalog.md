@@ -3536,8 +3536,8 @@
 
 ### Tests
 
+- `pkg/hub:TestTriggerDispatchE2E_RevokedAuthorityRecordsRefusedFire`
 - `pkg/hub:TestScheduledFire_UsesRecordedTokenCeiling`
-- `pkg/hub:TestTriggerEventsAndHistory_AuthzMatrix`
 
 ### Exemptions
 

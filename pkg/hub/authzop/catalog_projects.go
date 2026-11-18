@@ -1301,8 +1301,8 @@ var projectOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestTriggerDispatchE2E_RevokedAuthorityRecordsRefusedFire"},
 			{Package: "pkg/hub", Function: "TestScheduledFire_UsesRecordedTokenCeiling"},
-			{Package: "pkg/hub", Function: "TestTriggerEventsAndHistory_AuthzMatrix"},
 		},
 		Exemptions: []Exemption{{
 			Kind: ExemptionInternalOnly,

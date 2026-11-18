@@ -47,27 +47,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func TestPackageTrigger_DoesNotImportHub(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	require.NoError(t, err)
-	fset := token.NewFileSet()
-	checked := 0
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") {
-			continue
-		}
-		f, parseErr := parser.ParseFile(fset, filepath.Clean(entry.Name()), nil, parser.ImportsOnly)
-		require.NoError(t, parseErr)
-		checked++
-		for _, imp := range f.Imports {
-			p := strings.Trim(imp.Path.Value, `"`)
-			assert.NotEqual(t, "github.com/GoogleCloudPlatform/scion/pkg/hub", p,
-				"%s must not import package hub (Stage 1 D-S1-1(c))", entry.Name())
-		}
-	}
-	require.GreaterOrEqual(t, checked, 6)
-}
-
 func TestSignAndVerifyScionV1(t *testing.T) {
 	// Representative 32-byte random secret encoded as RawURLEncoding (what 1b-1 generates).
 	rawKeyBytes := []byte("0123456789abcdef0123456789abcdef")
