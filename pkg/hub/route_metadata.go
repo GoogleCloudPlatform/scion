@@ -507,6 +507,16 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/conduit/grant-keys", RouteID: "conduit.grant_keys",
 		Classification: RouteAuthenticated,
 	},
+	// Trigger rule preset schemas and stateless form compiler, behind
+	// hub.github_triggers. Reads no tenant rows and mutates no state.
+	"GET /api/v1/trigger-presets": {
+		Pattern: "GET /api/v1/trigger-presets", RouteID: "triggerPresets.list",
+		Classification: RouteAuthenticated,
+	},
+	"POST /api/v1/trigger-presets/compile": {
+		Pattern: "POST /api/v1/trigger-presets/compile", RouteID: "triggerPresets.compile",
+		Classification: RouteAuthenticated,
+	},
 	// Conduit sessions (WebSocket), behind hub.conduit. Agent principals
 	// authenticate with an agent token carrying agent:port:forward (the
 	// handler reads the agent row); runtime broker principals authenticate

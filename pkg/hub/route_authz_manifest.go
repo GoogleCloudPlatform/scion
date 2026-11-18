@@ -332,6 +332,8 @@ var routeAuthzManifest = map[string]string{
 	"GET /api/v1/github-app/repo-routing":                   "authenticated", // List GitHub App trigger repo routing
 	"PUT /api/v1/github-app/repo-routing/{owner}/{repo}":    "authenticated", // Set GitHub App trigger repo primary project
 	"DELETE /api/v1/github-app/repo-routing/{owner}/{repo}": "authenticated", // Delete GitHub App trigger repo primary project
+	"GET /api/v1/trigger-presets":                           "authenticated", // List trigger rule preset schemas (stateless; 404 when hub.github_triggers is off)
+	"POST /api/v1/trigger-presets/compile":                  "authenticated", // Compile trigger rule preset form (stateless; 404 when hub.github_triggers is off)
 
 	// ── Hub test identities (test_identity.issue; 404 unless enabled) ──
 	"POST /api/v1/test-identities":                     "authenticated", // Issue a test identity
