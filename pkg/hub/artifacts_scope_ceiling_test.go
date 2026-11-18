@@ -19,8 +19,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -119,14 +122,72 @@ func TestCeilingOptionalScopesDoNotDecideDelegation(t *testing.T) {
 	assert.False(t, explicit.Allowed, "an explicitly requested optional scope stays required")
 }
 
-// TestCeilingOptionalRoleScopesAreExactlyTheArtifactScopes keeps the set of
-// role scopes that do not decide role fit or delegation to exactly the two
-// artifact scopes; any addition needs its own review.
-func TestCeilingOptionalRoleScopesAreExactlyTheArtifactScopes(t *testing.T) {
-	assert.Equal(t, map[AgentTokenScope]bool{
+func checkCeilingOptionalRoleScopesReviewed(optional, reviewed map[AgentTokenScope]bool, bundles func(AgentRole) []AgentTokenScope) error {
+	inAnyRole := map[AgentTokenScope]bool{}
+	for _, role := range []AgentRole{AgentRoleReadOnly, AgentRoleBaseline, AgentRoleFull} {
+		for _, s := range bundles(role) {
+			inAnyRole[s] = true
+		}
+	}
+	for s, enabled := range optional {
+		if !enabled {
+			return fmt.Errorf("ceilingOptionalRoleScopes[%q] is false; omit absent scopes rather than storing false (sortedOptionalRoleScopes iterates map keys)", s)
+		}
+		if !inAnyRole[s] {
+			return fmt.Errorf("ceilingOptionalRoleScopes[%q] does not appear in any ScopesForRole bundle", s)
+		}
+		if !reviewed[s] {
+			return fmt.Errorf(
+				"ceilingOptionalRoleScopes contains unreviewed scope %q: "+
+					"ceilingOptionalRoleScopes IS the required classification for additive role scopes (ptone/scion#8324); "+
+					"before adding %q to the reviewed map in TestCeilingOptionalRoleScopesAreReviewed, confirm: "+
+					"(1) its permission coverage is pinned in TestAgentTokenScopesMapToRegistry and safe to exclude from unrecorded legacy chains, "+
+					"(2) handlers/CLI fail gracefully (e.g. 403 missing_scope) when pre-deploy bounded chains lack it until 'scion reset-auth --reissue-scopes', and "+
+					"(3) skipping it in canAgentDelegateToAgent's JWT check cannot widen authority beyond the delegator's live chain ceiling",
+				s, s,
+			)
+		}
+	}
+	for s := range reviewed {
+		if !optional[s] {
+			return fmt.Errorf("reviewed optional scope %q was removed from ceilingOptionalRoleScopes; update TestCeilingOptionalRoleScopesAreReviewed if intentional", s)
+		}
+	}
+	return nil
+}
+
+// TestCeilingOptionalRoleScopesAreReviewed ensures additions to
+// ceilingOptionalRoleScopes receive explicit security review rather than
+// pinning the set closed against future additive role scopes
+// (ptone/scion#8324).
+func TestCeilingOptionalRoleScopesAreReviewed(t *testing.T) {
+	reviewed := map[AgentTokenScope]bool{
 		ScopeProjectArtifactRead:  true,
 		ScopeProjectArtifactWrite: true,
-	}, ceilingOptionalRoleScopes)
+	}
+	require.NoError(t, checkCeilingOptionalRoleScopesReviewed(ceilingOptionalRoleScopes, reviewed, ScopesForRole))
+
+	t.Run("unreviewed addition prompts review checklist", func(t *testing.T) {
+		candidate := map[AgentTokenScope]bool{
+			ScopeProjectArtifactRead:  true,
+			ScopeProjectArtifactWrite: true,
+			ScopeProjectTemplateWrite: true,
+		}
+		err := checkCeilingOptionalRoleScopesReviewed(candidate, reviewed, ScopesForRole)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), string(ScopeProjectTemplateWrite))
+		assert.Contains(t, err.Error(), "TestCeilingOptionalRoleScopesAreReviewed")
+	})
+
+	t.Run("false entry rejected", func(t *testing.T) {
+		bad := map[AgentTokenScope]bool{
+			ScopeProjectArtifactRead:  true,
+			ScopeProjectArtifactWrite: false,
+		}
+		err := checkCeilingOptionalRoleScopesReviewed(bad, reviewed, ScopesForRole)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "false")
+	})
 }
 
 // assertNoArtifactAccess checks that an agent holding scopes has neither
@@ -275,12 +336,20 @@ func TestDroppedScopesWarningText(t *testing.T) {
 	assert.Contains(t, both, "missing_scope")
 	assert.Contains(t, both, "same parent gives it the same scopes")
 	assert.Contains(t, both, "hub super-admin can run 'scion reset-auth worker-1 --reissue-scopes'")
+	assert.NotContains(t, strings.ToLower(both), "artifact commands")
 
 	one := droppedScopesWarning(&store.Agent{Name: "Worker 2"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead}})
 	assert.Contains(t, one, "without the project:artifact:read scope:")
 	assert.Contains(t, one, "does not allow it,")
 	assert.Contains(t, one, "'scion reset-auth <agent> --reissue-scopes'", "a display name is never used in the command")
 	assert.NotContains(t, one, "Worker 2")
+
+	nonArtifact := droppedScopesWarning(&store.Agent{Slug: "worker-4"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectTemplateWrite}})
+	assert.Contains(t, nonArtifact, "without the project:template:write scope:")
+	assert.Contains(t, nonArtifact, "does not allow it,")
+	assert.Contains(t, nonArtifact, "missing_scope")
+	assert.Contains(t, nonArtifact, "'scion reset-auth worker-4 --reissue-scopes'")
+	assert.NotContains(t, strings.ToLower(nonArtifact), "artifact", "warning text must be generic across scopes")
 
 	slugged := droppedScopesWarning(&store.Agent{Slug: "worker-3", Name: "Worker 3 (docs site)"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactWrite}})
 	assert.Contains(t, slugged, "'scion reset-auth worker-3 --reissue-scopes'")
@@ -340,4 +409,140 @@ func TestMintWarnsWhenCeilingDropsArtifactScopes(t *testing.T) {
 		assert.NotContains(t, w, "issued without the", "no warning when the ceiling allows the artifact scopes")
 	}
 	assert.Contains(t, f.tokenClaims(t, f.client.lastResolvedEnv["SCION_AUTH_TOKEN"]).Scopes, ScopeProjectArtifactWrite)
+}
+
+// withholdRoleScopesForTest simulates a pre-deploy binary whose ScopesForRole
+// did not yet include scopes. Calling deploy restores the post-deploy bundle.
+func withholdRoleScopesForTest(t *testing.T, scopes ...AgentTokenScope) (deploy func()) {
+	t.Helper()
+	prev := roleScopesWithheldForTest
+	m := make(map[AgentTokenScope]bool, len(scopes))
+	for _, s := range scopes {
+		m[s] = true
+	}
+	roleScopesWithheldForTest = m
+	restored := false
+	restore := func() {
+		if !restored {
+			roleScopesWithheldForTest = prev
+			restored = true
+		}
+	}
+	t.Cleanup(restore)
+	return restore
+}
+
+// TestAdditiveCeilingOptionalRoleScope_NoDelegation403OrWidening reproduces a
+// Hub deploy that adds a scope (shaped like project:template:write) to
+// AgentRoleFull after a principal-rooted coordinator and an agent-created lead
+// are already running (ptone/scion#8324, parent ptone/scion#1515):
+//   - Without ceilingOptionalRoleScopes, both stale-JWT and bounded-chain
+//     delegation fail with 403.
+//   - With ceilingOptionalRoleScopes, both parents create full-role children
+//     with 201 (no 403 and no silent role downgrade), the bounded chain's
+//     child does not gain the new scope or permissions (no privilege
+//     widening) and emits the generic dropped-scope warning, and top-down
+//     scope re-issue grants the new scope cleanly.
+func TestAdditiveCeilingOptionalRoleScope_NoDelegation403OrWidening(t *testing.T) {
+	const addedScope = ScopeProjectTemplateWrite
+	deploy := withholdRoleScopesForTest(t, addedScope)
+
+	f := newChainFixture(t, "additive-optional")
+	f.srv.authzService.mintDevAuthOverride = false
+	ctx := context.Background()
+
+	// Pre-deploy binary: session user creates coord (principal ceiling), and
+	// coord creates lead (bounded ceiling frozen before addedScope existed).
+	coord, coordEdge := f.createdAgent(t,
+		f.create(t, authUser(f.creator), CreateAgentRequest{Name: "coord", AgentRole: string(AgentRoleFull)}),
+		"coord")
+	require.Equal(t, store.EffectCeilingPrincipal, coordEdge.Kind)
+	coordTokOld := f.agentToken(t, coord.ID)
+	require.NotContains(t, f.agentIdentityFor(t, coordTokOld).Scopes(), addedScope)
+
+	lead, leadEdge := f.createdAgent(t,
+		f.createAsParent(t, coordTokOld, CreateAgentRequest{Name: "lead", AgentRole: string(AgentRoleFull)}),
+		"lead")
+	require.Equal(t, store.EffectCeilingBounded, leadEdge.Kind)
+	require.NotContains(t, leadEdge.PermissionIDs, "template.create")
+	require.NotContains(t, leadEdge.PermissionIDs, "template.update")
+	leadTokOld := f.agentToken(t, lead.ID)
+	require.NotContains(t, f.agentIdentityFor(t, leadTokOld).Scopes(), addedScope)
+
+	// Deploy: AgentRoleFull now carries addedScope.
+	deploy()
+	require.Contains(t, ScopesForRole(AgentRoleFull), addedScope)
+
+	// Control: if addedScope were NOT ceiling-optional, both stale-JWT and
+	// refreshed bounded-chain creates fail with 403.
+	recDenied := f.createAsParent(t, coordTokOld, CreateAgentRequest{Name: "denied-coord"})
+	require.Equal(t, http.StatusForbidden, recDenied.Code)
+	assert.Contains(t, recDenied.Body.String(), "agent lacks scope for delegation: "+string(addedScope))
+	leadTokRefreshedBeforeOptional := f.agentToken(t, lead.ID)
+	require.NotContains(t, f.agentIdentityFor(t, leadTokRefreshedBeforeOptional).Scopes(), addedScope)
+	recDeniedLead := f.createAsParent(t, leadTokRefreshedBeforeOptional, CreateAgentRequest{Name: "denied-lead"})
+	require.Equal(t, http.StatusForbidden, recDeniedLead.Code)
+
+	// Enforced rule: addedScope is classed ceiling-optional.
+	ceilingOptionalRoleScopes[addedScope] = true
+	t.Cleanup(func() { delete(ceilingOptionalRoleScopes, addedScope) })
+
+	// 1. Principal-rooted parent with stale pre-deploy JWT creates full child (201, no 403).
+	c1Rec := f.createAsParent(t, coordTokOld, CreateAgentRequest{Name: "coord-child"})
+	c1, _ := f.createdAgent(t, c1Rec, "coord-child")
+	assert.Equal(t, string(AgentRoleFull), c1.AppliedConfig.AgentRole)
+	c1Grant, err := f.srv.AuthorizeAgentToken(ctx, c1)
+	require.NoError(t, err)
+	assert.Contains(t, c1Grant.Scopes, addedScope, "principal-rooted child derives live authority from user creator")
+	assert.Empty(t, c1Grant.DroppedScopes)
+
+	// 2. Bounded-chain parent (both stale JWT and refreshed JWT, defaulted and
+	// explicit full) creates full child with 201 and no privilege widening.
+	l1Rec := f.createAsParent(t, leadTokOld, CreateAgentRequest{Name: "lead-child-default"})
+	l1, l1Edge := f.createdAgent(t, l1Rec, "lead-child-default")
+	assert.Equal(t, string(AgentRoleFull), l1.AppliedConfig.AgentRole, "role must stay full, not silently downgrade")
+	assertDroppedScopesWarning(t, l1Rec, "lead-child-default", addedScope)
+	for _, w := range createResponseWarnings(t, l1Rec) {
+		assert.NotContains(t, strings.ToLower(w), "artifact", "dropped-scope warning must be generic")
+	}
+
+	leadTokRefreshed := f.agentToken(t, lead.ID)
+	assert.NotContains(t, f.agentIdentityFor(t, leadTokRefreshed).Scopes(), addedScope,
+		"refreshing a bounded-chain parent must not widen its scopes")
+	l2Rec := f.createAsParent(t, leadTokRefreshed, CreateAgentRequest{Name: "lead-child-explicit", AgentRole: string(AgentRoleFull)})
+	l2, _ := f.createdAgent(t, l2Rec, "lead-child-explicit")
+	assert.Equal(t, string(AgentRoleFull), l2.AppliedConfig.AgentRole)
+
+	// 3. No privilege widening on bounded-chain children: frozen edge, minted
+	// token, ceiling evaluator, and CheckAccess all deny the new capability.
+	assert.NotContains(t, l1Edge.PermissionIDs, "template.create")
+	assert.NotContains(t, l1Edge.PermissionIDs, "template.update")
+	l1Grant, err := f.srv.AuthorizeAgentToken(ctx, l1)
+	require.NoError(t, err)
+	assert.NotContains(t, l1Grant.Scopes, addedScope)
+	assert.Equal(t, []AgentTokenScope{addedScope}, l1Grant.DroppedScopes)
+	l1Ceiling, err := f.srv.authzService.agentRowEffectCeiling(ctx, l1)
+	require.NoError(t, err)
+	assert.False(t, EffectCeilingAllows(l1Ceiling, "template.create", false))
+	assert.False(t, EffectCeilingAllows(l1Ceiling, "template.update", false))
+	l1Identity := f.agentIdentityFor(t, f.agentToken(t, l1.ID))
+	dec := f.srv.authzService.CheckAccess(ctx, l1Identity, Resource{Type: "template", ParentID: f.proj.ID}, ActionCreate)
+	assert.False(t, dec.Allowed, "bounded child must not be allowed template.create: %s", dec.Reason)
+
+	// 4. Top-down super-admin scope re-issue repairs lead and then l1.
+	op := reissueOperator{UserID: DevUserID, CredentialKind: store.InitiatorCredentialKindSession}
+	leadReissue, err := f.srv.runScopeReissue(ctx, lead, op, false, "")
+	require.NoError(t, err)
+	assert.True(t, slices.Contains(leadReissue.Added, string(addedScope)), "added=%v", leadReissue.Added)
+
+	l1Reloaded, err := f.store.GetAgent(ctx, l1.ID)
+	require.NoError(t, err)
+	l1Reissue, err := f.srv.runScopeReissue(ctx, l1Reloaded, op, false, "")
+	require.NoError(t, err)
+	assert.True(t, slices.Contains(l1Reissue.Added, string(addedScope)), "added=%v", l1Reissue.Added)
+	l1After, err := f.store.GetAgent(ctx, l1.ID)
+	require.NoError(t, err)
+	l1GrantAfter, err := f.srv.AuthorizeAgentToken(ctx, l1After)
+	require.NoError(t, err)
+	assert.Contains(t, l1GrantAfter.Scopes, addedScope)
 }
