@@ -1304,9 +1304,31 @@ func TestAgentDecisions_WithdrawValidationEventsAnswerRefusalAndQueues(t *testin
 	assert.Equal(t, v2Prompt.Decisions[0].RowID, reAskEvt.Decision.ReplacedBy.RowID)
 }
 
+type answerRaceOverrideStore struct {
+	store.Store
+	fault       *storeFaultSwitch
+	before      func()
+	overrideErr error
+}
+
+func (s *answerRaceOverrideStore) RecordAnswer(ctx context.Context, in *store.RecordAnswerInput) (*store.DecisionAnswer, bool, error) {
+	if s.fault.Active() {
+		if b := s.before; b != nil {
+			s.before = nil
+			b()
+		}
+		if s.overrideErr != nil {
+			err := s.overrideErr
+			s.overrideErr = nil
+			return nil, false, err
+		}
+	}
+	return s.Store.RecordAnswer(ctx, in)
+}
+
 func TestDecisionAnswer_WithdrawnAfterStateCheck409(t *testing.T) {
-	srv, st, alice, bob, project, first, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *interpretedFirstStore {
-		return &interpretedFirstStore{Store: inner, fault: f}
+	srv, st, alice, bob, project, first, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *answerRaceOverrideStore {
+		return &answerRaceOverrideStore{Store: inner, fault: f}
 	})
 	f := newDecisionsFixtureOn(t, srv, st, alice, bob, project)
 	_, res := f.topicPrompt(t, oneDecision, false)
@@ -1332,6 +1354,28 @@ func TestDecisionAnswer_WithdrawnAfterStateCheck409(t *testing.T) {
 	wd, ok := view["withdrawn"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, "Won the race", wd["reason"])
+
+	// Even if the pending->decided update surfaces ErrDecisionReplaced when a
+	// concurrent withdraw won, re-reading status=withdrawn still writes 409 withdrawn.
+	_, res2 := f.topicPrompt(t, `[{"id":"D235","question":"Ship 2?","choices":["yes","no"]}]`, false)
+	row2 := res2.Decisions[0].RowID
+	first.before = func() {
+		_, err := f.store.WithdrawDecisions(context.Background(), &store.WithdrawDecisionsInput{
+			AskerAgentID: f.agent.ID,
+			Keys:         []string{"D235"},
+			Reason:       "Withdrawn under ErrDecisionReplaced",
+		})
+		require.NoError(t, err)
+	}
+	first.overrideErr = store.ErrDecisionReplaced
+
+	rr2 := f.answer(t, f.alice, row2, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusConflict, rr2.Code, rr2.Body.String())
+	code2, details2 := errorCodeAndDetails(t, rr2)
+	assert.Equal(t, ErrCodeDecisionWithdrawn, code2)
+	view2, ok := details2["decision"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, store.DecisionStatusWithdrawn, view2["status"])
 }
 
 func TestAgentDecisions_WithdrawMultiKeyWholeSetRefusalsAndListWithdrawn(t *testing.T) {

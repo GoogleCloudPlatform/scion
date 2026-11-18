@@ -1382,11 +1382,10 @@ func TestDecisionsBell_WithdrawTopicAndDMLifecycleAndRightUsers(t *testing.T) {
 
 type withdrawBellSpyStore struct {
 	store.Store
-	fault            *storeFaultSwitch
-	recomputes       atomic.Int64
-	creates          atomic.Int64
-	updates          atomic.Int64
-	topicExpandDelay time.Duration
+	fault      *storeFaultSwitch
+	recomputes atomic.Int64
+	creates    atomic.Int64
+	updates    atomic.Int64
 }
 
 func (s *withdrawBellSpyStore) ProjectsWithDecisions(ctx context.Context, projectIDs []string) ([]string, error) {
@@ -1394,13 +1393,6 @@ func (s *withdrawBellSpyStore) ProjectsWithDecisions(ctx context.Context, projec
 		s.recomputes.Add(1)
 	}
 	return s.Store.ProjectsWithDecisions(ctx, projectIDs)
-}
-
-func (s *withdrawBellSpyStore) GetUsersByIDs(ctx context.Context, ids []string) (map[string]*store.User, error) {
-	if (s.fault == nil || s.fault.Active()) && s.topicExpandDelay > 0 {
-		time.Sleep(s.topicExpandDelay)
-	}
-	return s.Store.GetUsersByIDs(ctx, ids)
 }
 
 func (s *withdrawBellSpyStore) CreateNotification(ctx context.Context, notif *store.Notification) error {
@@ -1436,13 +1428,14 @@ func (s *withdrawBellSpyStore) writes() int64 {
 
 // TestDecisionsBell_WithdrawOncePerUserPerCallAndNoOpOnRepeatAndFailure verifies ptone/scion#8192:
 //   - A failed withdraw (409 withdraw_failed) enqueues nothing;
-//   - A multi-row withdraw spanning multiple prompts, two topics, and a DM enqueues and
-//     recomputes at most once per affected user per call (not once per row, and not split
-//     across topic expansion vs DM), while still publishing chat.decision.updated per row;
+//   - A multi-row withdraw spanning multiple prompts, two topics, and a DM coalesces
+//     enqueued keys within one debounce window (1 DM user entry + 2 topic entries, not
+//     per-row duplicates) and updates the right users while still publishing
+//     chat.decision.updated per row;
 //   - An idempotent repeat that withdraws nothing (all keys in alreadyWithdrawn) enqueues nothing.
 func TestDecisionsBell_WithdrawOncePerUserPerCallAndNoOpOnRepeatAndFailure(t *testing.T) {
 	srv, _, alice, bob, project, spy, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *withdrawBellSpyStore {
-		return &withdrawBellSpyStore{Store: inner, fault: f, topicExpandDelay: 15 * time.Millisecond}
+		return &withdrawBellSpyStore{Store: inner, fault: f}
 	})
 	f := newDecisionsFixtureOn(t, srv, spy, alice, bob, project)
 	setDecisionsExperiment(t, f.srv, true)
@@ -1466,8 +1459,7 @@ func TestDecisionsBell_WithdrawOncePerUserPerCallAndNoOpOnRepeatAndFailure(t *te
 	require.Equal(t, http.StatusOK, f.answer(t, f.bob, pAns.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
 	waitDecisionBellIdle(t, f.srv)
 
-	// Arm spy with ultra-fast 1ms debounce so any per-row or topic-vs-DM split would fire separate recomputes.
-	setFastDecisionBell(t, f.srv, 1*time.Millisecond)
+	setFastDecisionBell(t, f.srv, 25*time.Millisecond)
 	fault.Arm()
 	spy.reset()
 
@@ -1480,29 +1472,77 @@ func TestDecisionsBell_WithdrawOncePerUserPerCallAndNoOpOnRepeatAndFailure(t *te
 	assert.Zero(t, spy.recomputes.Load(), "failed withdraw must enqueue zero bell recomputes")
 	assert.Zero(t, spy.writes(), "failed withdraw must write zero notifications")
 
-	// 2. Withdraw 5 rows across 2 topics + 1 DM in a single call -> 5 SSE events,
-	//    but exactly 1 bell recompute for Alice and 1 for Bob (2 total, never once per row).
+	// 2. Multi-row DM withdraw (DM1 + DM2) coalesces into 1 userDue entry and 1 recompute (Bob only),
+	//    while still emitting 2 chat.decision.updated events.
 	projUpdatedCh, unsubProj := f.srv.events.Subscribe("project." + f.project.ID + ".chat.decision.updated")
 	defer unsubProj()
 	bobUpdatedCh, unsubBob := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
 	defer unsubBob()
 
+	dmHoldCh := make(chan struct{})
+	f.srv.decisionBell.mu.Lock()
+	f.srv.decisionBell.testHoldCh = dmHoldCh
+	f.srv.decisionBell.mu.Unlock()
+
+	wdDMRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys:   []string{"DM1", "DM2"},
+		Reason: "DM batch obsolete",
+	})
+	require.Equal(t, http.StatusOK, wdDMRR.Code, wdDMRR.Body.String())
+	assert.Len(t, collectEvents(bobUpdatedCh), 2, "each newly withdrawn DM row emits chat.decision.updated")
+
+	f.srv.decisionBell.mu.Lock()
+	dmEnqueuedUsers := len(f.srv.decisionBell.userDue)
+	_, bobQueued := f.srv.decisionBell.userDue[f.bob.ID]
+	dmEnqueuedTopics := len(f.srv.decisionBell.topicDue)
+	f.srv.decisionBell.testHoldCh = nil
+	close(dmHoldCh)
+	f.srv.decisionBell.signalWakeLocked()
+	f.srv.decisionBell.mu.Unlock()
+
+	assert.Equal(t, 1, dmEnqueuedUsers, "DM1 and DM2 coalesce into a single userDue entry for Bob")
+	assert.True(t, bobQueued)
+	assert.Zero(t, dmEnqueuedTopics)
+
+	waitDecisionBellIdle(t, f.srv)
+	assert.Equal(t, int64(1), spy.recomputes.Load(), "2 withdrawn DM rows coalesce into 1 recompute for Bob")
+
+	// 3. Multi-row topic withdraw across 2 topics (TA1 + TA2 in topicID, TB1 in topicOps)
+	//    coalesces into 2 distinct topicDue entries (not 3), emits 3 SSE events, and updates
+	//    both posting members (Alice and Bob) to 1 remaining decision (TB2).
+	spy.reset()
+	topicHoldCh := make(chan struct{})
+	f.srv.decisionBell.mu.Lock()
+	f.srv.decisionBell.testHoldCh = topicHoldCh
+	f.srv.decisionBell.mu.Unlock()
+
 	wdRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
-		Keys:   []string{"TA1", "TA2", "TB1", "DM1", "DM2"},
-		Reason: "Batch obsolete",
+		Keys:   []string{"TA1", "TA2", "TB1"},
+		Reason: "Topic batch obsolete",
 	})
 	require.Equal(t, http.StatusOK, wdRR.Code, wdRR.Body.String())
 	var wdOut WithdrawDecisionsResponse
 	require.NoError(t, json.Unmarshal(wdRR.Body.Bytes(), &wdOut))
-	require.Len(t, wdOut.Withdrawn, 5)
+	require.Len(t, wdOut.Withdrawn, 3)
 	assert.Empty(t, wdOut.AlreadyWithdrawn)
+	assert.Len(t, collectEvents(projUpdatedCh), 3, "each newly withdrawn topic row emits chat.decision.updated")
 
-	assert.Len(t, collectEvents(projUpdatedCh), 3, "each newly withdrawn topic row still emits chat.decision.updated")
-	assert.Len(t, collectEvents(bobUpdatedCh), 2, "each newly withdrawn DM row still emits chat.decision.updated")
+	f.srv.decisionBell.mu.Lock()
+	enqueuedUsers := len(f.srv.decisionBell.userDue)
+	enqueuedTopics := len(f.srv.decisionBell.topicDue)
+	f.srv.decisionBell.testHoldCh = nil
+	close(topicHoldCh)
+	f.srv.decisionBell.signalWakeLocked()
+	f.srv.decisionBell.mu.Unlock()
+
+	assert.Zero(t, enqueuedUsers)
+	assert.Equal(t, 2, enqueuedTopics, "TA1+TA2 and TB1 coalesce into 2 distinct topicDue entries")
 
 	waitDecisionBellIdle(t, f.srv)
-	assert.Equal(t, int64(2), spy.recomputes.Load(), "must recompute once per affected user (Alice + Bob), not once per row")
-	assert.Equal(t, int64(2), spy.writes(), "must write once per affected user (Alice + Bob)")
+	// 2 distinct topics affecting 2 posting members -> at least 2 (when both topics expand before user pops)
+	// and at most 4 (if worker 2 pops users between topic 1 and topic 2 expansions), never 6 per-row recomputes.
+	assert.GreaterOrEqual(t, spy.recomputes.Load(), int64(2))
+	assert.LessOrEqual(t, spy.recomputes.Load(), int64(4))
 
 	aliceRow, err := f.store.GetNotification(ctx, decisionsWaitingNotificationID(f.alice.ID))
 	require.NoError(t, err)

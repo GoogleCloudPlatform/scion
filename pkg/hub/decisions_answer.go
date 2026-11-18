@@ -452,17 +452,15 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	})
 	switch {
 	case err == nil:
-	case errors.Is(err, store.ErrDecisionReplaced):
+	case errors.Is(err, store.ErrDecisionReplaced), errors.Is(err, store.ErrDecisionWithdrawn):
 		if cur, gerr := s.store.GetDecision(ctx, d.ID); gerr == nil {
 			d = cur
+		}
+		if d.Status == store.DecisionStatusWithdrawn || (errors.Is(err, store.ErrDecisionWithdrawn) && d.Status != store.DecisionStatusReplaced) {
+			s.writeDecisionWithdrawn(w, ctx, d)
+			return
 		}
 		s.writeDecisionReplaced(w, ctx, d)
-		return
-	case errors.Is(err, store.ErrDecisionWithdrawn):
-		if cur, gerr := s.store.GetDecision(ctx, d.ID); gerr == nil {
-			d = cur
-		}
-		s.writeDecisionWithdrawn(w, ctx, d)
 		return
 	case errors.Is(err, store.ErrNotRecordedAnswerer):
 		// An interpreted answer recorded after the state check above.

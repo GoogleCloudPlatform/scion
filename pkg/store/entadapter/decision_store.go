@@ -246,10 +246,11 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 				}
 				var n int
 				if store.DecisionStatusTerminal(string(st.active.Status)) {
-					// A withdrawn version stays withdrawn when --update re-asks the
-					// key as the next version, while replaced_by_id links v1 -> v2 (D7).
+					// A terminal version (such as withdrawn) keeps its status when
+					// --update re-asks the key as the next version, while
+					// replaced_by_id links v1 -> v2 (D7).
 					n, err = client.Decision.Update().
-						Where(decision.ID(st.active.ID), decision.StatusEQ(decision.StatusWithdrawn), decision.ReplacedByIDIsNil()).
+						Where(decision.ID(st.active.ID), decision.ReplacedByIDIsNil()).
 						SetReplacedAt(now).
 						SetReplacedByID(rowIDs[i]).
 						Save(ctx)

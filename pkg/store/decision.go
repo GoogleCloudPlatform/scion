@@ -323,15 +323,14 @@ func (e *AnswerSetChangedError) Unwrap() error { return ErrAnswerSetChanged }
 // withdrawn, decided for a direct answer, not_recorded_answerer for another
 // user's interpreted answer). d.Answers must be loaded.
 func DecisionActionableReason(d *Decision, userID string) string {
+	switch d.Status {
+	case DecisionStatusReplaced:
+		return AnswerSetReasonReplaced
+	case DecisionStatusWithdrawn:
+		return AnswerSetReasonWithdrawn
+	}
 	if DecisionStatusTerminal(d.Status) {
-		switch d.Status {
-		case DecisionStatusReplaced:
-			return AnswerSetReasonReplaced
-		case DecisionStatusWithdrawn:
-			return AnswerSetReasonWithdrawn
-		default:
-			return AnswerSetReasonNotActionable
-		}
+		return AnswerSetReasonNotActionable
 	}
 	var interpreted *DecisionAnswer
 	for _, a := range d.Answers {
