@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -150,16 +151,66 @@ func TestStatusCommandUnknownType(t *testing.T) {
 	t.Setenv("HOME", tempDir)
 	scrubScionEnv(t)
 
+	statusFile := filepath.Join(tempDir, "agent-info.json")
+	logFile := filepath.Join(tempDir, "agent.log")
+	setTestLogPath(t, logFile)
+
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
 	rootCmd.SetArgs([]string{"status", "unknown_type"})
 
-	_ = rootCmd.Execute()
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatalf("Execute() error = nil, want non-nil error for unknown status type (output: %s)", buf.String())
+	}
 
-	output := buf.String()
-	if !bytes.Contains([]byte(output), []byte("unknown status type")) {
-		t.Errorf("expected error message about unknown status type, got: %s", output)
+	for _, want := range []string{
+		`unknown status type "unknown_type"`,
+		"Valid types: ask_user, blocked, idle, task_completed, limits_exceeded",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Execute() error = %q, want substring %q", err.Error(), want)
+		}
+	}
+
+	if _, statErr := os.Stat(statusFile); !os.IsNotExist(statErr) {
+		t.Errorf("status file should not be created for unknown status type, stat err = %v", statErr)
+	}
+}
+
+func TestStatusCommandUnknownType_ProcessExitCode(t *testing.T) {
+	if os.Getenv("SCIONTOOL_STATUS_UNKNOWN_CHILD") == "1" {
+		os.Args = []string{"sciontool", "status", "unknown_type"}
+		Execute()
+		os.Exit(0)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStatusCommandUnknownType_ProcessExitCode$")
+	cmd.Env = append(os.Environ(), "SCIONTOOL_STATUS_UNKNOWN_CHILD=1", "TMPDIR="+t.TempDir())
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("child run error = %v, want *exec.ExitError (stdout=%q stderr=%q)", err, stdout.String(), stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != 1 {
+		t.Fatalf("child exit code = %d, want 1 (stderr=%q)", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty (help should not be printed)", stdout.String())
+	}
+
+	for _, want := range []string{
+		`Error: unknown status type "unknown_type"`,
+		"Valid types: ask_user, blocked, idle, task_completed, limits_exceeded",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want substring %q", stderr.String(), want)
+		}
 	}
 }
 
