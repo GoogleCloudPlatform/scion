@@ -12,8 +12,9 @@ Cloud Build (deploy/cd/cloudbuild-gke-cd.yaml, dedicated CD SA)
   ├── 1. resolve-and-check-noop  (~5–10s)
   │        Reads _VERSION_TAG or LATEST.json (.channels[$_CHANNEL].version).
   │        Checks gs://<state_bucket>/<prefix>/hubs/<hub>/deployed.json + live
-  │        default.tfstate outputs (hub_installed == true and matching @sha256 digest).
-  │        Exits cleanly via /workspace/SKIP_DEPLOY when unchanged; blocks downgrades.
+  │        hub.tfvars (tfvars_sha256) + default.tfstate outputs (hub_installed == true
+  │        and matching @sha256 digest). Exits cleanly via /workspace/SKIP_DEPLOY
+  │        when unchanged; blocks downgrades and schema DowngradeFloor violations.
   │
   ├── 2. checkout-release-tag
   │        Shallow-clones _REPO_URL at TARGET_TAG into /workspace/release-src,
@@ -81,7 +82,7 @@ Before applying infrastructure, verify the following in your target GCP project:
 
 ### 1.1 Run `setup-cd.sh` (State Bucket + Dedicated CD Service Account)
 
-Preview the commands first with `--dry-run`, then execute without `--dry-run`:
+Preview the commands first with `--dry-run`, then execute without `--dry-run` (include `--bootstrap-storage-admin` before Pass 1 so the CD service account can create `<project_id>-<hub_name>-artifacts`; you will revoke the unconditioned storage binding right after Pass 1):
 
 ```bash
 deploy/cd/scripts/setup-cd.sh \
@@ -90,6 +91,7 @@ deploy/cd/scripts/setup-cd.sh \
   --shared-prefix cdha \
   --hub-name cdha-gke-1 \
   --channel preview \
+  --bootstrap-storage-admin \
   --dry-run
 ```
 
@@ -130,8 +132,8 @@ After `shared-infra` creates the `<shared_prefix>-scion` Artifact Registry repos
 |---|---|---|---|
 | `gs://<project>-<prefix>-tfstate` | `roles/storage.objectAdmin` | **Bucket-scoped** (not project-wide) | Read/write/lock `<prefix>/hubs/<hub>/default.tfstate`, read `hub.tfvars`, write `deployed.json`. |
 | `<prefix>-scion` AR Repo | `roles/artifactregistry.writer` | **Repository-scoped** | Push/tag `scion-hub-gke`, `core-base`, `scion-base`, and `scion-*` harness images; read tags/digests. |
-| Project | `roles/secretmanager.admin` | **Condition:** `resource.name.startsWith("projects/<number>/secrets/<hub_name>-")` | Manage `<hub>-db-password` & `<hub>-db-dsn` secrets and per-secret IAM without reaching other hubs' secrets or `scion-<hash>-*` signing keys. |
-| Project | `roles/storage.admin` | **Condition:** `resource.name.startsWith("projects/_/buckets/<project>-<hub_name>-")` | Manage `<project>-<hub>-artifacts` GCS bucket and its IAM without touching unrelated project buckets. |
+| Project | `roles/secretmanager.admin` | **Condition:** `resource.name.startsWith("projects/<number>/secrets/<hub_name>-")` | Create and manage `<hub>-db-password` & `<hub>-db-dsn` secrets and per-secret IAM without reaching other hubs' secrets or `scion-<hash>-*` signing keys (`secrets.create` evaluates `resource.name` against the new child secret path; empirically verified in `deploy/terraform/modules/hub-identity/main.tf`). |
+| Project | `roles/storage.admin` | **Condition:** `resource.name.startsWith("projects/_/buckets/<project>-<hub_name>-")` *(steady-state)* | Manage existing `<project>-<hub>-artifacts` GCS bucket and its IAM without touching unrelated project buckets. *(Note: `storage.buckets.create` in Pass 1 evaluates on the parent project resource—pass `--bootstrap-storage-admin` before Pass 1 and `--revoke-bootstrap-storage-admin` right after Pass 1 creates the bucket.)* |
 | Project | `roles/container.admin` | Project | Read `<prefix>-agents` cluster and authenticate `kubernetes` + `helm` providers for `<hub>-system` and `<hub>` namespaces, PVs, RBAC, and `helm_release.hub`. |
 | Project | `roles/cloudsql.admin` | Project | Read `<prefix>-pg` and manage `google_sql_database` + `google_sql_user` for `<hub>`. |
 | Project | `roles/iam.serviceAccountAdmin` | Project | Manage `<hub>-{hub,transport,agent}` GSAs and Workload Identity / token-creator bindings. |
@@ -142,6 +144,8 @@ After `shared-infra` creates the `<shared_prefix>-scion` Artifact Registry repos
 | Project | `roles/file.viewer` | Project | Read `<prefix>-nfs` Filestore IP via `shared-lookup`. |
 | Project | `roles/iap.admin` | Project | Enable IAP on `<hub>-hub-backend` and manage `iap_members` bindings. |
 | Project | `roles/logging.logWriter` | Project | Stream Cloud Build logs to Cloud Logging (`CLOUD_LOGGING_ONLY`). |
+
+> **Security note on `projectIamAdmin` + `serviceAccountAdmin`:** Because `modules/hub-identity` manages per-hub GSAs and project IAM bindings in Terraform, the dedicated CD service account holds `roles/resourcemanager.projectIamAdmin` and `roles/iam.serviceAccountAdmin`, making it privilege-equivalent to a project administrator. Restrict `cloudbuild.builds.create` / trigger edit permissions in the project and protect the trigger's source branch (`--trigger-branch`, default `main`) with required reviews.
 
 *(Note: `roles/serviceusage.serviceUsageAdmin`, `roles/compute.networkAdmin`, `roles/servicenetworking.networksAdmin`, and `roles/file.editor` are needed **only** during Step 1.2 `shared-infra` bootstrap—never on the daily CD service account.)*
 
@@ -162,9 +166,17 @@ After `shared-infra` creates the `<shared_prefix>-scion` Artifact Registry repos
 3. **Two-pass first install (`iap_oauth_client_id`):**
    - **If you already know the project's Google-managed IAP OAuth client ID** (e.g. `<id>.apps.googleusercontent.com` from an existing IAP service in the same project), set `iap_oauth_client_id` in `hub.tfvars` up front—the first CD run installs everything in a single pass (`hub_installed = true`).
    - **Fresh project (general two-pass flow):**
-     1. **Pass 1:** Leave `iap_oauth_client_id` commented out (`null`) in `hub.tfvars` and run the CD trigger. The pipeline builds all images, provisions the load balancer + IAP backend + database + namespaces, and exits green with `hub_installed = false`. *(Note: if the very first create of `<hub>-neg` races the GKE NEG controller with a zonal NEG `not found` error, simply re-run the trigger—NEGs already exist and image builds will be skipped automatically.)*
-     2. **Discover the client ID (read-only):** In the Cloud Console, open **Security -> Identity-Aware Proxy**, locate `<hub_name>-hub-backend`, and copy its OAuth Client ID (`<id>.apps.googleusercontent.com`; also visible under **Google Auth Platform -> Clients**).
-     3. **Pass 2:** Uncomment and set `iap_oauth_client_id = "<id>.apps.googleusercontent.com"` in `hub.tfvars`, re-upload it to GCS, and run the CD trigger again. Pass 1's `hub_installed = false` prevents no-op short-circuiting, Step 3 skips all already-built images in ~5 seconds, and Step 4 installs the `scion-hub` Helm release (`hub_installed = true`).
+     1. **Pass 1:** Leave `iap_oauth_client_id` commented out (`null`) in `hub.tfvars` and run the CD trigger (having passed `--bootstrap-storage-admin` to `setup-cd.sh` so Pass 1 can create `<project_id>-<hub_name>-artifacts`). The pipeline builds all images, provisions the load balancer + IAP backend + database + artifacts bucket + namespaces, and exits green with `hub_installed = false`. *(Note: if the very first create of `<hub>-neg` races the GKE NEG controller with a zonal NEG `not found` error, simply re-run the trigger—NEGs already exist and image builds will be skipped automatically.)*
+     2. **Lock down Storage IAM after Pass 1:** Once `<project_id>-<hub_name>-artifacts` exists, remove temporary unconditioned `roles/storage.admin` so steady-state CD keeps only the bucket-prefix IAM Condition:
+        ```bash
+        deploy/cd/scripts/setup-cd.sh \
+          --project <project_id> \
+          --shared-prefix cdha \
+          --hub-name cdha-gke-1 \
+          --revoke-bootstrap-storage-admin
+        ```
+     3. **Discover the client ID (read-only):** In the Cloud Console, open **Security -> Identity-Aware Proxy**, locate `<hub_name>-hub-backend`, and copy its OAuth Client ID (`<id>.apps.googleusercontent.com`; also visible under **Google Auth Platform -> Clients**).
+     4. **Pass 2:** Uncomment and set `iap_oauth_client_id = "<id>.apps.googleusercontent.com"` in `hub.tfvars`, re-upload it to GCS, and run the CD trigger again. Pass 1's `hub_installed = false` (and the updated `hub.tfvars` SHA-256) prevents no-op short-circuiting, Step 3 skips all already-built images in ~5 seconds, and Step 4 installs the `scion-hub` Helm release (`hub_installed = true`).
 
    > **Important:** Once `iap_oauth_client_id` is set, never revert it to `null`—doing so plans a destroy of `helm_release.hub`.
 
@@ -214,7 +226,7 @@ gcloud compute ssl-certificates list --project=<project_id> --filter="name~^<hub
 
 ## Step 5: Cloud Build Trigger, Substitutions & Daily Cloud Scheduler
 
-Pass `--repository` (2nd-gen Cloud Build repository connection) or `--github-owner` + `--github-repo` (1st-gen GitHub App) to `setup-cd.sh` to create both the Cloud Build Trigger and the daily Cloud Scheduler job (`0 5 * * *` UTC, 2 hours after the 03:00 UTC nightly release workflow updates `LATEST.json`):
+Pass `--repository` (2nd-gen Cloud Build repository connection) or `--github-owner` + `--github-repo` (1st-gen GitHub App) to `setup-cd.sh` to create both the Cloud Build Trigger (using `^|^` delimiter escaping so multi-platform `_AGENT_PLATFORMS` values parse cleanly) and the daily Cloud Scheduler job (`0 5 * * *` UTC, posting a `RunBuildTriggerRequest` JSON payload—`{"source":{"branchName":"<branch>"}}` for 1st-gen GitHub triggers or `{}` for 2nd-gen `--repository` manual triggers—to `projects.locations.triggers.run`):
 
 ```bash
 deploy/cd/scripts/setup-cd.sh \
@@ -236,18 +248,27 @@ deploy/cd/scripts/setup-cd.sh \
 | `_STATE_BUCKET` | `''` *(required)* | Versioned GCS Terraform state bucket (`<project>-<shared_prefix>-tfstate`). |
 | `_SHARED_PREFIX` | `''` *(required)* | `shared-infra` `name_prefix` (`^[a-z][a-z0-9]{1,7}$`). |
 | `_HUB_NAME` | `''` *(required)* | Target hub name starting with `<_SHARED_PREFIX>-` (e.g. `cdha-gke-1`). |
-| `_REGISTRY` | `''` *(required)* | Artifact Registry Docker path (`<region>-docker.pkg.dev/<project>/<shared_prefix>-scion`). |
-| `_AGENT_PLATFORMS` | `'linux/amd64'` | Agent image platform(s). Keep `linux/amd64` (~20–30m uncached, ~12–15m with `core-base` cache) for amd64 GKE Autopilot nodes; set `linux/amd64,linux/arm64` (~2–3h QEMU build) only if scheduling arm64 agent pods. |
-| `_FORCE_REDEPLOY` | `'false'` | Set `'true'` to bypass the GCS no-op check and rebuild all images even if tags already exist. |
-| `_ALLOW_DOWNGRADE` | `'false'` | Set `'true'` to permit deploying a tag older than `deployed.json` (see Rollback notes below). |
+| `_REGISTRY` | `''` *(required)* | Artifact Registry Docker path (`<region>-docker.pkg.dev/<project>/<shared_prefix>-scion`, cross-checked against `<_SHARED_PREFIX>-scion` and `hub.tfvars`). |
+| `_AGENT_PLATFORMS` | `'linux/amd64'` | Agent image platform(s). Keep `linux/amd64` (~20–30m uncached, ~12–15m with `core-base` cache) for amd64 GKE Autopilot nodes; set `linux/amd64,linux/arm64` (~2–3h QEMU build) only if scheduling arm64 agent pods. **Note:** If adding `linux/arm64` on an already-built `TARGET_TAG`, pass `_FORCE_REDEPLOY=true` once so `:TARGET_TAG` and `:$SHORT_SHA` manifests are rebuilt multi-arch rather than reused by tag name. |
+| `_FORCE_APPLY` | `'false'` | Set `'true'` to bypass the Step 1 no-op short-circuit and re-run `terraform apply` while **reusing** already-pushed Artifact Registry images (~1–2m). *(Note: edits to `hub.tfvars` are already detected automatically via `tfvars_sha256` without needing `_FORCE_APPLY`.)* |
+| `_FORCE_REDEPLOY` | `'false'` | Set `'true'` to bypass the GCS no-op check **and** rebuild all images from scratch even if tags already exist (e.g. after changing `_AGENT_PLATFORMS`). |
+| `_ALLOW_DOWNGRADE` | `'false'` | Set `'true'` to permit deploying a tag older than `deployed.json`'s `version` when the target is at or above `deployed.json`'s `downgrade_floor` (see Rollback notes below). |
+| `_ALLOW_BELOW_DOWNGRADE_FLOOR` | `'false'` | Set `'true'` (together with `_ALLOW_DOWNGRADE=true`) **only after restoring Cloud SQL via PITR/backup** to permit deploying a tag below (or unorderable against) `deployed.json`'s schema `downgrade_floor`. |
 | `_REPO_URL` | `'https://github.com/GoogleCloudPlatform/scion.git'` | Git repository cloned at `TARGET_TAG` (and used to derive `LATEST.json` on `main`). |
 
-### Running Ad-Hoc Builds or Pinning a Version
+### Running Ad-Hoc Builds, Applying `hub.tfvars` Edits, or Pinning a Version
 
 ```bash
-# Run the configured channel check / rollout on demand:
+# Run the configured channel check / rollout on demand (also applies any uploaded
+# hub.tfvars edits such as iap_members, admin_emails, or db_password_rotation,
+# reusing existing images in ~5s without rebuilding):
 gcloud builds triggers run <hub_name>-cd \
   --region=us-central1 --project=<project_id> --branch=main
+
+# Reconcile Terraform state drift without rebuilding images:
+gcloud builds triggers run <hub_name>-cd \
+  --region=us-central1 --project=<project_id> --branch=main \
+  --substitutions=_FORCE_APPLY=true
 
 # Pin a specific release tag for one run:
 gcloud builds triggers run <hub_name>-cd \
@@ -285,16 +306,17 @@ Once the Google-managed SSL certificate reaches `ACTIVE` and the Hub is reachabl
 
 ## Step 7: Upgrades, Rollback & `DowngradeFloor`
 
-### Daily Steady State
-- On days when `LATEST.json` has not moved for `_CHANNEL`, Step 1 (`resolve-and-check-noop`) verifies `deployed.json` + `default.tfstate` convergence and exits green in **under 15 seconds**.
-- When a new tag is published, Step 3 reuses `core-base` via its content+platform hash tag (`cache-<sha256>`) whenever `image-build/core-base` and `image-build/lib` did not change, rebuilding only `scion-hub-gke`, `scion-base`, and the catalog harnesses (~12–15 minutes on `linux/amd64`), then rolls the Hub pod via digest update and verifies zero post-apply Terraform drift.
+### Daily Steady State & `hub.tfvars` Updates
+- On days when `LATEST.json` has not moved for `_CHANNEL` and `hub.tfvars` in GCS is unchanged, Step 1 (`resolve-and-check-noop`) verifies `deployed.json` + `hub.tfvars` (`tfvars_sha256`) + `default.tfstate` convergence and exits green in **under 15 seconds**.
+- When an operator uploads an updated `hub.tfvars` (e.g. modifying `iap_members`, `admin_emails`, `enable_http_redirect`, or rotating the database password via `db_password_rotation`), Step 1 automatically detects the `tfvars_sha256` change, Step 3 reuses all already-pushed images and the existing `scion-hub-gke` digest in ~5 seconds, and Step 4 applies the Terraform update and records the new `tfvars_sha256` in `deployed.json`.
+- When a new release tag is published, Step 3 reuses `core-base` via its content+platform hash tag (`cache-<sha256>`) whenever `image-build/core-base` and `image-build/lib` did not change, rebuilding only `scion-hub-gke`, `scion-base`, and the catalog harnesses (~12–15 minutes on `linux/amd64`), then rolls the Hub pod via digest update and verifies zero post-apply Terraform drift.
 
 ### Rollback & Database `DowngradeFloor` Hazards
- Step 1 refuses any `TARGET_TAG` older than `deployed.json`'s `version` unless `_ALLOW_DOWNGRADE=true`. Before forcing a downgrade, check three constraints:
+Step 1 refuses any `TARGET_TAG` older than `deployed.json`'s `version` unless `_ALLOW_DOWNGRADE=true`, and **additionally hard-fails** any rollback below (or unorderable against) `deployed.json`'s `downgrade_floor` unless `_ALLOW_BELOW_DOWNGRADE_FLOOR=true` is also set. Before forcing a downgrade, check three constraints:
 
 1. **One-way database migrations (`DowngradeFloor`):**
-   Scion tracks destructive schema changes in `pkg/version.DowngradeFloor` (recorded in `deployed.json` as `downgrade_floor` on each deploy). Rolling `scion-hub-gke` back via Terraform bypasses in-hub binary update guards and boots an older Hub binary directly against the newer Cloud SQL schema. **Never set `_ALLOW_DOWNGRADE=true` to a tag older than `deployed.json`'s `downgrade_floor` without restoring Cloud SQL (Point-in-Time Recovery / backup) to a pre-upgrade snapshot.**
+   Scion tracks destructive schema changes in `pkg/version.DowngradeFloor` (recorded in `deployed.json` as `downgrade_floor` on each deploy). Rolling `scion-hub-gke` back via Terraform bypasses in-hub binary update guards and boots an older Hub binary directly against the newer Cloud SQL schema. Routine rollbacks to a tag **at or above** `downgrade_floor` require only `_ALLOW_DOWNGRADE=true`. **Never set `_ALLOW_BELOW_DOWNGRADE_FLOOR=true` to roll below `downgrade_floor` without first restoring Cloud SQL (Point-in-Time Recovery / backup) to a pre-upgrade snapshot.**
 2. **Terraform resource drift across tags:**
-   Because Step 4 runs `deploy/terraform/configurations/hub-gke` from the checked-out `TARGET_TAG`, rolling backward to an older tag whose Terraform modules lack resources added in a newer release will plan to **destroy** those resources. Inspect Cloud Build plan logs carefully (or run `terraform plan` manually first) before rolling back across minor versions.
+   Because Step 4 runs `plan` and `apply` back-to-back from the checked-out `TARGET_TAG`, rolling backward to an older tag whose Terraform modules lack resources added in a newer release will plan and apply **destroys** of those resources in the same step. Always check out the older tag locally and run `terraform plan` manually to inspect the diff before triggering a cross-minor rollback in Cloud Build.
 3. **`nightly-YYYYMMDD` 14-day tag retention:**
    `nightly-*` Git tags are pruned from GitHub after **14 days**. For long-lived production stability or reproducible rollbacks beyond 14 days, track `_CHANNEL=preview` or `_CHANNEL=stable` (whose `vX.Y.Z*` Git tags are permanent), and keep Artifact Registry images in your project's `<prefix>-scion` repository.

@@ -52,7 +52,9 @@ steps:
       - '_REGISTRY=$_REGISTRY'
       - '_AGENT_PLATFORMS=$_AGENT_PLATFORMS'
       - '_FORCE_REDEPLOY=$_FORCE_REDEPLOY'
+      - '_FORCE_APPLY=$_FORCE_APPLY'
       - '_ALLOW_DOWNGRADE=$_ALLOW_DOWNGRADE'
+      - '_ALLOW_BELOW_DOWNGRADE_FLOOR=$_ALLOW_BELOW_DOWNGRADE_FLOOR'
       - '_REPO_URL=$_REPO_URL'
 
   - name: 'gcr.io/cloud-builders/gcloud'
@@ -67,6 +69,7 @@ steps:
     entrypoint: 'bash'
     args: ['deploy/cd/scripts/build-images.sh', '--phase', 'prepare']
     env:
+      - '_SHARED_PREFIX=$_SHARED_PREFIX'
       - '_REGISTRY=$_REGISTRY'
       - '_AGENT_PLATFORMS=$_AGENT_PLATFORMS'
       - '_FORCE_REDEPLOY=$_FORCE_REDEPLOY'
@@ -78,6 +81,7 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+      - '_SHARED_PREFIX=$_SHARED_PREFIX'
       - '_REGISTRY=$_REGISTRY'
       - '_AGENT_PLATFORMS=$_AGENT_PLATFORMS'
       - '_FORCE_REDEPLOY=$_FORCE_REDEPLOY'
@@ -90,6 +94,7 @@ steps:
       - '_STATE_BUCKET=$_STATE_BUCKET'
       - '_SHARED_PREFIX=$_SHARED_PREFIX'
       - '_HUB_NAME=$_HUB_NAME'
+      - '_REGISTRY=$_REGISTRY'
 
   - name: 'hashicorp/terraform:1.9.8'
     id: 'terraform-apply-hub-gke'
@@ -110,6 +115,7 @@ steps:
       - '_STATE_BUCKET=$_STATE_BUCKET'
       - '_SHARED_PREFIX=$_SHARED_PREFIX'
       - '_HUB_NAME=$_HUB_NAME'
+      - '_REGISTRY=$_REGISTRY'
 
 substitutions:
   _CHANNEL: 'nightly'
@@ -120,7 +126,9 @@ substitutions:
   _REGISTRY: ''
   _AGENT_PLATFORMS: 'linux/amd64'
   _FORCE_REDEPLOY: 'false'
+  _FORCE_APPLY: 'false'
   _ALLOW_DOWNGRADE: 'false'
+  _ALLOW_BELOW_DOWNGRADE_FLOOR: 'false'
   _REPO_URL: 'https://github.com/GoogleCloudPlatform/scion.git'
 
 options:

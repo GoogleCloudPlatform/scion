@@ -38,20 +38,68 @@ if [[ -f "${WORKSPACE_DIR}/SKIP_DEPLOY" ]]; then
 fi
 
 validate_cd_common_inputs
+REGISTRY="${_REGISTRY:-}"
+REGISTRY="${REGISTRY%/}"
+if [[ -n "${REGISTRY}" ]]; then
+  validate_registry_path "${REGISTRY}" "${_SHARED_PREFIX}"
+fi
 
 STATE_BASE_URI="gs://${_STATE_BUCKET}/${_SHARED_PREFIX}/hubs/${_HUB_NAME}"
+TFVARS_URI="${STATE_BASE_URI}/hub.tfvars"
+TFVARS_LOCAL="${WORKSPACE_DIR}/hub.tfvars"
 
 if [[ "${ACTION}" == "fetch-tfvars" ]]; then
-  TFVARS_URI="${STATE_BASE_URI}/hub.tfvars"
-  TFVARS_OUT="${WORKSPACE_DIR}/hub.tfvars"
-  rm -f -- "${TFVARS_OUT}"
+  rm -f -- "${TFVARS_LOCAL}"
   log_info "Downloading ${TFVARS_URI}..."
   if ! CLOUDSDK_CORE_SHOW_STRUCTURED_LOGS=never CLOUDSDK_CORE_CONSOLE_LOG_FORMAT=standard \
-    gcloud storage cp "${TFVARS_URI}" "${TFVARS_OUT}" --verbosity=error; then
+    gcloud storage cp "${TFVARS_URI}" "${TFVARS_LOCAL}" --verbosity=error; then
     die "Failed to download ${TFVARS_URI}. Upload your filled-in hub.tfvars (see deploy/cd/hub.tfvars.example and deploy/cd/README.md) before running the CD pipeline."
   fi
-  chmod 0600 "${TFVARS_OUT}"
-  [[ -s "${TFVARS_OUT}" ]] || die "Downloaded ${TFVARS_URI} is empty."
+  chmod 0600 "${TFVARS_LOCAL}"
+  [[ -s "${TFVARS_LOCAL}" ]] || die "Downloaded ${TFVARS_URI} is empty."
+
+  if [[ -n "${REGISTRY}" ]]; then
+    reg_err=""
+    if ! reg_err="$(python3 - "${TFVARS_LOCAL}" "${REGISTRY}" <<'PY' 2>&1
+import re
+import sys
+
+tfvars_path, reg = sys.argv[1:3]
+reg = reg.rstrip("/")
+kv = {}
+str_assign = re.compile(r'^\s*([A-Za-z0-9_]+)\s*=\s*"([^"#\\]*)"\s*(?:(?:#|//).*)?$')
+with open(tfvars_path, encoding="utf-8") as f:
+    for raw_line in f:
+        s = raw_line.strip()
+        if not s or s.startswith("#") or s.startswith("//"):
+            continue
+        m = str_assign.match(raw_line)
+        if m:
+            kv[m.group(1)] = m.group(2)
+
+proj = kv.get("project_id", "")
+region = kv.get("region", "")
+prefix = kv.get("shared_prefix", "")
+if proj and region and prefix:
+    expected = f"{region}-docker.pkg.dev/{proj}/{prefix}-scion"
+    if reg != expected:
+        raise SystemExit(
+            f"_REGISTRY '{reg}' does not match '{expected}' derived from hub.tfvars "
+            f"(region='{region}', project_id='{proj}', shared_prefix='{prefix}'; "
+            f"configurations/hub-gke pulls scion-hub-gke from shared_lookup's repo_url)"
+        )
+
+img_reg = kv.get("image_registry", "").rstrip("/")
+if img_reg and img_reg != reg:
+    raise SystemExit(
+        f"_REGISTRY '{reg}' does not match explicit image_registry='{img_reg}' in hub.tfvars"
+    )
+PY
+    )"; then
+      die "${reg_err}"
+    fi
+  fi
+
   log_info "Downloaded hub.tfvars (${TFVARS_URI})."
   exit 0
 fi
@@ -81,6 +129,17 @@ source "${WORKSPACE_DIR}/hub-digest.env"
 [[ "${HUB_IMAGE_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]] \
   || die "Invalid HUB_IMAGE_DIGEST '${HUB_IMAGE_DIGEST:-}'"
 
+TFVARS_SHA256=""
+if [[ -f "${TFVARS_LOCAL}" ]]; then
+  TFVARS_SHA256="$(sha256_file "${TFVARS_LOCAL}")"
+else
+  tfvars_fallback_tmp="$(mktemp "${TMPDIR:-/tmp}/scion-tfvars-hash.XXXXXX")"
+  if gcs_cat_if_exists "${TFVARS_URI}" "${tfvars_fallback_tmp}"; then
+    TFVARS_SHA256="$(sha256_file "${tfvars_fallback_tmp}")"
+  fi
+  rm -f -- "${tfvars_fallback_tmp}"
+fi
+
 DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 VERSION_DATE="${TARGET_VERSION_DATE:-${BUILD_TIME:-${DEPLOYED_AT}}}"
 TF_OUTPUTS_FILE="${WORKSPACE_DIR}/tf-outputs.json"
@@ -95,10 +154,12 @@ hub_installed_str="$(
     "${COMMIT_SHA}" \
     "${SHORT_SHA}" \
     "${HUB_IMAGE_DIGEST}" \
+    "${TFVARS_SHA256}" \
     "${SOURCE_DOWNGRADE_FLOOR:-}" \
     "${BUILD_ID:-}" \
     "${DEPLOYED_AT}" \
-    "${TF_OUTPUTS_FILE}" <<'PY'
+    "${TF_OUTPUTS_FILE}" \
+    "${REGISTRY}" <<'PY'
 import json
 import os
 import sys
@@ -110,14 +171,17 @@ import sys
     commit,
     short_sha,
     digest,
+    tfvars_sha256,
     floor,
     build_id,
     deployed_at,
     tf_outputs_path,
-) = sys.argv[1:11]
+    registry,
+) = sys.argv[1:13]
 
 hub_installed = True
 public_url = ""
+hub_image_out = ""
 if os.path.isfile(tf_outputs_path):
     with open(tf_outputs_path, encoding="utf-8") as f:
         tf_out = json.load(f)
@@ -128,6 +192,16 @@ if os.path.isfile(tf_outputs_path):
         url_entry = tf_out.get("public_url")
         if isinstance(url_entry, dict) and isinstance(url_entry.get("value"), str):
             public_url = url_entry["value"]
+        img_entry = tf_out.get("hub_image")
+        if isinstance(img_entry, dict) and isinstance(img_entry.get("value"), str):
+            hub_image_out = img_entry["value"]
+
+if registry and hub_image_out:
+    want_prefix = registry.rstrip("/") + "/scion-hub-gke@"
+    if not hub_image_out.startswith(want_prefix):
+        raise SystemExit(
+            f"Terraform output hub_image='{hub_image_out}' does not match _REGISTRY='{registry}'"
+        )
 
 payload = {
     "version": version,
@@ -140,6 +214,8 @@ payload = {
     "build_id": build_id,
     "deployed_at": deployed_at,
 }
+if tfvars_sha256:
+    payload["tfvars_sha256"] = tfvars_sha256
 if public_url:
     payload["public_url"] = public_url
 

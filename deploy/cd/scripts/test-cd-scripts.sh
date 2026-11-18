@@ -310,15 +310,33 @@ EOF
   source "${d}/workspace/target.env"
   assert_eq "_VERSION_TAG overrides _CHANNEL without fetching LATEST.json" "${TARGET_TAG}" "v0.4.0-preview.4"
 
-  # 3. Converged deployed.json + default.tfstate triggers SKIP_DEPLOY short-circuit
+  # 3. Converged deployed.json + default.tfstate + matching hub.tfvars sha256 triggers SKIP_DEPLOY short-circuit
   local digest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
   mkdir -p "${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1"
+  cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/hub.tfvars" <<'EOF'
+project_id    = "myproj"
+region        = "us-central1"
+zone          = "us-central1-a"
+shared_prefix = "cdha"
+hub_name      = "cdha-gke-1"
+state_prefix  = "cdha/hubs/cdha-gke-1"
+hostname      = "cdha-gke-1.endpoints.myproj.cloud.goog"
+iap_members   = ["group:scion-users@example.com"]
+EOF
+  local tfvars_sha
+  tfvars_sha="$(python3 - "${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/hub.tfvars" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], "rb") as f:
+    print("sha256:" + hashlib.sha256(f.read()).hexdigest())
+PY
+  )"
   cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json" <<EOF
 {
   "version": "nightly-20261118",
   "version_date": "2026-11-18T03:18:06Z",
   "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "hub_image_digest": "${digest}",
+  "tfvars_sha256": "${tfvars_sha}",
   "deployed_at": "2026-11-18T05:10:00Z"
 }
 EOF
@@ -339,6 +357,74 @@ EOF
   else
     fail "converged state failed to write SKIP_DEPLOY"
   fi
+
+  # 3b. R4: Editing hub.tfvars (e.g. db_password_rotation or iap_members) invalidates no-op short-circuit WITHOUT needing _FORCE_REDEPLOY
+  printf 'db_password_rotation = "2026-11-18-rot1"\n' >> "${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/hub.tfvars"
+  rm -rf "${d}/workspace" && mkdir -p "${d}/workspace"
+  env "${base_env[@]}" _CHANNEL=nightly _VERSION_TAG="" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" >/dev/null
+  if [[ ! -f "${d}/workspace/SKIP_DEPLOY" ]]; then
+    pass "hub.tfvars edit bypasses SKIP_DEPLOY without _FORCE_REDEPLOY"
+  else
+    fail "hub.tfvars edit was ignored and wrote SKIP_DEPLOY"
+  fi
+
+  # Restore matching tfvars_sha256 and test _FORCE_APPLY=true (bypasses no-op while _FORCE_REDEPLOY remains false)
+  tfvars_sha="$(python3 - "${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/hub.tfvars" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], "rb") as f:
+    print("sha256:" + hashlib.sha256(f.read()).hexdigest())
+PY
+  )"
+  cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json" <<EOF
+{
+  "version": "nightly-20261118",
+  "version_date": "2026-11-18T03:18:06Z",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hub_image_digest": "${digest}",
+  "tfvars_sha256": "${tfvars_sha}",
+  "deployed_at": "2026-11-18T05:10:00Z"
+}
+EOF
+  rm -rf "${d}/workspace" && mkdir -p "${d}/workspace"
+  env "${base_env[@]}" _FORCE_APPLY=true _CHANNEL=nightly _VERSION_TAG="" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" >/dev/null
+  if [[ ! -f "${d}/workspace/SKIP_DEPLOY" ]]; then
+    pass "_FORCE_APPLY=true bypasses no-op short-circuit without _FORCE_REDEPLOY"
+  else
+    fail "_FORCE_APPLY=true still wrote SKIP_DEPLOY"
+  fi
+
+  # 3c. Legacy deployed.json missing tfvars_sha256 does NOT short-circuit
+  cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json" <<EOF
+{
+  "version": "nightly-20261118",
+  "version_date": "2026-11-18T03:18:06Z",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hub_image_digest": "${digest}",
+  "deployed_at": "2026-11-18T05:10:00Z"
+}
+EOF
+  rm -rf "${d}/workspace" && mkdir -p "${d}/workspace"
+  env "${base_env[@]}" _CHANNEL=nightly _VERSION_TAG="" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" >/dev/null
+  if [[ ! -f "${d}/workspace/SKIP_DEPLOY" ]]; then
+    pass "deployed.json missing tfvars_sha256 does not short-circuit"
+  else
+    fail "deployed.json missing tfvars_sha256 unexpectedly wrote SKIP_DEPLOY"
+  fi
+
+  # Restore full deployed.json with tfvars_sha256 for subsequent tests
+  cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json" <<EOF
+{
+  "version": "nightly-20261118",
+  "version_date": "2026-11-18T03:18:06Z",
+  "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hub_image_digest": "${digest}",
+  "tfvars_sha256": "${tfvars_sha}",
+  "deployed_at": "2026-11-18T05:10:00Z"
+}
+EOF
 
   # 4. _FORCE_REDEPLOY=true bypasses SKIP_DEPLOY even when converged
   rm -rf "${d}/workspace" && mkdir -p "${d}/workspace"
@@ -455,6 +541,90 @@ EOF
     pass "rejects _HUB_NAME not starting with _SHARED_PREFIX-"
   else
     fail "accepted _HUB_NAME not starting with _SHARED_PREFIX-"
+  fi
+
+  # 12. _REGISTRY repository name cross-check against <_SHARED_PREFIX>-scion
+  rc=0
+  out="$(env "${base_env[@]}" _REGISTRY="us-central1-docker.pkg.dev/myproj/other-scion" _CHANNEL=nightly _VERSION_TAG="" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "rejects _REGISTRY repo not matching <_SHARED_PREFIX>-scion" "${out}" "cdha-scion"
+  else
+    fail "accepted _REGISTRY repo not matching <_SHARED_PREFIX>-scion"
+  fi
+
+  # 13. Stable SemVer downgrade guard + DowngradeFloor hard enforcement vs _ALLOW_BELOW_DOWNGRADE_FLOOR
+  cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json" <<EOF
+{
+  "version": "v0.4.0",
+  "version_date": "2026-11-25T12:00:00Z",
+  "hub_image_digest": "${digest}",
+  "tfvars_sha256": "${tfvars_sha}",
+  "downgrade_floor": "v0.3.5"
+}
+EOF
+  rc=0
+  out="$(env "${base_env[@]}" _CHANNEL="" _VERSION_TAG="v0.3.5" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "downgrade guard rejects stable SemVer downgrade without _ALLOW_DOWNGRADE" "${out}" "_ALLOW_DOWNGRADE"
+  else
+    fail "allowed stable SemVer downgrade without _ALLOW_DOWNGRADE"
+  fi
+
+  # Downgrade AT downgrade_floor (v0.4.0 -> v0.3.5, floor=v0.3.5) succeeds with _ALLOW_DOWNGRADE=true alone
+  rm -rf "${d}/workspace" && mkdir -p "${d}/workspace"
+  env "${base_env[@]}" _ALLOW_DOWNGRADE=true _CHANNEL="" _VERSION_TAG="v0.3.5" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" >/dev/null
+  # shellcheck disable=SC1091
+  source "${d}/workspace/target.env"
+  assert_eq "downgrade at downgrade_floor allowed with _ALLOW_DOWNGRADE=true" "${TARGET_TAG}" "v0.3.5"
+
+  # Downgrade BELOW downgrade_floor (v0.4.0 -> v0.3.0, floor=v0.3.5) HARD-FAILS even with _ALLOW_DOWNGRADE=true
+  rc=0
+  out="$(env "${base_env[@]}" _ALLOW_DOWNGRADE=true _CHANNEL="" _VERSION_TAG="v0.3.0" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "downgrade below downgrade_floor hard-fails without _ALLOW_BELOW_DOWNGRADE_FLOOR" "${out}" "_ALLOW_BELOW_DOWNGRADE_FLOOR"
+  else
+    fail "downgrade below downgrade_floor succeeded without _ALLOW_BELOW_DOWNGRADE_FLOOR=true"
+  fi
+
+  # Unorderable cross-family target against nightly downgrade_floor (pinned SemVer without publish date) also fails closed
+  cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json" <<EOF
+{
+  "version": "nightly-20261120",
+  "version_date": "2026-11-20T03:00:00Z",
+  "hub_image_digest": "${digest}",
+  "tfvars_sha256": "${tfvars_sha}",
+  "downgrade_floor": "nightly-20261119"
+}
+EOF
+  rc=0
+  out="$(env "${base_env[@]}" _ALLOW_DOWNGRADE=true _CHANNEL="" _VERSION_TAG="v0.3.0" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "unorderable target against downgrade_floor fails closed" "${out}" "_ALLOW_BELOW_DOWNGRADE_FLOOR"
+  else
+    fail "unorderable target against downgrade_floor did not fail closed"
+  fi
+
+  # Passing BOTH _ALLOW_DOWNGRADE=true and _ALLOW_BELOW_DOWNGRADE_FLOOR=true permits PITR rollback below floor
+  rm -rf "${d}/workspace" && mkdir -p "${d}/workspace"
+  env "${base_env[@]}" _ALLOW_DOWNGRADE=true _ALLOW_BELOW_DOWNGRADE_FLOOR=true _CHANNEL="" _VERSION_TAG="nightly-20261118" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" >/dev/null
+  # shellcheck disable=SC1091
+  source "${d}/workspace/target.env"
+  assert_eq "_ALLOW_BELOW_DOWNGRADE_FLOOR=true permits rollback below floor" "${TARGET_TAG}" "nightly-20261118"
+
+  # 14. Rejects nightly-YYYYMMDD.N tags that pkg/config/image_tag.go ReleaseImageTag does not recognize
+  rc=0
+  out="$(env "${base_env[@]}" _CHANNEL="" _VERSION_TAG="nightly-20261125.2" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "rejects nightly-YYYYMMDD.N tag unsupported by ReleaseImageTag" "${out}" "is not a valid Scion release tag"
+  else
+    fail "accepted nightly-YYYYMMDD.N tag unsupported by ReleaseImageTag"
   fi
 }
 
@@ -818,6 +988,7 @@ EOF
     "_STATE_BUCKET=myproj-cdha-tfstate"
     "_SHARED_PREFIX=cdha"
     "_HUB_NAME=cdha-gke-1"
+    "_REGISTRY=us-central1-docker.pkg.dev/myproj/cdha-scion"
     "BUILD_ID=cb-build-999"
   )
 
@@ -829,6 +1000,16 @@ EOF
   env "${tf_env[@]}" bash "${SCRIPT_DIR}/gcs-hub-state.sh" write-deployed >/dev/null
   assert_eq "SKIP_DEPLOY runs zero terraform commands" "$(cat "${d}/tf.log")" ""
   rm -f "${d}/workspace/SKIP_DEPLOY"
+
+  # 1b. _REGISTRY cross-check in fetch-tfvars rejects mismatched region/project in hub.tfvars before apply
+  local reg_rc=0 reg_out=""
+  reg_out="$(env "${tf_env[@]}" _REGISTRY="europe-west1-docker.pkg.dev/myproj/cdha-scion" \
+    bash "${SCRIPT_DIR}/gcs-hub-state.sh" fetch-tfvars 2>&1)" || reg_rc=$?
+  if [[ ${reg_rc} -ne 0 ]]; then
+    assert_contains "fetch-tfvars rejects _REGISTRY region mismatch against hub.tfvars" "${reg_out}" "us-central1-docker.pkg.dev/myproj/cdha-scion"
+  else
+    fail "fetch-tfvars accepted _REGISTRY region mismatch against hub.tfvars"
+  fi
 
   # 2. Full Cloud Build flow: fetch-tfvars -> POSIX sh terraform-apply-hub-gke.sh -> write-deployed
   : > "${d}/tf.log"
@@ -850,21 +1031,24 @@ EOF
 
   local deployed_gcs="${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json"
   if [[ -f "${deployed_gcs}" ]]; then
-    local dep_check
-    dep_check="$(python3 - "${deployed_gcs}" <<'PY'
-import json, sys
-with open(sys.argv[1]) as f:
+    local dep_check=""
+    dep_check="$(python3 - "${deployed_gcs}" "${d}/workspace/hub.tfvars" <<'PY'
+import hashlib, json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
     d = json.load(f)
+with open(sys.argv[2], "rb") as f:
+    want_tfvars_sha = "sha256:" + hashlib.sha256(f.read()).hexdigest()
 assert d["version"] == "nightly-20261118"
 assert d["commit"] == "0123456789abcdef0123456789abcdef01234567"
 assert d["hub_image_digest"].startswith("sha256:abcdef")
+assert d["tfvars_sha256"] == want_tfvars_sha, f"got {d.get('tfvars_sha256')!r}, want {want_tfvars_sha!r}"
 assert d["hub_installed"] is True
 assert d["downgrade_floor"] == "nightly-20261119"
 assert d["build_id"] == "cb-build-999"
 print("OK")
 PY
-    )"
-    assert_eq "deployed.json uploaded to GCS with expected metadata" "${dep_check}" "OK"
+    )" || true
+    assert_eq "deployed.json uploaded to GCS with expected metadata and tfvars_sha256" "${dep_check}" "OK"
   else
     fail "deployed.json was not uploaded to GCS"
   fi
@@ -896,7 +1080,7 @@ test_slice5() {
 
   # Required substitutions present
   local sub
-  for sub in _CHANNEL _VERSION_TAG _STATE_BUCKET _SHARED_PREFIX _HUB_NAME _REGISTRY _AGENT_PLATFORMS _FORCE_REDEPLOY _ALLOW_DOWNGRADE _REPO_URL; do
+  for sub in _CHANNEL _VERSION_TAG _STATE_BUCKET _SHARED_PREFIX _HUB_NAME _REGISTRY _AGENT_PLATFORMS _FORCE_REDEPLOY _FORCE_APPLY _ALLOW_DOWNGRADE _ALLOW_BELOW_DOWNGRADE_FLOOR _REPO_URL; do
     assert_contains "cloudbuild-gke-cd.yaml defines substitution ${sub}" "${yaml_content}" "${sub}:"
   done
 
@@ -910,7 +1094,7 @@ test_slice5() {
   assert_not_contains "zero mock/dev E2E steps in prod CD YAML" "${yaml_content}" "e2e"
   assert_not_contains "zero test_identities in prod CD YAML" "${yaml_content}" "test_identities"
 
-  # Parse cloudbuild-gke-cd.yaml strictly via Go's gopkg.in/yaml.v3 when go is available
+  # Parse cloudbuild-gke-cd.yaml strictly via Go's gopkg.in/yaml.v3 (fails if go is missing unless SKIP_GO_YAML_CHECK=true)
   if command -v go >/dev/null 2>&1; then
     local yaml_parse_dir="${TMP_ROOT}/yamlcheck"
     mkdir -p "${yaml_parse_dir}"
@@ -944,8 +1128,6 @@ func main() {
 		os.Exit(1)
 	}
 	var cfg cbConfig
-	dec := yaml.NewDecoder(os.Stdin)
-	_ = dec
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -967,6 +1149,10 @@ GOEOF
     else
       fail "gopkg.in/yaml.v3 failed to parse cloudbuild-gke-cd.yaml"
     fi
+  elif [[ "${SKIP_GO_YAML_CHECK:-false}" == "true" ]]; then
+    pass "skipped gopkg.in/yaml.v3 parse (SKIP_GO_YAML_CHECK=true)"
+  else
+    fail "go toolchain missing on PATH (required for gopkg.in/yaml.v3 YAML contract check; set SKIP_GO_YAML_CHECK=true to skip)"
   fi
 
   # Example tfvars exists and omits hardcoded hub_image_digest assignment
@@ -1004,7 +1190,198 @@ GOEOF
   assert_contains "setup-cd.sh creates dedicated CD service account" "${dry_out}" "cdha-cd-deployer"
   assert_contains "setup-cd.sh scopes Secret Manager role with IAM Condition" "${dry_out}" "secrets/cdha-gke-1-"
   assert_contains "setup-cd.sh scopes GCS storage.admin with IAM Condition" "${dry_out}" "buckets/my-prod-proj-cdha-gke-1-"
+  assert_not_contains "setup-cd.sh default omits unconditioned storage.admin" "${dry_out}" "--role=roles/storage.admin --condition=None"
   assert_not_contains "setup-cd.sh never widens default @cloudbuild.gserviceaccount.com" "${dry_out}" "@cloudbuild.gserviceaccount.com"
+
+  # setup-cd.sh --dry-run with multi-platform _AGENT_PLATFORMS and 1st-gen / 2nd-gen triggers
+  local dry_1st="" dry_2nd=""
+  dry_1st="$(bash "${SCRIPT_DIR}/setup-cd.sh" \
+    --project my-prod-proj \
+    --region us-central1 \
+    --shared-prefix cdha \
+    --hub-name cdha-gke-1 \
+    --agent-platforms "linux/amd64,linux/arm64" \
+    --github-owner GoogleCloudPlatform \
+    --github-repo scion \
+    --dry-run)"
+  assert_contains "setup-cd.sh --dry-run uses ^|^ alternate delimiter for multi-platform substitutions" \
+    "${dry_1st}" "_AGENT_PLATFORMS=linux/amd64"
+  assert_contains "setup-cd.sh --dry-run 1st-gen Scheduler body nests branchName under source" \
+    "${dry_1st}" "source"
+
+  dry_2nd="$(bash "${SCRIPT_DIR}/setup-cd.sh" \
+    --project my-prod-proj \
+    --region us-central1 \
+    --shared-prefix cdha \
+    --hub-name cdha-gke-1 \
+    --agent-platforms "linux/amd64,linux/arm64" \
+    --repository "projects/my-prod-proj/locations/us-central1/connections/gh/repositories/scion" \
+    --dry-run)"
+  assert_not_contains "setup-cd.sh --dry-run 2nd-gen Scheduler body omits branchName" \
+    "${dry_2nd}" "branchName"
+
+  # setup-cd.sh --bootstrap-storage-admin and --revoke-bootstrap-storage-admin (--dry-run)
+  local boot_out="" revoke_out=""
+  boot_out="$(bash "${SCRIPT_DIR}/setup-cd.sh" \
+    --project my-prod-proj \
+    --region us-central1 \
+    --shared-prefix cdha \
+    --hub-name cdha-gke-1 \
+    --bootstrap-storage-admin \
+    --dry-run)"
+  assert_contains "setup-cd.sh --bootstrap-storage-admin grants temporary unconditioned storage.admin" \
+    "${boot_out}" "--role=roles/storage.admin --condition=None"
+
+  revoke_out="$(bash "${SCRIPT_DIR}/setup-cd.sh" \
+    --project my-prod-proj \
+    --region us-central1 \
+    --shared-prefix cdha \
+    --hub-name cdha-gke-1 \
+    --revoke-bootstrap-storage-admin \
+    --dry-run)"
+  assert_contains "setup-cd.sh --revoke-bootstrap-storage-admin removes unconditioned storage.admin" \
+    "${revoke_out}" "projects remove-iam-policy-binding my-prod-proj"
+  assert_contains "setup-cd.sh --revoke-bootstrap-storage-admin targets roles/storage.admin --condition=None" \
+    "${revoke_out}" "--role=roles/storage.admin --condition=None"
+
+  # R1 & R2: Test setup-cd.sh with stubbed gcloud capturing exact argv for:
+  #   (a) 1st-gen GitHub trigger + multi-platform (--agent-platforms linux/amd64,linux/arm64)
+  #   (b) 2nd-gen Cloud Build repository trigger (--repository ...)
+  local setup_stub="${TMP_ROOT}/setup-stub"
+  mkdir -p "${setup_stub}/bin"
+  cat >"${setup_stub}/bin/gcloud" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+python3 - "${MOCK_SETUP_ARGV_JSONL:?}" "$@" <<'PY'
+import json, sys
+out_path = sys.argv[1]
+argv = sys.argv[2:]
+with open(out_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(argv) + "\n")
+PY
+if [[ "${1:-}" == "projects" && "${2:-}" == "describe" ]]; then
+  echo "123456789012"
+  exit 0
+fi
+if [[ "${1:-}" == "storage" && "${2:-}" == "buckets" && "${3:-}" == "describe" ]]; then
+  exit 1
+fi
+if [[ "${1:-}" == "iam" && "${2:-}" == "service-accounts" && "${3:-}" == "describe" ]]; then
+  exit 1
+fi
+if [[ "${1:-}" == "artifacts" && "${2:-}" == "repositories" && "${3:-}" == "describe" ]]; then
+  echo "projects/my-prod-proj/locations/us-central1/repositories/cdha-scion"
+  exit 0
+fi
+if [[ "${1:-}" == "builds" && "${2:-}" == "triggers" && "${3:-}" == "describe" ]]; then
+  if [[ "$*" == *"--format=value(id)"* ]]; then
+    echo "trigger-uuid-1234"
+    exit 0
+  fi
+  exit 1
+fi
+if [[ "${1:-}" == "scheduler" && "${2:-}" == "jobs" && "${3:-}" == "describe" ]]; then
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "${setup_stub}/bin/gcloud"
+
+  # (a) 1st-gen GitHub + multi-arch _AGENT_PLATFORMS=linux/amd64,linux/arm64 + custom branch
+  local jsonl_1st="${setup_stub}/calls-1st.jsonl"
+  : > "${jsonl_1st}"
+  env "PATH=${setup_stub}/bin:${PATH}" "MOCK_SETUP_ARGV_JSONL=${jsonl_1st}" \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 \
+      --channel nightly \
+      --agent-platforms "linux/amd64,linux/arm64" \
+      --github-owner GoogleCloudPlatform \
+      --github-repo scion \
+      --trigger-branch release-main >/dev/null
+
+  local r1_r2_1st_check=""
+  r1_r2_1st_check="$(python3 - "${jsonl_1st}" <<'PY'
+import json
+import sys
+
+# Exact gcloud topic escaping ArgDict parser (^DELIM^ prefix or default comma)
+def parse_gcloud_arg_dict(raw):
+    delim = ","
+    body = raw
+    if raw.startswith("^") and len(raw) >= 3:
+        idx = raw.find("^", 1)
+        if idx > 1:
+            delim = raw[1:idx]
+            body = raw[idx + 1:]
+    out = {}
+    for item in body.split(delim):
+        if "=" not in item:
+            raise ValueError(f"Bad syntax for dict arg: [{item}] in {raw!r}")
+        k, v = item.split("=", 1)
+        out[k] = v
+    return out
+
+calls = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+trigger_calls = [c for c in calls if c[:4] == ["builds", "triggers", "create", "manual"]]
+sched_calls = [c for c in calls if c[:4] == ["scheduler", "jobs", "create", "http"]]
+assert len(trigger_calls) == 1, f"expected 1 trigger create call, got {len(trigger_calls)}"
+assert len(sched_calls) == 1, f"expected 1 scheduler create call, got {len(sched_calls)}"
+
+subs_args = [a.split("=", 1)[1] for a in trigger_calls[0] if a.startswith("--substitutions=")]
+assert len(subs_args) == 1, f"missing --substitutions= in {trigger_calls[0]}"
+parsed_subs = parse_gcloud_arg_dict(subs_args[0])
+assert parsed_subs["_AGENT_PLATFORMS"] == "linux/amd64,linux/arm64", parsed_subs
+assert parsed_subs["_REPO_URL"] == "https://github.com/GoogleCloudPlatform/scion.git", parsed_subs
+assert parsed_subs["_CHANNEL"] == "nightly", parsed_subs
+
+body_args = [a.split("=", 1)[1] for a in sched_calls[0] if a.startswith("--message-body=")]
+assert len(body_args) == 1, f"missing --message-body= in {sched_calls[0]}"
+body = json.loads(body_args[0])
+# RunBuildTriggerRequest allows only projectId, triggerId, source at top level
+allowed_top = {"projectId", "triggerId", "source"}
+unknown_top = set(body.keys()) - allowed_top
+assert not unknown_top, f"invalid top-level RunBuildTriggerRequest fields: {unknown_top} in {body}"
+assert body == {"source": {"branchName": "release-main"}}, f"unexpected 1st-gen body: {body}"
+
+uri_args = [a.split("=", 1)[1] for a in sched_calls[0] if a.startswith("--uri=")]
+assert uri_args == ["https://cloudbuild.googleapis.com/v1/projects/my-prod-proj/locations/us-central1/triggers/trigger-uuid-1234:run"], uri_args
+print("OK")
+PY
+  )" || true
+  assert_eq "setup-cd.sh 1st-gen multi-arch substitutions & RunBuildTriggerRequest body" "${r1_r2_1st_check}" "OK"
+
+  # (b) 2nd-gen --repository trigger sends empty {} RunBuildTriggerRequest body
+  local jsonl_2nd="${setup_stub}/calls-2nd.jsonl"
+  : > "${jsonl_2nd}"
+  env "PATH=${setup_stub}/bin:${PATH}" "MOCK_SETUP_ARGV_JSONL=${jsonl_2nd}" \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 \
+      --channel stable \
+      --agent-platforms "linux/amd64,linux/arm64" \
+      --repository "projects/my-prod-proj/locations/us-central1/connections/gh/repositories/scion" >/dev/null
+
+  local r2_2nd_check=""
+  r2_2nd_check="$(python3 - "${jsonl_2nd}" <<'PY'
+import json
+import sys
+
+calls = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+sched_calls = [c for c in calls if c[:4] == ["scheduler", "jobs", "create", "http"]]
+assert len(sched_calls) == 1, f"expected 1 scheduler create call, got {len(sched_calls)}"
+body_args = [a.split("=", 1)[1] for a in sched_calls[0] if a.startswith("--message-body=")]
+assert len(body_args) == 1
+body = json.loads(body_args[0])
+assert body == {}, f"expected empty {{}} body for 2nd-gen trigger, got {body}"
+print("OK")
+PY
+  )" || true
+  assert_eq "setup-cd.sh 2nd-gen --repository sends {} Scheduler body" "${r2_2nd_check}" "OK"
 
   # Reject mismatched hub_name prefix in setup-cd.sh
   local rc=0
@@ -1019,7 +1396,121 @@ GOEOF
     fail "setup-cd.sh accepted --hub-name not starting with <shared-prefix>-"
   fi
 
-  # Shell syntax check on all scripts (bash -n for bash scripts, sh -n for POSIX sh scripts)
+  # R4 end-to-end: editing hub.tfvars on an already-deployed tag triggers TF apply
+  # with ZERO docker buildx rebuilds, updates tfvars_sha256, and re-converges on next run!
+  local e2e_d="${TMP_ROOT}/r4-e2e"
+  make_stub_env "${e2e_d}"
+  make_docker_stub "${e2e_d}"
+  make_terraform_stub "${e2e_d}"
+  local e2e_repo="${e2e_d}/origin-repo"
+  make_release_repo_fixture "${e2e_repo}"
+
+  local e2e_reg="us-central1-docker.pkg.dev/myproj/cdha-scion"
+  local e2e_digest="sha256:9999999999999999999999999999999999999999999999999999999999999999"
+  local e2e_state_dir="${e2e_d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1"
+  mkdir -p "${e2e_state_dir}"
+
+  cat >"${e2e_d}/LATEST.json" <<'EOF'
+{
+  "channels": {
+    "stable": { "version": "v0.4.0-preview.4", "date": "2026-11-18T03:00:00Z" }
+  }
+}
+EOF
+  cat >"${e2e_state_dir}/hub.tfvars" <<'EOF'
+project_id    = "myproj"
+region        = "us-central1"
+zone          = "us-central1-a"
+shared_prefix = "cdha"
+hub_name      = "cdha-gke-1"
+state_prefix  = "cdha/hubs/cdha-gke-1"
+hostname      = "cdha-gke-1.endpoints.myproj.cloud.goog"
+iap_members   = ["group:initial@example.com"]
+EOF
+  cat >"${e2e_state_dir}/default.tfstate" <<EOF
+{
+  "version": 4,
+  "outputs": {
+    "hub_installed": { "value": true, "type": "bool" },
+    "hub_image": { "value": "${e2e_reg}/scion-hub-gke@${e2e_digest}", "type": "string" }
+  }
+}
+EOF
+
+  local e2e_short
+  e2e_short="$(git -C "${e2e_repo}" rev-parse --short "refs/tags/v0.4.0-preview.4^{commit}")"
+  printf '%s\n' "${e2e_short}" > "${e2e_d}/ar/scion-hub-gke.tags"
+  printf '%s\n' "${e2e_digest}" > "${e2e_d}/ar/scion-hub-gke.digest"
+  for pkg in core-base scion-base scion-claude scion-gemini-cli; do
+    printf '%s\n%s\n' "v0.4.0-preview.4" "${e2e_short}" > "${e2e_d}/ar/${pkg}.tags"
+  done
+
+  local init_tfvars_sha
+  init_tfvars_sha="$(python3 - "${e2e_state_dir}/hub.tfvars" <<'PY'
+import hashlib, sys
+with open(sys.argv[1], "rb") as f:
+    print("sha256:" + hashlib.sha256(f.read()).hexdigest())
+PY
+  )"
+  cat >"${e2e_state_dir}/deployed.json" <<EOF
+{
+  "version": "v0.4.0-preview.4",
+  "version_date": "2026-11-18T03:00:00Z",
+  "hub_image_digest": "${e2e_digest}",
+  "tfvars_sha256": "${init_tfvars_sha}"
+}
+EOF
+
+  # Mutate hub.tfvars (operator rotates DB password / adds IAP member)
+  printf 'db_password_rotation = "2026-11-18-rot2"\n' >> "${e2e_state_dir}/hub.tfvars"
+  : > "${e2e_d}/docker.log"
+  : > "${e2e_d}/tf.log"
+
+  local e2e_env=(
+    "HOME=${e2e_d}/home"
+    "PATH=${e2e_d}/home/bin:${e2e_d}/bin:${PATH}"
+    "WORKSPACE_DIR=${e2e_d}/workspace"
+    "MOCK_MANIFEST_FILE=${e2e_d}/LATEST.json"
+    "MOCK_GCS_ROOT=${e2e_d}/gcs"
+    "MOCK_AR_ROOT=${e2e_d}/ar"
+    "MOCK_DOCKER_LOG=${e2e_d}/docker.log"
+    "MOCK_TF_LOG=${e2e_d}/tf.log"
+    "MOCK_HUB_DIGEST=${e2e_digest}"
+    "_CHANNEL=stable"
+    "_VERSION_TAG="
+    "_STATE_BUCKET=myproj-cdha-tfstate"
+    "_SHARED_PREFIX=cdha"
+    "_HUB_NAME=cdha-gke-1"
+    "_REGISTRY=${e2e_reg}"
+    "_AGENT_PLATFORMS=linux/amd64"
+    "_FORCE_REDEPLOY=false"
+    "_FORCE_APPLY=false"
+    "_ALLOW_DOWNGRADE=false"
+    "_ALLOW_BELOW_DOWNGRADE_FLOOR=false"
+    "_REPO_URL=${e2e_repo}"
+    "BUILD_ID=cb-tfvars-only"
+  )
+
+  env "${e2e_env[@]}" bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" >/dev/null
+  env "${e2e_env[@]}" bash "${SCRIPT_DIR}/checkout-release-tag.sh" >/dev/null
+  env "${e2e_env[@]}" bash "${SCRIPT_DIR}/build-images.sh" --phase all >/dev/null
+  env "${e2e_env[@]}" bash "${SCRIPT_DIR}/gcs-hub-state.sh" fetch-tfvars >/dev/null
+  env "${e2e_env[@]}" SKIP_WRITE_DEPLOYED=true sh "${SCRIPT_DIR}/terraform-apply-hub-gke.sh" >/dev/null
+  env "${e2e_env[@]}" bash "${SCRIPT_DIR}/gcs-hub-state.sh" write-deployed >/dev/null
+
+  assert_not_contains "R4 e2e: hub.tfvars edit runs zero docker buildx builds" "$(cat "${e2e_d}/docker.log")" "buildx build"
+  assert_contains "R4 e2e: hub.tfvars edit runs terraform apply with reused hub digest" "$(cat "${e2e_d}/tf.log")" "-var=hub_image_digest=${e2e_digest}"
+
+  # Next run with no further changes now short-circuits cleanly via SKIP_DEPLOY!
+  rm -rf "${e2e_d}/workspace" && mkdir -p "${e2e_d}/workspace"
+  env "${e2e_env[@]}" bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" >/dev/null
+  if [[ -f "${e2e_d}/workspace/SKIP_DEPLOY" ]]; then
+    pass "R4 e2e: subsequent run after hub.tfvars apply short-circuits cleanly"
+  else
+    fail "R4 e2e: subsequent run after hub.tfvars apply failed to short-circuit"
+  fi
+
+  # Shell syntax check on all scripts (bash -n for bash scripts, sh -n + dash -n for POSIX sh scripts)
   local s
   for s in "${SCRIPT_DIR}"/*.sh; do
     if head -n 1 "${s}" | grep -q '^#!/bin/sh'; then
@@ -1027,6 +1518,13 @@ GOEOF
         pass "sh -n syntax clean: $(basename "${s}")"
       else
         fail "sh -n syntax error: $(basename "${s}")"
+      fi
+      if command -v dash >/dev/null 2>&1; then
+        if dash -n "${s}"; then
+          pass "dash -n syntax clean: $(basename "${s}")"
+        else
+          fail "dash -n syntax error: $(basename "${s}")"
+        fi
       fi
     else
       if bash -n "${s}"; then

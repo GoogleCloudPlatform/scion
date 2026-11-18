@@ -78,7 +78,7 @@ BUILD_TIME=""
 # shellcheck disable=SC1091
 source "${WORKSPACE_DIR}/build.env"
 
-validate_registry_path "${REGISTRY}"
+validate_registry_path "${REGISTRY}" "${_SHARED_PREFIX:-}"
 validate_agent_platforms "${AGENT_PLATFORMS}"
 validate_bool_flag "_FORCE_REDEPLOY" "${FORCE_REDEPLOY}"
 validate_bool_flag "CORE_BASE_CACHE" "${CORE_BASE_CACHE}"

@@ -71,13 +71,41 @@ validate_cd_common_inputs() {
   esac
 }
 
+# Compute 'sha256:<64hex>' digest of file $1 (portable across Linux and macOS).
+sha256_file() {
+  local path="$1"
+  python3 - "${path}" <<'PY'
+import hashlib
+import sys
+
+h = hashlib.sha256()
+with open(sys.argv[1], "rb") as f:
+    while True:
+        chunk = f.read(65536)
+        if not chunk:
+            break
+        h.update(chunk)
+print("sha256:" + h.hexdigest())
+PY
+}
+
 # Validate Artifact Registry Docker repository path (<location>-docker.pkg.dev/<project>/<repo>).
+# When $2 (<shared_prefix>) is non-empty, also verifies the repository name matches
+# '<shared_prefix>-scion' (the repo configurations/hub-gke resolves via shared-lookup).
 validate_registry_path() {
   local reg="${1%/}"
+  local expected_prefix="${2:-}"
   [[ -n "${reg}" ]] || die "_REGISTRY is required (e.g. 'us-central1-docker.pkg.dev/<project>/<prefix>-scion')"
   local ar_re='^(us|europe|asia|[a-z]+-[a-z]+[0-9]{1,2})-docker\.pkg\.dev/[a-z][a-z0-9-]*[a-z0-9]/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*$'
   [[ "${reg}" =~ ${ar_re} ]] \
     || die "_REGISTRY '${reg}' must be an Artifact Registry Docker path (<location>-docker.pkg.dev/<project>/<repo>)"
+
+  if [[ -n "${expected_prefix}" ]]; then
+    local want_repo="${expected_prefix}-scion"
+    local repo_tail="${reg#*docker.pkg.dev/*/}"
+    [[ "${repo_tail}" == "${want_repo}" ]] \
+      || die "_REGISTRY '${reg}' repository '${repo_tail}' does not match '${want_repo}' expected by configurations/hub-gke (shared_prefix='${expected_prefix}')"
+  fi
 }
 
 # Validate _AGENT_PLATFORMS (e.g. 'linux/amd64' or 'linux/amd64,linux/arm64').
@@ -96,9 +124,11 @@ validate_agent_platforms() {
   done
 }
 
-# Validate a release tag against Scion's release tag grammar (pkg/version/update/compare.go):
-#   - vX.Y.Z, vX.Y.Z-preview.N, vX.Y.Z-rc.N (or general SemVer without +build metadata)
-#   - nightly-YYYYMMDD or nightly-YYYYMMDD.N with a real calendar date
+# Validate a release tag against Scion's deployable release image tag grammar
+# (matching pkg/config/image_tag.go releaseVersionPattern so hub.image_tag_version_default
+# always resolves agent images to :<TARGET_TAG> rather than falling back to :latest):
+#   - vX.Y.Z, vX.Y.Z-preview.N, or vX.Y.Z-rc.N
+#   - nightly-YYYYMMDD with a real calendar date
 is_valid_release_tag() {
   local tag="$1"
   python3 - "${tag}" <<'PY'
@@ -107,7 +137,7 @@ import re
 import sys
 
 tag = sys.argv[1]
-nightly_m = re.match(r"^nightly-(\d{8})(?:\.(\d+))?$", tag)
+nightly_m = re.match(r"^nightly-(\d{8})$", tag)
 if nightly_m:
     try:
         datetime.datetime.strptime(nightly_m.group(1), "%Y%m%d")
@@ -116,16 +146,19 @@ if nightly_m:
     sys.exit(0)
 
 semver_m = re.match(
-    r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
-    r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
-    r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?$",
+    r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(preview|rc)\.(0|[1-9]\d*))?$",
     tag,
 )
 sys.exit(0 if semver_m else 1)
 PY
 }
 
-# Compare deployed vs target release refs using pkg/version/update/compare.go rules.
+# Compare deployed vs target release refs:
+#   - nightly <-> nightly: calendar date then optional .N sequence (matching pkg/version/update/compare.go)
+#   - SemVer <-> SemVer (stable, preview, rc): ordered as one SemVer family (deliberately stricter than
+#     pkg/version/update/compare.go's date-based preview<->stable switch rule so v0.4.0 -> v0.4.0-preview.N
+#     and v0.4.0 -> v0.3.x are always classified as 'downgrade' regardless of publish timestamps)
+#   - Cross-family (nightly <-> SemVer) or non-release current version: ordered by publish dates
 # Prints one of: same | upgrade | switch-newer | downgrade | switch-older | unknown
 # Args: <current_tag> <target_tag> [<current_date_rfc3339>] [<target_date_rfc3339>]
 compare_release_refs() {

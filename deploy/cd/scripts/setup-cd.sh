@@ -52,6 +52,8 @@ GITHUB_OWNER=""
 GITHUB_REPO=""
 TRIGGER_BRANCH="main"
 PROJECT_NUMBER_OVERRIDE=""
+BOOTSTRAP_STORAGE_ADMIN="false"
+REVOKE_BOOTSTRAP_STORAGE_ADMIN="false"
 DRY_RUN="false"
 
 usage() {
@@ -83,6 +85,11 @@ Options:
   --github-owner <owner>     1st-gen Cloud Build GitHub App owner (use with --github-repo)
   --github-repo <repo>       1st-gen Cloud Build GitHub App repo name (use with --github-owner)
   --trigger-branch <branch>  Branch hosting deploy/cd/cloudbuild-gke-cd.yaml (default: main)
+  --bootstrap-storage-admin  Temporarily grant unconditioned roles/storage.admin so Pass 1 can run
+                             project-level storage.buckets.create for <project>-<hub-name>-artifacts
+  --revoke-bootstrap-storage-admin
+                             Remove temporary unconditioned roles/storage.admin after Pass 1 creates
+                             <project>-<hub-name>-artifacts (leaving only the bucket-prefix condition)
   --project-number <num>     Explicit GCP project number (used in --dry-run without live gcloud lookup)
   --dry-run                  Print commands without executing any GCP mutations
   -h, --help                 Show this help text
@@ -114,6 +121,8 @@ while [[ $# -gt 0 ]]; do
     --github-owner)       need_arg "$1" $#; GITHUB_OWNER="$2"; shift 2 ;;
     --github-repo)        need_arg "$1" $#; GITHUB_REPO="$2"; shift 2 ;;
     --trigger-branch)     need_arg "$1" $#; TRIGGER_BRANCH="$2"; shift 2 ;;
+    --bootstrap-storage-admin)        BOOTSTRAP_STORAGE_ADMIN="true"; shift ;;
+    --revoke-bootstrap-storage-admin) REVOKE_BOOTSTRAP_STORAGE_ADMIN="true"; shift ;;
     --project-number)     need_arg "$1" $#; PROJECT_NUMBER_OVERRIDE="$2"; shift 2 ;;
     --dry-run)            DRY_RUN="true"; shift ;;
     -h|--help)            usage 0 ;;
@@ -125,6 +134,10 @@ done
 [[ "${PROJECT}" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] \
   || die "--project '${PROJECT}' is not a valid GCP project ID"
 
+if [[ "${BOOTSTRAP_STORAGE_ADMIN}" == "true" && "${REVOKE_BOOTSTRAP_STORAGE_ADMIN}" == "true" ]]; then
+  die "Specify at most one of --bootstrap-storage-admin or --revoke-bootstrap-storage-admin"
+fi
+
 if [[ -z "${STATE_BUCKET}" ]]; then
   STATE_BUCKET="${PROJECT}-${SHARED_PREFIX}-tfstate"
 fi
@@ -135,6 +148,9 @@ _HUB_NAME="${HUB_NAME}"
 export _STATE_BUCKET _SHARED_PREFIX _HUB_NAME
 validate_cd_common_inputs
 validate_agent_platforms "${AGENT_PLATFORMS}"
+
+[[ -n "${TRIGGER_BRANCH}" && ! "${TRIGGER_BRANCH}" =~ [[:space:][:cntrl:]] ]] \
+  || die "--trigger-branch must be a non-empty branch name without whitespace or control characters"
 
 case "${CHANNEL}" in
   nightly|preview|stable|"") ;;
@@ -176,6 +192,17 @@ run_cmd() {
     "$@"
   fi
 }
+
+if [[ "${REVOKE_BOOTSTRAP_STORAGE_ADMIN}" == "true" ]]; then
+  log_info "Revoking temporary unconditioned roles/storage.admin from ${CD_SA_EMAIL} (keeping bucket-prefix IAM Condition)..."
+  run_cmd gcloud projects remove-iam-policy-binding "${PROJECT}" \
+    --member="serviceAccount:${CD_SA_EMAIL}" \
+    --role="roles/storage.admin" \
+    --condition=None \
+    --quiet
+  log_info "Unconditioned roles/storage.admin removed from ${CD_SA_EMAIL}."
+  exit 0
+fi
 
 PROJECT_NUMBER="${PROJECT_NUMBER_OVERRIDE}"
 if [[ -z "${PROJECT_NUMBER}" ]]; then
@@ -249,7 +276,9 @@ else
   log_warn "Artifact Registry repository '${AR_REPO}' does not exist yet. Apply configurations/shared-infra first, then re-run setup-cd.sh to bind roles/artifactregistry.writer on ${AR_REPO}."
 fi
 
-# 4c. Conditioned Secret Manager admin scoped strictly to <hub_name>-* Terraform-managed DB secrets
+# 4c. Conditioned Secret Manager admin scoped strictly to <hub_name>-* Terraform-managed DB secrets.
+#     Secret Manager evaluates resource.name on secrets.create against the new child secret path
+#     (empirically verified against the live API in deploy/terraform/modules/hub-identity/main.tf).
 SM_CONDITION="expression=resource.name.startsWith(\"projects/${PROJECT_NUMBER}/secrets/${HUB_NAME}-\"),title=${HUB_NAME}-cd-secrets,description=Terraform-managed secrets for ${HUB_NAME} only"
 run_cmd gcloud projects add-iam-policy-binding "${PROJECT}" \
   --member="serviceAccount:${CD_SA_EMAIL}" \
@@ -257,13 +286,31 @@ run_cmd gcloud projects add-iam-policy-binding "${PROJECT}" \
   --condition="${SM_CONDITION}" \
   --quiet
 
-# 4d. Conditioned Storage admin scoped strictly to <project>-<hub_name>-* artifacts bucket
+# 4d. Conditioned Storage admin scoped strictly to <project>-<hub_name>-* artifacts bucket.
+#     NOTE: Cloud Storage evaluates storage.buckets.create on the parent project resource rather
+#     than projects/_/buckets/<new-bucket>. Pass --bootstrap-storage-admin before Pass 1 so the
+#     CD SA can create gs://<project>-<hub_name>-artifacts, then run --revoke-bootstrap-storage-admin
+#     after Pass 1 so steady-state runs keep only this bucket-prefix condition.
 GCS_CONDITION="expression=resource.name.startsWith(\"projects/_/buckets/${PROJECT}-${HUB_NAME}-\"),title=${HUB_NAME}-cd-buckets,description=Artifacts bucket for ${HUB_NAME} only"
 run_cmd gcloud projects add-iam-policy-binding "${PROJECT}" \
   --member="serviceAccount:${CD_SA_EMAIL}" \
   --role="roles/storage.admin" \
   --condition="${GCS_CONDITION}" \
   --quiet
+
+ARTIFACTS_BUCKET="${PROJECT}-${HUB_NAME}-artifacts"
+if [[ "${BOOTSTRAP_STORAGE_ADMIN}" == "true" ]]; then
+  log_info "Granting temporary unconditioned roles/storage.admin for Pass 1 bucket creation (gs://${ARTIFACTS_BUCKET})..."
+  run_cmd gcloud projects add-iam-policy-binding "${PROJECT}" \
+    --member="serviceAccount:${CD_SA_EMAIL}" \
+    --role="roles/storage.admin" \
+    --condition=None \
+    --quiet
+  log_warn "After Pass 1 creates gs://${ARTIFACTS_BUCKET}, revoke temporary project-wide storage.admin with:"
+  log_warn "  $(basename "$0") --project ${PROJECT} --shared-prefix ${SHARED_PREFIX} --hub-name ${HUB_NAME} --revoke-bootstrap-storage-admin"
+elif [[ "${DRY_RUN}" != "true" ]] && ! gcloud storage buckets describe "gs://${ARTIFACTS_BUCKET}" --project="${PROJECT}" >/dev/null 2>&1; then
+  log_warn "Artifacts bucket gs://${ARTIFACTS_BUCKET} does not exist yet. Because storage.buckets.create is checked on the parent project rather than projects/_/buckets/..., re-run with --bootstrap-storage-admin before Pass 1 (and --revoke-bootstrap-storage-admin afterward)."
+fi
 
 # 4e. Steady-state project-level roles required by configurations/hub-gke
 PROJECT_ROLES=(
@@ -288,7 +335,13 @@ for role in "${PROJECT_ROLES[@]}"; do
 done
 
 # 5. Cloud Build Trigger & Cloud Scheduler daily job
-SUBSTITUTIONS="_CHANNEL=${CHANNEL},_VERSION_TAG=${VERSION_TAG},_STATE_BUCKET=${STATE_BUCKET},_SHARED_PREFIX=${SHARED_PREFIX},_HUB_NAME=${HUB_NAME},_REGISTRY=${REGISTRY},_AGENT_PLATFORMS=${AGENT_PLATFORMS},_FORCE_REDEPLOY=false,_ALLOW_DOWNGRADE=false,_REPO_URL=${REPO_URL}"
+# Use gcloud's ^|^ alternate delimiter (gcloud topic escaping) so comma-separated
+# values such as _AGENT_PLATFORMS=linux/amd64,linux/arm64 and colons in _REPO_URL
+# parse cleanly inside --substitutions.
+for sub_val in "${CHANNEL}" "${VERSION_TAG}" "${STATE_BUCKET}" "${SHARED_PREFIX}" "${HUB_NAME}" "${REGISTRY}" "${AGENT_PLATFORMS}" "${REPO_URL}"; do
+  [[ "${sub_val}" != *"|"* ]] || die "Substitution value '${sub_val}' must not contain '|'"
+done
+SUBSTITUTIONS="^|^_CHANNEL=${CHANNEL}|_VERSION_TAG=${VERSION_TAG}|_STATE_BUCKET=${STATE_BUCKET}|_SHARED_PREFIX=${SHARED_PREFIX}|_HUB_NAME=${HUB_NAME}|_REGISTRY=${REGISTRY}|_AGENT_PLATFORMS=${AGENT_PLATFORMS}|_FORCE_REDEPLOY=false|_FORCE_APPLY=false|_ALLOW_DOWNGRADE=false|_ALLOW_BELOW_DOWNGRADE_FLOOR=false|_REPO_URL=${REPO_URL}"
 CD_SA_RESOURCE="projects/${PROJECT}/serviceAccounts/${CD_SA_EMAIL}"
 
 if [[ -n "${REPOSITORY_2ND_GEN}" || -n "${GITHUB_OWNER}" ]]; then
@@ -343,6 +396,21 @@ if [[ -n "${REPOSITORY_2ND_GEN}" || -n "${GITHUB_OWNER}" ]]; then
     TRIGGER_ID="$(gcloud builds triggers describe "${TRIGGER_NAME}" --region="${REGION}" --project="${PROJECT}" --format='value(id)')"
   fi
 
+  # Regional projects.locations.triggers.run expects RunBuildTriggerRequest
+  # ({projectId, triggerId, source: RepoSource}), NOT bare RepoSource:
+  #   - 2nd-gen (--repository): empty {} runs the manual trigger's configured sourceToBuild branch.
+  #   - 1st-gen (--github-owner/--github-repo): {"source":{"branchName":"<branch>"}}.
+  SCHEDULER_MESSAGE_BODY="{}"
+  if [[ -z "${REPOSITORY_2ND_GEN}" ]]; then
+    SCHEDULER_MESSAGE_BODY="$(python3 - "${TRIGGER_BRANCH}" <<'PY'
+import json
+import sys
+
+print(json.dumps({"source": {"branchName": sys.argv[1]}}, separators=(",", ":")))
+PY
+    )"
+  fi
+
   TRIGGER_RUN_URI="https://cloudbuild.googleapis.com/v1/projects/${PROJECT}/locations/${REGION}/triggers/${TRIGGER_ID}:run"
   if [[ "${DRY_RUN}" == "true" ]] || ! gcloud scheduler jobs describe "${SCHEDULER_JOB_NAME}" --location="${REGION}" --project="${PROJECT}" >/dev/null 2>&1; then
     run_cmd gcloud scheduler jobs create http "${SCHEDULER_JOB_NAME}" \
@@ -353,14 +421,14 @@ if [[ -n "${REPOSITORY_2ND_GEN}" || -n "${GITHUB_OWNER}" ]]; then
       --uri="${TRIGGER_RUN_URI}" \
       --http-method=POST \
       --headers="Content-Type=application/json" \
-      --message-body="{\"branchName\":\"${TRIGGER_BRANCH}\"}" \
+      --message-body="${SCHEDULER_MESSAGE_BODY}" \
       --oauth-service-account-email="${SCHEDULER_SA_EMAIL}" \
       --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
   fi
 else
   log_info "Step 5: Skipping Cloud Build Trigger creation (pass --repository or --github-owner/--github-repo to create automatically)."
   log_info "  Substitutions for manual trigger setup:"
-  log_info "    ${SUBSTITUTIONS}"
+  log_info "    --substitutions=\"${SUBSTITUTIONS}\""
 fi
 
 log_info "Bootstrap complete. Next steps:"
