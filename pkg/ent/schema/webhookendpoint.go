@@ -90,7 +90,6 @@ func (WebhookEndpoint) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("project_id", "name").
 			Unique(),
-		index.Fields("project_id"),
 	}
 }
 

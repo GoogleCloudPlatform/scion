@@ -4190,11 +4190,6 @@ var (
 				Unique:  true,
 				Columns: []*schema.Column{WebhookEndpointsColumns[3], WebhookEndpointsColumns[4]},
 			},
-			{
-				Name:    "webhookendpoint_project_id",
-				Unique:  false,
-				Columns: []*schema.Column{WebhookEndpointsColumns[3]},
-			},
 		},
 	}
 	// GroupChildGroupsColumns holds the columns for the "group_child_groups" table.
