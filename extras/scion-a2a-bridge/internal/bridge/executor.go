@@ -105,6 +105,10 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			agentCtx, launching, resolveErr = e.bridge.resolveContextLaunch(ctx, route.ProjectSlug, route.AgentSlug, "")
 		}
 		if resolveErr != nil && !federatedUser {
+			if isStartOutcomeUnknown(resolveErr) {
+				yield(nil, resolveErr)
+				return
+			}
 			yield(nil, fmt.Errorf("resolve agent: %w", resolveErr))
 			return
 		}

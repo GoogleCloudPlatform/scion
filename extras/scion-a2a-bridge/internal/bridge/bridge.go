@@ -663,6 +663,9 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 
 	agentCtx, launching, err := b.resolveContextLaunch(ctx, projectSlug, agentSlug, contextID)
 	if err != nil {
+		if isStartOutcomeUnknown(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("resolve context: %w", err)
 	}
 
@@ -1980,6 +1983,28 @@ func isDeleteInProgress(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.Code == apiclient.ErrCodeDeleteInProgress
 }
 
+// isStartOutcomeUnknown reports whether err is the hub's 504
+// start_outcome_unknown answer to a synchronous create: the hub kept the
+// agent, which may still be starting.
+func isStartOutcomeUnknown(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusGatewayTimeout && apiErr.Code == apiclient.ErrCodeStartOutcomeUnknown
+}
+
+// startOutcomeUnknownError reports an auto-provision synchronous create whose
+// dispatch got no answer (504 start_outcome_unknown): the hub kept the agent,
+// which may still be starting.
+type startOutcomeUnknownError struct {
+	slug string
+	err  error
+}
+
+func (e *startOutcomeUnknownError) Error() string {
+	return fmt.Sprintf("Could not confirm that agent %q started; the agent may still be starting (%v)", e.slug, e.err)
+}
+
+func (e *startOutcomeUnknownError) Unwrap() error { return e.err }
+
 // agentBeingDeleted reports whether a listed agent is going away: it is
 // soft-deleted, or a delete holds it. A delete holds it while its view
 // reads deleting (the hub's finalizing step included), and also when it
@@ -2096,6 +2121,13 @@ func (b *Bridge) resolveContextLaunch(ctx context.Context, projectSlug, agentSlu
 			// adopted (ptone/scion#3455).
 			if isDeleteInProgress(err) {
 				return nil, nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+			}
+			// On 504 start_outcome_unknown from a synchronous create, the hub
+			// kept the agent and it may still be starting without an active
+			// async launch record: do not adopt and send while non-running,
+			// and report that it may still be starting (ptone/scion#5133).
+			if isStartOutcomeUnknown(err) {
+				return nil, nil, &startOutcomeUnknownError{slug: agentSlug, err: err}
 			}
 			// Concurrent create may have succeeded; re-list to find the agent.
 			retryAgents, retryErr := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{ProjectID: projectSlug})

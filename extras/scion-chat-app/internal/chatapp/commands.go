@@ -828,6 +828,10 @@ func (r *CommandRouter) cmdCreate(ctx context.Context, event *ChatEvent, args []
 		AcceptAsyncLaunch: r.asyncCreateEnabled(),
 	})
 	if err != nil {
+		if id, ok := startOutcomeUnknownAgentID(err); ok {
+			r.log.Warn("create: start outcome unknown; agent may still be starting", "error", err, "agent", args[0], "agent_id", id)
+			return textResponse(event, createStartOutcomeUnknownText(args[0], id, "")), nil
+		}
 		return textResponse(event, fmt.Sprintf("Failed to create agent: %v", err)), nil
 	}
 	if createResp == nil || createResp.Agent == nil {
@@ -1759,6 +1763,10 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 		AcceptAsyncLaunch: r.asyncCreateEnabled(),
 	})
 	if err != nil {
+		if id, ok := startOutcomeUnknownAgentID(err); ok {
+			r.log.Warn("thread: start outcome unknown; agent may still be starting", "error", err, "agent", agentName, "agent_id", id)
+			return textResponse(event, createStartOutcomeUnknownText(agentName, id, instruction)), nil
+		}
 		return textResponse(event, fmt.Sprintf("Failed to create agent: %v", err)), nil
 	}
 	if createResp == nil || createResp.Agent == nil {

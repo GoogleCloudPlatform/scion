@@ -366,3 +366,64 @@ func TestLaunchWaitErrorText(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleThread_SyncCreate_StartOutcomeUnknown(t *testing.T) {
+	e, k := newAsyncThreadEnv(t)
+	e.commands.SetAsyncCreate(false)
+	e.hub.failRequest(http.MethodPost, "/api/v1/projects/"+luProject+"/agents",
+		http.StatusGatewayTimeout,
+		`{"error":{"code":"start_outcome_unknown","message":"start outcome unknown: the runtime broker did not answer within 3m0s; the agent may still be starting","details":{"agentId":"`+asyncAgentID+`","phase":"provisioning"}}}`)
+
+	runThreadCommand(e)
+
+	all := e.discord.allBodies()
+	assert.Contains(t, all, "⚠️ Couldn't confirm that agent `"+asyncAgentSlug+"` started: the runtime broker did not answer in time; the agent may still be starting.")
+	assert.Contains(t, all, "Agent **"+asyncAgentSlug+"** was accepted, but I couldn't confirm that it started:")
+	assert.Contains(t, all, "/scion status")
+	assert.Contains(t, all, "/scion default "+asyncAgentSlug)
+	assert.NotContains(t, all, "Agent creation failed")
+	assert.NotContains(t, all, "could not be started")
+	assert.NotContains(t, all, asyncAgentID, "the agent ID stays in the log")
+	assert.NotContains(t, all, "504", "the raw hub status stays in the log")
+	assert.Empty(t, k.sends(), "no kickoff when the start outcome is unknown")
+	assert.Empty(t, threadBinding(t, e), "the thread stays unbound until the agent is running")
+}
+
+func TestHandleThread_SyncCreate_StartOutcomeUnknown_ThreadFailed(t *testing.T) {
+	e, k := newAsyncThreadEnv(t)
+	e.commands.SetAsyncCreate(false)
+	e.hub.failRequest(http.MethodPost, "/api/v1/projects/"+luProject+"/agents",
+		http.StatusGatewayTimeout,
+		`{"error":{"code":"start_outcome_unknown","message":"start outcome unknown: the runtime broker did not answer within 3m0s; the agent may still be starting","details":{"agentId":"`+asyncAgentID+`","phase":"provisioning"}}}`)
+	e.discord.failPath = "/api/v" + discordgo.APIVersion + "/channels/" + luChannel + "/threads"
+
+	runThreadCommand(e)
+
+	all := e.discord.allBodies()
+	assert.Contains(t, all, "may still be starting")
+	assert.Contains(t, all, "/scion default "+asyncAgentSlug)
+	assert.NotContains(t, all, "Failed to create both the agent and the thread")
+	assert.Empty(t, k.sends())
+}
+
+func TestHandleThread_SyncCreate_PlainGatewayTimeout_StillReportsFailure(t *testing.T) {
+	e, k := newAsyncThreadEnv(t)
+	e.commands.SetAsyncCreate(false)
+	e.hub.failRequest(http.MethodPost, "/api/v1/projects/"+luProject+"/agents",
+		http.StatusGatewayTimeout, `{"error":{"code":"unavailable","message":"upstream timeout"}}`)
+
+	runThreadCommand(e)
+
+	all := e.discord.allBodies()
+	assert.Contains(t, all, "❌ Agent creation failed:")
+	assert.Empty(t, k.sends())
+	assert.Empty(t, threadBinding(t, e))
+}
+
+func TestIsStartOutcomeUnknown(t *testing.T) {
+	assert.True(t, isStartOutcomeUnknown(&HubError{StatusCode: http.StatusGatewayTimeout, Code: apiclient.ErrCodeStartOutcomeUnknown}))
+	assert.False(t, isStartOutcomeUnknown(&HubError{StatusCode: http.StatusGatewayTimeout, Code: apiclient.ErrCodeUnavailable}))
+	assert.False(t, isStartOutcomeUnknown(&HubError{StatusCode: http.StatusInternalServerError, Code: apiclient.ErrCodeStartOutcomeUnknown}))
+	assert.False(t, isStartOutcomeUnknown(errors.New("boom")))
+	assert.False(t, isStartOutcomeUnknown(nil))
+}
