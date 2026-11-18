@@ -1,0 +1,61 @@
+{
+  "match": {
+    "types": [
+      "github.issue_comment.created",
+      "github.pull_request.opened"
+    ],
+    "rules": [
+      {
+        "dialect": "cel",
+        "expr": "event.attributes.command == 'my_check-1' && event.attributes.is_pull_request == 'true' && event.attributes.author_association in ['OWNER', 'MEMBER']"
+      }
+    ]
+  },
+  "subject": {
+    "mode": "new"
+  },
+  "form": {
+    "preset": "github.command",
+    "version": 1,
+    "fields": {
+      "allow_bots": true,
+      "allowed_associations": [
+        "OWNER",
+        "MEMBER"
+      ],
+      "command": "my_check-1",
+      "include_body": false,
+      "include_forks": true,
+      "include_review_comments": false,
+      "on": "pull_request"
+    }
+  },
+  "suggested_action": {
+    "type": "dispatch_agent",
+    "agentName": "pr-${event.attributes.number}-my-check-1",
+    "template": "default",
+    "task": "Handle `/my_check-1` on ${event.attributes.repo}#${event.attributes.number} (${event.attributes.title}) requested by @${event.attributes.sender}.\nCommand arguments: ${event.attributes.command_args?}\nSource URL: ${event.attributes.html_url}\nIf this is a fork pull request, inspect and check out the PR head safely with `gh pr checkout ${event.attributes.number}`.\nUse `gh` (authenticated as the GitHub App installation) to post results on the PR/issue, mention @${event.attributes.sender} when answering, and never include an `@<app> /<command>` slash-command mention in comments.",
+    "labels": {
+      "github_command": "${event.attributes.command}",
+      "issue": "${event.attributes.repo}#${event.attributes.number}"
+    },
+    "ephemeral": false,
+    "githubToken": "installation",
+    "reuseMessage": "New ${event.type} on ${event.subject}: ${event.attributes.action} by @${event.attributes.sender}. Command: /${event.attributes.command?} ${event.attributes.command_args?}",
+    "ackComment": {
+      "body": "Started **${result.agent_name}** for `/${event.attributes.command}` — [open agent](${result.agent_url}). Requested by @${event.attributes.sender}."
+    },
+    "untrustedVars": [
+      "event.attributes.repo",
+      "event.attributes.number",
+      "event.attributes.title",
+      "event.attributes.sender",
+      "event.attributes.command_args",
+      "event.attributes.html_url",
+      "event.attributes.command",
+      "event.type",
+      "event.subject",
+      "event.attributes.action"
+    ]
+  }
+}

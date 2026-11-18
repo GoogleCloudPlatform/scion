@@ -210,6 +210,8 @@ var routePermissionClassifications = map[string]string{
 	"GET /api/v1/github-app/repo-routing":                   "hub-admin:github-app",
 	"PUT /api/v1/github-app/repo-routing/{owner}/{repo}":    "hub-admin:github-app",
 	"DELETE /api/v1/github-app/repo-routing/{owner}/{repo}": "hub-admin:github-app",
+	"GET /api/v1/trigger-presets":                           "authenticated:trigger-presets",
+	"POST /api/v1/trigger-presets/compile":                  "authenticated:trigger-presets",
 	"POST /api/v1/test-identities":                          "hub-admin:test-identity",
 	"GET /api/v1/test-identities":                           "hub-admin:test-identity",
 	"POST /api/v1/test-identities/{id}/token":               "hub-admin:test-identity",

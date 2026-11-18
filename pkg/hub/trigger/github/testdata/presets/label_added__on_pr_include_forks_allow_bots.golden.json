@@ -1,0 +1,51 @@
+{
+  "match": {
+    "types": [
+      "github.pull_request.labeled"
+    ],
+    "rules": [
+      {
+        "dialect": "cel",
+        "expr": "event.attributes.label == 'agent:review' && event.attributes.is_pull_request == 'true'"
+      }
+    ]
+  },
+  "subject": {
+    "mode": "new"
+  },
+  "form": {
+    "preset": "github.label_added",
+    "version": 1,
+    "fields": {
+      "allow_bots": true,
+      "include_forks": true,
+      "label": "agent:review",
+      "on": "pull_request"
+    }
+  },
+  "suggested_action": {
+    "type": "dispatch_agent",
+    "agentName": "pr-${event.attributes.number}-labeled",
+    "template": "default",
+    "task": "Handle label `${event.attributes.label}` added to ${event.attributes.repo}#${event.attributes.number} (${event.attributes.title}) by @${event.attributes.sender}.\nSource URL: ${event.attributes.html_url}\nIf this is a fork pull request, inspect and check out the PR head safely with `gh pr checkout ${event.attributes.number}`.\nUse `gh` (authenticated as the GitHub App installation) to post results on the PR/issue, mention @${event.attributes.sender} when answering, and never include an `@<app> /<command>` slash-command mention in comments.",
+    "labels": {
+      "issue": "${event.attributes.repo}#${event.attributes.number}"
+    },
+    "ephemeral": false,
+    "githubToken": "installation",
+    "reuseMessage": "New ${event.type} on ${event.subject}: label `${event.attributes.label}` added by @${event.attributes.sender}.",
+    "ackComment": {
+      "body": "Started **${result.agent_name}** for ${event.subject} — [open agent](${result.agent_url}). Triggered by @${event.attributes.sender}."
+    },
+    "untrustedVars": [
+      "event.attributes.label",
+      "event.attributes.repo",
+      "event.attributes.number",
+      "event.attributes.title",
+      "event.attributes.sender",
+      "event.attributes.html_url",
+      "event.type",
+      "event.subject"
+    ]
+  }
+}

@@ -8389,6 +8389,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/github-app/repo-routing", s.guarded("GET /api/v1/github-app/repo-routing", s.requireGitHubTriggers(s.handleListGitHubAppRepoRouting)))
 	s.mux.HandleFunc("PUT /api/v1/github-app/repo-routing/{owner}/{repo}", s.guarded("PUT /api/v1/github-app/repo-routing/{owner}/{repo}", s.requireGitHubTriggers(s.handlePutGitHubAppRepoRouting)))
 	s.mux.HandleFunc("DELETE /api/v1/github-app/repo-routing/{owner}/{repo}", s.guarded("DELETE /api/v1/github-app/repo-routing/{owner}/{repo}", s.requireGitHubTriggers(s.handleDeleteGitHubAppRepoRouting)))
+	s.mux.HandleFunc("GET /api/v1/trigger-presets", s.guarded("GET /api/v1/trigger-presets", s.requireGitHubTriggers(s.handleListTriggerPresets)))
+	s.mux.HandleFunc("POST /api/v1/trigger-presets/compile", s.guarded("POST /api/v1/trigger-presets/compile", s.requireGitHubTriggers(s.handleCompileTriggerPreset)))
 
 	// Hub test identities (ptone/scion#4240). Always registered; each
 	// handler returns 404 unless --test-mode is member or above.

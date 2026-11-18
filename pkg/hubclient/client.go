@@ -126,6 +126,9 @@ type Client interface {
 	// GitHubApp returns the administrative GitHub App operations interface.
 	GitHubApp() GitHubAppService
 
+	// TriggerPresets returns the trigger rule preset schema and compilation service.
+	TriggerPresets() TriggerPresetService
+
 	// ProjectInjectedSkills returns an InjectedSkillsService scoped to a project.
 	ProjectInjectedSkills(projectID string) InjectedSkillsService
 
@@ -209,6 +212,7 @@ type client struct {
 	adminSettings         *adminSettingsService
 	systemOne             *systemOneService
 	githubApp             *githubAppService
+	triggerPresets        *triggerPresetService
 	artifacts             *artifactService
 	testIdentities        *testIdentityService
 	testIdentityDelegs    *testIdentityDelegationService
@@ -277,6 +281,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.adminSettings = &adminSettingsService{c: c}
 	c.systemOne = &systemOneService{c: c}
 	c.githubApp = &githubAppService{c: c}
+	c.triggerPresets = &triggerPresetService{c: c}
 	c.artifacts = &artifactService{c: c}
 	c.testIdentities = &testIdentityService{c: c}
 	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
@@ -430,6 +435,11 @@ func (c *client) SystemOne() SystemOneService {
 // GitHubApp returns the administrative GitHub App operations interface.
 func (c *client) GitHubApp() GitHubAppService {
 	return c.githubApp
+}
+
+// TriggerPresets returns the trigger rule preset schema and compilation service.
+func (c *client) TriggerPresets() TriggerPresetService {
+	return c.triggerPresets
 }
 
 // Messaging returns the cross-project messaging operations interface.

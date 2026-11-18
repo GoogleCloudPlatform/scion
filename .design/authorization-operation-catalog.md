@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 403
+**Operations:** 405
 
 ## Table of Contents
 
@@ -304,6 +304,8 @@
 - [hub.profiling.read](#hubprofilingread) — Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
 - [hub.injectedskills.read](#hubinjectedskillsread) — Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
 - [hub.conduitgrantkeys.read](#hubconduitgrantkeysread) — Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
+- [hub.triggerpresets.read](#hubtriggerpresetsread) — List static trigger rule preset field schemas. Any signed-in user or agent identity reads them, and any token reads them; 404 while the hub.github_triggers experiment is off
+- [hub.triggerpresets.compile](#hubtriggerpresetscompile) — Compile a trigger rule preset form into match types, ordered CEL rules, subject policy, and suggested action without persisting anything. Any signed-in user or agent identity calls it, and any token calls it; 404 while the hub.github_triggers experiment is off
 - [hub.prestarthooks.read](#hubprestarthooksread) — Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
 - [systemone.instance.read](#systemoneinstanceread) — List and read hub-scoped System One provider instances (redacted; stored API keys are never returned); interactive session only
@@ -11479,6 +11481,76 @@
 ### Exemptions
 
 - **authentication_only:** Public verification key halves only; carries no authority (scope: conduit grant public keys) — waives: `base_permission`
+
+---
+
+## hub.triggerpresets.read
+
+**Domain:** hub
+
+**Description:** List static trigger rule preset field schemas. Any signed-in user or agent identity reads them, and any token reads them; 404 while the hub.github_triggers experiment is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/trigger-presets` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestTriggerPresets_AnyTokenReadsAndCompiles`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTriggerPresets_Routes`
+- `pkg/hub:TestTriggerPresets_AnyTokenReadsAndCompiles`
+
+### Exemptions
+
+- **authentication_only:** Static server-side preset schemas only; reads no tenant records, mutates no state, and carries no authority (scope: trigger preset schemas) — waives: `base_permission`
+
+---
+
+## hub.triggerpresets.compile
+
+**Domain:** hub
+
+**Description:** Compile a trigger rule preset form into match types, ordered CEL rules, subject policy, and suggested action without persisting anything. Any signed-in user or agent identity calls it, and any token calls it; 404 while the hub.github_triggers experiment is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/trigger-presets/compile` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestTriggerPresets_AnyTokenReadsAndCompiles`)
+
+**Resource Resolver:** none
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTriggerPresets_Routes`
+- `pkg/hub:TestTriggerPresets_AnyTokenReadsAndCompiles`
+
+### Exemptions
+
+- **authentication_only:** Pure stateless preset-to-CEL compiler; reads no tenant records, mutates no state, and exercises no authority (scope: stateless trigger preset compiler) — waives: `base_permission`
 
 ---
 
