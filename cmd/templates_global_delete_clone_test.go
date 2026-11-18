@@ -137,13 +137,14 @@ func TestTemplatesDelete_ProjectScopeStillLinksProject(t *testing.T) {
 		writeTUProjectSettings(t, cwd, tuProjectID)
 		tuHubSettings(t, srv.URL)
 		err := runTemplatesRoot(t, "--yes", "--non-interactive",
-			"templates", "delete", "base", "--scope", "project")
+			"templates", "delete", "base")
 		requests, _, projectHits := hub.snapshot()
 		require.NoError(t, err, "requests: %v", requests)
 		assert.Contains(t, projectHits, "GET /api/v1/projects/"+tuProjectID)
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
-		// With --scope project only the project template is deleted (ptone/scion#8318).
+		// Without --global or --scope, delete defaults to project scope so only
+		// the project template is deleted (ptone/scion#8318).
 		assert.Equal(t, []string{"tmpl-project-1"}, hub.deleted)
 	})
 }

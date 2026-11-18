@@ -1226,8 +1226,8 @@ Manages agent templates. `scion template` (singular) is an accepted alias. Scope
 - `create <name>`: Create a new template (seeded from the `default` template).
 - `clone <src> <dest>`: Clone an existing template (local or Hub source) to a new local one.
     - Flags: `--local`, `--hub` (restrict where the source is searched). This `--hub` switch shadows the root `--hub <url>` flag, so select the Hub with `scion use` or `SCION_HUB_ENDPOINT`; the same holds for `delete`.
-- `delete <name>` (alias `rm`): Delete a template.
-    - Flags: `--local`, `--hub`, `--scope <project|global>` (only templates in this scope; with `global`, or the root `--global` flag, it links and looks up no project, so it works with a token outside a project; `--global` with `--scope project` is rejected). Under `--yes`, `--non-interactive`, `cli.interactive_disabled`, or agent mode, matches across more than one scope fail with an ambiguity error instead of deleting all of them.
+- `delete <name>` (alias `rm`): Delete a template in the target scope (`project` by default; pass `--scope global` or the root `--global` flag to delete a global template).
+    - Flags: `--local`, `--hub`, `--scope <project|global>` (defaults to `project`, or `global` with `--global`; with `global`, it links and looks up no project, so it works with a token outside a project; `--global` with `--scope project` is rejected).
 - `import <source>`: Import agent definitions (Claude/Gemini sub-agents or Scion templates) into your templates directory.
     - Flags: `--all` (import every discovered agent), `-H, --harness <type>` (force `claude`/`gemini`), `--name <name>` (rename a single import), `--force` (overwrite), `--dry-run` (preview).
 - `update-default`: Update the global default template with the latest from the binary.

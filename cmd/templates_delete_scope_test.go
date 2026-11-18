@@ -15,20 +15,26 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
-// Tests for ptone/scion#8318: 'scion templates delete' supports --scope
-// (project, global) and refuses cross-scope matches under implicit or
-// explicit auto-confirm instead of deleting every matching template across
-// scopes.
+// Tests for ptone/scion#8318: 'scion templates delete' (and singular
+// 'template delete') defaults to project scope (the narrowest scope), requires
+// --scope global or --global to delete a global template, and refuses residual
+// multi-scope matches under auto-confirm in ResolveTemplateForDelete.
 
 func createProjectTestTemplate(t *testing.T, projectRoot, name string) string {
 	t.Helper()
@@ -42,43 +48,204 @@ func createProjectTestTemplate(t *testing.T, projectRoot, name string) string {
 	return templateDir
 }
 
-// TestTemplatesDelete_SameNameAcrossScopesRefusedUnderAutoConfirm covers
-// Expected #2 and #3 of ptone/scion#8318: when both a project template and a
-// global template share a name, an unscoped auto-confirm delete (--non-interactive,
-// --yes, cli.interactive_disabled, or agent mode) fails with an ambiguity
-// error naming --scope and deletes neither template.
-func TestTemplatesDelete_SameNameAcrossScopesRefusedUnderAutoConfirm(t *testing.T) {
+// newGlobalOnlyTUHub returns a fake Hub where "glob-only" exists only in
+// global scope and tuProjectID has no templates.
+func newGlobalOnlyTUHub(t *testing.T) (*tuHub, *httptest.Server) {
+	t.Helper()
+	h := &tuHub{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		h.requests = append(h.requests, r.Method+" "+r.URL.RequestURI())
+		if strings.HasPrefix(r.URL.Path, "/api/v1/projects") {
+			h.projectHits = append(h.projectHits, r.Method+" "+r.URL.RequestURI())
+		}
+		h.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+tuProjectID:
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": tuProjectID, "name": "tu", "slug": "tu"})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects"):
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "not_found", "message": "project not found"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/templates":
+			all := []map[string]string{
+				{"id": tuGlobalTemplateID, "name": "glob-only", "slug": "glob-only", "scope": "global", "status": "active"},
+			}
+			out := []map[string]string{}
+			for _, tmpl := range all {
+				if s := r.URL.Query().Get("scope"); s != "" && tmpl["scope"] != s {
+					continue
+				}
+				out = append(out, tmpl)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"templates": out})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/templates/"):
+			h.mu.Lock()
+			h.deleted = append(h.deleted, strings.TrimPrefix(r.URL.Path, "/api/v1/templates/"))
+			h.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "not_found", "message": "not found"}})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return h, srv
+}
+
+// TestTemplatesDelete_GlobalOnlyNotDeletedWithoutGlobalScope verifies that an
+// unscoped auto-confirm delete inside a project never widens to a global-only
+// template: it deletes nothing and reports how to use --scope global.
+func TestTemplatesDelete_GlobalOnlyNotDeletedWithoutGlobalScope(t *testing.T) {
 	t.Run("--non-interactive on Hub", func(t *testing.T) {
-		hub, srv := newTUHub(t)
+		hub, srv := newGlobalOnlyTUHub(t)
 		cwd := tuSetup(t)
 		writeTUProjectSettings(t, cwd, tuProjectID)
 		tuHubSettings(t, srv.URL)
 
-		err := runTemplatesRoot(t, "--non-interactive", "templates", "delete", "base")
+		err := runTemplatesRoot(t, "--non-interactive", "templates", "delete", "glob-only")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "exists in several scopes")
-		assert.Contains(t, err.Error(), "--scope")
+		assert.Contains(t, err.Error(), "not found")
+		assert.Contains(t, err.Error(), "--scope global")
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
-		assert.Empty(t, hub.deleted, "nothing may be deleted when scopes are ambiguous")
+		assert.Empty(t, hub.deleted, "unscoped delete in a project must not delete a global template")
 	})
 
 	t.Run("--yes on Hub", func(t *testing.T) {
-		hub, srv := newTUHub(t)
+		hub, srv := newGlobalOnlyTUHub(t)
 		cwd := tuSetup(t)
 		writeTUProjectSettings(t, cwd, tuProjectID)
 		tuHubSettings(t, srv.URL)
 
-		err := runTemplatesRoot(t, "--yes", "templates", "delete", "base")
+		err := runTemplatesRoot(t, "--yes", "templates", "delete", "glob-only")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "exists in several scopes")
-		assert.Contains(t, err.Error(), "--scope")
+		assert.Contains(t, err.Error(), "not found")
+		assert.Contains(t, err.Error(), "--scope global")
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
 		assert.Empty(t, hub.deleted)
 	})
 
 	t.Run("cli.interactive_disabled setting on Hub", func(t *testing.T) {
+		hub, srv := newGlobalOnlyTUHub(t)
+		cwd := tuSetup(t)
+		writeTUProjectSettings(t, cwd, tuProjectID)
+		tuHubSettings(t, srv.URL)
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(home, config.DotScion, "settings.yaml"),
+			[]byte("schema_version: \"1\"\ncli:\n  interactive_disabled: true\n"),
+			0o644,
+		))
+
+		err = runTemplatesRoot(t, "templates", "delete", "glob-only")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+		assert.Contains(t, err.Error(), "--scope global")
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Empty(t, hub.deleted)
+	})
+
+	t.Run("agent mode on Hub", func(t *testing.T) {
+		hub, srv := newGlobalOnlyTUHub(t)
+		cwd := tuSetup(t)
+		require.NoError(t, os.MkdirAll(filepath.Join(cwd, config.DotScion), 0o755))
+		t.Setenv("SCION_CLI_MODE", "agent")
+		t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+		t.Setenv("SCION_PROJECT_ID", tuProjectID)
+		t.Setenv("SCION_AUTH_TOKEN", "agent-token-test")
+
+		err := runTemplatesRoot(t, "templates", "delete", "glob-only")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+		assert.Contains(t, err.Error(), "--scope global")
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Empty(t, hub.deleted, "agent mode must not delete a global-only template without --scope global")
+	})
+
+	t.Run("singular 'template delete' alias on Hub", func(t *testing.T) {
+		hub, srv := newGlobalOnlyTUHub(t)
+		cwd := tuSetup(t)
+		writeTUProjectSettings(t, cwd, tuProjectID)
+		tuHubSettings(t, srv.URL)
+
+		err := runTemplatesRoot(t, "--non-interactive", "template", "delete", "glob-only")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+		assert.Contains(t, err.Error(), "--scope global")
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Empty(t, hub.deleted)
+	})
+
+	t.Run("local global-only template inside a project under --local", func(t *testing.T) {
+		for _, agentMode := range []bool{false, true} {
+			name := "--non-interactive"
+			args := []string{"--non-interactive", "templates", "delete", "glob-only", "--local"}
+			if agentMode {
+				name = "agent mode"
+				args = []string{"templates", "delete", "glob-only", "--local"}
+			}
+			t.Run(name, func(t *testing.T) {
+				cwd := tuSetup(t)
+				require.NoError(t, os.MkdirAll(filepath.Join(cwd, config.DotScion, "templates"), 0o755))
+				home, err := os.UserHomeDir()
+				require.NoError(t, err)
+				globTpl := createTestTemplate(t, home, "glob-only")
+				if agentMode {
+					t.Setenv("SCION_CLI_MODE", "agent")
+				}
+
+				err = runTemplatesRoot(t, args...)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "not found")
+				assert.Contains(t, err.Error(), "--scope global")
+				assert.DirExists(t, globTpl, "global template must remain untouched")
+			})
+		}
+	})
+}
+
+// TestTemplatesDelete_UnscopedDefaultsToProjectScope verifies Expected #1 of
+// ptone/scion#8318: when both a project template and a global template share a
+// name, an unscoped delete defaults to project scope and removes only the
+// project template, leaving the global template intact.
+func TestTemplatesDelete_UnscopedDefaultsToProjectScope(t *testing.T) {
+	t.Run("--non-interactive on Hub removes only project template", func(t *testing.T) {
+		hub, srv := newTUHub(t)
+		cwd := tuSetup(t)
+		writeTUProjectSettings(t, cwd, tuProjectID)
+		tuHubSettings(t, srv.URL)
+
+		err := runTemplatesRoot(t, "--non-interactive", "templates", "delete", "base")
+		requests, _, _ := hub.snapshot()
+		require.NoError(t, err, "requests: %v", requests)
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Equal(t, []string{"tmpl-project-1"}, hub.deleted)
+	})
+
+	t.Run("--yes on Hub removes only project template", func(t *testing.T) {
+		hub, srv := newTUHub(t)
+		cwd := tuSetup(t)
+		writeTUProjectSettings(t, cwd, tuProjectID)
+		tuHubSettings(t, srv.URL)
+
+		err := runTemplatesRoot(t, "--yes", "templates", "delete", "base")
+		requests, _, _ := hub.snapshot()
+		require.NoError(t, err, "requests: %v", requests)
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Equal(t, []string{"tmpl-project-1"}, hub.deleted)
+	})
+
+	t.Run("cli.interactive_disabled setting on Hub removes only project template", func(t *testing.T) {
 		hub, srv := newTUHub(t)
 		cwd := tuSetup(t)
 		writeTUProjectSettings(t, cwd, tuProjectID)
@@ -92,15 +259,14 @@ func TestTemplatesDelete_SameNameAcrossScopesRefusedUnderAutoConfirm(t *testing.
 		))
 
 		err = runTemplatesRoot(t, "templates", "delete", "base")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "exists in several scopes")
-		assert.Contains(t, err.Error(), "--scope")
+		requests, _, _ := hub.snapshot()
+		require.NoError(t, err, "requests: %v", requests)
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
-		assert.Empty(t, hub.deleted)
+		assert.Equal(t, []string{"tmpl-project-1"}, hub.deleted)
 	})
 
-	t.Run("agent mode on Hub", func(t *testing.T) {
+	t.Run("agent mode on Hub removes only project template", func(t *testing.T) {
 		hub, srv := newTUHub(t)
 		cwd := tuSetup(t)
 		require.NoError(t, os.MkdirAll(filepath.Join(cwd, config.DotScion), 0o755))
@@ -110,12 +276,25 @@ func TestTemplatesDelete_SameNameAcrossScopesRefusedUnderAutoConfirm(t *testing.
 		t.Setenv("SCION_AUTH_TOKEN", "agent-token-test")
 
 		err := runTemplatesRoot(t, "templates", "delete", "base")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "exists in several scopes")
-		assert.Contains(t, err.Error(), "--scope")
+		requests, _, _ := hub.snapshot()
+		require.NoError(t, err, "requests: %v", requests)
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
-		assert.Empty(t, hub.deleted, "agent mode must not delete same-named global template")
+		assert.Equal(t, []string{"tmpl-project-1"}, hub.deleted)
+	})
+
+	t.Run("singular 'template delete' alias removes only project template", func(t *testing.T) {
+		hub, srv := newTUHub(t)
+		cwd := tuSetup(t)
+		writeTUProjectSettings(t, cwd, tuProjectID)
+		tuHubSettings(t, srv.URL)
+
+		err := runTemplatesRoot(t, "--non-interactive", "template", "delete", "base")
+		requests, _, _ := hub.snapshot()
+		require.NoError(t, err, "requests: %v", requests)
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Equal(t, []string{"tmpl-project-1"}, hub.deleted)
 	})
 
 	t.Run("local project and local global templates under --local", func(t *testing.T) {
@@ -135,14 +314,73 @@ func TestTemplatesDelete_SameNameAcrossScopesRefusedUnderAutoConfirm(t *testing.
 				if agentMode {
 					t.Setenv("SCION_CLI_MODE", "agent")
 				}
-				err = runTemplatesRoot(t, args...)
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "exists in several scopes")
-				assert.Contains(t, err.Error(), "--scope")
-				assert.DirExists(t, projTpl)
-				assert.DirExists(t, globTpl)
+				require.NoError(t, runTemplatesRoot(t, args...))
+				assert.NoDirExists(t, projTpl)
+				assert.DirExists(t, globTpl, "unscoped delete must leave local global template untouched")
 			})
 		}
+	})
+
+	t.Run("both local and Hub project copies deleted while global copies stay", func(t *testing.T) {
+		hub, srv := newTUHub(t)
+		cwd := tuSetup(t)
+		writeTUProjectSettings(t, cwd, tuProjectID)
+		tuHubSettings(t, srv.URL)
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+		projTpl := createProjectTestTemplate(t, cwd, "base")
+		globTpl := createTestTemplate(t, home, "base")
+
+		require.NoError(t, runTemplatesRoot(t, "--non-interactive", "templates", "delete", "base"))
+		assert.NoDirExists(t, projTpl)
+		assert.DirExists(t, globTpl)
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Equal(t, []string{"tmpl-project-1"}, hub.deleted)
+	})
+}
+
+// TestResolveTemplateForDelete_RefusesResidualMultiScopeUnderAutoConfirm
+// verifies defense-in-depth in ResolveTemplateForDelete: if ResolveOpts allows
+// multiple scopes and matches span >1 scope under AutoConfirm, it refuses with
+// an ambiguity error naming --scope instead of deleting across scopes.
+func TestResolveTemplateForDelete_RefusesResidualMultiScopeUnderAutoConfirm(t *testing.T) {
+	t.Run("local multi-scope match refused under AutoConfirm", func(t *testing.T) {
+		cwd := tuSetup(t)
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+		createProjectTestTemplate(t, cwd, "shared-role")
+		createTestTemplate(t, home, "shared-role")
+
+		matches, err := ResolveTemplateForDelete(context.Background(), "shared-role", nil, &ResolveOpts{
+			LocalOnly:   true,
+			AutoConfirm: true,
+		})
+		require.Error(t, err)
+		assert.Nil(t, matches)
+		assert.Contains(t, err.Error(), "exists in several scopes (project, global)")
+		assert.Contains(t, err.Error(), "--scope")
+	})
+
+	t.Run("Hub multi-scope match refused under AutoConfirm", func(t *testing.T) {
+		_, srv := newTUHub(t)
+		tuSetup(t)
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		hubCtx := &HubContext{
+			Client:    client,
+			Endpoint:  srv.URL,
+			ProjectID: tuProjectID,
+		}
+
+		matches, err := ResolveTemplateForDelete(context.Background(), "base", hubCtx, &ResolveOpts{
+			HubOnly:     true,
+			AutoConfirm: true,
+		})
+		require.Error(t, err)
+		assert.Nil(t, matches)
+		assert.Contains(t, err.Error(), "exists in several scopes (project, global)")
+		assert.Contains(t, err.Error(), "--scope")
 	})
 }
 
@@ -317,23 +555,10 @@ func TestTemplatesDelete_ScopeValidationAndConflicts(t *testing.T) {
 	})
 }
 
-func TestTemplatesDelete_UnscopedSingleScopeMatchSucceeds(t *testing.T) {
-	t.Run("only project template exists", func(t *testing.T) {
-		cwd := tuSetup(t)
-		projTpl := createProjectTestTemplate(t, cwd, "proj-only")
+func TestTemplatesDelete_UnscopedProjectOnlyMatchSucceeds(t *testing.T) {
+	cwd := tuSetup(t)
+	projTpl := createProjectTestTemplate(t, cwd, "proj-only")
 
-		require.NoError(t, runTemplatesRoot(t, "--non-interactive", "templates", "delete", "proj-only", "--local"))
-		assert.NoDirExists(t, projTpl)
-	})
-
-	t.Run("only global template exists inside a project", func(t *testing.T) {
-		cwd := tuSetup(t)
-		require.NoError(t, os.MkdirAll(filepath.Join(cwd, config.DotScion, "templates"), 0o755))
-		home, err := os.UserHomeDir()
-		require.NoError(t, err)
-		globTpl := createTestTemplate(t, home, "glob-only")
-
-		require.NoError(t, runTemplatesRoot(t, "--non-interactive", "templates", "delete", "glob-only", "--local"))
-		assert.NoDirExists(t, globTpl)
-	})
+	require.NoError(t, runTemplatesRoot(t, "--non-interactive", "templates", "delete", "proj-only", "--local"))
+	assert.NoDirExists(t, projTpl)
 }

@@ -404,6 +404,12 @@ func ResolveTemplateForDelete(ctx context.Context, name string, hubCtx *HubConte
 	}
 
 	if len(matches) == 0 {
+		if opts.ProjectOnly {
+			return nil, fmt.Errorf("template '%s' not found in project scope (use --scope global or --global to delete a global template)", name)
+		}
+		if opts.GlobalOnly {
+			return nil, fmt.Errorf("template '%s' not found in global scope", name)
+		}
 		return nil, fmt.Errorf("template '%s' not found", name)
 	}
 

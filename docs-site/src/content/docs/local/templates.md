@@ -263,7 +263,7 @@ When you reference a template by bare name, Scion searches in this order and use
 
 A template name (anything that is not a remote URI or an absolute path) is a single path component, with no `/`, `\`, `..`, `.`, leading `:` or `://`. A name in another form (for example `team/reviewer`) is refused rather than looked up. The same rule applies to harness-config names. The Hub and store refuse such a name on every write (`CreateTemplate`, `UpdateTemplate`, `CreateHarnessConfig`, `UpdateHarnessConfig`, create, rename, clone or import) with `name must be a single path component`, and when an agent create request names a template (`template must be a template name or ID`) or harness-config (`harness config must be a harness-config name`). `scion templates pull` and `scion harness-config pull` without `--to` build the destination directory only from a name in that form.
 
-When connected to a Hub, templates resolve from the Hub across three scopes. If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search (plus `--scope <project|global>` on `templates delete` and `--scope <global|project|user>` on `templates update`; under `--yes`, `--non-interactive`, `cli.interactive_disabled`, or agent mode, `templates delete` refuses a name that matches in more than one scope unless narrowed with `--scope` or `--global`).
+When connected to a Hub, templates resolve from the Hub across three scopes. If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search (`templates delete` defaults to `project` scope and takes `--scope <project|global>` or `--global` to delete a global template; `templates update` takes `--scope <global|project|user>`).
 
 ### Hub Template Scopes
 
@@ -309,8 +309,11 @@ scion --global templates create my-new-role
 # Clone an existing template (local or Hub source) to a new local one
 scion templates clone code-reviewer my-custom-reviewer
 
-# Delete a template (alias: rm); pass --scope project or --scope global to target one scope
-scion templates delete my-old-role --scope project
+# Delete a project template (alias: rm); defaults to project scope
+scion templates delete my-old-role
+
+# Delete a global template
+scion templates delete my-old-role --scope global
 
 # Refresh the built-in default template from the binary
 scion templates update-default --force
