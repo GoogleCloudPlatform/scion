@@ -34,6 +34,20 @@ func envHubProjectID() string {
 	return os.Getenv(projectkeys.EnvHubProjectID)
 }
 
+// ContainerProjectIDFromEnv returns the authoritative Hub project ID from the
+// environment when running in agent/container mode (IsAgentContainerContext):
+// SCION_HUB_PROJECT_ID first, then SCION_PROJECT_ID, or "" outside
+// agent/container mode or when neither variable is set.
+func ContainerProjectIDFromEnv() string {
+	if !IsAgentContainerContext() {
+		return ""
+	}
+	if hubID := envHubProjectID(); hubID != "" {
+		return hubID
+	}
+	return projectkeys.ProjectIDFromEnv(os.Getenv)
+}
+
 // projectIDFileSource names the project-id file of the project at
 // projectPath, for the precedence warning.
 func projectIDFileSource(projectPath string) string {

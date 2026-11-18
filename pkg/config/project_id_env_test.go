@@ -331,3 +331,84 @@ func TestWarnProjectIDOverride_NoWarningWithoutDisagreement(t *testing.T) {
 	warnProjectIDOverride("A", "x", "C", "y")
 	assert.Len(t, overrideWarnings(logs), 2, "each pair of sources is its own disagreement")
 }
+
+// TestProjectIDEnvPrecedence_AgentContainerMode covers ptone/scion#8302: in
+// agent/container mode, SCION_PROJECT_ID outranks an unexplicit workspace
+// .scion/project-id or hub.project_id file in LoadSettings, while
+// SCION_HUB_PROJECT_ID still outranks SCION_PROJECT_ID and
+// LoadSettingsIgnoringEnvProjectID preserves explicit --project/--global
+// precedence (ptone/scion#3123).
+func TestProjectIDEnvPrecedence_AgentContainerMode(t *testing.T) {
+	signals := []struct {
+		name        string
+		envKey      string
+		envVal      string
+		cliModeYAML bool
+	}{
+		{name: "SCION_AGENT_ID", envKey: "SCION_AGENT_ID", envVal: "agent-uuid-1"},
+		{name: "SCION_HOST_UID", envKey: "SCION_HOST_UID", envVal: "1000"},
+		{name: "SCION_CLI_MODE", envKey: "SCION_CLI_MODE", envVal: "agent"},
+		{name: "SCION_HUB_ENDPOINT", envKey: "SCION_HUB_ENDPOINT", envVal: "https://hub.example.test"},
+		{name: "SCION_HUB_URL", envKey: "SCION_HUB_URL", envVal: "https://hub.example.test"},
+		{name: "settings cli.mode", cliModeYAML: true},
+	}
+
+	fixtures := []struct {
+		name          string
+		settingsHubID string
+		fileID        string
+		wantIgnored   string
+	}{
+		{name: "project-id file", fileID: envIDTestFile, wantIgnored: envIDTestFile},
+		{name: "settings hub.project_id", settingsHubID: envIDTestSettings, wantIgnored: envIDTestSettings},
+		{name: "both", settingsHubID: envIDTestSettings, fileID: envIDTestFile, wantIgnored: envIDTestFile},
+	}
+
+	for _, sig := range signals {
+		for _, fx := range fixtures {
+			t.Run(sig.name+"/"+fx.name, func(t *testing.T) {
+				unsetTestEnv(t, "SCION_AGENT_ID", "SCION_HOST_UID", "SCION_CLI_MODE")
+				projectDir, logs := setupProjectIDEnvTest(t, fx.settingsHubID, fx.fileID)
+				if sig.cliModeYAML {
+					settingsPath := filepath.Join(projectDir, "settings.yaml")
+					data, err := os.ReadFile(settingsPath)
+					require.NoError(t, err)
+					require.NoError(t, os.WriteFile(settingsPath, append(data, []byte("cli:\n  mode: agent\n")...), 0o644))
+				} else {
+					t.Setenv(sig.envKey, sig.envVal)
+				}
+				t.Setenv(projectkeys.EnvProjectID, envIDTestEnvPlain)
+
+				s, err := LoadSettings(projectDir)
+				require.NoError(t, err)
+				assert.Equal(t, envIDTestEnvPlain, s.ProjectID, "SCION_PROJECT_ID wins in agent/container mode")
+				assert.Empty(t, overrideWarnings(logs), "normal container SCION_PROJECT_ID must not spam override warnings")
+
+				// Explicit --project / --global ignores SCION_PROJECT_ID and reads the target's own files.
+				ignored, err := LoadSettingsIgnoringEnvProjectID(projectDir)
+				require.NoError(t, err)
+				assert.Equal(t, fx.wantIgnored, ignored.ProjectID)
+
+				// When SCION_HUB_PROJECT_ID is also set, it still outranks SCION_PROJECT_ID.
+				t.Setenv(projectkeys.EnvHubProjectID, envIDTestEnvHub)
+				both, err := LoadSettings(projectDir)
+				require.NoError(t, err)
+				assert.Equal(t, envIDTestEnvHub, both.ProjectID)
+			})
+		}
+	}
+}
+
+func TestContainerProjectIDFromEnv(t *testing.T) {
+	unsetTestEnv(t, "SCION_AGENT_ID", "SCION_HOST_UID", "SCION_CLI_MODE", "SCION_HUB_ENDPOINT", "SCION_HUB_URL",
+		projectkeys.EnvProjectID, projectkeys.EnvHubProjectID)
+
+	t.Setenv(projectkeys.EnvProjectID, envIDTestEnvPlain)
+	assert.Empty(t, ContainerProjectIDFromEnv(), "outside agent/container mode, SCION_PROJECT_ID alone does not act as container override")
+
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	assert.Equal(t, envIDTestEnvPlain, ContainerProjectIDFromEnv())
+
+	t.Setenv(projectkeys.EnvHubProjectID, envIDTestEnvHub)
+	assert.Equal(t, envIDTestEnvHub, ContainerProjectIDFromEnv(), "SCION_HUB_PROJECT_ID outranks SCION_PROJECT_ID")
+}

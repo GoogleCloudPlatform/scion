@@ -479,10 +479,15 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// project for this agent. The workspace may contain a cloned repo whose
 	// .scion/settings has a different project_id (e.g. template-sync from an
 	// external repo). An explicit target skips this (see explicitTarget).
-	var projectID string
+	var envProjectID string
 	if hubContext && !explicitTarget {
-		projectID = projectkeys.ProjectIDFromEnv(os.Getenv)
+		if hubEnv := os.Getenv(projectkeys.EnvHubProjectID); hubEnv != "" {
+			envProjectID = hubEnv
+		} else {
+			envProjectID = projectkeys.ProjectIDFromEnv(os.Getenv)
+		}
 	}
+	projectID := envProjectID
 	if projectID == "" {
 		projectID = settings.ProjectID
 	}
@@ -540,10 +545,15 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 	// Prefer hub.projectId (explicit link to a hub project) over project_id
 	// (deterministic local identity). For hub API calls, we need the ID
-	// the hub knows the project by.
+	// the hub knows the project by — except when the container environment
+	// supplied the authoritative project ID for an implicit target, which
+	// must not be overridden by a checked-out workspace's hub.project_id
+	// (ptone/scion#8302).
 	effectiveProjectID := projectID
-	if hgid := settings.GetHubProjectID(); hgid != "" {
-		effectiveProjectID = hgid
+	if envProjectID == "" {
+		if hgid := settings.GetHubProjectID(); hgid != "" {
+			effectiveProjectID = hgid
+		}
 	}
 
 	hubCtx := &HubContext{
