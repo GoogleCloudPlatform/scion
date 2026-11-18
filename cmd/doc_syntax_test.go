@@ -113,26 +113,52 @@ func findCommandProblems(lines []string, source string) []string {
 		// mutates global cobra state (Changed bits + bound variables)
 		// and breaks other tests in the full suite.
 		for _, tok := range rest {
-			if !strings.HasPrefix(tok, "-") {
-				continue // positional arg or flag value
+			if tok == "--" {
+				break // POSIX end-of-flags marker; remaining tokens are positional
 			}
-			name := strings.TrimLeft(tok, "-")
-			if i := strings.Index(name, "="); i >= 0 {
-				name = name[:i]
+			if !strings.HasPrefix(tok, "-") || tok == "-" {
+				continue // positional arg, flag value, or "-" stdin
 			}
-			if name == "" {
+			if strings.HasPrefix(tok, "--") {
+				name, _, _ := strings.Cut(strings.TrimPrefix(tok, "--"), "=")
+				if name == "" || strings.HasPrefix(name, "-") {
+					problems = append(problems,
+						fmt.Sprintf("unknown flag %s: %s (from %s)", tok, line, source))
+					continue
+				}
+				f := cmd.Flags().Lookup(name)
+				if f == nil {
+					f = cmd.InheritedFlags().Lookup(name)
+				}
+				if f == nil {
+					problems = append(problems,
+						fmt.Sprintf("unknown flag --%s: %s (from %s)", name, line, source))
+				} else if f.Deprecated != "" {
+					problems = append(problems,
+						fmt.Sprintf("deprecated flag --%s (%s): %s (from %s)", name, f.Deprecated, line, source))
+				}
 				continue
 			}
-			f := cmd.Flags().Lookup(name)
+
+			short, _, _ := strings.Cut(strings.TrimPrefix(tok, "-"), "=")
+			if len(short) != 1 {
+				problems = append(problems,
+					fmt.Sprintf("unknown shorthand flag %s: %s (from %s)", tok, line, source))
+				continue
+			}
+			f := cmd.Flags().ShorthandLookup(short)
 			if f == nil {
-				f = cmd.InheritedFlags().Lookup(name)
+				f = cmd.InheritedFlags().ShorthandLookup(short)
 			}
 			if f == nil {
 				problems = append(problems,
-					fmt.Sprintf("unknown flag --%s: %s (from %s)", name, line, source))
+					fmt.Sprintf("unknown shorthand flag -%s: %s (from %s)", short, line, source))
 			} else if f.Deprecated != "" {
 				problems = append(problems,
-					fmt.Sprintf("deprecated flag --%s (%s): %s (from %s)", name, f.Deprecated, line, source))
+					fmt.Sprintf("deprecated flag -%s (%s): %s (from %s)", short, f.Deprecated, line, source))
+			} else if f.ShorthandDeprecated != "" {
+				problems = append(problems,
+					fmt.Sprintf("deprecated shorthand flag -%s (%s): %s (from %s)", short, f.ShorthandDeprecated, line, source))
 			}
 		}
 	}
@@ -324,6 +350,38 @@ func TestDocSyntax(t *testing.T) {
 		} {
 			assert.Empty(t, findCommandProblems([]string{good}, "test"),
 				"expected no problems for %q", good)
+		}
+	})
+
+	t.Run("short_and_inherited_flags", func(t *testing.T) {
+		for _, valid := range []string{
+			"scion decisions list -q release",
+			"scion decisions list -q=release",
+			"scion list -r",
+			"scion decisions list --format json",
+			"scion decisions list --format=json",
+			"scion hub status --as alice",
+			"scion decisions list -g my-project",
+			"scion decisions list -g=my-project",
+			"scion hub status -y",
+			"scion message @alice@example.com -",
+			"scion ssh my-agent -- ls -z",
+		} {
+			assert.Empty(t, findCommandProblems([]string{valid}, "test"),
+				"expected no problems for %q", valid)
+		}
+
+		for _, invalid := range []string{
+			"scion decisions list -z",
+			"scion hub status -q",
+			"scion hub status -json",
+			"scion decisions list -search release",
+			"scion decisions list -=release",
+			"scion decisions list --=release",
+			"scion decisions list ---search release",
+		} {
+			assert.NotEmpty(t, findCommandProblems([]string{invalid}, "test"),
+				"expected findCommandProblems to reject %q", invalid)
 		}
 	})
 }
