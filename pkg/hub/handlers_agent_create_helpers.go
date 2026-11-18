@@ -2951,11 +2951,14 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 // read; deliverySelector.probe). Before that (the create-time probe)
 // there is no target to authorize against and the record counts by
 // existence, as the start still authorizes every item before delivery.
-// An owner's user-scope row not shared with progeny counts only when the
-// owner material chain rule would deliver it (start_owner_material_chain.go).
-// An owner's secret shared with progeny, and an ancestor's progeny secret,
-// count only when start delivers them too (ownerChainCheck.allowsSecretRow
-// and sharedChainWithheld).
+// Once the agent's own record exists (newProbeOwnerChainCheck), an owner's
+// user-scope row not shared with progeny counts only when the owner material
+// chain rule would deliver it (start_owner_material_chain.go), and an
+// owner's secret shared with progeny or an ancestor's progeny secret counts
+// only when start delivers it too (ownerChainCheck.allowsSecretRow and
+// sharedChainWithheld). Before the agent is stored (the create-time probe)
+// the creating owner's rows count by existence, and start enforces the rule
+// once the agent and its delegation edge are stored.
 // A hub-scope secret counts only if secret.HubSecretDeliverable admits it,
 // at either time, since no other hub-scope secret is ever delivered.
 func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) (bool, error) {
@@ -2973,8 +2976,22 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 		return sel.probe(ctx, kind, record, id, key, scope, scopeID)
 	}
 	// An owner's user row the owner material chain rule withholds at start
-	// does not count as present (decided without a report).
-	ownerRows := newOwnerChainCheck(s.authzService, agent)
+	// does not count as present (decided without a report). Before the agent
+	// record is stored (the create-time probe), newProbeOwnerChainCheck
+	// returns nil, mirroring newProbeDeliverySelector.
+	var ownerRows *ownerChainCheck
+	ownerRowsReady := false
+	ownerCheck := func() (*ownerChainCheck, error) {
+		if !ownerRowsReady {
+			var err error
+			ownerRows, err = s.newProbeOwnerChainCheck(ctx, agent)
+			if err != nil {
+				return nil, err
+			}
+			ownerRowsReady = true
+		}
+		return ownerRows, nil
+	}
 	for _, key := range keys {
 		if agent.AppliedConfig != nil && agent.AppliedConfig.Env != nil {
 			if _, ok := agent.AppliedConfig.Env[key]; ok {
@@ -2986,15 +3003,27 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
-			if ev != nil && ownerRows.allowsRow(ctx, ev.AllowProgeny, ownerRowScope(ev.ScopeID, agent.OwnerID)) {
-				return true, nil
+			if ev != nil {
+				oc, err := ownerCheck()
+				if err != nil {
+					return false, err
+				}
+				if oc.allowsRow(ctx, ev.AllowProgeny, ownerRowScope(ev.ScopeID, agent.OwnerID)) {
+					return true, nil
+				}
 			}
 			sec, err := s.store.GetSecret(ctx, key, "user", agent.OwnerID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
-			if sec != nil && ownerRows.allowsSecretRow(ctx, sec.AllowProgeny, ownerRowScope(sec.ScopeID, agent.OwnerID)) {
-				return true, nil
+			if sec != nil {
+				oc, err := ownerCheck()
+				if err != nil {
+					return false, err
+				}
+				if oc.allowsSecretRow(ctx, sec.AllowProgeny, ownerRowScope(sec.ScopeID, agent.OwnerID)) {
+					return true, nil
+				}
 			}
 		}
 		for _, sc := range []struct{ scope, scopeID string }{
@@ -3053,7 +3082,11 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 		// Start refuses every progeny secret to an agent whose chain is
 		// not recorded or cannot be evaluated (the runtime chain verdict;
 		// sharedChainWithheld), so none of them counts as present then.
-		if !ownerRows.sharedChainWithheld(ctx) {
+		oc, err := ownerCheck()
+		if err != nil {
+			return false, err
+		}
+		if !oc.sharedChainWithheld(ctx) {
 			progenySecrets, err := s.store.ListProgenySecrets(ctx, agent.Ancestry)
 			if err != nil {
 				return false, err

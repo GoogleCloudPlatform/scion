@@ -282,9 +282,10 @@ type ownerRowOutcome struct {
 // ownerChainCheck applies the rule to one agent's rows. The verdict is
 // computed on the first row. It counts and logs nothing. A nil check allows
 // every row: no authorization service is configured, the agent has no
-// owner, or it has no ID yet (the create-time availability probe, before
-// the agent is stored; nothing is delivered to it, and every later start
-// applies the rule).
+// owner, it has no ID yet, or its record does not exist yet on the
+// create-time availability probe (newProbeOwnerChainCheck, before the agent
+// and its delegation edge are stored; nothing is delivered to it, and every
+// start applies the rule once stored).
 type ownerChainCheck struct {
 	a       *AuthzService
 	agent   *store.Agent
@@ -300,6 +301,29 @@ func newOwnerChainCheck(a *AuthzService, agent *store.Agent) *ownerChainCheck {
 		return nil
 	}
 	return &ownerChainCheck{a: a, agent: agent}
+}
+
+// newProbeOwnerChainCheck returns the ownerChainCheck the auth credential
+// probe uses for agent, or nil when the agent's record does not exist yet
+// (the create-time probe, before the agent and its delegation edge are
+// stored; nothing is delivered to it, and every start applies the rule once
+// stored). A lookup error other than not-found is returned so a store fault
+// fails closed instead of looking like a new agent.
+func (s *Server) newProbeOwnerChainCheck(ctx context.Context, agent *store.Agent) (*ownerChainCheck, error) {
+	if s == nil || s.authzService == nil || agent == nil || agent.ID == "" || s.store == nil {
+		return nil, nil
+	}
+	stored, err := s.store.GetAgent(ctx, agent.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if stored == nil {
+		return nil, nil
+	}
+	return newOwnerChainCheck(s.authzService, stored), nil
 }
 
 // decide applies the rule to a row of rowOwner not shared with progeny:
