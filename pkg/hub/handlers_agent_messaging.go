@@ -491,11 +491,15 @@ func (s *Server) resolveOutboundRouting(
 				"authenticated identity required for conversation_ref", nil)
 			return nil, fmt.Errorf("authentication required")
 		}
+		var resolveOpts []messaging.ResolveOption
+		if wcsAffinity != nil {
+			resolveOpts = append(resolveOpts, messaging.WithResolveTopicLookup(wcsAffinity))
+		}
 		resolveResult, resolveErr := messaging.Resolve(ctx, s.store, req.ConversationRef, messaging.ResolveContext{
 			SenderPrincipalKind: authKind,
 			SenderPrincipalID:   authID,
 			ProjectID:           agent.ProjectID, // from the authenticated agent, NOT from the request
-		})
+		}, resolveOpts...)
 		if resolveErr != nil {
 			var resErr *messaging.ResolutionError
 			if errors.As(resolveErr, &resErr) {
