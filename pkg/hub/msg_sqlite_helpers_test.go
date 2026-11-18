@@ -240,6 +240,12 @@ func (d *containmentDispatchSpy) getCalls() []containmentDispatchCall {
 	return cp
 }
 
+func (d *containmentDispatchSpy) reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls = nil
+}
+
 type containmentDispatchCall struct {
 	Method        string
 	Agent         *store.Agent

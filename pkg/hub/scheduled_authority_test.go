@@ -190,7 +190,7 @@ func TestSchedAgentPrincipalCarriesStoredAncestry(t *testing.T) {
 
 // Under headless-identity-note.md §2, a user-authored scheduled child records
 // OwnerID == user and Ancestry == [user], matching an interactive create.
-func TestSchedChildAncestryEmpty(t *testing.T) {
+func TestSchedChildUserAncestryAndOwner(t *testing.T) {
 	f := newSchedFire(t, "sched-anc-user")
 	require.NoError(t, f.fire(t, withSessionRevision(f.event("sched-anc-user-c"), f.creator.ID)))
 	child, _ := f.child(t, "sched-anc-user-c")
@@ -201,7 +201,7 @@ func TestSchedChildAncestryEmpty(t *testing.T) {
 // Under headless-identity-note.md §2, an agent-authored scheduled child
 // records OwnerID == parent.ID and Ancestry == parent.Ancestry + [parent.ID],
 // with NoAuth=false by default so progeny-eligible material can resolve.
-func TestScheduledChildNoUserMaterial(t *testing.T) {
+func TestScheduledChildAgentProgenyAncestryAndOwner(t *testing.T) {
 	f := newSchedFire(t, "sched-progeny")
 	parent := f.sessionAgent(t, "sched-progeny-p")
 	require.NoError(t, f.fire(t, withAgentRevision(t, f.srv, f.event("sched-progeny-c"), parent.ID)))
@@ -644,28 +644,34 @@ func TestSchedChildEdgeProvenanceFields(t *testing.T) {
 		parent := f.sessionAgent(t, "sched-pf-agent-p")
 		evt := withAgentRevision(t, f.srv, f.event("sched-pf-agent-c"), parent.ID)
 		// The revision recorded a narrower ceiling than the agent's live
-		// write ceiling: the edge keeps only what both allow.
-		evt.AuthorityCeiling.PermissionIDs = []string{"agent.create", "project.read"}
+		// write ceiling (covering readonly + agent.create, omitting full-role
+		// permissions like agent.lifecycle): the edge keeps only what both allow
+		// and caps the child's role to readonly.
+		narrow := sortedUniqueIDs(agentScopeCoverage(append([]AgentTokenScope{ScopeAgentCreate}, ScopesForRole(AgentRoleReadOnly)...)))
+		evt.AuthorityCeiling.PermissionIDs = narrow
 		require.NoError(t, f.fire(t, evt))
 		_, edge := f.child(t, "sched-pf-agent-c")
 		assertSchedulerProvenance(t, evt, edge, store.DelegationPrincipalAgent, parent.ID)
 		assert.Equal(t, store.EffectCeilingBounded, edge.Kind)
 		assert.Equal(t, permissions.CeilingVersionV1, edge.Version)
-		assert.Equal(t, []string{"agent.create", "project.read"}, edge.PermissionIDs)
+		assert.Equal(t, string(AgentRoleBaseline), edge.Role)
+		assert.Equal(t, narrow, edge.PermissionIDs)
+		assert.NotContains(t, edge.PermissionIDs, "agent.lifecycle")
 	})
 }
 
-// The scheduled child's edge records provenance the same way the
-// request create path does for the same user, apart from the scheduler
-// credential and its references.
+// The scheduled child's edge records provenance and default-ladder role the
+// same way the request create path does for the same user, apart from the
+// scheduler credential and its references.
 func TestSchedChildProvenanceParityWithRequestCreate(t *testing.T) {
 	f := newSchedFire(t, "sched-parity")
-	_, direct := f.createdAgent(t, f.create(t, authUser(f.creator), CreateAgentRequest{Name: "sched-parity-i", AgentRole: string(AgentRoleNone)}), "sched-parity-i")
+	_, direct := f.createdAgent(t, f.create(t, authUser(f.creator), CreateAgentRequest{Name: "sched-parity-i"}), "sched-parity-i")
 
 	evt := withSessionRevision(f.event("sched-parity-s"), f.creator.ID)
 	require.NoError(t, f.fire(t, evt))
 	_, scheduled := f.child(t, "sched-parity-s")
 
+	assert.Equal(t, string(AgentRoleFull), direct.Role)
 	assert.Equal(t, direct.DelegatorType, scheduled.DelegatorType)
 	assert.Equal(t, direct.DelegatorID, scheduled.DelegatorID)
 	assert.Equal(t, direct.DelegateType, scheduled.DelegateType)
@@ -680,6 +686,23 @@ func TestSchedChildProvenanceParityWithRequestCreate(t *testing.T) {
 	assert.Equal(t, store.SourceCredentialSession, direct.SourceCredentialKind)
 	assert.Equal(t, store.SourceCredentialScheduler, scheduled.SourceCredentialKind)
 	assert.Equal(t, evt.ID, scheduled.SourceEventID)
+
+	t.Run("noAuth_role_none_parity", func(t *testing.T) {
+		_, directNone := f.createdAgent(t, f.create(t, authUser(f.creator), CreateAgentRequest{
+			Name:      "sched-parity-none-i",
+			AgentRole: string(AgentRoleNone),
+		}), "sched-parity-none-i")
+
+		evtNone := f.event("sched-parity-none-s")
+		evtNone.Payload = `{"agentName":"sched-parity-none-s","noAuth":true}`
+		evtNone = withSessionRevision(evtNone, f.creator.ID)
+		require.NoError(t, f.fire(t, evtNone))
+		_, scheduledNone := f.child(t, "sched-parity-none-s")
+
+		assert.Equal(t, string(AgentRoleNone), directNone.Role)
+		assert.Equal(t, directNone.Role, scheduledNone.Role)
+		assert.Equal(t, directNone.EffectCeiling, scheduledNone.EffectCeiling)
+	})
 }
 
 // An agent-authored revision of an agent with a principal chain carries the

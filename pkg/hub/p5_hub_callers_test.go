@@ -552,6 +552,11 @@ func (c *schedRefusingClient) CreateAgent(ctx context.Context, brokerID, endpoin
 	return nil, errors.New("broker unavailable")
 }
 
+func (c *schedRefusingClient) CreateAgentWithGather(ctx context.Context, brokerID, endpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+	resp, err := c.CreateAgent(ctx, brokerID, endpoint, req)
+	return resp, nil, err
+}
+
 func (c *schedRefusingClient) DeleteAgent(_ context.Context, _, _, _, _ string, opts DeleteAgentOptions) error {
 	c.mu.Lock()
 	c.deletes = append(c.deletes, opts.RunID)
