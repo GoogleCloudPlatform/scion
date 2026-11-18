@@ -1559,9 +1559,9 @@ func TestIdleSuspend_NonAutoWakePathsWithActiveClaimAndPreClaimMark(t *testing.T
 			},
 		},
 		{
-			name: "choice_response",
+			name: "decision_response",
 			run: func(t *testing.T, srv *Server, s store.Store, u *store.User, _ *store.Agent, target *store.Agent) {
-				convID := tid("choice-conv-" + target.ID)
+				convID := tid("decision-conv-" + target.ID)
 				require.NoError(t, s.CreateConversation(context.Background(), &store.Conversation{
 					ID:        convID,
 					Kind:      "group",
@@ -1569,7 +1569,7 @@ func TestIdleSuspend_NonAutoWakePathsWithActiveClaimAndPreClaimMark(t *testing.T
 					ProjectID: &target.ProjectID,
 					CreatedAt: time.Now().UTC(),
 				}))
-				msgID := tid("choice-msg-" + target.ID)
+				msgID := tid("decision-msg-" + target.ID)
 				m := &store.Message{
 					ID:             msgID,
 					ProjectID:      target.ProjectID,
@@ -1585,7 +1585,7 @@ func TestIdleSuspend_NonAutoWakePathsWithActiveClaimAndPreClaimMark(t *testing.T
 					CreatedAt:      time.Now().UTC(),
 				}
 				require.NoError(t, s.CreateMessage(context.Background(), m))
-				srv.deliverChoiceResponse(context.Background(), target, m, &store.DecisionAnswer{
+				srv.deliverDecisionResponse(context.Background(), target, m, &store.DecisionAnswer{
 					ChoiceID:   tid("choice-id"),
 					Key:        "A",
 					Version:    1,
@@ -1594,9 +1594,9 @@ func TestIdleSuspend_NonAutoWakePathsWithActiveClaimAndPreClaimMark(t *testing.T
 			},
 		},
 		{
-			name: "choice_set_response",
+			name: "decision_set_response",
 			run: func(t *testing.T, srv *Server, s store.Store, u *store.User, _ *store.Agent, target *store.Agent) {
-				convID := tid("choiceset-conv-" + target.ID)
+				convID := tid("decisionset-conv-" + target.ID)
 				require.NoError(t, s.CreateConversation(context.Background(), &store.Conversation{
 					ID:        convID,
 					Kind:      "group",
@@ -1604,7 +1604,7 @@ func TestIdleSuspend_NonAutoWakePathsWithActiveClaimAndPreClaimMark(t *testing.T
 					ProjectID: &target.ProjectID,
 					CreatedAt: time.Now().UTC(),
 				}))
-				msgID := tid("choiceset-msg-" + target.ID)
+				msgID := tid("decisionset-msg-" + target.ID)
 				m := &store.Message{
 					ID:             msgID,
 					ProjectID:      target.ProjectID,
@@ -1620,7 +1620,7 @@ func TestIdleSuspend_NonAutoWakePathsWithActiveClaimAndPreClaimMark(t *testing.T
 					CreatedAt:      time.Now().UTC(),
 				}
 				require.NoError(t, s.CreateMessage(context.Background(), m))
-				srv.deliverChoiceSetResponse(context.Background(), target, m, tid("prompt-id"), &store.AnswerSetResult{
+				srv.deliverDecisionSetResponse(context.Background(), target, m, tid("prompt-id"), &store.AnswerSetResult{
 					BatchID: tid("batch-id"),
 				}, nil)
 			},

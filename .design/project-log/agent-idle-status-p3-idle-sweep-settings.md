@@ -83,8 +83,9 @@
     for an active claim to settle via `wakeOrAwaitStart` / `queueAutoWake` and report `"is suspending"`
     on timeout; non-auto-waking paths (`MessageBrokerProxy`, `broadcastDirect`,
     `handleBrokerInbound`, `dispatchRoutedRecipient`, `reconcile.deliverMessage`,
-    `deliverArtifactReview`, choice responses, `delegatedSender` DM, `group[]`, and delivery
-    notices) refuse, park, or mark failed just as they do for a suspended target.
+    `deliverArtifactReview`, decision responses (`deliverDecisionResponse`,
+    `deliverDecisionSetResponse`), `deliverMessageAction`, `delegatedSender` DM, `group[]`, and
+    delivery notices) refuse, park, or mark failed just as they do for a suspended target.
   - Integrated with Conduit `awaiting_session` hold and re-drive (`GoogleCloudPlatform/scion#4935`):
     `dispatchClaimedHeldMessage` in `message_hold_redrive.go` routes through `dispatchWithBrokerRetry`
     with `s.deliveryMarker()`, treating an active idle-suspend claim or pre-dispatch
