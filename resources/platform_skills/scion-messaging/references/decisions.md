@@ -90,7 +90,8 @@ You cannot combine decisions with `--attach`, `--artifact`, `--wake`, `--in`,
 Reusing a key you already sent is refused (`decision_key_exists`) unless you
 pass `--update`. With `--update`, each decision whose key exists gets a new
 version, and the old version is marked replaced and can no longer be answered.
-This works for answered decisions too.
+This works for answered and withdrawn decisions too. To retire a decision
+without a replacement, use `scion decisions withdraw`.
 
 **Revising an unanswered set: resend every still-pending key of that set**, not
 only the one you changed, in one prompt with `--update`. The new prompt then
@@ -126,21 +127,41 @@ answered, in the conversation of the prompt.
 `recommended` means the answer matched your `default`. Act on the answer, and
 reply in the conversation when the user expects a result.
 
+## Withdraw an obsolete decision
+
+When a pending decision stops mattering (you found the answer yourself, the
+plan changed, or the user answered in prose without matching a choice), retire
+it so it leaves **Waiting on you**, stops counting towards your pending cap,
+and refuses late answers:
+
+```bash
+scion decisions withdraw D234 --reason "CI found a regression"
+scion decisions withdraw D234 --set --reason "Moving release to Monday"
+```
+
+`--set` also withdraws every other pending decision of the prompt each key
+belongs to, leaving answered siblings (including interpreted answers awaiting
+confirmation) untouched. Repeating `withdraw` on an already-withdrawn decision
+is a no-op; no message is posted in the conversation, so send an ordinary
+message if bridged readers should know.
+
 ## Inspect your decisions
 
 ```bash
 scion decisions list
 scion decisions list --search staging
 scion decisions list --decided
+scion decisions list --withdrawn
 scion decisions list --all
 scion decisions show <key>
 ```
 
 `list` shows pending decisions by default; `--decided` shows answered ones,
-`--all` adds replaced versions, and `-q`/`--search <text>` (2 to 256 characters)
-searches the question, key, and effective answer label. `show <key>` prints
-every version of a key with its choices and every recorded answer. Both take
-`--json`.
+`--withdrawn` shows withdrawn ones, `--all` adds replaced and withdrawn
+versions, and `-q`/`--search <text>` (2 to 256 characters) searches the
+question, key, and effective answer label. `show <key>` prints every version of
+a key with its choices, withdrawal details, and every recorded answer. Both
+take `--json`.
 
 ## A user answers in words instead
 
@@ -169,7 +190,8 @@ scion decisions record --from <message-id> <key>=<choice-id> <key>=<choice-id>
 
 - At most 10 decisions per prompt and 2 to 10 choices per decision.
 - At most 50 pending decisions per agent. A prompt that would exceed it is
-  refused (`too_many_pending_decisions`): wait for answers, or replace pending
+  refused (`too_many_pending_decisions`): wait for answers, withdraw obsolete
+  pending decisions with `scion decisions withdraw`, or replace pending
   decisions with `--update` instead of adding new ones.
 - An all-digit key must be a number the Hub assigned to you.
 

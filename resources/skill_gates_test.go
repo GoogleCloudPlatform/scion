@@ -296,6 +296,7 @@ func TestPlatformSkillsFS_ScionMessagingChoices(t *testing.T) {
 		"scion decisions list",
 		"scion decisions show <key>",
 		"scion decisions record <key> <choice-id> --from <message-id>",
+		"To retire a decision without a replacement, use `scion decisions withdraw`.",
 		"At most 50 pending decisions per agent",
 		"`default`",
 		"send the question as ordinary Markdown",

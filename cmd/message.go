@@ -141,7 +141,8 @@ conversation) print one line per decision with its key and version. With
 decisions, plus every other field of an ordinary send. With --update, only
 keys included in the new payload are replaced; to revise an unanswered
 multi-decision set on a single card, resend all still-pending keys of that
-set together.
+set together. To retire a decision without a replacement, use scion decisions
+withdraw.
 
 Exit codes:
   0  Sent. For a group, every recipient was accepted or deferred.
@@ -2043,7 +2044,7 @@ func init() {
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 	messageCmd.Flags().StringVar(&msgDecisions, "decisions", "", "Send a decision prompt: a JSON array of decisions for a user or conversation to answer (agents only; needs the web.decisions experiment). The body becomes the optional intro")
 	messageCmd.Flags().StringVar(&msgDecisionsFile, "decisions-file", "", "Read the --decisions JSON from a file ('-' reads stdin, which then excludes --body-file -)")
-	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions or --decisions-file: replace decisions whose ids already exist (a new version each); without it, reusing an id is refused. To revise an unanswered set on one card, resend all still-pending keys of that set")
+	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions or --decisions-file: replace decisions whose ids already exist (a new version each); without it, reusing an id is refused. To revise an unanswered set on one card, resend all still-pending keys of that set. To retire a decision without a replacement, use 'scion decisions withdraw'")
 
 	// legacy choices fallback: remove in ptone/scion#8249
 	messageCmd.Flags().StringVar(&msgLegacyChoices, "choices", "", "Deprecated alias of --decisions")
