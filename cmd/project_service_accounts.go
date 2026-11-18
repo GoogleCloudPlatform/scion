@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -208,7 +209,10 @@ func resolveLinkedProjectForSA() (hubclient.Client, string, error) {
 	}
 
 	projectID := ""
-	if settings.Hub != nil && settings.Hub.ProjectID != "" {
+	if !explicitProjectTarget() {
+		projectID = config.ContainerProjectIDFromEnv()
+	}
+	if projectID == "" && settings.Hub != nil && settings.Hub.ProjectID != "" {
 		projectID = settings.Hub.ProjectID
 	}
 	if projectID == "" {

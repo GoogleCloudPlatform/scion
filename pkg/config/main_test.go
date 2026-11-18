@@ -45,6 +45,14 @@ var ambientTestEnvVars = []string{
 	// No pkg/projectkeys constant exists for this one: it is not a project
 	// identity alias, only a plain settings key reached through the env provider.
 	"SCION_PROJECT_TYPE",
+	// Agent/container mode signals read by IsAgentContainerContext: an ambient
+	// container environment running `go test ./pkg/config/...` directly would
+	// otherwise flip non-container tests into agent/container mode.
+	"SCION_AGENT_ID",
+	"SCION_HOST_UID",
+	"SCION_CLI_MODE",
+	"SCION_HUB_ENDPOINT",
+	"SCION_HUB_URL",
 }
 
 func TestMain(m *testing.M) {

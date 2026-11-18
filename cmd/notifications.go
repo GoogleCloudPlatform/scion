@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/google/uuid"
@@ -229,11 +228,7 @@ func resolveProjectID(settings *config.Settings, projectFlag string) (string, er
 		return projectFlag, nil
 	}
 
-	// Try hub project ID first, then local project ID
-	projectID := settings.GetHubProjectID()
-	if projectID == "" {
-		projectID = settings.ProjectID
-	}
+	projectID := targetProjectIDFromSettings(settings)
 	if projectID == "" {
 		return "", fmt.Errorf("cannot determine project ID. Use --project flag or link this project with 'scion hub link'")
 	}
@@ -652,10 +647,8 @@ func resolveSubscriptionsProjectFilter(ctx context.Context, client hubclient.Cli
 
 	// 3. Hub/agent container environment (SCION_HUB_PROJECT_ID / SCION_PROJECT_ID)
 	// wins over a cloned checkout's .scion/project-id, matching hubsync.EnsureHubReady.
-	if config.IsHubContext() {
-		if id := projectkeys.ProjectIDFromEnv(os.Getenv); id != "" {
-			return id, formatSubscriptionsProjectDisplay(os.Getenv("SCION_PROJECT"), id), "", nil
-		}
+	if id := config.ContainerProjectIDFromEnv(); id != "" {
+		return id, formatSubscriptionsProjectDisplay(os.Getenv("SCION_PROJECT"), id), "", nil
 	}
 
 	// 4. Walked directory project (.scion): use its linked Hub project ID only.
