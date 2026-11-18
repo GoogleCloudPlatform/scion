@@ -191,7 +191,7 @@ export class ScionHeader extends LitElement {
          below what it holds. With minmax(0, 1fr) it could collapse toward
          zero while its flex contents kept full width, and because it is
          justify-self:end the overflow spilled leftward across the centre
-         column — landing the unread badges on top of the "Terminal" label.
+         column — landing the unread badges on top of the "Terminals" label.
          The title column keeps the 0 floor and truncates instead, since it
          is the one element here that can lose characters harmlessly. */
       grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr);
