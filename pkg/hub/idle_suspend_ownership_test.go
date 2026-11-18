@@ -2210,7 +2210,10 @@ func TestIdleSuspend_PostCommitLateAgentAndRuntimeReportsKeepSuspendedIdleAndAut
 	grantDevUserRuntimeBrokerAccess(t, s)
 
 	dispB := &isoCallbackDispatcher{st: s, autoReadyOnStart: true}
-	srvB := isoSecondReplica(t, raceStore, dispB)
+	srvB := isoSecondReplica(t, s, dispB)
+	installStoreFault(t, srvB, func(store.Store, *storeFaultSwitch) *isoPostCommitReportRaceStore {
+		return raceStore
+	})
 
 	_, _, target := isoSetupIdleAgent(t, s, "post-commit-late-reports", string(state.ActivityIdle))
 	_, _, sender := isoSetupIdleAgent(t, s, "post-commit-late-sender", string(state.ActivityThinking))
