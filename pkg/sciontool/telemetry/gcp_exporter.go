@@ -52,7 +52,7 @@ type GCPExporter struct {
 	// entries instead (tests).
 	analyticsOnce   sync.Once
 	analyticsLogger *logging.Logger
-	analyticsSink   func(logging.Entry) error
+	analyticsSink   func(context.Context, logging.Entry) error
 }
 
 // NewGCPExporter creates a new GCP-native exporter for traces, metrics, and logs.
@@ -367,7 +367,7 @@ func (e *GCPExporter) SendAnalytics(ctx context.Context, line []byte) error {
 		return PermanentSendError(err)
 	}
 	if e.analyticsSink != nil {
-		return classifyAnalyticsSendError(e.analyticsSink(entry))
+		return classifyAnalyticsSendError(e.analyticsSink(ctx, entry))
 	}
 	if e.logClient == nil {
 		return errors.New("GCP analytics exporter unavailable")

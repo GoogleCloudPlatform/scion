@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +56,7 @@ func TestAnalyticsRootInitAndAgentHookShareOutbox(t *testing.T) {
 	p := &Pipeline{}
 	p.SetAnalyticsOutbox(agentHome, 1000, 1001)
 	p.analytics.resolver = func(context.Context) (string, error) { return "hub-1", nil }
-	p.analytics.start(context.Background(), &GCPExporter{analyticsSink: func(e logging.Entry) error {
+	p.analytics.start(context.Background(), &GCPExporter{analyticsSink: func(_ context.Context, e logging.Entry) error {
 		mu.Lock()
 		defer mu.Unlock()
 		entries = append(entries, e)
@@ -165,7 +166,7 @@ func TestSendAnalyticsClassifiesPermanentErrors(t *testing.T) {
 		"unparsable line":  {nil, []byte("not json"), true},
 		"bad event_ts":     {nil, []byte(`{"event_ts":"x"}`), true},
 	} {
-		g := &GCPExporter{analyticsSink: func(logging.Entry) error { return tc.sinkErr }}
+		g := &GCPExporter{analyticsSink: func(_ context.Context, _ logging.Entry) error { return tc.sinkErr }}
 		err := g.SendAnalytics(context.Background(), tc.line)
 		if IsPermanentSendError(err) != tc.permanent {
 			t.Errorf("%s: err %v permanent=%v, want %v", name, err, IsPermanentSendError(err), tc.permanent)
@@ -175,28 +176,108 @@ func TestSendAnalyticsClassifiesPermanentErrors(t *testing.T) {
 
 // R2: the final drain gets at most half of the remaining stop budget, so
 // the exporter shutdown that follows keeps its share even when the sink
-// hangs.
+// hangs — including when the background drain loop already has a send in
+// flight when stop is called (ptone/scion#6444).
 func TestAnalyticsStopLeavesBudgetForExporter(t *testing.T) {
-	setAnalyticsEnv(t, "claude")
-	hang := make(chan struct{})
-	defer close(hang)
-	a := analyticsState{outboxDir: filepath.Join(t.TempDir(), "ob"), resolver: func(context.Context) (string, error) { return "hub", nil }}
-	a.start(context.Background(), &GCPExporter{analyticsSink: func(logging.Entry) error { <-hang; return nil }})
-	d := bareUsageDeriver(claudeUsageRule{})
-	d.analytics = a.native
-	feed(d, claudeLogs(claudeRecord("req_011CUabcdefghijklmnopq", "1", 1_000, fullClaudeTokens)))
+	for _, inflight := range []bool{false, true} {
+		name := "final_drain"
+		if inflight {
+			name = "inflight_background_send"
+		}
+		t.Run(name, func(t *testing.T) {
+			setAnalyticsEnv(t, "claude")
+			unblock := make(chan struct{})
+			var unblockOnce sync.Once
+			release := func() { unblockOnce.Do(func() { close(unblock) }) }
+			defer release()
 
-	// The sink ignores ctx; use a send func that honours it instead.
-	a.drainer.send = func(ctx context.Context, _ []byte) error { <-ctx.Done(); return ctx.Err() }
-	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	a.stop(ctx)
-	if elapsed := time.Since(start); elapsed > 600*time.Millisecond {
-		t.Errorf("final drain took %v of an 800ms budget; must leave at least half", elapsed)
-	}
-	if ctx.Err() != nil {
-		t.Error("the caller's budget must not be exhausted by the analytics drain")
+			var calls atomic.Int32
+			entered := make(chan struct{})
+			var enteredOnce sync.Once
+
+			outboxDir := filepath.Join(t.TempDir(), "ob")
+			if inflight {
+				// Stage an event before starting the drainer so its initial
+				// background pass enters SendAnalytics immediately.
+				o, err := OpenAnalyticsOutbox(outboxDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				d := bareUsageDeriver(claudeUsageRule{})
+				d.analytics = NewUsageAnalytics(o, telemetrycontract.UsageSourceNative)
+				feed(d, claudeLogs(claudeRecord("req_011CUabcdefghijklmnopq", "1", 1_000, fullClaudeTokens)))
+			}
+
+			a := analyticsState{
+				outboxDir: outboxDir,
+				resolver:  func(context.Context) (string, error) { return "hub", nil },
+			}
+			a.start(context.Background(), &GCPExporter{analyticsSink: func(ctx context.Context, _ logging.Entry) error {
+				calls.Add(1)
+				enteredOnce.Do(func() { close(entered) })
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-unblock:
+					return context.Canceled
+				}
+			}})
+
+			if inflight {
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("background drainer did not enter SendAnalytics")
+				}
+			} else {
+				d := bareUsageDeriver(claudeUsageRule{})
+				d.analytics = a.native
+				feed(d, claudeLogs(claudeRecord("req_011CUabcdefghijklmnopq", "1", 1_000, fullClaudeTokens)))
+			}
+
+			type stopResult struct {
+				elapsed time.Duration
+				ctxErr  error
+			}
+			done := make(chan stopResult, 1)
+			stopExited := make(chan struct{})
+			defer func() {
+				release()
+				<-stopExited
+			}()
+			go func() {
+				defer close(stopExited)
+				ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+				defer cancel()
+				start := time.Now()
+				a.stop(ctx)
+				done <- stopResult{elapsed: time.Since(start), ctxErr: ctx.Err()}
+			}()
+
+			var res stopResult
+			select {
+			case res = <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("a.stop hung instead of honouring the stop budget")
+			}
+
+			if res.elapsed > 600*time.Millisecond {
+				t.Errorf("final drain took %v of an 800ms budget; must leave at least half", res.elapsed)
+			}
+			if res.ctxErr != nil {
+				t.Error("the caller's budget must not be exhausted by the analytics drain")
+			}
+			wantMinCalls := int32(1)
+			if inflight {
+				wantMinCalls = 2 // canceled background send + bounded final drain attempt
+			}
+			if got := calls.Load(); got < wantMinCalls {
+				t.Errorf("SendAnalytics calls = %d, want at least %d", got, wantMinCalls)
+			}
+			if a.native.Outbox().Stats().PendingBytes == 0 {
+				t.Error("undelivered event must remain pending in the outbox")
+			}
+		})
 	}
 }
 
