@@ -1192,7 +1192,8 @@ func TestGitHubWebhookIngress_ReceiptAuditContentFree(t *testing.T) {
 type ghInvalidInputTxStore struct {
 	store.Store
 	fault         *storeFaultSwitch
-	failProjectID string // empty fails every project when armed
+	mu            sync.Mutex
+	failRemaining int // -1 fails every armed WithTx; >0 fails that many armed WithTx calls
 }
 
 func (w *ghInvalidInputTxStore) CountDurableQueuePending(ctx context.Context, kind, projectID string) (int64, error) {
@@ -1203,18 +1204,33 @@ func (w *ghInvalidInputTxStore) CountDurableQueuePending(ctx context.Context, ki
 }
 
 func (w *ghInvalidInputTxStore) CreateTriggerEvent(ctx context.Context, evt *store.TriggerEvent) error {
-	if w.fault.Active() && (w.failProjectID == "" || (evt != nil && evt.ProjectID == w.failProjectID)) {
+	if w.fault.Active() {
 		return fmt.Errorf("%w: injected invalid trigger event", store.ErrInvalidInput)
 	}
 	return w.Store.CreateTriggerEvent(ctx, evt)
 }
 
 func (w *ghInvalidInputTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	inject := false
+	if w.fault.Active() {
+		w.mu.Lock()
+		switch {
+		case w.failRemaining < 0:
+			inject = true
+		case w.failRemaining > 0:
+			w.failRemaining--
+			inject = true
+		}
+		w.mu.Unlock()
+	}
 	return w.Store.WithTx(ctx, func(tx store.Store) error {
+		if !inject {
+			return fn(tx)
+		}
 		return fn(&ghInvalidInputTxStore{
 			Store:         tx,
 			fault:         w.fault,
-			failProjectID: w.failProjectID,
+			failRemaining: -1,
 		})
 	})
 }
@@ -1323,8 +1339,10 @@ func TestGitHubWebhookIngress_AmpersandLabelsCeilingAndInvalidInputSkip(t *testi
 		projA := f.createCandidateProject(t, "inv-proj-a", "https://github.com/acme/widgets.git", testInstID)
 		projB := f.createCandidateProject(t, "inv-proj-b", "https://github.com/acme/widgets.git", testInstID)
 
-		// 1. Fail only projA: projA is skipped with invalid_event, projB still queues.
-		wrapper.failProjectID = projA.ID
+		// 1. Fail 1 of the 2 projects: one project is skipped with invalid_event, sibling still queues.
+		wrapper.mu.Lock()
+		wrapper.failRemaining = 1
+		wrapper.mu.Unlock()
 		fault.Arm()
 		auditBuf.Reset()
 
@@ -1337,16 +1355,18 @@ func TestGitHubWebhookIngress_AmpersandLabelsCeilingAndInvalidInputSkip(t *testi
 		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
 		assert.Equal(t, GitHubWebhookStatusQueued, resp1.Status)
 		require.Len(t, resp1.Events, 1)
-		assert.Equal(t, projB.ID, resp1.Events[0].ProjectID)
 		require.Len(t, resp1.SkippedProjects, 1)
-		assert.Equal(t, GitHubWebhookSkippedProject{
-			ProjectID: projA.ID,
-			Reason:    GitHubWebhookSkipReasonInvalidEvent,
-		}, resp1.SkippedProjects[0])
+		assert.Equal(t, GitHubWebhookSkipReasonInvalidEvent, resp1.SkippedProjects[0].Reason)
+		assert.ElementsMatch(t, []string{projA.ID, projB.ID}, []string{
+			resp1.Events[0].ProjectID,
+			resp1.SkippedProjects[0].ProjectID,
+		})
 		assert.Contains(t, auditBuf.String(), GitHubWebhookSkipReasonInvalidEvent)
 
 		// 2. Fail all projects with a distinct body: top-level status is 202 skipped (not 500) + audit.
-		wrapper.failProjectID = ""
+		wrapper.mu.Lock()
+		wrapper.failRemaining = -1
+		wrapper.mu.Unlock()
 		auditBuf.Reset()
 
 		deliv2 := uuid.NewString()
@@ -1368,7 +1388,6 @@ func TestGitHubWebhookIngress_AmpersandLabelsCeilingAndInvalidInputSkip(t *testi
 func TestGitHubWebhookIngress_OwnAppUnknownIdentityPerformedViaAppAndRetryBackoff(t *testing.T) {
 	f := setupGitHubIngressFixture(t)
 	ctx := context.Background()
-	proj := f.createCandidateProject(t, "r1-ownapp-proj", "https://github.com/acme/widgets.git", f.instID)
 
 	// Start with GET /app failing (502) and AppSlug unset so the bot login is unknown.
 	mockGH := newMockAppEndpoint(t, http.StatusBadGateway, `{"message":"bad gateway"}`)
@@ -1382,6 +1401,8 @@ func TestGitHubWebhookIngress_OwnAppUnknownIdentityPerformedViaAppAndRetryBackof
 	f.srv.config.GitHubAppConfig.PrivateKey = testGitHubAppPrivateKeyPEM(t)
 	f.srv.config.GitHubAppConfig.APIBaseURL = mockGH.server.URL
 	f.srv.mu.Unlock()
+
+	proj := f.createCandidateProject(t, "r1-ownapp-proj", "https://"+f.srv.githubAppWebHost()+"/acme/widgets.git", f.instID)
 
 	// 1. App-authored comment carrying comment.performed_via_github_app.id == AppID
 	// while GET /app fails: dropped as 202 ignored/self with zero DB rows, and a
