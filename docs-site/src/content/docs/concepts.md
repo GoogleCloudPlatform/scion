@@ -79,9 +79,19 @@ This separation allows the UI and API consumers to distinguish between infrastru
 
 #### Ending a turn: blocked, idle, task_completed
 
-An agent reports why it is quiet with `sciontool status`, and the platform treats each answer differently. Every agent is told the same rule (it is part of the instructions Scion gives each agent):
+An agent reports why it is quiet with `sciontool status`, and the platform treats each answer differently. In summary: an agent uses **blocked** when it expects a specific event soon (a child agent finishing, a reply to a question it asked, a scheduled message, or its own background job), **idle** when nothing is coming until someone sends it new work (for example a lead between assignments, or after answering a message), and **task_completed** when it finished its assigned task. An idle or completed agent may be suspended to save resources, and any message, mention, notification or scheduled message for it wakes it automatically, so it should not say blocked just to stay up.
 
-> End every turn with a status. **blocked**: you expect a specific event soon (a child agent finishing, a reply to a question you asked, a scheduled message, or your own background job; signal it *before* ending the turn). Always use blocked while your own background job or process runs, because suspending would kill it. **idle**: nothing is coming until someone sends you new work, for example a lead between assignments or after answering a message. **task_completed**: you finished your assigned task. An idle or completed agent may be suspended to save resources. Any message, mention, notification **or scheduled message** for you wakes it automatically, so do not say blocked just to stay up. If the only thing you are waiting for is a scheduled message hours away, idle is fine: the schedule will wake you.
+The instructions Scion gives every agent (the agent instructions preamble) say:
+
+> **Important:** End every turn with `sciontool status blocked`, `idle`, `task_completed` or `ask_user`.
+
+and include these rules, quoted:
+
+> If you end your turn while your own background job or process runs (a build, a test run), always signal blocked *before* ending the turn: suspending you would kill the job.
+
+> If the only thing you are waiting for is a scheduled message hours away, idle is fine: the schedule will wake you.
+
+> An idle or completed agent may be suspended to save resources. If Scion suspends you this way, any message, mention, notification or scheduled message for you wakes you automatically, so do not signal blocked just to stay up.
 
 | Status command | Activity | Means | Stall detection | Idle auto-suspend |
 |---|---|---|---|---|

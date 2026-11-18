@@ -482,9 +482,16 @@ Every 5 minutes, the Hub suspends each `running` agent that meets all of these:
   harness config, so a custom-named config of a resumable harness qualifies.
 - No other lifecycle operation is in progress for it.
 
-So an agent is suspended between `idle_suspend_after` and `idle_suspend_after`
-plus 5 minutes after it went idle. Agents that are `blocked` or
-`waiting_for_input`, or that are working, are never suspended by this policy.
+An agent is normally suspended within about one sweep interval (5 minutes)
+after its grace period ends; with a large backlog of candidates it may take
+longer. Agents that are `blocked` or `waiting_for_input`, or that are working,
+are never suspended by this policy.
+
+The grace is measured from a timestamp the Hub records when the activity
+changes. An agent that has been `idle` or `completed` since before the Hub
+recorded it (that is, since before the `idle` status shipped) has no such
+timestamp, and is not eligible until its activity next changes; there is no
+backfill.
 
 The suspend works like `scion suspend`: the container stops, the harness session
 and the `idle`, `completed` or `harness_error` activity are kept, and the
