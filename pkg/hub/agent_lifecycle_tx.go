@@ -291,10 +291,10 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 
 // hardDeleteAgentTx runs inside the finalize transaction of a hard delete,
 // after the engine removed the agent row and its dependents. In order:
-// agentHardDeleteWork with cause agent_hard_delete (edges, service-account
-// assignments, hard-delete hooks), then the agent_hard_delete audit record.
-// a is the row as it was just before the delete; the row itself is not
-// readable.
+// agentHardDeleteWork with cause agent_hard_delete (active credential
+// revocation, edges, service-account assignments, hard-delete hooks), then the
+// agent_hard_delete audit record. a is the row as it was just before the
+// delete; the row itself is not readable.
 //
 // The hard delete of an incomplete create is a hard delete like any other;
 // its audit summary carries incomplete_create=true.

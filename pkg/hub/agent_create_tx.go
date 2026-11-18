@@ -288,10 +288,10 @@ var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
 // compensateAgentCreate rolls back a committed create after a later step
 // failed, in one transaction: it deletes the agent row (identity keys
 // cascade), runs the hard-delete work with cause create_compensation
-// (agentHardDeleteWork: delegation edges, service-account assignments and
-// the hard-delete hooks), and writes an agent_create_dispatch_failed audit
-// record naming the create's audit record and the failed stage. A hook
-// error rolls the compensation back.
+// (agentHardDeleteWork: active credential revocation, delegation edges,
+// service-account assignments and the hard-delete hooks), and writes an
+// agent_create_dispatch_failed audit record naming the create's audit record
+// and the failed stage. A hook error rolls the compensation back.
 //
 // The row delete is conditional (ptone/scion#3557, ptone/scion#3958): the
 // row is removed only when no delete holds it (createRowHeldCheck), checked

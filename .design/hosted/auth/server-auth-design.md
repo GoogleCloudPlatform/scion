@@ -82,7 +82,7 @@ Tokens are identified by their format and prefix:
 | Token Pattern | Type | Validator |
 |---------------|------|-----------|
 | `scion_dev_*` | Development token | DevAuthMiddleware |
-| JWT (3 dot-separated base64 segments, `iss: scion-hub`) | Agent JWT | AgentAuthMiddleware |
+| JWT (3 dot-separated base64 segments, `iss: scion-hub`) | Agent JWT | UnifiedAuthMiddleware |
 | JWT (3 dot-separated base64 segments, other issuers) | User access token | UserTokenValidator |
 | `sk_live_*` | API key | APIKeyValidator |
 | `sk_test_*` | Test API key | APIKeyValidator |
@@ -473,35 +473,13 @@ Agents receive a Hub-issued JWT during provisioning. See [sciontool-auth.md](sci
                                                     │ JWT
 ```
 
-### 6.2 Agent Token Middleware
+### 6.2 Agent Token Validation
 
-The existing `AgentAuthMiddleware` handles agent JWT validation:
+`UnifiedAuthMiddleware` (`pkg/hub/auth.go`, Section 7) handles agent JWT validation directly:
 
-```go
-// pkg/hub/agenttoken.go
-
-func (s *AgentTokenService) AgentAuthMiddleware(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        token := extractAgentToken(r)
-        if token == "" {
-            // No agent token, continue to next middleware
-            next.ServeHTTP(w, r)
-            return
-        }
-
-        claims, err := s.ValidateAgentToken(token)
-        if err != nil {
-            writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-                "invalid agent token: "+err.Error(), nil)
-            return
-        }
-
-        // Add claims to context
-        ctx := context.WithValue(r.Context(), agentContextKey{}, claims)
-        next.ServeHTTP(w, r.WithContext(ctx))
-    })
-}
-```
+- Extracts a candidate token via `extractAgentToken(r)` (`X-Scion-Agent-Token` first, otherwise `Authorization: Bearer`).
+- Validates the JWT signature and claims via `cfg.AgentTokenSvc.ValidateAgentToken(token)` and checks credential status and run scope (`verifyAgentTokenCredential` in `pkg/hub/agent_token_verify.go`).
+- Stores the validated claims and `AgentIdentity` on the request context before invoking downstream handlers (rejecting invalid `X-Scion-Agent-Token` headers, or falling through to user token validation when `Authorization: Bearer` is not an agent JWT).
 
 ### 6.3 Agent vs User Context
 
