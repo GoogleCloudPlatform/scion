@@ -1274,8 +1274,10 @@ func (c *CompositeStore) ListAgentDecisions(ctx context.Context, agentID string,
 		q = q.Where(decision.StatusEQ(decision.StatusPending))
 	case store.DecisionListStateDecided:
 		q = q.Where(decision.StatusEQ(decision.StatusDecided))
+	case store.DecisionListStateWithdrawn:
+		q = q.Where(decision.StatusEQ(decision.StatusWithdrawn))
 	case store.DecisionListStateAll:
-		// All statuses (pending, decided, replaced).
+		// All statuses (pending, decided, replaced, withdrawn).
 	default:
 		return nil, "", fmt.Errorf("%w: invalid decision state %q", store.ErrInvalidInput, state)
 	}
@@ -1630,10 +1632,14 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 		}
 		dStore := decisionToStore(row)
 		dStore.Answers = answersToStore(existing[row.ID])
-		if row.Status == decision.StatusReplaced {
+		if store.DecisionStatusTerminal(string(row.Status)) {
+			reason := store.InterpretedReasonWithdrawn
+			if row.Status == decision.StatusReplaced {
+				reason = store.InterpretedReasonReplaced
+			}
 			failures = append(failures, store.InterpretedKeyFailure{
 				Key:      dispKey,
-				Reason:   store.InterpretedReasonReplaced,
+				Reason:   reason,
 				Decision: dStore,
 			})
 			continue
@@ -1932,17 +1938,44 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 
 	trimmedKeys := make([]string, len(in.Keys))
 	norms := make([]string, len(in.Keys))
+	normSet := make(map[string]bool, len(in.Keys))
 	for i, k := range in.Keys {
 		trimmed := strings.TrimSpace(k)
 		trimmedKeys[i] = trimmed
 		norms[i] = messages.DecisionKeyNorm(trimmed)
+		normSet[norms[i]] = true
+	}
+
+	// With WholeSet, peek the prompt message IDs of the requested keys' active
+	// versions so one FOR UPDATE query locks both the named keys and their
+	// sibling rows in canonical (key_norm, version) order (never deadlocking
+	// with RecordAnswerSet, CreateDecisionPrompt, or RecordInterpretedAnswers).
+	var peekedMsgIDs []uuid.UUID
+	peekedMsgSet := map[uuid.UUID]bool{}
+	if in.WholeSet {
+		peekRows, err := client.Decision.Query().
+			Where(decision.AskerAgentID(agentUUID), decision.KeyNormIn(norms...), decision.ReplacedByIDIsNil()).
+			All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, r := range peekRows {
+			if !peekedMsgSet[r.MessageID] {
+				peekedMsgSet[r.MessageID] = true
+				peekedMsgIDs = append(peekedMsgIDs, r.MessageID)
+			}
+		}
 	}
 
 	// Lock target rows on Postgres in (key_norm, version) order — matching
 	// CreateDecisionPrompt, RecordAnswerSet, and RecordInterpretedAnswers —
 	// so concurrent answers, reposts, and withdrawals serialize cleanly.
+	matchPred := decision.KeyNormIn(norms...)
+	if len(peekedMsgIDs) > 0 {
+		matchPred = decision.Or(decision.KeyNormIn(norms...), decision.MessageIDIn(peekedMsgIDs...))
+	}
 	q := client.Decision.Query().
-		Where(decision.AskerAgentID(agentUUID), decision.KeyNormIn(norms...)).
+		Where(decision.AskerAgentID(agentUUID), matchPred).
 		Order(ent.Asc(decision.FieldKeyNorm), ent.Asc(decision.FieldVersion))
 	if c.isPostgres() {
 		q = q.ForUpdate()
@@ -1954,22 +1987,44 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 
 	latestByNorm := make(map[string]*ent.Decision, len(norms))
 	activeByNorm := make(map[string]*ent.Decision, len(norms))
+	siblingsByMsg := make(map[uuid.UUID][]*ent.Decision)
+	candidateIDs := make([]uuid.UUID, 0, len(rows))
 	for _, r := range rows {
-		if prev := latestByNorm[r.KeyNorm]; prev == nil || r.Version > prev.Version {
-			latestByNorm[r.KeyNorm] = r
-			if r.Status != decision.StatusReplaced && r.ReplacedByID == nil {
-				activeByNorm[r.KeyNorm] = r
-			} else {
-				delete(activeByNorm, r.KeyNorm)
+		if normSet[r.KeyNorm] {
+			if prev := latestByNorm[r.KeyNorm]; prev == nil || r.Version > prev.Version {
+				latestByNorm[r.KeyNorm] = r
+				if r.Status != decision.StatusReplaced && r.ReplacedByID == nil {
+					activeByNorm[r.KeyNorm] = r
+				} else {
+					delete(activeByNorm, r.KeyNorm)
+				}
+			}
+		}
+		if in.WholeSet {
+			siblingsByMsg[r.MessageID] = append(siblingsByMsg[r.MessageID], r)
+		}
+		if r.Status != decision.StatusReplaced && r.ReplacedByID == nil {
+			candidateIDs = append(candidateIDs, r.ID)
+		}
+	}
+
+	// Under Postgres READ COMMITTED, if a concurrent --update replaced v1 with
+	// v2 while FOR UPDATE waited on v1, EvalPlanQual returns updated v1 without
+	// scanning newly inserted v2. Retry so the next transaction snapshots and
+	// locks v2 (and its prompt's siblings when WholeSet is set).
+	for _, norm := range norms {
+		latest := latestByNorm[norm]
+		if latest != nil && activeByNorm[norm] == nil && (latest.Status == decision.StatusReplaced || latest.ReplacedByID != nil) {
+			return nil, fmt.Errorf("%w: %s was replaced concurrently", errDecisionRace, latest.Key)
+		}
+		if in.WholeSet {
+			if active := activeByNorm[norm]; active != nil && !peekedMsgSet[active.MessageID] {
+				return nil, fmt.Errorf("%w: %s moved to a newer prompt concurrently", errDecisionRace, active.Key)
 			}
 		}
 	}
 
-	activeIDs := make([]uuid.UUID, 0, len(activeByNorm))
-	for _, r := range activeByNorm {
-		activeIDs = append(activeIDs, r.ID)
-	}
-	existingAnswers, err := loadAnswers(ctx, client, activeIDs)
+	existingAnswers, err := loadAnswers(ctx, client, candidateIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1977,6 +2032,11 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 	var failures []store.WithdrawKeyFailure
 	var pendingRows []*ent.Decision
 	var alreadyRows []*ent.Decision
+	seenPending := make(map[uuid.UUID]bool, len(rows))
+	seenAlready := make(map[uuid.UUID]bool, len(rows))
+	var resolvedPromptIDs []uuid.UUID
+	seenPromptIDs := make(map[uuid.UUID]bool, len(norms))
+
 	for i, key := range trimmedKeys {
 		row := activeByNorm[norms[i]]
 		if row == nil {
@@ -1990,7 +2050,14 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 		dStore.Answers = answersToStore(existingAnswers[row.ID])
 		switch {
 		case row.Status == decision.StatusWithdrawn:
-			alreadyRows = append(alreadyRows, row)
+			if !seenAlready[row.ID] {
+				seenAlready[row.ID] = true
+				alreadyRows = append(alreadyRows, row)
+			}
+			if !seenPromptIDs[row.MessageID] {
+				seenPromptIDs[row.MessageID] = true
+				resolvedPromptIDs = append(resolvedPromptIDs, row.MessageID)
+			}
 		case len(existingAnswers[row.ID]) > 0 || row.Status == decision.StatusDecided:
 			failures = append(failures, store.WithdrawKeyFailure{
 				Key:      row.Key,
@@ -1998,7 +2065,14 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 				Decision: dStore,
 			})
 		case row.Status == decision.StatusPending:
-			pendingRows = append(pendingRows, row)
+			if !seenPending[row.ID] {
+				seenPending[row.ID] = true
+				pendingRows = append(pendingRows, row)
+			}
+			if !seenPromptIDs[row.MessageID] {
+				seenPromptIDs[row.MessageID] = true
+				resolvedPromptIDs = append(resolvedPromptIDs, row.MessageID)
+			}
 		default:
 			failures = append(failures, store.WithdrawKeyFailure{
 				Key:      row.Key,
@@ -2009,6 +2083,20 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 	}
 	if len(failures) > 0 {
 		return nil, &store.WithdrawDecisionsError{Failures: failures}
+	}
+
+	if in.WholeSet {
+		for _, msgID := range resolvedPromptIDs {
+			for _, sib := range siblingsByMsg[msgID] {
+				if seenPending[sib.ID] || seenAlready[sib.ID] {
+					continue
+				}
+				if sib.Status == decision.StatusPending && sib.ReplacedByID == nil && len(existingAnswers[sib.ID]) == 0 {
+					seenPending[sib.ID] = true
+					pendingRows = append(pendingRows, sib)
+				}
+			}
+		}
 	}
 
 	sort.SliceStable(pendingRows, func(i, j int) bool {

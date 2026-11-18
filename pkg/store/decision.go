@@ -142,9 +142,10 @@ var (
 type DecisionListState string
 
 const (
-	DecisionListStatePending DecisionListState = "pending"
-	DecisionListStateDecided DecisionListState = "decided"
-	DecisionListStateAll     DecisionListState = "all"
+	DecisionListStatePending   DecisionListState = "pending"
+	DecisionListStateDecided   DecisionListState = "decided"
+	DecisionListStateWithdrawn DecisionListState = "withdrawn"
+	DecisionListStateAll       DecisionListState = "all"
 
 	DefaultDecisionListLimit = 50
 	MaxDecisionListLimit     = 200
@@ -215,6 +216,7 @@ type ProjectDecisionAnswerEntry struct {
 const (
 	InterpretedReasonAlreadyAnswered = "already_answered"
 	InterpretedReasonReplaced        = "replaced"
+	InterpretedReasonWithdrawn       = "withdrawn"
 	InterpretedReasonInvalidChoice   = "invalid_choice"
 	InterpretedReasonNotFound        = "decision_not_found"
 )
@@ -283,6 +285,7 @@ func (e *WithdrawDecisionsError) Unwrap() error { return ErrWithdrawDecisionsFai
 // (AnswerSetChangedError.Reasons).
 const (
 	AnswerSetReasonReplaced            = "replaced"
+	AnswerSetReasonWithdrawn           = "withdrawn"
 	AnswerSetReasonDecided             = "decided"
 	AnswerSetReasonNotRecordedAnswerer = "not_recorded_answerer"
 	AnswerSetReasonMissing             = "missing"
@@ -291,9 +294,9 @@ const (
 
 // AnswerSetChangedError lists, by decision row id, why a set submit does
 // not equal the prompt's actionable set: a requested row that is not
-// actionable (replaced, decided, not_recorded_answerer, not_actionable) or
-// an actionable row the request left out (missing). It matches
-// ErrAnswerSetChanged.
+// actionable (replaced, withdrawn, decided, not_recorded_answerer,
+// not_actionable) or an actionable row the request left out (missing). It
+// matches ErrAnswerSetChanged.
 type AnswerSetChangedError struct {
 	Reasons map[string]string
 }
@@ -317,14 +320,18 @@ func (e *AnswerSetChangedError) Unwrap() error { return ErrAnswerSetChanged }
 // v5, 4.1, for one row and user: "" when the user may answer the row in a
 // set submit (pending, or decided with only an agent_interpreted answer
 // that records this user), else the reason it is excluded (replaced,
-// decided for a direct answer, not_recorded_answerer for another user's
-// interpreted answer). d.Answers must be loaded.
+// withdrawn, decided for a direct answer, not_recorded_answerer for another
+// user's interpreted answer). d.Answers must be loaded.
 func DecisionActionableReason(d *Decision, userID string) string {
 	if DecisionStatusTerminal(d.Status) {
-		if d.Status == DecisionStatusReplaced {
+		switch d.Status {
+		case DecisionStatusReplaced:
 			return AnswerSetReasonReplaced
+		case DecisionStatusWithdrawn:
+			return AnswerSetReasonWithdrawn
+		default:
+			return AnswerSetReasonNotActionable
 		}
-		return AnswerSetReasonNotActionable
 	}
 	var interpreted *DecisionAnswer
 	for _, a := range d.Answers {

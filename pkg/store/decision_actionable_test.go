@@ -104,3 +104,13 @@ func TestDecisionStatusTerminal(t *testing.T) {
 		}
 	}
 }
+
+func TestDecisionActionableReason_Withdrawn(t *testing.T) {
+	d := &Decision{Status: DecisionStatusWithdrawn}
+	if got := DecisionActionableReason(d, "u1"); got != AnswerSetReasonWithdrawn {
+		t.Fatalf("DecisionActionableReason(withdrawn, u1) = %q, want %q", got, AnswerSetReasonWithdrawn)
+	}
+	if got := DecisionActionableReason(d, ""); got != AnswerSetReasonWithdrawn {
+		t.Fatalf("DecisionActionableReason(withdrawn, \"\") = %q, want %q", got, AnswerSetReasonWithdrawn)
+	}
+}

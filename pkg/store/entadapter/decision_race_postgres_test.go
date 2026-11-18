@@ -299,3 +299,99 @@ func TestDecisionRace_RepostWaitsForWithdrawInFlight(t *testing.T) {
 	assert.Equal(t, store.DecisionStatusWithdrawn, d1.Status)
 	assert.Equal(t, r.res.Decisions[0].RowID, d1.ReplacedByID)
 }
+
+// TestDecisionRace_WithdrawWaitsForRepostInFlight: a --update repost holds
+// v1's row lock (having replaced v1 with v2); a concurrent withdraw of the key
+// waits for the lock, retries onto the newly active v2, and withdraws v2 while
+// leaving v1 replaced.
+func TestDecisionRace_WithdrawWaitsForRepostInFlight(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	v1Row := f.create(t, false, yesNo("DW4", "v1")).Decisions[0].RowID
+
+	tx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	repostRes, err := newTxCompositeStore(tx).createDecisionPromptTx(ctx, f.prompt("", true, yesNo("DW4", "v2")))
+	require.NoError(t, err)
+	v2Row := repostRes.Decisions[0].RowID
+
+	type result struct {
+		res *store.WithdrawDecisionsResult
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		res, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+			AskerAgentID: f.agentID,
+			Keys:         []string{"DW4"},
+			Reason:       "Withdraw active v2",
+		})
+		done <- result{res, err}
+	}()
+	select {
+	case r := <-done:
+		t.Fatalf("the withdraw did not wait for the repost's lock: %+v", r)
+	case <-time.After(blockedFor):
+	}
+	require.NoError(t, tx.Commit())
+
+	r := <-done
+	require.NoError(t, r.err)
+	require.Len(t, r.res.Withdrawn, 1)
+	assert.Equal(t, v2Row, r.res.Withdrawn[0].ID)
+	assert.Equal(t, 2, r.res.Withdrawn[0].Version)
+
+	d1, err := f.cs.GetDecision(ctx, v1Row)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusReplaced, d1.Status)
+
+	d2, err := f.cs.GetDecision(ctx, v2Row)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusWithdrawn, d2.Status)
+}
+
+// TestDecisionRace_SetSubmitWaitsForSetWithdrawInFlight: a WholeSet withdraw
+// holds the locks of its prompt's pending rows; a concurrent RecordAnswerSet
+// waits for those locks and then gets AnswerSetChangedError with reason
+// withdrawn for every row, storing nothing.
+func TestDecisionRace_SetSubmitWaitsForSetWithdrawInFlight(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	msgID, rows := f.createSet(t, threeDecisions()...)
+
+	tx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = newTxCompositeStore(tx).withdrawDecisionsTx(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"D1"},
+		WholeSet:     true,
+		Reason:       "Set obsolete",
+	})
+	require.NoError(t, err)
+
+	loser := f.answerSet(msgID, "user-1", "", rows[0], "1", rows[1], "1", rows[2], "1")
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.cs.RecordAnswerSet(ctx, loser)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the set submit did not wait for the withdraw's locks: %v", err)
+	case <-time.After(blockedFor):
+	}
+	require.NoError(t, tx.Commit())
+
+	var changed *store.AnswerSetChangedError
+	require.ErrorAs(t, <-done, &changed)
+	assert.Len(t, changed.Reasons, 3)
+	for _, id := range rows {
+		assert.Equal(t, store.AnswerSetReasonWithdrawn, changed.Reasons[id])
+	}
+	_, err = f.cs.GetMessage(ctx, loser.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
