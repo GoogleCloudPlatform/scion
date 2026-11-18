@@ -48,11 +48,11 @@ const missingRecipientFailureReason = "recipient agent no longer exists"
 // Messages stuck beyond stuckMessageExpireTTL are transitioned to failed.
 // After Phase 4 (no-queuing delivery), the only writer of pending rows is
 // ExecuteAgentDM: it persists the row "pending" for the length of its
-// dispatch, then marks it dispatched or failed. The dispatch is detached
-// from the caller's cancellation (dispatchContext), so a row stays pending
-// past the threshold only by design after a deadline-ambiguous dispatch
-// (AC-4 of #1689), or by a fault: a failed finalization write, a hub that
-// exited mid-dispatch, or a writer that left the state empty
+// dispatch (or background auto-wake), then marks it dispatched or failed —
+// including when the dispatch deadline expires with an unknown outcome
+// (ptone/scion#5111). A row stays pending past the threshold only while
+// queued behind a slow auto-wake or by a fault: a failed finalization write,
+// a hub that exited mid-dispatch, or a writer that left the state empty
 // (ptone/scion#4827). Every write of a pending row is logged as
 // store.MessageEnteredPendingLogMsg. Registered as a RecurringSingleton
 // guarded by LockBrokerMessageSweep (B5-2).
