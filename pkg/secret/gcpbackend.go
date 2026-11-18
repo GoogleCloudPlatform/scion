@@ -274,13 +274,22 @@ func extractGCPSMPath(ref string) (string, bool) {
 	return "", false
 }
 
+// errNilSecretPayload is returned when GCP Secret Manager responds to
+// AccessSecretVersion without a payload message. It is distinct from a
+// non-nil SecretPayload whose Data slice is empty.
+var errNilSecretPayload = errors.New("secret manager returned nil payload")
+
 // accessLatestVersionByPath retrieves the latest version of a secret using a full GCP SM path.
 func (b *GCPBackend) accessLatestVersionByPath(ctx context.Context, smPath string) (string, error) {
+	versionName := smPath + "/versions/latest"
 	resp, err := b.smClient.AccessSecretVersion(ctx, &smpb.AccessSecretVersionRequest{
-		Name: smPath + "/versions/latest",
+		Name: versionName,
 	})
 	if err != nil {
 		return "", err
+	}
+	if resp == nil || resp.Payload == nil {
+		return "", fmt.Errorf("%w for %s", errNilSecretPayload, versionName)
 	}
 	return string(resp.Payload.Data), nil
 }
@@ -734,26 +743,18 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 
 // accessLatestVersion retrieves the latest version of a secret from GCP SM.
 func (b *GCPBackend) accessLatestVersion(ctx context.Context, smSecretName string) (string, error) {
-	resp, err := b.smClient.AccessSecretVersion(ctx, &smpb.AccessSecretVersionRequest{
-		Name: fmt.Sprintf("projects/%s/secrets/%s/versions/latest", b.projectID, smSecretName),
-	})
-	if err != nil {
-		return "", err
-	}
-	return string(resp.Payload.Data), nil
+	return b.accessLatestVersionByPath(ctx, b.smSecretPath(smSecretName))
 }
 
 // AccessSecretValueByRef retrieves a secret value using a full GCP SM resource path.
 // The path should be in the form "projects/{project}/secrets/{name}".
 // This is used during migration to read values from old GCP SM secrets.
 func (b *GCPBackend) AccessSecretValueByRef(ctx context.Context, smPath string) (string, error) {
-	resp, err := b.smClient.AccessSecretVersion(ctx, &smpb.AccessSecretVersionRequest{
-		Name: smPath + "/versions/latest",
-	})
+	val, err := b.accessLatestVersionByPath(ctx, smPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to access secret at %s: %w", smPath, err)
 	}
-	return string(resp.Payload.Data), nil
+	return val, nil
 }
 
 // secretNamePrefix returns the hub-scoped prefix prepended to every GCP SM
@@ -853,6 +854,9 @@ func (b *GCPBackend) accessSecretByComputedName(ctx context.Context, name, scope
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	value, legacyErr := b.accessLatestVersion(ctx, legacyName)
 	if legacyErr != nil {
+		if errors.Is(legacyErr, errNilSecretPayload) {
+			return "", "", legacyErr
+		}
 		// Neither name resolved; surface the prefixed-name error since that is
 		// the current/expected name.
 		return "", "", err
