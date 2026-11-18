@@ -635,7 +635,7 @@ export class ScionPageProfileSettings extends LitElement {
           <div class="setting-info">
             <p class="setting-label">View mode shortcuts</p>
             <p class="setting-description">
-              Switch between Console, Chat and Terminal with
+              Switch between Console, Chat and Terminals with
               ${isMacPlatform() ? '⌘1, ⌘2 and ⌘3' : 'Ctrl+1, Ctrl+2 and Ctrl+3'}. When off, these
               keys keep their usual browser behaviour.
             </p>

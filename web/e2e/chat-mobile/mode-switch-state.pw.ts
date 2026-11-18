@@ -117,7 +117,7 @@ async function viewState(page: Page): Promise<{
 }
 
 /** Use the header's mode switch: segmented buttons, or the narrow dropdown. */
-async function switchMode(page: Page, mode: 'Console' | 'Chat' | 'Terminal'): Promise<void> {
+async function switchMode(page: Page, mode: 'Console' | 'Chat' | 'Terminals'): Promise<void> {
   const header = page.locator('scion-header:visible').first();
   // Wait for a header before choosing the path: right after a switch to
   // Terminal no header is visible until the lazy terminal workspace chunk has
@@ -193,7 +193,7 @@ test('thread and scroll position survive console and terminal round trips', asyn
   await switchMode(page, 'Chat');
   await expectSamePosition(page, before);
 
-  await switchMode(page, 'Terminal');
+  await switchMode(page, 'Terminals');
   await expect(page).toHaveURL(/\/terminals/);
   await switchMode(page, 'Chat');
   await expectSamePosition(page, before);
