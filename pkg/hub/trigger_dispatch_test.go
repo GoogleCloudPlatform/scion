@@ -799,10 +799,21 @@ func TestTriggerDispatchE2E_WakeFireContextEndsWithQueueItem(t *testing.T) {
 				return nil
 			},
 			onMessage: func(ctx context.Context, _ *store.Agent, msg *messages.StructuredMessage) error {
+				// context.AfterFunc invokes cancel asynchronously when Detach attaches
+				// to an already-done context; wait across a short window like a real
+				// broker RPC so an R1 revert cancels ctx and fails delivery.
+				var err error
+				select {
+				case <-ctx.Done():
+					err = ctx.Err()
+				case <-time.After(30 * time.Millisecond):
+					err = ctx.Err()
+				}
 				mu.Lock()
-				entryErr = ctx.Err()
-				deliveredMsg = msg
-				err := entryErr
+				entryErr = err
+				if err == nil {
+					deliveredMsg = msg
+				}
 				mu.Unlock()
 				return err
 			},

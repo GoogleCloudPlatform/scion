@@ -583,6 +583,14 @@ func TestDispatcher_WakeFireAdmitWaitPastPerFireTimeoutThenDetach(t *testing.T) 
 			detached, cancelDetached := req.Tracked.Detach(admittedCtx)
 			defer cancelDetached()
 
+			// context.AfterFunc invokes cancel in its own goroutine when abortCtx is
+			// already done; wait across a short scheduling window so an R1 revert
+			// (holding the expired admittedCtx as abortCtx) deterministically fails.
+			select {
+			case <-detached.Done():
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: detached.Err().Error()}
+			case <-time.After(30 * time.Millisecond):
+			}
 			if err := detached.Err(); err != nil {
 				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: err.Error()}
 			}
