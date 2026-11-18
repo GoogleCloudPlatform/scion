@@ -209,10 +209,12 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 		state = store.DecisionListStatePending
 	case string(store.DecisionListStateDecided):
 		state = store.DecisionListStateDecided
+	case string(store.DecisionListStateWithdrawn):
+		state = store.DecisionListStateWithdrawn
 	case string(store.DecisionListStateAll):
 		state = store.DecisionListStateAll
 	default:
-		ValidationError(w, fmt.Sprintf("invalid state %q: must be pending, decided, or all", s), nil)
+		ValidationError(w, fmt.Sprintf("invalid state %q: must be pending, decided, withdrawn, or all", s), nil)
 		return
 	}
 
@@ -815,13 +817,15 @@ func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.
 
 	status := http.StatusBadRequest
 	code := ErrCodeInvalidChoice
-	hasAnswered, hasReplaced, hasNotFound := false, false, false
+	hasAnswered, hasReplaced, hasWithdrawn, hasNotFound := false, false, false, false
 	for _, f := range iaErr.Failures {
 		switch f.Reason {
 		case store.InterpretedReasonAlreadyAnswered:
 			hasAnswered = true
 		case store.InterpretedReasonReplaced:
 			hasReplaced = true
+		case store.InterpretedReasonWithdrawn:
+			hasWithdrawn = true
 		case store.InterpretedReasonNotFound:
 			hasNotFound = true
 		}
@@ -833,6 +837,9 @@ func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.
 	case hasReplaced:
 		status = http.StatusConflict
 		code = ErrCodeDecisionReplaced
+	case hasWithdrawn:
+		status = http.StatusConflict
+		code = ErrCodeDecisionWithdrawn
 	case hasNotFound:
 		status = http.StatusNotFound
 		code = ErrCodeDecisionNotFound
@@ -854,7 +861,7 @@ func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.
 		if f.Decision != nil {
 			dv := s.decisionViewFor(ctx, f.Decision)
 			entry["decision"] = dv
-			if firstDecision == nil && (f.Reason == store.InterpretedReasonAlreadyAnswered || f.Reason == store.InterpretedReasonReplaced) {
+			if firstDecision == nil && (f.Reason == store.InterpretedReasonAlreadyAnswered || f.Reason == store.InterpretedReasonReplaced || f.Reason == store.InterpretedReasonWithdrawn) {
 				dvCopy := dv
 				firstDecision = &dvCopy
 			}
@@ -912,6 +919,11 @@ func formatInterpretedFailureMessage(f store.InterpretedKeyFailure) string {
 		return fmt.Sprintf("%s: already answered", f.Key)
 	case store.InterpretedReasonReplaced:
 		return fmt.Sprintf("%s: replaced by a newer version", f.Key)
+	case store.InterpretedReasonWithdrawn:
+		if f.Decision != nil && f.Decision.WithdrawnReason != "" {
+			return fmt.Sprintf("%s: decision was withdrawn (%s)", f.Key, plainLine(f.Decision.WithdrawnReason))
+		}
+		return fmt.Sprintf("%s: decision was withdrawn", f.Key)
 	case store.InterpretedReasonInvalidChoice:
 		return fmt.Sprintf("%s: choice %q is not a choice of this decision", f.Key, f.ChoiceID)
 	case store.InterpretedReasonNotFound:

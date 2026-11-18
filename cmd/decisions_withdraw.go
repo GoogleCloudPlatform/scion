@@ -48,11 +48,18 @@ cap. Repeating a withdrawal on an already-withdrawn Decision is an idempotent
 no-op. Decisions that already have an answer (direct or interpreted awaiting
 confirmation) cannot be withdrawn.
 
+Pass --set to also withdraw every other pending Decision of the prompt each key
+belongs to; answered siblings (including interpreted answers awaiting
+confirmation) are left untouched.
+
 Examples:
   scion decisions withdraw D234 --reason "CI found a regression"
+  scion decisions withdraw D234 17 --reason "No longer needed"
+  scion decisions withdraw D234 --set --reason "Moving release to Monday"
   scion decisions withdraw D234 --json`,
 		RunE: runDecisionsWithdraw,
 	}
+	cmd.Flags().Bool("set", false, "Also withdraw every other pending Decision of each key's prompt")
 	cmd.Flags().String("reason", "", "Optional plain-text reason why the Decision is no longer needed (at most 500 characters)")
 	cmd.Flags().Bool("json", false, "Output in JSON format")
 	return cmd
@@ -92,6 +99,7 @@ func runDecisionsWithdraw(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	wholeSet, _ := cmd.Flags().GetBool("set")
 	rawReason, _ := cmd.Flags().GetString("reason")
 	reason := strings.TrimSpace(rawReason)
 	if utf8.RuneCountInString(reason) > store.MaxDecisionWithdrawReasonRunes {
@@ -107,8 +115,9 @@ func runDecisionsWithdraw(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	resp, err := client.Decisions().Withdraw(ctx, &hubclient.WithdrawDecisionsRequest{
-		Keys:   keys,
-		Reason: reason,
+		Keys:     keys,
+		WholeSet: wholeSet,
+		Reason:   reason,
 	})
 	if err != nil {
 		return formatDecisionWithdrawError(ctx, client, err)

@@ -793,3 +793,148 @@ func TestDecisionsWithdraw_OutputIdempotencyErrorsAndModes(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, "decisions need the web.decisions experiment", err.Error())
 }
+
+func TestDecisionsWithdraw_MultiKeyWholeSetAndListShowWithdrawn(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 18, 6, 0, 0, 0, time.UTC)
+	restoreNow := clitime.SetNow(func() time.Time { return fixedNow })
+	defer restoreNow()
+	clitime.SetZone(time.UTC)
+	defer clitime.SetZone(nil)
+
+	tWithdrawn := time.Date(2026, 11, 18, 5, 45, 0, 0, time.UTC)
+	var lastWithdrawReq hubclient.WithdrawDecisionsRequest
+	listMode := "ok"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/decisions/withdraw", func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&lastWithdrawReq))
+		w.Header().Set("Content-Type", "application/json")
+		if lastWithdrawReq.WholeSet {
+			_ = json.NewEncoder(w).Encode(hubclient.WithdrawDecisionsResponse{
+				Withdrawn: []hubclient.DecisionView{
+					{Key: "D1", Version: 1, Status: "withdrawn"},
+					{Key: "D3", Version: 1, Status: "withdrawn"},
+				},
+				AlreadyWithdrawn: []hubclient.DecisionView{},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(hubclient.WithdrawDecisionsResponse{
+			Withdrawn: []hubclient.DecisionView{
+				{Key: "D2", Version: 2, Status: "withdrawn"},
+			},
+			AlreadyWithdrawn: []hubclient.DecisionView{
+				{Key: "D1", Version: 1, Status: "withdrawn"},
+			},
+		})
+	})
+	mux.HandleFunc("/api/v1/agent/decisions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if listMode == "old_hub_state" && r.URL.Query().Get("state") == "withdrawn" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":"validation_error","message":"invalid state \"withdrawn\": must be pending, decided, or all"}}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+			Items: []hubclient.AgentDecisionListItem{
+				{
+					RowID:          "row-wd-1",
+					Key:            "D234",
+					Ref:            "ag/D234",
+					Version:        1,
+					Status:         "withdrawn",
+					Question:       "Ship v0.9 today?",
+					ConversationID: "conv-rel",
+					CreatedAt:      fixedNow.Add(-30 * time.Minute),
+					Withdrawn: &hubclient.DecisionWithdrawnView{
+						At:     tWithdrawn,
+						Reason: "CI found a regression",
+						ByName: "release-bot",
+					},
+				},
+			},
+			Query: strings.TrimSpace(r.URL.Query().Get("q")),
+		})
+	})
+	mux.HandleFunc("/api/v1/agent/decisions/D234", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionShowResponse{
+			Key: "D234",
+			Ref: "ag/D234",
+			Versions: []hubclient.AgentDecisionVersionView{
+				{
+					RowID:           "row-wd-1",
+					Key:             "D234",
+					Ref:             "ag/D234",
+					Version:         1,
+					Status:          "withdrawn",
+					Question:        "Ship v0.9 today?",
+					ConversationID:  "conv-rel",
+					PromptMessageID: "prompt-1",
+					Choices:         []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}},
+					ReplacedBy:      &hubclient.DecisionReplacedByView{RowID: "row-wd-2", Version: 2, At: fixedNow},
+					Withdrawn: &hubclient.DecisionWithdrawnView{
+						At:     tWithdrawn,
+						Reason: "CI found a regression",
+						ByName: "release-bot",
+					},
+					CreatedAt: fixedNow.Add(-30 * time.Minute),
+					Answers:   []hubclient.DecisionAnswerView{},
+				},
+			},
+		})
+	})
+	withMockDecisionsServer(t, mux)
+
+	// 1. Multi-key output preserves requested key order and distinguishes already withdrawn.
+	t.Setenv("SCION_CLI_MODE", "agent")
+	outMulti, err := runDecisionsTestCmd(t, "decisions", "withdraw", "D1", "D2", "--reason", "No longer needed")
+	require.NoError(t, err)
+	assert.False(t, lastWithdrawReq.WholeSet)
+	assert.Equal(t, []string{"D1", "D2"}, lastWithdrawReq.Keys)
+	assert.Equal(t, "D1 v1 already withdrawn\nD2 v2 withdrawn\n", outMulti)
+
+	// 2. --set sends wholeSet=true and prints both explicitly named and sibling withdrawn keys.
+	outSet, err := runDecisionsTestCmd(t, "decisions", "withdraw", "D1", "--set", "--reason", "Set obsolete")
+	require.NoError(t, err)
+	assert.True(t, lastWithdrawReq.WholeSet)
+	assert.Equal(t, "D1 v1 withdrawn\nD3 v1 withdrawn\n", outSet)
+
+	// 3. list --withdrawn and list --all show status, withdrawal time, and reason; mutually exclusive with other state flags.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--withdrawn", "--decided")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--withdrawn")
+
+	outListWd, err := runDecisionsTestCmd(t, "decisions", "list", "--withdrawn")
+	require.NoError(t, err)
+	assert.Contains(t, outListWd, "D234")
+	assert.Contains(t, outListWd, "withdrawn")
+	assert.Contains(t, outListWd, "2026-11-18 05:45 UTC")
+	assert.Contains(t, outListWd, "CI found a regression")
+
+	outListAll, err := runDecisionsTestCmd(t, "decisions", "list", "--all")
+	require.NoError(t, err)
+	assert.Contains(t, outListAll, "2026-11-18 05:45 UTC")
+	assert.Contains(t, outListAll, "CI found a regression")
+
+	// Old hub rejecting state=withdrawn surfaces update-hub error.
+	listMode = "old_hub_state"
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--withdrawn")
+	require.Error(t, err)
+	assert.Equal(t, "this hub does not support withdrawing decisions; update the hub", err.Error())
+	listMode = "ok"
+
+	// Human mode rejects --withdrawn as an agent-mode flag.
+	t.Setenv("SCION_CLI_MODE", "human")
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--withdrawn")
+	require.Error(t, err)
+	assert.True(t, isUsageError(err))
+
+	// 4. show D234 renders v1 [withdrawn] (replaced by v2), Withdrawn timestamp/asker, and Reason.
+	t.Setenv("SCION_CLI_MODE", "agent")
+	outShow, err := runDecisionsTestCmd(t, "decisions", "show", "D234")
+	require.NoError(t, err)
+	assert.Contains(t, outShow, "v1 [withdrawn] (replaced by v2)")
+	assert.Contains(t, outShow, "Withdrawn:    2026-11-18 05:45 UTC by release-bot")
+	assert.Contains(t, outShow, "Reason:       CI found a regression")
+}

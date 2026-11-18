@@ -1333,3 +1333,168 @@ func TestDecisionAnswer_WithdrawnAfterStateCheck409(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Won the race", wd["reason"])
 }
+
+func TestAgentDecisions_WithdrawMultiKeyWholeSetRefusalsAndListWithdrawn(t *testing.T) {
+	f := newDecisionsFixture(t)
+
+	// 1. Multi-key all-or-nothing (D8) and mixed idempotency.
+	_, p1 := f.topicPrompt(t, `[
+		{"id":"MK-A","question":"First pending?","choices":["yes","no"]},
+		{"id":"MK-INT","question":"Interpreted awaiting confirm?","choices":["yes","no"]}
+	]`, false)
+	_, p2 := f.topicPrompt(t, `[
+		{"id":"MK-B","question":"Second pending?","choices":["yes","no"]},
+		{"id":"MK-C","question":"Third pending?","choices":["yes","no"]}
+	]`, false)
+	_ = p1
+	_ = p2
+	pDirect := f.sendPromptToBob(t, `[{"id":"MK-DIR","question":"Direct?","choices":["yes","no"]}]`, false)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, pDirect.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+
+	topicReply := f.storeUserReply(t, f.alice, f.topicID, "", "web", "MK-INT: no")
+	recIntRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: topicReply.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "MK-INT", ChoiceID: "2"}},
+	})
+	require.Equal(t, http.StatusOK, recIntRR.Code, recIntRR.Body.String())
+
+	projUpdatedCh, unsubProjUpdated := f.srv.events.Subscribe("project." + f.project.ID + ".chat.decision.updated")
+	defer unsubProjUpdated()
+
+	// All-or-nothing: MK-A (pending) + MK-DIR (direct) + MK-INT (interpreted awaiting confirm, D6) + MK-NOPE -> 409 withdraw_failed, nothing stored.
+	failRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys:   []string{"MK-A", "MK-DIR", "MK-INT", "MK-NOPE"},
+		Reason: "Must fail atomically",
+	})
+	require.Equal(t, http.StatusConflict, failRR.Code, failRR.Body.String())
+	failCode, failDetails := errorCodeAndDetails(t, failRR)
+	assert.Equal(t, ErrCodeWithdrawFailed, failCode)
+	failList := failDetails["failures"].([]interface{})
+	require.Len(t, failList, 3)
+	assert.Equal(t, "MK-DIR", failList[0].(map[string]interface{})["key"])
+	assert.Equal(t, store.WithdrawReasonAlreadyAnswered, failList[0].(map[string]interface{})["reason"])
+	assert.Equal(t, "MK-INT", failList[1].(map[string]interface{})["key"])
+	assert.Equal(t, store.WithdrawReasonAlreadyAnswered, failList[1].(map[string]interface{})["reason"])
+	assert.Contains(t, failList[1].(map[string]interface{})["message"], "interpreted awaiting confirmation")
+	assert.Equal(t, "MK-NOPE", failList[2].(map[string]interface{})["key"])
+	assert.Equal(t, store.WithdrawReasonNotFound, failList[2].(map[string]interface{})["reason"])
+	assert.Empty(t, collectEvents(projUpdatedCh), "failed batch emits no SSE events")
+
+	// Withdraw MK-B alone, then withdraw [MK-A, MK-B, MK-C] with a new reason:
+	// MK-A and MK-C are newly withdrawn (2 SSE events); MK-B is in alreadyWithdrawn with its original reason.
+	wdB := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys:   []string{"MK-B"},
+		Reason: "First reason for MK-B",
+	})
+	require.Equal(t, http.StatusOK, wdB.Code, wdB.Body.String())
+	require.Len(t, collectEvents(projUpdatedCh), 1)
+
+	wdMixed := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys:   []string{"MK-A", "MK-B", "MK-C"},
+		Reason: "Second batch reason",
+	})
+	require.Equal(t, http.StatusOK, wdMixed.Code, wdMixed.Body.String())
+	var wdMixedOut WithdrawDecisionsResponse
+	require.NoError(t, json.Unmarshal(wdMixed.Body.Bytes(), &wdMixedOut))
+	require.Len(t, wdMixedOut.Withdrawn, 2)
+	assert.Equal(t, "MK-A", wdMixedOut.Withdrawn[0].Key)
+	assert.Equal(t, "MK-C", wdMixedOut.Withdrawn[1].Key)
+	require.Len(t, wdMixedOut.AlreadyWithdrawn, 1)
+	assert.Equal(t, "MK-B", wdMixedOut.AlreadyWithdrawn[0].Key)
+	assert.Equal(t, "First reason for MK-B", wdMixedOut.AlreadyWithdrawn[0].Withdrawn.Reason)
+	assert.Len(t, collectEvents(projUpdatedCh), 2, "only newly withdrawn rows publish chat.decision.updated")
+
+	// 2. WholeSet (--set) on partially answered set + set-submit 409 answer_set_changed reason withdrawn.
+	setPrompt := f.sendPromptToBob(t, `[
+		{"id":"HS-1","question":"First open?","choices":["yes","no"]},
+		{"id":"HS-INT","question":"Interpreted awaiting confirm?","choices":["yes","no"]},
+		{"id":"HS-3","question":"Third open?","choices":["yes","no"]}
+	]`, false)
+	bobReply := f.bobDMReply(t, setPrompt.MessageID, "HS-INT: yes")
+	recSetInt := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: bobReply.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "HS-INT", ChoiceID: "1"}},
+	})
+	require.Equal(t, http.StatusOK, recSetInt.Code, recSetInt.Body.String())
+
+	bobUpdatedCh, unsubBobUpdated := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
+	defer unsubBobUpdated()
+
+	wdSetRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys:     []string{"HS-1"},
+		WholeSet: true,
+		Reason:   "Rest of set no longer needed",
+	})
+	require.Equal(t, http.StatusOK, wdSetRR.Code, wdSetRR.Body.String())
+	var wdSetOut WithdrawDecisionsResponse
+	require.NoError(t, json.Unmarshal(wdSetRR.Body.Bytes(), &wdSetOut))
+	require.Len(t, wdSetOut.Withdrawn, 2)
+	assert.Equal(t, "HS-1", wdSetOut.Withdrawn[0].Key)
+	assert.Equal(t, "HS-3", wdSetOut.Withdrawn[1].Key)
+	assert.Len(t, collectEvents(bobUpdatedCh), 2, "both withdrawn rows of the DM set publish user decision.updated")
+
+	// Set submit that includes withdrawn HS-1 fails with 409 answer_set_changed and reason "withdrawn".
+	staleSetRR := f.submitSet(t, f.bob, setPrompt.MessageID, "",
+		setPrompt.Decisions[0].RowID, "1",
+		setPrompt.Decisions[1].RowID, "1",
+	)
+	require.Equal(t, http.StatusConflict, staleSetRR.Code, staleSetRR.Body.String())
+	staleCode, staleDetails := errorCodeAndDetails(t, staleSetRR)
+	assert.Equal(t, ErrCodeAnswerSetChanged, staleCode)
+	staleReasons := staleDetails["reasons"].(map[string]interface{})
+	assert.Equal(t, store.AnswerSetReasonWithdrawn, staleReasons[setPrompt.Decisions[0].RowID])
+
+	// Submitting only the remaining actionable row (confirming HS-INT) succeeds with 200!
+	okSetRR := f.submitSet(t, f.bob, setPrompt.MessageID, "",
+		setPrompt.Decisions[1].RowID, "1",
+	)
+	require.Equal(t, http.StatusOK, okSetRR.Code, okSetRR.Body.String())
+
+	// 3. POST /api/v1/agent/decisions/interpreted on a withdrawn key (single and mixed batch) -> 409 withdrawn.
+	_, pOpenForInterp := f.topicPrompt(t, `[{"id":"INT-STILL-OPEN","question":"Open?","choices":["yes","no"]}]`, false)
+	_ = pOpenForInterp
+	lateReply := f.storeUserReply(t, f.alice, f.topicID, "", "web", "MK-A: yes, INT-STILL-OPEN: yes")
+
+	interpSingleRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: lateReply.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "MK-A", ChoiceID: "1"}},
+	})
+	require.Equal(t, http.StatusConflict, interpSingleRR.Code, interpSingleRR.Body.String())
+	interpCode, interpDetails := errorCodeAndDetails(t, interpSingleRR)
+	assert.Equal(t, ErrCodeDecisionWithdrawn, interpCode)
+	interpErrs := interpDetails["errors"].([]interface{})
+	require.Len(t, interpErrs, 1)
+	assert.Equal(t, store.InterpretedReasonWithdrawn, interpErrs[0].(map[string]interface{})["code"])
+	assert.NotNil(t, interpDetails["decision"])
+
+	interpMixedRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: lateReply.ID,
+		Answers: []InterpretedAnswerInput{
+			{Key: "INT-STILL-OPEN", ChoiceID: "1"},
+			{Key: "MK-A", ChoiceID: "1"},
+		},
+	})
+	require.Equal(t, http.StatusConflict, interpMixedRR.Code, interpMixedRR.Body.String())
+	assert.Equal(t, ErrCodeDecisionWithdrawn, errorCode(t, interpMixedRR))
+	assert.Contains(t, agentListKeys(t, f, f.agent, url.Values{"state": {"pending"}}), "INT-STILL-OPEN",
+		"failed interpreted batch left INT-STILL-OPEN pending")
+
+	// 4. D7: reusing withdrawn key without --update gives 409 decision_key_exists with "(v1, withdrawn)".
+	reuseRR := f.sendAsAgent(t, OutboundMessageRequest{
+		Recipient: "user:" + f.bob.Email,
+		Msg:       "Re-asking without --update",
+		Decisions: decisionInputs(t, `[{"id":"HS-1","question":"Again?","choices":["yes","no"]}]`),
+	})
+	require.Equal(t, http.StatusConflict, reuseRR.Code, reuseRR.Body.String())
+	assert.Equal(t, ErrCodeDecisionKeyExists, errorCode(t, reuseRR))
+	assert.Contains(t, reuseRR.Body.String(), "HS-1 already exists (v1, withdrawn)")
+
+	// 5. GET /api/v1/agent/decisions?state=withdrawn lists withdrawn versions (and rejects bogus state).
+	wdListKeys := agentListKeys(t, f, f.agent, url.Values{"state": {"withdrawn"}})
+	assert.ElementsMatch(t, []string{"MK-A", "MK-B", "MK-C", "HS-1", "HS-3"}, wdListKeys)
+	assert.ElementsMatch(t, []string{"HS-1", "HS-3"}, agentListKeys(t, f, f.agent, url.Values{"state": {"withdrawn"}, "q": {"HS-"}}))
+
+	badStateRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=bogus", nil)
+	require.Equal(t, http.StatusBadRequest, badStateRR.Code)
+	assert.Contains(t, badStateRR.Body.String(), "withdrawn")
+}

@@ -92,6 +92,16 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 		if v.DecidedAt != nil {
 			_, _ = fmt.Fprintf(out, "  Decided:      %s\n", clitime.Format(*v.DecidedAt, clitime.Minute))
 		}
+		if v.Withdrawn != nil {
+			withdrawnLine := clitime.Format(v.Withdrawn.At, clitime.Minute)
+			if v.Withdrawn.ByName != "" {
+				withdrawnLine += fmt.Sprintf(" by %s", safeText(v.Withdrawn.ByName))
+			}
+			_, _ = fmt.Fprintf(out, "  Withdrawn:    %s\n", withdrawnLine)
+			if v.Withdrawn.Reason != "" {
+				_, _ = fmt.Fprintf(out, "  Reason:       %s\n", collapseSingleLine(v.Withdrawn.Reason))
+			}
+		}
 		_, _ = fmt.Fprintln(out, "  Choices:")
 		for _, c := range v.Choices {
 			suffix := ""

@@ -47,7 +47,7 @@ type decisionService struct {
 
 // ListAgentDecisionsOptions configures GET /api/v1/agent/decisions.
 type ListAgentDecisionsOptions struct {
-	State  string // pending (default), decided, or all
+	State  string // pending (default), decided, withdrawn, or all
 	Query  string // optional substring search (2..256 runes)
 	Cursor string
 	Limit  int
