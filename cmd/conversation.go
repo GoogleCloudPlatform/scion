@@ -80,6 +80,7 @@ Conversation references:
   conv:<uuid>     Direct conversation ID
   @<agent-name>   Agent DM conversation
   #<thread-name>  Named thread conversation`,
+	Args: cobra.NoArgs,
 	RunE: runConversationList,
 }
 
@@ -94,6 +95,7 @@ Examples:
   scion conversation list --kind group
   scion conversation list --surface discord --json
   scion conversation list --limit 10`,
+	Args: cobra.NoArgs,
 	RunE: runConversationList,
 }
 
