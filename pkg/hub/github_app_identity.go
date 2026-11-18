@@ -434,6 +434,28 @@ func (s *Server) GitHubAppBotLogin(ctx context.Context) string {
 	return ""
 }
 
+// peekGitHubAppMentionIdentities reads the configured app_slug override or
+// already-cached GET /app slug and mention aliases from memory without making
+// any network/store call or emitting an unavailable-slug warning.
+func (s *Server) peekGitHubAppMentionIdentities() (slug string, aliases []string, ok bool) {
+	s.mu.RLock()
+	appID := s.config.GitHubAppConfig.AppID
+	override := normalizeGitHubMentionHandle(s.config.GitHubAppConfig.AppSlug)
+	rawAliases := append([]string(nil), s.config.GitHubAppConfig.CommandMentionAliases...)
+	s.mu.RUnlock()
+
+	aliases = normalizeGitHubMentionAliases(rawAliases)
+	if override != "" {
+		return override, aliases, true
+	}
+	if appID > 0 {
+		if id, _, _ := s.githubAppIdentity.snapshot(appID); id != nil && id.Slug != "" {
+			return id.Slug, aliases, true
+		}
+	}
+	return "", aliases, false
+}
+
 // GitHubAppMentionIdentities returns the canonical App mention slug and any
 // configured command mention aliases (without leading '@') for Stage 3 command
 // detection (§5.6, §10.2). When neither app_slug nor a fetched GET /app slug

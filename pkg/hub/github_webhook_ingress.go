@@ -15,13 +15,10 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -30,7 +27,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -73,8 +69,6 @@ const (
 	githubCandidateProjectsPageSize   = 200
 	maxGitHubStoredUserAgentBytes     = 512
 	maxGitHubStoredHeaderBytes        = 256
-	maxGitHubEnvelopeActionBytes      = 64
-	maxGitHubEnvelopeLoginBytes       = 128
 )
 
 var (
@@ -399,10 +393,26 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Step 4: parse JSON object without NUL and validate installation.id,
-	// action, repository.full_name, and sender shape before any DB lookup.
-	env, err := parseGitHubContentEnvelope(eventType, body)
-	if err != nil || !env.actionOK || !env.repoOK || !env.senderOK {
+	// Compute the signed raw-body SHA-256 before normalisation (Stage 3 rev 1.8
+	// §4.3/§4.4): deduplicating on (project_id, source_kind, body_sha256) blocks
+	// fresh-GUID replays of a captured signed body while leaving GitHub's manual
+	// Redeliver (identical bytes) classified as duplicate.
+	rawBodySum := sha256.Sum256(body)
+	rawBodySHA256 := hex.EncodeToString(rawBodySum[:])
+
+	// Step 4: normalise once from the raw JSON payload (pure, no DB or network
+	// I/O). Envelope errors (malformed JSON/UTF-8/NUL, missing or invalid
+	// action, installation.id, repository.full_name, sender, or
+	// performed_via_github_app) leave normRes.InstallationID == 0 and fail with
+	// 400 immediately; family/subject/ceiling errors populate normRes's routing
+	// fields and hold normErr until step 8 to preserve the §4.1 refusal order.
+	peekSlug, peekAliases, hadSlug := s.peekGitHubAppMentionIdentities()
+	normRes, normErr := githubtrigger.Normalize(eventType, deliveryID, body, githubtrigger.Options{
+		AppSlug:        peekSlug,
+		MentionAliases: peekAliases,
+		ReceivedAt:     now,
+	})
+	if normRes.InstallationID <= 0 {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
 		return
 	}
@@ -413,10 +423,10 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Step 5: installation lookup — must exist and have status == active.
-	inst, err := s.store.GetGitHubInstallation(ctx, env.installationID)
+	inst, err := s.store.GetGitHubInstallation(ctx, normRes.InstallationID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.Error("GitHub trigger ingress installation lookup failed",
-			"installation_id", env.installationID,
+			"installation_id", normRes.InstallationID,
 			"delivery_id", deliveryID,
 			"error", err,
 		)
@@ -427,9 +437,9 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
 			Delivery:       deliveryID,
 			Event:          eventType,
-			Action:         env.action,
-			InstallationID: env.installationID,
-			Repo:           env.repoFullName,
+			Action:         normRes.Action,
+			InstallationID: normRes.InstallationID,
+			Repo:           normRes.RepoFullName,
 			PayloadBytes:   len(body),
 			Result:         GitHubWebhookStatusUnknownInstallation,
 		})
@@ -441,13 +451,13 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Step 6: own-App guard (§5.7) — drop deliveries when either sender matches
-	// <slug>[bot] (type Bot) OR the signed primary object's
-	// performed_via_github_app.id equals the configured AppID.
+	// <slug>[bot] (type Bot) OR, on an object-creating action, the created
+	// object's performed_via_github_app.id equals the configured AppID.
 	botLogin := s.GitHubAppBotLogin(ctx)
 	if botLogin == "" {
 		s.githubWebhookIngress.maybeWarnUnknownAppIdentity(appID, now)
 	}
-	if githubtrigger.IsOwnAppActor(env.senderType, env.senderLogin, botLogin, env.performedViaAppID, appID) {
+	if normRes.IsOwnAppActor(botLogin, appID) {
 		s.githubWebhookIngress.selfIgnoredCount.Add(1)
 		writeJSON(w, http.StatusAccepted, GitHubWebhookAcceptedResponse{
 			Status:   GitHubWebhookStatusIgnored,
@@ -458,7 +468,7 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Step 7: fan-out (§4.2 steps 1–4).
-	candidates, err := s.listGitHubInstallationCandidateProjects(ctx, inst.InstallationID, env.repoFullName)
+	candidates, err := s.listGitHubInstallationCandidateProjects(ctx, inst.InstallationID, normRes.RepoFullName)
 	if err != nil {
 		slog.Error("GitHub trigger ingress project fan-out lookup failed",
 			"installation_id", inst.InstallationID,
@@ -472,9 +482,9 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
 			Delivery:       deliveryID,
 			Event:          eventType,
-			Action:         env.action,
+			Action:         normRes.Action,
 			InstallationID: inst.InstallationID,
-			Repo:           env.repoFullName,
+			Repo:           normRes.RepoFullName,
 			PayloadBytes:   len(body),
 			Result:         GitHubWebhookStatusNoProject,
 		})
@@ -485,14 +495,16 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	selected, bypassed, routingStatus := ApplyPrimaryRouting(candidates, inst.TriggerRouting, env.repoFullName)
+	selected, bypassed, routingStatus := ApplyPrimaryRouting(candidates, inst.TriggerRouting, normRes.RepoFullName)
 	auditRouting := ""
 	switch routingStatus {
 	case GitHubTriggerRoutingStatusOK:
-		auditRouting = GitHubWebhookRoutingRoutedToPrimary
+		if len(bypassed) > 0 {
+			auditRouting = GitHubWebhookRoutingRoutedToPrimary
+		}
 	case GitHubTriggerRoutingStatusStalePrimary:
 		auditRouting = GitHubWebhookRoutingStalePrimary
-		s.githubWebhookIngress.maybeWarnStalePrimary(inst.InstallationID, env.repoFullName, now)
+		s.githubWebhookIngress.maybeWarnStalePrimary(inst.InstallationID, normRes.RepoFullName, now)
 	}
 
 	selectedIDs := make([]string, len(selected))
@@ -500,20 +512,14 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		selectedIDs[i] = selected[i].ID
 	}
 
-	// Compute the signed raw-body SHA-256 before normalisation (Stage 3 rev 1.8
-	// §4.3/§4.4): deduplicating on (project_id, source_kind, body_sha256) blocks
-	// fresh-GUID replays of a captured signed body while leaving GitHub's manual
-	// Redeliver (identical bytes) classified as duplicate.
-	rawBodySum := sha256.Sum256(body)
-	rawBodySHA256 := hex.EncodeToString(rawBodySum[:])
-
-	// Step 8: normalise once (§5, §10.2).
-	appSlug, mentionAliases, _ := s.GitHubAppMentionIdentities(ctx)
-	normRes, normErr := githubtrigger.Normalize(eventType, deliveryID, body, githubtrigger.Options{
-		AppSlug:        appSlug,
-		MentionAliases: mentionAliases,
-		ReceivedAt:     now,
-	})
+	// Step 8: finish command mention detection if step 6 lazily fetched GET /app
+	// on a cold slug cache, then handle any held normaliser error (§5, §10.2).
+	if !hadSlug {
+		appSlug, mentionAliases, _ := s.GitHubAppMentionIdentities(ctx)
+		if normErr == nil && appSlug != "" {
+			normErr = normRes.ApplyAppSlug(appSlug, mentionAliases)
+		}
+	}
 	if normErr != nil {
 		if errors.Is(normErr, githubtrigger.ErrAttributesCeilingExceeded) {
 			skipped := make([]GitHubWebhookSkippedProject, len(selected))
@@ -526,9 +532,9 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 			s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
 				Delivery:           deliveryID,
 				Event:              eventType,
-				Action:             env.action,
+				Action:             normRes.Action,
 				InstallationID:     inst.InstallationID,
-				Repo:               env.repoFullName,
+				Repo:               normRes.RepoFullName,
 				PayloadBytes:       len(body),
 				Result:             GitHubWebhookStatusSkipped,
 				Routing:            auditRouting,
@@ -544,16 +550,6 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
-		return
-	}
-
-	if normRes.IsOwnAppActor(botLogin, appID) {
-		s.githubWebhookIngress.selfIgnoredCount.Add(1)
-		writeJSON(w, http.StatusAccepted, GitHubWebhookAcceptedResponse{
-			Status:   GitHubWebhookStatusIgnored,
-			Reason:   "self",
-			Delivery: deliveryID,
-		})
 		return
 	}
 
@@ -776,152 +772,6 @@ func (s *Server) listGitHubInstallationCandidateProjects(ctx context.Context, in
 	}
 }
 
-type githubContentEnvelope struct {
-	installationID    int64
-	action            string
-	actionOK          bool
-	repoFullName      string
-	repoOK            bool
-	senderLogin       string
-	senderType        string
-	senderOK          bool
-	performedViaAppID int64
-}
-
-func parseGitHubContentEnvelope(eventType string, payload []byte) (githubContentEnvelope, error) {
-	if len(payload) == 0 || !utf8.Valid(payload) || bytes.ContainsRune(payload, '\x00') {
-		return githubContentEnvelope{}, errors.New("invalid payload")
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(payload))
-	dec.UseNumber()
-	var root map[string]any
-	if err := dec.Decode(&root); err != nil || root == nil {
-		return githubContentEnvelope{}, errors.New("invalid payload")
-	}
-	var trailing any
-	if err := dec.Decode(&trailing); err != io.EOF {
-		return githubContentEnvelope{}, errors.New("invalid payload")
-	}
-
-	instRaw, ok := root["installation"].(map[string]any)
-	if !ok || instRaw == nil {
-		return githubContentEnvelope{}, errors.New("missing installation")
-	}
-	instID, ok := parsePositiveJSONInt64(instRaw["id"])
-	if !ok {
-		return githubContentEnvelope{}, errors.New("invalid installation.id")
-	}
-
-	out := githubContentEnvelope{
-		installationID: instID,
-	}
-
-	if actionRaw, ok := root["action"].(string); ok && isValidGitHubActionIdent(actionRaw) {
-		out.action = strings.ToLower(actionRaw)
-		out.actionOK = true
-	}
-
-	if repoMap, ok := root["repository"].(map[string]any); ok && repoMap != nil {
-		if fullName, ok := repoMap["full_name"].(string); ok && isValidGitHubOwnerRepo(fullName) {
-			out.repoFullName = fullName
-			out.repoOK = true
-		}
-	}
-
-	if senderMap, ok := root["sender"].(map[string]any); ok && senderMap != nil {
-		login, hasLogin := senderMap["login"].(string)
-		if hasLogin && len(login) > 0 && len(login) <= maxGitHubEnvelopeLoginBytes &&
-			utf8.ValidString(login) && isPrintableNonSpaceString(login) {
-			if rawType, exists := senderMap["type"]; exists && rawType != nil {
-				typeStr, isStr := rawType.(string)
-				if !isStr || !utf8.ValidString(typeStr) {
-					return githubContentEnvelope{}, errors.New("invalid sender.type")
-				}
-				out.senderType = strings.TrimSpace(typeStr)
-			}
-			out.senderLogin = login
-			out.senderOK = true
-		}
-	}
-
-	performedViaAppID, err := extractEnvelopePerformedViaAppID(eventType, root)
-	if err != nil {
-		return githubContentEnvelope{}, err
-	}
-	out.performedViaAppID = performedViaAppID
-
-	return out, nil
-}
-
-func extractEnvelopePerformedViaAppID(eventType string, root map[string]any) (int64, error) {
-	primaryKey := ""
-	switch eventType {
-	case githubtrigger.EventIssueComment, githubtrigger.EventPullRequestReviewComment:
-		primaryKey = "comment"
-	case githubtrigger.EventPullRequestReview:
-		primaryKey = "review"
-	case githubtrigger.EventIssues:
-		primaryKey = "issue"
-	case githubtrigger.EventPullRequest:
-		primaryKey = "pull_request"
-	}
-	if primaryKey != "" {
-		if primaryMap, ok := root[primaryKey].(map[string]any); ok && primaryMap != nil {
-			id, err := parseOptionalPerformedViaAppID(primaryMap)
-			if err != nil || id > 0 {
-				return id, err
-			}
-		}
-	}
-	return parseOptionalPerformedViaAppID(root)
-}
-
-func parseOptionalPerformedViaAppID(parent map[string]any) (int64, error) {
-	raw, exists := parent["performed_via_github_app"]
-	if !exists || raw == nil {
-		return 0, nil
-	}
-	appMap, ok := raw.(map[string]any)
-	if !ok {
-		return 0, errors.New("invalid performed_via_github_app")
-	}
-	idRaw, hasID := appMap["id"]
-	if !hasID || idRaw == nil {
-		return 0, nil
-	}
-	if n, ok := idRaw.(json.Number); ok && n.String() == "0" {
-		return 0, nil
-	}
-	if f, ok := idRaw.(float64); ok && f == 0 {
-		return 0, nil
-	}
-	id, ok := parsePositiveJSONInt64(idRaw)
-	if !ok {
-		return 0, errors.New("invalid performed_via_github_app.id")
-	}
-	return id, nil
-}
-
-func parsePositiveJSONInt64(v any) (int64, bool) {
-	switch n := v.(type) {
-	case json.Number:
-		s := n.String()
-		if strings.ContainsAny(s, ".eE") {
-			return 0, false
-		}
-		parsed, err := strconv.ParseInt(s, 10, 64)
-		return parsed, err == nil && parsed > 0
-	case float64:
-		if n <= 0 || float64(int64(n)) != n {
-			return 0, false
-		}
-		return int64(n), true
-	default:
-		return 0, false
-	}
-}
-
 func isValidGitHubDeliveryGUID(s string) bool {
 	if s == "" || len(s) > GitHubWebhookMaxDeliveryBytes || len(s) != 36 {
 		return false
@@ -941,45 +791,6 @@ func isValidGitHubDeliveryGUID(s string) bool {
 		}
 	}
 	return uuid.Validate(s) == nil
-}
-
-func isValidGitHubActionIdent(s string) bool {
-	if s == "" || len(s) > maxGitHubEnvelopeActionBytes {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
-		if !ok {
-			return false
-		}
-	}
-	return true
-}
-
-func isValidGitHubOwnerRepo(fullName string) bool {
-	if fullName == "" || len(fullName) > 200 || !utf8.ValidString(fullName) || !isPrintableNonSpaceString(fullName) {
-		return false
-	}
-	slash := strings.IndexByte(fullName, '/')
-	if slash <= 0 || slash == len(fullName)-1 {
-		return false
-	}
-	if strings.IndexByte(fullName[slash+1:], '/') >= 0 {
-		return false
-	}
-	owner := fullName[:slash]
-	repo := fullName[slash+1:]
-	return owner != "." && owner != ".." && repo != "." && repo != ".."
-}
-
-func isPrintableNonSpaceString(s string) bool {
-	for _, r := range s {
-		if !unicode.IsPrint(r) || unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
 }
 
 func sanitizeGitHubEventHeaders(in map[string]string) map[string]string {

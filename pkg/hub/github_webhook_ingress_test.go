@@ -823,6 +823,35 @@ func TestGitHubWebhookIngress_PrimaryRoutingAndStalePrimaryWarning(t *testing.T)
 		assert.Equal(t, []any{projA.ID}, audits[0]["bypassed_project_ids"])
 	})
 
+	t.Run("single_candidate_primary_omits_routed_to_primary_audit_field", func(t *testing.T) {
+		// Temporarily move projA off acme/widgets so projB is the sole candidate.
+		storedA, err := f.store.GetProject(ctx, projA.ID)
+		require.NoError(t, err)
+		origRemote := storedA.GitRemote
+		storedA.GitRemote = "https://github.com/acme/other-repo.git"
+		require.NoError(t, f.store.UpdateProject(ctx, storedA))
+		defer func() {
+			storedA.GitRemote = origRemote
+			require.NoError(t, f.store.UpdateProject(ctx, storedA))
+		}()
+
+		require.NoError(t, f.store.SetGitHubInstallationTriggerRoute(ctx, f.instID, "acme/widgets", store.GitHubTriggerRoute{
+			PrimaryProjectID: projB.ID,
+			SetBy:            "admin",
+			SetAt:            f.currentTime(),
+		}))
+
+		f.auditBuf.Reset()
+		body := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "sole-candidate", f.currentTime())
+		rec := f.postDelivery(t, "issue_comment", uuid.NewString(), body, nil)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+		audits := parseAuditLines(t, f.auditBuf.String())
+		require.Len(t, audits, 1)
+		assert.NotContains(t, audits[0], "routing", "routed_to_primary must be omitted when bypassed is empty")
+		assert.NotContains(t, audits[0], "bypassed_project_ids")
+	})
+
 	t.Run("stale_primary_fans_out_to_all_candidates_and_warns_once_per_hour", func(t *testing.T) {
 		require.NoError(t, f.store.SetGitHubInstallationTriggerRoute(ctx, f.instID, "acme/widgets", store.GitHubTriggerRoute{
 			PrimaryProjectID: uuid.NewString(), // no longer a candidate
@@ -1507,4 +1536,169 @@ func TestGitHubWebhookIngress_OwnAppUnknownIdentityPerformedViaAppAndRetryBackof
 	evsAfter, err := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: proj.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Len(t, evsAfter.Items, 1, "only the third-party bot event should exist in store")
+}
+
+func TestGitHubWebhookIngress_OwnAppPerformedViaOnlyOnObjectCreationActions(t *testing.T) {
+	f := setupGitHubIngressFixture(t)
+	ctx := context.Background()
+	proj := f.createCandidateProject(t, "r2-ownapp-proj", "https://github.com/acme/widgets.git", f.instID)
+
+	repoObj := map[string]any{
+		"id": 101, "name": "widgets", "full_name": "acme/widgets", "private": false,
+		"owner": map[string]any{"login": "acme", "id": 10, "type": "Organization"},
+	}
+	humanSender := map[string]any{"login": "alice", "id": 202, "type": "User"}
+	ownAppMeta := map[string]any{"id": f.appID, "slug": "scion-bot"}
+
+	// 1. Human labeling an App-created issue -> queued (NOT dropped as self).
+	issueLabeledBody, err := json.Marshal(map[string]any{
+		"action":       "labeled",
+		"installation": map[string]any{"id": f.instID},
+		"repository":   repoObj,
+		"sender":       humanSender,
+		"label":        map[string]any{"name": "agent"},
+		"issue": map[string]any{
+			"number": 51, "state": "open", "title": "App-opened issue", "body": "created by agent",
+			"html_url":                 "https://github.com/acme/widgets/issues/51",
+			"created_at":               "2026-11-18T11:00:00Z",
+			"updated_at":               "2026-11-18T11:10:00Z",
+			"performed_via_github_app": ownAppMeta,
+		},
+	})
+	require.NoError(t, err)
+	recIssueLabeled := f.postDelivery(t, githubtrigger.EventIssues, uuid.NewString(), issueLabeledBody, nil)
+	require.Equal(t, http.StatusAccepted, recIssueLabeled.Code, recIssueLabeled.Body.String())
+	var issueLabeledResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recIssueLabeled.Body.Bytes(), &issueLabeledResp))
+	assert.Equal(t, GitHubWebhookStatusQueued, issueLabeledResp.Status)
+	require.Len(t, issueLabeledResp.Events, 1)
+
+	// 2. Human closing an App-created issue -> queued (NOT dropped as self).
+	issueClosedBody, err := json.Marshal(map[string]any{
+		"action":       "closed",
+		"installation": map[string]any{"id": f.instID},
+		"repository":   repoObj,
+		"sender":       humanSender,
+		"issue": map[string]any{
+			"number": 51, "state": "closed", "title": "App-opened issue", "body": "created by agent",
+			"html_url":                 "https://github.com/acme/widgets/issues/51",
+			"created_at":               "2026-11-18T11:00:00Z",
+			"updated_at":               "2026-11-18T11:20:00Z",
+			"performed_via_github_app": ownAppMeta,
+		},
+	})
+	require.NoError(t, err)
+	recIssueClosed := f.postDelivery(t, githubtrigger.EventIssues, uuid.NewString(), issueClosedBody, nil)
+	require.Equal(t, http.StatusAccepted, recIssueClosed.Code, recIssueClosed.Body.String())
+	var issueClosedResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recIssueClosed.Body.Bytes(), &issueClosedResp))
+	assert.Equal(t, GitHubWebhookStatusQueued, issueClosedResp.Status)
+	require.Len(t, issueClosedResp.Events, 1)
+
+	// 3. Human labeling an App-created pull request -> queued (NOT dropped as self).
+	prLabeledBody, err := json.Marshal(map[string]any{
+		"action":       "labeled",
+		"installation": map[string]any{"id": f.instID},
+		"repository":   repoObj,
+		"sender":       humanSender,
+		"label":        map[string]any{"name": "needs-review"},
+		"pull_request": map[string]any{
+			"number": 52, "state": "open", "title": "App-opened PR", "body": "body",
+			"html_url":                 "https://github.com/acme/widgets/pull/52",
+			"created_at":               "2026-11-18T11:00:00Z",
+			"updated_at":               "2026-11-18T11:25:00Z",
+			"performed_via_github_app": ownAppMeta,
+			"base":                     map[string]any{"ref": "main", "sha": "111", "repo": repoObj},
+			"head":                     map[string]any{"ref": "feat", "sha": "222", "repo": repoObj},
+		},
+	})
+	require.NoError(t, err)
+	recPRLabeled := f.postDelivery(t, githubtrigger.EventPullRequest, uuid.NewString(), prLabeledBody, nil)
+	require.Equal(t, http.StatusAccepted, recPRLabeled.Code, recPRLabeled.Body.String())
+	var prLabeledResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recPRLabeled.Body.Bytes(), &prLabeledResp))
+	assert.Equal(t, GitHubWebhookStatusQueued, prLabeledResp.Status)
+	require.Len(t, prLabeledResp.Events, 1)
+
+	// 4. App-created comment -> 202 ignored/self, zero new rows.
+	appCommentBody, err := json.Marshal(map[string]any{
+		"action":       "created",
+		"installation": map[string]any{"id": f.instID},
+		"repository":   repoObj,
+		"sender":       humanSender,
+		"issue": map[string]any{
+			"number": 51, "state": "open", "title": "Issue", "body": "body",
+			"html_url": "https://github.com/acme/widgets/issues/51",
+		},
+		"comment": map[string]any{
+			"id": 901, "body": "Posted via App user-to-server token",
+			"html_url":                 "https://github.com/acme/widgets/issues/51#issuecomment-901",
+			"created_at":               "2026-11-18T11:30:00Z",
+			"performed_via_github_app": ownAppMeta,
+		},
+	})
+	require.NoError(t, err)
+	recAppComment := f.postDelivery(t, githubtrigger.EventIssueComment, uuid.NewString(), appCommentBody, nil)
+	require.Equal(t, http.StatusAccepted, recAppComment.Code, recAppComment.Body.String())
+	var appCommentResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recAppComment.Body.Bytes(), &appCommentResp))
+	assert.Equal(t, GitHubWebhookStatusIgnored, appCommentResp.Status)
+	assert.Equal(t, "self", appCommentResp.Reason)
+
+	// 5. App opening an issue via user-to-server (sender is User, action is opened) -> 202 ignored/self, zero new rows.
+	appIssueOpenedBody, err := json.Marshal(map[string]any{
+		"action":       "opened",
+		"installation": map[string]any{"id": f.instID},
+		"repository":   repoObj,
+		"sender":       humanSender,
+		"issue": map[string]any{
+			"number": 53, "state": "open", "title": "Opened via App", "body": "body",
+			"html_url":                 "https://github.com/acme/widgets/issues/53",
+			"created_at":               "2026-11-18T11:35:00Z",
+			"performed_via_github_app": ownAppMeta,
+		},
+	})
+	require.NoError(t, err)
+	recAppIssue := f.postDelivery(t, githubtrigger.EventIssues, uuid.NewString(), appIssueOpenedBody, nil)
+	require.Equal(t, http.StatusAccepted, recAppIssue.Code, recAppIssue.Body.String())
+	var appIssueResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recAppIssue.Body.Bytes(), &appIssueResp))
+	assert.Equal(t, GitHubWebhookStatusIgnored, appIssueResp.Status)
+	assert.Equal(t, "self", appIssueResp.Reason)
+
+	evs, err := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: proj.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, evs.Items, 3, "exactly the 3 human non-creation events must be queued")
+
+	// 6. O1 refusal-order check: valid envelope for an unknown installation with a
+	// missing family object still returns 202 unknown_installation (step 5 before step 8).
+	unknownWithFamilyErr := []byte(`{"action":"created","installation":{"id":888888},"repository":{"full_name":"acme/widgets"},"sender":{"login":"alice","type":"User"}}`)
+	recUnknown := f.postDelivery(t, githubtrigger.EventIssueComment, uuid.NewString(), unknownWithFamilyErr, nil)
+	require.Equal(t, http.StatusAccepted, recUnknown.Code, recUnknown.Body.String())
+	var unknownResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recUnknown.Body.Bytes(), &unknownResp))
+	assert.Equal(t, GitHubWebhookStatusUnknownInstallation, unknownResp.Status)
+
+	// 7. O1 cold-cache lazy GET /app slug discovery still populates attributes.command in one pass.
+	mockGH := newMockAppEndpoint(t, http.StatusOK, `{"id":778899,"slug":"cold-scion","events":["issue_comment"]}`)
+	f.srv.githubAppIdentity.reset()
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.AppSlug = ""
+	f.srv.config.GitHubAppConfig.PrivateKey = testGitHubAppPrivateKeyPEM(t)
+	f.srv.config.GitHubAppConfig.APIBaseURL = mockGH.server.URL
+	f.srv.mu.Unlock()
+
+	coldProj := f.createCandidateProject(t, "r2-coldslug-proj", "https://"+f.srv.githubAppWebHost()+"/acme/widgets.git", f.instID)
+	coldBody := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "@cold-scion /ping hello", f.currentTime())
+	recCold := f.postDelivery(t, githubtrigger.EventIssueComment, uuid.NewString(), coldBody, nil)
+	require.Equal(t, http.StatusAccepted, recCold.Code, recCold.Body.String())
+	var coldResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recCold.Body.Bytes(), &coldResp))
+	require.Len(t, coldResp.Events, 1)
+	assert.Equal(t, coldProj.ID, coldResp.Events[0].ProjectID)
+	coldEv, err := f.store.GetTriggerEvent(ctx, coldResp.Events[0].EventID)
+	require.NoError(t, err)
+	assert.Equal(t, "ping", coldEv.Attributes["command"])
+	assert.Equal(t, "hello", coldEv.Attributes["command_args"])
+	assert.NotContains(t, coldEv.Attributes, "mention_detection")
 }
