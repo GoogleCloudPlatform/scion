@@ -1,6 +1,9 @@
 # Idle auto-suspend durability: commit retry and sweep recovery (ptone/scion#8204)
 
-Phase 3b of ptone/scion#7826. Makes an idle auto-suspend durable across a failed record write, a
+**Branch:** scion/agent-idle-status-p3b
+**Issue:** ptone/scion#8204 (phase 3b of ptone/scion#7826)
+
+Phase 3b. Makes an idle auto-suspend durable across a failed record write, a
 hub restart and a stop timeout, so no agent is left stopped without `suspend_reason` after an idle
 suspend.
 
