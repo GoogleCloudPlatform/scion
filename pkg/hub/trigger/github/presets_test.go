@@ -19,8 +19,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -138,29 +140,71 @@ func assertSuggestedActionInvariants(t *testing.T, sa *SuggestedAction, expectBr
 		assert.NotContains(t, sa.Labels, reserved)
 	}
 
-	// Validate every template slot and untrustedVars opt-in via pkg/triggertemplate.
-	_, err = triggertemplate.ValidateSlot(sa.Task, triggertemplate.SlotTask, sa.UntrustedVars)
-	assert.NoError(t, err, "task slot validation failed")
+	// Validate every template slot via pkg/triggertemplate and verify
+	// UntrustedVars is strictly set-equal to the union of
+	// triggertemplate.Parse(...).Untrusted() across all emitted slots
+	// (preventing drift between the leaf package's trustedTemplateVars table
+	// and pkg/triggertemplate).
+	seenParsedUntrusted := make(map[string]bool)
+	var parsedUntrustedUnion []string
+	recordSlot := func(raw, slotName, desc string) {
+		_, err := triggertemplate.ValidateSlot(raw, slotName, sa.UntrustedVars)
+		assert.NoError(t, err, "%s slot validation failed", desc)
 
+		tmpl, parseErr := triggertemplate.Parse(raw, slotName)
+		require.NoError(t, parseErr, "%s slot parse failed", desc)
+		for _, u := range tmpl.Untrusted() {
+			if !seenParsedUntrusted[u] {
+				seenParsedUntrusted[u] = true
+				parsedUntrustedUnion = append(parsedUntrustedUnion, u)
+			}
+		}
+	}
+
+	recordSlot(sa.Task, triggertemplate.SlotTask, "task")
 	if sa.AgentName != "" {
-		_, err = triggertemplate.ValidateSlot(sa.AgentName, triggertemplate.SlotName, sa.UntrustedVars)
-		assert.NoError(t, err, "agentName slot validation failed")
+		recordSlot(sa.AgentName, triggertemplate.SlotName, "agentName")
 	}
 	if sa.Branch != "" {
-		_, err = triggertemplate.ValidateSlot(sa.Branch, triggertemplate.SlotBranch, sa.UntrustedVars)
-		assert.NoError(t, err, "branch slot validation failed")
+		recordSlot(sa.Branch, triggertemplate.SlotBranch, "branch")
 	}
-	for k, v := range sa.Labels {
-		_, err = triggertemplate.ValidateSlot(v, triggertemplate.SlotLabel, sa.UntrustedVars)
-		assert.NoError(t, err, "label[%s] slot validation failed", k)
+	if len(sa.Labels) > 0 {
+		labelKeys := make([]string, 0, len(sa.Labels))
+		for k := range sa.Labels {
+			labelKeys = append(labelKeys, k)
+		}
+		sort.Strings(labelKeys)
+		for _, k := range labelKeys {
+			recordSlot(sa.Labels[k], triggertemplate.SlotLabel, "label["+k+"]")
+		}
 	}
 	if sa.ReuseMessage != "" {
-		_, err = triggertemplate.ValidateSlot(sa.ReuseMessage, triggertemplate.SlotMessage, sa.UntrustedVars)
-		assert.NoError(t, err, "reuseMessage slot validation failed")
+		recordSlot(sa.ReuseMessage, triggertemplate.SlotMessage, "reuseMessage")
 	}
 	if sa.AckComment != nil {
-		_, err = triggertemplate.ValidateSlot(sa.AckComment.Body, testAckCommentSlot, sa.UntrustedVars)
-		assert.NoError(t, err, "ackComment.body slot validation failed")
+		recordSlot(sa.AckComment.Body, testAckCommentSlot, "ackComment.body")
+	}
+
+	seenDeclared := make(map[string]bool, len(sa.UntrustedVars))
+	for _, u := range sa.UntrustedVars {
+		assert.False(t, seenDeclared[u], "duplicate entry %q in UntrustedVars", u)
+		seenDeclared[u] = true
+	}
+	assert.ElementsMatch(t, parsedUntrustedUnion, sa.UntrustedVars,
+		"UntrustedVars drifted from union of triggertemplate.Parse(...).Untrusted()")
+}
+
+func TestMaxCompiledRuleBytes_MatchesTriggerRule(t *testing.T) {
+	assert.Equal(t, triggerrule.MaxMatchRuleBytes, MaxCompiledRuleBytes,
+		"leaf constant MaxCompiledRuleBytes must match triggerrule.MaxMatchRuleBytes")
+}
+
+func TestTrustedTemplateVars_MatchesTriggerTemplate(t *testing.T) {
+	ensureTestAckCommentSlot(t)
+	for path := range trustedTemplateVars {
+		cls, err := triggertemplate.Classify(path)
+		require.NoError(t, err, "trustedTemplateVars entry %q rejected by triggertemplate.Classify", path)
+		assert.True(t, cls.IsTrusted(), "trustedTemplateVars entry %q has non-trusted class %q", path, cls)
 	}
 }
 
@@ -198,6 +242,14 @@ func TestPresets_RegistryAndSchemaCompleteness(t *testing.T) {
 			assert.NotEmpty(t, f.Help, "missing help text on %s.%s", p.ID, f.Name)
 			if f.Type == FieldTypeEnum {
 				assert.NotEmpty(t, f.Enum, "enum field %s.%s must list allowed values", p.ID, f.Name)
+			}
+			if f.Name == "include_review_comments" {
+				assert.Contains(t, f.Help, "pull_request", "include_review_comments help must state pull_request/any scope")
+				assert.Contains(t, f.Help, "any", "include_review_comments help must state pull_request/any scope")
+			}
+			if f.Name == "base_branches" {
+				assert.Contains(t, f.Help, "not a branch literally named default",
+					"base_branches help must clarify the 'default' sentinel on %s", p.ID)
 			}
 		}
 
@@ -794,6 +846,38 @@ func TestCompilePreset_HostileInputsAndCELInjection(t *testing.T) {
 				wantField: "coalesce_window",
 			},
 			{
+				name: "coalesce_window sub-second 1ns",
+				req: CompilePresetRequest{
+					Preset: PresetPRUpdated,
+					Fields: map[string]any{"coalesce_window": "1ns"},
+				},
+				wantField: "coalesce_window",
+			},
+			{
+				name: "coalesce_window sub-second 500ms",
+				req: CompilePresetRequest{
+					Preset: PresetPRUpdated,
+					Fields: map[string]any{"coalesce_window": "500ms"},
+				},
+				wantField: "coalesce_window",
+			},
+			{
+				name: "coalesce_window fractional seconds 1500ms",
+				req: CompilePresetRequest{
+					Preset: PresetPRUpdated,
+					Fields: map[string]any{"coalesce_window": "1500ms"},
+				},
+				wantField: "coalesce_window",
+			},
+			{
+				name: "coalesce_window fractional seconds 1.5s",
+				req: CompilePresetRequest{
+					Preset: PresetPRUpdated,
+					Fields: map[string]any{"coalesce_window": "1.5s"},
+				},
+				wantField: "coalesce_window",
+			},
+			{
 				name: "unknown field rejected",
 				req: CompilePresetRequest{
 					Preset: PresetPROpened,
@@ -872,6 +956,102 @@ func TestCompilePreset_HostileInputsAndCELInjection(t *testing.T) {
 			}
 			assert.True(t, evalCEL(t, re, expr, exactAttrs, nil),
 				"exact label %q failed to match in expr %s", hostile, expr)
+		}
+	})
+
+	t.Run("oversized compiled match rules over MaxCompiledRuleBytes are rejected on the driving list field", func(t *testing.T) {
+		makeLongBranches := func(n int) []string {
+			out := make([]string, n)
+			for i := 0; i < n; i++ {
+				prefix := fmt.Sprintf("release/marker-%02d-", i)
+				out[i] = prefix + strings.Repeat("b", 193-len(prefix))
+			}
+			return out
+		}
+		makeQuotedLabels := func(n int) []string {
+			out := make([]string, n)
+			for i := 0; i < n; i++ {
+				prefix := fmt.Sprintf("lbl%02d", i)
+				out[i] = prefix + strings.Repeat("'", 93-len(prefix))
+			}
+			return out
+		}
+
+		oversizeCases := []struct {
+			name      string
+			req       CompilePresetRequest
+			wantField string
+		}{
+			{
+				name: "pr_opened with 32 branches of 193 bytes",
+				req: CompilePresetRequest{
+					Preset: PresetPROpened,
+					Fields: map[string]any{"base_branches": makeLongBranches(32)},
+				},
+				wantField: "base_branches",
+			},
+			{
+				name: "pr_opened with 20 branches of 193 bytes (~4164 bytes > 4096)",
+				req: CompilePresetRequest{
+					Preset: PresetPROpened,
+					Fields: map[string]any{"base_branches": makeLongBranches(20)},
+				},
+				wantField: "base_branches",
+			},
+			{
+				name: "pr_updated with 20 branches of 193 bytes",
+				req: CompilePresetRequest{
+					Preset: PresetPRUpdated,
+					Fields: map[string]any{"base_branches": makeLongBranches(20)},
+				},
+				wantField: "base_branches",
+			},
+			{
+				name: "issue_opened with 32 quote-heavy 93-byte labels",
+				req: CompilePresetRequest{
+					Preset: PresetIssueOpened,
+					Fields: map[string]any{"labels_any": makeQuotedLabels(32)},
+				},
+				wantField: "labels_any",
+			},
+		}
+
+		for _, tc := range oversizeCases {
+			t.Run(tc.name, func(t *testing.T) {
+				out, err := CompilePreset(tc.req)
+				require.Error(t, err)
+				assert.Nil(t, out)
+
+				var cErr *PresetCompileError
+				require.ErrorAs(t, err, &cErr)
+				require.Len(t, cErr.Fields, 1)
+				assert.Equal(t, tc.wantField, cErr.Fields[0].Field)
+				assert.Equal(t, "too_long", cErr.Fields[0].Code)
+				assert.NotContains(t, cErr.Fields[0].Message, "marker-")
+				assert.NotContains(t, cErr.Fields[0].Message, "lbl00")
+			})
+		}
+
+		// Boundary check: 19 branches of 193 bytes stays <= MaxCompiledRuleBytes
+		// and compiles cleanly through triggerrule.CompileMatch.
+		underCap, err := CompilePreset(CompilePresetRequest{
+			Preset: PresetPROpened,
+			Fields: map[string]any{"base_branches": makeLongBranches(19)},
+		})
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(underCap.Match.Rules[0].Expr), MaxCompiledRuleBytes)
+		require.NoError(t, tr.CompileMatch(context.Background(), triggerrule.Rule{
+			Dialect: DialectCEL,
+			Expr:    underCap.Match.Rules[0].Expr,
+		}))
+
+		// Whole-second coalesce_window values succeed.
+		for _, w := range []string{"0s", "1s", "90s", "10m"} {
+			_, wErr := CompilePreset(CompilePresetRequest{
+				Preset: PresetPRUpdated,
+				Fields: map[string]any{"coalesce_window": w},
+			})
+			require.NoError(t, wErr, "whole-second coalesce_window %q should succeed", w)
 		}
 	})
 }

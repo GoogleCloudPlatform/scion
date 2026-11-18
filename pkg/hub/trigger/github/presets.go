@@ -64,6 +64,11 @@ const (
 	DefaultCoalesceWindow     = "30s"
 	MaxCoalesceWindow         = 10 * time.Minute
 
+	// MaxCompiledRuleBytes mirrors triggerrule.MaxMatchRuleBytes (Stage 1 match
+	// expression byte cap; pinned equal by TestMaxCompiledRuleBytes_MatchesTriggerRule)
+	// without adding an in-module dependency to this stdlib-only leaf package.
+	MaxCompiledRuleBytes = 4096
+
 	maxPresetFieldKeyBytes = 64
 	maxPresetListItems     = 32
 	maxPresetLabelBytes    = 100
@@ -273,7 +278,7 @@ var presetRegistry = []Preset{
 				Type:     FieldTypeBool,
 				Default:  true,
 				Required: false,
-				Help:     "Also match commands in pull request reviews and inline diff comments.",
+				Help:     "Also match commands in pull request reviews and inline diff comments (applies to on=pull_request or any only).",
 			},
 			{
 				Name:     "include_forks",
@@ -304,7 +309,7 @@ var presetRegistry = []Preset{
 				Type:     FieldTypeList,
 				Default:  []string{DefaultBaseBranchSentinel},
 				Required: false,
-				Help:     "Target base branches to match ('default' matches the repository default branch; empty matches any base branch).",
+				Help:     "Target base branches to match ('default' matches the repository's default branch, not a branch literally named default; empty matches any base branch).",
 			},
 			{
 				Name:     "include_drafts",
@@ -350,7 +355,7 @@ var presetRegistry = []Preset{
 				Type:     FieldTypeList,
 				Default:  []string{DefaultBaseBranchSentinel},
 				Required: false,
-				Help:     "Target base branches to match ('default' matches the repository default branch; empty matches any base branch).",
+				Help:     "Target base branches to match ('default' matches the repository's default branch, not a branch literally named default; empty matches any base branch).",
 			},
 			{
 				Name:     "include_drafts",
@@ -386,7 +391,7 @@ var presetRegistry = []Preset{
 				Type:     FieldTypeDuration,
 				Default:  DefaultCoalesceWindow,
 				Required: false,
-				Help:     "Coalescing window across rapid pushes on the same pull request (0s disables, max 10m).",
+				Help:     "Whole-second coalescing window across rapid pushes on the same pull request (0s disables, max 10m).",
 			},
 		},
 		ActionKinds: defaultActionKinds,
@@ -726,12 +731,17 @@ func compileCommandPreset(r *presetFieldReader) *CompiledPreset {
 		ackBody:      "Started **${result.agent_name}** for `/${event.attributes.command}` — [open agent](${result.agent_url}). Requested by @${event.attributes.sender}.",
 	})
 
+	expr := strings.Join(clauses, " && ")
+	if !r.checkCompiledRuleLength("command", expr) {
+		return nil
+	}
+
 	return &CompiledPreset{
 		Match: CompiledMatch{
 			Types: types,
 			Rules: []CompiledRule{{
 				Dialect: DialectCEL,
-				Expr:    strings.Join(clauses, " && "),
+				Expr:    expr,
 			}},
 		},
 		Subject: CompiledSubject{
@@ -770,6 +780,9 @@ func compilePROpenedPreset(r *presetFieldReader) *CompiledPreset {
 		SourceKind + "." + EventPullRequest + ".reopened",
 	}
 	expr := buildPRFilterExpr(baseBranches, includeDrafts, includeForks, assocs, allowBots)
+	if !r.checkCompiledRuleLength("base_branches", expr) {
+		return nil
+	}
 
 	branch := "${event.attributes.head_ref}"
 	if includeForks {
@@ -837,6 +850,9 @@ func compilePRUpdatedPreset(r *presetFieldReader) *CompiledPreset {
 		SourceKind + "." + EventPullRequest + ".synchronize",
 	}
 	expr := buildPRFilterExpr(baseBranches, includeDrafts, includeForks, assocs, allowBots)
+	if !r.checkCompiledRuleLength("base_branches", expr) {
+		return nil
+	}
 
 	branch := "${event.attributes.head_ref}"
 	if includeForks {
@@ -933,12 +949,17 @@ func compileIssueOpenedPreset(r *presetFieldReader) *CompiledPreset {
 		ackBody:      "Started **${result.agent_name}** for ${event.subject} — [open agent](${result.agent_url}). Triggered by @${event.attributes.sender}.",
 	})
 
+	expr := strings.Join(clauses, " && ")
+	if !r.checkCompiledRuleLength("labels_any", expr) {
+		return nil
+	}
+
 	return &CompiledPreset{
 		Match: CompiledMatch{
 			Types: types,
 			Rules: []CompiledRule{{
 				Dialect: DialectCEL,
-				Expr:    strings.Join(clauses, " && "),
+				Expr:    expr,
 			}},
 		},
 		Subject: CompiledSubject{
@@ -1028,12 +1049,17 @@ func compileLabelAddedPreset(r *presetFieldReader) *CompiledPreset {
 		ackBody:      "Started **${result.agent_name}** for ${event.subject} — [open agent](${result.agent_url}). Triggered by @${event.attributes.sender}.",
 	})
 
+	expr := strings.Join(clauses, " && ")
+	if !r.checkCompiledRuleLength("label", expr) {
+		return nil
+	}
+
 	return &CompiledPreset{
 		Match: CompiledMatch{
 			Types: types,
 			Rules: []CompiledRule{{
 				Dialect: DialectCEL,
-				Expr:    strings.Join(clauses, " && "),
+				Expr:    expr,
 			}},
 		},
 		Subject: CompiledSubject{
@@ -1102,12 +1128,17 @@ func compileReviewSubmittedPreset(r *presetFieldReader) *CompiledPreset {
 		ackBody:      "Started **${result.agent_name}** for ${event.subject} — [open agent](${result.agent_url}). Triggered by @${event.attributes.sender}.",
 	})
 
+	expr := strings.Join(clauses, " && ")
+	if !r.checkCompiledRuleLength("states", expr) {
+		return nil
+	}
+
 	return &CompiledPreset{
 		Match: CompiledMatch{
 			Types: types,
 			Rules: []CompiledRule{{
 				Dialect: DialectCEL,
-				Expr:    strings.Join(clauses, " && "),
+				Expr:    expr,
 			}},
 		},
 		Subject: CompiledSubject{
@@ -1352,6 +1383,14 @@ func (r *presetFieldReader) hasErrors() bool {
 	return len(*r.errs) > 0
 }
 
+func (r *presetFieldReader) checkCompiledRuleLength(field, expr string) bool {
+	if len(expr) > MaxCompiledRuleBytes {
+		r.addError(field, "too_long", fmt.Sprintf("compiled match expression exceeds maximum of %d bytes", MaxCompiledRuleBytes))
+		return false
+	}
+	return true
+}
+
 func (r *presetFieldReader) rawOrDefault(name string) (any, bool) {
 	if r.raw != nil {
 		if v, exists := r.raw[name]; exists && v != nil {
@@ -1430,12 +1469,12 @@ func (r *presetFieldReader) readCoalesceWindow(name string) (string, time.Durati
 		return "", 0
 	}
 	if s == "" || hasDisallowedTextRunes(s) {
-		r.addError(name, "invalid_value", "coalesce_window must be a valid Go duration between 0s and 10m")
+		r.addError(name, "invalid_value", "coalesce_window must be a whole-second Go duration between 0s and 10m")
 		return "", 0
 	}
 	d, err := time.ParseDuration(s)
-	if err != nil || d < 0 || d > MaxCoalesceWindow {
-		r.addError(name, "invalid_value", "coalesce_window must be a valid Go duration between 0s and 10m")
+	if err != nil || d < 0 || d > MaxCoalesceWindow || d%time.Second != 0 {
+		r.addError(name, "invalid_value", "coalesce_window must be a whole-second Go duration between 0s and 10m")
 		return "", 0
 	}
 	if d == 0 {

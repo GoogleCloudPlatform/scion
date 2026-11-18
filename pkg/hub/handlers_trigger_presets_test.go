@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -159,6 +160,31 @@ func TestTriggerPresets_Routes(t *testing.T) {
 		errFieldNames = append(errFieldNames, name)
 	}
 	assert.ElementsMatch(t, []string{"bogus_field", "command", "allowed_associations"}, errFieldNames)
+
+	// Oversized compiled match expression (>4096 bytes) -> 400 naming the driving list field.
+	twentyBranches := make([]string, 20)
+	for i := range twentyBranches {
+		prefix := fmt.Sprintf("release/evil_branch_marker_%02d_", i)
+		twentyBranches[i] = prefix + strings.Repeat("b", 193-len(prefix))
+	}
+	oversizeExprBody, err := json.Marshal(map[string]any{
+		"preset": "github.pr_opened",
+		"fields": map[string]any{"base_branches": twentyBranches},
+	})
+	require.NoError(t, err)
+	rr = doAsMember(http.MethodPost, "/api/v1/trigger-presets/compile", oversizeExprBody)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	assert.NotContains(t, rr.Body.String(), "evil_branch_marker")
+	var oversizeEnv ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &oversizeEnv))
+	assert.Equal(t, ErrCodeValidationError, oversizeEnv.Error.Code)
+	oversizeFields, ok := oversizeEnv.Error.Details["fields"].([]any)
+	require.True(t, ok, "expected error.details.fields array: %s", rr.Body.String())
+	require.Len(t, oversizeFields, 1)
+	oversizeFieldMap, ok := oversizeFields[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "base_branches", oversizeFieldMap["field"])
+	assert.Equal(t, "too_long", oversizeFieldMap["code"])
 
 	// Malformed JSON, unknown top-level JSON field, trailing tokens, and oversized body.
 	rr = doAsMember(http.MethodPost, "/api/v1/trigger-presets/compile", []byte(`{"preset":`))
