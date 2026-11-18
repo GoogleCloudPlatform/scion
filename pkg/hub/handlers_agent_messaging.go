@@ -4537,11 +4537,22 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 	return true
 }
 
+// clearInboundClientEvent strips StructuredMessage.Event on every client-,
+// agent-, and broker-supplied inbound path. StructuredMessage.Event is a
+// hub-minted §8.3 carrier set exclusively by ApplyDispatchedEventEnvelope.
+func clearInboundClientEvent(msg *messages.StructuredMessage) {
+	if msg != nil {
+		msg.Event = nil
+	}
+}
+
 // defaultInboundStructured fills Version, Timestamp (RFC3339 UTC) and Type
 // when a client-supplied structured message omits them (e.g. the web UI
 // sends a minimal structured_message), so everything the hub publishes
-// carries them (ptone/scion#2100). Client-supplied values are kept.
+// carries them (ptone/scion#2100). Client-supplied values are kept, except
+// hub-only carriers such as Event which are unconditionally cleared.
 func defaultInboundStructured(msg *messages.StructuredMessage) {
+	clearInboundClientEvent(msg)
 	if msg.Version == 0 {
 		msg.Version = messages.Version
 	}
