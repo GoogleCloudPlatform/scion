@@ -666,7 +666,7 @@ export class ScionHeader extends LitElement {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: var(--scion-danger, #ef4444);
+      background: var(--scion-status-danger, #ef4444);
       pointer-events: none;
     }
 

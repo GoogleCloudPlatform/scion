@@ -832,7 +832,7 @@ export class ScionNotificationTray extends LitElement {
       height: 16px;
       padding: 0 4px;
       border-radius: 8px;
-      background: var(--scion-danger, #ef4444);
+      background: var(--scion-status-danger, #ef4444);
       color: #fff;
       font-size: 0.625rem;
       font-weight: 700;
@@ -958,15 +958,15 @@ export class ScionNotificationTray extends LitElement {
     }
 
     .status-success sl-icon {
-      color: var(--scion-success, #22c55e);
+      color: var(--scion-status-success, #22c55e);
     }
 
     .status-warning sl-icon {
-      color: var(--scion-warning, #f59e0b);
+      color: var(--scion-status-warning, #f59e0b);
     }
 
     .status-danger sl-icon {
-      color: var(--scion-danger, #ef4444);
+      color: var(--scion-status-danger, #ef4444);
     }
 
     .status-primary sl-icon {

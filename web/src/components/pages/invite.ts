@@ -68,7 +68,7 @@ export class ScionPageInvite extends LitElement {
       justify-content: center;
       min-height: 100vh;
       background: var(--scion-bg, #f8fafc);
-      font-family: var(--scion-font, system-ui, -apple-system, sans-serif);
+      font-family: var(--scion-font-sans, system-ui, -apple-system, sans-serif);
     }
 
     .card {

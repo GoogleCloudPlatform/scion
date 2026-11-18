@@ -773,7 +773,7 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
 
     .maintenance-mode-toggle .toggle-track.active {
-      background: var(--scion-warning, #f59e0b);
+      background: var(--scion-status-warning, #f59e0b);
     }
 
     .maintenance-mode-toggle .toggle-track.active:hover {
@@ -1089,7 +1089,7 @@ export class ScionPageAdminMaintenance extends LitElement {
 
     .run-history-table td {
       padding: 0.5rem 0.75rem;
-      border-bottom: 1px solid var(--scion-border-subtle, #f1f5f9);
+      border-bottom: 1px solid var(--scion-border, #f1f5f9);
       color: var(--scion-text, #1e293b);
     }
 

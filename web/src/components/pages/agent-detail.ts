@@ -714,13 +714,13 @@ export class ScionPageAgentDetail extends LitElement {
       font-size: 1rem;
     }
     .notif-icon.status-success sl-icon {
-      color: var(--scion-success, #22c55e);
+      color: var(--scion-status-success, #22c55e);
     }
     .notif-icon.status-warning sl-icon {
-      color: var(--scion-warning, #f59e0b);
+      color: var(--scion-status-warning, #f59e0b);
     }
     .notif-icon.status-danger sl-icon {
-      color: var(--scion-danger, #ef4444);
+      color: var(--scion-status-danger, #ef4444);
     }
     .notif-icon.status-info sl-icon {
       color: var(--scion-text-muted, #64748b);

@@ -426,7 +426,7 @@ export const brokerAreaStyles = css`
   .form-error {
     margin-bottom: 0.75rem;
     font-size: 0.8125rem;
-    color: var(--scion-danger, #dc2626);
+    color: var(--scion-error-text, #991b1b);
   }
 
   .hosted-marker {
