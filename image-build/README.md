@@ -424,10 +424,10 @@ Other behaviour:
 
 ### Making agents use release images: `--also-tag latest`
 
-A release build of the Hub (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`)
-runs `scion-<harness>:<its version>` when `image_tag` is unset (the
-`hub.image_tag_version_default` experiment, on by default). Development and
-nightly builds run `scion-<harness>:latest`, unless the `image_tag` setting
+A release build of the Hub (`vX.Y.Z`, `vX.Y.Z-preview.N`, `vX.Y.Z-rc.N` or
+`nightly-YYYYMMDD`) runs `scion-<harness>:<its version>` when `image_tag` is
+unset (the `hub.image_tag_version_default` experiment, on by default).
+Development builds run `scion-<harness>:latest`, unless the `image_tag` setting
 (behind the `hub.image_tag_setting` experiment) selects another tag. For
 those, or with `image_tag: latest`, add `--also-tag latest` so the release
 images are also tagged `:latest`:
