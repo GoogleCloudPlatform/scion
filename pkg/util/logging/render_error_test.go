@@ -444,6 +444,17 @@ func (w *pointerReceiverCycleMarshaler) MarshalJSON() ([]byte, error) {
 	return []byte(`"w"`), nil
 }
 
+// pointerReceiverRedactingSecret reproduces review-2 R1: an exported field
+// redacted by a pointer-receiver MarshalJSON on an addressable struct field
+// next to an unencodable sibling.
+type pointerReceiverRedactingSecret struct {
+	Value string
+}
+
+func (s *pointerReceiverRedactingSecret) MarshalJSON() ([]byte, error) {
+	return []byte(`"***"`), nil
+}
+
 func runWithin(t *testing.T, timeout time.Duration, name string, fn func()) {
 	t.Helper()
 	done := make(chan struct{})
@@ -618,6 +629,10 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 			Name string      `json:"name"`
 			Next *linkedNode `json:"next,omitempty"`
 		}
+		type ptrSecretHolder struct {
+			Secret pointerReceiverRedactingSecret `json:"secret"`
+			Bad    float64                        `json:"bad"`
+		}
 		acyclicNode := &linkedNode{Name: "head", Next: &linkedNode{Name: "tail"}}
 		cyclicNode := &linkedNode{Name: "loop"}
 		cyclicNode.Next = cyclicNode
@@ -653,6 +668,10 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 					"wrapped": ws,
 					"bad":     math.NaN(),
 				},
+				"ptr_secret_holder", &ptrSecretHolder{
+					Secret: pointerReceiverRedactingSecret{Value: "do-not-log-ptr-marshaler-secret"},
+					Bad:    math.NaN(),
+				},
 			)
 		})
 		if err := gcpLogger.Flush(); err != nil {
@@ -672,6 +691,7 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 			"do-not-log-unexported",
 			"do-not-log-marshaler-secret",
 			"do-not-log-embed-secret",
+			"do-not-log-ptr-marshaler-secret",
 		} {
 			if strings.Contains(string(raw), forbidden) {
 				t.Errorf("payload leaked hidden field %q: %s", forbidden, raw)
@@ -714,6 +734,10 @@ func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
 		}
 		if wrapped, ok := pmcMap["wrapped"].([]any); !ok || len(wrapped) != 1 || wrapped[0] != "w" {
 			t.Errorf("ptr_marshaler_cycle_in_broken_map.wrapped = %#v, want [\"w\"]", pmcMap["wrapped"])
+		}
+		psh, ok := got["ptr_secret_holder"].(map[string]any)
+		if !ok || psh["secret"] != "***" || psh["bad"] != "NaN" {
+			t.Errorf("ptr_secret_holder = %#v, want secret=\"***\" and bad=\"NaN\"", got["ptr_secret_holder"])
 		}
 	})
 

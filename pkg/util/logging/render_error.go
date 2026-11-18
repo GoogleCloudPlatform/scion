@@ -149,20 +149,7 @@ func sanitizeCloudReflect(rv reflect.Value, visiting map[visitKey]bool) any {
 	if rv.Kind() == reflect.Pointer && rv.IsNil() {
 		return nil
 	}
-	if rv.CanInterface() && validCloudPayloadValue(rv.Interface()) {
-		return rv.Interface()
-	}
-	if rv.Type().Implements(jsonMarshalerType) || rv.Type().Implements(textMarshalerType) {
-		if rv.CanInterface() {
-			v := rv.Interface()
-			if errVal, ok := v.(error); ok {
-				return sanitizedErrorText(errVal)
-			}
-			_, err := tryJSONMarshal(v)
-			return SanitizeText(fmt.Sprintf("!ERROR:%v", err))
-		}
-	}
-	if rv.CanAddr() {
+	if rv.Kind() != reflect.Pointer && rv.CanAddr() && rv.CanInterface() {
 		pt := reflect.PointerTo(rv.Type())
 		if pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType) {
 			pv := rv.Addr().Interface()
@@ -173,6 +160,19 @@ func sanitizeCloudReflect(rv reflect.Value, visiting map[visitKey]bool) any {
 				return sanitizedErrorText(errVal)
 			}
 			_, err := tryJSONMarshal(pv)
+			return SanitizeText(fmt.Sprintf("!ERROR:%v", err))
+		}
+	}
+	if rv.CanInterface() && validCloudPayloadValue(rv.Interface()) {
+		return rv.Interface()
+	}
+	if rv.Type().Implements(jsonMarshalerType) || rv.Type().Implements(textMarshalerType) {
+		if rv.CanInterface() {
+			v := rv.Interface()
+			if errVal, ok := v.(error); ok {
+				return sanitizedErrorText(errVal)
+			}
+			_, err := tryJSONMarshal(v)
 			return SanitizeText(fmt.Sprintf("!ERROR:%v", err))
 		}
 	}
