@@ -17,7 +17,7 @@
  * with web.decisions on: each approved mock state (design §4.3, §4.6;
  * mocks r4) in light and dark on desktop and at 390 px. Each test asserts
  * the state's text and ARIA, then saves a screenshot of the messages it
- * shows as a test artifact (`test-results/chat-mobile/…/choices-*.png`),
+ * shows as a test artifact (`test-results/chat-mobile/…/decisions-*.png`),
  * for a reviewer to compare with the mocks. Nothing is compared to a
  * committed baseline.
  */
@@ -34,7 +34,7 @@ import {
   responsesPhase2Thread,
   responsesThread,
   replacedThread,
-  routeChoiceThread,
+  routeDecisionThread,
   row,
   setDecisions,
   setThread,
@@ -42,8 +42,8 @@ import {
   singleThread,
   decision,
   type AskerLookup,
-  type ChoiceThread,
-} from './choices-mock.js';
+  type DecisionThread,
+} from './decisions-mock.js';
 
 type Theme = 'light' | 'dark';
 
@@ -62,10 +62,10 @@ const isPhone = (page: Page): boolean => (page.viewportSize()?.width ?? 0) <= 76
  * user the preselectRecommendedChoices profile setting (ptone/scion#7842);
  * without it recommended choices are only outlined.
  */
-async function openChoices(
+async function openDecisions(
   page: Page,
   theme: Theme,
-  thread: ChoiceThread,
+  thread: DecisionThread,
   asker: AskerLookup = 'ok',
   { preselect = false }: { preselect?: boolean } = {}
 ): Promise<void> {
@@ -74,7 +74,7 @@ async function openChoices(
       localStorage.setItem('scion-theme', t);
       window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, 'web.decisions': true };
     }, theme);
-    await routeChoiceThread(p, thread, asker);
+    await routeDecisionThread(p, thread, asker);
     if (preselect) {
       await p.route('**/auth/me', (route) =>
         route.fulfill({
@@ -94,7 +94,7 @@ async function openChoices(
 }
 
 const message = (page: Page, id: string): Locator => page.locator(`[id="msg-${id}"]`);
-const card = (page: Page, id: string): Locator => message(page, id).locator('scion-chat-choices');
+const card = (page: Page, id: string): Locator => message(page, id).locator('scion-chat-decisions');
 
 /** Wait until the question markdown of `id`'s card has rendered (inline code). */
 async function markdownReady(page: Page, id: string): Promise<void> {
@@ -103,7 +103,7 @@ async function markdownReady(page: Page, id: string): Promise<void> {
 
 /**
  * Save a screenshot of the given messages (their union, padded) as
- * `choices-<project>-<theme>-<name>.png` in the test's output directory.
+ * `decisions-<project>-<theme>-<name>.png` in the test's output directory.
  */
 async function shot(
   page: Page,
@@ -127,13 +127,13 @@ async function shot(
   const right = Math.min(viewport.width, Math.max(...boxes.map((b) => b.x + b.width)) + pad);
   const bottom = Math.min(viewport.height, Math.max(...boxes.map((b) => b.y + b.height)) + pad);
   const project = testInfo.project.name === 'chromium-390' ? 'mobile390' : 'desktop';
-  const file = testInfo.outputPath(`choices-${project}-${theme}-${name}.png`);
+  const file = testInfo.outputPath(`decisions-${project}-${theme}-${name}.png`);
   await page.screenshot({ path: file, clip: { x, y, width: right - x, height: bottom - y } });
   await testInfo.attach(name, { path: file, contentType: 'image/png' });
 }
 
 for (const theme of ['light', 'dark'] as const) {
-  test.describe(`choice cards (${theme})`, () => {
+  test.describe(`decision cards (${theme})`, () => {
     // 2x so the saved screenshots are legible next to the mock renders.
     test.use({ colorScheme: theme, timezoneId: 'UTC', locale: 'en-US', deviceScaleFactor: 2 });
 
@@ -144,7 +144,7 @@ for (const theme of ['light', 'dark'] as const) {
     test('single pending: recommended outlined, Enter hint, fallback hidden', async ({
       page,
     }, testInfo) => {
-      await openChoices(page, theme, singleThread(shipDecision('prompt-1')));
+      await openDecisions(page, theme, singleThread(shipDecision('prompt-1')));
       await markdownReady(page, 'prompt-1');
       const c = card(page, 'prompt-1');
       const group = c.locator('.card');
@@ -190,7 +190,7 @@ for (const theme of ['light', 'dark'] as const) {
           },
         ],
       });
-      await openChoices(page, theme, singleThread(d, ''));
+      await openDecisions(page, theme, singleThread(d, ''));
       await markdownReady(page, 'prompt-desc');
       const c = card(page, 'prompt-desc');
       await expect(c.locator('.choices.stack')).toBeVisible();
@@ -208,7 +208,7 @@ for (const theme of ['light', 'dark'] as const) {
       page,
     }, testInfo) => {
       const pending = shipDecision('prompt-1');
-      await openChoices(page, theme, singleThread(pending));
+      await openDecisions(page, theme, singleThread(pending));
       await markdownReady(page, 'prompt-1');
       let body: Record<string, unknown> | null = null;
       await page.route('**/api/v1/decisions/*/answer', async (route) => {
@@ -245,7 +245,7 @@ for (const theme of ['light', 'dark'] as const) {
     test('set pending (default): recommended outlined, nothing selected, "3 remaining"', async ({
       page,
     }, testInfo) => {
-      await openChoices(page, theme, setThread('prompt-set', setDecisions('prompt-set')));
+      await openDecisions(page, theme, setThread('prompt-set', setDecisions('prompt-set')));
       await markdownReady(page, 'prompt-set');
       const c = card(page, 'prompt-set');
       await expect(c.locator('.row[role="group"]')).toHaveCount(3);
@@ -273,7 +273,7 @@ for (const theme of ['light', 'dark'] as const) {
     test('set pending, preselect setting on: defaults selected, "1 remaining", Submit disabled naming 17', async ({
       page,
     }, testInfo) => {
-      await openChoices(page, theme, setThread('prompt-set', setDecisions('prompt-set')), 'ok', {
+      await openDecisions(page, theme, setThread('prompt-set', setDecisions('prompt-set')), 'ok', {
         preselect: true,
       });
       await markdownReady(page, 'prompt-set');
@@ -308,7 +308,7 @@ for (const theme of ['light', 'dark'] as const) {
     });
 
     test('set pending with a stacked row (mobile mock)', async ({ page }, testInfo) => {
-      await openChoices(
+      await openDecisions(
         page,
         theme,
         setThread(
@@ -326,7 +326,7 @@ for (const theme of ['light', 'dark'] as const) {
 
     test('set ready, then submitted', async ({ page }, testInfo) => {
       const decisions = setDecisions('prompt-set');
-      await openChoices(page, theme, setThread('prompt-set', decisions));
+      await openDecisions(page, theme, setThread('prompt-set', decisions));
       await markdownReady(page, 'prompt-set');
       const c = card(page, 'prompt-set');
       await c.locator('.row[data-row="prompt-set-d234"] [data-choice="yes"]').click();
@@ -396,7 +396,7 @@ for (const theme of ['light', 'dark'] as const) {
           },
         },
       });
-      await openChoices(page, theme, setThread('prompt-set', decisions));
+      await openDecisions(page, theme, setThread('prompt-set', decisions));
       await markdownReady(page, 'prompt-set');
       const c = card(page, 'prompt-set');
       const replaced = c.locator('.row[data-row="prompt-set-17"]');
@@ -412,7 +412,7 @@ for (const theme of ['light', 'dark'] as const) {
       page,
     }, testInfo) => {
       const decisions = setDecisions('prompt-set');
-      await openChoices(page, theme, setThread('prompt-set', decisions));
+      await openDecisions(page, theme, setThread('prompt-set', decisions));
       await markdownReady(page, 'prompt-set');
       const c = card(page, 'prompt-set');
       await c.locator('.row[data-row="prompt-set-d234"] [data-choice="no"]').click();
@@ -462,7 +462,7 @@ for (const theme of ['light', 'dark'] as const) {
     });
 
     test('replaced card with a jump to its replacement', async ({ page }, testInfo) => {
-      await openChoices(page, theme, replacedThread());
+      await openDecisions(page, theme, replacedThread());
       const v1 = card(page, 'prompt-v1');
       await expect(v1.locator('.row')).toHaveClass(/replaced/);
       await expect(v1.locator('.card-head .version')).toHaveText('v1');
@@ -493,7 +493,7 @@ for (const theme of ['light', 'dark'] as const) {
       });
       const thread = singleThread(d);
       thread.messages.push(row('bob-reply', 1, 'instruction', 'No, hold v0.9.', 'bob'));
-      await openChoices(page, theme, thread);
+      await openDecisions(page, theme, thread);
       await markdownReady(page, 'prompt-int');
       const c = card(page, 'prompt-int');
       await expect(c.locator('.card-head .badge.interp')).toContainText('interpreted');
@@ -552,7 +552,7 @@ for (const theme of ['light', 'dark'] as const) {
           sourceMessageId: 'reply-self',
         }),
       });
-      const thread: ChoiceThread = {
+      const thread: DecisionThread = {
         messages: [
           row(
             'prompt-p21',
@@ -578,7 +578,7 @@ for (const theme of ['light', 'dark'] as const) {
         },
       };
 
-      await openChoices(page, theme, thread);
+      await openDecisions(page, theme, thread);
       await markdownReady(page, 'prompt-p21');
       await markdownReady(page, 'prompt-p26');
 
@@ -751,7 +751,7 @@ for (const theme of ['light', 'dark'] as const) {
       thread.messages.push(row('reply-p24', 2, 'instruction', 'Ship v0.9 today.', 'self'));
       // With the preselect setting on (ptone/scion#7842), so the pending row
       // starts on its default and the interpreted row shows it beats one.
-      await openChoices(page, theme, thread, 'ok', { preselect: true });
+      await openDecisions(page, theme, thread, 'ok', { preselect: true });
       await markdownReady(page, 'prompt-p24');
 
       const c = card(page, 'prompt-p24');
@@ -802,7 +802,7 @@ for (const theme of ['light', 'dark'] as const) {
       });
       const thread = setThread('prompt-p25', decisions);
       thread.messages.push(row('reply-p25', 2, 'instruction', 'Ship v0.9.', 'self'));
-      await openChoices(page, theme, thread);
+      await openDecisions(page, theme, thread);
       await markdownReady(page, 'prompt-p25');
 
       const c = card(page, 'prompt-p25');
@@ -890,7 +890,7 @@ for (const theme of ['light', 'dark'] as const) {
       page,
     }, testInfo) => {
       const decisions = setDecisions('prompt-set').slice(0, 2);
-      await openChoices(
+      await openDecisions(
         page,
         theme,
         setThread('prompt-set', decisions, 'Three calls before the release.'),
@@ -925,7 +925,7 @@ for (const theme of ['light', 'dark'] as const) {
     test('read-only thread: disabled with the read-only reason', async ({ page }, testInfo) => {
       const thread = singleThread(shipDecision('prompt-ro'));
       thread.canPost = false;
-      await openChoices(page, theme, thread);
+      await openDecisions(page, theme, thread);
       await markdownReady(page, 'prompt-ro');
       const c = card(page, 'prompt-ro');
       const reason = c.locator('.reason[data-reason="read-only"]');
@@ -942,7 +942,7 @@ for (const theme of ['light', 'dark'] as const) {
     });
 
     test('asker gone: still answerable, with a not-delivered note', async ({ page }, testInfo) => {
-      await openChoices(page, theme, singleThread(shipDecision('prompt-gone')), 'gone');
+      await openDecisions(page, theme, singleThread(shipDecision('prompt-gone')), 'gone');
       await markdownReady(page, 'prompt-gone');
       const c = card(page, 'prompt-gone');
       const note = c.locator('.note[data-note="asker-gone"]');
@@ -962,8 +962,9 @@ for (const theme of ['light', 'dark'] as const) {
     test('response lines: single, set collapsed and expanded, not delivered', async ({
       page,
     }, testInfo) => {
-      await openChoices(page, theme, responsesThread());
-      const line = (id: string): Locator => message(page, id).locator('scion-chat-choice-response');
+      await openDecisions(page, theme, responsesThread());
+      const line = (id: string): Locator =>
+        message(page, id).locator('scion-chat-decision-response');
       await expect(line('resp-own').locator('[data-kind="single"]')).toContainText(
         'you chose Yes for D234 Ship v0.9 today?'
       );
@@ -971,8 +972,10 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(line('resp-bob').locator('[data-kind="single"]')).toContainText(
         'Bob chose New waiting state for 17 Which approach?'
       );
-      await expect(message(page, 'resp-own').locator('.choice-response-row')).toHaveClass(/own/);
-      await expect(message(page, 'resp-bob').locator('.choice-response-row')).toHaveClass(/other/);
+      await expect(message(page, 'resp-own').locator('.decision-response-row')).toHaveClass(/own/);
+      await expect(message(page, 'resp-bob').locator('.decision-response-row')).toHaveClass(
+        /other/
+      );
       const set = line('resp-set').locator('details[data-kind="set"]');
       await expect(set.locator('summary')).toContainText('you answered 3 decisions');
       await expect(set.locator('summary')).toContainText('Show answers ▸');
@@ -1012,10 +1015,11 @@ for (const theme of ['light', 'dark'] as const) {
     test('response lines P2-7: interpreted (own and Bob), confirmed, and overridden', async ({
       page,
     }, testInfo) => {
-      await openChoices(page, theme, responsesPhase2Thread());
-      const line = (id: string): Locator => message(page, id).locator('scion-chat-choice-response');
+      await openDecisions(page, theme, responsesPhase2Thread());
+      const line = (id: string): Locator =>
+        message(page, id).locator('scion-chat-decision-response');
 
-      await expect(message(page, 'resp-interp-own').locator('.choice-response-row')).toHaveClass(
+      await expect(message(page, 'resp-interp-own').locator('.decision-response-row')).toHaveClass(
         /other/
       );
       await expect(line('resp-interp-own').locator('[data-kind="single"]')).toContainText(
@@ -1026,7 +1030,7 @@ for (const theme of ['light', 'dark'] as const) {
 
       const bobSet = line('resp-interp-bob-set').locator('details[data-kind="set"]');
       await expect(
-        message(page, 'resp-interp-bob-set').locator('.choice-response-row')
+        message(page, 'resp-interp-bob-set').locator('.decision-response-row')
       ).toHaveClass(/other/);
       await expect(bobSet.locator('summary')).toContainText(
         `${ASKER_NAME} recorded Bob's answers to 2 decisions from their reply`
@@ -1043,7 +1047,7 @@ for (const theme of ['light', 'dark'] as const) {
       const itemJumps = bobSet.locator('ul.answers li[data-row] [data-action="jump"]');
       await expect(itemJumps).toHaveCount(2);
 
-      await expect(message(page, 'resp-confirm').locator('.choice-response-row')).toHaveClass(
+      await expect(message(page, 'resp-confirm').locator('.decision-response-row')).toHaveClass(
         /own/
       );
       await expect(line('resp-confirm').locator('[data-kind="single"]')).toContainText(
@@ -1053,7 +1057,7 @@ for (const theme of ['light', 'dark'] as const) {
         'not sent to the agent'
       );
 
-      await expect(message(page, 'resp-override').locator('.choice-response-row')).toHaveClass(
+      await expect(message(page, 'resp-override').locator('.decision-response-row')).toHaveClass(
         /own/
       );
       await expect(line('resp-override').locator('[data-kind="single"]')).toContainText(
@@ -1095,7 +1099,7 @@ for (const theme of ['light', 'dark'] as const) {
         ],
       });
       const plainDecision = shipDecision('prompt-plain');
-      const thread: ChoiceThread = {
+      const thread: DecisionThread = {
         messages: [
           row('prompt-desc', 0, 'decision-prompt', 'Strategy check.\n\n(fallback)', 'asker'),
           row('prompt-plain', 1, 'decision-prompt', 'Release check.\n\n(fallback)', 'asker'),
@@ -1113,7 +1117,7 @@ for (const theme of ['light', 'dark'] as const) {
           'prompt-plain': 'single',
         },
       };
-      await openChoices(page, theme, thread);
+      await openDecisions(page, theme, thread);
       await expect(card(page, 'prompt-desc').locator('.desc code').first()).toBeVisible();
 
       await page.route('**/api/v1/decisions/*/answer', async (route) => {
@@ -1228,7 +1232,7 @@ for (const theme of ['light', 'dark'] as const) {
                 ],
         })
       );
-      await openChoices(
+      await openDecisions(
         page,
         theme,
         setThread('prompt-many', decisions, 'Six calls before implementation.')

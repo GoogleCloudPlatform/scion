@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/** Global teardown for the real-hub chat choices E2E suite. */
+/** Global teardown for the real-hub chat decisions E2E suite. */
 
 import { cleanupAuthState } from '../harness/auth.js';
 import { stopHub } from '../harness/hub.js';

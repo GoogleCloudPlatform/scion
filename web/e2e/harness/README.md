@@ -371,15 +371,15 @@ import { canonicalAgentUserDMKey, createTestAgent } from '../harness/agent.js';
 
 const agent = await createTestAgent(hub, {
   projectId,
-  name: 'choices-asker',
+  name: 'decisions-asker',
   messageMode: 'project',
 });
 
 // Authenticates on RouteAgentSelf (/api/v1/agents/{id}/*):
-const sendRes = await agent.sendChoicePrompt({
-  conversationRef: '#choices-room', // or recipient: 'user:alice@e2e.test' or conversationId
+const sendRes = await agent.sendDecisionPrompt({
+  conversationRef: '#decisions-room', // or recipient: 'user:alice@e2e.test' or conversationId
   msg: 'Select rollout strategy:',
-  choices: [
+  decisions: [
     {
       id: 'D1',
       question: 'Which rollout strategy should we use?',
@@ -408,19 +408,19 @@ const res = await agent.request('/api/v1/agent/gcp-token');
 //     2s window, re-poll after override settles (or space >2s) because
 //     `reportMessageFailure` runs in separate goroutines.
 //   - 'agent_unreachable': asker was stopped/deleted before the answer.
-const delivery = await agent.waitForChoiceResponseDelivery(topicId, {
+const delivery = await agent.waitForDecisionResponseDelivery(topicId, {
   promptMessageId: sendRes.message_id,
 });
 ```
 
-### Running the real-hub interactive choices suite
+### Running the real-hub interactive decisions suite
 
 ```bash
 # Prebuild Go hub binary + web client assets, then run the Playwright suite:
 go build -buildvcs=false -o build/scion ./cmd/scion
 cd web
 npm run build
-CHROMIUM_EXECUTABLE=/usr/bin/chromium E2E_PREBUILT=1 npm run test:e2e:chat-choices
+CHROMIUM_EXECUTABLE=/usr/bin/chromium E2E_PREBUILT=1 npm run test:e2e:chat-decisions
 ```
 
 (Omit `CHROMIUM_EXECUTABLE` when using Playwright's downloaded Chromium bundle,
@@ -429,7 +429,7 @@ and omit `E2E_PREBUILT=1` to let `global-setup.ts` run `make build` and
 
 Note on project roles: built-in `project-admin` and `project-owner` carry the
 `agent.message` permission required to answer a `messageMode: 'project'`
-agent's choice prompts, whereas `project-member` does not (useful when testing
+agent's decision prompts, whereas `project-member` does not (useful when testing
 blocked answerability).
 
 ## Navigation waits

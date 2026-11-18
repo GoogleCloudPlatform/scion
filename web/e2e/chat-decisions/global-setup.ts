@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * Global setup for the real-hub chat choices E2E suite (ptone/scion#7776).
+ * Global setup for the real-hub chat decisions E2E suite (ptone/scion#7776).
  *
  * Starts a throwaway test hub with:
  *   - co-located runtime broker (`runtimeBroker: true, testIdentities: true`)
@@ -38,7 +38,7 @@ async function globalSetup(): Promise<void> {
     },
     experiments: ['web.decisions'],
   });
-  console.info(`[setup] Chat-choices real hub ${String(state.hubId)} at ${state.baseURL}`);
+  console.info(`[setup] Chat-decisions real hub ${String(state.hubId)} at ${state.baseURL}`);
 }
 
 export default globalSetup;

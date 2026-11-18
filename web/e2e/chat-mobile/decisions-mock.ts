@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * Choice prompt fixtures for choices.pw.ts (ptone/scion#7673): the states of
+ * Choice prompt fixtures for decisions.pw.ts (ptone/scion#7673): the states of
  * the approved mocks as hub history rows, with the choice side maps the hub
  * sends while web.decisions is on.
  */
@@ -33,7 +33,7 @@ export const at = (minutes: number): string => new Date(BASE + minutes * 60_000)
 
 type Json = Record<string, unknown>;
 
-export interface ChoiceThread {
+export interface DecisionThread {
   messages: Json[];
   messageDecisions?: Record<string, Json[]>;
   messageDecisionIntros?: Record<string, string>;
@@ -205,7 +205,7 @@ export function setDecisions(
 export function singleThread(
   d: Json,
   intro = 'The release branch is green. One call before I tag it.'
-): ChoiceThread {
+): DecisionThread {
   const id = d.messageId as string;
   return {
     messages: [
@@ -222,7 +222,7 @@ export function setThread(
   id: string,
   decisions: Json[],
   intro = 'Three calls before the release. Answer them together.'
-): ChoiceThread {
+): DecisionThread {
   return {
     messages: [row(id, 0, 'decision-prompt', `${intro}\n\n(fallback)`, 'asker')],
     messageDecisions: { [id]: decisions },
@@ -232,7 +232,7 @@ export function setThread(
 }
 
 /** Mock s9: v1 replaced by v2, both in the thread. */
-export function replacedThread(): ChoiceThread {
+export function replacedThread(): DecisionThread {
   const choices = [
     { id: 'extend', label: 'Extend input-needed' },
     { id: 'waiting', label: 'New waiting state' },
@@ -273,7 +273,7 @@ export function replacedThread(): ChoiceThread {
 }
 
 /** Mock s12: single (own, Bob's), set (own), and an undelivered single. */
-export function responsesThread(): ChoiceThread {
+export function responsesThread(): DecisionThread {
   const single = (
     id: string,
     label: string,
@@ -347,7 +347,7 @@ export function responsesThread(): ChoiceThread {
 }
 
 /** Mock P2-7: interpreted (own & Bob's set), confirmed, and overridden response lines. */
-export function responsesPhase2Thread(): ChoiceThread {
+export function responsesPhase2Thread(): DecisionThread {
   const otherPrompt = shipDecision('prompt-other', {
     key: 'D9',
     ref: 'D9',
@@ -477,9 +477,9 @@ export type AskerLookup = 'ok' | 'denied' | 'gone';
  * Serves `thread` as the #general history, the asker and Bob as members,
  * and the asker lookup. Register after setupChatMobileMocks so these win.
  */
-export async function routeChoiceThread(
+export async function routeDecisionThread(
   page: Page,
-  thread: ChoiceThread,
+  thread: DecisionThread,
   asker: AskerLookup = 'ok'
 ): Promise<void> {
   await page.route(/\/api\/v1\/chat\/spaces\/([^/]+)\/members/, (route) =>

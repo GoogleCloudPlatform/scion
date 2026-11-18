@@ -250,10 +250,10 @@ test.describe('Profile Decisions roll-up across projects on real hub (ptone/scio
     const gammaMadeQuestion = 'Approve private gamma vendor contract?';
 
     // 1. Seed decisions in projAlpha (topic + DM with User A).
-    const alphaRelSend = await alphaBot.sendChoicePrompt({
+    const alphaRelSend = await alphaBot.sendDecisionPrompt({
       conversationRef: '#release',
       msg: 'Alpha release check:',
-      choices: [
+      decisions: [
         {
           id: 'D-ALPHA-REL',
           question: alphaRelQuestion,
@@ -267,10 +267,10 @@ test.describe('Profile Decisions roll-up across projects on real hub (ptone/scio
     });
     expect(alphaRelSend.message_id).toBeTruthy();
 
-    const alphaDmSend = await alphaBot.sendChoicePrompt({
+    const alphaDmSend = await alphaBot.sendDecisionPrompt({
       recipient: `user:${userA.user.email}`,
       msg: 'Alpha DM check:',
-      choices: [
+      decisions: [
         {
           id: 'D-ALPHA-DM',
           question: alphaDmQuestion,
@@ -288,10 +288,10 @@ test.describe('Profile Decisions roll-up across projects on real hub (ptone/scio
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     // 2. Seed decision in projBeta (topic).
-    const betaSend = await betaBot.sendChoicePrompt({
+    const betaSend = await betaBot.sendDecisionPrompt({
       conversationRef: '#landing',
       msg: 'Beta landing check:',
-      choices: [
+      decisions: [
         {
           id: 'D-BETA-HERO',
           question: betaHeroQuestion,
@@ -306,10 +306,10 @@ test.describe('Profile Decisions roll-up across projects on real hub (ptone/scio
     expect(betaSend.message_id).toBeTruthy();
 
     // 3. Seed pending AND answered decisions in non-member projGamma.
-    const gammaPendingSend = await gammaBot.sendChoicePrompt({
+    const gammaPendingSend = await gammaBot.sendDecisionPrompt({
       conversationRef: '#confidential',
       msg: 'Gamma confidential pending:',
-      choices: [
+      decisions: [
         {
           id: 'D-GAMMA-PENDING',
           question: gammaPendingQuestion,
@@ -322,10 +322,10 @@ test.describe('Profile Decisions roll-up across projects on real hub (ptone/scio
     });
     expect(gammaPendingSend.message_id).toBeTruthy();
 
-    const gammaMadeSend = await gammaBot.sendChoicePrompt({
+    const gammaMadeSend = await gammaBot.sendDecisionPrompt({
       conversationRef: '#confidential',
       msg: 'Gamma confidential settled:',
-      choices: [
+      decisions: [
         {
           id: 'D-GAMMA-MADE',
           question: gammaMadeQuestion,

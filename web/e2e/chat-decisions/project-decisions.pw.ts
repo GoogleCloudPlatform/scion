@@ -344,10 +344,10 @@ test.describe('Project Decisions page on real hub (web.decisions)', () => {
     const dmSecretQuestion = 'Rotate Alice personal staging deploy key 9482?';
     const releaseQuestion = 'Freeze the v0.9 release branch at 17:00 UTC?';
 
-    const relSend = await agent.sendChoicePrompt({
+    const relSend = await agent.sendDecisionPrompt({
       conversationRef: '#release',
       msg: 'Release readiness check:',
-      choices: [
+      decisions: [
         {
           id: 'D-REL',
           question: releaseQuestion,
@@ -361,10 +361,10 @@ test.describe('Project Decisions page on real hub (web.decisions)', () => {
     });
     expect(relSend.message_id).toBeTruthy();
 
-    const dmSend = await agent.sendChoicePrompt({
+    const dmSend = await agent.sendDecisionPrompt({
       recipient: `user:${userA.user.email}`,
       msg: 'Private credentials check for Alice:',
-      choices: [
+      decisions: [
         {
           id: 'D-DM-SECRET',
           question: dmSecretQuestion,

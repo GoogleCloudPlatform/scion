@@ -23,7 +23,7 @@ import * as http from 'node:http';
 import { expect, test } from '@playwright/test';
 import {
   canonicalAgentUserDMKey,
-  classifyChoiceResponseDelivery,
+  classifyDecisionResponseDelivery,
   createTestAgent,
   deriveAgentSigningKey,
   mintAgentToken,
@@ -98,12 +98,12 @@ test('mintAgentToken signs HS256 claims matching pkg/hub/agenttoken.go', () => {
   expect(parts[2]).toBe(expectedSig);
 });
 
-test('classifyChoiceResponseDelivery distinguishes confirm vs override vs unreachable', () => {
-  expect(classifyChoiceResponseDelivery('dispatched', '')).toBe('logged_without_delivery');
+test('classifyDecisionResponseDelivery distinguishes confirm vs override vs unreachable', () => {
+  expect(classifyDecisionResponseDelivery('dispatched', '')).toBe('logged_without_delivery');
   expect(
-    classifyChoiceResponseDelivery('failed', 'broker delivery failed: agent container not found')
+    classifyDecisionResponseDelivery('failed', 'broker delivery failed: agent container not found')
   ).toBe('attempted_delivery');
-  expect(classifyChoiceResponseDelivery('failed', 'Agent unreachable (phase: stopped)')).toBe(
+  expect(classifyDecisionResponseDelivery('failed', 'Agent unreachable (phase: stopped)')).toBe(
     'agent_unreachable'
   );
   expect(canonicalAgentUserDMKey('agent-a', 'user-b')).toBe('dm:agent:agent-a:user:user-b');
@@ -242,9 +242,9 @@ test('createTestAgent provisions with provisionOnly, authenticates, and inspects
     expect(seenCalls[1]?.agentToken).toBe(agent.token);
 
     // Addressing with conversationId alone normalizes to conversation_ref: conv:<id>.
-    const sendRes = await agent.sendChoicePrompt({
+    const sendRes = await agent.sendDecisionPrompt({
       conversationId: 'conv-1',
-      choices: [{ question: 'Proceed?', choices: ['Yes', 'No'] }],
+      decisions: [{ question: 'Proceed?', choices: ['Yes', 'No'] }],
     });
     expect(sendRes.message_id).toBe('msg-prompt-1');
     expect(seenCalls[2]?.body).toMatchObject({
@@ -254,13 +254,13 @@ test('createTestAgent provisions with provisionOnly, authenticates, and inspects
 
     // In practice on a containerless agent, polling until the override settles
     // lets callers re-inspect and verify the earlier confirm stayed logged_without_delivery.
-    const settled = await agent.waitForChoiceResponseDelivery('topic-1', {
+    const settled = await agent.waitForDecisionResponseDelivery('topic-1', {
       promptMessageId: 'msg-prompt-1',
     });
     expect(settled.messageId).toBe('resp-override');
     expect(settled.attemptedAgentDelivery).toBe(true);
 
-    const all = await agent.inspectChoiceResponses('topic-1');
+    const all = await agent.inspectDecisionResponses('topic-1');
     const confirmRow = all.find((r) => r.messageId === 'resp-confirm');
     expect(confirmRow?.deliveryClassification).toBe('logged_without_delivery');
     expect(confirmRow?.attemptedAgentDelivery).toBe(false);

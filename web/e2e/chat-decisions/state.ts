@@ -21,11 +21,11 @@ import * as path from 'node:path';
  * creates the file in a private temp dir and sets it; Playwright passes the
  * environment of global setup on to the workers and the teardown.
  */
-const STATE_ENV = 'E2E_CHAT_CHOICES_HUB_STATE_FILE';
+const STATE_ENV = 'E2E_CHAT_DECISIONS_HUB_STATE_FILE';
 
 /** Creates the private state dir and publishes the state file path. */
 export function createStateFile(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-choices-state-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scion-e2e-decisions-state-'));
   fs.chmodSync(dir, 0o700);
   const file = path.join(dir, 'hub-state.json');
   process.env[STATE_ENV] = file;

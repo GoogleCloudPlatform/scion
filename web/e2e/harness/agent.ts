@@ -41,7 +41,7 @@
  */
 
 import * as crypto from 'node:crypto';
-import type { ChoiceResponseSetView, ChoiceResponseView } from '../../src/shared/types.js';
+import type { DecisionResponseSetView, DecisionResponseView } from '../../src/shared/types.js';
 import { E2E_SESSION_SECRET, type HubState } from './hub.js';
 
 const AGENT_TOKEN_ISSUER = 'scion-hub';
@@ -174,28 +174,28 @@ export interface SendAgentMessageOptions extends AgentRecipientOptions {
   urgent?: boolean;
 }
 
-export interface SendChoicePromptOptions extends AgentRecipientOptions {
-  /** Optional intro text rendered above the choice card. */
+export interface SendDecisionPromptOptions extends AgentRecipientOptions {
+  /** Optional intro text rendered above the decision card. */
   msg?: string;
   /** One decision (single mode) or 2+ decisions (set mode). */
-  choices: DecisionPromptInput[];
+  decisions: DecisionPromptInput[];
   /** Allow replacing existing decision keys with a new version (`--update`). */
-  choicesUpdate?: boolean;
+  decisionsUpdate?: boolean;
 }
 
-export interface ChoiceReplacedDecisionSummary {
+export interface ReplacedDecisionSummary {
   version: number;
   status: string;
   answer?: string;
   answered_by?: string;
 }
 
-export interface ChoiceDecisionSendResult {
+export interface DecisionSendResultSummary {
   key: string;
   version: number;
   ref: string;
   row_id: string;
-  replaced: ChoiceReplacedDecisionSummary | null;
+  replaced: ReplacedDecisionSummary | null;
 }
 
 export interface AgentOutboundSendResponse {
@@ -204,7 +204,7 @@ export interface AgentOutboundSendResponse {
   recipient: string;
   recipient_id: string;
   conversation_id?: string;
-  decisions?: ChoiceDecisionSendResult[];
+  decisions?: DecisionSendResultSummary[];
 }
 
 export interface AgentRequestResult<T = unknown> {
@@ -219,8 +219,8 @@ export interface AgentRequestResult<T = unknown> {
  * How the hub handled agent delivery for a stored `decision-response` message
  * (assumes a containerless/absent agent; against a live running container,
  * delivered responses also stay `dispatchState: "dispatched"`):
- *   - `'attempted_delivery'`: the hub called `deliverChoiceResponse` /
- *     `deliverChoiceSetResponse` to the containerless runtime broker, which
+ *   - `'attempted_delivery'`: the hub called `deliverDecisionResponse` /
+ *     `deliverDecisionSetResponse` to the containerless runtime broker, which
  *     rejected/failed container delivery because no container is running.
  *   - `'logged_without_delivery'`: the stored `decision-response` row is not (yet)
  *     marked `failed` (`dispatchState: "dispatched"`). Once broker flush has
@@ -231,12 +231,12 @@ export interface AgentRequestResult<T = unknown> {
  *     the asking agent was stopped, suspended, errored, or deleted
  *     (`dispatchFailureReason` starts with `"Agent unreachable"`).
  */
-export type ChoiceResponseDeliveryClassification =
+export type DecisionResponseDeliveryClassification =
   | 'attempted_delivery'
   | 'logged_without_delivery'
   | 'agent_unreachable';
 
-export interface ChoiceResponseInspection {
+export interface DecisionResponseInspection {
   messageId: string;
   sender: string;
   senderId: string;
@@ -246,13 +246,13 @@ export interface ChoiceResponseInspection {
   createdAt: string;
   dispatchState: string;
   dispatchFailureReason: string;
-  response?: ChoiceResponseView;
-  responseSet?: ChoiceResponseSetView;
-  deliveryClassification: ChoiceResponseDeliveryClassification;
+  response?: DecisionResponseView;
+  responseSet?: DecisionResponseSetView;
+  deliveryClassification: DecisionResponseDeliveryClassification;
   attemptedAgentDelivery: boolean;
 }
 
-export interface WaitForChoiceResponseSelector {
+export interface WaitForDecisionResponseSelector {
   /** Exact `decision-response` message UUID, when known. */
   responseMessageId?: string;
   /** Originating decision-prompt message UUID (`sendRes.message_id`). */
@@ -280,21 +280,21 @@ export interface AgentSender {
   /** Sends an outbound chat message via `POST /api/v1/agents/{id}/outbound-message`. */
   sendMessage(options: SendAgentMessageOptions): Promise<AgentOutboundSendResponse>;
 
-  /** Sends a choice prompt via `POST /api/v1/agents/{id}/outbound-message`. */
-  sendChoicePrompt(options: SendChoicePromptOptions): Promise<AgentOutboundSendResponse>;
+  /** Sends a decision prompt via `POST /api/v1/agents/{id}/outbound-message`. */
+  sendDecisionPrompt(options: SendDecisionPromptOptions): Promise<AgentOutboundSendResponse>;
 
   /**
    * Lists `decision-response` rows in `conversationKey` (`topicId` or `dm:...`)
    * from `GET /api/v1/chat/conversations/{conversationKey}/messages` and
    * classifies each row's agent-delivery behavior.
    */
-  inspectChoiceResponses(
+  inspectDecisionResponses(
     conversationKey: string,
     viewerAuth?: ViewerAuthOptions
-  ): Promise<ChoiceResponseInspection[]>;
+  ): Promise<DecisionResponseInspection[]>;
 
   /**
-   * Polls `inspectChoiceResponses` until the selected `decision-response` row
+   * Polls `inspectDecisionResponses` until the selected `decision-response` row
    * settles into a non-buffered delivery outcome (`'attempted_delivery'` or
    * `'agent_unreachable'`). Pass either a `responseMessageId` string or
    * `{ responseMessageId?, promptMessageId? }`. When matching by
@@ -316,12 +316,12 @@ export interface AgentSender {
    * should re-poll after the override settles or space the two answers >2s
    * apart.
    */
-  waitForChoiceResponseDelivery(
+  waitForDecisionResponseDelivery(
     conversationKey: string,
-    selector: string | WaitForChoiceResponseSelector,
+    selector: string | WaitForDecisionResponseSelector,
     viewerAuth?: ViewerAuthOptions,
     timeoutMs?: number
-  ): Promise<ChoiceResponseInspection>;
+  ): Promise<DecisionResponseInspection>;
 }
 
 interface RawHistoryMessage {
@@ -341,8 +341,8 @@ interface RawHistoryMessage {
 
 interface RawChatHistoryResponse {
   messages?: RawHistoryMessage[];
-  messageDecisionResponses?: Record<string, ChoiceResponseView>;
-  messageDecisionResponseSets?: Record<string, ChoiceResponseSetView>;
+  messageDecisionResponses?: Record<string, DecisionResponseView>;
+  messageDecisionResponseSets?: Record<string, DecisionResponseSetView>;
 }
 
 /**
@@ -472,10 +472,10 @@ export function canonicalAgentUserDMKey(agentId: string, userId: string): string
 }
 
 /** Classifies a stored `decision-response` message's dispatch state and failure reason. */
-export function classifyChoiceResponseDelivery(
+export function classifyDecisionResponseDelivery(
   dispatchState: string | undefined,
   dispatchFailureReason: string | undefined
-): ChoiceResponseDeliveryClassification {
+): DecisionResponseDeliveryClassification {
   const state = dispatchState ?? '';
   const reason = dispatchFailureReason ?? '';
   if (state === 'failed') {
@@ -630,22 +630,22 @@ export async function createTestAgent(
     return sendOutbound('agent.sendMessage', payload);
   };
 
-  const sendChoicePrompt = async (
-    choiceOpts: SendChoicePromptOptions
+  const sendDecisionPrompt = async (
+    decisionOpts: SendDecisionPromptOptions
   ): Promise<AgentOutboundSendResponse> => {
     const payload: Record<string, unknown> = {
-      ...buildOutboundAddressing(choiceOpts),
-      msg: choiceOpts.msg ?? '',
-      decisions: choiceOpts.choices,
-      ...(choiceOpts.choicesUpdate ? { decisions_update: true } : {}),
+      ...buildOutboundAddressing(decisionOpts),
+      msg: decisionOpts.msg ?? '',
+      decisions: decisionOpts.decisions,
+      ...(decisionOpts.decisionsUpdate ? { decisions_update: true } : {}),
     };
-    return sendOutbound('agent.sendChoicePrompt', payload);
+    return sendOutbound('agent.sendDecisionPrompt', payload);
   };
 
-  const inspectChoiceResponses = async (
+  const inspectDecisionResponses = async (
     conversationKey: string,
     viewerAuth?: ViewerAuthOptions
-  ): Promise<ChoiceResponseInspection[]> => {
+  ): Promise<DecisionResponseInspection[]> => {
     const res = await fetch(
       `${hub.baseURL}/api/v1/chat/conversations/${encodeURIComponent(conversationKey)}/messages?limit=100`,
       {
@@ -656,7 +656,7 @@ export async function createTestAgent(
     const text = await res.text();
     if (!res.ok) {
       throw new Error(
-        `agent.inspectChoiceResponses(${conversationKey}) answered ${res.status}: ${text}`
+        `agent.inspectDecisionResponses(${conversationKey}) answered ${res.status}: ${text}`
       );
     }
     const history = parseBody<RawChatHistoryResponse>(text);
@@ -669,7 +669,7 @@ export async function createTestAgent(
       .map((m) => {
         const dispatchState = m.dispatchState ?? '';
         const dispatchFailureReason = m.dispatchFailureReason ?? '';
-        const deliveryClassification = classifyChoiceResponseDelivery(
+        const deliveryClassification = classifyDecisionResponseDelivery(
           dispatchState,
           dispatchFailureReason
         );
@@ -691,21 +691,21 @@ export async function createTestAgent(
       });
   };
 
-  const waitForChoiceResponseDelivery = async (
+  const waitForDecisionResponseDelivery = async (
     conversationKey: string,
-    selector: string | WaitForChoiceResponseSelector,
+    selector: string | WaitForDecisionResponseSelector,
     viewerAuth?: ViewerAuthOptions,
     timeoutMs: number = DEFAULT_DELIVERY_SETTLE_TIMEOUT_MS
-  ): Promise<ChoiceResponseInspection> => {
-    const normalized: WaitForChoiceResponseSelector =
+  ): Promise<DecisionResponseInspection> => {
+    const normalized: WaitForDecisionResponseSelector =
       typeof selector === 'string' ? { responseMessageId: selector } : selector;
     if (!normalized.responseMessageId && !normalized.promptMessageId) {
       throw new Error(
-        'waitForChoiceResponseDelivery: provide responseMessageId or promptMessageId'
+        'waitForDecisionResponseDelivery: provide responseMessageId or promptMessageId'
       );
     }
     const label = normalized.responseMessageId ?? `prompt:${normalized.promptMessageId}`;
-    const matchesSelector = (item: ChoiceResponseInspection): boolean => {
+    const matchesSelector = (item: DecisionResponseInspection): boolean => {
       if (normalized.responseMessageId && item.messageId !== normalized.responseMessageId) {
         return false;
       }
@@ -717,9 +717,9 @@ export async function createTestAgent(
     };
 
     const deadline = Date.now() + timeoutMs;
-    let lastSeen: ChoiceResponseInspection | undefined;
+    let lastSeen: DecisionResponseInspection | undefined;
     while (Date.now() <= deadline) {
-      const items = await inspectChoiceResponses(conversationKey, viewerAuth);
+      const items = await inspectDecisionResponses(conversationKey, viewerAuth);
       const match = items.find(matchesSelector);
       if (match) {
         lastSeen = match;
@@ -730,7 +730,7 @@ export async function createTestAgent(
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new Error(
-      `waitForChoiceResponseDelivery(${label}) did not observe a settled delivery attempt within ${timeoutMs}ms` +
+      `waitForDecisionResponseDelivery(${label}) did not observe a settled delivery attempt within ${timeoutMs}ms` +
         (lastSeen ? ` (last state: ${JSON.stringify(lastSeen)})` : ' (message not found)')
     );
   };
@@ -745,8 +745,8 @@ export async function createTestAgent(
     request,
     setStatus,
     sendMessage,
-    sendChoicePrompt,
-    inspectChoiceResponses,
-    waitForChoiceResponseDelivery,
+    sendDecisionPrompt,
+    inspectDecisionResponses,
+    waitForDecisionResponseDelivery,
   };
 }

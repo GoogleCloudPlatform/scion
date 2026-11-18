@@ -13,7 +13,7 @@
 // limitations under the License.
 
 /**
- * Real-hub end-to-end Playwright suite for interactive chat choices
+ * Real-hub end-to-end Playwright suite for interactive chat decisions
  * (ptone/scion#7776, epic ptone/scion#7514).
  *
  * Runs against the real Go `scion` hub binary with `web.decisions` enabled
@@ -195,7 +195,7 @@ async function assertNoPageReload(page: Page, expectedBootId: string): Promise<v
   expect(current).toBe(expectedBootId);
 }
 
-test.describe('Interactive chat choices on real hub (web.decisions)', () => {
+test.describe('Interactive chat decisions on real hub (web.decisions)', () => {
   let hub!: HubState;
   let projectId = '';
   let userA!: AuthSession;
@@ -301,10 +301,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
         `user.${userA.user.id}.chat.>`
       );
 
-      const sendRes = await agent.sendChoicePrompt({
+      const sendRes = await agent.sendDecisionPrompt({
         recipient: `user:${userA.user.email}`,
         msg: 'Choose deployment strategy:',
-        choices: [
+        decisions: [
           {
             id: 'D-SINGLE',
             question: 'Which rollout strategy should we use?',
@@ -322,7 +322,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       expect(decision.version).toBe(1);
 
       const promptCard = page
-        .locator(`scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices`)
+        .locator(`scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-decisions`)
         .first();
       await expect(promptCard).toBeVisible({ timeout: 15_000 });
       await assertNoPageReload(page, bootId);
@@ -341,13 +341,13 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
         'true'
       );
 
-      const responseLine = page.locator('scion-chat-choice-response [data-kind="single"]').last();
+      const responseLine = page.locator('scion-chat-decision-response [data-kind="single"]').last();
       await expect(responseLine).toBeVisible({ timeout: 15_000 });
       await expect(responseLine).toContainText('you chose Blue/Green for');
       await expect(responseLine).toContainText('D-SINGLE');
       await assertNoPageReload(page, bootId);
 
-      const delivery = await agent.waitForChoiceResponseDelivery(
+      const delivery = await agent.waitForDecisionResponseDelivery(
         dmKey,
         { promptMessageId: sendRes.message_id },
         { authToken: userA.accessToken }
@@ -376,10 +376,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
         openChatAndAwaitSSE(sessionB.page, routePath, projectSubject),
       ]);
 
-      const sendRes = await agent.sendChoicePrompt({
+      const sendRes = await agent.sendDecisionPrompt({
         conversationRef: `#${topicName}`,
         msg: 'Database engine decision for the team:',
-        choices: [
+        decisions: [
           {
             id: 'D-GROUP',
             question: 'Select the primary database engine',
@@ -393,10 +393,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       const rowId = sendRes.decisions![0].row_id;
 
       const cardA = sessionA.page.locator(
-        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices`
+        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-decisions`
       );
       const cardB = sessionB.page.locator(
-        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices`
+        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-decisions`
       );
       await expect(cardA.locator(`[data-row="${rowId}"]`)).toHaveAttribute(
         'data-status',
@@ -433,7 +433,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       );
 
       const responseLineB = sessionB.page
-        .locator('scion-chat-choice-response [data-kind="single"]')
+        .locator('scion-chat-decision-response [data-kind="single"]')
         .last();
       await expect(responseLineB).toBeVisible({ timeout: 15_000 });
       await expect(responseLineB).toContainText('Alice Choices chose PostgreSQL for');
@@ -460,10 +460,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
         `project.${projectId}.chat.>`
       );
 
-      const sendRes = await agent.sendChoicePrompt({
+      const sendRes = await agent.sendDecisionPrompt({
         conversationRef: `#${topicName}`,
         msg: 'Configure release target:',
-        choices: [
+        decisions: [
           {
             id: 'D-REGION',
             question: 'Which target region should receive the canary?',
@@ -487,7 +487,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       const cacheRowId = sendRes.decisions![1].row_id;
 
       const setCard = page.locator(
-        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices .card.set`
+        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-decisions .card.set`
       );
       await expect(setCard).toBeVisible({ timeout: 15_000 });
       await expect(setCard.locator('.card-head')).toContainText('2 decisions');
@@ -518,7 +518,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       await expect(setCard.locator('.card-foot .counter')).toContainText('Submitted by you');
 
       const setResponse = page
-        .locator('scion-chat-choice-response details[data-kind="set"]')
+        .locator('scion-chat-decision-response details[data-kind="set"]')
         .last();
       await expect(setResponse).toBeVisible({ timeout: 15_000 });
       await expect(setResponse.locator('summary')).toContainText('you answered 2 decisions');
@@ -529,7 +529,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
 
       await assertNoPageReload(page, bootId);
 
-      const delivery = await agent.waitForChoiceResponseDelivery(
+      const delivery = await agent.waitForDecisionResponseDelivery(
         topicId,
         { promptMessageId: sendRes.message_id },
         { authToken: userA.accessToken }
@@ -578,10 +578,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
     const { context, page } = await openUserContext(browser, hub, carol);
     try {
       await openChatAndAwaitSSE(page, routePath, subject);
-      const sendRes = await agent.sendChoicePrompt({
+      const sendRes = await agent.sendDecisionPrompt({
         conversationRef: `#${topicName}`,
         msg: 'Release calls:',
-        choices: [
+        decisions: [
           {
             id: 'D-SHIP',
             question: 'Ship today?',
@@ -604,7 +604,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       const shipRowId = sendRes.decisions![0].row_id;
       const card = (): ReturnType<Page['locator']> =>
         page.locator(
-          `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices .card.set`
+          `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-decisions .card.set`
         );
 
       // Default: highlight only.
@@ -638,7 +638,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
     }
   });
 
-  test('replacement with choicesUpdate flips open v1 card live over SSE to Replaced by v2', async ({
+  test('replacement with decisionsUpdate flips open v1 card live over SSE to Replaced by v2', async ({
     browser,
   }) => {
     const topicName = 'choices-replace';
@@ -652,10 +652,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
         `project.${projectId}.chat.>`
       );
 
-      const v1Res = await agent.sendChoicePrompt({
+      const v1Res = await agent.sendDecisionPrompt({
         conversationRef: `#${topicName}`,
         msg: 'Release candidate check (v1):',
-        choices: [
+        decisions: [
           {
             id: 'D-REL',
             question: 'Cut release candidate v1 now?',
@@ -671,18 +671,18 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       expect(v1Decision.version).toBe(1);
 
       const v1Card = page.locator(
-        `scion-chat-message[id="msg-${v1Res.message_id}"] scion-chat-choices`
+        `scion-chat-message[id="msg-${v1Res.message_id}"] scion-chat-decisions`
       );
       const v1Row = v1Card.locator(`[data-row="${v1Decision.row_id}"]`);
       await expect(v1Row).toHaveAttribute('data-status', 'pending', { timeout: 15_000 });
 
-      // Agent re-sends D-REL with choicesUpdate: true using the resolved conversationId.
+      // Agent re-sends D-REL with decisionsUpdate: true using the resolved conversationId.
       expect(v1Res.conversation_id).toMatch(/^[0-9a-f-]{36}$/);
-      const v2Res = await agent.sendChoicePrompt({
+      const v2Res = await agent.sendDecisionPrompt({
         conversationId: v1Res.conversation_id!,
         msg: 'Release candidate check (v2):',
-        choicesUpdate: true,
-        choices: [
+        decisionsUpdate: true,
+        decisions: [
           {
             id: 'D-REL',
             question: 'Cut release candidate v2 after hotfix?',
@@ -709,7 +709,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
 
       // New v2 card renders live with pending status and v2 badge.
       const v2Card = page.locator(
-        `scion-chat-message[id="msg-${v2Res.message_id}"] scion-chat-choices`
+        `scion-chat-message[id="msg-${v2Res.message_id}"] scion-chat-decisions`
       );
       const v2Row = v2Card.locator(`[data-row="${v2Decision.row_id}"]`);
       await expect(v2Row).toHaveAttribute('data-status', 'pending', { timeout: 15_000 });
@@ -744,10 +744,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
         openChatAndAwaitSSE(sessionB.page, routePath, projectSubject),
       ]);
 
-      const sendRes = await setAgent.sendChoicePrompt({
+      const sendRes = await setAgent.sendDecisionPrompt({
         conversationRef: `#${topicName}`,
         msg: 'Release checklist decisions:',
-        choices: [
+        decisions: [
           {
             id: 'D234',
             question: 'Ship v0.9 today?',
@@ -782,10 +782,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       const shipRowId = sendRes.decisions![2].row_id;
 
       const cardA = sessionA.page.locator(
-        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices .card.set`
+        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-decisions .card.set`
       );
       const cardB = sessionB.page.locator(
-        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices .card.set`
+        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-decisions .card.set`
       );
       await expect(cardA).toBeVisible({ timeout: 15_000 });
       await expect(cardB).toBeVisible({ timeout: 15_000 });
@@ -838,7 +838,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       // Live SSE interpreted set response line attributes Alice Choices (not agent sender).
       const interpSetLineB = sessionB.page
         .locator(
-          `scion-chat-message[id="msg-${interpRes.body.response_message_id}"] scion-chat-choice-response details[data-kind="set"] summary`
+          `scion-chat-message[id="msg-${interpRes.body.response_message_id}"] scion-chat-decision-response details[data-kind="set"] summary`
         )
         .first();
       await expect(interpSetLineB).toContainText(
@@ -896,7 +896,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       await assertNoPageReload(sessionA.page, bootIdA);
       await assertNoPageReload(sessionB.page, bootIdB);
 
-      const delivery = await setAgent.waitForChoiceResponseDelivery(
+      const delivery = await setAgent.waitForDecisionResponseDelivery(
         topicId,
         { promptMessageId: sendRes.message_id },
         { authToken: userA.accessToken }
@@ -930,10 +930,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
         openChatAndAwaitSSE(sessionB.page, routePath, projectSubject),
       ]);
 
-      const promptConf = await singleAgent.sendChoicePrompt({
+      const promptConf = await singleAgent.sendDecisionPrompt({
         conversationRef: `#${topicName}`,
         msg: 'Staging rollout confirmation:',
-        choices: [
+        decisions: [
           {
             id: 'S-CONF',
             question: 'Confirm staging deploy?',
@@ -944,10 +944,10 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
           },
         ],
       });
-      const promptOver = await singleAgent.sendChoicePrompt({
+      const promptOver = await singleAgent.sendDecisionPrompt({
         conversationRef: `#${topicName}`,
         msg: 'Canary duration check:',
-        choices: [
+        decisions: [
           {
             id: 'S-OVER',
             question: 'Keep canary window at 5m?',
@@ -960,16 +960,16 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       });
 
       const cardConfA = sessionA.page.locator(
-        `scion-chat-message[id="msg-${promptConf.message_id}"] scion-chat-choices`
+        `scion-chat-message[id="msg-${promptConf.message_id}"] scion-chat-decisions`
       );
       const cardOverA = sessionA.page.locator(
-        `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-choices`
+        `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-decisions`
       );
       const cardConfB = sessionB.page.locator(
-        `scion-chat-message[id="msg-${promptConf.message_id}"] scion-chat-choices`
+        `scion-chat-message[id="msg-${promptConf.message_id}"] scion-chat-decisions`
       );
       const cardOverB = sessionB.page.locator(
-        `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-choices`
+        `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-decisions`
       );
       await expect(cardConfA).toBeVisible({ timeout: 15_000 });
       await expect(cardOverA).toBeVisible({ timeout: 15_000 });
@@ -1033,7 +1033,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       });
 
       const confRespLine = sessionA.page
-        .locator('scion-chat-choice-response [data-kind="single"]')
+        .locator('scion-chat-decision-response [data-kind="single"]')
         .last();
       await expect(confRespLine).toContainText('you confirmed Yes for', { timeout: 15_000 });
       await expect(confRespLine.locator('[data-state="not-sent"]')).toHaveText(
@@ -1041,7 +1041,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       );
 
       // Clear the co-located runtime broker's 2s per-agent delivery debounce window
-      // so `waitForChoiceResponseDelivery` deterministically attributes the broker
+      // so `waitForDecisionResponseDelivery` deterministically attributes the broker
       // delivery attempt to response 2 (override) without coalescing.
       await new Promise((resolve) => setTimeout(resolve, 2_500));
 
@@ -1070,7 +1070,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
 
       // Wait for response 2 (override) to attempt broker delivery, then verify
       // response 1 (confirm) remained logged_without_delivery after 500ms settle.
-      const overDelivery = await singleAgent.waitForChoiceResponseDelivery(
+      const overDelivery = await singleAgent.waitForDecisionResponseDelivery(
         topicId,
         { promptMessageId: promptOver.message_id },
         { authToken: userA.accessToken }
@@ -1080,7 +1080,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       expect(overDelivery.response?.outcome).toBe('override');
 
       await new Promise((resolve) => setTimeout(resolve, 500));
-      const inspected = await singleAgent.inspectChoiceResponses(topicId, {
+      const inspected = await singleAgent.inspectDecisionResponses(topicId, {
         authToken: userA.accessToken,
       });
       const confirmInspected = inspected.find(
@@ -1097,7 +1097,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       // and verify both card `AnswerView.previousChoiceLabel` and response lines survive reload.
       await sessionB.page.reload({ waitUntil: 'domcontentloaded' });
       const reloadedOverCard = sessionB.page.locator(
-        `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-choices`
+        `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-decisions`
       );
       await expect(reloadedOverCard.locator('.card-head .badge.over')).toContainText('changed', {
         timeout: 20_000,
@@ -1107,7 +1107,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       );
 
       const reloadedConfirmResp = sessionB.page.locator(
-        'scion-chat-choice-response [data-kind="single"][data-outcome="confirm"]'
+        'scion-chat-decision-response [data-kind="single"][data-outcome="confirm"]'
       );
       await expect(reloadedConfirmResp).toContainText('Alice Choices confirmed Yes for', {
         timeout: 15_000,
@@ -1118,7 +1118,7 @@ test.describe('Interactive chat choices on real hub (web.decisions)', () => {
       );
 
       const reloadedOverrideResp = sessionB.page.locator(
-        'scion-chat-choice-response [data-kind="single"][data-outcome="override"]'
+        'scion-chat-decision-response [data-kind="single"][data-outcome="override"]'
       );
       await expect(reloadedOverrideResp).toContainText(
         'Alice Choices changed S-OVER to 30 minutes',

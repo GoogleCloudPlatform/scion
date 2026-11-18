@@ -102,7 +102,7 @@ func (DecisionAnswer) Fields() []ent.Field {
 		field.Enum("surface").
 			Values("native", "decisions_page", "slack", "google_chat", "discord", "telegram", "teams", "other").
 			Immutable(),
-		// response_message_id is the choice-response message.
+		// response_message_id is the decision-response message.
 		field.UUID("response_message_id", uuid.UUID{}).
 			Immutable(),
 		// authorizing_user_id / delegation_grant_id: the same delegated-send
@@ -157,7 +157,7 @@ func (DecisionAnswer) Indexes() []ent.Index {
 		// The decision log filtered by asking agent (Decisions agent
 		// filter on Made), newest first.
 		index.Fields("project_id", "asker_agent_id", "created_at"),
-		// History joins choice-response messages to their answer.
+		// History joins decision-response messages to their answer.
 		index.Fields("response_message_id"),
 		// User deletion clears answered_by_user_id on the user's answers.
 		index.Fields("answered_by_user_id"),

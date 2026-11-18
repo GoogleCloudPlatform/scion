@@ -60,7 +60,7 @@ func (Decision) Fields() []ent.Field {
 			Nillable().
 			MaxLen(256).
 			Immutable(),
-		// message_id is the choice-prompt message that carried this version.
+		// message_id is the decision-prompt message that carried this version.
 		field.UUID("message_id", uuid.UUID{}).
 			Immutable(),
 		// position is the order of the decision within its message.
