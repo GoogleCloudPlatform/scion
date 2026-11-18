@@ -993,8 +993,10 @@ func (s *Server) handleAgentDecisionWithdraw(w http.ResponseWriter, r *http.Requ
 		alreadyViews[i] = s.decisionViewFor(ctx, d)
 	}
 
-	// Best-effort SSE update for each newly withdrawn row; no chat message is posted (D4).
-	s.publishWithdrawnDecisions(ctx, res.Withdrawn, withdrawnViews)
+	// Best-effort SSE update for each newly withdrawn row and coalesced bell
+	// recompute once per affected user; no chat message is posted (D4, B4).
+	threads := s.publishWithdrawnDecisions(ctx, res.Withdrawn, withdrawnViews)
+	s.enqueueDecisionBellWithdraw(threads)
 
 	writeJSON(w, http.StatusOK, WithdrawDecisionsResponse{
 		Withdrawn:        withdrawnViews,
@@ -1002,23 +1004,40 @@ func (s *Server) handleAgentDecisionWithdraw(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-func (s *Server) publishWithdrawnDecisions(ctx context.Context, rows []*store.Decision, views []DecisionView) {
+func (s *Server) publishWithdrawnDecisions(ctx context.Context, rows []*store.Decision, views []DecisionView) []decisionBellTopicKey {
+	if len(rows) == 0 {
+		return nil
+	}
+	threads := make([]decisionBellTopicKey, 0, len(rows))
+	var promptsByID map[string]string
 	for i, d := range rows {
 		chatKey := d.ChatKey
 		if chatKey == "" {
-			prompt, err := s.store.GetMessage(ctx, d.MessageID)
-			if err != nil {
-				s.messageLog.Warn("decisions: withdrawn decision's prompt not found for decision.updated", "row_id", d.ID, "message_id", d.MessageID, "error", err)
-				continue
+			var cached bool
+			if promptsByID != nil {
+				chatKey, cached = promptsByID[d.MessageID]
 			}
-			chatKey = prompt.ThreadID
+			if !cached {
+				prompt, err := s.store.GetMessage(ctx, d.MessageID)
+				if err != nil {
+					s.messageLog.Warn("decisions: withdrawn decision's prompt not found for decision.updated", "row_id", d.ID, "message_id", d.MessageID, "error", err)
+					continue
+				}
+				chatKey = prompt.ThreadID
+				if promptsByID == nil {
+					promptsByID = make(map[string]string)
+				}
+				promptsByID[d.MessageID] = chatKey
+			}
 		}
 		if chatKey == "" {
 			s.messageLog.Warn("decisions: withdrawn decision has no chat_key for decision.updated", "row_id", d.ID, "message_id", d.MessageID)
 			continue
 		}
-		s.publishDecisionUpdatedAt(ctx, d.ProjectID, d.MessageID, chatKey, views[i])
+		s.publishDecisionUpdatedEventAt(d.ProjectID, d.MessageID, chatKey, views[i])
+		threads = append(threads, decisionBellTopicKey{projectID: d.ProjectID, chatKey: chatKey})
 	}
+	return threads
 }
 
 func (s *Server) writeWithdrawDecisionsError(w http.ResponseWriter, ctx context.Context, err error) {

@@ -720,6 +720,16 @@ func (s *Server) publishDecisionUpdatedAt(ctx context.Context, projectID, messag
 	}
 	defer s.enqueueDecisionBellEvent(projectID, threadID, namedUserID)
 
+	s.publishDecisionUpdatedEventAt(projectID, messageID, threadID, view)
+}
+
+// publishDecisionUpdatedEventAt publishes chat.decision.updated on the row's
+// conversation subject without enqueuing a bell recompute, for callers (such as
+// multi-row withdrawal) that batch bell recomputes once per call.
+func (s *Server) publishDecisionUpdatedEventAt(projectID, messageID, threadID string, view DecisionView) {
+	if s == nil || s.events == nil {
+		return
+	}
 	evt := map[string]interface{}{"decision": view, "messageId": messageID, "threadId": threadID}
 	if strings.HasPrefix(threadID, "dm:") {
 		parts := strings.Split(threadID, ":")

@@ -222,7 +222,7 @@ func (s *Server) stopDecisionBell() {
 
 // enqueueDecisionBellEvent schedules bell recomputes after a decision lifecycle
 // transition (prompt created, answered, interpreted, confirmed, changed, batch
-// answered, or replaced; design B4).
+// answered, replaced, or withdrawn; design B4).
 func (s *Server) enqueueDecisionBellEvent(projectID, threadID, namedUserID string) {
 	if s == nil || s.store == nil || !s.decisionsBellEnabled() {
 		return
@@ -249,6 +249,80 @@ func (s *Server) enqueueDecisionBellEvent(projectID, threadID, namedUserID strin
 	if projectID != "" && threadID != "" && !strings.HasPrefix(threadID, "agent:") {
 		s.enqueueDecisionBellTopic(projectID, threadID)
 	}
+}
+
+// enqueueDecisionBellWithdraw schedules coalesced bell recomputes once per
+// affected user across all newly withdrawn decisions of a withdraw call
+// (design-8145 4.3, B4: the DM user for DM prompts; the topic's posting
+// members for topic prompts). An empty slice (for example an idempotent repeat
+// where every key was already withdrawn) enqueues nothing.
+func (s *Server) enqueueDecisionBellWithdraw(threads []decisionBellTopicKey) {
+	if s == nil || s.store == nil || len(threads) == 0 || !s.decisionsBellEnabled() {
+		return
+	}
+
+	var userIDs []string
+	seenUsers := make(map[string]bool)
+	var topics []decisionBellTopicKey
+	seenTopics := make(map[decisionBellTopicKey]bool)
+
+	for _, t := range threads {
+		threadID := t.chatKey
+		if strings.HasPrefix(threadID, "dm:") {
+			parts := strings.Split(threadID, ":")
+			if len(parts) >= 5 {
+				for i, id := range []string{parts[2], parts[4]} {
+					kind := parts[1]
+					if i == 1 {
+						kind = parts[3]
+					}
+					id = strings.TrimSpace(id)
+					if kind == "user" && id != "" && !seenUsers[id] {
+						seenUsers[id] = true
+						userIDs = append(userIDs, id)
+					}
+				}
+			}
+			continue
+		}
+		if t.projectID != "" && threadID != "" && !strings.HasPrefix(threadID, "agent:") {
+			tk := decisionBellTopicKey{projectID: t.projectID, chatKey: threadID}
+			if !seenTopics[tk] {
+				seenTopics[tk] = true
+				topics = append(topics, tk)
+			}
+		}
+	}
+	if len(userIDs) == 0 && len(topics) == 0 {
+		return
+	}
+
+	debounce := s.decisionBellDebounce()
+	dueAt := time.Now().Add(debounce)
+
+	st := &s.decisionBell
+	st.mu.Lock()
+	if !s.ensureDecisionBellStartedLocked() {
+		st.mu.Unlock()
+		return
+	}
+	for _, uid := range userIDs {
+		if existing, ok := st.userDue[uid]; ok {
+			if dueAt.Before(existing.dueAt) {
+				existing.dueAt = dueAt
+				st.userDue[uid] = existing
+			}
+		} else {
+			st.userDue[uid] = decisionBellUserEntry{dueAt: dueAt}
+		}
+	}
+	for _, tk := range topics {
+		if _, ok := st.topicDue[tk]; !ok {
+			st.topicDue[tk] = dueAt
+		}
+	}
+	st.signalWakeLocked()
+	st.mu.Unlock()
 }
 
 func (s *Server) enqueueDecisionBellUser(userID string, reconcile bool) {
@@ -391,17 +465,23 @@ func (s *Server) nextDecisionBellWorkItem() (decisionBellWorkItem, time.Duration
 		}
 	}
 
+	// Wait for in-flight topic expansions to merge their posting members into
+	// userDue before popping per-user recomputes, so a user affected by both a
+	// DM and a topic (or multiple topics) in the same window is recomputed once.
 	for uid, entry := range st.userDue {
 		if st.inFlightUsers[uid] {
 			continue
 		}
 		if !now.Before(entry.dueAt) {
-			delete(st.userDue, uid)
-			st.inFlightUsers[uid] = true
-			return decisionBellWorkItem{
-				userID:    uid,
-				reconcile: entry.reconcile,
-			}, 0, true
+			if len(st.inFlightTopics) == 0 {
+				delete(st.userDue, uid)
+				st.inFlightUsers[uid] = true
+				return decisionBellWorkItem{
+					userID:    uid,
+					reconcile: entry.reconcile,
+				}, 0, true
+			}
+			continue
 		}
 		if earliest.IsZero() || entry.dueAt.Before(earliest) {
 			earliest = entry.dueAt
@@ -437,17 +517,20 @@ func (s *Server) executeDecisionBellWorkItem(item decisionBellWorkItem) {
 
 		now := time.Now()
 		st.mu.Lock()
+		delete(st.inFlightTopics, item.topic)
 		if !st.stopped {
 			for _, uid := range members {
-				if _, exists := st.userDue[uid]; !exists {
+				if existing, exists := st.userDue[uid]; !exists {
 					st.userDue[uid] = decisionBellUserEntry{dueAt: now}
+				} else if now.Before(existing.dueAt) {
+					existing.dueAt = now
+					st.userDue[uid] = existing
 				}
 			}
-			if len(members) > 0 || st.topicDue[item.topic] != (time.Time{}) {
+			if len(members) > 0 || len(st.userDue) > 0 || len(st.topicDue) > 0 {
 				st.signalWakeLocked()
 			}
 		}
-		delete(st.inFlightTopics, item.topic)
 		st.notifyIdleIfEmptyLocked()
 		st.mu.Unlock()
 		return
