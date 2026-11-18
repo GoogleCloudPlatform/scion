@@ -2287,12 +2287,8 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, broker.ID)
-	if err != nil {
-		return fmt.Errorf("failed to list broker projects: %w", err)
-	}
-	if projectsResp != nil {
-		broker.Projects = projectsResp.Projects
+	if err := populateBrokerProjects(ctx, client, broker); err != nil {
+		return err
 	}
 
 	if isJSONOutput() {
@@ -2436,6 +2432,20 @@ func brokerInfoJSON(broker *hubclient.RuntimeBroker) map[string]interface{} {
 	return output
 }
 
+// populateBrokerProjects fetches the projects a broker serves from
+// GET /api/v1/runtime-brokers/{id}/projects, since broker get and list
+// responses never populate RuntimeBroker.Projects.
+func populateBrokerProjects(ctx context.Context, client hubclient.Client, broker *hubclient.RuntimeBroker) error {
+	projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, broker.ID)
+	if err != nil {
+		return fmt.Errorf("failed to list broker projects: %w", err)
+	}
+	if projectsResp != nil {
+		broker.Projects = projectsResp.Projects
+	}
+	return nil
+}
+
 func runHubBrokersDelete(cmd *cobra.Command, args []string) error {
 	// Broker name is required for delete
 	if len(args) == 0 {
@@ -2458,10 +2468,17 @@ func runHubBrokersDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Fail before prompting or deleting on error (same broker.read permission
+	// as Get) rather than silently omitting the project warning or reporting
+	// 0 projectsRemoved.
+	if err := populateBrokerProjects(ctx, client, broker); err != nil {
+		return err
+	}
+
 	// Extract project names for the confirmation prompt
 	projectNames := make([]string, len(broker.Projects))
 	for i, g := range broker.Projects {
-		projectNames[i] = g.ProjectName
+		projectNames[i] = valueOrDefault(g.ProjectName, g.ProjectID)
 	}
 
 	// Show confirmation prompt
