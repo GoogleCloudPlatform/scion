@@ -132,6 +132,7 @@ type ProjectDecisionLogEntry struct {
 	AnsweredByName         string                    `json:"answeredByName"`
 	Provenance             string                    `json:"provenance"`
 	Outcome                string                    `json:"outcome"`
+	DismissReason          string                    `json:"dismissReason,omitempty"`
 	Surface                string                    `json:"surface"`
 	InterpretedByAgentID   string                    `json:"interpretedByAgentId,omitempty"`
 	InterpretedByAgentName string                    `json:"interpretedByAgentName,omitempty"`

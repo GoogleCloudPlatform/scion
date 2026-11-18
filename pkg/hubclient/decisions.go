@@ -47,7 +47,7 @@ type decisionService struct {
 
 // ListAgentDecisionsOptions configures GET /api/v1/agent/decisions.
 type ListAgentDecisionsOptions struct {
-	State  string // pending (default), decided, withdrawn, or all
+	State  string // pending (default), decided, withdrawn, dismissed, or all
 	Query  string // optional substring search (2..256 runes)
 	Cursor string
 	Limit  int
@@ -62,6 +62,7 @@ type DecisionAnswerView struct {
 	AnsweredByEmail      string    `json:"answeredByEmail,omitempty"`
 	Provenance           string    `json:"provenance"`
 	Outcome              string    `json:"outcome,omitempty"`
+	DismissReason        string    `json:"dismissReason,omitempty"`
 	InterpretedByAgentID string    `json:"interpretedByAgentId,omitempty"`
 	SourceMessageID      string    `json:"sourceMessageId,omitempty"`
 	Surface              string    `json:"surface"`
@@ -86,6 +87,16 @@ type DecisionWithdrawnView struct {
 	ByName string    `json:"byName"`
 }
 
+// DecisionDismissedView describes when, by whom, and why a user dismissed a decision.
+type DecisionDismissedView struct {
+	At                time.Time `json:"at"`
+	ByUserID          string    `json:"byUserId,omitempty"`
+	ByName            string    `json:"byName"`
+	Reason            string    `json:"reason,omitempty"`
+	Surface           string    `json:"surface"`
+	ResponseMessageID string    `json:"responseMessageId"`
+}
+
 // DecisionView is the full view of one decision version returned by record/answer endpoints.
 type DecisionView struct {
 	RowID           string                  `json:"rowId"`
@@ -101,6 +112,7 @@ type DecisionView struct {
 	Choices         []messages.Choice       `json:"choices"`
 	ReplacedBy      *DecisionReplacedByView `json:"replacedBy,omitempty"`
 	Withdrawn       *DecisionWithdrawnView  `json:"withdrawn,omitempty"`
+	Dismissed       *DecisionDismissedView  `json:"dismissed,omitempty"`
 	Decision        *DecisionAnswerView     `json:"decision,omitempty"`
 }
 
@@ -117,6 +129,7 @@ type AgentDecisionListItem struct {
 	CreatedAt       time.Time              `json:"createdAt"`
 	DecidedAt       *time.Time             `json:"decidedAt,omitempty"`
 	Withdrawn       *DecisionWithdrawnView `json:"withdrawn,omitempty"`
+	Dismissed       *DecisionDismissedView `json:"dismissed,omitempty"`
 	Answer          *DecisionAnswerView    `json:"answer,omitempty"`
 }
 
@@ -141,6 +154,7 @@ type AgentDecisionVersionView struct {
 	DefaultChoiceID string                  `json:"defaultChoiceId,omitempty"`
 	ReplacedBy      *DecisionReplacedByView `json:"replacedBy,omitempty"`
 	Withdrawn       *DecisionWithdrawnView  `json:"withdrawn,omitempty"`
+	Dismissed       *DecisionDismissedView  `json:"dismissed,omitempty"`
 	CreatedAt       time.Time               `json:"createdAt"`
 	DecidedAt       *time.Time              `json:"decidedAt,omitempty"`
 	Answers         []DecisionAnswerView    `json:"answers"`

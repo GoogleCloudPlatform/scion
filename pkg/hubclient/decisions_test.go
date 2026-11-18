@@ -284,3 +284,46 @@ func TestDecisionService_Withdraw(t *testing.T) {
 		t.Fatalf("unexpected Withdraw response: %+v", resp)
 	}
 }
+
+func TestDecisionService_DismissedStateAndViews(t *testing.T) {
+	now := time.Date(2026, 11, 18, 15, 52, 0, 0, time.UTC)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/decisions", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("state"); got != "dismissed" {
+			t.Errorf("state = %q, want dismissed", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AgentDecisionListResponse{
+			Items: []AgentDecisionListItem{
+				{
+					RowID:   "row-dsm-1",
+					Key:     "D234",
+					Version: 1,
+					Status:  "dismissed",
+					Dismissed: &DecisionDismissedView{
+						At:                now,
+						ByUserID:          "u-alice",
+						ByName:            "alice",
+						Reason:            "Stale: shipped",
+						Surface:           "decisions_page",
+						ResponseMessageID: "resp-1",
+					},
+				},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c, err := New(srv.URL, WithAgentToken("agent-tok-1"))
+	if err != nil {
+		t.Fatalf("New client: %v", err)
+	}
+	res, err := c.Decisions().List(context.Background(), &ListAgentDecisionsOptions{State: "dismissed"})
+	if err != nil {
+		t.Fatalf("List dismissed: %v", err)
+	}
+	if len(res.Items) != 1 || res.Items[0].Dismissed == nil || res.Items[0].Dismissed.Reason != "Stale: shipped" {
+		t.Fatalf("unexpected List dismissed items: %+v", res.Items)
+	}
+}

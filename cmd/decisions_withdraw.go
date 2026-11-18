@@ -177,6 +177,16 @@ func formatWithdrawFailureEntry(entry map[string]interface{}) string {
 			}
 		}
 		return fmt.Sprintf("%s: already answered", safeText(key))
+	case store.WithdrawReasonDismissed:
+		if dec, ok := entry["decision"].(map[string]interface{}); ok {
+			if dsm, ok := dec["dismissed"].(map[string]interface{}); ok {
+				who, _ := dsm["byName"].(string)
+				if who != "" {
+					return fmt.Sprintf("%s: dismissed by %s", safeText(key), safeText(who))
+				}
+			}
+		}
+		return fmt.Sprintf("%s: dismissed", safeText(key))
 	case store.WithdrawReasonNotFound:
 		return fmt.Sprintf("%s: decision not found", safeText(key))
 	default:
