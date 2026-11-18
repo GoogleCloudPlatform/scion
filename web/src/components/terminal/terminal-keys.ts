@@ -29,6 +29,10 @@
  * - it ignores Alt on PgUp/PgDn, Tab and Shift+Tab.
  * The bar sends the plain forms (CSI 1 ; 3 X for Alt, ESC prefix for Alt+Tab
  * and Alt+Shift+Tab), which tmux and readline also understand.
+ *
+ * The modifiers apply to the bar's own keys and to single typed characters
+ * only. A hardware keyboard's arrow or function key arrives as an ESC-led
+ * sequence, so it passes unmodified and leaves the modifier as it was.
  */
 
 /** A key the bar sends as a fixed sequence (not a typed character). */

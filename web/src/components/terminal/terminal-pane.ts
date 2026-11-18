@@ -982,7 +982,8 @@ export class ScionTerminalPane extends LitElement {
     }
   `;
 
-  protected override willUpdate(): void {
+  protected override willUpdate(changed: PropertyValues): void {
+    super.willUpdate(changed);
     // An armed modifier must not outlive the bar, whatever hid it: the
     // toolbar toggle, or the touch query flipping (a trackpad attached).
     if (!this.keyBarShown) this.clearKeyBarModifiers();
