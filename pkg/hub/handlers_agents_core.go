@@ -4946,15 +4946,22 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		}
 	}
 
-	// The resolved TZ for the response, read before anything is written:
-	// a stored settings read error answers 503 with nothing committed, and
-	// never a lower-precedence zone. The writes below do not change any
-	// input of the TZ chain beyond the in-memory agent already updated.
-	tz, tzErr := s.agentTZ(ctx, agent)
-	if tzErr != nil {
-		slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(tzErr))
-		writeEnvSettingsUnavailable(w)
-		return
+	// The resolved TZ for the response, read before anything is written
+	// when the caller may view the agent's env (ptone/scion#5655): a
+	// stored settings read error answers 503 with nothing committed, and
+	// never a lower-precedence zone. Callers without env view receive
+	// neither key, as on GET. The writes below do not change any input of
+	// the TZ chain beyond the in-memory agent already updated.
+	var resolvedTimezone, timezoneSource *string
+	if canViewAgentEnv(ctx, s, agent) {
+		tz, tzErr := s.agentTZ(ctx, agent)
+		if tzErr != nil {
+			slog.WarnContext(ctx, "agent update: reading stored TZ settings failed; nothing written", "agent_id", agent.ID, "scope", tzReadScope(tzErr))
+			writeEnvSettingsUnavailable(w)
+			return
+		}
+		resolvedTimezone = &tz.TZ
+		timezoneSource = &tz.Source
 	}
 
 	if updates.Name != "" {
@@ -5023,8 +5030,8 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 	writeJSON(w, http.StatusOK, agentUpdateResponse{
 		Agent:            redactedAgentCopy(ctx, s, agent),
-		ResolvedTimezone: tz.TZ,
-		TimezoneSource:   tz.Source,
+		ResolvedTimezone: resolvedTimezone,
+		TimezoneSource:   timezoneSource,
 		Warnings:         warnings,
 		Disposition:      disposition,
 	})
@@ -5232,14 +5239,16 @@ func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, confi
 	}
 }
 
-// agentUpdateResponse is the agent PATCH response: the updated agent plus
-// the container timezone it will get at its next start, the rung of the
-// agent TZ chain that supplies it, and any warnings about the request.
-// resolvedTimezone is "" (source "none") when no TZ will be sent.
+// agentUpdateResponse is the agent PATCH response: the updated agent plus,
+// for a caller who may view the agent's env, the container timezone it will
+// get at its next start and the rung of the agent TZ chain that supplies it,
+// and any warnings about the request. When included, resolvedTimezone is ""
+// (source "none") when no TZ will be sent; pointers so "" still reaches the
+// wire while unset means omitted.
 type agentUpdateResponse struct {
 	*store.Agent
-	ResolvedTimezone string   `json:"resolvedTimezone"`
-	TimezoneSource   string   `json:"timezoneSource"`
+	ResolvedTimezone *string  `json:"resolvedTimezone,omitempty"`
+	TimezoneSource   *string  `json:"timezoneSource,omitempty"`
 	Warnings         []string `json:"warnings,omitempty"`
 	// Disposition names the keys the request changed, by when each takes
 	// effect.
