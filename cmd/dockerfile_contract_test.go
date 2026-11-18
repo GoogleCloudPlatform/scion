@@ -179,6 +179,48 @@ func checkRootDockerfileContract(t *testing.T, content string) []string {
 		errs = append(errs, "final stage must be a bare, empty `FROM runtime` so the default build target is the runtime image; got FROM "+last.base+" AS "+last.name)
 	}
 
+	builder := findStage(stages, "builder")
+	if builder == nil {
+		errs = append(errs, "no stage named builder")
+	} else {
+		builderArgs := map[string]bool{}
+		foundGoBuild := false
+		for _, in := range builder.instrs {
+			switch in.cmd {
+			case "ARG":
+				for _, k := range envOrArgKeys(in.args) {
+					builderArgs[k] = true
+				}
+			case "RUN":
+				norm := strings.Join(strings.Fields(in.args), " ")
+				if !strings.Contains(norm, "go build") {
+					continue
+				}
+				foundGoBuild = true
+				for _, argName := range []string{"GIT_COMMIT", "VERSION", "BUILD_TIME"} {
+					if !builderArgs[argName] {
+						errs = append(errs, "builder stage must declare ARG "+argName+" before `go build`")
+					}
+				}
+				if !strings.Contains(norm, "-buildvcs=false") {
+					errs = append(errs, "builder stage `go build` must pass -buildvcs=false (.git is excluded from build context)")
+				}
+				for _, sym := range []string{
+					"-X github.com/GoogleCloudPlatform/scion/pkg/version.Version=${VERSION}",
+					"-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=${GIT_COMMIT}",
+					"-X github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime=${BUILD_TIME}",
+				} {
+					if !strings.Contains(norm, sym) {
+						errs = append(errs, "builder stage `go build` must pass ldflags `"+sym+"`")
+					}
+				}
+			}
+		}
+		if !foundGoBuild {
+			errs = append(errs, "builder stage must run `go build`")
+		}
+	}
+
 	runtime := findStage(stages, "runtime")
 	if runtime == nil {
 		errs = append(errs, "no stage named runtime")
@@ -207,6 +249,9 @@ func checkRootDockerfileContract(t *testing.T, content string) []string {
 	}
 	var user string
 	var runs []string
+	gkeArgs := map[string]bool{}
+	gkeLabels := map[string]string{}
+	gkeLabelArgInScope := map[string]bool{}
 	for _, in := range gke.instrs {
 		switch in.cmd {
 		case "USER":
@@ -217,6 +262,26 @@ func checkRootDockerfileContract(t *testing.T, content string) []string {
 			errs = append(errs, "hub-gke must inherit ENTRYPOINT from runtime: ENTRYPOINT "+in.args)
 		case "RUN":
 			runs = append(runs, strings.Join(strings.Fields(in.args), " "))
+		case "ARG":
+			for _, k := range envOrArgKeys(in.args) {
+				gkeArgs[k] = true
+			}
+		case "LABEL":
+			fields := strings.Fields(in.args)
+			if len(fields) >= 2 && !strings.Contains(fields[0], "=") {
+				k, v := fields[0], strings.Trim(strings.Join(fields[1:], " "), `"'`)
+				gkeLabels[k] = v
+				gkeLabelArgInScope[k] = (k == "org.opencontainers.image.revision" && gkeArgs["GIT_COMMIT"]) ||
+					(k == "org.opencontainers.image.version" && gkeArgs["VERSION"])
+			} else {
+				for _, f := range fields {
+					if k, v, ok := strings.Cut(f, "="); ok {
+						gkeLabels[k] = strings.Trim(v, `"'`)
+						gkeLabelArgInScope[k] = (k == "org.opencontainers.image.revision" && gkeArgs["GIT_COMMIT"]) ||
+							(k == "org.opencontainers.image.version" && gkeArgs["VERSION"])
+					}
+				}
+			}
 		}
 	}
 	if user != "1000:1000" {
@@ -224,6 +289,12 @@ func checkRootDockerfileContract(t *testing.T, content string) []string {
 	}
 	if home, ok := envValue(gke, "HOME"); !ok || home != "/home/scion" {
 		errs = append(errs, "hub-gke must set ENV HOME=/home/scion; got "+home)
+	}
+	if got := gkeLabels["org.opencontainers.image.revision"]; got != "${GIT_COMMIT}" || !gkeLabelArgInScope["org.opencontainers.image.revision"] {
+		errs = append(errs, `hub-gke must declare ARG GIT_COMMIT before LABEL org.opencontainers.image.revision="${GIT_COMMIT}"; got `+got)
+	}
+	if got := gkeLabels["org.opencontainers.image.version"]; got != "${VERSION}" || !gkeLabelArgInScope["org.opencontainers.image.version"] {
+		errs = append(errs, `hub-gke must declare ARG VERSION before LABEL org.opencontainers.image.version="${VERSION}"; got `+got)
 	}
 	allRuns := strings.Join(runs, "\n")
 	for _, want := range []string{
@@ -287,6 +358,14 @@ func checkHubGKECloudBuildContract(content string) []string {
 			errs = append(errs, "cloudbuild-hub-gke.yaml substitution "+k+" must not mention latest: "+v)
 		}
 	}
+	for _, sub := range []string{"_VERSION", "_COMMIT_SHA", "_BUILD_TIME"} {
+		v, ok := cb.Substitutions[sub]
+		if !ok {
+			errs = append(errs, "cloudbuild-hub-gke.yaml must define substitution "+sub)
+		} else if v != "" {
+			errs = append(errs, "cloudbuild-hub-gke.yaml substitution "+sub+" must default to empty string; got "+v)
+		}
+	}
 
 	buildIdx, shaIdx := -1, -1
 	for i, s := range cb.Steps {
@@ -330,7 +409,7 @@ func checkHubGKECloudBuildContract(content string) []string {
 		case "--push":
 			push = true
 			continue
-		case "-t", "--tag", "-f", "--file", "--platform", "--target":
+		case "-t", "--tag", "-f", "--file", "--platform", "--target", "--build-arg":
 		default:
 			continue
 		}
@@ -360,6 +439,15 @@ func checkHubGKECloudBuildContract(content string) []string {
 	for flag, want := range map[string]string{"-f": "Dockerfile", "--platform": "linux/amd64", "--target": "hub-gke"} {
 		if got := flags[flag]; len(got) != 1 || got[0] != want {
 			errs = append(errs, "cloudbuild-hub-gke.yaml build step must pass "+flag+" "+want+"; got "+strings.Join(got, ", "))
+		}
+	}
+	buildArgs := map[string]int{}
+	for _, ba := range flags["--build-arg"] {
+		buildArgs[ba]++
+	}
+	for _, want := range []string{"VERSION=$_VERSION", "GIT_COMMIT=$_COMMIT_SHA", "BUILD_TIME=$_BUILD_TIME"} {
+		if buildArgs[want] != 1 {
+			errs = append(errs, "cloudbuild-hub-gke.yaml build step must pass --build-arg "+want+" once; got ["+strings.Join(flags["--build-arg"], ", ")+"]")
 		}
 	}
 
@@ -451,6 +539,16 @@ func TestDockerfileContractCheckerDetectsViolations(t *testing.T) {
 		{"runtime ENV KUBECONFIG legacy form", mustReplace(t, good, "EXPOSE 8080\n", "EXPOSE 8080\nENV KUBECONFIG /k\n"), "must not set ENV KUBECONFIG"},
 		{"runtime ARG KUBECONFIG", mustReplace(t, good, "EXPOSE 8080\n", "EXPOSE 8080\nARG KUBECONFIG=/k\n"), "must not set ARG KUBECONFIG"},
 		{"KUBECONFIG after a comment in a continuation", mustReplace(t, good, homeLine, "ENV HOME=/home/scion \\\n# note\n    KUBECONFIG=/k\n"), "must not set ENV KUBECONFIG"},
+		{"builder missing ARG VERSION", mustReplace(t, good, "ARG VERSION=\"\"\n", ""), "builder stage must declare ARG VERSION before `go build`"},
+		{"builder missing ARG GIT_COMMIT", mustReplace(t, good, "ARG GIT_COMMIT=\"\"\n", ""), "builder stage must declare ARG GIT_COMMIT before `go build`"},
+		{"builder missing ARG BUILD_TIME", mustReplace(t, good, "ARG BUILD_TIME=\"\"\n", ""), "builder stage must declare ARG BUILD_TIME before `go build`"},
+		{"builder missing -buildvcs=false", mustReplace(t, good, "-buildvcs=false ", ""), "must pass -buildvcs=false"},
+		{"builder missing Version ldflag", mustReplace(t, good, "pkg/version.Version=${VERSION}", "pkg/version.Ver=${VERSION}"), "pkg/version.Version=${VERSION}"},
+		{"builder missing Commit ldflag", mustReplace(t, good, "pkg/version.Commit=${GIT_COMMIT}", "pkg/version.GitCommit=${GIT_COMMIT}"), "pkg/version.Commit=${GIT_COMMIT}"},
+		{"builder missing BuildTime ldflag", mustReplace(t, good, "pkg/version.BuildTime=${BUILD_TIME}", "pkg/version.Time=${BUILD_TIME}"), "pkg/version.BuildTime=${BUILD_TIME}"},
+		{"hub-gke missing OCI revision label", mustReplace(t, good, "LABEL org.opencontainers.image.revision=\"${GIT_COMMIT}\"\n", ""), "org.opencontainers.image.revision"},
+		{"hub-gke missing OCI version label", mustReplace(t, good, "LABEL org.opencontainers.image.version=\"${VERSION}\"\n", ""), "org.opencontainers.image.version"},
+		{"hub-gke OCI label before stage ARG", mustReplace(t, good, "ARG GIT_COMMIT=\"\"\nARG VERSION=\"\"\nLABEL org.opencontainers.image.revision=\"${GIT_COMMIT}\"\nLABEL org.opencontainers.image.version=\"${VERSION}\"\n", "LABEL org.opencontainers.image.revision=\"${GIT_COMMIT}\"\nLABEL org.opencontainers.image.version=\"${VERSION}\"\nARG GIT_COMMIT=\"\"\nARG VERSION=\"\"\n"), "must declare ARG GIT_COMMIT before LABEL"},
 	}
 	for _, m := range dockerMutations {
 		expectViolation(t, m.name, checkRootDockerfileContract(t, m.src), m.want)
@@ -481,6 +579,13 @@ func TestDockerfileContractCheckerDetectsViolations(t *testing.T) {
 		{"-f swapped", mustReplace(t, cb, "      - 'Dockerfile'\n", "      - 'image-build/hub/Dockerfile'\n"), "-f Dockerfile"},
 		{"require-short-sha neutered", mustReplace(t, cb, `'test -n "$_SHORT_SHA" || { echo "ERROR: pass --substitutions=_SHORT_SHA=<git short sha>" >&2; exit 1; }'`, "'true'"), "require-short-sha step"},
 		{"ignore file reverted to default", mustReplace(t, cb, "--ignore-file="+hubGKEIgnoreFile, "--ignore-file=.gcloudignore"), "--ignore-file=" + hubGKEIgnoreFile},
+		{"missing _VERSION substitution", mustReplace(t, cb, "  _VERSION: ''\n", ""), "must define substitution _VERSION"},
+		{"non-empty _VERSION substitution", mustReplace(t, cb, "  _VERSION: ''\n", "  _VERSION: 'dev'\n"), "substitution _VERSION must default to empty string"},
+		{"missing _COMMIT_SHA substitution", mustReplace(t, cb, "  _COMMIT_SHA: ''\n", ""), "must define substitution _COMMIT_SHA"},
+		{"missing _BUILD_TIME substitution", mustReplace(t, cb, "  _BUILD_TIME: ''\n", ""), "must define substitution _BUILD_TIME"},
+		{"missing VERSION build-arg", mustReplace(t, cb, "      - '--build-arg'\n      - 'VERSION=$_VERSION'\n", ""), "--build-arg VERSION=$_VERSION once"},
+		{"missing GIT_COMMIT build-arg", mustReplace(t, cb, "      - '--build-arg'\n      - 'GIT_COMMIT=$_COMMIT_SHA'\n", ""), "--build-arg GIT_COMMIT=$_COMMIT_SHA once"},
+		{"missing BUILD_TIME build-arg", mustReplace(t, cb, "      - '--build-arg'\n      - 'BUILD_TIME=$_BUILD_TIME'\n", ""), "--build-arg BUILD_TIME=$_BUILD_TIME once"},
 	}
 	for _, m := range cbMutations {
 		expectViolation(t, m.name, checkHubGKECloudBuildContract(m.src), m.want)

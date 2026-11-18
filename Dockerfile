@@ -34,9 +34,19 @@ COPY . .
 # Copy built frontend assets into the embed location
 COPY --from=frontend /web/dist/client web/dist/client
 
+# Version build arguments (.git is stripped by .dockerignore and
+# image-build/gcloudignore-omni, so VCS stamping is disabled and version
+# metadata is injected explicitly via ldflags, matching image-build/scion-base).
+ARG GIT_COMMIT=""
+ARG VERSION=""
+ARG BUILD_TIME=""
+
 # Build a static binary (CGO_ENABLED=0) so it runs on the debian runtime image
 # without musl/glibc mismatch from the Alpine builder.
-RUN CGO_ENABLED=0 go build -o /scion ./cmd/scion/
+RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
+    CGO_ENABLED=0 go build -buildvcs=false \
+    -ldflags "-s -w -X github.com/GoogleCloudPlatform/scion/pkg/version.Version=${VERSION} -X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=${GIT_COMMIT} -X github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime=${BUILD_TIME}" \
+    -o /scion ./cmd/scion/
 
 # Stage 3: Create a minimal runtime image
 #
@@ -90,6 +100,10 @@ FROM runtime AS hub-gke
 RUN useradd -u 1000 -m -d /home/scion scion \
  && mkdir -p /home/scion/.scion \
  && chown -R 1000:1000 /home/scion
+ARG GIT_COMMIT=""
+ARG VERSION=""
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL org.opencontainers.image.version="${VERSION}"
 ENV HOME=/home/scion
 USER 1000:1000
 
