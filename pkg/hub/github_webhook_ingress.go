@@ -149,6 +149,8 @@ type githubWebhookIngressState struct {
 	auditLogger *slog.Logger
 	warnLogger  *slog.Logger
 
+	// In-process outcome counters read by unit tests; placeholders for the G7
+	// Prometheus counter scion_trigger_github_deliveries_total{result} (§15 G7).
 	selfIgnoredCount    atomic.Int64
 	targetMismatchCount atomic.Int64
 	rateLimitedCount    atomic.Int64
@@ -348,15 +350,10 @@ func (st *githubWebhookIngressState) recordReceiptAudit(ctx context.Context, rec
 	l.LogAttrs(ctx, slog.LevelInfo, trigger.AuditEventReceived, attrs...)
 }
 
-// handleGitHubContentWebhook executes Stage 3 design §4.1 steps 0–10 for
-// signature-verified GitHub App content-event deliveries.
+// handleGitHubContentWebhook executes Stage 3 design §4.1 steps 1–10 for
+// signature-verified GitHub App content-event deliveries after handleGitHubWebhook
+// has checked githubTriggersEnabled() in step 0.
 func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Request, eventType, deliveryID string, body []byte) {
-	// Step 0: both hub.triggers and hub.github_triggers must be enabled.
-	if !s.githubTriggersEnabled() {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": eventType})
-		return
-	}
-
 	ctx := r.Context()
 	now := s.githubWebhookIngress.now().UTC()
 
@@ -400,9 +397,10 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Step 4: parse JSON object without NUL and extract installation.id (+ routing envelope).
+	// Step 4: parse JSON object without NUL and validate installation.id,
+	// action, repository.full_name, and sender shape before any DB lookup.
 	env, err := parseGitHubContentEnvelope(eventType, body)
-	if err != nil {
+	if err != nil || !env.actionOK || !env.repoOK || !env.senderOK {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
 		return
 	}
@@ -443,10 +441,6 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 	// Step 6: own-App guard (§5.7) — drop deliveries when either sender matches
 	// <slug>[bot] (type Bot) OR the signed primary object's
 	// performed_via_github_app.id equals the configured AppID.
-	if !env.senderOK {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
-		return
-	}
 	botLogin := s.GitHubAppBotLogin(ctx)
 	if botLogin == "" {
 		s.githubWebhookIngress.maybeWarnUnknownAppIdentity(appID, now)
@@ -462,10 +456,6 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Step 7: fan-out (§4.2 steps 1–4).
-	if !env.repoOK || !env.actionOK {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
-		return
-	}
 	candidates, err := s.listGitHubInstallationCandidateProjects(ctx, inst.InstallationID, env.repoFullName)
 	if err != nil {
 		slog.Error("GitHub trigger ingress project fan-out lookup failed",
@@ -718,7 +708,7 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		Action:             normRes.Attributes["action"],
 		InstallationID:     inst.InstallationID,
 		Repo:               normRes.RepoFullName,
-		PayloadBytes:       normRes.PayloadBytes,
+		PayloadBytes:       len(body),
 		Result:             topStatus,
 		Routing:            auditRouting,
 		BypassedProjectIDs: bypassed,

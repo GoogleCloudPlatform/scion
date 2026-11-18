@@ -528,6 +528,10 @@ func TestGitHubWebhookIngress_MalformedPayloadAndNormaliserErrors(t *testing.T) 
 		{"negative_installation_id", []byte(`{"action":"created","installation":{"id":-5}}`)},
 		{"float_installation_id", []byte(`{"action":"created","installation":{"id":12.5}}`)},
 		{
+			"missing_action",
+			[]byte(fmt.Sprintf(`{"installation":{"id":%d},"repository":{"full_name":"acme/widgets"},"sender":{"login":"alice","type":"User"}}`, f.instID)),
+		},
+		{
 			"missing_sender_login",
 			[]byte(fmt.Sprintf(`{"action":"created","installation":{"id":%d},"repository":{"full_name":"acme/widgets"},"sender":{}}`, f.instID)),
 		},
@@ -1124,6 +1128,13 @@ func TestGitHubWebhookIngress_ReceiptAuditContentFree(t *testing.T) {
 		f.webhookSecret,
 	} {
 		assert.NotContains(t, auditOut, forbidden, "audit output must be strictly content-free")
+	}
+
+	// O4: payload_bytes in trigger.event.received must always report the raw body length.
+	for _, entry := range parseAuditLines(t, auditOut) {
+		if entry["event_type"] == trigger.AuditEventReceived {
+			assert.Equal(t, float64(len(raw)), entry["payload_bytes"], "payload_bytes must equal raw request body length")
+		}
 	}
 }
 

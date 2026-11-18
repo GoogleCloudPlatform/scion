@@ -451,10 +451,11 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 	if len(ev.Attributes) > 0 {
 		attrs := maps.Clone(ev.Attributes)
 		if verified != messaging.ExternalVerifiedScionV1 && verified != messaging.ExternalVerifiedGitHubHMACSHA256Projected {
-			// §8.1a: only scion_v1 signs routing headers; body_only and any
-			// unverified/unknown mode never forward unsigned header attributes.
-			// GitHub App deliveries validate X-GitHub-Event / X-GitHub-Delivery
-			// alongside the HMAC-verified projected payload (Stage 3 §4.1, §4.3).
+			// §8.1a: generic webhook modes other than scion_v1 strip header-derived
+			// attributes. Stage 3 GitHub App deliveries (§4.1, §4.3) keep "delivery"
+			// and "event" populated from X-GitHub-Delivery and X-GitHub-Event: those
+			// headers are shape-checked at ingress, NOT authenticated by
+			// X-Hub-Signature-256 (which covers the raw request body only).
 			delete(attrs, "delivery")
 			delete(attrs, "event")
 			delete(attrs, "subject")
