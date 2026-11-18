@@ -16,13 +16,13 @@
 
 /**
  * The phone conversation header (the compact row in the mobile layout)
- * shows the conversation name first with the project crumb beneath it,
- * and otherwise keeps the baseline geometry: padding, gap, borders, button
- * boxes, hit areas, one-line names and their type sizes. The fold between
- * the full and compact rows, and the header's height under the thread's
- * composer sizing (composer-room.ts), depend on that geometry. These are
- * static markup and style contracts, not geometry, rendering or device
- * evidence.
+ * shows the conversation name first with the project crumb indented beneath
+ * the name (past the avatar), and otherwise keeps the baseline geometry:
+ * padding, gap, borders, button boxes, hit areas, one-line names and their
+ * type sizes. The fold between the full and compact rows, and the header's
+ * height under the thread's composer sizing (composer-room.ts), depend on
+ * that geometry. These are static markup and style contracts, not geometry,
+ * rendering or device evidence.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
@@ -142,6 +142,19 @@ describe('phone conversation header — style contract', () => {
     );
   });
 
+  it('indents the project crumb to the conversation name column past the avatar', () => {
+    const title = rules.get(`${MOBILE} .v2-thread-header.compact .conv-title`);
+    const name = rules.get(`${MOBILE} .v2-thread-header.compact .conv-name`);
+    const crumb = rules.get(`${MOBILE} .v2-thread-header.compact .conv-crumb`);
+    expect(decl(title, 'display')).toBe('grid');
+    expect(decl(title, 'grid-template-columns')).toBe('auto minmax(0, 1fr)');
+    expect(decl(title, 'column-gap')).toBe(decl(rules.get('.conv-name'), 'gap'));
+    expect(decl(name, 'display')).toBe('grid');
+    expect(decl(name, 'grid-column')).toBe('1 / -1');
+    expect(decl(name, 'grid-template-columns')).toBe('subgrid');
+    expect(decl(crumb, 'grid-column')).toBe('2');
+  });
+
   it('keeps each title line to one line, cut with an ellipsis', () => {
     const base = rules.get('.conv-text');
     expect(decl(base, 'white-space')).toBe('nowrap');
@@ -155,16 +168,28 @@ describe('phone conversation header — style contract', () => {
     }
   });
 
-  it('adds nothing to the compact row but the name-first order', () => {
-    // The compact rules that predate the hierarchy change, and what each
-    // declares. Anything more would change the header's geometry per state.
+  it('adds nothing to the compact row but the name-first order and crumb indent', () => {
+    // The compact rules that predate the hierarchy change, plus the phone
+    // subgrid that aligns the crumb with the name past the avatar, and what
+    // each declares. Anything more would change the header's geometry per state.
     const allowed: Record<string, string[]> = {
       '.v2-thread-header.compact .header-secondary': ['display'],
       '.v2-thread-header.compact .header-more': ['display'],
       '.v2-thread-header.compact .conv-title': ['flex-direction', 'align-items', 'gap'],
       '.v2-thread-header.compact .conv-crumb': ['font-size', 'line-height'],
       '.v2-thread-header.compact .conv-name': ['line-height'],
-      [`${MOBILE} .v2-thread-header.compact .conv-name`]: ['order'],
+      [`${MOBILE} .v2-thread-header.compact .conv-title`]: [
+        'display',
+        'grid-template-columns',
+        'column-gap',
+      ],
+      [`${MOBILE} .v2-thread-header.compact .conv-name`]: [
+        'order',
+        'display',
+        'grid-column',
+        'grid-template-columns',
+      ],
+      [`${MOBILE} .v2-thread-header.compact .conv-crumb`]: ['grid-column'],
     };
     const isCompact = (key: string): boolean => key.includes('.v2-thread-header.compact');
     const compactKeys = [...rules.keys()].filter(isCompact);
@@ -191,7 +216,9 @@ describe('phone conversation header — style contract', () => {
       [
         `${MOBILE} .v2-thread-header sl-icon-button::part(base)`,
         `${MOBILE} .v2-thread-header sl-icon-button::part(base)::before`,
+        `${MOBILE} .v2-thread-header.compact .conv-title`,
         `${MOBILE} .v2-thread-header.compact .conv-name`,
+        `${MOBILE} .v2-thread-header.compact .conv-crumb`,
       ].sort()
     );
     // The native-size button with a hit area grown by an invisible overlay.

@@ -173,13 +173,17 @@ async function measureHeader(page: Page) {
       const el = header.querySelector<HTMLElement>(selector);
       if (!el) return null;
       const cs = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
       return {
-        height: el.getBoundingClientRect().height,
+        left: rect.left,
+        height: rect.height,
         fontSize: parseFloat(cs.fontSize),
         truncated: el.scrollWidth > el.clientWidth,
         textOverflow: cs.textOverflow,
       };
     };
+    const avatar = header.querySelector<HTMLElement>('.conv-name > :first-child');
+    const crumbBox = header.querySelector<HTMLElement>('.conv-crumb');
     const actions = header.querySelector<HTMLElement>('.header-actions')!;
     const buttons = [...header.querySelectorAll<HTMLElement>('sl-icon-button')]
       .filter((b) => b.getClientRects().length > 0)
@@ -193,6 +197,8 @@ async function measureHeader(page: Page) {
       left: h.left,
       right: h.right,
       innerWidth: window.innerWidth,
+      avatarRight: avatar ? avatar.getBoundingClientRect().right : null,
+      crumbLeft: crumbBox ? crumbBox.getBoundingClientRect().left : null,
       crumb: line('.conv-crumb .conv-text'),
       name: line('.conv-name .conv-text'),
       actionsOverflowX: getComputedStyle(actions).overflowX,
@@ -226,6 +232,16 @@ test.describe('agent DM header', () => {
       expect(m.height, 'header height').toBeLessThanOrEqual(72);
       expectOneLine(m.crumb, 'the project breadcrumb');
       expectOneLine(m.name, 'the agent name');
+      expect(m.crumbLeft, 'the project breadcrumb is rendered').not.toBeNull();
+      expect(m.avatarRight, 'the avatar is rendered').not.toBeNull();
+      expect(
+        m.crumbLeft!,
+        'the project breadcrumb sits to the right of the avatar'
+      ).toBeGreaterThan(m.avatarRight!);
+      expect(
+        Math.abs(m.crumbLeft! - m.name!.left),
+        'the project breadcrumb aligns with the conversation name left edge'
+      ).toBeLessThanOrEqual(0.5);
       expect(m.crumb!.truncated, 'the long project slug is cut short').toBe(true);
       expect(m.actionsOverflowX, 'the actions row is not a sideways scroller').toBe('visible');
       for (const b of m.buttons) {

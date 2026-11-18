@@ -1616,17 +1616,31 @@ export class ScionPageChat extends LitElement {
 
       /*
        * Phone conversation header, compact row: the conversation name leads
-       * and the project crumb follows it on the next line. This is visual
-       * order only (the crumb stays first in the DOM; neither is focusable).
-       * Nothing else in the header changes per state or with the keyboard:
-       * padding, gap, borders, button boxes, hit areas, font sizes and line
-       * heights are the baseline ones. The fold (isCompactHeaderWidth, from
-       * the ResizeObserver's content-box width) and the header's height
+       * and the project crumb follows it on the next line, indented into the
+       * name's text column past the avatar via a two-column subgrid. This is
+       * visual layout only (the crumb stays first in the DOM; neither is
+       * focusable). Nothing else in the header changes per state or with the
+       * keyboard: padding, gap, borders, button boxes, hit areas, font sizes
+       * and line heights are the baseline ones. The fold (isCompactHeaderWidth,
+       * from the ResizeObserver's content-box width) and the header's height
        * under the thread's composer sizing (composer-room.ts) therefore see
        * the same geometry as before.
        */
+      .v2-thread-header.compact .conv-title {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        column-gap: 0.375rem;
+      }
+
       .v2-thread-header.compact .conv-name {
         order: -1;
+        display: grid;
+        grid-column: 1 / -1;
+        grid-template-columns: subgrid;
+      }
+
+      .v2-thread-header.compact .conv-crumb {
+        grid-column: 2;
       }
 
       .desktop-members {
