@@ -568,7 +568,13 @@ export class ScionChatDecisions extends LitElement {
     .row.replaced .choices,
     .row.dismissed .q,
     .row.dismissed .choices,
-    .row.dismissed .row-top .key {
+    .row.dismissed .row-top .key,
+    .row.withdrawn .q,
+    .row.withdrawn .choices,
+    .row.withdrawn .row-top .key,
+    .row.closed .q,
+    .row.closed .choices,
+    .row.closed .row-top .key {
       opacity: 0.55;
     }
 
@@ -634,6 +640,13 @@ export class ScionChatDecisions extends LitElement {
       overflow-wrap: anywhere;
     }
 
+    .card.withdrawn-all .card-head .title {
+      color: var(--scion-text-secondary, #475569);
+    }
+
+    .card-foot.card-foot-wd {
+      display: block;
+    }
     .row-foot a.jump {
       color: var(--scion-primary, #3b82f6);
       text-decoration: none;
@@ -995,6 +1008,36 @@ export class ScionChatDecisions extends LitElement {
     return dm.byName || 'someone';
   }
 
+  private withdrawnBy(d: DecisionView): string {
+    return d.withdrawn?.byName || d.askerAgentName || 'the agent';
+  }
+
+  private rowStatusClass(d: DecisionView): string {
+    if (d.status === 'replaced') return ' replaced';
+    if (d.status === 'withdrawn') return ' withdrawn';
+    if (d.status === 'dismissed') return ' dismissed';
+    if (isClosedUnanswered(d)) return ' closed';
+    return '';
+  }
+
+  private isWholeSetWithdrawn(views: readonly DecisionView[]): boolean {
+    const first = views[0];
+    if (!first || !views.every((d) => d.status === 'withdrawn')) return false;
+    const at = first.withdrawn?.at ?? '';
+    const reason = first.withdrawn?.reason ?? '';
+    const by = this.withdrawnBy(first);
+    const jumpMsg = first.replacedBy?.messageId ?? '';
+    const jumpVer = first.replacedBy?.version ?? 0;
+    return views.every(
+      (d) =>
+        (d.withdrawn?.at ?? '') === at &&
+        (d.withdrawn?.reason ?? '') === reason &&
+        this.withdrawnBy(d) === by &&
+        (d.replacedBy?.messageId ?? '') === jumpMsg &&
+        (d.replacedBy?.version ?? 0) === jumpVer
+    );
+  }
+
   private ownerLabel(d: DecisionView): string {
     const a = d.decision;
     return a?.answeredByName || a?.answeredByEmail || 'the recorded answerer';
@@ -1077,6 +1120,9 @@ export class ScionChatDecisions extends LitElement {
             who === 'you' ? 'You dismissed this decision.' : `${who} dismissed this decision.`,
             'warning'
           );
+        } else if (res.code === 'withdrawn') {
+          const who = this.withdrawnBy(res.decision);
+          showToast(`No longer needed: ${who} withdrew this decision`, 'warning');
         } else {
           showToast(res.message, 'warning');
         }
@@ -1163,7 +1209,7 @@ export class ScionChatDecisions extends LitElement {
           <sl-icon name="signpost-split"></sl-icon>
           <span class="title">Decision</span>
           ${d.key ? html`<span class="key">${d.key}</span>` : nothing}
-          ${d.version > 1 || d.status === 'replaced'
+          ${d.version > 1 || d.status === 'replaced' || !!d.replacedBy
             ? html`<span class="version">v${d.version}</span>`
             : nothing}
           ${this.renderSingleBadge(d)}
@@ -1199,13 +1245,7 @@ export class ScionChatDecisions extends LitElement {
   private renderRow(d: DecisionView, showHint: boolean): TemplateResult {
     const stacked = (d.choices ?? []).some((c) => !!c.description);
     return html`
-      <div
-        class="row${d.status === 'replaced' ? ' replaced' : ''}${d.status === 'dismissed'
-          ? ' dismissed'
-          : ''}"
-        data-row=${d.rowId}
-        data-status=${d.status}
-      >
+      <div class="row${this.rowStatusClass(d)}" data-row=${d.rowId} data-status=${d.status}>
         <div class="q">${this.markdown(d.question, false)}</div>
         <div class="choices${stacked ? ' stack' : ''}">
           ${(d.choices ?? []).map((c) =>
@@ -1604,7 +1644,38 @@ export class ScionChatDecisions extends LitElement {
         </div>
         ${dm?.reason ? html`<div class="wd-reason">${dm.reason}</div>` : nothing}`;
     }
+    if (d.status === 'withdrawn') {
+      return this.renderWithdrawnFoot(d);
+    }
+    if (isClosedUnanswered(d)) {
+      return html`<div class="row-foot" role="status">
+        <sl-icon name="slash-circle" aria-hidden="true"></sl-icon>
+        <span>Closed</span>
+      </div>`;
+    }
     return null;
+  }
+
+  private renderWithdrawnFoot(d: DecisionView, inCardFoot = false): TemplateResult {
+    const w = d.withdrawn;
+    const who = this.withdrawnBy(d);
+    const r = d.replacedBy;
+    const label = r?.version ? `v${r.version}` : 'the new version';
+    return html`<div class="wd${inCardFoot ? ' card-wd' : ''}" role="status">
+        <sl-icon name="slash-circle" aria-hidden="true"></sl-icon>
+        <span><b class="state">No longer needed</b> · withdrawn by <b>${who}</b></span>
+        ${this.renderAt(w?.at)}
+        ${r?.messageId
+          ? html`<span aria-hidden="true">·</span>
+              <a
+                class="jump"
+                href="#msg-${r.messageId}"
+                @click=${(e: Event) => this.jump(e, r.messageId)}
+                >Jump to ${label}</a
+              >`
+          : nothing}
+      </div>
+      ${w?.reason ? html`<div class="wd-reason">${w.reason}</div>` : nothing}`;
   }
 
   private renderViewReply(sourceMessageId: string | undefined): TemplateResult | typeof nothing {
@@ -1805,9 +1876,10 @@ export class ScionChatDecisions extends LitElement {
     const n = views.length;
     const label = `${n} decisions${asker ? ` from ${asker}` : ''}`;
     const blocked = this.answerBlocked && views.some((d) => this.rowActionable(d));
+    const wholeWithdrawn = this.isWholeSetWithdrawn(views);
     return html`
       <div
-        class="card set"
+        class="card set${wholeWithdrawn ? ' withdrawn-all' : ''}"
         role="group"
         aria-label=${label}
         aria-disabled=${blocked ? 'true' : nothing}
@@ -1831,20 +1903,19 @@ export class ScionChatDecisions extends LitElement {
                 : 'Your selections were not sent.'}
             </sl-alert>`
           : nothing}
-        ${views.map((d) => this.renderSetRow(d))} ${blocked ? this.renderAnswerBlocked() : nothing}
-        ${this.renderAskerGoneNote()} ${this.renderSetFoot(views)}
+        ${views.map((d) => this.renderSetRow(d, wholeWithdrawn))}
+        ${blocked ? this.renderAnswerBlocked() : nothing} ${this.renderAskerGoneNote()}
+        ${this.renderSetFoot(views)}
       </div>
     `;
   }
 
-  private renderSetRow(d: DecisionView): TemplateResult {
+  private renderSetRow(d: DecisionView, omitFoot = false): TemplateResult {
     const stacked = (d.choices ?? []).some((c) => !!c.description);
     const notOwner = actionableReason(d, this.currentUserId) === 'not_recorded_answerer';
     return html`
       <div
-        class="row${d.status === 'replaced' ? ' replaced' : ''}${d.status === 'dismissed'
-          ? ' dismissed'
-          : ''}${notOwner ? ' readonly' : ''}"
+        class="row${this.rowStatusClass(d)}${notOwner ? ' readonly' : ''}"
         role="group"
         aria-label=${plainText(d.question)}
         data-row=${d.rowId}
@@ -1860,7 +1931,7 @@ export class ScionChatDecisions extends LitElement {
             stacked ? this.renderSetOptRow(d, c) : this.renderSetButton(d, c)
           )}
         </div>
-        ${this.renderTerminalFoot(d, true) ?? nothing}
+        ${omitFoot ? nothing : (this.renderTerminalFoot(d, true) ?? nothing)}
       </div>
     `;
   }
@@ -2168,6 +2239,12 @@ export class ScionChatDecisions extends LitElement {
    * (not to a viewer who could not answer: there were no choices to send).
    */
   private renderSetDoneFoot(views: DecisionView[]): TemplateResult {
+    const firstRow = views[0];
+    if (firstRow && this.isWholeSetWithdrawn(views)) {
+      return html`<div class="card-foot card-foot-wd">
+        ${this.renderWithdrawnFoot(firstRow, true)}
+      </div>`;
+    }
     const decided = views.filter((d) => d.status === 'decided' && d.decision);
     const batch = decided[0]?.decision?.batchId;
     const oneBatch = !!batch && decided.every((d) => d.decision?.batchId === batch);
