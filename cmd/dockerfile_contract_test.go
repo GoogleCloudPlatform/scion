@@ -247,6 +247,10 @@ func checkRootDockerfileContract(t *testing.T, content string) []string {
 	if gke.base != "runtime" {
 		errs = append(errs, "hub-gke must be FROM runtime; got FROM "+gke.base)
 	}
+	labelArg := map[string]string{
+		"org.opencontainers.image.revision": "GIT_COMMIT",
+		"org.opencontainers.image.version":  "VERSION",
+	}
 	var user string
 	var runs []string
 	gkeArgs := map[string]bool{}
@@ -267,18 +271,19 @@ func checkRootDockerfileContract(t *testing.T, content string) []string {
 				gkeArgs[k] = true
 			}
 		case "LABEL":
+			recordLabel := func(k, raw string) {
+				gkeLabels[k] = strings.Trim(raw, `"'`)
+				if arg, ok := labelArg[k]; ok {
+					gkeLabelArgInScope[k] = gkeArgs[arg]
+				}
+			}
 			fields := strings.Fields(in.args)
 			if len(fields) >= 2 && !strings.Contains(fields[0], "=") {
-				k, v := fields[0], strings.Trim(strings.Join(fields[1:], " "), `"'`)
-				gkeLabels[k] = v
-				gkeLabelArgInScope[k] = (k == "org.opencontainers.image.revision" && gkeArgs["GIT_COMMIT"]) ||
-					(k == "org.opencontainers.image.version" && gkeArgs["VERSION"])
+				recordLabel(fields[0], strings.Join(fields[1:], " "))
 			} else {
 				for _, f := range fields {
 					if k, v, ok := strings.Cut(f, "="); ok {
-						gkeLabels[k] = strings.Trim(v, `"'`)
-						gkeLabelArgInScope[k] = (k == "org.opencontainers.image.revision" && gkeArgs["GIT_COMMIT"]) ||
-							(k == "org.opencontainers.image.version" && gkeArgs["VERSION"])
+						recordLabel(k, v)
 					}
 				}
 			}
@@ -290,11 +295,14 @@ func checkRootDockerfileContract(t *testing.T, content string) []string {
 	if home, ok := envValue(gke, "HOME"); !ok || home != "/home/scion" {
 		errs = append(errs, "hub-gke must set ENV HOME=/home/scion; got "+home)
 	}
-	if got := gkeLabels["org.opencontainers.image.revision"]; got != "${GIT_COMMIT}" || !gkeLabelArgInScope["org.opencontainers.image.revision"] {
-		errs = append(errs, `hub-gke must declare ARG GIT_COMMIT before LABEL org.opencontainers.image.revision="${GIT_COMMIT}"; got `+got)
-	}
-	if got := gkeLabels["org.opencontainers.image.version"]; got != "${VERSION}" || !gkeLabelArgInScope["org.opencontainers.image.version"] {
-		errs = append(errs, `hub-gke must declare ARG VERSION before LABEL org.opencontainers.image.version="${VERSION}"; got `+got)
+	for _, k := range []string{"org.opencontainers.image.revision", "org.opencontainers.image.version"} {
+		arg := labelArg[k]
+		want := "${" + arg + "}"
+		if got := gkeLabels[k]; got != want {
+			errs = append(errs, "hub-gke must set LABEL "+k+`="`+want+`"; got `+got)
+		} else if !gkeLabelArgInScope[k] {
+			errs = append(errs, "hub-gke must declare ARG "+arg+" before LABEL "+k)
+		}
 	}
 	allRuns := strings.Join(runs, "\n")
 	for _, want := range []string{
@@ -490,6 +498,39 @@ func TestDockerfileContractHubGKEIgnoreFile(t *testing.T) {
 	}
 }
 
+// TestDockerfileContractHubGKEDocs checks that the operator-facing build
+// instructions in image-build/README.md and docs-site helm.md pass _COMMIT_SHA
+// in their gcloud builds submit invocation and document _VERSION for release
+// builds, so following the published commands produces a version-stamped image.
+func TestDockerfileContractHubGKEDocs(t *testing.T) {
+	cases := []struct {
+		file    string
+		heading string
+	}{
+		{"image-build/README.md", "## GKE Hub Image (`cloudbuild-hub-gke.yaml`)"},
+		{"docs-site/src/content/docs/hosted/ha/helm.md", "## 2. Build the hub image"},
+	}
+	for _, tc := range cases {
+		doc := readRepoFile(t, tc.file)
+		_, rest, ok := strings.Cut(doc, tc.heading)
+		if !ok {
+			t.Fatalf("%s: section %q not found", tc.file, tc.heading)
+		}
+		section, _, _ := strings.Cut(rest, "\n## ")
+		for _, want := range []string{
+			"--config=image-build/cloudbuild-hub-gke.yaml",
+			"--ignore-file=" + hubGKEIgnoreFile,
+			"_SHORT_SHA=$(git rev-parse --short HEAD)",
+			"_COMMIT_SHA=$(git rev-parse HEAD)",
+			",_VERSION=",
+		} {
+			if !strings.Contains(section, want) {
+				t.Errorf("%s (%s): hub-gke build instructions must include %q", tc.file, tc.heading, want)
+			}
+		}
+	}
+}
+
 // mustReplace applies a mutation and fails if it did not change the input.
 func mustReplace(t *testing.T, s, old, new string) string {
 	t.Helper()
@@ -546,9 +587,11 @@ func TestDockerfileContractCheckerDetectsViolations(t *testing.T) {
 		{"builder missing Version ldflag", mustReplace(t, good, "pkg/version.Version=${VERSION}", "pkg/version.Ver=${VERSION}"), "pkg/version.Version=${VERSION}"},
 		{"builder missing Commit ldflag", mustReplace(t, good, "pkg/version.Commit=${GIT_COMMIT}", "pkg/version.GitCommit=${GIT_COMMIT}"), "pkg/version.Commit=${GIT_COMMIT}"},
 		{"builder missing BuildTime ldflag", mustReplace(t, good, "pkg/version.BuildTime=${BUILD_TIME}", "pkg/version.Time=${BUILD_TIME}"), "pkg/version.BuildTime=${BUILD_TIME}"},
-		{"hub-gke missing OCI revision label", mustReplace(t, good, "LABEL org.opencontainers.image.revision=\"${GIT_COMMIT}\"\n", ""), "org.opencontainers.image.revision"},
-		{"hub-gke missing OCI version label", mustReplace(t, good, "LABEL org.opencontainers.image.version=\"${VERSION}\"\n", ""), "org.opencontainers.image.version"},
-		{"hub-gke OCI label before stage ARG", mustReplace(t, good, "ARG GIT_COMMIT=\"\"\nARG VERSION=\"\"\nLABEL org.opencontainers.image.revision=\"${GIT_COMMIT}\"\nLABEL org.opencontainers.image.version=\"${VERSION}\"\n", "LABEL org.opencontainers.image.revision=\"${GIT_COMMIT}\"\nLABEL org.opencontainers.image.version=\"${VERSION}\"\nARG GIT_COMMIT=\"\"\nARG VERSION=\"\"\n"), "must declare ARG GIT_COMMIT before LABEL"},
+		{"hub-gke missing OCI revision label", mustReplace(t, good, "LABEL org.opencontainers.image.revision=\"${GIT_COMMIT}\"\n", ""), "hub-gke must set LABEL org.opencontainers.image.revision"},
+		{"hub-gke missing OCI version label", mustReplace(t, good, "LABEL org.opencontainers.image.version=\"${VERSION}\"\n", ""), "hub-gke must set LABEL org.opencontainers.image.version"},
+		{"hub-gke missing stage ARG GIT_COMMIT", mustReplace(t, good, "ARG GIT_COMMIT=\"\"\nARG VERSION=\"\"\nLABEL org.opencontainers.image.revision", "ARG VERSION=\"\"\nLABEL org.opencontainers.image.revision"), "hub-gke must declare ARG GIT_COMMIT before LABEL org.opencontainers.image.revision"},
+		{"hub-gke missing stage ARG VERSION", mustReplace(t, good, "ARG GIT_COMMIT=\"\"\nARG VERSION=\"\"\nLABEL org.opencontainers.image.revision", "ARG GIT_COMMIT=\"\"\nLABEL org.opencontainers.image.revision"), "hub-gke must declare ARG VERSION before LABEL org.opencontainers.image.version"},
+		{"hub-gke OCI label before stage ARG", mustReplace(t, good, "ARG GIT_COMMIT=\"\"\nARG VERSION=\"\"\nLABEL org.opencontainers.image.revision=\"${GIT_COMMIT}\"\nLABEL org.opencontainers.image.version=\"${VERSION}\"\n", "LABEL org.opencontainers.image.revision=\"${GIT_COMMIT}\"\nLABEL org.opencontainers.image.version=\"${VERSION}\"\nARG GIT_COMMIT=\"\"\nARG VERSION=\"\"\n"), "hub-gke must declare ARG GIT_COMMIT before LABEL org.opencontainers.image.revision"},
 	}
 	for _, m := range dockerMutations {
 		expectViolation(t, m.name, checkRootDockerfileContract(t, m.src), m.want)

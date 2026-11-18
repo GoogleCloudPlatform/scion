@@ -567,9 +567,14 @@ targets; submit it directly from the repo root:
 gcloud builds submit \
   --config=image-build/cloudbuild-hub-gke.yaml \
   --ignore-file=image-build/gcloudignore-omni \
-  --substitutions=_REGISTRY=<registry>,_SHORT_SHA=$(git rev-parse --short HEAD) \
+  --substitutions=_REGISTRY=<registry>,_SHORT_SHA=$(git rev-parse --short HEAD),_COMMIT_SHA=$(git rev-parse HEAD) \
   .
 ```
+
+For a release build on an exact git tag, also append `,_VERSION=<tag>` (a
+`vX.Y.Z[-preview.N|-rc.N]` form; and optionally
+`,_BUILD_TIME=<YYYY-MM-DDTHH:MM:SSZ>`). Off-tag, `_VERSION` defaults to `''` so
+the binary reports version `dev` and `image_tag: version` resolves to `latest`.
 
 `--ignore-file` is required because the default `.gcloudignore` drops the web
 source the Dockerfile builds. hub-gke uses the omni ignore file,

@@ -100,6 +100,7 @@ FROM runtime AS hub-gke
 RUN useradd -u 1000 -m -d /home/scion scion \
  && mkdir -p /home/scion/.scion \
  && chown -R 1000:1000 /home/scion
+# ARGs are stage-scoped in Docker; re-declare them here for OCI labels.
 ARG GIT_COMMIT=""
 ARG VERSION=""
 LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
