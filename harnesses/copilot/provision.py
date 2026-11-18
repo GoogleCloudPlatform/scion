@@ -278,8 +278,24 @@ def _validate_staged_config(content: str, path: str) -> bool:
     return True
 
 
+def _read_installed_plugins(path: str) -> list[Any] | None:
+    """Return the installedPlugins list from an existing config.json, or None."""
+    try:
+        with open(path, "rb") as f:
+            data = _load_config_strictly(f.read())
+    except (OSError, ValueError, RecursionError):
+        return None
+    plugins = data.get("installedPlugins") if isinstance(data, dict) else None
+    return plugins if isinstance(plugins, list) else None
+
+
 def _write_copilot_config_file(ctx: scion_harness.ProvisionContext) -> None:
-    """Write ~/.copilot/config.json from a staged COPILOT_CONFIG file secret."""
+    """Write ~/.copilot/config.json from a staged COPILOT_CONFIG file secret.
+
+    Carries an existing installedPlugins list across the rewrite when both
+    files parse cleanly as JSON objects, so auth-file restarts do not drop
+    Copilot's plugin registry and reinstall every Agent Plugin (ptone/scion#5024).
+    """
     staged = scion_harness.expand_path(ctx.file_secret_files.get("COPILOT_CONFIG") or "")
     try:
         content = ctx.read_file_secret("COPILOT_CONFIG")
@@ -291,7 +307,8 @@ def _write_copilot_config_file(ctx: scion_harness.ProvisionContext) -> None:
         return
     if not content.strip():
         raise scion_harness.ProvisionError("COPILOT_CONFIG secret is empty")
-    if not _validate_staged_config(content, staged):
+    checked = _validate_staged_config(content, staged)
+    if not checked:
         ctx.info(
             f"COPILOT_CONFIG secret file {staged} is nested too deeply to "
             "check; copying it unchanged"
@@ -299,6 +316,17 @@ def _write_copilot_config_file(ctx: scion_harness.ProvisionContext) -> None:
     config_dir = scion_harness.expand_path("~/.copilot")
     os.makedirs(config_dir, exist_ok=True)
     target = os.path.join(config_dir, "config.json")
+    installed_plugins = _read_installed_plugins(target) if checked else None
+    if installed_plugins is not None:
+        try:
+            staged_data = _load_config_strictly(content.encode("utf-8"))
+        except (ValueError, RecursionError):
+            staged_data = None
+        if isinstance(staged_data, dict):
+            for key in [k for k in staged_data if k.lower() == "installedplugins"]:
+                del staged_data[key]
+            staged_data["installedPlugins"] = installed_plugins
+            content = json.dumps(staged_data, indent=2) + "\n"
     tmp = target + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(content)
@@ -589,9 +617,10 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
 #     marketplace plugin it acts on that one (a local marketplace plugin is
 #     disabled, the direct install stays). `<name>@` (empty marketplace)
 #     targets only the direct install and leaves marketplace plugins alone.
-# config.json is also copilot's sign-in file and an auth-file provision
-# replaces it with the staged secret, so registration is read back from
-# config.json rather than inferred from the cache dir.
+# config.json is also copilot's sign-in file (_write_copilot_config_file
+# carries installedPlugins across staged-secret rewrites, though a home
+# reset can still drop it), so registration is read back from config.json
+# rather than inferred from the cache dir.
 
 COPILOT_PLUGINS_MIN_VERSION = (1, 0, 74)
 
@@ -731,8 +760,8 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
         result: the plugin must no longer be registered in config.json
         (copilot 1.0.97 exits 1 for a plugin that is not installed). A
         leftover install dir is then removed: when the registration was
-        already gone (an auth-file start rewrites config.json), the CLI
-        removes nothing."""
+        already gone (for example after a home reset), the CLI removes
+        nothing."""
         proc = self._run("plugin", "uninstall", f"{name}@")
         try:
             entry = self.registration(name, strict=True)
@@ -755,8 +784,8 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
         """The install still exists and copilot still lists it as enabled.
         config.json can lose installedPlugins while the cache dir survives
-        (an auth-file provision writes the staged config.json, a re-provision
-        can reset the home); the plugin is then reinstalled. No CLI call."""
+        (for example when a re-provision resets the home); the plugin is then
+        reinstalled. No CLI call."""
         entry = self.registration(name)
         if not self.enabled(entry):
             return False
