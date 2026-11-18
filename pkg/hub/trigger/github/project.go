@@ -38,6 +38,9 @@ var keptPrimaryKeys = []string{
 
 // decodeJSONObject parses raw as a single JSON object preserving number tokens.
 func decodeJSONObject(raw []byte) (map[string]any, error) {
+	if !utf8.Valid(raw) || bytes.ContainsRune(raw, '\x00') {
+		return nil, errors.New("github trigger: invalid UTF-8 or NUL byte in webhook payload")
+	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return nil, errors.New("github trigger: empty webhook payload")

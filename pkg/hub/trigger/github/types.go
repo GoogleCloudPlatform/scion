@@ -165,12 +165,20 @@ type Result struct {
 	Truncated    bool
 
 	// Ingress routing and bot-guard facts (§4.1–4.2, §5.7).
+	Action            string
 	InstallationID    int64
 	RepoFullName      string
 	SenderLogin       string
 	SenderID          int64
 	SenderType        string
 	PerformedViaAppID int64
+
+	// Unexported state retained from Normalize so ingress can apply a lazily
+	// fetched AppSlug without decoding the payload a second time.
+	commandEligible bool
+	rawCommandBody  string
+	maxCommandArgs  int
+	maxCommandLine  int
 }
 
 // DedupKey returns the per-project deduplication key "<delivery>/<projectID>" (§4.3).
@@ -186,8 +194,9 @@ func (r Result) IsOwnApp(appSlug string) bool {
 }
 
 // IsOwnAppActor reports whether the webhook delivery originated from this
-// GitHub App itself: either its sender matches <appSlug>[bot] or its signed
-// primary object carries performed_via_github_app.id == appID (> 0; §5.7).
+// GitHub App itself: either its sender matches <appSlug>[bot] or, for an
+// object-creating action, the created object carries
+// performed_via_github_app.id == appID (> 0; §5.7).
 func (r Result) IsOwnAppActor(appSlug string, appID int64) bool {
 	return IsOwnAppActor(r.SenderType, r.SenderLogin, appSlug, r.PerformedViaAppID, appID)
 }

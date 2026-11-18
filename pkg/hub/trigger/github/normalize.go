@@ -26,9 +26,10 @@ import (
 )
 
 const (
-	maxActionBytes     = 64
-	maxDeliveryIDBytes = 128
-	maxLoginBytes      = 128
+	maxActionBytes       = 64
+	maxDeliveryIDBytes   = 128
+	maxLoginBytes        = 128
+	maxRepoFullNameBytes = 200
 )
 
 // Normalize converts a verified GitHub App webhook delivery into a normalised
@@ -115,7 +116,25 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 	if err != nil {
 		return Result{}, err
 	}
-	senderType := optCleanString(senderMap, "type")
+	senderType, err := optString(senderMap, "type", "sender.type")
+	if err != nil {
+		return Result{}, err
+	}
+
+	performedViaAppID, err := extractEventPerformedViaAppID(eventName, action, root)
+	if err != nil {
+		return Result{}, err
+	}
+
+	base := Result{
+		Action:            action,
+		InstallationID:    installationID,
+		RepoFullName:      repoFullName,
+		SenderLogin:       senderLogin,
+		SenderID:          senderID,
+		SenderType:        senderType,
+		PerformedViaAppID: performedViaAppID,
+	}
 
 	attrs := map[string]string{
 		"provider":        SourceKind,
@@ -162,17 +181,12 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		number, occurredAt, rawCommandBody, err = normalizePullRequestReviewComment(root, action, repoFullName, opts, attrs, lists)
 	}
 	if err != nil {
-		return Result{}, err
-	}
-
-	performedViaAppID, err := extractEventPerformedViaAppID(eventName, root)
-	if err != nil {
-		return Result{}, err
+		return base, err
 	}
 
 	subject := fmt.Sprintf("github:%s#%d", repoFullName, number)
 	if len(subject) > MaxSubjectBytes || !allPrintable(subject) {
-		return Result{}, errors.New("github trigger: derived subject exceeds bounds or contains non-printable characters")
+		return base, errors.New("github trigger: derived subject exceeds bounds or contains non-printable characters")
 	}
 
 	if occurredAt.IsZero() && !opts.ReceivedAt.IsZero() {
@@ -184,31 +198,14 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		}
 	}
 
-	if isCommandCreationAction(eventName, action) {
-		if normalizeHandle(opts.AppSlug) == "" {
-			attrs["mention_detection"] = "unavailable"
-		} else {
-			match := ParseCommand(
-				rawCommandBody,
-				opts.AppSlug,
-				opts.MentionAliases,
-				opts.maxCommandArgsBytes(),
-				opts.maxCommandLineBytes(),
-			)
-			if match.Mentioned {
-				attrs["mention"] = "true"
-			}
-			if match.HasCommand {
-				attrs["command"] = match.Command
-				attrs["command_args"] = match.CommandArgs
-				attrs["command_line"] = match.CommandLine
-			}
-		}
-	}
+	commandEligible := isCommandCreationAction(eventName, action)
+	maxCmdArgs := opts.maxCommandArgsBytes()
+	maxCmdLine := opts.maxCommandLineBytes()
+	applyCommandAttributes(attrs, commandEligible, rawCommandBody, opts.AppSlug, opts.MentionAliases, maxCmdArgs, maxCmdLine)
 
 	projected, truncated, err := projectDecodedPayload(root, opts.maxPayloadBytes())
 	if err != nil {
-		return Result{}, err
+		return base, err
 	}
 	if truncated {
 		attrs["payload_truncated"] = "true"
@@ -216,13 +213,13 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 
 	listsTruncated, err := enforceListsCeiling(lists, DefaultMaxListsBytes)
 	if err != nil {
-		return Result{}, err
+		return base, err
 	}
 	if listsTruncated {
 		attrs["lists_truncated"] = "true"
 	}
 	if err := enforceAttributesCeiling(attrs, DefaultMaxAttributesBytes); err != nil {
-		return Result{}, err
+		return base, err
 	}
 
 	return Result{
@@ -238,33 +235,104 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		Payload:           projected,
 		PayloadBytes:      len(projected),
 		Truncated:         truncated,
+		Action:            action,
 		InstallationID:    installationID,
 		RepoFullName:      repoFullName,
 		SenderLogin:       senderLogin,
 		SenderID:          senderID,
 		SenderType:        senderType,
 		PerformedViaAppID: performedViaAppID,
+		commandEligible:   commandEligible,
+		rawCommandBody:    rawCommandBody,
+		maxCommandArgs:    maxCmdArgs,
+		maxCommandLine:    maxCmdLine,
 	}, nil
 }
 
-func extractEventPerformedViaAppID(eventName string, root map[string]any) (int64, error) {
+// ApplyAppSlug updates command/mention attributes on a normalised Result when
+// the App slug was lazily discovered after Normalize ran with an empty AppSlug,
+// and re-enforces the attributes byte ceiling without re-decoding the payload.
+func (r *Result) ApplyAppSlug(appSlug string, mentionAliases []string) error {
+	if r == nil || !r.Handled || !r.commandEligible {
+		return nil
+	}
+	delete(r.Attributes, "mention_detection")
+	delete(r.Attributes, "mention")
+	delete(r.Attributes, "command")
+	delete(r.Attributes, "command_args")
+	delete(r.Attributes, "command_line")
+	applyCommandAttributes(r.Attributes, true, r.rawCommandBody, appSlug, mentionAliases, r.maxCommandArgs, r.maxCommandLine)
+	return enforceAttributesCeiling(r.Attributes, DefaultMaxAttributesBytes)
+}
+
+func applyCommandAttributes(
+	attrs map[string]string,
+	commandEligible bool,
+	rawCommandBody, appSlug string,
+	mentionAliases []string,
+	maxArgsBytes, maxLineBytes int,
+) {
+	if !commandEligible {
+		return
+	}
+	if normalizeHandle(appSlug) == "" {
+		attrs["mention_detection"] = "unavailable"
+		return
+	}
+	match := ParseCommand(
+		rawCommandBody,
+		appSlug,
+		mentionAliases,
+		maxArgsBytes,
+		maxLineBytes,
+	)
+	if match.Mentioned {
+		attrs["mention"] = "true"
+	}
+	if match.HasCommand {
+		attrs["command"] = match.Command
+		attrs["command_args"] = match.CommandArgs
+		attrs["command_line"] = match.CommandLine
+	}
+}
+
+// extractEventPerformedViaAppID extracts performed_via_github_app.id ONLY for
+// deliveries where this event's actor created that object in this event (§5.7):
+//   - issue_comment.created and pull_request_review_comment.created -> comment
+//   - pull_request_review.submitted -> review
+//   - issues.opened -> issue
+//   - pull_request.opened -> pull_request
+//
+// On all other actions (for example labeling, closing, assigning, or editing an
+// App-created issue or PR), object.performed_via_github_app records the object's
+// original creator rather than this event's actor and MUST NOT be consulted.
+func extractEventPerformedViaAppID(eventName, action string, root map[string]any) (int64, error) {
 	primaryKey := ""
 	switch eventName {
 	case EventIssueComment, EventPullRequestReviewComment:
-		primaryKey = "comment"
+		if action == "created" {
+			primaryKey = "comment"
+		}
 	case EventPullRequestReview:
-		primaryKey = "review"
+		if action == "submitted" {
+			primaryKey = "review"
+		}
 	case EventIssues:
-		primaryKey = "issue"
+		if action == "opened" {
+			primaryKey = "issue"
+		}
 	case EventPullRequest:
-		primaryKey = "pull_request"
+		if action == "opened" {
+			primaryKey = "pull_request"
+		}
 	}
-	if primaryKey != "" {
-		if primaryMap, ok := optMap(root, primaryKey); ok {
-			id, err := optPerformedViaAppID(primaryMap, primaryKey+".performed_via_github_app")
-			if err != nil || id > 0 {
-				return id, err
-			}
+	if primaryKey == "" {
+		return 0, nil
+	}
+	if primaryMap, ok := optMap(root, primaryKey); ok {
+		id, err := optPerformedViaAppID(primaryMap, primaryKey+".performed_via_github_app")
+		if err != nil || id > 0 {
+			return id, err
 		}
 	}
 	return optPerformedViaAppID(root, "performed_via_github_app")
@@ -1004,6 +1072,18 @@ func optCleanString(m map[string]any, key string) string {
 	return cleanUTF8(s)
 }
 
+func optString(m map[string]any, key, label string) (string, error) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return "", nil
+	}
+	s, ok := v.(string)
+	if !ok || !utf8.ValidString(s) {
+		return "", fmt.Errorf("github trigger: %s must be a valid UTF-8 string", label)
+	}
+	return strings.TrimSpace(s), nil
+}
+
 func reqPositiveInt64(m map[string]any, key, label string) (int64, error) {
 	n, ok, err := optInt64(m, key, label)
 	if err != nil {
@@ -1108,7 +1188,7 @@ func isActionIdent(s string) bool {
 }
 
 func parseOwnerRepo(fullName string) (owner, repo string, ok bool) {
-	if !utf8.ValidString(fullName) || !allPrintableNonSpace(fullName) {
+	if len(fullName) > maxRepoFullNameBytes || !utf8.ValidString(fullName) || !allPrintableNonSpace(fullName) {
 		return "", "", false
 	}
 	idx := strings.IndexByte(fullName, '/')

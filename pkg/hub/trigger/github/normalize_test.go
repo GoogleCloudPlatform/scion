@@ -918,4 +918,154 @@ func TestNormalize_PerformedViaAppIDAndIsOwnAppActor(t *testing.T) {
 		assert.True(t, IsOwnAppActor("Bot", "scion-bot[bot]", "scion-bot", 0, appID))
 		assert.False(t, IsOwnAppActor("Bot", "renovate[bot]", "scion-bot", 999999, appID))
 	})
+
+	t.Run("non_creation_actions_ignore_object_creator_performed_via_github_app", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			eventName string
+			payload   string
+		}{
+			{
+				name:      "human_labeling_app_created_issue",
+				eventName: EventIssues,
+				payload: `{
+					"action": "labeled",
+					"installation": {"id": 10},
+					"repository": {"id": 1, "name": "r", "full_name": "o/r", "private": false},
+					"sender": {"login": "alice", "id": 3, "type": "User"},
+					"label": {"name": "agent"},
+					"issue": {
+						"number": 7, "state": "open", "title": "App issue",
+						"created_at": "2026-05-01T10:00:00Z",
+						"performed_via_github_app": {"id": 778899}
+					}
+				}`,
+			},
+			{
+				name:      "human_closing_app_created_issue",
+				eventName: EventIssues,
+				payload: `{
+					"action": "closed",
+					"installation": {"id": 10},
+					"repository": {"id": 1, "name": "r", "full_name": "o/r", "private": false},
+					"sender": {"login": "alice", "id": 3, "type": "User"},
+					"issue": {
+						"number": 7, "state": "closed", "title": "App issue",
+						"created_at": "2026-05-01T10:00:00Z",
+						"performed_via_github_app": {"id": 778899}
+					}
+				}`,
+			},
+			{
+				name:      "human_labeling_app_created_pr",
+				eventName: EventPullRequest,
+				payload: `{
+					"action": "labeled",
+					"installation": {"id": 10},
+					"repository": {"id": 1, "name": "r", "full_name": "o/r", "private": false},
+					"sender": {"login": "alice", "id": 3, "type": "User"},
+					"label": {"name": "needs-review"},
+					"pull_request": {
+						"number": 8, "state": "open", "title": "App PR",
+						"created_at": "2026-05-01T10:00:00Z",
+						"performed_via_github_app": {"id": 778899},
+						"base": {"ref": "main", "sha": "111", "repo": {"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+						"head": {"ref": "feat", "sha": "222", "repo": {"id": 1, "full_name": "o/r", "name": "r", "private": false}}
+					}
+				}`,
+			},
+			{
+				name:      "human_dismissing_app_review",
+				eventName: EventPullRequestReview,
+				payload: `{
+					"action": "dismissed",
+					"installation": {"id": 10},
+					"repository": {"id": 1, "name": "r", "full_name": "o/r", "private": false},
+					"sender": {"login": "alice", "id": 3, "type": "User"},
+					"pull_request": {
+						"number": 8, "state": "open", "title": "PR",
+						"base": {"ref": "main", "sha": "111", "repo": {"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+						"head": {"ref": "feat", "sha": "222", "repo": {"id": 1, "full_name": "o/r", "name": "r", "private": false}}
+					},
+					"review": {
+						"id": 50, "state": "dismissed", "body": "old review",
+						"submitted_at": "2026-05-01T10:00:00Z",
+						"performed_via_github_app": {"id": 778899}
+					}
+				}`,
+			},
+			{
+				name:      "edited_comment_relies_on_sender_only",
+				eventName: EventIssueComment,
+				payload: `{
+					"action": "edited",
+					"installation": {"id": 10},
+					"repository": {"id": 1, "name": "r", "full_name": "o/r", "private": false},
+					"sender": {"login": "alice", "id": 3, "type": "User"},
+					"issue": {"number": 7, "state": "open", "title": "T"},
+					"comment": {
+						"id": 101, "body": "updated",
+						"created_at": "2026-05-01T10:00:00Z",
+						"performed_via_github_app": {"id": 778899}
+					}
+				}`,
+			},
+		} {
+			res, err := Normalize(tc.eventName, "d-"+tc.name, []byte(tc.payload), Options{})
+			require.NoError(t, err, tc.name)
+			assert.Zero(t, res.PerformedViaAppID, tc.name)
+			assert.False(t, res.IsOwnAppActor("scion-bot", appID), tc.name)
+		}
+
+		// User-to-server App opening an issue (sender is User, action is opened,
+		// issue.performed_via_github_app.id == appID) IS treated as own-App.
+		userToServerOpen := []byte(`{
+			"action": "opened",
+			"installation": {"id": 10},
+			"repository": {"id": 1, "name": "r", "full_name": "o/r", "private": false},
+			"sender": {"login": "alice", "id": 3, "type": "User"},
+			"issue": {
+				"number": 9, "state": "open", "title": "Opened via user-to-server App",
+				"created_at": "2026-05-01T10:00:00Z",
+				"performed_via_github_app": {"id": 778899}
+			}
+		}`)
+		resOpen, err := Normalize(EventIssues, "d-u2s-open", userToServerOpen, Options{})
+		require.NoError(t, err)
+		assert.Equal(t, appID, resOpen.PerformedViaAppID)
+		assert.True(t, resOpen.IsOwnAppActor("scion-bot", appID))
+	})
+
+	t.Run("partial_envelope_returned_on_family_error_and_apply_app_slug", func(t *testing.T) {
+		missingComment := []byte(`{
+			"action": "created",
+			"installation": {"id": 42},
+			"repository": {"id": 1, "name": "widgets", "full_name": "acme/widgets", "private": false},
+			"sender": {"login": "alice", "id": 3, "type": "User"},
+			"issue": {"number": 1, "state": "open", "title": "t"}
+		}`)
+		partial, err := Normalize(EventIssueComment, "d-partial", missingComment, Options{})
+		require.Error(t, err)
+		assert.False(t, partial.Handled)
+		assert.Equal(t, int64(42), partial.InstallationID)
+		assert.Equal(t, "created", partial.Action)
+		assert.Equal(t, "acme/widgets", partial.RepoFullName)
+		assert.Equal(t, "alice", partial.SenderLogin)
+
+		coldSlugBody := []byte(`{
+			"action": "created",
+			"installation": {"id": 42},
+			"repository": {"id": 1, "name": "widgets", "full_name": "acme/widgets", "private": false},
+			"sender": {"login": "alice", "id": 3, "type": "User"},
+			"issue": {"number": 1, "state": "open", "title": "t"},
+			"comment": {"id": 5, "body": "@lazy-scion /ping now", "created_at": "2026-05-01T10:00:00Z"}
+		}`)
+		res, err := Normalize(EventIssueComment, "d-cold", coldSlugBody, Options{})
+		require.NoError(t, err)
+		assert.Equal(t, "unavailable", res.Attributes["mention_detection"])
+		require.NoError(t, res.ApplyAppSlug("lazy-scion", nil))
+		assert.NotContains(t, res.Attributes, "mention_detection")
+		assert.Equal(t, "ping", res.Attributes["command"])
+		assert.Equal(t, "now", res.Attributes["command_args"])
+	})
 }
