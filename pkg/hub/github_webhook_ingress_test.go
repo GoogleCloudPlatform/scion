@@ -1144,7 +1144,7 @@ type ghInvalidInputTxStore struct {
 	failProjectID string // empty fails every project when armed
 }
 
-func (w *ghInvalidInputTxStore) CountDurableQueuePending(ctx context.Context, kind, projectID string) (int, error) {
+func (w *ghInvalidInputTxStore) CountDurableQueuePending(ctx context.Context, kind, projectID string) (int64, error) {
 	if c, ok := w.Store.(store.DurableQueuePendingCounter); ok {
 		return c.CountDurableQueuePending(ctx, kind, projectID)
 	}
