@@ -33,6 +33,18 @@ func renameNoReplace(oldDir int, oldName string, newDir int, newName string) err
 	return err
 }
 
+// supportsAtomicDirRename reports whether the filesystem holding dirFd
+// supports renameDirNoReplace (renameat2(RENAME_NOREPLACE)). The Linux NFS
+// client rejects every renameat2 flag with EINVAL; the empty-name probe also
+// honours the renameat2 test seam without touching any directory entry.
+func supportsAtomicDirRename(dirFd int) bool {
+	var sfs unix.Statfs_t
+	if err := unix.Fstatfs(dirFd, &sfs); err == nil && sfs.Type == unix.NFS_SUPER_MAGIC {
+		return false
+	}
+	return !noAtomicRename(renameat2(dirFd, "", dirFd, "", unix.RENAME_NOREPLACE))
+}
+
 // syncFS flushes the filesystem holding fd (syncfs(2)), so the files a copy
 // placed are durable before its source is put aside.
 func syncFS(fd int) error {

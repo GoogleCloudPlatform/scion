@@ -459,3 +459,46 @@ func TestStorageMigrateAgentStopped(t *testing.T) {
 		assert.Equal(t, want, storageMigrateAgentStopped(phase), phase)
 	}
 }
+
+// Symbolic links in a project's shared directories are not copied; the dry run
+// lists every symbolic link that will not be copied, and the migration report
+// names the skipped links.
+func TestProjectStorageMigrate_SharedDirSymlinksListedInDryRunAndReport(t *testing.T) {
+	f := newStorageMigrateFixture(t)
+	share := f.useNFS(t)
+	g := f.globalDir(t)
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("SECRET"), 0o600))
+
+	sdDir := filepath.Join(g, "project-configs", projectfs.LocalConfigDirName(f.project.Slug, f.project.ID), "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(filepath.Join(sdDir, "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sdDir, "notes.txt"), []byte("scratch"), 0o644))
+	require.NoError(t, os.Symlink("notes.txt", filepath.Join(sdDir, "latest.md")))
+	require.NoError(t, os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(sdDir, "nested", "escape.txt")))
+
+	dryLog, err := runStorageMigrate(t, f.srv, true)
+	require.NoError(t, err, dryLog)
+	assert.Contains(t, dryLog, "dry run: nothing is changed")
+	assert.Contains(t, dryLog, "step 3-shared-dirs would-merge")
+	assert.Contains(t, dryLog, "refused=2")
+	assert.Contains(t, dryLog, "REFUSED latest.md (symlink) (not copied)")
+	assert.Contains(t, dryLog, "REFUSED nested/escape.txt (symlink) (not copied)")
+	_, statErr := os.Stat(filepath.Join(share, "projects", f.project.ID))
+	assert.True(t, os.IsNotExist(statErr), "dry run must not create the project tree")
+
+	runLog, err := runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, runLog)
+	assert.Contains(t, runLog, "step 3-shared-dirs merged")
+	assert.Contains(t, runLog, "refused=2")
+	assert.Contains(t, runLog, "REFUSED latest.md (symlink) (not copied)")
+	assert.Contains(t, runLog, "REFUSED nested/escape.txt (symlink) (not copied)")
+
+	targetSD := filepath.Join(share, "projects", f.project.ID, "shared-dirs", "scratchpad")
+	got, err := os.ReadFile(filepath.Join(targetSD, "notes.txt"))
+	require.NoError(t, err, runLog)
+	assert.Equal(t, "scratch", string(got))
+	for _, skipped := range []string{"latest.md", "nested/escape.txt"} {
+		_, lerr := os.Lstat(filepath.Join(targetSD, skipped))
+		assert.True(t, os.IsNotExist(lerr), "symlink %s must not be copied", skipped)
+	}
+}

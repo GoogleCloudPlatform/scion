@@ -308,6 +308,9 @@ func (h HubReport) WriteLog(w io.Writer) {
 			if r.Copied > 0 || r.Identical > 0 {
 				line += fmt.Sprintf(" copied=%d identical=%d", r.Copied, r.Identical)
 			}
+			if len(r.Refused) > 0 {
+				line += fmt.Sprintf(" refused=%d", len(r.Refused))
+			}
 			if r.Backup != "" {
 				line += " source kept as " + r.Backup
 			}
