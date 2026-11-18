@@ -240,6 +240,7 @@ Seeds re-sync on restart for sections that haven't been admin-edited (seeded sec
 | `server.auth.authorized_domains` | `SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS` |
 | `server.auth.default_user_role` | `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE` |
 | `server.hub.auto_suspend_stalled` | `SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED` |
+| `server.hub.auto_suspend_idle` | `SCION_SEED_SERVER_HUB_AUTOSUSPENDIDLE` |
 | `server.hub.soft_delete_retain_files` | `SCION_SEED_SERVER_HUB_SOFTDELETERETAINFILES` |
 | `image_registry` | `SCION_SEED_IMAGEREGISTRY` |
 | `telemetry.enabled` | `SCION_SEED_TELEMETRY_ENABLED` |

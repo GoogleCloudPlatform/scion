@@ -56,10 +56,10 @@ agents are skipped rather than failing the whole batch.
 **Suspend reasons and retained activities.** While an agent is in the `suspended` phase, the Hub records why it was suspended in `suspendReason` (cleared as soon as the agent leaves `suspended`):
 
 - `user` — suspended explicitly by a user or agent (`scion suspend` or `POST /api/v1/agents/:id/suspend`).
-- `idle` — suspended automatically by the Hub after going idle.
+- `idle` — suspended automatically by the Hub after going idle (see [Auto-Suspend of Idle Agents](#auto-suspend-of-idle-agents)).
 - `stalled` — suspended automatically by the Hub after stalling (see [Auto-Suspend of Stalled Agents](#auto-suspend-of-stalled-agents)).
 
-Suspending an agent also preserves a terminal or error-bearing activity (`completed`, `idle`, or `harness_error`) across the suspend instead of clearing it, so you can still tell whether a suspended agent finished its task, went idle, or hit a model error before it was suspended. `scion list` displays both next to `suspended` in the **PHASE** column, for example `suspended (idle)` or `suspended · completed (stalled)` (`--activity` without `--phase` still matches active or terminal agents rather than suspended rows carrying a retained activity). For membership-loss holds (`suspension.held`), see [Agent Suspension When a Member Leaves a Project](/scion/reference/agent-suspension/).
+Suspending an agent also preserves a terminal or error-bearing activity (`completed`, `idle`, or `harness_error`) across the suspend instead of clearing it, so you can still tell whether a suspended agent finished its task, went idle, or hit a model error before it was suspended. `scion list` displays both next to `suspended` in the **PHASE** column, for example `suspended (idle)` or `suspended · completed (stalled)`, and the web shows the same label on the agent's status badge, with the reason explained in its tooltip and in a **Suspend reason** row on the agent page (`--activity` without `--phase` still matches active or terminal agents rather than suspended rows carrying a retained activity). For membership-loss holds (`suspension.held`), see [Agent Suspension When a Member Leaves a Project](/scion/reference/agent-suspension/).
 
 **Auto-wake on new work (`lifecycle.idle_suspend`).** When the [`lifecycle.idle_suspend`](/scion/reference/experiments/#server-experiments-with-notes) experiment is enabled (alpha, off by default), an agent the Hub suspended on its own (`suspendReason` `idle` or `stalled`) is resumed automatically whenever a direct message, web chat message, `@`-mention, notification, or scheduled message arrives for it — no `--wake` flag or `agent.lifecycle` permission is required on the sender (messaging permission is enough). Direct messages, primary web chat targets, and scheduled messages wait for the resume and then deliver; `@`-mentions, secondary web chat targets, and notifications are accepted immediately and delivered after a background resume. Agents suspended explicitly (`suspendReason` `user`), agents suspended before `suspendReason` was recorded, and held agents are never woken automatically.
 
@@ -434,10 +434,12 @@ any incoming message, mention, notification, or scheduled message when the
 experiment is enabled.
 
 :::tip
-If your agent is *intentionally* idle — for example, waiting on a child agent or
-a scheduled event — have it declare itself `blocked` (via
-`sciontool status blocked "<reason>"`). Blocked agents are excluded from stalled
-detection and therefore from auto-suspend.
+If your agent is *intentionally* quiet, have it say why. Waiting on a specific
+event (a child agent, a reply, a scheduled message, or its own background job)
+is `sciontool status blocked "<reason>"`; having nothing to do until new work
+arrives is `sciontool status idle "<reason>"`. Both are excluded from stalled
+detection and therefore from stalled auto-suspend. See
+[Ending a turn: blocked, idle, task_completed](/scion/concepts/#ending-a-turn-blocked-idle-task_completed).
 :::
 
 :::caution
@@ -445,6 +447,77 @@ Auto-suspend is a Hub-driven behavior and depends on the Hub's scheduler being
 operational. For `auto_suspend_stalled` and `stalled_threshold`, see
 [`server.hub`](/scion/reference/server-config/#hub-settings-serverhub).
 :::
+
+## Auto-Suspend of Idle Agents
+
+An agent that reports it has nothing to do (`idle`) or that finished its task
+(`completed`) still holds its container. The Hub can suspend such agents after a
+grace period and wake them again when new work arrives for them.
+
+:::danger[Not yet safe for production]
+Do not enable `server.hub.auto_suspend_idle` with the `lifecycle.idle_suspend`
+experiment on in production yet. Failure recovery for in-flight idle suspends
+(a failed commit after the container stopped, a Hub crash mid-suspend, and
+stop-timeout recovery) is not implemented yet.
+:::
+
+Idle auto-suspend needs **both**:
+
+- the [`lifecycle.idle_suspend`](/scion/reference/experiments/#server-experiments-with-notes)
+  experiment (alpha, off by default), and
+- `server.hub.auto_suspend_idle: true` (off by default; **Auto-suspend idle
+  agents** in **Admin > Server Config**).
+
+Every 5 minutes, the Hub suspends each `running` agent that meets all of these:
+
+- Its activity is `idle`, `completed` or `harness_error`, and has been for
+  longer than `server.hub.idle_suspend_after` (the grace period: default
+  **15 minutes**, minimum **5 minutes**; a shorter value is ignored and the
+  default applies). The grace is measured from when the activity last changed,
+  not from the last hook event.
+- Its heartbeat is fresh (an offline agent is left alone).
+- Its container reported no live work (a tool call in flight or CPU work) in the
+  last 90 seconds.
+- Its harness supports session resume, judged by the harness type behind its
+  harness config, so a custom-named config of a resumable harness qualifies.
+- No other lifecycle operation is in progress for it.
+
+So an agent is suspended between `idle_suspend_after` and `idle_suspend_after`
+plus 5 minutes after it went idle. Agents that are `blocked` or
+`waiting_for_input`, or that are working, are never suspended by this policy.
+
+The suspend works like `scion suspend`: the container stops, the harness session
+and the `idle`, `completed` or `harness_error` activity are kept, and the
+suspend reason is `idle`. `scion list` shows such an agent as, for example,
+`suspended · completed (idle)`.
+
+### Auto-wake on new work
+
+With the experiment on, an agent the Hub suspended (`idle` or `stalled`) is
+resumed automatically when a direct message, web chat message, `@`-mention,
+notification or scheduled message arrives for it, with no `--wake` and no
+lifecycle permission needed on the sender (permission to message the agent is
+enough). This is what makes it safe for an agent to go idle while it waits for
+a child agent or a scheduled callback hours away. An agent suspended by a user
+(reason `user`), one suspended before reasons were recorded, and a held agent
+are never woken this way.
+
+To keep a Hub-suspended agent down, suspend it again (`scion suspend <agent>`,
+or `POST /api/v1/agents/:id/suspend`): with the experiment on, this changes its
+reason from `idle` or `stalled` to `user` in place, without touching the
+runtime, so new work no longer wakes it.
+
+### What is gated
+
+| Behavior | Gate |
+|---|---|
+| The `idle` activity, `sciontool status idle`, the `IDLE` notification trigger, stall and offline exclusion of `idle` | None (always on) |
+| Retained activities and `suspendReason` on suspended agents, and their display | None (always on) |
+| Stalled auto-suspend | `server.hub.auto_suspend_stalled` |
+| Idle auto-suspend sweep | `lifecycle.idle_suspend` **and** `server.hub.auto_suspend_idle` |
+| Auto-wake of `idle`- or `stalled`-suspended agents, and converting them to `user` with suspend | `lifecycle.idle_suspend` |
+
+For the settings, see [`server.hub`](/scion/reference/server-config/#hub-settings-serverhub).
 
 ---
 

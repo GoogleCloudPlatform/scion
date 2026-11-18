@@ -13,6 +13,14 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Agents can report `idle`; idle auto-suspend and auto-wake (experimental)
+
+Agents now end each turn with one of `blocked` (waiting on a specific event, including their own background job), `idle` (nothing to do until new work arrives), `task_completed` or `ask_user`. See [Ending a turn: blocked, idle, task_completed](/scion/concepts/#ending-a-turn-blocked-idle-task_completed).
+
+- **`idle` activity (always on).** `sciontool status idle` sets it. Like `blocked`, it is never marked stalled or offline, and a delivered message clears it. `IDLE` is a default notification trigger of the Hub, the CLI and the Web Dashboard.
+- **Suspend reasons in the web.** A suspended agent shows its kept activity and suspend reason the way `scion list` does, for example **suspended · completed (idle)** or **suspended (user)**, with a neutral **idle** badge for running idle agents. The agent's SSE status events, compact list rows and chat member entries now carry `suspendReason`.
+- **Idle auto-suspend and auto-wake (`lifecycle.idle_suspend`, alpha, off by default).** With the experiment and `server.hub.auto_suspend_idle` on, the Hub suspends agents that have been `idle`, `completed` or `harness_error` for longer than `server.hub.idle_suspend_after` (default `15m`, minimum `5m`), and any message, mention, notification or scheduled message wakes them. Both settings are in **Admin > Server Config**. **Not yet safe for production:** failure recovery for in-flight idle suspends is not implemented yet. See [Auto-Suspend of Idle Agents](/scion/local/agent-lifecycle/#auto-suspend-of-idle-agents).
+
 ## Flat Cloud Run instances require `block_service_account`, enforce native GCP identity, and gain per-broker project defaults
 
 Flat Cloud Run Runtime Broker instances (`server.broker.instances[].runtime_target` with `type: cloudrun`, behind `hub.flat_cloudrun_target`) now always run per-agent GCP identity natively regardless of `hub.cloudrun_native_identity`, and projects gain a per-broker default GCP service account rung (`defaultGCPIdentityServiceAccountIDByBroker`) behind `hub.flat_runtime_brokers`. There is no database schema migration and no downgrade floor bump.
