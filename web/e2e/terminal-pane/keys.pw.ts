@@ -75,7 +75,7 @@ test.describe('phone', () => {
     page,
   }) => {
     const peer = await setup(page);
-    const bar = page.getByRole('toolbar', { name: 'Terminal keys' });
+    const bar = page.getByRole('group', { name: 'Terminal keys' });
     await expect(bar).toBeVisible();
     const barBox = (await bar.boundingBox())!;
     expect(barBox.y + barBox.height).toBeLessThanOrEqual(844);
@@ -170,17 +170,17 @@ test.describe('phone', () => {
     const rows = (): Promise<number> => page.evaluate(() => window.paneFixture.terminal().rows);
     const withBar = await rows();
     await page.getByRole('button', { name: 'Terminal keys' }).tap();
-    await expect(page.getByRole('toolbar', { name: 'Terminal keys' })).toBeHidden();
+    await expect(page.getByRole('group', { name: 'Terminal keys' })).toBeHidden();
     await expect.poll(rows).toBeGreaterThan(withBar);
     await page.reload();
     await expect(page.getByRole('button', { name: 'Terminal keys' })).toBeVisible();
-    await expect(page.getByRole('toolbar', { name: 'Terminal keys' })).toBeHidden();
+    await expect(page.getByRole('group', { name: 'Terminal keys' })).toBeHidden();
   });
 });
 
 test('desktop pointer shows no key bar and no toggle', async ({ page }) => {
   await setup(page);
   await expect(page.getByRole('button', { name: 'Agent window' })).toBeVisible();
-  await expect(page.getByRole('toolbar', { name: 'Terminal keys' })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Terminal keys' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Terminal keys' })).toHaveCount(0);
 });
