@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,8 +31,13 @@ import (
 	"time"
 
 	gcplog "cloud.google.com/go/logging"
+	logpb "cloud.google.com/go/logging/apiv2/loggingpb"
 	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"google.golang.org/api/option"
+	mrpb "google.golang.org/genproto/googleapis/api/monitoredres"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // keyShapedValues are the values keyShapedError embeds; no
@@ -353,4 +360,345 @@ func TestCreateBaseHandler_WritesToCurrentStdout(t *testing.T) {
 			t.Errorf("useGCP=%v: redirected stdout = %q, want the log line", useGCP, data)
 		}
 	}
+}
+
+type captureLoggingServer struct {
+	logpb.UnimplementedLoggingServiceV2Server
+	mu      sync.Mutex
+	entries []*logpb.LogEntry
+}
+
+func (s *captureLoggingServer) WriteLogEntries(_ context.Context, req *logpb.WriteLogEntriesRequest) (*logpb.WriteLogEntriesResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ent := range req.GetEntries() {
+		if strings.HasSuffix(ent.GetLogName(), "/logs/diagnostic-log") {
+			continue
+		}
+		s.entries = append(s.entries, ent)
+	}
+	return &logpb.WriteLogEntriesResponse{}, nil
+}
+
+func (s *captureLoggingServer) takeEntries() []*logpb.LogEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]*logpb.LogEntry(nil), s.entries...)
+	s.entries = nil
+	return out
+}
+
+func newTestCloudLogger(t *testing.T) (*gcplog.Client, *gcplog.Logger, *captureLoggingServer, *CloudWriteStats, *bytes.Buffer) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer()
+	fake := &captureLoggingServer{}
+	logpb.RegisterLoggingServiceV2Server(srv, fake)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client, err := gcplog.NewClient(ctx, "test-project", option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := newCloudWriteStats(nil)
+	var errBuf bytes.Buffer
+	client.OnError = cloudClientOnError(stats, &errBuf)
+	t.Cleanup(func() { _ = client.Close() })
+
+	logger := client.Logger("test-log", gcplog.CommonResource(&mrpb.MonitoredResource{
+		Type:   "global",
+		Labels: map[string]string{"project_id": "test-project"},
+	}))
+	return client, logger, fake, stats, &errBuf
+}
+
+type badMarshalerWithSecret struct {
+	secret string
+}
+
+func (b badMarshalerWithSecret) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("cannot encode value")
+}
+
+// TestCloudHandler_UnencodableAttrsReplacedEntryWritten verifies that the
+// Cloud Logging slog handlers replace only the unencodable value (such as a
+// NaN nested in a map attribute or an out-of-range time.Time) and still
+// deliver the rest of the entry through the real Cloud Logging SDK without
+// client errors or leaking hidden struct fields (ptone/scion#4779).
+func TestCloudHandler_UnencodableAttrsReplacedEntryWritten(t *testing.T) {
+	client, gcpLogger, fake, stats, errBuf := newTestCloudLogger(t)
+	h := &CloudHandler{
+		logger:    gcpLogger,
+		client:    client,
+		level:     slog.LevelDebug,
+		component: "scion-hub",
+		projectID: "test-project",
+		version:   "test",
+		stats:     stats,
+	}
+	log := slog.New(h)
+
+	t.Run("NaN and Inf nested in map and direct", func(t *testing.T) {
+		errBuf.Reset()
+		callerMap := map[string]any{
+			"ok":      1.5,
+			"nan":     math.NaN(),
+			"pos_inf": math.Inf(1),
+			"neg_inf": math.Inf(-1),
+			"inner": map[string]float64{
+				"valid": 42,
+				"bad":   math.NaN(),
+			},
+		}
+		log.Info("stats recorded",
+			"keep", "preserved",
+			"metrics", callerMap,
+			slog.Float64("direct_nan", math.NaN()),
+			slog.Group("grp",
+				slog.String("grp_ok", "yes"),
+				slog.Float64("grp_nan", math.NaN()),
+			),
+		)
+		if err := gcpLogger.Flush(); err != nil {
+			t.Fatalf("Flush failed: %v (stderr: %s)", err, errBuf.String())
+		}
+		if stats.Failures(CloudReasonError) != 0 || errBuf.Len() != 0 {
+			t.Fatalf("unexpected client error: count=%d stderr=%q", stats.Failures(CloudReasonError), errBuf.String())
+		}
+		entries := fake.takeEntries()
+		if len(entries) != 1 {
+			t.Fatalf("entries delivered = %d, want 1", len(entries))
+		}
+		got := entries[0].GetJsonPayload().AsMap()
+		if got["message"] != "stats recorded" || got["keep"] != "preserved" {
+			t.Fatalf("top-level fields lost: %#v", got)
+		}
+		if got["direct_nan"] != "NaN" {
+			t.Errorf("direct_nan = %#v, want %q", got["direct_nan"], "NaN")
+		}
+		grp, ok := got["grp"].(map[string]any)
+		if !ok || grp["grp_ok"] != "yes" || grp["grp_nan"] != "NaN" {
+			t.Errorf("grp = %#v, want map with grp_ok=yes and grp_nan=NaN", got["grp"])
+		}
+		metrics, ok := got["metrics"].(map[string]any)
+		if !ok {
+			t.Fatalf("metrics = %#v (%T), want preserved map object", got["metrics"], got["metrics"])
+		}
+		if metrics["ok"] != 1.5 || metrics["nan"] != "NaN" || metrics["pos_inf"] != "+Inf" || metrics["neg_inf"] != "-Inf" {
+			t.Errorf("metrics = %#v", metrics)
+		}
+		inner, ok := metrics["inner"].(map[string]any)
+		if !ok || inner["valid"] != float64(42) || inner["bad"] != "NaN" {
+			t.Errorf("metrics.inner = %#v", metrics["inner"])
+		}
+		if v, ok := callerMap["nan"].(float64); !ok || !math.IsNaN(v) {
+			t.Errorf("caller map was mutated in place: %#v", callerMap)
+		}
+	})
+
+	t.Run("out-of-range time direct and nested", func(t *testing.T) {
+		errBuf.Reset()
+		validTime := time.Date(2026, 10, 12, 17, 0, 0, 0, time.UTC)
+		year10000 := time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+		negYear := time.Date(-1, 6, 15, 12, 0, 0, 0, time.UTC)
+		yearZero := time.Date(0, 6, 15, 12, 0, 0, 0, time.UTC)
+		badZone := time.Date(2026, 1, 1, 0, 0, 0, 0, time.FixedZone("bad", 25*3600))
+
+		log.Info("schedule checked",
+			"keep", "preserved",
+			"valid_time", validTime,
+			slog.Time("year_10000", year10000),
+			"negative_year", negYear,
+			"year_zero", yearZero,
+			"bad_zone", badZone,
+			"nested", map[string]any{
+				"ok":         "still-here",
+				"far_future": time.Unix(1<<50, 0).UTC(),
+				"before_min": yearZero,
+			},
+			"year_zero_only_map", map[string]any{
+				"ok":         "still-here",
+				"before_min": yearZero,
+			},
+		)
+		if err := gcpLogger.Flush(); err != nil {
+			t.Fatalf("Flush failed: %v (stderr: %s)", err, errBuf.String())
+		}
+		if stats.Failures(CloudReasonError) != 0 || errBuf.Len() != 0 {
+			t.Fatalf("unexpected client error: count=%d stderr=%q", stats.Failures(CloudReasonError), errBuf.String())
+		}
+		entries := fake.takeEntries()
+		if len(entries) != 1 {
+			t.Fatalf("entries delivered = %d, want 1", len(entries))
+		}
+		got := entries[0].GetJsonPayload().AsMap()
+		if got["message"] != "schedule checked" || got["keep"] != "preserved" {
+			t.Fatalf("top-level fields lost: %#v", got)
+		}
+		if got["valid_time"] != "2026-10-12T17:00:00Z" {
+			t.Errorf("valid_time = %#v, want RFC3339 string", got["valid_time"])
+		}
+		for _, k := range []string{"year_10000", "negative_year", "year_zero", "bad_zone"} {
+			if s, ok := got[k].(string); !ok || s == "" {
+				t.Errorf("%s = %#v (%T), want non-empty string replacement", k, got[k], got[k])
+			}
+		}
+		nested, ok := got["nested"].(map[string]any)
+		if !ok || nested["ok"] != "still-here" {
+			t.Fatalf("nested = %#v (%T), want preserved map object", got["nested"], got["nested"])
+		}
+		for _, k := range []string{"far_future", "before_min"} {
+			if s, ok := nested[k].(string); !ok || s == "" {
+				t.Errorf("nested.%s = %#v (%T), want non-empty string replacement", k, nested[k], nested[k])
+			}
+		}
+		yzMap, ok := got["year_zero_only_map"].(map[string]any)
+		if !ok || yzMap["ok"] != "still-here" {
+			t.Fatalf("year_zero_only_map = %#v (%T), want preserved map object", got["year_zero_only_map"], got["year_zero_only_map"])
+		}
+		if s, ok := yzMap["before_min"].(string); !ok || s == "" || strings.HasSuffix(s, "Z") {
+			t.Errorf("year_zero_only_map.before_min = %#v, want replaced non-RFC3339 string", yzMap["before_min"])
+		}
+	})
+
+	t.Run("struct slices cycles and hidden fields", func(t *testing.T) {
+		errBuf.Reset()
+		type hiddenEmbed struct {
+			Promoted float64 `json:"promoted"`
+			secret   string
+		}
+		type sampleStruct struct {
+			hiddenEmbed
+			Count      int     `json:"count"`
+			Ratio      float64 `json:"ratio"`
+			OmitZero   string  `json:"omit_zero,omitempty"`
+			Hidden     string  `json:"-"`
+			unexported string
+		}
+		type linkedNode struct {
+			Name string      `json:"name"`
+			Next *linkedNode `json:"next,omitempty"`
+		}
+		acyclicNode := &linkedNode{Name: "head", Next: &linkedNode{Name: "tail"}}
+		cyclicNode := &linkedNode{Name: "loop"}
+		cyclicNode.Next = cyclicNode
+		cyclic := map[string]any{"ok": "yes"}
+		cyclic["self"] = cyclic
+
+		log.Info("composite check",
+			"struct_val", sampleStruct{
+				hiddenEmbed: hiddenEmbed{
+					Promoted: 3.5,
+					secret:   "do-not-log-embed-secret",
+				},
+				Count:      7,
+				Ratio:      math.NaN(),
+				Hidden:     "do-not-log-json-dash",
+				unexported: "do-not-log-unexported",
+			},
+			"bad_marshaler", badMarshalerWithSecret{secret: "do-not-log-marshaler-secret"},
+			"slice_val", []float64{1.25, math.NaN(), 2.5},
+			"acyclic_node", acyclicNode,
+			"cyclic_node", cyclicNode,
+			"cyclic", cyclic,
+		)
+		if err := gcpLogger.Flush(); err != nil {
+			t.Fatalf("Flush failed: %v (stderr: %s)", err, errBuf.String())
+		}
+		entries := fake.takeEntries()
+		if len(entries) != 1 {
+			t.Fatalf("entries delivered = %d, want 1", len(entries))
+		}
+		got := entries[0].GetJsonPayload().AsMap()
+		raw, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{
+			"do-not-log-json-dash",
+			"do-not-log-unexported",
+			"do-not-log-marshaler-secret",
+			"do-not-log-embed-secret",
+		} {
+			if strings.Contains(string(raw), forbidden) {
+				t.Errorf("payload leaked hidden field %q: %s", forbidden, raw)
+			}
+		}
+		sv, ok := got["struct_val"].(map[string]any)
+		if !ok || sv["count"] != float64(7) || sv["ratio"] != "NaN" || sv["promoted"] != 3.5 {
+			t.Errorf("struct_val = %#v", got["struct_val"])
+		}
+		if _, present := sv["omit_zero"]; present {
+			t.Errorf("struct_val kept empty omitempty field: %#v", sv)
+		}
+		sl, ok := got["slice_val"].([]any)
+		if !ok || len(sl) != 3 || sl[0] != 1.25 || sl[1] != "NaN" || sl[2] != 2.5 {
+			t.Errorf("slice_val = %#v", got["slice_val"])
+		}
+		an, ok := got["acyclic_node"].(map[string]any)
+		if !ok || an["name"] != "head" {
+			t.Errorf("acyclic_node = %#v", got["acyclic_node"])
+		}
+		cn, ok := got["cyclic_node"].(map[string]any)
+		if !ok || cn["name"] != "loop" || cn["next"] != "<cycle>" {
+			t.Errorf("cyclic_node = %#v", got["cyclic_node"])
+		}
+		cm, ok := got["cyclic"].(map[string]any)
+		if !ok || cm["ok"] != "yes" || cm["self"] != "<cycle>" {
+			t.Errorf("cyclic = %#v", got["cyclic"])
+		}
+	})
+
+	t.Run("dedicated message and artifact handlers and WithAttrs", func(t *testing.T) {
+		for name, handler := range map[string]slog.Handler{
+			"cloud-with-attrs": h.WithAttrs([]slog.Attr{
+				slog.Any("bound_map", map[string]any{"ok": "yes", "bad": math.NaN()}),
+			}),
+			"message": &messageCloudHandler{CloudHandler: CloudHandler{
+				logger: gcpLogger, client: client, level: slog.LevelDebug, component: "scion-hub", stats: stats,
+			}},
+			"artifact": &artifactCloudHandler{CloudHandler: CloudHandler{
+				logger: gcpLogger, client: client, level: slog.LevelDebug, component: "scion-hub", stats: stats,
+			}},
+		} {
+			t.Run(name, func(t *testing.T) {
+				errBuf.Reset()
+				slog.New(handler).Info("dedicated event",
+					"keep", "ok",
+					"nested", map[string]any{"v": math.NaN()},
+					"when", time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC),
+				)
+				if err := gcpLogger.Flush(); err != nil {
+					t.Fatalf("Flush failed: %v (stderr: %s)", err, errBuf.String())
+				}
+				entries := fake.takeEntries()
+				if len(entries) != 1 {
+					t.Fatalf("entries = %d, want 1", len(entries))
+				}
+				got := entries[0].GetJsonPayload().AsMap()
+				if got["keep"] != "ok" {
+					t.Errorf("keep = %#v", got["keep"])
+				}
+				nested, ok := got["nested"].(map[string]any)
+				if !ok || nested["v"] != "NaN" {
+					t.Errorf("nested = %#v", got["nested"])
+				}
+				if s, ok := got["when"].(string); !ok || s == "" {
+					t.Errorf("when = %#v (%T), want non-empty string", got["when"], got["when"])
+				}
+			})
+		}
+	})
 }
