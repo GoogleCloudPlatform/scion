@@ -294,9 +294,6 @@ export const decisionsPageSharedStyles: CSSResult = css`
   sl-alert[data-search-timeout] {
     display: block;
     margin: 0.75rem 0;
-    --sl-panel-background-color: var(--scion-surface, #ffffff);
-    --sl-panel-border-color: var(--scion-border, #e2e8f0);
-    --sl-color-neutral-700: var(--scion-text, #1e293b);
   }
 
   .date-range-error {

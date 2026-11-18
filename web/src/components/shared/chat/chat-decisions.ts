@@ -277,19 +277,9 @@ export class ScionChatDecisions extends LitElement {
     }
 
     /*
-     * Shoelace draws a default button's label in neutral-700, which the dark
-     * theme maps to a slate barely lighter than the button itself, so an
-     * enabled choice read as disabled. Use the theme's text colour.
-     */
-    .card sl-button[variant='default'] {
-      --sl-color-neutral-700: var(--scion-text, #1e293b);
-    }
-
-    /*
      * A set card's plain choices are native buttons (renderSetButton) drawn
-     * as a small sl-button: Shoelace's own rules and tokens, so both themes
-     * match the single card's sl-buttons. Default labels use the theme text
-     * colour and filled labels white, as the sl-button overrides below do.
+     * as a small sl-button using Shoelace's own rules and tokens, so both
+     * themes match the single card's sl-buttons.
      */
     .sb {
       appearance: none;
@@ -387,7 +377,7 @@ export class ScionChatDecisions extends LitElement {
     .sb-filled {
       background-color: var(--sl-color-primary-600, #2563eb);
       border-color: var(--sl-color-primary-600, #2563eb);
-      color: #fff;
+      color: var(--sl-color-neutral-0, #fff);
     }
 
     @media (hover: hover) {
@@ -411,14 +401,14 @@ export class ScionChatDecisions extends LitElement {
     @media (hover: hover) {
       .sb-outline:hover:not(:disabled):not([data-readonly]) {
         background-color: var(--sl-color-primary-600);
-        color: #fff;
+        color: var(--sl-color-neutral-0, #fff);
       }
     }
 
     .sb-outline:active:not(:disabled):not([data-readonly]) {
       border-color: var(--sl-color-primary-700);
       background-color: var(--sl-color-primary-700);
-      color: #fff;
+      color: var(--sl-color-neutral-0, #fff);
     }
 
     .sb-subtle {
@@ -439,15 +429,6 @@ export class ScionChatDecisions extends LitElement {
       background-color: var(--sl-color-primary-100);
       border-color: var(--sl-color-primary-400);
       color: var(--sl-color-primary-700);
-    }
-
-    /*
-     * A filled primary button draws its label in neutral-0, which the dark
-     * theme maps to a dark slate (about 3.5:1 on the primary fill). Keep it
-     * white, as in light mode and the mocks.
-     */
-    .card sl-button[variant='primary']:not([outline]) {
-      --sl-color-neutral-0: #fff;
     }
 
     .opt {
@@ -695,18 +676,9 @@ export class ScionChatDecisions extends LitElement {
       flex: 1;
     }
 
-    /*
-     * The app theme leaves Shoelace's panel background (neutral-50) and
-     * message text (neutral-700) at their light values in dark mode, which
-     * drew a white alert inside a dark card. Use the card's own surface and
-     * text colours.
-     */
     .card sl-alert.changed {
       display: block;
       margin: 0.6rem 0.75rem 0;
-      --sl-panel-background-color: var(--scion-surface, #fff);
-      --sl-panel-border-color: var(--scion-border, #e2e8f0);
-      --sl-color-neutral-700: var(--scion-text, #1e293b);
     }
 
     .note {
@@ -843,10 +815,6 @@ export class ScionChatDecisions extends LitElement {
     .confirmbar > sl-icon {
       flex-shrink: 0;
       color: var(--scion-primary, #3b82f6);
-    }
-
-    .confirmbar sl-button[variant='default'] {
-      --sl-color-neutral-700: var(--scion-text, #1e293b);
     }
 
     .row-foot .muted {
