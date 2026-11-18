@@ -25,11 +25,12 @@ do not use them for callbacks.
 ## Waiting on external processes — the blocked-wait pairing rule
 
 When waiting on an external, non-agent process (CI run, build job, deploy,
-third-party API), calling `sciontool status blocked "..."` alone is **not
-sufficient**. That command marks intentional waiting for the stall detector —
-it does not poll anything or wake you when the external condition resolves.
-Without a separate wake mechanism, you sit waiting and only resume if an
-unrelated inbound message happens to arrive.
+third-party API) or a silence-accepted human deadline, calling
+`sciontool status blocked "..."` alone is **not sufficient**. That command
+marks intentional waiting for the stall detector — it does not poll anything
+or wake you when the external condition resolves. Without a separate wake
+mechanism, you sit waiting and only resume if an unrelated inbound message
+happens to arrive.
 
 **Correct pattern:** schedule a self-callback, then set blocked status.
 
@@ -48,7 +49,10 @@ detector from flagging you during the wait. **Neither replaces the other.**
 
 `sciontool status blocked` alone **is** sufficient when waiting on another
 agent or a scheduled event already tracked by the orchestration system —
-those fire their own state-change notifications.
+those fire their own state-change notifications. A silence-accepted or
+default-proceed human deadline ("reply only if you object by …") emits no
+message or event when unopposed, so pair it with a one-shot self-callback for
+the deadline too.
 
 Use `blocked` for these specific waits, and always while your own background
 job or process runs. When you have no further work until something new
