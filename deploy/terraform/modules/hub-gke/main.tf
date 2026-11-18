@@ -80,9 +80,13 @@ locals {
       # Only when enabled, so existing hubs' values stay byte-identical by
       # default (the chart's own defaults are "" and false). hub.hubClass =
       # "test" is required by the chart whenever hub.testIdentities.enabled is
-      # true. Unrelated to test login, which the chart does not offer.
+      # true; split into two merge maps so each conditional unifies with {} as
+      # a homogeneous map. Unrelated to test login, which the chart does not
+      # offer.
       var.test_identities_enabled ? {
         hubClass = "test"
+      } : {},
+      var.test_identities_enabled ? {
         testIdentities = {
           enabled = true
         }
