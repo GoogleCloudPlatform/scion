@@ -59,6 +59,7 @@ const (
 
 	GitHubWebhookSkipReasonQueueFull         = "queue_full"
 	GitHubWebhookSkipReasonAttributesCeiling = "attributes_ceiling"
+	GitHubWebhookSkipReasonInvalidEvent      = "invalid_event"
 
 	GitHubWebhookRoutingRoutedToPrimary = "routed_to_primary"
 	GitHubWebhookRoutingStalePrimary    = "stale_primary"
@@ -603,6 +604,20 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 			skipped = append(skipped, GitHubWebhookSkippedProject{
 				ProjectID: proj.ID,
 				Reason:    GitHubWebhookSkipReasonQueueFull,
+			})
+			continue
+		}
+
+		if errors.Is(txErr, store.ErrInvalidInput) {
+			slog.Warn("Skipping GitHub trigger event rejected by store validation",
+				"project_id", proj.ID,
+				"installation_id", inst.InstallationID,
+				"delivery_id", deliveryID,
+				"reason", GitHubWebhookSkipReasonInvalidEvent,
+			)
+			skipped = append(skipped, GitHubWebhookSkippedProject{
+				ProjectID: proj.ID,
+				Reason:    GitHubWebhookSkipReasonInvalidEvent,
 			})
 			continue
 		}

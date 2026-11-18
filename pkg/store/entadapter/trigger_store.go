@@ -15,6 +15,7 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1068,6 +1069,20 @@ func unmarshalStringMap(raw string) map[string]string {
 	return out
 }
 
+func encodeCompactNoEscapeJSON(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	b := buf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
+	}
+	return b, nil
+}
+
 func marshalStringListMap(m map[string][]string) (string, error) {
 	if len(m) == 0 {
 		return "{}", nil
@@ -1080,7 +1095,9 @@ func marshalStringListMap(m map[string][]string) (string, error) {
 		}
 		clean[k] = v
 	}
-	raw, err := json.Marshal(clean)
+	// Measure and persist with SetEscapeHTML(false) so '<', '>', and '&' match
+	// the exact serialized byte count enforced by githubtrigger.Normalize.
+	raw, err := encodeCompactNoEscapeJSON(clean)
 	if err != nil {
 		return "", fmt.Errorf("%w: marshal string list map: %v", store.ErrInvalidInput, err)
 	}

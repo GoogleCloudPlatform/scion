@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -1124,4 +1125,179 @@ func TestGitHubWebhookIngress_ReceiptAuditContentFree(t *testing.T) {
 	} {
 		assert.NotContains(t, auditOut, forbidden, "audit output must be strictly content-free")
 	}
+}
+
+type ghInvalidInputTxStore struct {
+	store.Store
+	fault         *storeFaultSwitch
+	failProjectID string // empty fails every project when armed
+}
+
+func (w *ghInvalidInputTxStore) CountDurableQueuePending(ctx context.Context, kind, projectID string) (int, error) {
+	if c, ok := w.Store.(store.DurableQueuePendingCounter); ok {
+		return c.CountDurableQueuePending(ctx, kind, projectID)
+	}
+	return 0, errors.New("inner store missing DurableQueuePendingCounter")
+}
+
+func (w *ghInvalidInputTxStore) CreateTriggerEvent(ctx context.Context, evt *store.TriggerEvent) error {
+	if w.fault.Active() && (w.failProjectID == "" || (evt != nil && evt.ProjectID == w.failProjectID)) {
+		return fmt.Errorf("%w: injected invalid trigger event", store.ErrInvalidInput)
+	}
+	return w.Store.CreateTriggerEvent(ctx, evt)
+}
+
+func (w *ghInvalidInputTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return w.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&ghInvalidInputTxStore{
+			Store:         tx,
+			fault:         w.fault,
+			failProjectID: w.failProjectID,
+		})
+	})
+}
+
+func TestGitHubWebhookIngress_AmpersandLabelsCeilingAndInvalidInputSkip(t *testing.T) {
+	t.Run("ampersand_heavy_labels_within_unescaped_8kib_persist_without_500", func(t *testing.T) {
+		f := setupGitHubIngressFixture(t)
+		ctx := context.Background()
+		proj := f.createCandidateProject(t, "amp-labels-proj", "https://github.com/acme/widgets.git", f.instID)
+
+		// 40 labels of 50 characters (mostly '&') fit under 8 KiB with
+		// SetEscapeHTML(false) (~2.1 KiB) even though standard json.Marshal
+		// expands each '&' to '\u0026' (> 11 KiB).
+		labelObjs := make([]map[string]any, 40)
+		wantLabels := make([]string, 40)
+		for i := range labelObjs {
+			prefix := fmt.Sprintf("L%02d", i)
+			name := prefix + strings.Repeat("&", 50-len(prefix))
+			wantLabels[i] = name
+			labelObjs[i] = map[string]any{"id": i + 1, "name": name}
+		}
+
+		raw, err := json.Marshal(map[string]any{
+			"action":       "created",
+			"installation": map[string]any{"id": f.instID},
+			"repository": map[string]any{
+				"id": 101, "name": "widgets", "full_name": "acme/widgets", "private": false,
+				"owner": map[string]any{"login": "acme", "id": 10, "type": "Organization"},
+			},
+			"sender": map[string]any{"login": "alice", "id": 202, "type": "User"},
+			"issue": map[string]any{
+				"number": 42, "state": "open", "title": "R&D labels test", "body": "body",
+				"html_url":   "https://github.com/acme/widgets/issues/42",
+				"created_at": "2026-11-18T11:00:00Z", "updated_at": "2026-11-18T11:30:00Z",
+				"labels": labelObjs,
+			},
+			"comment": map[string]any{
+				"id": 701, "body": "@scion-bot /ping",
+				"html_url":   "https://github.com/acme/widgets/issues/42#issuecomment-701",
+				"created_at": "2026-11-18T11:30:00Z", "updated_at": "2026-11-18T11:30:00Z",
+			},
+		})
+		require.NoError(t, err)
+
+		deliv := uuid.NewString()
+		rec := f.postDelivery(t, "issue_comment", deliv, raw, nil)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+		var resp GitHubWebhookAcceptedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, GitHubWebhookStatusQueued, resp.Status)
+		require.Len(t, resp.Events, 1)
+		assert.Empty(t, resp.SkippedProjects)
+
+		stored, err := f.store.GetTriggerEvent(ctx, resp.Events[0].EventID)
+		require.NoError(t, err)
+		assert.Equal(t, proj.ID, stored.ProjectID)
+		assert.Empty(t, stored.Attributes["lists_truncated"])
+		assert.Equal(t, wantLabels, stored.Lists["labels"])
+	})
+
+	t.Run("store_err_invalid_input_becomes_skipped_project_with_audit_not_500", func(t *testing.T) {
+		srv, rawStore, wrapper, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *ghInvalidInputTxStore {
+			return &ghInvalidInputTxStore{Store: inner, fault: sw}
+		})
+
+		const (
+			testAppID  int64 = 778899
+			testSecret       = "whsec-github-invalid-input-test"
+			testInstID int64 = 554433
+		)
+		baseNow := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+		auditBuf := &ghIngressLogBuffer{}
+		f := &githubIngressTestFixture{
+			srv:           srv,
+			store:         rawStore,
+			appID:         testAppID,
+			webhookSecret: testSecret,
+			instID:        testInstID,
+			auditBuf:      auditBuf,
+			warnBuf:       &ghIngressLogBuffer{},
+			now:           baseNow,
+		}
+
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.AppID = testAppID
+		srv.config.GitHubAppConfig.WebhookSecret = testSecret
+		srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+		srv.config.GitHubAppConfig.WebhooksEnabled = true
+		srv.mu.Unlock()
+
+		srv.githubWebhookIngress.mu.Lock()
+		srv.githubWebhookIngress.nowFn = f.currentTime
+		srv.githubWebhookIngress.auditLogger = slog.New(slog.NewJSONHandler(auditBuf, nil))
+		srv.githubWebhookIngress.mu.Unlock()
+
+		setTriggerExperimentsForGitHubIngressTest(t, srv, true, true)
+		require.NoError(t, rawStore.CreateGitHubInstallation(context.Background(), &store.GitHubInstallation{
+			InstallationID: testInstID,
+			AccountLogin:   "acme",
+			AccountType:    "Organization",
+			AppID:          testAppID,
+			Status:         store.GitHubInstallationStatusActive,
+		}))
+
+		projA := f.createCandidateProject(t, "inv-proj-a", "https://github.com/acme/widgets.git", testInstID)
+		projB := f.createCandidateProject(t, "inv-proj-b", "https://github.com/acme/widgets.git", testInstID)
+
+		// 1. Fail only projA: projA is skipped with invalid_event, projB still queues.
+		wrapper.failProjectID = projA.ID
+		fault.Arm()
+		auditBuf.Reset()
+
+		deliv1 := uuid.NewString()
+		body1 := sampleIssueCommentPayload(t, testInstID, "acme/widgets", "alice", "User", "hello", baseNow)
+		rec1 := f.postDelivery(t, "issue_comment", deliv1, body1, nil)
+		require.Equal(t, http.StatusAccepted, rec1.Code, rec1.Body.String())
+
+		var resp1 GitHubWebhookAcceptedResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		assert.Equal(t, GitHubWebhookStatusQueued, resp1.Status)
+		require.Len(t, resp1.Events, 1)
+		assert.Equal(t, projB.ID, resp1.Events[0].ProjectID)
+		require.Len(t, resp1.SkippedProjects, 1)
+		assert.Equal(t, GitHubWebhookSkippedProject{
+			ProjectID: projA.ID,
+			Reason:    GitHubWebhookSkipReasonInvalidEvent,
+		}, resp1.SkippedProjects[0])
+		assert.Contains(t, auditBuf.String(), GitHubWebhookSkipReasonInvalidEvent)
+
+		// 2. Fail all projects: top-level status is 202 skipped (not 500) + audit.
+		wrapper.failProjectID = ""
+		auditBuf.Reset()
+
+		deliv2 := uuid.NewString()
+		rec2 := f.postDelivery(t, "issue_comment", deliv2, body1, nil)
+		require.Equal(t, http.StatusAccepted, rec2.Code, rec2.Body.String())
+
+		var resp2 GitHubWebhookAcceptedResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.Equal(t, GitHubWebhookStatusSkipped, resp2.Status)
+		assert.Empty(t, resp2.Events)
+		require.Len(t, resp2.SkippedProjects, 2)
+		audits := parseAuditLines(t, auditBuf.String())
+		require.Len(t, audits, 1)
+		assert.Equal(t, GitHubWebhookStatusSkipped, audits[0]["result"])
+	})
 }

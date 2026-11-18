@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -906,7 +907,39 @@ func TestTriggerEvent_ListsPersistenceAndCeiling(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, gotEmpty.Lists)
 
-	// Lists exceeding 8 KiB serialized ceiling is rejected with ErrInvalidInput.
+	// Regression (R2): 40 50-char '&'-heavy labels fit comfortably within 8 KiB
+	// under SetEscapeHTML(false) (~2.1 KiB) even though standard json.Marshal
+	// expands each '&' to '\u0026' (> 11 KiB). The store must measure the unescaped
+	// JSON bytes matching githubtrigger.Normalize.
+	ampLabels := make([]string, 40)
+	for i := range ampLabels {
+		prefix := fmt.Sprintf("L%02d", i)
+		ampLabels[i] = prefix + strings.Repeat("&", 50-len(prefix))
+	}
+	ampLists := map[string][]string{"labels": ampLabels}
+	escapedRaw, err := json.Marshal(ampLists)
+	require.NoError(t, err)
+	require.Greater(t, len(escapedRaw), store.MaxTriggerEventListsBytes)
+
+	evAmp := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#45",
+		DedupKey:   "a2d3162e-cc78-11e3-81ab-4c9367dc0958/" + projID,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Lists:      ampLists,
+		Payload:    `{"action":"created"}`,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, evAmp))
+	gotAmp, err := cs.GetTriggerEvent(ctx, evAmp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ampLabels, gotAmp.Lists["labels"])
+
+	// Lists genuinely exceeding 8 KiB under SetEscapeHTML(false) are rejected with ErrInvalidInput.
 	oversized := make([]string, 0, 200)
 	for i := 0; i < 200; i++ {
 		oversized = append(oversized, strings.Repeat("x", 60))
