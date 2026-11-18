@@ -607,9 +607,12 @@ func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) bool
 	sub, err := p.bus.Subscribe(topic, func(hctx context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
-		// Carry only the notification ID (log correlation) from the
+		// Carry only the notification ID and already-recorded marker from the
 		// publisher's ctx; delivery keeps its own lifetime.
 		ctx = withNotificationID(ctx, notificationIDFromContext(hctx))
+		if userRecordLoggedFromContext(hctx) {
+			ctx = withUserRecordLogged(ctx)
+		}
 		p.deliverToUser(ctx, projectID, t, msg)
 	})
 	if err != nil {
@@ -652,6 +655,24 @@ func notificationIDFromContext(ctx context.Context) string {
 	return id
 }
 
+// userRecordLoggedKey marks an in-process user-message publish whose message
+// record was already written by the caller (e.g. createInboxMessage in the
+// federated G2 write-deny corner), so deliverToUser's early-return defer does
+// not write a duplicate record.
+type userRecordLoggedKey struct{}
+
+func withUserRecordLogged(ctx context.Context) context.Context {
+	return context.WithValue(ctx, userRecordLoggedKey{}, true)
+}
+
+func userRecordLoggedFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	logged, _ := ctx.Value(userRecordLoggedKey{}).(bool)
+	return logged
+}
+
 // canPersistUserDM reports whether deliverToUser can persist a DM addressed
 // to recipientID. Under G2 write-deny a DM row needs a resolved conversation,
 // and DM conversation keys only accept canonical UUIDs
@@ -674,8 +695,8 @@ func canPersistUserDM(recipientID string, writeDeny bool) bool {
 func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic string, msg *messages.StructuredMessage) {
 	// One message record per message: the success path below writes it;
 	// an early return (conversation or persist failure) writes it here so
-	// the message still appears once.
-	recorded := false
+	// the message still appears once, unless the caller already logged it.
+	recorded := userRecordLoggedFromContext(ctx)
 	defer func() {
 		if recorded || p.messageLog == nil {
 			return

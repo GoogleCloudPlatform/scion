@@ -24,6 +24,7 @@ package hub
 // ---------------------------------------------------------------------------
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -421,6 +422,8 @@ func TestMessageLog_RoutedInbound_PrimaryAndMention_OneRecordEach(t *testing.T) 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
 		ProjectID:    env.project.ID,
 		DefaultAgent: "alpha",
+		Surface:      "slack",
+		ExternalRef:  "slack:C123:routed-rec",
 		Message: &messages.StructuredMessage{
 			Version: messages.Version,
 			Channel: "slack",
@@ -431,9 +434,25 @@ func TestMessageLog_RoutedInbound_PrimaryAndMention_OneRecordEach(t *testing.T) 
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
+	alphaMsgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{AgentID: env.agent1.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, alphaMsgs.Items, 1)
+	wantConvID := alphaMsgs.Items[0].ConversationID
+	require.NotEmpty(t, wantConvID)
+
 	entries := messageLogEntries(t, buf)
-	assert.Len(t, recordsForRecipient(t, entries, "agent:alpha"), 1, "primary: %v", entries)
-	assert.Len(t, recordsForRecipient(t, entries, "agent:beta"), 1, "mention: %v", entries)
+	alphaRecs := recordsForRecipient(t, entries, "agent:alpha")
+	require.Len(t, alphaRecs, 1, "primary: %v", entries)
+	assert.Equal(t, "agent:alpha", alphaRecs[0][logging.AttrRecipient])
+	assert.Equal(t, env.agent1.ID, alphaRecs[0][logging.AttrRecipientID])
+	assert.Equal(t, wantConvID, alphaRecs[0]["conversation_id"])
+
+	betaRecs := recordsForRecipient(t, entries, "agent:beta")
+	require.Len(t, betaRecs, 1, "mention: %v", entries)
+	assert.Equal(t, "agent:beta", betaRecs[0][logging.AttrRecipient])
+	assert.Equal(t, env.agent2.ID, betaRecs[0][logging.AttrRecipientID])
+	assert.Equal(t, wantConvID, betaRecs[0]["conversation_id"])
+
 	assert.Len(t, messageRecords(t, entries), 2, "no other records: %v", entries)
 	delivered := findMessageLogEntry(t, entries, "routed inbound message delivered")
 	assert.Equal(t, logging.LogKindEvent, delivered[logging.AttrLogKind])
@@ -726,18 +745,27 @@ func TestMessageLog_BrokerInbound_OneRecord(t *testing.T) {
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
 				Channel:   "discord",
 				Sender:    f.senderRef,
-				Recipient: "agent:" + f.agent.Slug,
+				// Caller text without RecipientID; the record must carry the
+				// hub's resolved agent recipient and effective conversation.
+				Recipient: "agent:caller-placeholder",
 				Msg:       "records inbound",
 				Type:      messages.TypeInstruction,
 			}
-			rec := f.sendBrokerInbound(t, msg, "", "", "")
+			rec := f.sendBrokerInbound(t, msg, "discord", "discord:chan:inbound-rec", "")
 			require.Equal(t, tc.wantCode, rec.Code, "body: %s", rec.Body.String())
+
+			conv, convErr := f.store.GetConversationByExternalRef(context.Background(), "discord", "discord:chan:inbound-rec")
+			require.NoError(t, convErr)
+			require.NotNil(t, conv)
+			require.NotEmpty(t, conv.ID)
 
 			entries := messageLogEntries(t, buf)
 			recs := messageRecords(t, entries)
 			require.Len(t, recs, 1, "%v", entries)
 			assert.Equal(t, "message handed to delivery", recs[0]["msg"])
 			assert.Equal(t, "agent:"+f.agent.Slug, recs[0][logging.AttrRecipient])
+			assert.Equal(t, f.agent.ID, recs[0][logging.AttrRecipientID])
+			assert.Equal(t, conv.ID, recs[0]["conversation_id"])
 			assert.Equal(t, "records inbound", recs[0]["message_content"])
 			if tc.dispErr == nil {
 				delivered := findMessageLogEntry(t, entries, "inbound broker message delivered")
@@ -865,4 +893,241 @@ func TestMessageLog_DeliverToUser_NotPersisted_OneRecord(t *testing.T) {
 	assert.Equal(t, "user message handed to delivery", recs[0]["msg"])
 	assert.Equal(t, false, recs[0]["persisted"])
 	assert.Equal(t, "records not persisted", recs[0]["message_content"])
+}
+
+// Recording a message with no agent writes no message record (ptone/scion#4650).
+func TestMessageLog_LogMessageRecord_NilAgent_WritesNothing(t *testing.T) {
+	logger, buf := newJSONMessageLogger()
+	msg := messages.NewInstruction("user:alice", "agent:missing", "should not be recorded")
+	msg.SenderID = tid("nil-agent-sender")
+
+	logMessageRecord(logger, nil, msg)
+
+	assert.Empty(t, messageLogEntries(t, buf))
+}
+
+// Direct-to-inbox user notifications (with no agent runtime / broker
+// subscriber persisting them) create one message record, like other delivered
+// messages (ptone/scion#4650).
+func TestMessageLog_UserNotification_DirectInbox_OneRecord(t *testing.T) {
+	t.Run("direct inbox without broker", func(t *testing.T) {
+		env := setupNotificationTest(t)
+		ctx := context.Background()
+		userID := api.NewUUID()
+		require.NoError(t, env.store.CreateUser(ctx, &store.User{
+			ID: userID, Email: "inbox-rec@example.com", DisplayName: "Inbox Rec",
+		}))
+		env.useUserSubscription(t, userID, "COMPLETED")
+
+		logger, buf := newJSONMessageLogger()
+		env.nd.messageLog = logger
+		env.nd.Start()
+		defer env.nd.Stop()
+
+		env.publishStatus("completed")
+
+		rows := env.settledUserRows(t, userID)
+		require.Len(t, rows, 1)
+		require.NotEmpty(t, rows[0].ConversationID)
+
+		require.Eventually(t, func() bool {
+			return len(messageRecords(t, messageLogEntries(t, buf))) >= 1
+		}, 2*time.Second, 20*time.Millisecond, "direct inbox notification wrote no message record")
+
+		recs := messageRecords(t, messageLogEntries(t, buf))
+		require.Len(t, recs, 1)
+		assert.Equal(t, "agent:"+env.watched.Slug, recs[0][logging.AttrSender])
+		assert.Equal(t, env.watched.ID, recs[0][logging.AttrSenderID])
+		assert.Equal(t, "user:"+userID, recs[0][logging.AttrRecipient])
+		assert.Equal(t, userID, recs[0][logging.AttrRecipientID])
+		assert.Equal(t, messages.TypeStateChange, recs[0][logging.AttrMsgType])
+		assert.Equal(t, rows[0].Msg, recs[0]["message_content"])
+		assert.Equal(t, rows[0].ConversationID, recs[0]["conversation_id"])
+		assert.Equal(t, env.project.ID, recs[0]["project_id"])
+		assert.Equal(t, env.watched.ID, recs[0]["agent_id"])
+	})
+
+	t.Run("federated subscriber under write-deny with broker", func(t *testing.T) {
+		env := setupNotificationTest(t)
+		const userID = "fed-rec@example.org"
+		env.useUserSubscription(t, userID, "COMPLETED")
+		_ = env.startRealBrokerProxy(t)
+		writeDeny := func() bool { return true }
+		env.nd.writeDenyEnabled = writeDeny
+		env.nd.brokerProxy.writeDenyEnabled = writeDeny
+
+		logger, buf := newJSONMessageLogger()
+		env.nd.messageLog = logger
+		env.nd.brokerProxy.messageLog = logger
+		env.nd.Start()
+		defer env.nd.Stop()
+
+		env.publishStatus("completed")
+
+		rows := env.settledUserRows(t, userID)
+		require.Len(t, rows, 1)
+
+		require.Eventually(t, func() bool {
+			return len(messageRecords(t, messageLogEntries(t, buf))) >= 1
+		}, 2*time.Second, 20*time.Millisecond, "federated inbox notification wrote no message record")
+		require.Never(t, func() bool {
+			return len(messageRecords(t, messageLogEntries(t, buf))) > 1
+		}, 200*time.Millisecond, 20*time.Millisecond, "duplicate message record written for federated inbox notification")
+
+		recs := messageRecords(t, messageLogEntries(t, buf))
+		require.Len(t, recs, 1)
+		assert.Equal(t, "agent:"+env.watched.Slug, recs[0][logging.AttrSender])
+		assert.Equal(t, "user:"+userID, recs[0][logging.AttrRecipient])
+		assert.Equal(t, rows[0].Msg, recs[0]["message_content"])
+	})
+
+	t.Run("broker publish failure fallback to inbox", func(t *testing.T) {
+		env := setupNotificationTest(t)
+		userID := api.NewUUID()
+		env.useUserSubscription(t, userID, "COMPLETED")
+		bus := env.startRealBrokerProxy(t)
+		require.NoError(t, bus.Close())
+
+		logger, buf := newJSONMessageLogger()
+		env.nd.messageLog = logger
+		env.nd.brokerProxy.messageLog = logger
+		env.nd.Start()
+		defer env.nd.Stop()
+
+		env.publishStatus("completed")
+
+		rows := env.settledUserRows(t, userID)
+		require.Len(t, rows, 1)
+
+		require.Eventually(t, func() bool {
+			return len(messageRecords(t, messageLogEntries(t, buf))) >= 1
+		}, 2*time.Second, 20*time.Millisecond, "fallback inbox notification wrote no message record")
+
+		recs := messageRecords(t, messageLogEntries(t, buf))
+		require.Len(t, recs, 1)
+		assert.Equal(t, "user:"+userID, recs[0][logging.AttrRecipient])
+		assert.Equal(t, rows[0].Msg, recs[0]["message_content"])
+	})
+}
+
+// Refused (4xx) agent message requests must not log "message received for
+// delivery" or write a message record; they log a refusal instead
+// (ptone/scion#4650).
+func TestMessageLog_HandleAgentMessage_Refused_LogsRefusalNotReceived(t *testing.T) {
+	assertRefusedOnly := func(t *testing.T, buf *syncBuffer, wantCode int, wantRecipient string) {
+		t.Helper()
+		entries := messageLogEntries(t, buf)
+		for _, e := range entries {
+			assert.NotEqual(t, "message received for delivery", e["msg"],
+				"refused request must not log 'message received for delivery': %v", entries)
+		}
+		assert.Empty(t, messageRecords(t, entries),
+			"refused request must write no message record: %v", entries)
+		refusal := findMessageLogEntry(t, entries, "agent message request refused")
+		assert.Equal(t, logging.LogKindEvent, refusal[logging.AttrLogKind])
+		assert.EqualValues(t, wantCode, refusal["status"])
+		assert.NotContains(t, refusal, "message_content", "refusal log must not carry message body")
+		if wantRecipient != "" {
+			assert.Equal(t, wantRecipient, refusal[logging.AttrRecipient])
+		}
+	}
+
+	t.Run("agent DM authorization denied", func(t *testing.T) {
+		srv, s, _, sender, target, _, _, _ := paritySetup(t)
+		target.MessageMode = "none"
+		require.NoError(t, s.UpdateAgent(context.Background(), target))
+
+		logger, buf := newJSONMessageLogger()
+		srv.SetMessageLogger(logger)
+
+		rr := sendViaStructured(t, srv, sender, target, "secret refused body")
+		require.Equal(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+
+		assertRefusedOnly(t, buf, http.StatusForbidden, "agent:"+target.Slug)
+	})
+
+	t.Run("agent DM target stopped", func(t *testing.T) {
+		srv, s, _, sender, target, _, _, _ := paritySetup(t)
+		target.Phase = string(state.PhaseStopped)
+		require.NoError(t, s.UpdateAgent(context.Background(), target))
+
+		logger, buf := newJSONMessageLogger()
+		srv.SetMessageLogger(logger)
+
+		rr := sendViaStructured(t, srv, sender, target, "stopped target body")
+		require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+
+		assertRefusedOnly(t, buf, http.StatusConflict, "agent:"+target.Slug)
+	})
+
+	t.Run("missing caller-supplied conversation_id", func(t *testing.T) {
+		srv, _, _, sender, target, _, _, _ := paritySetup(t)
+		logger, buf := newJSONMessageLogger()
+		srv.SetMessageLogger(logger)
+
+		sm := &messages.StructuredMessage{
+			Version:        messages.Version,
+			Timestamp:      time.Now().UTC().Format(time.RFC3339),
+			Type:           messages.TypeInstruction,
+			Sender:         "agent:" + sender.Slug,
+			SenderID:       sender.ID,
+			Recipient:      "agent:" + target.Slug,
+			RecipientID:    target.ID,
+			Msg:            "bad conv body",
+			ConversationID: api.NewUUID(),
+		}
+		reqBody, err := json.Marshal(MessageRequest{StructuredMessage: sm})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: sender.ID},
+			ProjectID: sender.ProjectID,
+			Ancestry:  sender.Ancestry,
+		}}))
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, target.ID)
+		require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+
+		assertRefusedOnly(t, buf, http.StatusBadRequest, "agent:"+target.Slug)
+	})
+
+	t.Run("user send to stopped agent without wake", func(t *testing.T) {
+		srv, s, _, _, target, _, _, _ := paritySetup(t)
+		target.Phase = string(state.PhaseStopped)
+		require.NoError(t, s.UpdateAgent(context.Background(), target))
+
+		logger, buf := newJSONMessageLogger()
+		srv.SetMessageLogger(logger)
+
+		reqBody, err := json.Marshal(MessageRequest{Message: "user stopped body"})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(),
+			NewAuthenticatedUser(DevUserID, "dev@example.com", "Dev", "admin", "cli")))
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, target.ID)
+		require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+
+		assertRefusedOnly(t, buf, http.StatusConflict, "agent:"+target.Slug)
+	})
+
+	t.Run("empty message validation error", func(t *testing.T) {
+		srv, _, _, _, target, _, _, _ := paritySetup(t)
+		logger, buf := newJSONMessageLogger()
+		srv.SetMessageLogger(logger)
+
+		reqBody, err := json.Marshal(MessageRequest{})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(),
+			NewAuthenticatedUser(DevUserID, "dev@example.com", "Dev", "admin", "cli")))
+		rr := httptest.NewRecorder()
+		srv.handleAgentMessage(rr, req, target.ID)
+		require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+
+		assertRefusedOnly(t, buf, http.StatusBadRequest, "")
+	})
 }

@@ -2028,6 +2028,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	ctx := r.Context()
 	messaging.RecordStep(ctx, "handle_agent_message_enter")
 
+	rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	w = rw
+	var (
+		plainMessage  string
+		structuredMsg *messages.StructuredMessage
+		resolvedAgent *store.Agent
+		senderStamped bool
+		admitted      bool
+	)
+	defer func() {
+		if admitted || rw.statusCode < 400 || rw.statusCode >= 500 {
+			return
+		}
+		s.logAgentMessageRefused(ctx, rw.statusCode, id, resolvedAgent, structuredMsg, senderStamped)
+	}()
+
 	var req MessageRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -2090,9 +2106,6 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// Determine the message content and structured message to forward
-	var plainMessage string
-	var structuredMsg *messages.StructuredMessage
-
 	if req.StructuredMessage != nil {
 		structuredMsg = req.StructuredMessage
 		plainMessage = req.StructuredMessage.Msg
@@ -2125,6 +2138,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 			structuredMsg.Sender = "agent:" + senderSlug
 		}
+		senderStamped = true
 		defaultInboundStructured(structuredMsg)
 		// decision-prompt and decision-response are minted by the hub only.
 		if rejectHubMintedType(w, structuredMsg.Type) {
@@ -2156,6 +2170,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg = messages.NewInstruction(sender, "agent:"+id, plainMessage)
 		structuredMsg.SenderID = senderID
 		structuredMsg.Plain = req.Plain
+		senderStamped = true
 		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else {
 		ValidationError(w, "message or structured_message is required", nil)
@@ -2207,6 +2222,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	resolvedAgent = agent
 	messaging.RecordStep(ctx, "agent_loaded")
 
 	// A chat reference (surface and external_ref) resolves a conversation
@@ -2591,22 +2607,30 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Log the inbound message to the dedicated message log. This fires
-	// before persistence and before the migration-gate decision below
-	// (reincarnating), so it must NOT claim a dispatch outcome (A25.6 O6,
-	// report-7-gteam-2a): a message that ends up deferred would otherwise
-	// be misread by anyone grepping logs for "dispatched" as delivered. The
-	// authoritative outcome is logged separately once known (e.g. "dm
-	// dispatch outcome", "agent DM: message dispatched").
-	logAttrs := []any{
-		"agent_id", agent.ID,
-		"agent_name", agent.Name,
-		"project_id", agent.ProjectID,
+	// logReceivedForDelivery writes the inbound message record to the
+	// dedicated message log once request validation (including conversation
+	// authorization and, for agent senders, ExecuteAgentDM admission/phase
+	// checks) has passed, before persistence and the migration-gate decision
+	// below (A25.6 O6, ptone/scion#4650).
+	logReceivedForDelivery := func(convID string) {
+		if admitted {
+			return
+		}
+		admitted = true
+		logAttrs := []any{
+			"agent_id", agent.ID,
+			"agent_name", agent.Name,
+			"project_id", agent.ProjectID,
+		}
+		if structuredMsg != nil {
+			logged := *structuredMsg
+			if convID != "" {
+				logged.ConversationID = convID
+			}
+			logAttrs = append(logAttrs, logged.LogAttrs()...)
+		}
+		s.logMessage("message received for delivery", logAttrs...)
 	}
-	if structuredMsg != nil {
-		logAttrs = append(logAttrs, structuredMsg.LogAttrs()...)
-	}
-	s.logMessage("message received for delivery", logAttrs...)
 
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
@@ -3048,7 +3072,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				GroupID:        groupID,
 				Wake:           req.Wake,
 				BeforeWake:     func() { s.extendWriteDeadlineForDMWake(ctx, w) },
-				// "message received for delivery" above is the record.
+				// Written once ExecuteAgentDM's admission and phase checks pass.
+				OnAdmitted:   func() { logReceivedForDelivery(storeMsg.ConversationID) },
 				RecordLogged: true,
 			})
 			if dmErr != nil {
@@ -3132,6 +3157,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			})
 			return
 		}
+
+		logReceivedForDelivery(storeMsg.ConversationID)
 
 		// #2257 P1 (design auto-offload-large-dm §4.2 item 1): strip
 		// hub-reserved offload metadata keys before persist/render/dispatch,
@@ -5060,4 +5087,40 @@ func (s *Server) validateChannelRegistered(w http.ResponseWriter, channel string
 		ValidationError(w, fmt.Sprintf("channel %q is not registered; available channels: %s", channel, strings.Join(available, ", ")), nil)
 	}
 	return false
+}
+
+// logAgentMessageRefused logs a 4xx validation or authorization refusal of a
+// handleAgentMessage request as a body-free event entry (logging.LogKindEvent),
+// so refused requests never appear as accepted message records (ptone/scion#4650).
+func (s *Server) logAgentMessageRefused(ctx context.Context, status int, targetID string, agent *store.Agent, msg *messages.StructuredMessage, senderStamped bool) {
+	attrs := []any{
+		logging.AttrLogKind, logging.LogKindEvent,
+		"status", status,
+	}
+	if agent != nil {
+		attrs = append(attrs,
+			"agent_id", agent.ID,
+			"agent_name", agent.Name,
+			"project_id", agent.ProjectID,
+			logging.AttrRecipient, "agent:"+agent.Slug,
+			logging.AttrRecipientID, agent.ID,
+		)
+	} else if targetID != "" {
+		attrs = append(attrs, "target_id", targetID)
+	}
+	if senderStamped && msg != nil {
+		attrs = append(attrs, logging.AttrSender, msg.Sender)
+		if msg.SenderID != "" {
+			attrs = append(attrs, logging.AttrSenderID, msg.SenderID)
+		}
+		if msg.Type != "" {
+			attrs = append(attrs, logging.AttrMsgType, messages.LogType(msg.Type))
+		}
+	} else if authKind, authID := authenticatedSender(ctx); authKind != "" && authID != "" {
+		attrs = append(attrs,
+			logging.AttrSender, authKind+":"+authID,
+			logging.AttrSenderID, authID,
+		)
+	}
+	s.recordLog().Warn("agent message request refused", attrs...)
 }
