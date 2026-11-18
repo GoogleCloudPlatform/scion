@@ -4537,12 +4537,14 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 	return true
 }
 
-// clearInboundClientEvent strips StructuredMessage.Event on every client-,
-// agent-, and broker-supplied inbound path. StructuredMessage.Event is a
-// hub-minted §8.3 carrier set exclusively by ApplyDispatchedEventEnvelope.
+// clearInboundClientEvent strips hub-minted trigger envelope markers
+// (StructuredMessage.Event and Metadata["system_category"]="trigger", along
+// with reserved metadata keys) on every client-, agent-, and broker-supplied
+// inbound path. Those markers are set exclusively by ApplyDispatchedEventEnvelope.
 func clearInboundClientEvent(msg *messages.StructuredMessage) {
 	if msg != nil {
 		msg.Event = nil
+		msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
 	}
 }
 

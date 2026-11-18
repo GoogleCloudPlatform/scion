@@ -169,12 +169,43 @@ func Qualifies(persistedBody string, plain bool, p OffloadPolicy) bool {
 // StripReservedMetadata returns md unchanged if it has none of the
 // hub-reserved keys (reservedMetadataKeys: the three offload keys, the
 // artifact reference key, the visitor sender keys and the sender time zone
-// key). Otherwise it returns a NEW map without
-// them. It never mutates md, so it is safe on aliased maps. Callers
-// assign the result:
+// key) and no hub-minted trigger system_category marker. Otherwise it returns
+// a NEW map without them. It never mutates md, so it is safe on aliased maps.
+// Callers assign the result:
 // sm.Metadata = messaging.StripReservedMetadata(sm.Metadata).
 func StripReservedMetadata(md map[string]string) map[string]string {
-	return stripMetadataKeys(md, reservedMetadataKeys)
+	hasReserved := false
+	for k, v := range md {
+		if isReservedMetadataEntry(k, v) {
+			hasReserved = true
+			break
+		}
+	}
+	if !hasReserved {
+		return md
+	}
+	out := make(map[string]string, len(md))
+	for k, v := range md {
+		if isReservedMetadataEntry(k, v) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func isReservedMetadataEntry(k, v string) bool {
+	if reservedMetadataKeys[k] {
+		return true
+	}
+	// system_category="trigger" is hub-minted exclusively by
+	// ApplyDispatchedEventEnvelope; client, agent, chat, and broker inbound
+	// callers may never supply it (non-trigger categories such as
+	// "port-forward" used by sciontool autoexpose remain allowed).
+	if k == "system_category" && strings.EqualFold(strings.TrimSpace(v), messages.SystemCategoryTrigger) {
+		return true
+	}
+	return false
 }
 
 // stripMetadataKeys returns md unchanged if it has none of keys, otherwise a

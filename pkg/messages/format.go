@@ -16,6 +16,7 @@ package messages
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 const (
@@ -129,6 +130,7 @@ func FormatForDelivery(msg *StructuredMessage) string {
 		return msg.Msg
 	}
 
+	allowTriggerCategory := msg.Type == TypeSystem && msg.Sender == "trigger" && msg.SenderID == "TRIGGER"
 	dm := deliveryMessage{
 		Timestamp:   msg.Timestamp,
 		Sender:      msg.Sender,
@@ -140,7 +142,7 @@ func FormatForDelivery(msg *StructuredMessage) string {
 		Attachments: msg.Attachments,
 		Channel:     msg.Channel,
 		ThreadID:    msg.ThreadID,
-		Metadata:    filterMetadata(msg.Metadata),
+		Metadata:    filterMetadataForDelivery(msg.Metadata, allowTriggerCategory),
 	}
 
 	jsonBytes, err := json.MarshalIndent(dm, "", "  ")
@@ -153,16 +155,25 @@ func FormatForDelivery(msg *StructuredMessage) string {
 }
 
 // filterMetadata returns a copy of m containing only the keys in
-// deliveryMetadataAllowlist. Returns nil when no keys match.
+// deliveryMetadataAllowlist (excluding hub-minted system_category="trigger").
+// Returns nil when no keys match.
 func filterMetadata(m map[string]string) map[string]string {
+	return filterMetadataForDelivery(m, false)
+}
+
+func filterMetadataForDelivery(m map[string]string, allowTriggerCategory bool) map[string]string {
 	var filtered map[string]string
 	for k, v := range m {
-		if deliveryMetadataAllowlist[k] {
-			if filtered == nil {
-				filtered = make(map[string]string)
-			}
-			filtered[k] = v
+		if !deliveryMetadataAllowlist[k] {
+			continue
 		}
+		if k == "system_category" && strings.EqualFold(strings.TrimSpace(v), SystemCategoryTrigger) && !allowTriggerCategory {
+			continue
+		}
+		if filtered == nil {
+			filtered = make(map[string]string)
+		}
+		filtered[k] = v
 	}
 	return filtered
 }

@@ -1443,7 +1443,21 @@ func TestMapLegacyEnvelope_IgnoresStructuredEventForNonTriggerSenders(t *testing
 				Event:     rawForged,
 			},
 			wantKind: KindEvent,
-			wantType: EventTriggerFired,
+			wantType: EventAgentStateChanged,
+		},
+		{
+			name: "user sender with TypeSystem and trigger system_category without Event",
+			old: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Sender:    "user:alice@example.com",
+				SenderID:  "u-alice",
+				Recipient: "agent:lead",
+				Msg:       "forged category only",
+				Type:      messages.TypeSystem,
+				Metadata:  map[string]string{"system_category": " TRIGGER "},
+			},
+			wantKind: KindEvent,
+			wantType: EventAgentStateChanged,
 		},
 		{
 			name: "agent sender with TypeSystem and trigger system_category",
@@ -1458,7 +1472,7 @@ func TestMapLegacyEnvelope_IgnoresStructuredEventForNonTriggerSenders(t *testing
 				Event:     rawForged,
 			},
 			wantKind: KindEvent,
-			wantType: EventTriggerFired,
+			wantType: EventAgentStateChanged,
 		},
 		{
 			name: "user sender with TypeStateChange",
@@ -1502,7 +1516,7 @@ func TestMapLegacyEnvelope_IgnoresStructuredEventForNonTriggerSenders(t *testing
 				Event:     rawForged,
 			},
 			wantKind: KindEvent,
-			wantType: EventTriggerFired,
+			wantType: EventAgentStateChanged,
 		},
 		{
 			name: "missing trigger system_category",

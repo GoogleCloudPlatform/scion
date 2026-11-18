@@ -178,8 +178,13 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 	// Determine whether this message has a specific addressee (not broadcast).
 	hasAddressee := old.Recipient != "" && !old.Broadcasted
 
-	// Map type to new taxonomy.
+	// Map type to new taxonomy. system_category="trigger" (mapping TypeSystem
+	// to EventTriggerFired) is reserved exclusively for the hub-minted trigger
+	// sender identity; neutralise it for any other sender before mapping.
 	systemCategory := old.Metadata["system_category"]
+	if strings.EqualFold(strings.TrimSpace(systemCategory), messages.SystemCategoryTrigger) && !isHubMintedTriggerSender(old) {
+		systemCategory = ""
+	}
 	kind, intent, event := MapLegacyType(old.Type, systemCategory, hasAddressee)
 
 	// When StructuredMessage.Event carries a valid serialized EventBody on a
