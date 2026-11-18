@@ -1426,6 +1426,11 @@ type VersionedSettings struct {
 	// never reads it. Unknown names are logged once and ignored.
 	LocalExperiments []string `json:"local_experiments,omitempty" yaml:"local_experiments,omitempty" koanf:"local_experiments"`
 
+	// AgentPolicy is the operator's agent policy (V1AgentPolicy). Only the
+	// global settings file's value is ever used (LoadAgentPolicy); a value
+	// in a project's settings is ignored.
+	AgentPolicy *V1AgentPolicy `json:"agent_policy,omitempty" yaml:"agent_policy,omitempty" koanf:"agent_policy"`
+
 	// activeProfileErr is set by the hub settings overlay when it replaced
 	// Profiles, ActiveProfile is not one of them, and there is not exactly
 	// one stored profile to use instead (see resolveOverlaidActiveProfile).
