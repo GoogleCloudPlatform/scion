@@ -18,59 +18,27 @@ package hub
 
 import (
 	"context"
-	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// newNativeExecRouteFixture builds an execRouteFixture that leaves Server's
-// native registerFireActions() registration (&execAction{srv: srv}) in place
-// rather than calling Scheduler.RegisterEventHandler.
-func newNativeExecRouteFixture(t *testing.T) *execRouteFixture {
-	t.Helper()
-	setExecTiming(t, &scheduledExecPollInitial, 20*time.Millisecond)
-	setExecTiming(t, &scheduledExecPollMax, 50*time.Millisecond)
-	f := newPTYConduitFixtureServer(t, nil)
-	enableExecSchedules(t, f.srv)
-	ctx := context.Background()
-	a, err := f.store.GetAgent(ctx, f.launched.ID)
-	require.NoError(t, err)
-	a.Phase = "running"
-	require.NoError(t, f.store.UpdateAgent(ctx, a))
-	got, err := f.store.GetAgent(ctx, a.ID)
-	require.NoError(t, err)
-	f.launched = got
-	owner, err := f.store.GetUser(ctx, got.OwnerID)
-	require.NoError(t, err)
-
-	sched := NewScheduler(f.store, slog.Default())
-	sched.srv = f.srv
-	f.srv.mu.Lock()
-	f.srv.scheduler = sched
-	f.srv.mu.Unlock()
-
-	return &execRouteFixture{
-		ptyConduitFixture: f,
-		capture:           &execCapture{},
-		opts:              execControlOptions(t),
-		owner:             authUser(owner),
-	}
-}
-
 // TestExecAction_NativeRegistryAndAfterRecord verifies:
-//   - Server.registerFireActions registers *execAction natively (not legacyAction);
+//   - newExecRouteFixture / Server.registerFireActions registers *execAction
+//     natively (not legacyAction);
 //   - FireOutcome.AfterRecord defers starting trackScheduledExecRun until the
 //     caller invokes AfterRecord (preserving the R1 outcome-persistence order);
 //   - ResultRef and run.EventID equal the event's FireID, with run.ScheduleID
 //     empty for one-shot fires.
 func TestExecAction_NativeRegistryAndAfterRecord(t *testing.T) {
-	f := newNativeExecRouteFixture(t)
+	f := newExecRouteFixture(t)
 	f.startAgent(t)
 
 	registered, ok := f.srv.LookupAction(scheduledEventTypeExec)
@@ -113,9 +81,10 @@ func TestExecAction_NativeRegistryAndAfterRecord(t *testing.T) {
 
 // TestExecAction_NativeOneShotAndRecurringEndToEnd exercises native *execAction
 // registration through Scheduler.fireEvent and Server.executeSchedule, plus
-// property (a) UNIQUE scheduled_exec_runs.event_id idempotency.
+// property (a) UNIQUE scheduled_exec_runs.event_id idempotency and empty
+// ResultRef on unadmitted Fire errors.
 func TestExecAction_NativeOneShotAndRecurringEndToEnd(t *testing.T) {
-	f := newNativeExecRouteFixture(t)
+	f := newExecRouteFixture(t)
 	f.startAgent(t)
 	ctx := context.Background()
 
@@ -129,11 +98,14 @@ func TestExecAction_NativeOneShotAndRecurringEndToEnd(t *testing.T) {
 	f.waitUntracked(t, oneShot.ID)
 
 	// Re-firing the already-admitted event_id via fireAction fails closed at
-	// CreateScheduledExecRun without sending a second exec-start.
+	// CreateScheduledExecRun without sending a second exec-start and carries an
+	// empty ResultRef.
 	startsBefore := f.capture.count(execRoutePath(agentcontrol.RouteExecStart))
 	dupOut := f.srv.fireAction(ctx, scheduledFireRequest(f.srv, oneShot, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + oneShot.ID}, nil))
 	assert.Equal(t, hubfire.FireStatusFailed, dupOut.Status)
 	assert.Equal(t, execReasonDispatchFailed, dupOut.Error)
+	assert.Empty(t, dupOut.ResultRef, "unadmitted Fire errors carry an empty ResultRef")
+	assert.False(t, dupOut.Detached)
 	assert.Equal(t, startsBefore, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)),
 		"property (a): duplicate event_id is never started twice")
 	assert.Equal(t, store.ScheduledEventFired, f.getEvent(t, oneShot.ID).Status,
@@ -155,4 +127,149 @@ func TestExecAction_NativeOneShotAndRecurringEndToEnd(t *testing.T) {
 	assert.Equal(t, sc.ID, recRun.ScheduleID)
 	assert.Equal(t, store.ScheduledExecOutcomeNonzero, recRun.Outcome)
 	f.waitUntracked(t, recEvt.ID)
+}
+
+// TestExecAction_SynchronousTerminalDetachedPreservesRecordedOutcome guards
+// property (b) on synchronous terminal answers from exec-start (409
+// overlap/busy/mismatch, 408 expired_before_start, 400 invalid):
+//   - FireOutcome.Detached must be true so the caller (Scheduler.fireEvent /
+//     Server.executeSchedule) writes nothing after FinishScheduledExecRun;
+//   - when another replica has already recorded a terminal outcome before
+//     terminal() runs, neither FinishScheduledExecRun nor the scheduler caller
+//     overwrites that recorded outcome. Setting Detached to false in terminal()
+//     causes Scheduler.fireEvent to overwrite evt.Status / evt.Error and fails
+//     every case below.
+func TestExecAction_SynchronousTerminalDetachedPreservesRecordedOutcome(t *testing.T) {
+	cases := []struct {
+		name            string
+		rpcStatus       int32
+		rpcBody         string
+		wantFireStatus  hubfire.FireStatus
+		wantRunOutcome  string
+		wantEventStatus string
+		wantReason      string
+	}{
+		{
+			name:            "409 overlap",
+			rpcStatus:       http.StatusConflict,
+			rpcBody:         `{"outcome":"overlap"}`,
+			wantFireStatus:  hubfire.FireStatusSkipped,
+			wantRunOutcome:  store.ScheduledExecOutcomeSkipped,
+			wantEventStatus: store.ScheduledEventSkipped,
+			wantReason:      execReasonOverlap,
+		},
+		{
+			name:            "409 busy",
+			rpcStatus:       http.StatusConflict,
+			rpcBody:         `{"outcome":"busy"}`,
+			wantFireStatus:  hubfire.FireStatusSkipped,
+			wantRunOutcome:  store.ScheduledExecOutcomeSkipped,
+			wantEventStatus: store.ScheduledEventSkipped,
+			wantReason:      execReasonCapacity,
+		},
+		{
+			name:            "409 mismatch",
+			rpcStatus:       http.StatusConflict,
+			rpcBody:         `{"outcome":"mismatch"}`,
+			wantFireStatus:  hubfire.FireStatusFailed,
+			wantRunOutcome:  store.ScheduledExecOutcomeError,
+			wantEventStatus: store.ScheduledEventFailed,
+			wantReason:      execReasonDispatchFailed,
+		},
+		{
+			name:            "408 expired_before_start",
+			rpcStatus:       http.StatusRequestTimeout,
+			rpcBody:         `{"outcome":"expired_before_start"}`,
+			wantFireStatus:  hubfire.FireStatusFailed,
+			wantRunOutcome:  store.ScheduledExecOutcomeError,
+			wantEventStatus: store.ScheduledEventFailed,
+			wantReason:      execReasonStartExpired,
+		},
+		{
+			name:            "400 invalid",
+			rpcStatus:       http.StatusBadRequest,
+			rpcBody:         `{"outcome":"invalid"}`,
+			wantFireStatus:  hubfire.FireStatusFailed,
+			wantRunOutcome:  store.ScheduledExecOutcomeError,
+			wantEventStatus: store.ScheduledEventFailed,
+			wantReason:      errScheduledExecPayloadInvalid.Error(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExecRouteFixture(t)
+			f.capture.answer = func(req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+				if req.GetPath() != execRoutePath(agentcontrol.RouteExecStart) {
+					return nil
+				}
+				return &conduitv1.RpcResponse{
+					Status: tc.rpcStatus,
+					Body:   []byte(tc.rpcBody),
+				}
+			}
+			f.startAgent(t)
+			ctx := context.Background()
+
+			// 1. Direct fireAction check: Detached is true, ResultRef is evt.ID,
+			// AfterRecord is nil, and FinishScheduledExecRun wrote run + event.
+			directEvt := f.event(t, 10, "true")
+			claimed, err := f.store.(store.ScheduledEventClaimer).ClaimScheduledEvent(ctx, directEvt.ID, store.ScheduledEventFired)
+			require.NoError(t, err)
+			require.True(t, claimed)
+
+			out := f.srv.fireAction(withFireHistoryCreator(ctx, directEvt.CreatedBy),
+				scheduledFireRequest(f.srv, directEvt, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + directEvt.ID}, nil))
+			assert.Equal(t, tc.wantFireStatus, out.Status)
+			assert.Equal(t, tc.wantReason, out.Error)
+			assert.Equal(t, directEvt.ID, out.ResultRef)
+			assert.True(t, out.Detached, "synchronous terminal outcome must set Detached=true")
+			assert.Nil(t, out.AfterRecord)
+			assert.Equal(t, tc.wantRunOutcome, f.getRun(t, directEvt.ID).Outcome)
+			gotDirectEvt := f.getEvent(t, directEvt.ID)
+			assert.Equal(t, tc.wantEventStatus, gotDirectEvt.Status)
+			assert.Equal(t, tc.wantReason, gotDirectEvt.Error)
+			f.waitUntracked(t, directEvt.ID)
+
+			// 2. End-to-end Scheduler.fireEvent non-overwrite check (property (b)):
+			// another replica records a distinct terminal outcome ("exit status 9")
+			// right after exec-start returns and before terminal() runs. Neither
+			// FinishScheduledExecRun nor Scheduler.fireEvent may overwrite it.
+			raceEvt := f.event(t, 10, "true")
+			priorCode := 9
+			priorReason := execReasonExitStatus(priorCode)
+			setExecFireHook(t, func(stage, eventID string) {
+				if stage != scheduledExecStageStarted || eventID != raceEvt.ID {
+					return
+				}
+				run := f.getRun(t, eventID)
+				changed, finErr := f.srv.finishScheduledExecRun(
+					ctx,
+					*run,
+					store.ScheduledExecOutcomeNonzero,
+					&agentcontrol.ExecResult{
+						State:    agentcontrol.ExecStateFinished,
+						Outcome:  agentcontrol.ExecOutcomeNonzero,
+						ExitCode: priorCode,
+					},
+					store.ScheduledEventFailed,
+					priorReason,
+				)
+				require.NoError(t, finErr)
+				require.True(t, changed)
+			})
+
+			f.fire(raceEvt)
+			f.waitUntracked(t, raceEvt.ID)
+
+			gotRun := f.getRun(t, raceEvt.ID)
+			assert.Equal(t, store.ScheduledExecOutcomeNonzero, gotRun.Outcome,
+				"FinishScheduledExecRun CAS must preserve prior replica's run outcome")
+			gotRaceEvt := f.getEvent(t, raceEvt.ID)
+			assert.Equal(t, store.ScheduledEventFailed, gotRaceEvt.Status,
+				"Scheduler.fireEvent must not overwrite prior replica's recorded event status")
+			assert.Equal(t, priorReason, gotRaceEvt.Error,
+				"Scheduler.fireEvent must not overwrite prior replica's recorded event error")
+		})
+	}
 }

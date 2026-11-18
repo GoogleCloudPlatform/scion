@@ -77,10 +77,10 @@ func newExecRouteFixtureWith(t *testing.T, srvMod func(*Server)) *execRouteFixtu
 	owner, err := f.store.GetUser(ctx, got.OwnerID)
 	require.NoError(t, err)
 	// The scheduler is created by StartBackgroundServices, which test
-	// servers do not run: build one with the exec handler.
+	// servers do not run: attach one to f.srv so it dispatches through the
+	// server's native *execAction registration from registerFireActions().
 	sched := NewScheduler(f.store, slog.Default())
 	sched.srv = f.srv
-	sched.RegisterEventHandler(scheduledEventTypeExec, f.srv.execEventHandler())
 	f.srv.mu.Lock()
 	f.srv.scheduler = sched
 	f.srv.mu.Unlock()

@@ -1781,6 +1781,9 @@ func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
 		srv.registerFireActions()
 
 		rec := newFireCoreTestAuthority(ms, projectID)
+		rec.DefinitionKind = hubfire.DefinitionKindScheduledEvent
+		rec.DefinitionID = "evt-exec-1"
+		rec.FireID = "evt-exec-1"
 		auth, identity, err := srv.resolveRecordedAuthority(context.Background(), rec, projectID, scheduledExecPermission)
 		require.NoError(t, err)
 
@@ -2002,16 +2005,15 @@ func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
 			})
 		}
 
-		// Happy Authorize (including DefinitionKindTrigger): returns resolved target;
-		// Fire refuses trigger-owned runs in Stage 1 without touching schedule_id.
-		trigReq := hubfire.FireRequest{
+		// Happy Authorize on a schedule fire returns the resolved deliverable target.
+		okReq := hubfire.FireRequest{
 			ProjectID:  projectID,
-			Authority:  rec, // rec uses DefinitionKindTrigger from newFireCoreTestAuthority
+			Authority:  rec,
 			ActionType: scheduledEventTypeExec,
 			Payload:    `{"agentId":"` + target.ID + `","command":["echo","ok"],"timeoutSeconds":45}`,
 			FireAt:     time.Now(),
 		}
-		authorized, refusal, err := act.Authorize(context.Background(), trigReq, auth, identity)
+		authorized, refusal, err := act.Authorize(context.Background(), okReq, auth, identity)
 		require.NoError(t, err)
 		assert.Nil(t, refusal)
 		ea, ok := authorized.(*execAuthorized)
@@ -2019,9 +2021,66 @@ func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
 		assert.Equal(t, target.ID, ea.target.ID)
 		assert.Equal(t, []string{"echo", "ok"}, ea.payload.Command)
 		assert.Equal(t, 45, ea.payload.timeout())
+	})
 
-		fireOut, fireErr := act.Fire(context.Background(), trigReq, authorized)
-		require.ErrorContains(t, fireErr, "trigger-owned runs are not wired in Stage 1")
+	t.Run("DefinitionKindTrigger fails closed with generic refusal before any skip or refusal audit", func(t *testing.T) {
+		logBuf := &fireCoreLogBuffer{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		ms, srv, _, auth, identity, target := setupFixture(t)
+		act := &execAction{srv: srv}
+
+		// Even with hub.exec_schedules disabled, stale FireAt, and unrecorded
+		// authority, DefinitionKindTrigger refuses before Preauthorize's skip
+		// audit or OnAuthorityRefused's refusal audit can fire.
+		setFireCoreExperiments(t, srv, map[string]bool{
+			conduitExperiment:         true,
+			experiments.ExecSchedules: false,
+		})
+		trigReq := hubfire.FireRequest{
+			ProjectID: projectID,
+			Authority: hubfire.RecordedAuthority{
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   "trig-exec-1",
+				FireID:         "fire-exec-1",
+			},
+			ActionType: scheduledEventTypeExec,
+			Payload:    `{"agentId":"` + target.ID + `","command":["echo","ok"]}`,
+			FireAt:     time.Now().Add(-scheduledExecMaxWindow - time.Hour),
+		}
+
+		out := srv.fireAction(context.Background(), trigReq)
+		assert.Equal(t, hubfire.FireStatusRefused, out.Status)
+		assert.Equal(t, execReasonRefused, out.Error)
+		assert.Empty(t, out.ResultRef)
+		assert.False(t, out.Detached)
+		assert.NotContains(t, logBuf.String(), "audit_action=schedule.exec.")
+
+		// Direct Authorize and Fire calls also fail closed with generic refusal
+		// text and zero schedule.exec.* audit records.
+		trigRec := newFireCoreTestAuthority(ms, projectID) // DefinitionKindTrigger
+		authorized, refusal, err := act.Authorize(context.Background(), hubfire.FireRequest{
+			ProjectID:  projectID,
+			Authority:  trigRec,
+			ActionType: scheduledEventTypeExec,
+			Payload:    trigReq.Payload,
+			FireAt:     time.Now(),
+		}, auth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+
+		fireOut, fireErr := act.Fire(context.Background(), trigReq, &execAuthorized{
+			payload: &scheduledExecPayload{AgentID: target.ID, Command: []string{"echo", "ok"}},
+			target:  target,
+			auth:    auth,
+		})
+		require.EqualError(t, fireErr, execReasonRefused)
+		assert.Empty(t, fireOut.ResultRef)
 		assert.False(t, fireOut.Detached)
+		assert.NotContains(t, logBuf.String(), "audit_action=schedule.exec.")
 	})
 }
