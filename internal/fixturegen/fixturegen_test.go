@@ -215,6 +215,12 @@ func TestFixtureLoadable(t *testing.T) {
 	trFire, err := composite.GetTriggerFire(ctx, triggerFireID)
 	require.NoError(t, err, "trigger_fires fixture row must be readable via TriggerStore")
 	assert.Equal(t, store.TriggerFireStatusFired, trFire.Status)
+
+	withdrawnDec, err := composite.GetDecision(ctx, "dc000000-0000-0000-0000-000000000003")
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusWithdrawn, withdrawnDec.Status)
+	require.NotNil(t, withdrawnDec.WithdrawnAt)
+	assert.Equal(t, "Plan changed", withdrawnDec.WithdrawnReason)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

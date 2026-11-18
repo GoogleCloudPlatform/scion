@@ -38895,6 +38895,8 @@ type DecisionMutation struct {
 	created_at        *time.Time
 	decided_at        *time.Time
 	replaced_at       *time.Time
+	withdrawn_at      *time.Time
+	withdrawn_reason  *string
 	clearedFields     map[string]struct{}
 	done              bool
 	oldValue          func(context.Context) (*Decision, error)
@@ -39878,6 +39880,104 @@ func (m *DecisionMutation) ResetReplacedAt() {
 	delete(m.clearedFields, decision.FieldReplacedAt)
 }
 
+// SetWithdrawnAt sets the "withdrawn_at" field.
+func (m *DecisionMutation) SetWithdrawnAt(t time.Time) {
+	m.withdrawn_at = &t
+}
+
+// WithdrawnAt returns the value of the "withdrawn_at" field in the mutation.
+func (m *DecisionMutation) WithdrawnAt() (r time.Time, exists bool) {
+	v := m.withdrawn_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWithdrawnAt returns the old "withdrawn_at" field's value of the Decision entity.
+// If the Decision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionMutation) OldWithdrawnAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWithdrawnAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWithdrawnAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWithdrawnAt: %w", err)
+	}
+	return oldValue.WithdrawnAt, nil
+}
+
+// ClearWithdrawnAt clears the value of the "withdrawn_at" field.
+func (m *DecisionMutation) ClearWithdrawnAt() {
+	m.withdrawn_at = nil
+	m.clearedFields[decision.FieldWithdrawnAt] = struct{}{}
+}
+
+// WithdrawnAtCleared returns if the "withdrawn_at" field was cleared in this mutation.
+func (m *DecisionMutation) WithdrawnAtCleared() bool {
+	_, ok := m.clearedFields[decision.FieldWithdrawnAt]
+	return ok
+}
+
+// ResetWithdrawnAt resets all changes to the "withdrawn_at" field.
+func (m *DecisionMutation) ResetWithdrawnAt() {
+	m.withdrawn_at = nil
+	delete(m.clearedFields, decision.FieldWithdrawnAt)
+}
+
+// SetWithdrawnReason sets the "withdrawn_reason" field.
+func (m *DecisionMutation) SetWithdrawnReason(s string) {
+	m.withdrawn_reason = &s
+}
+
+// WithdrawnReason returns the value of the "withdrawn_reason" field in the mutation.
+func (m *DecisionMutation) WithdrawnReason() (r string, exists bool) {
+	v := m.withdrawn_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWithdrawnReason returns the old "withdrawn_reason" field's value of the Decision entity.
+// If the Decision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionMutation) OldWithdrawnReason(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWithdrawnReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWithdrawnReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWithdrawnReason: %w", err)
+	}
+	return oldValue.WithdrawnReason, nil
+}
+
+// ClearWithdrawnReason clears the value of the "withdrawn_reason" field.
+func (m *DecisionMutation) ClearWithdrawnReason() {
+	m.withdrawn_reason = nil
+	m.clearedFields[decision.FieldWithdrawnReason] = struct{}{}
+}
+
+// WithdrawnReasonCleared returns if the "withdrawn_reason" field was cleared in this mutation.
+func (m *DecisionMutation) WithdrawnReasonCleared() bool {
+	_, ok := m.clearedFields[decision.FieldWithdrawnReason]
+	return ok
+}
+
+// ResetWithdrawnReason resets all changes to the "withdrawn_reason" field.
+func (m *DecisionMutation) ResetWithdrawnReason() {
+	m.withdrawn_reason = nil
+	delete(m.clearedFields, decision.FieldWithdrawnReason)
+}
+
 // Where appends a list predicates to the DecisionMutation builder.
 func (m *DecisionMutation) Where(ps ...predicate.Decision) {
 	m.predicates = append(m.predicates, ps...)
@@ -39912,7 +40012,7 @@ func (m *DecisionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionMutation) Fields() []string {
-	fields := make([]string, 0, 20)
+	fields := make([]string, 0, 22)
 	if m.project_id != nil {
 		fields = append(fields, decision.FieldProjectID)
 	}
@@ -39973,6 +40073,12 @@ func (m *DecisionMutation) Fields() []string {
 	if m.replaced_at != nil {
 		fields = append(fields, decision.FieldReplacedAt)
 	}
+	if m.withdrawn_at != nil {
+		fields = append(fields, decision.FieldWithdrawnAt)
+	}
+	if m.withdrawn_reason != nil {
+		fields = append(fields, decision.FieldWithdrawnReason)
+	}
 	return fields
 }
 
@@ -40021,6 +40127,10 @@ func (m *DecisionMutation) Field(name string) (ent.Value, bool) {
 		return m.DecidedAt()
 	case decision.FieldReplacedAt:
 		return m.ReplacedAt()
+	case decision.FieldWithdrawnAt:
+		return m.WithdrawnAt()
+	case decision.FieldWithdrawnReason:
+		return m.WithdrawnReason()
 	}
 	return nil, false
 }
@@ -40070,6 +40180,10 @@ func (m *DecisionMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldDecidedAt(ctx)
 	case decision.FieldReplacedAt:
 		return m.OldReplacedAt(ctx)
+	case decision.FieldWithdrawnAt:
+		return m.OldWithdrawnAt(ctx)
+	case decision.FieldWithdrawnReason:
+		return m.OldWithdrawnReason(ctx)
 	}
 	return nil, fmt.Errorf("unknown Decision field %s", name)
 }
@@ -40219,6 +40333,20 @@ func (m *DecisionMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetReplacedAt(v)
 		return nil
+	case decision.FieldWithdrawnAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWithdrawnAt(v)
+		return nil
+	case decision.FieldWithdrawnReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWithdrawnReason(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Decision field %s", name)
 }
@@ -40306,6 +40434,12 @@ func (m *DecisionMutation) ClearedFields() []string {
 	if m.FieldCleared(decision.FieldReplacedAt) {
 		fields = append(fields, decision.FieldReplacedAt)
 	}
+	if m.FieldCleared(decision.FieldWithdrawnAt) {
+		fields = append(fields, decision.FieldWithdrawnAt)
+	}
+	if m.FieldCleared(decision.FieldWithdrawnReason) {
+		fields = append(fields, decision.FieldWithdrawnReason)
+	}
 	return fields
 }
 
@@ -40337,6 +40471,12 @@ func (m *DecisionMutation) ClearField(name string) error {
 		return nil
 	case decision.FieldReplacedAt:
 		m.ClearReplacedAt()
+		return nil
+	case decision.FieldWithdrawnAt:
+		m.ClearWithdrawnAt()
+		return nil
+	case decision.FieldWithdrawnReason:
+		m.ClearWithdrawnReason()
 		return nil
 	}
 	return fmt.Errorf("unknown Decision nullable field %s", name)
@@ -40405,6 +40545,12 @@ func (m *DecisionMutation) ResetField(name string) error {
 		return nil
 	case decision.FieldReplacedAt:
 		m.ResetReplacedAt()
+		return nil
+	case decision.FieldWithdrawnAt:
+		m.ResetWithdrawnAt()
+		return nil
+	case decision.FieldWithdrawnReason:
+		m.ResetWithdrawnReason()
 		return nil
 	}
 	return fmt.Errorf("unknown Decision field %s", name)

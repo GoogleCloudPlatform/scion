@@ -217,6 +217,34 @@ func (_c *DecisionCreate) SetNillableReplacedAt(v *time.Time) *DecisionCreate {
 	return _c
 }
 
+// SetWithdrawnAt sets the "withdrawn_at" field.
+func (_c *DecisionCreate) SetWithdrawnAt(v time.Time) *DecisionCreate {
+	_c.mutation.SetWithdrawnAt(v)
+	return _c
+}
+
+// SetNillableWithdrawnAt sets the "withdrawn_at" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableWithdrawnAt(v *time.Time) *DecisionCreate {
+	if v != nil {
+		_c.SetWithdrawnAt(*v)
+	}
+	return _c
+}
+
+// SetWithdrawnReason sets the "withdrawn_reason" field.
+func (_c *DecisionCreate) SetWithdrawnReason(v string) *DecisionCreate {
+	_c.mutation.SetWithdrawnReason(v)
+	return _c
+}
+
+// SetNillableWithdrawnReason sets the "withdrawn_reason" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableWithdrawnReason(v *string) *DecisionCreate {
+	if v != nil {
+		_c.SetWithdrawnReason(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *DecisionCreate) SetID(v uuid.UUID) *DecisionCreate {
 	_c.mutation.SetID(v)
@@ -484,6 +512,14 @@ func (_c *DecisionCreate) createSpec() (*Decision, *sqlgraph.CreateSpec) {
 		_spec.SetField(decision.FieldReplacedAt, field.TypeTime, value)
 		_node.ReplacedAt = &value
 	}
+	if value, ok := _c.mutation.WithdrawnAt(); ok {
+		_spec.SetField(decision.FieldWithdrawnAt, field.TypeTime, value)
+		_node.WithdrawnAt = &value
+	}
+	if value, ok := _c.mutation.WithdrawnReason(); ok {
+		_spec.SetField(decision.FieldWithdrawnReason, field.TypeString, value)
+		_node.WithdrawnReason = &value
+	}
 	return _node, _spec
 }
 
@@ -599,6 +635,42 @@ func (u *DecisionUpsert) UpdateReplacedAt() *DecisionUpsert {
 // ClearReplacedAt clears the value of the "replaced_at" field.
 func (u *DecisionUpsert) ClearReplacedAt() *DecisionUpsert {
 	u.SetNull(decision.FieldReplacedAt)
+	return u
+}
+
+// SetWithdrawnAt sets the "withdrawn_at" field.
+func (u *DecisionUpsert) SetWithdrawnAt(v time.Time) *DecisionUpsert {
+	u.Set(decision.FieldWithdrawnAt, v)
+	return u
+}
+
+// UpdateWithdrawnAt sets the "withdrawn_at" field to the value that was provided on create.
+func (u *DecisionUpsert) UpdateWithdrawnAt() *DecisionUpsert {
+	u.SetExcluded(decision.FieldWithdrawnAt)
+	return u
+}
+
+// ClearWithdrawnAt clears the value of the "withdrawn_at" field.
+func (u *DecisionUpsert) ClearWithdrawnAt() *DecisionUpsert {
+	u.SetNull(decision.FieldWithdrawnAt)
+	return u
+}
+
+// SetWithdrawnReason sets the "withdrawn_reason" field.
+func (u *DecisionUpsert) SetWithdrawnReason(v string) *DecisionUpsert {
+	u.Set(decision.FieldWithdrawnReason, v)
+	return u
+}
+
+// UpdateWithdrawnReason sets the "withdrawn_reason" field to the value that was provided on create.
+func (u *DecisionUpsert) UpdateWithdrawnReason() *DecisionUpsert {
+	u.SetExcluded(decision.FieldWithdrawnReason)
+	return u
+}
+
+// ClearWithdrawnReason clears the value of the "withdrawn_reason" field.
+func (u *DecisionUpsert) ClearWithdrawnReason() *DecisionUpsert {
+	u.SetNull(decision.FieldWithdrawnReason)
 	return u
 }
 
@@ -772,6 +844,48 @@ func (u *DecisionUpsertOne) UpdateReplacedAt() *DecisionUpsertOne {
 func (u *DecisionUpsertOne) ClearReplacedAt() *DecisionUpsertOne {
 	return u.Update(func(s *DecisionUpsert) {
 		s.ClearReplacedAt()
+	})
+}
+
+// SetWithdrawnAt sets the "withdrawn_at" field.
+func (u *DecisionUpsertOne) SetWithdrawnAt(v time.Time) *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetWithdrawnAt(v)
+	})
+}
+
+// UpdateWithdrawnAt sets the "withdrawn_at" field to the value that was provided on create.
+func (u *DecisionUpsertOne) UpdateWithdrawnAt() *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateWithdrawnAt()
+	})
+}
+
+// ClearWithdrawnAt clears the value of the "withdrawn_at" field.
+func (u *DecisionUpsertOne) ClearWithdrawnAt() *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.ClearWithdrawnAt()
+	})
+}
+
+// SetWithdrawnReason sets the "withdrawn_reason" field.
+func (u *DecisionUpsertOne) SetWithdrawnReason(v string) *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetWithdrawnReason(v)
+	})
+}
+
+// UpdateWithdrawnReason sets the "withdrawn_reason" field to the value that was provided on create.
+func (u *DecisionUpsertOne) UpdateWithdrawnReason() *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateWithdrawnReason()
+	})
+}
+
+// ClearWithdrawnReason clears the value of the "withdrawn_reason" field.
+func (u *DecisionUpsertOne) ClearWithdrawnReason() *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.ClearWithdrawnReason()
 	})
 }
 
@@ -1112,6 +1226,48 @@ func (u *DecisionUpsertBulk) UpdateReplacedAt() *DecisionUpsertBulk {
 func (u *DecisionUpsertBulk) ClearReplacedAt() *DecisionUpsertBulk {
 	return u.Update(func(s *DecisionUpsert) {
 		s.ClearReplacedAt()
+	})
+}
+
+// SetWithdrawnAt sets the "withdrawn_at" field.
+func (u *DecisionUpsertBulk) SetWithdrawnAt(v time.Time) *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetWithdrawnAt(v)
+	})
+}
+
+// UpdateWithdrawnAt sets the "withdrawn_at" field to the value that was provided on create.
+func (u *DecisionUpsertBulk) UpdateWithdrawnAt() *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateWithdrawnAt()
+	})
+}
+
+// ClearWithdrawnAt clears the value of the "withdrawn_at" field.
+func (u *DecisionUpsertBulk) ClearWithdrawnAt() *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.ClearWithdrawnAt()
+	})
+}
+
+// SetWithdrawnReason sets the "withdrawn_reason" field.
+func (u *DecisionUpsertBulk) SetWithdrawnReason(v string) *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetWithdrawnReason(v)
+	})
+}
+
+// UpdateWithdrawnReason sets the "withdrawn_reason" field to the value that was provided on create.
+func (u *DecisionUpsertBulk) UpdateWithdrawnReason() *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateWithdrawnReason()
+	})
+}
+
+// ClearWithdrawnReason clears the value of the "withdrawn_reason" field.
+func (u *DecisionUpsertBulk) ClearWithdrawnReason() *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.ClearWithdrawnReason()
 	})
 }
 

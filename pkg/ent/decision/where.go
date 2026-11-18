@@ -140,6 +140,16 @@ func ReplacedAt(v time.Time) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldReplacedAt, v))
 }
 
+// WithdrawnAt applies equality check predicate on the "withdrawn_at" field. It's identical to WithdrawnAtEQ.
+func WithdrawnAt(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldWithdrawnAt, v))
+}
+
+// WithdrawnReason applies equality check predicate on the "withdrawn_reason" field. It's identical to WithdrawnReasonEQ.
+func WithdrawnReason(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldWithdrawnReason, v))
+}
+
 // ProjectIDEQ applies the EQ predicate on the "project_id" field.
 func ProjectIDEQ(v uuid.UUID) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldProjectID, v))
@@ -1068,6 +1078,131 @@ func ReplacedAtIsNil() predicate.Decision {
 // ReplacedAtNotNil applies the NotNil predicate on the "replaced_at" field.
 func ReplacedAtNotNil() predicate.Decision {
 	return predicate.Decision(sql.FieldNotNull(FieldReplacedAt))
+}
+
+// WithdrawnAtEQ applies the EQ predicate on the "withdrawn_at" field.
+func WithdrawnAtEQ(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldWithdrawnAt, v))
+}
+
+// WithdrawnAtNEQ applies the NEQ predicate on the "withdrawn_at" field.
+func WithdrawnAtNEQ(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldNEQ(FieldWithdrawnAt, v))
+}
+
+// WithdrawnAtIn applies the In predicate on the "withdrawn_at" field.
+func WithdrawnAtIn(vs ...time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldIn(FieldWithdrawnAt, vs...))
+}
+
+// WithdrawnAtNotIn applies the NotIn predicate on the "withdrawn_at" field.
+func WithdrawnAtNotIn(vs ...time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldNotIn(FieldWithdrawnAt, vs...))
+}
+
+// WithdrawnAtGT applies the GT predicate on the "withdrawn_at" field.
+func WithdrawnAtGT(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldGT(FieldWithdrawnAt, v))
+}
+
+// WithdrawnAtGTE applies the GTE predicate on the "withdrawn_at" field.
+func WithdrawnAtGTE(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldGTE(FieldWithdrawnAt, v))
+}
+
+// WithdrawnAtLT applies the LT predicate on the "withdrawn_at" field.
+func WithdrawnAtLT(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldLT(FieldWithdrawnAt, v))
+}
+
+// WithdrawnAtLTE applies the LTE predicate on the "withdrawn_at" field.
+func WithdrawnAtLTE(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldLTE(FieldWithdrawnAt, v))
+}
+
+// WithdrawnAtIsNil applies the IsNil predicate on the "withdrawn_at" field.
+func WithdrawnAtIsNil() predicate.Decision {
+	return predicate.Decision(sql.FieldIsNull(FieldWithdrawnAt))
+}
+
+// WithdrawnAtNotNil applies the NotNil predicate on the "withdrawn_at" field.
+func WithdrawnAtNotNil() predicate.Decision {
+	return predicate.Decision(sql.FieldNotNull(FieldWithdrawnAt))
+}
+
+// WithdrawnReasonEQ applies the EQ predicate on the "withdrawn_reason" field.
+func WithdrawnReasonEQ(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonNEQ applies the NEQ predicate on the "withdrawn_reason" field.
+func WithdrawnReasonNEQ(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldNEQ(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonIn applies the In predicate on the "withdrawn_reason" field.
+func WithdrawnReasonIn(vs ...string) predicate.Decision {
+	return predicate.Decision(sql.FieldIn(FieldWithdrawnReason, vs...))
+}
+
+// WithdrawnReasonNotIn applies the NotIn predicate on the "withdrawn_reason" field.
+func WithdrawnReasonNotIn(vs ...string) predicate.Decision {
+	return predicate.Decision(sql.FieldNotIn(FieldWithdrawnReason, vs...))
+}
+
+// WithdrawnReasonGT applies the GT predicate on the "withdrawn_reason" field.
+func WithdrawnReasonGT(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldGT(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonGTE applies the GTE predicate on the "withdrawn_reason" field.
+func WithdrawnReasonGTE(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldGTE(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonLT applies the LT predicate on the "withdrawn_reason" field.
+func WithdrawnReasonLT(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldLT(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonLTE applies the LTE predicate on the "withdrawn_reason" field.
+func WithdrawnReasonLTE(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldLTE(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonContains applies the Contains predicate on the "withdrawn_reason" field.
+func WithdrawnReasonContains(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldContains(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonHasPrefix applies the HasPrefix predicate on the "withdrawn_reason" field.
+func WithdrawnReasonHasPrefix(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldHasPrefix(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonHasSuffix applies the HasSuffix predicate on the "withdrawn_reason" field.
+func WithdrawnReasonHasSuffix(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldHasSuffix(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonIsNil applies the IsNil predicate on the "withdrawn_reason" field.
+func WithdrawnReasonIsNil() predicate.Decision {
+	return predicate.Decision(sql.FieldIsNull(FieldWithdrawnReason))
+}
+
+// WithdrawnReasonNotNil applies the NotNil predicate on the "withdrawn_reason" field.
+func WithdrawnReasonNotNil() predicate.Decision {
+	return predicate.Decision(sql.FieldNotNull(FieldWithdrawnReason))
+}
+
+// WithdrawnReasonEqualFold applies the EqualFold predicate on the "withdrawn_reason" field.
+func WithdrawnReasonEqualFold(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldEqualFold(FieldWithdrawnReason, v))
+}
+
+// WithdrawnReasonContainsFold applies the ContainsFold predicate on the "withdrawn_reason" field.
+func WithdrawnReasonContainsFold(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldContainsFold(FieldWithdrawnReason, v))
 }
 
 // And groups predicates with the AND operator between them.

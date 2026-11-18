@@ -59,8 +59,12 @@ type Decision struct {
 	// DecidedAt holds the value of the "decided_at" field.
 	DecidedAt *time.Time `json:"decided_at,omitempty"`
 	// ReplacedAt holds the value of the "replaced_at" field.
-	ReplacedAt   *time.Time `json:"replaced_at,omitempty"`
-	selectValues sql.SelectValues
+	ReplacedAt *time.Time `json:"replaced_at,omitempty"`
+	// WithdrawnAt holds the value of the "withdrawn_at" field.
+	WithdrawnAt *time.Time `json:"withdrawn_at,omitempty"`
+	// WithdrawnReason holds the value of the "withdrawn_reason" field.
+	WithdrawnReason *string `json:"withdrawn_reason,omitempty"`
+	selectValues    sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -74,9 +78,9 @@ func (*Decision) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case decision.FieldPosition, decision.FieldVersion, decision.FieldIntroLength:
 			values[i] = new(sql.NullInt64)
-		case decision.FieldChatKey, decision.FieldAskerAgentName, decision.FieldKey, decision.FieldKeyNorm, decision.FieldKeySource, decision.FieldQuestion, decision.FieldDefaultChoiceID, decision.FieldStatus:
+		case decision.FieldChatKey, decision.FieldAskerAgentName, decision.FieldKey, decision.FieldKeyNorm, decision.FieldKeySource, decision.FieldQuestion, decision.FieldDefaultChoiceID, decision.FieldStatus, decision.FieldWithdrawnReason:
 			values[i] = new(sql.NullString)
-		case decision.FieldCreatedAt, decision.FieldDecidedAt, decision.FieldReplacedAt:
+		case decision.FieldCreatedAt, decision.FieldDecidedAt, decision.FieldReplacedAt, decision.FieldWithdrawnAt:
 			values[i] = new(sql.NullTime)
 		case decision.FieldID, decision.FieldProjectID, decision.FieldMessageID, decision.FieldAskerAgentID:
 			values[i] = new(uuid.UUID)
@@ -229,6 +233,20 @@ func (_m *Decision) assignValues(columns []string, values []any) error {
 				_m.ReplacedAt = new(time.Time)
 				*_m.ReplacedAt = value.Time
 			}
+		case decision.FieldWithdrawnAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field withdrawn_at", values[i])
+			} else if value.Valid {
+				_m.WithdrawnAt = new(time.Time)
+				*_m.WithdrawnAt = value.Time
+			}
+		case decision.FieldWithdrawnReason:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field withdrawn_reason", values[i])
+			} else if value.Valid {
+				_m.WithdrawnReason = new(string)
+				*_m.WithdrawnReason = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -335,6 +353,16 @@ func (_m *Decision) String() string {
 	if v := _m.ReplacedAt; v != nil {
 		builder.WriteString("replaced_at=")
 		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.WithdrawnAt; v != nil {
+		builder.WriteString("withdrawn_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.WithdrawnReason; v != nil {
+		builder.WriteString("withdrawn_reason=")
+		builder.WriteString(*v)
 	}
 	builder.WriteByte(')')
 	return builder.String()

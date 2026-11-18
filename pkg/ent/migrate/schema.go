@@ -1275,11 +1275,13 @@ var (
 		{Name: "choices", Type: field.TypeJSON},
 		{Name: "default_choice_id", Type: field.TypeString, Nullable: true},
 		{Name: "intro_length", Type: field.TypeInt, Default: 0},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "decided", "replaced"}, Default: "pending"},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "decided", "replaced", "withdrawn"}, Default: "pending"},
 		{Name: "replaced_by_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "decided_at", Type: field.TypeTime, Nullable: true},
 		{Name: "replaced_at", Type: field.TypeTime, Nullable: true},
+		{Name: "withdrawn_at", Type: field.TypeTime, Nullable: true},
+		{Name: "withdrawn_reason", Type: field.TypeString, Nullable: true, Size: 2147483647},
 	}
 	// DecisionsTable holds the schema information for the "decisions" table.
 	DecisionsTable = &schema.Table{

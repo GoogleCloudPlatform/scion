@@ -392,6 +392,15 @@ func Spec() []TableFixture {
 				"status": "replaced", "replaced_by_id": "dc000000-0000-0000-0000-000000000002",
 				"created_at": baseTime, "replaced_at": baseTime,
 			},
+			{ // withdrawn decision version with reason (ptone/scion#8190)
+				"id": "dc000000-0000-0000-0000-000000000003", "project_id": projectID,
+				"conversation_id": conversationID, "message_id": messageID, "position": 2,
+				"asker_agent_id": agentID, "asker_agent_name": "worker",
+				"key": "D-WD", "key_norm": "d-wd", "key_source": "agent", "version": 1,
+				"question": "Obsolete rollout check?", "choices": `[{"id":"1","label":"yes"},{"id":"2","label":"no"}]`,
+				"status": "withdrawn", "created_at": baseTime,
+				"withdrawn_at": baseTime.Add(2 * time.Minute), "withdrawn_reason": "Plan changed",
+			},
 		}},
 		{Table: "decision_answers", Rows: []row{
 			{ // a direct answer recorded from the web session

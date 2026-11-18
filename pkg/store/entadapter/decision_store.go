@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
@@ -242,12 +244,23 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 				if st.active.Status == decision.StatusDecided {
 					prev.Answer = effectiveAnswer(decided[st.active.ID])
 				}
-				n, err := client.Decision.Update().
-					Where(decision.ID(st.active.ID), decision.StatusNEQ(decision.StatusReplaced)).
-					SetStatus(decision.StatusReplaced).
-					SetReplacedAt(now).
-					SetReplacedByID(rowIDs[i]).
-					Save(ctx)
+				var n int
+				if store.DecisionStatusTerminal(string(st.active.Status)) {
+					// A withdrawn version stays withdrawn when --update re-asks the
+					// key as the next version, while replaced_by_id links v1 -> v2 (D7).
+					n, err = client.Decision.Update().
+						Where(decision.ID(st.active.ID), decision.StatusEQ(decision.StatusWithdrawn), decision.ReplacedByIDIsNil()).
+						SetReplacedAt(now).
+						SetReplacedByID(rowIDs[i]).
+						Save(ctx)
+				} else {
+					n, err = client.Decision.Update().
+						Where(decision.ID(st.active.ID), decision.StatusNEQ(decision.StatusReplaced), decision.StatusNEQ(decision.StatusWithdrawn), decision.ReplacedByIDIsNil()).
+						SetStatus(decision.StatusReplaced).
+						SetReplacedAt(now).
+						SetReplacedByID(rowIDs[i]).
+						Save(ctx)
+				}
 				if err != nil {
 					return nil, mapError(err)
 				}
@@ -386,7 +399,7 @@ func loadKeyStates(ctx context.Context, client *ent.Client, agentID uuid.UUID, d
 		if r.Version > st.maxVersion {
 			st.maxVersion = r.Version
 			st.active = nil
-			if r.Status != decision.StatusReplaced {
+			if r.Status != decision.StatusReplaced && r.ReplacedByID == nil {
 				st.active = r
 			}
 		}
@@ -685,8 +698,11 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 			return a, ok, err
 		}
 	}
-	if row.Status == decision.StatusReplaced {
-		return nil, false, fmt.Errorf("%w: version %d of %s was replaced", store.ErrDecisionReplaced, row.Version, row.Key)
+	if store.DecisionStatusTerminal(string(row.Status)) {
+		if row.Status == decision.StatusReplaced {
+			return nil, false, fmt.Errorf("%w: version %d of %s was replaced", store.ErrDecisionReplaced, row.Version, row.Key)
+		}
+		return nil, false, fmt.Errorf("%w: version %d of %s was withdrawn", store.ErrDecisionWithdrawn, row.Version, row.Key)
 	}
 	var label string
 	for _, ch := range row.Choices {
@@ -1135,6 +1151,10 @@ func decisionToStore(r *ent.Decision) *store.Decision {
 		CreatedAt:      r.CreatedAt,
 		DecidedAt:      r.DecidedAt,
 		ReplacedAt:     r.ReplacedAt,
+		WithdrawnAt:    r.WithdrawnAt,
+	}
+	if r.WithdrawnReason != nil {
+		d.WithdrawnReason = *r.WithdrawnReason
 	}
 	if r.ConversationID != nil {
 		d.ConversationID = r.ConversationID.String()
@@ -1568,7 +1588,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 		rowIDs[i] = r.ID
 		if prev := latestByNorm[r.KeyNorm]; prev == nil || r.Version > prev.Version {
 			latestByNorm[r.KeyNorm] = r
-			if r.Status != decision.StatusReplaced {
+			if r.Status != decision.StatusReplaced && r.ReplacedByID == nil {
 				activeByNorm[r.KeyNorm] = r
 			} else {
 				delete(activeByNorm, r.KeyNorm)
@@ -1846,4 +1866,202 @@ func replayableInterpretedAnswers(ctx context.Context, client *ent.Client, agent
 		Answers:  ordered,
 		Replayed: true,
 	}, true, nil
+}
+
+// WithdrawDecisions implements store.DecisionStore.
+func (c *CompositeStore) WithdrawDecisions(ctx context.Context, in *store.WithdrawDecisionsInput) (*store.WithdrawDecisionsResult, error) {
+	if err := validateWithdrawDecisionsInput(in); err != nil {
+		return nil, err
+	}
+	if c.inTx {
+		return c.withdrawDecisionsTx(ctx, in)
+	}
+	var res *store.WithdrawDecisionsResult
+	for attempt := 0; ; attempt++ {
+		err := c.WithTx(ctx, func(tx store.Store) error {
+			var err error
+			res, err = tx.(*CompositeStore).withdrawDecisionsTx(ctx, in)
+			return err
+		})
+		if err == nil {
+			return res, nil
+		}
+		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
+			continue
+		}
+		if errors.Is(err, errDecisionRace) {
+			return nil, store.ErrTransient
+		}
+		return nil, err
+	}
+}
+
+func validateWithdrawDecisionsInput(in *store.WithdrawDecisionsInput) error {
+	if in == nil {
+		return fmt.Errorf("%w: withdraw input is required", store.ErrInvalidInput)
+	}
+	if _, err := parseUUID(in.AskerAgentID); err != nil {
+		return err
+	}
+	if len(in.Keys) == 0 || len(in.Keys) > messages.MaxDecisionsPerMessage {
+		return fmt.Errorf("%w: withdraw requires 1 to %d keys", store.ErrInvalidInput, messages.MaxDecisionsPerMessage)
+	}
+	seenNorms := make(map[string]bool, len(in.Keys))
+	for _, rawKey := range in.Keys {
+		k := strings.TrimSpace(rawKey)
+		if k == "" {
+			return fmt.Errorf("%w: decision key must be non-empty", store.ErrInvalidInput)
+		}
+		norm := messages.DecisionKeyNorm(k)
+		if seenNorms[norm] {
+			return fmt.Errorf("%w: duplicate decision key %q", store.ErrInvalidInput, k)
+		}
+		seenNorms[norm] = true
+	}
+	reason := strings.TrimSpace(in.Reason)
+	if utf8.RuneCountInString(reason) > store.MaxDecisionWithdrawReasonRunes {
+		return fmt.Errorf("%w: reason is at most %d characters", store.ErrInvalidInput, store.MaxDecisionWithdrawReasonRunes)
+	}
+	return nil
+}
+
+func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.WithdrawDecisionsInput) (*store.WithdrawDecisionsResult, error) {
+	client := c.client
+	agentUUID, _ := parseUUID(in.AskerAgentID)
+	reason := strings.TrimSpace(in.Reason)
+
+	trimmedKeys := make([]string, len(in.Keys))
+	norms := make([]string, len(in.Keys))
+	for i, k := range in.Keys {
+		trimmed := strings.TrimSpace(k)
+		trimmedKeys[i] = trimmed
+		norms[i] = messages.DecisionKeyNorm(trimmed)
+	}
+
+	// Lock target rows on Postgres in (key_norm, version) order — matching
+	// CreateDecisionPrompt, RecordAnswerSet, and RecordInterpretedAnswers —
+	// so concurrent answers, reposts, and withdrawals serialize cleanly.
+	q := client.Decision.Query().
+		Where(decision.AskerAgentID(agentUUID), decision.KeyNormIn(norms...)).
+		Order(ent.Asc(decision.FieldKeyNorm), ent.Asc(decision.FieldVersion))
+	if c.isPostgres() {
+		q = q.ForUpdate()
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	latestByNorm := make(map[string]*ent.Decision, len(norms))
+	activeByNorm := make(map[string]*ent.Decision, len(norms))
+	for _, r := range rows {
+		if prev := latestByNorm[r.KeyNorm]; prev == nil || r.Version > prev.Version {
+			latestByNorm[r.KeyNorm] = r
+			if r.Status != decision.StatusReplaced && r.ReplacedByID == nil {
+				activeByNorm[r.KeyNorm] = r
+			} else {
+				delete(activeByNorm, r.KeyNorm)
+			}
+		}
+	}
+
+	activeIDs := make([]uuid.UUID, 0, len(activeByNorm))
+	for _, r := range activeByNorm {
+		activeIDs = append(activeIDs, r.ID)
+	}
+	existingAnswers, err := loadAnswers(ctx, client, activeIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	var failures []store.WithdrawKeyFailure
+	var pendingRows []*ent.Decision
+	var alreadyRows []*ent.Decision
+	for i, key := range trimmedKeys {
+		row := activeByNorm[norms[i]]
+		if row == nil {
+			failures = append(failures, store.WithdrawKeyFailure{
+				Key:    key,
+				Reason: store.WithdrawReasonNotFound,
+			})
+			continue
+		}
+		dStore := decisionToStore(row)
+		dStore.Answers = answersToStore(existingAnswers[row.ID])
+		switch {
+		case row.Status == decision.StatusWithdrawn:
+			alreadyRows = append(alreadyRows, row)
+		case len(existingAnswers[row.ID]) > 0 || row.Status == decision.StatusDecided:
+			failures = append(failures, store.WithdrawKeyFailure{
+				Key:      row.Key,
+				Reason:   store.WithdrawReasonAlreadyAnswered,
+				Decision: dStore,
+			})
+		case row.Status == decision.StatusPending:
+			pendingRows = append(pendingRows, row)
+		default:
+			failures = append(failures, store.WithdrawKeyFailure{
+				Key:      row.Key,
+				Reason:   store.WithdrawReasonNotFound,
+				Decision: dStore,
+			})
+		}
+	}
+	if len(failures) > 0 {
+		return nil, &store.WithdrawDecisionsError{Failures: failures}
+	}
+
+	sort.SliceStable(pendingRows, func(i, j int) bool {
+		return compareEntDecisionOrder(pendingRows[i], pendingRows[j])
+	})
+	sort.SliceStable(alreadyRows, func(i, j int) bool {
+		return compareEntDecisionOrder(alreadyRows[i], alreadyRows[j])
+	})
+
+	alreadyOut := make([]*store.Decision, len(alreadyRows))
+	for i, r := range alreadyRows {
+		d := decisionToStore(r)
+		d.Answers = answersToStore(existingAnswers[r.ID])
+		alreadyOut[i] = d
+	}
+
+	// Pure retry: every target is already withdrawn, so store nothing and keep
+	// the original withdrawal timestamp and reason.
+	if len(pendingRows) == 0 {
+		return &store.WithdrawDecisionsResult{
+			Withdrawn:        []*store.Decision{},
+			AlreadyWithdrawn: alreadyOut,
+		}, nil
+	}
+
+	now := time.Now().UTC()
+	withdrawnOut := make([]*store.Decision, len(pendingRows))
+	for i, r := range pendingRows {
+		upd := client.Decision.Update().
+			Where(decision.ID(r.ID), decision.StatusEQ(decision.StatusPending)).
+			SetStatus(decision.StatusWithdrawn).
+			SetWithdrawnAt(now)
+		if reason != "" {
+			upd.SetWithdrawnReason(reason)
+		}
+		n, err := upd.Save(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if n != 1 {
+			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errDecisionRace, r.Version, r.Key)
+		}
+		d := decisionToStore(r)
+		d.Status = store.DecisionStatusWithdrawn
+		nowCopy := now
+		d.WithdrawnAt = &nowCopy
+		d.WithdrawnReason = reason
+		d.Answers = answersToStore(existingAnswers[r.ID])
+		withdrawnOut[i] = d
+	}
+
+	return &store.WithdrawDecisionsResult{
+		Withdrawn:        withdrawnOut,
+		AlreadyWithdrawn: alreadyOut,
+	}, nil
 }

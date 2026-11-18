@@ -108,7 +108,7 @@ func (Decision) Fields() []ent.Field {
 			NonNegative().
 			Immutable(),
 		field.Enum("status").
-			Values("pending", "decided", "replaced").
+			Values("pending", "decided", "replaced", "withdrawn").
 			Default("pending"),
 		// replaced_by_id is the row of the version that replaced this one.
 		field.UUID("replaced_by_id", uuid.UUID{}).
@@ -121,6 +121,12 @@ func (Decision) Fields() []ent.Field {
 			Optional().
 			Nillable(),
 		field.Time("replaced_at").
+			Optional().
+			Nillable(),
+		field.Time("withdrawn_at").
+			Optional().
+			Nillable(),
+		field.Text("withdrawn_reason").
 			Optional().
 			Nillable(),
 	}
