@@ -711,7 +711,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
-	// decisions.byId reads and answers a choice prompt decision; the
+	// decisions.byId reads and answers a decision prompt decision; the
 	// handler authorizes per conversation (read or send rights on the
 	// prompt's thread or DM). 404 while web.decisions is off.
 	"/api/v1/decisions/": {

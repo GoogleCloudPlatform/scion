@@ -53,7 +53,7 @@ import { resolveBrokerRoute } from './broker-routes.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
 import { apiFetch } from './api.js';
 import { setPreferredTimeZone } from '../utils/time.js';
-import { setPreselectRecommendedChoices } from './choice-preferences.js';
+import { setPreselectRecommendedChoices } from './decision-preferences.js';
 import { withTimeout } from './with-timeout.js';
 import {
   type AdminStatus,
@@ -423,7 +423,7 @@ async function fetchCurrentUser(): Promise<User | null> {
 
 /**
  * Refreshes the display-timezone preference and applies it to the
- * effective-zone store (`setPreferredTimeZone`), and the choices-card
+ * effective-zone store (`setPreferredTimeZone`), and the decision-card
  * preference (`setPreselectRecommendedChoices`). Used when the SSR-injected
  * user (`prefetchPageData`, `pkg/hub/web.go`) already supplied `currentUser`
  * without `preferences` — that field is deliberately never cached on the

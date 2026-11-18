@@ -37,7 +37,7 @@ const {
   fetchProfilePendingDecisions,
   getCachedProfileDecisionProbe,
   getLastKnownProfileDecisionAvailability,
-  isChoicePromptMessageEvent,
+  isDecisionPromptMessageEvent,
   parseProfileDecisionsUrlState,
   resetProfileDecisionProbeCacheForTests,
   scheduleSharedProfileDecisionProbeRefresh,
@@ -410,35 +410,35 @@ describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
 
   it('matches real Hub decision-prompt chat events and ignores plain messages, legacy choice-prompt, or dead message.choices shapes', () => {
     expect(
-      isChoicePromptMessageEvent(
+      isDecisionPromptMessageEvent(
         new CustomEvent('chat-message-received', {
           detail: { data: { id: 'm1', type: 'decision-prompt' } },
         })
       )
     ).toBe(true);
     expect(
-      isChoicePromptMessageEvent(
+      isDecisionPromptMessageEvent(
         new CustomEvent('chat-message-received', {
           detail: { data: { id: 'm2', decisions: [{ rowId: 'r1' }] } },
         })
       )
     ).toBe(true);
     expect(
-      isChoicePromptMessageEvent(
+      isDecisionPromptMessageEvent(
         new CustomEvent('chat-message-received', {
           detail: { data: { id: 'm-legacy', type: 'choice-prompt' } },
         })
       )
     ).toBe(false);
     expect(
-      isChoicePromptMessageEvent(
+      isDecisionPromptMessageEvent(
         new CustomEvent('chat-message-received', {
           detail: { data: { id: 'm3', type: 'message', content: 'hello' } },
         })
       )
     ).toBe(false);
     expect(
-      isChoicePromptMessageEvent(
+      isDecisionPromptMessageEvent(
         new CustomEvent('chat-message-received', {
           detail: { data: { message: { choices: [{ rowId: 'r1' }] } } },
         })

@@ -324,7 +324,7 @@ func (s *Server) storeOutboundBeforeBroker(ctx context.Context, w http.ResponseW
 	}
 	structuredMsg.ConversationID = storeMsg.ConversationID
 	if err := storeRow(ctx); err != nil {
-		if writeChoiceStoreError(w, err) {
+		if writeDecisionStoreError(w, err) {
 			return false, false
 		}
 		s.messageLog.Error("Failed to persist outbound message", "agent_id", agent.ID, "error", err)

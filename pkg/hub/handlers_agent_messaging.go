@@ -1160,11 +1160,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if rejectHubMintedType(w, req.Type) {
 		return
 	}
-	choiceSend, ok := s.prepareChoicePromptSend(w, id, &req)
+	decisionSend, ok := s.prepareDecisionPromptSend(w, id, &req)
 	if !ok {
 		return
 	}
-	if choiceSend != nil {
+	if decisionSend != nil {
 		req.Type = messages.TypeDecisionPrompt
 	}
 
@@ -1181,8 +1181,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// With choices the body is the optional intro above the decisions.
-	if req.Msg == "" && choiceSend == nil {
+	// With decisions the body is the optional intro above the decisions.
+	if req.Msg == "" && decisionSend == nil {
 		ValidationError(w, "msg is required", nil)
 		return
 	}
@@ -1194,9 +1194,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// (agent DM, mention fan-out, human mentions, the stored row) sees the
 	// same body.
 	req.Msg = rewriteIncomingAgentMentions(req.Msg)
-	if choiceSend != nil {
+	if decisionSend != nil {
 		// The intro is the body after that rewrite, as the stored row is.
-		choiceSend.intro = req.Msg
+		decisionSend.intro = req.Msg
 	}
 
 	// Validate DM key format when the thread_id looks like a DM key.
@@ -1253,7 +1253,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	// A decision prompt is for humans: a recipient that routing resolved to
 	// an agent (an agent DM, or a conversation that is one) is refused.
-	if choiceSend != nil && (outboundTargetAgentID != "" || result.DeliveryPath == deliveryAgentDM) {
+	if decisionSend != nil && (outboundTargetAgentID != "" || result.DeliveryPath == deliveryAgentDM) {
 		ValidationError(w, "decisions can be sent only to a user or a conversation, not to an agent",
 			map[string]interface{}{"field": "recipient"})
 		return
@@ -1478,9 +1478,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// deliverToUser before the SSE publish.
 	var stampWatermarks func(context.Context, *store.Message)
 	storeOutboundRow := func(storeCtx context.Context) error {
-		if choiceSend != nil {
+		if decisionSend != nil {
 			// The message and its decisions in one transaction.
-			if err := s.storeChoicePrompt(storeCtx, choiceSend, agent, storeMsg, structuredMsg); err != nil {
+			if err := s.storeDecisionPrompt(storeCtx, decisionSend, agent, storeMsg, structuredMsg); err != nil {
 				return err
 			}
 		} else if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
@@ -1505,15 +1505,15 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 		publishRefs := append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...)
 		var chatOpts []ChatEventOption
-		if choiceSend != nil {
-			// The chat events of a choice prompt carry its decisions.
-			chatOpts = append(chatOpts, withChoiceEvent(&choiceEventPayload{Prompt: s.choicePromptViewOf(storeCtx, storeMsg)}))
+		if decisionSend != nil {
+			// The chat events of a decision prompt carry its decisions.
+			chatOpts = append(chatOpts, withDecisionEvent(&decisionEventPayload{Prompt: s.decisionPromptViewOf(storeCtx, storeMsg)}))
 		}
 		s.events.PublishUserMessage(storeCtx, storeMsg, publishRefs, recordedRefs, chatOpts...)
 		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, publishRefs, recordedRefs, chatOpts...)
-		if choiceSend != nil {
+		if decisionSend != nil {
 			// Open cards of the versions this send replaced (--update).
-			s.publishReplacedDecisions(storeCtx, choiceSend.result)
+			s.publishReplacedDecisions(storeCtx, decisionSend.result)
 			s.enqueueDecisionBellEvent(storeMsg.ProjectID, storeMsg.ThreadID, "")
 		}
 		return nil
@@ -1554,8 +1554,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
-			if len(artifactAttachments) > 0 || choiceSend != nil {
-				// A choice prompt is stored with its decisions by this
+			if len(artifactAttachments) > 0 || decisionSend != nil {
+				// A decision prompt is stored with its decisions by this
 				// handler, so it takes the same stored-first path.
 				// Decision D2 (ptone/scion#4596): a message that carries
 				// attachments stored as artifacts is stored by this handler,
@@ -1648,7 +1648,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserDirect:
 		// Direct path: persist, link attachments, publish SSE, dispatch to channels.
 		if err := storeOutboundRow(ctx); err != nil {
-			if writeChoiceStoreError(w, err) {
+			if writeDecisionStoreError(w, err) {
 				return
 			}
 			s.messageLog.Error("Failed to persist outbound message", "error", err)
@@ -1675,9 +1675,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// its external_ref embeds whatever the caller chose to send; fan-out
 	// treats that the same as no group context at all.
 	//
-	// A choice prompt is addressed to humans and fans out to no agent.
+	// A decision prompt is addressed to humans and fans out to no agent.
 	var mentionResults []messages.MentionResult
-	if choiceSend == nil {
+	if decisionSend == nil {
 		mentionResults = s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
 			Sender:             agent,
 			SenderIdent:        agentIdent,
@@ -1700,7 +1700,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// (group_message_mode.go).
 	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
 	var defaultAgentResult *messages.MentionResult
-	if isGroupPost && choiceSend == nil {
+	if isGroupPost && decisionSend == nil {
 		defaultAgentResult = s.wakeGroupDefaultAgent(ctx, groupDefaultWakeInput{
 			Sender:            agent,
 			SenderIdent:       agentIdent,
@@ -1773,8 +1773,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if outboundArtifactWarning != "" {
 		respBody["artifact_warning"] = outboundArtifactWarning
 	}
-	if choiceSend != nil {
-		respBody["decisions"] = choiceDecisionResults(agent.ID, choiceSend.result)
+	if decisionSend != nil {
+		respBody["decisions"] = decisionSendResults(agent.ID, decisionSend.result)
 	}
 	writeJSON(w, http.StatusOK, respBody)
 }

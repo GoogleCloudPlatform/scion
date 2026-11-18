@@ -36,9 +36,9 @@ export interface UserPreferences {
    */
   timezone?: string | undefined;
   /**
-   * Whether multi-decision choices cards start with each recommended choice
+   * Whether multi-decision cards start with each recommended choice
    * selected (ptone/scion#7842). Absent means off: recommended choices are
-   * only outlined. See `web/src/client/choice-preferences.ts`.
+   * only outlined. See `web/src/client/decision-preferences.ts`.
    */
   preselectRecommendedChoices?: boolean | undefined;
 }
@@ -1718,18 +1718,18 @@ export interface Message {
   /** The prompt's intro without the hub's markdown fallback. */
   decisionIntro?: string;
   /** "single" for one decision, "set" for 2 or more (one submit answers all). */
-  answerMode?: ChoiceAnswerMode;
+  answerMode?: DecisionAnswerMode;
   /** One-click answer carried by a "decision-response" message. */
-  decisionResponse?: ChoiceResponseView;
+  decisionResponse?: DecisionResponseView;
   /** Set submit carried by a "decision-response" message. */
-  decisionResponseSet?: ChoiceResponseSetView;
+  decisionResponseSet?: DecisionResponseSetView;
 }
 
 // ---------------------------------------------------------------------------
-// Choices (mirror of pkg/hub/choices_view.go)
+// Decisions (mirror of pkg/hub/decisions_view.go)
 // ---------------------------------------------------------------------------
 
-export type ChoiceAnswerMode = 'single' | 'set';
+export type DecisionAnswerMode = 'single' | 'set';
 
 /** One option of a decision (pkg/messages Choice). */
 export interface ChoiceOption {
@@ -1791,7 +1791,7 @@ export interface DecisionView {
 }
 
 /** What a decision-response row of a one-click answer carries. */
-export interface ChoiceResponseView {
+export interface DecisionResponseView {
   rowId: string;
   ref: string;
   key: string;
@@ -1810,8 +1810,8 @@ export interface ChoiceResponseView {
   previousChoiceLabel?: string;
 }
 
-/** One answer of a ChoiceResponseSetView. */
-export interface ChoiceResponseSetAnswer {
+/** One answer of a DecisionResponseSetView. */
+export interface DecisionResponseSetAnswer {
   rowId: string;
   ref: string;
   key: string;
@@ -1831,14 +1831,14 @@ export interface ChoiceResponseSetAnswer {
 }
 
 /** What the decision-response row of a set submit carries, in position order. */
-export interface ChoiceResponseSetView {
+export interface DecisionResponseSetView {
   promptMessageId?: string;
   batchId: string;
-  answers: ChoiceResponseSetAnswer[];
+  answers: DecisionResponseSetAnswer[];
 }
 
 /** Payload of the chat.decision.updated SSE event. */
-export interface ChoiceUpdatedEvent {
+export interface DecisionUpdatedEvent {
   decision: DecisionView;
   messageId: string;
   threadId: string;

@@ -114,16 +114,16 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// processMentions: publish inside if persisted block.
 		"handlers_agent_messaging.go:processMentions": "Publish inside if persisted block",
 
-		// publishChoiceResponse: called by handleDecisionAnswer only after
+		// publishDecisionResponse: called by handleDecisionAnswer only after
 		// RecordAnswer stored the decision-response row in the answer's
 		// transaction; any RecordAnswer error returns before it.
-		"choices_answer.go:publishChoiceResponse": "Called only after RecordAnswer stored the response row; a RecordAnswer error returns before it",
+		"decisions_answer.go:publishDecisionResponse": "Called only after RecordAnswer stored the response row; a RecordAnswer error returns before it",
 
-		// publishChoiceResponseSet: called by handleChoiceSetAnswer only
+		// publishDecisionResponseSet: called by handleDecisionSetAnswer only
 		// after RecordAnswerSet stored the set's one decision-response row in
 		// the submit's transaction; any RecordAnswerSet error returns
 		// before it, and a replay returns before it too.
-		"choices_batch.go:publishChoiceResponseSet": "Called only after RecordAnswerSet stored the response row; a RecordAnswerSet error or a replay returns before it",
+		"decisions_batch.go:publishDecisionResponseSet": "Called only after RecordAnswerSet stored the response row; a RecordAnswerSet error or a replay returns before it",
 
 		"message_delivery_failures.go:notifyStoredMessageSenderFailed": "Acts only on already-persisted rows after FailUndeliveredMessage / ExpireHeldMessages has committed dispatch_state=failed; publish mirrors the committed write",
 	}
@@ -442,7 +442,7 @@ const (
 // PublishUserMessage. The event publish is a method call on an `events`
 // field or variable (s.events, p.events, nd.events, events) with the event
 // publish signature's 4 arguments (ctx, msg, attachments, artifactRefs),
-// optionally followed by ChatEventOptions (a choice prompt's or response's
+// optionally followed by ChatEventOptions (a decision prompt's or response's
 // chat payload). Every other PublishUserMessage call, whatever its receiver
 // or arity, is
 // publishCallOther: the broker proxy's PublishUserMessage (ctx, projectID,
@@ -517,8 +517,8 @@ func TestMemberFanoutFollowsPublish(t *testing.T) {
 		"handlers_chat_v2.go:sendHumanToHuman":                   true,
 		"handlers_agent_messaging.go:handleAgentOutboundMessage": true,
 		"messagebroker.go:deliverToUser":                         true,
-		"choices_answer.go:publishChoiceResponse":                true,
-		"choices_batch.go:publishChoiceResponseSet":              true,
+		"decisions_answer.go:publishDecisionResponse":            true,
+		"decisions_batch.go:publishDecisionResponseSet":          true,
 	}
 	isFanoutCall := func(call *ast.CallExpr) bool {
 		sel, ok := call.Fun.(*ast.SelectorExpr)

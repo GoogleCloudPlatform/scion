@@ -45,7 +45,7 @@ func seedSearchDecision(t *testing.T, cs *CompositeStore, in searchSeed) (msgID,
 		in.choices = []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
 	}
 	msgID = uuid.New().String()
-	res, err := cs.CreateChoicePrompt(context.Background(), &store.ChoicePromptInput{
+	res, err := cs.CreateDecisionPrompt(context.Background(), &store.DecisionPromptInput{
 		Message: &store.Message{
 			ID:        msgID,
 			ProjectID: in.projectID,

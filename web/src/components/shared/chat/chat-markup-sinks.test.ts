@@ -405,7 +405,7 @@ describe('chat message markup boundary', () => {
     let card: HTMLElement | null | undefined;
     await vi.waitFor(
       () => {
-        card = el.shadowRoot?.querySelector('scion-chat-choices');
+        card = el.shadowRoot?.querySelector('scion-chat-decisions');
         if (!card?.shadowRoot?.querySelector('.q strong')) {
           throw new Error('the choice question markdown has not rendered yet');
         }

@@ -370,15 +370,15 @@ type UserMessageEvent struct {
 
 	// Decisions and DecisionIntro are set on a decision-prompt row, and
 	// DecisionResponse on a decision-response row, on the chat subjects only
-	// (design choices v4, 4.4); see withChatChoicePayload. Only the
+	// (design choices v4, 4.4); see withChatDecisionPayload. Only the
 	// handlers of the web.decisions experiment set them.
-	Decisions        []DecisionView      `json:"decisions,omitempty"`
-	DecisionIntro    string              `json:"decisionIntro,omitempty"`
-	DecisionResponse *ChoiceResponseView `json:"decisionResponse,omitempty"`
+	Decisions        []DecisionView        `json:"decisions,omitempty"`
+	DecisionIntro    string                `json:"decisionIntro,omitempty"`
+	DecisionResponse *DecisionResponseView `json:"decisionResponse,omitempty"`
 	// AnswerMode is set with Decisions, and DecisionResponseSet on the
 	// response row of a set submit (design choices v5, 5.1 and 5.2).
-	AnswerMode          string                 `json:"answerMode,omitempty"`
-	DecisionResponseSet *ChoiceResponseSetView `json:"decisionResponseSet,omitempty"`
+	AnswerMode          string                   `json:"answerMode,omitempty"`
+	DecisionResponseSet *DecisionResponseSetView `json:"decisionResponseSet,omitempty"`
 }
 
 // UserMessageEventMetadata is the message metadata a live chat event
@@ -931,7 +931,7 @@ func (p *eventBuilder) PublishUserMessage(ctx context.Context, msg *store.Messag
 	// the hub's agent messages stream, which a user access token may open,
 	// reads agent.<id>.message (ptone/scion#4596).
 	evt := userMessageEvent(msg, legacyAttachmentRefs(attachments))
-	chatEvt := withChatChoicePayload(withChatArtifactRefs(userMessageEvent(msg, attachments), artifactRefs), chatEventOptionsOf(opts).choice)
+	chatEvt := withChatDecisionPayload(withChatArtifactRefs(userMessageEvent(msg, attachments), artifactRefs), chatEventOptionsOf(opts).decision)
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the
 	// RecipientID is the agent UUID, so publishing to user.<agentID>
@@ -999,8 +999,8 @@ func withChatArtifactRefs(evt UserMessageEvent, refs []artifacts.MessageRef) Use
 type ChatEventOption func(*chatEventOptions)
 
 type chatEventOptions struct {
-	// choice is a choice prompt's decisions or a choice response.
-	choice *choiceEventPayload
+	// decision is a decision prompt's decisions or a decision response.
+	decision *decisionEventPayload
 }
 
 // chatEventOptionsOf applies opts.
@@ -1014,10 +1014,10 @@ func chatEventOptionsOf(opts []ChatEventOption) chatEventOptions {
 	return o
 }
 
-// withChatChoicePayload returns evt carrying a choice prompt's decisions and
-// intro, or a choice response, for the chat subjects (the subjects whose
+// withChatDecisionPayload returns evt carrying a decision prompt's decisions and
+// intro, or a decision response, for the chat subjects (the subjects whose
 // history returns the same views to the same audience).
-func withChatChoicePayload(evt UserMessageEvent, p *choiceEventPayload) UserMessageEvent {
+func withChatDecisionPayload(evt UserMessageEvent, p *decisionEventPayload) UserMessageEvent {
 	if p == nil {
 		return evt
 	}
@@ -1075,7 +1075,7 @@ func (p *eventBuilder) PublishChatMemberMessage(ctx context.Context, msg *store.
 	if msg == nil || len(userIDs) == 0 {
 		return
 	}
-	evt := withChatChoicePayload(withChatArtifactRefs(userMessageEvent(msg, attachments), artifactRefs), chatEventOptionsOf(opts).choice)
+	evt := withChatDecisionPayload(withChatArtifactRefs(userMessageEvent(msg, attachments), artifactRefs), chatEventOptionsOf(opts).decision)
 	seen := make(map[string]bool, len(userIDs))
 	for _, id := range userIDs {
 		if id == "" || seen[id] {

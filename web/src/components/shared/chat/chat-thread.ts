@@ -44,25 +44,25 @@ import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type {
   Agent,
-  ChoiceAnswerMode,
-  ChoiceResponseSetView,
-  ChoiceResponseView,
-  ChoiceUpdatedEvent,
+  DecisionAnswerMode,
+  DecisionResponseSetView,
+  DecisionResponseView,
+  DecisionUpdatedEvent,
   DecisionView,
   Message,
 } from '../../../shared/types.js';
 import {
   ANSWERABLE,
-  applyChoiceHistoryMaps,
-  carryChoiceFields,
+  applyDecisionHistoryMaps,
+  carryDecisionFields,
   fetchAskerAnswerability,
   patchDecisions,
   readOnlyAnswerability,
   type AskerAnswerability,
-  type ChoiceAnswerDeniedDetail,
-  type ChoiceAnsweredDetail,
-  type ChoiceHistoryMaps,
-} from '../../../client/chat-choices.js';
+  type DecisionAnswerDeniedDetail,
+  type DecisionAnsweredDetail,
+  type DecisionHistoryMaps,
+} from '../../../client/decision-prompts.js';
 import type { ChatScheduleDetail, ChatSendDetail, ScionChatComposer } from './chat-composer.js';
 import {
   conversationSupportsScheduledSend,
@@ -210,7 +210,7 @@ export const MESSAGE_UNAVAILABLE_TOAST = 'That message is no longer available.';
  * DM version of a thread prompt), and the window fetch is scoped to this
  * conversation.
  */
-export const CHOICE_REPLACEMENT_ELSEWHERE_TOAST = 'The new version is in another conversation.';
+export const DECISION_REPLACEMENT_ELSEWHERE_TOAST = 'The new version is in another conversation.';
 
 /**
  * Detail of `chat-message-filter-change`: the thread asks the page to show
@@ -231,7 +231,7 @@ export interface StarOpenDetail {
 const READ_ONLY_ANSWERABILITY = readOnlyAnswerability();
 
 /** One history response, as the thread reads it. */
-interface HistoryWindow extends ChoiceHistoryMaps {
+interface HistoryWindow extends DecisionHistoryMaps {
   items?: Message[];
   messages?: Message[];
   nextCursor?: string;
@@ -1108,7 +1108,7 @@ export class ScionChatThread extends LitElement {
   private _v2DeleteHandler = this.handleV2MessageDeleted.bind(this);
 
   /** Bound listener for `chat.decision.updated` (the `decision-updated` state event). */
-  private _choiceUpdatedHandler = this.handleChoiceUpdated.bind(this);
+  private _decisionUpdatedHandler = this.handleDecisionUpdated.bind(this);
 
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
@@ -1936,7 +1936,7 @@ export class ScionChatThread extends LitElement {
    * new conversationKey — we must tear down old state and reload.
    */
   override updated(changedProperties: Map<string, unknown>): void {
-    if (changedProperties.has('messages')) this.lookupChoiceAskers();
+    if (changedProperties.has('messages')) this.lookupDecisionAskers();
     this.syncStarReconcilers();
     this.syncActionsTabStop();
     this.measureSendErrorTruncation();
@@ -2056,7 +2056,7 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-    stateManager.removeEventListener('decision-updated', this._choiceUpdatedHandler);
+    stateManager.removeEventListener('decision-updated', this._decisionUpdatedHandler);
 
     // Clear read-receipt state — it belongs to the conversation we just left.
     this.clearSeenState();
@@ -2154,7 +2154,7 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-    stateManager.removeEventListener('decision-updated', this._choiceUpdatedHandler);
+    stateManager.removeEventListener('decision-updated', this._decisionUpdatedHandler);
     this.clearSeenState();
     // Clean up typing timers
     for (const entry of this.typingUsers.values()) {
@@ -2345,7 +2345,7 @@ export class ScionChatThread extends LitElement {
       stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
       stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
       stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-      stateManager.removeEventListener('decision-updated', this._choiceUpdatedHandler);
+      stateManager.removeEventListener('decision-updated', this._decisionUpdatedHandler);
     }
   }
 
@@ -2452,7 +2452,7 @@ export class ScionChatThread extends LitElement {
       // edits/updates still apply.
       // A decision answered here or over SSE stays answered when an older
       // copy of its prompt arrives (design §4.4 out-of-order guard).
-      carryChoiceFields(existing, msg);
+      carryDecisionFields(existing, msg);
       let toStore = msg;
       if (existing?.dispatchState === 'failed' && msg.dispatchState !== 'failed') {
         // The pinned dispatchFailureReason/Code must come only from
@@ -2701,7 +2701,7 @@ export class ScionChatThread extends LitElement {
         retention?: HistoryRetention;
         canPost?: boolean;
         _capabilities?: ChatCapabilities;
-      } & ChoiceHistoryMaps;
+      } & DecisionHistoryMaps;
 
       // The body can still be arriving after the headers; a conversation
       // switch in the meantime must not merge this page into the new one.
@@ -2714,7 +2714,7 @@ export class ScionChatThread extends LitElement {
       if (!shouldMerge()) return true;
 
       const items = data?.items ?? data?.messages ?? [];
-      if (data) applyChoiceHistoryMaps(items, data);
+      if (data) applyDecisionHistoryMaps(items, data);
 
       this.mergeMessageArtifacts(data?.messageArtifacts);
       this.applyArtifactRefsAvailability(
@@ -2780,7 +2780,7 @@ export class ScionChatThread extends LitElement {
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.addEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.addEventListener('chat-message-deleted', this._v2DeleteHandler);
-    stateManager.addEventListener('decision-updated', this._choiceUpdatedHandler);
+    stateManager.addEventListener('decision-updated', this._decisionUpdatedHandler);
     // Seed the typing self-filter. The scope may not exist yet — see selfUserId.
     const scope = stateManager.currentScope;
     if (scope && scope.type === 'chat') {
@@ -2848,9 +2848,9 @@ export class ScionChatThread extends LitElement {
       // Decision fields (web.decisions; absent while off).
       decisions?: DecisionView[];
       decisionIntro?: string;
-      answerMode?: ChoiceAnswerMode;
-      decisionResponse?: ChoiceResponseView;
-      decisionResponseSet?: ChoiceResponseSetView;
+      answerMode?: DecisionAnswerMode;
+      decisionResponse?: DecisionResponseView;
+      decisionResponseSet?: DecisionResponseSetView;
     };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ChatEventData } & ChatEventData)
@@ -3210,11 +3210,11 @@ export class ScionChatThread extends LitElement {
         { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
       >;
       replyPreviews?: Record<string, ReplyPreviewInfo>;
-    } & ChoiceHistoryMaps;
+    } & DecisionHistoryMaps;
     // See fetchHistoryV2: re-checked once the body has been read.
     if (currentId !== this.fetchId) return;
     const items = data?.items ?? data?.messages ?? [];
-    if (data) applyChoiceHistoryMaps(items, data);
+    if (data) applyDecisionHistoryMaps(items, data);
 
     this.mergeMessageArtifacts(data?.messageArtifacts);
     this.applyArtifactRefsAvailability(
@@ -4182,7 +4182,7 @@ export class ScionChatThread extends LitElement {
    * A choice card's "Jump to vN": like any jump, except that a replacement
    * this conversation does not have is named as being elsewhere.
    */
-  private handleChoiceJump(e: CustomEvent<{ messageId: string }>): void {
+  private handleDecisionJump(e: CustomEvent<{ messageId: string }>): void {
     if (this.filtered) {
       this.handleScrollToMessage(e);
       return;
@@ -4191,7 +4191,7 @@ export class ScionChatThread extends LitElement {
       e.detail.messageId,
       true,
       false,
-      CHOICE_REPLACEMENT_ELSEWHERE_TOAST
+      DECISION_REPLACEMENT_ELSEWHERE_TOAST
     );
   }
 
@@ -4199,21 +4199,21 @@ export class ScionChatThread extends LitElement {
    * SSE handler for chat.decision.updated: patches the row of a loaded
    * prompt (design §4.4).
    */
-  private handleChoiceUpdated(e: Event): void {
+  private handleDecisionUpdated(e: Event): void {
     const detail = (e as CustomEvent).detail as
-      | ({ data?: Partial<ChoiceUpdatedEvent> } & Partial<ChoiceUpdatedEvent>)
+      | ({ data?: Partial<DecisionUpdatedEvent> } & Partial<DecisionUpdatedEvent>)
       | undefined;
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const data = detail?.data ?? detail;
     if (!data?.messageId || !data.decision) return;
     if (data.threadId && data.threadId !== this.conversationKey) return;
-    this.patchChoiceDecisions(data.messageId, [data.decision]);
+    this.patchMessageDecisions(data.messageId, [data.decision]);
   }
 
   /** The card's own POST answered: hold its views like an SSE update. */
-  private handleChoiceAnswered = (e: CustomEvent<ChoiceAnsweredDetail>): void => {
+  private handleDecisionAnswered = (e: CustomEvent<DecisionAnsweredDetail>): void => {
     const { messageId, decisions } = e.detail;
-    if (messageId && decisions?.length) this.patchChoiceDecisions(messageId, decisions);
+    if (messageId && decisions?.length) this.patchMessageDecisions(messageId, decisions);
   };
 
   /** Forgets the askers' answerability: the next thread load reads them again. */
@@ -4229,7 +4229,7 @@ export class ScionChatThread extends LitElement {
    * this thread load (design §4.5 step 2). Nothing to read in a read-only
    * thread: every card is blocked there anyway.
    */
-  private lookupChoiceAskers(): void {
+  private lookupDecisionAskers(): void {
     if (!decisionsEnabled()) return;
     if (!this.isDM && !this.canPost) return;
     for (const msg of this.messages) {
@@ -4266,7 +4266,7 @@ export class ScionChatThread extends LitElement {
    * chat_post_denied makes the thread read-only, message_denied blocks
    * every prompt of that asker.
    */
-  private handleChoiceAnswerDenied = (e: CustomEvent<ChoiceAnswerDeniedDetail>): void => {
+  private handleDecisionAnswerDenied = (e: CustomEvent<DecisionAnswerDeniedDetail>): void => {
     const { askerAgentId, code, reason, answerability } = e.detail;
     if (answerability.readOnly) {
       this.canPost = false;
@@ -4284,7 +4284,7 @@ export class ScionChatThread extends LitElement {
    * Replaces decision rows of a loaded prompt (design §4.4): an update for
    * a message not loaded is ignored, history carries its current state.
    */
-  private patchChoiceDecisions(messageId: string, incoming: DecisionView[]): void {
+  private patchMessageDecisions(messageId: string, incoming: DecisionView[]): void {
     const msg = this.messageMap.get(messageId);
     if (!msg?.decisions) return;
     const next = patchDecisions(msg.decisions, incoming);
@@ -5226,7 +5226,7 @@ export class ScionChatThread extends LitElement {
   private replaceHistoryWindow(data: HistoryWindow, recentFilesGeneration: number): void {
     {
       const items = data.items ?? data.messages ?? [];
-      applyChoiceHistoryMaps(items, data);
+      applyDecisionHistoryMaps(items, data);
       this.messageMap.clear();
       this.v2AttachmentMap.clear();
       this.v2MessageExtMap.clear();
@@ -6402,7 +6402,7 @@ export class ScionChatThread extends LitElement {
     if (!window.matchMedia('(hover: none)').matches) return;
 
     // Walk the composed path up to the message host so controls inside nested
-    // shadow roots (<scion-chat-choices>, <sl-button>, <sl-icon>) are
+    // shadow roots (<scion-chat-decisions>, <sl-button>, <sl-icon>) are
     // recognized instead of stopping at an inner shadow boundary.
     // `summary` toggles a <details> (a set's decision-response answers).
     for (const node of e.composedPath()) {
@@ -6410,7 +6410,7 @@ export class ScionChatThread extends LitElement {
       if (
         node instanceof Element &&
         node.matches(
-          'a, button, summary, sl-button, sl-icon-button, scion-chat-choices, .entity-link, .mention, .reply-preview'
+          'a, button, summary, sl-button, sl-icon-button, scion-chat-decisions, .entity-link, .mention, .reply-preview'
         )
       ) {
         return;
@@ -7795,9 +7795,9 @@ export class ScionChatThread extends LitElement {
             .answerability=${this.answerabilityFor(msg)}
             .decisionResponse=${msg.decisionResponse}
             .decisionResponseSet=${msg.decisionResponseSet}
-            @choice-answered=${this.handleChoiceAnswered}
-            @choice-jump=${this.handleChoiceJump}
-            @choice-answer-denied=${this.handleChoiceAnswerDenied}
+            @decision-answered=${this.handleDecisionAnswered}
+            @decision-jump=${this.handleDecisionJump}
+            @decision-answer-denied=${this.handleDecisionAnswerDenied}
             dispatchState=${this.deliveryStateFor(msg, lastOwnMessageId, seenExpired)}
             ?seen=${msg.id === lastOwnMessageId && this.isMessageSeen(msg)}
             dispatchFailureReason=${msg.dispatchFailureReason || ''}

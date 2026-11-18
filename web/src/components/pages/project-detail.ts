@@ -501,7 +501,7 @@ export class ScionPageProjectDetail extends LitElement {
     }
   };
 
-  private boundOnChoiceUpdated = (e: Event): void => {
+  private boundOnDecisionUpdated = (e: Event): void => {
     if (!this.decisionsEnabled || !this.projectId) return;
     const raw = (e as CustomEvent).detail as {
       data?: { projectId?: string };
@@ -1350,7 +1350,7 @@ export class ScionPageProjectDetail extends LitElement {
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
-    stateManager.addEventListener('decision-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('decision-updated', this.boundOnDecisionUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
@@ -1361,7 +1361,7 @@ export class ScionPageProjectDetail extends LitElement {
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
-    stateManager.removeEventListener('decision-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('decision-updated', this.boundOnDecisionUpdated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();

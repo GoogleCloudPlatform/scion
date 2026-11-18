@@ -65,12 +65,12 @@ func TestDecisionRace_RepostWaitsForAnswerInFlight(t *testing.T) {
 	require.NoError(t, err)
 
 	type result struct {
-		res *store.ChoicePromptResult
+		res *store.DecisionPromptResult
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
-		res, err := f.cs.CreateChoicePrompt(ctx, f.prompt("", true, yesNo("D1", "v2")))
+		res, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", true, yesNo("D1", "v2")))
 		done <- result{res, err}
 	}()
 	select {
@@ -102,7 +102,7 @@ func TestDecisionRace_AnswerWaitsForRepostInFlight(t *testing.T) {
 	tx, err := f.cs.client.Tx(ctx)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tx.Rollback() })
-	_, err = newTxCompositeStore(tx).createChoicePromptTx(ctx, f.prompt("", true, yesNo("D1", "v2")))
+	_, err = newTxCompositeStore(tx).createDecisionPromptTx(ctx, f.prompt("", true, yesNo("D1", "v2")))
 	require.NoError(t, err)
 
 	in := f.answer(row, "1", "user-1", "")

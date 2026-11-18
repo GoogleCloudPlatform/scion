@@ -865,9 +865,9 @@ func (s *Server) processClaimedHeldRow(
 	// metadata from decision_answers / decisions (OPT-1). Reconstruct both
 	// before RenderDeliveryText so legacy and envelope consumers match live send.
 	if row.Type == messages.TypeDecisionResponse {
-		choiceFailReason, choiceTransientErr := s.enrichHeldChoiceResponse(ctx, row, sm)
-		if choiceTransientErr != nil || ctx.Err() != nil {
-			errToLog := choiceTransientErr
+		decisionFailReason, decisionTransientErr := s.enrichHeldDecisionResponse(ctx, row, sm)
+		if decisionTransientErr != nil || ctx.Err() != nil {
+			errToLog := decisionTransientErr
 			if errToLog == nil {
 				errToLog = ctx.Err()
 			}
@@ -876,8 +876,8 @@ func (s *Server) processClaimedHeldRow(
 			s.reholdOrFailClaimedRow(ctx, agentID, row)
 			return claimedRowReheldTransient
 		}
-		if choiceFailReason != "" {
-			s.failClaimedHeldMessage(ctx, target, row, choiceFailReason)
+		if decisionFailReason != "" {
+			s.failClaimedHeldMessage(ctx, target, row, decisionFailReason)
 			return claimedRowFailed
 		}
 	} else if shouldTranslateHeldWebMentions(row) {
@@ -1121,14 +1121,14 @@ func (s *Server) isProjectChatV2Topic(
 	return true, nil
 }
 
-func (s *Server) enrichHeldChoiceResponse(
+func (s *Server) enrichHeldDecisionResponse(
 	ctx context.Context,
 	row *store.Message,
 	sm *messages.StructuredMessage,
 ) (fixedReason string, transientErr error) {
 	byResp, err := s.store.GetDecisionAnswersByResponseMessageIDs(ctx, []string{row.ID})
 	if err != nil {
-		return "", fmt.Errorf("choice answer lookup: %w", err)
+		return "", fmt.Errorf("decision answer lookup: %w", err)
 	}
 	answers := byResp[row.ID]
 	if len(answers) == 0 {
@@ -1141,7 +1141,7 @@ func (s *Server) enrichHeldChoiceResponse(
 		if a.Outcome == store.DecisionOutcomeOverride && a.DecisionRowID != "" {
 			d, derr := s.store.GetDecision(ctx, a.DecisionRowID)
 			if derr != nil && !errors.Is(derr, store.ErrNotFound) {
-				return "", fmt.Errorf("choice decision lookup: %w", derr)
+				return "", fmt.Errorf("decision lookup: %w", derr)
 			}
 			if d != nil {
 				for _, cand := range d.Answers {
@@ -1152,7 +1152,7 @@ func (s *Server) enrichHeldChoiceResponse(
 				}
 			}
 		}
-		sm.Msg = choiceResponseAgentLine(a, overridden)
+		sm.Msg = decisionResponseAgentLine(a, overridden)
 		sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
 		if sm.Metadata == nil {
 			sm.Metadata = make(map[string]string, 4)
@@ -1183,7 +1183,7 @@ func (s *Server) enrichHeldChoiceResponse(
 	}
 	rowsByID, rerr := s.store.GetDecisionRowsByIDs(ctx, rowIDs)
 	if rerr != nil {
-		return "", fmt.Errorf("choice set decision rows lookup: %w", rerr)
+		return "", fmt.Errorf("decision set rows lookup: %w", rerr)
 	}
 	promptID := ""
 	for _, a := range answers {
@@ -1210,7 +1210,7 @@ func (s *Server) enrichHeldChoiceResponse(
 	if needOverridden && promptID != "" {
 		byPrompt, perr := s.store.GetDecisionsByMessageIDs(ctx, []string{promptID})
 		if perr != nil {
-			return "", fmt.Errorf("choice set prompt decisions lookup: %w", perr)
+			return "", fmt.Errorf("decision set prompt decisions lookup: %w", perr)
 		}
 		overridden = make(map[string]*store.DecisionAnswer)
 		for _, d := range byPrompt[promptID] {
@@ -1222,13 +1222,13 @@ func (s *Server) enrichHeldChoiceResponse(
 			}
 		}
 	}
-	sm.Msg = choiceSetAgentLines(promptID, ordered, overridden)
+	sm.Msg = decisionSetAgentLines(promptID, ordered, overridden)
 	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
 	if sm.Metadata == nil {
 		sm.Metadata = make(map[string]string, 2)
 	}
 	sm.Metadata[messages.MetadataDecisionBatch] = batchID
-	sm.Metadata[messages.MetadataDecisionAnswers] = choiceAnswersMetadata(ordered)
+	sm.Metadata[messages.MetadataDecisionAnswers] = decisionAnswersMetadata(ordered)
 	return "", nil
 }
 

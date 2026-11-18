@@ -65,21 +65,21 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_messaging.go", function: "broadcastDirect", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage per-recipient at handlers_agent_messaging.go:1644"},
 
-	// choices_answer.go: deliverChoiceResponse — the decision-response of a
+	// decisions_answer.go: deliverDecisionResponse — the decision-response of a
 	// user's answer to the asking agent; handleDecisionAnswer calls
 	// authorizeAgentMessage on the asker before the answer is recorded,
-	// and deliverChoiceResponse runs only after that (not for a confirm,
+	// and deliverDecisionResponse runs only after that (not for a confirm,
 	// which is not delivered).
-	{file: "choices_answer.go", function: "deliverChoiceResponse", symbol: "dispatchWithBrokerRetry",
+	{file: "decisions_answer.go", function: "deliverDecisionResponse", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage in handleDecisionAnswer before RecordAnswer and delivery"},
 
-	// choices_batch.go: deliverChoiceSetResponse — the one decision-response of
-	// a set submit to the asking agent; handleChoiceSetAnswer calls
+	// decisions_batch.go: deliverDecisionSetResponse — the one decision-response of
+	// a set submit to the asking agent; handleDecisionSetAnswer calls
 	// authorizeAgentMessage on the asker before the set is recorded, and
 	// the delivery runs only after that (not for an all-confirm set, which
 	// is not delivered).
-	{file: "choices_batch.go", function: "deliverChoiceSetResponse", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "authorizeAgentMessage in handleChoiceSetAnswer before RecordAnswerSet and delivery"},
+	{file: "decisions_batch.go", function: "deliverDecisionSetResponse", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "authorizeAgentMessage in handleDecisionSetAnswer before RecordAnswerSet and delivery"},
 
 	// handlers_agent_messaging.go: publishBroadcastDeliveryFailed — derivative
 	// notice back to the original sender agent.

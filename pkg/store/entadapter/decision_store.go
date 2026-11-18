@@ -35,18 +35,18 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Choice prompt decisions and answers (choices, ptone/scion#7514). The
+// Decision prompt decisions and answers (ptone/scion#7514). The
 // methods live on CompositeStore because each one writes a message and
 // decision rows in one transaction.
 
 // errDecisionRace marks a write that lost a race with a concurrent prompt
 // or answer: a unique-index violation on decisions, decision_answers or
 // decision_key_counters, or an active version replaced under us. The
-// non-transactional entry points retry (CreateChoicePrompt, up to
+// non-transactional entry points retry (CreateDecisionPrompt, up to
 // maxDecisionRaceRetries times) or re-read (RecordAnswer) once on it.
 var errDecisionRace = errors.New("concurrent decision write")
 
-// maxDecisionRaceRetries bounds CreateChoicePrompt's retries of a lost
+// maxDecisionRaceRetries bounds CreateDecisionPrompt's retries of a lost
 // race: each retry reads the winner's rows, so n concurrent reposts of one
 // key need up to n-1 retries for the last one.
 const maxDecisionRaceRetries = 5
@@ -60,19 +60,19 @@ func markDecisionRace(err error) error {
 	return mapError(err)
 }
 
-// CreateChoicePrompt implements store.DecisionStore.
-func (c *CompositeStore) CreateChoicePrompt(ctx context.Context, in *store.ChoicePromptInput) (*store.ChoicePromptResult, error) {
-	if err := validateChoicePromptInput(in); err != nil {
+// CreateDecisionPrompt implements store.DecisionStore.
+func (c *CompositeStore) CreateDecisionPrompt(ctx context.Context, in *store.DecisionPromptInput) (*store.DecisionPromptResult, error) {
+	if err := validateDecisionPromptInput(in); err != nil {
 		return nil, err
 	}
 	if c.inTx {
-		return c.createChoicePromptTx(ctx, in)
+		return c.createDecisionPromptTx(ctx, in)
 	}
-	var res *store.ChoicePromptResult
+	var res *store.DecisionPromptResult
 	for attempt := 0; ; attempt++ {
 		err := c.WithTx(ctx, func(tx store.Store) error {
 			var err error
-			res, err = tx.(*CompositeStore).createChoicePromptTx(ctx, in)
+			res, err = tx.(*CompositeStore).createDecisionPromptTx(ctx, in)
 			return err
 		})
 		if err == nil {
@@ -90,9 +90,9 @@ func (c *CompositeStore) CreateChoicePrompt(ctx context.Context, in *store.Choic
 	}
 }
 
-func validateChoicePromptInput(in *store.ChoicePromptInput) error {
+func validateDecisionPromptInput(in *store.DecisionPromptInput) error {
 	if in == nil || in.Message == nil || in.Message.ID == "" || in.Message.ProjectID == "" {
-		return fmt.Errorf("%w: a choice prompt needs a message with an ID and a project", store.ErrInvalidInput)
+		return fmt.Errorf("%w: a decision prompt needs a message with an ID and a project", store.ErrInvalidInput)
 	}
 	// Every ID is a UUID column; a malformed one is refused here, before
 	// the transaction reserves numbers or replaces versions.
@@ -102,7 +102,7 @@ func validateChoicePromptInput(in *store.ChoicePromptInput) error {
 		}
 	}
 	if len(in.Decisions) == 0 || len(in.Decisions) > messages.MaxDecisionsPerMessage {
-		return fmt.Errorf("%w: a choice prompt carries 1 to %d decisions", store.ErrInvalidInput, messages.MaxDecisionsPerMessage)
+		return fmt.Errorf("%w: a decision prompt carries 1 to %d decisions", store.ErrInvalidInput, messages.MaxDecisionsPerMessage)
 	}
 	seen := map[string]bool{}
 	for i, d := range in.Decisions {
@@ -129,9 +129,9 @@ type keyState struct {
 	active     *ent.Decision // the highest version, unless it is replaced
 }
 
-// createChoicePromptTx is CreateChoicePrompt inside the transaction c runs
+// createDecisionPromptTx is CreateDecisionPrompt inside the transaction c runs
 // in (c.client is the transaction's client).
-func (c *CompositeStore) createChoicePromptTx(ctx context.Context, in *store.ChoicePromptInput) (*store.ChoicePromptResult, error) {
+func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.DecisionPromptInput) (*store.DecisionPromptResult, error) {
 	client := c.client
 	agentID, _ := parseUUID(in.AskerAgentID)
 	now := time.Now().UTC()
@@ -273,7 +273,7 @@ func (c *CompositeStore) createChoicePromptTx(ctx context.Context, in *store.Cho
 	}
 
 	// 6. The message, with the markdown fallback as its text.
-	msgText, introLen := messages.RenderChoiceFallback(in.Intro, keyed, in.AnswerURL)
+	msgText, introLen := messages.RenderDecisionFallback(in.Intro, keyed, in.AnswerURL)
 	in.Message.Msg = msgText
 	in.Message.Type = messages.TypeDecisionPrompt
 	if err := c.CreateMessage(ctx, in.Message); err != nil {
@@ -318,7 +318,7 @@ func (c *CompositeStore) createChoicePromptTx(ctx context.Context, in *store.Cho
 	if _, err := client.Decision.CreateBulk(creates...).Save(ctx); err != nil {
 		return nil, markDecisionRace(err)
 	}
-	return &store.ChoicePromptResult{Decisions: results, IntroLength: introLen}, nil
+	return &store.DecisionPromptResult{Decisions: results, IntroLength: introLen}, nil
 }
 
 // reserveDecisionNumbers takes need numbers from the agent's counter and
@@ -1527,7 +1527,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 	}
 
 	// 2. Load and lock all target decision rows on Postgres in (key_norm,
-	// version) order — the exact lock order of CreateChoicePrompt and
+	// version) order — the exact lock order of CreateDecisionPrompt and
 	// RecordAnswerSet — so concurrent reposts, user answers, and interpreted
 	// records serialize without deadlocking.
 	var explicitUIDs []uuid.UUID
@@ -1662,7 +1662,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 	}
 
 	// Sort validated pairs into canonical prompt/position order so stored
-	// response text, live SSE ChoiceResponseSetView, history hydration, and
+	// response text, live SSE DecisionResponseSetView, history hydration, and
 	// idempotency replay all share one deterministic order.
 	sort.SliceStable(validated, func(i, j int) bool {
 		return compareEntDecisionOrder(validated[i].row, validated[j].row)

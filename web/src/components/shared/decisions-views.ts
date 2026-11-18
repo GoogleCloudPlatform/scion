@@ -26,7 +26,7 @@
 import { css, html, nothing, type CSSResult, type TemplateResult } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
 
-import type { ChoiceAnsweredDetail } from '../../client/chat-choices.js';
+import type { DecisionAnsweredDetail } from '../../client/decision-prompts.js';
 import type {
   ProjectDecisionCounts,
   ProjectDecisionLogEntryView,
@@ -34,7 +34,7 @@ import type {
   ProjectDecisionPromptView,
 } from '../../client/project-decisions.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
-import './chat/chat-choices.js';
+import './chat/chat-decisions.js';
 import {
   avatarColor,
   avatarInitial,
@@ -178,7 +178,7 @@ export const decisionsPageSharedStyles: CSSResult = css`
     align-items: center;
   }
 
-  .pcard scion-chat-choices {
+  .pcard scion-chat-decisions {
     margin: 0 0.75rem 0.75rem;
   }
 
@@ -615,7 +615,7 @@ export function renderPromptCard(
     currentUserId: string;
     defaultProjectId?: string | undefined;
     projectBadgeName?: string | undefined;
-    onAnswered: (p: ProjectDecisionPromptView, e: CustomEvent<ChoiceAnsweredDetail>) => void;
+    onAnswered: (p: ProjectDecisionPromptView, e: CustomEvent<DecisionAnsweredDetail>) => void;
     onJump: (p: ProjectDecisionPromptView, e: CustomEvent<{ messageId?: string }>) => void;
   }
 ): TemplateResult {
@@ -632,9 +632,9 @@ export function renderPromptCard(
     <div
       class="pcard"
       data-prompt-card=${p.promptMessageId}
-      @choice-answered=${(e: CustomEvent<ChoiceAnsweredDetail>): void => opts.onAnswered(p, e)}
+      @decision-answered=${(e: CustomEvent<DecisionAnsweredDetail>): void => opts.onAnswered(p, e)}
       @scroll-to-message=${(e: CustomEvent<{ messageId?: string }>): void => opts.onJump(p, e)}
-      @choice-jump=${(e: CustomEvent<{ messageId?: string }>): void => opts.onJump(p, e)}
+      @decision-jump=${(e: CustomEvent<{ messageId?: string }>): void => opts.onJump(p, e)}
     >
       <div class="pcard-head">
         ${opts.projectBadgeName
@@ -669,14 +669,14 @@ export function renderPromptCard(
               : nothing}
         </span>
       </div>
-      <scion-chat-choices
+      <scion-chat-decisions
         .messageId=${p.promptMessageId}
         .decisions=${p.decisions}
         .currentUserId=${opts.currentUserId}
         .answerMode=${mode}
         .answerability=${promptAnswerability(p)}
         surface="decisions_page"
-      ></scion-chat-choices>
+      ></scion-chat-decisions>
     </div>
   `;
 }

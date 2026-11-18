@@ -45,7 +45,7 @@ import {
 import { isMacPlatform } from '../../utils/platform.js';
 import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
 import { decisionsEnabled } from '../../utils/feature-flags.js';
-import { setPreselectRecommendedChoices } from '../../client/choice-preferences.js';
+import { setPreselectRecommendedChoices } from '../../client/decision-preferences.js';
 import '../shared/subscription-manager.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
@@ -98,7 +98,7 @@ export class ScionPageProfileSettings extends LitElement {
 
   /**
    * `preferences.preselectRecommendedChoices` (ptone/scion#7842): whether
-   * multi-decision choices cards start with recommended choices selected.
+   * multi-decision cards start with recommended choices selected.
    * Shown only while web.decisions is on.
    */
   @state()
@@ -413,7 +413,7 @@ export class ScionPageProfileSettings extends LitElement {
   }
 
   /**
-   * Saves the choices-card preselect preference with a per-key
+   * Saves the decision-card preselect preference with a per-key
    * `preferences` PATCH and applies it to open cards at once; reverts the
    * switch when the PATCH fails.
    */

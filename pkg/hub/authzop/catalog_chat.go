@@ -1155,7 +1155,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.decision.read",
 		Domain:      "chat",
-		Description: "Read one version of a choice prompt decision. Needs read access to the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read for a thread; the caller in a user slot of a DM key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.decisions is off",
+		Description: "Read one version of a decision prompt decision. Needs read access to the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read for a thread; the caller in a user slot of a DM key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.decisions is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/decisions/{rowId}", Method: "GET"},
 		},
@@ -1239,16 +1239,16 @@ var chatOperations = []OperationSpec{
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialConflict},
 		TestRefs: []TestRef{
-			{Package: "pkg/hub", Function: "TestChoiceSetAnswer_RecordsAndDeliversOneResponse"},
-			{Package: "pkg/hub", Function: "TestChoiceSetAnswer_ChangedSet409"},
-			{Package: "pkg/hub", Function: "TestChoiceSetAnswer_Authorization"},
+			{Package: "pkg/hub", Function: "TestDecisionSetAnswer_RecordsAndDeliversOneResponse"},
+			{Package: "pkg/hub", Function: "TestDecisionSetAnswer_ChangedSet409"},
+			{Package: "pkg/hub", Function: "TestDecisionSetAnswer_Authorization"},
 		},
 		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 	{
 		ID:          "chat.projectdecisions.list",
 		Domain:      "chat",
-		Description: "List pending choice prompts or the append-only recorded answer log for a project, with live waitingOnYou and waitingOnOthers counts and filter facets. Needs project:read on the project, then scopes every prompt, log entry, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off",
+		Description: "List pending decision prompts or the append-only recorded answer log for a project, with live waitingOnYou and waitingOnOthers counts and filter facets. Needs project:read on the project, then scopes every prompt, log entry, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/decisions", Method: "GET"},
 		},
@@ -1274,7 +1274,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.userdecisions.list",
 		Domain:      "chat",
-		Description: "List pending choice prompts or recorded decision answers across every project the caller is a member of and can read, with live waitingOnYou and waitingOnOthers counts, sort=project|recent, optional project narrowing, and filter facets (capped at 200 readable member projects with truncatedProjects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty results), then scopes every prompt, log entry, group, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Non-member projects and project-visitor bindings are excluded even for hub admins. Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off",
+		Description: "List pending decision prompts or recorded decision answers across every project the caller is a member of and can read, with live waitingOnYou and waitingOnOthers counts, sort=project|recent, optional project narrowing, and filter facets (capped at 200 readable member projects with truncatedProjects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty results), then scopes every prompt, log entry, group, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Non-member projects and project-visitor bindings are excluded even for hub admins. Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/decisions", Method: "GET"},
 		},

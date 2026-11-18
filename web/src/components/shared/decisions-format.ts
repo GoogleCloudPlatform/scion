@@ -26,7 +26,7 @@ import {
   GENERIC_ANSWER_DENIED_REASON,
   actionableReason,
   type AskerAnswerability,
-} from '../../client/chat-choices.js';
+} from '../../client/decision-prompts.js';
 import { chatConversationPath } from '../../client/chat-routes.js';
 import type {
   ProjectDecisionLogEntryView,

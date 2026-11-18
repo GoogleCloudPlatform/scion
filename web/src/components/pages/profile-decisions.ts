@@ -477,7 +477,7 @@ export class ScionPageProfileDecisions extends LitElement {
                 renderPromptCard(p, {
                   currentUserId: this.ctrl.currentUserId,
                   projectBadgeName: this.ctrl.projectDisplayName(p.project),
-                  onAnswered: this.ctrl.onPromptChoiceAnswered,
+                  onAnswered: this.ctrl.onPromptDecisionAnswered,
                   onJump: this.ctrl.onPromptMessageJump,
                 })
             )}
@@ -521,7 +521,7 @@ export class ScionPageProfileDecisions extends LitElement {
           (p) =>
             renderPromptCard(p, {
               currentUserId: this.ctrl.currentUserId,
-              onAnswered: this.ctrl.onPromptChoiceAnswered,
+              onAnswered: this.ctrl.onPromptDecisionAnswered,
               onJump: this.ctrl.onPromptMessageJump,
             })
         )}

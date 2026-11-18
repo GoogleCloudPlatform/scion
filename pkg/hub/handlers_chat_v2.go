@@ -3524,7 +3524,7 @@ func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, his
 		MessageExtensions:           messageExtensions,
 		ReplyPreviews:               replyPreviews,
 	}
-	s.addChoiceHistoryViews(ctx, &resp)
+	s.addDecisionHistoryViews(ctx, &resp)
 	return resp
 }
 
@@ -6244,14 +6244,14 @@ type chatHistoryResponse struct {
 	// MessageDecisionResponses (decision-response rows) are keyed by message
 	// ID, set only while web.decisions is on (design choices v4, 4.4).
 	// The intro is the agent's body without the markdown fallback.
-	MessageDecisions         map[string][]DecisionView     `json:"messageDecisions,omitempty"`
-	MessageDecisionIntros    map[string]string             `json:"messageDecisionIntros,omitempty"`
-	MessageDecisionResponses map[string]ChoiceResponseView `json:"messageDecisionResponses,omitempty"`
+	MessageDecisions         map[string][]DecisionView       `json:"messageDecisions,omitempty"`
+	MessageDecisionIntros    map[string]string               `json:"messageDecisionIntros,omitempty"`
+	MessageDecisionResponses map[string]DecisionResponseView `json:"messageDecisionResponses,omitempty"`
 	// MessageDecisionAnswerModes (decision-prompt rows: "single" or "set") and
 	// MessageDecisionResponseSets (the response rows of set submits) are set
 	// under the same rule (design choices v5, 5.1 and 5.2).
-	MessageDecisionAnswerModes  map[string]string                `json:"messageDecisionAnswerModes,omitempty"`
-	MessageDecisionResponseSets map[string]ChoiceResponseSetView `json:"messageDecisionResponseSets,omitempty"`
+	MessageDecisionAnswerModes  map[string]string                  `json:"messageDecisionAnswerModes,omitempty"`
+	MessageDecisionResponseSets map[string]DecisionResponseSetView `json:"messageDecisionResponseSets,omitempty"`
 }
 
 // chatHistoryRetention is the history page's retention marker: messages

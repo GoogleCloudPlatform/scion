@@ -65,14 +65,14 @@ import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
 import { userMentionSlug } from './prose-mentions.js';
-import './chat-choices.js';
-import './chat-choice-response.js';
-import { ANSWERABLE } from '../../../client/chat-choices.js';
-import type { AskerAnswerability } from '../../../client/chat-choices.js';
+import './chat-decisions.js';
+import './chat-decision-response.js';
+import { ANSWERABLE } from '../../../client/decision-prompts.js';
+import type { AskerAnswerability } from '../../../client/decision-prompts.js';
 import type {
-  ChoiceAnswerMode,
-  ChoiceResponseSetView,
-  ChoiceResponseView,
+  DecisionAnswerMode,
+  DecisionResponseSetView,
+  DecisionResponseView,
   DecisionView,
 } from '../../../shared/types.js';
 import { copyToClipboard, showCopyFailedToast } from '../../../utils/clipboard.js';
@@ -1067,7 +1067,7 @@ export class ScionChatMessage extends LitElement {
 
   /** A decision prompt's answer mode. */
   @property()
-  answerMode: ChoiceAnswerMode | undefined = undefined;
+  answerMode: DecisionAnswerMode | undefined = undefined;
 
   /** Whether the viewer can answer the prompt's asker (design §4.5). */
   @property({ attribute: false })
@@ -1075,11 +1075,11 @@ export class ScionChatMessage extends LitElement {
 
   /** A decision-response's one-click answer (web.decisions; absent while off). */
   @property({ attribute: false })
-  decisionResponse: ChoiceResponseView | undefined = undefined;
+  decisionResponse: DecisionResponseView | undefined = undefined;
 
   /** A decision-response's set submit (web.decisions; absent while off). */
   @property({ attribute: false })
-  decisionResponseSet: ChoiceResponseSetView | undefined = undefined;
+  decisionResponseSet: DecisionResponseSetView | undefined = undefined;
 
   /** Reason for dispatch failure. */
   @property()
@@ -1269,23 +1269,23 @@ export class ScionChatMessage extends LitElement {
       position: relative;
     }
 
-    /* A choice-response is a compact line in the answerer's lane (design §4.6). */
-    .choice-response-row {
+    /* A decision-response is a compact line in the answerer's lane (design §4.6). */
+    .decision-response-row {
       display: flex;
       padding: 0.25rem 1rem;
     }
 
-    .choice-response-row.own {
+    .decision-response-row.own {
       justify-content: flex-end;
     }
 
-    .choice-response-row.other {
+    .decision-response-row.other {
       justify-content: flex-start;
       padding-left: 3.5rem;
     }
 
     /* A choice card needs room for its buttons (design §4.1). */
-    .bubble.choice {
+    .bubble.decision {
       max-width: min(100%, 640px);
       width: 100%;
     }
@@ -2316,12 +2316,12 @@ export class ScionChatMessage extends LitElement {
         padding-right: 0.5rem;
       }
 
-      .choice-response-row {
+      .decision-response-row {
         padding-left: 0.5rem;
         padding-right: 0.5rem;
       }
 
-      .choice-response-row.other {
+      .decision-response-row.other {
         padding-left: 3rem;
       }
 
@@ -2333,7 +2333,7 @@ export class ScionChatMessage extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.renderedCardMode = this.showsChoiceCard;
+    this.renderedCardMode = this.showsDecisionCard;
     this.renderedKnownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     void this.renderContent();
   }
@@ -2380,7 +2380,7 @@ export class ScionChatMessage extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    const cardMode = this.showsChoiceCard;
+    const cardMode = this.showsDecisionCard;
     const knownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     if (
       changed.has('body') ||
@@ -2707,14 +2707,14 @@ export class ScionChatMessage extends LitElement {
    * decision-prompt with decisions, and the browser flag on. The hub omits
    * the fields while the experiment is off; the flag gates presentation.
    */
-  private get showsChoiceCard(): boolean {
+  private get showsDecisionCard(): boolean {
     const d = this.decisions;
     return this.messageType === 'decision-prompt' && !!d && d.length > 0 && decisionsEnabled();
   }
 
   /** The text the bubble renders: the intro alone under a choice card. */
   private get displayBody(): string {
-    return this.showsChoiceCard ? (this.decisionIntro ?? '') : this.body;
+    return this.showsDecisionCard ? (this.decisionIntro ?? '') : this.body;
   }
 
   private async renderContent(): Promise<void> {
@@ -2901,15 +2901,15 @@ export class ScionChatMessage extends LitElement {
   }
 
   override render() {
-    if (this.showsChoiceResponse && !this.deletedAt) return this.renderChoiceResponse();
+    if (this.showsDecisionResponse && !this.deletedAt) return this.renderDecisionResponse();
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
     const groupClass = !this.showHeader ? ' grouped' : '';
     const isDeleted = !!this.deletedAt;
     // An attachment-only message (ptone/scion#6146) has no text: its
     // attachments render without an empty text bubble above them.
-    const choiceCard = this.showsChoiceCard;
+    const decisionCard = this.showsDecisionCard;
     const attachmentOnly =
-      !choiceCard &&
+      !decisionCard &&
       !(this.body ?? '').trim() &&
       ((this.attachmentRefs?.length ?? 0) > 0 || (this.attachments?.length ?? 0) > 0);
     // The More actions dots sit inside the text bubble, in a reserved corner.
@@ -2931,7 +2931,7 @@ export class ScionChatMessage extends LitElement {
         <div
           class="bubble${attachmentOnly && !isDeleted && this.actionsEnabled
             ? ' actions-corner'
-            : ''}${choiceCard && !isDeleted ? ' choice' : ''}"
+            : ''}${decisionCard && !isDeleted ? ' decision' : ''}"
         >
           ${this.showHeader && this.fromAgent
             ? html`
@@ -2972,10 +2972,10 @@ export class ScionChatMessage extends LitElement {
             : attachmentOnly
               ? nothing
               : html`<div class="bubble-content${contentActions}">
-                  ${choiceCard && !this.displayBody.trim()
+                  ${decisionCard && !this.displayBody.trim()
                     ? nothing
-                    : this.renderBody()}${choiceCard
-                    ? this.renderChoiceCard()
+                    : this.renderBody()}${decisionCard
+                    ? this.renderDecisionCard()
                     : nothing}${this.renderActionsButton()}
                 </div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
@@ -3193,14 +3193,14 @@ export class ScionChatMessage extends LitElement {
     }
   }
 
-  private renderChoiceCard(): TemplateResult {
-    return html`<scion-chat-choices
+  private renderDecisionCard(): TemplateResult {
+    return html`<scion-chat-decisions
       .messageId=${this.messageId}
       .decisions=${this.decisions ?? []}
       .answerMode=${this.answerMode}
       .currentUserId=${this.currentUserId}
       .answerability=${this.answerability ?? ANSWERABLE}
-    ></scion-chat-choices>`;
+    ></scion-chat-decisions>`;
   }
 
   /**
@@ -3208,7 +3208,7 @@ export class ScionChatMessage extends LitElement {
    * (design §4.6): a decision-response carrying its view, and the browser
    * flag on (double gate, as for the card).
    */
-  private get showsChoiceResponse(): boolean {
+  private get showsDecisionResponse(): boolean {
     return (
       this.messageType === 'decision-response' &&
       !!(this.decisionResponse || this.decisionResponseSet) &&
@@ -3221,7 +3221,7 @@ export class ScionChatMessage extends LitElement {
    * agent-sent interpreted response), attributed by `answeredByUserId`
    * rather than message sender (ptone/scion#7775).
    */
-  private renderChoiceResponse(): TemplateResult {
+  private renderDecisionResponse(): TemplateResult {
     const first = this.decisionResponse ?? this.decisionResponseSet?.answers?.[0];
     const answeredByUserId = first?.answeredByUserId ?? '';
     const answeredByName = first?.answeredByName ?? '';
@@ -3232,8 +3232,8 @@ export class ScionChatMessage extends LitElement {
     const fallbackAnswerer = !interpreted && !this.senderIsAgent ? this.senderName : '';
     const answererName = own ? 'you' : answeredByName || fallbackAnswerer || 'Someone';
     const agentName = interpreted ? (this.senderName || this.sender).replace(/^agent:/, '') : '';
-    return html`<div class="choice-response-row ${lane}">
-      <scion-chat-choice-response
+    return html`<div class="decision-response-row ${lane}">
+      <scion-chat-decision-response
         lane=${lane}
         .response=${this.decisionResponse}
         .responseSet=${this.decisionResponseSet}
@@ -3242,7 +3242,7 @@ export class ScionChatMessage extends LitElement {
         agentName=${agentName}
         timestamp=${this.timestamp}
         dispatchState=${this.dispatchState}
-      ></scion-chat-choice-response>
+      ></scion-chat-decision-response>
     </div>`;
   }
 
