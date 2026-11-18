@@ -104,8 +104,6 @@ func newIdleRecoveryFixture(t *testing.T, name string, stopLands bool) *idleReco
 	return f
 }
 
-func ptrTime(t time.Time) *time.Time { return &t }
-
 func (f *idleRecoveryFixture) suspendOnce(t *testing.T) {
 	t.Helper()
 	f.srv.autoSuspendAgents(context.Background(), []autoSuspendItem{{agent: *f.agent, reason: state.SuspendReasonIdle}})

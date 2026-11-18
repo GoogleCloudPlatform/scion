@@ -235,7 +235,7 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,
 	"StartClaimOwner": true, "StartClaimTarget": true, "StartClaimAt": true,
 	"StartClaimLeaseUntil": true, "StartClaimUnconfirmedAt": true,
-	"LastDeliveryAt": true, "IdleSuspendClaimUntil": true, "IdleSuspendClaimActive": true,
+	"LastDeliveryAt": true, "IdleSuspendClaimUntil": true, "IdleSuspendClaimActive": true, "IdleSuspendClaimLeaseActive": true,
 	"StartClaimHoldUntil": true, "StartClaimLaunchID": true,
 	// soft_delete_op_id is written only through SetAgentSoftDeleteOpID
 	// (never by CreateAgent/UpdateAgent) and is set only alongside

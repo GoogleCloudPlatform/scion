@@ -6263,7 +6263,6 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 				cctx, ccancel := finalizationContext(ctx)
 				_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
 				ccancel()
-				claimedIdle = false
 			}
 			// This stop was the system's, not the user's: if it
 			// replaced a running intent, put that back unless something
@@ -6338,7 +6337,6 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		cctx, ccancel := finalizationContext(ctx)
 		_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
 		ccancel()
-		claimedIdle = false
 	}
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
