@@ -39,7 +39,7 @@ func setGitHubTriggersExperimentForRouting(t *testing.T, srv *Server, on bool) {
 	t.Helper()
 	var active []experiments.Experiment
 	for _, e := range experiments.Default().All() {
-		if e.Name == experiments.GitHubTriggers {
+		if e.Name == experiments.GitHubTriggers || e.Name == experiments.Triggers {
 			e.Default = on
 		}
 		active = append(active, e)

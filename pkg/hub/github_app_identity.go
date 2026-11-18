@@ -86,9 +86,9 @@ type GitHubTriggersProjectReadiness struct {
 }
 
 // githubTriggersEnabled reports whether GitHub App triggers are enabled.
+// Both hub.triggers and hub.github_triggers must be enabled server-side (§4.1 step 0, §8.2).
 func (s *Server) githubTriggersEnabled() bool {
-	// TODO(ptone/scion#8028): also check s.experimentEnabled(experiments.Triggers) once Stage 1 1b-1 merges.
-	return s.experimentEnabled(experiments.GitHubTriggers)
+	return s.experimentEnabled(experiments.Triggers) && s.experimentEnabled(experiments.GitHubTriggers)
 }
 
 // requireGitHubTriggers wraps next with the server-side experiment gate for

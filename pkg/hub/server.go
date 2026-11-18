@@ -2936,9 +2936,12 @@ type Server struct {
 
 	// durableQueue is the shared durable work queue (pkg/durablequeue) over
 	// s.store when s.store implements store.DurableQueueStore. webhookIngress
-	// handles unauthenticated POST /api/v1/hooks/{id} (handlers_hooks_ingress.go).
-	durableQueue   *durablequeue.StoreQueue
-	webhookIngress *trigger.Ingress
+	// handles unauthenticated POST /api/v1/hooks/{id} (handlers_hooks_ingress.go),
+	// and githubWebhookIngress holds the Stage 3 verified token bucket and
+	// rate-limited audit/warn state for POST /api/v1/webhooks/github (github_webhook_ingress.go).
+	durableQueue         *durablequeue.StoreQueue
+	webhookIngress       *trigger.Ingress
+	githubWebhookIngress githubWebhookIngressState
 
 	// transportTrustedNets is ServerConfig.TransportTrustedProxies,
 	// resolved once in New (config.TransportTrustedProxies) for
