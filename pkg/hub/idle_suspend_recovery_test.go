@@ -89,8 +89,9 @@ func newIdleRecoveryFixture(t *testing.T, name string, stopLands bool) *idleReco
 	t.Helper()
 	srv, raw := testServer(t)
 	f := &idleRecoveryFixture{srv: srv, raw: raw}
-	f.faulty = &commitFaultStore{Store: srv.store}
-	srv.store = f.faulty
+	f.faulty, _ = installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *commitFaultStore {
+		return &commitFaultStore{Store: inner}
+	})
 	f.disp = &stopMutatingDispatcher{onStop: func(_ context.Context, a *store.Agent) {
 		f.stopHits.Add(1)
 		if stopLands {
