@@ -678,6 +678,71 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("post-commit late agent and runtime stopped reports keep suspended(idle) intact", func(t *testing.T) {
+		a, cond := makeEligible("post-commit-sticky-reports")
+		_, _, claimUntil, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
+		require.NoError(t, err)
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:               string(state.PhaseSuspended),
+			ContainerStatus:     "stopped",
+			SuspendReason:       string(state.SuspendReasonIdle),
+			RetainedActivity:    string(state.ActivityIdle),
+			IfRunID:             a.RunID,
+			IfIdleSuspendCommit: &claimUntil,
+		}))
+
+		// 1. Late agent "Session ended" report arriving in the post-commit, pre-clear window.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:              string(state.PhaseStopped),
+			Activity:           string(state.ActivityCrashed),
+			Message:            "Session ended",
+			ExitReason:         string(state.ExitReasonSignaled),
+			ReportSource:       store.StatusReportSourceAgent,
+			ReportRunID:        a.RunID,
+			ReportAgentToken:   true,
+			GuardReincarnation: true,
+		}))
+		mid, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), mid.Phase)
+		assert.Equal(t, string(state.SuspendReasonIdle), mid.SuspendReason)
+		assert.Equal(t, string(state.ActivityIdle), mid.Activity)
+		assert.Equal(t, store.RunIntentStopped, mid.RunIntent)
+
+		require.NoError(t, s.ClearIdleSuspendClaim(ctx, a.ID))
+
+		// 2. Late agent stopped report and late runtime broker stopped report after claim clear.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:              string(state.PhaseStopped),
+			Message:            "Session ended",
+			ExitReason:         string(state.ExitReasonSignaled),
+			ReportSource:       store.StatusReportSourceAgent,
+			ReportRunID:        a.RunID,
+			ReportAgentToken:   true,
+			GuardReincarnation: true,
+		}))
+		exit137 := 137
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:           string(state.PhaseStopped),
+			Activity:        string(state.ActivityCrashed),
+			ContainerStatus: "exited (137)",
+			ExitCode:        &exit137,
+			ReportSource:    store.StatusReportSourceRuntime,
+			ReportRunID:     a.RunID,
+		}))
+
+		after, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), after.Phase)
+		assert.Equal(t, string(state.SuspendReasonIdle), after.SuspendReason)
+		assert.Equal(t, string(state.ActivityIdle), after.Activity)
+		assert.Empty(t, after.ExitReason)
+		assert.Nil(t, after.ExitCode)
+		assert.Equal(t, store.RunIntentStopped, after.RunIntent)
+		assert.Nil(t, after.IdleSuspendClaimUntil)
+	})
 }
 
 func TestAgentStore_ClaimAgentStartWakeYieldsToActiveIdleClaim(t *testing.T) {

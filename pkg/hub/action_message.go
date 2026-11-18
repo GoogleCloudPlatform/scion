@@ -270,7 +270,7 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 			}
 			return hubfire.FireOutcome{}, err
 		}
-	} else if phaseErr := validateAgentDeliverable(agent); phaseErr != nil {
+	} else if phaseErr := s.validateAgentDeliverable(agent); phaseErr != nil {
 		slog.Warn("Scheduler: scheduled message target is not running",
 			"eventID", fireID,
 			"scheduleID", scheduleID,
@@ -292,8 +292,15 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 	// A wake fire may have spent the handler's deadline on the resume
 	// (wakeFireTarget runs on its own budget); its persist and dispatch get a
 	// fresh bound, keeping the handler's values.
+	var deferredEndTracking func()
+	defer func() {
+		if deferredEndTracking != nil {
+			deferredEndTracking()
+		}
+	}()
+	woke := ma.wake
 	dispatchBase := ctx
-	if ma.wake {
+	if woke {
 		tracker := req.Tracked
 		if tracker == nil {
 			tracker = newScheduledFireTracker(s, fireID, nil)
@@ -336,12 +343,72 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 	}
 
 	if _, err := s.holdOrDispatch(dispatchCtx, agent, holdMsgID, storeMsg, func() error {
-		return dispatchWithBrokerRetry(dispatchCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg)
+		return dispatchWithBrokerRetry(
+			dispatchCtx,
+			s.deliveryMarker(),
+			s.recordLog(),
+			dispatcher,
+			agent,
+			payload.Message,
+			payload.Interrupt,
+			structuredMsg,
+			withSyncAutoWakeHook(func(_ context.Context, target *store.Agent) (context.Context, context.CancelFunc, error) {
+				if s.autoWakeModeOf(target) == autoWakeNone {
+					return nil, nil, &errAutoWakeRefused{dmErr: s.validateAgentDeliverable(target)}
+				}
+				if dmErr := s.heldTargetRefusal(ctx, target); dmErr != nil {
+					return nil, nil, &errAutoWakeRefused{dmErr: dmErr}
+				}
+				tracker := req.Tracked
+				if tracker == nil {
+					tracker = newScheduledFireTracker(s, fireID, nil)
+				}
+				if !woke {
+					trackedCtx, endTracking, admitted := tracker.Admit(ctx)
+					if !admitted {
+						return nil, nil, errScheduledWakeShuttingDown
+					}
+					deferredEndTracking = endTracking
+					ctx = trackedCtx
+					woke = true
+				}
+				if werr := s.wakeFireTarget(ctx, fireID, scheduleID, target); werr != nil {
+					if scheduledFireAborted(ctx) {
+						return nil, nil, errScheduledWakeShutdown
+					}
+					return nil, nil, werr
+				}
+				detached, cancelDetached := tracker.Detach(ctx)
+				if holdMsgID != "" {
+					detached = withDispatchMessageID(detached, holdMsgID)
+				}
+				newCtx, cancelRetry := context.WithTimeout(detached, scheduledMessageDispatchTimeout)
+				cleanup := func() {
+					cancelRetry()
+					cancelDetached()
+				}
+				if err := s.refreshHoldLaunchAfterWake(newCtx, target, holdMsgID, storeMsg); err != nil {
+					cleanup()
+					return nil, nil, err
+				}
+				return newCtx, cleanup, nil
+			}),
+		)
 	}); err != nil {
+		var wakeRefused *errAutoWakeRefused
+		if errors.As(err, &wakeRefused) && wakeRefused.dmErr != nil {
+			if storeMsg != nil {
+				_ = s.markFailed(retryCtx, storeMsg.ID, wakeRefused.dmErr.Message)
+			}
+			return hubfire.FireOutcome{}, errors.New(wakeRefused.dmErr.Message)
+		}
 		if storeMsg != nil {
 			_ = s.markFailed(retryCtx, storeMsg.ID, err.Error())
 		}
-		if ma.wake && scheduledFireAborted(ctx) {
+		if errors.Is(err, errScheduledWakeShuttingDown) || errors.Is(err, errScheduledWakeShutdown) || errors.Is(err, errScheduledWakeNotReady) {
+			return hubfire.FireOutcome{}, err
+		}
+		if woke && scheduledFireAborted(ctx) {
 			return hubfire.FireOutcome{}, errScheduledWakeShutdown
 		}
 		if isBrokerAgentNotFound(err) {
@@ -350,7 +417,7 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 				"scheduleID", scheduleID,
 				"agent_id", agent.ID,
 				"agentName", agent.Name,
-				"wake", ma.wake,
+				"wake", woke,
 				"error", err,
 			}
 			var se *brokerStatusError
@@ -362,9 +429,9 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 				)
 			}
 			slog.Warn("Scheduler: broker reported agent not found on message dispatch", logArgs...)
-			if !ma.wake {
+			if !woke {
 				if fresh, gerr := s.store.GetAgent(retryCtx, agent.ID); gerr == nil && fresh != nil {
-					if phaseErr := validateAgentDeliverable(fresh); phaseErr != nil {
+					if phaseErr := s.validateAgentDeliverable(fresh); phaseErr != nil {
 						return hubfire.FireOutcome{}, errors.New(phaseErr.Message)
 					}
 				}

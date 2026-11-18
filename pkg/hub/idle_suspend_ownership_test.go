@@ -2143,3 +2143,201 @@ func TestIdleSuspend_OwnershipMatrix_PostCommitClearIdleSuspendClaim(t *testing.
 	assert.Nil(t, e2eAfter.IdleSuspendClaimUntil, "autoSuspendAgent success path must clear idle_suspend_claim_until via ClearIdleSuspendClaim")
 	assert.False(t, e2eAfter.IdleSuspendClaimActive)
 }
+
+type isoPostCommitReportRaceStore struct {
+	store.Store
+	fault           *storeFaultSwitch
+	bypass          atomic.Bool
+	targetID        string
+	wantReports     int
+	mu              sync.Mutex
+	reportsAtStore  int
+	allReportsReady chan struct{}
+	commitLanded    chan struct{}
+	commitOnce      sync.Once
+}
+
+func (w *isoPostCommitReportRaceStore) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	return w.Store.(store.AdvisoryLocker).TryAdvisoryLock(ctx, key)
+}
+
+func (w *isoPostCommitReportRaceStore) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
+	return w.Store.(store.AdvisoryLocker).TryAdvisoryLockObject(ctx, classID, objID)
+}
+
+func (w *isoPostCommitReportRaceStore) UpdateAgentStatus(ctx context.Context, id string, su store.AgentStatusUpdate) error {
+	if !w.fault.Active() || w.bypass.Load() || id != w.targetID {
+		return w.Store.UpdateAgentStatus(ctx, id, su)
+	}
+	if su.ReportSource != "" {
+		w.mu.Lock()
+		w.reportsAtStore++
+		if w.reportsAtStore == w.wantReports {
+			close(w.allReportsReady)
+		}
+		w.mu.Unlock()
+		<-w.commitLanded
+		return w.Store.UpdateAgentStatus(ctx, id, su)
+	}
+	err := w.Store.UpdateAgentStatus(ctx, id, su)
+	if su.IfIdleSuspendCommit != nil && su.Phase == string(state.PhaseSuspended) {
+		w.commitOnce.Do(func() { close(w.commitLanded) })
+	}
+	return err
+}
+
+// TestIdleSuspend_PostCommitLateAgentAndRuntimeReportsKeepSuspendedIdleAndAutoWakeable
+// verifies the multi-replica interaction between Phase 3's IfIdleSuspendCommit
+// and ptone/scion#8256 (GoogleCloudPlatform/scion#4981): when Replica B reads
+// phase=running during Replica A's container stop for both an agent shutdown
+// status report (phase=stopped, "Session ended") and a broker heartbeat
+// reporting stopped, and both UpdateAgentStatus writes land AFTER Replica A's
+// IfIdleSuspendCommit writes phase=suspended, suspend_reason=idle, the locked
+// row stays phase=suspended, suspend_reason=idle with retained activity intact,
+// and an incoming DM without --wake auto-wakes the agent and delivers the DM.
+func TestIdleSuspend_PostCommitLateAgentAndRuntimeReportsKeepSuspendedIdleAndAutoWakeable(t *testing.T) {
+	ctx := context.Background()
+	srvA, s, raceStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *isoPostCommitReportRaceStore {
+		return &isoPostCommitReportRaceStore{
+			Store:           inner,
+			fault:           f,
+			wantReports:     2,
+			allReportsReady: make(chan struct{}),
+			commitLanded:    make(chan struct{}),
+		}
+	})
+	isoEnableIdleSweep(t, srvA, 15*time.Minute)
+	grantDevUserRuntimeBrokerAccess(t, s)
+
+	dispB := &isoCallbackDispatcher{st: s, autoReadyOnStart: true}
+	srvB := isoSecondReplica(t, raceStore, dispB)
+
+	_, _, target := isoSetupIdleAgent(t, s, "post-commit-late-reports", string(state.ActivityIdle))
+	_, _, sender := isoSetupIdleAgent(t, s, "post-commit-late-sender", string(state.ActivityThinking))
+	_, err := s.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+		"UPDATE agents SET project_id = ? WHERE id = ?", target.ProjectID, sender.ID)
+	require.NoError(t, err)
+	sender.ProjectID = target.ProjectID
+	ensureStandingRoot(t, s, target.ProjectID, DevUserID)
+	for _, id := range []string{target.ID, sender.ID} {
+		row, gerr := s.GetAgent(ctx, id)
+		require.NoError(t, gerr)
+		row.MessageMode = store.MessageModeProject
+		row.Ancestry = []string{DevUserID}
+		require.NoError(t, s.UpdateAgent(ctx, row))
+	}
+	now := time.Now().UTC()
+	_, err = s.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+		"UPDATE agents SET activity = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+		string(state.ActivityIdle), now.Add(-20*time.Minute), now.Add(-10*time.Second), target.ID,
+	)
+	require.NoError(t, err)
+	target, err = s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	sender, err = s.GetAgent(ctx, sender.ID)
+	require.NoError(t, err)
+
+	tok, cred, err := srvA.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   target.ID,
+		ProjectID: target.ProjectID,
+		Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate},
+	}, target.RunID)
+	require.NoError(t, err)
+	require.NoError(t, s.CreateAgentCredential(ctx, cred))
+
+	raceStore.targetID = target.ID
+	var reportWG sync.WaitGroup
+	dispA := &isoCallbackDispatcher{
+		st: s,
+		onStop: func(_ context.Context, a *store.Agent) error {
+			if a.ID != target.ID {
+				return nil
+			}
+			// Both Replica B handlers read phase=running while Replica A's claim is
+			// active (no local lifecycleOp on Replica B) and block at UpdateAgentStatus
+			// until Replica A's IfIdleSuspendCommit writes phase=suspended(idle).
+			reportWG.Add(2)
+			go func() {
+				defer reportWG.Done()
+				rec := doRequestWithAgentToken(t, srvB, http.MethodPost, "/api/v1/agents/"+a.ID+"/status", map[string]any{
+					"phase":      string(state.PhaseStopped),
+					"message":    "Session ended",
+					"exitReason": string(state.ExitReasonSignaled),
+				}, tok)
+				assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			}()
+			go func() {
+				defer reportWG.Done()
+				exitZero := 0
+				rec := doRequest(t, srvB, http.MethodPost, "/api/v1/runtime-brokers/"+a.RuntimeBrokerID+"/heartbeat",
+					brokerHeartbeatRequest{
+						Status: store.BrokerStatusOnline,
+						Projects: []brokerProjectHeartbeat{{
+							ProjectID:  a.ProjectID,
+							AgentCount: 1,
+							Agents: []brokerAgentHeartbeat{{
+								Slug:            a.Slug,
+								RunID:           a.RunID,
+								Phase:           string(state.PhaseStopped),
+								ContainerStatus: "exited (0)",
+								ExitCode:        &exitZero,
+							}},
+						}},
+					})
+				assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			}()
+			select {
+			case <-raceStore.allReportsReady:
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for Replica B agent+runtime stopped reports to reach UpdateAgentStatus")
+			}
+			return nil
+		},
+	}
+	srvA.SetDispatcher(dispA)
+	fault.Arm()
+
+	srvA.agentIdleSuspendHandler()(ctx)
+	srvA.waitAutoSuspendIdle()
+	reportWG.Wait()
+	raceStore.bypass.Store(true)
+
+	// Also deliver a fresh post-clear runtime stopped report directly on Replica B.
+	exitZero := 0
+	rec := doRequest(t, srvB, http.MethodPost, "/api/v1/runtime-brokers/"+target.RuntimeBrokerID+"/heartbeat",
+		brokerHeartbeatRequest{
+			Status: store.BrokerStatusOnline,
+			Projects: []brokerProjectHeartbeat{{
+				ProjectID:  target.ProjectID,
+				AgentCount: 1,
+				Agents: []brokerAgentHeartbeat{{
+					Slug:            target.Slug,
+					RunID:           target.RunID,
+					Phase:           string(state.PhaseStopped),
+					ContainerStatus: "exited (0)",
+					ExitCode:        &exitZero,
+				}},
+			}},
+		})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	settled, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), settled.Phase, "late agent+runtime stopped reports must leave phase=suspended intact")
+	assert.Equal(t, string(state.SuspendReasonIdle), settled.SuspendReason, "suspend_reason=idle must remain intact")
+	assert.Equal(t, string(state.ActivityIdle), settled.Activity, "retained activity=idle must remain intact")
+	assert.Nil(t, settled.IdleSuspendClaimUntil)
+	assert.True(t, srvB.shouldAutoWake(settled))
+
+	// Incoming DM without --wake auto-wakes the suspended(idle) agent and delivers.
+	res, dmErr := srvB.ExecuteAgentDM(ctx, awAgentDMInput(sender, settled, "wake-after-late-reports"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, res)
+	assert.Equal(t, int32(1), dispB.starts.Load(), "DM must auto-wake the idle-suspended agent")
+	assert.Equal(t, []string{"wake-after-late-reports"}, dispB.deliveredMessages())
+
+	woken, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), woken.Phase)
+	assert.Empty(t, woken.SuspendReason)
+}
