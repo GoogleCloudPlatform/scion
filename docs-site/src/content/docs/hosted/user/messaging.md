@@ -440,7 +440,7 @@ The available modes are:
 - **Hub Mode**: Behaves like Project mode within the agent's own project, and additionally allows the agent to send direct messages across project boundaries when [cross-project messaging](#cross-project-messaging) is enabled. A project-mode agent can *receive* a cross-project DM but cannot *reply* across the boundary until granted Hub mode.
 - **Branch Mode**: Only users in the agent's ancestry chain (its creator and their ancestors), plus the agent's direct parent and child agents, can message it. Agent-to-agent messages need both agents in branch mode and one to be the other's direct parent; siblings, grandparents, and pairs that mix branch with another mode are denied.
 - **Lineage Mode**: Strictly restricts messaging to users in the agent's ancestry chain (its creator and their ancestors). No agent-to-agent messaging is permitted.
-- **None Mode**: Seals the agent from all messaging except system-plane notices. No users and no agents can message a none-mode agent through normal paths.
+- **None Mode**: Seals the agent from all messaging except system-plane notices and a super-admin's messages (see [Piercing](#piercing)). No other user and no agent can message a none-mode agent, so a task sent later as a message is refused and the agent stays idle. Give a none-mode agent its task when you create it: the creation-time task is passed to the harness when the agent starts, not delivered as a message, so the seal does not block it.
 
 A new agent's mode is set once, at creation: the `--message-mode` flag of `scion create` or `scion start` if given, else the template's `message_mode`, else the parent agent's mode when an agent creates it, else `project`. A default that resolves to `hub` still needs a hub-mode grant.
 
