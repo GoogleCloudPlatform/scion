@@ -151,16 +151,16 @@ func TestEffectiveImageTag(t *testing.T) {
 		// 1. a release build defaults to its own version
 		{"", "v1.0.0", "v1.0.0", false},
 		{"", "v0.3.0-preview.5", "v0.3.0-preview.5", false},
+		{"", "v0.4.0-preview.4", "v0.4.0-preview.4", false},
 		{"", "v0.3.0-rc.1", "v0.3.0-rc.1", false},
+		{"", "nightly-20261117", "nightly-20261117", false},
 		{"  ", "v1.0.0", "v1.0.0", false},
 		// 2. a dev or unversioned build keeps :latest (no change)
 		{"", "", "", false},
 		{"", "dev", "", false},
 		{"", "v0.3.0-dirty", "", false},
-		{"", "nightly-20261105", "", false},
 		{"", "v0.0.0-20261108002803-39f9e3d31e76", "", false},
 		{"", "v0.3.0+meta", "", false},
-		{"version", "nightly-20261105", "latest", false},
 		{"version", "dev", "latest", false},
 		{"version", "", "latest", false},
 		{"version", "v1+meta", "latest", false},
@@ -171,6 +171,7 @@ func TestEffectiveImageTag(t *testing.T) {
 		{" stable ", "", "stable", false},
 		{"version", "v0.3.0-preview.5", "v0.3.0-preview.5", false},
 		{"version", "v0.3.0-rc.2", "v0.3.0-rc.2", false},
+		{"version", "nightly-20261117", "nightly-20261117", false},
 		// invalid settings give no tag
 		{"bad tag", "v1.0.0", "", true},
 		{".hidden", "v1.0.0", "", true},
@@ -185,13 +186,20 @@ func TestEffectiveImageTag(t *testing.T) {
 
 // TestReleaseImageTag: only the release tag forms are release versions.
 func TestReleaseImageTag(t *testing.T) {
-	for _, v := range []string{"v0.3.0", "v1.2.3", "v0.3.0-preview.5", "v0.3.0-rc.1", "v10.0.0-preview.12"} {
+	for _, v := range []string{
+		"v0.3.0", "v1.0.0", "v1.2.3", "v0.3.0-preview.5", "v0.4.0-preview.4",
+		"v0.3.0-rc.1", "v10.0.0-preview.12", "nightly-20261105", "nightly-20261117",
+	} {
 		if got, ok := ReleaseImageTag(v); !ok || got != v {
 			t.Errorf("ReleaseImageTag(%q) = %q, %v; want %q, true", v, got, ok, v)
 		}
 	}
-	for _, v := range []string{"", "dev", "latest", "nightly-20261105", "0.3.0", "v0.3", "v0.3.0-dirty",
-		"v0.3.0+meta", "v0.3.0-rc1", "v0.3.0-preview", "v01.2.3", "v0.0.0-20261108002803-39f9e3d31e76", " v0.3.0"} {
+	for _, v := range []string{
+		"", "dev", "latest", "nightly", "nightly-", "nightly-2026111", "nightly-202611170",
+		"nightly-latest", "nightly-20261117.1", "0.3.0", "v0.3", "v0.3.0-dirty",
+		"v0.3.0+meta", "v0.3.0-rc1", "v0.3.0-preview", "v01.2.3",
+		"v0.0.0-20261108002803-39f9e3d31e76", " v0.3.0", " nightly-20261117",
+	} {
 		if got, ok := ReleaseImageTag(v); ok || got != "" {
 			t.Errorf("ReleaseImageTag(%q) = %q, %v; want \"\", false", v, got, ok)
 		}

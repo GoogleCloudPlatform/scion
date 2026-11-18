@@ -202,6 +202,11 @@ module "hub_gke" {
   port              = local.hub_port
   neg_zones         = local.neg_zones
 
+  # hub-identity grants <hub>-agent no Secret Manager roles, and the chart's
+  # RBAC omits SecretProviderClass: resolved secrets go through namespaced
+  # Kubernetes Secrets instead (Autopilot tolerances stay auto-detected).
+  agent_runtime_gke_mode = false
+
   db_name              = module.cloudsql_database.db_name
   db_user              = module.cloudsql_database.db_user
   db_password          = module.cloudsql_database.db_password

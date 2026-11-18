@@ -40,8 +40,9 @@ func TestImageTagApplication(t *testing.T) {
 		{"version falls back to latest for dev", "version", "dev", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:latest"},
 		{"version falls back to latest for an empty version", "version", "", "scion-claude", "", "scion-claude:latest"},
 		{"unset is the release version", "", "v0.3.0", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:v0.3.0"},
+		{"unset is the nightly version", "", "nightly-20261117", "scion-claude", "", "scion-claude:nightly-20261117"},
 		{"unset changes nothing for dev", "", "dev", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:latest"},
-		{"unset changes nothing for a nightly", "", "nightly-20261105", "scion-claude", "", "scion-claude"},
+		{"unset changes nothing for a pseudo-version", "", "v0.0.0-20261108002803-39f9e3d31e76", "scion-claude", "", "scion-claude"},
 		{"explicit latest opts out", "latest", "v0.3.0", "scion-claude:latest", "ghcr.io/org", "ghcr.io/org/scion-claude:latest"},
 		{"non-scion image takes the registry only", "v0.3.0", "dev", "ubuntu:latest", "ghcr.io/org", "ghcr.io/org/ubuntu:latest"},
 	}

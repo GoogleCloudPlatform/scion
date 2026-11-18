@@ -39,12 +39,15 @@ with its own version, so agents run images that match your binary. Chat plugins 
 and Discord are not included; their setup guides explain how to install them.
 
 :::note[Which image tag agents use]
-A release build of `scion` (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`, as Homebrew installs)
-uses its own version as the tag of the bundled `scion-*` images whose tag is `latest` or absent;
-development and nightly builds keep `:latest`.
+A release build of `scion` (`vX.Y.Z`, `vX.Y.Z-preview.N`, `vX.Y.Z-rc.N` as Homebrew installs, or
+`nightly-YYYYMMDD`) uses its own version as the tag of the bundled `scion-*` images whose tag is
+`latest` or absent; development builds keep `:latest`.
 
 - An image you name explicitly with `--image scion-claude:latest`, or a bare name such as
   `scion-claude`, is retagged the same way, to `scion-claude:<version>`.
+- Official nightly releases do not publish container images; build matching images with
+  [`build-release-images.sh`](#build-container-images) (or `build-images.sh --tag nightly-YYYYMMDD`),
+  or opt out with `image_tag` set to `latest`.
 - To keep `:latest`, set `image_tag` to `latest`: `scion config set --global image_tag latest`,
   then `scion server restart`. Any set `image_tag` takes precedence over the version default.
   While the `hub.image_tag_setting` experiment is off, a set value is not applied (image

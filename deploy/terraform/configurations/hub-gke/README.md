@@ -288,10 +288,11 @@ ptone/scion#3519.
 Two independent settings, both off by default. With defaults, neither adds a
 resource or changes the chart values.
 
-**`test_identities_enabled`** sets the chart's `hub.testIdentities.enabled`,
-which lets the hub issue test identities. When false (the default), the value
-is left out of the chart values and the chart's own default (false) applies.
-This is unrelated to test login, which the chart does not offer.
+**`test_identities_enabled`** sets the chart's `hub.hubClass` to `"test"` and
+`hub.testIdentities.enabled` to `true`, which lets the hub issue test
+identities. When false (the default), both values are left out of the chart
+values and the chart's own defaults (`""` and `false`) apply. This is
+unrelated to test login, which the chart does not offer.
 
 **`test_runner`** creates test-runner identities through
 `modules/hub-test-runner`, so an agent on another hub can run user-surface

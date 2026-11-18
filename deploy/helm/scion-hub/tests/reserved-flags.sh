@@ -32,7 +32,7 @@
 # an empty table and exited 0; this must not be able to do that.
 set -u
 
-EXPECTED_TOTAL=59          # 38 must-reject + 6 must-accept + 15 test-identity / hub-class value rows. Update deliberately.
+EXPECTED_TOTAL=60          # 38 must-reject + 6 must-accept + 16 test-identity / hub-class value rows. Update deliberately.
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -360,7 +360,7 @@ accept '"-C/x"'    # CASE. pflag shorthands are case-sensitive and no -C is regi
 # hub.testIdentities.enabled is the one way to set --test-mode; it renders
 # exactly --test-mode=member:<hub.hubId> and nothing else, so no chart value
 # reaches an admin level. It requires hub.hubClass: test (server.hub.class),
-# which the hub's member level needs too. Fifteen rows.
+# which the hub's member level needs too. Sixteen rows.
 ti_check() {  # ti_check <label> <0 if ok> [detail]
   executed=$((executed + 1))
   if [ "$2" -eq 0 ]; then echo "ok    $1"; else echo "FAIL  $1 ${3:-}"; failed=$((failed + 1)); fi
@@ -441,6 +441,27 @@ for ev in '[{"name":"SCION_SERVER_HUB_CLASS","value":"test"}]' \
   "$HELM" template t "$CHART" "${BASE_ES[@]}" --set-json "hub.extraEnv=$ev" 2>&1 | grep -qF 'hub.extraEnv may not set SCION_SERVER_HUB_CLASS' || ti_env_ok=1
 done
 ti_check "hub.extraEnv SCION_SERVER_HUB_CLASS refused (3 forms, with and without existingSecret)" $ti_env_ok
+
+# 16. Terraform hub-gke permutation (ci/values-terraform-hub-gke.yaml): renders
+#     both as-is (test_identities_enabled = false, runtime.gke = false) and with
+#     the exact pair modules/hub-gke merges when test_identities_enabled = true
+#     (hub.hubClass: test + hub.testIdentities.enabled: true), and refuses
+#     hub.testIdentities.enabled: true without hub.hubClass: test.
+ti_tf_fx="$CHART/ci/values-terraform-hub-gke.yaml"
+ti_tf_off="$("$HELM" template tfha-gke-h3 "$CHART" -f "$ti_tf_fx" --namespace tfha-gke-h3-system 2>&1)"; ti_tf_off_rc=$?
+ti_tf_on="$("$HELM" template tfha-gke-h3 "$CHART" -f "$ti_tf_fx" --set-string hub.hubClass=test --set hub.testIdentities.enabled=true --namespace tfha-gke-h3-system 2>&1)"; ti_tf_on_rc=$?
+ti_tf_bad="$("$HELM" template tfha-gke-h3 "$CHART" -f "$ti_tf_fx" --set hub.testIdentities.enabled=true --namespace tfha-gke-h3-system 2>&1)"; ti_tf_bad_rc=$?
+ti_tf_ok=0
+{ [ -f "$ti_tf_fx" ] \
+  && [ "$ti_tf_off_rc" -eq 0 ] \
+  && printf '%s' "$ti_tf_off" | grep -qE '^ +gke: false$' \
+  && ! printf '%s' "$ti_tf_off" | grep -qF -- '--test-mode' \
+  && [ "$ti_tf_on_rc" -eq 0 ] \
+  && printf '%s' "$ti_tf_on" | grep -qE '^ +class: test$' \
+  && printf '%s' "$ti_tf_on" | grep -qF -- '- --test-mode=member:tfha-gke-h3' \
+  && [ "$ti_tf_bad_rc" -ne 0 ] \
+  && printf '%s' "$ti_tf_bad" | grep -qF 'requires hub.hubClass: test'; } || ti_tf_ok=1
+ti_check "terraform hub-gke fixture: renders off (gke: false) and on (with hub.hubClass: test), refuses true without hubClass" "$ti_tf_ok"
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"

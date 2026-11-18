@@ -130,7 +130,7 @@ variable "nfs_capacity" {
 }
 
 variable "test_identities_enabled" {
-  description = "Sets the chart's hub.testIdentities.enabled, which lets the hub issue test identities. For test hubs only. Default false leaves the chart value unset (the chart's default is false). Unrelated to test login, which the chart does not offer."
+  description = "Sets the chart's hub.hubClass = \"test\" and hub.testIdentities.enabled = true, which lets the hub issue test identities. For test hubs only. Default false leaves both chart values unset (the chart's defaults are \"\" and false). Unrelated to test login, which the chart does not offer."
   type        = bool
   default     = false
   nullable    = false

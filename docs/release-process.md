@@ -467,10 +467,10 @@ the onboarding wizard on first start.
 Images are tagged only with the release tag, for example
 `ghcr.io/homebrew-scion/scion-claude:v0.3.0-preview.5`, plus the immutable `:<short-sha>` tag that
 `build-images.sh` always adds. Preview publishing never moves `:latest` and adds no `:preview` tag.
-A release build of Scion (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`) pulls the images tagged
-with its own version when `image_tag` is unset (the `hub.image_tag_version_default` experiment, on
-by default), so a Homebrew install pulls exactly the images this job pushes. Development and
-nightly builds, and an `image_tag` of `latest`, keep `:latest`, which in `ghcr.io/homebrew-scion`
+A release build of Scion (`vX.Y.Z`, `vX.Y.Z-preview.N`, `vX.Y.Z-rc.N` or `nightly-YYYYMMDD`) pulls
+the images tagged with its own version when `image_tag` is unset (the `hub.image_tag_version_default`
+experiment, on by default), so a Homebrew install pulls exactly the images this job pushes. Development
+builds, and an `image_tag` of `latest`, keep `:latest`, which in `ghcr.io/homebrew-scion`
 is an old v0.2 image (harnesses added since have no `:latest` there at all). The version comes
 from the build's version stamp only: a build of a tagged commit with local changes counts as that
 release. The formula caveats name the release-tagged images.

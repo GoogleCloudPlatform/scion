@@ -1280,14 +1280,14 @@ typing any value into it saves that value.
 
 A set `image_tag` is behind the `hub.image_tag_setting` [experiment](/scion/reference/experiments/)
 (off by default). The bundled agent images are tagged `latest`. When `image_tag` is unset, a
-release build of the Hub (`vX.Y.Z`, `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N`) uses its own version as
+release build of the Hub (`vX.Y.Z`, `vX.Y.Z-preview.N`, `vX.Y.Z-rc.N` or `nightly-YYYYMMDD`) uses its own version as
 the tag instead (the `hub.image_tag_version_default` experiment, on by default), so a Homebrew or
 release install runs the images published for its release. `image_tag` selects another tag (see
 "Build images for a release" in `image-build/README.md`):
 
 | Value | Effect |
 | :--- | :--- |
-| unset or `""` | The version default: a release build of the Hub uses its own version (for example `v0.3.0-preview.5`); any other build (development, nightly, or a build without a release version) makes no change. Off while `hub.image_tag_version_default` is off. |
+| unset or `""` | The version default: a release build of the Hub uses its own version (for example `v0.3.0-preview.5` or `nightly-20261117`); any other build (development or a build without a release version) makes no change. Off while `hub.image_tag_version_default` is off. |
 | `version` | The Hub binary's release version; `latest` for any other build. |
 | `latest` | Keeps `latest`: the opt-out from the version default. |
 | any other value | That literal tag. It must be a valid image tag: letters, digits, `_`, `.` and `-`, at most 128 characters, not starting with `.` or `-`, with no surrounding spaces. `scion config set image_tag` refuses anything else and leaves the settings file unchanged. |

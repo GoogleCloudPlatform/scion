@@ -154,16 +154,16 @@ run "client_id_set_installs_the_hub" {
     error_message = "no rotation marker means no rotation annotation."
   }
 
-  # Default: the value is left out, so the chart's own default (false)
-  # applies and existing hubs' values do not change.
+  # Default: both values are left out, so the chart's own defaults ("" and
+  # false) apply and existing hubs' values do not change.
   assert {
-    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
-    error_message = "test_identities_enabled defaults to false and must leave hub.testIdentities out of the chart values."
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities") && !contains(keys(output.chart_values.hub), "hubClass")
+    error_message = "test_identities_enabled defaults to false and must leave hub.testIdentities and hub.hubClass out of the chart values."
   }
 
   assert {
-    condition     = output.chart_values.runtime.gke == true
-    error_message = "agent_runtime_gke_mode defaults to true, so chart_values.runtime.gke must be true (the chart's previous hardcoded runtimes.kubernetes.gke)."
+    condition     = output.chart_values.runtime.gke == false
+    error_message = "agent_runtime_gke_mode defaults to false, so chart_values.runtime.gke must be false (matching hub-identity and chart RBAC)."
   }
 
   assert {
@@ -252,12 +252,12 @@ run "agent_runtime_gke_mode_passes_through" {
   command = plan
 
   variables {
-    agent_runtime_gke_mode = false
+    agent_runtime_gke_mode = true
   }
 
   assert {
-    condition     = output.chart_values.runtime.gke == false
-    error_message = "agent_runtime_gke_mode = false must reach the chart as runtime.gke = false."
+    condition     = output.chart_values.runtime.gke == true
+    error_message = "agent_runtime_gke_mode = true must reach the chart as runtime.gke = true."
   }
 }
 
@@ -269,8 +269,8 @@ run "test_identities_enabled_reaches_the_chart" {
   }
 
   assert {
-    condition     = output.chart_values.hub.testIdentities.enabled == true
-    error_message = "test_identities_enabled = true must set the chart's hub.testIdentities.enabled to true."
+    condition     = output.chart_values.hub.hubClass == "test" && output.chart_values.hub.testIdentities.enabled == true
+    error_message = "test_identities_enabled = true must set the chart's hub.hubClass to \"test\" and hub.testIdentities.enabled to true."
   }
 
   assert {
@@ -287,8 +287,8 @@ run "test_identities_explicit_false_adds_nothing" {
   }
 
   assert {
-    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
-    error_message = "test_identities_enabled = false must leave hub.testIdentities out (the chart default is false)."
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities") && !contains(keys(output.chart_values.hub), "hubClass")
+    error_message = "test_identities_enabled = false must leave hub.testIdentities and hub.hubClass out (the chart defaults are false and \"\")."
   }
 }
 

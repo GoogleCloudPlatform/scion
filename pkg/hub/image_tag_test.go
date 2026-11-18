@@ -197,7 +197,7 @@ func TestDispatchImageTagFor_Profile(t *testing.T) {
 func TestImageTag_VersionDefault(t *testing.T) {
 	srv, _, ops := newTestDBServer(t)
 
-	for _, v := range []string{"v0.3.0", "v0.3.0-preview.5", "v0.3.0-rc.1"} {
+	for _, v := range []string{"v0.3.0", "v0.3.0-preview.5", "v0.3.0-rc.1", "nightly-20261117"} {
 		setTestVersion(t, v)
 		assert.Equal(t, v, srv.hubScopeImageTag(), "a release build uses its version: %s", v)
 		assert.Equal(t, v, srv.dispatchImageTagFor("", ""), "dispatch carries the version: %s", v)
@@ -207,7 +207,7 @@ func TestImageTag_VersionDefault(t *testing.T) {
 	assert.Equal(t, "scion-claude:v0.3.0-preview.5", short)
 	assert.Equal(t, "ghcr.io/homebrew-scion/scion-claude:v0.3.0-preview.5", resolved)
 
-	for _, v := range []string{"", "dev", "nightly-20261105", "v0.3.0-dirty", "v0.0.0-20261108002803-39f9e3d31e76"} {
+	for _, v := range []string{"", "dev", "v0.3.0-dirty", "v0.0.0-20261108002803-39f9e3d31e76"} {
 		setTestVersion(t, v)
 		assert.Equal(t, "", srv.hubScopeImageTag(), "not a release build, images keep latest: %q", v)
 		assert.Equal(t, "", srv.dispatchImageTagFor("", ""), "no dispatch tag: %q", v)
