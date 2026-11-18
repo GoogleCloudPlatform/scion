@@ -2118,6 +2118,8 @@ func agentStatusEmoji(activity, phase string) string {
 		return "\U0001f514" // bell
 	case "blocked":
 		return "\U0001f6a7" // construction
+	case "idle":
+		return "\U0001f4a4" // zzz
 	case "completed":
 		return "✅" // check mark
 	case "limits_exceeded":
