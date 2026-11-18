@@ -1533,7 +1533,7 @@ func (s *AgentStore) populateListIdleSuspendClaimActive(ctx context.Context, ite
 	now = claimTime(now)
 	for i := range items {
 		if items[i].IdleSuspendClaimUntil != nil {
-			items[i].IdleSuspendClaimActive = now.Before(*items[i].IdleSuspendClaimUntil)
+			items[i].SetIdleSuspendFlags(now)
 		}
 	}
 	return nil
@@ -1770,11 +1770,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return store.ErrPhaseMismatch
 	}
 	clearSuspendReasonForHold := false
-	if su.IfNoStartClaim || su.IfNoActiveIdleClaim || su.IfIdleSuspendCommit != nil {
+	if su.IfNoStartClaim || su.IfNoActiveIdleClaim || su.IfIdleSuspendCommit != nil || su.IfIdleSuspendRecover != nil {
 		if su.IfNoStartClaim && heldClaimError(current) != nil {
 			return store.ErrClaimPredicate
 		}
-		if current.IdleSuspendClaimUntil != nil || su.IfIdleSuspendCommit != nil {
+		if current.IdleSuspendClaimUntil != nil || su.IfIdleSuspendCommit != nil || su.IfIdleSuspendRecover != nil {
 			storeClock, err := entTxStoreNow(ctx, tx, s.dialect() == dialect.Postgres)
 			if err != nil {
 				return err
@@ -1783,8 +1783,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			if (su.IfNoActiveIdleClaim || su.IfNoStartClaim) && idleActive {
 				return store.ErrClaimPredicate
 			}
-			if su.IfIdleSuspendCommit != nil {
-				if !checkIdleSuspendCommit(current, *su.IfIdleSuspendCommit, storeClock) {
+			if su.IfIdleSuspendCommit != nil || su.IfIdleSuspendRecover != nil {
+				if su.IfIdleSuspendCommit != nil && !checkIdleSuspendCommit(current, *su.IfIdleSuspendCommit, storeClock) {
+					return store.ErrIdleSuspendPrecondition
+				}
+				if su.IfIdleSuspendRecover != nil && !checkIdleSuspendRecover(current, *su.IfIdleSuspendRecover, storeClock) {
 					return store.ErrIdleSuspendPrecondition
 				}
 				// If a membership-loss hold took effect while the idle claim's

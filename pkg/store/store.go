@@ -900,6 +900,15 @@ type AgentStore interface {
 	// claimUntil). Returns ErrIdleSuspendPrecondition when any guard fails.
 	ClaimIdleSuspend(ctx context.Context, agentID string, cond IdleSuspendCondition) (prior RunIntent, at time.Time, claimUntil time.Time, err error)
 
+	// ListExpiredIdleSuspendClaims returns non-deleted agents whose
+	// idle_suspend_claim_until is set and has expired on the store clock, with
+	// run_intent=stopped and phase stopping, stopped or error: idle suspends
+	// whose stop landed but whose suspended(idle) record did not (commit write
+	// failure, hub restart, unknown stop outcome). Ordered by claim expiry, then
+	// id. A positive limit bounds the rows returned. The caller records each one
+	// with AgentStatusUpdate.IfIdleSuspendRecover.
+	ListExpiredIdleSuspendClaims(ctx context.Context, limit int) ([]Agent, error)
+
 	// ClearIdleSuspendClaim clears idle_suspend_claim_until on agentID.
 	ClearIdleSuspendClaim(ctx context.Context, agentID string) error
 
@@ -1639,6 +1648,14 @@ type AgentStatusUpdate struct {
 	// run); otherwise UpdateAgentStatus returns ErrIdleSuspendPrecondition and
 	// writes nothing. Internal to the hub — json:"-".
 	IfIdleSuspendCommit *time.Time `json:"-"`
+	// IfIdleSuspendRecover, when non-nil, guards the sweep's recovery write of
+	// an idle auto-suspend whose claim lease has expired without the commit
+	// landing: the same row conditions as IfIdleSuspendCommit, but the exact
+	// idle_suspend_claim_until must have expired on the store clock, and the
+	// phase must be stopping, stopped or error (never running). The write clears
+	// the claim. Otherwise ErrIdleSuspendPrecondition, nothing written.
+	// Internal to the hub — json:"-".
+	IfIdleSuspendRecover *time.Time `json:"-"`
 	// RetainedActivity, when non-empty on a Phase=suspended update, supplies
 	// the pre-stop retained activity (idle, completed or harness_error) to
 	// preserve if a container or runtime shutdown report already transitioned

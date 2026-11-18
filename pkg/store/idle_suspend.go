@@ -48,3 +48,26 @@ type IdleSuspendCondition struct {
 func (a *Agent) HasActiveIdleSuspendClaim(now time.Time) bool {
 	return a != nil && a.IdleSuspendClaimUntil != nil && now.Before(*a.IdleSuspendClaimUntil)
 }
+
+// SetIdleSuspendFlags populates IdleSuspendClaimLeaseActive and
+// IdleSuspendClaimActive on a from IdleSuspendClaimUntil, RunIntent and Phase
+// against the store-clock now. A row without a claim stamp has both false.
+//
+// IdleSuspendClaimActive means "an idle suspend is in progress": the lease is
+// unexpired, or the stamp is still set with run_intent=stopped and the row not
+// yet recorded suspended. Every user or hub lifecycle write clears the stamp,
+// so a surviving stamp with a stopped intent is an idle stop whose record
+// (worker commit or sweep recovery) has not landed yet, expired or not.
+func (a *Agent) SetIdleSuspendFlags(now time.Time) {
+	if a == nil {
+		return
+	}
+	a.IdleSuspendClaimLeaseActive = false
+	a.IdleSuspendClaimActive = false
+	if a.IdleSuspendClaimUntil == nil {
+		return
+	}
+	a.IdleSuspendClaimLeaseActive = now.Before(*a.IdleSuspendClaimUntil)
+	a.IdleSuspendClaimActive = a.IdleSuspendClaimLeaseActive ||
+		(a.RunIntent == RunIntentStopped && a.Phase != "suspended")
+}

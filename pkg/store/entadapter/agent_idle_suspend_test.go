@@ -617,10 +617,11 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 		require.NoError(t, err)
 		expiredByID, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		assert.False(t, expiredByID.IdleSuspendClaimActive)
+		assert.False(t, expiredByID.IdleSuspendClaimLeaseActive)
+		assert.True(t, expiredByID.IdleSuspendClaimActive, "expired stamp with run_intent=stopped is an idle suspend in progress")
 		expiredBySlug, err := s.GetAgentBySlug(ctx, a.ProjectID, a.Slug)
 		require.NoError(t, err)
-		assert.False(t, expiredBySlug.IdleSuspendClaimActive)
+		assert.False(t, expiredBySlug.IdleSuspendClaimLeaseActive)
 	})
 
 	t.Run("IfNoStartClaim and IfAutoWakeReason guard conversion CAS", func(t *testing.T) {

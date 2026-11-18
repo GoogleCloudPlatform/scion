@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 
 	"entgo.io/ent/dialect"
@@ -126,6 +127,19 @@ func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now ti
 // another replica) are all container/runtime outcomes of our own stop dispatch
 // and are accepted.
 func checkIdleSuspendCommit(row *ent.Agent, claimUntil, now time.Time) bool {
+	return checkIdleSuspendRecord(row, claimUntil, now, false)
+}
+
+// checkIdleSuspendRecover evaluates AgentStatusUpdate.IfIdleSuspendRecover on
+// the locked row at store-clock now: the same row conditions as
+// checkIdleSuspendCommit, but the claim lease must have expired. A surviving
+// stamp means no user or hub lifecycle write has touched the row since the
+// claim (each clears it), so the stop is the idle suspend's own.
+func checkIdleSuspendRecover(row *ent.Agent, claimUntil, now time.Time) bool {
+	return checkIdleSuspendRecord(row, claimUntil, now, true)
+}
+
+func checkIdleSuspendRecord(row *ent.Agent, claimUntil, now time.Time, expired bool) bool {
 	if row == nil {
 		return false
 	}
@@ -135,7 +149,10 @@ func checkIdleSuspendCommit(row *ent.Agent, claimUntil, now time.Time) bool {
 	if !claimEligible(row) || heldClaimError(row) != nil {
 		return false
 	}
-	if row.IdleSuspendClaimUntil == nil || !claimTime(*row.IdleSuspendClaimUntil).Equal(claimTime(claimUntil)) || !now.Before(*row.IdleSuspendClaimUntil) {
+	if row.IdleSuspendClaimUntil == nil || !claimTime(*row.IdleSuspendClaimUntil).Equal(claimTime(claimUntil)) {
+		return false
+	}
+	if expired == now.Before(*row.IdleSuspendClaimUntil) {
 		return false
 	}
 	if row.RunIntent == nil || *row.RunIntent != string(store.RunIntentStopped) {
@@ -146,7 +163,9 @@ func checkIdleSuspendCommit(row *ent.Agent, claimUntil, now time.Time) bool {
 	}
 	switch state.Phase(row.Phase) {
 	case state.PhaseRunning, state.PhaseStopping, state.PhaseStopped, state.PhaseError:
-		return true
+		// Recovery additionally never converts a row that is still running:
+		// its stop may not have landed.
+		return !expired || state.Phase(row.Phase) != state.PhaseRunning
 	default:
 		return false
 	}
@@ -163,7 +182,7 @@ func (s *AgentStore) populateIdleSuspendClaimActive(ctx context.Context, sa *sto
 	if err != nil {
 		return err
 	}
-	sa.IdleSuspendClaimActive = now.Before(*sa.IdleSuspendClaimUntil)
+	sa.SetIdleSuspendFlags(now)
 	return nil
 }
 
@@ -257,7 +276,12 @@ func (s *AgentStore) MarkAgentDelivery(ctx context.Context, agentID string) (*st
 	)
 	err := s.withIdleSuspendLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
 		out = nil
-		claimActive = row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil)
+		// claimActive is "an idle suspend is in progress" (store.Agent
+		// SetIdleSuspendFlags): an unexpired lease, or a surviving stamp with
+		// run_intent=stopped on a row not yet recorded suspended.
+		probe := entAgentToStore(row)
+		probe.SetIdleSuspendFlags(now)
+		claimActive = probe.IdleSuspendClaimActive
 		if !claimActive && (row.Phase == string(state.PhaseRunning) || row.Phase == string(state.PhaseStarting)) {
 			updated, err := c.Agent.UpdateOneID(row.ID).
 				SetUpdated(row.Updated).
@@ -270,12 +294,38 @@ func (s *AgentStore) MarkAgentDelivery(ctx context.Context, agentID string) (*st
 			out.IdleSuspendClaimActive = false
 			return true, nil
 		}
-		out = entAgentToStore(row)
-		out.IdleSuspendClaimActive = claimActive
+		out = probe
 		return false, nil
 	})
 	if err != nil {
 		return nil, false, err
 	}
 	return out, claimActive, nil
+}
+
+// ListExpiredIdleSuspendClaims implements store.AgentStore.ListExpiredIdleSuspendClaims.
+func (s *AgentStore) ListExpiredIdleSuspendClaims(ctx context.Context, limit int) ([]store.Agent, error) {
+	now, err := s.driverStoreNow(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := s.client.Agent.Query().Where(
+		agent.DeletedAtIsNil(),
+		agent.IdleSuspendClaimUntilNotNil(),
+		agent.IdleSuspendClaimUntilLTE(claimTime(now)),
+		agent.RunIntentEQ(string(store.RunIntentStopped)),
+		agent.PhaseIn(string(state.PhaseStopping), string(state.PhaseStopped), string(state.PhaseError)),
+	).Order(ent.Asc(agent.FieldIdleSuspendClaimUntil), ent.Asc(agent.FieldID))
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.Agent, len(rows))
+	for i, a := range rows {
+		out[i] = *entAgentToStore(a)
+	}
+	return out, nil
 }

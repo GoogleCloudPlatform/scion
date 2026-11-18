@@ -5926,6 +5926,10 @@ func (s *Server) agentIdleSuspendHandler() func(ctx context.Context) {
 			return
 		}
 
+		// Settle idle suspends whose stop landed but whose record did not,
+		// before selecting new candidates (same gates as the sweep).
+		s.recoverIdleSuspendClaims(ctx)
+
 		budget := s.idleAutoSuspendAvailableSlots()
 		if budget <= 0 {
 			return
@@ -6105,7 +6109,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			ClaimTTL:         idleSuspendClaimLease(),
 		}
 	default:
-		if agent.IdleSuspendClaimActive || agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
+		if agent.IdleSuspendClaimLeaseActive || agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
 			slog.Info("Scheduler: skipping auto-suspend; agent no longer stalled in the same run",
 				"agent_id", agent.ID, "agent_name", agent.Name, "phase", agent.Phase, "activity", agent.Activity)
 			return false
@@ -6212,13 +6216,12 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			return false
 		}
 		claimedIdle = true
-		defer func() {
-			if claimedIdle {
-				cctx, ccancel := finalizationContext(ctx)
-				_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
-				ccancel()
-			}
-		}()
+		// The claim is cleared on a definite stop refusal (below), after the
+		// suspension is recorded, and by any user or hub lifecycle write. It is
+		// kept when the commit write fails, when the commit guard rejects and
+		// when the stop's outcome is unknown: the expired claim is what lets
+		// the idle sweep record suspended(idle) later (recoverIdleSuspendClaims,
+		// "Suspend commit and recovery protocol").
 	} else {
 		priorIntent, intentAt, err = s.swapSystemRunIntent(ctx, agent, store.RunIntentStopped)
 		if errors.Is(err, store.ErrIdleSuspendPrecondition) {
@@ -6246,7 +6249,22 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
 			// As for suspend: the agent may still be running, so the
 			// record no longer describes a stopped workspace.
+			if claimedIdle && stopOutcomeUnknown(err) {
+				// A timeout, cancellation or transport error: the broker
+				// may have stopped the container. Keep the stopped intent
+				// and the claim; the idle sweep records suspended(idle)
+				// once the row reports stopping or stopped.
+				slog.Warn("Scheduler: idle auto-suspend stop outcome unknown; leaving the claim for sweep recovery",
+					"agent_id", agent.ID, "agent_name", agent.Name)
+				return false
+			}
 			s.clearWorkspaceAtStop(ctx, agent)
+			if claimedIdle {
+				cctx, ccancel := finalizationContext(ctx)
+				_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
+				ccancel()
+				claimedIdle = false
+			}
 			// This stop was the system's, not the user's: if it
 			// replaced a running intent, put that back unless something
 			// newer replaced it. A prior stopped intent (for example a
@@ -6281,14 +6299,19 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	} else {
 		statusUpdate.IfNoActiveIdleClaim = true
 	}
-	// ClaimIdleSuspend is the single commit point for idle auto-suspend: once
+	// ClaimIdleSuspend commits the idle suspend's intent: once
 	// DispatchAgentStop succeeds, the stop is irreversible and run_intent is
 	// never reverted to running. Only a run change, delete/reincarnation,
 	// foreign start claim, or concurrent user lifecycle action (which clears
-	// idle_suspend_claim_until) skips recording phase=suspended.
-	// Post-stop commit failure, hub crash, and stop-dispatch timeout recovery
-	// are tracked in ptone/scion#8204.
-	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "auto-suspend", statusUpdate)
+	// idle_suspend_claim_until) skips recording phase=suspended. A failed
+	// record write is retried (recordIdleSuspendCommit) and, if it still
+	// fails, left to sweep recovery with the claim kept.
+	var recorded bool
+	if reason == state.SuspendReasonIdle {
+		recorded, err = s.recordIdleSuspendCommit(ctx, agent.ID, stopRunID, claimUntil, statusUpdate)
+	} else {
+		recorded, err = s.recordStopStatus(ctx, agent.ID, stopRunID, "auto-suspend", statusUpdate)
+	}
 	// The op covers the dispatch and the status write only: it ends here,
 	// before the claim and quota releases and the publish below.
 	endLifecycleOp()
@@ -6309,6 +6332,24 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		return false
 	}
 
+	s.completeAutoSuspendRecord(ctx, agent, stopRunID, reason)
+	releaseClaim()
+	if claimedIdle {
+		cctx, ccancel := finalizationContext(ctx)
+		_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
+		ccancel()
+		claimedIdle = false
+	}
+	s.events.PublishAgentStatus(ctx, agent)
+	return true
+}
+
+// completeAutoSuspendRecord runs the steps that follow a recorded
+// auto-suspend (the worker's commit or the sweep's recovery): credential and
+// grant revocation, aligning the in-memory agent with the stored row, and the
+// broker and project quota release. The caller then releases the superseded
+// start claim and publishes the status.
+func (s *Server) completeAutoSuspendRecord(ctx context.Context, agent *store.Agent, stopRunID string, reason state.SuspendReason) {
 	// As for suspendAgent: every credential of the agent is revoked with the
 	// suspension, before the claim is released (as for the grants below).
 	// Unlike the grant revocation, which spares a newer run's grants
@@ -6334,15 +6375,6 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
 	s.releaseProjectQuota(ctx, agent)
-	releaseClaim()
-	if claimedIdle {
-		cctx, ccancel := finalizationContext(ctx)
-		_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
-		ccancel()
-		claimedIdle = false
-	}
-	s.events.PublishAgentStatus(ctx, agent)
-	return true
 }
 
 // scheduledEventRetention is how long non-pending scheduled events are kept

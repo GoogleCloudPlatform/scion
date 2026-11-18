@@ -682,7 +682,7 @@ func (s *Server) recordHeldRunIntent(ctx context.Context, agentID string) {
 // agent_holds is active); if that claim rolls back or expires, retryHeldAgentStops
 // picks the agent up.
 func heldAgentNeedsStop(a *store.Agent) bool {
-	if a == nil || !a.DeletedAt.IsZero() || a.RuntimeBrokerID == "" || a.IdleSuspendClaimActive {
+	if a == nil || !a.DeletedAt.IsZero() || a.RuntimeBrokerID == "" || a.IdleSuspendClaimLeaseActive {
 		return false
 	}
 	switch state.Phase(a.Phase) {
