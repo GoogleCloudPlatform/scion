@@ -138,6 +138,7 @@ type ProjectDecisionLogEntryView struct {
 	AnsweredByName         string                     `json:"answeredByName"`
 	Provenance             string                     `json:"provenance"`
 	Outcome                string                     `json:"outcome"`
+	DismissReason          string                     `json:"dismissReason,omitempty"`
 	Surface                string                     `json:"surface"`
 	InterpretedByAgentID   string                     `json:"interpretedByAgentId,omitempty"`
 	InterpretedByAgentName string                     `json:"interpretedByAgentName,omitempty"`
@@ -378,12 +379,13 @@ func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request) (project
 		case store.ProjectDecisionProvenanceDirect,
 			store.ProjectDecisionProvenanceInterpreted,
 			store.ProjectDecisionProvenanceConfirmed,
-			store.ProjectDecisionProvenanceOverridden:
+			store.ProjectDecisionProvenanceOverridden,
+			store.ProjectDecisionProvenanceDismissed:
 			out.madeFilter.Provenance = prov
 		case store.DecisionProvenanceAgentInterpreted:
 			out.madeFilter.Provenance = store.ProjectDecisionProvenanceInterpreted
 		default:
-			ValidationError(w, "provenance must be one of direct, interpreted, confirmed, overridden",
+			ValidationError(w, "provenance must be one of direct, interpreted, confirmed, overridden, dismissed",
 				map[string]interface{}{"field": "provenance"})
 			return projectDecisionsQuery{}, false
 		}
@@ -1146,7 +1148,7 @@ func (s *Server) classifyProjectOpenPrompts(
 		for _, d := range p.Decisions {
 			reason := store.DecisionActionableReason(d, viewerID)
 			switch reason {
-			case store.AnswerSetReasonReplaced, store.AnswerSetReasonDecided:
+			case store.AnswerSetReasonReplaced, store.AnswerSetReasonWithdrawn, store.AnswerSetReasonDismissed, store.AnswerSetReasonDecided:
 				// Already settled sibling row in a multi-question set prompt.
 				continue
 			case store.AnswerSetReasonNotRecordedAnswerer:
@@ -1450,6 +1452,7 @@ func (s *Server) buildProjectDecisionLogViews(
 			AnsweredByName:         answererDisplayName(a),
 			Provenance:             a.Provenance,
 			Outcome:                a.Outcome,
+			DismissReason:          a.DismissReason,
 			Surface:                a.Surface,
 			InterpretedByAgentID:   a.InterpretedByAgentID,
 			InterpretedByAgentName: interpretedByName,

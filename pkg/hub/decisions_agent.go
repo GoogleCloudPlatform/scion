@@ -213,10 +213,12 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 		state = store.DecisionListStateDecided
 	case string(store.DecisionListStateWithdrawn):
 		state = store.DecisionListStateWithdrawn
+	case string(store.DecisionListStateDismissed):
+		state = store.DecisionListStateDismissed
 	case string(store.DecisionListStateAll):
 		state = store.DecisionListStateAll
 	default:
-		ValidationError(w, fmt.Sprintf("invalid state %q: must be pending, decided, withdrawn, or all", s), nil)
+		ValidationError(w, fmt.Sprintf("invalid state %q: must be pending, decided, withdrawn, dismissed, or all", s), nil)
 		return
 	}
 
@@ -821,11 +823,13 @@ func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.
 
 	status := http.StatusBadRequest
 	code := ErrCodeInvalidChoice
-	hasAnswered, hasReplaced, hasWithdrawn, hasNotFound := false, false, false, false
+	hasAnswered, hasDismissed, hasReplaced, hasWithdrawn, hasNotFound := false, false, false, false, false
 	for _, f := range iaErr.Failures {
 		switch f.Reason {
 		case store.InterpretedReasonAlreadyAnswered:
 			hasAnswered = true
+		case store.InterpretedReasonDismissed:
+			hasDismissed = true
 		case store.InterpretedReasonReplaced:
 			hasReplaced = true
 		case store.InterpretedReasonWithdrawn:
@@ -838,6 +842,9 @@ func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.
 	case hasAnswered:
 		status = http.StatusConflict
 		code = ErrCodeDecisionAnswered
+	case hasDismissed:
+		status = http.StatusConflict
+		code = ErrCodeDecisionDismissed
 	case hasReplaced:
 		status = http.StatusConflict
 		code = ErrCodeDecisionReplaced
@@ -865,7 +872,7 @@ func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.
 		if f.Decision != nil {
 			dv := s.decisionViewFor(ctx, f.Decision)
 			entry["decision"] = dv
-			if firstDecision == nil && (f.Reason == store.InterpretedReasonAlreadyAnswered || f.Reason == store.InterpretedReasonReplaced || f.Reason == store.InterpretedReasonWithdrawn) {
+			if firstDecision == nil && (f.Reason == store.InterpretedReasonAlreadyAnswered || f.Reason == store.InterpretedReasonDismissed || f.Reason == store.InterpretedReasonReplaced || f.Reason == store.InterpretedReasonWithdrawn) {
 				dvCopy := dv
 				firstDecision = &dvCopy
 			}
@@ -921,6 +928,15 @@ func formatInterpretedFailureMessage(f store.InterpretedKeyFailure) string {
 			}
 		}
 		return fmt.Sprintf("%s: already answered", f.Key)
+	case store.InterpretedReasonDismissed:
+		if f.Decision != nil {
+			if dsm := f.Decision.Dismissal(); dsm != nil {
+				if who := answererDisplayName(dsm); who != "" {
+					return fmt.Sprintf("%s: dismissed by %s", f.Key, who)
+				}
+			}
+		}
+		return fmt.Sprintf("%s: dismissed", f.Key)
 	case store.InterpretedReasonReplaced:
 		return fmt.Sprintf("%s: replaced by a newer version", f.Key)
 	case store.InterpretedReasonWithdrawn:
@@ -1093,6 +1109,15 @@ func formatWithdrawFailureMessage(f store.WithdrawKeyFailure) string {
 			}
 		}
 		return fmt.Sprintf("%s: already answered", f.Key)
+	case store.WithdrawReasonDismissed:
+		if f.Decision != nil {
+			if dsm := f.Decision.Dismissal(); dsm != nil {
+				if who := answererDisplayName(dsm); who != "" {
+					return fmt.Sprintf("%s: dismissed by %s", f.Key, who)
+				}
+			}
+		}
+		return fmt.Sprintf("%s: dismissed", f.Key)
 	case store.WithdrawReasonNotFound:
 		return fmt.Sprintf("%s: decision not found", f.Key)
 	default:

@@ -444,3 +444,209 @@ func TestDecisionPromptDismiss_MetadataStripsReservedKeys(t *testing.T) {
 	assert.Empty(t, cleaned[messages.MetadataSenderVisitor], "reserved sender_visitor stripped")
 	assert.Equal(t, "kept", cleaned["custom_unreserved"])
 }
+
+func TestDecisionPromptDismiss_SubsetsIdempotencyInterpretedMadeAndAgentEndpoints(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+
+	setMsg, setRes := f.topicPrompt(t, `[
+		{"id":"H-SUB-1","question":"Ship Q1?","choices":["yes","no"]},
+		{"id":"H-SUB-2","question":"Ship Q2?","choices":["yes","no"]},
+		{"id":"H-SUB-3","question":"Ship Q3?","choices":["yes","no"]}
+	]`, false)
+	r0 := setRes.Decisions[0].RowID
+	r1 := setRes.Decisions[1].RowID
+	r2 := setRes.Decisions[2].RowID
+	dismissPath := "/api/v1/decision-prompts/" + setMsg.ID + "/dismiss"
+
+	d0, err := f.store.GetDecision(ctx, r0)
+	require.NoError(t, err)
+	t5m := d0.CreatedAt.Add(store.DecisionDismissMinAge)
+	f.srv.decisionClock = func() time.Time { return t5m }
+
+	// 1. Validation 400s: idempotencyKey > 128 bytes, >10 decisionIds, unknown id, duplicate id.
+	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, dismissPath, map[string]interface{}{
+		"idempotencyKey": strings.Repeat("x", store.MaxDecisionIdempotencyKeyLen+1),
+	}).Code)
+	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, dismissPath, map[string]interface{}{
+		"decisionIds": []string{"id0", "id1", "id2", "id3", "id4", "id5", "id6", "id7", "id8", "id9", "id10"},
+	}).Code)
+	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, dismissPath, map[string]interface{}{
+		"decisionIds": []string{api.NewUUID()},
+	}).Code)
+	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, dismissPath, map[string]interface{}{
+		"decisionIds": []string{r0, r0},
+	}).Code)
+
+	// 2. Agent records interpreted answer naming Alice on H-SUB-1.
+	aliceReply := f.storeUserReply(t, f.alice, f.topicID, setMsg.ConversationID, "web", "yes to Q1")
+	interpRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{
+		"source_message_id": aliceReply.ID,
+		"answers": []map[string]string{
+			{"key": "H-SUB-1", "choice_id": "1"},
+		},
+	})
+	require.Equal(t, http.StatusOK, interpRR.Code, interpRR.Body.String())
+
+	// Bob tries to dismiss [r0, r1] -> 409 dismiss_changed (r0 is not_recorded_answerer), nothing stored!
+	beforeDispatch := len(f.dispatcher.getMessages())
+	bobDismissRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, dismissPath, map[string]interface{}{
+		"decisionIds": []string{r0, r1},
+		"reason":      "Bob tried",
+	})
+	require.Equal(t, http.StatusConflict, bobDismissRR.Code, bobDismissRR.Body.String())
+	chgCode, chgDetails := errorCodeAndDetails(t, bobDismissRR)
+	assert.Equal(t, ErrCodeDismissChanged, chgCode)
+	reasonsMap, ok := chgDetails["reasons"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, store.AnswerSetReasonNotRecordedAnswerer, reasonsMap[r0])
+	assert.Len(t, f.dispatcher.getMessages(), beforeDispatch)
+
+	// 3. Alice dismisses subset [r0, r1] with idempotencyKey and reason -> 200, agent line includes "(your reading: yes)".
+	aliceOut := decodeDismissResponse(t, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, dismissPath, map[string]interface{}{
+		"decisionIds":    []string{r0, r1},
+		"reason":         "  Misread + stale — quartz-token  ",
+		"surface":        store.DecisionSurfaceDecisionsPage,
+		"idempotencyKey": "hub-idem-key-1",
+	}))
+	assert.True(t, aliceOut.Delivered)
+	require.Len(t, aliceOut.Dismissed, 2)
+	assert.Empty(t, aliceOut.AlreadyDismissed)
+
+	sent := f.dispatcher.getMessages()[beforeDispatch:]
+	require.Len(t, sent, 1)
+	assert.Equal(t,
+		userDisplay(authUser(f.alice))+` dismissed H-SUB-1 ("Ship Q1?") (your reading: yes), H-SUB-2 ("Ship Q2?"). Reason: Misread + stale — quartz-token`,
+		sent[0].structured.Msg,
+	)
+
+	// 4. Idempotent replay returns identical 200 without re-delivering; altered reason or ids -> 422 idempotency_mismatch.
+	replayOut := decodeDismissResponse(t, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, dismissPath, map[string]interface{}{
+		"decisionIds":    []string{r0, r1},
+		"reason":         "Misread + stale — quartz-token",
+		"idempotencyKey": "hub-idem-key-1",
+	}))
+	assert.Equal(t, aliceOut.ResponseMessageID, replayOut.ResponseMessageID)
+	assert.True(t, replayOut.Delivered)
+	require.Len(t, replayOut.Dismissed, 2)
+	assert.Len(t, f.dispatcher.getMessages()[beforeDispatch:], 1, "idempotent replay must not re-deliver")
+
+	mismatchRR := doRequestAsUser(t, f.srv, f.alice, http.MethodPost, dismissPath, map[string]interface{}{
+		"decisionIds":    []string{r0},
+		"reason":         "Misread + stale — quartz-token",
+		"idempotencyKey": "hub-idem-key-1",
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, mismatchRR.Code, mismatchRR.Body.String())
+	assert.Equal(t, ErrCodeIdempotencyMismatch, errorCode(t, mismatchRR))
+
+	// 5. H-SUB-3 remains open in Waiting on you (count 1) and can be submitted as the remaining actionable set!
+	projPending := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.alice, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions?tab=pending", nil))
+	assert.Equal(t, 1, projPending.Counts.WaitingOnYou)
+
+	remSetRR := doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/decision-prompts/"+setMsg.ID+"/answers", map[string]interface{}{
+		"answers": []map[string]interface{}{
+			{"decision_row_id": r2, "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusOK, remSetRR.Code, remSetRR.Body.String())
+
+	// 6. Agent interpreted answer on dismissed H-SUB-1 -> 409 dismissed.
+	interpDismissedRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{
+		"source_message_id": aliceReply.ID,
+		"answers": []map[string]string{
+			{"key": "H-SUB-1", "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusConflict, interpDismissedRR.Code, interpDismissedRR.Body.String())
+	assert.Equal(t, ErrCodeDecisionDismissed, errorCode(t, interpDismissedRR))
+	assert.Contains(t, interpDismissedRR.Body.String(), "H-SUB-1: dismissed by "+userDisplay(authUser(f.alice)))
+
+	// 7. Withdraw on dismissed H-SUB-2 fails with per-key "dismissed"; withdraw wholeSet skips dismissed siblings!
+	wdFailRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", map[string]interface{}{
+		"keys": []string{"H-SUB-2"},
+	})
+	require.Equal(t, http.StatusConflict, wdFailRR.Code, wdFailRR.Body.String())
+	assert.Equal(t, ErrCodeWithdrawFailed, errorCode(t, wdFailRR))
+	assert.Contains(t, wdFailRR.Body.String(), "H-SUB-2: dismissed by "+userDisplay(authUser(f.alice)))
+
+	wdMsg, wdRes := f.topicPrompt(t, `[
+		{"id":"H-WD-1","question":"Dismissed sibling?","choices":["yes","no"]},
+		{"id":"H-WD-2","question":"Pending sibling?","choices":["yes","no"]}
+	]`, false)
+	dWd, err := f.store.GetDecision(ctx, wdRes.Decisions[0].RowID)
+	require.NoError(t, err)
+	f.srv.decisionClock = func() time.Time { return dWd.CreatedAt.Add(store.DecisionDismissMinAge) }
+	decodeDismissResponse(t, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/decision-prompts/"+wdMsg.ID+"/dismiss", map[string]interface{}{
+		"decisionIds": []string{wdRes.Decisions[0].RowID},
+	}))
+
+	wdSetRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", map[string]interface{}{
+		"keys":     []string{"H-WD-2"},
+		"wholeSet": true,
+		"reason":   "Retire open rest",
+	})
+	require.Equal(t, http.StatusOK, wdSetRR.Code, wdSetRR.Body.String())
+	var wdSetOut WithdrawDecisionsResponse
+	require.NoError(t, json.Unmarshal(wdSetRR.Body.Bytes(), &wdSetOut))
+	require.Len(t, wdSetOut.Withdrawn, 1)
+	assert.Equal(t, "H-WD-2", wdSetOut.Withdrawn[0].Key)
+
+	// 8. Reuse of dismissed key without --update gives hint "H-SUB-2 already exists (v1, dismissed by <Alice>)";
+	// --update over dismissed key creates v2!
+	reuseRR := f.sendAsAgent(t, OutboundMessageRequest{
+		Recipient: "user:" + f.bob.Email,
+		Msg:       "Re-asking without update",
+		Decisions: decisionInputs(t, `[{"id":"H-SUB-2","question":"Again?","choices":["yes","no"]}]`),
+	})
+	require.Equal(t, http.StatusConflict, reuseRR.Code, reuseRR.Body.String())
+	assert.Equal(t, ErrCodeDecisionKeyExists, errorCode(t, reuseRR))
+	assert.Contains(t, reuseRR.Body.String(), "H-SUB-2 already exists (v1, dismissed by "+userDisplay(authUser(f.alice))+")")
+
+	// 9. Project and profile Made endpoints: provenance=dismissed, dismissReason field, and q over dismiss_reason!
+	projMadeDsm := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.alice, http.MethodGet,
+		"/api/v1/projects/"+f.project.ID+"/decisions?tab=made&provenance=dismissed", nil))
+	require.Len(t, projMadeDsm.Entries, 3) // H-WD-1, H-SUB-2, H-SUB-1
+	for _, e := range projMadeDsm.Entries {
+		assert.Equal(t, store.DecisionOutcomeDismiss, e.Outcome)
+	}
+
+	projMadeSearch := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.alice, http.MethodGet,
+		"/api/v1/projects/"+f.project.ID+"/decisions?tab=made&q=quartz-token", nil))
+	require.Len(t, projMadeSearch.Entries, 2)
+	assert.Equal(t, "Misread + stale — quartz-token", projMadeSearch.Entries[0].DismissReason)
+
+	// Unfiltered Made keeps BOTH the interpreted answer and the dismissal on H-SUB-1!
+	projMadeAll := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.alice, http.MethodGet,
+		"/api/v1/projects/"+f.project.ID+"/decisions?tab=made&q=H-SUB-1", nil))
+	require.Len(t, projMadeAll.Entries, 2)
+
+	profMadeRR := doRequestAsUser(t, f.srv, f.alice, http.MethodGet,
+		"/api/v1/users/me/decisions?tab=made&provenance=dismissed&q=quartz-token", nil)
+	require.Equal(t, http.StatusOK, profMadeRR.Code, profMadeRR.Body.String())
+	assert.Contains(t, profMadeRR.Body.String(), "quartz-token")
+
+	// 10. Agent list state=dismissed and show H-SUB-1.
+	listRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=dismissed", nil)
+	require.Equal(t, http.StatusOK, listRR.Code, listRR.Body.String())
+	var agentList AgentDecisionListResponse
+	require.NoError(t, json.Unmarshal(listRR.Body.Bytes(), &agentList))
+	require.Len(t, agentList.Items, 3)
+	for _, it := range agentList.Items {
+		assert.Equal(t, store.DecisionStatusDismissed, it.Status)
+		assert.Nil(t, it.Answer)
+		require.NotNil(t, it.Dismissed)
+	}
+
+	showRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/H-SUB-1", nil)
+	require.Equal(t, http.StatusOK, showRR.Code, showRR.Body.String())
+	var agentShow AgentDecisionShowResponse
+	require.NoError(t, json.Unmarshal(showRR.Body.Bytes(), &agentShow))
+	require.Len(t, agentShow.Versions, 1)
+	assert.Equal(t, store.DecisionStatusDismissed, agentShow.Versions[0].Status)
+	require.NotNil(t, agentShow.Versions[0].Dismissed)
+	assert.Equal(t, "Misread + stale — quartz-token", agentShow.Versions[0].Dismissed.Reason)
+	require.Len(t, agentShow.Versions[0].Answers, 2)
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, agentShow.Versions[0].Answers[0].Provenance)
+	assert.Equal(t, store.DecisionOutcomeDismiss, agentShow.Versions[0].Answers[1].Outcome)
+	assert.Equal(t, "Misread + stale — quartz-token", agentShow.Versions[0].Answers[1].DismissReason)
+}

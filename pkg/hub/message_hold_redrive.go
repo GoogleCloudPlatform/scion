@@ -1237,7 +1237,15 @@ func (s *Server) enrichHeldDecisionResponse(
 		return cmp.Compare(a.Key, b.Key)
 	})
 	if ordered[0].Outcome == store.DecisionOutcomeDismiss {
-		sm.Msg = decisionDismissAgentLine(ordered)
+		var promptRows []*store.Decision
+		if promptID != "" {
+			byPrompt, perr := s.store.GetDecisionsByMessageIDs(ctx, []string{promptID})
+			if perr != nil {
+				return "", fmt.Errorf("decision dismiss prompt decisions lookup: %w", perr)
+			}
+			promptRows = byPrompt[promptID]
+		}
+		sm.Msg = decisionDismissAgentLine(promptRows, ordered)
 		sm.Metadata = decisionDismissMetadata(sm.Metadata, batchID, ordered)
 		return "", nil
 	}

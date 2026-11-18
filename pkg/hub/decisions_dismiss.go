@@ -40,10 +40,12 @@ const (
 )
 
 // DismissDecisionPromptRequest is the body of
-// POST /api/v1/decision-prompts/{messageId}/dismiss (P1 whole-prompt slice).
+// POST /api/v1/decision-prompts/{messageId}/dismiss (design 8194, 4.3).
 type DismissDecisionPromptRequest struct {
-	Reason  string `json:"reason,omitempty"`
-	Surface string `json:"surface,omitempty"`
+	DecisionIDs    []string `json:"decisionIds,omitempty"`
+	Reason         string   `json:"reason,omitempty"`
+	Surface        string   `json:"surface,omitempty"`
+	IdempotencyKey string   `json:"idempotencyKey,omitempty"`
 }
 
 // DismissDecisionPromptResponse is the 200 response of
@@ -138,6 +140,16 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if len(req.IdempotencyKey) > store.MaxDecisionIdempotencyKeyLen {
+		ValidationError(w, fmt.Sprintf("idempotencyKey is at most %d bytes", store.MaxDecisionIdempotencyKeyLen),
+			map[string]interface{}{"field": "idempotencyKey"})
+		return
+	}
+	if len(req.DecisionIDs) > messages.MaxDecisionsPerMessage {
+		ValidationError(w, fmt.Sprintf("decisionIds accepts at most %d ids", messages.MaxDecisionsPerMessage),
+			map[string]interface{}{"field": "decisionIds"})
+		return
+	}
 	surface, ok := normalizeAnswerSurface(req.Surface)
 	if !ok {
 		ValidationError(w, fmt.Sprintf("surface %q is not supported; expected %q or %q", req.Surface, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage),
@@ -169,6 +181,33 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	byID := make(map[string]*store.Decision, len(ds))
+	for _, d := range ds {
+		byID[d.ID] = d
+	}
+	var cleanIDs []string
+	if len(req.DecisionIDs) > 0 {
+		cleanIDs = make([]string, 0, len(req.DecisionIDs))
+		seenIDs := make(map[string]bool, len(req.DecisionIDs))
+		for i, rawID := range req.DecisionIDs {
+			field := fmt.Sprintf("decisionIds[%d]", i)
+			rowID := strings.TrimSpace(rawID)
+			d, exists := byID[rowID]
+			if !exists {
+				ValidationError(w, fmt.Sprintf("decision row %q is not a decision of this prompt", rowID),
+					map[string]interface{}{"field": field})
+				return
+			}
+			if seenIDs[rowID] {
+				ValidationError(w, fmt.Sprintf("decision %s is listed twice", d.Key),
+					map[string]interface{}{"field": field})
+				return
+			}
+			seenIDs[rowID] = true
+			cleanIDs = append(cleanIDs, rowID)
+		}
+	}
+
 	asker, askerGone, ok := s.decisionAsker(w, ctx, ds[0].AskerAgentID)
 	if !ok {
 		return
@@ -184,12 +223,13 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	now := s.nowDecision()
+	now := s.nowDecision().Truncate(time.Microsecond)
 	responseMsg := decisionDismissResponseStoreMessage(user, ds[0], chatKey, asker, askerGone, now)
 	who := userDisplay(user)
 
 	res, err := s.store.DismissDecisions(ctx, &store.DismissDecisionsInput{
 		MessageID: msgID,
+		RowIDs:    cleanIDs,
 		User: store.DecisionAnswerer{
 			UserID: user.ID(),
 			Name:   user.DisplayName(),
@@ -197,16 +237,21 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		},
 		Reason:          trimmedReason,
 		Surface:         surface,
+		IdempotencyKey:  req.IdempotencyKey,
 		ResponseMessage: responseMsg,
 		FormatMessage: func(dismissed []*store.Decision) string {
 			return decisionDismissConversationLine(who, dismissed, trimmedReason)
 		},
-		Now: func() time.Time { return now },
+		Now: func() time.Time { return s.nowDecision() },
 	})
 	var tooRecent *store.DecisionTooRecentError
 	var changed *store.DismissChangedError
 	switch {
 	case err == nil:
+	case errors.Is(err, store.ErrIdempotencyMismatch):
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdempotencyMismatch,
+			"the idempotency key was used for another dismissal or answer set", nil)
+		return
 	case errors.As(err, &tooRecent):
 		writeError(w, http.StatusConflict, ErrCodeDecisionTooRecent,
 			"decisions must be at least 5 minutes old before they can be dismissed",
@@ -233,6 +278,34 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 
 	dismissedViews := s.decisionViewsFor(ctx, res.Dismissed)
 	alreadyViews := s.decisionViewsFor(ctx, res.AlreadyDismissed)
+
+	if res.Replayed {
+		respMsgID := ""
+		if len(res.Dismissed) > 0 {
+			if dsm := res.Dismissed[0].Dismissal(); dsm != nil {
+				respMsgID = dsm.ResponseMessageID
+			}
+		} else if len(res.AlreadyDismissed) > 0 {
+			if dsm := res.AlreadyDismissed[0].Dismissal(); dsm != nil {
+				respMsgID = dsm.ResponseMessageID
+			}
+		}
+		replayedDelivered := false
+		if !askerGone && respMsgID != "" && len(res.Dismissed) > 0 {
+			if storedMsg, merr := s.store.GetMessage(ctx, respMsgID); merr == nil && storedMsg != nil {
+				replayedDelivered = storedMsg.DispatchState == store.MessageDispatchDispatched
+			} else {
+				replayedDelivered = true
+			}
+		}
+		writeJSON(w, http.StatusOK, DismissDecisionPromptResponse{
+			Dismissed:         dismissedViews,
+			AlreadyDismissed:  alreadyViews,
+			ResponseMessageID: respMsgID,
+			Delivered:         replayedDelivered,
+		})
+		return
+	}
 
 	if len(res.Dismissed) == 0 {
 		respMsgID := ""
@@ -261,7 +334,7 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 
 	delivered := false
 	if !askerGone {
-		delivered = s.deliverDecisionDismissResponse(ctx, asker, responseMsg, res.BatchID, answers)
+		delivered = s.deliverDecisionDismissResponse(ctx, asker, responseMsg, res.BatchID, res.Dismissed, answers)
 	}
 	for _, v := range dismissedViews {
 		s.publishDecisionUpdatedAt(ctx, ds[0].ProjectID, msgID, chatKey, v)
@@ -329,9 +402,22 @@ func decisionDismissConversationLine(who string, dismissed []*store.Decision, re
 // decisionDismissAgentLine formats the hub-authored line delivered to the live
 // asking agent (design 8194, 4.5):
 // `alice dismissed D234 ("Ship v0.9 today?"), 17 ("Which approach?"). Reason: ...`
-func decisionDismissAgentLine(answers []*store.DecisionAnswer) string {
+// For a dismissed row that had an agent-interpreted answer awaiting
+// confirmation (D6), appends ` (your reading: <label>)`.
+func decisionDismissAgentLine(dismissed []*store.Decision, answers []*store.DecisionAnswer) string {
 	if len(answers) == 0 {
 		return ""
+	}
+	interpByRow := make(map[string]string, len(dismissed))
+	for _, d := range dismissed {
+		if d == nil {
+			continue
+		}
+		for _, ans := range d.Answers {
+			if ans != nil && ans.Provenance == store.DecisionProvenanceAgentInterpreted {
+				interpByRow[d.ID] = ans.ChoiceLabel
+			}
+		}
 	}
 	who := answererDisplayName(answers[0])
 	if who == "" {
@@ -339,7 +425,11 @@ func decisionDismissAgentLine(answers []*store.DecisionAnswer) string {
 	}
 	parts := make([]string, len(answers))
 	for i, a := range answers {
-		parts[i] = fmt.Sprintf("%s (%q)", a.Key, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax))
+		part := fmt.Sprintf("%s (%q)", a.Key, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax))
+		if reading := plainLine(interpByRow[a.DecisionRowID]); reading != "" {
+			part += fmt.Sprintf(" (your reading: %s)", reading)
+		}
+		parts[i] = part
 	}
 	line := fmt.Sprintf("%s dismissed %s.", who, strings.Join(parts, ", "))
 	if r := plainLine(answers[0].DismissReason); r != "" {
@@ -388,7 +478,7 @@ func populateDecisionDismissMetadata(meta map[string]string, batchID string, ans
 
 // deliverDecisionDismissResponse dispatches a dismissal's decision-response to
 // the live asking agent and returns true when accepted by holdOrDispatch.
-func (s *Server) deliverDecisionDismissResponse(ctx context.Context, asker *store.Agent, m *store.Message, batchID string, answers []*store.DecisionAnswer) bool {
+func (s *Server) deliverDecisionDismissResponse(ctx context.Context, asker *store.Agent, m *store.Message, batchID string, dismissed []*store.Decision, answers []*store.DecisionAnswer) bool {
 	if asker == nil || m.DispatchState != store.MessageDispatchDispatched || len(answers) == 0 {
 		return false
 	}
@@ -396,7 +486,7 @@ func (s *Server) deliverDecisionDismissResponse(ctx context.Context, asker *stor
 	if dispatcher == nil {
 		return false
 	}
-	text := decisionDismissAgentLine(answers)
+	text := decisionDismissAgentLine(dismissed, answers)
 	sm := &messages.StructuredMessage{
 		Version:        messages.Version,
 		Timestamp:      m.CreatedAt.UTC().Format(time.RFC3339),

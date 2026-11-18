@@ -322,12 +322,13 @@ func parseProfileDecisionsQuery(w http.ResponseWriter, r *http.Request, viewerID
 		case store.ProjectDecisionProvenanceDirect,
 			store.ProjectDecisionProvenanceInterpreted,
 			store.ProjectDecisionProvenanceConfirmed,
-			store.ProjectDecisionProvenanceOverridden:
+			store.ProjectDecisionProvenanceOverridden,
+			store.ProjectDecisionProvenanceDismissed:
 			out.madeFilter.Provenance = prov
 		case store.DecisionProvenanceAgentInterpreted:
 			out.madeFilter.Provenance = store.ProjectDecisionProvenanceInterpreted
 		default:
-			ValidationError(w, "provenance must be one of direct, interpreted, confirmed, overridden",
+			ValidationError(w, "provenance must be one of direct, interpreted, confirmed, overridden, dismissed",
 				map[string]interface{}{"field": "provenance"})
 			return projectDecisionsQuery{}, false
 		}
