@@ -15,22 +15,14 @@
 // Touch key bar on the production pane with real xterm, in phone emulation.
 import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
 import type {} from './fixture.js';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agentId = '11111111-1111-4111-8111-111111111111';
 
 async function setup(page: Page): Promise<{ input: string[]; write(text: string): void }> {
   const input: string[] = [];
   let peer!: WebSocketRoute;
-  await page.addInitScript(() => {
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
-  });
+  await installEventSourceStub(page);
   await page.route('**/api/v1/**', (route) =>
     route.fulfill({
       json: route.request().url().endsWith(`/agents/${agentId}`)
