@@ -68,7 +68,7 @@ scion start <agent-name> -t developer --harness antigravity --model large \
 
 ## Never commit
 
-Check `.gitignore` before staging. Binaries or media that aren't shipped UI (screenshots go in PR comments); agent state files (`.coordinator-state.md`, etc.); one-off scripts, test artifacts, generated data; PR review notes (`pr-*-review*.md`); force-added `.scratch/`, `.tasks/` or `downloads/` content. A new kind of ephemeral file gets a `.gitignore` entry in the same PR.
+Check `.gitignore` before staging. Binaries or media that aren't shipped UI (screenshots go in PR comments as uploaded images, never as local or shared-volume paths, which readers can't open); agent state files (`.coordinator-state.md`, etc.); one-off scripts, test artifacts, generated data; PR review notes (`pr-*-review*.md`); force-added `.scratch/`, `.tasks/` or `downloads/` content. A new kind of ephemeral file gets a `.gitignore` entry in the same PR.
 
 ## Durable notes
 
