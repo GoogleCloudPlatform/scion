@@ -1,0 +1,62 @@
+{
+  "match": {
+    "types": [
+      "github.pull_request.opened",
+      "github.pull_request.ready_for_review",
+      "github.pull_request.reopened"
+    ],
+    "rules": [
+      {
+        "dialect": "cel",
+        "expr": "event.attributes.draft == 'false' && event.attributes.is_fork == 'false' && event.attributes.author_association in ['OWNER', 'MEMBER', 'COLLABORATOR'] && event.attributes.sender_type != 'Bot'"
+      }
+    ]
+  },
+  "subject": {
+    "mode": "new"
+  },
+  "form": {
+    "preset": "github.pr_opened",
+    "version": 1,
+    "fields": {
+      "allow_bots": false,
+      "allowed_associations": [
+        "OWNER",
+        "MEMBER",
+        "COLLABORATOR"
+      ],
+      "base_branches": [],
+      "include_drafts": false,
+      "include_forks": false
+    }
+  },
+  "suggested_action": {
+    "type": "dispatch_agent",
+    "agentName": "pr-${event.attributes.number}-opened",
+    "template": "default",
+    "task": "Review pull request ${event.attributes.repo}#${event.attributes.number} (${event.attributes.title}) opened by @${event.attributes.sender} targeting `${event.attributes.base_ref}` at commit `${event.attributes.head_sha}`.\nPull request URL: ${event.attributes.html_url}\nUse `gh` (authenticated as the GitHub App installation) to post results on the PR/issue, mention @${event.attributes.sender} when answering, and never include an `@<app> /<command>` slash-command mention in comments.",
+    "branch": "${event.attributes.head_ref}",
+    "labels": {
+      "issue": "${event.attributes.repo}#${event.attributes.number}"
+    },
+    "ephemeral": false,
+    "githubToken": "installation",
+    "reuseMessage": "New ${event.type} on ${event.subject}: ${event.attributes.action} by @${event.attributes.sender} at ${event.attributes.head_sha}.",
+    "ackComment": {
+      "body": "Started **${result.agent_name}** for ${event.subject} — [open agent](${result.agent_url}). Triggered by @${event.attributes.sender}."
+    },
+    "untrustedVars": [
+      "event.attributes.repo",
+      "event.attributes.number",
+      "event.attributes.title",
+      "event.attributes.sender",
+      "event.attributes.base_ref",
+      "event.attributes.head_sha",
+      "event.attributes.html_url",
+      "event.attributes.head_ref",
+      "event.type",
+      "event.subject",
+      "event.attributes.action"
+    ]
+  }
+}

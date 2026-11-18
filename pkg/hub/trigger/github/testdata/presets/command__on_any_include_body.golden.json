@@ -1,0 +1,66 @@
+{
+  "match": {
+    "types": [
+      "github.issue_comment.created",
+      "github.pull_request_review_comment.created",
+      "github.pull_request_review.submitted",
+      "github.issues.opened",
+      "github.pull_request.opened"
+    ],
+    "rules": [
+      {
+        "dialect": "cel",
+        "expr": "event.attributes.command == 'implement' && (event.attributes.is_pull_request == 'false' || event.attributes.is_fork == 'false') && event.attributes.author_association in ['OWNER', 'MEMBER', 'COLLABORATOR'] && event.attributes.sender_type != 'Bot'"
+      }
+    ]
+  },
+  "subject": {
+    "mode": "new"
+  },
+  "form": {
+    "preset": "github.command",
+    "version": 1,
+    "fields": {
+      "allow_bots": false,
+      "allowed_associations": [
+        "OWNER",
+        "MEMBER",
+        "COLLABORATOR"
+      ],
+      "command": "implement",
+      "include_body": true,
+      "include_forks": false,
+      "include_review_comments": true,
+      "on": "any"
+    }
+  },
+  "suggested_action": {
+    "type": "dispatch_agent",
+    "agentName": "gh-${event.attributes.number}-implement",
+    "template": "default",
+    "task": "Handle `/implement` on ${event.attributes.repo}#${event.attributes.number} (${event.attributes.title}) requested by @${event.attributes.sender}.\nCommand arguments: ${event.attributes.command_args?}\nSource URL: ${event.attributes.html_url}\nEvent body:\n${event.attributes.body?}\nUse `gh` (authenticated as the GitHub App installation) to post results on the PR/issue, mention @${event.attributes.sender} when answering, and never include an `@<app> /<command>` slash-command mention in comments.",
+    "labels": {
+      "github_command": "${event.attributes.command}",
+      "issue": "${event.attributes.repo}#${event.attributes.number}"
+    },
+    "ephemeral": false,
+    "githubToken": "installation",
+    "reuseMessage": "New ${event.type} on ${event.subject}: ${event.attributes.action} by @${event.attributes.sender}. Command: /${event.attributes.command?} ${event.attributes.command_args?}",
+    "ackComment": {
+      "body": "Started **${result.agent_name}** for `/${event.attributes.command}` — [open agent](${result.agent_url}). Requested by @${event.attributes.sender}."
+    },
+    "untrustedVars": [
+      "event.attributes.repo",
+      "event.attributes.number",
+      "event.attributes.title",
+      "event.attributes.sender",
+      "event.attributes.command_args",
+      "event.attributes.html_url",
+      "event.attributes.body",
+      "event.attributes.command",
+      "event.type",
+      "event.subject",
+      "event.attributes.action"
+    ]
+  }
+}

@@ -13,7 +13,8 @@
 // limitations under the License.
 
 // Package github normalises GitHub App webhook deliveries into provider-neutral
-// trigger events (Triggers Stage 3, ptone/scion#836, ptone/scion#8088).
+// trigger events and compiles server-side GitHub trigger rule presets (Triggers
+// Stage 3, ptone/scion#836, ptone/scion#8088, ptone/scion#8093).
 //
 // It is a strict leaf package using only the Go standard library so it can be
 // unit-tested and reused without importing package hub.
