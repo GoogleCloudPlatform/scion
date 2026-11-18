@@ -121,7 +121,7 @@ writes YAML by default. The JSON schema lives at
 2. **Source of Truth**:
    - `GLOSSARY.md` (root) for terminology and the mode spine.
    - `.design/` for architectural intent.
-   - `pkg/` for implementation details; verify CLI flags in `cmd/` and HTTP status / wire error codes in `pkg/hub/` handlers. User-facing feature release notes go at the top of `src/content/docs/release-notes.md` (not generated `changelog/` pages).
+   - `pkg/` for implementation details; verify CLI flags in `cmd/` and HTTP status / wire error codes in `pkg/hub/` handlers. User-facing feature release notes go at the top of `src/content/docs/release-notes.md` (not generated `changelog/` pages); when curating per-tag release notes under `src/content/docs/release-notes/<slug>.md`, compare PR numbers against the git tag range (`scripts/release/select-previous-release-tag.sh`) rather than date-grouped `changelog/*.md` files alone, and verify experiment gates (`pkg/experiments/registry.go`) and required configuration fields at the tag.
 3. **Mode-Specific Placement**: Put a page in the mode it belongs to. When a topic
    spans modes, place it in the most logical one and cross-link — do not duplicate.
 4. **Tone**: *User docs* are practical and task-oriented; *admin docs* are technical
