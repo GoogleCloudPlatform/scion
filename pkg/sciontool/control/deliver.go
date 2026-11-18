@@ -334,6 +334,12 @@ func (t *trackingRunner) Run(ctx context.Context, argv []string, stdin io.Reader
 		verb = argv[1]
 	}
 	shows := verb == "send-keys" || verb == "paste-buffer"
+	// The step that leaves copy-mode takes an operator out of scrollback,
+	// so it does not run for a paste or keys the hard stop will refuse.
+	// Deliver ignores this step's error.
+	if verb == "copy-mode" && !t.now().Before(t.stop) {
+		return "", errExpired
+	}
 	// No paste starts after the hard stop, even when interrupt keys were
 	// already sent (review S-A-01); no first visible step starts after it
 	// either. After an interrupt the flush is partial, never 408.
