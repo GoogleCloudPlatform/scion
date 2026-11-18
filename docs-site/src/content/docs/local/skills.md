@@ -49,7 +49,7 @@ Frontmatter fields:
 | :--- | :--- | :--- |
 | `name` | Yes | Skill name in **kebab-case** (lowercase alphanumeric with hyphens, 1–64 chars, no leading/trailing hyphen). |
 | `description` | Yes | A short, human-readable summary shown in listings. |
-| `experiment` | No | Built-in platform skills only: gates the whole skill (`SKILL.md`) or a supporting `.md` file on a registered [experiment](/scion/reference/experiments/) (sections inside Markdown files can also be wrapped in `<!-- scion:experiment <id> -->` … `<!-- scion:end-experiment -->`; see [Platform and Workspace Skills](/scion/reference/agent-config/#platform-and-workspace-skills)). |
+| `experiment` | No | Built-in platform skills only: gates the whole skill (`SKILL.md`) or a supporting `.md` file on a registered [experiment](/scion/reference/experiments/) (sections inside Markdown files can also be wrapped in `<!-- scion:experiment <id> -->` … `<!-- scion:end-experiment -->`; see [Platform skills](#platform-skills) and [Platform and Workspace Skills](/scion/reference/agent-config/#platform-and-workspace-skills)). |
 
 ### Scaffolding a new skill
 
@@ -410,7 +410,22 @@ Before performing discovery or logging requests (`POST /api/v1/skills/discover-d
 
 ## Platform skills
 
-Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent (including `scion-web-serving` and its `references/web-apps.md`, which the agent instructions preamble points to for serving web apps and files over port forwarding). They provide baseline capabilities without any Hub or template setup.
+Beyond skills you publish, **platform skills** are embedded in the Scion binary (`resources/platform_skills/`, displayed in Hub settings under `scion-platform://`) and injected automatically into the harness's skills directory inside the Agent home at provisioning time. They provide baseline capabilities without any Hub or template setup:
+
+| Skill | Gate | Purpose |
+| :--- | :--- | :--- |
+| `git-operations` | Always | Git safety rules, shallow-clone diagnostics and deepening, working-tree resets, and non-interactive git operations. |
+| `git-sandbox` | `inject_when: git_workspace` | Git workflow protocol for sandbox and worktree workspaces. |
+| `scion-agent-manage` | Always | Managing concurrent agents (`scion start`, `look`, `reincarnate`), lifecycle rules (`references/agent-lifecycle.md`), and recovery (`references/troubleshooting.md`). |
+| `scion-artifacts` | `experiment: hub.artifacts` | Publishing, versioning, fetching, listing, and reviewing [artifacts](/scion/hosted/user/artifacts/) with CriticMarkup (`scion artifact`), sending references with `scion message --artifact`, and agent-mode limits. |
+| `scion-cli-operations` | Always | Container sandbox operational constraints and Hub-only CLI/API access rules. |
+| `scion-conversation` | Always | Managing conversations, participants, and message retrieval (`scion conversation`). |
+| `scion-messaging` | Always *(with gated sections)* | Sending messages to users and agents (`scion message`), addressing, mentions, and history catch-up (see [Messaging & Notifications](/scion/hosted/user/messaging/)). Gates `references/decisions.md` and inline decision-prompt guidance on `web.decisions`, and its `--artifact` pointer on `hub.artifacts`. |
+| `scion-scheduler` | Always | One-shot and recurring [schedules](/scion/hosted/user/scheduling/) (`scion schedule`), time zones, scheduled container exec (`--type exec`), and the blocked-wait pairing rule. |
+| `scion-web-serving` | Always | Exposing HTTP services and web apps through the Hub's [port proxy](/scion/hosted/user/port-forwarding/) (`scion expose`, `unexpose`, `tunnel`, and `references/web-apps.md`, referenced by the mandatory agent instructions preamble). |
+| `team-creation` | Always | Scaffolding and extending multi-agent team templates under `.scion/templates/` (see [Templates & Roles](/scion/local/templates/#the-team-creation-skill)). |
+
+### Environment gating (`inject_when`)
 
 Platform skills honor an optional `inject_when` frontmatter condition in `SKILL.md`, which gates injection on the agent's environment:
 
@@ -418,9 +433,19 @@ Platform skills honor an optional `inject_when` frontmatter condition in `SKILL.
 | :--- | :--- |
 | *(unset)* | Always. |
 | `git_workspace` | The workspace is a git repository. |
-| `hub_enabled` | The agent is connected to a Hub. |
+| `hub_enabled` | The agent is provisioned by a Runtime Broker or has a Hub endpoint configured. |
 
-A skill supplied by a template always takes precedence over a platform skill of the same name.
+### Experiment gating (`experiment` and `scion:experiment`)
+
+Platform skills and their supporting `.md` files can gate guidance on a registered [experiment](/scion/reference/experiments/) so agents are only shown features that are enabled:
+
+- **Whole skill (`SKILL.md` frontmatter):** Setting `experiment: <id>` in `SKILL.md` omits the entire skill directory while `<id>` is off (for example, `scion-artifacts` is installed only when `hub.artifacts` is enabled).
+- **Supporting file (`*.md` frontmatter):** Setting `experiment: <id>` in another Markdown file inside the skill omits that file while `<id>` is off (for example, `scion-messaging/references/decisions.md` requires `web.decisions`).
+- **Inline Markdown block:** Wrapping lines between `<!-- scion:experiment <id> -->` and `<!-- scion:end-experiment -->` (each marker on its own line) keeps those lines only while `<id>` is on and strips the marker lines either way.
+
+When a Runtime Broker provisions an agent for a Hub, Scion evaluates these gates against the experiments the Hub dispatches (`HubAgentDefaults.Experiments`, never the broker host's own settings); outside Hub dispatch, it checks `local_experiments` in the effective settings. Every gate fails closed: an off, unknown, or retired experiment ID — or an unclosed or nested block — omits the gated skill or content.
+
+Ordinary restarts and resumes leave already-installed platform skill directories untouched; [`scion reincarnate`](/scion/local/agent-lifecycle/) reprovisions platform skills from the current binary and experiment state, including removing a platform-owned skill whose `SKILL.md` experiment is now off. A skill supplied by a template always takes precedence over a platform skill of the same name.
 
 ## See also
 

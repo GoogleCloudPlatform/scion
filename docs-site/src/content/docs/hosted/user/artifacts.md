@@ -298,7 +298,7 @@ Keep in mind:
 
 - The Hub keeps only references that you can read, and drops the others with a warning.
 - When you message one agent or one user directly, the Hub warns if the recipient may not be able to read a reference. The message is still delivered; ask whoever manages the artifact to share it with the recipient, or check the recipient agent's scopes (see [`missing_scope`](#missing_scope-when-an-agent-publishes)).
-- `scion message --artifact` cannot be used with `group[...]` recipients or with `--in`/`--at`. Broadcast messages, @-mention copies and messages that arrive through chat plugins lose their references. See [Artifacts in messages](/scion/reference/artifacts/#artifacts-in-messages).
+- `scion message --artifact` cannot be used with `group[...]` recipients. Broadcast messages, @-mention copies and messages that arrive through chat plugins lose their references. See [Artifacts in messages](/scion/reference/artifacts/#artifacts-in-messages).
 
 ## Expiry, moving and deleting
 
