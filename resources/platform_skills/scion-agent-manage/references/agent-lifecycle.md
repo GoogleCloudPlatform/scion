@@ -75,7 +75,12 @@ open PR review, or an idle lead between assignments — and its harness supports
 resume, ensure its state and handoff are durable and use `scion suspend <name>` (under the
 same creator/supervisor authority) to stop the container while keeping the harness session
 resumable. Suspension releases the active broker and project capacity slot without closing
-open human questions; human silence is not closure. `scion stop` ends the session (the next
+open human questions; human silence is not closure. An agent you suspend receives nothing
+until someone with lifecycle permission on it (normally you) resumes it: messages without
+`--wake` fail (`scion-messaging`), and its own schedules fire only if they set `--wake`
+(`scion-scheduler`). Before suspending, confirm the agent has read any notice you sent; a
+message sent moments earlier can still fail delivery. Keep an agent running while it waits
+on a delivery from a peer that cannot wake it. `scion stop` ends the session (the next
 `start` begins a fresh session) and is justified only for short, time-boxed terminal or
 incident inspection when resume is unsupported or unwanted; do not leave agents stopped
 indefinitely.
