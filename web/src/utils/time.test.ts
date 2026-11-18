@@ -25,7 +25,19 @@
  * `parseWallClock`/`toWallClockInput`) is tz-refactor task 11's.
  */
 
-import { closeSync, existsSync, openSync, readdirSync, readSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import {
@@ -180,6 +192,14 @@ describe('isValidTimeZone', () => {
 const ZONEINFO_DIR = '/usr/share/zoneinfo';
 
 /**
+ * Bulk zone-database checks walk hundreds of `/usr/share/zoneinfo` TZif files
+ * and instantiate an `Intl.DateTimeFormat` per zone name. Under heavy parallel
+ * Vitest worker contention in CI, wall-clock time can exceed Vitest's 5,000 ms
+ * default timeout even with zero assertion failures (ptone/scion#5706).
+ */
+const BULK_ZONE_SCAN_TIMEOUT_MS = 30_000;
+
+/**
  * "right" and "posix" are whole-tree duplicates of the same zone data
  * (right/ with leap seconds baked in, posix/ without) under a path prefix
  * that isn't itself part of any IANA name — not because the prefixed form
@@ -199,6 +219,7 @@ const ZONEINFO_DIR = '/usr/share/zoneinfo';
 const ZONEINFO_EXCLUDED_NAMES = new Set(['right', 'posix', 'localtime', 'posixrules', 'Factory']);
 
 const TZIF_MAGIC = Buffer.from('TZif');
+const tzifHeaderBuf = Buffer.alloc(4);
 
 /**
  * Reports whether `path` is a compiled zoneinfo entry: a file (or a symlink
@@ -218,9 +239,8 @@ function isTZifFile(path: string): boolean {
     return false;
   }
   try {
-    const buf = Buffer.alloc(4);
-    const bytesRead = readSync(fd, buf, 0, 4, 0);
-    return bytesRead === 4 && buf.equals(TZIF_MAGIC);
+    const bytesRead = readSync(fd, tzifHeaderBuf, 0, 4, 0);
+    return bytesRead === 4 && tzifHeaderBuf.equals(TZIF_MAGIC);
   } catch {
     return false;
   } finally {
@@ -234,7 +254,7 @@ function listSystemZoneNames(dir: string, prefix = ''): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (ZONEINFO_EXCLUDED_NAMES.has(entry.name)) continue;
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-    const full = `${dir}/${entry.name}`;
+    const full = join(dir, entry.name);
     if (entry.isDirectory()) {
       names.push(...listSystemZoneNames(full, rel));
     } else if (isTZifFile(full)) {
@@ -245,7 +265,49 @@ function listSystemZoneNames(dir: string, prefix = ''): string[] {
   return names;
 }
 
+let cachedSystemZoneNames: readonly string[] | undefined;
+
+/** Walks `ZONEINFO_DIR` once per worker and caches the resulting zone list. */
+function getSystemZoneNames(): readonly string[] {
+  if (cachedSystemZoneNames === undefined) {
+    cachedSystemZoneNames = Object.freeze(listSystemZoneNames(ZONEINFO_DIR));
+  }
+  return cachedSystemZoneNames;
+}
+
 describe('isValidTimeZone against the system zone database', () => {
+  it('filters TZif files, skips non-TZif/short files and excluded names', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'scion-zoneinfo-test-'));
+    const shortDir = mkdtempSync(join(tmpdir(), 'scion-zoneinfo-short-'));
+    try {
+      const tzifPayload = Buffer.from('TZif2\0\0\0');
+      writeFileSync(join(dir, 'CET'), tzifPayload);
+      mkdirSync(join(dir, 'Asia'));
+      writeFileSync(join(dir, 'Asia', 'Tokyo'), tzifPayload);
+      writeFileSync(join(dir, 'zone.tab'), '# metadata\n');
+      // Excluded non-portable entries and duplicate trees.
+      writeFileSync(join(dir, 'Factory'), tzifPayload);
+      writeFileSync(join(dir, 'localtime'), tzifPayload);
+      writeFileSync(join(dir, 'posixrules'), tzifPayload);
+      mkdirSync(join(dir, 'posix'));
+      writeFileSync(join(dir, 'posix', 'CET'), tzifPayload);
+      mkdirSync(join(dir, 'right'));
+      writeFileSync(join(dir, 'right', 'CET'), tzifPayload);
+
+      expect(listSystemZoneNames(dir).sort()).toEqual(['Asia/Tokyo', 'CET']);
+
+      // Run after a valid TZif scan so `tzifHeaderBuf` definitely holds 'TZif'
+      // regardless of `readdirSync` entry order, proving 0-byte and <4-byte
+      // reads never match stale bytes in the reused scratch buffer.
+      writeFileSync(join(shortDir, 'empty'), Buffer.alloc(0));
+      writeFileSync(join(shortDir, 'short'), Buffer.from('TZ'));
+      expect(listSystemZoneNames(shortDir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(shortDir, { recursive: true, force: true });
+    }
+  });
+
   // The regression class here is "a hand-picked list of exceptions is
   // always incomplete." A test that only checks a dozen hand-picked names
   // (the describe block above) can't catch a recurrence of that same
@@ -259,12 +321,25 @@ describe('isValidTimeZone against the system zone database', () => {
   // otherwise quietly lose this guard.
   it.skipIf(!existsSync(ZONEINFO_DIR))(
     'accepts every name in the system zone database (0 false rejects)',
-    () => {
-      const names = listSystemZoneNames(ZONEINFO_DIR);
+    ({ task }) => {
+      expect(task.timeout).toBe(BULK_ZONE_SCAN_TIMEOUT_MS);
+      const names = getSystemZoneNames();
       expect(names.length).toBeGreaterThan(50);
       const falseRejects = names.filter((n) => !isValidTimeZone(n));
       expect(falseRejects).toEqual([]);
-    }
+    },
+    BULK_ZONE_SCAN_TIMEOUT_MS
+  );
+
+  it.skipIf(!existsSync(ZONEINFO_DIR))(
+    'caches the system zoneinfo directory walk across calls',
+    ({ task }) => {
+      expect(task.timeout).toBe(BULK_ZONE_SCAN_TIMEOUT_MS);
+      const first = getSystemZoneNames();
+      expect(Object.isFrozen(first)).toBe(true);
+      expect(getSystemZoneNames()).toBe(first);
+    },
+    BULK_ZONE_SCAN_TIMEOUT_MS
   );
 });
 
@@ -290,15 +365,20 @@ describe('listTimeZones', () => {
     expect(zones).toContain('Asia/Katmandu');
   });
 
-  it('every returned name is itself valid per isValidTimeZone', () => {
-    // Cross-consistency between the two helpers: every name listTimeZones()
-    // returns (400+ of them) must itself pass isValidTimeZone, including
-    // under isValidTimeZone's stricter case/offset rules.
-    const zones = listTimeZones();
-    for (const zone of zones) {
-      expect(isValidTimeZone(zone)).toBe(true);
-    }
-  });
+  it(
+    'every returned name is itself valid per isValidTimeZone',
+    ({ task }) => {
+      // Cross-consistency between the two helpers: every name listTimeZones()
+      // returns (400+ of them) must itself pass isValidTimeZone, including
+      // under isValidTimeZone's stricter case/offset rules.
+      expect(task.timeout).toBe(BULK_ZONE_SCAN_TIMEOUT_MS);
+      const zones = listTimeZones();
+      for (const zone of zones) {
+        expect(isValidTimeZone(zone)).toBe(true);
+      }
+    },
+    BULK_ZONE_SCAN_TIMEOUT_MS
+  );
 });
 
 // ---------------------------------------------------------------------------
