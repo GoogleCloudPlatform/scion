@@ -159,7 +159,7 @@ func TestPortForwardingConduitDeliver(t *testing.T) {
 	}
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
-	if len(rr.calls) != 4 || rr.calls[2][1] != "paste-buffer" {
+	if len(rr.calls) != 5 || rr.calls[3][1] != "paste-buffer" {
 		t.Fatalf("calls = %v", rr.calls)
 	}
 }
