@@ -1366,3 +1366,270 @@ func TestOwnerMaterialChain_EndedRequestDecidesOnMerits(t *testing.T) {
 		assert.NotEqual(t, ownerChainReasonLookupError, v.reason, "(%s) the memo holds the verdict computed in full, not a lookup fault", purpose)
 	}
 }
+
+// omcJSONRecords returns all JSON log records matching level and msg.
+func omcJSONRecords(t *testing.T, raw, level, msg string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		var rec map[string]any
+		if line == "" || json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if rec["level"] == level && rec["msg"] == msg {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// TestOwnerMaterialChain_WebCreateUserSecretAuthDetection verifies ptone/scion#8293:
+//   - a web create with no explicit auth method and a matching user-scope secret
+//     owned by the creating user does NOT fall back to no-auth, dispatches with
+//     credentials/as-needed keys, and logs availableAsNeededCount in
+//     buildCreateRequest without exposing secret values;
+//   - another user's user-scope secret (unshared or shared) does NOT satisfy
+//     create-time auth detection for the creating user;
+//   - existing persisted agents keep the owner material chain check unchanged
+//     (unrecorded or re-delegated chains withhold, and GetAgent store faults
+//     fail closed instead of looking like a new agent).
+func TestOwnerMaterialChain_WebCreateUserSecretAuthDetection(t *testing.T) {
+	const (
+		authKey       = "OMC_WEB_CREATE_API_KEY"
+		creatorValue  = "omc-creator-secret-value-never-log"
+		otherValue    = "omc-other-secret-value-never-log"
+		harnessConfig = "claude-web-create-hc"
+	)
+
+	newSetup := func(t *testing.T, name string) (*sdFixture, *store.User, *store.User, *mockRuntimeBrokerClient, *bytes.Buffer, *api.HarnessAuthMetadata) {
+		t.Helper()
+		ctx := context.Background()
+		f := newSDFixture(t, name)
+
+		creatorID := tid("omc-web-creator-" + name)
+		createDCUser(t, f.Store, creatorID, "creator-"+name+"@test.com", f.ProjectID, store.ProjectRoleOwner)
+		creator, err := f.Store.GetUser(ctx, creatorID)
+		require.NoError(t, err)
+
+		otherID := tid("omc-web-other-" + name)
+		createDCUser(t, f.Store, otherID, "other-"+name+"@test.com", f.ProjectID, store.ProjectRoleOwner)
+		other, err := f.Store.GetUser(ctx, otherID)
+		require.NoError(t, err)
+
+		brokerID := tid("omc-web-broker-" + name)
+		require.NoError(t, f.Store.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID: brokerID, Name: "omc-web-broker-" + name, Slug: "omc-web-broker-" + name,
+			Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline, AutoProvide: true,
+		}))
+		require.NoError(t, f.Store.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: f.ProjectID, BrokerID: brokerID, BrokerName: "omc-web-broker-" + name,
+			LocalPath: "/home/user/projects/omc/.scion", Status: store.BrokerStatusOnline,
+		}))
+
+		authMeta := &api.HarnessAuthMetadata{
+			Types: map[string]api.HarnessAuthTypeMetadata{
+				"api-key": {
+					RequiredEnv: []api.HarnessAuthEnvRequirement{{AnyOf: []string{authKey}}},
+				},
+			},
+		}
+		require.NoError(t, f.Store.CreateHarnessConfig(ctx, &store.HarnessConfig{
+			ID: tid("omc-web-hc-" + name), Name: harnessConfig, Slug: harnessConfig,
+			Harness: "claude", Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+			Config: &store.HarnessConfigData{
+				Harness:        "claude",
+				NoAuthBehavior: "drop-to-shell",
+				AuthMeta:       authMeta,
+			},
+		}))
+
+		var logBuf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		client := &mockRuntimeBrokerClient{}
+		d := NewHTTPAgentDispatcherWithClient(f.Store, client, true, logger)
+		d.SetTokenGenerator(runTokenGenerator{svc: f.Server.agentTokenService})
+		d.SetSecretBackend(f.Server.secretBackend)
+		d.SetAuthzService(f.Server.authzService)
+		f.Server.SetDispatcher(d)
+
+		return f, creator, other, client, &logBuf, authMeta
+	}
+
+	t.Run("matching own as_needed user secret keeps auth and logs as-needed count", func(t *testing.T) {
+		f, creator, _, client, logBuf, _ := newSetup(t, "own-asneeded")
+		_, _, err := f.Server.secretBackend.Set(context.Background(), &secret.SetSecretInput{
+			Name: authKey, Value: creatorValue, SecretType: store.SecretTypeEnvironment, Target: authKey,
+			Scope: store.ScopeUser, ScopeID: creator.ID, InjectionMode: store.InjectionModeAsNeeded,
+			AllowProgeny: false, CreatedBy: creator.ID, UpdatedBy: creator.ID,
+		})
+		require.NoError(t, err)
+
+		rec := doRequestAsUser(t, f.Server, creator, http.MethodPost, "/api/v1/projects/"+f.ProjectID+"/agents", CreateAgentRequest{
+			Name:          "web-own-asneeded",
+			HarnessConfig: harnessConfig,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		var resp CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotNil(t, resp.Agent)
+		require.NotNil(t, resp.Agent.AppliedConfig)
+		assert.False(t, resp.Agent.AppliedConfig.NoAuth, "matching user secret must prevent auto no-auth fallback")
+		assert.Empty(t, resp.Agent.AppliedConfig.HarnessAuth, "harness auth stays auto for broker selection rather than none")
+
+		require.NotNil(t, client.lastCreateReq)
+		assert.False(t, client.lastCreateReq.NoAuth)
+		assert.Contains(t, client.lastCreateReq.AvailableAsNeededKeys, authKey)
+
+		rawLog := logBuf.String()
+		assert.NotContains(t, rawLog, creatorValue, "secret value must never be logged")
+		infoRecs := omcJSONRecords(t, rawLog, "INFO", "buildCreateRequest complete")
+		require.Len(t, infoRecs, 1, "log: %s", rawLog)
+		assert.EqualValues(t, 0, infoRecs[0]["resolvedSecretsCount"])
+		assert.EqualValues(t, 1, infoRecs[0]["availableAsNeededCount"], "as-needed count appears in buildCreateRequest complete log")
+
+		debugRecs := omcJSONRecords(t, rawLog, "DEBUG", "buildCreateRequest: env resolution summary")
+		require.Len(t, debugRecs, 1, "log: %s", rawLog)
+		assert.EqualValues(t, 0, debugRecs[0]["resolvedSecretsCount"])
+		assert.EqualValues(t, 1, debugRecs[0]["availableAsNeededCount"], "as-needed count appears in debug summary log")
+	})
+
+	t.Run("matching own always user secret keeps auth and delivers secret", func(t *testing.T) {
+		f, creator, _, client, logBuf, _ := newSetup(t, "own-always")
+		_, _, err := f.Server.secretBackend.Set(context.Background(), &secret.SetSecretInput{
+			Name: authKey, Value: creatorValue, SecretType: store.SecretTypeEnvironment, Target: authKey,
+			Scope: store.ScopeUser, ScopeID: creator.ID, InjectionMode: store.InjectionModeAlways,
+			AllowProgeny: false, CreatedBy: creator.ID, UpdatedBy: creator.ID,
+		})
+		require.NoError(t, err)
+
+		rec := doRequestAsUser(t, f.Server, creator, http.MethodPost, "/api/v1/projects/"+f.ProjectID+"/agents", CreateAgentRequest{
+			Name:          "web-own-always",
+			HarnessConfig: harnessConfig,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		var resp CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.False(t, resp.Agent.AppliedConfig.NoAuth)
+		assert.Empty(t, resp.Agent.AppliedConfig.HarnessAuth)
+
+		require.NotNil(t, client.lastCreateReq)
+		assert.False(t, client.lastCreateReq.NoAuth)
+		assert.Equal(t, creatorValue, client.lastCreateReq.ResolvedEnv[authKey])
+		rawLog := logBuf.String()
+		assert.NotContains(t, rawLog, creatorValue)
+		infoRecs := omcJSONRecords(t, rawLog, "INFO", "buildCreateRequest complete")
+		require.Len(t, infoRecs, 1, "log: %s", rawLog)
+		assert.EqualValues(t, 1, infoRecs[0]["resolvedSecretsCount"])
+		assert.EqualValues(t, 0, infoRecs[0]["availableAsNeededCount"])
+	})
+
+	t.Run("matching own unshared user env var keeps auth", func(t *testing.T) {
+		f, creator, _, client, logBuf, _ := newSetup(t, "own-envvar")
+		_, err := f.Store.UpsertEnvVar(context.Background(), &store.EnvVar{
+			ID: api.NewUUID(), Key: authKey, Value: creatorValue,
+			Scope: store.ScopeUser, ScopeID: creator.ID, InjectionMode: store.InjectionModeAlways,
+			Secret: true, AllowProgeny: false, CreatedBy: creator.ID,
+		})
+		require.NoError(t, err)
+
+		rec := doRequestAsUser(t, f.Server, creator, http.MethodPost, "/api/v1/projects/"+f.ProjectID+"/agents", CreateAgentRequest{
+			Name:          "web-own-envvar",
+			HarnessConfig: harnessConfig,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		var resp CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.False(t, resp.Agent.AppliedConfig.NoAuth)
+		assert.Empty(t, resp.Agent.AppliedConfig.HarnessAuth)
+		require.NotNil(t, client.lastCreateReq)
+		assert.False(t, client.lastCreateReq.NoAuth)
+		assert.Equal(t, creatorValue, client.lastCreateReq.ResolvedEnv[authKey])
+		assert.NotContains(t, logBuf.String(), creatorValue)
+	})
+
+	t.Run("another user's user secret does not prevent no-auth fallback", func(t *testing.T) {
+		for _, allowProgeny := range []bool{false, true} {
+			name := "other-unshared"
+			if allowProgeny {
+				name = "other-shared"
+			}
+			t.Run(name, func(t *testing.T) {
+				f, creator, other, client, logBuf, _ := newSetup(t, name)
+				_, _, err := f.Server.secretBackend.Set(context.Background(), &secret.SetSecretInput{
+					Name: authKey, Value: otherValue, SecretType: store.SecretTypeEnvironment, Target: authKey,
+					Scope: store.ScopeUser, ScopeID: other.ID, InjectionMode: store.InjectionModeAlways,
+					AllowProgeny: allowProgeny, CreatedBy: other.ID, UpdatedBy: other.ID,
+				})
+				require.NoError(t, err)
+
+				rec := doRequestAsUser(t, f.Server, creator, http.MethodPost, "/api/v1/projects/"+f.ProjectID+"/agents", CreateAgentRequest{
+					Name:          "web-" + name,
+					HarnessConfig: harnessConfig,
+				})
+				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+				var resp CreateAgentResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				assert.True(t, resp.Agent.AppliedConfig.NoAuth, "another user's secret must not count for creator's create")
+				assert.Equal(t, "none", resp.Agent.AppliedConfig.HarnessAuth)
+
+				require.NotNil(t, client.lastCreateReq)
+				assert.True(t, client.lastCreateReq.NoAuth)
+				assert.Empty(t, client.lastCreateReq.ResolvedSecrets)
+				assert.Empty(t, client.lastCreateReq.AvailableAsNeededKeys)
+				assert.NotContains(t, client.lastCreateReq.ResolvedEnv, authKey)
+				assert.NotContains(t, logBuf.String(), otherValue)
+			})
+		}
+	})
+
+	t.Run("existing persisted agents keep owner chain check and lookup fault fails closed", func(t *testing.T) {
+		f, _, _, _, _, authMeta := newSetup(t, "existing")
+		ctx := context.Background()
+		_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: authKey, Value: creatorValue, SecretType: store.SecretTypeEnvironment, Target: authKey,
+			Scope: store.ScopeUser, ScopeID: f.UserID, InjectionMode: store.InjectionModeAlways,
+			AllowProgeny: false, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+
+		// Stored agent with no edge: still withheld (not treated as new).
+		noEdgeID, _ := f.direct(t, "existing-noedge", false)
+		noEdgeAgent, err := f.Store.GetAgent(ctx, noEdgeID)
+		require.NoError(t, err)
+		hasCreds, err := f.Server.hasRequiredAuthCredentials(ctx, noEdgeAgent, "claude", authMeta)
+		require.NoError(t, err)
+		assert.False(t, hasCreds, "stored agent with no recorded edge must still withhold user secret")
+
+		// Stored agent re-delegated to another user: still withheld.
+		redelegID, _ := omcRedelegated(t, f, "existing-redeleg")
+		redelegAgent, err := f.Store.GetAgent(ctx, redelegID)
+		require.NoError(t, err)
+		hasCreds, err = f.Server.hasRequiredAuthCredentials(ctx, redelegAgent, "claude", authMeta)
+		require.NoError(t, err)
+		assert.False(t, hasCreds, "re-delegated stored agent must still withhold original owner's secret")
+
+		// Stored agent with clean recorded chain to creator: still allowed.
+		cleanID, _ := f.direct(t, "existing-clean", true)
+		cleanAgent, err := f.Store.GetAgent(ctx, cleanID)
+		require.NoError(t, err)
+		hasCreds, err = f.Server.hasRequiredAuthCredentials(ctx, cleanAgent, "claude", authMeta)
+		require.NoError(t, err)
+		assert.True(t, hasCreds, "clean stored agent keeps owner's user secret")
+
+		// Store lookup fault on GetAgent fails closed with an error rather than
+		// treating the agent as not-yet-persisted.
+		injected := errors.New("injected GetAgent fault")
+		faultSrv := &Server{
+			store:        &materialFailingStore{Store: f.Store, getAgentErr: injected, getAgentErrID: noEdgeID},
+			authzService: f.Server.authzService,
+			hubID:        f.Server.hubID,
+		}
+		hasCreds, err = faultSrv.hasRequiredAuthCredentials(ctx, noEdgeAgent, "claude", authMeta)
+		assert.ErrorIs(t, err, injected)
+		assert.False(t, hasCreds)
+	})
+}

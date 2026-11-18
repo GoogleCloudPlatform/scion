@@ -1441,6 +1441,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			"configEnvCount", configEnvCount,
 			"storageEnvCount", len(envFromStorage),
 			"resolvedSecretsCount", len(req.ResolvedSecrets),
+			"availableAsNeededCount", len(req.AvailableAsNeededKeys),
 			"totalResolvedEnvCount", len(req.ResolvedEnv),
 			"provisionCredentialsCount", len(req.ProvisionCredentials),
 		)
@@ -1492,6 +1493,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		"agent_id", agent.ID, "caller", callerName,
 		"elapsed_ms", time.Since(buildRequestStart).Milliseconds(),
 		"resolvedSecretsCount", len(req.ResolvedSecrets),
+		"availableAsNeededCount", len(req.AvailableAsNeededKeys),
 		"resolvedSkillsCount", resolvedSkillsCount)
 	return req, nil
 }
