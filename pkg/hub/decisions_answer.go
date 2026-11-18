@@ -736,8 +736,6 @@ func (s *Server) publishDecisionUpdatedAt(ctx context.Context, projectID, messag
 	namedUserID := ""
 	if view.Decision != nil {
 		namedUserID = view.Decision.AnsweredByUserID
-	} else if view.Dismissed != nil {
-		namedUserID = view.Dismissed.ByUserID
 	}
 	defer s.enqueueDecisionBellEvent(projectID, threadID, namedUserID)
 

@@ -337,8 +337,9 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		delivered = s.deliverDecisionDismissResponse(ctx, asker, responseMsg, res.BatchID, res.Dismissed, answers)
 	}
 	for _, v := range dismissedViews {
-		s.publishDecisionUpdatedAt(ctx, ds[0].ProjectID, msgID, chatKey, v)
+		s.publishDecisionUpdatedEventAt(ds[0].ProjectID, msgID, chatKey, v)
 	}
+	s.enqueueDecisionBellDismiss(ds[0].ProjectID, chatKey, res.Dismissed)
 
 	writeJSON(w, http.StatusOK, DismissDecisionPromptResponse{
 		Dismissed:         dismissedViews,
