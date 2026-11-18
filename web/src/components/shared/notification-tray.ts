@@ -832,8 +832,8 @@ export class ScionNotificationTray extends LitElement {
       height: 16px;
       padding: 0 4px;
       border-radius: 8px;
-      background: var(--scion-status-danger, #ef4444);
-      color: #fff;
+      background: var(--sl-color-danger-600, #dc2626);
+      color: var(--sl-color-neutral-0, #fff);
       font-size: 0.625rem;
       font-weight: 700;
       line-height: 16px;

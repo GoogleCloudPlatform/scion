@@ -284,7 +284,7 @@ export class ScionPageProfileTelegram extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      background: var(--scion-bg-subtle, #f8fafc);
+      background: var(--scion-bg, #f8fafc);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.375rem;
       padding: 0.5rem 0.75rem;

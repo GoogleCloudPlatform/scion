@@ -107,6 +107,7 @@ html .sl-theme-light,
   --scion-text-disabled: var(--scion-neutral-400);
 
   --scion-border: var(--scion-neutral-200);
+  --scion-border-subtle: var(--scion-neutral-100);
   --scion-border-hover: var(--scion-neutral-300);
   --scion-border-active: var(--scion-primary-500);
 
@@ -277,7 +278,7 @@ html .sl-theme-light,
   --sl-input-filled-background-color-focus: var(--sl-color-neutral-100);
   --sl-input-filled-color: var(--sl-color-neutral-800);
   --sl-focus-ring-color: var(--sl-color-primary-600);
-  --sl-overlay-background-color: rgba(15, 23, 42, 0.33);
+  --sl-overlay-background-color: hsl(240 3.8% 46.1% / 33%);
   --sl-tooltip-background-color: var(--sl-color-neutral-800);
   --sl-tooltip-color: var(--sl-color-neutral-0);
 
@@ -316,6 +317,7 @@ html .sl-theme-dark,
   --scion-text-disabled: var(--scion-neutral-500);
 
   --scion-border: var(--scion-neutral-700);
+  --scion-border-subtle: var(--scion-neutral-700);
   --scion-border-hover: var(--scion-neutral-600);
   --scion-border-active: var(--scion-primary-400);
 
@@ -379,6 +381,7 @@ html .sl-theme-dark,
   --sl-color-primary-600: var(--scion-primary-300);
   --sl-color-primary-700: var(--scion-primary-200);
   --sl-color-primary-800: var(--scion-primary-100);
+  /* Literal #eff6ff avoids dark mode's translucent --scion-primary-50 tint override. */
   --sl-color-primary-900: #eff6ff;
   --sl-color-primary-950: #eff6ff;
 
@@ -420,7 +423,7 @@ html .sl-theme-dark,
 
   --sl-color-neutral-0: var(--scion-neutral-800);
   --sl-color-neutral-50: var(--scion-neutral-900);
-  --sl-color-neutral-100: var(--scion-neutral-800);
+  --sl-color-neutral-100: var(--scion-neutral-700);
   --sl-color-neutral-200: var(--scion-neutral-700);
   --sl-color-neutral-300: var(--scion-neutral-600);
   --sl-color-neutral-400: var(--scion-neutral-500);
@@ -444,7 +447,7 @@ html .sl-theme-dark,
   --sl-input-filled-background-color-focus: var(--scion-surface-raised);
   --sl-input-filled-color: var(--sl-color-neutral-800);
   --sl-focus-ring-color: var(--sl-color-primary-700);
-  --sl-overlay-background-color: rgba(0, 0, 0, 0.43);
+  --sl-overlay-background-color: hsl(0 0% 0% / 43%);
   --sl-tooltip-background-color: var(--scion-neutral-100);
   --sl-tooltip-color: var(--scion-neutral-900);
 }
@@ -516,6 +519,7 @@ html .sl-theme-dark,
     --scion-text-disabled: var(--scion-neutral-500);
 
     --scion-border: var(--scion-neutral-700);
+    --scion-border-subtle: var(--scion-neutral-700);
     --scion-border-hover: var(--scion-neutral-600);
     --scion-border-active: var(--scion-primary-400);
 
@@ -619,7 +623,7 @@ html .sl-theme-dark,
 
     --sl-color-neutral-0: var(--scion-neutral-800);
     --sl-color-neutral-50: var(--scion-neutral-900);
-    --sl-color-neutral-100: var(--scion-neutral-800);
+    --sl-color-neutral-100: var(--scion-neutral-700);
     --sl-color-neutral-200: var(--scion-neutral-700);
     --sl-color-neutral-300: var(--scion-neutral-600);
     --sl-color-neutral-400: var(--scion-neutral-500);
@@ -643,7 +647,7 @@ html .sl-theme-dark,
     --sl-input-filled-background-color-focus: var(--scion-surface-raised);
     --sl-input-filled-color: var(--sl-color-neutral-800);
     --sl-focus-ring-color: var(--sl-color-primary-700);
-    --sl-overlay-background-color: rgba(0, 0, 0, 0.43);
+    --sl-overlay-background-color: hsl(0 0% 0% / 43%);
     --sl-tooltip-background-color: var(--scion-neutral-100);
     --sl-tooltip-color: var(--scion-neutral-900);
   }

@@ -63,7 +63,6 @@ interface ParsedRule {
 function parseThemeRules(cssText: string): ParsedRule[] {
   const clean = cssText.replace(/\/\*[\s\S]*?\*\//g, '');
   const rules: ParsedRule[] = [];
-  let i = 0;
 
   const parseRuleList = (src: string, prefersDarkOnly: boolean): void => {
     let pos = 0;
@@ -97,70 +96,106 @@ function parseThemeRules(cssText: string): ParsedRule[] {
       }
       pos = close + 1;
     }
-    i = pos;
   };
 
   parseRuleList(clean, false);
-  void i;
   return rules;
 }
 
-/** Match and compute CSS selector specificity for html/:root and descendant .sl-theme-* containers. */
+/**
+ * Match and compute CSS selector specificity for html/:root and descendant
+ * .sl-theme-* containers. Throws on unrecognized selector syntax so new
+ * combinators or pseudo-classes in theme.css cannot be skipped silently.
+ */
 function matchSelector(sel: string, el: ElementState): Specificity | null {
   if (sel === ':host') return null;
 
   // Descendant selectors: `html .sl-theme-light` or `html .sl-theme-dark`
   if (sel.startsWith('html ')) {
+    const rest = sel.slice(5).trim();
+    const parsed = parseCompoundSelector(rest);
     if (el.isRoot) return null;
-    const sub = matchSimpleCompound(sel.slice(5).trim(), { ...el, isRoot: false });
+    const sub = evaluateCompound(parsed, { ...el, isRoot: false });
     return sub ? [sub[0], sub[1], sub[2] + 1] : null;
   }
 
-  return matchSimpleCompound(sel, el);
+  return evaluateCompound(parseCompoundSelector(sel), el);
 }
 
-function matchSimpleCompound(sel: string, el: ElementState): Specificity | null {
+interface CompoundPart {
+  kind: 'html' | 'root' | 'notDataTheme' | 'dataTheme' | 'class';
+  value?: string;
+}
+
+function parseCompoundSelector(sel: string): CompoundPart[] {
+  const parts: CompoundPart[] = [];
   let rest = sel;
-  let b = 0;
-  let c = 0;
 
   if (rest.startsWith('html')) {
-    if (!el.isRoot) return null;
-    c += 1;
+    parts.push({ kind: 'html' });
     rest = rest.slice(4);
   }
 
   while (rest.length > 0) {
     if (rest.startsWith(':root')) {
-      if (!el.isRoot) return null;
-      b += 1;
+      parts.push({ kind: 'root' });
       rest = rest.slice(5);
       continue;
     }
     const notAttr = /^:not\(\[data-theme=['"](\w+)['"]\]\)/.exec(rest);
     if (notAttr) {
-      if (el.dataTheme === notAttr[1]) return null;
-      b += 1;
+      parts.push({ kind: 'notDataTheme', value: notAttr[1] });
       rest = rest.slice(notAttr[0].length);
       continue;
     }
     const attr = /^\[data-theme=['"](\w+)['"]\]/.exec(rest);
     if (attr) {
-      if (el.dataTheme !== attr[1]) return null;
-      b += 1;
+      parts.push({ kind: 'dataTheme', value: attr[1] });
       rest = rest.slice(attr[0].length);
       continue;
     }
     const cls = /^\.([\w-]+)/.exec(rest);
     if (cls) {
-      if (!el.classes.has(cls[1])) return null;
-      b += 1;
+      parts.push({ kind: 'class', value: cls[1] });
       rest = rest.slice(cls[0].length);
       continue;
     }
-    return null;
+    throw new Error(`Unsupported theme selector syntax: "${sel}" (at "${rest}")`);
   }
 
+  if (parts.length === 0) {
+    throw new Error(`Empty compound selector: "${sel}"`);
+  }
+  return parts;
+}
+
+function evaluateCompound(parts: CompoundPart[], el: ElementState): Specificity | null {
+  let b = 0;
+  let c = 0;
+  for (const part of parts) {
+    switch (part.kind) {
+      case 'html':
+        if (!el.isRoot) return null;
+        c += 1;
+        break;
+      case 'root':
+        if (!el.isRoot) return null;
+        b += 1;
+        break;
+      case 'notDataTheme':
+        if (el.dataTheme === part.value) return null;
+        b += 1;
+        break;
+      case 'dataTheme':
+        if (el.dataTheme !== part.value) return null;
+        b += 1;
+        break;
+      case 'class':
+        if (!part.value || !el.classes.has(part.value)) return null;
+        b += 1;
+        break;
+    }
+  }
   return [0, b, c];
 }
 
@@ -271,13 +306,32 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
 
   const variants = ['primary', 'success', 'warning', 'danger', 'neutral'] as const;
 
-  it('preserves stock Scion light-mode palette values', () => {
+  it('preserves stock Scion light-mode palette and Shoelace non-palette values', () => {
     const get = resolver(light);
     expect(get('--sl-color-neutral-0')).toEqual([255, 255, 255, 1]);
     expect(get('--sl-color-neutral-700')).toEqual([0x33, 0x41, 0x55, 1]);
     expect(get('--sl-color-primary-600')).toEqual([0x25, 0x63, 0xeb, 1]);
     expect(get('--scion-bg')).toEqual([0xf8, 0xfa, 0xfc, 1]);
     expect(get('--scion-surface')).toEqual([255, 255, 255, 1]);
+
+    // Every non-palette --sl-* declaration in the light block must match Shoelace's light.css
+    // (except Scion's intentional font-family and border-radius overrides) so light mode never
+    // drifts on dialog overlays, panels, inputs, focus rings, or tooltips.
+    const slLight = decls(block(shoelaceLightCss, '.sl-theme-light {'));
+    const scionLight = decls(block(themeCss, '.sl-theme-light {'));
+    const intentionalNonColorOverrides = new Set([
+      '--sl-font-sans',
+      '--sl-font-mono',
+      '--sl-border-radius-small',
+      '--sl-border-radius-medium',
+      '--sl-border-radius-large',
+      '--sl-border-radius-x-large',
+    ]);
+    for (const [prop, val] of scionLight) {
+      if (!prop.startsWith('--sl-') || prop.startsWith('--sl-color-')) continue;
+      if (intentionalNonColorOverrides.has(prop)) continue;
+      expect(val, `${prop} in light theme`).toBe(slLight.get(prop)?.replace(/\s+/g, ' '));
+    }
   });
 
   for (const [themeName, vars] of themes) {
@@ -313,6 +367,24 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
             contrast(get('--sl-input-border-color'), get('--scion-surface'))
           ).toBeGreaterThanOrEqual(3);
         }
+      });
+
+      it('keeps sl-menu-item and sl-option hover visibly distinct from panel and card surfaces', () => {
+        // Hover fill (neutral-100) must visibly step away from panel and card surfaces
+        if (themeName !== 'light') {
+          expect(
+            contrast(get('--sl-color-neutral-100'), get('--sl-panel-background-color'))
+          ).toBeGreaterThanOrEqual(1.2);
+          expect(
+            contrast(get('--sl-color-neutral-100'), get('--scion-surface'))
+          ).toBeGreaterThanOrEqual(1.2);
+        } else {
+          expect(get('--sl-color-neutral-100')).not.toEqual(get('--sl-panel-background-color'));
+        }
+        // Hovered menu/option item text (neutral-1000) on hover fill (neutral-100)
+        expect(
+          contrast(get('--sl-color-neutral-1000'), get('--sl-color-neutral-100'))
+        ).toBeGreaterThanOrEqual(4.5);
       });
 
       it('keeps outline buttons and neutral text colours AA-readable on page and card surfaces (#3773)', () => {
@@ -389,7 +461,7 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
     });
   }
 
-  it('never pairs an inverted --sl-color-*-500/600/700 fill with a bare white foreground', () => {
+  it('never pairs an inverted --sl-color-*-500/600/700 or --scion-status-* fill with a bare white foreground (including descendant rules)', () => {
     const srcDir = resolve(__dirname, '..');
     const walk = (dir: string): string[] => {
       const out: string[] = [];
@@ -404,20 +476,38 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
       return out;
     };
 
+    const invertedBgRe =
+      /background(?:-color)?\s*:\s*var\(\s*(?:--sl-color-(?:primary|success|warning|danger|neutral)-(?:500|600|700)|--scion-status-(?:primary|success|warning|danger|info))/;
+    const bareWhiteFgRe = /(?:^|[;\s{])color\s*:\s*(?:#fff(?:fff)?\b|white\b)/i;
+
     const violations: string[] = [];
     for (const file of walk(srcDir).sort()) {
+      const rel = relative(srcDir, file).split(sep).join('/');
       const clean = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-      for (const m of clean.matchAll(/([^{}]*\{[^{}]*\})/g)) {
-        const ruleText = m[1];
-        if (
-          /background(?:-color)?\s*:\s*var\(\s*--sl-color-(?:primary|success|warning|danger|neutral)-(?:500|600|700)/.test(
-            ruleText
-          ) &&
-          /(?:^|[;\s{])color\s*:\s*(?:#fff(?:fff)?\b|white\b)/i.test(ruleText)
-        ) {
-          violations.push(
-            `${relative(srcDir, file).split(sep).join('/')}: ${ruleText.trim().replace(/\s+/g, ' ')}`
+      const rules = [...clean.matchAll(/([^{};]+)\{([^{}]*)\}/g)].map((m) => ({
+        selectors: m[1]
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+        body: m[2],
+        raw: `${m[1].trim()} { ${m[2].trim().replace(/\s+/g, ' ')} }`,
+      }));
+
+      const filledPrefixes = rules
+        .filter((r) => invertedBgRe.test(r.body))
+        .flatMap((r) => r.selectors)
+        .filter((sel) => sel.length > 0 && !sel.includes('${'));
+
+      for (const r of rules) {
+        if (!bareWhiteFgRe.test(r.body)) continue;
+        const sameRule = invertedBgRe.test(r.body);
+        const childOfFilled =
+          !sameRule &&
+          r.selectors.some((sel) =>
+            filledPrefixes.some((p) => sel.startsWith(`${p} `) || sel.startsWith(`${p}>`))
           );
+        if (sameRule || childOfFilled) {
+          violations.push(`${rel}: ${r.raw}`);
         }
       }
     }

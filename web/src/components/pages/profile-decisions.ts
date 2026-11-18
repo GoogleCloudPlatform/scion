@@ -180,6 +180,12 @@ export class ScionPageProfileDecisions extends LitElement {
         margin: 0.75rem 0;
       }
 
+      sl-badge[variant='neutral']::part(base) {
+        background: var(--scion-badge-neutral-bg, #f1f5f9);
+        color: var(--scion-badge-neutral-text, #334155);
+        border-color: var(--scion-border, #e2e8f0);
+      }
+
       .groupsec {
         margin: 1rem 0 0.35rem;
         display: flex;
