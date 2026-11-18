@@ -2287,6 +2287,14 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, broker.ID)
+	if err != nil {
+		return fmt.Errorf("failed to list broker projects: %w", err)
+	}
+	if projectsResp != nil {
+		broker.Projects = projectsResp.Projects
+	}
+
 	if isJSONOutput() {
 		return outputJSON(brokerInfoJSON(broker))
 	}
@@ -2370,7 +2378,7 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 		fmt.Println("Projects")
 		fmt.Println("--------")
 		for _, g := range broker.Projects {
-			fmt.Printf("  - %s (%d agents)\n", g.ProjectName, g.AgentCount)
+			fmt.Printf("  - %s (%d agents)\n", valueOrDefault(g.ProjectName, g.ProjectID), g.AgentCount)
 		}
 	} else {
 		fmt.Println()
