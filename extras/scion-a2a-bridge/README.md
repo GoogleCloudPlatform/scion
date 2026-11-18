@@ -77,9 +77,43 @@ docker run -p 8443:8443 -p 9090:9090 \
 - `tasks/pushNotification/get` — list webhooks for a task
 - `tasks/pushNotification/delete` — remove a webhook
 
-## TLS
+## TLS and reverse proxy
 
-The A2A server listens on plain HTTP. **TLS must be terminated at a reverse proxy** (e.g. Caddy, nginx, or a cloud load balancer) in front of the bridge. The bridge logs a `WARN` at startup as a reminder. Do not expose the bridge port directly to the internet without a TLS-terminating proxy.
+The A2A server listens on plain HTTP (`:8443` by default). **TLS must be terminated at a reverse proxy** (e.g. Caddy, nginx, or a cloud load balancer) in front of the bridge. The bridge logs a `WARN` at startup as a reminder. Do not expose the bridge port or the broker plugin RPC port (`localhost:9090`) directly to the internet without a TLS-terminating proxy and network restrictions.
+
+> **Warning — Path collisions when co-hosting with the Scion Hub:** Both the Scion Hub Web Dashboard and the A2A Protocol Bridge serve routes under `/projects/*` (as well as `/.well-known/*`, `/healthz`, `/readyz`, and `/metrics`). **Do not route `/projects/*` on the Hub's hostname directly to the bridge.** Direct browser links and page refreshes to Hub project pages (`/projects/...`) carry browser session cookies rather than A2A credentials, so the bridge rejects them with `401 Unauthorized` instead of loading the Web Dashboard.
+
+When co-hosting the bridge and the Hub behind Caddy on the same host, use either a separate hostname (recommended) or a stripped path prefix:
+
+### Separate hostname (recommended)
+
+```caddy
+hub.example.com {
+    reverse_proxy localhost:8080
+}
+
+a2a.example.com {
+    reverse_proxy localhost:8443
+}
+```
+
+Set `bridge.external_url` (and **External URL** in **Admin > Integrations > A2A Bridge**, if configured in the Admin UI) to `https://a2a.example.com`.
+
+### Distinct path prefix on the same hostname
+
+```caddy
+hub.example.com {
+    handle_path /a2a/* {
+        reverse_proxy localhost:8443
+    }
+
+    handle {
+        reverse_proxy localhost:8080
+    }
+}
+```
+
+Use `handle_path /a2a/*` (not `handle /a2a/*`) so Caddy strips `/a2a` before forwarding to `:8443`, and set `bridge.external_url` (and **External URL** in the Admin UI, if set) to `https://hub.example.com/a2a` so generated Agent Cards and rewritten OIDC `jwks_uri` links include the `/a2a` prefix. Point A2A clients at `https://hub.example.com/a2a/projects/<project>/agents/<agent>` (root-level `/.well-known/*` on `hub.example.com` remains served by the Hub).
 
 ## Ports
 
