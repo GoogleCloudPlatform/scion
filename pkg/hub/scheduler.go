@@ -142,6 +142,10 @@ type Scheduler struct {
 	// Defaults to 30 s in production; tests can set it to 0 for determinism.
 	MaxJitter time.Duration
 
+	// jitterFn, when non-nil, overrides the random [0, MaxJitter) draw in
+	// runRecurringHandlers so tests can observe and control jitter deterministically.
+	jitterFn func(time.Duration) time.Duration
+
 	// MaxConcurrency limits the number of recurring handlers that may execute
 	// simultaneously. Defaults to defaultMaxConcurrency (2) to prevent all
 	// handlers from competing for DB connections at once — the original
@@ -530,26 +534,44 @@ func (s *Scheduler) runLaunchReaperTick(ctx context.Context, fn func(ctx context
 	fn(ctx)
 }
 
+// isStopped reports whether the scheduler has been halted or ctx has ended.
+func (s *Scheduler) isStopped(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-s.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // Start begins the root ticker loop and runs eligible handlers immediately
 // on startup (tick 0). The provided context is used as the parent for handler
 // invocations. Before starting the ticker, persisted one-shot timers are
 // loaded from the database.
 func (s *Scheduler) Start(ctx context.Context) {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return
+	}
 	// Store the long-lived server context for use by timer callbacks.
 	// This prevents timers scheduled via HTTP requests from inheriting
 	// the short-lived request context.
-	s.mu.Lock()
 	s.ctx = ctx
-	if !s.stopped {
-		s.runCtx, s.runCancel = context.WithCancel(ctx)
-		s.started = true
+	s.runCtx, s.runCancel = context.WithCancel(ctx)
+	s.started = true
+	hasReaper := s.launchReaper != nil
+	s.wg.Add(1)
+	if hasReaper {
+		s.wg.Add(1)
 	}
 	s.mu.Unlock()
 
 	// Load and schedule persisted one-shot timers
 	s.loadPersistedTimers(ctx)
 
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 
@@ -558,7 +580,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 
 		// Run eligible handlers immediately on startup (tick 0).
 		// All handlers fire at tick 0 because 0 % N == 0 for any interval.
-		s.runRecurringHandlers(ctx)
+		if !s.isStopped(ctx) {
+			s.runRecurringHandlers(ctx)
+		}
 
 		for {
 			select {
@@ -567,29 +591,28 @@ func (s *Scheduler) Start(ctx context.Context) {
 			case <-s.stopCh:
 				return
 			case <-ticker.C:
+				if s.isStopped(ctx) {
+					return
+				}
 				s.tickCount.Add(1)
 				s.runRecurringHandlers(ctx)
 			}
 		}
 	}()
 
-	if s.launchReaper != nil {
-		s.wg.Add(1)
+	if hasReaper {
 		go s.runLaunchReaperLoop(ctx, s.launchReaper)
 	}
 }
 
 // Stop signals the scheduler to stop, cancels all pending one-shot timers,
-// and waits for the root ticker goroutine to exit. In-flight recurring
-// handler goroutines (spawned per tick by runRecurringHandlers) are not
-// tracked; they will be cancelled via the parent context when the server
-// shuts down. Recurring wake fires (ptone/scion#7734) are the exception: they
-// run off the evaluator on detached contexts, and the hub's teardown joins
-// them (Server.scheduledDetachedFires). The launch reaper's dedicated goroutine is different: it runs
-// synchronously (no per-tick goroutine), is tracked by the same s.wg, and so
-// Stop also waits for it to exit — including finishing any tick already in
-// flight, bounded by the store's 10s tick timeout plus its up-to-2s
-// best-effort disarm write. It is safe to call Stop multiple times.
+// and waits for the root ticker goroutine, recurring handler goroutines
+// spawned by runRecurringHandlers and UpsertRecurringSingleton (pending jitter
+// and semaphore waits abort immediately without running the handler; handlers
+// already in flight finish), and the launch reaper's dedicated goroutine to
+// exit. Recurring wake fires (ptone/scion#7734) run off the evaluator on
+// detached contexts, and the hub's teardown joins them
+// (Server.scheduledDetachedFires). It is safe to call Stop multiple times.
 func (s *Scheduler) Stop() {
 	s.halt()
 	s.wg.Wait()
@@ -601,10 +624,10 @@ func (s *Scheduler) Stop() {
 // (Server.BeginShutdown, ptone/scion#5054). It is idempotent.
 func (s *Scheduler) halt() {
 	s.stopOnce.Do(func() {
+		s.mu.Lock()
 		close(s.stopCh)
 
 		// Cancel runCtx and all one-shot timers
-		s.mu.Lock()
 		s.stopped = true
 		if s.runCancel != nil {
 			s.runCancel()
@@ -640,6 +663,10 @@ const maxJitter = 30 * time.Second
 // across ALL ticks — slow handlers from tick N still hold slots when tick N+1
 // fires, preventing cross-tick concurrency blow-up.
 func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
+	if s.isStopped(ctx) {
+		return
+	}
+
 	// Snapshot the tick once so eligibility and logging agree on it.
 	tick := s.tickCount.Load()
 
@@ -657,6 +684,9 @@ func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 	}
 
 	for _, h := range eligible {
+		if s.isStopped(ctx) {
+			return
+		}
 		s.launchRecurringHandler(ctx, h, tick, true)
 	}
 }
@@ -664,23 +694,43 @@ func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 // launchRecurringHandler runs a single recurring handler in its own goroutine
 // with optional jitter, semaphore gating, timeout, and panic recovery.
 func (s *Scheduler) launchRecurringHandler(ctx context.Context, handler RecurringHandler, tick uint64, applyJitter bool) {
+	s.mu.Lock()
+	if s.stopped || ctx.Err() != nil {
+		s.mu.Unlock()
+		return
+	}
+	s.wg.Add(1)
+	s.mu.Unlock()
+
 	go func() {
+		defer s.wg.Done()
+
 		// Stagger start: sleep a random 0–MaxJitter BEFORE acquiring a
 		// semaphore slot. This spreads arrivals at the semaphore over the
 		// jitter window so handlers don't hold concurrency slots during
 		// dead sleep time.
 		jitter := time.Duration(0)
 		if applyJitter && s.MaxJitter > 0 {
-			jitter = time.Duration(rand.Int63n(int64(s.MaxJitter)))
+			if s.jitterFn != nil {
+				jitter = s.jitterFn(s.MaxJitter)
+			} else {
+				jitter = time.Duration(rand.Int63n(int64(s.MaxJitter)))
+			}
 		}
 		if jitter > 0 {
+			timer := time.NewTimer(jitter)
 			select {
-			case <-time.After(jitter):
+			case <-timer.C:
 			case <-ctx.Done():
+				timer.Stop()
 				return
 			case <-s.stopCh:
+				timer.Stop()
 				return
 			}
+		}
+		if s.isStopped(ctx) {
+			return
 		}
 
 		// Acquire semaphore slot if concurrency is limited.
@@ -694,14 +744,9 @@ func (s *Scheduler) launchRecurringHandler(ctx context.Context, handler Recurrin
 			case <-s.stopCh:
 				return
 			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.stopCh:
-			return
-		default:
+			if s.isStopped(ctx) {
+				return
+			}
 		}
 
 		handlerCtx, cancel := context.WithTimeout(ctx, 55*time.Second)

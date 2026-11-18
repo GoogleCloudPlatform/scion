@@ -2109,6 +2109,163 @@ func TestSchedulerJitter(t *testing.T) {
 	}
 }
 
+func TestSchedulerStopDuringJitterDoesNotRunHandler(t *testing.T) {
+	t.Parallel()
+
+	t.Run("handler never runs after Stop with live parent context", func(t *testing.T) {
+		t.Parallel()
+		s := NewScheduler(nil, slog.Default())
+		s.tickInterval = 10 * time.Second
+		s.MaxJitter = 80 * time.Millisecond
+
+		inJitter := make(chan struct{})
+		var jitterOnce sync.Once
+		s.jitterFn = func(max time.Duration) time.Duration {
+			jitterOnce.Do(func() { close(inJitter) })
+			return max
+		}
+
+		var called atomic.Int32
+		s.RegisterRecurring("jittered-stop", 1, func(_ context.Context) {
+			called.Add(1)
+		})
+
+		// Deliberately use an uncancelled parent context: Stop alone must abort
+		// the jitter wait so jobs do not fire after Stop returns.
+		s.Start(context.Background())
+
+		select {
+		case <-inJitter:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for recurring handler to enter jitter wait")
+		}
+		// Give the goroutine a moment to park in the jitter select.
+		time.Sleep(15 * time.Millisecond)
+
+		s.Stop()
+
+		// Wait past the full 80ms jitter window to catch a job that slept through Stop.
+		time.Sleep(120 * time.Millisecond)
+		if got := called.Load(); got != 0 {
+			t.Fatalf("recurring handler ran %d time(s) after Stop during jitter wait; want 0", got)
+		}
+	})
+
+	t.Run("Stop returns without waiting out long jitter", func(t *testing.T) {
+		t.Parallel()
+		s := NewScheduler(nil, slog.Default())
+		s.tickInterval = 10 * time.Second
+		s.MaxJitter = 10 * time.Second
+
+		inJitter := make(chan struct{})
+		var jitterOnce sync.Once
+		s.jitterFn = func(max time.Duration) time.Duration {
+			jitterOnce.Do(func() { close(inJitter) })
+			return max
+		}
+
+		var called atomic.Int32
+		s.RegisterRecurring("long-jitter-stop", 1, func(_ context.Context) {
+			called.Add(1)
+		})
+
+		s.Start(context.Background())
+
+		select {
+		case <-inJitter:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for recurring handler to enter jitter wait")
+		}
+		time.Sleep(15 * time.Millisecond)
+
+		stopped := make(chan struct{})
+		go func() {
+			s.Stop()
+			close(stopped)
+		}()
+
+		select {
+		case <-stopped:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Stop blocked waiting out the jitter window instead of aborting on stopCh")
+		}
+		if got := called.Load(); got != 0 {
+			t.Fatalf("recurring handler ran %d time(s); want 0", got)
+		}
+	})
+}
+
+func TestSchedulerStopWaitsForInFlightRecurringAndSkipsQueued(t *testing.T) {
+	t.Parallel()
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(1))
+	s.tickInterval = 15 * time.Millisecond
+	s.MaxJitter = 0
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	var calls atomic.Int32
+
+	s.RegisterRecurring("serialized", 1, func(_ context.Context) {
+		n := calls.Add(1)
+		if n == 1 {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+		}
+	})
+
+	s.Start(context.Background())
+
+	// Tick 0 grabs the single semaphore slot and blocks on release.
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tick-0 handler to enter")
+	}
+
+	// Wait for tick 1 to advance so a second handler goroutine is spawned and
+	// queued on s.sem behind the blocked tick-0 handler.
+	deadline := time.Now().Add(2 * time.Second)
+	for s.Status().TickCount < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for tick 1 while tick-0 handler held s.sem")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	stopped := make(chan struct{})
+	go func() {
+		s.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-s.stopCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not close stopCh")
+	}
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while an in-flight recurring handler was still running")
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return after the in-flight recurring handler finished")
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("recurring handler calls = %d, want 1 (queued semaphore waiter should not run after Stop)", got)
+	}
+}
+
 func TestSchedulerStatusIncludesMaxConcurrency(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(5))
