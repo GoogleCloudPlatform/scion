@@ -27,24 +27,38 @@
 # If someone adds a new module under extras/, this job picks it up
 # automatically. If the discovered count is zero, the job fails.
 #
-# TRIGGER: extras/** + root go.mod/go.sum on pull_request. The root
-# go.mod/go.sum paths cover the causal edge — root dep changes can
-# stale broker go.sum without touching any file under extras/.
+# TRIGGER:
+#   - pull_request on extras/**, root go.mod/go.sum, and this workflow file.
+#     Adding pkg/** and cmd/** to the PR paths would run the matrix on most
+#     PRs; root go.mod/go.sum covers direct dependency edits on PRs.
+#   - push to main (unfiltered) and a nightly schedule, so root .go
+#     import-graph or API changes that stale an extras module's go.sum or
+#     break an extras build/test without touching extras/** or root
+#     go.mod/go.sum are caught on main (ptone/scion#5863).
+#   - workflow_dispatch for manual runs (including on forks, where push and
+#     schedule jobs are skipped by the fork CI gate).
 
 name: Extras Modules CI
 
 on:
+  push:
+    branches: [ main ]
   pull_request:
     paths:
       - 'extras/**'
       - 'go.mod'
       - 'go.sum'
+      - '.github/workflows/extras-ci.yml'
+  # 06:37 UTC: off-peak, with an odd minute to avoid top-of-hour cron spikes.
+  schedule:
+    - cron: '37 6 * * *'
+  workflow_dispatch:
 
 # One run per PR: a new push to the same PR cancels the superseded run
 # (ptone/scion#2845). Cancelling is limited to pull_request events. Outside
-# pull_request the group is the unique run_id, not github.ref, so runs on
-# main (should a push trigger ever be added) never share a group and are
-# never cancelled, even while pending.
+# pull_request the group is the unique run_id, not github.ref, so main,
+# scheduled and manual runs never share a group and are never cancelled,
+# even while pending.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -52,9 +66,12 @@ concurrency:
 permissions:
   contents: read
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   discover:
     name: Discover extras modules
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.find.outputs.matrix }}
@@ -122,6 +139,7 @@ jobs:
 
   build-and-test:
     name: ${{ matrix.module }}
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     needs: discover
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
@@ -138,13 +156,12 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: '${{ matrix.module }}/go.mod'
-          # No Go cache (ptone/scion#4251). This workflow runs only on pull
-          # requests, and setup-go's cache saved a fresh, PR-scoped cache per
-          # module on every run: about 5.4 GB of the repo's 10 GB cache
-          # budget per PR touching extras/, evicting ci.yml's main caches.
-          # Cold, these jobs take 0.5-5 min (the a2a PostgreSQL job about 9),
-          # well under ci.yml's run on the same PR, so they are off the
-          # critical path.
+          # No Go cache (ptone/scion#4251). setup-go's cache saves a separate
+          # entry per module (~5.4 GB across the matrix out of the repo's
+          # 10 GB cache budget), which would evict ci.yml's main caches on
+          # both PRs and main pushes. Cold, these jobs take 0.5-5 min (the
+          # a2a PostgreSQL job about 9), well under ci.yml's run, so they are
+          # off the critical path.
           cache: false
 
       - name: Build
@@ -185,6 +202,7 @@ jobs:
 
   coverage:
     name: Verify all modules were tested
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     needs: [discover, build-and-test]
     runs-on: ubuntu-latest
     steps:
@@ -227,6 +245,7 @@ jobs:
 
   a2a-bridge-postgres-integration:
     name: extras/scion-a2a-bridge PostgreSQL Integration
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     services:
       postgres:
