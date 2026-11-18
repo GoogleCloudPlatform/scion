@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -59,21 +60,97 @@ var autoSuspendStopGrace = 10 * time.Second
 // goroutine right after it has decided to exit and released the lock.
 var autoSuspendWorkerExitHook func()
 
+// autoSuspendItem pairs an agent snapshot with the suspend_reason the worker
+// should record if the agent is still eligible when processed.
+type autoSuspendItem struct {
+	agent  store.Agent
+	reason state.SuspendReason
+}
+
 // autoSuspendWorker is the state of the server's auto-suspend worker. The
 // zero value is ready to use.
 type autoSuspendWorker struct {
 	mu sync.Mutex
 	// pending are the agents waiting for the next batch, in hand-off order.
-	pending []store.Agent
+	pending []autoSuspendItem
 	// queued holds the IDs of the pending agents and of the agents in the
 	// batch being processed.
 	queued map[string]bool
+	// nonResumableLogged records agentID -> runID for non-resumable agents the
+	// idle sweep has already logged at INFO, so later sweeps of the same run
+	// log at DEBUG instead of flooding INFO on every tick.
+	nonResumableLogged map[string]string
 	// running is set while the worker goroutine runs.
 	running bool
 	// stopped is set by stopAutoSuspendWorker; later hand-offs are dropped.
 	stopped bool
 	// wg tracks the worker goroutine.
 	wg sync.WaitGroup
+}
+
+const maxNonResumableLoggedEntries = 4096
+
+// idleAutoSuspendQueueCap returns the maximum queue occupancy usable by the
+// idle auto-suspend sweep, reserving half of autoSuspendQueueLimit (at least 1
+// slot whenever autoSuspendQueueLimit > 1) for stalled hand-offs, which
+// MarkStalledAgents offers only once.
+func idleAutoSuspendQueueCap() int {
+	if autoSuspendQueueLimit <= 1 {
+		return autoSuspendQueueLimit
+	}
+	return autoSuspendQueueLimit / 2
+}
+
+// idleAutoSuspendAvailableSlots returns how many idle candidates may currently
+// be added without intruding into the stalled hand-off reserve.
+func (s *Server) idleAutoSuspendAvailableSlots() int {
+	w := &s.autoSuspend
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return 0
+	}
+	avail := idleAutoSuspendQueueCap() - len(w.queued)
+	if avail < 0 {
+		return 0
+	}
+	return avail
+}
+
+func (s *Server) isAutoSuspendQueued(agentID string) bool {
+	w := &s.autoSuspend
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.queued[agentID]
+}
+
+func (s *Server) logIdleSuspendNonResumable(agent *store.Agent, harnessType, skipReason string) {
+	if agent == nil {
+		return
+	}
+	harnessConfig := ""
+	if agent.AppliedConfig != nil {
+		harnessConfig = agent.AppliedConfig.HarnessConfig
+	}
+	w := &s.autoSuspend
+	w.mu.Lock()
+	alreadyLogged := w.nonResumableLogged != nil && w.nonResumableLogged[agent.ID] == agent.RunID
+	if !alreadyLogged {
+		if w.nonResumableLogged == nil || len(w.nonResumableLogged) >= maxNonResumableLoggedEntries {
+			w.nonResumableLogged = map[string]string{}
+		}
+		w.nonResumableLogged[agent.ID] = agent.RunID
+	}
+	w.mu.Unlock()
+	if alreadyLogged {
+		slog.Debug("Scheduler: skipping auto-suspend; harness does not support resume",
+			"agent_id", agent.ID, "agent_name", agent.Name,
+			"harness_config", harnessConfig, "harness", harnessType, "reason", skipReason)
+		return
+	}
+	slog.Info("Scheduler: skipping auto-suspend; harness does not support resume",
+		"agent_id", agent.ID, "agent_name", agent.Name,
+		"harness_config", harnessConfig, "harness", harnessType, "reason", skipReason)
 }
 
 // lifetimeCtx returns the server-lifetime context, cancelled on shutdown,
@@ -89,15 +166,27 @@ func (s *Server) lifetimeCtx() context.Context {
 // auto-suspend worker, starting it if it is not running. It does not wait
 // for them to be suspended.
 func (s *Server) enqueueAutoSuspend(agents []store.Agent) {
+	s.enqueueAutoSuspendWithReason(agents, state.SuspendReasonStalled)
+}
+
+// enqueueAutoSuspendWithReason hands candidate agents to the auto-suspend
+// worker with the given suspend reason, starting the worker if it is not
+// already running. It does not wait for them to be suspended.
+func (s *Server) enqueueAutoSuspendWithReason(agents []store.Agent, reason state.SuspendReason) {
 	w := &s.autoSuspend
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.stopped {
-		slog.Info("Scheduler: auto-suspend worker stopped; stalled agents not handed off", "count", len(agents))
+		slog.Info("Scheduler: auto-suspend worker stopped; agents not handed off",
+			"count", len(agents), "reason", reason)
 		return
 	}
 	if w.queued == nil {
 		w.queued = map[string]bool{}
+	}
+	limit := autoSuspendQueueLimit
+	if reason == state.SuspendReasonIdle {
+		limit = idleAutoSuspendQueueCap()
 	}
 	added, duplicates, dropped := 0, 0, 0
 	for i := range agents {
@@ -105,20 +194,21 @@ func (s *Server) enqueueAutoSuspend(agents []store.Agent) {
 		switch {
 		case w.queued[id]:
 			duplicates++
-		case len(w.queued) >= autoSuspendQueueLimit:
+		case len(w.queued) >= limit:
 			dropped++
 		default:
 			w.queued[id] = true
-			w.pending = append(w.pending, agents[i])
+			w.pending = append(w.pending, autoSuspendItem{agent: agents[i], reason: reason})
 			added++
 		}
 	}
 	if duplicates > 0 {
-		slog.Debug("Scheduler: stalled agents already queued for auto-suspend", "count", duplicates)
+		slog.Debug("Scheduler: agents already queued for auto-suspend",
+			"count", duplicates, "reason", reason)
 	}
 	if dropped > 0 {
-		slog.Warn("Scheduler: auto-suspend queue full; stalled agents left running",
-			"dropped", dropped, "limit", autoSuspendQueueLimit)
+		slog.Warn("Scheduler: auto-suspend queue full; agents left running",
+			"dropped", dropped, "limit", limit, "reason", reason)
 	}
 	if added > 0 && !w.running {
 		w.running = true
@@ -139,7 +229,7 @@ func (s *Server) runAutoSuspendWorker() {
 		w.pending = nil
 		if len(batch) == 0 || w.stopped || ctx.Err() != nil {
 			for i := range batch {
-				delete(w.queued, batch[i].ID)
+				delete(w.queued, batch[i].agent.ID)
 			}
 			w.running = false
 			w.mu.Unlock()
@@ -159,15 +249,13 @@ func (s *Server) runAutoSuspendWorker() {
 // recovered and logged, as the scheduler did when the batch
 // ran on its goroutine: the hub keeps running, the batch's agents are
 // still removed from the queued set, and the worker goes on with the next
-// batch or exits normally, so later hand-offs are still processed. The
-// agents of the batch after the one that panicked are not suspended; they
-// stay stalled.
-func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []store.Agent) {
+// batch or exits normally, so later hand-offs are still processed.
+func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []autoSuspendItem) {
 	w := &s.autoSuspend
 	defer func() {
 		w.mu.Lock()
 		for i := range batch {
-			delete(w.queued, batch[i].ID)
+			delete(w.queued, batch[i].agent.ID)
 		}
 		w.mu.Unlock()
 	}()
@@ -177,7 +265,7 @@ func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []store.Agent) {
 				"panic", r, "batch_size", len(batch), "stack", string(debug.Stack()))
 		}
 	}()
-	s.autoSuspendStalledAgents(ctx, batch)
+	s.autoSuspendAgents(ctx, batch)
 }
 
 // haltAutoSuspendWorker drops later hand-offs and pending agents without

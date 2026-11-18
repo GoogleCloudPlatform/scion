@@ -198,7 +198,7 @@ func TestStartClaimWiring_WakeDefersWhileAnotherStartHoldsTheClaim(t *testing.T)
 	require.Nil(t, dmErr)
 	require.NotNil(t, res)
 	assert.Equal(t, WakeDeferred, res.Outcome)
-	assert.Equal(t, "agent is already starting", deferredReason(getAgent(t, f.s, a.ID)))
+	assert.Equal(t, "agent is already starting", f.srv.deferredReason(getAgent(t, f.s, a.ID)))
 }
 
 func TestStartClaimWiring_QueuedStopDrainReleasesSupersededClaim(t *testing.T) {

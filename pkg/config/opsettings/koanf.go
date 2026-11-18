@@ -151,6 +151,8 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"lifecycle": {
 		"server.hub.auto_suspend_stalled":          "auto_suspend_stalled",
 		"server.hub.stalled_threshold":             "stalled_threshold",
+		"server.hub.auto_suspend_idle":             "auto_suspend_idle",
+		"server.hub.idle_suspend_after":            "idle_suspend_after",
 		"server.hub.soft_delete_retention":         "soft_delete_retention",
 		"server.hub.soft_delete_retain_files":      "soft_delete_retain_files",
 		"server.hub.start_claim_lease_ttl":         "start_claim_lease_ttl",
@@ -219,6 +221,8 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"lifecycle": {
 		"auto_suspend_stalled":          "server.hub.auto_suspend_stalled",
 		"stalled_threshold":             "server.hub.stalled_threshold",
+		"auto_suspend_idle":             "server.hub.auto_suspend_idle",
+		"idle_suspend_after":            "server.hub.idle_suspend_after",
 		"soft_delete_retention":         "server.hub.soft_delete_retention",
 		"soft_delete_retain_files":      "server.hub.soft_delete_retain_files",
 		"start_claim_lease_ttl":         "server.hub.start_claim_lease_ttl",

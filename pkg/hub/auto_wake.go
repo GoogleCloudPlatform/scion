@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -72,7 +73,16 @@ const (
 // wakeOrAwaitStart, which resumes a suspended target and waits on a
 // starting one.
 func (s *Server) autoWakeModeOf(agent *store.Agent) autoWakeMode {
-	if agent == nil || !state.SuspendReason(agent.SuspendReason).AutoWakes() {
+	if agent == nil {
+		return autoWakeNone
+	}
+	if agent.IdleSuspendClaimActive {
+		if !s.experimentEnabled(experiments.IdleSuspend) {
+			return autoWakeNone
+		}
+		return autoWakeAwait
+	}
+	if !state.SuspendReason(agent.SuspendReason).AutoWakes() {
 		return autoWakeNone
 	}
 	var mode autoWakeMode
@@ -97,6 +107,39 @@ func (s *Server) autoWakeModeOf(agent *store.Agent) autoWakeMode {
 // reasons were recorded) never auto-wakes.
 func (s *Server) shouldAutoWake(agent *store.Agent) bool {
 	return s.autoWakeModeOf(agent) == autoWakeResume
+}
+
+// shouldQueueAutoWake reports whether a background-queued delivery path
+// (mention fan-out, web chat secondaries, notifications) should queue behind
+// runAutoWake: either the agent is already hub-suspended (shouldAutoWake), or
+// an idle auto-suspend claim is actively stopping its container. Unlike a
+// starting target (whose container is coming up and accepts broker-buffered
+// messages), a stopping target must settle and resume before dispatch.
+func (s *Server) shouldQueueAutoWake(agent *store.Agent) bool {
+	if s.shouldAutoWake(agent) {
+		return true
+	}
+	return agent != nil && agent.IdleSuspendClaimActive && s != nil && s.experimentEnabled(experiments.IdleSuspend)
+}
+
+// syncAutoWakeForDM waits for an in-flight idle auto-suspend to settle and
+// resumes a hub-suspended target when dispatchMarkedAgentMessage observes
+// *errAgentIdleSuspending on a synchronous DM path.
+func (s *Server) syncAutoWakeForDM(wakeCtx context.Context, agent *store.Agent) error {
+	if s.autoWakeModeOf(agent) == autoWakeNone {
+		return &errAutoWakeRefused{dmErr: s.validateAgentDeliverable(agent)}
+	}
+	if dmErr := s.heldTargetRefusal(wakeCtx, agent); dmErr != nil {
+		return &errAutoWakeRefused{dmErr: dmErr}
+	}
+	dmErr, awaitErr := s.wakeOrAwaitStart(wakeCtx, agent)
+	if dmErr != nil {
+		return &errAutoWakeRefused{dmErr: dmErr}
+	}
+	if awaitErr != nil {
+		return &errAutoWakeRefused{dmErr: startInProgressDMError(agent, awaitErr), awaitErr: awaitErr}
+	}
+	return nil
 }
 
 // agentHeldOrUnknown reports whether agentID is held, or its hold could not
@@ -223,13 +266,19 @@ func (s *Server) runAutoWake(ctx context.Context, agent *store.Agent, run *autoW
 // running needs nothing. A start already in progress (the row reads
 // starting, or WakeDeferred) is waited for, as a scheduled wake does.
 func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.Agent, *AgentDMError) {
-	ctx, cancel := context.WithTimeout(ctx, autoWakeBudget)
-	defer cancel()
-
-	current, err := s.store.GetAgent(ctx, agent.ID)
+	readCtx, cancelRead := context.WithTimeout(ctx, autoWakeBudget)
+	current, err := s.store.GetAgent(readCtx, agent.ID)
+	cancelRead()
 	if err != nil || current == nil {
 		return nil, &AgentDMError{Code: ErrCodeAgentNotRunning, Message: "agent could not be read for auto-wake", HTTPStatus: http.StatusConflict}
 	}
+	if current.IdleSuspendClaimActive || current.IdleSuspendClaimUntil != nil {
+		if err := s.waitForIdleSuspendToSettle(ctx, current); err != nil {
+			return nil, startInProgressDMError(current, err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, autoWakeBudget)
+	defer cancel()
 	if dmErr := s.heldTargetRefusal(ctx, current); dmErr != nil {
 		return nil, dmErr
 	}
@@ -239,10 +288,12 @@ func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.
 	// clears the reason, and that agent is not auto-woken again. A running
 	// target needs nothing; a starting one is only waited on.
 	switch state.Phase(current.Phase) {
-	case state.PhaseRunning, state.PhaseStarting:
+	case state.PhaseRunning:
+		return current, nil
+	case state.PhaseStarting:
 	default:
 		if s.autoWakeModeOf(current) == autoWakeNone {
-			return nil, validateAgentDeliverable(current)
+			return nil, s.validateAgentDeliverable(current)
 		}
 	}
 
@@ -277,6 +328,10 @@ func (s *Server) stopAutoWakes(ctx context.Context) {
 // stored copy messageID (non-interrupt, as for any secondary) and settle the
 // attachment addressee; a failed dispatch or wake marks the copy failed.
 func (s *Server) chatSecondaryAutoWakeItem(messageID, addressee, content string, msg *messages.StructuredMessage) autoWakeItem {
+	return s.chatSecondaryAutoWakeItemWithLog(messageID, addressee, content, msg, nil)
+}
+
+func (s *Server) chatSecondaryAutoWakeItemWithLog(messageID, addressee, content string, msg *messages.StructuredMessage, recordLog *slog.Logger) autoWakeItem {
 	return autoWakeItem{
 		deliver: func(ctx context.Context, woken *store.Agent) {
 			var err error
@@ -285,7 +340,7 @@ func (s *Server) chatSecondaryAutoWakeItem(messageID, addressee, content string,
 			} else {
 				dctx, cancel := context.WithTimeout(withDispatchMessageID(ctx, messageID), chatWakeDeliveryBudget)
 				_, err = s.holdOrDispatch(dctx, woken, messageID, nil, func() error {
-					return dispatchWithBrokerRetry(dctx, nil, dispatcher, woken, content, false, msg)
+					return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), recordLog, dispatcher, woken, content, false, msg)
 				})
 				cancel()
 			}
@@ -319,7 +374,7 @@ func (s *Server) chatSecondaryAutoWakeItem(messageID, addressee, content string,
 // again (autoWakeParkedNotificationSubscribers). It reports whether a wake
 // was queued.
 func (s *Server) autoWakeNotificationSubscriber(subscriber *store.Agent) bool {
-	if !s.shouldAutoWake(subscriber) {
+	if !s.shouldQueueAutoWake(subscriber) {
 		return false
 	}
 	return s.queueAutoWake(subscriber, autoWakeItem{
@@ -358,3 +413,57 @@ func (s *Server) autoWakeParkedNotificationSubscribers(ctx context.Context) {
 // autoWakeSuspendReasons are the suspend reasons that auto-wake
 // (state.SuspendReason.AutoWakes), for store queries.
 var autoWakeSuspendReasons = []string{string(state.SuspendReasonIdle), string(state.SuspendReasonStalled)}
+
+// convertHubSuspendToUser handles a user SUSPEND action on an agent that the
+// hub already suspended (suspend_reason idle or stalled): it rewrites
+// suspend_reason to user in place, with no runtime broker action, so future
+// messages do not auto-wake the agent. It returns true when it handled the
+// request (writing the response to w), or false when the caller should proceed
+// with the normal running-only suspend path (for example when the agent is
+// already user-suspended, not suspended, or a concurrent wake changed its
+// phase before the CAS write).
+func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
+	if !s.experimentEnabled(experiments.IdleSuspend) {
+		return false
+	}
+	if agent == nil || agent.Phase != string(state.PhaseSuspended) ||
+		!state.SuspendReason(agent.SuspendReason).AutoWakes() ||
+		reincarnationInFlight(agent) {
+		return false
+	}
+	if agent.StartClaimID != "" || s.lifecycleOps.active(agent.ID) {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"Agent has a lifecycle operation in progress; retry once it settles.", nil)
+		return true
+	}
+	err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:            string(state.PhaseSuspended),
+		SuspendReason:    string(state.SuspendReasonUser),
+		IfPhase:          string(state.PhaseSuspended),
+		IfNoStartClaim:   true,
+		IfAutoWakeReason: true,
+	})
+	if errors.Is(err, store.ErrClaimPredicate) {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"Agent has a lifecycle operation in progress; retry once it settles.", nil)
+		return true
+	}
+	if errors.Is(err, store.ErrPhaseMismatch) {
+		if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
+			*agent = *fresh
+		}
+		return false
+	}
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return true
+	}
+	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(state.SuspendReasonUser))
+	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
+	s.events.PublishAgentStatus(ctx, agent)
+	respAgent := *agent
+	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(
+		agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent})
+	return true
+}

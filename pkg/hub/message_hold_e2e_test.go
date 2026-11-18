@@ -48,6 +48,7 @@ import (
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -2820,4 +2821,494 @@ func TestHoldA2_Round3_RV3N2_HoldOrDispatchErrorUsesFixedReason(t *testing.T) {
 	require.NotNil(t, msgs.Items[0].DispatchFailureReason)
 	assert.Equal(t, holdFailReasonPrepareFailed, *msgs.Items[0].DispatchFailureReason)
 	assert.NotContains(t, *msgs.Items[0].DispatchFailureReason, "raw sqlite internal constraint detail xyz")
+}
+
+type holdIdleMarkInterceptStore struct {
+	store.Store
+	markCalls        atomic.Int32
+	forceClaimOnNext atomic.Bool
+	forceMarkErr     atomic.Bool
+}
+
+func (s *holdIdleMarkInterceptStore) MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error) {
+	s.markCalls.Add(1)
+	if s.forceMarkErr.Load() {
+		return nil, false, errors.New("simulated MarkAgentDelivery failure")
+	}
+	if s.forceClaimOnNext.CompareAndSwap(true, false) {
+		a, err := s.Store.GetAgent(ctx, agentID)
+		if err != nil {
+			return nil, false, err
+		}
+		cp := *a
+		cp.IdleSuspendClaimActive = true
+		return &cp, true, nil
+	}
+	return s.Store.MarkAgentDelivery(ctx, agentID)
+}
+
+func configureHoldIdleSuspendGate(t *testing.T, f *holdE2EFixture, expEnabled, settingEnabled bool) {
+	t.Helper()
+	setHoldTestSettings(t, f.srv, map[string]bool{
+		conduitExperiment:             true,
+		experiments.ConduitDeliver:    true,
+		experiments.ChatScheduledSend: true,
+		experiments.IdleSuspend:       expEnabled,
+	})
+	f.srv.mu.Lock()
+	f.srv.config.AutoSuspendIdle = settingEnabled
+	f.srv.config.IdleSuspendAfter = 15 * time.Minute
+	f.srv.mu.Unlock()
+}
+
+func claimHoldTargetIdleForTest(t *testing.T, st store.Store, target *store.Agent) time.Time {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	idleSince := now.Add(-20 * time.Minute).Truncate(time.Microsecond)
+	_, err := st.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	db := st.(*entadapter.CompositeStore).DB()
+	_, err = db.ExecContext(ctx,
+		"UPDATE agents SET phase = ?, activity = ?, activity_since = ?, last_seen = ?, last_delivery_at = NULL, idle_suspend_claim_until = NULL WHERE id = ?",
+		string(state.PhaseRunning), string(state.ActivityIdle), idleSince, now.Add(-15*time.Second), target.ID,
+	)
+	require.NoError(t, err)
+	fresh, err := st.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+
+	_, _, claimUntil, err := st.ClaimIdleSuspend(ctx, target.ID, store.IdleSuspendCondition{
+		RunID:            fresh.RunID,
+		Activity:         fresh.Activity,
+		ActivitySince:    *fresh.ActivitySince,
+		IdleSuspendAfter: 15 * time.Minute,
+		HeartbeatRecency: 2 * time.Minute,
+		ClaimTTL:         2 * time.Minute,
+	})
+	require.NoError(t, err)
+	return claimUntil
+}
+
+// TestHold_IdleSuspend_RedriveDefersActiveClaimAndGateErrorWithoutWaking verifies
+// that message_hold_redrive routes through the delivery gate and treats both an
+// active idle-suspend claim and pre-dispatch errAgentIdleSuspending as deferrable
+// (keeping the message in awaiting_session for a later re-drive, without waking
+// or failing the row).
+func TestHold_IdleSuspend_RedriveDefersActiveClaimAndGateErrorWithoutWaking(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+	configureHoldIdleSuspendGate(t, f, true, true)
+
+	intercept, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *holdIdleMarkInterceptStore {
+		return &holdIdleMarkInterceptStore{Store: inner}
+	})
+
+	// Seed a held message and connect a live Conduit deliver-message session.
+	// Claim idle suspend FIRST so the session-admission callback's automatic
+	// re-drive also sees the active claim and defers!
+	claimHoldTargetIdleForTest(t, f.store, f.launched)
+	m1 := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "held-during-idle-claim", time.Now().UTC().Add(10*time.Minute))
+	f.connectDeliverSession(t, f.public.URL, true, nil)
+
+	// 1. Active idle-suspend claim: sweep and direct redrive keep m1 held without waking.
+	f.srv.sweepHeldMessages(ctx)
+	f.srv.redriveAgentHeldMessagesOnce(ctx, f.launched.ID)
+
+	got1, err := f.store.GetMessage(ctx, m1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchAwaitingSession, got1.DispatchState, "active idle-suspend claim must keep held message in awaiting_session")
+	f.disp.mu.Lock()
+	startsAfterActiveClaim := f.disp.startCalls
+	f.disp.mu.Unlock()
+	assert.Zero(t, startsAfterActiveClaim, "re-drive must never wake an idle-suspending agent")
+	assert.Zero(t, f.disp.dispatchCount(f.launched.Slug))
+
+	// 2. Clear the persisted claim, then inject errAgentIdleSuspending from the
+	// delivery gate inside dispatchClaimedHeldMessage (after revalidateClaimedHeldMessage
+	// already passed): processClaimedHeldRow must re-hold m1 as deferrable, never fail
+	// it with broker delivery failed and never wake.
+	require.NoError(t, f.store.ClearIdleSuspendClaim(ctx, f.launched.ID))
+	_, err = f.store.SetRunIntent(ctx, f.launched.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	intercept.markCalls.Store(0)
+	intercept.forceClaimOnNext.Store(true)
+
+	f.srv.redriveAgentHeldMessagesOnce(ctx, f.launched.ID)
+	assert.Equal(t, int32(1), intercept.markCalls.Load(), "dispatchClaimedHeldMessage must invoke MarkAgentDelivery via deliveryMarker")
+
+	got2, err := f.store.GetMessage(ctx, m1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchAwaitingSession, got2.DispatchState, "errAgentIdleSuspending from delivery gate must re-hold row for later retry")
+	hasHold, err := f.store.HasAgentDeliveryHold(ctx, f.launched.ID)
+	require.NoError(t, err)
+	assert.True(t, hasHold, "agent_delivery_holds marker must remain active after deferrable re-hold")
+	f.disp.mu.Lock()
+	startsAfterGateDefer := f.disp.startCalls
+	f.disp.mu.Unlock()
+	assert.Zero(t, startsAfterGateDefer, "re-drive must not auto-wake on errAgentIdleSuspending")
+	assert.Zero(t, f.disp.dispatchCount(f.launched.Slug))
+
+	// 3. Subsequent re-drive retries and delivers m1 once the claim is gone.
+	f.srv.redriveAgentHeldMessagesOnce(ctx, f.launched.ID)
+	f.waitMessageState(t, m1.ID, store.MessageDispatchDelivered)
+
+	freshTarget, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	assert.NotNil(t, freshTarget.LastDeliveryAt, "re-driven delivery must stamp LastDeliveryAt")
+}
+
+// TestHold_IdleSuspend_HoldOrDispatchPassesPreDispatchErrorsThroughWithoutCreatingHold
+// verifies that holdOrDispatch passes pre-dispatch errDeliveryMarkFailed and
+// errAgentIdleSuspending straight through without creating or joining an
+// awaiting_session hold, and refreshes hold_launch_id after synchronous auto-wake.
+func TestHold_IdleSuspend_HoldOrDispatchPassesPreDispatchErrorsThroughWithoutCreatingHold(t *testing.T) {
+	t.Run("errDeliveryMarkFailed passes through without creating or joining hold", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+		configureHoldIdleSuspendGate(t, f, true, true)
+
+		intercept, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *holdIdleMarkInterceptStore {
+			return &holdIdleMarkInterceptStore{Store: inner}
+		})
+		intercept.forceMarkErr.Store(true)
+
+		// Case 1: no existing hold marker -> no hold marker created, error passes through.
+		fresh, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		_, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    f.agent,
+			SenderIdentity: &storedAgentIdentity{agent: f.agent},
+			TargetAgent:    fresh,
+			ProjectID:      fresh.ProjectID,
+			Msg:            "mark-fail-no-hold",
+			Type:           messages.TypeInstruction,
+		})
+		require.NotNil(t, dmErr)
+		hasHold, err := f.store.HasAgentDeliveryHold(ctx, f.launched.ID)
+		require.NoError(t, err)
+		assert.False(t, hasHold, "errDeliveryMarkFailed must not create a session hold")
+
+		// Case 2: active hold marker already exists -> errDeliveryMarkFailed STILL
+		// passes straight through without queueing the new message into awaiting_session.
+		seeded := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "existing-held", time.Now().UTC().Add(10*time.Minute))
+		row2 := &store.Message{
+			ID:            uuid.NewString(),
+			ProjectID:     f.launched.ProjectID,
+			AgentID:       f.launched.ID,
+			Sender:        "agent:" + f.agent.Slug,
+			SenderID:      f.agent.ID,
+			Recipient:     "agent:" + f.launched.Slug,
+			RecipientID:   f.launched.ID,
+			Msg:           "mark-fail-with-existing-hold",
+			Type:          messages.TypeInstruction,
+			DispatchState: store.MessageDispatchPending,
+			CreatedAt:     time.Now().UTC(),
+		}
+		require.NoError(t, f.store.CreateMessage(ctx, row2))
+
+		targetCopy := *fresh
+		held, hErr := f.srv.holdOrDispatch(ctx, &targetCopy, row2.ID, row2, func() error {
+			return dispatchWithBrokerRetry(withDispatchMessageID(ctx, row2.ID), f.srv.deliveryMarker(), nil, f.disp, &targetCopy, row2.Msg, false, nil)
+		})
+		assert.False(t, held, "holdOrDispatch must not hold row when MarkAgentDelivery fails")
+		var markErr *errDeliveryMarkFailed
+		require.ErrorAs(t, hErr, &markErr)
+
+		gotRow2, err := f.store.GetMessage(ctx, row2.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchPending, gotRow2.DispatchState, "row must not move to awaiting_session on errDeliveryMarkFailed")
+		gotSeeded, err := f.store.GetMessage(ctx, seeded.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchAwaitingSession, gotSeeded.DispatchState)
+	})
+
+	t.Run("errAgentIdleSuspending passes through on non-wake and refreshes hold_launch_id on auto-wake", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+		configureHoldIdleSuspendGate(t, f, true, true)
+
+		// Seed an active hold marker on the old run, then claim idle suspend.
+		oldRunID := f.launched.RunID
+		seededOld := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "old-run-held", time.Now().UTC().Add(10*time.Minute))
+		claimUntil := claimHoldTargetIdleForTest(t, f.store, f.launched)
+
+		// 1. Non-auto-wake caller through holdOrDispatch: errAgentIdleSuspending
+		// passes straight through WITHOUT queueing behind the old run's session hold.
+		nonWakeRow := &store.Message{
+			ID:            uuid.NewString(),
+			ProjectID:     f.launched.ProjectID,
+			AgentID:       f.launched.ID,
+			Sender:        "agent:" + f.agent.Slug,
+			SenderID:      f.agent.ID,
+			Recipient:     "agent:" + f.launched.Slug,
+			RecipientID:   f.launched.ID,
+			Msg:           "non-wake-during-idle-claim",
+			Type:          messages.TypeInstruction,
+			DispatchState: store.MessageDispatchPending,
+			CreatedAt:     time.Now().UTC(),
+		}
+		require.NoError(t, f.store.CreateMessage(ctx, nonWakeRow))
+
+		staleTarget, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		staleTarget.IdleSuspendClaimActive = false // simulate pre-claim caller snapshot
+		held, hErr := f.srv.holdOrDispatch(ctx, staleTarget, nonWakeRow.ID, nonWakeRow, func() error {
+			return dispatchWithBrokerRetry(withDispatchMessageID(ctx, nonWakeRow.ID), f.srv.deliveryMarker(), nil, f.disp, staleTarget, nonWakeRow.Msg, false, nil)
+		})
+		assert.False(t, held, "non-wake caller must not join dying run's session hold")
+		var idleErr *errAgentIdleSuspending
+		require.ErrorAs(t, hErr, &idleErr)
+		gotNonWake, err := f.store.GetMessage(ctx, nonWakeRow.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchPending, gotNonWake.DispatchState)
+
+		// 2. Auto-wake DM caller while claim settles into suspended(reason=idle)
+		// and wakes into a new RunID before the new container's Conduit session connects:
+		// hold_launch_id must be refreshed to the new RunID so startup hold + redrive succeed.
+		wokenRunID := uuid.NewString()
+		f.disp.mu.Lock()
+		f.disp.onStart = func(_ context.Context, target *store.Agent) {
+			go func(agentID string) {
+				time.Sleep(25 * time.Millisecond)
+				db := f.store.(*entadapter.CompositeStore).DB()
+				_, _ = db.ExecContext(context.Background(), "UPDATE agents SET run_id = ? WHERE id = ?", wokenRunID, agentID)
+				_ = f.store.UpdateAgentStatus(context.Background(), agentID, store.AgentStatusUpdate{
+					Phase:    string(state.PhaseRunning),
+					Activity: "idle",
+				})
+			}(target.ID)
+		}
+		f.disp.mu.Unlock()
+
+		// Complete the in-flight idle suspend shortly after ExecuteAgentDM starts waiting.
+		go func() {
+			time.Sleep(40 * time.Millisecond)
+			recorded, rerr := f.srv.recordStopStatus(context.Background(), f.launched.ID, oldRunID, "auto-suspend", store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				ContainerStatus:     "stopped",
+				Activity:            "",
+				RetainedActivity:    string(state.ActivityIdle),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfIdleSuspendCommit: &claimUntil,
+			})
+			if rerr == nil && recorded {
+				_ = f.store.ClearIdleSuspendClaim(context.Background(), f.launched.ID)
+			}
+		}()
+
+		preWakeSnap, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		preWakeSnap.IdleSuspendClaimActive = false // exercise stale-read -> MarkAgentDelivery -> syncAutoWake path
+		res, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    f.agent,
+			SenderIdentity: &storedAgentIdentity{agent: f.agent},
+			TargetAgent:    preWakeSnap,
+			ProjectID:      preWakeSnap.ProjectID,
+			Msg:            "wake-conduit-dm-new-run",
+			Type:           messages.TypeInstruction,
+		})
+		require.Nil(t, dmErr)
+		require.NotNil(t, res)
+
+		// Old run's held message survives idle auto-suspend and is rebound to wokenAgent.RunID.
+		survivedOld := f.waitMessageState(t, seededOld.ID, store.MessageDispatchAwaitingSession)
+
+		// New woken DM enters awaiting_session behind seededOld on the new RunID (since no Conduit
+		// session has connected for newRunID yet), with HoldLaunchID == wokenAgent.RunID!
+		wokenAgent, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		require.NotEqual(t, oldRunID, wokenAgent.RunID)
+		assert.Equal(t, wokenAgent.RunID, survivedOld.HoldLaunchID, "surviving held row must rebind to the woken RunID")
+		heldWakeMsg := f.waitMessageState(t, res.MessageID, store.MessageDispatchAwaitingSession)
+		assert.Equal(t, wokenAgent.RunID, heldWakeMsg.HoldLaunchID, "refreshHoldLaunchAfterWake must stamp the woken RunID")
+
+		// Connect Conduit session for the woken run -> re-drive delivers both in FIFO order!
+		ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+		f.waitMessageState(t, seededOld.ID, store.MessageDispatchDelivered)
+		f.waitMessageState(t, res.MessageID, store.MessageDispatchDelivered)
+		pasted := strings.Join(ca.tmux.pastedTexts(), "\n")
+		assert.Less(t, strings.Index(pasted, "old-run-held"), strings.Index(pasted, "wake-conduit-dm-new-run"),
+			"surviving pre-idle held row must re-drive ahead of the post-wake message")
+	})
+}
+
+// TestHold_IdleSuspend_OffStateParity verifies that when either
+// lifecycle.idle_suspend or server.hub.auto_suspend_idle is off, holdOrDispatch
+// and redriveAgentHeldMessagesOnce behave identically to upstream-main without
+// touching MarkAgentDelivery.
+func TestHold_IdleSuspend_OffStateParity(t *testing.T) {
+	cases := []struct {
+		name           string
+		expEnabled     bool
+		settingEnabled bool
+	}{
+		{name: "experiment_off_setting_on", expEnabled: false, settingEnabled: true},
+		{name: "both_off", expEnabled: false, settingEnabled: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHoldE2EFixture(t)
+			ctx := context.Background()
+			configureHoldIdleSuspendGate(t, f, tc.expEnabled, tc.settingEnabled)
+
+			intercept, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *holdIdleMarkInterceptStore {
+				return &holdIdleMarkInterceptStore{Store: inner}
+			})
+			intercept.forceMarkErr.Store(true)
+
+			// 1. m1 dispatches while no session is connected -> held in awaiting_session.
+			fresh1, err := f.store.GetAgent(ctx, f.launched.ID)
+			require.NoError(t, err)
+			res1, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+				SenderAgent:    f.agent,
+				SenderIdentity: &storedAgentIdentity{agent: f.agent},
+				TargetAgent:    fresh1,
+				ProjectID:      fresh1.ProjectID,
+				Msg:            "off-parity-1",
+				Type:           messages.TypeInstruction,
+			})
+			require.Nil(t, dmErr)
+			f.waitMessageState(t, res1.MessageID, store.MessageDispatchAwaitingSession)
+
+			// 2. m2 arrives while hold marker is active -> holdOrDispatch queues behind m1.
+			fresh2, err := f.store.GetAgent(ctx, f.launched.ID)
+			require.NoError(t, err)
+			res2, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+				SenderAgent:    f.agent,
+				SenderIdentity: &storedAgentIdentity{agent: f.agent},
+				TargetAgent:    fresh2,
+				ProjectID:      fresh2.ProjectID,
+				Msg:            "off-parity-2",
+				Type:           messages.TypeInstruction,
+			})
+			require.Nil(t, dmErr)
+			f.waitMessageState(t, res2.MessageID, store.MessageDispatchAwaitingSession)
+
+			// 3. Session connects -> redrive delivers both in order, with zero MarkAgentDelivery calls.
+			ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+			f.waitMessageState(t, res1.MessageID, store.MessageDispatchDelivered)
+			f.waitMessageState(t, res2.MessageID, store.MessageDispatchDelivered)
+
+			assert.Zero(t, intercept.markCalls.Load(), "MarkAgentDelivery must never run when %s", tc.name)
+			deliveries := f.disp.deliveries()
+			require.NotEmpty(t, deliveries)
+			assert.Equal(t, []string{res1.MessageID, res2.MessageID}, deliveries[len(deliveries)-1].MessageIDs)
+			pasted := strings.Join(ca.tmux.pastedTexts(), "\n")
+			idx1 := strings.Index(pasted, "off-parity-1")
+			idx2 := strings.Index(pasted, "off-parity-2")
+			assert.NotEqual(t, -1, idx1)
+			assert.Less(t, idx1, idx2, "off-parity-1 must be delivered before off-parity-2")
+		})
+	}
+
+	t.Run("experiment_on_setting_off_marks_deliveries", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+		configureHoldIdleSuspendGate(t, f, true, false)
+
+		intercept, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *holdIdleMarkInterceptStore {
+			return &holdIdleMarkInterceptStore{Store: inner}
+		})
+
+		fresh1, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		res1, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    f.agent,
+			SenderIdentity: &storedAgentIdentity{agent: f.agent},
+			TargetAgent:    fresh1,
+			ProjectID:      fresh1.ProjectID,
+			Msg:            "exp-on-set-off-1",
+			Type:           messages.TypeInstruction,
+		})
+		require.Nil(t, dmErr)
+		f.waitMessageState(t, res1.MessageID, store.MessageDispatchAwaitingSession)
+
+		fresh2, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		res2, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    f.agent,
+			SenderIdentity: &storedAgentIdentity{agent: f.agent},
+			TargetAgent:    fresh2,
+			ProjectID:      fresh2.ProjectID,
+			Msg:            "exp-on-set-off-2",
+			Type:           messages.TypeInstruction,
+		})
+		require.Nil(t, dmErr)
+		f.waitMessageState(t, res2.MessageID, store.MessageDispatchAwaitingSession)
+
+		ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+		f.waitMessageState(t, res1.MessageID, store.MessageDispatchDelivered)
+		f.waitMessageState(t, res2.MessageID, store.MessageDispatchDelivered)
+
+		assert.GreaterOrEqual(t, intercept.markCalls.Load(), int32(1), "MarkAgentDelivery must run when experiment is on even with auto_suspend_idle=false")
+		after, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		assert.NotNil(t, after.LastDeliveryAt)
+		pasted := strings.Join(ca.tmux.pastedTexts(), "\n")
+		assert.Less(t, strings.Index(pasted, "exp-on-set-off-1"), strings.Index(pasted, "exp-on-set-off-2"))
+	})
+}
+
+// TestHold_IdleSuspend_StaleClaimSnapshotFallsThroughToSessionHold verifies O1:
+// when a caller's agent snapshot has IdleSuspendClaimActive=true, but the
+// idle-suspend claim cleared before holdOrDispatch ran (for example a stop
+// failure or user action cleared it), markAgentForDispatch succeeds and
+// holdOrDispatch falls through to applyPrepareOrHold rather than bypassing the
+// #4935 session-hold gate.
+func TestHold_IdleSuspend_StaleClaimSnapshotFallsThroughToSessionHold(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+	configureHoldIdleSuspendGate(t, f, true, true)
+
+	// Seed an initial no_session hold marker via m1.
+	fresh1, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	res1, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:    f.agent,
+		SenderIdentity: &storedAgentIdentity{agent: f.agent},
+		TargetAgent:    fresh1,
+		ProjectID:      fresh1.ProjectID,
+		Msg:            "o1-seed-hold",
+		Type:           messages.TypeInstruction,
+	})
+	require.Nil(t, dmErr)
+	f.waitMessageState(t, res1.MessageID, store.MessageDispatchAwaitingSession)
+
+	hasHold, err := f.store.HasAgentDeliveryHold(ctx, f.launched.ID)
+	require.NoError(t, err)
+	require.True(t, hasHold)
+
+	// Take and then clear an idle-suspend claim so a snapshot read before the
+	// clear still carries IdleSuspendClaimActive=true while the DB row has none.
+	claimHoldTargetIdleForTest(t, f.store, f.launched)
+	staleSnapshot, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	require.True(t, staleSnapshot.IdleSuspendClaimActive, "snapshot read while claim was held")
+
+	// Clear the claim and revert run_intent before holdOrDispatch runs.
+	require.NoError(t, f.store.ClearIdleSuspendClaim(ctx, f.launched.ID))
+	_, err = f.store.SetRunIntent(ctx, f.launched.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+
+	deliveriesBefore := len(f.disp.deliveries())
+	res2, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:    f.agent,
+		SenderIdentity: &storedAgentIdentity{agent: f.agent},
+		TargetAgent:    staleSnapshot,
+		ProjectID:      staleSnapshot.ProjectID,
+		Msg:            "o1-stale-claim-held",
+		Type:           messages.TypeInstruction,
+	})
+	require.Nil(t, dmErr)
+	f.waitMessageState(t, res2.MessageID, store.MessageDispatchAwaitingSession)
+	assert.Equal(t, deliveriesBefore, len(f.disp.deliveries()),
+		"stale IdleSuspendClaimActive snapshot must fall through to applyPrepareOrHold without unheld broker dispatch")
+
+	// Connect session -> both m1 and m2 deliver in order.
+	ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+	f.waitMessageState(t, res1.MessageID, store.MessageDispatchDelivered)
+	f.waitMessageState(t, res2.MessageID, store.MessageDispatchDelivered)
+	pasted := strings.Join(ca.tmux.pastedTexts(), "\n")
+	assert.Contains(t, pasted, "o1-seed-hold")
+	assert.Contains(t, pasted, "o1-stale-claim-held")
 }

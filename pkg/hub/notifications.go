@@ -62,6 +62,14 @@ type NotificationDispatcher struct {
 	// and is delivered by the drain that follows a successful wake. The
 	// Server sets it (autoWakeNotificationSubscriber); nil = no auto-wake.
 	autoWakeFn func(subscriber *store.Agent) bool
+
+	// idleSuspendGateFn reports whether lifecycle.idle_suspend is enabled;
+	// nil means off (AC 8).
+	idleSuspendGateFn func() bool
+}
+
+func (nd *NotificationDispatcher) deliveryMarker() agentDeliveryMarker {
+	return gatedDeliveryMarker{store: nd.store, gate: nd.idleSuspendGateFn}
 }
 
 // offerAutoWake offers a suspended subscriber to autoWakeFn.
@@ -590,8 +598,29 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
 
-	nd.recordAttempt(ctx, notif.ID)
-	if err := dispatchWithBrokerRetry(retryCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
+	err = dispatchWithBrokerRetry(
+		retryCtx,
+		nd.deliveryMarker(),
+		nd.messageLog,
+		dispatcher,
+		subscriber,
+		notif.Message,
+		false,
+		structuredMsg,
+		withBeforeBrokerAttempt(func() { nd.recordAttempt(ctx, notif.ID) }),
+	)
+	if err != nil {
+		var idleErr *errAgentIdleSuspending
+		if errors.As(err, &idleErr) {
+			if nd.offerAutoWake(subscriber) {
+				nd.log.Info("Subscriber agent is suspending or suspended; notification parked while it is woken",
+					"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+				return
+			}
+			nd.log.Info("Subscriber agent is suspending or suspended; notification parked until it resumes",
+				"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+			return
+		}
 		nd.log.Error("Failed to dispatch notification to agent; notification NOT dispatched",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
 		// Do NOT mark as dispatched: the notification was not delivered.

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -327,13 +328,12 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // Every field counts, including the internal json:"-" ones a decoded status
 // POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
 // erring towards "not empty" only means the store write runs.
-// The exceptions are the preconditions IfPhase, IfRunID, StartWrite,
-// GuardReincarnation, ReportSource, ReportRunID, ReportAgentToken and Restore, and the output
-// Result: they only condition the write (StartWrite selects the delete
-// guard; GuardReincarnation turns on the store's reincarnation guard;
-// ReportSource, ReportRunID and ReportAgentToken select the report rules; Restore only
-// qualifies a Phase) or report on it,
-// and persist nothing themselves, so they deliberately do not count.
+// The exceptions are the preconditions IfPhase, IfRunID, IfIdleSuspendCommit,
+// IfNoStartClaim, IfNoActiveIdleClaim, IfAutoWakeReason, StartWrite,
+// GuardReincarnation, ReportSource, ReportRunID, ReportAgentToken, Restore,
+// SuspendReason and RetainedActivity, and the output Result: they only
+// condition or qualify a Phase write or report on it, and persist nothing
+// themselves, so they deliberately do not count.
 // TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
 func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 	return !statusUpdateTouchesGuardedFields(su) &&
@@ -569,7 +569,15 @@ func (e *errHarnessNoResume) Error() string {
 // SupportYes; ptone/scion#7922, ptone/scion#8227) so GET, full-view list,
 // manual suspend, auto-suspend and membership-loss suspend always agree.
 func (s *Server) harnessSupportsResume(ctx context.Context, agent *store.Agent) (supported bool, harnessType, reason string) {
-	harnessType, caps := s.resolveAgentHarnessCapabilities(ctx, agent)
+	return s.harnessSupportsResumeMemo(ctx, agent, nil)
+}
+
+func (s *Server) harnessSupportsResumeMemo(ctx context.Context, agent *store.Agent, memo *harnessTypeMemo) (supported bool, harnessType, reason string) {
+	if agent != nil && isManagedAgentRuntime(agent.Runtime) {
+		return false, agent.Runtime, "managed agent runtimes do not support suspend"
+	}
+	harnessType = s.effectiveAgentHarnessTypeMemo(ctx, agent, memo)
+	caps := agentHarnessCapabilities(agent, harnessType)
 	if caps.Resume.Support == api.SupportNo {
 		return false, harnessType, caps.Resume.Reason
 	}
@@ -603,6 +611,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 
 	dispatcher := s.GetDispatcher()
 	stopRunID := agent.RunID
+	preStopRetained := string(state.RetainedSuspendActivity(
+		state.Activity(agent.Activity),
+		state.Activity(agent.StalledFromActivity),
+	))
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
 		// As for stop: warn about, and record, work in an ephemeral
 		// workspace that the suspend discards (ptone/scion#3819).
@@ -627,10 +639,11 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// reservation (ptone/scion#2550).
 	newPhase := string(state.PhaseSuspended)
 	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "suspend", store.AgentStatusUpdate{
-		Phase:           newPhase,
-		ContainerStatus: "stopped",
-		Activity:        "",
-		SuspendReason:   string(state.SuspendReasonUser),
+		Phase:            newPhase,
+		ContainerStatus:  "stopped",
+		Activity:         "",
+		RetainedActivity: preStopRetained,
+		SuspendReason:    string(state.SuspendReasonUser),
 	})
 	if err != nil {
 		// The container is stopped but the write failed. Revoke the
@@ -654,6 +667,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
 	s.syncAgentAfterStopRecord(ctx, agent, newPhase, string(state.SuspendReasonUser))
+	if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
+		agent.Activity = fresh.Activity
+	}
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation so it stops consuming broker
 	// capacity until it is resumed (ptone/scion#1963), and its
@@ -709,6 +725,62 @@ func (s *Server) swapRunIntent(ctx context.Context, agent *store.Agent, intent s
 	stored := at
 	agent.RunIntentAt = &stored
 	return prior, at, nil
+}
+
+// swapSystemRunIntent records a hub-initiated (non-user) run-intent transition,
+// yielding with store.ErrIdleSuspendPrecondition when an active idle-suspend
+// claim already owns the agent's shutdown.
+func (s *Server) swapSystemRunIntent(ctx context.Context, agent *store.Agent, intent store.RunIntent) (store.RunIntent, time.Time, error) {
+	prior, at, err := s.store.SwapSystemRunIntent(ctx, agent.ID, intent)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("record system run intent %s: %w", intent, err)
+	}
+	agent.RunIntent = intent
+	stored := at
+	agent.RunIntentAt = &stored
+	return prior, at, nil
+}
+
+// userStartIdleSettleWait bounds how long a user start/resume waits for an
+// active idle-suspend claim to commit before preempting it directly.
+var userStartIdleSettleWait = 2 * time.Second
+
+func (s *Server) waitForIdleSuspendBeforeUserStart(ctx context.Context, agent *store.Agent) {
+	budget := userStartIdleSettleWait
+	if idleSuspendSettleTimeoutOverride > 0 && idleSuspendSettleTimeoutOverride < budget {
+		budget = idleSuspendSettleTimeoutOverride
+	}
+	wctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	for {
+		fresh, err := s.store.GetAgent(wctx, agent.ID)
+		if err != nil || fresh == nil {
+			return
+		}
+		*agent = *fresh
+		if !fresh.IdleSuspendClaimActive {
+			return
+		}
+		select {
+		case <-wctx.Done():
+			return
+		case <-time.After(scheduledWakePollInterval):
+		}
+	}
+}
+
+// claimIdleSuspend atomically checks the idle-suspend guards on the locked
+// agent row, swaps run_intent to stopped, and records an idle-suspend claim
+// lease before DispatchAgentStop runs.
+func (s *Server) claimIdleSuspend(ctx context.Context, agent *store.Agent, cond store.IdleSuspendCondition) (store.RunIntent, time.Time, time.Time, error) {
+	prior, at, claimUntil, err := s.store.ClaimIdleSuspend(ctx, agent.ID, cond)
+	if err != nil {
+		return "", time.Time{}, time.Time{}, err
+	}
+	agent.RunIntent = store.RunIntentStopped
+	stored := at
+	agent.RunIntentAt = &stored
+	return prior, at, claimUntil, nil
 }
 
 // AgentLifecycleStartRequest is the optional JSON body for the "start"
@@ -783,6 +855,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// Managed agent lifecycle: handle directly without broker dispatch.
 	if isManagedAgentRuntime(agent.Runtime) {
 		s.handleManagedAgentLifecycle(w, r, agent, action)
+		return
+	}
+
+	// An agent already suspended by the hub (suspend_reason idle or stalled)
+	// can be converted in place to a user suspension without any broker action.
+	if action == api.AgentActionSuspend && s.convertHubSuspendToUser(ctx, w, agent) {
 		return
 	}
 
@@ -887,6 +965,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					return
 				}
 			}
+			if agent.IdleSuspendClaimActive {
+				s.waitForIdleSuspendBeforeUserStart(ctx, agent)
+			}
 			// rest is the effective resting phase (ptone/scion#4669): an error
 			// row that remembers the phase a failed asynchronous start began
 			// from resumes as that phase would (a suspended memory resumes
@@ -897,7 +978,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				s.agentLifecycleLog.Warn("Force-resuming agent from error phase via lifecycle start",
 					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
 			}
-			resume := rest == string(state.PhaseSuspended) || forcedRecovery
+			resume := rest == string(state.PhaseSuspended) || forcedRecovery || agent.IdleSuspendClaimActive
 			// Flat placement pre-check: a stale pin is refused before the
 			// reservation, the run intent and any credential or run-ID
 			// write.
@@ -977,10 +1058,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			defer s.releaseSupersededClaim(ctx, agent.ID, stopSupersedes, stopIntentAt)
 		}
 	case api.AgentActionSuspend:
-		// Only running agents can be suspended via the HTTP lifecycle handler.
-		// (The auto-suspend scheduler does not come through here: it runs its
-		// own inline suspend and restricts itself to running+stalled agents.)
-		if agent.Phase != string(state.PhaseRunning) {
+		// Only running agents (or an agent currently stopping under an active
+		// idle auto-suspend claim, which a user suspend converts into a user
+		// suspension) can be suspended via the HTTP lifecycle handler.
+		idleSuspending := agent.IdleSuspendClaimActive
+		if agent.Phase != string(state.PhaseRunning) && !idleSuspending {
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 				fmt.Sprintf("Cannot suspend agent in phase %q. Only running agents can be suspended.", agent.Phase), nil)
 			return
@@ -1680,9 +1762,10 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	// (for example one in phase error), so stop-all leaves no agent
 	// intended to run.
 	filter := store.AgentFilter{
-		ProjectID:   projectID,
-		Phase:       string(state.PhaseRunning),
-		OrRunIntent: string(store.RunIntentRunning),
+		ProjectID:         projectID,
+		Phase:             string(state.PhaseRunning),
+		OrRunIntent:       string(store.RunIntentRunning),
+		OrActiveIdleClaim: s.experimentEnabled(experiments.IdleSuspend),
 	}
 
 	// agent.stop_all is decided against the hub for global stop-all and
@@ -1852,6 +1935,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			}
 
 			supersedes := agent.StartClaimID
+			wasIdleSuspending := agent.IdleSuspendClaimActive
 			intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
 			if err != nil {
 				res.Status = "error"
@@ -1866,8 +1950,11 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			// agent whose start is still in flight, the start is not
 			// interrupted: the agent may still come up running, with
 			// intent stopped (as after a user stop whose dispatch failed).
-			// It is reported as stop_recorded rather than stopped.
-			if agent.Phase != string(state.PhaseRunning) {
+			// It is reported as stop_recorded rather than stopped. An agent
+			// mid-idle-suspend whose container already posted stopping/stopped
+			// still runs DispatchAgentStop and recordStopStatus so the user's
+			// stop wins over the idle suspension.
+			if agent.Phase != string(state.PhaseRunning) && !wasIdleSuspending {
 				res.Status = "stopped"
 				if startInFlightPhase(agent.Phase) {
 					res.Status = stopAllStatusStopRecorded

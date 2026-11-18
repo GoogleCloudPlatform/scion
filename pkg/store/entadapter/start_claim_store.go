@@ -206,6 +206,13 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 		if !claimEligible(row) {
 			return false, store.ErrClaimPredicate
 		}
+		// System start claims (auto-wake, automatic recovery) yield to an
+		// active idle-suspend claim rather than racing its in-flight container
+		// stop; user start/restart/create/reincarnate claims preempt.
+		if (kind == store.StartClaimWake || kind == store.StartClaimRecovery) &&
+			row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil) {
+			return false, store.ErrClaimPredicate
+		}
 		intentAt := nextRunIntentAt(now, row.RunIntentAt)
 		claim = store.StartClaim{
 			ID:          uuid.NewString(),
@@ -237,6 +244,7 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 			SetRunIntent(string(store.RunIntentRunning)).
 			SetRunIntentAt(intentAt).
 			SetRunIntentMarkedAt(intentAt).
+			ClearIdleSuspendClaimUntil().
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}
@@ -262,6 +270,12 @@ func (s *AgentStore) ClaimAgentStop(ctx context.Context, agentID, owner string, 
 			return false, held
 		}
 		if !entAgentToStore(row).RunIntentMatches(store.RunIntentStopped, intentAt) {
+			return false, store.ErrClaimPredicate
+		}
+		// System stop claims (intent-stop backstop, queued-stop drain,
+		// lost-start compensating stop) yield while an active idle-suspend
+		// claim owns the container stop and never clear idle_suspend_claim_until.
+		if row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil) {
 			return false, store.ErrClaimPredicate
 		}
 		claim = store.StartClaim{
@@ -435,7 +449,8 @@ func (s *AgentStore) ConvertUnconfirmedToStop(ctx context.Context, agentID, clai
 	var claim store.StartClaim
 	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
 		if !holdsClaim(row, claimID) || launchActive(row) ||
-			row.StartClaimState != string(store.StartClaimUnconfirmed) {
+			row.StartClaimState != string(store.StartClaimUnconfirmed) ||
+			(row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil)) {
 			return false, store.ErrClaimPredicate
 		}
 		claim = store.StartClaim{
@@ -601,6 +616,7 @@ func (s *AgentStore) ClaimAgentReincarnation(ctx context.Context, agentID string
 			).
 			SetReincarnationState(store.ReincarnationStatePending).
 			SetReincarnationUpdatedAt(at).
+			ClearIdleSuspendClaimUntil().
 			SetStateVersion(newVersion).
 			SetUpdated(time.Now()).
 			Save(ctx)

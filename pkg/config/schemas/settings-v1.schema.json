@@ -1559,6 +1559,18 @@
           "x-env-var": "SCION_SERVER_HUB_STALLEDTHRESHOLD",
           "x-since": "1"
         },
+        "auto_suspend_idle": {
+          "type": "boolean",
+          "description": "Automatically suspend idle, completed, and harness-error agents after idle_suspend_after.",
+          "x-env-var": "SCION_SERVER_HUB_AUTOSUSPENDIDLE",
+          "x-since": "1"
+        },
+        "idle_suspend_after": {
+          "type": "string",
+          "description": "Duration an agent must remain in a suspend-eligible activity before idle auto-suspend applies (default '15m', minimum '5m').",
+          "x-env-var": "SCION_SERVER_HUB_IDLESUSPENDAFTER",
+          "x-since": "1"
+        },
         "start_claim_lease_ttl": {
           "type": "string",
           "description": "Lease of the claim every agent start holds; the holder renews it every third of this. Default '90s', allowed 30s to 5m.",

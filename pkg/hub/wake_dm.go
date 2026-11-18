@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -93,6 +94,11 @@ func wakeDeleteWonError(agentID string) *AgentDMError {
 // Returns (*WakeResult, nil) on success or (nil, *AgentDMError) on failure.
 // On failure, no message should be dispatched (AC-4).
 func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeResult, *AgentDMError) {
+	if agent != nil && agent.IdleSuspendClaimActive {
+		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
+			return nil, startInProgressDMError(agent, err)
+		}
+	}
 	// The effective resting phase (ptone/scion#4669): an error row that
 	// remembers the suspended phase a failed asynchronous resume began from
 	// wakes as a suspended agent; a local only, agent.Phase is unchanged.
@@ -509,6 +515,28 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 	return err
 }
 
+// groupMemberDeliverableError is validateGroupMemberDeliverable aware of
+// server-side auto-wake: when shouldAutoWake(agent) holds (lifecycle.idle_suspend
+// enabled and suspend_reason is idle or stalled), a direct message wakes the
+// agent automatically without --wake, so the hint omits "--wake".
+func (s *Server) groupMemberDeliverableError(agent *store.Agent) *AgentDMError {
+	err := s.validateAgentDeliverable(agent)
+	claimSuspending := agent != nil && agent.IdleSuspendClaimActive
+	if err != nil && (state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended || claimSuspending) {
+		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly with --wake", agent.Slug)
+	}
+	if err != nil && (s.shouldAutoWake(agent) || (claimSuspending && s != nil && s.experimentEnabled(experiments.IdleSuspend))) {
+		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly to wake and deliver", agent.Slug)
+	}
+	return err
+}
+
+// validateAgentDeliverable checks target deliverability, always honouring an
+// active idle-suspend claim on the target row regardless of current settings.
+func (s *Server) validateAgentDeliverable(agent *store.Agent) *AgentDMError {
+	return validateAgentDeliverable(agent)
+}
+
 func agentTargetLabel(agent *store.Agent) string {
 	if agent == nil {
 		return ""
@@ -527,9 +555,16 @@ func agentTargetLabel(agent *store.Agent) string {
 // the agent is running, or a typed error describing why delivery is not
 // possible.
 func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
+	label := agentTargetLabel(agent)
+	if agent != nil && agent.IdleSuspendClaimActive {
+		return &AgentDMError{
+			Code:       ErrCodeAgentNotRunning,
+			Message:    fmt.Sprintf("agent %q is suspended; use --wake to resume and deliver", label),
+			HTTPStatus: http.StatusConflict,
+		}
+	}
 	rest := store.EffectiveRestingPhase(agent)
 	phase := state.Phase(rest)
-	label := agentTargetLabel(agent)
 	switch phase {
 	case state.PhaseRunning:
 		return nil
@@ -568,11 +603,14 @@ func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 
 // deferredReason is the note a deferred delivery reports: a migrating
 // recipient, or another start of the recipient already in progress.
-func deferredReason(agent *store.Agent) string {
+func (s *Server) deferredReason(agent *store.Agent) string {
 	if reincarnationInFlight(agent) {
 		return "agent is reincarnating"
 	}
-	if agent.StartClaimKind == store.StartClaimStop {
+	if agent != nil && agent.IdleSuspendClaimActive {
+		return "agent is suspending"
+	}
+	if agent != nil && agent.StartClaimKind == store.StartClaimStop {
 		return "a stop is in progress for the agent"
 	}
 	return "agent is already starting"

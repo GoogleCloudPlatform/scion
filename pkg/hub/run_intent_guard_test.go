@@ -103,11 +103,11 @@ type lifecycleDispatchRule struct {
 // that calls a lifecycle dispatch method. A new call site has to be added
 // here, with how it records run intent.
 var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
-	"Server.handleAgentLifecycle":    {kind: intentRecorded},
-	"Server.suspendAgent":            {kind: intentRecorded},
-	"Server.stopHeldAgent":           {kind: intentRecorded},
-	"Server.handleStopAllAgents":     {kind: intentRecorded},
-	"Server.autoSuspendStalledAgent": {kind: intentRecorded},
+	"Server.handleAgentLifecycle": {kind: intentRecorded},
+	"Server.suspendAgent":         {kind: intentRecorded},
+	"Server.stopHeldAgent":        {kind: intentRecorded},
+	"Server.handleStopAllAgents":  {kind: intentRecorded},
+	"Server.autoSuspendAgent":     {kind: intentRecorded},
 	// The scheduled create-and-start runs under a start claim.
 	"Server.dispatchAgentEventHandler": {kind: intentRecorded, recordedBy: "Server.withStartClaim",
 		link: linkCallsRecorder, hops: []string{"Server.createUnderClaim"}},
@@ -279,7 +279,7 @@ func TestLifecycleDispatchCallsRecordRunIntent(t *testing.T) {
 		if rule.recordedBy != "" {
 			recorder = rule.recordedBy
 		}
-		if funcs[recorder]["recordRunIntent"]+funcs[recorder]["swapRunIntent"] == 0 {
+		if funcs[recorder]["recordRunIntent"]+funcs[recorder]["swapRunIntent"]+funcs[recorder]["swapSystemRunIntent"]+funcs[recorder]["claimIdleSuspend"] == 0 {
 			t.Errorf("%s dispatches a lifecycle operation but %s does not call recordRunIntent", name, recorder)
 		}
 	}
@@ -461,4 +461,206 @@ func TestRecorderLinkErrors(t *testing.T) {
 			t.Errorf("%s: errors %q, want one containing %q", tc.desc, errs, tc.want)
 		}
 	}
+}
+
+// TestMessageDispatchCallsMarkAgentDelivery enforces that every non-test
+// AgentDispatcher.DispatchAgentMessage reference in pkg/hub (and its scanned
+// subpackages) lives inside dispatchMarkedAgentMessage — catching both direct
+// calls and method-value / method-expression bypasses such as
+// `send := d.DispatchAgentMessage` — that dispatchMarkedAgentMessage stamps
+// and checks MarkAgentDelivery via markAgentForDispatch, and that no
+// production caller passes nil for the agentDeliveryMarker parameter of
+// dispatchMarkedAgentMessage or dispatchWithBrokerRetry.
+//
+// Note: Server.managedAgentMessage (hub-managed runtimes with no runtime broker
+// container) delivers in-process without calling DispatchAgentMessage or
+// MarkAgentDelivery. That is safe while managed runtimes do not support
+// suspend/resume and cannot be idle-suspended.
+func TestMessageDispatchCallsMarkAgentDelivery(t *testing.T) {
+	funcs := parseHubFuncs(t)
+
+	var directCallers []string
+	for name, calls := range funcs {
+		if calls["DispatchAgentMessage"] > 0 {
+			directCallers = append(directCallers, name)
+		}
+	}
+	sort.Strings(directCallers)
+	if len(directCallers) != 1 || directCallers[0] != "dispatchMarkedAgentMessage" {
+		t.Fatalf("DispatchAgentMessage non-test callers = %v, want only [dispatchMarkedAgentMessage]; route every message dispatch through dispatchMarkedAgentMessage or dispatchWithBrokerRetry", directCallers)
+	}
+	if funcs["markAgentForDispatch"]["MarkAgentDelivery"] == 0 {
+		t.Fatalf("markAgentForDispatch does not call MarkAgentDelivery")
+	}
+
+	fset := token.NewFileSet()
+	files, err := globGuardScanDirs(".", "*.go")
+	if err != nil {
+		t.Fatalf("list package files: %v", err)
+	}
+	foundMarkedHelperCall := false
+	chokeCalls := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		rel := filepath.Dir(name)
+		if f.Name.Name != guardScanPackage(rel) {
+			continue
+		}
+		violations, markedHelper, calls := inspectMessageDispatchFile(fset, f)
+		for _, v := range violations {
+			t.Error(v)
+		}
+		if markedHelper {
+			foundMarkedHelperCall = true
+		}
+		chokeCalls += calls
+	}
+	if !foundMarkedHelperCall {
+		t.Fatalf("dispatchMarkedAgentMessage must call markAgentForDispatch before DispatchAgentMessage")
+	}
+	if chokeCalls == 0 {
+		t.Fatalf("scanner self-check failed: found zero calls to dispatchMarkedAgentMessage / dispatchWithBrokerRetry")
+	}
+
+	// Cross-check integration with hold-until-session re-drive (GoogleCloudPlatform/scion#4935):
+	// held-message re-drive must dispatch through the marked delivery helper, and
+	// holdOrDispatch must pre-check markAgentForDispatch before joining an active
+	// session hold so errAgentIdleSuspending and errDeliveryMarkFailed pass straight through.
+	if !funcBodyCallsIdentOrSel(t, "Server.dispatchClaimedHeldMessage", "dispatchWithBrokerRetry") {
+		t.Fatalf("Server.dispatchClaimedHeldMessage must route held-message re-drive through dispatchWithBrokerRetry")
+	}
+	if !funcBodyCallsIdentOrSel(t, "Server.holdOrDispatch", "markAgentForDispatch") {
+		t.Fatalf("Server.holdOrDispatch must check markAgentForDispatch before joining an active session hold")
+	}
+
+	t.Run("catches method-value and package-var bypasses", func(t *testing.T) {
+		const src = `package hub
+func sneakyFunc(d AgentDispatcher) {
+	send := d.DispatchAgentMessage
+	_ = send
+}
+var sneakyPkgVar = AgentDispatcher.DispatchAgentMessage
+func nilMarkerBypass() {
+	_ = dispatchMarkedAgentMessage(nil, nil, nil, nil, nil, nil, "", false, nil)
+}
+func nilRetryMarkerBypass() {
+	_ = dispatchWithBrokerRetry(nil, nil, nil, nil, nil, "", false, nil)
+}
+`
+		synthFset := token.NewFileSet()
+		sf, err := parser.ParseFile(synthFset, "sneaky.go", src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse synthetic file: %v", err)
+		}
+		violations, _, _ := inspectMessageDispatchFile(synthFset, sf)
+		if len(violations) != 4 {
+			t.Fatalf("expected 4 violations on synthetic bypass file, got %d: %v", len(violations), violations)
+		}
+	})
+}
+
+func funcBodyCallsIdentOrSel(t *testing.T, targetFunc, calleeName string) bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	files, err := globGuardScanDirs(".", "*.go")
+	if err != nil {
+		t.Fatalf("list package files: %v", err)
+	}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		rel := filepath.Dir(name)
+		if f.Name.Name != guardScanPackage(rel) {
+			continue
+		}
+		prefix := ""
+		if rel != "." {
+			prefix = filepath.ToSlash(rel) + "/"
+		}
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || prefix+funcDeclKey(fd) != targetFunc {
+				continue
+			}
+			found := false
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch fun := call.Fun.(type) {
+				case *ast.Ident:
+					if fun.Name == calleeName {
+						found = true
+					}
+				case *ast.SelectorExpr:
+					if fun.Sel.Name == calleeName {
+						found = true
+					}
+				}
+				return !found
+			})
+			return found
+		}
+	}
+	return false
+}
+
+func inspectMessageDispatchFile(fset *token.FileSet, f *ast.File) (violations []string, foundMarkedHelperCall bool, chokeCalls int) {
+	for _, decl := range f.Decls {
+		fnName := "<package>"
+		var root ast.Node = decl
+		if fd, ok := decl.(*ast.FuncDecl); ok {
+			if fd.Body == nil {
+				continue
+			}
+			fnName = funcDeclKey(fd)
+			root = fd.Body
+		}
+		ast.Inspect(root, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "DispatchAgentMessage" && fnName != "dispatchMarkedAgentMessage" {
+				pos := fset.Position(sel.Pos())
+				violations = append(violations, fmt.Sprintf("%s:%d (%s): DispatchAgentMessage referenced outside dispatchMarkedAgentMessage; route every message dispatch through dispatchMarkedAgentMessage or dispatchWithBrokerRetry", pos.Filename, pos.Line, fnName))
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			var callee string
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				callee = fun.Name
+			case *ast.SelectorExpr:
+				callee = fun.Sel.Name
+			}
+			if fnName == "dispatchMarkedAgentMessage" && callee == "markAgentForDispatch" {
+				foundMarkedHelperCall = true
+			}
+			if callee == "dispatchMarkedAgentMessage" || callee == "dispatchWithBrokerRetry" {
+				chokeCalls++
+				if len(call.Args) < 2 {
+					pos := fset.Position(call.Pos())
+					violations = append(violations, fmt.Sprintf("%s:%d (%s): %s called with fewer than 2 arguments", pos.Filename, pos.Line, fnName, callee))
+					return true
+				}
+				if id, isIdent := call.Args[1].(*ast.Ident); isIdent && id.Name == "nil" {
+					pos := fset.Position(call.Pos())
+					violations = append(violations, fmt.Sprintf("%s:%d (%s): %s passes nil for agentDeliveryMarker; pass s.deliveryMarker() so MarkAgentDelivery runs fail-closed when enabled", pos.Filename, pos.Line, fnName, callee))
+				}
+			}
+			return true
+		})
+	}
+	return violations, foundMarkedHelperCall, chokeCalls
 }

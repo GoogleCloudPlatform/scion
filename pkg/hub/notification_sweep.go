@@ -496,8 +496,33 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 	attemptCtx, cancel := context.WithTimeout(ctx, retryDispatchAttemptTimeout)
 	defer cancel()
 	brokerID = subscriber.RuntimeBrokerID
-	nd.recordAttempt(ctx, notif.ID)
-	if err := dispatchWithBrokerRetry(attemptCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
+	err = dispatchWithBrokerRetry(
+		attemptCtx,
+		nd.deliveryMarker(),
+		nd.messageLog,
+		dispatcher,
+		subscriber,
+		notif.Message,
+		false,
+		structuredMsg,
+		withBeforeBrokerAttempt(func() { nd.recordAttempt(ctx, notif.ID) }),
+	)
+	if err != nil {
+		var idleErr *errAgentIdleSuspending
+		if errors.As(err, &idleErr) {
+			nd.log.Debug("retry: subscriber is suspending or suspended, reverting claim",
+				"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+			nd.revertClaim(ctx, notif.ID)
+			nd.offerAutoWake(subscriber)
+			return retryNotAttempted, ""
+		}
+		var markErr *errDeliveryMarkFailed
+		if errors.As(err, &markErr) {
+			nd.log.Warn("retry: delivery mark failed before dispatch, reverting claim",
+				"notificationID", notif.ID, "subscriberID", sub.SubscriberID, "error", err)
+			nd.revertClaim(ctx, notif.ID)
+			return retryNotAttempted, ""
+		}
 		outcome = retryFailed
 		// ErrBrokerTimeout: deferred (unroutable) until the attempt timed out.
 		// DeadlineExceeded: the broker call itself ran out the attempt.

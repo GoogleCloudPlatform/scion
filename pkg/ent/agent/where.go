@@ -516,6 +516,16 @@ func ActivitySince(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldActivitySince, v))
 }
 
+// LastDeliveryAt applies equality check predicate on the "last_delivery_at" field. It's identical to LastDeliveryAtEQ.
+func LastDeliveryAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLastDeliveryAt, v))
+}
+
+// IdleSuspendClaimUntil applies equality check predicate on the "idle_suspend_claim_until" field. It's identical to IdleSuspendClaimUntilEQ.
+func IdleSuspendClaimUntil(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldIdleSuspendClaimUntil, v))
+}
+
 // FixtureRootIDEQ applies the EQ predicate on the "fixture_root_id" field.
 func FixtureRootIDEQ(v uuid.UUID) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldFixtureRootID, v))
@@ -6199,6 +6209,106 @@ func ActivitySinceIsNil() predicate.Agent {
 // ActivitySinceNotNil applies the NotNil predicate on the "activity_since" field.
 func ActivitySinceNotNil() predicate.Agent {
 	return predicate.Agent(sql.FieldNotNull(FieldActivitySince))
+}
+
+// LastDeliveryAtEQ applies the EQ predicate on the "last_delivery_at" field.
+func LastDeliveryAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLastDeliveryAt, v))
+}
+
+// LastDeliveryAtNEQ applies the NEQ predicate on the "last_delivery_at" field.
+func LastDeliveryAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLastDeliveryAt, v))
+}
+
+// LastDeliveryAtIn applies the In predicate on the "last_delivery_at" field.
+func LastDeliveryAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLastDeliveryAt, vs...))
+}
+
+// LastDeliveryAtNotIn applies the NotIn predicate on the "last_delivery_at" field.
+func LastDeliveryAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLastDeliveryAt, vs...))
+}
+
+// LastDeliveryAtGT applies the GT predicate on the "last_delivery_at" field.
+func LastDeliveryAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLastDeliveryAt, v))
+}
+
+// LastDeliveryAtGTE applies the GTE predicate on the "last_delivery_at" field.
+func LastDeliveryAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLastDeliveryAt, v))
+}
+
+// LastDeliveryAtLT applies the LT predicate on the "last_delivery_at" field.
+func LastDeliveryAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLastDeliveryAt, v))
+}
+
+// LastDeliveryAtLTE applies the LTE predicate on the "last_delivery_at" field.
+func LastDeliveryAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLastDeliveryAt, v))
+}
+
+// LastDeliveryAtIsNil applies the IsNil predicate on the "last_delivery_at" field.
+func LastDeliveryAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLastDeliveryAt))
+}
+
+// LastDeliveryAtNotNil applies the NotNil predicate on the "last_delivery_at" field.
+func LastDeliveryAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLastDeliveryAt))
+}
+
+// IdleSuspendClaimUntilEQ applies the EQ predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldIdleSuspendClaimUntil, v))
+}
+
+// IdleSuspendClaimUntilNEQ applies the NEQ predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldIdleSuspendClaimUntil, v))
+}
+
+// IdleSuspendClaimUntilIn applies the In predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldIdleSuspendClaimUntil, vs...))
+}
+
+// IdleSuspendClaimUntilNotIn applies the NotIn predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldIdleSuspendClaimUntil, vs...))
+}
+
+// IdleSuspendClaimUntilGT applies the GT predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldIdleSuspendClaimUntil, v))
+}
+
+// IdleSuspendClaimUntilGTE applies the GTE predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldIdleSuspendClaimUntil, v))
+}
+
+// IdleSuspendClaimUntilLT applies the LT predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldIdleSuspendClaimUntil, v))
+}
+
+// IdleSuspendClaimUntilLTE applies the LTE predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldIdleSuspendClaimUntil, v))
+}
+
+// IdleSuspendClaimUntilIsNil applies the IsNil predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldIdleSuspendClaimUntil))
+}
+
+// IdleSuspendClaimUntilNotNil applies the NotNil predicate on the "idle_suspend_claim_until" field.
+func IdleSuspendClaimUntilNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldIdleSuspendClaimUntil))
 }
 
 // HasProject applies the HasEdge predicate on the "project" edge.

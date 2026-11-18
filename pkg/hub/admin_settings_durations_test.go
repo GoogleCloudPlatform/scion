@@ -73,6 +73,12 @@ func TestPutServerConfigDB_DurationSettingsValidated(t *testing.T) {
 			clears: []string{`""`, `null`},
 		},
 		{
+			name: "idle_suspend_after", section: "lifecycle", key: "idle_suspend_after",
+			field:  "server.hub.idle_suspend_after",
+			body:   func(v string) string { return `{"server": {"hub": {"idle_suspend_after": ` + v + `}}}` },
+			clears: []string{`""`, `null`},
+		},
+		{
 			name: "soft_delete_retention", section: "lifecycle", key: "soft_delete_retention",
 			field:  "server.hub.soft_delete_retention",
 			body:   func(v string) string { return `{"server": {"hub": {"soft_delete_retention": ` + v + `}}}` },

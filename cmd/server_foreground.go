@@ -2945,6 +2945,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		InternalURL:                  cfg.Hub.InternalURL,
 		SlowRequestThreshold:         cfg.SlowRequestThreshold,
 		StalledThreshold:             cfg.Hub.StalledThreshold,
+		AutoSuspendIdle:              cfg.Hub.AutoSuspendIdle,
+		IdleSuspendAfter:             cfg.Hub.IdleSuspendAfter,
 		MissingAgentGrace:            cfg.Hub.MissingAgentGrace,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,

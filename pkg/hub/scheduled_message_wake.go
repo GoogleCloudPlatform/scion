@@ -128,7 +128,7 @@ func (s *Server) wakeFireTarget(ctx context.Context, fireID, scheduleID string, 
 	if awaitErr != nil {
 		slog.Warn("Scheduler: scheduled message target did not become ready after a start in progress",
 			"eventID", fireID, "agent_id", agent.ID, "error", awaitErr)
-		if errors.Is(awaitErr, errStartInProgressNotReady) {
+		if errors.Is(awaitErr, errStartInProgressNotReady) || errors.Is(awaitErr, errIdleSuspendInProgressNotSettled) {
 			return errScheduledWakeNotReady
 		}
 		return awaitErr
@@ -140,6 +140,33 @@ func (s *Server) wakeFireTarget(ctx context.Context, fireID, scheduleID string, 
 // of the target that someone else began did not bring it up in time.
 var errStartInProgressNotReady = errors.New("target agent was already starting and did not become ready")
 
+// errIdleSuspendInProgressNotSettled is waitForIdleSuspendToSettle's answer
+// when an in-flight idle auto-suspend did not finish stopping within the
+// settle budget (or the caller's request/wake deadline).
+var errIdleSuspendInProgressNotSettled = errors.New("target agent was suspending and did not finish stopping in time")
+
+// idleSuspendSettleTimeoutOverride is a test-only seam overriding
+// idleSuspendSettleBudget when positive. Tests that set it must not use
+// t.Parallel and must restore it in t.Cleanup.
+var idleSuspendSettleTimeoutOverride time.Duration
+
+// idleSuspendClaimLease is the store lease for an idle auto-suspend claim:
+// one stopWriteBudget plus 10s slack so the claim covers the full broker stop
+// dispatch, status write, and credential revocation.
+func idleSuspendClaimLease() time.Duration {
+	return stopWriteBudget() + 10*time.Second
+}
+
+// idleSuspendSettleBudget bounds waitForIdleSuspendToSettle to the full
+// idle-suspend claim lease (stopWriteBudget() + 10s); context.WithTimeout also
+// caps the wait at any tighter caller/request deadline on ctx.
+func idleSuspendSettleBudget() time.Duration {
+	if idleSuspendSettleTimeoutOverride > 0 {
+		return idleSuspendSettleTimeoutOverride
+	}
+	return idleSuspendClaimLease()
+}
+
 // wakeOrAwaitStart is wakeAgentForDM for a caller that must deliver after
 // the wake rather than keep its item deferred: a target another start is
 // already bringing up (phase starting, which wakeAgentForDM refuses, or a
@@ -150,6 +177,17 @@ var errStartInProgressNotReady = errors.New("target agent was already starting a
 // Nothing is started by the wait; the caller's delivery authorization
 // covers delivering to the run another start brought up.
 func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmErr *AgentDMError, awaitErr error) {
+	if agent != nil && (agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil) {
+		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
+			return nil, err
+		}
+		if state.Phase(agent.Phase) == state.PhaseRunning {
+			return nil, nil
+		}
+		if s.autoWakeModeOf(agent) == autoWakeNone {
+			return s.validateAgentDeliverable(agent), nil
+		}
+	}
 	if state.Phase(agent.Phase) == state.PhaseStarting {
 		return nil, s.awaitStartInProgress(ctx, agent)
 	}
@@ -165,10 +203,46 @@ func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmEr
 	return nil, s.awaitStartInProgress(ctx, agent)
 }
 
+// waitForIdleSuspendToSettle waits, up to idleSuspendSettleBudget (the claim
+// lease, bounded by any tighter caller deadline on ctx), for an active
+// idle-suspend claim on agent to clear (evaluated against the store clock via
+// MarkAgentDelivery), refreshing *agent to the settled row.
+func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Agent) error {
+	ctx, cancel := context.WithTimeout(ctx, idleSuspendSettleBudget())
+	defer cancel()
+	ticker := time.NewTicker(scheduledWakePollInterval)
+	defer ticker.Stop()
+	for {
+		fresh, claimActive, err := s.store.MarkAgentDelivery(ctx, agent.ID)
+		if err != nil {
+			return fmt.Errorf("failed to check agent status during idle suspend: %w", err)
+		}
+		if fresh == nil {
+			return store.ErrNotFound
+		}
+		*agent = *fresh
+		if !claimActive {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errIdleSuspendInProgressNotSettled
+		case <-ticker.C:
+		}
+	}
+}
+
 // startInProgressDMError is the direct-message answer to a wait on a start
-// already in progress that ended without a ready target (awaitErr from
-// wakeOrAwaitStart).
+// (or an in-flight idle suspend) already in progress that ended without a
+// ready target (awaitErr from wakeOrAwaitStart).
 func startInProgressDMError(agent *store.Agent, awaitErr error) *AgentDMError {
+	if errors.Is(awaitErr, errIdleSuspendInProgressNotSettled) {
+		return &AgentDMError{
+			Code:       ErrCodeUnavailable,
+			Message:    fmt.Sprintf("agent %q is suspending and did not finish stopping in time: %v", agent.Slug, awaitErr),
+			HTTPStatus: http.StatusServiceUnavailable,
+		}
+	}
 	return &AgentDMError{
 		Code:       ErrCodeUnavailable,
 		Message:    fmt.Sprintf("agent %q was already starting and did not become ready: %v", agent.Slug, awaitErr),

@@ -114,6 +114,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockPendingSecretExpiry,
 		LockScheduledExecRunSweep,
 		LockScheduledExecPollClaim,
+		LockAgentIdleSuspend,
 	}
 
 	seen := make(map[AdvisoryLockKey]bool, len(singletonKeys)+2)
@@ -223,6 +224,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockPendingSecretExpiry", LockPendingSecretExpiry},
 		{"LockScheduledExecRunSweep", LockScheduledExecRunSweep},
 		{"LockScheduledExecPollClaim", LockScheduledExecPollClaim},
+		{"LockAgentIdleSuspend", LockAgentIdleSuspend},
 		{"LockPendingSecretOwnerWrite", LockPendingSecretOwnerWrite},
 		{"LockScheduledEventQuota", LockScheduledEventQuota},
 		{"LockScheduledExecOverlap", LockScheduledExecOverlap},

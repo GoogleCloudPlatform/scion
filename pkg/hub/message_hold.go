@@ -37,7 +37,10 @@ const reservedSchedulerChannel = "scheduler"
 // A2-S8, RV3-N2), preventing store error strings from reaching senders.
 const holdFailReasonPrepareFailed = "message hold check failed"
 
-var errHoldPrepareFailed = errors.New(holdFailReasonPrepareFailed)
+var (
+	errHoldPrepareFailed = errors.New(holdFailReasonPrepareFailed)
+	errHeldAfterAutoWake = errors.New("message held awaiting session after auto-wake")
+)
 
 func isReservedSchedulerChannel(ch string) bool {
 	return strings.EqualFold(strings.TrimSpace(ch), reservedSchedulerChannel)
@@ -49,6 +52,9 @@ func isReservedSchedulerChannel(ch string) bool {
 //
 // When hub.conduit_deliver is enabled, the target agent uses conduit delivery,
 // and messageID names a persisted store.Message row:
+//   - When the idle-suspend delivery gate is active, pre-dispatch
+//     errAgentIdleSuspending and errDeliveryMarkFailed pass straight through
+//     without creating or joining a session hold on the stopping container.
 //   - PrepareOrHoldMessage atomically stamps the target's current RunID onto
 //     hold_launch_id and, if an agent_delivery_holds marker is active (under
 //     maxHeldMessagesPerAgent), moves the row directly to awaiting_session
@@ -72,6 +78,55 @@ func (s *Server) holdOrDispatch(
 		return false, dispatchFn()
 	}
 
+	rowClaim := agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil
+	if s.idleSuspendDeliveryGateActive() || rowClaim {
+		precheckMark := rowClaim
+		if !precheckMark {
+			finCtx, finCancel := finalizationContext(ctx)
+			hasHold, hErr := s.store.HasAgentDeliveryHold(finCtx, agent.ID)
+			finCancel()
+			if hErr != nil {
+				slog.Error("message-hold: check delivery hold failed",
+					"agent_id", agent.ID, "message_id", messageID, "error", hErr)
+				return false, errHoldPrepareFailed
+			}
+			precheckMark = hasHold
+		}
+		if precheckMark {
+			if err := markAgentForDispatch(ctx, s.deliveryMarker(), agent); err != nil {
+				var markErr *errDeliveryMarkFailed
+				if errors.As(err, &markErr) {
+					return false, err
+				}
+				derr := dispatchFn()
+				if errors.Is(derr, errHeldAfterAutoWake) {
+					return true, nil
+				}
+				return false, derr
+			}
+		}
+	}
+
+	held, err := s.applyPrepareOrHold(ctx, agent, messageID, storeMsg)
+	if err != nil {
+		return false, err
+	}
+	if held {
+		return true, nil
+	}
+	err = dispatchFn()
+	if errors.Is(err, errHeldAfterAutoWake) {
+		return true, nil
+	}
+	return false, err
+}
+
+func (s *Server) applyPrepareOrHold(
+	ctx context.Context,
+	agent *store.Agent,
+	messageID string,
+	storeMsg *store.Message,
+) (bool, error) {
 	finCtx, finCancel := finalizationContext(ctx)
 	res, err := s.store.PrepareOrHoldMessage(finCtx, agent.ID, messageID, s.heldMessagesCap())
 	finCancel()
@@ -99,7 +154,31 @@ func (s *Server) holdOrDispatch(
 		s.maybeScheduleHeldMessageRedriveIfConnected(agent.ID)
 		return true, nil
 	}
-	return false, dispatchFn()
+	return false, nil
+}
+
+// refreshHoldLaunchAfterWake re-runs PrepareOrHoldMessage against the newly
+// started container incarnation after synchronous auto-wake, updating
+// hold_launch_id on messageID (and queueing behind any active hold marker on
+// the woken run) before the post-wake broker dispatch runs.
+func (s *Server) refreshHoldLaunchAfterWake(
+	ctx context.Context,
+	agent *store.Agent,
+	messageID string,
+	storeMsg *store.Message,
+) error {
+	if s == nil || s.store == nil || agent == nil || messageID == "" ||
+		!s.conduitDeliverEnabled() || !s.agentUsesConduitDelivery(ctx, agent) {
+		return nil
+	}
+	held, err := s.applyPrepareOrHold(ctx, agent, messageID, storeMsg)
+	if err != nil {
+		return err
+	}
+	if held {
+		return errHeldAfterAutoWake
+	}
+	return nil
 }
 
 // persistScheduledMessageEvent persists a store.Message row for a scheduler

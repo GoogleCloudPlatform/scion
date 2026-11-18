@@ -169,6 +169,16 @@ type HubServerConfig struct {
 	// before being marked as stalled. Default: 5 minutes.
 	StalledThreshold time.Duration `json:"stalledThreshold" yaml:"stalledThreshold" koanf:"stalledThreshold"`
 
+	// AutoSuspendIdle controls whether agents holding a suspend-eligible
+	// activity (idle, completed, harness_error) are automatically suspended
+	// once IdleSuspendAfter has elapsed. Default: false.
+	AutoSuspendIdle bool `json:"autoSuspendIdle" yaml:"autoSuspendIdle" koanf:"autoSuspendIdle"`
+
+	// IdleSuspendAfter is how long an agent must hold a suspend-eligible
+	// activity before idle auto-suspend applies. Default: 15 minutes
+	// (minimum 5 minutes).
+	IdleSuspendAfter time.Duration `json:"idleSuspendAfter" yaml:"idleSuspendAfter" koanf:"idleSuspendAfter"`
+
 	// MissingAgentGrace is how long a running agent must be continuously
 	// absent from its runtime broker's complete heartbeat inventory before
 	// the Hub marks it phase=error with exit reason container_missing.

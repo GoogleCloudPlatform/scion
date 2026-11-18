@@ -34,6 +34,7 @@ import "testing"
 // intentionally NOT in strippedSites, with the reason it is safe: the site
 // never forwards client- or plugin-supplied metadata at all.
 var stripExemptions = map[stripSiteKey]string{
+	{"broker_routing.go", "dispatchMarkedAgentMessage"}:               "primitive wrapper: single choke point calling MarkAgentDelivery then DispatchAgentMessage, not a call site",
 	{"broker_routing.go", "dispatchWithBrokerRetry"}:                  "primitive wrapper: the retry loop implementation itself, not a call site",
 	{"handlers_agent_messaging.go", "publishBroadcastDeliveryFailed"}: "hub-built delivery-failure notice to the original sender; no client metadata",
 	{"messagebroker.go", "publishDeliveryFailed"}:                     "hub-built delivery-failure notice to the original sender; no client metadata",
@@ -45,11 +46,11 @@ var stripExemptions = map[stripSiteKey]string{
 	{"reconcile.go", "deliverMessage"}:                                "dead code: assigned at server.go but never invoked in production (msg_containment_callsite_test.go)",
 	{"notification_sweep.go", "retryDispatch"}:                        "hub-built notification fan-out retry; no client metadata",
 	{"agent_dm_operation.go", "agentDMAutoWakeItem"}:                  "dispatches the message ExecuteAgentDM already stripped (step 7b) before queuing it behind the auto-wake",
-	{"auto_wake.go", "chatSecondaryAutoWakeItem"}:                     "dispatches the secondary copy sendAgentRouted already stripped (mentionMsg.Metadata) before queuing it behind the auto-wake",
+	{"auto_wake.go", "chatSecondaryAutoWakeItemWithLog"}:              "dispatches the secondary copy sendAgentRouted / processMentions already stripped (mentionMsg.Metadata) before queuing it behind the auto-wake",
 }
 
 // TestReservedKeyStripCoverage requires every dispatchWithBrokerRetry /
-// DispatchAgentMessage call site classified in
+// dispatchMarkedAgentMessage / DispatchAgentMessage call site classified in
 // effectCallSiteClassifications (msg_containment_callsite_test.go) to be
 // either a strippedSites entry or a stripExemptions entry with a reason. A
 // new dispatch site fails this test until it is classified into one of the
@@ -58,7 +59,7 @@ var stripExemptions = map[stripSiteKey]string{
 func TestReservedKeyStripCoverage(t *testing.T) {
 	seen := make(map[stripSiteKey]bool)
 	for _, e := range effectCallSiteClassifications {
-		if e.symbol != "dispatchWithBrokerRetry" && e.symbol != "DispatchAgentMessage" {
+		if e.symbol != "dispatchWithBrokerRetry" && e.symbol != "dispatchMarkedAgentMessage" && e.symbol != "DispatchAgentMessage" {
 			continue
 		}
 		key := stripSiteKey{e.file, e.function}

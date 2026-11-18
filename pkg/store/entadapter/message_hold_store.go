@@ -25,6 +25,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdeliveryhold"
@@ -119,6 +120,8 @@ func lockAgentForHold(ctx context.Context, c *ent.Client, agentUID uuid.UUID) (*
 	row, err := q.Select(
 		agent.FieldID,
 		agent.FieldPhase,
+		agent.FieldSuspendReason,
+		agent.FieldIdleSuspendClaimUntil,
 		agent.FieldRunID,
 		agent.FieldDeletedAt,
 		agent.FieldDeletionState,
@@ -147,6 +150,31 @@ func agentEligibleForHold(ctx context.Context, c *ent.Client, a *ent.Agent, now 
 	switch a.Phase {
 	case "provisioning", "starting", "running":
 	default:
+		return false, nil
+	}
+	held, err := c.AgentHold.Query().
+		Where(agenthold.AgentIDEQ(a.ID), agenthold.ClearedAtIsNil()).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return !held, nil
+}
+
+func agentIdlePreservesHeldMessages(ctx context.Context, c *ent.Client, a *ent.Agent, now time.Time) (bool, error) {
+	if a == nil || a.DeletedAt != nil {
+		return false, nil
+	}
+	if store.DeletionHoldsRow(a.DeletionState, a.DeletionLeaseAt, now) {
+		return false, nil
+	}
+	if store.ReincarnationInFlight(a.ReincarnationState) {
+		return false, nil
+	}
+	idleClaimActive := a.IdleSuspendClaimUntil != nil && claimTime(now).Before(*a.IdleSuspendClaimUntil)
+	idleSuspended := a.Phase == string(state.PhaseSuspended) &&
+		a.SuspendReason != nil && *a.SuspendReason == string(state.SuspendReasonIdle)
+	if !idleClaimActive && !idleSuspended {
 		return false, nil
 	}
 	held, err := c.AgentHold.Query().
@@ -449,8 +477,14 @@ func (s *BrokerDispatchStore) HoldMessageAwaitingSession(ctx context.Context, p 
 			return err
 		}
 		eligible, err := agentEligibleForHold(ctx, c, agentRow, now)
-		if err != nil || !eligible {
+		if err != nil {
 			return err
+		}
+		if !eligible {
+			eligible, err = agentIdlePreservesHeldMessages(ctx, c, agentRow, now)
+			if err != nil || !eligible {
+				return err
+			}
 		}
 
 		heldCount, err := countHeldMessages(ctx, c, p.AgentID)
@@ -746,8 +780,14 @@ func (s *BrokerDispatchStore) ReholdClaimedMessage(ctx context.Context, agentID,
 			return err
 		}
 		eligible, err := agentEligibleForHold(ctx, c, agentRow, now)
-		if err != nil || !eligible {
+		if err != nil {
 			return err
+		}
+		if !eligible {
+			eligible, err = agentIdlePreservesHeldMessages(ctx, c, agentRow, now)
+			if err != nil || !eligible {
+				return err
+			}
 		}
 		if maxHeld > 0 {
 			heldCount, err := countHeldMessages(ctx, c, agentID)
@@ -839,8 +879,22 @@ func (s *BrokerDispatchStore) ExpireHeldMessagesForAgent(ctx context.Context, ag
 	var expired []store.Message
 	err := s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
 		if agentUID, pErr := parseUUID(agentID); pErr == nil {
-			if _, err := lockAgentForHold(ctx, c, agentUID); err != nil {
+			agentRow, err := lockAgentForHold(ctx, c, agentUID)
+			if err != nil {
 				return err
+			}
+			// Held awaiting_session rows survive an in-flight idle-suspend claim
+			// (across transient stopping/stopped/error container exit reports on
+			// any replica) and rest across phase=suspended, suspend_reason=idle
+			// so resume or auto-wake can re-drive them.
+			if reason == "agent stopped" && agentRow != nil {
+				preserve, err := agentIdlePreservesHeldMessages(ctx, c, agentRow, now)
+				if err != nil {
+					return err
+				}
+				if preserve {
+					return nil
+				}
 			}
 		}
 		candidates, err := c.Message.Query().
@@ -1044,4 +1098,55 @@ func (s *BrokerDispatchStore) ExpireHeldMessagesPastDeadlineForAgent(ctx context
 		return nil, err
 	}
 	return expired, nil
+}
+
+// RebindHeldMessagesLaunch implements store.MessageHoldStore.
+func (s *BrokerDispatchStore) RebindHeldMessagesLaunch(ctx context.Context, agentID, fromLaunchID, toLaunchID string) (int, error) {
+	if agentID == "" || fromLaunchID == "" || toLaunchID == "" || fromLaunchID == toLaunchID {
+		return 0, nil
+	}
+	agentUID, err := parseUUID(agentID)
+	if err != nil {
+		return 0, err
+	}
+	rebound := 0
+	err = s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
+		agentRow, err := lockAgentForHold(ctx, c, agentUID)
+		if err != nil {
+			return err
+		}
+		if agentRow == nil || agentRow.DeletedAt != nil {
+			return nil
+		}
+		eligible, err := agentEligibleForHold(ctx, c, agentRow, now)
+		if err != nil {
+			return err
+		}
+		if !eligible {
+			eligible, err = agentIdlePreservesHeldMessages(ctx, c, agentRow, now)
+			if err != nil || !eligible {
+				return err
+			}
+		}
+		n, err := c.Message.Update().
+			Where(
+				messageDispatchAwaitingSessionLiteral(),
+				message.RecipientIDEQ(agentID),
+				message.HoldLaunchIDEQ(fromLaunchID),
+			).
+			SetHoldLaunchID(toLaunchID).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		rebound = n
+		if rebound == 0 {
+			return nil
+		}
+		return syncAgentDeliveryHold(ctx, c, agentID, time.Time{}, toLaunchID, now)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return rebound, nil
 }

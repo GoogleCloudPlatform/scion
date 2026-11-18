@@ -3114,7 +3114,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			case AgentDMDeferred:
 				deliveryStatus = "deferred"
 				httpStatus = http.StatusAccepted
-				deferredNote = deferredReason(agent)
+				deferredNote = s.deferredReason(agent)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(httpStatus)
@@ -3315,9 +3315,55 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			retryCtx, retryCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
 			defer retryCancel()
 
+			var retryOpts []dispatchRetryOption
+			if !delegatedSender {
+				retryOpts = append(retryOpts, withSyncAutoWakeHook(func(_ context.Context, target *store.Agent) (context.Context, context.CancelFunc, error) {
+					s.extendWriteDeadlineForDMWake(ctx, w)
+					wctx, wcancel := context.WithTimeout(ctx, scheduledWakeBudget)
+					defer wcancel()
+					if err := s.syncAutoWakeForDM(wctx, target); err != nil {
+						return nil, nil, err
+					}
+					newCtx, newCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
+					if err := s.refreshHoldLaunchAfterWake(newCtx, target, persistedMsgID, nil); err != nil {
+						newCancel()
+						return nil, nil, err
+					}
+					return newCtx, newCancel, nil
+				}))
+			}
+
 			if _, err := s.holdOrDispatch(retryCtx, agent, persistedMsgID, nil, func() error {
-				return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg)
+				return dispatchWithBrokerRetry(retryCtx, s.deliveryMarker(), nil, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg, retryOpts...)
 			}); err != nil {
+				var wakeRefused *errAutoWakeRefused
+				if errors.As(err, &wakeRefused) && wakeRefused.dmErr != nil {
+					if persistedMsgID != "" {
+						if markErr := s.markFailed(ctx, persistedMsgID, wakeRefused.dmErr.Message); markErr != nil {
+							s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
+						}
+					}
+					WriteAgentDMError(w, wakeRefused.dmErr)
+					return
+				}
+				var idleErr *errAgentIdleSuspending
+				if errors.As(err, &idleErr) {
+					dmErr := s.validateAgentDeliverable(idleErr.asSuspendedAgent())
+					if dmErr == nil {
+						dmErr = &AgentDMError{
+							Code:       ErrCodeAgentNotRunning,
+							Message:    fmt.Sprintf("Agent %q is suspended.", agent.Slug),
+							HTTPStatus: http.StatusConflict,
+						}
+					}
+					if persistedMsgID != "" {
+						if markErr := s.markFailed(ctx, persistedMsgID, dmErr.Message); markErr != nil {
+							s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
+						}
+					}
+					WriteAgentDMError(w, dmErr)
+					return
+				}
 				if persistedMsgID != "" {
 					if markErr := s.markFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
@@ -3429,7 +3475,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Agent:           agent.Slug,
 			AgentPhase:      agent.Phase,
 			MentionResults:  mentionResults,
-			Deferred:        deferredReason(agent),
+			Deferred:        s.deferredReason(agent),
 			ArtifactWarning: artifactWarning,
 			ConversationID:  persistedConversationID,
 			ConversationKey: visitorConvKey,
@@ -3650,7 +3696,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			var gateReason *string
 			if !recipDeferred {
 				var reason string
-				if gateErr := validateGroupMemberDeliverable(agent); gateErr != nil {
+				if gateErr := s.groupMemberDeliverableError(agent); gateErr != nil {
 					reason = gateErr.Message
 				} else if dispatcher == nil {
 					reason = "dispatcher not available"
@@ -3806,15 +3852,23 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				groupStoreMsg = storeMsg
 			}
 			if _, err := s.holdOrDispatch(retryCtx, agent, groupMsgID, groupStoreMsg, func() error {
-				return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, plainMessage, interrupt, &agentMsg)
+				return dispatchWithBrokerRetry(retryCtx, s.deliveryMarker(), nil, dispatcher, agent, plainMessage, interrupt, &agentMsg)
 			}); err != nil {
 				retryCancel()
+				reason := err.Error()
+				var idleErr *errAgentIdleSuspending
+				if errors.As(err, &idleErr) {
+					reason = "agent is not running"
+					if dmErr := s.groupMemberDeliverableError(idleErr.asSuspendedAgent()); dmErr != nil {
+						reason = dmErr.Message
+					}
+				}
 				if persisted {
-					if markErr := s.markFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
+					if markErr := s.markFailed(ctx, storeMsg.ID, reason); markErr != nil {
 						s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
 					}
 				}
-				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: reason}
 				continue
 			}
 			retryCancel()
@@ -4381,7 +4435,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			broadcastStoreMsg = storeMsg
 		}
 		_, dispatchErr := s.holdOrDispatch(retryCtx, &agent, broadcastMsgID, broadcastStoreMsg, func() error {
-			return dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
+			return dispatchWithBrokerRetry(retryCtx, s.deliveryMarker(), s.recordLog(), dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
 		})
 		retryCancel()
 
@@ -4449,8 +4503,7 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 	if dispatcher == nil {
 		return
 	}
-	logMessageRecord(s.recordLog(), senderAgent, structuredMsg)
-	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, failMsg, false, structuredMsg); err != nil {
+	if err := dispatchMarkedAgentMessage(ctx, s.deliveryMarker(), s.recordLog(), nil, dispatcher, senderAgent, failMsg, false, structuredMsg); err != nil {
 		s.messageLog.Error("Failed to dispatch broadcast DELIVERY_FAILED notification",
 			"sender_id", msg.SenderID, "target_agent", targetAgent.Slug, "error", err)
 	}
@@ -4724,6 +4777,16 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			continue
 		}
 
+		if persisted && s.shouldQueueAutoWake(mentionAgent) && !s.agentHeldOrUnknown(ctx, mentionAgent.ID) &&
+			s.queueAutoWake(mentionAgent, s.chatSecondaryAutoWakeItemWithLog(storeMsg.ID, "", mentionMsg.Msg, mentionMsg, s.recordLog())) {
+			if groupConversationID != "" {
+				if joinOK, _ := s.groupAgentJoinAllowed(ctx, senderIdentity, mentionAgent); joinOK {
+					s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{mentionAgent})
+				}
+			}
+			continue
+		}
+
 		// Per-dispatch timeout is the lesser of 10s or the remaining aggregate budget.
 		// ptone/scion#1839: carry the persisted mention row's ID
 		// (RecipientID = mentionAgent.ID) so a post-acceptance broker
@@ -4740,9 +4803,20 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			mentionStorePtr = storeMsg
 		}
 		if _, dispatchErr := s.holdOrDispatch(dispatchCtx, mentionAgent, mentionMsgID, mentionStorePtr, func() error {
-			return dispatchWithBrokerRetry(dispatchCtx, s.recordLog(), dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg)
+			return dispatchWithBrokerRetry(dispatchCtx, s.deliveryMarker(), s.recordLog(), dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg)
 		}); dispatchErr != nil {
 			cancel()
+			var idleErr *errAgentIdleSuspending
+			if errors.As(dispatchErr, &idleErr) && persisted &&
+				s.shouldQueueAutoWake(mentionAgent) && !s.agentHeldOrUnknown(ctx, mentionAgent.ID) &&
+				s.queueAutoWake(mentionAgent, s.chatSecondaryAutoWakeItemWithLog(storeMsg.ID, "", mentionMsg.Msg, mentionMsg, s.recordLog())) {
+				if groupConversationID != "" {
+					if joinOK, _ := s.groupAgentJoinAllowed(ctx, senderIdentity, mentionAgent); joinOK {
+						s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{mentionAgent})
+					}
+				}
+				continue
+			}
 			if aggregateCtx.Err() != nil {
 				results[i].Status = "timeout"
 				results[i].Error = "aggregate mention dispatch timeout exceeded"

@@ -4701,6 +4701,8 @@ type AgentMutation struct {
 	start_claim_launch_id      *string
 	soft_delete_op_id          *string
 	activity_since             *time.Time
+	last_delivery_at           *time.Time
+	idle_suspend_claim_until   *time.Time
 	clearedFields              map[string]struct{}
 	project                    *uuid.UUID
 	clearedproject             bool
@@ -9631,6 +9633,104 @@ func (m *AgentMutation) ResetActivitySince() {
 	delete(m.clearedFields, agent.FieldActivitySince)
 }
 
+// SetLastDeliveryAt sets the "last_delivery_at" field.
+func (m *AgentMutation) SetLastDeliveryAt(t time.Time) {
+	m.last_delivery_at = &t
+}
+
+// LastDeliveryAt returns the value of the "last_delivery_at" field in the mutation.
+func (m *AgentMutation) LastDeliveryAt() (r time.Time, exists bool) {
+	v := m.last_delivery_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastDeliveryAt returns the old "last_delivery_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldLastDeliveryAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastDeliveryAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastDeliveryAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastDeliveryAt: %w", err)
+	}
+	return oldValue.LastDeliveryAt, nil
+}
+
+// ClearLastDeliveryAt clears the value of the "last_delivery_at" field.
+func (m *AgentMutation) ClearLastDeliveryAt() {
+	m.last_delivery_at = nil
+	m.clearedFields[agent.FieldLastDeliveryAt] = struct{}{}
+}
+
+// LastDeliveryAtCleared returns if the "last_delivery_at" field was cleared in this mutation.
+func (m *AgentMutation) LastDeliveryAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldLastDeliveryAt]
+	return ok
+}
+
+// ResetLastDeliveryAt resets all changes to the "last_delivery_at" field.
+func (m *AgentMutation) ResetLastDeliveryAt() {
+	m.last_delivery_at = nil
+	delete(m.clearedFields, agent.FieldLastDeliveryAt)
+}
+
+// SetIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field.
+func (m *AgentMutation) SetIdleSuspendClaimUntil(t time.Time) {
+	m.idle_suspend_claim_until = &t
+}
+
+// IdleSuspendClaimUntil returns the value of the "idle_suspend_claim_until" field in the mutation.
+func (m *AgentMutation) IdleSuspendClaimUntil() (r time.Time, exists bool) {
+	v := m.idle_suspend_claim_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIdleSuspendClaimUntil returns the old "idle_suspend_claim_until" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldIdleSuspendClaimUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIdleSuspendClaimUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIdleSuspendClaimUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIdleSuspendClaimUntil: %w", err)
+	}
+	return oldValue.IdleSuspendClaimUntil, nil
+}
+
+// ClearIdleSuspendClaimUntil clears the value of the "idle_suspend_claim_until" field.
+func (m *AgentMutation) ClearIdleSuspendClaimUntil() {
+	m.idle_suspend_claim_until = nil
+	m.clearedFields[agent.FieldIdleSuspendClaimUntil] = struct{}{}
+}
+
+// IdleSuspendClaimUntilCleared returns if the "idle_suspend_claim_until" field was cleared in this mutation.
+func (m *AgentMutation) IdleSuspendClaimUntilCleared() bool {
+	_, ok := m.clearedFields[agent.FieldIdleSuspendClaimUntil]
+	return ok
+}
+
+// ResetIdleSuspendClaimUntil resets all changes to the "idle_suspend_claim_until" field.
+func (m *AgentMutation) ResetIdleSuspendClaimUntil() {
+	m.idle_suspend_claim_until = nil
+	delete(m.clearedFields, agent.FieldIdleSuspendClaimUntil)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -9908,7 +10008,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 99)
+	fields := make([]string, 0, 101)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -10206,6 +10306,12 @@ func (m *AgentMutation) Fields() []string {
 	if m.activity_since != nil {
 		fields = append(fields, agent.FieldActivitySince)
 	}
+	if m.last_delivery_at != nil {
+		fields = append(fields, agent.FieldLastDeliveryAt)
+	}
+	if m.idle_suspend_claim_until != nil {
+		fields = append(fields, agent.FieldIdleSuspendClaimUntil)
+	}
 	return fields
 }
 
@@ -10412,6 +10518,10 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.SoftDeleteOpID()
 	case agent.FieldActivitySince:
 		return m.ActivitySince()
+	case agent.FieldLastDeliveryAt:
+		return m.LastDeliveryAt()
+	case agent.FieldIdleSuspendClaimUntil:
+		return m.IdleSuspendClaimUntil()
 	}
 	return nil, false
 }
@@ -10619,6 +10729,10 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldSoftDeleteOpID(ctx)
 	case agent.FieldActivitySince:
 		return m.OldActivitySince(ctx)
+	case agent.FieldLastDeliveryAt:
+		return m.OldLastDeliveryAt(ctx)
+	case agent.FieldIdleSuspendClaimUntil:
+		return m.OldIdleSuspendClaimUntil(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -11321,6 +11435,20 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetActivitySince(v)
 		return nil
+	case agent.FieldLastDeliveryAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastDeliveryAt(v)
+		return nil
+	case agent.FieldIdleSuspendClaimUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIdleSuspendClaimUntil(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -11681,6 +11809,12 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldActivitySince) {
 		fields = append(fields, agent.FieldActivitySince)
 	}
+	if m.FieldCleared(agent.FieldLastDeliveryAt) {
+		fields = append(fields, agent.FieldLastDeliveryAt)
+	}
+	if m.FieldCleared(agent.FieldIdleSuspendClaimUntil) {
+		fields = append(fields, agent.FieldIdleSuspendClaimUntil)
+	}
 	return fields
 }
 
@@ -11937,6 +12071,12 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldActivitySince:
 		m.ClearActivitySince()
+		return nil
+	case agent.FieldLastDeliveryAt:
+		m.ClearLastDeliveryAt()
+		return nil
+	case agent.FieldIdleSuspendClaimUntil:
+		m.ClearIdleSuspendClaimUntil()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -12242,6 +12382,12 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldActivitySince:
 		m.ResetActivitySince()
+		return nil
+	case agent.FieldLastDeliveryAt:
+		m.ResetLastDeliveryAt()
+		return nil
+	case agent.FieldIdleSuspendClaimUntil:
+		m.ResetIdleSuspendClaimUntil()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)

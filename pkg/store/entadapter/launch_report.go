@@ -612,6 +612,9 @@ func failedAfterRunningObservedApplies(current *ent.Agent, r store.LaunchReport,
 	if store.ReincarnationInFlight(current.ReincarnationState) {
 		return false
 	}
+	if current.IdleSuspendClaimUntil != nil && claimTime(now).Before(*current.IdleSuspendClaimUntil) {
+		return false
+	}
 	if r.ErrorCode == store.LaunchErrorBrokerRestarted {
 		return false
 	}

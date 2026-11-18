@@ -760,5 +760,5 @@ func (s *Server) deliverMessage(ctx context.Context, m *store.Message) error {
 	if dispatcher == nil {
 		return fmt.Errorf("no dispatcher available for message delivery")
 	}
-	return dispatcher.DispatchAgentMessage(ctx, agent, m.Msg, effectiveInterrupt(agent, m.Urgent), nil)
+	return dispatchMarkedAgentMessage(ctx, s.deliveryMarker(), nil, nil, dispatcher, agent, m.Msg, m.Urgent, nil)
 }

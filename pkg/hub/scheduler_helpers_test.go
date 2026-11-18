@@ -341,6 +341,23 @@ func (m *mockScheduledEventStore) GetAgent(_ context.Context, id string) (*store
 	return nil, store.ErrNotFound
 }
 
+func (m *mockScheduledEventStore) MarkAgentDelivery(_ context.Context, id string) (*store.Agent, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.agents[id]
+	if !ok {
+		return nil, false, store.ErrNotFound
+	}
+	now := time.Now().UTC()
+	claimActive := a.HasActiveIdleSuspendClaim(now)
+	if !claimActive && (a.Phase == "running" || a.Phase == "starting") {
+		a.LastDeliveryAt = &now
+	}
+	cp := *a
+	cp.IdleSuspendClaimActive = claimActive
+	return &cp, claimActive, nil
+}
+
 func (m *mockScheduledEventStore) GetUser(_ context.Context, id string) (*store.User, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

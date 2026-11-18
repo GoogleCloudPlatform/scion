@@ -72,6 +72,8 @@
     "lifecycle": [
       "server.hub.auto_suspend_stalled",
       "server.hub.stalled_threshold",
+      "server.hub.auto_suspend_idle",
+      "server.hub.idle_suspend_after",
       "server.hub.soft_delete_retention",
       "server.hub.soft_delete_retain_files",
       "server.hub.start_claim_lease_ttl",

@@ -168,15 +168,28 @@ func TestActivityIsSticky(t *testing.T) {
 	}
 }
 
-// TestActivityIsSuspendEligible covers every activity: only idle and
-// completed may be auto-suspended by the idle policy; blocked and
-// waiting_for_input wait on a specific event and never are, and neither is
-// harness_error, which a message to the agent must be able to retry.
+// TestActivityIsSuspendEligible covers every activity: only idle, completed,
+// and harness_error may be auto-suspended by the idle policy; blocked and
+// waiting_for_input wait on a specific event and never are.
 func TestActivityIsSuspendEligible(t *testing.T) {
-	eligible := map[Activity]bool{ActivityIdle: true, ActivityCompleted: true}
+	eligible := map[Activity]bool{
+		ActivityIdle:         true,
+		ActivityCompleted:    true,
+		ActivityHarnessError: true,
+	}
 	for _, a := range append(Activities(), "") {
 		if got := a.IsSuspendEligible(); got != eligible[a] {
 			t.Errorf("Activity(%q).IsSuspendEligible() = %v, want %v", a, got, eligible[a])
+		}
+	}
+
+	gotList := SuspendEligibleActivities()
+	if len(gotList) != len(eligible) {
+		t.Fatalf("SuspendEligibleActivities() = %v (len %d), want len %d", gotList, len(gotList), len(eligible))
+	}
+	for _, s := range gotList {
+		if !eligible[Activity(s)] {
+			t.Errorf("SuspendEligibleActivities() returned unexpected %q", s)
 		}
 	}
 }

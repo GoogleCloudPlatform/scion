@@ -283,6 +283,19 @@ type Agent struct {
 	// none): only that launch's end settles the claim.
 	StartClaimLaunchID string `json:"-"`
 
+	// Idle auto-suspend delivery handshake (see idle_suspend.go).
+	// LastDeliveryAt is the store-clock time an inbound item was last handed
+	// to a running/starting agent; IdleSuspendClaimUntil is the lease expiry
+	// of an in-flight idle auto-suspend. Internal bookkeeping, untagged like
+	// the start_claim_* columns; UpdateAgent and CreateAgent never write them.
+	LastDeliveryAt        *time.Time `json:"-"`
+	IdleSuspendClaimUntil *time.Time `json:"-"`
+	// IdleSuspendClaimActive is true when MarkAgentDelivery observed an
+	// unexpired IdleSuspendClaimUntil against the store clock (storeNow) on
+	// this snapshot. Populated by MarkAgentDelivery so hub callers do not
+	// compare store-clock leases against replica wall clocks.
+	IdleSuspendClaimActive bool `json:"-"`
+
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a
 	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -142,29 +143,282 @@ const (
 	brokerRetryMaxBackoff     = 5 * time.Second
 )
 
-// dispatchWithBrokerRetry attempts to deliver a message to an agent via the
-// dispatcher, retrying with exponential backoff when the broker is temporarily
-// unreachable (ErrMessageDeferred). The caller must set a deadline on ctx
-// (typically 30s). Returns nil on success, ErrBrokerTimeout if the deadline
-// expires while still retrying, or the original error for non-transient failures.
+// agentDeliveryMarker is the minimal store seam dispatchMarkedAgentMessage
+// uses to stamp last_delivery_at and observe any active idle-suspend claim
+// under the agent row's lock before DispatchAgentMessage runs.
+type agentDeliveryMarker interface {
+	MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error)
+}
+
+// idleSuspendGateChecker is an optional predicate on agentDeliveryMarker
+// reporting whether lifecycle.idle_suspend is enabled. When false and the
+// target carries no idle-suspend claim, markAgentForDispatch skips the
+// row-locked write and claim check altogether so off-state behavior is
+// identical to base (AC 8).
+type idleSuspendGateChecker interface {
+	IdleSuspendGateActive() bool
+}
+
+type gatedDeliveryMarker struct {
+	store agentDeliveryMarker
+	gate  func() bool
+}
+
+func (m gatedDeliveryMarker) IdleSuspendGateActive() bool {
+	return m.gate != nil && m.gate()
+}
+
+func (m gatedDeliveryMarker) MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error) {
+	if m.store == nil {
+		return nil, false, errors.New("delivery marker store is nil")
+	}
+	return m.store.MarkAgentDelivery(ctx, agentID)
+}
+
+// errDeliveryMarkFailed wraps a MarkAgentDelivery error (or nil marker/agent)
+// so every message dispatch path fails closed instead of sending unmarked when
+// the store cannot check or record the delivery handshake.
+type errDeliveryMarkFailed struct {
+	err error
+}
+
+func (e *errDeliveryMarkFailed) Error() string {
+	return fmt.Sprintf("mark agent delivery before dispatch: %v", e.err)
+}
+
+func (e *errDeliveryMarkFailed) Unwrap() error { return e.err }
+
+// errAgentIdleSuspending is returned by dispatchMarkedAgentMessage when
+// MarkAgentDelivery observes an active idle-suspend claim on the locked row,
+// observes a hub-suspended row, or observes that an agent the caller read as
+// running/starting is no longer in running/starting. No broker dispatch ran.
+type errAgentIdleSuspending struct {
+	agent       *store.Agent
+	claimActive bool
+}
+
+func (e *errAgentIdleSuspending) Error() string {
+	if e != nil && e.agent != nil {
+		if dmErr := validateAgentDeliverable(e.asSuspendedAgent()); dmErr != nil {
+			return dmErr.Message
+		}
+		return fmt.Sprintf("agent %q is suspended", e.agent.Slug)
+	}
+	return "agent is suspended"
+}
+
+// asSuspendedAgent returns a copy of e.agent normalized to phase=suspended
+// (reason=idle) while an idle-suspend claim is still stopping the container,
+// so non-auto-wake callers produce the exact refusal/failure message they emit
+// for a suspended target.
+func (e *errAgentIdleSuspending) asSuspendedAgent() *store.Agent {
+	if e == nil || e.agent == nil {
+		return nil
+	}
+	cp := *e.agent
+	if e.claimActive {
+		cp.Phase = string(state.PhaseSuspended)
+		cp.SuspendReason = string(state.SuspendReasonIdle)
+	}
+	return &cp
+}
+
+// errAutoWakeRefused wraps a synchronous auto-wake refusal or readiness timeout
+// encountered inside dispatchWithBrokerRetry before any broker message dispatch.
+type errAutoWakeRefused struct {
+	dmErr    *AgentDMError
+	awaitErr error
+}
+
+func (e *errAutoWakeRefused) Error() string {
+	if e.dmErr != nil {
+		return e.dmErr.Message
+	}
+	if e.awaitErr != nil {
+		return e.awaitErr.Error()
+	}
+	return "auto-wake failed"
+}
+
+func (e *errAutoWakeRefused) Unwrap() error { return e.awaitErr }
+
+// isPreDispatchDeliveryError reports whether err failed in the pre-dispatch
+// delivery mark, claim gate, or auto-wake step before DispatchAgentMessage was
+// called (so no broker delivery could be in flight).
+func isPreDispatchDeliveryError(err error) bool {
+	var (
+		markErr *errDeliveryMarkFailed
+		idleErr *errAgentIdleSuspending
+		wakeErr *errAutoWakeRefused
+	)
+	return errors.As(err, &markErr) || errors.As(err, &idleErr) || errors.As(err, &wakeErr)
+}
+
+// markAgentForDispatch runs MarkAgentDelivery under the row lock whenever
+// lifecycle.idle_suspend is enabled OR the target snapshot already carries an
+// idle-suspend claim, updates *agent with the fresh store snapshot (including
+// store-clock IdleSuspendClaimActive), fails closed on any store error, and
+// rejects dispatch with *errAgentIdleSuspending if an idle-suspend claim is
+// active or a previously running/starting target moved out of running/starting
+// since the caller's read. When the experiment is off and the row carries no
+// claim, it returns nil immediately without touching the store (AC 8).
+func markAgentForDispatch(ctx context.Context, marker agentDeliveryMarker, agent *store.Agent) error {
+	if marker == nil {
+		return &errDeliveryMarkFailed{err: errors.New("delivery marker store is nil")}
+	}
+	if agent == nil || agent.ID == "" {
+		return &errDeliveryMarkFailed{err: errors.New("target agent is nil")}
+	}
+	hasRowClaim := agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil
+	if gate, ok := marker.(idleSuspendGateChecker); ok && !gate.IdleSuspendGateActive() && !hasRowClaim {
+		return nil
+	}
+	wasDeliverable := state.Phase(agent.Phase) == state.PhaseRunning || state.Phase(agent.Phase) == state.PhaseStarting
+	wasRunning := state.Phase(agent.Phase) == state.PhaseRunning
+	fresh, claimActive, err := marker.MarkAgentDelivery(ctx, agent.ID)
+	if err != nil {
+		return &errDeliveryMarkFailed{err: err}
+	}
+	if fresh == nil {
+		return &errDeliveryMarkFailed{err: store.ErrNotFound}
+	}
+	*agent = *fresh
+	freshDeliverable := state.Phase(fresh.Phase) == state.PhaseRunning || state.Phase(fresh.Phase) == state.PhaseStarting
+	justIdleSuspended := wasRunning && state.Phase(fresh.Phase) == state.PhaseSuspended && state.SuspendReason(fresh.SuspendReason) == state.SuspendReasonIdle
+	if claimActive || justIdleSuspended || (wasDeliverable && !freshDeliverable) {
+		return &errAgentIdleSuspending{agent: fresh, claimActive: claimActive}
+	}
+	return nil
+}
+
+// dispatchMarkedAgentMessage is the hub's single choke point for
+// AgentDispatcher.DispatchAgentMessage (enforced by
+// TestMessageDispatchCallsMarkAgentDelivery). Every message dispatch stamps
+// last_delivery_at and checks for an active idle-suspend claim through
+// markAgentForDispatch before calling DispatchAgentMessage.
+func dispatchMarkedAgentMessage(
+	ctx context.Context,
+	marker agentDeliveryMarker,
+	recordLog *slog.Logger,
+	beforeSend func(),
+	dispatcher AgentDispatcher,
+	agent *store.Agent,
+	msg string,
+	urgent bool,
+	structuredMsg *messages.StructuredMessage,
+) error {
+	if err := markAgentForDispatch(ctx, marker, agent); err != nil {
+		return err
+	}
+	if beforeSend != nil {
+		beforeSend()
+	}
+	logMessageRecord(recordLog, agent, structuredMsg)
+	return dispatcher.DispatchAgentMessage(ctx, agent, msg, effectiveInterrupt(agent, urgent), structuredMsg)
+}
+
+type dispatchRetryConfig struct {
+	syncAutoWake          func(ctx context.Context, agent *store.Agent) (context.Context, context.CancelFunc, error)
+	adjustUrgentAfterWake func(agent *store.Agent, urgent bool) bool
+	beforeBrokerAttempt   func()
+}
+
+type dispatchRetryOption func(*dispatchRetryConfig)
+
+func withSyncAutoWakeHook(fn func(ctx context.Context, agent *store.Agent) (context.Context, context.CancelFunc, error)) dispatchRetryOption {
+	return func(cfg *dispatchRetryConfig) {
+		cfg.syncAutoWake = fn
+	}
+}
+
+func withAdjustUrgentAfterWake(fn func(agent *store.Agent, urgent bool) bool) dispatchRetryOption {
+	return func(cfg *dispatchRetryConfig) {
+		cfg.adjustUrgentAfterWake = fn
+	}
+}
+
+func withBeforeBrokerAttempt(fn func()) dispatchRetryOption {
+	return func(cfg *dispatchRetryConfig) {
+		cfg.beforeBrokerAttempt = fn
+	}
+}
+
+// dispatchWithBrokerRetry attempts to deliver a message to an agent via
+// dispatchMarkedAgentMessage, retrying with exponential backoff when the
+// broker is temporarily unreachable (ErrMessageDeferred). The caller must set
+// a deadline on ctx (typically 30s). Returns nil on success, ErrBrokerTimeout
+// if the deadline expires while still retrying, or the original error for
+// non-transient failures (including *errAgentIdleSuspending on non-auto-wake
+// paths and *errDeliveryMarkFailed when MarkAgentDelivery fails).
 //
 // recordLog is where the hub writes this message's record to the message
-// log, once, before the first attempt (see logMessageRecord). Callers that
-// write their own record pass nil.
-func dispatchWithBrokerRetry(ctx context.Context, recordLog *slog.Logger, dispatcher AgentDispatcher, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
-	logMessageRecord(recordLog, agent, structuredMsg)
-	urgent = effectiveInterrupt(agent, urgent)
+// log, once, right before the first broker attempt (see logMessageRecord).
+// Callers that write their own record pass nil.
+func dispatchWithBrokerRetry(
+	ctx context.Context,
+	marker agentDeliveryMarker,
+	recordLog *slog.Logger,
+	dispatcher AgentDispatcher,
+	agent *store.Agent,
+	msg string,
+	urgent bool,
+	structuredMsg *messages.StructuredMessage,
+	opts ...dispatchRetryOption,
+) error {
+	var cfg dispatchRetryConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	attemptCtx := ctx
 	backoff := brokerRetryInitialBackoff
+	wokeOnce := false
+	beforeAttemptRan := false
+	nextLog := recordLog
 	for {
-		err := dispatcher.DispatchAgentMessage(ctx, agent, msg, urgent, structuredMsg)
+		var hook func()
+		if !beforeAttemptRan && cfg.beforeBrokerAttempt != nil {
+			hook = func() {
+				beforeAttemptRan = true
+				cfg.beforeBrokerAttempt()
+			}
+		}
+		err := dispatchMarkedAgentMessage(attemptCtx, marker, nextLog, hook, dispatcher, agent, msg, urgent, structuredMsg)
 		if err == nil {
 			return nil
 		}
+		var idleErr *errAgentIdleSuspending
+		if errors.As(err, &idleErr) {
+			if cfg.syncAutoWake != nil && !wokeOnce {
+				wokeOnce = true
+				newCtx, cancelNew, wakeErr := cfg.syncAutoWake(attemptCtx, agent)
+				if cancelNew != nil {
+					defer cancelNew()
+				}
+				if wakeErr != nil {
+					return wakeErr
+				}
+				if newCtx != nil {
+					attemptCtx = newCtx
+				}
+				if cfg.adjustUrgentAfterWake != nil {
+					urgent = cfg.adjustUrgentAfterWake(agent, urgent)
+				}
+				backoff = brokerRetryInitialBackoff
+				continue
+			}
+			return err
+		}
+		if isPreDispatchDeliveryError(err) {
+			return err
+		}
+		nextLog = nil
 		if !errors.Is(err, ErrMessageDeferred) {
 			return err
 		}
 		select {
-		case <-ctx.Done():
+		case <-attemptCtx.Done():
 			return ErrBrokerTimeout
 		case <-time.After(backoff):
 			backoff *= 2

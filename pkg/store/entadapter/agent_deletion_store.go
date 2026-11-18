@@ -200,6 +200,9 @@ func applyAgentDeletionFields(ctx context.Context, tx *ent.Tx, row *ent.Agent, s
 	if set.DeletedAt != nil {
 		upd.SetDeletedAt(*set.DeletedAt)
 	}
+	if set.State != nil || set.DeletedAt != nil || set.Phase != nil {
+		upd.ClearIdleSuspendClaimUntil()
+	}
 	if set.SoftFinishRunID != nil {
 		upd.SetRunID(*set.SoftFinishRunID)
 		if *set.SoftFinishRunID != row.RunID {

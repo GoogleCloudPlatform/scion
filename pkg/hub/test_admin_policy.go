@@ -491,6 +491,8 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"server.auth.authorized_domains":            testAdminPolicyDeny,
 	"server.hub.auto_suspend_stalled":           testAdminPolicyDeny,
 	"server.hub.stalled_threshold":              testAdminPolicyDeny,
+	"server.hub.auto_suspend_idle":              testAdminPolicyDeny,
+	"server.hub.idle_suspend_after":             testAdminPolicyDeny,
 	"server.hub.soft_delete_retention":          testAdminPolicyDeny,
 	"server.hub.soft_delete_retain_files":       testAdminPolicyDeny,
 	"server.hub.start_claim_lease_ttl":          testAdminPolicyDeny,

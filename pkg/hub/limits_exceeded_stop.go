@@ -151,19 +151,21 @@ func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action stri
 		return true
 	}
 	err = s.store.UpdateAgentStatus(ctx, agentID, store.AgentStatusUpdate{
-		Phase:           string(state.PhaseStopped),
-		ContainerStatus: "stopped",
-		IfPhase:         cur.Phase,
-		IfRunID:         runID,
+		Phase:               string(state.PhaseStopped),
+		ContainerStatus:     "stopped",
+		IfPhase:             cur.Phase,
+		IfRunID:             runID,
+		IfNoActiveIdleClaim: true,
 	})
 	// The op covers the dispatch and the status write only, as for
 	// auto-suspend: it ends here, before the releases and the publish. The
 	// deferred call is then a no-op (the end function is idempotent).
 	endLifecycleOp()
 	if err != nil {
-		// ErrPhaseMismatch and ErrRunChanged (both ErrVersionConflict): another
-		// writer recorded the run's end, or a newer run, first.
-		if !errors.Is(err, store.ErrVersionConflict) {
+		// ErrPhaseMismatch and ErrRunChanged (both ErrVersionConflict), or an
+		// active start/idle-suspend claim (ErrClaimPredicate): another writer
+		// recorded or owns the run's end, or a newer run, first.
+		if !errors.Is(err, store.ErrVersionConflict) && !errors.Is(err, store.ErrClaimPredicate) {
 			s.agentLifecycleLog.Error("Agent "+action+": status write failed", "agent_id", agentID, "error", err)
 		}
 		return true

@@ -1870,6 +1870,10 @@ type V1ServerHubConfig struct {
 	AutoSuspendStalled *bool `json:"auto_suspend_stalled,omitempty" yaml:"auto_suspend_stalled,omitempty" koanf:"auto_suspend_stalled"`
 	// StalledThreshold is how long before an agent is marked stalled (e.g., "5m", "10m").
 	StalledThreshold string `json:"stalled_threshold,omitempty" yaml:"stalled_threshold,omitempty" koanf:"stalled_threshold"`
+	// AutoSuspendIdle controls whether idle, completed, and harness-error agents are automatically suspended.
+	AutoSuspendIdle *bool `json:"auto_suspend_idle,omitempty" yaml:"auto_suspend_idle,omitempty" koanf:"auto_suspend_idle"`
+	// IdleSuspendAfter is how long an agent must hold a suspend-eligible activity before idle auto-suspend applies (default "15m", minimum "5m").
+	IdleSuspendAfter string `json:"idle_suspend_after,omitempty" yaml:"idle_suspend_after,omitempty" koanf:"idle_suspend_after"`
 	// MissingAgentGrace is how long a running agent must be absent from its
 	// runtime broker's complete heartbeat inventory before the Hub marks it
 	// as having no container (e.g., "3m"; minimum "1m").
@@ -4663,6 +4667,14 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.StalledThreshold = d
 			}
 		}
+		if v1.Hub.AutoSuspendIdle != nil {
+			gc.Hub.AutoSuspendIdle = *v1.Hub.AutoSuspendIdle
+		}
+		if v1.Hub.IdleSuspendAfter != "" {
+			if d, err := time.ParseDuration(v1.Hub.IdleSuspendAfter); err == nil {
+				gc.Hub.IdleSuspendAfter = d
+			}
+		}
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
 		}
@@ -5131,6 +5143,13 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.StalledThreshold > 0 {
 		v1Hub.StalledThreshold = gc.Hub.StalledThreshold.String()
+	}
+	if gc.Hub.AutoSuspendIdle {
+		autoSuspendIdle := true
+		v1Hub.AutoSuspendIdle = &autoSuspendIdle
+	}
+	if gc.Hub.IdleSuspendAfter > 0 {
+		v1Hub.IdleSuspendAfter = gc.Hub.IdleSuspendAfter.String()
 	}
 	if gc.Hub.MissingAgentGrace > 0 {
 		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
