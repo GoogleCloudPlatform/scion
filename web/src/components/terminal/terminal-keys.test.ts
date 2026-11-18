@@ -138,7 +138,7 @@ describe('applyModifiers', () => {
   it('treats a lone surrogate as one character and empty data as none', () => {
     expect(applyModifiers('\ud83d', ALT)).toEqual({ data: '\x1b\ud83d', consumed: true });
     expect(applyModifiers('\ud83d\ud83d', ALT)).toEqual({ data: '\ud83d\ud83d', consumed: true });
-    expect(applyModifiers('', CTRL)).toEqual({ data: '', consumed: true });
+    expect(applyModifiers('', CTRL)).toEqual({ data: '', consumed: false });
   });
 
   it('passes multi-character user input unchanged and uses up the modifier', () => {

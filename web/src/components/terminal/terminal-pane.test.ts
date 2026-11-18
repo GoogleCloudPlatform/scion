@@ -2775,7 +2775,7 @@ describe('touch key bar', () => {
   it('shows on a touch device, and the toolbar toggle hides it and remembers that', async () => {
     await mountTouch();
     expect(keyBar()).not.toBeNull();
-    expect(keyBar()!.getAttribute('role')).toBe('toolbar');
+    expect(keyBar()!.getAttribute('role')).toBe('group');
     expect(toggle()!.getAttribute('aria-pressed')).toBe('true');
     toggle()!.click();
     await page.updateComplete;
@@ -2821,6 +2821,20 @@ describe('touch key bar', () => {
       expect(xt.focus).toHaveBeenCalledTimes(1);
     } finally {
       other.remove();
+    }
+
+    // A focused button outside the pane takes no typed text, so no keyboard
+    // is open and the bar key must not open one.
+    const button = document.createElement('button');
+    document.body.append(button);
+    try {
+      button.focus();
+      expect(document.activeElement).toBe(button);
+      xt.focus.mockClear();
+      await press('PgUp');
+      expect(xt.focus).not.toHaveBeenCalled();
+    } finally {
+      button.remove();
     }
 
     // Already focused in this pane: no focus call.
@@ -2991,12 +3005,16 @@ describe('touch key bar', () => {
     await press('Ctrl');
     toggle()!.click();
     await page.updateComplete;
-    type('c');
     toggle()!.click();
     await page.updateComplete;
+    // The bar is back and Ctrl is off: hiding it cleared the modifier.
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    type('c');
     await press('Ctrl');
     page.setVisible(false);
     page.setVisible(true);
+    await page.updateComplete;
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
     type('c');
     expect(sent()).toEqual(['c', 'c']);
   });
@@ -3019,7 +3037,38 @@ describe('touch key bar', () => {
     await mountTouch();
     FakeSocket.instances[0].onclose?.({ code: 1006 });
     await page.updateComplete;
-    expect(key('Esc').disabled).toBe(true);
-    expect(key('Ctrl').disabled).toBe(false);
+    // aria-disabled, not disabled: a disabled button may not dispatch the
+    // mousedown that keepFocus prevents, and the tap would close the keyboard.
+    expect(key('Esc').getAttribute('aria-disabled')).toBe('true');
+    expect(key('Esc').disabled).toBe(false);
+    expect(key('Ctrl').hasAttribute('aria-disabled')).toBe(false);
+    await press('Esc');
+    expect(sent()).toEqual([]);
+  });
+
+  it('a pane shown again picks up a toggle made in another pane', async () => {
+    await mountTouch();
+    page.setVisible(false);
+    localStorage.setItem('scion-terminal-key-bar-hidden', 'true');
+    page.setVisible(true);
+    await page.updateComplete;
+    expect(keyBar()).toBeNull();
+    expect(toggle()!.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('uses up an armed modifier when the tab goes to the background, keeps a locked one', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    await press('Alt');
+    await press('Alt');
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    try {
+      document.dispatchEvent(new Event('visibilitychange'));
+    } finally {
+      hidden.mockRestore();
+    }
+    await page.updateComplete;
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    expect(key('Alt').getAttribute('aria-pressed')).toBe('true');
   });
 });

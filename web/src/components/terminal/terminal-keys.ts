@@ -112,7 +112,7 @@ export function barKeySequence(
 
 /**
  * The control code for Ctrl plus a typed character, or null if the
- * character has none. xterm.js 5.5 maps a-z, space, 3-7, 8, [ \ ] and
+ * character has none. xterm.js 5.5 maps a-z, space, 3-7, 8, [ \ ], @, _ and
  * Backspace; the rest is xterm/VT convention (also gnome-terminal and
  * iTerm2): a-z and A-Z → 0x01-0x1a, @, space and 2 → NUL, [ \ ] ^ _ →
  * 0x1b-0x1f, 3-7 → 0x1b-0x1f, / → 0x1f, 8 and ? → DEL, Backspace (DEL)
@@ -137,6 +137,8 @@ const BRACKETED_PASTE_START = '\x1b[200~';
  * Applies sticky modifiers to data on its way from xterm to the PTY. Only a
  * single character is modified; a character with no control code keeps its
  * plain value under Ctrl. Longer data is returned unchanged:
+ * - empty data (xterm sends it when a composition ends with no text) is
+ *   not a key, so `consumed` is false;
  * - user input (a paste, dictation, a predictive-text or IME word) counts
  *   as the key the modifier was for, so `consumed` is true and an armed
  *   modifier clears rather than hitting the next keystroke;
@@ -148,7 +150,7 @@ const BRACKETED_PASTE_START = '\x1b[200~';
  *   input, so it uses the modifier up like any other paste.
  */
 export function applyModifiers(data: string, mods: Modifiers): { data: string; consumed: boolean } {
-  if (!mods.ctrl && !mods.alt) return { data, consumed: false };
+  if (data === '' || (!mods.ctrl && !mods.alt)) return { data, consumed: false };
   // One code point, checked without copying the data (a paste can be large).
   const first = data.codePointAt(0);
   const isOneCodePoint = first !== undefined && data.length === (first > 0xffff ? 2 : 1);
