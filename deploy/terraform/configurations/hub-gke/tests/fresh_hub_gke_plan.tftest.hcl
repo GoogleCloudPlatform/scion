@@ -229,10 +229,11 @@ run "fresh_gke_hub_plans_clean" {
     condition = (
       output.chart_values.serviceAccount.name == "scion-hub" &&
       output.chart_values.runtime.namespace == "tfha-gke-h3" &&
+      output.chart_values.runtime.gke == false &&
       output.hub_namespace == "tfha-gke-h3-system" &&
       output.chart_values.agents.imageRegistry == "us-central1-docker.pkg.dev/tfha-test-project/tfha-scion"
     )
-    error_message = "KSA, namespaces and agent image registry are not as designed."
+    error_message = "KSA, namespaces, runtime.gke and agent image registry are not as designed."
   }
 
   # Workspace share: the hub mounts and advertises exactly the share
@@ -304,8 +305,8 @@ run "fresh_gke_hub_plans_clean" {
   }
 
   assert {
-    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
-    error_message = "test_identities_enabled defaults to false and must leave hub.testIdentities out of the chart values."
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities") && !contains(keys(output.chart_values.hub), "hubClass")
+    error_message = "test_identities_enabled defaults to false and must leave hub.testIdentities and hub.hubClass out of the chart values."
   }
 }
 
@@ -710,8 +711,8 @@ run "test_identities_enabled_reaches_the_chart" {
   }
 
   assert {
-    condition     = output.chart_values.hub.testIdentities.enabled == true
-    error_message = "test_identities_enabled = true must set the chart's hub.testIdentities.enabled."
+    condition     = output.chart_values.hub.hubClass == "test" && output.chart_values.hub.testIdentities.enabled == true
+    error_message = "test_identities_enabled = true must set the chart's hub.hubClass and hub.testIdentities.enabled."
   }
 
   assert {

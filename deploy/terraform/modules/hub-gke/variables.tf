@@ -92,7 +92,7 @@ variable "iap_oauth_client_id" {
 }
 
 variable "test_identities_enabled" {
-  description = "Sets the chart's hub.testIdentities.enabled, which lets the hub issue test identities. Default false leaves the value out of the chart values entirely (the chart's default is false). Unrelated to test login, which the chart does not offer."
+  description = "Sets the chart's hub.hubClass = \"test\" and hub.testIdentities.enabled = true, which lets the hub issue test identities. Default false leaves both out of the chart values entirely (the chart's defaults are \"\" and false). Unrelated to test login, which the chart does not offer."
   type        = bool
   default     = false
   nullable    = false
@@ -209,9 +209,9 @@ variable "nfs_mount_root" {
 }
 
 variable "agent_runtime_gke_mode" {
-  description = "The chart's runtime.gke, rendered as runtimes.kubernetes.gke in the hub's settings.yaml: true turns on the Kubernetes runtime's GKE-specific features for agent pods (SecretProviderClass, GCS FUSE). A pass-through only; the default true keeps the chart's previous hardcoded value."
+  description = "The chart's runtime.gke, rendered as runtimes.kubernetes.gke in the hub's settings.yaml: true turns on the Kubernetes runtime's GKE-specific features for agent pods (SecretProviderClass, GCS FUSE); false writes resolved secrets into namespaced Kubernetes Secrets instead, matching hub-identity (which grants <hub>-agent no Secret Manager roles) and the chart's RBAC (which omits secretproviderclasses). GKE Autopilot scheduling tolerances stay active via auto-detection."
   type        = bool
-  default     = true
+  default     = false
   nullable    = false
 }
 
