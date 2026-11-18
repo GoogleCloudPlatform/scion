@@ -155,10 +155,14 @@ func (m *mockAgentService) SendKeys(ctx context.Context, agentID string, keys st
 	return nil, fmt.Errorf("not implemented")
 }
 
+var _ hubclient.AgentService = (*mockAgentService)(nil)
+
 // mockHubClient implements hubclient.Client for testing, delegating to a mockAgentService.
 type mockHubClient struct {
 	agents *mockAgentService
 }
+
+var _ hubclient.Client = (*mockHubClient)(nil)
 
 func (m *mockHubClient) Agents() hubclient.AgentService                               { return m.agents }
 func (m *mockHubClient) ProjectAgents(string) hubclient.AgentService                  { return m.agents }

@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -238,6 +239,19 @@ func findModuleRoot(t *testing.T) string {
 }
 
 // ---------- Two-process SDK HTTP-level tests ----------
+
+// TestA2ATestServerCompiles verifies that the testdata/a2a-testserver binary
+// compiles even when TEST_DATABASE_URL is unset (Go ignores testdata/ under
+// ./..., and the cross-process tests below skip without PostgreSQL).
+func TestA2ATestServerCompiles(t *testing.T) {
+	binaryPath := filepath.Join(t.TempDir(), "a2a-testserver")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binaryPath,
+		"./internal/bridge/testdata/a2a-testserver/")
+	build.Dir = findModuleRoot(t)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build a2a-testserver: %v\n%s", err, out)
+	}
+}
 
 // TestPostgresTaskStoreCrossProcessCreateGetListCancel tests the full A2A
 // JSON-RPC lifecycle across two separate OS processes sharing one Postgres

@@ -254,10 +254,14 @@ func (m *mockProdAgentService) SendKeys(ctx context.Context, agentID string, key
 	return nil, fmt.Errorf("not implemented")
 }
 
+var _ hubclient.AgentService = (*mockProdAgentService)(nil)
+
 // mockProdHubClient implements hubclient.Client.
 type mockProdHubClient struct {
 	agents *mockProdAgentService
 }
+
+var _ hubclient.Client = (*mockProdHubClient)(nil)
 
 func (m *mockProdHubClient) Agents() hubclient.AgentService                 { return m.agents }
 func (m *mockProdHubClient) ProjectAgents(string) hubclient.AgentService    { return m.agents }
