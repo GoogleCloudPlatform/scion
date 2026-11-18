@@ -1787,6 +1787,7 @@ func TestMatchAll_OrderAndShortCircuitWithRecordingDialect(t *testing.T) {
 		list      []triggerrule.Rule
 		wantRes   triggerrule.MatchResult
 		wantErr   bool
+		wantErrIs error
 		wantEvalA []string
 		wantEvalB []string
 	}{
@@ -1898,6 +1899,43 @@ func TestMatchAll_OrderAndShortCircuitWithRecordingDialect(t *testing.T) {
 			wantEvalA: []string{"a_uncertain"},
 			wantEvalB: nil,
 		},
+		{
+			name: "empty_expr_element_inside_list_fails_closed_never_matches",
+			list: []triggerrule.Rule{
+				{},
+				{Dialect: "rec_b", Expr: "b_must_not_run"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: false,
+				Through: 1,
+				Dialect: "cel",
+				Class:   triggerrule.MatchClassFailed,
+				Reason:  triggerrule.SkipReasonEvalFailed,
+			},
+			wantErr:   true,
+			wantErrIs: triggerrule.ErrCorruptMatchRules,
+			wantEvalA: nil,
+			wantEvalB: nil,
+		},
+		{
+			name: "whitespace_only_expr_element_2_fails_closed_before_element_3",
+			list: []triggerrule.Rule{
+				{Dialect: "rec_a", Expr: "a_true_1"},
+				{Dialect: "cel", Expr: "   \t\n  "},
+				{Dialect: "rec_b", Expr: "b_must_not_run"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: false,
+				Through: 2,
+				Dialect: "cel",
+				Class:   triggerrule.MatchClassFailed,
+				Reason:  triggerrule.SkipReasonEvalFailed,
+			},
+			wantErr:   true,
+			wantErrIs: triggerrule.ErrCorruptMatchRules,
+			wantEvalA: []string{"a_true_1"},
+			wantEvalB: nil,
+		},
 	}
 
 	for _, tc := range table {
@@ -1911,6 +1949,9 @@ func TestMatchAll_OrderAndShortCircuitWithRecordingDialect(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("MatchAll unexpected error = %v", err)
+			}
+			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
+				t.Fatalf("MatchAll error = %v, want errors.Is(_, %v)", err, tc.wantErrIs)
 			}
 			if got != tc.wantRes {
 				t.Fatalf("MatchAll result = %+v, want %+v (err=%v)", got, tc.wantRes, err)

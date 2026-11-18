@@ -1128,7 +1128,20 @@ func TestTriggerStore_OrderedMatchRulesRoundTripAndEmptyScalars(t *testing.T) {
 	// Corrupt stored match_rules payloads must mark MatchRulesCorrupt=true (fail-closed)
 	// rather than silently degrading to a Types-only trigger.
 	trUUID := uuid.MustParse(tr.ID)
-	for _, corruptRaw := range []string{"{not-json", "null", "{}", "[null]", "[123]", `[{"dialect":123}]`} {
+	for _, corruptRaw := range []string{
+		"{not-json",
+		"null",
+		"{}",
+		"[null]",
+		"[123]",
+		`[{"dialect":123}]`,
+		`[{}]`,
+		`[{"dialect":"cel","expr":""}]`,
+		`[{"dialect":"cel","expr":"   \t\n"}]`,
+		`[{"dialect":"cel","expression":"x"}]`,
+		`[{"dialect":"cel","expr":"true","extra":1}]`,
+		`[{"dialect":"cel","expr":"true"},{}]`,
+	} {
 		require.NoError(t, cs.client.Trigger.UpdateOneID(trUUID).SetMatchRules(corruptRaw).Exec(ctx))
 		corruptGot, gErr := cs.GetTrigger(ctx, tr.ID)
 		require.NoError(t, gErr)

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -487,7 +488,15 @@ func unmarshalMatchRules(raw string) ([]store.TriggerMatchRule, bool) {
 		if len(et) == 0 || et[0] != '{' {
 			return nil, true
 		}
-		if err := json.Unmarshal(et, &out[i]); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(et))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&out[i]); err != nil {
+			return nil, true
+		}
+		if dec.More() || dec.Decode(&struct{}{}) != io.EOF {
+			return nil, true
+		}
+		if strings.TrimSpace(out[i].Expr) == "" {
 			return nil, true
 		}
 	}

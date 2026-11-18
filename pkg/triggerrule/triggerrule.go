@@ -440,7 +440,9 @@ func (r *Rules) Match(ctx context.Context, scope celengine.CacheScope, rule Rule
 // (Class: "uncertain", "failed", or "budget"), and shares one BudgetTracker
 // across elements so each element's deadline is bounded by
 // min(dialect.Declares().MaxEvalTime, tracker.Remaining()).
-// An empty rules slice is a full match (Matched: true, Through: 0, Class: "matched").
+// An empty rules slice is a full match (Matched: true, Through: 0, Class: "matched");
+// "no rule" means only an empty slice — an element with an empty or whitespace-only
+// expression inside a non-empty slice fails closed (Class: "failed", ErrCorruptMatchRules).
 func (r *Rules) MatchAll(
 	ctx context.Context,
 	scope celengine.CacheScope,
@@ -507,6 +509,16 @@ func (r *Rules) MatchAll(
 			}, ruleengine.ErrBudgetExhausted
 		}
 
+		if strings.TrimSpace(elem.Expr) == "" {
+			return MatchResult{
+				Matched: false,
+				Through: through,
+				Dialect: dialect,
+				Class:   MatchClassFailed,
+				Reason:  SkipReasonEvalFailed,
+			}, ErrCorruptMatchRules
+		}
+
 		d, err := r.engine.DialectFor(ConsumerName, dialect)
 		if err != nil {
 			cls, reason := classifyMatchError(err)
@@ -517,10 +529,6 @@ func (r *Rules) MatchAll(
 				Class:   cls,
 				Reason:  reason,
 			}, err
-		}
-		if elem.Expr == "" {
-			lastDialect = dialect
-			continue
 		}
 
 		compileStart := time.Now()

@@ -2881,16 +2881,31 @@ func TestTriggersAuthoring_CorruptStoredMatchRulesFailsClosed(t *testing.T) {
 	var created TriggerResponse
 	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
 
-	// Corrupt match_rules directly in SQL storage to simulate DB-level corruption.
+	// Corrupt match_rules directly in SQL storage to simulate DB-level corruption
+	// (including empty-object and renamed-field JSON arrays alongside malformed JSON).
 	cs := f.store.(*entadapter.CompositeStore)
-	const secretCorruptPayload = "{corrupt-unparseable-raw-db-secret"
-	if cs.Dialect() == "postgres" {
-		_, err := cs.DB().ExecContext(ctx, "UPDATE triggers SET match_rules = $1 WHERE id = $2", secretCorruptPayload, created.ID)
-		require.NoError(t, err)
-	} else {
-		_, err := cs.DB().ExecContext(ctx, "UPDATE triggers SET match_rules = ? WHERE id = ?", secretCorruptPayload, created.ID)
-		require.NoError(t, err)
+	setRawMatchRules := func(raw string) {
+		t.Helper()
+		if cs.Dialect() == "postgres" {
+			_, err := cs.DB().ExecContext(ctx, "UPDATE triggers SET match_rules = $1 WHERE id = $2", raw, created.ID)
+			require.NoError(t, err)
+		} else {
+			_, err := cs.DB().ExecContext(ctx, "UPDATE triggers SET match_rules = ? WHERE id = ?", raw, created.ID)
+			require.NoError(t, err)
+		}
 	}
+	for _, probeRaw := range []string{`[{}]`, `[{"dialect":"cel","expression":"x"}]`} {
+		setRawMatchRules(probeRaw)
+		probeStored, gErr := f.store.GetTrigger(ctx, created.ID)
+		require.NoError(t, gErr)
+		assert.True(t, probeStored.MatchRulesCorrupt, "probe payload %s must be marked corrupt", probeRaw)
+		assert.Nil(t, probeStored.MatchRules)
+		pNorm, pErr := triggerMatchRules(*probeStored)
+		assert.Nil(t, pNorm)
+		require.ErrorIs(t, pErr, triggerrule.ErrCorruptMatchRules)
+	}
+	const secretCorruptPayload = "{corrupt-unparseable-raw-db-secret"
+	setRawMatchRules(secretCorruptPayload)
 
 	storedCorrupt, err := f.store.GetTrigger(ctx, created.ID)
 	require.NoError(t, err)

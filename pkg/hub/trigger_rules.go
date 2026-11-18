@@ -170,6 +170,9 @@ func triggerMatchRules(tr store.Trigger) ([]triggerrule.Rule, error) {
 	if len(tr.MatchRules) > 0 {
 		out := make([]triggerrule.Rule, len(tr.MatchRules))
 		for i, r := range tr.MatchRules {
+			if strings.TrimSpace(r.Expr) == "" {
+				return nil, errCorruptTriggerMatchRules
+			}
 			d := strings.TrimSpace(r.Dialect)
 			if d == "" {
 				d = ruleengine.DialectCEL
@@ -182,6 +185,9 @@ func triggerMatchRules(tr store.Trigger) ([]triggerrule.Rule, error) {
 		return out, nil
 	}
 	if tr.MatchRule != "" {
+		if strings.TrimSpace(tr.MatchRule) == "" {
+			return nil, errCorruptTriggerMatchRules
+		}
 		d := strings.TrimSpace(tr.MatchDialect)
 		if d == "" {
 			d = ruleengine.DialectCEL
