@@ -53,6 +53,12 @@ type GCPServiceAccountAdmin interface {
 	// granted the role are left as they are. Used for the Workload Identity
 	// bindings of a minted account (ptone/scion#3329 phase 5).
 	AddRoleMembers(ctx context.Context, saEmail, role string, members []string) error
+
+	// RoleMembers returns the members on unconditional bindings of role in
+	// saEmail's resource-level IAM policy (projects/-/serviceAccounts/<email>).
+	// Conditional bindings are excluded, matching AddRoleMembers. Used by the
+	// per-account status view for minted accounts (ptone/scion#3329 phase 5, P4).
+	RoleMembers(ctx context.Context, saEmail, role string) ([]string, error)
 }
 
 // IAMAdminClient implements GCPServiceAccountAdmin using the GCP IAM Admin API.
@@ -122,6 +128,30 @@ func (c *IAMAdminClient) AddRoleMembers(ctx context.Context, saEmail, role strin
 	}
 
 	return nil
+}
+
+func (c *IAMAdminClient) RoleMembers(ctx context.Context, saEmail, role string) ([]string, error) {
+	resource := "projects/-/serviceAccounts/" + saEmail
+	policy, err := c.service.Projects.ServiceAccounts.GetIamPolicy(resource).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("getting IAM policy for %s: %w", saEmail, err)
+	}
+	return policyRoleMembers(policy, role), nil
+}
+
+// policyRoleMembers returns the members on unconditional bindings of role in
+// policy. Conditional bindings are ignored, matching addPolicyRoleMembers.
+func policyRoleMembers(policy *iam.Policy, role string) []string {
+	if policy == nil {
+		return nil
+	}
+	var out []string
+	for _, b := range policy.Bindings {
+		if b.Role == role && b.Condition == nil {
+			out = append(out, b.Members...)
+		}
+	}
+	return out
 }
 
 // addPolicyRoleMembers adds each of members to the unconditional binding of

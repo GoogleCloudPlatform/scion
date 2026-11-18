@@ -2482,6 +2482,9 @@ type Server struct {
 
 	// GCP IAM admin for minting service accounts (nil = minting disabled)
 	gcpIAMAdmin GCPServiceAccountAdmin
+	// Short-lived cache (60s) of roles/iam.workloadIdentityUser members per
+	// minted GSA email for the per-account status view (ptone/scion#7968).
+	wiRoleMembersCache wiRoleMembersCache
 
 	// Caller-permission checker for the agent service-account assignment
 	// surface, and the mode gating whether it is consulted. Both are ALWAYS
@@ -5349,6 +5352,7 @@ func (s *Server) SetGCPServiceAccountAdmin(a GCPServiceAccountAdmin) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gcpIAMAdmin = a
+	s.wiRoleMembersCache.clear()
 }
 
 // DenyUnknownFailOpen returns the configured deny-unknown fallback policy.
@@ -5391,11 +5395,14 @@ func (s *Server) SetHookIdentityChecker(c store.CallerPermissionChecker) {
 	}
 }
 
-// invalidateActAsCache removes cached actAs decisions for a specific SA.
+// invalidateActAsCache removes cached actAs decisions and Workload Identity
+// role-member reads for a specific SA.
 // Called after SA deletion and Hub-initiated IAM mutations (mint path).
-// No-op if the configured checkers do not support invalidation (e.g.
+// No-op for actAs checkers that do not support invalidation (e.g.
 // DisabledCallerPermissionChecker when gcpIamCheckMode=off).
 func (s *Server) invalidateActAsCache(saEmail string) {
+	s.wiRoleMembersCache.invalidate(saEmail)
+
 	s.mu.RLock()
 	assignChecker := s.saAssignChecker
 	hookChecker := s.hookIdentityChecker

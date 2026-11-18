@@ -30,6 +30,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3000,12 +3001,24 @@ type mockGCPServiceAccountAdmin struct {
 	// when set, returns the error of a call (nil succeeds).
 	addMembersCalls []mockAddRoleMembersCall
 	addMembersErr   func(call int, members []string) error
+
+	// roleMembers holds unconditional role members keyed by
+	// strings.ToLower(saEmail)+"\x00"+role; roleMembersCalls records each
+	// RoleMembers call, and roleMembersErr injects read errors.
+	roleMembers      map[string][]string
+	roleMembersCalls []mockRoleMembersCall
+	roleMembersErr   func(call int, saEmail, role string) error
 }
 
 type mockAddRoleMembersCall struct {
 	SAEmail string
 	Role    string
 	Members []string
+}
+
+type mockRoleMembersCall struct {
+	SAEmail string
+	Role    string
 }
 
 func testServerWithMinting(t *testing.T) (*Server, store.Store, *mockGCPServiceAccountAdmin) {
@@ -5870,9 +5883,41 @@ func (m *mockGCPServiceAccountAdmin) AddRoleMembers(_ context.Context, saEmail, 
 		SAEmail: saEmail, Role: role, Members: append([]string(nil), members...),
 	})
 	if m.addMembersErr != nil {
-		return m.addMembersErr(len(m.addMembersCalls), members)
+		if err := m.addMembersErr(len(m.addMembersCalls), members); err != nil {
+			return err
+		}
 	}
+	if m.roleMembers == nil {
+		m.roleMembers = map[string][]string{}
+	}
+	key := strings.ToLower(saEmail) + "\x00" + role
+	cur := m.roleMembers[key]
+	for _, mem := range members {
+		if !slices.Contains(cur, mem) {
+			cur = append(cur, mem)
+		}
+	}
+	m.roleMembers[key] = cur
 	return nil
+}
+
+func (m *mockGCPServiceAccountAdmin) RoleMembers(_ context.Context, saEmail, role string) ([]string, error) {
+	m.roleMembersCalls = append(m.roleMembersCalls, mockRoleMembersCall{SAEmail: saEmail, Role: role})
+	if m.roleMembersErr != nil {
+		if err := m.roleMembersErr(len(m.roleMembersCalls), saEmail, role); err != nil {
+			return nil, err
+		}
+	}
+	key := strings.ToLower(saEmail) + "\x00" + role
+	return append([]string(nil), m.roleMembers[key]...), nil
+}
+
+func (m *mockGCPServiceAccountAdmin) setRoleMembers(saEmail, role string, members []string) {
+	if m.roleMembers == nil {
+		m.roleMembers = map[string][]string{}
+	}
+	key := strings.ToLower(saEmail) + "\x00" + role
+	m.roleMembers[key] = append([]string(nil), members...)
 }
 
 type mockIAMPolicyCall struct {

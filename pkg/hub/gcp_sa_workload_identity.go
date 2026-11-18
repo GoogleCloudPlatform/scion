@@ -356,7 +356,11 @@ func (s *Server) grantWorkloadIdentityBestEffort(ctx context.Context, saEmail st
 }
 
 // addWorkloadIdentityMembers makes the batched grant with its retries.
+// Any write attempt (success or failure) invalidates saEmail's cached
+// Workload Identity role-members entry so a partial write cannot leave a
+// stale set cached.
 func (s *Server) addWorkloadIdentityMembers(ctx context.Context, saEmail string, members []string) error {
+	defer s.wiRoleMembersCache.invalidate(saEmail)
 	op := func() error {
 		return s.gcpIAMAdmin.AddRoleMembers(ctx, saEmail, roleWorkloadIdentityUser, members)
 	}
@@ -453,6 +457,7 @@ func isIAMPolicyConflict(err error) bool {
 // provider brokers, then the grant) and returns a mapping-warning view that
 // reuses the provider broker list it loaded.
 func (s *Server) projectWorkloadIdentityBindings(ctx context.Context, projectID, saEmail string) ([]api.WorkloadIdentityBinding, func() projectSAMappingView) {
+	s.wiRoleMembersCache.invalidate(saEmail)
 	if !s.experimentEnabled(experiments.K8sWorkloadIdentitySetup) {
 		return nil, func() projectSAMappingView { return s.projectSAMappings(ctx, projectID) }
 	}
@@ -478,6 +483,7 @@ func (s *Server) projectWorkloadIdentityBindings(ctx context.Context, projectID,
 // Broker on the hub, then the grant; design §3.4) and returns a
 // mapping-warning view that reuses a complete broker walk.
 func (s *Server) hubWorkloadIdentityBindings(ctx context.Context, saEmail string) ([]api.WorkloadIdentityBinding, func() projectSAMappingView) {
+	s.wiRoleMembersCache.invalidate(saEmail)
 	if !s.experimentEnabled(experiments.K8sWorkloadIdentitySetup) {
 		return nil, func() projectSAMappingView { return s.hubSAMappings(ctx) }
 	}

@@ -2158,6 +2158,30 @@ export interface GCPServiceAccountAssignStatus {
  */
 export type GCPSAMappingState = 'mapped' | 'not_mapped' | 'unknown' | 'not_reported';
 
+export interface GCPServiceAccountProfileBinding {
+  state: string;
+  reason?: string;
+  pool?: string;
+  member?: string;
+  manualStep?: string;
+  stale?: boolean;
+  staleReason?: string;
+}
+
+export interface GCPServiceAccountBindingTarget {
+  pool?: string;
+  namespace?: string;
+  ksa?: string;
+  member?: string;
+  profiles?: string[];
+  state: string;
+  reason?: string;
+  manualStep?: string;
+  lastHeartbeat?: string;
+  stale?: boolean;
+  staleReason?: string;
+}
+
 /**
  * One Kubernetes broker profile's mapping for an account, from the status
  * view. Every field after `state` is absent in a report from an older broker.
@@ -2182,6 +2206,8 @@ export interface GCPServiceAccountProfileMapping {
    * 'ambiguous_mapping' (with `ambiguous` set).
    */
   unknownReason?: string;
+  /** Present when hub.k8s_workload_identity_setup is enabled on the hub. */
+  workloadIdentityBinding?: GCPServiceAccountProfileBinding;
 }
 
 /**
@@ -2197,13 +2223,17 @@ export interface GCPServiceAccountStatus {
     error?: string;
   };
   mappings: GCPServiceAccountProfileMapping[];
-  /** 'bound' | 'not_bound' | 'unknown'; only 'unknown' is produced today. */
-  workloadIdentityBinding: { state: string; reason?: string };
+  /** 'bound' | 'not_bound' | 'unknown'. */
+  workloadIdentityBinding: {
+    state: string;
+    reason?: string;
+    targets?: GCPServiceAccountBindingTarget[];
+  };
   /** kind is 'project', 'profile' (with profile set) or 'hub'. */
   defaultFor: Array<{ kind: string; profile?: string }>;
   /** Already limited to agents the caller may see; names may be truncated. */
   agents: { count: number; names: string[] };
-  /** code is 'not_verified', 'not_mapped' or 'none'. */
+  /** code is 'not_verified', 'not_mapped', 'not_bound' or 'none'. */
   nextStep: { code: string; brokerName?: string; profile?: string; message: string };
 }
 

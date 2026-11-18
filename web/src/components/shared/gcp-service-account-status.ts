@@ -24,17 +24,26 @@
  * identity from the same response does not fetch it twice.
  *
  * Every value is rendered as the hub returned it. In particular the binding
- * is shown as the hub states it (only "unknown" today) and never upgraded,
- * and the agents list is already limited to agents the caller may see.
+ * is shown as the hub states it and never upgraded, and the agents list is
+ * already limited to agents the caller may see. Behind
+ * hub.k8s_workload_identity_setup (LayerWeb, presentation only), the mapping
+ * table includes the Binding column and the binding section lists per-target
+ * details from the hub's response.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
 import type {
+  GCPServiceAccountBindingTarget,
+  GCPServiceAccountProfileBinding,
   GCPServiceAccountProfileMapping,
   GCPServiceAccountStatus,
 } from '../../shared/types.js';
+import {
+  FEATURE_FLAGS_CHANGED_EVENT,
+  k8sWorkloadIdentitySetupEnabled,
+} from '../../utils/feature-flags.js';
 import { formatRelative } from '../../utils/time.js';
 
 /** Human text for the broker's incomplete-report codes. */
@@ -56,6 +65,33 @@ const BINDING_STATE_TEXT: Record<string, string> = {
   not_bound: 'Not bound',
   unknown: 'Unknown',
 };
+
+const BINDING_REASON_TEXT: Record<string, string> = {
+  no_workload_identity_pool: 'no pool reported',
+  broker_too_old: 'broker too old to report a pool',
+  flat_broker_pool_unreported: 'flat broker does not report a pool yet',
+};
+
+const STALE_TARGET_REASON_TEXT: Record<string, string> = {
+  broker_no_longer_reports: 'the broker no longer reports Workload Identity targets',
+  broker_heartbeat_stale: 'the broker heartbeat is stale',
+};
+
+function bindingReasonText(reason: string | undefined): string {
+  if (!reason) return '';
+  return BINDING_REASON_TEXT[reason] ?? reason;
+}
+
+function staleTargetReasonText(reason: string | undefined): string {
+  if (!reason) return 'stored from an earlier broker heartbeat';
+  return STALE_TARGET_REASON_TEXT[reason] ?? 'stored from an earlier broker heartbeat';
+}
+
+function bindingBadgeVariant(state: string): 'success' | 'warning' | 'neutral' {
+  if (state === 'bound') return 'success';
+  if (state === 'not_bound') return 'warning';
+  return 'neutral';
+}
 
 /** incompleteReasonText renders a broker incomplete-report code. */
 export function incompleteReasonText(reason: string | undefined): string {
@@ -99,6 +135,27 @@ function ago(iso: string | undefined): string {
 export class ScionGCPServiceAccountStatus extends LitElement {
   /** The status view to render. Nothing renders without one. */
   @property({ attribute: false }) status: GCPServiceAccountStatus | null = null;
+
+  @state() private wiSetupEnabled = k8sWorkloadIdentitySetupEnabled();
+
+  private readonly boundOnFlagsChanged = (): void => {
+    this.wiSetupEnabled = k8sWorkloadIdentitySetupEnabled();
+  };
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    this.wiSetupEnabled = k8sWorkloadIdentitySetupEnabled();
+    if (typeof window !== 'undefined') {
+      window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
+    }
+  }
+
+  override disconnectedCallback(): void {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
+    }
+    super.disconnectedCallback();
+  }
 
   static override styles = css`
     :host {
@@ -154,6 +211,34 @@ export class ScionGCPServiceAccountStatus extends LitElement {
       padding-left: 1.25rem;
     }
 
+    .target-list {
+      list-style: none;
+      padding-left: 0;
+      margin-top: 0.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .target-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+      align-items: center;
+    }
+
+    code {
+      background: var(--sl-color-neutral-100, #f1f5f9);
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+      font-size: 0.8125rem;
+      word-break: break-all;
+    }
+
+    .manual-step {
+      margin-top: 0.25rem;
+    }
+
     .next-step {
       display: flex;
       gap: 0.5rem;
@@ -188,6 +273,7 @@ export class ScionGCPServiceAccountStatus extends LitElement {
   }
 
   private renderMappings(st: GCPServiceAccountStatus) {
+    const showBinding = this.wiSetupEnabled;
     return html`
       <section data-section="mappings">
         <h3>Mapping per Kubernetes broker profile</h3>
@@ -203,6 +289,7 @@ export class ScionGCPServiceAccountStatus extends LitElement {
                   <tr>
                     <th>Profile</th>
                     <th>State</th>
+                    ${showBinding ? html`<th data-col="binding">Binding</th>` : nothing}
                     <th>Kubernetes service account</th>
                     <th>Namespace</th>
                     <th>Source</th>
@@ -210,7 +297,7 @@ export class ScionGCPServiceAccountStatus extends LitElement {
                   </tr>
                 </thead>
                 <tbody>
-                  ${st.mappings.map((m) => this.renderMappingRow(m))}
+                  ${st.mappings.map((m) => this.renderMappingRow(m, showBinding))}
                 </tbody>
               </table>
             `}
@@ -218,7 +305,7 @@ export class ScionGCPServiceAccountStatus extends LitElement {
     `;
   }
 
-  private renderMappingRow(m: GCPServiceAccountProfileMapping) {
+  private renderMappingRow(m: GCPServiceAccountProfileMapping, showBinding: boolean) {
     const variant =
       m.state === 'mapped' ? 'success' : m.state === 'not_mapped' ? 'warning' : 'neutral';
     // An unknown state carries its own reason, which covers an incomplete
@@ -252,6 +339,11 @@ export class ScionGCPServiceAccountStatus extends LitElement {
             : nothing}
         </td>
         <td><sl-badge variant=${variant}>${MAPPING_STATE_TEXT[m.state] ?? m.state}</sl-badge></td>
+        ${showBinding
+          ? html`<td data-col="binding">
+              ${this.renderProfileBinding(m.workloadIdentityBinding)}
+            </td>`
+          : nothing}
         <td>${m.kubernetesServiceAccount || '—'}</td>
         <td>${m.namespace || '—'}</td>
         <td>${m.source || '—'}</td>
@@ -260,14 +352,73 @@ export class ScionGCPServiceAccountStatus extends LitElement {
     `;
   }
 
+  private renderProfileBinding(wb: GCPServiceAccountProfileBinding | undefined) {
+    if (!wb) return '—';
+    const reason = wb.state === 'unknown' ? bindingReasonText(wb.reason) : '';
+    return html`
+      <sl-badge variant=${bindingBadgeVariant(wb.state)}>
+        ${BINDING_STATE_TEXT[wb.state] ?? wb.state}
+      </sl-badge>
+      ${reason ? html`<div class="muted">${reason}</div>` : nothing}
+      ${wb.stale
+        ? html`<div class="note" data-note="stale-target">
+            <sl-icon name="exclamation-triangle"></sl-icon>
+            Stored target: ${staleTargetReasonText(wb.staleReason)}.
+          </div>`
+        : nothing}
+    `;
+  }
+
   private renderBinding(st: GCPServiceAccountStatus) {
     const b = st.workloadIdentityBinding;
+    const targets = this.wiSetupEnabled && b.targets && b.targets.length > 0 ? b.targets : null;
     return html`
       <section data-section="binding">
         <h3>Workload Identity binding</h3>
         ${BINDING_STATE_TEXT[b.state] ?? b.state}
         ${b.reason ? html`<span class="muted">(${b.reason})</span>` : nothing}
+        ${targets
+          ? html`
+              <p class="muted">
+                Targets are taken from each broker's last stored heartbeat report.
+              </p>
+              <ul class="target-list">
+                ${targets.map((t) => this.renderBindingTarget(t))}
+              </ul>
+            `
+          : nothing}
       </section>
+    `;
+  }
+
+  private renderBindingTarget(t: GCPServiceAccountBindingTarget) {
+    const hbAge = ago(t.lastHeartbeat);
+    const profiles = t.profiles && t.profiles.length > 0 ? t.profiles.join(', ') : '';
+    const reason = bindingReasonText(t.reason);
+    return html`
+      <li data-target=${t.member || profiles}>
+        <div class="target-row">
+          <sl-badge variant=${bindingBadgeVariant(t.state)}>
+            ${BINDING_STATE_TEXT[t.state] ?? t.state}
+          </sl-badge>
+          ${t.member ? html`<code>${t.member}</code>` : nothing}
+          ${profiles ? html`<span class="muted">(${profiles})</span>` : nothing}
+          ${reason ? html`<span class="muted">${reason}</span>` : nothing}
+          ${!t.stale && hbAge
+            ? html`<span class="muted">· broker heartbeat ${hbAge}</span>`
+            : nothing}
+        </div>
+        ${t.stale
+          ? html`<div class="note" data-note="stale-target">
+              <sl-icon name="exclamation-triangle"></sl-icon>
+              Stored target:
+              ${staleTargetReasonText(t.staleReason)}${hbAge ? ` (last heartbeat ${hbAge})` : ''}.
+            </div>`
+          : nothing}
+        ${t.manualStep
+          ? html`<div class="manual-step">To grant by hand: <code>${t.manualStep}</code></div>`
+          : nothing}
+      </li>
     `;
   }
 

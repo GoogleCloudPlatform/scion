@@ -807,6 +807,42 @@ func TestGCPServiceAccounts_Status(t *testing.T) {
 	}
 }
 
+func TestGCPServiceAccounts_Status_WIBindingTargets(t *testing.T) {
+	const body = `{
+  "account":{"id":"sa-1","scope":"project","email":"scion-worker@x.iam.gserviceaccount.com"},
+  "verification":{"status":"verified","verified":true},
+  "mappings":[{"brokerId":"b1","brokerName":"b","profile":"gke","state":"mapped",
+    "workloadIdentityBinding":{"state":"bound","pool":"p.svc.id.goog","member":"serviceAccount:p.svc.id.goog[agents/scion-worker]","stale":true,"staleReason":"broker_no_longer_reports"}}],
+  "workloadIdentityBinding":{
+    "state":"bound",
+    "targets":[{"pool":"p.svc.id.goog","namespace":"agents","ksa":"scion-worker","member":"serviceAccount:p.svc.id.goog[agents/scion-worker]","profiles":["b/gke"],"state":"bound","stale":true,"staleReason":"broker_no_longer_reports"}]
+  },
+  "defaultFor":[],
+  "agents":{"count":0,"names":[]},
+  "nextStep":{"code":"none","message":"Nothing missing that the hub can check."}
+}`
+	c, done := saTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	})
+	defer done()
+
+	st, err := c.GCPServiceAccounts().Status(context.Background(), "proj-1", "sa-1")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.WorkloadIdentityBinding.State != "bound" || len(st.WorkloadIdentityBinding.Targets) != 1 {
+		t.Fatalf("binding targets not decoded: %+v", st.WorkloadIdentityBinding)
+	}
+	tgt := st.WorkloadIdentityBinding.Targets[0]
+	if tgt.Pool != "p.svc.id.goog" || tgt.State != "bound" || !tgt.Stale || tgt.StaleReason != "broker_no_longer_reports" {
+		t.Errorf("unexpected target: %+v", tgt)
+	}
+	if len(st.Mappings) != 1 || st.Mappings[0].WorkloadIdentityBinding == nil || st.Mappings[0].WorkloadIdentityBinding.State != "bound" || !st.Mappings[0].WorkloadIdentityBinding.Stale {
+		t.Errorf("profile binding not decoded: %+v", st.Mappings)
+	}
+}
+
 func TestGCPServiceAccounts_Status_RequiresProject(t *testing.T) {
 	c, done := saTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("no request expected, got %s", r.URL.Path)
