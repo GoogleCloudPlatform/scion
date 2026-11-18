@@ -1433,3 +1433,69 @@ func TestDispatchAgentAction_ProjectLookupFaultAndRoleSnapshot(t *testing.T) {
 		}
 	})
 }
+
+// TestHeadlessCreate_NoAuthOwnerGitTokenFallback covers security-pass L-1:
+// with payload.noAuth: true, OwnerID is recorded from the revision principal,
+// so when no project-scope GITHUB_TOKEN exists the git token falls back to the
+// owner's user-scope GITHUB_TOKEN (pickNoAuthGitToken) while all other secrets
+// remain withheld — matching an interactive --no-auth create by the same user.
+func TestHeadlessCreate_NoAuthOwnerGitTokenFallback(t *testing.T) {
+	ctx := context.Background()
+	f := newSchedFire(t, "hc-noauth-git")
+	client := installHeadlessGatherDispatcher(t, f)
+
+	const (
+		ownerGitToken      = "ghp-owner-user-scope-token"
+		ownerLLMSecret     = "sk-ant-owner-secret"
+		projectOtherSecret = "sk-proj-other-secret"
+	)
+
+	for _, in := range []*secret.SetSecretInput{
+		{
+			Name: noAuthGitTokenKey, Value: ownerGitToken,
+			SecretType: store.SecretTypeEnvironment, Target: noAuthGitTokenKey,
+			Scope: store.ScopeUser, ScopeID: f.creator.ID,
+			InjectionMode: store.InjectionModeAlways,
+			CreatedBy:     f.creator.ID, UpdatedBy: f.creator.ID,
+		},
+		{
+			Name: "ANTHROPIC_API_KEY", Value: ownerLLMSecret,
+			SecretType: store.SecretTypeEnvironment, Target: "ANTHROPIC_API_KEY",
+			Scope: store.ScopeUser, ScopeID: f.creator.ID,
+			InjectionMode: store.InjectionModeAlways, AllowProgeny: true,
+			CreatedBy: f.creator.ID, UpdatedBy: f.creator.ID,
+		},
+		{
+			Name: "OPENAI_API_KEY", Value: projectOtherSecret,
+			SecretType: store.SecretTypeEnvironment, Target: "OPENAI_API_KEY",
+			Scope: store.ScopeProject, ScopeID: f.proj.ID,
+			InjectionMode: store.InjectionModeAlways,
+			CreatedBy:     f.creator.ID, UpdatedBy: f.creator.ID,
+		},
+	} {
+		_, _, err := f.srv.secretBackend.Set(ctx, in)
+		require.NoError(t, err)
+	}
+
+	evt := f.event("noauth-owner-git")
+	evt.Payload = `{"agentName":"noauth-owner-git","noAuth":true}`
+	evt = withSessionRevision(evt, f.creator.ID)
+	out := fireHeadlessDispatch(f.srv, evt, nil)
+	require.Equal(t, hubfire.FireStatusFired, out.Status, out.Error)
+
+	child, edge := f.child(t, "noauth-owner-git")
+	assert.Equal(t, f.creator.ID, child.OwnerID)
+	assert.Equal(t, []string{f.creator.ID}, child.Ancestry)
+	assert.Equal(t, string(AgentRoleNone), child.AppliedConfig.AgentRole)
+	assert.Equal(t, string(AgentRoleNone), edge.Role)
+	assert.True(t, child.AppliedConfig.NoAuth)
+
+	req := client.lastCreateReq
+	require.NotNil(t, req)
+	assert.True(t, req.NoAuth)
+	assert.Empty(t, req.ResolvedSecrets)
+	assert.Equal(t, ownerGitToken, req.ResolvedEnv[noAuthGitTokenKey])
+	assert.Equal(t, api.EnvKindSecretFetchable, req.EnvClassifications[noAuthGitTokenKey])
+	assert.NotContains(t, req.ResolvedEnv, "ANTHROPIC_API_KEY")
+	assert.NotContains(t, req.ResolvedEnv, "OPENAI_API_KEY")
+}

@@ -30,7 +30,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -1045,4 +1047,101 @@ func TestStartNoAuth_ReprovisionGatheredAsNeededWithheld(t *testing.T) {
 	require.True(t, m.client.startCalled)
 	assert.False(t, m.client.lastStartExtras.NoAuth)
 	assert.Equal(t, "na-canary-gathered-plain", m.client.lastResolvedEnv["NA_GATHERED_PLAIN"])
+}
+
+// TestStartNoAuth_LegacyUATScheduledEdge covers security-pass L-2: a pre-2b
+// scheduled agent row (AgentRole == none, NoAuth == true, OwnerID == "",
+// Ancestry == nil) whose recorded scheduler delegation edge was authored with a
+// UAT is recognized by uatRecordedHop on start/resume/restart, so it receives
+// project NoAuth material (project GITHUB_TOKEN and plain non-secret project
+// env) while receiving zero secret canaries and zero owner/user-scope material
+// (even when no project GITHUB_TOKEN exists).
+func TestStartNoAuth_LegacyUATScheduledEdge(t *testing.T) {
+	ctx := context.Background()
+
+	seedLegacyUATScheduledRow := func(t *testing.T, m *ldFixture, slug string) *store.Agent {
+		t.Helper()
+		legacy := &store.Agent{
+			ID:              tid("na-legacy-uat-row-" + slug),
+			Slug:            slug,
+			Name:            slug,
+			ProjectID:       m.projectAlpha.ID,
+			Phase:           string(state.PhaseRunning),
+			OwnerID:         "",
+			CreatedBy:       m.projectOwnerID,
+			Ancestry:        nil,
+			Detached:        true,
+			RuntimeBrokerID: m.broker.ID,
+			AppliedConfig: &store.AgentAppliedConfig{
+				AgentRole: string(AgentRoleNone),
+				NoAuth:    true,
+				CreateInputs: &store.AgentCreateInputs{
+					NoAuth: true,
+				},
+			},
+		}
+		require.NoError(t, m.store.CreateAgent(ctx, legacy))
+		hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, legacy.ID, m.projectAlpha.ID, func(e *store.DelegationEdge) {
+			e.Role = string(AgentRoleNone)
+			e.AuthorityProvenance = store.AuthorityProvenance{
+				ProvenanceVersion:           store.ProvenanceVersionV1,
+				SourcePrincipalKind:         store.DelegationPrincipalUser,
+				SourcePrincipalID:           m.projectOwnerID,
+				SourceCredentialKind:        store.SourceCredentialScheduler,
+				SourceEventID:               "evt-legacy-uat-" + slug,
+				SourceScheduleID:            "sched-legacy-uat-" + slug,
+				SourceAuthorizationRevision: 1,
+				InitiatorPrincipalKind:      store.DelegationPrincipalUser,
+				InitiatorPrincipalID:        m.projectOwnerID,
+				InitiatorCredentialKind:     store.InitiatorCredentialKindUAT,
+				InitiatorCredentialID:       "uat-legacy-" + slug,
+			}
+			// Bounded UAT ceiling without secret.deliver / env_var.deliver:
+			// only uatRecordedHop admits project NoAuth material.
+			e.EffectCeiling = store.EffectCeiling{
+				Kind:              store.EffectCeilingBounded,
+				Version:           permissions.CeilingVersionV1,
+				PermissionIDs:     []string{"agent.create", "project.read", "scheduled_event.create"},
+				BoundaryKind:      "project",
+				BoundaryProjectID: m.projectAlpha.ID,
+			}
+		})
+		return legacy
+	}
+
+	for _, op := range naOps {
+		t.Run(op.name, func(t *testing.T) {
+			f := newNAFixture(t, "na-legacy-uat-"+op.name, true, ldOptions{})
+			f.env(t, "NA_PLAIN_USER_SETTING", "na-plain-user-value", store.ScopeUser, f.projectOwnerID, false)
+			f.agent = seedLegacyUATScheduledRow(t, f.ldFixture, "legacy-uat-"+op.name)
+
+			sent := op.run(t, f.ldFixture)
+			assertNoCanary(t, sent, f.canaries)
+			assert.Empty(t, sent.secrets)
+			assert.True(t, sent.extras.NoAuth)
+			assert.Equal(t, naGitProject, sent.env[noAuthGitTokenKey], "project GITHUB_TOKEN is delivered via uatRecordedHop")
+			assert.Equal(t, api.EnvKindSecretFetchable, sent.extras.EnvClassifications[noAuthGitTokenKey])
+			assert.Equal(t, naPlainValue, sent.env[naPlainKey], "plain non-secret project env is delivered")
+			assert.Equal(t, naProjectSettingValue, sent.env["GOOGLE_CLOUD_PROJECT"])
+			assert.NotContains(t, sent.env, "NA_PLAIN_USER_SETTING", "owner-less legacy row never receives user-scope plain env")
+		})
+	}
+
+	t.Run("no_project_git_token_withholds_creator_user_git_token", func(t *testing.T) {
+		m := newLDFixture(t, "na-legacy-uat-noprojgit", ldOptions{})
+		naSetSecret(t, m, noAuthGitTokenKey, naGitUser, store.SecretTypeEnvironment, store.ScopeUser, false)
+		naSetSecret(t, m, "NA_USER_SHARED_CANARY", "na-user-shared-val", store.SecretTypeEnvironment, store.ScopeUser, true)
+		m.env(t, naPlainKey, naPlainValue, store.ScopeProject, m.agent.ProjectID, false)
+		m.env(t, "NA_PLAIN_USER_SETTING", "na-plain-user-value", store.ScopeUser, m.projectOwnerID, false)
+
+		m.agent = seedLegacyUATScheduledRow(t, m, "legacy-uat-noprojgit")
+		require.NoError(t, m.d.DispatchAgentStart(ctx, m.agent, "task", false))
+		require.True(t, m.client.startCalled)
+		assert.True(t, m.client.lastStartExtras.NoAuth)
+		assert.Empty(t, m.client.lastStartResolvedSecrets)
+		assert.Equal(t, naPlainValue, m.client.lastResolvedEnv[naPlainKey])
+		assert.NotContains(t, m.client.lastResolvedEnv, noAuthGitTokenKey, "owner-less legacy row does not fall back to creator user-scope GITHUB_TOKEN")
+		assert.NotContains(t, m.client.lastResolvedEnv, "NA_USER_SHARED_CANARY")
+		assert.NotContains(t, m.client.lastResolvedEnv, "NA_PLAIN_USER_SETTING")
+	})
 }
