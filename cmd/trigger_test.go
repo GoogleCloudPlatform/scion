@@ -1246,8 +1246,8 @@ func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
 	}, lastReq.Match.Rules)
 	require.NotNil(t, lastReq.Subject)
 	assert.Equal(t, `string(event.payload.service)`, lastReq.Subject.Expr)
-	assert.Contains(t, out, "Where:   1/1 [cel] has(event.payload) && event.payload.env == \"prod\"")
-	assert.Contains(t, out, "Subject: string(event.payload.service)")
+	assert.Contains(t, out, fmt.Sprintf("Where:   1/1 [cel] %q", `has(event.payload) && event.payload.env == "prod"`))
+	assert.Contains(t, out, fmt.Sprintf("Subject: %q", `string(event.payload.service)`))
 
 	// Position-bearing compile error formatted from details when message lacks line/column.
 	mode = "compile_err_details_only"
@@ -1382,9 +1382,9 @@ func TestTriggerCLI_GetNumberedElementsAndJSON(t *testing.T) {
 	humanOut := captureStdout(t, func() {
 		require.NoError(t, runTriggerGet(triggerGetCmd, []string{"ordered-guard"}))
 	})
-	idx1 := strings.Index(humanOut, `1/3 [cel] event.attributes["event"] == "pull_request"`)
-	idx2 := strings.Index(humanOut, `2/3 [cel] has(event.payload.pr)`)
-	idx3 := strings.Index(humanOut, `3/3 [system_one] Does this PR touch auth?`)
+	idx1 := strings.Index(humanOut, fmt.Sprintf("1/3 [cel] %q", `event.attributes["event"] == "pull_request"`))
+	idx2 := strings.Index(humanOut, fmt.Sprintf("2/3 [cel] %q", `has(event.payload.pr)`))
+	idx3 := strings.Index(humanOut, fmt.Sprintf("3/3 [system_one] %q", `Does this PR touch auth?`))
 	require.NotEqual(t, -1, idx1, humanOut)
 	require.NotEqual(t, -1, idx2, humanOut)
 	require.NotEqual(t, -1, idx3, humanOut)
@@ -1413,4 +1413,101 @@ func TestTriggerCLI_GetNumberedElementsAndJSON(t *testing.T) {
 	})
 	assert.Contains(t, brokenHumanOut, "Rules:       broken (stored match rules cannot be parsed)")
 	assert.NotContains(t, brokenHumanOut, "none (types only)")
+}
+
+func TestTriggerCLI_RuleTextQuotedEscapesSpoofedElementLines(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 16, 6, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+
+	origFormat := outputFormat
+	origName, origWebhook, origAgent, origMsg := triggerName, triggerWebhookRef, triggerAgent, triggerMessage
+	origWhere, origWhereFile, origSubject := triggerWhereRules, triggerWhereFile, triggerSubjectExpr
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerName, triggerWebhookRef, triggerAgent, triggerMessage = origName, origWebhook, origAgent, origMsg
+		triggerWhereRules, triggerWhereFile, triggerSubjectExpr = origWhere, origWhereFile, origSubject
+	})
+
+	const (
+		epID = "bbbbbbbb-1111-4222-8333-444444444444"
+		trID = "ffffffff-1111-4222-8333-444444444444"
+	)
+
+	// Element 1 embeds a newline followed by a forged "    2/2 [cel] false" element line;
+	// subject embeds a newline + control escape to attempt spoofing subsequent detail fields.
+	spoofRule1 := "true &&\n    2/2 [cel] false"
+	realRule2 := `event.payload.allow == true`
+	spoofSubject := "string(event.subject) +\n  Agent:       attacker\x1b[31m"
+
+	stored := hubclient.Trigger{
+		ID:                    trID,
+		ProjectID:             "proj-1",
+		Name:                  "spoof-guard",
+		Status:                "active",
+		AuthorizationRevision: 1,
+		Source:                hubclient.TriggerSourceSpec{Kind: "webhook", ID: epID},
+		Match: hubclient.TriggerMatchSpec{
+			Types: []string{"webhook.received"},
+			Rules: []hubclient.TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: spoofRule1},
+				{Dialect: "cel", Expr: realRule2},
+			},
+		},
+		Subject: hubclient.TriggerSubjectSpec{
+			Dialect: "cel",
+			Expr:    spoofSubject,
+			Mode:    "new",
+		},
+		Action:    hubclient.TriggerActionSpec{Type: "message", AgentName: "lead", Message: "ok"},
+		CreatedAt: fixedNow,
+		UpdatedAt: fixedNow,
+	}
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(stored)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID:
+			_ = json.NewEncoder(w).Encode(stored)
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindOAuth)
+
+	assertNoSpoofedLines := func(t *testing.T, out string) {
+		t.Helper()
+		var elem2Lines []string
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "    2/2 ") {
+				elem2Lines = append(elem2Lines, line)
+			}
+			assert.False(t, strings.HasPrefix(line, "  Agent:       attacker"), "newline in subject must not spoof Agent field: %s", out)
+			assert.NotContains(t, line, "\x1b[", "control characters in rule text must be escaped: %s", out)
+		}
+		require.Equal(t, []string{fmt.Sprintf("    2/2 [cel] %q", realRule2)}, elem2Lines,
+			"a newline inside rule 1 must never produce a fake 2/2 line:\n%s", out)
+		assert.Contains(t, out, fmt.Sprintf("    1/2 [cel] %q", spoofRule1))
+		assert.Contains(t, out, fmt.Sprintf("%q", spoofSubject))
+	}
+
+	outputFormat = ""
+	triggerName = "spoof-guard"
+	triggerWebhookRef = "deploys"
+	triggerAgent = "lead"
+	triggerMessage = "ok"
+	triggerWhereFile = ""
+	triggerWhereRules = []string{spoofRule1, realRule2}
+	triggerSubjectExpr = spoofSubject
+
+	createOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerCreate(triggerCreateCmd, nil))
+	})
+	assertNoSpoofedLines(t, createOut)
+
+	getOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerGet(triggerGetCmd, []string{trID}))
+	})
+	assertNoSpoofedLines(t, getOut)
 }

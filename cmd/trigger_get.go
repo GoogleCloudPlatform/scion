@@ -110,7 +110,7 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 	} else {
 		fmt.Printf("  Rules:       %d\n", len(rules))
 		for i, r := range rules {
-			fmt.Printf("    %d/%d [%s] %s\n", i+1, len(rules), r.Dialect, r.Expr)
+			fmt.Printf("    %d/%d [%s] %q\n", i+1, len(rules), r.Dialect, r.Expr)
 		}
 	}
 
@@ -119,7 +119,7 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 		if subjDialect == "" {
 			subjDialect = ruleengine.DialectCEL
 		}
-		fmt.Printf("  Subject:     [%s] %s (mode: %s)\n", subjDialect, tr.Subject.Expr, tr.Subject.Mode)
+		fmt.Printf("  Subject:     [%s] %q (mode: %s)\n", subjDialect, tr.Subject.Expr, tr.Subject.Mode)
 	} else if tr.Subject.Mode != "" {
 		fmt.Printf("  Subject:     default (mode: %s)\n", tr.Subject.Mode)
 	}

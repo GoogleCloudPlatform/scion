@@ -565,15 +565,15 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Types:   %s\n", strings.Join(created.Match.Types, ", "))
 	rules := effectiveTriggerMatchRules(created.Match)
 	if len(rules) == 1 {
-		fmt.Printf("  Where:   1/1 [%s] %s\n", rules[0].Dialect, rules[0].Expr)
+		fmt.Printf("  Where:   1/1 [%s] %q\n", rules[0].Dialect, rules[0].Expr)
 	} else if len(rules) > 1 {
 		fmt.Printf("  Where:\n")
 		for i, r := range rules {
-			fmt.Printf("    %d/%d [%s] %s\n", i+1, len(rules), r.Dialect, r.Expr)
+			fmt.Printf("    %d/%d [%s] %q\n", i+1, len(rules), r.Dialect, r.Expr)
 		}
 	}
 	if created.Subject.Expr != "" {
-		fmt.Printf("  Subject: %s\n", created.Subject.Expr)
+		fmt.Printf("  Subject: %q\n", created.Subject.Expr)
 	}
 	fmt.Printf("  Agent:   %s\n", agentLabel)
 	fmt.Printf("  Status:  %s\n", triggerStatusLabel(created.Status, created.StatusReason))
