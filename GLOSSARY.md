@@ -227,7 +227,7 @@ A server process running both the Hub and Runtime Broker components together (th
 _Avoid_: hub-broker, all-in-one, standalone, monolith
 
 **Console** (web UI mode):
-The management view in the web UI's three-way header mode switcher (**Console**, **Chat**, **Terminal**), holding the left-hand navigation and the overview, project, agent, Runtime Broker, and admin pages. Distinct from **Dashboard**, which is the overview landing page (`/`) inside Console's left-hand navigation.
+The management view in the web UI's three-way header mode switcher (**Console**, **Chat**, **Terminals**), holding the left-hand navigation and the overview, project, agent, Runtime Broker, and admin pages. Distinct from **Dashboard**, which is the overview landing page (`/`) inside Console's left-hand navigation.
 _Avoid_: Dashboard (when naming the mode-switcher option rather than the `/` overview page)
 _See also_: Native Web Chat
 
