@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -387,20 +389,26 @@ var harnessConfigShowCmd = &cobra.Command{
 		// Try local first
 		hcDir, localErr := config.FindHarnessConfigDir(name, gp)
 		if localErr == nil {
+			caps := hcDir.Config.DeclaredCapabilities()
 			if isJSONOutput() {
-				return outputJSON(map[string]interface{}{
+				out := map[string]interface{}{
 					"source":  "local",
 					"name":    hcDir.Name,
 					"harness": hcDir.Config.Harness,
 					"image":   hcDir.Config.Image,
 					"path":    hcDir.Path,
-				})
+				}
+				if caps != nil {
+					out["capabilities"] = caps
+				}
+				return outputJSON(out)
 			}
 			fmt.Printf("Name:    %s\n", hcDir.Name)
 			fmt.Printf("Source:  local\n")
 			fmt.Printf("Harness: %s\n", hcDir.Config.Harness)
 			fmt.Printf("Image:   %s\n", hcDir.Config.Image)
 			fmt.Printf("Path:    %s\n", hcDir.Path)
+			printHarnessConfigCapabilities(os.Stdout, caps)
 			return nil
 		}
 
@@ -420,6 +428,9 @@ var harnessConfigShowCmd = &cobra.Command{
 		if err == nil {
 			for _, hc := range resp.HarnessConfigs {
 				if hc.Name == name || hc.Slug == name {
+					if full, getErr := hubCtx.Client.HarnessConfigs().Get(ctx, hc.ID); getErr == nil && full != nil {
+						hc = *full
+					}
 					if isJSONOutput() {
 						return outputJSON(hc)
 					}
@@ -434,6 +445,9 @@ var harnessConfigShowCmd = &cobra.Command{
 					if hc.SourceURL != "" {
 						fmt.Printf("Source URL:   %s\n", hc.SourceURL)
 					}
+					if hc.Config != nil {
+						printHarnessConfigCapabilities(os.Stdout, hc.Config.Capabilities)
+					}
 					return nil
 				}
 			}
@@ -441,6 +455,52 @@ var harnessConfigShowCmd = &cobra.Command{
 
 		return fmt.Errorf("harness-config %q not found", name)
 	},
+}
+
+func printHarnessConfigCapabilities(w io.Writer, caps *api.HarnessAdvancedCapabilities) {
+	if caps == nil {
+		return
+	}
+	type namedCap struct {
+		key   string
+		field api.CapabilityField
+	}
+	all := []namedCap{
+		{"limits.max_turns", caps.Limits.MaxTurns},
+		{"limits.max_model_calls", caps.Limits.MaxModelCalls},
+		{"limits.max_duration", caps.Limits.MaxDuration},
+		{"telemetry.enabled", caps.Telemetry.EnabledConfig},
+		{"telemetry.native_emitter", caps.Telemetry.NativeEmitter},
+		{"prompts.system_prompt", caps.Prompts.SystemPrompt},
+		{"prompts.agent_instructions", caps.Prompts.AgentInstructions},
+		{"auth.api_key", caps.Auth.APIKey},
+		{"auth.auth_file", caps.Auth.AuthFile},
+		{"auth.oauth_token", caps.Auth.OAuthToken},
+		{"auth.vertex_ai", caps.Auth.VertexAI},
+		{"mcp.stdio", caps.MCP.Stdio},
+		{"mcp.sse", caps.MCP.SSE},
+		{"mcp.streamable_http", caps.MCP.StreamableHTTP},
+		{"mcp.project_scope", caps.MCP.ProjectScope},
+		{"resume", caps.Resume},
+		{"agent_plugins", caps.AgentPlugins},
+	}
+	var declared []namedCap
+	for _, item := range all {
+		if item.field.Support != "" {
+			declared = append(declared, item)
+		}
+	}
+	if len(declared) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "Capabilities:")
+	for _, item := range declared {
+		val := string(item.field.Support)
+		if item.field.Reason != "" {
+			val += " (" + item.field.Reason + ")"
+		}
+		_, _ = fmt.Fprintf(w, "  %-27s %s\n", item.key+":", val)
+	}
 }
 
 var harnessConfigDeleteCmd = &cobra.Command{

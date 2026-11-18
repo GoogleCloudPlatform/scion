@@ -1848,17 +1848,18 @@ const HarnessConfigLayoutBlobs = TemplateLayoutBlobs
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
-	Harness          string                   `json:"harness,omitempty"`
-	Image            string                   `json:"image,omitempty"`
-	User             string                   `json:"user,omitempty"`
-	Model            string                   `json:"model,omitempty"`
-	Args             []string                 `json:"args,omitempty"`
-	Env              map[string]string        `json:"env,omitempty"`
-	AuthSelectedType string                   `json:"authSelectedType,omitempty"`
-	Secrets          []api.RequiredSecret     `json:"secrets,omitempty"`
-	ModelAliases     map[string]string        `json:"modelAliases,omitempty"`
-	NoAuthBehavior   string                   `json:"noAuthBehavior,omitempty"`
-	AuthMeta         *api.HarnessAuthMetadata `json:"authMeta,omitempty"`
+	Harness          string                           `json:"harness,omitempty"`
+	Image            string                           `json:"image,omitempty"`
+	User             string                           `json:"user,omitempty"`
+	Model            string                           `json:"model,omitempty"`
+	Args             []string                         `json:"args,omitempty"`
+	Env              map[string]string                `json:"env,omitempty"`
+	AuthSelectedType string                           `json:"authSelectedType,omitempty"`
+	Secrets          []api.RequiredSecret             `json:"secrets,omitempty"`
+	ModelAliases     map[string]string                `json:"modelAliases,omitempty"`
+	NoAuthBehavior   string                           `json:"noAuthBehavior,omitempty"`
+	AuthMeta         *api.HarnessAuthMetadata         `json:"authMeta,omitempty"`
+	Capabilities     *api.HarnessAdvancedCapabilities `json:"capabilities,omitempty"`
 }
 
 // HarnessConfigStatus constants

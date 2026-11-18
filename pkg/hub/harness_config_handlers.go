@@ -598,11 +598,81 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, hc *st
 	// once, above the switch, in handleHarnessConfigByID.
 
 	resp := HarnessConfigWithCapabilities{HarnessConfig: *hc}
+	s.populateHarnessConfigCapabilities(ctx, &resp.HarnessConfig)
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, harnessConfigResource(hc))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// populateHarnessConfigCapabilities backfills Config.Capabilities from stored
+// config.yaml and agent-plugins.yaml when a row predates Capabilities being
+// derived onto HarnessConfigData.
+func (s *Server) populateHarnessConfigCapabilities(ctx context.Context, hc *store.HarnessConfig) {
+	if hc == nil || (hc.Config != nil && hc.Config.Capabilities != nil) {
+		return
+	}
+	_, hasConfig := templateFileByPath(hc.Files, harnessConfigYAMLPath)
+	_, hasSidecar := templateFileByPath(hc.Files, config.AgentPluginsSidecarFile)
+	if !hasConfig && !hasSidecar {
+		return
+	}
+	stor := s.GetStorage()
+	if stor == nil || hc.StoragePath == "" {
+		return
+	}
+	missKey := hc.ID + "@" + hc.ContentHash
+	if _, missed := s.harnessConfigCapsMisses.Load(missKey); missed {
+		return
+	}
+
+	var entry config.HarnessConfigEntry
+	transientErr := false
+	if hasConfig {
+		data, err := s.readHarnessConfigFile(ctx, stor, hc, harnessConfigYAMLPath, maxHarnessConfigFileSize)
+		switch {
+		case err == nil:
+			if parsed, perr := config.ParseHarnessConfigYAML(data); perr == nil {
+				entry = parsed
+			}
+		case errors.Is(err, storage.ErrNotFound), errors.Is(err, errTemplateObjectTooLarge):
+		default:
+			transientErr = true
+		}
+	}
+	if hasSidecar {
+		where := hc.Name + "/" + config.AgentPluginsSidecarFile
+		data, err := s.readHarnessConfigFile(ctx, stor, hc, config.AgentPluginsSidecarFile, maxHarnessConfigFileSize)
+		switch {
+		case err == nil:
+			config.ApplyAgentPluginsSidecarBytes(&entry, data, where)
+		case errors.Is(err, errTemplateObjectTooLarge):
+			config.ApplyAgentPluginsSidecarError(&entry, errTemplateObjectTooLarge, where)
+		case errors.Is(err, storage.ErrNotFound):
+		default:
+			transientErr = true
+		}
+	}
+
+	caps := entry.DeclaredCapabilities()
+	if caps == nil {
+		if !transientErr && ctx.Err() == nil {
+			s.harnessConfigCapsMisses.Store(missKey, struct{}{})
+		}
+		return
+	}
+	if caps.Harness == "" {
+		caps.Harness = hc.Harness
+	}
+	var cfgCopy store.HarnessConfigData
+	if hc.Config != nil {
+		cfgCopy = *hc.Config
+	} else {
+		cfgCopy.Harness = hc.Harness
+	}
+	cfgCopy.Capabilities = caps
+	hc.Config = &cfgCopy
 }
 
 // harnessConfigImage is the image the image handlers show and check: the

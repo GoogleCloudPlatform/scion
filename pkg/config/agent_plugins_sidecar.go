@@ -80,9 +80,48 @@ func (e *HarnessConfigEntry) AgentPluginsCapability() api.CapabilityField {
 	return api.CapabilityField{}
 }
 
+// DeclaredCapabilities returns the capabilities explicitly declared by the
+// harness-config bundle (config.yaml's capabilities block merged with the
+// agent-plugins.yaml sidecar when present), or nil when no capability is
+// declared. Unlike runtime AdvancedCapabilities(), this never synthesizes
+// generic fallback defaults for undeclared fields.
+func (e *HarnessConfigEntry) DeclaredCapabilities() *api.HarnessAdvancedCapabilities {
+	if e.Capabilities == nil && e.AgentPluginsSidecar == nil {
+		return nil
+	}
+	var caps api.HarnessAdvancedCapabilities
+	if e.Capabilities != nil {
+		caps = *e.Capabilities
+	}
+	caps.AgentPlugins = e.AgentPluginsCapability()
+	withoutHarness := caps
+	withoutHarness.Harness = ""
+	if withoutHarness == (api.HarnessAdvancedCapabilities{}) {
+		return nil
+	}
+	if caps.Harness == "" {
+		caps.Harness = e.Harness
+	}
+	return &caps
+}
+
 // invalidSidecarWarned dedupes the invalid-sidecar warning per location and
 // error, so a harness-config loaded on every start warns once per process.
 var invalidSidecarWarned sync.Map
+
+// ApplyAgentPluginsSidecarBytes records raw agent-plugins.yaml bytes on entry,
+// degrading invalid content to support "no" with the parse error as the reason.
+func ApplyAgentPluginsSidecarBytes(entry *HarnessConfigEntry, data []byte, where string) {
+	applyAgentPluginsSidecar(entry, data, where)
+}
+
+// ApplyAgentPluginsSidecarError records an unreadable/oversize
+// agent-plugins.yaml error on entry, degrading to support "no" with the error
+// as the reason.
+func ApplyAgentPluginsSidecarError(entry *HarnessConfigEntry, err error, where string) {
+	c := invalidAgentPluginsSidecar(fmt.Errorf("invalid %s: %w", AgentPluginsSidecarFile, err), where)
+	entry.AgentPluginsSidecar = &c
+}
 
 // applyAgentPluginsSidecar records the sidecar bytes on entry. A sidecar that
 // does not parse, or has a support level or shape this binary does not know

@@ -66,34 +66,60 @@ type harnessConfigIndex struct {
 }
 
 // deriveHarnessConfigIndex derives a harness-config's index from the bytes
-// of its config.yaml. present is false when the manifest has no config.yaml.
-// name is the harness-config's name (the Harness fallback).
-//
-// Every HarnessConfigData field comes from config.yaml, and a key absent from
-// config.yaml clears its field: there is no merge with what the row held.
-// A file that does not parse is derived like a missing one and logged; it is
-// not rejected (the provisioner check also passes such content through).
+// of its config.yaml (with no agent-plugins.yaml sidecar).
 func deriveHarnessConfigIndex(configYAML []byte, present bool, name string) harnessConfigIndex {
+	return deriveHarnessConfigIndexWithSidecar(configYAML, present, nil, false, name)
+}
+
+// deriveHarnessConfigIndexWithSidecar derives a harness-config's index from
+// its config.yaml and optional agent-plugins.yaml sidecar.
+//
+// Every HarnessConfigData field comes from config.yaml (plus agent-plugins.yaml
+// for capabilities.agent_plugins), and a key absent from those files clears
+// its field: there is no merge with what the row held. A config.yaml that does
+// not parse is derived like a missing one and logged; an invalid or oversize
+// agent-plugins.yaml degrades capabilities.agent_plugins to support "no" with
+// the error as the reason.
+func deriveHarnessConfigIndexWithSidecar(configYAML []byte, present bool, sidecarYAML []byte, sidecarPresent bool, name string) harnessConfigIndex {
 	var idx harnessConfigIndex
+	var entry config.HarnessConfigEntry
+	hasEntry := false
 	if present {
-		entry, err := config.ParseHarnessConfigYAML(configYAML)
+		parsed, err := config.ParseHarnessConfigYAML(configYAML)
 		if err != nil {
 			slog.Warn("harness-config commit: config.yaml does not parse; deriving it as empty",
 				"harness_config", name, "error", err)
 		} else {
+			entry = parsed
 			idx.Harness = entry.Harness
-			idx.Config = harnessConfigDataFromEntry(entry)
+			hasEntry = true
 		}
+	}
+	if sidecarPresent {
+		where := name + "/" + config.AgentPluginsSidecarFile
+		if sidecarYAML == nil {
+			config.ApplyAgentPluginsSidecarError(&entry, errTemplateObjectTooLarge, where)
+		} else {
+			config.ApplyAgentPluginsSidecarBytes(&entry, sidecarYAML, where)
+		}
+		hasEntry = true
 	}
 	if idx.Harness == "" {
 		idx.Harness = inferHarnessFromName(name)
 	}
+	if hasEntry {
+		idx.Config = harnessConfigDataFromEntry(entry, idx.Harness)
+	}
 	return idx
 }
 
-// harnessConfigDataFromEntry maps a parsed config.yaml onto the stored
-// HarnessConfigData. It returns nil when no field is set.
-func harnessConfigDataFromEntry(entry config.HarnessConfigEntry) *store.HarnessConfigData {
+// harnessConfigDataFromEntry maps a parsed config.yaml (and sidecar) onto the
+// stored HarnessConfigData. It returns nil when no field is set.
+func harnessConfigDataFromEntry(entry config.HarnessConfigEntry, resolvedHarness string) *store.HarnessConfigData {
+	caps := entry.DeclaredCapabilities()
+	if caps != nil && caps.Harness == "" {
+		caps.Harness = resolvedHarness
+	}
 	cfg := &store.HarnessConfigData{
 		Harness:          entry.Harness,
 		Image:            entry.Image,
@@ -104,6 +130,7 @@ func harnessConfigDataFromEntry(entry config.HarnessConfigEntry) *store.HarnessC
 		AuthSelectedType: entry.AuthSelectedType,
 		Secrets:          entry.Secrets,
 		ModelAliases:     entry.ModelAliases,
+		Capabilities:     caps,
 	}
 	if entry.NoAuthConfig != nil {
 		cfg.NoAuthBehavior = entry.NoAuthConfig.Behavior
@@ -119,16 +146,22 @@ func harnessConfigDataFromEntry(entry config.HarnessConfigEntry) *store.HarnessC
 }
 
 // deriveHarnessConfigIndexFromCollected is the collected-directory variant
-// of deriveHarnessConfigIndex (bootstrap, import): config.yaml is read
-// through the collected directory's root.
+// of deriveHarnessConfigIndexWithSidecar (bootstrap, import): config.yaml and
+// agent-plugins.yaml are read through the collected directory's root.
 func deriveHarnessConfigIndexFromCollected(cd *collectedDir, name string) harnessConfigIndex {
 	data, present, err := cd.harnessConfigYAML()
 	if err != nil {
 		slog.Warn("harness-config commit: cannot read config.yaml; deriving it as empty",
 			"harness_config", name, "dir", cd.dir, "error", err)
-		return deriveHarnessConfigIndex(nil, false, name)
+		data, present = nil, false
 	}
-	return deriveHarnessConfigIndex(data, present, name)
+	sidecar, sidecarPresent, sidecarErr := cd.harnessConfigFile(config.AgentPluginsSidecarFile)
+	if sidecarErr != nil {
+		slog.Warn("harness-config commit: cannot read agent-plugins.yaml; ignoring sidecar",
+			"harness_config", name, "dir", cd.dir, "error", sidecarErr)
+		sidecar, sidecarPresent = nil, false
+	}
+	return deriveHarnessConfigIndexWithSidecar(data, present, sidecar, sidecarPresent, name)
 }
 
 // harnessConfigIndexMatches reports whether hc's stored derived fields equal
@@ -295,10 +328,14 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 			return err
 		}
 	}
+	sidecarYAML, sidecarPresent, err := s.readHarnessConfigManifestFile(ctx, stor, base, next, config.AgentPluginsSidecarFile, opts)
+	if err != nil {
+		return fmt.Errorf("harness-config commit: %w", err)
+	}
 
 	// 3. Content hash. 4. Derived fields.
 	contentHash := s.computeContentHash(next)
-	idx := deriveHarnessConfigIndex(configYAML, present, hc.Name)
+	idx := deriveHarnessConfigIndexWithSidecar(configYAML, present, sidecarYAML, sidecarPresent, hc.Name)
 
 	// 5. One row write, in the blob layout.
 	prevState := *hc
@@ -360,30 +397,31 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 // order. present is false when next has no config.yaml. A file too large to
 // parse is returned as present with no content.
 func (s *Server) readHarnessConfigYAML(ctx context.Context, stor storage.Storage, base string, next []store.TemplateFile, opts harnessConfigCommitOpts) ([]byte, bool, error) {
-	if _, ok := templateFileByPath(next, harnessConfigYAMLPath); !ok {
+	return s.readHarnessConfigManifestFile(ctx, stor, base, next, harnessConfigYAMLPath, opts)
+}
+
+func (s *Server) readHarnessConfigManifestFile(ctx context.Context, stor storage.Storage, base string, next []store.TemplateFile, filePath string, opts harnessConfigCommitOpts) ([]byte, bool, error) {
+	if _, ok := templateFileByPath(next, filePath); !ok {
 		return nil, false, nil
 	}
-	if data, ok := opts.content[harnessConfigYAMLPath]; ok {
+	if data, ok := opts.content[filePath]; ok {
 		return data, true, nil
 	}
 	if opts.collected != nil {
-		data, present, err := opts.collected.harnessConfigYAML()
+		data, present, err := opts.collected.harnessConfigFile(filePath)
 		if err != nil {
 			return nil, false, err
 		}
 		if present {
 			return data, true, nil
 		}
-		// Not reached for a commit through commitHarnessConfigFiles, which
-		// has already required the collected config.yaml; a caller without
-		// one reads storage.
 	}
-	data, err := readHarnessConfigBlob(ctx, stor, base, next, harnessConfigYAMLPath, maxHarnessConfigFileSize)
+	data, err := readHarnessConfigBlob(ctx, stor, base, next, filePath, maxHarnessConfigFileSize)
 	switch {
 	case errors.Is(err, errTemplateObjectTooLarge):
 		return nil, true, nil
 	case errors.Is(err, storage.ErrNotFound):
-		return nil, false, &fileNotFoundError{path: harnessConfigYAMLPath}
+		return nil, false, &fileNotFoundError{path: filePath}
 	case err != nil:
 		return nil, false, err
 	}

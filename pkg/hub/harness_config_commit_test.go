@@ -66,6 +66,12 @@ auth:
     api-key:
       required_env:
         - any_of: ["EXAMPLE_API_KEY"]
+capabilities:
+  limits:
+    max_turns: { support: "yes" }
+    max_model_calls: { support: "no", reason: "no model events" }
+    max_duration: { support: "yes" }
+  resume: { support: "yes" }
 `
 
 const deriveBareYAML = "name: derive-hc\nharness: claude\n"
@@ -231,6 +237,11 @@ func TestHarnessConfigCommit_DerivedFieldsFollowConfigYAMLOnEveryPath(t *testing
 			assert.Equal(t, "scion", full.Config.User)
 			assert.Equal(t, []string{"--verbose"}, full.Config.Args)
 			assert.Equal(t, "api-key", full.Config.AuthSelectedType)
+			require.NotNil(t, full.Config.Capabilities)
+			assert.Equal(t, "claude", full.Config.Capabilities.Harness)
+			assert.Equal(t, api.SupportYes, full.Config.Capabilities.Limits.MaxTurns.Support)
+			assert.Equal(t, api.CapabilityField{Support: api.SupportNo, Reason: "no model events"}, full.Config.Capabilities.Limits.MaxModelCalls)
+			assert.Equal(t, api.SupportYes, full.Config.Capabilities.Resume.Support)
 
 			bare := path.apply(t, srv, s, deriveBareYAML)
 			assert.Equal(t, full.ID, bare.ID, "the same row is committed")
@@ -904,4 +915,93 @@ func TestHarnessConfigCommit_StorageErrorIsNotFileNotFound(t *testing.T) {
 	after := globalHC(t, s, deriveHCName)
 	assert.Equal(t, hc.ContentHash, after.ContentHash, "a failed commit leaves the row unchanged")
 	assertDerivedFrom(t, after, deriveBareYAML)
+}
+
+func TestHarnessConfigCapabilities_APIResponseSidecarAndBackfill(t *testing.T) {
+	t.Run("GET and List expose declared capabilities including agent-plugins.yaml sidecar", func(t *testing.T) {
+		srv, s, _ := newHCCommitTestServer(t)
+		hc := ensureDeriveHC(t, srv, s)
+
+		cfgYAML := "name: derive-hc\nharness: codex\ncapabilities:\n  limits:\n    max_turns: { support: \"yes\" }\n  resume: { support: \"yes\" }\n  agent_plugins: { support: \"no\", reason: \"legacy\" }\n"
+		sidecarYAML := "support: \"partial\"\nreason: \"Native install via local marketplace\"\n"
+
+		rec := finalizeHCManifest(t, srv, hc, map[string]string{
+			"config.yaml":        cfgYAML,
+			"agent-plugins.yaml": sidecarYAML,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		getRec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+		var gotGet HarnessConfigWithCapabilities
+		require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &gotGet))
+		require.NotNil(t, gotGet.Config)
+		require.NotNil(t, gotGet.Config.Capabilities)
+		assert.Equal(t, "codex", gotGet.Config.Capabilities.Harness)
+		assert.Equal(t, api.SupportYes, gotGet.Config.Capabilities.Limits.MaxTurns.Support)
+		assert.Equal(t, api.SupportYes, gotGet.Config.Capabilities.Resume.Support)
+		assert.Equal(t, api.CapabilityField{
+			Support: api.SupportPartial,
+			Reason:  "Native install via local marketplace",
+		}, gotGet.Config.Capabilities.AgentPlugins, "agent-plugins.yaml sidecar wins over deprecated capabilities.agent_plugins")
+
+		listRec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?name=derive-hc", nil)
+		require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+		var gotList ListHarnessConfigsResponse
+		require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &gotList))
+		require.Len(t, gotList.HarnessConfigs, 1)
+		require.NotNil(t, gotList.HarnessConfigs[0].Config)
+		assert.Equal(t, gotGet.Config.Capabilities, gotList.HarnessConfigs[0].Config.Capabilities)
+
+		// Deleting agent-plugins.yaml re-derives capabilities and falls back to config.yaml.
+		delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/harness-configs/"+hc.ID+"/files/agent-plugins.yaml", nil)
+		delReq.Header.Set("Authorization", "Bearer "+testDevToken)
+		delRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(delRec, delReq)
+		require.Equal(t, http.StatusOK, delRec.Code, delRec.Body.String())
+
+		getAfterDel := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusOK, getAfterDel.Code, getAfterDel.Body.String())
+		var gotAfterDel HarnessConfigWithCapabilities
+		require.NoError(t, json.Unmarshal(getAfterDel.Body.Bytes(), &gotAfterDel))
+		require.NotNil(t, gotAfterDel.Config)
+		require.NotNil(t, gotAfterDel.Config.Capabilities)
+		assert.Equal(t, api.CapabilityField{Support: api.SupportNo, Reason: "legacy"}, gotAfterDel.Config.Capabilities.AgentPlugins)
+	})
+
+	t.Run("Bootstrap OnHashMatch and GET backfill populate capabilities for pre-existing rows", func(t *testing.T) {
+		srv, s, _ := newHCCommitTestServer(t)
+		ctx := context.Background()
+
+		dir := makeHarnessConfigDir(t, "codex-preexisting", map[string]string{
+			"config.yaml":        "harness: codex\nimage: scion-codex:latest\ncapabilities:\n  resume: { support: \"yes\" }\n",
+			"agent-plugins.yaml": "support: \"partial\"\nreason: \"marketplace\"\n",
+		})
+		require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
+
+		hc := globalHC(t, s, "codex-preexisting")
+		require.NotNil(t, hc)
+
+		// Simulate a DB row persisted before Capabilities existed on HarnessConfigData.
+		hc.Config = &store.HarnessConfigData{Harness: "codex", Image: "scion-codex:latest"}
+		require.NoError(t, setHarnessConfigContentForTest(ctx, s, hc))
+
+		// 1. Read-time backfill on GET /api/v1/harness-configs/{id} works immediately before re-bootstrap.
+		getRec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/"+hc.ID, nil)
+		require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+		var gotBackfilled HarnessConfigWithCapabilities
+		require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &gotBackfilled))
+		require.NotNil(t, gotBackfilled.Config)
+		require.NotNil(t, gotBackfilled.Config.Capabilities)
+		assert.Equal(t, api.SupportYes, gotBackfilled.Config.Capabilities.Resume.Support)
+		assert.Equal(t, api.CapabilityField{Support: api.SupportPartial, Reason: "marketplace"}, gotBackfilled.Config.Capabilities.AgentPlugins)
+
+		// 2. Re-running BootstrapHarnessConfigsFromDir with unchanged contentHash triggers OnHashMatch and persists Capabilities.
+		require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
+		persisted := globalHC(t, s, "codex-preexisting")
+		require.NotNil(t, persisted.Config)
+		require.NotNil(t, persisted.Config.Capabilities)
+		assert.Equal(t, api.SupportYes, persisted.Config.Capabilities.Resume.Support)
+		assert.Equal(t, api.CapabilityField{Support: api.SupportPartial, Reason: "marketplace"}, persisted.Config.Capabilities.AgentPlugins)
+	})
 }

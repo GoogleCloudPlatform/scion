@@ -2788,8 +2788,13 @@ type Server struct {
 	// content, not on every create and dispatch. Transient read failures
 	// are not recorded. A new commit changes the content hash and retries.
 	templateAgentConfigMisses sync.Map
-	workspaceLog              *slog.Logger
-	agentMetricsLog           *slog.Logger
+	// harnessConfigCapsMisses records harness-config rows, keyed by ID and
+	// content hash, whose stored bundle declares no capabilities when
+	// backfilling on GET /api/v1/harness-configs/{id}, so storage is not
+	// re-read on every GET for bare configs.
+	harnessConfigCapsMisses sync.Map
+	workspaceLog            *slog.Logger
+	agentMetricsLog         *slog.Logger
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
