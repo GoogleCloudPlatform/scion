@@ -630,3 +630,137 @@ func TestTriggerCLI_PaginationAndResolutionBeyondFirstPage(t *testing.T) {
 		"delete-ep:" + endpoints[14].ID,
 	}, seenMutations)
 }
+
+type fakeNilListHubClient struct {
+	hubclient.Client
+	triggers  hubclient.TriggerService
+	endpoints hubclient.WebhookEndpointService
+}
+
+func (f *fakeNilListHubClient) Triggers(string) hubclient.TriggerService {
+	return f.triggers
+}
+
+func (f *fakeNilListHubClient) WebhookEndpoints(string) hubclient.WebhookEndpointService {
+	return f.endpoints
+}
+
+type fakeTriggerService struct {
+	hubclient.TriggerService
+	listFn func(ctx context.Context, opts *hubclient.ListTriggersOptions) (*hubclient.ListTriggersResponse, error)
+}
+
+func (f *fakeTriggerService) List(ctx context.Context, opts *hubclient.ListTriggersOptions) (*hubclient.ListTriggersResponse, error) {
+	return f.listFn(ctx, opts)
+}
+
+type fakeWebhookEndpointService struct {
+	hubclient.WebhookEndpointService
+	listFn func(ctx context.Context, opts *hubclient.ListWebhookEndpointsOptions) (*hubclient.ListWebhookEndpointsResponse, error)
+}
+
+func (f *fakeWebhookEndpointService) List(ctx context.Context, opts *hubclient.ListWebhookEndpointsOptions) (*hubclient.ListWebhookEndpointsResponse, error) {
+	return f.listFn(ctx, opts)
+}
+
+func TestTriggerCLI_NilListResponseGuard(t *testing.T) {
+	withFakeClient := func(t *testing.T, trSvc hubclient.TriggerService, epSvc hubclient.WebhookEndpointService) *HubContext {
+		t.Helper()
+		hubCtx := &HubContext{
+			Client: &fakeNilListHubClient{
+				triggers:  trSvc,
+				endpoints: epSvc,
+			},
+			Endpoint:       "https://hub.example.com",
+			ProjectID:      "proj-1",
+			CredentialKind: hubsync.CredentialKindOAuth,
+		}
+		origFn := triggerHubContextFn
+		triggerHubContextFn = func() (*HubContext, string, context.Context, context.CancelFunc, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			return hubCtx, "proj-1", ctx, cancel, nil
+		}
+		t.Cleanup(func() { triggerHubContextFn = origFn })
+		return hubCtx
+	}
+
+	t.Run("listAllTriggers nil first page and nil subsequent page", func(t *testing.T) {
+		origSource, origWebhook, origStatus := triggerListSource, triggerListWebhook, triggerListStatus
+		t.Cleanup(func() {
+			triggerListSource, triggerListWebhook, triggerListStatus = origSource, origWebhook, origStatus
+		})
+		triggerListSource, triggerListWebhook, triggerListStatus = "", "", ""
+
+		withFakeClient(t, &fakeTriggerService{
+			listFn: func(context.Context, *hubclient.ListTriggersOptions) (*hubclient.ListTriggersResponse, error) {
+				return nil, nil
+			},
+		}, nil)
+		err := runTriggerList(triggerListCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty response from hub")
+
+		calls := 0
+		_, err = listAllTriggers(context.Background(), &fakeTriggerService{
+			listFn: func(context.Context, *hubclient.ListTriggersOptions) (*hubclient.ListTriggersResponse, error) {
+				calls++
+				if calls == 1 {
+					return &hubclient.ListTriggersResponse{NextCursor: "p2"}, nil
+				}
+				return nil, nil
+			},
+		}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty response from hub")
+	})
+
+	t.Run("resolveTriggerIDOrName nil name-probe response", func(t *testing.T) {
+		withFakeClient(t, &fakeTriggerService{
+			listFn: func(context.Context, *hubclient.ListTriggersOptions) (*hubclient.ListTriggersResponse, error) {
+				return nil, nil
+			},
+		}, nil)
+		err := runTriggerDelete(triggerDeleteCmd, []string{"deploy-notify"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty response from hub")
+	})
+
+	t.Run("listAllWebhookEndpoints nil first page and nil subsequent page", func(t *testing.T) {
+		origStatus := triggerWebhookListStatus
+		t.Cleanup(func() { triggerWebhookListStatus = origStatus })
+		triggerWebhookListStatus = ""
+
+		withFakeClient(t, nil, &fakeWebhookEndpointService{
+			listFn: func(context.Context, *hubclient.ListWebhookEndpointsOptions) (*hubclient.ListWebhookEndpointsResponse, error) {
+				return nil, nil
+			},
+		})
+		err := runTriggerWebhookList(triggerWebhookListCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty response from hub")
+
+		calls := 0
+		_, err = listAllWebhookEndpoints(context.Background(), &fakeWebhookEndpointService{
+			listFn: func(context.Context, *hubclient.ListWebhookEndpointsOptions) (*hubclient.ListWebhookEndpointsResponse, error) {
+				calls++
+				if calls == 1 {
+					return &hubclient.ListWebhookEndpointsResponse{NextCursor: "p2"}, nil
+				}
+				return nil, nil
+			},
+		}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty response from hub")
+	})
+
+	t.Run("resolveWebhookEndpointIDOrName nil name-probe response", func(t *testing.T) {
+		withFakeClient(t, nil, &fakeWebhookEndpointService{
+			listFn: func(context.Context, *hubclient.ListWebhookEndpointsOptions) (*hubclient.ListWebhookEndpointsResponse, error) {
+				return nil, nil
+			},
+		})
+		err := runTriggerWebhookDelete(triggerWebhookDeleteCmd, []string{"deploys"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty response from hub")
+	})
+}

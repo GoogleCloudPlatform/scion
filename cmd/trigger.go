@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -156,6 +157,9 @@ func listAllTriggers(ctx context.Context, svc hubclient.TriggerService, baseOpts
 		if err != nil {
 			return nil, err
 		}
+		if page == nil {
+			return nil, errors.New("empty response from hub")
+		}
 		if agg == nil {
 			cp := *page
 			cp.Triggers = append([]hubclient.Trigger(nil), page.Triggers...)
@@ -189,6 +193,9 @@ func resolveTriggerIDOrName(ctx context.Context, hubCtx *HubContext, projectID, 
 	})
 	if err != nil {
 		return "", wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list triggers for resolution: %w", err))
+	}
+	if nameResp == nil {
+		return "", wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list triggers for resolution: %w", errors.New("empty response from hub")))
 	}
 	for _, tr := range nameResp.Triggers {
 		if tr.Name == ref {

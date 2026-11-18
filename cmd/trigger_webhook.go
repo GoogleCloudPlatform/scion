@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -116,6 +117,9 @@ func listAllWebhookEndpoints(ctx context.Context, svc hubclient.WebhookEndpointS
 		if err != nil {
 			return nil, err
 		}
+		if page == nil {
+			return nil, errors.New("empty response from hub")
+		}
 		if agg == nil {
 			cp := *page
 			cp.Endpoints = append([]hubclient.WebhookEndpoint(nil), page.Endpoints...)
@@ -149,6 +153,9 @@ func resolveWebhookEndpointIDOrName(ctx context.Context, hubCtx *HubContext, pro
 	})
 	if err != nil {
 		return "", wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list webhook endpoints for resolution: %w", err))
+	}
+	if nameResp == nil {
+		return "", wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list webhook endpoints for resolution: %w", errors.New("empty response from hub")))
 	}
 	for _, ep := range nameResp.Endpoints {
 		if ep.Name == ref {
