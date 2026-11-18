@@ -1368,6 +1368,7 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions", nil).Code)
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/D234", nil).Code)
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{}).Code)
+	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", map[string]interface{}{}).Code)
 
 	setAnswersBody := map[string]interface{}{
 		"answers": []map[string]interface{}{
@@ -1427,4 +1428,6 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	assert.Equal(t, http.StatusOK, setAnsOn.Code, setAnsOn.Body.String())
 	interpOn := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{})
 	assert.NotEqual(t, http.StatusNotFound, interpOn.Code, "POST /api/v1/agent/decisions/interpreted must be reachable when web.decisions is on")
+	wdOn := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", map[string]interface{}{})
+	assert.NotEqual(t, http.StatusNotFound, wdOn.Code, "POST /api/v1/agent/decisions/withdraw must be reachable when web.decisions is on")
 }

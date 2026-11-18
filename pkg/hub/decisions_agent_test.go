@@ -90,13 +90,16 @@ func TestAgentDecisions_ExperimentOffAndAuthz(t *testing.T) {
 	resp := f.sendPromptToBob(t, oneDecision, false)
 	reply := f.bobDMReply(t, resp.MessageID, "D234: yes")
 
-	// Experiment off -> 404 on all 3 routes.
+	// Experiment off -> 404 on all 4 routes.
 	setDecisionsExperiment(t, f.srv, false)
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions", nil).Code)
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/D234", nil).Code)
 	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: reply.ID,
 		Answers:         []InterpretedAnswerInput{{Key: "D234", ChoiceID: "1"}},
+	}).Code)
+	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys: []string{"D234"},
 	}).Code)
 
 	setDecisionsExperiment(t, f.srv, true)
@@ -107,7 +110,7 @@ func TestAgentDecisions_ExperimentOffAndAuthz(t *testing.T) {
 	f.srv.Handler().ServeHTTP(unauth, unauthReq)
 	assert.Equal(t, http.StatusUnauthorized, unauth.Code)
 
-	// User caller (session / user identity) -> 403 agents_only on all 3 routes.
+	// User caller (session / user identity) -> 403 agents_only on all 4 routes.
 	for _, tc := range []struct {
 		method string
 		path   string
@@ -118,6 +121,9 @@ func TestAgentDecisions_ExperimentOffAndAuthz(t *testing.T) {
 		{http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{
 			"source_message_id": reply.ID,
 			"answers":           []map[string]string{{"key": "D234", "choice_id": "1"}},
+		}},
+		{http.MethodPost, "/api/v1/agent/decisions/withdraw", map[string]interface{}{
+			"keys": []string{"D234"},
 		}},
 	} {
 		rr := doRequestAsUser(t, f.srv, f.bob, tc.method, tc.path, tc.body)
@@ -140,6 +146,7 @@ func TestAgentDecisions_ExperimentOffAndAuthz(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions", nil).Code)
 	assert.Equal(t, http.StatusMethodNotAllowed, f.agentDecisionReq(t, f.agent, http.MethodDelete, "/api/v1/agent/decisions/D234", nil).Code)
 	assert.Equal(t, http.StatusMethodNotAllowed, f.agentDecisionReq(t, f.agent, http.MethodDelete, "/api/v1/agent/decisions/interpreted", nil).Code)
+	assert.Equal(t, http.StatusMethodNotAllowed, f.agentDecisionReq(t, f.agent, http.MethodDelete, "/api/v1/agent/decisions/withdraw", nil).Code)
 }
 
 func TestAgentDecisions_ListAndShow(t *testing.T) {
@@ -1049,4 +1056,280 @@ func TestAgentDecisions_SearchPostgresCancelAndInterruptMapToSearchTimeout(t *te
 	rrInterrupt := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q=feature", nil)
 	assert.Equal(t, http.StatusServiceUnavailable, rrInterrupt.Code, rrInterrupt.Body.String())
 	assert.Equal(t, "SEARCH_TIMEOUT", errorCode(t, rrInterrupt))
+}
+
+func TestAgentDecisions_WithdrawValidationEventsAnswerRefusalAndQueues(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+
+	// Create a second agent to verify cross-agent isolation.
+	otherAgent := &store.Agent{
+		ID: api.NewUUID(), Slug: "other-bot", Name: "other-bot",
+		ProjectID: f.project.ID, OwnerID: f.bob.ID, Phase: "running",
+		Created: time.Now(),
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, otherAgent))
+
+	// 1. 400 validation cases.
+	rawInvalidReq := httptest.NewRequest(http.MethodPost, "/api/v1/agent/decisions/withdraw", strings.NewReader("{bad-json"))
+	rawInvalidReq.Header.Set("Content-Type", "application/json")
+	rawInvalidReq = rawInvalidReq.WithContext(agentCtx(rawInvalidReq.Context(), f.agent))
+	rawInvalidRR := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rawInvalidRR, rawInvalidReq)
+	assert.Equal(t, http.StatusBadRequest, rawInvalidRR.Code)
+
+	for name, body := range map[string]WithdrawDecisionsRequest{
+		"empty keys":     {Keys: nil},
+		"blank key":      {Keys: []string{"   "}},
+		"duplicate keys": {Keys: []string{"D234", "d234"}},
+		"over 10 keys":   {Keys: []string{"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11"}},
+		"reason > 500":   {Keys: []string{"D234"}, Reason: strings.Repeat("é", store.MaxDecisionWithdrawReasonRunes+1)},
+	} {
+		rr := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", body)
+		assert.Equal(t, http.StatusBadRequest, rr.Code, "%s: %s", name, rr.Body.String())
+	}
+
+	// 2. Ask one decision in topic and one in DM with Bob.
+	topicMsg, topicPrompt := f.topicPrompt(t, `[{"id":"D-TOPIC","question":"Ship topic?","choices":["yes","no"]}]`, false)
+	topicRowID := topicPrompt.Decisions[0].RowID
+	dmPrompt := f.sendPromptToBob(t, `[{"id":"D-DM","question":"Ship DM?","choices":["yes","no"]}]`, false)
+	dmRowID := dmPrompt.Decisions[0].RowID
+
+	// Baseline: both prompts appear in project and profile Waiting on you (count = 2).
+	projPendingBefore := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions?tab=pending", nil)
+	require.Equal(t, http.StatusOK, projPendingBefore.Code, projPendingBefore.Body.String())
+	var projBeforeOut ProjectPendingDecisionsResponse
+	require.NoError(t, json.Unmarshal(projPendingBefore.Body.Bytes(), &projBeforeOut))
+	assert.Equal(t, 2, projBeforeOut.Counts.WaitingOnYou)
+	assert.Len(t, projBeforeOut.Prompts, 2)
+
+	// 3. Unknown key and another agent's key fold into 409 withdraw_failed (reason decision_not_found).
+	for _, tc := range []struct {
+		caller *store.Agent
+		key    string
+	}{
+		{f.agent, "NO-SUCH-KEY"},
+		{otherAgent, "D-TOPIC"},
+	} {
+		rr := f.agentDecisionReq(t, tc.caller, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+			Keys: []string{tc.key},
+		})
+		require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+		code, details := errorCodeAndDetails(t, rr)
+		assert.Equal(t, ErrCodeWithdrawFailed, code)
+		failures, ok := details["failures"].([]interface{})
+		require.True(t, ok)
+		require.Len(t, failures, 1)
+		f0 := failures[0].(map[string]interface{})
+		assert.Equal(t, tc.key, f0["key"])
+		assert.Equal(t, store.WithdrawReasonNotFound, f0["reason"])
+	}
+
+	// 4. Subscribe to events BEFORE withdrawing D-TOPIC: chat.decision.updated arrives on
+	// project.<id>.chat.decision.updated, and NO chat message is posted (D4).
+	projUpdatedCh, unsubProjUpdated := f.srv.events.Subscribe("project." + f.project.ID + ".chat.decision.updated")
+	defer unsubProjUpdated()
+	projMsgCh, unsubProjMsg := f.srv.events.Subscribe("project." + f.project.ID + ".chat.message")
+	defer unsubProjMsg()
+
+	topicMsgsBefore, err := f.store.ListMessages(ctx, store.MessageFilter{ThreadID: topicMsg.ThreadID}, store.ListOptions{Limit: 50})
+	require.NoError(t, err)
+
+	wdTopicRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys:   []string{"D-TOPIC"},
+		Reason: "  CI found a regression  ",
+	})
+	require.Equal(t, http.StatusOK, wdTopicRR.Code, wdTopicRR.Body.String())
+	var wdTopicOut WithdrawDecisionsResponse
+	require.NoError(t, json.Unmarshal(wdTopicRR.Body.Bytes(), &wdTopicOut))
+	require.Len(t, wdTopicOut.Withdrawn, 1)
+	assert.Empty(t, wdTopicOut.AlreadyWithdrawn)
+	assert.Equal(t, store.DecisionStatusWithdrawn, wdTopicOut.Withdrawn[0].Status)
+	require.NotNil(t, wdTopicOut.Withdrawn[0].Withdrawn)
+	assert.Equal(t, "CI found a regression", wdTopicOut.Withdrawn[0].Withdrawn.Reason)
+	assert.Equal(t, wdTopicOut.Withdrawn[0].AskerAgentName, wdTopicOut.Withdrawn[0].Withdrawn.ByName)
+
+	projEvts := collectEvents(projUpdatedCh)
+	require.Len(t, projEvts, 1, "one chat.decision.updated event published on project subject")
+	var topicEvtPayload struct {
+		Decision  DecisionView `json:"decision"`
+		MessageID string       `json:"messageId"`
+		ThreadID  string       `json:"threadId"`
+	}
+	require.NoError(t, json.Unmarshal(projEvts[0].Data, &topicEvtPayload))
+	assert.Equal(t, topicRowID, topicEvtPayload.Decision.RowID)
+	assert.Equal(t, store.DecisionStatusWithdrawn, topicEvtPayload.Decision.Status)
+	require.NotNil(t, topicEvtPayload.Decision.Withdrawn)
+	assert.Equal(t, "CI found a regression", topicEvtPayload.Decision.Withdrawn.Reason)
+	assert.Empty(t, collectEvents(projMsgCh), "no chat.message event is published on withdrawal (D4)")
+
+	topicMsgsAfter, err := f.store.ListMessages(ctx, store.MessageFilter{ThreadID: topicMsg.ThreadID}, store.ListOptions{Limit: 50})
+	require.NoError(t, err)
+	assert.Len(t, topicMsgsAfter.Items, len(topicMsgsBefore.Items), "no message row inserted on withdrawal (D4)")
+
+	// Idempotent retry: returns under alreadyWithdrawn, keeps original reason, emits no new event.
+	wdRetryRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys:   []string{"D-TOPIC"},
+		Reason: "Different reason ignored",
+	})
+	require.Equal(t, http.StatusOK, wdRetryRR.Code, wdRetryRR.Body.String())
+	var wdRetryOut WithdrawDecisionsResponse
+	require.NoError(t, json.Unmarshal(wdRetryRR.Body.Bytes(), &wdRetryOut))
+	assert.Empty(t, wdRetryOut.Withdrawn)
+	require.Len(t, wdRetryOut.AlreadyWithdrawn, 1)
+	require.NotNil(t, wdRetryOut.AlreadyWithdrawn[0].Withdrawn)
+	assert.Equal(t, "CI found a regression", wdRetryOut.AlreadyWithdrawn[0].Withdrawn.Reason)
+	assert.Empty(t, collectEvents(projUpdatedCh), "idempotent retry publishes no duplicate event")
+
+	// 5. Withdraw D-DM: published only on user.<bob>.chat.decision.updated, never project subject, no chat message.
+	bobUpdatedCh, unsubBobUpdated := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
+	defer unsubBobUpdated()
+	bobMsgCh, unsubBobMsg := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.message")
+	defer unsubBobMsg()
+
+	wdDMRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys: []string{"D-DM"},
+	})
+	require.Equal(t, http.StatusOK, wdDMRR.Code, wdDMRR.Body.String())
+	bobEvts := collectEvents(bobUpdatedCh)
+	require.Len(t, bobEvts, 1, "DM user receives chat.decision.updated")
+	assert.Empty(t, collectEvents(projUpdatedCh), "DM withdrawal is never published on project subject")
+	assert.Empty(t, collectEvents(bobMsgCh), "DM withdrawal publishes no chat.message")
+
+	// 6. Both withdrawn prompts are gone from project and profile Waiting on you (count = 0),
+	// and agent list/show + GET /api/v1/decisions/{rowId} surface withdrawn metadata.
+	projPendingAfter := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions?tab=pending", nil)
+	require.Equal(t, http.StatusOK, projPendingAfter.Code)
+	var projAfterOut ProjectPendingDecisionsResponse
+	require.NoError(t, json.Unmarshal(projPendingAfter.Body.Bytes(), &projAfterOut))
+	assert.Equal(t, 0, projAfterOut.Counts.WaitingOnYou)
+	assert.Empty(t, projAfterOut.Prompts)
+
+	profPendingAfter := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/users/me/decisions?tab=pending", nil)
+	require.Equal(t, http.StatusOK, profPendingAfter.Code, profPendingAfter.Body.String())
+	var profAfterOut map[string]interface{}
+	require.NoError(t, json.Unmarshal(profPendingAfter.Body.Bytes(), &profAfterOut))
+	assert.Empty(t, profAfterOut["prompts"])
+	profCounts := profAfterOut["counts"].(map[string]interface{})
+	assert.Equal(t, float64(0), profCounts["waitingOnYou"])
+
+	getDecRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+topicRowID, nil)
+	require.Equal(t, http.StatusOK, getDecRR.Code, getDecRR.Body.String())
+	var getDecOut struct {
+		Decision DecisionView `json:"decision"`
+	}
+	require.NoError(t, json.Unmarshal(getDecRR.Body.Bytes(), &getDecOut))
+	assert.Equal(t, store.DecisionStatusWithdrawn, getDecOut.Decision.Status)
+	require.NotNil(t, getDecOut.Decision.Withdrawn)
+	assert.Equal(t, "CI found a regression", getDecOut.Decision.Withdrawn.Reason)
+
+	listAllRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=all", nil)
+	require.Equal(t, http.StatusOK, listAllRR.Code)
+	var listAllOut AgentDecisionListResponse
+	require.NoError(t, json.Unmarshal(listAllRR.Body.Bytes(), &listAllOut))
+	var sawTopicInList bool
+	for _, it := range listAllOut.Items {
+		if it.Key == "D-TOPIC" {
+			sawTopicInList = true
+			assert.Equal(t, store.DecisionStatusWithdrawn, it.Status)
+			require.NotNil(t, it.Withdrawn)
+			assert.Equal(t, "CI found a regression", it.Withdrawn.Reason)
+		}
+	}
+	assert.True(t, sawTopicInList)
+
+	showRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/D-TOPIC", nil)
+	require.Equal(t, http.StatusOK, showRR.Code)
+	var showOut AgentDecisionShowResponse
+	require.NoError(t, json.Unmarshal(showRR.Body.Bytes(), &showOut))
+	require.Len(t, showOut.Versions, 1)
+	assert.Equal(t, store.DecisionStatusWithdrawn, showOut.Versions[0].Status)
+	require.NotNil(t, showOut.Versions[0].Withdrawn)
+	assert.Equal(t, "CI found a regression", showOut.Versions[0].Withdrawn.Reason)
+
+	// 7. Single answer to a withdrawn row gets 409 withdrawn with details.decision.
+	ansRR := f.answer(t, f.bob, dmRowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusConflict, ansRR.Code, ansRR.Body.String())
+	ansCode, ansDetails := errorCodeAndDetails(t, ansRR)
+	assert.Equal(t, ErrCodeDecisionWithdrawn, ansCode)
+	ansDecView, ok := ansDetails["decision"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, store.DecisionStatusWithdrawn, ansDecView["status"])
+	assert.NotNil(t, ansDecView["withdrawn"])
+
+	// 8. Direct-answered and interpreted-awaiting-confirm (D6) rows fail with 409 withdraw_failed (already_answered).
+	pAnswered := f.sendPromptToBob(t, `[{"id":"D-DIR","question":"Direct?","choices":["yes","no"]}]`, false)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, pAnswered.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+	wdDirRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys: []string{"D-DIR"},
+	})
+	require.Equal(t, http.StatusConflict, wdDirRR.Code, wdDirRR.Body.String())
+	dirCode, dirDetails := errorCodeAndDetails(t, wdDirRR)
+	assert.Equal(t, ErrCodeWithdrawFailed, dirCode)
+	assert.Contains(t, wdDirRR.Body.String(), "D-DIR: already answered by ")
+	assert.Contains(t, wdDirRR.Body.String(), "(yes)")
+	dirFailures := dirDetails["failures"].([]interface{})
+	require.Len(t, dirFailures, 1)
+	assert.Equal(t, store.WithdrawReasonAlreadyAnswered, dirFailures[0].(map[string]interface{})["reason"])
+	assert.NotNil(t, dirFailures[0].(map[string]interface{})["decision"])
+
+	pInterp := f.sendPromptToBob(t, `[{"id":"D-INT","question":"Interp?","choices":["yes","no"]}]`, false)
+	reply := f.bobDMReply(t, pInterp.MessageID, "D-INT: no")
+	recRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: reply.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "D-INT", ChoiceID: "2"}},
+	})
+	require.Equal(t, http.StatusOK, recRR.Code, recRR.Body.String())
+	wdIntRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", WithdrawDecisionsRequest{
+		Keys: []string{"D-INT"},
+	})
+	require.Equal(t, http.StatusConflict, wdIntRR.Code, wdIntRR.Body.String())
+	assert.Equal(t, ErrCodeWithdrawFailed, errorCode(t, wdIntRR))
+	assert.Contains(t, wdIntRR.Body.String(), "already_answered")
+
+	// 9. --update over a withdrawn key asks v2 and publishes updated v1 (still withdrawn, with replacedBy -> v2).
+	v2Prompt := f.sendPromptToBob(t, `[{"id":"D-TOPIC","question":"Ship topic v2?","choices":["yes","no"]}]`, true)
+	require.Len(t, v2Prompt.Decisions, 1)
+	assert.Equal(t, 2, v2Prompt.Decisions[0].Version)
+	reAskEvts := collectEvents(projUpdatedCh)
+	require.Len(t, reAskEvts, 1, "re-asking D-TOPIC on DM publishes replacedBy update on old topic prompt")
+	var reAskEvt struct {
+		Decision DecisionView `json:"decision"`
+	}
+	require.NoError(t, json.Unmarshal(reAskEvts[0].Data, &reAskEvt))
+	assert.Equal(t, topicRowID, reAskEvt.Decision.RowID)
+	assert.Equal(t, store.DecisionStatusWithdrawn, reAskEvt.Decision.Status, "v1 stays withdrawn")
+	require.NotNil(t, reAskEvt.Decision.Withdrawn)
+	require.NotNil(t, reAskEvt.Decision.ReplacedBy)
+	assert.Equal(t, v2Prompt.Decisions[0].RowID, reAskEvt.Decision.ReplacedBy.RowID)
+}
+
+func TestDecisionAnswer_WithdrawnAfterStateCheck409(t *testing.T) {
+	srv, st, alice, bob, project, first, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *interpretedFirstStore {
+		return &interpretedFirstStore{Store: inner, fault: f}
+	})
+	f := newDecisionsFixtureOn(t, srv, st, alice, bob, project)
+	_, res := f.topicPrompt(t, oneDecision, false)
+	row := res.Decisions[0].RowID
+
+	first.before = func() {
+		_, err := f.store.WithdrawDecisions(context.Background(), &store.WithdrawDecisionsInput{
+			AskerAgentID: f.agent.ID,
+			Keys:         []string{"D234"},
+			Reason:       "Won the race",
+		})
+		require.NoError(t, err)
+	}
+	fault.Arm()
+
+	rr := f.answer(t, f.alice, row, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	code, details := errorCodeAndDetails(t, rr)
+	assert.Equal(t, ErrCodeDecisionWithdrawn, code)
+	view, ok := details["decision"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, store.DecisionStatusWithdrawn, view["status"])
+	wd, ok := view["withdrawn"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "Won the race", wd["reason"])
 }

@@ -227,3 +227,60 @@ func TestDecisionService_ListQueryParam(t *testing.T) {
 		t.Errorf("seenRawQueries[1] = %q, want %q", seenRawQueries[1], want)
 	}
 }
+
+func TestDecisionService_Withdraw(t *testing.T) {
+	now := time.Date(2026, 11, 18, 4, 0, 0, 0, time.UTC)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/decisions/withdraw", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method %s", r.Method)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if got := r.Header.Get("X-Scion-Agent-Token"); got != "agent-tok-1" {
+			t.Errorf("X-Scion-Agent-Token = %q, want agent-tok-1", got)
+		}
+		var req WithdrawDecisionsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if len(req.Keys) != 1 || req.Keys[0] != "D234" || req.Reason != "Obsolete" || req.WholeSet {
+			t.Errorf("unexpected request: %+v", req)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(WithdrawDecisionsResponse{
+			Withdrawn: []DecisionView{
+				{
+					RowID:   "row-1",
+					Key:     "D234",
+					Version: 1,
+					Status:  "withdrawn",
+					Withdrawn: &DecisionWithdrawnView{
+						At:     now,
+						Reason: "Obsolete",
+						ByName: "release-bot",
+					},
+				},
+			},
+			AlreadyWithdrawn: []DecisionView{},
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c, err := New(srv.URL, WithAgentToken("agent-tok-1"))
+	if err != nil {
+		t.Fatalf("New client: %v", err)
+	}
+	resp, err := c.Decisions().Withdraw(context.Background(), &WithdrawDecisionsRequest{
+		Keys:   []string{"D234"},
+		Reason: "Obsolete",
+	})
+	if err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+	if len(resp.Withdrawn) != 1 || resp.Withdrawn[0].Withdrawn == nil || resp.Withdrawn[0].Withdrawn.Reason != "Obsolete" {
+		t.Fatalf("unexpected Withdraw response: %+v", resp)
+	}
+}
