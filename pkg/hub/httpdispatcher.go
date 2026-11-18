@@ -1948,8 +1948,9 @@ func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store
 // shouldRevertRun reports whether a failed start or restart left the
 // previous runtime entry as the agent's live run, so the dispatch should
 // put the row's run ID back (ptone/scion#2550). That needs both:
-//   - isConfirmedStartNotActedOnError: the request never reached the
-//     broker, or the broker answered with its own error envelope; and
+//   - isStartRefusedBeforeCreate: the request never reached the broker,
+//     the broker answered with its own confirmed rejection envelope, or
+//     the broker refused before Manager.Start with 503 runtime_unavailable; and
 //   - no api.BrokerErrorDetailStartAttempted marker in that envelope. The
 //     broker sets the marker on any failure from inside Manager.Start, by
 //     which point Start may already have removed the previous entry (and
@@ -1958,9 +1959,9 @@ func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store
 //     is gone and leak the new one.
 //
 // An older broker never sets the marker, so against it this falls back to
-// isConfirmedStartNotActedOnError alone, the pre-marker behaviour.
+// isStartRefusedBeforeCreate alone, the pre-marker behaviour.
 func shouldRevertRun(err error) bool {
-	if !isConfirmedStartNotActedOnError(err) {
+	if !isStartRefusedBeforeCreate(err) {
 		return false
 	}
 	return !brokerStartAttempted(err)

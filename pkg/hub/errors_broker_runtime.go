@@ -80,6 +80,16 @@ func isBrokerRuntimeUnavailable(err error) bool {
 		se.brokerErrorCode() == brokerCodeRuntimeUnavailable
 }
 
+// isStartRefusedBeforeCreate reports whether err is a start error where no
+// container was created on the broker: either isConfirmedStartNotActedOnError
+// accepts err, or the broker refused the start with 503 runtime_unavailable
+// before entering Manager.Start (no startAttempted marker). It leaves
+// isConfirmedStartNotActedOnError unchanged.
+func isStartRefusedBeforeCreate(err error) bool {
+	return isConfirmedStartNotActedOnError(err) ||
+		(isBrokerRuntimeUnavailable(err) && !brokerStartAttempted(err))
+}
+
 // isBrokerDraining reports whether err is a runtime broker's 503 answer with
 // error code broker_draining (api.BrokerErrCodeBrokerDraining): the broker
 // is shutting down and refused the request before any start tracker,

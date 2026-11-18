@@ -1129,11 +1129,10 @@ const reincarnationRerenderTimeout = 2*brokerRequestTimeout + time.Minute
 
 // reincarnationStartLeftNoContainer reports whether a DispatchAgentStart
 // error is a definitive outcome that leaves no gen N+1 container: the broker
-// never acted on the request or explicitly refused it
-// (isConfirmedStartNotActedOnError, the classification DispatchAgentStart's
-// own start-failure revoke uses), and did not report a failure from inside
-// Manager.Start (brokerStartAttempted, by which point a container may have
-// been created). This is the pair shouldRevertRun uses. The worker's stop
+// never acted on the request or explicitly refused it before creating a
+// container (isStartRefusedBeforeCreate), and did not report a failure from
+// inside Manager.Start (brokerStartAttempted, by which point a container may
+// have been created). This is the pair shouldRevertRun uses. The worker's stop
 // step already confirmed the previous container is gone, so no container
 // is running for the agent. Every other error is ambiguous.
 //
@@ -1161,7 +1160,7 @@ func reincarnationStartLeftNoContainer(err error) bool {
 	if startRunNotBegunOutsideDelete(err) || pendingFoldRefusedOutsideDelete(err) || errors.Is(err, ErrHubShuttingDown) {
 		return true
 	}
-	return isConfirmedStartNotActedOnError(err) && !brokerStartAttempted(err)
+	return isStartRefusedBeforeCreate(err) && !brokerStartAttempted(err)
 }
 
 // rerenderPreviousConfig makes one best-effort reprovision dispatch with the

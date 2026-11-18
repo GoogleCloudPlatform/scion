@@ -103,7 +103,12 @@ func TestWriteBrokerRuntimeUnavailable_OtherReasonKeepsGenericRelay(t *testing.T
 func TestBrokerProfileUnresolved_StillRuntimeUnavailable(t *testing.T) {
 	err := &brokerStatusError{StatusCode: http.StatusServiceUnavailable, Body: profileUnresolvedBody(`"gone"`)}
 	require.True(t, isBrokerRuntimeUnavailable(err))
+	require.True(t, isStartRefusedBeforeCreate(err))
+	require.True(t, shouldRevertRun(err))
+	require.True(t, reincarnationStartLeftNoContainer(err))
+	require.True(t, startDidNotHappen(err))
 	require.True(t, startRefusedBeforeRun(err))
+	require.False(t, isConfirmedStartNotActedOnError(err))
 	profile, ok := brokerProfileUnresolved(err)
 	require.True(t, ok)
 	require.Equal(t, "gone", profile)
