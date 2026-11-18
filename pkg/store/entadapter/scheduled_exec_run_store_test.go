@@ -173,8 +173,10 @@ func TestScheduledExecRun_FinishNeverOverwritesEventOutcome(t *testing.T) {
 	s := newTestScheduleStore(t)
 	ctx := context.Background()
 	for _, status := range []string{store.ScheduledEventSkipped, store.ScheduledEventFailed, store.ScheduledEventCancelled} {
-		evt := newExecEvent(t, s, uuid.NewString(), status, time.Now())
+		now := time.Now()
+		evt := newExecEvent(t, s, uuid.NewString(), store.ScheduledEventFired, now)
 		require.NoError(t, s.CreateScheduledExecRun(ctx, newExecRun(evt)))
+		require.NoError(t, s.UpdateScheduledEventStatus(ctx, evt.ID, status, &now, "prior"))
 		won, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
 			EventID: evt.ID, Outcome: store.ScheduledExecOutcomeAbandoned,
 			EventStatus: store.ScheduledEventFailed, EventError: "run outcome unknown",
@@ -355,9 +357,11 @@ func TestPurgeOldScheduledEvents_RemovesExecRuns(t *testing.T) {
 	s := newTestScheduleStore(t)
 	ctx := context.Background()
 	project := uuid.NewString()
-	old := newExecEvent(t, s, project, store.ScheduledEventFailed, time.Now().Add(-8*24*time.Hour))
+	oldAt := time.Now().Add(-8 * 24 * time.Hour)
+	old := newExecEvent(t, s, project, store.ScheduledEventFired, oldAt)
 	recent := newExecEvent(t, s, project, store.ScheduledEventFired, time.Now().Add(-time.Hour))
 	require.NoError(t, s.CreateScheduledExecRun(ctx, newExecRun(old)))
+	require.NoError(t, s.UpdateScheduledEventStatus(ctx, old.ID, store.ScheduledEventFailed, &oldAt, "failed"))
 	require.NoError(t, s.CreateScheduledExecRun(ctx, newExecRun(recent)))
 
 	n, err := s.PurgeOldScheduledEvents(ctx, time.Now().Add(-7*24*time.Hour))
@@ -1092,5 +1096,149 @@ func TestCheckedExecQuota_CrossEventAndScheduleLastSlotAndSelfUpdate(t *testing.
 	require.NoError(t, err)
 	for _, item := range execList.Items {
 		assert.Equal(t, "exec", item.EventType)
+	}
+}
+
+// TestCreateScheduledExecRun_RequiresClaimedEventStatus (ptone/scion#8210):
+// CreateScheduledExecRun inserts a run only while the parent event is claimed
+// (fired or expired), refusing pending, firing, skipped, failed, and cancelled
+// events for both one-shot and recurring runs while preserving ErrAlreadyExists
+// when a run for that event already exists.
+func TestCreateScheduledExecRun_RequiresClaimedEventStatus(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second)
+	sc := newTestExecSchedule(t, s, project, "status-guard", store.ScheduleStatusActive)
+
+	for _, status := range []string{store.ScheduledEventFired, store.ScheduledEventExpired} {
+		evt := newExecEvent(t, s, project, status, now)
+		require.NoError(t, s.CreateScheduledExecRun(ctx, newExecRun(evt)), "status %s must admit", status)
+		_, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+			EventID: evt.ID, FinishedAt: now.Add(time.Second),
+			Outcome: store.ScheduledExecOutcomeError, EventStatus: store.ScheduledEventFailed, EventError: "boom",
+		})
+		require.NoError(t, err)
+		// Even after the event moved to failed, re-inserting for the same event returns ErrAlreadyExists.
+		assert.ErrorIs(t, s.CreateScheduledExecRun(ctx, newExecRun(evt)), store.ErrAlreadyExists)
+	}
+
+	for _, status := range []string{
+		store.ScheduledEventPending,
+		store.ScheduledEventFiring,
+		store.ScheduledEventSkipped,
+		store.ScheduledEventFailed,
+		store.ScheduledEventCancelled,
+	} {
+		oneShot := newExecEvent(t, s, project, status, now)
+		err := s.CreateScheduledExecRun(ctx, newExecRun(oneShot))
+		assert.ErrorIs(t, err, store.ErrScheduledExecEventClosed, "one-shot status %s must refuse admission", status)
+		_, getErr := s.GetScheduledExecRun(ctx, oneShot.ID)
+		assert.ErrorIs(t, getErr, store.ErrNotFound)
+
+		recEvt := &store.ScheduledEvent{
+			ID: uuid.NewString(), ProjectID: project, ScheduleID: sc.ID,
+			EventType: "exec", FireAt: now, FiredAt: &now,
+			Payload: sc.Payload, Status: status,
+		}
+		require.NoError(t, s.CreateScheduledEvent(ctx, recEvt))
+		recRun := newExecRun(recEvt)
+		recRun.ScheduleID = sc.ID
+		err = s.CreateScheduledExecRun(ctx, recRun)
+		assert.ErrorIs(t, err, store.ErrScheduledExecEventClosed, "recurring status %s must refuse admission", status)
+		_, getErr = s.GetScheduledExecRun(ctx, recEvt.ID)
+		assert.ErrorIs(t, getErr, store.ErrNotFound)
+	}
+}
+
+// TestCreateScheduledExecRun_RacesUnadmittedCompletionMutuallyExclusive (ptone/scion#8210):
+// when CreateScheduledExecRun races FailUnadmittedScheduledEvent or
+// CompleteUnadmittedExecEvent on the same event, exactly one side wins:
+// either the run is admitted (and the unadmitted fail is a no-op) or the event
+// is marked failed once (and CreateScheduledExecRun returns ErrScheduledExecEventClosed).
+func TestCreateScheduledExecRun_RacesUnadmittedCompletionMutuallyExclusive(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	retryTransient := func(fn func() error) error {
+		for tries := 0; tries < 50; tries++ {
+			err := fn()
+			if !errors.Is(err, store.ErrTransient) {
+				return err
+			}
+			time.Sleep(time.Millisecond)
+		}
+		return store.ErrTransient
+	}
+
+	for trial := 0; trial < 20; trial++ {
+		sc := newTestExecSchedule(t, s, project, uuid.NewString(), store.ScheduleStatusActive)
+		claimedAt := base.Add(-2 * time.Hour)
+		evt := newRecurringExecEvent(t, s, sc, claimedAt)
+		cutoff := base.Add(-time.Minute)
+
+		run := newExecRun(evt)
+		run.ScheduleID = sc.ID
+		run.StartedAt = base
+		run.LeaseUntil = base.Add(5 * time.Minute)
+
+		start := make(chan struct{})
+		var admitErr, failErr error
+		var failChanged bool
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			admitErr = retryTransient(func() error {
+				return s.CreateScheduledExecRun(ctx, run)
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			failErr = retryTransient(func() error {
+				var err error
+				if trial%2 == 0 {
+					failChanged, err = s.FailUnadmittedScheduledEvent(ctx, evt.ID, "exec", cutoff, "hub restarted before dispatch")
+				} else {
+					failChanged, err = s.CompleteUnadmittedExecEvent(ctx, evt.ID, store.ScheduledEventFailed, "hub shutting down", sc.ID, base)
+				}
+				return err
+			})
+		}()
+		close(start)
+		wg.Wait()
+
+		require.NoError(t, failErr)
+		if admitErr == nil {
+			assert.False(t, failChanged, "trial %d: admit won so unadmitted fail must be a no-op", trial)
+			won, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+				EventID: evt.ID, FinishedAt: base.Add(time.Second), Outcome: store.ScheduledExecOutcomeOK,
+			})
+			require.NoError(t, err)
+			require.True(t, won)
+			gotSc, err := s.GetSchedule(ctx, sc.ID)
+			require.NoError(t, err)
+			assert.Equal(t, 1, gotSc.RunCount, "trial %d: run_count must increment once", trial)
+			assert.Equal(t, 0, gotSc.ErrorCount)
+			gotEvt, err := s.GetScheduledEvent(ctx, evt.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventFired, gotEvt.Status)
+		} else {
+			assert.ErrorIs(t, admitErr, store.ErrScheduledExecEventClosed, "trial %d", trial)
+			assert.True(t, failChanged, "trial %d: unadmitted fail won", trial)
+			_, getErr := s.GetScheduledExecRun(ctx, evt.ID)
+			assert.ErrorIs(t, getErr, store.ErrNotFound)
+			gotSc, err := s.GetSchedule(ctx, sc.ID)
+			require.NoError(t, err)
+			assert.Equal(t, 1, gotSc.RunCount, "trial %d: run_count must increment once", trial)
+			assert.Equal(t, 1, gotSc.ErrorCount)
+			gotEvt, err := s.GetScheduledEvent(ctx, evt.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventFailed, gotEvt.Status)
+		}
 	}
 }

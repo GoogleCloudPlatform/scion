@@ -355,6 +355,17 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 		if errors.Is(err, store.ErrScheduledExecOverlap) {
 			return hubfire.FireOutcome{}, a.skipExecFire(ctx, req, p, execReasonOverlap, "db_overlap_lease")
 		}
+		if errors.Is(err, store.ErrScheduledExecEventClosed) {
+			// Unadmitted-event recovery or shutdown already closed this event
+			// (and recorded its outcome on any parent schedule); send nothing
+			// and do not overwrite the recorded outcome (ptone/scion#8210).
+			log.Warn("Scheduler: exec event already closed before run admission; nothing started")
+			return hubfire.FireOutcome{
+				Status:    hubfire.FireStatusFired,
+				ResultRef: fireID,
+				Detached:  true,
+			}, nil
+		}
 		// Nothing was sent. An existing run means this event was admitted
 		// before: it is never started again.
 		log.Error("Scheduler: exec run record not written; nothing started", "error", err)

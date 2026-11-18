@@ -82,10 +82,12 @@ func finalExecOutcome(o string) bool {
 	return false
 }
 
-// CreateScheduledExecRun inserts the run record of an admitted exec event.
-// When run.ScheduleID is set and run.FinishedAt is nil, the insert checks
-// inside a per-schedule locked transaction that no other unfinished run of
-// that schedule holds an unexpired DB lease (ptone/scion#7884).
+// CreateScheduledExecRun inserts the run record of an admitted exec event
+// inside a transaction that verifies the parent event is still claimed
+// (status fired or expired; ptone/scion#8210). When run.ScheduleID is set and
+// run.FinishedAt is nil, the transaction also checks under a per-schedule lock
+// that no other unfinished run of that schedule holds an unexpired DB lease
+// (ptone/scion#7884).
 func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.ScheduledExecRun) error {
 	if run == nil || run.EventID == "" || run.ProjectID == "" || run.TargetAgentID == "" || run.CommandSHA256 == "" {
 		return store.ErrInvalidInput
@@ -155,18 +157,33 @@ func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.S
 		}
 		return nil
 	}
-	if sid == nil {
-		return insertOn(s.client)
-	}
 	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
-		if isPostgres(c) {
+		if sid != nil && isPostgres(c) {
 			var res sql.Result
 			if err := c.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
 				[]any{int32(store.LockScheduledExecOverlap), store.StableProjectHash(run.ScheduleID)}, &res); err != nil {
 				return fmt.Errorf("lock scheduled exec overlap: %w", err)
 			}
 		}
-		if run.FinishedAt == nil {
+		evtQuery := c.ScheduledEvent.Query().Where(scheduledevent.IDEQ(eid))
+		if isPostgres(c) {
+			evtQuery = evtQuery.ForUpdate()
+		}
+		evt, err := evtQuery.Only(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if evt.Status != store.ScheduledEventFired && evt.Status != store.ScheduledEventExpired {
+			hasRun, err := c.ScheduledExecRun.Query().Where(scheduledexecrun.EventIDEQ(eid)).Exist(ctx)
+			if err != nil {
+				return mapError(err)
+			}
+			if hasRun {
+				return store.ErrAlreadyExists
+			}
+			return store.ErrScheduledExecEventClosed
+		}
+		if sid != nil && run.FinishedAt == nil {
 			overlaps, err := c.ScheduledExecRun.Query().
 				Where(
 					scheduledexecrun.ScheduleIDEQ(*sid),
@@ -725,6 +742,29 @@ func (s *ScheduleStore) CompleteUnadmittedExecEvent(ctx context.Context, id stri
 	}
 	var updated bool
 	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		// Lock the event row first on Postgres before checking ScheduledExecRun
+		// so concurrent CreateScheduledExecRun and CompleteUnadmittedExecEvent
+		// serialize on the event row rather than evaluating HasExecRun under a
+		// pre-lock statement snapshot (ptone/scion#8210).
+		evtQuery := c.ScheduledEvent.Query().Where(
+			scheduledevent.IDEQ(uid),
+			scheduledevent.StatusIn(store.ScheduledEventFired, store.ScheduledEventExpired),
+		)
+		if isPostgres(c) {
+			evtQuery = evtQuery.ForUpdate()
+		}
+		if _, err := evtQuery.Only(ctx); ent.IsNotFound(err) {
+			return nil
+		} else if err != nil {
+			return mapError(err)
+		}
+		admitted, err := c.ScheduledExecRun.Query().Where(scheduledexecrun.EventIDEQ(uid)).Exist(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if admitted {
+			return nil
+		}
 		upd := c.ScheduledEvent.Update().
 			Where(
 				scheduledevent.IDEQ(uid),
@@ -804,14 +844,32 @@ func (s *ScheduleStore) FailUnadmittedScheduledEvent(ctx context.Context, id, ev
 	}
 	var changed bool
 	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
-		evt, err := c.ScheduledEvent.Query().
-			Where(append([]predicate.ScheduledEvent{scheduledevent.IDEQ(uid)}, unadmittedPredicates(eventType, firedBefore)...)...).
-			Only(ctx)
+		// Lock the event row first on Postgres before checking ScheduledExecRun
+		// so concurrent CreateScheduledExecRun and FailUnadmittedScheduledEvent
+		// serialize on the event row rather than evaluating HasExecRun under a
+		// pre-lock statement snapshot (ptone/scion#8210).
+		evtQuery := c.ScheduledEvent.Query().Where(
+			scheduledevent.IDEQ(uid),
+			scheduledevent.EventTypeEQ(eventType),
+			scheduledevent.StatusIn(store.ScheduledEventFired, store.ScheduledEventExpired),
+			scheduledevent.FiredAtLT(firedBefore.UTC()),
+		)
+		if isPostgres(c) {
+			evtQuery = evtQuery.ForUpdate()
+		}
+		evt, err := evtQuery.Only(ctx)
 		if ent.IsNotFound(err) {
 			return nil
 		}
 		if err != nil {
 			return mapError(err)
+		}
+		admitted, err := c.ScheduledExecRun.Query().Where(scheduledexecrun.EventIDEQ(uid)).Exist(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if admitted {
+			return nil
 		}
 		n, err := c.ScheduledEvent.Update().
 			Where(append([]predicate.ScheduledEvent{scheduledevent.IDEQ(uid)}, unadmittedPredicates(eventType, firedBefore)...)...).
