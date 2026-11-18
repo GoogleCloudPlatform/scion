@@ -65,11 +65,11 @@ type FirePayloadValidator interface {
 }
 
 // FirePreauthorizer is an optional capability implemented by FireActions that
-// evaluate feature gates or staleness windows after ValidatePayload and before
-// recorded-authority resolution, returning a skip sentinel when the fire must
-// be skipped without evaluating authority.
+// evaluate definition-kind guards, feature gates, or staleness windows after
+// ValidatePayload and before recorded-authority resolution, returning either a
+// *FireRefusal or a skip sentinel without evaluating authority.
 type FirePreauthorizer interface {
-	Preauthorize(ctx context.Context, req hubfire.FireRequest) error
+	Preauthorize(ctx context.Context, req hubfire.FireRequest) (*FireRefusal, error)
 }
 
 // FireAuthorityRefusalHandler is an optional capability implemented by
@@ -208,7 +208,8 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 		}, err
 	}
 	if pa, ok := action.(FirePreauthorizer); ok {
-		if err := pa.Preauthorize(ctx, req); err != nil {
+		refusal, err := pa.Preauthorize(ctx, req)
+		if err != nil {
 			if reason, skipped := asScheduledSkip(err); skipped {
 				return hubfire.FireOutcome{
 					Status: hubfire.FireStatusSkipped,
@@ -219,6 +220,12 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 				Status: hubfire.FireStatusFailed,
 				Error:  err.Error(),
 			}, err
+		}
+		if refusal != nil {
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusRefused,
+				Error:  refusal.Reason,
+			}, scheduledKnownError(refusal.Reason)
 		}
 	}
 	if req.Tracked == nil {
@@ -268,7 +275,6 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 			return hubfire.FireOutcome{
 				Status:      hubfire.FireStatusSkipped,
 				Error:       reason,
-				ResultRef:   out.ResultRef,
 				AfterRecord: out.AfterRecord,
 				Detached:    out.Detached,
 			}, err
@@ -276,7 +282,6 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 		return hubfire.FireOutcome{
 			Status:      hubfire.FireStatusFailed,
 			Error:       err.Error(),
-			ResultRef:   out.ResultRef,
 			AfterRecord: out.AfterRecord,
 			Detached:    out.Detached,
 		}, err

@@ -141,21 +141,33 @@ func (a *execAction) refuseExecFire(ctx context.Context, req hubfire.FireRequest
 		"error", err)
 }
 
-func (a *execAction) Preauthorize(ctx context.Context, req hubfire.FireRequest) error {
+func (a *execAction) Preauthorize(ctx context.Context, req hubfire.FireRequest) (*FireRefusal, error) {
 	if a == nil || a.srv == nil {
-		return errors.New("exec action: server not configured")
+		return nil, errors.New("exec action: server not configured")
+	}
+	// Stage 1 keeps event-owned exec runs (UNIQUE scheduled_exec_runs.event_id,
+	// owner+run CAS, and sweeper/unadmitted recovery via event_id); trigger
+	// runs require the Stage 2 addendum P8 fire_id owner extension and a
+	// dedicated overlap_key, never schedule_id (§15 PR 2, rev 8.23). Fail closed
+	// before any schedule.exec.* skip or refusal audit is emitted.
+	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
+		slog.Warn("exec fire refused: trigger-owned exec runs are not wired in Stage 1",
+			"definitionID", req.Authority.DefinitionID,
+			"fireID", req.Authority.FireID,
+			"projectID", req.ProjectID)
+		return &FireRefusal{Reason: execReasonRefused}, nil
 	}
 	p, err := unmarshalExecFirePayload(req.Payload)
 	if err != nil {
-		return errScheduledExecPayloadInvalid
+		return nil, errScheduledExecPayloadInvalid
 	}
 	if !a.srv.execSchedulesEnabled() {
-		return a.skipExecFire(ctx, req, p, execReasonDisabled, "experiment_off")
+		return nil, a.skipExecFire(ctx, req, p, execReasonDisabled, "experiment_off")
 	}
 	if !req.FireAt.IsZero() && time.Since(req.FireAt) > scheduledExecMaxWindow {
-		return a.skipExecFire(ctx, req, p, execReasonMissedWindow, "missed_window")
+		return nil, a.skipExecFire(ctx, req, p, execReasonMissedWindow, "missed_window")
 	}
-	return nil
+	return nil, nil
 }
 
 func (a *execAction) OnAuthorityRefused(ctx context.Context, req hubfire.FireRequest, err error) string {
@@ -225,6 +237,13 @@ func (a *execAction) Authorize(
 	if a == nil || a.srv == nil {
 		return nil, nil, errors.New("exec action: server not configured")
 	}
+	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
+		slog.Warn("exec fire refused: trigger-owned exec runs are not wired in Stage 1",
+			"definitionID", req.Authority.DefinitionID,
+			"fireID", req.Authority.FireID,
+			"projectID", req.ProjectID)
+		return nil, &FireRefusal{Reason: execReasonRefused}, nil
+	}
 	p, err := unmarshalExecFirePayload(req.Payload)
 	if err != nil {
 		return nil, nil, errScheduledExecPayloadInvalid
@@ -275,12 +294,10 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	if fireID == "" {
 		return hubfire.FireOutcome{}, errors.New("exec action: missing fire ID")
 	}
-	// Stage 1 keeps event-owned exec runs (UNIQUE scheduled_exec_runs.event_id,
-	// owner+run CAS, and sweeper/unadmitted recovery via event_id); trigger
-	// runs require the Stage 2 addendum P8 fire_id owner extension and a
-	// dedicated overlap_key, never schedule_id (§15 PR 2, rev 8.23).
+	// Trigger-owned runs are refused in Preauthorize / Authorize; guard direct
+	// Fire calls with the same generic refusal text.
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
-		return hubfire.FireOutcome{}, errors.New("exec action: trigger-owned runs are not wired in Stage 1")
+		return hubfire.FireOutcome{}, errors.New(execReasonRefused)
 	}
 	var scheduleID string
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule {
@@ -288,18 +305,6 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	}
 
 	log := slog.With("subsystem", "scheduler", "eventID", fireID, "projectID", req.ProjectID)
-
-	// Authorize checks preflight before returning execAuthorized; re-check here
-	// to guard a Fire called directly with stale Authorized state.
-	if isManagedAgentRuntime(target.Runtime) {
-		return hubfire.FireOutcome{}, a.skipExecFire(ctx, req, p, execReasonTargetNotRunning, "managed_runtime")
-	}
-	if phaseErr := validateAgentDeliverable(target); phaseErr != nil {
-		return hubfire.FireOutcome{}, a.skipExecFire(ctx, req, p, execReasonTargetNotRunning, "phase_"+store.EffectiveRestingPhase(target))
-	}
-	if reincarnationInFlight(target) {
-		return hubfire.FireOutcome{}, a.skipExecFire(ctx, req, p, execReasonTargetNotRunning, "reincarnating")
-	}
 
 	// Admission: the replica's tracked-run bound (never waits) and the
 	// shutdown gate. The slot and ownership pass to the tracker via
@@ -321,9 +326,6 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	defer endWork()
 
 	executor, _ := ExecutorContextFromContext(ctx)
-	if executor.Kind == "" && executor.ID == "" {
-		executor = req.Executor
-	}
 	attr := req.Authority.Attribution
 	now := time.Now()
 	timeout := p.timeout()
