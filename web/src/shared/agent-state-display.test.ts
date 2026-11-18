@@ -24,7 +24,8 @@ import {
   STALLED_NO_HOOK_ACTIVITY_HINT,
   stalledHint,
   stateLabel,
-  suspendedActivityLabel,
+  suspendReasonHint,
+  suspendedStatusLabel,
 } from './agent-state-display.js';
 import type { Agent } from './types.js';
 
@@ -97,21 +98,19 @@ describe('provision-only status (ptone/scion#2929)', () => {
   });
 
   it('renders suspended · <activity> label for retained suspend activities while keeping status=suspended', () => {
-    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'completed' })).toBe(
+    expect(suspendedStatusLabel({ phase: 'suspended', activity: 'completed' })).toBe(
       'suspended · completed'
     );
-    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'idle' })).toBe(
-      'suspended · idle'
-    );
-    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'harness_error' })).toBe(
+    expect(suspendedStatusLabel({ phase: 'suspended', activity: 'idle' })).toBe('suspended · idle');
+    expect(suspendedStatusLabel({ phase: 'suspended', activity: 'harness_error' })).toBe(
       'suspended · harness error'
     );
-    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'HARNESS_ERROR' })).toBe(
+    expect(suspendedStatusLabel({ phase: 'suspended', activity: 'HARNESS_ERROR' })).toBe(
       'suspended · harness error'
     );
-    expect(suspendedActivityLabel({ phase: 'suspended', activity: '' })).toBeUndefined();
-    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'blocked' })).toBeUndefined();
-    expect(suspendedActivityLabel({ phase: 'running', activity: 'completed' })).toBeUndefined();
+    expect(suspendedStatusLabel({ phase: 'suspended', activity: '' })).toBeUndefined();
+    expect(suspendedStatusLabel({ phase: 'suspended', activity: 'blocked' })).toBeUndefined();
+    expect(suspendedStatusLabel({ phase: 'running', activity: 'completed' })).toBeUndefined();
 
     const done = badge({ name: 'a', phase: 'suspended', activity: 'completed' });
     expect(done.getAttribute('status')).toBe('suspended');
@@ -120,7 +119,7 @@ describe('provision-only status (ptone/scion#2929)', () => {
     const idle = badge({
       name: 'a',
       phase: 'suspended',
-      activity: 'idle' as Agent['activity'],
+      activity: 'idle',
     });
     expect(idle.getAttribute('status')).toBe('suspended');
     expect(idle.getAttribute('label')).toBe('suspended · idle');
@@ -218,5 +217,117 @@ describe('stalled no-hook-since-start hint (ptone/scion#4556)', () => {
       detail: { message: 'Ready' },
     });
     expect(el.hasAttribute('title')).toBe(false);
+  });
+});
+
+describe('idle status (ptone/scion#7826)', () => {
+  const badge = (agent: Partial<Agent>): Element => {
+    const host = document.createElement('div');
+    render(agentStatusBadge(agent as Agent), host);
+    return host.querySelector('scion-status-badge')!;
+  };
+
+  it('is a neutral badge, not a warning, with no pulse', () => {
+    expect(ACTIVITY_DISPLAY.idle).toEqual({
+      emoji: '💤',
+      icon: 'moon',
+      variant: 'neutral',
+      pulse: false,
+    });
+    expect(stateLabel('idle')).toBe('idle');
+  });
+
+  it('renders a running idle agent as idle', () => {
+    const el = badge({ name: 'a', phase: 'running', activity: 'idle' });
+    expect(el.getAttribute('status')).toBe('idle');
+    expect(el.getAttribute('label')).toBe('idle');
+    expect(el.hasAttribute('title')).toBe(false);
+  });
+});
+
+describe('suspend reason (ptone/scion#7826)', () => {
+  const badge = (agent: Partial<Agent>): Element => {
+    const host = document.createElement('div');
+    render(agentStatusBadge(agent as Agent), host);
+    return host.querySelector('scion-status-badge')!;
+  };
+
+  it('appends the reason in parentheses, matching scion list', () => {
+    expect(
+      suspendedStatusLabel({ phase: 'suspended', activity: 'completed', suspendReason: 'idle' })
+    ).toBe('suspended · completed (idle)');
+    expect(
+      suspendedStatusLabel({ phase: 'suspended', activity: 'idle', suspendReason: 'idle' })
+    ).toBe('suspended · idle (idle)');
+    expect(suspendedStatusLabel({ phase: 'suspended', suspendReason: 'user' })).toBe(
+      'suspended (user)'
+    );
+    expect(
+      suspendedStatusLabel({ phase: 'suspended', activity: 'blocked', suspendReason: 'stalled' })
+    ).toBe('suspended (stalled)');
+    expect(
+      suspendedStatusLabel({ phase: 'suspended', activity: 'harness_error', suspendReason: 'user' })
+    ).toBe('suspended · harness error (user)');
+  });
+
+  it('shows no suffix for a missing or unknown reason, or an agent that is not suspended', () => {
+    expect(suspendedStatusLabel({ phase: 'suspended', suspendReason: '' })).toBeUndefined();
+    expect(
+      suspendedStatusLabel({ phase: 'suspended', suspendReason: 'max_lifetime' })
+    ).toBeUndefined();
+    expect(
+      suspendedStatusLabel({ phase: 'suspended', activity: 'completed', suspendReason: 'later' })
+    ).toBe('suspended · completed');
+    // A stale reason on a resumed agent is never shown.
+    expect(
+      suspendedStatusLabel({ phase: 'running', activity: 'idle', suspendReason: 'idle' })
+    ).toBeUndefined();
+    expect(suspendReasonHint({ phase: 'running', suspendReason: 'idle' })).toBeUndefined();
+    expect(suspendReasonHint({ phase: 'suspended' })).toBeUndefined();
+  });
+
+  it('explains each reason', () => {
+    expect(suspendReasonHint({ phase: 'suspended', suspendReason: 'user' })).toMatch(/resume/);
+    expect(suspendReasonHint({ phase: 'suspended', suspendReason: 'idle' })).toMatch(/wakes it/);
+    expect(suspendReasonHint({ phase: 'suspended', suspendReason: 'stalled' })).toMatch(
+      /auto-wake/
+    );
+  });
+
+  it('labels the badge and explains the reason in its tooltip', () => {
+    const el = badge({
+      name: 'a',
+      phase: 'suspended',
+      activity: 'completed',
+      suspendReason: 'idle',
+    });
+    expect(el.getAttribute('status')).toBe('suspended');
+    expect(el.getAttribute('label')).toBe('suspended · completed (idle)');
+    expect(el.getAttribute('title')).toBe(
+      suspendReasonHint({ phase: 'suspended', suspendReason: 'idle' })
+    );
+
+    const user = badge({ name: 'a', phase: 'suspended', suspendReason: 'user' });
+    expect(user.getAttribute('label')).toBe('suspended (user)');
+  });
+
+  it('joins a retained harness error reason and the suspend reason in the tooltip', () => {
+    const el = badge({
+      name: 'a',
+      phase: 'suspended',
+      activity: 'harness_error',
+      suspendReason: 'user',
+      detail: { message: 'model API: 401' },
+    });
+    expect(el.getAttribute('title')).toBe(
+      `model API: 401\n${suspendReasonHint({ phase: 'suspended', suspendReason: 'user' })!}`
+    );
+  });
+
+  it('keeps an explicit label', () => {
+    const host = document.createElement('div');
+    const agent = { name: 'a', phase: 'suspended', activity: 'completed', suspendReason: 'idle' };
+    render(agentStatusBadge(agent as Agent, { status: 'suspended', label: 'suspended' }), host);
+    expect(host.querySelector('scion-status-badge')!.getAttribute('label')).toBe('suspended');
   });
 });

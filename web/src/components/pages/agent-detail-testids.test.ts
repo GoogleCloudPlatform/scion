@@ -90,6 +90,23 @@ describe('agent page test ids for UAT', () => {
     await import('./agent-detail.js');
   }, 30_000);
 
+  it('marks the suspend reason of a suspended agent (ptone/scion#7826)', () => {
+    const host = renderPart(
+      makeAgent({ phase: 'suspended', activity: 'completed', suspendReason: 'idle' }),
+      'renderCurrentStateCard'
+    );
+    expect(text(byId(host, 'agent-suspend-reason'))).toBe(
+      'Suspend reason idle Suspended by the hub because it was idle. New work for it wakes it automatically.'
+    );
+
+    for (const agent of [
+      makeAgent({ phase: 'suspended' }),
+      makeAgent({ phase: 'running', activity: 'idle', suspendReason: 'idle' }),
+    ]) {
+      expect(byId(renderPart(agent, 'renderCurrentStateCard'), 'agent-suspend-reason')).toBeNull();
+    }
+  });
+
   it('marks the launch banner step and message', () => {
     const host = renderPart(
       makeAgent({ phase: 'provisioning', launch: inFlight, message: 'waiting for a node' }),

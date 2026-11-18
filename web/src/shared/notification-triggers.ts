@@ -27,6 +27,7 @@
  */
 export const DEFAULT_TRIGGERS: readonly string[] = [
   'COMPLETED',
+  'IDLE',
   'WAITING_FOR_INPUT',
   'LIMITS_EXCEEDED',
   'STALLED',
@@ -38,6 +39,7 @@ export const DEFAULT_TRIGGERS: readonly string[] = [
 /** Every trigger a subscription can select. */
 export const ALL_TRIGGERS: readonly string[] = [
   'COMPLETED',
+  'IDLE',
   'WAITING_FOR_INPUT',
   'LIMITS_EXCEEDED',
   'STALLED',
@@ -49,6 +51,8 @@ export const ALL_TRIGGERS: readonly string[] = [
 
 const TRIGGER_LABELS: Record<string, string> = {
   COMPLETED: 'Completed',
+  // The agent has nothing to do until new work arrives (ptone/scion#7826).
+  IDLE: 'Idle',
   // Display only: pairs with 'blocked' shown as 'waiting on others'
   // (ptone/scion#3301, ptone/scion#1571).
   WAITING_FOR_INPUT: 'Waiting on Parent',

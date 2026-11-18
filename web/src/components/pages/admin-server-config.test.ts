@@ -827,6 +827,30 @@ describe('scion-page-admin-server-config', () => {
       expect(payload).not.toHaveProperty('active_profile');
     });
 
+    it('loads and saves the idle auto-suspend settings next to auto_suspend_stalled (ptone/scion#7826)', async () => {
+      const config = makeBaseConfig();
+      const hub = (config.server as Record<string, Record<string, unknown>>).hub;
+      hub.auto_suspend_idle = true;
+      hub.idle_suspend_after = '20m';
+      const payload = await capturePut(config, (el) => {
+        expect(el.hubAutoSuspendIdle).toBe(true);
+        expect(el.hubIdleSuspendAfter).toBe('20m');
+        el.hubIdleSuspendAfter = '45m';
+      });
+      const savedHub = (payload.server as Record<string, Record<string, unknown>>).hub;
+      expect(savedHub.auto_suspend_idle).toBe(true);
+      expect(savedHub.idle_suspend_after).toBe('45m');
+
+      const text = (id: string): string =>
+        (element.shadowRoot?.querySelector(`[data-testid="${id}"]`)?.textContent ?? '').replace(
+          /\s+/g,
+          ' '
+        );
+      expect(text('idle-suspend-after-hint')).toContain('Minimum 5m');
+      expect(text('auto-suspend-idle-hint')).toContain('lifecycle.idle_suspend');
+      expect(text('auto-suspend-idle-hint')).toContain('Not yet safe for production');
+    });
+
     it('auto_provide shows as on when GET omits it', async () => {
       element = await createComponent(
         createFetchHandler({
@@ -5547,6 +5571,8 @@ describe('scion-page-admin-server-config', () => {
             soft_delete_retain_files: true,
             auto_suspend_stalled: true,
             stalled_threshold: '10m',
+            auto_suspend_idle: true,
+            idle_suspend_after: '30m',
             start_claim_lease_ttl: '2m',
             start_max_duration: '15m',
             start_unconfirmed_hold: '18m',
@@ -5694,6 +5720,14 @@ describe('scion-page-admin-server-config', () => {
       },
       'server.hub.stalled_threshold': {
         clear: (el) => (el.hubStalledThreshold = ''),
+        expected: '',
+      },
+      'server.hub.auto_suspend_idle': {
+        clear: (el) => (el.hubAutoSuspendIdle = false),
+        expected: false,
+      },
+      'server.hub.idle_suspend_after': {
+        clear: (el) => (el.hubIdleSuspendAfter = ''),
         expected: '',
       },
       'server.hub.start_claim_lease_ttl': {

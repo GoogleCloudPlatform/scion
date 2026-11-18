@@ -58,7 +58,11 @@ interface AgentNotificationsResponse {
   userNotifications: Notification[];
   agentNotifications: Notification[];
 }
-import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.js';
+import {
+  agentStatusBadge,
+  stateLabel,
+  suspendReasonHint,
+} from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { agentPlacementView } from './agent-placement.js';
@@ -1269,6 +1273,26 @@ export class ScionPageAgentDetail extends LitElement {
     return formatInstantWithZone(dateString) || dateString;
   }
 
+  /**
+   * The Suspend reason row of a suspended agent with a known reason: the
+   * reason as `scion list` shows it, with what brings the agent back.
+   */
+  private renderSuspendReason(agent: Agent) {
+    const hint = suspendReasonHint(agent);
+    if (!hint) return nothing;
+    return html`
+      <div class="info-item" data-testid="agent-suspend-reason">
+        <span class="info-label">Suspend reason</span>
+        <span class="info-value"
+          >${agent.suspendReason}
+          <span style="color: var(--scion-text-muted, #64748b); font-size: 0.85em;"
+            >${hint}</span
+          ></span
+        >
+      </div>
+    `;
+  }
+
   private isZeroDate(dateString: string): boolean {
     if (!dateString) return true;
     const date = new Date(dateString);
@@ -2109,6 +2133,7 @@ export class ScionPageAgentDetail extends LitElement {
                 : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
             </span>
           </div>
+          ${this.renderSuspendReason(agent)}
           ${agent.detail?.toolName
             ? html`
                 <div class="info-item">

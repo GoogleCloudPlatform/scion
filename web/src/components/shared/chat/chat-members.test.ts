@@ -194,6 +194,51 @@ describe('scion-chat-members agent tooltip', () => {
   });
 });
 
+describe('scion-chat-members idle and suspend reason (ptone/scion#7826)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function tooltipContent(el: ScionChatMembers): string {
+    const tip = el.shadowRoot?.querySelector('sl-tooltip') as { content?: string } | null;
+    return tip?.content ?? '';
+  }
+
+  function badgeLabel(el: ScionChatMembers): string | null {
+    return el.shadowRoot?.querySelector('scion-status-badge')?.getAttribute('label') ?? null;
+  }
+
+  it('shows a running idle agent with the idle badge', async () => {
+    const el = await mount([agent({ phase: 'running', activity: 'idle' })]);
+    expect(badgeStatus(el)).toBe('idle');
+    expect(tooltipContent(el)).toBe('idle');
+  });
+
+  it('labels a suspended agent like the agent list, with the reason explained', async () => {
+    const el = await mount([
+      agent({ phase: 'suspended', activity: 'completed', suspendReason: 'idle' }),
+    ]);
+    expect(badgeStatus(el)).toBe('suspended');
+    expect(badgeLabel(el)).toBe('suspended · completed (idle)');
+    const lines = tooltipContent(el).split('\n');
+    expect(lines[0]).toBe('suspended · completed (idle)');
+    expect(lines[1]).toMatch(/idle/);
+    document.body.innerHTML = '';
+
+    const user = await mount([agent({ phase: 'suspended', activity: '', suspendReason: 'user' })]);
+    expect(badgeLabel(user)).toBe('suspended (user)');
+  });
+
+  it('ignores a stale reason once the agent runs again', async () => {
+    const el = await mount([
+      agent({ phase: 'running', activity: 'working', suspendReason: 'idle' }),
+    ]);
+    expect(badgeStatus(el)).toBe('working');
+    expect(badgeLabel(el)).toBe('');
+    expect(tooltipContent(el)).toBe('working');
+  });
+});
+
 describe('scion-chat-members thread default', () => {
   afterEach(() => {
     document.body.innerHTML = '';
