@@ -71,19 +71,33 @@ type DecisionSetAnswerResponse struct {
 // web.decisions is off:
 //
 //	POST /api/v1/decision-prompts/{messageId}/answers  answer every decision as one set
+//	POST /api/v1/decision-prompts/{messageId}/dismiss  dismiss open decisions of a prompt
 func (s *Server) handleDecisionPromptRoutes(w http.ResponseWriter, r *http.Request) {
 	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, decisionPromptsRoutePrefix)
-		msgID, sub, _ := strings.Cut(rest, "/")
-		if msgID == "" || sub != "answers" {
+		msgID, sub, hasExtra := strings.Cut(rest, "/")
+		if msgID == "" || (hasExtra && strings.Contains(sub, "/")) {
 			NotFound(w, "Decision prompt")
 			return
 		}
-		if r.Method != http.MethodPost {
-			MethodNotAllowed(w, http.MethodPost)
-			return
+		switch sub {
+		case "answers":
+			s.chatRoute(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					MethodNotAllowed(w, http.MethodPost)
+					return
+				}
+				s.handleDecisionSetAnswer(w, r, msgID)
+			})(w, r)
+		case "dismiss":
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleDecisionPromptDismiss(w, r, msgID)
+		default:
+			NotFound(w, "Decision prompt")
 		}
-		s.handleDecisionSetAnswer(w, r, msgID)
 	})(w, r)
 }
 
@@ -251,7 +265,13 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 				map[string]interface{}{"field": field + ".decision_row_id"})
 			return
 		}
-		choice, ok := d.Choice(strings.TrimSpace(a.ChoiceID))
+		choiceID := strings.TrimSpace(a.ChoiceID)
+		if messages.IsReservedChoiceID(choiceID) {
+			ValidationError(w, fmt.Sprintf("choice %q is reserved", choiceID),
+				map[string]interface{}{"field": field + ".choice_id"})
+			return
+		}
+		choice, ok := d.Choice(choiceID)
 		if !ok {
 			ValidationError(w, fmt.Sprintf("choice %q is not a choice of decision %s", a.ChoiceID, d.Key),
 				map[string]interface{}{"field": field + ".choice_id"})

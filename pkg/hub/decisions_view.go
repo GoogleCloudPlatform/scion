@@ -43,7 +43,8 @@ type DecisionView struct {
 	Choices         []messages.Choice   `json:"choices"`
 	ReplacedBy      *DecisionReplacedBy `json:"replacedBy,omitempty"`
 	Withdrawn       *DecisionWithdrawn  `json:"withdrawn,omitempty"`
-	// Decision is the effective answer; nil while pending.
+	Dismissed       *DecisionDismissed  `json:"dismissed,omitempty"`
+	// Decision is the effective answer; nil while pending or dismissed.
 	Decision *AnswerView `json:"decision,omitempty"`
 }
 
@@ -62,6 +63,16 @@ type DecisionWithdrawn struct {
 	ByName string    `json:"byName"`
 }
 
+// DecisionDismissed describes when, why, and by which user a decision was dismissed.
+type DecisionDismissed struct {
+	At                time.Time `json:"at"`
+	ByUserID          string    `json:"byUserId,omitempty"`
+	ByName            string    `json:"byName"`
+	Reason            string    `json:"reason,omitempty"`
+	Surface           string    `json:"surface"`
+	ResponseMessageID string    `json:"responseMessageId"`
+}
+
 // AnswerView is an answer as clients see it.
 type AnswerView struct {
 	ChoiceID             string `json:"choiceId"`
@@ -71,6 +82,7 @@ type AnswerView struct {
 	AnsweredByEmail      string `json:"answeredByEmail,omitempty"`
 	Provenance           string `json:"provenance"`
 	Outcome              string `json:"outcome,omitempty"`
+	DismissReason        string `json:"dismissReason,omitempty"`
 	InterpretedByAgentID string `json:"interpretedByAgentId,omitempty"`
 	SourceMessageID      string `json:"sourceMessageId,omitempty"`
 	Surface              string `json:"surface"`
@@ -130,6 +142,7 @@ type DecisionResponseSetAnswer struct {
 	Label                string `json:"label"`
 	Provenance           string `json:"provenance"`
 	Outcome              string `json:"outcome"`
+	DismissReason        string `json:"dismissReason,omitempty"`
 	MatchedDefault       bool   `json:"matchedDefault"`
 	AnsweredByUserID     string `json:"answeredByUserId,omitempty"`
 	AnsweredByName       string `json:"answeredByName,omitempty"`
@@ -150,6 +163,7 @@ type DecisionResponseView struct {
 	Label                string `json:"label"`
 	Provenance           string `json:"provenance"`
 	Outcome              string `json:"outcome,omitempty"`
+	DismissReason        string `json:"dismissReason,omitempty"`
 	AnsweredByUserID     string `json:"answeredByUserId,omitempty"`
 	AnsweredByName       string `json:"answeredByName,omitempty"`
 	InterpretedByAgentID string `json:"interpretedByAgentId,omitempty"`
@@ -171,6 +185,7 @@ func answerView(a *store.DecisionAnswer) *AnswerView {
 		AnsweredByEmail:      a.AnsweredByEmail,
 		Provenance:           a.Provenance,
 		Outcome:              a.Outcome,
+		DismissReason:        a.DismissReason,
 		InterpretedByAgentID: a.InterpretedByAgentID,
 		SourceMessageID:      a.SourceMessageID,
 		Surface:              a.Surface,
@@ -213,6 +228,7 @@ func decisionView(d *store.Decision, replacedBy *store.Decision) DecisionView {
 		v.ReplacedBy = r
 	}
 	v.Withdrawn = decisionWithdrawnView(d)
+	v.Dismissed = decisionDismissedView(d)
 	return v
 }
 
@@ -226,6 +242,32 @@ func decisionWithdrawnView(d *store.Decision) *DecisionWithdrawn {
 		Reason: d.WithdrawnReason,
 		ByName: d.AskerAgentName,
 	}
+}
+
+// decisionDismissedView returns the dismissed metadata of d when status is dismissed.
+func decisionDismissedView(d *store.Decision) *DecisionDismissed {
+	if d == nil || d.Status != store.DecisionStatusDismissed {
+		return nil
+	}
+	dsm := d.Dismissal()
+	if d.DismissedAt == nil && dsm == nil {
+		return nil
+	}
+	var at time.Time
+	if d.DismissedAt != nil {
+		at = *d.DismissedAt
+	} else if dsm != nil {
+		at = dsm.CreatedAt
+	}
+	out := &DecisionDismissed{At: at}
+	if dsm != nil {
+		out.ByUserID = dsm.AnsweredByUserID
+		out.ByName = answererDisplayName(dsm)
+		out.Reason = dsm.DismissReason
+		out.Surface = dsm.Surface
+		out.ResponseMessageID = dsm.ResponseMessageID
+	}
+	return out
 }
 
 // decisionViewFor builds the view of d, reading the row that replaced it.
@@ -427,6 +469,7 @@ func decisionResponseViewOf(a *store.DecisionAnswer, d *store.Decision) Decision
 		Label:                a.ChoiceLabel,
 		Provenance:           a.Provenance,
 		Outcome:              a.Outcome,
+		DismissReason:        a.DismissReason,
 		AnsweredByUserID:     a.AnsweredByUserID,
 		AnsweredByName:       answererDisplayName(a),
 		InterpretedByAgentID: a.InterpretedByAgentID,
@@ -454,6 +497,7 @@ func decisionResponseSetAnswerOf(a *store.DecisionAnswer, d *store.Decision) Dec
 		Label:                a.ChoiceLabel,
 		Provenance:           a.Provenance,
 		Outcome:              a.Outcome,
+		DismissReason:        a.DismissReason,
 		MatchedDefault:       a.MatchedDefault,
 		AnsweredByUserID:     a.AnsweredByUserID,
 		AnsweredByName:       answererDisplayName(a),

@@ -37,6 +37,7 @@ import (
 const (
 	ErrCodeDecisionReplaced    = "replaced"
 	ErrCodeDecisionWithdrawn   = "withdrawn"
+	ErrCodeDecisionDismissed   = "dismissed"
 	ErrCodeDecisionAnswered    = "already_answered"
 	ErrCodeNotRecordedAnswerer = "not_recorded_answerer"
 )
@@ -329,6 +330,10 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		ValidationError(w, "choice_id is required", map[string]interface{}{"field": "choice_id"})
 		return
 	}
+	if messages.IsReservedChoiceID(req.ChoiceID) {
+		ValidationError(w, fmt.Sprintf("choice %q is reserved", req.ChoiceID), map[string]interface{}{"field": "choice_id"})
+		return
+	}
 	if len(req.IdempotencyKey) > store.MaxDecisionIdempotencyKeyLen {
 		ValidationError(w, fmt.Sprintf("idempotency_key is at most %d bytes", store.MaxDecisionIdempotencyKeyLen),
 			map[string]interface{}{"field": "idempotency_key"})
@@ -387,11 +392,14 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	outcome := store.DecisionOutcomeAnswer
 	var overridden *store.DecisionAnswer
 	if store.DecisionStatusTerminal(d.Status) {
-		if d.Status == store.DecisionStatusReplaced {
+		switch d.Status {
+		case store.DecisionStatusReplaced:
 			s.writeDecisionReplaced(w, ctx, d)
-			return
+		case store.DecisionStatusDismissed:
+			s.writeDecisionDismissed(w, ctx, d)
+		default:
+			s.writeDecisionWithdrawn(w, ctx, d)
 		}
-		s.writeDecisionWithdrawn(w, ctx, d)
 		return
 	}
 	if eff := d.EffectiveAnswer(); eff != nil {
@@ -461,6 +469,12 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			return
 		}
 		s.writeDecisionReplaced(w, ctx, d)
+		return
+	case errors.Is(err, store.ErrDecisionDismissed):
+		if cur, gerr := s.store.GetDecision(ctx, d.ID); gerr == nil {
+			d = cur
+		}
+		s.writeDecisionDismissed(w, ctx, d)
 		return
 	case errors.Is(err, store.ErrNotRecordedAnswerer):
 		// An interpreted answer recorded after the state check above.
@@ -543,6 +557,13 @@ func (s *Server) writeDecisionReplaced(w http.ResponseWriter, ctx context.Contex
 func (s *Server) writeDecisionWithdrawn(w http.ResponseWriter, ctx context.Context, d *store.Decision) {
 	writeError(w, http.StatusConflict, ErrCodeDecisionWithdrawn,
 		fmt.Sprintf("decision %s v%d was withdrawn", d.Key, d.Version),
+		map[string]interface{}{"decision": s.decisionViewFor(ctx, d)})
+}
+
+// writeDecisionDismissed answers 409 dismissed with the decision view.
+func (s *Server) writeDecisionDismissed(w http.ResponseWriter, ctx context.Context, d *store.Decision) {
+	writeError(w, http.StatusConflict, ErrCodeDecisionDismissed,
+		fmt.Sprintf("decision %s v%d was dismissed", d.Key, d.Version),
 		map[string]interface{}{"decision": s.decisionViewFor(ctx, d)})
 }
 
@@ -715,6 +736,8 @@ func (s *Server) publishDecisionUpdatedAt(ctx context.Context, projectID, messag
 	namedUserID := ""
 	if view.Decision != nil {
 		namedUserID = view.Decision.AnsweredByUserID
+	} else if view.Dismissed != nil {
+		namedUserID = view.Dismissed.ByUserID
 	}
 	defer s.enqueueDecisionBellEvent(projectID, threadID, namedUserID)
 

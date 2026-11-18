@@ -1236,6 +1236,11 @@ func (s *Server) enrichHeldDecisionResponse(
 		}
 		return cmp.Compare(a.Key, b.Key)
 	})
+	if ordered[0].Outcome == store.DecisionOutcomeDismiss {
+		sm.Msg = decisionDismissAgentLine(ordered)
+		sm.Metadata = decisionDismissMetadata(sm.Metadata, batchID, ordered)
+		return "", nil
+	}
 	var overridden map[string]*store.DecisionAnswer
 	if needOverridden && promptID != "" {
 		byPrompt, perr := s.store.GetDecisionsByMessageIDs(ctx, []string{promptID})

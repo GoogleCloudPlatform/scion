@@ -1380,6 +1380,7 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+rowID, nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decisions/"+rowID+"/answer", map[string]interface{}{"choice_id": "1"}).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+twoMsg.ID+"/answers", setAnswersBody).Code)
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+twoMsg.ID+"/dismiss", map[string]interface{}{}).Code)
 
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions", nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/users/me/decisions", nil).Code)
@@ -1426,6 +1427,8 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	setAnsOn := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+twoMsg.ID+"/answers", setAnswersBody)
 	assert.NotEqual(t, http.StatusNotFound, setAnsOn.Code, "POST /api/v1/decision-prompts/{id}/answers must be reachable when web.decisions is on")
 	assert.Equal(t, http.StatusOK, setAnsOn.Code, setAnsOn.Body.String())
+	dismissOn := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+twoMsg.ID+"/dismiss", map[string]interface{}{})
+	assert.NotEqual(t, http.StatusNotFound, dismissOn.Code, "POST /api/v1/decision-prompts/{id}/dismiss must be reachable when web.decisions is on")
 	interpOn := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{})
 	assert.NotEqual(t, http.StatusNotFound, interpOn.Code, "POST /api/v1/agent/decisions/interpreted must be reachable when web.decisions is on")
 	wdOn := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", map[string]interface{}{})

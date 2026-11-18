@@ -2114,6 +2114,8 @@ type Server struct {
 	// decisionBell coalesces and reconciles per-user Decisions bell
 	// notifications (decisions_bell.go).
 	decisionBell decisionBellState
+	// decisionClock replaces time.Now on decision dismiss age checks (tests only).
+	decisionClock func() time.Time
 
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
@@ -8681,8 +8683,8 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 		// Decision prompt decisions: read and answer (web.decisions; 404 while off).
 		s.mux.HandleFunc("/api/v1/decisions/", s.guarded("/api/v1/decisions/", s.chatRoute(s.handleDecisionRoutes)))
-		// Decision prompt set answers (web.decisions; 404 while off).
-		s.mux.HandleFunc("/api/v1/decision-prompts/", s.guarded("/api/v1/decision-prompts/", s.chatRoute(s.handleDecisionPromptRoutes)))
+		// Decision prompt set answers and dismissal (web.decisions; 404 while off).
+		s.mux.HandleFunc("/api/v1/decision-prompts/", s.guarded("/api/v1/decision-prompts/", s.handleDecisionPromptRoutes))
 	}
 
 	// Attachment delivery capability redemption by brokers (ptone/scion#4596).

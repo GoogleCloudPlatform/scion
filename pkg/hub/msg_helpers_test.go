@@ -84,6 +84,12 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "decisions_batch.go", function: "deliverDecisionSetResponse", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage in handleDecisionSetAnswer before RecordAnswerSet and delivery"},
 
+	// decisions_dismiss.go: deliverDecisionDismissResponse — the one decision-response
+	// of a dismissal to a live asking agent; handleDecisionPromptDismiss calls
+	// authorizeAgentMessage on the asker before DismissDecisions and delivery.
+	{file: "decisions_dismiss.go", function: "deliverDecisionDismissResponse", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "authorizeAgentMessage in handleDecisionPromptDismiss before DismissDecisions and delivery"},
+
 	// handlers_agent_messaging.go: publishBroadcastDeliveryFailed — derivative
 	// notice back to the original sender agent.
 	{file: "handlers_agent_messaging.go", function: "publishBroadcastDeliveryFailed", symbol: "dispatchMarkedAgentMessage",

@@ -35,6 +35,8 @@ var strippedSites = map[stripSiteKey]bool{
 	{"decisions_answer.go", "deliverDecisionResponse"}: true,
 	// The one decision-response of a set submit.
 	{"decisions_batch.go", "deliverDecisionSetResponse"}: true,
+	// The one decision-response of a prompt dismissal.
+	{"decisions_dismiss.go", "deliverDecisionDismissResponse"}: true,
 	// P1: the two ExecuteAgentDM-routed entry points, covering the outbound
 	// endpoint, the handleAgentMessage agent fork, and #2083's agent mention
 	// fan-out (fanOutAgentMentions reaches dispatch through ExecuteAgentDM,

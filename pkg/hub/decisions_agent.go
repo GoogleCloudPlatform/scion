@@ -60,6 +60,7 @@ type AgentDecisionListItem struct {
 	CreatedAt       time.Time          `json:"createdAt"`
 	DecidedAt       *time.Time         `json:"decidedAt,omitempty"`
 	Withdrawn       *DecisionWithdrawn `json:"withdrawn,omitempty"`
+	Dismissed       *DecisionDismissed `json:"dismissed,omitempty"`
 	Answer          *AnswerView        `json:"answer,omitempty"`
 }
 
@@ -88,6 +89,7 @@ type AgentDecisionVersionView struct {
 	DefaultChoiceID string              `json:"defaultChoiceId,omitempty"`
 	ReplacedBy      *DecisionReplacedBy `json:"replacedBy,omitempty"`
 	Withdrawn       *DecisionWithdrawn  `json:"withdrawn,omitempty"`
+	Dismissed       *DecisionDismissed  `json:"dismissed,omitempty"`
 	CreatedAt       time.Time           `json:"createdAt"`
 	DecidedAt       *time.Time          `json:"decidedAt,omitempty"`
 	Answers         []AnswerView        `json:"answers"`
@@ -283,6 +285,7 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 			CreatedAt:       d.CreatedAt,
 			DecidedAt:       d.DecidedAt,
 			Withdrawn:       decisionWithdrawnView(d),
+			Dismissed:       decisionDismissedView(d),
 			Answer:          answerView(d.EffectiveAnswer()),
 		}
 	}
@@ -354,6 +357,7 @@ func (s *Server) handleAgentDecisionShow(w http.ResponseWriter, r *http.Request,
 			DefaultChoiceID: d.DefaultChoiceID,
 			ReplacedBy:      rep,
 			Withdrawn:       decisionWithdrawnView(d),
+			Dismissed:       decisionDismissedView(d),
 			CreatedAt:       d.CreatedAt,
 			DecidedAt:       d.DecidedAt,
 			Answers:         ansViews,
