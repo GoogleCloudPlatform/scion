@@ -1061,12 +1061,16 @@ type createRollback struct {
 	Stage string
 	// Cause is the failure that triggered the rollback.
 	Cause error
-	// RevokeCredentials must be false when the failure surfaced as an error
-	// from a dispatcher call that minted the credential: those calls
+	// RevokeCredentials controls the pre-teardown best-effort revoke (step 1 of
+	// cleanupFailedCreate). It must be false when the failure surfaced as an
+	// error from a dispatcher call that minted the credential: those calls
 	// (DispatchAgentCreateWithGather and friends) revoke on their own error
-	// return, and revoking again here would be a redundant second revoke.
-	// It is true for a failure the dispatcher reported as success (missing
-	// env vars), where no such revoke fired.
+	// return. It is true for a failure the dispatcher reported as success
+	// (missing env vars), where no such revoke fired — covering both the window
+	// before runtime teardown and rollbacks that end up keeping the row
+	// (refused or delete-held). When the row is removed in step 3 (or its
+	// fallback), agentHardDeleteWork always revokes any remaining active
+	// credentials in the row-delete transaction (a no-op when none is active).
 	RevokeCredentials bool
 	// DeleteRuntime deletes the agent's runtime-side resources; nil when
 	// the create has none.
@@ -1094,7 +1098,8 @@ type createRollback struct {
 //     a managed one);
 //  3. compensates the committed create (compensateAgentCreate): one
 //     transaction that deletes the agent row unless a delete holds it
-//     (createRowHeldCheck), deactivates its delegation edges and its
+//     (createRowHeldCheck), revokes any remaining active credentials with
+//     reason create_failed, deactivates its delegation edges and its
 //     service-account assignments with cause create_compensation, runs the
 //     hard-delete hooks and writes an agent_create_dispatch_failed audit
 //     record naming rb.CreateAuditID and rb.Stage; and
@@ -1123,9 +1128,9 @@ type createRollback struct {
 // compensation transaction fails, the failure is logged at ERROR with a
 // correlation ID and the compensation's op ID, and a fallback runs: a
 // delete of the agent row without the audit record, in one transaction
-// with the deactivation of the agent's delegation edges and
-// service-account assignments and the hard-delete hooks (same cause and op
-// ID; deleteFailedCreateRow). The correlation ID is
+// with active credential revocation, the deactivation of the agent's
+// delegation edges and service-account assignments, and the hard-delete
+// hooks (same cause and op ID; deleteFailedCreateRow). The correlation ID is
 // returned so the caller can report it (writeCreateFailure). The return
 // value is "" when the compensation committed.
 func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (compensationFailureCorrelationID string) {
@@ -1343,10 +1348,10 @@ func isCreateCleanupRefusedRow(a *store.Agent) bool {
 // errCreateRowDeleteHeld.
 //
 // Each attempt runs agentHardDeleteWork in the row delete's transaction:
-// the agent's delegation edges and service-account assignments are
-// deactivated with cause create_compensation under opID, and the
-// hard-delete hooks run, so the row is removed only together with them.
-// A failure there rolls the attempt back and keeps the row.
+// the agent's active credentials are revoked and its delegation edges and
+// service-account assignments are deactivated with cause create_compensation
+// under opID, and the hard-delete hooks run, so the row is removed only
+// together with them. A failure there rolls the attempt back and keeps the row.
 func (s *Server) deleteFailedCreateRow(ctx context.Context, agent *store.Agent, opID string) error {
 	agentID := agent.ID
 	actor := auditActorFromContext(ctx)

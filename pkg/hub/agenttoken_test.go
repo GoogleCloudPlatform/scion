@@ -17,8 +17,6 @@ package hub
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -270,125 +268,6 @@ func TestAgentTokenService_RandomKeyGeneration(t *testing.T) {
 	claims, err := service.ValidateAgentToken(token)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-123", claims.Subject)
-}
-
-func TestAgentAuthMiddleware(t *testing.T) {
-	service, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey: make([]byte, 32),
-	})
-	require.NoError(t, err)
-
-	// Generate a valid token
-	token, err := service.GenerateAgentToken("agent-123", "project-456", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
-
-	// Create a test handler that checks for agent context
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		claims := GetAgentFromContext(r.Context())
-		if claims != nil {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(claims.Subject))
-		} else {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte("no agent"))
-		}
-	})
-
-	// Wrap with middleware
-	wrapped := service.AgentAuthMiddleware(handler)
-
-	t.Run("valid token in X-Scion-Agent-Token", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		req.Header.Set("X-Scion-Agent-Token", token)
-		rr := httptest.NewRecorder()
-
-		wrapped.ServeHTTP(rr, req)
-
-		assert.Equal(t, http.StatusOK, rr.Code)
-		assert.Equal(t, "agent-123", rr.Body.String())
-	})
-
-	t.Run("valid token in Authorization header", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		rr := httptest.NewRecorder()
-
-		wrapped.ServeHTTP(rr, req)
-
-		assert.Equal(t, http.StatusOK, rr.Code)
-		assert.Equal(t, "agent-123", rr.Body.String())
-	})
-
-	t.Run("invalid token", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		req.Header.Set("X-Scion-Agent-Token", "invalid-token")
-		rr := httptest.NewRecorder()
-
-		wrapped.ServeHTTP(rr, req)
-
-		assert.Equal(t, http.StatusUnauthorized, rr.Code)
-	})
-
-	t.Run("no token passes through", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		rr := httptest.NewRecorder()
-
-		wrapped.ServeHTTP(rr, req)
-
-		// Should pass through (no agent context)
-		assert.Equal(t, http.StatusNotFound, rr.Code)
-		assert.Equal(t, "no agent", rr.Body.String())
-	})
-}
-
-func TestRequireAgentScope(t *testing.T) {
-	service, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey: make([]byte, 32),
-	})
-	require.NoError(t, err)
-
-	// Generate a token with only status update scope
-	token, err := service.GenerateAgentToken("agent-123", "project-456", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
-
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	t.Run("has required scope", func(t *testing.T) {
-		wrapped := service.AgentAuthMiddleware(RequireAgentScope(ScopeAgentStatusUpdate)(handler))
-
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		req.Header.Set("X-Scion-Agent-Token", token)
-		rr := httptest.NewRecorder()
-
-		wrapped.ServeHTTP(rr, req)
-
-		assert.Equal(t, http.StatusOK, rr.Code)
-	})
-
-	t.Run("missing required scope", func(t *testing.T) {
-		wrapped := service.AgentAuthMiddleware(RequireAgentScope(ScopeProjectSecretRead)(handler))
-
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		req.Header.Set("X-Scion-Agent-Token", token)
-		rr := httptest.NewRecorder()
-
-		wrapped.ServeHTTP(rr, req)
-
-		assert.Equal(t, http.StatusForbidden, rr.Code)
-	})
-
-	t.Run("no agent context", func(t *testing.T) {
-		wrapped := RequireAgentScope(ScopeAgentStatusUpdate)(handler)
-
-		req := httptest.NewRequest(http.MethodGet, "/test", nil)
-		rr := httptest.NewRecorder()
-
-		wrapped.ServeHTTP(rr, req)
-
-		assert.Equal(t, http.StatusUnauthorized, rr.Code)
-	})
 }
 
 func TestGetAgentFromContext(t *testing.T) {

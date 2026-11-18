@@ -242,14 +242,25 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	return nil
 }
 
+// hardDeleteCredentialRevokeReason maps an edge-deactivation cause to the
+// credential revoke reason recorded on agent_credentials rows when the agent
+// row is removed.
+func hardDeleteCredentialRevokeReason(cause store.EdgeDeactivationCause) string {
+	if cause == store.EdgeDeactivationCreateCompensation {
+		return agentCredentialRevokeReasonCreateFailed
+	}
+	return agentCredentialRevokeReasonDeleted
+}
+
 // agentHardDeleteWork is the work every removal of an agent row must commit
-// with it: deactivate the agent's delegation edges and its service-account
-// assignments with d (neither has a foreign key to the agent, so the rows
-// survive as history), then run the hard-delete hooks. Both the hard delete
-// (hardDeleteAgentTx) and the rollback of a committed create
-// (compensateAgentCreate) run it, so a hook registered for hard delete also
-// runs when a create is rolled back. label prefixes store errors; a hook
-// error is returned as is.
+// with it: revoke the agent's active credentials, deactivate its delegation
+// edges and its service-account assignments with d (none of the three has a
+// foreign key to the agent, so the rows survive as history), then run the
+// hard-delete hooks. Both the hard delete (hardDeleteAgentTx) and the rollback
+// of a committed create (compensateAgentCreate, deleteFailedCreateRow) run it,
+// so credential revocation and any hook registered for hard delete also run
+// when a create is rolled back. label prefixes store errors; a hook error is
+// returned as is.
 //
 // Only the edges where the agent is the delegate are deactivated. Edges where
 // it is the delegator are left as they are: authorization re-loads each
@@ -261,6 +272,9 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // delete, which removes every agent of the project in one transaction,
 // deactivates both sides (deactivateProjectAgentEdges).
 func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string) (edges, assignments int, err error) {
+	if _, err := tx.RevokeAgentCredentialsByAgent(ctx, a.ID, "system", hardDeleteCredentialRevokeReason(d.Cause)); err != nil {
+		return 0, 0, fmt.Errorf("%s: revoke agent credentials: %w", label, err)
+	}
 	edges, err = tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: deactivate delegation edges: %w", label, err)
@@ -277,10 +291,10 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 
 // hardDeleteAgentTx runs inside the finalize transaction of a hard delete,
 // after the engine removed the agent row and its dependents. In order:
-// agentHardDeleteWork with cause agent_hard_delete (edges, service-account
-// assignments, hard-delete hooks), then the agent_hard_delete audit record.
-// a is the row as it was just before the delete; the row itself is not
-// readable.
+// agentHardDeleteWork with cause agent_hard_delete (active credential
+// revocation, edges, service-account assignments, hard-delete hooks), then the
+// agent_hard_delete audit record. a is the row as it was just before the
+// delete; the row itself is not readable.
 //
 // The hard delete of an incomplete create is a hard delete like any other;
 // its audit summary carries incomplete_create=true.

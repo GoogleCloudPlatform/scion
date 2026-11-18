@@ -288,10 +288,10 @@ var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
 // compensateAgentCreate rolls back a committed create after a later step
 // failed, in one transaction: it deletes the agent row (identity keys
 // cascade), runs the hard-delete work with cause create_compensation
-// (agentHardDeleteWork: delegation edges, service-account assignments and
-// the hard-delete hooks), and writes an agent_create_dispatch_failed audit
-// record naming the create's audit record and the failed stage. A hook
-// error rolls the compensation back.
+// (agentHardDeleteWork: active credential revocation, delegation edges,
+// service-account assignments and the hard-delete hooks), and writes an
+// agent_create_dispatch_failed audit record naming the create's audit record
+// and the failed stage. A hook error rolls the compensation back.
 //
 // The row delete is conditional (ptone/scion#3557, ptone/scion#3958): the
 // row is removed only when no delete holds it (createRowHeldCheck), checked
@@ -304,8 +304,10 @@ var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
 // errCreateRowDeleteHeld.
 //
 // The caller passes a context detached from the request (see
-// cleanupFailedCreate). Credential revocation, the broker-side delete and
-// the quota release stay with the caller.
+// cleanupFailedCreate). Pre-delete credential revocation (for rollbacks that
+// keep the row), the broker-side delete and the quota release stay with the
+// caller; agentHardDeleteWork also revokes any remaining active credentials in
+// the row-delete transaction.
 func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation) error {
 	if c.Agent == nil {
 		return fmt.Errorf("%w: no agent to compensate", errAgentCreateWriteInvalid)

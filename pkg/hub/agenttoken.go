@@ -505,33 +505,6 @@ func (a *agentIdentityWrapper) OriginUserID() string {
 	return ""
 }
 
-// AgentAuthMiddleware creates middleware that validates agent tokens.
-// It looks for tokens in the Authorization header (Bearer) or X-Scion-Agent-Token header.
-// If valid, it adds the agent claims to the request context.
-func (s *AgentTokenService) AgentAuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Try to extract token from headers
-		token := extractAgentToken(r)
-		if token == "" {
-			// No agent token found, continue to next middleware (may have other auth)
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Validate the token
-		claims, err := s.ValidateAgentToken(token)
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-				"invalid agent token: "+err.Error(), nil)
-			return
-		}
-
-		// Add claims to context
-		ctx := context.WithValue(r.Context(), agentContextKey{}, claims)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
 // extractAgentToken extracts the agent token from the request.
 // It checks both the Authorization header and X-Scion-Agent-Token header.
 func extractAgentToken(r *http.Request) string {
@@ -552,61 +525,6 @@ func extractAgentToken(r *http.Request) string {
 	}
 
 	return parts[1]
-}
-
-// RequireAgentScope returns a middleware that requires the agent to have a specific scope.
-// It must be used after AgentAuthMiddleware.
-func RequireAgentScope(scope AgentTokenScope) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			claims := GetAgentFromContext(r.Context())
-			if claims == nil {
-				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-					"agent authentication required", nil)
-				return
-			}
-
-			if !claims.HasScope(scope) {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					fmt.Sprintf("missing required scope: %s", scope), nil)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// RequireAgentSelfAccess returns a middleware that ensures the agent can only access its own resources.
-// It extracts the agent ID from the URL path and compares it with the token's subject.
-func RequireAgentSelfAccess(pathPrefix string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			claims := GetAgentFromContext(r.Context())
-			if claims == nil {
-				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-					"agent authentication required", nil)
-				return
-			}
-
-			// Extract agent ID from path
-			agentID, _ := extractAction(r, pathPrefix)
-			if agentID == "" {
-				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-					"agent ID required in path", nil)
-				return
-			}
-
-			// Verify the agent is accessing its own resource
-			if agentID != claims.Subject {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"agents can only access their own resources", nil)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
 }
 
 // checkAgentReadScope verifies that agent callers have ScopeProjectRead.
