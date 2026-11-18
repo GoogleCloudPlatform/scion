@@ -165,6 +165,11 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		return Result{}, err
 	}
 
+	performedViaAppID, err := extractEventPerformedViaAppID(eventName, root)
+	if err != nil {
+		return Result{}, err
+	}
+
 	subject := fmt.Sprintf("github:%s#%d", repoFullName, number)
 	if len(subject) > MaxSubjectBytes || !allPrintable(subject) {
 		return Result{}, errors.New("github trigger: derived subject exceeds bounds or contains non-printable characters")
@@ -221,24 +226,60 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 	}
 
 	return Result{
-		Handled:        true,
-		SourceKind:     SourceKind,
-		SourceID:       strconv.FormatInt(installationID, 10),
-		DeliveryID:     deliveryID,
-		Type:           SourceKind + "." + eventName + "." + action,
-		Subject:        subject,
-		OccurredAt:     occurredAt,
-		Attributes:     attrs,
-		Lists:          lists,
-		Payload:        projected,
-		PayloadBytes:   len(projected),
-		Truncated:      truncated,
-		InstallationID: installationID,
-		RepoFullName:   repoFullName,
-		SenderLogin:    senderLogin,
-		SenderID:       senderID,
-		SenderType:     senderType,
+		Handled:           true,
+		SourceKind:        SourceKind,
+		SourceID:          strconv.FormatInt(installationID, 10),
+		DeliveryID:        deliveryID,
+		Type:              SourceKind + "." + eventName + "." + action,
+		Subject:           subject,
+		OccurredAt:        occurredAt,
+		Attributes:        attrs,
+		Lists:             lists,
+		Payload:           projected,
+		PayloadBytes:      len(projected),
+		Truncated:         truncated,
+		InstallationID:    installationID,
+		RepoFullName:      repoFullName,
+		SenderLogin:       senderLogin,
+		SenderID:          senderID,
+		SenderType:        senderType,
+		PerformedViaAppID: performedViaAppID,
 	}, nil
+}
+
+func extractEventPerformedViaAppID(eventName string, root map[string]any) (int64, error) {
+	primaryKey := ""
+	switch eventName {
+	case EventIssueComment, EventPullRequestReviewComment:
+		primaryKey = "comment"
+	case EventPullRequestReview:
+		primaryKey = "review"
+	case EventIssues:
+		primaryKey = "issue"
+	case EventPullRequest:
+		primaryKey = "pull_request"
+	}
+	if primaryKey != "" {
+		if primaryMap, ok := optMap(root, primaryKey); ok {
+			id, err := optPerformedViaAppID(primaryMap, primaryKey+".performed_via_github_app")
+			if err != nil || id > 0 {
+				return id, err
+			}
+		}
+	}
+	return optPerformedViaAppID(root, "performed_via_github_app")
+}
+
+func optPerformedViaAppID(parent map[string]any, label string) (int64, error) {
+	raw, exists := parent["performed_via_github_app"]
+	if !exists || raw == nil {
+		return 0, nil
+	}
+	appMap, ok := raw.(map[string]any)
+	if !ok {
+		return 0, fmt.Errorf("github trigger: %s must be a JSON object", label)
+	}
+	return optNonNegativeInt64(appMap, "id", label+".id")
 }
 
 func normalizePullRequest(

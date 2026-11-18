@@ -66,6 +66,7 @@ const (
 
 	githubTargetMismatchAuditInterval = time.Minute
 	githubStalePrimaryWarnInterval    = time.Hour
+	githubUnknownIdentityWarnInterval = time.Hour
 	maxGitHubStalePrimaryWarnEntries  = 4096
 	githubCandidateProjectsPageSize   = 200
 	maxGitHubStoredUserAgentBytes     = 512
@@ -141,7 +142,8 @@ type githubWebhookIngressState struct {
 	lastTargetMismatchAudit    time.Time
 	suppressedTargetMismatches int
 
-	stalePrimaryWarns map[githubStalePrimaryKey]time.Time
+	stalePrimaryWarns       map[githubStalePrimaryKey]time.Time
+	lastUnknownIdentityWarn time.Time
 
 	nowFn       func() time.Time
 	auditLogger *slog.Logger
@@ -288,6 +290,24 @@ func (st *githubWebhookIngressState) maybeWarnStalePrimary(installationID int64,
 	)
 }
 
+func (st *githubWebhookIngressState) maybeWarnUnknownAppIdentity(appID int64, now time.Time) {
+	st.mu.Lock()
+	if !st.lastUnknownIdentityWarn.IsZero() && now.Sub(st.lastUnknownIdentityWarn) < githubUnknownIdentityWarnInterval {
+		st.mu.Unlock()
+		return
+	}
+	st.lastUnknownIdentityWarn = now
+	l := st.warnLogger
+	st.mu.Unlock()
+
+	if l == nil {
+		l = slog.Default()
+	}
+	l.Warn("GitHub App bot login unavailable; own-App webhook guard is relying on performed_via_github_app.id until GET /app succeeds or server.github_app.app_slug is set",
+		"app_id", appID,
+	)
+}
+
 func (st *githubWebhookIngressState) recordReceiptAudit(ctx context.Context, rec githubReceiptAuditRecord) {
 	l := st.auditLog()
 	attrs := []slog.Attr{
@@ -381,7 +401,7 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Step 4: parse JSON object without NUL and extract installation.id (+ routing envelope).
-	env, err := parseGitHubContentEnvelope(body)
+	env, err := parseGitHubContentEnvelope(eventType, body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
 		return
@@ -420,12 +440,18 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Step 6: own-App guard (§5.7) — sender.type == "Bot" && sender.login == <slug>+"[bot]".
+	// Step 6: own-App guard (§5.7) — drop deliveries when either sender matches
+	// <slug>[bot] (type Bot) OR the signed primary object's
+	// performed_via_github_app.id equals the configured AppID.
 	if !env.senderOK {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
 		return
 	}
-	if githubtrigger.IsOwnAppSender(env.senderType, env.senderLogin, s.GitHubAppBotLogin(ctx)) {
+	botLogin := s.GitHubAppBotLogin(ctx)
+	if botLogin == "" {
+		s.githubWebhookIngress.maybeWarnUnknownAppIdentity(appID, now)
+	}
+	if githubtrigger.IsOwnAppActor(env.senderType, env.senderLogin, botLogin, env.performedViaAppID, appID) {
 		s.githubWebhookIngress.selfIgnoredCount.Add(1)
 		writeJSON(w, http.StatusAccepted, GitHubWebhookAcceptedResponse{
 			Status:   GitHubWebhookStatusIgnored,
@@ -519,6 +545,16 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid payload", nil)
+		return
+	}
+
+	if normRes.IsOwnAppActor(botLogin, appID) {
+		s.githubWebhookIngress.selfIgnoredCount.Add(1)
+		writeJSON(w, http.StatusAccepted, GitHubWebhookAcceptedResponse{
+			Status:   GitHubWebhookStatusIgnored,
+			Reason:   "self",
+			Delivery: deliveryID,
+		})
 		return
 	}
 
@@ -729,17 +765,18 @@ func (s *Server) listGitHubInstallationCandidateProjects(ctx context.Context, in
 }
 
 type githubContentEnvelope struct {
-	installationID int64
-	action         string
-	actionOK       bool
-	repoFullName   string
-	repoOK         bool
-	senderLogin    string
-	senderType     string
-	senderOK       bool
+	installationID    int64
+	action            string
+	actionOK          bool
+	repoFullName      string
+	repoOK            bool
+	senderLogin       string
+	senderType        string
+	senderOK          bool
+	performedViaAppID int64
 }
 
-func parseGitHubContentEnvelope(payload []byte) (githubContentEnvelope, error) {
+func parseGitHubContentEnvelope(eventType string, payload []byte) (githubContentEnvelope, error) {
 	if len(payload) == 0 || !utf8.Valid(payload) || bytes.ContainsRune(payload, '\x00') {
 		return githubContentEnvelope{}, errors.New("invalid payload")
 	}
@@ -796,7 +833,62 @@ func parseGitHubContentEnvelope(payload []byte) (githubContentEnvelope, error) {
 		}
 	}
 
+	performedViaAppID, err := extractEnvelopePerformedViaAppID(eventType, root)
+	if err != nil {
+		return githubContentEnvelope{}, err
+	}
+	out.performedViaAppID = performedViaAppID
+
 	return out, nil
+}
+
+func extractEnvelopePerformedViaAppID(eventType string, root map[string]any) (int64, error) {
+	primaryKey := ""
+	switch eventType {
+	case githubtrigger.EventIssueComment, githubtrigger.EventPullRequestReviewComment:
+		primaryKey = "comment"
+	case githubtrigger.EventPullRequestReview:
+		primaryKey = "review"
+	case githubtrigger.EventIssues:
+		primaryKey = "issue"
+	case githubtrigger.EventPullRequest:
+		primaryKey = "pull_request"
+	}
+	if primaryKey != "" {
+		if primaryMap, ok := root[primaryKey].(map[string]any); ok && primaryMap != nil {
+			id, err := parseOptionalPerformedViaAppID(primaryMap)
+			if err != nil || id > 0 {
+				return id, err
+			}
+		}
+	}
+	return parseOptionalPerformedViaAppID(root)
+}
+
+func parseOptionalPerformedViaAppID(parent map[string]any) (int64, error) {
+	raw, exists := parent["performed_via_github_app"]
+	if !exists || raw == nil {
+		return 0, nil
+	}
+	appMap, ok := raw.(map[string]any)
+	if !ok {
+		return 0, errors.New("invalid performed_via_github_app")
+	}
+	idRaw, hasID := appMap["id"]
+	if !hasID || idRaw == nil {
+		return 0, nil
+	}
+	if n, ok := idRaw.(json.Number); ok && n.String() == "0" {
+		return 0, nil
+	}
+	if f, ok := idRaw.(float64); ok && f == 0 {
+		return 0, nil
+	}
+	id, ok := parsePositiveJSONInt64(idRaw)
+	if !ok {
+		return 0, errors.New("invalid performed_via_github_app.id")
+	}
+	return id, nil
 }
 
 func parsePositiveJSONInt64(v any) (int64, bool) {

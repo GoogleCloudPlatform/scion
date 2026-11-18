@@ -421,12 +421,100 @@ func TestGitHubAppIdentity_LazyFetchRetryAndFailureCaching(t *testing.T) {
 			t.Fatalf("expected ordinary failure to be cached without retry (1 GET /app), got %d", got)
 		}
 
-		// Follow-up lazy lookups read the cached failure rather than issuing a second GET /app.
+		// Follow-up lazy lookups within the retry backoff read the cached failure
+		// rather than issuing a second GET /app.
 		if _, ok := srv.GitHubAppIdentity(ctx); ok {
 			t.Fatal("expected cached failure to return ok=false")
 		}
 		if got := mockGH.hits.Load(); got != 1 {
 			t.Fatalf("expected no second GET /app after cached failure, got %d", got)
+		}
+	})
+
+	t.Run("failure_retried_after_bounded_backoff", func(t *testing.T) {
+		mockGH := newMockAppEndpoint(t, http.StatusBadGateway, `{"message":"bad gateway"}`)
+
+		baseNow := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+		var clockMu sync.Mutex
+		curNow := baseNow
+		nowFn := func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return curNow
+		}
+		advance := func(d time.Duration) {
+			clockMu.Lock()
+			curNow = curNow.Add(d)
+			clockMu.Unlock()
+		}
+
+		srv, _ := testServer(t)
+		srv.githubAppIdentity.mu.Lock()
+		srv.githubAppIdentity.nowFn = nowFn
+		srv.githubAppIdentity.mu.Unlock()
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig = GitHubAppServerConfig{
+			AppID:      42,
+			PrivateKey: testGitHubAppPrivateKeyPEM(t),
+			APIBaseURL: mockGH.server.URL,
+		}
+		srv.mu.Unlock()
+
+		ctx := context.Background()
+		if _, ok := srv.GitHubAppIdentity(ctx); ok {
+			t.Fatal("expected initial GET /app failure")
+		}
+		if got := mockGH.hits.Load(); got != 1 {
+			t.Fatalf("expected 1 GET /app on initial failure, got %d", got)
+		}
+
+		// Before githubAppIdentityFailureRetryBackoff (5m), no retry occurs.
+		advance(githubAppIdentityFailureRetryBackoff - time.Second)
+		if _, ok := srv.GitHubAppIdentity(ctx); ok {
+			t.Fatal("expected cached failure before backoff expires")
+		}
+		if got := mockGH.hits.Load(); got != 1 {
+			t.Fatalf("expected no retry before backoff expires (hits=1), got %d", got)
+		}
+
+		// Once backoff expires and upstream is still failing, exactly 1 retry occurs
+		// and re-arms the 5m backoff window.
+		advance(2 * time.Second)
+		if _, ok := srv.GitHubAppIdentity(ctx); ok {
+			t.Fatal("expected retry against still-failing upstream to return ok=false")
+		}
+		if got := mockGH.hits.Load(); got != 2 {
+			t.Fatalf("expected 1 retry GET /app after backoff (hits=2), got %d", got)
+		}
+		if _, ok := srv.GitHubAppIdentity(ctx); ok {
+			t.Fatal("expected cached failure immediately after failed retry")
+		}
+		if got := mockGH.hits.Load(); got != 2 {
+			t.Fatalf("expected second failure to be rate-limited within new backoff (hits=2), got %d", got)
+		}
+
+		// Upstream recovers; after another backoff window, GET /app succeeds and caches.
+		mockGH.setPayload(t, http.StatusOK, map[string]any{
+			"id":     42,
+			"slug":   "recovered-scion",
+			"events": []string{"issue_comment"},
+		})
+		advance(githubAppIdentityFailureRetryBackoff + time.Second)
+		id, ok := srv.GitHubAppIdentity(ctx)
+		if !ok || id == nil || id.Slug != "recovered-scion" || id.BotLogin != "recovered-scion[bot]" {
+			t.Fatalf("expected recovered identity after backoff, got %+v (ok=%v)", id, ok)
+		}
+		if got := mockGH.hits.Load(); got != 3 {
+			t.Fatalf("expected 1 GET /app on recovery (hits=3), got %d", got)
+		}
+
+		// Successful identity remains cached across later intervals without refetching.
+		advance(2 * time.Hour)
+		if bot := srv.GitHubAppBotLogin(ctx); bot != "recovered-scion[bot]" {
+			t.Fatalf("expected cached bot login recovered-scion[bot], got %q", bot)
+		}
+		if got := mockGH.hits.Load(); got != 3 {
+			t.Fatalf("expected no extra GET /app once identity succeeded (hits=3), got %d", got)
 		}
 	})
 

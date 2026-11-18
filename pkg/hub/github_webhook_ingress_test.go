@@ -1301,3 +1301,126 @@ func TestGitHubWebhookIngress_AmpersandLabelsCeilingAndInvalidInputSkip(t *testi
 		assert.Equal(t, GitHubWebhookStatusSkipped, audits[0]["result"])
 	})
 }
+
+func TestGitHubWebhookIngress_OwnAppUnknownIdentityPerformedViaAppAndRetryBackoff(t *testing.T) {
+	f := setupGitHubIngressFixture(t)
+	ctx := context.Background()
+	proj := f.createCandidateProject(t, "r1-ownapp-proj", "https://github.com/acme/widgets.git", f.instID)
+
+	// Start with GET /app failing (502) and AppSlug unset so the bot login is unknown.
+	mockGH := newMockAppEndpoint(t, http.StatusBadGateway, `{"message":"bad gateway"}`)
+	f.srv.githubAppIdentity.reset()
+	f.srv.githubAppIdentity.mu.Lock()
+	f.srv.githubAppIdentity.nowFn = f.currentTime
+	f.srv.githubAppIdentity.mu.Unlock()
+
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.AppSlug = ""
+	f.srv.config.GitHubAppConfig.PrivateKey = testGitHubAppPrivateKeyPEM(t)
+	f.srv.config.GitHubAppConfig.APIBaseURL = mockGH.server.URL
+	f.srv.mu.Unlock()
+
+	// 1. App-authored comment carrying comment.performed_via_github_app.id == AppID
+	// while GET /app fails: dropped as 202 ignored/self with zero DB rows, and a
+	// rate-limited warning is logged once.
+	f.warnBuf.Reset()
+	ownAppCommentBody, err := json.Marshal(map[string]any{
+		"action":       "created",
+		"installation": map[string]any{"id": f.instID},
+		"repository": map[string]any{
+			"id": 101, "name": "widgets", "full_name": "acme/widgets", "private": false,
+			"owner": map[string]any{"login": "acme", "id": 10, "type": "Organization"},
+		},
+		"sender": map[string]any{"login": "unfetched-scion[bot]", "id": 9001, "type": "Bot"},
+		"issue": map[string]any{
+			"number": 42, "state": "open", "title": "Issue", "body": "body",
+			"html_url":   "https://github.com/acme/widgets/issues/42",
+			"created_at": "2026-11-18T11:00:00Z", "updated_at": "2026-11-18T11:30:00Z",
+		},
+		"comment": map[string]any{
+			"id": 801, "body": "App acknowledgement comment",
+			"html_url":                 "https://github.com/acme/widgets/issues/42#issuecomment-801",
+			"created_at":               "2026-11-18T11:30:00Z",
+			"updated_at":               "2026-11-18T11:30:00Z",
+			"performed_via_github_app": map[string]any{"id": f.appID, "slug": "unfetched-scion"},
+		},
+	})
+	require.NoError(t, err)
+
+	recOwn := f.postDelivery(t, "issue_comment", uuid.NewString(), ownAppCommentBody, nil)
+	require.Equal(t, http.StatusAccepted, recOwn.Code, recOwn.Body.String())
+
+	var ownResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recOwn.Body.Bytes(), &ownResp))
+	assert.Equal(t, GitHubWebhookStatusIgnored, ownResp.Status)
+	assert.Equal(t, "self", ownResp.Reason)
+	assert.Equal(t, int64(1), f.srv.githubWebhookIngress.selfIgnoredCount.Load())
+	assert.Equal(t, int64(1), mockGH.hits.Load(), "initial lazy GET /app should run once")
+
+	warnLines := parseAuditLines(t, f.warnBuf.String())
+	require.Len(t, warnLines, 1, "expected 1 rate-limited warning while identity is unknown")
+
+	evs, err := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: proj.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, evs.Items, "own-App comment must not create any trigger_events row")
+
+	// 2. Third-party bot (renovate[bot], different performed_via_github_app.id)
+	// while identity is still unknown (within 5m backoff): accepted 202 queued,
+	// no second GET /app call, and warning stays rate-limited.
+	f.advanceClock(time.Minute)
+	otherBotBody, err := json.Marshal(map[string]any{
+		"action":       "created",
+		"installation": map[string]any{"id": f.instID},
+		"repository": map[string]any{
+			"id": 101, "name": "widgets", "full_name": "acme/widgets", "private": false,
+			"owner": map[string]any{"login": "acme", "id": 10, "type": "Organization"},
+		},
+		"sender": map[string]any{"login": "renovate[bot]", "id": 9002, "type": "Bot"},
+		"issue": map[string]any{
+			"number": 42, "state": "open", "title": "Issue", "body": "body",
+			"html_url":   "https://github.com/acme/widgets/issues/42",
+			"created_at": "2026-11-18T11:00:00Z", "updated_at": "2026-11-18T11:30:00Z",
+		},
+		"comment": map[string]any{
+			"id": 802, "body": "Dependency update status",
+			"html_url":                 "https://github.com/acme/widgets/issues/42#issuecomment-802",
+			"created_at":               "2026-11-18T11:31:00Z",
+			"updated_at":               "2026-11-18T11:31:00Z",
+			"performed_via_github_app": map[string]any{"id": int64(999111), "slug": "renovate"},
+		},
+	})
+	require.NoError(t, err)
+
+	recOther := f.postDelivery(t, "issue_comment", uuid.NewString(), otherBotBody, nil)
+	require.Equal(t, http.StatusAccepted, recOther.Code, recOther.Body.String())
+
+	var otherResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recOther.Body.Bytes(), &otherResp))
+	assert.Equal(t, GitHubWebhookStatusQueued, otherResp.Status, "third-party bots must not be dropped while identity is unknown")
+	require.Len(t, otherResp.Events, 1)
+	assert.Equal(t, int64(1), mockGH.hits.Load(), "failed GET /app must remain cached within the 5m backoff")
+	assert.Len(t, parseAuditLines(t, f.warnBuf.String()), 1, "unknown-identity warning must stay rate-limited within 1h")
+
+	// 3. Upstream GET /app recovers and clock advances past githubAppIdentityFailureRetryBackoff:
+	// identity fetch retries, populates BotLogin, and drops own-App by sender.login alone.
+	mockGH.setPayload(t, http.StatusOK, map[string]any{
+		"id":     f.appID,
+		"slug":   "unfetched-scion",
+		"events": []string{"issue_comment"},
+	})
+	f.advanceClock(githubAppIdentityFailureRetryBackoff)
+
+	ownByLoginOnly := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "unfetched-scion[bot]", "Bot", "post-recovery comment", f.currentTime())
+	recRecovered := f.postDelivery(t, "issue_comment", uuid.NewString(), ownByLoginOnly, nil)
+	require.Equal(t, http.StatusAccepted, recRecovered.Code, recRecovered.Body.String())
+
+	var recovResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recRecovered.Body.Bytes(), &recovResp))
+	assert.Equal(t, GitHubWebhookStatusIgnored, recovResp.Status)
+	assert.Equal(t, "self", recovResp.Reason)
+	assert.GreaterOrEqual(t, mockGH.hits.Load(), int64(2), "GET /app must retry once the failure backoff expires")
+
+	evsAfter, err := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: proj.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, evsAfter.Items, 1, "only the third-party bot event should exist in store")
+}
