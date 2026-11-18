@@ -18,13 +18,22 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -149,4 +158,478 @@ func TestCreateUnderClaim_SyncAnswerOutlivingRenewIsNotLost(t *testing.T) {
 	got := mustAgent(t, s, a.ID)
 	assert.Equal(t, store.LaunchEndReasonNotLaunched, got.LaunchEndReason)
 	assert.Empty(t, got.StartClaimID, "the holder released its claim on success")
+}
+
+// closedLoopbackEndpoint allocates a loopback TCP port and closes the
+// listener immediately so a subsequent HTTP dial fails with connection refused.
+func closedLoopbackEndpoint(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return "http://" + addr
+}
+
+// newRealHTTPDispatchServer sets up a Server with start claims enabled, an
+// HTTPAgentDispatcher backed by a real HTTPRuntimeBrokerClient, and a broker
+// pointing at endpoint.
+func newRealHTTPDispatchServer(t *testing.T, name, endpoint string, asyncLaunch bool, clientTimeout time.Duration, rt http.RoundTripper) (*Server, store.Store, *store.Project, *store.RuntimeBroker, *HTTPRuntimeBrokerClient) {
+	t.Helper()
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.startClaimsOn = true
+	project := &store.Project{ID: tid("proj-5284-" + name), Name: "proj-" + name, Slug: "proj-" + name}
+	require.NoError(t, s.CreateProject(ctx, project))
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-5284-" + name),
+		Name:     "broker-" + name,
+		Slug:     "broker-" + name,
+		Endpoint: endpoint,
+		Status:   store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{
+			AsyncLaunch: asyncLaunch,
+			AsyncStart:  asyncLaunch,
+		},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	httpClient := NewHTTPRuntimeBrokerClient()
+	if clientTimeout > 0 {
+		httpClient.transport.client.Timeout = clientTimeout
+	}
+	if rt != nil {
+		httpClient.transport.client.Transport = rt
+	}
+	d := NewHTTPAgentDispatcherWithClient(s, httpClient, false, slog.Default())
+	d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
+	if asyncLaunch {
+		d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings {
+			return AsyncLaunchSettings{Enabled: true, Timeout: 5 * time.Minute, KeepaliveSeconds: 15}
+		})
+	}
+	srv.SetDispatcher(d)
+	return srv, s, project, broker, httpClient
+}
+
+// TestDispatchSend_NothingStartedReleasesStartClaimForImmediateRetry covers
+// ptone/scion#5284: when a dispatch send fails in a way that shows nothing
+// started (dial refused, pending dial timing out before any connection, TLS
+// handshake failure before any connection, or a 4xx refusal from the broker),
+// the Hub releases the start claim at once so an immediate env resubmit or
+// start retry succeeds instead of getting 409 start_in_progress.
+func TestDispatchSend_NothingStartedReleasesStartClaimForImmediateRetry(t *testing.T) {
+	// Good broker server used for the immediate retry after the failed send.
+	goodBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		if launchID, _ := body["launchId"].(string); body["asyncLaunch"] == true && launchID != "" {
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"launchPending":    true,
+				"launchId":         launchID,
+				"launchInstanceId": "inst-ok",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"created": true,
+			"agent":   map[string]interface{}{"id": "ok", "name": "ok", "phase": "running"},
+		})
+	}))
+	t.Cleanup(goodBroker.Close)
+
+	refusal422Broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"error":{"code":"validation_error","message":"invalid harness config"}}`))
+	}))
+	t.Cleanup(refusal422Broker.Close)
+
+	tlsUntrustedBroker := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(tlsUntrustedBroker.Close)
+
+	pendingDialTransport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	t.Cleanup(pendingDialTransport.CloseIdleConnections)
+
+	cases := []struct {
+		name     string
+		endpoint string
+		timeout  time.Duration
+		rt       http.RoundTripper
+	}{
+		{
+			name:     "dial refused",
+			endpoint: closedLoopbackEndpoint(t),
+		},
+		{
+			name:     "dial timeout before connection",
+			endpoint: "http://127.0.0.1:9",
+			timeout:  60 * time.Millisecond,
+			rt:       pendingDialTransport,
+		},
+		{
+			name:     "TLS handshake failure before connection",
+			endpoint: tlsUntrustedBroker.URL,
+		},
+		{
+			name:     "broker 422 refusal",
+			endpoint: refusal422Broker.URL,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run("env finalize/"+tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, s, project, broker, httpClient := newRealHTTPDispatchServer(t, "env-"+tc.name, tc.endpoint, true, tc.timeout, tc.rt)
+			agent := &store.Agent{
+				ID: tid("a-env-" + tc.name), Slug: "a-env", Name: "a-env",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+				Phase: string(state.PhaseProvisioning), LaunchAsyncOptIn: true,
+				AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude", Task: "run"},
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			envPath := fmt.Sprintf("/api/v1/projects/%s/agents/%s/env", project.ID, agent.Slug)
+			envBody := map[string]interface{}{"env": map[string]string{"API_KEY": "secret"}}
+
+			rec := doRequest(t, srv, http.MethodPost, envPath, envBody)
+			require.GreaterOrEqual(t, rec.Code, 400, "the failed send must fail the request: %s", rec.Body.String())
+			assert.NotEqual(t, http.StatusGatewayTimeout, rec.Code, "a pre-send failure is never 504 start_outcome_unknown")
+
+			got := mustAgent(t, s, agent.ID)
+			assert.Equal(t, string(state.PhaseProvisioning), got.Phase)
+			assert.Equal(t, store.LaunchStateEnded, got.LaunchState)
+			assert.Equal(t, store.LaunchEndReasonNotLaunched, got.LaunchEndReason)
+			assert.Equal(t, store.LaunchErrorDispatchFailed, got.LaunchError)
+			assert.Empty(t, got.StartClaimID, "nothing started: the start claim must be released at once")
+			assert.Empty(t, got.StartClaimState)
+
+			// Point at the working broker and resubmit immediately without
+			// waiting for start_create_unconfirmed_hold or running scion stop.
+			broker.Endpoint = goodBroker.URL
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			httpClient.transport.client.Transport = http.DefaultTransport
+			httpClient.transport.client.Timeout = 5 * time.Second
+
+			rec = doRequest(t, srv, http.MethodPost, envPath, envBody)
+			require.Equal(t, http.StatusOK, rec.Code, "immediate env resubmit must succeed instead of 409 start_in_progress: %s", rec.Body.String())
+			assert.True(t, mustAgent(t, s, agent.ID).IsInFlight())
+		})
+
+		t.Run("lifecycle start/"+tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, s, project, broker, httpClient := newRealHTTPDispatchServer(t, "start-"+tc.name, tc.endpoint, false, tc.timeout, tc.rt)
+			agent := &store.Agent{
+				ID: tid("a-start-" + tc.name), Slug: "a-start", Name: "a-start",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+				Phase:         string(state.PhaseStopped),
+				AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude", Task: "run"},
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			startPath := "/api/v1/agents/" + agent.ID + "/" + string(api.AgentActionStart)
+			rec := doRequest(t, srv, http.MethodPost, startPath, nil)
+			require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+
+			got := mustAgent(t, s, agent.ID)
+			assert.Equal(t, string(state.PhaseStopped), got.Phase)
+			assert.Empty(t, got.StartClaimID, "nothing started: the start claim must be released at once")
+			assert.Empty(t, got.StartClaimState)
+
+			// Retry start immediately against the working broker.
+			broker.Endpoint = goodBroker.URL
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			httpClient.transport.client.Transport = http.DefaultTransport
+			httpClient.transport.client.Timeout = 5 * time.Second
+
+			rec = doRequest(t, srv, http.MethodPost, startPath, nil)
+			require.Equal(t, http.StatusOK, rec.Code, "immediate start retry must succeed instead of 409 start_in_progress: %s", rec.Body.String())
+			assert.Equal(t, string(state.PhaseRunning), mustAgent(t, s, agent.ID).Phase)
+		})
+	}
+}
+
+// TestDispatchSend_CrossNodeNothingStartedReleasesStartClaimForImmediateRetry
+// verifies that on a cross-node dispatch (ErrLifecycleDeferred -> owner node
+// executes the broker_dispatch row), when the owner's send fails before
+// anything started on the Runtime Broker (dial failure, broker not connected,
+// request not sent, run not begun, or broker 4xx), the originating node
+// releases its start claim at once so an immediate retry succeeds.
+func TestDispatchSend_CrossNodeNothingStartedReleasesStartClaimForImmediateRetry(t *testing.T) {
+	dialErr := &url.Error{
+		Op:  "Post",
+		URL: "http://127.0.0.1:9/api/v1/agents",
+		Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")},
+	}
+	refusal400 := newBrokerStatusError("broker-x", http.StatusBadRequest,
+		[]byte(`{"error":{"code":"validation_error","message":"bad request"}}`), "")
+
+	cases := []struct {
+		name     string
+		ownerErr error
+	}{
+		{"owner dial failure", fmt.Errorf("failed to send request: %w", dialErr)},
+		{"owner broker not connected", fmt.Errorf("broker x not connected: %w", errStartBrokerNotConnected)},
+		{"owner request not sent", fmt.Errorf("failed to sign request: %w (%w)", errors.New("expired"), errStartRequestNotSent)},
+		{"owner run not begun", fmt.Errorf("%w: %w", errStartRunNotBegun, errAgentTokenRecord)},
+		{"owner broker 400", refusal400},
+	}
+
+	for _, tc := range cases {
+		t.Run("env finalize/"+tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			srv.startClaimsOn = true
+			bus := NewChannelEventPublisher()
+			t.Cleanup(bus.Close)
+			srv.events = bus
+
+			owner := &Server{
+				store:             s,
+				instanceID:        "hub-owner-" + uuid.NewString()[:8],
+				agentLifecycleLog: slog.Default(),
+				events:            bus,
+			}
+			ownerDisp := &ownerErrDispatcher{finalizeErr: tc.ownerErr}
+			owner.SetDispatcher(ownerDisp)
+			owner.execDispatch = owner.executeDispatch
+			owner.deliverMsg = owner.deliverMessage
+
+			requester := NewHTTPAgentDispatcherWithClient(s, &deferredDataOpTestClient{localBroker: "local-only"}, false, slog.Default())
+			requester.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
+			requester.SetCrossNodeDeps(bus, ownerSignalBus{owner: owner})
+			srv.SetDispatcher(requester)
+
+			agent := setupBrokerAgentInPhase(t, s, "xnode-env-"+uuid.NewString()[:6], state.PhaseProvisioning)
+			envPath := fmt.Sprintf("/api/v1/projects/%s/agents/%s/env", agent.ProjectID, agent.Slug)
+			envBody := map[string]interface{}{"env": map[string]string{"API_KEY": "v"}}
+
+			rec := doRequest(t, srv, http.MethodPost, envPath, envBody)
+			require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+
+			got := mustAgent(t, s, agent.ID)
+			assert.Empty(t, got.StartClaimID, "cross-node nothing-started failure must release the start claim: %s", tc.name)
+			assert.Empty(t, got.StartClaimState)
+
+			// Clear the owner error and immediately resubmit env.
+			ownerDisp.finalizeErr = nil
+			rec = doRequest(t, srv, http.MethodPost, envPath, envBody)
+			require.Equal(t, http.StatusOK, rec.Code, "immediate env resubmit must succeed: %s", rec.Body.String())
+		})
+
+		t.Run("lifecycle start/"+tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			srv.startClaimsOn = true
+			bus := NewChannelEventPublisher()
+			t.Cleanup(bus.Close)
+			srv.events = bus
+
+			owner := &Server{
+				store:             s,
+				instanceID:        "hub-owner-" + uuid.NewString()[:8],
+				agentLifecycleLog: slog.Default(),
+				events:            bus,
+			}
+			var failStart atomic.Bool
+			failStart.Store(true)
+			ownerDisp := &ownerErrDispatcher{err: tc.ownerErr}
+			ownerDisp.beforeStart = func() {
+				if !failStart.Load() {
+					ownerDisp.err = nil
+					// Simulate the owner's successful start publishing running.
+					go func() {
+						a, gerr := s.GetAgent(context.Background(), tid("placeholder"))
+						_ = a
+						_ = gerr
+					}()
+				}
+			}
+			owner.SetDispatcher(ownerDisp)
+			owner.execDispatch = owner.executeDispatch
+			owner.deliverMsg = owner.deliverMessage
+
+			requester := NewHTTPAgentDispatcherWithClient(s, &deferredTestClient{localBroker: "local-only"}, false, slog.Default())
+			requester.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
+			requester.SetCrossNodeDeps(bus, ownerSignalBus{owner: owner})
+			srv.SetDispatcher(requester)
+
+			agent := setupBrokerAgentInPhase(t, s, "xnode-start-"+uuid.NewString()[:6], state.PhaseStopped)
+			ownerDisp.beforeStart = func() {
+				if !failStart.Load() {
+					ownerDisp.err = nil
+					running := *agent
+					running.Phase = string(state.PhaseRunning)
+					bus.PublishAgentStatus(context.Background(), &running)
+				}
+			}
+
+			startPath := "/api/v1/agents/" + agent.ID + "/" + string(api.AgentActionStart)
+			rec := doRequest(t, srv, http.MethodPost, startPath, nil)
+			require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
+
+			got := mustAgent(t, s, agent.ID)
+			assert.Empty(t, got.StartClaimID, "cross-node nothing-started failure must release the start claim: %s", tc.name)
+			assert.Empty(t, got.StartClaimState)
+
+			// Immediately retry start now that the owner succeeds.
+			failStart.Store(false)
+			rec = doRequest(t, srv, http.MethodPost, startPath, nil)
+			require.Equal(t, http.StatusOK, rec.Code, "immediate start retry must succeed: %s", rec.Body.String())
+		})
+	}
+}
+
+// TestDispatchSend_UnknownOutcomeKeepsClaimUnconfirmed verifies that sends
+// whose outcome is unknown (a 502/504 gateway error, or a response timeout
+// after the TCP connection was established and the request was sent) keep
+// today's behaviour: the start claim stays held/unconfirmed and an immediate
+// retry gets 409 start_in_progress.
+func TestDispatchSend_UnknownOutcomeKeepsClaimUnconfirmed(t *testing.T) {
+	gateway502 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream proxy bad gateway"))
+	}))
+	t.Cleanup(gateway502.Close)
+
+	releaseStalled := make(chan struct{})
+	stalledAfterReceive := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Connection was established (GotConn fired) and the broker received
+		// the request, then stalled past the client timeout.
+		select {
+		case <-r.Context().Done():
+		case <-releaseStalled:
+		}
+	}))
+	t.Cleanup(func() {
+		close(releaseStalled)
+		stalledAfterReceive.CloseClientConnections()
+		stalledAfterReceive.Close()
+	})
+
+	t.Run("502 gateway error keeps claim unconfirmed and blocks immediate retry with 409", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s, project, broker, _ := newRealHTTPDispatchServer(t, "502", gateway502.URL, true, 0, nil)
+		agent := &store.Agent{
+			ID: tid("a-502"), Slug: "a-502", Name: "a-502",
+			ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+			Phase: string(state.PhaseProvisioning), LaunchAsyncOptIn: true,
+			AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude", Task: "run"},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		envPath := fmt.Sprintf("/api/v1/projects/%s/agents/%s/env", project.ID, agent.Slug)
+		envBody := map[string]interface{}{"env": map[string]string{"API_KEY": "v"}}
+
+		rec := doRequest(t, srv, http.MethodPost, envPath, envBody)
+		require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+
+		got := mustAgent(t, s, agent.ID)
+		require.NotEmpty(t, got.StartClaimID, "502 may have reached the broker: keep the claim")
+		assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState)
+
+		// Immediate retry must be refused with 409 start_in_progress.
+		rec = doRequest(t, srv, http.MethodPost, envPath, envBody)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, ErrCodeStartInProgress, decodeLaunchGuardError(t, rec).Code)
+	})
+
+	t.Run("post-connection timeout on sync start keeps claim unconfirmed and blocks retry with 409", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s, project, broker, _ := newRealHTTPDispatchServer(t, "postconn-timeout", stalledAfterReceive.URL, false, 60*time.Millisecond, nil)
+		agent := &store.Agent{
+			ID: tid("a-postconn"), Slug: "a-postconn", Name: "a-postconn",
+			ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+			Phase:         string(state.PhaseStopped),
+			AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude", Task: "run"},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		startPath := "/api/v1/agents/" + agent.ID + "/" + string(api.AgentActionStart)
+		rec := doRequest(t, srv, http.MethodPost, startPath, nil)
+		require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+
+		got := mustAgent(t, s, agent.ID)
+		require.NotEmpty(t, got.StartClaimID, "timeout after GotConn may have started the container: keep the claim")
+		assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState)
+
+		rec = doRequest(t, srv, http.MethodPost, startPath, nil)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Equal(t, ErrCodeStartInProgress, decodeLaunchGuardError(t, rec).Code)
+	})
+
+	t.Run("post-connection timeout on async env finalize keeps launch accepted", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s, project, broker, _ := newRealHTTPDispatchServer(t, "postconn-async", stalledAfterReceive.URL, true, 60*time.Millisecond, nil)
+		agent := &store.Agent{
+			ID: tid("a-postconn-async"), Slug: "a-postconn-async", Name: "a-postconn-async",
+			ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+			Phase: string(state.PhaseProvisioning), LaunchAsyncOptIn: true,
+			AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude", Task: "run"},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		envPath := fmt.Sprintf("/api/v1/projects/%s/agents/%s/env", project.ID, agent.Slug)
+		rec := doRequest(t, srv, http.MethodPost, envPath, map[string]interface{}{"env": map[string]string{"API_KEY": "v"}})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got := mustAgent(t, s, agent.ID)
+		assert.Equal(t, store.LaunchStateActive, got.LaunchState, "timeout after GotConn keeps the async launch active")
+		assert.Equal(t, store.StartClaimLive, got.StartClaimState, "claim stays linked to the active launch")
+		assert.Equal(t, got.LaunchID, got.StartClaimLaunchID)
+	})
+}
+
+type claimLaunchRunIDFailStore struct {
+	store.Store
+}
+
+func (s claimLaunchRunIDFailStore) SetAgentRunID(_ context.Context, _, _ string, _ *store.AgentCredential) (string, error) {
+	return "", fmt.Errorf("%w: %w", store.ErrCredentialNotRecorded, errors.New("insert refused"))
+}
+
+// TestCreateBeginRunPreSendFailure_ReleasesStartClaim verifies that if
+// beginRun fails in DispatchFinalizeEnv before any broker send (for example
+// the credential or run ID could not be recorded), the start claim is
+// released at once rather than held unconfirmed.
+func TestCreateBeginRunPreSendFailure_ReleasesStartClaim(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.startClaimsOn = true
+	project := &store.Project{ID: tid("proj-beginrun-5284"), Name: "proj-br", Slug: "proj-br"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-beginrun-5284"), Name: "broker-br", Slug: "broker-br",
+		Endpoint: "http://127.0.0.1:9", Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(claimLaunchRunIDFailStore{Store: s}, mockClient, false, slog.Default())
+	d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
+	srv.SetDispatcher(d)
+
+	agent := &store.Agent{
+		ID: tid("a-beginrun-5284"), Slug: "a-br", Name: "a-br",
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+		Phase:         string(state.PhaseProvisioning),
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude", Task: "run"},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	envPath := fmt.Sprintf("/api/v1/projects/%s/agents/%s/env", project.ID, agent.Slug)
+	rec := doRequest(t, srv, http.MethodPost, envPath, map[string]interface{}{"env": map[string]string{"API_KEY": "v"}})
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+	got := mustAgent(t, s, agent.ID)
+	assert.Empty(t, got.StartClaimID, "beginRun failed before any send: start claim must be released")
+	assert.Empty(t, got.StartClaimState)
 }

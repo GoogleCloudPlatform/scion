@@ -182,7 +182,23 @@ func (t *brokerHTTPTransport) doRequest(ctx context.Context, brokerID, method, e
 	if t.debug {
 		slog.Debug("Outgoing request to broker", "method", method, "endpoint", endpoint)
 	}
-	return t.client.Do(req)
+	// Record whether the transport ever handed this request a connection.
+	// Until GotConn fires, net/http has not written a single byte of the
+	// request, so a failure with no connection (including a pending dial
+	// cancelled by the request context or client timeout, or a TLS handshake
+	// failure) is proven pre-send.
+	var gotConn atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { gotConn.Store(true) },
+	}))
+	resp, err := t.client.Do(req)
+	if err != nil {
+		if !gotConn.Load() {
+			return nil, fmt.Errorf("%w (%w)", err, errStartRequestNotSent)
+		}
+		return nil, err
+	}
+	return resp, nil
 }
 
 func (t *brokerHTTPTransport) decodeResponse(resp *http.Response, out interface{}) error {
@@ -230,7 +246,7 @@ func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerE
 	endpoint := fmt.Sprintf("%s/api/v1/agents", strings.TrimSuffix(brokerEndpoint, "/"))
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w (%w)", err, errStartRequestNotSent)
 	}
 	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
 	if err != nil {
@@ -642,7 +658,7 @@ func (t *brokerHTTPTransport) CreateAgentWithGather(ctx context.Context, brokerI
 	endpoint := fmt.Sprintf("%s/api/v1/agents", strings.TrimSuffix(brokerEndpoint, "/"))
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, nil, fmt.Errorf("failed to marshal request: %w (%w)", err, errStartRequestNotSent)
 	}
 	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
 	if err != nil {
