@@ -270,3 +270,80 @@ func TestGCPBackend_ListHeldPending(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, local, "the local backend holds values on the rows")
 }
+
+// pendingNilPayloadSMClient wraps mockSMClient and overrides AccessSecretVersion
+// for secrets that exist in the underlying mock to return a nil Payload, a nil
+// response, or a non-nil SecretPayload with empty Data.
+type pendingNilPayloadSMClient struct {
+	*mockSMClient
+	nilResponse  bool
+	emptyPayload bool
+}
+
+func (m *pendingNilPayloadSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	if _, err := m.mockSMClient.AccessSecretVersion(ctx, req); err != nil {
+		return nil, err
+	}
+	if m.nilResponse {
+		return nil, nil
+	}
+	if m.emptyPayload {
+		return &smpb.AccessSecretVersionResponse{
+			Name:    req.Name,
+			Payload: &smpb.SecretPayload{Data: []byte{}},
+		}, nil
+	}
+	return &smpb.AccessSecretVersionResponse{Name: req.Name, Payload: nil}, nil
+}
+
+func TestGCPBackend_ReadPending_NilPayload(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("nil_payload", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		id := api.NewUUID()
+		secretVal := []byte("FAKE-pending-secret-value")
+		ref, err := base.HoldPending(ctx, id, secretVal)
+		require.NoError(t, err)
+		wantVersionName := "projects/test-project/secrets/" + base.secretNamePrefix() + "pending-" + id + "/versions/latest"
+
+		backend := NewGCPBackendWithClient(base.store, &pendingNilPayloadSMClient{mockSMClient: mock}, base.projectID, base.hubID)
+		got, err := backend.ReadPending(ctx, ref)
+		require.Error(t, err, "ReadPending must return an error when Secret Manager returns a nil payload")
+		assert.Nil(t, got)
+		assert.NotErrorIs(t, err, store.ErrNotFound)
+		assert.Contains(t, err.Error(), "nil payload")
+		assert.Contains(t, err.Error(), wantVersionName)
+		assert.NotContains(t, err.Error(), string(secretVal))
+	})
+
+	t.Run("nil_response", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		id := api.NewUUID()
+		secretVal := []byte("FAKE-pending-secret-value")
+		ref, err := base.HoldPending(ctx, id, secretVal)
+		require.NoError(t, err)
+		wantVersionName := "projects/test-project/secrets/" + base.secretNamePrefix() + "pending-" + id + "/versions/latest"
+
+		backend := NewGCPBackendWithClient(base.store, &pendingNilPayloadSMClient{mockSMClient: mock, nilResponse: true}, base.projectID, base.hubID)
+		got, err := backend.ReadPending(ctx, ref)
+		require.Error(t, err, "ReadPending must return an error when Secret Manager returns a nil response")
+		assert.Nil(t, got)
+		assert.NotErrorIs(t, err, store.ErrNotFound)
+		assert.Contains(t, err.Error(), "nil payload")
+		assert.Contains(t, err.Error(), wantVersionName)
+		assert.NotContains(t, err.Error(), string(secretVal))
+	})
+
+	t.Run("empty_data_distinct_from_nil_payload", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		id := api.NewUUID()
+		ref, err := base.HoldPending(ctx, id, []byte("FAKE-pending-secret-value"))
+		require.NoError(t, err)
+
+		backend := NewGCPBackendWithClient(base.store, &pendingNilPayloadSMClient{mockSMClient: mock, emptyPayload: true}, base.projectID, base.hubID)
+		got, err := backend.ReadPending(ctx, ref)
+		require.NoError(t, err, "a non-nil SecretPayload with empty Data is distinct from a nil payload")
+		assert.Empty(t, got)
+	})
+}

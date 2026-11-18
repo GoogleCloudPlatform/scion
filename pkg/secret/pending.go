@@ -160,8 +160,9 @@ func (b *GCPBackend) ReadPending(ctx context.Context, ref string) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
+	versionName := path + "/versions/latest"
 	resp, err := b.smClient.AccessSecretVersion(ctx, &smpb.AccessSecretVersionRequest{
-		Name: path + "/versions/latest",
+		Name: versionName,
 	})
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
@@ -172,7 +173,10 @@ func (b *GCPBackend) ReadPending(ctx context.Context, ref string) ([]byte, error
 		}
 		return nil, fmt.Errorf("failed to read a pending value from GCP SM: %w", err)
 	}
-	return resp.GetPayload().GetData(), nil
+	if resp == nil || resp.Payload == nil {
+		return nil, fmt.Errorf("secret manager returned nil payload for %s", versionName)
+	}
+	return resp.Payload.Data, nil
 }
 
 // DropPending implements PendingHolder: it deletes the Secret Manager
