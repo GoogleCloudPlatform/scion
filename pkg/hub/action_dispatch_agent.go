@@ -28,6 +28,8 @@ import (
 
 const dispatchAgentPermission = "agent.create"
 
+var errDispatchAgentProjectLookup = errors.New("dispatch_agent project lookup failed")
+
 // dispatchAgentAction implements FireAction and FirePayloadValidator for
 // deferred "dispatch_agent" fires executed through createAgentHeadless.
 type dispatchAgentAction struct {
@@ -41,6 +43,7 @@ type dispatchAgentAuthorized struct {
 	creatorName    string
 	edgeCeiling    store.EffectCeiling
 	edgeProvenance store.AuthorityProvenance
+	resolvedRole   headlessResolvedRole
 }
 
 func (a *dispatchAgentAction) Type() string {
@@ -95,7 +98,8 @@ func dispatchAgentRefusalReason(req hubfire.FireRequest, err error) *FireRefusal
 
 // authorizeDispatchAgentFire verifies live agent.create authorization,
 // ScopeAgentCreate (for agent principals), and CanDelegate under the resolved
-// revision identity.
+// revision identity, returning the resolved pre-cap role tuple approved by
+// CanDelegate so Fire never re-resolves project or parent role defaults.
 func (s *Server) authorizeDispatchAgentFire(
 	ctx context.Context,
 	projectID string,
@@ -104,24 +108,28 @@ func (s *Server) authorizeDispatchAgentFire(
 	auth FireAuthority,
 	identity Identity,
 	noAuth bool,
-) error {
+) (headlessResolvedRole, error) {
 	if auth.PrincipalKind == store.DelegationPrincipalAgent {
 		agentIdent, ok := identity.(AgentIdentity)
 		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
-			return fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
+			return headlessResolvedRole{}, fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
 		}
 	}
 	var project *store.Project
-	if p, err := s.store.GetProject(ctx, projectID); err == nil {
+	if p, err := s.store.GetProject(ctx, projectID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			return headlessResolvedRole{}, fmt.Errorf("%w: failed to resolve project %q: %w", errDispatchAgentProjectLookup, projectID, err)
+		}
+	} else {
 		project = p
 	}
-	delegatedRole, _, _, err := s.resolveHeadlessPreCapRole(ctx, project, auth, "", noAuth)
+	preCapRole, roleExplicit, parentMessageMode, err := s.resolveHeadlessPreCapRole(ctx, project, auth, "", noAuth)
 	if err != nil {
-		return err
+		return headlessResolvedRole{}, err
 	}
 
 	if decision := s.agentCreateDecision(ctx, identity, projectID); !decision.Allowed {
-		return fmt.Errorf("scheduled dispatch principal %s %q is not authorized to create agents in project %q: %s",
+		return headlessResolvedRole{}, fmt.Errorf("scheduled dispatch principal %s %q is not authorized to create agents in project %q: %s",
 			auth.PrincipalKind, auth.PrincipalID, projectID, decision.Reason)
 	}
 
@@ -131,7 +139,7 @@ func (s *Server) authorizeDispatchAgentFire(
 	}
 	delegateDecision := s.authzService.CanDelegate(ctx, identity, GrantDescriptor{
 		Type:      GrantTypeAgentDelegation,
-		AgentRole: string(delegatedRole),
+		AgentRole: string(preCapRole),
 		ProjectID: projectID,
 		ScopeType: store.RoleScopeProject,
 		ScopeID:   projectID,
@@ -146,10 +154,14 @@ func (s *Server) authorizeDispatchAgentFire(
 			CanDelegateResult:  "deny",
 			CanDelegateReason:  delegateDecision.Reason,
 		})
-		return fmt.Errorf("scheduled dispatch principal %s %q failed CanDelegate at fire time: %s",
+		return headlessResolvedRole{}, fmt.Errorf("scheduled dispatch principal %s %q failed CanDelegate at fire time: %s",
 			auth.PrincipalKind, auth.PrincipalID, delegateDecision.Reason)
 	}
-	return nil
+	return headlessResolvedRole{
+		preCapRole:        preCapRole,
+		roleExplicit:      roleExplicit,
+		parentMessageMode: parentMessageMode,
+	}, nil
 }
 
 func (a *dispatchAgentAction) Authorize(
@@ -168,7 +180,11 @@ func (a *dispatchAgentAction) Authorize(
 	}
 
 	fireID := req.Authority.FireID
-	if err := s.authorizeDispatchAgentFire(ctx, req.ProjectID, fireID, req.Authority.DefinitionKind, auth, identity, payload.NoAuth); err != nil {
+	resolvedRole, err := s.authorizeDispatchAgentFire(ctx, req.ProjectID, fireID, req.Authority.DefinitionKind, auth, identity, payload.NoAuth)
+	if err != nil {
+		if errors.Is(err, errDispatchAgentProjectLookup) {
+			return nil, nil, err
+		}
 		slog.Warn("Scheduler: dispatch_agent refused at fire time",
 			"eventID", fireID,
 			"definitionKind", req.Authority.DefinitionKind,
@@ -206,6 +222,7 @@ func (a *dispatchAgentAction) Authorize(
 		creatorName:    fireCreatorName(auth),
 		edgeCeiling:    edgeCeiling,
 		edgeProvenance: edgeProvenance,
+		resolvedRole:   resolvedRole,
 	}, nil, nil
 }
 
@@ -227,6 +244,7 @@ func (a *dispatchAgentAction) Fire(ctx context.Context, req hubfire.FireRequest,
 			"staleness", staleness.Truncate(time.Second).String())
 	}
 
+	resolvedRole := da.resolvedRole
 	agent, err := a.srv.createAgentHeadless(ctx, HeadlessCreate{
 		ProjectID:      req.ProjectID,
 		Authority:      da.auth,
@@ -235,6 +253,7 @@ func (a *dispatchAgentAction) Fire(ctx context.Context, req hubfire.FireRequest,
 		EdgeCeiling:    da.edgeCeiling,
 		EdgeProvenance: da.edgeProvenance,
 		NoAuth:         da.payload.NoAuth,
+		resolvedRole:   &resolvedRole,
 		Name:           da.payload.AgentName,
 		Template:       da.payload.Template,
 		Task:           da.payload.Task,

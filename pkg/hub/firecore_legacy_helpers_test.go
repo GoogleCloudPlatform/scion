@@ -132,7 +132,7 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 		_ = json.Unmarshal([]byte(evt.Payload), &p)
 	}
 	rec := scheduledRecordedAuthority(evt)
-	if err := s.authorizeDispatchAgentFire(ctx, evt.ProjectID, evt.ID, rec.DefinitionKind, creator.Authority, creator.Identity, p.NoAuth); err != nil {
+	if _, err := s.authorizeDispatchAgentFire(ctx, evt.ProjectID, evt.ID, rec.DefinitionKind, creator.Authority, creator.Identity, p.NoAuth); err != nil {
 		return scheduledCreator{}, err
 	}
 	return creator, nil

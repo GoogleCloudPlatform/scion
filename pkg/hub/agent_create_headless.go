@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -53,6 +54,7 @@ var (
 	errHeadlessEventFileTooLarge           = errors.New("headless create event file exceeds 16 KiB limit")
 	errHeadlessGitHubTokenUnsupported      = errors.New("headless create githubToken is not supported before Stage 2 P1c")
 	errHeadlessProvenancePrincipalMismatch = errors.New("headless create: edge provenance principal does not match authority principal")
+	errHeadlessInvalidEdgeProvenance       = errors.New("headless create: invalid scheduler edge provenance")
 	errHeadlessNoUsableRole                = errors.New("no usable role for the recorded authority; set noAuth: true or re-authorize the schedule")
 )
 
@@ -92,6 +94,11 @@ type HeadlessCreate struct {
 	AgentRole AgentRole
 	NoAuth    bool
 
+	// resolvedRole, when populated by dispatchAgentAction.Authorize, supplies
+	// the exact pre-cap role tuple approved by CanDelegate so Fire never
+	// re-resolves project or parent role defaults.
+	resolvedRole *headlessResolvedRole
+
 	// Trusted authoring-time values (Stage 1 design §5.8).
 	Name     string
 	Template string
@@ -111,6 +118,15 @@ type HeadlessCreate struct {
 
 	Detached      bool
 	NotifyBlocked func(ctx context.Context, existing *store.Agent, placementRefused bool)
+}
+
+// headlessResolvedRole carries the pre-cap role tuple resolved during
+// dispatchAgentAction.Authorize so createAgentHeadless writes the exact role
+// approved by CanDelegate without a second store lookup of role defaults.
+type headlessResolvedRole struct {
+	preCapRole        AgentRole
+	roleExplicit      bool
+	parentMessageMode string
 }
 
 func validateHeadlessEventEnv(env map[string]string) error {
@@ -302,6 +318,17 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 			edgeProvenance.SourcePrincipalKind, edgeProvenance.SourcePrincipalID,
 			hc.Authority.PrincipalKind, hc.Authority.PrincipalID)
 	}
+	if edgeProvenance.SourceCredentialKind != store.SourceCredentialScheduler ||
+		edgeProvenance.SourceEventID == "" ||
+		edgeProvenance.SourceAuthorizationRevision < 1 ||
+		(hc.Authority.Recorded.DefinitionKind == hubfire.DefinitionKindSchedule && edgeProvenance.SourceScheduleID == "") {
+		return nil, fmt.Errorf("%w: credential=%q event=%q schedule=%q revision=%d",
+			errHeadlessInvalidEdgeProvenance,
+			edgeProvenance.SourceCredentialKind,
+			edgeProvenance.SourceEventID,
+			edgeProvenance.SourceScheduleID,
+			edgeProvenance.SourceAuthorizationRevision)
+	}
 
 	slug, err := api.ValidateAgentName(hc.Name)
 	if err != nil {
@@ -323,10 +350,21 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	if err != nil {
 		return nil, err
 	}
-	preCapRole, roleExplicit, parentMessageMode, err := s.resolveHeadlessPreCapRole(
-		ctx, project, hc.Authority, hc.AgentRole, hc.NoAuth)
-	if err != nil {
-		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+	var (
+		preCapRole        AgentRole
+		roleExplicit      bool
+		parentMessageMode string
+	)
+	if hc.resolvedRole != nil {
+		preCapRole = hc.resolvedRole.preCapRole
+		roleExplicit = hc.resolvedRole.roleExplicit
+		parentMessageMode = hc.resolvedRole.parentMessageMode
+	} else {
+		preCapRole, roleExplicit, parentMessageMode, err = s.resolveHeadlessPreCapRole(
+			ctx, project, hc.Authority, hc.AgentRole, hc.NoAuth)
+		if err != nil {
+			return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+		}
 	}
 	fireID := hc.Authority.Recorded.FireID
 	childRole, cause, fits := childRoleWithinCeiling(

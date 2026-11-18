@@ -317,14 +317,13 @@ func TestAdoptedAgentRuntimeSecretFetch(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "adopt-value")
 }
 
-// Scheduled dispatch writes every child with applied role none (and NoAuth)
-// and an edge of role none. A fire runs on the schedule's recorded
-// authorization revision, so the edge carries recorded V1 scheduler
-// provenance, the default-ladder role, and NoAuth=false (headless-identity-note.md
-// §2–§3), and the automatic cohort leaves it as recorded. Legacy unrecorded
-// scheduled rows remain excluded as role_none
-// (TestPlanExcludesRoleNoneScheduledRows).
-func TestScheduledDispatchChildEdgeHasRoleNone(t *testing.T) {
+// A scheduled dispatch fire runs on the schedule's recorded authorization
+// revision, so the child and its delegation edge carry recorded V1 scheduler
+// provenance, the resolved default-ladder role, and NoAuth=false unless opted
+// out (headless-identity-note.md §2–§3), and the automatic adoption cohort
+// leaves the hop as recorded. Legacy unrecorded scheduled rows with role none
+// remain excluded as role_none (TestPlanExcludesRoleNoneScheduledRows).
+func TestScheduledDispatchChildEdgeRecordedRole(t *testing.T) {
 	srv, s, user, project := setupAgentRoleTest(t)
 	linkScheduledDispatchBroker(t, s, project.ID)
 	ctx := context.Background()

@@ -646,7 +646,8 @@ func TestSchedChildEdgeProvenanceFields(t *testing.T) {
 		// The revision recorded a narrower ceiling than the agent's live
 		// write ceiling (covering readonly + agent.create, omitting full-role
 		// permissions like agent.lifecycle): the edge keeps only what both allow
-		// and caps the child's role to readonly.
+		// and caps full down to baseline (whose additional scopes over readonly
+		// are self-operations and ceiling-optional artifact.write).
 		narrow := sortedUniqueIDs(agentScopeCoverage(append([]AgentTokenScope{ScopeAgentCreate}, ScopesForRole(AgentRoleReadOnly)...)))
 		evt.AuthorityCeiling.PermissionIDs = narrow
 		require.NoError(t, f.fire(t, evt))

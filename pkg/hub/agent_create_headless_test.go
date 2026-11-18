@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -779,6 +781,30 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 		_, err = f.srv.createAgentHeadless(ctx, hcBadKind)
 		require.ErrorIs(t, err, errHeadlessProvenancePrincipalMismatch)
 		f.assertNoChild(t, hcBadKind.Name)
+
+		hcBadCred := baseHC("prov-bad-cred")
+		hcBadCred.EdgeProvenance.SourceCredentialKind = store.SourceCredentialUAT
+		_, err = f.srv.createAgentHeadless(ctx, hcBadCred)
+		require.ErrorIs(t, err, errHeadlessInvalidEdgeProvenance)
+		f.assertNoChild(t, hcBadCred.Name)
+
+		hcNoEvent := baseHC("prov-no-event")
+		hcNoEvent.EdgeProvenance.SourceEventID = ""
+		_, err = f.srv.createAgentHeadless(ctx, hcNoEvent)
+		require.ErrorIs(t, err, errHeadlessInvalidEdgeProvenance)
+		f.assertNoChild(t, hcNoEvent.Name)
+
+		hcZeroRev := baseHC("prov-zero-rev")
+		hcZeroRev.EdgeProvenance.SourceAuthorizationRevision = 0
+		_, err = f.srv.createAgentHeadless(ctx, hcZeroRev)
+		require.ErrorIs(t, err, errHeadlessInvalidEdgeProvenance)
+		f.assertNoChild(t, hcZeroRev.Name)
+
+		hcNoSched := baseHC("prov-no-sched")
+		hcNoSched.EdgeProvenance.SourceScheduleID = ""
+		_, err = f.srv.createAgentHeadless(ctx, hcNoSched)
+		require.ErrorIs(t, err, errHeadlessInvalidEdgeProvenance)
+		f.assertNoChild(t, hcNoSched.Name)
 	})
 }
 
@@ -1239,5 +1265,171 @@ func TestHeadlessCreate_NarrowCeilingRequiresNoAuthOrReauthorize(t *testing.T) {
 		assert.True(t, child.AppliedConfig.NoAuth)
 		assert.True(t, child.AppliedConfig.CreateInputs.NoAuth)
 		assert.True(t, client.lastCreateReq.NoAuth)
+	})
+}
+
+var errInjectedGetProjectFault = errors.New("injected get-project store fault")
+
+type getProjectFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (s *getProjectFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if !s.fault.Active() {
+		return s.Store.GetProject(ctx, id)
+	}
+	return nil, errInjectedGetProjectFault
+}
+
+// TestDispatchAgentAction_ProjectLookupFaultAndRoleSnapshot covers pass-2 O1:
+//   - a non-ErrNotFound GetProject error in authorizeDispatchAgentFire fails
+//     the fire (FireStatusFailed) rather than proceeding with project == nil;
+//   - mutating scion.io/default-agent-role between Authorize and Fire does not
+//     alter the role written by createAgentHeadless from what CanDelegate
+//     approved.
+func TestDispatchAgentAction_ProjectLookupFaultAndRoleSnapshot(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("get_project_error_fails_fire", func(t *testing.T) {
+		srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *getProjectFaultStore {
+			return &getProjectFaultStore{Store: inner, fault: f}
+		})
+		srv.registerFireActions()
+
+		user := &store.User{
+			ID:          tid("user-proj-fault"),
+			Email:       "projfault@example.com",
+			DisplayName: "Proj Fault Tester",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, user))
+		ensureHubMembership(ctx, s, user.ID)
+
+		project := &store.Project{
+			ID:        tid("project-proj-fault"),
+			Name:      "proj-fault-project",
+			Slug:      "proj-fault-project",
+			OwnerID:   user.ID,
+			CreatedBy: user.ID,
+			Created:   time.Now(),
+			Updated:   time.Now(),
+		}
+		require.NoError(t, s.CreateProject(ctx, project))
+		srv.seedProjectCreatorMembership(ctx, project)
+		require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
+		linkScheduledDispatchBroker(t, s, project.ID)
+
+		// Seed a full-role parent agent while the fault switch is disarmed.
+		seedParentEvt := withSessionRevision(store.ScheduledEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  project.ID,
+			EventType:  "dispatch_agent",
+			Payload:    `{"agentName":"proj-fault-parent"}`,
+			CreatedBy:  user.ID,
+			ScheduleID: "sched-proj-fault-parent",
+			FireAt:     time.Now(),
+		}, user.ID)
+		seedOut := fireHeadlessDispatch(srv, seedParentEvt, nil)
+		require.Equal(t, hubfire.FireStatusFired, seedOut.Status, seedOut.Error)
+		parent, err := s.GetAgentBySlug(ctx, project.ID, "proj-fault-parent")
+		require.NoError(t, err)
+
+		evtAgent := withAgentRevision(t, srv, store.ScheduledEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  project.ID,
+			EventType:  "dispatch_agent",
+			Payload:    `{"agentName":"proj-fault-child"}`,
+			CreatedBy:  parent.ID,
+			ScheduleID: "sched-proj-fault-child",
+			FireAt:     time.Now(),
+		}, parent.ID)
+
+		evtUser := withSessionRevision(store.ScheduledEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  project.ID,
+			EventType:  "dispatch_agent",
+			Payload:    `{"agentName":"proj-fault-user-child"}`,
+			CreatedBy:  user.ID,
+			ScheduleID: "sched-proj-fault-user-child",
+			FireAt:     time.Now(),
+		}, user.ID)
+		rec := scheduledRecordedAuthority(evtUser)
+		auth, identity, err := srv.resolveRecordedAuthority(ctx, rec, project.ID, dispatchAgentPermission)
+		require.NoError(t, err)
+
+		// Arm the GetProject store fault.
+		fault.Arm()
+
+		// Full fireAction pipeline with an agent principal (resolveFireAgent
+		// reads only GetAgent, so authorizeDispatchAgentFire hits GetProject).
+		out := fireHeadlessDispatch(srv, evtAgent, nil)
+		assert.Equal(t, hubfire.FireStatusFailed, out.Status)
+		assert.Contains(t, out.Error, errInjectedGetProjectFault.Error())
+		_, err = s.GetAgentBySlug(ctx, project.ID, "proj-fault-child")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		// Direct dispatchAgentAction.Authorize with a user principal returns an
+		// operational error (not a FireRefusal) on a non-NotFound GetProject fault.
+		action := &dispatchAgentAction{srv: srv}
+		authorized, refusal, err := action.Authorize(ctx, hubfire.FireRequest{
+			ProjectID:  project.ID,
+			Authority:  rec,
+			ActionType: "dispatch_agent",
+			Payload:    evtUser.Payload,
+		}, auth, identity)
+		require.ErrorIs(t, err, errDispatchAgentProjectLookup)
+		assert.ErrorIs(t, err, errInjectedGetProjectFault)
+		assert.Nil(t, authorized)
+		assert.Nil(t, refusal)
+		_, err = s.GetAgentBySlug(ctx, project.ID, "proj-fault-user-child")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("default_agent_role_change_between_authorize_and_fire_preserves_approved_role", func(t *testing.T) {
+		f := newSchedFire(t, "hc-role-toctou")
+		installHeadlessGatherDispatcher(t, f)
+		action := &dispatchAgentAction{srv: f.srv}
+
+		for _, tc := range []struct {
+			name        string
+			childSlug   string
+			mutatedRole AgentRole
+		}{
+			{name: "escalated_to_full_after_authorize", childSlug: "toctou-escalated", mutatedRole: AgentRoleFull},
+			{name: "narrowed_to_readonly_after_authorize", childSlug: "toctou-narrowed", mutatedRole: AgentRoleReadOnly},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f.setProjectAnnotation(t, projectSettingDefaultAgentRole, string(AgentRoleBaseline))
+
+				evt := withSessionRevision(f.event(tc.childSlug), f.creator.ID)
+				rec := scheduledRecordedAuthority(evt)
+				req := hubfire.FireRequest{
+					ProjectID:  f.proj.ID,
+					Authority:  rec,
+					ActionType: "dispatch_agent",
+					Payload:    evt.Payload,
+				}
+				auth, identity, err := f.srv.resolveRecordedAuthority(ctx, rec, f.proj.ID, dispatchAgentPermission)
+				require.NoError(t, err)
+
+				authorized, refusal, err := action.Authorize(ctx, req, auth, identity)
+				require.NoError(t, err)
+				require.Nil(t, refusal)
+
+				// Mutate project default-agent-role between Authorize and Fire.
+				f.setProjectAnnotation(t, projectSettingDefaultAgentRole, string(tc.mutatedRole))
+
+				out, err := action.Fire(ctx, req, authorized)
+				require.NoError(t, err)
+				assert.Equal(t, hubfire.FireStatusFired, out.Status)
+
+				child, edge := f.child(t, tc.childSlug)
+				assert.Equal(t, string(AgentRoleBaseline), child.AppliedConfig.AgentRole)
+				assert.Equal(t, string(AgentRoleBaseline), edge.Role)
+			})
+		}
 	})
 }
