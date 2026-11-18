@@ -174,6 +174,7 @@ export function isProvisionedOnly(agent: Pick<Agent, 'phase' | 'provisionedOnly'
 /**
  * Hint set by the Hub stall detector when an agent never reported any harness
  * hook event after start (ptone/scion#4556).
+ * Keep in sync with state.StalledNoHookActivityHint in pkg/agent/state/state.go.
  */
 export const STALLED_NO_HOOK_ACTIVITY_HINT =
   'no harness activity since start; check harness credentials/task';

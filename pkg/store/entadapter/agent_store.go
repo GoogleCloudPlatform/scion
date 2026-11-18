@@ -3227,6 +3227,12 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 	return updated, nil
 }
 
+// startupActivityTimestampSlack bounds |last_activity_event - started_at| when
+// started_at was formatted at RFC3339 second resolution by the container while
+// last_activity_event was stamped at nanosecond resolution by the Hub in the
+// same start status update.
+const startupActivityTimestampSlack = 2 * time.Second
+
 // stalledWithoutHookSinceStart reports whether candidate row a is stalling
 // without having reported any harness hook event since start (ptone/scion#4556).
 //
@@ -3255,7 +3261,7 @@ func stalledWithoutHookSinceStart(a *ent.Agent) bool {
 			if diff < 0 {
 				diff = -diff
 			}
-			return diff <= 2*time.Second
+			return diff <= startupActivityTimestampSlack
 		}
 		return false
 	default:

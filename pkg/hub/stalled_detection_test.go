@@ -766,4 +766,25 @@ func TestAgentStalledDetectionHandler_NoHookSinceStartHintAndHeartbeatRetention(
 	if afterHB.Message != state.StalledNoHookActivityHint {
 		t.Errorf("after heartbeat message = %q, want %q", afterHB.Message, state.StalledNoHookActivityHint)
 	}
+
+	// A stalled agent that does NOT carry the startup hint still accepts
+	// broker heartbeat message updates (preserving base behavior).
+	if code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:     activeThenStalled.Slug,
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+		Message:  "Container detail updated",
+	}); code != 200 {
+		t.Fatalf("sendHeartbeat (activeThenStalled) code = %d, want 200", code)
+	}
+	afterActiveHB, err := s.GetAgent(ctx, activeThenStalled.ID)
+	if err != nil {
+		t.Fatalf("failed to get activeThenStalled after heartbeat: %v", err)
+	}
+	if afterActiveHB.Activity != string(state.ActivityStalled) {
+		t.Errorf("activeThenStalled after heartbeat activity = %q, want stalled", afterActiveHB.Activity)
+	}
+	if afterActiveHB.Message != "Container detail updated" {
+		t.Errorf("activeThenStalled after heartbeat message = %q, want %q", afterActiveHB.Message, "Container detail updated")
+	}
 }

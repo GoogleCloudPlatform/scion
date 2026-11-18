@@ -1890,6 +1890,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 					if agent.Activity == string(state.ActivityStalled) && statusUpdate.Activity == "" &&
+						agent.Message == state.StalledNoHookActivityHint &&
 						hbPhase != state.PhaseStopped && hbPhase != state.PhaseError {
 						statusUpdate.Message = ""
 					}

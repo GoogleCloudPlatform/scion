@@ -790,6 +790,7 @@ func (s AgentState) DisplayStatus() string {
 // StalledNoHookActivityHint is the status message set by the Hub stall
 // detector when an agent stalls without having reported any harness hook
 // event since start (ptone/scion#4556).
+// Keep in sync with STALLED_NO_HOOK_ACTIVITY_HINT in web/src/shared/agent-state-display.ts.
 const StalledNoHookActivityHint = "no harness activity since start; check harness credentials/task"
 
 // IsPreHookStartupMessage reports whether msg is one of the startup status
