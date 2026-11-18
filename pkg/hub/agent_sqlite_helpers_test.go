@@ -3620,7 +3620,7 @@ type viewPair struct {
 // item when every field is populated.
 var compactItemAllowlist = []string{
 	"id", "slug", "name", "template", "projectId", "project", "projectSlug", "labels",
-	"phase", "activity", "containerStatus", "message", "messageMode", "ancestry",
+	"phase", "activity", "suspendReason", "containerStatus", "message", "messageMode", "ancestry",
 	"createdBy", "creatorName", "created", "updated", "lastActivityEvent",
 	"_capabilities", "_messageability", "deletion", "harnessVendor", "modelSize",
 }

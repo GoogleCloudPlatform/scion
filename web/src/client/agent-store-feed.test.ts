@@ -1069,6 +1069,7 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
       labels: { team: 'red' },
       phase: 'running',
       activity: 'working',
+      suspendReason: 'idle',
       containerStatus: 'Up 1 minute',
       message: 'Waiting for review',
       messageMode: 'lineage',

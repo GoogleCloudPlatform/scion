@@ -201,11 +201,15 @@ type AgentDetail struct {
 
 // AgentStatusEvent is published when an agent's status changes.
 type AgentStatusEvent struct {
-	AgentID           string             `json:"agentId"`
-	ProjectID         string             `json:"projectId"`
-	Phase             string             `json:"phase,omitempty"`
-	Activity          string             `json:"activity"` // always sent, so a cleared Activity reaches the web as ""
-	Detail            *AgentDetail       `json:"detail"`   // always sent, so a cleared Message reaches the web as "" (ptone/scion#4415)
+	AgentID   string       `json:"agentId"`
+	ProjectID string       `json:"projectId"`
+	Phase     string       `json:"phase,omitempty"`
+	Activity  string       `json:"activity"` // always sent, so a cleared Activity reaches the web as ""
+	Detail    *AgentDetail `json:"detail"`   // always sent, so a cleared Message reaches the web as "" (ptone/scion#4415)
+	// SuspendReason is why a suspended agent was suspended (see
+	// state.SuspendReason). Always sent, like Activity, so a resume clears a
+	// reason the web merged earlier as "".
+	SuspendReason     string             `json:"suspendReason"`
 	ContainerStatus   string             `json:"containerStatus,omitempty"`
 	LastActivityEvent string             `json:"lastActivityEvent,omitempty"`
 	Launch            *store.AgentLaunch `json:"launch,omitempty"` // design §3.2; a snapshot taken at publish time
@@ -643,6 +647,7 @@ func agentStatusEvent(agent *store.Agent, now time.Time) AgentStatusEvent {
 		ProjectID:       agent.ProjectID,
 		Phase:           agent.Phase,
 		Activity:        agent.Activity,
+		SuspendReason:   agent.SuspendReason,
 		ContainerStatus: agent.ContainerStatus,
 		Launch:          store.ComputeAgentLaunch(agent, now),
 		// The generic view for every subscriber (ptone/scion#3122): the
