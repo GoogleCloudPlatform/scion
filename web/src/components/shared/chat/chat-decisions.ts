@@ -49,6 +49,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
+import { TouchPrimaryController } from '../../../utils/input-modality.js';
 import { showToast } from '../../../utils/toast.js';
 import { copyWithToast } from '../../../utils/clipboard.js';
 import {
@@ -154,6 +155,7 @@ export const dismissDialogStyles = css`
 export class ScionChatDecisions extends LitElement {
   readonly _zone = new DisplayZoneController(this);
   readonly _decisionPrefs = new DecisionPreferencesController(this);
+  private readonly touchPrimary = new TouchPrimaryController(this);
 
   /** The decision-prompt message id. */
   @property()
@@ -1092,6 +1094,12 @@ export class ScionChatDecisions extends LitElement {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
       margin-top: 0.35rem;
+    }
+
+    @media (max-width: 768px), (hover: none) and (pointer: coarse) {
+      .hint {
+        display: none;
+      }
     }
 
     .other-btn::part(base) {
@@ -2161,6 +2169,7 @@ export class ScionChatDecisions extends LitElement {
     const blocked = this.answerBlocked && this.rowActionable(d);
     const pendingWithDefault =
       d.status === 'pending' && !!d.defaultChoiceId && !blocked && !this.otherOpen;
+    const showEnterHint = pendingWithDefault && !this.touchPrimary.isTouch;
     return html`
       <div
         class="card"
@@ -2168,7 +2177,7 @@ export class ScionChatDecisions extends LitElement {
         tabindex="0"
         aria-label=${plainText(d.question)}
         aria-disabled=${blocked ? 'true' : nothing}
-        aria-describedby=${pendingWithDefault ? this.hintId : blocked ? this.reasonId : nothing}
+        aria-describedby=${showEnterHint ? this.hintId : blocked ? this.reasonId : nothing}
         @keydown=${(e: KeyboardEvent) => this.onCardKeydown(e, d)}
         @contextmenu=${this.onCardContextMenu}
       >
@@ -2183,7 +2192,7 @@ export class ScionChatDecisions extends LitElement {
           </span>
           ${this.renderSingleBadge(d)} ${this.renderCardMenu([d])}
         </div>
-        ${this.renderRow(d, pendingWithDefault)} ${this.renderAskerGoneNote()}
+        ${this.renderRow(d, showEnterHint)} ${this.renderAskerGoneNote()}
       </div>
       ${this.renderDismissDialog([d])}
     `;

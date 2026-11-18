@@ -356,6 +356,9 @@ export class ScionPageAdminUsers extends LitElement {
   private canReadRoleBindings = false;
 
   @state()
+  private canInviteUsers = false;
+
+  @state()
   private confirmAction: ConfirmAction | null = null;
 
   @state()
@@ -1068,11 +1071,23 @@ export class ScionPageAdminUsers extends LitElement {
   }
 
   private async loadCurrentUser(): Promise<void> {
+    const knownUserId = stateManager.getCurrentUserId();
+    if (knownUserId) {
+      const status = await loadAdminStatus(knownUserId);
+      this.canInviteUsers = hasAnyPermission(status, ['user.invite']);
+    }
     try {
       const res = await apiFetch('/auth/me');
       if (res.ok) {
         const data = (await res.json()) as { id?: string };
-        this.currentUserId = data.id || null;
+        const userId = data.id || null;
+        this.currentUserId = userId;
+        if (userId && userId !== knownUserId) {
+          const status = await loadAdminStatus(userId);
+          this.canInviteUsers = hasAnyPermission(status, ['user.invite']);
+        } else if (!userId) {
+          this.canInviteUsers = false;
+        }
       }
     } catch {
       // Non-critical — actions will still work, just can't prevent self-actions
@@ -2218,17 +2233,25 @@ export class ScionPageAdminUsers extends LitElement {
         <div class="empty-state">
           <sl-icon name="people"></sl-icon>
           <h2>No Users Found</h2>
-          <p>There are no users registered in the system. Invite users to get started.</p>
-          <sl-button
-            variant="primary"
-            style="margin-top: 1rem"
-            @click=${() => {
-              this.showInviteUserDialog = true;
-            }}
-          >
-            <sl-icon slot="prefix" name="person-plus"></sl-icon>
-            Invite User
-          </sl-button>
+          <p>
+            ${this.canInviteUsers
+              ? 'There are no users registered in the system. Invite users to get started.'
+              : 'There are no users registered in the system.'}
+          </p>
+          ${this.canInviteUsers
+            ? html`
+                <sl-button
+                  variant="primary"
+                  style="margin-top: 1rem"
+                  @click=${() => {
+                    this.showInviteUserDialog = true;
+                  }}
+                >
+                  <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                  Invite User
+                </sl-button>
+              `
+            : nothing}
         </div>
       `;
     }
@@ -2241,28 +2264,32 @@ export class ScionPageAdminUsers extends LitElement {
           ${this.renderStatusFilter()} ${this.renderRoleFilter()}
           <span class="meta-text user-count">${this.displayedCount}</span>
         </div>
-        <div class="users-toolbar-right">
-          <sl-button
-            size="small"
-            variant="default"
-            @click=${() => {
-              this.showImportDialog = true;
-            }}
-          >
-            <sl-icon slot="prefix" name="upload"></sl-icon>
-            Import CSV
-          </sl-button>
-          <sl-button
-            size="small"
-            variant="primary"
-            @click=${() => {
-              this.showInviteUserDialog = true;
-            }}
-          >
-            <sl-icon slot="prefix" name="person-plus"></sl-icon>
-            Invite User
-          </sl-button>
-        </div>
+        ${this.canInviteUsers
+          ? html`
+              <div class="users-toolbar-right">
+                <sl-button
+                  size="small"
+                  variant="default"
+                  @click=${() => {
+                    this.showImportDialog = true;
+                  }}
+                >
+                  <sl-icon slot="prefix" name="upload"></sl-icon>
+                  Import CSV
+                </sl-button>
+                <sl-button
+                  size="small"
+                  variant="primary"
+                  @click=${() => {
+                    this.showInviteUserDialog = true;
+                  }}
+                >
+                  <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                  Invite User
+                </sl-button>
+              </div>
+            `
+          : nothing}
       </div>
 
       ${this.users.length === 0
@@ -2789,7 +2816,7 @@ export class ScionPageAdminUsers extends LitElement {
   }
 
   private renderInviteUserDialog() {
-    if (!this.showInviteUserDialog) return nothing;
+    if (!this.showInviteUserDialog || !this.canInviteUsers) return nothing;
 
     return html`
       <sl-dialog
@@ -2854,7 +2881,7 @@ export class ScionPageAdminUsers extends LitElement {
   }
 
   private renderImportDialog() {
-    if (!this.showImportDialog) return nothing;
+    if (!this.showImportDialog || !this.canInviteUsers) return nothing;
     return html`
       <sl-dialog
         label="Import Users from CSV"

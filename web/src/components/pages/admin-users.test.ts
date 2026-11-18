@@ -24,6 +24,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 import type { AdminUser } from '../../shared/types.js';
 import { clearAdminStatus } from '../../client/admin-status.js';
+import type { AdminStatus } from '../../lib/admin-permissions.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
@@ -59,6 +60,11 @@ function createFetchHandler(users: AdminUser[]) {
     if (path.includes('/auth/me')) {
       return Promise.resolve(jsonResponse({ id: SELF_ID, role: 'admin' }));
     }
+    if (path.includes('/api/v1/auth/admin-status')) {
+      return Promise.resolve(
+        jsonResponse({ isAdmin: true, isSuperAdmin: true, permissions: [] } satisfies AdminStatus)
+      );
+    }
     if (method === 'PATCH' && path.includes('/api/v1/users/')) {
       const body = JSON.parse(requestBodyText(init?.body ?? '{}')) as { role?: string };
       const id = path.split('/api/v1/users/')[1];
@@ -78,6 +84,7 @@ function createFetchHandler(users: AdminUser[]) {
 let mod: any;
 
 async function createComponent(users: AdminUser[]) {
+  clearAdminStatus();
   vi.stubGlobal('fetch', vi.fn(createFetchHandler(users)));
   const el = document.createElement('scion-page-admin-users') as HTMLElement & {
     updateComplete: Promise<boolean>;
@@ -2151,5 +2158,125 @@ describe('admin-users Roles menu item (D4a–D4c)', () => {
     const delRo = rowForEmail(page, 'del-ro@example.com');
     expect(topLevelMenuLabels(delRo)).toEqual(['Roles']);
     expect(delRo.querySelector('.actions-cell sl-divider')).toBeNull();
+  });
+});
+
+describe('scion-page-admin-users — Invite User / Import CSV permission gating (ptone/scion#8179)', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler([])));
+    mod = await import('./admin-users.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    clearAdminStatus();
+    vi.restoreAllMocks();
+  });
+
+  function buttonLabels(el: HTMLElement): string[] {
+    return Array.from(el.shadowRoot?.querySelectorAll('sl-button') ?? []).map(
+      (b) => b.textContent?.trim() ?? ''
+    );
+  }
+
+  async function mountWithStatus(
+    users: AdminUser[],
+    adminStatusResponse: () => Response,
+    authMeRole = 'member'
+  ): Promise<HTMLElement> {
+    clearAdminStatus();
+    const base = createFetchHandler(users);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const path = requestUrl(url);
+        if (path.includes('/auth/me')) {
+          return Promise.resolve(jsonResponse({ id: SELF_ID, role: authMeRole }));
+        }
+        if (path.includes('/api/v1/auth/admin-status')) {
+          return Promise.resolve(adminStatusResponse());
+        }
+        return base(url, init);
+      })
+    );
+    const el = document.createElement('scion-page-admin-users') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await el.updateComplete;
+    return el;
+  }
+
+  it('hides Invite User and Import CSV in the toolbar for a hub member without user.invite', async () => {
+    element = await mountWithStatus([makeUser({ _capabilities: { actions: ['read'] } })], () =>
+      jsonResponse({
+        isAdmin: false,
+        isSuperAdmin: false,
+        permissions: ['user.read'],
+      } satisfies AdminStatus)
+    );
+
+    const labels = buttonLabels(element);
+    expect(labels).not.toContain('Invite User');
+    expect(labels).not.toContain('Import CSV');
+  });
+
+  it('hides Invite User in the empty state for a hub member without user.invite', async () => {
+    element = await mountWithStatus([], () =>
+      jsonResponse({
+        isAdmin: false,
+        isSuperAdmin: false,
+        permissions: ['user.read'],
+      } satisfies AdminStatus)
+    );
+
+    const labels = buttonLabels(element);
+    expect(labels).not.toContain('Invite User');
+    expect(element.shadowRoot?.querySelector('.empty-state p')?.textContent?.trim()).toBe(
+      'There are no users registered in the system.'
+    );
+  });
+
+  it('shows Invite User and Import CSV when the viewer holds user.invite (even with isAdmin=false)', async () => {
+    element = await mountWithStatus([makeUser({ _capabilities: { actions: ['read'] } })], () =>
+      jsonResponse({
+        isAdmin: false,
+        isSuperAdmin: false,
+        permissions: ['user.read', 'user.invite'],
+      } satisfies AdminStatus)
+    );
+
+    const labels = buttonLabels(element);
+    expect(labels).toContain('Invite User');
+    expect(labels).toContain('Import CSV');
+  });
+
+  it('shows Invite User in the empty state when the viewer holds user.invite', async () => {
+    element = await mountWithStatus([], () =>
+      jsonResponse({
+        isAdmin: true,
+        isSuperAdmin: false,
+        permissions: ['user.read', 'user.invite'],
+      } satisfies AdminStatus)
+    );
+
+    expect(buttonLabels(element)).toContain('Invite User');
+  });
+
+  it('fails closed when admin-status fails', async () => {
+    element = await mountWithStatus(
+      [makeUser()],
+      () => jsonResponse({ error: 'unavailable' }, 500),
+      'admin'
+    );
+
+    const labels = buttonLabels(element);
+    expect(labels).not.toContain('Invite User');
+    expect(labels).not.toContain('Import CSV');
   });
 });

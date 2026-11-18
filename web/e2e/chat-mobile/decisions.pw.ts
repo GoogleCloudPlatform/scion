@@ -155,13 +155,19 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(group).toHaveAttribute('role', 'group');
       await expect(group).toHaveAttribute('aria-label', 'Ship v0.9 today?');
       await expect(group).toHaveAttribute('tabindex', '0');
-      await expect(c.locator('.hint')).toHaveText(
-        'Press Enter to choose the recommended answer (outlined).'
-      );
-      await expect(group).toHaveAttribute(
-        'aria-describedby',
-        (await c.locator('.hint').getAttribute('id'))!
-      );
+      if (isPhone(page)) {
+        await expect(c.locator('.hint')).toBeHidden();
+        await expect(group).not.toHaveAttribute('aria-describedby');
+      } else {
+        await expect(c.locator('.hint')).toBeVisible();
+        await expect(c.locator('.hint')).toHaveText(
+          'Press Enter to choose the recommended answer (outlined).'
+        );
+        await expect(group).toHaveAttribute(
+          'aria-describedby',
+          (await c.locator('.hint').getAttribute('id'))!
+        );
+      }
       const yes = c.locator('sl-button[data-choice="yes"]');
       await expect(yes).toHaveAttribute('variant', 'primary');
       await expect(yes).toHaveAttribute('outline', '');

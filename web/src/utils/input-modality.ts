@@ -69,10 +69,11 @@ export class TouchPrimaryController implements ReactiveController {
   }
 
   hostConnected(): void {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
     this.mediaQueryList = window.matchMedia(TOUCH_PRIMARY_QUERY);
+    if (!this.mediaQueryList) return;
     this._isTouch = this.mediaQueryList.matches;
-    this.mediaQueryList.addEventListener('change', this.handleChange);
+    this.mediaQueryList.addEventListener?.('change', this.handleChange);
     // A host reconnecting after the query flipped while it was detached
     // (no listener was live to call requestUpdate() for that flip) would
     // otherwise render stale until its next unrelated update — Lit does not
@@ -83,7 +84,7 @@ export class TouchPrimaryController implements ReactiveController {
   }
 
   hostDisconnected(): void {
-    this.mediaQueryList?.removeEventListener('change', this.handleChange);
+    this.mediaQueryList?.removeEventListener?.('change', this.handleChange);
     this.mediaQueryList = null;
   }
 }
