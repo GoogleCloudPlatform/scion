@@ -126,9 +126,10 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	if parentName == "project" {
 		return false
 	}
-	// 'templates update --scope global' refreshes global templates and reads
-	// no project, so it runs outside a project (ptone/scion#1713).
-	if isGlobalTemplatesUpdate(cmd) {
+	// 'templates update --scope global' and 'templates delete --scope global'
+	// act on global templates and read no project, so they run outside a
+	// project (ptone/scion#1713, ptone/scion#8318).
+	if isGlobalTemplatesUpdate(cmd) || isGlobalTemplatesDelete(cmd) {
 		return false
 	}
 	// 'decisions list --all-projects' queries GET /api/v1/users/me/decisions
@@ -199,6 +200,20 @@ func isNotificationsSubscriptionsCommand(cmd *cobra.Command) bool {
 // --scope global.
 func isGlobalTemplatesUpdate(cmd *cobra.Command) bool {
 	if cmd.Name() != "update" || cmd.Parent() == nil || cmd.Parent().Name() != "templates" || !isTopLevel(cmd.Parent()) {
+		return false
+	}
+	scope, _ := cmd.Flags().GetString("scope")
+	return scope == "global"
+}
+
+// isGlobalTemplatesDelete reports whether cmd is 'templates delete' (or the
+// singular 'template delete' alias) with --scope global.
+func isGlobalTemplatesDelete(cmd *cobra.Command) bool {
+	if cmd.Name() != "delete" || cmd.Parent() == nil || !isTopLevel(cmd.Parent()) {
+		return false
+	}
+	parent := cmd.Parent().Name()
+	if parent != "templates" && parent != "template" {
 		return false
 	}
 	scope, _ := cmd.Flags().GetString("scope")
