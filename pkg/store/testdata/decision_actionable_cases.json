@@ -212,6 +212,14 @@
     "want": "withdrawn"
   },
   {
+    "name": "withdrawn (empty user id)",
+    "userId": "",
+    "status": "withdrawn",
+    "answers": [],
+    "decision": null,
+    "want": "withdrawn"
+  },
+  {
     "name": "dismissed (signed-in user)",
     "userId": "u1",
     "status": "dismissed",
