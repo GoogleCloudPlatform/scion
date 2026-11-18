@@ -284,6 +284,15 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"scheduled_event.create":  testAdminPolicyAllow,
 	"scheduled_event.delete":  testAdminPolicyAllow,
 	"scheduled_event.update":  testAdminPolicyAllow,
+	"trigger.read":            testAdminPolicyAllow,
+	"trigger.list":            testAdminPolicyAllow,
+	"trigger.create":          testAdminPolicyAllow,
+	"trigger.delete":          testAdminPolicyAllow,
+	"trigger.update":          testAdminPolicyAllow,
+	"webhook_endpoint.read":   testAdminPolicyAllow,
+	"webhook_endpoint.list":   testAdminPolicyAllow,
+	"webhook_endpoint.create": testAdminPolicyAllow,
+	"webhook_endpoint.delete": testAdminPolicyAllow,
 
 	// GitHub App triggers (ptone/scion#8090): github_trigger.comment is held
 	// by the built-in project-member, project-admin, and project-owner roles;
@@ -630,6 +639,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.WelcomeProject:               testAdminPolicyDeny,
 	experiments.SystemOne:                    testAdminPolicyDeny,
 	experiments.GitHubTriggers:               testAdminPolicyDeny,
+	experiments.Triggers:                     testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

@@ -1,0 +1,278 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestTriggerResponseGuard_StructFields(t *testing.T) {
+	now := time.Now().UTC()
+
+	epResp := WebhookEndpointResponse{
+		ID:            "ep-1",
+		ProjectID:     "proj-1",
+		Name:          "deploy-hook",
+		Description:   "desc",
+		URL:           "https://hub.example.com/api/v1/hooks/ep-1",
+		Status:        store.WebhookEndpointStatusActive,
+		SignatureMode: store.WebhookSignatureModeScionV1,
+		SecretVersion: 1,
+		CreatedBy:     "user-1",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	epRaw, err := json.Marshal(epResp)
+	require.NoError(t, err)
+	var epMap map[string]any
+	require.NoError(t, json.Unmarshal(epRaw, &epMap))
+	for _, forbidden := range []string{
+		"secret",
+		"ownerPrincipalKind", "ownerPrincipalId",
+		"owner_principal_kind", "owner_principal_id",
+	} {
+		assert.NotContains(t, epMap, forbidden, "WebhookEndpointResponse must not expose %q", forbidden)
+	}
+
+	trResp := buildTriggerResponse(store.Trigger{
+		ID:             "tr-1",
+		ProjectID:      "proj-1",
+		Name:           "notify-lead",
+		Status:         store.TriggerStatusActive,
+		SourceKind:     store.TriggerSourceKindWebhook,
+		SourceID:       "ep-1",
+		MatchTypes:     []string{"webhook.received"},
+		MatchDialect:   "cel",
+		ActionType:     "message",
+		ActionPayload:  `{"agentId":"ag-1","agentName":"lead","message":"hi","wake":true}`,
+		SubjectDialect: "cel",
+		SubjectMode:    store.TriggerSubjectModeNew,
+		CreatedBy:      "user-1",
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    "user-1",
+			InitiatorCredentialKind: store.InitiatorCredentialKindUAT,
+			InitiatorCredentialID:   "uat-secret-id",
+			AttributionVersion:      1,
+			AuthorizationRevision:   3,
+		},
+		AuthorityCeiling: store.EffectCeiling{
+			Kind:          store.EffectCeilingBounded,
+			Version:       1,
+			PermissionIDs: []string{"trigger.create"},
+		},
+		Fixture: store.FixtureProvenance{
+			RootID:   "ti-secret-id",
+			IssuerID: "ti-issuer-id",
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	trRaw, err := json.Marshal(trResp)
+	require.NoError(t, err)
+	var trMap map[string]any
+	require.NoError(t, json.Unmarshal(trRaw, &trMap))
+	for _, forbidden := range []string{
+		"initiatorPrincipalKind", "initiatorPrincipalId",
+		"initiatorCredentialKind", "initiatorCredentialId",
+		"attributionVersion", "authorityCeiling",
+		"initiator_principal_kind", "initiator_principal_id",
+		"initiator_credential_kind", "initiator_credential_id",
+		"authority_ceiling",
+		"fixture", "rootId", "issuerId",
+		"fixtureRooted", "fixtureTestIdentityId",
+		"fixture_rooted", "fixture_test_identity_id",
+		"actionPayload", "action_payload",
+	} {
+		assert.NotContains(t, trMap, forbidden, "TriggerResponse must not expose %q", forbidden)
+	}
+	assert.Equal(t, float64(3), trMap["authorizationRevision"])
+
+	fireResp := buildTriggerFireResponse(store.TriggerFire{
+		ID:         "fire-1",
+		TriggerID:  "tr-1",
+		EventID:    "evt-1",
+		ProjectID:  "proj-1",
+		ActionType: "message",
+		Status:     store.TriggerFireStatusFired,
+		CreatedAt:  now,
+		StartedAt:  now,
+		LeaseUntil: now.Add(time.Minute),
+		ResultRef:  "msg-1",
+	})
+	fireRaw, err := json.Marshal(fireResp)
+	require.NoError(t, err)
+	var fireMap map[string]any
+	require.NoError(t, json.Unmarshal(fireRaw, &fireMap))
+	for _, forbidden := range []string{"leaseUntil", "lease_until", "executorKind", "executorId"} {
+		assert.NotContains(t, fireMap, forbidden, "TriggerFireResponse must not expose %q", forbidden)
+	}
+}
+
+// buildTriggerFireResponse maps store.TriggerFire to TriggerFireResponse (moved
+// to trigger_response.go in 1b-3 when GET /triggers/{id}/history calls it).
+func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
+	return TriggerFireResponse{
+		ID:         tf.ID,
+		TriggerID:  tf.TriggerID,
+		EventID:    tf.EventID,
+		ProjectID:  tf.ProjectID,
+		Subject:    tf.Subject,
+		Status:     tf.Status,
+		ResultRef:  tf.ResultRef,
+		Error:      tf.Error,
+		StartedAt:  tf.StartedAt,
+		FinishedAt: tf.FinishedAt,
+	}
+}
+
+func TestWebhookEndpointResponses_NoSecretAfterCreate(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	// Create endpoint as owner -> secret returned ONCE.
+	createRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name:        "guard-hook",
+		Description: "guard test",
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	require.NotEmpty(t, created.Secret, "POST /webhook-endpoints must return secret once")
+	sentinel := created.Secret
+
+	// Create active + paused triggers referencing the endpoint.
+	trCreateRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "guard-trigger",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: created.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hello"},
+	})
+	require.Equal(t, http.StatusCreated, trCreateRec.Code, trCreateRec.Body.String())
+	assert.NotContains(t, trCreateRec.Body.String(), sentinel)
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(trCreateRec.Body.Bytes(), &tr))
+
+	// Exercise every other 1b-1 route and verify sentinel never appears.
+	checks := []struct {
+		name string
+		call func() string
+	}{
+		{
+			name: "GET /webhook-endpoints (owner)",
+			call: func() string {
+				rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodGet, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "GET /webhook-endpoints (member)",
+			call: func() string {
+				rec := f.doWebhookEndpoint(t, f.memberAuth, "", http.MethodGet, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "GET /webhook-endpoints/{id} (owner)",
+			call: func() string {
+				rec := f.doWebhookEndpoint(t, f.ownerAuth, created.ID, http.MethodGet, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "GET /triggers",
+			call: func() string {
+				rec := f.doTrigger(t, f.ownerAuth, "", http.MethodGet, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "GET /triggers/{id}",
+			call: func() string {
+				rec := f.doTrigger(t, f.ownerAuth, tr.ID, http.MethodGet, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "PATCH /triggers/{id}",
+			call: func() string {
+				desc := "updated"
+				rec := f.doTrigger(t, f.ownerAuth, tr.ID, http.MethodPatch, UpdateTriggerRequest{Description: &desc})
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "POST /triggers/{id}/pause",
+			call: func() string {
+				rec := f.doTrigger(t, f.ownerAuth, tr.ID+"/pause", http.MethodPost, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "POST /triggers/{id}/resume",
+			call: func() string {
+				rec := f.doTrigger(t, f.ownerAuth, tr.ID+"/resume", http.MethodPost, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "DELETE /triggers/{id}",
+			call: func() string {
+				rec := f.doTrigger(t, f.ownerAuth, tr.ID, http.MethodDelete, nil)
+				require.Equal(t, http.StatusNoContent, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "DELETE /webhook-endpoints/{id}",
+			call: func() string {
+				rec := f.doWebhookEndpoint(t, f.ownerAuth, created.ID, http.MethodDelete, nil)
+				require.Equal(t, http.StatusNoContent, rec.Code)
+				return rec.Body.String()
+			},
+		},
+	}
+
+	for _, tc := range checks {
+		body := tc.call()
+		assert.NotContains(t, body, sentinel, "%s response must never contain endpoint secret", tc.name)
+	}
+
+	// Verify mutation audit records never carry the secret value.
+	audits, _, err := f.store.ListMutationAudits(ctx, store.MutationAuditFilter{})
+	require.NoError(t, err)
+	require.NotEmpty(t, audits)
+	for _, rec := range audits {
+		assert.NotContains(t, rec.BeforeSummary, sentinel, "audit before_summary must not contain endpoint secret")
+		assert.NotContains(t, rec.AfterSummary, sentinel, "audit after_summary must not contain endpoint secret")
+	}
+}

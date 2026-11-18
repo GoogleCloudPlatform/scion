@@ -1487,6 +1487,8 @@ func (s *Server) fixtureLeftoverIssuer(ctx context.Context, rootID string) (stri
 	for _, stamps := range [][]store.FixtureProvenance{
 		fixtureStamps(set.Agents, func(a store.Agent) store.FixtureProvenance { return a.Fixture }),
 		fixtureStamps(set.Schedules, func(sc store.Schedule) store.FixtureProvenance { return sc.Fixture }),
+		fixtureStamps(set.Triggers, func(tr store.Trigger) store.FixtureProvenance { return tr.Fixture }),
+		fixtureStamps(set.WebhookEndpoints, func(ep store.WebhookEndpoint) store.FixtureProvenance { return ep.Fixture }),
 		fixtureStamps(set.Groups, func(g store.Group) store.FixtureProvenance { return g.Fixture }),
 		fixtureStamps(set.Projects, func(p store.Project) store.FixtureProvenance { return p.Fixture }),
 	} {

@@ -122,6 +122,7 @@ func (s *Server) listSecretsWithPending(w http.ResponseWriter, r *http.Request, 
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	metas = withoutInternalSecrets(metas)
 	pending, err := s.store.ListPendingSecretsByOwner(ctx, store.ScopeUser, ownerID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -191,6 +192,9 @@ func (l *projectOverrideLookup) forKey(ctx context.Context, key string) ([]Proje
 		return nil, err
 	}
 	for _, row := range rows {
+		if row.SecretType == store.SecretTypeInternal {
+			continue
+		}
 		project, err := l.readableProject(ctx, row.ScopeID)
 		if err != nil {
 			return nil, err

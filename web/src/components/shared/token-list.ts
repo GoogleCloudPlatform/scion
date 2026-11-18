@@ -211,7 +211,9 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   skill: 'Skill',
   template: 'Template',
   test_identity: 'Test Identity',
+  trigger: 'Trigger',
   user: 'User',
+  webhook_endpoint: 'Webhook Endpoint',
 };
 
 /**
@@ -1061,6 +1063,41 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'trigger:create',
+    label: 'trigger:create',
+    description: 'Create triggers',
+    resource: 'trigger',
+    isAlias: false,
+  },
+  {
+    value: 'trigger:delete',
+    label: 'trigger:delete',
+    description: 'Delete triggers',
+    resource: 'trigger',
+    isAlias: false,
+  },
+  {
+    value: 'trigger:list',
+    label: 'trigger:list',
+    description: 'List triggers and trigger events',
+    resource: 'trigger',
+    isAlias: false,
+  },
+  {
+    value: 'trigger:read',
+    label: 'trigger:read',
+    description: 'Read triggers, trigger history and trigger events',
+    resource: 'trigger',
+    isAlias: false,
+  },
+  {
+    value: 'trigger:update',
+    label: 'trigger:update',
+    description: 'Update, pause and resume triggers',
+    resource: 'trigger',
+    isAlias: false,
+  },
+  {
     value: 'user:invite',
     label: 'user:invite',
     description: 'Invite users',
@@ -1114,6 +1151,34 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'user_skill_injection:update',
     description: 'Change the skills injected into your own agents',
     resource: 'user_skill_injection',
+    isAlias: false,
+  },
+  {
+    value: 'webhook_endpoint:create',
+    label: 'webhook_endpoint:create',
+    description: 'Create webhook endpoints',
+    resource: 'webhook_endpoint',
+    isAlias: false,
+  },
+  {
+    value: 'webhook_endpoint:delete',
+    label: 'webhook_endpoint:delete',
+    description: 'Delete webhook endpoints',
+    resource: 'webhook_endpoint',
+    isAlias: false,
+  },
+  {
+    value: 'webhook_endpoint:list',
+    label: 'webhook_endpoint:list',
+    description: 'List webhook endpoints',
+    resource: 'webhook_endpoint',
+    isAlias: false,
+  },
+  {
+    value: 'webhook_endpoint:read',
+    label: 'webhook_endpoint:read',
+    description: 'Read webhook endpoints',
+    resource: 'webhook_endpoint',
     isAlias: false,
   },
 ];

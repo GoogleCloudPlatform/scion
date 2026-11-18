@@ -204,6 +204,12 @@ type Tx struct {
 	ThreadGroup *ThreadGroupClient
 	// ThreadGroupMember is the client for interacting with the ThreadGroupMember builders.
 	ThreadGroupMember *ThreadGroupMemberClient
+	// Trigger is the client for interacting with the Trigger builders.
+	Trigger *TriggerClient
+	// TriggerEvent is the client for interacting with the TriggerEvent builders.
+	TriggerEvent *TriggerEventClient
+	// TriggerFire is the client for interacting with the TriggerFire builders.
+	TriggerFire *TriggerFireClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// User is the client for interacting with the User builders.
@@ -216,6 +222,8 @@ type Tx struct {
 	UserDeletionAgent *UserDeletionAgentClient
 	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
 	UserTerminalWorkspace *UserTerminalWorkspaceClient
+	// WebhookEndpoint is the client for interacting with the WebhookEndpoint builders.
+	WebhookEndpoint *WebhookEndpointClient
 
 	// lazily loaded.
 	client     *Client
@@ -443,12 +451,16 @@ func (tx *Tx) init() {
 	tx.TestInfraMarker = NewTestInfraMarkerClient(tx.config)
 	tx.ThreadGroup = NewThreadGroupClient(tx.config)
 	tx.ThreadGroupMember = NewThreadGroupMemberClient(tx.config)
+	tx.Trigger = NewTriggerClient(tx.config)
+	tx.TriggerEvent = NewTriggerEventClient(tx.config)
+	tx.TriggerFire = NewTriggerFireClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)
 	tx.UserDeletion = NewUserDeletionClient(tx.config)
 	tx.UserDeletionAgent = NewUserDeletionAgentClient(tx.config)
 	tx.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(tx.config)
+	tx.WebhookEndpoint = NewWebhookEndpointClient(tx.config)
 }
 
 // txDriver wraps the given dialect.Tx with a nop dialect.Driver implementation.

@@ -62,6 +62,14 @@ func TestListFixtureRootedResources_SelectsByStampOnly(t *testing.T) {
 	sc := &store.Schedule{ID: uuid.NewString(), ProjectID: proj.ID, Name: "s", CronExpr: "0 * * * *", EventType: "message", Fixture: stamp}
 	require.NoError(t, cs.CreateSchedule(ctx, sc))
 	require.NoError(t, cs.CreateSchedule(ctx, &store.Schedule{ID: uuid.NewString(), ProjectID: proj.ID, Name: "plain", CronExpr: "0 * * * *", EventType: "message", CreatedBy: stamp.RootID}))
+	tr := &store.Trigger{ID: uuid.NewString(), ProjectID: proj.ID, Name: "t", SourceKind: store.TriggerSourceKindWebhook, SourceID: uuid.NewString(), MatchTypes: []string{"webhook.received"}, ActionType: store.TriggerActionMessage, ActionPayload: `{}`, Fixture: stamp}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+	require.NoError(t, cs.CreateTrigger(ctx, &store.Trigger{ID: uuid.NewString(), ProjectID: proj.ID, Name: "plain-t", SourceKind: store.TriggerSourceKindWebhook, SourceID: uuid.NewString(), MatchTypes: []string{"webhook.received"}, ActionType: store.TriggerActionMessage, ActionPayload: `{}`, CreatedBy: stamp.RootID}))
+	require.NoError(t, cs.CreateTrigger(ctx, &store.Trigger{ID: uuid.NewString(), ProjectID: otherProj.ID, Name: "other-t", SourceKind: store.TriggerSourceKindWebhook, SourceID: uuid.NewString(), MatchTypes: []string{"webhook.received"}, ActionType: store.TriggerActionMessage, ActionPayload: `{}`, Fixture: other}))
+	ep := &store.WebhookEndpoint{ID: uuid.NewString(), ProjectID: proj.ID, Name: "ep", OwnerPrincipalKind: store.DelegationPrincipalUser, OwnerPrincipalID: stamp.RootID, OwnerCredentialKind: store.InitiatorCredentialKindSession, Fixture: stamp}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, ep))
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, &store.WebhookEndpoint{ID: uuid.NewString(), ProjectID: proj.ID, Name: "plain-ep", OwnerPrincipalKind: store.DelegationPrincipalUser, OwnerPrincipalID: stamp.RootID, OwnerCredentialKind: store.InitiatorCredentialKindSession, CreatedBy: stamp.RootID}))
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, &store.WebhookEndpoint{ID: uuid.NewString(), ProjectID: otherProj.ID, Name: "other-ep", OwnerPrincipalKind: store.DelegationPrincipalUser, OwnerPrincipalID: other.RootID, OwnerCredentialKind: store.InitiatorCredentialKindSession, Fixture: other}))
 	gid := uuid.NewString()
 	require.NoError(t, cs.CreateGroup(ctx, &store.Group{ID: gid, Name: "g", Slug: "g-" + gid[:8], Fixture: stamp}))
 	pgid := uuid.NewString()
@@ -77,6 +85,12 @@ func TestListFixtureRootedResources_SelectsByStampOnly(t *testing.T) {
 	assert.ElementsMatch(t, []string{stamped, softDeleted}, agentIDs)
 	require.Len(t, set.Schedules, 1)
 	assert.Equal(t, sc.ID, set.Schedules[0].ID)
+	require.Len(t, set.Triggers, 1)
+	assert.Equal(t, tr.ID, set.Triggers[0].ID)
+	assert.Equal(t, stamp, set.Triggers[0].Fixture)
+	require.Len(t, set.WebhookEndpoints, 1)
+	assert.Equal(t, ep.ID, set.WebhookEndpoints[0].ID)
+	assert.Equal(t, stamp, set.WebhookEndpoints[0].Fixture)
 	require.Len(t, set.Groups, 1)
 	assert.Equal(t, gid, set.Groups[0].ID)
 	require.Len(t, set.Projects, 1)
@@ -189,9 +203,9 @@ func TestFinalizeAgentDeletion_DeletedAtNotNullSparesLiveRow(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// The 3a deferred items: on agents, projects, schedules and groups a CHECK
-// refuses a row with only one of fixture_root_id and fixture_issuer_id set
-// (even through raw SQL that bypasses the store), and fixture_root_id and
+// The 3a deferred items: on agents, projects, schedules, triggers and groups a
+// CHECK refuses a row with only one of fixture_root_id and fixture_issuer_id
+// set (even through raw SQL that bypasses the store), and fixture_root_id and
 // fixture_issuer_id are indexed.
 func TestFixtureStamp_CheckConstraintAndIndexes(t *testing.T) {
 	cs := newFixtureTestStore(t)
@@ -202,10 +216,14 @@ func TestFixtureStamp_CheckConstraintAndIndexes(t *testing.T) {
 	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "a-" + agentID[:8], Name: "a", ProjectID: proj.ID, Phase: "created", Fixture: stamp}))
 	sc := &store.Schedule{ID: uuid.NewString(), ProjectID: proj.ID, Name: "s", CronExpr: "0 * * * *", EventType: "message", Fixture: stamp}
 	require.NoError(t, cs.CreateSchedule(ctx, sc))
+	tr := &store.Trigger{ID: uuid.NewString(), ProjectID: proj.ID, Name: "t", SourceKind: store.TriggerSourceKindWebhook, SourceID: uuid.NewString(), MatchTypes: []string{"webhook.received"}, ActionType: store.TriggerActionMessage, ActionPayload: `{}`, Fixture: stamp}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+	ep := &store.WebhookEndpoint{ID: uuid.NewString(), ProjectID: proj.ID, Name: "ep", OwnerPrincipalKind: store.DelegationPrincipalUser, OwnerPrincipalID: stamp.RootID, OwnerCredentialKind: store.InitiatorCredentialKindSession, Fixture: stamp}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, ep))
 	gid := uuid.NewString()
 	require.NoError(t, cs.CreateGroup(ctx, &store.Group{ID: gid, Name: "g", Slug: "g-" + gid[:8], Fixture: stamp}))
 
-	for table, id := range map[string]string{"agents": agentID, "projects": proj.ID, "schedules": sc.ID, "groups": gid} {
+	for table, id := range map[string]string{"agents": agentID, "projects": proj.ID, "schedules": sc.ID, "triggers": tr.ID, "webhook_endpoints": ep.ID, "groups": gid} {
 		for _, col := range []string{"fixture_issuer_id", "fixture_root_id"} {
 			_, err := cs.DB().ExecContext(ctx, rebind(cs, "UPDATE "+table+" SET "+col+" = NULL WHERE id = ?"), id)
 			require.Error(t, err, "%s: clearing %s alone must be refused", table, col)
@@ -283,6 +301,8 @@ func TestListFixtureRoots_DistinctStampsByIssuer(t *testing.T) {
 	rootB := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: issuerI} // a schedule only (its project is unstamped)
 	rootC := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: issuerI} // a group only
 	rootD := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: issuerJ} // a soft-deleted agent only
+	rootE := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: issuerI} // a trigger only (its project is unstamped)
+	rootF := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: issuerI} // a webhook endpoint only (its project is unstamped)
 
 	projA := newStampTestProject(t, cs, rootA)
 	plain := newStampTestProject(t, cs, store.FixtureProvenance{})
@@ -299,6 +319,10 @@ func TestListFixtureRoots_DistinctStampsByIssuer(t *testing.T) {
 	_, err := cs.DB().ExecContext(ctx, rebind(cs, "UPDATE agents SET deleted_at = ? WHERE id = ?"), time.Now().UTC(), softDeleted)
 	require.NoError(t, err)
 	require.NoError(t, cs.CreateSchedule(ctx, &store.Schedule{ID: uuid.NewString(), ProjectID: plain.ID, Name: "s", CronExpr: "0 * * * *", EventType: "message", Fixture: rootB}))
+	require.NoError(t, cs.CreateTrigger(ctx, &store.Trigger{ID: uuid.NewString(), ProjectID: plain.ID, Name: "t-root-e", SourceKind: store.TriggerSourceKindWebhook, SourceID: uuid.NewString(), MatchTypes: []string{"webhook.received"}, ActionType: store.TriggerActionMessage, ActionPayload: `{}`, Fixture: rootE}))
+	require.NoError(t, cs.CreateTrigger(ctx, &store.Trigger{ID: uuid.NewString(), ProjectID: plain.ID, Name: "t-plain", SourceKind: store.TriggerSourceKindWebhook, SourceID: uuid.NewString(), MatchTypes: []string{"webhook.received"}, ActionType: store.TriggerActionMessage, ActionPayload: `{}`, CreatedBy: issuerI}))
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, &store.WebhookEndpoint{ID: uuid.NewString(), ProjectID: plain.ID, Name: "ep-root-f", OwnerPrincipalKind: store.DelegationPrincipalUser, OwnerPrincipalID: rootF.RootID, OwnerCredentialKind: store.InitiatorCredentialKindSession, Fixture: rootF}))
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, &store.WebhookEndpoint{ID: uuid.NewString(), ProjectID: plain.ID, Name: "ep-plain", OwnerPrincipalKind: store.DelegationPrincipalUser, OwnerPrincipalID: issuerI, OwnerCredentialKind: store.InitiatorCredentialKindSession, CreatedBy: issuerI}))
 	gid := uuid.NewString()
 	require.NoError(t, cs.CreateGroup(ctx, &store.Group{ID: gid, Name: "g", Slug: "g-" + gid[:8], Fixture: rootC}))
 
@@ -317,12 +341,12 @@ func TestListFixtureRoots_DistinctStampsByIssuer(t *testing.T) {
 	all, truncated, err := cs.ListFixtureRoots(ctx, "", "", 0)
 	require.NoError(t, err)
 	assert.False(t, truncated)
-	assert.Equal(t, sorted(rootA, rootB, rootC, rootD), all)
+	assert.Equal(t, sorted(rootA, rootB, rootC, rootD, rootE, rootF), all)
 
 	ofI, truncated, err := cs.ListFixtureRoots(ctx, issuerI, "", 0)
 	require.NoError(t, err)
 	assert.False(t, truncated)
-	assert.Equal(t, sorted(rootA, rootB, rootC), ofI)
+	assert.Equal(t, sorted(rootA, rootB, rootC, rootE, rootF), ofI)
 
 	ofJ, _, err := cs.ListFixtureRoots(ctx, issuerJ, "", 0)
 	require.NoError(t, err)
@@ -335,7 +359,7 @@ func TestListFixtureRoots_DistinctStampsByIssuer(t *testing.T) {
 	limited, truncated, err := cs.ListFixtureRoots(ctx, issuerI, "", 2)
 	require.NoError(t, err)
 	assert.True(t, truncated)
-	assert.Equal(t, sorted(rootA, rootB, rootC)[:2], limited)
+	assert.Equal(t, sorted(rootA, rootB, rootC, rootE, rootF)[:2], limited)
 
 	// The cursor resumes strictly after a root: paging by 1 visits every
 	// root of the issuer once, in order, and the last page has no more.
@@ -351,8 +375,8 @@ func TestListFixtureRoots_DistinctStampsByIssuer(t *testing.T) {
 		require.Len(t, page, 1)
 		after = page[0].RootID
 	}
-	assert.Equal(t, sorted(rootA, rootB, rootC), paged)
-	all2 := sorted(rootA, rootB, rootC, rootD)
+	assert.Equal(t, sorted(rootA, rootB, rootC, rootE, rootF), paged)
+	all2 := sorted(rootA, rootB, rootC, rootD, rootE, rootF)
 	rest, more, err := cs.ListFixtureRoots(ctx, "", all2[1].RootID, 0)
 	require.NoError(t, err)
 	assert.False(t, more)

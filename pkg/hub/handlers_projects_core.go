@@ -2842,6 +2842,20 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /triggers and /webhook-endpoints paths (hub.triggers experiment)
+	if subPath == "triggers" || strings.HasPrefix(subPath, "triggers/") {
+		triggerPath := strings.TrimPrefix(subPath, "triggers")
+		triggerPath = strings.TrimPrefix(triggerPath, "/")
+		s.handleTriggers(w, r, projectID, triggerPath)
+		return
+	}
+	if subPath == "webhook-endpoints" || strings.HasPrefix(subPath, "webhook-endpoints/") {
+		endpointPath := strings.TrimPrefix(subPath, "webhook-endpoints")
+		endpointPath = strings.TrimPrefix(endpointPath, "/")
+		s.handleWebhookEndpoints(w, r, projectID, endpointPath)
+		return
+	}
+
 	// Check for nested /metrics-summary path (lightweight project metrics summary)
 	if subPath == "metrics-summary" {
 		s.handleProjectMetricsSummary(w, r, projectID)

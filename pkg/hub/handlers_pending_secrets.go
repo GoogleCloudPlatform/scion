@@ -185,10 +185,21 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 	existing, err := s.secretBackend.GetMeta(ctx, key, store.ScopeUser, ownerID)
 	switch {
 	case err == nil:
+		if existing.SecretType == store.SecretTypeInternal {
+			writeError(w, http.StatusConflict, ErrCodeInternalSecret,
+				"internal secrets cannot be modified or deleted through the secrets API", nil)
+			return
+		}
 		replacesID, replacesVersion = existing.ID, existing.Version
 	case errors.Is(err, store.ErrNotFound):
+		if s.refuseInternalSecretMutation(w, ctx, key, store.ScopeUser, ownerID) {
+			return
+		}
 	default:
 		writeErrorFromErr(w, err, "")
+		return
+	}
+	if rejectWebhookEndpointReservedSecretWrite(w, key) {
 		return
 	}
 
@@ -556,6 +567,12 @@ func (s *Server) approvePendingSecret(w http.ResponseWriter, r *http.Request, ow
 
 	p, ok := s.ownPendingSecret(w, ctx, ownerID, id)
 	if !ok {
+		return
+	}
+	if s.refuseInternalSecretMutation(w, ctx, p.Key, store.ScopeUser, ownerID) {
+		return
+	}
+	if rejectWebhookEndpointReservedSecretWrite(w, p.Key) {
 		return
 	}
 

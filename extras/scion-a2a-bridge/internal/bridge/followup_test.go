@@ -177,6 +177,8 @@ func (m *mockHubClient) Subscriptions() hubclient.SubscriptionService           
 func (m *mockHubClient) SubscriptionTemplates() hubclient.SubscriptionTemplateService { return nil }
 func (m *mockHubClient) ScheduledEvents(string) hubclient.ScheduledEventService       { return nil }
 func (m *mockHubClient) Schedules(string) hubclient.ScheduleService                   { return nil }
+func (m *mockHubClient) WebhookEndpoints(string) hubclient.WebhookEndpointService     { return nil }
+func (m *mockHubClient) Triggers(string) hubclient.TriggerService                     { return nil }
 func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService       { return nil }
 func (m *mockHubClient) Messages() hubclient.MessageService                           { return nil }
 func (m *mockHubClient) Conversations() hubclient.ConversationService                 { return nil }
@@ -208,6 +210,8 @@ func (m *mockHubClient) Decisions() hubclient.DecisionService                   
 func (m *mockHubClient) ProjectDecisions(string) hubclient.ProjectDecisionService { return nil }
 func (m *mockHubClient) MyDecisions() hubclient.MyDecisionService                 { return nil }
 func (m *mockHubClient) SystemOne() hubclient.SystemOneService                    { return nil }
+func (m *mockHubClient) GitHubApp() hubclient.GitHubAppService                    { return nil }
+func (m *mockHubClient) TriggerPresets() hubclient.TriggerPresetService           { return nil }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }

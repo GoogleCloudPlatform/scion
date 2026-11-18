@@ -181,6 +181,7 @@ export function buildFixture() {
           'hub.flat_runtime_brokers': false,
           'hub.github_triggers': false,
           'hub.k8s_workload_identity_setup': false,
+          'hub.triggers': false,
           'hub.user_delete_force_cascade': false,
           'hub.welcome_project': false,
           'web.agent_badges': false,

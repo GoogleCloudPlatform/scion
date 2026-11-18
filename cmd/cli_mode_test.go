@@ -456,6 +456,8 @@ func TestAgentAllowedList(t *testing.T) {
 		"harness-config", "harness-config.list", "harness-config.show", "harness-config.install",
 		"harness-config.sync", "harness-config.push", "harness-config.pull",
 		"harness-config.delete", "harness-config.reset", "harness-config.upgrade",
+		"trigger", "trigger.create", "trigger.list", "trigger.delete", "trigger.pause", "trigger.resume",
+		"trigger.webhook", "trigger.webhook.create", "trigger.webhook.list", "trigger.webhook.delete",
 	}
 	for _, path := range expectedAllowed {
 		assert.True(t, agentAllowed[path], "agentAllowed should contain %s", path)

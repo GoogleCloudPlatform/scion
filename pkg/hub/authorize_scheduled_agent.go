@@ -22,10 +22,15 @@ import (
 // written by authorizeScheduleAuthoringCredential.
 const scheduleAuthoringCredentialRefusedMessage = "this credential kind cannot create, update or resume scheduled events or schedules"
 
-// scheduleAuthoringCredentialAllowed reports whether the request's
-// credential may author scheduled work: create a scheduled event or a
-// recurring schedule, update a schedule, or resume one. The rule is an
-// allowlist of (identity type, credential kind) pairs:
+// triggerAuthoringCredentialRefusedMessage is the message of the refusal
+// written by authorizeDeferredAuthoringCredential on trigger and webhook
+// endpoint authoring routes.
+const triggerAuthoringCredentialRefusedMessage = "this credential kind cannot create, update or resume triggers or webhook endpoints"
+
+// deferredAuthoringCredentialAllowed reports whether the request's
+// credential may author deferred work: create a scheduled event, recurring
+// schedule, or trigger, or update or resume a schedule or trigger. The rule is
+// an allowlist of (identity type, credential kind) pairs:
 //   - an agent identity with an agent JWT;
 //   - a user or dev identity with an interactive session or a dev
 //     credential (sessionCredentialAllowed), or with a broker credential
@@ -38,10 +43,10 @@ const scheduleAuthoringCredentialRefusedMessage = "this credential kind cannot c
 // credential classification, as AuthzRequestFromContext does.
 //
 // An admitted user access token is then held to its ceiling and boundary by
-// the scheduled_event permission check (authorizeScheduledEventAccess) and
-// by the event type's target checks, and the revision records the token's
-// ceiling and boundary (revisionAuthorityCeiling).
-func scheduleAuthoringCredentialAllowed(r *http.Request) bool {
+// the resource permission check (authorizeScheduledEventAccess /
+// authorizeTriggerAccess) and by the action type's target checks, and the
+// revision records the token's ceiling and boundary (revisionAuthorityCeiling).
+func deferredAuthoringCredentialAllowed(r *http.Request) bool {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if isNilIdentity(identity) {
@@ -72,10 +77,28 @@ func scheduleAuthoringCredentialAllowed(r *http.Request) bool {
 	}
 }
 
-// authorizeScheduleAuthoringCredential is the credential gate of scheduled
-// work authoring (scheduleAuthoringCredentialAllowed). It runs before any
+func scheduleAuthoringCredentialAllowed(r *http.Request) bool {
+	return deferredAuthoringCredentialAllowed(r)
+}
+
+// authorizeDeferredAuthoringCredential is the credential gate of deferred
+// work authoring (deferredAuthoringCredentialAllowed). It runs before any
 // target lookup or body read. On a refusal it writes 401 for a request with
 // no identity, otherwise 403, and returns false.
+func authorizeDeferredAuthoringCredential(w http.ResponseWriter, r *http.Request) bool {
+	if GetIdentityFromContext(r.Context()) == nil {
+		Unauthorized(w)
+		return false
+	}
+	if !deferredAuthoringCredentialAllowed(r) {
+		writeForbidden(w, triggerAuthoringCredentialRefusedMessage)
+		return false
+	}
+	return true
+}
+
+// authorizeScheduleAuthoringCredential enforces the authoring credential
+// allowlist for scheduled event and schedule routes.
 func authorizeScheduleAuthoringCredential(w http.ResponseWriter, r *http.Request) bool {
 	if GetIdentityFromContext(r.Context()) == nil {
 		Unauthorized(w)

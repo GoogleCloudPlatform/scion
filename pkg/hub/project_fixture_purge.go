@@ -270,6 +270,26 @@ func fixtureProjectContents(ctx context.Context, tx store.Store, projectID, root
 			return true, fixtureAgents, nil
 		}
 	}
+	triggers, err := tx.ListTriggers(ctx, store.TriggerFilter{ProjectID: projectID},
+		store.ListOptions{Limit: fixtureProjectScanLimit, SkipTotalCount: true})
+	if err != nil {
+		return false, false, fmt.Errorf("list project triggers: %w", err)
+	}
+	for _, tr := range triggers.Items {
+		if tr.Fixture.RootID != rootID {
+			return true, fixtureAgents, nil
+		}
+	}
+	endpoints, err := tx.ListWebhookEndpoints(ctx, store.WebhookEndpointFilter{ProjectID: projectID},
+		store.ListOptions{Limit: fixtureProjectScanLimit, SkipTotalCount: true})
+	if err != nil {
+		return false, false, fmt.Errorf("list project webhook endpoints: %w", err)
+	}
+	for _, ep := range endpoints.Items {
+		if ep.Fixture.RootID != rootID {
+			return true, fixtureAgents, nil
+		}
+	}
 	groups, err := tx.ListGroups(ctx, store.GroupFilter{ProjectID: projectID},
 		store.ListOptions{Limit: fixtureProjectScanLimit, SkipTotalCount: true})
 	if err != nil {

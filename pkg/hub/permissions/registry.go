@@ -40,6 +40,8 @@ const (
 	ResourceRole              = "role"
 	ResourceRoleBinding       = "role_binding"
 	ResourceScheduledEvent    = "scheduled_event"
+	ResourceTrigger           = "trigger"
+	ResourceWebhookEndpoint   = "webhook_endpoint"
 	ResourceAccessConstraint  = "access_constraint"
 	// ResourceSecret, ResourceEnvVar and ResourceSkillInjection are the
 	// material-delivery resource types (ptone/scion#2129): the typed target
@@ -418,6 +420,17 @@ var Registry = []Permission{
 
 	{ID: "github_trigger.comment", Resource: ResourceGitHubTrigger, Action: ActionComment, CapabilityKind: CapabilityScope, UATScope: "github_trigger:comment", Description: "Post comments on GitHub as the GitHub App through project triggers", NonRouteUse: []string{"Stage 3 github.comment trigger action author and execution check (ptone/scion#836)"}},
 	{ID: "github_trigger.configure", Resource: ResourceGitHubTrigger, Action: ActionConfigure, CapabilityKind: CapabilityResource, UATScope: "github_trigger:configure", Description: "Configure GitHub trigger source settings for a project", Enforcement: []string{"pkg/hub/handlers_github_trigger_settings.go:handlePutProjectGitHubTriggerSettings"}},
+
+	// Trigger and webhook endpoint permissions (project-scoped, ptone/scion#7961)
+	{ID: "trigger.read", Resource: ResourceTrigger, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "trigger:read", Description: "Read a trigger definition", Enforcement: []string{"pkg/hub/handlers_triggers.go"}},
+	{ID: "trigger.list", Resource: ResourceTrigger, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "trigger:list", Description: "List trigger definitions", Enforcement: []string{"pkg/hub/handlers_triggers.go"}},
+	{ID: "trigger.create", Resource: ResourceTrigger, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "trigger:create", Description: "Create a trigger definition", Enforcement: []string{"pkg/hub/handlers_triggers.go"}},
+	{ID: "trigger.delete", Resource: ResourceTrigger, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "trigger:delete", Description: "Delete a trigger definition", Enforcement: []string{"pkg/hub/handlers_triggers.go"}},
+	{ID: "trigger.update", Resource: ResourceTrigger, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "trigger:update", Description: "Update, pause or resume a trigger definition", Enforcement: []string{"pkg/hub/handlers_triggers.go"}},
+	{ID: "webhook_endpoint.read", Resource: ResourceWebhookEndpoint, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "webhook_endpoint:read", Description: "Read a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
+	{ID: "webhook_endpoint.list", Resource: ResourceWebhookEndpoint, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "webhook_endpoint:list", Description: "List webhook endpoints", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
+	{ID: "webhook_endpoint.create", Resource: ResourceWebhookEndpoint, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "webhook_endpoint:create", Description: "Create a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
+	{ID: "webhook_endpoint.delete", Resource: ResourceWebhookEndpoint, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "webhook_endpoint:delete", Description: "Delete a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
 
 	// Extensions to existing resource types (Phase 2 D4 resolution)
 	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", Enforcement: []string{"pkg/hub/route_metadata.go:admin.users.invite", "pkg/hub/route_metadata.go:admin.users.invite.bulk", "pkg/hub/route_metadata.go:admin.invites", "pkg/hub/route_metadata.go:admin.invites.byId", "pkg/hub/handlers_users_provision.go:handleProvisionUser"}},

@@ -102,10 +102,12 @@ type TestAdminResidueGrant struct {
 // TestAdminResidueResources lists the IDs of resources stamped with the
 // identity as their provenance root.
 type TestAdminResidueResources struct {
-	Agents    []string `json:"agents"`
-	Schedules []string `json:"schedules"`
-	Groups    []string `json:"groups"`
-	Projects  []string `json:"projects"`
+	Agents           []string `json:"agents"`
+	Schedules        []string `json:"schedules"`
+	Triggers         []string `json:"triggers"`
+	WebhookEndpoints []string `json:"webhookEndpoints"`
+	Groups           []string `json:"groups"`
+	Projects         []string `json:"projects"`
 }
 
 // TestAdminResidueChange is one mutation the identity (or an agent rooted

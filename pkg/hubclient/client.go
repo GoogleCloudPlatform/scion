@@ -91,6 +91,12 @@ type Client interface {
 	// Schedules returns the recurring schedule operations interface scoped to a project.
 	Schedules(projectID string) ScheduleService
 
+	// WebhookEndpoints returns the webhook endpoint operations interface scoped to a project.
+	WebhookEndpoints(projectID string) WebhookEndpointService
+
+	// Triggers returns the trigger definition operations interface scoped to a project.
+	Triggers(projectID string) TriggerService
+
 	// GCPServiceAccounts returns the GCP service account operations interface.
 	// Scope is chosen per call, not pinned here -- hub-scoped accounts have no
 	// project to pin to.
@@ -385,6 +391,16 @@ func (c *client) ScheduledEvents(projectID string) ScheduledEventService {
 // Schedules returns the recurring schedule operations interface scoped to a project.
 func (c *client) Schedules(projectID string) ScheduleService {
 	return &scheduleService{c: c, projectID: projectID}
+}
+
+// WebhookEndpoints returns the webhook endpoint operations interface scoped to a project.
+func (c *client) WebhookEndpoints(projectID string) WebhookEndpointService {
+	return &webhookEndpointService{c: c, projectID: projectID}
+}
+
+// Triggers returns the trigger definition operations interface scoped to a project.
+func (c *client) Triggers(projectID string) TriggerService {
+	return &triggerService{c: c, projectID: projectID}
 }
 
 // GCPServiceAccounts returns the GCP service account operations interface.

@@ -3186,6 +3186,11 @@ func isCompressBypassPath(path string) bool {
 	if len(segs) == 3 && segs[0] == "pending-secrets" && segs[2] == "reveal" {
 		return true
 	}
+	// POST /api/v1/projects/{projectId}/webhook-endpoints returns the
+	// one-time HMAC signing secret for the newly created endpoint.
+	if len(segs) == 3 && segs[0] == "projects" && segs[2] == "webhook-endpoints" {
+		return true
+	}
 	for i, seg := range segs {
 		switch seg {
 		case "env", "secrets":

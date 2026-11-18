@@ -131,6 +131,7 @@ type CompositeStore struct {
 	*UserDeletionStore
 	*DurableQueueStore
 	*SystemOneInstanceStore
+	*TriggerStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -279,6 +280,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.DurableQueueStore.inTx = true
 	txStore.SystemOneInstanceStore.inTx = true
 	txStore.ExternalStore.inTx = true
+	txStore.TriggerStore.inTx = true
 	return txStore
 }
 
@@ -333,6 +335,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		UserDeletionStore:           NewUserDeletionStore(client),
 		DurableQueueStore:           NewDurableQueueStore(client),
 		SystemOneInstanceStore:      NewSystemOneInstanceStore(client),
+		TriggerStore:                NewTriggerStore(client),
 		client:                      client,
 	}
 }

@@ -196,6 +196,12 @@ var ProjectTargetApplicability = map[string]bool{
 	// github_trigger.* — always scoped to an existing project.
 	"github_trigger.comment": true, "github_trigger.configure": true,
 
+	// trigger.* and webhook_endpoint.* — always scoped to a project.
+	"trigger.read": true, "trigger.list": true, "trigger.create": true,
+	"trigger.delete": true, "trigger.update": true,
+	"webhook_endpoint.read": true, "webhook_endpoint.list": true,
+	"webhook_endpoint.create": true, "webhook_endpoint.delete": true,
+
 	"project.secret_read": true,
 
 	// Material delivery and runtime-use permissions (ptone/scion#2129): every
@@ -323,6 +329,14 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// github_trigger.* act on one project's GitHub App trigger actions and
 	// source settings.
 	"github_trigger.comment": {BoundaryKindProject, BoundaryKindHub}, "github_trigger.configure": {BoundaryKindProject, BoundaryKindHub},
+
+	// trigger.* and webhook_endpoint.* act on one project's triggers and
+	// webhook endpoints.
+	"trigger.read": {BoundaryKindProject, BoundaryKindHub}, "trigger.list": {BoundaryKindProject, BoundaryKindHub},
+	"trigger.update": {BoundaryKindProject, BoundaryKindHub}, "trigger.delete": {BoundaryKindProject, BoundaryKindHub},
+	"trigger.create":        {BoundaryKindProject, BoundaryKindHub},
+	"webhook_endpoint.read": {BoundaryKindProject, BoundaryKindHub}, "webhook_endpoint.list": {BoundaryKindProject, BoundaryKindHub},
+	"webhook_endpoint.create": {BoundaryKindProject, BoundaryKindHub}, "webhook_endpoint.delete": {BoundaryKindProject, BoundaryKindHub},
 
 	// hub.* integration and observability permissions act on the hub
 	// itself, so their selectors are hub-only.
@@ -547,6 +561,14 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 
 	// github_trigger.* target a project's GitHub trigger actions and source settings.
 	"github_trigger.comment": {TargetClassKindProjectScoped}, "github_trigger.configure": {TargetClassKindProjectScoped},
+
+	// trigger.* and webhook_endpoint.* target a project's triggers and
+	// webhook endpoints.
+	"trigger.read": {TargetClassKindProjectScoped}, "trigger.list": {TargetClassKindProjectScoped},
+	"trigger.update": {TargetClassKindProjectScoped}, "trigger.delete": {TargetClassKindProjectScoped},
+	"trigger.create":        {TargetClassKindProjectScoped},
+	"webhook_endpoint.read": {TargetClassKindProjectScoped}, "webhook_endpoint.list": {TargetClassKindProjectScoped},
+	"webhook_endpoint.create": {TargetClassKindProjectScoped}, "webhook_endpoint.delete": {TargetClassKindProjectScoped},
 
 	// hub.* integration and observability permissions target the hub
 	// instance.

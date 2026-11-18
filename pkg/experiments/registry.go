@@ -520,6 +520,13 @@ const SystemOne = "hub.system_one"
 // routes answer 404, and the web section is hidden.
 const GitHubTriggers = "hub.github_triggers"
 
+// Triggers gates Stage 1 event triggers and webhook endpoints
+// (ptone/scion#7961): Server layer returns 404 on /api/v1/hooks/{id} and all
+// /webhook-endpoints, /triggers and /trigger-events project routes and omits
+// the trigger delivery drainer and fire-lease reaper while off; Web layer
+// exposes the flag for UI presentation.
+const Triggers = "hub.triggers"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -1032,6 +1039,17 @@ var compiled = []Experiment{
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#836",
+		Owner:       "triggers",
+		ReviewBy:    "2027-05-31",
+	},
+	{
+		Name:        Triggers,
+		Title:       "Triggers and webhook endpoints",
+		Description: "Lets projects define webhook endpoints and event triggers that deliver messages to agents when matching signed webhooks arrive. Server layer: while off, /api/v1/hooks/{id} and all /webhook-endpoints, /triggers and /trigger-events routes answer 404, and the trigger delivery drainer and fire-lease reaper do not register. Web layer: exposes the flag for UI presentation.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7961",
 		Owner:       "triggers",
 		ReviewBy:    "2027-05-31",
 	},

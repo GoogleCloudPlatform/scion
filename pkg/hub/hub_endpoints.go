@@ -76,6 +76,9 @@ const (
 	// HubEndpointForAgentLinks is the base URL of user-facing web agent
 	// detail links (for example in trigger acknowledgement comments).
 	HubEndpointForAgentLinks HubEndpointUse = "agent_links"
+	// HubEndpointForWebhooks is the public hub URL prefixed onto webhook
+	// endpoint ingress paths (/api/v1/hooks/{id}).
+	HubEndpointForWebhooks HubEndpointUse = "webhooks"
 )
 
 // hubEndpointKind selects one of the two resolved endpoints.
@@ -105,6 +108,7 @@ var hubEndpointUses = map[HubEndpointUse]hubEndpointKind{
 	HubEndpointForTransportAudience: hubEndpointPublic,
 	HubEndpointForConduitCheck:      hubEndpointPublic,
 	HubEndpointForAgentLinks:        hubEndpointPublic,
+	HubEndpointForWebhooks:          hubEndpointPublic,
 }
 
 // Public endpoint sources reported by HubEndpoints.PublicSource besides the

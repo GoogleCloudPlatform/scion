@@ -210,6 +210,19 @@ var agentAllowed = map[string]bool{
 	"decisions.list":   true,
 	"decisions.show":   true,
 	"decisions.record": true,
+
+	// Event triggers and webhook endpoints (ptone/scion#8028, Stage 1 §12):
+	// Hub routes enforce hub.triggers and caller-scoped ownership for agents.
+	"trigger":                true,
+	"trigger.create":         true,
+	"trigger.list":           true,
+	"trigger.delete":         true,
+	"trigger.pause":          true,
+	"trigger.resume":         true,
+	"trigger.webhook":        true,
+	"trigger.webhook.create": true,
+	"trigger.webhook.list":   true,
+	"trigger.webhook.delete": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

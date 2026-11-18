@@ -1161,6 +1161,42 @@ func (f ThreadGroupMemberFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ThreadGroupMemberMutation", m)
 }
 
+// The TriggerFunc type is an adapter to allow the use of ordinary
+// function as Trigger mutator.
+type TriggerFunc func(context.Context, *ent.TriggerMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TriggerFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TriggerMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TriggerMutation", m)
+}
+
+// The TriggerEventFunc type is an adapter to allow the use of ordinary
+// function as TriggerEvent mutator.
+type TriggerEventFunc func(context.Context, *ent.TriggerEventMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TriggerEventFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TriggerEventMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TriggerEventMutation", m)
+}
+
+// The TriggerFireFunc type is an adapter to allow the use of ordinary
+// function as TriggerFire mutator.
+type TriggerFireFunc func(context.Context, *ent.TriggerFireMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TriggerFireFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TriggerFireMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TriggerFireMutation", m)
+}
+
 // The UsageReservationFunc type is an adapter to allow the use of ordinary
 // function as UsageReservation mutator.
 type UsageReservationFunc func(context.Context, *ent.UsageReservationMutation) (ent.Value, error)
@@ -1231,6 +1267,18 @@ func (f UserTerminalWorkspaceFunc) Mutate(ctx context.Context, m ent.Mutation) (
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UserTerminalWorkspaceMutation", m)
+}
+
+// The WebhookEndpointFunc type is an adapter to allow the use of ordinary
+// function as WebhookEndpoint mutator.
+type WebhookEndpointFunc func(context.Context, *ent.WebhookEndpointMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f WebhookEndpointFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.WebhookEndpointMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.WebhookEndpointMutation", m)
 }
 
 // Condition is a hook condition function.

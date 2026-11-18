@@ -262,6 +262,14 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// against the existing project's github_trigger settings instance.
 	"github_trigger.comment": {TargetClassKindProjectScoped}, "github_trigger.configure": {},
 
+	// trigger.* and webhook_endpoint.* — list/create are CapabilityScope;
+	// read/delete/update target an existing trigger or webhook endpoint.
+	"trigger.read": {}, "trigger.list": {TargetClassKindProjectScoped},
+	"trigger.create": {TargetClassKindProjectScoped}, "trigger.delete": {},
+	"trigger.update":        {},
+	"webhook_endpoint.read": {}, "webhook_endpoint.list": {TargetClassKindProjectScoped},
+	"webhook_endpoint.create": {TargetClassKindProjectScoped}, "webhook_endpoint.delete": {},
+
 	// project.secret_read — agent self-service, no CapabilityKind, always
 	// an existing project's secret.
 	"project.secret_read": {},

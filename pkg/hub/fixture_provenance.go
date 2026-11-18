@@ -183,6 +183,26 @@ func stampSchedule(ctx context.Context, st store.Store, sc *store.Schedule, p fi
 	return nil
 }
 
+// stampTrigger sets tr's stamp from p.
+func stampTrigger(ctx context.Context, st store.Store, tr *store.Trigger, p fixturePrincipal) error {
+	stamp, err := resolveFixtureRoot(ctx, st, p)
+	if err != nil {
+		return err
+	}
+	tr.Fixture = stamp
+	return nil
+}
+
+// stampWebhookEndpoint sets ep's stamp from p.
+func stampWebhookEndpoint(ctx context.Context, st store.Store, ep *store.WebhookEndpoint, p fixturePrincipal) error {
+	stamp, err := resolveFixtureRoot(ctx, st, p)
+	if err != nil {
+		return err
+	}
+	ep.Fixture = stamp
+	return nil
+}
+
 // writeFixtureRootError writes the answer for a create refused by
 // resolveFixtureRoot and reports whether err was such a refusal: 409 when
 // the creating identity's row no longer exists, 500 otherwise.

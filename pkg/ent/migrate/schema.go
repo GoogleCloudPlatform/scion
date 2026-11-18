@@ -3748,6 +3748,179 @@ var (
 			},
 		},
 	}
+	// TriggersColumns holds the columns for the "triggers" table.
+	TriggersColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "initiator_principal_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_principal_id", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_id", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_snapshot", Type: field.TypeString, Nullable: true},
+		{Name: "attribution_version", Type: field.TypeInt, Nullable: true},
+		{Name: "authorization_revision", Type: field.TypeInt, Nullable: true},
+		{Name: "authority_ceiling_kind", Type: field.TypeString, Default: ""},
+		{Name: "authority_ceiling_version", Type: field.TypeInt32, Default: 0},
+		{Name: "authority_ceiling_permission_ids", Type: field.TypeString, Nullable: true},
+		{Name: "authority_ceiling_boundary_kind", Type: field.TypeString, Default: ""},
+		{Name: "authority_ceiling_boundary_project_id", Type: field.TypeString, Default: ""},
+		{Name: "authority_ceiling_source_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "source_kind", Type: field.TypeString},
+		{Name: "source_id", Type: field.TypeString, Default: ""},
+		{Name: "match_types", Type: field.TypeString, Size: 2147483647},
+		{Name: "match_dialect", Type: field.TypeString, Default: "cel"},
+		{Name: "match_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "action_type", Type: field.TypeString},
+		{Name: "action_payload", Type: field.TypeString, Size: 2147483647, Default: "{}"},
+		{Name: "subject_dialect", Type: field.TypeString, Default: "cel"},
+		{Name: "subject_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "subject_mode", Type: field.TypeString, Default: "new"},
+		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "status_reason", Type: field.TypeString, Nullable: true},
+		{Name: "last_fire_at", Type: field.TypeTime, Nullable: true},
+		{Name: "last_fire_status", Type: field.TypeString, Nullable: true},
+		{Name: "last_fire_error", Type: field.TypeString, Nullable: true},
+		{Name: "fire_count", Type: field.TypeInt, Default: 0},
+		{Name: "error_count", Type: field.TypeInt, Default: 0},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// TriggersTable holds the schema information for the "triggers" table.
+	TriggersTable = &schema.Table{
+		Name:       "triggers",
+		Columns:    TriggersColumns,
+		PrimaryKey: []*schema.Column{TriggersColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "trigger_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{TriggersColumns[14]},
+			},
+			{
+				Name:    "trigger_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{TriggersColumns[15]},
+			},
+			{
+				Name:    "trigger_project_id_name",
+				Unique:  true,
+				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[17]},
+			},
+			{
+				Name:    "trigger_project_id_source_kind_source_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[29]},
+			},
+			{
+				Name:    "trigger_initiator_principal_id",
+				Unique:  false,
+				Columns: []*schema.Column{TriggersColumns[2]},
+			},
+		},
+	}
+	// TriggerEventsColumns holds the columns for the "trigger_events" table.
+	TriggerEventsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "source_kind", Type: field.TypeString},
+		{Name: "source_id", Type: field.TypeString},
+		{Name: "type", Type: field.TypeString},
+		{Name: "subject", Type: field.TypeString},
+		{Name: "dedup_key", Type: field.TypeString},
+		{Name: "occurred_at", Type: field.TypeTime},
+		{Name: "received_at", Type: field.TypeTime},
+		{Name: "attributes", Type: field.TypeString, Size: 2147483647, Default: "{}"},
+		{Name: "headers", Type: field.TypeString, Size: 2147483647, Default: "{}"},
+		{Name: "payload", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "payload_bytes", Type: field.TypeInt, Default: 0},
+		{Name: "status", Type: field.TypeString, Default: "pending"},
+		{Name: "match_count", Type: field.TypeInt, Default: 0},
+		{Name: "fire_count", Type: field.TypeInt, Default: 0},
+		{Name: "error", Type: field.TypeString, Nullable: true},
+		{Name: "processed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+	}
+	// TriggerEventsTable holds the schema information for the "trigger_events" table.
+	TriggerEventsTable = &schema.Table{
+		Name:       "trigger_events",
+		Columns:    TriggerEventsColumns,
+		PrimaryKey: []*schema.Column{TriggerEventsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "triggerevent_project_id_received_at",
+				Unique:  false,
+				Columns: []*schema.Column{TriggerEventsColumns[1], TriggerEventsColumns[8]},
+			},
+			{
+				Name:    "triggerevent_source_kind_source_id_dedup_key",
+				Unique:  true,
+				Columns: []*schema.Column{TriggerEventsColumns[2], TriggerEventsColumns[3], TriggerEventsColumns[6]},
+			},
+			{
+				Name:    "triggerevent_status_created",
+				Unique:  false,
+				Columns: []*schema.Column{TriggerEventsColumns[13], TriggerEventsColumns[18]},
+			},
+		},
+	}
+	// TriggerFiresColumns holds the columns for the "trigger_fires" table.
+	TriggerFiresColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "initiator_principal_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_principal_id", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_kind", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_id", Type: field.TypeString, Nullable: true},
+		{Name: "initiator_credential_snapshot", Type: field.TypeString, Nullable: true},
+		{Name: "attribution_version", Type: field.TypeInt, Nullable: true},
+		{Name: "authorization_revision", Type: field.TypeInt, Nullable: true},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "trigger_id", Type: field.TypeUUID},
+		{Name: "event_id", Type: field.TypeUUID},
+		{Name: "subject", Type: field.TypeString, Size: 256},
+		{Name: "action_type", Type: field.TypeString},
+		{Name: "status", Type: field.TypeString, Default: "firing"},
+		{Name: "error", Type: field.TypeString, Nullable: true},
+		{Name: "result_ref", Type: field.TypeString, Nullable: true},
+		{Name: "executor_kind", Type: field.TypeString, Default: ""},
+		{Name: "executor_id", Type: field.TypeString, Default: ""},
+		{Name: "lease_until", Type: field.TypeTime},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+	}
+	// TriggerFiresTable holds the schema information for the "trigger_fires" table.
+	TriggerFiresTable = &schema.Table{
+		Name:       "trigger_fires",
+		Columns:    TriggerFiresColumns,
+		PrimaryKey: []*schema.Column{TriggerFiresColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "triggerfire_trigger_id_created",
+				Unique:  false,
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[21]},
+			},
+			{
+				Name:    "triggerfire_event_id_trigger_id",
+				Unique:  true,
+				Columns: []*schema.Column{TriggerFiresColumns[10], TriggerFiresColumns[9]},
+			},
+			{
+				Name:    "triggerfire_trigger_id_subject_status",
+				Unique:  false,
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[11], TriggerFiresColumns[13]},
+			},
+			{
+				Name:    "triggerfire_status_lease_until",
+				Unique:  false,
+				Columns: []*schema.Column{TriggerFiresColumns[13], TriggerFiresColumns[18]},
+			},
+		},
+	}
 	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -3975,6 +4148,50 @@ var (
 			},
 		},
 	}
+	// WebhookEndpointsColumns holds the columns for the "webhook_endpoints" table.
+	WebhookEndpointsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "owner_principal_kind", Type: field.TypeString},
+		{Name: "owner_principal_id", Type: field.TypeString},
+		{Name: "owner_credential_kind", Type: field.TypeString},
+		{Name: "secret_version", Type: field.TypeInt, Default: 1},
+		{Name: "signature_mode", Type: field.TypeString, Default: "scion_v1"},
+		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "last_received_at", Type: field.TypeTime, Nullable: true},
+		{Name: "receive_count", Type: field.TypeInt, Default: 0},
+		{Name: "reject_count", Type: field.TypeInt, Default: 0},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// WebhookEndpointsTable holds the schema information for the "webhook_endpoints" table.
+	WebhookEndpointsTable = &schema.Table{
+		Name:       "webhook_endpoints",
+		Columns:    WebhookEndpointsColumns,
+		PrimaryKey: []*schema.Column{WebhookEndpointsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "webhookendpoint_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{WebhookEndpointsColumns[1]},
+			},
+			{
+				Name:    "webhookendpoint_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{WebhookEndpointsColumns[2]},
+			},
+			{
+				Name:    "webhookendpoint_project_id_name",
+				Unique:  true,
+				Columns: []*schema.Column{WebhookEndpointsColumns[3], WebhookEndpointsColumns[4]},
+			},
+		},
+	}
 	// GroupChildGroupsColumns holds the columns for the "group_child_groups" table.
 	GroupChildGroupsColumns = []*schema.Column{
 		{Name: "group_id", Type: field.TypeUUID},
@@ -4098,12 +4315,16 @@ var (
 		TestInfraMarkerTable,
 		ThreadGroupsTable,
 		ThreadGroupMembersTable,
+		TriggersTable,
+		TriggerEventsTable,
+		TriggerFiresTable,
 		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
 		UserDeletionsTable,
 		UserDeletionAgentsTable,
 		UserTerminalWorkspacesTable,
+		WebhookEndpointsTable,
 		GroupChildGroupsTable,
 	}
 )
@@ -4352,6 +4573,18 @@ func init() {
 	ThreadGroupMembersTable.Annotation = &entsql.Annotation{
 		Table: "thread_group_members",
 	}
+	TriggersTable.Annotation = &entsql.Annotation{
+		Table: "triggers",
+	}
+	TriggersTable.Annotation.Checks = map[string]string{
+		"triggers_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
+	}
+	TriggerEventsTable.Annotation = &entsql.Annotation{
+		Table: "trigger_events",
+	}
+	TriggerFiresTable.Annotation = &entsql.Annotation{
+		Table: "trigger_fires",
+	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UsersTable.Annotation = &entsql.Annotation{
 		Table: "users",
@@ -4377,6 +4610,12 @@ func init() {
 	UserTerminalWorkspacesTable.ForeignKeys[0].RefTable = UsersTable
 	UserTerminalWorkspacesTable.Annotation = &entsql.Annotation{
 		Table: "user_terminal_workspaces",
+	}
+	WebhookEndpointsTable.Annotation = &entsql.Annotation{
+		Table: "webhook_endpoints",
+	}
+	WebhookEndpointsTable.Annotation.Checks = map[string]string{
+		"webhook_endpoints_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
 	}
 	GroupChildGroupsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupChildGroupsTable.ForeignKeys[1].RefTable = GroupsTable

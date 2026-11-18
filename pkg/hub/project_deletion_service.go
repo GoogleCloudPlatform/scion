@@ -117,6 +117,7 @@ type CascadeSummary struct {
 	HarnessConfigs    int `json:"harness_configs_deleted"`
 	UserAccessTokens  int `json:"user_access_tokens_deleted"`
 	Schedules         int `json:"schedules_deleted"`
+	Triggers          int `json:"triggers_deleted"`
 	AgentCredentials  int `json:"agent_credentials_deleted"`
 	LifecycleHooks    int `json:"lifecycle_hooks_deleted"`
 	PreStartHooks     int `json:"pre_start_hooks_deleted"`
@@ -650,6 +651,14 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		cs.Schedules = n
 	}
 
+	// 10b. Triggers, webhook endpoints, trigger events/fires, and hub-scoped
+	// webhook endpoint internal secrets for the project (ptone/scion#8028).
+	if n, err := tx.DeleteTriggersByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade triggers: %w", err)
+	} else {
+		cs.Triggers = n
+	}
+
 	// 11. Agent credentials — project-scoped agent auth tokens.
 	// No FK from credentials to agents. Parent agent records are deleted by
 	// CompositeStore.DeleteProject (Delete step 10), but credential rows
@@ -736,6 +745,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// | harness_configs        | Transactional: DeleteHarnessConfigsByScope (step 8)      | Config   |
 	// | user_access_tokens     | Transactional: DeleteUserAccessTokensByProject (step 9)  | Cred     |
 	// | schedules (+events)    | Transactional: DeleteSchedulesByProject (step 10)        | Job      |
+	// | triggers (+endpoints,  | Transactional: DeleteTriggersByProject (step 10b)        | Job/Cred |
+	// |   events, fires, internal webhook secrets)                                        |          |
 	// | agent_credentials      | Transactional: DeleteAgentCredentialsByProject (step 11) | Cred     |
 	// | lifecycle_hooks        | Transactional: DeleteLifecycleHooksByScope (step 12)     | Job      |
 	// | pre_start_hooks        | Transactional: DeletePreStartHooksByProject (step 13)    | Job      |

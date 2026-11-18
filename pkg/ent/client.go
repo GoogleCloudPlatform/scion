@@ -112,12 +112,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/webhookendpoint"
 )
 
 // Client is the client that holds all ent builders.
@@ -317,6 +321,12 @@ type Client struct {
 	ThreadGroup *ThreadGroupClient
 	// ThreadGroupMember is the client for interacting with the ThreadGroupMember builders.
 	ThreadGroupMember *ThreadGroupMemberClient
+	// Trigger is the client for interacting with the Trigger builders.
+	Trigger *TriggerClient
+	// TriggerEvent is the client for interacting with the TriggerEvent builders.
+	TriggerEvent *TriggerEventClient
+	// TriggerFire is the client for interacting with the TriggerFire builders.
+	TriggerFire *TriggerFireClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// User is the client for interacting with the User builders.
@@ -329,6 +339,8 @@ type Client struct {
 	UserDeletionAgent *UserDeletionAgentClient
 	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
 	UserTerminalWorkspace *UserTerminalWorkspaceClient
+	// WebhookEndpoint is the client for interacting with the WebhookEndpoint builders.
+	WebhookEndpoint *WebhookEndpointClient
 }
 
 // NewClient creates a new client configured with the given options.
@@ -436,12 +448,16 @@ func (c *Client) init() {
 	c.TestInfraMarker = NewTestInfraMarkerClient(c.config)
 	c.ThreadGroup = NewThreadGroupClient(c.config)
 	c.ThreadGroupMember = NewThreadGroupMemberClient(c.config)
+	c.Trigger = NewTriggerClient(c.config)
+	c.TriggerEvent = NewTriggerEventClient(c.config)
+	c.TriggerFire = NewTriggerFireClient(c.config)
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.User = NewUserClient(c.config)
 	c.UserAccessToken = NewUserAccessTokenClient(c.config)
 	c.UserDeletion = NewUserDeletionClient(c.config)
 	c.UserDeletionAgent = NewUserDeletionAgentClient(c.config)
 	c.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(c.config)
+	c.WebhookEndpoint = NewWebhookEndpointClient(c.config)
 }
 
 type (
@@ -630,12 +646,16 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
+		Trigger:                       NewTriggerClient(cfg),
+		TriggerEvent:                  NewTriggerEventClient(cfg),
+		TriggerFire:                   NewTriggerFireClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
 		UserDeletion:                  NewUserDeletionClient(cfg),
 		UserDeletionAgent:             NewUserDeletionAgentClient(cfg),
 		UserTerminalWorkspace:         NewUserTerminalWorkspaceClient(cfg),
+		WebhookEndpoint:               NewWebhookEndpointClient(cfg),
 	}, nil
 }
 
@@ -751,12 +771,16 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
+		Trigger:                       NewTriggerClient(cfg),
+		TriggerEvent:                  NewTriggerEventClient(cfg),
+		TriggerFire:                   NewTriggerFireClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
 		UserDeletion:                  NewUserDeletionClient(cfg),
 		UserDeletionAgent:             NewUserDeletionAgentClient(cfg),
 		UserTerminalWorkspace:         NewUserTerminalWorkspaceClient(cfg),
+		WebhookEndpoint:               NewWebhookEndpointClient(cfg),
 	}, nil
 }
 
@@ -812,9 +836,9 @@ func (c *Client) Use(hooks ...Hook) {
 		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
 		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
-		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
-		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
-		c.UserTerminalWorkspace,
+		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
+		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -850,9 +874,9 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
 		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
-		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
-		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
-		c.UserTerminalWorkspace,
+		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
+		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1053,6 +1077,12 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.ThreadGroup.mutate(ctx, m)
 	case *ThreadGroupMemberMutation:
 		return c.ThreadGroupMember.mutate(ctx, m)
+	case *TriggerMutation:
+		return c.Trigger.mutate(ctx, m)
+	case *TriggerEventMutation:
+		return c.TriggerEvent.mutate(ctx, m)
+	case *TriggerFireMutation:
+		return c.TriggerFire.mutate(ctx, m)
 	case *UsageReservationMutation:
 		return c.UsageReservation.mutate(ctx, m)
 	case *UserMutation:
@@ -1065,6 +1095,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.UserDeletionAgent.mutate(ctx, m)
 	case *UserTerminalWorkspaceMutation:
 		return c.UserTerminalWorkspace.mutate(ctx, m)
+	case *WebhookEndpointMutation:
+		return c.WebhookEndpoint.mutate(ctx, m)
 	default:
 		return nil, fmt.Errorf("ent: unknown mutation type %T", m)
 	}
@@ -14382,6 +14414,405 @@ func (c *ThreadGroupMemberClient) mutate(ctx context.Context, m *ThreadGroupMemb
 	}
 }
 
+// TriggerClient is a client for the Trigger schema.
+type TriggerClient struct {
+	config
+}
+
+// NewTriggerClient returns a client for the Trigger from the given config.
+func NewTriggerClient(c config) *TriggerClient {
+	return &TriggerClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `trigger.Hooks(f(g(h())))`.
+func (c *TriggerClient) Use(hooks ...Hook) {
+	c.hooks.Trigger = append(c.hooks.Trigger, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `trigger.Intercept(f(g(h())))`.
+func (c *TriggerClient) Intercept(interceptors ...Interceptor) {
+	c.inters.Trigger = append(c.inters.Trigger, interceptors...)
+}
+
+// Create returns a builder for creating a Trigger entity.
+func (c *TriggerClient) Create() *TriggerCreate {
+	mutation := newTriggerMutation(c.config, OpCreate)
+	return &TriggerCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of Trigger entities.
+func (c *TriggerClient) CreateBulk(builders ...*TriggerCreate) *TriggerCreateBulk {
+	return &TriggerCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TriggerClient) MapCreateBulk(slice any, setFunc func(*TriggerCreate, int)) *TriggerCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TriggerCreateBulk{err: fmt.Errorf("calling to TriggerClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TriggerCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TriggerCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for Trigger.
+func (c *TriggerClient) Update() *TriggerUpdate {
+	mutation := newTriggerMutation(c.config, OpUpdate)
+	return &TriggerUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TriggerClient) UpdateOne(_m *Trigger) *TriggerUpdateOne {
+	mutation := newTriggerMutation(c.config, OpUpdateOne, withTrigger(_m))
+	return &TriggerUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TriggerClient) UpdateOneID(id uuid.UUID) *TriggerUpdateOne {
+	mutation := newTriggerMutation(c.config, OpUpdateOne, withTriggerID(id))
+	return &TriggerUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for Trigger.
+func (c *TriggerClient) Delete() *TriggerDelete {
+	mutation := newTriggerMutation(c.config, OpDelete)
+	return &TriggerDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TriggerClient) DeleteOne(_m *Trigger) *TriggerDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TriggerClient) DeleteOneID(id uuid.UUID) *TriggerDeleteOne {
+	builder := c.Delete().Where(trigger.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TriggerDeleteOne{builder}
+}
+
+// Query returns a query builder for Trigger.
+func (c *TriggerClient) Query() *TriggerQuery {
+	return &TriggerQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTrigger},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a Trigger entity by its id.
+func (c *TriggerClient) Get(ctx context.Context, id uuid.UUID) (*Trigger, error) {
+	return c.Query().Where(trigger.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TriggerClient) GetX(ctx context.Context, id uuid.UUID) *Trigger {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *TriggerClient) Hooks() []Hook {
+	return c.hooks.Trigger
+}
+
+// Interceptors returns the client interceptors.
+func (c *TriggerClient) Interceptors() []Interceptor {
+	return c.inters.Trigger
+}
+
+func (c *TriggerClient) mutate(ctx context.Context, m *TriggerMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TriggerCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TriggerUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TriggerUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TriggerDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown Trigger mutation op: %q", m.Op())
+	}
+}
+
+// TriggerEventClient is a client for the TriggerEvent schema.
+type TriggerEventClient struct {
+	config
+}
+
+// NewTriggerEventClient returns a client for the TriggerEvent from the given config.
+func NewTriggerEventClient(c config) *TriggerEventClient {
+	return &TriggerEventClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `triggerevent.Hooks(f(g(h())))`.
+func (c *TriggerEventClient) Use(hooks ...Hook) {
+	c.hooks.TriggerEvent = append(c.hooks.TriggerEvent, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `triggerevent.Intercept(f(g(h())))`.
+func (c *TriggerEventClient) Intercept(interceptors ...Interceptor) {
+	c.inters.TriggerEvent = append(c.inters.TriggerEvent, interceptors...)
+}
+
+// Create returns a builder for creating a TriggerEvent entity.
+func (c *TriggerEventClient) Create() *TriggerEventCreate {
+	mutation := newTriggerEventMutation(c.config, OpCreate)
+	return &TriggerEventCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of TriggerEvent entities.
+func (c *TriggerEventClient) CreateBulk(builders ...*TriggerEventCreate) *TriggerEventCreateBulk {
+	return &TriggerEventCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TriggerEventClient) MapCreateBulk(slice any, setFunc func(*TriggerEventCreate, int)) *TriggerEventCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TriggerEventCreateBulk{err: fmt.Errorf("calling to TriggerEventClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TriggerEventCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TriggerEventCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for TriggerEvent.
+func (c *TriggerEventClient) Update() *TriggerEventUpdate {
+	mutation := newTriggerEventMutation(c.config, OpUpdate)
+	return &TriggerEventUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TriggerEventClient) UpdateOne(_m *TriggerEvent) *TriggerEventUpdateOne {
+	mutation := newTriggerEventMutation(c.config, OpUpdateOne, withTriggerEvent(_m))
+	return &TriggerEventUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TriggerEventClient) UpdateOneID(id uuid.UUID) *TriggerEventUpdateOne {
+	mutation := newTriggerEventMutation(c.config, OpUpdateOne, withTriggerEventID(id))
+	return &TriggerEventUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for TriggerEvent.
+func (c *TriggerEventClient) Delete() *TriggerEventDelete {
+	mutation := newTriggerEventMutation(c.config, OpDelete)
+	return &TriggerEventDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TriggerEventClient) DeleteOne(_m *TriggerEvent) *TriggerEventDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TriggerEventClient) DeleteOneID(id uuid.UUID) *TriggerEventDeleteOne {
+	builder := c.Delete().Where(triggerevent.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TriggerEventDeleteOne{builder}
+}
+
+// Query returns a query builder for TriggerEvent.
+func (c *TriggerEventClient) Query() *TriggerEventQuery {
+	return &TriggerEventQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTriggerEvent},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a TriggerEvent entity by its id.
+func (c *TriggerEventClient) Get(ctx context.Context, id uuid.UUID) (*TriggerEvent, error) {
+	return c.Query().Where(triggerevent.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TriggerEventClient) GetX(ctx context.Context, id uuid.UUID) *TriggerEvent {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *TriggerEventClient) Hooks() []Hook {
+	return c.hooks.TriggerEvent
+}
+
+// Interceptors returns the client interceptors.
+func (c *TriggerEventClient) Interceptors() []Interceptor {
+	return c.inters.TriggerEvent
+}
+
+func (c *TriggerEventClient) mutate(ctx context.Context, m *TriggerEventMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TriggerEventCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TriggerEventUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TriggerEventUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TriggerEventDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown TriggerEvent mutation op: %q", m.Op())
+	}
+}
+
+// TriggerFireClient is a client for the TriggerFire schema.
+type TriggerFireClient struct {
+	config
+}
+
+// NewTriggerFireClient returns a client for the TriggerFire from the given config.
+func NewTriggerFireClient(c config) *TriggerFireClient {
+	return &TriggerFireClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `triggerfire.Hooks(f(g(h())))`.
+func (c *TriggerFireClient) Use(hooks ...Hook) {
+	c.hooks.TriggerFire = append(c.hooks.TriggerFire, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `triggerfire.Intercept(f(g(h())))`.
+func (c *TriggerFireClient) Intercept(interceptors ...Interceptor) {
+	c.inters.TriggerFire = append(c.inters.TriggerFire, interceptors...)
+}
+
+// Create returns a builder for creating a TriggerFire entity.
+func (c *TriggerFireClient) Create() *TriggerFireCreate {
+	mutation := newTriggerFireMutation(c.config, OpCreate)
+	return &TriggerFireCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of TriggerFire entities.
+func (c *TriggerFireClient) CreateBulk(builders ...*TriggerFireCreate) *TriggerFireCreateBulk {
+	return &TriggerFireCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TriggerFireClient) MapCreateBulk(slice any, setFunc func(*TriggerFireCreate, int)) *TriggerFireCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TriggerFireCreateBulk{err: fmt.Errorf("calling to TriggerFireClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TriggerFireCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TriggerFireCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for TriggerFire.
+func (c *TriggerFireClient) Update() *TriggerFireUpdate {
+	mutation := newTriggerFireMutation(c.config, OpUpdate)
+	return &TriggerFireUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TriggerFireClient) UpdateOne(_m *TriggerFire) *TriggerFireUpdateOne {
+	mutation := newTriggerFireMutation(c.config, OpUpdateOne, withTriggerFire(_m))
+	return &TriggerFireUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TriggerFireClient) UpdateOneID(id uuid.UUID) *TriggerFireUpdateOne {
+	mutation := newTriggerFireMutation(c.config, OpUpdateOne, withTriggerFireID(id))
+	return &TriggerFireUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for TriggerFire.
+func (c *TriggerFireClient) Delete() *TriggerFireDelete {
+	mutation := newTriggerFireMutation(c.config, OpDelete)
+	return &TriggerFireDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TriggerFireClient) DeleteOne(_m *TriggerFire) *TriggerFireDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TriggerFireClient) DeleteOneID(id uuid.UUID) *TriggerFireDeleteOne {
+	builder := c.Delete().Where(triggerfire.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TriggerFireDeleteOne{builder}
+}
+
+// Query returns a query builder for TriggerFire.
+func (c *TriggerFireClient) Query() *TriggerFireQuery {
+	return &TriggerFireQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTriggerFire},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a TriggerFire entity by its id.
+func (c *TriggerFireClient) Get(ctx context.Context, id uuid.UUID) (*TriggerFire, error) {
+	return c.Query().Where(triggerfire.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TriggerFireClient) GetX(ctx context.Context, id uuid.UUID) *TriggerFire {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *TriggerFireClient) Hooks() []Hook {
+	return c.hooks.TriggerFire
+}
+
+// Interceptors returns the client interceptors.
+func (c *TriggerFireClient) Interceptors() []Interceptor {
+	return c.inters.TriggerFire
+}
+
+func (c *TriggerFireClient) mutate(ctx context.Context, m *TriggerFireMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TriggerFireCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TriggerFireUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TriggerFireUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TriggerFireDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown TriggerFire mutation op: %q", m.Op())
+	}
+}
+
 // UsageReservationClient is a client for the UsageReservation schema.
 type UsageReservationClient struct {
 	config
@@ -15340,6 +15771,139 @@ func (c *UserTerminalWorkspaceClient) mutate(ctx context.Context, m *UserTermina
 	}
 }
 
+// WebhookEndpointClient is a client for the WebhookEndpoint schema.
+type WebhookEndpointClient struct {
+	config
+}
+
+// NewWebhookEndpointClient returns a client for the WebhookEndpoint from the given config.
+func NewWebhookEndpointClient(c config) *WebhookEndpointClient {
+	return &WebhookEndpointClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `webhookendpoint.Hooks(f(g(h())))`.
+func (c *WebhookEndpointClient) Use(hooks ...Hook) {
+	c.hooks.WebhookEndpoint = append(c.hooks.WebhookEndpoint, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `webhookendpoint.Intercept(f(g(h())))`.
+func (c *WebhookEndpointClient) Intercept(interceptors ...Interceptor) {
+	c.inters.WebhookEndpoint = append(c.inters.WebhookEndpoint, interceptors...)
+}
+
+// Create returns a builder for creating a WebhookEndpoint entity.
+func (c *WebhookEndpointClient) Create() *WebhookEndpointCreate {
+	mutation := newWebhookEndpointMutation(c.config, OpCreate)
+	return &WebhookEndpointCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of WebhookEndpoint entities.
+func (c *WebhookEndpointClient) CreateBulk(builders ...*WebhookEndpointCreate) *WebhookEndpointCreateBulk {
+	return &WebhookEndpointCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *WebhookEndpointClient) MapCreateBulk(slice any, setFunc func(*WebhookEndpointCreate, int)) *WebhookEndpointCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &WebhookEndpointCreateBulk{err: fmt.Errorf("calling to WebhookEndpointClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*WebhookEndpointCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &WebhookEndpointCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for WebhookEndpoint.
+func (c *WebhookEndpointClient) Update() *WebhookEndpointUpdate {
+	mutation := newWebhookEndpointMutation(c.config, OpUpdate)
+	return &WebhookEndpointUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *WebhookEndpointClient) UpdateOne(_m *WebhookEndpoint) *WebhookEndpointUpdateOne {
+	mutation := newWebhookEndpointMutation(c.config, OpUpdateOne, withWebhookEndpoint(_m))
+	return &WebhookEndpointUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *WebhookEndpointClient) UpdateOneID(id uuid.UUID) *WebhookEndpointUpdateOne {
+	mutation := newWebhookEndpointMutation(c.config, OpUpdateOne, withWebhookEndpointID(id))
+	return &WebhookEndpointUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for WebhookEndpoint.
+func (c *WebhookEndpointClient) Delete() *WebhookEndpointDelete {
+	mutation := newWebhookEndpointMutation(c.config, OpDelete)
+	return &WebhookEndpointDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *WebhookEndpointClient) DeleteOne(_m *WebhookEndpoint) *WebhookEndpointDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *WebhookEndpointClient) DeleteOneID(id uuid.UUID) *WebhookEndpointDeleteOne {
+	builder := c.Delete().Where(webhookendpoint.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &WebhookEndpointDeleteOne{builder}
+}
+
+// Query returns a query builder for WebhookEndpoint.
+func (c *WebhookEndpointClient) Query() *WebhookEndpointQuery {
+	return &WebhookEndpointQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeWebhookEndpoint},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a WebhookEndpoint entity by its id.
+func (c *WebhookEndpointClient) Get(ctx context.Context, id uuid.UUID) (*WebhookEndpoint, error) {
+	return c.Query().Where(webhookendpoint.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *WebhookEndpointClient) GetX(ctx context.Context, id uuid.UUID) *WebhookEndpoint {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *WebhookEndpointClient) Hooks() []Hook {
+	return c.hooks.WebhookEndpoint
+}
+
+// Interceptors returns the client interceptors.
+func (c *WebhookEndpointClient) Interceptors() []Interceptor {
+	return c.inters.WebhookEndpoint
+}
+
+func (c *WebhookEndpointClient) mutate(ctx context.Context, m *WebhookEndpointMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&WebhookEndpointCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&WebhookEndpointUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&WebhookEndpointUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&WebhookEndpointDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown WebhookEndpoint mutation op: %q", m.Op())
+	}
+}
+
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
@@ -15366,8 +15930,9 @@ type (
 		ScheduledExecPollCursor, ScheduledExecRun, Secret, Skill, SkillInjection,
 		SkillRegistry, SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
 		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
-		ThreadGroupMember, UsageReservation, User, UserAccessToken, UserDeletion,
-		UserDeletionAgent, UserTerminalWorkspace []ent.Hook
+		ThreadGroupMember, Trigger, TriggerEvent, TriggerFire, UsageReservation, User,
+		UserAccessToken, UserDeletion, UserDeletionAgent, UserTerminalWorkspace,
+		WebhookEndpoint []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -15393,7 +15958,8 @@ type (
 		ScheduledExecPollCursor, ScheduledExecRun, Secret, Skill, SkillInjection,
 		SkillRegistry, SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
 		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
-		ThreadGroupMember, UsageReservation, User, UserAccessToken, UserDeletion,
-		UserDeletionAgent, UserTerminalWorkspace []ent.Interceptor
+		ThreadGroupMember, Trigger, TriggerEvent, TriggerFire, UsageReservation, User,
+		UserAccessToken, UserDeletion, UserDeletionAgent, UserTerminalWorkspace,
+		WebhookEndpoint []ent.Interceptor
 	}
 )

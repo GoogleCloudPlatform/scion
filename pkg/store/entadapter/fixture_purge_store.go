@@ -25,7 +25,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/webhookendpoint"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -74,6 +76,30 @@ func (c *CompositeStore) ListFixtureRootedResources(ctx context.Context, rootID 
 	}
 	for _, sc := range schedules[:trim(len(schedules))] {
 		out.Schedules = append(out.Schedules, *entScheduleToStore(sc))
+	}
+
+	tq := c.client.Trigger.Query().Where(trigger.FixtureRootIDEQ(root)).Order(trigger.ByID())
+	if fetch > 0 {
+		tq = tq.Limit(fetch)
+	}
+	triggers, err := tq.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for _, tr := range triggers[:trim(len(triggers))] {
+		out.Triggers = append(out.Triggers, *entTriggerToStore(tr))
+	}
+
+	wq := c.client.WebhookEndpoint.Query().Where(webhookendpoint.FixtureRootIDEQ(root)).Order(webhookendpoint.ByID())
+	if fetch > 0 {
+		wq = wq.Limit(fetch)
+	}
+	endpoints, err := wq.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for _, ep := range endpoints[:trim(len(endpoints))] {
+		out.WebhookEndpoints = append(out.WebhookEndpoints, *entWebhookEndpointToStore(ep))
 	}
 
 	gq := c.client.Group.Query().Where(group.FixtureRootIDEQ(root)).Order(group.ByID())
@@ -212,6 +238,44 @@ func (c *CompositeStore) ListFixtureRoots(ctx context.Context, issuerID, afterRo
 	}
 	for _, sc := range schedules {
 		add(sc.FixtureRootID, sc.FixtureIssuerID)
+	}
+
+	tq := c.client.Trigger.Query().Where(trigger.FixtureRootIDNotNil(), trigger.FixtureIssuerIDNotNil())
+	if issuer != nil {
+		tq = tq.Where(trigger.FixtureIssuerIDEQ(*issuer))
+	}
+	if after != nil {
+		tq = tq.Where(trigger.FixtureRootIDGT(*after))
+	}
+	tq = tq.Unique(true).Order(trigger.ByFixtureRootID())
+	if fetch > 0 {
+		tq = tq.Limit(fetch)
+	}
+	triggers, err := tq.Select(trigger.FieldFixtureRootID, trigger.FieldFixtureIssuerID).All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	for _, tr := range triggers {
+		add(tr.FixtureRootID, tr.FixtureIssuerID)
+	}
+
+	wq := c.client.WebhookEndpoint.Query().Where(webhookendpoint.FixtureRootIDNotNil(), webhookendpoint.FixtureIssuerIDNotNil())
+	if issuer != nil {
+		wq = wq.Where(webhookendpoint.FixtureIssuerIDEQ(*issuer))
+	}
+	if after != nil {
+		wq = wq.Where(webhookendpoint.FixtureRootIDGT(*after))
+	}
+	wq = wq.Unique(true).Order(webhookendpoint.ByFixtureRootID())
+	if fetch > 0 {
+		wq = wq.Limit(fetch)
+	}
+	endpoints, err := wq.Select(webhookendpoint.FieldFixtureRootID, webhookendpoint.FieldFixtureIssuerID).All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	for _, ep := range endpoints {
+		add(ep.FixtureRootID, ep.FixtureIssuerID)
 	}
 
 	gq := c.client.Group.Query().Where(group.FixtureRootIDNotNil(), group.FixtureIssuerIDNotNil())

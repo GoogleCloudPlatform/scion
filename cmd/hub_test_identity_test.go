@@ -379,7 +379,7 @@ func TestHubTestIdentityPurge(t *testing.T) {
 	require.Len(t, done.queries, 1)
 	assert.Equal(t, "purge=true", done.queries[0])
 	assert.Nil(t, done.bodies[0], "purge sends no body")
-	assert.Equal(t, "Purge of test identity fx-1: removed 3 agents, 1 schedules, 1 groups, 1 projects.\n"+
+	assert.Equal(t, "Purge of test identity fx-1: removed 3 agents, 1 schedules, 0 triggers, 0 webhook endpoints, 1 groups, 1 projects.\n"+
 		"Deleted test identity fx-1.\n"+
 		"  kept project p-2 (non_fixture_owner); the identity's access was removed\n", stdout.String())
 

@@ -1,0 +1,360 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hubclient
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+)
+
+// TriggerListScopeCaller indicates that a trigger or webhook-endpoint list
+// response is filtered to rows owned or held by the calling agent.
+const TriggerListScopeCaller = "caller"
+
+// WebhookEndpointService handles webhook endpoint operations scoped to a project.
+type WebhookEndpointService interface {
+	// Create creates a new webhook endpoint and returns its one-time signing secret.
+	Create(ctx context.Context, req *CreateWebhookEndpointRequest) (*WebhookEndpointCreated, error)
+
+	// Get retrieves a webhook endpoint by ID (never includes the signing secret).
+	Get(ctx context.Context, id string) (*WebhookEndpoint, error)
+
+	// List returns webhook endpoints matching the filter criteria.
+	List(ctx context.Context, opts *ListWebhookEndpointsOptions) (*ListWebhookEndpointsResponse, error)
+
+	// Delete deletes a webhook endpoint and pauses its active dependent triggers.
+	Delete(ctx context.Context, id string) error
+}
+
+// TriggerService handles trigger definition operations scoped to a project.
+type TriggerService interface {
+	// Create creates a new trigger definition.
+	Create(ctx context.Context, req *CreateTriggerRequest) (*Trigger, error)
+
+	// Get retrieves a trigger definition by ID.
+	Get(ctx context.Context, id string) (*Trigger, error)
+
+	// List returns trigger definitions matching the filter criteria.
+	List(ctx context.Context, opts *ListTriggersOptions) (*ListTriggersResponse, error)
+
+	// Update updates a trigger definition.
+	Update(ctx context.Context, id string, req *UpdateTriggerRequest) (*Trigger, error)
+
+	// Delete deletes a trigger definition.
+	Delete(ctx context.Context, id string) error
+
+	// Pause pauses an active trigger definition.
+	Pause(ctx context.Context, id string) (*Trigger, error)
+
+	// Resume resumes a paused trigger definition.
+	Resume(ctx context.Context, id string) (*Trigger, error)
+}
+
+type webhookEndpointService struct {
+	c         *client
+	projectID string
+}
+
+func (s *webhookEndpointService) basePath() string {
+	return fmt.Sprintf("/api/v1/projects/%s/webhook-endpoints", url.PathEscape(s.projectID))
+}
+
+type triggerService struct {
+	c         *client
+	projectID string
+}
+
+func (s *triggerService) basePath() string {
+	return fmt.Sprintf("/api/v1/projects/%s/triggers", url.PathEscape(s.projectID))
+}
+
+// CreateWebhookEndpointRequest is the client-side request for creating a webhook endpoint.
+type CreateWebhookEndpointRequest struct {
+	Name          string `json:"name"`
+	Description   string `json:"description,omitempty"`
+	SignatureMode string `json:"signatureMode,omitempty"`
+}
+
+// WebhookEndpoint represents a webhook endpoint returned by GET and LIST routes.
+type WebhookEndpoint struct {
+	ID             string     `json:"id"`
+	ProjectID      string     `json:"projectId"`
+	Name           string     `json:"name"`
+	Description    string     `json:"description,omitempty"`
+	URL            string     `json:"url"`
+	SignatureMode  string     `json:"signatureMode"`
+	SecretVersion  int        `json:"secretVersion"`
+	Status         string     `json:"status"`
+	LastReceivedAt *time.Time `json:"lastReceivedAt,omitempty"`
+	ReceiveCount   int        `json:"receiveCount"`
+	RejectCount    int        `json:"rejectCount"`
+	CreatedBy      string     `json:"createdBy,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
+}
+
+// WebhookEndpointCreated is returned once when creating a webhook endpoint.
+type WebhookEndpointCreated struct {
+	WebhookEndpoint
+	Secret string `json:"secret"`
+}
+
+// ListWebhookEndpointsOptions configures webhook endpoint listing.
+type ListWebhookEndpointsOptions struct {
+	Name   string
+	Status string
+	Page   apiclient.PageOptions
+}
+
+// ListWebhookEndpointsResponse is the response from listing webhook endpoints.
+type ListWebhookEndpointsResponse struct {
+	Scope      string            `json:"scope,omitempty"`
+	Endpoints  []WebhookEndpoint `json:"endpoints"`
+	NextCursor string            `json:"nextCursor,omitempty"`
+	TotalCount int               `json:"totalCount,omitempty"`
+	ServerTime time.Time         `json:"serverTime"`
+}
+
+// TriggerSourceSpec identifies the event source of a trigger.
+type TriggerSourceSpec struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+// TriggerMatchSpec holds the event-type filter and optional match expression.
+type TriggerMatchSpec struct {
+	Types   []string `json:"types,omitempty"`
+	Dialect string   `json:"dialect,omitempty"`
+	Expr    string   `json:"expr,omitempty"`
+}
+
+// TriggerMatchPatchSpec holds partial updates to a trigger's match block.
+type TriggerMatchPatchSpec struct {
+	Types   *[]string `json:"types,omitempty"`
+	Dialect *string   `json:"dialect,omitempty"`
+	Expr    *string   `json:"expr,omitempty"`
+}
+
+// TriggerActionSpec holds the action executed when a trigger matches.
+type TriggerActionSpec struct {
+	Type      string `json:"type"`
+	AgentID   string `json:"agentId,omitempty"`
+	AgentName string `json:"agentName,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Interrupt bool   `json:"interrupt,omitempty"`
+	Plain     bool   `json:"plain,omitempty"`
+	Wake      bool   `json:"wake,omitempty"`
+}
+
+// TriggerSubjectSpec configures per-subject handling for a trigger.
+type TriggerSubjectSpec struct {
+	Dialect string `json:"dialect,omitempty"`
+	Expr    string `json:"expr,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+}
+
+// TriggerSubjectPatchSpec holds partial updates to a trigger's subject block.
+type TriggerSubjectPatchSpec struct {
+	Dialect *string `json:"dialect,omitempty"`
+	Expr    *string `json:"expr,omitempty"`
+	Mode    *string `json:"mode,omitempty"`
+}
+
+// Trigger represents a trigger definition returned by the Hub API.
+type Trigger struct {
+	ID                    string             `json:"id"`
+	ProjectID             string             `json:"projectId"`
+	Name                  string             `json:"name"`
+	Description           string             `json:"description,omitempty"`
+	Source                TriggerSourceSpec  `json:"source"`
+	Match                 TriggerMatchSpec   `json:"match"`
+	Action                TriggerActionSpec  `json:"action"`
+	Subject               TriggerSubjectSpec `json:"subject"`
+	Status                string             `json:"status"`
+	StatusReason          string             `json:"statusReason,omitempty"`
+	AuthorizationRevision int                `json:"authorizationRevision"`
+	LastFireAt            *time.Time         `json:"lastFireAt,omitempty"`
+	LastFireStatus        string             `json:"lastFireStatus,omitempty"`
+	LastFireError         string             `json:"lastFireError,omitempty"`
+	FireCount             int                `json:"fireCount"`
+	ErrorCount            int                `json:"errorCount"`
+	CreatedBy             string             `json:"createdBy,omitempty"`
+	CreatedAt             time.Time          `json:"createdAt"`
+	UpdatedAt             time.Time          `json:"updatedAt"`
+}
+
+// CreateTriggerRequest is the client-side request for creating a trigger.
+type CreateTriggerRequest struct {
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	Source      TriggerSourceSpec   `json:"source"`
+	Match       *TriggerMatchSpec   `json:"match,omitempty"`
+	Action      TriggerActionSpec   `json:"action"`
+	Subject     *TriggerSubjectSpec `json:"subject,omitempty"`
+}
+
+// UpdateTriggerRequest is the client-side request for updating a trigger.
+type UpdateTriggerRequest struct {
+	Name             *string                  `json:"name,omitempty"`
+	Description      *string                  `json:"description,omitempty"`
+	Source           *TriggerSourceSpec       `json:"source,omitempty"`
+	Match            *TriggerMatchPatchSpec   `json:"match,omitempty"`
+	Action           *TriggerActionSpec       `json:"action,omitempty"`
+	Subject          *TriggerSubjectPatchSpec `json:"subject,omitempty"`
+	ExpectedRevision *int                     `json:"expectedRevision,omitempty"`
+	IfMatch          string                   `json:"-"`
+}
+
+// ListTriggersOptions configures trigger listing.
+type ListTriggersOptions struct {
+	Name     string
+	Source   string
+	SourceID string
+	Status   string
+	Page     apiclient.PageOptions
+}
+
+// ListTriggersResponse is the response from listing triggers.
+type ListTriggersResponse struct {
+	Scope      string    `json:"scope,omitempty"`
+	Triggers   []Trigger `json:"triggers"`
+	NextCursor string    `json:"nextCursor,omitempty"`
+	TotalCount int       `json:"totalCount,omitempty"`
+	ServerTime time.Time `json:"serverTime"`
+}
+
+func (s *webhookEndpointService) Create(ctx context.Context, req *CreateWebhookEndpointRequest) (*WebhookEndpointCreated, error) {
+	resp, err := s.c.post(ctx, s.basePath(), req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[WebhookEndpointCreated](resp)
+}
+
+func (s *webhookEndpointService) Get(ctx context.Context, id string) (*WebhookEndpoint, error) {
+	resp, err := s.c.get(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[WebhookEndpoint](resp)
+}
+
+func (s *webhookEndpointService) List(ctx context.Context, opts *ListWebhookEndpointsOptions) (*ListWebhookEndpointsResponse, error) {
+	query := url.Values{}
+	if opts != nil {
+		if opts.Name != "" {
+			query.Set("name", opts.Name)
+		}
+		if opts.Status != "" {
+			query.Set("status", opts.Status)
+		}
+		opts.Page.ToQuery(query)
+	}
+	resp, err := s.c.getWithQuery(ctx, s.basePath(), query, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ListWebhookEndpointsResponse](resp)
+}
+
+func (s *webhookEndpointService) Delete(ctx context.Context, id string) error {
+	resp, err := s.c.delete(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+func (s *triggerService) Create(ctx context.Context, req *CreateTriggerRequest) (*Trigger, error) {
+	resp, err := s.c.post(ctx, s.basePath(), req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[Trigger](resp)
+}
+
+func (s *triggerService) Get(ctx context.Context, id string) (*Trigger, error) {
+	resp, err := s.c.get(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[Trigger](resp)
+}
+
+func (s *triggerService) List(ctx context.Context, opts *ListTriggersOptions) (*ListTriggersResponse, error) {
+	query := url.Values{}
+	if opts != nil {
+		if opts.Name != "" {
+			query.Set("name", opts.Name)
+		}
+		if opts.Source != "" {
+			query.Set("source", opts.Source)
+		}
+		if opts.SourceID != "" {
+			query.Set("sourceId", opts.SourceID)
+		}
+		if opts.Status != "" {
+			query.Set("status", opts.Status)
+		}
+		opts.Page.ToQuery(query)
+	}
+	resp, err := s.c.getWithQuery(ctx, s.basePath(), query, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ListTriggersResponse](resp)
+}
+
+func (s *triggerService) Update(ctx context.Context, id string, req *UpdateTriggerRequest) (*Trigger, error) {
+	var headers http.Header
+	if req != nil && req.IfMatch != "" {
+		headers = http.Header{}
+		headers.Set("If-Match", req.IfMatch)
+	}
+	resp, err := s.c.patch(ctx, s.basePath()+"/"+url.PathEscape(id), req, headers)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[Trigger](resp)
+}
+
+func (s *triggerService) Delete(ctx context.Context, id string) error {
+	resp, err := s.c.delete(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+func (s *triggerService) Pause(ctx context.Context, id string) (*Trigger, error) {
+	resp, err := s.c.post(ctx, s.basePath()+"/"+url.PathEscape(id)+"/pause", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[Trigger](resp)
+}
+
+func (s *triggerService) Resume(ctx context.Context, id string) (*Trigger, error) {
+	resp, err := s.c.post(ctx, s.basePath()+"/"+url.PathEscape(id)+"/resume", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[Trigger](resp)
+}

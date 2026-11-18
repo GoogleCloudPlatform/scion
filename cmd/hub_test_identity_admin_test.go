@@ -498,7 +498,7 @@ func TestHubTestIdentityResidue_Golden(t *testing.T) {
 	hub := &tiAdminHub{residueBody: `{"identityId":"ta-1","issuanceId":"iss-1",` +
 		`"stampedGrants":[{"kind":"role_binding","id":"rb-1","roleDefinitionId":"project-admin","principalType":"user","principalId":"u-2","scopeType":"project","scopeId":"p-1","expiresAt":"2026-10-15T11:00:00Z"},` +
 		`{"kind":"group_membership","id":"gm-1","principalType":"user","principalId":"u-3","groupId":"g-1"}],` +
-		`"stampedResources":{"agents":["ag-1"],"schedules":[],"groups":["g-2"],"projects":["p-1"]},` +
+		`"stampedResources":{"agents":["ag-1"],"schedules":[],"triggers":["tr-1"],"webhookEndpoints":["ep-1"],"groups":["g-2"],"projects":["p-1"]},` +
 		`"unstampedChanges":[{"mutationType":"user_suspend","targetType":"user","targetId":"u-4","actorKind":"user","actorId":"ta-1","timestamp":"2026-10-15T10:05:00Z"}],` +
 		`"keptRoles":[{"kind":"role_definition","id":"rd-1","name":"ops","boundOutsideIssuance":true}],"truncated":true,"limit":"complete only as far as the mutation audit"}`}
 	var stdout bytes.Buffer
@@ -508,8 +508,10 @@ func TestHubTestIdentityResidue_Golden(t *testing.T) {
 		"Stamped grants (removed by a purge): 2\n" +
 		"  role_binding rb-1 role=project-admin principal=user:u-2 scope=project:p-1 expires=2026-10-15T11:00:00Z\n" +
 		"  group_membership gm-1 principal=user:u-3 group=g-1\n" +
-		"Stamped resources (removed by a purge): 1 agents, 0 schedules, 1 groups, 1 projects\n" +
+		"Stamped resources (removed by a purge): 1 agents, 0 schedules, 1 triggers, 1 webhook endpoints, 1 groups, 1 projects\n" +
 		"  agent ag-1\n" +
+		"  trigger tr-1\n" +
+		"  webhook_endpoint ep-1\n" +
 		"  group g-2\n" +
 		"  project p-1\n" +
 		"Changes to rows without its stamp (reported, never reverted): 1\n" +
