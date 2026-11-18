@@ -474,3 +474,64 @@ func TestGCPSAStatus_WIBinding_DeleteSAInvalidatesCache(t *testing.T) {
 	assert.Equal(t, GCPSABindingNotBound, stAfter.WorkloadIdentityBinding.State)
 	assert.Equal(t, "not_bound", stAfter.NextStep.Code)
 }
+
+// End-to-end with P2 hub-scoped mint (POST /api/v1/gcp-service-accounts/mint?scope=hub)
+// and hub-scoped delete (DELETE /api/v1/gcp-service-accounts/{id}): cache
+// invalidation covers hub-scoped mint entry, AddRoleMembers attempts (success
+// or failure), and hub-scoped deletion.
+func TestGCPSAStatus_WIBinding_HubScopedMintAndDeleteInvalidatesCache(t *testing.T) {
+	now := withWIBindingClock(t, time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC))
+	srv, s, mock, admin, _ := setupHubMintTest(t)
+	setWorkloadIdentitySetupExperiment(t, srv, true)
+
+	const hubEmail = "scion-wi-hub@test-hub-project.iam.gserviceaccount.com"
+	recProj := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+		Name: "WI Hub Mint Status " + t.Name(),
+	})
+	require.Equal(t, http.StatusCreated, recProj.Code, recProj.Body.String())
+	var createdProj store.Project
+	require.NoError(t, json.Unmarshal(recProj.Body.Bytes(), &createdProj))
+	projectID := createdProj.ID
+
+	b := addProviderBroker(t, s, projectID, "a", authoritativeProfile("gke", hubEmail))
+	require.NoError(t, s.UpdateRuntimeBrokerHeartbeat(context.Background(), b.ID, store.BrokerStatusOnline))
+	setWorkloadIdentityTargets(t, s, b.ID, true, []store.WorkloadIdentityTarget{
+		{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"},
+	})
+
+	// Seed a stale empty entry for hubEmail before minting: hubWorkloadIdentityBindings
+	// and addWorkloadIdentityMembers must invalidate it.
+	srv.wiRoleMembersCache.put(hubEmail, map[string]bool{}, *now)
+
+	minted, _ := mintHubForWI(t, srv, admin)
+	require.Equal(t, hubEmail, minted.Email)
+
+	getAsAdmin := func(saID string) GCPServiceAccountStatus {
+		rec := doRequestAsUser(t, srv, admin, http.MethodGet, statusPath(projectID, saID), nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var st GCPServiceAccountStatus
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st))
+		return st
+	}
+
+	st := getAsAdmin(minted.ID)
+	require.Len(t, mock.roleMembersCalls, 1, "pre-mint cache entry was invalidated")
+	assert.Equal(t, GCPSABindingBound, st.WorkloadIdentityBinding.State)
+	assert.Equal(t, GCPSANextStepNone, st.NextStep.Code)
+
+	// Delete the hub-scoped registration via the flat DELETE route, simulate
+	// out-of-band GCP SA deletion (clear stored IAM members), and re-mint the
+	// same account ID within the 60s window while IAM grant fails (403).
+	delRec := doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/gcp-service-accounts/"+minted.ID, nil)
+	require.Equal(t, http.StatusOK, delRec.Code, delRec.Body.String())
+	mock.setRoleMembers(hubEmail, roleWorkloadIdentityUser, nil)
+	mock.addMembersErr = func(int, []string) error {
+		return &googleapi.Error{Code: http.StatusForbidden, Message: "denied"}
+	}
+
+	reminted, _ := mintHubForWI(t, srv, admin)
+	stAfter := getAsAdmin(reminted.ID)
+	assert.Len(t, mock.roleMembersCalls, 2, "hub-scoped delete and failed grant invalidated the cached bound set")
+	assert.Equal(t, GCPSABindingNotBound, stAfter.WorkloadIdentityBinding.State)
+	assert.Equal(t, GCPSANextStepNotBound, stAfter.NextStep.Code)
+}
