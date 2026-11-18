@@ -42,6 +42,7 @@ import {
   type ScionHeader,
 } from './header.js';
 import { CHAT_UNREAD_COUNT_EVENT, chatUnread } from '../../client/chat-unread.js';
+import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
 import { resetServerFlagStateForTests, setServerFlags } from '../../utils/feature-flags.js';
 import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
@@ -992,7 +993,7 @@ describe('view mode shortcuts', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  it('Ctrl+1, Ctrl+2 and Ctrl+3 switch to Console, Chat and Terminal', async () => {
+  it('Ctrl+1, Ctrl+2 and Ctrl+3 switch to Console, Chat and Terminals', async () => {
     await mountHeader({ currentPath: '/projects/p1' });
 
     press(document.body, { code: 'Digit2', key: '2', ctrlKey: true });
@@ -1435,5 +1436,76 @@ describe('mode switcher: Console label and distinct icon', () => {
     const homeLink = nav.shadowRoot?.querySelector('a.nav-link[href="/"]');
     expect(homeLink?.querySelector('.nav-link-text')?.textContent?.trim()).toBe('Dashboard');
     expect(homeLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('house');
+  });
+});
+
+describe('mode switcher: Terminals label', () => {
+  afterEach(() => {
+    window.dispatchEvent(new CustomEvent(TERMINAL_SESSION_COUNT_EVENT, { detail: { count: 0 } }));
+  });
+
+  it('labels the segmented mode button Terminals in wide and medium tiers', async () => {
+    const el = await mountHeader({ currentPath: '/projects/p1' });
+    const switches = Array.from(el.shadowRoot?.querySelectorAll('.mode-switch') ?? []);
+    expect(switches).toHaveLength(2);
+
+    for (const sw of switches) {
+      const buttons = sw.querySelectorAll('button');
+      const terminalsButton = buttons[buttons.length - 1];
+      expect(terminalsButton?.getAttribute('aria-label')).toBe('Terminals (0)');
+      expect(terminalsButton?.querySelector('.mode-label')?.textContent?.trim()).toBe('Terminals');
+      expect(terminalsButton?.querySelector('sl-icon')?.getAttribute('name')).toBe('terminal');
+    }
+
+    window.dispatchEvent(new CustomEvent(TERMINAL_SESSION_COUNT_EVENT, { detail: { count: 2 } }));
+    await el.updateComplete;
+
+    for (const sw of switches) {
+      const buttons = sw.querySelectorAll('button');
+      const terminalsButton = buttons[buttons.length - 1];
+      expect(terminalsButton?.getAttribute('aria-label')).toBe('Terminals (2)');
+      expect(terminalsButton?.querySelector('.mode-label')?.textContent?.trim()).toBe('Terminals');
+    }
+  });
+
+  it('labels the narrow-tier dropdown trigger and menu item Terminals across terminal routes while keeping value="terminals"', async () => {
+    for (const currentPath of [
+      '/terminals',
+      '/terminals/00000000-0000-0000-0000-000000000001',
+      '/terminals?lv=1&lp=two-columns&s0=&s1=',
+    ]) {
+      const el = await mountHeader({ currentPath });
+      const dropdown = el.shadowRoot?.querySelector('.compact-mode-dropdown');
+      const triggerIcon = dropdown?.querySelector('.mode-trigger .mode-icon sl-icon');
+      const triggerLabel = dropdown?.querySelector('.mode-trigger .mode-dropdown-label');
+      expect(triggerIcon?.getAttribute('name')).toBe('terminal');
+      expect(triggerLabel?.textContent?.trim()).toBe('Terminals');
+
+      const item = dropdown?.querySelector('sl-menu-item[value="terminals"]');
+      expect(item).not.toBeNull();
+      expect(item?.querySelector('sl-icon[slot="prefix"]')?.getAttribute('name')).toBe('terminal');
+      const directText = Array.from(item?.childNodes ?? [])
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent ?? '')
+        .join('')
+        .trim();
+      expect(directText).toBe('Terminals');
+      el.remove();
+    }
+
+    // Also verify the menu item direct text stays "Terminals" when the suffix count badge renders.
+    const el = await mountHeader({ currentPath: '/' });
+    window.dispatchEvent(new CustomEvent(TERMINAL_SESSION_COUNT_EVENT, { detail: { count: 3 } }));
+    await el.updateComplete;
+    const item = el.shadowRoot?.querySelector(
+      '.compact-mode-dropdown sl-menu-item[value="terminals"]'
+    );
+    const directText = Array.from(item?.childNodes ?? [])
+      .filter((n) => n.nodeType === Node.TEXT_NODE)
+      .map((n) => n.textContent ?? '')
+      .join('')
+      .trim();
+    expect(directText).toBe('Terminals');
+    expect(item?.querySelector('.count-badge')?.textContent?.trim()).toBe('3');
   });
 });

@@ -191,7 +191,7 @@ export class ScionHeader extends LitElement {
          below what it holds. With minmax(0, 1fr) it could collapse toward
          zero while its flex contents kept full width, and because it is
          justify-self:end the overflow spilled leftward across the centre
-         column — landing the unread badges on top of the "Terminal" label.
+         column — landing the unread badges on top of the "Terminals" label.
          The title column keeps the 0 floor and truncates instead, since it
          is the one element here that can lose characters harmlessly. */
       grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr);
@@ -995,7 +995,7 @@ export class ScionHeader extends LitElement {
 
   /**
    * Inline segmented control for switching between Console / Chat /
-   * Terminal modes. Used in the wide center column (with labels) and in
+   * Terminals modes. Used in the wide center column (with labels) and in
    * the compact tier (icon-only via CSS).
    */
   private renderModeSwitch(): TemplateResult {
@@ -1054,7 +1054,7 @@ export class ScionHeader extends LitElement {
             aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
           >
             <sl-icon name="terminal"></sl-icon>
-            <span class="mode-label">Terminal</span>
+            <span class="mode-label">Terminals</span>
           </button>
         </sl-tooltip>
       </div>
@@ -1066,7 +1066,7 @@ export class ScionHeader extends LitElement {
   // =========================================================================
 
   /**
-   * Dropdown for switching between Console / Chat / Terminal modes.
+   * Dropdown for switching between Console / Chat / Terminals modes.
    */
   private renderModeDropdown(): TemplateResult {
     const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
@@ -1118,7 +1118,7 @@ export class ScionHeader extends LitElement {
             : ''}
           <sl-menu-item value="terminals" ?checked=${isTerminal}>
             <sl-icon slot="prefix" name="terminal"></sl-icon>
-            Terminal
+            Terminals
             ${this.terminalSessionCount > 0
               ? html`<span slot="suffix" class="count-badge">${this.terminalSessionCount}</span>`
               : ''}
@@ -1162,7 +1162,7 @@ export class ScionHeader extends LitElement {
   /** Icon and label for the currently active mode. */
   private getCurrentMode(): { icon: string; label: string } {
     if (this.isChatView()) return { icon: 'chat-dots', label: 'Chat' };
-    if (this.isTerminalView()) return { icon: 'terminal', label: 'Terminal' };
+    if (this.isTerminalView()) return { icon: 'terminal', label: 'Terminals' };
     return { icon: 'grid-1x2', label: 'Console' };
   }
 

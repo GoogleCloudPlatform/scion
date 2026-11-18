@@ -15,7 +15,7 @@
  */
 
 /**
- * Keyboard shortcuts for the Console / Chat / Terminal view modes:
+ * Keyboard shortcuts for the Console / Chat / Terminals view modes:
  * Cmd+1/2/3 on macOS, Ctrl+1/2/3 elsewhere.
  *
  * Keys are matched on `event.code` (the physical digit key), so the chord

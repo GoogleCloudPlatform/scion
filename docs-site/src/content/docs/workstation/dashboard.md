@@ -21,15 +21,15 @@ The dashboard features an integrated notification framework with real-time SSE d
 - **Browser Push Notifications**: Opt-in native browser push notifications ensure you receive alerts even when the dashboard is in the background. Default triggers include `stalled` and `error` states, as well as requests for user input.
 
 ### Mode Switcher
-The header features a **mode switcher** that lets you move between the top-level workspaces: **Console**, **Chat**, and **Terminal** (**Console** holds the left-hand navigation, including the **Dashboard** overview page at `/`). The header adapts to the viewport width in three tiers:
+The header features a **mode switcher** that lets you move between the top-level workspaces: **Console**, **Chat**, and **Terminals** (**Console** holds the left-hand navigation, including the **Dashboard** overview page at `/`). The header adapts to the viewport width in three tiers:
 
 - **Wide (above 1100 px)**: A segmented mode switcher with text labels and icons, with inline buttons for notifications, help, theme, profile, and sign-out.
 - **Medium (768–1100 px)**: The mode switcher shows icons only. Notifications, help, theme, profile, and sign-out move into a single account dropdown. A badge dot on the dropdown shows unread notifications.
 - **Narrow (below 768 px)**: The mode switcher becomes a dropdown, next to the account dropdown and a hamburger menu.
 
-Notifications stay reachable at every width. The Chat entry shows the unread conversation count, and the Terminal entry shows how many terminal sessions are open.
+Notifications stay reachable at every width. The Chat entry shows the unread conversation count, and the Terminals entry shows how many terminal sessions are open.
 
-**Keyboard shortcuts**: Cmd+1, Cmd+2 and Cmd+3 on macOS (Ctrl+1, Ctrl+2 and Ctrl+3 elsewhere) switch to Console, Chat and Terminal. The shortcuts use the physical digit keys, so they are the same on every keyboard layout. They are on by default; turn them off with the **View mode shortcuts** switch on your profile settings page. The setting is stored in the browser.
+**Keyboard shortcuts**: Cmd+1, Cmd+2 and Cmd+3 on macOS (Ctrl+1, Ctrl+2 and Ctrl+3 elsewhere) switch to Console, Chat and Terminals. The shortcuts use the physical digit keys, so they are the same on every keyboard layout. They are on by default; turn them off with the **View mode shortcuts** switch on your profile settings page. The setting is stored in the browser.
 
 The web UI also works on phones, down to 320 px wide and in landscape, including notched screens and the on-screen keyboard. Wide code blocks and tables scroll sideways on their own instead of widening the page, and a sideways swipe does not trigger the browser's Back gesture.
 
@@ -39,7 +39,7 @@ The dashboard shows clock times in 24-hour format. The **Display timezone** card
 ### Native Web Chat
 When enabled via the `web.native_chat` feature flag, the dashboard includes a top-level **Native Web Chat** workspace (a fourth ShellType in the SPA). It offers a rich interface for direct communication and coordination with your running agents and team.
 - **Project-Scoped Spaces & Shared Threads**: Conversations are organized into distinct spaces scoped to specific Projects. Within these spaces, users and agents can collaborate on shared discussion threads.
-- **Project Context Preservation (Mode Switching)**: When you switch between Console, Chat, and Terminal modes using the header mode switcher, the system maintains your active project context so you do not lose your place:
+- **Project Context Preservation (Mode Switching)**: When you switch between Console, Chat, and Terminals modes using the header mode switcher, the system maintains your active project context so you do not lose your place:
   - **Console → Chat**: Clicking **Chat** while on a project-scoped Console page (e.g., `/projects/:id/...`) takes you straight to that project's chat space (`/chat/space/:id`).
   - **Chat → Console**: Clicking **Console** while in a project chat space (`/chat/space/:id/...` or `/chat/:slug/...`) takes you directly back to that project's detail page (`/projects/:id`).
   - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the view defaults back to the top-level Dashboard page (`/`).
