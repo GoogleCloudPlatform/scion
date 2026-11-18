@@ -600,7 +600,7 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, beforeBySlug.IdleSuspendClaimActive)
 
-		cond.ClaimTTL = 25 * time.Millisecond
+		cond.ClaimTTL = 10 * time.Second
 		_, _, _, err = s.ClaimIdleSuspend(ctx, a.ID, cond)
 		require.NoError(t, err)
 
@@ -611,7 +611,10 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, duringBySlug.IdleSuspendClaimActive)
 
-		time.Sleep(35 * time.Millisecond)
+		_, err = s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+			SetIdleSuspendClaimUntil(time.Now().UTC().Add(-time.Second)).
+			Save(ctx)
+		require.NoError(t, err)
 		expiredByID, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.False(t, expiredByID.IdleSuspendClaimActive)

@@ -88,8 +88,10 @@ type MessageBrokerProxy struct {
 	// gate before dispatching a persisted broker message (ptone/scion#7881).
 	holdOrDispatch func(ctx context.Context, agent *store.Agent, messageID string, storeMsg *store.Message, dispatchFn func() error) (bool, error)
 
-	// idleSuspendGate, when non-nil, reports whether both lifecycle.idle_suspend
-	// and server.hub.auto_suspend_idle are enabled. Nil means off (AC 8).
+	// idleSuspendGate, when non-nil, reports whether lifecycle.idle_suspend is
+	// enabled (marking deliveries whenever the experiment is on, while active
+	// row claims are always honoured regardless of setting). Nil means off on
+	// unclaimed rows (AC 8).
 	idleSuspendGate func() bool
 
 	mu                  sync.Mutex
@@ -1550,7 +1552,8 @@ func (p *MessageBrokerProxy) publishDeliveryDeferred(ctx context.Context, agentS
 }
 
 // SetIdleSuspendGate sets the callback reporting whether the idle-suspend
-// delivery gate is active (both lifecycle.idle_suspend and auto_suspend_idle on).
+// delivery gate is active (lifecycle.idle_suspend enabled; active claims on
+// target rows are always honoured regardless of auto_suspend_idle).
 func (p *MessageBrokerProxy) SetIdleSuspendGate(fn func() bool) {
 	p.mu.Lock()
 	p.idleSuspendGate = fn
