@@ -9,7 +9,10 @@ harness config but should keep its identity, conversations, and lineage, use
 `scion reincarnate <agent>` (or `scion reincarnate` from inside the agent, to migrate
 itself) instead of delete-and-recreate; see its `--help` for the contract.
 Patch flags (`--model`, `--image`, `--role`, `--service-account`, `--thinking-level`,
-`--harness-auth`) change that setting on the new generation.
+`--harness-auth`, and `--harness`, which deletes and rebuilds the agent home) change that
+setting on the new generation; `reincarnate` refreshes the agent's existing template and
+has no flag to switch to a different template (switching templates requires deleting and
+recreating at a safe boundary).
 Reincarnating another agent needs permission to delegate its role, but the agent keeps
 its existing delegator (and so its authority) unless you change its role with `--role`.
 An agent denied with `ceiling_unrecorded` (for example, it cannot assign a service
@@ -17,9 +20,15 @@ account after a hub upgrade) has a delegation chain without recorded provenance.
 authorized user to reincarnate it, or to recreate it directly: a user's reincarnation
 re-records the agent's delegation with that user as delegator, even without a role
 change. Reincarnating it yourself, or from another agent, keeps the chain and does not
-clear the denial. Because reincarnation returns before the replacement container finishes
-starting, verify that the agent reaches `running` (rather than `error`) and confirm a
-resumed-work receipt.
+clear the denial. Run `--dry-run` first to catch unintended model or config fallback
+drift, and move any needed container-local `/tmp/` files to persistent storage beforehand
+(in-place container recreation wipes `/tmp/`, while keeping the agent home unless
+`--harness` or `--broker` rebuilds it). Because reincarnation returns before the
+replacement container finishes starting, verify that the agent reaches `running` (rather
+than `error`) and confirm a resumed-work receipt; this proves runtime continuity, whereas
+`resolvedVersion` in `~/.scion/resolved-skills.json` inside the container verifies
+installed `gh://` skill revisions when a task depends on newly merged guidance
+(`--dry-run` does not show `gh://` skill commit changes).
 
 ### Moving to another Runtime Broker
 
