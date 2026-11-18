@@ -3925,6 +3925,7 @@ var (
 		{Name: "occurred_at", Type: field.TypeTime},
 		{Name: "received_at", Type: field.TypeTime},
 		{Name: "attributes", Type: field.TypeString, Size: 2147483647, Default: "{}"},
+		{Name: "lists", Type: field.TypeString, Size: 2147483647, Default: "{}"},
 		{Name: "headers", Type: field.TypeString, Size: 2147483647, Default: "{}"},
 		{Name: "payload", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "payload_bytes", Type: field.TypeInt, Default: 0},
@@ -3954,7 +3955,7 @@ var (
 			{
 				Name:    "triggerevent_status_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerEventsColumns[13], TriggerEventsColumns[18]},
+				Columns: []*schema.Column{TriggerEventsColumns[14], TriggerEventsColumns[19]},
 			},
 		},
 	}

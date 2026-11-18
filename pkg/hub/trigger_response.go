@@ -153,22 +153,23 @@ type ListTriggerFiresResponse struct {
 // TriggerEventSummaryResponse is the API representation of a trigger event row
 // on GET /trigger-events. It intentionally omits payload and headers (§10.1).
 type TriggerEventSummaryResponse struct {
-	ID           string            `json:"id"`
-	ProjectID    string            `json:"projectId"`
-	Source       TriggerSourceSpec `json:"source"`
-	Type         string            `json:"type"`
-	Subject      string            `json:"subject"`
-	DedupKey     string            `json:"dedupKey"`
-	OccurredAt   time.Time         `json:"occurredAt"`
-	ReceivedAt   time.Time         `json:"receivedAt"`
-	Attributes   map[string]string `json:"attributes,omitempty"`
-	PayloadBytes int               `json:"payloadBytes"`
-	Status       string            `json:"status"`
-	MatchCount   int               `json:"matchCount"`
-	FireCount    int               `json:"fireCount"`
-	Error        string            `json:"error,omitempty"`
-	ProcessedAt  *time.Time        `json:"processedAt,omitempty"`
-	CreatedAt    time.Time         `json:"createdAt"`
+	ID           string              `json:"id"`
+	ProjectID    string              `json:"projectId"`
+	Source       TriggerSourceSpec   `json:"source"`
+	Type         string              `json:"type"`
+	Subject      string              `json:"subject"`
+	DedupKey     string              `json:"dedupKey"`
+	OccurredAt   time.Time           `json:"occurredAt"`
+	ReceivedAt   time.Time           `json:"receivedAt"`
+	Attributes   map[string]string   `json:"attributes,omitempty"`
+	Lists        map[string][]string `json:"lists,omitempty"`
+	PayloadBytes int                 `json:"payloadBytes"`
+	Status       string              `json:"status"`
+	MatchCount   int                 `json:"matchCount"`
+	FireCount    int                 `json:"fireCount"`
+	Error        string              `json:"error,omitempty"`
+	ProcessedAt  *time.Time          `json:"processedAt,omitempty"`
+	CreatedAt    time.Time           `json:"createdAt"`
 }
 
 // ListTriggerEventsResponse is the paginated response of GET /trigger-events.
@@ -316,6 +317,23 @@ func copyTriggerStringMap(in map[string]string) map[string]string {
 	return out
 }
 
+func copyTriggerStringListMap(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		if v == nil {
+			out[k] = []string{}
+			continue
+		}
+		cp := make([]string, len(v))
+		copy(cp, v)
+		out[k] = cp
+	}
+	return out
+}
+
 func buildTriggerEventSummaryResponse(ev store.TriggerEvent) TriggerEventSummaryResponse {
 	attrs := copyTriggerStringMap(ev.Attributes)
 	if rawCT, hasCT := attrs["content_type"]; hasCT {
@@ -334,6 +352,7 @@ func buildTriggerEventSummaryResponse(ev store.TriggerEvent) TriggerEventSummary
 		OccurredAt:   ev.OccurredAt,
 		ReceivedAt:   ev.ReceivedAt,
 		Attributes:   attrs,
+		Lists:        copyTriggerStringListMap(ev.Lists),
 		PayloadBytes: ev.PayloadBytes,
 		Status:       ev.Status,
 		MatchCount:   ev.MatchCount,

@@ -100,6 +100,11 @@ func Attributes(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldAttributes, v))
 }
 
+// Lists applies equality check predicate on the "lists" field. It's identical to ListsEQ.
+func Lists(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldLists, v))
+}
+
 // Headers applies equality check predicate on the "headers" field. It's identical to HeadersEQ.
 func Headers(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldHeaders, v))
@@ -653,6 +658,71 @@ func AttributesEqualFold(v string) predicate.TriggerEvent {
 // AttributesContainsFold applies the ContainsFold predicate on the "attributes" field.
 func AttributesContainsFold(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldContainsFold(FieldAttributes, v))
+}
+
+// ListsEQ applies the EQ predicate on the "lists" field.
+func ListsEQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldLists, v))
+}
+
+// ListsNEQ applies the NEQ predicate on the "lists" field.
+func ListsNEQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNEQ(FieldLists, v))
+}
+
+// ListsIn applies the In predicate on the "lists" field.
+func ListsIn(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldIn(FieldLists, vs...))
+}
+
+// ListsNotIn applies the NotIn predicate on the "lists" field.
+func ListsNotIn(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNotIn(FieldLists, vs...))
+}
+
+// ListsGT applies the GT predicate on the "lists" field.
+func ListsGT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGT(FieldLists, v))
+}
+
+// ListsGTE applies the GTE predicate on the "lists" field.
+func ListsGTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGTE(FieldLists, v))
+}
+
+// ListsLT applies the LT predicate on the "lists" field.
+func ListsLT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLT(FieldLists, v))
+}
+
+// ListsLTE applies the LTE predicate on the "lists" field.
+func ListsLTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLTE(FieldLists, v))
+}
+
+// ListsContains applies the Contains predicate on the "lists" field.
+func ListsContains(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContains(FieldLists, v))
+}
+
+// ListsHasPrefix applies the HasPrefix predicate on the "lists" field.
+func ListsHasPrefix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasPrefix(FieldLists, v))
+}
+
+// ListsHasSuffix applies the HasSuffix predicate on the "lists" field.
+func ListsHasSuffix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasSuffix(FieldLists, v))
+}
+
+// ListsEqualFold applies the EqualFold predicate on the "lists" field.
+func ListsEqualFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEqualFold(FieldLists, v))
+}
+
+// ListsContainsFold applies the ContainsFold predicate on the "lists" field.
+func ListsContainsFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContainsFold(FieldLists, v))
 }
 
 // HeadersEQ applies the EQ predicate on the "headers" field.

@@ -116748,6 +116748,7 @@ type TriggerEventMutation struct {
 	occurred_at      *time.Time
 	received_at      *time.Time
 	attributes       *string
+	lists            *string
 	headers          *string
 	payload          *string
 	payload_bytes    *int
@@ -117194,6 +117195,42 @@ func (m *TriggerEventMutation) ResetAttributes() {
 	m.attributes = nil
 }
 
+// SetLists sets the "lists" field.
+func (m *TriggerEventMutation) SetLists(s string) {
+	m.lists = &s
+}
+
+// Lists returns the value of the "lists" field in the mutation.
+func (m *TriggerEventMutation) Lists() (r string, exists bool) {
+	v := m.lists
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLists returns the old "lists" field's value of the TriggerEvent entity.
+// If the TriggerEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerEventMutation) OldLists(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLists is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLists requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLists: %w", err)
+	}
+	return oldValue.Lists, nil
+}
+
+// ResetLists resets all changes to the "lists" field.
+func (m *TriggerEventMutation) ResetLists() {
+	m.lists = nil
+}
+
 // SetHeaders sets the "headers" field.
 func (m *TriggerEventMutation) SetHeaders(s string) {
 	m.headers = &s
@@ -117638,7 +117675,7 @@ func (m *TriggerEventMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerEventMutation) Fields() []string {
-	fields := make([]string, 0, 18)
+	fields := make([]string, 0, 19)
 	if m.project_id != nil {
 		fields = append(fields, triggerevent.FieldProjectID)
 	}
@@ -117665,6 +117702,9 @@ func (m *TriggerEventMutation) Fields() []string {
 	}
 	if m.attributes != nil {
 		fields = append(fields, triggerevent.FieldAttributes)
+	}
+	if m.lists != nil {
+		fields = append(fields, triggerevent.FieldLists)
 	}
 	if m.headers != nil {
 		fields = append(fields, triggerevent.FieldHeaders)
@@ -117719,6 +117759,8 @@ func (m *TriggerEventMutation) Field(name string) (ent.Value, bool) {
 		return m.ReceivedAt()
 	case triggerevent.FieldAttributes:
 		return m.Attributes()
+	case triggerevent.FieldLists:
+		return m.Lists()
 	case triggerevent.FieldHeaders:
 		return m.Headers()
 	case triggerevent.FieldPayload:
@@ -117764,6 +117806,8 @@ func (m *TriggerEventMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldReceivedAt(ctx)
 	case triggerevent.FieldAttributes:
 		return m.OldAttributes(ctx)
+	case triggerevent.FieldLists:
+		return m.OldLists(ctx)
 	case triggerevent.FieldHeaders:
 		return m.OldHeaders(ctx)
 	case triggerevent.FieldPayload:
@@ -117853,6 +117897,13 @@ func (m *TriggerEventMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAttributes(v)
+		return nil
+	case triggerevent.FieldLists:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLists(v)
 		return nil
 	case triggerevent.FieldHeaders:
 		v, ok := value.(string)
@@ -118046,6 +118097,9 @@ func (m *TriggerEventMutation) ResetField(name string) error {
 		return nil
 	case triggerevent.FieldAttributes:
 		m.ResetAttributes()
+		return nil
+	case triggerevent.FieldLists:
+		m.ResetLists()
 		return nil
 	case triggerevent.FieldHeaders:
 		m.ResetHeaders()

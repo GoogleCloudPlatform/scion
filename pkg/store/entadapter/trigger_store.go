@@ -1068,6 +1068,44 @@ func unmarshalStringMap(raw string) map[string]string {
 	return out
 }
 
+func marshalStringListMap(m map[string][]string) (string, error) {
+	if len(m) == 0 {
+		return "{}", nil
+	}
+	clean := make(map[string][]string, len(m))
+	for k, v := range m {
+		if v == nil {
+			clean[k] = []string{}
+			continue
+		}
+		clean[k] = v
+	}
+	raw, err := json.Marshal(clean)
+	if err != nil {
+		return "", fmt.Errorf("%w: marshal string list map: %v", store.ErrInvalidInput, err)
+	}
+	if len(raw) > store.MaxTriggerEventListsBytes {
+		return "", fmt.Errorf("%w: trigger event lists exceed %d bytes", store.ErrInvalidInput, store.MaxTriggerEventListsBytes)
+	}
+	return string(raw), nil
+}
+
+func unmarshalStringListMap(raw string) map[string][]string {
+	out := map[string][]string{}
+	if raw == "" || raw == "{}" {
+		return out
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return map[string][]string{}
+	}
+	for k, v := range out {
+		if v == nil {
+			out[k] = []string{}
+		}
+	}
+	return out
+}
+
 func entTriggerEventToStore(e *ent.TriggerEvent) *store.TriggerEvent {
 	return &store.TriggerEvent{
 		ID:           e.ID.String(),
@@ -1080,6 +1118,7 @@ func entTriggerEventToStore(e *ent.TriggerEvent) *store.TriggerEvent {
 		OccurredAt:   e.OccurredAt,
 		ReceivedAt:   e.ReceivedAt,
 		Attributes:   unmarshalStringMap(e.Attributes),
+		Lists:        unmarshalStringListMap(e.Lists),
 		Headers:      unmarshalStringMap(e.Headers),
 		Payload:      e.Payload,
 		PayloadBytes: e.PayloadBytes,
@@ -1106,6 +1145,10 @@ func (s *TriggerStore) CreateTriggerEvent(ctx context.Context, evt *store.Trigge
 		return err
 	}
 	attrsJSON, err := marshalStringMap(evt.Attributes)
+	if err != nil {
+		return err
+	}
+	listsJSON, err := marshalStringListMap(evt.Lists)
 	if err != nil {
 		return err
 	}
@@ -1146,6 +1189,7 @@ func (s *TriggerStore) CreateTriggerEvent(ctx context.Context, evt *store.Trigge
 		SetOccurredAt(occurredAt).
 		SetReceivedAt(receivedAt).
 		SetAttributes(attrsJSON).
+		SetLists(listsJSON).
 		SetHeaders(headersJSON).
 		SetPayload(evt.Payload).
 		SetPayloadBytes(payloadBytes).

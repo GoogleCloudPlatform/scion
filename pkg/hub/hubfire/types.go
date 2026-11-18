@@ -81,6 +81,7 @@ type FireEvent struct {
 	OccurredAt time.Time
 	ReceivedAt time.Time
 	Attributes map[string]string
+	Lists      map[string][]string
 	Payload    []byte          // bounded raw JSON or nil
 	Trigger    *FireTriggerRef // populated when fired by a trigger
 }

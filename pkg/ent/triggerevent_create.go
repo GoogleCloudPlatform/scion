@@ -86,6 +86,20 @@ func (_c *TriggerEventCreate) SetNillableAttributes(v *string) *TriggerEventCrea
 	return _c
 }
 
+// SetLists sets the "lists" field.
+func (_c *TriggerEventCreate) SetLists(v string) *TriggerEventCreate {
+	_c.mutation.SetLists(v)
+	return _c
+}
+
+// SetNillableLists sets the "lists" field if the given value is not nil.
+func (_c *TriggerEventCreate) SetNillableLists(v *string) *TriggerEventCreate {
+	if v != nil {
+		_c.SetLists(*v)
+	}
+	return _c
+}
+
 // SetHeaders sets the "headers" field.
 func (_c *TriggerEventCreate) SetHeaders(v string) *TriggerEventCreate {
 	_c.mutation.SetHeaders(v)
@@ -265,6 +279,10 @@ func (_c *TriggerEventCreate) defaults() {
 		v := triggerevent.DefaultAttributes
 		_c.mutation.SetAttributes(v)
 	}
+	if _, ok := _c.mutation.Lists(); !ok {
+		v := triggerevent.DefaultLists
+		_c.mutation.SetLists(v)
+	}
 	if _, ok := _c.mutation.Headers(); !ok {
 		v := triggerevent.DefaultHeaders
 		_c.mutation.SetHeaders(v)
@@ -352,6 +370,9 @@ func (_c *TriggerEventCreate) check() error {
 	}
 	if _, ok := _c.mutation.Attributes(); !ok {
 		return &ValidationError{Name: "attributes", err: errors.New(`ent: missing required field "TriggerEvent.attributes"`)}
+	}
+	if _, ok := _c.mutation.Lists(); !ok {
+		return &ValidationError{Name: "lists", err: errors.New(`ent: missing required field "TriggerEvent.lists"`)}
 	}
 	if _, ok := _c.mutation.Headers(); !ok {
 		return &ValidationError{Name: "headers", err: errors.New(`ent: missing required field "TriggerEvent.headers"`)}
@@ -445,6 +466,10 @@ func (_c *TriggerEventCreate) createSpec() (*TriggerEvent, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.Attributes(); ok {
 		_spec.SetField(triggerevent.FieldAttributes, field.TypeString, value)
 		_node.Attributes = value
+	}
+	if value, ok := _c.mutation.Lists(); ok {
+		_spec.SetField(triggerevent.FieldLists, field.TypeString, value)
+		_node.Lists = value
 	}
 	if value, ok := _c.mutation.Headers(); ok {
 		_spec.SetField(triggerevent.FieldHeaders, field.TypeString, value)
@@ -661,6 +686,9 @@ func (u *TriggerEventUpsertOne) UpdateNewValues() *TriggerEventUpsertOne {
 		}
 		if _, exists := u.create.mutation.Attributes(); exists {
 			s.SetIgnore(triggerevent.FieldAttributes)
+		}
+		if _, exists := u.create.mutation.Lists(); exists {
+			s.SetIgnore(triggerevent.FieldLists)
 		}
 		if _, exists := u.create.mutation.Headers(); exists {
 			s.SetIgnore(triggerevent.FieldHeaders)
@@ -1012,6 +1040,9 @@ func (u *TriggerEventUpsertBulk) UpdateNewValues() *TriggerEventUpsertBulk {
 			}
 			if _, exists := b.mutation.Attributes(); exists {
 				s.SetIgnore(triggerevent.FieldAttributes)
+			}
+			if _, exists := b.mutation.Lists(); exists {
+				s.SetIgnore(triggerevent.FieldLists)
 			}
 			if _, exists := b.mutation.Headers(); exists {
 				s.SetIgnore(triggerevent.FieldHeaders)

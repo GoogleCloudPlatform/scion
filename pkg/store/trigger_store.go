@@ -20,11 +20,12 @@ import (
 	"time"
 )
 
-// Trigger and webhook endpoint resource caps (Stage 1 §4.1, §4.2, F5).
+// Trigger and webhook endpoint resource caps (Stage 1 §4.1, §4.2, F5; Stage 3 §4.3).
 const (
 	MaxWebhookEndpointsPerProject = 20
 	MaxActiveTriggersPerSource    = 50
 	MaxTriggersPerProject         = 200
+	MaxTriggerEventListsBytes     = 8 * 1024
 )
 
 // WebhookEndpoint signature modes and statuses (§4.1, §8.1a).
@@ -40,6 +41,7 @@ const (
 // and system pause reasons (§4.2, §5.6).
 const (
 	TriggerSourceKindWebhook = "webhook"
+	TriggerSourceKindGitHub  = "github"
 
 	TriggerDialectCEL = "cel"
 
@@ -190,25 +192,26 @@ type TriggerFieldMask struct {
 
 // TriggerEvent represents a durable inbox event record (§4.3).
 type TriggerEvent struct {
-	ID           string            `json:"id"`
-	ProjectID    string            `json:"projectId"`
-	SourceKind   string            `json:"sourceKind"`
-	SourceID     string            `json:"sourceId"`
-	Type         string            `json:"type"`
-	Subject      string            `json:"subject"`
-	DedupKey     string            `json:"dedupKey"`
-	OccurredAt   time.Time         `json:"occurredAt"`
-	ReceivedAt   time.Time         `json:"receivedAt"`
-	Attributes   map[string]string `json:"attributes"`
-	Headers      map[string]string `json:"headers"`
-	Payload      string            `json:"payload,omitempty"`
-	PayloadBytes int               `json:"payloadBytes"`
-	Status       string            `json:"status"`
-	MatchCount   int               `json:"matchCount"`
-	FireCount    int               `json:"fireCount"`
-	Error        string            `json:"error,omitempty"`
-	ProcessedAt  *time.Time        `json:"processedAt,omitempty"`
-	CreatedAt    time.Time         `json:"createdAt"`
+	ID           string              `json:"id"`
+	ProjectID    string              `json:"projectId"`
+	SourceKind   string              `json:"sourceKind"`
+	SourceID     string              `json:"sourceId"`
+	Type         string              `json:"type"`
+	Subject      string              `json:"subject"`
+	DedupKey     string              `json:"dedupKey"`
+	OccurredAt   time.Time           `json:"occurredAt"`
+	ReceivedAt   time.Time           `json:"receivedAt"`
+	Attributes   map[string]string   `json:"attributes"`
+	Lists        map[string][]string `json:"lists,omitempty"`
+	Headers      map[string]string   `json:"headers"`
+	Payload      string              `json:"payload,omitempty"`
+	PayloadBytes int                 `json:"payloadBytes"`
+	Status       string              `json:"status"`
+	MatchCount   int                 `json:"matchCount"`
+	FireCount    int                 `json:"fireCount"`
+	Error        string              `json:"error,omitempty"`
+	ProcessedAt  *time.Time          `json:"processedAt,omitempty"`
+	CreatedAt    time.Time           `json:"createdAt"`
 }
 
 // TriggerEventFilter selects trigger events in ListTriggerEvents.

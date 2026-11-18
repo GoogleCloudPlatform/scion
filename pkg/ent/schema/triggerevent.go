@@ -62,6 +62,9 @@ func (TriggerEvent) Fields() []ent.Field {
 		field.Text("attributes").
 			Default("{}").
 			Immutable(),
+		field.Text("lists").
+			Default("{}").
+			Immutable(),
 		field.Text("headers").
 			Default("{}").
 			Immutable(),

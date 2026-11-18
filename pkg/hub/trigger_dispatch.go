@@ -279,12 +279,16 @@ func (s *Server) runTriggerMaintenance(ctx context.Context) {
 	}
 }
 
-// verifiedLabelForFireEvent maps known signature_mode values to canonical
-// integrity labels and fails closed to ExternalVerifiedUnverified for missing
-// or unrecognized modes (never assuming scion-v1 and never echoing raw input).
+// verifiedLabelForFireEvent maps known source kinds and signature_mode values
+// to canonical integrity labels and fails closed to ExternalVerifiedUnverified
+// for missing or unrecognized modes (never assuming scion-v1 and never echoing
+// raw input).
 func verifiedLabelForFireEvent(ev *hubfire.FireEvent) string {
 	if ev == nil {
 		return messaging.ExternalVerifiedUnverified
+	}
+	if ev.SourceKind == store.TriggerSourceKindGitHub {
+		return messaging.ExternalVerifiedGitHubHMACSHA256Projected
 	}
 	switch ev.Attributes["signature_mode"] {
 	case store.WebhookSignatureModeBodyOnly, messaging.ExternalVerifiedHMACSHA256Body:
@@ -446,9 +450,11 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 	verified := verifiedLabelForFireEvent(ev)
 	if len(ev.Attributes) > 0 {
 		attrs := maps.Clone(ev.Attributes)
-		if verified != messaging.ExternalVerifiedScionV1 {
+		if verified != messaging.ExternalVerifiedScionV1 && verified != messaging.ExternalVerifiedGitHubHMACSHA256Projected {
 			// §8.1a: only scion_v1 signs routing headers; body_only and any
 			// unverified/unknown mode never forward unsigned header attributes.
+			// GitHub App deliveries validate X-GitHub-Event / X-GitHub-Delivery
+			// alongside the HMAC-verified projected payload (Stage 3 §4.1, §4.3).
 			delete(attrs, "delivery")
 			delete(attrs, "event")
 			delete(attrs, "subject")
@@ -459,6 +465,9 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 		if len(attrs) > 0 {
 			body.Attributes = attrs
 		}
+	}
+	if len(ev.Lists) > 0 {
+		body.Lists = copyTriggerStringListMap(ev.Lists)
 	}
 	if len(ev.Payload) > 0 {
 		body.External = messaging.NewExternalPayload(verified, ev.Payload)

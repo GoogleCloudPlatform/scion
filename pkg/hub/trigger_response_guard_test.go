@@ -152,9 +152,28 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 	require.NoError(t, err)
 	var evtSummaryMap map[string]any
 	require.NoError(t, json.Unmarshal(evtSummaryRaw, &evtSummaryMap))
-	for _, forbidden := range []string{"payload", "headers"} {
-		assert.NotContains(t, evtSummaryMap, forbidden, "TriggerEventSummaryResponse must not expose %q", forbidden)
+	for _, forbidden := range []string{"payload", "headers", "lists"} {
+		assert.NotContains(t, evtSummaryMap, forbidden, "TriggerEventSummaryResponse must not expose %q when omitted", forbidden)
 	}
+
+	evtWithLists := buildTriggerEventDetailResponse(store.TriggerEvent{
+		ID:         "evt-gh-1",
+		ProjectID:  "proj-1",
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "12345",
+		Type:       "github.pull_request.opened",
+		Subject:    "github:acme/widgets#7",
+		DedupKey:   "72d3162e-cc78-11e3-81ab-4c9367dc0958/proj-1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Attributes: map[string]string{"provider": "github", "repo": "acme/widgets"},
+		Lists:      map[string][]string{"labels": {"bug", "urgent"}},
+		Headers:    map[string]string{"X-GitHub-Event": "pull_request"},
+		Payload:    `{"action":"opened"}`,
+		Status:     store.TriggerEventStatusPending,
+		CreatedAt:  now,
+	})
+	assert.Equal(t, map[string][]string{"labels": {"bug", "urgent"}}, evtWithLists.Lists)
 }
 
 func TestWebhookEndpointResponses_NoSecretAfterCreate(t *testing.T) {

@@ -234,6 +234,62 @@ func TestApplyDispatchedEventEnvelope_WebhookReceivedAndTriggerFired(t *testing.
 			assert.Equal(t, messaging.ExternalVerifiedUnverified, env.Event.External.Verified, "mode=%q", mode)
 		}
 	})
+
+	t.Run("github source maps to trigger.fired with github-hmac-sha256+projected, preserves delivery/event attrs, and carries lists", func(t *testing.T) {
+		msg := messages.NewSystemMessage("scheduler", "agent:lead", "Review PR comment", messages.SystemCategoryScheduler)
+		msg.RecipientID = tid("env-agent-lead")
+
+		req := hubfire.FireRequest{
+			ProjectID:  tid("env-project"),
+			ActionType: "message",
+			Event: &hubfire.FireEvent{
+				ID:         api.NewUUID(),
+				ProjectID:  tid("env-project"),
+				SourceKind: store.TriggerSourceKindGitHub,
+				SourceID:   "98765",
+				Type:       "github.issue_comment.created",
+				Subject:    "github:acme/widgets#12",
+				OccurredAt: now,
+				ReceivedAt: now,
+				Attributes: map[string]string{
+					"provider": "github",
+					"repo":     "acme/widgets",
+					"event":    "issue_comment",
+					"action":   "created",
+					"delivery": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
+					"command":  "review",
+				},
+				Lists: map[string][]string{
+					"labels": {"bug", "needs-review"},
+				},
+				Payload: []byte(`{"action":"created","issue":{"number":12}}`),
+				Trigger: &hubfire.FireTriggerRef{
+					ID:   tid("env-trig-gh"),
+					Name: "pr-review-command",
+				},
+			},
+		}
+
+		require.NoError(t, ApplyDispatchedEventEnvelope(msg, req))
+		msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			Msg:       msg,
+			CreatedAt: now,
+		})
+		env := extractEnvelopeJSONFromDelivery(t, msg.DeliveryText)
+		require.NotNil(t, env.Event)
+		assert.Equal(t, messaging.EventTriggerFired, env.Event.Type)
+		assert.Equal(t, "github.issue_comment.created", env.Event.EventType)
+		require.NotNil(t, env.Event.Source)
+		assert.Equal(t, store.TriggerSourceKindGitHub, env.Event.Source.Kind)
+		assert.Equal(t, "98765", env.Event.Source.ID)
+		assert.Equal(t, "72d3162e-cc78-11e3-81ab-4c9367dc0958", env.Event.Attributes["delivery"])
+		assert.Equal(t, "issue_comment", env.Event.Attributes["event"])
+		assert.Equal(t, "review", env.Event.Attributes["command"])
+		assert.Equal(t, map[string][]string{"labels": {"bug", "needs-review"}}, env.Event.Lists)
+		require.NotNil(t, env.Event.External)
+		assert.Equal(t, messaging.ExternalVerifiedGitHubHMACSHA256Projected, env.Event.External.Verified)
+		assert.JSONEq(t, `{"action":"created","issue":{"number":12}}`, string(env.Event.External.JSON))
+	})
 }
 
 func enqueueTestTriggerEvent(t *testing.T, f *triggersTestFixture, ev *store.TriggerEvent) {

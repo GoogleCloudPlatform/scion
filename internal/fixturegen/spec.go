@@ -1284,6 +1284,7 @@ func Spec() []TableFixture {
 				"dedup_key":   "deliv-fixture-001",
 				"occurred_at": baseTime, "received_at": baseTime,
 				"attributes": `{"endpoint_name":"fixture-webhook","event":"received"}`,
+				"lists":      `{"labels":["bug"]}`,
 				"headers":    `{"content-type":"application/json"}`,
 				"payload":    unicodeJSON, "payload_bytes": len(unicodeJSON),
 				"status": "processed", "match_count": 1, "fire_count": 1,

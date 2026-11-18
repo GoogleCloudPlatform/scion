@@ -32,6 +32,8 @@ const (
 	FieldReceivedAt = "received_at"
 	// FieldAttributes holds the string denoting the attributes field in the database.
 	FieldAttributes = "attributes"
+	// FieldLists holds the string denoting the lists field in the database.
+	FieldLists = "lists"
 	// FieldHeaders holds the string denoting the headers field in the database.
 	FieldHeaders = "headers"
 	// FieldPayload holds the string denoting the payload field in the database.
@@ -66,6 +68,7 @@ var Columns = []string{
 	FieldOccurredAt,
 	FieldReceivedAt,
 	FieldAttributes,
+	FieldLists,
 	FieldHeaders,
 	FieldPayload,
 	FieldPayloadBytes,
@@ -100,6 +103,8 @@ var (
 	DedupKeyValidator func(string) error
 	// DefaultAttributes holds the default value on creation for the "attributes" field.
 	DefaultAttributes string
+	// DefaultLists holds the default value on creation for the "lists" field.
+	DefaultLists string
 	// DefaultHeaders holds the default value on creation for the "headers" field.
 	DefaultHeaders string
 	// DefaultPayload holds the default value on creation for the "payload" field.
@@ -169,6 +174,11 @@ func ByReceivedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByAttributes orders the results by the attributes field.
 func ByAttributes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAttributes, opts...).ToFunc()
+}
+
+// ByLists orders the results by the lists field.
+func ByLists(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLists, opts...).ToFunc()
 }
 
 // ByHeaders orders the results by the headers field.

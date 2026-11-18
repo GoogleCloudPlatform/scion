@@ -250,11 +250,12 @@ type EventScheduleRef struct {
 	FireAt  string `json:"fire_at,omitempty"`
 }
 
-// Canonical integrity-verification labels for ExternalPayload.Verified (§8.1a, §8.3).
+// Canonical integrity-verification labels for ExternalPayload.Verified (§8.1a, §8.3; Stage 3 §4.3).
 const (
-	ExternalVerifiedScionV1        = "scion-v1"
-	ExternalVerifiedHMACSHA256Body = "hmac-sha256-body"
-	ExternalVerifiedUnverified     = "unverified"
+	ExternalVerifiedScionV1                   = "scion-v1"
+	ExternalVerifiedHMACSHA256Body            = "hmac-sha256-body"
+	ExternalVerifiedGitHubHMACSHA256Projected = "github-hmac-sha256+projected"
+	ExternalVerifiedUnverified                = "unverified"
 )
 
 // ExternalPayload carries integrity-verified external data inside an EventBody (§8.3).
@@ -330,14 +331,15 @@ type EventBody struct {
 	Reason  string    `json:"reason,omitempty"`  // for delivery.failed
 	URL     string    `json:"url,omitempty"`     // for port.exposed
 
-	// Additive Stage 1 trigger and schedule event fields (§8.3):
-	EventID    string            `json:"event_id,omitempty"`
-	EventType  string            `json:"event_type,omitempty"`
-	Source     *EventSource      `json:"source,omitempty"`
-	Trigger    *EventTriggerRef  `json:"trigger,omitempty"`
-	Schedule   *EventScheduleRef `json:"schedule,omitempty"`
-	Attributes map[string]string `json:"attributes,omitempty"`
-	External   *ExternalPayload  `json:"external_payload,omitempty"`
+	// Additive Stage 1 / Stage 3 trigger and schedule event fields (§8.3, Stage 3 §4.3):
+	EventID    string              `json:"event_id,omitempty"`
+	EventType  string              `json:"event_type,omitempty"`
+	Source     *EventSource        `json:"source,omitempty"`
+	Trigger    *EventTriggerRef    `json:"trigger,omitempty"`
+	Schedule   *EventScheduleRef   `json:"schedule,omitempty"`
+	Attributes map[string]string   `json:"attributes,omitempty"`
+	Lists      map[string][]string `json:"lists,omitempty"`
+	External   *ExternalPayload    `json:"external_payload,omitempty"`
 }
 
 // Validate checks that the EventBody has a valid Type.
