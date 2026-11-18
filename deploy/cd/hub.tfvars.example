@@ -1,0 +1,47 @@
+# Example hub.tfvars for the Cloud Build GKE CD pipeline (deploy/cd/cloudbuild-gke-cd.yaml).
+#
+# Copy to a local gitignored file (e.g. hub.tfvars), fill in your project values,
+# and upload to your versioned GCS Terraform state bucket at:
+#
+#   gs://<project_id>-<shared_prefix>-tfstate/<shared_prefix>/hubs/<hub_name>/hub.tfvars
+#
+# Never commit filled-in .tfvars files to Git.
+#
+# NOTE: Omit `hub_image_digest` here — the CD pipeline builds `scion-hub-gke` from
+# the resolved release tag and passes `-var="hub_image_digest=sha256:..."` on
+# every plan and apply.
+
+project_id    = "my-gcp-project"
+region        = "us-central1"
+zone          = "us-central1-a"
+shared_prefix = "cdha"
+
+hub_name     = "cdha-gke-1"
+state_prefix = "cdha/hubs/cdha-gke-1"
+
+# External FQDN routed to the hub's Global External Application Load Balancer IP:
+#   - Option A (Customer domain / Cloud DNS): "cdha-gke-1.example.com"
+#   - Option B (Zero-domain Cloud Endpoints): "cdha-gke-1.endpoints.my-gcp-project.cloud.goog"
+hostname = "cdha-gke-1.example.com"
+
+# First-install Pass 1: leave commented out (null) if your project does not yet
+# have a known Google-managed IAP OAuth client ID. Pass 1 provisions the load
+# balancer and IAP backend (`hub_installed = false`). Then read the generated
+# client ID from Security -> Identity-Aware Proxy on `<hub_name>-hub-backend`,
+# uncomment and set it below, re-upload hub.tfvars to GCS, and re-run the trigger
+# (Pass 2 skips image rebuilds and installs the Hub Helm release).
+# iap_oauth_client_id = "REPLACE_ME.apps.googleusercontent.com"
+
+# Principals granted roles/iap.httpsResourceAccessor on this hub's backend service.
+iap_members = [
+  "group:scion-users@example.com",
+]
+
+# Emails seeded as Hub administrators on first boot.
+admin_emails = [
+  "scion-admin@example.com",
+]
+
+# Optional: set to a new non-empty marker string to rotate this hub's Cloud SQL
+# password and roll Hub pods; once set, keep the marker in hub.tfvars permanently.
+# db_password_rotation = "2026-11-18-initial"
