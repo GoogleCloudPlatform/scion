@@ -30,6 +30,8 @@ type TriggerEvent struct {
 	Subject string `json:"subject,omitempty"`
 	// DedupKey holds the value of the "dedup_key" field.
 	DedupKey string `json:"dedup_key,omitempty"`
+	// BodySha256 holds the value of the "body_sha256" field.
+	BodySha256 string `json:"body_sha256,omitempty"`
 	// OccurredAt holds the value of the "occurred_at" field.
 	OccurredAt time.Time `json:"occurred_at,omitempty"`
 	// ReceivedAt holds the value of the "received_at" field.
@@ -66,7 +68,7 @@ func (*TriggerEvent) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case triggerevent.FieldPayloadBytes, triggerevent.FieldMatchCount, triggerevent.FieldFireCount:
 			values[i] = new(sql.NullInt64)
-		case triggerevent.FieldSourceKind, triggerevent.FieldSourceID, triggerevent.FieldType, triggerevent.FieldSubject, triggerevent.FieldDedupKey, triggerevent.FieldAttributes, triggerevent.FieldLists, triggerevent.FieldHeaders, triggerevent.FieldPayload, triggerevent.FieldStatus, triggerevent.FieldError:
+		case triggerevent.FieldSourceKind, triggerevent.FieldSourceID, triggerevent.FieldType, triggerevent.FieldSubject, triggerevent.FieldDedupKey, triggerevent.FieldBodySha256, triggerevent.FieldAttributes, triggerevent.FieldLists, triggerevent.FieldHeaders, triggerevent.FieldPayload, triggerevent.FieldStatus, triggerevent.FieldError:
 			values[i] = new(sql.NullString)
 		case triggerevent.FieldOccurredAt, triggerevent.FieldReceivedAt, triggerevent.FieldProcessedAt, triggerevent.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -128,6 +130,12 @@ func (_m *TriggerEvent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field dedup_key", values[i])
 			} else if value.Valid {
 				_m.DedupKey = value.String
+			}
+		case triggerevent.FieldBodySha256:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field body_sha256", values[i])
+			} else if value.Valid {
+				_m.BodySha256 = value.String
 			}
 		case triggerevent.FieldOccurredAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -261,6 +269,9 @@ func (_m *TriggerEvent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("dedup_key=")
 	builder.WriteString(_m.DedupKey)
+	builder.WriteString(", ")
+	builder.WriteString("body_sha256=")
+	builder.WriteString(_m.BodySha256)
 	builder.WriteString(", ")
 	builder.WriteString("occurred_at=")
 	builder.WriteString(_m.OccurredAt.Format(time.ANSIC))

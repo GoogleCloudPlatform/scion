@@ -60,6 +60,20 @@ func (_c *TriggerEventCreate) SetDedupKey(v string) *TriggerEventCreate {
 	return _c
 }
 
+// SetBodySha256 sets the "body_sha256" field.
+func (_c *TriggerEventCreate) SetBodySha256(v string) *TriggerEventCreate {
+	_c.mutation.SetBodySha256(v)
+	return _c
+}
+
+// SetNillableBodySha256 sets the "body_sha256" field if the given value is not nil.
+func (_c *TriggerEventCreate) SetNillableBodySha256(v *string) *TriggerEventCreate {
+	if v != nil {
+		_c.SetBodySha256(*v)
+	}
+	return _c
+}
+
 // SetOccurredAt sets the "occurred_at" field.
 func (_c *TriggerEventCreate) SetOccurredAt(v time.Time) *TriggerEventCreate {
 	_c.mutation.SetOccurredAt(v)
@@ -275,6 +289,10 @@ func (_c *TriggerEventCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *TriggerEventCreate) defaults() {
+	if _, ok := _c.mutation.BodySha256(); !ok {
+		v := triggerevent.DefaultBodySha256
+		_c.mutation.SetBodySha256(v)
+	}
 	if _, ok := _c.mutation.Attributes(); !ok {
 		v := triggerevent.DefaultAttributes
 		_c.mutation.SetAttributes(v)
@@ -361,6 +379,9 @@ func (_c *TriggerEventCreate) check() error {
 		if err := triggerevent.DedupKeyValidator(v); err != nil {
 			return &ValidationError{Name: "dedup_key", err: fmt.Errorf(`ent: validator failed for field "TriggerEvent.dedup_key": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.BodySha256(); !ok {
+		return &ValidationError{Name: "body_sha256", err: errors.New(`ent: missing required field "TriggerEvent.body_sha256"`)}
 	}
 	if _, ok := _c.mutation.OccurredAt(); !ok {
 		return &ValidationError{Name: "occurred_at", err: errors.New(`ent: missing required field "TriggerEvent.occurred_at"`)}
@@ -454,6 +475,10 @@ func (_c *TriggerEventCreate) createSpec() (*TriggerEvent, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.DedupKey(); ok {
 		_spec.SetField(triggerevent.FieldDedupKey, field.TypeString, value)
 		_node.DedupKey = value
+	}
+	if value, ok := _c.mutation.BodySha256(); ok {
+		_spec.SetField(triggerevent.FieldBodySha256, field.TypeString, value)
+		_node.BodySha256 = value
 	}
 	if value, ok := _c.mutation.OccurredAt(); ok {
 		_spec.SetField(triggerevent.FieldOccurredAt, field.TypeTime, value)
@@ -677,6 +702,9 @@ func (u *TriggerEventUpsertOne) UpdateNewValues() *TriggerEventUpsertOne {
 		}
 		if _, exists := u.create.mutation.DedupKey(); exists {
 			s.SetIgnore(triggerevent.FieldDedupKey)
+		}
+		if _, exists := u.create.mutation.BodySha256(); exists {
+			s.SetIgnore(triggerevent.FieldBodySha256)
 		}
 		if _, exists := u.create.mutation.OccurredAt(); exists {
 			s.SetIgnore(triggerevent.FieldOccurredAt)
@@ -1031,6 +1059,9 @@ func (u *TriggerEventUpsertBulk) UpdateNewValues() *TriggerEventUpsertBulk {
 			}
 			if _, exists := b.mutation.DedupKey(); exists {
 				s.SetIgnore(triggerevent.FieldDedupKey)
+			}
+			if _, exists := b.mutation.BodySha256(); exists {
+				s.SetIgnore(triggerevent.FieldBodySha256)
 			}
 			if _, exists := b.mutation.OccurredAt(); exists {
 				s.SetIgnore(triggerevent.FieldOccurredAt)

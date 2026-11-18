@@ -17,6 +17,8 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -498,6 +500,13 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		selectedIDs[i] = selected[i].ID
 	}
 
+	// Compute the signed raw-body SHA-256 before normalisation (Stage 3 rev 1.8
+	// §4.3/§4.4): deduplicating on (project_id, source_kind, body_sha256) blocks
+	// fresh-GUID replays of a captured signed body while leaving GitHub's manual
+	// Redeliver (identical bytes) classified as duplicate.
+	rawBodySum := sha256.Sum256(body)
+	rawBodySHA256 := hex.EncodeToString(rawBodySum[:])
+
 	// Step 8: normalise once (§5, §10.2).
 	appSlug, mentionAliases, _ := s.GitHubAppMentionIdentities(ctx)
 	normRes, normErr := githubtrigger.Normalize(eventType, deliveryID, body, githubtrigger.Options{
@@ -575,6 +584,7 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 			Type:         normRes.Type,
 			Subject:      normRes.Subject,
 			DedupKey:     normRes.DedupKey(proj.ID),
+			BodySHA256:   rawBodySHA256,
 			OccurredAt:   normRes.OccurredAt,
 			ReceivedAt:   now,
 			Attributes:   maps.Clone(normRes.Attributes),
@@ -598,6 +608,15 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 			}
 			if gErr != nil && !errors.Is(gErr, store.ErrNotFound) {
 				return gErr
+			}
+
+			existingByBody, bErr := tx.GetTriggerEventByBodySHA256(ctx, proj.ID, store.TriggerSourceKindGitHub, ev.BodySHA256)
+			if bErr == nil && existingByBody != nil {
+				dupEventID = existingByBody.ID
+				return errGitHubDuplicateDelivery
+			}
+			if bErr != nil && !errors.Is(bErr, store.ErrNotFound) {
+				return bErr
 			}
 
 			txCounter, ok := tx.(store.DurableQueuePendingCounter)
@@ -652,6 +671,9 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 			(!errors.Is(txErr, durablequeue.ErrDuplicate) && errors.Is(txErr, store.ErrAlreadyExists)) {
 			if dupEventID == "" {
 				existing, gErr := s.store.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindGitHub, normRes.SourceID, ev.DedupKey)
+				if errors.Is(gErr, store.ErrNotFound) && ev.BodySHA256 != "" {
+					existing, gErr = s.store.GetTriggerEventByBodySHA256(ctx, proj.ID, store.TriggerSourceKindGitHub, ev.BodySHA256)
+				}
 				if gErr != nil || existing == nil {
 					if anyQueued {
 						queue.Wake(trigger.EventQueueKind)

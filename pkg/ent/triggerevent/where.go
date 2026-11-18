@@ -85,6 +85,11 @@ func DedupKey(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldDedupKey, v))
 }
 
+// BodySha256 applies equality check predicate on the "body_sha256" field. It's identical to BodySha256EQ.
+func BodySha256(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldBodySha256, v))
+}
+
 // OccurredAt applies equality check predicate on the "occurred_at" field. It's identical to OccurredAtEQ.
 func OccurredAt(v time.Time) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldOccurredAt, v))
@@ -513,6 +518,71 @@ func DedupKeyEqualFold(v string) predicate.TriggerEvent {
 // DedupKeyContainsFold applies the ContainsFold predicate on the "dedup_key" field.
 func DedupKeyContainsFold(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldContainsFold(FieldDedupKey, v))
+}
+
+// BodySha256EQ applies the EQ predicate on the "body_sha256" field.
+func BodySha256EQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldBodySha256, v))
+}
+
+// BodySha256NEQ applies the NEQ predicate on the "body_sha256" field.
+func BodySha256NEQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNEQ(FieldBodySha256, v))
+}
+
+// BodySha256In applies the In predicate on the "body_sha256" field.
+func BodySha256In(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldIn(FieldBodySha256, vs...))
+}
+
+// BodySha256NotIn applies the NotIn predicate on the "body_sha256" field.
+func BodySha256NotIn(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNotIn(FieldBodySha256, vs...))
+}
+
+// BodySha256GT applies the GT predicate on the "body_sha256" field.
+func BodySha256GT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGT(FieldBodySha256, v))
+}
+
+// BodySha256GTE applies the GTE predicate on the "body_sha256" field.
+func BodySha256GTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGTE(FieldBodySha256, v))
+}
+
+// BodySha256LT applies the LT predicate on the "body_sha256" field.
+func BodySha256LT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLT(FieldBodySha256, v))
+}
+
+// BodySha256LTE applies the LTE predicate on the "body_sha256" field.
+func BodySha256LTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLTE(FieldBodySha256, v))
+}
+
+// BodySha256Contains applies the Contains predicate on the "body_sha256" field.
+func BodySha256Contains(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContains(FieldBodySha256, v))
+}
+
+// BodySha256HasPrefix applies the HasPrefix predicate on the "body_sha256" field.
+func BodySha256HasPrefix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasPrefix(FieldBodySha256, v))
+}
+
+// BodySha256HasSuffix applies the HasSuffix predicate on the "body_sha256" field.
+func BodySha256HasSuffix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasSuffix(FieldBodySha256, v))
+}
+
+// BodySha256EqualFold applies the EqualFold predicate on the "body_sha256" field.
+func BodySha256EqualFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEqualFold(FieldBodySha256, v))
+}
+
+// BodySha256ContainsFold applies the ContainsFold predicate on the "body_sha256" field.
+func BodySha256ContainsFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContainsFold(FieldBodySha256, v))
 }
 
 // OccurredAtEQ applies the EQ predicate on the "occurred_at" field.

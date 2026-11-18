@@ -1132,6 +1132,7 @@ func entTriggerEventToStore(e *ent.TriggerEvent) *store.TriggerEvent {
 		Type:         e.Type,
 		Subject:      e.Subject,
 		DedupKey:     e.DedupKey,
+		BodySHA256:   e.BodySha256,
 		OccurredAt:   e.OccurredAt,
 		ReceivedAt:   e.ReceivedAt,
 		Attributes:   unmarshalStringMap(e.Attributes),
@@ -1203,6 +1204,7 @@ func (s *TriggerStore) CreateTriggerEvent(ctx context.Context, evt *store.Trigge
 		SetType(evt.Type).
 		SetSubject(evt.Subject).
 		SetDedupKey(evt.DedupKey).
+		SetBodySha256(evt.BodySHA256).
 		SetOccurredAt(occurredAt).
 		SetReceivedAt(receivedAt).
 		SetAttributes(attrsJSON).
@@ -1251,6 +1253,27 @@ func (s *TriggerStore) GetTriggerEventByDedupKey(ctx context.Context, sourceKind
 			triggerevent.SourceKindEQ(sourceKind),
 			triggerevent.SourceIDEQ(sourceID),
 			triggerevent.DedupKeyEQ(dedupKey),
+		).
+		Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entTriggerEventToStore(e), nil
+}
+
+func (s *TriggerStore) GetTriggerEventByBodySHA256(ctx context.Context, projectID, sourceKind, bodySHA256 string) (*store.TriggerEvent, error) {
+	if projectID == "" || sourceKind == "" || bodySHA256 == "" {
+		return nil, store.ErrNotFound
+	}
+	pid, err := parseGetID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	e, err := s.client.TriggerEvent.Query().
+		Where(
+			triggerevent.ProjectIDEQ(pid),
+			triggerevent.SourceKindEQ(sourceKind),
+			triggerevent.BodySha256EQ(bodySHA256),
 		).
 		Only(ctx)
 	if err != nil {

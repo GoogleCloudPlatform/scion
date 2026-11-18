@@ -1282,6 +1282,7 @@ func Spec() []TableFixture {
 				"source_kind": "webhook", "source_id": webhookEndpointID,
 				"type": "webhook.received", "subject": "webhook:" + webhookEndpointID,
 				"dedup_key":   "deliv-fixture-001",
+				"body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 				"occurred_at": baseTime, "received_at": baseTime,
 				"attributes": `{"endpoint_name":"fixture-webhook","event":"received"}`,
 				"lists":      `{"labels":["bug"]}`,

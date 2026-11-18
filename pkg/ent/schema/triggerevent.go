@@ -55,6 +55,9 @@ func (TriggerEvent) Fields() []ent.Field {
 		field.String("dedup_key").
 			NotEmpty().
 			Immutable(),
+		field.String("body_sha256").
+			Default("").
+			Immutable(),
 		field.Time("occurred_at").
 			Immutable(),
 		field.Time("received_at").
@@ -97,6 +100,14 @@ func (TriggerEvent) Indexes() []ent.Index {
 		index.Fields("project_id", "received_at"),
 		index.Fields("source_kind", "source_id", "dedup_key").
 			Unique(),
+		// Partial unique index (Stage 3 rev 1.8 §4.3/§4.4): deduplicates raw
+		// signed body bytes per (project_id, source_kind) when body_sha256 is
+		// populated, closing fresh-GUID replay on unsigned X-GitHub-Delivery.
+		index.Fields("project_id", "source_kind", "body_sha256").
+			Unique().
+			Annotations(
+				entsql.IndexWhere("body_sha256 <> ''"),
+			),
 		index.Fields("status", "created"),
 	}
 }

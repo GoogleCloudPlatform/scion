@@ -199,6 +199,7 @@ type TriggerEvent struct {
 	Type         string              `json:"type"`
 	Subject      string              `json:"subject"`
 	DedupKey     string              `json:"dedupKey"`
+	BodySHA256   string              `json:"bodySha256,omitempty"`
 	OccurredAt   time.Time           `json:"occurredAt"`
 	ReceivedAt   time.Time           `json:"receivedAt"`
 	Attributes   map[string]string   `json:"attributes"`
@@ -290,6 +291,7 @@ type TriggerStore interface {
 	CreateTriggerEvent(ctx context.Context, evt *TriggerEvent) error
 	GetTriggerEvent(ctx context.Context, id string) (*TriggerEvent, error)
 	GetTriggerEventByDedupKey(ctx context.Context, sourceKind, sourceID, dedupKey string) (*TriggerEvent, error)
+	GetTriggerEventByBodySHA256(ctx context.Context, projectID, sourceKind, bodySHA256 string) (*TriggerEvent, error)
 	ListTriggerEvents(ctx context.Context, filter TriggerEventFilter, opts ListOptions) (*ListResult[TriggerEvent], error)
 	CountPendingTriggerEvents(ctx context.Context, projectID string) (int, error)
 	MarkTriggerEventProcessed(ctx context.Context, id string, processedAt time.Time, matchCount, fireCount int) error

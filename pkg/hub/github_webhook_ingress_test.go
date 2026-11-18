@@ -479,7 +479,6 @@ func TestGitHubWebhookIngress_UnknownEventFamilyAndBadDeliveryID(t *testing.T) {
 func TestGitHubWebhookIngress_HubVerifiedBucketExhausted(t *testing.T) {
 	f := setupGitHubIngressFixture(t)
 	proj := f.createCandidateProject(t, "bucket-proj", "https://github.com/acme/widgets.git", f.instID)
-	body := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "hi", f.currentTime())
 
 	f.srv.githubWebhookIngress.mu.Lock()
 	f.srv.githubWebhookIngress.bucketInit = false
@@ -488,14 +487,16 @@ func TestGitHubWebhookIngress_HubVerifiedBucketExhausted(t *testing.T) {
 	f.srv.githubWebhookIngress.mu.Unlock()
 
 	for i := 0; i < 2; i++ {
-		rec := f.postDelivery(t, "issue_comment", uuid.NewString(), body, func(r *http.Request) {
+		bodyI := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", fmt.Sprintf("hi-%d", i), f.currentTime())
+		rec := f.postDelivery(t, "issue_comment", uuid.NewString(), bodyI, func(r *http.Request) {
 			r.RemoteAddr = fmt.Sprintf("192.0.2.%d:443", i+1)
 		})
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	}
 
 	// Third delivery from a brand-new IP still hits the hub-wide verified bucket (no IP keying).
-	rec := f.postDelivery(t, "issue_comment", uuid.NewString(), body, func(r *http.Request) {
+	bodyBlocked := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "hi-blocked", f.currentTime())
+	rec := f.postDelivery(t, "issue_comment", uuid.NewString(), bodyBlocked, func(r *http.Request) {
 		r.RemoteAddr = "198.51.100.99:443"
 	})
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
@@ -507,7 +508,7 @@ func TestGitHubWebhookIngress_HubVerifiedBucketExhausted(t *testing.T) {
 
 	// Advancing clock refills 1 token and admits the next delivery.
 	f.advanceClock(1100 * time.Millisecond)
-	rec = f.postDelivery(t, "issue_comment", uuid.NewString(), body, nil)
+	rec = f.postDelivery(t, "issue_comment", uuid.NewString(), bodyBlocked, nil)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 }
 
@@ -773,11 +774,13 @@ func TestGitHubWebhookIngress_MultiProjectFanOutListsAndNormaliserContract(t *te
 	f.srv.githubAppIdentity.reset()
 
 	noSlugDeliv := uuid.NewString()
-	noSlugRec := f.postDelivery(t, "issue_comment", noSlugDeliv, body, nil)
+	noSlugBody := sampleIssueCommentPayload(t, f.instID, "Acme/Widgets", "alice", "User", "Second check: @scion-alias /review focus-db", commentTime)
+	noSlugRec := f.postDelivery(t, "issue_comment", noSlugDeliv, noSlugBody, nil)
 	require.Equal(t, http.StatusAccepted, noSlugRec.Code, noSlugRec.Body.String())
 	var noSlugResp GitHubWebhookAcceptedResponse
 	require.NoError(t, json.Unmarshal(noSlugRec.Body.Bytes(), &noSlugResp))
 	require.Len(t, noSlugResp.Events, 2)
+	assert.Equal(t, GitHubWebhookStatusQueued, noSlugResp.Status)
 	noSlugEv, err := f.store.GetTriggerEvent(ctx, noSlugResp.Events[0].EventID)
 	require.NoError(t, err)
 	assert.Equal(t, "unavailable", noSlugEv.Attributes["mention_detection"])
@@ -830,13 +833,14 @@ func TestGitHubWebhookIngress_PrimaryRoutingAndStalePrimaryWarning(t *testing.T)
 		f.auditBuf.Reset()
 		f.warnBuf.Reset()
 
-		body := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "hello", f.currentTime())
-		rec1 := f.postDelivery(t, "issue_comment", uuid.NewString(), body, nil)
+		body1 := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "stale-primary-1", f.currentTime())
+		rec1 := f.postDelivery(t, "issue_comment", uuid.NewString(), body1, nil)
 		require.Equal(t, http.StatusAccepted, rec1.Code, rec1.Body.String())
 
 		var resp1 GitHubWebhookAcceptedResponse
 		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
 		require.Len(t, resp1.Events, 2, "stale primary must fail open to all candidates")
+		assert.Equal(t, GitHubWebhookStatusQueued, resp1.Status)
 
 		audits := parseAuditLines(t, f.auditBuf.String())
 		require.Len(t, audits, 1)
@@ -847,13 +851,15 @@ func TestGitHubWebhookIngress_PrimaryRoutingAndStalePrimaryWarning(t *testing.T)
 
 		// Second delivery 10 minutes later suppresses duplicate stale_primary warning.
 		f.advanceClock(10 * time.Minute)
-		rec2 := f.postDelivery(t, "issue_comment", uuid.NewString(), body, nil)
+		body2 := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "stale-primary-2", f.currentTime())
+		rec2 := f.postDelivery(t, "issue_comment", uuid.NewString(), body2, nil)
 		require.Equal(t, http.StatusAccepted, rec2.Code)
 		assert.Len(t, parseAuditLines(t, f.warnBuf.String()), 1, "stale_primary slog.Warn is rate-limited to 1/hour")
 
 		// After >1 hour, warning is emitted again.
 		f.advanceClock(55 * time.Minute)
-		rec3 := f.postDelivery(t, "issue_comment", uuid.NewString(), body, nil)
+		body3 := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "stale-primary-3", f.currentTime())
+		rec3 := f.postDelivery(t, "issue_comment", uuid.NewString(), body3, nil)
 		require.Equal(t, http.StatusAccepted, rec3.Code)
 		assert.Len(t, parseAuditLines(t, f.warnBuf.String()), 2)
 	})
@@ -868,6 +874,8 @@ func TestGitHubWebhookIngress_RedeliveryReturnsDuplicate(t *testing.T) {
 
 	deliv := "72d3162e-cc78-11e3-81ab-4c9367dc0958"
 	body := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "hello", f.currentTime())
+	rawSum := sha256.Sum256(body)
+	wantBodySHA := hex.EncodeToString(rawSum[:])
 
 	rec1 := f.postDelivery(t, "issue_comment", deliv, body, nil)
 	require.Equal(t, http.StatusAccepted, rec1.Code, rec1.Body.String())
@@ -875,7 +883,11 @@ func TestGitHubWebhookIngress_RedeliveryReturnsDuplicate(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &first))
 	require.Len(t, first.Events, 2)
 
-	// Manual redelivery with uppercase GUID hex deduplicates to the exact original event IDs.
+	storedFirst, err := f.store.GetTriggerEvent(ctx, first.Events[0].EventID)
+	require.NoError(t, err)
+	assert.Equal(t, wantBodySHA, storedFirst.BodySHA256, "stored BodySHA256 must hash the raw signed request body, not the projection")
+
+	// 1. Manual redelivery with uppercase GUID hex deduplicates to the exact original event IDs.
 	f.auditBuf.Reset()
 	rec2 := f.postDelivery(t, "issue_comment", strings.ToUpper(deliv), body, nil)
 	require.Equal(t, http.StatusAccepted, rec2.Code, rec2.Body.String())
@@ -889,19 +901,48 @@ func TestGitHubWebhookIngress_RedeliveryReturnsDuplicate(t *testing.T) {
 		assert.Equal(t, first.Events[i].EventID, second.Events[i].EventID)
 	}
 
+	// 2. Fresh GUID replay with the EXACT SAME raw body bytes is ALSO a duplicate (O1 / rev 1.8 §4.3).
+	f.auditBuf.Reset()
+	freshGUID := uuid.NewString()
+	recReplay := f.postDelivery(t, "issue_comment", freshGUID, body, nil)
+	require.Equal(t, http.StatusAccepted, recReplay.Code, recReplay.Body.String())
+	var replay GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recReplay.Body.Bytes(), &replay))
+	assert.Equal(t, GitHubWebhookStatusDuplicate, replay.Status)
+	require.Len(t, replay.Events, 2)
+	for i := range replay.Events {
+		assert.Equal(t, GitHubWebhookStatusDuplicate, replay.Events[i].Status)
+		assert.Equal(t, first.Events[i].ProjectID, replay.Events[i].ProjectID)
+		assert.Equal(t, first.Events[i].EventID, replay.Events[i].EventID)
+	}
+
 	dqStore := f.store.(store.DurableQueueStore)
 	for _, pid := range []string{projA.ID, projB.ID} {
-		evs, err := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: pid}, store.ListOptions{})
-		require.NoError(t, err)
+		evs, lErr := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: pid}, store.ListOptions{})
+		require.NoError(t, lErr)
 		assert.Len(t, evs.Items, 1)
-		stats, err := dqStore.DurableQueueStats(ctx, trigger.EventQueueKind, pid, f.currentTime())
-		require.NoError(t, err)
+		stats, sErr := dqStore.DurableQueueStats(ctx, trigger.EventQueueKind, pid, f.currentTime())
+		require.NoError(t, sErr)
 		assert.Equal(t, int64(1), stats.Pending)
 	}
 
 	audits := parseAuditLines(t, f.auditBuf.String())
 	require.Len(t, audits, 1)
 	assert.Equal(t, GitHubWebhookStatusDuplicate, audits[0]["result"])
+
+	// 3. Different raw body with a new GUID creates a second distinct event per project.
+	bodyDistinct := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "distinct follow-up comment", f.currentTime())
+	recDistinct := f.postDelivery(t, "issue_comment", uuid.NewString(), bodyDistinct, nil)
+	require.Equal(t, http.StatusAccepted, recDistinct.Code, recDistinct.Body.String())
+	var distinctResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recDistinct.Body.Bytes(), &distinctResp))
+	assert.Equal(t, GitHubWebhookStatusQueued, distinctResp.Status)
+	require.Len(t, distinctResp.Events, 2)
+	for _, pid := range []string{projA.ID, projB.ID} {
+		evs, lErr := f.store.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: pid}, store.ListOptions{})
+		require.NoError(t, lErr)
+		assert.Len(t, evs.Items, 2)
+	}
 }
 
 func TestGitHubWebhookIngress_PendingCapSkipsOverCapProjectWithAudit(t *testing.T) {
@@ -913,8 +954,8 @@ func TestGitHubWebhookIngress_PendingCapSkipsOverCapProjectWithAudit(t *testing.
 
 	// First accept one delivery so projOver has 1 real event we can redeliver at the cap.
 	seedDeliv := "11111111-2222-3333-4444-555555555555"
-	body := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "hello", f.currentTime())
-	seedRec := f.postDelivery(t, "issue_comment", seedDeliv, body, nil)
+	seedBody := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "seed-comment", f.currentTime())
+	seedRec := f.postDelivery(t, "issue_comment", seedDeliv, seedBody, nil)
 	require.Equal(t, http.StatusAccepted, seedRec.Code)
 
 	// Fill projOver's pending queue up to MaxPendingEventsPerProject (5000).
@@ -935,10 +976,11 @@ func TestGitHubWebhookIngress_PendingCapSkipsOverCapProjectWithAudit(t *testing.
 		return nil
 	}))
 
-	// New delivery: projOver is skipped with queue_full, while healthy sibling projOK is queued!
+	// New delivery (distinct body): projOver is skipped with queue_full, while healthy sibling projOK is queued!
 	f.auditBuf.Reset()
 	newDeliv := uuid.NewString()
-	rec := f.postDelivery(t, "issue_comment", newDeliv, body, nil)
+	newBody := sampleIssueCommentPayload(t, f.instID, "acme/widgets", "alice", "User", "distinct-over-cap-comment", f.currentTime())
+	rec := f.postDelivery(t, "issue_comment", newDeliv, newBody, nil)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 
 	var resp GitHubWebhookAcceptedResponse
@@ -960,14 +1002,23 @@ func TestGitHubWebhookIngress_PendingCapSkipsOverCapProjectWithAudit(t *testing.
 	assert.Equal(t, GitHubWebhookStatusQueued, audits[0]["result"])
 	assert.Contains(t, f.auditBuf.String(), GitHubWebhookSkipReasonQueueFull)
 
-	// Redelivery of seedDeliv while projOver is at 5000 pending still answers duplicate (dedup runs before cap check).
-	dupRec := f.postDelivery(t, "issue_comment", seedDeliv, body, nil)
+	// Redelivery of seedDeliv (same GUID) while projOver is at 5000 pending still answers duplicate (dedup runs before cap check).
+	dupRec := f.postDelivery(t, "issue_comment", seedDeliv, seedBody, nil)
 	require.Equal(t, http.StatusAccepted, dupRec.Code, dupRec.Body.String())
 	var dupResp GitHubWebhookAcceptedResponse
 	require.NoError(t, json.Unmarshal(dupRec.Body.Bytes(), &dupResp))
 	assert.Equal(t, GitHubWebhookStatusDuplicate, dupResp.Status)
 	assert.Empty(t, dupResp.SkippedProjects)
 	require.Len(t, dupResp.Events, 2)
+
+	// Replay of seedBody with a fresh GUID while projOver is at 5000 pending ALSO answers duplicate before cap check.
+	bodyDupRec := f.postDelivery(t, "issue_comment", uuid.NewString(), seedBody, nil)
+	require.Equal(t, http.StatusAccepted, bodyDupRec.Code, bodyDupRec.Body.String())
+	var bodyDupResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(bodyDupRec.Body.Bytes(), &bodyDupResp))
+	assert.Equal(t, GitHubWebhookStatusDuplicate, bodyDupResp.Status)
+	assert.Empty(t, bodyDupResp.SkippedProjects)
+	require.Len(t, bodyDupResp.Events, 2)
 }
 
 func TestGitHubWebhookIngress_AttributesCeilingExceededMappedTo202Skipped(t *testing.T) {
@@ -1294,12 +1345,13 @@ func TestGitHubWebhookIngress_AmpersandLabelsCeilingAndInvalidInputSkip(t *testi
 		}, resp1.SkippedProjects[0])
 		assert.Contains(t, auditBuf.String(), GitHubWebhookSkipReasonInvalidEvent)
 
-		// 2. Fail all projects: top-level status is 202 skipped (not 500) + audit.
+		// 2. Fail all projects with a distinct body: top-level status is 202 skipped (not 500) + audit.
 		wrapper.failProjectID = ""
 		auditBuf.Reset()
 
 		deliv2 := uuid.NewString()
-		rec2 := f.postDelivery(t, "issue_comment", deliv2, body1, nil)
+		body2 := sampleIssueCommentPayload(t, testInstID, "acme/widgets", "alice", "User", "hello-second-distinct", baseNow)
+		rec2 := f.postDelivery(t, "issue_comment", deliv2, body2, nil)
 		require.Equal(t, http.StatusAccepted, rec2.Code, rec2.Body.String())
 
 		var resp2 GitHubWebhookAcceptedResponse

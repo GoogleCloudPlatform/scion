@@ -959,3 +959,100 @@ func TestTriggerEvent_ListsPersistenceAndCeiling(t *testing.T) {
 	}
 	require.ErrorIs(t, cs.CreateTriggerEvent(ctx, evOversized), store.ErrInvalidInput)
 }
+
+func TestTriggerEvent_BodySHA256UniquePerProjectAndSourceKind(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projA := uuid.NewString()
+	projB := uuid.NewString()
+	now := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	hash1 := strings.Repeat("a", 64)
+	hash2 := strings.Repeat("b", 64)
+
+	ev1 := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projA,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#1",
+		DedupKey:   "11111111-1111-1111-1111-111111111111/" + projA,
+		BodySHA256: hash1,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created"}`,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, ev1))
+
+	byHash, err := cs.GetTriggerEventByBodySHA256(ctx, projA, store.TriggerSourceKindGitHub, hash1)
+	require.NoError(t, err)
+	assert.Equal(t, ev1.ID, byHash.ID)
+	assert.Equal(t, hash1, byHash.BodySHA256)
+
+	// Replay with a brand-new DedupKey on the same (project_id, source_kind, body_sha256)
+	// violates the partial unique index and returns store.ErrAlreadyExists.
+	replaySameProject := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projA,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#1",
+		DedupKey:   "22222222-2222-2222-2222-222222222222/" + projA,
+		BodySHA256: hash1,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created"}`,
+	}
+	require.ErrorIs(t, cs.CreateTriggerEvent(ctx, replaySameProject), store.ErrAlreadyExists)
+
+	// Same body_sha256 in a DIFFERENT project succeeds (multi-project fan-out).
+	sameHashOtherProject := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projB,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#1",
+		DedupKey:   "11111111-1111-1111-1111-111111111111/" + projB,
+		BodySHA256: hash1,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created"}`,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, sameHashOtherProject))
+
+	// Different body_sha256 in the same project succeeds.
+	diffHashSameProject := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projA,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#1",
+		DedupKey:   "33333333-3333-3333-3333-333333333333/" + projA,
+		BodySHA256: hash2,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created","n":2}`,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, diffHashSameProject))
+
+	// Multiple generic webhook events with empty body_sha256 in the same project
+	// do NOT collide under the partial unique index (WHERE body_sha256 <> '').
+	for i := 0; i < 2; i++ {
+		wh := &store.TriggerEvent{
+			ID:         uuid.NewString(),
+			ProjectID:  projA,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   "ep-1",
+			Type:       "webhook.received",
+			Subject:    "webhook:ep-1",
+			DedupKey:   fmt.Sprintf("wh-deliv-%d", i),
+			OccurredAt: now,
+			ReceivedAt: now,
+			Payload:    `{}`,
+		}
+		require.NoError(t, cs.CreateTriggerEvent(ctx, wh))
+	}
+}

@@ -26,6 +26,8 @@ const (
 	FieldSubject = "subject"
 	// FieldDedupKey holds the string denoting the dedup_key field in the database.
 	FieldDedupKey = "dedup_key"
+	// FieldBodySha256 holds the string denoting the body_sha256 field in the database.
+	FieldBodySha256 = "body_sha256"
 	// FieldOccurredAt holds the string denoting the occurred_at field in the database.
 	FieldOccurredAt = "occurred_at"
 	// FieldReceivedAt holds the string denoting the received_at field in the database.
@@ -65,6 +67,7 @@ var Columns = []string{
 	FieldType,
 	FieldSubject,
 	FieldDedupKey,
+	FieldBodySha256,
 	FieldOccurredAt,
 	FieldReceivedAt,
 	FieldAttributes,
@@ -101,6 +104,8 @@ var (
 	SubjectValidator func(string) error
 	// DedupKeyValidator is a validator for the "dedup_key" field. It is called by the builders before save.
 	DedupKeyValidator func(string) error
+	// DefaultBodySha256 holds the default value on creation for the "body_sha256" field.
+	DefaultBodySha256 string
 	// DefaultAttributes holds the default value on creation for the "attributes" field.
 	DefaultAttributes string
 	// DefaultLists holds the default value on creation for the "lists" field.
@@ -159,6 +164,11 @@ func BySubject(opts ...sql.OrderTermOption) OrderOption {
 // ByDedupKey orders the results by the dedup_key field.
 func ByDedupKey(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDedupKey, opts...).ToFunc()
+}
+
+// ByBodySha256 orders the results by the body_sha256 field.
+func ByBodySha256(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBodySha256, opts...).ToFunc()
 }
 
 // ByOccurredAt orders the results by the occurred_at field.
