@@ -3389,3 +3389,229 @@ func TestSecretFetch_RefMatchesResolve(t *testing.T) {
 		}
 	})
 }
+
+// nilPayloadSMClient wraps mockSMClient and returns an AccessSecretVersionResponse
+// with a nil Payload (or a nil response when nilResponse is true) for matching
+// secret versions that exist in the underlying mock.
+type nilPayloadSMClient struct {
+	*mockSMClient
+	matchPrefix string
+	nilResponse bool
+}
+
+func (m *nilPayloadSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	resp, err := m.mockSMClient.AccessSecretVersion(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if m.matchPrefix != "" && !strings.HasPrefix(req.Name, m.matchPrefix) {
+		return resp, nil
+	}
+	if m.nilResponse {
+		return nil, nil
+	}
+	return &smpb.AccessSecretVersionResponse{Name: req.Name, Payload: nil}, nil
+}
+
+func TestGCPBackend_NilSecretPayload(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("accessLatestVersionByPath", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		smName := base.gcpSecretName("API_KEY", ScopeUser, "user-1")
+		seedMockSecret(t, mock, base.projectID, smName, "FAKE-secret-value")
+
+		backend := NewGCPBackendWithClient(base.store, &nilPayloadSMClient{mockSMClient: mock}, base.projectID, base.hubID)
+		val, err := backend.accessLatestVersionByPath(ctx, base.smSecretPath(smName))
+		if err == nil {
+			t.Fatalf("accessLatestVersionByPath() = %q, nil; want an error on nil payload", val)
+		}
+		if !strings.Contains(err.Error(), "nil payload") {
+			t.Errorf("error = %q, want mention of nil payload", err.Error())
+		}
+		if val != "" {
+			t.Errorf("val = %q, want empty string on error", val)
+		}
+	})
+
+	t.Run("accessLatestVersionByPath_nil_response", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		smName := base.gcpSecretName("API_KEY", ScopeUser, "user-1")
+		seedMockSecret(t, mock, base.projectID, smName, "FAKE-secret-value")
+
+		backend := NewGCPBackendWithClient(base.store, &nilPayloadSMClient{mockSMClient: mock, nilResponse: true}, base.projectID, base.hubID)
+		val, err := backend.accessLatestVersionByPath(ctx, base.smSecretPath(smName))
+		if err == nil {
+			t.Fatalf("accessLatestVersionByPath() = %q, nil; want an error on nil response", val)
+		}
+		if !strings.Contains(err.Error(), "nil payload") {
+			t.Errorf("error = %q, want mention of nil payload", err.Error())
+		}
+		if val != "" {
+			t.Errorf("val = %q, want empty string on error", val)
+		}
+	})
+
+	t.Run("accessLatestVersionByPath_empty_data_allowed", func(t *testing.T) {
+		backend, mock := createTestGCPBackend(t)
+		smName := backend.gcpSecretName("EMPTY_KEY", ScopeUser, "user-1")
+		seedMockSecret(t, mock, backend.projectID, smName, "")
+
+		val, err := backend.accessLatestVersionByPath(ctx, backend.smSecretPath(smName))
+		if err != nil {
+			t.Fatalf("accessLatestVersionByPath() unexpected error for non-nil empty payload: %v", err)
+		}
+		if val != "" {
+			t.Errorf("val = %q, want empty string", val)
+		}
+	})
+
+	t.Run("accessSecretByComputedName_prefixed", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		prefixedName := base.gcpSecretName("API_KEY", ScopeUser, "user-1")
+		legacyName := base.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+		seedMockSecret(t, mock, base.projectID, prefixedName, "FAKE-prefixed")
+		seedMockSecret(t, mock, base.projectID, legacyName, "FAKE-legacy")
+
+		prefixedFull := base.smSecretPath(prefixedName)
+		backend := NewGCPBackendWithClient(base.store, &nilPayloadSMClient{mockSMClient: mock, matchPrefix: prefixedFull}, base.projectID, base.hubID)
+
+		val, smName, err := backend.accessSecretByComputedName(ctx, "API_KEY", ScopeUser, "user-1")
+		if err == nil {
+			t.Fatalf("accessSecretByComputedName() = (%q, %q, nil); want an error rather than legacy fallback or empty value", val, smName)
+		}
+		if status.Code(err) == codes.NotFound || errors.Is(err, store.ErrNotFound) {
+			t.Errorf("error = %v, must not be treated as NotFound", err)
+		}
+		if !strings.Contains(err.Error(), "nil payload") {
+			t.Errorf("error = %q, want mention of nil payload", err.Error())
+		}
+		if val != "" || smName != "" {
+			t.Errorf("got (%q, %q), want empty strings on error", val, smName)
+		}
+	})
+
+	t.Run("accessSecretByComputedName_legacy_fallback", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		legacyName := base.legacyGCPSecretName("API_KEY", ScopeUser, "user-1")
+		seedMockSecret(t, mock, base.projectID, legacyName, "FAKE-legacy")
+
+		backend := NewGCPBackendWithClient(base.store, &nilPayloadSMClient{mockSMClient: mock}, base.projectID, base.hubID)
+		val, smName, err := backend.accessSecretByComputedName(ctx, "API_KEY", ScopeUser, "user-1")
+		if err == nil {
+			t.Fatalf("accessSecretByComputedName() = (%q, %q, nil); want an error on legacy nil payload", val, smName)
+		}
+		if status.Code(err) == codes.NotFound || errors.Is(err, store.ErrNotFound) {
+			t.Errorf("error = %v, must surface nil payload error rather than prefixed NotFound", err)
+		}
+		if !strings.Contains(err.Error(), "nil payload") {
+			t.Errorf("error = %q, want mention of nil payload", err.Error())
+		}
+		if val != "" || smName != "" {
+			t.Errorf("got (%q, %q), want empty strings on error", val, smName)
+		}
+	})
+
+	t.Run("Get_stored_ref", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		if _, _, err := base.Set(ctx, &SetSecretInput{
+			Name: "API_KEY", Value: "FAKE-secret-value", SecretType: TypeEnvironment,
+			Scope: ScopeUser, ScopeID: "user-1",
+		}); err != nil {
+			t.Fatalf("Set failed: %v", err)
+		}
+
+		backend := NewGCPBackendWithClient(base.store, &nilPayloadSMClient{mockSMClient: mock}, base.projectID, base.hubID)
+		sv, err := backend.Get(ctx, "API_KEY", ScopeUser, "user-1")
+		if err == nil {
+			t.Fatalf("Get() = %+v, nil; want an error on nil payload", sv)
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			t.Errorf("Get() error = %v, must not be store.ErrNotFound", err)
+		}
+		if !strings.Contains(err.Error(), "nil payload") {
+			t.Errorf("Get() error = %q, want mention of nil payload", err.Error())
+		}
+		if strings.Contains(err.Error(), "FAKE-secret-value") {
+			t.Fatal("error leaked secret value")
+		}
+	})
+
+	t.Run("Get_computed_name_legacy", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		legacyName := base.legacyGCPSecretName("SIGNING_KEY", store.ScopeHub, base.hubID)
+		seedMockSecret(t, mock, base.projectID, legacyName, "FAKE-signing-key")
+
+		backend := NewGCPBackendWithClient(base.store, &nilPayloadSMClient{mockSMClient: mock}, base.projectID, base.hubID)
+		sv, err := backend.Get(ctx, "SIGNING_KEY", store.ScopeHub, base.hubID)
+		if err == nil {
+			t.Fatalf("Get() = %+v, nil; want an error on nil payload", sv)
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			t.Errorf("Get() error = %v, must not be store.ErrNotFound", err)
+		}
+		if !strings.Contains(err.Error(), "nil payload") {
+			t.Errorf("Get() error = %q, want mention of nil payload", err.Error())
+		}
+	})
+
+	t.Run("FetchValues_stored_ref_and_computed_name", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		_, storedMeta, err := base.Set(ctx, &SetSecretInput{
+			Name: "STORED_REF_KEY", Value: "FAKE-v1", SecretType: TypeEnvironment,
+			Scope: ScopeUser, ScopeID: "user-1",
+		})
+		if err != nil {
+			t.Fatalf("Set failed: %v", err)
+		}
+		if err := base.store.CreateSecret(ctx, &store.Secret{
+			ID: tid("nil-payload-computed"), Key: "COMPUTED_KEY",
+			SecretType: store.SecretTypeEnvironment, Target: "COMPUTED_KEY",
+			Scope: ScopeUser, ScopeID: "user-1",
+		}); err != nil {
+			t.Fatalf("CreateSecret failed: %v", err)
+		}
+		seedMockSecret(t, mock, base.projectID, base.gcpSecretName("COMPUTED_KEY", ScopeUser, "user-1"), "FAKE-v2")
+		computedMeta, err := base.GetMeta(ctx, "COMPUTED_KEY", ScopeUser, "user-1")
+		if err != nil {
+			t.Fatalf("GetMeta failed: %v", err)
+		}
+
+		backend := NewGCPBackendWithClient(base.store, &nilPayloadSMClient{mockSMClient: mock}, base.projectID, base.hubID)
+		results, err := backend.FetchValues(ctx, []SecretMeta{*storedMeta, *computedMeta})
+		if err != nil {
+			t.Fatalf("FetchValues outer error = %v, want nil", err)
+		}
+		for _, meta := range []*SecretMeta{storedMeta, computedMeta} {
+			res := results[meta.ID]
+			if !errors.Is(res.Err, ErrValueAccess) {
+				t.Errorf("%s: res.Err = %v, want ErrValueAccess", meta.Name, res.Err)
+			}
+			if res.Err == nil || !strings.Contains(res.Err.Error(), "nil payload") {
+				t.Errorf("%s: res.Err = %v, want mention of nil payload", meta.Name, res.Err)
+			}
+			if res.Value != "" || res.Ref != "" {
+				t.Errorf("%s: failed item carries value=%q ref=%q, want both empty", meta.Name, res.Value, res.Ref)
+			}
+		}
+	})
+
+	t.Run("Resolve_skips_nil_payload", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		if _, _, err := base.Set(ctx, &SetSecretInput{
+			Name: "API_KEY", Value: "FAKE-secret-value", SecretType: TypeEnvironment,
+			Scope: ScopeUser, ScopeID: "user-1",
+		}); err != nil {
+			t.Fatalf("Set failed: %v", err)
+		}
+
+		backend := NewGCPBackendWithClient(base.store, &nilPayloadSMClient{mockSMClient: mock}, base.projectID, base.hubID)
+		resolved, err := backend.Resolve(ctx, "user-1", "", "", nil)
+		if err != nil {
+			t.Fatalf("Resolve() error = %v, want nil (broken secret skipped)", err)
+		}
+		if len(resolved) != 0 {
+			t.Fatalf("Resolve() = %+v, want broken secret omitted rather than delivered with empty value", resolved)
+		}
+	})
+}
