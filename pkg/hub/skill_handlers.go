@@ -312,8 +312,9 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		if identity != nil {
 			principalType = identity.Type()
 		}
-		slog.WarnContext(ctx, "listSkills: failed to resolve list scopes; failing closed",
-			"principal_type", principalType, "error", err)
+		logAuthzCheckFault(ctx, nil, "list_skills_scope",
+			"listSkills: failed to resolve list scopes; failing closed", err,
+			"principal_type", principalType)
 	}
 	switch {
 	case identity == nil:

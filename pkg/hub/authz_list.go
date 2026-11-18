@@ -129,8 +129,8 @@ func (a *AuthzService) resolveListScopesForIdentity(ctx context.Context, identit
 	authzIn := a.inputsFor(ctx, identity)
 	principals, err := authzIn.Principals()
 	if err != nil {
-		a.logger.WarnContext(ctx, "ResolveListScopes: failed to resolve principals",
-			"error", err, "permission", permissionID)
+		logAuthzCheckFault(ctx, a.logger, "list_scope_principals",
+			"ResolveListScopes: failed to resolve principals", err, "permission", permissionID)
 		return none, fmt.Errorf("ResolveListScopes: principal resolution: %w", err)
 	}
 
@@ -150,8 +150,8 @@ func (a *AuthzService) resolveListScopesForIdentity(ctx context.Context, identit
 	// and project scoped) so ResolveAuthorizedScopes can compute the full set.
 	bindings, err := authzIn.Bindings()
 	if err != nil {
-		a.logger.WarnContext(ctx, "ResolveListScopes: failed to load role bindings",
-			"error", err, "permission", permissionID)
+		logAuthzCheckFault(ctx, a.logger, "list_scope_role_bindings",
+			"ResolveListScopes: failed to load role bindings", err, "permission", permissionID)
 		return none, fmt.Errorf("ResolveListScopes: role binding load: %w", err)
 	}
 
@@ -162,8 +162,8 @@ func (a *AuthzService) resolveListScopesForIdentity(ctx context.Context, identit
 	// Step 3: Collect unique role definition IDs and load them.
 	roleDefinitions, err := authzIn.RoleDefs()
 	if err != nil {
-		a.logger.WarnContext(ctx, "ResolveListScopes: failed to load role definitions",
-			"error", err, "permission", permissionID)
+		logAuthzCheckFault(ctx, a.logger, "list_scope_role_definitions",
+			"ResolveListScopes: failed to load role definitions", err, "permission", permissionID)
 		return none, fmt.Errorf("ResolveListScopes: role definition load: %w", err)
 	}
 
@@ -270,8 +270,8 @@ func (a *AuthzService) applyListScopeConstraints(
 	constraints, err := a.loadAllAccessConstraints(ctx)
 	if err != nil {
 		// C-2 + R-1: fail closed when constraint loading errors.
-		a.logger.WarnContext(ctx, "ResolveListScopes: failed to load access constraints (fail-closed)",
-			"error", err, "permission", permissionID)
+		logAuthzCheckFault(ctx, a.logger, "list_scope_access_constraints",
+			"ResolveListScopes: failed to load access constraints (fail-closed)", err, "permission", permissionID)
 		return none, fmt.Errorf("ResolveListScopes: constraint load: %w", err)
 	}
 	if len(constraints) == 0 {

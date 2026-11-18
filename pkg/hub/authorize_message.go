@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -527,8 +526,9 @@ func (s *Server) EvaluateAgentMessage(
 	// Fetch the sender agent's record for mode, project, ancestry.
 	senderAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
 	if err != nil {
-		slog.Warn("EvaluateAgentMessage: failed to fetch sender agent",
-			"sender_id", agentIdent.ID(), "error", err)
+		logAuthzCheckFault(ctx, nil, "message_sender_agent",
+			"EvaluateAgentMessage: failed to fetch sender agent", err,
+			"sender_id", agentIdent.ID())
 		return MessageDecision{Reason: "failed to fetch sender agent record"}
 	}
 	if senderAgent == nil {
@@ -652,8 +652,9 @@ func (s *Server) evaluateCrossProject(
 	// Gate (d): Destination project's crossProjectInbound policy.
 	destProject, err := s.store.GetProject(ctx, targetAgent.ProjectID)
 	if err != nil {
-		slog.Warn("EvaluateAgentMessage: failed to fetch destination project",
-			"project_id", targetAgent.ProjectID, "error", err)
+		logAuthzCheckFault(ctx, nil, "message_dest_project",
+			"EvaluateAgentMessage: failed to fetch destination project", err,
+			"project_id", targetAgent.ProjectID)
 		decision.Reason = "failed to fetch destination project"
 		return decision
 	}
@@ -698,9 +699,9 @@ func (s *Server) evaluateCrossProject(
 	if inboundPolicy == store.CrossProjectInboundMembers {
 		memberResult := s.CheckEffectiveMembership(ctx, originUserID, targetAgent.ProjectID)
 		if memberResult.Err != nil {
-			slog.Warn("EvaluateAgentMessage: membership check failed",
-				"user_id", originUserID, "project_id", targetAgent.ProjectID,
-				"error", memberResult.Err)
+			logAuthzCheckFault(ctx, nil, "message_membership",
+				"EvaluateAgentMessage: membership check failed", memberResult.Err,
+				"user_id", originUserID, "project_id", targetAgent.ProjectID)
 			// Infrastructure error → retryable denial, not a membership denial.
 			decision.Reason = "membership check failed: " + memberResult.Err.Error()
 			return decision
@@ -750,8 +751,9 @@ func (s *Server) validateCrossProjectOrigin(ctx context.Context, agentIdent Agen
 
 	originUser, err := s.store.GetUser(ctx, originUserID)
 	if err != nil {
-		slog.Warn("validateCrossProjectOrigin: failed to fetch origin user",
-			"user_id", originUserID, "error", err)
+		logAuthzCheckFault(ctx, nil, "message_origin_user",
+			"validateCrossProjectOrigin: failed to fetch origin user", err,
+			"user_id", originUserID)
 		return "", &MessageDecision{
 			CrossProject: true,
 			Code:         MessageDenialCrossProjectUntrusted,
@@ -861,8 +863,9 @@ func (s *Server) authorizeCrossProjectAgentMessage(
 	// 4. Destination project's inbound policy.
 	targetProject, err := s.store.GetProject(ctx, targetAgent.ProjectID)
 	if err != nil || targetProject == nil {
-		slog.Warn("authorizeCrossProjectAgentMessage: failed to fetch target project",
-			"project_id", targetAgent.ProjectID, "error", err)
+		logAuthzCheckFault(ctx, nil, "message_target_project",
+			"authorizeCrossProjectAgentMessage: failed to fetch target project", err,
+			"project_id", targetAgent.ProjectID)
 		return false, "cross_project_target_project_unavailable"
 	}
 
@@ -1033,7 +1036,9 @@ func (a *AuthzService) messageAncestorProjectAccess(ctx context.Context, sender 
 	if err != nil {
 		if isProjectAccessLookupFault(err) {
 			if a.logger != nil {
-				a.logger.Warn("message ancestry project access check failed (fail-closed)", "project_id", projectID, "error", err)
+				logAuthzCheckFault(ctx, a.logger, "message_ancestry_project_access",
+					"message ancestry project access check failed (fail-closed)", err,
+					"project_id", projectID)
 			}
 			return false, true
 		}

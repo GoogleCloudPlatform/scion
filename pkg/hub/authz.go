@@ -1048,7 +1048,8 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	var constraintLoadFailed bool
 	acRestrictions, acErr := a.accessConstraintRestrictions(ctx, closure, resourceCtx)
 	if acErr != nil {
-		a.logger.Warn("failed to load access constraints (fail-closed)", "error", acErr)
+		logAuthzCheckFault(ctx, a.logger, "access_constraints",
+			"failed to load access constraints (fail-closed)", acErr)
 		acRestrictions = []Restriction{{
 			Kind:        "access_constraint_error",
 			Description: "constraint loading failed (fail-closed)",
@@ -1904,7 +1905,8 @@ func (a *AuthzService) loadAccessConstraintRestrictions(
 		// R-1 fix: deny (fail closed) when constraint loading errors.
 		// The design is explicit: "Store or group resolution errors fail
 		// closed." Returning a deny-all restriction ensures no over-grant.
-		a.logger.Warn("failed to load access constraints (fail-closed)", "error", err)
+		logAuthzCheckFault(ctx, a.logger, "access_constraints",
+			"failed to load access constraints (fail-closed)", err)
 		return []Restriction{{
 			Kind:        "access_constraint_error",
 			Description: "constraint loading failed (fail-closed)",
@@ -2829,8 +2831,9 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 		// Fail closed: group resolution failure means we cannot evaluate
 		// group_closure constraints correctly. Return empty permissions
 		// rather than silently skipping group constraints.
-		a.logger.Warn("failed to get effective groups for permission expansion (fail-closed)",
-			"principalType", principalType, "principalID", principalID, "error", err)
+		logAuthzCheckFault(ctx, a.logger, "effective_permissions_groups",
+			"failed to get effective groups for permission expansion (fail-closed)", err,
+			"principalType", principalType, "principalID", principalID)
 		return nil, fmt.Errorf("group resolution failed (fail-closed): %w", err)
 	}
 	for _, gid := range groupIDs {
@@ -2868,8 +2871,9 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
-			a.logger.Warn("failed to resolve role definition for binding",
-				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID, "error", err)
+			logAuthzCheckFault(ctx, a.logger, "effective_permissions_role_def",
+				"failed to resolve role definition for binding", err,
+				"binding_id", b.ID, "role_definition_id", b.RoleDefinitionID)
 			continue
 		}
 		for _, permID := range rd.Permissions {

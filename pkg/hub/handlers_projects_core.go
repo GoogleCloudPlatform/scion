@@ -147,8 +147,8 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	// authorization result producing an empty list without a broad query.
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "project.list")
 	if err != nil {
-		slog.WarnContext(ctx, "listProjects: authorization scope resolution failed (fail-closed)",
-			"error", err)
+		logAuthzCheckFault(ctx, nil, "list_projects_scope",
+			"listProjects: authorization scope resolution failed (fail-closed)", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"unable to resolve authorization", nil)
 		return

@@ -697,7 +697,8 @@ func (s *Server) agentSuspensionViews(ctx context.Context, agents []store.Agent)
 		for {
 			res, err := s.store.ListActiveAgentHoldsByProject(ctx, p, store.ListOptions{Limit: 500, Cursor: cursor})
 			if err != nil {
-				slog.Warn("agent suspension view: hold listing failed", "project_id", p, "error", err)
+				logAuthzCheckFault(ctx, nil, "agent_suspension_holds",
+					"agent suspension view: hold listing failed", err, "project_id", p)
 				break
 			}
 			for _, h := range res.Items {
