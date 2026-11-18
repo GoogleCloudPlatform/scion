@@ -219,7 +219,6 @@ const BULK_ZONE_SCAN_TIMEOUT_MS = 30_000;
 const ZONEINFO_EXCLUDED_NAMES = new Set(['right', 'posix', 'localtime', 'posixrules', 'Factory']);
 
 const TZIF_MAGIC = Buffer.from('TZif');
-const tzifHeaderBuf = Buffer.alloc(4);
 
 /**
  * Reports whether `path` is a compiled zoneinfo entry: a file (or a symlink
@@ -239,8 +238,9 @@ function isTZifFile(path: string): boolean {
     return false;
   }
   try {
-    const bytesRead = readSync(fd, tzifHeaderBuf, 0, 4, 0);
-    return bytesRead === 4 && tzifHeaderBuf.equals(TZIF_MAGIC);
+    const buf = Buffer.alloc(4);
+    const bytesRead = readSync(fd, buf, 0, 4, 0);
+    return bytesRead === 4 && buf.equals(TZIF_MAGIC);
   } catch {
     return false;
   } finally {
@@ -265,26 +265,18 @@ function listSystemZoneNames(dir: string, prefix = ''): string[] {
   return names;
 }
 
-let cachedSystemZoneNames: readonly string[] | undefined;
-
-/** Walks `ZONEINFO_DIR` once per worker and caches the resulting zone list. */
-function getSystemZoneNames(): readonly string[] {
-  if (cachedSystemZoneNames === undefined) {
-    cachedSystemZoneNames = Object.freeze(listSystemZoneNames(ZONEINFO_DIR));
-  }
-  return cachedSystemZoneNames;
-}
-
 describe('isValidTimeZone against the system zone database', () => {
   it('filters TZif files, skips non-TZif/short files and excluded names', () => {
     const dir = mkdtempSync(join(tmpdir(), 'scion-zoneinfo-test-'));
-    const shortDir = mkdtempSync(join(tmpdir(), 'scion-zoneinfo-short-'));
     try {
       const tzifPayload = Buffer.from('TZif2\0\0\0');
       writeFileSync(join(dir, 'CET'), tzifPayload);
       mkdirSync(join(dir, 'Asia'));
       writeFileSync(join(dir, 'Asia', 'Tokyo'), tzifPayload);
+      // Non-TZif metadata and <4-byte files.
       writeFileSync(join(dir, 'zone.tab'), '# metadata\n');
+      writeFileSync(join(dir, 'empty'), Buffer.alloc(0));
+      writeFileSync(join(dir, 'short'), Buffer.from('TZ'));
       // Excluded non-portable entries and duplicate trees.
       writeFileSync(join(dir, 'Factory'), tzifPayload);
       writeFileSync(join(dir, 'localtime'), tzifPayload);
@@ -295,16 +287,8 @@ describe('isValidTimeZone against the system zone database', () => {
       writeFileSync(join(dir, 'right', 'CET'), tzifPayload);
 
       expect(listSystemZoneNames(dir).sort()).toEqual(['Asia/Tokyo', 'CET']);
-
-      // Run after a valid TZif scan so `tzifHeaderBuf` definitely holds 'TZif'
-      // regardless of `readdirSync` entry order, proving 0-byte and <4-byte
-      // reads never match stale bytes in the reused scratch buffer.
-      writeFileSync(join(shortDir, 'empty'), Buffer.alloc(0));
-      writeFileSync(join(shortDir, 'short'), Buffer.from('TZ'));
-      expect(listSystemZoneNames(shortDir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
-      rmSync(shortDir, { recursive: true, force: true });
     }
   });
 
@@ -323,21 +307,10 @@ describe('isValidTimeZone against the system zone database', () => {
     'accepts every name in the system zone database (0 false rejects)',
     ({ task }) => {
       expect(task.timeout).toBe(BULK_ZONE_SCAN_TIMEOUT_MS);
-      const names = getSystemZoneNames();
+      const names = listSystemZoneNames(ZONEINFO_DIR);
       expect(names.length).toBeGreaterThan(50);
       const falseRejects = names.filter((n) => !isValidTimeZone(n));
       expect(falseRejects).toEqual([]);
-    },
-    BULK_ZONE_SCAN_TIMEOUT_MS
-  );
-
-  it.skipIf(!existsSync(ZONEINFO_DIR))(
-    'caches the system zoneinfo directory walk across calls',
-    ({ task }) => {
-      expect(task.timeout).toBe(BULK_ZONE_SCAN_TIMEOUT_MS);
-      const first = getSystemZoneNames();
-      expect(Object.isFrozen(first)).toBe(true);
-      expect(getSystemZoneNames()).toBe(first);
     },
     BULK_ZONE_SCAN_TIMEOUT_MS
   );
