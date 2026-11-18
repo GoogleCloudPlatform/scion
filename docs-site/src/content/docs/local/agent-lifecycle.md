@@ -503,7 +503,7 @@ a child agent or a scheduled callback hours away. An agent suspended by a user
 are never woken this way.
 
 To keep a Hub-suspended agent down, suspend it again (`scion suspend <agent>`,
-or `POST /api/v1/agents/:id/suspend`): with the experiment on, this changes its
+`POST /api/v1/agents/:id/suspend`, or **Keep suspended** on the agent page): with the experiment on, this changes its
 reason from `idle` or `stalled` to `user` in place, without touching the
 runtime, so new work no longer wakes it.
 

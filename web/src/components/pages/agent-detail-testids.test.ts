@@ -107,6 +107,41 @@ describe('agent page test ids for UAT', () => {
     }
   });
 
+  it('offers Keep suspended only for a hub suspension with lifecycle.idle_suspend on (ptone/scion#7826)', () => {
+    const prev = window.__SCION_FEATURES__;
+    try {
+      window.__SCION_FEATURES__ = { 'lifecycle.idle_suspend': true };
+      for (const reason of ['idle', 'stalled']) {
+        const host = renderPart(
+          makeAgent({ phase: 'suspended', suspendReason: reason }),
+          'renderHeader'
+        );
+        expect(text(byId(host, 'header-keep-suspended'))).toBe('Keep suspended');
+        expect(byId(host, 'header-resume')).not.toBeNull();
+      }
+      for (const agent of [
+        makeAgent({ phase: 'suspended', suspendReason: 'user' }),
+        makeAgent({ phase: 'suspended' }),
+        makeAgent({
+          phase: 'suspended',
+          suspendReason: 'idle',
+          _capabilities: { actions: ['read'] },
+        }),
+      ]) {
+        expect(byId(renderPart(agent, 'renderHeader'), 'header-keep-suspended')).toBeNull();
+      }
+
+      window.__SCION_FEATURES__ = { 'lifecycle.idle_suspend': false };
+      const off = renderPart(
+        makeAgent({ phase: 'suspended', suspendReason: 'idle' }),
+        'renderHeader'
+      );
+      expect(byId(off, 'header-keep-suspended')).toBeNull();
+    } finally {
+      window.__SCION_FEATURES__ = prev;
+    }
+  });
+
   it('marks the launch banner step and message', () => {
     const host = renderPart(
       makeAgent({ phase: 'provisioning', launch: inFlight, message: 'waiting for a node' }),

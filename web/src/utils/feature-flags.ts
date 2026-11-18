@@ -306,3 +306,16 @@ export const K8S_WORKLOAD_IDENTITY_SETUP_FLAG = 'hub.k8s_workload_identity_setup
 export function k8sWorkloadIdentitySetupEnabled(): boolean {
   return isFeatureEnabled(K8S_WORKLOAD_IDENTITY_SETUP_FLAG);
 }
+
+/**
+ * Idle suspend and auto-wake (lifecycle.idle_suspend, ptone/scion#7826):
+ * offers "Keep suspended" on an agent the hub suspended (reason idle or
+ * stalled), which converts it to a user suspension. Presentation only: the
+ * hub checks the experiment before converting. Default OFF.
+ */
+export const IDLE_SUSPEND_FLAG = 'lifecycle.idle_suspend';
+
+/** Whether idle-suspend UI surfaces are enabled in this session. */
+export function idleSuspendEnabled(): boolean {
+  return isFeatureEnabled(IDLE_SUSPEND_FLAG);
+}
