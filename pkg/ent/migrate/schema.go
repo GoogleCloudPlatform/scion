@@ -1277,13 +1277,14 @@ var (
 		{Name: "choices", Type: field.TypeJSON},
 		{Name: "default_choice_id", Type: field.TypeString, Nullable: true},
 		{Name: "intro_length", Type: field.TypeInt, Default: 0},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "decided", "replaced", "withdrawn"}, Default: "pending"},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "decided", "replaced", "withdrawn", "dismissed"}, Default: "pending"},
 		{Name: "replaced_by_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "decided_at", Type: field.TypeTime, Nullable: true},
 		{Name: "replaced_at", Type: field.TypeTime, Nullable: true},
 		{Name: "withdrawn_at", Type: field.TypeTime, Nullable: true},
 		{Name: "withdrawn_reason", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "dismissed_at", Type: field.TypeTime, Nullable: true},
 	}
 	// DecisionsTable holds the schema information for the "decisions" table.
 	DecisionsTable = &schema.Table{
@@ -1338,7 +1339,8 @@ var (
 		{Name: "answered_by_name", Type: field.TypeString, Default: ""},
 		{Name: "answered_by_email", Type: field.TypeString, Default: ""},
 		{Name: "provenance", Type: field.TypeEnum, Enums: []string{"direct", "agent_interpreted"}},
-		{Name: "outcome", Type: field.TypeEnum, Enums: []string{"answer", "confirm", "override"}, Default: "answer"},
+		{Name: "outcome", Type: field.TypeEnum, Enums: []string{"answer", "confirm", "override", "dismiss"}, Default: "answer"},
+		{Name: "dismiss_reason", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "interpreted_by_agent_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "source_message_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "surface", Type: field.TypeEnum, Enums: []string{"native", "decisions_page", "slack", "google_chat", "discord", "telegram", "teams", "other"}},
@@ -1364,22 +1366,22 @@ var (
 			{
 				Name:    "decisionanswer_decision_row_id_idempotency_key",
 				Unique:  true,
-				Columns: []*schema.Column{DecisionAnswersColumns[1], DecisionAnswersColumns[20]},
+				Columns: []*schema.Column{DecisionAnswersColumns[1], DecisionAnswersColumns[21]},
 			},
 			{
 				Name:    "decisionanswer_project_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[23]},
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[24]},
 			},
 			{
 				Name:    "decisionanswer_project_id_asker_agent_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[3], DecisionAnswersColumns[23]},
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[3], DecisionAnswersColumns[24]},
 			},
 			{
 				Name:    "decisionanswer_response_message_id",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[17]},
+				Columns: []*schema.Column{DecisionAnswersColumns[18]},
 			},
 			{
 				Name:    "decisionanswer_answered_by_user_id",
@@ -1389,7 +1391,7 @@ var (
 			{
 				Name:    "decisionanswer_batch_id",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionAnswersColumns[21]},
+				Columns: []*schema.Column{DecisionAnswersColumns[22]},
 			},
 		},
 	}

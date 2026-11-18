@@ -2198,3 +2198,275 @@ func TestWithdrawDecisions_MultiKeyAllOrNothingWholeSetAndRefusals(t *testing.T)
 	assert.True(t, seenStatuses[store.DecisionStatusReplaced])
 	assert.True(t, seenStatuses[store.DecisionStatusWithdrawn])
 }
+
+func (f *decisionFixture) dismissInput(msgID, userID, reason string, now func() time.Time) *store.DismissDecisionsInput {
+	return &store.DismissDecisionsInput{
+		MessageID: msgID,
+		Reason:    reason,
+		Surface:   store.DecisionSurfaceDecisionsPage,
+		User: store.DecisionAnswerer{
+			UserID: userID,
+			Name:   "Pat",
+			Email:  "pat@example.com",
+		},
+		ResponseMessage: &store.Message{
+			ID:             uuid.NewString(),
+			ProjectID:      f.projectID,
+			ConversationID: f.conversationID,
+			Sender:         "user:pat@example.com",
+			SenderID:       userID,
+			Recipient:      "agent:asker",
+			RecipientID:    f.agentID,
+			DispatchState:  store.MessageDispatchDispatched,
+		},
+		FormatMessage: func(ds []*store.Decision) string {
+			keys := make([]string, len(ds))
+			for i, d := range ds {
+				keys[i] = d.Key
+			}
+			return "Pat dismissed " + strings.Join(keys, ", ")
+		},
+		Now: now,
+	}
+}
+
+func TestDismissDecisions_WholePromptAndMinimumAge(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	promptIn := f.prompt("", false, yesNo("DSM-1", "Ship v0.9 today?"), yesNo("DSM-2", "Which approach?"))
+	promptIn.Message.ThreadID = "topic:general"
+	createdPrompt, err := f.cs.CreateDecisionPrompt(ctx, promptIn)
+	require.NoError(t, err)
+	msgID := promptIn.Message.ID
+	rows := []string{createdPrompt.Decisions[0].RowID, createdPrompt.Decisions[1].RowID}
+	d0, err := f.cs.GetDecision(ctx, rows[0])
+	require.NoError(t, err)
+	createdAt := d0.CreatedAt
+	availAt := createdAt.Add(store.DecisionDismissMinAge)
+
+	// Input validation refusals.
+	for _, bad := range []*store.DismissDecisionsInput{
+		nil,
+		{MessageID: msgID, User: store.DecisionAnswerer{UserID: "u1"}},
+		func() *store.DismissDecisionsInput {
+			in := f.dismissInput(msgID, "", "", nil)
+			return in
+		}(),
+		func() *store.DismissDecisionsInput {
+			in := f.dismissInput(msgID, "user-1", strings.Repeat("a", store.MaxDecisionDismissReasonRunes+1), nil)
+			return in
+		}(),
+		func() *store.DismissDecisionsInput {
+			in := f.dismissInput(msgID, "user-1", "", nil)
+			in.Surface = "bogus"
+			return in
+		}(),
+		func() *store.DismissDecisionsInput {
+			in := f.dismissInput(msgID, "user-1", "", nil)
+			in.RowIDs = []string{rows[0]}
+			return in
+		}(),
+		func() *store.DismissDecisionsInput {
+			in := f.dismissInput(msgID, "user-1", "", nil)
+			in.IdempotencyKey = "not-yet"
+			return in
+		}(),
+	} {
+		_, err := f.cs.DismissDecisions(ctx, bad)
+		require.ErrorIs(t, err, store.ErrInvalidInput)
+	}
+
+	// Unknown message ID -> ErrNotFound.
+	_, err = f.cs.DismissDecisions(ctx, f.dismissInput(uuid.NewString(), "user-1", "", func() time.Time { return availAt }))
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	// 4m59s after creation -> DecisionTooRecentError with exact AvailableAt, nothing stored.
+	earlyIn := f.dismissInput(msgID, "user-1", "Too early", func() time.Time {
+		return createdAt.Add(4*time.Minute + 59*time.Second)
+	})
+	_, err = f.cs.DismissDecisions(ctx, earlyIn)
+	var tooRecent *store.DecisionTooRecentError
+	require.ErrorAs(t, err, &tooRecent)
+	require.ErrorIs(t, err, store.ErrDecisionTooRecent)
+	assert.True(t, availAt.Equal(tooRecent.AvailableAt), "expected %v, got %v", availAt, tooRecent.AvailableAt)
+	_, err = f.cs.GetMessage(ctx, earlyIn.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "early attempt stored no response message")
+
+	// Open prompts still include this prompt before dismissal.
+	openBefore, err := f.cs.ListOpenPrompts(ctx, []string{f.projectID}, []string{"topic:general"})
+	require.NoError(t, err)
+	require.Len(t, openBefore, 1)
+
+	// Exactly 5m00s -> dismisses both rows in prompt position order in one transaction.
+	okIn := f.dismissInput(msgID, "user-1", "  Stale: release already shipped — café ☕  ", func() time.Time {
+		return availAt
+	})
+	res, err := f.cs.DismissDecisions(ctx, okIn)
+	require.NoError(t, err)
+	require.Len(t, res.Dismissed, 2)
+	assert.Empty(t, res.AlreadyDismissed)
+	require.NotEmpty(t, res.BatchID)
+	assert.Equal(t, "DSM-1", res.Dismissed[0].Key)
+	assert.Equal(t, "DSM-2", res.Dismissed[1].Key)
+
+	storedMsg, err := f.cs.GetMessage(ctx, okIn.ResponseMessage.ID)
+	require.NoError(t, err)
+	assert.Equal(t, messages.TypeDecisionResponse, storedMsg.Type)
+	assert.Equal(t, "Pat dismissed DSM-1, DSM-2", storedMsg.Msg)
+
+	for i, rowID := range rows {
+		got, err := f.cs.GetDecision(ctx, rowID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DecisionStatusDismissed, got.Status)
+		require.NotNil(t, got.DismissedAt)
+		assert.True(t, availAt.Equal(*got.DismissedAt))
+		assert.Nil(t, got.EffectiveAnswer(), "EffectiveAnswer must skip outcome=dismiss and return nil on dismissed rows")
+		dsm := got.Dismissal()
+		require.NotNil(t, dsm)
+		assert.Equal(t, messages.ChoiceIDDismissed, dsm.ChoiceID)
+		assert.Equal(t, messages.ChoiceLabelDismissed, dsm.ChoiceLabel)
+		assert.Equal(t, store.DecisionOutcomeDismiss, dsm.Outcome)
+		assert.Equal(t, store.DecisionProvenanceDirect, dsm.Provenance)
+		assert.Equal(t, "Stale: release already shipped — café ☕", dsm.DismissReason)
+		assert.Equal(t, store.DecisionSurfaceDecisionsPage, dsm.Surface)
+		assert.Equal(t, okIn.ResponseMessage.ID, dsm.ResponseMessageID)
+		assert.Equal(t, res.BatchID, dsm.BatchID)
+		assert.False(t, dsm.MatchedDefault, "row %d matched_default must be false on dismissal", i)
+	}
+
+	// Open prompts omit a wholly-dismissed prompt.
+	openAfter, err := f.cs.ListOpenPrompts(ctx, []string{f.projectID}, []string{"topic:general"})
+	require.NoError(t, err)
+	assert.Empty(t, openAfter)
+
+	// Repeating whole-prompt dismiss returns AlreadyDismissed and stores nothing new.
+	retryIn := f.dismissInput(msgID, "user-1", "Second reason ignored", func() time.Time {
+		return availAt.Add(time.Minute)
+	})
+	retryRes, err := f.cs.DismissDecisions(ctx, retryIn)
+	require.NoError(t, err)
+	assert.Empty(t, retryRes.Dismissed)
+	require.Len(t, retryRes.AlreadyDismissed, 2)
+	assert.Equal(t, "Stale: release already shipped — café ☕", retryRes.AlreadyDismissed[0].Dismissal().DismissReason)
+	_, err = f.cs.GetMessage(ctx, retryIn.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "pure alreadyDismissed retry stores no message")
+}
+
+func TestDismissDecisions_AnswerRefusalReservedSentinelAndUpdateClock(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// Reserved sentinel $dismissed and outcome=dismiss are rejected by RecordAnswer / RecordAnswerSet.
+	openPrompt := f.create(t, false, yesNo("D-RES-1", "Reserved check?"))
+	openRow := openPrompt.Decisions[0].RowID
+	badChoice := f.answer(openRow, messages.ChoiceIDDismissed, "user-1", "")
+	_, _, err := f.cs.RecordAnswer(ctx, badChoice)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	badOutcome := f.answer(openRow, "1", "user-1", "")
+	badOutcome.Outcome = store.DecisionOutcomeDismiss
+	_, _, err = f.cs.RecordAnswer(ctx, badOutcome)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	setMsgID, setRows := f.createSet(t, yesNo("D-RES-2", "Set 1?"), yesNo("D-RES-3", "Set 2?"))
+	_, err = f.cs.RecordAnswerSet(ctx, f.answerSet(setMsgID, "user-1", "", setRows[0], messages.ChoiceIDDismissed, setRows[1], "1"))
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// Dismiss D-RES-1 at +5m, then verify RecordAnswer returns ErrDecisionDismissed.
+	dOpen, err := f.cs.GetDecision(ctx, openRow)
+	require.NoError(t, err)
+	t5m := dOpen.CreatedAt.Add(store.DecisionDismissMinAge)
+	_, err = f.cs.DismissDecisions(ctx, f.dismissInput(dOpen.MessageID, "user-1", "", func() time.Time { return t5m }))
+	require.NoError(t, err)
+
+	lateAns := f.answer(openRow, "1", "user-1", "late-key")
+	_, _, err = f.cs.RecordAnswer(ctx, lateAns)
+	require.ErrorIs(t, err, store.ErrDecisionDismissed)
+	_, err = f.cs.GetMessage(ctx, lateAns.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Idempotency replay runs BEFORE ErrDecisionDismissed check.
+	replayPrompt := f.create(t, false, yesNo("D-REPLAY-DSM", "Replay check?"))
+	replayRow := replayPrompt.Decisions[0].RowID
+	origAns, replayed, err := f.cs.RecordAnswer(ctx, f.answer(replayRow, "1", "user-1", "idem-before-dsm"))
+	require.NoError(t, err)
+	assert.False(t, replayed)
+
+	replayUUID, err := uuid.Parse(replayRow)
+	require.NoError(t, err)
+	require.NoError(t, f.cs.client.Decision.UpdateOneID(replayUUID).
+		SetStatus("dismissed").
+		SetDismissedAt(t5m).
+		Exec(ctx))
+
+	gotReplay, replayed, err := f.cs.RecordAnswer(ctx, f.answer(replayRow, "1", "user-1", "idem-before-dsm"))
+	require.NoError(t, err)
+	assert.True(t, replayed)
+	assert.Equal(t, origAns.ID, gotReplay.ID)
+
+	// --update after dismissal creates v2 (pending), leaves v1 dismissed with ReplacedByID -> v2,
+	// and resets the 5-minute clock on v2.
+	v2Res, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", true, yesNo("D-RES-1", "Re-asked v2?")))
+	require.NoError(t, err)
+	require.Len(t, v2Res.Decisions, 1)
+	require.NotNil(t, v2Res.Decisions[0].Replaced)
+	assert.Equal(t, store.DecisionStatusDismissed, v2Res.Decisions[0].Replaced.Status)
+
+	versions, err := f.cs.GetAgentDecisionVersions(ctx, f.agentID, "D-RES-1")
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+	assert.Equal(t, store.DecisionStatusDismissed, versions[0].Status, "v1 stays dismissed")
+	assert.Equal(t, v2Res.Decisions[0].RowID, versions[0].ReplacedByID)
+	assert.Equal(t, store.DecisionStatusPending, versions[1].Status)
+
+	// v2 has its own fresh CreatedAt, so dismissing v2 immediately fails with DecisionTooRecentError.
+	_, err = f.cs.DismissDecisions(ctx, f.dismissInput(versions[1].MessageID, "user-1", "", func() time.Time {
+		return versions[1].CreatedAt.Add(time.Minute)
+	}))
+	require.ErrorIs(t, err, store.ErrDecisionTooRecent)
+
+	// Dismissing an already-decided prompt returns DismissChangedError with reason "decided".
+	_, _, err = f.cs.RecordAnswer(ctx, f.answer(versions[1].ID, "1", "user-1", ""))
+	require.NoError(t, err)
+	_, err = f.cs.DismissDecisions(ctx, f.dismissInput(versions[1].MessageID, "user-1", "", func() time.Time {
+		return versions[1].CreatedAt.Add(store.DecisionDismissMinAge)
+	}))
+	var changedErr *store.DismissChangedError
+	require.ErrorAs(t, err, &changedErr)
+	require.ErrorIs(t, err, store.ErrDismissChanged)
+	assert.Equal(t, store.AnswerSetReasonDecided, changedErr.Reasons[versions[1].ID])
+}
+
+func TestDismissDecisions_FreesPendingCapacity(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	var firstMsgID string
+	var firstCreatedAt time.Time
+	for b := 0; b < 5; b++ {
+		ds := make([]messages.Decision, 10)
+		for i := 0; i < 10; i++ {
+			ds[i] = yesNo(fmt.Sprintf("DCAP-%d-%d", b, i), "Cap check?")
+		}
+		p := f.create(t, false, ds...)
+		if b == 0 {
+			d0, err := f.cs.GetDecision(ctx, p.Decisions[0].RowID)
+			require.NoError(t, err)
+			firstMsgID = d0.MessageID
+			firstCreatedAt = d0.CreatedAt
+		}
+	}
+
+	_, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, yesNo("DCAP-OVER", "Too many?")))
+	require.ErrorIs(t, err, store.ErrTooManyPendingDecisions)
+
+	_, err = f.cs.DismissDecisions(ctx, f.dismissInput(firstMsgID, "user-1", "Unblock cap", func() time.Time {
+		return firstCreatedAt.Add(store.DecisionDismissMinAge)
+	}))
+	require.NoError(t, err)
+
+	overRes, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, yesNo("DCAP-OVER", "Fits now?")))
+	require.NoError(t, err)
+	require.Len(t, overRes.Decisions, 1)
+}

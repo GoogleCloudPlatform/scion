@@ -190,13 +190,14 @@ func TestStripReservedMetadata_StripsSenderTimezone(t *testing.T) {
 // stripped before delivery (design choices v4, 4.4).
 func TestStripReservedMetadata_StripsDecisionKeys(t *testing.T) {
 	md := map[string]string{
-		"foo":                               "bar",
-		messages.MetadataDecisionKey:        "D1",
-		messages.MetadataDecisionVersion:    "1",
-		messages.MetadataChoiceID:           "yes",
-		messages.MetadataDecisionProvenance: "direct",
-		messages.MetadataDecisionBatch:      "b1",
-		messages.MetadataDecisionAnswers:    "D1@1=yes",
+		"foo":                                  "bar",
+		messages.MetadataDecisionKey:           "D1",
+		messages.MetadataDecisionVersion:       "1",
+		messages.MetadataChoiceID:              "yes",
+		messages.MetadataDecisionProvenance:    "direct",
+		messages.MetadataDecisionBatch:         "b1",
+		messages.MetadataDecisionAnswers:       "D1@1=yes",
+		messages.MetadataDecisionDismissReason: "stale",
 	}
 	out := StripReservedMetadata(md)
 	for _, k := range []string{
@@ -206,6 +207,7 @@ func TestStripReservedMetadata_StripsDecisionKeys(t *testing.T) {
 		messages.MetadataDecisionProvenance,
 		messages.MetadataDecisionBatch,
 		messages.MetadataDecisionAnswers,
+		messages.MetadataDecisionDismissReason,
 	} {
 		if _, ok := out[k]; ok {
 			t.Errorf("%s survived the strip: %v", k, out)

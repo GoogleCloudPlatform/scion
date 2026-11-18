@@ -63,9 +63,11 @@ const (
 	MetadataDecisionProvenance = "decision_provenance"
 	// MetadataDecisionBatch and MetadataDecisionAnswers are set instead of the
 	// four keys above on the response of a set submit (design choices v5,
-	// 5.1): the batch id and a compact key@version=choiceId list.
-	MetadataDecisionBatch   = "decision_batch"
-	MetadataDecisionAnswers = "decision_answers"
+	// 5.1): the batch id and a compact key@version=choiceId list (or JSON
+	// entries on a dismissal, alongside MetadataDecisionDismissReason).
+	MetadataDecisionBatch         = "decision_batch"
+	MetadataDecisionAnswers       = "decision_answers"
+	MetadataDecisionDismissReason = "decision_dismiss_reason"
 )
 
 // deliveryMetadataAllowlist defines the metadata keys that are forwarded to
@@ -98,12 +100,13 @@ var deliveryMetadataAllowlist = map[string]bool{
 	// Hub-set only (see MetadataSenderTimezone).
 	MetadataSenderTimezone: true,
 	// Hub-set only (see MetadataDecisionKey).
-	MetadataDecisionKey:        true,
-	MetadataDecisionVersion:    true,
-	MetadataChoiceID:           true,
-	MetadataDecisionProvenance: true,
-	MetadataDecisionBatch:      true,
-	MetadataDecisionAnswers:    true,
+	MetadataDecisionKey:           true,
+	MetadataDecisionVersion:       true,
+	MetadataChoiceID:              true,
+	MetadataDecisionProvenance:    true,
+	MetadataDecisionBatch:         true,
+	MetadataDecisionAnswers:       true,
+	MetadataDecisionDismissReason: true,
 }
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.

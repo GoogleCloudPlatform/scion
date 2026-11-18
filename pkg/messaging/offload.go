@@ -80,12 +80,13 @@ var reservedMetadataKeys = map[string]bool{
 	messages.MetadataSenderIssuer:       true,
 	messages.MetadataSenderDisplay:      true,
 	messages.MetadataSenderTimezone:     true,
-	messages.MetadataDecisionKey:        true,
-	messages.MetadataDecisionVersion:    true,
-	messages.MetadataChoiceID:           true,
-	messages.MetadataDecisionProvenance: true,
-	messages.MetadataDecisionBatch:      true,
-	messages.MetadataDecisionAnswers:    true,
+	messages.MetadataDecisionKey:           true,
+	messages.MetadataDecisionVersion:       true,
+	messages.MetadataChoiceID:              true,
+	messages.MetadataDecisionProvenance:    true,
+	messages.MetadataDecisionBatch:         true,
+	messages.MetadataDecisionAnswers:       true,
+	messages.MetadataDecisionDismissReason: true,
 }
 
 // DefaultPreviewBudgetBytes is the compiled default preview byte budget

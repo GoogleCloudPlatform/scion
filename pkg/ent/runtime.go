@@ -1289,7 +1289,7 @@ func init() {
 	// decisionanswer.DefaultAnsweredByEmail holds the default value on creation for the answered_by_email field.
 	decisionanswer.DefaultAnsweredByEmail = decisionanswerDescAnsweredByEmail.Default.(string)
 	// decisionanswerDescIdempotencyKey is the schema descriptor for idempotency_key field.
-	decisionanswerDescIdempotencyKey := decisionanswerFields[20].Descriptor()
+	decisionanswerDescIdempotencyKey := decisionanswerFields[21].Descriptor()
 	// decisionanswer.IdempotencyKeyValidator is a validator for the "idempotency_key" field. It is called by the builders before save.
 	decisionanswer.IdempotencyKeyValidator = func() func(string) error {
 		validators := decisionanswerDescIdempotencyKey.Validators
@@ -1307,11 +1307,11 @@ func init() {
 		}
 	}()
 	// decisionanswerDescMatchedDefault is the schema descriptor for matched_default field.
-	decisionanswerDescMatchedDefault := decisionanswerFields[22].Descriptor()
+	decisionanswerDescMatchedDefault := decisionanswerFields[23].Descriptor()
 	// decisionanswer.DefaultMatchedDefault holds the default value on creation for the matched_default field.
 	decisionanswer.DefaultMatchedDefault = decisionanswerDescMatchedDefault.Default.(bool)
 	// decisionanswerDescCreatedAt is the schema descriptor for created_at field.
-	decisionanswerDescCreatedAt := decisionanswerFields[23].Descriptor()
+	decisionanswerDescCreatedAt := decisionanswerFields[24].Descriptor()
 	// decisionanswer.DefaultCreatedAt holds the default value on creation for the created_at field.
 	decisionanswer.DefaultCreatedAt = decisionanswerDescCreatedAt.Default.(func() time.Time)
 	// decisionanswerDescID is the schema descriptor for id field.

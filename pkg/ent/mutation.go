@@ -39047,6 +39047,7 @@ type DecisionMutation struct {
 	replaced_at       *time.Time
 	withdrawn_at      *time.Time
 	withdrawn_reason  *string
+	dismissed_at      *time.Time
 	clearedFields     map[string]struct{}
 	done              bool
 	oldValue          func(context.Context) (*Decision, error)
@@ -40128,6 +40129,55 @@ func (m *DecisionMutation) ResetWithdrawnReason() {
 	delete(m.clearedFields, decision.FieldWithdrawnReason)
 }
 
+// SetDismissedAt sets the "dismissed_at" field.
+func (m *DecisionMutation) SetDismissedAt(t time.Time) {
+	m.dismissed_at = &t
+}
+
+// DismissedAt returns the value of the "dismissed_at" field in the mutation.
+func (m *DecisionMutation) DismissedAt() (r time.Time, exists bool) {
+	v := m.dismissed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDismissedAt returns the old "dismissed_at" field's value of the Decision entity.
+// If the Decision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionMutation) OldDismissedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDismissedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDismissedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDismissedAt: %w", err)
+	}
+	return oldValue.DismissedAt, nil
+}
+
+// ClearDismissedAt clears the value of the "dismissed_at" field.
+func (m *DecisionMutation) ClearDismissedAt() {
+	m.dismissed_at = nil
+	m.clearedFields[decision.FieldDismissedAt] = struct{}{}
+}
+
+// DismissedAtCleared returns if the "dismissed_at" field was cleared in this mutation.
+func (m *DecisionMutation) DismissedAtCleared() bool {
+	_, ok := m.clearedFields[decision.FieldDismissedAt]
+	return ok
+}
+
+// ResetDismissedAt resets all changes to the "dismissed_at" field.
+func (m *DecisionMutation) ResetDismissedAt() {
+	m.dismissed_at = nil
+	delete(m.clearedFields, decision.FieldDismissedAt)
+}
+
 // Where appends a list predicates to the DecisionMutation builder.
 func (m *DecisionMutation) Where(ps ...predicate.Decision) {
 	m.predicates = append(m.predicates, ps...)
@@ -40162,7 +40212,7 @@ func (m *DecisionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionMutation) Fields() []string {
-	fields := make([]string, 0, 22)
+	fields := make([]string, 0, 23)
 	if m.project_id != nil {
 		fields = append(fields, decision.FieldProjectID)
 	}
@@ -40229,6 +40279,9 @@ func (m *DecisionMutation) Fields() []string {
 	if m.withdrawn_reason != nil {
 		fields = append(fields, decision.FieldWithdrawnReason)
 	}
+	if m.dismissed_at != nil {
+		fields = append(fields, decision.FieldDismissedAt)
+	}
 	return fields
 }
 
@@ -40281,6 +40334,8 @@ func (m *DecisionMutation) Field(name string) (ent.Value, bool) {
 		return m.WithdrawnAt()
 	case decision.FieldWithdrawnReason:
 		return m.WithdrawnReason()
+	case decision.FieldDismissedAt:
+		return m.DismissedAt()
 	}
 	return nil, false
 }
@@ -40334,6 +40389,8 @@ func (m *DecisionMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldWithdrawnAt(ctx)
 	case decision.FieldWithdrawnReason:
 		return m.OldWithdrawnReason(ctx)
+	case decision.FieldDismissedAt:
+		return m.OldDismissedAt(ctx)
 	}
 	return nil, fmt.Errorf("unknown Decision field %s", name)
 }
@@ -40497,6 +40554,13 @@ func (m *DecisionMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetWithdrawnReason(v)
 		return nil
+	case decision.FieldDismissedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDismissedAt(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Decision field %s", name)
 }
@@ -40590,6 +40654,9 @@ func (m *DecisionMutation) ClearedFields() []string {
 	if m.FieldCleared(decision.FieldWithdrawnReason) {
 		fields = append(fields, decision.FieldWithdrawnReason)
 	}
+	if m.FieldCleared(decision.FieldDismissedAt) {
+		fields = append(fields, decision.FieldDismissedAt)
+	}
 	return fields
 }
 
@@ -40627,6 +40694,9 @@ func (m *DecisionMutation) ClearField(name string) error {
 		return nil
 	case decision.FieldWithdrawnReason:
 		m.ClearWithdrawnReason()
+		return nil
+	case decision.FieldDismissedAt:
+		m.ClearDismissedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown Decision nullable field %s", name)
@@ -40702,6 +40772,9 @@ func (m *DecisionMutation) ResetField(name string) error {
 	case decision.FieldWithdrawnReason:
 		m.ResetWithdrawnReason()
 		return nil
+	case decision.FieldDismissedAt:
+		m.ResetDismissedAt()
+		return nil
 	}
 	return fmt.Errorf("unknown Decision field %s", name)
 }
@@ -40774,6 +40847,7 @@ type DecisionAnswerMutation struct {
 	answered_by_email       *string
 	provenance              *decisionanswer.Provenance
 	outcome                 *decisionanswer.Outcome
+	dismiss_reason          *string
 	interpreted_by_agent_id *uuid.UUID
 	source_message_id       *uuid.UUID
 	surface                 *decisionanswer.Surface
@@ -41395,6 +41469,55 @@ func (m *DecisionAnswerMutation) ResetOutcome() {
 	m.outcome = nil
 }
 
+// SetDismissReason sets the "dismiss_reason" field.
+func (m *DecisionAnswerMutation) SetDismissReason(s string) {
+	m.dismiss_reason = &s
+}
+
+// DismissReason returns the value of the "dismiss_reason" field in the mutation.
+func (m *DecisionAnswerMutation) DismissReason() (r string, exists bool) {
+	v := m.dismiss_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDismissReason returns the old "dismiss_reason" field's value of the DecisionAnswer entity.
+// If the DecisionAnswer object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAnswerMutation) OldDismissReason(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDismissReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDismissReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDismissReason: %w", err)
+	}
+	return oldValue.DismissReason, nil
+}
+
+// ClearDismissReason clears the value of the "dismiss_reason" field.
+func (m *DecisionAnswerMutation) ClearDismissReason() {
+	m.dismiss_reason = nil
+	m.clearedFields[decisionanswer.FieldDismissReason] = struct{}{}
+}
+
+// DismissReasonCleared returns if the "dismiss_reason" field was cleared in this mutation.
+func (m *DecisionAnswerMutation) DismissReasonCleared() bool {
+	_, ok := m.clearedFields[decisionanswer.FieldDismissReason]
+	return ok
+}
+
+// ResetDismissReason resets all changes to the "dismiss_reason" field.
+func (m *DecisionAnswerMutation) ResetDismissReason() {
+	m.dismiss_reason = nil
+	delete(m.clearedFields, decisionanswer.FieldDismissReason)
+}
+
 // SetInterpretedByAgentID sets the "interpreted_by_agent_id" field.
 func (m *DecisionAnswerMutation) SetInterpretedByAgentID(u uuid.UUID) {
 	m.interpreted_by_agent_id = &u
@@ -41867,7 +41990,7 @@ func (m *DecisionAnswerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionAnswerMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 24)
 	if m.decision_row_id != nil {
 		fields = append(fields, decisionanswer.FieldDecisionRowID)
 	}
@@ -41906,6 +42029,9 @@ func (m *DecisionAnswerMutation) Fields() []string {
 	}
 	if m.outcome != nil {
 		fields = append(fields, decisionanswer.FieldOutcome)
+	}
+	if m.dismiss_reason != nil {
+		fields = append(fields, decisionanswer.FieldDismissReason)
 	}
 	if m.interpreted_by_agent_id != nil {
 		fields = append(fields, decisionanswer.FieldInterpretedByAgentID)
@@ -41971,6 +42097,8 @@ func (m *DecisionAnswerMutation) Field(name string) (ent.Value, bool) {
 		return m.Provenance()
 	case decisionanswer.FieldOutcome:
 		return m.Outcome()
+	case decisionanswer.FieldDismissReason:
+		return m.DismissReason()
 	case decisionanswer.FieldInterpretedByAgentID:
 		return m.InterpretedByAgentID()
 	case decisionanswer.FieldSourceMessageID:
@@ -42026,6 +42154,8 @@ func (m *DecisionAnswerMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldProvenance(ctx)
 	case decisionanswer.FieldOutcome:
 		return m.OldOutcome(ctx)
+	case decisionanswer.FieldDismissReason:
+		return m.OldDismissReason(ctx)
 	case decisionanswer.FieldInterpretedByAgentID:
 		return m.OldInterpretedByAgentID(ctx)
 	case decisionanswer.FieldSourceMessageID:
@@ -42146,6 +42276,13 @@ func (m *DecisionAnswerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetOutcome(v)
 		return nil
+	case decisionanswer.FieldDismissReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDismissReason(v)
+		return nil
 	case decisionanswer.FieldInterpretedByAgentID:
 		v, ok := value.(uuid.UUID)
 		if !ok {
@@ -42264,6 +42401,9 @@ func (m *DecisionAnswerMutation) ClearedFields() []string {
 	if m.FieldCleared(decisionanswer.FieldAnsweredByUserID) {
 		fields = append(fields, decisionanswer.FieldAnsweredByUserID)
 	}
+	if m.FieldCleared(decisionanswer.FieldDismissReason) {
+		fields = append(fields, decisionanswer.FieldDismissReason)
+	}
 	if m.FieldCleared(decisionanswer.FieldInterpretedByAgentID) {
 		fields = append(fields, decisionanswer.FieldInterpretedByAgentID)
 	}
@@ -42298,6 +42438,9 @@ func (m *DecisionAnswerMutation) ClearField(name string) error {
 	switch name {
 	case decisionanswer.FieldAnsweredByUserID:
 		m.ClearAnsweredByUserID()
+		return nil
+	case decisionanswer.FieldDismissReason:
+		m.ClearDismissReason()
 		return nil
 	case decisionanswer.FieldInterpretedByAgentID:
 		m.ClearInterpretedByAgentID()
@@ -42363,6 +42506,9 @@ func (m *DecisionAnswerMutation) ResetField(name string) error {
 		return nil
 	case decisionanswer.FieldOutcome:
 		m.ResetOutcome()
+		return nil
+	case decisionanswer.FieldDismissReason:
+		m.ResetDismissReason()
 		return nil
 	case decisionanswer.FieldInterpretedByAgentID:
 		m.ResetInterpretedByAgentID()

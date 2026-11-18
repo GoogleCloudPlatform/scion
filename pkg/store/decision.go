@@ -41,16 +41,24 @@ const (
 	DecisionStatusDecided   = "decided"
 	DecisionStatusReplaced  = "replaced"
 	DecisionStatusWithdrawn = "withdrawn"
+	DecisionStatusDismissed = "dismissed"
 )
 
 // MaxDecisionWithdrawReasonRunes bounds WithdrawDecisionsInput.Reason.
 const MaxDecisionWithdrawReasonRunes = 500
 
+// MaxDecisionDismissReasonRunes bounds DismissDecisionsInput.Reason.
+const MaxDecisionDismissReasonRunes = 500
+
+// DecisionDismissMinAge is the minimum age a decision version must reach
+// before a user may dismiss it (design-8194 section 4.4a, D10).
+const DecisionDismissMinAge = 5 * time.Minute
+
 // DecisionStatusTerminal reports whether status is a terminal decision status
-// (replaced or withdrawn) that cannot accept new answers.
+// (replaced, withdrawn, or dismissed) that cannot accept new answers.
 func DecisionStatusTerminal(status string) bool {
 	switch status {
-	case DecisionStatusReplaced, DecisionStatusWithdrawn:
+	case DecisionStatusReplaced, DecisionStatusWithdrawn, DecisionStatusDismissed:
 		return true
 	default:
 		return false
@@ -74,6 +82,7 @@ const (
 	DecisionOutcomeAnswer   = "answer"
 	DecisionOutcomeConfirm  = "confirm"
 	DecisionOutcomeOverride = "override"
+	DecisionOutcomeDismiss  = "dismiss"
 )
 
 // Decision answer surfaces: where the user acted.
@@ -107,6 +116,16 @@ var (
 	// ErrDecisionWithdrawn: the decision version was withdrawn by its
 	// asking agent and can no longer be answered.
 	ErrDecisionWithdrawn = errors.New("withdrawn")
+	// ErrDecisionDismissed: the decision version was dismissed by a user
+	// and can no longer be answered.
+	ErrDecisionDismissed = errors.New("dismissed")
+	// ErrDecisionTooRecent: every open decision of the prompt is younger
+	// than DecisionDismissMinAge and cannot be dismissed yet. Matches
+	// *DecisionTooRecentError.
+	ErrDecisionTooRecent = errors.New("too_recent")
+	// ErrDismissChanged: the decisions to dismiss changed or none are open
+	// for the user. Matches *DismissChangedError.
+	ErrDismissChanged = errors.New("dismiss changed")
 	// ErrDecisionAnswerConflict: the version already has an answer of this
 	// provenance (an agent_interpreted answer: of either provenance), or
 	// the idempotency key was used for a different answer.
@@ -286,11 +305,46 @@ func (e *WithdrawDecisionsError) Unwrap() error { return ErrWithdrawDecisionsFai
 const (
 	AnswerSetReasonReplaced            = "replaced"
 	AnswerSetReasonWithdrawn           = "withdrawn"
+	AnswerSetReasonDismissed           = "dismissed"
+	AnswerSetReasonTooRecent           = "too_recent"
 	AnswerSetReasonDecided             = "decided"
 	AnswerSetReasonNotRecordedAnswerer = "not_recorded_answerer"
 	AnswerSetReasonMissing             = "missing"
 	AnswerSetReasonNotActionable       = "not_actionable"
 )
+
+// DecisionTooRecentError reports the earliest time at which a too-recent
+// decision version becomes eligible for dismissal (design-8194 section 4.4a).
+type DecisionTooRecentError struct {
+	AvailableAt time.Time
+}
+
+func (e *DecisionTooRecentError) Error() string {
+	return fmt.Sprintf("decision is too recent to dismiss; available at %s", e.AvailableAt.UTC().Format(time.RFC3339))
+}
+
+func (e *DecisionTooRecentError) Unwrap() error { return ErrDecisionTooRecent }
+
+// DismissChangedError lists, by decision row id, why a dismiss request could
+// not dismiss the prompt's rows. Nothing was stored. Matches ErrDismissChanged.
+type DismissChangedError struct {
+	Reasons map[string]string
+}
+
+func (e *DismissChangedError) Error() string {
+	ids := make([]string, 0, len(e.Reasons))
+	for id := range e.Reasons {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = id + ": " + e.Reasons[id]
+	}
+	return "the decisions to dismiss changed: " + strings.Join(parts, "; ")
+}
+
+func (e *DismissChangedError) Unwrap() error { return ErrDismissChanged }
 
 // AnswerSetChangedError lists, by decision row id, why a set submit does
 // not equal the prompt's actionable set: a requested row that is not
@@ -323,17 +377,23 @@ func (e *AnswerSetChangedError) Unwrap() error { return ErrAnswerSetChanged }
 // withdrawn, decided for a direct answer, not_recorded_answerer for another
 // user's interpreted answer). d.Answers must be loaded.
 func DecisionActionableReason(d *Decision, userID string) string {
-	switch d.Status {
-	case DecisionStatusReplaced:
-		return AnswerSetReasonReplaced
-	case DecisionStatusWithdrawn:
-		return AnswerSetReasonWithdrawn
-	}
 	if DecisionStatusTerminal(d.Status) {
-		return AnswerSetReasonNotActionable
+		switch d.Status {
+		case DecisionStatusReplaced:
+			return AnswerSetReasonReplaced
+		case DecisionStatusWithdrawn:
+			return AnswerSetReasonWithdrawn
+		case DecisionStatusDismissed:
+			return AnswerSetReasonDismissed
+		default:
+			return AnswerSetReasonNotActionable
+		}
 	}
 	var interpreted *DecisionAnswer
 	for _, a := range d.Answers {
+		if a.Outcome == DecisionOutcomeDismiss {
+			return AnswerSetReasonDismissed
+		}
 		switch a.Provenance {
 		case DecisionProvenanceDirect:
 			return AnswerSetReasonDecided
@@ -443,6 +503,7 @@ type Decision struct {
 	ReplacedAt      *time.Time
 	WithdrawnAt     *time.Time
 	WithdrawnReason string // empty when none
+	DismissedAt     *time.Time
 
 	// Answers are the version's answers, oldest first. GetDecision and
 	// GetDecisionsByMessageIDs load them.
@@ -453,10 +514,17 @@ type Decision struct {
 func (d *Decision) Ref() string { return d.AskerAgentID + "/" + d.Key }
 
 // EffectiveAnswer is the direct answer if there is one, else the
-// interpreted one, else nil.
+// interpreted one, else nil. Dismissed decisions and outcome=dismiss rows
+// never yield an effective answer (design-8194 section 4.1).
 func (d *Decision) EffectiveAnswer() *DecisionAnswer {
+	if d.Status == DecisionStatusDismissed {
+		return nil
+	}
 	var interpreted *DecisionAnswer
 	for _, a := range d.Answers {
+		if a.Outcome == DecisionOutcomeDismiss {
+			return nil
+		}
 		switch a.Provenance {
 		case DecisionProvenanceDirect:
 			return a
@@ -465,6 +533,17 @@ func (d *Decision) EffectiveAnswer() *DecisionAnswer {
 		}
 	}
 	return interpreted
+}
+
+// Dismissal returns the outcome=dismiss answer row recorded for a dismissed
+// decision, or nil when the decision has not been dismissed.
+func (d *Decision) Dismissal() *DecisionAnswer {
+	for _, a := range d.Answers {
+		if a.Outcome == DecisionOutcomeDismiss {
+			return a
+		}
+	}
+	return nil
 }
 
 // Choice returns the choice with id, or false.
@@ -499,6 +578,7 @@ type DecisionAnswer struct {
 
 	Provenance           string // DecisionProvenance*
 	Outcome              string // DecisionOutcome*
+	DismissReason        string // optional, <= 500 runes, set iff Outcome == DecisionOutcomeDismiss
 	InterpretedByAgentID string // set iff agent_interpreted
 	SourceMessageID      string // set iff agent_interpreted
 	Surface              string // DecisionSurface*
@@ -704,6 +784,38 @@ type WithdrawDecisionsResult struct {
 	AlreadyWithdrawn []*Decision
 }
 
+// DecisionAnswerer identifies the user recording an answer or dismissal.
+type DecisionAnswerer struct {
+	UserID            string
+	Name              string
+	Email             string
+	AuthorizingUserID string
+	DelegationGrantID string
+}
+
+// DismissDecisionsInput dismisses open decisions of one prompt for one user
+// (design-8194 section 4.2).
+type DismissDecisionsInput struct {
+	MessageID       string           // the decision-prompt message
+	RowIDs          []string         // optional subset; empty = every row of the prompt waiting on the user
+	User            DecisionAnswerer // id, name, email, delegation fields
+	Reason          string           // optional, <= 500 runes, trimmed
+	Surface         string           // native | decisions_page
+	IdempotencyKey  string           // optional
+	ResponseMessage *Message         // the decision-response to store (built by the hub)
+	FormatMessage   func(dismissed []*Decision) string
+	Now             func() time.Time // optional clock override for tests; defaults to time.Now
+}
+
+// DismissDecisionsResult reports the decisions dismissed (or already dismissed)
+// by DismissDecisions.
+type DismissDecisionsResult struct {
+	Dismissed        []*Decision // now dismissed, prompt order, answers loaded
+	AlreadyDismissed []*Decision
+	BatchID          string
+	Replayed         bool // idempotency replay: nothing new stored
+}
+
 // DecisionStore persists decision prompt decisions and their answers.
 type DecisionStore interface {
 	// CreateDecisionPrompt stores a decision prompt in one transaction: it
@@ -824,6 +936,17 @@ type DecisionStore interface {
 	// reason), returns *WithdrawDecisionsError with nothing stored if any key
 	// fails, and otherwise marks pending target rows withdrawn.
 	WithdrawDecisions(ctx context.Context, in *WithdrawDecisionsInput) (*WithdrawDecisionsResult, error)
+
+	// DismissDecisions dismisses open decisions of one prompt for one user in
+	// one transaction: it locks the prompt's rows on Postgres in (key_norm,
+	// version) order, enforces DecisionDismissMinAge (returning
+	// *DecisionTooRecentError when only too-recent open rows exist), stores the
+	// decision-response message, marks dismissed rows status=dismissed with
+	// dismissed_at, and inserts one outcome=dismiss DecisionAnswer row per
+	// dismissed decision with choice_id "$dismissed". Repeating a call when all
+	// rows are already dismissed returns them under AlreadyDismissed and stores
+	// nothing new.
+	DismissDecisions(ctx context.Context, in *DismissDecisionsInput) (*DismissDecisionsResult, error)
 
 	// ListProjectDecisionAgents returns the distinct asking agents recorded on
 	// decisions in projectID (including hard-deleted agents whose rows in the

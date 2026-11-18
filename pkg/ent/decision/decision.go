@@ -59,6 +59,8 @@ const (
 	FieldWithdrawnAt = "withdrawn_at"
 	// FieldWithdrawnReason holds the string denoting the withdrawn_reason field in the database.
 	FieldWithdrawnReason = "withdrawn_reason"
+	// FieldDismissedAt holds the string denoting the dismissed_at field in the database.
+	FieldDismissedAt = "dismissed_at"
 	// Table holds the table name of the decision in the database.
 	Table = "decisions"
 )
@@ -88,6 +90,7 @@ var Columns = []string{
 	FieldReplacedAt,
 	FieldWithdrawnAt,
 	FieldWithdrawnReason,
+	FieldDismissedAt,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -156,6 +159,7 @@ const (
 	StatusDecided   Status = "decided"
 	StatusReplaced  Status = "replaced"
 	StatusWithdrawn Status = "withdrawn"
+	StatusDismissed Status = "dismissed"
 )
 
 func (s Status) String() string {
@@ -165,7 +169,7 @@ func (s Status) String() string {
 // StatusValidator is a validator for the "status" field enum values. It is called by the builders before save.
 func StatusValidator(s Status) error {
 	switch s {
-	case StatusPending, StatusDecided, StatusReplaced, StatusWithdrawn:
+	case StatusPending, StatusDecided, StatusReplaced, StatusWithdrawn, StatusDismissed:
 		return nil
 	default:
 		return fmt.Errorf("decision: invalid enum value for status field: %q", s)
@@ -283,4 +287,9 @@ func ByWithdrawnAt(opts ...sql.OrderTermOption) OrderOption {
 // ByWithdrawnReason orders the results by the withdrawn_reason field.
 func ByWithdrawnReason(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldWithdrawnReason, opts...).ToFunc()
+}
+
+// ByDismissedAt orders the results by the dismissed_at field.
+func ByDismissedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDismissedAt, opts...).ToFunc()
 }

@@ -58,7 +58,21 @@ const (
 	// MaxDecisionsPayloadBytes caps the JSON encoding of the normalized
 	// decisions of one message.
 	MaxDecisionsPayloadBytes = 32 * 1024
+
+	// ChoiceIDDismissed and ChoiceLabelDismissed are the hub-only sentinel
+	// choice values recorded on decision_answers rows written by the dismiss
+	// path (ptone/scion#8194). "$"-prefixed choice IDs are reserved and never
+	// accepted from clients as a choiceId.
+	ChoiceIDDismissed    = "$dismissed"
+	ChoiceLabelDismissed = "Dismissed"
 )
+
+// IsReservedChoiceID reports whether id is a hub-reserved sentinel choice ID
+// (such as "$dismissed" or "$other") that clients may never supply as a choiceId.
+func IsReservedChoiceID(id string) bool {
+	trimmed := strings.TrimSpace(id)
+	return strings.HasPrefix(trimmed, "$")
+}
 
 // Error codes of a DecisionValidationError. Handlers map every code to a 400 naming
 // the field.

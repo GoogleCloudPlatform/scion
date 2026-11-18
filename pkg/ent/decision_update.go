@@ -143,6 +143,26 @@ func (_u *DecisionUpdate) ClearWithdrawnReason() *DecisionUpdate {
 	return _u
 }
 
+// SetDismissedAt sets the "dismissed_at" field.
+func (_u *DecisionUpdate) SetDismissedAt(v time.Time) *DecisionUpdate {
+	_u.mutation.SetDismissedAt(v)
+	return _u
+}
+
+// SetNillableDismissedAt sets the "dismissed_at" field if the given value is not nil.
+func (_u *DecisionUpdate) SetNillableDismissedAt(v *time.Time) *DecisionUpdate {
+	if v != nil {
+		_u.SetDismissedAt(*v)
+	}
+	return _u
+}
+
+// ClearDismissedAt clears the value of the "dismissed_at" field.
+func (_u *DecisionUpdate) ClearDismissedAt() *DecisionUpdate {
+	_u.mutation.ClearDismissedAt()
+	return _u
+}
+
 // Mutation returns the DecisionMutation object of the builder.
 func (_u *DecisionUpdate) Mutation() *DecisionMutation {
 	return _u.mutation
@@ -238,6 +258,12 @@ func (_u *DecisionUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.WithdrawnReasonCleared() {
 		_spec.ClearField(decision.FieldWithdrawnReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.DismissedAt(); ok {
+		_spec.SetField(decision.FieldDismissedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DismissedAtCleared() {
+		_spec.ClearField(decision.FieldDismissedAt, field.TypeTime)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -373,6 +399,26 @@ func (_u *DecisionUpdateOne) ClearWithdrawnReason() *DecisionUpdateOne {
 	return _u
 }
 
+// SetDismissedAt sets the "dismissed_at" field.
+func (_u *DecisionUpdateOne) SetDismissedAt(v time.Time) *DecisionUpdateOne {
+	_u.mutation.SetDismissedAt(v)
+	return _u
+}
+
+// SetNillableDismissedAt sets the "dismissed_at" field if the given value is not nil.
+func (_u *DecisionUpdateOne) SetNillableDismissedAt(v *time.Time) *DecisionUpdateOne {
+	if v != nil {
+		_u.SetDismissedAt(*v)
+	}
+	return _u
+}
+
+// ClearDismissedAt clears the value of the "dismissed_at" field.
+func (_u *DecisionUpdateOne) ClearDismissedAt() *DecisionUpdateOne {
+	_u.mutation.ClearDismissedAt()
+	return _u
+}
+
 // Mutation returns the DecisionMutation object of the builder.
 func (_u *DecisionUpdateOne) Mutation() *DecisionMutation {
 	return _u.mutation
@@ -498,6 +544,12 @@ func (_u *DecisionUpdateOne) sqlSave(ctx context.Context) (_node *Decision, err 
 	}
 	if _u.mutation.WithdrawnReasonCleared() {
 		_spec.ClearField(decision.FieldWithdrawnReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.DismissedAt(); ok {
+		_spec.SetField(decision.FieldDismissedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DismissedAtCleared() {
+		_spec.ClearField(decision.FieldDismissedAt, field.TypeTime)
 	}
 	_node = &Decision{config: _u.config}
 	_spec.Assign = _node.assignValues

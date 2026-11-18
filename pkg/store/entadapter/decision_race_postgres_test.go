@@ -395,3 +395,91 @@ func TestDecisionRace_SetSubmitWaitsForSetWithdrawInFlight(t *testing.T) {
 	_, err = f.cs.GetMessage(ctx, loser.ResponseMessage.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
+
+// TestDecisionRace_AnswerWaitsForDismissInFlight: a dismiss holds the
+// decision row's lock; a concurrent answer waits for it and then gets
+// ErrDecisionDismissed, storing nothing.
+func TestDecisionRace_AnswerWaitsForDismissInFlight(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	p := f.create(t, false, yesNo("DD1", "v1"))
+	row := p.Decisions[0].RowID
+	d0, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	t5m := d0.CreatedAt.Add(store.DecisionDismissMinAge)
+
+	tx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = newTxCompositeStore(tx).dismissDecisionsTx(ctx, f.dismissInput(d0.MessageID, "user-1", "Stale", func() time.Time { return t5m }))
+	require.NoError(t, err)
+
+	in := f.answer(row, "1", "user-1", "")
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := f.cs.RecordAnswer(ctx, in)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the answer did not wait for the dismiss lock: %v", err)
+	case <-time.After(blockedFor):
+	}
+	require.NoError(t, tx.Commit())
+
+	require.ErrorIs(t, <-done, store.ErrDecisionDismissed)
+	d, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusDismissed, d.Status)
+	require.NotNil(t, d.Dismissal())
+	assert.Nil(t, d.EffectiveAnswer())
+	_, err = f.cs.GetMessage(ctx, in.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestDecisionRace_RepostWaitsForDismissInFlight: a dismiss holds the
+// decision row's lock; a concurrent --update repost waits for it, creates v2,
+// and reports v1's prior status as dismissed while leaving v1 dismissed.
+func TestDecisionRace_RepostWaitsForDismissInFlight(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	p := f.create(t, false, yesNo("DD2", "v1"))
+	row := p.Decisions[0].RowID
+	d0, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	t5m := d0.CreatedAt.Add(store.DecisionDismissMinAge)
+
+	tx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	_, err = newTxCompositeStore(tx).dismissDecisionsTx(ctx, f.dismissInput(d0.MessageID, "user-1", "Stale", func() time.Time { return t5m }))
+	require.NoError(t, err)
+
+	type result struct {
+		res *store.DecisionPromptResult
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		res, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", true, yesNo("DD2", "v2")))
+		done <- result{res, err}
+	}()
+	select {
+	case r := <-done:
+		t.Fatalf("the repost did not wait for the dismiss lock: %+v", r)
+	case <-time.After(blockedFor):
+	}
+	require.NoError(t, tx.Commit())
+
+	r := <-done
+	require.NoError(t, r.err)
+	require.NotNil(t, r.res.Decisions[0].Replaced)
+	assert.Equal(t, store.DecisionStatusDismissed, r.res.Decisions[0].Replaced.Status)
+
+	d1, err := f.cs.GetDecision(ctx, row)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusDismissed, d1.Status)
+	assert.Equal(t, r.res.Decisions[0].RowID, d1.ReplacedByID)
+}
