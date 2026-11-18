@@ -244,6 +244,10 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: %s)", req.EventType, s.supportedScheduledEventTypes()), nil)
 		return
 	}
+	if req.NoAuth && req.EventType != "dispatch_agent" {
+		ValidationError(w, "noAuth applies to dispatch_agent events only", nil)
+		return
+	}
 	if req.EventType == scheduledEventTypeExec {
 		s.createExecSchedule(w, r, projectID, &req)
 		return
@@ -256,8 +260,8 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		ValidationError(w, "wake applies to message events only", nil)
 		return
 	}
-	if req.NoAuth && req.EventType != "dispatch_agent" {
-		ValidationError(w, "noAuth applies to dispatch_agent events only", nil)
+	if req.NoAuth && req.Payload != "" {
+		ValidationError(w, "give either payload or noAuth, not both", nil)
 		return
 	}
 	// Recurring schedules accept (ptone/scion#2200)

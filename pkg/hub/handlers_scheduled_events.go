@@ -335,6 +335,10 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: %s)", req.EventType, s.supportedScheduledEventTypes()), nil)
 		return
 	}
+	if req.NoAuth && req.EventType != "dispatch_agent" {
+		ValidationError(w, "noAuth applies to dispatch_agent events only", nil)
+		return
+	}
 	if req.EventType == scheduledEventTypeExec {
 		s.createScheduledExecEvent(w, r, projectID, &req)
 		return
@@ -347,8 +351,8 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		ValidationError(w, "wake applies to message events only", nil)
 		return
 	}
-	if req.NoAuth && req.EventType != "dispatch_agent" {
-		ValidationError(w, "noAuth applies to dispatch_agent events only", nil)
+	if req.NoAuth && req.Payload != "" {
+		ValidationError(w, "give either payload or noAuth, not both", nil)
 		return
 	}
 	// The payload "raw" tombstone applies to both supported event types:

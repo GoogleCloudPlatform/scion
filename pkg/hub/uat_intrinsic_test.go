@@ -195,6 +195,11 @@ func TestUATIntrinsic_NotOtherHops(t *testing.T) {
 			p.SourceAuthorizationRevision = 0
 			return p
 		}(), bounded},
+		"scheduler of uat, missing source event id": {func() store.AuthorityProvenance {
+			p := schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindUAT)
+			p.SourceEventID = ""
+			return p
+		}(), bounded},
 		"source not scheduler (session with uat initiator)": {func() store.AuthorityProvenance {
 			p := recordedProv(store.DelegationPrincipalUser, user, store.SourceCredentialSession)
 			p.InitiatorPrincipalKind = store.DelegationPrincipalUser

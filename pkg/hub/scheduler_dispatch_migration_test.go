@@ -63,6 +63,7 @@ func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *tes
 	noAuthChild, err := s.GetAgentBySlug(ctx, project.ID, "scheduled-user-noauth")
 	require.NoError(t, err)
 	require.NotNil(t, noAuthChild.AppliedConfig)
+	require.Equal(t, string(AgentRoleNone), noAuthChild.AppliedConfig.AgentRole)
 	require.True(t, noAuthChild.AppliedConfig.NoAuth)
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
@@ -95,5 +96,6 @@ func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *tes
 	noAuthChild, err = s.GetAgent(ctx, noAuthChild.ID)
 	require.NoError(t, err)
 	require.NotNil(t, noAuthChild.AppliedConfig)
+	require.Equal(t, string(AgentRoleNone), noAuthChild.AppliedConfig.AgentRole)
 	require.True(t, noAuthChild.AppliedConfig.NoAuth)
 }

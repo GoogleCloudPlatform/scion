@@ -760,6 +760,26 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 		assert.Equal(t, "missing required environment variables (1)", err.Error())
 		f.assertNoChild(t, hcMissingEnv.Name)
 	})
+
+	t.Run("non_empty_github_token_and_mismatched_edge_provenance_rejected", func(t *testing.T) {
+		hcToken := baseHC("gh-token-unsupported")
+		hcToken.GitHubToken = "installation"
+		_, err := f.srv.createAgentHeadless(ctx, hcToken)
+		require.ErrorIs(t, err, errHeadlessGitHubTokenUnsupported)
+		f.assertNoChild(t, hcToken.Name)
+
+		hcBadID := baseHC("prov-bad-id")
+		hcBadID.EdgeProvenance.SourcePrincipalID = api.NewUUID()
+		_, err = f.srv.createAgentHeadless(ctx, hcBadID)
+		require.ErrorIs(t, err, errHeadlessProvenancePrincipalMismatch)
+		f.assertNoChild(t, hcBadID.Name)
+
+		hcBadKind := baseHC("prov-bad-kind")
+		hcBadKind.EdgeProvenance.SourcePrincipalKind = store.DelegationPrincipalAgent
+		_, err = f.srv.createAgentHeadless(ctx, hcBadKind)
+		require.ErrorIs(t, err, errHeadlessProvenancePrincipalMismatch)
+		f.assertNoChild(t, hcBadKind.Name)
+	})
 }
 
 // TestHeadlessCreate_ProjectDefaultsParityTable covers headless-identity-note.md
@@ -1001,6 +1021,44 @@ func TestHeadlessCreate_ScheduleNoAuthPayloadAndPatchRevision(t *testing.T) {
 			NoAuth:    true,
 		})
 		assert.Equal(t, http.StatusBadRequest, evtRec.Code, evtRec.Body.String())
+
+		execSchedRec := requestAsIdentity(t, f.srv, caller, http.MethodPost, schedURL, CreateScheduleRequest{
+			Name:      "bad-exec-noauth",
+			CronExpr:  "0 3 * * *",
+			EventType: "exec",
+			AgentName: "worker",
+			Command:   []string{"/bin/true"},
+			NoAuth:    true,
+		})
+		assert.Equal(t, http.StatusBadRequest, execSchedRec.Code, execSchedRec.Body.String())
+
+		execEvtRec := requestAsIdentity(t, f.srv, caller, http.MethodPost, eventsURL, CreateScheduledEventRequest{
+			EventType: "exec",
+			FireIn:    "10m",
+			AgentName: "worker",
+			Command:   []string{"/bin/true"},
+			NoAuth:    true,
+		})
+		assert.Equal(t, http.StatusBadRequest, execEvtRec.Code, execEvtRec.Body.String())
+	})
+
+	t.Run("noAuth_together_with_raw_payload_rejected_400", func(t *testing.T) {
+		rec := requestAsIdentity(t, f.srv, caller, http.MethodPost, schedURL, CreateScheduleRequest{
+			Name:      "ambiguous-sched-noauth",
+			CronExpr:  "0 5 * * *",
+			EventType: "dispatch_agent",
+			Payload:   `{"agentName":"ambiguous-worker"}`,
+			NoAuth:    true,
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+		evtRec := requestAsIdentity(t, f.srv, caller, http.MethodPost, eventsURL, CreateScheduledEventRequest{
+			EventType: "dispatch_agent",
+			FireIn:    "15m",
+			Payload:   `{"agentName":"ambiguous-oneshot"}`,
+			NoAuth:    true,
+		})
+		assert.Equal(t, http.StatusBadRequest, evtRec.Code, evtRec.Body.String())
 	})
 
 	t.Run("patch_schedule_payload_noAuth_bumps_authorization_revision", func(t *testing.T) {
@@ -1078,13 +1136,16 @@ func TestHeadlessCreate_ReincarnatePreservesPosture(t *testing.T) {
 		out := fireHeadlessDispatch(f.srv, evt, nil)
 		require.Equal(t, hubfire.FireStatusFired, out.Status, out.Error)
 
-		child, _ := f.child(t, "reinc-optout")
+		child, edge := f.child(t, "reinc-optout")
+		require.Equal(t, string(AgentRoleNone), child.AppliedConfig.AgentRole)
+		require.Equal(t, string(AgentRoleNone), edge.Role)
 		require.True(t, child.AppliedConfig.NoAuth)
 		require.True(t, child.AppliedConfig.CreateInputs.NoAuth)
 
 		fresh, _, err := f.srv.buildPatchedAppliedConfig(ctx, child, f.proj, noopReg, noopTag, nil)
 		require.NoError(t, err)
 		assert.True(t, fresh.NoAuth)
+		assert.Equal(t, string(AgentRoleNone), fresh.AgentRole)
 	})
 
 	t.Run("legacy_pre_2b_scheduled_agent_stays_noAuth_across_reincarnation", func(t *testing.T) {
@@ -1110,5 +1171,73 @@ func TestHeadlessCreate_ReincarnatePreservesPosture(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, fresh.NoAuth)
 		assert.Equal(t, string(AgentRoleNone), fresh.AgentRole)
+	})
+}
+
+// TestHeadlessCreate_NarrowCeilingRequiresNoAuthOrReauthorize covers R3
+// (headless-identity-note.md §2 & §3, Stage 1 design rev 8.30):
+//   - a UAT or agent-principal revision whose frozen ceiling admits no role in
+//     {full, baseline, readonly} fails the fire with the exact remedy text and
+//     creates nothing;
+//   - the same narrow-ceiling fixtures with payload.noAuth: true explicitly
+//     select role none and succeed with NoAuth=true under the narrow ceiling.
+func TestHeadlessCreate_NarrowCeilingRequiresNoAuthOrReauthorize(t *testing.T) {
+	f := newSchedFire(t, "hc-narrow")
+	client := installHeadlessGatherDispatcher(t, f)
+
+	const wantErrText = "no usable role for the recorded authority; set noAuth: true or re-authorize the schedule"
+
+	t.Run("narrow_uat_without_readonly_selectors", func(t *testing.T) {
+		// UAT holds agent:create and project:read only (no readonly role selectors).
+		tok := f.storedUAT(t, "agent:create", "project:read")
+
+		evtFail := withUATRevision(f.event("narrow-uat-fail"), tok)
+		outFail := fireHeadlessDispatch(f.srv, evtFail, nil)
+		assert.Equal(t, hubfire.FireStatusFailed, outFail.Status)
+		assert.Equal(t, wantErrText, outFail.Error)
+		f.assertNoChild(t, "narrow-uat-fail")
+
+		evtOptOut := f.event("narrow-uat-noauth")
+		evtOptOut.Payload = `{"agentName":"narrow-uat-noauth","noAuth":true}`
+		evtOptOut = withUATRevision(evtOptOut, tok)
+		outOptOut := fireHeadlessDispatch(f.srv, evtOptOut, nil)
+		require.Equal(t, hubfire.FireStatusFired, outOptOut.Status, outOptOut.Error)
+
+		child, edge := f.child(t, "narrow-uat-noauth")
+		assert.Equal(t, f.creator.ID, child.OwnerID)
+		assert.Equal(t, []string{f.creator.ID}, child.Ancestry)
+		assert.Equal(t, string(AgentRoleNone), child.AppliedConfig.AgentRole)
+		assert.Equal(t, string(AgentRoleNone), edge.Role)
+		assert.True(t, child.AppliedConfig.NoAuth)
+		assert.True(t, child.AppliedConfig.CreateInputs.NoAuth)
+		assert.True(t, client.lastCreateReq.NoAuth)
+	})
+
+	t.Run("narrow_agent_revision_without_readonly_coverage", func(t *testing.T) {
+		parent := f.sessionAgent(t, "narrow-agent-parent")
+
+		evtFail := withAgentRevision(t, f.srv, f.event("narrow-agent-fail"), parent.ID)
+		evtFail.AuthorityCeiling.PermissionIDs = []string{"agent.create", "project.read"}
+		outFail := fireHeadlessDispatch(f.srv, evtFail, nil)
+		assert.Equal(t, hubfire.FireStatusFailed, outFail.Status)
+		assert.Equal(t, wantErrText, outFail.Error)
+		f.assertNoChild(t, "narrow-agent-fail")
+
+		evtOptOut := f.event("narrow-agent-noauth")
+		evtOptOut.Payload = `{"agentName":"narrow-agent-noauth","noAuth":true}`
+		evtOptOut = withAgentRevision(t, f.srv, evtOptOut, parent.ID)
+		evtOptOut.AuthorityCeiling.PermissionIDs = []string{"agent.create", "project.read"}
+		outOptOut := fireHeadlessDispatch(f.srv, evtOptOut, nil)
+		require.Equal(t, hubfire.FireStatusFired, outOptOut.Status, outOptOut.Error)
+
+		child, edge := f.child(t, "narrow-agent-noauth")
+		assert.Equal(t, parent.ID, child.OwnerID)
+		assert.Equal(t, []string{f.creator.ID, parent.ID}, child.Ancestry)
+		assert.Equal(t, string(AgentRoleNone), child.AppliedConfig.AgentRole)
+		assert.Equal(t, string(AgentRoleNone), edge.Role)
+		assert.Equal(t, []string{"agent.create", "project.read"}, edge.PermissionIDs)
+		assert.True(t, child.AppliedConfig.NoAuth)
+		assert.True(t, child.AppliedConfig.CreateInputs.NoAuth)
+		assert.True(t, client.lastCreateReq.NoAuth)
 	})
 }

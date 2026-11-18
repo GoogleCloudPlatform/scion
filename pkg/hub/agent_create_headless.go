@@ -48,9 +48,12 @@ const (
 )
 
 var (
-	errDisallowedHeadlessEventEnvKey = errors.New("disallowed headless event env key")
-	errInvalidHeadlessEventEnvValue  = errors.New("headless event env value contains NUL byte")
-	errHeadlessEventFileTooLarge     = errors.New("headless create event file exceeds 16 KiB limit")
+	errDisallowedHeadlessEventEnvKey       = errors.New("disallowed headless event env key")
+	errInvalidHeadlessEventEnvValue        = errors.New("headless event env value contains NUL byte")
+	errHeadlessEventFileTooLarge           = errors.New("headless create event file exceeds 16 KiB limit")
+	errHeadlessGitHubTokenUnsupported      = errors.New("headless create githubToken is not supported before Stage 2 P1c")
+	errHeadlessProvenancePrincipalMismatch = errors.New("headless create: edge provenance principal does not match authority principal")
+	errHeadlessNoUsableRole                = errors.New("no usable role for the recorded authority; set noAuth: true or re-authorize the schedule")
 )
 
 // HeadlessMissingEnvError is the content-free error returned when a headless
@@ -68,7 +71,8 @@ func (e *HeadlessMissingEnvError) Error() string {
 
 // HeadlessCreate describes a non-interactive agent creation executed under an
 // already-resolved FireAuthority (scheduled dispatch_agent today; trigger
-// dispatch_agent in Stage 2/3).
+// dispatch_agent in Stage 2/3). Ownership and ancestry are derived strictly
+// from Authority (never overridden by callers).
 type HeadlessCreate struct {
 	ProjectID      string
 	Authority      FireAuthority
@@ -77,18 +81,16 @@ type HeadlessCreate struct {
 	EdgeCeiling    store.EffectCeiling
 	EdgeProvenance store.AuthorityProvenance
 
-	// Credential and lineage posture (Stage 1 design rev 8.27,
-	// headless-identity-note.md §2 & §2.3). When AgentRole is empty,
+	// Credential and lineage posture (Stage 1 design rev 8.27 & 8.30,
+	// headless-identity-note.md §2 & §2.3). When NoAuth is true, the create
+	// explicitly requests AgentRoleNone (roleExplicit=true) and launches without
+	// credentials under any frozen ceiling. Otherwise, when AgentRole is empty,
 	// createAgentHeadless resolves the role through the project/hub default
 	// ladder capped by projectSettingMaxAgentRole, the edge ceiling, and (for
-	// agent principals) the parent agent's role. NoAuth is true when explicitly
-	// requested (e.g. payload.noAuth) or when the resolved role is AgentRoleNone.
-	// When OwnerID and Ancestry are empty, they are derived from Authority
-	// exactly as an interactive create by that principal records them.
+	// agent principals) the parent agent's role; if no role fits the ceiling,
+	// the create fails with errHeadlessNoUsableRole.
 	AgentRole AgentRole
 	NoAuth    bool
-	OwnerID   string
-	Ancestry  []string
 
 	// Trusted authoring-time values (Stage 1 design §5.8).
 	Name     string
@@ -99,7 +101,7 @@ type HeadlessCreate struct {
 
 	// GitHubToken reserves the Stage 2 P1c dispatch token precedence preference
 	// ("" | "installation" | "user_preferred"; "" keeps today's dispatch
-	// precedence; Stage 1 design rev 8.28).
+	// precedence; non-empty values are refused until Stage 2 P1c lands).
 	GitHubToken string
 
 	// Data-only channels (never material, never participating in secret/env
@@ -152,9 +154,6 @@ func (s *Server) projectDefaultAgentRole(project *store.Project) AgentRole {
 }
 
 func (s *Server) resolveHeadlessOwnerAndAncestry(ctx context.Context, hc HeadlessCreate) (ownerID string, ancestry []string, err error) {
-	if hc.OwnerID != "" || len(hc.Ancestry) > 0 {
-		return hc.OwnerID, slices.Clone(hc.Ancestry), nil
-	}
 	switch hc.Authority.PrincipalKind {
 	case store.DelegationPrincipalUser:
 		if hc.Authority.PrincipalID == "" {
@@ -178,11 +177,30 @@ func (s *Server) resolveHeadlessOwnerAndAncestry(ctx context.Context, hc Headles
 	}
 }
 
+// fireParentAgentRoleCeiling resolves the parent agent's role ceiling and
+// message mode for an agent-principal fire, reusing auth.agent when already
+// loaded and falling back to callerAgentRoleCeiling (baseline on unreadable or
+// invalid stored role) so authorizeDispatchAgentFire and resolveHeadlessPreCapRole
+// evaluate the identical parent role.
+func (s *Server) fireParentAgentRoleCeiling(ctx context.Context, auth FireAuthority) (AgentRole, string) {
+	if auth.agent == nil {
+		return s.callerAgentRoleCeiling(ctx, auth.PrincipalID)
+	}
+	role, _ := agentRoleAndScopes(auth.agent)
+	if !ValidAgentRole(role) {
+		slog.Warn("Parent agent has invalid stored role, defaulting to baseline",
+			"parent_agent_id", auth.PrincipalID, "stored_role", role)
+		role = AgentRoleBaseline
+	}
+	return role, auth.agent.MessageMode
+}
+
 func (s *Server) resolveHeadlessPreCapRole(
 	ctx context.Context,
 	project *store.Project,
 	auth FireAuthority,
 	requestedRole AgentRole,
+	noAuth bool,
 ) (preCapRole AgentRole, roleExplicit bool, parentMessageMode string, err error) {
 	projectMax := projectMaxAgentRole(project)
 	defaultAgentRole := s.projectDefaultAgentRole(project)
@@ -192,18 +210,17 @@ func (s *Server) resolveHeadlessPreCapRole(
 		}
 		roleExplicit = true
 	}
+	if noAuth {
+		if requestedRole != "" && requestedRole != AgentRoleNone {
+			return "", false, "", fmt.Errorf("cannot request agent role %q together with noAuth", requestedRole)
+		}
+		requestedRole = AgentRoleNone
+		roleExplicit = true
+	}
 
 	if auth.PrincipalKind == store.DelegationPrincipalAgent {
-		var parentRole AgentRole
-		if auth.agent != nil {
-			parentRole, _ = agentRoleAndScopes(auth.agent)
-			parentMessageMode = auth.agent.MessageMode
-			if !ValidAgentRole(parentRole) {
-				parentRole = AgentRoleBaseline
-			}
-		} else {
-			parentRole, parentMessageMode = s.callerAgentRoleCeiling(ctx, auth.PrincipalID)
-		}
+		parentRole, msgMode := s.fireParentAgentRoleCeiling(ctx, auth)
+		parentMessageMode = msgMode
 		if !roleExplicit {
 			requestedRole = parentRole
 		}
@@ -248,6 +265,9 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	if hc.Name == "" {
 		return nil, fmt.Errorf("dispatch_agent payload: agentName is required")
 	}
+	if hc.GitHubToken != "" {
+		return nil, errHeadlessGitHubTokenUnsupported
+	}
 	templateName := hc.Template
 	if !templateRefAllowed(templateName) {
 		return nil, fmt.Errorf("dispatch_agent payload: %s", templateRefRefusal)
@@ -274,6 +294,14 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 			return nil, err
 		}
 	}
+	if edgeProvenance.SourcePrincipalKind != hc.Authority.PrincipalKind ||
+		edgeProvenance.SourcePrincipalID == "" ||
+		edgeProvenance.SourcePrincipalID != hc.Authority.PrincipalID {
+		return nil, fmt.Errorf("%w: provenance (%s:%s) != authority (%s:%s)",
+			errHeadlessProvenancePrincipalMismatch,
+			edgeProvenance.SourcePrincipalKind, edgeProvenance.SourcePrincipalID,
+			hc.Authority.PrincipalKind, hc.Authority.PrincipalID)
+	}
 
 	slug, err := api.ValidateAgentName(hc.Name)
 	if err != nil {
@@ -295,16 +323,28 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	if err != nil {
 		return nil, err
 	}
-	preCapRole, roleExplicit, parentMessageMode, err := s.resolveHeadlessPreCapRole(ctx, project, hc.Authority, hc.AgentRole)
+	preCapRole, roleExplicit, parentMessageMode, err := s.resolveHeadlessPreCapRole(
+		ctx, project, hc.Authority, hc.AgentRole, hc.NoAuth)
 	if err != nil {
 		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 	}
+	fireID := hc.Authority.Recorded.FireID
 	childRole, cause, fits := childRoleWithinCeiling(
 		uatHopEffectCeiling(edgeProvenance.SourcePrincipalKind, edgeProvenance.SourcePrincipalID, edgeProvenance, edgeCeiling),
 		preCapRole,
 		roleExplicit,
 	)
 	if !fits {
+		slog.Warn("Scheduler: headless agent create denied by recorded authority ceiling",
+			"eventID", fireID,
+			"agentName", slug,
+			"projectID", hc.ProjectID,
+			"requestedRole", preCapRole,
+			"roleExplicit", roleExplicit,
+			"cause", cause)
+		if !roleExplicit {
+			return nil, errHeadlessNoUsableRole
+		}
 		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w: %s", slug, errScheduledAuthorityDenied, cause)
 	}
 	effectiveNoAuth := hc.NoAuth || childRole == AgentRoleNone
@@ -334,7 +374,6 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		return nil, err
 	}
 
-	fireID := hc.Authority.Recorded.FireID
 	existingAgent, err := s.store.GetAgentBySlug(ctx, hc.ProjectID, slug)
 	if err == nil && existingAgent != nil {
 		slog.Warn("Scheduler: agent already exists, skipping dispatch_agent",

@@ -103,22 +103,21 @@ func (s *Server) authorizeDispatchAgentFire(
 	definitionKind string,
 	auth FireAuthority,
 	identity Identity,
+	noAuth bool,
 ) error {
-	var project *store.Project
-	if p, err := s.store.GetProject(ctx, projectID); err == nil {
-		project = p
-	}
-	delegatedRole := s.projectDefaultAgentRole(project)
 	if auth.PrincipalKind == store.DelegationPrincipalAgent {
-		role, _ := agentRoleAndScopes(auth.agent)
-		delegatedRole = role
 		agentIdent, ok := identity.(AgentIdentity)
 		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
 			return fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
 		}
 	}
-	if project != nil {
-		delegatedRole = minRole(delegatedRole, projectMaxAgentRole(project))
+	var project *store.Project
+	if p, err := s.store.GetProject(ctx, projectID); err == nil {
+		project = p
+	}
+	delegatedRole, _, _, err := s.resolveHeadlessPreCapRole(ctx, project, auth, "", noAuth)
+	if err != nil {
+		return err
 	}
 
 	if decision := s.agentCreateDecision(ctx, identity, projectID); !decision.Allowed {
@@ -169,7 +168,7 @@ func (a *dispatchAgentAction) Authorize(
 	}
 
 	fireID := req.Authority.FireID
-	if err := s.authorizeDispatchAgentFire(ctx, req.ProjectID, fireID, req.Authority.DefinitionKind, auth, identity); err != nil {
+	if err := s.authorizeDispatchAgentFire(ctx, req.ProjectID, fireID, req.Authority.DefinitionKind, auth, identity, payload.NoAuth); err != nil {
 		slog.Warn("Scheduler: dispatch_agent refused at fire time",
 			"eventID", fireID,
 			"definitionKind", req.Authority.DefinitionKind,

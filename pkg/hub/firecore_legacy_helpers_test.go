@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -126,8 +127,12 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 	if err != nil {
 		return scheduledCreator{}, err
 	}
+	var p DispatchAgentEventPayload
+	if evt.Payload != "" {
+		_ = json.Unmarshal([]byte(evt.Payload), &p)
+	}
 	rec := scheduledRecordedAuthority(evt)
-	if err := s.authorizeDispatchAgentFire(ctx, evt.ProjectID, evt.ID, rec.DefinitionKind, creator.Authority, creator.Identity); err != nil {
+	if err := s.authorizeDispatchAgentFire(ctx, evt.ProjectID, evt.ID, rec.DefinitionKind, creator.Authority, creator.Identity, p.NoAuth); err != nil {
 		return scheduledCreator{}, err
 	}
 	return creator, nil
