@@ -171,16 +171,6 @@ func (st *githubWebhookIngressState) auditLog() *slog.Logger {
 	return logging.Subsystem("hub.audit")
 }
 
-func (st *githubWebhookIngressState) warnLog() *slog.Logger {
-	st.mu.Lock()
-	l := st.warnLogger
-	st.mu.Unlock()
-	if l != nil {
-		return l
-	}
-	return slog.Default()
-}
-
 func (st *githubWebhookIngressState) allowVerified(now time.Time) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
