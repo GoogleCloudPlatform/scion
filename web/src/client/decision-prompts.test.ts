@@ -26,11 +26,18 @@ vi.mock('./api.js', async (orig) => ({
 }));
 
 const {
+  DISMISS_MIN_AGE_MS,
   actionableReason,
   answerDecision,
   answerDecisionSet,
   applyDecisionHistoryMaps,
   carryDecisionFields,
+  dismissAvailableAtMs,
+  dismissDecisionPrompt,
+  dismissRemainingMinutes,
+  isClosedUnanswered,
+  isOpenDecision,
+  isTerminalDecision,
   newerDecisionView,
   patchDecisions,
 } = await import('./decision-prompts.js');
@@ -461,6 +468,173 @@ describe('answerDecisionSet', () => {
   it('resolves a network failure as status 0', async () => {
     apiFetch.mockImplementation(() => Promise.reject(new TypeError('offline')));
     const out = await answerDecisionSet('m1', [{ rowId: 'r1', choiceId: 'y' }], 'k');
+    expect(out).toMatchObject({ ok: false, status: 0 });
+  });
+});
+
+describe('isOpenDecision, isClosedUnanswered, and isTerminalDecision', () => {
+  it('classifies pending, interpreted, direct, replaced, withdrawn, dismissed, and unknown statuses', () => {
+    const pendingView = view();
+    const interpView = decided({
+      decision: {
+        ...decided().decision!,
+        provenance: 'agent_interpreted',
+        answeredByUserId: 'u1',
+      },
+    });
+    const directView = decided();
+    const replacedView = view({ status: 'replaced' });
+    const withdrawnView = view({ status: 'withdrawn' });
+    const dismissedView = view({
+      status: 'dismissed',
+      dismissed: {
+        at: '2026-11-16T09:12:00Z',
+        byUserId: 'u1',
+        byName: 'alice',
+        reason: 'Stale',
+        surface: 'decisions_page',
+        responseMessageId: 'resp-dsm',
+      },
+    });
+    const unknownFutureView = view({ status: 'expired_v99' });
+
+    expect(isOpenDecision(pendingView)).toBe(true);
+    expect(isOpenDecision(interpView)).toBe(true);
+    expect(isOpenDecision(directView)).toBe(false);
+    expect(isOpenDecision(replacedView)).toBe(false);
+    expect(isOpenDecision(withdrawnView)).toBe(false);
+    expect(isOpenDecision(dismissedView)).toBe(false);
+    expect(isOpenDecision(unknownFutureView)).toBe(false);
+
+    expect(isClosedUnanswered(pendingView)).toBe(false);
+    expect(isClosedUnanswered(interpView)).toBe(false);
+    expect(isClosedUnanswered(directView)).toBe(false);
+    expect(isClosedUnanswered(replacedView)).toBe(true);
+    expect(isClosedUnanswered(withdrawnView)).toBe(true);
+    expect(isClosedUnanswered(dismissedView)).toBe(true);
+    expect(isClosedUnanswered(unknownFutureView)).toBe(true);
+
+    expect(isTerminalDecision(pendingView)).toBe(false);
+    expect(isTerminalDecision(directView)).toBe(true);
+    expect(isTerminalDecision(replacedView)).toBe(true);
+    expect(isTerminalDecision(withdrawnView)).toBe(true);
+    expect(isTerminalDecision(dismissedView)).toBe(true);
+
+    // Dismissed is terminal (rank 3) and never reverts to pending or decided.
+    expect(newerDecisionView(pendingView, dismissedView)).toBe(dismissedView);
+    expect(newerDecisionView(directView, dismissedView)).toBe(dismissedView);
+    expect(newerDecisionView(dismissedView, pendingView)).toBe(dismissedView);
+    expect(newerDecisionView(dismissedView, directView)).toBe(dismissedView);
+  });
+});
+
+describe('dismissRemainingMinutes and dismissDecisionPrompt', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  const res = (status: number, body: unknown): Response =>
+    ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: () => Promise.resolve(body),
+    }) as unknown as Response;
+
+  it('computes 5-minute dismissal threshold and rounds remaining minutes up', () => {
+    const created = '2026-11-16T09:00:00Z';
+    const createdMs = Date.parse(created);
+    expect(dismissAvailableAtMs(created)).toBe(createdMs + DISMISS_MIN_AGE_MS);
+    expect(dismissAvailableAtMs('not-a-date')).toBe(0);
+
+    expect(dismissRemainingMinutes(created, createdMs)).toBe(5);
+    expect(dismissRemainingMinutes(created, createdMs + 4 * 60_000 + 59_000)).toBe(1);
+    expect(dismissRemainingMinutes(created, createdMs + 5 * 60_000)).toBe(0);
+    expect(dismissRemainingMinutes('not-a-date', createdMs)).toBe(0);
+  });
+
+  it('posts trimmed reason and surface to /dismiss and reads 200 response', async () => {
+    const d1 = view({
+      status: 'dismissed',
+      dismissed: {
+        at: '2026-11-16T09:12:00Z',
+        byUserId: 'u1',
+        byName: 'alice',
+        reason: 'Stale release',
+        surface: 'decisions_page',
+        responseMessageId: 'resp-d1',
+      },
+    });
+    apiFetch.mockResolvedValue(
+      res(200, {
+        dismissed: [d1],
+        alreadyDismissed: [],
+        responseMessageId: 'resp-d1',
+        delivered: true,
+      })
+    );
+
+    const out = await dismissDecisionPrompt('m 1', {
+      reason: '  Stale release  ',
+      surface: 'decisions_page',
+    });
+    expect(out).toEqual({
+      ok: true,
+      dismissed: [d1],
+      alreadyDismissed: [],
+      responseMessageId: 'resp-d1',
+      delivered: true,
+    });
+    const [path, init] = apiFetch.mock.calls[0]!;
+    expect(path).toBe('/api/v1/decision-prompts/m%201/dismiss');
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(init?.body as string)).toEqual({
+      reason: 'Stale release',
+      surface: 'decisions_page',
+    });
+  });
+
+  it('parses 409 too_recent and 409 dismiss_changed error details', async () => {
+    apiFetch.mockResolvedValueOnce(
+      res(409, {
+        error: {
+          code: 'too_recent',
+          message: 'decisions may be dismissed 5 minutes after they are asked',
+          details: { availableAt: '2026-11-16T09:05:00Z' },
+        },
+      })
+    );
+    const early = await dismissDecisionPrompt('m1');
+    expect(early).toMatchObject({
+      ok: false,
+      status: 409,
+      code: 'too_recent',
+      availableAt: '2026-11-16T09:05:00Z',
+    });
+
+    apiFetch.mockResolvedValueOnce(
+      res(409, {
+        error: {
+          code: 'dismiss_changed',
+          message: 'the decisions changed; refresh and try again',
+          details: {
+            decisions: [decided()],
+            reasons: { r1: 'decided' },
+          },
+        },
+      })
+    );
+    const changed = await dismissDecisionPrompt('m1');
+    expect(changed).toMatchObject({
+      ok: false,
+      status: 409,
+      code: 'dismiss_changed',
+      reasons: { r1: 'decided' },
+    });
+  });
+
+  it('resolves a network failure as status 0', async () => {
+    apiFetch.mockImplementation(() => Promise.reject(new TypeError('offline')));
+    const out = await dismissDecisionPrompt('m1');
     expect(out).toMatchObject({ ok: false, status: 0 });
   });
 });

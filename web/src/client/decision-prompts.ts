@@ -34,9 +34,38 @@ import type {
 /** Web surface submitting a decision answer (`native` in chat, `decisions_page` on `/projects/:id/decisions`). */
 export type DecisionAnswerSurface = 'native' | 'decisions_page';
 
+/** Minimum version age before a decision may be dismissed (`store.DecisionDismissMinAge`, 5 minutes). */
+export const DISMISS_MIN_AGE_MS = 5 * 60 * 1000;
+
+/**
+ * Whether `d` is still open (pending without an effective answer, or decided
+ * only by an agent-interpreted answer awaiting confirmation). Unknown future
+ * statuses return false so they fail closed rather than rendering answerable.
+ */
+export function isOpenDecision(d: DecisionView): boolean {
+  if (d.status === 'pending' && !d.decision) return true;
+  if (d.status === 'decided' && d.decision?.provenance === 'agent_interpreted') return true;
+  return false;
+}
+
+/**
+ * Whether `d` is closed without an effective answer (`replaced`, `withdrawn`,
+ * `dismissed`, or any unknown future status).
+ */
+export function isClosedUnanswered(d: DecisionView): boolean {
+  if (isOpenDecision(d)) return false;
+  if (d.status === 'decided') return false;
+  return true;
+}
+
 /** A decision whose state can no longer change back to pending. */
 export function isTerminalDecision(view: DecisionView): boolean {
-  return view.status === 'decided' || view.status === 'replaced';
+  return (
+    view.status === 'decided' ||
+    view.status === 'replaced' ||
+    view.status === 'withdrawn' ||
+    view.status === 'dismissed'
+  );
 }
 
 /**
@@ -47,12 +76,16 @@ export function isTerminalDecision(view: DecisionView): boolean {
 export type ActionableReason =
   | ''
   | 'replaced'
+  | 'withdrawn'
+  | 'dismissed'
   | 'decided'
   | 'not_recorded_answerer'
   | 'not_actionable';
 
 export function actionableReason(d: DecisionView, userId: string | undefined): ActionableReason {
   if (d.status === 'replaced' || d.replacedBy) return 'replaced';
+  if (d.status === 'withdrawn' || d.withdrawn) return 'withdrawn';
+  if (d.status === 'dismissed' || d.dismissed) return 'dismissed';
   if (d.status === 'decided' && d.decision) {
     if (d.decision.provenance !== 'agent_interpreted') return 'decided';
     if (!userId || !d.decision.answeredByUserId || d.decision.answeredByUserId !== userId) {
@@ -66,13 +99,22 @@ export function actionableReason(d: DecisionView, userId: string | undefined): A
 
 /**
  * How far a decision has gone:
- * pending (0) < decided-interpreted (1) < decided-direct (2) < replaced (3).
+ * pending (0) < decided-interpreted (1) < decided-direct (2) < terminal closed (3).
  * The hub never moves a row back: a direct answer (including confirm/override)
- * supersedes an interpreted answer even when their timestamps tie, and replaced
- * is final.
+ * supersedes an interpreted answer even when their timestamps tie, and replaced,
+ * withdrawn, or dismissed are final.
  */
 function statusRank(view: DecisionView): number {
-  if (view.status === 'replaced' || view.replacedBy) return 3;
+  if (
+    view.status === 'replaced' ||
+    view.replacedBy ||
+    view.status === 'withdrawn' ||
+    view.withdrawn ||
+    view.status === 'dismissed' ||
+    view.dismissed
+  ) {
+    return 3;
+  }
   if (view.status === 'decided') {
     return view.decision?.provenance === 'agent_interpreted' ? 1 : 2;
   }
@@ -457,4 +499,113 @@ export async function fetchAskerAnswerability(
     return deniedAnswerability(m.reason, askerName || agent?.name || 'This agent');
   }
   return ANSWERABLE;
+}
+
+/**
+ * Epoch milliseconds at which a prompt created at `createdAt` reaches the
+ * 5-minute dismissal threshold, or `0` when `createdAt` cannot be parsed.
+ */
+export function dismissAvailableAtMs(createdAt: string): number {
+  const parsed = Date.parse(createdAt);
+  if (!Number.isFinite(parsed)) return 0;
+  return parsed + DISMISS_MIN_AGE_MS;
+}
+
+/**
+ * Remaining whole minutes (rounded up, minimum 1 while before threshold)
+ * until `createdAt + 5 min`, or `0` once dismiss is available.
+ */
+export function dismissRemainingMinutes(createdAt: string, nowMs = Date.now()): number {
+  const availMs = dismissAvailableAtMs(createdAt);
+  if (availMs <= 0 || nowMs >= availMs) return 0;
+  return Math.max(1, Math.ceil((availMs - nowMs) / 60000));
+}
+
+/** The outcome of dismissing open decisions of a prompt. */
+export type DismissDecisionPromptResult =
+  | {
+      ok: true;
+      dismissed: DecisionView[];
+      alreadyDismissed: DecisionView[];
+      responseMessageId: string;
+      delivered: boolean;
+    }
+  | {
+      ok: false;
+      status: number;
+      code: string;
+      message: string;
+      availableAt?: string;
+      decisions?: DecisionView[];
+      reasons?: Record<string, string>;
+      reason?: string;
+    };
+
+/**
+ * POST /api/v1/decision-prompts/{messageId}/dismiss (design 8194, §4.3).
+ */
+export async function dismissDecisionPrompt(
+  messageId: string,
+  opts: { reason?: string; surface?: DecisionAnswerSurface } = {}
+): Promise<DismissDecisionPromptResult> {
+  const trimmedReason = opts.reason?.trim() ?? '';
+  let res: Response;
+  try {
+    res = await apiFetch(`/api/v1/decision-prompts/${encodeURIComponent(messageId)}/dismiss`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...(trimmedReason ? { reason: trimmedReason } : {}),
+        ...(opts.surface ? { surface: opts.surface } : {}),
+      }),
+    });
+  } catch {
+    return {
+      ok: false,
+      status: 0,
+      code: '',
+      message: 'Network error: the dismissal was not sent.',
+    };
+  }
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  if (res.ok) {
+    const ok = body as {
+      dismissed?: unknown;
+      alreadyDismissed?: unknown;
+      responseMessageId?: string;
+      delivered?: boolean;
+    } | null;
+    const dismissed = decisionViews(ok?.dismissed);
+    const alreadyDismissed = decisionViews(ok?.alreadyDismissed);
+    if (dismissed && alreadyDismissed) {
+      return {
+        ok: true,
+        dismissed,
+        alreadyDismissed,
+        responseMessageId: ok?.responseMessageId ?? '',
+        delivered: Boolean(ok?.delivered),
+      };
+    }
+    return { ok: false, status: res.status, code: '', message: 'Unexpected dismiss response.' };
+  }
+  const err = (body as { error?: { code?: string; details?: Record<string, unknown> } } | null)
+    ?.error;
+  const details = err?.details ?? {};
+  const decisions = decisionViews(details.decisions);
+  const reasons = stringMap(details.reasons);
+  return {
+    ok: false,
+    status: res.status,
+    code: typeof err?.code === 'string' ? err.code : '',
+    message: apiErrorMessageFromBody(body) ?? `Failed to dismiss decisions (${res.status}).`,
+    ...(typeof details.availableAt === 'string' ? { availableAt: details.availableAt } : {}),
+    ...(decisions ? { decisions } : {}),
+    ...(reasons ? { reasons } : {}),
+    ...(typeof details.reason === 'string' ? { reason: details.reason } : {}),
+  };
 }

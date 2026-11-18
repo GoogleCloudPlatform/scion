@@ -25,6 +25,7 @@ import {
   ANSWERABLE,
   GENERIC_ANSWER_DENIED_REASON,
   actionableReason,
+  isOpenDecision,
   type AskerAnswerability,
 } from '../../client/decision-prompts.js';
 import { chatConversationPath } from '../../client/chat-routes.js';
@@ -178,11 +179,7 @@ export function promptAnswerability(p: ProjectDecisionPromptView): AskerAnswerab
 
 export function promptHasWaitingOnOthers(p: ProjectDecisionPromptView): boolean {
   return p.decisions.some(
-    (d) =>
-      Boolean(p.waitingReasons?.[d.rowId]) ||
-      (!p.waitingOnYou &&
-        d.status !== 'replaced' &&
-        !(d.status === 'decided' && d.decision?.provenance !== 'agent_interpreted'))
+    (d) => Boolean(p.waitingReasons?.[d.rowId]) || (!p.waitingOnYou && isOpenDecision(d))
   );
 }
 
@@ -195,11 +192,7 @@ export function collectWaitingOnOthersItems(
       const reason = p.waitingReasons?.[d.rowId];
       if (reason) {
         items.push({ prompt: p, decision: d, reason });
-      } else if (
-        !p.waitingOnYou &&
-        d.status !== 'replaced' &&
-        !(d.status === 'decided' && d.decision?.provenance !== 'agent_interpreted')
-      ) {
+      } else if (!p.waitingOnYou && isOpenDecision(d)) {
         items.push({ prompt: p, decision: d, reason: 'other_user_confirm' });
       }
     }

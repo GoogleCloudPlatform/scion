@@ -421,6 +421,67 @@ export const decisionsPageSharedStyles: CSSResult = css`
     color: var(--scion-text, #1e293b);
   }
 
+  .dismiss-tip-wrap {
+    display: inline-flex;
+  }
+
+  sl-dialog.dismiss-dialog {
+    --sl-panel-background-color: var(--scion-surface, #ffffff);
+    --sl-panel-border-color: var(--scion-border, #e2e8f0);
+    --sl-color-neutral-700: var(--scion-text, #1e293b);
+  }
+
+  sl-dialog.dismiss-dialog::part(panel) {
+    width: min(32.5rem, calc(100vw - 1.5rem));
+  }
+
+  .dismiss-dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    font-size: var(--chat-fs-base, 0.9375rem);
+    color: var(--scion-text, #1e293b);
+  }
+
+  .dismiss-dialog-note {
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text-muted, #64748b);
+  }
+
+  .dismiss-row-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .dismiss-row-item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.45rem;
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text, #1e293b);
+    overflow-wrap: anywhere;
+  }
+
+  .dismiss-tell {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text-secondary, #475569);
+  }
+
+  .dismiss-tell sl-icon {
+    flex-shrink: 0;
+  }
+
+  .dismiss-dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    width: 100%;
+  }
+
   @media (max-width: 640px) {
     .ph h1 {
       font-size: 1.2rem;
@@ -615,6 +676,8 @@ export function renderPromptCard(
     currentUserId: string;
     defaultProjectId?: string | undefined;
     projectBadgeName?: string | undefined;
+    dismissRemainingMin?: number | undefined;
+    onRequestDismiss?: ((p: ProjectDecisionPromptView) => void) | undefined;
     onAnswered: (p: ProjectDecisionPromptView, e: CustomEvent<DecisionAnsweredDetail>) => void;
     onJump: (p: ProjectDecisionPromptView, e: CustomEvent<{ messageId?: string }>) => void;
   }
@@ -627,6 +690,12 @@ export function renderPromptCard(
       ? `${convHref}#msg-${encodeURIComponent(p.promptMessageId)}`
       : null;
   const mode = p.answerMode === 'set' || p.answerMode === 'single' ? p.answerMode : undefined;
+  const canDismiss =
+    p.waitingOnYou &&
+    p.canAnswer &&
+    Boolean(opts.onRequestDismiss) &&
+    p.decisions.some((d) => d.status === 'pending' && !d.decision);
+  const remainingMin = opts.dismissRemainingMin ?? 0;
 
   return html`
     <div
@@ -657,6 +726,36 @@ export function renderPromptCard(
           >· ${formatRelative(p.createdAt, { style: 'short' })}</span
         >
         <span class="right">
+          ${canDismiss
+            ? remainingMin > 0
+              ? html`<sl-tooltip
+                  data-dismiss-tooltip
+                  content=${`Dismiss available in ${remainingMin} min`}
+                >
+                  <span class="dismiss-tip-wrap">
+                    <sl-button
+                      size="small"
+                      variant="default"
+                      disabled
+                      aria-disabled="true"
+                      data-dismiss-prompt=${p.promptMessageId}
+                    >
+                      <sl-icon slot="prefix" name="x-circle" aria-hidden="true"></sl-icon>
+                      Dismiss…
+                    </sl-button>
+                  </span>
+                </sl-tooltip>`
+              : html`<sl-button
+                  size="small"
+                  variant="danger"
+                  outline
+                  data-dismiss-prompt=${p.promptMessageId}
+                  @click=${(): void => opts.onRequestDismiss?.(p)}
+                >
+                  <sl-icon slot="prefix" name="x-circle" aria-hidden="true"></sl-icon>
+                  Dismiss…
+                </sl-button>`
+            : nothing}
           ${permalink
             ? html`<a class="linkish" data-open-in-chat href=${permalink}
                 ><sl-icon name="chat-left-text" aria-hidden="true"></sl-icon> Open in chat</a
@@ -972,5 +1071,108 @@ export function renderMadeTableAndMobileList(
           })
       )}
     </div>
+  `;
+}
+
+export function renderDismissPromptDialog(opts: {
+  prompt: ProjectDecisionPromptView | null;
+  reasonDraft: string;
+  submitting: boolean;
+  askerGone: boolean;
+  onReasonInput: (value: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): TemplateResult | typeof nothing {
+  const p = opts.prompt;
+  if (!p) return nothing;
+
+  const openRows = p.decisions.filter((d) => d.status === 'pending' && !d.decision);
+  const count = openRows.length;
+  const dialogLabel = count === 1 ? 'Dismiss decision' : 'Dismiss decisions';
+  const confirmLabel = count <= 1 ? 'Dismiss' : `Dismiss ${count} decisions`;
+  const askerName = p.askerAgentName || 'The agent';
+  const whereLabel = conversationDisplayLabel(p.chatKey, p.conversationLabel);
+  const onTextareaInput = (e: Event): void => {
+    const val = (e.target as HTMLElement & { value?: string })?.value ?? '';
+    opts.onReasonInput(val);
+  };
+
+  return html`
+    <sl-dialog
+      class="dismiss-dialog"
+      data-dismiss-dialog
+      label=${dialogLabel}
+      open
+      @sl-request-close=${(e: Event): void => {
+        if (opts.submitting) {
+          e.preventDefault();
+          return;
+        }
+        opts.onCancel();
+      }}
+    >
+      <div class="dismiss-dialog-body">
+        <div class="dismiss-row-list">
+          ${openRows.map(
+            (d) => html`
+              <div class="dismiss-row-item" data-dismiss-row=${d.rowId}>
+                ${d.key ? html`<span class="key">${d.key}</span>` : nothing}
+                <span>${d.question}</span>
+              </div>
+            `
+          )}
+        </div>
+        <div class="dismiss-dialog-note">
+          ${count === 1
+            ? 'A dismissed decision closes for everyone and cannot be answered. This cannot be undone.'
+            : 'Dismissed decisions close for everyone and cannot be answered. This cannot be undone.'}
+        </div>
+        <sl-textarea
+          size="small"
+          rows="2"
+          maxlength="500"
+          label="Reason (optional)"
+          help-text=${opts.askerGone
+            ? 'Plain text, up to 500 characters. Shown on the card.'
+            : `Plain text, up to 500 characters. Sent to ${askerName} and shown on the card.`}
+          placeholder="Why it no longer applies"
+          data-dismiss-reason
+          ?disabled=${opts.submitting}
+          .value=${opts.reasonDraft}
+          @sl-input=${onTextareaInput}
+          @input=${onTextareaInput}
+        ></sl-textarea>
+        ${opts.askerGone
+          ? html`<div class="dismiss-tell" data-dismiss-tell="gone">
+              <sl-icon name="person-x" aria-hidden="true"></sl-icon>
+              <span>${askerName} is gone; nothing will be sent.</span>
+            </div>`
+          : html`<div class="dismiss-tell" data-dismiss-tell="live">
+              <sl-icon name="send" aria-hidden="true"></sl-icon>
+              <span>${askerName} will be told in ${whereLabel}.</span>
+            </div>`}
+      </div>
+      <div slot="footer" class="dismiss-dialog-footer">
+        <sl-button
+          size="small"
+          data-dismiss-cancel
+          ?disabled=${opts.submitting}
+          @click=${opts.onCancel}
+        >
+          Cancel
+        </sl-button>
+        <sl-button
+          size="small"
+          variant="danger"
+          outline
+          data-dismiss-confirm
+          ?loading=${opts.submitting}
+          ?disabled=${opts.submitting}
+          @click=${opts.onConfirm}
+        >
+          ${confirmLabel}
+        </sl-button>
+      </div>
+    </sl-dialog>
   `;
 }

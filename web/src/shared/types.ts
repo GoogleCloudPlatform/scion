@@ -1768,6 +1768,23 @@ export interface DecisionReplacedBy {
   at: string;
 }
 
+/** When, why, and by which agent a decision was withdrawn (DecisionWithdrawn). */
+export interface DecisionWithdrawn {
+  at: string;
+  reason?: string;
+  byName: string;
+}
+
+/** When, why, and by which user a decision was dismissed (DecisionDismissed). */
+export interface DecisionDismissed {
+  at: string;
+  byUserId?: string;
+  byName: string;
+  reason?: string;
+  surface: string;
+  responseMessageId: string;
+}
+
 /** An answer as clients see it (AnswerView). */
 export interface AnswerView {
   choiceId: string;
@@ -1777,8 +1794,9 @@ export interface AnswerView {
   answeredByEmail?: string;
   /** "direct" or "agent_interpreted". */
   provenance: string;
-  /** "answer", "confirm" or "override". */
+  /** "answer", "confirm", "override", or "dismiss". */
   outcome?: string;
+  dismissReason?: string;
   interpretedByAgentId?: string;
   sourceMessageId?: string;
   surface: string;
@@ -1798,8 +1816,8 @@ export interface DecisionView {
   key: string;
   ref: string;
   version: number;
-  /** "pending", "decided" or "replaced". */
-  status: 'pending' | 'decided' | 'replaced' | (string & {});
+  /** "pending", "decided", "replaced", "withdrawn", or "dismissed". */
+  status: 'pending' | 'decided' | 'replaced' | 'withdrawn' | 'dismissed' | (string & {});
   askerAgentId: string;
   askerAgentName: string;
   /** Markdown. */
@@ -1807,7 +1825,9 @@ export interface DecisionView {
   defaultChoiceId?: string;
   choices: ChoiceOption[];
   replacedBy?: DecisionReplacedBy;
-  /** The effective answer; absent while pending. */
+  withdrawn?: DecisionWithdrawn;
+  dismissed?: DecisionDismissed;
+  /** The effective answer; absent while pending, withdrawn, or dismissed. */
   decision?: AnswerView;
 }
 
@@ -1821,8 +1841,9 @@ export interface DecisionResponseView {
   choiceId: string;
   label: string;
   provenance: string;
-  /** "answer", "confirm" or "override". */
+  /** "answer", "confirm", "override", or "dismiss". */
   outcome?: string;
+  dismissReason?: string;
   answeredByUserId?: string;
   answeredByName?: string;
   interpretedByAgentId?: string;
@@ -1842,6 +1863,7 @@ export interface DecisionResponseSetAnswer {
   label: string;
   provenance: string;
   outcome: string;
+  dismissReason?: string;
   matchedDefault: boolean;
   answeredByUserId?: string;
   answeredByName?: string;

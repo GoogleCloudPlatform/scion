@@ -564,8 +564,63 @@ export class ScionChatDecisions extends LitElement {
     }
 
     .row.replaced .q,
-    .row.replaced .choices {
+    .row.replaced .choices,
+    .row.dismissed .q,
+    .row.dismissed .choices,
+    .row.dismissed .row-top .key {
       opacity: 0.55;
+    }
+
+    .wd {
+      margin-top: 0.45rem;
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-muted, #64748b);
+      display: flex;
+      gap: 0.35rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .wd sl-icon {
+      font-size: 0.95rem;
+    }
+
+    .wd sl-icon.dc {
+      color: var(--scion-status-danger, #dc2626);
+    }
+
+    .wd b {
+      color: var(--scion-text-secondary, #475569);
+    }
+
+    .wd b.state {
+      color: var(--scion-text-secondary, #475569);
+      font-weight: 600;
+    }
+
+    .wd a.jump {
+      color: var(--scion-primary, #3b82f6);
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .wd a.jump:hover {
+      text-decoration: underline;
+    }
+
+    .wd a.jump:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 1px;
+      border-radius: 0.2rem;
+    }
+
+    .wd-reason {
+      margin-top: 0.35rem;
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-secondary, #475569);
+      border-left: 3px solid var(--scion-border, #e2e8f0);
+      padding: 0.1rem 0.55rem;
+      overflow-wrap: anywhere;
     }
 
     .row-foot a.jump {
@@ -922,6 +977,13 @@ export class ScionChatDecisions extends LitElement {
     return a.answeredByName || a.answeredByEmail || 'someone';
   }
 
+  private dismissedBy(d: DecisionView): string {
+    const dm = d.dismissed;
+    if (!dm) return 'someone';
+    if (dm.byUserId && dm.byUserId === this.currentUserId) return 'you';
+    return dm.byName || 'someone';
+  }
+
   private ownerLabel(d: DecisionView): string {
     const a = d.decision;
     return a?.answeredByName || a?.answeredByEmail || 'the recorded answerer';
@@ -998,6 +1060,12 @@ export class ScionChatDecisions extends LitElement {
         } else if (res.code === 'replaced') {
           const v = res.replacedBy?.version ?? res.decision.replacedBy?.version;
           showToast(v ? `Replaced by v${v}.` : 'This decision was replaced.', 'warning');
+        } else if (res.code === 'dismissed') {
+          const who = this.dismissedBy(res.decision);
+          showToast(
+            who === 'you' ? 'You dismissed this decision.' : `${who} dismissed this decision.`,
+            'warning'
+          );
         } else {
           showToast(res.message, 'warning');
         }
@@ -1121,7 +1189,9 @@ export class ScionChatDecisions extends LitElement {
     const stacked = (d.choices ?? []).some((c) => !!c.description);
     return html`
       <div
-        class="row${d.status === 'replaced' ? ' replaced' : ''}"
+        class="row${d.status === 'replaced' ? ' replaced' : ''}${d.status === 'dismissed'
+          ? ' dismissed'
+          : ''}"
         data-row=${d.rowId}
         data-status=${d.status}
       >
@@ -1502,6 +1572,27 @@ export class ScionChatDecisions extends LitElement {
           : nothing}
       </div>`;
     }
+    if (d.status === 'dismissed') {
+      const dm = d.dismissed;
+      const who = this.dismissedBy(d);
+      const r = d.replacedBy;
+      const label = r?.version ? `v${r.version}` : 'the new version';
+      return html`<div class="wd" role="status">
+          <sl-icon class="dc" name="x-circle" aria-hidden="true"></sl-icon>
+          <span><b class="state">Dismissed</b> by <b>${who}</b></span>
+          ${this.renderAt(dm?.at)}
+          ${r?.messageId
+            ? html`<span aria-hidden="true">·</span>
+                <a
+                  class="jump"
+                  href="#msg-${r.messageId}"
+                  @click=${(e: Event) => this.jump(e, r.messageId)}
+                  >Jump to ${label}</a
+                >`
+            : nothing}
+        </div>
+        ${dm?.reason ? html`<div class="wd-reason">${dm.reason}</div>` : nothing}`;
+    }
     return null;
   }
 
@@ -1661,6 +1752,10 @@ export class ScionChatDecisions extends LitElement {
     switch (reason) {
       case 'replaced':
         return 'was replaced';
+      case 'withdrawn':
+        return 'was withdrawn';
+      case 'dismissed':
+        return 'was dismissed';
       case 'decided':
       case 'not_recorded_answerer':
         return d.decision
@@ -1736,7 +1831,9 @@ export class ScionChatDecisions extends LitElement {
     const notOwner = actionableReason(d, this.currentUserId) === 'not_recorded_answerer';
     return html`
       <div
-        class="row${d.status === 'replaced' ? ' replaced' : ''}${notOwner ? ' readonly' : ''}"
+        class="row${d.status === 'replaced' ? ' replaced' : ''}${d.status === 'dismissed'
+          ? ' dismissed'
+          : ''}${notOwner ? ' readonly' : ''}"
         role="group"
         aria-label=${plainText(d.question)}
         data-row=${d.rowId}
@@ -1975,6 +2072,10 @@ export class ScionChatDecisions extends LitElement {
     }
     const replaced = views.filter((d) => d.status === 'replaced').length;
     if (replaced > 0) parts.push(`${replaced} replaced`);
+    const withdrawn = views.filter((d) => d.status === 'withdrawn').length;
+    if (withdrawn > 0) parts.push(`${withdrawn} withdrawn`);
+    const dismissed = views.filter((d) => d.status === 'dismissed').length;
+    if (dismissed > 0) parts.push(`${dismissed} dismissed`);
     return parts;
   }
 

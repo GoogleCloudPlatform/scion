@@ -202,5 +202,38 @@
     "answers": [],
     "decision": null,
     "want": "not_actionable"
+  },
+  {
+    "name": "dismissed (signed-in user)",
+    "userId": "u1",
+    "status": "dismissed",
+    "answers": [
+      {
+        "provenance": "direct",
+        "outcome": "dismiss",
+        "answeredByUserId": "u1"
+      }
+    ],
+    "decision": null,
+    "want": "dismissed"
+  },
+  {
+    "name": "dismissed (after own interpreted answer)",
+    "userId": "u1",
+    "status": "dismissed",
+    "answers": [
+      {
+        "provenance": "agent_interpreted",
+        "outcome": "answer",
+        "answeredByUserId": "u1"
+      },
+      {
+        "provenance": "direct",
+        "outcome": "dismiss",
+        "answeredByUserId": "u1"
+      }
+    ],
+    "decision": null,
+    "want": "dismissed"
   }
 ]
