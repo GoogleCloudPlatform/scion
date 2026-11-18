@@ -317,6 +317,10 @@ func copyTriggerStringMap(in map[string]string) map[string]string {
 }
 
 func buildTriggerEventSummaryResponse(ev store.TriggerEvent) TriggerEventSummaryResponse {
+	attrs := copyTriggerStringMap(ev.Attributes)
+	if rawCT, hasCT := attrs["content_type"]; hasCT {
+		attrs["content_type"] = sanitizeEventContentType(rawCT)
+	}
 	return TriggerEventSummaryResponse{
 		ID:        ev.ID,
 		ProjectID: ev.ProjectID,
@@ -329,7 +333,7 @@ func buildTriggerEventSummaryResponse(ev store.TriggerEvent) TriggerEventSummary
 		DedupKey:     ev.DedupKey,
 		OccurredAt:   ev.OccurredAt,
 		ReceivedAt:   ev.ReceivedAt,
-		Attributes:   copyTriggerStringMap(ev.Attributes),
+		Attributes:   attrs,
 		PayloadBytes: ev.PayloadBytes,
 		Status:       ev.Status,
 		MatchCount:   ev.MatchCount,

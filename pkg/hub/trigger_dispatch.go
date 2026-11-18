@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -295,6 +296,118 @@ func verifiedLabelForFireEvent(ev *hubfire.FireEvent) string {
 	}
 }
 
+const (
+	neutralEventContentType = "application/octet-stream"
+	maxSafeContentTypeBytes = 128
+)
+
+var safeContentTypeParamMaxLen = map[string]int{
+	"charset": 32,
+	"version": 16,
+}
+
+func isSafeMediaTypeToken(s string, maxLen int) bool {
+	if len(s) == 0 || len(s) > maxLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		isAlphaNum := (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+		if i == 0 {
+			if !isAlphaNum {
+				return false
+			}
+			continue
+		}
+		if !isAlphaNum && b != '.' && b != '_' && b != '+' && b != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func trimHTTPOWS(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
+}
+
+// sanitizeEventContentType restricts an event's content_type attribute to a
+// canonical lowercase media-type token ("type/subtype") plus an optional
+// allowlisted token parameter subset (charset, version). Any malformed value,
+// quoted string, comment, control byte, or unknown parameter is replaced with
+// neutralEventContentType while leaving the event body untouched.
+func sanitizeEventContentType(raw string) string {
+	if len(raw) == 0 || len(raw) > maxSafeContentTypeBytes {
+		return neutralEventContentType
+	}
+	for i := 0; i < len(raw); i++ {
+		if (raw[i] < 0x20 && raw[i] != '\t') || raw[i] > 0x7e {
+			return neutralEventContentType
+		}
+	}
+	trimmed := trimHTTPOWS(raw)
+	if trimmed == "" {
+		return neutralEventContentType
+	}
+	parts := strings.Split(trimmed, ";")
+	if len(parts) > 1+len(safeContentTypeParamMaxLen) {
+		return neutralEventContentType
+	}
+	media := trimHTTPOWS(parts[0])
+	slash := strings.IndexByte(media, '/')
+	if slash <= 0 || slash >= len(media)-1 || strings.IndexByte(media[slash+1:], '/') >= 0 {
+		return neutralEventContentType
+	}
+	mainType := media[:slash]
+	subType := media[slash+1:]
+	if !isSafeMediaTypeToken(mainType, 64) || !isSafeMediaTypeToken(subType, 64) {
+		return neutralEventContentType
+	}
+
+	var b strings.Builder
+	b.Grow(len(trimmed))
+	b.WriteString(strings.ToLower(mainType))
+	b.WriteByte('/')
+	b.WriteString(strings.ToLower(subType))
+
+	var seenParams map[string]struct{}
+	for _, rawParam := range parts[1:] {
+		p := trimHTTPOWS(rawParam)
+		if p == "" {
+			return neutralEventContentType
+		}
+		eq := strings.IndexByte(p, '=')
+		if eq <= 0 || eq >= len(p)-1 || strings.IndexByte(p[eq+1:], '=') >= 0 {
+			return neutralEventContentType
+		}
+		k := strings.ToLower(p[:eq])
+		v := p[eq+1:]
+		maxValLen, allowed := safeContentTypeParamMaxLen[k]
+		if !allowed || !isSafeMediaTypeToken(v, maxValLen) {
+			return neutralEventContentType
+		}
+		if seenParams == nil {
+			seenParams = make(map[string]struct{}, len(parts)-1)
+		}
+		if _, dup := seenParams[k]; dup {
+			return neutralEventContentType
+		}
+		seenParams[k] = struct{}{}
+		b.WriteString("; ")
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(strings.ToLower(v))
+	}
+	return b.String()
+}
+
 // buildDispatchedEventBody constructs the §8.3 messaging.EventBody for a
 // FireEvent delivered to an agent.
 func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
@@ -339,6 +452,9 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 			delete(attrs, "delivery")
 			delete(attrs, "event")
 			delete(attrs, "subject")
+		}
+		if rawCT, hasCT := attrs["content_type"]; hasCT {
+			attrs["content_type"] = sanitizeEventContentType(rawCT)
 		}
 		if len(attrs) > 0 {
 			body.Attributes = attrs
