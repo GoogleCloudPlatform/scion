@@ -687,13 +687,14 @@ func TestTriggerDispatchE2E_WakeFireContextEndsWithQueueItem(t *testing.T) {
 	t.Run("post-wake delivery Detach context ends when queue item ends", func(t *testing.T) {
 		srv, s, _, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
 		msgEntered := make(chan struct{})
+		entryErrCh := make(chan error, 1)
 		msgCtxDone := make(chan error, 1)
 		var msgOnce sync.Once
 		wd := &ctxBlockingWakeDispatcher{
 			onStart: func(_ context.Context, agent *store.Agent) error {
 				go func() {
 					// Delay readiness past PerFireTimeout so post-wake delivery relies on tracker.Detach.
-					time.Sleep(2 * shortPerFire)
+					time.Sleep(3 * shortPerFire)
 					deadline := time.Now().Add(2 * time.Second)
 					for time.Now().Before(deadline) {
 						a, gErr := s.GetAgent(context.Background(), agent.ID)
@@ -711,7 +712,15 @@ func TestTriggerDispatchE2E_WakeFireContextEndsWithQueueItem(t *testing.T) {
 			onMessage: func(ctx context.Context, _ *store.Agent, msg *messages.StructuredMessage) error {
 				require.NotNil(t, msg)
 				assert.Equal(t, "trigger", msg.Sender)
-				msgOnce.Do(func() { close(msgEntered) })
+				entryErr := ctx.Err()
+				msgOnce.Do(func() {
+					entryErrCh <- entryErr
+					close(msgEntered)
+				})
+				if entryErr != nil {
+					msgCtxDone <- entryErr
+					return entryErr
+				}
 				<-ctx.Done()
 				msgCtxDone <- ctx.Err()
 				return ctx.Err()
@@ -735,6 +744,13 @@ func TestTriggerDispatchE2E_WakeFireContextEndsWithQueueItem(t *testing.T) {
 			t.Fatal("timed out waiting for post-wake DispatchAgentMessage")
 		}
 
+		require.NoError(t, <-entryErrCh, "post-wake delivery context must still be alive past PerFireTimeout while queue item lives")
+		select {
+		case err := <-msgCtxDone:
+			t.Fatalf("post-wake delivery context canceled before queue item ended: %v", err)
+		default:
+		}
+
 		// Cancel the queue item context while post-wake message dispatch is in flight.
 		cancelItem()
 
@@ -752,6 +768,66 @@ func TestTriggerDispatchE2E_WakeFireContextEndsWithQueueItem(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("Dispatcher.HandleItem did not return after queue item cancellation")
 		}
+	})
+
+	t.Run("post-wake delivery after resume longer than PerFireTimeout succeeds and records fired", func(t *testing.T) {
+		srv, s, _, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
+		var (
+			mu           sync.Mutex
+			entryErr     error
+			deliveredMsg *messages.StructuredMessage
+		)
+		wd := &ctxBlockingWakeDispatcher{
+			onStart: func(_ context.Context, agent *store.Agent) error {
+				go func() {
+					// Spend > PerFireTimeout inside wakeFireTarget before marking ready.
+					time.Sleep(3 * shortPerFire)
+					deadline := time.Now().Add(2 * time.Second)
+					for time.Now().Before(deadline) {
+						a, gErr := s.GetAgent(context.Background(), agent.ID)
+						if gErr == nil && a.Phase == string(state.PhaseStarting) {
+							_ = s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{
+								Phase: string(state.PhaseRunning), Activity: "idle",
+							})
+							return
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+				}()
+				return nil
+			},
+			onMessage: func(ctx context.Context, _ *store.Agent, msg *messages.StructuredMessage) error {
+				mu.Lock()
+				entryErr = ctx.Err()
+				deliveredMsg = msg
+				err := entryErr
+				mu.Unlock()
+				return err
+			},
+		}
+		srv.SetDispatcher(wd)
+
+		disp, item, trID := seedWakeTriggerAndItem(t, srv, s, target, "deliver-success")
+
+		itemCtx, cancelItem := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelItem()
+
+		res := disp.HandleItem(itemCtx, item, staticQueueLease{})
+		require.NoError(t, res.Err)
+		assert.True(t, res.Done)
+
+		mu.Lock()
+		gotEntryErr := entryErr
+		gotMsg := deliveredMsg
+		mu.Unlock()
+		require.NoError(t, gotEntryErr, "post-wake onMessage must enter with live ctx.Err() == nil")
+		require.NotNil(t, gotMsg)
+		assert.Equal(t, "trigger", gotMsg.Sender)
+
+		fires, err := s.ListTriggerFires(context.Background(), store.TriggerFireFilter{TriggerID: trID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, fires.Items, 1)
+		assert.Equal(t, store.TriggerFireStatusFired, fires.Items[0].Status)
 	})
 }
 

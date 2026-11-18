@@ -76,8 +76,13 @@ type Core interface {
 // long-running trigger fires (such as message --wake) register with hub
 // shutdown admission and receive hub shutdown-abort signals while remaining
 // bounded by itemCtx (the queue item's lifetime, Stage 1 ledger L3).
+//
+// admittedCtx preserves the caller's per-fire deadline alongside any abort
+// values; abortCtx carries ONLY the real abort signal (hub shutdown + queue
+// item lifetime, never the per-fire deadline) so Detach can outlive a wake
+// resume longer than PerFireTimeout without outliving shutdown or itemCtx.
 type FireAdmitter interface {
-	AdmitFire(ctx, itemCtx context.Context) (context.Context, func(), bool)
+	AdmitFire(ctx, itemCtx context.Context) (admittedCtx, abortCtx context.Context, cleanup func(), ok bool)
 }
 
 // DispatcherConfig configures a trigger event Dispatcher.
@@ -597,12 +602,12 @@ func (t *triggerFireTracker) Admit(ctx context.Context) (context.Context, func()
 		return ctx, func() {}, false
 	}
 	if adm, ok := t.core.(FireAdmitter); ok {
-		admittedCtx, done, admitted := adm.AdmitFire(ctx, t.itemCtx)
+		admittedCtx, abortCtx, done, admitted := adm.AdmitFire(ctx, t.itemCtx)
 		if !admitted {
 			return ctx, func() {}, false
 		}
 		t.mu.Lock()
-		t.abortCtx = admittedCtx
+		t.abortCtx = abortCtx
 		t.mu.Unlock()
 		return admittedCtx, done, true
 	}

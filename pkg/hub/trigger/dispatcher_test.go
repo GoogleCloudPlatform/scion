@@ -36,7 +36,7 @@ import (
 
 type fakeCore struct {
 	enabled atomic.Bool
-	admitFn func(ctx context.Context) (context.Context, func(), bool)
+	admitFn func(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool)
 	fireFn  func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome
 }
 
@@ -54,11 +54,11 @@ func (c *fakeCore) Experiment(name string) bool {
 	return false
 }
 
-func (c *fakeCore) AdmitFire(ctx, _ context.Context) (context.Context, func(), bool) {
+func (c *fakeCore) AdmitFire(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool) {
 	if c.admitFn != nil {
-		return c.admitFn(ctx)
+		return c.admitFn(ctx, itemCtx)
 	}
-	return ctx, func() {}, true
+	return ctx, itemCtx, func() {}, true
 }
 
 type nopLease struct{}
@@ -506,4 +506,222 @@ func TestDispatcher_RuleBudgetExhaustedAndMalformedPayload(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, gotTr1.FireCount)
 	assert.Equal(t, 0, gotTr1.ErrorCount)
+}
+
+func TestDispatcher_WakeFireAdmitWaitPastPerFireTimeoutThenDetach(t *testing.T) {
+	type abortKey struct{}
+
+	makeAdmitter := func(shutdownCtx context.Context) func(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool) {
+		return func(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool) {
+			abortCtx, cancelAbort := context.WithCancel(context.Background())
+			stopShutdown := context.AfterFunc(shutdownCtx, cancelAbort)
+			stopItem := context.AfterFunc(itemCtx, cancelAbort)
+			fireCtx, cancelFire := context.WithCancel(ctx)
+			stopFire := context.AfterFunc(abortCtx, cancelFire)
+			withAbort := context.WithValue(fireCtx, abortKey{}, abortCtx)
+			return withAbort, abortCtx, func() {
+				stopFire()
+				stopItem()
+				stopShutdown()
+				cancelFire()
+				cancelAbort()
+			}, true
+		}
+	}
+
+	t.Run("Admit then wait past PerFireTimeout then Detach stays alive and records fired", func(t *testing.T) {
+		ms := newMemTriggerStore()
+		shutdownCtx, cancelShutdown := context.WithCancel(context.Background())
+		defer cancelShutdown()
+
+		core := &fakeCore{admitFn: makeAdmitter(shutdownCtx)}
+		core.enabled.Store(true)
+
+		projID := uuid.NewString()
+		epID := uuid.NewString()
+		trID := uuid.NewString()
+		evID := uuid.NewString()
+
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:           trID,
+			ProjectID:    projID,
+			Name:         "real-order-wake",
+			SourceKind:   store.TriggerSourceKindWebhook,
+			SourceID:     epID,
+			MatchTypes:   []string{"webhook.received"},
+			MatchDialect: store.TriggerDialectCEL,
+			ActionType:   store.TriggerActionMessage,
+			SubjectMode:  store.TriggerSubjectModeNew,
+			Status:       store.TriggerStatusActive,
+		}))
+		require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    "webhook:" + epID,
+			Status:     store.TriggerEventStatusPending,
+			OccurredAt: time.Now().UTC(),
+		}))
+
+		var detachedAlive bool
+		core.fireFn = func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+			// Real deliverMessageAction order: Admit first, spend PerFireTimeout
+			// during wake, then Detach for post-wake persist/dispatch.
+			admittedCtx, doneAdmit, ok := req.Tracked.Admit(ctx)
+			if !ok {
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "not admitted"}
+			}
+			defer doneAdmit()
+
+			<-admittedCtx.Done()
+			if !assert.ErrorIs(t, admittedCtx.Err(), context.DeadlineExceeded) {
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: admittedCtx.Err().Error()}
+			}
+
+			detached, cancelDetached := req.Tracked.Detach(admittedCtx)
+			defer cancelDetached()
+
+			if err := detached.Err(); err != nil {
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: err.Error()}
+			}
+			assert.NotNil(t, detached.Value(abortKey{}), "context values from Admit must carry onto Detach")
+			detachedAlive = true
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		}
+
+		disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+			Core:           core,
+			Store:          ms,
+			PerFireTimeout: 20 * time.Millisecond,
+		})
+		require.NoError(t, err)
+
+		itemCtx, cancelItem := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancelItem()
+
+		raw, err := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		require.NoError(t, err)
+		res := disp.HandleItem(itemCtx, durablequeue.Item{
+			Seq:       1,
+			Kind:      trigger.EventQueueKind,
+			DedupKey:  evID,
+			ProjectID: projID,
+			Payload:   raw,
+		}, nopLease{})
+		require.NoError(t, res.Err)
+		assert.True(t, res.Done)
+		assert.True(t, detachedAlive, "post-wake Detach must succeed with live context after PerFireTimeout")
+
+		fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{TriggerID: trID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, fires.Items, 1)
+		assert.Equal(t, store.TriggerFireStatusFired, fires.Items[0].Status)
+	})
+
+	t.Run("Admit then wait past PerFireTimeout then Detach cancels on shutdown abort", func(t *testing.T) {
+		ms := newMemTriggerStore()
+		shutdownCtx, cancelShutdown := context.WithCancel(context.Background())
+		defer cancelShutdown()
+
+		core := &fakeCore{admitFn: makeAdmitter(shutdownCtx)}
+		core.enabled.Store(true)
+
+		projID := uuid.NewString()
+		epID := uuid.NewString()
+		trID := uuid.NewString()
+		evID := uuid.NewString()
+
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:           trID,
+			ProjectID:    projID,
+			Name:         "shutdown-abort-wake",
+			SourceKind:   store.TriggerSourceKindWebhook,
+			SourceID:     epID,
+			MatchTypes:   []string{"webhook.received"},
+			MatchDialect: store.TriggerDialectCEL,
+			ActionType:   store.TriggerActionMessage,
+			SubjectMode:  store.TriggerSubjectModeNew,
+			Status:       store.TriggerStatusActive,
+		}))
+		require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    "webhook:" + epID,
+			Status:     store.TriggerEventStatusPending,
+			OccurredAt: time.Now().UTC(),
+		}))
+
+		detachedReady := make(chan struct{})
+		detachedErrCh := make(chan error, 1)
+		core.fireFn = func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+			admittedCtx, doneAdmit, ok := req.Tracked.Admit(ctx)
+			if !ok {
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "not admitted"}
+			}
+			defer doneAdmit()
+
+			<-admittedCtx.Done()
+			detached, cancelDetached := req.Tracked.Detach(admittedCtx)
+			defer cancelDetached()
+
+			if err := detached.Err(); err != nil {
+				detachedErrCh <- err
+				close(detachedReady)
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: err.Error()}
+			}
+			close(detachedReady)
+			<-detached.Done()
+			detachedErrCh <- detached.Err()
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: detached.Err().Error()}
+		}
+
+		disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+			Core:           core,
+			Store:          ms,
+			PerFireTimeout: 20 * time.Millisecond,
+		})
+		require.NoError(t, err)
+
+		itemCtx, cancelItem := context.WithCancel(context.Background())
+		defer cancelItem()
+
+		raw, err := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		require.NoError(t, err)
+		resCh := make(chan durablequeue.Result, 1)
+		go func() {
+			resCh <- disp.HandleItem(itemCtx, durablequeue.Item{
+				Seq:       1,
+				Kind:      trigger.EventQueueKind,
+				DedupKey:  evID,
+				ProjectID: projID,
+				Payload:   raw,
+			}, nopLease{})
+		}()
+
+		select {
+		case <-detachedReady:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for detached context after PerFireTimeout")
+		}
+		select {
+		case err := <-detachedErrCh:
+			t.Fatalf("detached context exited prematurely before shutdown abort: %v", err)
+		default:
+		}
+
+		cancelShutdown()
+
+		select {
+		case err := <-detachedErrCh:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			t.Fatal("detached context did not cancel on shutdown abort")
+		}
+		<-resCh
+	})
 }

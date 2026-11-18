@@ -96,9 +96,9 @@ func (c serverTriggerCore) Experiment(name string) bool {
 	return c.srv.experimentEnabled(name)
 }
 
-func (c serverTriggerCore) AdmitFire(ctx, itemCtx context.Context) (context.Context, func(), bool) {
+func (c serverTriggerCore) AdmitFire(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool) {
 	if itemCtx != nil && itemCtx.Err() != nil {
-		return ctx, func() {}, false
+		return ctx, nil, func() {}, false
 	}
 	var (
 		trackCtx context.Context
@@ -110,13 +110,14 @@ func (c serverTriggerCore) AdmitFire(ctx, itemCtx context.Context) (context.Cont
 		var ok bool
 		trackCtx, endWork, ok = c.srv.scheduledWakeFires.begin()
 		if !ok {
-			return ctx, func() {}, false
+			return ctx, nil, func() {}, false
 		}
 	}
-	// Bound scheduledFireAbortKey by BOTH hub shutdown (trackCtx) and the
-	// durablequeue item lifetime (itemCtx) so wakeFireTarget's
-	// detachKeepFireAbort(ctx) outlives the 30 s per-fire timeout without
-	// outliving either the queue item (Stage 1 ledger L3) or hub shutdown.
+	// Bound scheduledFireAbortKey and the returned abortCtx by BOTH hub
+	// shutdown (trackCtx) and the durablequeue item lifetime (itemCtx), with
+	// NO per-fire deadline, so both wakeFireTarget's detachKeepFireAbort(ctx)
+	// and post-wake tracker.Detach(ctx) outlive the 30 s per-fire timeout
+	// without outliving either the queue item (Stage 1 ledger L3) or shutdown.
 	abortCtx, cancelAbort := context.WithCancel(context.Background())
 	var stopTrack, stopItem func() bool
 	if trackCtx != nil {
@@ -127,7 +128,7 @@ func (c serverTriggerCore) AdmitFire(ctx, itemCtx context.Context) (context.Cont
 	}
 	fireCtx, cancelFire := context.WithCancel(ctx)
 	stopFire := context.AfterFunc(abortCtx, cancelFire)
-	return withScheduledFireAbort(fireCtx, abortCtx), func() {
+	return withScheduledFireAbort(fireCtx, abortCtx), abortCtx, func() {
 		stopFire()
 		if stopItem != nil {
 			stopItem()
