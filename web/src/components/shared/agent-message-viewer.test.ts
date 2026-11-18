@@ -390,3 +390,169 @@ describe('scion-agent-message-viewer SSE reconnect and visibility backfill', () 
     expect(firstEs.closed).toBe(true);
   });
 });
+
+describe('scion-agent-message-viewer cross-project badge', () => {
+  function hubMessage(id: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id,
+      projectId: 'proj-alpha',
+      sender: 'agent:builder',
+      senderId: 'agent-builder-id',
+      recipient: 'agent:reviewer',
+      recipientId: 'agent-reviewer-id',
+      msg: 'status update',
+      type: 'instruction',
+      agentId: 'agent-reviewer-id',
+      createdAt: '2026-09-23T15:00:00.000Z',
+      ...extra,
+    };
+  }
+
+  function crossProjectBadges(el: AnyEl): string[] {
+    return Array.from(
+      el.shadowRoot.querySelectorAll('.badge-cross-project') as NodeListOf<HTMLElement>
+    ).map((n) => (n.textContent ?? '').trim());
+  }
+
+  it('shows no cross-project tag for same-project sender and recipient when current project differs', async () => {
+    const el: AnyEl = document.createElement('scion-agent-message-viewer');
+    el.projectId = 'proj-other';
+    el.agentId = 'agent-reviewer-id';
+    document.body.appendChild(el);
+
+    el.mergeHubMessages([
+      hubMessage('m-same', {
+        senderProjectId: 'proj-alpha',
+        recipientProjectId: 'proj-alpha',
+      }),
+    ]);
+    await el.updateComplete;
+
+    expect(el.shadowRoot.querySelectorAll('.message-row').length).toBe(1);
+    expect(crossProjectBadges(el)).toEqual([]);
+
+    (el.shadowRoot.querySelector('.message-row') as HTMLElement).click();
+    await el.updateComplete;
+    const browser = el.shadowRoot.querySelector('scion-json-browser') as AnyEl;
+    expect(browser.data.crossProject).toBeUndefined();
+  });
+
+  it('shows cross-project tag when sender and recipient projects differ regardless of current project', async () => {
+    for (const currentProject of ['', 'proj-alpha', 'proj-other']) {
+      const el: AnyEl = document.createElement('scion-agent-message-viewer');
+      el.projectId = currentProject;
+      el.agentId = 'agent-reviewer-id';
+      document.body.appendChild(el);
+
+      el.mergeHubMessages([
+        hubMessage(`m-cross-${currentProject || 'unset'}`, {
+          senderProjectId: 'proj-alpha',
+          recipientProjectId: 'proj-beta',
+        }),
+      ]);
+      await el.updateComplete;
+
+      expect(crossProjectBadges(el)).toEqual(['cross-project']);
+
+      (el.shadowRoot.querySelector('.message-row') as HTMLElement).click();
+      await el.updateComplete;
+      const browser = el.shadowRoot.querySelector('scion-json-browser') as AnyEl;
+      expect(browser.data).toMatchObject({
+        crossProject: true,
+        senderProjectId: 'proj-alpha',
+        recipientProjectId: 'proj-beta',
+      });
+      el.remove();
+    }
+  });
+
+  it('shows no cross-project tag when provenance stamps are missing on one side', async () => {
+    const el: AnyEl = document.createElement('scion-agent-message-viewer');
+    el.projectId = 'proj-other';
+    el.agentId = 'agent-reviewer-id';
+    document.body.appendChild(el);
+
+    el.mergeHubMessages([
+      // Human-sent message: recipientProjectId is stamped, senderProjectId is absent.
+      hubMessage('m-human', {
+        sender: 'user:alice',
+        senderId: 'u-alice',
+        recipientProjectId: 'proj-alpha',
+      }),
+    ]);
+    await el.updateComplete;
+
+    expect(crossProjectBadges(el)).toEqual([]);
+  });
+
+  it('applies message-provenance cross-project logic to Cloud Logging entries', async () => {
+    const el: AnyEl = document.createElement('scion-agent-message-viewer');
+    el.projectId = 'proj-other';
+    document.body.appendChild(el);
+
+    el.mergeEntries([
+      {
+        ...entry('log-same', {
+          sender: 'agent:a',
+          recipient: 'agent:b',
+          msg_type: 'instruction',
+          sender_project_id: 'proj-alpha',
+          recipient_project_id: 'proj-alpha',
+        }),
+        timestamp: '2026-09-23T15:00:00.000Z',
+      },
+      {
+        ...entry('log-cross', {
+          sender: 'agent:a',
+          recipient: 'agent:c',
+          msg_type: 'instruction',
+          sender_project_id: 'proj-alpha',
+          recipient_project_id: 'proj-beta',
+        }),
+        timestamp: '2026-09-23T15:01:00.000Z',
+      },
+    ]);
+    await el.updateComplete;
+
+    const rows = Array.from(
+      el.shadowRoot.querySelectorAll('.message-row') as NodeListOf<HTMLElement>
+    );
+    expect(rows.length).toBe(2);
+    // Rendered newest first: log-cross (index 0) has badge; log-same (index 1) has none.
+    expect(rows[0]!.querySelector('.badge-cross-project')).not.toBeNull();
+    expect(rows[1]!.querySelector('.badge-cross-project')).toBeNull();
+  });
+
+  it('honors recorded cross_project boolean on Cloud Logging entries when project stamps are absent', async () => {
+    const el: AnyEl = document.createElement('scion-agent-message-viewer');
+    el.projectId = 'proj-other';
+    document.body.appendChild(el);
+
+    el.mergeEntries([
+      {
+        timestamp: '2026-09-23T15:00:00.000Z',
+        severity: 'INFO',
+        message: 'log line',
+        labels: { sender: 'agent:a', recipient: 'agent:b', msg_type: 'instruction' },
+        jsonPayload: { cross_project: false, message_content: 'same project' },
+        insertId: 'log-explicit-same',
+      },
+      {
+        timestamp: '2026-09-23T15:01:00.000Z',
+        severity: 'INFO',
+        message: 'log line',
+        labels: { sender: 'agent:a', recipient: 'agent:c', msg_type: 'instruction' },
+        jsonPayload: { cross_project: true, message_content: 'hello across projects' },
+        insertId: 'log-explicit-cross',
+      },
+    ]);
+    await el.updateComplete;
+
+    const rows = Array.from(
+      el.shadowRoot.querySelectorAll('.message-row') as NodeListOf<HTMLElement>
+    );
+    expect(rows.length).toBe(2);
+    expect(rows[0]!.querySelector('.badge-cross-project')).not.toBeNull();
+    expect(rows[1]!.querySelector('.badge-cross-project')).toBeNull();
+  });
+});
