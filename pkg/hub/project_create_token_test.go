@@ -238,14 +238,20 @@ func TestProjectCreateToken_SeededOwnerRoleNeedsUnmappedPermissions(t *testing.T
 	unmapped := pctUnmappedOwnerPerms()
 	require.NotEmpty(t, unmapped, "the seeded project-owner role carries permissions with no selector")
 	// The token carries project:create and every owner selector the holder
-	// can select on a hub boundary.
+	// can select on a hub boundary. Delete each single-selector probe token
+	// before minting the combined token so growing projectOwnerPermissionIDs
+	// past store.UATMaxPerUser (50) does not trip ErrUATLimitExceeded.
 	scopes := []string{"project:create"}
 	for _, p := range projectOwnerPermissionIDs() {
 		sel := bearerMatrixSelector(p)
 		if sel == "" || !permissionEligibleForBoundary(p, BoundaryKindHub) {
 			continue
 		}
-		if pctMintErr(srv, holder, hubBoundary(), sel) == nil {
+		_, probeTok, err := srv.uatService.CreateTokenWithParams(rs4MintContext(holder), CreateTokenParams{
+			UserID: holder, Name: "pct-" + tid("tok"), Boundary: hubBoundary(), Scopes: []string{sel},
+		})
+		if err == nil {
+			require.NoError(t, s.DeleteUserAccessToken(context.Background(), probeTok.ID))
 			scopes = append(scopes, sel)
 		}
 	}
