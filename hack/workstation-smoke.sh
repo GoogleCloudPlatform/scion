@@ -30,8 +30,9 @@
 #                                  a prompt and returns an empty list (only
 #                                  where 'scion init' can run)
 #   5c. scion use <slug>           from a directory outside any project
-#                                  selects the linked project (then again by
-#                                  its UUID); scion list
+#                                  selects the linked project (or a
+#                                  hub-managed one under --global, then
+#                                  again by its UUID); scion list
 #                                  then returns the empty list through the
 #                                  hub, and scion use shows source "context"
 #   6. scion server stop           stops the server
@@ -364,12 +365,21 @@ else
 fi
 
 log "5c. outside any project, scion use selects the project and scion list targets it"
-HUB_PROJECT_ID="$(tr -d '\n' <"$WORK/status.json" | grep -o '"hubProjectId"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | head -n 1)"
-[ -n "$HUB_PROJECT_ID" ] || { cat "$WORK/status.json" >&2; fail "hub status did not report the hub project ID"; }
-"$SCION" ${TARGET[@]+"${TARGET[@]}"} hub projects info "$HUB_PROJECT_ID" --format json >"$WORK/project.json" 2>"$WORK/project.err" || {
-  cat "$WORK/project.json" "$WORK/project.err" >&2; fail "scion hub projects info"; }
+if [ ${#TARGET[@]} -gt 0 ]; then
+  # 'scion use' leaves out a hub's built-in global project; create a
+  # hub-managed project (which needs no container runtime) to select instead.
+  "$SCION" "${TARGET[@]}" hub projects create --name smoke --format json >"$WORK/project.json" 2>"$WORK/project.err" || {
+    cat "$WORK/project.json" "$WORK/project.err" >&2; fail "scion hub projects create"; }
+  HUB_PROJECT_ID="$(sed -n 's/^  "id": "\([^"]*\)".*/\1/p' "$WORK/project.json" | head -n 1)"
+  [ -n "$HUB_PROJECT_ID" ] || { cat "$WORK/project.json" >&2; fail "hub projects create did not report the project ID"; }
+else
+  HUB_PROJECT_ID="$(tr -d '\n' <"$WORK/status.json" | grep -o '"hubProjectId"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | head -n 1)"
+  [ -n "$HUB_PROJECT_ID" ] || { cat "$WORK/status.json" >&2; fail "hub status did not report the hub project ID"; }
+  "$SCION" hub projects info "$HUB_PROJECT_ID" --format json >"$WORK/project.json" 2>"$WORK/project.err" || {
+    cat "$WORK/project.json" "$WORK/project.err" >&2; fail "scion hub projects info"; }
+fi
 HUB_PROJECT_SLUG="$(sed -n 's/^  "slug": "\([^"]*\)".*/\1/p' "$WORK/project.json" | head -n 1)"
-[ -n "$HUB_PROJECT_SLUG" ] || { cat "$WORK/project.json" >&2; fail "hub projects info did not report the project slug"; }
+[ -n "$HUB_PROJECT_SLUG" ] || { cat "$WORK/project.json" >&2; fail "project JSON did not report the project slug"; }
 USE_DIR="$(mktemp -d "$WORK/use.XXXXXX")"
 # By slug (the usual path: slug, then name lookup), then by UUID.
 for ref in "$HUB_PROJECT_SLUG" "$HUB_PROJECT_ID"; do
