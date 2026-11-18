@@ -55,6 +55,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { projectDisplayName } from '../../client/project-label.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { dragAxis, wheelNotches } from '../../shared/terminal-wheel.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
 import '../shared/breadcrumb.js';
 import type { Crumb } from '../shared/breadcrumb.js';
@@ -288,6 +289,8 @@ export class ScionTerminalPane extends LitElement {
   private _errorTimer: ReturnType<typeof setTimeout> | null = null;
   private _windowDragOver: ((e: DragEvent) => void) | null = null;
   private _windowDrop: ((e: DragEvent) => void) | null = null;
+  /** Aborts the touch-scroll listeners installed on the xterm element. */
+  private _touchScrollAbort: AbortController | null = null;
 
   // Theme: the pane chrome (toolbar, buttons, dialogs, loading/error states)
   // follows the app theme through --scion-* tokens. The terminal viewport and
@@ -1403,6 +1406,7 @@ export class ScionTerminalPane extends LitElement {
     this.terminal.open(container);
     const terminal = this.terminal;
     this.enableShiftSelectionOnMac();
+    this.enableTouchWheelScroll();
 
     // Detect active tmux window from OSC 7337 sequence sent by the broker
     // on connect. Format: \033]7337;tmuxwindow=<name>\007
@@ -1673,6 +1677,130 @@ export class ScionTerminalPane extends LitElement {
     };
   }
 
+  /**
+   * Turns a one-finger vertical drag into wheel events while the application
+   * has mouse reporting on (tmux with `mouse on`), so its scrollback can be
+   * reached on a device that has no wheel. xterm.js ignores touch while mouse
+   * reporting is on. With it off this does nothing and xterm.js scrolls its
+   * own viewport on touch, which has scrollback only on the normal screen: an
+   * application on the alternate screen that does not report the mouse (tmux
+   * with `mouse off`) does not scroll by touch.
+   *
+   * Only a vertical drag is taken. A horizontal one, a second finger and a
+   * pinch stay with the browser.
+   *
+   * The wheel events are dispatched on the xterm element, so xterm.js reports
+   * them itself: in the encoding the application asked for, and at the cell
+   * under the finger, so a split tmux window scrolls the pane that is touched.
+   *
+   * The listeners are bound to an AbortController that disposeTerminal()
+   * aborts, so they live as long as this pane's xterm element.
+   */
+  private enableTouchWheelScroll(): void {
+    const el = this.terminal?.element;
+    if (!el) return;
+    this._touchScrollAbort?.abort();
+    const abort = new AbortController();
+    this._touchScrollAbort = abort;
+    const { signal } = abort;
+
+    const mouseActive = (): boolean =>
+      !!this.terminal && this.terminal.modes.mouseTrackingMode !== 'none';
+    // One wheel notch per row of finger travel. How far a notch scrolls is
+    // up to the application: tmux's default copy-mode binding scrolls five
+    // lines for each, so its scrollback moves faster than the finger.
+    const rowHeight = (): number => Math.max(8, el.clientHeight / (this.terminal?.rows ?? 24));
+    // Stops the browser panning vertically on the next gesture; panning
+    // sideways and pinch-zoom still work.
+    const setTouchAction = (on: boolean): void => {
+      el.style.touchAction = on ? 'pan-x pinch-zoom' : '';
+    };
+
+    let startX = 0;
+    let startY = 0;
+    let lastY: number | null = null;
+    let carry = 0;
+    // Whether this gesture can still be, or is, a drag to translate.
+    let consuming = false;
+    // Set once the drag is known to be vertical (dragAxis).
+    let vertical = false;
+
+    el.addEventListener(
+      'touchstart',
+      (ev: TouchEvent): void => {
+        consuming = ev.touches.length === 1 && mouseActive();
+        // The browser reads touch-action when a gesture begins, so this
+        // applies to the next one; preventDefault below handles this one.
+        setTouchAction(consuming);
+        if (!consuming) return;
+        startX = ev.touches[0].clientX;
+        startY = lastY = ev.touches[0].clientY;
+        carry = 0;
+        vertical = false;
+      },
+      { passive: true, signal }
+    );
+
+    el.addEventListener(
+      'touchmove',
+      (ev: TouchEvent): void => {
+        if (!consuming || lastY === null) return;
+        // A second finger is a pinch-zoom, which belongs to the browser. The
+        // application can also turn mouse reporting off during a drag.
+        if (ev.touches.length !== 1 || !mouseActive()) {
+          consuming = false;
+          return;
+        }
+        const touch = ev.touches[0];
+        if (!vertical) {
+          // Browsers hold the first touchmove back until the finger has
+          // left a slop region, so this is normally decided on that move.
+          const axis = dragAxis(touch.clientX - startX, touch.clientY - startY);
+          if (axis === null) return;
+          if (axis === 'horizontal') {
+            consuming = false;
+            return;
+          }
+          vertical = true;
+        }
+        // Every move of a vertical drag, not only one that crosses a row, or
+        // the page moves under the finger. The first gesture after mouse
+        // reporting turns on can arrive with the browser's scroll already
+        // under way, and that move cannot be cancelled.
+        if (ev.cancelable) ev.preventDefault();
+
+        carry += lastY - touch.clientY;
+        lastY = touch.clientY;
+
+        const { notches, up, remainder } = wheelNotches(carry, rowHeight());
+        carry = remainder;
+        for (let i = 0; i < notches; i++) {
+          el.dispatchEvent(
+            new WheelEvent('wheel', {
+              deltaY: up ? -1 : 1,
+              deltaMode: WheelEvent.DOM_DELTA_LINE,
+              clientX: touch.clientX,
+              clientY: touch.clientY,
+              bubbles: true,
+              cancelable: true,
+            })
+          );
+        }
+      },
+      { passive: false, signal }
+    );
+
+    const end = (ev: TouchEvent): void => {
+      if (ev.touches.length > 0) return;
+      lastY = null;
+      carry = 0;
+      consuming = false;
+      setTouchAction(mouseActive());
+    };
+    el.addEventListener('touchend', end, { passive: true, signal });
+    el.addEventListener('touchcancel', end, { passive: true, signal });
+  }
+
   private sendData(data: string): void {
     this.session?.sendData(data);
   }
@@ -1902,6 +2030,8 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private disposeTerminal(): void {
+    this._touchScrollAbort?.abort();
+    this._touchScrollAbort = null;
     this.terminalStyle?.remove();
     this.terminalStyle = null;
     if (this.terminal) {
