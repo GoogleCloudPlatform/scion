@@ -14,35 +14,16 @@
  * limitations under the License.
  */
 
-/**
- * Scion Theme Configuration
- *
- * Integrates with Shoelace and provides light/dark mode support.
- * CSS custom properties follow the --scion- prefix convention.
- *
- * Selector specificity note:
- * Shoelace's light.css (:root, :host, .sl-theme-light) and dark.css
- * (:host, .sl-theme-dark) declare custom properties at specificity (0, 1, 0).
- * Depending on whether Vite runs in dev mode or preloads a lazy Shoelace chunk
- * in production, Shoelace's stylesheets may appear before or after theme.css in
- * document.head. Qualifying with `html` (html:root at (0, 1, 1) for light and
- * html:root.sl-theme-dark / html:root[data-theme='dark'] at (0, 2, 1) for dark)
- * guarantees Scion's mappings win regardless of stylesheet load order.
- */
+/* Scion Theme Configuration (--scion-* tokens + Shoelace theme integration).
+   Qualifying root selectors with `html` beats Shoelace's (0, 1, 0) theme rules
+   regardless of stylesheet load order in dev or lazy chunk preloads. */
 
-/* ==========================================================================
-   Light Theme (Default)
-   ========================================================================== */
-
+/* Light Theme (Default) */
 html:root,
 :host,
 html .sl-theme-light,
 .sl-theme-light {
   color-scheme: light;
-
-  /* -------------------------------------------------------------------------
-     Color Palette
-     ------------------------------------------------------------------------- */
 
   /* Primary - Blue */
   --scion-primary-50: #eff6ff;
@@ -109,40 +90,31 @@ html .sl-theme-light,
   --scion-neutral-900: #0f172a;
   --scion-neutral-950: #020617;
 
-  /* -------------------------------------------------------------------------
-     Semantic Colors (Light Mode)
-     ------------------------------------------------------------------------- */
-
-  /* Primary brand colors */
+  /* Semantic Colors (Light Mode) */
   --scion-primary: var(--scion-primary-500);
   --scion-primary-hover: var(--scion-primary-600);
   --scion-primary-active: var(--scion-primary-700);
   --scion-primary-text: #ffffff;
 
-  /* Backgrounds */
   --scion-bg: var(--scion-neutral-50);
   --scion-bg-subtle: var(--scion-neutral-100);
   --scion-surface: #ffffff;
   --scion-surface-raised: #ffffff;
 
-  /* Text colors */
   --scion-text: var(--scion-neutral-800);
   --scion-text-secondary: var(--scion-neutral-600);
   --scion-text-muted: var(--scion-neutral-500);
   --scion-text-disabled: var(--scion-neutral-400);
 
-  /* Borders */
   --scion-border: var(--scion-neutral-200);
   --scion-border-hover: var(--scion-neutral-300);
   --scion-border-active: var(--scion-primary-500);
 
-  /* Status colors */
   --scion-status-success: var(--scion-success-500);
   --scion-status-warning: var(--scion-warning-500);
   --scion-status-danger: var(--scion-danger-500);
   --scion-status-info: var(--scion-primary-500);
 
-  /* Status badge colors (light mode) */
   --scion-badge-success-bg: var(--scion-success-100);
   --scion-badge-success-text: var(--scion-success-800);
   --scion-badge-warning-bg: var(--scion-warning-100);
@@ -155,7 +127,6 @@ html .sl-theme-light,
   --scion-badge-neutral-bg: var(--scion-neutral-200);
   --scion-badge-neutral-text: var(--scion-neutral-800);
 
-  /* Callout / notice banner colors (light mode; text also AA-safe standalone on bg/surface) */
   --scion-error-bg: var(--scion-danger-50);
   --scion-error-border: var(--scion-danger-300);
   --scion-error-text: var(--scion-danger-800);
@@ -166,13 +137,11 @@ html .sl-theme-light,
   --scion-warning-border: var(--scion-warning-300);
   --scion-warning-text: var(--scion-warning-800);
 
-  /* Action-button subtle hover fills (light mode) */
   --scion-action-hover-danger-bg: rgba(239, 68, 68, 0.1);
   --scion-action-hover-warning-bg: rgba(245, 158, 11, 0.1);
   --scion-action-hover-success-bg: rgba(34, 197, 94, 0.1);
   --scion-action-hover-primary-bg: rgba(59, 130, 246, 0.1);
 
-  /* Review editor marks, comment badges and comment quotes: text on its own background (AA in both themes) */
   --scion-review-ins-text: #166534;
   --scion-review-ins-bg: #dcfce7;
   --scion-review-ins-line: #16a34a;
@@ -186,24 +155,16 @@ html .sl-theme-light,
   --scion-review-note-bg: #ede9fe;
   --scion-review-note-line: #8b5cf6;
 
-  /* Shadows */
   --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --scion-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
   --scion-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
   --scion-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
 
-  /* -------------------------------------------------------------------------
-     Layout
-     ------------------------------------------------------------------------- */
-
+  /* Layout, Typography, Radius, Spacing & Transitions */
   --scion-sidebar-width: 260px;
   --scion-sidebar-collapsed-width: 64px;
   --scion-header-height: 60px;
   --scion-content-max-width: 1400px;
-
-  /* -------------------------------------------------------------------------
-     Typography
-     ------------------------------------------------------------------------- */
 
   --scion-font-sans:
     'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
@@ -220,20 +181,12 @@ html .sl-theme-light,
   --scion-font-size-2xl: 1.5rem;
   --scion-font-size-3xl: 2rem;
 
-  /* -------------------------------------------------------------------------
-     Border Radius
-     ------------------------------------------------------------------------- */
-
   --scion-radius-sm: 0.25rem;
   --scion-radius: 0.5rem;
   --scion-radius-md: 0.5rem;
   --scion-radius-lg: 0.75rem;
   --scion-radius-xl: 1rem;
   --scion-radius-full: 9999px;
-
-  /* -------------------------------------------------------------------------
-     Spacing
-     ------------------------------------------------------------------------- */
 
   --scion-space-1: 0.25rem;
   --scion-space-2: 0.5rem;
@@ -245,19 +198,11 @@ html .sl-theme-light,
   --scion-space-10: 2.5rem;
   --scion-space-12: 3rem;
 
-  /* -------------------------------------------------------------------------
-     Transitions
-     ------------------------------------------------------------------------- */
-
   --scion-transition-fast: 150ms ease;
   --scion-transition-normal: 250ms ease;
   --scion-transition-slow: 350ms ease;
 
-  /* -------------------------------------------------------------------------
-     Shoelace Overrides - Map Scion theme to Shoelace variables (Light Mode)
-     ------------------------------------------------------------------------- */
-
-  /* Primary colors */
+  /* Shoelace Overrides (Light Mode) */
   --sl-color-primary-50: var(--scion-primary-50);
   --sl-color-primary-100: var(--scion-primary-100);
   --sl-color-primary-200: var(--scion-primary-200);
@@ -270,7 +215,6 @@ html .sl-theme-light,
   --sl-color-primary-900: var(--scion-primary-900);
   --sl-color-primary-950: var(--scion-primary-950);
 
-  /* Success colors */
   --sl-color-success-50: var(--scion-success-50);
   --sl-color-success-100: var(--scion-success-100);
   --sl-color-success-200: var(--scion-success-200);
@@ -283,7 +227,6 @@ html .sl-theme-light,
   --sl-color-success-900: var(--scion-success-900);
   --sl-color-success-950: var(--scion-success-950);
 
-  /* Warning colors */
   --sl-color-warning-50: var(--scion-warning-50);
   --sl-color-warning-100: var(--scion-warning-100);
   --sl-color-warning-200: var(--scion-warning-200);
@@ -296,7 +239,6 @@ html .sl-theme-light,
   --sl-color-warning-900: var(--scion-warning-900);
   --sl-color-warning-950: var(--scion-warning-950);
 
-  /* Danger colors */
   --sl-color-danger-50: var(--scion-danger-50);
   --sl-color-danger-100: var(--scion-danger-100);
   --sl-color-danger-200: var(--scion-danger-200);
@@ -309,7 +251,6 @@ html .sl-theme-light,
   --sl-color-danger-900: var(--scion-danger-900);
   --sl-color-danger-950: var(--scion-danger-950);
 
-  /* Neutral colors */
   --sl-color-neutral-0: #ffffff;
   --sl-color-neutral-50: var(--scion-neutral-50);
   --sl-color-neutral-100: var(--scion-neutral-100);
@@ -324,53 +265,32 @@ html .sl-theme-light,
   --sl-color-neutral-950: var(--scion-neutral-900);
   --sl-color-neutral-1000: var(--scion-neutral-900);
 
-  /* Panel, input, focus & tooltip surfaces */
   --sl-panel-background-color: var(--sl-color-neutral-0);
   --sl-panel-border-color: var(--sl-color-neutral-200);
-  --sl-input-background-color: var(--sl-color-neutral-0);
-  --sl-input-background-color-disabled: var(--sl-color-neutral-100);
   --sl-input-border-color: var(--sl-color-neutral-300);
   --sl-input-border-color-hover: var(--sl-color-neutral-400);
   --sl-input-border-color-focus: var(--sl-color-primary-500);
   --sl-input-border-color-disabled: var(--sl-color-neutral-300);
-  --sl-input-color: var(--sl-color-neutral-700);
-  --sl-input-color-hover: var(--sl-color-neutral-700);
-  --sl-input-color-focus: var(--sl-color-neutral-700);
-  --sl-input-color-disabled: var(--sl-color-neutral-900);
-  --sl-input-icon-color: var(--sl-color-neutral-500);
-  --sl-input-icon-color-hover: var(--sl-color-neutral-600);
-  --sl-input-icon-color-focus: var(--sl-color-neutral-600);
-  --sl-input-placeholder-color: var(--sl-color-neutral-500);
-  --sl-input-placeholder-color-disabled: var(--sl-color-neutral-600);
   --sl-input-help-text-color: var(--sl-color-neutral-500);
   --sl-input-filled-background-color: var(--sl-color-neutral-100);
   --sl-input-filled-background-color-hover: var(--sl-color-neutral-100);
   --sl-input-filled-background-color-focus: var(--sl-color-neutral-100);
-  --sl-input-filled-background-color-disabled: var(--sl-color-neutral-100);
   --sl-input-filled-color: var(--sl-color-neutral-800);
-  --sl-input-filled-color-hover: var(--sl-color-neutral-800);
-  --sl-input-filled-color-focus: var(--sl-color-neutral-700);
-  --sl-input-filled-color-disabled: var(--sl-color-neutral-800);
   --sl-focus-ring-color: var(--sl-color-primary-600);
   --sl-overlay-background-color: rgba(15, 23, 42, 0.33);
   --sl-tooltip-background-color: var(--sl-color-neutral-800);
   --sl-tooltip-color: var(--sl-color-neutral-0);
 
-  /* Typography */
   --sl-font-sans: var(--scion-font-sans);
   --sl-font-mono: var(--scion-font-mono);
 
-  /* Border radius */
   --sl-border-radius-small: var(--scion-radius-sm);
   --sl-border-radius-medium: var(--scion-radius);
   --sl-border-radius-large: var(--scion-radius-lg);
   --sl-border-radius-x-large: var(--scion-radius-xl);
 }
 
-/* ==========================================================================
-   Dark Theme
-   ========================================================================== */
-
+/* Dark Theme */
 .sl-theme-dark,
 html:root.sl-theme-dark,
 html:root[data-theme='dark'],
@@ -379,43 +299,31 @@ html .sl-theme-dark,
 [data-theme='dark'] {
   color-scheme: dark;
 
-  /* -------------------------------------------------------------------------
-     Semantic Colors (Dark Mode)
-     ------------------------------------------------------------------------- */
-
-  /* Primary brand colors - slightly brighter for dark mode */
   --scion-primary: var(--scion-primary-400);
   --scion-primary-hover: var(--scion-primary-300);
   --scion-primary-active: var(--scion-primary-500);
   --scion-primary-text: var(--scion-neutral-900);
-
-  /* Primary tint for backgrounds (selected items, user bubbles) */
   --scion-primary-50: rgba(59, 130, 246, 0.15);
 
-  /* Backgrounds - dark mode */
   --scion-bg: var(--scion-neutral-900);
   --scion-bg-subtle: var(--scion-neutral-800);
   --scion-surface: var(--scion-neutral-800);
   --scion-surface-raised: var(--scion-neutral-700);
 
-  /* Text colors - light text on dark */
   --scion-text: var(--scion-neutral-100);
   --scion-text-secondary: var(--scion-neutral-300);
   --scion-text-muted: var(--scion-neutral-400);
   --scion-text-disabled: var(--scion-neutral-500);
 
-  /* Borders - subtle for dark mode */
   --scion-border: var(--scion-neutral-700);
   --scion-border-hover: var(--scion-neutral-600);
   --scion-border-active: var(--scion-primary-400);
 
-  /* Status colors - slightly adjusted for dark mode */
   --scion-status-success: var(--scion-success-400);
   --scion-status-warning: var(--scion-warning-400);
   --scion-status-danger: var(--scion-danger-400);
   --scion-status-info: var(--scion-primary-400);
 
-  /* Status badge colors (dark mode) */
   --scion-badge-success-bg: rgba(34, 197, 94, 0.2);
   --scion-badge-success-text: #86efac;
   --scion-badge-warning-bg: rgba(245, 158, 11, 0.2);
@@ -428,7 +336,6 @@ html .sl-theme-dark,
   --scion-badge-neutral-bg: rgba(100, 116, 139, 0.2);
   --scion-badge-neutral-text: #cbd5e1;
 
-  /* Callout / notice banner colors (dark mode; text also AA-safe standalone on bg/surface) */
   --scion-error-bg: rgba(239, 68, 68, 0.15);
   --scion-error-border: rgba(248, 113, 113, 0.4);
   --scion-error-text: var(--scion-danger-300);
@@ -439,13 +346,11 @@ html .sl-theme-dark,
   --scion-warning-border: rgba(251, 191, 36, 0.4);
   --scion-warning-text: var(--scion-warning-300);
 
-  /* Action-button subtle hover fills (dark mode) */
   --scion-action-hover-danger-bg: rgba(239, 68, 68, 0.2);
   --scion-action-hover-warning-bg: rgba(245, 158, 11, 0.2);
   --scion-action-hover-success-bg: rgba(34, 197, 94, 0.2);
   --scion-action-hover-primary-bg: rgba(59, 130, 246, 0.2);
 
-  /* Review editor marks, comment badges and comment quotes: text on its own background (AA in both themes) */
   --scion-review-ins-text: #bbf7d0;
   --scion-review-ins-bg: #14532d;
   --scion-review-ins-line: #4ade80;
@@ -459,21 +364,12 @@ html .sl-theme-dark,
   --scion-review-note-bg: #4c1d95;
   --scion-review-note-line: #a78bfa;
 
-  /* Shadows - stronger opacity for dark mode */
   --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
   --scion-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);
   --scion-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.4);
   --scion-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.4);
 
-  /* -------------------------------------------------------------------------
-     Shoelace Overrides - Inverted Scales for Dark Mode
-     Shoelace expects 0..1000 and 50..950 scales to run dark -> light in dark
-     mode so filled buttons/badges (neutral-0 on *-600), default/outline
-     buttons & inputs (neutral-600/700 on neutral-0/surface), panels, alerts,
-     and subtle *-50/*-800 tags & callouts all meet WCAG AA contrast.
-     ------------------------------------------------------------------------- */
-
-  /* Primary colors (inverted; 900/950 use #eff6ff because --scion-primary-50 is translucent in dark mode) */
+  /* Shoelace Dark Mode Inverted Scales */
   --sl-color-primary-50: var(--scion-primary-900);
   --sl-color-primary-100: var(--scion-primary-800);
   --sl-color-primary-200: var(--scion-primary-700);
@@ -486,7 +382,6 @@ html .sl-theme-dark,
   --sl-color-primary-900: #eff6ff;
   --sl-color-primary-950: #eff6ff;
 
-  /* Success colors (inverted) */
   --sl-color-success-50: var(--scion-success-900);
   --sl-color-success-100: var(--scion-success-800);
   --sl-color-success-200: var(--scion-success-700);
@@ -499,7 +394,6 @@ html .sl-theme-dark,
   --sl-color-success-900: var(--scion-success-50);
   --sl-color-success-950: var(--scion-success-50);
 
-  /* Warning colors (inverted) */
   --sl-color-warning-50: var(--scion-warning-900);
   --sl-color-warning-100: var(--scion-warning-800);
   --sl-color-warning-200: var(--scion-warning-700);
@@ -512,7 +406,6 @@ html .sl-theme-dark,
   --sl-color-warning-900: var(--scion-warning-50);
   --sl-color-warning-950: var(--scion-warning-50);
 
-  /* Danger colors (inverted) */
   --sl-color-danger-50: var(--scion-danger-900);
   --sl-color-danger-100: var(--scion-danger-800);
   --sl-color-danger-200: var(--scion-danger-700);
@@ -525,7 +418,6 @@ html .sl-theme-dark,
   --sl-color-danger-900: var(--scion-danger-50);
   --sl-color-danger-950: var(--scion-danger-50);
 
-  /* Neutral colors (inverted) */
   --sl-color-neutral-0: var(--scion-neutral-800);
   --sl-color-neutral-50: var(--scion-neutral-900);
   --sl-color-neutral-100: var(--scion-neutral-800);
@@ -540,46 +432,24 @@ html .sl-theme-dark,
   --sl-color-neutral-950: var(--scion-neutral-50);
   --sl-color-neutral-1000: var(--scion-neutral-50);
 
-  /* Panel, input, focus & tooltip surfaces */
   --sl-panel-background-color: var(--scion-surface);
   --sl-panel-border-color: var(--scion-border);
-  --sl-input-background-color: var(--sl-color-neutral-0);
-  --sl-input-background-color-disabled: var(--sl-color-neutral-50);
   --sl-input-border-color: var(--sl-color-neutral-400);
   --sl-input-border-color-hover: var(--sl-color-neutral-500);
   --sl-input-border-color-focus: var(--sl-color-primary-600);
-  --sl-input-border-color-disabled: var(--sl-color-neutral-300);
-  --sl-input-color: var(--sl-color-neutral-700);
-  --sl-input-color-hover: var(--sl-color-neutral-700);
-  --sl-input-color-focus: var(--sl-color-neutral-700);
-  --sl-input-color-disabled: var(--sl-color-neutral-500);
-  --sl-input-icon-color: var(--sl-color-neutral-500);
-  --sl-input-icon-color-hover: var(--sl-color-neutral-600);
-  --sl-input-icon-color-focus: var(--sl-color-neutral-600);
-  --sl-input-placeholder-color: var(--sl-color-neutral-500);
-  --sl-input-placeholder-color-disabled: var(--sl-color-neutral-400);
+  --sl-input-border-color-disabled: var(--sl-color-neutral-400);
   --sl-input-help-text-color: var(--sl-color-neutral-600);
   --sl-input-filled-background-color: var(--scion-surface-raised);
   --sl-input-filled-background-color-hover: var(--scion-surface-raised);
   --sl-input-filled-background-color-focus: var(--scion-surface-raised);
-  --sl-input-filled-background-color-disabled: var(--sl-color-neutral-100);
   --sl-input-filled-color: var(--sl-color-neutral-800);
-  --sl-input-filled-color-hover: var(--sl-color-neutral-800);
-  --sl-input-filled-color-focus: var(--sl-color-neutral-700);
-  --sl-input-filled-color-disabled: var(--sl-color-neutral-600);
   --sl-focus-ring-color: var(--sl-color-primary-700);
   --sl-overlay-background-color: rgba(0, 0, 0, 0.43);
-
-  /* Give tooltips a light surface with dark text so they stand out against the dark page. */
   --sl-tooltip-background-color: var(--scion-neutral-100);
   --sl-tooltip-color: var(--scion-neutral-900);
 }
 
-/* ==========================================================================
-   Utility Classes
-   ========================================================================== */
-
-/* Status colors */
+/* Utility Classes */
 .scion-status-running {
   color: var(--scion-status-success);
 }
@@ -596,7 +466,6 @@ html .sl-theme-dark,
   color: var(--scion-status-danger);
 }
 
-/* Text utilities */
 .scion-text-muted {
   color: var(--scion-text-muted);
 }
@@ -605,7 +474,6 @@ html .sl-theme-dark,
   color: var(--scion-text-secondary);
 }
 
-/* Surface utilities */
 .scion-surface {
   background: var(--scion-surface);
   border: 1px solid var(--scion-border);
@@ -619,22 +487,16 @@ html .sl-theme-dark,
   box-shadow: var(--scion-shadow);
 }
 
-/* Focus ring */
 .scion-focus-ring:focus,
 .scion-focus-ring:focus-visible {
   outline: 2px solid var(--scion-primary);
   outline-offset: 2px;
 }
 
-/* ==========================================================================
-   Media Queries for Theme Preference
-   ========================================================================== */
-
+/* System Dark Preference (1:1 parity with .sl-theme-dark) */
 @media (prefers-color-scheme: dark) {
   html:root:not([data-theme='light']),
   :root:not([data-theme='light']) {
-    /* Apply dark theme colors when system prefers dark and user hasn't forced light.
-       Kept in 1:1 parity with the explicit dark block above. */
     color-scheme: dark;
 
     --scion-primary: var(--scion-primary-400);
@@ -771,33 +633,17 @@ html .sl-theme-dark,
 
     --sl-panel-background-color: var(--scion-surface);
     --sl-panel-border-color: var(--scion-border);
-    --sl-input-background-color: var(--sl-color-neutral-0);
-    --sl-input-background-color-disabled: var(--sl-color-neutral-50);
     --sl-input-border-color: var(--sl-color-neutral-400);
     --sl-input-border-color-hover: var(--sl-color-neutral-500);
     --sl-input-border-color-focus: var(--sl-color-primary-600);
-    --sl-input-border-color-disabled: var(--sl-color-neutral-300);
-    --sl-input-color: var(--sl-color-neutral-700);
-    --sl-input-color-hover: var(--sl-color-neutral-700);
-    --sl-input-color-focus: var(--sl-color-neutral-700);
-    --sl-input-color-disabled: var(--sl-color-neutral-500);
-    --sl-input-icon-color: var(--sl-color-neutral-500);
-    --sl-input-icon-color-hover: var(--sl-color-neutral-600);
-    --sl-input-icon-color-focus: var(--sl-color-neutral-600);
-    --sl-input-placeholder-color: var(--sl-color-neutral-500);
-    --sl-input-placeholder-color-disabled: var(--sl-color-neutral-400);
+    --sl-input-border-color-disabled: var(--sl-color-neutral-400);
     --sl-input-help-text-color: var(--sl-color-neutral-600);
     --sl-input-filled-background-color: var(--scion-surface-raised);
     --sl-input-filled-background-color-hover: var(--scion-surface-raised);
     --sl-input-filled-background-color-focus: var(--scion-surface-raised);
-    --sl-input-filled-background-color-disabled: var(--sl-color-neutral-100);
     --sl-input-filled-color: var(--sl-color-neutral-800);
-    --sl-input-filled-color-hover: var(--sl-color-neutral-800);
-    --sl-input-filled-color-focus: var(--sl-color-neutral-700);
-    --sl-input-filled-color-disabled: var(--sl-color-neutral-600);
     --sl-focus-ring-color: var(--sl-color-primary-700);
     --sl-overlay-background-color: rgba(0, 0, 0, 0.43);
-
     --sl-tooltip-background-color: var(--scion-neutral-100);
     --sl-tooltip-color: var(--scion-neutral-900);
   }
