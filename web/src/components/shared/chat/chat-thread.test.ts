@@ -5316,6 +5316,7 @@ describe('scion-chat-thread inter-agent day-split markers', () => {
   async function mountAgentDM(opts: {
     history?: Array<Record<string, unknown>>;
     interagent?: Message[];
+    projectId?: string;
   }): Promise<ScionChatThread> {
     apiFetch.mockImplementation((url: unknown) => {
       const u = String(url);
@@ -5336,6 +5337,7 @@ describe('scion-chat-thread inter-agent day-split markers', () => {
     const el = document.createElement('scion-chat-thread') as ScionChatThread;
     el.conversationKey = 'dm:agent:coder';
     el.isDM = true;
+    if (opts.projectId !== undefined) el.projectId = opts.projectId;
     document.body.appendChild(el);
     await vi.waitFor(() => {
       const internals = el as unknown as { interagentMessages: Message[] };
@@ -5633,6 +5635,59 @@ describe('scion-chat-thread inter-agent day-split markers', () => {
     } finally {
       setPreferredTimeZone('');
     }
+  });
+
+  it('determines inter-agent cross-project tags from message provenance, not the inherited DM projectId (ptone/scion#8273)', async () => {
+    const el = await mountAgentDM({
+      // Simulate opening an agent DM while viewing an unrelated project.
+      projectId: 'proj-viewed-other',
+      interagent: [
+        makeIaMessage({
+          id: 'ia-same',
+          createdAt: new Date(2026, 0, 15, 9, 0).toISOString(),
+          sender: 'agent:alpha',
+          senderProjectId: 'proj-aaaa-1111',
+          recipient: 'agent:beta',
+          recipientProjectId: 'proj-aaaa-1111',
+        }),
+        makeIaMessage({
+          id: 'ia-cross',
+          createdAt: new Date(2026, 0, 16, 9, 0).toISOString(),
+          sender: 'agent:alpha',
+          senderProjectId: 'proj-aaaa-1111',
+          recipient: 'agent:gamma',
+          recipientProjectId: 'proj-bbbb-2222',
+        }),
+      ],
+    });
+
+    const markers = Array.from(el.shadowRoot!.querySelectorAll('scion-chat-interagent-marker'));
+    expect(markers).toHaveLength(2);
+    const [sameMarker, crossMarker] = markers;
+
+    // Collapsed pills: same-project marker has no tag; cross-project marker has tag.
+    expect(sameMarker.shadowRoot?.querySelector('.ia-cross-project')).toBeNull();
+    expect(crossMarker.shadowRoot?.querySelector('.ia-cross-project')?.textContent).toMatch(
+      /1\s+cross-project/
+    );
+
+    // Expanded rows: same-project has plain names and no tag; cross-project has prefixes and tag.
+    (el as unknown as { interagentExpandAll: boolean }).interagentExpandAll = true;
+    await el.updateComplete;
+    await (sameMarker as unknown as { updateComplete: Promise<boolean> }).updateComplete;
+    await (crossMarker as unknown as { updateComplete: Promise<boolean> }).updateComplete;
+
+    expect(sameMarker.shadowRoot?.querySelector('.ia-cross-project')).toBeNull();
+    expect(sameMarker.shadowRoot?.querySelector('.ia-sender')?.textContent).toBe('alpha');
+    expect(sameMarker.shadowRoot?.querySelector('.ia-recipient')?.textContent).toBe('beta');
+
+    expect(crossMarker.shadowRoot?.querySelector('.ia-cross-project')).toBeTruthy();
+    expect(crossMarker.shadowRoot?.querySelector('.ia-sender')?.textContent).toBe(
+      'proj-aaa / alpha'
+    );
+    expect(crossMarker.shadowRoot?.querySelector('.ia-recipient')?.textContent).toBe(
+      'proj-bbb / gamma'
+    );
   });
 });
 
