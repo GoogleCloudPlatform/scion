@@ -488,3 +488,231 @@ echo '{"ID":"abc123","Names":"proj--agent1","Status":"Up 5 minutes","Image":"sci
 		t.Fatalf("expected singleflight to collapse %d concurrent calls into 1 exec, got %d", callers, got)
 	}
 }
+
+func TestDockerRuntime_PullImage_ClassifiesLaunchFailures(t *testing.T) {
+	cases := []struct {
+		name      string
+		image     string
+		stderr    string
+		wantCode  string
+		wantTyped bool
+	}{
+		{
+			name:      "missing tag",
+			image:     "example.com/scion/agent:no-such-tag",
+			stderr:    "Error response from daemon: manifest for example.com/scion/agent:no-such-tag not found: manifest unknown: manifest unknown",
+			wantCode:  api.LaunchCodeImagePullFailed,
+			wantTyped: true,
+		},
+		{
+			name:      "unreachable registry",
+			image:     "registry.invalid:5000/scion/agent:v1",
+			stderr:    `Error response from daemon: Get "https://registry.invalid:5000/v2/": dial tcp: lookup registry.invalid: no such host`,
+			wantCode:  api.LaunchCodeImagePullFailed,
+			wantTyped: true,
+		},
+		{
+			name:      "pull access denied",
+			image:     "example.com/private/agent:v1",
+			stderr:    "Error response from daemon: pull access denied for example.com/private/agent, repository does not exist or may require 'docker login': denied: requested access to the resource is denied",
+			wantCode:  api.LaunchCodeImagePullFailed,
+			wantTyped: true,
+		},
+		{
+			name:      "malformed reference",
+			image:     "INVALID::IMAGE",
+			stderr:    "invalid reference format",
+			wantCode:  api.LaunchCodeInvalidImage,
+			wantTyped: true,
+		},
+		{
+			name:      "uppercase repository reference",
+			image:     "Example.com/UpperCase/Agent:v1",
+			stderr:    "invalid reference format: repository name must be lowercase",
+			wantCode:  api.LaunchCodeInvalidImage,
+			wantTyped: true,
+		},
+		{
+			name:      "whitespace in image reference",
+			image:     "example.com/bad image:v1",
+			stderr:    "invalid argument",
+			wantCode:  api.LaunchCodeInvalidImage,
+			wantTyped: true,
+		},
+		{
+			name:      "daemon unreachable stays untyped",
+			image:     "example.com/scion/agent:v1",
+			stderr:    "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+			wantTyped: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			mockDocker := filepath.Join(tmpDir, "mock-docker")
+			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %s >&2\nexit 1\n", shellQuote(tc.stderr))
+			if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
+				t.Fatalf("failed to write mock docker: %v", err)
+			}
+
+			var steps []string
+			ctx := WithLaunchProgress(context.Background(), func(step, message string) {
+				steps = append(steps, step+": "+message)
+			})
+
+			rt := &DockerRuntime{Command: mockDocker}
+			err := rt.PullImage(ctx, tc.image)
+			if err == nil {
+				t.Fatal("expected PullImage to fail, got nil")
+			}
+
+			wantProgress := api.LaunchStepImagePull + ": pulling the image"
+			if len(steps) != 1 || steps[0] != wantProgress {
+				t.Errorf("progress steps = %v, want [%q]", steps, wantProgress)
+			}
+
+			var lf *LaunchFailure
+			if !tc.wantTyped {
+				if errors.As(err, &lf) {
+					t.Fatalf("expected untyped error, got LaunchFailure %+v", lf)
+				}
+				return
+			}
+			if !errors.As(err, &lf) {
+				t.Fatalf("expected *LaunchFailure, got %T: %v", err, err)
+			}
+			if lf.Code != tc.wantCode {
+				t.Errorf("LaunchFailure.Code = %q, want %q", lf.Code, tc.wantCode)
+			}
+			if lf.Step != api.LaunchStepImagePull {
+				t.Errorf("LaunchFailure.Step = %q, want %q", lf.Step, api.LaunchStepImagePull)
+			}
+			if lf.Reason != "" {
+				t.Errorf("LaunchFailure.Reason = %q, want empty (must not leak free text)", lf.Reason)
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("pull %q:", tc.image)) {
+				t.Errorf("error text %q lost pull prefix", err.Error())
+			}
+		})
+	}
+
+	t.Run("successful pull reports step", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mockDocker := filepath.Join(tmpDir, "mock-docker")
+		if err := os.WriteFile(mockDocker, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+			t.Fatalf("failed to write mock docker: %v", err)
+		}
+		var steps []string
+		ctx := WithLaunchProgress(context.Background(), func(step, message string) {
+			steps = append(steps, step+": "+message)
+		})
+		rt := &DockerRuntime{Command: mockDocker}
+		if err := rt.PullImage(ctx, "example.com/scion/agent:v1"); err != nil {
+			t.Fatalf("PullImage: %v", err)
+		}
+		wantProgress := api.LaunchStepImagePull + ": pulling the image"
+		if len(steps) != 1 || steps[0] != wantProgress {
+			t.Errorf("progress steps = %v, want [%q]", steps, wantProgress)
+		}
+	})
+
+	t.Run("missing binary stays untyped", func(t *testing.T) {
+		rt := &DockerRuntime{Command: filepath.Join(t.TempDir(), "no-such-docker")}
+		err := rt.PullImage(context.Background(), "example.com/scion/agent:v1")
+		if err == nil {
+			t.Fatal("expected error for missing binary")
+		}
+		var lf *LaunchFailure
+		if errors.As(err, &lf) {
+			t.Fatalf("expected untyped error for missing binary, got %+v", lf)
+		}
+	})
+}
+
+func TestDockerRuntime_Run_ClassifiesImageFailuresAndReportsPullStep(t *testing.T) {
+	cases := []struct {
+		name      string
+		image     string
+		stderr    string
+		wantCode  string
+		wantStep  string
+		wantTyped bool
+	}{
+		{
+			name:      "missing tag during run",
+			image:     "example.com/scion/agent:missing",
+			stderr:    "Unable to find image 'example.com/scion/agent:missing' locally\ndocker: Error response from daemon: manifest for example.com/scion/agent:missing not found: manifest unknown: manifest unknown.",
+			wantCode:  api.LaunchCodeImagePullFailed,
+			wantStep:  api.LaunchStepImagePull,
+			wantTyped: true,
+		},
+		{
+			name:      "malformed reference during run",
+			image:     "INVALID::IMAGE",
+			stderr:    "docker: invalid reference format.",
+			wantCode:  api.LaunchCodeInvalidImage,
+			wantStep:  api.LaunchStepImagePull,
+			wantTyped: true,
+		},
+		{
+			name:      "non-image container failure stays untyped",
+			image:     "example.com/scion/agent:v1",
+			stderr:    "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist.",
+			wantTyped: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			mockDocker := filepath.Join(tmpDir, "mock-docker")
+			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %s >&2\nexit 125\n", shellQuote(tc.stderr))
+			if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
+				t.Fatalf("failed to write mock docker: %v", err)
+			}
+
+			var steps []string
+			rt := &DockerRuntime{Command: mockDocker}
+			cfg := RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        tc.image,
+				Task:         "hello",
+				Progress: func(step, message string) {
+					steps = append(steps, step+": "+message)
+				},
+			}
+
+			_, err := rt.Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("expected Run to fail, got nil")
+			}
+
+			var lf *LaunchFailure
+			if !tc.wantTyped {
+				if errors.As(err, &lf) {
+					t.Fatalf("expected untyped error, got LaunchFailure %+v", lf)
+				}
+				if len(steps) != 0 {
+					t.Fatalf("expected no image_pull progress step, got %v", steps)
+				}
+				return
+			}
+			if !errors.As(err, &lf) {
+				t.Fatalf("expected *LaunchFailure, got %T: %v", err, err)
+			}
+			if lf.Code != tc.wantCode {
+				t.Errorf("LaunchFailure.Code = %q, want %q", lf.Code, tc.wantCode)
+			}
+			if lf.Step != tc.wantStep {
+				t.Errorf("LaunchFailure.Step = %q, want %q", lf.Step, tc.wantStep)
+			}
+			wantProgress := api.LaunchStepImagePull + ": pulling the image"
+			if len(steps) != 1 || steps[0] != wantProgress {
+				t.Errorf("progress steps = %v, want [%q]", steps, wantProgress)
+			}
+		})
+	}
+}

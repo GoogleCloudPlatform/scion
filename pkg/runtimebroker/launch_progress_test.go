@@ -652,7 +652,9 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		code, step, reason, want string
 	}{
 		{api.LaunchCodeImagePullFailed, api.LaunchStepContainerCreate, "ErrImagePull", "the agent image could not be pulled (ErrImagePull)"},
+		{api.LaunchCodeImagePullFailed, api.LaunchStepImagePull, "", "the agent image could not be pulled"},
 		{api.LaunchCodeInvalidImage, api.LaunchStepContainerCreate, "InvalidImageName", "the agent image reference is not valid (InvalidImageName)"},
+		{api.LaunchCodeInvalidImage, api.LaunchStepImagePull, "", "the agent image reference is not valid"},
 		{api.LaunchCodeContainerConfig, api.LaunchStepContainerCreate, "CreateContainerConfigError", "the agent container could not be configured (CreateContainerConfigError)"},
 		{api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, "CrashLoopBackOff", "the agent container keeps crashing on start (CrashLoopBackOff)"},
 		{api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, "Error", "an init container of the agent pod failed (Error)"},

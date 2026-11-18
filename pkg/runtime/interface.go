@@ -331,6 +331,8 @@ func launchStepMessage(step string) string {
 		return "running init containers"
 	case api.LaunchStepContainerCreate:
 		return "preparing the container (image pull, volume mounts)"
+	case api.LaunchStepImagePull:
+		return "pulling the image"
 	case api.LaunchStepContainerStart:
 		return "starting the container"
 	case api.LaunchStepHomeSync:
@@ -404,6 +406,28 @@ func (h launchHooks) progress(step string) {
 		return
 	}
 	h.progressFn(step, launchStepMessage(step))
+}
+
+type launchProgressKey struct{}
+
+// WithLaunchProgress attaches an async launch's Progress hook to ctx so
+// runtime calls made before Run (such as PullImage) can report launch steps.
+// A nil fn returns ctx unchanged.
+func WithLaunchProgress(ctx context.Context, fn func(step, message string)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, launchProgressKey{}, fn)
+}
+
+// reportLaunchProgress reports step with its fixed launchStepMessage to the
+// Progress hook carried on ctx, if any.
+func reportLaunchProgress(ctx context.Context, step string) {
+	fn, _ := ctx.Value(launchProgressKey{}).(func(string, string))
+	if fn == nil {
+		return
+	}
+	fn(step, launchStepMessage(step))
 }
 
 // checkpoint is called immediately before a resource-creating call. A
