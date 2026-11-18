@@ -149,6 +149,7 @@ type ReviewOpenEntry struct {
 
 // openReview is one principal's open review: its sessions collapsed.
 type openReview struct {
+	kind, id     string // principal kind and id, never sent to a client
 	ref          string // PrincipalRef, never sent to a client
 	lastActivity time.Time
 	dirty        bool
@@ -181,7 +182,7 @@ func openReviews(sessions []ReviewSession, currentSeq int, publisherKind, publis
 		ref := PrincipalRef(rs.PrincipalKind, rs.PrincipalRef)
 		o := byRef[ref]
 		if o == nil {
-			o = &openReview{ref: ref}
+			o = &openReview{kind: rs.PrincipalKind, id: rs.PrincipalRef, ref: ref}
 			byRef[ref] = o
 		}
 		if activity.After(o.lastActivity) {
@@ -200,6 +201,57 @@ func openReviews(sessions []ReviewSession, currentSeq int, publisherKind, publis
 		return out[i].ref < out[j].ref
 	})
 	return out
+}
+
+// readableOpenReviews drops any open review whose principal can no longer
+// read artifact a, evaluated through the one read rule (canReadWith) via
+// RecipientAuthority (ptone/scion#7650). A host without RecipientAuthority,
+// or a lookup failure for a reviewer, drops the unverified review so a
+// principal without verified current read access is neither counted nor
+// named, and a failed presence lookup never holds publishes.
+func (s *Service) readableOpenReviews(ctx context.Context, b backend, a *Artifact, reviews []openReview) []openReview {
+	if len(reviews) == 0 {
+		return nil
+	}
+	auth, ok := s.host.(RecipientAuthority)
+	if !ok {
+		return nil
+	}
+	var (
+		grantsLoaded bool
+		grants       []Grant
+		grantsErr    error
+	)
+	loadGrants := func() ([]Grant, error) {
+		if !grantsLoaded {
+			grants, grantsErr = b.store.ListGrants(ctx, a.ID)
+			grantsLoaded = true
+		}
+		return grants, grantsErr
+	}
+	kept := make([]openReview, 0, len(reviews))
+	for _, o := range reviews {
+		if o.kind == "" || o.id == "" {
+			continue
+		}
+		subject, err := auth.ResolveRecipient(ctx, o.kind, o.id)
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: resolving open reviewer failed", "error", err)
+			continue
+		}
+		if subject == nil {
+			continue
+		}
+		rh := &recipientHost{kind: o.kind, ref: o.id, subject: subject}
+		if !canReadWith(ctx, rh, a, loadGrants) || rh.err != nil {
+			if rh.err != nil {
+				slog.WarnContext(ctx, "artifacts: checking open reviewer access failed", "error", rh.err)
+			}
+			continue
+		}
+		kept = append(kept, o)
+	}
+	return kept
 }
 
 // reviewOpenEntries names the first maxReviewOpenListed reviews, and
@@ -264,6 +316,7 @@ func (s *Service) checkOpenReviews(w http.ResponseWriter, r *http.Request, b bac
 		return nil, true
 	}
 	reviews := openReviews(sessions, a.CurrentSeq, kind, ref, now)
+	reviews = s.readableOpenReviews(ctx, b, a, reviews)
 	if len(reviews) == 0 {
 		return nil, true
 	}

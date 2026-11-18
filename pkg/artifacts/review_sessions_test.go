@@ -30,10 +30,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// openReviewHost adds the optional FeatureGate and PrincipalNamer to the
-// test host.
+// openReviewHost adds the optional FeatureGate, PrincipalNamer and
+// RecipientAuthority to the test host.
 type openReviewHost struct {
-	*fakeHost
+	*fakeRecipientHost
 	gateMu sync.Mutex
 	on     bool
 	names  map[string]string
@@ -61,10 +61,31 @@ func (h *openReviewHost) PrincipalDisplayNames(_ context.Context, refs []string)
 	return out
 }
 
-// gateOnlyHost has the feature gate (always on) but no namer.
-type gateOnlyHost struct{ *fakeHost }
+// gateOnlyHost has the feature gate (always on) and RecipientAuthority, but
+// no namer.
+type gateOnlyHost struct{ *fakeRecipientHost }
 
 func (gateOnlyHost) FeatureEnabled(context.Context, string) bool { return true }
+
+// gateWithoutAuthorityHost has the feature gate and a namer, but no
+// RecipientAuthority: it cannot check whether a reviewer still reads the
+// artifact, so it drops every open-review session (fail closed).
+type gateWithoutAuthorityHost struct {
+	*fakeHost
+	names map[string]string
+}
+
+func (gateWithoutAuthorityHost) FeatureEnabled(context.Context, string) bool { return true }
+
+func (h gateWithoutAuthorityHost) PrincipalDisplayNames(_ context.Context, refs []string) map[string]string {
+	out := map[string]string{}
+	for _, r := range refs {
+		if n, ok := h.names[r]; ok {
+			out[r] = n
+		}
+	}
+	return out
+}
 
 // readerR reads project-1 artifacts through the home scope grant and holds
 // no grant on the fixture's artifact: it may neither publish to it nor
@@ -79,9 +100,12 @@ func newOpenReviewFixture(t *testing.T) (*fixture, *openReviewHost, string) {
 	t.Helper()
 	f := newFixture(t, false)
 	f.host.allow(readerR, "project-1", PermissionRead, PermissionCreate)
-	h := &openReviewHost{fakeHost: f.host, on: true, names: map[string]string{
-		PrincipalRef(userU.kind, userU.ref):   "Una User",
-		PrincipalRef(agentB.kind, agentB.ref): "builder-agent",
+	rh := &fakeRecipientHost{fakeHost: f.host, unknown: map[string]bool{}}
+	h := &openReviewHost{fakeRecipientHost: rh, on: true, names: map[string]string{
+		PrincipalRef(userU.kind, userU.ref):     "Una User",
+		PrincipalRef(outside.kind, outside.ref): "Ollie Outside",
+		PrincipalRef(agentB.kind, agentB.ref):   "builder-agent",
+		PrincipalRef(agentX.kind, agentX.ref):   "external-agent",
 	}}
 	f.svc.host = h
 	id := f.publish(agentA, "doc.md", []byte("# Doc\n"), "").Artifact.ID
@@ -543,10 +567,12 @@ func TestOpenReviewExperimentOff(t *testing.T) {
 }
 
 // TestOpenReviewHostWithoutExtensions: without a namer every reviewer is
-// "a reviewer"; without a gate the feature is off (fail closed).
+// "a reviewer"; without RecipientAuthority no reviewer can be verified to
+// still read the artifact so none is counted or named (fail closed); without
+// a gate the feature is off (fail closed).
 func TestOpenReviewHostWithoutExtensions(t *testing.T) {
-	f, _, id := newOpenReviewFixture(t)
-	f.svc.host = gateOnlyHost{f.host}
+	f, h, id := newOpenReviewFixture(t)
+	f.svc.host = gateOnlyHost{h.fakeRecipientHost}
 	if rec := f.beat(&userU, id, sidA, dirtyBeat); rec.Code != http.StatusOK {
 		t.Fatal(rec.Code)
 	}
@@ -554,6 +580,11 @@ func TestOpenReviewHostWithoutExtensions(t *testing.T) {
 	body := decodeInto[reviewOpenBody](t, rec)
 	if rec.Code != http.StatusConflict || len(body.Error.Details.Reviews) != 1 || body.Error.Details.Reviews[0].Reviewer != unnamedReviewer {
 		t.Errorf("no namer: %d %s", rec.Code, rec.Body.String())
+	}
+	f.svc.host = gateWithoutAuthorityHost{fakeHost: f.host, names: h.names}
+	rec = f.postJSON(&agentA, "/api/v1/artifacts/"+id+"/versions", publishV2(false))
+	if rec.Code != http.StatusCreated {
+		t.Errorf("no RecipientAuthority, publish: %d %s, want 201", rec.Code, rec.Body.String())
 	}
 	f.svc.host = f.host
 	if rec := f.beat(&userU, id, sidA, dirtyBeat); rec.Code != http.StatusNotFound {
@@ -570,6 +601,7 @@ func TestOpenReviewTruncatesAndOrders(t *testing.T) {
 	now := time.Now().UTC()
 	for i := 0; i < maxReviewOpenListed+2; i++ {
 		ref := "reviewer-" + strconv.Itoa(i)
+		f.host.allow(principal{PrincipalKindUser, ref, ""}, "project-1", PermissionRead)
 		h.names[PrincipalRef(PrincipalKindUser, ref)] = "Reviewer " + strconv.Itoa(i)
 		started := now.Add(-time.Duration(20-i) * time.Minute)
 		if err := f.store.TouchReviewSession(ctx, ReviewSession{ArtifactID: id, PrincipalKind: PrincipalKindUser,
@@ -597,6 +629,145 @@ func TestOpenReviewTruncatesAndOrders(t *testing.T) {
 	if w := decodeInto[PendingVersionResponse](t, rec).Warnings; len(w) != 1 || !strings.HasSuffix(w[0], "and 2 more)") ||
 		!strings.HasPrefix(w[0], "published while 7 reviews were open (") {
 		t.Errorf("forced warnings %q", w)
+	}
+}
+
+// TestOpenReviewDropsAndRestoresAccess checks that open-review evaluation
+// drops any session whose principal can no longer read the artifact (neither
+// counting nor naming it in 409 review_open details.reviews, forced warnings
+// or the version_forced count) and counts and names the session again when
+// read access is restored (ptone/scion#7650).
+func TestOpenReviewDropsAndRestoresAccess(t *testing.T) {
+	f, h, id := newOpenReviewFixture(t)
+	c := captureLog(f, slog.LevelInfo)
+	target := "/api/v1/artifacts/" + id + "/versions"
+
+	// Give outside (not in project-1) a review grant and PermissionCreate
+	// permit (default in fakeHost unless denied), and open sessions for both
+	// outside and userU.
+	f.addGrant(id, outside, GrantReview)
+	if rec := f.beat(&outside, id, sidA, dirtyBeat); rec.Code != http.StatusOK {
+		t.Fatalf("outside beat: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.beat(&userU, id, sidA, dirtyBeat); rec.Code != http.StatusOK {
+		t.Fatalf("userU beat: %d %s", rec.Code, rec.Body.String())
+	}
+	c.take(t)
+
+	// Both reviewers currently read the artifact: 2 reviews are reported.
+	rec := f.postJSON(&agentA, target, publishV2(false))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("both readable: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	body := decodeInto[reviewOpenBody](t, rec)
+	if len(body.Error.Details.Reviews) != 2 || !strings.HasPrefix(body.Error.Message, "2 reviews of this artifact are open") {
+		t.Fatalf("both readable: %+v", body.Error)
+	}
+
+	// Remove outside's grant: outside can no longer read the artifact, so
+	// outside is dropped from both the count and the open-review list
+	// returned to the client; userU remains.
+	f.execSQL(`DELETE FROM artifact_grant WHERE artifact_id = ? AND subject_ref = ?`, id, PrincipalRef(outside.kind, outside.ref))
+	if getRec := f.do(&outside, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); getRec.Code != http.StatusNotFound {
+		t.Fatalf("outside GET after grant removal: %d, want 404", getRec.Code)
+	}
+	rec = f.postJSON(&agentA, target, publishV2(false))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("one readable left: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	body = decodeInto[reviewOpenBody](t, rec)
+	if len(body.Error.Details.Reviews) != 1 || body.Error.Details.Reviews[0].Reviewer != "Una User" {
+		t.Errorf("after outside lost access, reviews = %+v, want [Una User]", body.Error.Details.Reviews)
+	}
+	if !strings.HasPrefix(body.Error.Message, "1 review of this artifact is open") {
+		t.Errorf("message after outside lost access: %q", body.Error.Message)
+	}
+	if strings.Contains(rec.Body.String(), "Ollie Outside") || strings.Contains(rec.Body.String(), outside.ref) {
+		t.Errorf("refusal still names revoked reviewer: %s", rec.Body.String())
+	}
+
+	// Regain access: restoring read access (even via a read grant, while the
+	// session row is still live) makes outside's open session count and
+	// appear again without needing a new heartbeat.
+	f.addGrant(id, outside, GrantRead)
+	rec = f.postJSON(&agentA, target, publishV2(false))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("after outside regained read access: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	body = decodeInto[reviewOpenBody](t, rec)
+	if len(body.Error.Details.Reviews) != 2 || !strings.HasPrefix(body.Error.Message, "2 reviews of this artifact are open") {
+		t.Errorf("after outside regained read access: %+v", body.Error)
+	}
+
+	// Lose access via principal deactivation / deletion (ResolveRecipient -> nil),
+	// then regain when active again.
+	h.unknown[outside.ref] = true
+	rec = f.postJSON(&agentA, target, publishV2(false))
+	body = decodeInto[reviewOpenBody](t, rec)
+	if rec.Code != http.StatusConflict || len(body.Error.Details.Reviews) != 1 || body.Error.Details.Reviews[0].Reviewer != "Una User" {
+		t.Errorf("inactive reviewer kept: %d %s", rec.Code, rec.Body.String())
+	}
+	delete(h.unknown, outside.ref)
+	rec = f.postJSON(&agentA, target, publishV2(false))
+	body = decodeInto[reviewOpenBody](t, rec)
+	if rec.Code != http.StatusConflict || len(body.Error.Details.Reviews) != 2 {
+		t.Errorf("reactivated reviewer missing: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Lose access for all open reviewers (outside loses grant; userU loses
+	// home-project read and its review grant): publish is NOT blocked, names
+	// nobody, and writes no version_forced log entry even with force.
+	f.execSQL(`DELETE FROM artifact_grant WHERE artifact_id = ? AND subject_kind = ?`, id, SubjectPrincipal)
+	f.host.mu.Lock()
+	delete(f.host.perms, PrincipalRef(userU.kind, userU.ref))
+	f.host.mu.Unlock()
+	c.take(t)
+
+	rec = f.postJSON(&agentA, target, publishV2(false))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("publish when no reviewer has read access: %d %s, want 201", rec.Code, rec.Body.String())
+	}
+	pend := decodeInto[PendingVersionResponse](t, rec)
+	if len(pend.Warnings) != 0 {
+		t.Errorf("warnings when no reviewer has read access: %q", pend.Warnings)
+	}
+	if rec := f.put(agentA, id, pend.Version.Seq, "doc.md", []byte("# Doc v2\n")); rec.Code != http.StatusNoContent {
+		t.Fatalf("upload v2: %d", rec.Code)
+	}
+	if rec := f.finalize(agentA, id, pend.Version.Seq); rec.Code != http.StatusOK {
+		t.Fatalf("finalize v2: %d %s", rec.Code, rec.Body.String())
+	}
+	entries, raw := c.take(t)
+	for _, e := range entries {
+		if e[logKeyAction] == logActionVersionForced {
+			t.Errorf("unexpected %s log when all open reviewers lost access: %v", logActionVersionForced, e)
+		}
+	}
+	if strings.Contains(raw, "Ollie Outside") || strings.Contains(raw, "Una User") {
+		t.Errorf("log mentions dropped reviewers: %s", raw)
+	}
+
+	// Regain access on v2: agentX (other project) gets a write grant, opens
+	// a session on v2, loses credential permit, then regains it.
+	f.addGrant(id, agentX, GrantWrite)
+	if rec := f.beat(&agentX, id, sidA, `{"base":2,"edited":true,"dirty":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("agentX beat on v2: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.postJSON(&agentA, target, publishV2(false)); rec.Code != http.StatusConflict {
+		t.Fatalf("agentX readable: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	f.host.deny(agentX, "project-1", PermissionRead)
+	if rec := f.postJSON(&agentA, target, publishV2(true)); rec.Code != http.StatusCreated ||
+		len(decodeInto[PendingVersionResponse](t, rec).Warnings) != 0 {
+		t.Errorf("forced publish when agentX credential denies read: %d %s, want 201 with no warnings", rec.Code, rec.Body.String())
+	}
+	f.host.mu.Lock()
+	delete(f.host.denied, PrincipalRef(agentX.kind, agentX.ref)+" project-1 "+PermissionRead)
+	f.host.mu.Unlock()
+	rec = f.postJSON(&agentA, target, publishV2(false))
+	body = decodeInto[reviewOpenBody](t, rec)
+	if rec.Code != http.StatusConflict || len(body.Error.Details.Reviews) != 1 || body.Error.Details.Reviews[0].Reviewer != "external-agent" {
+		t.Errorf("agentX after regaining credential read: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

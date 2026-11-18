@@ -239,11 +239,16 @@ func TestDirectUserRecipient(t *testing.T) {
 // moduleFuncKey names a function by its file's path from the module root.
 type moduleFuncKey struct{ path, function string }
 
-// recipientCheckSymbols are the warning-only recipient check entry points,
-// each with the only functions in the module that may call it.
+// recipientCheckSymbols are the advisory named-principal check entry points
+// (the send-time recipient warning and the open-review access filter), each
+// with the only functions in the module that may call it.
 var recipientCheckSymbols = map[string]map[moduleFuncKey]bool{
 	"RecipientMayNotRead": {{"pkg/hub/message_artifacts.go", "artifactRecipientWarning"}: true},
-	"ResolveRecipient":    {{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}: true},
+	"ResolveRecipient": {
+		{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}:       true,
+		{"pkg/artifacts/review_sessions.go", "readableOpenReviews"}: true,
+	},
+	"readableOpenReviews": {{"pkg/artifacts/review_sessions.go", "checkOpenReviews"}: true},
 	"recipientIdentity":   {{"pkg/hub/artifacts_recipient.go", "ResolveRecipient"}: true},
 	"agentChainAllowsErr": {
 		{"pkg/hub/artifacts_host.go", "agentChainAllows"}: true,

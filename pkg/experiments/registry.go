@@ -893,7 +893,7 @@ var compiled = []Experiment{
 	{
 		Name:        ArtifactsOpenReviewCheck,
 		Title:       "Warn publishers about open reviews",
-		Description: "Review mode on the artifact page reports that a review is open, and a publish that would overtake an open review of the current version is refused with 409 review_open, naming the reviewers and their last activity, until the publisher publishes anyway (force). Needs hub.artifacts. While off, the review-session routes answer 404, force is ignored and publishing behaves as before. Do not turn it on, on any hub, before the filter that drops reviewers who lost access to the artifact has landed (ptone/scion#6849).",
+		Description: "Review mode on the artifact page reports that a review is open, and a publish that would overtake an open review of the current version is refused with 409 review_open, naming the reviewers and their last activity, until the publisher publishes anyway (force); sessions of principals who can no longer read the artifact are ignored. Needs hub.artifacts. While off, the review-session routes answer 404, force is ignored and publishing behaves as before.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,

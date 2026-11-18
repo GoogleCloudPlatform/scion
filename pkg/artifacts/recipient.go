@@ -28,17 +28,18 @@ import (
 // a named recipient. A recipient still reads a reference only through
 // ResolveRefs under its own credential.
 
-// RecipientAuthority is an optional extension of Host for the send-time
-// recipient warning. Unlike every Host method it answers for a named
-// principal (kind, ref) rather than for the caller of ctx: the recipient of
-// a message has no credential in the sender's request. It is consulted only
-// by RecipientMayNotRead, whose answer is a count shown to the sender.
+// RecipientAuthority is an optional extension of Host for non-access-granting
+// read checks about a named principal (kind, ref) rather than the caller of
+// ctx: the send-time recipient warning (RecipientMayNotRead, ptone/scion#4575)
+// and the open-review access filter (readableOpenReviews, ptone/scion#7650),
+// where neither the message recipient nor a prior reviewer has a credential
+// in the caller's request. Nothing built from it ever grants access or
+// serves content.
 type RecipientAuthority interface {
 	// ResolveRecipient looks the principal up once, for every question
-	// one RecipientMayNotRead call asks about it. It returns a nil subject
-	// and no error for an unknown kind or an unknown, deleted or inactive
-	// principal (which can read nothing), and an error only when a lookup
-	// failed.
+	// one check asks about it. It returns a nil subject and no error for
+	// an unknown kind or an unknown, deleted or inactive principal (which
+	// can read nothing), and an error only when a lookup failed.
 	ResolveRecipient(ctx context.Context, kind, ref string) (RecipientSubject, error)
 }
 
