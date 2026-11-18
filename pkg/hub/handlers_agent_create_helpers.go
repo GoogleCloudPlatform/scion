@@ -1857,24 +1857,27 @@ func (s *Server) handleExistingAgent(
 		}
 		// This removes existingAgent unless a delete holds it, the same way
 		// the main delete handler does, just reached via env-gather
-		// re-provisioning rather than an explicit DELETE — so it must revoke
-		// with the same reason too (ptone/scion#1956), before the row is gone
-		// and before the fall-through create below mints a credential for the
-		// new agent row's own (distinct) ID.
+		// re-provisioning rather than an explicit DELETE — so it revokes with
+		// the same reason first (ptone/scion#1956), including when a concurrent
+		// delete holds the row below after the broker teardown above ran.
 		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
 		// The row is removed the way a create rollback removes its row
 		// (compensateAgentCreate): conditionally, in one transaction that
 		// reads the row (locked where supported), removes it, checks that no
-		// delete holds it (createRowHeldCheck) and then deactivates the
-		// agent's delegation edges, runs the hard-delete hooks and writes the
-		// agent_hard_delete audit record (hardDeleteAgentTx). A delete can
-		// claim the row after the start gate, while the broker delete above
-		// runs; when a delete holds the row, or the row is already gone or
-		// soft-deleted, the refused check rolls everything back and the row
-		// and its quotas are left to that delete: nothing is created and the
-		// answer is 409 delete_in_progress, as the start gate answers. A
-		// failed delete, or a deleting row whose lease lapsed, does not hold
-		// the row, so it is removed as before.
+		// delete holds it (createRowHeldCheck) and then revokes any remaining
+		// active credentials with reason agent_deleted, deactivates its
+		// delegation edges and service-account assignments, runs the
+		// hard-delete hooks and writes the agent_hard_delete audit record
+		// (hardDeleteAgentTx). Revoking inside the transaction ensures that a
+		// revoke failure rolls the row delete back before the fall-through
+		// create below can mint a credential for the new agent row's distinct
+		// ID. A delete can claim the row after the start gate, while the
+		// broker delete above runs; when a delete holds the row, or the row is
+		// already gone or soft-deleted, the refused check rolls everything
+		// back and the row and its quotas are left to that delete: nothing is
+		// created and the answer is 409 delete_in_progress, as the start gate
+		// answers. A failed delete, or a deleting row whose lease lapsed, does
+		// not hold the row, so it is removed as before.
 		actor := auditActorFromContext(ctx)
 		n, err := s.store.FinalizeAgentDeletion(lifecycleCreateRollback(ctx, "env_gather_recreate"), existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 			createRowHeldCheck(func(tx store.Store) error {

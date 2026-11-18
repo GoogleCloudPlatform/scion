@@ -304,8 +304,10 @@ var errCreateRowDeleteHeld = errors.New("agent row is held by a delete")
 // errCreateRowDeleteHeld.
 //
 // The caller passes a context detached from the request (see
-// cleanupFailedCreate). Credential revocation, the broker-side delete and
-// the quota release stay with the caller.
+// cleanupFailedCreate). Pre-delete credential revocation (for rollbacks that
+// keep the row), the broker-side delete and the quota release stay with the
+// caller; agentHardDeleteWork also revokes any remaining active credentials in
+// the row-delete transaction.
 func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation) error {
 	if c.Agent == nil {
 		return fmt.Errorf("%w: no agent to compensate", errAgentCreateWriteInvalid)

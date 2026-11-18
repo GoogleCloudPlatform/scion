@@ -1343,10 +1343,10 @@ func isCreateCleanupRefusedRow(a *store.Agent) bool {
 // errCreateRowDeleteHeld.
 //
 // Each attempt runs agentHardDeleteWork in the row delete's transaction:
-// the agent's delegation edges and service-account assignments are
-// deactivated with cause create_compensation under opID, and the
-// hard-delete hooks run, so the row is removed only together with them.
-// A failure there rolls the attempt back and keeps the row.
+// the agent's active credentials are revoked and its delegation edges and
+// service-account assignments are deactivated with cause create_compensation
+// under opID, and the hard-delete hooks run, so the row is removed only
+// together with them. A failure there rolls the attempt back and keeps the row.
 func (s *Server) deleteFailedCreateRow(ctx context.Context, agent *store.Agent, opID string) error {
 	agentID := agent.ID
 	actor := auditActorFromContext(ctx)

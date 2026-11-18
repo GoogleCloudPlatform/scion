@@ -134,15 +134,10 @@ func TestCreateAgent_CanceledRequest_FailureCleanupStillRuns(t *testing.T) {
 		gatherEnv bool
 		createErr error
 		envReqs   *RemoteEnvRequirementsResponse
-		// wantRevoked: only the missing-env path revokes in the cleanup. On
-		// a dispatch error the real dispatcher has already revoked (this mock
-		// does not), so the cleanup must leave the credential alone rather
-		// than revoke a second time.
-		wantRevoked bool
 	}{
 		{name: "dispatch failure", createErr: fmt.Errorf("simulated broker dispatch failure")},
 		{name: "gather-env dispatch failure", gatherEnv: true, createErr: fmt.Errorf("simulated broker dispatch failure")},
-		{name: "missing env vars", envReqs: &RemoteEnvRequirementsResponse{Needs: []string{"SOME_REQUIRED_KEY"}}, wantRevoked: true},
+		{name: "missing env vars", envReqs: &RemoteEnvRequirementsResponse{Needs: []string{"SOME_REQUIRED_KEY"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -179,14 +174,14 @@ func TestCreateAgent_CanceledRequest_FailureCleanupStillRuns(t *testing.T) {
 
 			assertNoReservations(t, s, agentID)
 
+			// Every hard-delete rollback revokes any remaining active
+			// credential in the row-delete transaction (agentHardDeleteWork),
+			// even when the dispatcher left one unrevoked and the request
+			// context was already canceled.
 			cred := getTestAgentCredential(t, s, disp.credJTI)
-			if tc.wantRevoked {
-				require.NotNil(t, cred.RevokedAt, "the missing-env cleanup must revoke the credential despite the canceled request")
-				require.NotNil(t, cred.RevokeReason)
-				assert.Equal(t, agentCredentialRevokeReasonCreateFailed, *cred.RevokeReason)
-			} else {
-				assert.Nil(t, cred.RevokedAt, "the cleanup must not revoke on a dispatch error: the dispatcher already did")
-			}
+			require.NotNil(t, cred.RevokedAt, "cleanup must revoke the credential despite the canceled request")
+			require.NotNil(t, cred.RevokeReason)
+			assert.Equal(t, agentCredentialRevokeReasonCreateFailed, *cred.RevokeReason)
 		})
 	}
 }
