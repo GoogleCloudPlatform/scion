@@ -210,6 +210,8 @@ func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmEr
 func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Agent) error {
 	ctx, cancel := context.WithTimeout(ctx, idleSuspendSettleBudget())
 	defer cancel()
+	ticker := time.NewTicker(scheduledWakePollInterval)
+	defer ticker.Stop()
 	for {
 		fresh, claimActive, err := s.store.MarkAgentDelivery(ctx, agent.ID)
 		if err != nil {
@@ -225,7 +227,7 @@ func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Ag
 		select {
 		case <-ctx.Done():
 			return errIdleSuspendInProgressNotSettled
-		case <-time.After(scheduledWakePollInterval):
+		case <-ticker.C:
 		}
 	}
 }

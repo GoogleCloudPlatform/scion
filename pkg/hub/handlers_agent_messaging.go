@@ -3348,7 +3348,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				}
 				var idleErr *errAgentIdleSuspending
 				if errors.As(err, &idleErr) {
-					dmErr := validateAgentDeliverable(idleErr.asSuspendedAgent())
+					dmErr := s.validateAgentDeliverable(idleErr.asSuspendedAgent())
 					if dmErr == nil {
 						dmErr = &AgentDMError{
 							Code:       ErrCodeAgentNotRunning,

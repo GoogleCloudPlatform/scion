@@ -2252,7 +2252,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	if primaryReincarnating || primaryUnreachable {
 		primaryDispatchOK = false
 	}
-	if primaryDispatchOK && !primaryReincarnating && !primaryUnreachable && dispatcher != nil {
+	if primaryDispatchOK && dispatcher != nil {
 		// withDispatchMessageID carries the hub message ID to the broker so a
 		// later buffered-delivery failure report (#1820) can mark this row
 		// failed even though this synchronous call returns nil (message_delivery_failures.go).
