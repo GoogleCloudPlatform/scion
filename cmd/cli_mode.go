@@ -205,11 +205,13 @@ var agentAllowed = map[string]bool{
 	"secret.list": true,
 
 	// Decision self-service as the calling agent (ptone/scion#7797,
-	// decision Q1). Hub routes enforce AgentIdentity and web.decisions.
-	"decisions":        true,
-	"decisions.list":   true,
-	"decisions.show":   true,
-	"decisions.record": true,
+	// decision Q1; withdraw ptone/scion#8190). Hub routes enforce
+	// AgentIdentity and web.decisions.
+	"decisions":          true,
+	"decisions.list":     true,
+	"decisions.show":     true,
+	"decisions.record":   true,
+	"decisions.withdraw": true,
 
 	// Event triggers and webhook endpoints (ptone/scion#8028, Stage 1 §12):
 	// Hub routes enforce hub.triggers and caller-scoped ownership for agents.

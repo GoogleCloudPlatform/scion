@@ -33,12 +33,12 @@ import (
 )
 
 func TestDecisionsCLIModesAndWindowsGate(t *testing.T) {
-	for _, path := range []string{"decisions", "decisions.list", "decisions.show", "decisions.record"} {
+	for _, path := range []string{"decisions", "decisions.list", "decisions.show", "decisions.record", "decisions.withdraw"} {
 		assert.True(t, agentAllowed[path], "agentAllowed[%q]", path)
 		assert.True(t, windowsAllowed[path], "windowsAllowed[%q]", path)
 	}
 
-	for _, sub := range []string{"list", "show", "record"} {
+	for _, sub := range []string{"list", "show", "record", "withdraw"} {
 		_, _, err := rootCmd.Find([]string{"decisions", sub})
 		assert.NoError(t, err, "decisions %s is registered on rootCmd", sub)
 	}
@@ -49,12 +49,13 @@ func TestDecisionsCLIModesAndWindowsGate(t *testing.T) {
 		root.AddCommand(dec)
 		applyModeRestrictions(root, mode)
 		names := collectCommandNames(root)
-		for _, path := range []string{"decisions", "decisions.list", "decisions.show", "decisions.record"} {
+		for _, path := range []string{"decisions", "decisions.list", "decisions.show", "decisions.record", "decisions.withdraw"} {
 			assert.Contains(t, names, path, "%s in %s mode", path, mode)
 		}
 		assert.True(t, containsLine(dec.Long, "scion decisions list"))
 		assert.True(t, containsLine(dec.Long, "scion decisions show <key>"))
 		assert.True(t, containsLine(dec.Long, "scion decisions record"))
+		assert.True(t, containsLine(dec.Long, "scion decisions withdraw"))
 	}
 
 	// Verify Windows platform gate leaves decisions and all subcommands runnable (not gated).
@@ -64,6 +65,7 @@ func TestDecisionsCLIModesAndWindowsGate(t *testing.T) {
 		{"decisions", "list"},
 		{"decisions", "show", "D234"},
 		{"decisions", "record", "D234", "1", "--from", "msg-1"},
+		{"decisions", "withdraw", "D234"},
 	} {
 		*ran = nil
 		winTree.SetArgs(args)
@@ -650,4 +652,144 @@ func TestDecisionsListAgent_SearchValidationPaginationAndErrors(t *testing.T) {
 	require.True(t, ok, helpText)
 	assert.Contains(t, flagsSection, "-q, --search")
 	assert.NotContains(t, flagsSection, "--conversation")
+}
+
+func TestDecisionsWithdraw_OutputIdempotencyErrorsAndModes(t *testing.T) {
+	var captured []hubclient.WithdrawDecisionsRequest
+	serverMode := "ok"
+	alreadyDone := map[string]bool{}
+	withdrawHits := 0
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/decisions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if serverMode == "exp_off" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"route not found"}}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+			Items: []hubclient.AgentDecisionListItem{},
+		})
+	})
+	mux.HandleFunc("/api/v1/agent/decisions/withdraw", func(w http.ResponseWriter, r *http.Request) {
+		withdrawHits++
+		w.Header().Set("Content-Type", "application/json")
+		switch serverMode {
+		case "exp_off":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"route not found"}}`))
+			return
+		case "old_hub_404_json":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"route not found"}}`))
+			return
+		case "old_hub_404_plain":
+			http.NotFound(w, r)
+			return
+		case "old_hub_405":
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_, _ = w.Write([]byte(`{"error":{"code":"method_not_allowed","message":"Method not allowed"}}`))
+			return
+		case "conflict_409":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":"withdraw_failed","message":"17: already answered by alice (yes); NOPE: decision not found","details":{"failures":[{"key":"17","reason":"already_answered","decision":{"key":"17","version":1,"status":"decided","decision":{"choiceId":"1","label":"yes","answeredByName":"alice","provenance":"direct"}}},{"key":"NOPE","reason":"decision_not_found","message":"NOPE: decision not found"}]}}}`))
+			return
+		}
+
+		var req hubclient.WithdrawDecisionsRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		captured = append(captured, req)
+
+		var resp hubclient.WithdrawDecisionsResponse
+		resp.Withdrawn = []hubclient.DecisionView{}
+		resp.AlreadyWithdrawn = []hubclient.DecisionView{}
+		for _, k := range req.Keys {
+			norm := messages.DecisionKeyNorm(k)
+			view := hubclient.DecisionView{
+				RowID:   "row-" + norm,
+				Key:     k,
+				Version: 1,
+				Status:  "withdrawn",
+				Withdrawn: &hubclient.DecisionWithdrawnView{
+					At:     time.Date(2026, 11, 18, 4, 0, 0, 0, time.UTC),
+					Reason: req.Reason,
+					ByName: "release-bot",
+				},
+			}
+			if alreadyDone[norm] {
+				resp.AlreadyWithdrawn = append(resp.AlreadyWithdrawn, view)
+			} else {
+				alreadyDone[norm] = true
+				resp.Withdrawn = append(resp.Withdrawn, view)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	withMockDecisionsServer(t, mux)
+
+	// 1. Human mode refuses before sending any HTTP request.
+	t.Setenv("SCION_CLI_MODE", "human")
+	_, err := runDecisionsTestCmd(t, "decisions", "withdraw", "D234")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "this command is for agents")
+	assert.Zero(t, withdrawHits)
+
+	// 2. Agent mode: validation rejects missing keys, duplicate keys, >10 keys, and --reason > 500 runes.
+	t.Setenv("SCION_CLI_MODE", "agent")
+	for _, badArgs := range [][]string{
+		{"decisions", "withdraw"},
+		{"decisions", "withdraw", "   "},
+		{"decisions", "withdraw", "D234", "d234"},
+		{"decisions", "withdraw", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11"},
+		{"decisions", "withdraw", "D234", "--reason", strings.Repeat("é", 501)},
+	} {
+		_, err := runDecisionsTestCmd(t, badArgs...)
+		require.Error(t, err, "args=%v", badArgs)
+		assert.True(t, isUsageError(err), "args=%v: %v", badArgs, err)
+	}
+	assert.Zero(t, withdrawHits, "client-side validation sends no HTTP request")
+
+	// 3. First withdrawal prints "<key> v1 withdrawn"; repeat prints "<key> v1 already withdrawn".
+	out1, err := runDecisionsTestCmd(t, "decisions", "withdraw", "D234", "--reason", "  CI found a regression  ")
+	require.NoError(t, err)
+	assert.Equal(t, "D234 v1 withdrawn\n", out1)
+	require.Len(t, captured, 1)
+	assert.Equal(t, []string{"D234"}, captured[0].Keys)
+	assert.Equal(t, "CI found a regression", captured[0].Reason)
+
+	out2, err := runDecisionsTestCmd(t, "decisions", "withdraw", "D234")
+	require.NoError(t, err)
+	assert.Equal(t, "D234 v1 already withdrawn\n", out2)
+
+	// 4. --json outputs the WithdrawDecisionsResponse payload.
+	jsonOut, err := runDecisionsTestCmd(t, "decisions", "withdraw", "17", "--json")
+	require.NoError(t, err)
+	var parsed hubclient.WithdrawDecisionsResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+	require.Len(t, parsed.Withdrawn, 1)
+	assert.Equal(t, "17", parsed.Withdrawn[0].Key)
+
+	// 5. 409 withdraw_failed prints one line per failed key and returns an error (exit 1).
+	serverMode = "conflict_409"
+	_, err = runDecisionsTestCmd(t, "decisions", "withdraw", "17", "NOPE")
+	require.Error(t, err)
+	assert.False(t, isUsageError(err))
+	assert.Equal(t, "17: already answered by alice (yes)\nNOPE: decision not found", err.Error())
+
+	// 6. Old hub (plain 404, JSON 404 while agent decisions list works, or 405 on POST /withdraw)
+	// reports the section 4.4 message.
+	for _, oldMode := range []string{"old_hub_404_plain", "old_hub_404_json", "old_hub_405"} {
+		serverMode = oldMode
+		_, err := runDecisionsTestCmd(t, "decisions", "withdraw", "D234")
+		require.Error(t, err, oldMode)
+		assert.Equal(t, "this hub does not support withdrawing decisions; update the hub", err.Error(), oldMode)
+	}
+
+	// 7. Experiment off (both /withdraw and /agent/decisions return 404 route not found)
+	// reports web.decisions experiment required.
+	serverMode = "exp_off"
+	_, err = runDecisionsTestCmd(t, "decisions", "withdraw", "D234")
+	require.Error(t, err)
+	assert.Equal(t, "decisions need the web.decisions experiment", err.Error())
 }

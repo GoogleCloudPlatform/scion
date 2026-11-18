@@ -47,12 +47,14 @@ Commands:
   scion decisions list [--waiting | --made] [--all-projects] [-q <text>]   List Decisions (human mode)
   scion decisions list [--pending | --decided | --all] [-q <text>]        List your agent's Decisions (agent mode)
   scion decisions show <key>                                               Show all versions and answers for a Decision (agent mode)
-  scion decisions record ... --from <message-id>                           Record interpreted answer(s) from a user reply (agent mode)`,
+  scion decisions record ... --from <message-id>                           Record interpreted answer(s) from a user reply (agent mode)
+  scion decisions withdraw <key>... [--reason <text>]                      Withdraw obsolete open Decision(s) (agent mode)`,
 	}
 	cmd.AddCommand(
 		newDecisionsListCmd(),
 		newDecisionsShowCmd(),
 		newDecisionsRecordCmd(),
+		newDecisionsWithdrawCmd(),
 	)
 	return cmd
 }
@@ -123,6 +125,21 @@ func formatDecisionAPIError(err error) error {
 	}
 	if apiErr.Code == "experiment_disabled" || (apiErr.StatusCode == http.StatusNotFound && apiErr.Code != "decision_not_found") {
 		return errors.New(errMsgDecisionsExperimentRequired)
+	}
+	if rawList, ok := apiErr.Details["failures"].([]interface{}); ok && len(rawList) > 0 {
+		var lines []string
+		for _, raw := range rawList {
+			entry, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if line := formatWithdrawFailureEntry(entry); line != "" {
+				lines = append(lines, line)
+			}
+		}
+		if len(lines) > 0 {
+			return errors.New(strings.Join(lines, "\n"))
+		}
 	}
 	if rawList, ok := apiErr.Details["errors"].([]interface{}); ok && len(rawList) > 0 {
 		var lines []string
