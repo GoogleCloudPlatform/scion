@@ -1228,3 +1228,76 @@ func TestTriggerFire_RuleEvalMetadataRoundTrip(t *testing.T) {
 	assert.Equal(t, "cel", listed.Items[0].DecidedDialect)
 	assert.Equal(t, traceJSON, listed.Items[0].RuleTrace)
 }
+
+func TestListTriggers_SourceIDsFilterForGitHubAndWebhookIsolation(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+	userID := uuid.NewString()
+
+	epA := uuid.NewString()
+	epB := uuid.NewString()
+
+	mkTrigger := func(name, sourceKind, sourceID string) string {
+		id := uuid.NewString()
+		matchType := "webhook.received"
+		if sourceKind == store.TriggerSourceKindGitHub {
+			matchType = "github.issue_comment.created"
+		}
+		tr := &store.Trigger{
+			ID:            id,
+			ProjectID:     projID,
+			Name:          name,
+			SourceKind:    sourceKind,
+			SourceID:      sourceID,
+			MatchTypes:    []string{matchType},
+			ActionType:    store.TriggerActionMessage,
+			ActionPayload: `{"agentId":"a1","message":"hi"}`,
+			CreatedBy:     userID,
+		}
+		require.NoError(t, cs.CreateTrigger(ctx, tr))
+		return id
+	}
+
+	ghWildcard := mkTrigger("gh-wildcard", store.TriggerSourceKindGitHub, "")
+	ghExact := mkTrigger("gh-exact", store.TriggerSourceKindGitHub, "424242")
+	_ = mkTrigger("gh-other", store.TriggerSourceKindGitHub, "999999")
+	whWildcard := mkTrigger("wh-empty", store.TriggerSourceKindWebhook, "")
+	whExactA := mkTrigger("wh-ep-a", store.TriggerSourceKindWebhook, epA)
+	_ = mkTrigger("wh-ep-b", store.TriggerSourceKindWebhook, epB)
+
+	// GitHub candidate query: source_kind == github AND source_id IN ('', inst).
+	ghRes, err := cs.ListTriggers(ctx, store.TriggerFilter{
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceIDs:  []string{"", "424242"},
+		Status:     store.TriggerStatusActive,
+	}, store.ListOptions{Limit: 50})
+	require.NoError(t, err)
+	gotGH := make([]string, 0, len(ghRes.Items))
+	for _, it := range ghRes.Items {
+		gotGH = append(gotGH, it.ID)
+	}
+	assert.ElementsMatch(t, []string{ghWildcard, ghExact}, gotGH)
+
+	ghCount, err := cs.CountTriggers(ctx, store.TriggerFilter{
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceIDs:  []string{"", "424242"},
+		Status:     store.TriggerStatusActive,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, ghCount)
+
+	// Webhook candidate query remains exact equality: SourceID == epA never matches "" or epB.
+	whRes, err := cs.ListTriggers(ctx, store.TriggerFilter{
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epA,
+		Status:     store.TriggerStatusActive,
+	}, store.ListOptions{Limit: 50})
+	require.NoError(t, err)
+	require.Len(t, whRes.Items, 1)
+	assert.Equal(t, whExactA, whRes.Items[0].ID)
+	assert.NotEqual(t, whWildcard, whRes.Items[0].ID)
+}

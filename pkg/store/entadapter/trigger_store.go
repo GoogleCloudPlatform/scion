@@ -659,6 +659,9 @@ func applyTriggerFilter(query *ent.TriggerQuery, filter store.TriggerFilter) err
 	if filter.SourceID != "" {
 		query.Where(trigger.SourceIDEQ(filter.SourceID))
 	}
+	if len(filter.SourceIDs) > 0 {
+		query.Where(trigger.SourceIDIn(filter.SourceIDs...))
+	}
 	if filter.Status != "" {
 		query.Where(trigger.StatusEQ(filter.Status))
 	}

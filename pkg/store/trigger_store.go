@@ -175,6 +175,7 @@ type TriggerFilter struct {
 	ProjectID          string
 	SourceKind         string
 	SourceID           string
+	SourceIDs          []string
 	Status             string
 	Name               string
 	InitiatorAgentID   string
