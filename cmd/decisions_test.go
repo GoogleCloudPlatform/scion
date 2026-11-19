@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -1061,4 +1062,21 @@ func TestDecisionsDismissed_AgentListShowAndWithdrawFailure(t *testing.T) {
 	_, err = runDecisionsTestCmd(t, "decisions", "withdraw", "D234")
 	require.Error(t, err)
 	assert.Equal(t, "D234: dismissed by alice", err.Error())
+}
+
+// TestDecisionDismissedSummary_TruncatesReasonOnlyInList pins that the list
+// table truncates a long dismiss reason like the withdrawn branch, while show
+// keeps the full reason.
+func TestDecisionDismissedSummary_TruncatesReasonOnlyInList(t *testing.T) {
+	reason := strings.Repeat("stale ", 40)
+	d := &hubclient.DecisionDismissedView{ByName: "alice", Reason: reason}
+
+	list := decisionDismissedSummary(d, decisionQuestionMaxWidth)
+	parts := strings.Split(list, " · ")
+	require.Len(t, parts, 3)
+	assert.Equal(t, truncateRunes(collapseSingleLine(reason), decisionQuestionMaxWidth, true), parts[2])
+	assert.LessOrEqual(t, utf8.RuneCountInString(parts[2]), decisionQuestionMaxWidth)
+
+	show := decisionDismissedSummary(d, 0)
+	assert.True(t, strings.HasSuffix(show, " · "+collapseSingleLine(reason)))
 }

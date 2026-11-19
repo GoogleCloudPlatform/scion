@@ -99,7 +99,9 @@ func decisionProvenanceDisplay(a *hubclient.DecisionAnswerView) string {
 	}
 }
 
-func decisionDismissedSummary(d *hubclient.DecisionDismissedView) string {
+// decisionDismissedSummary renders a dismissal as one line. maxReasonRunes > 0
+// truncates the reason (the list table); 0 keeps it whole (show).
+func decisionDismissedSummary(d *hubclient.DecisionDismissedView, maxReasonRunes int) string {
 	if d == nil {
 		return "dismissed"
 	}
@@ -109,6 +111,9 @@ func decisionDismissedSummary(d *hubclient.DecisionDismissedView) string {
 	}
 	summary := fmt.Sprintf("dismissed by %s · %s", who, clitime.Format(d.At, clitime.Minute))
 	if r := collapseSingleLine(d.Reason); r != "" {
+		if maxReasonRunes > 0 {
+			r = truncateRunes(r, maxReasonRunes, true)
+		}
 		summary += " · " + r
 	}
 	return summary

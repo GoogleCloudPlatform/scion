@@ -103,7 +103,7 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 			}
 		}
 		if v.Dismissed != nil {
-			_, _ = fmt.Fprintf(out, "  Dismissed:    %s\n", decisionDismissedSummary(v.Dismissed))
+			_, _ = fmt.Fprintf(out, "  Dismissed:    %s\n", decisionDismissedSummary(v.Dismissed, 0))
 		}
 		_, _ = fmt.Fprintln(out, "  Choices:")
 		for _, c := range v.Choices {

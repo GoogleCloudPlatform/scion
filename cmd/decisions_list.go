@@ -227,7 +227,7 @@ func writeDecisionsListTable(out io.Writer, items []hubclient.AgentDecisionListI
 		provenance := decisionProvenanceDisplay(it.Answer)
 		switch {
 		case it.Dismissed != nil:
-			answer = decisionDismissedSummary(it.Dismissed)
+			answer = decisionDismissedSummary(it.Dismissed, decisionQuestionMaxWidth)
 			if who := collapseSingleLine(it.Dismissed.ByName); who != "" {
 				answeredBy = who
 			}
