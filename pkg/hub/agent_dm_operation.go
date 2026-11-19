@@ -975,6 +975,37 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 	msgID := storeMsg.ID
 	return autoWakeItem{
 		deliver: func(ctx context.Context, woken *store.Agent) {
+			// Re-check that the persisted row is still in dispatch_state='pending'
+			// before dispatching (ptone/scion#7405): if a long serial auto-wake
+			// queue kept this item in flight past stuckMessageExpireTTL (or the
+			// recipient sweep already failed the row), do not deliver it late
+			// after the sender has already been notified.
+			var curMsg *store.Message
+			rerr := retryFinalization(ctx, func(finCtx context.Context) error {
+				var err error
+				curMsg, err = s.store.GetMessage(finCtx, msgID)
+				return err
+			})
+			if rerr != nil {
+				fctx, fcancel := finalizationContext(ctx)
+				defer fcancel()
+				s.finishAttachmentAddressee(fctx, input.AttachmentAddressee, rerr)
+				LogDMDispatchOutcome(input.SenderAgent, woken, msgID, DispatchFailed, rerr)
+				if !errors.Is(rerr, store.ErrNotFound) {
+					if markErr := s.markFailed(fctx, msgID, rerr.Error()); markErr != nil {
+						s.messageLog.Error("agent DM: failed to mark message failed",
+							"message_id", msgID, "error", markErr)
+					}
+				}
+				return
+			}
+			if curMsg == nil || curMsg.DispatchState != store.MessageDispatchPending {
+				fctx, fcancel := finalizationContext(ctx)
+				defer fcancel()
+				s.finishAttachmentAddressee(fctx, input.AttachmentAddressee, errors.New("message no longer pending before auto-wake dispatch"))
+				return
+			}
+
 			dctx, cancel := context.WithTimeout(ctx, agentDMDispatchTimeout)
 			defer cancel()
 			var err error

@@ -707,6 +707,97 @@ func TestAutoWake_Mention(t *testing.T) {
 		srv.waitAutoWakeIdle()
 		assert.Empty(t, disp.getStartCalls())
 	})
+
+	t.Run("expired pending row is not delivered late after auto-wake finishes", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s, faultStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *backdatePendingCreateStore {
+			return &backdatePendingCreateStore{Store: inner, fault: f, age: 11 * time.Minute}
+		})
+		setIdleSuspendExperiment(t, srv, true)
+
+		owner := &store.User{
+			ID: tid("aw-o1-owner"), Email: "aw-o1@test.example",
+			Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, owner))
+		ensureHubMembership(ctx, s, owner.ID)
+		proj := &store.Project{
+			ID: tid("aw-o1-proj"), Name: "aw-o1-proj", Slug: "aw-o1-proj",
+			OwnerID: owner.ID, CreatedBy: owner.ID,
+		}
+		require.NoError(t, s.CreateProject(ctx, proj))
+		ensureStandingRoot(t, s, proj.ID, owner.ID)
+		brokerID := tid("aw-o1-broker")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID: brokerID, Name: "aw-o1-broker", Slug: "aw-o1-broker", Status: store.BrokerStatusOnline,
+		}))
+		sender := &store.Agent{
+			ID: tid("aw-o1-sender"), Name: "aw-o1-sender", Slug: "aw-o1-sender",
+			ProjectID: proj.ID, Phase: string(state.PhaseRunning), RuntimeBrokerID: brokerID,
+			MessageMode: store.MessageModeProject, Ancestry: []string{owner.ID},
+		}
+		require.NoError(t, s.CreateAgent(ctx, sender))
+		target := &store.Agent{
+			ID: tid("aw-o1-target"), Name: "aw-o1-target", Slug: "aw-o1-target",
+			ProjectID: proj.ID, Phase: string(state.PhaseRunning), RuntimeBrokerID: brokerID,
+			MessageMode: store.MessageModeProject, Ancestry: []string{owner.ID},
+		}
+		require.NoError(t, s.CreateAgent(ctx, target))
+		awSuspendFor(t, s, target, state.SuspendReasonIdle)
+
+		disp := &wakeTrackingDispatcher{}
+		srv.SetDispatcher(disp)
+
+		parent := &store.Message{
+			ID: api.NewUUID(), ProjectID: sender.ProjectID, Sender: "agent:" + sender.Slug, SenderID: sender.ID,
+			Recipient: "agent:" + sender.Slug, RecipientID: sender.ID, Msg: "parent", Type: "instruction",
+			AgentID: sender.ID, CreatedAt: time.Now(), DispatchState: store.MessageDispatchDispatched,
+		}
+		require.NoError(t, s.CreateMessage(ctx, parent))
+		addrRow := srv.recordAttachmentAddressee(ctx, parent.ID, target.ID, "body-mention")
+		require.NotEmpty(t, addrRow)
+
+		// Backdate CreatedAt on the queued mention row so the sweep sees it as
+		// past the 10m stuckMessageExpireTTL while the background wake is still
+		// waiting on target readiness (ptone/scion#7405, review O1).
+		fault.Arm()
+		faultStore.backdate.Store(true)
+		in := awMentionInput(sender, target, "@target queued-past-ttl")
+		in.AttachmentAddressee = addrRow
+		res, dmErr := srv.ExecuteAgentDM(ctx, in)
+		faultStore.backdate.Store(false)
+		require.Nil(t, dmErr)
+		require.Equal(t, AgentDMWakeQueued, res.Outcome)
+
+		// Wait until runAutoWake has started resuming target and is waiting for readiness.
+		require.Eventually(t, func() bool {
+			return len(disp.getStartCalls()) == 1
+		}, 5*time.Second, 10*time.Millisecond, "background auto-wake must begin resume")
+
+		// Sweep expires the pending row while it is still queued behind the wake.
+		srv.brokerMessageSweepHandler()(ctx)
+		expiredRow, err := s.GetMessage(ctx, res.MessageID)
+		require.NoError(t, err)
+		require.Equal(t, store.MessageDispatchFailed, expiredRow.DispatchState)
+
+		// Mark target ready so runAutoWake proceeds to deliver.
+		require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseRunning), Activity: "idle",
+		}))
+		srv.waitAutoWakeIdle()
+
+		assert.Empty(t, disp.getMessageCalls(), "expired pending row must never be delivered late after auto-wake")
+		afterRow, err := s.GetMessage(ctx, res.MessageID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchFailed, afterRow.DispatchState)
+		require.NotNil(t, afterRow.DispatchFailureReason)
+		assert.Equal(t, store.MessageExpiredStuckPendingReason, *afterRow.DispatchFailureReason)
+
+		addrs, err := s.ListAddressees(ctx, parent.ID)
+		require.NoError(t, err)
+		require.Len(t, addrs, 1)
+		assert.Equal(t, addresseeFailed, addrs[0].DeliveryState, "attachment addressee must be settled as failed when row is no longer pending")
+	})
 }
 
 // --- User DM (handleAgentMessage) -------------------------------------------
