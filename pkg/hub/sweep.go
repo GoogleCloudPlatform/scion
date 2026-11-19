@@ -131,17 +131,19 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 		}
 
 		if len(expired) > 0 {
-			s.notifyExpiredPendingMessages(ctx, expired, store.MessageExpiredStuckPendingReason)
+			s.notifyExpiredPendingMessages(ctx, expired)
 		}
 	}
 }
 
 // notifyExpiredPendingMessages notifies the senders of pending messages that
 // ExpireAndListStuckPendingMessages transitioned to failed (ptone/scion#7405):
-// agent senders receive a DELIVERY_FAILED notice through MessageBrokerProxy,
-// and human senders get a live SSE failed-state update. Never redelivers to
+// agent senders receive a DELIVERY_UNCONFIRMED notice through
+// MessageBrokerProxy (because a pending row may have been delivered under AC-3
+// or AC-4, so claiming definite failure would cause duplicate resends), and
+// human senders get a live SSE delivery_unconfirmed update. Never redelivers to
 // the target agent.
-func (s *Server) notifyExpiredPendingMessages(ctx context.Context, expired []store.ExpiredPendingMessage, reason string) {
+func (s *Server) notifyExpiredPendingMessages(ctx context.Context, expired []store.ExpiredPendingMessage) {
 	if s.GetMessageBrokerProxy() == nil && s.events == nil {
 		return
 	}
@@ -168,7 +170,7 @@ func (s *Server) notifyExpiredPendingMessages(ctx context.Context, expired []sto
 			}
 		}
 		readCancel()
-		s.notifyStoredMessageSenderFailed(ctx, target, msg, reason)
+		s.notifyStoredMessageSenderUnconfirmed(ctx, target, msg)
 	}
 }
 

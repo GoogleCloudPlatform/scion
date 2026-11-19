@@ -1537,6 +1537,11 @@ const (
 	// (the agent looked reachable) but dispatchWithBrokerRetry returned an
 	// error synchronously.
 	dispatchFailureCodeDispatchError = "dispatch_error"
+	// dispatchFailureCodeDeliveryUnconfirmed is derived when a pending message
+	// row expired past stuckMessageExpireTTL (store.MessageExpiredStuckPendingReason,
+	// ptone/scion#7405): delivery may already have occurred (AC-3/AC-4), so UI
+	// surfaces must show "Delivery unconfirmed" rather than "Failed".
+	dispatchFailureCodeDeliveryUnconfirmed = "delivery_unconfirmed"
 )
 
 // dispatchFailureCodeFromReason derives a machine-readable dispatchFailureCode
@@ -1545,7 +1550,9 @@ const (
 // only thing available (nc-delivery-unreachable review R2, events.go
 // PublishUserMessage). Mirrors the frontend's own history-row fallback in
 // chat-message.ts renderDeliveryState: a reason with the "Agent unreachable"
-// prefix implies the agent_unreachable code. Anything else is left empty —
+// prefix implies the agent_unreachable code, and
+// store.MessageExpiredStuckPendingReason implies delivery_unconfirmed
+// (ptone/scion#7405). Anything else is left empty —
 // in particular the synchronous dispatch_error branch's raw dispatch-error
 // text, which does not follow this prefix and is out of scope here (its SSE
 // publish happens before that reason is even set; see the FYI note in the
@@ -1553,6 +1560,9 @@ const (
 func dispatchFailureCodeFromReason(reason string) string {
 	if strings.HasPrefix(reason, "Agent unreachable") {
 		return dispatchFailureCodeAgentUnreachable
+	}
+	if reason == store.MessageExpiredStuckPendingReason {
+		return dispatchFailureCodeDeliveryUnconfirmed
 	}
 	return ""
 }

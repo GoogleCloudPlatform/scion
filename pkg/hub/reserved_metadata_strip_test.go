@@ -39,6 +39,7 @@ var stripExemptions = map[stripSiteKey]string{
 	{"handlers_agent_messaging.go", "publishBroadcastDeliveryFailed"}: "hub-built delivery-failure notice to the original sender; no client metadata",
 	{"messagebroker.go", "publishDeliveryFailed"}:                     "hub-built delivery-failure notice to the original sender; no client metadata",
 	{"messagebroker.go", "publishDeliveryDeferred"}:                   "hub-built delivery-deferred notice to the original sender; no client metadata",
+	{"messagebroker.go", "publishDeliveryUnconfirmed"}:                "hub-built delivery-unconfirmed notice to the original sender; no client metadata",
 	{"artifacts_review.go", "deliverArtifactReview"}:                  "hub-built review notice to the artifact's owner; messages.NewSystemMessage carries no client metadata",
 	{"notifications.go", "dispatchToAgent"}:                           "hub-built notification fan-out; no client metadata",
 	{"action_message.go", "deliverMessageAction"}:                     "deferred message action; messages.NewSystemMessage carries no client metadata",

@@ -41,6 +41,7 @@ func TestHoldOrDispatchCallSites(t *testing.T) {
 		"handlers_agent_messaging.go:publishBroadcastDeliveryFailed:dispatchMarkedAgentMessage": "ephemeral delivery-failure notice to sender; no store.Message row",
 		"messagebroker.go:publishDeliveryFailed:dispatchMarkedAgentMessage":                     "ephemeral delivery-failure notice to sender; no store.Message row",
 		"messagebroker.go:publishDeliveryDeferred:dispatchMarkedAgentMessage":                   "ephemeral delivery-deferred notice to sender; no store.Message row",
+		"messagebroker.go:publishDeliveryUnconfirmed:dispatchMarkedAgentMessage":                "ephemeral delivery-unconfirmed notice to sender; no store.Message row",
 		"artifacts_review.go:deliverArtifactReview:dispatchWithBrokerRetry":                     "ephemeral artifact review system notice; no store.Message row",
 		"notifications.go:dispatchToAgent:dispatchWithBrokerRetry":                              "status/inbox notification fan-out (has its own notification_sweep retry); no store.Message row",
 		"notification_sweep.go:retryDispatch:dispatchWithBrokerRetry":                           "notification fan-out retry; no store.Message row",

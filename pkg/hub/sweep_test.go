@@ -22,10 +22,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -258,8 +260,10 @@ func TestBrokerMessageSweepHandler_ExpiresAfter10mAndLeavesYoungerPending(t *tes
 
 // TestBrokerMessageSweepHandler_ExpiredPendingNotifiesAgentAndUserSenders
 // verifies that expiring stuck pending messages notifies agent senders via a
-// DELIVERY_FAILED notice (naming the target agent, never redelivering to the
-// target) and re-publishes failed status for human senders (ptone/scion#7405).
+// DELIVERY_UNCONFIRMED notice (naming the target agent, telling the sender that
+// delivery may have succeeded and to check before resending, never claiming
+// "delivery failed", and never redelivering to the target) and re-publishes
+// delivery_unconfirmed status for human senders (ptone/scion#7405).
 func TestBrokerMessageSweepHandler_ExpiredPendingNotifiesAgentAndUserSenders(t *testing.T) {
 	srv, s, project, sender, target, _, dispatcher := deliverySetup(t)
 	ctx := context.Background()
@@ -322,12 +326,15 @@ func TestBrokerMessageSweepHandler_ExpiredPendingNotifiesAgentAndUserSenders(t *
 			notices = append(notices, c)
 		}
 	}
-	require.Len(t, notices, 1, "agent sender must receive exactly one DELIVERY_FAILED notice")
+	require.Len(t, notices, 1, "agent sender must receive exactly one DELIVERY_UNCONFIRMED notice")
 	require.NotNil(t, notices[0].StructuredMessage)
-	assert.Equal(t, "DELIVERY_FAILED", notices[0].StructuredMessage.Status)
+	assert.Equal(t, "DELIVERY_UNCONFIRMED", notices[0].StructuredMessage.Status)
+	assert.Equal(t, messages.SystemCategoryDeliveryUnconfirmed, notices[0].StructuredMessage.Metadata["system_category"])
 	assert.Contains(t, notices[0].Message, target.Slug, "notice must name the target agent")
 	assert.NotContains(t, notices[0].Message, `agent "`+sender.Slug+`"`, "notice must not mistake sender for target")
-	assert.Contains(t, notices[0].Message, store.MessageExpiredStuckPendingReason)
+	assert.Contains(t, notices[0].Message, "unconfirmed")
+	assert.Contains(t, notices[0].Message, "may have been delivered; check before resending")
+	assert.NotContains(t, notices[0].Message, "Message delivery failed", "must never claim definite failure for an expired pending row")
 	assert.Empty(t, notices[0].MessageID, "notice itself must not carry a reportable hub message ID")
 
 	select {
@@ -337,12 +344,13 @@ func TestBrokerMessageSweepHandler_ExpiredPendingNotifiesAgentAndUserSenders(t *
 		assert.Equal(t, userMsg.ID, payload.ID)
 		assert.Equal(t, store.MessageDispatchFailed, payload.DispatchState)
 		assert.Equal(t, store.MessageExpiredStuckPendingReason, payload.DispatchFailureReason)
+		assert.Equal(t, dispatchFailureCodeDeliveryUnconfirmed, payload.DispatchFailureCode)
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected user message failed SSE event on sweep expiry")
+		t.Fatal("expected user message delivery_unconfirmed SSE event on sweep expiry")
 	}
 
 	// A second sweep run must be a no-op (rows are already failed) and must not
-	// send duplicate DELIVERY_FAILED notices.
+	// send duplicate DELIVERY_UNCONFIRMED notices.
 	srv.brokerMessageSweepHandler()(ctx)
 	var afterSecondSweep int
 	for _, c := range dispatcher.getCalls() {
@@ -351,4 +359,130 @@ func TestBrokerMessageSweepHandler_ExpiredPendingNotifiesAgentAndUserSenders(t *
 		}
 	}
 	assert.Equal(t, 1, afterSecondSweep, "subsequent sweep runs must not re-notify sender")
+}
+
+type backdatePendingCreateStore struct {
+	store.Store
+	fault    *storeFaultSwitch
+	age      time.Duration
+	backdate atomic.Bool
+	failMark atomic.Bool
+}
+
+func (w *backdatePendingCreateStore) CreateMessage(ctx context.Context, msg *store.Message) error {
+	if w.fault.Active() && w.backdate.Load() && msg != nil {
+		msg.CreatedAt = time.Now().Add(-w.age)
+	}
+	return w.Store.CreateMessage(ctx, msg)
+}
+
+func (w *backdatePendingCreateStore) MarkMessageDispatched(ctx context.Context, id string) (bool, error) {
+	if w.fault.Active() && w.failMark.Load() {
+		return false, context.DeadlineExceeded
+	}
+	return w.Store.MarkMessageDispatched(ctx, id)
+}
+
+// TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice
+// reproduces review R1 end-to-end: both AC-3 (broker accepted, all
+// MarkMessageDispatched retries failed) and AC-4 (dispatch deadline exceeded
+// mid-flight) leave the persisted row pending; when the 10m sweep expires
+// them, the sender receives DELIVERY_UNCONFIRMED ("check before resending")
+// rather than DELIVERY_FAILED, and the target agent never receives a duplicate.
+func TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		setupCase func(dispatcher *recordingDispatcher, fs *backdatePendingCreateStore)
+		wantCalls int
+	}{
+		{
+			name: "AC-3_broker_accepted_mark_dispatched_failed",
+			setupCase: func(_ *recordingDispatcher, fs *backdatePendingCreateStore) {
+				fs.backdate.Store(true)
+				fs.failMark.Store(true)
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "AC-4_dispatch_deadline_ambiguous",
+			setupCase: func(dispatcher *recordingDispatcher, fs *backdatePendingCreateStore) {
+				fs.backdate.Store(true)
+				dispatcher.returnErr = context.DeadlineExceeded
+			},
+			wantCalls: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, faultStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *backdatePendingCreateStore {
+				return &backdatePendingCreateStore{Store: inner, fault: f, age: 11 * time.Minute}
+			})
+			ctx := context.Background()
+
+			owner := &store.User{
+				ID: tid("r1-owner-" + tc.name), Email: "r1-" + tc.name + "@test.example",
+				Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+			}
+			require.NoError(t, s.CreateUser(ctx, owner))
+			ensureHubMembership(ctx, s, owner.ID)
+			proj := &store.Project{
+				ID: tid("r1-proj-" + tc.name), Name: "r1-" + tc.name, Slug: "r1-" + tc.name,
+				OwnerID: owner.ID, CreatedBy: owner.ID,
+			}
+			require.NoError(t, s.CreateProject(ctx, proj))
+			ensureStandingRoot(t, s, proj.ID, owner.ID)
+			brokerID := tid("r1-broker-" + tc.name)
+			require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+				ID: brokerID, Name: "r1-broker", Slug: "r1-broker-" + tc.name, Status: store.BrokerStatusOnline,
+			}))
+			sender := &store.Agent{
+				ID: tid("r1-sender-" + tc.name), Name: "r1-sender", Slug: "r1-sender-" + tc.name,
+				ProjectID: proj.ID, Phase: "running", RuntimeBrokerID: brokerID,
+				MessageMode: store.MessageModeProject, Ancestry: []string{owner.ID},
+			}
+			require.NoError(t, s.CreateAgent(ctx, sender))
+			target := &store.Agent{
+				ID: tid("r1-target-" + tc.name), Name: "r1-target", Slug: "r1-target-" + tc.name,
+				ProjectID: proj.ID, Phase: "running", RuntimeBrokerID: brokerID,
+				MessageMode: store.MessageModeProject, Ancestry: []string{owner.ID},
+			}
+			require.NoError(t, s.CreateAgent(ctx, target))
+
+			dispatcher := &recordingDispatcher{}
+			srv.SetDispatcher(dispatcher)
+			events := NewChannelEventPublisher()
+			defer events.Close()
+			srv.SetEventPublisher(events)
+			bus := eventbus.NewInProcessEventBus(slog.Default())
+			defer func() { _ = bus.Close() }()
+			srv.SetMessageBrokerProxy(NewMessageBrokerProxy(bus, s, events, func() AgentDispatcher { return dispatcher }, slog.Default()))
+
+			fault.Arm()
+			tc.setupCase(dispatcher, faultStore)
+			res, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "ac-ambiguous-"+tc.name))
+			require.Nil(t, dmErr)
+			require.NotNil(t, res)
+			require.Equal(t, AgentDMAmbiguous, res.Outcome)
+
+			faultStore.backdate.Store(false)
+			faultStore.failMark.Store(false)
+			dispatcher.returnErr = nil
+			srv.brokerMessageSweepHandler()(ctx)
+
+			var targetCalls, senderNotices int
+			for _, c := range dispatcher.getCalls() {
+				switch c.Agent.ID {
+				case target.ID:
+					targetCalls++
+				case sender.ID:
+					senderNotices++
+					require.NotNil(t, c.StructuredMessage)
+					assert.Equal(t, "DELIVERY_UNCONFIRMED", c.StructuredMessage.Status)
+					assert.Contains(t, c.Message, "may have been delivered; check before resending")
+					assert.NotContains(t, c.Message, "Message delivery failed")
+				}
+			}
+			assert.Equal(t, tc.wantCalls, targetCalls, "sweep must never redeliver to target")
+			assert.Equal(t, 1, senderNotices, "sender must receive one DELIVERY_UNCONFIRMED notice")
+		})
+	}
 }

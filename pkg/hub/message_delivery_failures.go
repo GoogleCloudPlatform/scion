@@ -408,6 +408,41 @@ func (s *Server) notifyStoredMessageSenderFailed(ctx context.Context, agent *sto
 	}
 }
 
+// notifyStoredMessageSenderUnconfirmed notifies an agent sender (via
+// DELIVERY_UNCONFIRMED notice) or connected human browser clients (via
+// PublishUserMessage with dispatchFailureCode=delivery_unconfirmed) after
+// ExpireAndListStuckPendingMessages has committed dispatch_state=failed with
+// store.MessageExpiredStuckPendingReason (ptone/scion#7405). Because a stored
+// pending row carries no pre- vs post-dispatch marker to separate never-sent
+// rows from AC-3/AC-4 rows that were or may have been delivered, every
+// pending-TTL expiry uses unconfirmed wording telling the sender to check
+// before resending.
+func (s *Server) notifyStoredMessageSenderUnconfirmed(ctx context.Context, agent *store.Agent, msg *store.Message) {
+	if msg == nil {
+		return
+	}
+	if proxy := s.GetMessageBrokerProxy(); proxy != nil && strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID != "" {
+		var agentSlug string
+		if agent != nil && agent.Slug != "" {
+			agentSlug = agent.Slug
+		} else {
+			agentSlug = strings.TrimPrefix(msg.Recipient, "agent:")
+		}
+		proxy.publishDeliveryUnconfirmed(ctx, agentSlug, &messages.StructuredMessage{
+			Sender:   msg.Sender,
+			SenderID: msg.SenderID,
+		})
+	}
+
+	if strings.HasPrefix(msg.Sender, "user:") && s.events != nil {
+		cp := *msg
+		cp.DispatchState = store.MessageDispatchFailed
+		reason := store.MessageExpiredStuckPendingReason
+		cp.DispatchFailureReason = &reason
+		s.events.PublishUserMessage(ctx, &cp, nil, nil)
+	}
+}
+
 // maxFailureReasonBytes bounds the broker-supplied failure reason that is
 // stored on the message row and echoed to the sender.
 const maxFailureReasonBytes = 512

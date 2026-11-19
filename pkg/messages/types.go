@@ -121,6 +121,11 @@ const (
 	// deferred their message instead of dispatching it — distinct from
 	// SystemCategoryDeliveryFailed: the message was saved, not dropped.
 	SystemCategoryDeliveryDeferred = "delivery-deferred"
+	// SystemCategoryDeliveryUnconfirmed marks the notice sent to an agent
+	// sender when a message row expired in dispatch_state="pending" without
+	// dispatch confirmation (ptone/scion#7405): delivery may already have
+	// occurred, so the sender should check before resending.
+	SystemCategoryDeliveryUnconfirmed = "delivery-unconfirmed"
 	// SystemCategoryArtifactReview marks the notice sent to an artifact's
 	// owner when a review version of the artifact was published.
 	SystemCategoryArtifactReview = "artifact-review"

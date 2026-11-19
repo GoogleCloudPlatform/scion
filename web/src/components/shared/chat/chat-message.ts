@@ -3179,6 +3179,26 @@ export class ScionChatMessage extends LitElement {
         const isUnreachable =
           this.dispatchFailureCode === 'agent_unreachable' ||
           (!this.dispatchFailureCode && this.dispatchFailureReason.startsWith('Agent unreachable'));
+        // ptone/scion#7405: pending-TTL expiry means dispatch confirmation was
+        // lost or never completed — delivery may already have occurred, so show
+        // "Delivery unconfirmed" rather than claiming a definite failure.
+        const isUnconfirmed =
+          this.dispatchFailureCode === 'delivery_unconfirmed' ||
+          (!this.dispatchFailureCode &&
+            this.dispatchFailureReason === 'expired: stuck in pending state beyond TTL');
+        if (isUnconfirmed) {
+          return html`
+            <sl-tooltip
+              content="Delivery unconfirmed: it may have been delivered; check before resending"
+              hoist
+            >
+              <div class="delivery-state failed">
+                <sl-icon name="exclamation-triangle"></sl-icon>
+                Delivery unconfirmed
+              </div>
+            </sl-tooltip>
+          `;
+        }
         return html`
           <sl-tooltip content=${this.dispatchFailureReason || 'Delivery failed'} hoist>
             <div class="delivery-state failed">

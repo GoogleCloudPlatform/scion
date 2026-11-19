@@ -1169,6 +1169,41 @@ describe('scion-chat-message delivery state', () => {
     expect(state?.textContent).not.toContain('Agent unreachable');
   });
 
+  // ptone/scion#7405: pending-TTL expiry may represent an AC-3/AC-4 row that
+  // was or may have been delivered; never claim "Failed".
+  it('shows "Delivery unconfirmed" when dispatchFailureCode is delivery_unconfirmed', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: 'expired: stuck in pending state beyond TTL',
+      dispatchFailureCode: 'delivery_unconfirmed',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Delivery unconfirmed');
+    expect(state?.textContent).not.toContain('Failed');
+    expect(state?.classList.contains('failed')).toBe(true);
+    const tooltip = el.shadowRoot?.querySelector('sl-tooltip');
+    expect(tooltip?.getAttribute('content')).toBe(
+      'Delivery unconfirmed: it may have been delivered; check before resending'
+    );
+  });
+
+  it('falls back to matching the pending-TTL reason for history rows without a code', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: 'expired: stuck in pending state beyond TTL',
+      dispatchFailureCode: '',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Delivery unconfirmed');
+    expect(state?.textContent).not.toContain('Failed');
+    const tooltip = el.shadowRoot?.querySelector('sl-tooltip');
+    expect(tooltip?.getAttribute('content')).toBe(
+      'Delivery unconfirmed: it may have been delivered; check before resending'
+    );
+  });
+
   // ptone/scion#4480: a dispatched message was accepted by the agent's
   // runtime, not confirmed read, so the receipt never claims "Delivered".
   it('shows "Accepted" for dispatchState=dispatched', async () => {

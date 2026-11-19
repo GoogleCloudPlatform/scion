@@ -864,6 +864,7 @@ func TestNewEnvelopeToLegacy_EventSystem(t *testing.T) {
 		// the round trip must recover SystemCategoryDeliveryDeferred, not
 		// collapse back to SystemCategoryDeliveryFailed.
 		{"delivery.failed/deferred", EventDeliveryFailed, "DELIVERY_DEFERRED", messages.SystemCategoryDeliveryDeferred, "DELIVERY_DEFERRED"},
+		{"delivery.failed/unconfirmed", EventDeliveryFailed, "DELIVERY_UNCONFIRMED", messages.SystemCategoryDeliveryUnconfirmed, "DELIVERY_UNCONFIRMED"},
 		{"webhook.received", EventWebhookReceived, "", messages.SystemCategoryTrigger, ""},
 		{"trigger.fired", EventTriggerFired, "", messages.SystemCategoryTrigger, ""},
 	}
@@ -907,6 +908,19 @@ func TestMapSystemCategory_DeliveryDeferred(t *testing.T) {
 	}
 	if body.Status != "DELIVERY_DEFERRED" {
 		t.Errorf("status: got %q, want DELIVERY_DEFERRED", body.Status)
+	}
+}
+
+func TestMapSystemCategory_DeliveryUnconfirmed(t *testing.T) {
+	body := mapSystemCategory(messages.SystemCategoryDeliveryUnconfirmed)
+	if body == nil {
+		t.Fatal("mapSystemCategory returned nil")
+	}
+	if body.Type != EventDeliveryFailed {
+		t.Errorf("type: got %v, want EventDeliveryFailed", body.Type)
+	}
+	if body.Status != "DELIVERY_UNCONFIRMED" {
+		t.Errorf("status: got %q, want DELIVERY_UNCONFIRMED", body.Status)
 	}
 }
 
