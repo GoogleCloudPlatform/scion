@@ -237,6 +237,78 @@ describe('scion-chat-message @mentions', () => {
     }
   });
 
+  it('clears browser-created press selection when mention-contextmenu is handled and expires stale press snapshots', async () => {
+    vi.useFakeTimers();
+    try {
+      const el = await mount('hello @coder');
+      const span = mentions(el)[0];
+      const sel = window.getSelection()!;
+      const handled: string[] = [];
+      el.addEventListener('mention-contextmenu', (e): void => {
+        e.preventDefault();
+        handled.push((e as CustomEvent<{ slug: string }>).detail.slug);
+      });
+
+      // 1. Handled mention-contextmenu clears selection created after pointerdown so a repeat right-click still fires.
+      for (let i = 0; i < 2; i++) {
+        span.dispatchEvent(
+          new PointerEvent('pointerdown', {
+            bubbles: true,
+            composed: true,
+            button: 2,
+            clientX: 10,
+            clientY: 10,
+          })
+        );
+        const wordRange = document.createRange();
+        wordRange.selectNodeContents(span);
+        sel.removeAllRanges();
+        sel.addRange(wordRange);
+        const ctx = new MouseEvent('contextmenu', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          button: 2,
+          clientX: 10,
+          clientY: 10,
+        });
+        span.dispatchEvent(ctx);
+        expect(ctx.defaultPrevented).toBe(true);
+        expect(sel.rangeCount).toBe(0);
+      }
+      expect(handled).toEqual(['coder', 'coder']);
+
+      // 2. Once CONTEXT_PRESS_WINDOW_MS expires, an earlier uncovered press does not mask a live selection.
+      span.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          button: 2,
+          clientX: 10,
+          clientY: 10,
+        })
+      );
+      vi.advanceTimersByTime(1100);
+      const laterRange = document.createRange();
+      laterRange.selectNodeContents(span);
+      sel.addRange(laterRange);
+      const staleCtx = new MouseEvent('contextmenu', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        button: 2,
+        clientX: 10,
+        clientY: 10,
+      });
+      span.dispatchEvent(staleCtx);
+      expect(staleCtx.defaultPrevented).toBe(false);
+      expect(handled).toEqual(['coder', 'coder']);
+      sel.removeAllRanges();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('emits a composed mention-click with the slug when a mention is clicked', async () => {
     const el = await mount('hello @coder');
     const seen: string[] = [];
