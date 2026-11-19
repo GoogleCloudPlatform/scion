@@ -844,3 +844,58 @@ func TestDecisionsBell_WaitingOnYouTotalPinsDismissedExclusion(t *testing.T) {
 	assert.Equal(t, 2, totalB)
 	assert.Equal(t, 1, projB)
 }
+
+// TestDecisionsBell_DismissMixedInterpretedAndPendingEnqueuesTopic pins that a
+// dismissal mixing a row with an interpreted answer awaiting the named user
+// and a pending row still recomputes the whole conversation: the named-user
+// enqueue (enqueueDecisionBellEvent) also enqueues the topic, so other members
+// waiting on the pending row are not left with a stale bell.
+func TestDecisionsBell_DismissMixedInterpretedAndPendingEnqueuesTopic(t *testing.T) {
+	srv, _, alice, bob, project, spy, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *dismissBellSpyStore {
+		return &dismissBellSpyStore{Store: inner, fault: f}
+	})
+	f := newDecisionsFixtureOn(t, srv, spy, alice, bob, project)
+	setDecisionsExperiment(t, f.srv, true)
+	setFastDecisionBell(t, f.srv, 10*time.Millisecond)
+	ctx := context.Background()
+
+	f.agent.Ancestry = []string{f.bob.ID}
+	f.agent.MessageMode = store.MessageModeProject
+	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+
+	p := sendTopicDecisionPromptAsAgent(t, f.srv, f.store, f.agent, f.project.ID, f.topicID, `[
+		{"id":"MIX1","question":"Interpreted for Alice?","choices":["yes","no"]},
+		{"id":"MIX2","question":"Pending for everyone?","choices":["yes","no"]}
+	]`, false)
+	recordTestInterpretedForUser(t, f.store, f.project.ID, f.topicID, f.agent, f.alice, p.Decisions[0].RowID, "1")
+	waitDecisionBellIdle(t, f.srv)
+	f.srv.decisionClock = func() time.Time { return time.Now().UTC().Add(store.DecisionDismissMinAge + time.Minute) }
+
+	fault.Arm()
+	spy.reset()
+	hold := make(chan struct{})
+	f.srv.decisionBell.mu.Lock()
+	f.srv.decisionBell.testHoldCh = hold
+	f.srv.decisionBell.mu.Unlock()
+
+	// Alice (the named user) dismisses the whole prompt: both rows wait on her.
+	out := decodeDismissResponse(t, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/decision-prompts/"+p.MessageID+"/dismiss", map[string]interface{}{
+		"reason": "Both stale",
+	}))
+	require.Len(t, out.Dismissed, 2)
+
+	f.srv.decisionBell.mu.Lock()
+	_, aliceQueued := f.srv.decisionBell.userDue[f.alice.ID]
+	_, topicQueued := f.srv.decisionBell.topicDue[decisionBellTopicKey{projectID: f.project.ID, chatKey: f.topicID}]
+	topics := len(f.srv.decisionBell.topicDue)
+	f.srv.decisionBell.testHoldCh = nil
+	close(hold)
+	f.srv.decisionBell.signalWakeLocked()
+	f.srv.decisionBell.mu.Unlock()
+
+	assert.True(t, aliceQueued, "the interpreted row's named user is enqueued")
+	assert.True(t, topicQueued, "the conversation-wide recompute is enqueued for members waiting on the pending row")
+	assert.Equal(t, 1, topics, "one topic recompute, coalesced")
+	waitDecisionBellIdle(t, f.srv)
+	assert.GreaterOrEqual(t, spy.recomputes.Load(), int64(2), "both posting members (Alice and Bob) are recomputed")
+}

@@ -342,6 +342,8 @@ func (s *Server) enqueueDecisionBellDismiss(projectID, chatKey string, dismissed
 			if a != nil && a.Provenance == store.DecisionProvenanceAgentInterpreted {
 				if uid := strings.TrimSpace(a.AnsweredByUserID); uid != "" && !seenNamed[uid] {
 					seenNamed[uid] = true
+					// Also enqueues the conversation (topic members or DM users),
+					// so the "" call below is only needed when no user was named.
 					s.enqueueDecisionBellEvent(projectID, chatKey, uid)
 					enqueuedConversation = true
 				}
