@@ -1764,3 +1764,437 @@ func TestRecordInterpretedAnswers_ReplacedVersion(t *testing.T) {
 	require.NotNil(t, iaErr.Failures[0].Decision)
 	assert.NotEmpty(t, iaErr.Failures[0].Decision.ReplacedByID)
 }
+
+func TestWithdrawDecisions_RowStatesValidationAndIdempotency(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	p := f.create(t, false,
+		yesNo("D234", "Ship with reason?"),
+		yesNo("D235", "Ship without reason?"),
+		yesNo("D236", "Direct answered?"),
+		yesNo("D237", "Interpreted awaiting confirm?"),
+	)
+	rowReason := p.Decisions[0].RowID
+	rowNoReason := p.Decisions[1].RowID
+	rowDirect := p.Decisions[2].RowID
+	rowInterp := p.Decisions[3].RowID
+
+	// Answer D236 directly and D237 via agent_interpreted (awaiting confirm, D6).
+	_, _, err := f.cs.RecordAnswer(ctx, f.answer(rowDirect, "1", "user-1", ""))
+	require.NoError(t, err)
+	_, err = f.cs.RecordInterpretedAnswers(ctx, f.interpretedBatch(uuid.NewString(), "user-1", "",
+		store.InterpretedAnswerPair{DecisionRowID: rowInterp, Key: "D237", ChoiceID: "2"},
+	))
+	require.NoError(t, err)
+
+	// Input validation rejects malformed inputs before touching rows.
+	for _, bad := range []*store.WithdrawDecisionsInput{
+		nil,
+		{AskerAgentID: "not-a-uuid", Keys: []string{"D234"}},
+		{AskerAgentID: f.agentID, Keys: nil},
+		{AskerAgentID: f.agentID, Keys: []string{"   "}},
+		{AskerAgentID: f.agentID, Keys: []string{"D234", "d234"}},
+		{AskerAgentID: f.agentID, Keys: []string{"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11"}},
+		{AskerAgentID: f.agentID, Keys: []string{"D234"}, Reason: strings.Repeat("é", store.MaxDecisionWithdrawReasonRunes+1)},
+	} {
+		_, err := f.cs.WithdrawDecisions(ctx, bad)
+		require.ErrorIs(t, err, store.ErrInvalidInput, "input=%+v", bad)
+	}
+
+	// Withdraw pending D234 (case-insensitive key lookup, trimmed reason).
+	res1, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"  d234  "},
+		Reason:       "  CI found a regression — café  ",
+	})
+	require.NoError(t, err)
+	require.Len(t, res1.Withdrawn, 1)
+	assert.Empty(t, res1.AlreadyWithdrawn)
+	assert.Equal(t, "D234", res1.Withdrawn[0].Key)
+	assert.Equal(t, store.DecisionStatusWithdrawn, res1.Withdrawn[0].Status)
+	require.NotNil(t, res1.Withdrawn[0].WithdrawnAt)
+	assert.Equal(t, "CI found a regression — café", res1.Withdrawn[0].WithdrawnReason)
+	firstWithdrawnAt := *res1.Withdrawn[0].WithdrawnAt
+	assert.Zero(t, firstWithdrawnAt.Nanosecond()%int(time.Microsecond),
+		"withdrawn_at is microsecond-aligned so first response and Postgres TIMESTAMPTZ reads agree")
+
+	// Idempotent retry with a DIFFERENT reason reports AlreadyWithdrawn and
+	// preserves the original timestamp and reason (first withdrawal wins).
+	time.Sleep(2 * time.Millisecond)
+	resRetry, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"D234"},
+		Reason:       "Second reason should be ignored",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, resRetry.Withdrawn)
+	require.Len(t, resRetry.AlreadyWithdrawn, 1)
+	assert.Equal(t, "D234", resRetry.AlreadyWithdrawn[0].Key)
+	assert.Equal(t, "CI found a regression — café", resRetry.AlreadyWithdrawn[0].WithdrawnReason)
+	require.NotNil(t, resRetry.AlreadyWithdrawn[0].WithdrawnAt)
+	assert.True(t, firstWithdrawnAt.Equal(*resRetry.AlreadyWithdrawn[0].WithdrawnAt))
+
+	gotReason, err := f.cs.GetDecision(ctx, rowReason)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusWithdrawn, gotReason.Status)
+	assert.Equal(t, "CI found a regression — café", gotReason.WithdrawnReason)
+
+	// 500 multi-byte runes are accepted; empty reason stores empty WithdrawnReason.
+	maxRuneReason := strings.Repeat("☕", store.MaxDecisionWithdrawReasonRunes)
+	resNoReason, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"D235"},
+		Reason:       "   ",
+	})
+	require.NoError(t, err)
+	require.Len(t, resNoReason.Withdrawn, 1)
+	assert.Empty(t, resNoReason.Withdrawn[0].WithdrawnReason)
+	gotNoReason, err := f.cs.GetDecision(ctx, rowNoReason)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusWithdrawn, gotNoReason.Status)
+	assert.Empty(t, gotNoReason.WithdrawnReason)
+
+	pMax := f.create(t, false, yesNo("DMAX", "500 rune reason?"))
+	resMax, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"DMAX"},
+		Reason:       maxRuneReason,
+	})
+	require.NoError(t, err)
+	require.Len(t, resMax.Withdrawn, 1)
+	assert.Equal(t, maxRuneReason, resMax.Withdrawn[0].WithdrawnReason)
+	_ = pMax
+
+	// Unknown key -> decision_not_found; another agent's key -> decision_not_found.
+	otherAgent := uuid.NewString()
+	otherPrompt := f.prompt("", false, yesNo("OTHER-KEY", "Other agent asks"))
+	otherPrompt.AskerAgentID = otherAgent
+	otherPrompt.Message.SenderID = otherAgent
+	otherPrompt.Message.AgentID = otherAgent
+	_, err = f.cs.CreateDecisionPrompt(ctx, otherPrompt)
+	require.NoError(t, err)
+
+	for _, missing := range []string{"NOPE", "OTHER-KEY"} {
+		_, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+			AskerAgentID: f.agentID,
+			Keys:         []string{missing},
+		})
+		var wdErr *store.WithdrawDecisionsError
+		require.ErrorAs(t, err, &wdErr, "key=%s", missing)
+		require.ErrorIs(t, err, store.ErrWithdrawDecisionsFailed)
+		require.Len(t, wdErr.Failures, 1)
+		assert.Equal(t, missing, wdErr.Failures[0].Key)
+		assert.Equal(t, store.WithdrawReasonNotFound, wdErr.Failures[0].Reason)
+		assert.Nil(t, wdErr.Failures[0].Decision)
+	}
+
+	// Direct answered (D236) and interpreted awaiting confirm (D237, D6) -> already_answered.
+	for _, answeredKey := range []string{"D236", "D237"} {
+		_, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+			AskerAgentID: f.agentID,
+			Keys:         []string{answeredKey},
+		})
+		var wdErr *store.WithdrawDecisionsError
+		require.ErrorAs(t, err, &wdErr, "key=%s", answeredKey)
+		require.Len(t, wdErr.Failures, 1)
+		assert.Equal(t, answeredKey, wdErr.Failures[0].Key)
+		assert.Equal(t, store.WithdrawReasonAlreadyAnswered, wdErr.Failures[0].Reason)
+		require.NotNil(t, wdErr.Failures[0].Decision)
+		require.NotEmpty(t, wdErr.Failures[0].Decision.Answers)
+	}
+}
+
+func TestWithdrawDecisions_RecordAnswerRefusalAndReplay(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	rowID := f.create(t, false, yesNo("D-ANS", "Answer after withdraw?")).Decisions[0].RowID
+	_, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"D-ANS"},
+		Reason:       "Obsolete",
+	})
+	require.NoError(t, err)
+
+	ansIn := f.answer(rowID, "1", "user-1", "idem-late")
+	_, _, err = f.cs.RecordAnswer(ctx, ansIn)
+	require.ErrorIs(t, err, store.ErrDecisionWithdrawn)
+
+	d, err := f.cs.GetDecision(ctx, rowID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusWithdrawn, d.Status)
+	assert.Empty(t, d.Answers, "refused answer stored nothing")
+	_, err = f.cs.GetMessage(ctx, ansIn.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "refused answer stored no response message")
+
+	// Idempotency replay check runs BEFORE terminal-status refusal (design 4.1):
+	// if an answer was recorded under an idempotency key before the row transitioned
+	// to withdrawn, retrying with that idempotency key still replays the answer.
+	replayRowID := f.create(t, false, yesNo("D-REPLAY", "Replay before withdraw?")).Decisions[0].RowID
+	origAns, replayed, err := f.cs.RecordAnswer(ctx, f.answer(replayRowID, "1", "user-1", "idem-prior"))
+	require.NoError(t, err)
+	assert.False(t, replayed)
+
+	replayUUID, err := uuid.Parse(replayRowID)
+	require.NoError(t, err)
+	require.NoError(t, f.cs.client.Decision.UpdateOneID(replayUUID).
+		SetStatus("withdrawn").
+		SetWithdrawnAt(time.Now().UTC()).
+		Exec(ctx))
+
+	gotReplay, replayed, err := f.cs.RecordAnswer(ctx, f.answer(replayRowID, "1", "user-1", "idem-prior"))
+	require.NoError(t, err)
+	assert.True(t, replayed)
+	assert.Equal(t, origAns.ID, gotReplay.ID)
+}
+
+func TestWithdrawDecisions_PendingCapAndUpdateAfterWithdraw(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// Fill all 50 pending slots across 5 prompts of 10 decisions each.
+	for b := 0; b < 5; b++ {
+		ds := make([]messages.Decision, 10)
+		for i := 0; i < 10; i++ {
+			ds[i] = yesNo(fmt.Sprintf("CAP-%d-%d", b, i), "Cap check?")
+		}
+		f.create(t, false, ds...)
+	}
+
+	// 51st pending decision is refused.
+	_, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, yesNo("CAP-OVER", "Too many?")))
+	require.ErrorIs(t, err, store.ErrTooManyPendingDecisions)
+
+	// Withdrawing one pending decision frees capacity (cap counts pending only).
+	_, err = f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"CAP-0-0"},
+		Reason:       "No longer needed",
+	})
+	require.NoError(t, err)
+
+	overRes, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, yesNo("CAP-OVER", "Fits now?")))
+	require.NoError(t, err)
+	require.Len(t, overRes.Decisions, 1)
+
+	// Re-asking CAP-0-0 without --update is refused with "(v1, withdrawn)" (D7).
+	_, err = f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, yesNo("CAP-0-0", "Re-ask without update?")))
+	var existsErr *store.DecisionKeyExistsError
+	require.ErrorAs(t, err, &existsErr)
+	assert.Contains(t, existsErr.Error(), "CAP-0-0 already exists (v1, withdrawn)")
+
+	// Free one more slot so --update adding a new pending v2 stays within 50.
+	_, err = f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"CAP-0-1"},
+	})
+	require.NoError(t, err)
+
+	// Re-asking CAP-0-0 WITH --update creates v2 (pending), leaves v1 withdrawn,
+	// and links v1.ReplacedByID -> v2.RowID (D7, design section 10).
+	v2Res, err := f.cs.CreateDecisionPrompt(ctx, f.prompt("", true, yesNo("CAP-0-0", "Re-ask v2?")))
+	require.NoError(t, err)
+	require.Len(t, v2Res.Decisions, 1)
+	assert.Equal(t, 2, v2Res.Decisions[0].Version)
+	require.NotNil(t, v2Res.Decisions[0].Replaced)
+	assert.Equal(t, 1, v2Res.Decisions[0].Replaced.Version)
+	assert.Equal(t, store.DecisionStatusWithdrawn, v2Res.Decisions[0].Replaced.Status)
+
+	versions, err := f.cs.GetAgentDecisionVersions(ctx, f.agentID, "CAP-0-0")
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+	assert.Equal(t, store.DecisionStatusWithdrawn, versions[0].Status, "v1 stays withdrawn")
+	assert.Equal(t, "No longer needed", versions[0].WithdrawnReason)
+	require.NotNil(t, versions[0].WithdrawnAt)
+	assert.Equal(t, v2Res.Decisions[0].RowID, versions[0].ReplacedByID, "v1 links to v2")
+	assert.Equal(t, store.DecisionStatusPending, versions[1].Status)
+}
+
+func TestWithdrawDecisions_MultiKeyAllOrNothingWholeSetAndRefusals(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// 1. Multi-key across prompts + all-or-nothing failure (D8) + mixed idempotency.
+	p1 := f.create(t, false,
+		yesNo("MK-1", "First pending?"),
+		yesNo("MK-ANS", "Answered directly?"),
+		yesNo("MK-INT", "Interpreted awaiting confirm?"),
+	)
+	p2 := f.create(t, false,
+		yesNo("MK-2", "Second pending?"),
+		yesNo("MK-3", "Third pending?"),
+	)
+	_, _, err := f.cs.RecordAnswer(ctx, f.answer(p1.Decisions[1].RowID, "1", "user-1", ""))
+	require.NoError(t, err)
+	_, err = f.cs.RecordInterpretedAnswers(ctx, f.interpretedBatch(uuid.NewString(), "user-1", "",
+		store.InterpretedAnswerPair{DecisionRowID: p1.Decisions[2].RowID, Key: "MK-INT", ChoiceID: "2"},
+	))
+	require.NoError(t, err)
+
+	// Mixed pending + direct-answered + interpreted-awaiting-confirm (D6) + unknown -> all-or-nothing failure.
+	_, err = f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"MK-1", "MK-ANS", "MK-INT", "MK-MISSING"},
+		Reason:       "Should not write",
+	})
+	var wdErr *store.WithdrawDecisionsError
+	require.ErrorAs(t, err, &wdErr)
+	require.Len(t, wdErr.Failures, 3)
+	assert.Equal(t, "MK-ANS", wdErr.Failures[0].Key)
+	assert.Equal(t, store.WithdrawReasonAlreadyAnswered, wdErr.Failures[0].Reason)
+	assert.Equal(t, "MK-INT", wdErr.Failures[1].Key)
+	assert.Equal(t, store.WithdrawReasonAlreadyAnswered, wdErr.Failures[1].Reason)
+	assert.Equal(t, "MK-MISSING", wdErr.Failures[2].Key)
+	assert.Equal(t, store.WithdrawReasonNotFound, wdErr.Failures[2].Reason)
+
+	mk1, err := f.cs.GetDecision(ctx, p1.Decisions[0].RowID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusPending, mk1.Status, "all-or-nothing left MK-1 pending")
+
+	// Withdraw MK-2 first with its own reason, then withdraw [MK-3, MK-2, MK-1] with a new reason:
+	// MK-1 and MK-3 become Withdrawn (in canonical prompt/position order: MK-1 then MK-3),
+	// while MK-2 is reported in AlreadyWithdrawn with its original reason preserved.
+	resFirst, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"MK-2"},
+		Reason:       "Original reason for MK-2",
+	})
+	require.NoError(t, err)
+	require.Len(t, resFirst.Withdrawn, 1)
+	mk2At := *resFirst.Withdrawn[0].WithdrawnAt
+
+	time.Sleep(2 * time.Millisecond)
+	resMixed, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"MK-3", "MK-2", "MK-1"},
+		Reason:       "Batch reason",
+	})
+	require.NoError(t, err)
+	require.Len(t, resMixed.Withdrawn, 2)
+	assert.Equal(t, "MK-1", resMixed.Withdrawn[0].Key)
+	assert.Equal(t, "MK-3", resMixed.Withdrawn[1].Key)
+	assert.Equal(t, "Batch reason", resMixed.Withdrawn[0].WithdrawnReason)
+	assert.Equal(t, "Batch reason", resMixed.Withdrawn[1].WithdrawnReason)
+	require.Len(t, resMixed.AlreadyWithdrawn, 1)
+	assert.Equal(t, "MK-2", resMixed.AlreadyWithdrawn[0].Key)
+	assert.Equal(t, "Original reason for MK-2", resMixed.AlreadyWithdrawn[0].WithdrawnReason)
+	assert.True(t, mk2At.Equal(*resMixed.AlreadyWithdrawn[0].WithdrawnAt))
+	_ = p2
+
+	// 2. WholeSet (--set): withdraws every pending sibling of the key's prompt,
+	// skipping direct-answered, interpreted-awaiting-confirm (D6), and replaced siblings.
+	setMsgID, setRows := f.createSet(t,
+		yesNo("WS-1", "Pending target?"),
+		yesNo("WS-DIRECT", "Direct answered sibling?"),
+		yesNo("WS-INTERP", "Interpreted awaiting confirm sibling?"),
+		yesNo("WS-REPL", "Replaced sibling?"),
+		yesNo("WS-5", "Pending sibling?"),
+	)
+	_, _, err = f.cs.RecordAnswer(ctx, f.answer(setRows[1], "1", "user-1", ""))
+	require.NoError(t, err)
+	_, err = f.cs.RecordInterpretedAnswers(ctx, f.interpretedBatch(uuid.NewString(), "user-1", "",
+		store.InterpretedAnswerPair{DecisionRowID: setRows[2], Key: "WS-INTERP", ChoiceID: "1"},
+	))
+	require.NoError(t, err)
+	// Replace WS-REPL onto a newer prompt so setRows[3] has status=replaced on setMsgID.
+	f.create(t, true, yesNo("WS-REPL", "WS-REPL v2 on another prompt"))
+
+	// Explicitly naming an answered row with WholeSet=true still fails all-or-nothing.
+	_, err = f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"WS-INTERP"},
+		WholeSet:     true,
+		Reason:       "Must fail",
+	})
+	require.ErrorAs(t, err, &wdErr)
+	assert.Equal(t, store.WithdrawReasonAlreadyAnswered, wdErr.Failures[0].Reason)
+
+	// Naming pending WS-1 with WholeSet=true withdraws WS-1 and WS-5, skipping WS-DIRECT, WS-INTERP, and WS-REPL v1.
+	resSet, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"WS-1"},
+		WholeSet:     true,
+		Reason:       "Retiring rest of set",
+	})
+	require.NoError(t, err)
+	require.Len(t, resSet.Withdrawn, 2)
+	assert.Empty(t, resSet.AlreadyWithdrawn)
+	assert.Equal(t, "WS-1", resSet.Withdrawn[0].Key)
+	assert.Equal(t, "WS-5", resSet.Withdrawn[1].Key)
+
+	// Repeating WholeSet=true on WS-1 reports WS-1 in AlreadyWithdrawn and writes nothing.
+	resSetRetry, err := f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"WS-1"},
+		WholeSet:     true,
+		Reason:       "Ignored retry reason",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, resSetRetry.Withdrawn)
+	require.Len(t, resSetRetry.AlreadyWithdrawn, 1)
+	assert.Equal(t, "WS-1", resSetRetry.AlreadyWithdrawn[0].Key)
+	assert.Equal(t, "Retiring rest of set", resSetRetry.AlreadyWithdrawn[0].WithdrawnReason)
+
+	// 3. Set submit (RecordAnswerSet) refuses withdrawn rows with AnswerSetReasonWithdrawn,
+	// while allowing the remaining actionable row (confirming WS-INTERP) to be submitted.
+	badSetIn := f.answerSet(setMsgID, "user-1", "", setRows[0], "1", setRows[2], "1")
+	badSetIn.Answers[1].Outcome = store.DecisionOutcomeConfirm
+	_, err = f.cs.RecordAnswerSet(ctx, badSetIn)
+	var setChanged *store.AnswerSetChangedError
+	require.ErrorAs(t, err, &setChanged)
+	assert.Equal(t, map[string]string{setRows[0]: store.AnswerSetReasonWithdrawn}, setChanged.Reasons)
+	_, err = f.cs.GetMessage(ctx, badSetIn.ResponseMessage.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	goodSetIn := f.answerSet(setMsgID, "user-1", "", setRows[2], "1")
+	goodSetIn.Answers[0].Outcome = store.DecisionOutcomeConfirm
+	goodSetRes, err := f.cs.RecordAnswerSet(ctx, goodSetIn)
+	require.NoError(t, err)
+	require.Len(t, goodSetRes.Answers, 1)
+	assert.Equal(t, store.DecisionOutcomeConfirm, goodSetRes.Answers[0].Outcome)
+
+	// 4. RecordInterpretedAnswers refuses withdrawn keys with InterpretedReasonWithdrawn (all-or-nothing).
+	interpOpen := f.create(t, false, yesNo("INT-OPEN", "Still pending?"))
+	interpBatchIn := f.interpretedBatch(uuid.NewString(), "user-1", "",
+		store.InterpretedAnswerPair{DecisionRowID: interpOpen.Decisions[0].RowID, Key: "INT-OPEN", ChoiceID: "1"},
+		store.InterpretedAnswerPair{DecisionRowID: setRows[0], Key: "WS-1", ChoiceID: "1"},
+	)
+	_, err = f.cs.RecordInterpretedAnswers(ctx, interpBatchIn)
+	var iaErr *store.InterpretedAnswersError
+	require.ErrorAs(t, err, &iaErr)
+	require.Len(t, iaErr.Failures, 1)
+	assert.Equal(t, "WS-1", iaErr.Failures[0].Key)
+	assert.Equal(t, store.InterpretedReasonWithdrawn, iaErr.Failures[0].Reason)
+	require.NotNil(t, iaErr.Failures[0].Decision)
+	assert.Equal(t, store.DecisionStatusWithdrawn, iaErr.Failures[0].Decision.Status)
+
+	openAfter, err := f.cs.GetDecision(ctx, interpOpen.Decisions[0].RowID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusPending, openAfter.Status, "all-or-nothing left INT-OPEN pending")
+
+	// 5. ListAgentDecisions with DecisionListStateWithdrawn and DecisionListStateAll.
+	withdrawnList, nextCur, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateWithdrawn, "", "", 50)
+	require.NoError(t, err)
+	assert.Empty(t, nextCur)
+	require.Len(t, withdrawnList, 5) // MK-1, MK-2, MK-3, WS-1, WS-5
+	for _, item := range withdrawnList {
+		assert.Equal(t, store.DecisionStatusWithdrawn, item.Status)
+		assert.NotNil(t, item.WithdrawnAt)
+	}
+
+	filteredWithdrawn, _, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateWithdrawn, "WS-", "", 50)
+	require.NoError(t, err)
+	require.Len(t, filteredWithdrawn, 2)
+
+	allList, _, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateAll, "", "", 50)
+	require.NoError(t, err)
+	seenStatuses := map[string]bool{}
+	for _, item := range allList {
+		seenStatuses[item.Status] = true
+	}
+	assert.True(t, seenStatuses[store.DecisionStatusPending])
+	assert.True(t, seenStatuses[store.DecisionStatusDecided])
+	assert.True(t, seenStatuses[store.DecisionStatusReplaced])
+	assert.True(t, seenStatuses[store.DecisionStatusWithdrawn])
+}

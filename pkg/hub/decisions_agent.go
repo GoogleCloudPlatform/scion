@@ -39,6 +39,7 @@ const (
 	ErrCodeSourceBeforePrompt      = "source_before_prompt"
 	ErrCodeSourceAuthorNotAllowed  = "source_author_not_allowed"
 	ErrCodeInvalidChoice           = "invalid_choice"
+	ErrCodeWithdrawFailed          = "withdraw_failed"
 )
 
 const (
@@ -48,17 +49,18 @@ const (
 
 // AgentDecisionListItem is one decision version in GET /api/v1/agent/decisions.
 type AgentDecisionListItem struct {
-	RowID           string      `json:"rowId"`
-	Key             string      `json:"key"`
-	Ref             string      `json:"ref"`
-	Version         int         `json:"version"`
-	Status          string      `json:"status"`
-	Question        string      `json:"question"`
-	ConversationID  string      `json:"conversationId"`
-	PromptMessageID string      `json:"promptMessageId"`
-	CreatedAt       time.Time   `json:"createdAt"`
-	DecidedAt       *time.Time  `json:"decidedAt,omitempty"`
-	Answer          *AnswerView `json:"answer,omitempty"`
+	RowID           string             `json:"rowId"`
+	Key             string             `json:"key"`
+	Ref             string             `json:"ref"`
+	Version         int                `json:"version"`
+	Status          string             `json:"status"`
+	Question        string             `json:"question"`
+	ConversationID  string             `json:"conversationId"`
+	PromptMessageID string             `json:"promptMessageId"`
+	CreatedAt       time.Time          `json:"createdAt"`
+	DecidedAt       *time.Time         `json:"decidedAt,omitempty"`
+	Withdrawn       *DecisionWithdrawn `json:"withdrawn,omitempty"`
+	Answer          *AnswerView        `json:"answer,omitempty"`
 }
 
 // AgentDecisionListResponse is the 200 envelope of GET /api/v1/agent/decisions.
@@ -85,6 +87,7 @@ type AgentDecisionVersionView struct {
 	Choices         []messages.Choice   `json:"choices"`
 	DefaultChoiceID string              `json:"defaultChoiceId,omitempty"`
 	ReplacedBy      *DecisionReplacedBy `json:"replacedBy,omitempty"`
+	Withdrawn       *DecisionWithdrawn  `json:"withdrawn,omitempty"`
 	CreatedAt       time.Time           `json:"createdAt"`
 	DecidedAt       *time.Time          `json:"decidedAt,omitempty"`
 	Answers         []AnswerView        `json:"answers"`
@@ -118,12 +121,26 @@ type RecordInterpretedResponse struct {
 	Replayed          bool           `json:"replayed,omitempty"`
 }
 
+// WithdrawDecisionsRequest is the body of POST /api/v1/agent/decisions/withdraw.
+type WithdrawDecisionsRequest struct {
+	Keys     []string `json:"keys"`
+	WholeSet bool     `json:"wholeSet,omitempty"`
+	Reason   string   `json:"reason,omitempty"`
+}
+
+// WithdrawDecisionsResponse is the 200 response of POST /api/v1/agent/decisions/withdraw.
+type WithdrawDecisionsResponse struct {
+	Withdrawn        []DecisionView `json:"withdrawn"`
+	AlreadyWithdrawn []DecisionView `json:"alreadyWithdrawn"`
+}
+
 // handleAgentDecisionRoutes serves the agent decision endpoints, 404 while
 // web.decisions is off:
 //
 //	GET  /api/v1/agent/decisions              list caller agent's decisions
 //	GET  /api/v1/agent/decisions/{key}        show all versions of {key}
 //	POST /api/v1/agent/decisions/interpreted  record interpreted answers
+//	POST /api/v1/agent/decisions/withdraw     withdraw open decisions
 func (s *Server) handleAgentDecisionRoutes(w http.ResponseWriter, r *http.Request) {
 	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
 		agentIdent := agentDecisionCaller(w, r)
@@ -150,6 +167,14 @@ func (s *Server) handleAgentDecisionRoutes(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if seg == "interpreted" && r.Method != http.MethodGet {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+			return
+		}
+		if seg == "withdraw" && r.Method == http.MethodPost {
+			s.handleAgentDecisionWithdraw(w, r, agentIdent)
+			return
+		}
+		if seg == "withdraw" && r.Method != http.MethodGet {
 			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 			return
 		}
@@ -184,10 +209,12 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 		state = store.DecisionListStatePending
 	case string(store.DecisionListStateDecided):
 		state = store.DecisionListStateDecided
+	case string(store.DecisionListStateWithdrawn):
+		state = store.DecisionListStateWithdrawn
 	case string(store.DecisionListStateAll):
 		state = store.DecisionListStateAll
 	default:
-		ValidationError(w, fmt.Sprintf("invalid state %q: must be pending, decided, or all", s), nil)
+		ValidationError(w, fmt.Sprintf("invalid state %q: must be pending, decided, withdrawn, or all", s), nil)
 		return
 	}
 
@@ -255,6 +282,7 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 			PromptMessageID: d.MessageID,
 			CreatedAt:       d.CreatedAt,
 			DecidedAt:       d.DecidedAt,
+			Withdrawn:       decisionWithdrawnView(d),
 			Answer:          answerView(d.EffectiveAnswer()),
 		}
 	}
@@ -325,6 +353,7 @@ func (s *Server) handleAgentDecisionShow(w http.ResponseWriter, r *http.Request,
 			Choices:         choices,
 			DefaultChoiceID: d.DefaultChoiceID,
 			ReplacedBy:      rep,
+			Withdrawn:       decisionWithdrawnView(d),
 			CreatedAt:       d.CreatedAt,
 			DecidedAt:       d.DecidedAt,
 			Answers:         ansViews,
@@ -788,13 +817,15 @@ func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.
 
 	status := http.StatusBadRequest
 	code := ErrCodeInvalidChoice
-	hasAnswered, hasReplaced, hasNotFound := false, false, false
+	hasAnswered, hasReplaced, hasWithdrawn, hasNotFound := false, false, false, false
 	for _, f := range iaErr.Failures {
 		switch f.Reason {
 		case store.InterpretedReasonAlreadyAnswered:
 			hasAnswered = true
 		case store.InterpretedReasonReplaced:
 			hasReplaced = true
+		case store.InterpretedReasonWithdrawn:
+			hasWithdrawn = true
 		case store.InterpretedReasonNotFound:
 			hasNotFound = true
 		}
@@ -806,6 +837,9 @@ func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.
 	case hasReplaced:
 		status = http.StatusConflict
 		code = ErrCodeDecisionReplaced
+	case hasWithdrawn:
+		status = http.StatusConflict
+		code = ErrCodeDecisionWithdrawn
 	case hasNotFound:
 		status = http.StatusNotFound
 		code = ErrCodeDecisionNotFound
@@ -827,7 +861,7 @@ func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.
 		if f.Decision != nil {
 			dv := s.decisionViewFor(ctx, f.Decision)
 			entry["decision"] = dv
-			if firstDecision == nil && (f.Reason == store.InterpretedReasonAlreadyAnswered || f.Reason == store.InterpretedReasonReplaced) {
+			if firstDecision == nil && (f.Reason == store.InterpretedReasonAlreadyAnswered || f.Reason == store.InterpretedReasonReplaced || f.Reason == store.InterpretedReasonWithdrawn) {
 				dvCopy := dv
 				firstDecision = &dvCopy
 			}
@@ -885,9 +919,177 @@ func formatInterpretedFailureMessage(f store.InterpretedKeyFailure) string {
 		return fmt.Sprintf("%s: already answered", f.Key)
 	case store.InterpretedReasonReplaced:
 		return fmt.Sprintf("%s: replaced by a newer version", f.Key)
+	case store.InterpretedReasonWithdrawn:
+		if f.Decision != nil && f.Decision.WithdrawnReason != "" {
+			return fmt.Sprintf("%s: decision was withdrawn (%s)", f.Key, plainLine(f.Decision.WithdrawnReason))
+		}
+		return fmt.Sprintf("%s: decision was withdrawn", f.Key)
 	case store.InterpretedReasonInvalidChoice:
 		return fmt.Sprintf("%s: choice %q is not a choice of this decision", f.Key, f.ChoiceID)
 	case store.InterpretedReasonNotFound:
+		return fmt.Sprintf("%s: decision not found", f.Key)
+	default:
+		return fmt.Sprintf("%s: %s", f.Key, f.Reason)
+	}
+}
+
+// handleAgentDecisionWithdraw serves POST /api/v1/agent/decisions/withdraw.
+func (s *Server) handleAgentDecisionWithdraw(w http.ResponseWriter, r *http.Request, agentIdent AgentIdentity) {
+	ctx := r.Context()
+	agentID := agentIdent.ID()
+
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var req WithdrawDecisionsRequest
+	if err := readJSON(r, &req); err != nil {
+		ValidationError(w, "invalid JSON body: "+err.Error(), nil)
+		return
+	}
+
+	if len(req.Keys) < 1 || len(req.Keys) > messages.MaxDecisionsPerMessage {
+		ValidationError(w, fmt.Sprintf("keys must contain 1 to %d items", messages.MaxDecisionsPerMessage),
+			map[string]interface{}{"field": "keys"})
+		return
+	}
+	seenNorms := make(map[string]bool, len(req.Keys))
+	for i := range req.Keys {
+		req.Keys[i] = strings.TrimSpace(req.Keys[i])
+		if req.Keys[i] == "" {
+			ValidationError(w, "each key must be non-empty", map[string]interface{}{"field": "keys"})
+			return
+		}
+		norm := messages.DecisionKeyNorm(req.Keys[i])
+		if seenNorms[norm] {
+			ValidationError(w, fmt.Sprintf("duplicate decision key %q in request", req.Keys[i]),
+				map[string]interface{}{"field": "keys"})
+			return
+		}
+		seenNorms[norm] = true
+	}
+
+	reason := strings.TrimSpace(req.Reason)
+	if utf8.RuneCountInString(reason) > store.MaxDecisionWithdrawReasonRunes {
+		ValidationError(w, fmt.Sprintf("reason is at most %d characters", store.MaxDecisionWithdrawReasonRunes),
+			map[string]interface{}{"field": "reason"})
+		return
+	}
+
+	res, err := s.store.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: agentID,
+		Keys:         req.Keys,
+		WholeSet:     req.WholeSet,
+		Reason:       reason,
+	})
+	if err != nil {
+		s.writeWithdrawDecisionsError(w, ctx, err)
+		return
+	}
+
+	withdrawnViews := make([]DecisionView, len(res.Withdrawn))
+	for i, d := range res.Withdrawn {
+		withdrawnViews[i] = s.decisionViewFor(ctx, d)
+	}
+	alreadyViews := make([]DecisionView, len(res.AlreadyWithdrawn))
+	for i, d := range res.AlreadyWithdrawn {
+		alreadyViews[i] = s.decisionViewFor(ctx, d)
+	}
+
+	// Best-effort SSE update for each newly withdrawn row and coalesced bell
+	// recompute once per affected user; no chat message is posted (D4, B4).
+	threads := s.publishWithdrawnDecisions(ctx, res.Withdrawn, withdrawnViews)
+	s.enqueueDecisionBellWithdraw(threads)
+
+	writeJSON(w, http.StatusOK, WithdrawDecisionsResponse{
+		Withdrawn:        withdrawnViews,
+		AlreadyWithdrawn: alreadyViews,
+	})
+}
+
+func (s *Server) publishWithdrawnDecisions(ctx context.Context, rows []*store.Decision, views []DecisionView) []decisionBellTopicKey {
+	if len(rows) == 0 {
+		return nil
+	}
+	threads := make([]decisionBellTopicKey, 0, len(rows))
+	var promptsByID map[string]string
+	for i, d := range rows {
+		chatKey := d.ChatKey
+		if chatKey == "" {
+			var cached bool
+			if promptsByID != nil {
+				chatKey, cached = promptsByID[d.MessageID]
+			}
+			if !cached {
+				prompt, err := s.store.GetMessage(ctx, d.MessageID)
+				if err != nil {
+					s.messageLog.Warn("decisions: withdrawn decision's prompt not found for decision.updated", "row_id", d.ID, "message_id", d.MessageID, "error", err)
+					continue
+				}
+				chatKey = prompt.ThreadID
+				if promptsByID == nil {
+					promptsByID = make(map[string]string)
+				}
+				promptsByID[d.MessageID] = chatKey
+			}
+		}
+		if chatKey == "" {
+			s.messageLog.Warn("decisions: withdrawn decision has no chat_key for decision.updated", "row_id", d.ID, "message_id", d.MessageID)
+			continue
+		}
+		s.publishDecisionUpdatedEventAt(d.ProjectID, d.MessageID, chatKey, views[i])
+		threads = append(threads, decisionBellTopicKey{projectID: d.ProjectID, chatKey: chatKey})
+	}
+	return threads
+}
+
+func (s *Server) writeWithdrawDecisionsError(w http.ResponseWriter, ctx context.Context, err error) {
+	if errors.Is(err, store.ErrInvalidInput) {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	var wdErr *store.WithdrawDecisionsError
+	if !errors.As(err, &wdErr) || len(wdErr.Failures) == 0 {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	failures := make([]map[string]interface{}, 0, len(wdErr.Failures))
+	msgs := make([]string, 0, len(wdErr.Failures))
+	for _, f := range wdErr.Failures {
+		msg := formatWithdrawFailureMessage(f)
+		msgs = append(msgs, msg)
+		entry := map[string]interface{}{
+			"key":     f.Key,
+			"reason":  f.Reason,
+			"message": msg,
+		}
+		if f.Decision != nil {
+			entry["decision"] = s.decisionViewFor(ctx, f.Decision)
+		}
+		failures = append(failures, entry)
+	}
+	writeError(w, http.StatusConflict, ErrCodeWithdrawFailed, strings.Join(msgs, "; "),
+		map[string]interface{}{"failures": failures})
+}
+
+func formatWithdrawFailureMessage(f store.WithdrawKeyFailure) string {
+	switch f.Reason {
+	case store.WithdrawReasonAlreadyAnswered:
+		if f.Decision != nil {
+			if eff := f.Decision.EffectiveAnswer(); eff != nil {
+				who := eff.AnsweredByName
+				if who == "" {
+					who = eff.AnsweredByEmail
+				}
+				if who == "" {
+					who = "a user"
+				}
+				if eff.Provenance == store.DecisionProvenanceAgentInterpreted {
+					return fmt.Sprintf("%s: already answered by %s (%s, interpreted awaiting confirmation)", f.Key, who, eff.ChoiceLabel)
+				}
+				return fmt.Sprintf("%s: already answered by %s (%s)", f.Key, who, eff.ChoiceLabel)
+			}
+		}
+		return fmt.Sprintf("%s: already answered", f.Key)
+	case store.WithdrawReasonNotFound:
 		return fmt.Sprintf("%s: decision not found", f.Key)
 	default:
 		return fmt.Sprintf("%s: %s", f.Key, f.Reason)

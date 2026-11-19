@@ -333,8 +333,11 @@ func TestMessageCommand_UpdateHelpDocumentsFullSet(t *testing.T) {
 	require.NotNil(t, flag)
 	assert.Contains(t, flag.Usage, "--decisions")
 	assert.Contains(t, flag.Usage, "still-pending keys")
+	assert.Contains(t, flag.Usage, "scion decisions withdraw")
 	assert.Contains(t, messageCmd.Long, "Decision prompts (--decisions or --decisions-file")
 	assert.Contains(t, messageCmd.Long, "still-pending keys")
+	assert.Contains(t, messageCmd.Long, "To retire a decision without a replacement")
+	assert.Contains(t, messageCmd.Long, "withdraw")
 }
 
 // TestMessageCommand_ChoicesAliasesDeprecatedAndHidden covers the S3 CLI

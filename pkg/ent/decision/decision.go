@@ -55,6 +55,10 @@ const (
 	FieldDecidedAt = "decided_at"
 	// FieldReplacedAt holds the string denoting the replaced_at field in the database.
 	FieldReplacedAt = "replaced_at"
+	// FieldWithdrawnAt holds the string denoting the withdrawn_at field in the database.
+	FieldWithdrawnAt = "withdrawn_at"
+	// FieldWithdrawnReason holds the string denoting the withdrawn_reason field in the database.
+	FieldWithdrawnReason = "withdrawn_reason"
 	// Table holds the table name of the decision in the database.
 	Table = "decisions"
 )
@@ -82,6 +86,8 @@ var Columns = []string{
 	FieldCreatedAt,
 	FieldDecidedAt,
 	FieldReplacedAt,
+	FieldWithdrawnAt,
+	FieldWithdrawnReason,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -146,9 +152,10 @@ const DefaultStatus = StatusPending
 
 // Status values.
 const (
-	StatusPending  Status = "pending"
-	StatusDecided  Status = "decided"
-	StatusReplaced Status = "replaced"
+	StatusPending   Status = "pending"
+	StatusDecided   Status = "decided"
+	StatusReplaced  Status = "replaced"
+	StatusWithdrawn Status = "withdrawn"
 )
 
 func (s Status) String() string {
@@ -158,7 +165,7 @@ func (s Status) String() string {
 // StatusValidator is a validator for the "status" field enum values. It is called by the builders before save.
 func StatusValidator(s Status) error {
 	switch s {
-	case StatusPending, StatusDecided, StatusReplaced:
+	case StatusPending, StatusDecided, StatusReplaced, StatusWithdrawn:
 		return nil
 	default:
 		return fmt.Errorf("decision: invalid enum value for status field: %q", s)
@@ -266,4 +273,14 @@ func ByDecidedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByReplacedAt orders the results by the replaced_at field.
 func ByReplacedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldReplacedAt, opts...).ToFunc()
+}
+
+// ByWithdrawnAt orders the results by the withdrawn_at field.
+func ByWithdrawnAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWithdrawnAt, opts...).ToFunc()
+}
+
+// ByWithdrawnReason orders the results by the withdrawn_reason field.
+func ByWithdrawnReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWithdrawnReason, opts...).ToFunc()
 }

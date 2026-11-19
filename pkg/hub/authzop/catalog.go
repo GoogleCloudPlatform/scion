@@ -350,7 +350,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "POST /api/v1/agent/identity-token", Kind: ExemptionInternalOnly, Reason: "Agent OIDC identity token, agent-JWT auth", Owner: "route_metadata.go", Response: ResponseCredential},
 	{Pattern: "POST /api/v1/agent/secrets", Kind: ExemptionInternalOnly, Reason: "Agent secret fetch, agent-JWT auth", Owner: "route_metadata.go", Response: ResponseCredential},
 	{Pattern: "/api/v1/agent/decisions", Kind: ExemptionInternalOnly, Reason: "Agent self-scoped decision list (asker_agent_id = caller), agent-JWT auth; refuses non-agent callers with 403 agents_only; experiment-gated", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/agent/decisions/", Kind: ExemptionInternalOnly, Reason: "Agent self-scoped decision show and interpreted-answer recording (asker_agent_id = caller; source author permission verified via authorizeChatSend), agent-JWT auth; refuses non-agent callers with 403 agents_only; experiment-gated", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/agent/decisions/", Kind: ExemptionInternalOnly, Reason: "Agent self-scoped decision show, interpreted-answer recording, and withdrawal (asker_agent_id = caller; source author permission verified via authorizeChatSend for interpreted answers), agent-JWT auth; refuses non-agent callers with 403 agents_only; experiment-gated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/conduit", Kind: ExemptionInternalOnly, Reason: "Conduit session, agent-JWT auth (own agent row only) or runtime broker HMAC auth (shared connect verifier; carries broker RPCs), experiment-gated", Owner: "route_metadata.go"},
 
 	// Webhook endpoints — signature verification

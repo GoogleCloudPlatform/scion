@@ -42,6 +42,7 @@ type DecisionView struct {
 	DefaultChoiceID string              `json:"defaultChoiceId,omitempty"`
 	Choices         []messages.Choice   `json:"choices"`
 	ReplacedBy      *DecisionReplacedBy `json:"replacedBy,omitempty"`
+	Withdrawn       *DecisionWithdrawn  `json:"withdrawn,omitempty"`
 	// Decision is the effective answer; nil while pending.
 	Decision *AnswerView `json:"decision,omitempty"`
 }
@@ -52,6 +53,13 @@ type DecisionReplacedBy struct {
 	MessageID string    `json:"messageId"`
 	Version   int       `json:"version"`
 	At        time.Time `json:"at"`
+}
+
+// DecisionWithdrawn describes when, why, and by which agent a decision was withdrawn.
+type DecisionWithdrawn struct {
+	At     time.Time `json:"at"`
+	Reason string    `json:"reason,omitempty"`
+	ByName string    `json:"byName"`
 }
 
 // AnswerView is an answer as clients see it.
@@ -204,7 +212,20 @@ func decisionView(d *store.Decision, replacedBy *store.Decision) DecisionView {
 		}
 		v.ReplacedBy = r
 	}
+	v.Withdrawn = decisionWithdrawnView(d)
 	return v
+}
+
+// decisionWithdrawnView returns the withdrawn metadata of d when status is withdrawn.
+func decisionWithdrawnView(d *store.Decision) *DecisionWithdrawn {
+	if d == nil || d.Status != store.DecisionStatusWithdrawn || d.WithdrawnAt == nil {
+		return nil
+	}
+	return &DecisionWithdrawn{
+		At:     *d.WithdrawnAt,
+		Reason: d.WithdrawnReason,
+		ByName: d.AskerAgentName,
+	}
 }
 
 // decisionViewFor builds the view of d, reading the row that replaced it.

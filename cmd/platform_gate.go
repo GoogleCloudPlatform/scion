@@ -74,12 +74,13 @@ var windowsAllowed = map[string]bool{
 	"conversation.group.add":    true,
 	"conversation.group.remove": true,
 
-	// Decisions (ptone/scion#7797, decision Q1): pure Hub API calls,
-	// no local writes.
-	"decisions":        true,
-	"decisions.list":   true,
-	"decisions.show":   true,
-	"decisions.record": true,
+	// Decisions (ptone/scion#7797, decision Q1; withdraw ptone/scion#8190):
+	// pure Hub API calls, no local writes.
+	"decisions":          true,
+	"decisions.list":     true,
+	"decisions.show":     true,
+	"decisions.record":   true,
+	"decisions.withdraw": true,
 
 	// Event triggers and webhook endpoints (ptone/scion#8028): pure Hub API
 	// calls, no local writes.

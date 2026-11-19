@@ -19,11 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"text/tabwriter"
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
@@ -48,9 +50,10 @@ project by name, slug or ID, and --sort selects project or recent order. On
 (answer time).
 
 In agent mode, lists the Decisions your agent has asked. By default only
-pending Decisions; pass --decided for answered active Decisions or --all to
-include pending, decided and replaced versions. Search with -q/--search
-(question, key or effective answer label, 2 to 256 characters).
+pending Decisions; pass --decided for answered active Decisions, --withdrawn
+for withdrawn Decisions, or --all to include pending, decided, replaced and
+withdrawn versions. Search with -q/--search (question, key or effective answer
+label, 2 to 256 characters).
 
 Examples:
   scion decisions list
@@ -60,6 +63,7 @@ Examples:
   scion decisions list --made --conversation release --since 2026-11-01
   scion decisions list --made --answered-by me --json
   scion decisions list --decided          # agent mode
+  scion decisions list --withdrawn        # agent mode
   scion decisions list --all -q release   # agent mode
   scion decisions list --all --json       # agent mode`,
 		Args: cobra.NoArgs,
@@ -68,8 +72,9 @@ Examples:
 	// Agent mode.
 	cmd.Flags().Bool("pending", false, "List pending Decisions only (default)")
 	cmd.Flags().Bool("decided", false, "List decided active Decisions only")
-	cmd.Flags().Bool("all", false, "List pending, decided, and replaced Decisions")
-	markFlagsForMode(cmd, ModeAgent, "pending", "decided", "all")
+	cmd.Flags().Bool("withdrawn", false, "List withdrawn Decisions only")
+	cmd.Flags().Bool("all", false, "List pending, decided, replaced, and withdrawn Decisions")
+	markFlagsForMode(cmd, ModeAgent, "pending", "decided", "withdrawn", "all")
 	// Human mode.
 	cmd.Flags().Bool("waiting", false, "List Decisions waiting on you (default)")
 	cmd.Flags().Bool("made", false, "List the Decisions made (the answer log)")
@@ -93,6 +98,7 @@ Examples:
 func resolveDecisionsListState(cmd *cobra.Command) (string, error) {
 	pending, _ := cmd.Flags().GetBool("pending")
 	decided, _ := cmd.Flags().GetBool("decided")
+	withdrawn, _ := cmd.Flags().GetBool("withdrawn")
 	all, _ := cmd.Flags().GetBool("all")
 
 	setCount := 0
@@ -102,15 +108,20 @@ func resolveDecisionsListState(cmd *cobra.Command) (string, error) {
 	if decided {
 		setCount++
 	}
+	if withdrawn {
+		setCount++
+	}
 	if all {
 		setCount++
 	}
 	if setCount > 1 {
-		return "", newUsageError("pass at most one of --pending, --decided, or --all")
+		return "", newUsageError("pass at most one of --pending, --decided, --withdrawn, or --all")
 	}
 	switch {
 	case decided:
 		return "decided", nil
+	case withdrawn:
+		return "withdrawn", nil
 	case all:
 		return "all", nil
 	default:
@@ -161,6 +172,10 @@ func runAgentDecisionsList(cmd *cobra.Command) error {
 			Limit:  200,
 		})
 		if err != nil {
+			var apiErr *apiclient.APIError
+			if state == "withdrawn" && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest && strings.Contains(apiErr.Message, "invalid state") {
+				return errors.New(errMsgDecisionWithdrawUnsupported)
+			}
 			return formatDecisionAPIError(err)
 		}
 		if search != "" && page.Query == "" {
@@ -201,6 +216,12 @@ func writeDecisionsListTable(out io.Writer, items []hubclient.AgentDecisionListI
 		answer := "-"
 		if it.Answer != nil && it.Answer.Label != "" {
 			answer = collapseSingleLine(it.Answer.Label)
+		} else if it.Withdrawn != nil {
+			detail := "withdrawn " + clitime.Format(it.Withdrawn.At, clitime.Minute)
+			if it.Withdrawn.Reason != "" {
+				detail += ": " + truncateRunes(collapseSingleLine(it.Withdrawn.Reason), decisionQuestionMaxWidth, true)
+			}
+			answer = detail
 		}
 		answeredBy := decisionAnswererDisplay(it.Answer)
 		provenance := decisionProvenanceDisplay(it.Answer)

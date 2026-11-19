@@ -37,10 +37,25 @@ const MaxPendingDecisionsPerAgent = 50
 
 // Decision statuses.
 const (
-	DecisionStatusPending  = "pending"
-	DecisionStatusDecided  = "decided"
-	DecisionStatusReplaced = "replaced"
+	DecisionStatusPending   = "pending"
+	DecisionStatusDecided   = "decided"
+	DecisionStatusReplaced  = "replaced"
+	DecisionStatusWithdrawn = "withdrawn"
 )
+
+// MaxDecisionWithdrawReasonRunes bounds WithdrawDecisionsInput.Reason.
+const MaxDecisionWithdrawReasonRunes = 500
+
+// DecisionStatusTerminal reports whether status is a terminal decision status
+// (replaced or withdrawn) that cannot accept new answers.
+func DecisionStatusTerminal(status string) bool {
+	switch status {
+	case DecisionStatusReplaced, DecisionStatusWithdrawn:
+		return true
+	default:
+		return false
+	}
+}
 
 // Decision key sources.
 const (
@@ -89,6 +104,9 @@ var (
 	// ErrDecisionReplaced: the decision version was replaced by a newer
 	// one and can no longer be answered.
 	ErrDecisionReplaced = errors.New("replaced")
+	// ErrDecisionWithdrawn: the decision version was withdrawn by its
+	// asking agent and can no longer be answered.
+	ErrDecisionWithdrawn = errors.New("withdrawn")
 	// ErrDecisionAnswerConflict: the version already has an answer of this
 	// provenance (an agent_interpreted answer: of either provenance), or
 	// the idempotency key was used for a different answer.
@@ -114,15 +132,20 @@ var (
 	// failed row-state or choice validation; nothing was stored. Matches
 	// *InterpretedAnswersError.
 	ErrInterpretedAnswersFailed = errors.New("interpreted answers failed")
+	// ErrWithdrawDecisionsFailed: one or more keys of WithdrawDecisions
+	// failed lookup or row-state validation; nothing was stored. Matches
+	// *WithdrawDecisionsError.
+	ErrWithdrawDecisionsFailed = errors.New("withdraw decisions failed")
 )
 
 // DecisionListState filters ListAgentDecisions by row status.
 type DecisionListState string
 
 const (
-	DecisionListStatePending DecisionListState = "pending"
-	DecisionListStateDecided DecisionListState = "decided"
-	DecisionListStateAll     DecisionListState = "all"
+	DecisionListStatePending   DecisionListState = "pending"
+	DecisionListStateDecided   DecisionListState = "decided"
+	DecisionListStateWithdrawn DecisionListState = "withdrawn"
+	DecisionListStateAll       DecisionListState = "all"
 
 	DefaultDecisionListLimit = 50
 	MaxDecisionListLimit     = 200
@@ -193,6 +216,7 @@ type ProjectDecisionAnswerEntry struct {
 const (
 	InterpretedReasonAlreadyAnswered = "already_answered"
 	InterpretedReasonReplaced        = "replaced"
+	InterpretedReasonWithdrawn       = "withdrawn"
 	InterpretedReasonInvalidChoice   = "invalid_choice"
 	InterpretedReasonNotFound        = "decision_not_found"
 )
@@ -227,10 +251,41 @@ func (e *InterpretedAnswersError) Error() string {
 
 func (e *InterpretedAnswersError) Unwrap() error { return ErrInterpretedAnswersFailed }
 
+// Per-key failure reasons in WithdrawDecisionsError.
+const (
+	WithdrawReasonAlreadyAnswered = "already_answered"
+	WithdrawReasonNotFound        = "decision_not_found"
+)
+
+// WithdrawKeyFailure describes why one key in WithdrawDecisions could not be
+// withdrawn.
+type WithdrawKeyFailure struct {
+	Key      string
+	Reason   string    // WithdrawReason*
+	Decision *Decision // current active row with Answers loaded, when present
+}
+
+// WithdrawDecisionsError lists every key that failed in an all-or-nothing
+// WithdrawDecisions call. Nothing was stored.
+type WithdrawDecisionsError struct {
+	Failures []WithdrawKeyFailure
+}
+
+func (e *WithdrawDecisionsError) Error() string {
+	parts := make([]string, len(e.Failures))
+	for i, f := range e.Failures {
+		parts[i] = fmt.Sprintf("%s: %s", f.Key, f.Reason)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (e *WithdrawDecisionsError) Unwrap() error { return ErrWithdrawDecisionsFailed }
+
 // Reasons a row of a set submit is not answerable, or is missing from it
 // (AnswerSetChangedError.Reasons).
 const (
 	AnswerSetReasonReplaced            = "replaced"
+	AnswerSetReasonWithdrawn           = "withdrawn"
 	AnswerSetReasonDecided             = "decided"
 	AnswerSetReasonNotRecordedAnswerer = "not_recorded_answerer"
 	AnswerSetReasonMissing             = "missing"
@@ -239,9 +294,9 @@ const (
 
 // AnswerSetChangedError lists, by decision row id, why a set submit does
 // not equal the prompt's actionable set: a requested row that is not
-// actionable (replaced, decided, not_recorded_answerer, not_actionable) or
-// an actionable row the request left out (missing). It matches
-// ErrAnswerSetChanged.
+// actionable (replaced, withdrawn, decided, not_recorded_answerer,
+// not_actionable) or an actionable row the request left out (missing). It
+// matches ErrAnswerSetChanged.
 type AnswerSetChangedError struct {
 	Reasons map[string]string
 }
@@ -265,11 +320,17 @@ func (e *AnswerSetChangedError) Unwrap() error { return ErrAnswerSetChanged }
 // v5, 4.1, for one row and user: "" when the user may answer the row in a
 // set submit (pending, or decided with only an agent_interpreted answer
 // that records this user), else the reason it is excluded (replaced,
-// decided for a direct answer, not_recorded_answerer for another user's
-// interpreted answer). d.Answers must be loaded.
+// withdrawn, decided for a direct answer, not_recorded_answerer for another
+// user's interpreted answer). d.Answers must be loaded.
 func DecisionActionableReason(d *Decision, userID string) string {
-	if d.Status == DecisionStatusReplaced {
+	switch d.Status {
+	case DecisionStatusReplaced:
 		return AnswerSetReasonReplaced
+	case DecisionStatusWithdrawn:
+		return AnswerSetReasonWithdrawn
+	}
+	if DecisionStatusTerminal(d.Status) {
+		return AnswerSetReasonNotActionable
 	}
 	var interpreted *DecisionAnswer
 	for _, a := range d.Answers {
@@ -377,9 +438,11 @@ type Decision struct {
 	Status       string // DecisionStatus*
 	ReplacedByID string // empty unless replaced
 
-	CreatedAt  time.Time
-	DecidedAt  *time.Time
-	ReplacedAt *time.Time
+	CreatedAt       time.Time
+	DecidedAt       *time.Time
+	ReplacedAt      *time.Time
+	WithdrawnAt     *time.Time
+	WithdrawnReason string // empty when none
 
 	// Answers are the version's answers, oldest first. GetDecision and
 	// GetDecisionsByMessageIDs load them.
@@ -626,6 +689,21 @@ type RecordInterpretedInput struct {
 	IdempotencyKey string
 }
 
+// WithdrawDecisionsInput withdraws open decisions of one asking agent.
+type WithdrawDecisionsInput struct {
+	AskerAgentID string
+	Keys         []string // 1..MaxDecisionsPerMessage; resolved to active versions
+	WholeSet     bool     // also every other pending row of each key's prompt message
+	Reason       string   // optional, <= 500 runes, trimmed
+}
+
+// WithdrawDecisionsResult reports the decisions withdrawn (or already
+// withdrawn) by WithdrawDecisions.
+type WithdrawDecisionsResult struct {
+	Withdrawn        []*Decision // now withdrawn, prompt order, answers loaded
+	AlreadyWithdrawn []*Decision
+}
+
 // DecisionStore persists decision prompt decisions and their answers.
 type DecisionStore interface {
 	// CreateDecisionPrompt stores a decision prompt in one transaction: it
@@ -737,6 +815,15 @@ type DecisionStore interface {
 	// inserts the DecisionAnswer rows (sharing a new BatchID when len >= 2,
 	// empty BatchID when len == 1), and marks every target row decided.
 	RecordInterpretedAnswers(ctx context.Context, in *RecordInterpretedInput) (*AnswerSetResult, error)
+
+	// WithdrawDecisions withdraws open decisions of one asking agent in one
+	// transaction: it locks target rows on Postgres in (key_norm, version)
+	// order, validates every key (unknown -> decision_not_found; any answer,
+	// direct or interpreted awaiting confirm -> already_answered; already
+	// withdrawn -> AlreadyWithdrawn idempotently without overwriting the first
+	// reason), returns *WithdrawDecisionsError with nothing stored if any key
+	// fails, and otherwise marks pending target rows withdrawn.
+	WithdrawDecisions(ctx context.Context, in *WithdrawDecisionsInput) (*WithdrawDecisionsResult, error)
 
 	// ListProjectDecisionAgents returns the distinct asking agents recorded on
 	// decisions in projectID (including hard-deleted agents whose rows in the

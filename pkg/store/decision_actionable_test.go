@@ -88,3 +88,29 @@ func TestDecisionActionableReason(t *testing.T) {
 		})
 	}
 }
+
+func TestDecisionStatusTerminal(t *testing.T) {
+	cases := map[string]bool{
+		DecisionStatusPending:   false,
+		DecisionStatusDecided:   false,
+		DecisionStatusReplaced:  true,
+		DecisionStatusWithdrawn: true,
+		"":                      false,
+		"expired":               false,
+	}
+	for status, want := range cases {
+		if got := DecisionStatusTerminal(status); got != want {
+			t.Errorf("DecisionStatusTerminal(%q) = %v, want %v", status, got, want)
+		}
+	}
+}
+
+func TestDecisionActionableReason_Withdrawn(t *testing.T) {
+	d := &Decision{Status: DecisionStatusWithdrawn}
+	if got := DecisionActionableReason(d, "u1"); got != AnswerSetReasonWithdrawn {
+		t.Fatalf("DecisionActionableReason(withdrawn, u1) = %q, want %q", got, AnswerSetReasonWithdrawn)
+	}
+	if got := DecisionActionableReason(d, ""); got != AnswerSetReasonWithdrawn {
+		t.Fatalf("DecisionActionableReason(withdrawn, \"\") = %q, want %q", got, AnswerSetReasonWithdrawn)
+	}
+}

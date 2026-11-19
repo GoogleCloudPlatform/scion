@@ -36,6 +36,7 @@ import (
 // Error codes of the decision endpoints (design choices v4, 4.10).
 const (
 	ErrCodeDecisionReplaced    = "replaced"
+	ErrCodeDecisionWithdrawn   = "withdrawn"
 	ErrCodeDecisionAnswered    = "already_answered"
 	ErrCodeNotRecordedAnswerer = "not_recorded_answerer"
 )
@@ -385,8 +386,12 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	// Step 3b: state, for every answer that is not a replay.
 	outcome := store.DecisionOutcomeAnswer
 	var overridden *store.DecisionAnswer
-	if d.Status == store.DecisionStatusReplaced {
-		s.writeDecisionReplaced(w, ctx, d)
+	if store.DecisionStatusTerminal(d.Status) {
+		if d.Status == store.DecisionStatusReplaced {
+			s.writeDecisionReplaced(w, ctx, d)
+			return
+		}
+		s.writeDecisionWithdrawn(w, ctx, d)
 		return
 	}
 	if eff := d.EffectiveAnswer(); eff != nil {
@@ -447,7 +452,14 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	})
 	switch {
 	case err == nil:
-	case errors.Is(err, store.ErrDecisionReplaced):
+	case errors.Is(err, store.ErrDecisionReplaced), errors.Is(err, store.ErrDecisionWithdrawn):
+		if cur, gerr := s.store.GetDecision(ctx, d.ID); gerr == nil {
+			d = cur
+		}
+		if d.Status == store.DecisionStatusWithdrawn || (errors.Is(err, store.ErrDecisionWithdrawn) && d.Status != store.DecisionStatusReplaced) {
+			s.writeDecisionWithdrawn(w, ctx, d)
+			return
+		}
 		s.writeDecisionReplaced(w, ctx, d)
 		return
 	case errors.Is(err, store.ErrNotRecordedAnswerer):
@@ -525,6 +537,13 @@ func (s *Server) writeDecisionReplaced(w http.ResponseWriter, ctx context.Contex
 	}
 	writeError(w, http.StatusConflict, ErrCodeDecisionReplaced,
 		fmt.Sprintf("decision %s v%d was replaced by a newer version", d.Key, d.Version), details)
+}
+
+// writeDecisionWithdrawn answers 409 withdrawn with the decision view.
+func (s *Server) writeDecisionWithdrawn(w http.ResponseWriter, ctx context.Context, d *store.Decision) {
+	writeError(w, http.StatusConflict, ErrCodeDecisionWithdrawn,
+		fmt.Sprintf("decision %s v%d was withdrawn", d.Key, d.Version),
+		map[string]interface{}{"decision": s.decisionViewFor(ctx, d)})
 }
 
 // writeDecisionAnswered answers 409 already_answered with the effective
@@ -699,6 +718,16 @@ func (s *Server) publishDecisionUpdatedAt(ctx context.Context, projectID, messag
 	}
 	defer s.enqueueDecisionBellEvent(projectID, threadID, namedUserID)
 
+	s.publishDecisionUpdatedEventAt(projectID, messageID, threadID, view)
+}
+
+// publishDecisionUpdatedEventAt publishes chat.decision.updated on the row's
+// conversation subject without enqueuing a bell recompute, for callers (such as
+// multi-row withdrawal) that batch bell recomputes once per call.
+func (s *Server) publishDecisionUpdatedEventAt(projectID, messageID, threadID string, view DecisionView) {
+	if s == nil || s.events == nil {
+		return
+	}
 	evt := map[string]interface{}{"decision": view, "messageId": messageID, "threadId": threadID}
 	if strings.HasPrefix(threadID, "dm:") {
 		parts := strings.Split(threadID, ":")

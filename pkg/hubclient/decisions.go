@@ -36,6 +36,9 @@ type DecisionService interface {
 	// RecordInterpreted atomically records 1..10 interpreted answers from a user
 	// free-text reply message.
 	RecordInterpreted(ctx context.Context, req *RecordInterpretedRequest) (*RecordInterpretedResponse, error)
+
+	// Withdraw retires open decisions asked by the calling agent.
+	Withdraw(ctx context.Context, req *WithdrawDecisionsRequest) (*WithdrawDecisionsResponse, error)
 }
 
 type decisionService struct {
@@ -44,7 +47,7 @@ type decisionService struct {
 
 // ListAgentDecisionsOptions configures GET /api/v1/agent/decisions.
 type ListAgentDecisionsOptions struct {
-	State  string // pending (default), decided, or all
+	State  string // pending (default), decided, withdrawn, or all
 	Query  string // optional substring search (2..256 runes)
 	Cursor string
 	Limit  int
@@ -76,6 +79,13 @@ type DecisionReplacedByView struct {
 	At        time.Time `json:"at"`
 }
 
+// DecisionWithdrawnView describes when and why an asking agent withdrew a decision.
+type DecisionWithdrawnView struct {
+	At     time.Time `json:"at"`
+	Reason string    `json:"reason,omitempty"`
+	ByName string    `json:"byName"`
+}
+
 // DecisionView is the full view of one decision version returned by record/answer endpoints.
 type DecisionView struct {
 	RowID           string                  `json:"rowId"`
@@ -90,22 +100,24 @@ type DecisionView struct {
 	DefaultChoiceID string                  `json:"defaultChoiceId,omitempty"`
 	Choices         []messages.Choice       `json:"choices"`
 	ReplacedBy      *DecisionReplacedByView `json:"replacedBy,omitempty"`
+	Withdrawn       *DecisionWithdrawnView  `json:"withdrawn,omitempty"`
 	Decision        *DecisionAnswerView     `json:"decision,omitempty"`
 }
 
 // AgentDecisionListItem is one decision version in AgentDecisionListResponse.
 type AgentDecisionListItem struct {
-	RowID           string              `json:"rowId"`
-	Key             string              `json:"key"`
-	Ref             string              `json:"ref"`
-	Version         int                 `json:"version"`
-	Status          string              `json:"status"`
-	Question        string              `json:"question"`
-	ConversationID  string              `json:"conversationId"`
-	PromptMessageID string              `json:"promptMessageId"`
-	CreatedAt       time.Time           `json:"createdAt"`
-	DecidedAt       *time.Time          `json:"decidedAt,omitempty"`
-	Answer          *DecisionAnswerView `json:"answer,omitempty"`
+	RowID           string                 `json:"rowId"`
+	Key             string                 `json:"key"`
+	Ref             string                 `json:"ref"`
+	Version         int                    `json:"version"`
+	Status          string                 `json:"status"`
+	Question        string                 `json:"question"`
+	ConversationID  string                 `json:"conversationId"`
+	PromptMessageID string                 `json:"promptMessageId"`
+	CreatedAt       time.Time              `json:"createdAt"`
+	DecidedAt       *time.Time             `json:"decidedAt,omitempty"`
+	Withdrawn       *DecisionWithdrawnView `json:"withdrawn,omitempty"`
+	Answer          *DecisionAnswerView    `json:"answer,omitempty"`
 }
 
 // AgentDecisionListResponse is the response from GET /api/v1/agent/decisions.
@@ -128,6 +140,7 @@ type AgentDecisionVersionView struct {
 	Choices         []messages.Choice       `json:"choices"`
 	DefaultChoiceID string                  `json:"defaultChoiceId,omitempty"`
 	ReplacedBy      *DecisionReplacedByView `json:"replacedBy,omitempty"`
+	Withdrawn       *DecisionWithdrawnView  `json:"withdrawn,omitempty"`
 	CreatedAt       time.Time               `json:"createdAt"`
 	DecidedAt       *time.Time              `json:"decidedAt,omitempty"`
 	Answers         []DecisionAnswerView    `json:"answers"`
@@ -159,6 +172,19 @@ type RecordInterpretedResponse struct {
 	BatchID           string         `json:"batch_id,omitempty"`
 	Decisions         []DecisionView `json:"decisions"`
 	Replayed          bool           `json:"replayed,omitempty"`
+}
+
+// WithdrawDecisionsRequest is the body of POST /api/v1/agent/decisions/withdraw.
+type WithdrawDecisionsRequest struct {
+	Keys     []string `json:"keys"`
+	WholeSet bool     `json:"wholeSet,omitempty"`
+	Reason   string   `json:"reason,omitempty"`
+}
+
+// WithdrawDecisionsResponse is the response from POST /api/v1/agent/decisions/withdraw.
+type WithdrawDecisionsResponse struct {
+	Withdrawn        []DecisionView `json:"withdrawn"`
+	AlreadyWithdrawn []DecisionView `json:"alreadyWithdrawn"`
 }
 
 func (s *decisionService) List(ctx context.Context, opts *ListAgentDecisionsOptions) (*AgentDecisionListResponse, error) {
@@ -198,4 +224,12 @@ func (s *decisionService) RecordInterpreted(ctx context.Context, req *RecordInte
 		return nil, err
 	}
 	return apiclient.DecodeRequired[RecordInterpretedResponse](resp)
+}
+
+func (s *decisionService) Withdraw(ctx context.Context, req *WithdrawDecisionsRequest) (*WithdrawDecisionsResponse, error) {
+	resp, err := s.c.post(ctx, "/api/v1/agent/decisions/withdraw", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[WithdrawDecisionsResponse](resp)
 }

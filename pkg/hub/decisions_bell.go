@@ -222,7 +222,7 @@ func (s *Server) stopDecisionBell() {
 
 // enqueueDecisionBellEvent schedules bell recomputes after a decision lifecycle
 // transition (prompt created, answered, interpreted, confirmed, changed, batch
-// answered, or replaced; design B4).
+// answered, replaced, or withdrawn; design B4).
 func (s *Server) enqueueDecisionBellEvent(projectID, threadID, namedUserID string) {
 	if s == nil || s.store == nil || !s.decisionsBellEnabled() {
 		return
@@ -248,6 +248,25 @@ func (s *Server) enqueueDecisionBellEvent(projectID, threadID, namedUserID strin
 	}
 	if projectID != "" && threadID != "" && !strings.HasPrefix(threadID, "agent:") {
 		s.enqueueDecisionBellTopic(projectID, threadID)
+	}
+}
+
+// enqueueDecisionBellWithdraw schedules bell recomputes for the de-duplicated
+// conversations of a withdraw call (design-8145 4.3, B4: the DM user for DM
+// prompts; the topic's posting members for topic prompts). An empty slice (for
+// example an idempotent repeat where every key was already withdrawn) enqueues
+// nothing.
+func (s *Server) enqueueDecisionBellWithdraw(threads []decisionBellTopicKey) {
+	if len(threads) == 0 {
+		return
+	}
+	seen := make(map[decisionBellTopicKey]bool, len(threads))
+	for _, t := range threads {
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		s.enqueueDecisionBellEvent(t.projectID, t.chatKey, "")
 	}
 }
 
