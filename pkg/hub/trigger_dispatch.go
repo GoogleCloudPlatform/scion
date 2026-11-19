@@ -279,12 +279,16 @@ func (s *Server) runTriggerMaintenance(ctx context.Context) {
 	}
 }
 
-// verifiedLabelForFireEvent maps known signature_mode values to canonical
-// integrity labels and fails closed to ExternalVerifiedUnverified for missing
-// or unrecognized modes (never assuming scion-v1 and never echoing raw input).
+// verifiedLabelForFireEvent maps known source kinds and signature_mode values
+// to canonical integrity labels and fails closed to ExternalVerifiedUnverified
+// for missing or unrecognized modes (never assuming scion-v1 and never echoing
+// raw input).
 func verifiedLabelForFireEvent(ev *hubfire.FireEvent) string {
 	if ev == nil {
 		return messaging.ExternalVerifiedUnverified
+	}
+	if ev.SourceKind == store.TriggerSourceKindGitHub {
+		return messaging.ExternalVerifiedGitHubHMACSHA256Projected
 	}
 	switch ev.Attributes["signature_mode"] {
 	case store.WebhookSignatureModeBodyOnly, messaging.ExternalVerifiedHMACSHA256Body:
@@ -446,9 +450,12 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 	verified := verifiedLabelForFireEvent(ev)
 	if len(ev.Attributes) > 0 {
 		attrs := maps.Clone(ev.Attributes)
-		if verified != messaging.ExternalVerifiedScionV1 {
-			// §8.1a: only scion_v1 signs routing headers; body_only and any
-			// unverified/unknown mode never forward unsigned header attributes.
+		if verified != messaging.ExternalVerifiedScionV1 && verified != messaging.ExternalVerifiedGitHubHMACSHA256Projected {
+			// §8.1a: generic webhook modes other than scion_v1 strip header-derived
+			// attributes. Stage 3 GitHub App deliveries (§4.1, §4.3) keep "delivery"
+			// and "event" populated from X-GitHub-Delivery and X-GitHub-Event: those
+			// headers are shape-checked at ingress, NOT authenticated by
+			// X-Hub-Signature-256 (which covers the raw request body only).
 			delete(attrs, "delivery")
 			delete(attrs, "event")
 			delete(attrs, "subject")
@@ -459,6 +466,9 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 		if len(attrs) > 0 {
 			body.Attributes = attrs
 		}
+	}
+	if len(ev.Lists) > 0 {
+		body.Lists = copyTriggerStringListMap(ev.Lists)
 	}
 	if len(ev.Payload) > 0 {
 		body.External = messaging.NewExternalPayload(verified, ev.Payload)

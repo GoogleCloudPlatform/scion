@@ -3924,9 +3924,11 @@ var (
 		{Name: "type", Type: field.TypeString},
 		{Name: "subject", Type: field.TypeString},
 		{Name: "dedup_key", Type: field.TypeString},
+		{Name: "body_sha256", Type: field.TypeString, Default: ""},
 		{Name: "occurred_at", Type: field.TypeTime},
 		{Name: "received_at", Type: field.TypeTime},
 		{Name: "attributes", Type: field.TypeString, Size: 2147483647, Default: "{}"},
+		{Name: "lists", Type: field.TypeString, Size: 2147483647, Default: "{}"},
 		{Name: "headers", Type: field.TypeString, Size: 2147483647, Default: "{}"},
 		{Name: "payload", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "payload_bytes", Type: field.TypeInt, Default: 0},
@@ -3946,7 +3948,7 @@ var (
 			{
 				Name:    "triggerevent_project_id_received_at",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerEventsColumns[1], TriggerEventsColumns[8]},
+				Columns: []*schema.Column{TriggerEventsColumns[1], TriggerEventsColumns[9]},
 			},
 			{
 				Name:    "triggerevent_source_kind_source_id_dedup_key",
@@ -3954,9 +3956,17 @@ var (
 				Columns: []*schema.Column{TriggerEventsColumns[2], TriggerEventsColumns[3], TriggerEventsColumns[6]},
 			},
 			{
+				Name:    "triggerevent_project_id_source_kind_body_sha256",
+				Unique:  true,
+				Columns: []*schema.Column{TriggerEventsColumns[1], TriggerEventsColumns[2], TriggerEventsColumns[7]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "body_sha256 <> ''",
+				},
+			},
+			{
 				Name:    "triggerevent_status_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerEventsColumns[13], TriggerEventsColumns[18]},
+				Columns: []*schema.Column{TriggerEventsColumns[15], TriggerEventsColumns[20]},
 			},
 		},
 	}

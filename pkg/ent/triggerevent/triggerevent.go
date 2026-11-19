@@ -26,12 +26,16 @@ const (
 	FieldSubject = "subject"
 	// FieldDedupKey holds the string denoting the dedup_key field in the database.
 	FieldDedupKey = "dedup_key"
+	// FieldBodySha256 holds the string denoting the body_sha256 field in the database.
+	FieldBodySha256 = "body_sha256"
 	// FieldOccurredAt holds the string denoting the occurred_at field in the database.
 	FieldOccurredAt = "occurred_at"
 	// FieldReceivedAt holds the string denoting the received_at field in the database.
 	FieldReceivedAt = "received_at"
 	// FieldAttributes holds the string denoting the attributes field in the database.
 	FieldAttributes = "attributes"
+	// FieldLists holds the string denoting the lists field in the database.
+	FieldLists = "lists"
 	// FieldHeaders holds the string denoting the headers field in the database.
 	FieldHeaders = "headers"
 	// FieldPayload holds the string denoting the payload field in the database.
@@ -63,9 +67,11 @@ var Columns = []string{
 	FieldType,
 	FieldSubject,
 	FieldDedupKey,
+	FieldBodySha256,
 	FieldOccurredAt,
 	FieldReceivedAt,
 	FieldAttributes,
+	FieldLists,
 	FieldHeaders,
 	FieldPayload,
 	FieldPayloadBytes,
@@ -98,8 +104,12 @@ var (
 	SubjectValidator func(string) error
 	// DedupKeyValidator is a validator for the "dedup_key" field. It is called by the builders before save.
 	DedupKeyValidator func(string) error
+	// DefaultBodySha256 holds the default value on creation for the "body_sha256" field.
+	DefaultBodySha256 string
 	// DefaultAttributes holds the default value on creation for the "attributes" field.
 	DefaultAttributes string
+	// DefaultLists holds the default value on creation for the "lists" field.
+	DefaultLists string
 	// DefaultHeaders holds the default value on creation for the "headers" field.
 	DefaultHeaders string
 	// DefaultPayload holds the default value on creation for the "payload" field.
@@ -156,6 +166,11 @@ func ByDedupKey(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDedupKey, opts...).ToFunc()
 }
 
+// ByBodySha256 orders the results by the body_sha256 field.
+func ByBodySha256(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBodySha256, opts...).ToFunc()
+}
+
 // ByOccurredAt orders the results by the occurred_at field.
 func ByOccurredAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOccurredAt, opts...).ToFunc()
@@ -169,6 +184,11 @@ func ByReceivedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByAttributes orders the results by the attributes field.
 func ByAttributes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAttributes, opts...).ToFunc()
+}
+
+// ByLists orders the results by the lists field.
+func ByLists(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLists, opts...).ToFunc()
 }
 
 // ByHeaders orders the results by the headers field.

@@ -105,8 +105,12 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 
 	default:
-		// Ignore unhandled event types
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": eventType})
+		if !s.githubTriggersEnabled() {
+			// Ignore unhandled event types unchanged when triggers or github_triggers is off (§4.1 step 0).
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": eventType})
+			return
+		}
+		s.handleGitHubContentWebhook(w, r, eventType, deliveryID, body)
 		return
 	}
 }

@@ -165,11 +165,20 @@ type Result struct {
 	Truncated    bool
 
 	// Ingress routing and bot-guard facts (§4.1–4.2, §5.7).
-	InstallationID int64
-	RepoFullName   string
-	SenderLogin    string
-	SenderID       int64
-	SenderType     string
+	Action            string
+	InstallationID    int64
+	RepoFullName      string
+	SenderLogin       string
+	SenderID          int64
+	SenderType        string
+	PerformedViaAppID int64
+
+	// Unexported state retained from Normalize so ingress can apply a lazily
+	// fetched AppSlug without decoding the payload a second time.
+	commandEligible bool
+	rawCommandBody  string
+	maxCommandArgs  int
+	maxCommandLine  int
 }
 
 // DedupKey returns the per-project deduplication key "<delivery>/<projectID>" (§4.3).
@@ -182,6 +191,14 @@ func (r Result) DedupKey(projectID string) string {
 // identity (<slug>[bot] with sender.type == "Bot", case-insensitive; §4.1 step 6, §5.7).
 func (r Result) IsOwnApp(appSlug string) bool {
 	return IsOwnAppSender(r.SenderType, r.SenderLogin, appSlug)
+}
+
+// IsOwnAppActor reports whether the webhook delivery originated from this
+// GitHub App itself: either its sender matches <appSlug>[bot] or, for an
+// object-creating action, the created object carries
+// performed_via_github_app.id == appID (> 0; §5.7).
+func (r Result) IsOwnAppActor(appSlug string, appID int64) bool {
+	return IsOwnAppActor(r.SenderType, r.SenderLogin, appSlug, r.PerformedViaAppID, appID)
 }
 
 // DedupKey formats the §4.3 per-project deduplication key "<deliveryID>/<projectID>".
@@ -201,6 +218,16 @@ func IsOwnAppSender(senderType, senderLogin, appSlug string) bool {
 	}
 	return strings.EqualFold(senderType, "Bot") &&
 		strings.EqualFold(senderLogin, slug+"[bot]")
+}
+
+// IsOwnAppActor reports whether a webhook delivery originated from this GitHub
+// App itself: either (senderType, senderLogin) matches <appSlug>[bot] with
+// sender.type == "Bot", OR performedViaAppID matches the configured appID (> 0).
+func IsOwnAppActor(senderType, senderLogin, appSlug string, performedViaAppID, appID int64) bool {
+	if appID > 0 && performedViaAppID > 0 && performedViaAppID == appID {
+		return true
+	}
+	return IsOwnAppSender(senderType, senderLogin, appSlug)
 }
 
 // IsSupportedEvent reports whether eventName is in the Stage 3 normalisation table (§5.1).

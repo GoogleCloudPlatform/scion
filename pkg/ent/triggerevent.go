@@ -30,12 +30,16 @@ type TriggerEvent struct {
 	Subject string `json:"subject,omitempty"`
 	// DedupKey holds the value of the "dedup_key" field.
 	DedupKey string `json:"dedup_key,omitempty"`
+	// BodySha256 holds the value of the "body_sha256" field.
+	BodySha256 string `json:"body_sha256,omitempty"`
 	// OccurredAt holds the value of the "occurred_at" field.
 	OccurredAt time.Time `json:"occurred_at,omitempty"`
 	// ReceivedAt holds the value of the "received_at" field.
 	ReceivedAt time.Time `json:"received_at,omitempty"`
 	// Attributes holds the value of the "attributes" field.
 	Attributes string `json:"attributes,omitempty"`
+	// Lists holds the value of the "lists" field.
+	Lists string `json:"lists,omitempty"`
 	// Headers holds the value of the "headers" field.
 	Headers string `json:"headers,omitempty"`
 	// Payload holds the value of the "payload" field.
@@ -64,7 +68,7 @@ func (*TriggerEvent) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case triggerevent.FieldPayloadBytes, triggerevent.FieldMatchCount, triggerevent.FieldFireCount:
 			values[i] = new(sql.NullInt64)
-		case triggerevent.FieldSourceKind, triggerevent.FieldSourceID, triggerevent.FieldType, triggerevent.FieldSubject, triggerevent.FieldDedupKey, triggerevent.FieldAttributes, triggerevent.FieldHeaders, triggerevent.FieldPayload, triggerevent.FieldStatus, triggerevent.FieldError:
+		case triggerevent.FieldSourceKind, triggerevent.FieldSourceID, triggerevent.FieldType, triggerevent.FieldSubject, triggerevent.FieldDedupKey, triggerevent.FieldBodySha256, triggerevent.FieldAttributes, triggerevent.FieldLists, triggerevent.FieldHeaders, triggerevent.FieldPayload, triggerevent.FieldStatus, triggerevent.FieldError:
 			values[i] = new(sql.NullString)
 		case triggerevent.FieldOccurredAt, triggerevent.FieldReceivedAt, triggerevent.FieldProcessedAt, triggerevent.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -127,6 +131,12 @@ func (_m *TriggerEvent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.DedupKey = value.String
 			}
+		case triggerevent.FieldBodySha256:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field body_sha256", values[i])
+			} else if value.Valid {
+				_m.BodySha256 = value.String
+			}
 		case triggerevent.FieldOccurredAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field occurred_at", values[i])
@@ -144,6 +154,12 @@ func (_m *TriggerEvent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field attributes", values[i])
 			} else if value.Valid {
 				_m.Attributes = value.String
+			}
+		case triggerevent.FieldLists:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field lists", values[i])
+			} else if value.Valid {
+				_m.Lists = value.String
 			}
 		case triggerevent.FieldHeaders:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -254,6 +270,9 @@ func (_m *TriggerEvent) String() string {
 	builder.WriteString("dedup_key=")
 	builder.WriteString(_m.DedupKey)
 	builder.WriteString(", ")
+	builder.WriteString("body_sha256=")
+	builder.WriteString(_m.BodySha256)
+	builder.WriteString(", ")
 	builder.WriteString("occurred_at=")
 	builder.WriteString(_m.OccurredAt.Format(time.ANSIC))
 	builder.WriteString(", ")
@@ -262,6 +281,9 @@ func (_m *TriggerEvent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("attributes=")
 	builder.WriteString(_m.Attributes)
+	builder.WriteString(", ")
+	builder.WriteString("lists=")
+	builder.WriteString(_m.Lists)
 	builder.WriteString(", ")
 	builder.WriteString("headers=")
 	builder.WriteString(_m.Headers)

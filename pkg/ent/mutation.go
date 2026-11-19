@@ -116891,9 +116891,11 @@ type TriggerEventMutation struct {
 	_type            *string
 	subject          *string
 	dedup_key        *string
+	body_sha256      *string
 	occurred_at      *time.Time
 	received_at      *time.Time
 	attributes       *string
+	lists            *string
 	headers          *string
 	payload          *string
 	payload_bytes    *int
@@ -117232,6 +117234,42 @@ func (m *TriggerEventMutation) ResetDedupKey() {
 	m.dedup_key = nil
 }
 
+// SetBodySha256 sets the "body_sha256" field.
+func (m *TriggerEventMutation) SetBodySha256(s string) {
+	m.body_sha256 = &s
+}
+
+// BodySha256 returns the value of the "body_sha256" field in the mutation.
+func (m *TriggerEventMutation) BodySha256() (r string, exists bool) {
+	v := m.body_sha256
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBodySha256 returns the old "body_sha256" field's value of the TriggerEvent entity.
+// If the TriggerEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerEventMutation) OldBodySha256(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBodySha256 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBodySha256 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBodySha256: %w", err)
+	}
+	return oldValue.BodySha256, nil
+}
+
+// ResetBodySha256 resets all changes to the "body_sha256" field.
+func (m *TriggerEventMutation) ResetBodySha256() {
+	m.body_sha256 = nil
+}
+
 // SetOccurredAt sets the "occurred_at" field.
 func (m *TriggerEventMutation) SetOccurredAt(t time.Time) {
 	m.occurred_at = &t
@@ -117338,6 +117376,42 @@ func (m *TriggerEventMutation) OldAttributes(ctx context.Context) (v string, err
 // ResetAttributes resets all changes to the "attributes" field.
 func (m *TriggerEventMutation) ResetAttributes() {
 	m.attributes = nil
+}
+
+// SetLists sets the "lists" field.
+func (m *TriggerEventMutation) SetLists(s string) {
+	m.lists = &s
+}
+
+// Lists returns the value of the "lists" field in the mutation.
+func (m *TriggerEventMutation) Lists() (r string, exists bool) {
+	v := m.lists
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLists returns the old "lists" field's value of the TriggerEvent entity.
+// If the TriggerEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerEventMutation) OldLists(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLists is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLists requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLists: %w", err)
+	}
+	return oldValue.Lists, nil
+}
+
+// ResetLists resets all changes to the "lists" field.
+func (m *TriggerEventMutation) ResetLists() {
+	m.lists = nil
 }
 
 // SetHeaders sets the "headers" field.
@@ -117784,7 +117858,7 @@ func (m *TriggerEventMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerEventMutation) Fields() []string {
-	fields := make([]string, 0, 18)
+	fields := make([]string, 0, 20)
 	if m.project_id != nil {
 		fields = append(fields, triggerevent.FieldProjectID)
 	}
@@ -117803,6 +117877,9 @@ func (m *TriggerEventMutation) Fields() []string {
 	if m.dedup_key != nil {
 		fields = append(fields, triggerevent.FieldDedupKey)
 	}
+	if m.body_sha256 != nil {
+		fields = append(fields, triggerevent.FieldBodySha256)
+	}
 	if m.occurred_at != nil {
 		fields = append(fields, triggerevent.FieldOccurredAt)
 	}
@@ -117811,6 +117888,9 @@ func (m *TriggerEventMutation) Fields() []string {
 	}
 	if m.attributes != nil {
 		fields = append(fields, triggerevent.FieldAttributes)
+	}
+	if m.lists != nil {
+		fields = append(fields, triggerevent.FieldLists)
 	}
 	if m.headers != nil {
 		fields = append(fields, triggerevent.FieldHeaders)
@@ -117859,12 +117939,16 @@ func (m *TriggerEventMutation) Field(name string) (ent.Value, bool) {
 		return m.Subject()
 	case triggerevent.FieldDedupKey:
 		return m.DedupKey()
+	case triggerevent.FieldBodySha256:
+		return m.BodySha256()
 	case triggerevent.FieldOccurredAt:
 		return m.OccurredAt()
 	case triggerevent.FieldReceivedAt:
 		return m.ReceivedAt()
 	case triggerevent.FieldAttributes:
 		return m.Attributes()
+	case triggerevent.FieldLists:
+		return m.Lists()
 	case triggerevent.FieldHeaders:
 		return m.Headers()
 	case triggerevent.FieldPayload:
@@ -117904,12 +117988,16 @@ func (m *TriggerEventMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldSubject(ctx)
 	case triggerevent.FieldDedupKey:
 		return m.OldDedupKey(ctx)
+	case triggerevent.FieldBodySha256:
+		return m.OldBodySha256(ctx)
 	case triggerevent.FieldOccurredAt:
 		return m.OldOccurredAt(ctx)
 	case triggerevent.FieldReceivedAt:
 		return m.OldReceivedAt(ctx)
 	case triggerevent.FieldAttributes:
 		return m.OldAttributes(ctx)
+	case triggerevent.FieldLists:
+		return m.OldLists(ctx)
 	case triggerevent.FieldHeaders:
 		return m.OldHeaders(ctx)
 	case triggerevent.FieldPayload:
@@ -117979,6 +118067,13 @@ func (m *TriggerEventMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDedupKey(v)
 		return nil
+	case triggerevent.FieldBodySha256:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBodySha256(v)
+		return nil
 	case triggerevent.FieldOccurredAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -117999,6 +118094,13 @@ func (m *TriggerEventMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAttributes(v)
+		return nil
+	case triggerevent.FieldLists:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLists(v)
 		return nil
 	case triggerevent.FieldHeaders:
 		v, ok := value.(string)
@@ -118184,6 +118286,9 @@ func (m *TriggerEventMutation) ResetField(name string) error {
 	case triggerevent.FieldDedupKey:
 		m.ResetDedupKey()
 		return nil
+	case triggerevent.FieldBodySha256:
+		m.ResetBodySha256()
+		return nil
 	case triggerevent.FieldOccurredAt:
 		m.ResetOccurredAt()
 		return nil
@@ -118192,6 +118297,9 @@ func (m *TriggerEventMutation) ResetField(name string) error {
 		return nil
 	case triggerevent.FieldAttributes:
 		m.ResetAttributes()
+		return nil
+	case triggerevent.FieldLists:
+		m.ResetLists()
 		return nil
 	case triggerevent.FieldHeaders:
 		m.ResetHeaders()

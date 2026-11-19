@@ -85,6 +85,11 @@ func DedupKey(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldDedupKey, v))
 }
 
+// BodySha256 applies equality check predicate on the "body_sha256" field. It's identical to BodySha256EQ.
+func BodySha256(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldBodySha256, v))
+}
+
 // OccurredAt applies equality check predicate on the "occurred_at" field. It's identical to OccurredAtEQ.
 func OccurredAt(v time.Time) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldOccurredAt, v))
@@ -98,6 +103,11 @@ func ReceivedAt(v time.Time) predicate.TriggerEvent {
 // Attributes applies equality check predicate on the "attributes" field. It's identical to AttributesEQ.
 func Attributes(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldAttributes, v))
+}
+
+// Lists applies equality check predicate on the "lists" field. It's identical to ListsEQ.
+func Lists(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldLists, v))
 }
 
 // Headers applies equality check predicate on the "headers" field. It's identical to HeadersEQ.
@@ -510,6 +520,71 @@ func DedupKeyContainsFold(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldContainsFold(FieldDedupKey, v))
 }
 
+// BodySha256EQ applies the EQ predicate on the "body_sha256" field.
+func BodySha256EQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldBodySha256, v))
+}
+
+// BodySha256NEQ applies the NEQ predicate on the "body_sha256" field.
+func BodySha256NEQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNEQ(FieldBodySha256, v))
+}
+
+// BodySha256In applies the In predicate on the "body_sha256" field.
+func BodySha256In(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldIn(FieldBodySha256, vs...))
+}
+
+// BodySha256NotIn applies the NotIn predicate on the "body_sha256" field.
+func BodySha256NotIn(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNotIn(FieldBodySha256, vs...))
+}
+
+// BodySha256GT applies the GT predicate on the "body_sha256" field.
+func BodySha256GT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGT(FieldBodySha256, v))
+}
+
+// BodySha256GTE applies the GTE predicate on the "body_sha256" field.
+func BodySha256GTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGTE(FieldBodySha256, v))
+}
+
+// BodySha256LT applies the LT predicate on the "body_sha256" field.
+func BodySha256LT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLT(FieldBodySha256, v))
+}
+
+// BodySha256LTE applies the LTE predicate on the "body_sha256" field.
+func BodySha256LTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLTE(FieldBodySha256, v))
+}
+
+// BodySha256Contains applies the Contains predicate on the "body_sha256" field.
+func BodySha256Contains(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContains(FieldBodySha256, v))
+}
+
+// BodySha256HasPrefix applies the HasPrefix predicate on the "body_sha256" field.
+func BodySha256HasPrefix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasPrefix(FieldBodySha256, v))
+}
+
+// BodySha256HasSuffix applies the HasSuffix predicate on the "body_sha256" field.
+func BodySha256HasSuffix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasSuffix(FieldBodySha256, v))
+}
+
+// BodySha256EqualFold applies the EqualFold predicate on the "body_sha256" field.
+func BodySha256EqualFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEqualFold(FieldBodySha256, v))
+}
+
+// BodySha256ContainsFold applies the ContainsFold predicate on the "body_sha256" field.
+func BodySha256ContainsFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContainsFold(FieldBodySha256, v))
+}
+
 // OccurredAtEQ applies the EQ predicate on the "occurred_at" field.
 func OccurredAtEQ(v time.Time) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldOccurredAt, v))
@@ -653,6 +728,71 @@ func AttributesEqualFold(v string) predicate.TriggerEvent {
 // AttributesContainsFold applies the ContainsFold predicate on the "attributes" field.
 func AttributesContainsFold(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldContainsFold(FieldAttributes, v))
+}
+
+// ListsEQ applies the EQ predicate on the "lists" field.
+func ListsEQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldLists, v))
+}
+
+// ListsNEQ applies the NEQ predicate on the "lists" field.
+func ListsNEQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNEQ(FieldLists, v))
+}
+
+// ListsIn applies the In predicate on the "lists" field.
+func ListsIn(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldIn(FieldLists, vs...))
+}
+
+// ListsNotIn applies the NotIn predicate on the "lists" field.
+func ListsNotIn(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNotIn(FieldLists, vs...))
+}
+
+// ListsGT applies the GT predicate on the "lists" field.
+func ListsGT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGT(FieldLists, v))
+}
+
+// ListsGTE applies the GTE predicate on the "lists" field.
+func ListsGTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGTE(FieldLists, v))
+}
+
+// ListsLT applies the LT predicate on the "lists" field.
+func ListsLT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLT(FieldLists, v))
+}
+
+// ListsLTE applies the LTE predicate on the "lists" field.
+func ListsLTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLTE(FieldLists, v))
+}
+
+// ListsContains applies the Contains predicate on the "lists" field.
+func ListsContains(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContains(FieldLists, v))
+}
+
+// ListsHasPrefix applies the HasPrefix predicate on the "lists" field.
+func ListsHasPrefix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasPrefix(FieldLists, v))
+}
+
+// ListsHasSuffix applies the HasSuffix predicate on the "lists" field.
+func ListsHasSuffix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasSuffix(FieldLists, v))
+}
+
+// ListsEqualFold applies the EqualFold predicate on the "lists" field.
+func ListsEqualFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEqualFold(FieldLists, v))
+}
+
+// ListsContainsFold applies the ContainsFold predicate on the "lists" field.
+func ListsContainsFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContainsFold(FieldLists, v))
 }
 
 // HeadersEQ applies the EQ predicate on the "headers" field.

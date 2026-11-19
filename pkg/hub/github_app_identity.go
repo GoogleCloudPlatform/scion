@@ -30,8 +30,9 @@ import (
 )
 
 const (
-	githubAppIdentityFetchTimeout = 5 * time.Second
-	githubAppSlugWarnInterval     = time.Hour
+	githubAppIdentityFetchTimeout        = 5 * time.Second
+	githubAppIdentityFailureRetryBackoff = 5 * time.Minute
+	githubAppSlugWarnInterval            = time.Hour
 )
 
 // githubTriggersRequiredEvents lists the GitHub App webhook events Stage 3
@@ -86,9 +87,9 @@ type GitHubTriggersProjectReadiness struct {
 }
 
 // githubTriggersEnabled reports whether GitHub App triggers are enabled.
+// Both hub.triggers and hub.github_triggers must be enabled server-side (§4.1 step 0, §8.2).
 func (s *Server) githubTriggersEnabled() bool {
-	// TODO(ptone/scion#8028): also check s.experimentEnabled(experiments.Triggers) once Stage 1 1b-1 merges.
-	return s.experimentEnabled(experiments.GitHubTriggers)
+	return s.experimentEnabled(experiments.Triggers) && s.experimentEnabled(experiments.GitHubTriggers)
 }
 
 // requireGitHubTriggers wraps next with the server-side experiment gate for
@@ -116,6 +117,7 @@ type githubAppIdentityState struct {
 	checkedAt    time.Time
 	lastErr      string
 	lastSlugWarn time.Time
+	nowFn        func() time.Time
 
 	startupMu      sync.Mutex
 	startupCancel  context.CancelFunc
@@ -137,6 +139,16 @@ func (c *githubAppIdentityState) generation() uint64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.gen
+}
+
+func (c *githubAppIdentityState) now() time.Time {
+	c.mu.RLock()
+	fn := c.nowFn
+	c.mu.RUnlock()
+	if fn != nil {
+		return fn()
+	}
+	return timeNow()
 }
 
 func (c *githubAppIdentityState) snapshot(appID int64) (*githubapp.AppIdentity, time.Time, string) {
@@ -218,7 +230,7 @@ func (s *Server) refreshGitHubAppIdentityLocked(ctx context.Context) (*githubapp
 	startGen := s.githubAppIdentity.generation()
 	s.mu.RUnlock()
 
-	now := timeNow().UTC()
+	now := s.githubAppIdentity.now().UTC()
 	client, err := s.getGitHubAppClient()
 	if err != nil {
 		if appID != 0 {
@@ -243,7 +255,7 @@ func (s *Server) refreshGitHubAppIdentityLocked(ctx context.Context) (*githubapp
 		s.githubAppRateLimit = rl
 		s.mu.Unlock()
 	}
-	now = timeNow().UTC()
+	now = s.githubAppIdentity.now().UTC()
 	if err != nil {
 		// Do not poison the shared cache when the caller's own context was
 		// canceled or expired (e.g. an aborted HTTP request or server shutdown),
@@ -341,15 +353,27 @@ func (s *Server) stopGitHubAppIdentityInit() {
 	st.startupWG.Wait()
 }
 
+func githubAppIdentityCacheUsable(id *githubapp.AppIdentity, checkedAt, now time.Time) bool {
+	if checkedAt.IsZero() {
+		return false
+	}
+	if id != nil {
+		return true
+	}
+	return now.Sub(checkedAt) < githubAppIdentityFailureRetryBackoff
+}
+
 // ensureGitHubAppIdentity returns the cached AppIdentity snapshot, performing a
-// single lazy GET /app fetch if the cache has never been populated for the
-// current AppID and credentials are available.
+// lazy GET /app fetch if the cache has never been populated for the current
+// AppID (or if a previous failed fetch has passed the bounded retry backoff)
+// and credentials are available.
 func (s *Server) ensureGitHubAppIdentity(ctx context.Context) (*githubapp.AppIdentity, time.Time, string) {
 	cfg, hasPrivateKey, _ := s.githubAppCredentialPresence(ctx)
 	if cfg.AppID == 0 {
 		return nil, time.Time{}, ""
 	}
-	if id, checkedAt, lastErr := s.githubAppIdentity.snapshot(cfg.AppID); !checkedAt.IsZero() {
+	now := s.githubAppIdentity.now().UTC()
+	if id, checkedAt, lastErr := s.githubAppIdentity.snapshot(cfg.AppID); githubAppIdentityCacheUsable(id, checkedAt, now) {
 		return id, checkedAt, lastErr
 	}
 	if !hasPrivateKey {
@@ -359,21 +383,24 @@ func (s *Server) ensureGitHubAppIdentity(ctx context.Context) (*githubapp.AppIde
 	s.githubAppIdentity.refreshMu.Lock()
 	defer s.githubAppIdentity.refreshMu.Unlock()
 	// Retry once if a concurrent App config reset (generation counter bump)
-	// discarded the in-flight result, leaving checkedAt zero. Ordinary GET /app
-	// failures set checkedAt and are cached deliberately without retrying.
+	// discarded the in-flight result, leaving checkedAt zero. Failed GET /app
+	// calls record checkedAt and are cached for githubAppIdentityFailureRetryBackoff
+	// before the next rate-limited retry.
 	for attempt := 0; attempt < 2; attempt++ {
 		cfg, hasPrivateKey, _ = s.githubAppCredentialPresence(ctx)
 		if cfg.AppID == 0 || !hasPrivateKey {
 			return nil, time.Time{}, ""
 		}
-		if id, checkedAt, lastErr := s.githubAppIdentity.snapshot(cfg.AppID); !checkedAt.IsZero() {
+		now = s.githubAppIdentity.now().UTC()
+		if id, checkedAt, lastErr := s.githubAppIdentity.snapshot(cfg.AppID); githubAppIdentityCacheUsable(id, checkedAt, now) {
 			return id, checkedAt, lastErr
 		}
 		if _, err := s.refreshGitHubAppIdentityLocked(ctx); err != nil {
 			slog.Warn("GitHub App lazy identity fetch failed",
 				"app_id", cfg.AppID, "error", upstreamText(err.Error()))
 		}
-		if id, checkedAt, lastErr := s.githubAppIdentity.snapshot(cfg.AppID); !checkedAt.IsZero() || ctx.Err() != nil {
+		now = s.githubAppIdentity.now().UTC()
+		if id, checkedAt, lastErr := s.githubAppIdentity.snapshot(cfg.AppID); githubAppIdentityCacheUsable(id, checkedAt, now) || ctx.Err() != nil {
 			return id, checkedAt, lastErr
 		}
 	}
@@ -407,6 +434,28 @@ func (s *Server) GitHubAppBotLogin(ctx context.Context) string {
 	return ""
 }
 
+// peekGitHubAppMentionIdentities reads the configured app_slug override or
+// already-cached GET /app slug and mention aliases from memory without making
+// any network/store call or emitting an unavailable-slug warning.
+func (s *Server) peekGitHubAppMentionIdentities() (slug string, aliases []string, ok bool) {
+	s.mu.RLock()
+	appID := s.config.GitHubAppConfig.AppID
+	override := normalizeGitHubMentionHandle(s.config.GitHubAppConfig.AppSlug)
+	rawAliases := append([]string(nil), s.config.GitHubAppConfig.CommandMentionAliases...)
+	s.mu.RUnlock()
+
+	aliases = normalizeGitHubMentionAliases(rawAliases)
+	if override != "" {
+		return override, aliases, true
+	}
+	if appID > 0 {
+		if id, _, _ := s.githubAppIdentity.snapshot(appID); id != nil && id.Slug != "" {
+			return id.Slug, aliases, true
+		}
+	}
+	return "", aliases, false
+}
+
 // GitHubAppMentionIdentities returns the canonical App mention slug and any
 // configured command mention aliases (without leading '@') for Stage 3 command
 // detection (§5.6, §10.2). When neither app_slug nor a fetched GET /app slug
@@ -424,7 +473,7 @@ func (s *Server) GitHubAppMentionIdentities(ctx context.Context) (slug string, a
 	if id, hasID := s.GitHubAppIdentity(ctx); hasID && id.Slug != "" {
 		return id.Slug, aliases, true
 	}
-	if s.githubAppIdentity.shouldWarnSlugUnavailable(timeNow().UTC()) {
+	if s.githubAppIdentity.shouldWarnSlugUnavailable(s.githubAppIdentity.now().UTC()) {
 		slog.Warn("GitHub App slug unavailable; skipping command mention detection until GET /app succeeds or server.github_app.app_slug is set")
 	}
 	return "", aliases, false

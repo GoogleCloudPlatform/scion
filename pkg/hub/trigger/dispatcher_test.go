@@ -197,6 +197,9 @@ func (m *memTriggerStore) GetTriggerEvent(_ context.Context, id string) (*store.
 func (m *memTriggerStore) GetTriggerEventByDedupKey(context.Context, string, string, string) (*store.TriggerEvent, error) {
 	return nil, store.ErrNotFound
 }
+func (m *memTriggerStore) GetTriggerEventByBodySHA256(context.Context, string, string, string) (*store.TriggerEvent, error) {
+	return nil, store.ErrNotFound
+}
 func (m *memTriggerStore) ListTriggerEvents(context.Context, store.TriggerEventFilter, store.ListOptions) (*store.ListResult[store.TriggerEvent], error) {
 	return &store.ListResult[store.TriggerEvent]{}, nil
 }

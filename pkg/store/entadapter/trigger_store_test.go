@@ -18,8 +18,10 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -839,4 +841,218 @@ func TestListTriggerEvents_AgentVisibility_ManyFiresSubquery(t *testing.T) {
 	hasHidden, err := cs.AgentHasFiredTriggerForEvent(ctx, evHidden.ID, agentA)
 	require.NoError(t, err)
 	assert.False(t, hasHidden)
+}
+
+func TestTriggerEvent_ListsPersistenceAndCeiling(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+	now := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+
+	evWithLists := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.pull_request.opened",
+		Subject:    "github:acme/widgets#42",
+		DedupKey:   "72d3162e-cc78-11e3-81ab-4c9367dc0958/" + projID,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Attributes: map[string]string{"provider": "github", "repo": "acme/widgets"},
+		Lists: map[string][]string{
+			"labels":              {"bug", "p1"},
+			"assignees":           {"octocat"},
+			"requested_reviewers": {},
+		},
+		Payload:      `{"action":"opened"}`,
+		PayloadBytes: len(`{"action":"opened"}`),
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, evWithLists))
+	assert.Equal(t, []string{"bug", "p1"}, evWithLists.Lists["labels"])
+	assert.Equal(t, []string{"octocat"}, evWithLists.Lists["assignees"])
+	assert.Equal(t, []string{}, evWithLists.Lists["requested_reviewers"])
+
+	byID, err := cs.GetTriggerEvent(ctx, evWithLists.ID)
+	require.NoError(t, err)
+	assert.Equal(t, evWithLists.Lists, byID.Lists)
+
+	byDedup, err := cs.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindGitHub, "424242", evWithLists.DedupKey)
+	require.NoError(t, err)
+	assert.Equal(t, evWithLists.Lists, byDedup.Lists)
+
+	listed, err := cs.ListTriggerEvents(ctx, store.TriggerEventFilter{
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+	}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, listed.Items, 1)
+	assert.Equal(t, evWithLists.Lists, listed.Items[0].Lists)
+
+	// Omitted Lists defaults to empty map.
+	evEmpty := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#43",
+		DedupKey:   "82d3162e-cc78-11e3-81ab-4c9367dc0958/" + projID,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created"}`,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, evEmpty))
+	gotEmpty, err := cs.GetTriggerEvent(ctx, evEmpty.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotEmpty.Lists)
+
+	// Regression (R2): 40 50-char '&'-heavy labels fit comfortably within 8 KiB
+	// under SetEscapeHTML(false) (~2.1 KiB) even though standard json.Marshal
+	// expands each '&' to '\u0026' (> 11 KiB). The store must measure the unescaped
+	// JSON bytes matching githubtrigger.Normalize.
+	ampLabels := make([]string, 40)
+	for i := range ampLabels {
+		prefix := fmt.Sprintf("L%02d", i)
+		ampLabels[i] = prefix + strings.Repeat("&", 50-len(prefix))
+	}
+	ampLists := map[string][]string{"labels": ampLabels}
+	escapedRaw, err := json.Marshal(ampLists)
+	require.NoError(t, err)
+	require.Greater(t, len(escapedRaw), store.MaxTriggerEventListsBytes)
+
+	evAmp := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#45",
+		DedupKey:   "a2d3162e-cc78-11e3-81ab-4c9367dc0958/" + projID,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Lists:      ampLists,
+		Payload:    `{"action":"created"}`,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, evAmp))
+	gotAmp, err := cs.GetTriggerEvent(ctx, evAmp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ampLabels, gotAmp.Lists["labels"])
+
+	// Lists genuinely exceeding 8 KiB under SetEscapeHTML(false) are rejected with ErrInvalidInput.
+	oversized := make([]string, 0, 200)
+	for i := 0; i < 200; i++ {
+		oversized = append(oversized, strings.Repeat("x", 60))
+	}
+	evOversized := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.pull_request.opened",
+		Subject:    "github:acme/widgets#44",
+		DedupKey:   "92d3162e-cc78-11e3-81ab-4c9367dc0958/" + projID,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Lists:      map[string][]string{"labels": oversized},
+		Payload:    `{"action":"opened"}`,
+	}
+	require.ErrorIs(t, cs.CreateTriggerEvent(ctx, evOversized), store.ErrInvalidInput)
+}
+
+func TestTriggerEvent_BodySHA256UniquePerProjectAndSourceKind(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projA := uuid.NewString()
+	projB := uuid.NewString()
+	now := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	hash1 := strings.Repeat("a", 64)
+	hash2 := strings.Repeat("b", 64)
+
+	ev1 := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projA,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#1",
+		DedupKey:   "11111111-1111-1111-1111-111111111111/" + projA,
+		BodySHA256: hash1,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created"}`,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, ev1))
+
+	byHash, err := cs.GetTriggerEventByBodySHA256(ctx, projA, store.TriggerSourceKindGitHub, hash1)
+	require.NoError(t, err)
+	assert.Equal(t, ev1.ID, byHash.ID)
+	assert.Equal(t, hash1, byHash.BodySHA256)
+
+	// Replay with a brand-new DedupKey on the same (project_id, source_kind, body_sha256)
+	// violates the partial unique index and returns store.ErrAlreadyExists.
+	replaySameProject := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projA,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#1",
+		DedupKey:   "22222222-2222-2222-2222-222222222222/" + projA,
+		BodySHA256: hash1,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created"}`,
+	}
+	require.ErrorIs(t, cs.CreateTriggerEvent(ctx, replaySameProject), store.ErrAlreadyExists)
+
+	// Same body_sha256 in a DIFFERENT project succeeds (multi-project fan-out).
+	sameHashOtherProject := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projB,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#1",
+		DedupKey:   "11111111-1111-1111-1111-111111111111/" + projB,
+		BodySHA256: hash1,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created"}`,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, sameHashOtherProject))
+
+	// Different body_sha256 in the same project succeeds.
+	diffHashSameProject := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projA,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#1",
+		DedupKey:   "33333333-3333-3333-3333-333333333333/" + projA,
+		BodySHA256: hash2,
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created","n":2}`,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, diffHashSameProject))
+
+	// Multiple generic webhook events with empty body_sha256 in the same project
+	// do NOT collide under the partial unique index (WHERE body_sha256 <> '').
+	for i := 0; i < 2; i++ {
+		wh := &store.TriggerEvent{
+			ID:         uuid.NewString(),
+			ProjectID:  projA,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   "ep-1",
+			Type:       "webhook.received",
+			Subject:    "webhook:ep-1",
+			DedupKey:   fmt.Sprintf("wh-deliv-%d", i),
+			OccurredAt: now,
+			ReceivedAt: now,
+			Payload:    `{}`,
+		}
+		require.NoError(t, cs.CreateTriggerEvent(ctx, wh))
+	}
 }

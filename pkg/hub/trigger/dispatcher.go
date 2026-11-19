@@ -389,6 +389,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				OccurredAt: ev.OccurredAt,
 				ReceivedAt: ev.ReceivedAt,
 				Attributes: maps.Clone(ev.Attributes),
+				Lists:      cloneStringListMap(ev.Lists),
 				Payload:    rawPayload,
 				Trigger: &hubfire.FireTriggerRef{
 					ID:   tr.ID,
@@ -540,6 +541,23 @@ func deriveFireSubject(raw string) string {
 		cut--
 	}
 	return raw[:cut]
+}
+
+func cloneStringListMap(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		if v == nil {
+			out[k] = nil
+			continue
+		}
+		cp := make([]string, len(v))
+		copy(cp, v)
+		out[k] = cp
+	}
+	return out
 }
 
 func storeWriteContext(ctx context.Context) (context.Context, context.CancelFunc) {

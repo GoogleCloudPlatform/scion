@@ -15,6 +15,7 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1068,6 +1069,60 @@ func unmarshalStringMap(raw string) map[string]string {
 	return out
 }
 
+func encodeCompactNoEscapeJSON(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	b := buf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
+	}
+	return b, nil
+}
+
+func marshalStringListMap(m map[string][]string) (string, error) {
+	if len(m) == 0 {
+		return "{}", nil
+	}
+	clean := make(map[string][]string, len(m))
+	for k, v := range m {
+		if v == nil {
+			clean[k] = []string{}
+			continue
+		}
+		clean[k] = v
+	}
+	// Measure and persist with SetEscapeHTML(false) so '<', '>', and '&' match
+	// the exact serialized byte count enforced by githubtrigger.Normalize.
+	raw, err := encodeCompactNoEscapeJSON(clean)
+	if err != nil {
+		return "", fmt.Errorf("%w: marshal string list map: %v", store.ErrInvalidInput, err)
+	}
+	if len(raw) > store.MaxTriggerEventListsBytes {
+		return "", fmt.Errorf("%w: trigger event lists exceed %d bytes", store.ErrInvalidInput, store.MaxTriggerEventListsBytes)
+	}
+	return string(raw), nil
+}
+
+func unmarshalStringListMap(raw string) map[string][]string {
+	out := map[string][]string{}
+	if raw == "" || raw == "{}" {
+		return out
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return map[string][]string{}
+	}
+	for k, v := range out {
+		if v == nil {
+			out[k] = []string{}
+		}
+	}
+	return out
+}
+
 func entTriggerEventToStore(e *ent.TriggerEvent) *store.TriggerEvent {
 	return &store.TriggerEvent{
 		ID:           e.ID.String(),
@@ -1077,9 +1132,11 @@ func entTriggerEventToStore(e *ent.TriggerEvent) *store.TriggerEvent {
 		Type:         e.Type,
 		Subject:      e.Subject,
 		DedupKey:     e.DedupKey,
+		BodySHA256:   e.BodySha256,
 		OccurredAt:   e.OccurredAt,
 		ReceivedAt:   e.ReceivedAt,
 		Attributes:   unmarshalStringMap(e.Attributes),
+		Lists:        unmarshalStringListMap(e.Lists),
 		Headers:      unmarshalStringMap(e.Headers),
 		Payload:      e.Payload,
 		PayloadBytes: e.PayloadBytes,
@@ -1106,6 +1163,10 @@ func (s *TriggerStore) CreateTriggerEvent(ctx context.Context, evt *store.Trigge
 		return err
 	}
 	attrsJSON, err := marshalStringMap(evt.Attributes)
+	if err != nil {
+		return err
+	}
+	listsJSON, err := marshalStringListMap(evt.Lists)
 	if err != nil {
 		return err
 	}
@@ -1143,9 +1204,11 @@ func (s *TriggerStore) CreateTriggerEvent(ctx context.Context, evt *store.Trigge
 		SetType(evt.Type).
 		SetSubject(evt.Subject).
 		SetDedupKey(evt.DedupKey).
+		SetBodySha256(evt.BodySHA256).
 		SetOccurredAt(occurredAt).
 		SetReceivedAt(receivedAt).
 		SetAttributes(attrsJSON).
+		SetLists(listsJSON).
 		SetHeaders(headersJSON).
 		SetPayload(evt.Payload).
 		SetPayloadBytes(payloadBytes).
@@ -1190,6 +1253,27 @@ func (s *TriggerStore) GetTriggerEventByDedupKey(ctx context.Context, sourceKind
 			triggerevent.SourceKindEQ(sourceKind),
 			triggerevent.SourceIDEQ(sourceID),
 			triggerevent.DedupKeyEQ(dedupKey),
+		).
+		Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entTriggerEventToStore(e), nil
+}
+
+func (s *TriggerStore) GetTriggerEventByBodySHA256(ctx context.Context, projectID, sourceKind, bodySHA256 string) (*store.TriggerEvent, error) {
+	if projectID == "" || sourceKind == "" || bodySHA256 == "" {
+		return nil, store.ErrNotFound
+	}
+	pid, err := parseGetID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	e, err := s.client.TriggerEvent.Query().
+		Where(
+			triggerevent.ProjectIDEQ(pid),
+			triggerevent.SourceKindEQ(sourceKind),
+			triggerevent.BodySha256EQ(bodySHA256),
 		).
 		Only(ctx)
 	if err != nil {

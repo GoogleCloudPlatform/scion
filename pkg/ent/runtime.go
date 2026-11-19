@@ -3620,36 +3620,44 @@ func init() {
 	triggereventDescDedupKey := triggereventFields[6].Descriptor()
 	// triggerevent.DedupKeyValidator is a validator for the "dedup_key" field. It is called by the builders before save.
 	triggerevent.DedupKeyValidator = triggereventDescDedupKey.Validators[0].(func(string) error)
+	// triggereventDescBodySha256 is the schema descriptor for body_sha256 field.
+	triggereventDescBodySha256 := triggereventFields[7].Descriptor()
+	// triggerevent.DefaultBodySha256 holds the default value on creation for the body_sha256 field.
+	triggerevent.DefaultBodySha256 = triggereventDescBodySha256.Default.(string)
 	// triggereventDescAttributes is the schema descriptor for attributes field.
-	triggereventDescAttributes := triggereventFields[9].Descriptor()
+	triggereventDescAttributes := triggereventFields[10].Descriptor()
 	// triggerevent.DefaultAttributes holds the default value on creation for the attributes field.
 	triggerevent.DefaultAttributes = triggereventDescAttributes.Default.(string)
+	// triggereventDescLists is the schema descriptor for lists field.
+	triggereventDescLists := triggereventFields[11].Descriptor()
+	// triggerevent.DefaultLists holds the default value on creation for the lists field.
+	triggerevent.DefaultLists = triggereventDescLists.Default.(string)
 	// triggereventDescHeaders is the schema descriptor for headers field.
-	triggereventDescHeaders := triggereventFields[10].Descriptor()
+	triggereventDescHeaders := triggereventFields[12].Descriptor()
 	// triggerevent.DefaultHeaders holds the default value on creation for the headers field.
 	triggerevent.DefaultHeaders = triggereventDescHeaders.Default.(string)
 	// triggereventDescPayload is the schema descriptor for payload field.
-	triggereventDescPayload := triggereventFields[11].Descriptor()
+	triggereventDescPayload := triggereventFields[13].Descriptor()
 	// triggerevent.DefaultPayload holds the default value on creation for the payload field.
 	triggerevent.DefaultPayload = triggereventDescPayload.Default.(string)
 	// triggereventDescPayloadBytes is the schema descriptor for payload_bytes field.
-	triggereventDescPayloadBytes := triggereventFields[12].Descriptor()
+	triggereventDescPayloadBytes := triggereventFields[14].Descriptor()
 	// triggerevent.DefaultPayloadBytes holds the default value on creation for the payload_bytes field.
 	triggerevent.DefaultPayloadBytes = triggereventDescPayloadBytes.Default.(int)
 	// triggereventDescStatus is the schema descriptor for status field.
-	triggereventDescStatus := triggereventFields[13].Descriptor()
+	triggereventDescStatus := triggereventFields[15].Descriptor()
 	// triggerevent.DefaultStatus holds the default value on creation for the status field.
 	triggerevent.DefaultStatus = triggereventDescStatus.Default.(string)
 	// triggereventDescMatchCount is the schema descriptor for match_count field.
-	triggereventDescMatchCount := triggereventFields[14].Descriptor()
+	triggereventDescMatchCount := triggereventFields[16].Descriptor()
 	// triggerevent.DefaultMatchCount holds the default value on creation for the match_count field.
 	triggerevent.DefaultMatchCount = triggereventDescMatchCount.Default.(int)
 	// triggereventDescFireCount is the schema descriptor for fire_count field.
-	triggereventDescFireCount := triggereventFields[15].Descriptor()
+	triggereventDescFireCount := triggereventFields[17].Descriptor()
 	// triggerevent.DefaultFireCount holds the default value on creation for the fire_count field.
 	triggerevent.DefaultFireCount = triggereventDescFireCount.Default.(int)
 	// triggereventDescCreated is the schema descriptor for created field.
-	triggereventDescCreated := triggereventFields[18].Descriptor()
+	triggereventDescCreated := triggereventFields[20].Descriptor()
 	// triggerevent.DefaultCreated holds the default value on creation for the created field.
 	triggerevent.DefaultCreated = triggereventDescCreated.Default.(func() time.Time)
 	// triggereventDescID is the schema descriptor for id field.
