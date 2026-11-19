@@ -576,3 +576,106 @@ func TestDelivery_WriteAgentDMError_DispatchFailedIncludesMessageID(t *testing.T
 	details := errObj["details"].(map[string]interface{})
 	assert.Equal(t, "test-msg-123", details["message_id"])
 }
+
+// ---------------------------------------------------------------------------
+// Shutdown admission pre-check and post-persist race (ptone/scion#7405)
+// ---------------------------------------------------------------------------
+
+func TestDelivery_ShuttingDown_RefusesBeforePersistenceWith503RetryAfter(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	srv.BeginShutdown()
+
+	_, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "shutting-down-broker"))
+	require.NotNil(t, dmErr, "shutting-down hub must refuse ExecuteAgentDM before persistence")
+	assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+	assert.Equal(t, time.Duration(shutdownRetryAfterSeconds)*time.Second, dmErr.RetryAfter)
+
+	w := httptest.NewRecorder()
+	WriteAgentDMError(w, dmErr)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "10", w.Header().Get("Retry-After"))
+
+	// Managed runtime targets must also be refused before persistence during shutdown.
+	managedTarget := *target
+	managedTarget.Runtime = "gemini-interactions"
+	_, managedErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, &managedTarget, "shutting-down-managed"))
+	require.NotNil(t, managedErr)
+	assert.Equal(t, http.StatusServiceUnavailable, managedErr.HTTPStatus)
+
+	assert.Empty(t, dispatcher.getCalls(), "must not dispatch during shutdown")
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: sender.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "no message row may be persisted when hub is already shutting down")
+}
+
+func TestDelivery_ShuttingDownDuringWake_RefusesBeforePersistence(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	// Grant owner role so sender is permitted to wake target, and suspend target.
+	target.Phase = "suspended"
+	require.NoError(t, s.UpdateAgent(ctx, target))
+	ownerID := target.Ancestry[0]
+	userCtx := contextWithIdentity(ctx, NewAuthenticatedUser(ownerID, "delivery-owner@test.example", "Owner", "member", "cli"))
+	in := deliveryDMInput(sender, target, "shutting-down-after-wake")
+	in.SenderIdentity = GetIdentityFromContext(userCtx)
+	in.Wake = true
+
+	// Simulate BeginShutdown firing after checkDispatchAvailability, while
+	// Phase 1b wake completes (spy marks target running so wakeAgentForDM returns).
+	wakeDispatcher := &spyStateDispatcher{store: s}
+	srv.SetDispatcher(wakeDispatcher)
+	in.BeforeWake = func() {
+		target.Phase = "running"
+		target.Activity = "idle"
+		_ = s.UpdateAgent(ctx, target)
+		srv.BeginShutdown()
+	}
+
+	_, dmErr := srv.ExecuteAgentDM(ctx, in)
+	require.NotNil(t, dmErr, "must refuse before CreateMessage if shutdown began during Phase 1b")
+	assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+	assert.Equal(t, time.Duration(shutdownRetryAfterSeconds)*time.Second, dmErr.RetryAfter)
+
+	assert.Empty(t, dispatcher.getCalls())
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: sender.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "no message row may be persisted if shutdown began before CreateMessage")
+}
+
+func TestDelivery_ShuttingDownPostPersistRace_MarksFailedAndReturns503RetryAfter(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	// Simulate BeginShutdown firing in the narrow window after CreateMessage
+	// and before the dispatcher's shutdownGate check.
+	dispatcher.returnErr = ErrHubShuttingDown
+
+	_, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "shutting-down-race"))
+	require.NotNil(t, dmErr)
+	assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+	assert.Equal(t, time.Duration(shutdownRetryAfterSeconds)*time.Second, dmErr.RetryAfter)
+
+	require.NotNil(t, dmErr.Details)
+	msgID, ok := dmErr.Details["message_id"].(string)
+	require.True(t, ok)
+	require.NotEmpty(t, msgID)
+
+	w := httptest.NewRecorder()
+	WriteAgentDMError(w, dmErr)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "10", w.Header().Get("Retry-After"))
+
+	// The persisted row must be marked failed (not left pending).
+	msg, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, msg.DispatchState,
+		"post-persist shutdown race must mark row failed rather than leave it pending")
+	require.NotNil(t, msg.DispatchFailureReason)
+	assert.Contains(t, *msg.DispatchFailureReason, "shutting down")
+}

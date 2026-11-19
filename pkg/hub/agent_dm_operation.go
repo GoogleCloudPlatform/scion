@@ -509,6 +509,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 
 	// ── Phase 2: Side effects ───────────────────────────────────────────
 
+	// Re-check shutdown after Phase 1b (which may have waited on a wake):
+	// refuse with retryable 503 before ingesting attachments or persisting a
+	// pending row that dispatchShutdownGate would immediately reject (#7405).
+	if s.ShuttingDown() {
+		return nil, shuttingDownDMError("")
+	}
+
 	// 6. Attachment ingestion.
 	attachmentRefs, attachmentWarnings := s.ingestAgentAttachments(ctx, input.ProjectID, input.SenderAgent.ID, input.Attachments)
 
@@ -855,6 +862,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		if markErr := s.markFailed(ctx, msgID, dispatchErr.Error()); markErr != nil {
 			s.messageLog.Error("agent DM: failed to mark message failed",
 				"message_id", msgID, "error", markErr)
+		}
+		if errors.Is(dispatchErr, ErrHubShuttingDown) {
+			return nil, shuttingDownDMError(msgID)
 		}
 		if isBrokerAgentNotFound(dispatchErr) {
 			return nil, agentNotRunningDispatchError(msgID)

@@ -61,6 +61,10 @@ const deliveryNoticeTimeout = 15 * time.Second
 // This check runs before message persistence so that unavailable dispatch
 // does not leave orphaned pending rows or falsely report success (AC-2).
 func (s *Server) checkDispatchAvailability(input *AgentDMInput) *AgentDMError {
+	if s.ShuttingDown() {
+		return shuttingDownDMError("")
+	}
+
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
 		// Managed runtime dispatch is always available at pre-check time;
 		// backend resolution happens at dispatch time and any failure there
@@ -172,6 +176,27 @@ func markMessageFailed(ctx context.Context, st messageFailureMarker, msgID strin
 	finCtx, finCancel := finalizationContext(ctx)
 	defer finCancel()
 	return st.MarkMessageFailed(finCtx, msgID, sanitizeFailureReason(reason))
+}
+
+// shuttingDownDMError constructs a retryable 503 AgentDMError when the hub
+// is shutting down (ptone/scion#7405). When msgID is non-empty (the narrow
+// race where BeginShutdown fired after CreateMessage and before
+// dispatchShutdownGate), message_id is included in details so callers can
+// correlate the failed record; when empty, refusal occurred before persistence.
+func shuttingDownDMError(msgID string) *AgentDMError {
+	var details map[string]interface{}
+	if msgID != "" {
+		details = map[string]interface{}{
+			"message_id": msgID,
+		}
+	}
+	return &AgentDMError{
+		Code:       ErrCodeUnavailable,
+		Message:    "the server is shutting down; retry shortly",
+		HTTPStatus: http.StatusServiceUnavailable,
+		RetryAfter: shutdownRetryAfterSeconds * time.Second,
+		Details:    details,
+	}
 }
 
 // dispatchFailedError constructs an AgentDMError for a definite dispatch
