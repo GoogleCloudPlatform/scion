@@ -249,6 +249,41 @@ func validateTriggerName(raw string) (string, error) {
 	return validateTriggerResourceName(raw, maxTriggerNameLen)
 }
 
+// authorizeGitHubTriggerSource validates Stage 3 §4.2 / §8.2 GitHub trigger
+// authoring requirements without making any outbound GitHub HTTP call:
+// hub.github_triggers must be enabled (400 experiment_disabled), source.id must
+// be "" (400), and the project must have an authorized GitHub App association
+// (409 github_not_associated).
+func (s *Server) authorizeGitHubTriggerSource(w http.ResponseWriter, r *http.Request, project *store.Project, rawSourceID string) bool {
+	if !s.githubTriggersEnabled() {
+		writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+			"GitHub triggers require the hub.github_triggers experiment to be enabled", nil)
+		return false
+	}
+	if rawSourceID != "" {
+		ValidationError(w, "source.id must be empty for github triggers", nil)
+		return false
+	}
+	authorized, err := s.hasAuthorizedGitHubAssociationCached(r.Context(), project)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !authorized {
+		writeError(w, http.StatusConflict, ErrCodeGitHubNotAssociated,
+			"project does not have an authorized GitHub App association", nil)
+		return false
+	}
+	return true
+}
+
+func triggerSourceLimitMessage(sourceKind string) string {
+	if sourceKind == store.TriggerSourceKindGitHub {
+		return fmt.Sprintf("GitHub trigger source has reached the maximum of %d active triggers", store.MaxActiveTriggersPerSource)
+	}
+	return fmt.Sprintf("webhook endpoint has reached the maximum of %d active triggers", store.MaxActiveTriggersPerSource)
+}
+
 func setTriggerETag(w http.ResponseWriter, rev int) {
 	w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("%d", rev)))
 }
@@ -306,7 +341,8 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	if _, err := s.store.GetProject(ctx, projectID); err != nil {
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
 			NotFound(w, "Project")
 			return
@@ -316,17 +352,28 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	sourceKind := strings.TrimSpace(req.Source.Kind)
-	if sourceKind != store.TriggerSourceKindWebhook {
-		ValidationError(w, fmt.Sprintf("unsupported source kind %q (supported: %s)", sourceKind, store.TriggerSourceKindWebhook), nil)
-		return
-	}
-	ep, ok := s.resolveTriggerWebhookSource(w, r, projectID, req.Source.ID)
-	if !ok {
+	var resolvedSourceID string
+	switch sourceKind {
+	case store.TriggerSourceKindWebhook:
+		ep, ok := s.resolveTriggerWebhookSource(w, r, projectID, req.Source.ID)
+		if !ok {
+			return
+		}
+		resolvedSourceID = ep.ID
+	case store.TriggerSourceKindGitHub:
+		if !s.authorizeGitHubTriggerSource(w, r, project, req.Source.ID) {
+			return
+		}
+		resolvedSourceID = ""
+	default:
+		ValidationError(w, fmt.Sprintf("unsupported source kind %q (supported: %s, %s)",
+			sourceKind, store.TriggerSourceKindWebhook, store.TriggerSourceKindGitHub), nil)
 		return
 	}
 
+	defaultTypes := sourceKind == store.TriggerSourceKindWebhook
 	explicitMatchDialect := req.Match != nil && req.Match.Rules == nil && strings.TrimSpace(req.Match.Dialect) != ""
-	matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, req.Match, true, explicitMatchDialect)
+	matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, req.Match, defaultTypes, explicitMatchDialect)
 	if !ok {
 		return
 	}
@@ -356,8 +403,8 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		ProjectID:            projectID,
 		Name:                 name,
 		Description:          req.Description,
-		SourceKind:           store.TriggerSourceKindWebhook,
-		SourceID:             ep.ID,
+		SourceKind:           sourceKind,
+		SourceID:             resolvedSourceID,
 		MatchTypes:           matchTypes,
 		MatchRules:           matchRules,
 		ActionType:           store.TriggerActionMessage,
@@ -376,8 +423,10 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 			return lErr
 		}
-		if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, trigger.SourceID); vErr != nil {
-			return vErr
+		if trigger.SourceKind == store.TriggerSourceKindWebhook {
+			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, trigger.SourceID); vErr != nil {
+				return vErr
+			}
 		}
 		if sErr := stampTrigger(ctx, tx, &trigger, fp); sErr != nil {
 			return sErr
@@ -415,7 +464,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 				fmt.Sprintf("project has reached the maximum of %d triggers", store.MaxTriggersPerProject), nil)
 		case errors.Is(err, errTriggerSourceLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
-				fmt.Sprintf("webhook endpoint has reached the maximum of %d active triggers", store.MaxActiveTriggersPerSource), nil)
+				triggerSourceLimitMessage(trigger.SourceKind), nil)
 		case errors.Is(err, store.ErrAlreadyExists):
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"a trigger with this name already exists in this project", nil)
@@ -567,16 +616,34 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 	if req.Source != nil {
 		sourceKind := strings.TrimSpace(req.Source.Kind)
-		if sourceKind != store.TriggerSourceKindWebhook {
-			ValidationError(w, fmt.Sprintf("unsupported source kind %q (supported: %s)", sourceKind, store.TriggerSourceKindWebhook), nil)
+		switch sourceKind {
+		case store.TriggerSourceKindWebhook:
+			ep, ok := s.resolveTriggerWebhookSource(w, r, projectID, req.Source.ID)
+			if !ok {
+				return
+			}
+			tr.SourceKind = store.TriggerSourceKindWebhook
+			tr.SourceID = ep.ID
+		case store.TriggerSourceKindGitHub:
+			project, pErr := s.store.GetProject(ctx, projectID)
+			if pErr != nil {
+				if errors.Is(pErr, store.ErrNotFound) || errors.Is(pErr, store.ErrInvalidInput) {
+					NotFound(w, "Project")
+					return
+				}
+				writeErrorFromErr(w, pErr, "")
+				return
+			}
+			if !s.authorizeGitHubTriggerSource(w, r, project, req.Source.ID) {
+				return
+			}
+			tr.SourceKind = store.TriggerSourceKindGitHub
+			tr.SourceID = ""
+		default:
+			ValidationError(w, fmt.Sprintf("unsupported source kind %q (supported: %s, %s)",
+				sourceKind, store.TriggerSourceKindWebhook, store.TriggerSourceKindGitHub), nil)
 			return
 		}
-		ep, ok := s.resolveTriggerWebhookSource(w, r, projectID, req.Source.ID)
-		if !ok {
-			return
-		}
-		tr.SourceKind = store.TriggerSourceKindWebhook
-		tr.SourceID = ep.ID
 		fields.SourceKind = true
 		fields.SourceID = true
 		changesFutureDispatch = true
@@ -713,7 +780,27 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		// both the source and the target action of the resulting trigger, and
 		// re-validates stored match/subject rules not already compiled above.
 		if req.Source == nil {
-			if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+			switch tr.SourceKind {
+			case store.TriggerSourceKindWebhook:
+				if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+					return
+				}
+			case store.TriggerSourceKindGitHub:
+				project, pErr := s.store.GetProject(ctx, projectID)
+				if pErr != nil {
+					if errors.Is(pErr, store.ErrNotFound) || errors.Is(pErr, store.ErrInvalidInput) {
+						NotFound(w, "Project")
+						return
+					}
+					writeErrorFromErr(w, pErr, "")
+					return
+				}
+				if !s.authorizeGitHubTriggerSource(w, r, project, tr.SourceID) {
+					return
+				}
+			default:
+				ValidationError(w, fmt.Sprintf("unsupported source kind %q (supported: %s, %s)",
+					tr.SourceKind, store.TriggerSourceKindWebhook, store.TriggerSourceKindGitHub), nil)
 				return
 			}
 		}
@@ -762,8 +849,10 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 				return lErr
 			}
-			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID); vErr != nil {
-				return vErr
+			if tr.SourceKind == store.TriggerSourceKindWebhook {
+				if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID); vErr != nil {
+					return vErr
+				}
 			}
 			if tr.Status == store.TriggerStatusActive &&
 				(tr.SourceID != oldSourceID || tr.SourceKind != oldSourceKind) {
@@ -792,7 +881,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 				"trigger was concurrently modified; refresh and retry", nil)
 		case errors.Is(err, errTriggerSourceLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
-				fmt.Sprintf("webhook endpoint has reached the maximum of %d active triggers", store.MaxActiveTriggersPerSource), nil)
+				triggerSourceLimitMessage(tr.SourceKind), nil)
 		case errors.Is(err, store.ErrAlreadyExists):
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"a trigger with this name already exists in this project", nil)
@@ -862,11 +951,27 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	if tr.SourceKind != store.TriggerSourceKindWebhook {
-		ValidationError(w, fmt.Sprintf("unsupported source kind %q (supported: %s)", tr.SourceKind, store.TriggerSourceKindWebhook), nil)
-		return
-	}
-	if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+	switch tr.SourceKind {
+	case store.TriggerSourceKindWebhook:
+		if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+			return
+		}
+	case store.TriggerSourceKindGitHub:
+		project, pErr := s.store.GetProject(ctx, projectID)
+		if pErr != nil {
+			if errors.Is(pErr, store.ErrNotFound) || errors.Is(pErr, store.ErrInvalidInput) {
+				NotFound(w, "Project")
+				return
+			}
+			writeErrorFromErr(w, pErr, "")
+			return
+		}
+		if !s.authorizeGitHubTriggerSource(w, r, project, tr.SourceID) {
+			return
+		}
+	default:
+		ValidationError(w, fmt.Sprintf("unsupported source kind %q (supported: %s, %s)",
+			tr.SourceKind, store.TriggerSourceKindWebhook, store.TriggerSourceKindGitHub), nil)
 		return
 	}
 	existingRules, rErr := triggerMatchRules(*tr)
@@ -911,8 +1016,10 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 			return lErr
 		}
-		if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID); vErr != nil {
-			return vErr
+		if tr.SourceKind == store.TriggerSourceKindWebhook {
+			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID); vErr != nil {
+				return vErr
+			}
 		}
 		srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
 			ProjectID:  projectID,
@@ -937,7 +1044,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 				"trigger was concurrently modified; refresh and retry", nil)
 		case errors.Is(err, errTriggerSourceLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
-				fmt.Sprintf("webhook endpoint has reached the maximum of %d active triggers", store.MaxActiveTriggersPerSource), nil)
+				triggerSourceLimitMessage(tr.SourceKind), nil)
 		default:
 			writeErrorFromErr(w, err, "")
 		}

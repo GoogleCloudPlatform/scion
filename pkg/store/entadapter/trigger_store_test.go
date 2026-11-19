@@ -1300,4 +1300,23 @@ func TestListTriggers_SourceIDsFilterForGitHubAndWebhookIsolation(t *testing.T) 
 	require.Len(t, whRes.Items, 1)
 	assert.Equal(t, whExactA, whRes.Items[0].ID)
 	assert.NotEqual(t, whWildcard, whRes.Items[0].ID)
+
+	// Batch lookup returns only projects that have >= 1 trigger of the requested source kind.
+	projOnlyWebhook := uuid.NewString()
+	require.NoError(t, cs.CreateTrigger(ctx, &store.Trigger{
+		ID:            uuid.NewString(),
+		ProjectID:     projOnlyWebhook,
+		Name:          "only-webhook",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      epA,
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"a1","message":"hi"}`,
+		CreatedBy:     userID,
+	}))
+	projEmpty := uuid.NewString()
+
+	hasGH, err := cs.ProjectsWithTriggersBySourceKind(ctx, []string{projID, projOnlyWebhook, projEmpty, projID, "not-a-uuid"}, store.TriggerSourceKindGitHub)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]bool{projID: true}, hasGH)
 }

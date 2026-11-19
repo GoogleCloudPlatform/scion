@@ -172,6 +172,17 @@ func (m *memTriggerStore) ListTriggers(_ context.Context, filter store.TriggerFi
 func (m *memTriggerStore) CountTriggers(context.Context, store.TriggerFilter) (int, error) {
 	return 0, nil
 }
+func (m *memTriggerStore) ProjectsWithTriggersBySourceKind(_ context.Context, projectIDs []string, sourceKind string) (map[string]bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]bool)
+	for _, tr := range m.triggers {
+		if tr.SourceKind == sourceKind && slices.Contains(projectIDs, tr.ProjectID) {
+			out[tr.ProjectID] = true
+		}
+	}
+	return out, nil
+}
 func (m *memTriggerStore) UpdateTrigger(context.Context, *store.Trigger, store.TriggerFieldMask, int, bool, *store.InitiatorAttribution) error {
 	return nil
 }

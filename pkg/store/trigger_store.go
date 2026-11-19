@@ -297,6 +297,7 @@ type TriggerStore interface {
 	GetTriggerByName(ctx context.Context, projectID, name string) (*Trigger, error)
 	ListTriggers(ctx context.Context, filter TriggerFilter, opts ListOptions) (*ListResult[Trigger], error)
 	CountTriggers(ctx context.Context, filter TriggerFilter) (int, error)
+	ProjectsWithTriggersBySourceKind(ctx context.Context, projectIDs []string, sourceKind string) (map[string]bool, error)
 	UpdateTrigger(ctx context.Context, tr *Trigger, fields TriggerFieldMask, prevRevision int, prevRevisionKnown bool, attribution *InitiatorAttribution) error
 	UpdateTriggerStatus(ctx context.Context, id, status, reason string) error
 	RecordTriggerFire(ctx context.Context, id string, firedAt time.Time, status, errMsg string) error

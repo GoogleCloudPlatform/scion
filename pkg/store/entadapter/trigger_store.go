@@ -896,6 +896,54 @@ func (s *TriggerStore) CountTriggers(ctx context.Context, filter store.TriggerFi
 	return query.Count(ctx)
 }
 
+const triggerProjectsBatchSize = 500
+
+func (s *TriggerStore) ProjectsWithTriggersBySourceKind(ctx context.Context, projectIDs []string, sourceKind string) (map[string]bool, error) {
+	out := make(map[string]bool)
+	if len(projectIDs) == 0 || sourceKind == "" {
+		return out, nil
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(projectIDs))
+	pids := make([]uuid.UUID, 0, len(projectIDs))
+	for _, raw := range projectIDs {
+		uid, err := uuid.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+		if _, dup := seen[uid]; dup {
+			continue
+		}
+		seen[uid] = struct{}{}
+		pids = append(pids, uid)
+	}
+	if len(pids) == 0 {
+		return out, nil
+	}
+
+	for start := 0; start < len(pids); start += triggerProjectsBatchSize {
+		end := start + triggerProjectsBatchSize
+		if end > len(pids) {
+			end = len(pids)
+		}
+		rows, err := s.client.Trigger.Query().
+			Where(
+				trigger.ProjectIDIn(pids[start:end]...),
+				trigger.SourceKindEQ(sourceKind),
+			).
+			Unique(true).
+			Select(trigger.FieldProjectID).
+			All(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			out[r.ProjectID.String()] = true
+		}
+	}
+	return out, nil
+}
+
 func (s *TriggerStore) UpdateTrigger(
 	ctx context.Context, tr *store.Trigger, fields store.TriggerFieldMask,
 	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution,

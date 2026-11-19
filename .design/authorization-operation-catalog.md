@@ -77,8 +77,8 @@
 - [webhookendpoint.delete](#webhookendpointdelete) — Delete a webhook endpoint, removing its hub-scoped internal signing secret rows and pausing dependent triggers with status_reason=source_deleted. An agent caller targeting another principal's endpoint receives the same 404 as not-found
 - [trigger.list](#triggerlist) — List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)
 - [trigger.read](#triggerread) — Read a trigger definition, a trigger's fire history, or a trigger event in a project. An agent caller reading an event it neither received on its own endpoint nor fired through a trigger it holds receives the same 404 as not-found
-- [trigger.create](#triggercreate) — Create an event trigger in a project. Resolves the source webhook endpoint through webhookEndpointAccessDecision(read) and passes the action's target checks; a user access token needs trigger:create plus the source and target selectors
-- [trigger.update](#triggerupdate) — Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source endpoint and action target and record the caller's attribution and frozen ceiling
+- [trigger.create](#triggercreate) — Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id="") require hub.github_triggers and an authorized GitHub App association on the project; both pass the action's target checks
+- [trigger.update](#triggerupdate) — Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target and record the caller's attribution and frozen ceiling
 - [trigger.pause](#triggerpause) — Pause an event trigger. Pausing only stops future fires, so a user access token with trigger:update is admitted
 - [trigger.delete](#triggerdelete) — Delete an event trigger in a project
 - [trigger.fire](#triggerfire) — Fire a matched event trigger's message action through the shared fire core under the authority recorded by the trigger's current revision
@@ -3365,7 +3365,7 @@
 
 **Domain:** trigger
 
-**Description:** Create an event trigger in a project. Resolves the source webhook endpoint through webhookEndpointAccessDecision(read) and passes the action's target checks; a user access token needs trigger:create plus the source and target selectors
+**Description:** Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id="") require hub.github_triggers and an authorized GitHub App association on the project; both pass the action's target checks
 
 ### Entry Points
 
@@ -3403,7 +3403,7 @@
 
 **Domain:** trigger
 
-**Description:** Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source endpoint and action target and record the caller's attribution and frozen ceiling
+**Description:** Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target and record the caller's attribution and frozen ceiling
 
 ### Entry Points
 

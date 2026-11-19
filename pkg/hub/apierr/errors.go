@@ -162,7 +162,8 @@ const (
 	ErrCodeRuntimeBrokerNotLinked           = "runtime_broker_not_linked"            // 422
 	ErrCodeRuntimeBrokerLinkPathUnsupported = "runtime_broker_link_path_unsupported" // 409
 	ErrCodeRuntimeTargetTypeUnsupported     = "runtime_target_type_unsupported"      // 422
-	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412
+	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412 / 400
+	ErrCodeGitHubNotAssociated              = "github_not_associated"                // 409
 
 	// ErrCodeHarnessConfigNotFound is returned (404) by a reincarnate
 	// --harness request naming a harness config the hub does not know, and
