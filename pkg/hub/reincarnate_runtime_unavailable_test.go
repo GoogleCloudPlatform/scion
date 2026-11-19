@@ -180,8 +180,42 @@ func TestDispatchAgentStart_RuntimeUnavailable503_RevertsRunWithoutRevokingCrede
 	// start-attempted marker, neither run revert nor reincarnate treats it as
 	// pre-create.
 	marked := brokerEnvelope(t, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, startAttempted("run-1"))
+	assert.False(t, isStartRefusedBeforeCreate(marked))
 	assert.False(t, shouldRevertRun(marked))
 	assert.False(t, reincarnationStartLeftNoContainer(marked))
+	assert.False(t, startDidNotHappen(marked))
+}
+
+// TestProvisionedAgentStart_RuntimeUnavailable503_RevertsRunIntent verifies
+// the behavioral effect of startDidNotHappen for a provisioned (never-started)
+// agent whose start is refused with 503 runtime_unavailable: phase stays
+// created, RunID stays empty, RunIntent is reverted to stopped, and the
+// provisioned-resting note is recorded.
+func TestProvisionedAgentStart_RuntimeUnavailable503_RevertsRunIntent(t *testing.T) {
+	srv, s := testServer(t)
+	agent := setupBrokerAgentInPhase(t, s, "prov-start-ru503", state.PhaseCreated)
+	agent.ProvisionedOnly = true
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+	se := &brokerStatusError{
+		StatusCode: http.StatusServiceUnavailable,
+		Body:       profileUnresolvedBody(`"gone"`),
+		RetryAfter: "30",
+	}
+	mockClient := &mockRuntimeBrokerClient{returnErr: se}
+	d := NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default())
+	d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
+	srv.SetDispatcher(d)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseCreated), got.Phase)
+	assert.Empty(t, got.RunID, "provisioned agent's RunID remains empty after refused start")
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent, "provisioned start refusal reverts RunIntent to stopped")
+	assert.Contains(t, got.Message, provisionedRestingNote)
 }
 
 // TestReincarnateAgent_Uncoded503AndTimeout_StayAmbiguous verifies that

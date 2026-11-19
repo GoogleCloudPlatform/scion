@@ -1958,8 +1958,9 @@ func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store
 //     minted run, so reverting would aim the next delete at an entry that
 //     is gone and leak the new one.
 //
-// An older broker never sets the marker, so against it this falls back to
-// isStartRefusedBeforeCreate alone, the pre-marker behaviour.
+// An older broker never sets the marker, so against it a failure from inside
+// Manager.Start falls back to isStartRefusedBeforeCreate alone, as before the
+// marker existed.
 func shouldRevertRun(err error) bool {
 	if !isStartRefusedBeforeCreate(err) {
 		return false
