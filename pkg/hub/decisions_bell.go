@@ -323,6 +323,38 @@ func (s *Server) enqueueDecisionBellTopic(projectID, chatKey string) {
 	st.mu.Unlock()
 }
 
+// enqueueDecisionBellDismiss schedules bell recomputes for a prompt dismissal
+// (design-8194 4.3, B4: the DM user for DM prompts; the topic's posting members
+// for topic prompts; and any user named by a prior interpreted answer on a
+// newly dismissed row). An empty slice (for example an idempotent repeat where
+// every row was already dismissed) enqueues nothing.
+func (s *Server) enqueueDecisionBellDismiss(projectID, chatKey string, dismissed []*store.Decision) {
+	if len(dismissed) == 0 {
+		return
+	}
+	seenNamed := make(map[string]bool)
+	enqueuedConversation := false
+	for _, d := range dismissed {
+		if d == nil {
+			continue
+		}
+		for _, a := range d.Answers {
+			if a != nil && a.Provenance == store.DecisionProvenanceAgentInterpreted {
+				if uid := strings.TrimSpace(a.AnsweredByUserID); uid != "" && !seenNamed[uid] {
+					seenNamed[uid] = true
+					// Also enqueues the conversation (topic members or DM users),
+					// so the "" call below is only needed when no user was named.
+					s.enqueueDecisionBellEvent(projectID, chatKey, uid)
+					enqueuedConversation = true
+				}
+			}
+		}
+	}
+	if !enqueuedConversation {
+		s.enqueueDecisionBellEvent(projectID, chatKey, "")
+	}
+}
+
 // reconcileDecisionBellAsync schedules a coalesced background reconciliation
 // for userID after responding (design B6, C3).
 func (s *Server) reconcileDecisionBellAsync(userID string) {

@@ -150,6 +150,11 @@ func WithdrawnReason(v string) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldWithdrawnReason, v))
 }
 
+// DismissedAt applies equality check predicate on the "dismissed_at" field. It's identical to DismissedAtEQ.
+func DismissedAt(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldDismissedAt, v))
+}
+
 // ProjectIDEQ applies the EQ predicate on the "project_id" field.
 func ProjectIDEQ(v uuid.UUID) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldProjectID, v))
@@ -1203,6 +1208,56 @@ func WithdrawnReasonEqualFold(v string) predicate.Decision {
 // WithdrawnReasonContainsFold applies the ContainsFold predicate on the "withdrawn_reason" field.
 func WithdrawnReasonContainsFold(v string) predicate.Decision {
 	return predicate.Decision(sql.FieldContainsFold(FieldWithdrawnReason, v))
+}
+
+// DismissedAtEQ applies the EQ predicate on the "dismissed_at" field.
+func DismissedAtEQ(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldDismissedAt, v))
+}
+
+// DismissedAtNEQ applies the NEQ predicate on the "dismissed_at" field.
+func DismissedAtNEQ(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldNEQ(FieldDismissedAt, v))
+}
+
+// DismissedAtIn applies the In predicate on the "dismissed_at" field.
+func DismissedAtIn(vs ...time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldIn(FieldDismissedAt, vs...))
+}
+
+// DismissedAtNotIn applies the NotIn predicate on the "dismissed_at" field.
+func DismissedAtNotIn(vs ...time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldNotIn(FieldDismissedAt, vs...))
+}
+
+// DismissedAtGT applies the GT predicate on the "dismissed_at" field.
+func DismissedAtGT(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldGT(FieldDismissedAt, v))
+}
+
+// DismissedAtGTE applies the GTE predicate on the "dismissed_at" field.
+func DismissedAtGTE(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldGTE(FieldDismissedAt, v))
+}
+
+// DismissedAtLT applies the LT predicate on the "dismissed_at" field.
+func DismissedAtLT(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldLT(FieldDismissedAt, v))
+}
+
+// DismissedAtLTE applies the LTE predicate on the "dismissed_at" field.
+func DismissedAtLTE(v time.Time) predicate.Decision {
+	return predicate.Decision(sql.FieldLTE(FieldDismissedAt, v))
+}
+
+// DismissedAtIsNil applies the IsNil predicate on the "dismissed_at" field.
+func DismissedAtIsNil() predicate.Decision {
+	return predicate.Decision(sql.FieldIsNull(FieldDismissedAt))
+}
+
+// DismissedAtNotNil applies the NotNil predicate on the "dismissed_at" field.
+func DismissedAtNotNil() predicate.Decision {
+	return predicate.Decision(sql.FieldNotNull(FieldDismissedAt))
 }
 
 // And groups predicates with the AND operator between them.

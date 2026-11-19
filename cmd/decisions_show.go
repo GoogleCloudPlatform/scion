@@ -102,6 +102,9 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 				_, _ = fmt.Fprintf(out, "  Reason:       %s\n", collapseSingleLine(v.Withdrawn.Reason))
 			}
 		}
+		if v.Dismissed != nil {
+			_, _ = fmt.Fprintf(out, "  Dismissed:    %s\n", decisionDismissedSummary(v.Dismissed, 0))
+		}
 		_, _ = fmt.Fprintln(out, "  Choices:")
 		for _, c := range v.Choices {
 			suffix := ""
@@ -129,6 +132,9 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 			)
 			if a.SourceMessageID != "" {
 				line += fmt.Sprintf(" (source %s)", safeText(a.SourceMessageID))
+			}
+			if a.Outcome == "dismiss" && strings.TrimSpace(a.DismissReason) != "" {
+				line += fmt.Sprintf(": %s", collapseSingleLine(a.DismissReason))
 			}
 			_, _ = fmt.Fprintln(out, line)
 		}

@@ -360,6 +360,31 @@ func TestIsHubMintedType(t *testing.T) {
 	}
 }
 
+func TestIsReservedChoiceID_AndNormalizeRefusesSentinel(t *testing.T) {
+	for _, id := range []string{ChoiceIDDismissed, " $dismissed ", "$other", "$custom"} {
+		if !IsReservedChoiceID(id) {
+			t.Errorf("IsReservedChoiceID(%q) = false, want true", id)
+		}
+	}
+	for _, id := range []string{"yes", "no", "1", "dismissed", ""} {
+		if IsReservedChoiceID(id) {
+			t.Errorf("IsReservedChoiceID(%q) = true, want false", id)
+		}
+	}
+
+	_, err := NormalizeDecisions("decisions", []DecisionInput{{
+		ID:       "D1",
+		Question: "Ship?",
+		Choices: []ChoiceInput{
+			{ID: ChoiceIDDismissed, Label: "Dismissed"},
+			{ID: "yes", Label: "Yes"},
+		},
+	}})
+	if err == nil {
+		t.Fatal("NormalizeDecisions accepted reserved sentinel $dismissed choice id")
+	}
+}
+
 func TestRenderDecisionFallback_DesignExample(t *testing.T) {
 	ds := []Decision{
 		{Key: "D234", Question: "Ship the feature now?", DefaultChoiceID: "1", Choices: []Choice{{ID: "1", Label: "yes"}, {ID: "2", Label: "no"}}},

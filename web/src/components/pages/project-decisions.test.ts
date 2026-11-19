@@ -37,6 +37,9 @@ import {
 } from '../../utils/feature-flags.js';
 import { setPreferredTimeZone } from '../../utils/time.js';
 
+const showToast = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/toast.js', () => ({ showToast }));
+
 class FakeEventSource extends EventTarget {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -175,6 +178,7 @@ describe('<scion-page-project-decisions>', () => {
   let projectHandler: ((url: URL, init?: RequestInit) => Promise<Response>) | null;
   let pendingHandler: ((url: URL, init?: RequestInit) => Promise<Response>) | null;
   let madeHandler: ((url: URL, init?: RequestInit) => Promise<Response>) | null;
+  let agentHandler: ((url: URL, init?: RequestInit) => Promise<Response>) | null;
   let requests: { method: string; url: string; body?: unknown }[];
   let answerResponseFn: (url: URL, body: unknown) => Promise<Response>;
   let navEvents: string[];
@@ -195,9 +199,11 @@ describe('<scion-page-project-decisions>', () => {
     window.history.replaceState({}, '', '/projects/p-1/decisions');
     requests = [];
     navEvents = [];
+    showToast.mockReset();
     projectHandler = null;
     pendingHandler = null;
     madeHandler = null;
+    agentHandler = null;
     document.addEventListener('nav-click', onNavClick);
 
     pendingResponses = [
@@ -272,6 +278,9 @@ describe('<scion-page-project-decisions>', () => {
           const next =
             pendingResponses.length > 1 ? pendingResponses.shift()! : pendingResponses[0]!;
           return jsonResponse(next);
+        }
+        if (url.pathname.startsWith('/api/v1/agents/') && agentHandler) {
+          return agentHandler(url, init);
         }
         if (
           url.pathname.startsWith('/api/v1/decisions/') ||
@@ -2544,5 +2553,459 @@ describe('<scion-page-project-decisions>', () => {
 
     expect(root.querySelector('[data-prompt-card="m-agent-only"]')).not.toBeNull();
     expect(root.querySelector('[data-prompt-card="m-old-tail-0"]')).toBeNull();
+  });
+
+  it('disables Dismiss… with countdown tooltip before 5 minutes and unlocks at the boundary (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const createdAt = new Date(Date.now() - (5 * 60_000 - 1200)).toISOString();
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [makePrompt({ createdAt })],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+
+    const disabledBtn = root.querySelector<HTMLElement>('[data-dismiss-prompt="m-1"]')!;
+    expect(disabledBtn).not.toBeNull();
+    expect(disabledBtn.hasAttribute('disabled')).toBe(true);
+    const tip = root.querySelector<HTMLElement>('[data-dismiss-tooltip]')!;
+    expect(tip?.getAttribute('content')).toBe('Dismiss available in 1 min');
+
+    // Wait past the 1.2s remaining age so the controller's boundary timer fires automatically.
+    await settle(el, 1350);
+
+    const enabledBtn = root.querySelector<HTMLElement>('[data-dismiss-prompt="m-1"]')!;
+    expect(enabledBtn.hasAttribute('disabled')).toBe(false);
+    expect(root.querySelector('[data-dismiss-tooltip]')).toBeNull();
+  });
+
+  it('dismisses a multi-row set from the confirm dialog with reason and removes the card from Waiting on you (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const d1 = makeDecision({ rowId: 'r-1', key: 'D234', ref: 'D234', question: 'Ship v0.9?' });
+    const d2 = makeDecision({
+      rowId: 'r-2',
+      key: '17',
+      ref: '17',
+      question: 'Which approach?',
+    });
+    const setPrompt = makePrompt({
+      promptMessageId: 'm-set',
+      answerMode: 'set',
+      createdAt: '2026-11-13T10:00:00Z',
+      decisions: [d1, d2],
+    });
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+        prompts: [setPrompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+      {
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ id: 'a-rel', name: 'release-bot' });
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-set/dismiss') {
+        const dismissedMeta = {
+          at: '2026-11-13T10:12:00Z',
+          byUserId: 'u-me',
+          byName: 'Alice',
+          reason: 'Stale: already shipped.',
+          surface: 'decisions_page',
+          responseMessageId: 'resp-dsm',
+        };
+        return jsonResponse({
+          dismissed: [
+            { ...d1, status: 'dismissed', dismissed: dismissedMeta },
+            { ...d2, status: 'dismissed', dismissed: dismissedMeta },
+          ],
+          alreadyDismissed: [],
+          responseMessageId: 'resp-dsm',
+          delivered: true,
+          deliveryStatus: 'delivered',
+        });
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    expect(root.querySelector('[data-waiting-badge]')?.textContent?.trim()).toBe('2');
+
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-set"]')!.click();
+    await settle(el, 20);
+
+    const dialog = root.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.getAttribute('label')).toBe('Dismiss decisions');
+    expect(dialog.querySelector('[data-dismiss-tell="live"]')?.textContent).toContain(
+      'release-bot will be told in #release.'
+    );
+    const confirmBtn = dialog.querySelector<HTMLElement>('[data-dismiss-confirm]')!;
+    expect(confirmBtn.textContent?.trim()).toBe('Dismiss 2 decisions');
+
+    const reasonInput = dialog.querySelector<HTMLElement & { value?: string }>(
+      '[data-dismiss-reason]'
+    )!;
+    reasonInput.value = '  Stale: already shipped.  ';
+    reasonInput.dispatchEvent(new Event('sl-input', { bubbles: true, composed: true }));
+    await settle(el, 10);
+
+    confirmBtn.click();
+    await settle(el, 90);
+
+    const dismissReq = requests.find((r) => r.url === '/api/v1/decision-prompts/m-set/dismiss');
+    expect(dismissReq).toEqual({
+      method: 'POST',
+      url: '/api/v1/decision-prompts/m-set/dismiss',
+      body: {
+        decisionIds: ['r-1', 'r-2'],
+        reason: 'Stale: already shipped.',
+        surface: 'decisions_page',
+      },
+    });
+    expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
+    expect(root.querySelector('[data-prompt-card="m-set"]')).toBeNull();
+    expect(root.querySelector('[data-waiting-badge]')).toBeNull();
+    expect(root.querySelector('[data-empty="pending"]')).not.toBeNull();
+    expect(showToast).toHaveBeenCalledWith('Dismissed 2 decisions.', 'success');
+  });
+
+  it('dismisses only the rows the dialog lists, not an interpreted row awaiting the viewer (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const pending = makeDecision({
+      rowId: 'r-pend',
+      messageId: 'm-mixed',
+      key: 'D1',
+      ref: 'D1',
+      question: 'Ship v0.9?',
+    });
+    const interpreted = makeDecision({
+      rowId: 'r-interp',
+      messageId: 'm-mixed',
+      key: 'D2',
+      ref: 'D2',
+      question: 'Which approach?',
+      status: 'decided',
+      decision: {
+        choiceId: 'yes',
+        label: 'Yes',
+        answeredByUserId: 'u-me',
+        answeredByName: 'Alice',
+        provenance: 'agent_interpreted',
+        outcome: 'answer',
+        surface: 'slack',
+        sourceMessageId: 'msg-reply-9',
+        responseMessageId: 'resp-i',
+        at: '2026-11-13T10:05:00Z',
+      },
+    });
+    const prompt = makePrompt({
+      promptMessageId: 'm-mixed',
+      answerMode: 'set',
+      createdAt: '2026-11-13T10:00:00Z',
+      decisions: [pending, interpreted],
+    });
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+        prompts: [prompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ id: 'a-rel', name: 'release-bot' });
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-mixed/dismiss') {
+        return jsonResponse({
+          dismissed: [
+            {
+              ...pending,
+              status: 'dismissed',
+              dismissed: {
+                at: '2026-11-13T10:12:00Z',
+                byUserId: 'u-me',
+                byName: 'Alice',
+                surface: 'decisions_page',
+                responseMessageId: 'resp-mixed',
+              },
+            },
+          ],
+          alreadyDismissed: [],
+          responseMessageId: 'resp-mixed',
+          delivered: true,
+          deliveryStatus: 'delivered',
+        });
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-mixed"]')!.click();
+    await settle(el, 20);
+
+    const dialog = root.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.getAttribute('label')).toBe('Dismiss decision');
+    expect(dialog.textContent).toContain('D1');
+    expect(dialog.textContent).not.toContain('Which approach?');
+    dialog.querySelector<HTMLElement>('[data-dismiss-confirm]')!.click();
+    await settle(el, 90);
+
+    const dismissReq = requests.find((r) => r.url === '/api/v1/decision-prompts/m-mixed/dismiss');
+    expect(dismissReq?.body).toEqual({ decisionIds: ['r-pend'], surface: 'decisions_page' });
+  });
+
+  it('closes the dialog and refreshes when the card changed under the dialog (dismiss_changed) (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const d1 = makeDecision({ rowId: 'r-1', messageId: 'm-chg' });
+    const prompt = makePrompt({
+      promptMessageId: 'm-chg',
+      createdAt: '2026-11-13T10:00:00Z',
+      decisions: [d1],
+    });
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [prompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ id: 'a-rel', name: 'release-bot' });
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-chg/dismiss') {
+        return jsonResponse(
+          {
+            error: {
+              code: 'dismiss_changed',
+              message: 'the decision set changed',
+              details: { reasons: { 'r-1': 'decided' } },
+            },
+          },
+          409
+        );
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-chg"]')!.click();
+    await settle(el, 20);
+    root
+      .querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]')!
+      .click();
+    await settle(el, 90);
+
+    const dismissReq = requests.find((r) => r.url === '/api/v1/decision-prompts/m-chg/dismiss');
+    expect(dismissReq?.body).toEqual({ decisionIds: ['r-1'], surface: 'decisions_page' });
+    expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
+    expect(showToast).toHaveBeenCalledWith('Nothing dismissed: this card changed.', 'warning');
+  });
+
+  it('treats a dismiss_changed whose only reason is too_recent like too_recent: re-arms the unlock (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const d1 = makeDecision({ rowId: 'r-1', messageId: 'm-skew' });
+    const prompt = makePrompt({
+      promptMessageId: 'm-skew',
+      createdAt: '2026-11-13T10:00:00Z',
+      decisions: [d1],
+    });
+    const availableAt = new Date(Date.now() + 3 * 60_000 - 1_000).toISOString();
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [prompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ id: 'a-rel', name: 'release-bot' });
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-skew/dismiss') {
+        return jsonResponse(
+          {
+            error: {
+              code: 'dismiss_changed',
+              message: 'the decisions to dismiss changed; refresh and try again',
+              details: { reasons: { 'r-1': 'too_recent' }, availableAt },
+            },
+          },
+          409
+        );
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-skew"]')!.click();
+    await settle(el, 20);
+    root
+      .querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]')!
+      .click();
+    await settle(el, 90);
+
+    expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(
+      'Decisions must be at least 5 minutes old before they can be dismissed.',
+      'warning'
+    );
+    expect(showToast).not.toHaveBeenCalledWith('Nothing dismissed: this card changed.', 'warning');
+    const btn = root.querySelector<HTMLElement>('[data-dismiss-prompt="m-skew"]')!;
+    expect(btn.hasAttribute('disabled')).toBe(true);
+    expect(root.querySelector<HTMLElement>('[data-dismiss-tooltip]')?.getAttribute('content')).toBe(
+      'Dismiss available in 3 min'
+    );
+  });
+
+  it('tells the user a suspended asker was not told, not that it is gone (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const d1 = makeDecision({ rowId: 'r-1', messageId: 'm-susp' });
+    const prompt = makePrompt({
+      promptMessageId: 'm-susp',
+      createdAt: '2026-11-13T10:00:00Z',
+      decisions: [d1],
+    });
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [prompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+      {
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ id: 'a-rel', name: 'release-bot', phase: 'suspended' });
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-susp/dismiss') {
+        return jsonResponse({
+          dismissed: [{ ...d1, status: 'dismissed' }],
+          alreadyDismissed: [],
+          responseMessageId: 'resp-susp',
+          delivered: false,
+          deliveryStatus: 'unreachable',
+        });
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-susp"]')!.click();
+    await settle(el, 20);
+    root
+      .querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]')!
+      .click();
+    await settle(el, 90);
+
+    expect(showToast).toHaveBeenCalledWith(
+      'release-bot is suspended or stopped; it was not told.',
+      'warning'
+    );
+    expect(showToast).not.toHaveBeenCalledWith('release-bot is gone; nothing was sent.', 'neutral');
+  });
+
+  it('shows gone-agent notice in the dismiss dialog when the asking agent returns 404 (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const d1 = makeDecision({
+      rowId: 'r-gone',
+      key: 'migrate',
+      ref: 'migrate',
+      askerAgentId: 'a-gone',
+      askerAgentName: 'nc-x',
+      question: 'Run the backfill on staging first?',
+    });
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [
+          makePrompt({
+            promptMessageId: 'm-gone',
+            askerAgentId: 'a-gone',
+            askerAgentName: 'nc-x',
+            createdAt: '2026-11-13T10:00:00Z',
+            decisions: [d1],
+          }),
+        ],
+        agents: [{ id: 'a-gone', name: 'nc-x' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+      {
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        agents: [{ id: 'a-gone', name: 'nc-x' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ error: { code: 'not_found' } }, 404);
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-gone/dismiss') {
+        return jsonResponse({
+          dismissed: [
+            {
+              ...d1,
+              status: 'dismissed',
+              dismissed: {
+                at: '2026-11-13T10:15:00Z',
+                byUserId: 'u-me',
+                byName: 'Alice',
+                surface: 'decisions_page',
+                responseMessageId: 'resp-gone',
+              },
+            },
+          ],
+          alreadyDismissed: [],
+          responseMessageId: 'resp-gone',
+          delivered: false,
+          deliveryStatus: 'gone',
+        });
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-gone"]')!.click();
+    await settle(el, 25);
+
+    const dialog = root.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
+    expect(dialog.querySelector('[data-dismiss-tell="gone"]')?.textContent).toContain(
+      'nc-x is gone; nothing will be sent.'
+    );
+
+    dialog.querySelector<HTMLElement>('[data-dismiss-confirm]')!.click();
+    await settle(el, 90);
+
+    expect(root.querySelector('[data-prompt-card="m-gone"]')).toBeNull();
+    expect(showToast).toHaveBeenCalledWith('nc-x is gone; nothing was sent.', 'neutral');
   });
 });

@@ -16,10 +16,12 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -44,11 +46,11 @@ Decisions made. In agent mode, inspect the Decisions your agent has asked and
 record interpreted answers from user replies.
 
 Commands:
-  scion decisions list [--waiting | --made] [--all-projects] [-q <text>]       List Decisions (human mode)
-  scion decisions list [--pending | --decided | --withdrawn | --all] [-q <t>]  List your agent's Decisions (agent mode)
-  scion decisions show <key>                                                   Show all versions and answers for a Decision (agent mode)
-  scion decisions record ... --from <message-id>                               Record interpreted answer(s) from a user reply (agent mode)
-  scion decisions withdraw <key>... [--set] [--reason <text>]                  Withdraw obsolete open Decision(s) (agent mode)`,
+  scion decisions list [--waiting | --made] [--all-projects] [-q <text>]                         List Decisions (human mode)
+  scion decisions list [--pending | --decided | --withdrawn | --dismissed | --all] [-q <text>]   List your agent's Decisions (agent mode)
+  scion decisions show <key>                                                                     Show all versions and answers for a Decision (agent mode)
+  scion decisions record ... --from <message-id>                                                 Record interpreted answer(s) from a user reply (agent mode)
+  scion decisions withdraw <key>... [--set] [--reason <text>]                                    Withdraw obsolete open Decision(s) (agent mode)`,
 	}
 	cmd.AddCommand(
 		newDecisionsListCmd(),
@@ -82,6 +84,8 @@ func decisionProvenanceDisplay(a *hubclient.DecisionAnswerView) string {
 			return "confirmed"
 		case "override":
 			return "overridden"
+		case "dismiss":
+			return "dismissed"
 		default:
 			return "direct"
 		}
@@ -93,6 +97,26 @@ func decisionProvenanceDisplay(a *hubclient.DecisionAnswerView) string {
 		}
 		return "-"
 	}
+}
+
+// decisionDismissedSummary renders a dismissal as one line. maxReasonRunes > 0
+// truncates the reason (the list table); 0 keeps it whole (show).
+func decisionDismissedSummary(d *hubclient.DecisionDismissedView, maxReasonRunes int) string {
+	if d == nil {
+		return "dismissed"
+	}
+	who := collapseSingleLine(d.ByName)
+	if who == "" {
+		who = "a user"
+	}
+	summary := fmt.Sprintf("dismissed by %s · %s", who, clitime.Format(d.At, clitime.Minute))
+	if r := collapseSingleLine(d.Reason); r != "" {
+		if maxReasonRunes > 0 {
+			r = truncateRunes(r, maxReasonRunes, true)
+		}
+		summary += " · " + r
+	}
+	return summary
 }
 
 func decisionAnswererDisplay(a *hubclient.DecisionAnswerView) string {

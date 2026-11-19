@@ -83,10 +83,16 @@ func (DecisionAnswer) Fields() []ent.Field {
 			Values("direct", "agent_interpreted").
 			Immutable(),
 		// outcome: confirm and override only on a direct row that follows
-		// an interpreted one.
+		// an interpreted one; dismiss on a user dismissal row.
 		field.Enum("outcome").
-			Values("answer", "confirm", "override").
+			Values("answer", "confirm", "override", "dismiss").
 			Default("answer").
+			Immutable(),
+		// dismiss_reason is optional plain text (<= 500 runes) set only when
+		// outcome == dismiss.
+		field.Text("dismiss_reason").
+			Optional().
+			Nillable().
 			Immutable(),
 		// interpreted_by_agent_id and source_message_id are set iff the
 		// provenance is agent_interpreted.

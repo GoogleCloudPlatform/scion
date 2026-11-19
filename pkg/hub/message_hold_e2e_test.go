@@ -2536,6 +2536,89 @@ func TestHoldA2_Round1_OPT1_DecisionResponsePreservesAgentLineAndMetadata(t *tes
 	assert.Empty(t, setMeta[messages.MetadataDecisionKey])
 }
 
+// TestHoldDecisionDismissResponseRedriveRebuildsAgentLineAndMetadata pins the
+// dismiss branch of enrichHeldDecisionResponse (ptone/scion#8213): a dismissal
+// whose asker has no session is held, and the redrive delivers the dismiss
+// line and the dismissal metadata (batch, JSON answers, reason).
+func TestHoldDecisionDismissResponseRedriveRebuildsAgentLineAndMetadata(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
+	require.NoError(t, wcs.Init())
+	f.srv.SetWebChatStore(wcs)
+	setHoldTestSettings(t, f.srv, map[string]bool{
+		conduitExperiment:             true,
+		experiments.ConduitDeliver:    true,
+		experiments.Decisions:         true,
+		experiments.ChatScheduledSend: true,
+	})
+	f.srv.decisionClock = func() time.Time { return time.Now().UTC().Add(store.DecisionDismissMinAge + time.Minute) }
+
+	owner, err := f.store.GetUser(ctx, f.launched.OwnerID)
+	require.NoError(t, err)
+
+	var decs []messages.DecisionInput
+	require.NoError(t, json.Unmarshal([]byte(`[{"id":"D20","question":"Ship the feature now?","choices":["yes","no"]},{"question":"Which approach?","choices":[{"id":"a","label":"Extend"},{"id":"b","label":"New type"}]}]`), &decs))
+	body, err := json.Marshal(OutboundMessageRequest{Recipient: "user:" + owner.Email, Msg: "Please choose", Decisions: decs})
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/agents/"+f.launched.ID+"/outbound-message", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+f.agentToken(t, f.launched))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	rb, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, string(rb))
+	var sent struct {
+		MessageID string               `json:"message_id"`
+		Decisions []DecisionSendResult `json:"decisions"`
+	}
+	require.NoError(t, json.Unmarshal(rb, &sent))
+	require.Len(t, sent.Decisions, 2)
+
+	dBody, _ := json.Marshal(map[string]any{"reason": "Stale: shipped already"})
+	dReq, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/decision-prompts/"+sent.MessageID+"/dismiss", bytes.NewReader(dBody))
+	require.NoError(t, err)
+	dReq.Header.Set("Authorization", "Bearer "+f.userToken)
+	dReq.Header.Set("Content-Type", "application/json")
+	dResp, err := http.DefaultClient.Do(dReq)
+	require.NoError(t, err)
+	dBytes, _ := io.ReadAll(dResp.Body)
+	_ = dResp.Body.Close()
+	require.Equal(t, http.StatusOK, dResp.StatusCode, string(dBytes))
+	var out DismissDecisionPromptResponse
+	require.NoError(t, json.Unmarshal(dBytes, &out))
+	require.Len(t, out.Dismissed, 2)
+	assert.True(t, out.Delivered, "a held response is accepted for delivery (holdOrDispatch), as for answers")
+	f.waitMessageState(t, out.ResponseMessageID, store.MessageDispatchAwaitingSession)
+
+	ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+	f.waitMessageState(t, out.ResponseMessageID, store.MessageDispatchDelivered)
+
+	var envs []map[string]any
+	for _, chunk := range ca.tmux.pastedTexts() {
+		envs = append(envs, decodeAllHoldTestEnvelopes(t, chunk)...)
+	}
+	require.Len(t, envs, 1)
+	assert.Equal(t, out.ResponseMessageID, envs[0]["message_id"])
+	msgText, _ := envs[0]["msg"].(string)
+	assert.Contains(t, msgText, ` dismissed D20 ("Ship the feature now?"), 1 ("Which approach?"). Reason: Stale: shipped already`)
+	meta, _ := envs[0]["metadata"].(map[string]any)
+	require.NotNil(t, meta)
+	assert.Equal(t, "Stale: shipped already", meta[messages.MetadataDecisionDismissReason])
+	assert.NotEmpty(t, meta[messages.MetadataDecisionBatch])
+	answersJSON, _ := meta[messages.MetadataDecisionAnswers].(string)
+	var answers []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(answersJSON), &answers), answersJSON)
+	require.Len(t, answers, 2)
+	assert.Equal(t, "D20", answers[0]["key"])
+	assert.Equal(t, messages.ChoiceIDDismissed, answers[0]["choice_id"])
+	assert.Equal(t, store.DecisionOutcomeDismiss, answers[0]["outcome"])
+	assert.Equal(t, "1", answers[1]["key"])
+}
+
 func TestHoldA2_Round2_R1_FlagOffRoutedGroupRecordsUserParticipant(t *testing.T) {
 	env := setupRoutedTestEnv(t)
 	setHoldTestSettings(t, env.srv, map[string]bool{

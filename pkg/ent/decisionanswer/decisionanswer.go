@@ -41,6 +41,8 @@ const (
 	FieldProvenance = "provenance"
 	// FieldOutcome holds the string denoting the outcome field in the database.
 	FieldOutcome = "outcome"
+	// FieldDismissReason holds the string denoting the dismiss_reason field in the database.
+	FieldDismissReason = "dismiss_reason"
 	// FieldInterpretedByAgentID holds the string denoting the interpreted_by_agent_id field in the database.
 	FieldInterpretedByAgentID = "interpreted_by_agent_id"
 	// FieldSourceMessageID holds the string denoting the source_message_id field in the database.
@@ -81,6 +83,7 @@ var Columns = []string{
 	FieldAnsweredByEmail,
 	FieldProvenance,
 	FieldOutcome,
+	FieldDismissReason,
 	FieldInterpretedByAgentID,
 	FieldSourceMessageID,
 	FieldSurface,
@@ -158,6 +161,7 @@ const (
 	OutcomeAnswer   Outcome = "answer"
 	OutcomeConfirm  Outcome = "confirm"
 	OutcomeOverride Outcome = "override"
+	OutcomeDismiss  Outcome = "dismiss"
 )
 
 func (o Outcome) String() string {
@@ -167,7 +171,7 @@ func (o Outcome) String() string {
 // OutcomeValidator is a validator for the "outcome" field enum values. It is called by the builders before save.
 func OutcomeValidator(o Outcome) error {
 	switch o {
-	case OutcomeAnswer, OutcomeConfirm, OutcomeOverride:
+	case OutcomeAnswer, OutcomeConfirm, OutcomeOverride, OutcomeDismiss:
 		return nil
 	default:
 		return fmt.Errorf("decisionanswer: invalid enum value for outcome field: %q", o)
@@ -274,6 +278,11 @@ func ByProvenance(opts ...sql.OrderTermOption) OrderOption {
 // ByOutcome orders the results by the outcome field.
 func ByOutcome(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOutcome, opts...).ToFunc()
+}
+
+// ByDismissReason orders the results by the dismiss_reason field.
+func ByDismissReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDismissReason, opts...).ToFunc()
 }
 
 // ByInterpretedByAgentID orders the results by the interpreted_by_agent_id field.

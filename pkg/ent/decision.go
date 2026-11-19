@@ -64,7 +64,9 @@ type Decision struct {
 	WithdrawnAt *time.Time `json:"withdrawn_at,omitempty"`
 	// WithdrawnReason holds the value of the "withdrawn_reason" field.
 	WithdrawnReason *string `json:"withdrawn_reason,omitempty"`
-	selectValues    sql.SelectValues
+	// DismissedAt holds the value of the "dismissed_at" field.
+	DismissedAt  *time.Time `json:"dismissed_at,omitempty"`
+	selectValues sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -80,7 +82,7 @@ func (*Decision) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case decision.FieldChatKey, decision.FieldAskerAgentName, decision.FieldKey, decision.FieldKeyNorm, decision.FieldKeySource, decision.FieldQuestion, decision.FieldDefaultChoiceID, decision.FieldStatus, decision.FieldWithdrawnReason:
 			values[i] = new(sql.NullString)
-		case decision.FieldCreatedAt, decision.FieldDecidedAt, decision.FieldReplacedAt, decision.FieldWithdrawnAt:
+		case decision.FieldCreatedAt, decision.FieldDecidedAt, decision.FieldReplacedAt, decision.FieldWithdrawnAt, decision.FieldDismissedAt:
 			values[i] = new(sql.NullTime)
 		case decision.FieldID, decision.FieldProjectID, decision.FieldMessageID, decision.FieldAskerAgentID:
 			values[i] = new(uuid.UUID)
@@ -247,6 +249,13 @@ func (_m *Decision) assignValues(columns []string, values []any) error {
 				_m.WithdrawnReason = new(string)
 				*_m.WithdrawnReason = value.String
 			}
+		case decision.FieldDismissedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field dismissed_at", values[i])
+			} else if value.Valid {
+				_m.DismissedAt = new(time.Time)
+				*_m.DismissedAt = value.Time
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -363,6 +372,11 @@ func (_m *Decision) String() string {
 	if v := _m.WithdrawnReason; v != nil {
 		builder.WriteString("withdrawn_reason=")
 		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.DismissedAt; v != nil {
+		builder.WriteString("dismissed_at=")
+		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteByte(')')
 	return builder.String()

@@ -695,6 +695,7 @@ func decisionAnswerMatchesQuery(q string, labelKeys []string) predicate.Decision
 	return decisionanswer.Or(
 		decisionanswer.QuestionTextContainsFold(q),
 		decisionanswer.ChoiceLabelContainsFold(q),
+		decisionanswer.DismissReasonContainsFold(q),
 		decisionanswer.KeyContainsFold(q),
 		func(s *entsql.Selector) {
 			t := entsql.Table(decision.Table)
@@ -726,6 +727,11 @@ func answerProvenancePredicate(raw string) (predicate.DecisionAnswer, error) {
 		return decisionanswer.And(
 			decisionanswer.ProvenanceEQ(decisionanswer.ProvenanceDirect),
 			decisionanswer.OutcomeEQ(decisionanswer.OutcomeOverride),
+		), nil
+	case store.ProjectDecisionProvenanceDismissed:
+		return decisionanswer.And(
+			decisionanswer.ProvenanceEQ(decisionanswer.ProvenanceDirect),
+			decisionanswer.OutcomeEQ(decisionanswer.OutcomeDismiss),
 		), nil
 	default:
 		return nil, fmt.Errorf("%w: invalid provenance filter %q", store.ErrInvalidInput, raw)

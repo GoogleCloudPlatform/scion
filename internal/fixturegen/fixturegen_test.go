@@ -237,6 +237,16 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, store.DecisionStatusWithdrawn, withdrawnDec.Status)
 	require.NotNil(t, withdrawnDec.WithdrawnAt)
 	assert.Equal(t, "Plan changed", withdrawnDec.WithdrawnReason)
+
+	dismissedDec, err := composite.GetDecision(ctx, "dc000000-0000-0000-0000-000000000004")
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusDismissed, dismissedDec.Status)
+	require.NotNil(t, dismissedDec.DismissedAt)
+	assert.Nil(t, dismissedDec.EffectiveAnswer())
+	require.NotNil(t, dismissedDec.Dismissal())
+	assert.Equal(t, "$dismissed", dismissedDec.Dismissal().ChoiceID)
+	assert.Equal(t, store.DecisionOutcomeDismiss, dismissedDec.Dismissal().Outcome)
+	assert.Equal(t, "Already handled out of band", dismissedDec.Dismissal().DismissReason)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

@@ -71,21 +71,22 @@ var offloadMetadataKeys = map[string]bool{
 // messages.MetadataDecisionBatch and MetadataDecisionAnswers included), which
 // only the hub sets, on the decision-response it delivers.
 var reservedMetadataKeys = map[string]bool{
-	MetaBodyOffloaded:                   true,
-	MetaBodyChars:                       true,
-	MetaBodySHA256:                      true,
-	artifacts.MessageMetadataKey:        true,
-	messages.MetadataSenderVisitor:      true,
-	messages.MetadataSenderEmail:        true,
-	messages.MetadataSenderIssuer:       true,
-	messages.MetadataSenderDisplay:      true,
-	messages.MetadataSenderTimezone:     true,
-	messages.MetadataDecisionKey:        true,
-	messages.MetadataDecisionVersion:    true,
-	messages.MetadataChoiceID:           true,
-	messages.MetadataDecisionProvenance: true,
-	messages.MetadataDecisionBatch:      true,
-	messages.MetadataDecisionAnswers:    true,
+	MetaBodyOffloaded:                      true,
+	MetaBodyChars:                          true,
+	MetaBodySHA256:                         true,
+	artifacts.MessageMetadataKey:           true,
+	messages.MetadataSenderVisitor:         true,
+	messages.MetadataSenderEmail:           true,
+	messages.MetadataSenderIssuer:          true,
+	messages.MetadataSenderDisplay:         true,
+	messages.MetadataSenderTimezone:        true,
+	messages.MetadataDecisionKey:           true,
+	messages.MetadataDecisionVersion:       true,
+	messages.MetadataChoiceID:              true,
+	messages.MetadataDecisionProvenance:    true,
+	messages.MetadataDecisionBatch:         true,
+	messages.MetadataDecisionAnswers:       true,
+	messages.MetadataDecisionDismissReason: true,
 }
 
 // DefaultPreviewBudgetBytes is the compiled default preview byte budget

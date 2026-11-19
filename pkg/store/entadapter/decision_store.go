@@ -195,8 +195,11 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 			if st.active != nil {
 				ek.Key = st.active.Key
 				ek.Status = string(st.active.Status)
-				if st.active.Status == decision.StatusDecided {
+				switch st.active.Status {
+				case decision.StatusDecided:
 					ek.Answer = effectiveAnswer(answers[st.active.ID])
+				case decision.StatusDismissed:
+					ek.Dismissal = dismissalAnswer(answers[st.active.ID])
 				}
 			}
 			existing = append(existing, ek)
@@ -246,17 +249,17 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 				}
 				var n int
 				if store.DecisionStatusTerminal(string(st.active.Status)) {
-					// A terminal version (such as withdrawn) keeps its status when
-					// --update re-asks the key as the next version, while
-					// replaced_by_id links v1 -> v2 (D7).
+					// A withdrawn or dismissed version keeps its terminal status when
+					// --update re-asks the key as the next version, while replaced_by_id
+					// links v1 -> v2 (design-8145 D7, design-8194 section 4.8).
 					n, err = client.Decision.Update().
-						Where(decision.ID(st.active.ID), decision.ReplacedByIDIsNil()).
+						Where(decision.ID(st.active.ID), decision.StatusIn(decision.StatusWithdrawn, decision.StatusDismissed), decision.ReplacedByIDIsNil()).
 						SetReplacedAt(now).
 						SetReplacedByID(rowIDs[i]).
 						Save(ctx)
 				} else {
 					n, err = client.Decision.Update().
-						Where(decision.ID(st.active.ID), decision.StatusNEQ(decision.StatusReplaced), decision.StatusNEQ(decision.StatusWithdrawn), decision.ReplacedByIDIsNil()).
+						Where(decision.ID(st.active.ID), decision.StatusNotIn(decision.StatusReplaced, decision.StatusWithdrawn, decision.StatusDismissed), decision.ReplacedByIDIsNil()).
 						SetStatus(decision.StatusReplaced).
 						SetReplacedAt(now).
 						SetReplacedByID(rowIDs[i]).
@@ -432,6 +435,11 @@ func loadAnswers(ctx context.Context, client *ent.Client, rowIDs []uuid.UUID) (m
 func effectiveAnswer(rows []*ent.DecisionAnswer) *store.DecisionAnswer {
 	d := &store.Decision{Answers: answersToStore(rows)}
 	return d.EffectiveAnswer()
+}
+
+func dismissalAnswer(rows []*ent.DecisionAnswer) *store.DecisionAnswer {
+	d := &store.Decision{Answers: answersToStore(rows)}
+	return d.Dismissal()
 }
 
 // GetDecision implements store.DecisionStore.
@@ -618,10 +626,16 @@ func validateRecordAnswerInput(in *store.RecordAnswerInput) error {
 	if in.ChoiceID == "" {
 		return fmt.Errorf("%w: an answer needs a choice id", store.ErrInvalidInput)
 	}
+	if messages.IsReservedChoiceID(in.ChoiceID) {
+		return fmt.Errorf("%w: choice %q is reserved", store.ErrInvalidInput, in.ChoiceID)
+	}
 	if err := decisionanswer.ProvenanceValidator(decisionanswer.Provenance(in.Provenance)); err != nil {
 		return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
 	}
 	if in.Outcome != "" {
+		if in.Outcome == store.DecisionOutcomeDismiss {
+			return fmt.Errorf("%w: outcome %q is written only by DismissDecisions", store.ErrInvalidInput, in.Outcome)
+		}
 		if err := decisionanswer.OutcomeValidator(decisionanswer.Outcome(in.Outcome)); err != nil {
 			return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
 		}
@@ -700,10 +714,14 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		}
 	}
 	if store.DecisionStatusTerminal(string(row.Status)) {
-		if row.Status == decision.StatusReplaced {
+		switch row.Status {
+		case decision.StatusReplaced:
 			return nil, false, fmt.Errorf("%w: version %d of %s was replaced", store.ErrDecisionReplaced, row.Version, row.Key)
+		case decision.StatusDismissed:
+			return nil, false, fmt.Errorf("%w: version %d of %s was dismissed", store.ErrDecisionDismissed, row.Version, row.Key)
+		default:
+			return nil, false, fmt.Errorf("%w: version %d of %s was withdrawn", store.ErrDecisionWithdrawn, row.Version, row.Key)
 		}
-		return nil, false, fmt.Errorf("%w: version %d of %s was withdrawn", store.ErrDecisionWithdrawn, row.Version, row.Key)
 	}
 	var label string
 	for _, ch := range row.Choices {
@@ -846,11 +864,17 @@ func validateRecordAnswerSetInput(in *store.RecordAnswerSetInput) error {
 		if a.DecisionRowID == "" || a.ChoiceID == "" {
 			return fmt.Errorf("%w: every answer needs a decision row id and a choice id", store.ErrInvalidInput)
 		}
+		if messages.IsReservedChoiceID(a.ChoiceID) {
+			return fmt.Errorf("%w: choice %q is reserved", store.ErrInvalidInput, a.ChoiceID)
+		}
 		if seen[a.DecisionRowID] {
 			return fmt.Errorf("%w: decision row %s is answered twice", store.ErrInvalidInput, a.DecisionRowID)
 		}
 		seen[a.DecisionRowID] = true
 		if a.Outcome != "" {
+			if a.Outcome == store.DecisionOutcomeDismiss {
+				return fmt.Errorf("%w: outcome %q is written only by DismissDecisions", store.ErrInvalidInput, a.Outcome)
+			}
 			if err := decisionanswer.OutcomeValidator(decisionanswer.Outcome(a.Outcome)); err != nil {
 				return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
 			}
@@ -1153,6 +1177,7 @@ func decisionToStore(r *ent.Decision) *store.Decision {
 		DecidedAt:      r.DecidedAt,
 		ReplacedAt:     r.ReplacedAt,
 		WithdrawnAt:    r.WithdrawnAt,
+		DismissedAt:    r.DismissedAt,
 	}
 	if r.WithdrawnReason != nil {
 		d.WithdrawnReason = *r.WithdrawnReason
@@ -1205,6 +1230,9 @@ func answerToStore(r *ent.DecisionAnswer) *store.DecisionAnswer {
 	}
 	if r.AnsweredByUserID != nil {
 		a.AnsweredByUserID = *r.AnsweredByUserID
+	}
+	if r.DismissReason != nil {
+		a.DismissReason = *r.DismissReason
 	}
 	if r.InterpretedByAgentID != nil {
 		a.InterpretedByAgentID = r.InterpretedByAgentID.String()
@@ -1277,8 +1305,10 @@ func (c *CompositeStore) ListAgentDecisions(ctx context.Context, agentID string,
 		q = q.Where(decision.StatusEQ(decision.StatusDecided))
 	case store.DecisionListStateWithdrawn:
 		q = q.Where(decision.StatusEQ(decision.StatusWithdrawn))
+	case store.DecisionListStateDismissed:
+		q = q.Where(decision.StatusEQ(decision.StatusDismissed))
 	case store.DecisionListStateAll:
-		// All statuses (pending, decided, replaced, withdrawn).
+		// All statuses (pending, decided, replaced, withdrawn, dismissed).
 	default:
 		return nil, "", fmt.Errorf("%w: invalid decision state %q", store.ErrInvalidInput, state)
 	}
@@ -1345,12 +1375,32 @@ func agentDecisionMatchesQuery(q string) predicate.Decision {
 		decision.QuestionContainsFold(q),
 		decision.KeyContainsFold(q),
 		effectiveAnswerLabelContainsFold(q),
+		dismissalReasonContainsFold(q),
 	)
+}
+
+func dismissalReasonContainsFold(q string) predicate.Decision {
+	return func(s *entsql.Selector) {
+		ta := entsql.Table(decisionanswer.Table).As("da_dsm")
+		s.Where(entsql.And(
+			entsql.EQ(s.C(decision.FieldStatus), decision.StatusDismissed),
+			entsql.Exists(
+				entsql.Select(ta.C(decisionanswer.FieldID)).
+					From(ta).
+					Where(entsql.And(
+						entsql.ColumnsEQ(ta.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
+						entsql.EQ(ta.C(decisionanswer.FieldOutcome), decisionanswer.OutcomeDismiss),
+						entsql.ContainsFold(ta.C(decisionanswer.FieldDismissReason), q),
+					)),
+			),
+		))
+	}
 }
 
 // effectiveAnswerLabelContainsFold matches decisions whose effective answer
 // (Decision.EffectiveAnswer: the direct answer when present, otherwise the
-// agent-interpreted answer) has a choice_label containing q case-insensitively.
+// agent-interpreted answer, skipping dismissed decisions and outcome=dismiss
+// rows) has a choice_label containing q case-insensitively.
 func effectiveAnswerLabelContainsFold(q string) predicate.Decision {
 	return func(s *entsql.Selector) {
 		ta := entsql.Table(decisionanswer.Table).As("da_eff")
@@ -1363,20 +1413,24 @@ func effectiveAnswerLabelContainsFold(q string) predicate.Decision {
 					entsql.EQ(tDir.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
 				)),
 		)
-		s.Where(entsql.Exists(
-			entsql.Select(ta.C(decisionanswer.FieldID)).
-				From(ta).
-				Where(entsql.And(
-					entsql.ColumnsEQ(ta.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
-					entsql.ContainsFold(ta.C(decisionanswer.FieldChoiceLabel), q),
-					entsql.Or(
-						entsql.EQ(ta.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
-						entsql.And(
-							entsql.EQ(ta.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceAgentInterpreted),
-							noDirect,
+		s.Where(entsql.And(
+			entsql.NEQ(s.C(decision.FieldStatus), decision.StatusDismissed),
+			entsql.Exists(
+				entsql.Select(ta.C(decisionanswer.FieldID)).
+					From(ta).
+					Where(entsql.And(
+						entsql.ColumnsEQ(ta.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
+						entsql.NEQ(ta.C(decisionanswer.FieldOutcome), decisionanswer.OutcomeDismiss),
+						entsql.ContainsFold(ta.C(decisionanswer.FieldChoiceLabel), q),
+						entsql.Or(
+							entsql.EQ(ta.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
+							entsql.And(
+								entsql.EQ(ta.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceAgentInterpreted),
+								noDirect,
+							),
 						),
-					),
-				)),
+					)),
+			),
 		))
 	}
 }
@@ -1635,8 +1689,11 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 		dStore.Answers = answersToStore(existing[row.ID])
 		if store.DecisionStatusTerminal(string(row.Status)) {
 			reason := store.InterpretedReasonWithdrawn
-			if row.Status == decision.StatusReplaced {
+			switch row.Status {
+			case decision.StatusReplaced:
 				reason = store.InterpretedReasonReplaced
+			case decision.StatusDismissed:
+				reason = store.InterpretedReasonDismissed
 			}
 			failures = append(failures, store.InterpretedKeyFailure{
 				Key:      dispKey,
@@ -1970,7 +2027,7 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 
 	// Lock target rows on Postgres in (key_norm, version) order — matching
 	// CreateDecisionPrompt, RecordAnswerSet, and RecordInterpretedAnswers —
-	// so concurrent answers, reposts, and withdrawals serialize cleanly.
+	// so concurrent answers, reposts, dismissals, and withdrawals serialize cleanly.
 	matchPred := decision.KeyNormIn(norms...)
 	if len(peekedMsgIDs) > 0 {
 		matchPred = decision.Or(decision.KeyNormIn(norms...), decision.MessageIDIn(peekedMsgIDs...))
@@ -2059,6 +2116,12 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 				seenPromptIDs[row.MessageID] = true
 				resolvedPromptIDs = append(resolvedPromptIDs, row.MessageID)
 			}
+		case row.Status == decision.StatusDismissed:
+			failures = append(failures, store.WithdrawKeyFailure{
+				Key:      row.Key,
+				Reason:   store.WithdrawReasonDismissed,
+				Decision: dStore,
+			})
 		case len(existingAnswers[row.ID]) > 0 || row.Status == decision.StatusDecided:
 			failures = append(failures, store.WithdrawKeyFailure{
 				Key:      row.Key,
@@ -2156,4 +2219,432 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 		Withdrawn:        withdrawnOut,
 		AlreadyWithdrawn: alreadyOut,
 	}, nil
+}
+
+// DismissDecisions implements store.DecisionStore.
+func (c *CompositeStore) DismissDecisions(ctx context.Context, in *store.DismissDecisionsInput) (*store.DismissDecisionsResult, error) {
+	if err := validateDismissDecisionsInput(in); err != nil {
+		return nil, err
+	}
+	if c.inTx {
+		return c.dismissDecisionsTx(ctx, in)
+	}
+	origMsg := in.ResponseMessage.Msg
+	var res *store.DismissDecisionsResult
+	for attempt := 0; ; attempt++ {
+		in.ResponseMessage.Msg = origMsg
+		err := c.WithTx(ctx, func(tx store.Store) error {
+			var err error
+			res, err = tx.(*CompositeStore).dismissDecisionsTx(ctx, in)
+			return err
+		})
+		if err == nil {
+			return res, nil
+		}
+		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
+			continue
+		}
+		if errors.Is(err, errDecisionRace) {
+			return nil, store.ErrTransient
+		}
+		return nil, err
+	}
+}
+
+func validateDismissDecisionsInput(in *store.DismissDecisionsInput) error {
+	if in == nil || in.ResponseMessage == nil || in.ResponseMessage.ID == "" || in.ResponseMessage.ProjectID == "" {
+		return fmt.Errorf("%w: dismiss requires a response message with an ID and a project", store.ErrInvalidInput)
+	}
+	for _, id := range []string{in.MessageID, in.ResponseMessage.ID, in.ResponseMessage.ProjectID} {
+		if _, err := parseUUID(id); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(in.User.UserID) == "" {
+		return fmt.Errorf("%w: dismiss requires the dismissing user", store.ErrInvalidInput)
+	}
+	if len(in.RowIDs) > messages.MaxDecisionsPerMessage {
+		return fmt.Errorf("%w: dismiss accepts at most %d decision row ids", store.ErrInvalidInput, messages.MaxDecisionsPerMessage)
+	}
+	seenIDs := make(map[string]bool, len(in.RowIDs))
+	for _, rawID := range in.RowIDs {
+		trimmed := strings.TrimSpace(rawID)
+		if trimmed == "" {
+			return fmt.Errorf("%w: decision row id must be non-empty", store.ErrInvalidInput)
+		}
+		if _, err := parseUUID(trimmed); err != nil {
+			return err
+		}
+		if seenIDs[trimmed] {
+			return fmt.Errorf("%w: duplicate decision row id %q", store.ErrInvalidInput, trimmed)
+		}
+		seenIDs[trimmed] = true
+	}
+	if len(in.IdempotencyKey) > store.MaxDecisionIdempotencyKeyLen {
+		return fmt.Errorf("%w: idempotency key is at most %d bytes", store.ErrInvalidInput, store.MaxDecisionIdempotencyKeyLen)
+	}
+	surface := strings.TrimSpace(in.Surface)
+	if surface == "" {
+		surface = store.DecisionSurfaceNative
+	}
+	if surface != store.DecisionSurfaceNative && surface != store.DecisionSurfaceDecisionsPage {
+		return fmt.Errorf("%w: invalid dismiss surface %q", store.ErrInvalidInput, in.Surface)
+	}
+	reason := strings.TrimSpace(in.Reason)
+	if utf8.RuneCountInString(reason) > store.MaxDecisionDismissReasonRunes {
+		return fmt.Errorf("%w: reason is at most %d characters", store.ErrInvalidInput, store.MaxDecisionDismissReasonRunes)
+	}
+	return nil
+}
+
+func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.DismissDecisionsInput) (*store.DismissDecisionsResult, error) {
+	client := c.client
+	msgID, err := parseGetID(in.MessageID)
+	if err != nil {
+		return nil, err
+	}
+
+	rawNow := time.Now().UTC()
+	if in.Now != nil {
+		rawNow = in.Now().UTC()
+	}
+	// Truncate stored timestamps to microsecond precision so in-memory responses
+	// match subsequent Postgres TIMESTAMPTZ reads byte-for-byte.
+	writeNow := rawNow.Truncate(time.Microsecond)
+	reason := strings.TrimSpace(in.Reason)
+	surface := strings.TrimSpace(in.Surface)
+	if surface == "" {
+		surface = store.DecisionSurfaceNative
+	}
+
+	// Lock the prompt's rows on Postgres in (key_norm, version) order — the
+	// same order used by CreateDecisionPrompt, RecordAnswerSet,
+	// RecordInterpretedAnswers, and WithdrawDecisions — so concurrent races
+	// serialize without deadlocking. Put rows back in prompt position order
+	// after reading.
+	q := client.Decision.Query().
+		Where(decision.MessageID(msgID)).
+		Order(ent.Asc(decision.FieldKeyNorm), ent.Asc(decision.FieldVersion))
+	if c.isPostgres() {
+		q = q.ForUpdate()
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("%w: message %s has no decisions", store.ErrNotFound, in.MessageID)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Position < rows[j].Position })
+
+	byID := make(map[string]*ent.Decision, len(rows))
+	rowIDs := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		byID[r.ID.String()] = r
+		rowIDs[i] = r.ID
+	}
+
+	requestedSet := make(map[string]bool, len(in.RowIDs))
+	for _, rawID := range in.RowIDs {
+		id := strings.TrimSpace(rawID)
+		if _, ok := byID[id]; !ok {
+			return nil, fmt.Errorf("%w: decision row %s is not in message %s", store.ErrInvalidInput, id, in.MessageID)
+		}
+		requestedSet[id] = true
+	}
+
+	existingAnswers, err := loadAnswers(ctx, client, rowIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Replay check runs before state and minimum-age checks so retries always
+	// receive the stored dismissal (or 422 ErrIdempotencyMismatch when reused
+	// for a different row set or reason).
+	if in.IdempotencyKey != "" {
+		if res, ok, err := replayableDismissal(ctx, client, rows, existingAnswers, requestedSet, reason, in); err != nil || ok {
+			return res, err
+		}
+	}
+
+	var toDismiss []*ent.Decision
+	var alreadyRows []*ent.Decision
+	var earliestAvailableAt time.Time
+	var latestTooRecentAt time.Time
+	reasons := make(map[string]string)
+
+	if len(requestedSet) > 0 {
+		// Explicit RowIDs: all-or-nothing. Every requested row must either be
+		// already dismissed (idempotent no-op) or pass DecisionActionableReason
+		// for the user and meet DecisionDismissMinAge.
+		for _, r := range rows {
+			id := r.ID.String()
+			if !requestedSet[id] {
+				continue
+			}
+			dStore := decisionToStore(r)
+			dStore.Answers = answersToStore(existingAnswers[r.ID])
+			if r.Status == decision.StatusDismissed {
+				alreadyRows = append(alreadyRows, r)
+				continue
+			}
+			actReason := store.DecisionActionableReason(dStore, in.User.UserID)
+			if actReason != "" {
+				reasons[id] = actReason
+				continue
+			}
+			avail := r.CreatedAt.Add(store.DecisionDismissMinAge)
+			if rawNow.Before(avail) {
+				reasons[id] = store.AnswerSetReasonTooRecent
+				if avail.After(latestTooRecentAt) {
+					latestTooRecentAt = avail
+				}
+				continue
+			}
+			toDismiss = append(toDismiss, r)
+		}
+		if len(reasons) > 0 {
+			return nil, &store.DismissChangedError{Reasons: reasons, AvailableAt: latestTooRecentAt}
+		}
+	} else {
+		// Empty RowIDs: dismiss every open row of the prompt waiting on the user
+		// (pending or agent_interpreted naming the user, D6) that has reached
+		// DecisionDismissMinAge; too-recent open rows are skipped, and if none
+		// remain eligible, return DecisionTooRecentError with the earliest time
+		// (design-8194 section 4.4a).
+		for _, r := range rows {
+			dStore := decisionToStore(r)
+			dStore.Answers = answersToStore(existingAnswers[r.ID])
+			if r.Status == decision.StatusDismissed {
+				alreadyRows = append(alreadyRows, r)
+				continue
+			}
+			actReason := store.DecisionActionableReason(dStore, in.User.UserID)
+			if actReason == "" {
+				avail := r.CreatedAt.Add(store.DecisionDismissMinAge)
+				if rawNow.Before(avail) {
+					if earliestAvailableAt.IsZero() || avail.Before(earliestAvailableAt) {
+						earliestAvailableAt = avail
+					}
+					continue
+				}
+				toDismiss = append(toDismiss, r)
+				continue
+			}
+			reasons[dStore.ID] = actReason
+		}
+	}
+
+	alreadyOut := make([]*store.Decision, len(alreadyRows))
+	for i, r := range alreadyRows {
+		d := decisionToStore(r)
+		d.Answers = answersToStore(existingAnswers[r.ID])
+		alreadyOut[i] = d
+	}
+
+	if len(toDismiss) == 0 {
+		if !earliestAvailableAt.IsZero() {
+			return nil, &store.DecisionTooRecentError{AvailableAt: earliestAvailableAt}
+		}
+		if len(alreadyOut) > 0 {
+			return &store.DismissDecisionsResult{
+				Dismissed:        []*store.Decision{},
+				AlreadyDismissed: alreadyOut,
+			}, nil
+		}
+		return nil, &store.DismissChangedError{Reasons: reasons}
+	}
+
+	if in.FormatMessage != nil && in.ResponseMessage.Msg == "" {
+		preview := make([]*store.Decision, len(toDismiss))
+		for i, r := range toDismiss {
+			d := decisionToStore(r)
+			d.Answers = answersToStore(existingAnswers[r.ID])
+			preview[i] = d
+		}
+		in.ResponseMessage.Msg = in.FormatMessage(preview)
+	}
+	in.ResponseMessage.Type = messages.TypeDecisionResponse
+	if in.ResponseMessage.CreatedAt.IsZero() {
+		in.ResponseMessage.CreatedAt = writeNow
+	} else {
+		in.ResponseMessage.CreatedAt = in.ResponseMessage.CreatedAt.UTC().Truncate(time.Microsecond)
+	}
+	if err := c.CreateMessage(ctx, in.ResponseMessage); err != nil {
+		return nil, err
+	}
+
+	responseUUID, _ := parseUUID(in.ResponseMessage.ID)
+	batchUUID := uuid.New()
+	dismissedOut := make([]*store.Decision, len(toDismiss))
+
+	for i, r := range toDismiss {
+		savedAns, err := client.DecisionAnswer.Create().
+			SetDecisionRowID(r.ID).
+			SetProjectID(r.ProjectID).
+			SetAskerAgentID(r.AskerAgentID).
+			SetKey(r.Key).
+			SetVersion(r.Version).
+			SetQuestionText(r.Question).
+			SetChoiceID(messages.ChoiceIDDismissed).
+			SetChoiceLabel(messages.ChoiceLabelDismissed).
+			SetNillableAnsweredByUserID(nullableString(in.User.UserID)).
+			SetAnsweredByName(in.User.Name).
+			SetAnsweredByEmail(in.User.Email).
+			SetProvenance(decisionanswer.ProvenanceDirect).
+			SetOutcome(decisionanswer.OutcomeDismiss).
+			SetNillableDismissReason(nullableString(reason)).
+			SetSurface(decisionanswer.Surface(surface)).
+			SetResponseMessageID(responseUUID).
+			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
+			SetBatchID(batchUUID).
+			SetMatchedDefault(false).
+			SetCreatedAt(writeNow).
+			Save(ctx)
+		if err != nil {
+			return nil, markDecisionRace(err)
+		}
+
+		// Transition pending or decided (interpreted awaiting confirm, D6) to
+		// dismissed while keeping any prior agent_interpreted answer row in
+		// decision_answers.
+		n, err := client.Decision.Update().
+			Where(decision.ID(r.ID), decision.StatusEQ(r.Status)).
+			SetStatus(decision.StatusDismissed).
+			SetDismissedAt(writeNow).
+			Save(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if n != 1 {
+			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errDecisionRace, r.Version, r.Key)
+		}
+
+		d := decisionToStore(r)
+		d.Status = store.DecisionStatusDismissed
+		nowCopy := writeNow
+		d.DismissedAt = &nowCopy
+		ansStore := answerToStore(savedAns)
+		ansStore.CreatedAt = writeNow
+		d.Answers = append(answersToStore(existingAnswers[r.ID]), ansStore)
+		dismissedOut[i] = d
+	}
+
+	return &store.DismissDecisionsResult{
+		Dismissed:        dismissedOut,
+		AlreadyDismissed: alreadyOut,
+		BatchID:          batchUUID.String(),
+	}, nil
+}
+
+// replayableDismissal checks whether in.IdempotencyKey was already used by
+// in.User.UserID on this prompt's rows. Returns (res, true, nil) on an exact
+// replay of the same row set and trimmed reason, (nil, false, ErrIdempotencyMismatch)
+// when reused for different rows/reason/answers, or (nil, false, nil) when unused.
+func replayableDismissal(
+	ctx context.Context,
+	client *ent.Client,
+	rows []*ent.Decision,
+	existingAnswers map[uuid.UUID][]*ent.DecisionAnswer,
+	requestedSet map[string]bool,
+	reason string,
+	in *store.DismissDecisionsInput,
+) (*store.DismissDecisionsResult, bool, error) {
+	rowIDs := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		rowIDs[i] = r.ID
+	}
+	found, err := client.DecisionAnswer.Query().
+		Where(
+			decisionanswer.DecisionRowIDIn(rowIDs...),
+			decisionanswer.IdempotencyKey(in.IdempotencyKey),
+			decisionanswer.BatchIDNotNil(),
+			decisionanswer.AnsweredByUserID(in.User.UserID),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	if len(found) == 0 {
+		return nil, false, nil
+	}
+
+	mismatch := fmt.Errorf("%w: the idempotency key was used for another dismissal or answer set", store.ErrIdempotencyMismatch)
+	batch := *found[0].BatchID
+	recordedAt := found[0].CreatedAt
+	foundByRow := make(map[uuid.UUID]*ent.DecisionAnswer, len(found))
+	for _, f := range found {
+		if f.Outcome != decisionanswer.OutcomeDismiss ||
+			f.AnsweredByUserID == nil || *f.AnsweredByUserID != in.User.UserID ||
+			f.BatchID == nil || *f.BatchID != batch ||
+			derefString(f.DismissReason) != reason {
+			return nil, false, mismatch
+		}
+		foundByRow[f.DecisionRowID] = f
+	}
+
+	var dismissedOut []*store.Decision
+	var alreadyOut []*store.Decision
+
+	if len(requestedSet) > 0 {
+		for _, f := range found {
+			if !requestedSet[f.DecisionRowID.String()] {
+				return nil, false, mismatch
+			}
+		}
+		for _, r := range rows {
+			if !requestedSet[r.ID.String()] {
+				continue
+			}
+			dStore := decisionToStore(r)
+			dStore.Answers = answersToStore(existingAnswers[r.ID])
+			if _, inBatch := foundByRow[r.ID]; inBatch {
+				dismissedOut = append(dismissedOut, dStore)
+				continue
+			}
+			// A requested row not in this batch is valid only if it was already
+			// dismissed in an earlier call (not still open, decided, or dismissed
+			// after recordedAt).
+			dsm := dStore.Dismissal()
+			if r.Status != decision.StatusDismissed || dsm == nil || dsm.BatchID == batch.String() || dsm.CreatedAt.After(recordedAt) {
+				return nil, false, mismatch
+			}
+			alreadyOut = append(alreadyOut, dStore)
+		}
+	} else {
+		for _, r := range rows {
+			dStore := decisionToStore(r)
+			dStore.Answers = answersToStore(existingAnswers[r.ID])
+			if _, inBatch := foundByRow[r.ID]; inBatch {
+				dismissedOut = append(dismissedOut, dStore)
+				continue
+			}
+			if r.Status == decision.StatusDismissed {
+				if dsm := dStore.Dismissal(); dsm != nil && !dsm.CreatedAt.After(recordedAt) {
+					alreadyOut = append(alreadyOut, dStore)
+				}
+				continue
+			}
+			// If another row of the prompt is still waiting on the user and was
+			// already >= 5 minutes old at recordedAt, the original call under
+			// this key must have been an explicit subset rather than empty RowIDs.
+			if store.DecisionActionableReason(dStore, in.User.UserID) == "" &&
+				!recordedAt.Before(r.CreatedAt.Add(store.DecisionDismissMinAge).Truncate(time.Microsecond)) {
+				return nil, false, mismatch
+			}
+		}
+	}
+
+	if dismissedOut == nil {
+		dismissedOut = []*store.Decision{}
+	}
+	if alreadyOut == nil {
+		alreadyOut = []*store.Decision{}
+	}
+	return &store.DismissDecisionsResult{
+		Dismissed:        dismissedOut,
+		AlreadyDismissed: alreadyOut,
+		BatchID:          batch.String(),
+		Replayed:         true,
+	}, true, nil
 }

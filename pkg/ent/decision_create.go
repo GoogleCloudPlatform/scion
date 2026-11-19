@@ -245,6 +245,20 @@ func (_c *DecisionCreate) SetNillableWithdrawnReason(v *string) *DecisionCreate 
 	return _c
 }
 
+// SetDismissedAt sets the "dismissed_at" field.
+func (_c *DecisionCreate) SetDismissedAt(v time.Time) *DecisionCreate {
+	_c.mutation.SetDismissedAt(v)
+	return _c
+}
+
+// SetNillableDismissedAt sets the "dismissed_at" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableDismissedAt(v *time.Time) *DecisionCreate {
+	if v != nil {
+		_c.SetDismissedAt(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *DecisionCreate) SetID(v uuid.UUID) *DecisionCreate {
 	_c.mutation.SetID(v)
@@ -520,6 +534,10 @@ func (_c *DecisionCreate) createSpec() (*Decision, *sqlgraph.CreateSpec) {
 		_spec.SetField(decision.FieldWithdrawnReason, field.TypeString, value)
 		_node.WithdrawnReason = &value
 	}
+	if value, ok := _c.mutation.DismissedAt(); ok {
+		_spec.SetField(decision.FieldDismissedAt, field.TypeTime, value)
+		_node.DismissedAt = &value
+	}
 	return _node, _spec
 }
 
@@ -671,6 +689,24 @@ func (u *DecisionUpsert) UpdateWithdrawnReason() *DecisionUpsert {
 // ClearWithdrawnReason clears the value of the "withdrawn_reason" field.
 func (u *DecisionUpsert) ClearWithdrawnReason() *DecisionUpsert {
 	u.SetNull(decision.FieldWithdrawnReason)
+	return u
+}
+
+// SetDismissedAt sets the "dismissed_at" field.
+func (u *DecisionUpsert) SetDismissedAt(v time.Time) *DecisionUpsert {
+	u.Set(decision.FieldDismissedAt, v)
+	return u
+}
+
+// UpdateDismissedAt sets the "dismissed_at" field to the value that was provided on create.
+func (u *DecisionUpsert) UpdateDismissedAt() *DecisionUpsert {
+	u.SetExcluded(decision.FieldDismissedAt)
+	return u
+}
+
+// ClearDismissedAt clears the value of the "dismissed_at" field.
+func (u *DecisionUpsert) ClearDismissedAt() *DecisionUpsert {
+	u.SetNull(decision.FieldDismissedAt)
 	return u
 }
 
@@ -886,6 +922,27 @@ func (u *DecisionUpsertOne) UpdateWithdrawnReason() *DecisionUpsertOne {
 func (u *DecisionUpsertOne) ClearWithdrawnReason() *DecisionUpsertOne {
 	return u.Update(func(s *DecisionUpsert) {
 		s.ClearWithdrawnReason()
+	})
+}
+
+// SetDismissedAt sets the "dismissed_at" field.
+func (u *DecisionUpsertOne) SetDismissedAt(v time.Time) *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetDismissedAt(v)
+	})
+}
+
+// UpdateDismissedAt sets the "dismissed_at" field to the value that was provided on create.
+func (u *DecisionUpsertOne) UpdateDismissedAt() *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateDismissedAt()
+	})
+}
+
+// ClearDismissedAt clears the value of the "dismissed_at" field.
+func (u *DecisionUpsertOne) ClearDismissedAt() *DecisionUpsertOne {
+	return u.Update(func(s *DecisionUpsert) {
+		s.ClearDismissedAt()
 	})
 }
 
@@ -1268,6 +1325,27 @@ func (u *DecisionUpsertBulk) UpdateWithdrawnReason() *DecisionUpsertBulk {
 func (u *DecisionUpsertBulk) ClearWithdrawnReason() *DecisionUpsertBulk {
 	return u.Update(func(s *DecisionUpsert) {
 		s.ClearWithdrawnReason()
+	})
+}
+
+// SetDismissedAt sets the "dismissed_at" field.
+func (u *DecisionUpsertBulk) SetDismissedAt(v time.Time) *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.SetDismissedAt(v)
+	})
+}
+
+// UpdateDismissedAt sets the "dismissed_at" field to the value that was provided on create.
+func (u *DecisionUpsertBulk) UpdateDismissedAt() *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.UpdateDismissedAt()
+	})
+}
+
+// ClearDismissedAt clears the value of the "dismissed_at" field.
+func (u *DecisionUpsertBulk) ClearDismissedAt() *DecisionUpsertBulk {
+	return u.Update(func(s *DecisionUpsert) {
+		s.ClearDismissedAt()
 	})
 }
 

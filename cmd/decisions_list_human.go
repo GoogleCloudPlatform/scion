@@ -121,10 +121,10 @@ func humanDecisionsListOptions(cmd *cobra.Command) (hubclient.ListProjectDecisio
 	opts.UserID = strings.TrimSpace(opts.UserID)
 	provenance, _ := flags.GetString("provenance")
 	switch provenance = strings.TrimSpace(provenance); provenance {
-	case "", "direct", "interpreted", "confirmed", "overridden":
+	case "", "direct", "interpreted", "confirmed", "overridden", "dismissed":
 		opts.Provenance = provenance
 	default:
-		return opts, newUsageError("--provenance must be one of direct, interpreted, confirmed, overridden")
+		return opts, newUsageError("--provenance must be one of direct, interpreted, confirmed, overridden, dismissed")
 	}
 	for flag, dst := range map[string]*string{"since": &opts.From, "until": &opts.To} {
 		v, _ := flags.GetString(flag)

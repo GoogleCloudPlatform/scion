@@ -51,9 +51,10 @@ project by name, slug or ID, and --sort selects project or recent order. On
 
 In agent mode, lists the Decisions your agent has asked. By default only
 pending Decisions; pass --decided for answered active Decisions, --withdrawn
-for withdrawn Decisions, or --all to include pending, decided, replaced and
-withdrawn versions. Search with -q/--search (question, key or effective answer
-label, 2 to 256 characters).
+for withdrawn Decisions, --dismissed for dismissed Decisions, or --all to
+include pending, decided, replaced, withdrawn and dismissed versions. Search
+with -q/--search (question, key, effective answer label, or dismissal reason,
+2 to 256 characters).
 
 Examples:
   scion decisions list
@@ -64,6 +65,7 @@ Examples:
   scion decisions list --made --answered-by me --json
   scion decisions list --decided          # agent mode
   scion decisions list --withdrawn        # agent mode
+  scion decisions list --dismissed        # agent mode
   scion decisions list --all -q release   # agent mode
   scion decisions list --all --json       # agent mode`,
 		Args: cobra.NoArgs,
@@ -73,8 +75,9 @@ Examples:
 	cmd.Flags().Bool("pending", false, "List pending Decisions only (default)")
 	cmd.Flags().Bool("decided", false, "List decided active Decisions only")
 	cmd.Flags().Bool("withdrawn", false, "List withdrawn Decisions only")
-	cmd.Flags().Bool("all", false, "List pending, decided, replaced, and withdrawn Decisions")
-	markFlagsForMode(cmd, ModeAgent, "pending", "decided", "withdrawn", "all")
+	cmd.Flags().Bool("dismissed", false, "List dismissed Decisions only")
+	cmd.Flags().Bool("all", false, "List pending, decided, replaced, withdrawn, and dismissed Decisions")
+	markFlagsForMode(cmd, ModeAgent, "pending", "decided", "withdrawn", "dismissed", "all")
 	// Human mode.
 	cmd.Flags().Bool("waiting", false, "List Decisions waiting on you (default)")
 	cmd.Flags().Bool("made", false, "List the Decisions made (the answer log)")
@@ -83,7 +86,7 @@ Examples:
 	cmd.Flags().String("conversation", "", "Only this conversation: a name such as #release or \"DM with nc-x\", or its key")
 	cmd.Flags().String("agent", "", "Only Decisions asked by this agent: a name or an agent ID")
 	cmd.Flags().String("answered-by", "", "With --made: only answers by this user: me or a user ID")
-	cmd.Flags().String("provenance", "", "With --made: direct, interpreted, confirmed or overridden")
+	cmd.Flags().String("provenance", "", "With --made: direct, interpreted, confirmed, overridden or dismissed")
 	cmd.Flags().String("since", "", "With --made: answered on or after this day (YYYY-MM-DD, UTC) or time (RFC3339)")
 	cmd.Flags().String("until", "", "With --made: answered on or before this day (YYYY-MM-DD, UTC) or time (RFC3339)")
 	cmd.Flags().Int("limit", defaultDecisionsListLimit, fmt.Sprintf("Maximum number of prompts or answers to list (1 to %d)", maxDecisionsListLimit))
@@ -99,6 +102,7 @@ func resolveDecisionsListState(cmd *cobra.Command) (string, error) {
 	pending, _ := cmd.Flags().GetBool("pending")
 	decided, _ := cmd.Flags().GetBool("decided")
 	withdrawn, _ := cmd.Flags().GetBool("withdrawn")
+	dismissed, _ := cmd.Flags().GetBool("dismissed")
 	all, _ := cmd.Flags().GetBool("all")
 
 	setCount := 0
@@ -111,17 +115,22 @@ func resolveDecisionsListState(cmd *cobra.Command) (string, error) {
 	if withdrawn {
 		setCount++
 	}
+	if dismissed {
+		setCount++
+	}
 	if all {
 		setCount++
 	}
 	if setCount > 1 {
-		return "", newUsageError("pass at most one of --pending, --decided, --withdrawn, or --all")
+		return "", newUsageError("pass at most one of --pending, --decided, --withdrawn, --dismissed, or --all")
 	}
 	switch {
 	case decided:
 		return "decided", nil
 	case withdrawn:
 		return "withdrawn", nil
+	case dismissed:
+		return "dismissed", nil
 	case all:
 		return "all", nil
 	default:
@@ -214,17 +223,24 @@ func writeDecisionsListTable(out io.Writer, items []hubclient.AgentDecisionListI
 	for _, it := range items {
 		question := truncateRunes(collapseSingleLine(it.Question), decisionQuestionMaxWidth, true)
 		answer := "-"
-		if it.Answer != nil && it.Answer.Label != "" {
+		answeredBy := decisionAnswererDisplay(it.Answer)
+		provenance := decisionProvenanceDisplay(it.Answer)
+		switch {
+		case it.Dismissed != nil:
+			answer = decisionDismissedSummary(it.Dismissed, decisionQuestionMaxWidth)
+			if who := collapseSingleLine(it.Dismissed.ByName); who != "" {
+				answeredBy = who
+			}
+			provenance = "dismissed"
+		case it.Answer != nil && it.Answer.Label != "":
 			answer = collapseSingleLine(it.Answer.Label)
-		} else if it.Withdrawn != nil {
+		case it.Withdrawn != nil:
 			detail := "withdrawn " + clitime.Format(it.Withdrawn.At, clitime.Minute)
 			if it.Withdrawn.Reason != "" {
 				detail += ": " + truncateRunes(collapseSingleLine(it.Withdrawn.Reason), decisionQuestionMaxWidth, true)
 			}
 			answer = detail
 		}
-		answeredBy := decisionAnswererDisplay(it.Answer)
-		provenance := decisionProvenanceDisplay(it.Answer)
 		conv := safeText(it.ConversationID)
 		if conv == "" {
 			conv = "-"

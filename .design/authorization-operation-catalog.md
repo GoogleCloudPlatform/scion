@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 422
+**Operations:** 423
 
 ## Table of Contents
 
@@ -221,6 +221,7 @@
 - [chat.decision.read](#chatdecisionread) — Read one version of a decision prompt decision. Needs read access to the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read for a thread; the caller in a user slot of a DM key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.decisions is off
 - [chat.decision.answer](#chatdecisionanswer) — Answer a decision prompt decision by choice id (the label is copied from the stored row) with optional surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403, and so does a user other than the one an agent-interpreted answer records, or a user the asking agent takes no messages from (MESSAGE_DENIED, the chat send's check; a confirm is not delivered, so it is not checked). A replaced version or an answered one is 409, as is an idempotency key reused for another answer; the first answer wins. Records the answer and a decision-response message, delivers it to the asking agent and publishes decision.updated. 404 while web.decisions is off
 - [chat.decisionprompt.answer](#chatdecisionpromptanswer) — Answer every actionable decision of a decision prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows) with optional surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one decision-response message in one transaction, delivers it to the asking agent and publishes decision.updated per row. 404 while web.decisions is off
+- [chat.decisionprompt.dismiss](#chatdecisionpromptdismiss) — Dismiss open decisions of a decision prompt without answering, once the version is at least 5 minutes old, with an optional plain-text reason (up to 500 characters) and surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key; a UAT also needs inbox:write and the prompt's project inside its boundary), surviving chat retention purge of the prompt message. Agents get 403 users_only, visitors and non-session/non-UAT credentials get 403, and a user a live asking agent takes no messages from gets 403 MESSAGE_DENIED. A missing or unreadable prompt is 404; a too-recent version is 409 too_recent with details.availableAt; an already-settled prompt is 409 dismiss_changed (with details.availableAt when a listed row is too recent). Records one outcome=dismiss ($dismissed) answer row per dismissed decision with a shared batch id and one decision-response message in one transaction, delivers it to a live asking agent, and reports deliveryStatus: delivered, held (for the agent's next session), gone (stored without failure, not sent), unreachable (a suspended or stopped asker: stored failed, not sent), failed, or none when nothing new was dismissed; and publishes decision.updated per row. 404 while web.decisions is off
 - [chat.projectdecisions.list](#chatprojectdecisionslist) — List pending decision prompts or the append-only recorded answer log for a project, with live waitingOnYou and waitingOnOthers counts and filter facets. Needs project:read on the project, then scopes every prompt, log entry, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off
 - [chat.userdecisions.list](#chatuserdecisionslist) — List pending decision prompts or recorded decision answers across every project the caller is a member of and can read, with live waitingOnYou and waitingOnOthers counts, sort=project|recent, optional project narrowing, and filter facets (capped at 200 readable member projects with truncatedProjects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty results), then scopes every prompt, log entry, group, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Non-member projects and project-visitor bindings are excluded even for hub admins. Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
@@ -8391,6 +8392,56 @@
 - `pkg/hub:TestDecisionSetAnswer_RecordsAndDeliversOneResponse`
 - `pkg/hub:TestDecisionSetAnswer_ChangedSet409`
 - `pkg/hub:TestDecisionSetAnswer_Authorization`
+
+---
+
+## chat.decisionprompt.dismiss
+
+**Domain:** chat
+
+**Description:** Dismiss open decisions of a decision prompt without answering, once the version is at least 5 minutes old, with an optional plain-text reason (up to 500 characters) and surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key; a UAT also needs inbox:write and the prompt's project inside its boundary), surviving chat retention purge of the prompt message. Agents get 403 users_only, visitors and non-session/non-UAT credentials get 403, and a user a live asking agent takes no messages from gets 403 MESSAGE_DENIED. A missing or unreadable prompt is 404; a too-recent version is 409 too_recent with details.availableAt; an already-settled prompt is 409 dismiss_changed (with details.availableAt when a listed row is too recent). Records one outcome=dismiss ($dismissed) answer row per dismissed decision with a shared batch id and one decision-response message in one transaction, delivers it to a live asking agent, and reports deliveryStatus: delivered, held (for the agent's next session), gone (stored without failure, not sent), unreachable (a suspended or stopped asker: stored failed, not sent), failed, or none when nothing new was dismissed; and publishes decision.updated per row. 404 while web.decisions is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/decision-prompts/{messageId}/dismiss` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`; pinned by `TestDecisionPromptDismiss_Authorization`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `create-resource`, `update-resource`, `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `chat.decisionprompt.dismiss`
+- **Context Fields:** actor_id, prompt_message_id, batch_id
+- **After Fields:** response_message_id
+- **Atomic:** No
+- **Non-Atomic Justification:** The dismissal answer rows and response message are stored in one transaction before agent delivery, which is fire-and-forget
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** idempotencyKey (optional); prompt message ID otherwise
+- **Retry:** repeating the call on an already-dismissed prompt returns alreadyDismissed and stores nothing new
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestDecisionPromptDismiss_Authorization`
+- `pkg/hub:TestDecisionPromptDismiss_MinimumAgeAndDelivery`
+- `pkg/hub:TestDecisionPromptDismiss_GoneAsker`
 
 ---
 

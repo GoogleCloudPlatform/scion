@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 type actionableGoldenAnswer struct {
@@ -95,6 +97,7 @@ func TestDecisionStatusTerminal(t *testing.T) {
 		DecisionStatusDecided:   false,
 		DecisionStatusReplaced:  true,
 		DecisionStatusWithdrawn: true,
+		DecisionStatusDismissed: true,
 		"":                      false,
 		"expired":               false,
 	}
@@ -112,5 +115,55 @@ func TestDecisionActionableReason_Withdrawn(t *testing.T) {
 	}
 	if got := DecisionActionableReason(d, ""); got != AnswerSetReasonWithdrawn {
 		t.Fatalf("DecisionActionableReason(withdrawn, \"\") = %q, want %q", got, AnswerSetReasonWithdrawn)
+	}
+}
+
+func TestDecisionDismissed_EffectiveAnswerDismissalAndActionable(t *testing.T) {
+	dismissRow := &DecisionAnswer{
+		ID:               "ans-dsm",
+		ChoiceID:         messages.ChoiceIDDismissed,
+		ChoiceLabel:      messages.ChoiceLabelDismissed,
+		Provenance:       DecisionProvenanceDirect,
+		Outcome:          DecisionOutcomeDismiss,
+		DismissReason:    "Stale: release shipped",
+		AnsweredByUserID: "u1",
+		AnsweredByName:   "Alice",
+	}
+
+	// Plain dismissed decision: EffectiveAnswer is nil, Dismissal returns the row.
+	d := &Decision{
+		Status:  DecisionStatusDismissed,
+		Answers: []*DecisionAnswer{dismissRow},
+	}
+	if eff := d.EffectiveAnswer(); eff != nil {
+		t.Fatalf("EffectiveAnswer() on dismissed decision = %+v, want nil", eff)
+	}
+	if got := d.Dismissal(); got != dismissRow {
+		t.Fatalf("Dismissal() = %+v, want %+v", got, dismissRow)
+	}
+	if got := DecisionActionableReason(d, "u1"); got != AnswerSetReasonDismissed {
+		t.Fatalf("DecisionActionableReason(dismissed) = %q, want %q", got, AnswerSetReasonDismissed)
+	}
+
+	// Dismissed after an agent_interpreted row (even when Status is not set on
+	// an answer-slice helper struct): EffectiveAnswer still returns nil.
+	withInterp := &Decision{
+		Answers: []*DecisionAnswer{
+			{
+				ID:               "ans-interp",
+				ChoiceID:         "1",
+				ChoiceLabel:      "Yes",
+				Provenance:       DecisionProvenanceAgentInterpreted,
+				Outcome:          DecisionOutcomeAnswer,
+				AnsweredByUserID: "u1",
+			},
+			dismissRow,
+		},
+	}
+	if eff := withInterp.EffectiveAnswer(); eff != nil {
+		t.Fatalf("EffectiveAnswer() with interpreted + dismiss rows = %+v, want nil", eff)
+	}
+	if got := withInterp.Dismissal(); got != dismissRow {
+		t.Fatalf("Dismissal() with interpreted + dismiss rows = %+v, want %+v", got, dismissRow)
 	}
 }

@@ -401,6 +401,15 @@ func Spec() []TableFixture {
 				"status": "withdrawn", "created_at": baseTime,
 				"withdrawn_at": baseTime.Add(2 * time.Minute), "withdrawn_reason": "Plan changed",
 			},
+			{ // dismissed decision version paired with an outcome=dismiss answer row (ptone/scion#8213)
+				"id": "dc000000-0000-0000-0000-000000000004", "project_id": projectID,
+				"conversation_id": conversationID, "message_id": messageID, "position": 3,
+				"asker_agent_id": agentID, "asker_agent_name": "worker",
+				"key": "D-DSM", "key_norm": "d-dsm", "key_source": "agent", "version": 1,
+				"question": "Stale approval check?", "choices": `[{"id":"1","label":"yes"},{"id":"2","label":"no"}]`,
+				"status": "dismissed", "created_at": baseTime,
+				"dismissed_at": baseTime.Add(6 * time.Minute),
+			},
 		}},
 		{Table: "decision_answers", Rows: []row{
 			{ // a direct answer recorded from the web session
@@ -411,6 +420,15 @@ func Spec() []TableFixture {
 				"provenance": "direct", "outcome": "answer", "surface": "native",
 				"response_message_id": messageID, "idempotency_key": "web-1", "created_at": baseTime.Add(time.Minute),
 				"batch_id": "ba000000-0000-0000-0000-000000000001", "matched_default": false,
+			},
+			{ // a dismissal recorded from the Decisions page (ptone/scion#8213)
+				"id": "da000000-0000-0000-0000-000000000002", "decision_row_id": "dc000000-0000-0000-0000-000000000004",
+				"project_id": projectID, "asker_agent_id": agentID, "key": "D-DSM", "version": 1,
+				"question_text": "Stale approval check?", "choice_id": "$dismissed", "choice_label": "Dismissed",
+				"answered_by_user_id": userID, "answered_by_name": "Alice", "answered_by_email": "alice@example.com",
+				"provenance": "direct", "outcome": "dismiss", "dismiss_reason": "Already handled out of band",
+				"surface": "decisions_page", "response_message_id": messageID, "created_at": baseTime.Add(6 * time.Minute),
+				"batch_id": "ba000000-0000-0000-0000-000000000002", "matched_default": false,
 			},
 		}},
 		{Table: "decision_key_counters", Rows: []row{

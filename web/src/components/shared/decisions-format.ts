@@ -25,14 +25,57 @@ import {
   ANSWERABLE,
   GENERIC_ANSWER_DENIED_REASON,
   actionableReason,
+  isOpenDecision,
   type AskerAnswerability,
+  type DismissDeliveryStatus,
 } from '../../client/decision-prompts.js';
+import type { ToastVariant } from '../../utils/toast.js';
 import { chatConversationPath } from '../../client/chat-routes.js';
 import type {
   ProjectDecisionLogEntryView,
   ProjectDecisionPromptView,
 } from '../../client/project-decisions.js';
 import { effectiveTimeZone, formatInstant, parseWallClock } from '../../utils/time.js';
+
+/**
+ * The toast after a successful dismiss call: what was dismissed, and only a
+ * truthful claim about whether the asking agent was told (deliveryStatus).
+ */
+export function dismissResultToast(
+  deliveryStatus: DismissDeliveryStatus,
+  dismissedCount: number,
+  alreadyDismissedCount: number,
+  askerName: string
+): { message: string; variant: ToastVariant } {
+  const name = askerName || 'The agent';
+  const midName = askerName || 'the agent';
+  const done =
+    dismissedCount === 1 ? 'Decision dismissed.' : `Dismissed ${dismissedCount} decisions.`;
+  switch (deliveryStatus) {
+    case 'none':
+      return {
+        message:
+          alreadyDismissedCount === 1
+            ? 'Already dismissed.'
+            : `${alreadyDismissedCount} decisions were already dismissed.`,
+        variant: 'neutral',
+      };
+    case 'delivered':
+      return { message: done, variant: 'success' };
+    case 'held':
+      return {
+        message: `${done} ${midName} will be told when it can receive messages.`,
+        variant: 'success',
+      };
+    case 'gone':
+      return { message: `${name} is gone; nothing was sent.`, variant: 'neutral' };
+    case 'unreachable':
+      return { message: `${name} is suspended or stopped; it was not told.`, variant: 'warning' };
+    case 'failed':
+    default:
+      return { message: `${done} Could not confirm that ${midName} was told.`, variant: 'warning' };
+  }
+}
 
 export interface WaitingOnOthersItem {
   prompt: ProjectDecisionPromptView;
@@ -178,11 +221,7 @@ export function promptAnswerability(p: ProjectDecisionPromptView): AskerAnswerab
 
 export function promptHasWaitingOnOthers(p: ProjectDecisionPromptView): boolean {
   return p.decisions.some(
-    (d) =>
-      Boolean(p.waitingReasons?.[d.rowId]) ||
-      (!p.waitingOnYou &&
-        d.status !== 'replaced' &&
-        !(d.status === 'decided' && d.decision?.provenance !== 'agent_interpreted'))
+    (d) => Boolean(p.waitingReasons?.[d.rowId]) || (!p.waitingOnYou && isOpenDecision(d))
   );
 }
 
@@ -195,11 +234,7 @@ export function collectWaitingOnOthersItems(
       const reason = p.waitingReasons?.[d.rowId];
       if (reason) {
         items.push({ prompt: p, decision: d, reason });
-      } else if (
-        !p.waitingOnYou &&
-        d.status !== 'replaced' &&
-        !(d.status === 'decided' && d.decision?.provenance !== 'agent_interpreted')
-      ) {
+      } else if (!p.waitingOnYou && isOpenDecision(d)) {
         items.push({ prompt: p, decision: d, reason: 'other_user_confirm' });
       }
     }

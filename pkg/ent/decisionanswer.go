@@ -44,6 +44,8 @@ type DecisionAnswer struct {
 	Provenance decisionanswer.Provenance `json:"provenance,omitempty"`
 	// Outcome holds the value of the "outcome" field.
 	Outcome decisionanswer.Outcome `json:"outcome,omitempty"`
+	// DismissReason holds the value of the "dismiss_reason" field.
+	DismissReason *string `json:"dismiss_reason,omitempty"`
 	// InterpretedByAgentID holds the value of the "interpreted_by_agent_id" field.
 	InterpretedByAgentID *uuid.UUID `json:"interpreted_by_agent_id,omitempty"`
 	// SourceMessageID holds the value of the "source_message_id" field.
@@ -78,7 +80,7 @@ func (*DecisionAnswer) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case decisionanswer.FieldVersion:
 			values[i] = new(sql.NullInt64)
-		case decisionanswer.FieldKey, decisionanswer.FieldQuestionText, decisionanswer.FieldChoiceID, decisionanswer.FieldChoiceLabel, decisionanswer.FieldAnsweredByUserID, decisionanswer.FieldAnsweredByName, decisionanswer.FieldAnsweredByEmail, decisionanswer.FieldProvenance, decisionanswer.FieldOutcome, decisionanswer.FieldSurface, decisionanswer.FieldAuthorizingUserID, decisionanswer.FieldDelegationGrantID, decisionanswer.FieldIdempotencyKey:
+		case decisionanswer.FieldKey, decisionanswer.FieldQuestionText, decisionanswer.FieldChoiceID, decisionanswer.FieldChoiceLabel, decisionanswer.FieldAnsweredByUserID, decisionanswer.FieldAnsweredByName, decisionanswer.FieldAnsweredByEmail, decisionanswer.FieldProvenance, decisionanswer.FieldOutcome, decisionanswer.FieldDismissReason, decisionanswer.FieldSurface, decisionanswer.FieldAuthorizingUserID, decisionanswer.FieldDelegationGrantID, decisionanswer.FieldIdempotencyKey:
 			values[i] = new(sql.NullString)
 		case decisionanswer.FieldCreatedAt:
 			values[i] = new(sql.NullTime)
@@ -183,6 +185,13 @@ func (_m *DecisionAnswer) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field outcome", values[i])
 			} else if value.Valid {
 				_m.Outcome = decisionanswer.Outcome(value.String)
+			}
+		case decisionanswer.FieldDismissReason:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field dismiss_reason", values[i])
+			} else if value.Valid {
+				_m.DismissReason = new(string)
+				*_m.DismissReason = value.String
 			}
 		case decisionanswer.FieldInterpretedByAgentID:
 			if value, ok := values[i].(*sql.NullScanner); !ok {
@@ -326,6 +335,11 @@ func (_m *DecisionAnswer) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("outcome=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Outcome))
+	builder.WriteString(", ")
+	if v := _m.DismissReason; v != nil {
+		builder.WriteString("dismiss_reason=")
+		builder.WriteString(*v)
+	}
 	builder.WriteString(", ")
 	if v := _m.InterpretedByAgentID; v != nil {
 		builder.WriteString("interpreted_by_agent_id=")

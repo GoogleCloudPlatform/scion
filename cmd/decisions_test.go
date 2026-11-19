@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -937,4 +938,145 @@ func TestDecisionsWithdraw_MultiKeyWholeSetAndListShowWithdrawn(t *testing.T) {
 	assert.Contains(t, outShow, "v1 [withdrawn] (replaced by v2)")
 	assert.Contains(t, outShow, "Withdrawn:    2026-11-18 05:45 UTC by release-bot")
 	assert.Contains(t, outShow, "Reason:       CI found a regression")
+}
+
+func TestDecisionsDismissed_AgentListShowAndWithdrawFailure(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	fixedNow := time.Date(2026, 11, 18, 16, 0, 0, 0, time.UTC)
+	restoreNow := clitime.SetNow(func() time.Time { return fixedNow })
+	defer restoreNow()
+	clitime.SetZone(time.UTC)
+	defer clitime.SetZone(nil)
+
+	dismissedAt := time.Date(2026, 11, 18, 15, 52, 0, 0, time.UTC)
+	var seenStates []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/decisions", func(w http.ResponseWriter, r *http.Request) {
+		seenStates = append(seenStates, r.URL.Query().Get("state"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+			Items: []hubclient.AgentDecisionListItem{
+				{
+					RowID:          "row-dsm-1",
+					Key:            "D234",
+					Ref:            "ag/D234",
+					Version:        1,
+					Status:         "dismissed",
+					Question:       "Ship v0.9 today?",
+					ConversationID: "conv-rel",
+					CreatedAt:      fixedNow.Add(-15 * time.Minute),
+					Dismissed: &hubclient.DecisionDismissedView{
+						At:                dismissedAt,
+						ByUserID:          "u-alice",
+						ByName:            "alice",
+						Reason:            "Stale: the release already shipped",
+						Surface:           "decisions_page",
+						ResponseMessageID: "resp-dsm-1",
+					},
+				},
+			},
+		})
+	})
+	mux.HandleFunc("/api/v1/agent/decisions/D234", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionShowResponse{
+			Key: "D234",
+			Ref: "ag/D234",
+			Versions: []hubclient.AgentDecisionVersionView{
+				{
+					RowID:           "row-dsm-1",
+					Key:             "D234",
+					Ref:             "ag/D234",
+					Version:         1,
+					Status:          "dismissed",
+					Question:        "Ship v0.9 today?",
+					ConversationID:  "conv-rel",
+					PromptMessageID: "prompt-dsm-1",
+					Choices: []messages.Choice{
+						{ID: "1", Label: "Yes"},
+						{ID: "2", Label: "No"},
+					},
+					DefaultChoiceID: "1",
+					CreatedAt:       dismissedAt.Add(-10 * time.Minute),
+					Dismissed: &hubclient.DecisionDismissedView{
+						At:                dismissedAt,
+						ByUserID:          "u-alice",
+						ByName:            "alice",
+						Reason:            "Stale: the release already shipped",
+						Surface:           "decisions_page",
+						ResponseMessageID: "resp-dsm-1",
+					},
+					Answers: []hubclient.DecisionAnswerView{
+						{
+							ChoiceID:        "1",
+							Label:           "Yes",
+							AnsweredByName:  "alice",
+							Provenance:      "agent_interpreted",
+							Outcome:         "answer",
+							SourceMessageID: "src-1",
+							Surface:         "native",
+							At:              dismissedAt.Add(-8 * time.Minute),
+						},
+						{
+							ChoiceID:       "$dismissed",
+							Label:          "Dismissed",
+							AnsweredByName: "alice",
+							Provenance:     "direct",
+							Outcome:        "dismiss",
+							DismissReason:  "Stale: the release already shipped",
+							Surface:        "decisions_page",
+							At:             dismissedAt,
+						},
+					},
+				},
+			},
+		})
+	})
+	mux.HandleFunc("/api/v1/agent/decisions/withdraw", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"withdraw_failed","message":"D234: dismissed by alice","details":{"failures":[{"key":"D234","reason":"dismissed","decision":{"key":"D234","version":1,"status":"dismissed","dismissed":{"byName":"alice","reason":"Stale"}}}]}}}`))
+	})
+	withMockDecisionsServer(t, mux)
+
+	// --dismissed is mutually exclusive with --pending/--decided/--withdrawn/--all.
+	_, err := runDecisionsTestCmd(t, "decisions", "list", "--dismissed", "--pending")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at most one")
+
+	// list --dismissed requests state=dismissed and prints "dismissed by alice · <time> · <reason>".
+	listOut, err := runDecisionsTestCmd(t, "decisions", "list", "--dismissed")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"dismissed"}, seenStates)
+	assert.Contains(t, listOut, "dismissed by alice · 2026-11-18 15:52 UTC · Stale: the release already shipped")
+
+	// show D234 prints v1 [dismissed], Dismissed summary line, and both [interpreted] and [dismissed] answer rows.
+	showOut, err := runDecisionsTestCmd(t, "decisions", "show", "D234")
+	require.NoError(t, err)
+	assert.Contains(t, showOut, "v1 [dismissed]")
+	assert.Contains(t, showOut, "Dismissed:    dismissed by alice · 2026-11-18 15:52 UTC · Stale: the release already shipped")
+	assert.Contains(t, showOut, "Yes (1) [interpreted] by alice via native")
+	assert.Contains(t, showOut, "Dismissed ($dismissed) [dismissed] by alice via decisions_page at 2026-11-18 15:52 UTC: Stale: the release already shipped")
+
+	// withdraw on dismissed key prints per-key "D234: dismissed by alice".
+	_, err = runDecisionsTestCmd(t, "decisions", "withdraw", "D234")
+	require.Error(t, err)
+	assert.Equal(t, "D234: dismissed by alice", err.Error())
+}
+
+// TestDecisionDismissedSummary_TruncatesReasonOnlyInList pins that the list
+// table truncates a long dismiss reason like the withdrawn branch, while show
+// keeps the full reason.
+func TestDecisionDismissedSummary_TruncatesReasonOnlyInList(t *testing.T) {
+	reason := strings.Repeat("stale ", 40)
+	d := &hubclient.DecisionDismissedView{ByName: "alice", Reason: reason}
+
+	list := decisionDismissedSummary(d, decisionQuestionMaxWidth)
+	parts := strings.Split(list, " · ")
+	require.Len(t, parts, 3)
+	assert.Equal(t, truncateRunes(collapseSingleLine(reason), decisionQuestionMaxWidth, true), parts[2])
+	assert.LessOrEqual(t, utf8.RuneCountInString(parts[2]), decisionQuestionMaxWidth)
+
+	show := decisionDismissedSummary(d, 0)
+	assert.True(t, strings.HasSuffix(show, " · "+collapseSingleLine(reason)))
 }
