@@ -20,6 +20,7 @@ func TestAgentStatusEmoji_ActivityIcons(t *testing.T) {
 		{"executing", "⚙️"},
 		{"waiting_for_input", "\U0001f514"},
 		{"blocked", "\U0001f6a7"},
+		{"idle", "\U0001f4a4"},
 		{"completed", "✅"},
 		{"limits_exceeded", "\U0001f6ab"},
 		{"stalled", "⏳"},

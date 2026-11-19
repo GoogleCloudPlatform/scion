@@ -70,25 +70,56 @@ Agent state uses a **layered model** with three dimensions:
   with three off-the-happy-path destinations: `suspended` (paused for later resume), `error` (the agent crashed), and `halted` (the platform ended a run that should still be running).
 
 - **Activity** — What the agent is doing within the `running` phase:
-  `initializing` (shown as "starting"), `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`, `harness_error` (shown as "harness error")
+  `initializing` (shown as "starting"), `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `idle`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`, `harness_error` (shown as "harness error")
   (the `crashed` value exists in the enum, but a real crash now surfaces as the `error` *phase* — see below — rather than as an activity)
 
 - **Detail** — Freeform context about the current activity (tool name, message, task summary).
 
-This separation allows the UI and API consumers to distinguish between infrastructure lifecycle events (provisioning, stopping) and the agent's cognitive state (thinking, waiting for input). The `blocked` activity is set by agents themselves when they are intentionally waiting for an expected event (such as a child agent completing), which prevents the system from falsely marking them as stalled.
+This separation allows the UI and API consumers to distinguish between infrastructure lifecycle events (provisioning, stopping) and the agent's cognitive state (thinking, waiting for input).
+
+#### Ending a turn: blocked, idle, task_completed
+
+An agent reports why it is quiet with `sciontool status`, and the platform treats each answer differently. In summary: an agent uses **blocked** when it expects a specific event soon (a child agent finishing, a reply to a question it asked, a scheduled message, or its own background job), **idle** when nothing is coming until someone sends it new work (for example a lead between assignments, or after answering a message), and **task_completed** when it finished its assigned task. An idle or completed agent may be suspended to save resources, and any message, mention, notification or scheduled message for it wakes it automatically, so it should not say blocked just to stay up.
+
+The instructions Scion gives every agent (the agent instructions preamble) say:
+
+> **Important:** End every turn with `sciontool status blocked`, `idle`, `task_completed` or `ask_user`.
+
+and include these rules, quoted:
+
+> If you end your turn while your own background job or process runs (a build, a test run), always signal blocked *before* ending the turn: suspending you would kill the job.
+
+> If the only thing you are waiting for is a scheduled message hours away, idle is fine: the schedule will wake you.
+
+> An idle or completed agent may be suspended to save resources. If Scion suspends you this way, any message, mention, notification or scheduled message for you wakes you automatically, so do not signal blocked just to stay up.
+
+| Status command | Activity | Means | Stall detection | Idle auto-suspend |
+|---|---|---|---|---|
+| `sciontool status blocked "<reason>"` | `blocked` (shown as "waiting on others" in the web) | Waiting on a specific event: a child agent, a reply, a scheduled message, or the agent's own background job | Excluded | Never |
+| `sciontool status idle "<reason>"` | `idle` | Nothing to do until new work arrives | Excluded | Eligible after the grace period |
+| `sciontool status task_completed "<title>"` | `completed` | The assigned task is done | Excluded | Eligible after the grace period |
+| `sciontool status ask_user "<question>"` | `waiting_for_input` (shown as "waiting on parent" in the web) | Waiting on an answer from a user or parent agent | Excluded | Never |
+
+- **A background job means `blocked`.** Suspending an agent stops its container, so a build or test run the agent started in the background would be killed. An agent with its own job running says `blocked`, never `idle`.
+- **`idle` is not `task_completed`.** `task_completed` reports that an assigned task finished, carries the task summary and fires the `COMPLETED` notification. `idle` means "nothing to do", for example a lead or coordinator between assignments, or an agent that answered a message when it had no assigned task. Agents with an ongoing role never complete; they go idle. A subscribed parent gets an `IDLE` notification (it is one of the default notification triggers).
+- **New work ends `idle`.** A delivered message or a new prompt clears `idle` to `working`, exactly as for `blocked`. Only the agent reports `idle`; the platform never infers it.
+
+The `idle` and `blocked` activities, the `IDLE` notification and the stall exclusion are always available. Suspending idle agents and waking them on new work are Hub policies behind the `lifecycle.idle_suspend` experiment; see [Auto-Suspend of Idle Agents](/scion/local/agent-lifecycle/#auto-suspend-of-idle-agents).
 
 #### Sticky activities
 
-The activities `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `crashed`, and `harness_error` are "sticky": routine harness events (model calls, tool runs, the end of a turn, sub-agent activity) do not replace them, except as listed below for `waiting_for_input`. A sticky activity is cleared by new work (a new prompt, or a new harness session), by an explicit status update from the agent (`sciontool status`), or by a lifecycle phase change such as stopping. Beyond that, each one has its own rules:
+The activities `waiting_for_input`, `blocked`, `idle`, `completed`, `limits_exceeded`, `crashed`, and `harness_error` are "sticky": routine harness events (model calls, tool runs, the end of a turn, sub-agent activity) do not replace them, except as listed below for `waiting_for_input`. A sticky activity is cleared by new work (a new prompt, or a new harness session), by an explicit status update from the agent (`sciontool status`), or by a lifecycle phase change such as stopping. Beyond that, each one has its own rules:
 
 - **`limits_exceeded` and `crashed`** are terminal: they record how the agent ended. A later notification, or a later question from the agent (a Claude Code `AskUserQuestion` or `ExitPlanMode`), does not replace them.
 - **`harness_error`** means the harness is alive at its prompt but reported that a model, API or auth error ended its turn; the reason is in the agent's message. The end of a turn does not clear it, but any sign of progress does: a new prompt, a model call, or a tool call. A new message to the agent therefore retries. See [Harness Errors](/scion/local/agent-lifecycle/#harness-errors-the-harness-is-still-running).
-- **`blocked` and `completed`** are kept through tool runs, which may follow `task_completed` as wrap-up. The agent asking the user (its own question, or a harness notification that asks the user) moves them to `waiting_for_input`. A sub-agent's question does not.
+- **`blocked`, `idle` and `completed`** are kept through tool runs, which may follow `task_completed` as wrap-up. The agent asking the user (its own question, or a harness notification that asks the user) moves them to `waiting_for_input`. A sub-agent's question does not.
 - **`waiting_for_input`** set by the agent itself (`sciontool status ask_user`, or the agent's own `AskUserQuestion` or `ExitPlanMode`) is cleared when the agent starts its next tool, because the user has answered. A wait set by a harness prompt (for example a permission dialog) is also cleared when the prompted tool ends or the turn ends. While a sub-agent's question is open, the wait stays until that sub-agent's question is answered or the sub-agent ends, even if the parent agent answers its own question first.
 
 #### Suspended phase
 
 `suspended` is distinct from `stopped`. Both tear down the container, but `suspended` records the **intent to resume**: when the agent is started again, its harness conversation is continued (Claude Code receives `--continue`, Gemini CLI receives `--resume`, and so on) rather than starting fresh. This is true session continuation, not a restart from a blank slate. Suspension is only available for harnesses that support session resume — see [Agent Lifecycle: Suspend & Resume](/scion/local/agent-lifecycle/).
+
+A suspended agent keeps a `completed`, `idle` or `harness_error` activity it had when it was suspended (any other activity is cleared), and records its **suspend reason**: `user` (someone suspended it), `idle` (the Hub's idle policy) or `stalled` (the Hub's stalled policy). `scion list` and the web show both next to the phase, for example `suspended · completed (idle)` or `suspended (user)`. Resuming clears both.
 
 #### Error phase (crashes and setup failures)
 
@@ -127,7 +158,7 @@ To continue, run `scion start <agent>`. It starts the agent the way a start from
 
 #### Stalled, offline, and auto-suspend
 
-The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked`, and agents whose harness reported a `harness_error`, are excluded from stalled detection. If `server.hub.auto_suspend_stalled` is on (off by default), the Hub also **auto-suspends** a stalled agent to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
+The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked`, `idle` or `completed`, agents waiting for input, and agents whose harness reported a `harness_error`, are excluded from stalled detection. If `server.hub.auto_suspend_stalled` is on (off by default), the Hub also **auto-suspends** a stalled agent to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents). With the `lifecycle.idle_suspend` experiment, the Hub can also suspend `idle` and `completed` agents after a grace period — see [Auto-Suspend of Idle Agents](/scion/local/agent-lifecycle/#auto-suspend-of-idle-agents).
 
 The `offline` activity status occurs when an agent heartbeat has not been heard from for some time. Currently, this may be due to an agent being unable to refresh its auth token, which disconnects it from sending its heartbeat and other updates. These agents can be stopped and restarted to be provisioned with a new auth token. They should be able to refresh this token as long as they can maintain a connection to the Hub.
 

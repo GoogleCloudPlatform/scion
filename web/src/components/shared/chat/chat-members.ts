@@ -34,7 +34,8 @@ import type { PropertyValues, TemplateResult } from 'lit';
 import {
   ACTIVITY_DISPLAY,
   stateLabel,
-  suspendedActivityLabel,
+  suspendReasonHint,
+  suspendedStatusLabel,
 } from '../../../shared/agent-state-display.js';
 import { isTerminalActivity } from '../../../shared/types.js';
 import { apiFetch } from '../../../client/api.js';
@@ -141,6 +142,11 @@ export interface ChatAgentMember {
   slug?: string;
   phase?: string;
   activity?: string;
+  /**
+   * Why a suspended agent was suspended (user, idle, stalled). Explicitly
+   * `| undefined` because the mappers pass it through unconditionally.
+   */
+  suspendReason?: string | undefined;
   lastSeen?: string;
   projectId?: string;
   /** Freeform status detail — what the agent detail page shows as "Detail". */
@@ -1137,15 +1143,23 @@ export class ScionChatMembers extends LitElement {
     const showActivity =
       lowerActivity &&
       (a.phase === 'running' || (a.phase === 'stopped' && isTerminalActivity(lowerActivity)));
+    const suspended = {
+      phase: a.phase,
+      activity: lowerActivity,
+      suspendReason: a.suspendReason,
+    };
+    const suspendedLabel = suspendedStatusLabel(suspended);
     const detailText =
       a.detailMessage ||
       (showActivity ? stateLabel(lowerActivity) : '') ||
-      suspendedActivityLabel({ phase: a.phase, activity: lowerActivity }) ||
+      suspendedLabel ||
       a.phase ||
       'unknown';
     const updated = a.lastActivityEvent ? this.formatRelativeTime(a.lastActivityEvent) : '';
     const updatedText = updated ? `Updated: ${updated}` : '';
-    const tooltipContent = updatedText ? `${detailText}\n${updatedText}` : detailText;
+    const tooltipContent = [detailText, suspendReasonHint(suspended), updatedText]
+      .filter(Boolean)
+      .join('\n');
 
     const badgeStatus = this.resolveAgentStatus(a);
 
@@ -1169,7 +1183,11 @@ export class ScionChatMembers extends LitElement {
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
-          <scion-status-badge status=${badgeStatus} size="small"></scion-status-badge>
+          <scion-status-badge
+            status=${badgeStatus}
+            label=${suspendedLabel ?? ''}
+            size="small"
+          ></scion-status-badge>
         </div>
         ${a.canAttach !== true
           ? nothing

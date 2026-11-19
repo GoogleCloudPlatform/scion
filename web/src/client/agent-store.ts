@@ -418,6 +418,7 @@ export const PROJECT_COMPACT_KEYS: ReadonlySet<string> = new Set([
   'labels',
   'phase',
   'activity',
+  'suspendReason',
   'containerStatus',
   'message',
   'messageMode',

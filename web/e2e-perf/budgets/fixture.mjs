@@ -184,6 +184,7 @@ export function buildFixture() {
           'hub.triggers': false,
           'hub.user_delete_force_cascade': false,
           'hub.welcome_project': false,
+          'lifecycle.idle_suspend': false,
           'web.agent_badges': false,
           'web.agent_edit': true,
           'web.artifact_manage_access': false,

@@ -109,6 +109,8 @@ function makeFullConfig(overrides: Record<string, unknown>): Record<string, unkn
         soft_delete_retain_files: true,
         auto_suspend_stalled: true,
         stalled_threshold: '10m',
+        auto_suspend_idle: true,
+        idle_suspend_after: '30m',
         start_claim_lease_ttl: '2m',
         start_max_duration: '15m',
         start_unconfirmed_hold: '18m',

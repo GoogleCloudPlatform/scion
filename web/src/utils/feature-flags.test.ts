@@ -412,3 +412,17 @@ describe('k8sWorkloadIdentitySetupEnabled (hub.k8s_workload_identity_setup)', ()
     expect(k8sWorkloadIdentitySetupEnabled()).toBe(false);
   });
 });
+
+describe('idleSuspendEnabled (lifecycle.idle_suspend)', () => {
+  it('defaults to false and follows server/explicit flags', async () => {
+    const { IDLE_SUSPEND_FLAG, idleSuspendEnabled } = await import('./feature-flags.js');
+    expect(IDLE_SUSPEND_FLAG).toBe('lifecycle.idle_suspend');
+    expect(idleSuspendEnabled()).toBe(false);
+
+    setServerFlags({ 'lifecycle.idle_suspend': true });
+    expect(idleSuspendEnabled()).toBe(true);
+
+    setFeatureFlag('lifecycle.idle_suspend', false);
+    expect(idleSuspendEnabled()).toBe(false);
+  });
+});

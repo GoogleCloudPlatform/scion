@@ -58,7 +58,11 @@ interface AgentNotificationsResponse {
   userNotifications: Notification[];
   agentNotifications: Notification[];
 }
-import { agentStatusBadge, stateLabel } from '../../shared/agent-state-display.js';
+import {
+  agentStatusBadge,
+  stateLabel,
+  suspendReasonHint,
+} from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { agentPlacementView } from './agent-placement.js';
@@ -94,7 +98,7 @@ import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { idleSuspendEnabled, isFeatureEnabled } from '../../utils/feature-flags.js';
 import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
@@ -1269,6 +1273,26 @@ export class ScionPageAgentDetail extends LitElement {
     return formatInstantWithZone(dateString) || dateString;
   }
 
+  /**
+   * The Suspend reason row of a suspended agent with a known reason: the
+   * reason as `scion list` shows it, with what brings the agent back.
+   */
+  private renderSuspendReason(agent: Agent) {
+    const hint = suspendReasonHint(agent);
+    if (!hint) return nothing;
+    return html`
+      <div class="info-item" data-testid="agent-suspend-reason">
+        <span class="info-label">Suspend reason</span>
+        <span class="info-value"
+          >${agent.suspendReason}
+          <span style="color: var(--scion-text-muted, #64748b); font-size: 0.85em;"
+            >${hint}</span
+          ></span
+        >
+      </div>
+    `;
+  }
+
   private isZeroDate(dateString: string): boolean {
     if (!dateString) return true;
     const date = new Date(dateString);
@@ -1337,6 +1361,57 @@ export class ScionPageAgentDetail extends LitElement {
     } catch (err) {
       console.error(`Failed to ${action} agent:`, err);
       showToast(err instanceof Error ? err.message : `Failed to ${action} agent`);
+      this.backgroundRefresh();
+    }
+  }
+
+  /**
+   * "Keep suspended" for an agent the hub suspended (reason idle or stalled)
+   * while the lifecycle.idle_suspend experiment is on: suspending it again
+   * makes the hub rewrite the reason to user in place, so new work no longer
+   * wakes it (ptone/scion#7826). The hub checks the experiment; the flag here
+   * only decides whether to offer the action.
+   */
+  private renderKeepSuspended(agent: Agent) {
+    const hubSuspended = agent.suspendReason === 'idle' || agent.suspendReason === 'stalled';
+    if (!hubSuspended || !idleSuspendEnabled()) return nothing;
+    return html`
+      <sl-tooltip content="New work will no longer wake this agent; only a resume brings it back.">
+        <sl-button
+          variant="default"
+          size="small"
+          outline
+          data-testid="header-keep-suspended"
+          ?loading=${this.actionLoading['keep-suspended']}
+          ?disabled=${this.actionLoading['keep-suspended']}
+          @click=${() => this.keepSuspended()}
+        >
+          <sl-icon slot="prefix" name="pause-circle"></sl-icon>
+          Keep suspended
+        </sl-button>
+      </sl-tooltip>
+    `;
+  }
+
+  /** Converts a hub suspension to a user suspension (POST suspend on a suspended agent). */
+  private async keepSuspended(): Promise<void> {
+    if (!this.agent) return;
+    this.actionLoading = { ...this.actionLoading, 'keep-suspended': true };
+    try {
+      const response = await apiFetch(
+        `/api/v1/agents/${this.agentId}/suspend`,
+        lifecycleActionRequestInit('suspend')
+      );
+      if (!response.ok) {
+        throw new Error(
+          await lifecycleActionErrorMessage(response, 'Failed to keep agent suspended')
+        );
+      }
+    } catch (err) {
+      console.error('Failed to keep agent suspended:', err);
+      showToast(err instanceof Error ? err.message : 'Failed to keep agent suspended');
+    } finally {
+      this.actionLoading = { ...this.actionLoading, 'keep-suspended': false };
       this.backgroundRefresh();
     }
   }
@@ -1950,21 +2025,21 @@ export class ScionPageAgentDetail extends LitElement {
                   : nothing}
               `
             : agent.phase === 'suspended'
-              ? startOk
-                ? html`
-                    <sl-button
-                      variant="success"
-                      size="small"
-                      data-testid="header-resume"
-                      ?loading=${this.actionLoading['resume']}
-                      ?disabled=${this.actionLoading['resume']}
-                      @click=${() => this.handleAction('resume')}
-                    >
-                      <sl-icon slot="prefix" name="play-circle"></sl-icon>
-                      Resume
-                    </sl-button>
-                  `
-                : nothing
+              ? html`${startOk
+                  ? html`
+                      <sl-button
+                        variant="success"
+                        size="small"
+                        data-testid="header-resume"
+                        ?loading=${this.actionLoading['resume']}
+                        ?disabled=${this.actionLoading['resume']}
+                        @click=${() => this.handleAction('resume')}
+                      >
+                        <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                        Resume
+                      </sl-button>
+                    `
+                  : nothing}${lifecycleOk ? this.renderKeepSuspended(agent) : nothing}`
               : startOk
                 ? html`
                     ${agent.phase === 'error'
@@ -2109,6 +2184,7 @@ export class ScionPageAgentDetail extends LitElement {
                 : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
             </span>
           </div>
+          ${this.renderSuspendReason(agent)}
           ${agent.detail?.toolName
             ? html`
                 <div class="info-item">

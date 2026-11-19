@@ -27,7 +27,7 @@ import { html } from 'lit';
 import type { TemplateResult } from 'lit';
 import { ifDefined } from 'lit/directives/if-defined.js';
 
-import { getAgentDisplayStatus, isRetainedSuspendActivity } from './types.js';
+import { getAgentDisplayStatus, isKnownSuspendReason, isRetainedSuspendActivity } from './types.js';
 import type { Agent, AgentPhase, AgentActivity } from './types.js';
 
 /**
@@ -105,6 +105,10 @@ export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
     pulse: false,
     label: 'waiting on others',
   },
+  // The agent reported it has nothing to do until new work arrives (between
+  // assignments, or after answering a message). Healthy, not a warning: a
+  // message for it ends idleness (ptone/scion#7826).
+  idle: { emoji: '💤', icon: 'moon', variant: 'neutral', pulse: false },
   completed: { emoji: '✅', icon: 'check-circle', variant: 'success', pulse: false },
   limits_exceeded: {
     emoji: '🚫',
@@ -223,38 +227,80 @@ interface AgentStatusBadgeOptions {
   testId?: string;
 }
 
-/**
- * Compound label (`"suspended · completed"`, `"suspended · idle"`,
- * `"suspended · harness error"`) for a suspended agent carrying a retained
- * pre-suspend activity, or `undefined` when no retained activity applies.
- */
-export function suspendedActivityLabel(agent: {
+/** The agent fields the suspended display reads. */
+export interface SuspendedDisplayFields {
   phase?: string | undefined;
   activity?: string | undefined;
-}): string | undefined {
-  if (agent.phase === 'suspended' && isRetainedSuspendActivity(agent.activity)) {
-    return `${stateLabel('suspended')} · ${stateLabel(agent.activity!.toLowerCase())}`;
+  suspendReason?: string | undefined;
+}
+
+/**
+ * Status label for a suspended agent, matching `scion list`: the retained
+ * pre-suspend activity after a middle dot, then the recorded suspend reason
+ * in parentheses, e.g. `"suspended · completed (idle)"`, `"suspended · idle"`
+ * or `"suspended (user)"`. Returns `undefined` when the agent is not
+ * suspended, or is suspended with neither a retained activity nor a known
+ * reason (plain `"suspended"`).
+ */
+export function suspendedStatusLabel(agent: SuspendedDisplayFields): string | undefined {
+  if (agent.phase !== 'suspended') return undefined;
+  const retained = isRetainedSuspendActivity(agent.activity);
+  const reason = isKnownSuspendReason(agent.suspendReason) ? agent.suspendReason : undefined;
+  if (!retained && !reason) return undefined;
+  let label = stateLabel('suspended');
+  if (retained) label += ` · ${stateLabel(agent.activity!.toLowerCase())}`;
+  if (reason) label += ` (${reason})`;
+  return label;
+}
+
+/**
+ * A one-line explanation of a suspended agent's suspend reason, for a
+ * tooltip, or `undefined` when the agent is not suspended or has no known
+ * reason. Auto-wake of an agent the hub suspended needs the hub's
+ * lifecycle.idle_suspend experiment; the idle policy only runs with it, so
+ * an idle suspension always wakes, and a stalled one wakes where it is on.
+ */
+export function suspendReasonHint(agent: SuspendedDisplayFields): string | undefined {
+  if (agent.phase !== 'suspended') return undefined;
+  switch (agent.suspendReason) {
+    case 'user':
+      return 'Suspended by a user. Only a resume brings it back.';
+    case 'idle':
+      return 'Suspended by the hub because it was idle. New work for it wakes it automatically.';
+    case 'stalled':
+      return 'Suspended by the hub because it stalled. Where the hub has auto-wake on, new work for it wakes it.';
+    default:
+      return undefined;
   }
-  return undefined;
+}
+
+/** The non-empty hints, one per line, or undefined when there are none. */
+function joinHints(...hints: (string | undefined)[]): string | undefined {
+  const lines = hints.filter((h): h is string => !!h);
+  return lines.length ? lines.join('\n') : undefined;
 }
 
 /**
  * An agent status badge. Use it for every agent status badge: it shows a
  * provision-only agent as "created (not started)" with a start hint, and a
- * suspended agent with a retained activity as "suspended · <activity>".
+ * suspended agent as "suspended · <activity> (<reason>)" (see
+ * suspendedStatusLabel) with the reason explained in its tooltip.
  */
 export function agentStatusBadge(
   agent: Agent,
   { status = getAgentDisplayStatus(agent), label, size, testId }: AgentStatusBadgeOptions = {}
 ): TemplateResult {
   const po = isProvisionedOnly(agent);
+  const isDisplayStatus = status === getAgentDisplayStatus(agent);
   const hint = po
     ? `Not started yet. Use Start, or run: scion start ${agent.name}`
-    : (harnessErrorHint(agent, status) ?? stalledHint(agent, status));
-  const defaultLabel =
-    status === getAgentDisplayStatus(agent)
-      ? (suspendedActivityLabel(agent) ?? stateLabel(status))
-      : stateLabel(status);
+    : joinHints(
+        harnessErrorHint(agent, status) ?? stalledHint(agent, status),
+        isDisplayStatus ? suspendReasonHint(agent) : undefined
+      );
+  const defaultLabel = isDisplayStatus
+    ? (suspendedStatusLabel(agent) ?? stateLabel(status))
+    : stateLabel(status);
   return html`<scion-status-badge
     status=${status}
     label=${po ? PROVISIONED_ONLY_LABEL : (label ?? defaultLabel)}

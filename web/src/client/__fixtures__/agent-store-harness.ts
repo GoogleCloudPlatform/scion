@@ -104,7 +104,7 @@ export function agent(id: string, extra: Partial<Agent> = {}): Agent {
     phase: 'running',
     activity: 'idle',
     ...extra,
-  } as Agent;
+  };
 }
 
 interface Gate {
@@ -193,6 +193,7 @@ export const COMPACT_KEYS = [
   'labels',
   'phase',
   'activity',
+  'suspendReason',
   'containerStatus',
   'message',
   'messageMode',

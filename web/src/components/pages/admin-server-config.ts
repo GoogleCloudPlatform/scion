@@ -199,6 +199,8 @@ interface V1ServerHubConfig {
   soft_delete_retain_files?: boolean;
   auto_suspend_stalled?: boolean;
   stalled_threshold?: string;
+  auto_suspend_idle?: boolean;
+  idle_suspend_after?: string;
   start_claim_lease_ttl?: string;
   start_max_duration?: string;
   start_unconfirmed_hold?: string;
@@ -731,6 +733,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // lifecycle section
   'server.hub.auto_suspend_stalled': 'Auto-Suspend Stalled Agents',
   'server.hub.stalled_threshold': 'Stalled Threshold',
+  'server.hub.auto_suspend_idle': 'Auto-Suspend Idle Agents',
+  'server.hub.idle_suspend_after': 'Idle Suspend After',
   'server.hub.start_claim_lease_ttl': 'Start Claim Lease',
   'server.hub.start_max_duration': 'Start Deadline',
   'server.hub.start_unconfirmed_hold': 'Unconfirmed Start Hold',
@@ -1218,6 +1222,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubSoftDeleteRetainFiles = false;
   @state() private hubAutoSuspendStalled = false;
   @state() private hubStalledThreshold = '';
+  @state() private hubAutoSuspendIdle = false;
+  @state() private hubIdleSuspendAfter = '';
   // Agent start timing (server.hub.start_*, lifecycle section;
   // ptone/scion#3925). "" is unset: the hub's coded default applies.
   @state() private hubStartTimings: Record<StartTimingKey, string> = emptyStartTimings();
@@ -2340,6 +2346,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.hubSoftDeleteRetainFiles = hubBlock.soft_delete_retain_files || false;
     this.hubAutoSuspendStalled = hubBlock.auto_suspend_stalled || false;
     this.hubStalledThreshold = hubBlock.stalled_threshold || '';
+    this.hubAutoSuspendIdle = hubBlock.auto_suspend_idle || false;
+    this.hubIdleSuspendAfter = hubBlock.idle_suspend_after || '';
     this.hubStartTimings = startTimingsFrom(hubBlock);
     this.loadedStartTimings = { ...this.hubStartTimings };
     this.hubGcpIamCheckMode = hubBlock.gcp_iam_check_mode || 'off';
@@ -3016,6 +3024,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
+    if (ok('server.hub.auto_suspend_idle')) hub.auto_suspend_idle = this.hubAutoSuspendIdle;
+    if (ok('server.hub.idle_suspend_after')) hub.idle_suspend_after = this.hubIdleSuspendAfter;
     for (const t of START_TIMINGS) {
       if (ok(`server.hub.${t.key}`)) hub[t.key] = this.hubStartTimings[t.key];
     }
@@ -3430,6 +3440,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
+    if (ok('server.hub.auto_suspend_idle')) hub.auto_suspend_idle = this.hubAutoSuspendIdle;
+    if (ok('server.hub.idle_suspend_after')) hub.idle_suspend_after = this.hubIdleSuspendAfter;
     // Only a start timing the user changed is sent: a settings.yaml save
     // that sends any start key is range-checked on the merged values, so
     // sending them all would let a stored out-of-range value block an
@@ -5505,6 +5517,45 @@ export class ScionPageAdminServerConfig extends LitElement {
                   placeholder="5m"
                   @sl-input=${(e: Event) => {
                     this.hubStalledThreshold = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>`
+            )}
+          </div>
+          <div class="form-field">
+            ${this.renderFieldValue(
+              'server.hub.auto_suspend_idle',
+              this.hubAutoSuspendIdle ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('server.hub.auto_suspend_idle')}<sl-switch
+                  ?checked=${this.hubAutoSuspendIdle}
+                  @sl-change=${(e: Event) => {
+                    this.hubAutoSuspendIdle = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Auto-suspend idle agents</sl-switch
+                >`
+            )}
+            <span class="hint" data-testid="auto-suspend-idle-hint"
+              >When enabled, agents that report idle or completed (or a harness error) for longer
+              than Idle Suspend After are suspended (container stopped, session preserved). A
+              message, mention, notification or scheduled message for an agent the hub suspended
+              resumes it. Takes effect only while the lifecycle.idle_suspend experiment is on. Not
+              yet safe for production: recovery from a failed idle suspend is not implemented
+              yet.</span
+            >
+          </div>
+          <div class="form-field">
+            <label>Idle Suspend After</label>
+            <span class="hint" data-testid="idle-suspend-after-hint"
+              >How long an agent stays idle or completed before it is suspended (e.g. 15m, 1h).
+              Minimum 5m; a shorter value is ignored and the 15m default applies.</span
+            >
+            ${this.renderFieldValue(
+              'server.hub.idle_suspend_after',
+              this.hubIdleSuspendAfter || '15m (default)',
+              html`${this.renderEnvBadge('server.hub.idle_suspend_after')}<sl-input
+                  value=${this.hubIdleSuspendAfter}
+                  placeholder="15m"
+                  @sl-input=${(e: Event) => {
+                    this.hubIdleSuspendAfter = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
             )}

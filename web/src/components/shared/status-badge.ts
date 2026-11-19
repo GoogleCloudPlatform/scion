@@ -55,6 +55,7 @@ export type StatusType =
   | 'thinking'
   | 'executing'
   | 'waiting_for_input'
+  | 'idle'
   | 'completed'
   | 'limits_exceeded'
   | 'harness_error'

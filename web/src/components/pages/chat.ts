@@ -323,6 +323,7 @@ function withLiveAgentStatus(
     ...member,
     phase: agent.phase || '',
     activity: agent.activity || '',
+    suspendReason: agent.suspendReason,
     // The store row is the seeded member plus any status events, so a
     // row without a message means the message was cleared.
     detailMessage: agentDetailMessage(agent),
@@ -368,6 +369,7 @@ function hubAgentMember(a: Agent): import('../shared/chat/chat-members.js').Chat
     slug: a.slug || '',
     phase: a.phase || '',
     activity: a.activity || '',
+    suspendReason: a.suspendReason,
     projectId: a.projectId || '',
     detailMessage: agentDetailMessage(a),
     lastActivityEvent: realTimestamp(a.lastActivityEvent) || realTimestamp(a.updated),
@@ -2872,6 +2874,7 @@ export class ScionPageChat extends LitElement {
         slug: agent.slug || existing?.slug || '',
         phase: agent.phase || '',
         activity: agent.activity || '',
+        suspendReason: agent.suspendReason,
         lastSeen: agent.lastSeen || existing?.lastSeen || '',
         projectId: agent.projectId || existing?.projectId || scopeProjectId,
         // A full store row: no message means the server cleared it, as
@@ -4126,6 +4129,7 @@ export class ScionPageChat extends LitElement {
             slug?: string;
             phase?: string;
             activity?: string;
+            suspendReason?: string;
             message?: string;
             lastSeen?: string;
             lastActivityEvent?: string;
@@ -4158,6 +4162,7 @@ export class ScionPageChat extends LitElement {
           slug: a.slug || '',
           phase: a.phase || '',
           activity: a.activity || '',
+          suspendReason: a.suspendReason,
           lastSeen: a.lastSeen || '',
           projectId: a.projectId || projectId,
           detailMessage: agentDetailMessage(a),

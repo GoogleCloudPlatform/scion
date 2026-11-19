@@ -5011,14 +5011,15 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 			return
 		}
 		entry := chatMemberEntry{
-			ID:          a.ID,
-			Kind:        "agent",
-			DisplayName: a.Name,
-			Slug:        a.Slug,
-			Phase:       a.Phase,
-			Activity:    a.Activity,
-			ProjectID:   a.ProjectID,
-			Message:     a.Message,
+			ID:            a.ID,
+			Kind:          "agent",
+			DisplayName:   a.Name,
+			Slug:          a.Slug,
+			Phase:         a.Phase,
+			Activity:      a.Activity,
+			SuspendReason: a.SuspendReason,
+			ProjectID:     a.ProjectID,
+			Message:       a.Message,
 		}
 		// Whether this viewer may open a terminal on this agent. The PTY
 		// route gates on authorizeAgentLifecycle, which decides
@@ -6382,6 +6383,9 @@ type chatMemberEntry struct {
 	Phase         string `json:"phase,omitempty"`
 	Activity      string `json:"activity,omitempty"`
 	PresenceState string `json:"presenceState,omitempty"`
+	// SuspendReason is why a suspended agent was suspended (see
+	// state.SuspendReason), as on the agent; agents only.
+	SuspendReason string `json:"suspendReason,omitempty"`
 	// Agent-only fields. LastSeen is RFC3339; empty when the agent has
 	// never reported in.
 	LastSeen  string `json:"lastSeen,omitempty"`

@@ -48,6 +48,7 @@
         "experiments.hub.triggers:boolean",
         "experiments.hub.user_delete_force_cascade:boolean",
         "experiments.hub.welcome_project:boolean",
+        "experiments.lifecycle.idle_suspend:boolean",
         "experiments.web.agent_badges:boolean",
         "experiments.web.agent_edit:boolean",
         "experiments.web.artifact_manage_access:boolean",

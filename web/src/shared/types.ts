@@ -429,11 +429,26 @@ export type AgentActivity =
   | 'executing'
   | 'waiting_for_input'
   | 'blocked'
+  | 'idle'
   | 'completed'
   | 'limits_exceeded'
   | 'harness_error'
   | 'stalled'
   | 'offline';
+
+/**
+ * Why a suspended agent was suspended (Go `state.SuspendReason`): `user` (a
+ * user or caller suspended it; only an explicit resume brings it back),
+ * `idle` (the hub's idle policy) or `stalled` (the hub's
+ * auto_suspend_stalled policy). The hub may wake an agent it suspended
+ * (idle or stalled) when new work arrives for it.
+ */
+export type AgentSuspendReason = 'user' | 'idle' | 'stalled';
+
+/** Whether `reason` is a suspend reason this client knows. */
+export function isKnownSuspendReason(reason: string | undefined): reason is AgentSuspendReason {
+  return reason === 'user' || reason === 'idle' || reason === 'stalled';
+}
 
 /**
  * Contextual metadata for the current agent state
@@ -1000,6 +1015,12 @@ export interface Agent {
   template: string;
   phase: AgentPhase;
   activity?: AgentActivity;
+  /**
+   * Why a suspended agent was suspended; absent when none is recorded (an
+   * agent that is not suspended, or one suspended before reasons were
+   * recorded). Unknown future values are possible.
+   */
+  suspendReason?: string;
   detail?: AgentDetail;
   taskSummary?: string;
   message?: string;
