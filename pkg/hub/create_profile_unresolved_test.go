@@ -103,6 +103,8 @@ func TestCreateAgent_ProfileUnresolvedRelayedAndRolledBack(t *testing.T) {
 			code, msg := decodeHubError(t, rec)
 			assert.Equal(t, brokerCodeRuntimeUnavailable, code)
 			assert.Contains(t, msg, `Runtime profile "typo-prof" cannot be resolved`)
+			assert.Contains(t, msg, "not configured for this broker")
+			assert.NotContains(t, msg, "hub's stored profiles")
 			assert.Contains(t, msg, "(available profiles: k8s-prod, local)")
 			assert.NotContains(t, msg, "available profiles: x", "raw broker text must not be echoed")
 
@@ -156,6 +158,57 @@ func TestCreateAgent_ProfileUnresolvedWithoutKnownBrokerProfiles(t *testing.T) {
 		code, _ := decodeHubError(t, rec)
 		assert.Equal(t, brokerCodeRuntimeUnavailable, code)
 	})
+}
+
+// TestCreateAgent_BrokerDrainingRelayedAndRolledBack verifies that across
+// normal create, gather-env create, and provisionOnly create, a broker's 503
+// broker_draining is relayed with code broker_draining and Retry-After instead
+// of 502 runtime_error or a 201 with a warning, and rolls back the agent row
+// and both project and broker quota reservations.
+func TestCreateAgent_BrokerDrainingRelayedAndRolledBack(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		gatherEnv     bool
+		provisionOnly bool
+	}{
+		{name: "create"},
+		{name: "gather_env", gatherEnv: true},
+		{name: "provision_only", provisionOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			draining := drainingErr("7")
+			var disp AgentDispatcher = &failingCreateDispatcher{createErr: draining}
+			if tc.provisionOnly {
+				disp = &skillFailDispatcher{provisionErr: draining}
+			}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			setBrokerAgentCeiling(t, s, 1)
+			setProjectAgentCeiling(t, s, 1)
+			brokerID := project.DefaultRuntimeBrokerID
+
+			slug := "draining-" + tidSlugSafe(tc.name)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name:          slug,
+				ProjectID:     project.ID,
+				GatherEnv:     tc.gatherEnv,
+				ProvisionOnly: tc.provisionOnly,
+			})
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+			assert.Equal(t, "7", rec.Header().Get("Retry-After"))
+
+			code, msg := decodeHubError(t, rec)
+			assert.Equal(t, api.BrokerErrCodeBrokerDraining, code)
+			assert.Equal(t, brokerDrainingMessage, msg)
+
+			_, err := s.GetAgentBySlug(ctx, project.ID, slug)
+			assert.ErrorIs(t, err, store.ErrNotFound, "agent row must be rolled back")
+			assert.Empty(t, activeReservationResources(t, s, store.LimitMaxAgentsPerBroker, store.QuotaScopeBroker, brokerID),
+				"broker quota reservation must be rolled back")
+			assert.Empty(t, activeReservationResources(t, s, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, project.ID),
+				"project quota reservation must be rolled back")
+		})
+	}
 }
 
 // TestFinalizeCreate_ProfileUnresolvedRelayed covers workspace-upload finalize

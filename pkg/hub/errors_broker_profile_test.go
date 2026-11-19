@@ -55,6 +55,8 @@ func TestWriteBrokerRuntimeUnavailable_ProfileUnresolvedNamesProfile(t *testing.
 	code, msg := decodeHubError(t, rec)
 	require.Equal(t, brokerCodeRuntimeUnavailable, code)
 	require.Contains(t, msg, `Runtime profile "gone" cannot be resolved`)
+	require.Contains(t, msg, "not configured for this broker")
+	require.NotContains(t, msg, "hub's stored profiles")
 	require.NotContains(t, strings.ToLower(msg), "retry later")
 	require.NotContains(t, msg, "available profiles: x", "the broker's message must not be relayed")
 }
@@ -67,7 +69,8 @@ func TestWriteBrokerRuntimeUnavailable_ProfileUnresolvedDefaultProfile(t *testin
 
 	require.Empty(t, rec.Header().Get("Retry-After"))
 	_, msg := decodeHubError(t, rec)
-	require.Contains(t, msg, "active_profile is unset or not one of the hub's stored profiles")
+	require.Contains(t, msg, "active_profile is unset or is not configured for this broker")
+	require.NotContains(t, msg, "hub's stored profiles")
 }
 
 // A profile detail that is not a string or is too long is not echoed.

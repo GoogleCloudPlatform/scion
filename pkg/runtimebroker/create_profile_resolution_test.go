@@ -15,9 +15,11 @@
 package runtimebroker
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -54,6 +56,31 @@ func TestCreateProfileResolution_UnknownProfileRefused(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLifecycleFixture(t)
 			const agentName = "typo-profile-agent"
+			if tc.gatherEnv {
+				// Declare a required empty-valued env key in harness_configs so a
+				// lenient preflight in resolveRuntimeNameForOpts would answer 202
+				// env-gather instead of refusing with 503 before the env prompt
+				// (ptone/scion#4888, ptone/scion#3817).
+				t.Setenv("SCION_TEST_MISSING_ENV_3817", "")
+				_ = os.Unsetenv("SCION_TEST_MISSING_ENV_3817")
+				writeLifecycleProject(t, f.projectPath, "schema_version: \"1\"\n"+
+					"active_profile: local\n"+
+					"harness_configs:\n"+
+					"    claude:\n"+
+					"        harness: claude\n"+
+					"        env:\n"+
+					"            SCION_TEST_MISSING_ENV_3817: \"\"\n"+
+					"profiles:\n"+
+					"    local:\n"+
+					"        runtime: docker\n"+
+					"    "+lifecycleK8sProfile+":\n"+
+					"        runtime: kubernetes\n"+
+					"runtimes:\n"+
+					"    docker:\n"+
+					"        type: docker\n"+
+					"    kubernetes:\n"+
+					"        type: kubernetes\n")
+			}
 			w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
 				"name":          agentName,
 				"slug":          agentName,
@@ -273,6 +300,131 @@ func TestCreateProfileResolution_ValidDefaultZeroAndFlatUnchanged(t *testing.T) 
 		}
 		if _, err := forced.srv.resolveRuntimeNameForOpts(forced.opts("unknown-under-force")); err != nil {
 			t.Fatalf("ForceRuntime resolveRuntimeNameForOpts: %v", err)
+		}
+	})
+}
+
+// TestCreateProfileResolution_GatherEnvPreflightAndSettingsLoadError verifies:
+//   - a valid profile with a missing required env key returns 202 (control),
+//     whereas an unresolvable profile/active_profile/runtime is refused by
+//     resolveRuntimeNameForOpts with 503 before the 202 env-gather prompt;
+//   - when project settings fail to load (malformed YAML) or return nil,
+//     missingSettingsProfileError reports that project settings could not be
+//     loaded rather than claiming the requested profile does not exist.
+func TestCreateProfileResolution_GatherEnvPreflightAndSettingsLoadError(t *testing.T) {
+	t.Setenv("SCION_TEST_MISSING_ENV_3817", "")
+	_ = os.Unsetenv("SCION_TEST_MISSING_ENV_3817")
+
+	t.Run("gatherEnv control returns 202 for valid profile", func(t *testing.T) {
+		f := newLifecycleFixture(t)
+		writeLifecycleProject(t, f.projectPath, "schema_version: \"1\"\n"+
+			"active_profile: local\n"+
+			"harness_configs:\n"+
+			"    claude:\n"+
+			"        harness: claude\n"+
+			"        env:\n"+
+			"            SCION_TEST_MISSING_ENV_3817: \"\"\n"+
+			"profiles:\n"+
+			"    local:\n"+
+			"        runtime: docker\n"+
+			"runtimes:\n"+
+			"    docker:\n"+
+			"        type: docker\n")
+		w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
+			"name":        "gather-control",
+			"slug":        "gather-control",
+			"id":          "agent-uuid-gather-control",
+			"projectPath": f.projectPath,
+			"gatherEnv":   true,
+			"config":      map[string]any{"template": "claude", "profile": "local"},
+		})
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want %d (202 env-gather control): %s", w.Code, http.StatusAccepted, w.Body.String())
+		}
+	})
+
+	t.Run("gatherEnv preflight refuses unknown active_profile before 202", func(t *testing.T) {
+		f := newLifecycleFixture(t)
+		writeLifecycleProject(t, f.projectPath, "schema_version: \"1\"\n"+
+			"active_profile: vanished-default\n"+
+			"harness_configs:\n"+
+			"    claude:\n"+
+			"        harness: claude\n"+
+			"        env:\n"+
+			"            SCION_TEST_MISSING_ENV_3817: \"\"\n"+
+			"profiles:\n"+
+			"    local:\n"+
+			"        runtime: docker\n"+
+			"runtimes:\n"+
+			"    docker:\n"+
+			"        type: docker\n")
+		w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
+			"name":        "gather-bad-active",
+			"slug":        "gather-bad-active",
+			"id":          "agent-uuid-gather-bad-active",
+			"projectPath": f.projectPath,
+			"gatherEnv":   true,
+			"config":      map[string]any{"template": "claude"},
+		})
+		assertDispatchRefused(t, w,
+			"default runtime profile cannot be resolved",
+			`active_profile "vanished-default" not found`,
+		)
+		assertProfileUnresolvedDetails(t, w, "vanished-default")
+		f.assertNoRuntimeUsed(t)
+	})
+
+	t.Run("malformed settings reports load failure rather than unknown profile", func(t *testing.T) {
+		for _, gatherEnv := range []bool{false, true} {
+			f := newLifecycleFixture(t)
+			if err := os.WriteFile(filepath.Join(f.projectPath, "settings.yaml"),
+				[]byte("schema_version: \"1\"\nprofiles: [not valid yaml\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg := map[string]any{"template": "claude", "profile": "local"}
+			if gatherEnv {
+				cfg["env"] = []string{"SCION_TEST_MISSING_ENV_3817"}
+			}
+			w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
+				"name":        "malformed-settings-agent",
+				"slug":        "malformed-settings-agent",
+				"id":          "agent-uuid-malformed",
+				"projectPath": f.projectPath,
+				"gatherEnv":   gatherEnv,
+				"noAuth":      !gatherEnv,
+				"config":      cfg,
+			})
+			assertDispatchRefused(t, w,
+				"requested runtime profile cannot be resolved",
+				`profile "local" cannot be verified: project settings could not be loaded`,
+				"retry once project settings can be loaded",
+			)
+			if strings.Contains(w.Body.String(), "not found in settings") {
+				t.Fatalf("body falsely claims profile is unknown when settings failed to load: %s", w.Body.String())
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if resp.Error.Details != nil {
+				t.Fatalf("details = %#v, want nil when settings failed to load", resp.Error.Details)
+			}
+			f.assertNoRuntimeUsed(t)
+		}
+	})
+
+	t.Run("nil settings without load error reports no settings loaded", func(t *testing.T) {
+		f := newBRFixture(t)
+		f.srv.loadSettings = func(string) (*config.VersionedSettings, []string, error) {
+			return nil, nil, nil
+		}
+		_, err := f.srv.resolveManagerForOptsStrict(api.StartOptions{Name: "nil-vs", Profile: "local"}, profileCreate)
+		if err == nil || !strings.Contains(err.Error(), "no project settings loaded") {
+			t.Fatalf("resolveManagerForOptsStrict err = %v, want 'no project settings loaded'", err)
+		}
+		_, err = f.srv.resolveRuntimeNameForOpts(api.StartOptions{Name: "nil-vs", Profile: "local"})
+		if err == nil || !strings.Contains(err.Error(), "no project settings loaded") {
+			t.Fatalf("resolveRuntimeNameForOpts err = %v, want 'no project settings loaded'", err)
 		}
 	})
 }
