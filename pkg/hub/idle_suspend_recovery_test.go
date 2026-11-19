@@ -71,9 +71,7 @@ func fastIdleCommitRetry(t *testing.T) {
 
 func expireIdleClaim(t *testing.T, s store.Store, agentID string) {
 	t.Helper()
-	_, err := s.(*entadapter.CompositeStore).DB().ExecContext(context.Background(),
-		"UPDATE agents SET idle_suspend_claim_until = ? WHERE id = ?", time.Now().UTC().Add(-time.Second), agentID)
-	require.NoError(t, err)
+	setIdleClaimExpiredFor(t, s, agentID, time.Second)
 }
 
 func setPhaseForTest(t *testing.T, s store.Store, agentID, phase string) {
@@ -621,8 +619,12 @@ func TestIdleSuspendRecovery_ExperimentOffIsInert(t *testing.T) {
 
 func setIdleClaimExpiredFor(t *testing.T, s store.Store, agentID string, ago time.Duration) {
 	t.Helper()
+	// The claim wrote its intent one lease before the stamp: keep that link, so
+	// the intent still reads as the claim's own (store.Agent.IdleSuspendIntentIsOwn).
+	until := time.Now().UTC().Add(-ago)
 	_, err := s.(*entadapter.CompositeStore).DB().ExecContext(context.Background(),
-		"UPDATE agents SET idle_suspend_claim_until = ? WHERE id = ?", time.Now().UTC().Add(-ago), agentID)
+		"UPDATE agents SET idle_suspend_claim_until = ?, run_intent_at = ?, run_intent_marked_at = ? WHERE id = ?",
+		until, until.Add(-time.Minute), until.Add(-time.Minute), agentID)
 	require.NoError(t, err)
 }
 
@@ -800,4 +802,43 @@ func TestIdleSuspendRecovery_AbandonBackoffThroughFullSweep(t *testing.T) {
 	reArm()
 	sweep()
 	assert.Equal(t, int32(2), disp.stops.Load(), "one new attempt after the backoff")
+}
+
+// TestIdleSuspendRecovery_NewerSystemIntentIsNotOurs: after the idle lease
+// expired, a system stop intent written by a membership hold or by the stalled
+// auto-suspend (SwapSystemRunIntent keeps the expired stamp) is not the idle
+// claim's. The sweep neither abandons nor recovers such a row, keeps the
+// intent, writes no message, and no delivery treats it as an idle suspend in
+// progress.
+func TestIdleSuspendRecovery_NewerSystemIntentIsNotOurs(t *testing.T) {
+	for name, phase := range map[string]state.Phase{
+		"hold on a running row":    state.PhaseRunning,
+		"stalled on a stopped row": state.PhaseStopped,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newIdleRecoveryFixture(t, "rec-notours-"+tidSlugSafe(name), false)
+			fastIdleCommitRetry(t)
+			f.disp.runIntentDispatcher.stopErr = &brokerStatusError{StatusCode: http.StatusInternalServerError}
+			f.suspendOnce(t)
+			// The lease expired a long time ago, then a system writer wrote its own intent.
+			setIdleClaimExpiredFor(t, f.raw, f.agent.ID, idleSuspendAbandonAfter()+time.Hour)
+			_, at, err := f.raw.SwapSystemRunIntent(ctx, f.agent.ID, store.RunIntentStopped)
+			require.NoError(t, err)
+			setPhaseForTest(t, f.raw, f.agent.ID, string(phase))
+			before := f.get(t)
+			require.NotNil(t, before.RunIntentAt)
+			require.True(t, before.RunIntentAt.After(*before.IdleSuspendClaimUntil), "the intent is newer than the stamp")
+			assert.False(t, before.IdleSuspendClaimActive, "not an idle suspend in progress")
+
+			f.sweep()
+
+			got := f.get(t)
+			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the system intent is kept")
+			assert.Equal(t, string(phase), got.Phase, "not recovered")
+			assert.Empty(t, got.SuspendReason)
+			assert.Empty(t, got.Message, "no abandon message")
+			assert.True(t, got.RunIntentAt.Equal(at) || got.RunIntentAt.Equal(*before.RunIntentAt))
+		})
+	}
 }

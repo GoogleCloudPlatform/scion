@@ -613,6 +613,7 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 
 		_, err = s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
 			SetIdleSuspendClaimUntil(time.Now().UTC().Add(-time.Second)).
+			SetRunIntentAt(time.Now().UTC().Add(-time.Minute)).SetRunIntentMarkedAt(time.Now().UTC().Add(-time.Minute)).
 			Save(ctx)
 		require.NoError(t, err)
 		expiredByID, err := s.GetAgent(ctx, a.ID)

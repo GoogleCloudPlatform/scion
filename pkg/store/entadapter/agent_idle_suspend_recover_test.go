@@ -63,7 +63,7 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 		require.NoError(t, err)
 		if expire {
 			until = time.Now().UTC().Add(-time.Second).Truncate(time.Microsecond)
-			_, err = s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).SetIdleSuspendClaimUntil(until).Save(ctx)
+			_, err = s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).SetIdleSuspendClaimUntil(until).SetRunIntentAt(until.Add(-time.Minute)).SetRunIntentMarkedAt(until.Add(-time.Minute)).Save(ctx)
 			require.NoError(t, err)
 		}
 		runIDs[a.ID] = got.RunID
@@ -235,7 +235,7 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 		past := func(t *testing.T, id string, ago time.Duration) time.Time {
 			t.Helper()
 			until := time.Now().UTC().Add(-ago).Truncate(time.Microsecond)
-			_, err := s.client.Agent.UpdateOneID(uuid.MustParse(id)).SetIdleSuspendClaimUntil(until).Save(ctx)
+			_, err := s.client.Agent.UpdateOneID(uuid.MustParse(id)).SetIdleSuspendClaimUntil(until).SetRunIntentAt(until.Add(-time.Minute)).SetRunIntentMarkedAt(until.Add(-time.Minute)).Save(ctx)
 			require.NoError(t, err)
 			return until
 		}
@@ -315,5 +315,29 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 		cond.ClaimBackoff = 30 * time.Second
 		_, _, _, err = s.ClaimIdleSuspend(ctx, a.ID, cond)
 		assert.NoError(t, err, "backoff passed")
+	})
+
+	t.Run("a newer system stop intent is not the claim's: not listed, recovered, abandoned or in progress", func(t *testing.T) {
+		a, until := claimed(t, "rec-notours", true)
+		setPhase(t, a.ID, string(state.PhaseStopped))
+		// A system writer (membership hold, stalled auto-suspend) writes its own
+		// stopped intent after the lease expired; the expired stamp stays.
+		_, at, err := s.SwapSystemRunIntent(ctx, a.ID, store.RunIntentStopped)
+		require.NoError(t, err)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.IdleSuspendClaimUntil)
+		require.True(t, got.RunIntentAt.After(*got.IdleSuspendClaimUntil))
+		assert.False(t, got.IdleSuspendClaimActive)
+		assert.False(t, listed(t, a.ID))
+		assert.ErrorIs(t, s.UpdateAgentStatus(ctx, a.ID, recoverUpdate(a.ID, until)), store.ErrIdleSuspendPrecondition)
+
+		setPhase(t, a.ID, string(state.PhaseRunning))
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, a.ID, until, runIDs[a.ID], at, time.Nanosecond, "x"), store.ErrIdleSuspendPrecondition)
+		abandoned, err := s.ListAbandonedIdleSuspendClaims(ctx, time.Nanosecond, 0)
+		require.NoError(t, err)
+		for _, r := range abandoned {
+			assert.NotEqual(t, a.ID, r.ID)
+		}
 	})
 }

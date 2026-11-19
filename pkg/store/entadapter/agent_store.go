@@ -1606,7 +1606,7 @@ func (s *AgentStore) agentFilterPredicates(ctx context.Context, filter store.Age
 			if s.idleSuspendExtended() {
 				inProgress = append(inProgress, agent.And(
 					agent.RunIntentEQ(string(store.RunIntentStopped)),
-					agent.PhaseNEQ(string(state.PhaseSuspended)),
+					agent.PhaseIn(string(state.PhaseRunning), string(state.PhaseStopping), string(state.PhaseStopped), string(state.PhaseError)),
 				))
 			}
 			preds = append(preds, agent.Or(

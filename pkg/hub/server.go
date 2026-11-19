@@ -6361,8 +6361,9 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 // completeAutoSuspendRecord runs the steps that follow a recorded
 // auto-suspend (the worker's commit or the sweep's recovery): credential and
 // grant revocation, aligning the in-memory agent with the stored row, and the
-// broker and project quota release. The caller then releases the superseded
-// start claim and publishes the status.
+// broker and project quota release. The worker then releases the start claim its
+// stop superseded and publishes the status; recovery has no such claim (the
+// store guard refuses a row holding a start claim) and only publishes.
 func (s *Server) completeAutoSuspendRecord(ctx context.Context, agent *store.Agent, stopRunID string, reason state.SuspendReason) {
 	// As for suspendAgent: every credential of the agent is revoked with the
 	// suspension, before the claim is released (as for the grants below).

@@ -161,6 +161,9 @@ func checkIdleSuspendRecord(row *ent.Agent, claimUntil, now time.Time, expired b
 	if row.RunIntent == nil || *row.RunIntent != string(store.RunIntentStopped) {
 		return false
 	}
+	if !entAgentToStore(row).IdleSuspendIntentIsOwn() {
+		return false // a newer system stop intent (hold, stalled): not the claim's
+	}
 	if row.ContainerStatus == store.ContainerStatusStopQueued {
 		return false
 	}
@@ -319,16 +322,20 @@ func (s *AgentStore) ListExpiredIdleSuspendClaims(ctx context.Context, limit int
 		agent.RunIntentEQ(string(store.RunIntentStopped)),
 		agent.PhaseIn(string(state.PhaseStopping), string(state.PhaseStopped), string(state.PhaseError)),
 	).Order(ent.Asc(agent.FieldIdleSuspendClaimUntil), ent.Asc(agent.FieldID))
-	if limit > 0 {
-		q = q.Limit(limit)
-	}
 	rows, err := q.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	out := make([]store.Agent, len(rows))
-	for i, a := range rows {
-		out[i] = *entAgentToStore(a)
+	out := make([]store.Agent, 0, len(rows))
+	for _, a := range rows {
+		sa := entAgentToStore(a)
+		if !sa.IdleSuspendIntentIsOwn() {
+			continue // a newer system stop intent: not the idle claim's
+		}
+		out = append(out, *sa)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	return out, nil
 }
@@ -346,16 +353,20 @@ func (s *AgentStore) ListAbandonedIdleSuspendClaims(ctx context.Context, expired
 		agent.RunIntentEQ(string(store.RunIntentStopped)),
 		agent.PhaseEQ(string(state.PhaseRunning)),
 	).Order(ent.Asc(agent.FieldIdleSuspendClaimUntil), ent.Asc(agent.FieldID))
-	if limit > 0 {
-		q = q.Limit(limit)
-	}
 	rows, err := q.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	out := make([]store.Agent, len(rows))
-	for i, a := range rows {
-		out[i] = *entAgentToStore(a)
+	out := make([]store.Agent, 0, len(rows))
+	for _, a := range rows {
+		sa := entAgentToStore(a)
+		if !sa.IdleSuspendIntentIsOwn() {
+			continue // a newer system stop intent: not the idle claim's
+		}
+		out = append(out, *sa)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	return out, nil
 }
@@ -372,7 +383,8 @@ func (s *AgentStore) AbandonIdleSuspend(ctx context.Context, agentID string, cla
 			return false, store.ErrIdleSuspendPrecondition
 		}
 		if row.RunID != runID || row.Phase != string(state.PhaseRunning) ||
-			!entAgentToStore(row).RunIntentMatches(store.RunIntentStopped, intentAt) {
+			!entAgentToStore(row).RunIntentMatches(store.RunIntentStopped, intentAt) ||
+			!entAgentToStore(row).IdleSuspendIntentIsOwn() {
 			return false, store.ErrIdleSuspendPrecondition
 		}
 		if _, err := c.Agent.UpdateOneID(row.ID).

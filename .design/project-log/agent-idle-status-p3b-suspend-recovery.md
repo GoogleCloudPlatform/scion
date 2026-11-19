@@ -36,8 +36,14 @@ suspend.
   reverts the intent to running and records a message, logs WARN and publishes the status), so the
   agent is deliverable again as after a failed stop on main. The stamp is kept as a backoff marker:
   the candidate query and `ClaimIdleSuspend` skip the row until `idleSuspendBackoff()` (two ceilings
-  plus a lease after the stamp) has passed, so a persistent failure retries about every half hour.
+  plus a lease after the stamp, about 26 minutes, or 15 after the abandon) has passed, so a
+  persistent failure retries about every 30 minutes.
   On a definite stop refusal the worker reverts the intent before clearing the claim.
+- **Own intent only.** The idle machinery acts only on the intent its claim wrote
+  (`IdleSuspendIntentIsOwn`: `run_intent_at <= idle_suspend_claim_until`; the claim writes both in one
+  write and system writers yield while the lease is active). A newer system stop intent (membership
+  hold, stalled auto-suspend) is neither recovered, abandoned nor in progress. In-progress and
+  stop-all cover only the phases the machinery can settle (running, stopping, stopped, error).
 - **Delivery and stop-all.** `IdleSuspendClaimActive` means an idle suspend is in progress: lease
   unexpired, or, while the experiment is on, the stamp still set with `run_intent=stopped` on a row
   not yet `suspended`. With the experiment off it is lease-only (no claim checks beyond the lease).

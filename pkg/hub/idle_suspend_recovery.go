@@ -60,8 +60,8 @@ func idleSuspendAbandonAfter() time.Duration {
 // claimed again by the idle sweep. The abandon runs idleSuspendAbandonAfter
 // after the stamp and keeps the stamp (run_intent back to running) as the
 // marker, so the next attempt comes idleSuspendAbandonAfter + one lease after
-// the abandon at the earliest: a persistent stop failure retries about every
-// half hour instead of every tick. Any user or hub lifecycle write clears the
+// the abandon at the earliest (about 15 minutes at the default lease): a
+// persistent stop failure retries about every 30 minutes instead of every tick. Any user or hub lifecycle write clears the
 // stamp and ends the backoff.
 func idleSuspendBackoff() time.Duration {
 	return 2*idleSuspendAbandonAfter() + idleSuspendClaimLease()
