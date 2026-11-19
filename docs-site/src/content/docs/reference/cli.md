@@ -1849,9 +1849,9 @@ Manage Hub-scoped System One provider instances through the running Hub's admini
 
 - **Subcommands:**
     - `create <name>`: Register a System One provider instance (`POST /api/v1/admin/system-one/instances`). For security, the provider API key is read **only** from standard input (piped or `--key-stdin`) or from `--key-file <path|->`; passing the key via positional arguments, value-bearing command-line flags, or environment variables is refused. The key is stored in the Hub's internal secret backend (`systemone.instance.<id>`) and is never returned in output or API responses.
-        - `--adapter <name>`: Provider adapter name (default `typesafe`).
-        - `--model <id>`: Provider model identifier (required for `typesafe`, for example `jev-1.14.0`).
-        - `--endpoint <https-url>`: Provider base HTTPS URL (defaults to the adapter's default when omitted; loopback, private, link-local, metadata, and unspecified IP addresses are refused).
+        - `--adapter <name>`: Provider adapter name (for example `typesafe` or `gemini_decisions`; default `typesafe`).
+        - `--model <id>`: Provider model identifier (required for `typesafe` and `gemini_decisions`, for example `jev-1.14.0` or `gemini-decision-1`).
+        - `--endpoint <https-url>`: Provider base HTTPS URL (defaults to the adapter's default when supported — `https://api.typesafe.ai` for `typesafe`, `https://generativelanguage.googleapis.com` for `gemini_decisions` — and required with `400 validation_error` when omitted on an adapter without a default; loopback, private, link-local, metadata, and unspecified IP addresses are refused).
         - `--location <string>`: Optional provider location or region.
         - `--key-file <path|->`: Path to a file containing the provider API key, or `-` for standard input.
         - `--key-stdin`: Read the provider API key from standard input.
@@ -1867,8 +1867,8 @@ Manage Hub-scoped System One provider instances through the running Hub's admini
         - `--limit <1..500>`: Maximum instances to return.
         - `--cursor <string>`: Pagination cursor from a previous list response.
     - `delete <name>`: Delete a System One provider instance and remove its managed internal secret (`DELETE /api/v1/admin/system-one/instances/{name}`).
-    - `probe <name>`: Run an administrative diagnostic probe against an instance (`POST /api/v1/admin/system-one/instances/{name}/probe`), either listing models supported by the provider (`--models`) or evaluating an inline System One spec (JSON or YAML) against synthetic text (`--spec-file` with `--text` or `--text-file`), bounded by `server.hub.system_one.max_eval_time`. Exits `0` when the evaluated outcome `class` is `success`, and exits non-zero (`1`) when `class` is not `success` (for example `failed` or `uncertain`) or the request fails; the probe report is still written to stdout before exiting.
-        - `--models`: Query models supported by the provider instance (cannot be combined with spec/text flags).
+    - `probe <name>`: Run an administrative diagnostic probe against an instance (`POST /api/v1/admin/system-one/instances/{name}/probe`), either listing models supported by the provider (`--models`) or evaluating an inline System One spec (JSON or YAML) against synthetic text (`--spec-file` with `--text` or `--text-file`), bounded by `server.hub.system_one.max_eval_time`. Model listing (`--models`) requires an adapter that implements model discovery (such as `typesafe`); adapters without model listing (such as `gemini_decisions`) return `400 validation_error` (`"adapter does not support model listing"`). In human output, when a provider omits a response model identifier (such as `gemini_decisions`), `Resolved Model:` prints `unreported (model_unreported)`; `Usage:` prints `input_tokens=<n>, output_tokens=<n>` (plus `, truncated=<bool>` when present) when measured usage is reported, or `usage unavailable (usage_unreported)` / `usage unavailable` when usage is absent, unparseable, or unmeasured (`usage` is omitted from `--format json` output rather than presenting zero tokens as measured). Exits `0` when the evaluated outcome `class` is `success`, and exits non-zero (`1`) when `class` is not `success` (for example `failed` or `uncertain`) or the request fails; the probe report is still written to stdout before exiting.
+        - `--models`: Query models supported by the provider instance (requires adapter model-listing support, such as `typesafe`; cannot be combined with spec/text flags).
         - `--spec-file <path|->`: Path to an inline System One spec or rule envelope in JSON or YAML, or `-` for standard input.
         - `--text <string>`: Synthetic text bound to `probe.text`.
         - `--text-file <path|->`: Path to a file containing synthetic text bound to `probe.text`, or `-` for standard input (`--spec-file` and `--text-file` cannot both use `-`).
@@ -1884,14 +1884,20 @@ All four subcommands honor `--format json`.
 # Register a TypeSafe instance reading the API key from a file
 scion admin system-one instance create typesafe-main --adapter typesafe --model jev-1.14.0 --key-file /path/to/typesafe.key
 
+# Register a Gemini Decision 1 instance reading the API key from standard input
+scion admin system-one instance create gemini-main --adapter gemini_decisions --model gemini-decision-1 --key-stdin < /path/to/gemini-key.txt
+
 # List configured instances
 scion admin system-one instance list
 
-# List models reported by the provider instance
+# List models reported by a TypeSafe provider instance
 scion admin system-one instance probe typesafe-main --models
 
-# Evaluate an inline spec against synthetic text
+# Evaluate an inline spec against synthetic text on TypeSafe
 scion admin system-one instance probe typesafe-main --spec-file ./probe-spec.json --text "Synthetic test sample."
+
+# Evaluate an inline spec against synthetic text on Gemini Decision 1
+scion admin system-one instance probe gemini-main --spec-file ./probe-spec.json --text "Synthetic test sample."
 
 # Delete an instance and its managed internal secret
 scion admin system-one instance delete typesafe-main
