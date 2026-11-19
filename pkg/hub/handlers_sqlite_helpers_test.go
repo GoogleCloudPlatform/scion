@@ -2176,11 +2176,15 @@ func seedHumanMessage(t *testing.T, s store.Store, proj *store.Project, topicID,
 type spaceMembersStore struct {
 	store.Store
 	// fault gates every override below; nil means always active.
-	fault           *storeFaultSwitch
-	listAgentsCalls int
+	fault              *storeFaultSwitch
+	listAgentsCalls    int
+	getUserCalls       int
+	getUsersByIDsCalls int
+	lastProjectMembers []*store.ProjectMembership
 	// failListAgentsOnCall makes the Nth ListAgents call (1-based) fail.
 	failListAgentsOnCall int
 	failProjectMembers   bool
+	failGetUsersByIDs    bool
 	// onAgentPage, when set, runs after each successful ListAgents call with
 	// the 1-based call number and whether that page was the last one.
 	onAgentPage func(call int, last bool)
@@ -5766,7 +5770,28 @@ func (s *spaceMembersStore) ListProjectMembers(ctx context.Context, projectID st
 	if s.failProjectMembers && s.fault.Active() {
 		return nil, errors.New("injected list project members failure")
 	}
-	return s.Store.ListProjectMembers(ctx, projectID)
+	members, err := s.Store.ListProjectMembers(ctx, projectID)
+	if err == nil && s.fault.Active() {
+		s.lastProjectMembers = members
+	}
+	return members, err
+}
+
+func (s *spaceMembersStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.fault.Active() && s.lastProjectMembers != nil {
+		s.getUserCalls++
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *spaceMembersStore) GetUsersByIDs(ctx context.Context, ids []string) (map[string]*store.User, error) {
+	if s.fault.Active() {
+		s.getUsersByIDsCalls++
+		if s.failGetUsersByIDs {
+			return nil, errors.New("injected get users by IDs failure")
+		}
+	}
+	return s.Store.GetUsersByIDs(ctx, ids)
 }
 
 func (p *readStateAtPublishSpy) PublishUserMessage(ctx context.Context, msg *store.Message, _ []AttachmentRef, _ []artifacts.MessageRef, _ ...ChatEventOption) {

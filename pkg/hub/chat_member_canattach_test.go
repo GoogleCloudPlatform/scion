@@ -34,7 +34,7 @@ import (
 //
 // false is the value the client most needs to receive, so it must be on the wire.
 func TestChatMemberCanAttachFalseIsSerialised(t *testing.T) {
-	denied, err := json.Marshal(chatMemberEntry{ID: "a1", Kind: "agent", CanAttach: false})
+	denied, err := json.Marshal(chatAgentMemberEntry{ID: "a1", CanAttach: false})
 	if err != nil {
 		t.Fatalf("marshal denied agent: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestChatMemberCanAttachFalseIsSerialised(t *testing.T) {
 		t.Fatalf("denied agent must serialise canAttach:false, got %s", denied)
 	}
 
-	allowed, err := json.Marshal(chatMemberEntry{ID: "a2", Kind: "agent", CanAttach: true})
+	allowed, err := json.Marshal(chatAgentMemberEntry{ID: "a2", CanAttach: true})
 	if err != nil {
 		t.Fatalf("marshal allowed agent: %v", err)
 	}

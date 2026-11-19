@@ -882,9 +882,9 @@ func TestDeletionViewOnlyBuiltThroughRedaction(t *testing.T) {
 	}
 	sort.Strings(viewSites)
 	assert.Len(t, computeSites, 1, "only deletionViewForCaller computes the view: %v", computeSites)
-	// enrichAgents, enrichAgent, three lifecycle responses (stop no-op,
-	// stop not recorded, final), the managed response, the 202 writer and
-	// the status event.
-	assert.Len(t, viewSites, 8, "deletion view call sites: %v", viewSites)
+	// enrichAgents, enrichAgent, handleSpaceMembers, three lifecycle
+	// responses (stop no-op, stop not recorded, final), the managed
+	// response, the 202 writer and the status event.
+	assert.Len(t, viewSites, 9, "deletion view call sites: %v", viewSites)
 	assert.Equal(t, 1, eventSites, "events.go builds the status event's deletion view once")
 }
