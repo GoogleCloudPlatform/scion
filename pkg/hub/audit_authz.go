@@ -34,9 +34,8 @@ import (
 // Decision Audit Emitter
 // =============================================================================
 
-// auditWriteTimeout is the maximum time an async mutation audit INSERT may
-// take before the goroutine abandons the attempt and releases its store
-// reference.
+// auditWriteTimeout is the maximum time a best-effort mutation audit INSERT
+// (async or synchronous) may take before abandoning the attempt.
 const auditWriteTimeout = 1 * time.Second
 
 // auditCancelDrainGrace bounds how long CloseAuditWriter waits after cancelling
@@ -277,17 +276,40 @@ func (t *mutationAuditTracker) stop(ctx context.Context, grace, cancelGrace time
 // bound or arriving after admission closes can be lost at shutdown rather than
 // hanging shutdown or writing to a closed store.
 func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAuditRecord) {
+	s.recordMutationAudit(ctx, record, true)
+}
+
+// emitMutationAuditSync creates and stores a mutation audit record
+// synchronously through the same record preparation, bounded timeout, and
+// best-effort logging path as emitMutationAudit, detached from request
+// cancellation so the write completes before the caller returns without
+// changing the caller's response on store errors.
+func (s *Server) emitMutationAuditSync(ctx context.Context, record *store.MutationAuditRecord) {
+	s.recordMutationAudit(ctx, record, false)
+}
+
+// recordMutationAudit builds and persists a best-effort mutation audit record,
+// shared between emitMutationAudit (async) and emitMutationAuditSync (sync).
+func (s *Server) recordMutationAudit(ctx context.Context, record *store.MutationAuditRecord, async bool) {
+	if record == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	// E.2a: consolidated actor/credential-snapshot/correlation helper (plan
 	// §3.3), replacing this function's own copy of the extraction logic.
 	// ApplyActor only fills fields the caller has not already set explicitly.
 	auditActorFromContext(ctx).ApplyActor(record)
 
 	if record.Timestamp.IsZero() {
-		record.Timestamp = time.Now()
+		record.Timestamp = time.Now().UTC()
 	}
 
+	st := s.store
 	logger := slog.Default()
-	if !s.mutationAuditWork.goTracked(auditWriteTimeout, func(writeCtx context.Context) {
+	write := func(writeCtx context.Context) {
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Warn("recovered panic in mutation audit emit",
@@ -296,13 +318,29 @@ func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAu
 					"panic", r)
 			}
 		}()
-		if err := s.store.CreateMutationAudit(writeCtx, record); err != nil {
+		if st == nil {
+			logger.Warn("failed to emit mutation audit record",
+				"mutation_type", record.MutationType,
+				"target_id", record.TargetID,
+				"error", "no store")
+			return
+		}
+		if err := st.CreateMutationAudit(writeCtx, record); err != nil {
 			logger.Warn("failed to emit mutation audit record",
 				"mutation_type", record.MutationType,
 				"target_id", record.TargetID,
 				"error", err)
 		}
-	}) {
+	}
+
+	if !async {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+		defer cancel()
+		write(writeCtx)
+		return
+	}
+
+	if !s.mutationAuditWork.goTracked(auditWriteTimeout, write) {
 		logger.Warn("dropped mutation audit record after audit shutdown",
 			"mutation_type", record.MutationType,
 			"target_id", record.TargetID)

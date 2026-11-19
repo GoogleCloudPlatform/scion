@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -361,4 +362,184 @@ func TestEmitMutationAudit_CapturesCallTimeLoggerAndLogsTargetID(t *testing.T) {
 		}
 	}
 	assert.True(t, matched, "expected warning in call-time logger; got:\n%s", callLogs.String())
+}
+
+// TestEmitMutationAudit_SyncAndAsyncShareRecordBuildAndWrite verifies that
+// emitMutationAudit (async) and emitMutationAuditSync (sync) produce identical
+// actor/credential/correlation/executor fields and UTC timestamps from the
+// shared builder/writer path, and that emitMutationAuditSync detaches from
+// request cancellation while completing synchronously before returning
+// (ptone/scion#3834).
+func TestEmitMutationAudit_SyncAndAsyncShareRecordBuildAndWrite(t *testing.T) {
+	origZone := time.Local
+	time.Local = time.FixedZone("UTC-7", -7*60*60)
+	t.Cleanup(func() { time.Local = origZone })
+
+	srv, s := testServer(t)
+
+	decoration := &CredentialDecoration{
+		Kind:      CredentialKindUAT,
+		TokenID:   "tok-shared-3834",
+		TokenName: "shared-audit-token",
+		Boundary:  decorationBoundary{Kind: "project", ProjectID: "proj-3834"},
+		Labels:    map[string]string{"env": "ci"},
+	}
+	baseUser := NewAuthenticatedUser("user-3834", "user3834@example.com", "User 3834", store.UserRoleAdmin, "api")
+	scoped := NewScopedUserIdentityWithDecoration(baseUser, "proj-3834", []string{"project:read"}, "tok-shared-3834", decoration)
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	reqCtx = logging.ContextWithRequestMeta(reqCtx, &logging.RequestMeta{RequestID: "req-shared-3834"})
+	reqCtx = contextWithIdentity(reqCtx, scoped)
+	reqCtx = contextWithCredentialContext(reqCtx, credentialContextForIdentity(scoped))
+	reqCtx = ContextWithExecutor(reqCtx, ExecutorContext{Kind: "hub_settings", ID: "server-config"})
+
+	asyncTarget := tid("mut-audit-async-3834")
+	asyncRec := &store.MutationAuditRecord{
+		MutationType:  gcpIAMNotAppliedMutation,
+		TargetType:    gcpIAMAuditTarget,
+		TargetID:      asyncTarget,
+		BeforeSummary: "before-val",
+		AfterSummary:  "after-val",
+	}
+	srv.emitMutationAudit(reqCtx, asyncRec)
+
+	// Cancel the request context before calling emitMutationAuditSync to prove
+	// the synchronous path detaches from caller cancellation while still
+	// extracting actor metadata from reqCtx.
+	cancelReq()
+
+	syncTarget := tid("mut-audit-sync-3834")
+	syncRec := &store.MutationAuditRecord{
+		MutationType:  gcpIAMNotAppliedMutation,
+		TargetType:    gcpIAMAuditTarget,
+		TargetID:      syncTarget,
+		BeforeSummary: "before-val",
+		AfterSummary:  "after-val",
+	}
+	srv.emitMutationAuditSync(reqCtx, syncRec)
+
+	// Synchronous record must already be persisted before CloseAuditWriter.
+	syncPersisted, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+		MutationType: gcpIAMNotAppliedMutation,
+		TargetID:     syncTarget,
+	})
+	require.NoError(t, err)
+	require.Len(t, syncPersisted, 1, "emitMutationAuditSync must persist before returning even when caller ctx is cancelled")
+
+	require.NoError(t, srv.CloseAuditWriter(context.Background()))
+
+	asyncPersisted, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+		MutationType: gcpIAMNotAppliedMutation,
+		TargetID:     asyncTarget,
+	})
+	require.NoError(t, err)
+	require.Len(t, asyncPersisted, 1)
+
+	assert.Equal(t, time.UTC, asyncRec.Timestamp.Location(), "async record Timestamp must default to UTC")
+	assert.Equal(t, time.UTC, syncRec.Timestamp.Location(), "sync record Timestamp must default to UTC")
+
+	gotAsync := asyncPersisted[0]
+	gotSync := syncPersisted[0]
+	assert.Equal(t, gotAsync.MutationType, gotSync.MutationType)
+	assert.Equal(t, gotAsync.TargetType, gotSync.TargetType)
+	assert.Equal(t, gotAsync.BeforeSummary, gotSync.BeforeSummary)
+	assert.Equal(t, gotAsync.AfterSummary, gotSync.AfterSummary)
+	assert.Equal(t, "user-3834", gotSync.ActorPrincipalID)
+	assert.Equal(t, gotAsync.ActorPrincipalKind, gotSync.ActorPrincipalKind)
+	assert.Equal(t, gotAsync.ActorPrincipalID, gotSync.ActorPrincipalID)
+	assert.Equal(t, gotAsync.ActorCredentialID, gotSync.ActorCredentialID)
+	assert.Equal(t, gotAsync.ActorCredentialType, gotSync.ActorCredentialType)
+	assert.Equal(t, gotAsync.CredentialName, gotSync.CredentialName)
+	assert.Equal(t, gotAsync.CredentialBoundaryKind, gotSync.CredentialBoundaryKind)
+	assert.Equal(t, gotAsync.CredentialBoundaryProjectID, gotSync.CredentialBoundaryProjectID)
+	assert.Equal(t, gotAsync.CredentialLabels, gotSync.CredentialLabels)
+	assert.Equal(t, "req-shared-3834", gotSync.CorrelationID)
+	assert.Equal(t, gotAsync.CorrelationID, gotSync.CorrelationID)
+	assert.Equal(t, "hub_settings", gotSync.ExecutorKind)
+	assert.Equal(t, "server-config", gotSync.ExecutorID)
+	assert.Equal(t, gotAsync.ExecutorKind, gotSync.ExecutorKind)
+	assert.Equal(t, gotAsync.ExecutorID, gotSync.ExecutorID)
+}
+
+// TestEmitMutationAuditSync_BestEffortStoreFailureAndNilStore verifies that
+// emitMutationAuditSync logs store errors and nil-store conditions with the
+// same structured fields as emitMutationAudit without panicking
+// (ptone/scion#3834).
+func TestEmitMutationAuditSync_BestEffortStoreFailureAndNilStore(t *testing.T) {
+	t.Run("store error logs target_id", func(t *testing.T) {
+		logs := &syncBuffer{}
+		orig := slog.Default()
+		t.Cleanup(func() { slog.SetDefault(orig) })
+
+		srv, _, wrapped, fault := testServerWithStoreFault(t, newBlockingMutationAuditStore)
+		wrapped.err = errors.New("injected sync audit failure")
+		close(wrapped.release)
+		fault.Arm()
+
+		slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+		targetID := tid("mut-audit-sync-err")
+		srv.emitMutationAuditSync(context.Background(), &store.MutationAuditRecord{
+			MutationType:       gcpIAMNotAppliedMutation,
+			TargetType:         gcpIAMAuditTarget,
+			TargetID:           targetID,
+			ActorPrincipalKind: gcpIAMSystemActorKind,
+			ActorPrincipalID:   gcpIAMSystemActorID,
+		})
+		slog.SetDefault(orig)
+
+		var matched bool
+		for _, line := range strings.Split(logs.String(), "\n") {
+			var rec struct {
+				Msg          string `json:"msg"`
+				MutationType string `json:"mutation_type"`
+				TargetID     string `json:"target_id"`
+				Error        string `json:"error"`
+			}
+			if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "failed to emit mutation audit record" {
+				matched = true
+				assert.Equal(t, gcpIAMNotAppliedMutation, rec.MutationType)
+				assert.Equal(t, targetID, rec.TargetID)
+				assert.Contains(t, rec.Error, "injected sync audit failure")
+			}
+		}
+		assert.True(t, matched, "expected warning log with target_id; got:\n%s", logs.String())
+	})
+
+	t.Run("nil store logs no store on sync and async paths", func(t *testing.T) {
+		logs := &syncBuffer{}
+		orig := slog.Default()
+		t.Cleanup(func() { slog.SetDefault(orig) })
+		slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
+
+		srv := &Server{}
+		srv.emitMutationAuditSync(context.Background(), &store.MutationAuditRecord{
+			MutationType: gcpIAMNotAppliedMutation,
+			TargetType:   gcpIAMAuditTarget,
+			TargetID:     "sync-nil-store",
+		})
+		srv.emitMutationAudit(context.Background(), &store.MutationAuditRecord{
+			MutationType: gcpIAMNotAppliedMutation,
+			TargetType:   gcpIAMAuditTarget,
+			TargetID:     "async-nil-store",
+		})
+		require.NoError(t, srv.CloseAuditWriter(context.Background()))
+		slog.SetDefault(orig)
+
+		seenTargets := map[string]string{}
+		for _, line := range strings.Split(logs.String(), "\n") {
+			var rec struct {
+				Msg          string `json:"msg"`
+				MutationType string `json:"mutation_type"`
+				TargetID     string `json:"target_id"`
+				Error        string `json:"error"`
+			}
+			if json.Unmarshal([]byte(line), &rec) == nil && rec.Msg == "failed to emit mutation audit record" {
+				seenTargets[rec.TargetID] = rec.Error
+			}
+		}
+		assert.Equal(t, map[string]string{
+			"sync-nil-store":  "no store",
+			"async-nil-store": "no store",
+		}, seenTargets, "both sync and async paths must log no-store warning cleanly; got:\n%s", logs.String())
+	})
 }

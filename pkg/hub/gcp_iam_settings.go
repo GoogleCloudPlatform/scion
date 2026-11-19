@@ -495,27 +495,13 @@ func (s *Server) writeGCPIAMAudit(ctx context.Context, mutation, surface string,
 func (s *Server) auditGCPIAMNotApplied(ctx context.Context, cur, next gcpIAMSettings, cause error) {
 	slog.Error("GCP permission-check setting change was recorded but not written",
 		"check_mode", next.CheckMode, "deny_unknown_policy", next.denyUnknownPolicy(), "error", cause)
-	rec := &store.MutationAuditRecord{
+	s.emitMutationAuditSync(ctx, &store.MutationAuditRecord{
 		MutationType:  gcpIAMNotAppliedMutation,
 		TargetType:    gcpIAMAuditTarget,
 		TargetID:      gcpIAMSection,
 		BeforeSummary: cur.CheckMode + "," + cur.denyUnknownPolicy(),
 		AfterSummary:  next.CheckMode + "," + next.denyUnknownPolicy(),
-	}
-	auditActorFromContext(ctx).ApplyActor(rec)
-	rec.Timestamp = time.Now().UTC()
-	if s.store == nil {
-		slog.Warn("failed to emit mutation audit record",
-			"mutation_type", rec.MutationType, "error", "no store")
-		return
-	}
-	// Detached from request cancellation, bounded like emitMutationAudit.
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
-	defer cancel()
-	if err := s.store.CreateMutationAudit(writeCtx, rec); err != nil {
-		slog.Warn("failed to emit mutation audit record",
-			"mutation_type", rec.MutationType, "error", err)
-	}
+	})
 }
 
 // approveGCPIAMTransition admits t for the next ApplySnapshot on this
