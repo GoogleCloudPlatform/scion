@@ -667,7 +667,7 @@ func parseAndValidateBrandAsset(raw, slot string, pngOnlyData bool) (resolvedURL
 		return "", "", nil, errors.New("http:// URLs are not allowed (blocked by Hub Content-Security-Policy img-src); use https://")
 	}
 	if !strings.EqualFold(u.Scheme, "https") {
-		return "", "", nil, errors.New("asset URI must use https://, a same-origin /path, or data:image/...;base64,...")
+		return "", "", nil, errors.New("asset URI must use https://, a same-origin /path, or a base64 data:image URI")
 	}
 	if u.Host == "" {
 		return "", "", nil, errors.New("https:// URL must include a non-empty host")
