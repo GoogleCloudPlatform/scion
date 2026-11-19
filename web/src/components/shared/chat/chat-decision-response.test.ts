@@ -515,6 +515,161 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
   });
 });
 
+describe('dismissal responses (ptone/scion#8216, design 8194 §4.5, Mock X7)', () => {
+  it('renders a single dismissed decision line with x-circle, optional reason, not-delivered, and Jump', async () => {
+    const withReason = await mount({
+      response: single({
+        choiceId: '$dismissed',
+        label: 'Dismissed',
+        outcome: 'dismiss',
+        dismissReason: 'Stale: the release already shipped.',
+      }),
+    });
+    const line = root(withReason).querySelector('[data-kind="single"][data-outcome="dismiss"]')!;
+    expect(line).not.toBeNull();
+    const icon = line.querySelector('sl-icon')!;
+    expect(icon.getAttribute('name')).toBe('x-circle');
+    expect(icon.classList.contains('dismiss')).toBe(true);
+    expect(text(line)).toMatch(
+      /^alice dismissed D234 · Stale: the release already shipped\. · \d\d:\d\d · Jump$/
+    );
+    const got = jumps(withReason);
+    line.querySelector<HTMLButtonElement>('[data-action="jump"]')!.click();
+    expect(got).toEqual(['p1']);
+
+    const noReasonFailed = await mount({
+      response: single({
+        key: 'migrate',
+        choiceId: '$dismissed',
+        label: 'Dismissed',
+        outcome: 'dismiss',
+      }),
+      dispatchState: 'failed',
+    });
+    const line2 = root(noReasonFailed).querySelector(
+      '[data-kind="single"][data-outcome="dismiss"]'
+    )!;
+    expect(text(line2)).toMatch(
+      /^alice dismissed migrate · \d\d:\d\d · not delivered \(agent gone\) · Jump$/
+    );
+  });
+
+  it('renders a 1-row dismissal set from the hub as the compact single dismissal line', async () => {
+    const oneRowSet = await mount({
+      responseSet: {
+        promptMessageId: 'p-mig',
+        batchId: 'b-1',
+        answers: [
+          setAnswer({
+            rowId: 'r-mig',
+            key: 'migrate',
+            question: 'Run the backfill on staging first?',
+            choiceId: '$dismissed',
+            label: 'Dismissed',
+            outcome: 'dismiss',
+            dismissReason: 'Obsolete migration.',
+            promptMessageId: 'p-mig',
+          }),
+        ],
+      },
+      answererName: 'you',
+      isOwnAnswerer: true,
+    });
+    expect(root(oneRowSet).querySelector('details')).toBeNull();
+    const line = root(oneRowSet).querySelector('[data-kind="single"][data-outcome="dismiss"]')!;
+    expect(line).not.toBeNull();
+    expect(text(line)).toMatch(/^you dismissed migrate · Obsolete migration\. · \d\d:\d\d · Jump$/);
+    const got = jumps(oneRowSet);
+    line.querySelector<HTMLButtonElement>('[data-action="jump"]')!.click();
+    expect(got).toEqual(['p-mig']);
+  });
+
+  it('renders a multi-row dismissal set with summary reason and expandable per-key Dismissed list', async () => {
+    const el = await mount({
+      responseSet: {
+        promptMessageId: 'p-set',
+        batchId: 'b-dsm',
+        answers: [
+          setAnswer({
+            rowId: 'r1',
+            key: 'D234',
+            question: 'Ship v0.9 today?',
+            choiceId: '$dismissed',
+            label: 'Dismissed',
+            outcome: 'dismiss',
+            dismissReason: 'Stale: the release already shipped.',
+          }),
+          setAnswer({
+            rowId: 'r2',
+            key: '17',
+            question: 'Which approach?',
+            choiceId: '$dismissed',
+            label: 'Dismissed',
+            outcome: 'dismiss',
+            dismissReason: 'Stale: the release already shipped.',
+          }),
+        ],
+      },
+      answererName: 'alice',
+    });
+    const details = root(el).querySelector<HTMLDetailsElement>(
+      'details[data-kind="set"][data-outcome="dismiss"]'
+    )!;
+    expect(details).not.toBeNull();
+    expect(details.open).toBe(false);
+    const summary = details.querySelector('summary')!;
+    const icon = summary.querySelector('sl-icon')!;
+    expect(icon.getAttribute('name')).toBe('x-circle');
+    expect(icon.classList.contains('dismiss')).toBe(true);
+    expect(text(summary)).toMatch(
+      /^alice dismissed 2 decisions · Stale: the release already shipped\. · \d\d:\d\d · Show decisions ▸$/
+    );
+
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
+    await el.updateComplete;
+    expect(text(summary)).toContain('Hide decisions ▾');
+    const rows = [...details.querySelectorAll('li[data-row]')].map((li) => text(li));
+    expect(rows).toEqual(['D234 Ship v0.9 today? — Dismissed', '17 Which approach? — Dismissed']);
+    const got = jumps(el);
+    details.querySelector<HTMLButtonElement>('[data-action="jump"]')!.click();
+    expect(got).toEqual(['p-set']);
+  });
+
+  it('renders dismissReason strictly as plain text (no HTML or Markdown parsing)', async () => {
+    const payload = '<img src=x onerror="alert(1)"> [evil](https://evil.example) **bold**';
+    const el = await mount({
+      responseSet: {
+        promptMessageId: 'p-set',
+        batchId: 'b-xss',
+        answers: [
+          setAnswer({
+            rowId: 'r1',
+            key: 'D1',
+            question: 'Q1?',
+            choiceId: '$dismissed',
+            label: 'Dismissed',
+            outcome: 'dismiss',
+            dismissReason: payload,
+          }),
+          setAnswer({
+            rowId: 'r2',
+            key: 'D2',
+            question: 'Q2?',
+            choiceId: '$dismissed',
+            label: 'Dismissed',
+            outcome: 'dismiss',
+            dismissReason: payload,
+          }),
+        ],
+      },
+    });
+    const reasonEl = root(el).querySelector('[data-dismiss-reason]')!;
+    expect(reasonEl.textContent).toBe(payload);
+    expect(reasonEl.querySelector('img, a, strong')).toBeNull();
+  });
+});
+
 it('renders nothing without a view', async () => {
   const el = await mount({});
   expect(root(el).querySelector('.line, details')).toBeNull();

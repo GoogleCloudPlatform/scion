@@ -469,4 +469,50 @@ describe('chat message markup boundary', () => {
     expect(marker.shadowRoot?.querySelector('.ia-full-body strong')?.textContent).toBe('there');
     expect(flagged()).toEqual([]);
   });
+
+  it('renders a dismissal decision-response reason with zero markup parsing (plain-text sink)', async () => {
+    window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, 'web.decisions': true };
+    sinkState.calls.length = 0;
+
+    const payload = '<img src=x onerror="window.__pwned=1"><script>window.__pwned=1</script> **m**';
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.messageId = 'resp-dsm-1';
+    el.messageType = 'decision-response';
+    el.currentUserId = 'u-alice';
+    el.timestamp = '2026-11-16T09:12:00Z';
+    el.decisionResponseSet = {
+      promptMessageId: 'prompt-1',
+      batchId: 'batch-1',
+      answers: [
+        {
+          rowId: 'r1',
+          ref: 'D234',
+          key: 'D234',
+          version: 1,
+          question: 'Ship v0.9 today?',
+          choiceId: '$dismissed',
+          label: 'Dismissed',
+          provenance: 'direct',
+          outcome: 'dismiss',
+          dismissReason: payload,
+          matchedDefault: false,
+          answeredByUserId: 'u-alice',
+          answeredByName: 'alice',
+          promptMessageId: 'prompt-1',
+        },
+      ],
+    };
+    document.body.appendChild(el);
+    await el.updateComplete;
+    const inner = el.shadowRoot?.querySelector('scion-chat-decision-response');
+    await (inner as { updateComplete?: Promise<boolean> } | null)?.updateComplete;
+
+    const reasonEl = inner?.shadowRoot?.querySelector('[data-dismiss-reason]');
+    expect(reasonEl?.textContent).toBe(payload);
+    expect(reasonEl?.querySelector('img, script, strong')).toBeNull();
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+    expect(flagged()).toEqual([]);
+    // The dismissal line uses Lit text bindings only — not even DOMPurify parses it.
+    expect(sinkState.calls.filter((c) => c.policy === 'dompurify')).toEqual([]);
+  });
 });
