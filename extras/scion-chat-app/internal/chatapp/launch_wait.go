@@ -51,7 +51,7 @@ func createStartOutcomeUnknownText(name, id, instruction string) string {
 	}
 	text := fmt.Sprintf("%s was created, but could not confirm that it started; it may still be starting. Check `/scionAdmin status %s`.", who, slug)
 	if instruction != "" {
-		text += " Send the instruction once it is running."
+		text += fmt.Sprintf(" No thread was opened and the instruction was not sent; once `/scionAdmin status %s` shows it running, send the instruction with `/scion %s <instruction>`.", slug, slug)
 	}
 	return text
 }

@@ -1018,7 +1018,14 @@ func TestCmdThread_SyncStartOutcomeUnknown(t *testing.T) {
 	if strings.Contains(strings.ToLower(got), "failed") {
 		t.Errorf("504 start_outcome_unknown must not report a failed create, got %q", got)
 	}
-	for _, want := range []string{"`a1`", "may still be starting", "/scionAdmin status a1", "Send the instruction once it is running."} {
+	for _, want := range []string{
+		"`a1`",
+		"may still be starting",
+		"/scionAdmin status a1",
+		"No thread was opened and the instruction was not sent",
+		"once `/scionAdmin status a1` shows it running",
+		"`/scion a1 <instruction>`",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("reply = %q, want it to contain %q", got, want)
 		}
@@ -1067,5 +1074,12 @@ func TestStartOutcomeUnknownHelpers(t *testing.T) {
 	got := createStartOutcomeUnknownText("My_Agent", "", "")
 	if !strings.Contains(got, "`my-agent`") || !strings.Contains(got, "/scionAdmin status my-agent") {
 		t.Errorf("slugified reply = %q, want my-agent", got)
+	}
+	if strings.Contains(got, "No thread was opened") {
+		t.Errorf("reply without instruction = %q, must not mention dropped instruction", got)
+	}
+	withInst := createStartOutcomeUnknownText("My_Agent", "", "fix tests")
+	if !strings.Contains(withInst, "`/scion my-agent <instruction>`") {
+		t.Errorf("slugified instruction reply = %q, want `/scion my-agent <instruction>`", withInst)
 	}
 }
