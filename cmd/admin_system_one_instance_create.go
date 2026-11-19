@@ -55,17 +55,23 @@ with --key-stdin) or from --key-file <path>. Passing the key via positional
 arguments, command-line flags, or environment variables is not supported.
 
 Examples:
-  # Read API key from a file
+  # Register a TypeSafe instance reading the API key from a file
   scion admin system-one instance create typesafe-main \
     --adapter typesafe \
     --model jev-1.14.0 \
     --key-file /path/to/key.txt
 
-  # Read API key from standard input
+  # Register a TypeSafe instance reading the API key from standard input
   scion admin system-one instance create typesafe-main \
     --adapter typesafe \
     --model jev-1.14.0 \
-    --key-stdin < /path/to/key.txt`,
+    --key-stdin < /path/to/key.txt
+
+  # Register a Gemini Decision 1 instance reading the API key from standard input
+  scion admin system-one instance create gemini-main \
+    --adapter gemini_decisions \
+    --model gemini-decision-1 \
+    --key-stdin < /path/to/gemini-key.txt`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return errors.New("instance name is required")
@@ -80,9 +86,9 @@ Examples:
 
 func init() {
 	f := adminSystemOneInstanceCreateCmd.Flags()
-	f.StringVar(&adminSystemOneCreateOpts.adapter, "adapter", "typesafe", "Provider adapter name (for example: typesafe)")
-	f.StringVar(&adminSystemOneCreateOpts.model, "model", "", "Provider model identifier (required for typesafe, e.g. jev-1.14.0)")
-	f.StringVar(&adminSystemOneCreateOpts.endpoint, "endpoint", "", "Provider base HTTPS URL (defaults to adapter default when omitted)")
+	f.StringVar(&adminSystemOneCreateOpts.adapter, "adapter", "typesafe", "Provider adapter name (for example: typesafe, gemini_decisions)")
+	f.StringVar(&adminSystemOneCreateOpts.model, "model", "", "Provider model identifier (required for typesafe and gemini_decisions, e.g. jev-1.14.0 or gemini-decision-1)")
+	f.StringVar(&adminSystemOneCreateOpts.endpoint, "endpoint", "", "Provider base HTTPS URL (defaults to adapter default when supported; required otherwise)")
 	f.StringVar(&adminSystemOneCreateOpts.location, "location", "", "Optional provider location or region")
 	f.StringVar(&adminSystemOneCreateOpts.keyFile, "key-file", "", "Path to file containing the provider API key (or '-' for stdin)")
 	f.BoolVar(&adminSystemOneCreateOpts.keyStdin, "key-stdin", false, "Read the provider API key from standard input")

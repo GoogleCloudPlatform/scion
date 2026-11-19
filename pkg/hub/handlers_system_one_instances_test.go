@@ -1060,3 +1060,340 @@ func TestSystemOneInstances_EndpointDefaulterAndInstanceValidator(t *testing.T) 
 	assert.Equal(t, "https://provider.example.com", okCustom.Endpoint)
 	assert.Empty(t, okCustom.Model)
 }
+
+func TestSystemOneInstances_GeminiDecisionsVerticalProbeAndTypeSafeRegression(t *testing.T) {
+	// Synthetic from docs (not recorded from the live API): ai.google.dev/gemini-api/docs/decisions-api & api/decisions.
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-gemini-vert-admin", store.SystemRoleHubAdmin))
+	require.NoError(t, err)
+
+	var auditBuf syncBuffer
+	srv.envSecretLog = slog.New(slog.NewJSONHandler(&auditBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	var runtimeLogBuf syncBuffer
+	origDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&runtimeLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(origDefault) })
+
+	type wireCapture struct {
+		method string
+		path   string
+		query  string
+		goog   string
+		auth   string
+		hdrs   http.Header
+		body   string
+	}
+
+	var (
+		mu             sync.Mutex
+		geminiStatus   = http.StatusOK
+		geminiRespBody string
+		captures       []wireCapture
+	)
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw bytes.Buffer
+		if r.Body != nil {
+			_, _ = raw.ReadFrom(r.Body)
+			_ = r.Body.Close()
+		}
+		mu.Lock()
+		captures = append(captures, wireCapture{
+			method: r.Method,
+			path:   r.URL.Path,
+			query:  r.URL.RawQuery,
+			goog:   r.Header.Get("x-goog-api-key"),
+			auth:   r.Header.Get("Authorization"),
+			hdrs:   r.Header.Clone(),
+			body:   raw.String(),
+		})
+		st := geminiStatus
+		gBody := geminiRespBody
+		mu.Unlock()
+
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1beta/decisions":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(st)
+			_, _ = w.Write([]byte(gBody))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"jev-1.14.0","description":"Latest","release_date":"2026-06-01"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/systemone":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Typesafe-Request-Id", "req-ts-reg-1")
+			_, _ = w.Write([]byte(`{
+				"model": "jev-1.14.0",
+				"answers": {
+					"is_damaged": {"type": "noul", "noul": 0.92},
+					"department": {
+						"type": "choice",
+						"choice": "support",
+						"confidence": 0.88,
+						"probabilities": {"billing": 0.04, "other": 0.02, "sales": 0.03, "support": 0.91}
+					}
+				},
+				"usage": {"input_tokens": 31, "output_tokens": 4}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	srv.SetSystemOneRuntimeOptionsForTesting(
+		t,
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+
+	const (
+		sentinelGeminiKey   = "SENTINEL_GEMINI_HUB_SECRET_KEY_8414_ALPHA"
+		sentinelTypeSafeKey = "SENTINEL_TYPESAFE_HUB_SECRET_KEY_8414_BETA"
+		sentinelProbeText   = "SENTINEL_GEMINI_PROBE_SAMPLE_CRACKED_SCREEN_8414"
+		sentinelSafetyErr   = "CANARY_GEMINI_400_SAFETY_ERROR_BODY_8414"
+	)
+
+	// 1. Create gemini_decisions instance; verify internal secret storage and non-disclosure.
+	gemCreateRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "gemini-main",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": tlsSrv.URL,
+		"auth":     map[string]any{"kind": "api_key", "apiKey": sentinelGeminiKey},
+	})
+	require.Equal(t, http.StatusCreated, gemCreateRec.Code, gemCreateRec.Body.String())
+	assert.NotContains(t, gemCreateRec.Body.String(), sentinelGeminiKey)
+
+	var gemInst SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(gemCreateRec.Body.Bytes(), &gemInst))
+	assert.Equal(t, geminidecisions.AdapterName, gemInst.Adapter)
+	assert.Equal(t, "gemini-decision-1", gemInst.Model)
+	require.Equal(t, "systemone.instance."+gemInst.ID, gemInst.Auth.SecretName)
+
+	sv, err := localBackend.Get(ctx, gemInst.Auth.SecretName, store.ScopeHub, srv.hubID)
+	require.NoError(t, err)
+	assert.Equal(t, store.SecretTypeInternal, sv.SecretType)
+	assert.Equal(t, sentinelGeminiKey, sv.Value)
+
+	// 2. Models probe on gemini_decisions returns 400 unsupported without making any network call.
+	gemModelsRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-main/probe", map[string]any{
+		"models": true,
+	})
+	require.Equal(t, http.StatusBadRequest, gemModelsRec.Code, gemModelsRec.Body.String())
+	assert.Contains(t, gemModelsRec.Body.String(), "adapter does not support model listing")
+	mu.Lock()
+	assert.Empty(t, captures, "unsupported models probe must not contact provider")
+	mu.Unlock()
+
+	mixedProbeSpec := map[string]any{
+		"version": 1,
+		"questions": []map[string]any{
+			{
+				"id":           "is_damaged",
+				"type":         "binary",
+				"instructions": "Does `probe.text` describe physical hardware damage?",
+				"criteria": map[string]any{
+					"true":  "Physical damage is described.",
+					"false": "No physical damage is described.",
+				},
+			},
+			{
+				"id":           "department",
+				"type":         "choice",
+				"instructions": "Route `probe.text` to the owning department.",
+				"options": []map[string]any{
+					{"id": "billing", "description": "Billing inquiries"},
+					{"id": "sales", "description": "Sales inquiries"},
+					{"id": "support", "description": "Technical support"},
+					{"id": "other", "description": "Cannot determine", "abstain": true},
+				},
+			},
+		},
+		"output": map[string]any{
+			"question": "department",
+		},
+	}
+
+	// 3a. Gemini probe with documented 0.999 choice sum and measured usage.
+	mu.Lock()
+	geminiStatus = http.StatusOK
+	geminiRespBody = `{
+		"answers": {
+			"is_damaged": {"type": "noul", "noul": 0.99, "confidence": 0.99},
+			"department": {
+				"type": "choice",
+				"choice": "support",
+				"probabilities": {"billing": 0.004, "other": 0.002, "sales": 0.003, "support": 0.99},
+				"confidence": 0.99
+			}
+		},
+		"usage": {"total_input_tokens": 58, "total_output_tokens": 0}
+	}`
+	mu.Unlock()
+
+	probeOKRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-main/probe", map[string]any{
+		"spec":   mixedProbeSpec,
+		"probe":  map[string]any{"text": sentinelProbeText},
+		"ruleId": "pv3-g2-hub-probe",
+	})
+	require.Equal(t, http.StatusOK, probeOKRec.Code, probeOKRec.Body.String())
+	assert.NotContains(t, probeOKRec.Body.String(), sentinelGeminiKey)
+	assert.NotContains(t, probeOKRec.Body.String(), sentinelProbeText)
+
+	var probeOK ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(probeOKRec.Body.Bytes(), &probeOK))
+	assert.Equal(t, systemoneruntime.ClassSuccess, probeOK.Class)
+	require.NotNil(t, probeOK.Decision)
+	assert.Equal(t, spec.KindJudgmentChoice, probeOK.Decision.Kind)
+	require.NotNil(t, probeOK.Decision.String)
+	assert.Equal(t, "support", *probeOK.Decision.String)
+
+	require.NotNil(t, probeOK.Evaluation)
+	assert.Equal(t, "gemini-decision-1", probeOK.Evaluation.ConfiguredModel)
+	assert.Empty(t, probeOK.Evaluation.ResolvedModel)
+	assert.Empty(t, probeOK.Evaluation.EffectiveResolvedModel())
+	assert.True(t, probeOK.Evaluation.HasModelUnreported())
+	assert.False(t, probeOK.Evaluation.HasUsageUnreported())
+	assert.Equal(t, []string{systemoneprovider.NoteModelUnreported}, probeOK.Evaluation.Notes)
+	require.NotNil(t, probeOK.Evaluation.Usage)
+	assert.Equal(t, systemoneprovider.Usage{InputTokens: 58, OutputTokens: 0}, *probeOK.Evaluation.Usage)
+	require.Len(t, probeOK.Evaluation.Attempts, 1)
+	assert.Equal(t, geminidecisions.AdapterName, probeOK.Evaluation.Attempts[0].Adapter)
+	assert.Equal(t, "gemini-decision-1", probeOK.Evaluation.Attempts[0].ConfiguredModel)
+	assert.Empty(t, probeOK.Evaluation.Attempts[0].ReportedModel)
+	assert.Equal(t, []string{systemoneprovider.NoteClamped001To099}, probeOK.Evaluation.Answers["is_damaged"].Notes)
+	assert.Equal(t, []string{systemoneprovider.NoteOptionsSortedByProvider}, probeOK.Evaluation.Answers["department"].Notes)
+	assert.Contains(t, probeOK.Evaluation.Answers["department"].NativeMetrics, geminidecisions.NativeMetricConfidence)
+
+	mu.Lock()
+	require.Len(t, captures, 1)
+	cap1 := captures[0]
+	mu.Unlock()
+	assert.Equal(t, http.MethodPost, cap1.method)
+	assert.Equal(t, "/v1beta/decisions", cap1.path)
+	assert.Empty(t, cap1.query)
+	assert.Equal(t, sentinelGeminiKey, cap1.goog)
+	assert.Empty(t, cap1.auth, "Authorization header must never be sent for gemini_decisions")
+	for hdr, vals := range cap1.hdrs {
+		if strings.EqualFold(hdr, "x-goog-api-key") {
+			continue
+		}
+		for _, v := range vals {
+			assert.NotContains(t, v, sentinelGeminiKey, "secret leaked in header %s", hdr)
+		}
+	}
+	assert.NotContains(t, cap1.body, sentinelGeminiKey)
+
+	// 3b. Gemini probe with missing usage -> usage_unreported note and nil Usage (never 0 tokens as measured).
+	mu.Lock()
+	geminiStatus = http.StatusOK
+	geminiRespBody = `{
+		"answers": {
+			"is_damaged": {"type": "noul", "noul": 0.15, "confidence": 0.85},
+			"department": {
+				"type": "choice",
+				"choice": "billing",
+				"probabilities": {"billing": 0.90, "other": 0.02, "sales": 0.05, "support": 0.03},
+				"confidence": 0.90
+			}
+		}
+	}`
+	mu.Unlock()
+
+	probeNoUsageRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-main/probe", map[string]any{
+		"spec":  mixedProbeSpec,
+		"probe": map[string]any{"text": sentinelProbeText},
+	})
+	require.Equal(t, http.StatusOK, probeNoUsageRec.Code, probeNoUsageRec.Body.String())
+	assert.NotContains(t, probeNoUsageRec.Body.String(), `"usage"`, "missing usage must never serialize zero tokens as measured usage")
+
+	var probeNoUsage ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(probeNoUsageRec.Body.Bytes(), &probeNoUsage))
+	assert.Equal(t, systemoneruntime.ClassSuccess, probeNoUsage.Class)
+	require.NotNil(t, probeNoUsage.Evaluation)
+	assert.Nil(t, probeNoUsage.Evaluation.Usage)
+	assert.True(t, probeNoUsage.Evaluation.HasUsageUnreported())
+	assert.ElementsMatch(t, []string{systemoneprovider.NoteModelUnreported, systemoneprovider.NoteUsageUnreported}, probeNoUsage.Evaluation.Notes)
+
+	// 3c. Gemini HTTP 400 safety block -> ClassFailed, reason="content_blocked", error body never leaked.
+	mu.Lock()
+	geminiStatus = http.StatusBadRequest
+	geminiRespBody = fmt.Sprintf(`{"error":{"code":"safety","message":%q}}`, sentinelSafetyErr)
+	mu.Unlock()
+
+	probeBlockedRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-main/probe", map[string]any{
+		"spec":  mixedProbeSpec,
+		"probe": map[string]any{"text": sentinelProbeText},
+	})
+	require.Equal(t, http.StatusOK, probeBlockedRec.Code, probeBlockedRec.Body.String())
+	assert.NotContains(t, probeBlockedRec.Body.String(), sentinelSafetyErr)
+	assert.NotContains(t, probeBlockedRec.Body.String(), sentinelGeminiKey)
+
+	var probeBlocked ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(probeBlockedRec.Body.Bytes(), &probeBlocked))
+	assert.Equal(t, systemoneruntime.ClassFailed, probeBlocked.Class)
+	assert.Equal(t, string(systemoneprovider.FailContentBlocked), probeBlocked.Reason)
+	assert.Nil(t, probeBlocked.Decision)
+	require.NotNil(t, probeBlocked.Evaluation)
+	assert.Equal(t, "gemini-decision-1", probeBlocked.Evaluation.ConfiguredModel)
+	assert.Empty(t, probeBlocked.Evaluation.ResolvedModel)
+	assert.Equal(t, []string{systemoneprovider.NoteModelUnreported}, probeBlocked.Evaluation.Notes)
+	assert.Nil(t, probeBlocked.Evaluation.Usage)
+	require.Len(t, probeBlocked.Evaluation.Attempts, 1)
+	assert.Equal(t, "4xx", probeBlocked.Evaluation.Attempts[0].HTTPStatusClass)
+
+	// 4. TypeSafe regression on the same Hub server: still uses Authorization: Bearer and never x-goog-api-key.
+	tsCreateRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "typesafe-reg",
+		"adapter":  jevwire.AdapterNameTypeSafe,
+		"model":    "jev-1.14.0",
+		"endpoint": tlsSrv.URL,
+		"auth":     map[string]any{"kind": "api_key", "apiKey": sentinelTypeSafeKey},
+	})
+	require.Equal(t, http.StatusCreated, tsCreateRec.Code, tsCreateRec.Body.String())
+	assert.NotContains(t, tsCreateRec.Body.String(), sentinelTypeSafeKey)
+
+	tsModelsRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/typesafe-reg/probe", map[string]any{
+		"models": true,
+	})
+	require.Equal(t, http.StatusOK, tsModelsRec.Code, tsModelsRec.Body.String())
+
+	tsProbeRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/typesafe-reg/probe", map[string]any{
+		"spec":  mixedProbeSpec,
+		"probe": map[string]any{"text": sentinelProbeText},
+	})
+	require.Equal(t, http.StatusOK, tsProbeRec.Code, tsProbeRec.Body.String())
+	var tsProbe ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(tsProbeRec.Body.Bytes(), &tsProbe))
+	assert.Equal(t, systemoneruntime.ClassSuccess, tsProbe.Class)
+	require.NotNil(t, tsProbe.Evaluation)
+	assert.Equal(t, "jev-1.14.0", tsProbe.Evaluation.ConfiguredModel)
+	assert.Equal(t, "jev-1.14.0", tsProbe.Evaluation.ResolvedModel)
+	require.NotNil(t, tsProbe.Evaluation.Usage)
+	assert.Equal(t, systemoneprovider.Usage{InputTokens: 31, OutputTokens: 4}, *tsProbe.Evaluation.Usage)
+
+	mu.Lock()
+	require.Len(t, captures, 5)
+	tsModelsCap := captures[3]
+	tsProbeCap := captures[4]
+	mu.Unlock()
+	for _, tsCap := range []wireCapture{tsModelsCap, tsProbeCap} {
+		assert.Equal(t, "Bearer "+sentinelTypeSafeKey, tsCap.auth)
+		assert.Empty(t, tsCap.goog, "x-goog-api-key must never be sent for typesafe")
+		assert.NotContains(t, tsCap.body, sentinelTypeSafeKey)
+	}
+
+	allLogs := auditBuf.String() + "\n" + runtimeLogBuf.String()
+	for _, forbidden := range []string{
+		sentinelGeminiKey,
+		sentinelTypeSafeKey,
+		sentinelProbeText,
+		sentinelSafetyErr,
+	} {
+		assert.NotContains(t, allLogs, forbidden, "sensitive value leaked into logs")
+	}
+}

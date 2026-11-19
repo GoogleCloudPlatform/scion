@@ -653,10 +653,25 @@ func TestAdminSystemOneProbe(t *testing.T) {
 		}
 	})
 
-	t.Run("help omits unsupported judgment_score kind", func(t *testing.T) {
+	t.Run("help omits unsupported judgment_score kind and documents gemini_decisions", func(t *testing.T) {
 		kindFlag := adminSystemOneInstanceProbeCmd.Flags().Lookup("kind")
 		require.NotNil(t, kindFlag)
 		assert.NotContains(t, kindFlag.Usage, "judgment_score")
+
+		resetAdminSystemOneFlags(t)
+		createHelp, _, err := executeAdminSystemOneSubcmd(t, []string{"create", "--help"}, nil)
+		require.NoError(t, err)
+		assert.Contains(t, createHelp, "--adapter gemini_decisions")
+		assert.Contains(t, createHelp, "--model gemini-decision-1")
+		assert.Contains(t, createHelp, "--key-stdin")
+		assert.NotContains(t, createHelp, "--api-key")
+
+		resetAdminSystemOneFlags(t)
+		probeHelp, _, err := executeAdminSystemOneSubcmd(t, []string{"probe", "--help"}, nil)
+		require.NoError(t, err)
+		assert.Contains(t, probeHelp, "gemini-main")
+		assert.Contains(t, probeHelp, "gemini_decisions")
+		assert.Contains(t, probeHelp, "adapter does not support model listing")
 	})
 
 	t.Run("flag mutual exclusion", func(t *testing.T) {

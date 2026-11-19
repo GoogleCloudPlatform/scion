@@ -47,16 +47,25 @@ instance, either listing available provider models (--models) or evaluating an
 inline System One spec against synthetic probe text (--spec-file with --text or
 --text-file).
 
+Model listing (--models) requires an adapter that implements model discovery
+(such as typesafe); adapters without model listing (such as gemini_decisions)
+return an "adapter does not support model listing" validation error.
+
 Exits 0 when the probe completes with class "success", and non-zero when the
 evaluated outcome class is not "success" (for example "failed" or "uncertain")
 or the request fails. The probe result is still written to stdout before exiting.
 
 Examples:
-  # List models reported by the provider instance
+  # List models reported by a TypeSafe provider instance
   scion admin system-one instance probe typesafe-main --models
 
-  # Evaluate an inline spec (JSON or YAML) against synthetic text
+  # Evaluate an inline spec (JSON or YAML) against synthetic text on TypeSafe
   scion admin system-one instance probe typesafe-main \
+    --spec-file ./probe-spec.json \
+    --text "Synthetic test sample."
+
+  # Evaluate an inline spec against synthetic text on Gemini Decision 1
+  scion admin system-one instance probe gemini-main \
     --spec-file ./probe-spec.json \
     --text "Synthetic test sample."`,
 	Args: cobra.ExactArgs(1),
@@ -65,7 +74,7 @@ Examples:
 
 func init() {
 	f := adminSystemOneInstanceProbeCmd.Flags()
-	f.BoolVar(&adminSystemOneProbeOpts.models, "models", false, "Query models supported by the provider instance")
+	f.BoolVar(&adminSystemOneProbeOpts.models, "models", false, "Query models supported by the provider instance (requires adapter model-listing support, e.g. typesafe)")
 	f.StringVar(&adminSystemOneProbeOpts.specFile, "spec-file", "", "Path to inline System One spec or rule envelope (JSON or YAML, or '-' for stdin)")
 	f.StringVar(&adminSystemOneProbeOpts.text, "text", "", "Synthetic text bound to probe.text")
 	f.StringVar(&adminSystemOneProbeOpts.textFile, "text-file", "", "Path to file containing synthetic text bound to probe.text")

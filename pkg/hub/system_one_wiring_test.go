@@ -32,6 +32,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
+	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/geminidecisions"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
 
@@ -195,6 +198,23 @@ func TestSystemOneCredentialSource_ErrorClassification(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, want, tok)
 	})
+}
+
+func TestSystemOneProviderRegistry_RegistersBuiltInAdapters(t *testing.T) {
+	srv := &Server{}
+	reg := srv.SystemOneProviderRegistry()
+	assert.Contains(t, reg.Names(), jevwire.AdapterNameTypeSafe)
+	assert.Contains(t, reg.Names(), geminidecisions.AdapterName)
+
+	gem, ok := reg.Lookup(geminidecisions.AdapterName)
+	require.True(t, ok)
+	assert.Equal(t, geminidecisions.DefaultEndpoint, defaultSystemOneAdapterEndpoint(gem))
+	_, hasValidator := gem.(systemoneprovider.InstanceValidator)
+	assert.True(t, hasValidator)
+
+	ts, ok := reg.Lookup(jevwire.AdapterNameTypeSafe)
+	require.True(t, ok)
+	assert.Equal(t, jevwire.DefaultTypeSafeEndpoint, defaultSystemOneAdapterEndpoint(ts))
 }
 
 func TestResolveSystemOneMaxEvalTime(t *testing.T) {
