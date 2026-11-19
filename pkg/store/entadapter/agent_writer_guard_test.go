@@ -110,6 +110,7 @@ var agentWriterClasses = map[string]writerEntry{
 	"run_intent_store.go:AgentStore.BackfillRunIntent":                                                    {classExempt, "run_intent is desired state"},
 	"idle_suspend_store.go:AgentStore.ClaimIdleSuspend":                                                   {classExempt, "idle_suspend_claim_until and run_intent columns only"},
 	"idle_suspend_store.go:AgentStore.ClearIdleSuspendClaim":                                              {classExempt, "idle_suspend_claim_until only"},
+	"idle_suspend_store.go:AgentStore.AbandonIdleSuspend":                                                 {classExempt, "run_intent (stopped to running), message and idle_suspend_claim_until only, under the stamp guard"},
 	"idle_suspend_store.go:AgentStore.MarkAgentDelivery":                                                  {classExempt, "last_delivery_at only"},
 	"start_claim_store.go:claimUpdate via start_claim_store.go:AgentStore.ClaimAgentStart":                {classExempt, "claim and intent columns, and an ended start launch's launch_error/launch_cause (ptone/scion#4191); none is a fingerprint or snapshot input"},
 	"start_claim_store.go:claimUpdate via start_claim_store.go:AgentStore.ClaimAgentStop":                 {classExempt, "claim and intent columns only"},
