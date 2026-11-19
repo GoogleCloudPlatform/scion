@@ -74,12 +74,15 @@ var confidenceMetricDecl = provider.MetricDecl{
 	Source:      metrics.SourceProviderDoc,
 }
 
-// Adapter implements provider.Adapter for Gemini Decision 1 (v1beta).
-// ModelLister is intentionally not implemented because model listing support for
-// gemini-decision-1 is undocumented (PV3 brief §5.1, U-G1).
+// Adapter implements provider.Adapter and provider.InstanceValidator for Gemini
+// Decision 1 (v1beta). ModelLister is intentionally not implemented because
+// model listing support for gemini-decision-1 is undocumented (PV3 brief §5.1, U-G1).
 type Adapter struct{}
 
-var _ provider.Adapter = (*Adapter)(nil)
+var (
+	_ provider.Adapter           = (*Adapter)(nil)
+	_ provider.InstanceValidator = (*Adapter)(nil)
+)
 
 // New constructs a Gemini Decision 1 provider Adapter.
 func New() *Adapter {
@@ -96,13 +99,32 @@ func (a *Adapter) Version() string {
 	return AdapterVersion
 }
 
-// Capabilities validates that inst specifies a non-empty model identifier and
-// returns a defensive copy of the Gemini Decision 1 capability declaration
-// (PV3 brief §5.1).
-func (a *Adapter) Capabilities(inst provider.InstanceView) (provider.Capabilities, error) {
+// ValidateInstance checks Gemini-specific instance configuration (requiring a
+// non-empty model identifier free of control characters, valid location, and a
+// valid endpoint without userinfo, query parameters, or fragments).
+func (a *Adapter) ValidateInstance(inst provider.InstanceView) error {
 	if _, err := validateModelIdentifier(inst.Model); err != nil {
-		return provider.Capabilities{}, err
+		return err
 	}
+	if !utf8.ValidString(inst.Location) {
+		return provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "instance location must be valid UTF-8")
+	}
+	for _, r := range inst.Location {
+		if r < 0x20 || r == 0x7f {
+			return provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "instance location contains invalid control characters")
+		}
+	}
+	if strings.TrimSpace(inst.Endpoint) != "" {
+		if _, err := resolveEndpointURL(inst.Endpoint, DefaultEndpoint, DecisionsPath); err != nil {
+			return provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "invalid instance endpoint")
+		}
+	}
+	return nil
+}
+
+// Capabilities returns a static, defensive copy of the Gemini Decision 1
+// capability declaration (PV3 brief §5.1).
+func (a *Adapter) Capabilities(_ provider.InstanceView) (provider.Capabilities, error) {
 	return provider.Capabilities{
 		Primitives: map[string]provider.PrimitiveLimits{
 			spec.PrimitiveBinary: {
@@ -149,6 +171,9 @@ func (a *Adapter) Validate(inst provider.InstanceView, rule provider.RuleSpec) e
 func (a *Adapter) Invoke(ctx context.Context, t provider.Transport, inst provider.InstanceView, req provider.ModelRequest) (provider.ModelResult, error) {
 	errMeta := provider.ModelResult{
 		Notes: []string{provider.NoteModelUnreported},
+	}
+	if _, err := validateModelIdentifier(inst.Model); err != nil {
+		return errMeta, err
 	}
 	if t == nil {
 		return errMeta, provider.NewProviderError(provider.FailInternal, false, 0, 0, "nil provider transport")

@@ -39,7 +39,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
+	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/geminidecisions"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
 const systemOneAdminPath = "/api/v1/admin/system-one/instances"
@@ -922,4 +926,85 @@ func TestSystemOneInstances_CreateStoreFaultRollsBackSecret(t *testing.T) {
 	assert.Contains(t, logs, failedID2)
 	assert.Contains(t, logs, secretName2)
 	assert.NotContains(t, logs, sentinelKey)
+}
+
+type bareSystemOneTestAdapter struct {
+	name string
+}
+
+func (a *bareSystemOneTestAdapter) Name() string    { return a.name }
+func (a *bareSystemOneTestAdapter) Version() string { return "0.1.0" }
+func (a *bareSystemOneTestAdapter) Capabilities(_ systemoneprovider.InstanceView) (systemoneprovider.Capabilities, error) {
+	return systemoneprovider.Capabilities{
+		Primitives: map[string]systemoneprovider.PrimitiveLimits{
+			spec.PrimitiveBinary: {Supported: true, DistributionCompleteness: systemoneprovider.CompletenessComplete},
+		},
+		MaxQuestionsPerRequest: 8,
+		MaxInputTokens:         4096,
+		Truncation:             systemoneprovider.TruncationNever,
+		ReturnsDistribution:    true,
+		SideEffectFree:         true,
+		AuthScheme:             systemoneprovider.AuthBearer,
+	}, nil
+}
+func (a *bareSystemOneTestAdapter) Validate(_ systemoneprovider.InstanceView, _ systemoneprovider.RuleSpec) error {
+	return nil
+}
+func (a *bareSystemOneTestAdapter) Invoke(_ context.Context, _ systemoneprovider.Transport, _ systemoneprovider.InstanceView, _ systemoneprovider.ModelRequest) (systemoneprovider.ModelResult, error) {
+	return systemoneprovider.ModelResult{}, nil
+}
+
+func TestSystemOneInstances_InstanceValidator(t *testing.T) {
+	ctx := context.Background()
+	srv, s, _ := newSystemOneTestServer(t, true)
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-validator-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	// Register gemini_decisions + a bare adapter without InstanceValidator in a dedicated test registry.
+	reg := systemoneprovider.NewRegistry()
+	require.NoError(t, jevwire.Register(reg))
+	require.NoError(t, geminidecisions.Register(reg))
+	require.NoError(t, reg.Register(&bareSystemOneTestAdapter{name: "no-validator"}))
+	srv.mu.Lock()
+	srv.systemOneRegistry = reg
+	srv.rebuildSystemOneRuntimeLocked()
+	srv.mu.Unlock()
+
+	// gemini_decisions without model -> 400 validation_error via InstanceValidator.
+	missingGeminiModel := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "gem-no-model",
+		"adapter":  geminidecisions.AdapterName,
+		"endpoint": geminidecisions.DefaultEndpoint,
+		"auth":     map[string]any{"kind": "api_key", "apiKey": "SYNTH_GEMINI_KEY_1"},
+	})
+	require.Equal(t, http.StatusBadRequest, missingGeminiModel.Code, missingGeminiModel.Body.String())
+	assert.Contains(t, missingGeminiModel.Body.String(), "instance model is required for gemini_decisions")
+	assert.NotContains(t, missingGeminiModel.Body.String(), "SYNTH_GEMINI_KEY_1")
+
+	gemOK := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "gem-ok-model",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": geminidecisions.DefaultEndpoint,
+		"auth":     map[string]any{"kind": "api_key", "apiKey": "SYNTH_GEMINI_KEY_2"},
+	})
+	require.Equal(t, http.StatusCreated, gemOK.Code, gemOK.Body.String())
+
+	// typesafe without model -> 400 preserving exact message via InstanceValidator.
+	missingTSModel := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "ts-no-model",
+		"adapter": jevwire.AdapterNameTypeSafe,
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "SYNTH_TS_KEY_1"},
+	})
+	require.Equal(t, http.StatusBadRequest, missingTSModel.Code, missingTSModel.Body.String())
+	assert.Contains(t, missingTSModel.Body.String(), `model is required for adapter \"typesafe\"`)
+
+	// Adapter without InstanceValidator allows empty model.
+	bareOK := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "bare-empty-model",
+		"adapter":  "no-validator",
+		"endpoint": "https://provider.example.com",
+		"auth":     map[string]any{"kind": "api_key", "apiKey": "SYNTH_CUSTOM_KEY"},
+	})
+	require.Equal(t, http.StatusCreated, bareOK.Code, bareOK.Body.String())
 }

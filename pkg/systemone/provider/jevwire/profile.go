@@ -70,6 +70,7 @@ type Profile struct {
 	RequestIDHeader         string
 	KnownAliases            []string
 	ConfidenceMetric        *provider.MetricDecl
+	RequireModel            bool
 	RequireChoiceConfidence bool
 	CheckConfidenceFormula  bool
 	ChoiceNullOnTie         bool
@@ -97,6 +98,7 @@ func TypeSafeProfile() Profile {
 		RequestIDHeader:         HeaderTypeSafeRequestID,
 		KnownAliases:            []string{"jev-latest", "jev-preview"},
 		ConfidenceMetric:        &confDecl,
+		RequireModel:            true,
 		RequireChoiceConfidence: true,
 		CheckConfidenceFormula:  true,
 		ChoiceNullOnTie:         false,

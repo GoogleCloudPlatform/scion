@@ -282,3 +282,11 @@ type Adapter interface {
 type ModelLister interface {
 	ListModels(ctx context.Context, t Transport, inst InstanceView) ([]string, error)
 }
+
+// InstanceValidator is an optional SPI-adjacent extension implemented by
+// adapters that validate provider-specific instance configuration (for example
+// requiring a non-empty InstanceView.Model) at instance creation time without
+// coupling static Capabilities(InstanceView{}) discovery to instance fields.
+type InstanceValidator interface {
+	ValidateInstance(inst InstanceView) error
+}

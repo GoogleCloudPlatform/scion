@@ -101,15 +101,15 @@ type stubAdapter struct {
 	name           string
 	version        string
 	sideEffectFree bool
-	requireModel   bool
+	capsErr        error
 	models         []string
 }
 
 func (a *stubAdapter) Name() string    { return a.name }
 func (a *stubAdapter) Version() string { return a.version }
-func (a *stubAdapter) Capabilities(inst provider.InstanceView) (provider.Capabilities, error) {
-	if a.requireModel && strings.TrimSpace(inst.Model) == "" {
-		return provider.Capabilities{}, provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "instance model is required")
+func (a *stubAdapter) Capabilities(_ provider.InstanceView) (provider.Capabilities, error) {
+	if a.capsErr != nil {
+		return provider.Capabilities{}, a.capsErr
 	}
 	return provider.Capabilities{
 		Primitives: map[string]provider.PrimitiveLimits{
@@ -145,13 +145,30 @@ func (a *stubAdapter) ListModels(_ context.Context, _ provider.Transport, _ prov
 	return a.models, nil
 }
 
+type stubValidatingAdapter struct {
+	stubAdapter
+}
+
+func (a *stubValidatingAdapter) ValidateInstance(inst provider.InstanceView) error {
+	if strings.TrimSpace(inst.Model) == "" {
+		return provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "instance model is required")
+	}
+	return nil
+}
+
 func TestRegistry_RegisterLookupAndSideEffectFreeEnforcement(t *testing.T) {
 	reg := provider.NewRegistry()
 
-	// Rejects nil, missing name/version, and SideEffectFree == false (runtime-design §4.3).
+	// Rejects nil, missing name/version, Capabilities(InstanceView{}) errors, and SideEffectFree == false (runtime-design §4.3).
 	require.Error(t, reg.Register(nil))
 	require.Error(t, reg.Register(&stubAdapter{name: "", version: "0.1.0", sideEffectFree: true}))
 	require.Error(t, reg.Register(&stubAdapter{name: "bad", version: "", sideEffectFree: true}))
+	require.Error(t, reg.Register(&stubAdapter{
+		name:           "caps-err",
+		version:        "0.1.0",
+		sideEffectFree: true,
+		capsErr:        provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "capabilities must not fail on zero InstanceView"),
+	}))
 	err := reg.Register(&stubAdapter{name: "mutating", version: "0.1.0", sideEffectFree: false})
 	require.ErrorIs(t, err, provider.ErrNotSideEffectFree)
 
@@ -160,16 +177,14 @@ func TestRegistry_RegisterLookupAndSideEffectFreeEnforcement(t *testing.T) {
 	require.NoError(t, reg.Register(good))
 	require.ErrorIs(t, reg.Register(good), provider.ErrDuplicateAdapter)
 
-	// Adapters whose Capabilities(inst) require a non-empty Model still register
-	// when SideEffectFree is true and are rejected when SideEffectFree is false.
-	require.ErrorIs(t,
-		reg.Register(&stubAdapter{name: "gemini-mutating", version: "0.1.0", sideEffectFree: false, requireModel: true}),
-		provider.ErrNotSideEffectFree,
-	)
-	modelReq := &stubAdapter{name: "gemini-test", version: "0.1.0", sideEffectFree: true, requireModel: true}
+	// Adapters with static Capabilities(InstanceView{}) and optional InstanceValidator
+	// register cleanly without synthetic InstanceView fabrication.
+	modelReq := &stubValidatingAdapter{stubAdapter: stubAdapter{name: "gemini-test", version: "0.1.0", sideEffectFree: true}}
 	require.NoError(t, reg.Register(modelReq))
-	_, emptyModelErr := modelReq.Capabilities(provider.InstanceView{})
-	require.Error(t, emptyModelErr)
+	validator, hasValidator := provider.Adapter(modelReq).(provider.InstanceValidator)
+	require.True(t, hasValidator)
+	require.Error(t, validator.ValidateInstance(provider.InstanceView{}))
+	require.NoError(t, validator.ValidateInstance(provider.InstanceView{Model: "gemini-decision-1"}))
 
 	got, ok := reg.Get("typesafe-test")
 	require.True(t, ok)
@@ -182,6 +197,10 @@ func TestRegistry_RegisterLookupAndSideEffectFreeEnforcement(t *testing.T) {
 	models, err := lister.ListModels(context.Background(), nil, provider.InstanceView{Name: "inst-1"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"jev-1.14.0"}, models)
+
+	// Optional InstanceValidator is absent unless explicitly implemented.
+	_, gotValidator := got.(provider.InstanceValidator)
+	assert.False(t, gotValidator)
 
 	// Capabilities.SpecLimits bridges directly into spec.ValidatePortable.
 	caps, err := got.Capabilities(provider.InstanceView{})

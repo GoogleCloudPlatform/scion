@@ -44,10 +44,23 @@ func TestDefaultRegistry_RegistersGeminiDecisionsWithoutModelLister(t *testing.T
 	_, isLister := got.(provider.ModelLister)
 	assert.False(t, isLister, "gemini_decisions must not implement provider.ModelLister in PV3 (U-G1)")
 
-	// Empty or whitespace model in Capabilities must return FailInvalidRequest.
-	for _, badModel := range []string{"", "   ", "gemini\nmodel"} {
-		_, err := got.Capabilities(provider.InstanceView{Name: "gem-prod", Model: badModel})
-		require.Error(t, err, "expected error for model %q", badModel)
+	// Capabilities is static and error-free even on a zero InstanceView.
+	zeroCaps, zeroErr := got.Capabilities(provider.InstanceView{})
+	require.NoError(t, zeroErr)
+	assert.True(t, zeroCaps.SideEffectFree)
+
+	validator, isValidator := got.(provider.InstanceValidator)
+	require.True(t, isValidator, "gemini_decisions must implement optional provider.InstanceValidator")
+	require.NoError(t, validator.ValidateInstance(provider.InstanceView{Name: "gem-prod", Model: "gemini-decision-1"}))
+	for _, badInst := range []provider.InstanceView{
+		{Name: "gem-prod", Model: ""},
+		{Name: "gem-prod", Model: "   "},
+		{Name: "gem-prod", Model: "gemini\nmodel"},
+		{Name: "gem-prod", Model: "gemini-decision-1", Location: "us\x00central1"},
+		{Name: "gem-prod", Model: "gemini-decision-1", Endpoint: "https://generativelanguage.googleapis.com?key=forbid"},
+	} {
+		err := validator.ValidateInstance(badInst)
+		require.Error(t, err, "expected ValidateInstance error for %+v", badInst)
 		pe, ok := provider.AsProviderError(err)
 		require.True(t, ok)
 		assert.Equal(t, provider.FailInvalidRequest, pe.Reason)
@@ -123,10 +136,8 @@ func TestValidate_AcceptsPortableBinaryAndChoiceAndRejectsEmptyModelOrScore(t *t
 		},
 	}
 	require.NoError(t, adapter.Validate(inst, validRule))
-
-	// Empty model fails Validate via Capabilities.
-	err := adapter.Validate(provider.InstanceView{Name: "gem-prod", Model: ""}, validRule)
-	require.Error(t, err)
+	// Validate checks portable rule compatibility against static Capabilities even with empty InstanceView.
+	require.NoError(t, adapter.Validate(provider.InstanceView{}, validRule))
 
 	// Score rule fails Validate with CategoryCapability.
 	scoreRule := spec.Spec{
@@ -135,7 +146,7 @@ func TestValidate_AcceptsPortableBinaryAndChoiceAndRejectsEmptyModelOrScore(t *t
 			{ID: "urgency", Type: spec.PrimitiveScore, Instructions: "How urgent?"},
 		},
 	}
-	err = adapter.Validate(inst, scoreRule)
+	err := adapter.Validate(inst, scoreRule)
 	require.Error(t, err)
 	ce, ok := spec.AsCompileError(err)
 	require.True(t, ok)
@@ -561,6 +572,31 @@ func TestInvoke_HeaderPlacementWireGuardsAndErrorMapping(t *testing.T) {
 		assert.Empty(t, res.ResolvedModel)
 		assert.Equal(t, []string{provider.NoteModelUnreported}, res.Notes)
 		assert.Equal(t, provider.Usage{InputTokens: 28, OutputTokens: 0}, res.Usage)
+
+		// Defensive empty-model check in Invoke returns FailInvalidRequest without network I/O.
+		var emptyModelCalls atomic.Int32
+		noCallSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			emptyModelCalls.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer noCallSrv.Close()
+		noCallTr := egress.NewClient(
+			egress.StaticBearer(canaryKey),
+			egress.WithCredentialPlacement(egress.HeaderPlacement(geminidecisions.HeaderAPIKey)),
+			egress.WithLoopbackServerForTesting(noCallSrv.URL, noCallSrv.Client()),
+		)
+		for _, emptyMod := range []string{"", "   "} {
+			emptyInst := inst
+			emptyInst.Model = emptyMod
+			emptyInst.Endpoint = noCallSrv.URL
+			errRes, invErr := adapter.Invoke(context.Background(), noCallTr, emptyInst, req)
+			require.Error(t, invErr)
+			pe, ok := provider.AsProviderError(invErr)
+			require.True(t, ok)
+			assert.Equal(t, provider.FailInvalidRequest, pe.Reason)
+			assert.Equal(t, []string{provider.NoteModelUnreported}, errRes.Notes)
+		}
+		assert.Zero(t, emptyModelCalls.Load(), "Invoke with empty model must fail before any HTTP call")
 	})
 
 	t.Run("error_mapping_table_content_free_and_no_retry", func(t *testing.T) {

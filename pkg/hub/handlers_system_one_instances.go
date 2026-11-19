@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"net/http"
 	"net/url"
@@ -424,6 +425,13 @@ func safeSystemOneJSONError(err error) string {
 	return "invalid JSON request body"
 }
 
+func safeSystemOneAdapterConfigMessage(err error) string {
+	if pe, ok := systemoneprovider.AsProviderError(err); ok && pe.Message != "" && !hasControlChars(pe.Message) {
+		return pe.Message
+	}
+	return "adapter rejected instance configuration"
+}
+
 func validateSystemOneEndpoint(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -578,10 +586,6 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 	}
 
 	model := strings.TrimSpace(req.Model)
-	if adapterName == jevwire.AdapterNameTypeSafe && model == "" {
-		ValidationError(w, "model is required for adapter \"typesafe\"", nil)
-		return
-	}
 	if len(model) > maxSystemOneModelBytes || !utf8.ValidString(model) || hasControlChars(model) {
 		ValidationError(w, "invalid model identifier", nil)
 		return
@@ -604,6 +608,41 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	opts, err := validateSystemOneOptions(req.Options)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+
+	limits, err := parseSystemOneLimits(req.Limits)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+
+	instView := systemoneprovider.InstanceView{
+		Name:     name,
+		Model:    model,
+		Endpoint: endpoint,
+		Location: location,
+		Options:  maps.Clone(opts),
+	}
+	caps, err := adapter.Capabilities(instView)
+	if err != nil {
+		ValidationError(w, safeSystemOneAdapterConfigMessage(err), nil)
+		return
+	}
+	if !caps.SideEffectFree {
+		ValidationError(w, "adapter must be side-effect-free", nil)
+		return
+	}
+	if validator, ok := adapter.(systemoneprovider.InstanceValidator); ok {
+		if err := validator.ValidateInstance(instView); err != nil {
+			ValidationError(w, safeSystemOneAdapterConfigMessage(err), nil)
+			return
+		}
+	}
+
 	if req.APIKey != "" && req.Auth != nil && req.Auth.APIKey != "" && req.APIKey != req.Auth.APIKey {
 		ValidationError(w, "conflicting apiKey values in request", nil)
 		return
@@ -614,18 +653,6 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 	}
 	if len(apiKey) > maxSystemOneAPIKeyBytes || !isValidSystemOneAPIKey(apiKey) {
 		ValidationError(w, "apiKey is required and must be a non-empty credential free of control characters", nil)
-		return
-	}
-
-	opts, err := validateSystemOneOptions(req.Options)
-	if err != nil {
-		ValidationError(w, err.Error(), nil)
-		return
-	}
-
-	limits, err := parseSystemOneLimits(req.Limits)
-	if err != nil {
-		ValidationError(w, err.Error(), nil)
 		return
 	}
 
@@ -660,16 +687,6 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		Enabled:             enabled,
 		CreatedBy:           actorID,
 		UpdatedBy:           actorID,
-	}
-
-	caps, err := adapter.Capabilities(storeSystemOneInstanceToRuntime(inst).View())
-	if err != nil {
-		ValidationError(w, "adapter rejected instance configuration", nil)
-		return
-	}
-	if !caps.SideEffectFree {
-		ValidationError(w, "adapter must be side-effect-free", nil)
-		return
 	}
 
 	// Pre-check name uniqueness before writing to the secret backend so

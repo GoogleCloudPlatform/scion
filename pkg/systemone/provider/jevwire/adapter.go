@@ -17,25 +17,29 @@ package jevwire
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
-// Adapter implements provider.Adapter and provider.ModelLister for a Jev-wire Profile.
+// Adapter implements provider.Adapter, provider.ModelLister, and
+// provider.InstanceValidator for a Jev-wire Profile.
 type Adapter struct {
 	profile Profile
 }
 
 var (
-	_ provider.Adapter     = (*Adapter)(nil)
-	_ provider.ModelLister = (*Adapter)(nil)
+	_ provider.Adapter           = (*Adapter)(nil)
+	_ provider.ModelLister       = (*Adapter)(nil)
+	_ provider.InstanceValidator = (*Adapter)(nil)
 )
 
 // NewAdapter constructs a Jev-wire Adapter for the supplied Profile.
@@ -56,6 +60,30 @@ func (a *Adapter) Name() string {
 // Version returns the adapter implementation version recorded in provenance.
 func (a *Adapter) Version() string {
 	return a.profile.Version
+}
+
+// ValidateInstance checks profile-specific instance configuration (for example
+// requiring a non-empty InstanceView.Model on TypeSafe).
+func (a *Adapter) ValidateInstance(inst provider.InstanceView) error {
+	trimmed := strings.TrimSpace(inst.Model)
+	if a.profile.RequireModel && trimmed == "" {
+		return provider.NewProviderError(
+			provider.FailInvalidRequest,
+			false,
+			0,
+			0,
+			fmt.Sprintf("model is required for adapter %q", a.profile.Name),
+		)
+	}
+	if !utf8.ValidString(trimmed) {
+		return provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "instance model must be valid UTF-8")
+	}
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f {
+			return provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "instance model contains invalid control characters")
+		}
+	}
+	return nil
 }
 
 // Capabilities returns a defensive copy of the profile's declared capabilities.

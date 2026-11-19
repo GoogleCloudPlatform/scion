@@ -45,6 +45,24 @@ func TestDefaultRegistry_RegistersTypeSafeAdapterAndModelLister(t *testing.T) {
 	_, isLister := got.(provider.ModelLister)
 	assert.True(t, isLister, "typesafe profile must implement optional provider.ModelLister")
 
+	// Capabilities is static and error-free even on a zero InstanceView.
+	zeroCaps, zeroErr := got.Capabilities(provider.InstanceView{})
+	require.NoError(t, zeroErr)
+	assert.True(t, zeroCaps.SideEffectFree)
+
+	validator, isValidator := got.(provider.InstanceValidator)
+	require.True(t, isValidator, "typesafe profile must implement optional provider.InstanceValidator")
+	require.NoError(t, validator.ValidateInstance(provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0"}))
+	for _, badModel := range []string{"", "   ", "jev\nmodel"} {
+		badErr := validator.ValidateInstance(provider.InstanceView{Name: "jev-prod", Model: badModel})
+		require.Error(t, badErr, "expected ValidateInstance error for model %q", badModel)
+		pe, ok := provider.AsProviderError(badErr)
+		require.True(t, ok)
+		assert.Equal(t, provider.FailInvalidRequest, pe.Reason)
+	}
+	emptyErr := validator.ValidateInstance(provider.InstanceView{Name: "jev-prod", Model: ""})
+	assert.Contains(t, emptyErr.Error(), `model is required for adapter "typesafe"`)
+
 	caps, err := got.Capabilities(provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0"})
 	require.NoError(t, err)
 	assert.True(t, caps.SideEffectFree)
