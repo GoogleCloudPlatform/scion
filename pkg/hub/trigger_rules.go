@@ -34,12 +34,7 @@ import (
 
 var (
 	errTriggerRuleEngineNotInitialized = errors.New("trigger rule engine is not initialized")
-	// errCorruptTriggerMatchRules is returned by triggerMatchRules when a stored
-	// trigger's match_rules column cannot be parsed. It aliases
-	// triggerrule.ErrCorruptMatchRules so 3b-2 dispatch maps it directly via
-	// triggerrule.SkipReason to skipped ("rule evaluation failed").
-	errCorruptTriggerMatchRules = triggerrule.ErrCorruptMatchRules
-	ruleDialectNameRE           = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	ruleDialectNameRE                  = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 )
 
 // Trigger rule registration, authoring validation, and engine seam

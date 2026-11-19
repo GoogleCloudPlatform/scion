@@ -2308,6 +2308,26 @@ func TestMatchAll_EvaluationCapsClosedReasonVocabularyAndTrace(t *testing.T) {
 		t.Fatalf(">MaxMatchRules must not evaluate any element, got %v", evalCalls)
 	}
 
+	// 2b. List-total JSON size > MaxMatchRulesJSONBytes (16 KiB) with <= 8 elements and each element <= 4096B
+	// fails closed at evaluation time before evaluating any element (O3).
+	fiveNearMax := make([]triggerrule.Rule, 5)
+	for i := range fiveNearMax {
+		fiveNearMax[i] = triggerrule.Rule{
+			Dialect: "rec_vocab",
+			Expr:    fmt.Sprintf("elem_%d_%s", i, strings.Repeat("q", 3500)),
+		}
+	}
+	resTotalBig, _, errTotalBig := rules.MatchAllWithTrace(ctx, scope, fiveNearMax, act, triggerrule.WithBudget(budget))
+	if errTotalBig == nil || resTotalBig.Matched || resTotalBig.Through != 1 || resTotalBig.Class != triggerrule.MatchClassFailed || resTotalBig.Reason != celengine.CategorySize {
+		t.Fatalf(">MaxMatchRulesJSONBytes: res=%+v err=%v, want Through=1 Class=failed Reason=size", resTotalBig, errTotalBig)
+	}
+	if skip, ok := triggerrule.SkipReason(errTotalBig); !ok || skip != triggerrule.SkipReasonEvalFailed {
+		t.Fatalf("SkipReason(>MaxMatchRulesJSONBytes) = (%q, %v), want (%q, true)", skip, ok, triggerrule.SkipReasonEvalFailed)
+	}
+	if _, evalCalls := rec.calls(); len(evalCalls) != 0 {
+		t.Fatalf(">MaxMatchRulesJSONBytes must not evaluate any element, got %v", evalCalls)
+	}
+
 	// 2. Oversized element (> MaxMatchRuleBytes) fails closed even on non-CEL dialect.
 	oversized := strings.Repeat("x", triggerrule.MaxMatchRuleBytes+1)
 	resBig, traceBig, errBig := rules.MatchAllWithTrace(ctx, scope, []triggerrule.Rule{
@@ -2354,5 +2374,103 @@ func TestMatchAll_EvaluationCapsClosedReasonVocabularyAndTrace(t *testing.T) {
 	}, act, triggerrule.WithBudget(budget))
 	if skip, ok := triggerrule.SkipReason(errUngranted); !ok || skip != triggerrule.SkipReasonEvalFailed {
 		t.Fatalf("SkipReason(ungranted dialect) = (%q, %v), want (%q, true)", skip, ok, triggerrule.SkipReasonEvalFailed)
+	}
+}
+
+func TestStage1CacheConfigBudgetAndPrecompiledRegexHeapBound(t *testing.T) {
+	cfg := triggerrule.Stage1CacheConfig()
+	if cfg.MaxEntries != celengine.DefaultCacheMaxEntries {
+		t.Fatalf("Stage1CacheConfig().MaxEntries = %d, want DefaultCacheMaxEntries (%d)", cfg.MaxEntries, celengine.DefaultCacheMaxEntries)
+	}
+	if cfg.MaxBytes != celengine.DefaultCacheMaxBytes {
+		t.Fatalf("Stage1CacheConfig().MaxBytes = %d, want DefaultCacheMaxBytes (%d)", cfg.MaxBytes, celengine.DefaultCacheMaxBytes)
+	}
+	if cfg.MaxBytesPerProject <= 0 || cfg.MaxBytesPerProject > cfg.MaxBytes/2 {
+		t.Fatalf("Stage1CacheConfig().MaxBytesPerProject = %d, want positive fraction <= MaxBytes/2 (%d)", cfg.MaxBytesPerProject, cfg.MaxBytes/2)
+	}
+	if cfg.MaxPerProject <= 0 || cfg.MaxPerProject > cfg.MaxEntries/2 {
+		t.Fatalf("Stage1CacheConfig().MaxPerProject = %d, want positive fraction <= MaxEntries/2 (%d)", cfg.MaxPerProject, cfg.MaxEntries/2)
+	}
+
+	eng, err := celengine.New(triggerrule.Env(), triggerrule.Stage1Limits(), cfg)
+	if err != nil {
+		t.Fatalf("celengine.New(Stage1CacheConfig): %v", err)
+	}
+	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	// Build regex-bearing trigger rules (~110-130 KiB weight each, fitting inside the
+	// 256 KiB per-project cap while packing multiple rules across 20 projects to stress
+	// the 1 MiB global Stage1CacheConfig heap ceiling) plus ~600 KiB extreme regex rules
+	// (> 256 KiB per-project cap, exercising O1 compile-use-don't-retain).
+	buildProjectRegexRule := func(projIdx, ruleIdx int, maxTerms int) string {
+		var b strings.Builder
+		for j := 0; j < maxTerms; j++ {
+			term := fmt.Sprintf(`string(event.payload.s).matches("^p%d_r%d_%d[a-z]{1,100}$")`, projIdx, ruleIdx, j)
+			sep := ""
+			if j > 0 {
+				sep = " || "
+			}
+			if b.Len()+len(sep)+len(term) > triggerrule.MaxMatchRuleBytes {
+				break
+			}
+			b.WriteString(sep)
+			b.WriteString(term)
+		}
+		return b.String()
+	}
+
+	runtime.GC()
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	for p := 0; p < 20; p++ {
+		projID := fmt.Sprintf("proj-%d", p)
+		// 6 medium-heavy regex rules (~115 KiB weight each) + 2 extreme ~4 KiB regex rules (~550 KiB weight > 256 KiB).
+		for r := 0; r < 6; r++ {
+			expr := buildProjectRegexRule(p, r, 16)
+			scope := celengine.CacheScope{
+				Consumer:  triggerrule.ConsumerName,
+				ProjectID: projID,
+				ID:        fmt.Sprintf("trig-med-%d-%d", p, r),
+				Revision:  1,
+			}
+			if _, err := eng.Cached(ctx, scope, expr, filterKind); err != nil {
+				t.Fatalf("Cached med[%d,%d]: %v", p, r, err)
+			}
+		}
+		for r := 0; r < 2; r++ {
+			expr := buildProjectRegexRule(p, 100+r, 90)
+			scope := celengine.CacheScope{
+				Consumer:  triggerrule.ConsumerName,
+				ProjectID: projID,
+				ID:        fmt.Sprintf("trig-huge-%d-%d", p, r),
+				Revision:  1,
+			}
+			if _, err := eng.Cached(ctx, scope, expr, filterKind); err != nil {
+				t.Fatalf("Cached huge[%d,%d]: %v", p, r, err)
+			}
+		}
+	}
+
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+
+	stats := eng.CacheStats()
+	if stats.Bytes > celengine.DefaultCacheMaxBytes {
+		t.Fatalf("CacheStats.Bytes = %d, want <= %d (1 MiB)", stats.Bytes, celengine.DefaultCacheMaxBytes)
+	}
+	if stats.Entries == 0 || stats.Entries > 16 {
+		t.Fatalf("CacheStats.Entries = %d, want 1..16 under 1 MiB Stage1CacheConfig", stats.Entries)
+	}
+	var retained int64
+	if after.HeapAlloc > before.HeapAlloc {
+		retained = int64(after.HeapAlloc - before.HeapAlloc)
+	}
+	const maxRetainedBytes = 64 << 20 // 64 MiB
+	if retained > maxRetainedBytes {
+		t.Fatalf("Stage1CacheConfig retained heap delta = %d MiB, want <= %d MiB", retained>>20, maxRetainedBytes>>20)
 	}
 }

@@ -61,10 +61,14 @@ const (
 	MaxRuleTraceBytes  = 4 * 1024
 	EventRuleBudget    = time.Second
 
-	Stage1CacheMaxEntries         = 4096
-	Stage1CacheMaxBytes           = 4 << 20 // 4 MiB across active projects
-	Stage1CacheMaxPerProject      = 400     // 2x MaxTriggersPerProject (200)
-	Stage1CacheMaxBytesPerProject = 1 << 20 // 1 MiB per project
+	Stage1CacheMaxEntries = celengine.DefaultCacheMaxEntries // 1024 global entries (stage1-design rev 8.3)
+	Stage1CacheMaxBytes   = celengine.DefaultCacheMaxBytes   // 1 MiB global program weight (stage1-design rev 8.3)
+	// A 200-trigger project with up to 8 match_rules elements + 1 subject_rule
+	// can author up to 1,800 distinct programs; capping any single project at
+	// 1/4 of the global 1,024-entry / 1 MiB cache prevents one rule-heavy
+	// project from evicting other projects' warm working sets (3a F2).
+	Stage1CacheMaxPerProject      = 256       // 1/4 of DefaultCacheMaxEntries
+	Stage1CacheMaxBytesPerProject = 256 << 10 // 256 KiB (1/4 of DefaultCacheMaxBytes)
 )
 
 // MatchResult outcome classes (§3.1).
@@ -665,6 +669,39 @@ func budgetRemainingMsPtr(tracker *ruleengine.BudgetTracker) *int64 {
 	return &ms
 }
 
+type storedMatchRuleJSON struct {
+	Dialect string `json:"dialect"`
+	Expr    string `json:"expr"`
+}
+
+func encodedMatchRulesLength(rules []Rule) int {
+	if len(rules) == 0 {
+		return 2
+	}
+	rawBytes := 0
+	for _, r := range rules {
+		rawBytes += len(r.normalizedDialect()) + len(r.Expr)
+	}
+	// In encoding/json, each byte expands to at most 6 bytes (\uXXXX) plus 25
+	// structural bytes per element and '['. Skip allocating when worst-case
+	// escaping cannot exceed MaxMatchRulesJSONBytes.
+	if 1+25*len(rules)+6*rawBytes <= MaxMatchRulesJSONBytes {
+		return 1 + 25*len(rules) + rawBytes
+	}
+	wire := make([]storedMatchRuleJSON, len(rules))
+	for i, r := range rules {
+		wire[i] = storedMatchRuleJSON{
+			Dialect: r.normalizedDialect(),
+			Expr:    r.Expr,
+		}
+	}
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		return MaxMatchRulesJSONBytes + 1
+	}
+	return len(raw)
+}
+
 // MatchAllWithTrace evaluates rules in strict author order with short-circuit
 // AND semantics (§3.1, §5), returning both the summary MatchResult and the
 // content-free per-element RuleTrace.
@@ -708,10 +745,30 @@ func (r *Rules) MatchAllWithTrace(
 
 	cfg := applyEvalOpts(opts)
 
-	// Evaluation-time list count cap (SEC-3b1rw-01 defence in depth).
+	// Evaluation-time list count and 16 KiB list-total caps (SEC-3b1rw-01, O3).
 	if len(rules) > MaxMatchRules {
 		dialect := SafeDialectName(rules[0].normalizedDialect())
 		err := &corruptRuleSizeError{detail: fmt.Sprintf("rule list count %d exceeds maximum %d", len(rules), MaxMatchRules)}
+		trace := RuleTrace{
+			Elements: []RuleTraceElement{{
+				Index:   1,
+				Dialect: dialect,
+				Class:   MatchClassFailed,
+				Reason:  celengine.CategorySize,
+			}},
+			BudgetRemainingMs: budgetRemainingMsPtr(cfg.tracker),
+		}
+		return MatchResult{
+			Matched: false,
+			Through: 1,
+			Dialect: dialect,
+			Class:   MatchClassFailed,
+			Reason:  celengine.CategorySize,
+		}, trace, err
+	}
+	if encodedBytes := encodedMatchRulesLength(rules); encodedBytes > MaxMatchRulesJSONBytes {
+		dialect := SafeDialectName(rules[0].normalizedDialect())
+		err := &corruptRuleSizeError{detail: fmt.Sprintf("encoded rule list length %d exceeds maximum %d bytes", encodedBytes, MaxMatchRulesJSONBytes)}
 		trace := RuleTrace{
 			Elements: []RuleTraceElement{{
 				Index:   1,
