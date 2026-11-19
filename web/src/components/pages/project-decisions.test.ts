@@ -2670,13 +2670,152 @@ describe('<scion-page-project-decisions>', () => {
     expect(dismissReq).toEqual({
       method: 'POST',
       url: '/api/v1/decision-prompts/m-set/dismiss',
-      body: { reason: 'Stale: already shipped.', surface: 'decisions_page' },
+      body: {
+        decisionIds: ['r-1', 'r-2'],
+        reason: 'Stale: already shipped.',
+        surface: 'decisions_page',
+      },
     });
     expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
     expect(root.querySelector('[data-prompt-card="m-set"]')).toBeNull();
     expect(root.querySelector('[data-waiting-badge]')).toBeNull();
     expect(root.querySelector('[data-empty="pending"]')).not.toBeNull();
     expect(showToast).toHaveBeenCalledWith('Dismissed 2 decisions.', 'success');
+  });
+
+  it('dismisses only the rows the dialog lists, not an interpreted row awaiting the viewer (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const pending = makeDecision({
+      rowId: 'r-pend',
+      messageId: 'm-mixed',
+      key: 'D1',
+      ref: 'D1',
+      question: 'Ship v0.9?',
+    });
+    const interpreted = makeDecision({
+      rowId: 'r-interp',
+      messageId: 'm-mixed',
+      key: 'D2',
+      ref: 'D2',
+      question: 'Which approach?',
+      status: 'decided',
+      decision: {
+        choiceId: 'yes',
+        label: 'Yes',
+        answeredByUserId: 'u-me',
+        answeredByName: 'Alice',
+        provenance: 'agent_interpreted',
+        outcome: 'answer',
+        surface: 'slack',
+        sourceMessageId: 'msg-reply-9',
+        responseMessageId: 'resp-i',
+        at: '2026-11-13T10:05:00Z',
+      },
+    });
+    const prompt = makePrompt({
+      promptMessageId: 'm-mixed',
+      answerMode: 'set',
+      createdAt: '2026-11-13T10:00:00Z',
+      decisions: [pending, interpreted],
+    });
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+        prompts: [prompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ id: 'a-rel', name: 'release-bot' });
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-mixed/dismiss') {
+        return jsonResponse({
+          dismissed: [
+            {
+              ...pending,
+              status: 'dismissed',
+              dismissed: {
+                at: '2026-11-13T10:12:00Z',
+                byUserId: 'u-me',
+                byName: 'Alice',
+                surface: 'decisions_page',
+                responseMessageId: 'resp-mixed',
+              },
+            },
+          ],
+          alreadyDismissed: [],
+          responseMessageId: 'resp-mixed',
+          delivered: true,
+        });
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-mixed"]')!.click();
+    await settle(el, 20);
+
+    const dialog = root.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.getAttribute('label')).toBe('Dismiss decision');
+    expect(dialog.textContent).toContain('D1');
+    expect(dialog.textContent).not.toContain('Which approach?');
+    dialog.querySelector<HTMLElement>('[data-dismiss-confirm]')!.click();
+    await settle(el, 90);
+
+    const dismissReq = requests.find((r) => r.url === '/api/v1/decision-prompts/m-mixed/dismiss');
+    expect(dismissReq?.body).toEqual({ decisionIds: ['r-pend'], surface: 'decisions_page' });
+  });
+
+  it('closes the dialog and refreshes when the card changed under the dialog (dismiss_changed) (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const d1 = makeDecision({ rowId: 'r-1', messageId: 'm-chg' });
+    const prompt = makePrompt({
+      promptMessageId: 'm-chg',
+      createdAt: '2026-11-13T10:00:00Z',
+      decisions: [d1],
+    });
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [prompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ id: 'a-rel', name: 'release-bot' });
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-chg/dismiss') {
+        return jsonResponse(
+          {
+            error: {
+              code: 'dismiss_changed',
+              message: 'the decision set changed',
+              details: { reasons: { 'r-1': 'decided' } },
+            },
+          },
+          409
+        );
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-chg"]')!.click();
+    await settle(el, 20);
+    root
+      .querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]')!
+      .click();
+    await settle(el, 90);
+
+    const dismissReq = requests.find((r) => r.url === '/api/v1/decision-prompts/m-chg/dismiss');
+    expect(dismissReq?.body).toEqual({ decisionIds: ['r-1'], surface: 'decisions_page' });
+    expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
+    expect(showToast).toHaveBeenCalledWith('Nothing dismissed: this card changed.', 'warning');
   });
 
   it('shows gone-agent notice in the dismiss dialog when the asking agent returns 404 (ptone/scion#8213)', async () => {

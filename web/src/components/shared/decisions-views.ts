@@ -26,7 +26,7 @@
 import { css, html, nothing, type CSSResult, type TemplateResult } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
 
-import type { DecisionAnsweredDetail } from '../../client/decision-prompts.js';
+import { dismissDialogRows, type DecisionAnsweredDetail } from '../../client/decision-prompts.js';
 import type {
   ProjectDecisionCounts,
   ProjectDecisionLogEntryView,
@@ -1086,7 +1086,7 @@ export function renderDismissPromptDialog(opts: {
   const p = opts.prompt;
   if (!p) return nothing;
 
-  const openRows = p.decisions.filter((d) => d.status === 'pending' && !d.decision);
+  const openRows = dismissDialogRows(p.decisions);
   const count = openRows.length;
   const dialogLabel = count === 1 ? 'Dismiss decision' : 'Dismiss decisions';
   const confirmLabel = count <= 1 ? 'Dismiss' : `Dismiss ${count} decisions`;

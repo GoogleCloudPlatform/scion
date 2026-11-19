@@ -29,6 +29,7 @@ import {
   actionableReason,
   dismissAvailableAtMs,
   dismissDecisionPrompt,
+  dismissDialogRows,
   fetchAskerAnswerability,
   patchDecisions,
   type DecisionAnsweredDetail,
@@ -1622,6 +1623,7 @@ export class DecisionsPageController implements ReactiveController {
       const res = await dismissDecisionPrompt(prompt.promptMessageId, {
         reason: this.dismissReasonDraft,
         surface: 'decisions_page',
+        decisionIds: dismissDialogRows(prompt.decisions).map((d) => d.rowId),
       });
       if (!this.host.isConnected) return;
       if (res.ok) {

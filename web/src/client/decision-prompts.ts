@@ -542,11 +542,24 @@ export type DismissDecisionPromptResult =
     };
 
 /**
+ * Rows the Decisions-page dismiss dialog lists and dismisses: pending rows
+ * without an effective answer. The dialog sends exactly these row ids as
+ * `decisionIds`, so the hub never dismisses a row the dialog did not show
+ * (such as an interpreted answer awaiting the viewer's confirmation).
+ */
+export function dismissDialogRows(decisions: readonly DecisionView[]): DecisionView[] {
+  return decisions.filter((d) => d.status === 'pending' && !d.decision);
+}
+
+/**
  * POST /api/v1/decision-prompts/{messageId}/dismiss (design 8194, §4.3).
+ *
+ * With `decisionIds`, the hub dismisses exactly those rows or nothing
+ * (`409 dismiss_changed` when one is no longer dismissable).
  */
 export async function dismissDecisionPrompt(
   messageId: string,
-  opts: { reason?: string; surface?: DecisionAnswerSurface } = {}
+  opts: { reason?: string; surface?: DecisionAnswerSurface; decisionIds?: readonly string[] } = {}
 ): Promise<DismissDecisionPromptResult> {
   const trimmedReason = opts.reason?.trim() ?? '';
   let res: Response;
@@ -555,6 +568,9 @@ export async function dismissDecisionPrompt(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        ...(opts.decisionIds && opts.decisionIds.length > 0
+          ? { decisionIds: [...opts.decisionIds] }
+          : {}),
         ...(trimmedReason ? { reason: trimmedReason } : {}),
         ...(opts.surface ? { surface: opts.surface } : {}),
       }),
