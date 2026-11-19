@@ -45,20 +45,10 @@ import type { Project, User } from '../../shared/types.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
-import { CHAT_SPACE_ROUTE, dmPeerFromKey } from '../../client/chat-routes.js';
-import { openTerminal } from '../../client/open-terminal.js';
-import { stateManager } from '../../client/state.js';
 import {
-  CURRENT_AGENT_CHANGED_EVENT,
-  TERMINAL_DROPDOWN_SELECT_EVENT,
   TERMINAL_SESSION_COUNT_EVENT,
-  getAgentPageCurrentAgent,
-  getChatCurrentAgent,
   getTerminalWorkspaceSnapshot,
-  type CurrentAgentInfo,
-  type TerminalDropdownSelectDetail,
   type TerminalSessionCountDetail,
-  type TerminalSessionDot,
   type TerminalSessionSummary,
 } from '../../client/terminal-workspace-events.js';
 import { TRAY_COUNT_EVENT, type TrayCountDetail } from '../../client/tray-count-events.js';
@@ -144,6 +134,18 @@ const rememberedModePaths = {
   chat: '/chat',
 };
 
+type HeaderTerminalsMenuMod = typeof import('./header-terminals-menu.js');
+let cachedTerminalsMenuMod: HeaderTerminalsMenuMod | null = null;
+let terminalsMenuModPromise: Promise<HeaderTerminalsMenuMod> | null = null;
+
+/** Single-flight lazy loader for the wide Terminals dropdown menu helper. */
+export function preloadHeaderTerminalsMenu(): Promise<HeaderTerminalsMenuMod> {
+  return (terminalsMenuModPromise ??= import('./header-terminals-menu.js').then((m) => {
+    cachedTerminalsMenuMod = m;
+    return m;
+  }));
+}
+
 @customElement('scion-header')
 export class ScionHeader extends LitElement {
   /**
@@ -188,6 +190,11 @@ export class ScionHeader extends LitElement {
   /** Bumped when page/store current-agent metadata updates so the dropdown re-renders. */
   @state()
   private currentAgentRevision = 0;
+
+  @state()
+  private terminalsMenuMod: HeaderTerminalsMenuMod | null = cachedTerminalsMenuMod;
+
+  private unsubscribeTerminalsMenu: (() => void) | null = null;
 
   /** Whether a graph view on screen offers the "Jump to agent" palette. */
   @state()
@@ -407,100 +414,27 @@ export class ScionHeader extends LitElement {
       font-weight: 500;
     }
 
-    /* ------------------------------------------------------------------ */
-    /* Wide-tier Terminals split button & dropdown                         */
-    /* ------------------------------------------------------------------ */
-    .terminals-split {
-      display: inline-flex;
-      align-items: stretch;
-      border-radius: 0.375rem;
-    }
-
-    .terminals-split > sl-tooltip {
-      display: inline-flex;
-    }
-
-    .terminals-split > sl-tooltip > button {
-      border-top-right-radius: 0;
-      border-bottom-right-radius: 0;
-      padding-right: 0.625rem;
-    }
-
+    .terminals-split,
+    .terminals-split > sl-tooltip,
     .terminals-dropdown {
       display: inline-flex;
       align-items: stretch;
     }
-
+    .terminals-split > sl-tooltip > button {
+      border-radius: 0.375rem 0 0 0.375rem;
+      padding-right: 0.625rem;
+    }
     .mode-switch button.terminals-menu-trigger {
       padding: 0.5rem 0.4375rem;
-      border-top-left-radius: 0;
-      border-bottom-left-radius: 0;
+      border-radius: 0 0.375rem 0.375rem 0;
       border-left: 1px solid var(--scion-border, #e2e8f0);
       gap: 0;
     }
-
     .mode-switch button.terminals-menu-trigger.active {
       border-left-color: rgba(255, 255, 255, 0.28);
     }
-
-    .mode-switch button.terminals-menu-trigger sl-icon.terminals-chevron {
+    .mode-switch button.terminals-menu-trigger sl-icon {
       font-size: 0.75rem;
-    }
-
-    .terminals-menu {
-      min-width: 14rem;
-      max-width: 22rem;
-    }
-
-    .terminal-row-dot {
-      width: 0.5rem;
-      height: 0.5rem;
-      border-radius: 50%;
-      background: #94a3b8;
-      display: inline-block;
-      flex-shrink: 0;
-    }
-
-    .terminal-row-dot[data-dot='green'] {
-      background: #22c55e;
-    }
-
-    .terminal-row-dot[data-dot='red'] {
-      background: #ef4444;
-    }
-
-    .terminal-row-dot[data-dot='amber'] {
-      background: #f59e0b;
-    }
-
-    .terminal-row-dot[data-dot='neutral'] {
-      background: transparent;
-      box-shadow: inset 0 0 0 2px var(--scion-text-muted, #64748b);
-    }
-
-    .terminal-row-dot.placeholder {
-      background: transparent;
-      box-shadow: inset 0 0 0 1.5px var(--scion-border, #cbd5e1);
-    }
-
-    .terminal-row-name {
-      display: inline-block;
-      max-width: 13rem;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      vertical-align: bottom;
-    }
-
-    .terminal-row-status {
-      margin-left: 0.75rem;
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      white-space: nowrap;
-    }
-
-    .terminal-row-status.not-open {
-      font-style: italic;
     }
 
     /* ------------------------------------------------------------------ */
@@ -1241,317 +1175,60 @@ export class ScionHeader extends LitElement {
     `;
   }
 
-  /**
-   * Secondary chevron dropdown next to the wide-tier Terminals segment.
-   * Lists the current agent first (marked "not open" when absent from the
-   * rail, or deduplicated with its rail dot when already open), followed by
-   * the rail's open terminals in the rail's current sort order.
-   */
   private renderTerminalsDropdown(isTerminal: boolean): TemplateResult {
-    // Touch currentAgentRevision so Lit tracks store/page current-agent updates.
     void this.currentAgentRevision;
-    const rows = this.buildTerminalDropdownRows();
-
-    return html`
-      <sl-dropdown
-        class="terminals-dropdown"
-        placement="bottom-end"
-        distance="4"
-        @sl-show=${(): void => {
-          this.terminalsMenuOpen = true;
-          this.ensureTerminalsTriggerHaspopup();
-        }}
-        @sl-hide=${(): void => {
-          this.terminalsMenuOpen = false;
-          this.ensureTerminalsTriggerHaspopup();
-        }}
+    const mod = this.terminalsMenuMod;
+    const setOpen = (open: boolean): void => {
+      this.terminalsMenuOpen = open;
+      this.syncTerminalsTriggerAria();
+    };
+    return html`<sl-dropdown
+      class="terminals-dropdown"
+      placement="bottom-end"
+      distance="4"
+      @sl-show=${(): void => setOpen(true)}
+      @sl-hide=${(): void => setOpen(false)}
+    >
+      <button
+        type="button"
+        slot="trigger"
+        class="terminals-menu-trigger ${isTerminal ? 'active' : ''}"
+        title="Open terminals menu"
+        aria-label="Open terminals menu"
+        aria-haspopup="menu"
+        aria-expanded=${this.terminalsMenuOpen ? 'true' : 'false'}
+        @click=${(e: MouseEvent): void =>
+          mod?.onTerminalsTriggerClick(e, setOpen, this.terminalsMenuOpen)}
+        @keydown=${(e: KeyboardEvent): void =>
+          mod?.onTerminalsTriggerKey(e, this.shadowRoot, setOpen)}
       >
-        <button
-          type="button"
-          slot="trigger"
-          class="terminals-menu-trigger ${isTerminal ? 'active' : ''}"
-          title="Open terminals menu"
-          aria-label="Open terminals menu"
-          aria-haspopup="menu"
-          aria-expanded=${this.terminalsMenuOpen ? 'true' : 'false'}
-          @click=${(e: MouseEvent): void => this.handleTerminalsTriggerClick(e)}
-          @keydown=${(e: KeyboardEvent): void => this.handleTerminalsTriggerKeydown(e)}
-        >
-          <sl-icon class="terminals-chevron" name="chevron-down" aria-hidden="true"></sl-icon>
-        </button>
-        <sl-menu
-          class="terminals-menu"
-          @sl-select=${(e: CustomEvent<{ item: HTMLElement }>): void =>
-            this.handleTerminalsMenuSelect(e)}
-          @keydown=${(e: KeyboardEvent): void => this.handleTerminalsMenuKeydown(e)}
-        >
-          ${rows.length === 0
-            ? html`<sl-menu-item class="terminals-empty-item" disabled
-                >No open terminals</sl-menu-item
-              >`
-            : rows.map((row) => {
-                const statusText = row.dot ? row.dot.meaning : 'not open';
-                return html`
-                  <sl-menu-item
-                    value=${row.agentId}
-                    tabindex="0"
-                    aria-label=${`${row.name}, ${statusText}`}
-                  >
-                    ${row.dot
-                      ? html`<span
-                          slot="prefix"
-                          class="terminal-row-dot"
-                          data-dot=${row.dot.colour}
-                          aria-hidden="true"
-                        ></span>`
-                      : html`<span
-                          slot="prefix"
-                          class="terminal-row-dot placeholder"
-                          aria-hidden="true"
-                        ></span>`}
-                    <span class="terminal-row-name">${row.name}</span>
-                    <span
-                      slot="suffix"
-                      class="terminal-row-status ${row.dot ? '' : 'not-open'}"
-                      aria-hidden="true"
-                      >${statusText}</span
-                    >
-                  </sl-menu-item>
-                `;
-              })}
-        </sl-menu>
-      </sl-dropdown>
-    `;
+        <sl-icon name="chevron-down" aria-hidden="true"></sl-icon>
+      </button>
+      <sl-menu
+        class="terminals-menu"
+        @sl-select=${(e: CustomEvent<{ item: HTMLElement }>): void =>
+          mod?.onTerminalsMenuSelect(e, setOpen)}
+        @keydown=${(e: KeyboardEvent): void => mod?.onTerminalsMenuKey(e, this.shadowRoot, setOpen)}
+      >
+        ${mod
+          ? mod.renderTerminalsMenuItems({
+              currentPath: this.currentPath,
+              userId: this.user?.id ?? '',
+              sessions: this.terminalSessions,
+              focusedAgentId: this.terminalFocusedAgentId,
+            })
+          : html`<sl-menu-item class="terminals-empty-item" disabled
+              >No open terminals</sl-menu-item
+            >`}
+      </sl-menu>
+    </sl-dropdown>`;
   }
 
-  private buildTerminalDropdownRows(): Array<{
-    agentId: string;
-    name: string;
-    dot: TerminalSessionDot | null;
-  }> {
-    const current = this.resolveCurrentAgent();
-    const rows: Array<{
-      agentId: string;
-      name: string;
-      dot: TerminalSessionDot | null;
-    }> = [];
-    if (current) {
-      const openSession = this.terminalSessions.find((s) => s.agentId === current.agentId);
-      if (openSession) {
-        rows.push({
-          agentId: openSession.agentId,
-          name: openSession.name,
-          dot: openSession.dot,
-        });
-      } else {
-        rows.push({
-          agentId: current.agentId,
-          name: current.name,
-          dot: null,
-        });
-      }
-    }
-    for (const session of this.terminalSessions) {
-      if (current && session.agentId === current.agentId) continue;
-      rows.push({
-        agentId: session.agentId,
-        name: session.name,
-        dot: session.dot,
-      });
-    }
-    return rows;
-  }
-
-  private lookupAgentName(agentId: string): string {
-    return (
-      this.terminalSessions.find((s) => s.agentId === agentId)?.name ||
-      stateManager.getAgent(agentId)?.name ||
-      agentId
-    );
-  }
-
-  /**
-   * Resolves the current agent for the active route:
-   * - `/terminals*`: the workspace's focused pane agent (`terminalFocusedAgentId`);
-   * - `/chat*`: agent DM peer or resolved thread `defaultAgent` (null on bare
-   *   `/chat`, `/chat/space/:id`, user DMs, or threads with no default agent);
-   * - `/agents/:id` and `/agents/:id/edit`: that agent (excluding `/agents`,
-   *   `/agents/new`, and `/agents/graph`);
-   * - project, dashboard, and all other routes: null.
-   */
-  private resolveCurrentAgent(): CurrentAgentInfo | null {
-    const rawPath = this.currentPath || window.location.pathname;
-    const pathname = rawPath.split(/[?#]/, 1)[0].replace(/\/+$/, '') || '/';
-
-    if (this.isTerminalView()) {
-      const id = this.terminalFocusedAgentId;
-      if (!id) return null;
-      return { agentId: id, name: this.lookupAgentName(id) };
-    }
-
-    if (this.isChatView()) {
-      if (pathname === '/chat' || CHAT_SPACE_ROUTE.test(pathname)) return null;
-      const dmMatch = pathname.match(/^\/chat\/dm\/([^/]+)$/);
-      if (dmMatch) {
-        let key = dmMatch[1];
-        try {
-          key = decodeURIComponent(dmMatch[1]);
-        } catch {
-          // Keep raw segment if malformed percent-encoding.
-        }
-        const peer = dmPeerFromKey(key, this.user?.id ?? '');
-        if (peer) {
-          if (peer.peerKind !== 'agent') return null;
-          const chatAgent = getChatCurrentAgent();
-          const name =
-            chatAgent?.agentId === peer.peerId ? chatAgent.name : this.lookupAgentName(peer.peerId);
-          return { agentId: peer.peerId, name };
-        }
-      }
-      return getChatCurrentAgent();
-    }
-
-    const agentMatch = pathname.match(/^\/agents\/([^/]+)(?:\/edit)?$/);
-    if (agentMatch) {
-      const rawSegment = agentMatch[1];
-      if (rawSegment === 'new' || rawSegment === 'graph') return null;
-      let agentId = rawSegment;
-      try {
-        agentId = decodeURIComponent(rawSegment);
-      } catch {
-        // Keep raw segment if malformed percent-encoding.
-      }
-      const pageAgent = getAgentPageCurrentAgent();
-      const name = pageAgent?.agentId === agentId ? pageAgent.name : this.lookupAgentName(agentId);
-      return { agentId, name };
-    }
-
-    return null;
-  }
-
-  /** Shoelace's SlDropdown sets aria-haspopup="true"; keep the explicit "menu" token. */
-  private ensureTerminalsTriggerHaspopup(): void {
-    const trigger = this.shadowRoot?.querySelector<HTMLButtonElement>(
-      '.wide-center .terminals-menu-trigger'
-    );
-    if (trigger && trigger.getAttribute('aria-haspopup') !== 'menu') {
-      trigger.setAttribute('aria-haspopup', 'menu');
-    }
-  }
-
-  private isSlDropdownUpgraded(el: Element | null | undefined): boolean {
-    return Boolean(el && typeof (el as { show?: unknown }).show === 'function');
-  }
-
-  private getEnabledTerminalMenuItems(): HTMLElement[] {
-    const menu = this.shadowRoot?.querySelector('.wide-center .terminals-menu');
-    if (!menu) return [];
-    return Array.from(menu.querySelectorAll<HTMLElement>('sl-menu-item:not([disabled])'));
-  }
-
-  private handleTerminalsTriggerClick(e: MouseEvent): void {
-    const trigger = e.currentTarget as HTMLElement;
-    const dropdown = trigger.closest('sl-dropdown');
-    if (this.isSlDropdownUpgraded(dropdown)) return;
-    this.terminalsMenuOpen = !this.terminalsMenuOpen;
-  }
-
-  private handleTerminalsTriggerKeydown(e: KeyboardEvent): void {
-    const trigger = e.currentTarget as HTMLButtonElement;
-    const dropdown = trigger.closest('sl-dropdown');
-    if (dropdown && this.isSlDropdownUpgraded(dropdown)) {
-      if (e.key === 'Enter' || e.key === ' ') {
-        const slDropdown = dropdown as HTMLElement & {
-          open: boolean;
-          updateComplete: Promise<boolean>;
-        };
-        queueMicrotask(() => {
-          void slDropdown.updateComplete.then(() => {
-            if (!slDropdown.open) return;
-            this.getEnabledTerminalMenuItems()[0]?.focus();
-          });
-        });
-      }
-      return;
-    }
-
-    if (e.key === 'ArrowDown' || e.key === 'Home' || e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      this.terminalsMenuOpen = true;
-      this.getEnabledTerminalMenuItems()[0]?.focus();
-    } else if (e.key === 'ArrowUp' || e.key === 'End') {
-      e.preventDefault();
-      this.terminalsMenuOpen = true;
-      const items = this.getEnabledTerminalMenuItems();
-      items[items.length - 1]?.focus();
-    } else if (e.key === 'Escape' && this.terminalsMenuOpen) {
-      e.preventDefault();
-      this.terminalsMenuOpen = false;
-      trigger.focus();
-    }
-  }
-
-  private handleTerminalsMenuKeydown(e: KeyboardEvent): void {
-    const menu = e.currentTarget as HTMLElement;
-    const dropdown = menu.closest('sl-dropdown');
-    if (this.isSlDropdownUpgraded(dropdown)) return;
-
-    const trigger = dropdown?.querySelector<HTMLButtonElement>('.terminals-menu-trigger');
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      this.terminalsMenuOpen = false;
-      trigger?.focus();
-      return;
-    }
-
-    const items = this.getEnabledTerminalMenuItems();
-    if (items.length === 0) return;
-    const active = this.shadowRoot?.activeElement as HTMLElement | null;
-    const idx = active ? items.indexOf(active) : -1;
-
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      items[(idx + 1) % items.length]?.focus();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      items[idx <= 0 ? items.length - 1 : idx - 1]?.focus();
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      items[0]?.focus();
-    } else if (e.key === 'End') {
-      e.preventDefault();
-      items[items.length - 1]?.focus();
-    } else if ((e.key === 'Enter' || e.key === ' ') && active && idx >= 0) {
-      e.preventDefault();
-      this.terminalsMenuOpen = false;
-      const agentId = active.getAttribute('value');
-      if (agentId) this.selectTerminalFromDropdown(agentId);
-    }
-  }
-
-  private handleTerminalsMenuSelect(e: CustomEvent<{ item: HTMLElement }>): void {
-    const item = e.detail?.item;
-    if (!item || item.hasAttribute('disabled')) return;
-    const agentId = item.getAttribute('value') || (item as unknown as { value?: string }).value;
-    if (!agentId) return;
-    this.terminalsMenuOpen = false;
-    this.selectTerminalFromDropdown(agentId);
-  }
-
-  private selectTerminalFromDropdown(agentId: string): void {
-    openTerminal(agentId);
-    // Deferred one microtask so SlDropdown's own bubble-phase handlePanelSelect
-    // (which calls focusOnTrigger()) runs first, and TerminalWorkspaceRoot's
-    // focus target then wins without being cleared by focusin on the header.
-    queueMicrotask(() => {
-      window.dispatchEvent(
-        new CustomEvent<TerminalDropdownSelectDetail>(TERMINAL_DROPDOWN_SELECT_EVENT, {
-          detail: { agentId },
-        })
-      );
-    });
-  }
+  private readonly syncTerminalsTriggerAria = (): void => {
+    this.shadowRoot
+      ?.querySelector('.wide-center .terminals-menu-trigger')
+      ?.setAttribute('aria-haspopup', 'menu');
+  };
 
   // =========================================================================
   // Mode-selector dropdown -- narrow tier
@@ -1956,8 +1633,15 @@ export class ScionHeader extends LitElement {
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
     );
-    window.addEventListener(CURRENT_AGENT_CHANGED_EVENT, this.handleCurrentAgentChanged);
-    stateManager.addEventListener('agents-changed', this.handleCurrentAgentChanged);
+    const attachMenu = (m: HeaderTerminalsMenuMod): void => {
+      if (!this.isConnected) return;
+      this.terminalsMenuMod = m;
+      this.unsubscribeTerminalsMenu ??= m.subscribeCurrentAgentChanges(
+        this.handleCurrentAgentChanged
+      );
+    };
+    if (cachedTerminalsMenuMod) attachMenu(cachedTerminalsMenuMod);
+    else void preloadHeaderTerminalsMenu().then(attachMenu);
     this.graphPaletteAvailable = isGraphPaletteAvailable();
     window.addEventListener(GRAPH_PALETTE_AVAILABILITY_EVENT, this.handleGraphPaletteAvailability);
     this.rememberModePath();
@@ -1980,8 +1664,8 @@ export class ScionHeader extends LitElement {
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
     );
-    window.removeEventListener(CURRENT_AGENT_CHANGED_EVENT, this.handleCurrentAgentChanged);
-    stateManager.removeEventListener('agents-changed', this.handleCurrentAgentChanged);
+    this.unsubscribeTerminalsMenu?.();
+    this.unsubscribeTerminalsMenu = null;
     window.removeEventListener(
       GRAPH_PALETTE_AVAILABILITY_EVENT,
       this.handleGraphPaletteAvailability
@@ -2001,7 +1685,7 @@ export class ScionHeader extends LitElement {
     // their shadow DOMs are ready, then hide their trigger buttons.
     requestAnimationFrame(() => {
       this.hideTrayTriggers();
-      this.ensureTerminalsTriggerHaspopup();
+      this.syncTerminalsTriggerAria();
     });
   }
 
@@ -2011,8 +1695,8 @@ export class ScionHeader extends LitElement {
 
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) this.rememberModePath();
-    this.ensureTerminalsTriggerHaspopup();
-    queueMicrotask(() => this.ensureTerminalsTriggerHaspopup());
+    this.terminalsMenuMod?.ensureTerminalsMenuStyles(this.shadowRoot);
+    queueMicrotask(this.syncTerminalsTriggerAria);
   }
 
   /**

@@ -50,51 +50,18 @@ export const TERMINAL_SESSION_COUNT_EVENT = 'scion:terminal-session-count';
 /** Custom MIME type for terminal drag payloads. */
 export const TERMINAL_DRAG_MIME = 'application/x-scion-terminal';
 
-/**
- * Detail for {@link TERMINAL_PALETTE_NEW_AGENT_EVENT}: an agent the "Jump to
- * agent" palette selected that has no session yet in this tab's registry, so
- * a brand new one must be created through the coordinator (cross-tab
- * ownership/session-reuse) — unlike an already-open agent, which
- * `TerminalWorkspaceRoot` places directly with no coordinator round-trip.
- */
 export interface TerminalPaletteNewAgentDetail {
   readonly agentId: string;
 }
 
-/**
- * Dispatched by `TerminalWorkspaceRoot` when the palette selects an agent
- * with no existing session while more than one pane is on screen. `main.ts`
- * is the only listener: it alone holds the module-local
- * `TerminalCoordinator` reference a brand new session must go through (see
- * `TerminalWorkspaceRoot.create`'s own doc comment for why placement itself
- * still happens inside `create()`, not here).
- */
 export const TERMINAL_PALETTE_NEW_AGENT_EVENT = 'scion:terminal-palette-new-agent';
-
-/**
- * Dispatched (bubbling, composed) by a `scion-terminal-pane` when one of its
- * own dialogs opens. Those dialogs render already open, so they fire no
- * `sl-show`; `TerminalWorkspaceRoot` listens for this instead, to close the
- * "Jump to agent" palette so the two modals are never open together.
- */
 export const TERMINAL_PANE_DIALOG_OPEN_EVENT = 'scion:terminal-pane-dialog-open';
-
-/**
- * Dispatched on `window` when the header's Terminals dropdown selects an
- * agent, so a mounted `TerminalWorkspaceRoot` can place an existing rail
- * entry into a free multi-pane slot and move keyboard focus into that pane
- * just like a rail click.
- */
 export const TERMINAL_DROPDOWN_SELECT_EVENT = 'scion:terminal-dropdown-select';
 
 export interface TerminalDropdownSelectDetail {
   readonly agentId: string;
 }
 
-/**
- * Dispatched on `window` whenever the active chat conversation's or agent
- * detail/edit page's current agent changes.
- */
 export const CURRENT_AGENT_CHANGED_EVENT = 'scion:current-agent-changed';
 
 export interface CurrentAgentInfo {
@@ -102,104 +69,90 @@ export interface CurrentAgentInfo {
   readonly name: string;
 }
 
-const EMPTY_SNAPSHOT: TerminalWorkspaceSnapshot = Object.freeze({
+const EMPTY_SNAPSHOT: TerminalWorkspaceSnapshot = {
   count: 0,
-  sessions: Object.freeze([]),
+  sessions: [],
   focusedAgentId: null,
-});
+};
 
 let latestSnapshot: TerminalWorkspaceSnapshot = EMPTY_SNAPSHOT;
-let chatCurrentAgent: CurrentAgentInfo | null = null;
-let agentPageCurrentAgent: CurrentAgentInfo | null = null;
+let chatAgent: CurrentAgentInfo | null = null;
+let pageAgent: CurrentAgentInfo | null = null;
 
-function sameAgent(a: CurrentAgentInfo | null, b: CurrentAgentInfo | null): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  return a.agentId === b.agentId && a.name === b.name;
+function setSlot(
+  prev: CurrentAgentInfo | null,
+  next: CurrentAgentInfo | null,
+  assign: (v: CurrentAgentInfo | null) => void
+): void {
+  const val = next ? { agentId: next.agentId, name: next.name } : null;
+  if (prev?.agentId === val?.agentId && prev?.name === val?.name && Boolean(prev) === Boolean(val))
+    return;
+  assign(val);
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(CURRENT_AGENT_CHANGED_EVENT));
 }
 
-/** Latest published terminal workspace snapshot for late-mounting headers. */
 export function getTerminalWorkspaceSnapshot(): TerminalWorkspaceSnapshot {
   return latestSnapshot;
 }
 
-/**
- * Stores `snapshot` and announces it via {@link TERMINAL_SESSION_COUNT_EVENT}
- * (keeping `detail.count` backward-compatible for count-only listeners).
- */
 export function publishTerminalWorkspaceSnapshot(snapshot: TerminalWorkspaceSnapshot): void {
-  const count = Math.max(0, snapshot.count);
-  const sessions = [...snapshot.sessions];
-  const focusedAgentId = snapshot.focusedAgentId ?? null;
-  latestSnapshot = { count, sessions, focusedAgentId };
+  latestSnapshot = {
+    count: Math.max(0, snapshot.count),
+    sessions: [...snapshot.sessions],
+    focusedAgentId: snapshot.focusedAgentId ?? null,
+  };
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent<TerminalSessionCountDetail>(TERMINAL_SESSION_COUNT_EVENT, {
-        detail: { count, sessions, focusedAgentId },
+        detail: latestSnapshot,
       })
     );
   }
 }
 
-/** Current agent reported by the chat page (agent DM or thread default agent). */
 export function getChatCurrentAgent(): CurrentAgentInfo | null {
-  return chatCurrentAgent;
+  return chatAgent;
 }
 
 export function setChatCurrentAgent(agent: CurrentAgentInfo | null): void {
-  const next = agent ? { agentId: agent.agentId, name: agent.name } : null;
-  if (sameAgent(chatCurrentAgent, next)) return;
-  chatCurrentAgent = next;
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new Event(CURRENT_AGENT_CHANGED_EVENT));
-  }
+  setSlot(chatAgent, agent, (v) => {
+    chatAgent = v;
+  });
 }
 
-/** Current agent reported by the agent detail or edit page once loaded. */
 export function getAgentPageCurrentAgent(): CurrentAgentInfo | null {
-  return agentPageCurrentAgent;
+  return pageAgent;
 }
 
 export function setAgentPageCurrentAgent(agent: CurrentAgentInfo | null): void {
-  const next = agent ? { agentId: agent.agentId, name: agent.name } : null;
-  if (sameAgent(agentPageCurrentAgent, next)) return;
-  agentPageCurrentAgent = next;
-  if (typeof window !== 'undefined') {
-    window.dispatchEvent(new Event(CURRENT_AGENT_CHANGED_EVENT));
-  }
-}
-
-/** Clears retained snapshots on logout / auth expiry so nothing leaks across accounts. */
-function handleAccountTeardown(): void {
-  const hadSnapshot =
-    latestSnapshot.count !== 0 ||
-    latestSnapshot.sessions.length !== 0 ||
-    latestSnapshot.focusedAgentId !== null;
-  const hadCurrentAgent = chatCurrentAgent !== null || agentPageCurrentAgent !== null;
-  latestSnapshot = EMPTY_SNAPSHOT;
-  chatCurrentAgent = null;
-  agentPageCurrentAgent = null;
-  if (typeof window !== 'undefined') {
-    if (hadSnapshot) {
-      window.dispatchEvent(
-        new CustomEvent<TerminalSessionCountDetail>(TERMINAL_SESSION_COUNT_EVENT, {
-          detail: { count: 0, sessions: [], focusedAgentId: null },
-        })
-      );
-    }
-    if (hadCurrentAgent) {
-      window.dispatchEvent(new Event(CURRENT_AGENT_CHANGED_EVENT));
-    }
-  }
+  setSlot(pageAgent, agent, (v) => {
+    pageAgent = v;
+  });
 }
 
 if (typeof window !== 'undefined') {
-  window.addEventListener(ACCOUNT_TEARDOWN_EVENT, handleAccountTeardown);
+  window.addEventListener(ACCOUNT_TEARDOWN_EVENT, () => {
+    const hadSnap =
+      latestSnapshot.count !== 0 ||
+      latestSnapshot.sessions.length !== 0 ||
+      latestSnapshot.focusedAgentId !== null;
+    const hadAgent = chatAgent !== null || pageAgent !== null;
+    latestSnapshot = EMPTY_SNAPSHOT;
+    chatAgent = null;
+    pageAgent = null;
+    if (hadSnap) {
+      window.dispatchEvent(
+        new CustomEvent<TerminalSessionCountDetail>(TERMINAL_SESSION_COUNT_EVENT, {
+          detail: EMPTY_SNAPSHOT,
+        })
+      );
+    }
+    if (hadAgent) window.dispatchEvent(new Event(CURRENT_AGENT_CHANGED_EVENT));
+  });
 }
 
-/** Resets module-level retained state between unit tests without dispatching events. */
 export function resetTerminalWorkspaceEventsForTests(): void {
   latestSnapshot = EMPTY_SNAPSHOT;
-  chatCurrentAgent = null;
-  agentPageCurrentAgent = null;
+  chatAgent = null;
+  pageAgent = null;
 }
