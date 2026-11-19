@@ -564,7 +564,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// profile resolution for it), so profileMode stays lenient. The start and
 	// restart handlers' image-provenance integrity read
 	// (runtimeSelectionOpts) still runs for it.
-	if gcpIdentityProfile == "" && in.Operation != opCreate && !s.isFlat() {
+	if in.Operation == opCreate && !s.isFlat() {
+		profileMode = profileCreate
+	} else if gcpIdentityProfile == "" && in.Operation != opCreate && !s.isFlat() {
 		profile, provisioned, err := classificationProfile(in)
 		if err != nil {
 			var pe *agent.ImageProvenanceError
@@ -583,9 +585,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// A saved profile that no longer resolves fails here, with the same
 	// 503 as start/restart's own later resolution, rather than classifying
 	// the dispatch against the default runtime first (ptone/scion#2709).
-	// Create and a start without a saved profile stay non-strict, except
-	// that, on a co-located broker, a profile missing from the Hub's stored
-	// profiles is refused (errProfileUnresolved / errDefaultProfileUnresolved).
+	// Create/provision/reprovision (profileCreate, ptone/scion#3817) and
+	// co-located stored-profile dispatches refuse unresolvable profiles
+	// (errProfileUnresolved / errDefaultProfileUnresolved /
+	// errProfileRuntimeUnresolved); a zero-profile create or a start without a
+	// saved profile stays non-strict.
 	res, err := s.resolveExistingAgentManager(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,

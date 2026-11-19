@@ -319,9 +319,18 @@ profiles: [not valid yaml
 
 func TestCreateAgentWithProfile(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
+	projectPath := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const settingsYAML = "schema_version: \"1\"\nprofiles:\n  custom-profile:\n    runtime: docker\n"
+	if err := os.WriteFile(filepath.Join(projectPath, "settings.yaml"), []byte(settingsYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	body := `{
 		"name": "profiled-agent",
+		"projectPath": "` + projectPath + `",
 		"config": {"template": "claude", "profile": "custom-profile"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))

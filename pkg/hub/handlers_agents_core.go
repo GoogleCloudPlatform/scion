@@ -3028,7 +3028,7 @@ func (s *Server) createAgentInProject(
 					// it minted on this error return.
 					failCreate(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
 						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
-							dispatchCreateErrorResponseWithDefaultTier(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode)
+							dispatchCreateErrorResponseForBroker(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode, resolvedBroker)
 						}
 					})
 					return
@@ -3123,7 +3123,7 @@ func (s *Server) createAgentInProject(
 					// it minted on this error return.
 					failCreate(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
 						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
-							dispatchCreateErrorResponseWithDefaultTier(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode)
+							dispatchCreateErrorResponseForBroker(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode, resolvedBroker)
 						}
 					})
 					return
@@ -3183,7 +3183,21 @@ func (s *Server) createAgentInProject(
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
 					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
-						dispatchCreateErrorResponseWithDefaultTier(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode)
+						dispatchCreateErrorResponseForBroker(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode, resolvedBroker)
+					})
+					return
+				}
+				if isBrokerRuntimeUnavailable(err) || isBrokerDraining(err) {
+					// An unresolvable profile or unavailable runtime on the broker
+					// refuses provisioning: fail the create, roll back the row and
+					// quotas, and relay via the runtime_unavailable path instead of
+					// leaving an unstartable created row (ptone/scion#3817).
+					// DispatchAgentProvision already revoked any credential it
+					// minted on this error return.
+					s.agentLifecycleLog.Warn("Provision-only create failed: runtime unavailable on broker",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						dispatchCreateErrorResponseForBroker(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode, resolvedBroker)
 					})
 					return
 				}
@@ -3842,6 +3856,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 			return
 		}
 		if relayBrokerRefusal(w, err) {
+			return
+		}
+		if s.writeFinalizeBrokerRuntimeUnavailable(ctx, w, agent, err) {
 			return
 		}
 		RuntimeError(w, "Failed to finalize env on runtime broker: "+err.Error())
@@ -6185,6 +6202,10 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 }
 
 func dispatchCreateErrorResponseWithDefaultTier(w http.ResponseWriter, err error, agentID string, tier *defaultTier, mode string) {
+	dispatchCreateErrorResponseForBroker(w, err, agentID, tier, mode, nil)
+}
+
+func dispatchCreateErrorResponseForBroker(w http.ResponseWriter, err error, agentID string, tier *defaultTier, mode string, broker *store.RuntimeBroker) {
 	if writeAgentTokenRecordError(w, err) {
 		return
 	}
@@ -6213,6 +6234,8 @@ func dispatchCreateErrorResponseWithDefaultTier(w http.ResponseWriter, err error
 		// Response already written.
 	case relayIdentityMappingErrorWithDefaultTier(w, err, tier, mode):
 		// Response already written.
+	case writeCreateBrokerRuntimeUnavailable(w, err, "", broker):
+		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
 		var se *brokerStatusError
@@ -6227,6 +6250,71 @@ func dispatchCreateErrorResponseWithDefaultTier(w http.ResponseWriter, err error
 		// reason; relay only those (brokerFailureDetails).
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Failed to dispatch to runtime broker: "+err.Error(), brokerFailureDetails(err))
 	}
+}
+
+// writeCreateBrokerRuntimeUnavailable relays a broker's runtime_unavailable or
+// broker_draining 503 on create, provision, or finalize via
+// writeBrokerRuntimeUnavailable, appending valid profile names from
+// broker.Profiles when a profile_unresolved refusal is returned and the Hub
+// has a profile list for the target broker (ptone/scion#3817).
+func writeCreateBrokerRuntimeUnavailable(w http.ResponseWriter, err error, runtime string, broker *store.RuntimeBroker) bool {
+	if isBrokerRuntimeUnavailable(err) {
+		if profile, ok := brokerProfileUnresolved(err); ok {
+			if names := knownBrokerProfileNames(broker); len(names) > 0 {
+				msg := brokerProfileUnresolvedMessage(profile) + " (available profiles: " + strings.Join(names, ", ") + ")"
+				writeError(w, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, msg, nil)
+				return true
+			}
+		}
+	}
+	return writeBrokerRuntimeUnavailable(w, err, runtime)
+}
+
+func (s *Server) writeFinalizeBrokerRuntimeUnavailable(ctx context.Context, w http.ResponseWriter, agent *store.Agent, err error) bool {
+	if !isBrokerRuntimeUnavailable(err) && !isBrokerDraining(err) {
+		return false
+	}
+	var broker *store.RuntimeBroker
+	var rt string
+	if agent != nil {
+		rt = agent.Runtime
+		if agent.RuntimeBrokerID != "" {
+			if b, bErr := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID); bErr == nil {
+				broker = b
+			}
+		}
+	}
+	return writeCreateBrokerRuntimeUnavailable(w, err, rt, broker)
+}
+
+func knownBrokerProfileNames(broker *store.RuntimeBroker) []string {
+	if broker == nil || broker.IsFlat() || len(broker.Profiles) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(broker.Profiles))
+	names := make([]string, 0, len(broker.Profiles))
+	for _, p := range broker.Profiles {
+		if p.Name == "" || len(p.Name) > maxRelayedProfileNameLen || !isPrintableProfileName(p.Name) {
+			continue
+		}
+		if _, ok := seen[p.Name]; ok {
+			continue
+		}
+		seen[p.Name] = struct{}{}
+		names = append(names, p.Name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func isPrintableProfileName(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x21 || c > 0x7e || c == '"' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 // skillResolutionDispatchError returns the broker's typed required-skill

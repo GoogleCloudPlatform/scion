@@ -157,8 +157,10 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 	// Isolate HOME so LoadEffectiveSettings does not merge the developer's
 	// personal ~/.scion/settings.yaml (which may declare harness-config
 	// auth_selected_type values that would override the test fixture).
-	t.Setenv("HOME", t.TempDir())
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
 	t.Setenv("XDG_CONFIG_HOME", "")
+	seedMockRuntimeInGlobalSettings(t, homeDir)
 
 	// Create temp project directory with settings
 	// LoadEffectiveSettings expects a dir that contains settings.yaml directly
@@ -207,6 +209,18 @@ func newTestServerWithProjectPath(t *testing.T, settingsYAML string) (*Server, *
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
 	return New(cfg, mgr, rt, config.RuntimeBuildRecord{}), mgr, projectDir
+}
+
+func seedMockRuntimeInGlobalSettings(t *testing.T, homeDir string) {
+	t.Helper()
+	globalScion := filepath.Join(homeDir, ".scion")
+	if err := os.MkdirAll(globalScion, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const globalYAML = "schema_version: \"1\"\nruntimes:\n  mock:\n    type: docker\n"
+	if err := os.WriteFile(filepath.Join(globalScion, "settings.yaml"), []byte(globalYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestEnvGather_AllSatisfied tests the fast path: all required env keys are provided
@@ -526,8 +540,10 @@ func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML,
 	// Isolate HOME so LoadEffectiveSettings does not merge the developer's
 	// personal ~/.scion/settings.yaml (which may declare harness-config
 	// auth_selected_type values that would override the test fixture).
-	t.Setenv("HOME", t.TempDir())
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
 	t.Setenv("XDG_CONFIG_HOME", "")
+	seedMockRuntimeInGlobalSettings(t, homeDir)
 
 	projectDir := t.TempDir()
 
@@ -2001,6 +2017,9 @@ harness_configs:
 profiles:
   default:
     runtime: mock
+runtimes:
+  mock:
+    type: docker
 `
 	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 		t.Fatal(err)
