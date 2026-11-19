@@ -835,6 +835,7 @@ type RuntimeTargetConfig struct {
 	KubernetesBlockServiceAccount    string              `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
 	KubernetesServiceAccountMappings map[string]string   `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
 	WorkloadIdentityPool             string              `json:"workloadIdentityPool,omitempty" yaml:"workloadIdentityPool,omitempty" koanf:"workloadIdentityPool"`
+	CreateServiceAccounts            bool                `json:"createServiceAccounts,omitempty" yaml:"createServiceAccounts,omitempty" koanf:"createServiceAccounts"`
 	SharedDirStorageClass            string              `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
 	SharedDirSize                    string              `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
 	GKE                              bool                `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`

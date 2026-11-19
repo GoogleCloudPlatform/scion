@@ -2030,6 +2030,10 @@
               "pattern": "^$|^[a-z][a-z0-9-]{4,28}[a-z0-9]\\.svc\\.id\\.goog$",
               "description": "Kubernetes only. The GKE Workload Identity pool of this instance's cluster, <cluster-project-id>.svc.id.goog. Local operator policy: not part of the runtime target identity or the presentation."
             },
+            "create_service_accounts": {
+              "type": "boolean",
+              "description": "Kubernetes only. Default: false. When true and the Hub's hub.k8s_workload_identity_setup experiment is enabled, an unmapped Hub-minted GCP service account looks up the conventional Kubernetes ServiceAccount (<gsa-account-id>) by name in this instance's namespace (never listing serviceaccounts), creates it if missing, reuses it only if labeled app.kubernetes.io/managed-by=scion and annotated for the GSA, and otherwise fails with identity_ksa_conflict. Local operator policy: not part of the runtime target identity or the presentation."
+            },
             "kubernetes_service_account_mappings": {
               "type": "object",
               "propertyNames": {
@@ -2206,6 +2210,7 @@
         { "required": ["kubeconfig"], "properties": { "kubeconfig": { "minLength": 1 } } },
         { "required": ["kubernetes_block_service_account"], "properties": { "kubernetes_block_service_account": { "minLength": 1 } } },
         { "required": ["workload_identity_pool"], "properties": { "workload_identity_pool": { "minLength": 1 } } },
+        { "required": ["create_service_accounts"], "properties": { "create_service_accounts": { "const": true } } },
         { "required": ["kubernetes_service_account_mappings"], "properties": { "kubernetes_service_account_mappings": { "minProperties": 1 } } },
         { "required": ["shared_dir_storage_class"], "properties": { "shared_dir_storage_class": { "minLength": 1 } } },
         { "required": ["shared_dir_size"], "properties": { "shared_dir_size": { "minLength": 1 } } },

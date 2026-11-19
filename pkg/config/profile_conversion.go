@@ -478,8 +478,11 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 		set("safe_to_evict", *rt.SafeToEvict, rp+"safe_to_evict")
 	}
 	str("kubernetes_block_service_account", prof.KubernetesBlockServiceAccount, rt.KubernetesBlockServiceAccount)
-	// The Workload Identity pool exists on runtime entries only.
+	// The Workload Identity pool and opt-in KSA creation exist on runtime entries only.
 	str("workload_identity_pool", "", rt.WorkloadIdentityPool)
+	if rt.CreateServiceAccounts {
+		set("create_service_accounts", true, rp+"create_service_accounts")
+	}
 	// Service-account mappings are a per-key lookup, the profile first,
 	// with no single value that shadows the map.
 	for gsa, ksa := range rt.KubernetesServiceAccountMappings {
@@ -595,7 +598,8 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 func isKubernetesOnlyTargetField(field string) bool {
 	switch field {
 	case "gke", "priority_class_name", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict",
-		"kubernetes_block_service_account", "workload_identity_pool", "node_selector", "tolerations", "runtime_class_name":
+		"kubernetes_block_service_account", "workload_identity_pool", "create_service_accounts",
+		"node_selector", "tolerations", "runtime_class_name":
 		return true
 	}
 	return strings.HasPrefix(field, "kubernetes_service_account_mappings.")
@@ -635,6 +639,7 @@ func reportNotValidKubernetesFields(st *convState, typ, name, rtKey string, prof
 		{"kubernetes_service_account_mappings", len(rt.KubernetesServiceAccountMappings) > 0},
 		{"kubernetes_block_service_account", rt.KubernetesBlockServiceAccount != ""},
 		{"workload_identity_pool", rt.WorkloadIdentityPool != ""},
+		{"create_service_accounts", rt.CreateServiceAccounts},
 		{"node_selector", len(rt.NodeSelector) > 0}, {"tolerations", len(rt.Tolerations) > 0},
 		{"runtime_class_name", rt.RuntimeClassName != ""},
 	} {
@@ -1418,6 +1423,8 @@ func setInstanceField(t *V1RuntimeTargetConfig, d *V1InstanceAgentDefaults, fiel
 		t.KubernetesBlockServiceAccount = v.(string)
 	case "workload_identity_pool":
 		t.WorkloadIdentityPool = v.(string)
+	case "create_service_accounts":
+		t.CreateServiceAccounts = v.(bool)
 	case "node_selector":
 		t.NodeSelector = copyStringMap(v.(map[string]string))
 	case "tolerations":

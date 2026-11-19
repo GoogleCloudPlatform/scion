@@ -12,6 +12,7 @@ runtimes:
     namespace: agents
     shared_dir_size: 10Gi
     workload_identity_pool: cluster-project.svc.id.goog
+    create_service_accounts: true
 profiles:
   full:
     runtime: cluster

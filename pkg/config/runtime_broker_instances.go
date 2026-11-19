@@ -165,6 +165,7 @@ func kubernetesOnlyFieldsSet(t *V1RuntimeTargetConfig) []string {
 		{"priority_class_name", t.PriorityClassName != ""}, {"runtime_class_name", t.RuntimeClassName != ""},
 		{"kubernetes_service_account_mappings", len(t.KubernetesServiceAccountMappings) > 0},
 		{"workload_identity_pool", t.WorkloadIdentityPool != ""},
+		{"create_service_accounts", t.CreateServiceAccounts},
 		{"gke", t.GKE}, {"safe_to_evict", t.SafeToEvict != nil},
 		{"node_selector", len(t.NodeSelector) > 0}, {"tolerations", len(t.Tolerations) > 0}} {
 		if f.set {
@@ -636,6 +637,11 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 					return fmt.Errorf("%s.runtime_target.gke must be true or false", p)
 				}
 			}
+			if v, present := tm["create_service_accounts"]; present {
+				if _, isBool := v.(bool); !isBool {
+					return fmt.Errorf("%s.runtime_target.create_service_accounts must be true or false", p)
+				}
+			}
 			if v, present := tm["safe_to_evict"]; present && v != nil {
 				if _, isBool := v.(bool); !isBool {
 					return fmt.Errorf("%s.runtime_target.safe_to_evict must be true, false or null", p)
@@ -1074,6 +1080,7 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
 				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
 				WorkloadIdentityPool:             i.RuntimeTarget.WorkloadIdentityPool,
+				CreateServiceAccounts:            i.RuntimeTarget.CreateServiceAccounts,
 				SharedDirStorageClass:            i.RuntimeTarget.SharedDirStorageClass,
 				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
 				GKE:                              i.RuntimeTarget.GKE,
@@ -1130,6 +1137,7 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
 				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
 				WorkloadIdentityPool:             i.RuntimeTarget.WorkloadIdentityPool,
+				CreateServiceAccounts:            i.RuntimeTarget.CreateServiceAccounts,
 				SharedDirStorageClass:            i.RuntimeTarget.SharedDirStorageClass,
 				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
 				GKE:                              i.RuntimeTarget.GKE,
