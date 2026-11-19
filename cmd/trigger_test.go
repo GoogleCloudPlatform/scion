@@ -54,6 +54,9 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 		"trigger.pause",
 		"trigger.resume",
 		"trigger.history",
+		"trigger.event",
+		"trigger.event.list",
+		"trigger.event.get",
 		"trigger.webhook",
 		"trigger.webhook.create",
 		"trigger.webhook.list",
@@ -89,6 +92,8 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 		{"trigger", "pause", "t1"},
 		{"trigger", "resume", "t1"},
 		{"trigger", "history", "t1"},
+		{"trigger", "event", "list"},
+		{"trigger", "event", "get", "evt-1"},
 		{"trigger", "webhook", "list"},
 		{"trigger", "webhook", "create", "--name", "wh1"},
 		{"trigger", "webhook", "delete", "wh1"},
@@ -1510,4 +1515,237 @@ func TestTriggerCLI_RuleTextQuotedEscapesSpoofedElementLines(t *testing.T) {
 		require.NoError(t, runTriggerGet(triggerGetCmd, []string{trID}))
 	})
 	assertNoSpoofedLines(t, getOut)
+}
+
+func TestTriggerEventCLI_ListGetPayloadAndJSON(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 18, 12, 10, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+	prevZone := clitime.Zone()
+	clitime.SetZone(time.UTC)
+	t.Cleanup(func() { clitime.SetZone(prevZone) })
+
+	origFormat := outputFormat
+	origEvSource, origEvWebhook, origEvStatus := triggerEventListSource, triggerEventListWebhook, triggerEventListStatus
+	origEvSince, origEvLimit, origEvCursor := triggerEventListSince, triggerEventListLimit, triggerEventListCursor
+	origEvPayload := triggerEventPayloadOnly
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerEventListSource, triggerEventListWebhook, triggerEventListStatus = origEvSource, origEvWebhook, origEvStatus
+		triggerEventListSince, triggerEventListLimit, triggerEventListCursor = origEvSince, origEvLimit, origEvCursor
+		triggerEventPayloadOnly = origEvPayload
+	})
+
+	epID := "bbbbbbbb-1111-4222-8333-444444444444"
+	evID := "eeeeeeee-1111-4222-8333-444444444444"
+	receivedAt := fixedNow.Add(-3 * time.Minute)
+	processedAt := fixedNow.Add(-2 * time.Minute)
+	var seenEventQuery string
+
+	summary := hubclient.TriggerEventSummary{
+		ID:         evID,
+		ProjectID:  "proj-1",
+		Source:     hubclient.TriggerSourceSpec{Kind: "github", ID: "777001"},
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#42",
+		DedupKey:   "github:550e8400-e29b-41d4-a716-446655440000",
+		OccurredAt: receivedAt,
+		ReceivedAt: receivedAt,
+		Attributes: map[string]string{
+			"command":      "ping",
+			"command_args": "hello-stage3",
+			"mention":      "true",
+			"repo":         "acme/widgets",
+		},
+		Lists: map[string][]string{
+			"assignees": {},
+			"labels":    {"bug", "triggers"},
+		},
+		PayloadBytes: 96,
+		Status:       "processed",
+		MatchCount:   1,
+		FireCount:    1,
+		ProcessedAt:  &processedAt,
+		CreatedAt:    receivedAt,
+	}
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints":
+			_ = json.NewEncoder(w).Encode(hubclient.ListWebhookEndpointsResponse{
+				Scope: hubclient.TriggerListScopeCaller,
+				Endpoints: []hubclient.WebhookEndpoint{{
+					ID:        epID,
+					ProjectID: "proj-1",
+					Name:      "deploys",
+					Status:    "active",
+					CreatedAt: fixedNow,
+					UpdatedAt: fixedNow,
+				}},
+				TotalCount: 1,
+				ServerTime: fixedNow,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events":
+			seenEventQuery = r.URL.RawQuery
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerEventsResponse{
+				Scope:      hubclient.TriggerListScopeCaller,
+				Events:     []hubclient.TriggerEventSummary{summary},
+				TotalCount: 1,
+				ServerTime: fixedNow,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+evID:
+			_ = json.NewEncoder(w).Encode(hubclient.TriggerEventDetail{
+				TriggerEventSummary: summary,
+				Headers:             map[string]string{"x-github-event": "issue_comment"},
+				Payload:             json.RawMessage(`{"action":"created","comment":{"body":"@scion /ping hello-stage3"}}`),
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindAgentToken)
+
+	// 1. List trigger events (--source github --since ...).
+	outputFormat = ""
+	triggerEventListSource = "github"
+	triggerEventListWebhook = ""
+	triggerEventListStatus = "processed"
+	triggerEventListSince = "2026-11-18T12:00:00Z"
+	triggerEventListLimit = 0
+	triggerEventListCursor = ""
+	evListOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventList(triggerEventListCmd, nil))
+	})
+	assert.Contains(t, seenEventQuery, "source=github")
+	assert.Contains(t, seenEventQuery, "status=processed")
+	assert.Contains(t, seenEventQuery, "since=2026-11-18T12%3A00%3A00Z")
+	assert.Contains(t, seenEventQuery, "limit=50")
+	assert.Contains(t, evListOut, "visible to this agent")
+	assert.Contains(t, evListOut, "eeeeeeee")
+	assert.Contains(t, evListOut, "github:777001")
+	assert.Contains(t, evListOut, "github:acme/widgets#42")
+	assert.Contains(t, evListOut, "3m ago")
+
+	// 2. List trigger events with --webhook resolves endpoint name and --json outputs ListTriggerEventsResponse.
+	outputFormat = "json"
+	triggerEventListSource = ""
+	triggerEventListWebhook = "deploys"
+	evListJSON := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventList(triggerEventListCmd, nil))
+	})
+	assert.Contains(t, seenEventQuery, "source=webhook")
+	assert.Contains(t, seenEventQuery, "sourceId="+epID)
+	var parsedList hubclient.ListTriggerEventsResponse
+	require.NoError(t, json.Unmarshal([]byte(evListJSON), &parsedList))
+	assert.Equal(t, hubclient.TriggerListScopeCaller, parsedList.Scope)
+	require.Len(t, parsedList.Events, 1)
+	assert.Equal(t, evID, parsedList.Events[0].ID)
+
+	// 3. Get trigger event by short ID prefix renders attributes, lists, headers, and projected payload.
+	outputFormat = ""
+	triggerEventPayloadOnly = false
+	evGetOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{"eeeeeeee"}))
+	})
+	assert.Contains(t, evGetOut, "Event:        "+evID)
+	assert.Contains(t, evGetOut, "Type:         github.issue_comment.created")
+	assert.Contains(t, evGetOut, "Source:       github:777001")
+	assert.Contains(t, evGetOut, "Attributes:\n  command: ping\n  command_args: hello-stage3\n  mention: true\n  repo: acme/widgets")
+	assert.Contains(t, evGetOut, "Lists:\n  assignees: []\n  labels: [\"bug\",\"triggers\"]")
+	assert.Contains(t, evGetOut, "Headers:\n  x-github-event: issue_comment")
+	assert.Contains(t, evGetOut, "\"@scion /ping hello-stage3\"")
+
+	// 4. Get trigger event with --payload prints only valid pretty JSON payload.
+	triggerEventPayloadOnly = true
+	payloadOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	})
+	assert.JSONEq(t, `{"action":"created","comment":{"body":"@scion /ping hello-stage3"}}`, payloadOut)
+
+	// 5. Get trigger event with --format json round-trips Lists and Attributes.
+	triggerEventPayloadOnly = false
+	outputFormat = "json"
+	evJSONOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	})
+	var parsedDetail hubclient.TriggerEventDetail
+	require.NoError(t, json.Unmarshal([]byte(evJSONOut), &parsedDetail))
+	assert.Equal(t, "ping", parsedDetail.Attributes["command"])
+	assert.Equal(t, []string{"bug", "triggers"}, parsedDetail.Lists["labels"])
+}
+
+func TestTriggerEventCLI_SinglePageDefaultCursorHintAndEarlyStopPrefixAmbiguity(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+
+	origFormat := outputFormat
+	origEvSource, origEvWebhook, origEvStatus := triggerEventListSource, triggerEventListWebhook, triggerEventListStatus
+	origEvSince, origEvLimit, origEvCursor := triggerEventListSince, triggerEventListLimit, triggerEventListCursor
+	origEvPayload := triggerEventPayloadOnly
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerEventListSource, triggerEventListWebhook, triggerEventListStatus = origEvSource, origEvWebhook, origEvStatus
+		triggerEventListSince, triggerEventListLimit, triggerEventListCursor = origEvSince, origEvLimit, origEvCursor
+		triggerEventPayloadOnly = origEvPayload
+	})
+
+	ev1 := "abcd1111-1111-4222-8333-444444444444"
+	ev2 := "abcd2222-1111-4222-8333-444444444444"
+	var seenQueries []string
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/api/v1/projects/proj-1/trigger-events", r.URL.Path)
+		seenQueries = append(seenQueries, r.URL.RawQuery)
+
+		if r.URL.Query().Get("cursor") != "" {
+			t.Fatalf("unexpected pagination request with cursor=%q", r.URL.Query().Get("cursor"))
+		}
+		_ = json.NewEncoder(w).Encode(hubclient.ListTriggerEventsResponse{
+			Events: []hubclient.TriggerEventSummary{
+				{
+					ID:         ev1,
+					ProjectID:  "proj-1",
+					Source:     hubclient.TriggerSourceSpec{Kind: "github", ID: "777001"},
+					Type:       "github.issue_comment.created",
+					Subject:    "github:acme/widgets#1",
+					ReceivedAt: fixedNow.Add(-time.Minute),
+					Status:     "processed",
+				},
+				{
+					ID:         ev2,
+					ProjectID:  "proj-1",
+					Source:     hubclient.TriggerSourceSpec{Kind: "github", ID: "777001"},
+					Type:       "github.issue_comment.created",
+					Subject:    "github:acme/widgets#2",
+					ReceivedAt: fixedNow.Add(-2 * time.Minute),
+					Status:     "processed",
+				},
+			},
+			NextCursor: "page-2-token",
+			TotalCount: 250,
+			ServerTime: fixedNow,
+		})
+	}, hubsync.CredentialKindOAuth)
+
+	// 1. Bare `scion trigger event list` fetches a single page (--limit 50) and prints next-cursor hint.
+	outputFormat = ""
+	triggerEventListSource, triggerEventListWebhook, triggerEventListStatus, triggerEventListSince = "", "", "", ""
+	triggerEventListLimit = defaultTriggerEventListLimit
+	triggerEventListCursor = ""
+	listOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventList(triggerEventListCmd, nil))
+	})
+	require.Len(t, seenQueries, 1, "event list must default to a single page")
+	assert.Contains(t, seenQueries[0], "limit=50")
+	assert.Contains(t, listOut, "Next cursor: page-2-token")
+	assert.Contains(t, listOut, "--cursor page-2-token")
+
+	// 2. Ambiguous prefix in `scion trigger event get abcd` stops immediately on page 1 without fetching page 2.
+	seenQueries = nil
+	triggerEventPayloadOnly = false
+	err := runTriggerEventGet(triggerEventGetCmd, []string{"abcd"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous trigger event ID prefix")
+	require.Len(t, seenQueries, 1, "prefix resolution must stop as soon as a second match is seen")
 }

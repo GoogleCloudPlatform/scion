@@ -282,3 +282,91 @@ func TestTriggerService(t *testing.T) {
 
 	require.NoError(t, svc.Delete(ctx, "tr-456"))
 }
+
+func TestTriggerEventService(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	since := now.Add(-time.Hour)
+	processed := now.Add(2 * time.Second)
+
+	summary := TriggerEventSummary{
+		ID:         "evt-789",
+		ProjectID:  "proj-1",
+		Source:     TriggerSourceSpec{Kind: "github", ID: "777001"},
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#42",
+		DedupKey:   "github:550e8400-e29b-41d4-a716-446655440000",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Attributes: map[string]string{
+			"command": "ping",
+			"repo":    "acme/widgets",
+		},
+		Lists: map[string][]string{
+			"labels":    {"bug", "triggers"},
+			"assignees": {},
+		},
+		PayloadBytes: 128,
+		Status:       "processed",
+		MatchCount:   1,
+		FireCount:    1,
+		ProcessedAt:  &processed,
+		CreatedAt:    now,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/projects/proj-1/trigger-events", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "github", r.URL.Query().Get("source"))
+		assert.Equal(t, "777001", r.URL.Query().Get("sourceId"))
+		assert.Equal(t, "processed", r.URL.Query().Get("status"))
+		assert.Equal(t, since.UTC().Format(time.RFC3339Nano), r.URL.Query().Get("since"))
+		assert.Equal(t, "10", r.URL.Query().Get("limit"))
+		assert.Equal(t, "cur-0", r.URL.Query().Get("cursor"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ListTriggerEventsResponse{
+			Scope:      TriggerListScopeCaller,
+			Events:     []TriggerEventSummary{summary},
+			NextCursor: "cur-1",
+			TotalCount: 1,
+			ServerTime: now,
+		})
+	})
+	mux.HandleFunc("/api/v1/projects/proj-1/trigger-events/evt-789", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(TriggerEventDetail{
+			TriggerEventSummary: summary,
+			Headers:             map[string]string{"x-github-event": "issue_comment"},
+			Payload:             json.RawMessage(`{"action":"created","comment":{"body":"@scion /ping"}}`),
+		})
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	c, err := New(server.URL)
+	require.NoError(t, err)
+	ctx := context.Background()
+	svc := c.TriggerEvents("proj-1")
+
+	listed, err := svc.List(ctx, &ListTriggerEventsOptions{
+		Source:   "github",
+		SourceID: "777001",
+		Status:   "processed",
+		Since:    &since,
+		Page:     apiclient.PageOptions{Limit: 10, Cursor: "cur-0"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, TriggerListScopeCaller, listed.Scope)
+	assert.Equal(t, "cur-1", listed.NextCursor)
+	require.Len(t, listed.Events, 1)
+	assert.Equal(t, "ping", listed.Events[0].Attributes["command"])
+	assert.Equal(t, []string{"bug", "triggers"}, listed.Events[0].Lists["labels"])
+
+	detail, err := svc.Get(ctx, "evt-789")
+	require.NoError(t, err)
+	assert.Equal(t, "github.issue_comment.created", detail.Type)
+	assert.Equal(t, "issue_comment", detail.Headers["x-github-event"])
+	assert.Equal(t, []string{"bug", "triggers"}, detail.Lists["labels"])
+	assert.JSONEq(t, `{"action":"created","comment":{"body":"@scion /ping"}}`, string(detail.Payload))
+}

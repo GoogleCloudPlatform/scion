@@ -64,7 +64,7 @@ var (
 var triggerCmd = &cobra.Command{
 	Use:   "trigger",
 	Short: "Manage event triggers and webhook endpoints",
-	Long:  `Create, inspect, list, pause, resume, and delete event triggers and webhook endpoints for the current project.`,
+	Long:  `Create, inspect, list, pause, resume, and delete event triggers, received trigger events, and webhook endpoints for the current project.`,
 }
 
 var triggerCreateCmd = &cobra.Command{
@@ -561,7 +561,7 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Trigger created: %s\n", created.ID)
 	fmt.Printf("  Name:    %s\n", created.Name)
-	fmt.Printf("  Source:  %s:%s\n", created.Source.Kind, created.Source.ID)
+	fmt.Printf("  Source:  %s\n", formatTriggerSource(created.Source, 0))
 	fmt.Printf("  Types:   %s\n", strings.Join(created.Match.Types, ", "))
 	rules := effectiveTriggerMatchRules(created.Match)
 	if len(rules) == 1 {
@@ -633,10 +633,6 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
 		}
-		sourceShort := tr.Source.ID
-		if len(sourceShort) > 8 {
-			sourceShort = sourceShort[:8]
-		}
 		agentLabel := tr.Action.AgentName
 		if agentLabel == "" {
 			agentLabel = tr.Action.AgentID
@@ -651,11 +647,10 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 				lastFire += " (" + tr.LastFireStatus + ")"
 			}
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s:%s\t%s\t%s\t%s\t%d\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
 			shortID,
 			tr.Name,
-			tr.Source.Kind,
-			sourceShort,
+			formatTriggerSource(tr.Source, 8),
 			strings.Join(tr.Match.Types, ","),
 			agentLabel,
 			triggerStatusLabel(tr.Status, tr.StatusReason),
@@ -818,6 +813,17 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func formatTriggerSource(src hubclient.TriggerSourceSpec, maxIDLen int) string {
+	if src.ID == "" {
+		return src.Kind
+	}
+	id := src.ID
+	if maxIDLen > 0 && len(id) > maxIDLen {
+		id = id[:maxIDLen]
+	}
+	return src.Kind + ":" + id
+}
+
 func triggerStatusLabel(status, reason string) string {
 	if reason == "" {
 		return status
@@ -835,6 +841,7 @@ func init() {
 	triggerCmd.AddCommand(triggerPauseCmd)
 	triggerCmd.AddCommand(triggerResumeCmd)
 	triggerCmd.AddCommand(triggerHistoryCmd)
+	triggerCmd.AddCommand(triggerEventCmd)
 	triggerCmd.AddCommand(triggerWebhookCmd)
 
 	triggerCreateCmd.Flags().StringVar(&triggerName, "name", "", "Trigger name (required)")
