@@ -180,7 +180,7 @@ this git repository is not a scion project yet; run 'scion init' here first (or 
 A `.scion`-less repository inside another scion project is not refused: it links that parent
 project, so run `scion init` in the repository itself.
 
-`scion init` adds an untracked `.scion/` to your checkout and, unless it is already ignored, appends `.scion/agents/` to your `.gitignore`.
+`scion init` adds an untracked `.scion/` to your checkout and, unless it is already ignored, appends `.scion/agents/` to your `.gitignore`. When a remote Hub is selected, `scion init` skips local container-runtime detection and does not require `scion init --machine` first.
 
 #### On the local workstation Hub: a worktree of your checkout
 

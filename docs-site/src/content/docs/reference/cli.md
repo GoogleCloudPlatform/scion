@@ -957,11 +957,12 @@ only to a Runtime Broker that already serves its project.
 
 Manages the Scion workspace (Project). `scion projects` is an alias of the group (as is `scion group`), so `scion projects list` and `scion projects use` work too.
 
-- `scion project init`: Initialize a new project. By default, creates a `.scion` directory in the current directory or the root of the current git repository.
+- `scion project init` (alias `scion init`): Initialize a new project. By default, creates a `.scion` directory in the root of the current git repository, or a `.scion` marker file in a non-git directory.
     - Flags:
         - `--global`: Initialize the global project in the home directory.
         - `--machine`: Perform full machine-level setup (seeds harness-configs, templates, settings).
         - `--image-registry <string>`: Configure the container image registry path (e.g., `ghcr.io/myorg`).
+    - **Container runtime & remote Hubs:** When no Hub or the local workstation Hub is selected, `init` and `init --machine` require a supported local container runtime on `PATH` (and `init` requires `~/.scion/` from `scion init --machine`); if none is found, the error points remote-Hub clients to `scion hub add` and `scion use`. When the invocation Hub resolves to a remote Hub (`--hub`, `SCION_HUB_ENDPOINT`/`SCION_HUB_URL`, a directory link, or the current Hub from `scion use`), `init` and `init --machine` skip both the local container-runtime check and the `~/.scion/` prerequisite, and `init --machine` skips the `image_registry` prompt and unconfigured note unless `--image-registry` or `SCION_IMAGE_REGISTRY` is set.
     - **Note:** If you are in a git repository, add `.scion/agents` to your `.gitignore` to avoid issues with nested git worktrees: `echo ".scion/agents" >> .gitignore`
     - **Hub Integration:** When a hub answers, `init` links the new project to it: without a prompt on the local workstation hub, after a prompt on a remote hub. When no hub is configured or the local server is not running, `init` still succeeds and prints a note pointing at `scion server start`; the project then links on its first hub command.
 - `scion project use [project]`: Show or select the current project: a project on a Hub that commands target when they run outside a scion project directory. `scion use` is an alias with the same flags. The selection is saved per user in `~/.scion/context.yaml`; flags, environment variables and the project of the current directory take precedence over it. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/).

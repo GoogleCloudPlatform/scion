@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -214,6 +215,9 @@ func TestDetectLocalRuntime_NoRuntime(t *testing.T) {
 			_, err := DetectLocalRuntime()
 			if err == nil {
 				t.Fatal("expected error when no runtime is available")
+			}
+			if !errors.Is(err, ErrNoLocalRuntime) {
+				t.Errorf("expected errors.Is(err, ErrNoLocalRuntime) to be true, got: %v", err)
 			}
 			if err.Error() != tt.want {
 				t.Errorf("unexpected error message for %s: %s", tt.goos, err.Error())

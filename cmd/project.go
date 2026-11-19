@@ -57,6 +57,8 @@ By default, it initializes in:
 With --global, it initializes in the user's home folder.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		embedOnlyHarnesses := harness.EmbedOnlyHarnesses()
+		ep := invocationHubEndpoint()
+		remoteHub := ep != "" && !isLocalWorkstationEndpoint(ep)
 
 		if globalInit || machineInit {
 			if !isJSONOutput() {
@@ -75,17 +77,18 @@ With --global, it initializes in the user's home folder.`,
 				}
 			}
 			var prompt func() string
-			if !isJSONOutput() {
+			if !isJSONOutput() && !remoteHub {
 				prompt = promptImageRegistry
 			}
 			registryValue, envRegistry := resolveInitImageRegistry(initImageRegistry, fileRegistry, config.ImageRegistryFromEnv(), prompt)
 
 			opts := config.InitMachineOpts{
-				ImageRegistry: registryValue,
-				Force:         machineInitForce,
+				SkipRuntimeCheck: remoteHub,
+				ImageRegistry:    registryValue,
+				Force:            machineInitForce,
 			}
 			if err := config.InitMachine(embedOnlyHarnesses, opts); err != nil {
-				return fmt.Errorf("failed to initialize global config: %w", err)
+				return fmt.Errorf("failed to initialize global config: %w", appendHubOnlyInitHint(err))
 			}
 
 			if isJSONOutput() {
@@ -106,7 +109,7 @@ With --global, it initializes in the user's home folder.`,
 				fmt.Printf("Image registry: %s\n", registryValue)
 			} else if envRegistry != "" {
 				fmt.Printf("Image registry: %s (from %s; not saved to settings)\n", config.RedactImageRegistry(envRegistry), config.EnvImageRegistry)
-			} else {
+			} else if !remoteHub {
 				fmt.Println()
 				fmt.Println("Note: image_registry is not configured. Agents cannot start without it.")
 				fmt.Println("  Build images first — see image-build/README.md")
@@ -122,10 +125,12 @@ With --global, it initializes in the user's home folder.`,
 			return nil
 		}
 
-		// Check if ~/.scion/ exists; error if not since global project is required
-		if globalDir, err := config.GetGlobalDir(); err == nil {
-			if _, err := os.Stat(globalDir); os.IsNotExist(err) {
-				return fmt.Errorf("global scion directory (~/.scion/) does not exist.\nRun 'scion init --machine' first to set up the global configuration")
+		if !remoteHub {
+			// Check if ~/.scion/ exists; error if not since global project is required
+			if globalDir, err := config.GetGlobalDir(); err == nil {
+				if _, err := os.Stat(globalDir); os.IsNotExist(err) {
+					return fmt.Errorf("global scion directory (~/.scion/) does not exist.\nRun 'scion init --machine' first to set up the global configuration.\n%s", hubOnlyInitHint)
+				}
 			}
 		}
 
@@ -166,8 +171,8 @@ With --global, it initializes in the user's home folder.`,
 		if !isJSONOutput() {
 			fmt.Println("Initializing scion project...")
 		}
-		if err := config.InitProject("", embedOnlyHarnesses); err != nil {
-			return fmt.Errorf("failed to initialize project: %w", err)
+		if err := config.InitProject("", embedOnlyHarnesses, config.InitProjectOpts{SkipRuntimeCheck: remoteHub}); err != nil {
+			return fmt.Errorf("failed to initialize project: %w", appendHubOnlyInitHint(err))
 		}
 
 		// Resolve the projectID and save it to settings.
@@ -219,6 +224,15 @@ With --global, it initializes in the user's home folder.`,
 
 		return nil
 	},
+}
+
+const hubOnlyInitHint = "To use a remote Hub without a local container runtime, register it with 'scion hub add <name> <url>' and select it with 'scion use --hub <name>' (or run 'scion use <project>' to work without initializing a directory)"
+
+func appendHubOnlyInitHint(err error) error {
+	if errors.Is(err, config.ErrNoLocalRuntime) {
+		return fmt.Errorf("%w\n%s", err, hubOnlyInitHint)
+	}
+	return err
 }
 
 // promptHubRegistration links the newly initialised project to the hub,

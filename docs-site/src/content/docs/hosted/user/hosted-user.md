@@ -17,7 +17,7 @@ scion hub auth login --hub team
 scion use --hub team
 ```
 
-`scion --hub https://hub.example.com hub auth login` also adds a Hub URL that is not in the list yet, with a nickname derived from its host; when no Hub is current yet, it also becomes the current Hub, and a login never switches a Hub that is already current. Commands run outside a project directory now target the current Hub. To pick a project on it as well, run `scion use <project>`; then commands such as `scion list` and `scion start` work from any directory without `--project`. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for the hub list, `scion use`, and how the CLI chooses a Hub and project.
+`scion --hub https://hub.example.com hub auth login` also adds a Hub URL that is not in the list yet, with a nickname derived from its host; when no Hub is current yet, it also becomes the current Hub, and a login never switches a Hub that is already current. Commands run outside a project directory now target the current Hub. To pick a project on it as well, run `scion use <project>`; then commands such as `scion list` and `scion start` work from any directory without `--project`. A client machine that only connects to a remote Hub needs no local container runtime (Docker or Podman) and does not need `scion init --machine`. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for the hub list, `scion use`, and how the CLI chooses a Hub and project.
 
 **Note:** In workstation mode, a background `scion server start` (the default) adds the local Hub as `local` for you. Authentication is not required there: the CLI uses a machine-specific developer token, and the Hub listens only on localhost.
 
@@ -57,6 +57,8 @@ In a team environment, a **Project** represents a shared project. You link your 
 # Link the current directory to the Hub
 scion hub link
 ```
+
+In a git repository that does not have `.scion` yet, initialize it first with `scion init` — while a remote Hub is selected (for example after `scion use --hub <name>` or with `--hub`), `scion init` skips both local container-runtime detection and the `scion init --machine` prerequisite.
 
 If this directory is already linked (its Hub project ID names a Hub project of the same name), Scion reports that it is already linked. Otherwise it looks for Hub projects with the same name (the repository name from the Git remote, or the directory name). If it finds any, it asks whether to link to one of them or register a new project; with `--yes` it links to the first match, and `--non-interactive` refuses when more than one matches. If none match, it registers a new project. On the local workstation Hub the link confirmation is skipped (a prompt to pick among matching projects, and the offer to import agents, still appear), and a repository links itself on its first command, so you rarely need `scion hub link` there. The project is linked on the Hub that applies in this directory, usually your current Hub, and the link is recorded in your hub list, so the directory keeps using that Hub after you switch Hubs with `scion use`. With no Hub configured at all, `scion hub link` fails with `No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.`
 
