@@ -87,6 +87,11 @@ var envContractStructuredKeys = map[string]bool{
 	"runtimes":                                    true, // map of objects
 	"server.broker.instances":                     true, // list of objects
 	"server.federation.trusted_issuers":           true, // list of objects (ptone/scion#3836)
+	"server.hub.branding.palette.danger":          true, // map
+	"server.hub.branding.palette.neutral":         true, // map
+	"server.hub.branding.palette.primary":         true, // map
+	"server.hub.branding.palette.success":         true, // map
+	"server.hub.branding.palette.warning":         true, // map
 	"server.hub.conduit.peers":                    true, // list of objects
 	"server.hub.test_identities.workload_issuers": true, // list of objects (ptone/scion#4240)
 	"server.notification_channels":                true, // list of objects

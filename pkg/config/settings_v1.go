@@ -1927,6 +1927,8 @@ type V1ServerHubConfig struct {
 	// SystemOne holds Hub-wide System One rule evaluation settings
 	// (server.hub.system_one).
 	SystemOne *V1ServerHubSystemOneConfig `json:"system_one,omitempty" yaml:"system_one,omitempty" koanf:"system_one"`
+	// Branding holds Hub-wide UI branding settings (server.hub.branding).
+	Branding *BrandingConfig `json:"branding,omitempty" yaml:"branding,omitempty" koanf:"branding"`
 }
 
 // V1ServerHubSystemOneConfig holds Hub-wide System One rule evaluation
@@ -4769,6 +4771,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if so := v1.Hub.SystemOne; so != nil {
 			gc.Hub.SystemOne = HubSystemOneConfig{MaxEvalTime: so.MaxEvalTime}
 		}
+		if b := v1.Hub.Branding; b != nil {
+			gc.Hub.Branding = b.CloneValue()
+		}
 	}
 
 	if r := v1.Relay; r != nil {
@@ -5209,6 +5214,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if so := gc.Hub.SystemOne; !so.IsZero() {
 		v1Hub.SystemOne = &V1ServerHubSystemOneConfig{MaxEvalTime: so.MaxEvalTime}
+	}
+	if b := gc.Hub.Branding; !b.IsZero() {
+		v1Hub.Branding = b.Clone()
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
