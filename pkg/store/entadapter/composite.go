@@ -186,6 +186,20 @@ type CompositeStore struct {
 	// beforeFKReconcile is passed to entc.AutoMigrate by Migrate; see
 	// SetBeforeFKReconcile.
 	beforeFKReconcile entc.BeforeFKReconcileFunc
+
+	// relayRole, when non-empty on PostgreSQL, names the role Migrate grants
+	// least-privilege conduit relay table permissions to right after
+	// entc.AutoMigrate; see SetRelayRole.
+	relayRole string
+}
+
+// SetRelayRole configures an optional PostgreSQL role name (from
+// server.database.relay_role) that Migrate grants least-privilege conduit
+// relay permissions to immediately after entc.AutoMigrate completes. On
+// non-PostgreSQL dialects Migrate still validates the role string and skips
+// the SQL grants.
+func (c *CompositeStore) SetRelayRole(role string) {
+	c.relayRole = role
 }
 
 // SetBeforeFKReconcile makes Migrate pass fn to entc.AutoMigrate, which
@@ -938,6 +952,10 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	}
 
 	if err := entc.AutoMigrate(ctx, c.client, entc.WithBeforeFKReconcile(c.beforeFKReconcile)); err != nil {
+		return err
+	}
+
+	if err := ensureRelayRoleGrants(ctx, c.Dialect(), c.DB(), c.relayRole, nil); err != nil {
 		return err
 	}
 

@@ -2333,6 +2333,10 @@ type V1DatabaseConfig struct {
 	// create a new table set that hides existing hub tables
 	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
 	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
+	// RelayRole is an optional PostgreSQL role granted the minimum privileges
+	// needed by `scion server --role relay` after schema migration runs. See
+	// DatabaseConfig.RelayRole.
+	RelayRole string `json:"relay_role,omitempty" yaml:"relay_role,omitempty" koanf:"relay_role"`
 	// TxDiagnostics configures transaction-hold and lock-wait diagnostics.
 	// See TxDiagnosticsConfig.
 	TxDiagnostics *TxDiagnosticsConfig `json:"tx_diagnostics,omitempty" yaml:"tx_diagnostics,omitempty" koanf:"tx_diagnostics"`
@@ -4852,6 +4856,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
 		}
 		gc.Database.AllowShadowedSchema = v1.Database.AllowShadowedSchema
+		if v1.Database.RelayRole != "" {
+			gc.Database.RelayRole = v1.Database.RelayRole
+		}
 		if v1.Database.TxDiagnostics != nil {
 			gc.Database.TxDiagnostics = *v1.Database.TxDiagnostics
 		}
@@ -5284,6 +5291,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
 
 		AllowShadowedSchema: gc.Database.AllowShadowedSchema,
+		RelayRole:           gc.Database.RelayRole,
 	}
 	if td := gc.Database.TxDiagnostics; td != (TxDiagnosticsConfig{}) {
 		v1.Database.TxDiagnostics = &td

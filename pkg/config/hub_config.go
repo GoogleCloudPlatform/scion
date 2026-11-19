@@ -886,6 +886,14 @@ type DatabaseConfig struct {
 	// it logs a warning and continues.
 	AllowShadowedSchema bool `json:"allowShadowedSchema" yaml:"allowShadowedSchema" koanf:"allowShadowedSchema"`
 
+	// RelayRole is an optional PostgreSQL role name (for example "<hub>-relay")
+	// granted the minimum privileges needed by `scion server --role relay`
+	// after schema migration runs (CONNECT on current_database() and USAGE on
+	// current_schema() when absent, plus table privileges on relay_instances,
+	// conduit_sessions, conduit_principal_epochs and SELECT on hub_settings).
+	// Ignored on SQLite and on `--role relay`.
+	RelayRole string `json:"relayRole,omitempty" yaml:"relayRole,omitempty" koanf:"relayRole"`
+
 	// TxDiagnostics configures the hub's transaction-hold and lock-wait
 	// diagnostics (WARN lines and metrics). See TxDiagnosticsSettings.
 	TxDiagnostics TxDiagnosticsConfig `json:"tx_diagnostics" yaml:"tx_diagnostics" koanf:"tx_diagnostics"`

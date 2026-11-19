@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/spf13/cobra"
 )
 
@@ -110,6 +111,10 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	relayRole, err := serverMigrateRelayRole()
+	if err != nil {
+		return err
+	}
 
 	_, _ = fmt.Fprintf(out, "Opening source (read-only): %s\n", srcPath)
 	src, err := entc.OpenSQLiteReadOnly(srcDSN)
@@ -132,6 +137,9 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintln(out, "Ensuring destination schema (auto-migrate)")
 	if err := migrateHubSchema(ctx, dst, allowShadowed, true); err != nil {
 		return fmt.Errorf("destination: %w", err)
+	}
+	if err := entadapter.EnsureRelayRoleGrants(ctx, dst, relayRole, nil); err != nil {
+		return fmt.Errorf("destination relay role grants: %w", err)
 	}
 
 	_, _ = fmt.Fprintln(out, "Migrating entities...")
@@ -235,6 +243,14 @@ func serverMigrateAllowShadowedSchema() (bool, error) {
 		return false, fmt.Errorf("loading server config for server.database.allow_shadowed_schema: %w", err)
 	}
 	return cfg.Database.AllowShadowedSchema, nil
+}
+
+func serverMigrateRelayRole() (string, error) {
+	cfg, err := config.LoadGlobalConfig(serverConfigPath)
+	if err != nil {
+		return "", fmt.Errorf("loading server config for server.database.relay_role: %w", err)
+	}
+	return cfg.Database.RelayRole, nil
 }
 
 // dropSQLiteFile removes the SQLite database file and any WAL/SHM/journal

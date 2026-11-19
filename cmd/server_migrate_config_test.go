@@ -91,3 +91,42 @@ func TestServerMigrateAllowShadowedSchema(t *testing.T) {
 		assert.True(t, errors.Is(err, config.ErrRuntimeBrokerInstancesInServerYAML), "got %v", err)
 	})
 }
+
+func TestServerMigrateRelayRole(t *testing.T) {
+	isolate := func(t *testing.T) string {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Chdir(t.TempDir())
+		orig := serverConfigPath
+		t.Cleanup(func() { serverConfigPath = orig })
+		serverConfigPath = ""
+		return home
+	}
+
+	t.Run("default empty", func(t *testing.T) {
+		isolate(t)
+		role, err := serverMigrateRelayRole()
+		require.NoError(t, err)
+		assert.Empty(t, role)
+	})
+
+	t.Run("environment override", func(t *testing.T) {
+		isolate(t)
+		t.Setenv("SCION_SERVER_DATABASE_RELAYROLE", "tfha-gke-h3-relay")
+		role, err := serverMigrateRelayRole()
+		require.NoError(t, err)
+		assert.Equal(t, "tfha-gke-h3-relay", role)
+	})
+
+	t.Run("settings file override", func(t *testing.T) {
+		home := isolate(t)
+		dir := filepath.Join(home, config.GlobalDir)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(
+			"schema_version: \"1\"\nserver:\n  database:\n    driver: postgres\n    relay_role: tfha-gke-h3-relay\n"), 0o600))
+		role, err := serverMigrateRelayRole()
+		require.NoError(t, err)
+		assert.Equal(t, "tfha-gke-h3-relay", role)
+	})
+}

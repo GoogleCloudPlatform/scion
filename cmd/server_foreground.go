@@ -2057,6 +2057,7 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// unless server.database.allow_shadowed_schema is set. Only hub startup
 	// enables this check.
 	s.EnableSchemaShadowGuard(cfg.Database.AllowShadowedSchema)
+	s.SetRelayRole(cfg.Database.RelayRole)
 
 	// On SQLite, snapshot the database when the migration (after
 	// PreMigrate) is about to apply declared ON DELETE actions to orphaned
