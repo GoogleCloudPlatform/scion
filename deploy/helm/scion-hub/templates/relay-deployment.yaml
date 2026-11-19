@@ -1,0 +1,240 @@
+{{/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+{{- include "scion-hub.assertNoCredentialsInValues" . }}
+{{- $r := .Values.relay | default (dict) }}
+{{- $podAnnotations := $r.podAnnotations | default dict }}
+{{- $podLabels := $r.podLabels | default dict }}
+{{- if hasKey $podAnnotations "scion.dev/hub-id" }}
+{{- fail "relay.podAnnotations may not set scion.dev/hub-id: it is rendered from hub.hubId." }}
+{{- end }}
+{{- range $k := keys (include "scion-hub.relaySelectorLabels" . | fromYaml) }}
+{{- if hasKey $podLabels $k }}
+{{- fail (printf "relay.podLabels may not set %s: it is an immutable selector label." $k) }}
+{{- end }}
+{{- end }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" $podAnnotations "source" "relay.podAnnotations") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" $podLabels "source" "relay.podLabels") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" ($r.nodeSelector | default dict) "source" "relay.nodeSelector") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" ($r.tolerations | default list) "source" "relay.tolerations") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" ($r.affinity | default dict) "source" "relay.affinity") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" ($r.topologySpreadConstraints | default list) "source" "relay.topologySpreadConstraints") }}
+{{- include "scion-hub.assertRelayExtraEnv" . }}
+{{- if eq (include "scion-hub.relayEnabled" .) "true" }}
+{{- $hubId := include "scion-hub.hubId" . }}
+{{- $conduitCfg := include "scion-hub.conduitConfig" . | fromYaml }}
+{{- $relayTls := include "scion-hub.relayTls" . | fromYaml }}
+{{- if not $relayTls }}
+{{- fail "separate Conduit Relay pods require conduit.internalTls (enabled with conduit.internalTls.existingSecret)." }}
+{{- end }}
+{{- include "scion-hub.assertRelayPorts" . }}
+{{- $probes := $r.probes | default dict }}
+{{- $startup := $probes.startup | default dict }}
+{{- $readiness := $probes.readiness | default dict }}
+{{- $liveness := $probes.liveness | default dict }}
+{{- $startupEnabled := ternary true $startup.enabled (eq (toString $startup.enabled) "<nil>") }}
+{{- if and $liveness.enabled (not $startupEnabled) }}
+{{- fail "relay.probes.liveness.enabled is true while relay.probes.startup.enabled is false; enable the startup probe so liveness does not kill relay pods while waiting on database readiness." }}
+{{- end }}
+{{- $useCloudsql := and (eq .Values.database.driver "postgres") .Values.cloudsql.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scion-hub.relayFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scion-hub.relayLabels" . | nindent 4 }}
+  {{- if eq (include "scion-hub.relayImageCheck" .) "unverified" }}
+  annotations:
+    scion.dev/relay-tls-image-check: unverified
+  {{- end }}
+spec:
+  replicas: {{ int (default 2 $r.replicaCount) }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "scion-hub.relaySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "scion-hub.relayLabels" . | nindent 8 }}
+        {{- with $podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        scion.dev/hub-id: {{ $hubId | quote }}
+        checksum/relay-settings: {{ include "scion-hub.relaySettingsChecksum" . }}
+        {{- with $podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "scion-hub.relayServiceAccountName" . }}
+      terminationGracePeriodSeconds: {{ int (default 45 $r.terminationGracePeriodSeconds) }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "scion-hub.nonRootSecurityContext" . | nindent 8 }}
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if and $useCloudsql .Values.cloudsql.nativeSidecar }}
+      {{- with (include "scion-hub.nativeSidecarGuard" (dict "major" .Capabilities.KubeVersion.Major "minor" .Capabilities.KubeVersion.Minor "version" .Capabilities.KubeVersion.Version)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      initContainers:
+        {{- include "scion-hub.relayCloudsqlProxyContainer" . | nindent 8 }}
+          restartPolicy: Always
+      {{- end }}
+      containers:
+        - name: relay
+          image: {{ include "scion-hub.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            {{- include "scion-hub.relayArgs" . | nindent 12 }}
+          env:
+            - name: HOME
+              value: {{ .Values.hub.home | quote }}
+            {{- if $conduitCfg.existingPeerSecret }}
+            - name: SCION_SERVER_HUB_CONDUIT_PEERSECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $conduitCfg.existingPeerSecret }}
+                  key: {{ $conduitCfg.existingPeerSecretKey }}
+            {{- end }}
+            {{- $userPodName := false }}
+            {{- $userPodIP := false }}
+            {{- range $entry := ($r.extraEnv | default list) }}
+            {{- if eq (toString (dig "name" "" $entry)) "POD_NAME" }}{{- $userPodName = true }}{{- end }}
+            {{- if eq (toString (dig "name" "" $entry)) "POD_IP" }}{{- $userPodIP = true }}{{- end }}
+            {{- end }}
+            {{- if not $userPodName }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
+            {{- if not $userPodIP }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            {{- end }}
+            {{- with $r.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ int (default 8080 $r.port) }}
+              protocol: TCP
+            - name: relay-tls
+              containerPort: {{ int $relayTls.port }}
+              protocol: TCP
+          {{- if $startupEnabled }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ int (default 5 $startup.periodSeconds) }}
+            failureThreshold: {{ int (default 60 $startup.failureThreshold) }}
+            timeoutSeconds: {{ int (default 3 $startup.timeoutSeconds) }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ int (default 10 $readiness.periodSeconds) }}
+            timeoutSeconds: {{ int (default 3 $readiness.timeoutSeconds) }}
+            failureThreshold: {{ int (default 3 $readiness.failureThreshold) }}
+          {{- if $liveness.enabled }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: {{ int (default 15 $liveness.periodSeconds) }}
+            failureThreshold: {{ int (default 3 $liveness.failureThreshold) }}
+            timeoutSeconds: {{ int (default 3 $liveness.timeoutSeconds) }}
+          {{- end }}
+          securityContext:
+            {{- include "scion-hub.nonRootSecurityContext" . | nindent 12 }}
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          {{- with $r.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: scion-home
+              mountPath: {{ include "scion-hub.scionDir" . | quote }}
+            - name: relay-settings
+              mountPath: {{ printf "%s/settings.yaml" (include "scion-hub.scionDir" .) | quote }}
+              subPath: settings.yaml
+              readOnly: true
+            - name: relay-tls
+              mountPath: {{ $relayTls.certDir | quote }}
+              readOnly: true
+            - name: relay-tls-ca
+              mountPath: {{ $relayTls.caDir | quote }}
+              readOnly: true
+        {{- if and $useCloudsql (not .Values.cloudsql.nativeSidecar) }}
+        {{- include "scion-hub.relayCloudsqlProxyContainer" . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: scion-home
+          emptyDir: {}
+        - name: relay-settings
+          secret:
+            secretName: {{ include "scion-hub.relaySettingsSecretName" . }}
+            defaultMode: 0444
+            items:
+              - key: settings.yaml
+                path: settings.yaml
+        - name: relay-tls
+          secret:
+            secretName: {{ $relayTls.secret }}
+            defaultMode: 0444
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: relay-tls-ca
+          secret:
+            secretName: {{ $relayTls.caSecret }}
+            defaultMode: 0444
+            items:
+              - key: {{ $relayTls.caKey }}
+                path: ca.crt
+      {{- with $r.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $r.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

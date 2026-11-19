@@ -35,6 +35,22 @@
           "minLength": 1
         }
       }
+    },
+    "pdbBudgetValue": {
+      "oneOf": [
+        {"type": "integer", "minimum": 0},
+        {"type": "string", "pattern": "^(|0|[1-9][0-9]*|(100|[1-9]?[0-9])%)$"}
+      ]
+    },
+    "pdb": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "minAvailable": {"$ref": "#/$defs/pdbBudgetValue"},
+        "maxUnavailable": {"$ref": "#/$defs/pdbBudgetValue"}
+      }
     }
   },
   "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "cloudsql", "storage", "secrets", "auth"],
@@ -220,6 +236,15 @@
         },
         "affinity": {
           "type": "object"
+        },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "pdb": {
+          "$ref": "#/$defs/pdb"
         },
         "terminationGracePeriodSeconds": {
           "type": "integer",
@@ -627,14 +652,36 @@
     "conduit": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The conduit relay's internal hop between hub nodes.",
+      "description": "Conduit relay mode, relay-peer authentication, and internal hop TLS.",
       "properties": {
+        "relayMode": {
+          "type": "string",
+          "enum": ["in_process", "external"],
+          "description": "Conduit relay topology: in_process (default) or external (separate relay pods)."
+        },
+        "peerAuth": {
+          "type": "string",
+          "enum": ["auto", "hmac", "oidc"],
+          "description": "Relay-peer authentication mode rendered as server.hub.conduit.peer_auth."
+        },
+        "existingPeerSecret": {
+          "type": "string",
+          "description": "Name of a Secret holding the shared relay-peer secret."
+        },
+        "existingPeerSecretKey": {
+          "type": "string",
+          "description": "Key inside conduit.existingPeerSecret holding the peer secret (defaults to SCION_SERVER_HUB_CONDUIT_PEERSECRET)."
+        },
+        "peerSecret": {
+          "type": "string",
+          "description": "Inline relay-peer secret rendered into the settings Secret(s) and redacted from checksum annotations. Mutually exclusive with conduit.existingPeerSecret."
+        },
         "internalTls": {
           "type": "object",
           "additionalProperties": false,
           "description": "When enabled resolves to on (see enabled), rendered as server.hub.conduit.internal_listen and internal_tls_* with the Secret mounted: native TLS on the relay listener. A non-loopback relay listener without TLS is refused at render.",
           "properties": {
-            "enabled": {"oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["auto"]}], "description": "true, false or auto (on when replicaCount is above one)."},
+            "enabled": {"oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["auto"]}], "description": "true, false or auto (on when replicaCount is above one or conduit.relayMode is external)."},
             "port": {"type": "integer", "minimum": 1, "maximum": 65535},
             "existingSecret": {"type": "string", "description": "kubernetes.io/tls Secret with tls.crt and tls.key. Required when enabled."},
             "caSecret": {"type": "string", "description": "Secret holding the CA bundle. Empty means existingSecret."},
@@ -759,6 +806,148 @@
         "requireStableSigningKey": {
           "type": "boolean",
           "description": "When true the hub refuses to start rather than fall back to a per-process signing key. That fallback is fatal across replicas and silent: each pod signs tokens the others reject, which presents as intermittent logouts."
+        }
+      }
+    },
+    "relay": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Separate Conduit Relay Deployment (`scion server start --role relay`).",
+      "properties": {
+        "enabled": {
+          "oneOf": [
+            {"type": "boolean"},
+            {"type": "string", "enum": ["auto"]}
+          ],
+          "description": "true, false or auto (on when conduit.relayMode is external)."
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "publicUrl": {
+          "type": "string"
+        },
+        "hubInternalUrl": {
+          "type": "string"
+        },
+        "trustedProxies": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "args": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "extraEnv": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "resources": {
+          "type": "object"
+        },
+        "podAnnotations": {
+          "type": "object"
+        },
+        "podLabels": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "nodeSelector": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "affinity": {
+          "type": "object"
+        },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "probes": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "startup": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "periodSeconds": {"type": "integer", "minimum": 1},
+                "failureThreshold": {"type": "integer", "minimum": 1},
+                "timeoutSeconds": {"type": "integer", "minimum": 1}
+              }
+            },
+            "readiness": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "periodSeconds": {"type": "integer", "minimum": 1},
+                "timeoutSeconds": {"type": "integer", "minimum": 1},
+                "failureThreshold": {"type": "integer", "minimum": 1}
+              }
+            },
+            "liveness": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {"type": "boolean"},
+                "periodSeconds": {"type": "integer", "minimum": 1},
+                "failureThreshold": {"type": "integer", "minimum": 1},
+                "timeoutSeconds": {"type": "integer", "minimum": 1}
+              }
+            }
+          }
+        },
+        "serviceAccount": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "create": {"type": "boolean"},
+            "name": {"type": "string"},
+            "gcpServiceAccount": {
+              "type": "string",
+              "pattern": "^(|[^@\\s]+@[^@\\s]+\\.iam\\.gserviceaccount\\.com)$"
+            },
+            "annotations": {"type": "object"}
+          }
+        },
+        "pdb": {
+          "$ref": "#/$defs/pdb"
+        },
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "auth": {
+              "type": "string",
+              "enum": ["", "iam", "password"]
+            },
+            "user": {"type": "string"},
+            "password": {"type": "string"},
+            "maxOpenConns": {"type": "integer", "minimum": 2},
+            "maxIdleConns": {"type": "integer", "minimum": 0},
+            "connMaxLifetime": {
+              "type": "string",
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$"
+            },
+            "connMaxIdleTime": {
+              "type": "string",
+              "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$"
+            }
+          }
         }
       }
     }

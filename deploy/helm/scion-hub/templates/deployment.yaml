@@ -48,6 +48,9 @@ carries operator-supplied text into the pod spec, add a call beside these.
 {{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.nodeSelector | default dict) "source" "hub.nodeSelector") }}
 {{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.tolerations | default list) "source" "hub.tolerations") }}
 {{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.affinity | default dict) "source" "hub.affinity") }}
+{{- include "scion-hub.assertNoCredentialTree" (dict "value" (.Values.hub.topologySpreadConstraints | default list) "source" "hub.topologySpreadConstraints") }}
+{{- $_ := include "scion-hub.pdbBudget" (dict "pdb" (.Values.hub.pdb | default dict) "prefix" "hub.pdb") }}
+{{- $conduitCfg := include "scion-hub.conduitConfig" . | fromYaml }}
 {{- $strategy := include "scion-hub.updateStrategyType" . }}
 {{- include "scion-hub.assertExtraEnv" . }}
 {{- /*
@@ -339,6 +342,13 @@ spec:
                   name: {{ include "scion-hub.sessionSecretName" . }}
                   key: {{ include "scion-hub.sessionSecretKey" . }}
             {{- end }}
+            {{- if $conduitCfg.existingPeerSecret }}
+            - name: SCION_SERVER_HUB_CONDUIT_PEERSECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $conduitCfg.existingPeerSecret }}
+                  key: {{ $conduitCfg.existingPeerSecretKey }}
+            {{- end }}
             {{- /*
             The namespace the hub is running in, which it reads to decide where
             to create agent pods when no namespace is configured. There is no
@@ -612,5 +622,9 @@ spec:
       {{- end }}
       {{- with .Values.hub.affinity }}
       affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}

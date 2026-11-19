@@ -492,6 +492,33 @@ including one set through `config.extra`. `conduit.internalTls` is refused
 together with `config.existingSecret`; put the same keys in your own settings
 file instead.
 
+### Separate Conduit Relays and PodDisruptionBudgets
+
+Setting `conduit.relayMode: external` moves Conduit session hosting out of the
+hub pods into a separate `Deployment` running `scion server start --role relay`
+(see [Separate Conduit Relays](/scion/hosted/ha/separate-relay/)):
+
+- **Peer authentication:** set `conduit.existingPeerSecret` (preferred; read as
+  `SCION_SERVER_HUB_CONDUIT_PEERSECRET` via `secretKeyRef`) or
+  `conduit.peerSecret` (redacted from `checksum/settings` and
+  `checksum/relay-settings` annotations), and set `conduit.peerAuth: hmac` when
+  using proxy ingress (`server.hub.conduit.ingress: proxy`).
+- **Internal hop Service:** when `conduit.relayMode: external` (or
+  `relay.enabled: true`), `conduit.internalTls` auto-enables and the chart
+  renders an internal `ClusterIP` `Service` `<fullname>-relay` on
+  `conduit.internalTls.port` (`9443`) so relay pods reach
+  `server.relay.hub_internal_url` (`https://<fullname>-relay.<namespace>.svc:9443`).
+- **Relay isolation & probes:** `relay.*` renders a dedicated `Deployment`,
+  `ServiceAccount` (`relay.serviceAccount.gcpServiceAccount`), optional
+  `PodDisruptionBudget` (`relay.pdb`), and isolated settings `Secret`
+  (`<fullname>-relay-settings`) carrying no hub session secret, OAuth
+  credentials, GCS storage config, or Secret Manager config. Relay HTTP probes
+  target `/healthz` (`--role relay` serves no `/readyz`).
+- **Disruption budgets & topology spread:** enable `hub.pdb.enabled: true` /
+  `relay.pdb.enabled: true` (`minAvailable` or `maxUnavailable`) and
+  `hub.topologySpreadConstraints` / `relay.topologySpreadConstraints` for
+  multi-replica availability across zones.
+
 The readiness and startup probes target `/readyz` on the hub's web port
 (`hub.webPort`, default 8080). The path cannot be changed. The liveness probe is
 off by default. When `probes.liveness.enabled` is `true`, it is a TCP check on

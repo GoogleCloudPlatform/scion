@@ -119,7 +119,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=5
-EXPECTED_ASSERTIONS=459   # 49 chart-integrity + 298 render-guards + 60 reserved-flags + 4 update-strategy + 48 rbac-collision.
+EXPECTED_ASSERTIONS=487   # 55 chart-integrity + 320 render-guards + 60 reserved-flags + 4 update-strategy + 48 rbac-collision.
 EXPECTED_FILES=8        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 # 🛑 [HISTORY 2026-08-17] EXPECTED_FILES SHIPPED WRONG FOR AN HOUR BECAUSE A
 # CONFLICT RESOLUTION TOOK BOTH LINES AS A UNIT. The rebase onto main deleted

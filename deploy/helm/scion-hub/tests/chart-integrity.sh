@@ -73,7 +73,7 @@ BASE=("${BASE_NO_SECRET[@]}" --set auth.sessionSecret=chart-integrity-not-a-real
 # honest encoding of the hold, and bumping it would be the defeat gd-p0-dev
 # warned about. Lifting the hold is a two-line change: 26 -> 35 here, and
 # 107 -> 116 in run-all.sh, in one diff.
-EXPECTED_TOTAL=49
+EXPECTED_TOTAL=55
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output
@@ -211,12 +211,18 @@ EXPECTED_FILES=(
   scion-hub/templates/_helpers.tpl
   scion-hub/templates/configmap-env.yaml
   scion-hub/templates/deployment.yaml
+  scion-hub/templates/pdb.yaml
   scion-hub/templates/rbac-clusterrole.yaml
   scion-hub/templates/rbac-clusterrolebinding.yaml
   scion-hub/templates/rbac-role.yaml
   scion-hub/templates/rbac-rolebinding.yaml
+  scion-hub/templates/relay-deployment.yaml
+  scion-hub/templates/relay-pdb.yaml
+  scion-hub/templates/relay-secret-settings.yaml
+  scion-hub/templates/relay-serviceaccount.yaml
   scion-hub/templates/secret-session.yaml
   scion-hub/templates/secret-settings.yaml
+  scion-hub/templates/service-relay.yaml
   scion-hub/templates/service.yaml
   scion-hub/templates/serviceaccount.yaml
 )
