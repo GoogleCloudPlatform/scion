@@ -35,10 +35,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -141,28 +142,64 @@ func TestGitHubTriggerAuthoring_FlagSourceIDMatchTypesAssociationAndAgentRules(t
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Equal(t, ErrCodeGitHubNotAssociated, decodeAPIErrorCode(t, rec))
 
-	// 4. Cold-cache creator-proof case: creator holds a stored GITHUB_TOKEN, caches are cold,
-	// and GitHubAppStatus is unchecked -> accepted WITHOUT calling GitHub.
-	require.NoError(t, f.srv.secretBackend.Set(ctx, "GITHUB_TOKEN", "ghp_owner_token", "user", f.owner.ID))
-	proj, err = f.store.GetProject(ctx, f.projectID)
+	// 4. Cold-cache creator-proof case on a project whose CreatedBy is persisted at creation time:
+	// first without GITHUB_TOKEN -> 409, then with stored GITHUB_TOKEN + cold caches -> 201 with 0 GitHub HTTP calls.
+	creatorInstCopy := instID
+	creatorProj := createAssocProject(t, f.store, "g1b-creator-proj", remote, f.owner.ID, &creatorInstCopy)
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, creatorProj.ID, f.owner.ID))
+	creatorTarget := &store.Agent{
+		ID:        tid("g1b-creator-target"),
+		Slug:      "creator-target",
+		Name:      "creator-target",
+		ProjectID: creatorProj.ID,
+		Phase:     string(state.PhaseRunning),
+		CreatedBy: f.owner.ID,
+		OwnerID:   f.owner.ID,
+		Ancestry:  []string{f.owner.ID},
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, creatorTarget))
+	doCreatorTrigger := func(body any) *httptest.ResponseRecorder {
+		path := "/api/v1/projects/" + creatorProj.ID + "/triggers"
+		req := authoredRequest(t, f.ownerAuth, http.MethodPost, path, body)
+		w := httptest.NewRecorder()
+		f.srv.handleTriggers(w, req, creatorProj.ID, "")
+		return w
+	}
+
+	// No stored GITHUB_TOKEN yet -> 409 github_not_associated.
+	rec = doCreatorTrigger(CreateTriggerRequest{
+		Name:   "gh-creator-no-token",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: creatorTarget.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeGitHubNotAssociated, decodeAPIErrorCode(t, rec))
+
+	// Store user-scope GITHUB_TOKEN for f.owner.ID while caches stay cold.
+	_, _, err = f.srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GITHUB_TOKEN",
+		Value:      "ghp_owner_token",
+		SecretType: secret.TypeEnvironment,
+		Scope:      secret.ScopeUser,
+		ScopeID:    f.owner.ID,
+	})
 	require.NoError(t, err)
-	f.srv.setGitHubInstallationAssociation(proj, instID)
-	require.NoError(t, f.store.UpdateProject(ctx, proj))
 
 	// Empty match.types on source.kind == "github" -> 400 (no webhook.received default).
-	rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+	rec = doCreatorTrigger(CreateTriggerRequest{
 		Name:   "gh-missing-types",
 		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
-		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.targetAgent.ID, Message: "hi"},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: creatorTarget.ID, Message: "hi"},
 	})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 
 	// Valid cold-cache creator-proof create -> 201 Created, zero GitHub HTTP calls.
-	rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+	rec = doCreatorTrigger(CreateTriggerRequest{
 		Name:   "gh-cold-creator-ok",
 		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
 		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
-		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.targetAgent.ID, Message: "Check PR comment"},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: creatorTarget.ID, Message: "Check PR comment"},
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var createdCold TriggerResponse
@@ -176,20 +213,20 @@ func TestGitHubTriggerAuthoring_FlagSourceIDMatchTypesAssociationAndAgentRules(t
 	assert.Empty(t, mints, "authoring must never mint a GitHub token")
 
 	// 5. If GitHubAppStatus shows association_unauthorized, cold-cache creator-proof refuses with 409.
-	proj, err = f.store.GetProject(ctx, f.projectID)
+	creatorProj, err = f.store.GetProject(ctx, creatorProj.ID)
 	require.NoError(t, err)
-	f.srv.updateProjectGitHubAppStatus(ctx, proj, store.GitHubAppStateError, githubAppErrAssociationUnauthorized, "denied")
-	rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+	f.srv.updateProjectGitHubAppStatus(ctx, creatorProj, store.GitHubAppStateError, githubAppErrAssociationUnauthorized, "denied")
+	rec = doCreatorTrigger(CreateTriggerRequest{
 		Name:   "gh-status-unauthorized",
 		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
 		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
-		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.targetAgent.ID, Message: "hi"},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: creatorTarget.ID, Message: "hi"},
 	})
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Equal(t, ErrCodeGitHubNotAssociated, decodeAPIErrorCode(t, rec))
 
 	// 6. Warm association report cache answers directly (both false and true) with 0 GitHub calls.
-	now := timeNow()
+	now := time.Now()
 	f.srv.githubAssociationReportCache.mu.Lock()
 	f.srv.githubAssociationReportCache.valid = true
 	f.srv.githubAssociationReportCache.generatedAt = now
@@ -342,6 +379,7 @@ func postSignedGitHubDelivery(
 
 func TestGitHubTriggerE2E_SignedWebhookToFakeAgentHistoryRedeliveryAndRefusal(t *testing.T) {
 	f := setupTriggersTestFixture(t)
+	enableWriteDenySwitch(t, f.srv)
 	ctx := context.Background()
 
 	const (

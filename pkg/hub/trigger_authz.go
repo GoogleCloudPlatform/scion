@@ -360,10 +360,11 @@ func (s *Server) resolveTriggerWebhookSource(w http.ResponseWriter, r *http.Requ
 }
 
 // authorizeTriggerMessageAuthoring validates a Stage 1 message action spec
-// through the shared HTTP-free target rule (messageAction.Validate), updating
-// spec with the authoritative AgentID and display AgentName and returning the
-// canonical JSON action_payload.
-func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http.Request, projectID string, spec *TriggerActionSpec) (string, bool) {
+// through the shared HTTP-free target rule (messageAction.Validate), enforcing
+// self-only targeting for agent callers on github triggers (Stage 3 §8.1),
+// updating spec with the authoritative AgentID and display AgentName, and
+// returning the canonical JSON action_payload.
+func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http.Request, projectID, sourceKind string, spec *TriggerActionSpec) (string, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -394,6 +395,17 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 	var resolved MessageEventPayload
 	if err := json.Unmarshal([]byte(normalized), &resolved); err != nil {
 		InternalError(w)
+		return "", false
+	}
+	if sourceKind == store.TriggerSourceKindGitHub && identity.Type() == "agent" && resolved.AgentID != identity.ID() {
+		logAuthzDenial(r, identity, Resource{
+			Type:       permissions.ResourceAgent,
+			ID:         resolved.AgentID,
+			ParentType: permissions.ResourceProject,
+			ParentID:   projectID,
+		}, ActionMessage, "github trigger message authoring: agent caller may only target itself")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"agent callers may only target themselves on github triggers", nil)
 		return "", false
 	}
 	spec.AgentID = resolved.AgentID

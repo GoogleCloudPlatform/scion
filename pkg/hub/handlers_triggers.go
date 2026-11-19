@@ -352,19 +352,18 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	sourceKind := strings.TrimSpace(req.Source.Kind)
-	var resolvedSourceID string
 	switch sourceKind {
 	case store.TriggerSourceKindWebhook:
-		ep, ok := s.resolveTriggerWebhookSource(w, r, projectID, req.Source.ID)
-		if !ok {
-			return
-		}
-		resolvedSourceID = ep.ID
 	case store.TriggerSourceKindGitHub:
-		if !s.authorizeGitHubTriggerSource(w, r, project, req.Source.ID) {
+		if !s.githubTriggersEnabled() {
+			writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+				"GitHub triggers require the hub.github_triggers experiment to be enabled", nil)
 			return
 		}
-		resolvedSourceID = ""
+		if req.Source.ID != "" {
+			ValidationError(w, "source.id must be empty for github triggers", nil)
+			return
+		}
 	default:
 		ValidationError(w, fmt.Sprintf("unsupported source kind %q (supported: %s, %s)",
 			sourceKind, store.TriggerSourceKindWebhook, store.TriggerSourceKindGitHub), nil)
@@ -383,12 +382,27 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
+	var resolvedSourceID string
+	switch sourceKind {
+	case store.TriggerSourceKindWebhook:
+		ep, ok := s.resolveTriggerWebhookSource(w, r, projectID, req.Source.ID)
+		if !ok {
+			return
+		}
+		resolvedSourceID = ep.ID
+	case store.TriggerSourceKindGitHub:
+		if !s.authorizeGitHubTriggerSource(w, r, project, req.Source.ID) {
+			return
+		}
+		resolvedSourceID = ""
+	}
+
 	actionType := strings.TrimSpace(req.Action.Type)
 	if actionType != store.TriggerActionMessage {
 		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s)", actionType, store.TriggerActionMessage), nil)
 		return
 	}
-	actionPayload, ok := s.authorizeTriggerMessageAuthoring(w, r, projectID, &req.Action)
+	actionPayload, ok := s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &req.Action)
 	if !ok {
 		return
 	}
@@ -547,13 +561,13 @@ func (s *Server) getTrigger(w http.ResponseWriter, r *http.Request, projectID, t
 	writeJSON(w, http.StatusOK, buildTriggerResponse(*tr))
 }
 
-func (s *Server) authorizeStoredTriggerAction(w http.ResponseWriter, r *http.Request, projectID, actionType, rawPayload string) (string, bool) {
+func (s *Server) authorizeStoredTriggerAction(w http.ResponseWriter, r *http.Request, projectID, sourceKind, actionType, rawPayload string) (string, bool) {
 	if actionType != store.TriggerActionMessage {
 		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s)", actionType, store.TriggerActionMessage), nil)
 		return "", false
 	}
 	spec := buildTriggerActionSpec(actionType, rawPayload)
-	return s.authorizeTriggerMessageAuthoring(w, r, projectID, &spec)
+	return s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &spec)
 }
 
 func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID, triggerID string) {
@@ -763,7 +777,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s)", actionType, store.TriggerActionMessage), nil)
 			return
 		}
-		actionPayload, ok := s.authorizeTriggerMessageAuthoring(w, r, projectID, req.Action)
+		actionPayload, ok := s.authorizeTriggerMessageAuthoring(w, r, projectID, tr.SourceKind, req.Action)
 		if !ok {
 			return
 		}
@@ -827,7 +841,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			}
 		}
 		if req.Action == nil {
-			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.ActionType, tr.ActionPayload)
+			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, tr.ActionType, tr.ActionPayload)
 			if !ok {
 				return
 			}
@@ -992,7 +1006,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}, false); !ok {
 		return
 	}
-	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.ActionType, tr.ActionPayload)
+	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, tr.ActionType, tr.ActionPayload)
 	if !ok {
 		return
 	}
