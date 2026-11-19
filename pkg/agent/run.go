@@ -1080,7 +1080,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			h = resolved.Harness
 			aliasHarness = resolved.Config.Harness
 			noAuthConfig = resolved.Config.NoAuthConfig
-			resolvedHarnessArgs = resolved.Config.Args
+			// Scope settings-merged harness args fallback to the generic
+			// harness so existing non-generic harnesses keep their prior
+			// command behavior when settings.yaml carries harness args
+			// (ptone/scion#5082).
+			if resolved.Config.Harness == "generic" {
+				resolvedHarnessArgs = resolved.Config.Args
+			}
 			resolvedHCDir = resolved.ConfigDir
 			if resolved.ConfigDir != nil {
 				harnessConfigRevision = config.ComputeHarnessConfigRevision(resolved.ConfigDir.Path)

@@ -1637,7 +1637,11 @@ func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) err
 	if rt.HarnessConfigDir != nil {
 		hcSource = rt.HarnessConfigDir.Source
 	}
-	runTask, baseCmdArgs := resolveBaseCommandInputs(rt.Config, entry.Args, opts.Task)
+	var entryArgs []string
+	if entry.Harness == "generic" {
+		entryArgs = entry.Args
+	}
+	runTask, baseCmdArgs := resolveBaseCommandInputs(rt.Config, entryArgs, opts.Task)
 	return harness.ValidateEntryCommand(hcSource, entry, runTask, harnessResume(opts), baseCmdArgs)
 }
 
@@ -2530,7 +2534,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// See docs-site/src/content/docs/reference/settings-precedence.md.
 	hcImage := hcDir.Config.Image
 	hcPullPolicy := hcDir.Config.ImagePullPolicy
-	hcArgs := hcDir.Config.Args
 	if settings != nil {
 		if settingsHC, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil {
 			if settingsHC.Image != "" {
@@ -2539,9 +2542,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 			if settingsHC.ImagePullPolicy != "" {
 				hcPullPolicy = settingsHC.ImagePullPolicy
-			}
-			if len(settingsHC.Args) > 0 {
-				hcArgs = settingsHC.Args
 			}
 		}
 	}
@@ -2554,8 +2554,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if hcDir.Config.Model != "" {
 		hcCfg.Model = hcDir.Config.Model
 	}
-	if len(hcArgs) > 0 {
-		hcCfg.CommandArgs = hcArgs
+	if len(hcDir.Config.Args) > 0 {
+		hcCfg.CommandArgs = hcDir.Config.Args
 	}
 	if hcDir.Config.TaskFlag != "" {
 		hcCfg.TaskFlag = hcDir.Config.TaskFlag

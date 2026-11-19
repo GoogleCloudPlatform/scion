@@ -352,4 +352,41 @@ func TestStart_GenericHarnessValidStartsUnchanged(t *testing.T) {
 			t.Errorf("command = %v, want [claude]", got)
 		}
 	})
+
+	t.Run("non-generic harness command is unchanged when settings args are present", func(t *testing.T) {
+		extraSettings := "harness_configs:\n  claude:\n    harness: claude\n    args: [\"--unexpected-from-settings\"]\n"
+		projectScionDir := setupGenericHarnessProject(t, extraSettings)
+		hcDir := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "claude")
+		if err := os.MkdirAll(hcDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: test-image:latest\ncommand:\n  base: [\"claude\"]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		mgr := NewManager(&runtime.MockRuntime{
+			ListFunc:        func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+			ImageExistsFunc: func(context.Context, string) (bool, error) { return true, nil },
+			RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+				got = cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
+				return "mock-id", nil
+			},
+		})
+		opts := api.StartOptions{
+			Name:          "claude-settings-args",
+			ProjectPath:   projectScionDir,
+			HarnessConfig: "claude",
+			BrokerMode:    true,
+			NoAuth:        true,
+		}
+		if err := mgr.Preflight(context.Background(), opts); err != nil {
+			t.Fatalf("Preflight: %v", err)
+		}
+		if _, err := mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if !reflect.DeepEqual(got, []string{"claude"}) {
+			t.Errorf("command = %v, want [claude] (settings args must not alter non-generic harness)", got)
+		}
+	})
 }
