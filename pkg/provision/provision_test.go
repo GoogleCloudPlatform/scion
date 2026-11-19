@@ -5026,6 +5026,28 @@ func TestProvision_WorktreePerAgent_CollidingSanitizedBranchDoesNotJoin(t *testi
 	require.NoError(t, err)
 	assert.Equal(t, wtDash, gotDashWT)
 	assert.Equal(t, []string{"agent-2"}, sharersDash)
+
+	// Also verify a valid multi-segment Git branch whose flattened legacy
+	// filename exceeds 255-byte NAME_MAX provisions cleanly once
+	// .git/scion-sharers/ already exists.
+	longBranch := "feature/" + strings.Repeat("a", 130) + "/" + strings.Repeat("b", 130)
+	require.NoError(t, ProvisionShared(ProvisionInput{
+		Resolved:        ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID:       "proj-collide-1",
+		AgentID:         "agent-3",
+		AgentName:       longBranch,
+		MountedWorktree: true,
+		NFSUID:          os.Getuid(),
+		NFSGID:          os.Getgid(),
+		Mode:            store.SharingModeWorktreePerAgent,
+		GitClone:        &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	}))
+	wtLong := WorktreePath(hostPath, "agent-3")
+	assert.Equal(t, longBranch, currentBranch(context.Background(), wtLong))
+	sharersLong, gotLongWT, err := ListSharers(hostPath, "", longBranch)
+	require.NoError(t, err)
+	assert.Equal(t, wtLong, gotLongWT)
+	assert.Equal(t, []string{"agent-3"}, sharersLong)
 }
 
 func intPtr(i int) *int { return &i }

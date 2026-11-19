@@ -28,6 +28,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // sharerMarker is the on-disk JSON shape stored per shared branch.
@@ -47,14 +48,34 @@ type sharerMarker struct {
 const (
 	sharerDir = "scion-sharers"
 
-	// maxEncodedBranchMarkerStem bounds the encoded stem before ".json" and
-	// writeMarkerAtomic's ".tmp-*" suffix so marker filenames stay well below
-	// 255-byte NAME_MAX limits across POSIX/macOS/NFS filesystems.
-	maxEncodedBranchMarkerStem = 200
+	// maxEncodedBranchMarkerStem bounds the encoded stem before ".json" (5B) and
+	// writeMarkerAtomic's ".tmp-*" suffix (~16B) so marker filenames stay <= 121
+	// bytes — well below 255-byte POSIX/NTFS NAME_MAX and 143-byte Linux
+	// eCryptfs NAME_MAX, while keeping ".git/scion-sharers/<name>" compact
+	// within Windows's 260-char MAX_PATH budget.
+	maxEncodedBranchMarkerStem = 100
 )
 
-// encodeBranchMarkerStem produces a collision-free, lowercase-ASCII filename
-// stem for branch:
+// isWindowsReservedDeviceStem reports whether stem is one of the 24 lowercase
+// ASCII device stems ("con", "prn", "aux", "nul", "com0"–"com9", "lpt0"–"lpt9")
+// that Win32 reserves in every directory even when followed by an extension.
+// Other reserved forms ("CONIN$", "CONOUT$", superscript "COM¹"–"LPT³", and
+// uppercase variants) contain bytes outside [a-z0-9-_] and are already
+// percent-escaped by encodeBranchMarkerStem's byte loop.
+func isWindowsReservedDeviceStem(stem string) bool {
+	switch len(stem) {
+	case 3:
+		return stem == "con" || stem == "prn" || stem == "aux" || stem == "nul"
+	case 4:
+		return (strings.HasPrefix(stem, "com") || strings.HasPrefix(stem, "lpt")) &&
+			stem[3] >= '0' && stem[3] <= '9'
+	default:
+		return false
+	}
+}
+
+// encodeBranchMarkerStem produces a collision-free, cross-platform-safe,
+// lowercase-ASCII filename stem for branch:
 //   - empty branch -> "%" (never produced by the byte loop, which always
 //     follows '%' with two hex digits)
 //   - bytes in [a-z0-9-_] pass through unchanged, keeping plain slug branch
@@ -62,6 +83,9 @@ const (
 //   - every other byte (including '/', '.', '%', uppercase ASCII, spaces, and
 //     non-ASCII UTF-8 bytes) is escaped as '%' + two lowercase hex digits, so
 //     distinct branches never collide even on case-insensitive filesystems
+//   - the 24 lowercase Windows reserved device stems percent-escape their
+//     first byte (e.g. "con" -> "%63on"; collision-free because [a-z] is never
+//     percent-encoded by the byte loop and literal '%' becomes "%25")
 //   - stems longer than maxEncodedBranchMarkerStem fall back to "%h-" + sha256
 //     hex ('h' is not a hex digit, so it cannot collide with escaped stems)
 func encodeBranchMarkerStem(branch string) string {
@@ -85,7 +109,11 @@ func encodeBranchMarkerStem(branch string) string {
 		sum := sha256.Sum256([]byte(branch))
 		return "%h-" + hex.EncodeToString(sum[:])
 	}
-	return b.String()
+	stem := b.String()
+	if isWindowsReservedDeviceStem(stem) {
+		return "%" + string([]byte{hexDigits[stem[0]>>4], hexDigits[stem[0]&0x0f]}) + stem[1:]
+	}
+	return stem
 }
 
 // sharerPath returns the canonical marker file path for a branch under base.
@@ -298,6 +326,9 @@ func lookupMarkerForBranch(base, projectDir, branch string) (m *sharerMarker, fo
 		return nil, "", nil, nil
 	}
 	m, _, err = readMarkerWithRaw(base, projectDir, legacy)
+	if errors.Is(err, syscall.ENAMETOOLONG) {
+		return nil, "", nil, nil
+	}
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -403,6 +434,17 @@ func hasRealWorktreeGitfile(path string) bool {
 	return err == nil
 }
 
+func relocateDisplacedLegacyMarker(p, target string, raw []byte) error {
+	if err := os.Link(p, target); err == nil || errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	_, statErr := os.Lstat(target)
+	if errors.Is(statErr, fs.ErrNotExist) {
+		return writeRawMarkerAtomic(target, raw)
+	}
+	return statErr
+}
+
 // RegisterSharer adds agentID to the sharer list for the given branch
 // worktree. The call is idempotent: re-registering an already-present agent is
 // a no-op. worktreePath is recorded so that teardown can locate the worktree
@@ -439,17 +481,6 @@ func hasRealWorktreeGitfile(path string) bool {
 // readMarker; pass "" for callers with no ProvisionAgent-layout concept.
 //
 // Callers MUST hold the per-project provisioning lock.
-func relocateDisplacedLegacyMarker(p, target string, raw []byte) error {
-	if err := os.Link(p, target); err == nil || errors.Is(err, fs.ErrExist) {
-		return nil
-	}
-	if _, statErr := os.Lstat(target); errors.Is(statErr, fs.ErrNotExist) {
-		return writeRawMarkerAtomic(target, raw)
-	} else {
-		return statErr
-	}
-}
-
 func RegisterSharer(base, projectDir, branch, worktreePath, agentID string) error {
 	p := sharerPath(base, branch)
 	m, foundPath, displaced, err := lookupMarkerForBranch(base, projectDir, branch)
@@ -505,6 +536,11 @@ func UnregisterSharer(base, projectDir, branch, agentID string) (remaining []str
 		if rerr := os.Remove(foundPath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
 			return nil, m.WorktreePath, rerr
 		}
+		if legacy := legacySharerPath(base, branch); legacy != foundPath {
+			if lm, _, lerr := readMarkerWithRaw(base, projectDir, legacy); lerr == nil && lm != nil && lm.Branch == branch {
+				_ = os.Remove(legacy)
+			}
+		}
 		return []string{}, m.WorktreePath, nil
 	}
 	if err := writeMarkerAtomic(p, m); err != nil {
@@ -554,6 +590,24 @@ func ListSharersForJoin(base, branch string) ([]string, string, error) {
 	return m.Sharers, m.WorktreePath, nil
 }
 
+// isActiveScannedMarker reports whether m read from fullPath during a
+// directory scan is the authoritative marker for m.Branch under base, matching
+// lookupMarkerForBranch's path-to-Branch invariant:
+//   - fullPath is m.Branch's canonical sharerPath, or
+//   - fullPath is m.Branch's legacySharerPath and no canonical marker for
+//     m.Branch exists on disk.
+func isActiveScannedMarker(base, fullPath string, m *sharerMarker) bool {
+	canonical := sharerPath(base, m.Branch)
+	if fullPath == canonical {
+		return true
+	}
+	if !isLegacyMarkerAtPath(base, fullPath, m.Branch) {
+		return false
+	}
+	_, err := os.Lstat(canonical)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
 // FindBranchForAgent scans all marker files under base to find which branch
 // (and worktree path) agentID is sharing. Returns found=false when the agent
 // is not present in any marker. projectDir is passed through to the read
@@ -568,7 +622,8 @@ func FindBranchForAgent(base, projectDir, agentID string) (branch, worktreePath 
 		return "", "", false, err
 	}
 	for _, name := range names {
-		m, err := readMarker(base, projectDir, filepath.Join(dir, name))
+		fullPath := filepath.Join(dir, name)
+		m, err := readMarker(base, projectDir, fullPath)
 		if err != nil {
 			// A single corrupted/unreadable marker must not block the whole
 			// scan (and thus all agent deletions). Skip it and keep looking;
@@ -577,7 +632,15 @@ func FindBranchForAgent(base, projectDir, agentID string) (branch, worktreePath 
 				"file", name, "error", err)
 			continue
 		}
-		if m != nil && slices.Contains(m.Sharers, agentID) {
+		if m == nil {
+			continue
+		}
+		if !isActiveScannedMarker(base, fullPath, m) {
+			slog.Warn("FindBranchForAgent: skipping mismatched or superseded sharer marker",
+				"file", name, "branch", m.Branch)
+			continue
+		}
+		if slices.Contains(m.Sharers, agentID) {
 			return m.Branch, m.WorktreePath, true, nil
 		}
 	}
@@ -611,8 +674,22 @@ func UnregisterSharerElsewhere(base, agentID, keep string) (rewritten []string, 
 		return nil, err
 	}
 	for _, name := range names {
-		m, err := readMarker(base, "", filepath.Join(dir, name))
-		if err != nil || m == nil || m.Branch == keep || !slices.Contains(m.Sharers, agentID) {
+		fullPath := filepath.Join(dir, name)
+		m, err := readMarker(base, "", fullPath)
+		if err != nil {
+			slog.Warn("UnregisterSharerElsewhere: skipping unreadable sharer marker",
+				"file", name, "error", err)
+			continue
+		}
+		if m == nil {
+			continue
+		}
+		if !isActiveScannedMarker(base, fullPath, m) {
+			slog.Warn("UnregisterSharerElsewhere: skipping mismatched or superseded sharer marker",
+				"file", name, "branch", m.Branch)
+			continue
+		}
+		if m.Branch == keep || !slices.Contains(m.Sharers, agentID) {
 			continue
 		}
 		remaining, _, err := UnregisterSharer(base, "", m.Branch, agentID)
