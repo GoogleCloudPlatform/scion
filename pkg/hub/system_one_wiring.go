@@ -197,11 +197,14 @@ func (s *Server) SystemOneProviderRegistry() *systemoneprovider.Registry {
 }
 
 // initSystemOneRuntime constructs the Hub's System One runtime using the
-// configured MaxEvalTime ceiling, store-backed InstanceSource, and
-// pkg/secret-backed CredentialSource.
+// configured MaxEvalTime ceiling, store-backed InstanceSource,
+// pkg/secret-backed API-key CredentialSource, and Google ADC token cache.
 func (s *Server) initSystemOneRuntime() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.systemOneADCCache == nil {
+		s.systemOneADCCache = newHubSystemOneADCCache(defaultSystemOneADCProvider)
+	}
 	s.rebuildSystemOneRuntimeLocked()
 }
 
@@ -215,7 +218,8 @@ func (s *Server) rebuildSystemOneRuntimeLocked() {
 		systemoneruntime.Config{
 			Registry:    reg,
 			Instances:   &hubSystemOneInstanceSource{srv: s},
-			Credentials: credSrc.BearerToken,
+			Credentials: credSrc.APIKeyToken,
+			TokenSource: credSrc.GoogleAccessToken,
 			MaxEvalTime: resolveSystemOneMaxEvalTime(s.config),
 			Logger:      logging.Subsystem("hub.system-one"),
 		},
@@ -360,12 +364,26 @@ type hubSystemOneCredentialSource struct {
 	srv *Server
 }
 
-// BearerToken resolves the provider API key for inst from the Hub's secret
+// BearerToken dispatches credential resolution by inst.Auth.Kind:
+// "api_key" (or empty) reads from the Hub's secret backend, and
+// "google_access_token" mints/reuses from the Hub's in-memory ADC token cache.
+func (c *hubSystemOneCredentialSource) BearerToken(ctx context.Context, inst systemoneruntime.Instance) (string, error) {
+	switch inst.Auth.Kind {
+	case "", store.SystemOneAuthKindAPIKey:
+		return c.APIKeyToken(ctx, inst)
+	case store.SystemOneAuthKindGoogleAccessToken:
+		return c.GoogleAccessToken(ctx, inst)
+	default:
+		return "", egress.ErrAuth
+	}
+}
+
+// APIKeyToken resolves the provider API key for inst from the Hub's secret
 // backend. Missing, deleted, or rejected secrets return egress.ErrAuth
 // (reason "auth"); other backend faults return egress.ErrCredentialUnavailable
 // (reason "unavailable"). Secret values and raw backend errors are never
 // included in returned errors.
-func (c *hubSystemOneCredentialSource) BearerToken(ctx context.Context, inst systemoneruntime.Instance) (string, error) {
+func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst systemoneruntime.Instance) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}

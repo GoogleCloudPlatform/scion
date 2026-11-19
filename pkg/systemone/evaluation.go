@@ -37,6 +37,7 @@ const (
 type (
 	Evaluation       = runtime.Evaluation
 	EvaluationError  = runtime.EvaluationError
+	AuthProvenance   = runtime.AuthProvenance
 	RuleRef          = runtime.RuleRef
 	AnswerRecord     = runtime.AnswerRecord
 	ThresholdCheck   = runtime.ThresholdCheck

@@ -48,10 +48,6 @@ const (
 	// pkg/systemone/egress for Gemini API-key authentication (PV3 brief §§4, 5.1).
 	HeaderAPIKey = "x-goog-api-key"
 
-	// DefaultOAuthScope is the default and minimum Google OAuth2 scope declared
-	// for keyless ADC access to the Gemini Developer API (PV3 brief Addendum B §B3).
-	DefaultOAuthScope = provider.GoogleScopeCloudPlatform
-
 	// NativeMetricConfidence is the namespaced native metric key for Gemini's
 	// documented answer confidence field (PV3 brief §5.1, provider-design §6.2).
 	NativeMetricConfidence = "gemini.confidence"
@@ -166,8 +162,7 @@ func (a *Adapter) Capabilities(_ provider.InstanceView) (provider.Capabilities, 
 				HeaderName: HeaderAPIKey,
 			},
 			string(provider.AuthKindGoogleAccessToken): {
-				Kind:   provider.AuthKindGoogleAccessToken,
-				Scopes: []string{DefaultOAuthScope},
+				Kind: provider.AuthKindGoogleAccessToken,
 			},
 		},
 		ProviderRetention: ProviderRetention,

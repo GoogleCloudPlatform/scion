@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/metrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
@@ -143,7 +142,7 @@ func TestAdminSystemOneCreate_KeyFromFileAndStdin_NeverInOutput(t *testing.T) {
 				Adapter:   captured.Adapter,
 				Model:     captured.Model,
 				Endpoint:  "https://api.typesafe.ai",
-				Auth:      store.SystemOneInstanceAuth{Kind: "api_key", SecretName: "systemone.instance.inst-001"},
+				Auth:      hubclient.SystemOneInstanceAuthDTO{Kind: "api_key", SecretName: "systemone.instance.inst-001"},
 				Enabled:   true,
 				Revision:  1,
 				CreatedAt: now,
@@ -195,7 +194,7 @@ func TestAdminSystemOneCreate_KeyFromFileAndStdin_NeverInOutput(t *testing.T) {
 				Adapter:   req.Adapter,
 				Model:     req.Model,
 				Endpoint:  "https://api.typesafe.ai",
-				Auth:      store.SystemOneInstanceAuth{Kind: "api_key", SecretName: "systemone.instance.inst-002"},
+				Auth:      hubclient.SystemOneInstanceAuthDTO{Kind: "api_key", SecretName: "systemone.instance.inst-002"},
 				Enabled:   true,
 				Revision:  1,
 				CreatedAt: now,
@@ -350,7 +349,7 @@ func TestAdminSystemOneListAndDelete(t *testing.T) {
 						Adapter:   "typesafe",
 						Model:     "jev-1.14.0",
 						Endpoint:  "https://api.typesafe.ai",
-						Auth:      store.SystemOneInstanceAuth{Kind: "api_key", SecretName: "systemone.instance.inst-10"},
+						Auth:      hubclient.SystemOneInstanceAuthDTO{Kind: "api_key", SecretName: "systemone.instance.inst-10"},
 						Enabled:   false,
 						UpdatedAt: now,
 					},

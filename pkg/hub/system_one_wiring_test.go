@@ -17,14 +17,22 @@ package hub
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -396,4 +404,335 @@ func TestIsSystemOneReservedSecretKey_SanitizedForms(t *testing.T) {
 	require.Len(t, filtered, 2)
 	assert.Equal(t, "OPENAI_API_KEY", filtered[0].Name)
 	assert.Equal(t, "SYSTEMONE_API_KEY", filtered[1].Name)
+}
+
+type funcTokenSource func() (*oauth2.Token, error)
+
+func (f funcTokenSource) Token() (*oauth2.Token, error) {
+	return f()
+}
+
+func TestSystemOneADC_CredentialJSONInspectionAndAllowedTypes(t *testing.T) {
+	t.Run("allowed_credential_categories", func(t *testing.T) {
+		credType, email, err := inspectGoogleCredentialsJSON([]byte(`{
+			"type": "service_account",
+			"client_email": "gemini-runner@paid-proj-123.iam.gserviceaccount.com",
+			"private_key": "SYNTHETIC-NOT-A-KEY"
+		}`))
+		require.NoError(t, err)
+		assert.Equal(t, SystemOneADCTypeServiceAccount, credType)
+		assert.Equal(t, "gemini-runner@paid-proj-123.iam.gserviceaccount.com", email)
+
+		credType, email, err = inspectGoogleCredentialsJSON([]byte(`{
+			"type": "external_account",
+			"service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/wif-sa@paid-proj-123.iam.gserviceaccount.com:generateAccessToken"
+		}`))
+		require.NoError(t, err)
+		assert.Equal(t, SystemOneADCTypeExternalAccount, credType)
+		assert.Equal(t, "wif-sa@paid-proj-123.iam.gserviceaccount.com", email)
+
+		credType, email, err = inspectGoogleCredentialsJSON([]byte(`{
+			"type": "external_account"
+		}`))
+		require.NoError(t, err)
+		assert.Equal(t, SystemOneADCTypeExternalAccount, credType)
+		assert.Empty(t, email)
+
+		credType, email, err = inspectGoogleCredentialsJSON([]byte(`{
+			"type": "impersonated_service_account",
+			"service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/imp-sa%40paid-proj-123.iam.gserviceaccount.com:generateAccessToken"
+		}`))
+		require.NoError(t, err)
+		assert.Equal(t, SystemOneADCTypeImpersonatedServiceAccount, credType)
+		assert.Equal(t, "imp-sa@paid-proj-123.iam.gserviceaccount.com", email)
+
+		credType, email, err = inspectGoogleCredentialsJSON([]byte(`{
+			"type": "authorized_user",
+			"client_id": "synthetic-id",
+			"client_secret": "synthetic-secret",
+			"refresh_token": "synthetic-refresh"
+		}`))
+		require.NoError(t, err)
+		assert.Equal(t, SystemOneADCTypeAuthorizedUser, credType)
+		assert.Empty(t, email)
+	})
+
+	t.Run("disallowed_or_malformed_types_map_to_ErrAuth", func(t *testing.T) {
+		for _, badJSON := range []string{
+			`not-json`,
+			`{}`,
+			`{"web":{"client_id":"id"}}`,
+			`{"type":"gdch_service_account"}`,
+			`{"type":"external_account_authorized_user"}`,
+			`{"type":"unknown_custom_type"}`,
+		} {
+			_, _, err := inspectGoogleCredentialsJSON([]byte(badJSON))
+			require.ErrorIs(t, err, egress.ErrAuth, "json=%s", badJSON)
+		}
+	})
+}
+
+func TestSystemOneADC_ReuseTokenSourceCacheAndErrorMapping(t *testing.T) {
+	const (
+		canaryToken = "fake-adc-token-CANARY-unit"
+		testScopeA  = "https://www.googleapis.com/auth/synthetic.scope.a"
+		testScopeB  = "https://www.googleapis.com/auth/synthetic.scope.b"
+	)
+
+	t.Run("caches_per_canonical_scope_set_and_refreshes_within_5m_expiry", func(t *testing.T) {
+		var providerCalls atomic.Int32
+		var mintCalls atomic.Int32
+		var nextExpiry time.Time
+
+		srv := &Server{}
+		srv.SetSystemOneADCForTesting(t, func(_ context.Context, scopes []string) (*SystemOneADCCredentials, error) {
+			n := providerCalls.Add(1)
+			return &SystemOneADCCredentials{
+				CredentialType:      SystemOneADCTypeServiceAccount,
+				ServiceAccountEmail: "sa@paid-proj-123.iam.gserviceaccount.com",
+				TokenSource: funcTokenSource(func() (*oauth2.Token, error) {
+					m := mintCalls.Add(1)
+					return &oauth2.Token{
+						AccessToken: canaryToken + "-" + string(rune('0'+n)) + "-" + string(rune('0'+m)),
+						Expiry:      nextExpiry,
+					}, nil
+				}),
+			}, nil
+		})
+		src := &hubSystemOneCredentialSource{srv: srv}
+
+		// Empty scopes are rejected (Addendum E: no default scope).
+		noScopeTok, noScopeErr := src.BearerToken(context.Background(), systemoneruntime.Instance{
+			Auth: systemoneruntime.InstanceAuth{Kind: store.SystemOneAuthKindGoogleAccessToken},
+		})
+		assert.Empty(t, noScopeTok)
+		require.ErrorIs(t, noScopeErr, egress.ErrAuth)
+		assert.Zero(t, providerCalls.Load())
+
+		instA := systemoneruntime.Instance{
+			Name:    "gem-adc-a",
+			Adapter: geminidecisions.AdapterName,
+			Auth: systemoneruntime.InstanceAuth{
+				Kind:   store.SystemOneAuthKindGoogleAccessToken,
+				Scopes: []string{testScopeA, testScopeB},
+			},
+			Options: map[string]string{systemoneprovider.OptionQuotaProject: "project-alpha-1"},
+		}
+		// Reversed scope order + different quota_project -> SAME canonical scope key!
+		instB := systemoneruntime.Instance{
+			Name:    "gem-adc-b",
+			Adapter: geminidecisions.AdapterName,
+			Auth: systemoneruntime.InstanceAuth{
+				Kind:   store.SystemOneAuthKindGoogleAccessToken,
+				Scopes: []string{testScopeB, testScopeA},
+			},
+			Options: map[string]string{systemoneprovider.OptionQuotaProject: "project-bravo-2"},
+		}
+
+		// Token valid for 30 minutes (> 5m reuse window): minted once, reused on instB.
+		nextExpiry = time.Now().Add(30 * time.Minute)
+		tok1, err := src.BearerToken(context.Background(), instA)
+		require.NoError(t, err)
+		assert.Equal(t, canaryToken+"-1-1", tok1)
+
+		tok2, err := src.BearerToken(context.Background(), instB)
+		require.NoError(t, err)
+		assert.Equal(t, canaryToken+"-1-1", tok2)
+		assert.Equal(t, int32(1), providerCalls.Load(), "quota_project and scope ordering must not bust ADC cache")
+		assert.Equal(t, int32(1), mintCalls.Load(), "token valid for >5m must be reused from memory")
+
+		// Distinct scope set -> new provider lookup.
+		instSingleScope := instA
+		instSingleScope.Auth.Scopes = []string{testScopeA}
+		// Set expiry within 2 minutes (< 5m early-refresh window) so subsequent call refreshes!
+		nextExpiry = time.Now().Add(2 * time.Minute)
+		tok3, err := src.BearerToken(context.Background(), instSingleScope)
+		require.NoError(t, err)
+		assert.Equal(t, canaryToken+"-2-2", tok3)
+		assert.Equal(t, int32(2), providerCalls.Load())
+
+		nextExpiry = time.Now().Add(30 * time.Minute)
+		tok4, err := src.BearerToken(context.Background(), instSingleScope)
+		require.NoError(t, err)
+		assert.Equal(t, canaryToken+"-2-3", tok4, "token within 5m of expiry must refresh automatically")
+		assert.Equal(t, int32(2), providerCalls.Load(), "refresh must reuse the cached TokenSource")
+	})
+
+	t.Run("authorized_user_requires_quota_project_at_runtime", func(t *testing.T) {
+		var mintCalls atomic.Int32
+		srv := &Server{}
+		srv.SetSystemOneADCForTesting(t, func(_ context.Context, _ []string) (*SystemOneADCCredentials, error) {
+			return &SystemOneADCCredentials{
+				CredentialType: SystemOneADCTypeAuthorizedUser,
+				TokenSource: funcTokenSource(func() (*oauth2.Token, error) {
+					mintCalls.Add(1)
+					return &oauth2.Token{AccessToken: canaryToken}, nil
+				}),
+			}, nil
+		})
+		src := &hubSystemOneCredentialSource{srv: srv}
+
+		noQP := systemoneruntime.Instance{
+			Auth: systemoneruntime.InstanceAuth{
+				Kind:   store.SystemOneAuthKindGoogleAccessToken,
+				Scopes: []string{testScopeA},
+			},
+		}
+		tok, err := src.BearerToken(context.Background(), noQP)
+		assert.Empty(t, tok)
+		require.ErrorIs(t, err, egress.ErrAuth)
+		assert.Zero(t, mintCalls.Load(), "must reject authorized_user without quota_project before minting token")
+
+		withQP := noQP
+		withQP.Options = map[string]string{systemoneprovider.OptionQuotaProject: "paid-proj-123"}
+		tok, err = src.BearerToken(context.Background(), withQP)
+		require.NoError(t, err)
+		assert.Equal(t, canaryToken, tok)
+		assert.Equal(t, int32(1), mintCalls.Load())
+	})
+
+	t.Run("error_mapping_matches_B7_and_never_echoes_canary", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			credTyp string
+			provErr error
+			tokErr  error
+			wantErr error
+		}{
+			{
+				name:    "no_adc_found",
+				provErr: errors.New("google: could not find default credentials; secret=" + canaryToken),
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name:    "unreadable_credentials_file",
+				provErr: &os.PathError{Op: "open", Path: "/tmp/" + canaryToken, Err: os.ErrNotExist},
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name:    "disallowed_credential_type",
+				credTyp: "gdch_service_account",
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name:    "refresh_invalid_grant",
+				credTyp: SystemOneADCTypeServiceAccount,
+				tokErr: &oauth2.RetrieveError{
+					Response:         &http.Response{StatusCode: http.StatusBadRequest},
+					ErrorCode:        "invalid_grant",
+					ErrorDescription: "revoked " + canaryToken,
+				},
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name:    "refresh_http_401",
+				credTyp: SystemOneADCTypeServiceAccount,
+				tokErr: &oauth2.RetrieveError{
+					Response: &http.Response{StatusCode: http.StatusUnauthorized},
+					Body:     []byte(canaryToken),
+				},
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name:    "metadata_not_defined_404",
+				credTyp: SystemOneADCTypeMetadata,
+				tokErr:  metadata.NotDefinedError("instance/service-accounts/default/token"),
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name:    "token_endpoint_503",
+				credTyp: SystemOneADCTypeServiceAccount,
+				tokErr: &oauth2.RetrieveError{
+					Response: &http.Response{StatusCode: http.StatusServiceUnavailable},
+					Body:     []byte("upstream outage " + canaryToken),
+				},
+				wantErr: egress.ErrCredentialUnavailable,
+			},
+			{
+				name:    "metadata_500",
+				credTyp: SystemOneADCTypeMetadata,
+				tokErr:  &metadata.Error{Code: http.StatusInternalServerError, Message: canaryToken},
+				wantErr: egress.ErrCredentialUnavailable,
+			},
+			{
+				name:    "sts_timeout",
+				credTyp: SystemOneADCTypeExternalAccount,
+				tokErr:  &url.Error{Op: "Post", URL: "https://sts.googleapis.com/v1/token", Err: context.DeadlineExceeded},
+				wantErr: egress.ErrCredentialUnavailable,
+			},
+			{
+				name:    "connection_reset",
+				credTyp: SystemOneADCTypeServiceAccount,
+				tokErr:  io.ErrUnexpectedEOF,
+				wantErr: egress.ErrCredentialUnavailable,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				srv := &Server{}
+				srv.SetSystemOneADCForTesting(t, func(_ context.Context, _ []string) (*SystemOneADCCredentials, error) {
+					if tc.provErr != nil {
+						return nil, tc.provErr
+					}
+					return &SystemOneADCCredentials{
+						CredentialType: tc.credTyp,
+						TokenSource: funcTokenSource(func() (*oauth2.Token, error) {
+							return nil, tc.tokErr
+						}),
+					}, nil
+				})
+				src := &hubSystemOneCredentialSource{srv: srv}
+				tok, err := src.BearerToken(context.Background(), systemoneruntime.Instance{
+					Auth: systemoneruntime.InstanceAuth{
+						Kind:   store.SystemOneAuthKindGoogleAccessToken,
+						Scopes: []string{testScopeA},
+					},
+				})
+				assert.Empty(t, tok)
+				require.ErrorIs(t, err, tc.wantErr)
+				assert.NotContains(t, err.Error(), canaryToken)
+			})
+		}
+	})
+}
+
+func TestSystemOneADC_DefaultProviderSyntheticInvalidCredentialsFile(t *testing.T) {
+	// Point GOOGLE_APPLICATION_CREDENTIALS at synthetic invalid/disallowed temp
+	// files so google.FindDefaultCredentials returns immediately from step 1
+	// without ever consulting ~/.config/gcloud or GCE metadata.
+	const (
+		fileSecretCanary = "fake-key-file-secret-CANARY-never-echo"
+		testScope        = "https://www.googleapis.com/auth/synthetic.scope.a"
+	)
+	dir := t.TempDir()
+
+	t.Run("missing_file_maps_to_ErrAuth", func(t *testing.T) {
+		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(dir, "does-not-exist.json"))
+		creds, err := defaultSystemOneADCProvider(context.Background(), []string{testScope})
+		assert.Nil(t, creds)
+		require.ErrorIs(t, err, egress.ErrAuth)
+	})
+
+	t.Run("malformed_json_file_maps_to_ErrAuth_without_echoing_contents", func(t *testing.T) {
+		badFile := filepath.Join(dir, "malformed.json")
+		require.NoError(t, os.WriteFile(badFile, []byte("not-json-"+fileSecretCanary), 0o600))
+		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", badFile)
+
+		creds, err := defaultSystemOneADCProvider(context.Background(), []string{testScope})
+		assert.Nil(t, creds)
+		require.ErrorIs(t, err, egress.ErrAuth)
+		assert.NotContains(t, err.Error(), fileSecretCanary)
+	})
+
+	t.Run("disallowed_type_json_file_maps_to_ErrAuth", func(t *testing.T) {
+		disallowedFile := filepath.Join(dir, "disallowed.json")
+		require.NoError(t, os.WriteFile(disallowedFile, []byte(`{"type":"gdch_service_account","private_key":"`+fileSecretCanary+`"}`), 0o600))
+		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", disallowedFile)
+
+		creds, err := defaultSystemOneADCProvider(context.Background(), []string{testScope})
+		assert.Nil(t, creds)
+		require.ErrorIs(t, err, egress.ErrAuth)
+		assert.NotContains(t, err.Error(), fileSecretCanary)
+	})
 }

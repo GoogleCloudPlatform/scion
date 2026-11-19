@@ -194,6 +194,40 @@ type evalCallTrackerKey struct{}
 
 type evalCallTracker struct {
 	preCallAuthFailed atomic.Bool
+	mu                sync.Mutex
+	credType          string
+	saEmail           string
+}
+
+// RecordAuthIdentity records non-secret credential category metadata (such as
+// Google ADC credential type and service-account email) on the active
+// evaluation's content-free provenance record. Values failing identifier
+// sanitization are silently ignored; secret or token material must never be
+// passed here.
+func RecordAuthIdentity(ctx context.Context, credentialType, serviceAccountEmail string) {
+	if ctx == nil {
+		return
+	}
+	tracker, ok := ctx.Value(evalCallTrackerKey{}).(*evalCallTracker)
+	if !ok || tracker == nil {
+		return
+	}
+	cleanType, _ := sanitizeProviderIdentifier(credentialType)
+	cleanEmail, _ := sanitizeProviderIdentifier(serviceAccountEmail)
+	tracker.mu.Lock()
+	if cleanType != "" {
+		tracker.credType = cleanType
+	}
+	if cleanEmail != "" {
+		tracker.saEmail = cleanEmail
+	}
+	tracker.mu.Unlock()
+}
+
+func (t *evalCallTracker) authIdentity() (string, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.credType, t.saEmail
 }
 
 func markPreCallAuthFailed(ctx context.Context) {
@@ -402,6 +436,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	if authReason != "" {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, authReason)
 	}
+	eval.Auth = buildInitialAuthProvenance(inst, selectedScheme)
 
 	// Step 5: Tighten runtime-owned deadline with per-instance CallTimeout ceiling (§7.1).
 	attemptOwnDur := r.effectiveOwnDuration(compiled.Timeout, opts, inst.Limits.CallTimeout)
@@ -448,6 +483,17 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	attemptRequests := 1
 	if callTracker.preCallAuthFailed.Load() || isPreCallEgressError(invokeErr) {
 		attemptRequests = 0
+	}
+	if credType, saEmail := callTracker.authIdentity(); credType != "" || saEmail != "" {
+		if eval.Auth == nil {
+			eval.Auth = &AuthProvenance{AuthKind: inst.Auth.Kind}
+		}
+		if credType != "" {
+			eval.Auth.CredentialType = credType
+		}
+		if saEmail != "" {
+			eval.Auth.ServiceAccountEmail = saEmail
+		}
 	}
 
 	attempt := Attempt{
@@ -1052,6 +1098,13 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 		if instAuth.Kind != string(provider.AuthKindGoogleAccessToken) {
 			return provider.FailUnsupported
 		}
+		effScopes := instAuth.Scopes
+		if len(effScopes) == 0 && len(adapterScheme.Scopes) > 0 {
+			effScopes = adapterScheme.Scopes
+		}
+		if !hasValidGoogleOAuthScopes(effScopes) {
+			return provider.FailInvalidRequest
+		}
 		if qp := inst.Options[provider.OptionQuotaProject]; qp != "" {
 			if err := egress.ValidateQuotaProject(qp); err != nil {
 				return provider.FailInvalidRequest
@@ -1084,6 +1137,44 @@ func isPreCallEgressError(err error) bool {
 		egress.IsSchemeNotAllowed(err) ||
 		egress.IsInvalidEndpoint(err) ||
 		egress.IsBlockedDestination(err)
+}
+
+func buildInitialAuthProvenance(inst Instance, selectedScheme provider.AuthScheme) *AuthProvenance {
+	if inst.Auth.Kind == "" {
+		return nil
+	}
+	prov := &AuthProvenance{
+		AuthKind: inst.Auth.Kind,
+	}
+	if selectedScheme.Kind == provider.AuthKindGoogleAccessToken {
+		scopes := inst.Auth.Scopes
+		if len(scopes) == 0 && len(selectedScheme.Scopes) > 0 {
+			scopes = selectedScheme.Scopes
+		}
+		if len(scopes) > 0 {
+			prov.Scopes = slices.Clone(scopes)
+		}
+		prov.QuotaProject = provider.FormatQuotaProjectProvenance(inst.Options[provider.OptionQuotaProject])
+	}
+	return prov
+}
+
+func hasValidGoogleOAuthScopes(scopes []string) bool {
+	if len(scopes) == 0 {
+		return false
+	}
+	for _, s := range scopes {
+		if !strings.HasPrefix(s, provider.GoogleScopePrefix) || len(s) <= len(provider.GoogleScopePrefix) {
+			return false
+		}
+		for i := 0; i < len(s); i++ {
+			b := s[i]
+			if b < 0x21 || b > 0x7e || b == '?' || b == '#' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func buildModelRequest(evalID string, compiled *spec.Compiled, selectedFields []provider.InputField) provider.ModelRequest {

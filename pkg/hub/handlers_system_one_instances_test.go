@@ -33,6 +33,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -53,6 +54,10 @@ func newSystemOneTestServer(t *testing.T, enabled bool) (*Server, store.Store, *
 	srv, s := testServerWithOps(t, nil)
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret-signing-key")
 	srv.SetSecretBackend(localBackend)
+	// Always isolate Hub tests from any ambient host/container ADC or metadata server.
+	srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+		return nil, egress.ErrAuth
+	})
 
 	if enabled {
 		ctx := context.Background()
@@ -307,7 +312,7 @@ func TestSystemOneInstances_CRUDAndProbe(t *testing.T) {
 
 	// Validation errors (400).
 	t.Run("validation rejections", func(t *testing.T) {
-		for _, badKind := range []string{"none", "google_access_token", "google_id_token", "azure_entra", "unknown_kind"} {
+		for _, badKind := range []string{"none", "google_id_token", "azure_entra", "unknown_kind"} {
 			rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
 				"name":    "bad-auth-" + strings.ReplaceAll(badKind, "_", "-"),
 				"adapter": "typesafe",
@@ -317,6 +322,15 @@ func TestSystemOneInstances_CRUDAndProbe(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, rec.Code, "kind=%s body=%s", badKind, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "auth kind not yet supported")
 		}
+		// TypeSafe does not declare google_access_token in SupportedAuth.
+		tsADCRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    "bad-auth-typesafe-adc",
+			"adapter": "typesafe",
+			"model":   "jev-1.14.0",
+			"auth":    map[string]any{"kind": "google_access_token"},
+		})
+		require.Equal(t, http.StatusBadRequest, tsADCRec.Code, tsADCRec.Body.String())
+		assert.Contains(t, tsADCRec.Body.String(), "does not support auth kind")
 
 		badPayloads := []struct {
 			name string
@@ -1448,4 +1462,459 @@ func TestSystemOneInstances_GeminiDecisionsVerticalProbeAndTypeSafeRegression(t 
 	} {
 		assert.NotContains(t, allLogs, forbidden, "sensitive value leaked into logs")
 	}
+}
+
+func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedaction(t *testing.T) {
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-gemini-adc-admin", store.SystemRoleHubAdmin))
+	require.NoError(t, err)
+
+	var auditBuf, runtimeLogBuf bytes.Buffer
+	srv.envSecretLog = slog.New(slog.NewJSONHandler(&auditBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	const (
+		canaryADCToken    = "fake-adc-token-CANARY-hub-vertical"
+		canaryAPIKeyInput = "AIzaSy-should-be-refused-CANARY"
+		quotaProject      = "paid-gemini-proj-77"
+		saEmail           = "gemini-decisions-sa@paid-gemini-proj-77.iam.gserviceaccount.com"
+		testADCScope      = "https://www.googleapis.com/auth/synthetic.test.scope"
+	)
+
+	type adcWireCapture struct {
+		auth   string
+		goog   string
+		qp     string
+		body   string
+		method string
+		path   string
+	}
+	var (
+		mu       sync.Mutex
+		captures []adcWireCapture
+		nextCode = http.StatusOK
+		nextBody = `{
+			"answers": {
+				"is_damaged": {"type": "noul", "noul": 0.99, "confidence": 0.99}
+			},
+			"usage": {"total_input_tokens": 42, "total_output_tokens": 0}
+		}`
+		currentADCType = SystemOneADCTypeServiceAccount
+		currentSAEmail = saEmail
+		tokenErr       error
+	)
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var raw bytes.Buffer
+		_, _ = raw.ReadFrom(r.Body)
+		_ = r.Body.Close()
+
+		mu.Lock()
+		captures = append(captures, adcWireCapture{
+			auth:   r.Header.Get("Authorization"),
+			goog:   r.Header.Get("x-goog-api-key"),
+			qp:     r.Header.Get("X-Goog-User-Project"),
+			body:   raw.String(),
+			method: r.Method,
+			path:   r.URL.Path,
+		})
+		st := nextCode
+		body := nextBody
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(st)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer tlsSrv.Close()
+
+	installFakeADC := func() {
+		srv.SetSystemOneADCForTesting(t, func(_ context.Context, _ []string) (*SystemOneADCCredentials, error) {
+			mu.Lock()
+			ct := currentADCType
+			em := currentSAEmail
+			mu.Unlock()
+			return &SystemOneADCCredentials{
+				CredentialType:      ct,
+				ServiceAccountEmail: em,
+				TokenSource: funcTokenSource(func() (*oauth2.Token, error) {
+					mu.Lock()
+					tErr := tokenErr
+					mu.Unlock()
+					if tErr != nil {
+						return nil, tErr
+					}
+					return &oauth2.Token{
+						AccessToken: canaryADCToken,
+						Expiry:      time.Now().Add(30 * time.Minute),
+					}, nil
+				}),
+			}, nil
+		})
+	}
+	installFakeADC()
+
+	srv.SetSystemOneRuntimeOptionsForTesting(t,
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+	reg := srv.SystemOneProviderRegistry()
+	srv.mu.Lock()
+	srv.systemOneRuntime = systemoneruntime.New(
+		systemoneruntime.Config{
+			Registry:    reg,
+			Instances:   &hubSystemOneInstanceSource{srv: srv},
+			Credentials: (&hubSystemOneCredentialSource{srv: srv}).APIKeyToken,
+			TokenSource: (&hubSystemOneCredentialSource{srv: srv}).GoogleAccessToken,
+			MaxEvalTime: resolveSystemOneMaxEvalTime(srv.config),
+			Logger:      slog.New(slog.NewJSONHandler(&runtimeLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		},
+		srv.systemOneRuntimeOpts...,
+	)
+	srv.mu.Unlock()
+
+	// 1. Create rejections (400): apiKey refused, bad scopes refused, bad quota_project refused, headerName/audience refused.
+	badCreates := []struct {
+		name string
+		body map[string]any
+		want string
+	}{
+		{
+			name: "top_level_apiKey_refused",
+			body: map[string]any{
+				"name":    "gem-adc-bad-1",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"apiKey":  canaryAPIKeyInput,
+				"auth":    map[string]any{"kind": "google_access_token"},
+			},
+			want: "apiKey must not be provided",
+		},
+		{
+			name: "nested_auth_apiKey_refused",
+			body: map[string]any{
+				"name":    "gem-adc-bad-2",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"auth":    map[string]any{"kind": "google_access_token", "apiKey": canaryAPIKeyInput},
+			},
+			want: "apiKey must not be provided",
+		},
+		{
+			name: "missing_scopes_refused",
+			body: map[string]any{
+				"name":    "gem-adc-bad-missing-scopes",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"auth":    map[string]any{"kind": "google_access_token"},
+			},
+			want: "auth.scopes is required",
+		},
+		{
+			name: "empty_scopes_slice_refused",
+			body: map[string]any{
+				"name":    "gem-adc-bad-3",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{}},
+			},
+			want: "auth.scopes is required",
+		},
+		{
+			name: "bad_scope_prefix_refused",
+			body: map[string]any{
+				"name":    "gem-adc-bad-4",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{"https://evil.example/scope"}},
+			},
+			want: "https://www.googleapis.com/auth/",
+		},
+		{
+			name: "bare_scope_prefix_refused",
+			body: map[string]any{
+				"name":    "gem-adc-bad-5",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{"https://www.googleapis.com/auth/"}},
+			},
+			want: "https://www.googleapis.com/auth/",
+		},
+		{
+			name: "bad_quota_project_refused",
+			body: map[string]any{
+				"name":    "gem-adc-bad-6",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+				"options": map[string]string{"quota_project": "INVALID_UPPER"},
+			},
+			want: "quota_project",
+		},
+		{
+			name: "headerName_refused",
+			body: map[string]any{
+				"name":    "gem-adc-bad-7",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}, "headerName": "Authorization"},
+			},
+			want: "headerName is not supported",
+		},
+		{
+			name: "audience_refused",
+			body: map[string]any{
+				"name":    "gem-adc-bad-8",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}, "audience": "https://generativelanguage.googleapis.com"},
+			},
+			want: "audience is not supported",
+		},
+		{
+			name: "quota_project_on_api_key_refused",
+			body: map[string]any{
+				"name":    "gem-key-bad-qp",
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-decision-1",
+				"auth":    map[string]any{"kind": "api_key", "apiKey": "AIzaSy-synthetic"},
+				"options": map[string]string{"quota_project": quotaProject},
+			},
+			want: "quota_project is only supported",
+		},
+	}
+	for _, tc := range badCreates {
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, tc.body)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", tc.name, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), tc.want, tc.name)
+		assert.NotContains(t, rec.Body.String(), canaryAPIKeyInput)
+	}
+
+	// 2. authorized_user without quota_project refused at create (400 invalid_request).
+	mu.Lock()
+	currentADCType = SystemOneADCTypeAuthorizedUser
+	currentSAEmail = ""
+	mu.Unlock()
+	installFakeADC()
+
+	authUserNoQPRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gem-adc-user-no-qp",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
+		"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+	})
+	require.Equal(t, http.StatusBadRequest, authUserNoQPRec.Code, authUserNoQPRec.Body.String())
+	assert.Contains(t, authUserNoQPRec.Body.String(), "quota_project is required")
+	assert.Contains(t, authUserNoQPRec.Body.String(), `"reason":"invalid_request"`)
+
+	// Restore service_account ADC for create/get/list/probe.
+	mu.Lock()
+	currentADCType = SystemOneADCTypeServiceAccount
+	currentSAEmail = saEmail
+	mu.Unlock()
+	installFakeADC()
+
+	// 3. Create ADC instance: writes zero secrets, stores ONLY options["quota_project"] and auth.{kind,scopes}, exposes metadata on create/get/list.
+	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "gemini-adc-main",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": tlsSrv.URL,
+		"auth":     map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+		"options":  map[string]string{"quota_project": quotaProject},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	assert.NotContains(t, createRec.Body.String(), canaryADCToken)
+
+	var created SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	assert.Equal(t, "google_access_token", created.Auth.Kind)
+	assert.Empty(t, created.Auth.SecretName)
+	assert.Equal(t, []string{testADCScope}, created.Auth.Scopes)
+	assert.Equal(t, "explicit: "+quotaProject, created.Auth.QuotaProject)
+	assert.Equal(t, SystemOneADCTypeServiceAccount, created.Auth.CredentialType)
+	assert.Equal(t, saEmail, created.Auth.ServiceAccountEmail)
+	assert.Equal(t, map[string]string{"quota_project": quotaProject}, created.Options)
+
+	// Verify store round-trip persists nothing new (no credential_type, service_account_email, or duplicate quota_project).
+	storedMain, err := s.GetSystemOneInstanceByName(ctx, "gemini-adc-main")
+	require.NoError(t, err)
+	assert.Equal(t, store.SystemOneInstanceAuth{
+		Kind:   store.SystemOneAuthKindGoogleAccessToken,
+		Scopes: []string{testADCScope},
+	}, storedMain.Auth)
+	assert.Equal(t, map[string]string{"quota_project": quotaProject}, storedMain.Options)
+
+	secretsList, err := localBackend.List(ctx, secret.Filter{Scope: store.ScopeHub, ScopeID: "test-hub-id"})
+	require.NoError(t, err)
+	assert.Empty(t, secretsList, "creating a google_access_token instance must store zero secrets")
+
+	// GET /instances/{name} and GET /instances show auth_kind, scopes, explicit quota_project, credential_type, service_account_email, and never token.
+	getRec := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath+"/gemini-adc-main", nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	assert.NotContains(t, getRec.Body.String(), canaryADCToken)
+	var gotResp SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &gotResp))
+	assert.Equal(t, created.Auth, gotResp.Auth)
+
+	listRec := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil)
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	assert.NotContains(t, listRec.Body.String(), canaryADCToken)
+	var listResp ListSystemOneInstancesResponse
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listResp))
+	require.Len(t, listResp.Instances, 1)
+	assert.Equal(t, created.Auth, listResp.Instances[0].Auth)
+
+	// 4. Probe success: Authorization: Bearer + X-Goog-User-Project on wire, no x-goog-api-key, provenance populated, no canary leaked.
+	binSpec := map[string]any{
+		"version": 1,
+		"form":    "portable",
+		"questions": []map[string]any{
+			{"id": "is_damaged", "type": "binary", "instructions": "Does `probe.text` describe physical damage?"},
+		},
+		"output": map[string]any{"question": "is_damaged"},
+	}
+	probeRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-adc-main/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Synthetic cracked glass report."},
+	})
+	require.Equal(t, http.StatusOK, probeRec.Code, probeRec.Body.String())
+	assert.NotContains(t, probeRec.Body.String(), canaryADCToken)
+
+	var probeOK ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(probeRec.Body.Bytes(), &probeOK))
+	assert.Equal(t, systemoneruntime.ClassSuccess, probeOK.Class)
+	require.NotNil(t, probeOK.Evaluation)
+	require.NotNil(t, probeOK.Evaluation.Auth)
+	assert.Equal(t, &systemoneruntime.AuthProvenance{
+		AuthKind:            "google_access_token",
+		Scopes:              []string{testADCScope},
+		QuotaProject:        "explicit: " + quotaProject,
+		CredentialType:      SystemOneADCTypeServiceAccount,
+		ServiceAccountEmail: saEmail,
+	}, probeOK.Evaluation.Auth)
+	require.Len(t, probeOK.Evaluation.Attempts, 1)
+	assert.Equal(t, 1, probeOK.Evaluation.Attempts[0].Requests)
+
+	mu.Lock()
+	require.Len(t, captures, 1)
+	cap1 := captures[0]
+	mu.Unlock()
+	assert.Equal(t, "Bearer "+canaryADCToken, cap1.auth)
+	assert.Equal(t, quotaProject, cap1.qp)
+	assert.Empty(t, cap1.goog, "x-goog-api-key must never be sent on ADC probe")
+	assert.NotContains(t, cap1.body, canaryADCToken)
+
+	// 5. Create second ADC instance WITHOUT quota_project (optional/unset by default for service_account; Addendum D):
+	//    GET and probe show "implicit (service account association)", wire omits X-Goog-User-Project, store options is nil.
+	noQPCreate := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "gemini-adc-no-qp",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": tlsSrv.URL,
+		"auth":     map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+	})
+	require.Equal(t, http.StatusCreated, noQPCreate.Code, noQPCreate.Body.String())
+	var createdNoQP SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(noQPCreate.Body.Bytes(), &createdNoQP))
+	assert.Equal(t, systemoneprovider.QuotaProjectImplicit, createdNoQP.Auth.QuotaProject)
+	assert.Empty(t, createdNoQP.Options)
+	storedNoQP, err := s.GetSystemOneInstanceByName(ctx, "gemini-adc-no-qp")
+	require.NoError(t, err)
+	assert.Nil(t, storedNoQP.Options)
+
+	mu.Lock()
+	captures = nil
+	mu.Unlock()
+	implicitProbeRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-adc-no-qp/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Synthetic text."},
+	})
+	require.Equal(t, http.StatusOK, implicitProbeRec.Code, implicitProbeRec.Body.String())
+	var implicitProbe ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(implicitProbeRec.Body.Bytes(), &implicitProbe))
+	assert.Equal(t, systemoneruntime.ClassSuccess, implicitProbe.Class)
+	require.NotNil(t, implicitProbe.Evaluation.Auth)
+	assert.Equal(t, systemoneprovider.QuotaProjectImplicit, implicitProbe.Evaluation.Auth.QuotaProject)
+	mu.Lock()
+	require.Len(t, captures, 1)
+	assert.Empty(t, captures[0].qp, "X-Goog-User-Project must be omitted when quota_project is unset")
+	captures = nil
+	currentADCType = SystemOneADCTypeAuthorizedUser
+	currentSAEmail = ""
+	mu.Unlock()
+	installFakeADC()
+
+	envChangedProbe := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-adc-no-qp/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Synthetic text."},
+	})
+	require.Equal(t, http.StatusOK, envChangedProbe.Code, envChangedProbe.Body.String())
+	var envChangedResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(envChangedProbe.Body.Bytes(), &envChangedResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, envChangedResp.Class)
+	assert.Equal(t, string(systemoneprovider.FailAuth), envChangedResp.Reason)
+	require.NotNil(t, envChangedResp.Evaluation)
+	require.Len(t, envChangedResp.Evaluation.Attempts, 1)
+	assert.Equal(t, 0, envChangedResp.Evaluation.Attempts[0].Requests)
+	mu.Lock()
+	assert.Empty(t, captures, "authorized_user without quota_project must fail pre-call with 0 provider requests")
+	mu.Unlock()
+
+	// 6. Pre-call token endpoint 503 -> unavailable, requests=0, canary scrubbed.
+	mu.Lock()
+	currentADCType = SystemOneADCTypeServiceAccount
+	currentSAEmail = saEmail
+	tokenErr = &oauth2.RetrieveError{
+		Response: &http.Response{StatusCode: http.StatusServiceUnavailable},
+		Body:     []byte("sts outage echoing " + canaryADCToken),
+	}
+	mu.Unlock()
+	installFakeADC()
+
+	unavailRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-adc-main/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Synthetic text."},
+	})
+	require.Equal(t, http.StatusOK, unavailRec.Code, unavailRec.Body.String())
+	assert.NotContains(t, unavailRec.Body.String(), canaryADCToken)
+	var unavailResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(unavailRec.Body.Bytes(), &unavailResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, unavailResp.Class)
+	assert.Equal(t, string(systemoneprovider.FailUnavailable), unavailResp.Reason)
+	require.Len(t, unavailResp.Evaluation.Attempts, 1)
+	assert.Equal(t, 0, unavailResp.Evaluation.Attempts[0].Requests)
+
+	// 6b. Provider HTTP 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT -> auth, requests=1, canary scrubbed.
+	mu.Lock()
+	tokenErr = nil
+	nextCode = http.StatusForbidden
+	nextBody = `{"error":{"code":403,"message":"Request had insufficient authentication scopes: ` + canaryADCToken + `","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}`
+	mu.Unlock()
+	installFakeADC()
+
+	scope403Rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-adc-main/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Synthetic text."},
+	})
+	require.Equal(t, http.StatusOK, scope403Rec.Code, scope403Rec.Body.String())
+	assert.NotContains(t, scope403Rec.Body.String(), canaryADCToken)
+	var scope403Resp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(scope403Rec.Body.Bytes(), &scope403Resp))
+	assert.Equal(t, systemoneruntime.ClassFailed, scope403Resp.Class)
+	assert.Equal(t, string(systemoneprovider.FailAuth), scope403Resp.Reason)
+	require.Len(t, scope403Resp.Evaluation.Attempts, 1)
+	assert.Equal(t, 1, scope403Resp.Evaluation.Attempts[0].Requests)
+	assert.Equal(t, "4xx", scope403Resp.Evaluation.Attempts[0].HTTPStatusClass)
+
+	// 7. Delete removes row only (no secret existed), returning 204 then 404 on GET.
+	delRec := doRequestAsUser(t, srv, admin, http.MethodDelete, systemOneAdminPath+"/gemini-adc-main", nil)
+	require.Equal(t, http.StatusNoContent, delRec.Code)
+	getDeletedRec := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath+"/gemini-adc-main", nil)
+	assert.Equal(t, http.StatusNotFound, getDeletedRec.Code)
+
+	allLogs := auditBuf.String() + "\n" + runtimeLogBuf.String()
+	assert.NotContains(t, allLogs, canaryADCToken, "ADC canary token must never appear in audit or runtime logs")
+	assert.NotContains(t, allLogs, canaryAPIKeyInput)
 }

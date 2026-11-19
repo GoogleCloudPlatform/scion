@@ -23,6 +23,7 @@ package provider
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/metrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
@@ -139,18 +140,31 @@ const (
 	InstanceAuthAPIKey = "api_key"
 
 	// GoogleScopePrefix is the required URL prefix for Google OAuth2 scopes on
-	// google_access_token System One instances (PV3 brief Addendum B §B3).
+	// google_access_token System One instances (PV3 brief Addendum B §B3, E).
 	GoogleScopePrefix = "https://www.googleapis.com/auth/"
 
-	// GoogleScopeCloudPlatform is the default and minimum OAuth2 scope for
-	// keyless ADC access to the Gemini Developer API (PV3 brief Addendum B §B3).
-	GoogleScopeCloudPlatform = "https://www.googleapis.com/auth/cloud-platform"
-
-	// OptionQuotaProject is the non-secret instance option key carrying the GCP
-	// project ID sent as x-goog-user-project on ADC bearer requests (PV3 brief
-	// Addendum B §B3).
+	// OptionQuotaProject is the non-secret instance option key carrying an
+	// explicit GCP billing/quota project ID sent as x-goog-user-project on ADC
+	// bearer requests (PV3 brief Addendum B §B3, Addendum D).
 	OptionQuotaProject = "quota_project"
+
+	// QuotaProjectImplicit is the provenance display value recorded when a
+	// google_access_token instance leaves options["quota_project"] unset so the
+	// service account's associated project bills implicitly (Addendum D).
+	QuotaProjectImplicit = "implicit (service account association)"
 )
+
+// FormatQuotaProjectProvenance formats the effective quota-project provenance
+// string for google_access_token instances (Addendum D):
+// "implicit (service account association)" when unset, or "explicit: <id>" when
+// an explicit quota_project option is configured.
+func FormatQuotaProjectProvenance(quotaProject string) string {
+	trimmed := strings.TrimSpace(quotaProject)
+	if trimmed == "" {
+		return QuotaProjectImplicit
+	}
+	return "explicit: " + trimmed
+}
 
 // AuthScheme describes the transport authentication scheme an adapter expects
 // pkg/systemone/egress to apply. It carries scheme metadata only, never

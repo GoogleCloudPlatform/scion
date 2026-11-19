@@ -475,6 +475,7 @@ func TestRuntime_GeminiDecisionsAdapter_ADCBearerErrorMappingAndCanaryRedaction(
 	const (
 		canaryToken  = "fake-adc-token-CANARY-gemini-rt"
 		quotaProject = "paid-gemini-proj-99"
+		testScope    = "https://www.googleapis.com/auth/synthetic.test"
 	)
 
 	binSpec := `{
@@ -524,7 +525,7 @@ func TestRuntime_GeminiDecisionsAdapter_ADCBearerErrorMappingAndCanaryRedaction(
 		Endpoint: srv.URL,
 		Auth: runtime.InstanceAuth{
 			Kind:   "google_access_token",
-			Scopes: []string{provider.GoogleScopeCloudPlatform},
+			Scopes: []string{testScope},
 		},
 		Options:  map[string]string{provider.OptionQuotaProject: quotaProject},
 		Enabled:  true,
@@ -650,7 +651,7 @@ func TestRuntime_GeminiDecisionsAdapter_ADCBearerErrorMappingAndCanaryRedaction(
 			mu.Lock()
 			hits = 0
 			nextCode = statusCode
-			nextBody = `{"error":{"code":403,"message":"API not enabled on quota project; token ` + canaryToken + `","status":"PERMISSION_DENIED"}}`
+			nextBody = `{"error":{"code":403,"message":"Request had insufficient authentication scopes; token ` + canaryToken + `","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}`
 			mu.Unlock()
 			tokenFn = func(context.Context, runtime.Instance) (string, error) {
 				return canaryToken, nil

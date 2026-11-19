@@ -82,11 +82,13 @@ type googleRetryInfoDetail struct {
 	Type          string `json:"@type"`
 	RetryDelay    string `json:"retryDelay"`
 	RetryDelayAlt string `json:"retry_delay"`
+	Reason        string `json:"reason"`
 }
 
 type parsedGoogleError struct {
 	codeString string
 	status     string
+	reason     string
 	retryDelay time.Duration
 }
 
@@ -112,6 +114,9 @@ func parseGoogleError(body []byte) parsedGoogleError {
 		if err := json.Unmarshal(rawDetail, &d); err != nil {
 			continue
 		}
+		if out.reason == "" && strings.TrimSpace(d.Reason) != "" {
+			out.reason = strings.TrimSpace(d.Reason)
+		}
 		typ := strings.TrimSpace(d.Type)
 		if typ != retryInfoTypeShort && !strings.HasSuffix(typ, retryInfoTypeSuffix) {
 			continue
@@ -122,7 +127,6 @@ func parseGoogleError(body []byte) parsedGoogleError {
 		}
 		if dur := parseProtobufDuration(rawDelay); dur > 0 {
 			out.retryDelay = dur
-			break
 		}
 	}
 	return out
@@ -170,12 +174,16 @@ func classifyHTTPError(status int, hdr http.Header, body []byte, now time.Time) 
 		)
 
 	case http.StatusUnauthorized, http.StatusForbidden:
+		msg := fmt.Sprintf("provider authentication rejected (HTTP %d)", status)
+		if strings.EqualFold(parsed.reason, "ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
+			msg = fmt.Sprintf("provider authentication rejected: insufficient access token scope (HTTP %d)", status)
+		}
 		return provider.NewProviderError(
 			provider.FailAuth,
 			false,
 			0,
 			status,
-			fmt.Sprintf("provider authentication rejected (HTTP %d)", status),
+			msg,
 		)
 
 	case http.StatusNotFound:

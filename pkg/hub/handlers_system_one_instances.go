@@ -16,6 +16,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
@@ -50,6 +52,8 @@ const (
 	maxSystemOneOptionKeyBytes           = 64
 	maxSystemOneOptionValueBytes         = 512
 	maxSystemOneAdapterErrorMessageBytes = 256
+	maxSystemOneAuthScopes               = 16
+	maxSystemOneAuthScopeBytes           = 256
 )
 
 var forbiddenSystemOneOptionSubstrings = []string{
@@ -126,27 +130,43 @@ func (r CreateSystemOneInstanceRequest) LogValue() slog.Value {
 	)
 }
 
+// SystemOneInstanceAuthDTO is the credential-free JSON wire representation of
+// authentication metadata on a System One provider instance response.
+// QuotaProject, CredentialType, and ServiceAccountEmail are response-only
+// metadata fields enriched at read time for google_access_token instances and
+// are never persisted to the database.
+type SystemOneInstanceAuthDTO struct {
+	Kind                string   `json:"kind"`
+	SecretName          string   `json:"secretName,omitempty"`
+	HeaderName          string   `json:"headerName,omitempty"`
+	Scopes              []string `json:"scopes,omitempty"`
+	Audience            string   `json:"audience,omitempty"`
+	QuotaProject        string   `json:"quotaProject,omitempty"`
+	CredentialType      string   `json:"credentialType,omitempty"`
+	ServiceAccountEmail string   `json:"serviceAccountEmail,omitempty"`
+}
+
 // SystemOneInstanceResponse is the credential-free JSON wire representation of
 // a configured System One provider instance. Auth carries only reference
-// metadata (such as SecretName = "systemone.instance.<id>"); secret values are
-// never returned.
+// metadata (such as SecretName = "systemone.instance.<id>" or non-secret ADC
+// metadata); secret and token values are never returned.
 type SystemOneInstanceResponse struct {
-	ID                  string                      `json:"id"`
-	Name                string                      `json:"name"`
-	Adapter             string                      `json:"adapter"`
-	Model               string                      `json:"model,omitempty"`
-	Endpoint            string                      `json:"endpoint"`
-	Location            string                      `json:"location,omitempty"`
-	Auth                store.SystemOneInstanceAuth `json:"auth"`
-	Options             map[string]string           `json:"options,omitempty"`
-	Limits              SystemOneInstanceLimitsDTO  `json:"limits,omitempty"`
-	AllowPrivateNetwork bool                        `json:"allowPrivateNetwork,omitempty"`
-	Enabled             bool                        `json:"enabled"`
-	Revision            int64                       `json:"revision"`
-	CreatedBy           string                      `json:"createdBy,omitempty"`
-	UpdatedBy           string                      `json:"updatedBy,omitempty"`
-	CreatedAt           time.Time                   `json:"createdAt"`
-	UpdatedAt           time.Time                   `json:"updatedAt"`
+	ID                  string                     `json:"id"`
+	Name                string                     `json:"name"`
+	Adapter             string                     `json:"adapter"`
+	Model               string                     `json:"model,omitempty"`
+	Endpoint            string                     `json:"endpoint"`
+	Location            string                     `json:"location,omitempty"`
+	Auth                SystemOneInstanceAuthDTO   `json:"auth"`
+	Options             map[string]string          `json:"options,omitempty"`
+	Limits              SystemOneInstanceLimitsDTO `json:"limits,omitempty"`
+	AllowPrivateNetwork bool                       `json:"allowPrivateNetwork,omitempty"`
+	Enabled             bool                       `json:"enabled"`
+	Revision            int64                      `json:"revision"`
+	CreatedBy           string                     `json:"createdBy,omitempty"`
+	UpdatedBy           string                     `json:"updatedBy,omitempty"`
+	CreatedAt           time.Time                  `json:"createdAt"`
+	UpdatedAt           time.Time                  `json:"updatedAt"`
 }
 
 // ListSystemOneInstancesResponse is the response body for
@@ -213,7 +233,7 @@ type ProbeSystemOneInstanceResponse struct {
 	Evaluation *systemoneruntime.Evaluation `json:"evaluation,omitempty"`
 }
 
-func toSystemOneInstanceResponse(inst *store.SystemOneInstance) SystemOneInstanceResponse {
+func (s *Server) toSystemOneInstanceResponse(ctx context.Context, inst *store.SystemOneInstance) SystemOneInstanceResponse {
 	if inst == nil {
 		return SystemOneInstanceResponse{}
 	}
@@ -231,20 +251,28 @@ func toSystemOneInstanceResponse(inst *store.SystemOneInstance) SystemOneInstanc
 	if inst.Limits.CallTimeout > 0 {
 		limits.CallTimeout = inst.Limits.CallTimeout.String()
 	}
+	authDTO := SystemOneInstanceAuthDTO{
+		Kind:       inst.Auth.Kind,
+		SecretName: inst.Auth.SecretName,
+		HeaderName: inst.Auth.HeaderName,
+		Scopes:     slices.Clone(inst.Auth.Scopes),
+		Audience:   inst.Auth.Audience,
+	}
+	if inst.Auth.Kind == store.SystemOneAuthKindGoogleAccessToken {
+		authDTO.QuotaProject = systemoneprovider.FormatQuotaProjectProvenance(inst.Options[systemoneprovider.OptionQuotaProject])
+		if meta, err := s.inspectSystemOneADCMetadata(ctx, inst.Auth.Scopes); err == nil {
+			authDTO.CredentialType = meta.CredentialType
+			authDTO.ServiceAccountEmail = meta.ServiceAccountEmail
+		}
+	}
 	return SystemOneInstanceResponse{
-		ID:       inst.ID,
-		Name:     inst.Name,
-		Adapter:  inst.Adapter,
-		Model:    inst.Model,
-		Endpoint: inst.Endpoint,
-		Location: inst.Location,
-		Auth: store.SystemOneInstanceAuth{
-			Kind:       inst.Auth.Kind,
-			SecretName: inst.Auth.SecretName,
-			HeaderName: inst.Auth.HeaderName,
-			Scopes:     slices.Clone(inst.Auth.Scopes),
-			Audience:   inst.Auth.Audience,
-		},
+		ID:                  inst.ID,
+		Name:                inst.Name,
+		Adapter:             inst.Adapter,
+		Model:               inst.Model,
+		Endpoint:            inst.Endpoint,
+		Location:            inst.Location,
+		Auth:                authDTO,
 		Options:             opts,
 		Limits:              limits,
 		AllowPrivateNetwork: inst.AllowPrivateNetwork,
@@ -570,6 +598,65 @@ func hasControlChars(s string) bool {
 	return false
 }
 
+func resolveAdapterAuthSchemeForCreate(caps systemoneprovider.Capabilities, authKind string) (systemoneprovider.AuthScheme, bool) {
+	if len(caps.SupportedAuth) > 0 {
+		scheme, ok := caps.SupportedAuth[authKind]
+		return scheme, ok
+	}
+	switch authKind {
+	case store.SystemOneAuthKindAPIKey:
+		switch caps.AuthScheme.Kind {
+		case systemoneprovider.AuthKindBearer, systemoneprovider.AuthKindHeader:
+			return caps.AuthScheme, true
+		default:
+			return systemoneprovider.AuthScheme{}, false
+		}
+	case store.SystemOneAuthKindGoogleAccessToken:
+		if caps.AuthScheme.Kind == systemoneprovider.AuthKindGoogleAccessToken {
+			return caps.AuthScheme, true
+		}
+		return systemoneprovider.AuthScheme{}, false
+	default:
+		return systemoneprovider.AuthScheme{}, false
+	}
+}
+
+func validateSystemOneGoogleScopes(authReq *CreateSystemOneInstanceAuthRequest) ([]string, error) {
+	if authReq == nil || len(authReq.Scopes) == 0 {
+		return nil, errors.New("auth.scopes is required and must be non-empty for google_access_token auth")
+	}
+	rawScopes := authReq.Scopes
+	if len(rawScopes) > maxSystemOneAuthScopes {
+		return nil, fmt.Errorf("auth.scopes exceeds maximum of %d scopes", maxSystemOneAuthScopes)
+	}
+
+	seen := make(map[string]struct{}, len(rawScopes))
+	clean := make([]string, 0, len(rawScopes))
+	for _, raw := range rawScopes {
+		s := strings.TrimSpace(raw)
+		if s == "" || s != raw || len(s) > maxSystemOneAuthScopeBytes {
+			return nil, errors.New("invalid auth scope: must be a trimmed https://www.googleapis.com/auth/ URL")
+		}
+		if !strings.HasPrefix(s, systemoneprovider.GoogleScopePrefix) || len(s) <= len(systemoneprovider.GoogleScopePrefix) {
+			return nil, fmt.Errorf("invalid auth scope: must start with %q", systemoneprovider.GoogleScopePrefix)
+		}
+		for i := 0; i < len(s); i++ {
+			b := s[i]
+			if b < 0x21 || b > 0x7e || b == '?' || b == '#' {
+				return nil, errors.New("invalid auth scope: contains disallowed URL characters")
+			}
+		}
+		if _, dup := seen[s]; !dup {
+			seen[s] = struct{}{}
+			clean = append(clean, s)
+		}
+	}
+	if len(clean) == 0 {
+		return nil, errors.New("auth.scopes is required and must be non-empty for google_access_token auth")
+	}
+	return clean, nil
+}
+
 func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request, user UserIdentity) {
 	ctx := r.Context()
 
@@ -599,7 +686,7 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 	if req.Auth != nil && strings.TrimSpace(req.Auth.Kind) != "" {
 		authKind = strings.TrimSpace(req.Auth.Kind)
 	}
-	if authKind != store.SystemOneAuthKindAPIKey {
+	if authKind != store.SystemOneAuthKindAPIKey && authKind != store.SystemOneAuthKindGoogleAccessToken {
 		ValidationError(w, fmt.Sprintf("auth kind %q: auth kind not yet supported", authKind), nil)
 		return
 	}
@@ -625,17 +712,6 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 	if len(location) > maxSystemOneLocationBytes || !utf8.ValidString(location) || hasControlChars(location) {
 		ValidationError(w, "invalid location", nil)
 		return
-	}
-
-	if req.Auth != nil {
-		if len(req.Auth.Scopes) > 0 || strings.TrimSpace(req.Auth.Audience) != "" {
-			ValidationError(w, "auth scopes and audience are not supported for api_key auth", nil)
-			return
-		}
-		if hdr := strings.TrimSpace(req.Auth.HeaderName); hdr != "" && !strings.EqualFold(hdr, "Authorization") {
-			ValidationError(w, "custom auth headerName is not supported in P1", nil)
-			return
-		}
 	}
 
 	opts, err := validateSystemOneOptions(req.Options)
@@ -666,6 +742,10 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		ValidationError(w, "adapter must be side-effect-free", nil)
 		return
 	}
+	if _, supported := resolveAdapterAuthSchemeForCreate(caps, authKind); !supported {
+		ValidationError(w, fmt.Sprintf("adapter %q does not support auth kind %q", adapterName, authKind), nil)
+		return
+	}
 	if validator, ok := adapter.(systemoneprovider.InstanceValidator); ok {
 		if err := validator.ValidateInstance(instView); err != nil {
 			ValidationError(w, safeSystemOneAdapterConfigMessage(err), nil)
@@ -673,32 +753,85 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	if req.APIKey != "" && req.Auth != nil && req.Auth.APIKey != "" && req.APIKey != req.Auth.APIKey {
-		ValidationError(w, "conflicting apiKey values in request", nil)
-		return
-	}
-	apiKey := req.APIKey
-	if apiKey == "" && req.Auth != nil {
-		apiKey = req.Auth.APIKey
-	}
-	if len(apiKey) > maxSystemOneAPIKeyBytes || !isValidSystemOneAPIKey(apiKey) {
-		ValidationError(w, "apiKey is required and must be a non-empty credential free of control characters", nil)
-		return
-	}
+	var (
+		apiKey     string
+		authScopes []string
+		secretName string
+	)
+	id := api.NewUUID()
+	actorID := user.ID()
 
-	if s.secretBackend == nil {
-		writeError(w, http.StatusNotImplemented, ErrCodeNotImplemented, "Secret backend is not configured", nil)
-		return
+	switch authKind {
+	case store.SystemOneAuthKindAPIKey:
+		if req.Auth != nil {
+			if len(req.Auth.Scopes) > 0 || strings.TrimSpace(req.Auth.Audience) != "" {
+				ValidationError(w, "auth scopes and audience are not supported for api_key auth", nil)
+				return
+			}
+			if hdr := strings.TrimSpace(req.Auth.HeaderName); hdr != "" && !strings.EqualFold(hdr, "Authorization") {
+				ValidationError(w, "custom auth headerName is not supported in P1", nil)
+				return
+			}
+		}
+		if _, hasQP := opts[systemoneprovider.OptionQuotaProject]; hasQP {
+			ValidationError(w, "options.quota_project is only supported when auth.kind is \"google_access_token\"", nil)
+			return
+		}
+		if req.APIKey != "" && req.Auth != nil && req.Auth.APIKey != "" && req.APIKey != req.Auth.APIKey {
+			ValidationError(w, "conflicting apiKey values in request", nil)
+			return
+		}
+		apiKey = req.APIKey
+		if apiKey == "" && req.Auth != nil {
+			apiKey = req.Auth.APIKey
+		}
+		if len(apiKey) > maxSystemOneAPIKeyBytes || !isValidSystemOneAPIKey(apiKey) {
+			ValidationError(w, "apiKey is required and must be a non-empty credential free of control characters", nil)
+			return
+		}
+		if s.secretBackend == nil {
+			writeError(w, http.StatusNotImplemented, ErrCodeNotImplemented, "Secret backend is not configured", nil)
+			return
+		}
+		secretName = systemOneInstanceSecretName(id)
+
+	case store.SystemOneAuthKindGoogleAccessToken:
+		if req.APIKey != "" || (req.Auth != nil && req.Auth.APIKey != "") {
+			ValidationError(w, "apiKey must not be provided when auth.kind is \"google_access_token\"", nil)
+			return
+		}
+		if req.Auth != nil {
+			if strings.TrimSpace(req.Auth.HeaderName) != "" {
+				ValidationError(w, "auth.headerName is not supported for google_access_token auth", nil)
+				return
+			}
+			if strings.TrimSpace(req.Auth.Audience) != "" {
+				ValidationError(w, "auth.audience is not supported for google_access_token auth", nil)
+				return
+			}
+		}
+		authScopes, err = validateSystemOneGoogleScopes(req.Auth)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		if qp, hasQP := opts[systemoneprovider.OptionQuotaProject]; hasQP {
+			if err := egress.ValidateQuotaProject(qp); err != nil {
+				ValidationError(w, "invalid options.quota_project: must be a valid GCP project ID (6..30 lowercase letters, digits, or hyphens)", nil)
+				return
+			}
+		} else if meta, metaErr := s.inspectSystemOneADCMetadata(ctx, authScopes); metaErr == nil && meta.CredentialType == SystemOneADCTypeAuthorizedUser {
+			ValidationError(w, "options.quota_project is required when using authorized_user Application Default Credentials", map[string]any{
+				"reason": string(systemoneprovider.FailInvalidRequest),
+			})
+			return
+		}
 	}
 
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-
-	id := api.NewUUID()
-	secretName := systemOneInstanceSecretName(id)
-	actorID := user.ID()
 
 	inst := &store.SystemOneInstance{
 		ID:       id,
@@ -708,8 +841,9 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		Endpoint: endpoint,
 		Location: location,
 		Auth: store.SystemOneInstanceAuth{
-			Kind:       store.SystemOneAuthKindAPIKey,
+			Kind:       authKind,
 			SecretName: secretName,
+			Scopes:     authScopes,
 		},
 		Options:             opts,
 		Limits:              limits,
@@ -729,26 +863,30 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if _, err = s.setSystemOneInstanceSecret(ctx, id, apiKey, actorID); err != nil {
-		s.logSystemOneAudit().Error("Failed to store System One instance credential",
-			"instance_id", id,
-			"instance_name", name,
-			"secret_name", secretName,
-			"actor_id", actorID,
-		)
-		InternalError(w)
-		return
-	}
-
-	if err := s.store.CreateSystemOneInstance(ctx, inst); err != nil {
-		// Roll back the hub-scoped internal secret if row creation fails.
-		if rbErr := s.deleteSystemOneInstanceSecret(ctx, secretName); rbErr != nil {
-			s.logSystemOneAudit().Error("Failed to roll back System One instance credential after store failure",
+	if authKind == store.SystemOneAuthKindAPIKey {
+		if _, err = s.setSystemOneInstanceSecret(ctx, id, apiKey, actorID); err != nil {
+			s.logSystemOneAudit().Error("Failed to store System One instance credential",
 				"instance_id", id,
 				"instance_name", name,
 				"secret_name", secretName,
 				"actor_id", actorID,
 			)
+			InternalError(w)
+			return
+		}
+	}
+
+	if err := s.store.CreateSystemOneInstance(ctx, inst); err != nil {
+		if authKind == store.SystemOneAuthKindAPIKey {
+			// Roll back the hub-scoped internal secret if row creation fails.
+			if rbErr := s.deleteSystemOneInstanceSecret(ctx, secretName); rbErr != nil {
+				s.logSystemOneAudit().Error("Failed to roll back System One instance credential after store failure",
+					"instance_id", id,
+					"instance_name", name,
+					"secret_name", secretName,
+					"actor_id", actorID,
+				)
+			}
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, fmt.Sprintf("System One instance %q already exists", name))
@@ -768,12 +906,13 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		"adapter", inst.Adapter,
 		"model", inst.Model,
 		"endpoint", inst.Endpoint,
+		"auth_kind", inst.Auth.Kind,
 		"secret_name", inst.Auth.SecretName,
 		"revision", inst.Revision,
 		"actor_id", actorID,
 	)
 
-	writeJSON(w, http.StatusCreated, toSystemOneInstanceResponse(inst))
+	writeJSON(w, http.StatusCreated, s.toSystemOneInstanceResponse(ctx, inst))
 }
 
 func (s *Server) listSystemOneInstances(w http.ResponseWriter, r *http.Request) {
@@ -816,7 +955,7 @@ func (s *Server) listSystemOneInstances(w http.ResponseWriter, r *http.Request) 
 
 	items := make([]SystemOneInstanceResponse, 0, len(res.Items))
 	for i := range res.Items {
-		items = append(items, toSystemOneInstanceResponse(&res.Items[i]))
+		items = append(items, s.toSystemOneInstanceResponse(r.Context(), &res.Items[i]))
 	}
 	writeJSON(w, http.StatusOK, ListSystemOneInstancesResponse{
 		Instances:  items,
@@ -839,7 +978,7 @@ func (s *Server) getSystemOneInstance(w http.ResponseWriter, r *http.Request, na
 		InternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, toSystemOneInstanceResponse(inst))
+	writeJSON(w, http.StatusOK, s.toSystemOneInstanceResponse(r.Context(), inst))
 }
 
 func (s *Server) deleteSystemOneInstance(w http.ResponseWriter, r *http.Request, name string, user UserIdentity) {
@@ -1051,6 +1190,21 @@ func (s *Server) probeSystemOneInstance(w http.ResponseWriter, r *http.Request, 
 	eval := decision.Eval
 	if eval == nil && evalErr != nil {
 		eval, _ = systemoneruntime.EvaluationFrom(evalErr)
+	}
+	if eval != nil && inst.Auth.Kind == store.SystemOneAuthKindGoogleAccessToken {
+		if eval.Auth == nil {
+			eval.Auth = &systemoneruntime.AuthProvenance{
+				AuthKind:     inst.Auth.Kind,
+				Scopes:       slices.Clone(inst.Auth.Scopes),
+				QuotaProject: systemoneprovider.FormatQuotaProjectProvenance(inst.Options[systemoneprovider.OptionQuotaProject]),
+			}
+		}
+		if eval.Auth.CredentialType == "" {
+			if meta, metaErr := s.inspectSystemOneADCMetadata(ctx, inst.Auth.Scopes); metaErr == nil {
+				eval.Auth.CredentialType = meta.CredentialType
+				eval.Auth.ServiceAccountEmail = meta.ServiceAccountEmail
+			}
+		}
 	}
 
 	resp := ProbeSystemOneInstanceResponse{

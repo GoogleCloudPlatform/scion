@@ -89,10 +89,10 @@ func TestDefaultRegistry_RegistersGeminiDecisionsWithoutModelLister(t *testing.T
 			HeaderName: "x-goog-api-key",
 		},
 		"google_access_token": {
-			Kind:   provider.AuthKindGoogleAccessToken,
-			Scopes: []string{"https://www.googleapis.com/auth/cloud-platform"},
+			Kind: provider.AuthKindGoogleAccessToken,
 		},
 	}, caps.SupportedAuth)
+	assert.Empty(t, caps.SupportedAuth["google_access_token"].Scopes, "gemini_decisions must not declare a default OAuth scope (Addendum E)")
 	assert.Equal(t, geminidecisions.ProviderRetention, caps.ProviderRetention)
 	assert.Equal(t, provider.PrimitiveLimits{
 		Supported:                true,
@@ -120,14 +120,13 @@ func TestDefaultRegistry_RegistersGeminiDecisionsWithoutModelLister(t *testing.T
 	// Capabilities returns defensive copies.
 	caps.Primitives[spec.PrimitiveBinary] = provider.PrimitiveLimits{}
 	caps.NativeMetrics[0].Name = "mutated"
-	caps.SupportedAuth["google_access_token"].Scopes[0] = "mutated-scope"
 	delete(caps.SupportedAuth, "api_key")
 	capsAgain, err := got.Capabilities(provider.InstanceView{Name: "gem-prod", Model: "gemini-decision-1"})
 	require.NoError(t, err)
 	assert.True(t, capsAgain.Primitives[spec.PrimitiveBinary].Supported)
 	assert.Equal(t, "gemini.confidence", capsAgain.NativeMetrics[0].Name)
 	assert.Contains(t, capsAgain.SupportedAuth, "api_key")
-	assert.Equal(t, []string{"https://www.googleapis.com/auth/cloud-platform"}, capsAgain.SupportedAuth["google_access_token"].Scopes)
+	assert.Contains(t, capsAgain.SupportedAuth, "google_access_token")
 }
 
 func TestValidate_AcceptsPortableBinaryAndChoiceAndRejectsEmptyModelOrScore(t *testing.T) {

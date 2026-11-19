@@ -236,6 +236,17 @@ type InputFingerprint struct {
 	SHA256 string             `json:"sha256,omitempty"`
 }
 
+// AuthProvenance records content-free, non-secret authentication metadata for
+// an evaluation (PV3 brief Addendum B §§B4, B6, B10). Token and secret values
+// are never stored here.
+type AuthProvenance struct {
+	AuthKind            string   `json:"auth_kind,omitempty"`
+	Scopes              []string `json:"scopes,omitempty"`
+	QuotaProject        string   `json:"quota_project,omitempty"`
+	CredentialType      string   `json:"credential_type,omitempty"`
+	ServiceAccountEmail string   `json:"service_account_email,omitempty"`
+}
+
 // Evaluation is the content-free provenance record returned on every evaluation
 // path (in Decision.Eval on Success and inside EvaluationError on Uncertain and
 // Failed; runtime-design §8.1, P1 brief §1, §5).
@@ -246,6 +257,7 @@ type Evaluation struct {
 	Requested       spec.Binding            `json:"requested"`
 	ConfiguredModel string                  `json:"configured_model,omitempty"`
 	ResolvedModel   string                  `json:"resolved_model,omitempty"`
+	Auth            *AuthProvenance         `json:"auth,omitempty"`
 	Class           Class                   `json:"class"`
 	Reason          string                  `json:"reason,omitempty"`
 	Answers         map[string]AnswerRecord `json:"answers,omitempty"`
