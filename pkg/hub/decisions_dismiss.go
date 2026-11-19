@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -292,10 +293,13 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		}
 		replayedDelivered := false
 		if !askerGone && respMsgID != "" && len(res.Dismissed) > 0 {
+			// A lookup failure reports not delivered: claiming delivery we
+			// cannot confirm is the wrong default.
 			if storedMsg, merr := s.store.GetMessage(ctx, respMsgID); merr == nil && storedMsg != nil {
 				replayedDelivered = storedMsg.DispatchState == store.MessageDispatchDispatched
-			} else {
-				replayedDelivered = true
+			} else if merr != nil {
+				slog.Warn("decision dismiss replay: response message lookup failed",
+					"response_message_id", respMsgID, "error", merr)
 			}
 		}
 		writeJSON(w, http.StatusOK, DismissDecisionPromptResponse{
