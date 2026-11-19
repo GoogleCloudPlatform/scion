@@ -1227,12 +1227,19 @@ func TestDispatcher_CorruptStoredMatchRules_SkipsAndNeverFires(t *testing.T) {
 	for _, f := range firesRes.Items {
 		byTrig[f.TriggerID] = f
 	}
-	for _, corruptID := range []string{trCorruptFlag.ID, trEmptyElem.ID, trTooMany.ID} {
-		f, ok := byTrig[corruptID]
-		require.True(t, ok, "expected skipped fire row for corrupt trigger %s", corruptID)
+	for _, tc := range []struct {
+		id         string
+		wantReason string
+	}{
+		{trCorruptFlag.ID, triggerrule.MatchReasonCorruptRules},
+		{trEmptyElem.ID, triggerrule.MatchReasonCorruptRules},
+		{trTooMany.ID, celengine.CategorySize},
+	} {
+		f, ok := byTrig[tc.id]
+		require.True(t, ok, "expected skipped fire row for corrupt trigger %s", tc.id)
 		assert.Equal(t, store.TriggerFireStatusSkipped, f.Status)
 		assert.Equal(t, triggerrule.SkipReasonEvalFailed, f.Error)
-		assert.Contains(t, f.RuleTrace, triggerrule.MatchReasonCorruptRules)
+		assert.Contains(t, f.RuleTrace, tc.wantReason)
 	}
 }
 

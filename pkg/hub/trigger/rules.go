@@ -16,7 +16,6 @@ package trigger
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -42,24 +41,19 @@ const (
 
 // MatchRules normalizes a stored Trigger's match_rules on read (mixed-rule-arrays
 // §2.1, SEC-3b1rw-01). Normalization fails closed with triggerrule.ErrCorruptMatchRules
-// whenever MatchRulesCorrupt is set, element count/byte caps are exceeded, or an
-// element expression is empty or whitespace-only, so a corrupt stored row never
-// degrades to an unconditional Types-only match.
+// whenever MatchRulesCorrupt is set or an element expression is empty or
+// whitespace-only, so a corrupt stored row never degrades to an unconditional
+// Types-only match. Element-count and per-element byte caps are enforced by
+// writeAndValidateTriggerMatch at authoring/resume and by MatchAllWithTrace at
+// evaluation time so multi-element authoring diagnostics remain per-element.
 func MatchRules(tr store.Trigger) ([]triggerrule.Rule, error) {
 	if tr.MatchRulesCorrupt {
 		return nil, triggerrule.ErrCorruptMatchRules
 	}
 	if len(tr.MatchRules) > 0 {
-		if len(tr.MatchRules) > triggerrule.MaxMatchRules {
-			return nil, triggerrule.ErrCorruptMatchRules
-		}
-		raw, err := json.Marshal(tr.MatchRules)
-		if err != nil || len(raw) > triggerrule.MaxMatchRulesJSONBytes {
-			return nil, triggerrule.ErrCorruptMatchRules
-		}
 		out := make([]triggerrule.Rule, len(tr.MatchRules))
 		for i, r := range tr.MatchRules {
-			if strings.TrimSpace(r.Expr) == "" || len(r.Expr) > triggerrule.MaxMatchRuleBytes {
+			if strings.TrimSpace(r.Expr) == "" {
 				return nil, triggerrule.ErrCorruptMatchRules
 			}
 			d := strings.TrimSpace(r.Dialect)
@@ -74,7 +68,7 @@ func MatchRules(tr store.Trigger) ([]triggerrule.Rule, error) {
 		return out, nil
 	}
 	if tr.MatchRule != "" {
-		if strings.TrimSpace(tr.MatchRule) == "" || len(tr.MatchRule) > triggerrule.MaxMatchRuleBytes {
+		if strings.TrimSpace(tr.MatchRule) == "" {
 			return nil, triggerrule.ErrCorruptMatchRules
 		}
 		d := strings.TrimSpace(tr.MatchDialect)
