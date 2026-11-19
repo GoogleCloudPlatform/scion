@@ -869,6 +869,10 @@ func TestAgentStore_ClaimAgentStartWakeYieldsToActiveIdleClaim(t *testing.T) {
 		ReportSource: store.StatusReportSourceRuntime,
 		ReportRunID:  aExpiredFilter.RunID,
 	}))
+	// An expired stamp on a row already recorded suspended is not in progress.
+	aExpiredSuspended, _ := makeClaimed("stopall-expired-suspended", 5*time.Millisecond)
+	_, err = s.client.Agent.UpdateOneID(uuid.MustParse(aExpiredSuspended.ID)).SetPhase(string(state.PhaseSuspended)).Save(ctx)
+	require.NoError(t, err)
 	time.Sleep(15 * time.Millisecond)
 
 	listed, err := s.ListAgents(ctx, store.AgentFilter{
@@ -884,7 +888,8 @@ func TestAgentStore_ClaimAgentStartWakeYieldsToActiveIdleClaim(t *testing.T) {
 	}
 	require.Contains(t, listedMap, aActiveFilter.ID, "active idle claim must be matched by stop-all filter")
 	assert.True(t, listedMap[aActiveFilter.ID].IdleSuspendClaimActive, "ListAgents must populate IdleSuspendClaimActive")
-	assert.NotContains(t, listedMap, aExpiredFilter.ID, "expired idle claim must NOT be matched by stop-all filter")
+	assert.Contains(t, listedMap, aExpiredFilter.ID, "an expired claim whose suspend is still in progress (intent stopped, not suspended) must be matched by stop-all")
+	assert.NotContains(t, listedMap, aExpiredSuspended.ID, "an expired claim on a suspended row must NOT be matched by stop-all filter")
 
 	// With OrActiveIdleClaim=false (lifecycle.idle_suspend off), ListAgents skips
 	// the active-claim OR branch and incurs no extra store-clock query.
