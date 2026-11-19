@@ -36,12 +36,14 @@ import type {
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import './chat/chat-decisions.js';
 import {
+  MAX_BULK_DISMISS_SELECTION,
   avatarColor,
   avatarInitial,
   conversationDisplayLabel,
   conversationHref,
   formatDecisionLogWhen,
   promptAnswerability,
+  promptWaitingOnViewerRows,
   replyHrefForEntry,
   surfaceDisplay,
   type WaitingOnOthersItem,
@@ -135,6 +137,119 @@ export const decisionsPageSharedStyles: CSSResult = css`
     border: 1px solid var(--scion-border, #e2e8f0);
     border-radius: var(--scion-radius-lg, 0.75rem);
     margin: 0.75rem 0;
+  }
+
+  .pcard.sel {
+    border-color: var(--scion-primary, #3b82f6);
+    box-shadow: 0 0 0 1px var(--scion-primary, #3b82f6);
+  }
+
+  .pcard-head sl-checkbox.card-select {
+    margin-right: 0.1rem;
+  }
+
+  .pcard-head sl-checkbox.card-select::part(label) {
+    margin-inline-start: 0;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .select-all-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.35rem 0.75rem;
+    margin: 0.35rem 0;
+    font-size: 0.875rem;
+    color: var(--scion-text-secondary, #475569);
+  }
+
+  .selbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    margin: 0.5rem 0;
+    background: var(--scion-primary-50, rgba(59, 130, 246, 0.12));
+    border: 1px solid var(--scion-primary, #3b82f6);
+    border-radius: var(--scion-radius-lg, 0.75rem);
+    font-size: 0.875rem;
+    color: var(--scion-text, #1e293b);
+    flex-wrap: wrap;
+  }
+
+  .selbar .spacer {
+    flex: 1;
+  }
+
+  .bulk-dismiss-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    max-height: 14rem;
+    overflow-y: auto;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--scion-border, #e2e8f0);
+    border-radius: var(--scion-radius, 0.5rem);
+    background: var(--scion-bg-subtle, #f8fafc);
+  }
+
+  .bulk-dismiss-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text, #1e293b);
+    overflow-wrap: anywhere;
+  }
+
+  .bulk-dismiss-item + .bulk-dismiss-item {
+    border-top: 1px solid var(--scion-border, #e2e8f0);
+    padding-top: 0.45rem;
+  }
+
+  .bulk-dismiss-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    font-size: 0.8125rem;
+    color: var(--scion-text-secondary, #475569);
+  }
+
+  .bulk-dismiss-item-meta b {
+    color: var(--scion-text, #1e293b);
+  }
+
+  .bulk-dismiss-item-q {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+  }
+
+  .bulk-dismiss-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .bulk-dismiss-progress-label {
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text-secondary, #475569);
   }
 
   .pcard-head {
@@ -429,6 +544,52 @@ export const decisionsPageSharedStyles: CSSResult = css`
     color: var(--scion-text, #1e293b);
   }
 
+  .dismiss-tip-wrap {
+    display: inline-flex;
+  }
+
+  sl-dialog.dismiss-dialog {
+    --sl-panel-background-color: var(--scion-surface, #ffffff);
+    --sl-panel-border-color: var(--scion-border, #e2e8f0);
+    --sl-color-neutral-700: var(--scion-text, #1e293b);
+  }
+
+  sl-dialog.dismiss-dialog::part(panel) {
+    width: min(32.5rem, calc(100vw - 1.5rem));
+  }
+
+  .dismiss-dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    font-size: var(--chat-fs-base, 0.9375rem);
+    color: var(--scion-text, #1e293b);
+  }
+
+  .dismiss-dialog-note {
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text-muted, #64748b);
+  }
+
+  .dismiss-tell {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text-secondary, #475569);
+  }
+
+  .dismiss-tell sl-icon {
+    flex-shrink: 0;
+  }
+
+  .dismiss-dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    width: 100%;
+  }
+
   @media (max-width: 640px) {
     .ph h1 {
       font-size: 1.2rem;
@@ -617,6 +778,81 @@ export function renderLoadMoreFooter(opts: {
   return nothing;
 }
 
+export function renderPendingSelectionHeader(opts: {
+  selectedCount: number;
+  selectableCount: number;
+  submitting: boolean;
+  onToggleAll: (checked: boolean) => void;
+  onClear: () => void;
+  onDismiss: () => void;
+}): TemplateResult {
+  const cap = Math.min(opts.selectableCount, MAX_BULK_DISMISS_SELECTION);
+  const allSelected = cap > 0 && opts.selectedCount >= cap;
+  const indeterminate = opts.selectedCount > 0 && !allSelected;
+  const selectAllDisabled = cap === 0 || opts.submitting;
+
+  const onSelectAllChange = (e: Event): void => {
+    const box = e.currentTarget as HTMLElement & { checked?: boolean };
+    const nextChecked = Boolean(box.checked) && !allSelected;
+    opts.onToggleAll(nextChecked);
+  };
+
+  if (opts.selectedCount === 0) {
+    return html`
+      <div class="select-all-row">
+        <sl-checkbox
+          data-select-all-prompts
+          ?checked=${false}
+          .checked=${false}
+          ?indeterminate=${false}
+          .indeterminate=${false}
+          ?disabled=${selectAllDisabled}
+          @sl-change=${onSelectAllChange}
+          >Select all on this page</sl-checkbox
+        >
+      </div>
+    `;
+  }
+
+  return html`
+    <div class="selbar" data-selection-bar>
+      <sl-checkbox
+        data-select-all-prompts
+        ?checked=${allSelected}
+        .checked=${allSelected}
+        ?indeterminate=${indeterminate}
+        .indeterminate=${indeterminate}
+        ?disabled=${selectAllDisabled}
+        @sl-change=${onSelectAllChange}
+        >Select all on this page</sl-checkbox
+      >
+      <b data-selected-count
+        >${opts.selectedCount === 1 ? '1 card selected' : `${opts.selectedCount} cards selected`}</b
+      >
+      <span class="spacer"></span>
+      <sl-button
+        size="small"
+        variant="text"
+        data-selection-clear
+        ?disabled=${opts.submitting}
+        @click=${opts.onClear}
+        >Clear</sl-button
+      >
+      <sl-button
+        size="small"
+        variant="danger"
+        outline
+        data-selection-dismiss
+        ?disabled=${opts.submitting}
+        @click=${opts.onDismiss}
+      >
+        <sl-icon slot="prefix" name="x-circle" aria-hidden="true"></sl-icon>
+        Dismiss…
+      </sl-button>
+    </div>
+  `;
+}
+
 export function renderPromptCard(
   p: ProjectDecisionPromptView,
   opts: {
@@ -624,6 +860,11 @@ export function renderPromptCard(
     defaultProjectId?: string | undefined;
     projectBadgeName?: string | undefined;
     askerGone?: boolean | undefined;
+    dismissRemainingMin?: number | undefined;
+    selected?: boolean | undefined;
+    canSelect?: boolean | undefined;
+    selectionCapReached?: boolean | undefined;
+    onToggleSelect?: ((p: ProjectDecisionPromptView, checked: boolean) => void) | undefined;
     onDismissTooRecent?:
       | ((
           p: ProjectDecisionPromptView,
@@ -642,10 +883,51 @@ export function renderPromptCard(
       ? `${convHref}#msg-${encodeURIComponent(p.promptMessageId)}`
       : null;
   const mode = p.answerMode === 'set' || p.answerMode === 'single' ? p.answerMode : undefined;
+  const remainingMin = opts.dismissRemainingMin ?? 0;
+  const isSelected = Boolean(opts.selected);
+  const canDismissAnyRow =
+    opts.canSelect ?? promptWaitingOnViewerRows(p, opts.currentUserId).length > 0;
+  const capReached = Boolean(opts.selectionCapReached) && !isSelected;
+  const checkboxDisabled = !canDismissAnyRow || remainingMin > 0 || capReached;
+  const checkboxTooltip =
+    canDismissAnyRow && remainingMin > 0
+      ? `Dismiss available in ${remainingMin} min`
+      : capReached
+        ? `Select up to ${MAX_BULK_DISMISS_SELECTION} cards at once`
+        : '';
+
+  const renderSelectCheckbox = (): TemplateResult => {
+    const box = html`
+      <sl-checkbox
+        class="card-select"
+        data-select-prompt=${p.promptMessageId}
+        ?checked=${isSelected}
+        .checked=${isSelected}
+        ?disabled=${checkboxDisabled}
+        @sl-change=${(e: Event): void => {
+          const target = e.currentTarget as HTMLElement & { checked?: boolean };
+          if (checkboxDisabled) {
+            target.checked = isSelected;
+            return;
+          }
+          opts.onToggleSelect?.(p, Boolean(target.checked));
+        }}
+        ><span class="sr-only">Select decision card from ${p.askerAgentName}</span></sl-checkbox
+      >
+    `;
+    if (checkboxTooltip) {
+      return html`
+        <sl-tooltip data-select-prompt-tooltip=${p.promptMessageId} content=${checkboxTooltip}>
+          <span class="dismiss-tip-wrap">${box}</span>
+        </sl-tooltip>
+      `;
+    }
+    return box;
+  };
 
   return html`
     <div
-      class="pcard"
+      class="pcard ${isSelected ? 'sel' : ''}"
       data-prompt-card=${p.promptMessageId}
       @decision-answered=${(e: CustomEvent<DecisionAnsweredDetail>): void => opts.onAnswered(p, e)}
       @decision-dismiss-too-recent=${(
@@ -655,6 +937,7 @@ export function renderPromptCard(
       @decision-jump=${(e: CustomEvent<{ messageId?: string }>): void => opts.onJump(p, e)}
     >
       <div class="pcard-head">
+        ${opts.onToggleSelect ? renderSelectCheckbox() : nothing}
         ${opts.projectBadgeName
           ? html`<sl-badge variant="neutral" data-card-project>${opts.projectBadgeName}</sl-badge>`
           : nothing}
@@ -1017,5 +1300,170 @@ export function renderMadeTableAndMobileList(
           })
       )}
     </div>
+  `;
+}
+
+export function renderBulkDismissDialog(opts: {
+  prompts: readonly ProjectDecisionPromptView[];
+  currentUserId: string;
+  reasonDraft: string;
+  submitting: boolean;
+  completedCount: number;
+  goneAgentIds: ReadonlySet<string>;
+  onReasonInput: (value: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): TemplateResult | typeof nothing {
+  const prompts = opts.prompts;
+  if (prompts.length === 0) return nothing;
+
+  const count = prompts.length;
+  const dialogLabel = count === 1 ? 'Dismiss 1 card' : `Dismiss ${count} cards`;
+  const confirmLabel = count === 1 ? 'Dismiss 1 card' : `Dismiss ${count} cards`;
+  const onTextareaInput = (e: Event): void => {
+    const val = (e.target as HTMLElement & { value?: string })?.value ?? '';
+    opts.onReasonInput(val);
+  };
+
+  let goneCount = 0;
+  const distinctAgentNames = new Set<string>();
+  for (const p of prompts) {
+    if (p.askerAgentName) distinctAgentNames.add(p.askerAgentName);
+    if (p.askerAgentId && opts.goneAgentIds.has(p.askerAgentId)) {
+      goneCount++;
+    }
+  }
+  const allGone = goneCount === count;
+  const someGone = goneCount > 0 && !allGone;
+  const singleAsker = distinctAgentNames.size === 1 ? [...distinctAgentNames][0] : '';
+
+  const progressPct = count > 0 ? Math.round((opts.completedCount / count) * 100) : 0;
+
+  return html`
+    <sl-dialog
+      class="dismiss-dialog"
+      data-bulk-dismiss-dialog
+      label=${dialogLabel}
+      open
+      @sl-request-close=${(e: Event): void => {
+        if (opts.submitting) {
+          e.preventDefault();
+          return;
+        }
+        opts.onCancel();
+      }}
+    >
+      <div class="dismiss-dialog-body">
+        <div class="dismiss-dialog-note">
+          Dismissed decisions close for everyone and cannot be answered. This cannot be undone.
+        </div>
+        <div class="bulk-dismiss-list" data-bulk-dismiss-list>
+          ${prompts.map((p) => {
+            const waitingRows = promptWaitingOnViewerRows(p, opts.currentUserId);
+            const firstRow = waitingRows[0] ?? p.decisions[0];
+            const extraCount = Math.max(0, waitingRows.length - 1);
+            const whereLabel = conversationDisplayLabel(p.chatKey, p.conversationLabel);
+            const isGone = Boolean(p.askerAgentId && opts.goneAgentIds.has(p.askerAgentId));
+            return html`
+              <div class="bulk-dismiss-item" data-bulk-dismiss-item=${p.promptMessageId}>
+                <div class="bulk-dismiss-item-meta">
+                  <b>${p.askerAgentName || 'Agent'}</b>
+                  ${isGone ? html`<span class="muted">(deleted)</span>` : nothing}
+                  <span>·</span>
+                  <span>${whereLabel}</span>
+                  ${extraCount > 0
+                    ? html`<span class="muted">· +${extraCount} more</span>`
+                    : nothing}
+                </div>
+                ${firstRow
+                  ? html`
+                      <div class="bulk-dismiss-item-q">
+                        ${firstRow.key ? html`<span class="key">${firstRow.key}</span>` : nothing}
+                        <span>${firstRow.question}</span>
+                      </div>
+                    `
+                  : nothing}
+              </div>
+            `;
+          })}
+        </div>
+        <sl-textarea
+          size="small"
+          rows="2"
+          maxlength="500"
+          label="Reason (optional)"
+          help-text=${allGone
+            ? 'Plain text, up to 500 characters. Shown on each card.'
+            : 'Plain text, up to 500 characters. Sent to live asking agents and shown on each card.'}
+          placeholder="Why these no longer apply"
+          data-bulk-dismiss-reason
+          ?disabled=${opts.submitting}
+          .value=${opts.reasonDraft}
+          @sl-input=${onTextareaInput}
+          @input=${onTextareaInput}
+        ></sl-textarea>
+        ${allGone
+          ? html`<div class="dismiss-tell" data-bulk-dismiss-tell="gone">
+              <sl-icon name="person-x" aria-hidden="true"></sl-icon>
+              <span
+                >${singleAsker
+                  ? `${singleAsker} is gone; nothing will be sent.`
+                  : 'Asking agents are gone; nothing will be sent.'}</span
+              >
+            </div>`
+          : someGone
+            ? html`<div class="dismiss-tell" data-bulk-dismiss-tell="mixed">
+                <sl-icon name="send" aria-hidden="true"></sl-icon>
+                <span
+                  >Live asking agents will be told; deleted agents are gone and nothing will be sent
+                  to them.</span
+                >
+              </div>`
+            : html`<div class="dismiss-tell" data-bulk-dismiss-tell="live">
+                <sl-icon name="send" aria-hidden="true"></sl-icon>
+                <span
+                  >${singleAsker
+                    ? `${singleAsker} will be told if reachable.`
+                    : 'Live asking agents will be told in their conversations.'}</span
+                >
+              </div>`}
+        ${opts.submitting
+          ? html`
+              <div
+                class="bulk-dismiss-progress"
+                data-bulk-dismiss-progress
+                role="status"
+                aria-live="polite"
+              >
+                <div class="bulk-dismiss-progress-label">
+                  Dismissing ${opts.completedCount} of ${count} ${count === 1 ? 'card' : 'cards'}…
+                </div>
+                <sl-progress-bar value=${progressPct}></sl-progress-bar>
+              </div>
+            `
+          : nothing}
+      </div>
+      <div slot="footer" class="dismiss-dialog-footer">
+        <sl-button
+          size="small"
+          data-bulk-dismiss-cancel
+          ?disabled=${opts.submitting}
+          @click=${opts.onCancel}
+        >
+          Cancel
+        </sl-button>
+        <sl-button
+          size="small"
+          variant="danger"
+          outline
+          data-bulk-dismiss-confirm
+          ?loading=${opts.submitting}
+          ?disabled=${opts.submitting}
+          @click=${opts.onConfirm}
+        >
+          ${confirmLabel}
+        </sl-button>
+      </div>
+    </sl-dialog>
   `;
 }

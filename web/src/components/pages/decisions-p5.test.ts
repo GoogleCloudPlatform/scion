@@ -21,9 +21,11 @@
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import type { DecisionView } from '../../shared/types.js';
 import type {
   ProjectDecisionLogEntryView,
   ProjectDecisionProjectRef,
+  ProjectDecisionPromptView,
   ProjectMadeDecisionsResponse,
   ProjectPendingDecisionsResponse,
 } from '../../client/project-decisions.js';
@@ -353,5 +355,697 @@ describe('Made tab dismissals and Provenance = Dismissed (ptone/scion#8217)', ()
     expect(profReason).not.toBeNull();
     expect(profReason.textContent).toBe(payload);
     expect(profReason.querySelector('img, script, strong, b')).toBeNull();
+  });
+});
+
+function makeDecision(over: Partial<DecisionView> = {}): DecisionView {
+  return {
+    rowId: 'r-1',
+    messageId: 'm-1',
+    key: 'D234',
+    ref: 'D234',
+    version: 1,
+    status: 'pending',
+    askerAgentId: AGENT_REL,
+    askerAgentName: 'release-bot',
+    question: 'Ship v0.9 today?',
+    choices: [
+      { id: 'yes', label: 'Yes' },
+      { id: 'no', label: 'No' },
+    ],
+    ...over,
+  };
+}
+
+function makePrompt(over: Partial<ProjectDecisionPromptView> = {}): ProjectDecisionPromptView {
+  return {
+    project: PROJ_SCION,
+    promptMessageId: 'm-1',
+    promptAvailable: true,
+    chatKey: 'topic-release',
+    conversationLabel: '#release',
+    conversationAvailable: true,
+    askerAgentId: AGENT_REL,
+    askerAgentName: 'release-bot',
+    createdAt: '2026-11-16T08:00:00Z',
+    answerMode: 'single',
+    waitingOnYou: true,
+    canAnswer: true,
+    decisions: [makeDecision()],
+    ...over,
+  };
+}
+
+function toggleCheckbox(box: HTMLElement & { checked?: boolean }, checked: boolean): void {
+  box.checked = checked;
+  box.dispatchEvent(new Event('sl-change', { bubbles: true }));
+}
+
+describe('Waiting on you multi-select and bulk dismiss (ptone/scion#8217)', () => {
+  beforeAll(() => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+  });
+
+  beforeEach(() => {
+    delete window.__SCION_FEATURES__;
+    window.localStorage.removeItem('scion:decisions:filters-open');
+    resetServerFlagStateForTests();
+    resetProfileDecisionProbeCacheForTests();
+    setPreferredTimeZone('UTC');
+    setFeatureFlag(DECISIONS_FLAG, true);
+    showToast.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
+  });
+
+  it('disables too-recent card checkboxes with countdown tooltip, skips them on Select all, keeps selection page-local, and clears selection (X5, X9)', async () => {
+    const nowIso = new Date(Date.now() - 2 * 60_000).toISOString(); // 2 min old -> 3 min remaining
+    const old1 = makePrompt({
+      promptMessageId: 'm-old-1',
+      askerAgentName: 'nc-x',
+      chatKey: 'dm:ncx',
+      conversationLabel: 'DM with nc-x',
+      createdAt: '2026-11-10T08:00:00Z',
+      decisions: [
+        makeDecision({
+          rowId: 'r-old-1',
+          messageId: 'm-old-1',
+          key: 'migrate',
+          question: 'Run backfill?',
+        }),
+      ],
+    });
+    const old2 = makePrompt({
+      promptMessageId: 'm-old-2',
+      askerAgentName: 'release-bot',
+      chatKey: 'topic-release',
+      conversationLabel: '#release',
+      createdAt: '2026-11-12T08:00:00Z',
+      decisions: [
+        makeDecision({
+          rowId: 'r-old-2',
+          messageId: 'm-old-2',
+          key: 'D234',
+          question: 'Ship v0.9?',
+        }),
+      ],
+    });
+    const recent = makePrompt({
+      promptMessageId: 'm-recent',
+      askerAgentName: 'docs-bot',
+      chatKey: 'topic-docs',
+      conversationLabel: '#docs',
+      createdAt: nowIso,
+      decisions: [
+        makeDecision({
+          rowId: 'r-rec',
+          messageId: 'm-recent',
+          key: 'toc',
+          question: 'Split CLI ref?',
+        }),
+      ],
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL): Promise<Response> => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const url = new URL(raw, 'http://localhost');
+        if (url.pathname === '/api/v1/projects/p-1') return jsonResponse(PROJ_SCION);
+        if (url.pathname === '/auth/me') return jsonResponse({ id: 'u-me', name: 'Alice' });
+        if (url.pathname === '/api/v1/projects/p-1/decisions') {
+          return jsonResponse({
+            counts: { waitingOnYou: 3, waitingOnOthers: 0 },
+            prompts: [old1, old2, recent],
+            agents: [{ id: AGENT_REL, name: 'release-bot' }],
+            answerers: [{ id: 'u-me', name: 'Alice' }],
+            conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+          });
+        }
+        return jsonResponse({}, 404);
+      })
+    );
+
+    window.history.replaceState({}, '', '/projects/p-1/decisions');
+    const el = document.createElement('scion-page-project-decisions') as ScionPageProjectDecisions;
+    el.pageData = {
+      path: '/projects/p-1/decisions',
+      user: { id: 'u-me', email: 'alice@example.com', name: 'Alice', role: 'member' },
+    };
+    document.body.appendChild(el);
+    await settle(el, 25);
+
+    const root = el.shadowRoot!;
+    // Selection bar is hidden until at least 1 card is selected, while Select all is available
+    expect(root.querySelector('[data-selection-bar]')).toBeNull();
+    const selectAll = root.querySelector<
+      HTMLElement & { checked?: boolean; indeterminate?: boolean }
+    >('[data-select-all-prompts]')!;
+    expect(selectAll).not.toBeNull();
+
+    // Too-recent card checkbox is disabled with countdown tooltip
+    const recentBox = root.querySelector<HTMLElement & { checked?: boolean }>(
+      '[data-select-prompt="m-recent"]'
+    )!;
+    expect(recentBox.hasAttribute('disabled')).toBe(true);
+    expect(
+      root
+        .querySelector<HTMLElement>('[data-select-prompt-tooltip="m-recent"]')
+        ?.getAttribute('content')
+    ).toMatch(/^Dismiss available in [34] min$/);
+
+    // Attempting to check a too-recent card is ignored
+    toggleCheckbox(recentBox, true);
+    await settle(el, 10);
+    expect(root.querySelector('[data-selection-bar]')).toBeNull();
+
+    // Select one eligible card -> selection bar appears in indeterminate state
+    const box1 = root.querySelector<HTMLElement & { checked?: boolean }>(
+      '[data-select-prompt="m-old-1"]'
+    )!;
+    toggleCheckbox(box1, true);
+    await settle(el, 10);
+
+    const bar = root.querySelector<HTMLElement>('[data-selection-bar]')!;
+    expect(bar).not.toBeNull();
+    expect(bar.querySelector('[data-selected-count]')?.textContent).toBe('1 card selected');
+    const barSelectAll = bar.querySelector<
+      HTMLElement & { indeterminate?: boolean; checked?: boolean }
+    >('[data-select-all-prompts]')!;
+    expect(barSelectAll.indeterminate).toBe(true);
+    expect(window.location.search).toBe(''); // page-local, never in URL
+
+    // Select all on this page -> selects old1 & old2, skips recent -> 2 cards selected
+    toggleCheckbox(barSelectAll, true);
+    await settle(el, 10);
+    expect(root.querySelector('[data-selected-count]')?.textContent).toBe('2 cards selected');
+    expect(
+      root.querySelector<HTMLElement>('[data-prompt-card="m-old-1"]')?.classList.contains('sel')
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLElement>('[data-prompt-card="m-old-2"]')?.classList.contains('sel')
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLElement>('[data-prompt-card="m-recent"]')?.classList.contains('sel')
+    ).toBe(false);
+
+    // Clear button resets selection and hides bar
+    root.querySelector<HTMLElement>('[data-selection-clear]')!.click();
+    await settle(el, 10);
+    expect(root.querySelector('[data-selection-bar]')).toBeNull();
+  });
+
+  it('caps selection at 50 cards on Select all and individual toggles', async () => {
+    const prompts = Array.from({ length: 55 }, (_, i) => {
+      const id = `m-cap-${i + 1}`;
+      return makePrompt({
+        promptMessageId: id,
+        createdAt: '2026-11-10T08:00:00Z',
+        decisions: [makeDecision({ rowId: `r-cap-${i + 1}`, messageId: id, key: `K${i + 1}` })],
+      });
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL): Promise<Response> => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const url = new URL(raw, 'http://localhost');
+        if (url.pathname === '/api/v1/projects/p-1') return jsonResponse(PROJ_SCION);
+        if (url.pathname === '/auth/me') return jsonResponse({ id: 'u-me', name: 'Alice' });
+        if (url.pathname === '/api/v1/projects/p-1/decisions') {
+          return jsonResponse({
+            counts: { waitingOnYou: 55, waitingOnOthers: 0 },
+            prompts,
+            agents: [{ id: AGENT_REL, name: 'release-bot' }],
+            answerers: [{ id: 'u-me', name: 'Alice' }],
+            conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+          });
+        }
+        return jsonResponse({}, 404);
+      })
+    );
+
+    window.history.replaceState({}, '', '/projects/p-1/decisions');
+    const el = document.createElement('scion-page-project-decisions') as ScionPageProjectDecisions;
+    el.pageData = {
+      path: '/projects/p-1/decisions',
+      user: { id: 'u-me', email: 'alice@example.com', name: 'Alice', role: 'member' },
+    };
+    document.body.appendChild(el);
+    await settle(el, 25);
+
+    const root = el.shadowRoot!;
+    const selectAll = root.querySelector<HTMLElement & { checked?: boolean }>(
+      '[data-select-all-prompts]'
+    )!;
+    toggleCheckbox(selectAll, true);
+    await settle(el, 15);
+
+    expect(root.querySelector('[data-selected-count]')?.textContent).toBe('50 cards selected');
+    const box51 = root.querySelector<HTMLElement & { checked?: boolean }>(
+      '[data-select-prompt="m-cap-51"]'
+    )!;
+    expect(box51.hasAttribute('disabled')).toBe(true);
+    toggleCheckbox(box51, true);
+    await settle(el, 10);
+    expect(root.querySelector('[data-selected-count]')?.textContent).toBe('50 cards selected');
+
+    // Unchecking Select all clears all 50
+    const barSelectAll = root.querySelector<HTMLElement & { checked?: boolean }>(
+      '[data-select-all-prompts]'
+    )!;
+    toggleCheckbox(barSelectAll, false);
+    await settle(el, 10);
+    expect(root.querySelector('[data-selection-bar]')).toBeNull();
+  });
+
+  it('dismisses selected cards on Profile Decisions with max 4 in flight, viewer-waiting decisionIds + idempotencyKey, progress bar, partial-failure summary, and preserved changed state', async () => {
+    const projWeb: ProjectDecisionProjectRef = { id: 'p-2', name: 'web-site', slug: 'web-site' };
+    // Card 1 has: 1 pending row, 1 interpreted row awaiting viewer u-me (D6 -> included),
+    // and 1 interpreted row awaiting bob (excluded from decisionIds!)
+    const card1 = makePrompt({
+      project: PROJ_SCION,
+      promptMessageId: 'm-b1',
+      askerAgentName: 'release-bot',
+      chatKey: 'topic-release',
+      conversationLabel: '#release',
+      answerMode: 'set',
+      waitingReasons: { 'r-b1-bob': 'other_user_confirm' },
+      decisions: [
+        makeDecision({
+          rowId: 'r-b1-pend',
+          messageId: 'm-b1',
+          key: 'D234',
+          question: 'Ship v0.9 today?',
+        }),
+        makeDecision({
+          rowId: 'r-b1-me',
+          messageId: 'm-b1',
+          key: 'D235',
+          question: 'Tag rc1?',
+          status: 'decided',
+          decision: {
+            choiceId: 'yes',
+            label: 'Yes',
+            answeredByUserId: 'u-me',
+            answeredByName: 'Alice',
+            provenance: 'agent_interpreted',
+            outcome: 'answer',
+            surface: 'slack',
+            responseMessageId: 'resp-i1',
+            at: '2026-11-16T08:01:00Z',
+          },
+        }),
+        makeDecision({
+          rowId: 'r-b1-bob',
+          messageId: 'm-b1',
+          key: 'D236',
+          question: 'Bob sign-off?',
+          status: 'decided',
+          decision: {
+            choiceId: 'yes',
+            label: 'Yes',
+            answeredByUserId: 'u-bob',
+            answeredByName: 'Bob',
+            provenance: 'agent_interpreted',
+            outcome: 'answer',
+            surface: 'slack',
+            responseMessageId: 'resp-i2',
+            at: '2026-11-16T08:01:00Z',
+          },
+        }),
+      ],
+    });
+
+    const otherCards = [2, 3, 4, 5, 6].map((n) =>
+      makePrompt({
+        project: n <= 3 ? PROJ_SCION : projWeb,
+        promptMessageId: `m-b${n}`,
+        askerAgentName: n === 6 ? 'docs-bot' : `bot-${n}`,
+        chatKey: n === 6 ? 'topic-docs' : `topic-${n}`,
+        conversationLabel: n === 6 ? '#docs' : `#chan-${n}`,
+        decisions: [
+          makeDecision({
+            rowId: `r-b${n}`,
+            messageId: `m-b${n}`,
+            key: `K${n}`,
+            question: `Question number ${n}?`,
+          }),
+        ],
+      })
+    );
+
+    // Card 6 will fail with 409 dismiss_changed: row 1 was answered, row 2 is still open!
+    otherCards[4] = makePrompt({
+      project: projWeb,
+      promptMessageId: 'm-b6',
+      askerAgentName: 'docs-bot',
+      chatKey: 'topic-docs',
+      conversationLabel: '#docs',
+      answerMode: 'set',
+      decisions: [
+        makeDecision({
+          rowId: 'r-b6-a',
+          messageId: 'm-b6',
+          key: 'toc',
+          question: 'Split CLI reference?',
+        }),
+        makeDecision({
+          rowId: 'r-b6-b',
+          messageId: 'm-b6',
+          key: 'nav',
+          question: 'Keep sidebar flat?',
+        }),
+      ],
+    });
+
+    let livePrompts: ProjectDecisionPromptView[] = [card1, ...otherCards];
+    let inFlightDismiss = 0;
+    let peakInFlightDismiss = 0;
+    const dismissGates: Array<{ id: string; body: Record<string, unknown>; release: () => void }> =
+      [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const url = new URL(raw, 'http://localhost');
+        if (url.pathname === '/auth/me') return jsonResponse({ id: 'u-me', name: 'Alice' });
+        if (url.pathname === '/api/v1/users/me/decisions') {
+          const waitingCount = livePrompts.filter((p) => p.waitingOnYou).length;
+          return jsonResponse({
+            counts: { waitingOnYou: waitingCount, waitingOnOthers: 0 },
+            prompts: livePrompts,
+            agents: [{ id: AGENT_REL, name: 'release-bot', projectId: 'p-1' }],
+            answerers: [{ id: 'u-me', name: 'Alice' }],
+            conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+            projects: [PROJ_SCION, projWeb],
+            truncatedProjects: false,
+          });
+        }
+        if (url.pathname.startsWith('/api/v1/agents/')) {
+          return jsonResponse({ id: AGENT_REL, name: 'release-bot' });
+        }
+        const m = /^\/api\/v1\/decision-prompts\/([^/]+)\/dismiss$/.exec(url.pathname);
+        if (m) {
+          const msgId = decodeURIComponent(m[1]!);
+          const body = JSON.parse((init?.body as string) || '{}') as Record<string, unknown>;
+          inFlightDismiss++;
+          peakInFlightDismiss = Math.max(peakInFlightDismiss, inFlightDismiss);
+          return new Promise<Response>((resolve) => {
+            dismissGates.push({
+              id: msgId,
+              body,
+              release: () => {
+                inFlightDismiss--;
+                if (msgId === 'm-b6') {
+                  const changedDecisions: DecisionView[] = [
+                    makeDecision({
+                      rowId: 'r-b6-a',
+                      messageId: 'm-b6',
+                      key: 'toc',
+                      question: 'Split CLI reference?',
+                      status: 'decided',
+                      decision: {
+                        choiceId: 'yes',
+                        label: 'Yes',
+                        answeredByUserId: 'u-bob',
+                        answeredByName: 'Bob',
+                        provenance: 'direct',
+                        outcome: 'answer',
+                        surface: 'native',
+                        responseMessageId: 'resp-bob',
+                        at: '2026-11-16T09:10:00Z',
+                      },
+                    }),
+                    makeDecision({
+                      rowId: 'r-b6-b',
+                      messageId: 'm-b6',
+                      key: 'nav',
+                      question: 'Keep sidebar flat?',
+                    }),
+                  ];
+                  livePrompts = livePrompts.map((p) =>
+                    p.promptMessageId === 'm-b6' ? { ...p, decisions: changedDecisions } : p
+                  );
+                  resolve(
+                    jsonResponse(
+                      {
+                        error: {
+                          code: 'dismiss_changed',
+                          message: 'the decisions to dismiss changed',
+                          details: {
+                            reasons: { 'r-b6-a': 'decided' },
+                            decisions: changedDecisions,
+                          },
+                        },
+                      },
+                      409
+                    )
+                  );
+                  return;
+                }
+                const target = livePrompts.find((p) => p.promptMessageId === msgId)!;
+                const reqIds = new Set((body.decisionIds as string[]) ?? []);
+                const dismissedViews = target.decisions
+                  .filter((d) => reqIds.has(d.rowId))
+                  .map((d) => ({
+                    ...d,
+                    status: 'dismissed' as const,
+                    dismissed: {
+                      at: '2026-11-16T09:12:00Z',
+                      byUserId: 'u-me',
+                      byName: 'Alice',
+                      reason: typeof body.reason === 'string' ? body.reason : '',
+                      surface: 'decisions_page',
+                      responseMessageId: `resp-${msgId}`,
+                    },
+                  }));
+                livePrompts = livePrompts.filter((p) => p.promptMessageId !== msgId);
+                resolve(
+                  jsonResponse({
+                    dismissed: dismissedViews,
+                    alreadyDismissed: [],
+                    responseMessageId: `resp-${msgId}`,
+                    delivered: true,
+                    deliveryStatus: 'delivered',
+                  })
+                );
+              },
+            });
+          });
+        }
+        return jsonResponse({}, 404);
+      })
+    );
+
+    window.history.replaceState({}, '', '/profile/decisions');
+    const el = document.createElement('scion-page-profile-decisions') as ScionPageProfileDecisions;
+    el.pageData = {
+      path: '/profile/decisions',
+      user: { id: 'u-me', email: 'alice@example.com', name: 'Alice', role: 'member' },
+    };
+    document.body.appendChild(el);
+    await settle(el, 25);
+
+    const root = el.shadowRoot!;
+    // Select all 6 cards on Profile Waiting on you
+    const selectAll = root.querySelector<HTMLElement & { checked?: boolean }>(
+      '[data-select-all-prompts]'
+    )!;
+    toggleCheckbox(selectAll, true);
+    await settle(el, 15);
+    expect(root.querySelector('[data-selected-count]')?.textContent).toBe('6 cards selected');
+
+    // Open bulk dismiss dialog
+    root.querySelector<HTMLElement>('[data-selection-dismiss]')!.click();
+    await settle(el, 15);
+
+    const dialog = root.querySelector<HTMLElement>('sl-dialog[data-bulk-dismiss-dialog]')!;
+    expect(dialog).not.toBeNull();
+    // Lists agent, conversation, and first question for each selected card
+    expect(dialog.textContent).toContain('release-bot');
+    expect(dialog.textContent).toContain('#release');
+    expect(dialog.textContent).toContain('Ship v0.9 today?');
+    expect(dialog.textContent).toContain('docs-bot');
+    expect(dialog.textContent).toContain('#docs');
+    expect(dialog.textContent).toContain('Split CLI reference?');
+
+    // Enter optional reason
+    const textarea = dialog.querySelector<HTMLElement & { value?: string }>(
+      '[data-bulk-dismiss-reason]'
+    )!;
+    textarea.value = '  Sprint closed; cleaning stale queue  ';
+    textarea.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await settle(el, 5);
+
+    // Confirm -> starts at most 4 calls in flight and shows progress
+    dialog.querySelector<HTMLElement>('[data-bulk-dismiss-confirm]')!.click();
+    await settle(el, 10);
+
+    expect(inFlightDismiss).toBe(4);
+    expect(dismissGates).toHaveLength(4);
+    expect(dialog.querySelector('[data-bulk-dismiss-progress]')?.textContent).toContain('0 of 6');
+
+    // Release first 2 -> 2 more start (still max 4 in flight), progress shows 2 of 6
+    dismissGates[0]!.release();
+    dismissGates[1]!.release();
+    await settle(el, 10);
+    expect(inFlightDismiss).toBe(4);
+    expect(peakInFlightDismiss).toBe(4);
+    expect(dismissGates).toHaveLength(6);
+    expect(dialog.querySelector('[data-bulk-dismiss-progress]')?.textContent).toContain('2 of 6');
+
+    // Release remaining 4
+    for (let i = 2; i < 6; i++) {
+      dismissGates[i]!.release();
+    }
+    await settle(el, 90);
+
+    expect(peakInFlightDismiss).toBe(4);
+    expect(root.querySelector('sl-dialog[data-bulk-dismiss-dialog]')).toBeNull();
+
+    // Verify card 1 sent only viewer-waiting rows (pending + own interpreted, NOT bob's!) + idempotencyKey
+    const card1Req = dismissGates.find((g) => g.id === 'm-b1')!;
+    expect(card1Req.body.decisionIds).toEqual(['r-b1-pend', 'r-b1-me']);
+    expect(card1Req.body.reason).toBe('Sprint closed; cleaning stale queue');
+    expect(card1Req.body.surface).toBe('decisions_page');
+    expect(typeof card1Req.body.idempotencyKey).toBe('string');
+    expect((card1Req.body.idempotencyKey as string).length).toBeGreaterThan(8);
+
+    // Unique idempotencyKey per card
+    const keys = dismissGates.map((g) => g.body.idempotencyKey as string);
+    expect(new Set(keys).size).toBe(6);
+
+    // Summary toast reports partial success and names the changed card
+    expect(showToast).toHaveBeenCalledTimes(1);
+    const [toastMsg, toastVariant] = showToast.mock.calls[0]!;
+    expect(toastVariant).toBe('warning');
+    expect(toastMsg).toContain('Dismissed 5 of 6 cards; 1 had changed');
+    expect(toastMsg).toContain('docs-bot · #docs');
+
+    // Dismissed cards removed; changed card m-b6 remains with its updated state (row 1 decided by Bob)
+    expect(root.querySelector('[data-prompt-card="m-b1"]')).toBeNull();
+    const changedCard = root.querySelector<HTMLElement>('[data-prompt-card="m-b6"]')!;
+    expect(changedCard).not.toBeNull();
+    const innerDecisions = changedCard.querySelector('scion-chat-decisions') as HTMLElement & {
+      decisions?: DecisionView[];
+    };
+    expect(innerDecisions.decisions?.[0]?.status).toBe('decided');
+    expect(innerDecisions.decisions?.[1]?.status).toBe('pending');
+  });
+
+  it('distinguishes a deleted (404) asking agent from a suspended agent in the bulk dismiss dialog and Profile sort=recent (ptone/scion#8217)', async () => {
+    const suspAgentId = '22222222-3333-4444-5555-666666666666';
+    const goneAgentId = '33333333-4444-5555-6666-777777777777';
+    const suspCard = makePrompt({
+      promptMessageId: 'm-susp-1',
+      askerAgentId: suspAgentId,
+      askerAgentName: 'sleep-bot',
+      chatKey: 'topic-ops',
+      conversationLabel: '#ops',
+      decisions: [
+        makeDecision({
+          rowId: 'r-s1',
+          messageId: 'm-susp-1',
+          key: 'S1',
+          question: 'Restart worker?',
+        }),
+      ],
+    });
+    const goneCard = makePrompt({
+      promptMessageId: 'm-gone-1',
+      askerAgentId: goneAgentId,
+      askerAgentName: 'nc-x',
+      chatKey: 'dm:ncx',
+      conversationLabel: 'DM with nc-x',
+      decisions: [
+        makeDecision({
+          rowId: 'r-g1',
+          messageId: 'm-gone-1',
+          key: 'G1',
+          question: 'Run migration?',
+        }),
+      ],
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL): Promise<Response> => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const url = new URL(raw, 'http://localhost');
+        if (url.pathname === '/auth/me') return jsonResponse({ id: 'u-me', name: 'Alice' });
+        if (url.pathname === '/api/v1/users/me/decisions') {
+          return jsonResponse({
+            counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+            prompts: [suspCard, goneCard],
+            agents: [
+              { id: suspAgentId, name: 'sleep-bot', projectId: 'p-1' },
+              { id: goneAgentId, name: 'nc-x', projectId: 'p-1' },
+            ],
+            answerers: [{ id: 'u-me', name: 'Alice' }],
+            conversations: [{ key: 'topic-ops', label: '#ops', projectId: 'p-1' }],
+            projects: [PROJ_SCION],
+            truncatedProjects: false,
+          });
+        }
+        if (url.pathname === `/api/v1/agents/${suspAgentId}`) {
+          return jsonResponse({ id: suspAgentId, name: 'sleep-bot', phase: 'suspended' });
+        }
+        if (url.pathname === `/api/v1/agents/${goneAgentId}`) {
+          return jsonResponse({ error: { code: 'not_found' } }, 404);
+        }
+        return jsonResponse({}, 404);
+      })
+    );
+
+    window.history.replaceState({}, '', '/profile/decisions?tab=pending&sort=recent');
+    const el = document.createElement('scion-page-profile-decisions') as ScionPageProfileDecisions;
+    el.pageData = {
+      path: '/profile/decisions?tab=pending&sort=recent',
+      user: { id: 'u-me', email: 'alice@example.com', name: 'Alice', role: 'member' },
+    };
+    document.body.appendChild(el);
+    await settle(el, 25);
+
+    const root = el.shadowRoot!;
+    // Select only the suspended-agent card -> dialog must NOT claim sleep-bot is gone
+    toggleCheckbox(
+      root.querySelector<HTMLElement & { checked?: boolean }>('[data-select-prompt="m-susp-1"]')!,
+      true
+    );
+    await settle(el, 10);
+    root.querySelector<HTMLElement>('[data-selection-dismiss]')!.click();
+    await settle(el, 25);
+
+    let dialog = root.querySelector<HTMLElement>('sl-dialog[data-bulk-dismiss-dialog]')!;
+    expect(dialog.querySelector('[data-bulk-dismiss-tell="gone"]')).toBeNull();
+    expect(dialog.textContent).not.toContain('sleep-bot is gone');
+    dialog.querySelector<HTMLElement>('[data-bulk-dismiss-cancel]')!.click();
+    await settle(el, 10);
+
+    // Select only the deleted-agent card -> 404 probe marks nc-x as gone
+    root.querySelector<HTMLElement>('[data-selection-clear]')!.click();
+    await settle(el, 10);
+    toggleCheckbox(
+      root.querySelector<HTMLElement & { checked?: boolean }>('[data-select-prompt="m-gone-1"]')!,
+      true
+    );
+    await settle(el, 10);
+    root.querySelector<HTMLElement>('[data-selection-dismiss]')!.click();
+    await settle(el, 25);
+
+    dialog = root.querySelector<HTMLElement>('sl-dialog[data-bulk-dismiss-dialog]')!;
+    expect(dialog.querySelector('[data-bulk-dismiss-tell="gone"]')?.textContent).toContain(
+      'nc-x is gone; nothing will be sent.'
+    );
   });
 });

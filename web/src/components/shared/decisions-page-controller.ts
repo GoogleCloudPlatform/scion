@@ -28,7 +28,9 @@ import { apiFetch } from '../../client/api.js';
 import {
   actionableReason,
   dismissAvailableAtMs,
-  dismissDialogRows,
+  dismissDecisionPrompt,
+  fetchAskerAnswerability,
+  newerDecisionView,
   patchDecisions,
   type DecisionAnsweredDetail,
 } from '../../client/decision-prompts.js';
@@ -67,6 +69,7 @@ import {
 import { stateManager } from '../../client/state.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, decisionsEnabled } from '../../utils/feature-flags.js';
 import { DISPLAY_TIMEZONE_CHANGED_EVENT } from '../../utils/time.js';
+import { showToast } from '../../utils/toast.js';
 import { deepActiveElement } from './deep-active-element.js';
 import type {
   DecisionsFilterPatch,
@@ -75,11 +78,18 @@ import type {
 } from './decisions-filter-panel.js';
 import {
   DEFAULT_DECISIONS_PAGE_SIZE,
+  MAX_BULK_DISMISS_CONCURRENCY,
+  MAX_BULK_DISMISS_SELECTION,
   MAX_DECISIONS_PAGE_SIZE,
   SEARCH_DEBOUNCE_MS,
+  bulkDismissResultToast,
   dateBoundToIso,
   isEditableTarget,
+  isOnlyTooRecentDismissError,
   promptHasWaitingOnOthers,
+  promptWaitingOnViewerRows,
+  runWithConcurrencyLimit,
+  type BulkDismissCardOutcome,
 } from './decisions-format.js';
 
 export type DecisionsPageScope = 'project' | 'profile';
@@ -175,8 +185,16 @@ export class DecisionsPageController implements ReactiveController {
 
   clockNow: () => number = () => Date.now();
 
+  selectedPromptIds = new Set<string>();
+  bulkDismissPrompts: ProjectDecisionPromptView[] = [];
+  bulkDismissReasonDraft = '';
+  bulkDismissSubmitting = false;
+  bulkDismissCompleted = 0;
+  bulkDismissGoneAgentIds = new Set<string>();
+
   private readonly dismissAvailableAtOverrides = new Map<string, number>();
   private dismissUnlockTimer: ReturnType<typeof setTimeout> | null = null;
+  private bulkDismissProbeGen = 0;
 
   private pendingSortOverride: ProfileDecisionsSort | null = null;
   private madeSortOverride: ProfileDecisionsSort | null = null;
@@ -335,6 +353,13 @@ export class DecisionsPageController implements ReactiveController {
       clearTimeout(this.dismissUnlockTimer);
       this.dismissUnlockTimer = null;
     }
+    ++this.bulkDismissProbeGen;
+    this.selectedPromptIds = new Set();
+    this.bulkDismissPrompts = [];
+    this.bulkDismissReasonDraft = '';
+    this.bulkDismissSubmitting = false;
+    this.bulkDismissCompleted = 0;
+    this.bulkDismissGoneAgentIds = new Set();
     this.pendingResetInFlight = false;
     this.pendingLoading = false;
     this.pendingLoadingMore = false;
@@ -717,24 +742,26 @@ export class DecisionsPageController implements ReactiveController {
         this.pendingNextCursor = res.nextCursor ?? '';
         this.pendingPagedBeyondFirst = true;
       } else {
+        const mergedIncoming = this.mergeHeldDecisionRanks(res.prompts);
         // In sort=project mode on profile, P4's cursor tracks finished projects;
         // always reload from page 1 so project group ranks and cursors stay consistent.
         if (effectiveSort === 'recent' && this.pendingPrompts.length > MAX_DECISIONS_PAGE_SIZE) {
-          const headIds = new Set(res.prompts.map((p) => p.promptMessageId));
+          const headIds = new Set(mergedIncoming.map((p) => p.promptMessageId));
           const openTail = this.pendingPrompts
             .slice(MAX_DECISIONS_PAGE_SIZE)
             .filter(
               (p) =>
                 !headIds.has(p.promptMessageId) && (p.waitingOnYou || promptHasWaitingOnOthers(p))
             );
-          this.pendingPrompts = [...res.prompts, ...openTail];
+          this.pendingPrompts = [...mergedIncoming, ...openTail];
         } else {
-          this.pendingPrompts = res.prompts;
+          this.pendingPrompts = mergedIncoming;
           this.pendingNextCursor = res.nextCursor ?? '';
           this.pendingPagedBeyondFirst = false;
         }
       }
 
+      this.pruneInvalidSelections();
       this.mergeFacets({
         agents: res.agents,
         answerers: res.answerers,
@@ -1050,6 +1077,7 @@ export class DecisionsPageController implements ReactiveController {
 
     if (changed) {
       this.pendingPrompts = nextPrompts;
+      this.pruneInvalidSelections();
       this.scheduleDismissUnlockTimer();
       if (deltaWaitingOnYou !== 0) {
         this.updateCounts({
@@ -1200,6 +1228,9 @@ export class DecisionsPageController implements ReactiveController {
           : (this.madeSortOverride ?? defaultProfileDecisionsSort('made'));
     }
 
+    if (!this.bulkDismissSubmitting && this.selectedPromptIds.size > 0) {
+      this.selectedPromptIds = new Set();
+    }
     this.activeTab = next;
     this.syncUrlState();
     this.notify();
@@ -1256,6 +1287,9 @@ export class DecisionsPageController implements ReactiveController {
         this.invalidateInFlightMadeLoad();
       }
       this.syncUrlState();
+      if (!this.bulkDismissSubmitting && this.selectedPromptIds.size > 0) {
+        this.selectedPromptIds = new Set();
+      }
       this.pendingNextCursor = '';
       this.pendingPagedBeyondFirst = false;
       this.notify();
@@ -1438,6 +1472,9 @@ export class DecisionsPageController implements ReactiveController {
 
     if (this.activeTab === 'pending') {
       if (opts.sharedChanged) {
+        if (!this.bulkDismissSubmitting && this.selectedPromptIds.size > 0) {
+          this.selectedPromptIds = new Set();
+        }
         this.pendingNextCursor = '';
         this.pendingPagedBeyondFirst = false;
         if (
@@ -1531,9 +1568,7 @@ export class DecisionsPageController implements ReactiveController {
     let earliestMs = Infinity;
     for (const p of this.pendingPrompts) {
       if (!p.waitingOnYou || !p.canAnswer) continue;
-      if (dismissDialogRows(p.decisions, this.currentUserId, p.waitingReasons).length === 0) {
-        continue;
-      }
+      if (promptWaitingOnViewerRows(p, this.currentUserId).length === 0) continue;
       const overrideMs = this.dismissAvailableAtOverrides.get(p.promptMessageId) ?? 0;
       const availMs = Math.max(dismissAvailableAtMs(p.createdAt), overrideMs);
       if (availMs > nowMs && availMs < earliestMs) {
@@ -1562,7 +1597,306 @@ export class DecisionsPageController implements ReactiveController {
     const parsed = Date.parse(e.detail?.availableAt ?? '');
     if (!Number.isFinite(parsed)) return;
     this.dismissAvailableAtOverrides.set(prompt.promptMessageId, parsed);
+    this.pruneInvalidSelections();
     this.scheduleDismissUnlockTimer();
     this.notify();
+  };
+
+  private mergeHeldDecisionRanks(
+    incomingPrompts: readonly ProjectDecisionPromptView[]
+  ): ProjectDecisionPromptView[] {
+    if (this.pendingPrompts.length === 0) return [...incomingPrompts];
+    const heldByMsgId = new Map(this.pendingPrompts.map((p) => [p.promptMessageId, p]));
+    return incomingPrompts.map((incoming) => {
+      const held = heldByMsgId.get(incoming.promptMessageId);
+      if (!held) return incoming;
+      const heldRows = new Map(held.decisions.map((d) => [d.rowId, d]));
+      let changed = false;
+      const nextDecisions = incoming.decisions.map((d) => {
+        const prior = heldRows.get(d.rowId);
+        if (!prior) return d;
+        const chosen = newerDecisionView(prior, d);
+        if (chosen !== d) changed = true;
+        return chosen;
+      });
+      if (!changed) return incoming;
+      const nowActionable = incoming.waitingOnYou
+        ? nextDecisions.filter(
+            (d) =>
+              !incoming.waitingReasons?.[d.rowId] && actionableReason(d, this.currentUserId) === ''
+          ).length
+        : 0;
+      return {
+        ...incoming,
+        decisions: nextDecisions,
+        waitingOnYou: incoming.waitingOnYou && nowActionable > 0,
+      };
+    });
+  }
+
+  orderedWaitingPrompts(): ProjectDecisionPromptView[] {
+    const waiting = this.pendingPrompts.filter((p) => p.waitingOnYou);
+    if (this.adapter.scope !== 'profile' || this.pendingEffectiveSort() !== 'project') {
+      return waiting;
+    }
+    const groups: ProjectDecisionPromptView[][] = [];
+    const byProject = new Map<string, ProjectDecisionPromptView[]>();
+    for (const p of waiting) {
+      const pid = p.project?.id || 'unknown';
+      let bucket = byProject.get(pid);
+      if (!bucket) {
+        bucket = [];
+        byProject.set(pid, bucket);
+        groups.push(bucket);
+      }
+      bucket.push(p);
+    }
+    return groups.flat();
+  }
+
+  promptCanDismiss = (prompt: ProjectDecisionPromptView): boolean =>
+    promptWaitingOnViewerRows(prompt, this.currentUserId).length > 0;
+
+  isPromptSelectable = (prompt: ProjectDecisionPromptView): boolean =>
+    this.promptCanDismiss(prompt) && this.promptDismissRemainingMinutes(prompt) === 0;
+
+  selectableWaitingPrompts(): ProjectDecisionPromptView[] {
+    return this.orderedWaitingPrompts().filter(this.isPromptSelectable);
+  }
+
+  isPromptSelected = (promptMessageId: string): boolean =>
+    this.selectedPromptIds.has(promptMessageId);
+
+  isPromptSelectionCapReached = (promptMessageId: string): boolean =>
+    !this.selectedPromptIds.has(promptMessageId) &&
+    this.selectedPromptIds.size >= MAX_BULK_DISMISS_SELECTION;
+
+  private pruneInvalidSelections(): void {
+    if (this.selectedPromptIds.size === 0) return;
+    const byId = new Map(this.pendingPrompts.map((p) => [p.promptMessageId, p]));
+    let removed = false;
+    const next = new Set<string>();
+    for (const id of this.selectedPromptIds) {
+      const p = byId.get(id);
+      if (p && this.isPromptSelectable(p) && next.size < MAX_BULK_DISMISS_SELECTION) {
+        next.add(id);
+      } else {
+        removed = true;
+      }
+    }
+    if (removed) {
+      this.selectedPromptIds = next;
+    }
+    if (this.bulkDismissPrompts.length > 0 && !this.bulkDismissSubmitting) {
+      const refreshed = this.bulkDismissPrompts
+        .map((p) => byId.get(p.promptMessageId))
+        .filter((p): p is ProjectDecisionPromptView => Boolean(p && this.isPromptSelectable(p)));
+      if (refreshed.length === 0) {
+        this.bulkDismissPrompts = [];
+        this.bulkDismissReasonDraft = '';
+        this.bulkDismissGoneAgentIds = new Set();
+      } else {
+        this.bulkDismissPrompts = refreshed;
+      }
+    }
+  }
+
+  setPromptSelected = (prompt: ProjectDecisionPromptView, checked: boolean): void => {
+    if (this.bulkDismissSubmitting) return;
+    if (!checked) {
+      if (this.selectedPromptIds.delete(prompt.promptMessageId)) {
+        this.selectedPromptIds = new Set(this.selectedPromptIds);
+      }
+      this.notify();
+      return;
+    }
+    if (!this.isPromptSelectable(prompt)) {
+      this.notify();
+      return;
+    }
+    if (
+      !this.selectedPromptIds.has(prompt.promptMessageId) &&
+      this.selectedPromptIds.size >= MAX_BULK_DISMISS_SELECTION
+    ) {
+      this.notify();
+      return;
+    }
+    const next = new Set(this.selectedPromptIds);
+    next.add(prompt.promptMessageId);
+    this.selectedPromptIds = next;
+    this.notify();
+  };
+
+  toggleSelectAllPrompts = (checked: boolean): void => {
+    if (this.bulkDismissSubmitting) return;
+    const selectable = this.selectableWaitingPrompts();
+    const cap = Math.min(selectable.length, MAX_BULK_DISMISS_SELECTION);
+    if (!checked || cap === 0) {
+      this.clearPromptSelection();
+      return;
+    }
+    const next = new Set<string>();
+    for (const p of selectable) {
+      if (this.selectedPromptIds.has(p.promptMessageId) && next.size < MAX_BULK_DISMISS_SELECTION) {
+        next.add(p.promptMessageId);
+      }
+    }
+    for (const p of selectable) {
+      if (next.size >= MAX_BULK_DISMISS_SELECTION) break;
+      next.add(p.promptMessageId);
+    }
+    this.selectedPromptIds = next;
+    this.notify();
+  };
+
+  clearPromptSelection = (): void => {
+    if (this.bulkDismissSubmitting || this.selectedPromptIds.size === 0) return;
+    this.selectedPromptIds = new Set();
+    this.notify();
+  };
+
+  openBulkDismissDialog = (): void => {
+    if (this.bulkDismissSubmitting) return;
+    const selected = this.orderedWaitingPrompts()
+      .filter((p) => this.selectedPromptIds.has(p.promptMessageId) && this.isPromptSelectable(p))
+      .slice(0, MAX_BULK_DISMISS_SELECTION);
+    if (selected.length === 0) return;
+
+    this.bulkDismissPrompts = selected;
+    this.bulkDismissReasonDraft = '';
+    this.bulkDismissSubmitting = false;
+    this.bulkDismissCompleted = 0;
+
+    const initialGone = new Set<string>();
+    const distinctAgents = new Map<string, string>();
+    for (const p of selected) {
+      if (!p.askerAgentId) continue;
+      distinctAgents.set(p.askerAgentId, p.askerAgentName);
+      const actor = this.facetsAgents.find((a) => a.id === p.askerAgentId);
+      if (actor?.hint?.includes('deleted')) {
+        initialGone.add(p.askerAgentId);
+      }
+    }
+    this.bulkDismissGoneAgentIds = initialGone;
+    this.notify();
+
+    if (distinctAgents.size > 0) {
+      const gen = ++this.bulkDismissProbeGen;
+      for (const [agentId, agentName] of distinctAgents) {
+        void fetchAskerAnswerability(agentId, agentName).then((ans) => {
+          if (
+            gen !== this.bulkDismissProbeGen ||
+            !this.host.isConnected ||
+            this.bulkDismissPrompts.length === 0
+          ) {
+            return;
+          }
+          const next = new Set(this.bulkDismissGoneAgentIds);
+          if (ans.state === 'gone') {
+            next.add(agentId);
+          } else {
+            next.delete(agentId);
+          }
+          if (next.size !== this.bulkDismissGoneAgentIds.size) {
+            this.bulkDismissGoneAgentIds = next;
+            this.notify();
+          }
+        });
+      }
+    }
+  };
+
+  closeBulkDismissDialog = (): void => {
+    if (this.bulkDismissSubmitting) return;
+    ++this.bulkDismissProbeGen;
+    this.bulkDismissPrompts = [];
+    this.bulkDismissReasonDraft = '';
+    this.bulkDismissGoneAgentIds = new Set();
+    this.notify();
+  };
+
+  setBulkDismissReasonDraft = (value: string): void => {
+    this.bulkDismissReasonDraft = value;
+    this.notify();
+  };
+
+  confirmBulkDismiss = async (): Promise<void> => {
+    if (this.bulkDismissSubmitting || this.bulkDismissPrompts.length === 0) return;
+    const targets = this.bulkDismissPrompts
+      .map((prompt) => ({
+        prompt,
+        decisionIds: promptWaitingOnViewerRows(prompt, this.currentUserId).map((d) => d.rowId),
+        idempotencyKey: crypto.randomUUID(),
+      }))
+      .filter((t) => t.decisionIds.length > 0);
+    if (targets.length === 0) {
+      this.closeBulkDismissDialog();
+      return;
+    }
+
+    const reason = this.bulkDismissReasonDraft;
+    this.bulkDismissSubmitting = true;
+    this.bulkDismissCompleted = 0;
+    this.notify();
+
+    try {
+      const outcomes = await runWithConcurrencyLimit(
+        targets,
+        MAX_BULK_DISMISS_CONCURRENCY,
+        async (target): Promise<BulkDismissCardOutcome> => {
+          const res = await dismissDecisionPrompt(target.prompt.promptMessageId, {
+            reason,
+            surface: 'decisions_page',
+            decisionIds: target.decisionIds,
+            idempotencyKey: target.idempotencyKey,
+          });
+          this.bulkDismissCompleted++;
+          if (this.host.isConnected) {
+            if (res.ok) {
+              const nextSel = new Set(this.selectedPromptIds);
+              nextSel.delete(target.prompt.promptMessageId);
+              this.selectedPromptIds = nextSel;
+              this.applyIncomingDecisionPatch(target.prompt.promptMessageId, [
+                ...res.dismissed,
+                ...res.alreadyDismissed,
+              ]);
+            } else if (isOnlyTooRecentDismissError(res)) {
+              if (res.availableAt) {
+                const parsed = Date.parse(res.availableAt);
+                if (Number.isFinite(parsed)) {
+                  this.dismissAvailableAtOverrides.set(target.prompt.promptMessageId, parsed);
+                }
+              }
+              const nextSel = new Set(this.selectedPromptIds);
+              nextSel.delete(target.prompt.promptMessageId);
+              this.selectedPromptIds = nextSel;
+              this.scheduleDismissUnlockTimer();
+            } else if (res.code === 'dismiss_changed') {
+              if (res.decisions) {
+                this.applyIncomingDecisionPatch(target.prompt.promptMessageId, res.decisions);
+              }
+              this.pruneInvalidSelections();
+            }
+            this.notify();
+          }
+          return { prompt: target.prompt, result: res };
+        }
+      );
+
+      if (!this.host.isConnected) return;
+      this.bulkDismissPrompts = [];
+      this.bulkDismissReasonDraft = '';
+      this.bulkDismissGoneAgentIds = new Set();
+      this.pruneInvalidSelections();
+      const toast = bulkDismissResultToast(outcomes);
+      showToast(toast.message, toast.variant);
+      this.scheduleLiveRefresh();
+    } finally {
+      this.bulkDismissSubmitting = false;
+      this.bulkDismissCompleted = 0;
+      if (this.host.isConnected) {
+        this.notify();
+      }
+    }
   };
 }

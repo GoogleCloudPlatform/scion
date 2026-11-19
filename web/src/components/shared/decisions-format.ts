@@ -25,9 +25,11 @@ import {
   ANSWERABLE,
   GENERIC_ANSWER_DENIED_REASON,
   actionableReason,
+  dismissDialogRows,
   isOpenDecision,
   type AskerAnswerability,
   type DismissDeliveryStatus,
+  type DismissDecisionPromptResult,
 } from '../../client/decision-prompts.js';
 import type { ToastVariant } from '../../utils/toast.js';
 import { chatConversationPath } from '../../client/chat-routes.js';
@@ -86,6 +88,228 @@ export interface WaitingOnOthersItem {
 export const DEFAULT_DECISIONS_PAGE_SIZE = 50;
 export const MAX_DECISIONS_PAGE_SIZE = 200;
 export const SEARCH_DEBOUNCE_MS = 300;
+export const MAX_BULK_DISMISS_SELECTION = 50;
+export const MAX_BULK_DISMISS_CONCURRENCY = 4;
+
+export interface BulkDismissCardOutcome {
+  prompt: ProjectDecisionPromptView;
+  result: DismissDecisionPromptResult;
+}
+
+/**
+ * Whether a failed dismiss result failed solely because every listed row is
+ * still inside the 5-minute grace period (`409 too_recent` or
+ * `409 dismiss_changed` where every reason is `'too_recent'`).
+ */
+export function isOnlyTooRecentDismissError(res: DismissDecisionPromptResult): boolean {
+  if (res.ok) return false;
+  if (res.code === 'too_recent') return true;
+  return (
+    res.code === 'dismiss_changed' &&
+    Boolean(res.reasons) &&
+    Object.keys(res.reasons!).length > 0 &&
+    Object.values(res.reasons!).every((r) => r === 'too_recent')
+  );
+}
+
+/**
+ * Runs `fn` over `items` with at most `limit` promises in flight at any time,
+ * resolving to results in the original `items` order.
+ */
+export async function runWithConcurrencyLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const cap = Math.max(1, Math.trunc(limit));
+  const out = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const worker = async (): Promise<void> => {
+    while (nextIndex < items.length) {
+      const idx = nextIndex++;
+      out[idx] = await fn(items[idx], idx);
+    }
+  };
+
+  const workerCount = Math.min(cap, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return out;
+}
+
+function formatCardFailureTarget(p: ProjectDecisionPromptView): string {
+  const agent = p.askerAgentName || 'Agent';
+  const where = conversationDisplayLabel(p.chatKey, p.conversationLabel);
+  return `${agent} · ${where}`;
+}
+
+function formatCappedList(items: readonly string[], maxShown = 3): string {
+  if (items.length <= maxShown) return items.join(', ');
+  return `${items.slice(0, maxShown).join(', ')}, +${items.length - maxShown} more`;
+}
+
+/**
+ * Aggregates multi-card dismiss outcomes into one truthful summary toast:
+ * reports partial failures per card and summarizes `deliveryStatus` without
+ * claiming delivery for gone, suspended/unreachable, or unconfirmed dispatches.
+ */
+export function bulkDismissResultToast(outcomes: readonly BulkDismissCardOutcome[]): {
+  message: string;
+  variant: ToastVariant;
+} {
+  if (outcomes.length === 1) {
+    const first = outcomes[0];
+    if (first.result.ok) {
+      return dismissResultToast(
+        first.result.deliveryStatus,
+        first.result.dismissed.length,
+        first.result.alreadyDismissed.length,
+        first.prompt.askerAgentName
+      );
+    }
+  }
+
+  const total = outcomes.length;
+  const succeeded = outcomes.filter(
+    (
+      o
+    ): o is {
+      prompt: ProjectDecisionPromptView;
+      result: Extract<DismissDecisionPromptResult, { ok: true }>;
+    } => o.result.ok
+  );
+  const failed = outcomes.filter(
+    (
+      o
+    ): o is {
+      prompt: ProjectDecisionPromptView;
+      result: Extract<DismissDecisionPromptResult, { ok: false }>;
+    } => !o.result.ok
+  );
+
+  const changedTargets: string[] = [];
+  const tooRecentTargets: string[] = [];
+  const errorItems: string[] = [];
+
+  for (const f of failed) {
+    const target = formatCardFailureTarget(f.prompt);
+    if (isOnlyTooRecentDismissError(f.result)) {
+      tooRecentTargets.push(target);
+    } else if (f.result.code === 'dismiss_changed') {
+      changedTargets.push(target);
+    } else {
+      errorItems.push(`${target}: ${f.result.message || 'failed'}`);
+    }
+  }
+
+  const failureParts: string[] = [];
+  if (changedTargets.length > 0) {
+    failureParts.push(`${changedTargets.length} had changed (${formatCappedList(changedTargets)})`);
+  }
+  if (tooRecentTargets.length > 0) {
+    failureParts.push(
+      `${tooRecentTargets.length} too recent (${formatCappedList(tooRecentTargets)})`
+    );
+  }
+  if (errorItems.length > 0) {
+    failureParts.push(`${errorItems.length} failed (${formatCappedList(errorItems)})`);
+  }
+  const failureClause = failureParts.join('; ');
+
+  const newlyDismissed = succeeded.filter((o) => o.result.deliveryStatus !== 'none');
+  if (succeeded.length > 0 && newlyDismissed.length === 0) {
+    if (failed.length === 0) {
+      return {
+        message: `${succeeded.length} cards were already dismissed.`,
+        variant: 'neutral',
+      };
+    }
+    return {
+      message: `${succeeded.length} of ${total} cards already dismissed; ${failureClause}.`,
+      variant: 'warning',
+    };
+  }
+
+  let deliveredCount = 0;
+  let heldCount = 0;
+  let goneCount = 0;
+  let unreachableCount = 0;
+  let unconfirmedCount = 0;
+  for (const o of newlyDismissed) {
+    switch (o.result.deliveryStatus) {
+      case 'delivered':
+        deliveredCount++;
+        break;
+      case 'held':
+        heldCount++;
+        break;
+      case 'gone':
+        goneCount++;
+        break;
+      case 'unreachable':
+        unreachableCount++;
+        break;
+      case 'failed':
+      default:
+        unconfirmedCount++;
+        break;
+    }
+  }
+
+  const cardWord = total === 1 ? 'card' : 'cards';
+  const lead =
+    failed.length === 0
+      ? `Dismissed ${succeeded.length} ${succeeded.length === 1 ? 'card' : 'cards'}.`
+      : `Dismissed ${succeeded.length} of ${total} ${cardWord}; ${failureClause}.`;
+
+  let deliveryTail = '';
+  if (newlyDismissed.length > 0) {
+    if (goneCount === newlyDismissed.length) {
+      const askers = new Set(newlyDismissed.map((o) => o.prompt.askerAgentName).filter(Boolean));
+      const onlyAsker = askers.size === 1 ? [...askers][0] : '';
+      deliveryTail = onlyAsker
+        ? `${onlyAsker} is gone; nothing was sent.`
+        : 'Asking agents are gone; nothing was sent.';
+    } else {
+      const notes: string[] = [];
+      if (heldCount > 0) {
+        notes.push(
+          `${heldCount === 1 ? '1 response' : `${heldCount} responses`} will be sent when the agent can receive messages`
+        );
+      }
+      if (goneCount > 0) {
+        notes.push(
+          `${goneCount} asking ${goneCount === 1 ? 'agent is' : 'agents are'} gone (nothing sent)`
+        );
+      }
+      if (unreachableCount > 0) {
+        notes.push(
+          `${unreachableCount} ${unreachableCount === 1 ? 'agent is' : 'agents are'} suspended or stopped; not told`
+        );
+      }
+      if (unconfirmedCount > 0) {
+        notes.push(`could not confirm delivery for ${unconfirmedCount}`);
+      }
+      if (notes.length > 0) {
+        const joined = notes.join('; ');
+        deliveryTail = `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`;
+      }
+    }
+  }
+
+  const message = deliveryTail ? `${lead} ${deliveryTail}` : lead;
+
+  let variant: ToastVariant = 'success';
+  if (succeeded.length === 0 && errorItems.length > 0) {
+    variant = 'danger';
+  } else if (failed.length > 0 || unreachableCount > 0 || unconfirmedCount > 0) {
+    variant = 'warning';
+  } else if (deliveredCount === 0 && heldCount === 0) {
+    variant = 'neutral';
+  }
+  return { message, variant };
+}
 
 const AVATAR_PALETTE = ['#7c3aed', '#059669', '#0284c7', '#d97706', '#e11d48', '#4f46e5'] as const;
 
@@ -240,6 +464,19 @@ export function collectWaitingOnOthersItems(
     }
   }
   return items;
+}
+
+/**
+ * Decision rows of `p` that wait on the viewer and may be dismissed by the
+ * viewer on Waiting on you (pending rows without a block reason, plus D6
+ * interpreted answers awaiting the viewer's confirmation).
+ */
+export function promptWaitingOnViewerRows(
+  p: ProjectDecisionPromptView,
+  currentUserId: string
+): DecisionView[] {
+  if (!p.waitingOnYou || !p.canAnswer) return [];
+  return dismissDialogRows(p.decisions, currentUserId || undefined, p.waitingReasons);
 }
 
 export function countActionableInPrompt(
