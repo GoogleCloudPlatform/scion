@@ -285,18 +285,40 @@ type ListTriggersResponse struct {
 	ServerTime time.Time `json:"serverTime"`
 }
 
+// TriggerRuleTraceElement describes one executed element in a trigger fire's
+// content-free rule evaluation trace (mixed-rule-arrays §5).
+type TriggerRuleTraceElement struct {
+	Index      int    `json:"i"`
+	Dialect    string `json:"dialect"`
+	Class      string `json:"class"`
+	Reason     string `json:"reason,omitempty"`
+	DurationMs int64  `json:"duration_ms"`
+	Provenance string `json:"provenance,omitempty"`
+}
+
+// TriggerRuleTrace describes the content-free rule evaluation trace recorded on
+// a trigger fire row (mixed-rule-arrays §5).
+type TriggerRuleTrace struct {
+	Elements          []TriggerRuleTraceElement `json:"elements"`
+	Unexecuted        []int                     `json:"unexecuted,omitempty"`
+	BudgetRemainingMs *int64                    `json:"budget_remaining_ms,omitempty"`
+}
+
 // TriggerFire represents a trigger fire history record returned by GET /triggers/{id}/history.
 type TriggerFire struct {
-	ID         string     `json:"id"`
-	TriggerID  string     `json:"triggerId"`
-	EventID    string     `json:"eventId"`
-	ProjectID  string     `json:"projectId"`
-	Subject    string     `json:"subject,omitempty"`
-	Status     string     `json:"status"`
-	ResultRef  string     `json:"resultRef,omitempty"`
-	Error      string     `json:"error,omitempty"`
-	StartedAt  time.Time  `json:"startedAt"`
-	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	ID             string            `json:"id"`
+	TriggerID      string            `json:"triggerId"`
+	EventID        string            `json:"eventId"`
+	ProjectID      string            `json:"projectId"`
+	Subject        string            `json:"subject,omitempty"`
+	Status         string            `json:"status"`
+	ResultRef      string            `json:"resultRef,omitempty"`
+	Error          string            `json:"error,omitempty"`
+	MatchedThrough string            `json:"matchedThrough,omitempty"`
+	DecidedDialect string            `json:"decidedDialect,omitempty"`
+	RuleTrace      *TriggerRuleTrace `json:"ruleTrace,omitempty"`
+	StartedAt      time.Time         `json:"startedAt"`
+	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`
 }
 
 // ListTriggerFiresOptions configures trigger fire history listing.

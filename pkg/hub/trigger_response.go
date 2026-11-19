@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
 
 // Fail-closed response serializers for webhook endpoints, triggers, and
@@ -144,18 +145,41 @@ type ListTriggersResponse struct {
 	ServerTime time.Time         `json:"serverTime"`
 }
 
+// TriggerRuleTraceElement is one executed element in a trigger fire's
+// content-free rule evaluation trace (mixed-rule-arrays §5).
+type TriggerRuleTraceElement struct {
+	Index      int    `json:"i"`
+	Dialect    string `json:"dialect"`
+	Class      string `json:"class"`
+	Reason     string `json:"reason,omitempty"`
+	DurationMs int64  `json:"duration_ms"`
+	Provenance string `json:"provenance,omitempty"`
+}
+
+// TriggerRuleTrace is the fail-closed API projection of trigger_fires.rule_trace
+// (mixed-rule-arrays §5). Decoding into explicit typed fields prevents unknown
+// JSON keys from passing through the serializer.
+type TriggerRuleTrace struct {
+	Elements          []TriggerRuleTraceElement `json:"elements"`
+	Unexecuted        []int                     `json:"unexecuted,omitempty"`
+	BudgetRemainingMs *int64                    `json:"budget_remaining_ms,omitempty"`
+}
+
 // TriggerFireResponse is the API representation of a trigger fire record.
 type TriggerFireResponse struct {
-	ID         string     `json:"id"`
-	TriggerID  string     `json:"triggerId"`
-	EventID    string     `json:"eventId"`
-	ProjectID  string     `json:"projectId"`
-	Subject    string     `json:"subject,omitempty"`
-	Status     string     `json:"status"`
-	ResultRef  string     `json:"resultRef,omitempty"`
-	Error      string     `json:"error,omitempty"`
-	StartedAt  time.Time  `json:"startedAt"`
-	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+	ID             string            `json:"id"`
+	TriggerID      string            `json:"triggerId"`
+	EventID        string            `json:"eventId"`
+	ProjectID      string            `json:"projectId"`
+	Subject        string            `json:"subject,omitempty"`
+	Status         string            `json:"status"`
+	ResultRef      string            `json:"resultRef,omitempty"`
+	Error          string            `json:"error,omitempty"`
+	MatchedThrough string            `json:"matchedThrough,omitempty"`
+	DecidedDialect string            `json:"decidedDialect,omitempty"`
+	RuleTrace      *TriggerRuleTrace `json:"ruleTrace,omitempty"`
+	StartedAt      time.Time         `json:"startedAt"`
+	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`
 }
 
 // ListTriggerFiresResponse is the paginated response of GET /triggers/{id}/history.
@@ -312,18 +336,42 @@ func buildTriggerResponses(triggers []store.Trigger) []TriggerResponse {
 	return out
 }
 
+func decodeTriggerFireRuleTrace(raw string) *TriggerRuleTrace {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var parsed TriggerRuleTrace
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil
+	}
+	if parsed.Elements == nil {
+		parsed.Elements = []TriggerRuleTraceElement{}
+	}
+	for i := range parsed.Elements {
+		parsed.Elements[i].Dialect = triggerrule.SafeDialectName(parsed.Elements[i].Dialect)
+	}
+	return &parsed
+}
+
 func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
+	decidedDialect := ""
+	if tf.DecidedDialect != "" {
+		decidedDialect = triggerrule.SafeDialectName(tf.DecidedDialect)
+	}
 	return TriggerFireResponse{
-		ID:         tf.ID,
-		TriggerID:  tf.TriggerID,
-		EventID:    tf.EventID,
-		ProjectID:  tf.ProjectID,
-		Subject:    tf.Subject,
-		Status:     tf.Status,
-		ResultRef:  tf.ResultRef,
-		Error:      tf.Error,
-		StartedAt:  tf.StartedAt,
-		FinishedAt: tf.FinishedAt,
+		ID:             tf.ID,
+		TriggerID:      tf.TriggerID,
+		EventID:        tf.EventID,
+		ProjectID:      tf.ProjectID,
+		Subject:        tf.Subject,
+		Status:         tf.Status,
+		ResultRef:      tf.ResultRef,
+		Error:          tf.Error,
+		MatchedThrough: tf.MatchedThrough,
+		DecidedDialect: decidedDialect,
+		RuleTrace:      decodeTriggerFireRuleTrace(tf.RuleTrace),
+		StartedAt:      tf.StartedAt,
+		FinishedAt:     tf.FinishedAt,
 	}
 }
 

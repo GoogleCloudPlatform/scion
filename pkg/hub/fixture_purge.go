@@ -683,6 +683,7 @@ func (s *Server) purgeFixtureTrigger(ctx context.Context, tr *store.Trigger, bas
 	if err != nil {
 		return false, err
 	}
+	s.invalidateTriggerRuleCache(tr.ProjectID, tr.ID, 0)
 	return true, nil
 }
 
