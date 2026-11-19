@@ -933,3 +933,21 @@ func TestDelivery_MarkFailedTransientErrors_RetriesWithoutDuplicateBrokerDispatc
 	assert.Equal(t, store.MessageDispatchFailed, msg.DispatchState,
 		"row must be marked failed after MarkMessageFailed retry succeeds")
 }
+
+func TestDelivery_MarkDispatchedNonRetryableError_StopsImmediately(t *testing.T) {
+	srv, _, faultStore, fault, sender, target, dispatcher := deliverySetupWithFinalizationFault(t)
+
+	faultStore.dispatchedErrs = []error{store.ErrNotFound, context.DeadlineExceeded}
+	fault.Arm()
+
+	result, dmErr := srv.ExecuteAgentDM(context.Background(), deliveryDMInput(sender, target, "non-retryable-mark"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, result)
+	assert.Equal(t, AgentDMAmbiguous, result.Outcome)
+	assert.Len(t, dispatcher.getCalls(), 1, "broker dispatch must run only once")
+
+	faultStore.mu.Lock()
+	attempts := faultStore.dispatchedAttempts
+	faultStore.mu.Unlock()
+	assert.Equal(t, 1, attempts, "non-retryable store error must stop immediately without retry")
+}

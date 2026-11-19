@@ -60,7 +60,7 @@ func TestBrokerMessageSweepHandler_FailsPendingMessagesWithMissingRecipient(t *t
 
 	// A pending message addressed to an agent ID that does not exist
 	// (simulating a deleted/purged recipient) must be failed early by the
-	// sweep, well before the 24h stuck-pending TTL.
+	// sweep, without waiting for stuckMessageExpireTTL.
 	orphan := &store.Message{
 		ID: uuid.NewString(), ProjectID: proj.ID,
 		Sender: "user:x", Recipient: "agent:gone", RecipientID: uuid.NewString(), Msg: "hi",
@@ -97,7 +97,7 @@ func TestBrokerMessageSweepHandler_ExpiresStuckPendingWithSharedReason(t *testin
 	stuck := &store.Message{
 		ID: uuid.NewString(), ProjectID: proj.ID,
 		Sender: "user:x", Recipient: "agent:a", Msg: "hi",
-		CreatedAt: time.Now().Add(-25 * time.Hour), // past stuckMessageExpireTTL (24h)
+		CreatedAt: time.Now().Add(-25 * time.Hour), // past stuckMessageExpireTTL
 	}
 	require.NoError(t, cs.CreateMessage(ctx, stuck))
 	assert.Equal(t, store.MessageDispatchPending, stuck.DispatchState)
@@ -340,4 +340,15 @@ func TestBrokerMessageSweepHandler_ExpiredPendingNotifiesAgentAndUserSenders(t *
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected user message failed SSE event on sweep expiry")
 	}
+
+	// A second sweep run must be a no-op (rows are already failed) and must not
+	// send duplicate DELIVERY_FAILED notices.
+	srv.brokerMessageSweepHandler()(ctx)
+	var afterSecondSweep int
+	for _, c := range dispatcher.getCalls() {
+		if c.Agent.ID == sender.ID {
+			afterSecondSweep++
+		}
+	}
+	assert.Equal(t, 1, afterSecondSweep, "subsequent sweep runs must not re-notify sender")
 }
