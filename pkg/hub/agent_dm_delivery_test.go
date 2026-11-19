@@ -33,6 +33,7 @@ package hub
 // ---------------------------------------------------------------------------
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -610,6 +611,41 @@ func TestDelivery_ShuttingDown_RefusesBeforePersistenceWith503RetryAfter(t *test
 	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: sender.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.Empty(t, msgs.Items, "no message row may be persisted when hub is already shutting down")
+}
+
+// TestDelivery_DelegatedSendShuttingDown_RefusesBeforePersistence covers the
+// delegated-send ingress path (handleAgentMessage -> delegatedDeliveryRefusal ->
+// checkDispatchAvailability, review O2 / mutant m1), which does not go through
+// ExecuteAgentDM's Phase 2 re-check.
+func TestDelivery_DelegatedSendShuttingDown_RefusesBeforePersistence(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	srv.BeginShutdown()
+
+	bodyBytes, err := json.Marshal(map[string]any{"message": "delegated-send-during-shutdown"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	delegated := &DelegatedAgentIdentity{
+		agentID:           sender.ID,
+		agentProjectID:    sender.ProjectID,
+		authorizingUserID: target.Ancestry[0],
+		grantID:           tid("delegated-shutdown-grant"),
+	}
+	req = req.WithContext(contextWithIdentity(req.Context(), delegated))
+	rec := httptest.NewRecorder()
+
+	srv.handleAgentMessage(rec, req, target.ID)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Equal(t, "10", rec.Header().Get("Retry-After"))
+	assert.Contains(t, rec.Body.String(), ErrCodeUnavailable)
+	assert.Empty(t, dispatcher.getCalls(), "delegated send during shutdown must not dispatch")
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "delegated send during shutdown must not persist a message row")
 }
 
 func TestDelivery_ShuttingDownDuringWake_RefusesBeforePersistence(t *testing.T) {
