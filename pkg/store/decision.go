@@ -801,13 +801,14 @@ type WithdrawDecisionsResult struct {
 	AlreadyWithdrawn []*Decision
 }
 
-// DecisionAnswerer identifies the user recording an answer or dismissal.
+// DecisionAnswerer identifies the user recording a dismissal. Dismissal is
+// open only to users acting for themselves (session or user access token);
+// agents, including delegated agent credentials, are refused, so a dismissal
+// row carries no delegation attribution.
 type DecisionAnswerer struct {
-	UserID            string
-	Name              string
-	Email             string
-	AuthorizingUserID string
-	DelegationGrantID string
+	UserID string
+	Name   string
+	Email  string
 }
 
 // DismissDecisionsInput dismisses open decisions of one prompt for one user
@@ -815,7 +816,7 @@ type DecisionAnswerer struct {
 type DismissDecisionsInput struct {
 	MessageID       string           // the decision-prompt message
 	RowIDs          []string         // optional subset; empty = every row of the prompt waiting on the user
-	User            DecisionAnswerer // id, name, email, delegation fields
+	User            DecisionAnswerer // id, name, email
 	Reason          string           // optional, <= 500 runes, trimmed
 	Surface         string           // native | decisions_page
 	IdempotencyKey  string           // optional

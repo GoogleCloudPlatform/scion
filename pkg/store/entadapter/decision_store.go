@@ -2492,8 +2492,6 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 			SetNillableDismissReason(nullableString(reason)).
 			SetSurface(decisionanswer.Surface(surface)).
 			SetResponseMessageID(responseUUID).
-			SetNillableAuthorizingUserID(nullableString(in.User.AuthorizingUserID)).
-			SetNillableDelegationGrantID(nullableString(in.User.DelegationGrantID)).
 			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
 			SetBatchID(batchUUID).
 			SetMatchedDefault(false).
