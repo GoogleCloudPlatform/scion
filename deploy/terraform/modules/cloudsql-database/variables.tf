@@ -39,3 +39,10 @@ variable "password_rotation" {
   type        = string
   default     = ""
 }
+
+variable "enable_relay_user" {
+  description = "Optional least-privilege Cloud SQL user \"<hub_name>-relay\" (plus Secret Manager password and DSN secrets) for separate Conduit Relay pods (--role relay). Default false creates nothing so existing single-binary / in-process hubs see zero plan diff. Note: Cloud SQL BUILT_IN users do not automatically receive table-level privileges on tables created by \"<hub_name>\"; after the hub runs its initial migration, grant CONNECT/USAGE plus table privileges on relay_instances, conduit_sessions, conduit_principal_epochs and SELECT on hub_settings (see main.tf and configurations/hub-gke/README.md)."
+  type        = bool
+  default     = false
+  nullable    = false
+}

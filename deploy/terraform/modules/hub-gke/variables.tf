@@ -279,3 +279,81 @@ variable "neg_zones" {
     error_message = "neg_zones must list at least one explicit zone (no \"*\" wildcard: the front door reads one NEG per listed zone)."
   }
 }
+
+# --- High Availability & Separate Conduit Relay ---
+
+variable "hub_replica_count" {
+  description = "Number of Hub replicas (the chart's replicaCount). Default 1 leaves single-replica chart_values unchanged; > 1 provisions internal hop TLS (conduit.internalTls) so Hub replicas authenticate and encrypt the internal Conduit hop."
+  type        = number
+  default     = 1
+  nullable    = false
+
+  validation {
+    condition     = var.hub_replica_count >= 1 && floor(var.hub_replica_count) == var.hub_replica_count
+    error_message = "hub_replica_count must be an integer >= 1."
+  }
+}
+
+variable "conduit_relay_mode" {
+  description = "Conduit relay topology: \"in_process\" (default; each Hub pod runs its own relay) or \"external\" (separate --role relay Deployment with HMAC peer auth, internal TLS hop and dedicated KSA/GSA)."
+  type        = string
+  default     = "in_process"
+  nullable    = false
+
+  validation {
+    condition     = contains(["in_process", "external"], var.conduit_relay_mode)
+    error_message = "conduit_relay_mode must be \"in_process\" or \"external\"."
+  }
+}
+
+variable "relay_replica_count" {
+  description = "Number of separate Conduit Relay replicas when conduit_relay_mode is \"external\" (the chart's relay.replicaCount)."
+  type        = number
+  default     = 2
+  nullable    = false
+
+  validation {
+    condition     = var.relay_replica_count >= 1 && floor(var.relay_replica_count) == var.relay_replica_count
+    error_message = "relay_replica_count must be an integer >= 1."
+  }
+}
+
+variable "enable_hub_pdb" {
+  description = "Enable the Hub Deployment's PodDisruptionBudget (hub.pdb.enabled)."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "enable_relay_pdb" {
+  description = "Enable the Conduit Relay Deployment's PodDisruptionBudget when conduit_relay_mode is \"external\" (relay.pdb.enabled)."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "relay_sa_email" {
+  description = "Optional least-privilege Google service account email for Conduit Relay pods (hub-identity's relay_sa_email), bound via Workload Identity on relay.serviceAccount.gcpServiceAccount when conduit_relay_mode is \"external\"."
+  type        = string
+  default     = null
+}
+
+variable "relay_ksa_name" {
+  description = "Kubernetes ServiceAccount name for separate Conduit Relay pods when conduit_relay_mode is \"external\"."
+  type        = string
+  default     = "scion-relay"
+  nullable    = false
+}
+
+variable "relay_db_user" {
+  description = "Optional dedicated Postgres user for Conduit Relay pods (cloudsql-database's relay_db_user). Null inherits var.db_user."
+  type        = string
+  default     = null
+}
+
+variable "relay_db_password" {
+  description = "Optional Postgres password for relay_db_user (sensitive), passed via set_sensitive as relay.database.password when relay_db_user is non-null."
+  type        = string
+  default     = null
+  sensitive   = true
+}

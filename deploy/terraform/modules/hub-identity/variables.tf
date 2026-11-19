@@ -70,3 +70,27 @@ variable "hub_workload_identity_ksa" {
     error_message = "hub_workload_identity_ksa.namespace and .name must be lowercase DNS labels (^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$)."
   }
 }
+
+variable "enable_relay_identity" {
+  description = "Opt-in dedicated Google service account \"<hub_name>-relay\" for separate Conduit Relay pods (--role relay). Granted only roles/cloudsql.client, roles/cloudsql.instanceUser and roles/logging.logWriter (never Secret Manager, GCS or TokenCreator). Default false creates nothing, leaving existing hubs' plans unchanged."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "relay_workload_identity_ksa" {
+  description = "Optional Kubernetes service account { namespace, name } granted roles/iam.workloadIdentityUser on the <hub_name>-relay GSA when enable_relay_identity is true. Default null creates no binding."
+  type = object({
+    namespace = string
+    name      = string
+  })
+  default = null
+
+  validation {
+    condition = var.relay_workload_identity_ksa == null || (
+      can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", var.relay_workload_identity_ksa.namespace)) &&
+      can(regex("^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$", var.relay_workload_identity_ksa.name))
+    )
+    error_message = "relay_workload_identity_ksa.namespace and .name must be lowercase DNS labels (^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$)."
+  }
+}

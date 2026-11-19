@@ -14,6 +14,7 @@ mock_provider "google" {}
 mock_provider "kubernetes" {}
 mock_provider "helm" {}
 mock_provider "random" {}
+mock_provider "tls" {}
 
 variables {
   project_id        = "tfha-test-project"
@@ -718,5 +719,44 @@ run "test_identities_enabled_reaches_the_chart" {
   assert {
     condition     = length(module.hub_test_runner) == 0
     error_message = "test identities alone must not create test-runner identities."
+  }
+}
+
+# --- Multi-replica HA + Separate Conduit Relay ---
+
+run "external_relay_ha_plans_clean_with_least_privilege_identity" {
+  command = plan
+
+  variables {
+    hub_replica_count    = 2
+    conduit_relay_mode   = "external"
+    relay_replica_count  = 2
+    enable_hub_pdb       = true
+    enable_relay_pdb     = true
+    enable_relay_db_user = true
+  }
+
+  override_resource {
+    target = module.hub_identity.google_service_account.relay
+    values = {
+      name  = "projects/tfha-test-project/serviceAccounts/tfha-gke-h3-relay@tfha-test-project.iam.gserviceaccount.com"
+      email = "tfha-gke-h3-relay@tfha-test-project.iam.gserviceaccount.com"
+    }
+  }
+
+  assert {
+    condition = (
+      output.relay_sa_email == "tfha-gke-h3-relay@tfha-test-project.iam.gserviceaccount.com" &&
+      output.chart_values.replicaCount == 2 &&
+      output.chart_values.hub.pdb.enabled == true &&
+      output.chart_values.conduit.relayMode == "external" &&
+      output.chart_values.conduit.peerAuth == "hmac" &&
+      output.chart_values.relay.enabled == true &&
+      output.chart_values.relay.replicaCount == 2 &&
+      output.chart_values.relay.pdb.enabled == true &&
+      output.chart_values.relay.serviceAccount.gcpServiceAccount == "tfha-gke-h3-relay@tfha-test-project.iam.gserviceaccount.com" &&
+      output.chart_values.relay.database.user == "tfha-gke-h3-relay"
+    )
+    error_message = "external relay HA configuration must wire hub_replica_count, conduit_relay_mode=external, peerAuth=hmac, relay GSA and relay DB user."
   }
 }

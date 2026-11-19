@@ -110,3 +110,8 @@ output "test_runner_issuer_unique_id" {
   description = "Unique ID of <hub>-issuer. null unless test_runner.enabled."
   value       = one(module.hub_test_runner[*].issuer_unique_id)
 }
+
+output "relay_sa_email" {
+  description = "Email of <hub>-relay GSA (modules/hub-identity). null unless conduit_relay_mode is \"external\"."
+  value       = module.hub_identity.relay_sa_email
+}

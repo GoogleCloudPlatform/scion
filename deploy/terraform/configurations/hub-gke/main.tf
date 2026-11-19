@@ -92,6 +92,13 @@ locals {
     name      = "scion-hub"
   }
 
+  relay_ksa = {
+    namespace = "${var.hub_name}-system"
+    name      = "scion-relay"
+  }
+
+  external_relay = var.conduit_relay_mode == "external"
+
   # Every zone the cluster's nodes may run in. There is deliberately no
   # override: a subset would leave pods in unattached zones (README, "NEG zones").
   neg_zones = sort(tolist(data.google_container_cluster.agents.node_locations))
@@ -112,7 +119,9 @@ module "hub_identity" {
   project_number = module.shared_lookup.shared.project_number
   hub_name       = local.hub_id
 
-  hub_workload_identity_ksa = local.hub_ksa
+  hub_workload_identity_ksa   = local.hub_ksa
+  enable_relay_identity       = local.external_relay
+  relay_workload_identity_ksa = local.external_relay ? local.relay_ksa : null
 }
 
 module "cloudsql_database" {
@@ -124,6 +133,7 @@ module "cloudsql_database" {
   hub_sa_email        = module.hub_identity.hub_sa_email
   sql_connection_name = module.shared_lookup.shared.sql.connection_name
   password_rotation   = var.db_password_rotation
+  enable_relay_user   = var.enable_relay_db_user
 }
 
 module "agent_runtime_k8s" {
@@ -229,13 +239,31 @@ module "hub_gke" {
   hub_run_as_uid = var.nfs_uid
   hub_run_as_gid = var.nfs_gid
 
+  hub_replica_count   = var.hub_replica_count
+  conduit_relay_mode  = var.conduit_relay_mode
+  relay_replica_count = var.relay_replica_count
+  enable_hub_pdb      = var.enable_hub_pdb
+  enable_relay_pdb    = var.enable_relay_pdb
+  relay_sa_email      = module.hub_identity.relay_sa_email
+  relay_ksa_name      = local.relay_ksa.name
+  relay_db_user       = var.enable_relay_db_user ? module.cloudsql_database.relay_db_user : null
+  relay_db_password   = var.enable_relay_db_user ? module.cloudsql_database.relay_db_password : null
+
   # Real resource attributes only (see hub-gke's variable). The hub pod
   # reaches Secret Manager, Cloud SQL and GCS as the hub GSA through
-  # Workload Identity, so the release waits for those grants to exist.
-  boot_prerequisites = {
-    hub_workload_identity = module.hub_identity.hub_workload_identity_member
-    hub_iam_grants        = join(",", module.hub_identity.hub_iam_grants)
-  }
+  # Workload Identity, and in external relay mode the relay pods reach Cloud
+  # SQL through the dedicated <hub>-relay GSA, so the release waits for those
+  # grants to exist.
+  boot_prerequisites = merge(
+    {
+      hub_workload_identity = module.hub_identity.hub_workload_identity_member
+      hub_iam_grants        = join(",", module.hub_identity.hub_iam_grants)
+    },
+    local.external_relay ? {
+      relay_workload_identity = module.hub_identity.relay_workload_identity_member
+      relay_iam_grants        = join(",", module.hub_identity.relay_iam_grants)
+    } : {},
+  )
 }
 
 # Optional test-runner identities, off by default. The backend service name

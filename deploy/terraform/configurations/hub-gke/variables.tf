@@ -156,3 +156,62 @@ variable "test_runner" {
   default  = {}
   nullable = false
 }
+
+# --- High Availability & Separate Conduit Relay ---
+
+variable "hub_replica_count" {
+  description = "Number of Hub replicas (default 1; set >= 2 for multi-replica HA). Above 1, Terraform provisions a per-hub internal TLS CA and certificate Secret for the Conduit hop."
+  type        = number
+  default     = 1
+  nullable    = false
+
+  validation {
+    condition     = var.hub_replica_count >= 1 && floor(var.hub_replica_count) == var.hub_replica_count
+    error_message = "hub_replica_count must be an integer >= 1."
+  }
+}
+
+variable "conduit_relay_mode" {
+  description = "Conduit relay topology: \"in_process\" (default; each Hub pod runs its own relay) or \"external\" (separate --role relay Deployment with HMAC peer auth, internal TLS hop and dedicated <hub_name>-relay GSA/KSA)."
+  type        = string
+  default     = "in_process"
+  nullable    = false
+
+  validation {
+    condition     = contains(["in_process", "external"], var.conduit_relay_mode)
+    error_message = "conduit_relay_mode must be \"in_process\" or \"external\"."
+  }
+}
+
+variable "relay_replica_count" {
+  description = "Number of separate Conduit Relay replicas when conduit_relay_mode is \"external\"."
+  type        = number
+  default     = 2
+  nullable    = false
+
+  validation {
+    condition     = var.relay_replica_count >= 1 && floor(var.relay_replica_count) == var.relay_replica_count
+    error_message = "relay_replica_count must be an integer >= 1."
+  }
+}
+
+variable "enable_hub_pdb" {
+  description = "Enable the Hub Deployment's PodDisruptionBudget (hub.pdb.enabled)."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "enable_relay_pdb" {
+  description = "Enable the Conduit Relay Deployment's PodDisruptionBudget when conduit_relay_mode is \"external\" (relay.pdb.enabled)."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "enable_relay_db_user" {
+  description = "Create a dedicated Cloud SQL user \"<hub_name>-relay\" and wire it to separate Conduit Relay pods when conduit_relay_mode is \"external\". Default false reuses the hub's DB user so fresh installs boot with zero manual SQL grants; enable after applying the least-privilege Postgres GRANTs documented in README.md."
+  type        = bool
+  default     = false
+  nullable    = false
+}

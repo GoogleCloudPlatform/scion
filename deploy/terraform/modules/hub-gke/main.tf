@@ -33,6 +33,24 @@ locals {
 
   hub_installed = var.iap_oauth_client_id != null
 
+  conduit_external_relay  = var.conduit_relay_mode == "external"
+  conduit_hop_tls_enabled = var.hub_replica_count > 1 || local.conduit_external_relay
+
+  # Mirrors scion-hub.fullname for release name = var.hub_name (3..16 chars, so
+  # never hits the >63-char truncation branch). Used as the leaf cert SAN and
+  # passed explicitly as conduit.internalTls.serverName so the certificate and
+  # the chart's internal Service (<fullname>-relay.<namespace>.svc) agree by
+  # construction.
+  chart_fullname = (
+    strcontains(local.release_name, "scion-hub") && !endswith(local.release_name, "-scion-hub")
+    ? local.release_name
+    : "${local.release_name}-scion-hub"
+  )
+  conduit_tls_server_name  = "${local.chart_fullname}-relay.${local.namespace}.svc"
+  conduit_tls_secret_name  = "${var.hub_name}-conduit-tls"
+  conduit_peer_secret_name = "${var.hub_name}-conduit-peer"
+  conduit_peer_secret_key  = "SCION_SERVER_HUB_CONDUIT_PEERSECRET"
+
   # Same rules as hub-cloudrun's artifacts bucket: only ARCHIVED versions
   # expire, and stalled multipart uploads are aborted. See that module for
   # why no rule touches CURRENT objects and why with_state = "ANY" is
@@ -52,137 +70,185 @@ locals {
   # not in here; it goes through set_sensitive on the release. Exposed as
   # the chart_values output, so tests and operators can read exactly what
   # was handed to Helm.
-  chart_values = {
-    image = {
-      repository = var.image_repository
-      digest     = var.image_digest
-    }
-
-    hub = merge(
-      {
-        hubId       = var.hub_name
-        baseUrl     = var.public_url
-        adminEmails = var.admin_emails
-        webPort     = var.port
-        # Only these two keys: the chart's other hub.securityContext settings
-        # are fixed in its templates, and Helm merges this map with the
-        # chart's defaults.
-        securityContext = {
-          runAsUser  = var.hub_run_as_uid
-          runAsGroup = var.hub_run_as_gid
-        }
-      },
-      var.db_password_rotation == "" ? {} : {
-        podAnnotations = {
-          "scion.dev/db-password-rotation" = var.db_password_rotation
-        }
-      },
-      # Only when enabled, so existing hubs' values stay byte-identical by
-      # default (the chart's own defaults are "" and false). hub.hubClass =
-      # "test" is required by the chart whenever hub.testIdentities.enabled is
-      # true; split into two merge maps so each conditional unifies with {} as
-      # a homogeneous map. Unrelated to test login, which the chart does not
-      # offer.
-      var.test_identities_enabled ? {
-        hubClass = "test"
-      } : {},
-      var.test_identities_enabled ? {
-        testIdentities = {
-          enabled = true
-        }
-      } : {},
-    )
-
-    serviceAccount = {
-      create            = true
-      name              = var.ksa_name
-      gcpServiceAccount = var.hub_sa_email
-    }
-
-    rbac = {
-      create = true
-    }
-
-    runtime = {
-      namespace = var.runtime_namespace
-      gke       = var.agent_runtime_gke_mode
-    }
-
-    agents = {
-      imageRegistry = var.image_registry
-    }
-
-    database = {
-      driver = "postgres"
-      auth   = "password"
-      name   = var.db_name
-      user   = var.db_user
-    }
-
-    cloudsql = {
-      enabled                = true
-      instanceConnectionName = var.sql_connection_name
-      # The instance created by modules/cloudsql-instance has no public IP, and
-      # the GKE cluster is VPC-native on the same privately connected network,
-      # so the proxy must connect over the private IP.
-      privateIp = true
-    }
-
-    storage = {
-      provider = "gcs"
-      bucket   = google_storage_bucket.artifacts.name
-    }
-
-    secrets = {
-      backend = "gcpsm"
-      gcpsm = {
-        projectId = var.project_id
+  chart_values = merge(
+    {
+      image = {
+        repository = var.image_repository
+        digest     = var.image_digest
       }
-    }
 
-    auth = {
-      mode = "proxy"
-      proxy = {
-        provider = "iap"
-        iap = {
-          audience = var.iap_audience
+      hub = merge(
+        {
+          hubId       = var.hub_name
+          baseUrl     = var.public_url
+          adminEmails = var.admin_emails
+          webPort     = var.port
+          # Only these two keys: the chart's other hub.securityContext settings
+          # are fixed in its templates, and Helm merges this map with the
+          # chart's defaults.
+          securityContext = {
+            runAsUser  = var.hub_run_as_uid
+            runAsGroup = var.hub_run_as_gid
+          }
+        },
+        var.db_password_rotation == "" ? {} : {
+          podAnnotations = {
+            "scion.dev/db-password-rotation" = var.db_password_rotation
+          }
+        },
+        # Only when enabled, so existing hubs' values stay byte-identical by
+        # default (the chart's own defaults are "" and false). hub.hubClass =
+        # "test" is required by the chart whenever hub.testIdentities.enabled is
+        # true; split into two merge maps so each conditional unifies with {} as
+        # a homogeneous map. Unrelated to test login, which the chart does not
+        # offer.
+        var.test_identities_enabled ? {
+          hubClass = "test"
+        } : {},
+        var.test_identities_enabled ? {
+          testIdentities = {
+            enabled = true
+          }
+        } : {},
+        var.enable_hub_pdb ? {
+          pdb = {
+            enabled = true
+          }
+        } : {},
+      )
+
+      serviceAccount = {
+        create            = true
+        name              = var.ksa_name
+        gcpServiceAccount = var.hub_sa_email
+      }
+
+      rbac = {
+        create = true
+      }
+
+      runtime = {
+        namespace = var.runtime_namespace
+        gke       = var.agent_runtime_gke_mode
+      }
+
+      agents = {
+        imageRegistry = var.image_registry
+      }
+
+      database = {
+        driver = "postgres"
+        auth   = "password"
+        name   = var.db_name
+        user   = var.db_user
+      }
+
+      cloudsql = {
+        enabled                = true
+        instanceConnectionName = var.sql_connection_name
+        # The instance created by modules/cloudsql-instance has no public IP, and
+        # the GKE cluster is VPC-native on the same privately connected network,
+        # so the proxy must connect over the private IP.
+        privateIp = true
+      }
+
+      storage = {
+        provider = "gcs"
+        bucket   = google_storage_bucket.artifacts.name
+      }
+
+      secrets = {
+        backend = "gcpsm"
+        gcpsm = {
+          projectId = var.project_id
         }
       }
-      transport = {
-        mode           = "iap"
-        oidcAudience   = var.iap_oauth_client_id
-        platformAuthSa = var.transport_sa_email
-      }
-      existingSecret = local.session_secret_name
-    }
 
-    # Workspace storage: one chart value renders settings.yaml
-    # server.project_storage (backend nfs) and mounts the export in the hub
-    # pod at <mountRoot>/<shareId>, so the settings and the mount cannot
-    # drift. With backend nfs the hub's /readyz returns 503 until that path
-    # exists in the hub container. The settings uid/gid come from
-    # hub.securityContext.runAsUser/runAsGroup. With shares[0].pv_name set,
-    # the Kubernetes runtime mounts agent workspaces and shared dirs by
-    # subPath from this hub's NFS claim and creates no per-directory claims.
-    # The runtime broker in the hub pod creates the workspace and shared-dir
-    # subPath directories through this mount, as the hub's uid, before the
-    # agent pod starts. The kubelet creates them only if the broker can't
-    # (ensureNFSWorkspaceLeaf, pkg/agent/nfs_workspace_leaf.go). With
-    # pv_name empty, agent pods mount the share inline (one NFS volume per
-    # directory, no mount options) and the kubelet never creates them: the
-    # broker's mount of the export must then be writable by the hub's uid.
-    workspaceStorage = {
-      nfs = {
-        enabled     = true
-        server      = var.nfs.server
-        export      = var.nfs.export
-        mountRoot   = var.nfs_mount_root
-        shareId     = var.hub_name
-        pvName      = var.nfs.pv_name
-        subpathRoot = var.nfs_subpath_root
+      auth = {
+        mode = "proxy"
+        proxy = {
+          provider = "iap"
+          iap = {
+            audience = var.iap_audience
+          }
+        }
+        transport = {
+          mode           = "iap"
+          oidcAudience   = var.iap_oauth_client_id
+          platformAuthSa = var.transport_sa_email
+        }
+        existingSecret = local.session_secret_name
       }
-    }
-  }
+
+      workspaceStorage = {
+        nfs = {
+          enabled     = true
+          server      = var.nfs.server
+          export      = var.nfs.export
+          mountRoot   = var.nfs_mount_root
+          shareId     = var.hub_name
+          pvName      = var.nfs.pv_name
+          subpathRoot = var.nfs_subpath_root
+        }
+      }
+    },
+    var.hub_replica_count > 1 ? {
+      replicaCount = var.hub_replica_count
+    } : {},
+    (local.conduit_hop_tls_enabled && !local.conduit_external_relay) ? {
+      conduit = {
+        internalTls = {
+          enabled        = true
+          existingSecret = local.conduit_tls_secret_name
+          serverName     = local.conduit_tls_server_name
+        }
+      }
+    } : {},
+    local.conduit_external_relay ? {
+      conduit = {
+        relayMode          = "external"
+        peerAuth           = "hmac"
+        existingPeerSecret = local.conduit_peer_secret_name
+        internalTls = {
+          enabled        = true
+          existingSecret = local.conduit_tls_secret_name
+          serverName     = local.conduit_tls_server_name
+        }
+      }
+    } : {},
+    local.conduit_external_relay ? {
+      relay = merge(
+        {
+          enabled      = true
+          replicaCount = var.relay_replica_count
+          serviceAccount = merge(
+            {
+              create = true
+              name   = var.relay_ksa_name
+            },
+            var.relay_sa_email != null ? {
+              gcpServiceAccount = var.relay_sa_email
+            } : {},
+          )
+        },
+        var.enable_relay_pdb ? {
+          pdb = {
+            enabled = true
+          }
+        } : {},
+        var.relay_db_user != null ? {
+          database = {
+            user = var.relay_db_user
+          }
+        } : {},
+        var.db_password_rotation != "" ? {
+          podAnnotations = {
+            "scion.dev/db-password-rotation" = var.db_password_rotation
+          }
+        } : {},
+      )
+    } : {},
+  )
 
   session_secret_name = "${var.hub_name}-session"
 }
@@ -268,6 +334,119 @@ resource "kubernetes_secret_v1" "session" {
   type = "Opaque"
 }
 
+# --- Conduit internal hop TLS & external relay peer secret ---
+#
+# Provisioned when hub_replica_count > 1 or conduit_relay_mode == "external".
+# The leaf certificate carries SAN <fullname>-relay.<namespace>.svc (matching
+# conduit.internalTls.serverName and the chart's internal Service), signed by a
+# per-hub CA stored alongside tls.crt/tls.key in kubernetes_secret_v1.conduit_tls.
+resource "tls_private_key" "conduit_ca" {
+  count = local.hub_installed && local.conduit_hop_tls_enabled ? 1 : 0
+
+  algorithm   = "ECDSA"
+  ecdsa_curve = "P256"
+}
+
+resource "tls_self_signed_cert" "conduit_ca" {
+  count = local.hub_installed && local.conduit_hop_tls_enabled ? 1 : 0
+
+  private_key_pem   = tls_private_key.conduit_ca[0].private_key_pem
+  is_ca_certificate = true
+
+  subject {
+    common_name = "${var.hub_name}-conduit-ca"
+  }
+
+  validity_period_hours = 87600 # 10 years
+  early_renewal_hours   = 2160  # 90 days
+
+  allowed_uses = [
+    "cert_signing",
+    "crl_signing",
+  ]
+}
+
+resource "tls_private_key" "conduit_leaf" {
+  count = local.hub_installed && local.conduit_hop_tls_enabled ? 1 : 0
+
+  algorithm   = "ECDSA"
+  ecdsa_curve = "P256"
+}
+
+resource "tls_cert_request" "conduit_leaf" {
+  count = local.hub_installed && local.conduit_hop_tls_enabled ? 1 : 0
+
+  private_key_pem = tls_private_key.conduit_leaf[0].private_key_pem
+
+  subject {
+    common_name = local.conduit_tls_server_name
+  }
+
+  dns_names = [
+    local.conduit_tls_server_name,
+    "${local.conduit_tls_server_name}.cluster.local",
+  ]
+}
+
+resource "tls_locally_signed_cert" "conduit_leaf" {
+  count = local.hub_installed && local.conduit_hop_tls_enabled ? 1 : 0
+
+  cert_request_pem   = tls_cert_request.conduit_leaf[0].cert_request_pem
+  ca_private_key_pem = tls_private_key.conduit_ca[0].private_key_pem
+  ca_cert_pem        = tls_self_signed_cert.conduit_ca[0].cert_pem
+
+  validity_period_hours = 8760 # 1 year
+  early_renewal_hours   = 720  # 30 days
+
+  allowed_uses = [
+    "key_encipherment",
+    "digital_signature",
+    "server_auth",
+    "client_auth",
+  ]
+}
+
+resource "kubernetes_secret_v1" "conduit_tls" {
+  count = local.hub_installed && local.conduit_hop_tls_enabled ? 1 : 0
+
+  metadata {
+    name      = local.conduit_tls_secret_name
+    namespace = kubernetes_namespace_v1.system.metadata[0].name
+  }
+
+  data = {
+    "tls.crt" = tls_locally_signed_cert.conduit_leaf[0].cert_pem
+    "tls.key" = tls_private_key.conduit_leaf[0].private_key_pem
+    "ca.crt"  = tls_self_signed_cert.conduit_ca[0].cert_pem
+  }
+
+  type = "kubernetes.io/tls"
+}
+
+# Shared relay-peer HMAC secret for external relay mode (48 octets, distinct
+# from the 64-octet session secret).
+resource "random_password" "conduit_peer" {
+  count = local.hub_installed && local.conduit_external_relay ? 1 : 0
+
+  length  = 48
+  special = false
+}
+
+resource "kubernetes_secret_v1" "conduit_peer" {
+  count = local.hub_installed && local.conduit_external_relay ? 1 : 0
+
+  metadata {
+    name      = local.conduit_peer_secret_name
+    namespace = kubernetes_namespace_v1.system.metadata[0].name
+  }
+
+  data = {
+    (local.conduit_peer_secret_key) = random_password.conduit_peer[0].result
+  }
+
+  type = "Opaque"
+}
+
 # --- Artifacts bucket ---
 #
 # Not gated on the release: it is durable storage, and creating it on the
@@ -327,19 +506,30 @@ resource "helm_release" "hub" {
 
   values = [yamlencode(local.chart_values)]
 
-  set_sensitive = [
-    {
-      name  = "database.password"
-      value = var.db_password
-      type  = "string"
-    },
-  ]
+  set_sensitive = concat(
+    [
+      {
+        name  = "database.password"
+        value = var.db_password
+        type  = "string"
+      },
+    ],
+    local.conduit_external_relay && var.relay_db_user != null ? [
+      {
+        name  = "relay.database.password"
+        value = var.relay_db_password
+        type  = "string"
+      },
+    ] : [],
+  )
 
   wait    = true
   timeout = var.helm_timeout
 
   depends_on = [
     kubernetes_secret_v1.session,
+    kubernetes_secret_v1.conduit_tls,
+    kubernetes_secret_v1.conduit_peer,
     google_storage_bucket_iam_member.hub_object_admin,
     terraform_data.boot_prerequisites,
   ]

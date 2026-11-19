@@ -7,6 +7,7 @@ mock_provider "google" {}
 mock_provider "kubernetes" {}
 mock_provider "helm" {}
 mock_provider "random" {}
+mock_provider "tls" {}
 
 variables {
   project_id          = "tfha-test-project"
@@ -481,5 +482,65 @@ run "chart_ci_fixture_matches_chart_values" {
       },
     ))
     error_message = "deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml no longer matches chart_values; update the fixture with the module."
+  }
+}
+
+run "multi_replica_in_process_provisions_conduit_tls_only" {
+  command = plan
+
+  variables {
+    hub_replica_count = 2
+    enable_hub_pdb    = true
+  }
+
+  assert {
+    condition = (
+      output.chart_values.replicaCount == 2 &&
+      output.chart_values.hub.pdb.enabled == true &&
+      length(kubernetes_secret_v1.conduit_tls) == 1 &&
+      length(kubernetes_secret_v1.conduit_peer) == 0 &&
+      output.chart_values.conduit.internalTls.enabled == true &&
+      output.chart_values.conduit.internalTls.existingSecret == "tfha-gke-h3-conduit-tls" &&
+      output.chart_values.conduit.internalTls.serverName == "tfha-gke-h3-scion-hub-relay.tfha-gke-h3-system.svc" &&
+      !contains(keys(output.chart_values), "relay")
+    )
+    error_message = "multi-replica in_process mode must provision conduit_tls, set replicaCount=2 and hub.pdb.enabled=true, and create no external relay resources."
+  }
+}
+
+run "external_relay_ha_provisions_tls_peer_secret_and_relay_values" {
+  command = plan
+
+  variables {
+    hub_replica_count    = 2
+    conduit_relay_mode   = "external"
+    relay_replica_count  = 3
+    enable_hub_pdb       = true
+    enable_relay_pdb     = true
+    relay_sa_email       = "tfha-gke-h3-relay@tfha-test-project.iam.gserviceaccount.com"
+    relay_db_user        = "tfha-gke-h3-relay"
+    relay_db_password    = "not-a-real-relay-password"
+    db_password_rotation = "2026-11-19"
+  }
+
+  assert {
+    condition = (
+      length(kubernetes_secret_v1.conduit_tls) == 1 &&
+      length(kubernetes_secret_v1.conduit_peer) == 1 &&
+      random_password.conduit_peer[0].length == 48 &&
+      random_password.session[0].length == 64 &&
+      output.chart_values.conduit.relayMode == "external" &&
+      output.chart_values.conduit.peerAuth == "hmac" &&
+      output.chart_values.conduit.existingPeerSecret == "tfha-gke-h3-conduit-peer" &&
+      output.chart_values.relay.enabled == true &&
+      output.chart_values.relay.replicaCount == 3 &&
+      output.chart_values.relay.pdb.enabled == true &&
+      output.chart_values.relay.serviceAccount.name == "scion-relay" &&
+      output.chart_values.relay.serviceAccount.gcpServiceAccount == "tfha-gke-h3-relay@tfha-test-project.iam.gserviceaccount.com" &&
+      output.chart_values.relay.database.user == "tfha-gke-h3-relay" &&
+      !contains(keys(output.chart_values.relay.database), "password") &&
+      output.chart_values.relay.podAnnotations["scion.dev/db-password-rotation"] == "2026-11-19"
+    )
+    error_message = "external relay mode must provision TLS + peer secrets and wire conduit/relay chart_values without leaking relay_db_password in plain values."
   }
 }

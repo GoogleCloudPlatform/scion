@@ -339,6 +339,64 @@ plan time.
 | `chart_values` | every non-secret value handed to the chart |
 | `neg_zones` | zones the NEGs are created in and read from (the cluster's `node_locations`) |
 | `test_runner_uat_email`, `test_runner_uat_unique_id`, `test_runner_issuer_email`, `test_runner_issuer_unique_id` | the test-runner accounts; null unless `test_runner.enabled` |
+| `relay_sa_email` | `<hub>-relay` GSA email; null unless `conduit_relay_mode = "external"` |
+
+## Multi-replica HA and separate Conduit Relays (optional)
+
+By default `hub_replica_count = 1` and `conduit_relay_mode = "in_process"`,
+leaving single-replica plans and `chart_values` unchanged.
+
+To run multi-replica HA with separate Conduit Relay pods (`scion server start --role relay`):
+
+```hcl
+hub_replica_count   = 2
+conduit_relay_mode  = "external"
+relay_replica_count = 2
+enable_hub_pdb      = true
+enable_relay_pdb    = true
+```
+
+What Terraform and the `scion-hub` chart wire in this mode:
+
+- **Internal hop TLS (`<hub>-conduit-tls`):** whenever `hub_replica_count > 1`
+  or `conduit_relay_mode = "external"`, `modules/hub-gke` generates a per-hub
+  ECDSA CA and leaf certificate (`hashicorp/tls`) with SAN
+  `<hub>-scion-hub-relay.<hub>-system.svc` and mounts it into both Hub and
+  Relay pods (`conduit.internalTls`).
+- **Relay-peer authentication (`<hub>-conduit-peer`):** in `external` mode,
+  `modules/hub-gke` generates a 48-octet secret (distinct from the 64-octet
+  session secret) injected via `SCION_SERVER_HUB_CONDUIT_PEERSECRET`, sets
+  `conduit.peerAuth = "hmac"` so `hub-lb` stays unchanged (`ingress: proxy`
+  forwards WebSocket upgrades through the Hub to Relay pods), and renders the
+  internal `ClusterIP` Service `<hub>-scion-hub-relay:9443` for
+  `server.relay.hub_internal_url`.
+- **Fresh-DB bootstrap:** when `server.hub.conduit.relay_mode` is `external`
+  and the `experiments` row in `hub_settings` has no explicit `hub.conduit`
+  override yet, the Hub seeds `hub.conduit = true` during operational settings
+  initialization so both Hub and `--role relay` pods boot cleanly on a brand-new
+  database without manual intervention.
+- **Least-privilege Relay GSA (`<hub>-relay`):** `modules/hub-identity` creates
+  `<hub>-relay` with only `roles/cloudsql.client`,
+  `roles/cloudsql.instanceUser`, and `roles/logging.logWriter` (bound via
+  Workload Identity to `<hub>-system/scion-relay` — no Secret Manager, GCS, or
+  `serviceAccountTokenCreator` access). Relay pods receive an isolated
+  `<hub>-scion-hub-relay-settings` Secret containing no Hub session or OAuth
+  secrets, and are probed on `/healthz`.
+- **Optional dedicated Relay DB user (`enable_relay_db_user = true`):**
+  `modules/cloudsql-database` creates the Cloud SQL user `<hub>-relay`. Because
+  Cloud SQL `BUILT_IN` users do not automatically inherit privileges on tables
+  created by `<hub>`, run the following SQL once as `<hub>` (or `postgres`)
+  after the Hub's initial migration before flipping `enable_relay_db_user = true`:
+
+  ```sql
+  GRANT CONNECT ON DATABASE "<hub_with_underscores>" TO "<hub>-relay";
+  GRANT USAGE ON SCHEMA public TO "<hub>-relay";
+  GRANT SELECT, INSERT, UPDATE, DELETE
+    ON TABLE relay_instances, conduit_sessions TO "<hub>-relay";
+  GRANT SELECT, INSERT, UPDATE
+    ON TABLE conduit_principal_epochs TO "<hub>-relay";
+  GRANT SELECT ON TABLE hub_settings TO "<hub>-relay";
+  ```
 
 ## Destroy
 

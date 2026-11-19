@@ -124,3 +124,83 @@ resource "google_secret_manager_secret_version" "db_dsn" {
 # state-only). Known window: from the sql_user password update until the
 # new revision is Ready, the old revision's *new* DB connections fail,
 # while its existing pooled connections survive.
+
+# --- Optional separate Conduit Relay user (<hub_name>-relay) ---
+#
+# Least-privilege PostgreSQL grants required after the hub's first Ent
+# schema migration creates the tables under owner "<hub_name>" (run once
+# connected to database "<hub_name with - replaced by _>" as "<hub_name>" or
+# postgres):
+#
+#   GRANT CONNECT ON DATABASE "<db_name>" TO "<hub_name>-relay";
+#   GRANT USAGE ON SCHEMA public TO "<hub_name>-relay";
+#   GRANT SELECT, INSERT, UPDATE, DELETE
+#     ON TABLE relay_instances, conduit_sessions TO "<hub_name>-relay";
+#   GRANT SELECT, INSERT, UPDATE
+#     ON TABLE conduit_principal_epochs TO "<hub_name>-relay";
+#   GRANT SELECT ON TABLE hub_settings TO "<hub_name>-relay";
+
+resource "random_password" "relay_db" {
+  count = var.enable_relay_user ? 1 : 0
+
+  length  = 32
+  special = false
+
+  keepers = var.password_rotation == "" ? null : {
+    rotation = var.password_rotation
+  }
+}
+
+resource "google_sql_user" "relay" {
+  count = var.enable_relay_user ? 1 : 0
+
+  project  = var.project_id
+  instance = var.instance_name
+  name     = "${var.hub_name}-relay"
+  password = random_password.relay_db[0].result
+  type     = "BUILT_IN"
+}
+
+resource "google_secret_manager_secret" "relay_db_password" {
+  count = var.enable_relay_user ? 1 : 0
+
+  project   = var.project_id
+  secret_id = "${var.hub_name}-relay-db-password"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "relay_db_password" {
+  count = var.enable_relay_user ? 1 : 0
+
+  secret      = google_secret_manager_secret.relay_db_password[0].id
+  secret_data = random_password.relay_db[0].result
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "google_secret_manager_secret" "relay_db_dsn" {
+  count = var.enable_relay_user ? 1 : 0
+
+  project   = var.project_id
+  secret_id = "${var.hub_name}-relay-db-dsn"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "relay_db_dsn" {
+  count = var.enable_relay_user ? 1 : 0
+
+  secret      = google_secret_manager_secret.relay_db_dsn[0].id
+  secret_data = "postgres://${google_sql_user.relay[0].name}:${urlencode(random_password.relay_db[0].result)}@/${google_sql_database.this.name}?host=/cloudsql/${var.sql_connection_name}"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
