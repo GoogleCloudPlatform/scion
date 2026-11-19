@@ -406,3 +406,259 @@ func TestFindBranchForAgent_NoDir(t *testing.T) {
 		t.Error("expected found=false when scion-sharers dir does not exist")
 	}
 }
+
+func TestSharerMarkers_CollidingSanitizedBranchesAreIsolated(t *testing.T) {
+	pairs := []struct {
+		name string
+		a    string
+		b    string
+	}{
+		{name: "slash vs hyphen", a: "feature/x", b: "feature-x"},
+		{name: "double dot vs hyphen", a: "x..y", b: "x-y"},
+		{name: "case difference", a: "Feature/x", b: "feature/x"},
+		{name: "literal percent escape vs slash", a: "feature%2fx", b: "feature/x"},
+		{name: "leading hyphen vs trimmed", a: "-leading", b: "leading"},
+		{name: "trailing dot vs trimmed", a: "trailing.", b: "trailing"},
+		{name: "empty vs agent", a: "", b: "agent"},
+		{
+			name: "overlong branches differing at tail",
+			a:    filepath.ToSlash(string(make([]byte, 0))) + "prefix/" + string(slicesRepeatByte('a', 220)) + "/1",
+			b:    "prefix/" + string(slicesRepeatByte('a', 220)) + "/2",
+		},
+	}
+
+	for _, tc := range pairs {
+		t.Run(tc.name, func(t *testing.T) {
+			base := setupBase(t)
+			wtA := inTreeWT(base, "wt-a")
+			wtB := inTreeWT(base, "wt-b")
+			for _, wt := range []string{wtA, wtB} {
+				if err := os.MkdirAll(filepath.Join(wt, ".git"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			pathA := sharerPath(base, tc.a)
+			pathB := sharerPath(base, tc.b)
+			if pathA == pathB {
+				t.Fatalf("sharerPath(%q) == sharerPath(%q) == %q", tc.a, tc.b, pathA)
+			}
+			if len(filepath.Base(pathA)) > 220 || len(filepath.Base(pathB)) > 220 {
+				t.Fatalf("marker filename exceeds safe length: %d, %d", len(filepath.Base(pathA)), len(filepath.Base(pathB)))
+			}
+
+			if err := RegisterSharer(base, "", tc.a, wtA, "agent-a"); err != nil {
+				t.Fatalf("RegisterSharer(%q): %v", tc.a, err)
+			}
+
+			// Before registering b, join/list lookups for b must see nothing.
+			if sharersB, joinPathB, err := ListSharersForJoin(base, tc.b); err != nil || len(sharersB) != 0 || joinPathB != "" {
+				t.Fatalf("ListSharersForJoin(%q) before register = (%v, %q, %v), want empty", tc.b, sharersB, joinPathB, err)
+			}
+
+			if err := RegisterSharer(base, "", tc.b, wtB, "agent-b"); err != nil {
+				t.Fatalf("RegisterSharer(%q): %v", tc.b, err)
+			}
+
+			sharersA, gotWtA, err := ListSharers(base, "", tc.a)
+			if err != nil {
+				t.Fatalf("ListSharers(%q): %v", tc.a, err)
+			}
+			if gotWtA != wtA || !slices.Equal(sharersA, []string{"agent-a"}) {
+				t.Errorf("branch %q state = (%v, %q), want ([agent-a], %q)", tc.a, sharersA, gotWtA, wtA)
+			}
+
+			sharersB, gotWtB, err := ListSharers(base, "", tc.b)
+			if err != nil {
+				t.Fatalf("ListSharers(%q): %v", tc.b, err)
+			}
+			if gotWtB != wtB || !slices.Equal(sharersB, []string{"agent-b"}) {
+				t.Errorf("branch %q state = (%v, %q), want ([agent-b], %q)", tc.b, sharersB, gotWtB, wtB)
+			}
+
+			foundBranch, foundWT, found, err := FindBranchForAgent(base, "", "agent-b")
+			if err != nil || !found || foundBranch != tc.b || foundWT != wtB {
+				t.Errorf("FindBranchForAgent(agent-b) = (%q, %q, %v, %v), want (%q, %q, true, nil)", foundBranch, foundWT, found, err, tc.b, wtB)
+			}
+
+			if _, _, err := UnregisterSharer(base, "", tc.b, "agent-b"); err != nil {
+				t.Fatalf("UnregisterSharer(%q): %v", tc.b, err)
+			}
+			// Branch a must be completely untouched.
+			sharersA, gotWtA, err = ListSharers(base, "", tc.a)
+			if err != nil || gotWtA != wtA || !slices.Equal(sharersA, []string{"agent-a"}) {
+				t.Errorf("branch %q after unregistering %q = (%v, %q, %v), want ([agent-a], %q, nil)", tc.a, tc.b, sharersA, gotWtA, err, wtA)
+			}
+		})
+	}
+}
+
+func slicesRepeatByte(b byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
+func TestSharerMarkers_RecordedBranchMismatchRefused(t *testing.T) {
+	base := setupBase(t)
+	wt := inTreeWT(base, "wt-1")
+	if err := os.MkdirAll(filepath.Join(wt, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a marker at feature/x's canonical path whose recorded Branch is unrelated.
+	p := sharerPath(base, "feature/x")
+	if err := writeMarkerAtomic(p, &sharerMarker{
+		Branch:       "unrelated-branch",
+		WorktreePath: wt,
+		Sharers:      []string{"agent-1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := ListSharersForJoin(base, "feature/x"); err == nil {
+		t.Error("ListSharersForJoin: expected error on recorded branch mismatch, got nil")
+	}
+	if _, _, err := ListSharers(base, "", "feature/x"); err == nil {
+		t.Error("ListSharers: expected error on recorded branch mismatch, got nil")
+	}
+	if err := RegisterSharer(base, "", "feature/x", wt, "agent-2"); err == nil {
+		t.Error("RegisterSharer: expected error on recorded branch mismatch, got nil")
+	}
+	if _, _, err := UnregisterSharer(base, "", "feature/x", "agent-1"); err == nil {
+		t.Error("UnregisterSharer: expected error on recorded branch mismatch, got nil")
+	}
+}
+
+func TestSharerMarkers_LegacySanitizedMarkerCompatibility(t *testing.T) {
+	t.Run("read and migrate legacy marker for slash branch without exposing it to hyphen branch", func(t *testing.T) {
+		base := setupBase(t)
+		wtSlash := inTreeWT(base, "wt-slash")
+		if err := os.MkdirAll(filepath.Join(wtSlash, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		legacyPath := filepath.Join(base, ".git", sharerDir, "feature-x.json")
+		if err := writeMarkerAtomic(legacyPath, &sharerMarker{
+			Branch:       "feature/x",
+			WorktreePath: wtSlash,
+			Sharers:      []string{"agent-1"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Legacy marker for feature/x is readable under feature/x.
+		sharers, gotWT, err := ListSharersForJoin(base, "feature/x")
+		if err != nil || gotWT != wtSlash || !slices.Equal(sharers, []string{"agent-1"}) {
+			t.Fatalf("ListSharersForJoin(feature/x) = (%v, %q, %v), want ([agent-1], %q, nil)", sharers, gotWT, err, wtSlash)
+		}
+
+		// Hyphen branch feature-x must NOT see feature/x's legacy marker.
+		if sharersDash, wtDash, err := ListSharersForJoin(base, "feature-x"); err != nil || len(sharersDash) != 0 || wtDash != "" {
+			t.Fatalf("ListSharersForJoin(feature-x) = (%v, %q, %v), want empty", sharersDash, wtDash, err)
+		}
+		if rem, wtDash, err := UnregisterSharer(base, "", "feature-x", "agent-1"); err != nil || rem != nil || wtDash != "" {
+			t.Fatalf("UnregisterSharer(feature-x) = (%v, %q, %v), want (nil, \"\", nil)", rem, wtDash, err)
+		}
+
+		// Registering a second sharer on feature/x migrates the marker to its encoded path.
+		if err := RegisterSharer(base, "", "feature/x", wtSlash, "agent-2"); err != nil {
+			t.Fatalf("RegisterSharer(feature/x): %v", err)
+		}
+		if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+			t.Errorf("legacy marker %s should be removed after migration, stat err = %v", legacyPath, err)
+		}
+		if _, err := os.Stat(sharerPath(base, "feature/x")); err != nil {
+			t.Errorf("encoded marker should exist after migration: %v", err)
+		}
+		sharers, gotWT, err = ListSharers(base, "", "feature/x")
+		if err != nil || gotWT != wtSlash || !slices.Equal(sharers, []string{"agent-1", "agent-2"}) {
+			t.Fatalf("ListSharers(feature/x) after migrate = (%v, %q, %v)", sharers, gotWT, err)
+		}
+	})
+
+	t.Run("registering colliding hyphen branch relocates existing legacy slash marker intact", func(t *testing.T) {
+		base := setupBase(t)
+		projectDir := filepath.Join(base, ".scion")
+		wtSlash := filepath.Join(projectDir, "agents", "a1", "workspace")
+		wtDash := inTreeWT(base, "wt-dash")
+		for _, wt := range []string{wtSlash, wtDash} {
+			if err := os.MkdirAll(filepath.Join(wt, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		legacyPath := filepath.Join(base, ".git", sharerDir, "feature-x.json")
+		if err := writeMarkerAtomic(legacyPath, &sharerMarker{
+			Branch:       "feature/x",
+			WorktreePath: wtSlash,
+			Sharers:      []string{"a1"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		// Registering feature-x with projectDir=="" (ProvisionShared caller) must
+		// relocate feature/x's marker to feature%2fx.json without losing its
+		// ProvisionAgent-shaped WorktreePath.
+		if err := RegisterSharer(base, "", "feature-x", wtDash, "agent-2"); err != nil {
+			t.Fatalf("RegisterSharer(feature-x): %v", err)
+		}
+
+		sharersSlash, gotSlashWT, err := ListSharers(base, projectDir, "feature/x")
+		if err != nil || gotSlashWT != wtSlash || !slices.Equal(sharersSlash, []string{"a1"}) {
+			t.Fatalf("ListSharers(feature/x) = (%v, %q, %v), want ([a1], %q, nil)", sharersSlash, gotSlashWT, err, wtSlash)
+		}
+		sharersDash, gotDashWT, err := ListSharers(base, "", "feature-x")
+		if err != nil || gotDashWT != wtDash || !slices.Equal(sharersDash, []string{"agent-2"}) {
+			t.Fatalf("ListSharers(feature-x) = (%v, %q, %v), want ([agent-2], %q, nil)", sharersDash, gotDashWT, err, wtDash)
+		}
+	})
+
+	t.Run("unregistering from legacy marker migrates remaining sharers and deletes when empty", func(t *testing.T) {
+		base := setupBase(t)
+		wtSlash := inTreeWT(base, "wt-slash")
+		if err := os.MkdirAll(filepath.Join(wtSlash, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		legacyPath := filepath.Join(base, ".git", sharerDir, "feature-x.json")
+		if err := writeMarkerAtomic(legacyPath, &sharerMarker{
+			Branch:       "feature/x",
+			WorktreePath: wtSlash,
+			Sharers:      []string{"agent-1", "agent-2"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		rem, gotWT, err := UnregisterSharer(base, "", "feature/x", "agent-1")
+		if err != nil || gotWT != wtSlash || !slices.Equal(rem, []string{"agent-2"}) {
+			t.Fatalf("UnregisterSharer first = (%v, %q, %v), want ([agent-2], %q, nil)", rem, gotWT, err, wtSlash)
+		}
+		if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+			t.Errorf("legacy marker should be removed after UnregisterSharer migration, stat err = %v", err)
+		}
+		if _, err := os.Stat(sharerPath(base, "feature/x")); err != nil {
+			t.Errorf("canonical marker should exist after UnregisterSharer migration: %v", err)
+		}
+
+		// Also test removing the last sharer directly from a legacy marker.
+		baseSingle := setupBase(t)
+		legacySingle := filepath.Join(baseSingle, ".git", sharerDir, "feature-x.json")
+		if err := writeMarkerAtomic(legacySingle, &sharerMarker{
+			Branch:       "feature/x",
+			WorktreePath: inTreeWT(baseSingle, "wt-slash"),
+			Sharers:      []string{"agent-only"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		rem, _, err = UnregisterSharer(baseSingle, "", "feature/x", "agent-only")
+		if err != nil || len(rem) != 0 {
+			t.Fatalf("UnregisterSharer last from legacy = (%v, %v), want ([], nil)", rem, err)
+		}
+		if _, err := os.Stat(legacySingle); !os.IsNotExist(err) {
+			t.Errorf("legacy marker should be removed when last sharer unregisters, stat err = %v", err)
+		}
+	})
+}

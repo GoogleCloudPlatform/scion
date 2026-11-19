@@ -2161,10 +2161,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	// be) checked out on. Computed once, ahead of ProvisionShared, so the
 	// same value can be used below both to detect a pre-existing JOIN target
 	// and to resolve the authoritative workspace path afterward.
-	branch := result.ProvisionInput.AgentName
-	if branch == "" {
-		branch = in.AgentID
-	}
+	branch := provision.WorktreeBranchName(result.ProvisionInput)
 
 	// Serialize same-project provisioning with every Runtime Broker server
 	// of this process (one host may run several instances) so concurrent

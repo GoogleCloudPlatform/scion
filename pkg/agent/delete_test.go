@@ -1166,3 +1166,57 @@ func TestDeleteAgentFiles_GlobalProject_DeletesOnlyTargetWorkspace(t *testing.T)
 		t.Errorf("global-agent-b config dir should be removed, stat err=%v", err)
 	}
 }
+
+func TestProvisionAgent_CollidingSanitizedBranchMarkersIsolated(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	projectDir := filepath.Dir(scionDir)
+	resolvedScionDir, err := config.GetResolvedProjectDir(scionDir)
+	if err != nil {
+		t.Fatalf("GetResolvedProjectDir: %v", err)
+	}
+
+	if _, _, _, err := ProvisionAgent(context.Background(), "agent-slash", "default", "", "", scionDir, "", "created", "feature/x", ""); err != nil {
+		t.Fatalf("ProvisionAgent(feature/x): %v", err)
+	}
+	if _, _, _, err := ProvisionAgent(context.Background(), "agent-dash", "default", "", "", scionDir, "", "created", "feature-x", ""); err != nil {
+		t.Fatalf("ProvisionAgent(feature-x): %v", err)
+	}
+
+	wtSlash := filepath.Join(resolvedScionDir, "agents", "agent-slash", "workspace")
+	wtDash := filepath.Join(resolvedScionDir, "agents", "agent-dash", "workspace")
+	for _, wt := range []string{wtSlash, wtDash} {
+		if _, err := os.Stat(filepath.Join(wt, ".git")); err != nil {
+			t.Fatalf("expected worktree at %s: %v", wt, err)
+		}
+	}
+
+	root, err := util.RepoRootDir(projectDir)
+	if err != nil {
+		t.Fatalf("RepoRootDir: %v", err)
+	}
+
+	sharersSlash, gotSlashWT, err := provision.ListSharers(root, resolvedScionDir, "feature/x")
+	if err != nil || gotSlashWT != wtSlash || len(sharersSlash) != 1 || sharersSlash[0] != "agent-slash" {
+		t.Fatalf("feature/x marker = (%v, %q, %v), want ([agent-slash], %q, nil)", sharersSlash, gotSlashWT, err, wtSlash)
+	}
+	sharersDash, gotDashWT, err := provision.ListSharers(root, resolvedScionDir, "feature-x")
+	if err != nil || gotDashWT != wtDash || len(sharersDash) != 1 || sharersDash[0] != "agent-dash" {
+		t.Fatalf("feature-x marker = (%v, %q, %v), want ([agent-dash], %q, nil)", sharersDash, gotDashWT, err, wtDash)
+	}
+
+	// Deleting agent-dash must remove only agent-dash's worktree, leaving
+	// feature/x's worktree and sharer registration untouched.
+	if _, err := DeleteAgentFiles("agent-dash", scionDir, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-dash): %v", err)
+	}
+	if _, err := os.Stat(wtDash); !os.IsNotExist(err) {
+		t.Errorf("agent-dash worktree should be removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wtSlash, ".git")); err != nil {
+		t.Errorf("agent-slash worktree must survive deleting agent-dash: %v", err)
+	}
+	sharersSlash, gotSlashWT, err = provision.ListSharers(root, resolvedScionDir, "feature/x")
+	if err != nil || gotSlashWT != wtSlash || len(sharersSlash) != 1 || sharersSlash[0] != "agent-slash" {
+		t.Errorf("feature/x marker after deleting agent-dash = (%v, %q, %v)", sharersSlash, gotSlashWT, err)
+	}
+}

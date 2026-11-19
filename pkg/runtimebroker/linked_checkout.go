@@ -207,14 +207,15 @@ func existingNonLocalWorkspace(in startContextInputs) bool {
 				return true
 			}
 			// The branch is the sharer-registry key tryProvisionWorktree
-			// uses (resolveWorktreeProvision's AgentName).
-			branch := in.Name
+			// uses (provision.WorktreeBranchName).
+			agentName := in.Name
 			if in.Config != nil && in.Config.Branch != "" {
-				branch = in.Config.Branch
+				agentName = in.Config.Branch
 			}
-			if branch == "" {
-				branch = in.AgentID
-			}
+			branch := provision.WorktreeBranchName(provision.ProvisionInput{
+				AgentID:   in.AgentID,
+				AgentName: agentName,
+			})
 			_, regPath, listErr := provision.ListSharersForJoin(resolved.HostPath, branch)
 			if listErr != nil {
 				return true

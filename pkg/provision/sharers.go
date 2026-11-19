@@ -15,6 +15,8 @@
 package provision
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,10 +44,59 @@ type sharerMarker struct {
 	unmatchedWorktreePath string
 }
 
-const sharerDir = "scion-sharers"
+const (
+	sharerDir = "scion-sharers"
 
-// sharerPath returns the marker file path for a branch under the base repo.
+	// maxEncodedBranchMarkerStem bounds the encoded stem before ".json" and
+	// writeMarkerAtomic's ".tmp-*" suffix so marker filenames stay well below
+	// 255-byte NAME_MAX limits across POSIX/macOS/NFS filesystems.
+	maxEncodedBranchMarkerStem = 200
+)
+
+// encodeBranchMarkerStem produces a collision-free, lowercase-ASCII filename
+// stem for branch:
+//   - empty branch -> "%" (never produced by the byte loop, which always
+//     follows '%' with two hex digits)
+//   - bytes in [a-z0-9-_] pass through unchanged, keeping plain slug branch
+//     names readable and identical on disk
+//   - every other byte (including '/', '.', '%', uppercase ASCII, spaces, and
+//     non-ASCII UTF-8 bytes) is escaped as '%' + two lowercase hex digits, so
+//     distinct branches never collide even on case-insensitive filesystems
+//   - stems longer than maxEncodedBranchMarkerStem fall back to "%h-" + sha256
+//     hex ('h' is not a hex digit, so it cannot collide with escaped stems)
+func encodeBranchMarkerStem(branch string) string {
+	if branch == "" {
+		return "%"
+	}
+	const hexDigits = "0123456789abcdef"
+	var b strings.Builder
+	b.Grow(len(branch))
+	for i := 0; i < len(branch); i++ {
+		c := branch[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('%')
+			b.WriteByte(hexDigits[c>>4])
+			b.WriteByte(hexDigits[c&0x0f])
+		}
+	}
+	if b.Len() > maxEncodedBranchMarkerStem {
+		sum := sha256.Sum256([]byte(branch))
+		return "%h-" + hex.EncodeToString(sum[:])
+	}
+	return b.String()
+}
+
+// sharerPath returns the canonical marker file path for a branch under base.
 func sharerPath(base, branch string) string {
+	return filepath.Join(base, ".git", sharerDir, encodeBranchMarkerStem(branch)+".json")
+}
+
+// legacySharerPath returns the legacy marker file path derived from the lossy
+// sanitizeBranchName mapping, used for compatible lookup and migration of
+// markers written before branch-encoded filenames.
+func legacySharerPath(base, branch string) string {
 	return filepath.Join(base, ".git", sharerDir, sanitizeBranchName(branch)+".json")
 }
 
@@ -170,30 +221,90 @@ func isProvisionAgentWorkspaceShape(projectDir, candidate string) bool {
 // ProvisionAgent-layout shape check (see its doc comment); pass "" for
 // callers with no such layout.
 func readMarker(base, projectDir, path string) (*sharerMarker, error) {
+	m, _, err := readMarkerWithRaw(base, projectDir, path)
+	return m, err
+}
+
+func readMarkerWithRaw(base, projectDir, path string) (*sharerMarker, []byte, error) {
 	// The marker is in the shared .git, which agents can write: it is read
 	// without following a symlink at its last component and bounded.
 	data, err := readSmallFileNoFollow(path, sharerMarkerMaxBytes)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var m sharerMarker
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if m.WorktreePath == "" || WorktreePathIsScionCreated(base, projectDir, m.WorktreePath) {
-		return &m, nil
+		return &m, data, nil
 	}
 	if shouldRefuseWorktreePath(base, m.WorktreePath) {
-		return nil, fmt.Errorf("sharer marker %s: worktreePath %q is not in canonical form or crosses a symlink", path, m.WorktreePath)
+		return nil, nil, fmt.Errorf("sharer marker %s: worktreePath %q is not in canonical form or crosses a symlink", path, m.WorktreePath)
 	}
 	slog.Warn("sharer marker worktreePath does not match a scion-created worktree shape; keeping sharer refcount, discarding only the path",
 		"path", path, "worktreePath", m.WorktreePath)
 	m.unmatchedWorktreePath = m.WorktreePath
 	m.WorktreePath = ""
-	return &m, nil
+	return &m, data, nil
+}
+
+type displacedLegacyMarker struct {
+	branch string
+	raw    []byte
+}
+
+func isLegacyMarkerAtPath(base, path, recordedBranch string) bool {
+	return recordedBranch != "" &&
+		legacySharerPath(base, recordedBranch) == path &&
+		sharerPath(base, recordedBranch) != path
+}
+
+// lookupMarkerForBranch resolves the marker for branch across its canonical
+// encoded path (sharerPath) and, when absent there, its legacy sanitized
+// path (legacySharerPath), checking that the marker's recorded Branch matches
+// branch.
+//
+//   - If sharerPath holds a marker with m.Branch == branch, it is returned.
+//   - If sharerPath holds a legacy marker belonging to a different branch
+//     whose sanitizeBranchName collided onto sharerPath (for example,
+//     "feature-x.json" recording "feature/x"), branch has no marker of its own
+//     (m == nil) and displaced carries the legacy file's raw bytes so a writer
+//     holding the provisioning lock can relocate it to its canonical path first.
+//   - Any other recorded-branch mismatch at sharerPath fails closed with an error.
+//   - When sharerPath does not exist and legacySharerPath differs, a marker at
+//     legacySharerPath is returned only when its recorded Branch equals branch.
+func lookupMarkerForBranch(base, projectDir, branch string) (m *sharerMarker, foundPath string, displaced *displacedLegacyMarker, err error) {
+	primary := sharerPath(base, branch)
+	m, raw, err := readMarkerWithRaw(base, projectDir, primary)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if m != nil {
+		if m.Branch == branch {
+			return m, primary, nil, nil
+		}
+		if isLegacyMarkerAtPath(base, primary, m.Branch) {
+			return nil, "", &displacedLegacyMarker{branch: m.Branch, raw: raw}, nil
+		}
+		return nil, "", nil, fmt.Errorf("sharer marker %s: recorded branch %q does not match requested branch %q", primary, m.Branch, branch)
+	}
+
+	legacy := legacySharerPath(base, branch)
+	if legacy == primary {
+		return nil, "", nil, nil
+	}
+	m, _, err = readMarkerWithRaw(base, projectDir, legacy)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	if m == nil || m.Branch != branch {
+		return nil, "", nil, nil
+	}
+	return m, legacy, nil, nil
 }
 
 // shouldRefuseWorktreePath reports whether an untrusted worktreePath value
@@ -245,11 +356,15 @@ func shouldRefuseWorktreePath(base, path string) bool {
 // writeMarkerAtomic writes the marker via a temp file + rename to avoid torn
 // reads. The caller MUST hold the per-project provisioning lock.
 func writeMarkerAtomic(path string, m *sharerMarker) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := json.Marshal(m)
 	if err != nil {
+		return err
+	}
+	return writeRawMarkerAtomic(path, data)
+}
+
+func writeRawMarkerAtomic(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	// Unique temp file (not a static path+".tmp") so concurrent writers don't
@@ -324,11 +439,27 @@ func hasRealWorktreeGitfile(path string) bool {
 // readMarker; pass "" for callers with no ProvisionAgent-layout concept.
 //
 // Callers MUST hold the per-project provisioning lock.
+func relocateDisplacedLegacyMarker(p, target string, raw []byte) error {
+	if err := os.Link(p, target); err == nil || errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if _, statErr := os.Lstat(target); errors.Is(statErr, fs.ErrNotExist) {
+		return writeRawMarkerAtomic(target, raw)
+	} else {
+		return statErr
+	}
+}
+
 func RegisterSharer(base, projectDir, branch, worktreePath, agentID string) error {
 	p := sharerPath(base, branch)
-	m, err := readMarker(base, projectDir, p)
+	m, foundPath, displaced, err := lookupMarkerForBranch(base, projectDir, branch)
 	if err != nil {
 		return err
+	}
+	if displaced != nil {
+		if err := relocateDisplacedLegacyMarker(p, sharerPath(base, displaced.branch), displaced.raw); err != nil {
+			return err
+		}
 	}
 	if m == nil {
 		m = &sharerMarker{Branch: branch}
@@ -339,7 +470,15 @@ func RegisterSharer(base, projectDir, branch, worktreePath, agentID string) erro
 	if !slices.Contains(m.Sharers, agentID) {
 		m.Sharers = append(m.Sharers, agentID)
 	}
-	return writeMarkerAtomic(p, m)
+	if err := writeMarkerAtomic(p, m); err != nil {
+		return err
+	}
+	if foundPath != "" && foundPath != p {
+		if rerr := os.Remove(foundPath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			return rerr
+		}
+	}
+	return nil
 }
 
 // UnregisterSharer removes agentID from the sharer list for the given branch.
@@ -354,7 +493,7 @@ func RegisterSharer(base, projectDir, branch, worktreePath, agentID string) erro
 // Callers MUST hold the per-project provisioning lock.
 func UnregisterSharer(base, projectDir, branch, agentID string) (remaining []string, worktreePath string, err error) {
 	p := sharerPath(base, branch)
-	m, err := readMarker(base, projectDir, p)
+	m, foundPath, _, err := lookupMarkerForBranch(base, projectDir, branch)
 	if err != nil {
 		return nil, "", err
 	}
@@ -363,13 +502,18 @@ func UnregisterSharer(base, projectDir, branch, agentID string) (remaining []str
 	}
 	m.Sharers = slices.DeleteFunc(m.Sharers, func(s string) bool { return s == agentID })
 	if len(m.Sharers) == 0 {
-		if rerr := os.Remove(p); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		if rerr := os.Remove(foundPath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
 			return nil, m.WorktreePath, rerr
 		}
 		return []string{}, m.WorktreePath, nil
 	}
 	if err := writeMarkerAtomic(p, m); err != nil {
 		return nil, m.WorktreePath, err
+	}
+	if foundPath != p {
+		if rerr := os.Remove(foundPath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			return nil, m.WorktreePath, rerr
+		}
 	}
 	return m.Sharers, m.WorktreePath, nil
 }
@@ -379,8 +523,7 @@ func UnregisterSharer(base, projectDir, branch, agentID string) (remaining []str
 // projectDir is passed through to the read boundary's shape check — see
 // readMarker.
 func ListSharers(base, projectDir, branch string) ([]string, string, error) {
-	p := sharerPath(base, branch)
-	m, err := readMarker(base, projectDir, p)
+	m, _, _, err := lookupMarkerForBranch(base, projectDir, branch)
 	if err != nil {
 		return nil, "", err
 	}
@@ -398,7 +541,7 @@ func ListSharers(base, projectDir, branch string) ([]string, string, error) {
 // registry entry that is not a valid worktree rather than treating the
 // branch as having no registered worktree.
 func ListSharersForJoin(base, branch string) ([]string, string, error) {
-	m, err := readMarker(base, "", sharerPath(base, branch))
+	m, _, _, err := lookupMarkerForBranch(base, "", branch)
 	if err != nil {
 		return nil, "", err
 	}

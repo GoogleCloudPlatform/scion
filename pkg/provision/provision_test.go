@@ -4975,6 +4975,59 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 	assert.Equal(t, []string{"agent-a"}, sharers)
 }
 
+func TestProvision_WorktreePerAgent_CollidingSanitizedBranchDoesNotJoin(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Register a real worktree on branch "feature/x" (MountedWorktree keeps
+	// the branch verbatim, including slashes).
+	require.NoError(t, ProvisionShared(ProvisionInput{
+		Resolved:        ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID:       "proj-collide-1",
+		AgentID:         "agent-1",
+		AgentName:       "feature/x",
+		MountedWorktree: true,
+		NFSUID:          os.Getuid(),
+		NFSGID:          os.Getgid(),
+		Mode:            store.SharingModeWorktreePerAgent,
+		GitClone:        &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	}))
+	wtSlash := WorktreePath(hostPath, "agent-1")
+	require.DirExists(t, wtSlash)
+	require.NoError(t, os.WriteFile(filepath.Join(wtSlash, "dirty.txt"), []byte("uncommitted"), 0o644))
+
+	// Provision a second agent for "feature-x" in the same repository.
+	// Previously sanitizeBranchName("feature/x") == "feature-x", causing
+	// agent-2 to join agent-1's "feature/x" worktree and share its dirty tree.
+	require.NoError(t, ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-collide-1",
+		AgentID:   "agent-2",
+		AgentName: "feature-x",
+		Mode:      store.SharingModeWorktreePerAgent,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: intPtr(0)},
+	}))
+
+	wtDash := WorktreePath(hostPath, "agent-2")
+	require.DirExists(t, wtDash, "agent-2 must get its own worktree for feature-x instead of joining feature/x")
+	assert.Equal(t, "feature-x", currentBranch(context.Background(), wtDash))
+	_, dirtyErr := os.Stat(filepath.Join(wtDash, "dirty.txt"))
+	assert.True(t, os.IsNotExist(dirtyErr), "agent-2 must not share feature/x's uncommitted files")
+
+	sharersSlash, gotSlashWT, err := ListSharers(hostPath, "", "feature/x")
+	require.NoError(t, err)
+	assert.Equal(t, wtSlash, gotSlashWT)
+	assert.Equal(t, []string{"agent-1"}, sharersSlash, "feature/x's sharer list must remain unchanged")
+
+	sharersDash, gotDashWT, err := ListSharers(hostPath, "", "feature-x")
+	require.NoError(t, err)
+	assert.Equal(t, wtDash, gotDashWT)
+	assert.Equal(t, []string{"agent-2"}, sharersDash)
+}
+
 func intPtr(i int) *int { return &i }
 
 // --- EmptyPerAgent rejection ---
