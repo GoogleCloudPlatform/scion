@@ -511,7 +511,8 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 
 	// Re-check shutdown after Phase 1b (which may have waited on a wake):
 	// refuse with retryable 503 before ingesting attachments or persisting a
-	// pending row that dispatchShutdownGate would immediately reject (#7405).
+	// pending row that dispatchShutdownGate would immediately reject
+	// (ptone/scion#7405).
 	if s.ShuttingDown() {
 		return nil, shuttingDownDMError("")
 	}

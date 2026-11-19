@@ -682,7 +682,7 @@ func TestDelivery_ShuttingDownPostPersistRace_MarksFailedAndReturns503RetryAfter
 }
 
 // ---------------------------------------------------------------------------
-// Bounded finalization retries without duplicate broker dispatch (#7405)
+// Bounded finalization retries without duplicate broker dispatch (ptone/scion#7405)
 // ---------------------------------------------------------------------------
 
 type markFinalizationFaultStore struct {

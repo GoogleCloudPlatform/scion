@@ -61,7 +61,7 @@ func TestExpiredPendingLogAttrs_NamesEachExpiredMessage(t *testing.T) {
 	assert.Equal(t, wantKeys, expiredLogRecordKeys(rec), "exact key set of the expiry line")
 	assert.Equal(t, "INFO", rec["level"])
 	assert.Equal(t, float64(2), rec["expired"])
-	assert.Equal(t, "24h0m0s", rec["ttl"])
+	assert.Equal(t, "10m0s", rec["ttl"])
 	assert.Equal(t, []any{"id-1", "id-2"}, rec["message_ids"])
 	assert.Equal(t, []any{"agent:alpha", "agent:beta"}, rec["recipients"])
 	assert.Equal(t, []any{"26h30m0s", "24h0m5s"}, rec["pending_durations"])

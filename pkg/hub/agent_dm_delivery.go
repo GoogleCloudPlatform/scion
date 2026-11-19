@@ -51,7 +51,7 @@ const finalizationTimeout = 5 * time.Second
 
 // finalizationMaxAttempts bounds how many detached store attempts
 // markDispatched and markMessageFailed make before giving up. Only the DB
-// state transition is retried — never the broker delivery (#7405).
+// state transition is retried — never the broker delivery (ptone/scion#7405).
 const finalizationMaxAttempts = 3
 
 // finalizationRetryBackoff is the initial pause between finalization store
@@ -149,15 +149,7 @@ func isNonRetryableFinalizationError(err error) bool {
 	return errors.Is(err, store.ErrInvalidInput) || errors.Is(err, store.ErrNotFound)
 }
 
-// markDispatched transitions a message from pending to dispatched after
-// broker/managed-runtime acceptance. Uses fresh bounded finalization contexts
-// across up to finalizationMaxAttempts attempts so request cancellation or a
-// transient store stall does not discard the known outcome (#7405).
-//
-// Returns (dispatched=true) on successful CAS, (dispatched=false) if the
-// row was already transitioned (duplicate protection), or an error on
-// store failure after exhausting retries.
-func (s *Server) markDispatched(ctx context.Context, msgID string) (bool, error) {
+func retryFinalization(ctx context.Context, fn func(finCtx context.Context) error) error {
 	backoff := finalizationRetryBackoff
 	var lastErr error
 	for attempt := 0; attempt < finalizationMaxAttempts; attempt++ {
@@ -166,17 +158,35 @@ func (s *Server) markDispatched(ctx context.Context, msgID string) (bool, error)
 			backoff *= 2
 		}
 		finCtx, finCancel := finalizationContext(ctx)
-		dispatched, err := s.store.MarkMessageDispatched(finCtx, msgID)
+		err := fn(finCtx)
 		finCancel()
 		if err == nil {
-			return dispatched, nil
+			return nil
 		}
 		lastErr = err
 		if isNonRetryableFinalizationError(err) {
 			break
 		}
 	}
-	return false, lastErr
+	return lastErr
+}
+
+// markDispatched transitions a message from pending to dispatched after
+// broker/managed-runtime acceptance. Uses fresh bounded finalization contexts
+// across up to finalizationMaxAttempts attempts so request cancellation or a
+// transient store stall does not discard the known outcome (ptone/scion#7405).
+//
+// Returns (dispatched=true) on successful CAS, (dispatched=false) if the
+// row was already transitioned (duplicate protection), or an error on
+// store failure after exhausting retries.
+func (s *Server) markDispatched(ctx context.Context, msgID string) (bool, error) {
+	var dispatched bool
+	err := retryFinalization(ctx, func(finCtx context.Context) error {
+		var casErr error
+		dispatched, casErr = s.store.MarkMessageDispatched(finCtx, msgID)
+		return casErr
+	})
+	return dispatched, err
 }
 
 // markFailed records a definite dispatch failure on the message row.
@@ -193,12 +203,13 @@ type messageFailureMarker interface {
 }
 
 // markMessageFailed records a definite dispatch failure on a message row on
-// fresh finalizationContexts derived from ctx (ptone/scion#1838, #7405). The
-// dispatch ctx is frequently already expired by the time a failure is known —
-// dispatchWithBrokerRetry returns ErrBrokerTimeout exactly when it fires — and
-// a mark on that ctx would fail, leaving the row "dispatched" or "pending".
-// Every MarkMessageFailed call site in pkg/hub should go through this helper
-// (or Server.markFailed) rather than calling the store directly.
+// fresh finalizationContexts derived from ctx (ptone/scion#1838,
+// ptone/scion#7405). The dispatch ctx is frequently already expired by the
+// time a failure is known — dispatchWithBrokerRetry returns ErrBrokerTimeout
+// exactly when it fires — and a mark on that ctx would fail, leaving the row
+// "dispatched" or "pending". Every MarkMessageFailed call site in pkg/hub
+// should go through this helper (or Server.markFailed) rather than calling the
+// store directly.
 //
 // The reason is passed through sanitizeFailureReason before it is persisted
 // as dispatch_failure_reason (ptone/scion#1841): on the synchronous paths it
@@ -206,25 +217,9 @@ type messageFailureMarker interface {
 // Sanitizing is idempotent, so already-sanitized reasons are unaffected.
 func markMessageFailed(ctx context.Context, st messageFailureMarker, msgID string, reason string) error {
 	sanitized := sanitizeFailureReason(reason)
-	backoff := finalizationRetryBackoff
-	var lastErr error
-	for attempt := 0; attempt < finalizationMaxAttempts; attempt++ {
-		if attempt > 0 && backoff > 0 {
-			time.Sleep(backoff)
-			backoff *= 2
-		}
-		finCtx, finCancel := finalizationContext(ctx)
-		err := st.MarkMessageFailed(finCtx, msgID, sanitized)
-		finCancel()
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if isNonRetryableFinalizationError(err) {
-			break
-		}
-	}
-	return lastErr
+	return retryFinalization(ctx, func(finCtx context.Context) error {
+		return st.MarkMessageFailed(finCtx, msgID, sanitized)
+	})
 }
 
 // shuttingDownDMError constructs a retryable 503 AgentDMError when the hub

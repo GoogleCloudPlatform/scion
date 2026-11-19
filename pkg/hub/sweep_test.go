@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -200,4 +201,143 @@ func TestBrokerMessageSweepHandler_ExpiryErrorStillFailsMissingRecipient(t *test
 	got, err := cs.GetMessage(ctx, orphan.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState, "the missing-recipient step still runs after a failed expiry")
+}
+
+// TestBrokerMessageSweepHandler_ExpiresAfter10mAndLeavesYoungerPending verifies
+// that stuckMessageExpireTTL is 10m (ptone/scion#7405): a pending agent message
+// older than 10m transitions to failed instead of degrading health for 24h,
+// while one younger than 10m (within legitimate auto-wake / dispatch budgets)
+// remains pending.
+func TestBrokerMessageSweepHandler_ExpiresAfter10mAndLeavesYoungerPending(t *testing.T) {
+	assert.Equal(t, 10*time.Minute, stuckMessageExpireTTL)
+
+	srv, s, project, sender, target, _, _ := deliverySetup(t)
+	ctx := context.Background()
+
+	expiredMsg := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     project.ID,
+		Sender:        "agent:" + sender.Slug,
+		SenderID:      sender.ID,
+		Recipient:     "agent:" + target.Slug,
+		RecipientID:   target.ID,
+		AgentID:       sender.ID,
+		Msg:           "stuck-past-10m",
+		DispatchState: store.MessageDispatchPending,
+		CreatedAt:     time.Now().Add(-11 * time.Minute),
+	}
+	require.NoError(t, s.CreateMessage(ctx, expiredMsg))
+
+	youngerMsg := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     project.ID,
+		Sender:        "agent:" + sender.Slug,
+		SenderID:      sender.ID,
+		Recipient:     "agent:" + target.Slug,
+		RecipientID:   target.ID,
+		AgentID:       sender.ID,
+		Msg:           "still-within-10m-budget",
+		DispatchState: store.MessageDispatchPending,
+		CreatedAt:     time.Now().Add(-7 * time.Minute),
+	}
+	require.NoError(t, s.CreateMessage(ctx, youngerMsg))
+
+	srv.brokerMessageSweepHandler()(ctx)
+
+	gotExpired, err := s.GetMessage(ctx, expiredMsg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, gotExpired.DispatchState)
+	require.NotNil(t, gotExpired.DispatchFailureReason)
+	assert.Equal(t, store.MessageExpiredStuckPendingReason, *gotExpired.DispatchFailureReason)
+
+	gotYounger, err := s.GetMessage(ctx, youngerMsg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, gotYounger.DispatchState,
+		"pending message younger than 10m TTL must not be expired prematurely")
+}
+
+// TestBrokerMessageSweepHandler_ExpiredPendingNotifiesAgentAndUserSenders
+// verifies that expiring stuck pending messages notifies agent senders via a
+// DELIVERY_FAILED notice (naming the target agent, never redelivering to the
+// target) and re-publishes failed status for human senders (ptone/scion#7405).
+func TestBrokerMessageSweepHandler_ExpiredPendingNotifiesAgentAndUserSenders(t *testing.T) {
+	srv, s, project, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	srv.SetEventPublisher(events)
+
+	bus := eventbus.NewInProcessEventBus(slog.Default())
+	defer func() { _ = bus.Close() }()
+	srv.SetMessageBrokerProxy(NewMessageBrokerProxy(bus, s, events, func() AgentDispatcher { return dispatcher }, slog.Default()))
+
+	sub, unsubscribe := events.Subscribe("agent." + target.ID + ".message")
+	defer unsubscribe()
+
+	agentDM := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     project.ID,
+		Sender:        "agent:" + sender.Slug,
+		SenderID:      sender.ID,
+		Recipient:     "agent:" + target.Slug,
+		RecipientID:   target.ID,
+		AgentID:       sender.ID, // ExecuteAgentDM sets AgentID to SenderAgent.ID
+		Msg:           "interrupted-agent-dm",
+		Type:          "instruction",
+		DispatchState: store.MessageDispatchPending,
+		CreatedAt:     time.Now().Add(-11 * time.Minute),
+	}
+	require.NoError(t, s.CreateMessage(ctx, agentDM))
+
+	userMsg := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     project.ID,
+		Sender:        "user:alice",
+		SenderID:      tid("sweep-user-alice"),
+		Recipient:     "agent:" + target.Slug,
+		RecipientID:   target.ID,
+		AgentID:       target.ID,
+		Msg:           "interrupted-user-msg",
+		Type:          "instruction",
+		DispatchState: store.MessageDispatchPending,
+		CreatedAt:     time.Now().Add(-11 * time.Minute),
+	}
+	require.NoError(t, s.CreateMessage(ctx, userMsg))
+
+	srv.brokerMessageSweepHandler()(ctx)
+
+	gotDM, err := s.GetMessage(ctx, agentDM.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, gotDM.DispatchState)
+
+	gotUser, err := s.GetMessage(ctx, userMsg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, gotUser.DispatchState)
+
+	var notices []dispatchCall
+	for _, c := range dispatcher.getCalls() {
+		assert.NotEqual(t, target.ID, c.Agent.ID, "sweep expiry must never redeliver to target agent")
+		if c.Agent.ID == sender.ID {
+			notices = append(notices, c)
+		}
+	}
+	require.Len(t, notices, 1, "agent sender must receive exactly one DELIVERY_FAILED notice")
+	require.NotNil(t, notices[0].StructuredMessage)
+	assert.Equal(t, "DELIVERY_FAILED", notices[0].StructuredMessage.Status)
+	assert.Contains(t, notices[0].Message, target.Slug, "notice must name the target agent")
+	assert.NotContains(t, notices[0].Message, `agent "`+sender.Slug+`"`, "notice must not mistake sender for target")
+	assert.Contains(t, notices[0].Message, store.MessageExpiredStuckPendingReason)
+	assert.Empty(t, notices[0].MessageID, "notice itself must not carry a reportable hub message ID")
+
+	select {
+	case evt := <-sub:
+		var payload UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &payload))
+		assert.Equal(t, userMsg.ID, payload.ID)
+		assert.Equal(t, store.MessageDispatchFailed, payload.DispatchState)
+		assert.Equal(t, store.MessageExpiredStuckPendingReason, payload.DispatchFailureReason)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected user message failed SSE event on sweep expiry")
+	}
 }

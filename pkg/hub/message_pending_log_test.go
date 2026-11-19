@@ -159,7 +159,7 @@ func seedStuckPending(t *testing.T, cs store.Store, n int) []string {
 	}
 	require.NoError(t, cs.CreateProject(ctx, proj))
 	ids := make([]string, 0, n)
-	base := time.Now().Add(-time.Hour)
+	base := time.Now().Add(-7 * time.Minute)
 	for i := 0; i < n; i++ {
 		m := &store.Message{
 			ID: uuid.NewString(), ProjectID: proj.ID,

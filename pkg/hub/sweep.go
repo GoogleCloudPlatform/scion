@@ -24,7 +24,14 @@ import (
 
 const stuckMessageThreshold = 5 * time.Minute
 
-const stuckMessageExpireTTL = 24 * time.Hour
+// stuckMessageExpireTTL bounds how long a message row may remain in
+// dispatch_state='pending' before brokerMessageSweepHandler transitions it to
+// failed and notifies the sender (ptone/scion#7405). Sized at 10m to exceed
+// every legitimate post-persist pending budget (30s agentDMDispatchTimeout,
+// 150s sync idle-suspend auto-wake + retry, and ~346s background autoWakeAgent
+// settle + resume + 30s dispatch) while clearing interrupted dispatches within
+// minutes instead of leaving health degraded for 24h.
+const stuckMessageExpireTTL = 10 * time.Minute
 
 // stuckMessageLogIDCap bounds how many message IDs the stuck-pending sweep
 // line names (ptone/scion#4827). 20 UUIDs keep the line under about 1 KB;
@@ -118,12 +125,50 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 		orphaned, err := s.store.FailPendingMessagesWithMissingRecipient(ctx, missingRecipientFailureReason)
 		if err != nil {
 			s.agentLifecycleLog.Error("sweep: fail pending messages with missing recipient failed", "error", err)
-			return
-		}
-		if orphaned > 0 {
+		} else if orphaned > 0 {
 			s.agentLifecycleLog.Info("sweep: failed pending messages with missing recipient",
 				"count", orphaned)
 		}
+
+		if len(expired) > 0 {
+			s.notifyExpiredPendingMessages(ctx, expired, store.MessageExpiredStuckPendingReason)
+		}
+	}
+}
+
+// notifyExpiredPendingMessages notifies the senders of pending messages that
+// ExpireAndListStuckPendingMessages transitioned to failed (ptone/scion#7405):
+// agent senders receive a DELIVERY_FAILED notice through MessageBrokerProxy,
+// and human senders get a live SSE failed-state update. Never redelivers to
+// the target agent.
+func (s *Server) notifyExpiredPendingMessages(ctx context.Context, expired []store.ExpiredPendingMessage, reason string) {
+	if s.GetMessageBrokerProxy() == nil && s.events == nil {
+		return
+	}
+	agentCache := make(map[string]*store.Agent)
+	for _, item := range expired {
+		if s.ShuttingDown() {
+			return
+		}
+		readCtx, readCancel := finalizationContext(ctx)
+		msg, err := s.store.GetMessage(readCtx, item.ID)
+		if err != nil || msg == nil {
+			readCancel()
+			continue
+		}
+		var target *store.Agent
+		if msg.RecipientID != "" {
+			var seen bool
+			target, seen = agentCache[msg.RecipientID]
+			if !seen {
+				if a, aErr := s.store.GetAgent(readCtx, msg.RecipientID); aErr == nil {
+					target = a
+				}
+				agentCache[msg.RecipientID] = target
+			}
+		}
+		readCancel()
+		s.notifyStoredMessageSenderFailed(ctx, target, msg, reason)
 	}
 }
 
