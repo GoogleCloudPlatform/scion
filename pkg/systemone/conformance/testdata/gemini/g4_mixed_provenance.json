@@ -1,0 +1,310 @@
+{
+  "fixture_id": "G4",
+  "description": "Gemini Decision 1 mixed binary + choice provenance (ResolvedModel == '', model_unreported, clamped_0.01_0.99, options_sorted_by_provider), missing usage -> usage_unreported note, and subset question selection.",
+  "adapter": "gemini_decisions",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API",
+    "sources": [
+      "https://ai.google.dev/api/decisions (CreateDecisionResponse omits model field; optional usage counters)",
+      "https://ai.google.dev/gemini-api/docs/decisions-api (multi-question map, binary clamp 0.01-0.99, choice alphabetical sorting)"
+    ],
+    "unverified_items": ["U-G3", "U-G5"]
+  },
+  "invoke_cases": [
+    {
+      "name": "mixed_binary_and_choice_provenance_notes",
+      "note": "PV3 brief r1.2 §5.3 & §7 G4: ResolvedModel == '', result note model_unreported, binary note clamped_0.01_0.99, choice note options_sorted_by_provider.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "is_damaged",
+              "type": "binary",
+              "instructions": "Does `probe.text` report physical damage?",
+              "criteria": {
+                "true": "Describes physical damage to the product.",
+                "false": "No physical damage is described."
+              }
+            },
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Which department handles `probe.text`?",
+              "options": [
+                {"id": "billing", "description": "Billing and refunds"},
+                {"id": "sales", "description": "New sales and quotes"},
+                {"id": "support", "description": "Technical support and repairs"},
+                {"id": "other", "description": "Anything else"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "The hinge snapped when I opened the lid out of the box.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.99,\"confidence\":0.99},\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"probabilities\":{\"billing\":0.004,\"other\":0.002,\"sales\":0.003,\"support\":0.99},\"confidence\":0.99}},\"usage\":{\"total_input_tokens\":88,\"total_output_tokens\":0,\"total_tokens\":88}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 88,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "is_damaged": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.99,
+              "false": 0.01
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.99,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["clamped_0.01_0.99"]
+          },
+          "department": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "support",
+            "distribution": {
+              "billing": 0.004,
+              "other": 0.002,
+              "sales": 0.003,
+              "support": 0.99
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.99,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["options_sorted_by_provider"]
+          }
+        }
+      }
+    },
+    {
+      "name": "missing_usage_object_adds_usage_unreported",
+      "note": "PV3 brief §5.3 & Decision 5: absent usage is unavailable evidence (usage_unreported note), never presented as measured zero usage.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "is_damaged",
+              "type": "binary",
+              "instructions": "Does `probe.text` report physical damage?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Screen cracked in transit.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.99,\"confidence\":0.99}}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported", "usage_unreported"],
+        "answers": {
+          "is_damaged": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.99,
+              "false": 0.01
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.99,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["clamped_0.01_0.99"]
+          }
+        }
+      }
+    },
+    {
+      "name": "missing_total_input_tokens_adds_usage_unreported",
+      "note": "PV3 brief §5.3 & Decision 5: usage object without total_input_tokens adds usage_unreported.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "is_damaged",
+              "type": "binary",
+              "instructions": "Does `probe.text` report physical damage?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Screen cracked in transit.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.99,\"confidence\":0.99}},\"usage\":{\"total_output_tokens\":0}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported", "usage_unreported"],
+        "answers": {
+          "is_damaged": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.99,
+              "false": 0.01
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.99,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["clamped_0.01_0.99"]
+          }
+        }
+      }
+    },
+    {
+      "name": "mixed_rule_subset_question_selection",
+      "note": "ModelRequest.Questions selects only 'department' from a 2-question RuleSpec.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "questions": ["department"],
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "is_damaged",
+              "type": "binary",
+              "instructions": "Does `probe.text` report physical damage?"
+            },
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Which department handles `probe.text`?",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Refund request for duplicate charge.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"billing\",\"probabilities\":{\"billing\":0.92,\"support\":0.08},\"confidence\":0.92}},\"usage\":{\"total_input_tokens\":38,\"total_output_tokens\":0}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 38,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "department": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "billing",
+            "distribution": {
+              "billing": 0.92,
+              "support": 0.08
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.92,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["options_sorted_by_provider"]
+          }
+        }
+      }
+    }
+  ]
+}

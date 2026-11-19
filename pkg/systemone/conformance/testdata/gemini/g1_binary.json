@@ -1,0 +1,221 @@
+{
+  "fixture_id": "G1",
+  "description": "Gemini Decision 1 binary (noul) question encoding and decoding without criteria: documented quickstart is_damaged example (noul 0.99 / confidence 0.99), exact 0.5 tie, and confidence formula deviation observation.",
+  "adapter": "gemini_decisions",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API",
+    "sources": [
+      "https://ai.google.dev/gemini-api/docs/decisions-api (binary noul quickstart example: is_damaged, noul 0.99, confidence 0.99, clamped 0.01-0.99)",
+      "https://ai.google.dev/api/decisions (v1beta POST /v1beta/decisions CreateDecisionRequest and CreateDecisionResponse)"
+    ],
+    "unverified_items": ["U-G5"]
+  },
+  "invoke_cases": [
+    {
+      "name": "quickstart_is_damaged_without_criteria",
+      "note": "Derived from Gemini Decisions quickstart binary noul example (input serialized as compact JSON string per PV3 brief §5.2).",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "exact_request_key_order": true,
+      "expected_request_json": {
+        "model": "gemini-decision-1",
+        "input": "{\"probe.text\":\"The package arrived with a crushed corner and a cracked screen.\"}",
+        "questions": {
+          "is_damaged": {
+            "type": "noul",
+            "instructions": "Does the customer describe physical damage to the item?"
+          }
+        }
+      },
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "is_damaged",
+              "type": "binary",
+              "instructions": "Does the customer describe physical damage to the item?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "The package arrived with a crushed corner and a cracked screen.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.99,\"confidence\":0.99}},\"usage\":{\"total_input_tokens\":42,\"total_output_tokens\":0,\"total_tokens\":42}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 42,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "is_damaged": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.99,
+              "false": 0.01
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.99,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "portable_metrics": {
+              "p_top": 0.99,
+              "margin": 0.98,
+              "norm_entropy": 0.08079313589591118
+            },
+            "notes": ["clamped_0.01_0.99"]
+          }
+        }
+      }
+    },
+    {
+      "name": "binary_exact_half_tie_signal",
+      "note": "Synthetic from provider-design §4.3 & PV3 brief §5.3: noul == 0.5 yields Tied=true and Bool=nil for runtime Uncertain(tie).",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "is_damaged",
+              "type": "binary",
+              "instructions": "Does the customer describe physical damage to the item?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Checking on my order status.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.5,\"confidence\":0.5}},\"usage\":{\"total_input_tokens\":28,\"total_output_tokens\":0}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 28,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "is_damaged": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": true,
+            "distribution": {
+              "true": 0.5,
+              "false": 0.5
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.5,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "portable_metrics": {
+              "p_top": 0.5,
+              "margin": 0.0,
+              "norm_entropy": 1.0
+            },
+            "notes": ["clamped_0.01_0.99"]
+          }
+        }
+      }
+    },
+    {
+      "name": "binary_confidence_formula_deviation_noted_not_rejected",
+      "note": "Synthetic from PV3 brief §5.3: |confidence - max(p, 1-p)| > 1e-3 adds confidence_formula_deviation alongside clamped_0.01_0.99 without failing validation.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "is_damaged",
+              "type": "binary",
+              "instructions": "Does the customer describe physical damage to the item?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic binary formula check.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.90,\"confidence\":0.75}},\"usage\":{\"total_input_tokens\":24,\"total_output_tokens\":0}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 24,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "is_damaged": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.9,
+              "false": 0.1
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.75,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["clamped_0.01_0.99", "confidence_formula_deviation"]
+          }
+        }
+      }
+    }
+  ]
+}

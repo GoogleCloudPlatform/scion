@@ -1,0 +1,96 @@
+{
+  "fixture_id": "G2",
+  "description": "Gemini Decision 1 binary (noul) question with criteria ({true_description, false_description}) request golden and false-answer decoding (is_defect, noul 0.03 / confidence 0.97).",
+  "adapter": "gemini_decisions",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API",
+    "sources": [
+      "https://ai.google.dev/gemini-api/docs/decisions-api (noul criteria {true_description, false_description})",
+      "https://ai.google.dev/api/decisions (v1beta NoulQuestion and NoulCriteria schema)"
+    ],
+    "unverified_items": ["U-G5"]
+  },
+  "invoke_cases": [
+    {
+      "name": "binary_with_criteria_true_description_false_description",
+      "note": "Synthetic from Gemini Decisions noul criteria schema: portable {true, false} encodes to {true_description, false_description}.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "exact_request_key_order": true,
+      "expected_request_json": {
+        "model": "gemini-decision-1",
+        "input": "{\"probe.text\":\"I dropped my phone on concrete and shattered the back glass.\"}",
+        "questions": {
+          "is_defect": {
+            "type": "noul",
+            "instructions": "Is the reported issue a manufacturing defect?",
+            "criteria": {
+              "true_description": "A flaw in materials or factory workmanship present before customer use.",
+              "false_description": "Accidental user damage, drops, liquid exposure, or normal wear."
+            }
+          }
+        }
+      },
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "is_defect",
+              "type": "binary",
+              "instructions": "Is the reported issue a manufacturing defect?",
+              "criteria": {
+                "true": "A flaw in materials or factory workmanship present before customer use.",
+                "false": "Accidental user damage, drops, liquid exposure, or normal wear."
+              }
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "I dropped my phone on concrete and shattered the back glass.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_defect\":{\"type\":\"noul\",\"noul\":0.03,\"confidence\":0.97}},\"usage\":{\"total_input_tokens\":68,\"total_output_tokens\":0,\"total_tokens\":68}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 68,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "is_defect": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": false,
+            "distribution": {
+              "true": 0.03,
+              "false": 0.97
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.97,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["clamped_0.01_0.99"]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,196 @@
+{
+  "fixture_id": "G8",
+  "description": "Gemini Decision 1 request encoding goldens: exact wire JSON key order, input serialized as a compact JSON string in sorted key order, declared question and option order preserved, x-goog-api-key header placement (no Authorization, no query string), and empty-model pre-flight rejection.",
+  "adapter": "gemini_decisions",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API",
+    "sources": [
+      "https://ai.google.dev/api/decisions (v1beta CreateDecisionRequest {model, input, questions})",
+      "https://ai.google.dev/gemini-api/docs/decisions-api (x-goog-api-key header, JSON serialized to string in input)"
+    ],
+    "unverified_items": ["U-G6"]
+  },
+  "invoke_cases": [
+    {
+      "name": "golden_sorted_serialized_input_string_and_mixed_questions",
+      "note": "Input fields z_context and a_message serialize into sorted compact JSON string inside top-level 'input'; options zebra -> alpha -> middle preserve declared order; SuiteConfig verifies x-goog-api-key == canary, no Authorization, and empty query string.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "exact_request_key_order": true,
+      "expected_request_json": {
+        "model": "gemini-decision-1",
+        "input": "{\"a_message\":\"Route <ticket #42> & confirm whether a pick is requested.\",\"z_context\":\"enterprise-support\"}",
+        "questions": {
+          "is_damaged": {
+            "type": "noul",
+            "instructions": "Is physical damage mentioned?"
+          },
+          "asks_choice": {
+            "type": "noul",
+            "instructions": "Does `a_message` ask the recipient to pick between alternatives?",
+            "criteria": {
+              "true_description": "Presents alternatives and asks for a pick.",
+              "false_description": "No pick among alternatives is requested."
+            }
+          },
+          "queue": {
+            "type": "choice",
+            "instructions": "Which queue handles `a_message`?",
+            "criteria": {
+              "zebra": "Zebra escalation queue",
+              "alpha": "Alpha intake queue",
+              "middle": "Middle triage queue"
+            }
+          }
+        }
+      },
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "is_damaged",
+              "type": "binary",
+              "instructions": "Is physical damage mentioned?"
+            },
+            {
+              "id": "asks_choice",
+              "type": "binary",
+              "instructions": "Does `a_message` ask the recipient to pick between alternatives?",
+              "criteria": {
+                "true": "Presents alternatives and asks for a pick.",
+                "false": "No pick among alternatives is requested."
+              }
+            },
+            {
+              "id": "queue",
+              "type": "choice",
+              "instructions": "Which queue handles `a_message`?",
+              "options": [
+                {"id": "zebra", "description": "Zebra escalation queue"},
+                {"id": "alpha", "description": "Alpha intake queue"},
+                {"id": "middle", "description": "Middle triage queue"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "z_context",
+            "kind": "text",
+            "value": "enterprise-support",
+            "trust": "trusted"
+          },
+          {
+            "name": "a_message",
+            "kind": "text",
+            "value": "Route <ticket #42> & confirm whether a pick is requested.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.02,\"confidence\":0.98},\"asks_choice\":{\"type\":\"noul\",\"noul\":0.88,\"confidence\":0.88},\"queue\":{\"type\":\"choice\",\"choice\":\"alpha\",\"probabilities\":{\"alpha\":0.70,\"middle\":0.15,\"zebra\":0.15},\"confidence\":0.70}},\"usage\":{\"total_input_tokens\":112,\"total_output_tokens\":0}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 112,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "is_damaged": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": false,
+            "distribution": {
+              "true": 0.02,
+              "false": 0.98
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.98,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["clamped_0.01_0.99"]
+          },
+          "asks_choice": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.88,
+              "false": 0.12
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.88,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["clamped_0.01_0.99"]
+          },
+          "queue": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "alpha",
+            "distribution": {
+              "alpha": 0.7,
+              "middle": 0.15,
+              "zebra": 0.15
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.7,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["options_sorted_by_provider"]
+          }
+        }
+      }
+    },
+    {
+      "name": "missing_model_rejected_before_network",
+      "note": "Empty InstanceView.Model fails closed with invalid_request before any outbound HTTP call.",
+      "model": "",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Damaged?"}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{}"
+      },
+      "expect_error": {
+        "reason": "invalid_request",
+        "retryable": false
+      }
+    }
+  ]
+}

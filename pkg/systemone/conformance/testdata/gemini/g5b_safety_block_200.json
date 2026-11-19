@@ -1,0 +1,124 @@
+{
+  "fixture_id": "G5b",
+  "description": "Gemini Decision 1 safety-block reference form: HTTP 200 with prompt_feedback.block_reason set (blocklist, safety, other, prohibited_content, image_safety) mapped to content_blocked and never returning a partial result.",
+  "adapter": "gemini_decisions",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API",
+    "sources": [
+      "https://ai.google.dev/api/decisions (CreateDecisionResponse prompt_feedback.block_reason in {safety, other, blocklist, prohibited_content, image_safety}, block_reason_message, empty answers)"
+    ],
+    "unverified_items": ["U-G2"]
+  },
+  "invoke_cases": [
+    {
+      "name": "http_200_prompt_feedback_blocklist_empty_answers",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{},\"prompt_feedback\":{\"block_reason\":\"blocklist\",\"block_reason_message\":\"G5B_CANARY_BLOCKLIST_MESSAGE\"}}"
+      },
+      "expect_error": {
+        "reason": "content_blocked",
+        "retryable": false,
+        "http_status": 200,
+        "error_body_canary": "G5B_CANARY_BLOCKLIST_MESSAGE"
+      }
+    },
+    {
+      "name": "http_200_prompt_feedback_safety_omitted_answers",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"prompt_feedback\":{\"block_reason\":\"safety\",\"block_reason_message\":\"G5B_CANARY_SAFETY_OMITTED\"}}"
+      },
+      "expect_error": {
+        "reason": "content_blocked",
+        "retryable": false,
+        "http_status": 200,
+        "error_body_canary": "G5B_CANARY_SAFETY_OMITTED"
+      }
+    },
+    {
+      "name": "http_200_prompt_feedback_other",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{},\"prompt_feedback\":{\"block_reason\":\"other\",\"block_reason_message\":\"G5B_CANARY_OTHER\"}}"
+      },
+      "expect_error": {
+        "reason": "content_blocked",
+        "retryable": false,
+        "http_status": 200,
+        "error_body_canary": "G5B_CANARY_OTHER"
+      }
+    },
+    {
+      "name": "http_200_prompt_feedback_prohibited_content_even_with_partial_answers",
+      "note": "PV3 brief §5.3: 200 with prompt_feedback.block_reason set returns content_blocked even if some answers are present.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."},
+            {"id": "is_urgent", "type": "binary", "instructions": "Urgent?"}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.99,\"confidence\":0.99}},\"prompt_feedback\":{\"block_reason\":\"prohibited_content\",\"block_reason_message\":\"G5B_CANARY_PARTIAL_ANSWERS\"}}"
+      },
+      "expect_error": {
+        "reason": "content_blocked",
+        "retryable": false,
+        "http_status": 200,
+        "error_body_canary": "G5B_CANARY_PARTIAL_ANSWERS"
+      }
+    }
+  ]
+}

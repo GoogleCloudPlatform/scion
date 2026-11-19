@@ -1,0 +1,588 @@
+{
+  "fixture_id": "G7",
+  "description": "Gemini Decision 1 malformed 2xx response validation: missing/extra answers, partial/extra probability keys, sum 0.98 and 1±(1e-3+1e-9), NaN, noul 1.2, non-argmax choice, null choice (non-tie and tie), wrong type, missing/out-of-range confidence, duplicate JSON keys, and excessive nesting.",
+  "adapter": "gemini_decisions",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API",
+    "sources": [
+      "https://ai.google.dev/api/decisions (CreateDecisionResponse, NoulAnswer, ChoiceAnswer required fields)",
+      "https://ai.google.dev/gemini-api/docs/decisions-api (probabilities cover all options and sum to 1; confidence required)"
+    ],
+    "unverified_items": ["U-G3"]
+  },
+  "invoke_cases": [
+    {
+      "name": "missing_answer_key",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{},\"usage\":{\"total_input_tokens\":16,\"total_output_tokens\":0}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "extra_answer_key",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"confidence\":0.8,\"probabilities\":{\"billing\":0.2,\"support\":0.8}},\"unexpected\":{\"type\":\"noul\",\"noul\":0.5,\"confidence\":0.5}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "missing_probability_key",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "sales", "description": "Sales"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"confidence\":0.8,\"probabilities\":{\"billing\":0.2,\"support\":0.8}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "extra_probability_key",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"confidence\":0.8,\"probabilities\":{\"billing\":0.2,\"support\":0.8,\"sales\":0.0}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "unnormalized_distribution_sum_0_98",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"confidence\":0.80,\"probabilities\":{\"billing\":0.18,\"support\":0.80}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "sum_just_outside_float_slack_1_minus_1e3_minus_1e9",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"billing\",\"confidence\":0.5,\"probabilities\":{\"billing\":0.5,\"support\":0.498999999}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "non_finite_nan_probability",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"confidence\":0.8,\"probabilities\":{\"billing\":NaN,\"support\":0.8}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "binary_noul_1_2_out_of_range",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Damaged?"}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":1.2,\"confidence\":0.9}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "choice_not_argmax",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"billing\",\"confidence\":0.8,\"probabilities\":{\"billing\":0.2,\"support\":0.8}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "null_choice_non_tie",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":null,\"confidence\":0.8,\"probabilities\":{\"billing\":0.2,\"support\":0.8}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "null_choice_on_tie",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":null,\"confidence\":0.5,\"probabilities\":{\"billing\":0.5,\"support\":0.5}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "wrong_answer_type_choice_for_binary",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Damaged?"}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"choice\",\"choice\":\"yes\",\"confidence\":0.9,\"probabilities\":{\"yes\":0.9,\"no\":0.1}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "wrong_answer_type_noul_for_choice",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"noul\",\"noul\":0.8,\"confidence\":0.8}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "missing_confidence_on_binary",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Damaged?"}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.9}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "missing_confidence_on_choice",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"probabilities\":{\"billing\":0.2,\"support\":0.8}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "confidence_out_of_range",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Damaged?"}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.9,\"confidence\":1.2}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "duplicate_json_probability_key",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Route.",
+              "options": [
+                {"id": "billing", "description": "Billing"},
+                {"id": "support", "description": "Support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"confidence\":0.8,\"probabilities\":{\"billing\":0.1,\"billing\":0.2,\"support\":0.8}}},\"usage\":{\"total_input_tokens\":16}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "excessive_json_nesting_depth_over_32",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Damaged?"}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"is_damaged\":{\"type\":\"noul\",\"noul\":0.99,\"confidence\":0.99}},\"usage\":{\"total_input_tokens\":16},\"extra\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    }
+  ]
+}

@@ -1,0 +1,149 @@
+{
+  "fixture_id": "G5a",
+  "description": "Gemini Decision 1 safety-block guide form: HTTP 400 with string error.code in {safety, prohibited_content, blocklist, image_safety, content_blocked} mapped to content_blocked (non-retryable, content-free).",
+  "adapter": "gemini_decisions",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API",
+    "sources": [
+      "https://ai.google.dev/gemini-api/docs/decisions-api (safety block HTTP 400 with string error.code in {safety, prohibited_content, blocklist, image_safety, content_blocked})"
+    ],
+    "unverified_items": ["U-G2"]
+  },
+  "invoke_cases": [
+    {
+      "name": "http_400_error_code_safety",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"error\":{\"code\":\"safety\",\"message\":\"G5A_CANARY_SAFETY_BLOCK_MESSAGE\"}}"
+      },
+      "expect_error": {
+        "reason": "content_blocked",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "G5A_CANARY_SAFETY_BLOCK_MESSAGE"
+      }
+    },
+    {
+      "name": "http_400_error_code_prohibited_content",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"error\":{\"code\":\"prohibited_content\",\"message\":\"G5A_CANARY_PROHIBITED_CONTENT\"}}"
+      },
+      "expect_error": {
+        "reason": "content_blocked",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "G5A_CANARY_PROHIBITED_CONTENT"
+      }
+    },
+    {
+      "name": "http_400_error_code_blocklist",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"error\":{\"code\":\"blocklist\",\"message\":\"G5A_CANARY_BLOCKLIST\"}}"
+      },
+      "expect_error": {
+        "reason": "content_blocked",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "G5A_CANARY_BLOCKLIST"
+      }
+    },
+    {
+      "name": "http_400_error_code_image_safety",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"error\":{\"code\":\"image_safety\",\"message\":\"G5A_CANARY_IMAGE_SAFETY\"}}"
+      },
+      "expect_error": {
+        "reason": "content_blocked",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "G5A_CANARY_IMAGE_SAFETY"
+      }
+    },
+    {
+      "name": "http_400_error_code_content_blocked",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"error\":{\"code\":\"content_blocked\",\"message\":\"G5A_CANARY_CONTENT_BLOCKED\"}}"
+      },
+      "expect_error": {
+        "reason": "content_blocked",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "G5A_CANARY_CONTENT_BLOCKED"
+      }
+    }
+  ]
+}

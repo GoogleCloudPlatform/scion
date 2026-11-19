@@ -330,6 +330,17 @@ func TestDecodeResponse_Documented0999ChoiceBinaryNotesTiesSafetyBlockAndUsage(t
 	assert.Nil(t, tieRes.Answers["department"].Choice)
 	assert.ElementsMatch(t, []string{provider.NoteOptionsSortedByProvider, provider.NoteConfidenceFormulaDeviation}, tieRes.Answers["department"].Notes)
 
+	// Empty prompt_feedback or BLOCK_REASON_UNSPECIFIED with valid answers must succeed.
+	for _, benignPFBody := range []string{
+		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"prompt_feedback":{},"usage":{"total_input_tokens":20}}`,
+		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"prompt_feedback":{"block_reason":"BLOCK_REASON_UNSPECIFIED"},"usage":{"total_input_tokens":20}}`,
+	} {
+		pfRes, pfErr := geminidecisions.DecodeResponse(qs[:1], http.StatusOK, []byte(benignPFBody))
+		require.NoError(t, pfErr)
+		require.NotNil(t, pfRes.Answers["is_damaged"].Bool)
+		assert.True(t, *pfRes.Answers["is_damaged"].Bool)
+	}
+
 	// 200 safety block via prompt_feedback.block_reason -> content_blocked (even if partial answers are present).
 	for _, blockedBody := range []string{
 		`{"answers":{},"prompt_feedback":{"block_reason":"blocklist","block_reason_message":"CANARY_BLOCK_MSG"}}`,
@@ -638,7 +649,7 @@ func TestInvoke_HeaderPlacementWireGuardsAndErrorMapping(t *testing.T) {
 			{
 				name:           "429_retry_info_fallback",
 				status:         http.StatusTooManyRequests,
-				body:           `{"error":{"code":429,"message":"CANARY_429_DETAIL","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"3.5s"}]}}`,
+				body:           `{"error":{"code":429,"message":"CANARY_429_DETAIL","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"subject":"CANARY_QUOTA_SUBJ"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"3.5s"}]}}`,
 				wantReason:     provider.FailRateLimited,
 				wantRetryable:  true,
 				wantRetryAfter: 3500 * time.Millisecond,
