@@ -20,13 +20,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// Audit event type names and rate-limit constants (§8.1).
+// Audit event type names and rate-limit constants (§8.1; mixed-rule-arrays §5).
 const (
 	AuditEventReceived        = "trigger.event.received"
 	AuditEventSignatureFailed = "trigger.webhook.signature_failed"
+	AuditFirePrefix           = "trigger.fire."
 
 	FailureAuditInterval   = time.Minute
 	maxFailureAuditEntries = 10000
@@ -181,4 +184,89 @@ func (s *SlogAuditSink) FailureWindowLen() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.failures.len()
+}
+
+// FireAuditRecord carries content-free metadata for a terminal trigger fire
+// outcome (mixed-rule-arrays §5). It never carries rule expression text or
+// event payload data.
+type FireAuditRecord struct {
+	ProjectID      string
+	TriggerID      string
+	EventID        string
+	FireID         string
+	ActionType     string
+	Status         string // "fired" | "skipped" | "refused" | "failed"
+	MatchedThrough string
+	DecidedDialect string
+	Reason         string // optional closed content-free reason token
+}
+
+// FireAuditSink records content-free terminal trigger.fire.<status> audit events.
+type FireAuditSink interface {
+	RecordFire(ctx context.Context, rec FireAuditRecord)
+}
+
+type multiFireAuditSink struct {
+	sinks []FireAuditSink
+}
+
+func (m multiFireAuditSink) RecordFire(ctx context.Context, rec FireAuditRecord) {
+	for _, sink := range m.sinks {
+		if sink != nil {
+			sink.RecordFire(ctx, rec)
+		}
+	}
+}
+
+// MultiFireAuditSink fans RecordFire calls out to all non-nil sinks.
+func MultiFireAuditSink(sinks ...FireAuditSink) FireAuditSink {
+	var nonNil []FireAuditSink
+	for _, s := range sinks {
+		if s != nil {
+			nonNil = append(nonNil, s)
+		}
+	}
+	return multiFireAuditSink{sinks: nonNil}
+}
+
+func sanitizeAuditFireStatus(status string) string {
+	switch status {
+	case store.TriggerFireStatusFired,
+		store.TriggerFireStatusSkipped,
+		store.TriggerFireStatusRefused,
+		store.TriggerFireStatusFailed:
+		return status
+	default:
+		return "unknown"
+	}
+}
+
+// RecordFire emits one content-free trigger.fire.<status> audit record carrying
+// matched_through and decided_dialect without ever logging rule text or payload (§5).
+func (s *SlogAuditSink) RecordFire(ctx context.Context, rec FireAuditRecord) {
+	if s == nil {
+		return
+	}
+	status := sanitizeAuditFireStatus(rec.Status)
+	evType := AuditFirePrefix + status
+	attrs := []slog.Attr{
+		slog.String("event_type", evType),
+		slog.String("project_id", rec.ProjectID),
+		slog.String("trigger_id", rec.TriggerID),
+		slog.String("event_id", rec.EventID),
+		slog.String("fire_id", rec.FireID),
+		slog.String("action_type", rec.ActionType),
+		slog.String("status", status),
+		slog.String("matched_through", rec.MatchedThrough),
+	}
+	if rec.DecidedDialect != "" {
+		attrs = append(attrs, slog.String("decided_dialect", triggerrule.SafeDialectName(rec.DecidedDialect)))
+	}
+	if rec.Reason != "" {
+		attrs = append(attrs, slog.String("reason", rec.Reason))
+	}
+	if reqID := logging.RequestIDFromContext(ctx); reqID != "" {
+		attrs = append(attrs, slog.String(logging.AttrRequestID, reqID))
+	}
+	s.log.LogAttrs(ctx, slog.LevelInfo, evType, attrs...)
 }

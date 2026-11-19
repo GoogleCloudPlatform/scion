@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
 
 func seedProjectForDispatch(t *testing.T, cs *entadapter.CompositeStore) string {
@@ -312,9 +313,24 @@ func TestDispatcher_LostQueueLeaseRehandle_NoDoubleFire(t *testing.T) {
 	projID := seedProjectForDispatch(t, cs)
 	epID := uuid.NewString()
 
+	recDialect := &testDispatchDialect{name: "rec_rehandle"}
+	_, rules := newTestTriggerEngineWithDialects(t, recDialect)
+
 	trAlreadyFired := makeActiveTrigger(projID, epID, "tr-1-done", []string{"webhook.received"})
+	trAlreadyFired.MatchRules = []store.TriggerMatchRule{
+		{Dialect: "rec_rehandle", Expr: "done_elem_1"},
+		{Dialect: "cel", Expr: `event.payload.retry == true`},
+	}
 	trLiveFiring := makeActiveTrigger(projID, epID, "tr-2-live", []string{"webhook.received"})
+	trLiveFiring.MatchRules = []store.TriggerMatchRule{
+		{Dialect: "rec_rehandle", Expr: "live_elem_1"},
+		{Dialect: "cel", Expr: `event.payload.retry == true`},
+	}
 	trUnclaimed := makeActiveTrigger(projID, epID, "tr-3-unclaimed", []string{"webhook.received"})
+	trUnclaimed.MatchRules = []store.TriggerMatchRule{
+		{Dialect: "rec_rehandle", Expr: "unclaimed_elem_1"},
+		{Dialect: "cel", Expr: `event.payload.retry == true`},
+	}
 	for _, tr := range []*store.Trigger{trAlreadyFired, trLiveFiring, trUnclaimed} {
 		require.NoError(t, cs.CreateTrigger(ctx, tr))
 	}
@@ -338,30 +354,34 @@ func TestDispatcher_LostQueueLeaseRehandle_NoDoubleFire(t *testing.T) {
 	// trAlreadyFired is terminal "fired", trLiveFiring is still "firing" with a live horizon.
 	finished := t0.Add(time.Second)
 	claimed, _, err := cs.ClaimTriggerFire(ctx, &store.TriggerFire{
-		ID:         uuid.NewString(),
-		ProjectID:  projID,
-		TriggerID:  trAlreadyFired.ID,
-		EventID:    ev.ID,
-		Subject:    ev.Subject,
-		ActionType: store.TriggerActionMessage,
-		Status:     store.TriggerFireStatusFired,
-		LeaseUntil: t0.Add(10 * time.Minute),
-		StartedAt:  t0,
-		FinishedAt: &finished,
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		TriggerID:      trAlreadyFired.ID,
+		EventID:        ev.ID,
+		Subject:        ev.Subject,
+		ActionType:     store.TriggerActionMessage,
+		Status:         store.TriggerFireStatusFired,
+		MatchedThrough: "2/2",
+		DecidedDialect: "cel",
+		LeaseUntil:     t0.Add(10 * time.Minute),
+		StartedAt:      t0,
+		FinishedAt:     &finished,
 	})
 	require.NoError(t, err)
 	require.True(t, claimed)
 
 	claimed, _, err = cs.ClaimTriggerFire(ctx, &store.TriggerFire{
-		ID:         uuid.NewString(),
-		ProjectID:  projID,
-		TriggerID:  trLiveFiring.ID,
-		EventID:    ev.ID,
-		Subject:    ev.Subject,
-		ActionType: store.TriggerActionMessage,
-		Status:     store.TriggerFireStatusFiring,
-		LeaseUntil: t0.Add(10 * time.Minute),
-		StartedAt:  t0,
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		TriggerID:      trLiveFiring.ID,
+		EventID:        ev.ID,
+		Subject:        ev.Subject,
+		ActionType:     store.TriggerActionMessage,
+		Status:         store.TriggerFireStatusFiring,
+		MatchedThrough: "2/2",
+		DecidedDialect: "cel",
+		LeaseUntil:     t0.Add(10 * time.Minute),
+		StartedAt:      t0,
 	})
 	require.NoError(t, err)
 	require.True(t, claimed)
@@ -377,6 +397,7 @@ func TestDispatcher_LostQueueLeaseRehandle_NoDoubleFire(t *testing.T) {
 	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
 		Core:  core,
 		Store: cs,
+		Rules: rules,
 		Now:   func() time.Time { return t0.Add(3 * time.Minute) },
 	})
 	require.NoError(t, err)
@@ -391,6 +412,17 @@ func TestDispatcher_LostQueueLeaseRehandle_NoDoubleFire(t *testing.T) {
 	}, nopLease{})
 	assert.True(t, res.Done)
 	assert.Equal(t, []string{trUnclaimed.ID}, firedTriggerIDs, "only unclaimed trigger may fire on re-handle")
+
+	// Design §3.4 & §8 item 6: re-handle explicitly re-evaluates candidate triggers from element 1,
+	// while idempotent ClaimTriggerFire prevents double-firing already-claimed triggers.
+	assert.ElementsMatch(t, []string{"done_elem_1", "live_elem_1", "unclaimed_elem_1"}, recDialect.evalCalls)
+
+	unclaimedFires, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: trUnclaimed.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, unclaimedFires.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, unclaimedFires.Items[0].Status)
+	assert.Equal(t, "2/2", unclaimedFires.Items[0].MatchedThrough)
+	assert.Equal(t, "cel", unclaimedFires.Items[0].DecidedDialect)
 
 	gotEv, err := cs.GetTriggerEvent(ctx, ev.ID)
 	require.NoError(t, err)
@@ -614,27 +646,50 @@ func TestRunMaintenance_ReaperReconcileAndPurge(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
 
-func TestDispatcher_MatchRulesFailClosed_DBRoundTrip(t *testing.T) {
+func TestDispatcher_CorruptStoredMatchRulesSQLite_SkipsAndNeverFires(t *testing.T) {
 	ctx := context.Background()
 	entClient := enttest.NewClient(t)
 	cs := entadapter.NewCompositeStore(entClient)
-	t0 := time.Date(2026, 11, 20, 6, 0, 0, 0, time.UTC)
+	t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return t0 }))
 	projID := seedProjectForDispatch(t, cs)
 	epID := uuid.NewString()
 
-	trWithRules := makeActiveTrigger(projID, epID, "tr-rules", []string{"webhook.received"})
-	trWithRules.MatchRules = []store.TriggerMatchRule{
-		{Dialect: store.TriggerDialectCEL, Expr: `event.type == "webhook.received"`},
-	}
-	trLegacyScalar := makeActiveTrigger(projID, epID, "tr-legacy", []string{"webhook.received"})
-	trLegacyScalar.MatchRule = `event.type == "webhook.received"`
-	trCorrupt := makeActiveTrigger(projID, epID, "tr-corrupt", []string{"webhook.received"})
-	trEmpty := makeActiveTrigger(projID, epID, "tr-empty", []string{"webhook.received"})
+	_, rules := newTestTriggerEngineWithDialects(t)
 
-	for _, tr := range []*store.Trigger{trWithRules, trLegacyScalar, trCorrupt, trEmpty} {
-		require.NoError(t, cs.CreateTrigger(ctx, tr))
+	trCorrupt := makeActiveTrigger(projID, epID, "tr-corrupt-sqlite", []string{"webhook.received"})
+	trCorrupt.MatchRules = []store.TriggerMatchRule{{Dialect: "cel", Expr: `event.payload.ok == true`}}
+	require.NoError(t, cs.CreateTrigger(ctx, trCorrupt))
+
+	// Corrupt the stored match_rules JSON directly in SQLite (SEC-3b1rw-01).
+	require.NoError(t, entClient.Trigger.UpdateOneID(uuid.MustParse(trCorrupt.ID)).
+		SetMatchRules(`{corrupt-not-json-array`).
+		Exec(ctx))
+
+	trHealthy := makeActiveTrigger(projID, epID, "tr-healthy-sqlite", []string{"webhook.received"})
+	trHealthy.MatchRules = []store.TriggerMatchRule{{Dialect: "cel", Expr: `event.payload.ok == true`}}
+	require.NoError(t, cs.CreateTrigger(ctx, trHealthy))
+
+	var firedIDs []string
+	core := &fakeCore{}
+	core.enabled.Store(true)
+	core.fireFn = func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+		firedIDs = append(firedIDs, req.Authority.DefinitionID)
+		return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
 	}
-	require.NoError(t, entClient.Trigger.UpdateOneID(uuid.MustParse(trCorrupt.ID)).SetMatchRules("{corrupt").Exec(ctx))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: cs,
+		Rules: rules,
+		Now:   func() time.Time { return t0 },
+	})
+	require.NoError(t, err)
+	drainer, err := disp.NewDrainer(trigger.DrainerOptions{
+		QueueStore: cs,
+		Queue:      q,
+	})
+	require.NoError(t, err)
 
 	ev := &store.TriggerEvent{
 		ID:         uuid.NewString(),
@@ -643,68 +698,26 @@ func TestDispatcher_MatchRulesFailClosed_DBRoundTrip(t *testing.T) {
 		SourceID:   epID,
 		Type:       "webhook.received",
 		Subject:    "webhook:" + epID,
-		DedupKey:   "guard-db-1",
+		DedupKey:   "corrupt-sqlite-1",
 		OccurredAt: t0,
 		ReceivedAt: t0,
 		Payload:    `{"ok":true}`,
-		Status:     store.TriggerEventStatusPending,
 	}
-	require.NoError(t, cs.CreateTriggerEvent(ctx, ev))
+	require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+		_, enqErr := trigger.EnqueueEvent(ctx, tx, tx, q, ev)
+		return enqErr
+	}))
 
-	var firedIDs []string
-	core := &fakeCore{
-		fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
-			firedIDs = append(firedIDs, req.Authority.DefinitionID)
-			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
-		},
-	}
-	core.enabled.Store(true)
-
-	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
-		Core:  core,
-		Store: cs,
-		Now:   func() time.Time { return t0 },
-	})
+	dRes, err := drainer.DrainOnce(ctx)
 	require.NoError(t, err)
+	assert.Equal(t, 1, dRes.Claimed)
 
-	raw, err := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: ev.ID})
+	assert.Equal(t, []string{trHealthy.ID}, firedIDs, "corrupt stored match_rules row must never fire")
+
+	corruptFires, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: trCorrupt.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
-	res := disp.HandleItem(ctx, durablequeue.Item{
-		Seq:       1,
-		Kind:      trigger.EventQueueKind,
-		DedupKey:  ev.ID,
-		ProjectID: projID,
-		Payload:   raw,
-	}, nopLease{})
-	assert.True(t, res.Done)
-	assert.NoError(t, res.Err)
-	assert.Equal(t, []string{trEmpty.ID}, firedIDs, "only empty-rules trigger may invoke action")
-
-	fires, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: projID, EventID: ev.ID}, store.ListOptions{Limit: 10})
-	require.NoError(t, err)
-	require.Len(t, fires.Items, 4)
-	byTr := make(map[string]store.TriggerFire, len(fires.Items))
-	for _, f := range fires.Items {
-		byTr[f.TriggerID] = f
-	}
-	for _, skippedID := range []string{trWithRules.ID, trLegacyScalar.ID, trCorrupt.ID} {
-		f := byTr[skippedID]
-		assert.Equal(t, store.TriggerFireStatusSkipped, f.Status)
-		assert.Equal(t, "rule evaluation unavailable", f.Error)
-
-		gotTr, gErr := cs.GetTrigger(ctx, skippedID)
-		require.NoError(t, gErr)
-		assert.Equal(t, 1, gotTr.FireCount)
-		assert.Equal(t, 0, gotTr.ErrorCount)
-		assert.Equal(t, store.TriggerFireStatusSkipped, gotTr.LastFireStatus)
-		assert.Equal(t, "rule evaluation unavailable", gotTr.LastFireError)
-	}
-	assert.Equal(t, store.TriggerFireStatusFired, byTr[trEmpty.ID].Status)
-	assert.Empty(t, byTr[trEmpty.ID].Error)
-
-	gotEv, err := cs.GetTriggerEvent(ctx, ev.ID)
-	require.NoError(t, err)
-	assert.Equal(t, store.TriggerEventStatusProcessed, gotEv.Status)
-	assert.Equal(t, 1, gotEv.MatchCount)
-	assert.Equal(t, 1, gotEv.FireCount)
+	require.Len(t, corruptFires.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusSkipped, corruptFires.Items[0].Status)
+	assert.Equal(t, triggerrule.SkipReasonEvalFailed, corruptFires.Items[0].Error)
+	assert.Contains(t, corruptFires.Items[0].RuleTrace, triggerrule.MatchReasonCorruptRules)
 }

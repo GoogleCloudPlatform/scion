@@ -27,6 +27,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -407,6 +408,16 @@ func (r *Rules) Invalidate(dialect string, scope celengine.CacheScope) {
 		scope.Consumer = ConsumerName
 	}
 	r.engine.Invalidate(dialect, EnvironmentName, scope)
+}
+
+// IsRegisteredDialect reports whether dialect is registered on the underlying
+// ruleengine.Engine, allowing metrics callers to restrict dialect labels to the
+// finite server-registered dialect set.
+func (r *Rules) IsRegisteredDialect(dialect string) bool {
+	if r == nil || r.engine == nil {
+		return false
+	}
+	return slices.Contains(r.engine.Dialects(), strings.TrimSpace(dialect))
 }
 
 // Activation holds the pre-parsed event map so multiple candidate trigger rules
