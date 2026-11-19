@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net"
@@ -34,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/metrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 	"github.com/stretchr/testify/assert"
@@ -1435,6 +1437,7 @@ func TestRuntime_WrappedEgressErrorOverridesProviderErrorReason(t *testing.T) {
 		{name: "wrapped_response_too_large", sentinel: egress.ErrResponseTooLarge, want: provider.FailMalformedResponse},
 		{name: "wrapped_credential_unavailable", sentinel: egress.ErrCredentialUnavailable, want: provider.FailUnavailable},
 		{name: "wrapped_auth", sentinel: egress.ErrAuth, want: provider.FailAuth},
+		{name: "wrapped_invalid_placement", sentinel: egress.ErrInvalidPlacement, want: provider.FailInternal},
 	}
 
 	for _, tc := range cases {
@@ -2066,4 +2069,538 @@ func TestRuntime_EngineMaxEvalTimeMarginAndLatch(t *testing.T) {
 			assert.Empty(t, eval.Attempts, "provider must not be invoked after deadline expired during resolve")
 		})
 	})
+}
+
+// ---------------------------------------------------------------------------
+// PV3 G0: Header auth support, placement wiring, transport cache isolation,
+// float-slack choice runtime check, and TypeSafe bearer/default-endpoint regression
+// ---------------------------------------------------------------------------
+
+type dynamicCapsAdapter struct {
+	*fakeAdapter
+	capsFn func(inst provider.InstanceView) (provider.Capabilities, error)
+}
+
+func (a *dynamicCapsAdapter) Capabilities(inst provider.InstanceView) (provider.Capabilities, error) {
+	if a.capsFn != nil {
+		return a.capsFn(inst)
+	}
+	return a.fakeAdapter.Capabilities(inst)
+}
+
+func (a *dynamicCapsAdapter) ListModels(ctx context.Context, tr provider.Transport, inst provider.InstanceView) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, inst.Endpoint+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := tr.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	_ = resp.Body.Close()
+	return []string{"model-1"}, nil
+}
+
+func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
+	binSpec := `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
+
+	geminiHeaderScheme := provider.AuthScheme{
+		Kind:       provider.AuthKindHeader,
+		HeaderName: "x-goog-api-key",
+	}
+
+	cases := []struct {
+		name          string
+		adapterScheme provider.AuthScheme
+		instAuthKind  string
+		wantFail      provider.FailReason
+	}{
+		{name: "bearer_adapter_with_empty_inst_auth", adapterScheme: provider.AuthBearer, instAuthKind: "", wantFail: ""},
+		{name: "bearer_adapter_with_api_key_inst_auth", adapterScheme: provider.AuthBearer, instAuthKind: "api_key", wantFail: ""},
+		{name: "bearer_adapter_with_bearer_inst_auth", adapterScheme: provider.AuthBearer, instAuthKind: "bearer", wantFail: ""},
+		{name: "bearer_adapter_with_none_inst_auth_rejected", adapterScheme: provider.AuthBearer, instAuthKind: "none", wantFail: provider.FailUnsupported},
+		{name: "header_adapter_with_empty_inst_auth", adapterScheme: geminiHeaderScheme, instAuthKind: "", wantFail: ""},
+		{name: "header_adapter_with_api_key_inst_auth", adapterScheme: geminiHeaderScheme, instAuthKind: "api_key", wantFail: ""},
+		{name: "header_adapter_with_none_inst_auth_rejected", adapterScheme: geminiHeaderScheme, instAuthKind: "none", wantFail: provider.FailUnsupported},
+		{name: "header_adapter_with_bearer_inst_auth_rejected", adapterScheme: geminiHeaderScheme, instAuthKind: "bearer", wantFail: provider.FailUnsupported},
+		{name: "header_adapter_with_google_token_inst_auth_rejected", adapterScheme: geminiHeaderScheme, instAuthKind: "google_access_token", wantFail: provider.FailUnsupported},
+		{name: "header_adapter_with_empty_header_name_rejected_internal", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindHeader, HeaderName: ""}, instAuthKind: "api_key", wantFail: provider.FailInternal},
+		{name: "header_adapter_with_reserved_authorization_rejected_internal", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindHeader, HeaderName: "Authorization"}, instAuthKind: "api_key", wantFail: provider.FailInternal},
+		{name: "header_adapter_with_reserved_host_rejected_internal", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindHeader, HeaderName: "Host"}, instAuthKind: "api_key", wantFail: provider.FailInternal},
+		{name: "header_adapter_with_crlf_header_name_rejected_internal", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindHeader, HeaderName: "x-key\r\nEvil: 1"}, instAuthKind: "api_key", wantFail: provider.FailInternal},
+		{name: "none_adapter_with_empty_inst_auth", adapterScheme: provider.AuthNone, instAuthKind: "", wantFail: ""},
+		{name: "none_adapter_with_none_inst_auth", adapterScheme: provider.AuthNone, instAuthKind: "none", wantFail: ""},
+		{name: "none_adapter_with_api_key_inst_auth_rejected", adapterScheme: provider.AuthNone, instAuthKind: "api_key", wantFail: provider.FailUnsupported},
+		{name: "oauth_adapter_rejected_unsupported", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleAccessToken}, instAuthKind: "google_access_token", wantFail: provider.FailUnsupported},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			base := newFakeAdapter(func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				dist, val, _, _ := provider.BinaryDistribution(0.9)
+				return provider.ModelResult{
+					Answers: map[string]provider.Answer{
+						"q1": {QuestionID: "q1", Primitive: spec.PrimitiveBinary, Status: provider.AnswerStatusAnswered, Bool: val, Distribution: dist},
+					},
+				}, nil
+			})
+			base.caps.AuthScheme = tc.adapterScheme
+			adapter := &dynamicCapsAdapter{fakeAdapter: base}
+
+			reg := provider.NewRegistry()
+			reg.MustRegister(adapter)
+
+			inst := defaultTestInstance()
+			inst.Endpoint = srv.URL
+			inst.Auth = runtime.InstanceAuth{
+				Kind:       tc.instAuthKind,
+				SecretName: "systemone.instance.inst-uuid-1",
+			}
+
+			var credSrc runtime.CredentialSource
+			if tc.adapterScheme.Kind != provider.AuthKindNone {
+				credSrc = runtime.StaticCredential("sk-matrix-key")
+			}
+
+			rt := runtime.New(
+				runtime.Config{
+					Registry:    reg,
+					Instances:   runtime.StaticInstances(inst),
+					Credentials: credSrc,
+				},
+				runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+			)
+			defer rt.CloseIdleConnections()
+
+			dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hello"), runtime.EvalOptions{})
+			if tc.wantFail == "" {
+				require.NoError(t, err)
+				assert.True(t, dec.Bool)
+				assert.Equal(t, 1, adapter.callCount())
+
+				models, listErr := rt.ListModels(context.Background(), inst)
+				require.NoError(t, listErr)
+				assert.Equal(t, []string{"model-1"}, models)
+			} else {
+				require.Error(t, err)
+				assert.Equal(t, 0, adapter.callCount(), "adapter must not be invoked when auth support check fails")
+				eval, ok := runtime.EvaluationFrom(err)
+				require.True(t, ok)
+				assert.Equal(t, runtime.ClassFailed, eval.Class)
+				assert.Equal(t, string(tc.wantFail), eval.Reason)
+
+				_, listErr := rt.ListModels(context.Background(), inst)
+				require.Error(t, listErr)
+				pe, ok := provider.AsProviderError(listErr)
+				require.True(t, ok)
+				assert.Equal(t, tc.wantFail, pe.Reason)
+			}
+		})
+	}
+}
+
+func TestRuntime_HeaderPlacementWireIsolationFloatBoundaryAndUnreportedModelProvenance(t *testing.T) {
+	const canaryKey = "AIzaSy-runtime-header-canary-secret-442200"
+
+	var (
+		gotHeaders http.Header
+		gotQuery   string
+		gotBody    []byte
+	)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		gotQuery = r.URL.RawQuery
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	choiceSpec := `{
+	  "version": 1,
+	  "questions": [{
+	    "id": "department",
+	    "type": "choice",
+	    "instructions": "Route probe.text to a department.",
+	    "options": [
+	      {"id": "billing", "description": "Billing"},
+	      {"id": "sales", "description": "Sales"},
+	      {"id": "support", "description": "Support"},
+	      {"id": "other", "description": "Other"}
+	    ]
+	  }],
+	  "output": {"question": "department"}
+	}`
+	compiled := compileTestSpec(t, choiceSpec, spec.KindRoute)
+
+	adapter := newFakeAdapter(func(ctx context.Context, tr provider.Transport, inst provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, inst.Endpoint+"/v1beta/decisions", strings.NewReader(`{"model":"gemini-decision-1"}`))
+		if err != nil {
+			return provider.ModelResult{}, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		resp, err := tr.Do(httpReq)
+		if err != nil {
+			return provider.ModelResult{}, err
+		}
+		_ = resp.Body.Close()
+
+		return provider.ModelResult{
+			ResolvedModel: "", // Gemini omits model in response (PV3 brief r1.2)
+			HTTPStatus:    resp.StatusCode,
+			Notes:         []string{provider.NoteModelUnreported},
+			Answers: map[string]provider.Answer{
+				"department": {
+					QuestionID: "department",
+					Primitive:  spec.PrimitiveChoice,
+					Status:     provider.AnswerStatusAnswered,
+					Choice:     strPtr("support"),
+					// Documented Gemini choice probabilities summing to 0.999 in float64.
+					Distribution: map[string]float64{
+						"support": 0.99,
+						"billing": 0.004,
+						"sales":   0.003,
+						"other":   0.002,
+					},
+					Notes: []string{provider.NoteOptionsSortedByProvider},
+				},
+			},
+		}, nil
+	})
+	adapter.name = "fake-gemini"
+	adapter.caps.AuthScheme = provider.AuthScheme{
+		Kind:       provider.AuthKindHeader,
+		HeaderName: "x-goog-api-key",
+	}
+
+	reg := provider.NewRegistry()
+	reg.MustRegister(adapter)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	inst := runtime.Instance{
+		ID:       "inst-gem-1",
+		Name:     "gemini-primary",
+		Adapter:  "fake-gemini",
+		Model:    "gemini-decision-1",
+		Endpoint: srv.URL,
+		Auth: runtime.InstanceAuth{
+			Kind:       "api_key",
+			SecretName: "systemone.instance.inst-gem-1",
+			// Even if Instance.Auth.HeaderName carries another string, placement
+			// comes strictly from the adapter's declared Capabilities.AuthScheme.
+			HeaderName: "X-Ignored-Instance-Header",
+		},
+		Enabled:  true,
+		Revision: 1,
+	}
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry:    reg,
+			Instances:   runtime.StaticInstances(inst),
+			Credentials: runtime.StaticCredential(canaryKey),
+			Logger:      logger,
+		},
+		runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+	)
+	defer rt.CloseIdleConnections()
+
+	dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("broken screen"), runtime.EvalOptions{
+		Consumer: "probe",
+		RuleID:   "route-dept",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "support", dec.String)
+
+	// Wire placement assertions: secret ONLY in x-goog-api-key, never Authorization or X-Ignored-Instance-Header.
+	assert.Equal(t, canaryKey, gotHeaders.Get("x-goog-api-key"))
+	assert.Empty(t, gotHeaders.Get("Authorization"))
+	assert.Empty(t, gotHeaders.Get("X-Ignored-Instance-Header"))
+	for hdr, vals := range gotHeaders {
+		if strings.EqualFold(hdr, "x-goog-api-key") {
+			continue
+		}
+		for _, v := range vals {
+			assert.NotContains(t, v, canaryKey, "header %s leaked secret", hdr)
+		}
+	}
+	assert.NotContains(t, gotQuery, canaryKey)
+	assert.NotContains(t, string(gotBody), canaryKey)
+
+	// Provenance & float-boundary assertions (PV3 brief r1.2 & §5.3).
+	eval := dec.Eval
+	require.NotNil(t, eval)
+	assert.Equal(t, "gemini-decision-1", eval.ConfiguredModel)
+	assert.Empty(t, eval.ResolvedModel)
+	assert.Empty(t, eval.EffectiveResolvedModel())
+	assert.Equal(t, []string{provider.NoteModelUnreported}, eval.Notes, "mergeNotes must dedupe model_unreported to once")
+	require.Len(t, eval.Attempts, 1)
+	assert.Equal(t, "gemini-decision-1", eval.Attempts[0].ConfiguredModel)
+	assert.Empty(t, eval.Attempts[0].ReportedModel)
+
+	deptRec := eval.Answers["department"]
+	assert.Equal(t, map[string]float64{
+		"support": 0.99,
+		"billing": 0.004,
+		"sales":   0.003,
+		"other":   0.002,
+	}, deptRec.Distribution, "runtime must preserve exact probabilities without renormalization")
+	assert.InDelta(t, 0.99, deptRec.Metrics[metrics.NamePTop].Value, 1e-12)
+	assert.InDelta(t, 0.986, deptRec.Metrics[metrics.NameMargin].Value, 1e-12)
+
+	evalJSON, err := json.Marshal(eval)
+	require.NoError(t, err)
+	assert.NotContains(t, string(evalJSON), canaryKey)
+	assert.NotContains(t, logBuf.String(), canaryKey)
+}
+
+func TestRuntime_TransportCacheKeyIsolatesCredentialPlacement(t *testing.T) {
+	const canaryKey = "sk-placement-cache-canary-9090"
+
+	type wireAuthSnapshot struct {
+		authorization string
+		googKey       string
+		altKey        string
+	}
+	var (
+		mu        sync.Mutex
+		wireCalls []wireAuthSnapshot
+		seenTrs   []provider.Transport
+	)
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		wireCalls = append(wireCalls, wireAuthSnapshot{
+			authorization: r.Header.Get("Authorization"),
+			googKey:       r.Header.Get("x-goog-api-key"),
+			altKey:        r.Header.Get("x-alt-api-key"),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	base := newFakeAdapter(nil)
+	base.name = "dynamic-placement"
+	dyn := &dynamicCapsAdapter{
+		fakeAdapter: base,
+		capsFn: func(inst provider.InstanceView) (provider.Capabilities, error) {
+			caps := base.caps
+			switch inst.Options["mode"] {
+			case "goog":
+				caps.AuthScheme = provider.AuthScheme{Kind: provider.AuthKindHeader, HeaderName: "x-goog-api-key"}
+			case "alt":
+				caps.AuthScheme = provider.AuthScheme{Kind: provider.AuthKindHeader, HeaderName: "x-alt-api-key"}
+			default:
+				caps.AuthScheme = provider.AuthBearer
+			}
+			return caps, nil
+		},
+	}
+
+	// Wrap ListModels to also record the provider.Transport pointer received from Runtime.
+	recordingAdapter := &fakeModelListerAdapter{
+		fakeAdapter: base,
+	}
+	_ = recordingAdapter
+	reg := provider.NewRegistry()
+	// Register a wrapper implementing both dynamic Capabilities and transport pointer capture.
+	wrapper := &placementRecordingAdapter{
+		dynamicCapsAdapter: dyn,
+		onTransport: func(tr provider.Transport) {
+			mu.Lock()
+			seenTrs = append(seenTrs, tr)
+			mu.Unlock()
+		},
+	}
+	reg.MustRegister(wrapper)
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry:    reg,
+			Credentials: runtime.StaticCredential(canaryKey),
+		},
+		runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+	)
+	defer rt.CloseIdleConnections()
+
+	// Identical ID, Name, Revision, Endpoint, and InstanceAuth across all calls;
+	// ONLY the adapter-declared placement changes.
+	makeInst := func(mode string) runtime.Instance {
+		return runtime.Instance{
+			ID:       "inst-shared-cache-id",
+			Name:     "shared-name",
+			Revision: 1,
+			Adapter:  "dynamic-placement",
+			Endpoint: srv.URL,
+			Enabled:  true,
+			Auth: runtime.InstanceAuth{
+				Kind:       "api_key",
+				SecretName: "systemone.instance.inst-shared-cache-id",
+			},
+			Options: map[string]string{"mode": mode},
+		}
+	}
+
+	_, err := rt.ListModels(context.Background(), makeInst("bearer"))
+	require.NoError(t, err)
+	_, err = rt.ListModels(context.Background(), makeInst("bearer"))
+	require.NoError(t, err)
+	_, err = rt.ListModels(context.Background(), makeInst("goog"))
+	require.NoError(t, err)
+	_, err = rt.ListModels(context.Background(), makeInst("goog"))
+	require.NoError(t, err)
+	_, err = rt.ListModels(context.Background(), makeInst("alt"))
+	require.NoError(t, err)
+
+	mu.Lock()
+	trs := append([]provider.Transport(nil), seenTrs...)
+	calls := append([]wireAuthSnapshot(nil), wireCalls...)
+	mu.Unlock()
+
+	require.Len(t, trs, 5)
+	assert.Same(t, trs[0], trs[1], "same placement must reuse cached transport")
+	assert.NotSame(t, trs[0], trs[2], "switching bearer -> header:x-goog-api-key must yield distinct cached transport")
+	assert.Same(t, trs[2], trs[3], "same header placement must reuse cached transport")
+	assert.NotSame(t, trs[2], trs[4], "switching header:x-goog-api-key -> header:x-alt-api-key must yield distinct cached transport")
+	assert.NotSame(t, trs[0], trs[4], "bearer and header:x-alt-api-key must not share transport")
+
+	require.Equal(t, []wireAuthSnapshot{
+		{authorization: "Bearer " + canaryKey},
+		{authorization: "Bearer " + canaryKey},
+		{googKey: canaryKey},
+		{googKey: canaryKey},
+		{altKey: canaryKey},
+	}, calls)
+}
+
+type placementRecordingAdapter struct {
+	*dynamicCapsAdapter
+	onTransport func(provider.Transport)
+}
+
+func (a *placementRecordingAdapter) ListModels(ctx context.Context, tr provider.Transport, inst provider.InstanceView) ([]string, error) {
+	if a.onTransport != nil {
+		a.onTransport(tr)
+	}
+	return a.dynamicCapsAdapter.ListModels(ctx, tr, inst)
+}
+
+func TestRuntime_TypeSafeBearerAndDefaultEndpointRegression(t *testing.T) {
+	const typeSafeSecret = "sk-typesafe-regression-canary-112233"
+
+	type recordedWire struct {
+		method string
+		host   string
+		path   string
+		auth   string
+		goog   string
+	}
+	var (
+		mu   sync.Mutex
+		reqs []recordedWire
+	)
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqs = append(reqs, recordedWire{
+			method: r.Method,
+			host:   r.Host,
+			path:   r.URL.Path,
+			auth:   r.Header.Get("Authorization"),
+			goog:   r.Header.Get("x-goog-api-key"),
+		})
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"models":[{"name":"jev-1.14.0","description":"Pinned release.","release_date":"2026-09-15"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"model":"jev-1.14.0","answers":{"q1":{"type":"noul","noul":0.95}},"usage":{"input_tokens":20,"output_tokens":2}}`))
+	}))
+	defer srv.Close()
+
+	reg := provider.NewRegistry()
+	require.NoError(t, jevwire.Register(reg))
+
+	// Instance omits Endpoint ("") so TypeSafe resolves jevwire.DefaultTypeSafeEndpoint ("https://api.typesafe.ai").
+	inst := runtime.Instance{
+		ID:       "inst-ts-default",
+		Name:     "typesafe-default",
+		Adapter:  jevwire.AdapterNameTypeSafe,
+		Model:    "jev-1.14.0",
+		Endpoint: "",
+		Auth: runtime.InstanceAuth{
+			Kind:       "api_key",
+			SecretName: "systemone.instance.inst-ts-default",
+		},
+		Enabled:  true,
+		Revision: 1,
+	}
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry:    reg,
+			Instances:   runtime.StaticInstances(inst),
+			Credentials: runtime.StaticCredential(typeSafeSecret),
+		},
+		runtime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+				targets: map[string]string{"443": srv.Listener.Addr().String()},
+			}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+	defer rt.CloseIdleConnections()
+
+	binSpec := `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
+
+	dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("check default endpoint"), runtime.EvalOptions{})
+	require.NoError(t, err)
+	assert.True(t, dec.Bool)
+
+	models, err := rt.ListModels(context.Background(), inst)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"jev-1.14.0"}, models)
+
+	mu.Lock()
+	gotReqs := append([]recordedWire(nil), reqs...)
+	mu.Unlock()
+
+	require.Equal(t, []recordedWire{
+		{
+			method: http.MethodPost,
+			host:   "api.typesafe.ai",
+			path:   "/v1/systemone",
+			auth:   "Bearer " + typeSafeSecret,
+			goog:   "",
+		},
+		{
+			method: http.MethodGet,
+			host:   "api.typesafe.ai",
+			path:   "/v1/models",
+			auth:   "Bearer " + typeSafeSecret,
+			goog:   "",
+		},
+	}, gotReqs)
 }
