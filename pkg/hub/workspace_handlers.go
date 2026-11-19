@@ -578,6 +578,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if relayBrokerRefusal(w, err) {
 				return
 			}
+			if s.writeFinalizeBrokerRuntimeUnavailable(ctx, w, agent, err) {
+				return
+			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
 			return
 		}
