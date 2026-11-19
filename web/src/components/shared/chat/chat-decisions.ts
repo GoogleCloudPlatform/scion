@@ -1103,9 +1103,10 @@ export class ScionChatDecisions extends LitElement {
         return;
       }
       if (res.decision) {
-        // 409 (`already_answered`, `replaced`) or Hub-shaped 403 (`not_recorded_answerer`,
-        // where `writeNotRecordedAnswerer` includes `details.decision`): refresh the card
-        // to the authoritative view (read-only for non-owner, not blocked) and warn.
+        // 409 (`already_answered`, `replaced`, `withdrawn`) or Hub-shaped 403
+        // (`not_recorded_answerer`, where `writeNotRecordedAnswerer` includes
+        // `details.decision`): refresh the card to the authoritative view (read-only
+        // for non-owner, not blocked) and warn.
         this.pendingChange = null;
         this.applyOwn(res.decision);
         if (res.code === 'already_answered') {

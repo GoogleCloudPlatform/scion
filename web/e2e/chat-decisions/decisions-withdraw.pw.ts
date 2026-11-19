@@ -36,7 +36,7 @@ import * as fs from 'node:fs';
 import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { createTestAgent, type AgentSender } from '../harness/agent.js';
 import { createSession, type AuthSession } from '../harness/auth.js';
-import { readHubState, type HubState } from '../harness/hub.js';
+import { hubBinaryPath, readHubState, type HubState } from '../harness/hub.js';
 import { stateFile } from './state.js';
 
 interface TrackedEventSourceInfo {
@@ -48,8 +48,6 @@ interface HubApiResponse<T = unknown> {
   status: number;
   body: T;
 }
-
-const HUB_BINARY = path.resolve(process.cwd(), '..', 'build', 'scion');
 
 async function hubApi<T = unknown>(
   hub: HubState,
@@ -127,7 +125,7 @@ function runAgentScionCli(
   cleanEnv.SCION_HUB_ENDPOINT = hub.baseURL;
   cleanEnv.SCION_AUTH_TOKEN = agent.token;
   cleanEnv.SCION_PROJECT_ID = agent.projectId;
-  return execFileSync(HUB_BINARY, args, {
+  return execFileSync(hubBinaryPath(), args, {
     env: cleanEnv,
     encoding: 'utf8',
     timeout: 15_000,
