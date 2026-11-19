@@ -56,7 +56,18 @@ const (
 	// MaxProviderErrorMessageBytes bounds content-free diagnostic text on ProviderError
 	// (runtime-design §10).
 	MaxProviderErrorMessageBytes = 256
+
+	// AuthHintTokenScopeInsufficient is the closed, content-free auth reason hint
+	// recorded when a provider rejects an OAuth access token specifically for
+	// insufficient scope (PV3 brief Addendum E §E3).
+	AuthHintTokenScopeInsufficient = "token_scope_insufficient"
 )
+
+// IsValidAuthHint reports whether hint belongs to the closed set of content-free
+// auth failure hints allowed in Evaluation.Auth.ReasonHint.
+func IsValidAuthHint(hint string) bool {
+	return hint == AuthHintTokenScopeInsufficient
+}
 
 var closedFailReasons = []FailReason{
 	FailTimeout,
@@ -162,6 +173,7 @@ type ProviderError struct {
 	RetryAfter time.Duration
 	HTTPStatus int
 	Message    string
+	AuthHint   string
 }
 
 // NewProviderError constructs a *ProviderError with Message truncated on a
@@ -206,11 +218,17 @@ func AsProviderError(err error) (*ProviderError, bool) {
 	if errors.As(err, &ptr) && ptr != nil {
 		cp := *ptr
 		cp.Message = truncateUTF8(cp.Message, MaxProviderErrorMessageBytes)
+		if !IsValidAuthHint(cp.AuthHint) {
+			cp.AuthHint = ""
+		}
 		return &cp, true
 	}
 	var val ProviderError
 	if errors.As(err, &val) {
 		val.Message = truncateUTF8(val.Message, MaxProviderErrorMessageBytes)
+		if !IsValidAuthHint(val.AuthHint) {
+			val.AuthHint = ""
+		}
 		return &val, true
 	}
 	return nil, false

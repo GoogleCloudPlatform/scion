@@ -23,11 +23,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -42,6 +45,7 @@ import (
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 )
 
 const inProcessSystemOneHubID = "system-one-test-hub"
@@ -72,6 +76,11 @@ func startInProcessSystemOneHub(t *testing.T) *inProcessSystemOneHub {
 	}, s)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+
+	// Never fall through to ambient FindDefaultCredentials/metadata in tests.
+	srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*hub.SystemOneADCCredentials, error) {
+		return nil, egress.ErrAuth
+	})
 
 	localBackend := secret.NewLocalBackend(s, inProcessSystemOneHubID, "system-one-test-signing-key")
 	srv.SetSecretBackend(localBackend)
@@ -471,4 +480,324 @@ func TestAdminSystemOne_GeminiDecisionsVerticalProbeAndTypeSafeRegression(t *tes
 	assert.Empty(t, calls[4].goog)
 	assert.NotContains(t, calls[4].body, typeSafeSecret)
 	mu.Unlock()
+}
+
+type fakeCLIADCTokenSource struct {
+	fn func() (*oauth2.Token, error)
+}
+
+func (f fakeCLIADCTokenSource) Token() (*oauth2.Token, error) {
+	return f.fn()
+}
+
+func TestAdminSystemOne_GeminiADCVerticalRoundTripProbeAndRedaction(t *testing.T) {
+	// Synthetic from docs (not recorded from the live API): ai.google.dev/gemini-api/docs/decisions-api & api/decisions.
+	resetAdminSystemOneFlags(t)
+	env := startInProcessSystemOneHub(t)
+
+	const (
+		adcCanaryToken = "fake-adc-token-CANARY-cli-8414"
+		scopeTestURL   = "https://www.googleapis.com/auth/test-decisions-scope"
+		saEmail        = "so-cli-test@proj-alpha.iam.gserviceaccount.com"
+		errBodyCanary  = "CANARY_CLI_403_SCOPE_ERROR_DETAIL_8414"
+	)
+
+	var (
+		tokenMints atomic.Int32
+		providerMu sync.Mutex
+		geminiCode = http.StatusOK
+		geminiResp = `{
+			"answers": {
+				"mentions_tests": {"type": "noul", "noul": 0.96, "confidence": 0.96},
+				"build_outcome": {
+					"type": "choice",
+					"choice": "passed",
+					"confidence": 0.94,
+					"probabilities": {"failed": 0.03, "passed": 0.94, "unknown": 0.03}
+				}
+			},
+			"usage": {"total_input_tokens": 44, "total_output_tokens": 3}
+		}`
+	)
+
+	type recordedADCRequest struct {
+		path        string
+		authHeader  string
+		googAPIKey  string
+		userProject string
+		body        string
+	}
+	var recorded []recordedADCRequest
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		if r.Body != nil {
+			_, _ = buf.ReadFrom(r.Body)
+			_ = r.Body.Close()
+		}
+		providerMu.Lock()
+		recorded = append(recorded, recordedADCRequest{
+			path:        r.URL.Path,
+			authHeader:  r.Header.Get("Authorization"),
+			googAPIKey:  r.Header.Get("x-goog-api-key"),
+			userProject: r.Header.Get("X-Goog-User-Project"),
+			body:        buf.String(),
+		})
+		code := geminiCode
+		body := geminiResp
+		providerMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	env.server.SetSystemOneRuntimeOptionsForTesting(
+		t,
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+	env.server.SetSystemOneADCForTesting(t, func(_ context.Context, scopes []string) (*hub.SystemOneADCCredentials, error) {
+		require.Equal(t, []string{scopeTestURL}, scopes)
+		return &hub.SystemOneADCCredentials{
+			CredentialType:      hub.SystemOneADCTypeServiceAccount,
+			ServiceAccountEmail: saEmail,
+			TokenSource: fakeCLIADCTokenSource{fn: func() (*oauth2.Token, error) {
+				tokenMints.Add(1)
+				return &oauth2.Token{
+					AccessToken: adcCanaryToken,
+					Expiry:      time.Now().Add(45 * time.Minute),
+				}, nil
+			}},
+		}, nil
+	})
+
+	specRaw := buildSystemOneLiveProbeSpec(t)
+	specFile := filepath.Join(t.TempDir(), "probe-spec.json")
+	require.NoError(t, os.WriteFile(specFile, specRaw, 0o600))
+
+	// 1. Create keyless ADC instance without --quota-project (implicit SA project association).
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	createImpOut, createImpErr, err := executeAdminSystemOneSubcmd(t, []string{
+		"create", "gemini-adc-implicit",
+		"--adapter", geminidecisions.AdapterName,
+		"--model", "gemini-decision-1",
+		"--endpoint", tlsSrv.URL,
+		"--auth-kind", "google_access_token",
+		"--auth-scope", scopeTestURL,
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, createImpOut, "Created System One instance gemini-adc-implicit")
+	assert.Contains(t, createImpOut, "Auth Kind:       google_access_token")
+	assert.Contains(t, createImpOut, "Scopes:          "+scopeTestURL)
+	assert.Contains(t, createImpOut, "Quota Project:   implicit (service account association)")
+	assert.Contains(t, createImpOut, "Credential Type: service_account")
+	assert.Contains(t, createImpOut, "Service Account: "+saEmail)
+	assert.NotContains(t, createImpOut, "Secret:")
+	assert.NotContains(t, createImpOut, adcCanaryToken)
+	assert.NotContains(t, createImpErr, adcCanaryToken)
+
+	// Confirm zero System One instance secrets created for keyless ADC.
+	secretsList, err := env.secretStore.List(context.Background(), secret.Filter{
+		Scope:   store.ScopeHub,
+		ScopeID: inProcessSystemOneHubID,
+	})
+	require.NoError(t, err)
+	for _, sm := range secretsList {
+		assert.False(t, strings.HasPrefix(sm.Name, "systemone.instance."),
+			"google_access_token instance must not create any systemone.instance.* secret (found %q)", sm.Name)
+	}
+
+	// 2. Create second keyless ADC instance WITH --quota-project billing-proj-42.
+	resetAdminSystemOneFlags(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	createExpOut, createExpErr, err := executeAdminSystemOneSubcmd(t, []string{
+		"create", "gemini-adc-explicit",
+		"--adapter", geminidecisions.AdapterName,
+		"--model", "gemini-decision-1",
+		"--endpoint", tlsSrv.URL,
+		"--auth-kind", "google_access_token",
+		"--auth-scope", scopeTestURL,
+		"--quota-project", "billing-proj-42",
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, createExpOut, "Quota Project:   explicit: billing-proj-42")
+	assert.NotContains(t, createExpOut, adcCanaryToken)
+	assert.NotContains(t, createExpErr, adcCanaryToken)
+
+	// 3. List both instances in human and JSON modes; verify metadata and zero canary leakage.
+	resetAdminSystemOneFlags(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	listHuman, listHumanErr, err := executeAdminSystemOneSubcmd(t, []string{"list"}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, listHuman, "gemini-adc-implicit")
+	assert.Contains(t, listHuman, "gemini-adc-explicit")
+	assert.Contains(t, listHuman, "implicit (service account association)")
+	assert.Contains(t, listHuman, "explicit: billing-proj-42")
+	assert.Contains(t, listHuman, "service_account ("+saEmail+")")
+	assert.NotContains(t, listHuman, adcCanaryToken)
+	assert.NotContains(t, listHumanErr, adcCanaryToken)
+
+	// 4. Probe implicit instance: sends Authorization: Bearer <token>, NO x-goog-api-key, NO X-Goog-User-Project.
+	resetAdminSystemOneFlags(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	probeImpOut, probeImpErr, err := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-adc-implicit",
+		"--spec-file", specFile,
+		"--text", "All 18 automated unit tests passed.",
+	}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, probeImpOut, "Class: success")
+	assert.Contains(t, probeImpOut, "Auth Kind:            google_access_token")
+	assert.Contains(t, probeImpOut, "Auth Scopes:          "+scopeTestURL)
+	assert.Contains(t, probeImpOut, "Quota Project:        implicit (service account association)")
+	assert.Contains(t, probeImpOut, "Credential Type:      service_account")
+	assert.Contains(t, probeImpOut, "Service Account:      "+saEmail)
+	assert.NotContains(t, probeImpOut, adcCanaryToken)
+	assert.NotContains(t, probeImpErr, adcCanaryToken)
+
+	// 5. Probe explicit instance in JSON mode: sends Authorization: Bearer <token> AND X-Goog-User-Project: billing-proj-42.
+	resetAdminSystemOneFlags(t)
+	outputFormat = "json"
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	probeExpJSON, probeExpErr, err := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-adc-explicit",
+		"--spec-file", specFile,
+		"--text", "All 18 automated unit tests passed.",
+	}, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, probeExpJSON, adcCanaryToken)
+	assert.NotContains(t, probeExpErr, adcCanaryToken)
+
+	var parsedProbe hubclient.ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal([]byte(probeExpJSON), &parsedProbe))
+	require.NotNil(t, parsedProbe.Evaluation)
+	require.NotNil(t, parsedProbe.Evaluation.Auth)
+	assert.Equal(t, "google_access_token", parsedProbe.Evaluation.Auth.AuthKind)
+	assert.Equal(t, "explicit: billing-proj-42", parsedProbe.Evaluation.Auth.QuotaProject)
+	assert.Equal(t, "service_account", parsedProbe.Evaluation.Auth.CredentialType)
+	assert.Equal(t, saEmail, parsedProbe.Evaluation.Auth.ServiceAccountEmail)
+
+	// Both instances share the same canonical scope set, so ReuseTokenSource minted only once.
+	assert.Equal(t, int32(1), tokenMints.Load())
+
+	providerMu.Lock()
+	require.Len(t, recorded, 2)
+	assert.Equal(t, "/v1beta/decisions", recorded[0].path)
+	assert.Equal(t, "Bearer "+adcCanaryToken, recorded[0].authHeader)
+	assert.Empty(t, recorded[0].googAPIKey)
+	assert.Empty(t, recorded[0].userProject)
+	assert.NotContains(t, recorded[0].body, adcCanaryToken)
+
+	assert.Equal(t, "/v1beta/decisions", recorded[1].path)
+	assert.Equal(t, "Bearer "+adcCanaryToken, recorded[1].authHeader)
+	assert.Empty(t, recorded[1].googAPIKey)
+	assert.Equal(t, "billing-proj-42", recorded[1].userProject)
+	assert.NotContains(t, recorded[1].body, adcCanaryToken)
+	providerMu.Unlock()
+
+	// 6. Provider 403 ACCESS_TOKEN_SCOPE_INSUFFICIENT -> failed (auth), requests=1, content-free hint, error body redacted.
+	providerMu.Lock()
+	geminiCode = http.StatusForbidden
+	geminiResp = fmt.Sprintf(`{"error":{"code":403,"message":%q,"status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}`, errBodyCanary)
+	providerMu.Unlock()
+
+	resetAdminSystemOneFlags(t)
+	restoreAllSilenceUsage(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	scopeFailOut, scopeFailStderr, scopeFailErr := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-adc-implicit",
+		"--spec-file", specFile,
+		"--text", "Scope rejection check.",
+	}, nil)
+	require.Error(t, scopeFailErr)
+	assert.Equal(t, 1, exitCodeFor(scopeFailErr))
+	assert.Contains(t, scopeFailOut, "Class: failed")
+	assert.Contains(t, scopeFailOut, "Reason: auth")
+	assert.Contains(t, scopeFailOut, "Auth Hint:            token_scope_insufficient")
+	assert.Contains(t, scopeFailOut, "status=4xx")
+	assert.Contains(t, scopeFailOut, "requests=1")
+	for _, s := range []string{scopeFailOut, scopeFailStderr, scopeFailErr.Error()} {
+		assert.NotContains(t, s, adcCanaryToken)
+		assert.NotContains(t, s, errBodyCanary)
+	}
+
+	// 7. Pre-call authorized_user without quota_project -> failed (auth), requests=0 (zero HTTP calls).
+	providerMu.Lock()
+	callsBeforePreCall := len(recorded)
+	providerMu.Unlock()
+
+	env.server.SetSystemOneADCForTesting(t, func(_ context.Context, _ []string) (*hub.SystemOneADCCredentials, error) {
+		return &hub.SystemOneADCCredentials{
+			CredentialType: hub.SystemOneADCTypeAuthorizedUser,
+			TokenSource: fakeCLIADCTokenSource{fn: func() (*oauth2.Token, error) {
+				return &oauth2.Token{AccessToken: adcCanaryToken, Expiry: time.Now().Add(time.Hour)}, nil
+			}},
+		}, nil
+	})
+
+	resetAdminSystemOneFlags(t)
+	restoreAllSilenceUsage(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	auOut, _, auErr := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-adc-implicit",
+		"--spec-file", specFile,
+		"--text", "Authorized user without quota project.",
+	}, nil)
+	require.Error(t, auErr)
+	assert.Contains(t, auOut, "Class: failed")
+	assert.Contains(t, auOut, "Reason: auth")
+	assert.Contains(t, auOut, "requests=0")
+	assert.NotContains(t, auOut, adcCanaryToken)
+
+	// 8. Pre-call transient ADC outage -> failed (unavailable), requests=0 (zero HTTP calls).
+	env.server.SetSystemOneADCForTesting(t, func(_ context.Context, _ []string) (*hub.SystemOneADCCredentials, error) {
+		return nil, &url.Error{Op: "Get", URL: "http://169.254.169.254/computeMetadata/v1", Err: context.DeadlineExceeded}
+	})
+
+	resetAdminSystemOneFlags(t)
+	restoreAllSilenceUsage(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	unavailOut, _, unavailErr := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-adc-explicit",
+		"--spec-file", specFile,
+		"--text", "Transient metadata outage.",
+	}, nil)
+	require.Error(t, unavailErr)
+	assert.Contains(t, unavailOut, "Class: failed")
+	assert.Contains(t, unavailOut, "Reason: unavailable")
+	assert.Contains(t, unavailOut, "requests=0")
+
+	providerMu.Lock()
+	assert.Len(t, recorded, callsBeforePreCall, "pre-call ADC failures must make zero provider HTTP calls")
+	providerMu.Unlock()
+
+	// 9. Delete both keyless ADC instances cleanly via CLI.
+	for _, name := range []string{"gemini-adc-implicit", "gemini-adc-explicit"} {
+		resetAdminSystemOneFlags(t)
+		systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+			return env.client.SystemOne(), nil
+		}
+		delOut, _, delErr := executeAdminSystemOneSubcmd(t, []string{"delete", name}, nil)
+		require.NoError(t, delErr)
+		assert.Contains(t, delOut, "Deleted System One instance "+name)
+	}
 }

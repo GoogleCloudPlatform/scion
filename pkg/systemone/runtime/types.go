@@ -245,6 +245,7 @@ type AuthProvenance struct {
 	QuotaProject        string   `json:"quota_project,omitempty"`
 	CredentialType      string   `json:"credential_type,omitempty"`
 	ServiceAccountEmail string   `json:"service_account_email,omitempty"`
+	ReasonHint          string   `json:"reason_hint,omitempty"`
 }
 
 // Evaluation is the content-free provenance record returned on every evaluation

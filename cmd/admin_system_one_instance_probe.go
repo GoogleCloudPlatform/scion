@@ -248,6 +248,28 @@ func renderAdminSystemOneEvaluationHuman(out io.Writer, eval *systemoneruntime.E
 		_, _ = fmt.Fprintf(out, "  Resolved Model:       unreported (%s)\n", provider.NoteModelUnreported)
 	}
 	_, _ = fmt.Fprintf(out, "  Model Alias Reported: %t\n", eval.HasModelAliasReported())
+	if eval.Auth != nil {
+		if eval.Auth.AuthKind != "" {
+			_, _ = fmt.Fprintf(out, "  Auth Kind:            %s\n", eval.Auth.AuthKind)
+		}
+		if len(eval.Auth.Scopes) > 0 {
+			_, _ = fmt.Fprintf(out, "  Auth Scopes:          %s\n", strings.Join(eval.Auth.Scopes, ", "))
+		}
+		if eval.Auth.QuotaProject != "" {
+			_, _ = fmt.Fprintf(out, "  Quota Project:        %s\n", eval.Auth.QuotaProject)
+		} else if eval.Auth.AuthKind == string(provider.AuthKindGoogleAccessToken) {
+			_, _ = fmt.Fprintf(out, "  Quota Project:        %s\n", provider.FormatQuotaProjectProvenance(""))
+		}
+		if eval.Auth.CredentialType != "" {
+			_, _ = fmt.Fprintf(out, "  Credential Type:      %s\n", eval.Auth.CredentialType)
+		}
+		if eval.Auth.ServiceAccountEmail != "" {
+			_, _ = fmt.Fprintf(out, "  Service Account:      %s\n", eval.Auth.ServiceAccountEmail)
+		}
+		if eval.Auth.ReasonHint != "" {
+			_, _ = fmt.Fprintf(out, "  Auth Hint:            %s\n", eval.Auth.ReasonHint)
+		}
+	}
 	if eval.Usage != nil && !eval.HasUsageUnreported() {
 		if eval.Usage.Truncated != nil {
 			_, _ = fmt.Fprintf(out, "  Usage:                input_tokens=%d, output_tokens=%d, truncated=%t\n",

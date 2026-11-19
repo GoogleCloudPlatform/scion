@@ -524,6 +524,12 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		if statusClass != "" {
 			attempt.HTTPStatusClass = statusClass
 		}
+		if pe, ok := provider.AsProviderError(invokeErr); ok && provider.IsValidAuthHint(pe.AuthHint) {
+			if eval.Auth == nil {
+				eval.Auth = &AuthProvenance{AuthKind: inst.Auth.Kind}
+			}
+			eval.Auth.ReasonHint = pe.AuthHint
+		}
 		attempt.Outcome = AttemptFailed
 		attempt.Reason = string(reason)
 		eval.Attempts = []Attempt{attempt}

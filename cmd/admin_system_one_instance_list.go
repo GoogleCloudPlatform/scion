@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/spf13/cobra"
 )
 
@@ -87,23 +88,48 @@ func runAdminSystemOneInstanceList(cmd *cobra.Command, _ []string) error {
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "NAME\tADAPTER\tMODEL\tENDPOINT\tENABLED\tSECRET\tUPDATED")
+	_, _ = fmt.Fprintln(tw, "NAME\tADAPTER\tMODEL\tENDPOINT\tAUTH\tENABLED\tSECRET\tSCOPES\tQUOTA PROJECT\tCREDENTIAL\tUPDATED")
 	for _, inst := range resp.Instances {
 		model := inst.Model
 		if model == "" {
 			model = "-"
 		}
+		authKind := inst.Auth.Kind
+		if authKind == "" {
+			authKind = "-"
+		}
 		secretName := inst.Auth.SecretName
 		if secretName == "" {
 			secretName = "-"
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\t%s\n",
+		scopes := "-"
+		if len(inst.Auth.Scopes) > 0 {
+			scopes = strings.Join(inst.Auth.Scopes, ",")
+		}
+		quotaProj := inst.Auth.QuotaProject
+		if quotaProj == "" && inst.Auth.Kind == string(provider.AuthKindGoogleAccessToken) {
+			quotaProj = provider.FormatQuotaProjectProvenance(inst.Options[provider.OptionQuotaProject])
+		}
+		if quotaProj == "" {
+			quotaProj = "-"
+		}
+		credInfo := inst.Auth.CredentialType
+		if credInfo == "" {
+			credInfo = "-"
+		} else if inst.Auth.ServiceAccountEmail != "" {
+			credInfo = credInfo + " (" + inst.Auth.ServiceAccountEmail + ")"
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%t\t%s\t%s\t%s\t%s\t%s\n",
 			inst.Name,
 			inst.Adapter,
 			model,
 			inst.Endpoint,
+			authKind,
 			inst.Enabled,
 			secretName,
+			scopes,
+			quotaProj,
+			credInfo,
 			clitime.Format(inst.UpdatedAt, clitime.Full),
 		)
 	}

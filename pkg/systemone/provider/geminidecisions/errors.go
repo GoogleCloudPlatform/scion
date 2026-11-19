@@ -175,16 +175,20 @@ func classifyHTTPError(status int, hdr http.Header, body []byte, now time.Time) 
 
 	case http.StatusUnauthorized, http.StatusForbidden:
 		msg := fmt.Sprintf("provider authentication rejected (HTTP %d)", status)
+		var authHint string
 		if strings.EqualFold(parsed.reason, "ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
 			msg = fmt.Sprintf("provider authentication rejected: insufficient access token scope (HTTP %d)", status)
+			authHint = provider.AuthHintTokenScopeInsufficient
 		}
-		return provider.NewProviderError(
+		pe := provider.NewProviderError(
 			provider.FailAuth,
 			false,
 			0,
 			status,
 			msg,
 		)
+		pe.AuthHint = authHint
+		return pe
 
 	case http.StatusNotFound:
 		return provider.NewProviderError(

@@ -226,6 +226,10 @@ func ValidateQuotaProject(projectID string) error {
 	return nil
 }
 
+func isLowerAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
+}
+
 func isGCPProjectID(s string) bool {
 	if len(s) < minGCPProjectIDLen || len(s) > maxGCPProjectIDLen {
 		return false
@@ -233,13 +237,12 @@ func isGCPProjectID(s string) bool {
 	if s[0] < 'a' || s[0] > 'z' {
 		return false
 	}
-	last := s[len(s)-1]
-	if !((last >= 'a' && last <= 'z') || (last >= '0' && last <= '9')) {
+	if !isLowerAlnum(s[len(s)-1]) {
 		return false
 	}
 	for i := 1; i < len(s)-1; i++ {
 		b := s[i]
-		if !((b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-') {
+		if !isLowerAlnum(b) && b != '-' {
 			return false
 		}
 	}

@@ -24,6 +24,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -33,6 +35,9 @@ type adminSystemOneCreateFlags struct {
 	model          string
 	endpoint       string
 	location       string
+	authKind       string
+	authScopes     []string
+	quotaProject   string
 	keyFile        string
 	keyStdin       bool
 	options        []string
@@ -50,9 +55,31 @@ var adminSystemOneInstanceCreateCmd = &cobra.Command{
 	Short: "Register a Hub System One provider instance",
 	Long: `Register a System One provider instance on the Hub.
 
-For security, the provider API key is read ONLY from standard input (piped or
-with --key-stdin) or from --key-file <path>. Passing the key via positional
-arguments, command-line flags, or environment variables is not supported.
+When --auth-kind is api_key (the default), the provider API key is read ONLY
+from standard input (piped or with --key-stdin) or from --key-file <path>.
+Passing the key via positional arguments, command-line flags, or environment
+variables is not supported.
+
+When --auth-kind is google_access_token (supported on gemini_decisions), the Hub
+acquires OAuth2 access tokens in memory via Google Application Default
+Credentials (ADC) and stores no secret or token:
+  - Pass --auth-scope explicitly (repeatable; must start with
+    https://www.googleapis.com/auth/). The required Decisions scope is
+    unverified (U-G9); cloud-platform alone was observed insufficient; pass
+    --auth-scope explicitly.
+  - ADC prerequisites: enable the Generative Language API on a paid-tier GCP
+    project, and ensure GCE/GKE VM or node access scopes permit the requested
+    OAuth scope.
+  - --quota-project is optional and unset by default for service-account and
+    metadata/Workload Identity ADC (omitting x-goog-user-project so the service
+    account's associated project bills). Set --quota-project only to bill a
+    deliberate, different project where the principal has
+    serviceusage.services.use, or when using authorized_user ADC (where
+    --quota-project is required).
+  - Do not combine --auth-kind google_access_token with --key-stdin or
+    --key-file.
+  - ADC credentials and token sources are cached in memory per scope set; a
+    changed ADC environment requires a Hub restart.
 
 Examples:
   # Register a TypeSafe instance reading the API key from a file
@@ -71,7 +98,14 @@ Examples:
   scion admin system-one instance create gemini-main \
     --adapter gemini_decisions \
     --model gemini-decision-1 \
-    --key-stdin < /path/to/gemini-key.txt`,
+    --key-stdin < /path/to/gemini-key.txt
+
+  # Register a keyless ADC Gemini Decision 1 instance with an explicit scope
+  scion admin system-one instance create gemini-adc \
+    --adapter gemini_decisions \
+    --model gemini-decision-1 \
+    --auth-kind google_access_token \
+    --auth-scope https://www.googleapis.com/auth/<scope>`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return errors.New("instance name is required")
@@ -90,6 +124,9 @@ func init() {
 	f.StringVar(&adminSystemOneCreateOpts.model, "model", "", "Provider model identifier (required for typesafe and gemini_decisions, e.g. jev-1.14.0 or gemini-decision-1)")
 	f.StringVar(&adminSystemOneCreateOpts.endpoint, "endpoint", "", "Provider base HTTPS URL (defaults to adapter default when supported; required otherwise)")
 	f.StringVar(&adminSystemOneCreateOpts.location, "location", "", "Optional provider location or region")
+	f.StringVar(&adminSystemOneCreateOpts.authKind, "auth-kind", "api_key", "Authentication kind (api_key or google_access_token)")
+	f.StringArrayVar(&adminSystemOneCreateOpts.authScopes, "auth-scope", nil, "OAuth2 scope URL for --auth-kind google_access_token (repeatable; required for google_access_token; must start with https://www.googleapis.com/auth/)")
+	f.StringVar(&adminSystemOneCreateOpts.quotaProject, "quota-project", "", "Optional GCP billing/quota project ID for --auth-kind google_access_token (sent as x-goog-user-project; required only for authorized_user ADC)")
 	f.StringVar(&adminSystemOneCreateOpts.keyFile, "key-file", "", "Path to file containing the provider API key (or '-' for stdin)")
 	f.BoolVar(&adminSystemOneCreateOpts.keyStdin, "key-stdin", false, "Read the provider API key from standard input")
 	f.StringArrayVar(&adminSystemOneCreateOpts.options, "option", nil, "Non-secret adapter option as KEY=VALUE (repeatable)")
@@ -113,9 +150,66 @@ func runAdminSystemOneInstanceCreate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	apiKey, err := readAdminSystemOneAPIKey(cmd, adminSystemOneCreateOpts.keyFile, adminSystemOneCreateOpts.keyStdin)
-	if err != nil {
-		return err
+	authKind := strings.TrimSpace(adminSystemOneCreateOpts.authKind)
+	if authKind == "" {
+		authKind = "api_key"
+	}
+
+	var (
+		apiKey  string
+		authReq *hubclient.CreateSystemOneInstanceAuthRequest
+	)
+	switch authKind {
+	case "api_key":
+		if len(adminSystemOneCreateOpts.authScopes) > 0 {
+			return errors.New("--auth-scope is only supported with --auth-kind google_access_token")
+		}
+		if strings.TrimSpace(adminSystemOneCreateOpts.quotaProject) != "" {
+			return errors.New("--quota-project is only supported with --auth-kind google_access_token")
+		}
+		if _, hasOptQP := optsMap[provider.OptionQuotaProject]; hasOptQP {
+			return errors.New("option quota_project is only supported with --auth-kind google_access_token")
+		}
+		apiKey, err = readAdminSystemOneAPIKey(cmd, adminSystemOneCreateOpts.keyFile, adminSystemOneCreateOpts.keyStdin)
+		if err != nil {
+			return err
+		}
+		authReq = &hubclient.CreateSystemOneInstanceAuthRequest{
+			Kind:   "api_key",
+			APIKey: apiKey,
+		}
+
+	case string(provider.AuthKindGoogleAccessToken):
+		if adminSystemOneCreateOpts.keyStdin || strings.TrimSpace(adminSystemOneCreateOpts.keyFile) != "" {
+			return errors.New("--key-stdin and --key-file cannot be combined with --auth-kind google_access_token")
+		}
+		cleanScopes, scopeErr := validateAdminSystemOneCLIScopes(adminSystemOneCreateOpts.authScopes)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		qp := strings.TrimSpace(adminSystemOneCreateOpts.quotaProject)
+		if optQP, hasOptQP := optsMap[provider.OptionQuotaProject]; hasOptQP {
+			if qp != "" && qp != optQP {
+				return errors.New("conflicting --quota-project and --option quota_project values")
+			}
+			qp = optQP
+		}
+		if qp != "" || cmd.Flags().Changed("quota-project") {
+			if err := egress.ValidateQuotaProject(qp); err != nil {
+				return errors.New("invalid --quota-project: must be a valid GCP project ID (6..30 lowercase letters, digits, or hyphens)")
+			}
+			if optsMap == nil {
+				optsMap = make(map[string]string, 1)
+			}
+			optsMap[provider.OptionQuotaProject] = qp
+		}
+		authReq = &hubclient.CreateSystemOneInstanceAuthRequest{
+			Kind:   string(provider.AuthKindGoogleAccessToken),
+			Scopes: cleanScopes,
+		}
+
+	default:
+		return fmt.Errorf("unsupported --auth-kind %q (supported: api_key, google_access_token)", authKind)
 	}
 
 	var limits *hubclient.SystemOneInstanceLimitsDTO
@@ -138,13 +232,10 @@ func runAdminSystemOneInstanceCreate(cmd *cobra.Command, args []string) error {
 		Model:    strings.TrimSpace(adminSystemOneCreateOpts.model),
 		Endpoint: strings.TrimSpace(adminSystemOneCreateOpts.endpoint),
 		Location: strings.TrimSpace(adminSystemOneCreateOpts.location),
-		Auth: &hubclient.CreateSystemOneInstanceAuthRequest{
-			Kind:   "api_key",
-			APIKey: apiKey,
-		},
-		Options: optsMap,
-		Limits:  limits,
-		Enabled: &enabled,
+		Auth:     authReq,
+		Options:  optsMap,
+		Limits:   limits,
+		Enabled:  &enabled,
 	}
 
 	svc, ctx, cancel, err := systemOneAdminService(cmd, adminSystemOneDefaultTimeout)
@@ -171,11 +262,56 @@ func runAdminSystemOneInstanceCreate(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(out, "  Endpoint: %s\n", inst.Endpoint)
 	_, _ = fmt.Fprintf(out, "  Enabled:  %t\n", inst.Enabled)
+	if inst.Auth.Kind != "" {
+		_, _ = fmt.Fprintf(out, "  Auth Kind:       %s\n", inst.Auth.Kind)
+	}
 	if inst.Auth.SecretName != "" {
 		_, _ = fmt.Fprintf(out, "  Secret:   %s\n", inst.Auth.SecretName)
 	}
+	if len(inst.Auth.Scopes) > 0 {
+		_, _ = fmt.Fprintf(out, "  Scopes:          %s\n", strings.Join(inst.Auth.Scopes, ", "))
+	}
+	if inst.Auth.QuotaProject != "" {
+		_, _ = fmt.Fprintf(out, "  Quota Project:   %s\n", inst.Auth.QuotaProject)
+	} else if inst.Auth.Kind == string(provider.AuthKindGoogleAccessToken) {
+		_, _ = fmt.Fprintf(out, "  Quota Project:   %s\n", provider.FormatQuotaProjectProvenance(inst.Options[provider.OptionQuotaProject]))
+	}
+	if inst.Auth.CredentialType != "" {
+		_, _ = fmt.Fprintf(out, "  Credential Type: %s\n", inst.Auth.CredentialType)
+	}
+	if inst.Auth.ServiceAccountEmail != "" {
+		_, _ = fmt.Fprintf(out, "  Service Account: %s\n", inst.Auth.ServiceAccountEmail)
+	}
 	_, _ = fmt.Fprintf(out, "  Created:  %s\n", clitime.Format(inst.CreatedAt, clitime.Full))
 	return nil
+}
+
+func validateAdminSystemOneCLIScopes(scopes []string) ([]string, error) {
+	if len(scopes) == 0 {
+		return nil, errors.New("--auth-scope is required with --auth-kind google_access_token (the required Decisions scope is unverified; pass --auth-scope explicitly)")
+	}
+	seen := make(map[string]struct{}, len(scopes))
+	clean := make([]string, 0, len(scopes))
+	for _, raw := range scopes {
+		s := strings.TrimSpace(raw)
+		if s == "" || s != raw {
+			return nil, errors.New("invalid --auth-scope: must be a non-empty trimmed https://www.googleapis.com/auth/ URL")
+		}
+		if !strings.HasPrefix(s, provider.GoogleScopePrefix) || len(s) <= len(provider.GoogleScopePrefix) {
+			return nil, fmt.Errorf("invalid --auth-scope %q: must start with %s", s, provider.GoogleScopePrefix)
+		}
+		for i := 0; i < len(s); i++ {
+			b := s[i]
+			if b < 0x21 || b > 0x7e || b == '?' || b == '#' {
+				return nil, errors.New("invalid --auth-scope: contains disallowed URL characters")
+			}
+		}
+		if _, dup := seen[s]; !dup {
+			seen[s] = struct{}{}
+			clean = append(clean, s)
+		}
+	}
+	return clean, nil
 }
 
 // readAdminSystemOneAPIKey reads the credential exclusively from --key-file or

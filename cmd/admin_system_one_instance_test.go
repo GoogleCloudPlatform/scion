@@ -62,6 +62,7 @@ func resetAdminSystemOneFlags(t *testing.T) {
 	} {
 		resetFlagSet(c)
 	}
+	adminSystemOneCreateOpts.authScopes = nil
 	adminSystemOneCreateOpts.options = nil
 	adminSystemOneProbeOpts.params = nil
 
@@ -663,6 +664,14 @@ func TestAdminSystemOneProbe(t *testing.T) {
 		assert.Contains(t, createHelp, "--adapter gemini_decisions")
 		assert.Contains(t, createHelp, "--model gemini-decision-1")
 		assert.Contains(t, createHelp, "--key-stdin")
+		assert.Contains(t, createHelp, "--auth-kind")
+		assert.Contains(t, createHelp, "--auth-scope")
+		assert.Contains(t, createHelp, "--quota-project")
+		assert.Contains(t, createHelp, "unverified (U-G9)")
+		assert.Contains(t, createHelp, "cloud-platform alone was observed insufficient")
+		assert.Contains(t, createHelp, "Generative Language API")
+		assert.Contains(t, createHelp, "Hub restart")
+		assert.NotContains(t, createHelp, "generative-language.retriever")
 		assert.NotContains(t, createHelp, "--api-key")
 
 		resetAdminSystemOneFlags(t)
@@ -767,5 +776,392 @@ func TestAdminSystemOne_WindowsGateAllowsSystemOneWhileGatingPromote(t *testing.
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, errUnsupportedOnWindows), "got %v", err)
 		assert.Empty(t, *ran)
+	})
+}
+
+func TestAdminSystemOneCreate_GoogleAccessTokenFlagsAndValidation(t *testing.T) {
+	now := time.Date(2026, 11, 19, 18, 0, 0, 0, time.UTC)
+
+	t.Run("google_access_token implicit quota project human output", func(t *testing.T) {
+		resetAdminSystemOneFlags(t)
+		var captured hubclient.CreateSystemOneInstanceRequest
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, http.MethodPost, r.Method)
+			require.Equal(t, "/api/v1/admin/system-one/instances", r.URL.Path)
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.SystemOneInstance{
+				ID:       "inst-adc-1",
+				Name:     captured.Name,
+				Adapter:  captured.Adapter,
+				Model:    captured.Model,
+				Endpoint: "https://generativelanguage.googleapis.com",
+				Auth: hubclient.SystemOneInstanceAuthDTO{
+					Kind:                string(provider.AuthKindGoogleAccessToken),
+					Scopes:              captured.Auth.Scopes,
+					QuotaProject:        "implicit (service account association)",
+					CredentialType:      "service_account",
+					ServiceAccountEmail: "so-adc@proj-a.iam.gserviceaccount.com",
+				},
+				Enabled:   true,
+				Revision:  1,
+				CreatedAt: now,
+				UpdatedAt: now,
+			})
+		}))
+
+		stdout, _, err := executeAdminSystemOneSubcmd(t, []string{
+			"create", "gemini-adc",
+			"--adapter", "gemini_decisions",
+			"--model", "gemini-decision-1",
+			"--auth-kind", "google_access_token",
+			"--auth-scope", "https://www.googleapis.com/auth/scope-alpha",
+			"--auth-scope", "https://www.googleapis.com/auth/scope-beta",
+			"--auth-scope", "https://www.googleapis.com/auth/scope-alpha",
+		}, nil)
+		require.NoError(t, err)
+		require.NotNil(t, captured.Auth)
+		assert.Equal(t, "google_access_token", captured.Auth.Kind)
+		assert.Empty(t, captured.Auth.APIKey)
+		assert.Equal(t, []string{
+			"https://www.googleapis.com/auth/scope-alpha",
+			"https://www.googleapis.com/auth/scope-beta",
+		}, captured.Auth.Scopes)
+		assert.Empty(t, captured.Options)
+
+		assert.Contains(t, stdout, "Created System One instance gemini-adc")
+		assert.Contains(t, stdout, "Auth Kind:       google_access_token")
+		assert.Contains(t, stdout, "Scopes:          https://www.googleapis.com/auth/scope-alpha, https://www.googleapis.com/auth/scope-beta")
+		assert.Contains(t, stdout, "Quota Project:   implicit (service account association)")
+		assert.Contains(t, stdout, "Credential Type: service_account")
+		assert.Contains(t, stdout, "Service Account: so-adc@proj-a.iam.gserviceaccount.com")
+		assert.NotContains(t, stdout, "Secret:")
+	})
+
+	t.Run("google_access_token explicit quota project json and human output", func(t *testing.T) {
+		resetAdminSystemOneFlags(t)
+		outputFormat = "json"
+		var captured hubclient.CreateSystemOneInstanceRequest
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.SystemOneInstance{
+				ID:       "inst-adc-2",
+				Name:     captured.Name,
+				Adapter:  captured.Adapter,
+				Model:    captured.Model,
+				Endpoint: "https://generativelanguage.googleapis.com",
+				Auth: hubclient.SystemOneInstanceAuthDTO{
+					Kind:           string(provider.AuthKindGoogleAccessToken),
+					Scopes:         captured.Auth.Scopes,
+					QuotaProject:   "explicit: billing-proj-01",
+					CredentialType: "authorized_user",
+				},
+				Options:   captured.Options,
+				Enabled:   true,
+				Revision:  1,
+				CreatedAt: now,
+				UpdatedAt: now,
+			})
+		}))
+
+		stdout, _, err := executeAdminSystemOneSubcmd(t, []string{
+			"create", "gemini-adc-qp",
+			"--adapter", "gemini_decisions",
+			"--model", "gemini-decision-1",
+			"--auth-kind", "google_access_token",
+			"--auth-scope", "https://www.googleapis.com/auth/scope-alpha",
+			"--quota-project", "billing-proj-01",
+		}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"quota_project": "billing-proj-01"}, captured.Options)
+
+		var parsed hubclient.SystemOneInstance
+		require.NoError(t, json.Unmarshal([]byte(stdout), &parsed))
+		assert.Equal(t, "google_access_token", parsed.Auth.Kind)
+		assert.Equal(t, "explicit: billing-proj-01", parsed.Auth.QuotaProject)
+		assert.Equal(t, "authorized_user", parsed.Auth.CredentialType)
+	})
+
+	t.Run("pre-request flag conflict and validation errors make zero HTTP calls", func(t *testing.T) {
+		var httpCalls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			httpCalls.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+
+		keyFile := filepath.Join(t.TempDir(), "dummy-key.txt")
+		require.NoError(t, os.WriteFile(keyFile, []byte("synthetic-key-do-not-send\n"), 0o600))
+
+		for _, tc := range []struct {
+			name    string
+			args    []string
+			stdin   string
+			wantErr string
+		}{
+			{
+				name: "google_access_token with --key-stdin",
+				args: []string{
+					"create", "g-adc", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+					"--auth-scope", "https://www.googleapis.com/auth/scope-a",
+					"--key-stdin",
+				},
+				stdin:   "synthetic-stdin-key",
+				wantErr: "--key-stdin and --key-file cannot be combined with --auth-kind google_access_token",
+			},
+			{
+				name: "google_access_token with --key-file",
+				args: []string{
+					"create", "g-adc", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+					"--auth-scope", "https://www.googleapis.com/auth/scope-a",
+					"--key-file", keyFile,
+				},
+				wantErr: "--key-stdin and --key-file cannot be combined with --auth-kind google_access_token",
+			},
+			{
+				name: "google_access_token missing --auth-scope",
+				args: []string{
+					"create", "g-adc", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+				},
+				wantErr: "--auth-scope is required with --auth-kind google_access_token",
+			},
+			{
+				name: "google_access_token invalid --auth-scope prefix",
+				args: []string{
+					"create", "g-adc", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+					"--auth-scope", "https://evil.example/scope",
+				},
+				wantErr: "must start with https://www.googleapis.com/auth/",
+			},
+			{
+				name: "google_access_token bare --auth-scope prefix",
+				args: []string{
+					"create", "g-adc", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+					"--auth-scope", "https://www.googleapis.com/auth/",
+				},
+				wantErr: "must start with https://www.googleapis.com/auth/",
+			},
+			{
+				name: "google_access_token --auth-scope with query",
+				args: []string{
+					"create", "g-adc", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+					"--auth-scope", "https://www.googleapis.com/auth/scope-a?x=1",
+				},
+				wantErr: "disallowed URL characters",
+			},
+			{
+				name: "google_access_token invalid --quota-project",
+				args: []string{
+					"create", "g-adc", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+					"--auth-scope", "https://www.googleapis.com/auth/scope-a",
+					"--quota-project", "BAD_PROJECT",
+				},
+				wantErr: "invalid --quota-project",
+			},
+			{
+				name: "google_access_token empty --quota-project=",
+				args: []string{
+					"create", "g-adc", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+					"--auth-scope", "https://www.googleapis.com/auth/scope-a",
+					"--quota-project=",
+				},
+				wantErr: "invalid --quota-project",
+			},
+			{
+				name: "google_access_token conflicting --quota-project and --option quota_project",
+				args: []string{
+					"create", "g-adc", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+					"--auth-scope", "https://www.googleapis.com/auth/scope-a",
+					"--quota-project", "billing-proj-01",
+					"--option", "quota_project=billing-proj-02",
+				},
+				wantErr: "conflicting --quota-project and --option quota_project",
+			},
+			{
+				name: "api_key with --auth-scope",
+				args: []string{
+					"create", "g-key", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-scope", "https://www.googleapis.com/auth/scope-a",
+					"--key-file", keyFile,
+				},
+				wantErr: "--auth-scope is only supported with --auth-kind google_access_token",
+			},
+			{
+				name: "api_key with --quota-project",
+				args: []string{
+					"create", "g-key", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--quota-project", "billing-proj-01",
+					"--key-file", keyFile,
+				},
+				wantErr: "--quota-project is only supported with --auth-kind google_access_token",
+			},
+			{
+				name: "api_key with --option quota_project",
+				args: []string{
+					"create", "g-key", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--option", "quota_project=billing-proj-01",
+					"--key-file", keyFile,
+				},
+				wantErr: "option quota_project is only supported with --auth-kind google_access_token",
+			},
+			{
+				name: "unsupported --auth-kind",
+				args: []string{
+					"create", "g-bad", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "oauth_refresh",
+				},
+				wantErr: "unsupported --auth-kind",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				resetAdminSystemOneFlags(t)
+				useMockSystemOneServer(t, srv.Config.Handler)
+
+				_, _, err := executeAdminSystemOneSubcmd(t, tc.args, strings.NewReader(tc.stdin))
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.Zero(t, httpCalls.Load(), "CLI validation error must happen before any HTTP request")
+			})
+		}
+	})
+}
+
+func TestAdminSystemOneListAndProbe_ADCMetadataOutput(t *testing.T) {
+	now := time.Date(2026, 11, 19, 18, 15, 0, 0, time.UTC)
+
+	t.Run("list renders ADC auth kind, scopes, quota project provenance, and credential info", func(t *testing.T) {
+		resetAdminSystemOneFlags(t)
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.ListSystemOneInstancesResponse{
+				Instances: []hubclient.SystemOneInstance{
+					{
+						ID:       "inst-adc-imp",
+						Name:     "gemini-adc-imp",
+						Adapter:  "gemini_decisions",
+						Model:    "gemini-decision-1",
+						Endpoint: "https://generativelanguage.googleapis.com",
+						Auth: hubclient.SystemOneInstanceAuthDTO{
+							Kind:                "google_access_token",
+							Scopes:              []string{"https://www.googleapis.com/auth/scope-a"},
+							QuotaProject:        "implicit (service account association)",
+							CredentialType:      "service_account",
+							ServiceAccountEmail: "so-sa@proj.iam.gserviceaccount.com",
+						},
+						Enabled:   true,
+						UpdatedAt: now,
+					},
+					{
+						ID:       "inst-adc-exp",
+						Name:     "gemini-adc-exp",
+						Adapter:  "gemini_decisions",
+						Model:    "gemini-decision-1",
+						Endpoint: "https://generativelanguage.googleapis.com",
+						Auth: hubclient.SystemOneInstanceAuthDTO{
+							Kind:           "google_access_token",
+							Scopes:         []string{"https://www.googleapis.com/auth/scope-a"},
+							QuotaProject:   "explicit: billing-proj-01",
+							CredentialType: "metadata",
+						},
+						Options:   map[string]string{"quota_project": "billing-proj-01"},
+						Enabled:   true,
+						UpdatedAt: now,
+					},
+				},
+				TotalCount: 2,
+			})
+		}))
+
+		stdout, _, err := executeAdminSystemOneSubcmd(t, []string{"list"}, nil)
+		require.NoError(t, err)
+		assert.Contains(t, stdout, "AUTH")
+		assert.Contains(t, stdout, "SCOPES")
+		assert.Contains(t, stdout, "QUOTA PROJECT")
+		assert.Contains(t, stdout, "CREDENTIAL")
+		assert.Contains(t, stdout, "google_access_token")
+		assert.Contains(t, stdout, "implicit (service account association)")
+		assert.Contains(t, stdout, "explicit: billing-proj-01")
+		assert.Contains(t, stdout, "service_account (so-sa@proj.iam.gserviceaccount.com)")
+		assert.Contains(t, stdout, "metadata")
+	})
+
+	t.Run("probe renders ADC evaluation auth provenance in human and json modes", func(t *testing.T) {
+		dir := t.TempDir()
+		specPath := filepath.Join(dir, "spec.json")
+		require.NoError(t, os.WriteFile(specPath, []byte(`{"version":1,"questions":[{"id":"q1","type":"binary","instructions":"Check."}]}`), 0o600))
+
+		yes := true
+		probeResp := hubclient.ProbeSystemOneInstanceResponse{
+			Class: systemoneruntime.ClassSuccess,
+			Decision: &hubclient.ProbeSystemOneDecision{
+				Kind: spec.KindJudgmentBool,
+				Bool: &yes,
+			},
+			Evaluation: &systemoneruntime.Evaluation{
+				EvalID:          "eval-adc-1",
+				ConfiguredModel: "gemini-decision-1",
+				Class:           systemoneruntime.ClassSuccess,
+				Notes:           []string{provider.NoteModelUnreported, provider.NoteUsageUnreported},
+				Auth: &systemoneruntime.AuthProvenance{
+					AuthKind:            string(provider.AuthKindGoogleAccessToken),
+					Scopes:              []string{"https://www.googleapis.com/auth/scope-a"},
+					QuotaProject:        "implicit (service account association)",
+					CredentialType:      "service_account",
+					ServiceAccountEmail: "so-sa@proj.iam.gserviceaccount.com",
+				},
+			},
+		}
+
+		resetAdminSystemOneFlags(t)
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(probeResp)
+		}))
+
+		stdout, _, err := executeAdminSystemOneSubcmd(t, []string{
+			"probe", "gemini-adc-imp",
+			"--spec-file", specPath,
+			"--text", "Synthetic sample.",
+		}, nil)
+		require.NoError(t, err)
+		assert.Contains(t, stdout, "Auth Kind:            google_access_token")
+		assert.Contains(t, stdout, "Auth Scopes:          https://www.googleapis.com/auth/scope-a")
+		assert.Contains(t, stdout, "Quota Project:        implicit (service account association)")
+		assert.Contains(t, stdout, "Credential Type:      service_account")
+		assert.Contains(t, stdout, "Service Account:      so-sa@proj.iam.gserviceaccount.com")
+
+		resetAdminSystemOneFlags(t)
+		outputFormat = "json"
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(probeResp)
+		}))
+
+		jsonOut, _, err := executeAdminSystemOneSubcmd(t, []string{
+			"probe", "gemini-adc-imp",
+			"--spec-file", specPath,
+			"--text", "Synthetic sample.",
+		}, nil)
+		require.NoError(t, err)
+		var parsed hubclient.ProbeSystemOneInstanceResponse
+		require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+		require.NotNil(t, parsed.Evaluation)
+		require.NotNil(t, parsed.Evaluation.Auth)
+		assert.Equal(t, "google_access_token", parsed.Evaluation.Auth.AuthKind)
+		assert.Equal(t, "implicit (service account association)", parsed.Evaluation.Auth.QuotaProject)
+		assert.Equal(t, "service_account", parsed.Evaluation.Auth.CredentialType)
+		assert.Equal(t, "so-sa@proj.iam.gserviceaccount.com", parsed.Evaluation.Auth.ServiceAccountEmail)
 	})
 }
