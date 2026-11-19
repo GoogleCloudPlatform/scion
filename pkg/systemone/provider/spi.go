@@ -80,12 +80,13 @@ const (
 	BinaryTrueKey  = "true"
 	BinaryFalseKey = "false"
 
-	// Content-free provenance note constants (provider-design §6.1, §7.4; runtime-design §8.1).
+	// Content-free provenance note constants (provider-design §6.1, §7.4; runtime-design §8.1; PV3 brief §5.3).
 	NoteModelAliasReported         = "model_alias_reported"
 	NoteModelUnreported            = "model_unreported"
 	NoteClamped001To099            = "clamped_0.01_0.99"
 	NoteOptionsSortedByProvider    = "options_sorted_by_provider"
 	NoteConfidenceFormulaDeviation = "confidence_formula_deviation"
+	NoteUsageUnreported            = "usage_unreported"
 )
 
 var closedNotes = []string{
@@ -94,6 +95,7 @@ var closedNotes = []string{
 	NoteClamped001To099,
 	NoteOptionsSortedByProvider,
 	NoteConfidenceFormulaDeviation,
+	NoteUsageUnreported,
 }
 
 // AllNotes returns a copy of the closed set of content-free provenance note
@@ -112,7 +114,8 @@ func IsValidNote(note string) bool {
 		NoteModelUnreported,
 		NoteClamped001To099,
 		NoteOptionsSortedByProvider,
-		NoteConfidenceFormulaDeviation:
+		NoteConfidenceFormulaDeviation,
+		NoteUsageUnreported:
 		return true
 	default:
 		return false

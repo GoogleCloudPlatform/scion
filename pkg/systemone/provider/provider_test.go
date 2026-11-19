@@ -66,7 +66,8 @@ func TestFailReasons_ClosedSetMatchesRuntimeDesign(t *testing.T) {
 
 func TestNotes_ClosedSet(t *testing.T) {
 	notes := provider.AllNotes()
-	require.Len(t, notes, 5)
+	require.Len(t, notes, 6)
+	assert.Contains(t, notes, provider.NoteUsageUnreported)
 	for _, n := range notes {
 		assert.True(t, provider.IsValidNote(n), "expected %q to be valid closed note", n)
 	}
@@ -100,12 +101,16 @@ type stubAdapter struct {
 	name           string
 	version        string
 	sideEffectFree bool
+	requireModel   bool
 	models         []string
 }
 
 func (a *stubAdapter) Name() string    { return a.name }
 func (a *stubAdapter) Version() string { return a.version }
-func (a *stubAdapter) Capabilities(_ provider.InstanceView) (provider.Capabilities, error) {
+func (a *stubAdapter) Capabilities(inst provider.InstanceView) (provider.Capabilities, error) {
+	if a.requireModel && strings.TrimSpace(inst.Model) == "" {
+		return provider.Capabilities{}, provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "instance model is required")
+	}
 	return provider.Capabilities{
 		Primitives: map[string]provider.PrimitiveLimits{
 			spec.PrimitiveBinary: {
@@ -155,10 +160,21 @@ func TestRegistry_RegisterLookupAndSideEffectFreeEnforcement(t *testing.T) {
 	require.NoError(t, reg.Register(good))
 	require.ErrorIs(t, reg.Register(good), provider.ErrDuplicateAdapter)
 
+	// Adapters whose Capabilities(inst) require a non-empty Model still register
+	// when SideEffectFree is true and are rejected when SideEffectFree is false.
+	require.ErrorIs(t,
+		reg.Register(&stubAdapter{name: "gemini-mutating", version: "0.1.0", sideEffectFree: false, requireModel: true}),
+		provider.ErrNotSideEffectFree,
+	)
+	modelReq := &stubAdapter{name: "gemini-test", version: "0.1.0", sideEffectFree: true, requireModel: true}
+	require.NoError(t, reg.Register(modelReq))
+	_, emptyModelErr := modelReq.Capabilities(provider.InstanceView{})
+	require.Error(t, emptyModelErr)
+
 	got, ok := reg.Get("typesafe-test")
 	require.True(t, ok)
 	assert.Equal(t, "typesafe-test", got.Name())
-	assert.Equal(t, []string{"typesafe-test"}, reg.Names())
+	assert.Equal(t, []string{"gemini-test", "typesafe-test"}, reg.Names())
 
 	// Optional ModelLister assertion works on registered adapter.
 	lister, ok := got.(provider.ModelLister)

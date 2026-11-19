@@ -58,6 +58,13 @@ func (r *Registry) Register(a Adapter) error {
 	}
 	caps, err := a.Capabilities(InstanceView{})
 	if err != nil {
+		// Adapters that require a configured instance model (for example
+		// gemini_decisions) reject an empty InstanceView.Model; probe with a
+		// synthetic non-empty InstanceView so the registration-time
+		// SideEffectFree gate still runs.
+		caps, err = a.Capabilities(InstanceView{Name: "registry-check", Model: "registry-check"})
+	}
+	if err != nil {
 		return fmt.Errorf("provider: inspecting capabilities for %q: %w", name, err)
 	}
 	if !caps.SideEffectFree {
