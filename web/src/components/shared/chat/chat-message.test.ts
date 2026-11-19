@@ -148,6 +148,95 @@ describe('scion-chat-message @mentions', () => {
     expect(span.hasAttribute('role')).toBe(false);
   });
 
+  it('evaluates mention-contextmenu selection at pointerdown and only when covering the mention', async () => {
+    const el = await mount('check `token` and @coder');
+    const span = mentions(el)[0];
+    const code = el.shadowRoot!.querySelector('code')!;
+    const sel = window.getSelection()!;
+    const seen: string[] = [];
+    el.addEventListener('mention-contextmenu', (e): void => {
+      seen.push((e as CustomEvent<{ slug: string }>).detail.slug);
+    });
+
+    try {
+      // 1. Selection covering a sibling element does not suppress mention-contextmenu.
+      const siblingRange = document.createRange();
+      siblingRange.selectNodeContents(code);
+      sel.removeAllRanges();
+      sel.addRange(siblingRange);
+      span.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          button: 2,
+          clientX: 10,
+          clientY: 10,
+        })
+      );
+      span.dispatchEvent(
+        new MouseEvent('contextmenu', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          button: 2,
+          clientX: 10,
+          clientY: 10,
+        })
+      );
+      expect(seen).toEqual(['coder']);
+
+      // 2. macOS word selection created after pointerdown does not suppress mention-contextmenu.
+      sel.removeAllRanges();
+      span.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          button: 2,
+          clientX: 10,
+          clientY: 10,
+        })
+      );
+      const wordRange = document.createRange();
+      wordRange.selectNodeContents(span);
+      sel.addRange(wordRange);
+      span.dispatchEvent(
+        new MouseEvent('contextmenu', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          button: 2,
+          clientX: 10,
+          clientY: 10,
+        })
+      );
+      expect(seen).toEqual(['coder', 'coder']);
+
+      // 3. Selection already covering @coder at pointerdown suppresses mention-contextmenu.
+      span.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          button: 2,
+          clientX: 10,
+          clientY: 10,
+        })
+      );
+      span.dispatchEvent(
+        new MouseEvent('contextmenu', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          button: 2,
+          clientX: 10,
+          clientY: 10,
+        })
+      );
+      expect(seen).toEqual(['coder', 'coder']);
+    } finally {
+      sel.removeAllRanges();
+    }
+  });
+
   it('emits a composed mention-click with the slug when a mention is clicked', async () => {
     const el = await mount('hello @coder');
     const seen: string[] = [];

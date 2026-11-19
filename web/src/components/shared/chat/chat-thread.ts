@@ -125,8 +125,8 @@ import {
 import './chat-message.js';
 import {
   buildKnownUsersByEmail,
-  hasTextSelection,
   knownUsersByEmailKey,
+  selectionCoversNode,
   type MentionContextMenuDetail,
   type MentionPointerDownDetail,
   type ReplyPreviewInfo,
@@ -578,13 +578,6 @@ interface MemberIndex {
   byEmail: Map<string, number>;
 }
 
-/**
- * Reactive properties that only drive controls around the transcript (the
- * context menu, the file preview, the composer's reply and edit bars), never
- * the message rows, so changing them must not rebuild the row model. Their
- * writers never mutate row metadata in place without also assigning
- * `messages`, which does rebuild.
- */
 /** Resolved agent targeted by message or `@mention` agent menu actions. */
 interface AgentMenuTarget {
   id: string;
@@ -594,6 +587,13 @@ interface AgentMenuTarget {
   canAttach: boolean;
 }
 
+/**
+ * Reactive properties that only drive controls around the transcript (the
+ * context menu, the file preview, the composer's reply and edit bars), never
+ * the message rows, so changing them must not rebuild the row model. Their
+ * writers never mutate row metadata in place without also assigning
+ * `messages`, which does rebuild.
+ */
 const ROW_INDEPENDENT_UI_KEYS: ReadonlySet<PropertyKey> = new Set([
   'contextMenuMessage',
   'contextMenuAgent',
@@ -1032,7 +1032,6 @@ export class ScionChatThread extends LitElement {
   @state() private contextMenuAgent: {
     target: AgentMenuTarget;
     messageId: string;
-    mentionEl: HTMLElement;
   } | null = null;
 
   /** Touch long-press tracker for highlighted `@agent` mentions. */
@@ -2190,7 +2189,7 @@ export class ScionChatThread extends LitElement {
       this._readDebounceTimer = null;
     }
     // Clean up context menu keyboard listener
-    this.clearContextMenuAgent();
+    this.contextMenuAgent = null;
     document.removeEventListener('keydown', this.handleContextMenuKeydown);
   }
 
@@ -6253,6 +6252,12 @@ export class ScionChatThread extends LitElement {
     return Date.now() - press.at <= PRESS_LINK_WINDOW_MS ? press.href : null;
   }
 
+  private hasMessageSelectionForContextMenu(e: MouseEvent, msg: Message): boolean {
+    const target = e.composedPath()[0];
+    const msgEl = this.messageElement(msg.id);
+    return msgEl ? msgEl.hasSelectionForContextMenu(target) : selectionCoversNode(target);
+  }
+
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
     // A context menu the keyboard raised (the ContextMenu key on a focused
@@ -6267,7 +6272,11 @@ export class ScionChatThread extends LitElement {
         typeof PointerEvent !== 'undefined' &&
         e instanceof PointerEvent &&
         e.pointerType === '');
-    if (e.type === 'contextmenu' && !fromKeyboard && hasTextSelection(e.composedPath()[0])) {
+    if (
+      e.type === 'contextmenu' &&
+      !fromKeyboard &&
+      this.hasMessageSelectionForContextMenu(e, msg)
+    ) {
       this._mentionLongPress.cancel();
       return;
     }
@@ -6290,17 +6299,12 @@ export class ScionChatThread extends LitElement {
   /** Track a touch long-press on a highlighted `@agent` mention. */
   private handleMentionPointerDown(ev: CustomEvent<MentionPointerDownDetail>, msg: Message): void {
     const { slug, mentionEl, originalEvent } = ev.detail;
-    if (hasTextSelection(mentionEl)) {
-      this._mentionLongPress.cancel();
-      return;
-    }
     const target = this.agentMenuTargetFromMention(slug);
     if (!target || this.agentMenuActionsForTarget(target).length === 0) {
       this._mentionLongPress.cancel();
       return;
     }
     this._mentionLongPress.pointerDown(originalEvent, (at) => {
-      if (hasTextSelection(mentionEl)) return;
       const fresh = this.agentMenuTargetFromMention(slug);
       if (!fresh || this.agentMenuActionsForTarget(fresh).length === 0) return;
       this.openAgentMentionMenu(msg, mentionEl, fresh, at);
@@ -6310,23 +6314,13 @@ export class ScionChatThread extends LitElement {
   /** Handle right-click / touch `contextmenu` / keyboard menu open on a `@mention`. */
   private handleMentionContextMenu(ev: CustomEvent<MentionContextMenuDetail>, msg: Message): void {
     const { slug, mentionEl, clientX, clientY, fromKeyboard, originalEvent } = ev.detail;
-    if (!fromKeyboard && hasTextSelection(mentionEl)) {
-      this._mentionLongPress.cancel();
-      return;
-    }
     if (originalEvent && this._mentionLongPress.contextMenu(originalEvent)) {
       ev.preventDefault();
       return;
     }
     const target = this.agentMenuTargetFromMention(slug);
     const actions = target ? this.agentMenuActionsForTarget(target) : [];
-    if (!target || actions.length === 0) {
-      if (originalEvent && !originalEvent.composed) {
-        ev.preventDefault();
-        this.handleMessageContextMenu(originalEvent, msg);
-      }
-      return;
-    }
+    if (!target || actions.length === 0) return;
     ev.preventDefault();
     let at = { x: clientX, y: clientY };
     if (fromKeyboard && clientX === 0 && clientY === 0) {
@@ -6336,12 +6330,6 @@ export class ScionChatThread extends LitElement {
     this.openAgentMentionMenu(msg, mentionEl, target, at);
   }
 
-  private clearContextMenuAgent(): void {
-    if (!this.contextMenuAgent) return;
-    this.contextMenuAgent.mentionEl.removeAttribute('aria-expanded');
-    this.contextMenuAgent = null;
-  }
-
   /** Open the agent menu for a highlighted `@agent` mention at `at`. */
   private openAgentMentionMenu(
     msg: Message,
@@ -6349,11 +6337,9 @@ export class ScionChatThread extends LitElement {
     target: AgentMenuTarget,
     at: { x: number; y: number }
   ): void {
-    this.clearContextMenuAgent();
     this.contextMenuMessage = null;
     this.contextMenuLinkHref = null;
-    mentionEl.setAttribute('aria-expanded', 'true');
-    this.contextMenuAgent = { target, messageId: msg.id, mentionEl };
+    this.contextMenuAgent = { target, messageId: msg.id };
     this.contextMenuPosition = at;
     this.contextMenuAsSheet = shouldUseMenuSheet();
     document.addEventListener('keydown', this.handleContextMenuKeydown);
@@ -6374,7 +6360,7 @@ export class ScionChatThread extends LitElement {
     at: { x: number; y: number },
     linkHref: string | null = null
   ): void {
-    this.clearContextMenuAgent();
+    this.contextMenuAgent = null;
     // Star states whose request failed are retried when a menu opens.
     if (this.starsActive) void this.stars.retryFailed();
     this.contextMenuMessage = msg;
@@ -6666,7 +6652,7 @@ export class ScionChatThread extends LitElement {
 
   /** Close the context menu. */
   private closeContextMenu(): void {
-    this.clearContextMenuAgent();
+    this.contextMenuAgent = null;
     this.contextMenuMessage = null;
     this.contextMenuLinkHref = null;
     document.removeEventListener('keydown', this.handleContextMenuKeydown);

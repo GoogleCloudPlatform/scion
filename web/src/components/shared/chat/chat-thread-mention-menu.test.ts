@@ -191,14 +191,35 @@ function mentionSpan(el: ScionChatThread, msgId: string, slug: string): HTMLElem
 async function rightClick(
   el: ScionChatThread,
   target: Element,
-  init: MouseEventInit = {}
+  init: MouseEventInit = {},
+  betweenPressAndMenu?: () => void
 ): Promise<MouseEvent> {
+  const clientX = init.clientX ?? 40;
+  const clientY = init.clientY ?? 60;
+  // Keyboard-synthesized contextmenu at (0, 0) has no preceding pointer press.
+  if (!(clientX === 0 && clientY === 0)) {
+    target.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        button: 2,
+        buttons: 2,
+        pointerType: 'mouse',
+        isPrimary: true,
+        clientX,
+        clientY,
+      })
+    );
+  }
+  betweenPressAndMenu?.();
   const e = new MouseEvent('contextmenu', {
     bubbles: true,
     composed: true,
     cancelable: true,
-    clientX: 40,
-    clientY: 60,
+    button: 2,
+    clientX,
+    clientY,
     ...init,
   });
   target.dispatchEvent(e);
@@ -361,49 +382,261 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
     ]);
   });
 
-  it('preserves the browser context menu when text is selected (DOM Range or ShadowRoot-retargeted Range)', async () => {
+  it('preserves the browser context menu when an existing selection covers the clicked target', async () => {
     const el = await mountThread({
       messages: [
         {
           id: 'm1',
           sender: 'user:alice@example.com',
           senderId: 'user-alice',
-          msg: 'Select @coder text here.',
+          msg: 'Select `config.yaml` or @coder text here.',
           type: 'chat',
           createdAt: '2026-01-01T00:00:00Z',
+        },
+        {
+          id: 'm2',
+          sender: 'agent:lead',
+          senderId: 'agent-lead',
+          projectId: 'proj-lead',
+          msg: 'Follow up with @lead.',
+          type: 'assistant-reply',
+          createdAt: '2026-01-01T00:01:00Z',
         },
       ],
     });
     const mention = mentionSpan(el, 'm1', 'coder');
-
-    // 1. Real DOM non-collapsed Range selection.
-    const range = document.createRange();
-    range.selectNodeContents(mention);
+    const codeEl = messageBody(el, 'm1')!.querySelector('code')!;
+    const leadMention = mentionSpan(el, 'm2', 'lead');
     const sel = window.getSelection()!;
+
+    // 1. Real DOM non-collapsed Range covering @coder suppresses both mention and message menus.
+    const mentionRange = document.createRange();
+    mentionRange.selectNodeContents(mention);
     sel.removeAllRanges();
-    sel.addRange(range);
+    sel.addRange(mentionRange);
 
     const domSelectedEvent = await rightClick(el, mention);
     expect(domSelectedEvent.defaultPrevented).toBe(false);
     expect(el.shadowRoot!.querySelector('[role="menu"]')).toBeNull();
     sel.removeAllRanges();
 
-    // 2. Chromium Shadow-DOM-retargeted Selection (type === 'Range', isCollapsed === true).
-    const spy = vi
-      .spyOn(window, 'getSelection')
-      .mockReturnValue({ type: 'Range', isCollapsed: true } as unknown as Selection);
+    // 2. Real DOM Range covering inline message text suppresses the message menu on that text.
+    const codeRange = document.createRange();
+    codeRange.selectNodeContents(codeEl);
+    sel.addRange(codeRange);
+
+    const codeSelectedEvent = await rightClick(el, codeEl);
+    expect(codeSelectedEvent.defaultPrevented).toBe(false);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')).toBeNull();
+    sel.removeAllRanges();
+
+    // 3. Shadow-DOM composed range (Chromium/WebKit/Gecko getComposedRanges where
+    // window.getSelection().getRangeAt(0) is collapsed on document.body).
+    const collapsedLightRange = document.createRange();
+    collapsedLightRange.setStart(document.body, 0);
+    collapsedLightRange.setEnd(document.body, 0);
+    const mentionText = mention.firstChild!;
+    const fakeComposed = {
+      collapsed: false,
+      startContainer: mentionText,
+      startOffset: 0,
+      endContainer: mentionText,
+      endOffset: mentionText.textContent!.length,
+    } as StaticRange;
+    const spy = vi.spyOn(window, 'getSelection').mockReturnValue({
+      type: 'Range',
+      isCollapsed: true,
+      rangeCount: 1,
+      getRangeAt: () => collapsedLightRange,
+      getComposedRanges: () => [fakeComposed],
+      removeAllRanges: () => {},
+    } as unknown as Selection);
     try {
       const shadowSelectedEvent = await rightClick(el, mention);
       expect(shadowSelectedEvent.defaultPrevented).toBe(false);
       expect(el.shadowRoot!.querySelector('[role="menu"]')).toBeNull();
+
+      // The same composed range in m1 does NOT suppress @lead in m2.
+      const otherMentionEvent = await rightClick(el, leadMention);
+      expect(otherMentionEvent.defaultPrevented).toBe(true);
+      expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+        'Agent actions, Lead Coordinator'
+      );
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      await el.updateComplete;
     } finally {
       spy.mockRestore();
     }
 
-    // 3. Once selection is cleared/collapsed, right-click opens the agent menu again.
+    // 4. Left-button drag-selection followed by right-click still preserves the browser menu.
+    mention.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        composed: true,
+        button: 0,
+        buttons: 1,
+        pointerType: 'mouse',
+        isPrimary: true,
+      })
+    );
+    const dragRange = document.createRange();
+    dragRange.selectNodeContents(mention);
+    sel.removeAllRanges();
+    sel.addRange(dragRange);
+    const afterDragRightClick = new MouseEvent('contextmenu', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 2,
+      clientX: 40,
+      clientY: 60,
+    });
+    mention.dispatchEvent(afterDragRightClick);
+    await el.updateComplete;
+    expect(afterDragRightClick.defaultPrevented).toBe(false);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')).toBeNull();
+    sel.removeAllRanges();
+
+    // 5. Once selection is cleared, right-click opens the agent menu again.
     const normalEvent = await rightClick(el, mention);
     expect(normalEvent.defaultPrevented).toBe(true);
     expect(itemLabels(popupItems(el))).toContain('Open terminal');
+  });
+
+  it('opens mention and message menus when a leftover selection is outside the clicked element', async () => {
+    const outsideNote = document.createElement('p');
+    outsideNote.textContent = 'Header text outside thread';
+    document.body.appendChild(outsideNote);
+
+    const el = await mountThread({
+      messages: [
+        {
+          id: 'm1',
+          sender: 'user:alice@example.com',
+          senderId: 'user-alice',
+          msg: 'First message with `selected-token` and @coder.',
+          type: 'chat',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+        {
+          id: 'm2',
+          sender: 'agent:coder',
+          senderId: 'agent-coder',
+          projectId: 'proj-coder',
+          msg: 'Second message mentioning @lead.',
+          type: 'assistant-reply',
+          createdAt: '2026-01-01T00:01:00Z',
+        },
+      ],
+    });
+
+    const sel = window.getSelection()!;
+    const m1Code = messageBody(el, 'm1')!.querySelector('code')!;
+    const m1Mention = mentionSpan(el, 'm1', 'coder');
+    const m2Content = messageBody(el, 'm2')!;
+    const m2Mention = mentionSpan(el, 'm2', 'lead');
+
+    // 1. Selection in m1 does not block right-clicking @lead in m2 or m2's message menu.
+    const m1Range = document.createRange();
+    m1Range.selectNodeContents(m1Code);
+    sel.removeAllRanges();
+    sel.addRange(m1Range);
+
+    const m2MentionEv = await rightClick(el, m2Mention);
+    expect(m2MentionEv.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Agent actions, Lead Coordinator'
+    );
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    const m2MsgEv = await rightClick(el, m2Content);
+    expect(m2MsgEv.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Message actions, Code Writer'
+    );
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    // 2. Selection on `selected-token` in m1 does not block right-clicking sibling @coder in m1.
+    const siblingMentionEv = await rightClick(el, m1Mention);
+    expect(siblingMentionEv.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Agent actions, Code Writer'
+    );
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    // 3. Selection in light DOM outside the thread does not block either menu.
+    const outsideRange = document.createRange();
+    outsideRange.selectNodeContents(outsideNote);
+    sel.removeAllRanges();
+    sel.addRange(outsideRange);
+
+    const lightMentionEv = await rightClick(el, m1Mention);
+    expect(lightMentionEv.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Agent actions, Code Writer'
+    );
+  });
+
+  it('opens mention and message menus when macOS selects the word between pointerdown and contextmenu', async () => {
+    const el = await mountThread({
+      messages: [
+        {
+          id: 'm-user',
+          sender: 'user:alice@example.com',
+          senderId: 'user-alice',
+          msg: 'Right-click @coder on macOS.',
+          type: 'chat',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+        {
+          id: 'm-coder',
+          sender: 'agent:coder',
+          senderId: 'agent-coder',
+          projectId: 'proj-coder',
+          msg: 'Plain paragraph text on macOS.',
+          type: 'assistant-reply',
+          createdAt: '2026-01-01T00:01:00Z',
+        },
+      ],
+    });
+
+    const sel = window.getSelection()!;
+    const mention = mentionSpan(el, 'm-user', 'coder');
+    const coderContent = messageBody(el, 'm-coder')!;
+
+    // 1. Right-click @coder: nothing selected at pointerdown, browser selects @coder before contextmenu.
+    const mentionEv = await rightClick(el, mention, {}, () => {
+      const wordRange = document.createRange();
+      wordRange.selectNodeContents(mention);
+      sel.removeAllRanges();
+      sel.addRange(wordRange);
+    });
+    expect(mentionEv.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Agent actions, Code Writer'
+    );
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    // 2. Right-click message text while the macOS auto-selected @coder is still selected in m-user,
+    // and macOS then selects the word in m-coder before contextmenu.
+    const msgEv = await rightClick(el, coderContent, {}, () => {
+      const wordRange = document.createRange();
+      wordRange.selectNodeContents(coderContent);
+      sel.removeAllRanges();
+      sel.addRange(wordRange);
+    });
+    expect(msgEv.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Message actions, Code Writer'
+    );
   });
 
   it('is keyboard accessible: mention is focusable, ContextMenu and Shift+F10 open the menu, Escape restores focus', async () => {
@@ -443,7 +676,6 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
       await el.updateComplete;
 
       expect(kd.defaultPrevented).toBe(true);
-      expect(mention.getAttribute('aria-expanded')).toBe('true');
 
       const menu = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"]')!;
       expect(menu).not.toBeNull();
@@ -455,7 +687,6 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
       await el.updateComplete;
 
       expect(el.shadowRoot!.querySelector('[role="menu"]')).toBeNull();
-      expect(mention.hasAttribute('aria-expanded')).toBe(false);
       expect(msgHost.shadowRoot!.activeElement).toBe(mention);
 
       document.body.innerHTML = '';
@@ -530,6 +761,89 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
     }
   });
 
+  it('handles Android touch long-press contextmenu (including native word selection during hold) without double-opening', async () => {
+    vi.useFakeTimers();
+    sheet = true;
+    touch = true;
+
+    const el = await mountThread({
+      messages: [
+        {
+          id: 'm1',
+          sender: 'user:alice@example.com',
+          senderId: 'user-alice',
+          msg: 'Android touch @coder here.',
+          type: 'chat',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+    const mention = mentionSpan(el, 'm1', 'coder');
+    const sel = window.getSelection()!;
+    const mentionClicks: string[] = [];
+    const onMentionClick = (e: Event): void => {
+      mentionClicks.push((e as CustomEvent<{ slug: string }>).detail.slug);
+    };
+    document.addEventListener('mention-click', onMentionClick);
+
+    try {
+      mention.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          pointerId: 7,
+          pointerType: 'touch',
+          isPrimary: true,
+          clientX: 30,
+          clientY: 40,
+        })
+      );
+      // Android selects the word under the finger during the hold before firing contextmenu.
+      const range = document.createRange();
+      range.selectNodeContents(mention);
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      const touchCtx = new PointerEvent('contextmenu', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        pointerId: 7,
+        pointerType: 'touch',
+        clientX: 30,
+        clientY: 40,
+      });
+      mention.dispatchEvent(touchCtx);
+      await el.updateComplete;
+
+      expect(touchCtx.defaultPrevented).toBe(true);
+      const actionSheet = el.shadowRoot!.querySelector('scion-action-sheet') as HTMLElement & {
+        open: boolean;
+        heading: string;
+      };
+      expect(actionSheet.open).toBe(true);
+      expect(actionSheet.heading).toBe('Code Writer');
+
+      // Advancing past LONG_PRESS_MS does not fire a second open after contextMenu() won.
+      vi.advanceTimersByTime(LONG_PRESS_MS + 50);
+      await el.updateComplete;
+      expect(actionSheet.open).toBe(true);
+
+      window.dispatchEvent(
+        new PointerEvent('pointerup', {
+          bubbles: true,
+          pointerId: 7,
+          pointerType: 'touch',
+          isPrimary: true,
+        })
+      );
+      mention.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+      expect(mentionClicks).toEqual([]);
+    } finally {
+      document.removeEventListener('mention-click', onMentionClick);
+    }
+  });
+
   it('keeps non-agent user mentions and unknown mentions on their current behavior', async () => {
     const el = await mountThread({
       messages: [
@@ -590,14 +904,13 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
     // Keyboard-synthesized contextmenu at (0, 0) also opens the mention menu anchored to mention.
     mention.focus();
     await rightClick(el, mention, { clientX: 0, clientY: 0 });
-    expect(mention.getAttribute('aria-expanded')).toBe('true');
+    expect(mention.hasAttribute('aria-expanded')).toBe(false);
     expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
       'Agent actions, Code Writer'
     );
 
-    // Right-clicking the message bubble outside the mention switches to the message menu and clears aria-expanded.
+    // Right-clicking the message bubble outside the mention switches to the message menu.
     await rightClick(el, messageHost(el, 'm1'));
-    expect(mention.hasAttribute('aria-expanded')).toBe(false);
     expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
       'Message actions, Lead Coordinator'
     );
