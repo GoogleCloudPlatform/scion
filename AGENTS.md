@@ -60,7 +60,7 @@ Mandatory while project-level template configuration overrides are in developmen
 
 - Pass the named harness configuration to `--harness` (alias for `--harness-config`) and the size alias to `--model`; never pass a model name or alias to `--harness` or `--harness-config`.
 - Applies only when creating or starting new agents from these four templates. Leave other templates unchanged, and do not restart or recreate existing agents solely to apply these overrides.
-- **Stall fallback:** if an agent launched with `--harness antigravity` makes no model progress for 20 minutes or more and a `continue` nudge does not recover it, its owner may recreate it with `--harness claude --model medium` without asking first, and reports the swap in the workstream.
+- **Stall fallback:** if a worker launched with `--harness antigravity` makes no model progress for 20 minutes or more and a `continue` nudge does not recover it, the agent that started it may recreate it with `--harness claude --model medium` without asking first, once the worker's pushed work and handoff are durable, and reports the swap in the workstream. This does not cover an agent that holds children, open human questions or a standing role; those keep their usual approval path.
 
 ```bash
 scion start <agent-name> -t developer --harness antigravity --model large \
