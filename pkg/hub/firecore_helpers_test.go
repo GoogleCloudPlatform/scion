@@ -31,8 +31,15 @@ func fireScheduledActionForTest(ctx context.Context, srv *Server, actionType str
 		evt.EventType = actionType
 	}
 	exec, _ := ExecutorContextFromContext(ctx)
-	req := scheduledFireRequest(srv, evt, exec)
+	var st store.Store
+	if srv != nil {
+		st = srv.store
+	}
+	req := scheduledFireRequestWithSchedule(ctx, srv, st, evt, nil, exec)
 	req.ActionType = actionType
+	if actionType == "message" && req.Event == nil {
+		req.Event = scheduledMessageFireEvent(ctx, st, evt, nil)
+	}
 	action, ok := srv.LookupAction(actionType)
 	if !ok {
 		switch actionType {

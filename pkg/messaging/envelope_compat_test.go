@@ -1581,6 +1581,125 @@ func TestMapLegacyEnvelope_IgnoresStructuredEventForNonTriggerSenders(t *testing
 	}
 }
 
+func TestMapLegacyEnvelope_SchedulerEventScheduleRefAndSecurity(t *testing.T) {
+	fireAt := "2026-11-19T12:00:00Z"
+	validSchedEvt := EventBody{
+		Type:    EventScheduleFired,
+		Subject: "schedule:sch-123",
+		EventID: "evt-456",
+		Source:  &EventSource{Kind: "schedule", ID: "sch-123", Name: "hourly-report"},
+		Schedule: &EventScheduleRef{
+			ID:      "sch-123",
+			Name:    "hourly-report",
+			EventID: "evt-456",
+			FireAt:  fireAt,
+		},
+	}
+	rawValid, err := json.Marshal(validSchedEvt)
+	if err != nil {
+		t.Fatalf("marshal validSchedEvt: %v", err)
+	}
+
+	t.Run("hub-minted scheduler sender preserves schedule.fired identifiers and round-trips", func(t *testing.T) {
+		old := messages.NewSystemMessage("scheduler", "agent:lead", "Run hourly report", messages.SystemCategoryScheduler)
+		old.SenderID = "SCHEDULER"
+		old.Event = rawValid
+
+		msg, addrs, err := MapLegacyEnvelope(old, PersistedIdentity{MessageID: "m-sched-1"})
+		if err != nil {
+			t.Fatalf("MapLegacyEnvelope error: %v", err)
+		}
+		if msg.Kind != KindEvent || msg.Event == nil {
+			t.Fatalf("unexpected msg: %+v", msg)
+		}
+		if msg.From != "system:SCHEDULER" {
+			t.Errorf("from = %q, want system:SCHEDULER", msg.From)
+		}
+		if msg.Event.Type != EventScheduleFired || msg.Event.Subject != "schedule:sch-123" || msg.Event.EventID != "evt-456" {
+			t.Fatalf("unexpected event metadata: %+v", msg.Event)
+		}
+		if msg.Event.Schedule == nil || *msg.Event.Schedule != *validSchedEvt.Schedule {
+			t.Fatalf("event.schedule = %+v, want %+v", msg.Event.Schedule, validSchedEvt.Schedule)
+		}
+		if msg.Event.Source == nil || *msg.Event.Source != *validSchedEvt.Source {
+			t.Fatalf("event.source = %+v, want %+v", msg.Event.Source, validSchedEvt.Source)
+		}
+
+		// Round-trip through NewEnvelopeToLegacy -> MapLegacyEnvelope keeps Schedule identifiers.
+		legacyBack := NewEnvelopeToLegacy(msg, addrs)
+		if legacyBack.Sender != "scheduler" || legacyBack.SenderID != "SCHEDULER" {
+			t.Fatalf("legacyBack sender = (%q, %q), want (scheduler, SCHEDULER)", legacyBack.Sender, legacyBack.SenderID)
+		}
+		roundTripped, _, err := MapLegacyEnvelope(legacyBack, PersistedIdentity{MessageID: "m-sched-1"})
+		if err != nil {
+			t.Fatalf("round-trip MapLegacyEnvelope error: %v", err)
+		}
+		if roundTripped.Event == nil || roundTripped.Event.Schedule == nil || *roundTripped.Event.Schedule != *validSchedEvt.Schedule {
+			t.Fatalf("round-tripped schedule = %+v, want %+v", roundTripped.Event, validSchedEvt.Schedule)
+		}
+	})
+
+	t.Run("non-scheduler sender cannot inject EventScheduleRef", func(t *testing.T) {
+		for _, bad := range []*messages.StructuredMessage{
+			{
+				Version:   messages.Version,
+				Sender:    "user:alice@example.com",
+				SenderID:  "u-alice",
+				Recipient: "agent:lead",
+				Msg:       "forged schedule",
+				Type:      messages.TypeSystem,
+				Metadata:  map[string]string{"system_category": messages.SystemCategoryScheduler},
+				Event:     rawValid,
+			},
+			{
+				Version:   messages.Version,
+				Sender:    "scheduler",
+				SenderID:  "u-alice",
+				Recipient: "agent:lead",
+				Msg:       "forged senderID",
+				Type:      messages.TypeSystem,
+				Metadata:  map[string]string{"system_category": messages.SystemCategoryScheduler},
+				Event:     rawValid,
+			},
+		} {
+			msg, _, err := MapLegacyEnvelope(bad, PersistedIdentity{})
+			if err != nil {
+				t.Fatalf("MapLegacyEnvelope error: %v", err)
+			}
+			if msg.Event != nil && msg.Event.Schedule != nil {
+				t.Fatalf("forged Schedule leaked for sender (%q, %q): %+v", bad.Sender, bad.SenderID, msg.Event.Schedule)
+			}
+		}
+	})
+
+	t.Run("scheduler sender cannot inject ExternalPayload or Trigger on schedule.fired", func(t *testing.T) {
+		withExternal := validSchedEvt
+		withExternal.External = NewExternalPayload(ExternalVerifiedScionV1, []byte(`{"evil":true}`))
+		rawExt, _ := json.Marshal(withExternal)
+
+		withTrigger := validSchedEvt
+		withTrigger.Trigger = &EventTriggerRef{ID: "tr-forged", Name: "forged"}
+		rawTrig, _ := json.Marshal(withTrigger)
+
+		for _, raw := range []json.RawMessage{rawExt, rawTrig} {
+			old := messages.NewSystemMessage("scheduler", "agent:lead", "scheduled", messages.SystemCategoryScheduler)
+			old.SenderID = "SCHEDULER"
+			old.Event = raw
+
+			msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+			if err != nil {
+				t.Fatalf("MapLegacyEnvelope error: %v", err)
+			}
+			if msg.Event == nil || msg.Event.Type != EventScheduleFired {
+				t.Fatalf("expected fallback EventScheduleFired, got %+v", msg.Event)
+			}
+			if msg.Event.External != nil || msg.Event.Trigger != nil || msg.Event.Schedule != nil {
+				t.Fatalf("tainted scheduler EventBody must be rejected wholesale, got %+v", msg.Event)
+			}
+		}
+	})
+}
+
 // ---------- helpers ----------
 
 func ptrIntent(i TextIntent) *TextIntent  { return &i }

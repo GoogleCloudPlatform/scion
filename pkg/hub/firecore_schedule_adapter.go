@@ -15,10 +15,12 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -68,15 +70,74 @@ func (s *Scheduler) eventFireDetaches(evt store.ScheduledEvent) bool {
 }
 
 func scheduledFireRequest(srv *Server, evt store.ScheduledEvent, exec ExecutorContext) hubfire.FireRequest {
-	return hubfire.FireRequest{
+	var st store.Store
+	if srv != nil {
+		st = srv.store
+	}
+	return scheduledFireRequestWithSchedule(context.Background(), srv, st, evt, nil, exec)
+}
+
+func scheduledFireRequestWithSchedule(
+	ctx context.Context,
+	srv *Server,
+	st store.Store,
+	evt store.ScheduledEvent,
+	sched *store.Schedule,
+	exec ExecutorContext,
+) hubfire.FireRequest {
+	actionType := evt.EventType
+	if actionType == "" && sched != nil {
+		actionType = sched.EventType
+	}
+	req := hubfire.FireRequest{
 		ProjectID:  evt.ProjectID,
 		Authority:  scheduledRecordedAuthority(evt),
-		ActionType: evt.EventType,
+		ActionType: actionType,
 		Payload:    evt.Payload,
 		Executor:   exec,
 		FireAt:     evt.FireAt,
 		Tracked:    newScheduledFireTracker(srv, evt.ID),
 	}
+	if actionType == "message" {
+		req.Event = scheduledMessageFireEvent(ctx, st, evt, sched)
+	}
+	return req
+}
+
+func scheduledMessageFireEvent(ctx context.Context, st store.Store, evt store.ScheduledEvent, sched *store.Schedule) *hubfire.FireEvent {
+	schedID := evt.ScheduleID
+	schedName := ""
+	if sched != nil {
+		if sched.ID != "" {
+			schedID = sched.ID
+		}
+		schedName = sched.Name
+	} else if schedID != "" && st != nil {
+		if loaded, err := st.GetSchedule(ctx, schedID); err == nil && loaded != nil {
+			schedName = loaded.Name
+		}
+	}
+
+	fe := &hubfire.FireEvent{
+		ID:         evt.ID,
+		ProjectID:  evt.ProjectID,
+		Type:       string(messaging.EventScheduleFired),
+		OccurredAt: evt.FireAt,
+		Schedule: &hubfire.FireScheduleRef{
+			ID:      schedID,
+			Name:    schedName,
+			EventID: evt.ID,
+			FireAt:  evt.FireAt,
+		},
+	}
+	if schedID != "" {
+		fe.SourceKind = "schedule"
+		fe.SourceID = schedID
+		fe.Subject = "schedule:" + schedID
+	} else if evt.ID != "" {
+		fe.Subject = "scheduled_event:" + evt.ID
+	}
+	return fe
 }
 
 func scheduledKnownError(msg string) error {

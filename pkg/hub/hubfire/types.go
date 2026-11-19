@@ -67,6 +67,15 @@ type FireTriggerRef struct {
 	Name string
 }
 
+// FireScheduleRef identifies the schedule and firing event for a schedule.fired
+// FireEvent (§8.4).
+type FireScheduleRef struct {
+	ID      string
+	Name    string
+	EventID string
+	FireAt  time.Time
+}
+
 // FireEvent is the normalised event envelope as seen by the fire core.
 type FireEvent struct {
 	ID         string
@@ -79,8 +88,9 @@ type FireEvent struct {
 	ReceivedAt time.Time
 	Attributes map[string]string
 	Lists      map[string][]string
-	Payload    []byte          // bounded raw JSON or nil
-	Trigger    *FireTriggerRef // populated when fired by a trigger
+	Payload    []byte           // bounded raw JSON or nil
+	Trigger    *FireTriggerRef  // populated when fired by a trigger
+	Schedule   *FireScheduleRef // populated when fired by a schedule (§8.4)
 }
 
 // FireRequest carries everything a fire-core Action needs from an adapter

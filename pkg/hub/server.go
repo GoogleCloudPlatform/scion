@@ -6990,10 +6990,7 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 	// E.2b: mark this as deferred execution of the schedule, distinct from the
 	// initiator attribution just copied onto evt above.
 	exec := ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}
-	req := scheduledFireRequest(s, evt, exec)
-	if req.ActionType == "" {
-		req.ActionType = sched.EventType
-	}
+	req := scheduledFireRequestWithSchedule(ctx, s, s.store, evt, &sched, exec)
 	handlerCtx, cancel := context.WithTimeout(
 		withFireHistoryCreator(ContextWithExecutor(ctx, exec), evt.CreatedBy),
 		scheduledEventHandlerTimeout)

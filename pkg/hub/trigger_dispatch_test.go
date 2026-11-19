@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1920,4 +1921,157 @@ func TestTriggerDispatchE2E_SubjectModeSkip_WakeInFlightThenFiresAfter(t *testin
 	assert.Equal(t, store.TriggerFireStatusSkipped, fireByEvent[ev2ID].Status)
 	assert.Equal(t, trigger.ErrFireSubjectBusy, fireByEvent[ev2ID].Error)
 	assert.Equal(t, store.TriggerFireStatusFired, fireByEvent[ev3ID].Status)
+}
+
+func TestScheduleFiredEnvelope_RecurringAndOneShot(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableWriteDenySwitch(t, f.srv)
+	ctx := context.Background()
+
+	disp := &recordingDispatcher{}
+	f.srv.SetDispatcher(disp)
+
+	fireAt := time.Date(2026, 11, 19, 16, 30, 0, 0, time.UTC)
+	msgRaw, err := json.Marshal(MessageEventPayload{
+		AgentID: f.targetAgent.ID,
+		Message: "Scheduled standup check",
+	})
+	require.NoError(t, err)
+
+	// 1. Recurring schedule through Server.runScheduleFire (§8.4).
+	sched := store.Schedule{
+		ID:        api.NewUUID(),
+		ProjectID: f.projectID,
+		Name:      "daily-standup",
+		CronExpr:  "30 16 * * *",
+		EventType: "message",
+		Payload:   string(msgRaw),
+		Status:    store.ScheduleStatusActive,
+		CreatedBy: f.owner.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+			InitiatorPrincipalID:    f.owner.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}
+	require.NoError(t, f.store.CreateSchedule(ctx, &sched))
+
+	recurEvt := store.ScheduledEvent{
+		ID:                   api.NewUUID(),
+		ProjectID:            f.projectID,
+		ScheduleID:           sched.ID,
+		EventType:            "message",
+		FireAt:               fireAt,
+		Payload:              string(msgRaw),
+		Status:               store.ScheduledEventFiring,
+		CreatedBy:            f.owner.ID,
+		InitiatorAttribution: sched.InitiatorAttribution,
+		AuthorityCeiling:     sched.AuthorityCeiling,
+	}
+	require.NoError(t, f.store.CreateScheduledEvent(ctx, &recurEvt))
+
+	f.srv.runScheduleFire(ctx, slog.Default(), sched, recurEvt, fireAt, fireAt.Add(24*time.Hour), nil)
+
+	calls := disp.getCalls()
+	require.Len(t, calls, 1)
+	require.NotContains(t, calls[0].StructuredMessage.DeliveryText, "external_payload")
+	envRecur := extractEnvelopeJSONFromDelivery(t, calls[0].StructuredMessage.DeliveryText)
+	assert.Equal(t, "event", envRecur.Type)
+	assert.Equal(t, "system:SCHEDULER", envRecur.From)
+	assert.Equal(t, "Scheduled standup check", envRecur.Msg)
+	require.NotNil(t, envRecur.Event)
+	assert.Equal(t, messaging.EventScheduleFired, envRecur.Event.Type)
+	assert.Empty(t, envRecur.Event.EventType)
+	assert.Equal(t, "schedule:"+sched.ID, envRecur.Event.Subject)
+	assert.Equal(t, recurEvt.ID, envRecur.Event.EventID)
+	require.NotNil(t, envRecur.Event.Source)
+	assert.Equal(t, messaging.EventSource{
+		Kind: "schedule",
+		ID:   sched.ID,
+		Name: "daily-standup",
+	}, *envRecur.Event.Source)
+	require.NotNil(t, envRecur.Event.Schedule)
+	assert.Equal(t, messaging.EventScheduleRef{
+		ID:      sched.ID,
+		Name:    "daily-standup",
+		EventID: recurEvt.ID,
+		FireAt:  fireAt.Format(time.RFC3339),
+	}, *envRecur.Event.Schedule)
+
+	// 2. One-shot scheduled event without ScheduleID through Scheduler.executeEvent.
+	oneShotAt := fireAt.Add(5 * time.Minute)
+	oneShotEvt := store.ScheduledEvent{
+		ID:                   api.NewUUID(),
+		ProjectID:            f.projectID,
+		EventType:            "message",
+		FireAt:               oneShotAt,
+		Payload:              string(msgRaw),
+		Status:               store.ScheduledEventPending,
+		CreatedBy:            f.owner.ID,
+		InitiatorAttribution: sched.InitiatorAttribution,
+		AuthorityCeiling:     sched.AuthorityCeiling,
+	}
+	require.NoError(t, f.store.CreateScheduledEvent(ctx, &oneShotEvt))
+	sch := NewScheduler(f.store, slog.Default())
+	sch.srv = f.srv
+	require.NoError(t, sch.executeEvent(ctx, oneShotEvt))
+
+	calls = disp.getCalls()
+	require.Len(t, calls, 2)
+	envOneShot := extractEnvelopeJSONFromDelivery(t, calls[1].StructuredMessage.DeliveryText)
+	require.NotNil(t, envOneShot.Event)
+	assert.Equal(t, messaging.EventScheduleFired, envOneShot.Event.Type)
+	assert.Equal(t, "scheduled_event:"+oneShotEvt.ID, envOneShot.Event.Subject)
+	assert.Equal(t, oneShotEvt.ID, envOneShot.Event.EventID)
+	assert.Nil(t, envOneShot.Event.Source, "one-shot event without ScheduleID omits source")
+	require.NotNil(t, envOneShot.Event.Schedule)
+	assert.Equal(t, messaging.EventScheduleRef{
+		EventID: oneShotEvt.ID,
+		FireAt:  oneShotAt.Format(time.RFC3339),
+	}, *envOneShot.Event.Schedule)
+}
+
+func TestBuildDispatchedEventBody_EnumMemberVsTriggerFiredFallback(t *testing.T) {
+	enumMembers := []messaging.EventType{
+		messaging.EventAgentStateChanged,
+		messaging.EventAgentInputNeeded,
+		messaging.EventDeliveryFailed,
+		messaging.EventScheduleFired,
+		messaging.EventPortExposed,
+		messaging.EventArtifactReview,
+		messaging.EventWebhookReceived,
+		messaging.EventTriggerFired,
+	}
+	for _, et := range enumMembers {
+		t.Run("enum_"+string(et), func(t *testing.T) {
+			body := buildDispatchedEventBody(&hubfire.FireEvent{
+				ID:      "evt-enum",
+				Type:    string(et),
+				Subject: "subj-1",
+			})
+			assert.Equal(t, et, body.Type)
+			assert.Empty(t, body.EventType, "enum member %q must use its EventType directly without fallback EventType", et)
+		})
+	}
+
+	nonEnumTypes := []string{
+		"webhook.deploy.finished",
+		"github.pull_request.opened",
+		"custom.service.degraded",
+		"",
+	}
+	for _, srcType := range nonEnumTypes {
+		t.Run("fallback_"+srcType, func(t *testing.T) {
+			body := buildDispatchedEventBody(&hubfire.FireEvent{
+				ID:      "evt-fallback",
+				Type:    srcType,
+				Subject: "subj-2",
+			})
+			assert.Equal(t, messaging.EventTriggerFired, body.Type)
+			assert.Equal(t, srcType, body.EventType)
+		})
+	}
 }

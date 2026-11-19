@@ -2574,9 +2574,9 @@ func TestDispatcher_SubjectModeSkip_WhileWakeFireInFlightAndAfter(t *testing.T) 
 	ev1WakeEntered := make(chan struct{})
 	releaseEv1Wake := make(chan struct{})
 	var (
-		mu         sync.Mutex
-		skipFires  []string
-		newFires   []string
+		mu        sync.Mutex
+		skipFires []string
+		newFires  []string
 	)
 
 	core.fireFn = func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
