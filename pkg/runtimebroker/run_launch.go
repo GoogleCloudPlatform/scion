@@ -1054,6 +1054,9 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 	if ue, ok := unusableProvisionerFrom(err); ok {
 		return ErrCodeHarnessConfigUnusable, ue.PublicMessage()
 	}
+	if emptyGenericCommandFrom(err) {
+		return ErrCodeHarnessConfigUnusable, emptyGenericCommandMessage()
+	}
 	if se, ok := storageMigrationRequiredFrom(err); ok {
 		return ErrCodeStorageMigrationRequired, se.PublicMessage()
 	}

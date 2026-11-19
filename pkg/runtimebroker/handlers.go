@@ -2248,6 +2248,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
+		isEmptyGenericCmd := emptyGenericCommandFrom(err)
 		switch {
 		case isPolicyErr:
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
@@ -2257,6 +2258,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case isResourceRefusal:
 			markAttemptFailed(resourceLimitsStatus, resourceErr.PublicMessage())
+		case isEmptyGenericCmd:
+			markAttemptFailed(emptyGenericCommandStatus, emptyGenericCommandMessage())
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
@@ -2349,6 +2352,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// The runtime refused the resource spec before creating
 			// anything (ptone/scion#7103). The full error is logged above.
 			writeResourceLimitsRefused(w, resourceErr, opCreateAgent, nil)
+		case isEmptyGenericCmd:
+			writeEmptyGenericCommandRefused(w, opCreateAgent, nil)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -4399,6 +4404,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		case isResourceRefusal:
 			// As on create (ptone/scion#7103); logged above.
 			writeResourceLimitsRefused(w, resourceErr, "start agent", details)
+		case emptyGenericCommandFrom(err):
+			writeEmptyGenericCommandRefused(w, "start agent", details)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -5628,6 +5635,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// As on create (ptone/scion#7103); logged above.
 		if re, ok := resourceLimitsErrorFrom(err); ok {
 			writeResourceLimitsRefused(w, re, "restart agent", details)
+			return
+		}
+		if emptyGenericCommandFrom(err) {
+			writeEmptyGenericCommandRefused(w, "restart agent", details)
 			return
 		}
 		// Start can re-provision the agent: a required skill reference that

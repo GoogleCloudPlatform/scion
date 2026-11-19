@@ -103,6 +103,13 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 			s.writeHarnessPolicyRefusal(w, d, "create agent", req.ID, nil)
 			return false
 		}
+		if emptyGenericCommandFrom(err) {
+			markAttemptFailed(emptyGenericCommandStatus, emptyGenericCommandMessage())
+			s.agentLifecycleLog.Warn("Agent create failed: preflight: empty generic command",
+				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
+			writeEmptyGenericCommandRefused(w, opCreateAgent, nil)
+			return false
+		}
 		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 			// Names the resource without err's own text, which can carry
