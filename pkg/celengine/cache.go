@@ -49,6 +49,11 @@ type CacheConfig struct {
 	MaxPerConsumer     int
 	MaxPerProject      int
 	MaxBytesPerProject int
+	// OnCapCheck is an optional test/instrumentation hook invoked whenever a
+	// newly bound scope checks per-project / per-consumer caps, reporting the
+	// number of LRU candidates inspected during eviction (0 when within cap).
+	// Already-bound scoped cache hits bypass cap checks completely.
+	OnCapCheck func(evictSteps int)
 }
 
 // DefaultCacheConfig returns a CacheConfig with DefaultCacheMaxEntries (1024)
@@ -140,6 +145,16 @@ type scopeKey struct {
 	id       string
 }
 
+type projectKey struct {
+	consumer  string
+	projectID string
+}
+
+type projectStats struct {
+	entries int
+	bytes   int
+}
+
 type scopeRecord struct {
 	projectID string
 	revision  int64
@@ -147,12 +162,14 @@ type scopeRecord struct {
 }
 
 type cacheEntry struct {
-	key        cacheIdentity
-	prog       Program
-	weight     int
-	elem       *list.Element
-	scopes     map[scopeKey]struct{}
-	everScoped bool
+	key          cacheIdentity
+	prog         Program
+	weight       int
+	elem         *list.Element
+	scopes       map[scopeKey]string // scopeKey -> projectID recorded for that link
+	consumerRefs map[string]int      // consumer -> count of attached scopeKeys
+	projectRefs  map[projectKey]int  // (consumer, projectID) -> count of attached scopeKeys
+	everScoped   bool
 }
 
 type programCache struct {
@@ -162,10 +179,13 @@ type programCache struct {
 	maxPerConsumer     int
 	maxPerProject      int
 	maxBytesPerProject int
+	onCapCheck         func(evictSteps int)
 	bytes              int
 	lru                *list.List // front = most recently used; Value = *cacheEntry
 	byKey              map[cacheIdentity]*cacheEntry
 	byScope            map[scopeKey]*scopeRecord
+	consumerCounts     map[string]int
+	projectUsage       map[projectKey]projectStats
 	hits               uint64
 	misses             uint64
 }
@@ -177,9 +197,31 @@ func newProgramCache(cfg CacheConfig) *programCache {
 		maxPerConsumer:     cfg.MaxPerConsumer,
 		maxPerProject:      cfg.MaxPerProject,
 		maxBytesPerProject: cfg.MaxBytesPerProject,
+		onCapCheck:         cfg.OnCapCheck,
 		lru:                list.New(),
 		byKey:              make(map[cacheIdentity]*cacheEntry),
 		byScope:            make(map[scopeKey]*scopeRecord),
+		consumerCounts:     make(map[string]int),
+		projectUsage:       make(map[projectKey]projectStats),
+	}
+}
+
+func (c *programCache) exceedsProjectByteCapLocked(scope CacheScope, weight int) bool {
+	return scope.ProjectID != "" && c.maxBytesPerProject > 0 && weight > c.maxBytesPerProject
+}
+
+func (c *programCache) retireSupersededRevisionLocked(scope CacheScope) {
+	if !scope.hasID() || scope.Revision <= 0 {
+		return
+	}
+	sk := scopeKey{consumer: scope.Consumer, id: scope.ID}
+	rec, ok := c.byScope[sk]
+	if !ok || rec.revision <= 0 || scope.Revision <= rec.revision {
+		return
+	}
+	delete(c.byScope, sk)
+	for oldID := range rec.entries {
+		c.detachScopeFromEntryLocked(sk, oldID)
 	}
 }
 
@@ -195,8 +237,11 @@ func (c *programCache) get(id cacheIdentity, scope CacheScope) (Program, bool) {
 	c.hits++
 	c.lru.MoveToFront(ent.elem)
 	if scope.hasID() {
-		c.bindScopeLocked(scope, ent)
-		c.enforceScopeCapsLocked(scope, ent)
+		if c.exceedsProjectByteCapLocked(scope, ent.weight) {
+			c.retireSupersededRevisionLocked(scope)
+		} else if c.bindScopeLocked(scope, ent) {
+			c.enforceScopeCapsLocked(scope, ent)
+		}
 	}
 	return ent.prog, true
 }
@@ -208,26 +253,44 @@ func (c *programCache) put(id cacheIdentity, exprBytes int, prog Program, scope 
 	if ent, ok := c.byKey[id]; ok {
 		c.lru.MoveToFront(ent.elem)
 		if scope.hasID() {
-			c.bindScopeLocked(scope, ent)
-			c.enforceScopeCapsLocked(scope, ent)
+			if c.exceedsProjectByteCapLocked(scope, ent.weight) {
+				c.retireSupersededRevisionLocked(scope)
+			} else if c.bindScopeLocked(scope, ent) {
+				c.enforceScopeCapsLocked(scope, ent)
+			}
 		}
 		return ent.prog
 	}
 
 	weight := max(exprBytes, 1) + prog.regexCacheWeight()
+
+	// Never retain an entry heavier than the global or per-project byte bound
+	// (O1): compile and return prog for immediate use without caching it.
+	if c.maxEntries == 0 ||
+		(c.maxBytes > 0 && weight > c.maxBytes) ||
+		(scope.hasID() && c.exceedsProjectByteCapLocked(scope, weight)) {
+		if scope.hasID() {
+			c.retireSupersededRevisionLocked(scope)
+		}
+		return prog
+	}
+
 	ent := &cacheEntry{
-		key:    id,
-		prog:   prog,
-		weight: weight,
-		scopes: make(map[scopeKey]struct{}),
+		key:          id,
+		prog:         prog,
+		weight:       weight,
+		scopes:       make(map[scopeKey]string),
+		consumerRefs: make(map[string]int),
+		projectRefs:  make(map[projectKey]int),
 	}
 	ent.elem = c.lru.PushFront(ent)
 	c.byKey[id] = ent
 	c.bytes += weight
 
 	if scope.hasID() {
-		c.bindScopeLocked(scope, ent)
-		c.enforceScopeCapsLocked(scope, ent)
+		if c.bindScopeLocked(scope, ent) {
+			c.enforceScopeCapsLocked(scope, ent)
+		}
 	}
 
 	for c.lru.Len() > c.maxEntries || (c.maxBytes > 0 && c.bytes > c.maxBytes) {
@@ -240,19 +303,88 @@ func (c *programCache) put(id cacheIdentity, exprBytes int, prog Program, scope 
 	return prog
 }
 
-func (c *programCache) enforceScopeCapsLocked(scope CacheScope, keep *cacheEntry) {
-	if scope.Consumer == "" {
+func (c *programCache) attachEntryScopeLocked(ent *cacheEntry, sk scopeKey, projectID string) {
+	if oldProj, already := ent.scopes[sk]; already {
+		if projectID == "" || oldProj == projectID {
+			return
+		}
+		if oldProj != "" {
+			c.decProjectRefLocked(ent, projectKey{consumer: sk.consumer, projectID: oldProj})
+		}
+		ent.scopes[sk] = projectID
+		c.incProjectRefLocked(ent, projectKey{consumer: sk.consumer, projectID: projectID})
 		return
 	}
-	if scope.ProjectID != "" && (c.maxPerProject > 0 || c.maxBytesPerProject > 0) {
-		c.enforceProjectCapLocked(scope.Consumer, scope.ProjectID, keep)
+	ent.scopes[sk] = projectID
+	ent.everScoped = true
+	if ent.consumerRefs[sk.consumer] == 0 {
+		c.consumerCounts[sk.consumer]++
 	}
-	if c.maxPerConsumer > 0 {
-		c.enforceConsumerCapLocked(scope.Consumer, keep)
+	ent.consumerRefs[sk.consumer]++
+	if projectID != "" {
+		c.incProjectRefLocked(ent, projectKey{consumer: sk.consumer, projectID: projectID})
 	}
 }
 
-func (c *programCache) bindScopeLocked(scope CacheScope, target *cacheEntry) {
+func (c *programCache) unlinkEntryScopeLocked(ent *cacheEntry, sk scopeKey) {
+	projID, exists := ent.scopes[sk]
+	if !exists {
+		return
+	}
+	delete(ent.scopes, sk)
+
+	rc := ent.consumerRefs[sk.consumer] - 1
+	if rc <= 0 {
+		delete(ent.consumerRefs, sk.consumer)
+		cc := c.consumerCounts[sk.consumer] - 1
+		if cc <= 0 {
+			delete(c.consumerCounts, sk.consumer)
+		} else {
+			c.consumerCounts[sk.consumer] = cc
+		}
+	} else {
+		ent.consumerRefs[sk.consumer] = rc
+	}
+
+	if projID != "" {
+		c.decProjectRefLocked(ent, projectKey{consumer: sk.consumer, projectID: projID})
+	}
+}
+
+func (c *programCache) incProjectRefLocked(ent *cacheEntry, pk projectKey) {
+	if ent.projectRefs[pk] == 0 {
+		u := c.projectUsage[pk]
+		u.entries++
+		u.bytes += ent.weight
+		c.projectUsage[pk] = u
+	}
+	ent.projectRefs[pk]++
+}
+
+func (c *programCache) decProjectRefLocked(ent *cacheEntry, pk projectKey) {
+	rc := ent.projectRefs[pk] - 1
+	if rc <= 0 {
+		delete(ent.projectRefs, pk)
+		u := c.projectUsage[pk]
+		u.entries--
+		u.bytes -= ent.weight
+		if u.entries <= 0 {
+			delete(c.projectUsage, pk)
+		} else {
+			if u.bytes < 0 {
+				u.bytes = 0
+			}
+			c.projectUsage[pk] = u
+		}
+	} else {
+		ent.projectRefs[pk] = rc
+	}
+}
+
+// bindScopeLocked associates target with scope and reports whether any binding
+// state changed. When (scope, target) is already bound at the current revision
+// and project, it returns false in O(1) without touching cap counters.
+func (c *programCache) bindScopeLocked(scope CacheScope, target *cacheEntry) bool {
 	sk := scopeKey{consumer: scope.Consumer, id: scope.ID}
 
 	rec, exists := c.byScope[sk]
@@ -262,23 +394,36 @@ func (c *programCache) bindScopeLocked(scope CacheScope, target *cacheEntry) {
 			revision:  scope.Revision,
 			entries:   map[cacheIdentity]struct{}{target.key: {}},
 		}
-		target.scopes[sk] = struct{}{}
-		target.everScoped = true
-		return
+		c.attachEntryScopeLocked(target, sk, scope.ProjectID)
+		return true
 	}
 
 	// Do not allow an older revision to clobber bindings recorded for a newer revision.
 	if scope.Revision > 0 && rec.revision > scope.Revision {
-		return
+		return false
 	}
-	if scope.ProjectID != "" {
+
+	// Fast path (R1): hit on an already-bound (scope, entry) pair at the current
+	// revision and project performs zero mutations and zero cap checks.
+	if (scope.Revision <= 0 || scope.Revision == rec.revision) &&
+		(scope.ProjectID == "" || scope.ProjectID == rec.projectID) {
+		if _, already := rec.entries[target.key]; already {
+			return false
+		}
+	}
+
+	if scope.ProjectID != "" && scope.ProjectID != rec.projectID {
 		rec.projectID = scope.ProjectID
+		for existingID := range rec.entries {
+			if existingEnt, ok := c.byKey[existingID]; ok {
+				c.attachEntryScopeLocked(existingEnt, sk, rec.projectID)
+			}
+		}
 	}
 
 	// Attach target first so an unchanged expression across a revision bump is never
 	// transiently left with zero scopes while detaching prior-revision entries.
-	target.scopes[sk] = struct{}{}
-	target.everScoped = true
+	c.attachEntryScopeLocked(target, sk, rec.projectID)
 
 	if scope.Revision > 0 && rec.revision > 0 && scope.Revision > rec.revision {
 		for oldID := range rec.entries {
@@ -290,13 +435,14 @@ func (c *programCache) bindScopeLocked(scope CacheScope, target *cacheEntry) {
 		}
 		rec.revision = scope.Revision
 		rec.entries[target.key] = struct{}{}
-		return
+		return true
 	}
 
 	rec.entries[target.key] = struct{}{}
 	if scope.Revision > rec.revision {
 		rec.revision = scope.Revision
 	}
+	return true
 }
 
 func (c *programCache) detachScopeFromEntryLocked(sk scopeKey, id cacheIdentity) {
@@ -304,62 +450,39 @@ func (c *programCache) detachScopeFromEntryLocked(sk scopeKey, id cacheIdentity)
 	if !ok {
 		return
 	}
-	delete(ent.scopes, sk)
+	c.unlinkEntryScopeLocked(ent, sk)
 	if ent.everScoped && len(ent.scopes) == 0 {
 		c.removeEntryLocked(ent)
 	}
 }
 
-func (c *programCache) enforceConsumerCapLocked(consumer string, keep *cacheEntry) {
-	for c.consumerEntryCountLocked(consumer) > c.maxPerConsumer {
-		var victim *cacheEntry
-		for e := c.lru.Back(); e != nil; e = e.Prev() {
-			cand := e.Value.(*cacheEntry)
-			if cand == keep {
-				continue
-			}
-			if entryHasConsumer(cand, consumer) {
-				victim = cand
-				break
-			}
-		}
-		if victim == nil {
-			break
-		}
-		// Detach all scopes belonging to this consumer from victim; if no other
-		// scope references victim, remove it.
-		for sk := range victim.scopes {
-			if sk.consumer == consumer {
-				delete(victim.scopes, sk)
-				if rec, ok := c.byScope[sk]; ok {
-					delete(rec.entries, victim.key)
-					if len(rec.entries) == 0 {
-						delete(c.byScope, sk)
-					}
-				}
-			}
-		}
-		if len(victim.scopes) == 0 {
-			c.removeEntryLocked(victim)
-		}
+func (c *programCache) enforceScopeCapsLocked(scope CacheScope, keep *cacheEntry) {
+	if scope.Consumer == "" {
+		return
+	}
+	evictSteps := 0
+	if scope.ProjectID != "" && (c.maxPerProject > 0 || c.maxBytesPerProject > 0) {
+		evictSteps += c.enforceProjectCapLocked(scope.Consumer, scope.ProjectID, keep)
+	}
+	if c.maxPerConsumer > 0 {
+		evictSteps += c.enforceConsumerCapLocked(scope.Consumer, keep)
+	}
+	if c.onCapCheck != nil {
+		c.onCapCheck(evictSteps)
 	}
 }
 
-func (c *programCache) enforceProjectCapLocked(consumer, projectID string, keep *cacheEntry) {
-	for {
-		count, bytes := c.projectUsageLocked(consumer, projectID)
-		overCount := c.maxPerProject > 0 && count > c.maxPerProject
-		overBytes := c.maxBytesPerProject > 0 && bytes > c.maxBytesPerProject
-		if !overCount && !overBytes {
-			break
-		}
+func (c *programCache) enforceConsumerCapLocked(consumer string, keep *cacheEntry) int {
+	steps := 0
+	for c.consumerCounts[consumer] > c.maxPerConsumer {
 		var victim *cacheEntry
 		for e := c.lru.Back(); e != nil; e = e.Prev() {
+			steps++
 			cand := e.Value.(*cacheEntry)
 			if cand == keep {
 				continue
 			}
-			if c.entryHasProjectLocked(cand, consumer, projectID) {
+			if cand.consumerRefs[consumer] > 0 {
 				victim = cand
 				break
 			}
@@ -371,64 +494,75 @@ func (c *programCache) enforceProjectCapLocked(consumer, projectID string, keep 
 			if sk.consumer != consumer {
 				continue
 			}
-			rec, ok := c.byScope[sk]
-			if !ok || rec.projectID != projectID {
-				continue
-			}
-			delete(victim.scopes, sk)
-			delete(rec.entries, victim.key)
-			if len(rec.entries) == 0 {
-				delete(c.byScope, sk)
+			c.unlinkEntryScopeLocked(victim, sk)
+			if rec, ok := c.byScope[sk]; ok {
+				delete(rec.entries, victim.key)
+				if len(rec.entries) == 0 {
+					delete(c.byScope, sk)
+				}
 			}
 		}
 		if len(victim.scopes) == 0 {
 			c.removeEntryLocked(victim)
 		}
 	}
+	return steps
 }
 
-func (c *programCache) consumerEntryCountLocked(consumer string) int {
-	n := 0
-	for _, ent := range c.byKey {
-		if entryHasConsumer(ent, consumer) {
-			n++
+func (c *programCache) enforceProjectCapLocked(consumer, projectID string, keep *cacheEntry) int {
+	pk := projectKey{consumer: consumer, projectID: projectID}
+	steps := 0
+	for {
+		u := c.projectUsage[pk]
+		overCount := c.maxPerProject > 0 && u.entries > c.maxPerProject
+		overBytes := c.maxBytesPerProject > 0 && u.bytes > c.maxBytesPerProject
+		if !overCount && !overBytes {
+			break
+		}
+		var victim *cacheEntry
+		for e := c.lru.Back(); e != nil; e = e.Prev() {
+			steps++
+			cand := e.Value.(*cacheEntry)
+			if cand == keep {
+				continue
+			}
+			if cand.projectRefs[pk] > 0 {
+				victim = cand
+				break
+			}
+		}
+		if victim == nil {
+			break
+		}
+		for sk, skProj := range victim.scopes {
+			if sk.consumer != consumer || skProj != projectID {
+				continue
+			}
+			c.unlinkEntryScopeLocked(victim, sk)
+			if rec, ok := c.byScope[sk]; ok {
+				delete(rec.entries, victim.key)
+				if len(rec.entries) == 0 {
+					delete(c.byScope, sk)
+				}
+			}
+		}
+		if len(victim.scopes) == 0 {
+			c.removeEntryLocked(victim)
 		}
 	}
-	return n
-}
-
-func (c *programCache) projectUsageLocked(consumer, projectID string) (entries, bytes int) {
-	for _, ent := range c.byKey {
-		if c.entryHasProjectLocked(ent, consumer, projectID) {
-			entries++
-			bytes += ent.weight
-		}
-	}
-	return entries, bytes
-}
-
-func entryHasConsumer(ent *cacheEntry, consumer string) bool {
-	for sk := range ent.scopes {
-		if sk.consumer == consumer {
-			return true
-		}
-	}
-	return false
-}
-
-func (c *programCache) entryHasProjectLocked(ent *cacheEntry, consumer, projectID string) bool {
-	for sk := range ent.scopes {
-		if sk.consumer != consumer {
-			continue
-		}
-		if rec, ok := c.byScope[sk]; ok && rec.projectID == projectID {
-			return true
-		}
-	}
-	return false
+	return steps
 }
 
 func (c *programCache) removeEntryLocked(ent *cacheEntry) {
+	for sk := range ent.scopes {
+		c.unlinkEntryScopeLocked(ent, sk)
+		if rec, ok := c.byScope[sk]; ok {
+			delete(rec.entries, ent.key)
+			if len(rec.entries) == 0 {
+				delete(c.byScope, sk)
+			}
+		}
+	}
 	if _, existed := c.byKey[ent.key]; existed {
 		delete(c.byKey, ent.key)
 		c.bytes -= ent.weight
@@ -439,14 +573,6 @@ func (c *programCache) removeEntryLocked(ent *cacheEntry) {
 	if ent.elem != nil {
 		c.lru.Remove(ent.elem)
 		ent.elem = nil
-	}
-	for sk := range ent.scopes {
-		if rec, ok := c.byScope[sk]; ok {
-			delete(rec.entries, ent.key)
-			if len(rec.entries) == 0 {
-				delete(c.byScope, sk)
-			}
-		}
 	}
 }
 
