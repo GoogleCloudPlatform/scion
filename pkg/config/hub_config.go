@@ -1622,7 +1622,11 @@ func applyDatabasePoolDefaults(db *DatabaseConfig) {
 // If both exist in the same directory, a deprecation warning is emitted to stderr.
 func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	// Try loading from settings.yaml first (versioned path)
-	if gc, ok := loadGlobalConfigFromSettings(configPath); ok {
+	gc, ok, err := loadGlobalConfigFromSettings(configPath)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
 		markTrustedProxiesSet(gc, nil)
 		return gc, nil
 	}
@@ -1631,7 +1635,7 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	// key, but a settings.yaml may still carry top-level hub sections
 	// (quotas, agent_secrets, default_timezone, ...); honour them so a
 	// file-mode reload does not reset those live values (ptone/scion#2284).
-	gc, err := loadGlobalConfigLegacy(configPath, findTopLevelSettingsRaw(configPath))
+	gc, err = loadGlobalConfigLegacy(configPath, findTopLevelSettingsRaw(configPath))
 	if err != nil {
 		return nil, err
 	}
@@ -1671,11 +1675,16 @@ func trustedProxiesEnvNames() []string {
 }
 
 // loadGlobalConfigFromSettings attempts to load server config from settings.yaml files.
-// Returns (config, true) if settings.yaml had a server key, (nil, false) otherwise.
-func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
+// Returns (config, true, nil) if settings.yaml had a valid server key,
+// (nil, false, err) on a settings.yaml or server-section decode error, and
+// (nil, false, nil) when no settings.yaml has a server key.
+func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool, error) {
 	src := resolveServerSettingsSource(configPath)
+	if src.err != nil {
+		return nil, false, src.err
+	}
 	if src.globalDir == "" || src.legacy {
-		return nil, false
+		return nil, false, nil
 	}
 	globalDir := src.globalDir
 	gc := src.gc
@@ -1691,7 +1700,7 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	// Apply environment variable overrides (SCION_SERVER_ prefix).
 	// Without this, env vars are ignored when config comes from settings.yaml.
 	if err := applyEnvOverrides(gc); err != nil {
-		return nil, false
+		return nil, false, err
 	}
 
 	// Apply database URL default if needed
@@ -1700,7 +1709,7 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	}
 	applyDatabasePoolDefaults(&gc.Database)
 
-	return gc, true
+	return gc, true, nil
 }
 
 // serverSettingsSource is where the server's settings come from for a given
@@ -1724,8 +1733,13 @@ type serverSettingsSource struct {
 	// legacy reports that neither settings.yaml has a server key, so the
 	// server block comes from server.yaml (loadGlobalConfigLegacy).
 	legacy bool
-	// gc is the server config parsed from settingsDir (nil in legacy mode).
+	// gc is the server config parsed from settingsDir (nil in legacy mode or
+	// when err != nil).
 	gc *GlobalConfig
+	// err is non-nil when a candidate settings.yaml cannot be read/parsed or
+	// its server section fails to decode; resolution stops without falling
+	// back to --config or legacy server.yaml (ptone/scion#6187).
+	err error
 }
 
 // configPathDir returns the directory of configPath (configPath itself when
@@ -1756,13 +1770,23 @@ func resolveServerSettingsSource(configPath string) serverSettingsSource {
 	src.configDir, src.configFile = configPathDir(configPath)
 
 	if src.globalDir != "" {
-		if gc, found := loadServerFromSettingsFile(src.globalDir); found {
+		gc, found, err := loadServerFromSettingsFile(src.globalDir)
+		if err != nil {
+			src.settingsDir, src.err = src.globalDir, err
+			return src
+		}
+		if found {
 			src.settingsDir, src.gc = src.globalDir, gc
 			return src
 		}
 	}
-	if src.configDir != "" {
-		if gc, found := loadServerFromSettingsFile(src.configDir); found {
+	if src.configDir != "" && (src.globalDir == "" || !sameDir(src.configDir, src.globalDir)) {
+		gc, found, err := loadServerFromSettingsFile(src.configDir)
+		if err != nil {
+			src.settingsDir, src.err = src.configDir, err
+			return src
+		}
+		if found {
 			src.settingsDir, src.gc = src.configDir, gc
 			return src
 		}
@@ -2800,27 +2824,57 @@ func loadServerConfigFile(k *koanf.Koanf, dir string) {
 // loadServerFromSettingsFile checks if settings.yaml in the given directory
 // contains a "server" key. If found, it loads the server section as a
 // V1ServerConfig and converts it to a GlobalConfig.
-// Returns (config, true) if settings.yaml had a server key, (nil, false) otherwise.
-func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
-	raw, ok := readSettingsFileRaw(dir)
-	if !ok {
-		return nil, false
+// Returns (config, true, nil) if settings.yaml had a valid server key,
+// (nil, true, err) if settings.yaml had a server key that failed to parse or
+// decode, (nil, false, err) if settings.yaml existed and could not be read,
+// and (nil, false, nil) if settings.yaml was absent or had no server key.
+func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool, error) {
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("reading %s: %w", settingsPath, err)
+	}
+
+	var doc yamlv3.Node
+	if err := unmarshalSettingsYAML(data, &doc); err != nil {
+		if hasTopLevelServerKey(data) {
+			return nil, true, fmt.Errorf("parsing %s: %w", settingsPath, err)
+		}
+		return nil, false, nil
+	}
+	root := &doc
+	if root.Kind == yamlv3.DocumentNode {
+		if len(root.Content) == 0 {
+			return nil, false, nil
+		}
+		root = root.Content[0]
+	}
+	if root.Kind != yamlv3.MappingNode || !mappingHasServerOrMergeKey(root) {
+		return nil, false, nil
+	}
+
+	var raw map[string]interface{}
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
+		return nil, true, fmt.Errorf("parsing %s: %w", settingsPath, err)
 	}
 
 	serverRaw, ok := raw["server"]
 	if !ok || serverRaw == nil {
-		return nil, false
+		return nil, false, nil
 	}
 
 	// Re-marshal just the server section, then unmarshal into V1ServerConfig
 	serverData, err := yamlv3.Marshal(serverRaw)
 	if err != nil {
-		return nil, false
+		return nil, true, fmt.Errorf("invalid server configuration in %s: %w", settingsPath, err)
 	}
 
 	var v1Server V1ServerConfig
-	if err := yamlv3.Unmarshal(serverData, &v1Server); err != nil {
-		return nil, false
+	if err := unmarshalSettingsYAML(serverData, &v1Server); err != nil {
+		return nil, true, formatServerDecodeError(settingsPath, serverData)
 	}
 
 	// ConvertV1ServerToGlobalConfig sets TrustedProxiesSet when the file
@@ -2829,7 +2883,230 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 	gc := ConvertV1ServerToGlobalConfig(&v1Server)
 	applyTopLevelSettingsSections(gc, raw)
 
-	return gc, true
+	return gc, true, nil
+}
+
+// mappingHasServerOrMergeKey reports whether a top-level YAML MappingNode
+// defines a non-null "server" key or a "<<" merge key (which could expand one).
+func mappingHasServerOrMergeKey(root *yamlv3.Node) bool {
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		kNode, vNode := root.Content[i], root.Content[i+1]
+		switch kNode.Value {
+		case "server":
+			return vNode.Kind != yamlv3.ScalarNode || vNode.ShortTag() != "!!null"
+		case "<<":
+			return true
+		}
+	}
+	return false
+}
+
+// hasTopLevelServerKey reports whether unparseable YAML text plausibly declares
+// a top-level "server" key (at column 0, or as a JSON top-level "server": key),
+// so syntax errors in a server-bearing settings.yaml fail closed while
+// syntax errors in a server-less settings.yaml leave LoadGlobalConfig on the
+// legacy/default server path (allowing `scion server preflight` to inspect the
+// broken non-server sections).
+func hasTopLevelServerKey(data []byte) bool {
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimRight(rawLine, "\r")
+		if rest, ok := strings.CutPrefix(line, "server:"); ok {
+			if rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '#' {
+				return true
+			}
+		}
+		trimmed := strings.TrimLeft(line, " \t{")
+		if strings.HasPrefix(trimmed, `"server"`) {
+			after := strings.TrimLeft(strings.TrimPrefix(trimmed, `"server"`), " \t")
+			if strings.HasPrefix(after, ":") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// formatServerDecodeError locates the mistyped field(s) in serverData by
+// walking the YAML node against V1ServerConfig and formats an error naming
+// each field path without quoting raw scalar values (which may contain
+// secrets).
+func formatServerDecodeError(settingsPath string, serverData []byte) error {
+	var doc yamlv3.Node
+	if err := unmarshalSettingsYAML(serverData, &doc); err == nil {
+		node := &doc
+		if node.Kind == yamlv3.DocumentNode && len(node.Content) > 0 {
+			node = node.Content[0]
+		}
+		if details := findServerDecodeErrors(node, reflect.TypeOf(V1ServerConfig{}), "server"); len(details) > 0 {
+			return fmt.Errorf("invalid server configuration in %s: %s", settingsPath, strings.Join(details, "; "))
+		}
+	}
+	return fmt.Errorf("invalid server configuration in %s: server: values do not decode into the server configuration structure", settingsPath)
+}
+
+// findServerDecodeErrors walks node alongside Go type typ at dotted settings
+// path (starting at "server") and returns one "path: cannot decode X into Y"
+// message per leaf that fails yaml.v3 decoding.
+func findServerDecodeErrors(node *yamlv3.Node, typ reflect.Type, path string) []string {
+	for node != nil && node.Kind == yamlv3.AliasNode {
+		node = node.Alias
+	}
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	if node == nil || decodeSettingsYAMLNode(node, reflect.New(typ).Interface()) == nil {
+		return nil
+	}
+
+	switch {
+	case typ.Kind() == reflect.Struct && typ != reflect.TypeOf(time.Time{}) && node.Kind == yamlv3.MappingNode:
+		fields := yamlStructFieldTypes(typ)
+		var out []string
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			kNode, vNode := node.Content[i], node.Content[i+1]
+			if fieldType, ok := fields[kNode.Value]; ok {
+				out = append(out, findServerDecodeErrors(vNode, fieldType, path+"."+kNode.Value)...)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	case (typ.Kind() == reflect.Slice || typ.Kind() == reflect.Array) && node.Kind == yamlv3.SequenceNode:
+		var out []string
+		for idx, elem := range node.Content {
+			out = append(out, findServerDecodeErrors(elem, typ.Elem(), fmt.Sprintf("%s[%d]", path, idx))...)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	case typ.Kind() == reflect.Map && node.Kind == yamlv3.MappingNode:
+		var out []string
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			kNode, vNode := node.Content[i], node.Content[i+1]
+			if decodeSettingsYAMLNode(kNode, reflect.New(typ.Key()).Interface()) != nil {
+				out = append(out, fmt.Sprintf("%s: cannot decode map key %s into %s", path, yamlNodeKindName(kNode), expectedYAMLTypeName(typ.Key())))
+				continue
+			}
+			out = append(out, findServerDecodeErrors(vNode, typ.Elem(), path+"."+kNode.Value)...)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+
+	return []string{fmt.Sprintf("%s: cannot decode %s into %s", path, yamlNodeKindName(node), expectedYAMLTypeName(typ))}
+}
+
+// yamlStructFieldTypes maps each exported YAML field name on struct typ to its
+// Go reflect.Type, expanding inline struct fields.
+func yamlStructFieldTypes(typ reflect.Type) map[string]reflect.Type {
+	fields := make(map[string]reflect.Type, typ.NumField())
+	for i := 0; i < typ.NumField(); i++ {
+		sf := typ.Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+		tag := sf.Tag.Get("yaml")
+		if tag == "-" {
+			continue
+		}
+		name, opts, _ := strings.Cut(tag, ",")
+		if strings.Contains(","+opts+",", ",inline,") {
+			ft := sf.Type
+			for ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct {
+				for k, v := range yamlStructFieldTypes(ft) {
+					if _, exists := fields[k]; !exists {
+						fields[k] = v
+					}
+				}
+			}
+			continue
+		}
+		if name == "" {
+			name = strings.ToLower(sf.Name)
+		}
+		fields[name] = sf.Type
+	}
+	return fields
+}
+
+func yamlNodeKindName(node *yamlv3.Node) string {
+	for node != nil && node.Kind == yamlv3.AliasNode {
+		node = node.Alias
+	}
+	if node == nil {
+		return "null"
+	}
+	switch node.Kind {
+	case yamlv3.MappingNode:
+		return "mapping"
+	case yamlv3.SequenceNode:
+		return "sequence"
+	case yamlv3.ScalarNode:
+		switch node.ShortTag() {
+		case "!!str":
+			return "string"
+		case "!!int":
+			return "integer"
+		case "!!float":
+			return "number"
+		case "!!bool":
+			return "boolean"
+		case "!!null":
+			return "null"
+		case "!!timestamp":
+			return "timestamp"
+		case "!!binary":
+			return "binary"
+		default:
+			return "scalar"
+		}
+	default:
+		return "value"
+	}
+}
+
+func expectedYAMLTypeName(typ reflect.Type) string {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	if typ == reflect.TypeOf(time.Duration(0)) {
+		return "duration"
+	}
+	switch typ.Kind() {
+	case reflect.Struct, reflect.Map:
+		return "mapping"
+	case reflect.Slice, reflect.Array:
+		elem := typ.Elem()
+		for elem.Kind() == reflect.Pointer {
+			elem = elem.Elem()
+		}
+		switch elem.Kind() {
+		case reflect.String:
+			return "list of strings"
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return "list of integers"
+		case reflect.Struct, reflect.Map:
+			return "list of mappings"
+		default:
+			return "list"
+		}
+	case reflect.String:
+		return "string"
+	case reflect.Bool:
+		return "boolean"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return "integer"
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "unsigned integer"
+	case reflect.Float32, reflect.Float64:
+		return "number"
+	default:
+		return typ.String()
+	}
 }
 
 // readSettingsFileRaw reads settings.yaml in dir and parses it into a generic

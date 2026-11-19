@@ -197,18 +197,10 @@ func TestRuntimeBrokerInstances_StrictLoaderFileResolution(t *testing.T) {
 		if len(got) != 1 || got[0].Key != "from-global" {
 			t.Fatalf("expected the global entry, got %+v", got)
 		}
-		// The lenient server loader silently falls back to the --config
-		// settings; the startup comparison must therefore detect a
-		// difference (the P1.2 refusal trigger).
-		gc, err := LoadGlobalConfig(cfgDir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(gc.RuntimeBroker.Instances) != 1 || gc.RuntimeBroker.Instances[0].Key != "from-config" {
-			t.Fatalf("expected the lenient loader to fall back to --config, got %+v", gc.RuntimeBroker.Instances)
-		}
-		if reflect.DeepEqual(RuntimeBrokerInstancesToGlobal(got), gc.RuntimeBroker.Instances) {
-			t.Fatal("strict and lenient results must differ in the silent-fallback case")
+		// LoadGlobalConfig also refuses to fall back to --config when the
+		// global settings.yaml server section has a decode error (ptone/scion#6187).
+		if _, err := LoadGlobalConfig(cfgDir); err == nil {
+			t.Fatal("expected LoadGlobalConfig to fail on mistyped global server.broker.port rather than falling back to --config")
 		}
 	})
 	t.Run("unparseable global settings is an error", func(t *testing.T) {
