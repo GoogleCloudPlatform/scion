@@ -2370,6 +2370,7 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 	var toDismiss []*ent.Decision
 	var alreadyRows []*ent.Decision
 	var earliestAvailableAt time.Time
+	var latestTooRecentAt time.Time
 	reasons := make(map[string]string)
 
 	if len(requestedSet) > 0 {
@@ -2395,12 +2396,15 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 			avail := r.CreatedAt.Add(store.DecisionDismissMinAge)
 			if rawNow.Before(avail) {
 				reasons[id] = store.AnswerSetReasonTooRecent
+				if avail.After(latestTooRecentAt) {
+					latestTooRecentAt = avail
+				}
 				continue
 			}
 			toDismiss = append(toDismiss, r)
 		}
 		if len(reasons) > 0 {
-			return nil, &store.DismissChangedError{Reasons: reasons}
+			return nil, &store.DismissChangedError{Reasons: reasons, AvailableAt: latestTooRecentAt}
 		}
 	} else {
 		// Empty RowIDs: dismiss every open row of the prompt waiting on the user

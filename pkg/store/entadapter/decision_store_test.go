@@ -2522,6 +2522,7 @@ func TestDismissDecisions_SubsetsAllOrNothingAndEmptyRowIDs(t *testing.T) {
 		rows[0]: store.AnswerSetReasonTooRecent,
 		rows[2]: store.AnswerSetReasonTooRecent,
 	}, changedErr.Reasons)
+	assert.WithinDuration(t, t5m, changedErr.AvailableAt, time.Second, "too-recent subset reports when it becomes dismissable")
 	_, err = f.cs.GetMessage(ctx, earlySub.ResponseMessage.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
@@ -2725,6 +2726,7 @@ func TestDismissDecisions_InterpretedWithdrawReuseMadeAndAgentList(t *testing.T)
 	var changedErr *store.DismissChangedError
 	require.ErrorAs(t, err, &changedErr)
 	assert.Equal(t, store.AnswerSetReasonNotRecordedAnswerer, changedErr.Reasons[rows[0]])
+	assert.True(t, changedErr.AvailableAt.IsZero(), "no too-recent row: no availableAt")
 
 	// Named user still cannot dismiss before version age reaches 5m (age counts from version creation, 4.4a).
 	tooSoonInterp := f.dismissInput(msgID, "user-1", "Too soon", func() time.Time {

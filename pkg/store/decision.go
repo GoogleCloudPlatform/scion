@@ -331,8 +331,12 @@ func (e *DecisionTooRecentError) Unwrap() error { return ErrDecisionTooRecent }
 
 // DismissChangedError lists, by decision row id, why a dismiss request could
 // not dismiss the prompt's rows. Nothing was stored. Matches ErrDismissChanged.
+// AvailableAt is set when any listed row is too recent: the time by which every
+// too-recent listed row reaches DecisionDismissMinAge (an explicit subset is
+// all-or-nothing, so the latest of them).
 type DismissChangedError struct {
-	Reasons map[string]string
+	Reasons     map[string]string
+	AvailableAt time.Time
 }
 
 func (e *DismissChangedError) Error() string {

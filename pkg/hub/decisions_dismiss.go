@@ -55,7 +55,64 @@ type DismissDecisionPromptResponse struct {
 	Dismissed         []DecisionView `json:"dismissed"`
 	AlreadyDismissed  []DecisionView `json:"alreadyDismissed"`
 	ResponseMessageID string         `json:"responseMessageId"`
-	Delivered         bool           `json:"delivered"`
+	// Delivered is true when the response was dispatched to the asking agent
+	// or held for its next session (DeliveryStatus delivered or held).
+	Delivered bool `json:"delivered"`
+	// DeliveryStatus says what happened to the asking agent's
+	// decision-response: one of the DismissDelivery* values.
+	DeliveryStatus string `json:"deliveryStatus"`
+}
+
+// DismissDecisionPromptResponse.DeliveryStatus values.
+const (
+	// DismissDeliveryDelivered: dispatched to the asking agent.
+	DismissDeliveryDelivered = "delivered"
+	// DismissDeliveryHeld: held until the asking agent's next session, and
+	// delivered then.
+	DismissDeliveryHeld = "held"
+	// DismissDeliveryGone: the asking agent is deleted; nothing was sent.
+	DismissDeliveryGone = "gone"
+	// DismissDeliveryUnreachable: the asking agent is suspended, stopping,
+	// stopped, or in error; the response is stored, marked failed, not sent.
+	DismissDeliveryUnreachable = "unreachable"
+	// DismissDeliveryFailed: dispatch was attempted and failed, or the result
+	// cannot be confirmed.
+	DismissDeliveryFailed = "failed"
+	// DismissDeliveryNone: nothing new was dismissed, so no response exists
+	// for this call (every listed row was already dismissed).
+	DismissDeliveryNone = "none"
+)
+
+// agentUnreachableReasonPrefix starts every agentUnreachableReason with a
+// phase suffix (handlers_chat_v2.go), the failure reason stored on a
+// decision-response for an unreachable asker.
+const agentUnreachableReasonPrefix = "Agent unreachable ("
+
+func dismissDeliveryAccepted(status string) bool {
+	return status == DismissDeliveryDelivered || status == DismissDeliveryHeld
+}
+
+// dismissReplayDeliveryStatus rebuilds the delivery status of a replayed
+// dismissal from its stored decision-response.
+func dismissReplayDeliveryStatus(askerGone bool, m *store.Message) string {
+	if askerGone {
+		return DismissDeliveryGone
+	}
+	if m == nil {
+		return DismissDeliveryFailed
+	}
+	switch m.DispatchState {
+	case store.MessageDispatchDispatched, store.MessageDispatchDelivered:
+		return DismissDeliveryDelivered
+	case store.MessageDispatchAwaitingSession, store.MessageDispatchPending,
+		store.MessageDispatchDeferred, store.MessageDispatchDelivering:
+		return DismissDeliveryHeld
+	case store.MessageDispatchFailed:
+		if m.DispatchFailureReason != nil && strings.HasPrefix(*m.DispatchFailureReason, agentUnreachableReasonPrefix) {
+			return DismissDeliveryUnreachable
+		}
+	}
+	return DismissDeliveryFailed
 }
 
 type decisionDismissAnswerMeta struct {
@@ -225,7 +282,7 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 	}
 
 	now := s.nowDecision().Truncate(time.Microsecond)
-	responseMsg := decisionDismissResponseStoreMessage(user, ds[0], chatKey, asker, askerGone, now)
+	responseMsg := s.decisionDismissResponseStoreMessage(user, ds[0], chatKey, asker, askerGone, now)
 	who := userDisplay(user)
 
 	res, err := s.store.DismissDecisions(ctx, &store.DismissDecisionsInput{
@@ -261,10 +318,7 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 	case errors.As(err, &changed):
 		writeError(w, http.StatusConflict, ErrCodeDismissChanged,
 			"the decisions to dismiss changed; refresh and try again",
-			map[string]interface{}{
-				"reasons":   changed.Reasons,
-				"decisions": s.promptDecisionViewsByID(ctx, msgID),
-			})
+			dismissChangedDetails(changed, s.promptDecisionViewsByID(ctx, msgID)))
 		return
 	case errors.Is(err, store.ErrInvalidInput):
 		ValidationError(w, err.Error(), nil)
@@ -291,22 +345,27 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 				respMsgID = dsm.ResponseMessageID
 			}
 		}
-		replayedDelivered := false
-		if !askerGone && respMsgID != "" && len(res.Dismissed) > 0 {
-			// A lookup failure reports not delivered: claiming delivery we
-			// cannot confirm is the wrong default.
-			if storedMsg, merr := s.store.GetMessage(ctx, respMsgID); merr == nil && storedMsg != nil {
-				replayedDelivered = storedMsg.DispatchState == store.MessageDispatchDispatched
-			} else if merr != nil {
-				slog.Warn("decision dismiss replay: response message lookup failed",
-					"response_message_id", respMsgID, "error", merr)
+		status := DismissDeliveryNone
+		if len(res.Dismissed) > 0 {
+			// A lookup failure reports failed: claiming delivery we cannot
+			// confirm is the wrong default.
+			var storedMsg *store.Message
+			if !askerGone && respMsgID != "" {
+				var merr error
+				if storedMsg, merr = s.store.GetMessage(ctx, respMsgID); merr != nil {
+					slog.Warn("decision dismiss replay: response message lookup failed",
+						"response_message_id", respMsgID, "error", merr)
+					storedMsg = nil
+				}
 			}
+			status = dismissReplayDeliveryStatus(askerGone, storedMsg)
 		}
 		writeJSON(w, http.StatusOK, DismissDecisionPromptResponse{
 			Dismissed:         dismissedViews,
 			AlreadyDismissed:  alreadyViews,
 			ResponseMessageID: respMsgID,
-			Delivered:         replayedDelivered,
+			Delivered:         dismissDeliveryAccepted(status),
+			DeliveryStatus:    status,
 		})
 		return
 	}
@@ -323,6 +382,7 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 			AlreadyDismissed:  alreadyViews,
 			ResponseMessageID: respMsgID,
 			Delivered:         false,
+			DeliveryStatus:    DismissDeliveryNone,
 		})
 		return
 	}
@@ -336,9 +396,9 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 	setView := decisionResponseSetView(msgID, res.BatchID, ds, answers)
 	s.publishDecisionResponseSet(ctx, responseMsg, setView)
 
-	delivered := false
+	status := DismissDeliveryGone
 	if !askerGone {
-		delivered = s.deliverDecisionDismissResponse(ctx, asker, responseMsg, res.BatchID, res.Dismissed, answers)
+		status = s.deliverDecisionDismissResponse(ctx, asker, responseMsg, res.BatchID, res.Dismissed, answers)
 	}
 	for _, v := range dismissedViews {
 		s.publishDecisionUpdatedEventAt(ds[0].ProjectID, msgID, chatKey, v)
@@ -349,15 +409,32 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		Dismissed:         dismissedViews,
 		AlreadyDismissed:  alreadyViews,
 		ResponseMessageID: responseMsg.ID,
-		Delivered:         delivered,
+		Delivered:         dismissDeliveryAccepted(status),
+		DeliveryStatus:    status,
 	})
+}
+
+// dismissChangedDetails builds the 409 dismiss_changed details: per-row
+// reasons, the prompt's current views, and availableAt when a listed row is
+// too recent (so the page can re-arm its unlock timer, as for too_recent).
+func dismissChangedDetails(changed *store.DismissChangedError, views []DecisionView) map[string]interface{} {
+	details := map[string]interface{}{
+		"reasons":   changed.Reasons,
+		"decisions": views,
+	}
+	if !changed.AvailableAt.IsZero() {
+		details["availableAt"] = changed.AvailableAt.UTC()
+	}
+	return details
 }
 
 // decisionDismissResponseStoreMessage builds the decision-response message
 // stored with a dismissal (design 8194, 4.5). Unlike an answer to a gone
 // asker, a dismissal of a gone asker's prompt stays in DispatchState
-// dispatched (not marked failed), is not delivered, and reports delivered=false.
-func decisionDismissResponseStoreMessage(user UserIdentity, first *store.Decision, chatKey string, asker *store.Agent, askerGone bool, now time.Time) *store.Message {
+// dispatched (not marked failed), is not delivered, and reports
+// deliveryStatus gone. An unreachable (suspended, stopped, ...) asker's
+// response is stored failed and reports deliveryStatus unreachable.
+func (s *Server) decisionDismissResponseStoreMessage(user UserIdentity, first *store.Decision, chatKey string, asker *store.Agent, askerGone bool, now time.Time) *store.Message {
 	m := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      first.ProjectID,
@@ -376,7 +453,7 @@ func decisionDismissResponseStoreMessage(user UserIdentity, first *store.Decisio
 		m.Recipient = "agent:" + first.AskerAgentName
 	} else {
 		m.Recipient = "agent:" + asker.Slug
-		if unreachable, why := isAgentUnreachable(asker); unreachable {
+		if unreachable, why := s.isAgentUnreachable(asker); unreachable {
 			reason := agentUnreachableReason(why)
 			m.DispatchState = store.MessageDispatchFailed
 			m.DispatchFailureReason = &reason
@@ -482,14 +559,18 @@ func populateDecisionDismissMetadata(meta map[string]string, batchID string, ans
 }
 
 // deliverDecisionDismissResponse dispatches a dismissal's decision-response to
-// the live asking agent and returns true when accepted by holdOrDispatch.
-func (s *Server) deliverDecisionDismissResponse(ctx context.Context, asker *store.Agent, m *store.Message, batchID string, dismissed []*store.Decision, answers []*store.DecisionAnswer) bool {
-	if asker == nil || m.DispatchState != store.MessageDispatchDispatched || len(answers) == 0 {
-		return false
+// the asking agent and returns its DismissDelivery* status.
+func (s *Server) deliverDecisionDismissResponse(ctx context.Context, asker *store.Agent, m *store.Message, batchID string, dismissed []*store.Decision, answers []*store.DecisionAnswer) string {
+	if asker == nil || len(answers) == 0 {
+		return DismissDeliveryFailed
+	}
+	if m.DispatchState != store.MessageDispatchDispatched {
+		// Stored failed up front: the asker is unreachable.
+		return DismissDeliveryUnreachable
 	}
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
-		return false
+		return DismissDeliveryFailed
 	}
 	text := decisionDismissAgentLine(dismissed, answers)
 	sm := &messages.StructuredMessage{
@@ -514,12 +595,16 @@ func (s *Server) deliverDecisionDismissResponse(ctx context.Context, asker *stor
 
 	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
 	defer cancel()
-	if _, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
+	held, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
 		return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), s.recordLog(), dispatcher, asker, text, false, sm)
-	}); err != nil {
+	})
+	if err != nil {
 		s.messageLog.Error("decisions: failed to deliver dismiss decision-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
 		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())
-		return false
+		return DismissDeliveryFailed
 	}
-	return true
+	if held {
+		return DismissDeliveryHeld
+	}
+	return DismissDeliveryDelivered
 }

@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -228,6 +229,24 @@ func TestDecisionPromptDismiss_MinimumAgeAndDelivery(t *testing.T) {
 	assert.True(t, availAt.Equal(parsedAvail), "want %v, got %v", availAt, parsedAvail)
 	assert.Len(t, f.dispatcher.getMessages(), beforeMsgs)
 
+	// Explicit ids at 4m59s -> 409 dismiss_changed with reason too_recent and
+	// details.availableAt, so the page can re-arm its unlock timer.
+	earlyIDsRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, twoDismissPath, map[string]interface{}{
+		"decisionIds": []string{twoRes.Decisions[0].RowID, twoRes.Decisions[1].RowID},
+	})
+	require.Equal(t, http.StatusConflict, earlyIDsRR.Code, earlyIDsRR.Body.String())
+	idsCode, idsDetails := errorCodeAndDetails(t, earlyIDsRR)
+	assert.Equal(t, ErrCodeDismissChanged, idsCode)
+	idsReasons, ok := idsDetails["reasons"].(map[string]interface{})
+	require.True(t, ok, "details: %+v", idsDetails)
+	assert.Equal(t, store.AnswerSetReasonTooRecent, idsReasons[twoRes.Decisions[0].RowID])
+	idsAvailStr, ok := idsDetails["availableAt"].(string)
+	require.True(t, ok, "details: %+v", idsDetails)
+	idsAvail, err := time.Parse(time.RFC3339Nano, idsAvailStr)
+	require.NoError(t, err)
+	assert.True(t, availAt.Equal(idsAvail), "want %v, got %v", availAt, idsAvail)
+	assert.Len(t, f.dispatcher.getMessages(), beforeMsgs)
+
 	// Confirm both prompts appear on project and profile Waiting on you before dismissal.
 	projBefore := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions?tab=pending", nil))
 	assert.Equal(t, 3, projBefore.Counts.WaitingOnYou)
@@ -244,6 +263,7 @@ func TestDecisionPromptDismiss_MinimumAgeAndDelivery(t *testing.T) {
 	})
 	dsmOut := decodeDismissResponse(t, dsmRR)
 	assert.True(t, dsmOut.Delivered)
+	assert.Equal(t, DismissDeliveryDelivered, dsmOut.DeliveryStatus)
 	require.NotEmpty(t, dsmOut.ResponseMessageID)
 	require.Len(t, dsmOut.Dismissed, 2)
 	assert.Empty(t, dsmOut.AlreadyDismissed)
@@ -292,6 +312,7 @@ func TestDecisionPromptDismiss_MinimumAgeAndDelivery(t *testing.T) {
 	assert.Empty(t, retryOut.Dismissed)
 	require.Len(t, retryOut.AlreadyDismissed, 2)
 	assert.False(t, retryOut.Delivered)
+	assert.Equal(t, DismissDeliveryNone, retryOut.DeliveryStatus, "nothing new dismissed: no delivery claim")
 	assert.Equal(t, dsmOut.ResponseMessageID, retryOut.ResponseMessageID)
 	assert.Len(t, f.dispatcher.getMessages()[beforeMsgs:], 1)
 
@@ -379,6 +400,7 @@ func TestDecisionPromptDismiss_GoneAsker(t *testing.T) {
 		"reason": "Agent was soft-deleted",
 	}))
 	assert.False(t, softOut.Delivered)
+	assert.Equal(t, DismissDeliveryGone, softOut.DeliveryStatus)
 	require.Len(t, softOut.Dismissed, 1)
 	assert.Equal(t, store.DecisionStatusDismissed, softOut.Dismissed[0].Status)
 
@@ -396,6 +418,7 @@ func TestDecisionPromptDismiss_GoneAsker(t *testing.T) {
 		"reason": "Agent was deleted",
 	}))
 	assert.False(t, hardOut.Delivered)
+	assert.Equal(t, DismissDeliveryGone, hardOut.DeliveryStatus)
 	require.Len(t, hardOut.Dismissed, 1)
 	assert.Equal(t, store.DecisionStatusDismissed, hardOut.Dismissed[0].Status)
 
@@ -405,6 +428,89 @@ func TestDecisionPromptDismiss_GoneAsker(t *testing.T) {
 	assert.Equal(t, store.MessageDispatchDispatched, storedHard.DispatchState, "hard-deleted asker dismissal must not be marked failed")
 	assert.Nil(t, storedHard.DispatchFailureReason)
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing delivered to hard-deleted asker")
+}
+
+// TestDecisionPromptDismiss_DeliveryStatus pins why nothing was delivered
+// (ptone/scion#8213): a suspended asker gets its response stored failed and
+// not dispatched (unreachable, also on replay); a dismiss that loses the race
+// to another dismissal reports none.
+func TestDecisionPromptDismiss_DeliveryStatus(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+
+	suspMsg, suspRes := f.topicPrompt(t, `[{"id":"SUSP-1","question":"Suspended asker?","choices":["yes","no"]}]`, false)
+	raceMsg, raceRes := f.topicPrompt(t, `[{"id":"RACE-1","question":"Raced?","choices":["yes","no"]}]`, false)
+	dSusp, err := f.store.GetDecision(ctx, suspRes.Decisions[0].RowID)
+	require.NoError(t, err)
+	f.srv.decisionClock = func() time.Time { return dSusp.CreatedAt.Add(store.DecisionDismissMinAge + time.Minute) }
+
+	// 1. Race: Alice dismisses first; Bob's dismiss of the same rows then finds
+	//    nothing new to dismiss -> none, no delivery claim, nothing dispatched.
+	aliceOut := decodeDismissResponse(t, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/decision-prompts/"+raceMsg.ID+"/dismiss", nil))
+	require.Len(t, aliceOut.Dismissed, 1)
+	assert.Equal(t, DismissDeliveryDelivered, aliceOut.DeliveryStatus)
+	beforeRace := len(f.dispatcher.getMessages())
+	bobOut := decodeDismissResponse(t, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+raceMsg.ID+"/dismiss", map[string]interface{}{
+		"decisionIds": []string{raceRes.Decisions[0].RowID},
+	}))
+	assert.Empty(t, bobOut.Dismissed)
+	require.Len(t, bobOut.AlreadyDismissed, 1)
+	assert.False(t, bobOut.Delivered)
+	assert.Equal(t, DismissDeliveryNone, bobOut.DeliveryStatus)
+	assert.Len(t, f.dispatcher.getMessages(), beforeRace)
+
+	// 2. Suspended asker -> stored failed with the unreachable reason, not
+	//    dispatched, deliveryStatus unreachable.
+	f.agent.Phase = string(state.PhaseSuspended)
+	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+	before := len(f.dispatcher.getMessages())
+	suspOut := decodeDismissResponse(t, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+suspMsg.ID+"/dismiss", map[string]interface{}{
+		"reason":         "Stale",
+		"idempotencyKey": "susp-idem-1",
+	}))
+	require.Len(t, suspOut.Dismissed, 1)
+	assert.False(t, suspOut.Delivered)
+	assert.Equal(t, DismissDeliveryUnreachable, suspOut.DeliveryStatus)
+	assert.Len(t, f.dispatcher.getMessages(), before, "nothing dispatched to a suspended asker")
+	stored, err := f.store.GetMessage(ctx, suspOut.ResponseMessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, stored.DispatchState)
+	require.NotNil(t, stored.DispatchFailureReason)
+	assert.Equal(t, agentUnreachableReason(string(state.PhaseSuspended)), *stored.DispatchFailureReason)
+
+	// 3. Replay returns the original status.
+	replayOut := decodeDismissResponse(t, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+suspMsg.ID+"/dismiss", map[string]interface{}{
+		"reason":         "Stale",
+		"idempotencyKey": "susp-idem-1",
+	}))
+	assert.Equal(t, suspOut.ResponseMessageID, replayOut.ResponseMessageID)
+	assert.Equal(t, DismissDeliveryUnreachable, replayOut.DeliveryStatus)
+	assert.False(t, replayOut.Delivered)
+}
+
+func TestDismissReplayDeliveryStatus(t *testing.T) {
+	unreachable := agentUnreachableReason("stopped")
+	require.True(t, strings.HasPrefix(unreachable, agentUnreachableReasonPrefix), "prefix must track agentUnreachableReason")
+	other := "broker timeout"
+	cases := []struct {
+		name      string
+		askerGone bool
+		m         *store.Message
+		want      string
+	}{
+		{"gone", true, nil, DismissDeliveryGone},
+		{"lookup failed", false, nil, DismissDeliveryFailed},
+		{"dispatched", false, &store.Message{DispatchState: store.MessageDispatchDispatched}, DismissDeliveryDelivered},
+		{"delivered", false, &store.Message{DispatchState: store.MessageDispatchDelivered}, DismissDeliveryDelivered},
+		{"held", false, &store.Message{DispatchState: store.MessageDispatchAwaitingSession}, DismissDeliveryHeld},
+		{"unreachable", false, &store.Message{DispatchState: store.MessageDispatchFailed, DispatchFailureReason: &unreachable}, DismissDeliveryUnreachable},
+		{"failed", false, &store.Message{DispatchState: store.MessageDispatchFailed, DispatchFailureReason: &other}, DismissDeliveryFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, dismissReplayDeliveryStatus(tc.askerGone, tc.m))
+		})
+	}
 }
 
 func TestDecisionPromptDismiss_MetadataStripsReservedKeys(t *testing.T) {
@@ -500,6 +606,8 @@ func TestDecisionPromptDismiss_SubsetsIdempotencyInterpretedMadeAndAgentEndpoint
 	reasonsMap, ok := chgDetails["reasons"].(map[string]interface{})
 	require.True(t, ok)
 	assert.Equal(t, store.AnswerSetReasonNotRecordedAnswerer, reasonsMap[r0])
+	_, hasAvail := chgDetails["availableAt"]
+	assert.False(t, hasAvail, "no too-recent row: no availableAt")
 	assert.Len(t, f.dispatcher.getMessages(), beforeDispatch)
 
 	// 3. Alice dismisses subset [r0, r1] with idempotencyKey and reason -> 200, agent line includes "(your reading: yes)".
@@ -510,6 +618,7 @@ func TestDecisionPromptDismiss_SubsetsIdempotencyInterpretedMadeAndAgentEndpoint
 		"idempotencyKey": "hub-idem-key-1",
 	}))
 	assert.True(t, aliceOut.Delivered)
+	assert.Equal(t, DismissDeliveryDelivered, aliceOut.DeliveryStatus)
 	require.Len(t, aliceOut.Dismissed, 2)
 	assert.Empty(t, aliceOut.AlreadyDismissed)
 
@@ -528,6 +637,7 @@ func TestDecisionPromptDismiss_SubsetsIdempotencyInterpretedMadeAndAgentEndpoint
 	}))
 	assert.Equal(t, aliceOut.ResponseMessageID, replayOut.ResponseMessageID)
 	assert.True(t, replayOut.Delivered)
+	assert.Equal(t, DismissDeliveryDelivered, replayOut.DeliveryStatus, "replay returns the original status")
 	require.Len(t, replayOut.Dismissed, 2)
 	assert.Len(t, f.dispatcher.getMessages()[beforeDispatch:], 1, "idempotent replay must not re-deliver")
 
