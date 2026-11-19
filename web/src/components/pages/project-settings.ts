@@ -3176,7 +3176,7 @@ export class ScionPageProjectSettings extends LitElement {
             >Limits</sl-tab
           >
           <sl-tab slot="nav" panel="resources" ?active=${this.activeConfigTab === 'resources'}
-            >Resources</sl-tab
+            >Agent Resources</sl-tab
           >
           <sl-tab slot="nav" panel="brokers" ?active=${this.activeConfigTab === 'brokers'}
             >Runtime Brokers</sl-tab
@@ -3841,7 +3841,7 @@ export class ScionPageProjectSettings extends LitElement {
 
     return html`
       <div class="section">
-        <h2>Resources</h2>
+        <h2>Project Resources</h2>
         <p>Project-scoped resources available to agents.</p>
 
         <sl-tab-group
