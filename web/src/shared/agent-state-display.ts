@@ -172,6 +172,14 @@ export function isProvisionedOnly(agent: Pick<Agent, 'phase' | 'provisionedOnly'
 }
 
 /**
+ * Hint set by the Hub stall detector when an agent never reported any harness
+ * hook event after start (ptone/scion#4556).
+ * Keep in sync with state.StalledNoHookActivityHint in pkg/agent/state/state.go.
+ */
+export const STALLED_NO_HOOK_ACTIVITY_HINT =
+  'no harness activity since start; check harness credentials/task';
+
+/**
  * The badge tooltip for a harness_error status (including when retained on a
  * suspended agent): the reason the harness reported (detail.message), or
  * undefined for any other status.
@@ -187,6 +195,22 @@ export function harnessErrorHint(
     return undefined;
   }
   return agent.detail?.message || agent.message || undefined;
+}
+
+/**
+ * The badge tooltip for a stalled status when the Hub recorded the
+ * no-hook-activity-since-start hint, or undefined for any other status or
+ * stale pre-stall message.
+ */
+export function stalledHint(
+  agent: Pick<Agent, 'detail' | 'message'>,
+  status: string
+): string | undefined {
+  if (status !== 'stalled') {
+    return undefined;
+  }
+  const msg = agent.detail?.message || agent.message;
+  return msg === STALLED_NO_HOOK_ACTIVITY_HINT ? msg : undefined;
 }
 
 interface AgentStatusBadgeOptions {
@@ -226,7 +250,7 @@ export function agentStatusBadge(
   const po = isProvisionedOnly(agent);
   const hint = po
     ? `Not started yet. Use Start, or run: scion start ${agent.name}`
-    : harnessErrorHint(agent, status);
+    : (harnessErrorHint(agent, status) ?? stalledHint(agent, status));
   const defaultLabel =
     status === getAgentDisplayStatus(agent)
       ? (suspendedActivityLabel(agent) ?? stateLabel(status))

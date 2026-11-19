@@ -787,6 +787,26 @@ func (s AgentState) DisplayStatus() string {
 	return string(s.Phase)
 }
 
+// StalledNoHookActivityHint is the status message set by the Hub stall
+// detector when an agent stalls without having reported any harness hook
+// event since start (ptone/scion#4556).
+// Keep in sync with STALLED_NO_HOOK_ACTIVITY_HINT in web/src/shared/agent-state-display.ts.
+const StalledNoHookActivityHint = "no harness activity since start; check harness credentials/task"
+
+// IsPreHookStartupMessage reports whether msg is one of the startup status
+// messages emitted by sciontool init or its readiness watcher before any
+// harness hook event has been observed.
+func IsPreHookStartupMessage(msg string) bool {
+	switch msg {
+	case "Agent started",
+		"Harness started",
+		"Harness readiness not confirmed by deadline; assuming ready":
+		return true
+	default:
+		return false
+	}
+}
+
 // Validate checks cross-field constraints on the agent state.
 // Activity is meaningful when phase is running, when phase is stopped with a
 // terminal activity, or when phase is suspended with a retained activity.

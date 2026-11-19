@@ -1045,6 +1045,9 @@ func formatAgentLastActivity(a api.AgentInfo, t time.Time) string {
 		if a.StalledFromActivity != "" {
 			label = fmt.Sprintf("%s (was %s)", a.Activity, state.Activity(a.StalledFromActivity).DisplayLabel())
 		}
+		if a.Detail != nil && a.Detail.Message == state.StalledNoHookActivityHint {
+			label += ": " + a.Detail.Message
+		}
 	default:
 		return formatLastActivity(a.Activity, t)
 	}

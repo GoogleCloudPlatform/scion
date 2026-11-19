@@ -123,7 +123,7 @@ var agentWriterClasses = map[string]writerEntry{
 	"start_claim_store.go:claimUpdate via start_claim_store.go:AgentStore.ReleaseUnconfirmedStart":        {classExempt, "claim and intent columns only"},
 	"start_claim_store.go:claimUpdate via start_claim_store.go:AgentStore.SettleEndedLaunchClaim":         {classExempt, "claim and intent columns only"},
 	"agent_store.go:AgentStore.MarkStaleAgentsOffline":                                                    {classExempt, "activity only"},
-	"agent_store.go:AgentStore.MarkStalledAgents":                                                         {classExempt, "activity / stalled_from_activity only"},
+	"agent_store.go:AgentStore.MarkStalledAgents":                                                         {classExempt, "activity / stalled_from_activity / message only"},
 	"agent_store.go:AgentStore.SetAgentAnnotation":                                                        {classExempt, "annotations are not exported"},
 	"agent_store.go:AgentStore.SetAgentSSHHostKey":                                                        {classExempt, "not a snapshot input"},
 	"agent_store.go:AgentStore.SetAgentSoftDeleteOpID":                                                    {classExempt, "not a snapshot input"},

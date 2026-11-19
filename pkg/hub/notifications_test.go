@@ -520,6 +520,12 @@ func TestFormatNotificationMessage(t *testing.T) {
 			expected: "bot has STALLED (was working)",
 		},
 		{
+			name:     "STALLED appends no-hook-since-start hint",
+			agent:    &store.Agent{Slug: "bot", StalledFromActivity: "working", Message: state.StalledNoHookActivityHint},
+			status:   "STALLED",
+			expected: "bot has STALLED (was working): " + state.StalledNoHookActivityHint,
+		},
+		{
 			name:     "HARNESS_ERROR without message",
 			agent:    &store.Agent{Slug: "bot"},
 			status:   "HARNESS_ERROR",
@@ -561,6 +567,14 @@ func TestFormatNotificationMessage_StalledAge(t *testing.T) {
 		LastActivityEvent:   time.Now().Add(-6*time.Minute - 10*time.Second),
 	}
 	assert.Equal(t, "bot has STALLED (was executing): no activity for 6m", formatNotificationMessage(agent, "STALLED"))
+
+	noHookAgent := &store.Agent{
+		Slug:                "bot",
+		StalledFromActivity: "working",
+		Message:             state.StalledNoHookActivityHint,
+		LastActivityEvent:   time.Now().Add(-6*time.Minute - 10*time.Second),
+	}
+	assert.Equal(t, "bot has STALLED (was working): no activity for 6m ("+state.StalledNoHookActivityHint+")", formatNotificationMessage(noHookAgent, "STALLED"))
 }
 
 func TestFormatStallAge(t *testing.T) {

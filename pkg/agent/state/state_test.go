@@ -853,3 +853,28 @@ func TestRetainedSuspendActivity(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPreHookStartupMessage(t *testing.T) {
+	for _, msg := range []string{
+		"Agent started",
+		"Harness started",
+		"Harness readiness not confirmed by deadline; assuming ready",
+	} {
+		if !IsPreHookStartupMessage(msg) {
+			t.Errorf("IsPreHookStartupMessage(%q) = false, want true", msg)
+		}
+	}
+	for _, msg := range []string{
+		"",
+		"Session started",
+		"Harness ready",
+		"Processing",
+		"Executing: Bash",
+		"Ready",
+		StalledNoHookActivityHint,
+	} {
+		if IsPreHookStartupMessage(msg) {
+			t.Errorf("IsPreHookStartupMessage(%q) = true, want false", msg)
+		}
+	}
+}
