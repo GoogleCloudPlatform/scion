@@ -193,6 +193,11 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 	return validateHostedDevAuth(hostedMode, cmd.Flags().Changed("dev-auth") && enableDevAuth, testModeRequested())
 }
 
+// startServerDaemonFn launches the background server process; a var so tests
+// can exercise runServerStartOrDaemon's pre-spawn setup without re-execing the
+// test binary.
+var startServerDaemonFn = daemon.StartComponent
+
 // runServerStartOrDaemon handles the server start command. By default it launches
 // the server as a background daemon. When --foreground is set, it runs directly.
 func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
@@ -277,7 +282,7 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 		mode = "hosted"
 	}
 	fmt.Printf("Starting server as daemon (%s mode)...\n", mode)
-	if err := daemon.StartComponent(serverDaemonComponent, executable, daemonArgs, globalDir); err != nil {
+	if err := startServerDaemonFn(serverDaemonComponent, executable, daemonArgs, globalDir); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
