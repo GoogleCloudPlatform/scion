@@ -147,7 +147,7 @@ func TestGeminiConformance_CapabilitiesAndUntrustedInputIsolation(t *testing.T) 
 		Revision: 1,
 		Model:    "gemini-decision-1",
 	}
-	conformance.RunCapabilitiesCheck(t, adapter, inst)
+	conformance.RunCapabilitiesCheck(t, adapter, inst, "gemini")
 
 	compiled, err := spec.Compile([]byte(`{
 		"dialect": "system_one",

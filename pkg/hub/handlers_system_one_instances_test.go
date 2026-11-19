@@ -960,6 +960,17 @@ type emptyDefaultEndpointAdapter struct {
 
 func (a *emptyDefaultEndpointAdapter) DefaultEndpoint() string { return "   " }
 
+type validatorErrorTestAdapter struct {
+	bareSystemOneTestAdapter
+	validateErr error
+}
+
+func (a *validatorErrorTestAdapter) DefaultEndpoint() string { return "https://provider.example.com" }
+
+func (a *validatorErrorTestAdapter) ValidateInstance(_ systemoneprovider.InstanceView) error {
+	return a.validateErr
+}
+
 func TestSystemOneInstances_EndpointDefaulterAndInstanceValidator(t *testing.T) {
 	ctx := context.Background()
 	srv, s, _ := newSystemOneTestServer(t, true)
@@ -1033,6 +1044,21 @@ func TestSystemOneInstances_EndpointDefaulterAndInstanceValidator(t *testing.T) 
 	customReg := systemoneprovider.NewRegistry()
 	require.NoError(t, customReg.Register(&bareSystemOneTestAdapter{name: "no-defaulter"}))
 	require.NoError(t, customReg.Register(&emptyDefaultEndpointAdapter{bareSystemOneTestAdapter: bareSystemOneTestAdapter{name: "empty-defaulter"}}))
+	oversizeMsg := strings.Repeat("m", 255) + "é" + strings.Repeat("TAIL_NEVER_ECHOED", 20)
+	require.NoError(t, customReg.Register(&validatorErrorTestAdapter{
+		bareSystemOneTestAdapter: bareSystemOneTestAdapter{name: "long-err-adapter"},
+		validateErr: &systemoneprovider.ProviderError{
+			Reason:  systemoneprovider.FailInvalidRequest,
+			Message: oversizeMsg,
+		},
+	}))
+	require.NoError(t, customReg.Register(&validatorErrorTestAdapter{
+		bareSystemOneTestAdapter: bareSystemOneTestAdapter{name: "ctrl-err-adapter"},
+		validateErr: &systemoneprovider.ProviderError{
+			Reason:  systemoneprovider.FailInvalidRequest,
+			Message: strings.Repeat("c", 270) + "\ninjected-line",
+		},
+	}))
 	customSrv.mu.Lock()
 	customSrv.systemOneRegistry = customReg
 	customSrv.rebuildSystemOneRuntimeLocked()
@@ -1059,6 +1085,32 @@ func TestSystemOneInstances_EndpointDefaulterAndInstanceValidator(t *testing.T) 
 	require.NoError(t, json.Unmarshal(okCustomRec.Body.Bytes(), &okCustom))
 	assert.Equal(t, "https://provider.example.com", okCustom.Endpoint)
 	assert.Empty(t, okCustom.Model)
+
+	// 4. Adapter config error message is capped at 256 bytes on a UTF-8 boundary and control characters fall back.
+	longErrRec := doRequestAsUser(t, customSrv, customAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "long-err-inst",
+		"adapter": "long-err-adapter",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "SYNTH_CUSTOM_KEY"},
+	})
+	require.Equal(t, http.StatusBadRequest, longErrRec.Code, longErrRec.Body.String())
+	var longErrEnv ErrorResponse
+	require.NoError(t, json.Unmarshal(longErrRec.Body.Bytes(), &longErrEnv))
+	assert.LessOrEqual(t, len(longErrEnv.Error.Message), maxSystemOneAdapterErrorMessageBytes)
+	assert.Equal(t, strings.Repeat("m", 255), longErrEnv.Error.Message, "2-byte UTF-8 rune straddling byte 256 must not be split")
+	assert.NotContains(t, longErrRec.Body.String(), "TAIL_NEVER_ECHOED")
+
+	ctrlErrRec := doRequestAsUser(t, customSrv, customAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "ctrl-err-inst",
+		"adapter": "ctrl-err-adapter",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "SYNTH_CUSTOM_KEY"},
+	})
+	require.Equal(t, http.StatusBadRequest, ctrlErrRec.Code, ctrlErrRec.Body.String())
+	var ctrlErrEnv ErrorResponse
+	require.NoError(t, json.Unmarshal(ctrlErrRec.Body.Bytes(), &ctrlErrEnv))
+	assert.Equal(t, "adapter rejected instance configuration", ctrlErrEnv.Error.Message)
+
+	assert.Equal(t, strings.Repeat("z", 256), truncateUTF8Bytes(strings.Repeat("z", 400), maxSystemOneAdapterErrorMessageBytes))
+	assert.Equal(t, strings.Repeat("z", 255), truncateUTF8Bytes(strings.Repeat("z", 255)+"é", maxSystemOneAdapterErrorMessageBytes))
 }
 
 func TestSystemOneInstances_GeminiDecisionsVerticalProbeAndTypeSafeRegression(t *testing.T) {

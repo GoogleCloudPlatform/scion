@@ -247,6 +247,8 @@ func (s *Server) SystemOneRuntime() *systemoneruntime.Runtime {
 // SetSystemOneRuntimeOptionsForTesting replaces optional runtime construction
 // options (such as loopback TLS test seams) and rebuilds the Hub's System One
 // runtime for offline integration tests.
+//
+// For tests only; production code must never call it.
 func (s *Server) SetSystemOneRuntimeOptionsForTesting(tb interface{ Helper() }, opts ...systemoneruntime.Option) {
 	if tb == nil {
 		panic("SetSystemOneRuntimeOptionsForTesting requires a non-nil testing.TB")

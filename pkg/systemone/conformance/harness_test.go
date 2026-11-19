@@ -168,7 +168,7 @@ func TestHarness_SuiteConfigHeaderPlacementCapabilitiesAndIsolation(t *testing.T
 		Model:    "gemini-decision-1",
 	}
 
-	conformance.RunCapabilitiesCheck(t, adapter, inst)
+	conformance.RunCapabilitiesCheck(t, adapter, inst, "gemini")
 
 	cfg := conformance.SuiteConfig{
 		Auth: egress.HeaderPlacement("x-goog-api-key"),
@@ -299,4 +299,79 @@ func TestHarness_ZeroSuiteConfigAuthDefaultsToBearer(t *testing.T) {
 	bundle := conformance.LoadBundle(t, filepath.FromSlash("testdata/typesafe/f1_noul.json"))
 	// Omitting SuiteConfig.Auth (zero Placement{}) continues to default to Bearer.
 	conformance.RunBundle(t, adapter, bundle, conformance.SuiteConfig{})
+}
+
+type namedMetricStubAdapter struct {
+	stubHeaderAdapter
+	adapterName string
+	metricName  string
+}
+
+func (a namedMetricStubAdapter) Name() string { return a.adapterName }
+
+func (a namedMetricStubAdapter) Capabilities(inst provider.InstanceView) (provider.Capabilities, error) {
+	caps, err := a.stubHeaderAdapter.Capabilities(inst)
+	if err != nil {
+		return provider.Capabilities{}, err
+	}
+	caps.NativeMetrics = []provider.MetricDecl{
+		{
+			Name:        a.metricName,
+			Unit:        metrics.UnitFraction,
+			Min:         0,
+			Max:         1,
+			HigherMeans: "more_probable_top_outcome",
+			Source:      metrics.SourceProviderDoc,
+		},
+	}
+	return caps, nil
+}
+
+type failureRecordingTB struct {
+	testing.TB
+	failed bool
+}
+
+func (r *failureRecordingTB) Helper()               {}
+func (r *failureRecordingTB) Errorf(string, ...any) { r.failed = true }
+func (r *failureRecordingTB) Error(...any)          { r.failed = true }
+func (r *failureRecordingTB) Fail()                 { r.failed = true }
+
+func TestHarness_CapabilitiesMetricNamespaceRequiresExplicitDeclaration(t *testing.T) {
+	inst := provider.InstanceView{
+		Name:     "ns-check",
+		Revision: 1,
+		Model:    "test-model",
+	}
+
+	// Exact adapter name match passes without extra namespaces.
+	recExact := &failureRecordingTB{TB: t}
+	conformance.RunCapabilitiesCheck(recExact, namedMetricStubAdapter{
+		adapterName: "custom_adapter",
+		metricName:  "custom_adapter.confidence",
+	}, inst)
+	assert.False(t, recExact.failed, "exact adapter name namespace must pass")
+
+	// Prefix before '_' is NOT implicitly derived: gemini_foo with gemini.confidence must fail unless declared.
+	recUndeclaredPrefix := &failureRecordingTB{TB: t}
+	conformance.RunCapabilitiesCheck(recUndeclaredPrefix, namedMetricStubAdapter{
+		adapterName: "gemini_foo",
+		metricName:  "gemini.confidence",
+	}, inst)
+	assert.True(t, recUndeclaredPrefix.failed, "adapter prefix before '_' must not implicitly authorize namespace")
+
+	// Explicitly declared namespace ("gemini" for "gemini_decisions") passes, while another namespace still fails.
+	recDeclared := &failureRecordingTB{TB: t}
+	conformance.RunCapabilitiesCheck(recDeclared, namedMetricStubAdapter{
+		adapterName: "gemini_decisions",
+		metricName:  "gemini.confidence",
+	}, inst, "gemini")
+	assert.False(t, recDeclared.failed, "explicitly declared namespace must pass")
+
+	recWrongNS := &failureRecordingTB{TB: t}
+	conformance.RunCapabilitiesCheck(recWrongNS, namedMetricStubAdapter{
+		adapterName: "gemini_decisions",
+		metricName:  "other.confidence",
+	}, inst, "gemini")
+	assert.True(t, recWrongNS.failed, "unlisted namespace must fail even when another namespace is declared")
 }

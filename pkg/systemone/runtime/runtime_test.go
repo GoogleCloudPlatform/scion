@@ -2411,11 +2411,6 @@ func TestRuntime_TransportCacheKeyIsolatesCredentialPlacement(t *testing.T) {
 		},
 	}
 
-	// Wrap ListModels to also record the provider.Transport pointer received from Runtime.
-	recordingAdapter := &fakeModelListerAdapter{
-		fakeAdapter: base,
-	}
-	_ = recordingAdapter
 	reg := provider.NewRegistry()
 	// Register a wrapper implementing both dynamic Capabilities and transport pointer capture.
 	wrapper := &placementRecordingAdapter{

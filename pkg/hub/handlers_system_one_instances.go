@@ -40,15 +40,16 @@ import (
 )
 
 const (
-	maxCreateSystemOneInstanceBodyBytes = 64 * 1024
-	maxProbeSystemOneInstanceBodyBytes  = 256 * 1024
-	maxSystemOneAPIKeyBytes             = 8 * 1024
-	maxSystemOneModelBytes              = 128
-	maxSystemOneRuleIDBytes             = 128
-	maxSystemOneLocationBytes           = 128
-	maxSystemOneOptionsEntries          = 32
-	maxSystemOneOptionKeyBytes          = 64
-	maxSystemOneOptionValueBytes        = 512
+	maxCreateSystemOneInstanceBodyBytes  = 64 * 1024
+	maxProbeSystemOneInstanceBodyBytes   = 256 * 1024
+	maxSystemOneAPIKeyBytes              = 8 * 1024
+	maxSystemOneModelBytes               = 128
+	maxSystemOneRuleIDBytes              = 128
+	maxSystemOneLocationBytes            = 128
+	maxSystemOneOptionsEntries           = 32
+	maxSystemOneOptionKeyBytes           = 64
+	maxSystemOneOptionValueBytes         = 512
+	maxSystemOneAdapterErrorMessageBytes = 256
 )
 
 var forbiddenSystemOneOptionSubstrings = []string{
@@ -429,9 +430,31 @@ func defaultSystemOneAdapterEndpoint(adapter systemoneprovider.Adapter) string {
 	return ""
 }
 
+func truncateUTF8Bytes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 func safeSystemOneAdapterConfigMessage(err error) string {
-	if pe, ok := systemoneprovider.AsProviderError(err); ok && pe.Message != "" && !hasControlChars(pe.Message) {
-		return pe.Message
+	var ptr *systemoneprovider.ProviderError
+	if errors.As(err, &ptr) && ptr != nil && hasControlChars(ptr.Message) {
+		return "adapter rejected instance configuration"
+	}
+	var val systemoneprovider.ProviderError
+	if errors.As(err, &val) && hasControlChars(val.Message) {
+		return "adapter rejected instance configuration"
+	}
+	if pe, ok := systemoneprovider.AsProviderError(err); ok {
+		msg := truncateUTF8Bytes(pe.Message, maxSystemOneAdapterErrorMessageBytes)
+		if msg != "" && utf8.ValidString(msg) && !hasControlChars(msg) {
+			return msg
+		}
 	}
 	return "adapter rejected instance configuration"
 }
