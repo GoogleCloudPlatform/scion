@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -468,15 +469,33 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 	}
 
 	allowedSteps := make(map[string]bool, len(ScaleSteps))
-	for _, st := range ScaleSteps {
+	stepOrder := make(map[string]int, len(ScaleSteps))
+	for idx, st := range ScaleSteps {
 		allowedSteps[st] = true
+		stepOrder[st] = idx
 	}
 
 	validateAndOverlayScale := func(name string, override BrandingScale) bool {
 		if len(override) == 0 {
 			return false
 		}
-		for step, val := range override {
+		steps := make([]string, 0, len(override))
+		for step := range override {
+			steps = append(steps, step)
+		}
+		sort.Slice(steps, func(i, j int) bool {
+			oi, okI := stepOrder[steps[i]]
+			oj, okJ := stepOrder[steps[j]]
+			if okI && okJ {
+				return oi < oj
+			}
+			if okI != okJ {
+				return okI
+			}
+			return steps[i] < steps[j]
+		})
+		for _, step := range steps {
+			val := override[step]
 			path := fmt.Sprintf("%s.palette.%s.%s", BrandingSectionKey, name, step)
 			if !allowedSteps[step] {
 				errs = append(errs, ValidationError{
@@ -549,6 +568,25 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 	}
 	if len(errs) > 0 {
 		return scales, light, dark, hasCustomPalette, errs
+	}
+
+	// When neither accent_color nor palette.primary was provided, seed the
+	// primary ramp from an explicit mode primary so --scion-primary-50..950,
+	// --sl-color-primary-*, and the sibling mode's derived tokens match the
+	// configured brand hue instead of leaking stock blue.
+	explicitPrimarySeed := ""
+	if accent == "" && !customPrimaryScale {
+		switch {
+		case lightIn != nil && lightIn.Primary != "":
+			explicitPrimarySeed = normalizeHex(lightIn.Primary)
+		case darkIn != nil && darkIn.Primary != "":
+			explicitPrimarySeed = normalizeHex(darkIn.Primary)
+		}
+		if explicitPrimarySeed != "" {
+			if ramp, err := GenerateOKLCHScale(explicitPrimarySeed); err == nil {
+				scales["primary"] = ramp
+			}
+		}
 	}
 
 	neutral := scales["neutral"]
@@ -638,7 +676,7 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 		return backingNeutralStep != "" && neutralStepCustomized(backingNeutralStep)
 	}
 
-	basePrimaryChanged := accent != "" || customPrimaryScale
+	basePrimaryChanged := accent != "" || customPrimaryScale || explicitPrimarySeed != ""
 	lightPrimaryChanged := basePrimaryChanged ||
 		(lightIn != nil && (lightIn.Primary != "" || lightIn.PrimaryHover != "" || lightIn.PrimaryActive != "" || lightIn.PrimaryText != ""))
 	darkPrimaryChanged := basePrimaryChanged ||
@@ -651,6 +689,15 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 
 	recalcLightPrimary := lightPrimaryChanged || lightBgOrSurfaceCustomized
 	recalcDarkPrimary := darkPrimaryChanged || darkBgOrSurfaceCustomized
+
+	modePrimaryRamp := func(explicitHex string) BrandingScale {
+		if explicitHex != "" && !customPrimaryScale {
+			if ramp, err := GenerateOKLCHScale(explicitHex); err == nil {
+				return ramp
+			}
+		}
+		return primary
+	}
 
 	// Resolve Light primary tokens using the same predicate as the WCAG AA gate below,
 	// so neutral-scale background overrides (palette.neutral.50) behave identically to
@@ -670,16 +717,25 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 			light.Primary = primary["600"]
 		}
 
+		lightRamp := primary
+		if lightIn != nil && lightIn.Primary != "" {
+			lightRamp = modePrimaryRamp(light.Primary)
+		}
+
 		if lightIn != nil && lightIn.PrimaryHover != "" {
 			light.PrimaryHover = normalizeHex(lightIn.PrimaryHover)
 		} else {
-			light.PrimaryHover = darkerPrimaryStep(primary, light.Primary, "700")
+			light.PrimaryHover = darkerPrimaryStep(lightRamp, light.Primary, "700")
 		}
 
 		if lightIn != nil && lightIn.PrimaryActive != "" {
 			light.PrimaryActive = normalizeHex(lightIn.PrimaryActive)
 		} else {
-			light.PrimaryActive = darkerPrimaryStep(primary, light.PrimaryHover, "800")
+			activeRamp := lightRamp
+			if lightIn != nil && lightIn.Primary == "" && lightIn.PrimaryHover != "" {
+				activeRamp = modePrimaryRamp(light.PrimaryHover)
+			}
+			light.PrimaryActive = darkerPrimaryStep(activeRamp, light.PrimaryHover, "800")
 		}
 
 		if lightIn != nil && lightIn.PrimaryText != "" {
@@ -707,16 +763,25 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 			dark.Primary = primary["400"]
 		}
 
+		darkRamp := primary
+		if darkIn != nil && darkIn.Primary != "" {
+			darkRamp = modePrimaryRamp(dark.Primary)
+		}
+
 		if darkIn != nil && darkIn.PrimaryHover != "" {
 			dark.PrimaryHover = normalizeHex(darkIn.PrimaryHover)
 		} else {
-			dark.PrimaryHover = lighterPrimaryStep(primary, dark.Primary, "300")
+			dark.PrimaryHover = lighterPrimaryStep(darkRamp, dark.Primary, "300")
 		}
 
 		if darkIn != nil && darkIn.PrimaryActive != "" {
 			dark.PrimaryActive = normalizeHex(darkIn.PrimaryActive)
 		} else {
-			dark.PrimaryActive = lighterPrimaryStep(primary, dark.PrimaryHover, "200")
+			activeRamp := darkRamp
+			if darkIn != nil && darkIn.Primary == "" && darkIn.PrimaryHover != "" {
+				activeRamp = modePrimaryRamp(dark.PrimaryHover)
+			}
+			dark.PrimaryActive = lighterPrimaryStep(activeRamp, dark.PrimaryHover, "200")
 		}
 
 		if darkIn != nil && darkIn.PrimaryText != "" {
@@ -824,7 +889,7 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 		lightBgKey string
 	}
 	ramps := []rampCheck{
-		{"primary", accent != "" || customPrimaryScale, "100"},
+		{"primary", basePrimaryChanged, "100"},
 		{"neutral", customNeutralScale, "200"},
 		{"success", customSuccessScale, "100"},
 		{"warning", customWarningScale, "100"},

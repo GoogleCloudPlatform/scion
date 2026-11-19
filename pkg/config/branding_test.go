@@ -630,3 +630,157 @@ func TestValidateBranding_DarkBadgeCompositeContrast(t *testing.T) {
 		t.Fatalf("expected darkSurfaceCustomized branch to flag dark badge contrast on .300, got: %v", surfaceErrs)
 	}
 }
+
+func hexHueDegrees(t *testing.T, hexStr string) float64 {
+	t.Helper()
+	r, g, b, err := parseHexRGB(hexStr)
+	if err != nil {
+		t.Fatalf("parseHexRGB(%q): %v", hexStr, err)
+	}
+	_, _, h := srgbToOKLCH(r, g, b)
+	return h * 180.0 / math.Pi
+}
+
+func hueAngleDiffDeg(a, b float64) float64 {
+	d := math.Mod(math.Abs(a-b), 360.0)
+	if d > 180.0 {
+		d = 360.0 - d
+	}
+	return d
+}
+
+func assertSameHue(t *testing.T, label, gotHex, wantHueRefHex string, maxDeg float64) {
+	t.Helper()
+	gotDeg := hexHueDegrees(t, gotHex)
+	wantDeg := hexHueDegrees(t, wantHueRefHex)
+	if diff := hueAngleDiffDeg(gotDeg, wantDeg); diff > maxDeg {
+		t.Errorf("%s (%s, hue %.1f°) drifted %.1f° from %s (hue %.1f°); max %.1f°",
+			label, gotHex, gotDeg, diff, wantHueRefHex, wantDeg, maxDeg)
+	}
+}
+
+func TestResolveBranding_ExplicitModePrimaryPreservesHueAndSingleTokenSymmetry(t *testing.T) {
+	// 1. Both palette.light.primary and palette.dark.primary set (teal) without accent_color or palette.primary:
+	// hover, active, scales["primary"], and PublicBranding/CSSText must stay teal (no stock-blue leak).
+	bothModes, errs := ResolveBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Light: &BrandingSemanticMode{Primary: "#0f766e"},
+			Dark:  &BrandingSemanticMode{Primary: "#2dd4bf"},
+		},
+	})
+	if len(errs) > 0 {
+		t.Fatalf("explicit light+dark teal primary unexpected errors: %v", errs)
+	}
+	assertSameHue(t, "light.PrimaryHover", bothModes.Light.PrimaryHover, "#0f766e", 10.0)
+	assertSameHue(t, "light.PrimaryActive", bothModes.Light.PrimaryActive, "#0f766e", 10.0)
+	assertSameHue(t, "dark.PrimaryHover", bothModes.Dark.PrimaryHover, "#2dd4bf", 10.0)
+	assertSameHue(t, "dark.PrimaryActive", bothModes.Dark.PrimaryActive, "#2dd4bf", 10.0)
+	assertSameHue(t, "scales[primary][600]", bothModes.Scales["primary"]["600"], "#0f766e", 10.0)
+	pub := bothModes.Public()
+	if pub == nil || !strings.Contains(pub.CSSText, "--scion-primary-hover: "+bothModes.Light.PrimaryHover) {
+		t.Fatalf("expected PublicBranding.CSSText to publish teal light.PrimaryHover %s", bothModes.Light.PrimaryHover)
+	}
+
+	// 2. Single-mode palette.light.primary alone (#0f766e): no stock-blue leak in light, dark, or primary scale.
+	lightOnly, errs := ResolveBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Light: &BrandingSemanticMode{Primary: "#0f766e"},
+		},
+	})
+	if len(errs) > 0 {
+		t.Fatalf("light-only primary unexpected errors: %v", errs)
+	}
+	assertSameHue(t, "lightOnly light.PrimaryHover", lightOnly.Light.PrimaryHover, "#0f766e", 10.0)
+	assertSameHue(t, "lightOnly light.PrimaryActive", lightOnly.Light.PrimaryActive, "#0f766e", 10.0)
+	assertSameHue(t, "lightOnly dark.Primary", lightOnly.Dark.Primary, "#0f766e", 10.0)
+	assertSameHue(t, "lightOnly dark.PrimaryHover", lightOnly.Dark.PrimaryHover, "#0f766e", 10.0)
+	assertSameHue(t, "lightOnly dark.PrimaryActive", lightOnly.Dark.PrimaryActive, "#0f766e", 10.0)
+
+	// 3. Single-mode palette.dark.primary alone (#2dd4bf): no stock-blue leak in dark, light, or primary scale.
+	darkOnly, errs := ResolveBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Dark: &BrandingSemanticMode{Primary: "#2dd4bf"},
+		},
+	})
+	if len(errs) > 0 {
+		t.Fatalf("dark-only primary unexpected errors: %v", errs)
+	}
+	assertSameHue(t, "darkOnly dark.PrimaryHover", darkOnly.Dark.PrimaryHover, "#2dd4bf", 10.0)
+	assertSameHue(t, "darkOnly dark.PrimaryActive", darkOnly.Dark.PrimaryActive, "#2dd4bf", 10.0)
+	assertSameHue(t, "darkOnly light.Primary", darkOnly.Light.Primary, "#2dd4bf", 10.0)
+	assertSameHue(t, "darkOnly light.PrimaryHover", darkOnly.Light.PrimaryHover, "#2dd4bf", 10.0)
+	assertSameHue(t, "darkOnly light.PrimaryActive", darkOnly.Light.PrimaryActive, "#2dd4bf", 10.0)
+
+	// 4. Split-hue explicit light (#0f766e teal) + dark (#c084fc purple): each mode keeps its own hue.
+	splitHue, errs := ResolveBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Light: &BrandingSemanticMode{Primary: "#0f766e"},
+			Dark:  &BrandingSemanticMode{Primary: "#c084fc"},
+		},
+	})
+	if len(errs) > 0 {
+		t.Fatalf("split-hue primary unexpected errors: %v", errs)
+	}
+	assertSameHue(t, "splitHue light.PrimaryHover", splitHue.Light.PrimaryHover, "#0f766e", 10.0)
+	assertSameHue(t, "splitHue dark.PrimaryHover", splitHue.Dark.PrimaryHover, "#c084fc", 10.0)
+
+	// 5. accent_color alone (#d97706 amber): both modes and scale stay amber.
+	accentOnly, errs := ResolveBranding(&BrandingConfig{AccentColor: "#d97706"})
+	if len(errs) > 0 {
+		t.Fatalf("accent_color alone unexpected errors: %v", errs)
+	}
+	assertSameHue(t, "accentOnly light.Primary", accentOnly.Light.Primary, "#d97706", 12.0)
+	assertSameHue(t, "accentOnly light.PrimaryHover", accentOnly.Light.PrimaryHover, "#d97706", 12.0)
+	assertSameHue(t, "accentOnly dark.Primary", accentOnly.Dark.Primary, "#d97706", 12.0)
+	assertSameHue(t, "accentOnly dark.PrimaryHover", accentOnly.Dark.PrimaryHover, "#d97706", 12.0)
+
+	// 6. Pin O3: setting palette.light.primary_text alone ("#ffffff") shifts light.Primary from
+	// grandfathered stock #3b82f6 (3.68:1 on white) to AA-passing primary-600 (#2563eb, 5.17:1).
+	primaryTextOnly, errs := ResolveBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Light: &BrandingSemanticMode{PrimaryText: "#ffffff"},
+		},
+	})
+	if len(errs) > 0 {
+		t.Fatalf("primary_text alone unexpected errors: %v", errs)
+	}
+	if primaryTextOnly.Light.Primary != DefaultPrimaryScale()["600"] {
+		t.Errorf("primaryTextOnly.Light.Primary = %q, want AA-compliant primary-600 %q",
+			primaryTextOnly.Light.Primary, DefaultPrimaryScale()["600"])
+	}
+}
+
+func TestValidateBranding_DeterministicScaleErrorOrder(t *testing.T) {
+	cfg := BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Primary: BrandingScale{
+				"999": "#000000",
+				"500": "not-a-hex",
+				"50":  "bad",
+				"123": "#000000",
+				"900": "nope",
+			},
+		},
+	}
+	first := ValidateBranding(&cfg)
+	wantPaths := []string{
+		"server.hub.branding.palette.primary.50",
+		"server.hub.branding.palette.primary.500",
+		"server.hub.branding.palette.primary.900",
+		"server.hub.branding.palette.primary.123",
+		"server.hub.branding.palette.primary.999",
+	}
+	gotPaths := make([]string, len(first))
+	for i, e := range first {
+		gotPaths[i] = e.Path
+	}
+	if !reflect.DeepEqual(gotPaths, wantPaths) {
+		t.Fatalf("got error paths %v, want %v", gotPaths, wantPaths)
+	}
+	for run := 0; run < 50; run++ {
+		again := ValidateBranding(&cfg)
+		if !reflect.DeepEqual(again, first) {
+			t.Fatalf("run %d returned different error order: %v vs %v", run, again, first)
+		}
+	}
+}
