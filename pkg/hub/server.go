@@ -4081,6 +4081,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.registerFireActions()
 	srv.registerRoutes()
 
+	// With lifecycle.idle_suspend off nothing records an idle suspend, so the
+	// store must not report an expired claim as in progress (no claim checks
+	// at all while the experiment is off).
+	if g, ok := s.(interface{ SetIdleSuspendInProgressGate(func() bool) }); ok {
+		g.SetIdleSuspendInProgressGate(func() bool { return srv.experimentEnabled(experiments.IdleSuspend) })
+	}
 	return srv, nil
 }
 
@@ -6251,11 +6257,13 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
 			// As for suspend: the agent may still be running, so the
 			// record no longer describes a stopped workspace.
-			if claimedIdle && stopOutcomeUnknown(err) {
-				// A timeout, cancellation or transport error: the broker
-				// may have stopped the container. Keep the stopped intent
-				// and the claim; the idle sweep records suspended(idle)
-				// once the row reports stopping or stopped.
+			if claimedIdle && !stopDefinitelyRefused(err) {
+				// Any stop error other than a provable refusal leaves the
+				// outcome unknown: the broker may have stopped the container.
+				// Keep the stopped intent and the claim; if the container
+				// still runs the intent-stop backstop stops it, and the idle
+				// sweep records suspended(idle) once the row reports
+				// stopping, stopped or error.
 				slog.Warn("Scheduler: idle auto-suspend stop outcome unknown; leaving the claim for sweep recovery",
 					"agent_id", agent.ID, "agent_name", agent.Name)
 				return false

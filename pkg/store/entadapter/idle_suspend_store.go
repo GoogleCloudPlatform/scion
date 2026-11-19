@@ -182,7 +182,7 @@ func (s *AgentStore) populateIdleSuspendClaimActive(ctx context.Context, sa *sto
 	if err != nil {
 		return err
 	}
-	sa.SetIdleSuspendFlags(now)
+	sa.SetIdleSuspendFlags(now, s.idleSuspendExtended())
 	return nil
 }
 
@@ -280,7 +280,7 @@ func (s *AgentStore) MarkAgentDelivery(ctx context.Context, agentID string) (*st
 		// SetIdleSuspendFlags): an unexpired lease, or a surviving stamp with
 		// run_intent=stopped on a row not yet recorded suspended.
 		probe := entAgentToStore(row)
-		probe.SetIdleSuspendFlags(now)
+		probe.SetIdleSuspendFlags(now, s.idleSuspendExtended())
 		claimActive = probe.IdleSuspendClaimActive
 		if !claimActive && (row.Phase == string(state.PhaseRunning) || row.Phase == string(state.PhaseStarting)) {
 			updated, err := c.Agent.UpdateOneID(row.ID).

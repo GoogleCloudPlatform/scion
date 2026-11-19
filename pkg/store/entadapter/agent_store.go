@@ -1531,9 +1531,10 @@ func (s *AgentStore) populateListIdleSuspendClaimActive(ctx context.Context, ite
 		return err
 	}
 	now = claimTime(now)
+	extended := s.idleSuspendExtended()
 	for i := range items {
 		if items[i].IdleSuspendClaimUntil != nil {
-			items[i].SetIdleSuspendFlags(now)
+			items[i].SetIdleSuspendFlags(now, extended)
 		}
 	}
 	return nil
@@ -1597,12 +1598,23 @@ func (s *AgentStore) agentFilterPredicates(ctx context.Context, filter store.Age
 			if err != nil {
 				return nil, err
 			}
+			// An idle suspend still in progress after its lease expired
+			// (store.Agent.SetIdleSuspendFlags) counts too: a user stop-all
+			// must clear it, or recovery would convert the row it just
+			// stopped.
+			inProgress := []predicate.Agent{agent.IdleSuspendClaimUntilGT(claimTime(now))}
+			if s.idleSuspendExtended() {
+				inProgress = append(inProgress, agent.And(
+					agent.RunIntentEQ(string(store.RunIntentStopped)),
+					agent.PhaseNEQ(string(state.PhaseSuspended)),
+				))
+			}
 			preds = append(preds, agent.Or(
 				agent.PhaseEQ(filter.Phase),
 				agent.RunIntentEQ(filter.OrRunIntent),
 				agent.And(
 					agent.IdleSuspendClaimUntilNotNil(),
-					agent.IdleSuspendClaimUntilGT(claimTime(now)),
+					agent.Or(inProgress...),
 				),
 			))
 		} else {

@@ -12,25 +12,28 @@ suspend.
   guarded writers: the worker (`IfIdleSuspendCommit`, lease unexpired) or sweep recovery
   (`IfIdleSuspendRecover`, lease expired).
 - **Worker (`pkg/hub/server.go`, `pkg/hub/idle_suspend_recovery.go`).**
-  - The record write is retried with backoff (100ms to 2s, 30s budget) on a detached context. A
-    guard rejection after an ambiguous attempt re-reads the row and counts `suspended(idle)` with the
-    same claim stamp as recorded.
+  - The record write is retried with backoff (100ms to 2s, 30s budget) on a detached context, and
+    returns at once on `ErrNotFound`. A guard rejection after an ambiguous attempt re-reads the row
+    and counts `suspended` for the same run and claim stamp as recorded, whatever the reason.
   - The claim is no longer cleared when the record write fails, the guard rejects, or the stop
-    outcome is unknown. It is still cleared after the record and on a definite stop refusal (broker
-    status, request not sent, run mismatch), where the intent is reverted as before.
-  - A stop timeout, cancellation or transport error does not revert the intent.
-- **Recovery.** `recoverIdleSuspendClaims` runs first in each idle sweep tick under the same gates
-  (`lifecycle.idle_suspend` and `auto_suspend_idle`). It selects rows through
-  `ListExpiredIdleSuspendClaims` (claim expired, `run_intent=stopped`, phase `stopping`, `stopped` or
-  `error`) and writes `suspended(idle)` under `IfIdleSuspendRecover`, which re-checks the stamp, run,
-  intent, phase, start claim, reincarnation and deletion on the locked row and clears the claim. A
-  row still `running` is left alone. The post-record steps are shared with the worker
+    outcome is unknown. It is still cleared after the record and on a definite stop refusal.
+  - The stop classification is inverted: every `DispatchAgentStop` error is an unknown outcome (claim
+    kept, intent not reverted) except the allowlist in `stopDefinitelyRefused` (request not sent,
+    broker not connected, dial failure, run mismatch, broker 400/401/403). An unknown outcome whose
+    container still runs converges through the intent-stop backstop and then recovery.
+- **Recovery.** `recoverIdleSuspendClaims` runs first in each idle sweep tick and needs only the
+  `lifecycle.idle_suspend` experiment, not `auto_suspend_idle`. A delivery wait that finds an
+  expired claim on a row already stopping, stopped or error also tries the recovery write for that
+  one row. It selects rows through `ListExpiredIdleSuspendClaims` (claim expired,
+  `run_intent=stopped`, phase `stopping`, `stopped` or `error`) and writes `suspended(idle)` under
+  `IfIdleSuspendRecover`, which re-checks the stamp, run, intent, phase, start claim, reincarnation
+  and deletion on the locked row and clears the claim. A row still `running` is left to the
+  intent-stop backstop. The post-record steps are shared with the worker
   (`completeAutoSuspendRecord`).
-- **Delivery.** `IdleSuspendClaimActive` now means an idle suspend is in progress: lease unexpired,
-  or the stamp still set with `run_intent=stopped` on a row not yet `suspended`. Every user or hub
-  lifecycle write clears the stamp, so this never holds a user-stopped row. Delivery and auto-wake
-  paths therefore never dispatch into a container whose stop may have landed; they wait, then
-  auto-wake once recovery records the suspension, or refuse with the "suspending" error.
+- **Delivery and stop-all.** `IdleSuspendClaimActive` means an idle suspend is in progress: lease
+  unexpired, or, while the experiment is on, the stamp still set with `run_intent=stopped` on a row
+  not yet `suspended`. With the experiment off it is lease-only (no claim checks beyond the lease).
+  A user stop-all selects in-progress rows by the same definition, so it wins over recovery.
   `IdleSuspendClaimLeaseActive` keeps the strict lease meaning for the intent-stop backstop,
   membership loss and the stalled auto-suspend.
 - **Docs.** The "not yet safe for production" notes were removed from the experiment registry and
@@ -39,5 +42,5 @@ suspend.
   `pkg/hub/idle_suspend_recovery_test.go` (fault injection on the record write, crash between stop
   and commit, stop timeout versus refusal, user stop in the window, gates off, and a DM during an
   unsettled suspend).
-- **Residual.** A row that stays `running` after its claim expired (the stop never landed) is not
-  converted; the claim stays inert and the existing run-intent reconciliation applies.
+- **Residual.** Recovery writes an empty retained activity: the pre-stop activity is not recorded
+  anywhere once the container's stop report clears it.

@@ -17,6 +17,8 @@ package store
 import (
 	"fmt"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 )
 
 // ErrIdleSuspendPrecondition is returned by ClaimIdleSuspend (when the agent
@@ -54,11 +56,14 @@ func (a *Agent) HasActiveIdleSuspendClaim(now time.Time) bool {
 // against the store-clock now. A row without a claim stamp has both false.
 //
 // IdleSuspendClaimActive means "an idle suspend is in progress": the lease is
-// unexpired, or the stamp is still set with run_intent=stopped and the row not
-// yet recorded suspended. Every user or hub lifecycle write clears the stamp,
-// so a surviving stamp with a stopped intent is an idle stop whose record
-// (worker commit or sweep recovery) has not landed yet, expired or not.
-func (a *Agent) SetIdleSuspendFlags(now time.Time) {
+// unexpired, or, when extended is true, the stamp is still set with
+// run_intent=stopped on a row not yet recorded suspended. Every user or hub
+// lifecycle write clears the stamp, so a surviving stamp with a stopped intent
+// is an idle stop whose record (worker commit or sweep recovery) has not
+// landed yet, expired or not. extended is false while lifecycle.idle_suspend
+// is off: nothing records the suspension then, so an expired stamp is inert
+// and no claim check applies beyond the lease.
+func (a *Agent) SetIdleSuspendFlags(now time.Time, extended bool) {
 	if a == nil {
 		return
 	}
@@ -69,5 +74,5 @@ func (a *Agent) SetIdleSuspendFlags(now time.Time) {
 	}
 	a.IdleSuspendClaimLeaseActive = now.Before(*a.IdleSuspendClaimUntil)
 	a.IdleSuspendClaimActive = a.IdleSuspendClaimLeaseActive ||
-		(a.RunIntent == RunIntentStopped && a.Phase != "suspended")
+		(extended && a.RunIntent == RunIntentStopped && a.Phase != string(state.PhaseSuspended))
 }

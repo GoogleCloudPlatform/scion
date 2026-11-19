@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
+	"net/http"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -41,22 +43,46 @@ var (
 	idleSuspendRecoveryBatch = 64
 )
 
-// stopOutcomeUnknown reports whether a failed stop dispatch may nonetheless
-// have stopped the container: a timeout, a lost control-channel connection
-// after the request was sent, a cross-node wait that expired with the stop
-// intent still open, or a network timeout. It reuses the create path's
-// classification (isUnknownDispatchOutcome), so a dial failure, a request that
-// was never sent, a broker's HTTP refusal, a run mismatch and any error raised
-// before anything was sent are definite and return false.
-func stopOutcomeUnknown(err error) bool {
+// stopDefinitelyRefused reports whether a failed idle-suspend stop dispatch
+// provably did nothing to the container, so the worker may revert the run
+// intent and clear the claim. Every other error leaves the outcome unknown
+// (the claim is kept and the intent stays stopped): an owner node's timeout
+// flattened across nodes, a non-zero exit of our own stop, a connection reset
+// after the request was written, a 5xx. Unknown outcomes converge: a container
+// that still runs keeps intent=stopped, the intent-stop backstop stops it, and
+// the sweep then records suspended(idle).
+//
+// The allowlist, each entry with its reason:
+//   - errStartRequestNotSent: the request could not be built, signed or routed;
+//     nothing was sent.
+//   - errStartBrokerNotConnected: no connection to the broker; nothing was sent.
+//   - a dial failure: the connection was never established. Checked first: a
+//     dial timeout also matches context.DeadlineExceeded.
+//   - ErrStopRunNotFound: the broker answered that it holds no entry for the
+//     requested run; nothing was stopped, and the run is already gone.
+//   - a broker HTTP 400, 401 or 403: the request was rejected before the broker
+//     acted on it. Other statuses (404 for a container that may be gone, 409,
+//     408, 5xx) can follow a partial or completed stop and stay unknown.
+func stopDefinitelyRefused(err error) bool {
 	if err == nil {
 		return false
 	}
-	var se *brokerStatusError
-	if errors.As(err, &se) || errors.Is(err, ErrStopRunNotFound) {
-		return false
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
 	}
-	return isUnknownDispatchOutcome(err)
+	if errors.Is(err, errStartRequestNotSent) || errors.Is(err, errStartBrokerNotConnected) ||
+		errors.Is(err, ErrStopRunNotFound) {
+		return true
+	}
+	var se *brokerStatusError
+	if errors.As(err, &se) {
+		switch se.StatusCode {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+			return true
+		}
+	}
+	return false
 }
 
 // recordIdleSuspendCommit writes the idle suspend's status update under the
@@ -84,6 +110,9 @@ func (s *Server) recordIdleSuspendCommit(ctx context.Context, agentID, runID str
 				}
 			}
 			return recorded, nil
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return false, err // the row is gone: nothing to record
 		}
 		slog.Warn("Scheduler: idle auto-suspend record write failed; retrying",
 			"agent_id", agentID, "attempt", attempt+1, "error", err)
