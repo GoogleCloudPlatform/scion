@@ -595,4 +595,64 @@ describe('mobile touch on choice cards (ptone/scion#7839)', () => {
     await thread.updateComplete;
     expect(hasOpenMenu(thread)).toBe(true);
   });
+
+  it('forwards conversationLabel and createdAt to the card and patches thread decisions on dismiss (ptone/scion#8216)', async () => {
+    const thread = document.createElement('scion-chat-thread');
+    thread.conversationKey = KEY;
+    thread.threadName = 'release';
+    thread.projectId = 'proj-1';
+    thread.currentUserId = 'u-me';
+    document.body.appendChild(thread);
+    await thread.updateComplete;
+    await vi.waitFor(() =>
+      expect(apiFetch.mock.calls.some(([path]) => path.includes('/messages?'))).toBe(true)
+    );
+    await settle();
+    await thread.updateComplete;
+
+    const msgEl = await messageEl(thread, 'p1');
+    const card = cardOf(msgEl)!;
+    await card.updateComplete;
+
+    card.shadowRoot.querySelector<HTMLElement>('[data-dismiss-menu-item]')!.click();
+    await card.updateComplete;
+
+    const dialog = card.shadowRoot.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
+    expect(dialog.querySelector('[data-dismiss-tell="live"]')?.textContent).toContain(
+      'release-bot will be told in #release.'
+    );
+
+    const dsmView: DecisionView = decision({
+      status: 'dismissed',
+      dismissed: {
+        at: '2026-11-12T15:50:00Z',
+        byUserId: 'u-me',
+        byName: 'Alice',
+        reason: 'Obsolete',
+        surface: 'native',
+        responseMessageId: 'resp-dsm-1',
+      },
+    });
+    apiFetch.mockImplementationOnce((path) => {
+      expect(path).toBe('/api/v1/decision-prompts/p1/dismiss');
+      return Promise.resolve(
+        json({
+          dismissed: [dsmView],
+          alreadyDismissed: [],
+          responseMessageId: 'resp-dsm-1',
+          delivered: true,
+          deliveryStatus: 'delivered',
+        })
+      );
+    });
+
+    dialog.querySelector<HTMLElement>('[data-dismiss-confirm]')!.click();
+    await settle();
+    await thread.updateComplete;
+    await card.updateComplete;
+
+    expect(card.shadowRoot.querySelector('.row.dismissed .wd')?.textContent).toContain(
+      'Dismissed by you'
+    );
+  });
 });

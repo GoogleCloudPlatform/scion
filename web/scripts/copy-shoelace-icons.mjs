@@ -212,6 +212,7 @@ const USED_ICONS = [
   'tag',
   'telegram',
   'terminal',
+  'three-dots',
   'three-dots-vertical',
   'trash',
   'upload',

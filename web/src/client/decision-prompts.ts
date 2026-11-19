@@ -568,13 +568,20 @@ export type DismissDecisionPromptResult =
     };
 
 /**
- * Rows the Decisions-page dismiss dialog lists and dismisses: pending rows
- * without an effective answer. The dialog sends exactly these row ids as
- * `decisionIds`, so the hub never dismisses a row the dialog did not show
- * (such as an interpreted answer awaiting the viewer's confirmation).
+ * Rows a dismiss dialog lists as dismissable by `currentUserId`: open rows
+ * waiting on the viewer (`pending` without an effective answer, or an
+ * `agent_interpreted` answer naming `currentUserId` when `currentUserId` is
+ * non-empty, D6), excluding rows blocked in `waitingReasons`. When
+ * `currentUserId` is omitted, only pending rows match.
  */
-export function dismissDialogRows(decisions: readonly DecisionView[]): DecisionView[] {
-  return decisions.filter((d) => d.status === 'pending' && !d.decision);
+export function dismissDialogRows(
+  decisions: readonly DecisionView[],
+  currentUserId?: string,
+  waitingReasons?: Readonly<Record<string, string>>
+): DecisionView[] {
+  return decisions.filter(
+    (d) => !waitingReasons?.[d.rowId] && actionableReason(d, currentUserId) === ''
+  );
 }
 
 /**
@@ -597,7 +604,12 @@ function dismissDeliveryStatus(
  */
 export async function dismissDecisionPrompt(
   messageId: string,
-  opts: { reason?: string; surface?: DecisionAnswerSurface; decisionIds?: readonly string[] } = {}
+  opts: {
+    reason?: string;
+    surface?: DecisionAnswerSurface;
+    decisionIds?: readonly string[];
+    idempotencyKey?: string;
+  } = {}
 ): Promise<DismissDecisionPromptResult> {
   const trimmedReason = opts.reason?.trim() ?? '';
   let res: Response;
@@ -611,6 +623,7 @@ export async function dismissDecisionPrompt(
           : {}),
         ...(trimmedReason ? { reason: trimmedReason } : {}),
         ...(opts.surface ? { surface: opts.surface } : {}),
+        ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
       }),
     });
   } catch {

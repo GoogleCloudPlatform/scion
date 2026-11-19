@@ -34,6 +34,7 @@ const {
   carryDecisionFields,
   dismissAvailableAtMs,
   dismissDecisionPrompt,
+  dismissDialogRows,
   dismissRemainingMinutes,
   isClosedUnanswered,
   isOpenDecision,
@@ -643,6 +644,8 @@ describe('dismissRemainingMinutes and dismissDecisionPrompt', () => {
     const out = await dismissDecisionPrompt('m 1', {
       reason: '  Stale release  ',
       surface: 'decisions_page',
+      decisionIds: ['r1'],
+      idempotencyKey: 'idem-123',
     });
     expect(out).toEqual({
       ok: true,
@@ -656,9 +659,55 @@ describe('dismissRemainingMinutes and dismissDecisionPrompt', () => {
     expect(path).toBe('/api/v1/decision-prompts/m%201/dismiss');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual({
+      decisionIds: ['r1'],
       reason: 'Stale release',
       surface: 'decisions_page',
+      idempotencyKey: 'idem-123',
     });
+  });
+
+  it('dismissDialogRows returns pending and viewer-owned interpreted rows, excluding others and waitingReasons', () => {
+    const pend = view({ rowId: 'r-pend' });
+    const myInterp = view({
+      rowId: 'r-mine',
+      status: 'decided',
+      decision: {
+        choiceId: 'yes',
+        label: 'Yes',
+        answeredByUserId: 'u-me',
+        answeredByName: 'Alice',
+        provenance: 'agent_interpreted',
+        surface: 'web',
+        responseMessageId: 'resp-i1',
+        at: '2026-11-16T09:01:00Z',
+      },
+    });
+    const bobInterp = view({
+      rowId: 'r-bob',
+      status: 'decided',
+      decision: {
+        choiceId: 'no',
+        label: 'No',
+        answeredByUserId: 'u-bob',
+        answeredByName: 'Bob',
+        provenance: 'agent_interpreted',
+        surface: 'web',
+        responseMessageId: 'resp-i2',
+        at: '2026-11-16T09:01:00Z',
+      },
+    });
+    const direct = decided({ rowId: 'r-direct' });
+
+    expect(
+      dismissDialogRows([pend, myInterp, bobInterp, direct], 'u-me').map((d) => d.rowId)
+    ).toEqual(['r-pend', 'r-mine']);
+    expect(
+      dismissDialogRows([pend, myInterp], 'u-me', { 'r-pend': 'read_only' }).map((d) => d.rowId)
+    ).toEqual(['r-mine']);
+    // Without currentUserId, only pending rows match.
+    expect(dismissDialogRows([pend, myInterp, bobInterp, direct]).map((d) => d.rowId)).toEqual([
+      'r-pend',
+    ]);
   });
 
   it('parses 409 too_recent and 409 dismiss_changed error details', async () => {
