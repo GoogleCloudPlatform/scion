@@ -811,6 +811,20 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			writeSettingsValidation(w, err.Error(), projectStorageEntries(err), nil)
 			return
 		}
+		if len(sectionBodyPresence(opsettings.BrandingSectionName, rawBody).sentKeys()) > 0 {
+			if srvMap, ok := raw["server"].(map[string]interface{}); ok {
+				if hubMap, ok := srvMap["hub"].(map[string]interface{}); ok {
+					if brandRaw, ok := hubMap["branding"]; ok && brandRaw != nil {
+						if brandDoc, mErr := json.Marshal(brandRaw); mErr == nil {
+							if errs := opsettings.Validate(opsettings.BrandingSectionName, brandDoc); len(errs) > 0 {
+								writeSettingsValidation(w, "", sectionValidationEntries(opsettings.BrandingSectionName, errs), nil)
+								return
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// telemetry.cloud.tls unit rule, same as the DB-mode handler: checked

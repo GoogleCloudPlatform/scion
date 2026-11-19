@@ -375,6 +375,9 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
+	// Branding: saved or bootstrap value; nil when unset.
+	resp.Server.Hub.Branding = snap.Branding.Clone()
+
 	// GitHub App
 	if resp.Server.GitHubApp == nil {
 		resp.Server.GitHubApp = &config.V1GitHubAppConfig{}
@@ -2593,6 +2596,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.LaunchKeepaliveSeconds != nil {
 				keys = append(keys, "server.hub.launch_keepalive_seconds")
 			}
+			if hub.Branding != nil && !hub.Branding.IsZero() {
+				keys = append(keys, config.BrandingSectionKey)
+			}
 		}
 		if srv.Auth != nil {
 			auth := srv.Auth
@@ -3038,6 +3044,15 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.Observability != nil {
 			d.MetricsEnabled = req.Server.Hub.Observability.MetricsEnabled
 			d.TracingEnabled = req.Server.Hub.Observability.TracingEnabled
+		}
+		doc = d
+
+	case opsettings.BrandingSectionName:
+		// handlePutServerConfigDB deep-merges this doc on the current row
+		// (bodyMergedSections + deepMergeSections).
+		d := &opsettings.BrandingSettings{}
+		if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.Branding != nil {
+			d.BrandingConfig = req.Server.Hub.Branding.CloneValue()
 		}
 		doc = d
 
@@ -3536,6 +3551,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"telemetry":         settingsTokenConfiguration, // telemetry export
 	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
 	"hub_observability": settingsTokenRefused,       // where the hub's own metrics and traces go
+	"branding":          settingsTokenRefused,       // unauthenticated /login content, logos, icons and palette
 	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys

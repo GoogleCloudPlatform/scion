@@ -1145,7 +1145,16 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 		if err := json.Unmarshal(doc, &cfg); err != nil {
 			return []config.ValidationError{{Message: fmt.Sprintf("invalid branding JSON: %v", err)}}
 		}
-		return config.ValidateBranding(&cfg)
+		errs := config.ValidateBranding(&cfg)
+		prefix := config.BrandingSectionKey + "."
+		for i := range errs {
+			if errs[i].Path == config.BrandingSectionKey {
+				errs[i].Path = ""
+			} else {
+				errs[i].Path = strings.TrimPrefix(errs[i].Path, prefix)
+			}
+		}
+		return errs
 	default:
 		return nil
 	}

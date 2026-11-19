@@ -45,6 +45,8 @@ type startupLayer1Values struct {
 	// AuthorizedDomains is the sign-in domain list from settings.yaml and
 	// SCION_SERVER_* (ptone/scion#6000).
 	AuthorizedDomains []string
+	// Branding is the Hub-wide UI branding from startup config.
+	Branding *config.BrandingConfig
 }
 
 // githubAppPublicConfig is the part of GitHubAppServerConfig that the
@@ -112,7 +114,36 @@ func (s *Server) recordStartupLayer1Values() {
 		TelemetryConfig:        s.config.TelemetryConfig,
 		GitHubApp:              githubAppPublicFrom(s.config.GitHubAppConfig),
 		AuthorizedDomains:      slices.Clone(s.config.AuthorizedDomains),
+		Branding:               s.config.Branding.Clone(),
 	}
+}
+
+// ResolvedBranding returns the running Hub's validated UI branding snapshot.
+// Never returns nil; an uninitialized Server returns DefaultResolvedBranding().
+func (s *Server) ResolvedBranding() *config.ResolvedBranding {
+	if s != nil {
+		if r := s.resolvedBranding.Load(); r != nil {
+			return r
+		}
+	}
+	return config.DefaultResolvedBranding()
+}
+
+// applyBrandingLocked resolves next and updates s.config.Branding and
+// s.resolvedBranding, returning true when the effective branding config
+// changed. Malformed configs log a warning and fall back to stock Scion
+// defaults. Callers hold s.mu (or run during single-goroutine Server init).
+func (s *Server) applyBrandingLocked(next *config.BrandingConfig) bool {
+	cloned := next.Clone()
+	changed := !reflect.DeepEqual(s.config.Branding, cloned)
+	s.config.Branding = cloned
+	resolved, errs := config.ResolveBranding(cloned)
+	if len(errs) > 0 {
+		logging.Subsystem("hub.settings").Warn("invalid server.hub.branding configuration; falling back to default Scion branding",
+			"errors", errs)
+	}
+	s.resolvedBranding.Store(resolved)
+	return changed
 }
 
 // softDeleteSettings returns the running soft-delete retention and the

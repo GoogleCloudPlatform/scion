@@ -71,6 +71,9 @@ func TestBrandingSection_KoanfRoundTripAndValidation(t *testing.T) {
 	if len(crossErrs) == 0 {
 		t.Fatal("Validate should reject low-contrast light.primary")
 	}
+	if crossErrs[0].Path != "palette.light.primary" {
+		t.Errorf("crossErrs[0].Path = %q, want palette.light.primary", crossErrs[0].Path)
+	}
 	if !strings.Contains(crossErrs[0].Error(), "4.50:1") {
 		t.Errorf("expected WCAG AA 4.50:1 error message, got: %v", crossErrs)
 	}
