@@ -454,13 +454,6 @@ An agent that reports it has nothing to do (`idle`) or that finished its task
 (`completed`) still holds its container. The Hub can suspend such agents after a
 grace period and wake them again when new work arrives for them.
 
-:::danger[Not yet safe for production]
-Do not enable `server.hub.auto_suspend_idle` with the `lifecycle.idle_suspend`
-experiment on in production yet. Failure recovery for in-flight idle suspends
-(a failed commit after the container stopped, a Hub crash mid-suspend, and
-stop-timeout recovery) is not implemented yet.
-:::
-
 Idle auto-suspend needs **both**:
 
 - the [`lifecycle.idle_suspend`](/scion/reference/experiments/#server-experiments-with-notes)
@@ -497,6 +490,37 @@ The suspend works like `scion suspend`: the container stops, the harness session
 and the `idle`, `completed` or `harness_error` activity are kept, and the
 suspend reason is `idle`. `scion list` shows such an agent as, for example,
 `suspended · completed (idle)`.
+
+### Interrupted suspends
+
+The suspend is committed in two steps: the Hub records its intent to stop the
+agent (with a short lease of a few minutes), stops the container, then records
+`suspended` with reason `idle`. Failures between the steps are handled so an
+agent is never left stopped without a suspend reason:
+
+- **Retry.** The final write is retried with backoff. While it has not landed,
+  the lease is kept.
+- **Recovery.** If the write still fails, or the Hub restarts after the stop, the
+  idle sweep records the suspension once the lease has expired and the agent
+  reports stopping, stopped or error. This needs only the experiment, so turning
+  `auto_suspend_idle` off does not strand an in-flight suspend. A user stop,
+  stop-all, start or delete in the meantime always wins; the sweep never converts
+  such an agent.
+- **Unknown stop outcome.** A timeout or other error that leaves it unclear
+  whether the container stopped does not revert the stop intent. If the
+  container is still running, the Hub's stop-intent reconciliation stops it and
+  the sweep then records the suspension. Only a provable refusal (for example
+  the request never reached the broker) reverts the intent right away.
+- **Fail fast, then abandon.** While a suspend is in progress, messages that need
+  a running agent wait for it to settle (auto-wake paths) or are refused with a
+  "suspending" error. If the lease has expired and the agent is still running,
+  the stop never landed: deliveries are refused at once rather than waiting.
+  After about 11 minutes the sweep abandons the suspend: it reverts the intent,
+  records a message on the agent, and logs a warning, so the agent is reachable
+  again.
+- **Backoff.** An abandoned agent is not idle-suspended again for about 15
+  minutes, so a persistently failing broker is retried roughly every 30 minutes
+  rather than every sweep.
 
 ### Auto-wake on new work
 

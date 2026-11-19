@@ -5537,9 +5537,9 @@ export class ScionPageAdminServerConfig extends LitElement {
               >When enabled, agents that report idle or completed (or a harness error) for longer
               than Idle Suspend After are suspended (container stopped, session preserved). A
               message, mention, notification or scheduled message for an agent the hub suspended
-              resumes it. Takes effect only while the lifecycle.idle_suspend experiment is on. Not
-              yet safe for production: recovery from a failed idle suspend is not implemented
-              yet.</span
+              resumes it. Takes effect only while the lifecycle.idle_suspend experiment is on. An
+              idle suspend that does not finish is completed or abandoned by the hub
+              automatically.</span
             >
           </div>
           <div class="form-field">
