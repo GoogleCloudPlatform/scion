@@ -909,6 +909,21 @@ type AgentStore interface {
 	// with AgentStatusUpdate.IfIdleSuspendRecover.
 	ListExpiredIdleSuspendClaims(ctx context.Context, limit int) ([]Agent, error)
 
+	// ListAbandonedIdleSuspendClaims returns non-deleted agents still in phase
+	// running whose idle_suspend_claim_until expired at least expiredFor ago on
+	// the store clock, with run_intent=stopped: idle suspends whose stop never
+	// landed. Ordered by claim expiry, then id; a positive limit bounds the
+	// rows. The caller abandons each with AbandonIdleSuspend.
+	ListAbandonedIdleSuspendClaims(ctx context.Context, expiredFor time.Duration, limit int) ([]Agent, error)
+
+	// AbandonIdleSuspend gives up an idle suspend whose stop never landed, under
+	// the row lock and the store clock: it requires the exact claimUntil stamp,
+	// expired at least expiredFor ago, the same runID, phase running,
+	// run_intent=stopped, no start claim, reincarnation or deletion; then it
+	// clears the claim, reverts run_intent to running and records message on
+	// the row. Otherwise ErrIdleSuspendPrecondition, nothing written.
+	AbandonIdleSuspend(ctx context.Context, agentID string, claimUntil time.Time, runID string, expiredFor time.Duration, message string) error
+
 	// ClearIdleSuspendClaim clears idle_suspend_claim_until on agentID.
 	ClearIdleSuspendClaim(ctx context.Context, agentID string) error
 

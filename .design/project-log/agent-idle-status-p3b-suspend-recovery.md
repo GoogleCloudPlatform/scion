@@ -30,6 +30,11 @@ suspend.
   and deletion on the locked row and clears the claim. A row still `running` is left to the
   intent-stop backstop. The post-record steps are shared with the worker
   (`completeAutoSuspendRecord`).
+- **Abandon.** A row whose stop never lands (running, intent stopped, claim expired) fails deliveries
+  fast; the sweep abandons the suspend once the claim has been expired for three leases
+  (`AbandonIdleSuspend`: same stamp and run, no start claim or deletion; clears the claim, reverts
+  the intent to running, records a message, logs WARN and publishes the status), so the agent is
+  deliverable again as after a failed stop on main.
 - **Delivery and stop-all.** `IdleSuspendClaimActive` means an idle suspend is in progress: lease
   unexpired, or, while the experiment is on, the stamp still set with `run_intent=stopped` on a row
   not yet `suspended`. With the experiment off it is lease-only (no claim checks beyond the lease).

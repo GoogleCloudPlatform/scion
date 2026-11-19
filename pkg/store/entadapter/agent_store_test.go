@@ -47,7 +47,11 @@ func newTestAgentStore(t *testing.T) (*AgentStore, string) {
 		Save(context.Background())
 	require.NoError(t, err)
 
-	return NewAgentStore(client), agentTestProjectUID.String()
+	as := NewAgentStore(client)
+	// The hub installs this gate (lifecycle.idle_suspend on); without one the
+	// store is lease-only.
+	as.SetIdleSuspendInProgressGate(func() bool { return true })
+	return as, agentTestProjectUID.String()
 }
 
 // makeAgent builds a minimal valid agent for the seeded project.

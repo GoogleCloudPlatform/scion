@@ -43,6 +43,21 @@ var (
 	idleSuspendRecoveryBatch = 64
 )
 
+// idleSuspendAbandonLeases is how many claim leases an idle suspend whose stop
+// never landed (the row still runs, intent stopped, claim expired) may stay in
+// progress before the sweep abandons it: the claim is cleared and the intent
+// reverted to running, the state a failed stop leaves on main. Until then
+// deliveries fail fast instead of waiting.
+const idleSuspendAbandonLeases = 3
+
+// idleSuspendAbandonAfter is how long a claim must have been expired for the
+// sweep to abandon the idle suspend of a row that still runs.
+func idleSuspendAbandonAfter() time.Duration {
+	return idleSuspendAbandonLeases * idleSuspendClaimLease()
+}
+
+const idleSuspendAbandonedMessage = "Idle suspend failed: the container did not stop; the suspend was abandoned and the agent keeps running"
+
 // stopDefinitelyRefused reports whether a failed idle-suspend stop dispatch
 // provably did nothing to the container, so the worker may revert the run
 // intent and clear the claim. Every other error leaves the outcome unknown
@@ -152,6 +167,52 @@ func (s *Server) recoverIdleSuspendClaims(ctx context.Context) {
 		}
 		s.recoverIdleSuspendClaim(ctx, &rows[i])
 	}
+	s.abandonStuckIdleSuspends(ctx)
+}
+
+// abandonStuckIdleSuspends gives up idle suspends whose stop never landed: rows
+// still running, intent stopped, with a claim expired for longer than
+// idleSuspendAbandonAfter. The store write clears the claim and reverts the
+// intent to running under the exact stamp, run and no-start-claim guards, so
+// it wins or loses atomically against the intent-stop backstop and a user
+// action. The agent stays deliverable, as after a failed stop on main.
+func (s *Server) abandonStuckIdleSuspends(ctx context.Context) {
+	after := idleSuspendAbandonAfter()
+	rows, err := s.store.ListAbandonedIdleSuspendClaims(ctx, after, idleSuspendRecoveryBatch)
+	if err != nil {
+		slog.Error("Scheduler: idle auto-suspend abandon listing failed", "error", err)
+		return
+	}
+	for i := range rows {
+		if ctx.Err() != nil {
+			return
+		}
+		agent := &rows[i]
+		if agent.IdleSuspendClaimUntil == nil || s.isAutoSuspendQueued(agent.ID) {
+			continue
+		}
+		endLifecycleOp, ok := s.tryBeginLifecycleOp(agent.ID)
+		if !ok {
+			continue
+		}
+		rctx, cancel := detachedContext(ctx, finalizationTimeout)
+		err := s.store.AbandonIdleSuspend(rctx, agent.ID, *agent.IdleSuspendClaimUntil, agent.RunID, after, idleSuspendAbandonedMessage)
+		cancel()
+		endLifecycleOp()
+		switch {
+		case err == nil:
+			slog.Warn("Scheduler: idle auto-suspend abandoned: the stop never landed; the agent keeps running",
+				"agent_id", agent.ID, "agent_name", agent.Name, "claim_expired_at", *agent.IdleSuspendClaimUntil)
+			if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
+				s.events.PublishAgentStatus(ctx, fresh)
+			}
+		case errors.Is(err, store.ErrIdleSuspendPrecondition):
+			// The row moved on (a stop landed, a user acted): nothing to do.
+		default:
+			slog.Error("Scheduler: idle auto-suspend abandon failed; will retry on the next sweep",
+				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+		}
+	}
 }
 
 func (s *Server) recoverIdleSuspendClaim(ctx context.Context, agent *store.Agent) {
@@ -187,9 +248,6 @@ func (s *Server) recoverIdleSuspendClaim(ctx context.Context, agent *store.Agent
 	}
 	slog.Info("Scheduler: recovered idle auto-suspend", "agent_id", agent.ID, "agent_name", agent.Name)
 	s.completeAutoSuspendRecord(rctx, agent, agent.RunID, state.SuspendReasonIdle)
-	if agent.RuntimeBrokerID != "" && agent.RunIntentAt != nil {
-		s.releaseSupersededClaim(rctx, agent.ID, agent.StartClaimID, *agent.RunIntentAt)
-	}
 	endLifecycleOp()
 	s.events.PublishAgentStatus(rctx, agent)
 }

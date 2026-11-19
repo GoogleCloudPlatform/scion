@@ -618,3 +618,107 @@ func TestIdleSuspendRecovery_ExperimentOffIsInert(t *testing.T) {
 		assert.Equal(t, AgentDMAccepted, res.Outcome)
 	}
 }
+
+func setIdleClaimExpiredFor(t *testing.T, s store.Store, agentID string, ago time.Duration) {
+	t.Helper()
+	_, err := s.(*entadapter.CompositeStore).DB().ExecContext(context.Background(),
+		"UPDATE agents SET idle_suspend_claim_until = ? WHERE id = ?", time.Now().UTC().Add(-ago), agentID)
+	require.NoError(t, err)
+}
+
+// TestIdleSuspendRecovery_StopNeverLandsIsAbandoned: a stop that fails with a
+// non-allowlisted error on every attempt leaves the row running with
+// intent=stopped and an expired claim. Deliveries fail fast (nothing is
+// dispatched) while the state is within the ceiling; past it the sweep
+// abandons the suspend (claim cleared, intent running) and a DM is delivered
+// normally. A stop that lands before the ceiling still records suspended(idle).
+func TestIdleSuspendRecovery_StopNeverLandsIsAbandoned(t *testing.T) {
+	ctx := context.Background()
+	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+	disp := &wakeTrackingDispatcher{}
+	srv.SetDispatcher(disp)
+	t.Cleanup(srv.waitAutoWakeIdle)
+	enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+	target, cond := claimIdleForTest(t, s, target, "run-never-lands")
+	_, _, _, err := s.ClaimIdleSuspend(ctx, target.ID, cond)
+	require.NoError(t, err)
+	// The worker's stop failed with a broker 500 (unknown): claim and intent kept.
+	setIdleClaimExpiredFor(t, s, target.ID, time.Second)
+	stuck, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseRunning), stuck.Phase)
+	require.Equal(t, store.RunIntentStopped, stuck.RunIntent)
+	require.True(t, stuck.IdleSuspendClaimActive)
+
+	// Within the ceiling: deliveries fail fast and nothing is dispatched.
+	started := time.Now()
+	res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, stuck, "must not reach the container"))
+	assert.Nil(t, res)
+	require.NotNil(t, dmErr)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+	assert.Less(t, time.Since(started), 5*time.Second, "no wait for the settle budget")
+	assert.Empty(t, disp.getMessageCalls())
+
+	// A sweep within the ceiling leaves the row alone.
+	srv.agentIdleSuspendHandler()(ctx)
+	srv.waitAutoSuspendIdle()
+	got, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent)
+	assert.NotNil(t, got.IdleSuspendClaimUntil)
+
+	// Past the ceiling the sweep abandons the suspend.
+	// (The abandon step runs inside the sweep; it is called directly here because
+	// the same tick would otherwise select the still-idle agent for a fresh
+	// suspend attempt, which is the intended retry.)
+	setIdleClaimExpiredFor(t, s, target.ID, idleSuspendAbandonAfter()+time.Minute)
+	srv.abandonStuckIdleSuspends(ctx)
+	got, err = s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+	assert.Nil(t, got.IdleSuspendClaimUntil)
+	assert.Contains(t, got.Message, "Idle suspend failed")
+
+	// The agent is deliverable again.
+	res, dmErr = srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, got, "delivered after abandon"))
+	require.Nil(t, dmErr)
+	assert.Equal(t, AgentDMAccepted, res.Outcome)
+	msgs := disp.getMessageCalls()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "delivered after abandon", msgs[0].Message)
+	assert.Empty(t, disp.getStartCalls())
+}
+
+func TestIdleSuspendRecovery_StopLandsBeforeCeilingStillRecords(t *testing.T) {
+	f := newIdleRecoveryFixture(t, "rec-before-ceiling", false)
+	f.disp.runIntentDispatcher.stopErr = &brokerStatusError{StatusCode: http.StatusInternalServerError}
+	f.suspendOnce(t)
+	setIdleClaimExpiredFor(t, f.raw, f.agent.ID, idleSuspendAbandonAfter()/2)
+
+	f.sweep()
+	assert.Equal(t, string(state.PhaseRunning), f.get(t).Phase, "within the ceiling nothing is converted or reverted")
+	assert.Equal(t, store.RunIntentStopped, f.get(t).RunIntent)
+
+	setPhaseForTest(t, f.raw, f.agent.ID, string(state.PhaseStopped))
+	f.sweep()
+	got := f.get(t)
+	assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+	assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason)
+}
+
+// TestIdleSuspendRecovery_LeaseOnlyCallSites: heldAgentNeedsStop keeps the
+// strict lease meaning, so a held agent whose idle claim expired (suspend still
+// in progress) is picked up for a stop, while an unexpired lease still yields.
+func TestIdleSuspendRecovery_LeaseOnlyCallSites(t *testing.T) {
+	base := store.Agent{RuntimeBrokerID: "b1", Phase: string(state.PhaseRunning)}
+
+	leased := base
+	leased.IdleSuspendClaimActive, leased.IdleSuspendClaimLeaseActive = true, true
+	assert.False(t, heldAgentNeedsStop(&leased), "an unexpired idle lease owns the stop")
+
+	expired := base
+	expired.IdleSuspendClaimActive, expired.IdleSuspendClaimLeaseActive = true, false
+	assert.True(t, heldAgentNeedsStop(&expired), "an expired in-progress claim does not block the held-agent stop")
+}

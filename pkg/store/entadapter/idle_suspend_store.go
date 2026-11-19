@@ -329,3 +329,57 @@ func (s *AgentStore) ListExpiredIdleSuspendClaims(ctx context.Context, limit int
 	}
 	return out, nil
 }
+
+// ListAbandonedIdleSuspendClaims implements store.AgentStore.ListAbandonedIdleSuspendClaims.
+func (s *AgentStore) ListAbandonedIdleSuspendClaims(ctx context.Context, expiredFor time.Duration, limit int) ([]store.Agent, error) {
+	now, err := s.driverStoreNow(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := s.client.Agent.Query().Where(
+		agent.DeletedAtIsNil(),
+		agent.IdleSuspendClaimUntilNotNil(),
+		agent.IdleSuspendClaimUntilLTE(claimTime(now.Add(-expiredFor))),
+		agent.RunIntentEQ(string(store.RunIntentStopped)),
+		agent.PhaseEQ(string(state.PhaseRunning)),
+	).Order(ent.Asc(agent.FieldIdleSuspendClaimUntil), ent.Asc(agent.FieldID))
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.Agent, len(rows))
+	for i, a := range rows {
+		out[i] = *entAgentToStore(a)
+	}
+	return out, nil
+}
+
+// AbandonIdleSuspend implements store.AgentStore.AbandonIdleSuspend.
+func (s *AgentStore) AbandonIdleSuspend(ctx context.Context, agentID string, claimUntil time.Time, runID string, expiredFor time.Duration, message string) error {
+	return s.withIdleSuspendLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
+		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) ||
+			!claimEligible(row) || heldClaimError(row) != nil {
+			return false, store.ErrIdleSuspendPrecondition
+		}
+		if row.IdleSuspendClaimUntil == nil || !claimTime(*row.IdleSuspendClaimUntil).Equal(claimTime(claimUntil)) ||
+			now.Before(row.IdleSuspendClaimUntil.Add(expiredFor)) {
+			return false, store.ErrIdleSuspendPrecondition
+		}
+		if row.RunID != runID || row.Phase != string(state.PhaseRunning) ||
+			row.RunIntent == nil || *row.RunIntent != string(store.RunIntentStopped) {
+			return false, store.ErrIdleSuspendPrecondition
+		}
+		if _, err := c.Agent.UpdateOneID(row.ID).
+			SetUpdated(row.Updated).
+			SetRunIntent(string(store.RunIntentRunning)).
+			SetMessage(message).
+			ClearIdleSuspendClaimUntil().
+			Save(ctx); err != nil {
+			return false, mapError(err)
+		}
+		return true, nil
+	})
+}

@@ -229,4 +229,58 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, recoverUpdate(a.ID, until)))
 	})
+
+	t.Run("abandon reverts a running row only past the ceiling and under the guards", func(t *testing.T) {
+		ceiling := time.Hour
+		past := func(t *testing.T, id string, ago time.Duration) time.Time {
+			t.Helper()
+			until := time.Now().UTC().Add(-ago).Truncate(time.Microsecond)
+			_, err := s.client.Agent.UpdateOneID(uuid.MustParse(id)).SetIdleSuspendClaimUntil(until).Save(ctx)
+			require.NoError(t, err)
+			return until
+		}
+		a, _ := claimed(t, "ab-ok", true)
+		until := past(t, a.ID, 2*time.Hour)
+		rows, err := s.ListAbandonedIdleSuspendClaims(ctx, ceiling, 0)
+		require.NoError(t, err)
+		found := false
+		for _, r := range rows {
+			found = found || r.ID == a.ID
+		}
+		assert.True(t, found)
+		require.NoError(t, s.AbandonIdleSuspend(ctx, a.ID, until, runIDs[a.ID], ceiling, "abandoned"))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+		assert.Nil(t, got.IdleSuspendClaimUntil)
+		assert.Equal(t, "abandoned", got.Message)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+
+		young, _ := claimed(t, "ab-young", true)
+		yu := past(t, young.ID, time.Minute)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, young.ID, yu, runIDs[young.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition)
+
+		stamp, _ := claimed(t, "ab-stamp", true)
+		su := past(t, stamp.ID, 2*time.Hour)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stamp.ID, su.Add(time.Hour), runIDs[stamp.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stamp.ID, su, "other-run", ceiling, "x"), store.ErrIdleSuspendPrecondition)
+
+		stopped, _ := claimed(t, "ab-stopped", true)
+		stu := past(t, stopped.ID, 2*time.Hour)
+		setPhase(t, stopped.ID, string(state.PhaseStopped))
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stopped.ID, stu, runIDs[stopped.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition)
+
+		held, _ := claimed(t, "ab-claim", true)
+		hu := past(t, held.ID, 2*time.Hour)
+		row, err := s.GetAgent(ctx, held.ID)
+		require.NoError(t, err)
+		_, err = s.ClaimAgentStop(ctx, held.ID, "backstop", *row.RunIntentAt, time.Minute)
+		require.NoError(t, err)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, held.ID, hu, runIDs[held.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition)
+
+		userStopped, _ := claimed(t, "ab-userstop", true)
+		uu := past(t, userStopped.ID, 2*time.Hour)
+		require.NoError(t, s.UpdateAgentStatus(ctx, userStopped.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, userStopped.ID, uu, runIDs[userStopped.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition, "a hub write cleared the stamp")
+	})
 }
