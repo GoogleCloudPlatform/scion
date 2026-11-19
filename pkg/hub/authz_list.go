@@ -399,6 +399,7 @@ func (a *AuthzService) loadRoleDefinitions(ctx context.Context, roleDefIDs []str
 	for _, rd := range defs {
 		rp := NewRolePermissions(rd.ID, rd.Name, rd.ScopeType, rd.Permissions)
 		rp.ConfersMembership = rd.ConfersProjectMembership()
+		rp.System = rd.System
 		result[rd.ID] = rp
 	}
 	return result, nil

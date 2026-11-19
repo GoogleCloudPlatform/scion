@@ -1089,6 +1089,24 @@ func (a *AuthzService) activeSystemScopeCandidates(ctx context.Context, principa
 // uncached body, split out so the cache wrapper above never duplicates
 // this logic.
 func (a *AuthzService) loadActiveSystemScopeCandidates(ctx context.Context, principal PrincipalContext) ([]CandidateBinding, map[string]*RolePermissions, []store.PrincipalRef, error) {
+	refs, systemBindings, roleDefs, err := a.loadScopedActiveBindings(ctx, principal, time.Now(), func(b *store.RoleBinding) bool {
+		return b.ScopeType == ScopeTypeSystem
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return toCandidateBindings(systemBindings), roleDefs, refs, nil
+}
+
+// loadScopedActiveBindings resolves principal's group-expanded closure, loads
+// clamped role bindings in one batch, filters to active bindings matching
+// includeScope at evalTime, and batch-loads their role definitions.
+func (a *AuthzService) loadScopedActiveBindings(
+	ctx context.Context,
+	principal PrincipalContext,
+	evalTime time.Time,
+	includeScope func(*store.RoleBinding) bool,
+) ([]store.PrincipalRef, []*store.RoleBinding, map[string]*RolePermissions, error) {
 	refs, _, _, err := a.principalClosure(ctx, principal)
 	if err != nil {
 		return nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
@@ -1097,23 +1115,21 @@ func (a *AuthzService) loadActiveSystemScopeCandidates(ctx context.Context, prin
 	if err != nil {
 		return nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
 	}
-	now := time.Now()
-	var systemBindings []*store.RoleBinding
+	var active []*store.RoleBinding
 	for _, b := range bindings {
-		if b.ScopeType != ScopeTypeSystem {
+		if b == nil || !includeScope(b) {
 			continue
 		}
-		if !bindingActivationOK(b, now) {
+		if !bindingActivationOK(b, evalTime) {
 			continue
 		}
-		systemBindings = append(systemBindings, b)
+		active = append(active, b)
 	}
-	roleDefs, err := a.loadRoleDefinitions(ctx, collectRoleDefinitionIDs(systemBindings))
+	roleDefs, err := a.loadRoleDefinitions(ctx, collectRoleDefinitionIDs(active))
 	if err != nil {
 		return nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: role resolution failed: %v", ErrProjectAccessDenied, err))
 	}
-	candidates := toCandidateBindings(systemBindings)
-	return candidates, roleDefs, refs, nil
+	return refs, active, roleDefs, nil
 }
 
 func candidateSetHasPermission(candidates []CandidateBinding, roleDefs map[string]*RolePermissions, permissionID string) bool {

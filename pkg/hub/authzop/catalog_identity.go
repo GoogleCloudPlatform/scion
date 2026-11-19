@@ -1034,6 +1034,28 @@ var identityOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
+		ID:          "role.binding.effectivepermissions",
+		Domain:      "role.binding",
+		Description: "Resolve a user principal's effective permissions and grant provenance. A token needs role_binding:read on a hub boundary; HEAD answers whether the caller may read it",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/effective-permissions", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/effective-permissions", Method: "HEAD"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "role_binding.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestAdminEffectivePermissions_CallerGates"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
 		ID:          "access.constraint.read",
 		Domain:      "access.constraint",
 		Description: "Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes also need access_constraint:admin",

@@ -1240,6 +1240,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteAuthenticated,
 		Permission:     "hub.audit.read", Resource: "hub", Action: "read",
 	},
+	"/api/v1/admin/effective-permissions": {
+		Pattern: "/api/v1/admin/effective-permissions", RouteID: "admin.effectivePermissions",
+		Classification: RouteHubAdmin,
+		Permission:     "role_binding.read", Resource: "role_binding", Action: "read",
+		BearerTarget: "hub_instance",
+	},
 
 	// -------------------------------------------------------------------------
 	// Authenticated: the caller's own pending secrets

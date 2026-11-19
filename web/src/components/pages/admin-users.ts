@@ -34,6 +34,7 @@ import {
 import '../shared/status-badge.js';
 import '../shared/effective-role-provenance.js';
 import '../shared/effective-access-boundary-notice.js';
+import '../shared/effective-permissions-view.js';
 import '../shared/security-review-dialog.js';
 import { invitedStatusTagStyles } from '../shared/styles.js';
 import { formatRelative } from '../../utils/time.js';
@@ -427,6 +428,10 @@ export class ScionPageAdminUsers extends LitElement {
   /** User for which we are showing the effective roles dialog. */
   @state()
   private viewRolesUser: AdminUser | null = null;
+
+  /** Active tab inside the Roles dialog. */
+  @state()
+  private viewRolesActiveTab: 'roles' | 'permissions' = 'roles';
 
   // Security review dialog state
   @state()
@@ -1020,6 +1025,14 @@ export class ScionPageAdminUsers extends LitElement {
       .invites-header span {
         font-size: 0.875rem;
         color: var(--scion-text-muted, #64748b);
+      }
+
+      .roles-dialog sl-tab-group {
+        --indicator-color: var(--scion-primary, #3b82f6);
+      }
+
+      .roles-dialog sl-tab-group::part(body) {
+        padding-top: 1rem;
       }
 
       @media (max-width: 768px) {
@@ -2462,6 +2475,7 @@ export class ScionPageAdminUsers extends LitElement {
         <sl-menu>
           <sl-menu-item
             @click=${() => {
+              this.viewRolesActiveTab = 'roles';
               this.viewRolesUser = user;
             }}
           >
@@ -3040,27 +3054,71 @@ export class ScionPageAdminUsers extends LitElement {
     const user = this.viewRolesUser;
     return html`
       <sl-dialog
-        label="Effective Roles — ${user.displayName || user.email}"
+        class="roles-dialog"
+        label="Roles — ${user.displayName || user.email}"
         open
-        style="--width: 36rem;"
-        @sl-request-close=${() => {
+        style="--width: 48rem;"
+        @sl-request-close=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.viewRolesUser = null;
+          this.viewRolesActiveTab = 'roles';
         }}
       >
-        <scion-effective-role-provenance
-          principalType="user"
-          principalId=${user.id}
-          sectionTitle="Effective Roles"
-        ></scion-effective-role-provenance>
-        <scion-effective-access-boundary-notice
-          contextType="user"
-          contextId=${user.id}
-        ></scion-effective-access-boundary-notice>
+        <sl-tab-group
+          @sl-tab-show=${(e: CustomEvent<{ name: string }>) => {
+            const name = e.detail?.name;
+            if (name === 'roles' || name === 'permissions') {
+              this.viewRolesActiveTab = name;
+            }
+          }}
+        >
+          <sl-tab
+            slot="nav"
+            panel="roles"
+            ?active=${this.viewRolesActiveTab === 'roles'}
+            @click=${() => {
+              this.viewRolesActiveTab = 'roles';
+            }}
+          >
+            Effective roles
+          </sl-tab>
+          <sl-tab
+            slot="nav"
+            panel="permissions"
+            ?active=${this.viewRolesActiveTab === 'permissions'}
+            @click=${() => {
+              this.viewRolesActiveTab = 'permissions';
+            }}
+          >
+            Effective permissions
+          </sl-tab>
+
+          <sl-tab-panel name="roles" ?active=${this.viewRolesActiveTab === 'roles'}>
+            <scion-effective-role-provenance
+              principalType="user"
+              principalId=${user.id}
+              sectionTitle="Effective Roles"
+            ></scion-effective-role-provenance>
+            <scion-effective-access-boundary-notice
+              contextType="user"
+              contextId=${user.id}
+            ></scion-effective-access-boundary-notice>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="permissions" ?active=${this.viewRolesActiveTab === 'permissions'}>
+            <scion-effective-permissions-view
+              principalType="user"
+              principalId=${user.id}
+              ?active=${this.viewRolesActiveTab === 'permissions'}
+            ></scion-effective-permissions-view>
+          </sl-tab-panel>
+        </sl-tab-group>
         <sl-button
           slot="footer"
           variant="default"
           @click=${() => {
             this.viewRolesUser = null;
+            this.viewRolesActiveTab = 'roles';
           }}
           >Close</sl-button
         >

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 423
+**Operations:** 424
 
 ## Table of Contents
 
@@ -257,6 +257,7 @@
 - [user.self.update](#userselfupdate) — Update the caller's own profile (display name and preferences) through PATCH /api/v1/users/{id} naming the caller's own record. A status field on the caller's own record is refused by the self-status guard
 - [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes also need their own selector
 - [role.binding.read](#rolebindingread) — Read role binding assignments
+- [role.binding.effectivepermissions](#rolebindingeffectivepermissions) — Resolve a user principal's effective permissions and grant provenance. A token needs role_binding:read on a hub boundary; HEAD answers whether the caller may read it
 - [access.constraint.read](#accessconstraintread) — Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes also need access_constraint:admin
 - [hub.audit.constraint](#hubauditconstraint) — Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
@@ -9875,6 +9876,40 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestRoleReadToken_DoesNotAdmitRoleWrites`
+
+---
+
+## role.binding.effectivepermissions
+
+**Domain:** role.binding
+
+**Description:** Resolve a user principal's effective permissions and grant provenance. A token needs role_binding:read on a hub boundary; HEAD answers whether the caller may read it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/effective-permissions` |
+| http_route | HEAD | `/api/v1/admin/effective-permissions` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `role_binding.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAdminEffectivePermissions_CallerGates`
 
 ---
 

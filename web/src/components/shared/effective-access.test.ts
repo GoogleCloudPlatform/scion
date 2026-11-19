@@ -133,6 +133,10 @@ describe('No priority/override/winner terminology in remaining components', () =
       name: 'effective-access-boundary-notice.ts',
       path: './effective-access-boundary-notice.ts',
     },
+    {
+      name: 'effective-permissions-view.ts',
+      path: './effective-permissions-view.ts',
+    },
   ];
 
   const prohibitedTerms = [

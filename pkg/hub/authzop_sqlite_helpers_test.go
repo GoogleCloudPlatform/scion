@@ -1439,6 +1439,8 @@ func queryOverrides(f idFixtures) map[string]string {
 		"/api/v1/conversations/resolve": "reference=conv:" + f.inbox.groupConversation,
 		// handleAdminEffectiveAccess 400s without a principal.
 		"/api/v1/admin/effective-access": "principalType=user&principalId=" + f.user,
+		// handleAdminEffectivePermissions 400s without a principal.
+		"/api/v1/admin/effective-permissions": "principalType=user&principalId=" + f.user,
 		// handleListThreadGroups 400s without a project for a user.
 		"/api/v1/thread-groups": "projectId=" + f.project,
 		// Skill file reads and writes name the version.
