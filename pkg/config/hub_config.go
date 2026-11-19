@@ -2841,7 +2841,7 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool, error) {
 	var doc yamlv3.Node
 	if err := unmarshalSettingsYAML(data, &doc); err != nil {
 		if hasTopLevelServerKey(data) {
-			return nil, true, fmt.Errorf("parsing %s: %w", settingsPath, err)
+			return nil, true, formatSettingsYAMLParseError(settingsPath, err)
 		}
 		return nil, false, nil
 	}
@@ -2852,29 +2852,30 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool, error) {
 		}
 		root = root.Content[0]
 	}
-	if root.Kind != yamlv3.MappingNode || !mappingHasServerOrMergeKey(root) {
+	root = unwrapYAMLAlias(root)
+	if root == nil || root.Kind != yamlv3.MappingNode || !mappingHasServerOrMergeKey(root) {
 		return nil, false, nil
 	}
 
-	var raw map[string]interface{}
-	if err := unmarshalSettingsYAML(data, &raw); err != nil {
-		return nil, true, fmt.Errorf("parsing %s: %w", settingsPath, err)
+	var env struct {
+		Server yamlv3.Node `yaml:"server"`
 	}
-
-	serverRaw, ok := raw["server"]
-	if !ok || serverRaw == nil {
+	if err := decodeSettingsYAMLNode(root, &env); err != nil {
+		return nil, true, formatSettingsYAMLNodeDecodeError(settingsPath, root)
+	}
+	serverNode := unwrapYAMLAlias(&env.Server)
+	if serverNode == nil || serverNode.Kind == 0 || (serverNode.Kind == yamlv3.ScalarNode && serverNode.ShortTag() == "!!null") {
 		return nil, false, nil
-	}
-
-	// Re-marshal just the server section, then unmarshal into V1ServerConfig
-	serverData, err := yamlv3.Marshal(serverRaw)
-	if err != nil {
-		return nil, true, fmt.Errorf("invalid server configuration in %s: %w", settingsPath, err)
 	}
 
 	var v1Server V1ServerConfig
-	if err := unmarshalSettingsYAML(serverData, &v1Server); err != nil {
-		return nil, true, formatServerDecodeError(settingsPath, serverData)
+	if err := decodeSettingsYAMLNode(serverNode, &v1Server); err != nil {
+		return nil, true, formatServerDecodeError(settingsPath, serverNode)
+	}
+
+	var raw map[string]interface{}
+	if err := decodeSettingsYAMLNode(root, &raw); err != nil {
+		return nil, true, formatSettingsYAMLNodeDecodeError(settingsPath, root)
 	}
 
 	// ConvertV1ServerToGlobalConfig sets TrustedProxiesSet when the file
@@ -2926,20 +2927,148 @@ func hasTopLevelServerKey(data []byte) bool {
 	return false
 }
 
-// formatServerDecodeError locates the mistyped field(s) in serverData by
+// unwrapYAMLAlias dereferences AliasNode hops with a fixed bound so malformed
+// cyclic aliases cannot spin indefinitely.
+func unwrapYAMLAlias(node *yamlv3.Node) *yamlv3.Node {
+	for hops := 0; node != nil && node.Kind == yamlv3.AliasNode && hops < 64; hops++ {
+		node = node.Alias
+	}
+	if node != nil && node.Kind == yamlv3.AliasNode {
+		return nil
+	}
+	return node
+}
+
+// formatSettingsYAMLParseError formats a YAML syntax/parser error from
+// unmarshalSettingsYAML(data, &doc) without echoing any scalar or anchor name
+// from settings.yaml. Scanner/parser messages carry only line numbers and
+// static grammar descriptions; unknown-anchor errors quote the alias token
+// (for example an unquoted leading-* secret) and are replaced with a static
+// message.
+func formatSettingsYAMLParseError(settingsPath string, err error) error {
+	msg := err.Error()
+	if strings.HasPrefix(msg, "yaml: unknown anchor ") {
+		return fmt.Errorf("parsing %s: yaml: unknown anchor referenced", settingsPath)
+	}
+	if !isValueFreeYAMLParserMessage(msg) {
+		return fmt.Errorf("parsing %s: invalid YAML syntax", settingsPath)
+	}
+	return fmt.Errorf("parsing %s: %s", settingsPath, msg)
+}
+
+// isValueFreeYAMLParserMessage reports whether msg is a static libyaml
+// scanner/parser diagnostic (which never contains backticks, double quotes, or
+// multi-character single-quoted spans).
+func isValueFreeYAMLParserMessage(msg string) bool {
+	if !strings.HasPrefix(msg, "yaml: ") {
+		return false
+	}
+	if strings.ContainsAny(msg, "`\"") {
+		return false
+	}
+	for rest := msg; ; {
+		start := strings.IndexByte(rest, '\'')
+		if start < 0 {
+			return true
+		}
+		rest = rest[start+1:]
+		end := strings.IndexByte(rest, '\'')
+		if end < 0 || end > 1 {
+			return false
+		}
+		rest = rest[end+1:]
+	}
+}
+
+// formatSettingsYAMLNodeDecodeError formats a non-server YAML node decode
+// failure without consulting yaml.v3's raw decoder error string (which quotes
+// scalar values and map keys verbatim) or interpolating any node.Value.
+func formatSettingsYAMLNodeDecodeError(settingsPath string, root *yamlv3.Node) error {
+	visited := make(map[*yamlv3.Node]bool)
+	if detail := findSettingsYAMLNodeDecodeError(root, visited); detail != "" {
+		return fmt.Errorf("parsing %s: %s", settingsPath, detail)
+	}
+	return fmt.Errorf("parsing %s: invalid YAML value or structure", settingsPath)
+}
+
+func findSettingsYAMLNodeDecodeError(node *yamlv3.Node, visited map[*yamlv3.Node]bool) string {
+	node = unwrapYAMLAlias(node)
+	if node == nil || visited[node] {
+		return ""
+	}
+	visited[node] = true
+
+	switch node.Kind {
+	case yamlv3.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			rawKey, rawVal := node.Content[i], node.Content[i+1]
+			kNode := unwrapYAMLAlias(rawKey)
+			vNode := unwrapYAMLAlias(rawVal)
+			if kNode == nil {
+				return fmt.Sprintf("line %d: cyclic YAML alias", rawKey.Line)
+			}
+			if kNode.Kind == yamlv3.SequenceNode || kNode.Kind == yamlv3.MappingNode {
+				return fmt.Sprintf("line %d: invalid non-scalar mapping key (%s)", kNode.Line, yamlNodeKindName(kNode))
+			}
+			if kNode.Kind == yamlv3.ScalarNode && kNode.Value == "<<" && (kNode.Tag == "" || kNode.Tag == "!" || kNode.ShortTag() == "!!merge") {
+				if !isValidYAMLMergeTarget(vNode) {
+					return fmt.Sprintf("line %d: map merge requires mapping or sequence of mappings", rawVal.Line)
+				}
+			}
+			for j := i + 2; j+1 < len(node.Content); j += 2 {
+				nj := node.Content[j]
+				if rawKey.Kind == nj.Kind && rawKey.Value == nj.Value {
+					return fmt.Sprintf("line %d: duplicate mapping key (already defined at line %d)", nj.Line, rawKey.Line)
+				}
+			}
+			if detail := findSettingsYAMLNodeDecodeError(rawKey, visited); detail != "" {
+				return detail
+			}
+			if detail := findSettingsYAMLNodeDecodeError(rawVal, visited); detail != "" {
+				return detail
+			}
+		}
+	case yamlv3.SequenceNode:
+		for _, elem := range node.Content {
+			if detail := findSettingsYAMLNodeDecodeError(elem, visited); detail != "" {
+				return detail
+			}
+		}
+	case yamlv3.ScalarNode:
+		var v interface{}
+		if decodeSettingsYAMLNode(node, &v) != nil {
+			return fmt.Sprintf("line %d: cannot decode scalar value as %s", node.Line, yamlNodeKindName(node))
+		}
+	}
+	return ""
+}
+
+func isValidYAMLMergeTarget(node *yamlv3.Node) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == yamlv3.MappingNode {
+		return true
+	}
+	if node.Kind == yamlv3.SequenceNode {
+		for _, elem := range node.Content {
+			e := unwrapYAMLAlias(elem)
+			if e == nil || e.Kind != yamlv3.MappingNode {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// formatServerDecodeError locates the mistyped field(s) in serverNode by
 // walking the YAML node against V1ServerConfig and formats an error naming
 // each field path without quoting raw scalar values (which may contain
 // secrets).
-func formatServerDecodeError(settingsPath string, serverData []byte) error {
-	var doc yamlv3.Node
-	if err := unmarshalSettingsYAML(serverData, &doc); err == nil {
-		node := &doc
-		if node.Kind == yamlv3.DocumentNode && len(node.Content) > 0 {
-			node = node.Content[0]
-		}
-		if details := findServerDecodeErrors(node, reflect.TypeOf(V1ServerConfig{}), "server"); len(details) > 0 {
-			return fmt.Errorf("invalid server configuration in %s: %s", settingsPath, strings.Join(details, "; "))
-		}
+func formatServerDecodeError(settingsPath string, serverNode *yamlv3.Node) error {
+	if details := findServerDecodeErrors(serverNode, reflect.TypeOf(V1ServerConfig{}), "server"); len(details) > 0 {
+		return fmt.Errorf("invalid server configuration in %s: %s", settingsPath, strings.Join(details, "; "))
 	}
 	return fmt.Errorf("invalid server configuration in %s: server: values do not decode into the server configuration structure", settingsPath)
 }
@@ -2948,9 +3077,7 @@ func formatServerDecodeError(settingsPath string, serverData []byte) error {
 // path (starting at "server") and returns one "path: cannot decode X into Y"
 // message per leaf that fails yaml.v3 decoding.
 func findServerDecodeErrors(node *yamlv3.Node, typ reflect.Type, path string) []string {
-	for node != nil && node.Kind == yamlv3.AliasNode {
-		node = node.Alias
-	}
+	node = unwrapYAMLAlias(node)
 	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
@@ -2963,7 +3090,11 @@ func findServerDecodeErrors(node *yamlv3.Node, typ reflect.Type, path string) []
 		fields := yamlStructFieldTypes(typ)
 		var out []string
 		for i := 0; i+1 < len(node.Content); i += 2 {
-			kNode, vNode := node.Content[i], node.Content[i+1]
+			kNode := unwrapYAMLAlias(node.Content[i])
+			vNode := node.Content[i+1]
+			if kNode == nil {
+				continue
+			}
 			if fieldType, ok := fields[kNode.Value]; ok {
 				out = append(out, findServerDecodeErrors(vNode, fieldType, path+"."+kNode.Value)...)
 			}
@@ -2982,8 +3113,9 @@ func findServerDecodeErrors(node *yamlv3.Node, typ reflect.Type, path string) []
 	case typ.Kind() == reflect.Map && node.Kind == yamlv3.MappingNode:
 		var out []string
 		for i := 0; i+1 < len(node.Content); i += 2 {
-			kNode, vNode := node.Content[i], node.Content[i+1]
-			if decodeSettingsYAMLNode(kNode, reflect.New(typ.Key()).Interface()) != nil {
+			kNode := unwrapYAMLAlias(node.Content[i])
+			vNode := node.Content[i+1]
+			if kNode == nil || decodeSettingsYAMLNode(kNode, reflect.New(typ.Key()).Interface()) != nil {
 				out = append(out, fmt.Sprintf("%s: cannot decode map key %s into %s", path, yamlNodeKindName(kNode), expectedYAMLTypeName(typ.Key())))
 				continue
 			}
@@ -3034,9 +3166,7 @@ func yamlStructFieldTypes(typ reflect.Type) map[string]reflect.Type {
 }
 
 func yamlNodeKindName(node *yamlv3.Node) string {
-	for node != nil && node.Kind == yamlv3.AliasNode {
-		node = node.Alias
-	}
+	node = unwrapYAMLAlias(node)
 	if node == nil {
 		return "null"
 	}

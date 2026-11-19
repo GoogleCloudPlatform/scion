@@ -112,6 +112,54 @@ server:
 			wantField:      "server.broker.instances[0].runtime_target",
 			forbidInErrMsg: `"docker"`,
 		},
+		{
+			name: "mismatched explicit YAML tag on secret scalar in server",
+			settingsYAML: `schema_version: "1"
+server:
+  mode: hosted
+  database:
+    driver: postgres
+    url: !!int "postgres://scion:super-secret-db-password@db.example.internal/scion"
+`,
+			wantField:      "server.database.url",
+			forbidInErrMsg: "super-secret-db-password",
+		},
+		{
+			name: "sequence map key inside mistyped server scalar field",
+			settingsYAML: `schema_version: "1"
+server:
+  auth:
+    dev_token:
+      ["super-secret-dev-token"]: true
+`,
+			wantField:      "server.auth.dev_token",
+			forbidInErrMsg: "super-secret-dev-token",
+		},
+		{
+			name: "mistyped map entry value inside server map field",
+			settingsYAML: `schema_version: "1"
+server:
+  notification_channels:
+    - type: webhook
+      params:
+        webhook_url:
+          - "https://hooks.example.internal/super-secret-hook"
+`,
+			wantField:      "server.notification_channels[0].params.webhook_url",
+			forbidInErrMsg: "super-secret-hook",
+		},
+		{
+			name: "non-scalar map key inside server map field",
+			settingsYAML: `schema_version: "1"
+server:
+  notification_channels:
+    - type: webhook
+      params:
+        ["super-secret-webhook-key"]: "https://hooks.example.internal/super-secret-webhook-val"
+`,
+			wantField:      "server.notification_channels[0].params",
+			forbidInErrMsg: "super-secret-webhook",
+		},
 	}
 
 	for _, tc := range tests {
@@ -199,6 +247,93 @@ func TestLoadGlobalConfig_MalformedSettingsYAMLFailsWithoutFallback(t *testing.T
 	require.Error(t, err)
 	assert.Nil(t, gc)
 	assert.Contains(t, err.Error(), settingsPath)
+}
+
+// TestLoadGlobalConfig_ServerBearingYAMLDecodeErrorsNeverEchoValues verifies
+// that YAML tag/key/anchor errors outside V1ServerConfig (such as bad explicit
+// tags, non-scalar map keys, duplicate keys, or unknown anchors in non-server
+// sections of a server-bearing settings.yaml) fail closed without echoing raw
+// scalar values (ptone/scion#6187).
+func TestLoadGlobalConfig_ServerBearingYAMLDecodeErrorsNeverEchoValues(t *testing.T) {
+	tests := []struct {
+		name           string
+		settingsYAML   string
+		forbidInErrMsg string
+	}{
+		{
+			name: "mismatched explicit YAML tag in non-server section",
+			settingsYAML: `schema_version: "1"
+server:
+  mode: hosted
+profiles:
+  local:
+    env:
+      API_KEY: !!int "sk-ant-super-secret-key"
+`,
+			forbidInErrMsg: "sk-ant-super-secret-key",
+		},
+		{
+			name: "non-scalar map key in non-server section",
+			settingsYAML: `schema_version: "1"
+server:
+  mode: hosted
+profiles:
+  local:
+    env:
+      ["sk-ant-super-secret-map-key"]: "present"
+`,
+			forbidInErrMsg: "sk-ant-super-secret-map-key",
+		},
+		{
+			name: "duplicate mapping key in non-server section",
+			settingsYAML: `schema_version: "1"
+server:
+  mode: hosted
+profiles:
+  local:
+    env:
+      "sk-ant-super-secret-dup": "one"
+      "sk-ant-super-secret-dup": "two"
+`,
+			forbidInErrMsg: "sk-ant-super-secret-dup",
+		},
+		{
+			name: "unknown alias from unquoted star scalar in server section",
+			settingsYAML: `schema_version: "1"
+server:
+  auth:
+    dev_token: *super-secret-star-token
+`,
+			forbidInErrMsg: "super-secret-star-token",
+		},
+		{
+			name: "mismatched explicit YAML tag on top-level mapping key",
+			settingsYAML: `schema_version: "1"
+server:
+  mode: hosted
+!!int "sk-ant-super-secret-top-key": true
+`,
+			forbidInErrMsg: "sk-ant-super-secret-top-key",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			globalDir := filepath.Join(home, ".scion")
+			require.NoError(t, os.MkdirAll(globalDir, 0o755))
+			settingsPath := filepath.Join(globalDir, "settings.yaml")
+			require.NoError(t, os.WriteFile(settingsPath, []byte(tc.settingsYAML), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(globalDir, "server.yaml"), []byte("hub:\n  port: 7777\n"), 0o644))
+
+			gc, err := LoadGlobalConfig(globalDir)
+			require.Error(t, err, "LoadGlobalConfig must fail closed")
+			assert.Nil(t, gc)
+			assert.Contains(t, err.Error(), settingsPath)
+			assert.NotContains(t, err.Error(), tc.forbidInErrMsg, "error must never echo raw scalar values")
+		})
+	}
 }
 
 // TestLoadGlobalConfig_NullServerKeyStillFallsBackToServerYAML preserves the

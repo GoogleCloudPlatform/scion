@@ -56,4 +56,27 @@ server:
 	if !strings.Contains(err.Error(), "server.hub.admin_emails") {
 		t.Fatalf("loadAndReconcileConfig err = %v, want error naming server.hub.admin_emails", err)
 	}
+	if strings.Contains(err.Error(), "admin@example.com") {
+		t.Fatalf("loadAndReconcileConfig err = %v, must not echo raw scalar value", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(`schema_version: "1"
+server:
+  mode: hosted
+  database:
+    driver: postgres
+    url: !!int "postgres://scion:super-secret-db-password@db.example.internal/scion"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = loadAndReconcileConfig(serverStartCmd)
+	if err == nil {
+		t.Fatal("loadAndReconcileConfig succeeded; expected failure on tagged server.database.url")
+	}
+	if !strings.Contains(err.Error(), "server.database.url") {
+		t.Fatalf("loadAndReconcileConfig err = %v, want error naming server.database.url", err)
+	}
+	if strings.Contains(err.Error(), "super-secret-db-password") {
+		t.Fatalf("loadAndReconcileConfig err = %v, must not echo raw secret value", err)
+	}
 }
