@@ -42,9 +42,11 @@ const (
 	// MaxDecisionsPerMessage is the most decisions one decision prompt carries.
 	MaxDecisionsPerMessage = 10
 	// MinChoicesPerDecision and MaxChoicesPerDecision bound a decision's
-	// choices.
-	MinChoicesPerDecision = 2
-	MaxChoicesPerDecision = 10
+	// fixed choices when allow_other is off; MinChoicesPerDecisionWithOther
+	// applies when allow_other is on (design-8146 §4.1, D3).
+	MinChoicesPerDecision          = 2
+	MinChoicesPerDecisionWithOther = 1
+	MaxChoicesPerDecision          = 10
 	// MaxDecisionQuestionLen is the most characters (runes) in a question.
 	MaxDecisionQuestionLen = 2000
 	// MaxChoiceLabelLen is the most characters (runes) in a choice label.
@@ -52,6 +54,12 @@ const (
 	// MaxChoiceDescriptionLen is the most characters (runes) in a choice
 	// description.
 	MaxChoiceDescriptionLen = 300
+	// MaxOtherPlaceholderLen is the most characters (runes) in an Other
+	// placeholder (design-8146 §4.1).
+	MaxOtherPlaceholderLen = 100
+	// MaxOtherTextLen is the most characters (runes) in a free-form Other
+	// answer after trimming surrounding spaces (design-8146 §4.3, D2).
+	MaxOtherTextLen = 200
 	// MaxDecisionKeyLen is the most characters in a decision key or a
 	// choice id.
 	MaxDecisionKeyLen = 32
@@ -62,13 +70,22 @@ const (
 	// ChoiceIDDismissed and ChoiceLabelDismissed are the hub-only sentinel
 	// choice values recorded on decision_answers rows written by the dismiss
 	// path (ptone/scion#8194). "$"-prefixed choice IDs are reserved and never
-	// accepted from clients as a choiceId.
+	// accepted from clients as a prompt choiceId.
 	ChoiceIDDismissed    = "$dismissed"
 	ChoiceLabelDismissed = "Dismissed"
+
+	// ChoiceIDOther is the hub-reserved sentinel choice id for a free-form
+	// Other answer (design-8146 §4.3).
+	ChoiceIDOther = "$other"
+	// DefaultOtherLabel is the default label for an Other option when none is
+	// specified (design-8146 §4.1).
+	DefaultOtherLabel = "Other"
 )
 
-// IsReservedChoiceID reports whether id is a hub-reserved sentinel choice ID
-// (such as "$dismissed" or "$other") that clients may never supply as a choiceId.
+// IsReservedChoiceID reports whether id is a hub-reserved "$"-prefixed sentinel
+// choice ID (such as "$dismissed" or "$other"). Prompt choice definitions and
+// defaults never accept a reserved ID; answer routes accept ChoiceIDOther only
+// via an explicit allow on decisions with Other enabled.
 func IsReservedChoiceID(id string) bool {
 	trimmed := strings.TrimSpace(id)
 	return strings.HasPrefix(trimmed, "$")
@@ -87,6 +104,8 @@ const (
 	DecisionErrReservedField = "reserved_field"
 	DecisionErrNoMatch       = "no_match"
 	DecisionErrTooLarge      = "too_large"
+	DecisionErrNotSupported  = "not_supported"
+	DecisionErrNotAllowed    = "not_allowed"
 )
 
 // identRe is the shape of an agent-supplied decision key and of a choice id.
@@ -168,6 +187,100 @@ func (c ChoiceInput) MarshalJSON() ([]byte, error) {
 	}{c.ID, c.Label, c.Description})
 }
 
+// OtherInput is the allow_other field of a DecisionInput: boolean, custom
+// label string, or object {label?, description?, placeholder?}
+// (design-8146 §4.1). Bad JSON types and unknown object keys are kept so
+// NormalizeDecisions reports them with their field path.
+type OtherInput struct {
+	Enabled     bool
+	Label       string
+	Description string
+	Placeholder string
+
+	labelSet      bool
+	invalidRoot   bool
+	invalidFields []string
+	extraFields   []string
+}
+
+// UnmarshalJSON decodes boolean, string, or object forms of allow_other,
+// recording type mismatches and unknown keys for NormalizeDecisions.
+func (o *OtherInput) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		*o = OtherInput{invalidRoot: true}
+		return nil
+	}
+	switch {
+	case bytes.Equal(data, []byte("true")):
+		*o = OtherInput{Enabled: true}
+		return nil
+	case bytes.Equal(data, []byte("false")):
+		*o = OtherInput{Enabled: false}
+		return nil
+	case data[0] == '"':
+		var label string
+		if err := json.Unmarshal(data, &label); err != nil {
+			return err
+		}
+		*o = OtherInput{Enabled: true, Label: label, labelSet: true}
+		return nil
+	case data[0] == '{':
+		fields, order, err := decodeObject(data)
+		if err != nil {
+			return err
+		}
+		out := OtherInput{Enabled: true}
+		for _, name := range order {
+			raw := bytes.TrimSpace(fields[name])
+			var dst *string
+			switch name {
+			case "label":
+				dst = &out.Label
+				out.labelSet = true
+			case "description":
+				dst = &out.Description
+			case "placeholder":
+				dst = &out.Placeholder
+			default:
+				out.extraFields = append(out.extraFields, name)
+				continue
+			}
+			if len(raw) == 0 || raw[0] != '"' {
+				out.invalidFields = append(out.invalidFields, name)
+				continue
+			}
+			if err := json.Unmarshal(raw, dst); err != nil {
+				return err
+			}
+		}
+		*o = out
+		return nil
+	default:
+		var dummy any
+		if err := json.Unmarshal(data, &dummy); err != nil {
+			return err
+		}
+		*o = OtherInput{invalidRoot: true}
+		return nil
+	}
+}
+
+// MarshalJSON writes the boolean or object form of OtherInput.
+func (o OtherInput) MarshalJSON() ([]byte, error) {
+	if !o.Enabled {
+		return []byte("false"), nil
+	}
+	if !o.labelSet && o.Label == "" && o.Description == "" && o.Placeholder == "" {
+		return []byte("true"), nil
+	}
+	return json.Marshal(struct {
+		Label       string `json:"label,omitempty"`
+		Description string `json:"description,omitempty"`
+		Placeholder string `json:"placeholder,omitempty"`
+	}{o.Label, o.Description, o.Placeholder})
+}
+
 // DecisionInput is one decision as an agent writes it in --decisions.
 type DecisionInput struct {
 	// ID is the optional decision key. Empty means the hub assigns the
@@ -176,7 +289,8 @@ type DecisionInput struct {
 	Question string
 	Choices  []ChoiceInput
 	// Default names the recommended choice by id or label.
-	Default string
+	Default    string
+	AllowOther *OtherInput
 
 	extraFields []string
 }
@@ -217,6 +331,12 @@ func (d *DecisionInput) UnmarshalJSON(data []byte) error {
 			if err := json.Unmarshal(raw, &out.Choices); err != nil {
 				return fmt.Errorf("decision choices: %w", err)
 			}
+		case "allow_other":
+			var ao OtherInput
+			if err := json.Unmarshal(raw, &ao); err != nil {
+				return fmt.Errorf("decision allow_other: %w", err)
+			}
+			out.AllowOther = &ao
 		default:
 			out.extraFields = append(out.extraFields, name)
 		}
@@ -227,12 +347,17 @@ func (d *DecisionInput) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON writes the object form with every choice as an object.
 func (d DecisionInput) MarshalJSON() ([]byte, error) {
+	var ao *OtherInput
+	if d.AllowOther != nil && d.AllowOther.Enabled {
+		ao = d.AllowOther
+	}
 	return json.Marshal(struct {
-		ID       string        `json:"id,omitempty"`
-		Question string        `json:"question"`
-		Choices  []ChoiceInput `json:"choices"`
-		Default  string        `json:"default,omitempty"`
-	}{d.ID, d.Question, d.Choices, d.Default})
+		ID         string        `json:"id,omitempty"`
+		Question   string        `json:"question"`
+		Choices    []ChoiceInput `json:"choices"`
+		Default    string        `json:"default,omitempty"`
+		AllowOther *OtherInput   `json:"allow_other,omitempty"`
+	}{d.ID, d.Question, d.Choices, d.Default, ao})
 }
 
 // decodeObject decodes a JSON object into its raw members, keeping the key
@@ -280,13 +405,22 @@ type Choice struct {
 	Description string `json:"description,omitempty"`
 }
 
+// OtherOption configures an optional free-form Other answer on a Decision
+// (design-8146 §4.1). Label is always filled after normalization.
+type OtherOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+	Placeholder string `json:"placeholder,omitempty"`
+}
+
 // Decision is one decision in canonical stored form. Key is empty when the
 // hub is to assign a number.
 type Decision struct {
-	Key             string   `json:"key,omitempty"`
-	Question        string   `json:"question"`
-	DefaultChoiceID string   `json:"default_choice_id,omitempty"`
-	Choices         []Choice `json:"choices"`
+	Key             string       `json:"key,omitempty"`
+	Question        string       `json:"question"`
+	DefaultChoiceID string       `json:"default_choice_id,omitempty"`
+	Choices         []Choice     `json:"choices"`
+	Other           *OtherOption `json:"other,omitempty"`
 }
 
 // DecisionValidationError is one field-specific validation failure. Field is a path
@@ -391,9 +525,27 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 			add(p+".question", DecisionErrTooLong, "question is at most %d characters", MaxDecisionQuestionLen)
 		}
 
-		nd.Choices = normalizeChoices(p+".choices", d.Choices, add)
+		otherOpt, otherEnabled := normalizeAllowOther(p+".allow_other", d.AllowOther, len(in) > 1, add)
+		minChoices := MinChoicesPerDecision
+		if otherEnabled {
+			minChoices = MinChoicesPerDecisionWithOther
+		}
+		nd.Choices = normalizeChoices(p+".choices", d.Choices, minChoices, add)
+		if otherOpt != nil && otherOpt.Label != "" && nd.Choices != nil {
+			for j, c := range nd.Choices {
+				if strings.EqualFold(c.Label, otherOpt.Label) {
+					add(p+".allow_other.label", DecisionErrDuplicate, "label %q is also used by %s.choices[%d] (labels compare case-insensitively)", otherOpt.Label, p, j)
+					break
+				}
+			}
+		}
+		nd.Other = otherOpt
 		if def := strings.TrimSpace(d.Default); def != "" && nd.Choices != nil {
-			id, ok := matchDefault(nd.Choices, def)
+			var id string
+			var ok bool
+			if !strings.EqualFold(def, ChoiceIDOther) && (nd.Other == nil || nd.Other.Label == "" || !strings.EqualFold(def, nd.Other.Label)) {
+				id, ok = matchDefault(nd.Choices, def)
+			}
 			if !ok {
 				add(p+".default", DecisionErrNoMatch, "default %q matches no choice id or label", def)
 			}
@@ -415,12 +567,117 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 	return out, nil
 }
 
+// normalizeAllowOther validates a decision's allow_other input. It returns
+// the canonical OtherOption and whether Other is enabled (lowering the
+// minimum fixed choices from 2 to 1).
+func normalizeAllowOther(p string, ao *OtherInput, isMulti bool, add func(field, code, format string, args ...any)) (*OtherOption, bool) {
+	if ao == nil {
+		return nil, false
+	}
+	if ao.invalidRoot {
+		add(p, DecisionErrInvalid, "allow_other must be a boolean, a string, or an object")
+		return nil, false
+	}
+	if !ao.Enabled {
+		return nil, false
+	}
+	if isMulti {
+		add(p, DecisionErrNotSupported, "allow_other is not supported on multi-decision prompts")
+	}
+	for _, name := range ao.extraFields {
+		add(p+"."+name, DecisionErrUnknownField, "unknown field %q", name)
+	}
+	badType := map[string]bool{}
+	for _, name := range ao.invalidFields {
+		badType[name] = true
+		add(p+"."+name, DecisionErrInvalid, "allow_other %s must be a string", name)
+	}
+	out := &OtherOption{}
+	if !badType["label"] {
+		if !ao.labelSet {
+			out.Label = DefaultOtherLabel
+		} else if !validPlainText(ao.Label) {
+			add(p+".label", DecisionErrInvalid, "label must be one line of plain text without control characters")
+		} else {
+			out.Label = strings.TrimSpace(ao.Label)
+			switch {
+			case out.Label == "":
+				add(p+".label", DecisionErrInvalid, "label must be 1 to %d characters", MaxChoiceLabelLen)
+			case utf8.RuneCountInString(out.Label) > MaxChoiceLabelLen:
+				add(p+".label", DecisionErrTooLong, "label is at most %d characters", MaxChoiceLabelLen)
+			}
+		}
+	}
+	if !badType["description"] {
+		if !validPlainText(ao.Description) {
+			add(p+".description", DecisionErrInvalid, "description must be one line of text without control characters")
+		} else {
+			out.Description = strings.TrimSpace(ao.Description)
+			if utf8.RuneCountInString(out.Description) > MaxChoiceDescriptionLen {
+				add(p+".description", DecisionErrTooLong, "description is at most %d characters", MaxChoiceDescriptionLen)
+			}
+		}
+	}
+	if !badType["placeholder"] {
+		if !validPlainText(ao.Placeholder) {
+			add(p+".placeholder", DecisionErrInvalid, "placeholder must be one line of plain text without control characters")
+		} else {
+			out.Placeholder = strings.TrimSpace(ao.Placeholder)
+			if utf8.RuneCountInString(out.Placeholder) > MaxOtherPlaceholderLen {
+				add(p+".placeholder", DecisionErrTooLong, "placeholder is at most %d characters", MaxOtherPlaceholderLen)
+			}
+		}
+	}
+	return out, true
+}
+
+// NormalizeOtherText validates and normalizes the free-form text of an
+// answer (design-8146 §4.3). When choiceID is ChoiceIDOther ("$other"), raw
+// must be valid single-line plain text (no newlines, tabs, control, or
+// bidi/format runes) of 1 to MaxOtherTextLen runes after trimming surrounding
+// whitespace. When choiceID is any other id, raw must be empty.
+func NormalizeOtherText(choiceID, raw string) (string, *DecisionValidationError) {
+	if choiceID != ChoiceIDOther {
+		if raw != "" {
+			return "", &DecisionValidationError{
+				Field:   "other_text",
+				Code:    DecisionErrNotAllowed,
+				Message: fmt.Sprintf("other_text is allowed only when choice_id is %q", ChoiceIDOther),
+			}
+		}
+		return "", nil
+	}
+	if !validPlainText(raw) {
+		return "", &DecisionValidationError{
+			Field:   "other_text",
+			Code:    DecisionErrInvalid,
+			Message: "other_text must be one line of plain text without control characters",
+		}
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", &DecisionValidationError{
+			Field:   "other_text",
+			Code:    DecisionErrRequired,
+			Message: "other_text is required when choice_id is \"$other\"",
+		}
+	}
+	if utf8.RuneCountInString(trimmed) > MaxOtherTextLen {
+		return "", &DecisionValidationError{
+			Field:   "other_text",
+			Code:    DecisionErrTooLong,
+			Message: fmt.Sprintf("other_text is at most %d characters", MaxOtherTextLen),
+		}
+	}
+	return trimmed, nil
+}
+
 // normalizeChoices validates one decision's choices. It returns nil when
 // the count is out of range (the per-choice checks are then skipped).
-func normalizeChoices(p string, in []ChoiceInput, add func(field, code, format string, args ...any)) []Choice {
+func normalizeChoices(p string, in []ChoiceInput, minChoices int, add func(field, code, format string, args ...any)) []Choice {
 	switch {
-	case len(in) < MinChoicesPerDecision:
-		add(p, DecisionErrTooFew, "at least %d choices are required, got %d", MinChoicesPerDecision, len(in))
+	case len(in) < minChoices:
+		add(p, DecisionErrTooFew, "at least %d choices are required, got %d", minChoices, len(in))
 		return nil
 	case len(in) > MaxChoicesPerDecision:
 		add(p, DecisionErrTooMany, "at most %d choices are allowed, got %d", MaxChoicesPerDecision, len(in))
@@ -612,6 +869,15 @@ func RenderDecisionFallback(intro string, decisions []Decision, answerURL string
 				b.WriteString(" _(recommended)_")
 			}
 			b.WriteString("\n")
+		}
+		if d.Other != nil {
+			b.WriteString("  - ")
+			b.WriteString(EscapeMarkdownPlain(d.Other.Label))
+			if d.Other.Description != "" {
+				b.WriteString(": ")
+				b.WriteString(NeutralizeMentions(d.Other.Description))
+			}
+			b.WriteString(" — *your own answer, in words*\n")
 		}
 	}
 	b.WriteString("\n")

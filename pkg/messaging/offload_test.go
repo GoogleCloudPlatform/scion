@@ -87,10 +87,11 @@ func TestStripReservedMetadata_NoMutationSameMapWhenClean(t *testing.T) {
 
 func TestStripReservedMetadata_NewMapWhenReservedPresent(t *testing.T) {
 	md := map[string]string{
-		"foo":             "bar",
-		MetaBodyOffloaded: "true",
-		MetaBodyChars:     "123",
-		MetaBodySHA256:    "deadbeef",
+		"foo":                              "bar",
+		MetaBodyOffloaded:                  "true",
+		MetaBodyChars:                      "123",
+		MetaBodySHA256:                     "deadbeef",
+		messages.MetadataDecisionOtherText: "forged-other-text",
 	}
 	original := map[string]string{}
 	for k, v := range md {
