@@ -56,6 +56,7 @@ import {
   answerDecision,
   answerDecisionSet,
   answerabilityFromDenial,
+  isClosedUnanswered,
   newerDecisionView,
 } from '../../../client/decision-prompts.js';
 import {
@@ -579,6 +580,16 @@ export class ScionChatDecisions extends LitElement {
       gap: 0.35rem;
       align-items: center;
       flex-wrap: wrap;
+    }
+
+    .wd.card-wd {
+      margin-top: 0;
+    }
+
+    .wd-lead {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
     }
 
     .wd sl-icon {
@@ -1753,7 +1764,7 @@ export class ScionChatDecisions extends LitElement {
       case 'replaced':
         return 'was replaced';
       case 'withdrawn':
-        return 'was withdrawn';
+        return 'is no longer needed';
       case 'dismissed':
         return 'was dismissed';
       case 'decided':
@@ -2073,9 +2084,17 @@ export class ScionChatDecisions extends LitElement {
     const replaced = views.filter((d) => d.status === 'replaced').length;
     if (replaced > 0) parts.push(`${replaced} replaced`);
     const withdrawn = views.filter((d) => d.status === 'withdrawn').length;
-    if (withdrawn > 0) parts.push(`${withdrawn} withdrawn`);
+    if (withdrawn > 0) parts.push(`${withdrawn} no longer needed`);
     const dismissed = views.filter((d) => d.status === 'dismissed').length;
     if (dismissed > 0) parts.push(`${dismissed} dismissed`);
+    const otherClosed = views.filter(
+      (d) =>
+        d.status !== 'replaced' &&
+        d.status !== 'withdrawn' &&
+        d.status !== 'dismissed' &&
+        isClosedUnanswered(d)
+    ).length;
+    if (otherClosed > 0) parts.push(`${otherClosed} closed`);
     return parts;
   }
 

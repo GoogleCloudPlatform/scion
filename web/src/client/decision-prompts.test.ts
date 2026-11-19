@@ -526,6 +526,30 @@ describe('isOpenDecision, isClosedUnanswered, and isTerminalDecision', () => {
     expect(newerDecisionView(dismissedView, pendingView)).toBe(dismissedView);
     expect(newerDecisionView(dismissedView, directView)).toBe(dismissedView);
   });
+
+  it('keeps actionableReason as withdrawn even when replacedBy links to a re-asked v2 (D7)', () => {
+    const withdrawnReasked = view({
+      status: 'withdrawn',
+      withdrawn: { at: '2026-11-16T09:12:00Z', byName: 'bot' },
+      replacedBy: { rowId: 'r2', messageId: 'm2', version: 2, at: '2026-11-16T09:15:00Z' },
+    });
+    expect(actionableReason(withdrawnReasked, 'u1')).toBe('withdrawn');
+  });
+
+  it('keeps actionableReason as dismissed even when replacedBy links to a re-asked v2', () => {
+    const dismissedReasked = view({
+      status: 'dismissed',
+      dismissed: {
+        at: '2026-11-16T09:12:00Z',
+        byUserId: 'u1',
+        byName: 'alice',
+        surface: 'decisions_page',
+        responseMessageId: 'resp-dsm',
+      },
+      replacedBy: { rowId: 'r2', messageId: 'm2', version: 2, at: '2026-11-16T09:15:00Z' },
+    });
+    expect(actionableReason(dismissedReasked, 'u1')).toBe('dismissed');
+  });
 });
 
 describe('dismissRemainingMinutes and dismissDecisionPrompt', () => {

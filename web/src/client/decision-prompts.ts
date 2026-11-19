@@ -83,9 +83,10 @@ export type ActionableReason =
   | 'not_actionable';
 
 export function actionableReason(d: DecisionView, userId: string | undefined): ActionableReason {
-  if (d.status === 'replaced' || d.replacedBy) return 'replaced';
+  if (d.status === 'replaced') return 'replaced';
   if (d.status === 'withdrawn' || d.withdrawn) return 'withdrawn';
   if (d.status === 'dismissed' || d.dismissed) return 'dismissed';
+  if (d.replacedBy) return 'replaced';
   if (d.status === 'decided' && d.decision) {
     if (d.decision.provenance !== 'agent_interpreted') return 'decided';
     if (!userId || !d.decision.answeredByUserId || d.decision.answeredByUserId !== userId) {
