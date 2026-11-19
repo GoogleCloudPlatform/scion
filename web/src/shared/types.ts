@@ -1804,6 +1804,14 @@ export interface ChoiceOption {
   description?: string;
 }
 
+/** Optional free-form Other option of a decision (pkg/messages OtherOption). */
+export interface OtherOption {
+  label: string;
+  /** Inline markdown. */
+  description?: string;
+  placeholder?: string;
+}
+
 /** The version that replaced a decision. */
 export interface DecisionReplacedBy {
   rowId: string;
@@ -1833,6 +1841,7 @@ export interface DecisionDismissed {
 export interface AnswerView {
   choiceId: string;
   label: string;
+  otherText?: string;
   answeredByUserId?: string;
   answeredByName?: string;
   answeredByEmail?: string;
@@ -1868,6 +1877,7 @@ export interface DecisionView {
   question: string;
   defaultChoiceId?: string;
   choices: ChoiceOption[];
+  other?: OtherOption;
   replacedBy?: DecisionReplacedBy;
   withdrawn?: DecisionWithdrawn;
   dismissed?: DecisionDismissed;
@@ -1884,6 +1894,7 @@ export interface DecisionResponseView {
   question: string;
   choiceId: string;
   label: string;
+  otherText?: string;
   provenance: string;
   /** "answer", "confirm", "override", or "dismiss". */
   outcome?: string;
