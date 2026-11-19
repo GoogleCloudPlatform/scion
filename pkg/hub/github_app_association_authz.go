@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -933,4 +934,31 @@ func (s *Server) hasAuthorizedGitHubAssociationCached(ctx context.Context, proje
 	// creator holds a stored GITHUB_TOKEN, so accept without calling GitHub;
 	// AuthorizeEventSource re-checks full authorizeGitHubAppAssociation at fire time.
 	return true, nil
+}
+
+// clearProjectGitHubAssociationErrorStatus resets project.GitHubAppStatus back
+// to ok when a live association check succeeds on a project whose stored status
+// still carries an association_* error, matching a successful token mint so a
+// stale association_unauthorized no longer blocks cold-cache trigger authoring.
+func (s *Server) clearProjectGitHubAssociationErrorStatus(ctx context.Context, project *store.Project) {
+	if project == nil || project.GitHubAppStatus == nil {
+		return
+	}
+	if !strings.HasPrefix(project.GitHubAppStatus.ErrorCode, "association_") {
+		return
+	}
+	now := timeNow()
+	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
+		State:         store.GitHubAppStateOK,
+		LastTokenMint: project.GitHubAppStatus.LastTokenMint,
+		LastChecked:   now,
+	}
+	if err := s.store.UpdateProject(ctx, project); err != nil {
+		slog.WarnContext(ctx, "Failed to clear project GitHub App association error status",
+			"project_id", project.ID, "error", err)
+		return
+	}
+	if s.events != nil {
+		s.events.PublishProjectUpdated(ctx, project)
+	}
 }

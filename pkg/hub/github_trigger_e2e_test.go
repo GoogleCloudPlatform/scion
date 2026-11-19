@@ -712,4 +712,65 @@ func TestGitHubTriggerE2E_InconclusiveAssociationCheckRetriesUntilRecovered(t *t
 	require.NoError(t, err)
 	require.Len(t, firesAfterRecovery.Items, 1)
 	assert.Equal(t, store.TriggerFireStatusFired, firesAfterRecovery.Items[0].Status)
+
+	// Successful drainer association check resets association_check_failed -> ok.
+	recoveredProj, err := f.store.GetProject(ctx, creatorProj.ID)
+	require.NoError(t, err)
+	require.NotNil(t, recoveredProj.GitHubAppStatus)
+	assert.Equal(t, store.GitHubAppStateOK, recoveredProj.GitHubAppStatus.State)
+	assert.Empty(t, recoveredProj.GitHubAppStatus.ErrorCode)
+
+	// 3. Stale association_unauthorized status reset: if GitHubAppStatus carries a
+	// stale association_unauthorized (which blocks cold-cache authoring with 409),
+	// a successful drainer association check resets status to ok so subsequent
+	// cold-cache authoring succeeds with 201 and zero GitHub HTTP calls.
+	f.srv.updateProjectGitHubAppStatus(ctx, recoveredProj, store.GitHubAppStateError, githubAppErrAssociationUnauthorized, "stale denial")
+	f.srv.invalidateGitHubAssociation(creatorProj.ID)
+
+	blockedRec := httptest.NewRecorder()
+	f.srv.handleTriggers(blockedRec, authoredRequest(t, f.ownerAuth, http.MethodPost, createPath, CreateTriggerRequest{
+		Name:   "blocked-by-stale-status",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: target.ID, Message: "blocked"},
+	}), creatorProj.ID, "")
+	require.Equal(t, http.StatusConflict, blockedRec.Code, blockedRec.Body.String())
+	assert.Equal(t, ErrCodeGitHubNotAssociated, decodeAPIErrorCode(t, blockedRec))
+
+	secondFixtureBytes, err := os.ReadFile(filepath.Join("trigger", "github", "testdata", "issue_comment__created_issue.payload.json"))
+	require.NoError(t, err)
+	ingRec2 := postSignedGitHubDelivery(t, f.srv, webhookSecret, appID, "issue_comment", uuid.NewString(), secondFixtureBytes)
+	require.Equal(t, http.StatusAccepted, ingRec2.Code, ingRec2.Body.String())
+	var ingResp2 GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(ingRec2.Body.Bytes(), &ingResp2))
+	require.Len(t, ingResp2.Events, 1)
+	eventID2 := ingResp2.Events[0].EventID
+
+	require.Eventually(t, func() bool {
+		stored, gErr := f.store.GetTriggerEvent(ctx, eventID2)
+		return gErr == nil && stored != nil && stored.Status == store.TriggerEventStatusProcessed
+	}, 5*time.Second, 20*time.Millisecond)
+
+	clearedProj, err := f.store.GetProject(ctx, creatorProj.ID)
+	require.NoError(t, err)
+	require.NotNil(t, clearedProj.GitHubAppStatus)
+	assert.Equal(t, store.GitHubAppStateOK, clearedProj.GitHubAppStatus.State)
+	assert.Empty(t, clearedProj.GitHubAppStatus.ErrorCode)
+
+	// Invalidate in-memory caches so authoring hits the cold-cache creator-proof path,
+	// and verify the cleared GitHubAppStatus now permits authoring with zero GitHub calls.
+	f.srv.invalidateGitHubAssociation(creatorProj.ID)
+	callsBefore, _ := gh.counts()
+
+	unblockedRec := httptest.NewRecorder()
+	f.srv.handleTriggers(unblockedRec, authoredRequest(t, f.ownerAuth, http.MethodPost, createPath, CreateTriggerRequest{
+		Name:   "unblocked-after-drainer-ok",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: target.ID, Message: "unblocked"},
+	}), creatorProj.ID, "")
+	require.Equal(t, http.StatusCreated, unblockedRec.Code, unblockedRec.Body.String())
+
+	callsAfter, _ := gh.counts()
+	assert.Equal(t, callsBefore, callsAfter, "cold-cache authoring after status reset must make zero GitHub HTTP calls")
 }

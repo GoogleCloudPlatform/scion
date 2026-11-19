@@ -153,6 +153,7 @@ func (c serverTriggerCore) AuthorizeEventSource(ctx context.Context, ev *store.T
 			"project_id", project.ID, "installation_id", instID, "event_id", ev.ID, "error", authzErr)
 		return false, nil
 	}
+	c.srv.clearProjectGitHubAssociationErrorStatus(ctx, project)
 	return true, nil
 }
 
