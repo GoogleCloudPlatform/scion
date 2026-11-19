@@ -117,6 +117,7 @@ func artifactReviewNoticeText(n artifacts.ReviewNotice) string {
 	fmt.Fprintf(&b, "A review (v%d, by %s) was published on your artifact; it is now the current version.\n", n.Seq, by)
 	fmt.Fprintf(&b, "Artifact: v%d - scion artifact get %s\n", n.Seq, ref)
 	fmt.Fprintf(&b, "Without the marks: scion artifact get %s --clean\n", ref)
+	fmt.Fprintf(&b, "Review comments: scion artifact comments %s\n", ref)
 	fmt.Fprintf(&b, "Apply or answer the marks, then publish the result as the next version: scion artifact publish <file> --version-of %s",
 		artifacts.FormatRef(n.ArtifactID, 0))
 	return b.String()
