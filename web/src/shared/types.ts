@@ -156,6 +156,50 @@ export interface PageData {
    * the session user (ptone/scion#2489); present only for a signed-in shell
    */
   experiments?: Record<string, boolean> | undefined;
+  /**
+   * Hub-wide UI branding payload; present on both authenticated and anonymous
+   * (/login, /invite) shells when server.hub.branding is customized.
+   */
+  branding?: PublicBranding | undefined;
+}
+
+/**
+ * Resolved semantic color tokens (#RRGGBB) for one theme mode.
+ */
+export interface BrandingSemanticMode {
+  bg?: string;
+  bg_subtle?: string;
+  surface?: string;
+  surface_raised?: string;
+  text?: string;
+  text_secondary?: string;
+  text_muted?: string;
+  border?: string;
+  primary?: string;
+  primary_hover?: string;
+  primary_active?: string;
+  primary_text?: string;
+}
+
+/**
+ * Public Hub branding payload delivered via __SCION_DATA__.branding and
+ * GET /api/v1/settings/public. Contains zero boolean fields.
+ */
+export interface PublicBranding {
+  name: string;
+  shortName: string;
+  subtitle?: string;
+  attribution: 'shown' | 'hidden';
+  logoLight?: string;
+  logoDark?: string;
+  faviconUrl?: string;
+  appleTouchIconUrl?: string;
+  notificationIconUrl?: string;
+  themeColor: string;
+  cssText?: string;
+  light?: BrandingSemanticMode;
+  dark?: BrandingSemanticMode;
+  scales?: Record<string, Record<string, string>>;
 }
 
 /**

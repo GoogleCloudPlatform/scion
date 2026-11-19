@@ -22,6 +22,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resetServerFlagStateForTests, isFeatureEnabled } from '../utils/feature-flags.js';
+import { getAppName, setAppName, setDocumentTitle } from './page-title.js';
 import {
   applyServerFeatureFlags,
   getPublicSettings,
@@ -47,6 +48,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setAppName(undefined);
+  setDocumentTitle();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -386,5 +389,34 @@ describe('getPublicSettings: shared object', () => {
     );
     const settings = await getPublicSettings();
     expect(Object.isFrozen(settings)).toBe(true);
+  });
+
+  it('syncs branding.name into page-title and resets when branding is cleared', async () => {
+    setDocumentTitle('Dashboard');
+    const fetchSpy = vi.fn(() =>
+      Promise.resolve(
+        jsonResponse({
+          telemetryEnabled: false,
+          branding: {
+            name: 'Acme Hub',
+            shortName: 'Acme',
+            attribution: 'shown',
+            themeColor: '#1e293b',
+          },
+        })
+      )
+    );
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await getPublicSettings();
+    expect(getAppName()).toBe('Acme Hub');
+    expect(document.title).toBe('Dashboard — Acme Hub');
+
+    // Simulate section reset omitting branding.
+    invalidatePublicSettings();
+    fetchSpy.mockImplementation(() => Promise.resolve(jsonResponse({ telemetryEnabled: false })));
+    await getPublicSettings();
+    expect(getAppName()).toBe('Scion');
+    expect(document.title).toBe('Dashboard — Scion');
   });
 });

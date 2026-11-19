@@ -21,8 +21,10 @@
  * one function.
  */
 
+import type { PublicBranding } from '../shared/types.js';
 import { setFeatureFlag, setServerFlags } from '../utils/feature-flags.js';
 import { apiFetch } from './api.js';
+import { setAppName } from './page-title.js';
 
 /**
  * Parses `res` as JSON, returning `null` for a non-OK status or a body that
@@ -52,6 +54,7 @@ export interface PublicSettings {
   defaultTemplate?: string;
   defaultModel?: string;
   agentSecretsUserScopeOnly?: boolean;
+  branding?: PublicBranding;
 }
 
 /** Successful result, kept until invalidatePublicSettings(). */
@@ -95,6 +98,7 @@ export function getPublicSettings(): Promise<Readonly<PublicSettings> | null> {
           : null;
       if (settings && generation === publicSettingsGeneration) {
         publicSettings = settings;
+        setAppName(settings.branding?.name);
       }
       return settings;
     } catch {
