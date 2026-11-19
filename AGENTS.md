@@ -11,6 +11,7 @@ Alpha: changing or removing behavior needs no deprecation path.
 | Go build, test or lint in a container; OOM, VCS-status or `fmt-check` failures | `docs-repo/agents/sandbox-go-toolchain.md` |
 | Code compiled into `./cmd/scion`: `*_unix.go`, private-file writes, path containment, lock files, new commands | `docs-repo/agents/windows-platform-seams.md` (CI enforces it) |
 | Anything under `web/`, including a new `<sl-icon>` | `web/AGENTS.md` |
+| Helm chart or Terraform under `deploy/` | `docs-repo/agents/deploy-gates.md` |
 | Documentation site | `docs-site/AGENTS.md` |
 | Naming a concept | `GLOSSARY.md` |
 | CLI command agent-mode availability | `.design/cli-modes.md` |
