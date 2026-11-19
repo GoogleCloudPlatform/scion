@@ -31,7 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
-	_ "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire" // register built-in "typesafe" System One adapter
+	_ "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/geminidecisions" // register built-in "gemini_decisions" System One adapter
+	_ "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire"         // register built-in "typesafe" System One adapter
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -241,6 +242,20 @@ func (s *Server) SystemOneRuntime() *systemoneruntime.Runtime {
 		s.rebuildSystemOneRuntimeLocked()
 	}
 	return s.systemOneRuntime
+}
+
+// SetSystemOneRuntimeOptionsForTesting replaces optional runtime construction
+// options (such as loopback TLS test seams) and rebuilds the Hub's System One
+// runtime for offline integration tests.
+func (s *Server) SetSystemOneRuntimeOptionsForTesting(tb interface{ Helper() }, opts ...systemoneruntime.Option) {
+	if tb == nil {
+		panic("SetSystemOneRuntimeOptionsForTesting requires a non-nil testing.TB")
+	}
+	tb.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.systemOneRuntimeOpts = slices.Clone(opts)
+	s.rebuildSystemOneRuntimeLocked()
 }
 
 // storeSystemOneInstanceToRuntime converts a persisted store record into the

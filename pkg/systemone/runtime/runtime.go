@@ -481,6 +481,9 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	if cleanResolvedModel == "" {
 		eval.Notes = mergeNotes(eval.Notes, []string{provider.NoteModelUnreported})
 	}
+	if !eval.HasUsageUnreported() && hasMeasuredProviderUsage(res.Usage) {
+		eval.Usage = cloneProviderUsage(res.Usage)
+	}
 
 	// Step 7: Validate decoded answers, compute portable metrics, apply argmax/abstain/tie,
 	// classify outcome, and project to consumer Kind (runtime-design §§5, 6, 8.1; AC-6).
@@ -1202,6 +1205,25 @@ func mergeNotes(existing []string, added []string) []string {
 		out = append(out, n)
 	}
 	return out
+}
+
+func hasMeasuredProviderUsage(u provider.Usage) bool {
+	if u.InputTokens < 0 || u.OutputTokens < 0 {
+		return false
+	}
+	return u.InputTokens > 0 || u.OutputTokens > 0 || u.Truncated != nil
+}
+
+func cloneProviderUsage(u provider.Usage) *provider.Usage {
+	cp := provider.Usage{
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+	}
+	if u.Truncated != nil {
+		t := *u.Truncated
+		cp.Truncated = &t
+	}
+	return &cp
 }
 
 func cloneInstance(inst Instance) Instance {

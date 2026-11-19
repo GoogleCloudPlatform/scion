@@ -954,43 +954,57 @@ func (a *bareSystemOneTestAdapter) Invoke(_ context.Context, _ systemoneprovider
 	return systemoneprovider.ModelResult{}, nil
 }
 
-func TestSystemOneInstances_InstanceValidator(t *testing.T) {
+type emptyDefaultEndpointAdapter struct {
+	bareSystemOneTestAdapter
+}
+
+func (a *emptyDefaultEndpointAdapter) DefaultEndpoint() string { return "   " }
+
+func TestSystemOneInstances_EndpointDefaulterAndInstanceValidator(t *testing.T) {
 	ctx := context.Background()
 	srv, s, _ := newSystemOneTestServer(t, true)
-	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-validator-admin", store.SystemRoleSuperAdmin))
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-defaulter-admin", store.SystemRoleSuperAdmin))
 	require.NoError(t, err)
 
-	// Register gemini_decisions + a bare adapter without InstanceValidator in a dedicated test registry.
-	reg := systemoneprovider.NewRegistry()
-	require.NoError(t, jevwire.Register(reg))
-	require.NoError(t, geminidecisions.Register(reg))
-	require.NoError(t, reg.Register(&bareSystemOneTestAdapter{name: "no-validator"}))
-	srv.mu.Lock()
-	srv.systemOneRegistry = reg
-	srv.rebuildSystemOneRuntimeLocked()
-	srv.mu.Unlock()
+	// Built-in default registry exposes both typesafe and gemini_decisions.
+	names := srv.SystemOneProviderRegistry().Names()
+	assert.Contains(t, names, jevwire.AdapterNameTypeSafe)
+	assert.Contains(t, names, geminidecisions.AdapterName)
 
-	// gemini_decisions without model -> 400 validation_error via InstanceValidator.
+	// 1. gemini_decisions: missing model -> 400 via InstanceValidator; omitted endpoint -> defaults to DefaultEndpoint.
 	missingGeminiModel := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-		"name":     "gem-no-model",
-		"adapter":  geminidecisions.AdapterName,
-		"endpoint": geminidecisions.DefaultEndpoint,
-		"auth":     map[string]any{"kind": "api_key", "apiKey": "SYNTH_GEMINI_KEY_1"},
+		"name":    "gem-no-model",
+		"adapter": geminidecisions.AdapterName,
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "SYNTH_GEMINI_KEY_1"},
 	})
 	require.Equal(t, http.StatusBadRequest, missingGeminiModel.Code, missingGeminiModel.Body.String())
 	assert.Contains(t, missingGeminiModel.Body.String(), "instance model is required for gemini_decisions")
 	assert.NotContains(t, missingGeminiModel.Body.String(), "SYNTH_GEMINI_KEY_1")
 
-	gemOK := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-		"name":     "gem-ok-model",
-		"adapter":  geminidecisions.AdapterName,
-		"model":    "gemini-decision-1",
-		"endpoint": geminidecisions.DefaultEndpoint,
-		"auth":     map[string]any{"kind": "api_key", "apiKey": "SYNTH_GEMINI_KEY_2"},
+	gemCreatedRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gem-default-ep",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "SYNTH_GEMINI_KEY_2"},
 	})
-	require.Equal(t, http.StatusCreated, gemOK.Code, gemOK.Body.String())
+	require.Equal(t, http.StatusCreated, gemCreatedRec.Code, gemCreatedRec.Body.String())
+	assert.NotContains(t, gemCreatedRec.Body.String(), "SYNTH_GEMINI_KEY_2")
+	var gemCreated SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(gemCreatedRec.Body.Bytes(), &gemCreated))
+	assert.Equal(t, geminidecisions.DefaultEndpoint, gemCreated.Endpoint)
+	assert.Equal(t, "gemini-decision-1", gemCreated.Model)
 
-	// typesafe without model -> 400 preserving exact message via InstanceValidator.
+	// Custom auth.headerName is still rejected on gemini_decisions (placement comes only from adapter declaration).
+	badHdrRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gem-custom-hdr",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "SYNTH_GEMINI_KEY_3", "headerName": "x-goog-api-key"},
+	})
+	require.Equal(t, http.StatusBadRequest, badHdrRec.Code, badHdrRec.Body.String())
+	assert.Contains(t, badHdrRec.Body.String(), "custom auth headerName is not supported")
+
+	// 2. typesafe regression: missing model -> 400 preserving exact message; omitted endpoint -> https://api.typesafe.ai.
 	missingTSModel := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
 		"name":    "ts-no-model",
 		"adapter": jevwire.AdapterNameTypeSafe,
@@ -999,12 +1013,50 @@ func TestSystemOneInstances_InstanceValidator(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, missingTSModel.Code, missingTSModel.Body.String())
 	assert.Contains(t, missingTSModel.Body.String(), `model is required for adapter \"typesafe\"`)
 
-	// Adapter without InstanceValidator allows empty model.
-	bareOK := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-		"name":     "bare-empty-model",
-		"adapter":  "no-validator",
+	tsCreatedRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "ts-default-ep",
+		"adapter": jevwire.AdapterNameTypeSafe,
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "SYNTH_TS_KEY_2"},
+	})
+	require.Equal(t, http.StatusCreated, tsCreatedRec.Code, tsCreatedRec.Body.String())
+	var tsCreated SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(tsCreatedRec.Body.Bytes(), &tsCreated))
+	assert.Equal(t, jevwire.DefaultTypeSafeEndpoint, tsCreated.Endpoint)
+
+	// 3. Adapter without EndpointDefaulter (or returning empty string) requires explicit endpoint (400 if omitted)
+	// and allows empty model when InstanceValidator is not implemented.
+	customSrv, customStore, _ := newSystemOneTestServer(t, true)
+	customAdmin, err := customStore.GetUser(ctx, hubConfigTokenUser(t, customStore, "s1-custom-reg-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	customReg := systemoneprovider.NewRegistry()
+	require.NoError(t, customReg.Register(&bareSystemOneTestAdapter{name: "no-defaulter"}))
+	require.NoError(t, customReg.Register(&emptyDefaultEndpointAdapter{bareSystemOneTestAdapter: bareSystemOneTestAdapter{name: "empty-defaulter"}}))
+	customSrv.mu.Lock()
+	customSrv.systemOneRegistry = customReg
+	customSrv.rebuildSystemOneRuntimeLocked()
+	customSrv.mu.Unlock()
+
+	for _, adName := range []string{"no-defaulter", "empty-defaulter"} {
+		noEpRec := doRequestAsUser(t, customSrv, customAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    adName + "-missing-ep",
+			"adapter": adName,
+			"auth":    map[string]any{"kind": "api_key", "apiKey": "SYNTH_CUSTOM_KEY"},
+		})
+		require.Equal(t, http.StatusBadRequest, noEpRec.Code, "adapter=%s body=%s", adName, noEpRec.Body.String())
+		assert.Contains(t, noEpRec.Body.String(), "endpoint is required")
+	}
+
+	okCustomRec := doRequestAsUser(t, customSrv, customAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "no-defaulter-explicit",
+		"adapter":  "no-defaulter",
 		"endpoint": "https://provider.example.com",
 		"auth":     map[string]any{"kind": "api_key", "apiKey": "SYNTH_CUSTOM_KEY"},
 	})
-	require.Equal(t, http.StatusCreated, bareOK.Code, bareOK.Body.String())
+	require.Equal(t, http.StatusCreated, okCustomRec.Code, okCustomRec.Body.String())
+	var okCustom SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(okCustomRec.Body.Bytes(), &okCustom))
+	assert.Equal(t, "https://provider.example.com", okCustom.Endpoint)
+	assert.Empty(t, okCustom.Model)
 }

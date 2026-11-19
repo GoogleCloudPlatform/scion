@@ -500,9 +500,99 @@ func TestAdminSystemOneProbe(t *testing.T) {
 		assert.Contains(t, stdout, "Configured Model:     jev-1.14.0")
 		assert.Contains(t, stdout, "Resolved Model:       jev-1.14-prod-20261001")
 		assert.Contains(t, stdout, "Model Alias Reported: true")
+		assert.Contains(t, stdout, "Usage:                usage unavailable")
 		assert.Contains(t, stdout, "typesafe.confidence=0.8800")
 		assert.Contains(t, stdout, "p_top=0.9000")
 		assert.Contains(t, stdout, "instance=ts-prod adapter=typesafe outcome=success")
+	})
+
+	t.Run("renders model_unreported and usage unavailable vs measured usage without 0-token false report", func(t *testing.T) {
+		dir := t.TempDir()
+		specPath := filepath.Join(dir, "spec.json")
+		require.NoError(t, os.WriteFile(specPath, []byte(`{"version":1,"questions":[{"id":"is_damaged","type":"binary","instructions":"Check probe.text."}]}`), 0600))
+
+		// Case 1: missing usage (usage_unreported + model_unreported) — human and JSON.
+		resetAdminSystemOneFlags(t)
+		yes := true
+		missingResp := hubclient.ProbeSystemOneInstanceResponse{
+			Class: systemoneruntime.ClassSuccess,
+			Decision: &hubclient.ProbeSystemOneDecision{
+				Kind: spec.KindJudgmentBool,
+				Bool: &yes,
+			},
+			Evaluation: &systemoneruntime.Evaluation{
+				EvalID:          "eval-gemini-unreported",
+				ConfiguredModel: "gemini-decision-1",
+				ResolvedModel:   "",
+				Class:           systemoneruntime.ClassSuccess,
+				Notes:           []string{provider.NoteModelUnreported, provider.NoteUsageUnreported},
+				Answers: map[string]systemoneruntime.AnswerRecord{
+					"is_damaged": {
+						QuestionID:    "is_damaged",
+						Primitive:     spec.PrimitiveBinary,
+						Status:        provider.AnswerStatusAnswered,
+						Bool:          &yes,
+						Distribution:  map[string]float64{"true": 0.99, "false": 0.01},
+						NativeMetrics: map[string]metrics.Metric{"gemini.confidence": {Value: 0.99}},
+						Notes:         []string{provider.NoteClamped001To099},
+					},
+				},
+			},
+		}
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(missingResp)
+		}))
+
+		stdout, _, err := executeAdminSystemOneSubcmd(t, []string{
+			"probe", "gemini-main",
+			"--spec-file", specPath,
+			"--text", "Synthetic sample.",
+		}, nil)
+		require.NoError(t, err)
+		assert.Contains(t, stdout, "Configured Model:     gemini-decision-1")
+		assert.Contains(t, stdout, "Resolved Model:       unreported (model_unreported)")
+		assert.Contains(t, stdout, "Usage:                usage unavailable (usage_unreported)")
+		assert.Contains(t, stdout, "Notes:                model_unreported, usage_unreported")
+		assert.Contains(t, stdout, "notes: clamped_0.01_0.99")
+		assert.NotContains(t, stdout, "input_tokens=0")
+		assert.NotContains(t, stdout, "output_tokens=0")
+
+		resetAdminSystemOneFlags(t)
+		outputFormat = "json"
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(missingResp)
+		}))
+		jsonOut, _, err := executeAdminSystemOneSubcmd(t, []string{
+			"probe", "gemini-main",
+			"--spec-file", specPath,
+			"--text", "Synthetic sample.",
+		}, nil)
+		require.NoError(t, err)
+		assert.NotContains(t, jsonOut, `"usage"`)
+		assert.Contains(t, jsonOut, `"model_unreported"`)
+		assert.Contains(t, jsonOut, `"usage_unreported"`)
+
+		// Case 2: measured usage present (total_input_tokens=58, total_output_tokens=0).
+		resetAdminSystemOneFlags(t)
+		measuredResp := missingResp
+		measuredEval := *missingResp.Evaluation
+		measuredEval.Notes = []string{provider.NoteModelUnreported}
+		measuredEval.Usage = &provider.Usage{InputTokens: 58, OutputTokens: 0}
+		measuredResp.Evaluation = &measuredEval
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(measuredResp)
+		}))
+		measuredOut, _, err := executeAdminSystemOneSubcmd(t, []string{
+			"probe", "gemini-main",
+			"--spec-file", specPath,
+			"--text", "Synthetic sample.",
+		}, nil)
+		require.NoError(t, err)
+		assert.Contains(t, measuredOut, "Resolved Model:       unreported (model_unreported)")
+		assert.Contains(t, measuredOut, "Usage:                input_tokens=58, output_tokens=0")
 	})
 
 	t.Run("non-zero exit when class is not success", func(t *testing.T) {

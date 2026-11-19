@@ -283,6 +283,15 @@ type ModelLister interface {
 	ListModels(ctx context.Context, t Transport, inst InstanceView) ([]string, error)
 }
 
+// EndpointDefaulter is an optional SPI-adjacent extension implemented by
+// adapters that define a default HTTPS base URL when an instance is created
+// without an explicit endpoint (PV3 brief §6, Decision 4). Adapters that do not
+// implement EndpointDefaulter (or return an empty string) require an explicit
+// endpoint at instance creation time.
+type EndpointDefaulter interface {
+	DefaultEndpoint() string
+}
+
 // InstanceValidator is an optional SPI-adjacent extension implemented by
 // adapters that validate provider-specific instance configuration (for example
 // requiring a non-empty InstanceView.Model) at instance creation time without

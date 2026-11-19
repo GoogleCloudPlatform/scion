@@ -198,7 +198,9 @@ func TestRegistry_RegisterLookupAndSideEffectFreeEnforcement(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"jev-1.14.0"}, models)
 
-	// Optional InstanceValidator is absent unless explicitly implemented.
+	// Optional EndpointDefaulter and InstanceValidator are absent unless explicitly implemented.
+	_, hasDefaulter := got.(provider.EndpointDefaulter)
+	assert.False(t, hasDefaulter)
 	_, gotValidator := got.(provider.InstanceValidator)
 	assert.False(t, gotValidator)
 

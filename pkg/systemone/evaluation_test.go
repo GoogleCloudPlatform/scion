@@ -127,7 +127,19 @@ func TestEvaluation_EffectiveResolvedModelHonorsAliasNote(t *testing.T) {
 			ResolvedModel:   "gemini-decision-1",
 			Notes:           []string{provider.NoteModelUnreported},
 		}
+		assert.True(t, eval.HasModelUnreported())
+		assert.False(t, eval.HasUsageUnreported())
 		assert.Empty(t, eval.EffectiveResolvedModel(), "unreported fallback model counts as unresolved")
+	})
+
+	t.Run("usage_unreported_note", func(t *testing.T) {
+		eval := &systemone.Evaluation{
+			ConfiguredModel: "gemini-decision-1",
+			Notes:           []string{provider.NoteModelUnreported, provider.NoteUsageUnreported},
+		}
+		assert.True(t, eval.HasModelUnreported())
+		assert.True(t, eval.HasUsageUnreported())
+		assert.Nil(t, eval.Usage)
 	})
 }
 

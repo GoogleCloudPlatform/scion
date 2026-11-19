@@ -45,6 +45,10 @@ func TestDefaultRegistry_RegistersTypeSafeAdapterAndModelLister(t *testing.T) {
 	_, isLister := got.(provider.ModelLister)
 	assert.True(t, isLister, "typesafe profile must implement optional provider.ModelLister")
 
+	defaulter, isDefaulter := got.(provider.EndpointDefaulter)
+	require.True(t, isDefaulter, "typesafe profile must implement optional provider.EndpointDefaulter")
+	assert.Equal(t, jevwire.DefaultTypeSafeEndpoint, defaulter.DefaultEndpoint())
+
 	// Capabilities is static and error-free even on a zero InstanceView.
 	zeroCaps, zeroErr := got.Capabilities(provider.InstanceView{})
 	require.NoError(t, zeroErr)

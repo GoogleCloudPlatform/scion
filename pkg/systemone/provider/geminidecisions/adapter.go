@@ -74,13 +74,15 @@ var confidenceMetricDecl = provider.MetricDecl{
 	Source:      metrics.SourceProviderDoc,
 }
 
-// Adapter implements provider.Adapter and provider.InstanceValidator for Gemini
-// Decision 1 (v1beta). ModelLister is intentionally not implemented because
-// model listing support for gemini-decision-1 is undocumented (PV3 brief §5.1, U-G1).
+// Adapter implements provider.Adapter, provider.EndpointDefaulter, and
+// provider.InstanceValidator for Gemini Decision 1 (v1beta). ModelLister is
+// intentionally not implemented because model listing support for
+// gemini-decision-1 is undocumented (PV3 brief §5.1, U-G1).
 type Adapter struct{}
 
 var (
 	_ provider.Adapter           = (*Adapter)(nil)
+	_ provider.EndpointDefaulter = (*Adapter)(nil)
 	_ provider.InstanceValidator = (*Adapter)(nil)
 )
 
@@ -97,6 +99,11 @@ func (a *Adapter) Name() string {
 // Version returns AdapterVersion ("0.1.0").
 func (a *Adapter) Version() string {
 	return AdapterVersion
+}
+
+// DefaultEndpoint returns DefaultEndpoint ("https://generativelanguage.googleapis.com").
+func (a *Adapter) DefaultEndpoint() string {
+	return DefaultEndpoint
 }
 
 // ValidateInstance checks Gemini-specific instance configuration (requiring a

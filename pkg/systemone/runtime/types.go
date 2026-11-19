@@ -250,6 +250,7 @@ type Evaluation struct {
 	Reason          string                  `json:"reason,omitempty"`
 	Answers         map[string]AnswerRecord `json:"answers,omitempty"`
 	Uncertainty     []ThresholdCheck        `json:"uncertainty,omitempty"`
+	Usage           *provider.Usage         `json:"usage,omitempty"`
 	Notes           []string                `json:"notes,omitempty"`
 	Attempts        []Attempt               `json:"attempts,omitempty"`
 	FallbackUsed    bool                    `json:"fallback_used,omitempty"`
@@ -267,6 +268,24 @@ func (e *Evaluation) HasModelAliasReported() bool {
 		return false
 	}
 	return slices.Contains(e.Notes, provider.NoteModelAliasReported)
+}
+
+// HasModelUnreported reports whether Notes contains NoteModelUnreported
+// (indicating that the provider did not report a serving model identifier).
+func (e *Evaluation) HasModelUnreported() bool {
+	if e == nil {
+		return false
+	}
+	return slices.Contains(e.Notes, provider.NoteModelUnreported)
+}
+
+// HasUsageUnreported reports whether Notes contains NoteUsageUnreported
+// (indicating that provider token usage was absent rather than measured zero).
+func (e *Evaluation) HasUsageUnreported() bool {
+	if e == nil {
+		return false
+	}
+	return slices.Contains(e.Notes, provider.NoteUsageUnreported)
 }
 
 // EffectiveResolvedModel returns ResolvedModel when it identifies a concrete

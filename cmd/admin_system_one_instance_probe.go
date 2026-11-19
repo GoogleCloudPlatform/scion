@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/spf13/cobra"
 )
@@ -234,8 +235,23 @@ func renderAdminSystemOneEvaluationHuman(out io.Writer, eval *systemoneruntime.E
 	}
 	if eval.ResolvedModel != "" {
 		_, _ = fmt.Fprintf(out, "  Resolved Model:       %s\n", eval.ResolvedModel)
+	} else if eval.HasModelUnreported() {
+		_, _ = fmt.Fprintf(out, "  Resolved Model:       unreported (%s)\n", provider.NoteModelUnreported)
 	}
 	_, _ = fmt.Fprintf(out, "  Model Alias Reported: %t\n", eval.HasModelAliasReported())
+	if eval.Usage != nil && !eval.HasUsageUnreported() {
+		if eval.Usage.Truncated != nil {
+			_, _ = fmt.Fprintf(out, "  Usage:                input_tokens=%d, output_tokens=%d, truncated=%t\n",
+				eval.Usage.InputTokens, eval.Usage.OutputTokens, *eval.Usage.Truncated)
+		} else {
+			_, _ = fmt.Fprintf(out, "  Usage:                input_tokens=%d, output_tokens=%d\n",
+				eval.Usage.InputTokens, eval.Usage.OutputTokens)
+		}
+	} else if eval.HasUsageUnreported() {
+		_, _ = fmt.Fprintf(out, "  Usage:                usage unavailable (%s)\n", provider.NoteUsageUnreported)
+	} else {
+		_, _ = fmt.Fprintf(out, "  Usage:                usage unavailable\n")
+	}
 	if len(eval.Notes) > 0 {
 		_, _ = fmt.Fprintf(out, "  Notes:                %s\n", strings.Join(eval.Notes, ", "))
 	}
@@ -297,6 +313,9 @@ func renderAdminSystemOneEvaluationHuman(out io.Writer, eval *systemoneruntime.E
 					parts = append(parts, fmt.Sprintf("%s=%.4f", name, ans.NativeMetrics[name].Value))
 				}
 				_, _ = fmt.Fprintf(out, "      native_metrics: %s\n", strings.Join(parts, ", "))
+			}
+			if len(ans.Notes) > 0 {
+				_, _ = fmt.Fprintf(out, "      notes: %s\n", strings.Join(ans.Notes, ", "))
 			}
 		}
 	}

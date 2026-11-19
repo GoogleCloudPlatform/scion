@@ -30,8 +30,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
-// Adapter implements provider.Adapter, provider.ModelLister, and
-// provider.InstanceValidator for a Jev-wire Profile.
+// Adapter implements provider.Adapter, provider.ModelLister,
+// provider.EndpointDefaulter, and provider.InstanceValidator for a Jev-wire
+// Profile.
 type Adapter struct {
 	profile Profile
 }
@@ -39,6 +40,7 @@ type Adapter struct {
 var (
 	_ provider.Adapter           = (*Adapter)(nil)
 	_ provider.ModelLister       = (*Adapter)(nil)
+	_ provider.EndpointDefaulter = (*Adapter)(nil)
 	_ provider.InstanceValidator = (*Adapter)(nil)
 )
 
@@ -60,6 +62,12 @@ func (a *Adapter) Name() string {
 // Version returns the adapter implementation version recorded in provenance.
 func (a *Adapter) Version() string {
 	return a.profile.Version
+}
+
+// DefaultEndpoint returns the profile's default HTTPS base URL (for example
+// "https://api.typesafe.ai" for TypeSafe), or "" if the profile defines none.
+func (a *Adapter) DefaultEndpoint() string {
+	return a.profile.DefaultEndpoint
 }
 
 // ValidateInstance checks profile-specific instance configuration (for example

@@ -35,14 +35,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
-	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
 const (
-	defaultSystemOneEndpoint = jevwire.DefaultTypeSafeEndpoint
-
 	maxCreateSystemOneInstanceBodyBytes = 64 * 1024
 	maxProbeSystemOneInstanceBodyBytes  = 256 * 1024
 	maxSystemOneAPIKeyBytes             = 8 * 1024
@@ -425,6 +422,13 @@ func safeSystemOneJSONError(err error) string {
 	return "invalid JSON request body"
 }
 
+func defaultSystemOneAdapterEndpoint(adapter systemoneprovider.Adapter) string {
+	if defaulter, ok := adapter.(systemoneprovider.EndpointDefaulter); ok {
+		return strings.TrimSpace(defaulter.DefaultEndpoint())
+	}
+	return ""
+}
+
 func safeSystemOneAdapterConfigMessage(err error) string {
 	if pe, ok := systemoneprovider.AsProviderError(err); ok && pe.Message != "" && !hasControlChars(pe.Message) {
 		return pe.Message
@@ -432,10 +436,13 @@ func safeSystemOneAdapterConfigMessage(err error) string {
 	return "adapter rejected instance configuration"
 }
 
-func validateSystemOneEndpoint(raw string) (string, error) {
+func validateSystemOneEndpoint(raw, defaultEndpoint, adapterName string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		trimmed = defaultSystemOneEndpoint
+		trimmed = strings.TrimSpace(defaultEndpoint)
+	}
+	if trimmed == "" {
+		return "", fmt.Errorf("endpoint is required for adapter %q", adapterName)
 	}
 	u, err := url.Parse(trimmed)
 	if err != nil {
@@ -579,7 +586,7 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	endpoint, err := validateSystemOneEndpoint(req.Endpoint)
+	endpoint, err := validateSystemOneEndpoint(req.Endpoint, defaultSystemOneAdapterEndpoint(adapter), adapterName)
 	if err != nil {
 		ValidationError(w, err.Error(), nil)
 		return

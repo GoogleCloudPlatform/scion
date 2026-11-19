@@ -225,6 +225,9 @@ func TestRuntime_GeminiDecisionsAdapter_ProvenanceAndHeaderPlacementAcrossOutcom
 		assertWireIsolation(t)
 		assertDecision3Provenance(t, dec.Eval, &logBuf)
 		assert.Equal(t, []string{provider.NoteModelUnreported}, dec.Eval.Notes)
+		require.NotNil(t, dec.Eval.Usage)
+		assert.Equal(t, provider.Usage{InputTokens: 58, OutputTokens: 0}, *dec.Eval.Usage)
+		assert.False(t, dec.Eval.HasUsageUnreported())
 
 		binRec := dec.Eval.Answers["is_damaged"]
 		require.NotNil(t, binRec.Bool)
@@ -267,6 +270,11 @@ func TestRuntime_GeminiDecisionsAdapter_ProvenanceAndHeaderPlacementAcrossOutcom
 		assertWireIsolation(t)
 		assertDecision3Provenance(t, dec.Eval, &logBuf)
 		assert.ElementsMatch(t, []string{provider.NoteModelUnreported, provider.NoteUsageUnreported}, dec.Eval.Notes)
+		assert.True(t, dec.Eval.HasUsageUnreported())
+		assert.Nil(t, dec.Eval.Usage, "missing usage must never present SPI zero tokens as measured usage")
+		rawMissingJSON, err := json.Marshal(dec.Eval)
+		require.NoError(t, err)
+		assert.NotContains(t, string(rawMissingJSON), `"usage"`)
 	})
 
 	t.Run("uncertain_tie_carries_decision3_provenance_in_evaluation_error", func(t *testing.T) {

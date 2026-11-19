@@ -44,6 +44,10 @@ func TestDefaultRegistry_RegistersGeminiDecisionsWithoutModelLister(t *testing.T
 	_, isLister := got.(provider.ModelLister)
 	assert.False(t, isLister, "gemini_decisions must not implement provider.ModelLister in PV3 (U-G1)")
 
+	defaulter, isDefaulter := got.(provider.EndpointDefaulter)
+	require.True(t, isDefaulter, "gemini_decisions must implement optional provider.EndpointDefaulter")
+	assert.Equal(t, geminidecisions.DefaultEndpoint, defaulter.DefaultEndpoint())
+
 	// Capabilities is static and error-free even on a zero InstanceView.
 	zeroCaps, zeroErr := got.Capabilities(provider.InstanceView{})
 	require.NoError(t, zeroErr)
