@@ -60,4 +60,4 @@ admin_emails = ["REPLACE_ME@example.com"]
 # relay_replica_count  = 2
 # enable_hub_pdb       = true
 # enable_relay_pdb     = true
-# enable_relay_db_user = true # Optional dedicated <hub>-relay SQL user; Hub migration grants least-privilege access automatically
+# enable_relay_db_user = true # Optional dedicated <hub>-relay SQL user (deletion_policy = ABANDON; see README for revoke/drop cleanup)

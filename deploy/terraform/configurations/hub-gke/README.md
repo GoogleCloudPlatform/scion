@@ -410,6 +410,33 @@ What Terraform and the `scion-hub` chart wire in this mode:
   Cloud SQL instances, all `BUILT_IN` users remain members of
   `cloudsqlsuperuser`; see `../../README.md`, "Shared-infra trust domain and
   sizing".)
+- **Disabling `enable_relay_db_user` or rolling back `external -> in_process`:**
+  `google_sql_user.relay` sets `deletion_policy = "ABANDON"`. Once the Hub has
+  granted table/schema/database privileges to `<hub>-relay`, PostgreSQL refuses
+  `DROP ROLE` while those grants exist (`cannot be dropped because some objects
+  depend on it`). With `ABANDON`, applying `enable_relay_db_user = false` (which
+  is also required when rolling `conduit_relay_mode` back from `"external"` to
+  `"in_process"`) updates the Helm release so pods stop using `<hub>-relay`,
+  removes `server.database.relay_role` from the Hub's `settings.yaml`, destroys
+  the `<hub>-relay-db-password` and `<hub>-relay-db-dsn` Secret Manager secrets,
+  and drops `google_sql_user.relay` from Terraform state without failing the
+  apply. The password-bearing `LOGIN` role `<hub>-relay` (with its existing
+  grants) remains in the Cloud SQL instance until you clean it up manually. To
+  remove the abandoned role after the apply completes:
+  1. Connect to the hub database (`<hub_name with - replaced by _>`, for example
+     `tfha_gke_h3`) **as the `<hub>` PostgreSQL user** (the granting role; `DROP
+     OWNED BY` cannot be used without role membership) and revoke its grants in
+     the hub schema (`public` by default):
+     ```sql
+     REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM "<hub>-relay";
+     REVOKE USAGE ON SCHEMA public FROM "<hub>-relay";
+     REVOKE CONNECT ON DATABASE "<hub_db>" FROM "<hub>-relay";
+     ```
+  2. Drop the abandoned role via SQL (`DROP ROLE "<hub>-relay";` from an admin
+     session permitted to drop it) or via the Cloud SQL Admin API:
+     ```bash
+     gcloud sql users delete <hub>-relay --instance=<shared_prefix>-pg --project=<project>
+     ```
 
 ## Destroy
 
@@ -418,7 +445,11 @@ configuration fails on purpose. To retire a hub, first remove the
 `prevent_destroy` line from `modules/hub-lb/main.tf` in a deliberate change,
 then destroy. Expect the hub's DNS record to stop resolving. The agent
 namespace's NFS data follows the same rules as a Cloud Run hub (see
-`../../README.md`, "Destroy runbook").
+`../../README.md`, "Destroy runbook"). If `enable_relay_db_user = true` was ever
+applied, `google_sql_user.relay` is abandoned on destroy (`deletion_policy =
+"ABANDON"`); once the hub database `<hub_db>` is gone, delete the leftover
+`<hub>-relay` Cloud SQL user (`DROP ROLE "<hub>-relay";` or `gcloud sql users
+delete <hub>-relay --instance=<shared_prefix>-pg --project=<project>`).
 
 ## Tests
 

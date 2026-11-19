@@ -140,6 +140,18 @@ resource "google_secret_manager_secret_version" "db_dsn" {
 # Non-chart deployments running `--role relay` directly should set
 # server.database.relay_role = "<hub_name>-relay" (or
 # SCION_SERVER_DATABASE_RELAYROLE) on the Hub as well.
+#
+# deletion_policy = "ABANDON": once Hub migration has granted privileges to
+# "<hub_name>-relay" in the hub database, PostgreSQL refuses a plain DROP ROLE
+# ("cannot be dropped because some objects depend on it") until those grants
+# are revoked. Without ABANDON, setting enable_relay_user back to false (for
+# example when rolling conduit_relay_mode back from "external" to "in_process")
+# or destroying the hub if Terraform orders google_sql_user.relay before
+# google_sql_database.this fails mid-apply. With ABANDON, Terraform drops the
+# user from state (while still destroying the Secret Manager password/DSN
+# secrets below) and leaves the PostgreSQL role in the Cloud SQL instance;
+# see configurations/hub-gke/README.md for the optional REVOKE + DROP ROLE
+# cleanup runbook.
 
 resource "random_password" "relay_db" {
   count = var.enable_relay_user ? 1 : 0
@@ -155,11 +167,12 @@ resource "random_password" "relay_db" {
 resource "google_sql_user" "relay" {
   count = var.enable_relay_user ? 1 : 0
 
-  project  = var.project_id
-  instance = var.instance_name
-  name     = "${var.hub_name}-relay"
-  password = random_password.relay_db[0].result
-  type     = "BUILT_IN"
+  project         = var.project_id
+  instance        = var.instance_name
+  name            = "${var.hub_name}-relay"
+  password        = random_password.relay_db[0].result
+  type            = "BUILT_IN"
+  deletion_policy = "ABANDON"
 }
 
 resource "google_secret_manager_secret" "relay_db_password" {

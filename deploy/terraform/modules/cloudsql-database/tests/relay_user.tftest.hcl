@@ -38,8 +38,12 @@ run "enable_relay_user_provisions_user_and_secrets" {
   }
 
   assert {
-    condition     = length(google_sql_user.relay) == 1 && google_sql_user.relay[0].name == "tfha-gke-h3-relay"
-    error_message = "enable_relay_user = true must create google_sql_user.relay named <hub_name>-relay."
+    condition = (
+      length(google_sql_user.relay) == 1 &&
+      google_sql_user.relay[0].name == "tfha-gke-h3-relay" &&
+      google_sql_user.relay[0].deletion_policy == "ABANDON"
+    )
+    error_message = "enable_relay_user = true must create google_sql_user.relay named <hub_name>-relay with deletion_policy = \"ABANDON\"."
   }
 
   assert {

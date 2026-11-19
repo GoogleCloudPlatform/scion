@@ -220,7 +220,7 @@ variable "enable_relay_pdb" {
 }
 
 variable "enable_relay_db_user" {
-  description = "Create a dedicated Cloud SQL user \"<hub_name>-relay\" and wire it to separate Conduit Relay pods when conduit_relay_mode is \"external\". The chart also sets server.database.relay_role on the Hub so Hub schema migration applies the least-privilege PostgreSQL table grants automatically on first boot and every upgrade. Default false reuses the hub's <hub_name> DB user so existing hubs see zero plan diff."
+  description = "Create a dedicated Cloud SQL user \"<hub_name>-relay\" and wire it to separate Conduit Relay pods when conduit_relay_mode is \"external\". The chart also sets server.database.relay_role on the Hub so Hub schema migration applies the least-privilege PostgreSQL table grants automatically on first boot and every upgrade. google_sql_user.relay sets deletion_policy = \"ABANDON\" so turning enable_relay_db_user off (including rolling conduit_relay_mode back to \"in_process\") or destroying the hub does not fail on PostgreSQL's DROP ROLE privilege check; see README.md for the optional REVOKE + DROP ROLE cleanup. Default false reuses the hub's <hub_name> DB user so existing hubs see zero plan diff."
   type        = bool
   default     = false
   nullable    = false
