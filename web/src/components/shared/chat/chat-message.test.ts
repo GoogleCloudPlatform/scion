@@ -101,7 +101,51 @@ describe('scion-chat-message @mentions', () => {
     expect(spans).toHaveLength(1);
     expect(spans[0].classList.contains('clickable')).toBe(true);
     expect(spans[0].getAttribute('data-mention')).toBe('native-chat-lead');
+    expect(spans[0].getAttribute('tabindex')).toBe('0');
+    expect(spans[0].getAttribute('role')).toBe('button');
     expect(spans[0].textContent).toBe('@native-chat-lead');
+  });
+
+  it('activates mention-click with Enter and Space from keyboard focus', async () => {
+    const el = await mount('hello @coder');
+    const seen: string[] = [];
+    const onMentionClick = (e: Event): void => {
+      seen.push((e as CustomEvent<{ slug: string }>).detail.slug);
+    };
+    document.addEventListener('mention-click', onMentionClick);
+    try {
+      const span = mentions(el)[0];
+      span.focus();
+      const enter = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      span.dispatchEvent(enter);
+      expect(enter.defaultPrevented).toBe(true);
+
+      const space = new KeyboardEvent('keydown', {
+        key: ' ',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      span.dispatchEvent(space);
+      expect(space.defaultPrevented).toBe(true);
+    } finally {
+      document.removeEventListener('mention-click', onMentionClick);
+    }
+
+    expect(seen).toEqual(['coder', 'coder']);
+  });
+
+  it('does not add button semantics to a mention nested inside a markdown link', async () => {
+    const el = await mount('see [@coder](https://example.com)');
+    const span = mentions(el)[0];
+    expect(span.getAttribute('data-mention')).toBe('coder');
+    expect(span.hasAttribute('tabindex')).toBe(false);
+    expect(span.hasAttribute('role')).toBe(false);
   });
 
   it('emits a composed mention-click with the slug when a mention is clicked', async () => {

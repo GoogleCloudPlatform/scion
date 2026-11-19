@@ -97,6 +97,51 @@ export interface ChatMessageMember {
   kind?: string;
 }
 
+/** Detail emitted when a highlighted `@mention` requests its context menu. */
+export interface MentionContextMenuDetail {
+  slug: string;
+  mentionEl: HTMLElement;
+  clientX: number;
+  clientY: number;
+  fromKeyboard: boolean;
+  originalEvent?: MouseEvent | undefined;
+}
+
+/** Detail emitted on `pointerdown` over a highlighted `@mention` (for touch long-press). */
+export interface MentionPointerDownDetail {
+  slug: string;
+  mentionEl: HTMLElement;
+  originalEvent: PointerEvent;
+}
+
+function selectionHasText(sel: Selection | null | undefined): boolean {
+  if (!sel) return false;
+  if (sel.type === 'Range') return true;
+  if (sel.type === 'None' || sel.type === 'Caret') return false;
+  if (sel.isCollapsed === true) return false;
+  if (typeof sel.toString === 'function' && sel.toString !== Object.prototype.toString) {
+    return sel.toString().length > 0;
+  }
+  return typeof sel.rangeCount === 'number' ? sel.rangeCount > 0 : sel.isCollapsed === false;
+}
+
+/**
+ * Whether an active non-collapsed text selection exists. Checks both any
+ * enclosing `ShadowRoot.getSelection?.()` and `window.getSelection()`, and
+ * handles Chromium's Shadow DOM retargeting (`type === 'Range'` with
+ * `isCollapsed === true`).
+ */
+export function hasTextSelection(target?: EventTarget | null): boolean {
+  if (typeof window === 'undefined' || typeof window.getSelection !== 'function') return false;
+  if (target instanceof Node) {
+    const root = target.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
+    if (typeof root.getSelection === 'function' && selectionHasText(root.getSelection())) {
+      return true;
+    }
+  }
+  return selectionHasText(window.getSelection());
+}
+
 /**
  * A reply preview: the message a reply quotes. `unavailable` is set when
  * that message no longer exists (for example removed by the hub's chat
@@ -860,6 +905,12 @@ function linkifyRenderedFragment(
     (el) => isCode(el) || artifactLinks.has(el) || isMailtoLink(el),
     (text) => styleMentionsInText(text, opts.knownUsersByEmail)
   );
+  for (const el of root.querySelectorAll('.mention[data-mention]')) {
+    if (!el.closest('a, button')) {
+      el.setAttribute('tabindex', '0');
+      el.setAttribute('role', 'button');
+    }
+  }
   linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
     styleEntityLinksInText(text, opts.gcs)
   );
@@ -1507,6 +1558,15 @@ export class ScionChatMessage extends LitElement {
     .md-content .mention.clickable:hover {
       background: color-mix(in srgb, var(--scion-primary, #3b82f6) 18%, transparent);
       text-decoration: underline;
+    }
+
+    .md-content .mention.clickable:focus {
+      outline: none;
+    }
+
+    .md-content .mention.clickable:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 1px;
     }
 
     /* A wide table scrolls sideways inside its own box rather than
@@ -2753,8 +2813,96 @@ export class ScionChatMessage extends LitElement {
     content.className = 'md-content';
     content.addEventListener('click', (e) => this.handleContentClick(e));
     content.addEventListener('auxclick', (e) => this.handleContentAuxClick(e));
+    content.addEventListener('pointerdown', (e) => this.handleContentPointerDown(e));
+    content.addEventListener('contextmenu', (e) => this.handleContentContextMenu(e));
+    content.addEventListener('keydown', (e) => this.handleContentKeydown(e));
     content.append(fragment);
     return content;
+  }
+
+  private handleContentPointerDown(e: PointerEvent): void {
+    const target = (e.target as HTMLElement | null)?.closest<HTMLElement>('.mention[data-mention]');
+    if (!target) return;
+    const slug = target.getAttribute('data-mention');
+    if (!slug) return;
+    this.dispatchEvent(
+      new CustomEvent<MentionPointerDownDetail>('mention-pointerdown', {
+        bubbles: true,
+        composed: true,
+        detail: { slug, mentionEl: target, originalEvent: e },
+      })
+    );
+  }
+
+  private handleContentContextMenu(e: MouseEvent): void {
+    const target = (e.target as HTMLElement | null)?.closest<HTMLElement>('.mention[data-mention]');
+    if (!target) return;
+    const slug = target.getAttribute('data-mention');
+    if (!slug) return;
+
+    const fromKeyboard =
+      (e.clientX === 0 && e.clientY === 0) ||
+      (typeof PointerEvent !== 'undefined' && e instanceof PointerEvent && e.pointerType === '');
+    if (!fromKeyboard && hasTextSelection(target)) return;
+
+    const ev = new CustomEvent<MentionContextMenuDetail>('mention-contextmenu', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      detail: {
+        slug,
+        mentionEl: target,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        fromKeyboard,
+        originalEvent: e,
+      },
+    });
+    if (!this.dispatchEvent(ev)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }
+
+  private handleContentKeydown(e: KeyboardEvent): void {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const target = (e.target as HTMLElement | null)?.closest<HTMLElement>('.mention[data-mention]');
+    if (!target) return;
+    const slug = target.getAttribute('data-mention');
+    if (!slug) return;
+
+    if ((e.key === 'Enter' || e.key === ' ') && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.dispatchEvent(
+        new CustomEvent('mention-click', {
+          bubbles: true,
+          composed: true,
+          detail: { slug },
+        })
+      );
+      return;
+    }
+
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      const r = target.getBoundingClientRect();
+      const ev = new CustomEvent<MentionContextMenuDetail>('mention-contextmenu', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        detail: {
+          slug,
+          mentionEl: target,
+          clientX: r.left,
+          clientY: r.bottom,
+          fromKeyboard: true,
+        },
+      });
+      if (!this.dispatchEvent(ev)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }
   }
 
   /**
