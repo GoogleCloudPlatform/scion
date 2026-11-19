@@ -989,6 +989,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// if any (for restaging capture-auth assets after a bundle clear).
 	var resolvedHCDir *config.HarnessConfigDir
 	var noAuthConfig *config.HarnessNoAuthConfig
+	var resolvedHarnessArgs []string
 	// aliasHarness keys the built-in model-alias fallback
 	// (resolveEffectiveModel): the declared harness of the harness-config
 	// this launch resolved, or the stored name when none was resolved (the
@@ -1079,6 +1080,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			h = resolved.Harness
 			aliasHarness = resolved.Config.Harness
 			noAuthConfig = resolved.Config.NoAuthConfig
+			resolvedHarnessArgs = resolved.Config.Args
 			resolvedHCDir = resolved.ConfigDir
 			if resolved.ConfigDir != nil {
 				harnessConfigRevision = config.ComputeHarnessConfigRevision(resolved.ConfigDir.Path)
@@ -1473,6 +1475,18 @@ authDone:
 	// a corrupted value from a prior run's scion-agent.json.
 	if harness.IsHarnessImplementationName(opts.HarnessAuth) {
 		opts.HarnessAuth = ""
+	}
+
+	// Reject a generic harness start whose command would be empty before
+	// pulling images, writing credentials, or creating any runtime resource
+	// (ptone/scion#5082). Checked before modelCommandArgs so --model alone
+	// cannot stand in for a command; skipped when no-auth mode runs its own
+	// shell command instead of the harness.
+	if !noAuthModeActive(opts.NoAuth, noAuthConfig) && h != nil {
+		preTask, preCmdArgs := resolveBaseCommandInputs(finalScionCfg, resolvedHarnessArgs, task)
+		if err := harness.ValidateCommand(h, preTask, harnessResume(opts), preCmdArgs); err != nil {
+			return nil, err
+		}
 	}
 
 	// 4. Launch container
@@ -2705,27 +2719,14 @@ authDone:
 		GitCloneForInit:  nfsInitGitClone(opts),
 		TelemetryEnabled: telemetryEnabled,
 		Task: func() string {
-			// When task_flag is set, task is delivered via CommandArgs instead
-			if finalScionCfg != nil && finalScionCfg.TaskFlag != "" {
-				return ""
-			}
-			return task
+			runTask, _ := resolveBaseCommandInputs(finalScionCfg, resolvedHarnessArgs, task)
+			return runTask
 		}(),
 		CommandArgs: func() []string {
-			var args []string
-			if finalScionCfg != nil {
-				args = finalScionCfg.CommandArgs
-			}
+			_, baseArgs := resolveBaseCommandInputs(finalScionCfg, resolvedHarnessArgs, task)
 			// The model flag comes before user args, from the same
 			// effective model as SCION_MODEL.
-			args = modelCommandArgs(effectiveModel, args)
-			if finalScionCfg != nil {
-				// If task_flag is configured, append task as a flag value
-				if finalScionCfg.TaskFlag != "" && task != "" {
-					args = append(args, finalScionCfg.TaskFlag, task)
-				}
-			}
-			return args
+			return modelCommandArgs(effectiveModel, baseArgs)
 		}(),
 		Env:             agentEnv,
 		ResolvedSecrets: opts.ResolvedSecrets,
@@ -4660,6 +4661,25 @@ func resolveEffectiveModel(envModel string, cfg *api.ScionConfig, hcAliases map[
 		}
 	}
 	return model
+}
+
+// resolveBaseCommandInputs computes the task and non-model command arguments
+// passed to Harness.GetCommand: cfg.CommandArgs (falling back to harnessArgs
+// when empty), plus cfg.TaskFlag and task when task_flag is configured.
+func resolveBaseCommandInputs(cfg *api.ScionConfig, harnessArgs []string, task string) (runTask string, args []string) {
+	if cfg != nil {
+		args = append(args, cfg.CommandArgs...)
+	}
+	if len(args) == 0 && len(harnessArgs) > 0 {
+		args = append(args, harnessArgs...)
+	}
+	if cfg != nil && cfg.TaskFlag != "" {
+		if task != "" {
+			args = append(args, cfg.TaskFlag, task)
+		}
+		return "", args
+	}
+	return task, args
 }
 
 // modelCommandArgs prepends the harness model flag for model to args. It

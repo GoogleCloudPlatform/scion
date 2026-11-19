@@ -46,6 +46,7 @@ type wrapperRun struct {
 	tail     string // contents of the tail file, "" if missing
 	tailMode os.FileMode
 	tmuxArgs string // the fake tmux's argv, "" if it did not run
+	output   string // combined stdout/stderr of the wrapper shell
 	// rcBeforeTail is true if the exit-code file already existed when
 	// the fake tmux captured the pane.
 	rcBeforeTail bool
@@ -77,7 +78,7 @@ func runWrapper(t *testing.T, cmdLine, tmuxScript string) wrapperRun {
 	}
 	// PATH holds only the fake tmux and the few tools the scripts use,
 	// so a real tmux on the host is never reached.
-	for _, tool := range []string{"sh", "touch"} {
+	for _, tool := range []string{"sh", "touch", "date"} {
 		p, err := exec.LookPath(tool)
 		if err != nil {
 			t.Fatal(err)
@@ -93,7 +94,7 @@ func runWrapper(t *testing.T, cmdLine, tmuxScript string) wrapperRun {
 	if err != nil {
 		t.Fatalf("wrapper run failed: %v\n%s", err, out)
 	}
-	var r wrapperRun
+	r := wrapperRun{output: string(out)}
 	if b, err := os.ReadFile(rcFile); err == nil {
 		r.rc = strings.TrimSpace(string(b))
 	}
@@ -151,6 +152,57 @@ func TestHarnessWrapperLine_PreservesExitStatus(t *testing.T) {
 			r := runWrapper(t, tc.cmdLine, tc.tmux)
 			if r.rc != tc.want {
 				t.Errorf("exit code file = %q, want %q", r.rc, tc.want)
+			}
+		})
+	}
+}
+
+// Defense in depth (ptone/scion#5082): an empty harness command or an empty
+// cmdLine never produces an invalid shell line ("sh -c '; ...'"); instead it
+// fails with an explained non-zero exit status recorded to HarnessExitCodeFile.
+func TestHarnessWrapperLine_EmptyCommandFailsWithExplanation(t *testing.T) {
+	cmdLine, ok := harnessCmdLine(RunConfig{Harness: &mockHarness{}}, harnessCmdLineOptions{})
+	if !ok {
+		t.Fatal("harnessCmdLine returned ok=false for non-nil Harness")
+	}
+	if strings.TrimSpace(cmdLine) == "" {
+		t.Fatalf("harnessCmdLine returned empty command line %q", cmdLine)
+	}
+	if strings.HasPrefix(strings.TrimSpace(cmdLine), ";") {
+		t.Fatalf("harnessCmdLine starts with ';': %q", cmdLine)
+	}
+
+	resumeEmptyFallback, ok := harnessCmdLine(RunConfig{
+		Harness: &resumeStubHarness{resumeTokens: []string{"--resume"}},
+		Resume:  true,
+	}, harnessCmdLineOptions{FreshStartOnFailedResume: true})
+	if !ok {
+		t.Fatal("harnessCmdLine(resume empty freshArgs) returned ok=false")
+	}
+
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{"from empty GetCommand", cmdLine},
+		{"from resume fallback with empty freshArgs", resumeEmptyFallback},
+		{"direct empty cmdLine", ""},
+		{"direct whitespace cmdLine", "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			window := tmuxAgentWindowCmd("sh", tc.line)
+			if strings.HasPrefix(window, "sh -c ';") {
+				t.Fatalf("tmuxAgentWindowCmd generated leading ';' syntax error: %s", window)
+			}
+			if !strings.Contains(window, emptyHarnessCmdNotice) {
+				t.Errorf("tmuxAgentWindowCmd missing explanation %q: %s", emptyHarnessCmdNotice, window)
+			}
+			r := runWrapper(t, tc.line, "")
+			if r.rc != "1" {
+				t.Fatalf("exit code file = %q, want \"1\" (output: %q)", r.rc, r.output)
+			}
+			if !strings.Contains(r.output, emptyHarnessCmdNotice) {
+				t.Errorf("wrapper stderr/stdout = %q, want substring %q", r.output, emptyHarnessCmdNotice)
 			}
 		})
 	}

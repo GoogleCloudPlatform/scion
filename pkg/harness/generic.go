@@ -17,6 +17,7 @@ package harness
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,12 +26,48 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
+// ErrEmptyGenericCommand is returned when starting a generic harness would
+// produce an empty command because neither a task, harness args, nor
+// command_args were provided.
+var ErrEmptyGenericCommand = errors.New("generic harness needs a task, harness args or command_args")
+
+type commandValidator interface {
+	validateCommand(task string, resume bool, baseArgs []string) error
+}
+
+// ValidateCommand checks that h produces a non-empty command for the given
+// start inputs. The built-in generic harness has no executable of its own, so
+// an empty command is rejected with ErrEmptyGenericCommand; custom/on-disk
+// harness configs and other harnesses are unaffected here (the runtime still
+// guards against any empty command line as defense in depth).
+func ValidateCommand(h api.Harness, task string, resume bool, baseArgs []string) error {
+	if v, ok := h.(commandValidator); ok {
+		return v.validateCommand(task, resume, baseArgs)
+	}
+	return nil
+}
+
+// ValidateEntryCommand checks the effective harness-config entry Resolve would
+// build from, without constructing a container-script harness (for preflight
+// admission checks that hold only an EffectiveConfig entry and its source).
+func ValidateEntryCommand(source config.HarnessConfigSource, entry config.HarnessConfigEntry, task string, resume bool, baseArgs []string) error {
+	if source != config.HarnessConfigSourceBuiltin || entry.Provisioner != nil {
+		return nil
+	}
+	d := NewDeclarativeGenericHarness(entry)
+	d.builtin = true
+	return d.validateCommand(task, resume, baseArgs)
+}
+
 // Generic is the harness for a harness-config without a provisioner or
 // declarative metadata, and for names harness.New does not know.
 type Generic struct {
 	// ready, when set, is the resolved ready spec of the harness-config
 	// entry Resolve built this harness from; nil uses the delay default.
 	ready *api.ReadySpec
+	// builtin is true when Resolve built this harness from the synthetic
+	// built-in "generic" harness-config entry (HarnessConfigSourceBuiltin).
+	builtin bool
 }
 
 func (g *Generic) Name() string {
@@ -74,6 +111,16 @@ func (g *Generic) GetCommand(task string, resume bool, baseArgs []string) []stri
 		args = append(args, task)
 	}
 	return args
+}
+
+func (g *Generic) validateCommand(task string, resume bool, baseArgs []string) error {
+	if !g.builtin {
+		return nil
+	}
+	if len(g.GetCommand(task, resume, baseArgs)) == 0 {
+		return ErrEmptyGenericCommand
+	}
+	return nil
 }
 
 func (g *Generic) DefaultConfigDir() string {

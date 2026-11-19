@@ -139,6 +139,22 @@ const resumeFallbackWindowSeconds = 30
 // resumeFallbackNotice is printed to stderr before the fresh start.
 const resumeFallbackNotice = "scion: no resumable session; starting fresh"
 
+// emptyHarnessCmdNotice is printed to stderr when a runtime entrypoint is
+// built from an empty harness command, so the agent window exits non-zero
+// with an explained message instead of a shell syntax error.
+const emptyHarnessCmdNotice = "scion: harness command is empty (provide a task, harness args, or command_args)"
+
+func emptyHarnessCmdLine() string {
+	return fmt.Sprintf("echo %s >&2; (exit 1)", shellQuote(emptyHarnessCmdNotice))
+}
+
+func quotedOrEmptyCmdLine(args []string, refs map[string]string) string {
+	if len(args) == 0 {
+		return emptyHarnessCmdLine()
+	}
+	return quotedArgsLine(args, refs)
+}
+
 // harnessCmdLine builds the shell command line that runs the harness (or
 // the no-auth shell), from the fields shared by every runtime's entrypoint
 // builder: NoAuth/NoAuthMessage/NoAuthCommand, or Harness.GetCommand with
@@ -157,7 +173,7 @@ func harnessCmdLine(cfg RunConfig, opts harnessCmdLineOptions) (cmdLine string, 
 				return resumeFallbackCmdLine(harnessArgs, freshArgs), true
 			}
 		}
-		return quotedArgsLine(harnessArgs, nil), true
+		return quotedOrEmptyCmdLine(harnessArgs, nil), true
 	}
 	return "", false
 }
@@ -227,10 +243,10 @@ func resumeFallbackCmdLine(resumeArgs, freshArgs []string) string {
 			`[ $(( $(date +%%s) - scion_start )) -lt %d ]; `+
 			`then printf '%%s\n' %s >&2; %s; else (exit "$scion_rc"); fi`,
 		assigns.String(),
-		quotedArgsLine(resumeArgs, refs),
+		quotedOrEmptyCmdLine(resumeArgs, refs),
 		resumeFallbackWindowSeconds,
 		shellQuote(resumeFallbackNotice),
-		quotedArgsLine(freshArgs, refs),
+		quotedOrEmptyCmdLine(freshArgs, refs),
 	)
 }
 
@@ -260,6 +276,9 @@ func tmuxAgentWindowCmd(shellPath, cmdLine string) string {
 // must be plain words (the fixed /tmp paths are); they are parameters only
 // so a test can run the line against temporary files.
 func harnessWrapperLine(cmdLine, tailFile, exitCodeFile string) string {
+	if strings.TrimSpace(cmdLine) == "" {
+		cmdLine = emptyHarnessCmdLine()
+	}
 	return cmdLine + "; scion_hrc=$?; " +
 		`(umask 077; tmux capture-pane -p -J -S -40 -t "$TMUX_PANE" > ` + tailFile + ") 2>/dev/null; " +
 		"echo $scion_hrc > " + exitCodeFile

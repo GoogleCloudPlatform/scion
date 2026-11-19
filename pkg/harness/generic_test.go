@@ -15,12 +15,15 @@
 package harness
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 func TestGeneric_Name(t *testing.T) {
@@ -57,6 +60,77 @@ func TestGeneric_GetCommand(t *testing.T) {
 	cmdEmpty := g.GetCommand("", false, nil)
 	if len(cmdEmpty) != 0 {
 		t.Errorf("Expected empty command, got %v", cmdEmpty)
+	}
+}
+
+func TestGeneric_ValidateCommand(t *testing.T) {
+	// Isolate HOME and CWD so Resolve("generic") uses the synthetic built-in
+	// entry even if the developer host has ~/.scion/harness-configs/generic.
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	resolvedGeneric, err := Resolve(context.Background(), ResolveOptions{Name: "generic"})
+	if err != nil {
+		t.Fatalf("Resolve(generic): %v", err)
+	}
+	if err := ValidateCommand(resolvedGeneric.Harness, "", false, nil); !errors.Is(err, ErrEmptyGenericCommand) {
+		t.Fatalf("ValidateCommand(built-in generic, empty) = %v, want ErrEmptyGenericCommand", err)
+	}
+	if err := ValidateCommand(resolvedGeneric.Harness, "", true, nil); !errors.Is(err, ErrEmptyGenericCommand) {
+		t.Fatalf("ValidateCommand(built-in generic, empty resume) = %v, want ErrEmptyGenericCommand", err)
+	}
+	if err := ValidateCommand(resolvedGeneric.Harness, "echo hi", false, nil); err != nil {
+		t.Errorf("ValidateCommand(built-in generic, with task) = %v, want nil", err)
+	}
+	if err := ValidateCommand(resolvedGeneric.Harness, "", false, []string{"tail", "-f", "/dev/null"}); err != nil {
+		t.Errorf("ValidateCommand(built-in generic, with baseArgs) = %v, want nil", err)
+	}
+
+	// Built-in generic with a settings overlay adding declarative metadata
+	// (e.g. ready) still rejects an empty command.
+	withReadySettings := &config.VersionedSettings{
+		HarnessConfigs: map[string]config.HarnessConfigEntry{
+			"generic": {
+				Harness: "generic",
+				Ready:   &config.HarnessReadyConfig{Strategy: config.ReadyStrategyDelay},
+			},
+		},
+	}
+	resolvedDeclBuiltin, err := Resolve(context.Background(), ResolveOptions{
+		Name:     "generic",
+		Settings: withReadySettings,
+	})
+	if err != nil {
+		t.Fatalf("Resolve(generic with ready overlay): %v", err)
+	}
+	if err := ValidateCommand(resolvedDeclBuiltin.Harness, "", false, nil); !errors.Is(err, ErrEmptyGenericCommand) {
+		t.Fatalf("ValidateCommand(built-in declarative generic, empty) = %v, want ErrEmptyGenericCommand", err)
+	}
+
+	// Non-builtin Generic / DeclarativeGenericHarness instances and all
+	// bundled harnesses are unaffected by early command validation.
+	if err := ValidateCommand(&Generic{}, "", false, nil); err != nil {
+		t.Errorf("ValidateCommand(non-builtin Generic) = %v, want nil", err)
+	}
+	declCustom := NewDeclarativeGenericHarness(config.HarnessConfigEntry{Harness: "generic", SkillsDir: ".skills"})
+	if err := ValidateCommand(declCustom, "", false, nil); err != nil {
+		t.Errorf("ValidateCommand(custom declarative generic) = %v, want nil", err)
+	}
+	for _, name := range AllHarnessNames() {
+		h := New(name)
+		if err := ValidateCommand(h, "", false, nil); err != nil {
+			t.Errorf("ValidateCommand(built-in %q) = %v, want nil", name, err)
+		}
+	}
+
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBuiltin, config.HarnessConfigEntry{Harness: "generic"}, "", false, nil); !errors.Is(err, ErrEmptyGenericCommand) {
+		t.Errorf("ValidateEntryCommand(builtin generic empty) = %v, want ErrEmptyGenericCommand", err)
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBuiltin, config.HarnessConfigEntry{Harness: "generic"}, "echo hi", false, nil); err != nil {
+		t.Errorf("ValidateEntryCommand(builtin generic with task) = %v, want nil", err)
+	}
+	if err := ValidateEntryCommand(config.HarnessConfigSourceBrokerLocal, config.HarnessConfigEntry{Harness: "generic"}, "", false, nil); err != nil {
+		t.Errorf("ValidateEntryCommand(broker-local generic empty) = %v, want nil", err)
 	}
 }
 

@@ -36,7 +36,8 @@ import (
 // "Alternative C, partial adoption" path from the design doc and lets
 // external harness authors stand up a new harness with no code.
 type DeclarativeGenericHarness struct {
-	entry config.HarnessConfigEntry
+	entry   config.HarnessConfigEntry
+	builtin bool
 }
 
 // NewDeclarativeGenericHarness wraps a HarnessConfigEntry as an api.Harness.
@@ -134,6 +135,16 @@ func (d *DeclarativeGenericHarness) GetCommand(task string, resume bool, baseArg
 		}
 	}
 	return args
+}
+
+func (d *DeclarativeGenericHarness) validateCommand(task string, resume bool, baseArgs []string) error {
+	if !d.builtin {
+		return nil
+	}
+	if len(d.GetCommand(task, resume, baseArgs)) == 0 {
+		return ErrEmptyGenericCommand
+	}
+	return nil
 }
 
 func (d *DeclarativeGenericHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {

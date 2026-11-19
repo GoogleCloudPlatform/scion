@@ -1617,7 +1617,28 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 // during admission, for an async create: Manager.Start would otherwise raise
 // the same errors, but only from inside the launch goroutine.
 func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) error {
-	return PreflightResolve(ctx, opts)
+	rt, projectDir, profileName, settings, err := preflightResolveDetails(ctx, opts)
+	if err != nil {
+		return err
+	}
+	// If the agent already has persisted state on disk (scion-agent.json /
+	// prompt.md), defer command validation to Start, which loads those files.
+	if agentDir, _, dirErr := AgentStateDir(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID, opts.BrokerMode || opts.HubProjectID != ""); dirErr == nil && agentDir != "" {
+		if _, statErr := os.Stat(filepath.Join(agentDir, "scion-agent.json")); statErr == nil {
+			return nil
+		}
+	}
+	entry := harness.EffectiveConfig(rt.HarnessConfigName, rt.HarnessConfigDir, settings, profileName)
+	noAuth := opts.NoAuth || isNoAuthSelection(opts.HarnessAuth, rt.Config)
+	if noAuthModeActive(noAuth, entry.NoAuthConfig) {
+		return nil
+	}
+	var hcSource config.HarnessConfigSource
+	if rt.HarnessConfigDir != nil {
+		hcSource = rt.HarnessConfigDir.Source
+	}
+	runTask, baseCmdArgs := resolveBaseCommandInputs(rt.Config, entry.Args, opts.Task)
+	return harness.ValidateEntryCommand(hcSource, entry, runTask, harnessResume(opts), baseCmdArgs)
 }
 
 // PreflightResolve is Preflight's resolution as a package function: it
@@ -1628,11 +1649,16 @@ func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) err
 // refusal happens before a worktree, agent directory, staged bundle or
 // container exists.
 func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
+	_, _, _, _, err := preflightResolveDetails(ctx, opts)
+	return err
+}
+
+func preflightResolveDetails(ctx context.Context, opts api.StartOptions) (*resolvedTemplate, string, string, *config.VersionedSettings, error) {
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
 	if err != nil {
-		return err
+		return nil, "", "", nil, err
 	}
 
 	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
@@ -1654,8 +1680,8 @@ func PreflightResolve(ctx context.Context, opts api.StartOptions) error {
 
 	// The real provisioning repeats this resolution and reports any ignored
 	// template environment keys; stay quiet here so each is reported once.
-	_, err = resolveTemplateAndHarnessConfig(withQuietTemplateEnvWarnings(ctx), templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
-	return err
+	rt, err := resolveTemplateAndHarnessConfig(withQuietTemplateEnvWarnings(ctx), templateName, opts.HarnessConfig, opts.ProjectPath, projectDir, profileName, settings, inlineCfg)
+	return rt, projectDir, profileName, settings, err
 }
 
 // templateChainFor resolves the template chain for name. A name equal to the
@@ -2504,6 +2530,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// See docs-site/src/content/docs/reference/settings-precedence.md.
 	hcImage := hcDir.Config.Image
 	hcPullPolicy := hcDir.Config.ImagePullPolicy
+	hcArgs := hcDir.Config.Args
 	if settings != nil {
 		if settingsHC, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil {
 			if settingsHC.Image != "" {
@@ -2512,6 +2539,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 			if settingsHC.ImagePullPolicy != "" {
 				hcPullPolicy = settingsHC.ImagePullPolicy
+			}
+			if len(settingsHC.Args) > 0 {
+				hcArgs = settingsHC.Args
 			}
 		}
 	}
@@ -2524,8 +2554,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if hcDir.Config.Model != "" {
 		hcCfg.Model = hcDir.Config.Model
 	}
-	if len(hcDir.Config.Args) > 0 {
-		hcCfg.CommandArgs = hcDir.Config.Args
+	if len(hcArgs) > 0 {
+		hcCfg.CommandArgs = hcArgs
 	}
 	if hcDir.Config.TaskFlag != "" {
 		hcCfg.TaskFlag = hcDir.Config.TaskFlag

@@ -108,14 +108,18 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		}
 	}
 
+	isBuiltin := hcDir != nil && hcDir.Source == config.HarnessConfigSourceBuiltin
+
 	// 2. Declarative generic. If config.yaml has declarative metadata
 	// (command/env_template/capabilities/ready/delivery), use the
 	// declarative wrapper so callers get those fields. Otherwise fall back
 	// to the legacy Generic. The check reads the declared entry: a ready
 	// block filled in from the built-in bundle is not declared metadata.
 	if hasDeclarativeMetadata(declared) {
+		d := NewDeclarativeGenericHarness(entry)
+		d.builtin = isBuiltin
 		return &ResolvedHarness{
-			Harness:        NewDeclarativeGenericHarness(entry),
+			Harness:        d,
 			ConfigName:     opts.Name,
 			ConfigDir:      hcDir,
 			Config:         entry,
@@ -128,7 +132,7 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	// block), so a built-in harness type keeps its readiness here too.
 	ready := entry.ResolvedReady()
 	return &ResolvedHarness{
-		Harness:        &Generic{ready: &ready},
+		Harness:        &Generic{ready: &ready, builtin: isBuiltin},
 		ConfigName:     opts.Name,
 		ConfigDir:      hcDir,
 		Config:         entry,
