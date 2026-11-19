@@ -39,7 +39,7 @@ func TestWebhookEndpointService(t *testing.T) {
 			assert.Equal(t, "ci-hook", req.Name)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(WebhookEndpointCreated{
+			out := WebhookEndpointCreated{
 				WebhookEndpoint: WebhookEndpoint{
 					ID:            "ep-123",
 					ProjectID:     "proj-1",
@@ -53,7 +53,24 @@ func TestWebhookEndpointService(t *testing.T) {
 					UpdatedAt:     now,
 				},
 				Secret: "one-time-secret",
-			})
+			}
+			if req.DefaultTrigger != nil {
+				out.TriggerID = "tr-default-123"
+				out.Trigger = &Trigger{
+					ID:                    "tr-default-123",
+					ProjectID:             "proj-1",
+					Name:                  req.Name,
+					Source:                TriggerSourceSpec{Kind: "webhook", ID: "ep-123"},
+					Match:                 TriggerMatchSpec{Types: []string{"webhook.received"}, Rules: []TriggerMatchRuleSpec{}},
+					Action:                TriggerActionSpec{Type: "message", AgentName: req.DefaultTrigger.AgentName, Message: req.DefaultTrigger.Message, Interrupt: req.DefaultTrigger.Interrupt, Wake: req.DefaultTrigger.Wake},
+					Subject:               TriggerSubjectSpec{Dialect: "cel", Mode: "new"},
+					Status:                "active",
+					AuthorizationRevision: 1,
+					CreatedAt:             now,
+					UpdatedAt:             now,
+				}
+			}
+			_ = json.NewEncoder(w).Encode(out)
 		case http.MethodGet:
 			assert.Equal(t, "ci-hook", r.URL.Query().Get("name"))
 			assert.Equal(t, "active", r.URL.Query().Get("status"))
@@ -113,6 +130,25 @@ func TestWebhookEndpointService(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ep-123", created.ID)
 	assert.Equal(t, "one-time-secret", created.Secret)
+	assert.Empty(t, created.TriggerID)
+	assert.Nil(t, created.Trigger)
+
+	createdWithDefault, err := svc.Create(ctx, &CreateWebhookEndpointRequest{
+		Name:        "ci-hook",
+		Description: "CI deploys with default trigger",
+		DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+			AgentName: "lead",
+			Message:   "Handle webhook",
+			Interrupt: true,
+			Wake:      true,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ep-123", createdWithDefault.ID)
+	assert.Equal(t, "tr-default-123", createdWithDefault.TriggerID)
+	require.NotNil(t, createdWithDefault.Trigger)
+	assert.Equal(t, "tr-default-123", createdWithDefault.Trigger.ID)
+	assert.Equal(t, "Handle webhook", createdWithDefault.Trigger.Action.Message)
 
 	got, err := svc.Get(ctx, "ep-123")
 	require.NoError(t, err)

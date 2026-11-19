@@ -51,9 +51,13 @@ type WebhookEndpointResponse struct {
 }
 
 // WebhookEndpointCreatedResponse is returned once on POST /webhook-endpoints.
+// When defaultTrigger was supplied, TriggerID and Trigger describe the default
+// message trigger created in the same transaction.
 type WebhookEndpointCreatedResponse struct {
 	WebhookEndpointResponse
-	Secret string `json:"secret"`
+	Secret    string           `json:"secret"`
+	TriggerID string           `json:"triggerId,omitempty"`
+	Trigger   *TriggerResponse `json:"trigger,omitempty"`
 }
 
 // ListWebhookEndpointsResponse is the paginated response of GET /webhook-endpoints.

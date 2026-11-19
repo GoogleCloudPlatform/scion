@@ -107,11 +107,23 @@ func (s *triggerEventService) basePath() string {
 	return fmt.Sprintf("/api/v1/projects/%s/trigger-events", url.PathEscape(s.projectID))
 }
 
+// WebhookEndpointDefaultTriggerSpec configures an optional default message
+// trigger created in the same transaction as a webhook endpoint.
+type WebhookEndpointDefaultTriggerSpec struct {
+	AgentID   string `json:"agentId,omitempty"`
+	AgentName string `json:"agentName,omitempty"`
+	ToSelf    bool   `json:"toSelf,omitempty"`
+	Message   string `json:"message"`
+	Interrupt bool   `json:"interrupt,omitempty"`
+	Wake      bool   `json:"wake,omitempty"`
+}
+
 // CreateWebhookEndpointRequest is the client-side request for creating a webhook endpoint.
 type CreateWebhookEndpointRequest struct {
-	Name          string `json:"name"`
-	Description   string `json:"description,omitempty"`
-	SignatureMode string `json:"signatureMode,omitempty"`
+	Name           string                             `json:"name"`
+	Description    string                             `json:"description,omitempty"`
+	SignatureMode  string                             `json:"signatureMode,omitempty"`
+	DefaultTrigger *WebhookEndpointDefaultTriggerSpec `json:"defaultTrigger,omitempty"`
 }
 
 // WebhookEndpoint represents a webhook endpoint returned by GET and LIST routes.
@@ -135,7 +147,9 @@ type WebhookEndpoint struct {
 // WebhookEndpointCreated is returned once when creating a webhook endpoint.
 type WebhookEndpointCreated struct {
 	WebhookEndpoint
-	Secret string `json:"secret"`
+	Secret    string   `json:"secret"`
+	TriggerID string   `json:"triggerId,omitempty"`
+	Trigger   *Trigger `json:"trigger,omitempty"`
 }
 
 // ListWebhookEndpointsOptions configures webhook endpoint listing.

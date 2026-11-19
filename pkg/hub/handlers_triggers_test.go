@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -37,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -3416,4 +3418,319 @@ func TestTriggersAuthoring_MatchRulesRevisionBumpAndBrokenElementGuard(t *testin
 	assert.Equal(t, []string{"webhook.received"}, storedBroken.MatchTypes)
 	assert.Equal(t, 5, storedBroken.AuthorizationRevision)
 	assert.Equal(t, f.owner.ID, storedBroken.InitiatorPrincipalID)
+}
+
+type failCreateTriggerTxStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (s *failCreateTriggerTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !s.fault.Active() {
+		return s.Store.WithTx(ctx, fn)
+	}
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&failCreateTriggerInnerStore{Store: tx, parent: s})
+	})
+}
+
+type failCreateTriggerInnerStore struct {
+	store.Store
+	parent *failCreateTriggerTxStore
+}
+
+func (s *failCreateTriggerInnerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) error {
+	if s.parent.fault.Active() {
+		return errors.New("injected CreateTrigger database error")
+	}
+	return s.Store.CreateTrigger(ctx, tr)
+}
+
+func TestWebhookEndpointCreate_DefaultTrigger(t *testing.T) {
+	t.Run("one-call create returns both IDs, matches defaults, records audit, and fires end-to-end", func(t *testing.T) {
+		f := setupTriggersTestFixture(t)
+		ctx := context.Background()
+
+		rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name:        "one-call-deploys",
+			Description: "One-call endpoint and default trigger",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentName: f.targetAgent.Slug,
+				Message:   "Handle incoming webhook event",
+				Interrupt: true,
+				Wake:      true,
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		var created WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		require.NotEmpty(t, created.ID)
+		require.NotEmpty(t, created.Secret)
+		require.NotEmpty(t, created.TriggerID)
+		require.NotNil(t, created.Trigger)
+		assert.Equal(t, created.TriggerID, created.Trigger.ID)
+		assert.Equal(t, "one-call-deploys", created.Trigger.Name)
+		assert.Equal(t, TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: created.ID}, created.Trigger.Source)
+		assert.Equal(t, []string{"webhook.received"}, created.Trigger.Match.Types)
+		assert.Empty(t, created.Trigger.Match.Rules)
+		assert.Empty(t, created.Trigger.Match.Dialect)
+		assert.Empty(t, created.Trigger.Match.Expr)
+		assert.Equal(t, store.TriggerSubjectModeNew, created.Trigger.Subject.Mode)
+		assert.Empty(t, created.Trigger.Subject.Expr)
+		assert.Equal(t, store.TriggerActionMessage, created.Trigger.Action.Type)
+		assert.Equal(t, f.targetAgent.ID, created.Trigger.Action.AgentID)
+		assert.Equal(t, f.targetAgent.Slug, created.Trigger.Action.AgentName)
+		assert.Equal(t, "Handle incoming webhook event", created.Trigger.Action.Message)
+		assert.True(t, created.Trigger.Action.Interrupt)
+		assert.True(t, created.Trigger.Action.Wake)
+
+		// Stored row uses 3b-1 ordered contract (empty scalar match columns) and owner attribution.
+		storedTr, err := f.store.GetTrigger(ctx, created.TriggerID)
+		require.NoError(t, err)
+		assert.Empty(t, storedTr.MatchDialect)
+		assert.Empty(t, storedTr.MatchRule)
+		assert.Empty(t, storedTr.MatchRules)
+		assert.Equal(t, store.DelegationPrincipalUser, storedTr.InitiatorPrincipalKind)
+		assert.Equal(t, f.owner.ID, storedTr.InitiatorPrincipalID)
+		assert.Equal(t, 1, storedTr.AuthorizationRevision)
+
+		// Audit record for webhook_endpoint_create includes both endpoint_id and trigger_id, never the secret.
+		audits, _, err := f.store.ListMutationAudits(ctx, store.MutationAuditFilter{
+			MutationType: mutationTypeWebhookEndpointCreate,
+			TargetID:     created.ID,
+			Limit:        10,
+		})
+		require.NoError(t, err)
+		require.Len(t, audits, 1)
+		assert.NotContains(t, audits[0].AfterSummary, created.Secret)
+		var afterSummary map[string]any
+		require.NoError(t, json.Unmarshal([]byte(audits[0].AfterSummary), &afterSummary))
+		assert.Equal(t, created.ID, afterSummary["endpoint_id"])
+		assert.Equal(t, created.TriggerID, afterSummary["trigger_id"])
+
+		// End-to-end: signed POST to the one-call endpoint fires its default trigger.
+		disp := &recordingDispatcher{}
+		f.srv.SetDispatcher(disp)
+		require.NotNil(t, f.srv.startTriggerDrainer(ctx))
+		t.Cleanup(func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			f.srv.stopTriggerDrainer(stopCtx)
+		})
+		time.Sleep(30 * time.Millisecond)
+
+		payload := []byte(`{"deploy":"v1.2.3"}`)
+		ts := time.Now().Unix()
+		sig := trigger.SignScionV1(created.Secret, ts, "deliv-one-call-1", "", "", payload)
+		hookReq := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+created.ID, bytes.NewReader(payload))
+		hookReq.RemoteAddr = "198.51.100.10:12345"
+		hookReq.Header.Set("Content-Type", "application/json")
+		hookReq.Header.Set(trigger.HeaderDelivery, "deliv-one-call-1")
+		hookReq.Header.Set(trigger.HeaderSignature, sig)
+		hookRec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(hookRec, hookReq)
+		require.Equal(t, http.StatusAccepted, hookRec.Code, hookRec.Body.String())
+
+		require.Eventually(t, func() bool {
+			return len(disp.getCalls()) == 1
+		}, 1500*time.Millisecond, 15*time.Millisecond)
+		assert.Contains(t, disp.getCalls()[0].Message, "Handle incoming webhook event")
+
+		histRec := f.doTrigger(t, f.ownerAuth, created.TriggerID+"/history", http.MethodGet, nil)
+		require.Equal(t, http.StatusOK, histRec.Code, histRec.Body.String())
+		var hist ListTriggerFiresResponse
+		require.NoError(t, json.Unmarshal(histRec.Body.Bytes(), &hist))
+		require.Len(t, hist.Fires, 1)
+		assert.Equal(t, store.TriggerFireStatusFired, hist.Fires[0].Status)
+	})
+
+	t.Run("toSelf resolves strictly from Hub AgentIdentity and rejects spoofing or human callers", func(t *testing.T) {
+		f := setupTriggersTestFixture(t)
+		ctx := context.Background()
+
+		// 1. Human caller with toSelf: true -> 400 validation_error, nothing persisted.
+		humanSelfRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "human-self-invalid",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				ToSelf:  true,
+				Message: "should fail",
+			},
+		})
+		assert.Equal(t, http.StatusBadRequest, humanSelfRec.Code, humanSelfRec.Body.String())
+		_, err := f.store.GetWebhookEndpointByName(ctx, f.projectID, "human-self-invalid")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		// 2. Agent caller combining toSelf with agentId or agentName -> 400 validation_error, nothing persisted.
+		conflictSelfRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "agent-self-conflict",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				ToSelf:  true,
+				AgentID: f.agentB.ID,
+				Message: "should fail",
+			},
+		})
+		assert.Equal(t, http.StatusBadRequest, conflictSelfRec.Code, conflictSelfRec.Body.String())
+		_, err = f.store.GetWebhookEndpointByName(ctx, f.projectID, "agent-self-conflict")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		// 3. Agent A calling with toSelf: true -> 201 targeting Agent A from its Hub identity.
+		agentSelfRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "agent-a-self-ep",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				ToSelf:  true,
+				Message: "Deliver to self",
+				Wake:    true,
+			},
+		})
+		require.Equal(t, http.StatusCreated, agentSelfRec.Code, agentSelfRec.Body.String())
+		var selfCreated WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(agentSelfRec.Body.Bytes(), &selfCreated))
+		require.NotNil(t, selfCreated.Trigger)
+		assert.Equal(t, f.agentA.ID, selfCreated.Trigger.Action.AgentID)
+		assert.Equal(t, f.agentA.Slug, selfCreated.Trigger.Action.AgentName)
+
+		storedEp, err := f.store.GetWebhookEndpoint(ctx, selfCreated.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DelegationPrincipalAgent, storedEp.OwnerPrincipalKind)
+		assert.Equal(t, f.agentA.ID, storedEp.OwnerPrincipalID)
+
+		storedTr, err := f.store.GetTrigger(ctx, selfCreated.TriggerID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DelegationPrincipalAgent, storedTr.InitiatorPrincipalKind)
+		assert.Equal(t, f.agentA.ID, storedTr.InitiatorPrincipalID)
+	})
+
+	t.Run("authority parity: UAT scopes and target message authorization match two-call path without partial writes", func(t *testing.T) {
+		f := setupTriggersTestFixture(t)
+		ctx := context.Background()
+		projBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}
+
+		// 1. UAT with webhook_endpoint:create ONLY (no trigger:create) succeeds without defaultTrigger, fails 403 with defaultTrigger.
+		epOnlyUAT := scheduleTestUAT(t, f.ownerAuth, projBoundary, "webhook_endpoint:create")
+		bareOK := f.doWebhookEndpoint(t, epOnlyUAT, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "uat-bare-ep"})
+		require.Equal(t, http.StatusCreated, bareOK.Code, bareOK.Body.String())
+
+		deniedNoTrCreate := f.doWebhookEndpoint(t, epOnlyUAT, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "uat-denied-no-tr-create",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentID: f.targetAgent.ID,
+				Message: "hi",
+			},
+		})
+		assert.Equal(t, http.StatusForbidden, deniedNoTrCreate.Code, deniedNoTrCreate.Body.String())
+		_, err := f.store.GetWebhookEndpointByName(ctx, f.projectID, "uat-denied-no-tr-create")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		// 2. UAT missing webhook_endpoint:read fails 403 when defaultTrigger is requested, leaving no endpoint behind.
+		noEpReadUAT := scheduleTestUAT(t, f.ownerAuth, projBoundary, "webhook_endpoint:create", "trigger:create", "agent:message")
+		deniedNoEpRead := f.doWebhookEndpoint(t, noEpReadUAT, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "uat-denied-no-ep-read",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentID: f.targetAgent.ID,
+				Message: "hi",
+			},
+		})
+		assert.Equal(t, http.StatusForbidden, deniedNoEpRead.Code, deniedNoEpRead.Body.String())
+		_, err = f.store.GetWebhookEndpointByName(ctx, f.projectID, "uat-denied-no-ep-read")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		// 3. UAT missing agent:message fails target authorization without creating the endpoint.
+		noAgentMsgUAT := scheduleTestUAT(t, f.ownerAuth, projBoundary, "webhook_endpoint:create", "webhook_endpoint:read", "trigger:create")
+		deniedNoMsg := f.doWebhookEndpoint(t, noAgentMsgUAT, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "uat-denied-no-msg",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentID: f.targetAgent.ID,
+				Message: "hi",
+			},
+		})
+		assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, deniedNoMsg.Code, deniedNoMsg.Body.String())
+		_, err = f.store.GetWebhookEndpointByName(ctx, f.projectID, "uat-denied-no-msg")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		// 4. Full UAT scopes succeed and record bounded ceiling on the default trigger.
+		fullUAT := scheduleTestUAT(t, f.ownerAuth, projBoundary, "webhook_endpoint:create", "webhook_endpoint:read", "trigger:create", "agent:message")
+		fullOK := f.doWebhookEndpoint(t, fullUAT, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "uat-one-call-ok",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentID: f.targetAgent.ID,
+				Message: "hi",
+			},
+		})
+		require.Equal(t, http.StatusCreated, fullOK.Code, fullOK.Body.String())
+		var uatCreated WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(fullOK.Body.Bytes(), &uatCreated))
+		storedUATTr, err := f.store.GetTrigger(ctx, uatCreated.TriggerID)
+		require.NoError(t, err)
+		assert.Equal(t, store.EffectCeilingBounded, storedUATTr.AuthorityCeiling.Kind)
+		assert.Equal(t, store.InitiatorCredentialKindUAT, storedUATTr.InitiatorCredentialKind)
+
+		// 5. Missing target agent -> 404, no endpoint or secret created.
+		missingTarget := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "missing-target-ep",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentName: "nonexistent-agent",
+				Message:   "hi",
+			},
+		})
+		assert.Equal(t, http.StatusNotFound, missingTarget.Code, missingTarget.Body.String())
+		_, err = f.store.GetWebhookEndpointByName(ctx, f.projectID, "missing-target-ep")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("atomic single-transaction rollback on trigger name collision and store fault", func(t *testing.T) {
+		srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *failCreateTriggerTxStore {
+			return &failCreateTriggerTxStore{Store: inner, fault: sw}
+		})
+		f := setupTriggersTestFixtureOnServer(t, srv, s)
+		ctx := context.Background()
+
+		// Create an existing endpoint "other-ep" and a trigger named "taken-trigger-name" attached to it.
+		otherEpRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "other-ep"})
+		require.Equal(t, http.StatusCreated, otherEpRec.Code, otherEpRec.Body.String())
+		var otherEp WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(otherEpRec.Body.Bytes(), &otherEp))
+
+		existingTrRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   "taken-trigger-name",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: otherEp.ID},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "existing"},
+		})
+		require.Equal(t, http.StatusCreated, existingTrRec.Code, existingTrRec.Body.String())
+
+		secretsBefore, err := f.store.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeHub, ScopeID: f.srv.hubID})
+		require.NoError(t, err)
+
+		// 1. Name collision on trigger -> 409 conflict naming trigger, and endpoint + secret roll back completely.
+		collisionRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "taken-trigger-name",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentID: f.targetAgent.ID,
+				Message: "new",
+			},
+		})
+		require.Equal(t, http.StatusConflict, collisionRec.Code, collisionRec.Body.String())
+		assert.Contains(t, collisionRec.Body.String(), "a trigger with this name already exists in this project")
+		_, err = f.store.GetWebhookEndpointByName(ctx, f.projectID, "taken-trigger-name")
+		assert.ErrorIs(t, err, store.ErrNotFound, "endpoint insert must roll back when default trigger creation fails")
+		secretsAfterCollision, err := f.store.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeHub, ScopeID: f.srv.hubID})
+		require.NoError(t, err)
+		assert.Len(t, secretsAfterCollision, len(secretsBefore), "internal secret insert must roll back when default trigger creation fails")
+
+		// 2. Store fault on CreateTrigger inside WithTx -> 500, and endpoint + secret + audit roll back completely.
+		fault.Arm()
+		faultRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "faulted-one-call",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentID: f.targetAgent.ID,
+				Message: "new",
+			},
+		})
+		assert.Equal(t, http.StatusInternalServerError, faultRec.Code, faultRec.Body.String())
+		_, err = s.GetWebhookEndpointByName(ctx, f.projectID, "faulted-one-call")
+		assert.ErrorIs(t, err, store.ErrNotFound, "endpoint insert must roll back on CreateTrigger store fault")
+		secretsAfterFault, err := s.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeHub, ScopeID: f.srv.hubID})
+		require.NoError(t, err)
+		assert.Len(t, secretsAfterFault, len(secretsBefore), "internal secret insert must roll back on CreateTrigger store fault")
+	})
 }
