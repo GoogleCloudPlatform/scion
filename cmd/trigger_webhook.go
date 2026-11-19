@@ -32,23 +32,36 @@ import (
 var (
 	triggerWebhookName        string
 	triggerWebhookDescription string
+	triggerWebhookAgent       string
+	triggerWebhookToSelf      bool
+	triggerWebhookMessage     string
+	triggerWebhookInterrupt   bool
+	triggerWebhookWake        bool
 	triggerWebhookListStatus  string
 )
 
 var triggerWebhookCmd = &cobra.Command{
 	Use:   "webhook",
 	Short: "Manage project webhook endpoints",
-	Long:  `Create, list, and delete signed webhook ingress endpoints for the current project.`,
+	Long:  `Create, inspect, list, and delete signed webhook ingress endpoints for the current project.`,
 }
 
 var triggerWebhookCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a webhook endpoint and display its one-time signing secret",
-	Long: `Create a signed webhook endpoint for the current project.
+	Long: `Create a signed webhook endpoint for the current project, optionally pairing it
+with a default message trigger in the same transaction.
 
 The Hub generates a 32-byte base64url HMAC signing secret and returns it ONCE in
 this command's output. Save it immediately — subsequent list and read operations
 never return the secret.
+
+One-call endpoint + default trigger:
+  Pass --agent <name|id> --message <text> (or --to-self --message <text> inside
+  an agent container, resolved strictly from the caller's authenticated Hub
+  identity) with optional --interrupt and --wake to create the endpoint and a
+  default webhook.received message trigger named after the endpoint in a single
+  transaction under the same authority checks as two separate calls.
 
 Data visibility & payload limits:
   - Note: anyone with read access to this project's triggers can read bodies sent here.
@@ -82,6 +95,14 @@ Example (curl + openssl):
     -H "X-Scion-Subject: ${SUBJECT}" \
     --data-raw "$BODY"`,
 	RunE: runTriggerWebhookCreate,
+}
+
+var triggerWebhookGetCmd = &cobra.Command{
+	Use:   "get <id|name>",
+	Short: "Get a webhook endpoint",
+	Long:  `Display detailed configuration and ingress counters for a webhook endpoint (never its signing secret).`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTriggerWebhookGet,
 }
 
 var triggerWebhookListCmd = &cobra.Command{
@@ -193,10 +214,52 @@ func resolveWebhookEndpointIDOrName(ctx context.Context, hubCtx *HubContext, pro
 	}
 }
 
-func runTriggerWebhookCreate(cmd *cobra.Command, args []string) error {
+func buildCreateWebhookEndpointRequest() (*hubclient.CreateWebhookEndpointRequest, error) {
 	name := strings.TrimSpace(triggerWebhookName)
 	if name == "" {
-		return newUsageError("--name is required")
+		return nil, newUsageError("--name is required")
+	}
+
+	agentRef := strings.TrimSpace(triggerWebhookAgent)
+	if agentRef != "" && triggerWebhookToSelf {
+		return nil, newUsageError("--agent and --to-self cannot be used together")
+	}
+
+	hasTarget := agentRef != "" || triggerWebhookToSelf
+	hasTriggerOpts := strings.TrimSpace(triggerWebhookMessage) != "" || triggerWebhookInterrupt || triggerWebhookWake
+	if hasTarget && strings.TrimSpace(triggerWebhookMessage) == "" {
+		return nil, newUsageError("--message is required when --agent or --to-self is set")
+	}
+	if !hasTarget && hasTriggerOpts {
+		return nil, newUsageError("--agent or --to-self is required when --message, --interrupt, or --wake is set")
+	}
+
+	req := &hubclient.CreateWebhookEndpointRequest{
+		Name:        name,
+		Description: triggerWebhookDescription,
+	}
+	if hasTarget {
+		dt := &hubclient.WebhookEndpointDefaultTriggerSpec{
+			Message:   triggerWebhookMessage,
+			Interrupt: triggerWebhookInterrupt,
+			Wake:      triggerWebhookWake,
+		}
+		if triggerWebhookToSelf {
+			dt.ToSelf = true
+		} else if uuid.Validate(agentRef) == nil {
+			dt.AgentID = agentRef
+		} else {
+			dt.AgentName = agentRef
+		}
+		req.DefaultTrigger = dt
+	}
+	return req, nil
+}
+
+func runTriggerWebhookCreate(cmd *cobra.Command, args []string) error {
+	req, err := buildCreateWebhookEndpointRequest()
+	if err != nil {
+		return err
 	}
 
 	hubCtx, projectID, ctx, cancel, err := triggerHubContextFn()
@@ -205,15 +268,12 @@ func runTriggerWebhookCreate(cmd *cobra.Command, args []string) error {
 	}
 	defer cancel()
 
-	created, err := hubCtx.Client.WebhookEndpoints(projectID).Create(ctx, &hubclient.CreateWebhookEndpointRequest{
-		Name:        name,
-		Description: triggerWebhookDescription,
-	})
+	created, err := hubCtx.Client.WebhookEndpoints(projectID).Create(ctx, req)
 	if err != nil {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create webhook endpoint: %w", err))
 	}
 
-	if isJSONOutput() {
+	if isTriggerJSONOutput() {
 		return outputJSON(created)
 	}
 
@@ -222,10 +282,67 @@ func runTriggerWebhookCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  URL:            %s\n", created.URL)
 	fmt.Printf("  Signature Mode: %s\n", created.SignatureMode)
 	fmt.Printf("  Secret:         %s\n", created.Secret)
+	if created.TriggerID != "" {
+		fmt.Printf("  Trigger:        %s\n", created.TriggerID)
+		if created.Trigger != nil {
+			agentLabel := created.Trigger.Action.AgentName
+			if agentLabel == "" {
+				agentLabel = created.Trigger.Action.AgentID
+			}
+			if agentLabel != "" {
+				fmt.Printf("  Target Agent:   %s\n", agentLabel)
+			}
+		}
+	}
 	fmt.Println()
 	fmt.Println("Warning: save this signing secret now; it is shown only once and cannot be retrieved later.")
 	fmt.Println("Note: anyone with read access to this project's triggers can read bodies sent here.")
 	return nil
+}
+
+func runTriggerWebhookGet(cmd *cobra.Command, args []string) error {
+	hubCtx, projectID, ctx, cancel, err := triggerHubContextFn()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
+	fullID, err := resolveWebhookEndpointIDOrName(ctx, hubCtx, projectID, args[0])
+	if err != nil {
+		return err
+	}
+
+	ep, err := hubCtx.Client.WebhookEndpoints(projectID).Get(ctx, fullID)
+	if err != nil {
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to get webhook endpoint: %w", err))
+	}
+
+	if isTriggerJSONOutput() {
+		return outputJSON(ep)
+	}
+
+	printWebhookEndpointDetail(ep)
+	return nil
+}
+
+func printWebhookEndpointDetail(ep *hubclient.WebhookEndpoint) {
+	fmt.Printf("Webhook Endpoint: %s\n", ep.ID)
+	fmt.Printf("  Name:           %s\n", ep.Name)
+	if ep.Description != "" {
+		fmt.Printf("  Description:    %s\n", ep.Description)
+	}
+	fmt.Printf("  Project:        %s\n", ep.ProjectID)
+	fmt.Printf("  Status:         %s\n", ep.Status)
+	fmt.Printf("  URL:            %s\n", ep.URL)
+	fmt.Printf("  Signature Mode: %s\n", ep.SignatureMode)
+	fmt.Printf("  Secret Version: %d\n", ep.SecretVersion)
+	fmt.Printf("  Received:       %d (rejected: %d)\n", ep.ReceiveCount, ep.RejectCount)
+	lastRecv := "-"
+	if ep.LastReceivedAt != nil {
+		lastRecv = clitime.Format(*ep.LastReceivedAt, clitime.Full)
+	}
+	fmt.Printf("  Last Received:  %s\n", lastRecv)
+	fmt.Printf("  Created:        %s\n", clitime.Format(ep.CreatedAt, clitime.Full))
 }
 
 func runTriggerWebhookList(cmd *cobra.Command, args []string) error {
@@ -243,7 +360,7 @@ func runTriggerWebhookList(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list webhook endpoints: %w", err))
 	}
 
-	if isJSONOutput() {
+	if isTriggerJSONOutput() {
 		return outputJSON(resp)
 	}
 
@@ -303,7 +420,7 @@ func runTriggerWebhookDelete(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to delete webhook endpoint: %w", err))
 	}
 
-	return outputActionResult(ActionResult{
+	return outputTriggerActionResult(ActionResult{
 		Status:  "ok",
 		Command: "trigger webhook delete",
 		Message: fmt.Sprintf("Webhook endpoint %s deleted.", fullID),
@@ -312,11 +429,17 @@ func runTriggerWebhookDelete(cmd *cobra.Command, args []string) error {
 
 func init() {
 	triggerWebhookCmd.AddCommand(triggerWebhookCreateCmd)
+	triggerWebhookCmd.AddCommand(triggerWebhookGetCmd)
 	triggerWebhookCmd.AddCommand(triggerWebhookListCmd)
 	triggerWebhookCmd.AddCommand(triggerWebhookDeleteCmd)
 
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookName, "name", "", "Webhook endpoint name (required)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookDescription, "description", "", "Optional endpoint description")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookAgent, "agent", "", "Create a default message trigger targeting this agent name or ID (requires --message)")
+	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookToSelf, "to-self", false, "Create a default message trigger targeting the calling agent via its Hub identity (requires --message)")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookMessage, "message", "", "Message delivered by the default trigger (requires --agent or --to-self)")
+	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookInterrupt, "interrupt", false, "Interrupt the target agent when the default trigger fires")
+	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookWake, "wake", false, "Resume the target agent if suspended when the default trigger fires")
 
 	triggerWebhookListCmd.Flags().StringVar(&triggerWebhookListStatus, "status", "", "Filter by status (active or disabled)")
 }

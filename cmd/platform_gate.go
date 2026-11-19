@@ -97,6 +97,7 @@ var windowsAllowed = map[string]bool{
 	"trigger.event.get":      true,
 	"trigger.webhook":        true,
 	"trigger.webhook.create": true,
+	"trigger.webhook.get":    true,
 	"trigger.webhook.list":   true,
 	"trigger.webhook.delete": true,
 

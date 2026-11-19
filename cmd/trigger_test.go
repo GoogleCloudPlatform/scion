@@ -59,6 +59,7 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 		"trigger.event.get",
 		"trigger.webhook",
 		"trigger.webhook.create",
+		"trigger.webhook.get",
 		"trigger.webhook.list",
 		"trigger.webhook.delete",
 	}
@@ -95,6 +96,7 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 		{"trigger", "event", "list"},
 		{"trigger", "event", "get", "evt-1"},
 		{"trigger", "webhook", "list"},
+		{"trigger", "webhook", "get", "wh1"},
 		{"trigger", "webhook", "create", "--name", "wh1"},
 		{"trigger", "webhook", "delete", "wh1"},
 	} {
@@ -117,6 +119,10 @@ func TestTriggerWebhookCreateHelp_DisclosuresAndSigningExample(t *testing.T) {
 	assert.Contains(t, help, "X-Scion-Event")
 	assert.Contains(t, help, "X-Scion-Subject")
 	assert.Contains(t, help, "openssl dgst -sha256 -hmac")
+	assert.Contains(t, help, "--to-self")
+	assert.Contains(t, help, "--agent")
+	assert.Contains(t, help, "--message")
+	assert.Contains(t, help, "X-Scion-Signature: t=<unix_seconds>,v1=<hex_hmac_sha256>")
 }
 
 func TestBuildCreateTriggerRequest(t *testing.T) {
@@ -1748,4 +1754,397 @@ func TestTriggerEventCLI_SinglePageDefaultCursorHintAndEarlyStopPrefixAmbiguity(
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ambiguous trigger event ID prefix")
 	require.Len(t, seenQueries, 1, "prefix resolution must stop as soon as a second match is seen")
+}
+
+func TestTriggerWebhookCLI_GetAndOneCallCreate(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+	prevZone := clitime.Zone()
+	clitime.SetZone(time.UTC)
+	t.Cleanup(func() { clitime.SetZone(prevZone) })
+
+	origFormat := outputFormat
+	origJSON := triggerOutputJSON
+	origWhName, origWhDesc := triggerWebhookName, triggerWebhookDescription
+	origWhAgent, origWhToSelf, origWhMsg := triggerWebhookAgent, triggerWebhookToSelf, triggerWebhookMessage
+	origWhInt, origWhWake := triggerWebhookInterrupt, triggerWebhookWake
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerOutputJSON = origJSON
+		triggerWebhookName, triggerWebhookDescription = origWhName, origWhDesc
+		triggerWebhookAgent, triggerWebhookToSelf, triggerWebhookMessage = origWhAgent, origWhToSelf, origWhMsg
+		triggerWebhookInterrupt, triggerWebhookWake = origWhInt, origWhWake
+	})
+
+	const (
+		epID      = "aaaaaaaa-2222-4333-8444-555555555555"
+		trID      = "cccccccc-2222-4333-8444-555555555555"
+		agentUUID = "dddddddd-2222-4333-8444-555555555555"
+	)
+	lastRecv := fixedNow.Add(-4 * time.Minute)
+	var seenCreateReqs []hubclient.CreateWebhookEndpointRequest
+
+	endpointDetail := hubclient.WebhookEndpoint{
+		ID:             epID,
+		ProjectID:      "proj-1",
+		Name:           "github-ci",
+		Description:    "Signed CI ingress",
+		URL:            "https://hub.example.com/api/v1/hooks/" + epID,
+		SignatureMode:  "scion_v1",
+		SecretVersion:  2,
+		Status:         "active",
+		LastReceivedAt: &lastRecv,
+		ReceiveCount:   7,
+		RejectCount:    1,
+		CreatedAt:      fixedNow.Add(-time.Hour),
+		UpdatedAt:      fixedNow,
+	}
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints":
+			var req hubclient.CreateWebhookEndpointRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			seenCreateReqs = append(seenCreateReqs, req)
+			w.WriteHeader(http.StatusCreated)
+			resp := hubclient.WebhookEndpointCreated{
+				WebhookEndpoint: endpointDetail,
+				Secret:          "secret-shown-once-xyz",
+			}
+			resp.Name = req.Name
+			if req.DefaultTrigger != nil {
+				targetName := req.DefaultTrigger.AgentName
+				if req.DefaultTrigger.ToSelf {
+					targetName = "authenticated-caller-agent"
+				}
+				resp.TriggerID = trID
+				resp.Trigger = &hubclient.Trigger{
+					ID:        trID,
+					ProjectID: "proj-1",
+					Name:      req.Name,
+					Status:    "active",
+					Source:    hubclient.TriggerSourceSpec{Kind: "webhook", ID: epID},
+					Match:     hubclient.TriggerMatchSpec{Types: []string{"webhook.received"}, Rules: []hubclient.TriggerMatchRuleSpec{}},
+					Subject:   hubclient.TriggerSubjectSpec{Mode: "new"},
+					Action: hubclient.TriggerActionSpec{
+						Type:      "message",
+						AgentID:   req.DefaultTrigger.AgentID,
+						AgentName: targetName,
+						Message:   req.DefaultTrigger.Message,
+						Interrupt: req.DefaultTrigger.Interrupt,
+						Wake:      req.DefaultTrigger.Wake,
+					},
+					CreatedAt: fixedNow,
+					UpdatedAt: fixedNow,
+				}
+			}
+			_ = json.NewEncoder(w).Encode(resp)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints":
+			var list []hubclient.WebhookEndpoint
+			if n := r.URL.Query().Get("name"); n == "" || n == endpointDetail.Name {
+				if n != "hidden-other" {
+					list = []hubclient.WebhookEndpoint{endpointDetail}
+				}
+			}
+			_ = json.NewEncoder(w).Encode(hubclient.ListWebhookEndpointsResponse{
+				Scope:      hubclient.TriggerListScopeCaller,
+				Endpoints:  list,
+				TotalCount: len(list),
+				ServerTime: fixedNow,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints/"+epID:
+			_ = json.NewEncoder(w).Encode(endpointDetail)
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindAgentToken)
+
+	resetCreateFlags := func() {
+		outputFormat = ""
+		triggerOutputJSON = false
+		triggerWebhookName = "github-ci"
+		triggerWebhookDescription = "Signed CI ingress"
+		triggerWebhookAgent = ""
+		triggerWebhookToSelf = false
+		triggerWebhookMessage = ""
+		triggerWebhookInterrupt = false
+		triggerWebhookWake = false
+	}
+
+	// 1. Flag validation errors for one-call webhook create.
+	t.Run("flag validation", func(t *testing.T) {
+		resetCreateFlags()
+		triggerWebhookAgent = "lead"
+		triggerWebhookToSelf = true
+		triggerWebhookMessage = "hello"
+		_, err := buildCreateWebhookEndpointRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--agent and --to-self cannot be used together")
+
+		resetCreateFlags()
+		triggerWebhookAgent = "lead"
+		_, err = buildCreateWebhookEndpointRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--message is required")
+
+		resetCreateFlags()
+		triggerWebhookToSelf = true
+		_, err = buildCreateWebhookEndpointRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--message is required")
+
+		resetCreateFlags()
+		triggerWebhookMessage = "orphan message"
+		_, err = buildCreateWebhookEndpointRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--agent or --to-self is required")
+
+		resetCreateFlags()
+		triggerWebhookWake = true
+		_, err = buildCreateWebhookEndpointRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--agent or --to-self is required")
+	})
+
+	// 2. --to-self resolves strictly via Hub identity (toSelf=true), NEVER reading SCION_AGENT_* env vars.
+	t.Run("one-call create with --to-self ignores SCION_AGENT env vars", func(t *testing.T) {
+		resetCreateFlags()
+		t.Setenv("SCION_AGENT_NAME", "spoofed-other-agent")
+		t.Setenv("SCION_AGENT_ID", "99999999-8888-4777-8666-555555555555")
+
+		triggerWebhookToSelf = true
+		triggerWebhookMessage = "Handle incoming CI hook"
+		triggerWebhookInterrupt = true
+		triggerWebhookWake = true
+
+		humanOut := captureStdout(t, func() {
+			require.NoError(t, runTriggerWebhookCreate(triggerWebhookCreateCmd, nil))
+		})
+		require.Len(t, seenCreateReqs, 1)
+		req := seenCreateReqs[0]
+		require.NotNil(t, req.DefaultTrigger)
+		assert.True(t, req.DefaultTrigger.ToSelf)
+		assert.Empty(t, req.DefaultTrigger.AgentName, "--to-self must not populate agentName from env")
+		assert.Empty(t, req.DefaultTrigger.AgentID, "--to-self must not populate agentId from env")
+		assert.Equal(t, "Handle incoming CI hook", req.DefaultTrigger.Message)
+		assert.True(t, req.DefaultTrigger.Interrupt)
+		assert.True(t, req.DefaultTrigger.Wake)
+
+		assert.Contains(t, humanOut, epID)
+		assert.Contains(t, humanOut, "secret-shown-once-xyz")
+		assert.Contains(t, humanOut, "Trigger:        "+trID)
+		assert.Contains(t, humanOut, "authenticated-caller-agent")
+		assert.NotContains(t, humanOut, "spoofed-other-agent")
+	})
+
+	// 3. One-call create with --agent <uuid> and --json returns both id and triggerId.
+	t.Run("one-call create with --agent UUID and --json", func(t *testing.T) {
+		resetCreateFlags()
+		seenCreateReqs = nil
+		triggerOutputJSON = true
+		triggerWebhookAgent = agentUUID
+		triggerWebhookMessage = "Deploy hook arrived"
+
+		jsonOut := captureStdout(t, func() {
+			require.NoError(t, runTriggerWebhookCreate(triggerWebhookCreateCmd, nil))
+		})
+		require.Len(t, seenCreateReqs, 1)
+		require.NotNil(t, seenCreateReqs[0].DefaultTrigger)
+		assert.Equal(t, agentUUID, seenCreateReqs[0].DefaultTrigger.AgentID)
+		assert.Empty(t, seenCreateReqs[0].DefaultTrigger.AgentName)
+		assert.False(t, seenCreateReqs[0].DefaultTrigger.ToSelf)
+
+		var created hubclient.WebhookEndpointCreated
+		require.NoError(t, json.Unmarshal([]byte(jsonOut), &created))
+		assert.Equal(t, epID, created.ID)
+		assert.Equal(t, trID, created.TriggerID)
+		assert.Equal(t, "secret-shown-once-xyz", created.Secret)
+		require.NotNil(t, created.Trigger)
+		assert.Equal(t, agentUUID, created.Trigger.Action.AgentID)
+	})
+
+	// 4. `scion trigger webhook get <name|id>` renders endpoint detail without secrets, supports --json, and scopes missing errors in agent mode.
+	t.Run("webhook get by name, prefix, UUID, --json, and caller-scoped miss", func(t *testing.T) {
+		resetCreateFlags()
+		getOut := captureStdout(t, func() {
+			require.NoError(t, runTriggerWebhookGet(triggerWebhookGetCmd, []string{"github-ci"}))
+		})
+		assert.Contains(t, getOut, "Webhook Endpoint: "+epID)
+		assert.Contains(t, getOut, "Name:           github-ci")
+		assert.Contains(t, getOut, "Description:    Signed CI ingress")
+		assert.Contains(t, getOut, "Project:        proj-1")
+		assert.Contains(t, getOut, "Status:         active")
+		assert.Contains(t, getOut, "Signature Mode: scion_v1")
+		assert.Contains(t, getOut, "Secret Version: 2")
+		assert.Contains(t, getOut, "Received:       7 (rejected: 1)")
+		assert.NotContains(t, getOut, "secret-shown-once-xyz")
+
+		triggerOutputJSON = true
+		getJSON := captureStdout(t, func() {
+			require.NoError(t, runTriggerWebhookGet(triggerWebhookGetCmd, []string{epID[:8]}))
+		})
+		var gotEP hubclient.WebhookEndpoint
+		require.NoError(t, json.Unmarshal([]byte(getJSON), &gotEP))
+		assert.Equal(t, epID, gotEP.ID)
+		assert.Equal(t, "github-ci", gotEP.Name)
+		assert.Equal(t, 2, gotEP.SecretVersion)
+
+		triggerOutputJSON = false
+		err := runTriggerWebhookGet(triggerWebhookGetCmd, []string{"hidden-other"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "owned by this agent")
+	})
+}
+
+func TestTriggerCLI_JSONFlagEverywhere(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 19, 13, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+
+	origFormat := outputFormat
+	origJSON := triggerOutputJSON
+	origName, origWebhook, origAgent, origMsg := triggerName, triggerWebhookRef, triggerAgent, triggerMessage
+	origWhere, origWhereFile, origSubj := triggerWhereRules, triggerWhereFile, triggerSubjectExpr
+	origWhName := triggerWebhookName
+	origEvPayload := triggerEventPayloadOnly
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerOutputJSON = origJSON
+		triggerName, triggerWebhookRef, triggerAgent, triggerMessage = origName, origWebhook, origAgent, origMsg
+		triggerWhereRules, triggerWhereFile, triggerSubjectExpr = origWhere, origWhereFile, origSubj
+		triggerWebhookName = origWhName
+		triggerEventPayloadOnly = origEvPayload
+	})
+
+	const (
+		epID = "aaaaaaaa-3333-4333-8444-555555555555"
+		trID = "bbbbbbbb-3333-4333-8444-555555555555"
+		evID = "cccccccc-3333-4333-8444-555555555555"
+	)
+
+	trObj := hubclient.Trigger{
+		ID:        trID,
+		ProjectID: "proj-1",
+		Name:      "t1",
+		Status:    "active",
+		Source:    hubclient.TriggerSourceSpec{Kind: "webhook", ID: epID},
+		Match:     hubclient.TriggerMatchSpec{Types: []string{"webhook.received"}, Rules: []hubclient.TriggerMatchRuleSpec{}},
+		Action:    hubclient.TriggerActionSpec{Type: "message", AgentName: "lead", Message: "hi"},
+		CreatedAt: fixedNow,
+		UpdatedAt: fixedNow,
+	}
+	epObj := hubclient.WebhookEndpoint{
+		ID:            epID,
+		ProjectID:     "proj-1",
+		Name:          "wh1",
+		URL:           "https://hub.example.com/api/v1/hooks/" + epID,
+		Status:        "active",
+		SignatureMode: "scion_v1",
+		SecretVersion: 1,
+		CreatedAt:     fixedNow,
+		UpdatedAt:     fixedNow,
+	}
+	evSummary := hubclient.TriggerEventSummary{
+		ID:         evID,
+		ProjectID:  "proj-1",
+		Source:     hubclient.TriggerSourceSpec{Kind: "webhook", ID: epID},
+		Type:       "webhook.received",
+		Subject:    "webhook:" + epID,
+		OccurredAt: fixedNow,
+		ReceivedAt: fixedNow,
+		Status:     "processed",
+		CreatedAt:  fixedNow,
+	}
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(trObj)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{Triggers: []hubclient.Trigger{trObj}, TotalCount: 1, ServerTime: fixedNow})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID:
+			_ = json.NewEncoder(w).Encode(trObj)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID+"/pause":
+			_ = json.NewEncoder(w).Encode(trObj)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID+"/resume":
+			_ = json.NewEncoder(w).Encode(trObj)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID+"/history":
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerFiresResponse{Fires: []hubclient.TriggerFire{}, TotalCount: 0, ServerTime: fixedNow})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events":
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerEventsResponse{Events: []hubclient.TriggerEventSummary{evSummary}, TotalCount: 1, ServerTime: fixedNow})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+evID:
+			_ = json.NewEncoder(w).Encode(hubclient.TriggerEventDetail{TriggerEventSummary: evSummary, Payload: json.RawMessage(`{"ok":true}`)})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.WebhookEndpointCreated{WebhookEndpoint: epObj, Secret: "sec-1"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints":
+			_ = json.NewEncoder(w).Encode(hubclient.ListWebhookEndpointsResponse{Endpoints: []hubclient.WebhookEndpoint{epObj}, TotalCount: 1, ServerTime: fixedNow})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints/"+epID:
+			_ = json.NewEncoder(w).Encode(epObj)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints/"+epID:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindOAuth)
+
+	// Every leaf subcommand under `scion trigger` must expose `--json` via inherited/local flags
+	// and emit valid JSON when `triggerOutputJSON = true` (even when `outputFormat == ""`).
+	outputFormat = ""
+	triggerOutputJSON = true
+	triggerName = "t1"
+	triggerWebhookRef = epID
+	triggerAgent = "lead"
+	triggerMessage = "hi"
+	triggerWhereRules = nil
+	triggerWhereFile = ""
+	triggerSubjectExpr = ""
+	triggerWebhookName = "wh1"
+
+	cases := []struct {
+		name string
+		cmd  *cobra.Command
+		run  func() error
+	}{
+		{"trigger create", triggerCreateCmd, func() error { return runTriggerCreate(triggerCreateCmd, nil) }},
+		{"trigger get", triggerGetCmd, func() error { return runTriggerGet(triggerGetCmd, []string{trID}) }},
+		{"trigger list", triggerListCmd, func() error { return runTriggerList(triggerListCmd, nil) }},
+		{"trigger delete", triggerDeleteCmd, func() error { return runTriggerDelete(triggerDeleteCmd, []string{trID}) }},
+		{"trigger pause", triggerPauseCmd, func() error { return runTriggerPause(triggerPauseCmd, []string{trID}) }},
+		{"trigger resume", triggerResumeCmd, func() error { return runTriggerResume(triggerResumeCmd, []string{trID}) }},
+		{"trigger history", triggerHistoryCmd, func() error { return runTriggerHistory(triggerHistoryCmd, []string{trID}) }},
+		{"trigger event list", triggerEventListCmd, func() error { return runTriggerEventList(triggerEventListCmd, nil) }},
+		{"trigger event get", triggerEventGetCmd, func() error {
+			triggerEventPayloadOnly = false
+			return runTriggerEventGet(triggerEventGetCmd, []string{evID})
+		}},
+		{"trigger event get --payload", triggerEventGetCmd, func() error {
+			triggerEventPayloadOnly = true
+			return runTriggerEventGet(triggerEventGetCmd, []string{evID})
+		}},
+		{"trigger webhook create", triggerWebhookCreateCmd, func() error { return runTriggerWebhookCreate(triggerWebhookCreateCmd, nil) }},
+		{"trigger webhook get", triggerWebhookGetCmd, func() error { return runTriggerWebhookGet(triggerWebhookGetCmd, []string{epID}) }},
+		{"trigger webhook list", triggerWebhookListCmd, func() error { return runTriggerWebhookList(triggerWebhookListCmd, nil) }},
+		{"trigger webhook delete", triggerWebhookDeleteCmd, func() error { return runTriggerWebhookDelete(triggerWebhookDeleteCmd, []string{epID}) }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := tc.cmd.InheritedFlags().Lookup("json")
+			if f == nil {
+				f = tc.cmd.Flags().Lookup("json")
+			}
+			require.NotNil(t, f, "%s must accept --json", tc.name)
+
+			out := captureStdout(t, func() {
+				require.NoError(t, tc.run())
+			})
+			var decoded any
+			require.NoError(t, json.Unmarshal([]byte(out), &decoded), "%s --json must emit valid JSON, got:\n%s", tc.name, out)
+		})
+	}
 }

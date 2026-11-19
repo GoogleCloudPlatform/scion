@@ -77,7 +77,7 @@ func runTriggerGet(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to get trigger: %w", err))
 	}
 
-	if isJSONOutput() {
+	if isTriggerJSONOutput() {
 		return outputJSON(tr)
 	}
 

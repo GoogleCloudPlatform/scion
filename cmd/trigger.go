@@ -58,7 +58,20 @@ var (
 
 	triggerHistoryLimit  int
 	triggerHistoryCursor string
+
+	triggerOutputJSON bool
 )
+
+func isTriggerJSONOutput() bool {
+	return isJSONOutput() || triggerOutputJSON
+}
+
+func outputTriggerActionResult(r ActionResult) error {
+	if isTriggerJSONOutput() {
+		return outputJSON(r)
+	}
+	return outputActionResult(r)
+}
 
 // triggerCmd is the top-level command group for trigger and webhook endpoint management.
 var triggerCmd = &cobra.Command{
@@ -161,7 +174,7 @@ func triggerHubContext() (*HubContext, string, context.Context, context.CancelFu
 	if err != nil {
 		return nil, "", nil, nil, err
 	}
-	if !isJSONOutput() {
+	if !isTriggerJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
@@ -551,7 +564,7 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create trigger: %w", formatTriggerRuleError(err)))
 	}
 
-	if isJSONOutput() {
+	if isTriggerJSONOutput() {
 		return outputJSON(created)
 	}
 
@@ -607,7 +620,7 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list triggers: %w", err))
 	}
 
-	if isJSONOutput() {
+	if isTriggerJSONOutput() {
 		return outputJSON(resp)
 	}
 
@@ -678,7 +691,7 @@ func runTriggerDelete(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to delete trigger: %w", err))
 	}
 
-	return outputActionResult(ActionResult{
+	return outputTriggerActionResult(ActionResult{
 		Status:  "ok",
 		Command: "trigger delete",
 		Message: fmt.Sprintf("Trigger %s deleted.", fullID),
@@ -701,7 +714,7 @@ func runTriggerPause(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to pause trigger: %w", err))
 	}
 
-	return outputActionResult(ActionResult{
+	return outputTriggerActionResult(ActionResult{
 		Status:  "ok",
 		Command: "trigger pause",
 		Message: fmt.Sprintf("Trigger %s paused.", fullID),
@@ -724,7 +737,7 @@ func runTriggerResume(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to resume trigger: %w", formatTriggerRuleError(err)))
 	}
 
-	return outputActionResult(ActionResult{
+	return outputTriggerActionResult(ActionResult{
 		Status:  "ok",
 		Command: "trigger resume",
 		Message: fmt.Sprintf("Trigger %s resumed.", fullID),
@@ -762,7 +775,7 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to get trigger history: %w", err))
 	}
 
-	if isJSONOutput() {
+	if isTriggerJSONOutput() {
 		return outputJSON(resp)
 	}
 
@@ -833,6 +846,7 @@ func triggerStatusLabel(status, reason string) string {
 
 func init() {
 	rootCmd.AddCommand(triggerCmd)
+	triggerCmd.PersistentFlags().BoolVar(&triggerOutputJSON, "json", false, "Output in JSON format")
 
 	triggerCmd.AddCommand(triggerCreateCmd)
 	triggerCmd.AddCommand(triggerGetCmd)

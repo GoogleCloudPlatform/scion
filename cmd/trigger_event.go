@@ -167,7 +167,7 @@ func runTriggerEventList(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list trigger events: %w", err))
 	}
 
-	if isJSONOutput() {
+	if isTriggerJSONOutput() {
 		return outputJSON(resp)
 	}
 
@@ -237,7 +237,7 @@ func runTriggerEventGet(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if isJSONOutput() {
+	if isTriggerJSONOutput() {
 		return outputJSON(detail)
 	}
 
