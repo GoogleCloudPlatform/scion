@@ -812,17 +812,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(sectionBodyPresence(opsettings.BrandingSectionName, rawBody).sentKeys()) > 0 {
-			if srvMap, ok := raw["server"].(map[string]interface{}); ok {
-				if hubMap, ok := srvMap["hub"].(map[string]interface{}); ok {
-					if brandRaw, ok := hubMap["branding"]; ok && brandRaw != nil {
-						if brandDoc, mErr := json.Marshal(brandRaw); mErr == nil {
-							if errs := opsettings.Validate(opsettings.BrandingSectionName, brandDoc); len(errs) > 0 {
-								writeSettingsValidation(w, "", sectionValidationEntries(opsettings.BrandingSectionName, errs), nil)
-								return
-							}
-						}
-					}
-				}
+			if !validateFileModeMergedBranding(w, raw) {
+				return
 			}
 		}
 	}
@@ -1296,4 +1287,42 @@ func rejectNullFederation(w http.ResponseWriter, rawBody []byte) bool {
 // also accepts 0; a default does not, because 0 used to be sent for "unset".
 func validDefaultThinkingLevel(n int) bool {
 	return n >= 1 && n <= 100
+}
+
+// validateFileModeMergedBranding validates the merged server.hub.branding map
+// in file-mode handlePutServerConfig, failing closed (HTTP 422) if any parent
+// map is malformed or the merged branding value cannot be JSON-encoded.
+func validateFileModeMergedBranding(w http.ResponseWriter, raw map[string]interface{}) bool {
+	srvRaw, exists := raw["server"]
+	if !exists || srvRaw == nil {
+		return true
+	}
+	srvMap, ok := srvRaw.(map[string]interface{})
+	if !ok {
+		writeSettingsFieldError(w, "server", "server section in settings.yaml is not an object")
+		return false
+	}
+	hubRaw, exists := srvMap["hub"]
+	if !exists || hubRaw == nil {
+		return true
+	}
+	hubMap, ok := hubRaw.(map[string]interface{})
+	if !ok {
+		writeSettingsFieldError(w, "server.hub", "server.hub section in settings.yaml is not an object")
+		return false
+	}
+	brandRaw, exists := hubMap["branding"]
+	if !exists || brandRaw == nil {
+		return true
+	}
+	brandDoc, mErr := json.Marshal(brandRaw)
+	if mErr != nil {
+		writeSettingsFieldError(w, config.BrandingSectionKey, fmt.Sprintf("invalid branding settings in settings.yaml: %v", mErr))
+		return false
+	}
+	if errs := opsettings.Validate(opsettings.BrandingSectionName, brandDoc); len(errs) > 0 {
+		writeSettingsValidation(w, "", sectionValidationEntries(opsettings.BrandingSectionName, errs), nil)
+		return false
+	}
+	return true
 }

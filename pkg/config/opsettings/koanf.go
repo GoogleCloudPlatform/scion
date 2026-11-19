@@ -551,9 +551,9 @@ func init() {
 	}
 }
 
-// subtreeSectionPrefixes maps subtree-extracted sections to their koanf root prefix.
+// subtreeSectionPrefixes maps subtree-extracted sections whose koanf prefix is
+// not "<section>." to their koanf root prefix.
 var subtreeSectionPrefixes = map[string]string{
-	"telemetry":         "telemetry",
 	BrandingSectionName: config.BrandingSectionKey,
 }
 

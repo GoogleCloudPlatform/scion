@@ -334,6 +334,26 @@ func TestValidateBranding_AssetsAndSVGSafety(t *testing.T) {
 			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: "/assets/../secret.svg"}},
 		},
 		{
+			name: "same-origin /auth/logout route rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: "/auth/logout"}},
+		},
+		{
+			name: "same-origin /auth prefix with image suffix rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: "/auth/logout/logo.svg"}},
+		},
+		{
+			name: "same-origin /api prefix rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: "/api/v1/export.png"}},
+		},
+		{
+			name: "same-origin /brand prefix rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: "/brand/logo-light.svg"}},
+		},
+		{
+			name: "same-origin non-image path rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: "/login"}},
+		},
+		{
 			name: "svg data URI rejected on icon_192",
 			cfg:  BrandingConfig{Icons: &BrandingIconsConfig{Icon192: safeSVG}},
 		},
@@ -410,5 +430,78 @@ func TestValidateBranding_AssetsAndSVGSafety(t *testing.T) {
 	})
 	if len(exceedTotalErrs) == 0 {
 		t.Fatal("expected > 512 KiB total asset error across 5 slots, got none")
+	}
+
+	// Valid static same-origin image path (outside reserved Hub prefixes) passes.
+	validPathCfg := BrandingConfig{
+		Logo:  &BrandingLogoConfig{Light: "/assets/custom-logo.svg"},
+		Icons: &BrandingIconsConfig{Favicon: "/favicon.ico"},
+	}
+	if errs := ValidateBranding(&validPathCfg); len(errs) > 0 {
+		t.Fatalf("expected valid same-origin image paths to pass, got: %v", errs)
+	}
+}
+
+func TestResolveBranding_NeutralScaleOverridesMatchSemanticBgAndSurface(t *testing.T) {
+	// Light neutral.50 override must re-derive light.primary to primary-600 and pass AA,
+	// matching the equivalent palette.light.bg override.
+	viaLightBg, errs := ResolveBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Light: &BrandingSemanticMode{Bg: "#fafaf9"},
+		},
+	})
+	if len(errs) > 0 {
+		t.Fatalf("palette.light.bg=#fafaf9 unexpected errors: %v", errs)
+	}
+
+	viaNeutral50, errs := ResolveBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Neutral: BrandingScale{"50": "#fafaf9"},
+		},
+	})
+	if len(errs) > 0 {
+		t.Fatalf("palette.neutral.50=#fafaf9 unexpected errors: %v", errs)
+	}
+	if viaNeutral50.Light.Bg != "#fafaf9" {
+		t.Errorf("viaNeutral50.Light.Bg = %q, want #fafaf9", viaNeutral50.Light.Bg)
+	}
+	if viaNeutral50.Light.Primary != viaLightBg.Light.Primary {
+		t.Errorf("viaNeutral50.Light.Primary = %q, want %q (same as palette.light.bg)", viaNeutral50.Light.Primary, viaLightBg.Light.Primary)
+	}
+	if viaNeutral50.Light.Primary != DefaultPrimaryScale()["600"] {
+		t.Errorf("viaNeutral50.Light.Primary = %q, want primary-600 %q", viaNeutral50.Light.Primary, DefaultPrimaryScale()["600"])
+	}
+	// Dark mode was not touched by neutral.50, so dark primary stays stock.
+	if viaNeutral50.Dark.Primary != DefaultDarkSemanticMode().Primary {
+		t.Errorf("viaNeutral50.Dark.Primary = %q, want untouched stock %q", viaNeutral50.Dark.Primary, DefaultDarkSemanticMode().Primary)
+	}
+
+	// Dark neutral 900/800 overrides must similarly re-derive dark primary tokens consistently
+	// with palette.dark.bg / palette.dark.surface without perturbing light mode.
+	viaDarkBgSurface, errs := ResolveBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Dark: &BrandingSemanticMode{Bg: "#0c0a09", Surface: "#1c1917"},
+		},
+	})
+	if len(errs) > 0 {
+		t.Fatalf("palette.dark.{bg,surface} unexpected errors: %v", errs)
+	}
+
+	viaDarkNeutral, errs := ResolveBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Neutral: BrandingScale{"900": "#0c0a09", "800": "#1c1917"},
+		},
+	})
+	if len(errs) > 0 {
+		t.Fatalf("palette.neutral.{900,800} unexpected errors: %v", errs)
+	}
+	if viaDarkNeutral.Dark.Primary != viaDarkBgSurface.Dark.Primary ||
+		viaDarkNeutral.Dark.PrimaryHover != viaDarkBgSurface.Dark.PrimaryHover ||
+		viaDarkNeutral.Dark.PrimaryActive != viaDarkBgSurface.Dark.PrimaryActive ||
+		viaDarkNeutral.Dark.PrimaryText != viaDarkBgSurface.Dark.PrimaryText {
+		t.Errorf("dark neutral override primary tokens %+v != explicit dark bg/surface tokens %+v", viaDarkNeutral.Dark, viaDarkBgSurface.Dark)
+	}
+	if viaDarkNeutral.Light.Primary != DefaultLightSemanticMode().Primary {
+		t.Errorf("viaDarkNeutral.Light.Primary = %q, want untouched stock %q", viaDarkNeutral.Light.Primary, DefaultLightSemanticMode().Primary)
 	}
 }

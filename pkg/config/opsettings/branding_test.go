@@ -96,4 +96,18 @@ func TestBrandingSection_KoanfRoundTripAndValidation(t *testing.T) {
 	if got := OwningSection(config.BrandingSectionKey + ".palette.primary.500"); got != BrandingSectionName {
 		t.Errorf("OwningSection(palette.primary.500) = %q, want %q", got, BrandingSectionName)
 	}
+	// Telemetry paths are not flat-mapped via SectionKeyFromKoanfPath / KoanfPathFromSectionKey;
+	// verify branding's subtree mapping does not alter telemetry behavior.
+	if got := SectionKeyFromKoanfPath("telemetry.enabled"); got != "" {
+		t.Errorf("SectionKeyFromKoanfPath(telemetry.enabled) = %q, want empty", got)
+	}
+	if got := KoanfPathFromSectionKey("telemetry", "enabled"); got != "" {
+		t.Errorf("KoanfPathFromSectionKey(telemetry, enabled) = %q, want empty", got)
+	}
+	if got := SectionKeyFromKoanfPath("server.hub.branding.name"); got != "name" {
+		t.Errorf("SectionKeyFromKoanfPath(server.hub.branding.name) = %q, want name", got)
+	}
+	if got := KoanfPathFromSectionKey(BrandingSectionName, "name"); got != "server.hub.branding.name" {
+		t.Errorf("KoanfPathFromSectionKey(branding, name) = %q, want server.hub.branding.name", got)
+	}
 }

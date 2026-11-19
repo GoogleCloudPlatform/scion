@@ -628,12 +628,34 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 		}
 	}
 
-	primaryChanged := accent != "" || customPrimaryScale ||
-		(lightIn != nil && (lightIn.Primary != "" || lightIn.PrimaryHover != "" || lightIn.PrimaryActive != "" || lightIn.PrimaryText != "")) ||
+	neutralStepCustomized := func(step string) bool {
+		return cfg.Palette != nil && cfg.Palette.Neutral != nil && cfg.Palette.Neutral[step] != ""
+	}
+	modeTokenCustomized := func(fieldVal, backingNeutralStep string) bool {
+		if fieldVal != "" {
+			return true
+		}
+		return backingNeutralStep != "" && neutralStepCustomized(backingNeutralStep)
+	}
+
+	basePrimaryChanged := accent != "" || customPrimaryScale
+	lightPrimaryChanged := basePrimaryChanged ||
+		(lightIn != nil && (lightIn.Primary != "" || lightIn.PrimaryHover != "" || lightIn.PrimaryActive != "" || lightIn.PrimaryText != ""))
+	darkPrimaryChanged := basePrimaryChanged ||
 		(darkIn != nil && (darkIn.Primary != "" || darkIn.PrimaryHover != "" || darkIn.PrimaryActive != "" || darkIn.PrimaryText != ""))
 
-	// Resolve Light primary tokens.
-	if primaryChanged || (lightIn != nil && (lightIn.Surface != "" || lightIn.Bg != "")) {
+	lightBgOrSurfaceCustomized := modeTokenCustomized(modeField(lightIn, "bg"), "50") ||
+		modeTokenCustomized(modeField(lightIn, "surface"), "")
+	darkBgOrSurfaceCustomized := modeTokenCustomized(modeField(darkIn, "bg"), "900") ||
+		modeTokenCustomized(modeField(darkIn, "surface"), "800")
+
+	recalcLightPrimary := lightPrimaryChanged || lightBgOrSurfaceCustomized
+	recalcDarkPrimary := darkPrimaryChanged || darkBgOrSurfaceCustomized
+
+	// Resolve Light primary tokens using the same predicate as the WCAG AA gate below,
+	// so neutral-scale background overrides (palette.neutral.50) behave identically to
+	// explicit palette.light.bg overrides.
+	if recalcLightPrimary {
 		if lightIn != nil && lightIn.Primary != "" {
 			light.Primary = normalizeHex(lightIn.Primary)
 		} else if accent != "" {
@@ -667,8 +689,10 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 		}
 	}
 
-	// Resolve Dark primary tokens.
-	if primaryChanged || (darkIn != nil && (darkIn.Surface != "" || darkIn.Bg != "")) {
+	// Resolve Dark primary tokens using the same predicate as the WCAG AA gate below,
+	// so neutral-scale dark background/surface overrides (palette.neutral.900/800)
+	// behave identically to explicit palette.dark.bg/surface overrides.
+	if recalcDarkPrimary {
 		if darkIn != nil && darkIn.Primary != "" {
 			dark.Primary = normalizeHex(darkIn.Primary)
 		} else if accent != "" {
@@ -719,16 +743,6 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 		}
 	}
 
-	neutralStepCustomized := func(step string) bool {
-		return cfg.Palette != nil && cfg.Palette.Neutral != nil && cfg.Palette.Neutral[step] != ""
-	}
-	lightTokenCustomized := func(fieldVal, backingNeutralStep string) bool {
-		if fieldVal != "" {
-			return true
-		}
-		return backingNeutralStep != "" && neutralStepCustomized(backingNeutralStep)
-	}
-
 	// 1. Body, secondary, and muted text vs backgrounds & surfaces (4.5:1)
 	type tokenInfo struct {
 		name       string
@@ -736,15 +750,15 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 		customized bool
 	}
 	lightTexts := []tokenInfo{
-		{"text", light.Text, lightTokenCustomized(modeField(lightIn, "text"), "800")},
-		{"text_secondary", light.TextSecondary, lightTokenCustomized(modeField(lightIn, "text_secondary"), "600")},
-		{"text_muted", light.TextMuted, lightTokenCustomized(modeField(lightIn, "text_muted"), "500")},
+		{"text", light.Text, modeTokenCustomized(modeField(lightIn, "text"), "800")},
+		{"text_secondary", light.TextSecondary, modeTokenCustomized(modeField(lightIn, "text_secondary"), "600")},
+		{"text_muted", light.TextMuted, modeTokenCustomized(modeField(lightIn, "text_muted"), "500")},
 	}
 	lightBgs := []tokenInfo{
-		{"bg", light.Bg, lightTokenCustomized(modeField(lightIn, "bg"), "50")},
-		{"bg_subtle", light.BgSubtle, lightTokenCustomized(modeField(lightIn, "bg_subtle"), "100")},
-		{"surface", light.Surface, lightTokenCustomized(modeField(lightIn, "surface"), "")},
-		{"surface_raised", light.SurfaceRaised, lightTokenCustomized(modeField(lightIn, "surface_raised"), "")},
+		{"bg", light.Bg, modeTokenCustomized(modeField(lightIn, "bg"), "50")},
+		{"bg_subtle", light.BgSubtle, modeTokenCustomized(modeField(lightIn, "bg_subtle"), "100")},
+		{"surface", light.Surface, modeTokenCustomized(modeField(lightIn, "surface"), "")},
+		{"surface_raised", light.SurfaceRaised, modeTokenCustomized(modeField(lightIn, "surface_raised"), "")},
 	}
 	for _, tTok := range lightTexts {
 		for _, bTok := range lightBgs {
@@ -761,15 +775,15 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 	}
 
 	darkTexts := []tokenInfo{
-		{"text", dark.Text, lightTokenCustomized(modeField(darkIn, "text"), "100")},
-		{"text_secondary", dark.TextSecondary, lightTokenCustomized(modeField(darkIn, "text_secondary"), "300")},
-		{"text_muted", dark.TextMuted, lightTokenCustomized(modeField(darkIn, "text_muted"), "400")},
+		{"text", dark.Text, modeTokenCustomized(modeField(darkIn, "text"), "100")},
+		{"text_secondary", dark.TextSecondary, modeTokenCustomized(modeField(darkIn, "text_secondary"), "300")},
+		{"text_muted", dark.TextMuted, modeTokenCustomized(modeField(darkIn, "text_muted"), "400")},
 	}
 	darkBgs := []tokenInfo{
-		{"bg", dark.Bg, lightTokenCustomized(modeField(darkIn, "bg"), "900")},
-		{"bg_subtle", dark.BgSubtle, lightTokenCustomized(modeField(darkIn, "bg_subtle"), "800")},
-		{"surface", dark.Surface, lightTokenCustomized(modeField(darkIn, "surface"), "800")},
-		{"surface_raised", dark.SurfaceRaised, lightTokenCustomized(modeField(darkIn, "surface_raised"), "700")},
+		{"bg", dark.Bg, modeTokenCustomized(modeField(darkIn, "bg"), "900")},
+		{"bg_subtle", dark.BgSubtle, modeTokenCustomized(modeField(darkIn, "bg_subtle"), "800")},
+		{"surface", dark.Surface, modeTokenCustomized(modeField(darkIn, "surface"), "800")},
+		{"surface_raised", dark.SurfaceRaised, modeTokenCustomized(modeField(darkIn, "surface_raised"), "700")},
 	}
 	for _, tTok := range darkTexts {
 		for _, bTok := range darkBgs {
@@ -787,14 +801,14 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 
 	// 2 & 3 & 6 (focus ring): Primary vs bg/surface (4.5:1 text/links & >=3.0:1 focus)
 	// and primary_text vs primary/primary_hover/primary_active (4.5:1).
-	if primaryChanged || lightTokenCustomized(modeField(lightIn, "bg"), "50") || lightTokenCustomized(modeField(lightIn, "surface"), "") {
+	if recalcLightPrimary {
 		checkContrast(BrandingSectionKey+".palette.light.primary", light.Primary, "light.bg", light.Bg, wcagAATextContrastMin)
 		checkContrast(BrandingSectionKey+".palette.light.primary", light.Primary, "light.surface", light.Surface, wcagAATextContrastMin)
 		checkContrast(BrandingSectionKey+".palette.light.primary_text", light.PrimaryText, "light.primary", light.Primary, wcagAATextContrastMin)
 		checkContrast(BrandingSectionKey+".palette.light.primary_text", light.PrimaryText, "light.primary_hover", light.PrimaryHover, wcagAATextContrastMin)
 		checkContrast(BrandingSectionKey+".palette.light.primary_text", light.PrimaryText, "light.primary_active", light.PrimaryActive, wcagAATextContrastMin)
 	}
-	if primaryChanged || lightTokenCustomized(modeField(darkIn, "bg"), "900") || lightTokenCustomized(modeField(darkIn, "surface"), "800") {
+	if recalcDarkPrimary {
 		checkContrast(BrandingSectionKey+".palette.dark.primary", dark.Primary, "dark.bg", dark.Bg, wcagAATextContrastMin)
 		checkContrast(BrandingSectionKey+".palette.dark.primary", dark.Primary, "dark.surface", dark.Surface, wcagAATextContrastMin)
 		checkContrast(BrandingSectionKey+".palette.dark.primary_text", dark.PrimaryText, "dark.primary", dark.Primary, wcagAATextContrastMin)
@@ -816,7 +830,7 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 		{"warning", customWarningScale, "100"},
 		{"danger", customDangerScale, "100"},
 	}
-	darkSurfaceCustomized := lightTokenCustomized(modeField(darkIn, "surface"), "800")
+	darkSurfaceCustomized := modeTokenCustomized(modeField(darkIn, "surface"), "800")
 	for _, rc := range ramps {
 		sc := scales[rc.name]
 		if rc.customized || neutralStepCustomized("950") {
@@ -865,7 +879,7 @@ func resolveAndValidatePalette(cfg *BrandingConfig) (
 	}
 
 	// 6. Non-text UI component boundary contrast (3.0:1): neutral input/hover borders vs surface.
-	if neutralStepCustomized("600") || lightTokenCustomized(modeField(lightIn, "surface"), "") {
+	if neutralStepCustomized("600") || modeTokenCustomized(modeField(lightIn, "surface"), "") {
 		checkContrast(
 			BrandingSectionKey+".palette.neutral.600",
 			neutral["600"],

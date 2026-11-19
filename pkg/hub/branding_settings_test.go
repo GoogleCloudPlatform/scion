@@ -87,8 +87,63 @@ func TestBrandingSettings_PutLiveReloadPublicAndMaintenance(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "server.hub.branding.palette.light.primary")
 	assert.NotContains(t, rec.Body.String(), "server.hub.branding.server.hub.branding")
-	assert.Contains(t, rec.Body.String(), "light.surface")
+	assert.Contains(t, rec.Body.String(), "light.bg")
 	assert.Contains(t, rec.Body.String(), "4.50:1")
+
+	// Dark-mode WCAG AA contrast violation also returns HTTP 422 naming dark mode and token pair,
+	// and same-origin /auth/logout asset path is rejected with HTTP 422.
+	badDarkBody := json.RawMessage(`{
+		"server": {
+			"hub": {
+				"branding": {
+					"palette": {
+						"dark": {
+							"primary": "#1e293b"
+						}
+					}
+				}
+			}
+		}
+	}`)
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/server-config", badDarkBody)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "server.hub.branding.palette.dark.primary")
+	assert.Contains(t, rec.Body.String(), "dark.")
+	assert.Contains(t, rec.Body.String(), "4.50:1")
+
+	badAssetPathBody := json.RawMessage(`{
+		"server": {
+			"hub": {
+				"branding": {
+					"logo": {
+						"light": "/auth/logout"
+					}
+				}
+			}
+		}
+	}`)
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/server-config", badAssetPathBody)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "server.hub.branding.logo.light")
+
+	// Neutral-scale-only background override (R1) passes 200 OK and re-derives light.primary.
+	neutralOnlyPut := json.RawMessage(`{
+		"server": {
+			"hub": {
+				"branding": {
+					"palette": {
+						"neutral": {
+							"50": "#fafaf9"
+						}
+					}
+				}
+			}
+		}
+	}`)
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/server-config", neutralOnlyPut)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "#fafaf9", srv.ResolvedBranding().Light.Bg)
+	assert.Equal(t, config.DefaultPrimaryScale()["600"], srv.ResolvedBranding().Light.Primary)
 
 	// 3. Valid save applies live without restart; partial deep-merge preserves earlier keys.
 	put1 := json.RawMessage(`{
@@ -237,4 +292,34 @@ func TestWebServer_PreAuthSPAShellTitleAndInitialBranding(t *testing.T) {
 
 	// Audit and session protocol identifiers remain "scion_sess" / "Scion" regardless of UI branding.
 	assert.Equal(t, "scion_sess", webSessionName)
+}
+
+func TestBrandingSettings_FileModePutFailsClosedOnMarshalError(t *testing.T) {
+	srv, _, settingsPath := fileModeGCPIdentityServer(t)
+	srv.config.ConfigPath = settingsPath
+
+	// Seed settings.yaml with a YAML value (.nan) under server.hub.branding that yaml.v3 decodes
+	// into float64(NaN), causing json.Marshal on the merged branding map to fail. File-mode PUT
+	// must fail closed (422) and leave settings.yaml untouched rather than skipping validation.
+	poisonedYAML := "schema_version: \"1\"\ndefault_timezone: UTC\nserver:\n  hub:\n    port: 9810\n    branding:\n      poison: .nan\n"
+	require.NoError(t, os.WriteFile(settingsPath, []byte(poisonedYAML), 0o644))
+
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"server":{"hub":{"branding":{"name":"Acme","palette":{"light":{"primary":"#eab308"}}}}}}`))
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "expected fail-closed 422, got %d: %s", rr.Code, rr.Body.String())
+
+	after, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	assert.Equal(t, poisonedYAML, string(after), "failed validation must not overwrite settings.yaml")
+
+	// Valid clean settings.yaml validates merged branding and rejects low-contrast light.primary in file mode too.
+	cleanYAML := "schema_version: \"1\"\ndefault_timezone: UTC\nserver:\n  hub:\n    port: 9810\n"
+	require.NoError(t, os.WriteFile(settingsPath, []byte(cleanYAML), 0o644))
+
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"server":{"hub":{"branding":{"palette":{"light":{"primary":"#eab308"}}}}}}`))
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "server.hub.branding.palette.light.primary")
 }

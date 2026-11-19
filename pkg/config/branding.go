@@ -653,7 +653,14 @@ func parseAndValidateBrandAsset(raw, slot string, pngOnlyData bool) (resolvedURL
 				return "", "", nil, errors.New("same-origin path must not contain '.' or '..' traversal segments")
 			}
 		}
-		return raw, inferAssetMediaTypeFromPath(raw), nil, nil
+		if reservedPrefix := matchingReservedHubAssetPrefix(raw); reservedPrefix != "" {
+			return "", "", nil, fmt.Errorf("same-origin asset path must not target reserved Hub route prefix %q", reservedPrefix)
+		}
+		mt := inferAssetMediaTypeFromPath(raw)
+		if mt == "" {
+			return "", "", nil, errors.New("same-origin asset path must end with .svg, .png, .webp, or .ico")
+		}
+		return raw, mt, nil, nil
 	}
 
 	if len(raw) > MaxBrandHTTPSURLLen {
@@ -676,6 +683,27 @@ func parseAndValidateBrandAsset(raw, slot string, pngOnlyData bool) (resolvedURL
 		return "", "", nil, errors.New("https:// URL must not include user credentials")
 	}
 	return raw, inferAssetMediaTypeFromPath(u.Path), nil, nil
+}
+
+var reservedHubAssetPrefixes = []string{
+	"/auth",
+	"/api",
+	"/brand",
+	"/events",
+	"/.well-known",
+	"/health",
+	"/healthz",
+	"/readyz",
+}
+
+func matchingReservedHubAssetPrefix(rawPath string) string {
+	lower := strings.ToLower(rawPath)
+	for _, prefix := range reservedHubAssetPrefixes {
+		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
+			return prefix
+		}
+	}
+	return ""
 }
 
 func inferAssetMediaTypeFromPath(p string) string {
