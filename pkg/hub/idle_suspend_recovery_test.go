@@ -230,12 +230,12 @@ func TestIdleSuspendRecovery_StopDispatchOutcomes(t *testing.T) {
 		"broker 404":              status(http.StatusNotFound),
 		"broker 409":              status(http.StatusConflict),
 		"pre-send endpoint error": errors.New("broker endpoint lookup failed"),
+		"dial failure (ambiguous with an HTTP/2 resend)": fmt.Errorf("failed to send request: %w", &net.OpError{Op: "dial", Err: errors.New("connection refused")}),
 	}
 	// The allowlist (stopDefinitelyRefused): the stop provably did nothing.
 	definite := map[string]error{
 		"request not sent":     fmt.Errorf("failed to sign request: %w (%w)", errors.New("sign"), errStartRequestNotSent),
 		"broker not connected": fmt.Errorf("stop: %w", errStartBrokerNotConnected),
-		"dial failure":         fmt.Errorf("failed to send request: %w", &net.OpError{Op: "dial", Err: errors.New("connection refused")}),
 		"run mismatch":         fmt.Errorf("%w (requested run r1)", ErrStopRunNotFound),
 		"broker 400":           status(http.StatusBadRequest),
 		"broker 401":           status(http.StatusUnauthorized),

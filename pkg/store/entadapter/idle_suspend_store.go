@@ -363,6 +363,9 @@ func (s *AgentStore) ListAbandonedIdleSuspendClaims(ctx context.Context, expired
 		if !sa.IdleSuspendIntentIsOwn() {
 			continue // a newer system stop intent: not the idle claim's
 		}
+		if a.LastSeen == nil || !a.LastSeen.After(*a.IdleSuspendClaimUntil) {
+			continue // no heartbeat since the lease expired: the container may be gone
+		}
 		out = append(out, *sa)
 		if limit > 0 && len(out) >= limit {
 			break
@@ -385,6 +388,12 @@ func (s *AgentStore) AbandonIdleSuspend(ctx context.Context, agentID string, cla
 		if row.RunID != runID || row.Phase != string(state.PhaseRunning) ||
 			!entAgentToStore(row).RunIntentMatches(store.RunIntentStopped, intentAt) ||
 			!entAgentToStore(row).IdleSuspendIntentIsOwn() {
+			return false, store.ErrIdleSuspendPrecondition
+		}
+		// A heartbeat after the lease expired proves the container is still
+		// alive: phase=running alone may be a stop whose report lags, which must
+		// not be reverted.
+		if row.LastSeen == nil || !row.LastSeen.After(*row.IdleSuspendClaimUntil) {
 			return false, store.ErrIdleSuspendPrecondition
 		}
 		if _, err := c.Agent.UpdateOneID(row.ID).

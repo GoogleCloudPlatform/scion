@@ -50,8 +50,9 @@ suspend.
   A user stop-all selects in-progress rows by the same definition, so it wins over recovery.
   `IdleSuspendClaimLeaseActive` keeps the strict lease meaning for the intent-stop backstop,
   membership loss and the stalled auto-suspend.
-- **Docs.** The "not yet safe for production" notes were removed from the experiment registry and
-  `reference/experiments.md`.
+- **Docs.** The "not yet safe for production" notes were removed from the experiment registry,
+  `reference/experiments.md`, the lifecycle docs, `reference/server-config.md`, the release notes
+  and the web admin hint. The lifecycle docs gained an "Interrupted suspends" section.
 - **Tests.** `pkg/store/entadapter/agent_idle_suspend_recover_test.go` (store guards) and
   `pkg/hub/idle_suspend_recovery_test.go` (fault injection on the record write, crash between stop
   and commit, stop timeout versus refusal, user stop in the window, gates off, and a DM during an

@@ -916,7 +916,9 @@ type AgentStore interface {
 	// running whose idle_suspend_claim_until expired at least expiredFor ago on
 	// the store clock, with run_intent=stopped: idle suspends whose stop never
 	// landed. Ordered by claim expiry, then id; a positive limit bounds the
-	// rows. The caller abandons each with AbandonIdleSuspend.
+	// rows. Only rows with a heartbeat (last_seen) after the claim stamp are
+	// returned: a heartbeat since proves the container is alive. The caller
+	// abandons each with AbandonIdleSuspend.
 	ListAbandonedIdleSuspendClaims(ctx context.Context, expiredFor time.Duration, limit int) ([]Agent, error)
 
 	// AbandonIdleSuspend gives up an idle suspend whose stop never landed, under

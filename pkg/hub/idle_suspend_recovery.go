@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"time"
 
@@ -74,7 +73,8 @@ const idleSuspendAbandonedMessage = "Idle suspend failed: the container did not 
 // intent and clear the claim. Every other error leaves the outcome unknown
 // (the claim is kept and the intent stays stopped): an owner node's timeout
 // flattened across nodes, a non-zero exit of our own stop, a connection reset
-// after the request was written, a 5xx. Unknown outcomes converge: a container
+// after the request was written, a dial failure (an HTTP/2 resend can make
+// "dial failed" ambiguous), a 5xx. Unknown outcomes converge: a container
 // that still runs keeps intent=stopped, the intent-stop backstop stops it, and
 // the sweep then records suspended(idle).
 //
@@ -82,8 +82,6 @@ const idleSuspendAbandonedMessage = "Idle suspend failed: the container did not 
 //   - errStartRequestNotSent: the request could not be built, signed or routed;
 //     nothing was sent.
 //   - errStartBrokerNotConnected: no connection to the broker; nothing was sent.
-//   - a dial failure: the connection was never established. Checked first: a
-//     dial timeout also matches context.DeadlineExceeded.
 //   - ErrStopRunNotFound: the broker answered that it holds no entry for the
 //     requested run; nothing was stopped, and the run is already gone.
 //   - a broker HTTP 400, 401 or 403: the request was rejected before the broker
@@ -92,10 +90,6 @@ const idleSuspendAbandonedMessage = "Idle suspend failed: the container did not 
 func stopDefinitelyRefused(err error) bool {
 	if err == nil {
 		return false
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) && opErr.Op == "dial" {
-		return true
 	}
 	if errors.Is(err, errStartRequestNotSent) || errors.Is(err, errStartBrokerNotConnected) ||
 		errors.Is(err, ErrStopRunNotFound) {
@@ -131,7 +125,7 @@ func (s *Server) recordIdleSuspendCommit(ctx context.Context, agentID, runID str
 			if !recorded && attempt > 0 {
 				if fresh, gerr := s.store.GetAgent(rctx, agentID); gerr == nil && fresh != nil &&
 					fresh.Phase == string(state.PhaseSuspended) && fresh.RunID == runID &&
-					fresh.IdleSuspendClaimUntil != nil && fresh.IdleSuspendClaimUntil.Equal(claimUntil) {
+					fresh.IdleSuspendClaimUntil != nil && sameStamp(*fresh.IdleSuspendClaimUntil, claimUntil) {
 					return true, nil
 				}
 			}
@@ -287,4 +281,11 @@ func (s *Server) recoverExpiredIdleClaimOnDemand(ctx context.Context, agent *sto
 		return
 	}
 	s.recoverIdleSuspendClaim(ctx, agent)
+}
+
+// sameStamp compares two idle-claim stamps at the store's timestamp precision
+// (microseconds): the stamp ClaimIdleSuspend returned may carry nanoseconds
+// the database column does not.
+func sameStamp(a, b time.Time) bool {
+	return a.UTC().Truncate(time.Microsecond).Equal(b.UTC().Truncate(time.Microsecond))
 }

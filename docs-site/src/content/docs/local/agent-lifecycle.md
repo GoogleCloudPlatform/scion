@@ -515,7 +515,7 @@ agent is never left stopped without a suspend reason:
   a running agent wait for it to settle (auto-wake paths) or are refused with a
   "suspending" error. If the lease has expired and the agent is still running,
   the stop never landed: deliveries are refused at once rather than waiting.
-  After about 11 minutes the sweep abandons the suspend: it reverts the intent,
+  After roughly 11 to 16 minutes (the sweep runs every 5 minutes) the sweep abandons the suspend: it reverts the intent,
   records a message on the agent, and logs a warning, so the agent is reachable
   again.
 - **Backoff.** An abandoned agent is not idle-suspended again for about 15

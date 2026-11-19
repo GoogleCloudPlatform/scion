@@ -275,6 +275,18 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stamp.ID, su.Add(time.Hour), runIDs[stamp.ID], time.Now(), ceiling, "x"), store.ErrIdleSuspendPrecondition)
 		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stamp.ID, su, "other-run", time.Now(), ceiling, "x"), store.ErrIdleSuspendPrecondition)
 
+		// No heartbeat since the lease expired: the container may already be gone.
+		quiet, _ := claimed(t, "ab-quiet", true)
+		qu := past(t, quiet.ID, 2*time.Hour)
+		_, err = s.client.Agent.UpdateOneID(uuid.MustParse(quiet.ID)).SetLastSeen(qu.Add(-time.Minute)).Save(ctx)
+		require.NoError(t, err)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, quiet.ID, qu, runIDs[quiet.ID], time.Now(), ceiling, "x"), store.ErrIdleSuspendPrecondition)
+		abandonable, err := s.ListAbandonedIdleSuspendClaims(ctx, ceiling, 0)
+		require.NoError(t, err)
+		for _, r := range abandonable {
+			assert.NotEqual(t, quiet.ID, r.ID, "a row with a stale last_seen is not abandoned")
+		}
+
 		stopped, _ := claimed(t, "ab-stopped", true)
 		stu := past(t, stopped.ID, 2*time.Hour)
 		setPhase(t, stopped.ID, string(state.PhaseStopped))
