@@ -427,7 +427,7 @@ func Spec() []TableFixture {
 				"question_text": "Stale approval check?", "choice_id": "$dismissed", "choice_label": "Dismissed",
 				"answered_by_user_id": userID, "answered_by_name": "Alice", "answered_by_email": "alice@example.com",
 				"provenance": "direct", "outcome": "dismiss", "dismiss_reason": "Already handled out of band",
-				"surface": "decisions-page", "response_message_id": messageID, "created_at": baseTime.Add(6 * time.Minute),
+				"surface": "decisions_page", "response_message_id": messageID, "created_at": baseTime.Add(6 * time.Minute),
 				"batch_id": "ba000000-0000-0000-0000-000000000002", "matched_default": false,
 			},
 		}},
