@@ -213,6 +213,7 @@ type DeleteOptions struct {
 type DeleteResult struct {
 	Grants int
 	Links  int
+	Drafts int
 }
 
 // insertEvent writes one artifact_event row inside tx.
@@ -261,8 +262,8 @@ func (s *sqlStore) DeleteArtifact(ctx context.Context, artifactID string, opts D
 }
 
 // deleteArtifactTx is the one soft delete: inside tx it sets deleted_at,
-// removes every grant, share link and review session row of the artifact,
-// and records the deleted event with the grants and links it removed.
+// removes every grant, share link, review session and review draft row of
+// the artifact, and records the deleted event with the counts it removed.
 func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID string, opts DeleteOptions, now time.Time) (DeleteResult, error) {
 	at := s.timeArg(now)
 	q := `UPDATE artifact SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`
@@ -322,8 +323,17 @@ func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID 
 	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_review_session WHERE artifact_id = ?`), artifactID); err != nil {
 		return DeleteResult{}, fmt.Errorf("artifacts: drop review sessions: %w", err)
 	}
+	dr, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_review_draft WHERE artifact_id = ?`), artifactID)
+	if err != nil {
+		return DeleteResult{}, fmt.Errorf("artifacts: drop review drafts: %w", err)
+	}
+	draftsRemoved, err := dr.RowsAffected()
+	if err != nil {
+		return DeleteResult{}, fmt.Errorf("artifacts: drop review drafts: %w", err)
+	}
+	res.Drafts = int(draftsRemoved)
 	if err := s.insertEvent(ctx, tx, artifactID, EventDeleted, opts.Actor, now,
-		map[string]any{"grantsRemoved": res.Grants, "linksRevoked": res.Links}); err != nil {
+		map[string]any{"grantsRemoved": res.Grants, "linksRevoked": res.Links, "draftsRemoved": res.Drafts}); err != nil {
 		return DeleteResult{}, err
 	}
 	return res, nil
