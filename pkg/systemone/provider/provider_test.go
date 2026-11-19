@@ -279,3 +279,99 @@ func TestDistributionAndTieHelpers(t *testing.T) {
 		assert.Equal(t, provider.FailMalformedResponse, pe.Reason)
 	}
 }
+
+func TestValidateDistribution_SumToleranceFloatSlackBoundary(t *testing.T) {
+	// Synthetic from docs (ai.google.dev/gemini-api/docs/decisions-api):
+	// Gemini's documented 4-option "department" choice example has exact decimal
+	// sum 0.999, whose IEEE-754 binary64 sum (0.002+0.003+0.004+0.99) has
+	// |sum - 1| = 0.0010000000000000009 > float64(1e-3). The 1e-12 numerical
+	// float slack at the 1e-3 boundary accepts this without renormalization.
+	deptIDs := []string{"billing", "sales", "support", "other"}
+	docExample := map[string]float64{
+		"support": 0.99,
+		"billing": 0.004,
+		"sales":   0.003,
+		"other":   0.002,
+	}
+	require.NoError(t, provider.ValidateDistribution(docExample, deptIDs))
+	// Confirm ValidateDistribution never mutates or renormalizes the map.
+	assert.Equal(t, 0.99, docExample["support"])
+	assert.Equal(t, 0.004, docExample["billing"])
+	assert.Equal(t, 0.003, docExample["sales"])
+	assert.Equal(t, 0.002, docExample["other"])
+
+	// Upper 1e-3 boundary with symmetric binary64 representation also passes.
+	upperBoundary := map[string]float64{
+		"support": 0.99,
+		"billing": 0.005,
+		"sales":   0.003,
+		"other":   0.003, // decimal sum 1.001
+	}
+	require.NoError(t, provider.ValidateDistribution(upperBoundary, deptIDs))
+
+	// Sums just outside 1 ± (1e-3 + 1e-12), materially outside 1 ± 1e-3,
+	// out-of-bounds [0, 1] values, and non-finite values still fail as
+	// malformed_response and are never renormalized.
+	twoIDs := []string{"a", "b"}
+	rejectCases := []struct {
+		name string
+		ids  []string
+		dist map[string]float64
+	}{
+		{
+			name: "just_below_lower_boundary_1_minus_1e3_minus_1e9",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": 0.5, "b": 0.5 - (1e-3 + 1e-9)},
+		},
+		{
+			name: "just_above_upper_boundary_1_plus_1e3_plus_1e9",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": 0.5, "b": 0.5 + (1e-3 + 1e-9)},
+		},
+		{
+			name: "materially_below_sum_0_98",
+			ids:  deptIDs,
+			dist: map[string]float64{"support": 0.90, "billing": 0.04, "sales": 0.02, "other": 0.02},
+		},
+		{
+			name: "materially_above_sum_1_02",
+			ids:  deptIDs,
+			dist: map[string]float64{"support": 0.90, "billing": 0.06, "sales": 0.03, "other": 0.03},
+		},
+		{
+			name: "negative_within_sum_band",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": 1.0, "b": -1e-12},
+		},
+		{
+			name: "above_one_within_sum_band",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": 1.0 + 1e-12, "b": 0.0},
+		},
+		{
+			name: "nan_value",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": math.NaN(), "b": 1.0},
+		},
+		{
+			name: "pos_inf_value",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": math.Inf(1), "b": 0.0},
+		},
+		{
+			name: "neg_inf_value",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": math.Inf(-1), "b": 1.0},
+		},
+	}
+
+	for _, tc := range rejectCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := provider.ValidateDistribution(tc.dist, tc.ids)
+			require.Error(t, err)
+			pe, ok := provider.AsProviderError(err)
+			require.True(t, ok)
+			assert.Equal(t, provider.FailMalformedResponse, pe.Reason)
+		})
+	}
+}

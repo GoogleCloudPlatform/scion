@@ -26,6 +26,12 @@ const (
 	// SumTolerance is the allowed deviation from 1.0 when validating closed
 	// probability distributions (provider-design §6.3, §7.4).
 	SumTolerance = metrics.SumTolerance
+	// SumToleranceFloatSlack is numerical slack (1e-12) for IEEE-754 binary64
+	// representation at the existing SumTolerance (1e-3) boundary, widening the
+	// accepted band by a negligible 1e-12 (mathematically non-zero, far below
+	// reported probability precision) without widening the 1 ± 1e-3 contract or
+	// accommodating provider rounding.
+	SumToleranceFloatSlack = metrics.SumToleranceFloatSlack
 	// TieTolerance is the top-two probability margin at or below which a binary
 	// or closed-choice answer is classified as Uncertain("tie")
 	// (provider-design §4.3, §6.3, §7.4).
@@ -34,8 +40,9 @@ const (
 
 // ValidateDistribution verifies that dist contains exact keys matching
 // declaredIDs, every value is finite and in [0, 1], and the sum is within
-// 1 ± SumTolerance. It never repairs or renormalizes dist; any violation returns
-// a *ProviderError with Reason FailMalformedResponse (provider-design §6.3).
+// 1 ± SumTolerance (with 1e-12 binary64 boundary slack). It never repairs or
+// renormalizes dist; any violation returns a *ProviderError with Reason
+// FailMalformedResponse (provider-design §6.3).
 func ValidateDistribution(dist map[string]float64, declaredIDs []string) error {
 	if len(declaredIDs) < 2 {
 		return NewProviderError(FailMalformedResponse, false, 0, 0, "declared option set has fewer than 2 options")
@@ -72,7 +79,10 @@ func ValidateDistribution(dist map[string]float64, declaredIDs []string) error {
 	for _, p := range probs {
 		sum += p
 	}
-	if math.Abs(sum-1.0) > SumTolerance {
+	// Compare against SumTolerance + 1e-12 for IEEE-754 binary64 representation
+	// slack at the existing 1e-3 boundary (negligible 1e-12 widening; not a
+	// wider contract or provider-rounding accommodation).
+	if math.Abs(sum-1.0) > SumTolerance+SumToleranceFloatSlack {
 		return NewProviderError(FailMalformedResponse, false, 0, 0, "distribution probabilities do not sum to 1 ± 1e-3")
 	}
 	return nil

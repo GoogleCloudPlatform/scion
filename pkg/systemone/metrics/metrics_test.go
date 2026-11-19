@@ -89,6 +89,13 @@ func TestCompute_GoldenDistributions(t *testing.T) {
 			wantMargin:  0.0,
 			wantEntropy: -(3 * 0.333 * math.Log(0.333)) / math.Log(3),
 		},
+		{
+			name:        "gemini_doc_choice_example_float_boundary_0999",
+			dist:        map[string]float64{"support": 0.99, "billing": 0.004, "sales": 0.003, "other": 0.002},
+			wantPTop:    0.99,
+			wantMargin:  0.99 - 0.004,
+			wantEntropy: -(0.002*math.Log(0.002) + 0.003*math.Log(0.003) + 0.004*math.Log(0.004) + 0.99*math.Log(0.99)) / math.Log(4),
+		},
 	}
 
 	for _, tc := range tests {
@@ -178,6 +185,9 @@ func TestCompute_RejectsInvalidDistributions(t *testing.T) {
 		{name: "prob_above_one", dist: map[string]float64{"a": 1.0005, "b": 0.0}},
 		{name: "sum_too_low", dist: map[string]float64{"a": 0.45, "b": 0.45}},
 		{name: "sum_too_high", dist: map[string]float64{"a": 0.501, "b": 0.501}},
+		{name: "sum_0_98", dist: map[string]float64{"a": 0.90, "b": 0.08}},
+		{name: "sum_just_below_slack_band", dist: map[string]float64{"a": 0.5, "b": 0.5 - (1e-3 + 1e-9)}},
+		{name: "sum_just_above_slack_band", dist: map[string]float64{"a": 0.5, "b": 0.5 + (1e-3 + 1e-9)}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
