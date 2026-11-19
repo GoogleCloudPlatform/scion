@@ -56,6 +56,17 @@ func idleSuspendAbandonAfter() time.Duration {
 	return idleSuspendAbandonLeases * idleSuspendClaimLease()
 }
 
+// idleSuspendBackoff is how long after its claim stamp an abandoned row is not
+// claimed again by the idle sweep. The abandon runs idleSuspendAbandonAfter
+// after the stamp and keeps the stamp (run_intent back to running) as the
+// marker, so the next attempt comes idleSuspendAbandonAfter + one lease after
+// the abandon at the earliest: a persistent stop failure retries about every
+// half hour instead of every tick. Any user or hub lifecycle write clears the
+// stamp and ends the backoff.
+func idleSuspendBackoff() time.Duration {
+	return 2*idleSuspendAbandonAfter() + idleSuspendClaimLease()
+}
+
 const idleSuspendAbandonedMessage = "Idle suspend failed: the container did not stop; the suspend was abandoned and the agent keeps running"
 
 // stopDefinitelyRefused reports whether a failed idle-suspend stop dispatch
@@ -196,7 +207,12 @@ func (s *Server) abandonStuckIdleSuspends(ctx context.Context) {
 			continue
 		}
 		rctx, cancel := detachedContext(ctx, finalizationTimeout)
-		err := s.store.AbandonIdleSuspend(rctx, agent.ID, *agent.IdleSuspendClaimUntil, agent.RunID, after, idleSuspendAbandonedMessage)
+		if agent.RunIntentAt == nil {
+			endLifecycleOp()
+			cancel()
+			continue
+		}
+		err := s.store.AbandonIdleSuspend(rctx, agent.ID, *agent.IdleSuspendClaimUntil, agent.RunID, *agent.RunIntentAt, after, idleSuspendAbandonedMessage)
 		cancel()
 		endLifecycleOp()
 		switch {

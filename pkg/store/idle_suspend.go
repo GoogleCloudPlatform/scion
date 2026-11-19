@@ -43,6 +43,10 @@ type IdleSuspendCondition struct {
 	IdleSuspendAfter time.Duration
 	HeartbeatRecency time.Duration
 	ClaimTTL         time.Duration
+	// ClaimBackoff, when positive, makes ClaimIdleSuspend refuse a row whose
+	// idle_suspend_claim_until is less than ClaimBackoff in the past (the
+	// marker an abandoned idle suspend leaves).
+	ClaimBackoff time.Duration
 }
 
 // HasActiveIdleSuspendClaim reports whether an idle-suspend claim lease is

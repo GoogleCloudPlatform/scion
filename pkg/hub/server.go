@@ -5950,6 +5950,9 @@ func (s *Server) agentIdleSuspendHandler() func(ctx context.Context) {
 		cutoff := now.Add(-after)
 		heartbeatRecency := now.Add(-agentHeartbeatRecency)
 		liveWorkCutoff := now.Add(-store.LiveWorkFreshness)
+		// Rows an abandoned idle suspend left stamped are not selected until the
+		// backoff passes (also not in the tick that abandoned them).
+		backoffCutoff := now.Add(-idleSuspendBackoff())
 
 		pageSize := budget
 		if pageSize < 64 {
@@ -5961,7 +5964,7 @@ func (s *Server) agentIdleSuspendHandler() func(ctx context.Context) {
 			cursor   *store.IdleSuspendCursor
 		)
 		for len(selected) < budget && tickCtx.Err() == nil {
-			page, err := s.store.ListIdleSuspendCandidates(tickCtx, cutoff, heartbeatRecency, liveWorkCutoff, cursor, pageSize)
+			page, err := s.store.ListIdleSuspendCandidates(tickCtx, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff, cursor, pageSize)
 			if err != nil {
 				slog.Error("Scheduler: idle auto-suspend check failed", "error", err)
 				return
@@ -6115,6 +6118,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			IdleSuspendAfter: after,
 			HeartbeatRecency: agentHeartbeatRecency,
 			ClaimTTL:         idleSuspendClaimLease(),
+			ClaimBackoff:     idleSuspendBackoff(),
 		}
 	default:
 		if agent.IdleSuspendClaimLeaseActive || agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
@@ -6269,20 +6273,22 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 				return false
 			}
 			s.clearWorkspaceAtStop(ctx, agent)
-			if claimedIdle {
-				cctx, ccancel := finalizationContext(ctx)
-				_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
-				ccancel()
-			}
 			// This stop was the system's, not the user's: if it
 			// replaced a running intent, put that back unless something
 			// newer replaced it. A prior stopped intent (for example a
-			// user stop whose dispatch also failed) stays stopped.
+			// user stop whose dispatch also failed) stays stopped. The
+			// intent is reverted before the claim is cleared: cleared first,
+			// a crash in between would leave intent=stopped with no stamp.
 			if priorIntent == store.RunIntentRunning {
 				if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
 					slog.Error("Scheduler: auto-suspend intent revert failed",
 						"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
 				}
+			}
+			if claimedIdle {
+				cctx, ccancel := finalizationContext(ctx)
+				_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
+				ccancel()
 			}
 			return false
 		}

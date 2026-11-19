@@ -1757,9 +1757,9 @@ type countingIdleCandidatesStore struct {
 	listCalls atomic.Int32
 }
 
-func (w *countingIdleCandidatesStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, after *store.IdleSuspendCursor, limit int) ([]store.Agent, error) {
+func (w *countingIdleCandidatesStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *store.IdleSuspendCursor, limit int) ([]store.Agent, error) {
 	w.listCalls.Add(1)
-	return w.Store.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, after, limit)
+	return w.Store.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff, after, limit)
 }
 
 type claimBeforeMarkStore struct {

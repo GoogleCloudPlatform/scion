@@ -248,27 +248,37 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 			found = found || r.ID == a.ID
 		}
 		assert.True(t, found)
-		require.NoError(t, s.AbandonIdleSuspend(ctx, a.ID, until, runIDs[a.ID], ceiling, "abandoned"))
+		rowA, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NoError(t, s.AbandonIdleSuspend(ctx, a.ID, until, runIDs[a.ID], *rowA.RunIntentAt, ceiling, "abandoned"))
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, store.RunIntentRunning, got.RunIntent)
-		assert.Nil(t, got.IdleSuspendClaimUntil)
+		require.NotNil(t, got.IdleSuspendClaimUntil, "the stamp stays as the backoff marker")
+		assert.False(t, got.IdleSuspendClaimActive, "intent running: not in progress")
 		assert.Equal(t, "abandoned", got.Message)
+
+		// The marker keeps the row out of the candidate query and ClaimIdleSuspend.
+		cands, err := s.ListIdleSuspendCandidates(ctx, time.Now().Add(time.Hour), time.Now().Add(-time.Hour), time.Now(), time.Now().Add(-3*time.Hour), nil, 0)
+		require.NoError(t, err)
+		for _, c := range cands {
+			assert.NotEqual(t, a.ID, c.ID, "backoff: not a candidate")
+		}
 		assert.Equal(t, string(state.PhaseRunning), got.Phase)
 
 		young, _ := claimed(t, "ab-young", true)
 		yu := past(t, young.ID, time.Minute)
-		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, young.ID, yu, runIDs[young.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, young.ID, yu, runIDs[young.ID], time.Now(), ceiling, "x"), store.ErrIdleSuspendPrecondition)
 
 		stamp, _ := claimed(t, "ab-stamp", true)
 		su := past(t, stamp.ID, 2*time.Hour)
-		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stamp.ID, su.Add(time.Hour), runIDs[stamp.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition)
-		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stamp.ID, su, "other-run", ceiling, "x"), store.ErrIdleSuspendPrecondition)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stamp.ID, su.Add(time.Hour), runIDs[stamp.ID], time.Now(), ceiling, "x"), store.ErrIdleSuspendPrecondition)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stamp.ID, su, "other-run", time.Now(), ceiling, "x"), store.ErrIdleSuspendPrecondition)
 
 		stopped, _ := claimed(t, "ab-stopped", true)
 		stu := past(t, stopped.ID, 2*time.Hour)
 		setPhase(t, stopped.ID, string(state.PhaseStopped))
-		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stopped.ID, stu, runIDs[stopped.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, stopped.ID, stu, runIDs[stopped.ID], time.Now(), ceiling, "x"), store.ErrIdleSuspendPrecondition)
 
 		held, _ := claimed(t, "ab-claim", true)
 		hu := past(t, held.ID, 2*time.Hour)
@@ -276,11 +286,34 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 		require.NoError(t, err)
 		_, err = s.ClaimAgentStop(ctx, held.ID, "backstop", *row.RunIntentAt, time.Minute)
 		require.NoError(t, err)
-		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, held.ID, hu, runIDs[held.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition)
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, held.ID, hu, runIDs[held.ID], *row.RunIntentAt, ceiling, "x"), store.ErrIdleSuspendPrecondition)
 
 		userStopped, _ := claimed(t, "ab-userstop", true)
 		uu := past(t, userStopped.ID, 2*time.Hour)
 		require.NoError(t, s.UpdateAgentStatus(ctx, userStopped.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
-		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, userStopped.ID, uu, runIDs[userStopped.ID], ceiling, "x"), store.ErrIdleSuspendPrecondition, "a hub write cleared the stamp")
+		assert.ErrorIs(t, s.AbandonIdleSuspend(ctx, userStopped.ID, uu, runIDs[userStopped.ID], time.Now(), ceiling, "x"), store.ErrIdleSuspendPrecondition, "a hub write cleared the stamp")
+	})
+
+	t.Run("ClaimIdleSuspend honours the backoff marker", func(t *testing.T) {
+		a := makeAgent(projectID, "claim-backoff")
+		a.Phase = string(state.PhaseRunning)
+		a.Activity = string(state.ActivityIdle)
+		a.RunID = "run-b"
+		a.LastSeen = now.Add(-15 * time.Second)
+		require.NoError(t, s.CreateAgent(ctx, a))
+		_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+			SetRunIntent(string(store.RunIntentRunning)).SetRunIntentAt(now.Add(-time.Hour)).
+			SetActivitySince(idleSince).SetIdleSuspendClaimUntil(time.Now().UTC().Add(-time.Minute)).Save(ctx)
+		require.NoError(t, err)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		cond := store.IdleSuspendCondition{RunID: got.RunID, Activity: got.Activity, ActivitySince: *got.ActivitySince,
+			IdleSuspendAfter: 15 * time.Minute, HeartbeatRecency: 2 * time.Minute, ClaimTTL: time.Minute,
+			ClaimBackoff: time.Hour}
+		_, _, _, err = s.ClaimIdleSuspend(ctx, a.ID, cond)
+		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition, "stamp newer than the backoff")
+		cond.ClaimBackoff = 30 * time.Second
+		_, _, _, err = s.ClaimIdleSuspend(ctx, a.ID, cond)
+		assert.NoError(t, err, "backoff passed")
 	})
 }

@@ -887,9 +887,12 @@ type AgentStore interface {
 	// activity_since ascending (and id ascending as tiebreaker). When after is
 	// non-nil, only rows strictly after (after.ActivitySince, after.ID) are
 	// returned so sweeps can advance past non-resumable or already-queued rows.
+	// Rows whose idle_suspend_claim_until is at or after backoffCutoff are not
+	// returned: an abandoned idle suspend leaves its stamp (run_intent back to
+	// running) as the backoff marker. A zero backoffCutoff disables that skip.
 	// Offline agents and rows with a NULL activity_since are never returned. A
 	// positive limit bounds the number of rows returned.
-	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, after *IdleSuspendCursor, limit int) ([]Agent, error)
+	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *IdleSuspendCursor, limit int) ([]Agent, error)
 
 	// ClaimIdleSuspend atomically checks that agentID still satisfies cond on
 	// the locked row (phase=running, matching run_id/activity/activity_since
@@ -919,10 +922,13 @@ type AgentStore interface {
 	// AbandonIdleSuspend gives up an idle suspend whose stop never landed, under
 	// the row lock and the store clock: it requires the exact claimUntil stamp,
 	// expired at least expiredFor ago, the same runID, phase running,
-	// run_intent=stopped, no start claim, reincarnation or deletion; then it
-	// clears the claim, reverts run_intent to running and records message on
-	// the row. Otherwise ErrIdleSuspendPrecondition, nothing written.
-	AbandonIdleSuspend(ctx context.Context, agentID string, claimUntil time.Time, runID string, expiredFor time.Duration, message string) error
+	// run_intent=stopped written at intentAt (a newer stopped intent, for
+	// example a membership hold's, is not reverted), no start claim,
+	// reincarnation or deletion; then it reverts run_intent to running and
+	// records message on the row. The stamp is KEPT as the backoff marker
+	// (ClaimIdleSuspend and ListIdleSuspendCandidates skip a row whose stamp is
+	// newer than the backoff); any user or hub lifecycle write clears it. Otherwise ErrIdleSuspendPrecondition, nothing written.
+	AbandonIdleSuspend(ctx context.Context, agentID string, claimUntil time.Time, runID string, intentAt time.Time, expiredFor time.Duration, message string) error
 
 	// ClearIdleSuspendClaim clears idle_suspend_claim_until on agentID.
 	ClearIdleSuspendClaim(ctx context.Context, agentID string) error

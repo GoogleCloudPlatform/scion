@@ -678,7 +678,8 @@ func TestIdleSuspendRecovery_StopNeverLandsIsAbandoned(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseRunning), got.Phase)
 	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
-	assert.Nil(t, got.IdleSuspendClaimUntil)
+	assert.NotNil(t, got.IdleSuspendClaimUntil, "the stamp stays as the backoff marker")
+	assert.False(t, got.IdleSuspendClaimActive)
 	assert.Contains(t, got.Message, "Idle suspend failed")
 
 	// The agent is deliverable again.
@@ -721,4 +722,82 @@ func TestIdleSuspendRecovery_LeaseOnlyCallSites(t *testing.T) {
 	expired := base
 	expired.IdleSuspendClaimActive, expired.IdleSuspendClaimLeaseActive = true, false
 	assert.True(t, heldAgentNeedsStop(&expired), "an expired in-progress claim does not block the held-agent stop")
+}
+
+// failingStopWakeDispatcher counts stops and fails each with err.
+type failingStopWakeDispatcher struct {
+	wakeTrackingDispatcher
+	stops atomic.Int32
+	err   error
+}
+
+func (d *failingStopWakeDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
+	d.stops.Add(1)
+	return d.err
+}
+
+// TestIdleSuspendRecovery_AbandonBackoffThroughFullSweep drives the real sweep
+// handler against a stop that fails with a non-allowlisted error every time.
+// After the abandon the agent stays deliverable and is not claimed again in
+// that tick or the following ones; once the backoff passes, one new attempt
+// follows.
+func TestIdleSuspendRecovery_AbandonBackoffThroughFullSweep(t *testing.T) {
+	ctx := context.Background()
+	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+	disp := &failingStopWakeDispatcher{err: &brokerStatusError{StatusCode: http.StatusInternalServerError}}
+	srv.SetDispatcher(disp)
+	t.Cleanup(srv.waitAutoWakeIdle)
+	enableIdleSweepForTest(t, srv, 15*time.Minute)
+	sweep := func() {
+		srv.agentIdleSuspendHandler()(ctx)
+		srv.waitAutoSuspendIdle()
+	}
+
+	target, _ = claimIdleForTest(t, s, target, "run-backoff")
+	require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning), Activity: string(state.ActivityIdle)}))
+	_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	reArm := func() {
+		now := time.Now().UTC()
+		_, err := s.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+			"UPDATE agents SET activity_since = ?, last_seen = ?, last_delivery_at = NULL WHERE id = ?",
+			now.Add(-20*time.Minute), now.Add(-15*time.Second), target.ID)
+		require.NoError(t, err)
+	}
+	reArm()
+
+	// Sweep 1: claimed, the stop fails with an unknown outcome.
+	sweep()
+	require.Equal(t, int32(1), disp.stops.Load())
+	got, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.RunIntentStopped, got.RunIntent)
+
+	// Past the ceiling the same tick abandons it and must not claim it again.
+	setIdleClaimExpiredFor(t, s, target.ID, idleSuspendAbandonAfter()+time.Minute)
+	sweep()
+	assert.Equal(t, int32(1), disp.stops.Load(), "no new claim in the tick that abandoned")
+	got, err = s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+	assert.NotNil(t, got.IdleSuspendClaimUntil, "the stamp is the backoff marker")
+	assert.False(t, got.IdleSuspendClaimActive)
+
+	// Deliverable: a DM is delivered normally.
+	res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, got, "delivered during the backoff"))
+	require.Nil(t, dmErr)
+	assert.Equal(t, AgentDMAccepted, res.Outcome)
+	require.Len(t, disp.getMessageCalls(), 1)
+
+	// Still within the backoff: later ticks do not claim it.
+	reArm()
+	sweep()
+	sweep()
+	assert.Equal(t, int32(1), disp.stops.Load(), "no re-claim within the backoff")
+
+	// Once the backoff has passed, one new attempt follows.
+	setIdleClaimExpiredFor(t, s, target.ID, idleSuspendBackoff()+time.Minute)
+	reArm()
+	sweep()
+	assert.Equal(t, int32(2), disp.stops.Load(), "one new attempt after the backoff")
 }

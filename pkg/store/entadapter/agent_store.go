@@ -3311,7 +3311,7 @@ func entTxStoreNow(ctx context.Context, tx *ent.Tx, isPostgres bool) (time.Time,
 }
 
 // ListIdleSuspendCandidates implements store.AgentStore.
-func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, after *store.IdleSuspendCursor, limit int) ([]store.Agent, error) {
+func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *store.IdleSuspendCursor, limit int) ([]store.Agent, error) {
 	q := s.client.Agent.Query().Where(
 		agent.DeletedAtIsNil(),
 		agent.PhaseEQ(string(state.PhaseRunning)),
@@ -3325,6 +3325,12 @@ func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, hear
 			agent.LastLiveProcessAtLT(liveWorkCutoff.UTC()),
 		),
 	)
+	if !backoffCutoff.IsZero() {
+		q = q.Where(agent.Or(
+			agent.IdleSuspendClaimUntilIsNil(),
+			agent.IdleSuspendClaimUntilLT(backoffCutoff.UTC()),
+		))
+	}
 	if after != nil {
 		afterUID, err := parseUUID(after.ID)
 		if err != nil {

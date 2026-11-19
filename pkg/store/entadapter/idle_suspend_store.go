@@ -83,6 +83,9 @@ func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now ti
 	if row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil) {
 		return false
 	}
+	if row.IdleSuspendClaimUntil != nil && cond.ClaimBackoff > 0 && now.Before(row.IdleSuspendClaimUntil.Add(cond.ClaimBackoff)) {
+		return false
+	}
 	if row.Phase != string(state.PhaseRunning) {
 		return false
 	}
@@ -358,7 +361,7 @@ func (s *AgentStore) ListAbandonedIdleSuspendClaims(ctx context.Context, expired
 }
 
 // AbandonIdleSuspend implements store.AgentStore.AbandonIdleSuspend.
-func (s *AgentStore) AbandonIdleSuspend(ctx context.Context, agentID string, claimUntil time.Time, runID string, expiredFor time.Duration, message string) error {
+func (s *AgentStore) AbandonIdleSuspend(ctx context.Context, agentID string, claimUntil time.Time, runID string, intentAt time.Time, expiredFor time.Duration, message string) error {
 	return s.withIdleSuspendLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
 		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) ||
 			!claimEligible(row) || heldClaimError(row) != nil {
@@ -369,14 +372,13 @@ func (s *AgentStore) AbandonIdleSuspend(ctx context.Context, agentID string, cla
 			return false, store.ErrIdleSuspendPrecondition
 		}
 		if row.RunID != runID || row.Phase != string(state.PhaseRunning) ||
-			row.RunIntent == nil || *row.RunIntent != string(store.RunIntentStopped) {
+			!entAgentToStore(row).RunIntentMatches(store.RunIntentStopped, intentAt) {
 			return false, store.ErrIdleSuspendPrecondition
 		}
 		if _, err := c.Agent.UpdateOneID(row.ID).
 			SetUpdated(row.Updated).
 			SetRunIntent(string(store.RunIntentRunning)).
 			SetMessage(message).
-			ClearIdleSuspendClaimUntil().
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}
