@@ -13,7 +13,15 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { agentA, apiAgent, defaultAgents, projectId, setup, switchView } from './fixtures.js';
+import {
+  agentA,
+  agentB,
+  apiAgent,
+  defaultAgents,
+  projectId,
+  setup,
+  switchView,
+} from './fixtures.js';
 
 // ---------------------------------------------------------------------------
 // Table-driven entry point: href verification
@@ -455,4 +463,95 @@ test('browser back/forward preserves retained terminal session', async ({ page }
   await expect(page).toHaveURL(`/terminals/${agentA}`);
   expect(socket.attaches).toBe(1);
   expect(socket.closes).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// Wide-tier header Terminals chevron dropdown (ptone/scion#8284)
+// ---------------------------------------------------------------------------
+
+test('wide header Terminals chevron lists current agent and rail sessions, opens via keyboard, and hides on medium/narrow widths', async ({
+  page,
+}) => {
+  const socket = await setup(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  // 1. Empty state on dashboard before any terminal session is opened.
+  await page.goto('/');
+  const appChevron = page
+    .locator('scion-app scion-header .wide-center')
+    .getByRole('button', { name: 'Open terminals menu' });
+  await expect(appChevron).toBeVisible({ timeout: 15000 });
+  await expect(appChevron).toHaveAttribute('aria-haspopup', 'menu');
+  await expect(appChevron).toHaveAttribute('aria-expanded', 'false');
+
+  await appChevron.click();
+  await expect(page).toHaveURL('/');
+  await expect(appChevron).toHaveAttribute('aria-expanded', 'true');
+  const emptyItem = page.locator(
+    'scion-app scion-header .wide-center .terminals-menu sl-menu-item[disabled]'
+  );
+  await expect(emptyItem).toBeVisible();
+  await expect(emptyItem).toContainText('No open terminals');
+
+  await page.keyboard.press('Escape');
+  await expect(appChevron).toHaveAttribute('aria-expanded', 'false');
+
+  // 2. Open alpha-agent in the terminal workspace so the rail holds one live session.
+  await page.goto(`/terminals/${agentA}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+
+  // 3. Navigate to beta-agent's detail page (not yet open in the rail).
+  await page.evaluate(
+    (path) => document.dispatchEvent(new CustomEvent('nav-click', { detail: { path } })),
+    `/agents/${agentB}`
+  );
+  await expect(page).toHaveURL(`/agents/${agentB}`);
+  // Wait until agent-detail loads beta-agent's name and publishes it.
+  await expect
+    .poll(async () => {
+      const items = page.locator(
+        'scion-app scion-header .wide-center .terminals-menu sl-menu-item'
+      );
+      return items.allTextContents();
+    })
+    .toEqual([expect.stringContaining('beta-agent'), expect.stringContaining('alpha-agent')]);
+
+  // Open via keyboard ArrowDown and verify row 1 ("not open") + row 2 ("Connected").
+  await appChevron.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(appChevron).toHaveAttribute('aria-expanded', 'true');
+  const rows = page.locator('scion-app scion-header .wide-center .terminals-menu sl-menu-item');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText('beta-agent');
+  await expect(rows.nth(0)).toContainText('not open');
+  await expect(rows.nth(1)).toContainText('alpha-agent');
+
+  // Press Enter on focused row 1 (beta-agent) -> navigates to /terminals/<agentB> and attaches.
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`/terminals/${agentB}`);
+  await expect.poll(() => socket.attaches).toBe(2);
+
+  // Inside /terminals/<agentB>, the focused pane (beta-agent) is listed first and deduplicated.
+  const wsRows = page.locator(
+    '#terminal-workspace scion-header .wide-center .terminals-menu sl-menu-item'
+  );
+  await expect(wsRows).toHaveCount(2);
+  await expect(wsRows.nth(0)).toContainText('beta-agent');
+  await expect(wsRows.nth(0)).not.toContainText('not open');
+  await expect(wsRows.nth(1)).toContainText('alpha-agent');
+
+  // 4. Medium (<=1100px) and narrow (<=768px) tiers hide the wide chevron.
+  await page.setViewportSize({ width: 1000, height: 800 });
+  await expect(
+    page
+      .locator('#terminal-workspace scion-header')
+      .getByRole('button', { name: 'Open terminals menu' })
+  ).toBeHidden();
+
+  await page.setViewportSize({ width: 600, height: 800 });
+  await expect(
+    page
+      .locator('#terminal-workspace scion-header')
+      .getByRole('button', { name: 'Open terminals menu' })
+  ).toBeHidden();
 });

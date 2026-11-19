@@ -23,7 +23,7 @@ The dashboard features an integrated notification framework with real-time SSE d
 ### Mode Switcher
 The header features a **mode switcher** that lets you move between the top-level workspaces: **Console**, **Chat**, and **Terminals** (**Console** holds the left-hand navigation, including the **Dashboard** overview page at `/`). The header adapts to the viewport width in three tiers:
 
-- **Wide (above 1100 px)**: A segmented mode switcher with text labels and icons, with inline buttons for notifications, help, theme, profile, and sign-out.
+- **Wide (above 1100 px)**: A segmented mode switcher with text labels and icons, with inline buttons for notifications, help, theme, profile, and sign-out. A chevron next to **Terminals** opens a menu of open terminal sessions in the rail's sort order, listing the current agent first (marked **not open** when it is not yet in the rail) so you can jump straight to a terminal from any view.
 - **Medium (768–1100 px)**: The mode switcher shows icons only. Notifications, help, theme, profile, and sign-out move into a single account dropdown. A badge dot on the dropdown shows unread notifications.
 - **Narrow (below 768 px)**: The mode switcher becomes a dropdown, next to the account dropdown and a hamburger menu.
 
