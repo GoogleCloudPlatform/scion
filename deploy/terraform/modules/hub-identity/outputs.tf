@@ -40,3 +40,22 @@ output "hub_workload_identity_member" {
   description = "The Workload Identity member granted roles/iam.workloadIdentityUser on the hub GSA (\"serviceAccount:<project>.svc.id.goog[<ns>/<ksa>]\"), or null when hub_workload_identity_ksa is unset. A real resource attribute, so a consumer that must not start before the grant exists (hub-gke's boot_prerequisites) gets a genuine dependency edge from it."
   value       = one(google_service_account_iam_member.hub_workload_identity_user[*].member)
 }
+
+output "relay_sa_email" {
+  description = "Separate Conduit Relay GSA email (\"<hub_name>-relay@...\"), or null when enable_relay_identity is false."
+  value       = one(google_service_account.relay[*].email)
+}
+
+output "relay_iam_grants" {
+  description = "All relay-SA IAM grant resource .id values for boot_prerequisites dependency wiring (empty list when enable_relay_identity is false)."
+  value = concat(
+    google_project_iam_member.relay_cloudsql_client[*].id,
+    google_project_iam_member.relay_cloudsql_instance_user[*].id,
+    google_project_iam_member.relay_logging_log_writer[*].id,
+  )
+}
+
+output "relay_workload_identity_member" {
+  description = "Workload Identity member granted roles/iam.workloadIdentityUser on the relay GSA, or null when disabled."
+  value       = one(google_service_account_iam_member.relay_workload_identity_user[*].member)
+}

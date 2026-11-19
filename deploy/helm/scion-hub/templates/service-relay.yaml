@@ -1,0 +1,43 @@
+{{/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/}}
+{{- include "scion-hub.assertNoCredentialsInValues" . }}
+{{- $conduitCfg := include "scion-hub.conduitConfig" . | fromYaml }}
+{{- $relayTls := include "scion-hub.relayTls" . | fromYaml }}
+{{- $relayOn := eq (include "scion-hub.relayEnabled" .) "true" }}
+{{- if and $relayTls (or (eq (toString $conduitCfg.relayMode) "external") $relayOn) }}
+# Internal ClusterIP Service selecting HUB pods (app.kubernetes.io/name:
+# scion-hub) on the relay-tls port so separate relay pods reach
+# server.relay.hub_internal_url at <fullname>-relay.<namespace>.svc:9443
+# (matching the default conduit.internalTls.serverName). Relay pods themselves
+# carry app.kubernetes.io/name: scion-hub-relay and are dialed directly by pod
+# IP from relay_instances.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "scion-hub.relayServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scion-hub.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: relay-tls
+      port: {{ int $relayTls.port }}
+      targetPort: relay-tls
+      protocol: TCP
+  selector:
+    {{- include "scion-hub.selectorLabels" . | nindent 4 }}
+{{- end }}

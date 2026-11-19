@@ -66,6 +66,12 @@ jobs:
       - name: Helm lint (Terraform hub-gke values)
         run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml
 
+      - name: Helm lint (Terraform hub-gke multi-replica values)
+        run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-terraform-hub-gke-multi.yaml
+
+      - name: Helm lint (Terraform hub-gke external relay values)
+        run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-terraform-hub-gke-external.yaml
+
       - name: Helm lint (NFS workspace values)
         run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-nfs-workspace.yaml
 
@@ -84,10 +90,17 @@ jobs:
             values-file: ci/values-cluster-rbac.yaml
             release-name: ci-cluster-rbac
           # The values deploy/terraform/modules/hub-gke generates (its
-          # chart_values), with placeholders. That module's terraform test
-          # keeps this file equal to chart_values.
+          # chart_values), with placeholders, across single-replica,
+          # multi-replica in_process, and multi-replica external relay.
+          # That module's terraform test keeps each file equal to chart_values.
           - name: terraform-hub-gke
             values-file: ci/values-terraform-hub-gke.yaml
+            release-name: tfha-gke-h3
+          - name: terraform-hub-gke-multi
+            values-file: ci/values-terraform-hub-gke-multi.yaml
+            release-name: tfha-gke-h3
+          - name: terraform-hub-gke-external
+            values-file: ci/values-terraform-hub-gke-external.yaml
             release-name: tfha-gke-h3
           # workspaceStorage.nfs enabled: settings.yaml workspace_storage and
           # the hub pod's inline nfs volume, schema-checked by kubeconform.

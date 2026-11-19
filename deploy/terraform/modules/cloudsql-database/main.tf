@@ -124,3 +124,97 @@ resource "google_secret_manager_secret_version" "db_dsn" {
 # state-only). Known window: from the sql_user password update until the
 # new revision is Ready, the old revision's *new* DB connections fail,
 # while its existing pooled connections survive.
+
+# --- Optional separate Conduit Relay user (<hub_name>-relay) ---
+#
+# Cloud SQL BUILT_IN users do not automatically inherit privileges on tables
+# owned by "<hub_name>". When wired through modules/hub-gke / scion-hub Helm
+# chart (relay.database.user = "<hub_name>-relay"), the chart sets
+# server.database.relay_role = "<hub_name>-relay" in the Hub's settings.yaml so
+# Hub schema migration (CompositeStore.Migrate) automatically runs idempotent
+# PostgreSQL GRANTs in current_schema() after AutoMigrate:
+#   - CONNECT on current_database() and USAGE on current_schema() (when missing)
+#   - SELECT, INSERT, UPDATE, DELETE on relay_instances, conduit_sessions
+#   - SELECT, INSERT, UPDATE on conduit_principal_epochs
+#   - SELECT on hub_settings
+# Non-chart deployments running `--role relay` directly should set
+# server.database.relay_role = "<hub_name>-relay" (or
+# SCION_SERVER_DATABASE_RELAYROLE) on the Hub as well.
+#
+# deletion_policy = "ABANDON": once Hub migration has granted privileges to
+# "<hub_name>-relay" in the hub database, PostgreSQL refuses a plain DROP ROLE
+# ("cannot be dropped because some objects depend on it") until those grants
+# are revoked. Without ABANDON, setting enable_relay_user back to false (for
+# example when rolling conduit_relay_mode back from "external" to "in_process")
+# or destroying the hub if Terraform orders google_sql_user.relay before
+# google_sql_database.this fails mid-apply. With ABANDON, Terraform drops the
+# user from state (while still destroying the Secret Manager password/DSN
+# secrets below) and leaves the PostgreSQL role in the Cloud SQL instance;
+# see configurations/hub-gke/README.md for the optional REVOKE + DROP ROLE
+# cleanup runbook.
+
+resource "random_password" "relay_db" {
+  count = var.enable_relay_user ? 1 : 0
+
+  length  = 32
+  special = false
+
+  keepers = var.password_rotation == "" ? null : {
+    rotation = var.password_rotation
+  }
+}
+
+resource "google_sql_user" "relay" {
+  count = var.enable_relay_user ? 1 : 0
+
+  project         = var.project_id
+  instance        = var.instance_name
+  name            = "${var.hub_name}-relay"
+  password        = random_password.relay_db[0].result
+  type            = "BUILT_IN"
+  deletion_policy = "ABANDON"
+}
+
+resource "google_secret_manager_secret" "relay_db_password" {
+  count = var.enable_relay_user ? 1 : 0
+
+  project   = var.project_id
+  secret_id = "${var.hub_name}-relay-db-password"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "relay_db_password" {
+  count = var.enable_relay_user ? 1 : 0
+
+  secret      = google_secret_manager_secret.relay_db_password[0].id
+  secret_data = random_password.relay_db[0].result
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "google_secret_manager_secret" "relay_db_dsn" {
+  count = var.enable_relay_user ? 1 : 0
+
+  project   = var.project_id
+  secret_id = "${var.hub_name}-relay-db-dsn"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "relay_db_dsn" {
+  count = var.enable_relay_user ? 1 : 0
+
+  secret      = google_secret_manager_secret.relay_db_dsn[0].id
+  secret_data = "postgres://${google_sql_user.relay[0].name}:${urlencode(random_password.relay_db[0].result)}@/${google_sql_database.this.name}?host=/cloudsql/${var.sql_connection_name}"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}

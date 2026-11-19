@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=298   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances) + 8 (the relay version floor set to v0.3.0-preview.5: v0.3.0-preview.4, v0.2.99 and nightly-20261028 refused, v0.3.0-preview.5, v0.3.0, v0.3.1-preview.1 and nightly-20261029 accepted, the default-tag refusal offers the release floor; the empty-floor case moves to a chart copy; the pre-release-of-the-minimum row is dropped, the preview.4 row covering it; the gate block now runs 34 rows) + 3 (v0.3.0-preview.10 accepted, numeric pre-release precedence at the floor's core version; the empty-floor chart copy also refuses the default tag and a malformed version tag; the gate block now runs 37 rows) + 12 (scion-hub.fullname injectivity, preserved names, >63 digest, fullnameOverride upgrade path and NOTES disclosure).
+EXPECTED_TOTAL=322   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances) + 8 (the relay version floor set to v0.3.0-preview.5: v0.3.0-preview.4, v0.2.99 and nightly-20261028 refused, v0.3.0-preview.5, v0.3.0, v0.3.1-preview.1 and nightly-20261029 accepted, the default-tag refusal offers the release floor; the empty-floor case moves to a chart copy; the pre-release-of-the-minimum row is dropped, the preview.4 row covering it; the gate block now runs 34 rows) + 3 (v0.3.0-preview.10 accepted, numeric pre-release precedence at the floor's core version; the empty-floor chart copy also refuses the default tag and a malformed version tag; the gate block now runs 37 rows) + 12 (scion-hub.fullname injectivity, preserved names, >63 digest, fullnameOverride upgrade path and NOTES disclosure) + 22 (HA PDB + external Conduit Relay role + peerAuth auto->hmac + oidc refusal).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1768,6 +1768,163 @@ for rel in t other-release t2; do
     echo "FAIL  hub-id under release '${rel}': ${got}"; failed=$((failed + 1))
   fi
 done
+
+echo "== hub.pdb, hub.topologySpreadConstraints, conduit.relayMode=external and relay role =="
+reject "hub.pdb with both minAvailable and maxUnavailable" "never both" \
+  --set hub.pdb.enabled=true --set hub.pdb.minAvailable=1 --set hub.pdb.maxUnavailable=1
+reject "hub.pdb with malformed minAvailable" "must be a non-negative integer or a percentage" \
+  --skip-schema-validation --set hub.pdb.enabled=true --set-string hub.pdb.minAvailable=abc
+reject "hub.topologySpreadConstraints embedding a credential" "has the shape of a credential" \
+  --set 'hub.topologySpreadConstraints[0].maxSkew=1' \
+  --set-string 'hub.topologySpreadConstraints[0].topologyKey=ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'
+accept "hub.pdb default maxUnavailable=1" --set hub.pdb.enabled=true
+executed=$((executed + 1))
+_pdb_def="$(render --set hub.pdb.enabled=true -s templates/pdb.yaml)"
+if printf '%s\n' "$_pdb_def" | grep -qxF '  maxUnavailable: 1'; then
+  echo "ok    hub.pdb defaults to maxUnavailable: 1 (drain-safe on 1 replica, N-1 on >= 2 replicas)"
+else
+  echo "FAIL  hub.pdb default budget did not render maxUnavailable: 1"; failed=$((failed + 1))
+fi
+unset _pdb_def
+accept "hub.pdb percentage maxUnavailable" --set hub.pdb.enabled=true --set-string hub.pdb.maxUnavailable="50%"
+executed=$((executed + 1))
+_pdb_out="$(render --set hub.pdb.enabled=true --set-string hub.pdb.maxUnavailable="50%" \
+  --set 'hub.topologySpreadConstraints[0].maxSkew=1' \
+  --set-string 'hub.topologySpreadConstraints[0].topologyKey=topology.kubernetes.io/zone' \
+  --set-string 'hub.topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway')"
+if printf '%s\n' "$_pdb_out" | grep -qxF 'kind: PodDisruptionBudget' \
+  && printf '%s\n' "$_pdb_out" | grep -qxF '  maxUnavailable: "50%"' \
+  && printf '%s\n' "$_pdb_out" | grep -qxF '      topologySpreadConstraints:'; then
+  echo "ok    hub.pdb and hub.topologySpreadConstraints render expected PDB and pod scheduling blocks"
+else
+  echo "FAIL  hub.pdb / hub.topologySpreadConstraints shape did not match"; failed=$((failed + 1))
+fi
+unset _pdb_out
+
+EXT_TLS=(--set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 --set conduit.internalTls.existingSecret=rg-conduit-tls)
+reject "conduit.relayMode=external without internalTls existingSecret (auto turns TLS on)" \
+  "Set conduit.internalTls.existingSecret" \
+  --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+  --set conduit.relayMode=external --set conduit.existingPeerSecret=rg-peer
+reject "conduit.relayMode=external without peerSecret or existingPeerSecret" \
+  "requires a shared relay-peer secret" \
+  "${EXT_TLS[@]}" --set conduit.relayMode=external
+reject "conduit.peerSecret and conduit.existingPeerSecret both set" \
+  "conduit.peerSecret and conduit.existingPeerSecret are both set" \
+  "${EXT_TLS[@]}" --set conduit.relayMode=external \
+  --set conduit.existingPeerSecret=rg-peer \
+  --set-string conduit.peerSecret=peer-secret-valid-0123456789abcdef012345
+reject "conduit.existingPeerSecretKey without existingPeerSecret" \
+  "conduit.existingPeerSecretKey is set but conduit.existingPeerSecret is not" \
+  --set-string conduit.existingPeerSecretKey=CUSTOM_KEY
+reject "conduit.peerSecret shorter than 32 octets" "shorter than 32 octets" \
+  "${EXT_TLS[@]}" --set conduit.relayMode=external --set-string conduit.peerSecret=too-short-secret
+reject "conduit.peerSecret fewer than 16 distinct characters" "fewer than 16 distinct" \
+  "${EXT_TLS[@]}" --set conduit.relayMode=external --set-string conduit.peerSecret=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+reject "conduit.peerSecret equal to auth.sessionSecret" "must differ from auth.sessionSecret" \
+  "${EXT_TLS[@]}" --set conduit.relayMode=external \
+  --set-string auth.sessionSecret=shared-collision-secret-0123456789abcdef \
+  --set-string conduit.peerSecret=shared-collision-secret-0123456789abcdef
+reject "conduit.relayMode=external with internalTls explicitly false" \
+  "requires server.hub.conduit.internal_listen" \
+  --set conduit.relayMode=external --set conduit.internalTls.enabled=false \
+  --set conduit.existingPeerSecret=rg-peer --set relay.enabled=false
+reject "conduit.relayMode=external with conduit.peerAuth=oidc under proxy ingress" \
+  "ingress_requires_hmac" \
+  "${EXT_TLS[@]}" --set conduit.relayMode=external --set conduit.peerAuth=oidc \
+  --set conduit.existingPeerSecret=rg-peer
+reject "hub.extraEnv setting SCION_SERVER_HUB_CONDUIT_PEERSECRET" \
+  "hub.extraEnv may not set SCION_SERVER_HUB_CONDUIT_PEERSECRET" \
+  --set 'hub.extraEnv[0].name=SCION_SERVER_HUB_CONDUIT_PEERSECRET' \
+  --set 'hub.extraEnv[0].valueFrom.secretKeyRef.name=s' \
+  --set 'hub.extraEnv[0].valueFrom.secretKeyRef.key=k'
+
+EXT_BASE=("${EXT_TLS[@]}" --set conduit.relayMode=external --set conduit.peerAuth=hmac --set conduit.existingPeerSecret=rg-peer)
+reject "relay.args setting --enable-hub" "relay.args may not set --enable-hub" \
+  "${EXT_BASE[@]}" --set 'relay.args[0]=--enable-hub'
+reject "relay.args setting --session-secret" "relay.args may not set --session-secret" \
+  "${EXT_BASE[@]}" --set 'relay.args[0]=--session-secret=foo'
+reject "relay.extraEnv setting SCION_SERVER_SESSION_SECRET" \
+  "relay.extraEnv may not set SCION_SERVER_SESSION_SECRET" \
+  "${EXT_BASE[@]}" \
+  --set 'relay.extraEnv[0].name=SCION_SERVER_SESSION_SECRET' \
+  --set 'relay.extraEnv[0].valueFrom.secretKeyRef.name=s' \
+  --set 'relay.extraEnv[0].valueFrom.secretKeyRef.key=k'
+reject "relay.pdb with both minAvailable and maxUnavailable" "never both" \
+  "${EXT_BASE[@]}" --set relay.pdb.enabled=true --set relay.pdb.minAvailable=1 --set relay.pdb.maxUnavailable=1
+reject "relay.port colliding with conduit.internalTls.port" \
+  "claimed by both relay.port and conduit.internalTls.port" \
+  "${EXT_BASE[@]}" --set relay.port=9443
+
+executed=$((executed + 1))
+_relay_health_path="/health""z"
+_ha_ext="$("$HELM" template t "$CHART" -f "$CHART/ci/values-terraform-hub-gke.yaml" \
+  --set replicaCount=2 --set hub.pdb.enabled=true \
+  --set conduit.relayMode=external --set conduit.peerAuth=hmac \
+  --set conduit.existingPeerSecret=scion-conduit-peer \
+  --set conduit.internalTls.existingSecret=scion-conduit-tls \
+  --set relay.pdb.enabled=true \
+  --set-string relay.serviceAccount.gcpServiceAccount=tfha-gke-h3-relay@my-project.iam.gserviceaccount.com 2>&1)"
+_ha_relay_dep="$("$HELM" template t "$CHART" -f "$CHART/ci/values-terraform-hub-gke.yaml" \
+  --set conduit.relayMode=external --set conduit.peerAuth=hmac \
+  --set conduit.existingPeerSecret=scion-conduit-peer \
+  --set conduit.internalTls.existingSecret=scion-conduit-tls \
+  -s templates/relay-deployment.yaml 2>&1)"
+_ha_relay_sec="$("$HELM" template t "$CHART" -f "$CHART/ci/values-terraform-hub-gke.yaml" \
+  --set conduit.relayMode=external --set conduit.peerAuth=hmac \
+  --set conduit.existingPeerSecret=scion-conduit-peer \
+  --set conduit.internalTls.existingSecret=scion-conduit-tls \
+  -s templates/relay-secret-settings.yaml 2>&1)"
+_ha_fail=""
+for _w in \
+  '  name: t-scion-hub-relay' \
+  '      targetPort: relay-tls' \
+  '          relay_mode: external' \
+  '          peer_auth: hmac' \
+  '            - name: SCION_SERVER_HUB_CONDUIT_PEERSECRET' \
+  '            - "--role"' \
+  '            - "relay"' \
+  '        - name: cloud-sql-proxy' \
+  '        hub_internal_url: https://t-scion-hub-relay.default.svc:9443' \
+  '        public_url: https://tfha-gke-h3.example.com' \
+  '      trusted_proxies: []' \
+  '    iam.gke.io/gcp-service-account: "tfha-gke-h3-relay@my-project.iam.gserviceaccount.com"'; do
+  printf '%s\n' "$_ha_ext" | grep -qxF -- "$_w" || _ha_fail="${_ha_fail} [missing: ${_w# *}]"
+done
+_r_hp="$(printf '%s\n' "$_ha_relay_dep" | _httpget_paths | grep -cxF "$_relay_health_path" || true)"
+_r_rp="$(printf '%s\n' "$_ha_relay_dep" | _httpget_paths | grep -cxF '/readyz' || true)"
+[ "$_r_hp" -eq 2 ] || _ha_fail="${_ha_fail} [relay healthz probes=${_r_hp}, want 2]"
+[ "$_r_rp" -eq 0 ] || _ha_fail="${_ha_fail} [relay readyz probes=${_r_rp}, want 0]"
+printf '%s\n' "$_ha_relay_dep" | grep -q 'SESSION_SECRET' && _ha_fail="${_ha_fail} [SESSION_SECRET in relay Deployment]"
+printf '%s\n' "$_ha_relay_sec" | grep -qE '^      (oauth|storage|secrets|broker):' && _ha_fail="${_ha_fail} [hub-only section in relay settings]"
+[ "$(printf '%s\n' "$_ha_ext" | grep -cx 'kind: PodDisruptionBudget')" -eq 2 ] || _ha_fail="${_ha_fail} [expected 2 PDBs]"
+if [ -z "$_ha_fail" ]; then
+  echo "ok    external relay HA renders internal Service, --role relay Deployment with Cloud SQL sidecar and healthz probes, isolated relay settings and 2 PDBs"
+else
+  echo "FAIL  external relay HA shape:${_ha_fail}"; failed=$((failed + 1))
+fi
+unset _ha_ext _ha_relay_dep _ha_relay_sec _ha_fail _w _r_hp _r_rp _relay_health_path
+
+executed=$((executed + 1))
+_ps_a="$(render "${EXT_TLS[@]}" --set conduit.relayMode=external --set-string conduit.peerSecret=peer-secret-alpha-0123456789abcdef0123)"
+_ps_b="$(render "${EXT_TLS[@]}" --set conduit.relayMode=external --set-string conduit.peerSecret=peer-secret-bravo-fedcba98765432109876)"
+_ps_c="$(render "${EXT_TLS[@]}" --set conduit.relayMode=external --set-string conduit.peerSecret=peer-secret-bravo-fedcba98765432109876 --set relay.port=8090)"
+_hub_ck_a="$(printf '%s\n' "$_ps_a" | awk '/checksum\/settings:/{print $2}')"
+_hub_ck_b="$(printf '%s\n' "$_ps_b" | awk '/checksum\/settings:/{print $2}')"
+_rel_ck_a="$(printf '%s\n' "$_ps_a" | awk '/checksum\/relay-settings:/{print $2}')"
+_rel_ck_b="$(printf '%s\n' "$_ps_b" | awk '/checksum\/relay-settings:/{print $2}')"
+_rel_ck_c="$(printf '%s\n' "$_ps_c" | awk '/checksum\/relay-settings:/{print $2}')"
+if [ -n "$_hub_ck_a" ] && [ -n "$_rel_ck_a" ] \
+  && [ "$_hub_ck_a" = "$_hub_ck_b" ] \
+  && [ "$_rel_ck_a" = "$_rel_ck_b" ] \
+  && [ "$_rel_ck_b" != "$_rel_ck_c" ] \
+  && [ "$(printf '%s\n' "$_ps_a" | grep -cxF '          peer_auth: hmac')" -eq 2 ]; then
+  echo "ok    conduit.peerSecret is redacted from both checksums and conduit.peerAuth=auto resolves to hmac in external mode"
+else
+  echo "FAIL  conduit.peerSecret checksum redaction (hub: $_hub_ck_a vs $_hub_ck_b; relay: $_rel_ck_a vs $_rel_ck_b vs $_rel_ck_c)"
+  failed=$((failed + 1))
+fi
+unset _ps_a _ps_b _ps_c _hub_ck_a _hub_ck_b _rel_ck_a _rel_ck_b _rel_ck_c EXT_TLS EXT_BASE
 
 echo "---"
 echo "executed=${executed} expected=${EXPECTED_TOTAL} failed=${failed}"

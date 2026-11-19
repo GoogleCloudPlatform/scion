@@ -156,3 +156,77 @@ variable "test_runner" {
   default  = {}
   nullable = false
 }
+
+# --- High Availability & Separate Conduit Relay ---
+
+variable "hub_replica_count" {
+  description = "Number of Hub replicas (default 1; set >= 2 for multi-replica HA). Above 1, Terraform provisions a per-hub internal TLS CA and certificate Secret for the Conduit hop."
+  type        = number
+  default     = 1
+  nullable    = false
+
+  validation {
+    condition     = var.hub_replica_count >= 1 && floor(var.hub_replica_count) == var.hub_replica_count
+    error_message = "hub_replica_count must be an integer >= 1."
+  }
+}
+
+variable "conduit_relay_mode" {
+  description = "Conduit relay topology: \"in_process\" (default; each Hub pod runs its own relay) or \"external\" (separate --role relay Deployment with HMAC peer auth, internal TLS hop and dedicated <hub_name>-relay GSA/KSA)."
+  type        = string
+  default     = "in_process"
+  nullable    = false
+
+  validation {
+    condition     = contains(["in_process", "external"], var.conduit_relay_mode)
+    error_message = "conduit_relay_mode must be \"in_process\" or \"external\"."
+  }
+}
+
+variable "relay_replica_count" {
+  description = "Number of separate Conduit Relay replicas when conduit_relay_mode is \"external\"."
+  type        = number
+  default     = 2
+  nullable    = false
+
+  validation {
+    condition     = var.relay_replica_count >= 1 && floor(var.relay_replica_count) == var.relay_replica_count
+    error_message = "relay_replica_count must be an integer >= 1."
+  }
+}
+
+variable "enable_hub_pdb" {
+  description = "Enable the Hub Deployment's PodDisruptionBudget (hub.pdb.enabled). Requires hub_replica_count >= 2."
+  type        = bool
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = !var.enable_hub_pdb || var.hub_replica_count >= 2
+    error_message = "enable_hub_pdb = true requires hub_replica_count >= 2."
+  }
+}
+
+variable "enable_relay_pdb" {
+  description = "Enable the Conduit Relay Deployment's PodDisruptionBudget when conduit_relay_mode is \"external\" (relay.pdb.enabled). Requires conduit_relay_mode = \"external\" and relay_replica_count >= 2."
+  type        = bool
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = !var.enable_relay_pdb || (var.conduit_relay_mode == "external" && var.relay_replica_count >= 2)
+    error_message = "enable_relay_pdb = true requires conduit_relay_mode = \"external\" and relay_replica_count >= 2."
+  }
+}
+
+variable "enable_relay_db_user" {
+  description = "Create a dedicated Cloud SQL user \"<hub_name>-relay\" and wire it to separate Conduit Relay pods when conduit_relay_mode is \"external\". The chart also sets server.database.relay_role on the Hub so Hub schema migration applies the least-privilege PostgreSQL table grants automatically on first boot and every upgrade. google_sql_user.relay sets deletion_policy = \"ABANDON\" so turning enable_relay_db_user off (including rolling conduit_relay_mode back to \"in_process\") or destroying the hub does not fail on PostgreSQL's DROP ROLE privilege check; see README.md for the optional REVOKE + DROP ROLE cleanup. Default false reuses the hub's <hub_name> DB user so existing hubs see zero plan diff."
+  type        = bool
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = !var.enable_relay_db_user || var.conduit_relay_mode == "external"
+    error_message = "enable_relay_db_user = true requires conduit_relay_mode = \"external\" (in_process mode runs no separate relay pods, so a dedicated relay DB user and secrets would go unused)."
+  }
+}

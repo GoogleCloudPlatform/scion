@@ -32,14 +32,18 @@ on:
     branches: [ main ]
     paths:
       - 'deploy/terraform/**'
-      # modules/hub-gke's terraform test compares chart_values with this fixture.
+      # modules/hub-gke's terraform test compares chart_values with these fixtures.
       - 'deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml'
+      - 'deploy/helm/scion-hub/ci/values-terraform-hub-gke-multi.yaml'
+      - 'deploy/helm/scion-hub/ci/values-terraform-hub-gke-external.yaml'
       - '.github/workflows/terraform-ci.yml'
   pull_request:
     paths:
       - 'deploy/terraform/**'
-      # modules/hub-gke's terraform test compares chart_values with this fixture.
+      # modules/hub-gke's terraform test compares chart_values with these fixtures.
       - 'deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml'
+      - 'deploy/helm/scion-hub/ci/values-terraform-hub-gke-multi.yaml'
+      - 'deploy/helm/scion-hub/ci/values-terraform-hub-gke-external.yaml'
       - '.github/workflows/terraform-ci.yml'
 
 permissions:

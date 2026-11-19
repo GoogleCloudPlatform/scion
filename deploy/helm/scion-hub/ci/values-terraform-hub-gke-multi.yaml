@@ -1,0 +1,108 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# THE TERRAFORM HUB-GKE MULTI-REPLICA (IN-PROCESS RELAY) PERMUTATION: the
+# values deploy/terraform/modules/hub-gke hands this chart when
+# hub_replica_count = 2 and enable_hub_pdb = true with conduit_relay_mode =
+# "in_process", key for key (minus database.password, which goes through
+# set_sensitive).
+#
+# KEPT IN STEP BY A TEST: modules/hub-gke's run
+# "multi_replica_in_process_provisions_conduit_tls_only" fails unless
+# chart_values equals this file (minus database.password).
+
+replicaCount: 2
+
+image:
+  repository: us-central1-docker.pkg.dev/example-project/example-repo/scion-hub-gke
+  digest: sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface
+
+hub:
+  hubId: tfha-gke-h3
+  baseUrl: https://tfha-gke-h3.example.com
+  adminEmails:
+    - admin@example.com
+  webPort: 8080
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+  podAnnotations:
+    scion.dev/db-password-rotation: "2026-10-06"
+  pdb:
+    enabled: true
+
+serviceAccount:
+  create: true
+  name: scion-hub
+  gcpServiceAccount: tfha-gke-h3-hub@example-project.iam.gserviceaccount.com
+
+rbac:
+  create: true
+
+runtime:
+  namespace: tfha-gke-h3
+  gke: false
+
+agents:
+  imageRegistry: us-central1-docker.pkg.dev/example-project/example-repo
+
+database:
+  driver: postgres
+  auth: password
+  name: tfha_gke_h3
+  user: tfha-gke-h3
+  password: placeholder-not-a-real-password
+
+cloudsql:
+  enabled: true
+  instanceConnectionName: example-project:us-central1:tfha-pg
+  privateIp: true
+
+storage:
+  provider: gcs
+  bucket: example-project-tfha-gke-h3-artifacts
+
+secrets:
+  backend: gcpsm
+  gcpsm:
+    projectId: example-project
+
+auth:
+  mode: proxy
+  proxy:
+    provider: iap
+    iap:
+      audience: /projects/123456789012/global/backendServices/4242424242
+  transport:
+    mode: iap
+    oidcAudience: 123456789-placeholder.apps.googleusercontent.com
+    platformAuthSa: tfha-gke-h3-transport@example-project.iam.gserviceaccount.com
+  existingSecret: tfha-gke-h3-session
+
+workspaceStorage:
+  nfs:
+    enabled: true
+    server: nfs.example.com
+    export: /example-export/tfha-gke-h3
+    mountRoot: /mnt/scion-nfs
+    shareId: tfha-gke-h3
+    pvName: tfha-gke-h3-nfs
+    subpathRoot: projects
+
+conduit:
+  internalTls:
+    enabled: true
+    existingSecret: tfha-gke-h3-conduit-tls
+    serverName: tfha-gke-h3-scion-hub-relay.tfha-gke-h3-system.svc

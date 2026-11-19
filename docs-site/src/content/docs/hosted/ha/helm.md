@@ -492,6 +492,57 @@ including one set through `config.extra`. `conduit.internalTls` is refused
 together with `config.existingSecret`; put the same keys in your own settings
 file instead.
 
+### Separate Conduit Relays and PodDisruptionBudgets
+
+Setting `conduit.relayMode: external` moves Conduit session hosting out of the
+hub pods into a separate `Deployment` running `scion server start --role relay`
+(see [Separate Conduit Relays](/scion/hosted/ha/separate-relay/)):
+
+- **Peer authentication:** set `conduit.existingPeerSecret` (preferred; read as
+  `SCION_SERVER_HUB_CONDUIT_PEERSECRET` via `secretKeyRef`) or
+  `conduit.peerSecret` (redacted from `checksum/settings` and
+  `checksum/relay-settings` annotations). In `external` mode, the default
+  `conduit.peerAuth: auto` automatically resolves to `hmac` so proxy ingress
+  (`server.hub.conduit.ingress: proxy`) preserves client `Authorization`
+  headers; `conduit.peerAuth: oidc` is refused while proxy ingress is active.
+- **Internal hop Service:** when `conduit.relayMode: external` (or
+  `relay.enabled: true`), `conduit.internalTls` auto-enables and the chart
+  renders an internal `ClusterIP` `Service` `<fullname>-relay` on
+  `conduit.internalTls.port` (`9443`) selecting **Hub** pods (`scion-hub`
+  selector labels) so relay pods reach `server.relay.hub_internal_url`
+  (`https://<fullname>-relay.<namespace>.svc:9443`, matching the default
+  `conduit.internalTls.serverName`).
+- **Relay isolation, database role & probes:** `relay.*` renders a dedicated
+  `Deployment` (with distinct `scion-hub-relay` selector labels),
+  `ServiceAccount` (`relay.serviceAccount.gcpServiceAccount`), optional
+  `PodDisruptionBudget` (`relay.pdb`), and isolated settings `Secret`
+  (`<fullname>-relay-settings`) carrying no hub session secret, OAuth
+  credentials, GCS storage config, or Secret Manager config. When
+  `relay.database.user` (or IAM-derived relay user) differs from the Hub's
+  `database.user`, the chart automatically sets `server.database.relay_role` in
+  the Hub's `settings.yaml` so Hub schema migration grants that PostgreSQL role
+  the exact least-privilege table permissions. Relay HTTP probes target
+  `/healthz` (`--role relay` serves no `/readyz`).
+- **Replica sizing, disruption budgets & topology spread:** run at least 2 Hub
+  replicas (`replicaCount: 2`) and 2 Relay replicas (`relay.replicaCount: 2`)
+  for zone-level HA, keeping `(replicaCount × database.maxOpenConns) + (relay.replicaCount × relay.database.maxOpenConns)`
+  plus sidecar/listener overhead comfortably below your PostgreSQL
+  `max_connections` limit. Enable `hub.pdb.enabled: true` and
+  `relay.pdb.enabled: true` (both default to `maxUnavailable: 1` when neither
+  `minAvailable` nor `maxUnavailable` is set, so voluntary node drains keep
+  `N - 1` pods serving without wedging single-replica test releases) alongside
+  `hub.topologySpreadConstraints` / `relay.topologySpreadConstraints`.
+- **First-install and upgrade order:** on a brand-new database with
+  `conduit.relayMode: external`, the Hub runs schema migrations, applies any
+  `server.database.relay_role` PostgreSQL grants, and seeds `hub.conduit: true`
+  in `hub_settings` (when no explicit override exists). Relay pods starting in
+  the same `helm install` retry database/permission checks for up to 60 seconds
+  and may restart once if they read `hub_settings` in the brief window before
+  the Hub seeds `hub.conduit: true`; Kubernetes restarts them automatically and
+  the release converges without manual steps. On version upgrades across
+  separate releases, upgrade the Hub before separate relays (see
+  [Running a relay](/scion/hosted/ha/separate-relay/#running-a-relay)).
+
 The readiness and startup probes target `/readyz` on the hub's web port
 (`hub.webPort`, default 8080). The path cannot be changed. The liveness probe is
 off by default. When `probes.liveness.enabled` is `true`, it is a TCP check on

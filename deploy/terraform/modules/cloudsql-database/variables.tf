@@ -39,3 +39,10 @@ variable "password_rotation" {
   type        = string
   default     = ""
 }
+
+variable "enable_relay_user" {
+  description = "Optional dedicated Cloud SQL user \"<hub_name>-relay\" (plus Secret Manager password and DSN secrets) for separate Conduit Relay pods (--role relay). Default false creates nothing so existing single-binary / in-process hubs see zero plan diff. Cloud SQL BUILT_IN users do not automatically receive table-level privileges on tables created by \"<hub_name>\"; configure server.database.relay_role = \"<hub_name>-relay\" on the Hub (wired automatically by the scion-hub Helm chart when relay.database.user is set) so Hub schema migration applies the least-privilege PostgreSQL table grants automatically. Sets deletion_policy = \"ABANDON\" on google_sql_user.relay because PostgreSQL refuses DROP ROLE while those grants exist; revoke the grants and drop the role manually if retiring it permanently (see configurations/hub-gke/README.md)."
+  type        = bool
+  default     = false
+  nullable    = false
+}

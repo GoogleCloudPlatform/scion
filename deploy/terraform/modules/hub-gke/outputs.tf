@@ -21,6 +21,14 @@ output "ksa" {
   }
 }
 
+output "relay_ksa" {
+  description = "The separate Conduit Relay pod's Kubernetes service account when conduit_relay_mode is \"external\", else null."
+  value = local.conduit_external_relay ? {
+    namespace = local.namespace
+    name      = var.relay_ksa_name
+  } : null
+}
+
 output "bucket_name" {
   value = google_storage_bucket.artifacts.name
 }

@@ -49,3 +49,15 @@ admin_emails = ["REPLACE_ME@example.com"]
 #   impersonators               = ["serviceAccount:REPLACE_ME@REPLACE_ME.iam.gserviceaccount.com"]
 #   alert_notification_channels = ["projects/REPLACE_ME/notificationChannels/REPLACE_ME"]
 # }
+
+# Optional: multi-replica HA Hub + separate Conduit Relay pods (--role relay).
+# Above 1 Hub replica or with conduit_relay_mode = "external", Terraform
+# provisions the internal Conduit TLS CA/leaf Secret; in external mode it also
+# provisions the shared relay-peer HMAC Secret and least-privilege <hub>-relay
+# GSA/KSA (hub-lb stays unchanged on proxy ingress).
+# hub_replica_count    = 2
+# conduit_relay_mode   = "external"
+# relay_replica_count  = 2
+# enable_hub_pdb       = true
+# enable_relay_pdb     = true
+# enable_relay_db_user = true # Optional dedicated <hub>-relay SQL user (deletion_policy = ABANDON; see README for revoke/drop cleanup)

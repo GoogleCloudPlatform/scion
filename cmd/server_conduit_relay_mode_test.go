@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -32,7 +33,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -510,4 +513,155 @@ func TestValidateConduitIngress(t *testing.T) {
 			assert.Equal(t, tc.wantOff, off)
 		})
 	}
+}
+
+// TestInitOperationalSettings_ExternalRelayBootstrapsConduitExperiment verifies
+// that starting a Hub with server.hub.conduit.relay_mode=external on a fresh DB
+// seeds hub.conduit=true in hub_settings (breaking the fresh-DB startup
+// deadlock for both Hub and --role relay), merges hub.conduit=true into an
+// existing experiments row that has no explicit hub.conduit override, honors an
+// explicit admin hub.conduit=false override, leaves malformed documents
+// untouched, and never seeds hub.conduit in in_process mode.
+func TestInitOperationalSettings_ExternalRelayBootstrapsConduitExperiment(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	captureStdLog(t)
+
+	setupEnv := func(t *testing.T) (context.Context, string) {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		globalDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(globalDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o600))
+		return context.Background(), globalDir
+	}
+
+	t.Run("fresh DB with in_process leaves experiments absent and hub.conduit off", func(t *testing.T) {
+		ctx, globalDir := setupEnv(t)
+		st := newTestStore(t)
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite3"
+		srv, err := hub.New(hub.ServerConfig{}, st)
+		require.NoError(t, err)
+
+		require.NoError(t, initOperationalSettings(ctx, cfg, srv, st, globalDir))
+		assert.False(t, srv.ConduitEnabled(), "in_process mode must not auto-enable hub.conduit")
+		_, err = st.GetHubSetting(ctx, "experiments")
+		assert.ErrorIs(t, err, store.ErrNotFound, "experiments row stays absent in in_process mode")
+	})
+
+	t.Run("fresh DB with external relay seeds hub.conduit=true and is idempotent on restart", func(t *testing.T) {
+		ctx, globalDir := setupEnv(t)
+		st := newTestStore(t)
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite3"
+		cfg.Hub.Conduit = config.HubConduitConfig{
+			RelayMode:  config.ConduitRelayModeExternal,
+			PeerSecret: relayModeTestPeerSecret,
+		}
+
+		srv, err := hub.New(hub.ServerConfig{}, st)
+		require.NoError(t, err)
+		require.NoError(t, initOperationalSettings(ctx, cfg, srv, st, globalDir))
+		assert.True(t, srv.ConduitEnabled(), "external relay mode enables hub.conduit on fresh DB")
+
+		row, err := st.GetHubSetting(ctx, "experiments")
+		require.NoError(t, err)
+		assert.Equal(t, opsettings.OriginSeeded, row.Origin)
+		parsed, malformed := opsettings.ParseExperimentsDoc(row.Value)
+		require.False(t, malformed)
+		assert.Equal(t, map[string]bool{"hub.conduit": true}, parsed.Overrides)
+		firstRev := row.Revision
+
+		// Restarting with the same configuration must not rewrite or bump revision.
+		srv2, err := hub.New(hub.ServerConfig{}, st)
+		require.NoError(t, err)
+		require.NoError(t, initOperationalSettings(ctx, cfg, srv2, st, globalDir))
+		assert.True(t, srv2.ConduitEnabled())
+		row2, err := st.GetHubSetting(ctx, "experiments")
+		require.NoError(t, err)
+		assert.Equal(t, firstRev, row2.Revision, "idempotent restart must not bump revision")
+	})
+
+	t.Run("existing experiments row without hub.conduit merges hub.conduit=true", func(t *testing.T) {
+		ctx, globalDir := setupEnv(t)
+		st := newTestStore(t)
+		_, err := st.UpsertHubSetting(ctx, "experiments",
+			json.RawMessage(`{"overrides":{"hub.conduit_deliver":false}}`),
+			"admin@example.com", 0, opsettings.OriginManaged)
+		require.NoError(t, err)
+
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite3"
+		cfg.Hub.Conduit = config.HubConduitConfig{
+			RelayMode:  config.ConduitRelayModeExternal,
+			PeerSecret: relayModeTestPeerSecret,
+		}
+		srv, err := hub.New(hub.ServerConfig{}, st)
+		require.NoError(t, err)
+		require.NoError(t, initOperationalSettings(ctx, cfg, srv, st, globalDir))
+		assert.True(t, srv.ConduitEnabled())
+
+		row, err := st.GetHubSetting(ctx, "experiments")
+		require.NoError(t, err)
+		assert.Equal(t, opsettings.OriginManaged, row.Origin, "managed origin preserved")
+		assert.Equal(t, "admin@example.com", row.UpdatedBy, "managed updatedBy preserved")
+		parsed, malformed := opsettings.ParseExperimentsDoc(row.Value)
+		require.False(t, malformed)
+		assert.Equal(t, map[string]bool{
+			"hub.conduit":         true,
+			"hub.conduit_deliver": false,
+		}, parsed.Overrides)
+	})
+
+	t.Run("explicit hub.conduit=false override is honored and startConduit refuses", func(t *testing.T) {
+		ctx, globalDir := setupEnv(t)
+		st := newTestStore(t)
+		_, err := st.UpsertHubSetting(ctx, "experiments",
+			json.RawMessage(`{"overrides":{"hub.conduit":false}}`),
+			"admin@example.com", 0, opsettings.OriginManaged)
+		require.NoError(t, err)
+
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite3"
+		cfg.Hub.Conduit = config.HubConduitConfig{
+			RelayMode:  config.ConduitRelayModeExternal,
+			PeerSecret: relayModeTestPeerSecret,
+		}
+		srv, err := hub.New(hub.ServerConfig{}, st)
+		require.NoError(t, err)
+		require.NoError(t, initOperationalSettings(ctx, cfg, srv, st, globalDir))
+		assert.False(t, srv.ConduitEnabled(), "explicit admin false override must not be overwritten")
+
+		runCtx, cancel := context.WithCancel(ctx)
+		var wg sync.WaitGroup
+		t.Cleanup(func() { cancel(); wg.Wait() })
+		q := newTestShutdown(cancel)
+		err = startConduit(runCtx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+		require.ErrorIs(t, err, errConduitExternalNeedsExperiment)
+	})
+
+	t.Run("malformed experiments row stays untouched and fails closed", func(t *testing.T) {
+		ctx, globalDir := setupEnv(t)
+		st := newTestStore(t)
+		_, err := st.UpsertHubSetting(ctx, "experiments",
+			json.RawMessage(`{"overrides":"not-a-map"}`),
+			"admin@example.com", 0, opsettings.OriginManaged)
+		require.NoError(t, err)
+
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite3"
+		cfg.Hub.Conduit = config.HubConduitConfig{
+			RelayMode:  config.ConduitRelayModeExternal,
+			PeerSecret: relayModeTestPeerSecret,
+		}
+		srv, err := hub.New(hub.ServerConfig{}, st)
+		require.NoError(t, err)
+		require.NoError(t, initOperationalSettings(ctx, cfg, srv, st, globalDir))
+		assert.False(t, srv.ConduitEnabled(), "malformed experiments row must fail closed")
+
+		row, err := st.GetHubSetting(ctx, "experiments")
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"overrides":"not-a-map"}`, string(row.Value))
+	})
 }

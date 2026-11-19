@@ -164,3 +164,51 @@ resource "google_project_iam_member" "agent_sa_project_roles" {
   member  = "serviceAccount:${google_service_account.agent.email}"
 }
 
+# --- Separate Conduit Relay SA (opt-in, external relay mode only) ---
+#
+# Least-privilege GSA for `scion server start --role relay` pods: Cloud SQL
+# connectivity + Cloud Logging only (`roles/cloudsql.instanceUser` is
+# pre-granted alongside `roles/cloudsql.client` for parity with the Hub GSA so
+# switching relay.database.auth to IAM requires no IAM rollout race; password
+# auth via the Cloud SQL Auth Proxy uses `roles/cloudsql.client`). Deliberately
+# receives NO Secret Manager, GCS, cluster-viewer or TokenCreator grants.
+resource "google_service_account" "relay" {
+  count = var.enable_relay_identity ? 1 : 0
+
+  project      = var.project_id
+  account_id   = "${var.hub_name}-relay"
+  display_name = "Scion Conduit Relay (${var.hub_name}) — GKE Workload Identity"
+}
+
+resource "google_project_iam_member" "relay_cloudsql_client" {
+  count = var.enable_relay_identity ? 1 : 0
+
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.relay[0].email}"
+}
+
+resource "google_project_iam_member" "relay_cloudsql_instance_user" {
+  count = var.enable_relay_identity ? 1 : 0
+
+  project = var.project_id
+  role    = "roles/cloudsql.instanceUser"
+  member  = "serviceAccount:${google_service_account.relay[0].email}"
+}
+
+resource "google_project_iam_member" "relay_logging_log_writer" {
+  count = var.enable_relay_identity ? 1 : 0
+
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.relay[0].email}"
+}
+
+resource "google_service_account_iam_member" "relay_workload_identity_user" {
+  count = var.enable_relay_identity && var.relay_workload_identity_ksa != null ? 1 : 0
+
+  service_account_id = google_service_account.relay[0].name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.relay_workload_identity_ksa.namespace}/${var.relay_workload_identity_ksa.name}]"
+}
+

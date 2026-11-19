@@ -264,7 +264,15 @@ NO_RENDERED_SETTINGS=(existing-secret)
 #
 # 365 -> 366: grace-period gains the explicit-null arm (null deletes the key,
 # so it must fall back to 45, not int(nil) = 0). Summed, then read off a run.
-EXPECTED_TOTAL=366
+#
+# 366 -> 373 for the three Terraform hub-gke combination fixtures (ptone/scion#8425):
+#    +3  helm lint --strict across terraform-hub-gke, terraform-hub-gke-multi,
+#        and terraform-hub-gke-external
+#    +3  helm template + kubeconform -strict across the same three fixtures
+#        (7, 8, and 13 valid resources, 0 skipped)
+#    +1  relay_role rendered in Hub settings.yaml (and absent from relay
+#        settings.yaml) when relay.database.user differs from database.user
+EXPECTED_TOTAL=373
 
 failures=0
 assertions=0
@@ -2116,6 +2124,7 @@ PROBE_PY
 # missing entry here does not produce a wrong answer - it produces a render
 # failure or a leaf that moves nothing, both of which are counted and reported
 # below.
+_RELAY_PROBE_PRE='--set|relay.enabled=true|--set-string|conduit.existingPeerSecret=probe-peer|--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000'
 declare -A PROBE_MUTATION=(
   [auth.requireStableSigningKey]='--set|auth.requireStableSigningKey=false'
   [auth.sessionSecret]='--set-string|auth.sessionSecret=probe-other-session-secret'
@@ -2221,6 +2230,58 @@ declare -A PROBE_MUTATION=(
   [workspaceStorage.nfs.shareId]='--set|workspaceStorage.nfs.enabled=true|--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set-string|workspaceStorage.nfs.shareId=probe-other-share'
   [workspaceStorage.nfs.pvName]='--set|workspaceStorage.nfs.enabled=true|--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set-string|workspaceStorage.nfs.pvName=probe-other-pv'
   [workspaceStorage.nfs.subpathRoot]='--set|workspaceStorage.nfs.enabled=true|--set-string|workspaceStorage.nfs.server=192.0.2.10|--set-string|workspaceStorage.nfs.export=/probe_share|--set-string|workspaceStorage.nfs.shareId=probe-share|--set-string|workspaceStorage.nfs.pvName=probe-pv|--set-string|workspaceStorage.nfs.subpathRoot=probe/other'
+  [hub.topologySpreadConstraints]='--set|hub.topologySpreadConstraints[0].maxSkew=1|--set-string|hub.topologySpreadConstraints[0].topologyKey=topology.kubernetes.io/zone|--set-string|hub.topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway|--set-string|hub.topologySpreadConstraints[0].labelSelector.matchLabels.probe=one'
+  [hub.pdb.enabled]='--set|hub.pdb.enabled=true'
+  [hub.pdb.minAvailable]='--set|hub.pdb.enabled=true|--set|hub.pdb.minAvailable=2'
+  [hub.pdb.maxUnavailable]='--set|hub.pdb.enabled=true|--set|hub.pdb.maxUnavailable=2'
+  [conduit.relayMode]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.existingPeerSecret=probe-peer|--set-string|conduit.relayMode=external'
+  [conduit.peerAuth]='--set-string|conduit.peerAuth=hmac'
+  [conduit.existingPeerSecret]='--set-string|conduit.existingPeerSecret=probe-peer-secret'
+  [conduit.existingPeerSecretKey]='--set-string|conduit.existingPeerSecret=probe-peer-secret|--set-string|conduit.existingPeerSecretKey=OTHER_PEER_KEY'
+  [conduit.peerSecret]='--set-string|conduit.peerSecret=probe-conduit-peer-secret-0123456789abcdef'
+  [relay.enabled]='--set-string|conduit.existingPeerSecret=probe-peer|--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set|relay.enabled=true'
+  [relay.replicaCount]="${_RELAY_PROBE_PRE}|--set|relay.replicaCount=3"
+  [relay.port]="${_RELAY_PROBE_PRE}|--set|relay.port=8088"
+  [relay.publicUrl]="${_RELAY_PROBE_PRE}|--set-string|relay.publicUrl=https://relay.example.com"
+  [relay.hubInternalUrl]="${_RELAY_PROBE_PRE}|--set-string|relay.hubInternalUrl=https://hub-internal.example.internal:9443"
+  [relay.trustedProxies]="${_RELAY_PROBE_PRE}|--set|relay.trustedProxies={10.0.0.0/8}"
+  [relay.args]="${_RELAY_PROBE_PRE}|--set|relay.args={--probe-relay-flag}"
+  [relay.extraEnv]="${_RELAY_PROBE_PRE}|--set-string|relay.extraEnv[0].name=PROBE_RELAY_ENV|--set-string|relay.extraEnv[0].value=x"
+  [relay.resources.requests.cpu]="${_RELAY_PROBE_PRE}|--set-string|relay.resources.requests.cpu=300m"
+  [relay.resources.requests.memory]="${_RELAY_PROBE_PRE}|--set-string|relay.resources.requests.memory=640Mi"
+  [relay.resources.limits.memory]="${_RELAY_PROBE_PRE}|--set-string|relay.resources.limits.memory=2Gi"
+  [relay.podAnnotations]="${_RELAY_PROBE_PRE}|--set-string|relay.podAnnotations.probeKey=probeVal"
+  [relay.podLabels]="${_RELAY_PROBE_PRE}|--set-string|relay.podLabels.probeKey=probeVal"
+  [relay.nodeSelector]="${_RELAY_PROBE_PRE}|--set-string|relay.nodeSelector.probeKey=probeVal"
+  [relay.tolerations]="${_RELAY_PROBE_PRE}|--set-string|relay.tolerations[0].key=probe|--set-string|relay.tolerations[0].operator=Exists"
+  [relay.affinity]="${_RELAY_PROBE_PRE}|--set-string|relay.affinity.probeKey=probeVal"
+  [relay.topologySpreadConstraints]="${_RELAY_PROBE_PRE}|--set|relay.topologySpreadConstraints[0].maxSkew=1|--set-string|relay.topologySpreadConstraints[0].topologyKey=topology.kubernetes.io/zone|--set-string|relay.topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway|--set-string|relay.topologySpreadConstraints[0].labelSelector.matchLabels.probe=one"
+  [relay.terminationGracePeriodSeconds]="${_RELAY_PROBE_PRE}|--set|relay.terminationGracePeriodSeconds=60"
+  [relay.probes.startup.enabled]="${_RELAY_PROBE_PRE}|--set|relay.probes.startup.enabled=false"
+  [relay.probes.startup.periodSeconds]="${_RELAY_PROBE_PRE}|--set|relay.probes.startup.periodSeconds=7"
+  [relay.probes.startup.failureThreshold]="${_RELAY_PROBE_PRE}|--set|relay.probes.startup.failureThreshold=70"
+  [relay.probes.startup.timeoutSeconds]="${_RELAY_PROBE_PRE}|--set|relay.probes.startup.timeoutSeconds=5"
+  [relay.probes.readiness.periodSeconds]="${_RELAY_PROBE_PRE}|--set|relay.probes.readiness.periodSeconds=15"
+  [relay.probes.readiness.timeoutSeconds]="${_RELAY_PROBE_PRE}|--set|relay.probes.readiness.timeoutSeconds=5"
+  [relay.probes.readiness.failureThreshold]="${_RELAY_PROBE_PRE}|--set|relay.probes.readiness.failureThreshold=5"
+  [relay.probes.liveness.enabled]="${_RELAY_PROBE_PRE}|--set|relay.probes.liveness.enabled=true"
+  [relay.probes.liveness.periodSeconds]="${_RELAY_PROBE_PRE}|--set|relay.probes.liveness.enabled=true|--set|relay.probes.liveness.periodSeconds=25"
+  [relay.probes.liveness.failureThreshold]="${_RELAY_PROBE_PRE}|--set|relay.probes.liveness.enabled=true|--set|relay.probes.liveness.failureThreshold=5"
+  [relay.probes.liveness.timeoutSeconds]="${_RELAY_PROBE_PRE}|--set|relay.probes.liveness.enabled=true|--set|relay.probes.liveness.timeoutSeconds=5"
+  [relay.serviceAccount.create]="${_RELAY_PROBE_PRE}|--set-string|relay.serviceAccount.name=preexisting-relay|--set|relay.serviceAccount.create=false"
+  [relay.serviceAccount.name]="${_RELAY_PROBE_PRE}|--set-string|relay.serviceAccount.name=custom-relay-sa"
+  [relay.serviceAccount.gcpServiceAccount]="${_RELAY_PROBE_PRE}|--set-string|relay.serviceAccount.gcpServiceAccount=probe-relay@proj.iam.gserviceaccount.com"
+  [relay.serviceAccount.annotations]="${_RELAY_PROBE_PRE}|--set-string|relay.serviceAccount.annotations.probeKey=probeVal"
+  [relay.pdb.enabled]="${_RELAY_PROBE_PRE}|--set|relay.pdb.enabled=true"
+  [relay.pdb.minAvailable]="${_RELAY_PROBE_PRE}|--set|relay.pdb.enabled=true|--set|relay.pdb.minAvailable=2"
+  [relay.pdb.maxUnavailable]="${_RELAY_PROBE_PRE}|--set|relay.pdb.enabled=true|--set|relay.pdb.maxUnavailable=2"
+  [relay.database.auth]="${_RELAY_PROBE_PRE}|--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|relay.database.user=probe-relay-user|--set-string|relay.database.password=probe-relay-pw|--set-string|relay.database.auth=password"
+  [relay.database.user]="${_RELAY_PROBE_PRE}|--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|relay.database.user=probe-relay-user"
+  [relay.database.password]="${_RELAY_PROBE_PRE}|--set-string|database.driver=postgres|--set-string|database.auth=password|--set-string|database.name=probe-db|--set-string|database.user=probe-user|--set-string|database.password=probe-pw|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|relay.database.password=probe-relay-pw"
+  [relay.database.maxOpenConns]="${_RELAY_PROBE_PRE}|--set|relay.database.maxOpenConns=15"
+  [relay.database.maxIdleConns]="${_RELAY_PROBE_PRE}|--set|relay.database.maxIdleConns=8"
+  [relay.database.connMaxLifetime]="${_RELAY_PROBE_PRE}|--set-string|relay.database.connMaxLifetime=15m"
+  [relay.database.connMaxIdleTime]="${_RELAY_PROBE_PRE}|--set-string|relay.database.connMaxIdleTime=9m"
 )
 
 # A COMPLETE OAUTH WEB CREDENTIAL, IN THE PROBE'S BASELINE AND NOT IN BASE.
@@ -2348,13 +2409,14 @@ probe_leaf_live_under_es() { # <leaf> <comma-list of leaves to drop> <spec args.
 # leaving it in would report every settings-only value as touching the
 # Deployment too, and no value would ever be classified settings-only.
 probe_settings() {
-  sed -n '/^  settings\.yaml: |/,/^[^ ]/p' "$1" \
+  awk '/^# Source: /{keep = ($0 ~ /\/templates\/secret-settings\.yaml$/)} keep' "$1" \
+    | sed -n '/^  settings\.yaml: |/,/^[^ ]/p' \
     | sed -e '1d' -e '/^$/d' | grep -E '^    ' \
     | sed -e 's/^    //' -e '/^[[:space:]]*#/d' \
     | python3 "$WORK/settings-leaves.py"
 }
 probe_other() {
-  awk '/^# Source: /{keep = ($0 !~ /secret-settings\.yaml/)} keep' "$1" \
+  awk '/^# Source: /{keep = ($0 !~ /\/templates\/secret-settings\.yaml$/)} keep' "$1" \
     | grep -vF 'checksum/settings:'
 }
 
@@ -3570,7 +3632,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=44   # 44, less the gate-parity step's sites (removed with acknowledgeHAUnlanded), plus the four in its replacement, plus the two in the config.existingSecret + K_SERVICE NOTES rows (= 43), plus grace_default_line in the grace-period null arm (|| true fallback) = 44.
+PIPE_SITES_EXPECTED=45   # 44, plus tfkc in the terraform hub-gke combination fixtures step (|| true fallback) = 45.
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else
@@ -5080,10 +5142,10 @@ rm -f "$_probe"
 
 _sweep "$_banned_path" "${_tree[@]}" >"$_sweep_out"
 mapfile -t _hits <"$_sweep_out"
-if [[ "${#_hits[@]}" -eq 0 ]]; then
-  pass "the banned readiness literal appears in 0 of $_tree_n files in the chart tree ($_git_n tracked)"
+if [[ "${#_hits[@]}" -eq 1 && "${_hits[0]}" == "$CHART_DIR/templates/relay-deployment.yaml" ]]; then
+  pass "the banned hub readiness literal appears ONLY in templates/relay-deployment.yaml (--role relay serves no /readyz) and in 0 of $((_tree_n - 1)) other files ($_git_n tracked)"
 else
-  fail "the banned readiness literal appears in ${#_hits[@]} of $_tree_n files: ${_hits[*]}. The readiness path is /readyz; this literal must not ship, and VALIDATION.md ships."
+  fail "the banned hub readiness literal appears in ${#_hits[@]} of $_tree_n files (expected only templates/relay-deployment.yaml): ${_hits[*]}. On the hub the readiness path is /readyz."
 fi
 
 # THE TWO ASSERTIONS THAT MAKE THE ZERO ABOVE MEAN ANYTHING. Without these the
@@ -5106,6 +5168,48 @@ else
   fail "the banned-path sweeps exited $(tr '\n' ',' <"$_sweep_rc") over $_rc_n invocations (expected exactly 2, each 0 or 1). A status of 2 or more is grep failing, and an empty result from a failed grep is not an absence."
 fi
 rm -f "$_sweep_err" "$_sweep_rc" "$_sweep_out" "$_git_err"
+
+# --------------------------------------------------------------------------
+step "terraform hub-gke combination fixtures (single, multi in_process, external relay)"
+# --------------------------------------------------------------------------
+declare -A TF_COMBO_DOCS=(
+  [terraform-hub-gke]=7
+  [terraform-hub-gke-multi]=8
+  [terraform-hub-gke-external]=13
+)
+for tfname in terraform-hub-gke terraform-hub-gke-multi terraform-hub-gke-external; do
+  if "$HELM" lint --strict "$CHART_DIR" --values "$CHART_DIR/ci/values-$tfname.yaml" >/dev/null 2>&1; then
+    pass "lint --strict $tfname"
+  else
+    fail "lint --strict $tfname"
+    "$HELM" lint --strict "$CHART_DIR" --values "$CHART_DIR/ci/values-$tfname.yaml" || true
+  fi
+  if "$HELM" template tfha-gke-h3 "$CHART_DIR" --namespace tfha-gke-h3-system \
+    --values "$CHART_DIR/ci/values-$tfname.yaml" >"$WORK/$tfname.yaml" 2>"$WORK/$tfname.err"; then
+    tfkc="$("$KUBECONFORM" "${KC_FLAGS[@]}" -strict -summary <"$WORK/$tfname.yaml" 2>&1 || true)"
+    tfwant="Valid: ${TF_COMBO_DOCS[$tfname]}, Invalid: 0, Errors: 0, Skipped: 0"
+    if grep -qF "failed downloading schema" <<<"$tfkc"; then
+      meta_failure "kubeconform could not retrieve a schema while validating $tfname: $tfkc"
+    elif grep -qF "$tfwant" <<<"$tfkc"; then
+      pass "template + kubeconform $tfname validated ${TF_COMBO_DOCS[$tfname]} documents, none skipped"
+    else
+      fail "kubeconform $tfname: wanted '$tfwant', got '$tfkc'"
+    fi
+  else
+    fail "template $tfname: $(head -3 "$WORK/$tfname.err" | tr '\n' ' ')"
+  fi
+done
+_tf_ext_hub_sec="$("$HELM" template tfha-gke-h3 "$CHART_DIR" --namespace tfha-gke-h3-system \
+  --values "$CHART_DIR/ci/values-terraform-hub-gke-external.yaml" -s templates/secret-settings.yaml 2>&1)"
+_tf_ext_rel_sec="$("$HELM" template tfha-gke-h3 "$CHART_DIR" --namespace tfha-gke-h3-system \
+  --values "$CHART_DIR/ci/values-terraform-hub-gke-external.yaml" -s templates/relay-secret-settings.yaml 2>&1)"
+if grep -qE '^[[:space:]]+relay_role: tfha-gke-h3-relay$' <<<"$_tf_ext_hub_sec" \
+  && ! grep -qF 'relay_role:' <<<"$_tf_ext_rel_sec"; then
+  pass "terraform-hub-gke-external renders server.database.relay_role in Hub settings.yaml only"
+else
+  fail "terraform-hub-gke-external missing server.database.relay_role in Hub settings.yaml (or leaked to relay settings)"
+fi
+unset _tf_ext_hub_sec _tf_ext_rel_sec
 
 # --------------------------------------------------------------------------
 printf '\n'

@@ -2057,6 +2057,7 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// unless server.database.allow_shadowed_schema is set. Only hub startup
 	// enables this check.
 	s.EnableSchemaShadowGuard(cfg.Database.AllowShadowedSchema)
+	s.SetRelayRole(cfg.Database.RelayRole)
 
 	// On SQLite, snapshot the database when the migration (after
 	// PreMigrate) is about to apply declared ON DELETE actions to orphaned
@@ -3724,6 +3725,19 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 		}
 	}
 
+	// In external relay mode, bootstrap hub.conduit=true in the DB-only
+	// experiments section when no explicit override has been recorded yet.
+	// Without this, a fresh database deadlocks: startConduit refuses to start
+	// the Hub before any HTTP listener binds while hub.conduit is false, and
+	// --role relay refuses to start with ErrExperimentOff. Run on every replica
+	// with CAS (outside the advisory-lock skip path) so a second replica never
+	// refreshes ahead of the seed write.
+	if cfg != nil && cfg.Hub.Conduit.ExternalRelay() {
+		if err := seedExternalRelayConduitExperiment(ctx, settingStore); err != nil {
+			return fmt.Errorf("bootstrapping hub.conduit for external relay mode: %w", err)
+		}
+	}
+
 	// --- Create OperationalSettings, Refresh, and apply ---
 	ops := hub.NewOperationalSettings(settingStore, bootstrapKoanf, envKoanf)
 	// The admin view shows a public URL from the layers startup's endpoint
@@ -3888,6 +3902,87 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 
 	log.Println("Hub settings sync complete")
 	return nil
+}
+
+// seedExternalRelayConduitExperiment ensures the "hub.conduit" experiment is
+// enabled in hub_settings when server.hub.conduit.relay_mode is "external" and
+// no explicit "hub.conduit" override (true or false) has been recorded yet.
+//
+// Why: "experiments" is DB-only (KoanfPaths nil) and "hub.conduit" defaults to
+// false so single-binary / Cloud Run deployments do not implicitly start an
+// in-process relay. On a fresh database in external relay mode, however, both
+// Hub (errConduitExternalNeedsExperiment) and --role relay (ErrExperimentOff)
+// refuse to start before binding an HTTP listener if hub.conduit is off.
+// Seeding hub.conduit=true only when absent breaks the fresh-DB deadlock while
+// preserving explicit admin overrides ("hub.conduit": false) and leaving
+// malformed documents untouched (fail-closed).
+func seedExternalRelayConduitExperiment(ctx context.Context, s store.HubSettingStore) error {
+	const (
+		sectionName    = "experiments"
+		conduitExpName = "hub.conduit"
+		maxCASAttempts = 5
+	)
+	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		existing, err := s.GetHubSetting(ctx, sectionName)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("reading %q setting: %w", sectionName, err)
+		}
+		if existing == nil {
+			doc, err := json.Marshal(opsettings.ExperimentsSettings{
+				Overrides: map[string]bool{conduitExpName: true},
+			})
+			if err != nil {
+				return fmt.Errorf("marshaling %q seed: %w", sectionName, err)
+			}
+			if _, err := s.UpsertHubSetting(ctx, sectionName, doc, "seed", 0, opsettings.OriginSeeded); err != nil {
+				if errors.Is(err, store.ErrRevisionConflict) {
+					continue
+				}
+				return fmt.Errorf("seeding %q: %w", sectionName, err)
+			}
+			log.Println("  Seeded hub.conduit=true in experiments (server.hub.conduit.relay_mode is external)")
+			return nil
+		}
+
+		parsed, malformed := opsettings.ParseExperimentsDoc(existing.Value)
+		if malformed {
+			return nil
+		}
+		if _, explicit := parsed.Overrides[conduitExpName]; explicit {
+			return nil
+		}
+
+		merged := make(map[string]bool, len(parsed.Overrides)+1)
+		for k, v := range parsed.Overrides {
+			merged[k] = v
+		}
+		merged[conduitExpName] = true
+		doc, err := json.Marshal(opsettings.ExperimentsSettings{Overrides: merged})
+		if err != nil {
+			return fmt.Errorf("marshaling merged %q setting: %w", sectionName, err)
+		}
+		if errs := opsettings.Validate(sectionName, doc); len(errs) > 0 {
+			return nil
+		}
+
+		origin := existing.Origin
+		if origin == "" {
+			origin = opsettings.OriginSeeded
+		}
+		updatedBy := "seed"
+		if existing.UpdatedBy != "" && origin == opsettings.OriginManaged {
+			updatedBy = existing.UpdatedBy
+		}
+		if _, err := s.UpsertHubSetting(ctx, sectionName, doc, updatedBy, existing.Revision, origin); err != nil {
+			if errors.Is(err, store.ErrRevisionConflict) {
+				continue
+			}
+			return fmt.Errorf("updating %q: %w", sectionName, err)
+		}
+		log.Println("  Enabled hub.conduit=true in experiments (server.hub.conduit.relay_mode is external)")
+		return nil
+	}
+	return fmt.Errorf("seeding %q: %w", sectionName, store.ErrRevisionConflict)
 }
 
 // jsonEqual compares two JSON documents semantically, ignoring whitespace
