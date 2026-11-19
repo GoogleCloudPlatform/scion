@@ -51,9 +51,10 @@ interface DecisionOpts {
   choices: { id: string; label: string; description?: string }[];
   defaultChoiceId?: string;
   version?: number;
-  status?: 'pending' | 'decided' | 'replaced';
+  status?: 'pending' | 'decided' | 'replaced' | 'withdrawn';
   decision?: Json;
   replacedBy?: Json;
+  withdrawn?: Json;
 }
 
 export function decision(o: DecisionOpts): Json {
@@ -70,7 +71,17 @@ export function decision(o: DecisionOpts): Json {
     ...(o.defaultChoiceId ? { defaultChoiceId: o.defaultChoiceId } : {}),
     choices: o.choices,
     ...(o.replacedBy ? { replacedBy: o.replacedBy } : {}),
+    ...(o.withdrawn ? { withdrawn: o.withdrawn } : {}),
     ...(o.decision ? { decision: o.decision } : {}),
+  };
+}
+
+/** Withdrawn metadata for a `status: 'withdrawn'` decision view. */
+export function withdrawnInfo(minutes: number, reason?: string, byName = ASKER_NAME): Json {
+  return {
+    at: at(minutes),
+    ...(reason ? { reason } : {}),
+    byName,
   };
 }
 

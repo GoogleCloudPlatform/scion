@@ -1662,8 +1662,13 @@ export class ScionChatDecisions extends LitElement {
     const r = d.replacedBy;
     const label = r?.version ? `v${r.version}` : 'the new version';
     return html`<div class="wd${inCardFoot ? ' card-wd' : ''}" role="status">
-        <sl-icon name="slash-circle" aria-hidden="true"></sl-icon>
-        <span><b class="state">No longer needed</b> · withdrawn by <b>${who}</b></span>
+        <span class="wd-lead"
+          ><sl-icon name="slash-circle" aria-hidden="true"></sl-icon>
+          <b class="state">No longer needed</b></span
+        >
+        <span aria-hidden="true">·</span>
+        <span>withdrawn by</span>
+        <b>${who}</b>
         ${this.renderAt(w?.at)}
         ${r?.messageId
           ? html`<span aria-hidden="true">·</span>
