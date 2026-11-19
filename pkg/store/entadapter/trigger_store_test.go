@@ -1320,3 +1320,169 @@ func TestListTriggers_SourceIDsFilterForGitHubAndWebhookIsolation(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, map[string]bool{projID: true}, hasGH)
 }
+
+func TestClaimTriggerFireSubjectSkip(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+	trID := uuid.NewString()
+	otherTrID := uuid.NewString()
+	base := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+
+	_, _, _, err := cs.ClaimTriggerFireSubjectSkip(ctx, nil, "subject busy", base)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	newFire := func(triggerID, eventID, subject string, startedAt time.Time) *store.TriggerFire {
+		return &store.TriggerFire{
+			ID:         uuid.NewString(),
+			ProjectID:  projID,
+			TriggerID:  triggerID,
+			EventID:    eventID,
+			Subject:    subject,
+			ActionType: store.TriggerActionMessage,
+			LeaseUntil: startedAt.Add(10 * time.Minute),
+			StartedAt:  startedAt,
+		}
+	}
+
+	// 1. Idle (trigger, subject) claims in status=firing with skippedBusy=false.
+	ev1 := uuid.NewString()
+	f1 := newFire(trID, ev1, "webhook:ep-1/pr/42", base)
+	claimed, skippedBusy, existing, err := cs.ClaimTriggerFireSubjectSkip(ctx, f1, "subject busy", base)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	assert.False(t, skippedBusy)
+	assert.Nil(t, existing)
+	assert.Equal(t, store.TriggerFireStatusFiring, f1.Status)
+	assert.Nil(t, f1.FinishedAt)
+
+	// 2. Duplicate (event_id, trigger_id) returns claimed=false, skippedBusy=false, existing=f1.
+	f1Dup := newFire(trID, ev1, "webhook:ep-1/pr/42", base.Add(time.Second))
+	claimedDup, skippedDup, existingDup, err := cs.ClaimTriggerFireSubjectSkip(ctx, f1Dup, "subject busy", base.Add(time.Second))
+	require.NoError(t, err)
+	assert.False(t, claimedDup)
+	assert.False(t, skippedDup)
+	require.NotNil(t, existingDup)
+	assert.Equal(t, f1.ID, existingDup.ID)
+
+	// 3. New event on same (trigger, subject) while f1 is live (status=firing, lease_until > now)
+	// inserts a terminal skipped row ("subject busy") and returns claimed=true, skippedBusy=true.
+	ev2 := uuid.NewString()
+	f2 := newFire(trID, ev2, "webhook:ep-1/pr/42", base.Add(2*time.Second))
+	claimed2, skippedBusy2, existing2, err := cs.ClaimTriggerFireSubjectSkip(ctx, f2, "subject busy", base.Add(2*time.Second))
+	require.NoError(t, err)
+	require.True(t, claimed2)
+	assert.True(t, skippedBusy2)
+	assert.Nil(t, existing2)
+	assert.Equal(t, store.TriggerFireStatusSkipped, f2.Status)
+	assert.Equal(t, "subject busy", f2.Error)
+	require.NotNil(t, f2.FinishedAt)
+
+	persisted2, err := cs.GetTriggerFire(ctx, f2.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusSkipped, persisted2.Status)
+	assert.Equal(t, "subject busy", persisted2.Error)
+	require.NotNil(t, persisted2.FinishedAt)
+
+	// 4. Different subject on the same trigger is independent and claims in status=firing.
+	evOtherSubj := uuid.NewString()
+	fOtherSubj := newFire(trID, evOtherSubj, "webhook:ep-1/pr/99", base.Add(3*time.Second))
+	claimedOS, skippedOS, _, err := cs.ClaimTriggerFireSubjectSkip(ctx, fOtherSubj, "subject busy", base.Add(3*time.Second))
+	require.NoError(t, err)
+	require.True(t, claimedOS)
+	assert.False(t, skippedOS)
+	assert.Equal(t, store.TriggerFireStatusFiring, fOtherSubj.Status)
+	_, err = cs.FinishTriggerFire(ctx, fOtherSubj.ID, store.TriggerFireStatusFired, "msg-os", "", base.Add(4*time.Second))
+	require.NoError(t, err)
+
+	// 5. Different trigger on the same subject is independent and claims in status=firing.
+	fOtherTr := newFire(otherTrID, ev2, "webhook:ep-1/pr/42", base.Add(3*time.Second))
+	claimedOT, skippedOT, _, err := cs.ClaimTriggerFireSubjectSkip(ctx, fOtherTr, "subject busy", base.Add(3*time.Second))
+	require.NoError(t, err)
+	require.True(t, claimedOT)
+	assert.False(t, skippedOT)
+	assert.Equal(t, store.TriggerFireStatusFiring, fOtherTr.Status)
+
+	// 6. Expired lease (lease_until <= now) no longer blocks a fresh claim.
+	afterExpiry := f1.LeaseUntil
+	evAfterExpiry := uuid.NewString()
+	fAfterExpiry := newFire(trID, evAfterExpiry, "webhook:ep-1/pr/42", afterExpiry)
+	claimedExp, skippedExp, _, err := cs.ClaimTriggerFireSubjectSkip(ctx, fAfterExpiry, "subject busy", afterExpiry)
+	require.NoError(t, err)
+	require.True(t, claimedExp)
+	assert.False(t, skippedExp)
+	assert.Equal(t, store.TriggerFireStatusFiring, fAfterExpiry.Status)
+
+	// 7. Finishing fAfterExpiry allows the next event on the same (trigger, subject) to fire immediately.
+	finished, err := cs.FinishTriggerFire(ctx, fAfterExpiry.ID, store.TriggerFireStatusFired, "msg-1", "", afterExpiry.Add(time.Second))
+	require.NoError(t, err)
+	require.True(t, finished)
+
+	evAfterFinish := uuid.NewString()
+	fAfterFinish := newFire(trID, evAfterFinish, "webhook:ep-1/pr/42", afterExpiry.Add(2*time.Second))
+	claimedFin, skippedFin, _, err := cs.ClaimTriggerFireSubjectSkip(ctx, fAfterFinish, "subject busy", afterExpiry.Add(2*time.Second))
+	require.NoError(t, err)
+	require.True(t, claimedFin)
+	assert.False(t, skippedFin)
+	assert.Equal(t, store.TriggerFireStatusFiring, fAfterFinish.Status)
+}
+
+func TestClaimTriggerFireSubjectSkip_ConcurrentContention(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+	trID := uuid.NewString()
+	subject := "webhook:ep-conc/deploy/prod"
+	now := time.Date(2026, 11, 19, 13, 0, 0, 0, time.UTC)
+
+	const workers = 8
+	start := make(chan struct{})
+	var (
+		wg          sync.WaitGroup
+		firingCount atomic.Int32
+		skipCount   atomic.Int32
+	)
+	errs := make(chan error, workers)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f := &store.TriggerFire{
+				ID:         uuid.NewString(),
+				ProjectID:  projID,
+				TriggerID:  trID,
+				EventID:    uuid.NewString(),
+				Subject:    subject,
+				ActionType: store.TriggerActionMessage,
+				LeaseUntil: now.Add(10 * time.Minute),
+				StartedAt:  now,
+			}
+			<-start
+			claimed, skippedBusy, _, err := cs.ClaimTriggerFireSubjectSkip(ctx, f, "subject busy", now)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if !claimed {
+				errs <- errors.New("expected distinct event_id to claim a row")
+				return
+			}
+			if skippedBusy {
+				skipCount.Add(1)
+			} else {
+				firingCount.Add(1)
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, int32(1), firingCount.Load(), "exactly one concurrent claimant must win firing status")
+	assert.Equal(t, int32(workers-1), skipCount.Load(), "remaining concurrent claimants must skip without mutual skip or double fire")
+}

@@ -595,12 +595,9 @@ func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx conte
 		}
 	}
 	switch mode {
-	case store.TriggerSubjectModeNew:
-	case store.TriggerSubjectModeSkip:
-		ValidationError(w, `subject_mode "skip" is not yet supported`, nil)
-		return "", "", "", false
+	case store.TriggerSubjectModeNew, store.TriggerSubjectModeSkip:
 	default:
-		ValidationError(w, fmt.Sprintf("unsupported subject mode %q", mode), nil)
+		ValidationError(w, fmt.Sprintf("unsupported subject mode %q (supported: %s, %s)", mode, store.TriggerSubjectModeNew, store.TriggerSubjectModeSkip), nil)
 		return "", "", "", false
 	}
 	if err := validateTriggerDialectName(dialect); err != nil {

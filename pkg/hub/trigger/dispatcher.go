@@ -68,6 +68,7 @@ const (
 	ErrFireRuleUncertain                 = "rule uncertain"
 	ErrFireRuleNoLongerCompiles          = "rule no longer compiles"
 	ErrFireGitHubAssociationUnauthorized = "github association not authorized"
+	ErrFireSubjectBusy                   = "subject busy"
 )
 
 // Core is the narrow capability interface package hub/trigger consumes from
@@ -629,7 +630,17 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			InitiatorAttribution: tr.InitiatorAttribution,
 		}
 
-		claimed, existing, cErr := d.store.ClaimTriggerFire(ctx, &fire)
+		var (
+			claimed     bool
+			skippedBusy bool
+			existing    *store.TriggerFire
+			cErr        error
+		)
+		if tr.SubjectMode == store.TriggerSubjectModeSkip {
+			claimed, skippedBusy, existing, cErr = d.store.ClaimTriggerFireSubjectSkip(ctx, &fire, ErrFireSubjectBusy, claimNow)
+		} else {
+			claimed, existing, cErr = d.store.ClaimTriggerFire(ctx, &fire)
+		}
 		if cErr != nil {
 			d.logger.Warn("trigger: failed to claim trigger fire",
 				"eventID", ev.ID, "triggerID", tr.ID, "error", cErr)
@@ -643,6 +654,27 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			if existing != nil && existing.Status == store.TriggerFireStatusFired {
 				fireCount++
 			}
+			continue
+		}
+		if skippedBusy {
+			writeCtx, cancelWrite := storeWriteContext(ctx)
+			if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, claimNow, store.TriggerFireStatusSkipped, ErrFireSubjectBusy); rErr != nil {
+				d.logger.Warn("trigger: failed to update trigger fire counters",
+					"triggerID", tr.ID, "fireID", fire.ID, "error", rErr)
+			}
+			if d.fireAudit != nil {
+				d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
+					ProjectID:      tr.ProjectID,
+					TriggerID:      tr.ID,
+					EventID:        ev.ID,
+					FireID:         fire.ID,
+					ActionType:     tr.ActionType,
+					Status:         store.TriggerFireStatusSkipped,
+					MatchedThrough: fire.MatchedThrough,
+					DecidedDialect: fire.DecidedDialect,
+				})
+			}
+			cancelWrite()
 			continue
 		}
 

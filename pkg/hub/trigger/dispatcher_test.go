@@ -296,6 +296,38 @@ func (m *memTriggerStore) ClaimTriggerFire(_ context.Context, fire *store.Trigge
 	*fire = cp
 	return true, nil, nil
 }
+func (m *memTriggerStore) ClaimTriggerFireSubjectSkip(_ context.Context, fire *store.TriggerFire, skipError string, now time.Time) (bool, bool, *store.TriggerFire, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := fire.EventID + "|" + fire.TriggerID
+	if ex, exists := m.fires[key]; exists {
+		cp := *ex
+		return false, false, &cp, nil
+	}
+	busy := false
+	for _, f := range m.byFireID {
+		if f.TriggerID == fire.TriggerID &&
+			f.Subject == fire.Subject &&
+			f.Status == store.TriggerFireStatusFiring &&
+			f.LeaseUntil.After(now.UTC()) {
+			busy = true
+			break
+		}
+	}
+	cp := *fire
+	if busy {
+		cp.Status = store.TriggerFireStatusSkipped
+		cp.Error = skipError
+		fin := now.UTC()
+		cp.FinishedAt = &fin
+	} else if cp.Status == "" {
+		cp.Status = store.TriggerFireStatusFiring
+	}
+	m.fires[key] = &cp
+	m.byFireID[cp.ID] = &cp
+	*fire = cp
+	return true, busy, nil, nil
+}
 func (m *memTriggerStore) FinishTriggerFire(_ context.Context, id, status, resultRef, errMsg string, finishedAt time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2477,4 +2509,177 @@ func TestDispatcher_GitHubSourceAuthorizationPrecedesRuleEvaluation(t *testing.T
 		_, nonMatchFired := byTr[trNoMatchCELID]
 		assert.False(t, nonMatchFired, "non-matching CEL trigger must not record a fire row")
 	})
+}
+
+func TestDispatcher_SubjectModeSkip_WhileWakeFireInFlightAndAfter(t *testing.T) {
+	ms := newMemTriggerStore()
+	core := &fakeCore{}
+	core.enabled.Store(true)
+
+	projID := uuid.NewString()
+	epID := uuid.NewString()
+	trSkipID := uuid.NewString()
+	trNewID := uuid.NewString()
+	t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+
+	require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+		ID:            trSkipID,
+		ProjectID:     projID,
+		Name:          "skip-tr",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      epID,
+		MatchTypes:    []string{"webhook.received"},
+		MatchDialect:  store.TriggerDialectCEL,
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"a1","message":"wake-skip","wake":true}`,
+		SubjectMode:   store.TriggerSubjectModeSkip,
+		Status:        store.TriggerStatusActive,
+	}))
+	require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+		ID:            trNewID,
+		ProjectID:     projID,
+		Name:          "new-tr",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      epID,
+		MatchTypes:    []string{"webhook.received"},
+		MatchDialect:  store.TriggerDialectCEL,
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"a1","message":"always-new"}`,
+		SubjectMode:   store.TriggerSubjectModeNew,
+		Status:        store.TriggerStatusActive,
+	}))
+
+	mkEvent := func(id, subject string) string {
+		require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+			ID:         id,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    subject,
+			DedupKey:   "d-" + id,
+			OccurredAt: t0,
+			ReceivedAt: t0,
+			Payload:    `{"ok":true}`,
+			Status:     store.TriggerEventStatusPending,
+		}))
+		return id
+	}
+
+	ev1 := mkEvent(uuid.NewString(), "webhook:"+epID+"/pr/42")
+	ev2 := mkEvent(uuid.NewString(), "webhook:"+epID+"/pr/42")
+	evOther := mkEvent(uuid.NewString(), "webhook:"+epID+"/pr/99")
+	ev3 := mkEvent(uuid.NewString(), "webhook:"+epID+"/pr/42")
+
+	ev1WakeEntered := make(chan struct{})
+	releaseEv1Wake := make(chan struct{})
+	var (
+		mu         sync.Mutex
+		skipFires  []string
+		newFires   []string
+	)
+
+	core.fireFn = func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+		mu.Lock()
+		switch req.Authority.DefinitionID {
+		case trSkipID:
+			skipFires = append(skipFires, req.Event.ID)
+		case trNewID:
+			newFires = append(newFires, req.Event.ID)
+		}
+		mu.Unlock()
+
+		if req.Authority.DefinitionID == trSkipID && req.Event.ID == ev1 {
+			detached, cancelDetached := req.Tracked.Detach(ctx)
+			defer cancelDetached()
+			close(ev1WakeEntered)
+			select {
+			case <-releaseEv1Wake:
+			case <-detached.Done():
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: detached.Err().Error()}
+			}
+		}
+		return hubfire.FireOutcome{Status: hubfire.FireStatusFired, ResultRef: "msg-" + req.Event.ID[:8]}
+	}
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:           core,
+		Store:          ms,
+		Now:            func() time.Time { return t0 },
+		PerFireTimeout: 40 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	makeItem := func(seq int64, evID string) durablequeue.Item {
+		raw, mErr := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		require.NoError(t, mErr)
+		return durablequeue.Item{
+			Seq:       seq,
+			Kind:      trigger.EventQueueKind,
+			DedupKey:  evID,
+			ProjectID: projID,
+			Payload:   raw,
+		}
+	}
+
+	// Start ev1; wait until trSkip's wake fire is in flight.
+	ev1Done := make(chan durablequeue.Result, 1)
+	go func() {
+		ev1Done <- disp.HandleItem(context.Background(), makeItem(1, ev1), nopLease{})
+	}()
+	select {
+	case <-ev1WakeEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ev1 wake fire to enter")
+	}
+
+	// While ev1's wake fire on pr/42 is in flight, handle ev2 on the same subject:
+	// trSkip must skip ("subject busy") without calling Fire, whereas trNew MUST fire.
+	res2 := disp.HandleItem(context.Background(), makeItem(2, ev2), nopLease{})
+	require.NoError(t, res2.Err)
+	assert.True(t, res2.Done)
+
+	// Different subject pr/99 while pr/42 is still busy MUST fire for both trSkip and trNew.
+	resOther := disp.HandleItem(context.Background(), makeItem(3, evOther), nopLease{})
+	require.NoError(t, resOther.Err)
+	assert.True(t, resOther.Done)
+
+	// Release ev1 wake fire and wait for ev1 to finish.
+	close(releaseEv1Wake)
+	res1 := <-ev1Done
+	require.NoError(t, res1.Err)
+	assert.True(t, res1.Done)
+
+	// After ev1's wake fire ends, ev3 on pr/42 MUST fire again for trSkip.
+	res3 := disp.HandleItem(context.Background(), makeItem(4, ev3), nopLease{})
+	require.NoError(t, res3.Err)
+	assert.True(t, res3.Done)
+
+	mu.Lock()
+	assert.Equal(t, []string{ev1, evOther, ev3}, skipFires, "skip trigger must skip ev2 while wake fire is in flight, fire other subjects, and fire ev3 after wake ends")
+	assert.ElementsMatch(t, []string{ev1, ev2, evOther, ev3}, newFires, "new mode trigger must always fire")
+	mu.Unlock()
+
+	firesRes, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	var ev2SkipRow *store.TriggerFire
+	for i := range firesRes.Items {
+		f := &firesRes.Items[i]
+		if f.TriggerID == trSkipID && f.EventID == ev2 {
+			ev2SkipRow = f
+		}
+	}
+	require.NotNil(t, ev2SkipRow, "expected trigger_fires row for skipped ev2")
+	assert.Equal(t, store.TriggerFireStatusSkipped, ev2SkipRow.Status)
+	assert.Equal(t, trigger.ErrFireSubjectBusy, ev2SkipRow.Error)
+
+	gotEv2, err := ms.GetTriggerEvent(context.Background(), ev2)
+	require.NoError(t, err)
+	assert.Equal(t, 2, gotEv2.MatchCount)
+	assert.Equal(t, 1, gotEv2.FireCount, "only trNew fired on ev2; trSkip skipped")
+
+	gotSkipTr, err := ms.GetTrigger(context.Background(), trSkipID)
+	require.NoError(t, err)
+	assert.Equal(t, 4, gotSkipTr.FireCount)
+	assert.Equal(t, 0, gotSkipTr.ErrorCount, "skipped subject busy must not increment error_count")
 }

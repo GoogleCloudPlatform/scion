@@ -1756,3 +1756,168 @@ func TestTriggerDispatchE2E_CELMatchRulesSubjectDerivationHistoryAndCacheInvalid
 	require.NotNil(t, delRes)
 	assert.Zero(t, celEng.CacheStats().Entries, "project deletion must invalidate all cached trigger programs for that project")
 }
+
+func TestTriggerDispatchE2E_SubjectModeSkip_WakeInFlightThenFiresAfter(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableWriteDenySwitch(t, f.srv)
+	ctx := context.Background()
+
+	// Seed an online runtime broker for targetAgent and place targetAgent in PhaseSuspended
+	// so the first message --wake fire blocks mid-wake.
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-skip-wake"),
+		Name:   "Skip Wake Broker",
+		Slug:   "skip-wake-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, f.store.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, f.store.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  f.projectID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+	f.targetAgent.RuntimeBrokerID = broker.ID
+	f.targetAgent.Phase = string(state.PhaseSuspended)
+	require.NoError(t, f.store.UpdateAgent(ctx, f.targetAgent))
+
+	wakeStarted := make(chan struct{})
+	releaseWake := make(chan struct{})
+	var (
+		startOnce sync.Once
+		mu        sync.Mutex
+		delivered []*messages.StructuredMessage
+	)
+	wd := &ctxBlockingWakeDispatcher{
+		onStart: func(_ context.Context, agent *store.Agent) error {
+			startOnce.Do(func() {
+				close(wakeStarted)
+				go func() {
+					<-releaseWake
+					deadline := time.Now().Add(2 * time.Second)
+					for time.Now().Before(deadline) {
+						a, gErr := f.store.GetAgent(context.Background(), agent.ID)
+						if gErr == nil && a.Phase == string(state.PhaseStarting) {
+							_ = f.store.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{
+								Phase: string(state.PhaseRunning), Activity: "idle",
+							})
+							return
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+				}()
+			})
+			return nil
+		},
+		onMessage: func(_ context.Context, _ *store.Agent, msg *messages.StructuredMessage) error {
+			mu.Lock()
+			delivered = append(delivered, msg)
+			mu.Unlock()
+			return nil
+		},
+	}
+	f.srv.SetDispatcher(wd)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "skip-wake-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	trRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:    "skip-wake-tr",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:   &TriggerMatchSpec{Types: []string{"webhook.deploy"}},
+		Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip},
+		Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "Wake deploy", Wake: true},
+	})
+	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &tr))
+
+	postSignedHook := func(delivery, subjectHdr string) string {
+		t.Helper()
+		payload := []byte(`{"delivery":"` + delivery + `"}`)
+		ts := time.Now().Unix()
+		sig := trigger.SignScionV1(ep.Secret, ts, delivery, "deploy", subjectHdr, payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ep.ID, bytes.NewReader(payload))
+		req.RemoteAddr = "198.51.100.77:54321"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(trigger.HeaderDelivery, delivery)
+		req.Header.Set(trigger.HeaderEvent, "deploy")
+		req.Header.Set(trigger.HeaderSubject, subjectHdr)
+		req.Header.Set(trigger.HeaderSignature, sig)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		var resp trigger.IngressAcceptedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Equal(t, trigger.IngressStatusQueued, resp.Status)
+		return resp.EventID
+	}
+
+	dqStore, ok := f.store.(store.DurableQueueStore)
+	require.True(t, ok)
+	q := f.srv.TriggerEventQueue()
+	require.NotNil(t, q)
+	d1, err := f.srv.triggerDrainer(dqStore, q)
+	require.NoError(t, err)
+	d2, err := f.srv.triggerDrainer(dqStore, q)
+	require.NoError(t, err)
+
+	// 1. Hook #1 wakes suspended agent and stays in flight while wakeStarted is held.
+	ev1ID := postSignedHook("skip-e2e-1", "svc/checkout")
+	d1Err := make(chan error, 1)
+	go func() {
+		_, err := d1.DrainOnce(ctx)
+		d1Err <- err
+	}()
+
+	select {
+	case <-wakeStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for hook #1 wake to start")
+	}
+
+	// 2. Hook #2 on the same subject arrives while hook #1's wake fire is in flight: must skip ("subject busy").
+	ev2ID := postSignedHook("skip-e2e-2", "svc/checkout")
+	res2, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res2.Claimed)
+
+	mu.Lock()
+	assert.Empty(t, delivered, "neither hook #1 (still waking) nor hook #2 (skipped) has delivered yet")
+	mu.Unlock()
+
+	// 3. Release wake #1 -> hook #1 finishes and delivers message #1.
+	close(releaseWake)
+	require.NoError(t, <-d1Err)
+
+	mu.Lock()
+	require.Len(t, delivered, 1, "hook #1 must deliver once wake completes")
+	mu.Unlock()
+
+	// 4. Hook #3 on the same subject after hook #1's wake fire has ended: must fire and deliver message #2.
+	ev3ID := postSignedHook("skip-e2e-3", "svc/checkout")
+	res3, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res3.Claimed)
+
+	mu.Lock()
+	require.Len(t, delivered, 2, "hook #3 must fire after hook #1's wake fire ended")
+	mu.Unlock()
+
+	histRec := f.doTrigger(t, f.ownerAuth, tr.ID+"/history", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, histRec.Code, histRec.Body.String())
+	var hist ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(histRec.Body.Bytes(), &hist))
+	require.Len(t, hist.Fires, 3)
+
+	fireByEvent := make(map[string]TriggerFireResponse, len(hist.Fires))
+	for _, fr := range hist.Fires {
+		fireByEvent[fr.EventID] = fr
+	}
+	assert.Equal(t, store.TriggerFireStatusFired, fireByEvent[ev1ID].Status)
+	assert.Equal(t, store.TriggerFireStatusSkipped, fireByEvent[ev2ID].Status)
+	assert.Equal(t, trigger.ErrFireSubjectBusy, fireByEvent[ev2ID].Error)
+	assert.Equal(t, store.TriggerFireStatusFired, fireByEvent[ev3ID].Status)
+}

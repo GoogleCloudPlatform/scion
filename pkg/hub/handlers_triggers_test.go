@@ -549,9 +549,14 @@ func TestTriggersAuthoring_Stage1b1ValidationRefusals(t *testing.T) {
 			wantMsg: "match_types",
 		},
 		{
-			name:    "subject.mode skip refused in 1b-1",
-			mutate:  func(r *CreateTriggerRequest) { r.Subject = &TriggerSubjectSpec{Mode: "skip"} },
-			wantMsg: `subject_mode "skip" is not yet supported`,
+			name:    "unsupported subject.mode reuse refused",
+			mutate:  func(r *CreateTriggerRequest) { r.Subject = &TriggerSubjectSpec{Mode: "reuse"} },
+			wantMsg: "unsupported subject mode",
+		},
+		{
+			name:    "non-cel subject.dialect refused",
+			mutate:  func(r *CreateTriggerRequest) { r.Subject = &TriggerSubjectSpec{Dialect: "rego"} },
+			wantMsg: "unsupported subject dialect",
 		},
 		{
 			name:    "non-message action.type refused in Stage 1",
@@ -3855,4 +3860,77 @@ func TestWebhookEndpointCreate_DefaultTrigger(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, secretsAfter, len(secretsBefore), "rejected defaultTrigger requests must not persist webhook secrets")
 	})
+}
+
+func TestTriggersAuthoring_SubjectModeSkipCreatePatchAndResume(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "skip-auth-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// Create with subject.mode = "skip" (and CEL subject.expr via 3b-1).
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:    "skip-trigger",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Subject: &TriggerSubjectSpec{Expr: "event.subject", Mode: store.TriggerSubjectModeSkip},
+		Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "on-hook", Wake: true},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created TriggerResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	assert.Equal(t, store.TriggerSubjectModeSkip, created.Subject.Mode)
+	assert.Equal(t, "cel", created.Subject.Dialect)
+	assert.Equal(t, "event.subject", created.Subject.Expr)
+	assert.Equal(t, 1, created.AuthorizationRevision)
+
+	// PATCH unsupported mode or non-cel dialect -> 400.
+	reuseMode := "reuse"
+	badModeRec := f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Subject: &TriggerSubjectPatchSpec{Mode: &reuseMode},
+	})
+	assert.Equal(t, http.StatusBadRequest, badModeRec.Code, badModeRec.Body.String())
+
+	regoDialect := "rego"
+	badDialectRec := f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Subject: &TriggerSubjectPatchSpec{Dialect: &regoDialect},
+	})
+	assert.Equal(t, http.StatusBadRequest, badDialectRec.Code, badDialectRec.Body.String())
+
+	// PATCH subject.mode -> "new" bumps authorizationRevision and re-attributes.
+	newMode := store.TriggerSubjectModeNew
+	toNewRec := f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Subject: &TriggerSubjectPatchSpec{Mode: &newMode},
+	})
+	require.Equal(t, http.StatusOK, toNewRec.Code, toNewRec.Body.String())
+	var patchedNew TriggerResponse
+	require.NoError(t, json.Unmarshal(toNewRec.Body.Bytes(), &patchedNew))
+	assert.Equal(t, store.TriggerSubjectModeNew, patchedNew.Subject.Mode)
+	assert.Equal(t, 2, patchedNew.AuthorizationRevision)
+
+	// PATCH subject.mode -> "skip" bumps authorizationRevision=3.
+	skipMode := store.TriggerSubjectModeSkip
+	toSkipRec := f.doTrigger(t, f.ownerAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Subject: &TriggerSubjectPatchSpec{Mode: &skipMode},
+	})
+	require.Equal(t, http.StatusOK, toSkipRec.Code, toSkipRec.Body.String())
+	var patchedSkip TriggerResponse
+	require.NoError(t, json.Unmarshal(toSkipRec.Body.Bytes(), &patchedSkip))
+	assert.Equal(t, store.TriggerSubjectModeSkip, patchedSkip.Subject.Mode)
+	assert.Equal(t, 3, patchedSkip.AuthorizationRevision)
+
+	// Pause + resume preserves subject.mode = "skip".
+	pauseRec := f.doTrigger(t, f.ownerAuth, created.ID+"/pause", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+	resumeRec := f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, resumeRec.Code, resumeRec.Body.String())
+	var resumed TriggerResponse
+	require.NoError(t, json.Unmarshal(resumeRec.Body.Bytes(), &resumed))
+	assert.Equal(t, store.TriggerSubjectModeSkip, resumed.Subject.Mode)
+
+	stored, err := f.store.GetTrigger(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerSubjectModeSkip, stored.SubjectMode)
 }
