@@ -8431,7 +8431,7 @@
 
 - **Delivery:** `fire_and_forget`
 - **Failure Mode:** `log_and_continue`
-- **Idempotency:** prompt message ID
+- **Idempotency:** idempotencyKey (optional); prompt message ID otherwise
 - **Retry:** repeating the call on an already-dismissed prompt returns alreadyDismissed and stores nothing new
 - **Auth Before Emit:** Yes
 

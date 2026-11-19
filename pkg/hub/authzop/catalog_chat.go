@@ -1262,7 +1262,7 @@ var chatOperations = []OperationSpec{
 		ExternalPolicy: &ExternalEffectPolicy{
 			DeliveryMode:   DeliveryFireAndForget,
 			FailureMode:    FailureLogAndContinue,
-			IdempotencyKey: "prompt message ID",
+			IdempotencyKey: "idempotencyKey (optional); prompt message ID otherwise",
 			RetryPolicy:    "repeating the call on an already-dismissed prompt returns alreadyDismissed and stores nothing new",
 			AuthBeforeEmit: true,
 		},
