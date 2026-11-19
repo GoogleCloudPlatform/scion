@@ -42,6 +42,9 @@ import (
 // forced runtime, so no target is reported (an empty list). It returns nil
 // when the settings cannot be read, so the hub keeps what it has.
 func (s *Server) heartbeatWorkloadIdentityTargets() []hubclient.WorkloadIdentityTarget {
+	if s.isFlat() {
+		return s.flatWorkloadIdentityTargets()
+	}
 	vs, err := s.loadHeartbeatMappingSettings()
 	if err != nil || vs == nil {
 		return nil
@@ -54,6 +57,39 @@ func (s *Server) heartbeatWorkloadIdentityTargets() []hubclient.WorkloadIdentity
 		s.saDiscovery().warnRateLimited("wipool\x00"+profile+"\x00"+pool,
 			"workload_identity_pool is not a Workload Identity pool (<cluster-project-id>.svc.id.goog); the profile is left out of the heartbeat Workload Identity targets",
 			"profile", profile, "workload_identity_pool", pool)
+	})
+}
+
+// flatWorkloadIdentityTargets builds the WorkloadIdentityTargets list of a
+// flat Runtime Broker instance from its startup runtime_target snapshot
+// (ptone/scion#7967): at most one entry, with Profile left empty and
+// Namespace set to flatInstanceNamespace. Non-Kubernetes targets and
+// unconfigured Kubernetes targets report an empty non-nil list ([]), never nil.
+func (s *Server) flatWorkloadIdentityTargets() []hubclient.WorkloadIdentityTarget {
+	out := []hubclient.WorkloadIdentityTarget{}
+	p := s.flatKubernetesPolicy()
+	if p.targetType != config.RuntimeTargetTypeKubernetes {
+		return out
+	}
+	ksaCreation := p.createServiceAccounts
+	pool := strings.TrimSpace(p.workloadIdentityPool)
+	if pool != "" && config.ValidateWorkloadIdentityPool(pool) != nil {
+		instanceKey := ""
+		if fi := s.flatInstance(); fi != nil {
+			instanceKey = fi.Instance.Key
+		}
+		s.saDiscovery().warnRateLimited("wipool\x00flat\x00"+instanceKey+"\x00"+pool,
+			"workload_identity_pool is not a Workload Identity pool (<cluster-project-id>.svc.id.goog); the flat instance is left out of the heartbeat Workload Identity targets",
+			"instance", instanceKey, "workload_identity_pool", pool)
+		pool = ""
+	}
+	if pool == "" && !ksaCreation {
+		return out
+	}
+	return append(out, hubclient.WorkloadIdentityTarget{
+		Pool:        pool,
+		Namespace:   s.flatInstanceNamespace(),
+		KSACreation: ksaCreation,
 	})
 }
 

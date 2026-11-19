@@ -19,24 +19,42 @@ import (
 )
 
 // flatKubernetesIdentityPolicy is a flat Kubernetes instance's own GCP
-// identity policy (ptone/scion#3274 amendment): the "block" ServiceAccount
-// and the "assign" GSA-to-KSA mapping from its runtime_target. It is a
-// snapshot taken when the server is built and never changes; a change to
-// the settings file takes effect at the next instance restart. A flat
-// instance reads its identity policy only from here: never from profiles,
-// runtime entries, the Hub database overlay or a project's settings.
+// identity and Workload Identity policy (ptone/scion#3274 amendment,
+// ptone/scion#7967): the "block" ServiceAccount, the "assign" GSA-to-KSA
+// mapping, the GKE Workload Identity pool, and opt-in ServiceAccount
+// creation from its runtime_target. It is a snapshot taken when the server
+// is built and never changes; a change to the settings file takes effect at
+// the next instance restart. A flat instance reads its identity policy only
+// from here: never from profiles, runtime entries, the Hub database overlay
+// or a project's settings.
 type flatKubernetesIdentityPolicy struct {
-	blockServiceAccount string
-	mappings            map[string]string
+	populated             bool
+	targetType            string
+	blockServiceAccount   string
+	mappings              map[string]string
+	workloadIdentityPool  string
+	createServiceAccounts bool
 }
 
 // newFlatKubernetesIdentityPolicy copies the instance's policy.
 func newFlatKubernetesIdentityPolicy(fi *FlatInstanceConfig) flatKubernetesIdentityPolicy {
-	if fi == nil || fi.Instance.RuntimeTarget == nil {
+	if fi == nil {
 		return flatKubernetesIdentityPolicy{}
 	}
+	p := flatKubernetesIdentityPolicy{populated: true}
+	if fi.Identity != nil {
+		p.targetType = fi.Identity.RuntimeTarget.Type
+	}
+	if fi.Instance.RuntimeTarget == nil {
+		return p
+	}
 	t := fi.Instance.RuntimeTarget
-	p := flatKubernetesIdentityPolicy{blockServiceAccount: t.KubernetesBlockServiceAccount}
+	if p.targetType == "" {
+		p.targetType = t.Type
+	}
+	p.blockServiceAccount = t.KubernetesBlockServiceAccount
+	p.workloadIdentityPool = t.WorkloadIdentityPool
+	p.createServiceAccounts = t.CreateServiceAccounts
 	if len(t.KubernetesServiceAccountMappings) > 0 {
 		p.mappings = make(map[string]string, len(t.KubernetesServiceAccountMappings))
 		for k, v := range t.KubernetesServiceAccountMappings {
@@ -44,6 +62,16 @@ func newFlatKubernetesIdentityPolicy(fi *FlatInstanceConfig) flatKubernetesIdent
 		}
 	}
 	return p
+}
+
+// flatKubernetesPolicy returns the startup snapshot taken when s was built,
+// or a fresh copy of s.flatInstance() for servers constructed directly in
+// tests without New.
+func (s *Server) flatKubernetesPolicy() flatKubernetesIdentityPolicy {
+	if s.flatK8sIdentity.populated {
+		return s.flatK8sIdentity
+	}
+	return newFlatKubernetesIdentityPolicy(s.flatInstance())
 }
 
 // blockAccount returns the instance's block ServiceAccount and

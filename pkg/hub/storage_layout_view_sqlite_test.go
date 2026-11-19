@@ -266,3 +266,102 @@ func TestStorageValues_ProjectScopedTokenGetsNoValues(t *testing.T) {
 	rec := doRequestWithToken(t, srv, key, http.MethodGet, "/api/v1/runtime-brokers/"+broker.ID, nil)
 	requireRedactedBroker(t, rec.Code, rec.Body.String(), "a project-scoped token")
 }
+
+// TestWorkloadIdentityTargets_RedactedWithoutHubConfigRead verifies P1 review 3
+// FYI-3 / P3b: store.RuntimeBroker.WorkloadIdentityTargets is redacted on
+// broker GET and list responses for callers without hub.config.read (even when
+// WorkspaceStorage is nil), while hub admins (hub.config.read) and pureSelf see
+// the targets, and the stored record is never modified.
+func TestWorkloadIdentityTargets_RedactedWithoutHubConfigRead(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := setupNonAdminUser(t, s, []string{"broker.read"})
+
+	hubAdminID := tid("wi-redact-hubadmin")
+	createTestUserWithRole(t, s, hubAdminID, "wi-redact-hubadmin@test.com", "member", store.SystemRoleHubAdmin)
+	hubAdmin, err := s.GetUser(ctx, hubAdminID)
+	require.NoError(t, err)
+	ensureHubMembership(ctx, s, hubAdmin.ID)
+
+	flatBroker := &store.RuntimeBroker{
+		ID:            tid("wi-redact-flat-broker"),
+		Name:          "wi-redact-flat-broker",
+		Slug:          "wi-redact-flat-broker",
+		Status:        store.BrokerStatusOnline,
+		RuntimeTarget: &api.RuntimeTargetDescriptor{ID: tid("wi-redact-target"), Type: "kubernetes", DisplayName: "GKE"},
+		// WorkspaceStorage is deliberately nil to confirm brokerStorageForViewer
+		// does not skip WorkloadIdentityTargets redaction when WorkspaceStorage is nil.
+		WorkloadIdentityTargets: []store.WorkloadIdentityTarget{{
+			Pool:        "secret-cluster-proj.svc.id.goog",
+			Namespace:   "agents-prod",
+			KSACreation: true,
+		}},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, flatBroker))
+
+	// 1. Member (has broker.read, lacks hub.config.read): redacted on GET and list.
+	recGetMember := doRequestAsIdentity(t, srv, member, http.MethodGet, "/api/v1/runtime-brokers/"+flatBroker.ID, nil)
+	require.Equal(t, http.StatusOK, recGetMember.Code, recGetMember.Body.String())
+	require.NotContains(t, recGetMember.Body.String(), "secret-cluster-proj.svc.id.goog")
+	require.NotContains(t, recGetMember.Body.String(), "workloadIdentityTargets")
+
+	recListMember := doRequestAsIdentity(t, srv, member, http.MethodGet, "/api/v1/runtime-brokers", nil)
+	require.Equal(t, http.StatusOK, recListMember.Code, recListMember.Body.String())
+	require.NotContains(t, recListMember.Body.String(), "secret-cluster-proj.svc.id.goog")
+	require.NotContains(t, recListMember.Body.String(), "workloadIdentityTargets")
+
+	// 2. Hub admin (holds hub.config.read): sees WorkloadIdentityTargets on GET and list.
+	recGetAdmin := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/runtime-brokers/"+flatBroker.ID, nil)
+	require.Equal(t, http.StatusOK, recGetAdmin.Code, recGetAdmin.Body.String())
+	require.Contains(t, recGetAdmin.Body.String(), "secret-cluster-proj.svc.id.goog")
+	require.Contains(t, recGetAdmin.Body.String(), `"ksaCreation":true`)
+
+	recListAdmin := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/runtime-brokers", nil)
+	require.Equal(t, http.StatusOK, recListAdmin.Code, recListAdmin.Body.String())
+	require.Contains(t, recListAdmin.Body.String(), "secret-cluster-proj.svc.id.goog")
+
+	// 3. pureSelf (broker reading its own record): sees WorkloadIdentityTargets.
+	selfGot := srv.brokerStorageForViewer(ctx, *flatBroker, true)
+	require.Len(t, selfGot.WorkloadIdentityTargets, 1)
+	require.Equal(t, "secret-cluster-proj.svc.id.goog", selfGot.WorkloadIdentityTargets[0].Pool)
+
+	// 4. Project-filtered broker listing (?projectId=) also redacts WorkloadIdentityTargets
+	// for non-hub.config.read callers, and a broker.read viewer without project access
+	// cannot read P4's per-account status view on that project, while an authorized
+	// project reader on P4's status view still evaluates stored targets cleanly.
+	projID := tid("wi-redact-proj")
+	createDelegateTestProject(t, s, projID, "wi-redact-proj", "test")
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projID, BrokerID: flatBroker.ID, BrokerName: flatBroker.Name, Status: flatBroker.Status,
+	}))
+	recProjListMember := doRequestAsIdentity(t, srv, member, http.MethodGet, "/api/v1/runtime-brokers?projectId="+projID, nil)
+	require.Equal(t, http.StatusOK, recProjListMember.Code, recProjListMember.Body.String())
+	require.NotContains(t, recProjListMember.Body.String(), "secret-cluster-proj.svc.id.goog")
+	require.NotContains(t, recProjListMember.Body.String(), "workloadIdentityTargets")
+
+	recProjListAdmin := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/runtime-brokers?projectId="+projID, nil)
+	require.Equal(t, http.StatusOK, recProjListAdmin.Code, recProjListAdmin.Body.String())
+	require.Contains(t, recProjListAdmin.Body.String(), "secret-cluster-proj.svc.id.goog")
+
+	mintedSA := &store.GCPServiceAccount{
+		ID:                 tid("wi-redact-minted-sa"),
+		Scope:              store.ScopeProject,
+		ScopeID:            projID,
+		Email:              "scion-worker@hub-proj.iam.gserviceaccount.com",
+		ProjectID:          "hub-proj",
+		Verified:           true,
+		VerificationStatus: store.GCPVerificationVerified,
+		Managed:            true,
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, mintedSA))
+	recStatusMember := doRequestAsIdentity(t, srv, member, http.MethodGet, "/api/v1/projects/"+projID+"/gcp-service-accounts/"+mintedSA.ID+"/status", nil)
+	require.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, recStatusMember.Code, "broker.read alone must not access a project's GCP SA status view")
+	require.NotContains(t, recStatusMember.Body.String(), "secret-cluster-proj.svc.id.goog")
+
+	// 5. Stored record is unchanged (so P4's store-backed status evaluation is unaffected).
+	stored, err := s.GetRuntimeBroker(ctx, flatBroker.ID)
+	require.NoError(t, err)
+	require.Len(t, stored.WorkloadIdentityTargets, 1)
+	require.Equal(t, "secret-cluster-proj.svc.id.goog", stored.WorkloadIdentityTargets[0].Pool)
+}

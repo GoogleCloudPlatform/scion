@@ -377,4 +377,44 @@ func TestIdentityMappingDispatchError_KSAConflictAndPermissions(t *testing.T) {
 		assert.Contains(t, ime.Message, `"scion-worker"`)
 		assert.Contains(t, ime.Message, "conventional")
 	})
+
+	t.Run("flat broker conflict and missingPermission omit discovery/list wording", func(t *testing.T) {
+		conflictBody, _ := json.Marshal(map[string]any{"error": map[string]any{
+			"code":    ErrCodeIdentityKSAConflict,
+			"message": "raw flat broker text",
+			"details": map[string]any{
+				api.BrokerErrDetailServiceAccount: "scion-worker@hub-proj.iam.gserviceaccount.com",
+				api.BrokerErrDetailBroker:         "flat-k8s-a",
+				api.BrokerErrDetailConflictingKSA: "scion-worker",
+				api.BrokerErrDetailNamespace:      "agents",
+			},
+		}})
+		imeConflict, ok := identityMappingDispatchError(&brokerStatusError{StatusCode: http.StatusBadRequest, Body: string(conflictBody)})
+		require.True(t, ok)
+		assert.Equal(t, ErrCodeIdentityKSAConflict, imeConflict.Code)
+		assert.Contains(t, imeConflict.Message, `"scion-worker"`)
+		assert.Contains(t, imeConflict.Message, `namespace "agents"`)
+		assert.Contains(t, imeConflict.Message, "cannot be reused")
+		assert.NotContains(t, imeConflict.Message, "annotate it with iam.gke.io/gcp-service-account")
+		assert.NotContains(t, imeConflict.Message, "raw flat broker text")
+
+		for _, perm := range []string{api.BrokerKSAPermissionCreate, api.BrokerKSAPermissionGet} {
+			permBody, _ := json.Marshal(map[string]any{"error": map[string]any{
+				"code":    ErrCodeIdentityNotMapped,
+				"message": "raw apiserver forbidden text",
+				"details": map[string]any{
+					api.BrokerErrDetailServiceAccount:    "scion-worker@hub-proj.iam.gserviceaccount.com",
+					api.BrokerErrDetailBroker:            "flat-k8s-a",
+					api.BrokerErrDetailNamespace:         "agents",
+					api.BrokerErrDetailMissingPermission: perm,
+				},
+			}})
+			imePerm, ok := identityMappingDispatchError(&brokerStatusError{StatusCode: http.StatusBadRequest, Body: string(permBody)})
+			require.True(t, ok)
+			assert.Equal(t, ErrCodeIdentityNotMapped, imePerm.Code)
+			assert.Contains(t, imePerm.Message, "grant get and create on serviceaccounts")
+			assert.NotContains(t, imePerm.Message, "list")
+			assert.NotContains(t, imePerm.Message, "raw apiserver forbidden text")
+		}
+	})
 }

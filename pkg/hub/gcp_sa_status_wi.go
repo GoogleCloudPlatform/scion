@@ -72,9 +72,8 @@ const (
 	GCPSABindingTargetStaleBrokerHeartbeat       = "broker_heartbeat_stale"
 
 	// Missing-pool reasons for Kubernetes targets without a reported pool (O3).
-	GCPSABindingReasonNoPool             = api.WorkloadIdentityReasonNoPool
-	GCPSABindingReasonBrokerTooOld       = "broker_too_old"
-	GCPSABindingReasonFlatPoolUnreported = "flat_broker_pool_unreported"
+	GCPSABindingReasonNoPool       = api.WorkloadIdentityReasonNoPool
+	GCPSABindingReasonBrokerTooOld = "broker_too_old"
 )
 
 // gcpSAWIBindingNow is the clock for the Workload Identity binding cache and
@@ -571,20 +570,13 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 }
 
 func wiMissingStatusReason(why workloadIdentityMissingReason) string {
-	switch why {
-	case wiMissingTooOld:
+	if why == wiMissingTooOld {
 		return GCPSABindingReasonBrokerTooOld
-	case wiMissingFlat:
-		return GCPSABindingReasonFlatPoolUnreported
-	default:
-		return GCPSABindingReasonNoPool
 	}
+	return GCPSABindingReasonNoPool
 }
 
 func missingProfileBindingReason(b *store.RuntimeBroker) string {
-	if b != nil && b.IsFlat() {
-		return GCPSABindingReasonFlatPoolUnreported
-	}
 	if b == nil || b.Capabilities == nil || !b.Capabilities.WITargetsV1 {
 		return GCPSABindingReasonBrokerTooOld
 	}
