@@ -79,4 +79,25 @@ server:
 	if strings.Contains(err.Error(), "super-secret-db-password") {
 		t.Fatalf("loadAndReconcileConfig err = %v, must not echo raw secret value", err)
 	}
+
+	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(`schema_version: "1"
+server:
+  notification_channels:
+    - type: webhook
+      params:
+        super-secret-webhook-key:
+          - "https://hooks.example.internal/super-secret-hook"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = loadAndReconcileConfig(serverStartCmd)
+	if err == nil {
+		t.Fatal("loadAndReconcileConfig succeeded; expected failure on mistyped map entry")
+	}
+	if !strings.Contains(err.Error(), "server.notification_channels[0].params[entry 0]") {
+		t.Fatalf("loadAndReconcileConfig err = %v, want error naming server.notification_channels[0].params[entry 0]", err)
+	}
+	if strings.Contains(err.Error(), "super-secret-") {
+		t.Fatalf("loadAndReconcileConfig err = %v, must not echo raw map key or scalar value", err)
+	}
 }

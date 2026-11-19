@@ -2236,7 +2236,7 @@ func LoadFileOnlyKoanf() *koanf.Koanf {
 	}
 	if globalDir != "" {
 		if _, err := loadSettingsFile(k, globalDir); err != nil {
-			slog.Warn("LoadFileOnlyKoanf: failed to load settings file", "dir", globalDir, "error", err)
+			slog.Warn("LoadFileOnlyKoanf: failed to load settings file", "dir", globalDir, "error", sanitizeSettingsDirLoadError(globalDir, err))
 		}
 	}
 
@@ -2358,7 +2358,7 @@ func loadBootstrapKoanf(configPath string, withSeed, withDefaults bool) *koanf.K
 	if globalDir != "" {
 		globalK := koanf.New(".")
 		if _, err := loadSettingsFile(globalK, globalDir); err != nil {
-			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", globalDir, "error", err)
+			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", globalDir, "error", sanitizeSettingsDirLoadError(globalDir, err))
 		}
 		if configSettingsWin(src, globalDir) {
 			// LoadGlobalConfig reads these only from the --config file.
@@ -2446,7 +2446,7 @@ func loadConfigPathFiles(k *koanf.Koanf, src serverSettingsSource, globalDir str
 	dirIsGlobal := globalDir != "" && sameDir(src.configDir, globalDir)
 	loadSettings := func() {
 		if _, err := loadSettingsFile(k, src.configDir); err != nil {
-			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", src.configDir, "error", err)
+			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", src.configDir, "error", sanitizeSettingsDirLoadError(src.configDir, err))
 		}
 	}
 	if !src.legacy {
@@ -2469,7 +2469,7 @@ func loadConfigPathFiles(k *koanf.Koanf, src serverSettingsSource, globalDir str
 		// A settings file is never a legacy server config.
 	default:
 		if err := k.Load(file.Provider(src.configFile), yaml.Parser()); err != nil {
-			slog.Warn("LoadBootstrapKoanf: failed to load config file", "path", src.configFile, "error", err)
+			slog.Warn("LoadBootstrapKoanf: failed to load config file", "path", src.configFile, "error", sanitizeYAMLFileLoadError(src.configFile, err))
 		}
 	}
 }
@@ -2888,18 +2888,39 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool, error) {
 }
 
 // mappingHasServerOrMergeKey reports whether a top-level YAML MappingNode
-// defines a non-null "server" key or a "<<" merge key (which could expand one).
+// defines a non-null "server" key, repeated "server" keys (which yaml.v3
+// rejects as duplicate mapping keys), or a "<<" merge key (which could expand a
+// "server" section). Every entry is inspected and aliases are unwrapped so a
+// leading null "server:" placeholder cannot mask a later "server:" or "<<"
+// entry and an aliased "server" key or value is honored.
 func mappingHasServerOrMergeKey(root *yamlv3.Node) bool {
+	serverKeys := 0
 	for i := 0; i+1 < len(root.Content); i += 2 {
-		kNode, vNode := root.Content[i], root.Content[i+1]
+		rawKey, rawVal := root.Content[i], root.Content[i+1]
+		if isYAMLMergeKey(rawKey) {
+			return true
+		}
+		kNode := unwrapYAMLAlias(rawKey)
+		vNode := unwrapYAMLAlias(rawVal)
+		if kNode == nil {
+			continue
+		}
 		switch kNode.Value {
 		case "server":
-			return vNode.Kind != yamlv3.ScalarNode || vNode.ShortTag() != "!!null"
+			serverKeys++
+			if serverKeys > 1 || vNode == nil || vNode.Kind != yamlv3.ScalarNode || vNode.ShortTag() != "!!null" {
+				return true
+			}
 		case "<<":
 			return true
 		}
 	}
 	return false
+}
+
+func isYAMLMergeKey(node *yamlv3.Node) bool {
+	return node != nil && node.Kind == yamlv3.ScalarNode && node.Value == "<<" &&
+		(node.Tag == "" || node.Tag == "!" || node.ShortTag() == "!!merge")
 }
 
 // hasTopLevelServerKey reports whether unparseable YAML text plausibly declares
@@ -2947,13 +2968,51 @@ func unwrapYAMLAlias(node *yamlv3.Node) *yamlv3.Node {
 // message.
 func formatSettingsYAMLParseError(settingsPath string, err error) error {
 	msg := err.Error()
-	if strings.HasPrefix(msg, "yaml: unknown anchor ") {
+	if strings.Contains(msg, "unknown anchor") {
 		return fmt.Errorf("parsing %s: yaml: unknown anchor referenced", settingsPath)
 	}
 	if !isValueFreeYAMLParserMessage(msg) {
 		return fmt.Errorf("parsing %s: invalid YAML syntax", settingsPath)
 	}
 	return fmt.Errorf("parsing %s: %s", settingsPath, msg)
+}
+
+// sanitizeSettingsDirLoadError converts a koanf settings-file load error into a
+// structural diagnostic that never quotes raw scalar values, map keys, tags, or
+// anchor/alias names from settings.yaml / settings.yml.
+func sanitizeSettingsDirLoadError(dir string, err error) error {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) || errors.Is(err, ErrSettingsFileRefused) {
+		return err
+	}
+	for _, name := range []string{"settings.yaml", "settings.yml"} {
+		p := filepath.Join(dir, name)
+		if _, statErr := os.Stat(p); statErr == nil {
+			return sanitizeYAMLFileLoadError(p, err)
+		}
+	}
+	if isValueFreeYAMLParserMessage(err.Error()) {
+		return err
+	}
+	return fmt.Errorf("parsing settings in %s: invalid settings syntax or structure", dir)
+}
+
+func sanitizeYAMLFileLoadError(path string, err error) error {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) || errors.Is(err, ErrSettingsFileRefused) {
+		return err
+	}
+	if data, readErr := os.ReadFile(path); readErr == nil {
+		var doc yamlv3.Node
+		if parseErr := unmarshalSettingsYAML(data, &doc); parseErr != nil {
+			return formatSettingsYAMLParseError(path, parseErr)
+		}
+		return formatSettingsYAMLNodeDecodeError(path, &doc)
+	}
+	if isValueFreeYAMLParserMessage(err.Error()) {
+		return err
+	}
+	return fmt.Errorf("parsing %s: invalid YAML value or structure", path)
 }
 
 // isValueFreeYAMLParserMessage reports whether msg is a static libyaml
@@ -3010,15 +3069,16 @@ func findSettingsYAMLNodeDecodeError(node *yamlv3.Node, visited map[*yamlv3.Node
 			if kNode.Kind == yamlv3.SequenceNode || kNode.Kind == yamlv3.MappingNode {
 				return fmt.Sprintf("line %d: invalid non-scalar mapping key (%s)", kNode.Line, yamlNodeKindName(kNode))
 			}
-			if kNode.Kind == yamlv3.ScalarNode && kNode.Value == "<<" && (kNode.Tag == "" || kNode.Tag == "!" || kNode.ShortTag() == "!!merge") {
+			if isYAMLMergeKey(rawKey) {
 				if !isValidYAMLMergeTarget(vNode) {
 					return fmt.Sprintf("line %d: map merge requires mapping or sequence of mappings", rawVal.Line)
 				}
 			}
 			for j := i + 2; j+1 < len(node.Content); j += 2 {
-				nj := node.Content[j]
-				if rawKey.Kind == nj.Kind && rawKey.Value == nj.Value {
-					return fmt.Sprintf("line %d: duplicate mapping key (already defined at line %d)", nj.Line, rawKey.Line)
+				rawKeyJ := node.Content[j]
+				nj := unwrapYAMLAlias(rawKeyJ)
+				if nj != nil && kNode.Kind == nj.Kind && kNode.Value == nj.Value {
+					return fmt.Sprintf("line %d: duplicate mapping key (already defined at line %d)", rawKeyJ.Line, rawKey.Line)
 				}
 			}
 			if detail := findSettingsYAMLNodeDecodeError(rawKey, visited); detail != "" {
@@ -3062,26 +3122,43 @@ func isValidYAMLMergeTarget(node *yamlv3.Node) bool {
 	return false
 }
 
+const maxServerDecodeWalkDepth = 64
+
 // formatServerDecodeError locates the mistyped field(s) in serverNode by
 // walking the YAML node against V1ServerConfig and formats an error naming
-// each field path without quoting raw scalar values (which may contain
-// secrets).
+// each entry strictly by compile-time struct field path or integer index, never
+// by user-supplied key, scalar, tag, or anchor/alias name.
 func formatServerDecodeError(settingsPath string, serverNode *yamlv3.Node) error {
-	if details := findServerDecodeErrors(serverNode, reflect.TypeOf(V1ServerConfig{}), "server"); len(details) > 0 {
+	if details := findServerDecodeErrors(serverNode, reflect.TypeOf(V1ServerConfig{}), "server", 0); len(details) > 0 {
 		return fmt.Errorf("invalid server configuration in %s: %s", settingsPath, strings.Join(details, "; "))
 	}
 	return fmt.Errorf("invalid server configuration in %s: server: values do not decode into the server configuration structure", settingsPath)
 }
 
-// findServerDecodeErrors walks node alongside Go type typ at dotted settings
-// path (starting at "server") and returns one "path: cannot decode X into Y"
-// message per leaf that fails yaml.v3 decoding.
-func findServerDecodeErrors(node *yamlv3.Node, typ reflect.Type, path string) []string {
-	node = unwrapYAMLAlias(node)
+type yamlStructField struct {
+	name string
+	typ  reflect.Type
+}
+
+// findServerDecodeErrors walks rawNode alongside Go type typ at dotted settings
+// path (starting at "server") and returns one structural diagnostic per failing
+// leaf or mapping. Path segments come exclusively from Go struct YAML tags and
+// integer slice/map-entry indices so untrusted keys and scalars are never echoed.
+func findServerDecodeErrors(rawNode *yamlv3.Node, typ reflect.Type, path string, depth int) []string {
+	if rawNode == nil {
+		return nil
+	}
+	if depth >= maxServerDecodeWalkDepth {
+		return []string{fmt.Sprintf("%s: cyclic YAML structure", path)}
+	}
+	node := unwrapYAMLAlias(rawNode)
+	if node == nil {
+		return []string{fmt.Sprintf("%s: cyclic YAML alias", path)}
+	}
 	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
-	if node == nil || decodeSettingsYAMLNode(node, reflect.New(typ).Interface()) == nil {
+	if decodeSettingsYAMLNode(node, reflect.New(typ).Interface()) == nil {
 		return nil
 	}
 
@@ -3089,14 +3166,24 @@ func findServerDecodeErrors(node *yamlv3.Node, typ reflect.Type, path string) []
 	case typ.Kind() == reflect.Struct && typ != reflect.TypeOf(time.Time{}) && node.Kind == yamlv3.MappingNode:
 		fields := yamlStructFieldTypes(typ)
 		var out []string
+		var mergeNodes []*yamlv3.Node
 		for i := 0; i+1 < len(node.Content); i += 2 {
-			kNode := unwrapYAMLAlias(node.Content[i])
-			vNode := node.Content[i+1]
-			if kNode == nil {
+			rawKey, vNode := node.Content[i], node.Content[i+1]
+			if isYAMLMergeKey(rawKey) {
+				mergeNodes = append(mergeNodes, vNode)
 				continue
 			}
-			if fieldType, ok := fields[kNode.Value]; ok {
-				out = append(out, findServerDecodeErrors(vNode, fieldType, path+"."+kNode.Value)...)
+			kNode := unwrapYAMLAlias(rawKey)
+			if kNode == nil || kNode.Kind != yamlv3.ScalarNode {
+				continue
+			}
+			if field, ok := fields[kNode.Value]; ok {
+				out = append(out, findServerDecodeErrors(vNode, field.typ, path+"."+field.name, depth+1)...)
+			}
+		}
+		if len(out) == 0 {
+			for _, mn := range mergeNodes {
+				out = append(out, findMergedMappingDecodeErrors(mn, typ, path, depth+1)...)
 			}
 		}
 		if len(out) > 0 {
@@ -3105,34 +3192,66 @@ func findServerDecodeErrors(node *yamlv3.Node, typ reflect.Type, path string) []
 	case (typ.Kind() == reflect.Slice || typ.Kind() == reflect.Array) && node.Kind == yamlv3.SequenceNode:
 		var out []string
 		for idx, elem := range node.Content {
-			out = append(out, findServerDecodeErrors(elem, typ.Elem(), fmt.Sprintf("%s[%d]", path, idx))...)
+			out = append(out, findServerDecodeErrors(elem, typ.Elem(), fmt.Sprintf("%s[%d]", path, idx), depth+1)...)
 		}
 		if len(out) > 0 {
 			return out
 		}
 	case typ.Kind() == reflect.Map && node.Kind == yamlv3.MappingNode:
 		var out []string
+		var mergeNodes []*yamlv3.Node
 		for i := 0; i+1 < len(node.Content); i += 2 {
-			kNode := unwrapYAMLAlias(node.Content[i])
-			vNode := node.Content[i+1]
-			if kNode == nil || decodeSettingsYAMLNode(kNode, reflect.New(typ.Key()).Interface()) != nil {
-				out = append(out, fmt.Sprintf("%s: cannot decode map key %s into %s", path, yamlNodeKindName(kNode), expectedYAMLTypeName(typ.Key())))
+			rawKey, vNode := node.Content[i], node.Content[i+1]
+			if isYAMLMergeKey(rawKey) {
+				mergeNodes = append(mergeNodes, vNode)
 				continue
 			}
-			out = append(out, findServerDecodeErrors(vNode, typ.Elem(), path+"."+kNode.Value)...)
+			entryPath := fmt.Sprintf("%s[entry %d]", path, i/2)
+			kNode := unwrapYAMLAlias(rawKey)
+			if kNode == nil || decodeSettingsYAMLNode(kNode, reflect.New(typ.Key()).Interface()) != nil {
+				out = append(out, fmt.Sprintf("%s: cannot decode map key %s into %s", entryPath, yamlNodeKindName(kNode), expectedYAMLTypeName(typ.Key())))
+				continue
+			}
+			out = append(out, findServerDecodeErrors(vNode, typ.Elem(), entryPath, depth+1)...)
+		}
+		if len(out) == 0 {
+			for _, mn := range mergeNodes {
+				out = append(out, findMergedMappingDecodeErrors(mn, typ, path, depth+1)...)
+			}
 		}
 		if len(out) > 0 {
 			return out
 		}
 	}
 
+	if node.Kind == yamlv3.MappingNode && expectedYAMLTypeName(typ) == "mapping" {
+		if detail := findSettingsYAMLNodeDecodeError(node, make(map[*yamlv3.Node]bool)); detail != "" {
+			return []string{fmt.Sprintf("%s: %s", path, detail)}
+		}
+	}
+
 	return []string{fmt.Sprintf("%s: cannot decode %s into %s", path, yamlNodeKindName(node), expectedYAMLTypeName(typ))}
 }
 
+func findMergedMappingDecodeErrors(mergeNode *yamlv3.Node, typ reflect.Type, path string, depth int) []string {
+	mn := unwrapYAMLAlias(mergeNode)
+	if !isValidYAMLMergeTarget(mn) {
+		return nil
+	}
+	if mn.Kind == yamlv3.MappingNode {
+		return findServerDecodeErrors(mn, typ, path, depth)
+	}
+	var out []string
+	for _, elem := range mn.Content {
+		out = append(out, findServerDecodeErrors(elem, typ, path, depth)...)
+	}
+	return out
+}
+
 // yamlStructFieldTypes maps each exported YAML field name on struct typ to its
-// Go reflect.Type, expanding inline struct fields.
-func yamlStructFieldTypes(typ reflect.Type) map[string]reflect.Type {
-	fields := make(map[string]reflect.Type, typ.NumField())
+// compile-time tag name and Go reflect.Type, expanding inline struct fields.
+func yamlStructFieldTypes(typ reflect.Type) map[string]yamlStructField {
+	fields := make(map[string]yamlStructField, typ.NumField())
 	for i := 0; i < typ.NumField(); i++ {
 		sf := typ.Field(i)
 		if !sf.IsExported() {
@@ -3160,7 +3279,7 @@ func yamlStructFieldTypes(typ reflect.Type) map[string]reflect.Type {
 		if name == "" {
 			name = strings.ToLower(sf.Name)
 		}
-		fields[name] = sf.Type
+		fields[name] = yamlStructField{name: name, typ: sf.Type}
 	}
 	return fields
 }
