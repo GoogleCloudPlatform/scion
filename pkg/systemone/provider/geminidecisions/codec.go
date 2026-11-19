@@ -270,7 +270,7 @@ func encodeQuestion(q spec.Question) (wireQuestion, error) {
 
 type wireCreateDecisionResponse struct {
 	Answers        map[string]json.RawMessage `json:"answers"`
-	Usage          *wireUsage                 `json:"usage"`
+	Usage          json.RawMessage            `json:"usage"`
 	PromptFeedback *wirePromptFeedback        `json:"prompt_feedback"`
 }
 
@@ -296,8 +296,9 @@ type wireAnswer struct {
 //
 // Gemini Decisions omits a response model identifier, so DecodeResponse always
 // leaves ResolvedModel empty ("") and attaches NoteModelUnreported. When usage
-// or total_input_tokens is absent, DecodeResponse attaches NoteUsageUnreported
-// rather than presenting zero tokens as measured usage.
+// or total_input_tokens is absent or unparseable, DecodeResponse attaches
+// NoteUsageUnreported rather than failing a valid decision or presenting zero
+// tokens as measured usage.
 func DecodeResponse(questions []spec.Question, httpStatus int, body []byte) (provider.ModelResult, error) {
 	if err := checkNoDuplicateJSONKeys(body); err != nil {
 		return provider.ModelResult{}, provider.NewProviderError(provider.FailMalformedResponse, false, 0, httpStatus, "malformed or duplicate-key JSON in provider response")
@@ -345,24 +346,12 @@ func DecodeResponse(questions []spec.Question, httpStatus int, body []byte) (pro
 	}
 
 	resultNotes := []string{provider.NoteModelUnreported}
-	var usage provider.Usage
-	if raw.Usage == nil || raw.Usage.TotalInputTokens == nil {
+	usage, hasUsage, err := decodeWireUsage(raw.Usage, httpStatus)
+	if err != nil {
+		return provider.ModelResult{}, err
+	}
+	if !hasUsage {
 		resultNotes = append(resultNotes, provider.NoteUsageUnreported)
-	} else {
-		if *raw.Usage.TotalInputTokens < 0 {
-			return provider.ModelResult{}, provider.NewProviderError(provider.FailMalformedResponse, false, 0, httpStatus, "provider response reported negative input token count")
-		}
-		outTokens := 0
-		if raw.Usage.TotalOutputTokens != nil {
-			if *raw.Usage.TotalOutputTokens < 0 {
-				return provider.ModelResult{}, provider.NewProviderError(provider.FailMalformedResponse, false, 0, httpStatus, "provider response reported negative output token count")
-			}
-			outTokens = *raw.Usage.TotalOutputTokens
-		}
-		usage = provider.Usage{
-			InputTokens:  *raw.Usage.TotalInputTokens,
-			OutputTokens: outTokens,
-		}
 	}
 
 	return provider.ModelResult{
@@ -372,6 +361,35 @@ func DecodeResponse(questions []spec.Question, httpStatus int, body []byte) (pro
 		Usage:         usage,
 		Notes:         resultNotes,
 	}, nil
+}
+
+// decodeWireUsage parses the optional usage field separately from answer
+// validation so absent or unparseable usage (for example proto3-style JSON
+// string integers) yields NoteUsageUnreported rather than failing a valid
+// decision (PV3 brief §5.3).
+func decodeWireUsage(rawUsage json.RawMessage, httpStatus int) (provider.Usage, bool, error) {
+	trimmed := bytes.TrimSpace(rawUsage)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return provider.Usage{}, false, nil
+	}
+	var wu wireUsage
+	if err := json.Unmarshal(trimmed, &wu); err != nil || wu.TotalInputTokens == nil {
+		return provider.Usage{}, false, nil
+	}
+	if *wu.TotalInputTokens < 0 {
+		return provider.Usage{}, false, provider.NewProviderError(provider.FailMalformedResponse, false, 0, httpStatus, "provider response reported negative input token count")
+	}
+	outTokens := 0
+	if wu.TotalOutputTokens != nil {
+		if *wu.TotalOutputTokens < 0 {
+			return provider.Usage{}, false, provider.NewProviderError(provider.FailMalformedResponse, false, 0, httpStatus, "provider response reported negative output token count")
+		}
+		outTokens = *wu.TotalOutputTokens
+	}
+	return provider.Usage{
+		InputTokens:  *wu.TotalInputTokens,
+		OutputTokens: outTokens,
+	}, true, nil
 }
 
 func decodeQuestionAnswer(q spec.Question, httpStatus int, rawAns json.RawMessage) (provider.Answer, error) {

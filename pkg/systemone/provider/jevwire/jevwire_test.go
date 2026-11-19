@@ -1108,3 +1108,60 @@ func TestInvoke_ErrorPathsPreserveProviderRequestIDAndHTTPStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestInvoke_BodyReadErrorPreservesHTTPStatusAndSentinel(t *testing.T) {
+	adapter := jevwire.NewTypeSafe()
+	req := provider.ModelRequest{
+		Rule: spec.Spec{
+			Version:   1,
+			Questions: []spec.Question{{ID: "billing", Type: spec.PrimitiveBinary, Instructions: "Check."}},
+		},
+		Input: []provider.InputField{{Name: spec.ProbeFieldText, Kind: provider.FieldKindText, Value: "hi", Trust: provider.TrustUntrusted}},
+	}
+	inst := provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0", Endpoint: "https://api.typesafe.ai"}
+
+	res, err := adapter.Invoke(context.Background(), &http.Client{
+		Transport: stubJevRoundTripper(func(*http.Request) (*http.Response, error) {
+			hdr := make(http.Header)
+			hdr.Set("x-typesafe-request-id", "req_stream_drop_502")
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Header:     hdr,
+				Body:       errJevReadCloser{err: io.ErrUnexpectedEOF},
+			}, nil
+		}),
+	}, inst, req)
+	require.Error(t, err)
+	assert.Equal(t, http.StatusBadGateway, res.HTTPStatus)
+	assert.Equal(t, "req_stream_drop_502", res.ProviderRequestID)
+	pe, ok := provider.AsProviderError(err)
+	require.True(t, ok)
+	assert.Equal(t, provider.FailUnavailable, pe.Reason)
+	assert.Equal(t, http.StatusBadGateway, pe.HTTPStatus)
+
+	_, sentinelErr := adapter.Invoke(context.Background(), &http.Client{
+		Transport: stubJevRoundTripper(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       errJevReadCloser{err: egress.ErrResponseTooLarge},
+			}, nil
+		}),
+	}, inst, req)
+	require.Error(t, sentinelErr)
+	assert.True(t, egress.IsResponseTooLarge(sentinelErr))
+	_, isPE := provider.AsProviderError(sentinelErr)
+	assert.False(t, isPE)
+}
+
+type stubJevRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f stubJevRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type errJevReadCloser struct {
+	err error
+}
+
+func (e errJevReadCloser) Read([]byte) (int, error) { return 0, e.err }
+func (e errJevReadCloser) Close() error             { return nil }

@@ -310,14 +310,23 @@ func TestDecodeResponse_Documented0999ChoiceBinaryNotesTiesSafetyBlockAndUsage(t
 		Source: metrics.SourceProviderDoc,
 	}, choiceAns.NativeMetrics["gemini.confidence"])
 
-	// Missing usage or missing total_input_tokens -> usage_unreported note, never presented as measured zero.
+	// Missing usage, missing total_input_tokens, or unparseable usage (such as
+	// proto3-style JSON string integers) -> usage_unreported note, never
+	// failing a valid decision or presenting zero as measured usage.
 	for _, missingUsageBody := range []string{
 		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}}}`,
+		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"usage":null}`,
 		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"usage":{}}`,
 		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"usage":{"total_output_tokens":0}}`,
+		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"usage":{"total_input_tokens":"64","total_output_tokens":"0"}}`,
+		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"usage":{"total_input_tokens":"64","total_output_tokens":0}}`,
+		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"usage":{"total_input_tokens":64,"total_output_tokens":"0"}}`,
+		`{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"usage":"unavailable"}`,
 	} {
 		uRes, uErr := geminidecisions.DecodeResponse(qs[:1], http.StatusOK, []byte(missingUsageBody))
-		require.NoError(t, uErr)
+		require.NoError(t, uErr, "body: %s", missingUsageBody)
+		require.NotNil(t, uRes.Answers["is_damaged"].Bool)
+		assert.True(t, *uRes.Answers["is_damaged"].Bool)
 		assert.Equal(t, provider.Usage{InputTokens: 0, OutputTokens: 0}, uRes.Usage)
 		assert.ElementsMatch(t, []string{provider.NoteModelUnreported, provider.NoteUsageUnreported}, uRes.Notes)
 	}
@@ -816,4 +825,57 @@ func TestInvoke_HeaderPlacementWireGuardsAndErrorMapping(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, egress.IsInvalidEndpoint(err))
 	})
+
+	t.Run("body_read_error_preserves_http_status_and_egress_sentinel", func(t *testing.T) {
+		adapter := geminidecisions.New()
+		req := provider.ModelRequest{
+			Rule: spec.Spec{
+				Version:   1,
+				Questions: []spec.Question{{ID: "q", Type: spec.PrimitiveBinary, Instructions: "Check."}},
+			},
+			Input: []provider.InputField{{Name: spec.ProbeFieldText, Kind: provider.FieldKindText, Value: "test", Trust: provider.TrustUntrusted}},
+		}
+		inst := provider.InstanceView{Name: "gemini-main", Model: "gemini-decision-1", Endpoint: "https://generativelanguage.googleapis.com"}
+
+		errMeta, err := adapter.Invoke(context.Background(), &http.Client{
+			Transport: stubRoundTripper(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadGateway,
+					Body:       errBodyReadCloser{err: io.ErrUnexpectedEOF},
+				}, nil
+			}),
+		}, inst, req)
+		require.Error(t, err)
+		assert.Equal(t, http.StatusBadGateway, errMeta.HTTPStatus)
+		pe, ok := provider.AsProviderError(err)
+		require.True(t, ok)
+		assert.Equal(t, provider.FailUnavailable, pe.Reason)
+		assert.Equal(t, http.StatusBadGateway, pe.HTTPStatus)
+
+		_, sentinelErr := adapter.Invoke(context.Background(), &http.Client{
+			Transport: stubRoundTripper(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       errBodyReadCloser{err: egress.ErrResponseTooLarge},
+				}, nil
+			}),
+		}, inst, req)
+		require.Error(t, sentinelErr)
+		assert.True(t, egress.IsResponseTooLarge(sentinelErr))
+		_, isPE := provider.AsProviderError(sentinelErr)
+		assert.False(t, isPE)
+	})
 }
+
+type stubRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f stubRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type errBodyReadCloser struct {
+	err error
+}
+
+func (e errBodyReadCloser) Read([]byte) (int, error) { return 0, e.err }
+func (e errBodyReadCloser) Close() error             { return nil }

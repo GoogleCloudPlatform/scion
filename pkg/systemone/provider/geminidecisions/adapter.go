@@ -244,6 +244,7 @@ func executeOnce(ctx context.Context, t provider.Transport, httpReq *http.Reques
 			classified := classifyTransportError(ctx, readErr)
 			if pe, ok := provider.AsProviderError(classified); ok {
 				pe.HTTPStatus = resp.StatusCode
+				return resp, nil, pe
 			}
 			return resp, nil, classified
 		}

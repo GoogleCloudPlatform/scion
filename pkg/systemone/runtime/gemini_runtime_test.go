@@ -277,6 +277,32 @@ func TestRuntime_GeminiDecisionsAdapter_ProvenanceAndHeaderPlacementAcrossOutcom
 		assert.NotContains(t, string(rawMissingJSON), `"usage"`)
 	})
 
+	t.Run("success_string_typed_usage_records_usage_unreported", func(t *testing.T) {
+		setMock(http.StatusOK, `{
+			"answers": {
+				"is_damaged": {"type": "noul", "noul": 0.99, "confidence": 0.99},
+				"department": {
+					"type": "choice",
+					"choice": "support",
+					"probabilities": {"billing": 0.004, "other": 0.002, "sales": 0.003, "support": 0.99},
+					"confidence": 0.99
+				}
+			},
+			"usage": {"total_input_tokens": "64", "total_output_tokens": "0"}
+		}`)
+
+		dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("Screen cracked."), runtime.EvalOptions{
+			Consumer: "probe",
+			RuleID:   "gemini-string-usage",
+		})
+		require.NoError(t, err)
+		assertWireIsolation(t)
+		assertDecision3Provenance(t, dec.Eval, &logBuf)
+		assert.ElementsMatch(t, []string{provider.NoteModelUnreported, provider.NoteUsageUnreported}, dec.Eval.Notes)
+		assert.True(t, dec.Eval.HasUsageUnreported())
+		assert.Nil(t, dec.Eval.Usage, "unparseable usage must never present SPI zero tokens as measured usage")
+	})
+
 	t.Run("uncertain_tie_carries_decision3_provenance_in_evaluation_error", func(t *testing.T) {
 		setMock(http.StatusOK, `{
 			"answers": {
