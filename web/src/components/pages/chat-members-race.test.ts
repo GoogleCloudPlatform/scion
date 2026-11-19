@@ -368,7 +368,7 @@ describe('members sidebar stale-response guard', () => {
     // The late presence response names the project's own human member with
     // a presence state — it must not be merged in, since it was fetched
     // for a view the user already left.
-    resolveFetch('/api/v1/chat/spaces/hub-project/members', {
+    resolveFetch('/api/v1/chat/spaces/hub-project/members?include=humans', {
       humans: [{ id: 'human-a', presenceState: 'active' }],
     });
     await loadPresence;
