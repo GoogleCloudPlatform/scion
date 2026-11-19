@@ -64,6 +64,21 @@ type FirePayloadValidator interface {
 	ValidatePayload(req hubfire.FireRequest) error
 }
 
+// FirePreauthorizer is an optional capability implemented by FireActions that
+// evaluate definition-kind guards, feature gates, or staleness windows after
+// ValidatePayload and before recorded-authority resolution, returning either a
+// *FireRefusal or a skip sentinel without evaluating authority.
+type FirePreauthorizer interface {
+	Preauthorize(ctx context.Context, req hubfire.FireRequest) (*FireRefusal, error)
+}
+
+// FireAuthorityRefusalHandler is an optional capability implemented by
+// FireActions that emit action-specific audit records and return their own
+// generic refusal text when resolveRecordedAuthority denies a fire.
+type FireAuthorityRefusalHandler interface {
+	OnAuthorityRefused(ctx context.Context, req hubfire.FireRequest, err error) string
+}
+
 type actionRegistry struct {
 	mu      sync.RWMutex
 	actions map[string]FireAction
@@ -192,6 +207,27 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 			Error:  err.Error(),
 		}, err
 	}
+	if pa, ok := action.(FirePreauthorizer); ok {
+		refusal, err := pa.Preauthorize(ctx, req)
+		if err != nil {
+			if reason, skipped := asScheduledSkip(err); skipped {
+				return hubfire.FireOutcome{
+					Status: hubfire.FireStatusSkipped,
+					Error:  reason,
+				}, err
+			}
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusFailed,
+				Error:  err.Error(),
+			}, err
+		}
+		if refusal != nil {
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusRefused,
+				Error:  refusal.Reason,
+			}, scheduledKnownError(refusal.Reason)
+		}
+	}
 	if req.Tracked == nil {
 		req.Tracked = newScheduledFireTracker(s, req.Authority.FireID, nil)
 	} else if st, ok := req.Tracked.(*scheduledFireTracker); ok && st.srv == nil {
@@ -200,6 +236,13 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 	permissionID := action.Permission()
 	auth, identity, err := s.resolveRecordedAuthority(ctx, req.Authority, req.ProjectID, permissionID)
 	if err != nil {
+		if handler, ok := action.(FireAuthorityRefusalHandler); ok {
+			refusalText := handler.OnAuthorityRefused(ctx, req, err)
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusRefused,
+				Error:  refusalText,
+			}, scheduledKnownError(refusalText)
+		}
 		s.logFireAuthorityRefusal(req, permissionID, err)
 		refusalText := fireAuthorityRefusalText(req.ActionType, err)
 		return hubfire.FireOutcome{
@@ -209,6 +252,12 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 	}
 	authorized, refusal, err := action.Authorize(ctx, req, auth, identity)
 	if err != nil {
+		if reason, skipped := asScheduledSkip(err); skipped {
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusSkipped,
+				Error:  reason,
+			}, err
+		}
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusFailed,
 			Error:  err.Error(),

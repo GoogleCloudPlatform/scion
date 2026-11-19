@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -27,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -469,6 +471,79 @@ func TestFireCorePayloadValidatedBeforeAuthority(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("real execAction validates payload before unrecorded authority refusal", func(t *testing.T) {
+		ms := newMockStore()
+		srv := newEventHandlerTestServer(ms)
+		setFireCoreExperiments(t, srv, map[string]bool{
+			conduitExperiment:         true,
+			experiments.ExecSchedules: true,
+		})
+		srv.registerFireActions()
+
+		unrecorded := hubfire.RecordedAuthority{
+			DefinitionKind: hubfire.DefinitionKindScheduledEvent,
+			DefinitionID:   "evt-exec-unrec",
+			FireID:         "evt-exec-unrec",
+		}
+
+		cases := []struct {
+			name       string
+			payload    string
+			wantStatus hubfire.FireStatus
+			wantErr    string
+		}{
+			{
+				name:       "malformed JSON fails before authority",
+				payload:    `{not-json`,
+				wantStatus: hubfire.FireStatusFailed,
+				wantErr:    errScheduledExecPayloadInvalid.Error(),
+			},
+			{
+				name:       "empty command fails before authority",
+				payload:    `{"agentId":"a1","command":[]}`,
+				wantStatus: hubfire.FireStatusFailed,
+				wantErr:    errScheduledExecPayloadInvalid.Error(),
+			},
+			{
+				name:       "missing agentId fails before authority",
+				payload:    `{"agentName":"worker","command":["true"]}`,
+				wantStatus: hubfire.FireStatusFailed,
+				wantErr:    errScheduledExecPayloadInvalid.Error(),
+			},
+			{
+				name:       "wake true fails before authority",
+				payload:    `{"agentId":"a1","command":["true"],"wake":true}`,
+				wantStatus: hubfire.FireStatusFailed,
+				wantErr:    errScheduledExecPayloadInvalid.Error(),
+			},
+			{
+				name:       "unknown field fails before authority",
+				payload:    `{"agentId":"a1","command":["true"],"extra":1}`,
+				wantStatus: hubfire.FireStatusFailed,
+				wantErr:    errScheduledExecPayloadInvalid.Error(),
+			},
+			{
+				name:       "valid payload reaches authority resolution and refuses with exec refused",
+				payload:    `{"agentId":"a1","command":["true"]}`,
+				wantStatus: hubfire.FireStatusRefused,
+				wantErr:    execReasonRefused,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				out := srv.fireAction(context.Background(), hubfire.FireRequest{
+					ProjectID:  "project-order",
+					Authority:  unrecorded,
+					ActionType: scheduledEventTypeExec,
+					Payload:    tc.payload,
+				})
+				assert.Equal(t, tc.wantStatus, out.Status)
+				assert.Equal(t, tc.wantErr, out.Error)
+			})
+		}
+	})
 }
 
 func TestFireCoreTracker(t *testing.T) {
@@ -584,6 +659,17 @@ func TestFireCoreContainment(t *testing.T) {
 			"Fire",
 			"Detaches",
 			"deliverMessageAction",
+		},
+		"action_exec.go": {
+			"Validate",
+			"ValidatePayload",
+			"Preauthorize",
+			"OnAuthorityRefused",
+			"Authorize",
+			"Fire",
+			"Detaches",
+			"authorizeExecFire",
+			"dispatchExecAction",
 		},
 	}
 	forbiddenStoreTypes := map[string]bool{
@@ -1182,7 +1268,8 @@ func TestFireCoreLegacyActionDetaches(t *testing.T) {
 
 	realMsgAction := &messageAction{}
 	legacyMsgAction := newLegacyAction("message", nil)
-	execAction := newLegacyAction(scheduledEventTypeExec, nil)
+	realExecAction := &execAction{}
+	legacyExecAction := newLegacyAction(scheduledEventTypeExec, nil)
 	dispAction := newLegacyAction("dispatch_agent", nil)
 
 	for _, defKind := range []string{
@@ -1216,14 +1303,40 @@ func TestFireCoreLegacyActionDetaches(t *testing.T) {
 		}), "dispatch_agent never detaches (%s)", defKind)
 	}
 
-	assert.True(t, execAction.Detaches(hubfire.FireRequest{
-		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindSchedule},
-		Payload:   `{"agentId":"a1","command":["true"]}`,
-	}), "recurring exec detaches when DefinitionKind == schedule (rev 8.12)")
-	assert.False(t, execAction.Detaches(hubfire.FireRequest{
-		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent},
-		Payload:   `{"agentId":"a1","command":["true"]}`,
-	}), "one-shot exec keeps non-detaching path")
+	for name, act := range map[string]FireAction{
+		"execAction":   realExecAction,
+		"legacyAction": legacyExecAction,
+	} {
+		assert.True(t, act.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindSchedule},
+			Payload:   `{"agentId":"a1","command":["true"]}`,
+		}), "%s recurring exec detaches when DefinitionKind == schedule (rev 8.12)", name)
+		assert.False(t, act.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent},
+			Payload:   `{"agentId":"a1","command":["true"]}`,
+		}), "%s one-shot exec keeps non-detaching path", name)
+		assert.False(t, act.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindTrigger},
+			Payload:   `{"agentId":"a1","command":["true"]}`,
+		}), "%s trigger exec does not use schedule pre-fire detachment", name)
+	}
+}
+
+func TestFireCoreExecActionValidate(t *testing.T) {
+	t.Parallel()
+
+	act := &execAction{srv: newEventHandlerTestServer(newMockStore())}
+	assert.Equal(t, scheduledEventTypeExec, act.Type())
+	assert.Equal(t, scheduledExecPermission, act.Permission())
+
+	normalized, err := act.Validate(context.Background(), nil, "proj-1", `{"agentId":"a1","command":["true"]}`)
+	require.ErrorContains(t, err, "exec action authoring validation is not wired in Stage 1")
+	assert.Empty(t, normalized)
+
+	var nilAction *execAction
+	normalized, err = nilAction.Validate(context.Background(), nil, "", "")
+	require.ErrorContains(t, err, "exec action authoring validation is not wired in Stage 1")
+	assert.Empty(t, normalized)
 }
 
 func TestFireCoreMessageActionValidate(t *testing.T) {
@@ -1558,7 +1671,7 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 		ms.schedules[scRow.ID] = scRow
 
 		// With hub.exec_schedules disabled by default on newEventHandlerTestServer,
-		// fireScheduledExec returns unadmitted skip ("exec schedules disabled").
+		// execAction.Preauthorize returns unadmitted skip ("exec schedules disabled").
 		srv.executeSchedule(context.Background(), *scRow, now)
 		srv.scheduledWakeFires.wg.Wait()
 
@@ -1629,5 +1742,345 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 		assert.Equal(t, 0, fs.completeCalls)
 		assert.Equal(t, 0, fs.unadmittedExecCalls)
 		fs.mu.Unlock()
+	})
+}
+
+func setFireCoreExperiments(t *testing.T, srv *Server, on map[string]bool) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"overrides": on})
+	require.NoError(t, err)
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("experiments", raw)
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	_, err = ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+}
+
+type agentLookupErrStore struct {
+	*mockScheduledEventStore
+	err error
+}
+
+func (s *agentLookupErrStore) GetAgent(_ context.Context, _ string) (*store.Agent, error) {
+	return nil, s.err
+}
+
+func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
+	// Not t.Parallel: captures process-default slog logger for audit assertions.
+	const projectID = "project-exec-fireaction"
+
+	setupFixture := func(t *testing.T) (*mockScheduledEventStore, *Server, hubfire.RecordedAuthority, FireAuthority, Identity, *store.Agent) {
+		t.Helper()
+		ms := newMockStore()
+		srv := newEventHandlerTestServer(ms)
+		setFireCoreExperiments(t, srv, map[string]bool{
+			conduitExperiment:         true,
+			experiments.ExecSchedules: true,
+		})
+		srv.registerFireActions()
+
+		rec := newFireCoreTestAuthority(ms, projectID)
+		rec.DefinitionKind = hubfire.DefinitionKindScheduledEvent
+		rec.DefinitionID = "evt-exec-1"
+		rec.FireID = "evt-exec-1"
+		auth, identity, err := srv.resolveRecordedAuthority(context.Background(), rec, projectID, scheduledExecPermission)
+		require.NoError(t, err)
+
+		target := &store.Agent{
+			ID:        "agent-exec-target",
+			Slug:      "exec-worker",
+			Name:      "exec-worker",
+			ProjectID: projectID,
+			OwnerID:   rec.Attribution.InitiatorPrincipalID,
+			Phase:     "running",
+			RunID:     "launch-1",
+		}
+		require.NoError(t, ms.CreateAgent(context.Background(), target))
+		return ms, srv, rec, auth, identity, target
+	}
+
+	t.Run("Preauthorize skips flag-off and missed-window before authority resolution", func(t *testing.T) {
+		logBuf := &fireCoreLogBuffer{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		_, srv, _, _, _, target := setupFixture(t)
+		unrecorded := hubfire.RecordedAuthority{
+			DefinitionKind: hubfire.DefinitionKindScheduledEvent,
+			DefinitionID:   "evt-preauth",
+			FireID:         "evt-preauth",
+		}
+		payload := `{"agentId":"` + target.ID + `","command":["true"]}`
+
+		// 1. Flag off skips before authority resolution.
+		setFireCoreExperiments(t, srv, map[string]bool{
+			conduitExperiment:         true,
+			experiments.ExecSchedules: false,
+		})
+		out := srv.fireAction(context.Background(), hubfire.FireRequest{
+			ProjectID:  projectID,
+			Authority:  unrecorded,
+			ActionType: scheduledEventTypeExec,
+			Payload:    payload,
+			FireAt:     time.Now(),
+		})
+		assert.Equal(t, hubfire.FireStatusSkipped, out.Status)
+		assert.Equal(t, execReasonDisabled, out.Error)
+		assert.Contains(t, logBuf.String(), "audit_action=schedule.exec.skipped")
+		assert.Contains(t, logBuf.String(), "reason=experiment_off")
+
+		// 2. Missed window skips before authority resolution.
+		logBuf.mu.Lock()
+		logBuf.buf.Reset()
+		logBuf.mu.Unlock()
+		setFireCoreExperiments(t, srv, map[string]bool{
+			conduitExperiment:         true,
+			experiments.ExecSchedules: true,
+		})
+		out = srv.fireAction(context.Background(), hubfire.FireRequest{
+			ProjectID:  projectID,
+			Authority:  unrecorded,
+			ActionType: scheduledEventTypeExec,
+			Payload:    payload,
+			FireAt:     time.Now().Add(-scheduledExecMaxWindow - time.Minute),
+		})
+		assert.Equal(t, hubfire.FireStatusSkipped, out.Status)
+		assert.Equal(t, execReasonMissedWindow, out.Error)
+		assert.Contains(t, logBuf.String(), "audit_action=schedule.exec.skipped")
+		assert.Contains(t, logBuf.String(), "reason=missed_window")
+	})
+
+	t.Run("Authorize refusal paths emit audit and return generic exec refused", func(t *testing.T) {
+		logBuf := &fireCoreLogBuffer{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		ms, srv, rec, auth, identity, target := setupFixture(t)
+		act := &execAction{srv: srv}
+		baseReq := hubfire.FireRequest{
+			ProjectID:  projectID,
+			Authority:  rec,
+			ActionType: scheduledEventTypeExec,
+			Payload:    `{"agentId":"` + target.ID + `","agentName":"` + target.Slug + `","command":["true"]}`,
+			FireAt:     time.Now(),
+		}
+
+		// 1. Missing target (never falls back to AgentName).
+		missingReq := baseReq
+		missingReq.Payload = `{"agentId":"missing-agent-id","agentName":"` + target.Slug + `","command":["true"]}`
+		authorized, refusal, err := act.Authorize(context.Background(), missingReq, auth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+		assert.Contains(t, logBuf.String(), "audit_action=schedule.exec.refused")
+
+		// 2. Deleted target.
+		deletedTarget := *target
+		deletedTarget.ID = "agent-deleted"
+		deletedTarget.DeletedAt = time.Now()
+		require.NoError(t, ms.CreateAgent(context.Background(), &deletedTarget))
+		delReq := baseReq
+		delReq.Payload = `{"agentId":"` + deletedTarget.ID + `","command":["true"]}`
+		authorized, refusal, err = act.Authorize(context.Background(), delReq, auth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+
+		// 3. Cross-project target.
+		foreignTarget := *target
+		foreignTarget.ID = "agent-foreign-project"
+		foreignTarget.ProjectID = "other-project"
+		require.NoError(t, ms.CreateAgent(context.Background(), &foreignTarget))
+		crossReq := baseReq
+		crossReq.Payload = `{"agentId":"` + foreignTarget.ID + `","command":["true"]}`
+		authorized, refusal, err = act.Authorize(context.Background(), crossReq, auth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+
+		// 4. Target store lookup error fails closed with generic refusal text.
+		errStore := &agentLookupErrStore{mockScheduledEventStore: ms, err: errors.New("secret-db-internal-detail")}
+		errSrv := newEventHandlerTestServer(errStore)
+		errAct := &execAction{srv: errSrv}
+		authorized, refusal, err = errAct.Authorize(context.Background(), baseReq, auth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+		assert.NotContains(t, refusal.Reason, "secret-db-internal-detail")
+
+		// 5. Nil identity.
+		authorized, refusal, err = act.Authorize(context.Background(), baseReq, auth, nil)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+
+		// 6. Bounded ceiling without agent.attach.
+		narrowAuth := auth
+		narrowAuth.Ceiling = store.EffectCeiling{
+			Kind:              store.EffectCeilingBounded,
+			Version:           1,
+			PermissionIDs:     []string{"agent.read", "agent.message"},
+			BoundaryKind:      "project",
+			BoundaryProjectID: projectID,
+		}
+		authorized, refusal, err = act.Authorize(context.Background(), baseReq, narrowAuth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+
+		// 7. Live authorizeAgentTargetAction denial (unowned agent).
+		unowned := *target
+		unowned.ID = "agent-other-owner"
+		unowned.OwnerID = "someone-else"
+		require.NoError(t, ms.CreateAgent(context.Background(), &unowned))
+		unownedReq := baseReq
+		unownedReq.Payload = `{"agentId":"` + unowned.ID + `","command":["true"]}`
+		authorized, refusal, err = act.Authorize(context.Background(), unownedReq, auth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+
+		// 8. Held target (fireStanding denial).
+		heldSrv := newEventHandlerTestServer(&heldAgentMockStore{
+			mockScheduledEventStore: ms,
+			heldID:                  target.ID,
+		})
+		heldAct := &execAction{srv: heldSrv}
+		authorized, refusal, err = heldAct.Authorize(context.Background(), baseReq, auth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+	})
+
+	t.Run("Authorize preflight seam skips non-deliverable targets and returns resolved target when ready", func(t *testing.T) {
+		ms, srv, rec, auth, identity, target := setupFixture(t)
+		act := &execAction{srv: srv}
+
+		preflightCases := []struct {
+			name   string
+			mutate func(a *store.Agent)
+		}{
+			{"managed runtime", func(a *store.Agent) { a.Runtime = "managed:gemini" }},
+			{"stopped phase", func(a *store.Agent) { a.Phase = "stopped" }},
+			{"suspended phase", func(a *store.Agent) { a.Phase = "suspended" }},
+			{"starting phase", func(a *store.Agent) { a.Phase = "starting" }},
+			{"reincarnating", func(a *store.Agent) { a.ReincarnationState = store.ReincarnationStateProvisioning }},
+		}
+		for i, tc := range preflightCases {
+			t.Run(tc.name, func(t *testing.T) {
+				cp := *target
+				cp.ID = target.ID + "-" + string(rune('a'+i))
+				tc.mutate(&cp)
+				require.NoError(t, ms.CreateAgent(context.Background(), &cp))
+
+				req := hubfire.FireRequest{
+					ProjectID:  projectID,
+					Authority:  rec,
+					ActionType: scheduledEventTypeExec,
+					Payload:    `{"agentId":"` + cp.ID + `","command":["true"]}`,
+					FireAt:     time.Now(),
+				}
+				authorized, refusal, err := act.Authorize(context.Background(), req, auth, identity)
+				assert.Nil(t, authorized)
+				assert.Nil(t, refusal)
+				reason, skipped := asScheduledSkip(err)
+				require.True(t, skipped, "preflight must return skip sentinel at Authorize seam: %v", err)
+				assert.Equal(t, execReasonTargetNotRunning, reason)
+
+				out := srv.fireAction(context.Background(), req)
+				assert.Equal(t, hubfire.FireStatusSkipped, out.Status)
+				assert.Equal(t, execReasonTargetNotRunning, out.Error)
+				assert.False(t, out.Detached)
+			})
+		}
+
+		// Happy Authorize on a schedule fire returns the resolved deliverable target.
+		okReq := hubfire.FireRequest{
+			ProjectID:  projectID,
+			Authority:  rec,
+			ActionType: scheduledEventTypeExec,
+			Payload:    `{"agentId":"` + target.ID + `","command":["echo","ok"],"timeoutSeconds":45}`,
+			FireAt:     time.Now(),
+		}
+		authorized, refusal, err := act.Authorize(context.Background(), okReq, auth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, refusal)
+		ea, ok := authorized.(*execAuthorized)
+		require.True(t, ok)
+		assert.Equal(t, target.ID, ea.target.ID)
+		assert.Equal(t, []string{"echo", "ok"}, ea.payload.Command)
+		assert.Equal(t, 45, ea.payload.timeout())
+	})
+
+	t.Run("DefinitionKindTrigger fails closed with generic refusal before any skip or refusal audit", func(t *testing.T) {
+		logBuf := &fireCoreLogBuffer{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		ms, srv, _, auth, identity, target := setupFixture(t)
+		act := &execAction{srv: srv}
+
+		// Even with hub.exec_schedules disabled, stale FireAt, and unrecorded
+		// authority, DefinitionKindTrigger refuses before Preauthorize's skip
+		// audit or OnAuthorityRefused's refusal audit can fire.
+		setFireCoreExperiments(t, srv, map[string]bool{
+			conduitExperiment:         true,
+			experiments.ExecSchedules: false,
+		})
+		trigReq := hubfire.FireRequest{
+			ProjectID: projectID,
+			Authority: hubfire.RecordedAuthority{
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   "trig-exec-1",
+				FireID:         "fire-exec-1",
+			},
+			ActionType: scheduledEventTypeExec,
+			Payload:    `{"agentId":"` + target.ID + `","command":["echo","ok"]}`,
+			FireAt:     time.Now().Add(-scheduledExecMaxWindow - time.Hour),
+		}
+
+		out := srv.fireAction(context.Background(), trigReq)
+		assert.Equal(t, hubfire.FireStatusRefused, out.Status)
+		assert.Equal(t, execReasonRefused, out.Error)
+		assert.Empty(t, out.ResultRef)
+		assert.False(t, out.Detached)
+		assert.NotContains(t, logBuf.String(), "audit_action=schedule.exec.")
+
+		// Direct Authorize and Fire calls also fail closed with generic refusal
+		// text and zero schedule.exec.* audit records.
+		trigRec := newFireCoreTestAuthority(ms, projectID) // DefinitionKindTrigger
+		authorized, refusal, err := act.Authorize(context.Background(), hubfire.FireRequest{
+			ProjectID:  projectID,
+			Authority:  trigRec,
+			ActionType: scheduledEventTypeExec,
+			Payload:    trigReq.Payload,
+			FireAt:     time.Now(),
+		}, auth, identity)
+		require.NoError(t, err)
+		assert.Nil(t, authorized)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+
+		fireOut, fireErr := act.Fire(context.Background(), trigReq, &execAuthorized{
+			payload: &scheduledExecPayload{AgentID: target.ID, Command: []string{"echo", "ok"}},
+			target:  target,
+			auth:    auth,
+		})
+		require.EqualError(t, fireErr, execReasonRefused)
+		assert.Empty(t, fireOut.ResultRef)
+		assert.False(t, fireOut.Detached)
+		assert.NotContains(t, logBuf.String(), "audit_action=schedule.exec.")
 	})
 }

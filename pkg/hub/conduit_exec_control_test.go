@@ -477,11 +477,13 @@ func TestExecControlRoutes_NotReachableThroughDeliver(t *testing.T) {
 
 // TestExecControlCallers guards the amendment's first bound: in pkg/hub,
 // only conduit_exec_control.go names the exec routes, and the typed
-// client is called from no other non-test file than the scheduler's exec
-// fire, run tracker and sweeper (scheduled_exec_fire.go, ptone/scion#7883).
+// client is called from no other non-test file than the fire core's exec
+// action (action_exec.go) and the run tracker and sweeper
+// (scheduled_exec_fire.go, ptone/scion#7883, ptone/scion#8029).
 // No user-facing endpoint may ever be added there.
 func TestExecControlCallers(t *testing.T) {
 	allowedCallers := map[string]bool{
+		"action_exec.go":          true,
 		"conduit_exec_control.go": true,
 		"scheduled_exec_fire.go":  true,
 	}
