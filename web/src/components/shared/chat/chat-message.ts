@@ -114,32 +114,100 @@ export interface MentionPointerDownDetail {
   originalEvent: PointerEvent;
 }
 
-function selectionHasText(sel: Selection | null | undefined): boolean {
-  if (!sel) return false;
-  if (sel.type === 'Range') return true;
-  if (sel.type === 'None' || sel.type === 'Caret') return false;
-  if (sel.isCollapsed === true) return false;
-  if (typeof sel.toString === 'function' && sel.toString !== Object.prototype.toString) {
-    return sel.toString().length > 0;
-  }
-  return typeof sel.rangeCount === 'number' ? sel.rangeCount > 0 : sel.isCollapsed === false;
+/** How long a press-time selection snapshot stays valid for the ensuing `contextmenu`. */
+const CONTEXT_PRESS_WINDOW_MS = 1000;
+
+type ComposedSelection = Selection & {
+  getComposedRanges?: (options: { shadowRoots: ShadowRoot[] }) => StaticRange[];
+};
+
+function hasRangeSelection(sel: Selection | null | undefined): sel is Selection {
+  return !!sel && sel.type === 'Range';
 }
 
-/**
- * Whether an active non-collapsed text selection exists. Checks both any
- * enclosing `ShadowRoot.getSelection?.()` and `window.getSelection()`, and
- * handles Chromium's Shadow DOM retargeting (`type === 'Range'` with
- * `isCollapsed === true`).
- */
-export function hasTextSelection(target?: EventTarget | null): boolean {
-  if (typeof window === 'undefined' || typeof window.getSelection !== 'function') return false;
-  if (target instanceof Node) {
-    const root = target.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
-    if (typeof root.getSelection === 'function' && selectionHasText(root.getSelection())) {
+function ancestorShadowRoots(node: Node): ShadowRoot[] {
+  const roots: ShadowRoot[] = [];
+  let cur: Node | null = node;
+  while (cur) {
+    const root = cur.getRootNode();
+    if (root instanceof ShadowRoot) {
+      roots.push(root);
+      cur = root.host;
+    } else {
+      break;
+    }
+  }
+  return roots;
+}
+
+function staticRangeCoversNode(sr: StaticRange, target: Node): boolean {
+  if (sr.collapsed) return false;
+  const startRoot = sr.startContainer.getRootNode();
+  const endRoot = sr.endContainer.getRootNode();
+  let node: Node | null = target;
+  while (node) {
+    const root = node.getRootNode();
+    if (startRoot === root || endRoot === root) {
+      const range = document.createRange();
+      if (startRoot === root) {
+        range.setStart(sr.startContainer, sr.startOffset);
+      } else {
+        range.setStart(root, 0);
+      }
+      if (endRoot === root) {
+        range.setEnd(sr.endContainer, sr.endOffset);
+      } else {
+        range.setEnd(root, root.childNodes.length);
+      }
+      return !range.collapsed && range.intersectsNode(node);
+    }
+    if (root instanceof ShadowRoot) {
+      node = root.host;
+    } else {
+      return false;
+    }
+  }
+  return false;
+}
+
+function selectionRangesCoverNode(sel: Selection | null | undefined, target: Node): boolean {
+  if (!hasRangeSelection(sel)) return false;
+  const targetRoot = target.getRootNode();
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const range = sel.getRangeAt(i);
+    if (range.collapsed) continue;
+    if (range.startContainer.getRootNode() === targetRoot && range.intersectsNode(target)) {
       return true;
     }
   }
-  return selectionHasText(window.getSelection());
+  return false;
+}
+
+/**
+ * Whether an active non-empty text selection covers or intersects `target`.
+ * Uses `Selection.getComposedRanges` across `target`'s enclosing shadow roots
+ * when available, falling back to `ShadowRoot.getSelection` and
+ * `window.getSelection`.
+ */
+export function selectionCoversNode(target?: EventTarget | null): boolean {
+  if (!(target instanceof Node) || typeof window === 'undefined') return false;
+  const sel: ComposedSelection | null =
+    typeof window.getSelection === 'function' ? window.getSelection() : null;
+  if (sel && typeof sel.getComposedRanges === 'function') {
+    const roots = ancestorShadowRoots(target);
+    return sel
+      .getComposedRanges({ shadowRoots: roots })
+      .some((sr) => staticRangeCoversNode(sr, target));
+  }
+  const root: ShadowRoot & { getSelection?: () => Selection | null } =
+    target.getRootNode() as ShadowRoot;
+  if (
+    typeof root.getSelection === 'function' &&
+    selectionRangesCoverNode(root.getSelection(), target)
+  ) {
+    return true;
+  }
+  return selectionRangesCoverNode(sel, target);
 }
 
 /**
@@ -2395,8 +2463,23 @@ export class ScionChatMessage extends LitElement {
     }
   `;
 
+  /** Selection coverage captured at context-menu press start (`pointerdown`). */
+  private _contextPress: { target: Node; covered: boolean; at: number } | null = null;
+
+  private readonly boundRecordContextPress: EventListener = (e: Event): void => {
+    this.recordContextPress(e);
+  };
+
+  private readonly boundHostContextPress: EventListener = (e: Event): void => {
+    if (e.composedPath()[0] === this) {
+      this.recordContextPress(e);
+    }
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
+    this.renderRoot.addEventListener('pointerdown', this.boundRecordContextPress, true);
+    this.addEventListener('pointerdown', this.boundHostContextPress, true);
     this.renderedCardMode = this.showsDecisionCard;
     this.renderedKnownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     void this.renderContent();
@@ -2404,9 +2487,56 @@ export class ScionChatMessage extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.renderRoot.removeEventListener('pointerdown', this.boundRecordContextPress, true);
+    this.removeEventListener('pointerdown', this.boundHostContextPress, true);
+    this._contextPress = null;
     this.previewObserver?.disconnect();
     this.previewObserver = null;
     this.observedPreviews = new WeakSet();
+  }
+
+  private recordContextPress(e: Event): void {
+    // Only record presses that can initiate a context menu: secondary button,
+    // macOS Ctrl+click, or touch long-press. Plain primary-button presses
+    // start drag-selections and clear any earlier press snapshot without
+    // masking the selection the drag creates.
+    const pe = e as Partial<PointerEvent>;
+    if (pe.button !== 2 && pe.pointerType !== 'touch' && !(pe.button === 0 && pe.ctrlKey)) {
+      this._contextPress = null;
+      return;
+    }
+    const origin = e.composedPath()[0];
+    if (!(origin instanceof Node)) return;
+    const mentionEl =
+      (origin instanceof Element ? origin : origin.parentElement)?.closest<HTMLElement>(
+        '.mention[data-mention]'
+      ) ?? null;
+    const pressTarget = mentionEl ?? origin;
+    this._contextPress = {
+      target: pressTarget,
+      covered: selectionCoversNode(pressTarget),
+      at: Date.now(),
+    };
+  }
+
+  /**
+   * Whether `target` was covered by an active text selection when the
+   * context-menu press started (ignoring any word selection the browser
+   * creates between `pointerdown` and `contextmenu`, as on macOS and
+   * Android). Falls back to live `selectionCoversNode(target)` when no
+   * matching press was recorded (e.g. synthetic `contextmenu` events).
+   */
+  hasSelectionForContextMenu(target?: EventTarget | null): boolean {
+    if (!(target instanceof Node)) return false;
+    const press = this._contextPress;
+    if (
+      press &&
+      Date.now() - press.at <= CONTEXT_PRESS_WINDOW_MS &&
+      (press.target === target || target.contains(press.target))
+    ) {
+      return press.covered;
+    }
+    return selectionCoversNode(target);
   }
 
   override willUpdate(changed: Map<string, unknown>): void {
@@ -2825,6 +2955,7 @@ export class ScionChatMessage extends LitElement {
     if (!target) return;
     const slug = target.getAttribute('data-mention');
     if (!slug) return;
+    if (this.hasSelectionForContextMenu(target)) return;
     this.dispatchEvent(
       new CustomEvent<MentionPointerDownDetail>('mention-pointerdown', {
         bubbles: true,
@@ -2843,7 +2974,7 @@ export class ScionChatMessage extends LitElement {
     const fromKeyboard =
       (e.clientX === 0 && e.clientY === 0) ||
       (typeof PointerEvent !== 'undefined' && e instanceof PointerEvent && e.pointerType === '');
-    if (!fromKeyboard && hasTextSelection(target)) return;
+    if (!fromKeyboard && this.hasSelectionForContextMenu(target)) return;
 
     const ev = new CustomEvent<MentionContextMenuDetail>('mention-contextmenu', {
       bubbles: true,
