@@ -90,7 +90,7 @@ You cannot combine decisions with `--attach`, `--artifact`, `--wake`, `--in`,
 Reusing a key you already sent is refused (`decision_key_exists`) unless you
 pass `--update`. With `--update`, each decision whose key exists gets a new
 version, and the old version is marked replaced and can no longer be answered.
-This works for answered and withdrawn decisions too. To retire a decision
+This works for answered, withdrawn, and dismissed decisions too. To retire a decision
 without a replacement, use `scion decisions withdraw`.
 
 **Revising an unanswered set: resend every still-pending key of that set**, not
@@ -127,6 +127,21 @@ answered, in the conversation of the prompt.
 `recommended` means the answer matched your `default`. Act on the answer, and
 reply in the conversation when the user expects a result.
 
+A user may also **dismiss** one or more open decisions instead of answering
+(once the version is at least 5 minutes old). You receive one
+`decision-response` per dismiss call (for example
+`alice dismissed D234 ("Ship v0.9 today?"). Reason: ...`, adding
+`(your reading: <label>)` when the row held your interpreted answer) with
+envelope metadata `decision_batch`, `decision_answers` as JSON entries
+(`[{"key":"D234","version":1,"choice_id":"$dismissed","provenance":"direct","outcome":"dismiss"}]`
+— unlike set answers, which encode `decision_answers` as the compact
+`key@version=choiceId` list), optional `decision_dismiss_reason`, and, when one
+decision was dismissed, `decision_key`, `decision_version`,
+`choice_id` (`$dismissed`) and `decision_provenance`. Treat a dismissal as a
+closed question: do not ask again unless the situation changed, and if you must
+re-ask, pass `--update` (reusing a dismissed key without `--update` is refused
+with `decision_key_exists`).
+
 ## Withdraw an obsolete decision
 
 When a pending decision stops mattering (you found the answer yourself, the
@@ -152,16 +167,17 @@ scion decisions list
 scion decisions list --search staging
 scion decisions list --decided
 scion decisions list --withdrawn
+scion decisions list --dismissed
 scion decisions list --all
 scion decisions show <key>
 ```
 
 `list` shows pending decisions by default; `--decided` shows answered ones,
-`--withdrawn` shows withdrawn ones, `--all` adds replaced and withdrawn
-versions, and `-q`/`--search <text>` (2 to 256 characters) searches the
-question, key, and effective answer label. `show <key>` prints every version of
-a key with its choices, withdrawal details, and every recorded answer. Both
-take `--json`.
+`--withdrawn` shows withdrawn ones, `--dismissed` shows dismissed ones, `--all`
+adds replaced, withdrawn and dismissed versions, and `-q`/`--search <text>` (2
+to 256 characters) searches the question, key, effective answer label, and
+dismissal reason. `show <key>` prints every version of a key with its choices,
+withdrawal or dismissal details, and every recorded answer. Both take `--json`.
 
 ## A user answers in words instead
 
