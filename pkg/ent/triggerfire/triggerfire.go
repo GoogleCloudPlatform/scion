@@ -44,6 +44,12 @@ const (
 	FieldError = "error"
 	// FieldResultRef holds the string denoting the result_ref field in the database.
 	FieldResultRef = "result_ref"
+	// FieldMatchedThrough holds the string denoting the matched_through field in the database.
+	FieldMatchedThrough = "matched_through"
+	// FieldDecidedDialect holds the string denoting the decided_dialect field in the database.
+	FieldDecidedDialect = "decided_dialect"
+	// FieldRuleTrace holds the string denoting the rule_trace field in the database.
+	FieldRuleTrace = "rule_trace"
 	// FieldExecutorKind holds the string denoting the executor_kind field in the database.
 	FieldExecutorKind = "executor_kind"
 	// FieldExecutorID holds the string denoting the executor_id field in the database.
@@ -78,6 +84,9 @@ var Columns = []string{
 	FieldStatus,
 	FieldError,
 	FieldResultRef,
+	FieldMatchedThrough,
+	FieldDecidedDialect,
+	FieldRuleTrace,
 	FieldExecutorKind,
 	FieldExecutorID,
 	FieldLeaseUntil,
@@ -103,6 +112,12 @@ var (
 	ActionTypeValidator func(string) error
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
+	// MatchedThroughValidator is a validator for the "matched_through" field. It is called by the builders before save.
+	MatchedThroughValidator func(string) error
+	// DecidedDialectValidator is a validator for the "decided_dialect" field. It is called by the builders before save.
+	DecidedDialectValidator func(string) error
+	// RuleTraceValidator is a validator for the "rule_trace" field. It is called by the builders before save.
+	RuleTraceValidator func(string) error
 	// DefaultExecutorKind holds the default value on creation for the "executor_kind" field.
 	DefaultExecutorKind string
 	// DefaultExecutorID holds the default value on creation for the "executor_id" field.
@@ -194,6 +209,21 @@ func ByError(opts ...sql.OrderTermOption) OrderOption {
 // ByResultRef orders the results by the result_ref field.
 func ByResultRef(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldResultRef, opts...).ToFunc()
+}
+
+// ByMatchedThrough orders the results by the matched_through field.
+func ByMatchedThrough(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMatchedThrough, opts...).ToFunc()
+}
+
+// ByDecidedDialect orders the results by the decided_dialect field.
+func ByDecidedDialect(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDecidedDialect, opts...).ToFunc()
+}
+
+// ByRuleTrace orders the results by the rule_trace field.
+func ByRuleTrace(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRuleTrace, opts...).ToFunc()
 }
 
 // ByExecutorKind orders the results by the executor_kind field.

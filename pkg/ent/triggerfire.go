@@ -48,6 +48,12 @@ type TriggerFire struct {
 	Error string `json:"error,omitempty"`
 	// ResultRef holds the value of the "result_ref" field.
 	ResultRef string `json:"result_ref,omitempty"`
+	// MatchedThrough holds the value of the "matched_through" field.
+	MatchedThrough string `json:"matched_through,omitempty"`
+	// DecidedDialect holds the value of the "decided_dialect" field.
+	DecidedDialect string `json:"decided_dialect,omitempty"`
+	// RuleTrace holds the value of the "rule_trace" field.
+	RuleTrace string `json:"rule_trace,omitempty"`
 	// ExecutorKind holds the value of the "executor_kind" field.
 	ExecutorKind string `json:"executor_kind,omitempty"`
 	// ExecutorID holds the value of the "executor_id" field.
@@ -70,7 +76,7 @@ func (*TriggerFire) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case triggerfire.FieldAttributionVersion, triggerfire.FieldAuthorizationRevision:
 			values[i] = new(sql.NullInt64)
-		case triggerfire.FieldInitiatorPrincipalKind, triggerfire.FieldInitiatorPrincipalID, triggerfire.FieldInitiatorCredentialKind, triggerfire.FieldInitiatorCredentialID, triggerfire.FieldInitiatorCredentialSnapshot, triggerfire.FieldSubject, triggerfire.FieldActionType, triggerfire.FieldStatus, triggerfire.FieldError, triggerfire.FieldResultRef, triggerfire.FieldExecutorKind, triggerfire.FieldExecutorID:
+		case triggerfire.FieldInitiatorPrincipalKind, triggerfire.FieldInitiatorPrincipalID, triggerfire.FieldInitiatorCredentialKind, triggerfire.FieldInitiatorCredentialID, triggerfire.FieldInitiatorCredentialSnapshot, triggerfire.FieldSubject, triggerfire.FieldActionType, triggerfire.FieldStatus, triggerfire.FieldError, triggerfire.FieldResultRef, triggerfire.FieldMatchedThrough, triggerfire.FieldDecidedDialect, triggerfire.FieldRuleTrace, triggerfire.FieldExecutorKind, triggerfire.FieldExecutorID:
 			values[i] = new(sql.NullString)
 		case triggerfire.FieldLeaseUntil, triggerfire.FieldStartedAt, triggerfire.FieldFinishedAt, triggerfire.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -193,6 +199,24 @@ func (_m *TriggerFire) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field result_ref", values[i])
 			} else if value.Valid {
 				_m.ResultRef = value.String
+			}
+		case triggerfire.FieldMatchedThrough:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field matched_through", values[i])
+			} else if value.Valid {
+				_m.MatchedThrough = value.String
+			}
+		case triggerfire.FieldDecidedDialect:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field decided_dialect", values[i])
+			} else if value.Valid {
+				_m.DecidedDialect = value.String
+			}
+		case triggerfire.FieldRuleTrace:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field rule_trace", values[i])
+			} else if value.Valid {
+				_m.RuleTrace = value.String
 			}
 		case triggerfire.FieldExecutorKind:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -325,6 +349,15 @@ func (_m *TriggerFire) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("result_ref=")
 	builder.WriteString(_m.ResultRef)
+	builder.WriteString(", ")
+	builder.WriteString("matched_through=")
+	builder.WriteString(_m.MatchedThrough)
+	builder.WriteString(", ")
+	builder.WriteString("decided_dialect=")
+	builder.WriteString(_m.DecidedDialect)
+	builder.WriteString(", ")
+	builder.WriteString("rule_trace=")
+	builder.WriteString(_m.RuleTrace)
 	builder.WriteString(", ")
 	builder.WriteString("executor_kind=")
 	builder.WriteString(_m.ExecutorKind)

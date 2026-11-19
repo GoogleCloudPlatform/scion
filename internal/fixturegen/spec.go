@@ -1317,6 +1317,8 @@ func Spec() []TableFixture {
 				"trigger_id": triggerID, "event_id": triggerEventID,
 				"subject": "webhook:" + webhookEndpointID, "action_type": "message",
 				"status": "fired", "error": "", "result_ref": messageID,
+				"matched_through": "1/1", "decided_dialect": "cel",
+				"rule_trace": `{"elements":[{"i":1,"dialect":"cel","class":"matched","duration_ms":1}]}`,
 				"executor_kind": "trigger", "executor_id": "trigger:" + triggerID,
 				"initiator_principal_kind": "user", "initiator_principal_id": userID,
 				"initiator_credential_kind": "session", "initiator_credential_id": "",

@@ -232,6 +232,9 @@ func TestFixtureLoadable(t *testing.T) {
 	trFire, err := composite.GetTriggerFire(ctx, triggerFireID)
 	require.NoError(t, err, "trigger_fires fixture row must be readable via TriggerStore")
 	assert.Equal(t, store.TriggerFireStatusFired, trFire.Status)
+	assert.Equal(t, "1/1", trFire.MatchedThrough)
+	assert.Equal(t, "cel", trFire.DecidedDialect)
+	assert.Contains(t, trFire.RuleTrace, `"class":"matched"`)
 
 	withdrawnDec, err := composite.GetDecision(ctx, "dc000000-0000-0000-0000-000000000003")
 	require.NoError(t, err)

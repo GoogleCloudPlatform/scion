@@ -1162,3 +1162,69 @@ func TestTriggerStore_OrderedMatchRulesRoundTripAndEmptyScalars(t *testing.T) {
 	assert.False(t, repaired.MatchRulesCorrupt)
 	assert.Equal(t, []store.TriggerMatchRule{{Dialect: "cel", Expr: "true"}}, repaired.MatchRules)
 }
+
+func TestTriggerFire_RuleEvalMetadataRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+	trID := uuid.NewString()
+	evID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	const traceJSON = `{"elements":[{"i":1,"dialect":"cel","class":"matched","duration_ms":2},{"i":2,"dialect":"cel","class":"matched","duration_ms":1}]}`
+
+	fire := &store.TriggerFire{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		TriggerID:      trID,
+		EventID:        evID,
+		Subject:        "webhook:ep-1/prod",
+		ActionType:     store.TriggerActionMessage,
+		Status:         store.TriggerFireStatusFiring,
+		MatchedThrough: "2/2",
+		DecidedDialect: "cel",
+		RuleTrace:      traceJSON,
+		ExecutorKind:   "trigger_drainer",
+		ExecutorID:     "trigger_event:" + evID,
+		LeaseUntil:     now.Add(10 * time.Minute),
+		StartedAt:      now,
+		CreatedAt:      now,
+	}
+	claimed, existing, err := cs.ClaimTriggerFire(ctx, fire)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	assert.Nil(t, existing)
+	assert.Equal(t, "2/2", fire.MatchedThrough)
+	assert.Equal(t, "cel", fire.DecidedDialect)
+	assert.Equal(t, traceJSON, fire.RuleTrace)
+
+	// Duplicate claim returns existing with all rule evaluation metadata intact.
+	dupFire := *fire
+	dupFire.ID = uuid.NewString()
+	dupClaimed, dupExisting, err := cs.ClaimTriggerFire(ctx, &dupFire)
+	require.NoError(t, err)
+	assert.False(t, dupClaimed)
+	require.NotNil(t, dupExisting)
+	assert.Equal(t, "2/2", dupExisting.MatchedThrough)
+	assert.Equal(t, "cel", dupExisting.DecidedDialect)
+	assert.Equal(t, traceJSON, dupExisting.RuleTrace)
+
+	// FinishTriggerFire preserves rule evaluation metadata written at claim time.
+	finished, err := cs.FinishTriggerFire(ctx, fire.ID, store.TriggerFireStatusFired, "msg-99", "", now.Add(time.Second))
+	require.NoError(t, err)
+	assert.True(t, finished)
+
+	got, err := cs.GetTriggerFire(ctx, fire.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFired, got.Status)
+	assert.Equal(t, "2/2", got.MatchedThrough)
+	assert.Equal(t, "cel", got.DecidedDialect)
+	assert.Equal(t, traceJSON, got.RuleTrace)
+
+	listed, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: trID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, listed.Items, 1)
+	assert.Equal(t, "2/2", listed.Items[0].MatchedThrough)
+	assert.Equal(t, "cel", listed.Items[0].DecidedDialect)
+	assert.Equal(t, traceJSON, listed.Items[0].RuleTrace)
+}

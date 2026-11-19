@@ -3682,16 +3682,28 @@ func init() {
 	triggerfireDescStatus := triggerfireFields[6].Descriptor()
 	// triggerfire.DefaultStatus holds the default value on creation for the status field.
 	triggerfire.DefaultStatus = triggerfireDescStatus.Default.(string)
+	// triggerfireDescMatchedThrough is the schema descriptor for matched_through field.
+	triggerfireDescMatchedThrough := triggerfireFields[9].Descriptor()
+	// triggerfire.MatchedThroughValidator is a validator for the "matched_through" field. It is called by the builders before save.
+	triggerfire.MatchedThroughValidator = triggerfireDescMatchedThrough.Validators[0].(func(string) error)
+	// triggerfireDescDecidedDialect is the schema descriptor for decided_dialect field.
+	triggerfireDescDecidedDialect := triggerfireFields[10].Descriptor()
+	// triggerfire.DecidedDialectValidator is a validator for the "decided_dialect" field. It is called by the builders before save.
+	triggerfire.DecidedDialectValidator = triggerfireDescDecidedDialect.Validators[0].(func(string) error)
+	// triggerfireDescRuleTrace is the schema descriptor for rule_trace field.
+	triggerfireDescRuleTrace := triggerfireFields[11].Descriptor()
+	// triggerfire.RuleTraceValidator is a validator for the "rule_trace" field. It is called by the builders before save.
+	triggerfire.RuleTraceValidator = triggerfireDescRuleTrace.Validators[0].(func(string) error)
 	// triggerfireDescExecutorKind is the schema descriptor for executor_kind field.
-	triggerfireDescExecutorKind := triggerfireFields[9].Descriptor()
+	triggerfireDescExecutorKind := triggerfireFields[12].Descriptor()
 	// triggerfire.DefaultExecutorKind holds the default value on creation for the executor_kind field.
 	triggerfire.DefaultExecutorKind = triggerfireDescExecutorKind.Default.(string)
 	// triggerfireDescExecutorID is the schema descriptor for executor_id field.
-	triggerfireDescExecutorID := triggerfireFields[10].Descriptor()
+	triggerfireDescExecutorID := triggerfireFields[13].Descriptor()
 	// triggerfire.DefaultExecutorID holds the default value on creation for the executor_id field.
 	triggerfire.DefaultExecutorID = triggerfireDescExecutorID.Default.(string)
 	// triggerfireDescCreated is the schema descriptor for created field.
-	triggerfireDescCreated := triggerfireFields[14].Descriptor()
+	triggerfireDescCreated := triggerfireFields[17].Descriptor()
 	// triggerfire.DefaultCreated holds the default value on creation for the created field.
 	triggerfire.DefaultCreated = triggerfireDescCreated.Default.(func() time.Time)
 	// triggerfireDescID is the schema descriptor for id field.
