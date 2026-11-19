@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -97,6 +101,239 @@ func TestSystemStatus_NoUncheckedImagesPresent(t *testing.T) {
 			t.Errorf("status is missing %q: %s", key, rec.Body.String())
 		}
 	}
+}
+
+func getWorkstationOnboardingStatus(t *testing.T, srv *Server) OnboardingStatus {
+	t.Helper()
+	rec := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/status", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var status OnboardingStatus
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &status))
+	return status
+}
+
+// setupCLIWorkstation prepares a workstation server mirroring `scion server start`
+// before the web onboarding wizard has been opened: ~/.scion/settings.yaml exists
+// without server.auth identity fields, a local container runtime is reachable,
+// global harness configs are bootstrapped into the store, and the Hub's built-in
+// global system project is present when withGlobalProject is true.
+func setupCLIWorkstation(t *testing.T, withGlobalProject bool) (*Server, store.Store, string) {
+	t.Helper()
+	srv, s := testWorkstationServer(t)
+	srv.SetStorage(newMockStorage("test-bucket"))
+	ctx := context.Background()
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"),
+		[]byte("schema_version: \"1\"\n"), 0o600))
+
+	restore := config.OverrideRuntimeDetection(
+		func(string) (string, error) { return "/usr/bin/docker", nil },
+		func(string, []string) error { return nil },
+	)
+	t.Cleanup(restore)
+
+	hcDir := writeHarnessConfigDirs(t, globalDir, "claude")
+	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, hcDir))
+
+	if withGlobalProject {
+		require.NoError(t, srv.ensureEmbeddedGlobalProject(ctx))
+	}
+	return srv, s, globalDir
+}
+
+type projectSummaryFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (w projectSummaryFaultStore) ListProjectSummaries(ctx context.Context, f store.ProjectFilter, o store.ListOptions) (*store.ListResult[store.Project], error) {
+	if !w.fault.Active() {
+		return w.Store.ListProjectSummaries(ctx, f, o)
+	}
+	return nil, errors.New("database is locked")
+}
+
+// ptone/scion#7537: HasWorkspace excludes the Hub's built-in global project, and
+// Complete is satisfied when core workstation setup is ready and either web
+// identity is configured or a user project exists (e.g. CLI `scion init`).
+func TestSystemStatus_WorkspaceAndComplete(t *testing.T) {
+	t.Run("fresh install with only global project enters onboarding", func(t *testing.T) {
+		srv, _, _ := setupCLIWorkstation(t, true)
+
+		st := getWorkstationOnboardingStatus(t, srv)
+		assert.True(t, st.Initialized)
+		assert.False(t, st.IdentitySet)
+		assert.True(t, st.RuntimeOK)
+		assert.True(t, st.HarnessesSeeded)
+		assert.False(t, st.HasWorkspace, "built-in global project alone must not count as a user workspace")
+		assert.False(t, st.Complete, "fresh install without identity or user project must enter /onboarding")
+	})
+
+	t.Run("CLI-initialized workstation with user project skips onboarding", func(t *testing.T) {
+		srv, _, _ := setupCLIWorkstation(t, true)
+
+		reg := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/projects/register", map[string]interface{}{
+			"name":      "cli-repo",
+			"gitRemote": "https://github.com/example/cli-repo.git",
+		})
+		require.Equal(t, http.StatusOK, reg.Code, "register project: %s", reg.Body.String())
+
+		st := getWorkstationOnboardingStatus(t, srv)
+		assert.True(t, st.Initialized)
+		assert.False(t, st.IdentitySet)
+		assert.True(t, st.RuntimeOK)
+		assert.True(t, st.HarnessesSeeded)
+		assert.True(t, st.HasWorkspace)
+		assert.True(t, st.Complete, "CLI-created user project must satisfy onboarding completeness")
+	})
+
+	t.Run("user project created before global project still counts as workspace", func(t *testing.T) {
+		srv, _, _ := setupCLIWorkstation(t, false)
+
+		reg := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/projects/register", map[string]interface{}{
+			"name":      "older-cli-repo",
+			"gitRemote": "https://github.com/example/older-cli-repo.git",
+		})
+		require.Equal(t, http.StatusOK, reg.Code, "register project: %s", reg.Body.String())
+		// Create built-in global project afterwards so it sorts first under
+		// ListProjectSummaries's DESC created ordering.
+		require.NoError(t, srv.ensureEmbeddedGlobalProject(context.Background()))
+
+		st := getWorkstationOnboardingStatus(t, srv)
+		assert.True(t, st.HasWorkspace, "newer global project must not shadow an existing user project")
+		assert.True(t, st.Complete)
+	})
+
+	t.Run("user project with client-supplied global labels still counts as workspace", func(t *testing.T) {
+		srv, _, _ := setupCLIWorkstation(t, true)
+
+		reg := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/projects/register", map[string]interface{}{
+			"name": "labeled-user-project",
+			"labels": map[string]string{
+				store.LabelSystemProject: "true",
+				store.LabelGlobalProject: "true",
+			},
+		})
+		require.Equal(t, http.StatusOK, reg.Code, "register project: %s", reg.Body.String())
+
+		st := getWorkstationOnboardingStatus(t, srv)
+		assert.True(t, st.HasWorkspace, "client labels on a non-global slug do not make it the global project")
+		assert.True(t, st.Complete)
+	})
+
+	t.Run("wizard path with IdentitySet true and only global project stays Complete", func(t *testing.T) {
+		srv, _, _ := setupCLIWorkstation(t, true)
+
+		put := doWorkstationRequest(t, srv, http.MethodPut, "/api/v1/system/identity", map[string]interface{}{
+			"displayName": "Workstation Owner",
+			"email":       "owner@example.com",
+		})
+		require.Equal(t, http.StatusOK, put.Code, "put identity: %s", put.Body.String())
+
+		st := getWorkstationOnboardingStatus(t, srv)
+		assert.True(t, st.Initialized)
+		assert.True(t, st.IdentitySet)
+		assert.True(t, st.RuntimeOK)
+		assert.True(t, st.HarnessesSeeded)
+		assert.False(t, st.HasWorkspace, "skipping workspace step leaves only global project -> HasWorkspace false")
+		assert.True(t, st.Complete, "wizard completion with skipped workspace must stay Complete")
+	})
+
+	t.Run("user project does not mark Complete when required setup is missing", func(t *testing.T) {
+		t.Run("uninitialized settings", func(t *testing.T) {
+			srv, _, globalDir := setupCLIWorkstation(t, true)
+			reg := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/projects/register", map[string]interface{}{
+				"name":      "cli-repo",
+				"gitRemote": "https://github.com/example/cli-repo.git",
+			})
+			require.Equal(t, http.StatusOK, reg.Code)
+			require.NoError(t, os.Remove(filepath.Join(globalDir, "settings.yaml")))
+
+			st := getWorkstationOnboardingStatus(t, srv)
+			assert.False(t, st.Initialized)
+			assert.True(t, st.HasWorkspace)
+			assert.False(t, st.Complete)
+		})
+
+		t.Run("runtime unavailable", func(t *testing.T) {
+			srv, _, _ := setupCLIWorkstation(t, true)
+			reg := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/projects/register", map[string]interface{}{
+				"name":      "cli-repo",
+				"gitRemote": "https://github.com/example/cli-repo.git",
+			})
+			require.Equal(t, http.StatusOK, reg.Code)
+			restore := config.OverrideRuntimeDetection(
+				func(string) (string, error) { return "", errors.New("no runtime") },
+				func(string, []string) error { return errors.New("no runtime") },
+			)
+			t.Cleanup(restore)
+
+			st := getWorkstationOnboardingStatus(t, srv)
+			assert.False(t, st.RuntimeOK)
+			assert.True(t, st.HasWorkspace)
+			assert.False(t, st.Complete)
+		})
+
+		t.Run("harnesses not seeded", func(t *testing.T) {
+			srv, s := testWorkstationServer(t)
+			srv.SetStorage(newMockStorage("test-bucket"))
+			tmpHome := t.TempDir()
+			t.Setenv("HOME", tmpHome)
+			globalDir := filepath.Join(tmpHome, ".scion")
+			require.NoError(t, os.MkdirAll(globalDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"),
+				[]byte("schema_version: \"1\"\n"), 0o600))
+			restore := config.OverrideRuntimeDetection(
+				func(string) (string, error) { return "/usr/bin/docker", nil },
+				func(string, []string) error { return nil },
+			)
+			t.Cleanup(restore)
+			require.NoError(t, srv.ensureEmbeddedGlobalProject(context.Background()))
+			require.NoError(t, s.CreateProject(context.Background(), &store.Project{
+				ID: "11111111-1111-4111-8111-111111111111", Name: "cli-repo", Slug: "cli-repo",
+			}))
+
+			st := getWorkstationOnboardingStatus(t, srv)
+			assert.False(t, st.HarnessesSeeded)
+			assert.True(t, st.HasWorkspace)
+			assert.False(t, st.Complete)
+		})
+
+		t.Run("store error listing projects", func(t *testing.T) {
+			srv, s := testWorkstationServer(t)
+			waitUserScopedDataSweep(t, srv)
+			_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) projectSummaryFaultStore {
+				return projectSummaryFaultStore{Store: inner, fault: f}
+			})
+			srv.SetStorage(newMockStorage("test-bucket"))
+			ctx := context.Background()
+			tmpHome := t.TempDir()
+			t.Setenv("HOME", tmpHome)
+			globalDir := filepath.Join(tmpHome, ".scion")
+			require.NoError(t, os.MkdirAll(globalDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"),
+				[]byte("schema_version: \"1\"\n"), 0o600))
+			restore := config.OverrideRuntimeDetection(
+				func(string) (string, error) { return "/usr/bin/docker", nil },
+				func(string, []string) error { return nil },
+			)
+			t.Cleanup(restore)
+			hcDir := writeHarnessConfigDirs(t, globalDir, "claude")
+			require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, hcDir))
+			require.NoError(t, s.CreateProject(ctx, &store.Project{
+				ID: "22222222-2222-4222-8222-222222222222", Name: "cli-repo", Slug: "cli-repo",
+			}))
+
+			fault.Arm()
+			st := getWorkstationOnboardingStatus(t, srv)
+			assert.False(t, st.HasWorkspace)
+			assert.False(t, st.Complete)
+		})
+	})
 }
 
 // ============================================================================
