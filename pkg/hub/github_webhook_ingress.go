@@ -43,7 +43,6 @@ import (
 const (
 	GitHubWebhookVerifiedRatePerSecond = 100.0
 	GitHubWebhookVerifiedBurst         = 500
-	GitHubWebhookMaxDeliveryBytes      = 64
 
 	GitHubAuditEventRejected              = "trigger.github.rejected"
 	GitHubAuditRejectReasonTargetMismatch = "target_mismatch"
