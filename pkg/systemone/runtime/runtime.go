@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -109,8 +110,13 @@ type Config struct {
 	// Instances resolves configured provider instances. Optional when callers
 	// supply EvalOptions.Instance directly.
 	Instances InstanceSource
-	// Credentials supplies per-instance bearer API keys at request time.
+	// Credentials supplies per-instance bearer API keys at request time (and
+	// acts as the fallback credential resolver when TokenSource is nil).
 	Credentials CredentialSource
+	// TokenSource optionally supplies per-instance OAuth/ADC access tokens at
+	// request time when Instance.Auth.Kind is "google_access_token". When nil,
+	// Runtime falls back to Credentials.
+	TokenSource CredentialSource
 	// MaxEvalTime is the runtime-wide evaluation ceiling (server.hub.systemone.maxEvalTime;
 	// defaults to DefaultMaxEvalTime = 3s when <= 0, clamped to MaxAllowedEvalTime = 30s).
 	MaxEvalTime time.Duration
@@ -179,17 +185,33 @@ type transportKey struct {
 	headerName      string
 	audience        string
 	scopes          string
+	quotaProject    string
 	placementKind   provider.AuthKind
 	placementHeader string
 }
 
+type evalCallTrackerKey struct{}
+
+type evalCallTracker struct {
+	preCallAuthFailed atomic.Bool
+}
+
+func markPreCallAuthFailed(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if tracker, ok := ctx.Value(evalCallTrackerKey{}).(*evalCallTracker); ok && tracker != nil {
+		tracker.preCallAuthFailed.Store(true)
+	}
+}
+
 // Runtime executes compiled System One rules under bounded deadlines and
-// content-environment limits, producing typed Decisions and content-free
-// Evaluation provenance records (runtime-design §§6, 7.1, 7.7, 8.1).
+// content-free provenance records (runtime-design §§6, 7.1, 7.7, 8.1).
 type Runtime struct {
 	registry        *provider.Registry
 	instances       InstanceSource
 	credentials     CredentialSource
+	tokenSource     CredentialSource
 	maxEvalTime     time.Duration
 	defaultInstance string
 	logger          *slog.Logger
@@ -218,6 +240,7 @@ func New(cfg Config, opts ...Option) *Runtime {
 		registry:        reg,
 		instances:       cfg.Instances,
 		credentials:     cfg.Credentials,
+		tokenSource:     cfg.TokenSource,
 		maxEvalTime:     maxEval,
 		defaultInstance: cfg.DefaultInstance,
 		logger:          logger,
@@ -375,7 +398,8 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	if caps.MaxQuestionsPerRequest > 0 && len(compiled.Spec.Questions) > caps.MaxQuestionsPerRequest {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, provider.FailUnsupported)
 	}
-	if authReason := checkInstanceAuthSupport(caps.AuthScheme, inst.Auth); authReason != "" {
+	selectedScheme, authReason := selectInstanceAuthScheme(caps, inst)
+	if authReason != "" {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, authReason)
 	}
 
@@ -393,10 +417,12 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	// Step 6: Build credential-free ModelRequest from compiled spec + selected fields only (AC-2).
 	req := buildModelRequest(evalID, compiled, selectedFields)
 	instView := inst.View()
-	transport := r.transportForInstance(inst, caps.AuthScheme)
+	transport := r.transportForInstance(inst, selectedScheme)
+	callTracker := &evalCallTracker{}
+	callCtx := context.WithValue(attemptCtx, evalCallTrackerKey{}, callTracker)
 
 	attemptStart := time.Now().UTC()
-	res, invokeErr, panicked := invokeSafely(attemptCtx, adapter, transport, instView, req)
+	res, invokeErr, panicked := invokeSafely(callCtx, adapter, transport, instView, req)
 	attemptDuration := time.Since(attemptStart)
 	callerErr := ctx.Err()
 	attemptErr := attemptCtx.Err()
@@ -419,6 +445,11 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		}
 	}
 
+	attemptRequests := 1
+	if callTracker.preCallAuthFailed.Load() || isPreCallEgressError(invokeErr) {
+		attemptRequests = 0
+	}
+
 	attempt := Attempt{
 		Instance:          inst.Name,
 		InstanceRevision:  inst.Revision,
@@ -430,7 +461,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		Location:          inst.Location,
 		Started:           attemptStart,
 		Duration:          attemptDuration,
-		Requests:          1,
+		Requests:          attemptRequests,
 		Retries:           0,
 		HTTPStatusClass:   provider.HTTPStatusClass(res.HTTPStatus),
 	}
@@ -546,7 +577,8 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 		}
 		return nil, provider.NewProviderError(provider.FailInternal, false, 0, 0, "failed to inspect adapter capabilities")
 	}
-	if authReason := checkInstanceAuthSupport(caps.AuthScheme, inst.Auth); authReason != "" {
+	selectedScheme, authReason := selectInstanceAuthScheme(caps, inst)
+	if authReason != "" {
 		return nil, provider.NewProviderError(authReason, false, 0, 0, "instance auth scheme is not supported")
 	}
 
@@ -564,7 +596,7 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	callCtx, cancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
 	defer cancel()
 
-	models, err, listPanicked := listModelsSafely(callCtx, lister, r.transportForInstance(inst, caps.AuthScheme), inst.View())
+	models, err, listPanicked := listModelsSafely(callCtx, lister, r.transportForInstance(inst, selectedScheme), inst.View())
 	if listPanicked {
 		return nil, provider.NewProviderError(provider.FailInternal, false, 0, 0, "adapter panic recovered")
 	}
@@ -752,7 +784,10 @@ func canonicalScopesKey(scopes []string) string {
 	return b.String()
 }
 
-func placementFromAuthScheme(scheme provider.AuthScheme) egress.Placement {
+func placementFromAuthScheme(scheme provider.AuthScheme, instOpts map[string]string) egress.Placement {
+	if scheme.Kind == provider.AuthKindGoogleAccessToken {
+		return egress.ADCBearerPlacement(instOpts[provider.OptionQuotaProject])
+	}
 	return egress.Placement{
 		Kind:       scheme.Kind,
 		HeaderName: scheme.HeaderName,
@@ -772,8 +807,12 @@ func canonicalPlacementKey(p egress.Placement) (provider.AuthKind, string) {
 }
 
 func (r *Runtime) transportForInstance(inst Instance, adapterScheme provider.AuthScheme) provider.Transport {
-	placement := placementFromAuthScheme(adapterScheme)
+	placement := placementFromAuthScheme(adapterScheme, inst.Options)
 	placementKind, placementHeader := canonicalPlacementKey(placement)
+	effScopes := inst.Auth.Scopes
+	if adapterScheme.Kind == provider.AuthKindGoogleAccessToken && len(effScopes) == 0 && len(adapterScheme.Scopes) > 0 {
+		effScopes = adapterScheme.Scopes
+	}
 	key := transportKey{
 		id:              inst.ID,
 		name:            inst.Name,
@@ -784,7 +823,8 @@ func (r *Runtime) transportForInstance(inst Instance, adapterScheme provider.Aut
 		secretName:      inst.Auth.SecretName,
 		headerName:      inst.Auth.HeaderName,
 		audience:        inst.Auth.Audience,
-		scopes:          canonicalScopesKey(inst.Auth.Scopes),
+		scopes:          canonicalScopesKey(effScopes),
+		quotaProject:    placement.QuotaProject,
 		placementKind:   placementKind,
 		placementHeader: placementHeader,
 	}
@@ -806,12 +846,25 @@ func (r *Runtime) transportForInstance(inst Instance, adapterScheme provider.Aut
 	}
 
 	instSnap := cloneInstance(inst)
+	if len(effScopes) > 0 {
+		instSnap.Auth.Scopes = slices.Clone(effScopes)
+	}
 	creds := r.credentials
+	tokSrc := r.tokenSource
 	bearer := func(reqCtx context.Context) (string, error) {
-		if creds == nil {
+		src := creds
+		if instSnap.Auth.Kind == string(provider.AuthKindGoogleAccessToken) && tokSrc != nil {
+			src = tokSrc
+		}
+		if src == nil {
+			markPreCallAuthFailed(reqCtx)
 			return "", egress.ErrAuth
 		}
-		return creds(reqCtx, instSnap)
+		tok, err := src(reqCtx, instSnap)
+		if err != nil || strings.TrimSpace(tok) == "" {
+			markPreCallAuthFailed(reqCtx)
+		}
+		return tok, err
 	}
 	opts := make([]egress.Option, 0, len(r.egressOpts)+1)
 	opts = append(opts, egress.WithCredentialPlacement(placement))
@@ -944,12 +997,41 @@ func checkMaxInputTokensBytes(totalBytes int, caps provider.Capabilities, limits
 	return ""
 }
 
-func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, instAuth InstanceAuth) provider.FailReason {
+func selectInstanceAuthScheme(caps provider.Capabilities, inst Instance) (provider.AuthScheme, provider.FailReason) {
+	if len(caps.SupportedAuth) > 0 {
+		kind := inst.Auth.Kind
+		if kind == "" {
+			if _, hasEmpty := caps.SupportedAuth[""]; !hasEmpty {
+				if caps.AuthScheme.Kind == provider.AuthKindNone {
+					kind = string(provider.AuthKindNone)
+				} else {
+					kind = provider.InstanceAuthAPIKey
+				}
+			}
+		}
+		scheme, ok := caps.SupportedAuth[kind]
+		if !ok {
+			return provider.AuthScheme{}, provider.FailUnsupported
+		}
+		if fail := checkInstanceAuthSupport(scheme, inst); fail != "" {
+			return provider.AuthScheme{}, fail
+		}
+		return scheme, ""
+	}
+
+	if fail := checkInstanceAuthSupport(caps.AuthScheme, inst); fail != "" {
+		return provider.AuthScheme{}, fail
+	}
+	return caps.AuthScheme, ""
+}
+
+func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) provider.FailReason {
+	instAuth := inst.Auth
 	switch adapterScheme.Kind {
 	case provider.AuthKindBearer:
 		switch instAuth.Kind {
-		case "", "api_key", string(provider.AuthKindBearer):
-			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme)); err != nil {
+		case "", provider.InstanceAuthAPIKey, string(provider.AuthKindBearer):
+			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
 				return provider.FailInternal
 			}
 			return ""
@@ -958,17 +1040,30 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, instAuth Instan
 		}
 	case provider.AuthKindHeader:
 		switch instAuth.Kind {
-		case "", "api_key":
-			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme)); err != nil {
+		case "", provider.InstanceAuthAPIKey:
+			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
 				return provider.FailInternal
 			}
 			return ""
 		default:
 			return provider.FailUnsupported
 		}
+	case provider.AuthKindGoogleAccessToken:
+		if instAuth.Kind != string(provider.AuthKindGoogleAccessToken) {
+			return provider.FailUnsupported
+		}
+		if qp := inst.Options[provider.OptionQuotaProject]; qp != "" {
+			if err := egress.ValidateQuotaProject(qp); err != nil {
+				return provider.FailInvalidRequest
+			}
+		}
+		if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
+			return provider.FailInternal
+		}
+		return ""
 	case provider.AuthKindNone:
 		if instAuth.Kind == "" || instAuth.Kind == string(provider.AuthKindNone) {
-			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme)); err != nil {
+			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
 				return provider.FailInternal
 			}
 			return ""
@@ -977,6 +1072,18 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, instAuth Instan
 	default:
 		return provider.FailUnsupported
 	}
+}
+
+func isPreCallEgressError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return egress.IsAuthError(err) ||
+		egress.IsCredentialUnavailable(err) ||
+		egress.IsInvalidPlacement(err) ||
+		egress.IsSchemeNotAllowed(err) ||
+		egress.IsInvalidEndpoint(err) ||
+		egress.IsBlockedDestination(err)
 }
 
 func buildModelRequest(evalID string, compiled *spec.Compiled, selectedFields []provider.InputField) provider.ModelRequest {

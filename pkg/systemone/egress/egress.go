@@ -144,6 +144,16 @@ func IsInvalidPlacement(err error) bool {
 // maxPlacementHeaderNameBytes bounds custom API-key header names declared by adapters.
 const maxPlacementHeaderNameBytes = 128
 
+// HeaderQuotaProject is the canonical HTTP header name carrying the GCP billing
+// / quota project ID on keyless OAuth/ADC bearer requests (PV3 brief Addendum B
+// §§B3, B5). It is reserved so adapters cannot set or override it independently.
+const HeaderQuotaProject = "X-Goog-User-Project"
+
+const (
+	minGCPProjectIDLen = 6
+	maxGCPProjectIDLen = 30
+)
+
 // reservedPlacementHeaders lists lowercased hop-by-hop, framing, routing,
 // cookie, and bearer/proxy-auth HTTP header names that WithCredentialPlacement
 // must never overwrite or use as an API-key header.
@@ -174,24 +184,66 @@ var reservedPlacementHeaders = map[string]struct{}{
 	"x-forwarded-for":     {},
 	"x-forwarded-host":    {},
 	"x-forwarded-proto":   {},
+	"x-goog-user-project": {},
 }
 
 // Placement specifies where egress attaches the per-request credential inside
 // RoundTrip. Zero value defaults to Bearer (Authorization: Bearer <token>).
 // HeaderName comes from an adapter's declared Capabilities.AuthScheme, never
-// from admin or untrusted input, and is validated at construction.
+// from admin or untrusted input, and is validated at construction. QuotaProject
+// is attached as X-Goog-User-Project solely on ADC Bearer placement and is
+// validated against the GCP project-ID grammar.
 type Placement struct {
-	Kind       provider.AuthKind
-	HeaderName string
+	Kind         provider.AuthKind
+	HeaderName   string
+	QuotaProject string
 }
 
 // BearerPlacement attaches the credential as "Authorization: Bearer <token>".
 var BearerPlacement = Placement{Kind: provider.AuthKindBearer}
 
+// ADCBearerPlacement constructs a Bearer Placement for Google OAuth/ADC access
+// tokens, optionally attaching "X-Goog-User-Project: <quotaProject>" when
+// quotaProject is non-empty.
+func ADCBearerPlacement(quotaProject string) Placement {
+	return Placement{Kind: provider.AuthKindBearer, QuotaProject: quotaProject}
+}
+
 // HeaderPlacement constructs a Placement that attaches the credential as
 // "<headerName>: <token>" instead of Authorization.
 func HeaderPlacement(headerName string) Placement {
 	return Placement{Kind: provider.AuthKindHeader, HeaderName: headerName}
+}
+
+// ValidateQuotaProject checks that projectID conforms to the GCP project-ID
+// grammar (6..30 characters: lowercase ASCII letter, followed by lowercase
+// ASCII letters/digits/hyphens, ending with a lowercase ASCII letter or digit).
+// Returned errors are content-free and never echo projectID.
+func ValidateQuotaProject(projectID string) error {
+	if !isGCPProjectID(projectID) {
+		return fmt.Errorf("%w: quota project must be a valid GCP project ID", ErrInvalidPlacement)
+	}
+	return nil
+}
+
+func isGCPProjectID(s string) bool {
+	if len(s) < minGCPProjectIDLen || len(s) > maxGCPProjectIDLen {
+		return false
+	}
+	if s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	last := s[len(s)-1]
+	if !((last >= 'a' && last <= 'z') || (last >= '0' && last <= '9')) {
+		return false
+	}
+	for i := 1; i < len(s)-1; i++ {
+		b := s[i]
+		if !((b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateHeaderName verifies that name is a valid, non-reserved RFC 7230 token
@@ -221,8 +273,19 @@ func normalizePlacement(p Placement) (Placement, error) {
 		if p.HeaderName != "" {
 			return Placement{}, fmt.Errorf("%w: bearer placement must not specify a header name", ErrInvalidPlacement)
 		}
-		return BearerPlacement, nil
+		if p.QuotaProject != "" {
+			if err := ValidateQuotaProject(p.QuotaProject); err != nil {
+				return Placement{}, err
+			}
+		}
+		return Placement{
+			Kind:         provider.AuthKindBearer,
+			QuotaProject: p.QuotaProject,
+		}, nil
 	case provider.AuthKindHeader:
+		if p.QuotaProject != "" {
+			return Placement{}, fmt.Errorf("%w: header placement must not specify a quota project", ErrInvalidPlacement)
+		}
 		if err := ValidateHeaderName(p.HeaderName); err != nil {
 			return Placement{}, err
 		}
@@ -233,6 +296,9 @@ func normalizePlacement(p Placement) (Placement, error) {
 	case provider.AuthKindNone:
 		if p.HeaderName != "" {
 			return Placement{}, fmt.Errorf("%w: none placement must not specify a header name", ErrInvalidPlacement)
+		}
+		if p.QuotaProject != "" {
+			return Placement{}, fmt.Errorf("%w: none placement must not specify a quota project", ErrInvalidPlacement)
 		}
 		return Placement{Kind: provider.AuthKindNone}, nil
 	default:
@@ -456,6 +522,7 @@ func (rt *egressRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 
 	outReq := req.Clone(req.Context())
+	outReq.Header.Del(HeaderQuotaProject)
 	switch rt.placement.Kind {
 	case provider.AuthKindNone:
 		outReq.Header.Del("Authorization")
@@ -464,6 +531,9 @@ func (rt *egressRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		outReq.Header.Set(rt.placement.HeaderName, token)
 	default:
 		outReq.Header.Set("Authorization", "Bearer "+token)
+		if rt.placement.QuotaProject != "" {
+			outReq.Header.Set(HeaderQuotaProject, rt.placement.QuotaProject)
+		}
 	}
 
 	resp, err := transport.RoundTrip(outReq)

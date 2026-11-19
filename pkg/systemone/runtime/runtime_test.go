@@ -2136,7 +2136,10 @@ func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
 		{name: "none_adapter_with_empty_inst_auth", adapterScheme: provider.AuthNone, instAuthKind: "", wantFail: ""},
 		{name: "none_adapter_with_none_inst_auth", adapterScheme: provider.AuthNone, instAuthKind: "none", wantFail: ""},
 		{name: "none_adapter_with_api_key_inst_auth_rejected", adapterScheme: provider.AuthNone, instAuthKind: "api_key", wantFail: provider.FailUnsupported},
-		{name: "oauth_adapter_rejected_unsupported", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleAccessToken}, instAuthKind: "google_access_token", wantFail: provider.FailUnsupported},
+		{name: "google_access_token_adapter_with_matching_inst_auth", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleAccessToken, Scopes: []string{provider.GoogleScopeCloudPlatform}}, instAuthKind: "google_access_token", wantFail: ""},
+		{name: "google_access_token_adapter_with_api_key_rejected", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleAccessToken}, instAuthKind: "api_key", wantFail: provider.FailUnsupported},
+		{name: "google_id_token_adapter_rejected_unsupported", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindGoogleIDToken}, instAuthKind: "google_id_token", wantFail: provider.FailUnsupported},
+		{name: "azure_entra_adapter_rejected_unsupported", adapterScheme: provider.AuthScheme{Kind: provider.AuthKindAzureEntra}, instAuthKind: "azure_entra", wantFail: provider.FailUnsupported},
 	}
 
 	for _, tc := range cases {
@@ -2599,3 +2602,357 @@ func TestRuntime_TypeSafeBearerAndDefaultEndpointRegression(t *testing.T) {
 		},
 	}, gotReqs)
 }
+
+func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.T) {
+	const (
+		canaryAPIKey = "AIzaSy-fake-key-CANARY-matrix"
+		canaryToken  = "fake-adc-token-CANARY-matrix"
+	)
+
+	binSpec := `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
+
+	type wireCall struct {
+		authHeader   string
+		googKey      string
+		quotaProject string
+	}
+
+	var (
+		mu        sync.Mutex
+		wireCalls []wireCall
+	)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		wireCalls = append(wireCalls, wireCall{
+			authHeader:   r.Header.Get("Authorization"),
+			googKey:      r.Header.Get("x-goog-api-key"),
+			quotaProject: r.Header.Get("x-goog-user-project"),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	adapter := newFakeAdapter(func(ctx context.Context, tr provider.Transport, inst provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, inst.Endpoint+"/v1beta/decisions", strings.NewReader(`{}`))
+		if err != nil {
+			return provider.ModelResult{}, err
+		}
+		resp, err := tr.Do(req)
+		if err != nil {
+			return provider.ModelResult{}, err
+		}
+		_ = resp.Body.Close()
+		dist, val, _, _ := provider.BinaryDistribution(0.9)
+		return provider.ModelResult{
+			HTTPStatus: resp.StatusCode,
+			Answers: map[string]provider.Answer{
+				"q1": {QuestionID: "q1", Primitive: spec.PrimitiveBinary, Status: provider.AnswerStatusAnswered, Bool: val, Distribution: dist},
+			},
+		}, nil
+	})
+	adapter.name = "multi-auth-gemini"
+	adapter.caps.AuthScheme = provider.AuthScheme{Kind: provider.AuthKindHeader, HeaderName: "x-goog-api-key"}
+	adapter.caps.SupportedAuth = map[string]provider.AuthScheme{
+		"api_key": {
+			Kind:       provider.AuthKindHeader,
+			HeaderName: "x-goog-api-key",
+		},
+		"google_access_token": {
+			Kind:   provider.AuthKindGoogleAccessToken,
+			Scopes: []string{provider.GoogleScopeCloudPlatform},
+		},
+	}
+
+	reg := provider.NewRegistry()
+	reg.MustRegister(adapter)
+
+	var (
+		credCalls  int
+		tokenCalls int
+		gotScopes  []string
+	)
+	rt := runtime.New(
+		runtime.Config{
+			Registry: reg,
+			Credentials: func(_ context.Context, inst runtime.Instance) (string, error) {
+				credCalls++
+				return canaryAPIKey, nil
+			},
+			TokenSource: func(_ context.Context, inst runtime.Instance) (string, error) {
+				tokenCalls++
+				gotScopes = append([]string(nil), inst.Auth.Scopes...)
+				return canaryToken, nil
+			},
+		},
+		runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+	)
+	defer rt.CloseIdleConnections()
+
+	resetCounters := func() {
+		mu.Lock()
+		wireCalls = nil
+		mu.Unlock()
+		credCalls = 0
+		tokenCalls = 0
+		gotScopes = nil
+	}
+
+	t.Run("api_key_selects_header_and_never_sends_quota_project", func(t *testing.T) {
+		resetCounters()
+		inst := runtime.Instance{
+			ID:       "inst-1",
+			Name:     "gem-key",
+			Revision: 1,
+			Adapter:  "multi-auth-gemini",
+			Model:    "gemini-decision-1",
+			Endpoint: srv.URL,
+			Auth:     runtime.InstanceAuth{Kind: "api_key", SecretName: "systemone.instance.inst-1"},
+			Options:  map[string]string{provider.OptionQuotaProject: "ignored-on-api-key"},
+			Enabled:  true,
+		}
+		dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hi"), runtime.EvalOptions{Instance: &inst})
+		require.NoError(t, err)
+		assert.True(t, dec.Bool)
+		assert.Equal(t, 1, credCalls)
+		assert.Equal(t, 0, tokenCalls)
+		require.Len(t, wireCalls, 1)
+		assert.Equal(t, canaryAPIKey, wireCalls[0].googKey)
+		assert.Empty(t, wireCalls[0].authHeader)
+		assert.Empty(t, wireCalls[0].quotaProject, "quota_project must never be sent on api_key requests")
+	})
+
+	t.Run("google_access_token_with_quota_project_selects_bearer_and_defaults_scopes", func(t *testing.T) {
+		resetCounters()
+		inst := runtime.Instance{
+			ID:       "inst-2",
+			Name:     "gem-adc-qp",
+			Revision: 1,
+			Adapter:  "multi-auth-gemini",
+			Model:    "gemini-decision-1",
+			Endpoint: srv.URL,
+			Auth:     runtime.InstanceAuth{Kind: "google_access_token"},
+			Options:  map[string]string{provider.OptionQuotaProject: "paid-gemini-proj-42"},
+			Enabled:  true,
+		}
+		dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hi"), runtime.EvalOptions{Instance: &inst})
+		require.NoError(t, err)
+		assert.True(t, dec.Bool)
+		assert.Equal(t, 0, credCalls)
+		assert.Equal(t, 1, tokenCalls)
+		assert.Equal(t, []string{provider.GoogleScopeCloudPlatform}, gotScopes)
+		require.Len(t, wireCalls, 1)
+		assert.Equal(t, "Bearer "+canaryToken, wireCalls[0].authHeader)
+		assert.Equal(t, "paid-gemini-proj-42", wireCalls[0].quotaProject)
+		assert.Empty(t, wireCalls[0].googKey)
+	})
+
+	t.Run("google_access_token_without_quota_project_omits_header", func(t *testing.T) {
+		resetCounters()
+		inst := runtime.Instance{
+			ID:       "inst-3",
+			Name:     "gem-adc-no-qp",
+			Revision: 1,
+			Adapter:  "multi-auth-gemini",
+			Model:    "gemini-decision-1",
+			Endpoint: srv.URL,
+			Auth:     runtime.InstanceAuth{Kind: "google_access_token", Scopes: []string{provider.GoogleScopeCloudPlatform}},
+			Enabled:  true,
+		}
+		dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hi"), runtime.EvalOptions{Instance: &inst})
+		require.NoError(t, err)
+		assert.True(t, dec.Bool)
+		assert.Equal(t, 0, credCalls)
+		assert.Equal(t, 1, tokenCalls)
+		require.Len(t, wireCalls, 1)
+		assert.Equal(t, "Bearer "+canaryToken, wireCalls[0].authHeader)
+		assert.Empty(t, wireCalls[0].quotaProject)
+		assert.Empty(t, wireCalls[0].googKey)
+	})
+
+	for _, badKind := range []string{"bearer", "none", "google_id_token", "azure_entra", "custom_kind"} {
+		t.Run("unsupported_kind_"+badKind, func(t *testing.T) {
+			resetCounters()
+			inst := runtime.Instance{
+				ID:       "inst-bad-" + badKind,
+				Name:     "gem-bad",
+				Revision: 1,
+				Adapter:  "multi-auth-gemini",
+				Model:    "gemini-decision-1",
+				Endpoint: srv.URL,
+				Auth:     runtime.InstanceAuth{Kind: badKind},
+				Enabled:  true,
+			}
+			_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hi"), runtime.EvalOptions{Instance: &inst})
+			require.Error(t, err)
+			eval, ok := runtime.EvaluationFrom(err)
+			require.True(t, ok)
+			assert.Equal(t, runtime.ClassFailed, eval.Class)
+			assert.Equal(t, string(provider.FailUnsupported), eval.Reason)
+			assert.Empty(t, eval.Attempts, "pre-call unsupported auth must make 0 attempts")
+			assert.Empty(t, wireCalls, "must make 0 provider HTTP requests")
+			assert.Equal(t, 0, credCalls)
+			assert.Equal(t, 0, tokenCalls)
+		})
+	}
+
+	t.Run("invalid_quota_project_fails_pre_call_invalid_request", func(t *testing.T) {
+		resetCounters()
+		inst := runtime.Instance{
+			ID:       "inst-bad-qp",
+			Name:     "gem-bad-qp",
+			Revision: 1,
+			Adapter:  "multi-auth-gemini",
+			Model:    "gemini-decision-1",
+			Endpoint: srv.URL,
+			Auth:     runtime.InstanceAuth{Kind: "google_access_token"},
+			Options:  map[string]string{provider.OptionQuotaProject: "INVALID_PROJECT!"},
+			Enabled:  true,
+		}
+		_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hi"), runtime.EvalOptions{Instance: &inst})
+		require.Error(t, err)
+		eval, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, eval.Class)
+		assert.Equal(t, string(provider.FailInvalidRequest), eval.Reason)
+		assert.Empty(t, eval.Attempts)
+		assert.Empty(t, wireCalls)
+	})
+}
+
+func TestRuntime_TransportCacheKeyIncludesQuotaProjectAndExcludesToken(t *testing.T) {
+	binSpec := `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
+
+	type wireSnap struct {
+		auth string
+		qp   string
+	}
+	var (
+		mu      sync.Mutex
+		wires   []wireSnap
+		seenTrs []provider.Transport
+		tokSeq  int
+	)
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		wires = append(wires, wireSnap{
+			auth: r.Header.Get("Authorization"),
+			qp:   r.Header.Get("X-Goog-User-Project"),
+		})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	base := newFakeAdapter(func(ctx context.Context, tr provider.Transport, inst provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+		mu.Lock()
+		seenTrs = append(seenTrs, tr)
+		mu.Unlock()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, inst.Endpoint+"/v1beta/decisions", strings.NewReader(`{}`))
+		if err != nil {
+			return provider.ModelResult{}, err
+		}
+		resp, err := tr.Do(req)
+		if err != nil {
+			return provider.ModelResult{}, err
+		}
+		_ = resp.Body.Close()
+		dist, val, _, _ := provider.BinaryDistribution(0.9)
+		return provider.ModelResult{
+			HTTPStatus: resp.StatusCode,
+			Answers: map[string]provider.Answer{
+				"q1": {QuestionID: "q1", Primitive: spec.PrimitiveBinary, Status: provider.AnswerStatusAnswered, Bool: val, Distribution: dist},
+			},
+		}, nil
+	})
+	base.name = "adc-cache-test"
+	base.caps.SupportedAuth = map[string]provider.AuthScheme{
+		"google_access_token": {
+			Kind:   provider.AuthKindGoogleAccessToken,
+			Scopes: []string{provider.GoogleScopeCloudPlatform},
+		},
+	}
+
+	reg := provider.NewRegistry()
+	reg.MustRegister(base)
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry: reg,
+			TokenSource: func(_ context.Context, _ runtime.Instance) (string, error) {
+				mu.Lock()
+				tokSeq++
+				tok := "fake-adc-token-CANARY-" + string(rune('0'+tokSeq))
+				mu.Unlock()
+				return tok, nil
+			},
+		},
+		runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+	)
+	defer rt.CloseIdleConnections()
+
+	makeInst := func(qp string) runtime.Instance {
+		var opts map[string]string
+		if qp != "" {
+			opts = map[string]string{provider.OptionQuotaProject: qp}
+		}
+		return runtime.Instance{
+			ID:       "inst-adc-cache",
+			Name:     "gem-adc",
+			Revision: 1,
+			Adapter:  "adc-cache-test",
+			Model:    "gemini-decision-1",
+			Endpoint: srv.URL,
+			Auth: runtime.InstanceAuth{
+				Kind:   "google_access_token",
+				Scopes: []string{provider.GoogleScopeCloudPlatform},
+			},
+			Options: opts,
+			Enabled: true,
+		}
+	}
+
+	// Call 1 & Call 2: same quotaProject, rotating token -> MUST reuse identical provider.Transport pointer while sending rotated token!
+	_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("one"), runtime.EvalOptions{Instance: ptr(makeInst("project-alpha-1"))})
+	require.NoError(t, err)
+	_, err = rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("two"), runtime.EvalOptions{Instance: ptr(makeInst("project-alpha-1"))})
+	require.NoError(t, err)
+
+	// Call 3: different quotaProject -> MUST allocate distinct provider.Transport!
+	_, err = rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("three"), runtime.EvalOptions{Instance: ptr(makeInst("project-bravo-2"))})
+	require.NoError(t, err)
+
+	// Call 4: empty quotaProject -> MUST allocate distinct provider.Transport with no header!
+	_, err = rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("four"), runtime.EvalOptions{Instance: ptr(makeInst(""))})
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, seenTrs, 4)
+	assert.Same(t, seenTrs[0], seenTrs[1], "rotating access token must NOT bust transport cache")
+	assert.NotSame(t, seenTrs[0], seenTrs[2], "different quota_project must isolate transport cache")
+	assert.NotSame(t, seenTrs[0], seenTrs[3], "empty vs non-empty quota_project must isolate transport cache")
+	assert.NotSame(t, seenTrs[2], seenTrs[3])
+
+	require.Equal(t, []wireSnap{
+		{auth: "Bearer fake-adc-token-CANARY-1", qp: "project-alpha-1"},
+		{auth: "Bearer fake-adc-token-CANARY-2", qp: "project-alpha-1"},
+		{auth: "Bearer fake-adc-token-CANARY-3", qp: "project-bravo-2"},
+		{auth: "Bearer fake-adc-token-CANARY-4", qp: ""},
+	}, wires)
+}
+
+func ptr[T any](v T) *T { return &v }

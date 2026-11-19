@@ -133,6 +133,23 @@ const (
 	AuthKindGoogleAccessToken AuthKind = "google_access_token"
 	AuthKindGoogleIDToken     AuthKind = "google_id_token"
 	AuthKindAzureEntra        AuthKind = "azure_entra"
+
+	// InstanceAuthAPIKey is the canonical instance auth.kind identifier for
+	// API-key credentials in Capabilities.SupportedAuth.
+	InstanceAuthAPIKey = "api_key"
+
+	// GoogleScopePrefix is the required URL prefix for Google OAuth2 scopes on
+	// google_access_token System One instances (PV3 brief Addendum B §B3).
+	GoogleScopePrefix = "https://www.googleapis.com/auth/"
+
+	// GoogleScopeCloudPlatform is the default and minimum OAuth2 scope for
+	// keyless ADC access to the Gemini Developer API (PV3 brief Addendum B §B3).
+	GoogleScopeCloudPlatform = "https://www.googleapis.com/auth/cloud-platform"
+
+	// OptionQuotaProject is the non-secret instance option key carrying the GCP
+	// project ID sent as x-goog-user-project on ADC bearer requests (PV3 brief
+	// Addendum B §B3).
+	OptionQuotaProject = "quota_project"
 )
 
 // AuthScheme describes the transport authentication scheme an adapter expects
@@ -182,6 +199,7 @@ type Capabilities struct {
 	Abstains               bool                       `json:"abstains"`
 	SideEffectFree         bool                       `json:"side_effect_free"`
 	AuthScheme             AuthScheme                 `json:"auth_scheme"`
+	SupportedAuth          map[string]AuthScheme      `json:"supported_auth,omitempty"`
 	ProviderRetention      string                     `json:"provider_retention,omitempty"`
 }
 

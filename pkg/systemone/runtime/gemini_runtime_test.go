@@ -470,3 +470,207 @@ func TestRuntime_GeminiDecisionsAdapter_ProvenanceAndHeaderPlacementAcrossOutcom
 		assertDecision3Provenance(t, dec.Eval, &logBuf)
 	})
 }
+
+func TestRuntime_GeminiDecisionsAdapter_ADCBearerErrorMappingAndCanaryRedaction(t *testing.T) {
+	const (
+		canaryToken  = "fake-adc-token-CANARY-gemini-rt"
+		quotaProject = "paid-gemini-proj-99"
+	)
+
+	binSpec := `{
+		"version": 1,
+		"form": "portable",
+		"questions": [
+			{"id": "is_damaged", "type": "binary", "instructions": "Does ` + "`probe.text`" + ` describe damage?"}
+		],
+		"output": {"question": "is_damaged"}
+	}`
+	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
+
+	var (
+		mu       sync.Mutex
+		hits     int
+		nextCode int
+		nextBody string
+		lastHdrs http.Header
+	)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		mu.Lock()
+		hits++
+		lastHdrs = r.Header.Clone()
+		code := nextCode
+		body := nextBody
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	reg := provider.NewRegistry()
+	require.NoError(t, geminidecisions.Register(reg))
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	var tokenFn func(ctx context.Context, inst runtime.Instance) (string, error)
+	inst := runtime.Instance{
+		ID:       "inst-gemini-adc-1",
+		Name:     "gemini-adc",
+		Adapter:  geminidecisions.AdapterName,
+		Model:    "gemini-decision-1",
+		Endpoint: srv.URL,
+		Auth: runtime.InstanceAuth{
+			Kind:   "google_access_token",
+			Scopes: []string{provider.GoogleScopeCloudPlatform},
+		},
+		Options:  map[string]string{provider.OptionQuotaProject: quotaProject},
+		Enabled:  true,
+		Revision: 1,
+	}
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry:  reg,
+			Instances: runtime.StaticInstances(inst),
+			TokenSource: func(ctx context.Context, inst runtime.Instance) (string, error) {
+				return tokenFn(ctx, inst)
+			},
+			Logger: logger,
+		},
+		runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+	)
+	defer rt.CloseIdleConnections()
+
+	assertNoCanaryLeak := func(t *testing.T, eval *runtime.Evaluation, evalErr error) {
+		t.Helper()
+		if evalErr != nil {
+			assert.NotContains(t, evalErr.Error(), canaryToken)
+		}
+		if eval != nil {
+			raw, mErr := json.Marshal(eval)
+			require.NoError(t, mErr)
+			assert.NotContains(t, string(raw), canaryToken)
+		}
+		assert.NotContains(t, logBuf.String(), canaryToken)
+	}
+
+	t.Run("success_adc_bearer_and_quota_project_wire_headers", func(t *testing.T) {
+		mu.Lock()
+		hits = 0
+		nextCode = http.StatusOK
+		nextBody = `{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"usage":{"total_input_tokens":40,"total_output_tokens":0}}`
+		mu.Unlock()
+		tokenFn = func(context.Context, runtime.Instance) (string, error) {
+			return canaryToken, nil
+		}
+
+		dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("cracked glass"), runtime.EvalOptions{Consumer: "probe"})
+		require.NoError(t, err)
+		assert.True(t, dec.Bool)
+		require.NotNil(t, dec.Eval)
+		require.Len(t, dec.Eval.Attempts, 1)
+		assert.Equal(t, 1, dec.Eval.Attempts[0].Requests)
+		assert.Equal(t, "gemini-decision-1", dec.Eval.ConfiguredModel)
+		assert.Empty(t, dec.Eval.ResolvedModel)
+		assert.True(t, dec.Eval.HasModelUnreported())
+
+		mu.Lock()
+		gotHits := hits
+		hdrs := lastHdrs.Clone()
+		mu.Unlock()
+		assert.Equal(t, 1, gotHits)
+		assert.Equal(t, "Bearer "+canaryToken, hdrs.Get("Authorization"))
+		assert.Equal(t, quotaProject, hdrs.Get("X-Goog-User-Project"))
+		assert.Empty(t, hdrs.Get("x-goog-api-key"))
+		for name, vals := range hdrs {
+			if strings.EqualFold(name, "Authorization") {
+				continue
+			}
+			for _, v := range vals {
+				assert.NotContains(t, v, canaryToken)
+			}
+		}
+		assertNoCanaryLeak(t, dec.Eval, nil)
+	})
+
+	t.Run("pre_call_token_auth_error_records_zero_requests", func(t *testing.T) {
+		mu.Lock()
+		hits = 0
+		mu.Unlock()
+		tokenFn = func(context.Context, runtime.Instance) (string, error) {
+			return "", egress.ErrAuth
+		}
+
+		_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("cracked glass"), runtime.EvalOptions{Consumer: "probe"})
+		require.Error(t, err)
+		eval, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, eval.Class)
+		assert.Equal(t, string(provider.FailAuth), eval.Reason)
+		require.Len(t, eval.Attempts, 1)
+		assert.Equal(t, 0, eval.Attempts[0].Requests, "pre-call auth failure must record requests=0")
+		assert.Empty(t, eval.Attempts[0].HTTPStatusClass)
+
+		mu.Lock()
+		gotHits := hits
+		mu.Unlock()
+		assert.Equal(t, 0, gotHits, "provider must receive 0 requests on pre-call credential failure")
+		assertNoCanaryLeak(t, eval, err)
+	})
+
+	t.Run("pre_call_token_unavailable_error_records_zero_requests_and_scrubs_canary", func(t *testing.T) {
+		mu.Lock()
+		hits = 0
+		mu.Unlock()
+		tokenFn = func(context.Context, runtime.Instance) (string, error) {
+			return "", io.ErrUnexpectedEOF
+		}
+
+		_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("cracked glass"), runtime.EvalOptions{Consumer: "probe"})
+		require.Error(t, err)
+		eval, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, eval.Class)
+		assert.Equal(t, string(provider.FailUnavailable), eval.Reason)
+		require.Len(t, eval.Attempts, 1)
+		assert.Equal(t, 0, eval.Attempts[0].Requests, "pre-call token source outage must record requests=0")
+
+		mu.Lock()
+		gotHits := hits
+		mu.Unlock()
+		assert.Equal(t, 0, gotHits)
+		assertNoCanaryLeak(t, eval, err)
+	})
+
+	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run("provider_"+http.StatusText(statusCode)+"_maps_to_auth_with_one_request", func(t *testing.T) {
+			mu.Lock()
+			hits = 0
+			nextCode = statusCode
+			nextBody = `{"error":{"code":403,"message":"API not enabled on quota project; token ` + canaryToken + `","status":"PERMISSION_DENIED"}}`
+			mu.Unlock()
+			tokenFn = func(context.Context, runtime.Instance) (string, error) {
+				return canaryToken, nil
+			}
+
+			_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("cracked glass"), runtime.EvalOptions{Consumer: "probe"})
+			require.Error(t, err)
+			eval, ok := runtime.EvaluationFrom(err)
+			require.True(t, ok)
+			assert.Equal(t, runtime.ClassFailed, eval.Class)
+			assert.Equal(t, string(provider.FailAuth), eval.Reason)
+			require.Len(t, eval.Attempts, 1)
+			assert.Equal(t, 1, eval.Attempts[0].Requests, "provider 401/403 must record requests=1")
+			assert.Equal(t, "4xx", eval.Attempts[0].HTTPStatusClass)
+
+			mu.Lock()
+			gotHits := hits
+			mu.Unlock()
+			assert.Equal(t, 1, gotHits)
+			assertNoCanaryLeak(t, eval, err)
+		})
+	}
+}

@@ -803,9 +803,22 @@ func TestEgress_RejectsInvalidAndReservedCredentialPlacements(t *testing.T) {
 		{name: "reserved_via", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Via"}},
 		{name: "reserved_forwarded", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Forwarded"}},
 		{name: "reserved_x_forwarded_for", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "X-Forwarded-For"}},
+		{name: "reserved_x_goog_user_project", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-goog-user-project"}},
+		{name: "reserved_x_goog_user_project_canonical", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "X-Goog-User-Project"}},
 		{name: "bearer_with_header_name", placement: Placement{Kind: provider.AuthKindBearer, HeaderName: "x-goog-api-key"}},
 		{name: "empty_kind_with_header_name", placement: Placement{Kind: "", HeaderName: "x-goog-api-key"}},
 		{name: "none_with_header_name", placement: Placement{Kind: provider.AuthKindNone, HeaderName: "x-goog-api-key"}},
+		{name: "header_with_quota_project", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-goog-api-key", QuotaProject: "valid-project-123"}},
+		{name: "none_with_quota_project", placement: Placement{Kind: provider.AuthKindNone, QuotaProject: "valid-project-123"}},
+		{name: "bearer_quota_project_too_short", placement: ADCBearerPlacement("abcde")},
+		{name: "bearer_quota_project_too_long", placement: ADCBearerPlacement("a" + strings.Repeat("b", 30))},
+		{name: "bearer_quota_project_starts_with_digit", placement: ADCBearerPlacement("1project")},
+		{name: "bearer_quota_project_starts_with_hyphen", placement: ADCBearerPlacement("-project")},
+		{name: "bearer_quota_project_ends_with_hyphen", placement: ADCBearerPlacement("project-")},
+		{name: "bearer_quota_project_uppercase", placement: ADCBearerPlacement("MyProject")},
+		{name: "bearer_quota_project_underscore", placement: ADCBearerPlacement("my_project")},
+		{name: "bearer_quota_project_colon", placement: ADCBearerPlacement("google.com:my-proj")},
+		{name: "bearer_quota_project_crlf_canary", placement: ADCBearerPlacement("proj-12\r\nX-Evil: " + badHeaderCanary)},
 		{name: "unsupported_google_access_token", placement: Placement{Kind: provider.AuthKindGoogleAccessToken}},
 		{name: "unsupported_unknown_kind", placement: Placement{Kind: provider.AuthKind("digest_" + badHeaderCanary)}},
 	}
@@ -883,4 +896,121 @@ func TestEgress_ImportGuard(t *testing.T) {
 		}
 	}
 	require.Greater(t, nonTestCount, 0, "expected at least one non-test Go file")
+}
+
+func TestEgress_ADCBearerQuotaProjectPlacementAndCanaryIsolation(t *testing.T) {
+	const canaryToken = "fake-adc-token-CANARY-egress-001"
+	const quotaProject = "paid-gemini-proj-42"
+
+	var (
+		mu         sync.Mutex
+		gotHeaders http.Header
+		gotQuery   string
+		gotBody    []byte
+	)
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotHeaders = r.Header.Clone()
+		gotQuery = r.URL.RawQuery
+		gotBody = body
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer ts.Close()
+
+	t.Run("adc_bearer_with_quota_project_sets_authorization_and_user_project_only", func(t *testing.T) {
+		require.NoError(t, ValidateQuotaProject(quotaProject))
+		require.NoError(t, ValidateQuotaProject("abcdef"))
+		require.NoError(t, ValidateQuotaProject("a"+strings.Repeat("b", 28)+"9"))
+
+		client := NewClient(
+			StaticBearer(canaryToken),
+			WithCredentialPlacement(ADCBearerPlacement(quotaProject)),
+			WithLoopbackServerForTesting(ts.URL, ts.Client()),
+		)
+
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/v1beta/decisions", strings.NewReader(`{"model":"gemini-decision-1"}`))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		// Adapter-set x-goog-user-project must be overwritten/controlled solely by egress.
+		req.Header.Set("x-goog-user-project", "adapter-spoofed-proj")
+
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+
+		// Caller's original request must not have been mutated with token or quota project.
+		assert.Empty(t, req.Header.Get("Authorization"))
+		assert.Equal(t, "adapter-spoofed-proj", req.Header.Get("x-goog-user-project"))
+
+		mu.Lock()
+		hdrs := gotHeaders.Clone()
+		query := gotQuery
+		body := string(gotBody)
+		mu.Unlock()
+
+		assert.Equal(t, "Bearer "+canaryToken, hdrs.Get("Authorization"))
+		assert.Equal(t, []string{quotaProject}, hdrs.Values("X-Goog-User-Project"))
+		assert.Empty(t, hdrs.Get("x-goog-api-key"))
+		assert.Empty(t, query)
+		assert.NotContains(t, body, canaryToken)
+		for name, vals := range hdrs {
+			if strings.EqualFold(name, "Authorization") {
+				continue
+			}
+			for _, v := range vals {
+				assert.NotContains(t, v, canaryToken, "canary token leaked into header %s", name)
+			}
+		}
+	})
+
+	t.Run("adc_bearer_without_quota_project_omits_and_strips_user_project", func(t *testing.T) {
+		client := NewClient(
+			StaticBearer(canaryToken),
+			WithCredentialPlacement(ADCBearerPlacement("")),
+			WithLoopbackServerForTesting(ts.URL, ts.Client()),
+		)
+
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/v1beta/decisions", strings.NewReader(`{}`))
+		require.NoError(t, err)
+		req.Header.Set("x-goog-user-project", "adapter-spoofed-proj")
+
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+
+		mu.Lock()
+		hdrs := gotHeaders.Clone()
+		mu.Unlock()
+
+		assert.Equal(t, "Bearer "+canaryToken, hdrs.Get("Authorization"))
+		assert.Empty(t, hdrs.Values("X-Goog-User-Project"), "x-goog-user-project must be omitted when QuotaProject is unset and stripped if pre-set")
+		assert.Empty(t, hdrs.Get("x-goog-api-key"))
+	})
+
+	t.Run("header_placement_strips_any_adapter_set_user_project", func(t *testing.T) {
+		client := NewClient(
+			StaticBearer("AIzaSy-fake-key-canary"),
+			WithCredentialPlacement(HeaderPlacement("x-goog-api-key")),
+			WithLoopbackServerForTesting(ts.URL, ts.Client()),
+		)
+
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/v1beta/decisions", strings.NewReader(`{}`))
+		require.NoError(t, err)
+		req.Header.Set("x-goog-user-project", "adapter-spoofed-proj")
+
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+
+		mu.Lock()
+		hdrs := gotHeaders.Clone()
+		mu.Unlock()
+
+		assert.Equal(t, "AIzaSy-fake-key-canary", hdrs.Get("x-goog-api-key"))
+		assert.Empty(t, hdrs.Get("Authorization"))
+		assert.Empty(t, hdrs.Values("X-Goog-User-Project"))
+	})
 }
