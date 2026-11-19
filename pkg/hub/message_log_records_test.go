@@ -949,7 +949,10 @@ func TestMessageLog_UserNotification_DirectInbox_OneRecord(t *testing.T) {
 
 	t.Run("federated subscriber under write-deny with broker", func(t *testing.T) {
 		env := setupNotificationTest(t)
-		const userID = "fed-rec@example.org"
+		// Dot-free non-UUID so the publish topic matches the in-process bus's
+		// single-token wildcard subscription (user.*.messages) and exercises
+		// deliverToUser's userRecordLogged guard.
+		const userID = "fed-rec-user"
 		env.useUserSubscription(t, userID, "COMPLETED")
 		_ = env.startRealBrokerProxy(t)
 		writeDeny := func() bool { return true }
