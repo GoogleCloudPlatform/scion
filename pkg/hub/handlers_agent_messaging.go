@@ -4538,13 +4538,15 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 }
 
 // clearInboundClientEvent strips hub-minted trigger envelope markers
-// (StructuredMessage.Event and Metadata["system_category"]="trigger", along
-// with reserved metadata keys) on every client-, agent-, and broker-supplied
-// inbound path. Those markers are set exclusively by ApplyDispatchedEventEnvelope.
+// (StructuredMessage.Event and Metadata["system_category"]="trigger") on every
+// client-, agent-, and broker-supplied inbound path without prematurely
+// stripping artifacts.MessageMetadataKey before admitMessageArtifacts runs.
+// Full reserved-key stripping (messaging.StripReservedMetadata) still runs at
+// admitMessageArtifacts and every dispatch site.
 func clearInboundClientEvent(msg *messages.StructuredMessage) {
 	if msg != nil {
 		msg.Event = nil
-		msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
+		msg.Metadata = messaging.StripTriggerSystemCategory(msg.Metadata)
 	}
 }
 

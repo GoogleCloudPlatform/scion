@@ -198,14 +198,42 @@ func isReservedMetadataEntry(k, v string) bool {
 	if reservedMetadataKeys[k] {
 		return true
 	}
+	return isTriggerSystemCategoryEntry(k, v)
+}
+
+func isTriggerSystemCategoryEntry(k, v string) bool {
 	// system_category="trigger" is hub-minted exclusively by
 	// ApplyDispatchedEventEnvelope; client, agent, chat, and broker inbound
 	// callers may never supply it (non-trigger categories such as
 	// "port-forward" used by sciontool autoexpose remain allowed).
-	if k == "system_category" && strings.EqualFold(strings.TrimSpace(v), messages.SystemCategoryTrigger) {
-		return true
+	return k == "system_category" && strings.EqualFold(strings.TrimSpace(v), messages.SystemCategoryTrigger)
+}
+
+// StripTriggerSystemCategory returns md unchanged if it does not carry a
+// trigger system_category marker, otherwise a new map with that entry removed.
+// Unlike StripReservedMetadata, it leaves other keys (such as
+// artifacts.MessageMetadataKey) untouched so early ingress normalization can
+// run before admitMessageArtifacts inspects and admits caller artifact refs.
+// It never mutates md.
+func StripTriggerSystemCategory(md map[string]string) map[string]string {
+	hasTriggerCategory := false
+	for k, v := range md {
+		if isTriggerSystemCategoryEntry(k, v) {
+			hasTriggerCategory = true
+			break
+		}
 	}
-	return false
+	if !hasTriggerCategory {
+		return md
+	}
+	out := make(map[string]string, len(md)-1)
+	for k, v := range md {
+		if isTriggerSystemCategoryEntry(k, v) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // stripMetadataKeys returns md unchanged if it has none of keys, otherwise a

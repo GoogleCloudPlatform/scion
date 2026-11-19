@@ -124,6 +124,19 @@ func TestStripReservedMetadata_StripsTriggerSystemCategoryOnly(t *testing.T) {
 	outClean := StripReservedMetadata(clean)
 	assert.True(t, sameMap(clean, outClean), "non-trigger system_category must return same map unchanged")
 	assert.Equal(t, messages.SystemCategoryPortForward, outClean["system_category"])
+
+	// StripTriggerSystemCategory removes only system_category=trigger while
+	// leaving artifacts.MessageMetadataKey intact for admitMessageArtifacts.
+	withArtifactRef := map[string]string{
+		"artifact_refs":   `["scion://artifact/123"]`,
+		"system_category": " Trigger ",
+	}
+	outEarly := StripTriggerSystemCategory(withArtifactRef)
+	assert.False(t, sameMap(withArtifactRef, outEarly))
+	assert.Equal(t, map[string]string{"artifact_refs": `["scion://artifact/123"]`}, outEarly)
+	assert.Equal(t, " Trigger ", withArtifactRef["system_category"], "caller map must not be mutated")
+	assert.Nil(t, StripTriggerSystemCategory(nil))
+	assert.True(t, sameMap(clean, StripTriggerSystemCategory(clean)))
 }
 
 // sameMap reports whether a and b are backed by the same underlying map by

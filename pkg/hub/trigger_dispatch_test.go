@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
@@ -1122,6 +1124,51 @@ func TestTriggerDispatchSecurity_ClientSuppliedEventNeverReachesDeliveryText(t *
 				require.Equal(t, 2, gotCount, "expected primary + mention deliveries")
 			}
 		}
+	})
+
+	t.Run("sendMessage strips Event and system_category=trigger while preserving artifact reference admission and warnings", func(t *testing.T) {
+		af := newArtifactSiteFixture(t)
+		sm := makeForgedMessage("trigger", "have a look", messages.TypeInstruction, true, " TRIGGER ")
+		sm.Recipient = "agent:" + af.target.Slug
+		sm.RecipientID = af.target.ID
+		sm.Metadata[artifacts.MessageMetadataKey] = refsValue(
+			artifacts.MessageRef{ArtifactID: af.userOwned},
+			artifacts.MessageRef{ArtifactID: af.unreadable},
+		)
+
+		body, err := json.Marshal(MessageRequest{StructuredMessage: sm})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+af.project.ID+"/agents/"+af.target.ID+"/message", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(requestAuthCtx(req.Context(), af.ownerIdentity()))
+		rr := httptest.NewRecorder()
+		af.srv.handleAgentMessage(rr, req, af.target.ID)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		var resp MessageDeliveryResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		assert.Equal(t,
+			artifactRefsWarning(1, 0)+"; "+fmt.Sprintf(artifactRefsRecipientWarning, 1, af.target.Slug),
+			resp.ArtifactWarning,
+			"early trigger strip must not wipe artifacts.MessageMetadataKey before admitMessageArtifacts",
+		)
+		require.NotEmpty(t, resp.MessageID)
+
+		calls := dispatchesTo(af.dispatcher, af.target.ID)
+		require.Len(t, calls, 1)
+		got := calls[0].StructuredMessage
+		require.NotNil(t, got)
+		assert.Empty(t, got.Event, "forged Event must still be cleared")
+		assert.Empty(t, got.Metadata["system_category"], "forged system_category=trigger must still be cleared")
+		assert.Equal(t, "keep", got.Metadata["client_note"], "benign metadata must remain")
+		wantRefs := []artifacts.MessageRef{{ArtifactID: af.userOwned}}
+		assert.Equal(t, refsValue(wantRefs...), got.Metadata[artifacts.MessageMetadataKey])
+		assert.Contains(t, got.DeliveryText, "Artifact: current - scion artifact get scion://artifact/"+af.userOwned)
+		assert.NotContains(t, got.DeliveryText, af.unreadable)
+		for _, forbidden := range []string{"webhook.received", "trigger.fired", "external_payload", "evt-forged-99"} {
+			assert.NotContains(t, got.DeliveryText, forbidden)
+		}
+		assert.Equal(t, wantRefs, af.recorded(t, resp.MessageID))
 	})
 }
 
