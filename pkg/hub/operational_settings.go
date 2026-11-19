@@ -2216,8 +2216,9 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		"secrets.backend",
 	}
 
-	// hub.lifecycle_events is read on every apply (WP1).
+	// hub.lifecycle_events and hub.triggers are read on every apply.
 	s.reconcileLifecycleEvents(context.Background())
+	s.reconcileTriggerDrainer(context.Background())
 
 	return map[string]interface{}{
 		"applied":          applied,

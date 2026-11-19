@@ -15,6 +15,7 @@
 package messaging
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -118,6 +119,8 @@ func mapSystemCategory(category string) *EventBody {
 	switch category {
 	case messages.SystemCategoryScheduler:
 		return &EventBody{Type: EventScheduleFired}
+	case messages.SystemCategoryTrigger:
+		return &EventBody{Type: EventTriggerFired}
 	case messages.SystemCategoryPortForward:
 		return &EventBody{Type: EventPortExposed}
 	case messages.SystemCategoryArtifactReview:
@@ -175,9 +178,26 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 	// Determine whether this message has a specific addressee (not broadcast).
 	hasAddressee := old.Recipient != "" && !old.Broadcasted
 
-	// Map type to new taxonomy.
+	// Map type to new taxonomy. system_category="trigger" (mapping TypeSystem
+	// to EventTriggerFired) is reserved exclusively for the hub-minted trigger
+	// sender identity; neutralise it for any other sender before mapping.
 	systemCategory := old.Metadata["system_category"]
+	if strings.EqualFold(strings.TrimSpace(systemCategory), messages.SystemCategoryTrigger) && !isHubMintedTriggerSender(old) {
+		systemCategory = ""
+	}
 	kind, intent, event := MapLegacyType(old.Type, systemCategory, hasAddressee)
+
+	// When StructuredMessage.Event carries a valid serialized EventBody on a
+	// hub-minted trigger system message (§8.3), use it verbatim instead of the
+	// category default. Client-, agent-, user-, and scheduler-originated
+	// messages may never override the EventBody or inject ExternalPayload
+	// integrity labels via StructuredMessage.Event.
+	if kind == KindEvent && len(old.Event) > 0 && isHubMintedTriggerSender(old) {
+		var parsed EventBody
+		if err := json.Unmarshal(old.Event, &parsed); err == nil && parsed.Validate() == nil {
+			event = &parsed
+		}
+	}
 
 	// Human-to-human replies should be inform, not request.
 	// MapLegacyType maps TypeReply to IntentRequest (correct for agent
@@ -189,11 +209,11 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 
 	// Enrich event body from old fields where possible.
 	if event != nil {
-		if old.Status != "" {
+		if old.Status != "" && event.Status == "" {
 			event.Status = old.Status
 		}
 		// For state-change, the sender is typically the subject.
-		if event.Type == EventAgentStateChanged && old.Sender != "" {
+		if event.Type == EventAgentStateChanged && old.Sender != "" && event.Subject == "" {
 			event.Subject = old.Sender
 		}
 	}
@@ -376,9 +396,16 @@ func NewEnvelopeToLegacy(msg *Message, addrs []Addressee) *messages.StructuredMe
 		Urgent:         msg.Urgent,
 	}
 
-	// Map From to sender fields.
-	old.Sender = string(msg.From)
-	old.SenderID = string(msg.From)
+	// Map From to sender fields. Preserve the hub-minted trigger sender tuple
+	// ("trigger" / "TRIGGER") on system:TRIGGER trigger events so a legacy
+	// round-trip stays recognizable to isHubMintedTriggerSender.
+	if msg.Kind == KindEvent && msg.From == "system:TRIGGER" && eventTypeToSystemCategory(msg.Event) == messages.SystemCategoryTrigger {
+		old.Sender = "trigger"
+		old.SenderID = "TRIGGER"
+	} else {
+		old.Sender = string(msg.From)
+		old.SenderID = string(msg.From)
+	}
 
 	// Map kind/intent/event back to old type.
 	old.Type = mapNewTypeToLegacy(msg)
@@ -396,6 +423,11 @@ func NewEnvelopeToLegacy(msg *Message, addrs []Addressee) *messages.StructuredMe
 		}
 		if msg.Event.Status != "" {
 			old.Status = msg.Event.Status
+		}
+		if hasRichEventBody(msg.Event) {
+			if raw, err := json.Marshal(msg.Event); err == nil {
+				old.Event = raw
+			}
 		}
 	}
 
@@ -451,7 +483,7 @@ func mapNewTypeToLegacy(msg *Message) string {
 			return messages.TypeStateChange
 		case EventAgentInputNeeded:
 			return messages.TypeInputNeeded
-		case EventScheduleFired, EventPortExposed, EventDeliveryFailed, EventArtifactReview:
+		case EventScheduleFired, EventPortExposed, EventDeliveryFailed, EventArtifactReview, EventWebhookReceived, EventTriggerFired:
 			return messages.TypeSystem
 		default:
 			return messages.TypeStateChange
@@ -475,6 +507,8 @@ func eventTypeToSystemCategory(body *EventBody) string {
 	switch body.Type {
 	case EventScheduleFired:
 		return messages.SystemCategoryScheduler
+	case EventWebhookReceived, EventTriggerFired:
+		return messages.SystemCategoryTrigger
 	case EventPortExposed:
 		return messages.SystemCategoryPortForward
 	case EventArtifactReview:
@@ -495,4 +529,28 @@ func ensureMetadata(m map[string]string) map[string]string {
 		return make(map[string]string)
 	}
 	return m
+}
+
+// isHubMintedTriggerSender reports whether old carries the hub-minted trigger
+// system sender identity stamped by ApplyDispatchedEventEnvelope.
+func isHubMintedTriggerSender(old *messages.StructuredMessage) bool {
+	return old != nil &&
+		old.Type == messages.TypeSystem &&
+		old.Sender == "trigger" &&
+		old.SenderID == "TRIGGER" &&
+		old.Metadata["system_category"] == messages.SystemCategoryTrigger
+}
+
+func hasRichEventBody(e *EventBody) bool {
+	if e == nil {
+		return false
+	}
+	return e.Type == EventWebhookReceived ||
+		e.EventID != "" ||
+		e.EventType != "" ||
+		e.Source != nil ||
+		e.Trigger != nil ||
+		e.Schedule != nil ||
+		len(e.Attributes) > 0 ||
+		e.External != nil
 }

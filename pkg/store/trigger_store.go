@@ -217,6 +217,7 @@ type TriggerEventFilter struct {
 	SourceKind       string
 	SourceID         string
 	Status           string
+	Since            *time.Time
 	VisibleToAgentID string
 }
 
@@ -290,6 +291,7 @@ type TriggerStore interface {
 	CountPendingTriggerEvents(ctx context.Context, projectID string) (int, error)
 	MarkTriggerEventProcessed(ctx context.Context, id string, processedAt time.Time, matchCount, fireCount int) error
 	MarkTriggerEventFailed(ctx context.Context, id string, processedAt time.Time, errMsg string) error
+	ReconcileOrphanedPendingTriggerEvents(ctx context.Context, queueKind string, olderThan, now time.Time, errMsg string, limit int) (int, error)
 
 	// Trigger fires
 	ClaimTriggerFire(ctx context.Context, fire *TriggerFire) (claimed bool, existing *TriggerFire, err error)

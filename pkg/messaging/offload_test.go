@@ -104,6 +104,41 @@ func TestStripReservedMetadata_NewMapWhenReservedPresent(t *testing.T) {
 	assert.Equal(t, original, md)
 }
 
+func TestStripReservedMetadata_StripsTriggerSystemCategoryOnly(t *testing.T) {
+	for _, forgedVal := range []string{"trigger", "TRIGGER", " trigger\t"} {
+		md := map[string]string{
+			"foo":             "bar",
+			"system_category": forgedVal,
+		}
+		out := StripReservedMetadata(md)
+		assert.False(t, sameMap(md, out), "system_category=%q must return a distinct map", forgedVal)
+		assert.Equal(t, map[string]string{"foo": "bar"}, out)
+		assert.Equal(t, forgedVal, md["system_category"], "caller map must not be mutated")
+	}
+
+	// Non-trigger categories such as port-forward (used by sciontool autoexpose) stay untouched.
+	clean := map[string]string{
+		"foo":             "bar",
+		"system_category": messages.SystemCategoryPortForward,
+	}
+	outClean := StripReservedMetadata(clean)
+	assert.True(t, sameMap(clean, outClean), "non-trigger system_category must return same map unchanged")
+	assert.Equal(t, messages.SystemCategoryPortForward, outClean["system_category"])
+
+	// StripTriggerSystemCategory removes only system_category=trigger while
+	// leaving artifacts.MessageMetadataKey intact for admitMessageArtifacts.
+	withArtifactRef := map[string]string{
+		"artifact_refs":   `["scion://artifact/123"]`,
+		"system_category": " Trigger ",
+	}
+	outEarly := StripTriggerSystemCategory(withArtifactRef)
+	assert.False(t, sameMap(withArtifactRef, outEarly))
+	assert.Equal(t, map[string]string{"artifact_refs": `["scion://artifact/123"]`}, outEarly)
+	assert.Equal(t, " Trigger ", withArtifactRef["system_category"], "caller map must not be mutated")
+	assert.Nil(t, StripTriggerSystemCategory(nil))
+	assert.True(t, sameMap(clean, StripTriggerSystemCategory(clean)))
+}
+
 // sameMap reports whether a and b are backed by the same underlying map by
 // writing through a and observing b — a cheap reference-identity probe since
 // Go maps aren't otherwise comparable.

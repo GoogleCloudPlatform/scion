@@ -169,12 +169,71 @@ func Qualifies(persistedBody string, plain bool, p OffloadPolicy) bool {
 // StripReservedMetadata returns md unchanged if it has none of the
 // hub-reserved keys (reservedMetadataKeys: the three offload keys, the
 // artifact reference key, the visitor sender keys and the sender time zone
-// key). Otherwise it returns a NEW map without
-// them. It never mutates md, so it is safe on aliased maps. Callers
-// assign the result:
+// key) and no hub-minted trigger system_category marker. Otherwise it returns
+// a NEW map without them. It never mutates md, so it is safe on aliased maps.
+// Callers assign the result:
 // sm.Metadata = messaging.StripReservedMetadata(sm.Metadata).
 func StripReservedMetadata(md map[string]string) map[string]string {
-	return stripMetadataKeys(md, reservedMetadataKeys)
+	hasReserved := false
+	for k, v := range md {
+		if isReservedMetadataEntry(k, v) {
+			hasReserved = true
+			break
+		}
+	}
+	if !hasReserved {
+		return md
+	}
+	out := make(map[string]string, len(md))
+	for k, v := range md {
+		if isReservedMetadataEntry(k, v) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func isReservedMetadataEntry(k, v string) bool {
+	if reservedMetadataKeys[k] {
+		return true
+	}
+	return isTriggerSystemCategoryEntry(k, v)
+}
+
+func isTriggerSystemCategoryEntry(k, v string) bool {
+	// system_category="trigger" is hub-minted exclusively by
+	// ApplyDispatchedEventEnvelope; client, agent, chat, and broker inbound
+	// callers may never supply it (non-trigger categories such as
+	// "port-forward" used by sciontool autoexpose remain allowed).
+	return k == "system_category" && strings.EqualFold(strings.TrimSpace(v), messages.SystemCategoryTrigger)
+}
+
+// StripTriggerSystemCategory returns md unchanged if it does not carry a
+// trigger system_category marker, otherwise a new map with that entry removed.
+// Unlike StripReservedMetadata, it leaves other keys (such as
+// artifacts.MessageMetadataKey) untouched so early ingress normalization can
+// run before admitMessageArtifacts inspects and admits caller artifact refs.
+// It never mutates md.
+func StripTriggerSystemCategory(md map[string]string) map[string]string {
+	hasTriggerCategory := false
+	for k, v := range md {
+		if isTriggerSystemCategoryEntry(k, v) {
+			hasTriggerCategory = true
+			break
+		}
+	}
+	if !hasTriggerCategory {
+		return md
+	}
+	out := make(map[string]string, len(md)-1)
+	for k, v := range md {
+		if isTriggerSystemCategoryEntry(k, v) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // stripMetadataKeys returns md unchanged if it has none of keys, otherwise a

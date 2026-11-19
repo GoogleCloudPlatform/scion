@@ -28,9 +28,12 @@ import (
 // makes. Every other store method is unused here.
 type purgeCountingStore struct {
 	store.Store
-	mu           sync.Mutex
-	agentCutoffs []time.Time
-	eventCalls   int
+	mu                      sync.Mutex
+	agentCutoffs            []time.Time
+	eventCalls              int
+	triggerReapCalls        int
+	triggerReconcileCalls   int
+	triggerHistoryPurgeCall int
 }
 
 // ListSoftDeletedAgentsBefore is the agent purge's first store call
@@ -49,10 +52,37 @@ func (p *purgeCountingStore) PurgeOldScheduledEvents(_ context.Context, _ time.T
 	return 0, nil
 }
 
+func (p *purgeCountingStore) ReapExpiredTriggerFires(_ context.Context, _ time.Time, _ int) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.triggerReapCalls++
+	return 0, nil
+}
+
+func (p *purgeCountingStore) ReconcileOrphanedPendingTriggerEvents(_ context.Context, _ string, _, _ time.Time, _ string, _ int) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.triggerReconcileCalls++
+	return 0, nil
+}
+
+func (p *purgeCountingStore) PurgeOldTriggerHistory(_ context.Context, _ time.Time) (int, int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.triggerHistoryPurgeCall++
+	return 0, 0, nil
+}
+
 func (p *purgeCountingStore) counts() (agents, events int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.agentCutoffs), p.eventCalls
+}
+
+func (p *purgeCountingStore) triggerMaintenanceCounts() (reap, reconcile, purge int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.triggerReapCalls, p.triggerReconcileCalls, p.triggerHistoryPurgeCall
 }
 
 // The scheduled-event purge runs on every tick, whatever the soft-delete
@@ -100,4 +130,16 @@ func TestPurgeHandler_ZeroRetentionSkipsAgentPurge(t *testing.T) {
 	srv.purgeHandler()(context.Background())
 	agents, _ := st.counts()
 	assert.Equal(t, 0, agents, "retention 0 does not purge soft-deleted agents")
+}
+
+func TestPurgeHandler_RunsTriggerMaintenance(t *testing.T) {
+	st := &purgeCountingStore{}
+	srv := &Server{store: st}
+	srv.recordStartupLayer1Values()
+
+	srv.purgeHandler()(context.Background())
+	reap, reconcile, purge := st.triggerMaintenanceCounts()
+	assert.Equal(t, 1, reap, "purgeHandler reaps expired trigger fires")
+	assert.Equal(t, 1, reconcile, "purgeHandler reconciles orphaned pending trigger events")
+	assert.Equal(t, 1, purge, "purgeHandler purges old trigger history")
 }

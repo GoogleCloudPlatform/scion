@@ -136,6 +136,7 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", req.Message.Channel), nil)
 		return
 	}
+	clearInboundClientEvent(req.Message)
 	if !strings.HasPrefix(req.Message.Sender, "user:") {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"sender must use user: prefix for mapped identity", nil)

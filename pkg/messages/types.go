@@ -16,6 +16,7 @@
 package messages
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"time"
@@ -123,6 +124,8 @@ const (
 	// SystemCategoryArtifactReview marks the notice sent to an artifact's
 	// owner when a review version of the artifact was published.
 	SystemCategoryArtifactReview = "artifact-review"
+	// SystemCategoryTrigger marks a system event delivered by an event trigger.
+	SystemCategoryTrigger = "trigger"
 )
 
 // validTypes is the set of valid message types.
@@ -223,6 +226,10 @@ type StructuredMessage struct {
 	// home. Set by the hub's send path only; never read from a request,
 	// never serialized.
 	AttachmentMounts map[string]string `json:"-"`
+
+	// Event carries the structured EventBody JSON for TypeSystem deliveries
+	// (such as trigger fires) through the legacy StructuredMessage path.
+	Event json.RawMessage `json:"event,omitempty"`
 
 	// DeliveryText is the fully rendered agent-facing envelope, produced by
 	// the hub. When set, the broker delivers it verbatim and performs no

@@ -142,6 +142,52 @@ type TriggerFireResponse struct {
 	FinishedAt *time.Time `json:"finishedAt,omitempty"`
 }
 
+// ListTriggerFiresResponse is the paginated response of GET /triggers/{id}/history.
+type ListTriggerFiresResponse struct {
+	Fires      []TriggerFireResponse `json:"fires"`
+	NextCursor string                `json:"nextCursor,omitempty"`
+	TotalCount int                   `json:"totalCount"`
+	ServerTime time.Time             `json:"serverTime"`
+}
+
+// TriggerEventSummaryResponse is the API representation of a trigger event row
+// on GET /trigger-events. It intentionally omits payload and headers (§10.1).
+type TriggerEventSummaryResponse struct {
+	ID           string            `json:"id"`
+	ProjectID    string            `json:"projectId"`
+	Source       TriggerSourceSpec `json:"source"`
+	Type         string            `json:"type"`
+	Subject      string            `json:"subject"`
+	DedupKey     string            `json:"dedupKey"`
+	OccurredAt   time.Time         `json:"occurredAt"`
+	ReceivedAt   time.Time         `json:"receivedAt"`
+	Attributes   map[string]string `json:"attributes,omitempty"`
+	PayloadBytes int               `json:"payloadBytes"`
+	Status       string            `json:"status"`
+	MatchCount   int               `json:"matchCount"`
+	FireCount    int               `json:"fireCount"`
+	Error        string            `json:"error,omitempty"`
+	ProcessedAt  *time.Time        `json:"processedAt,omitempty"`
+	CreatedAt    time.Time         `json:"createdAt"`
+}
+
+// ListTriggerEventsResponse is the paginated response of GET /trigger-events.
+type ListTriggerEventsResponse struct {
+	Scope      string                        `json:"scope,omitempty"`
+	Events     []TriggerEventSummaryResponse `json:"events"`
+	NextCursor string                        `json:"nextCursor,omitempty"`
+	TotalCount int                           `json:"totalCount"`
+	ServerTime time.Time                     `json:"serverTime"`
+}
+
+// TriggerEventDetailResponse is the API representation of GET /trigger-events/{id},
+// including allow-listed headers and the raw JSON payload (§4.3, §10.1).
+type TriggerEventDetailResponse struct {
+	TriggerEventSummaryResponse
+	Headers map[string]string `json:"headers,omitempty"`
+	Payload json.RawMessage   `json:"payload,omitempty"`
+}
+
 // webhookEndpointIngressURL returns the full public ingress URL for endpointID.
 func (s *Server) webhookEndpointIngressURL(endpointID string) string {
 	base := strings.TrimRight(s.HubEndpointFor(HubEndpointForWebhooks), "/")
@@ -234,4 +280,90 @@ func buildTriggerResponses(triggers []store.Trigger) []TriggerResponse {
 		out[i] = buildTriggerResponse(triggers[i])
 	}
 	return out
+}
+
+func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
+	return TriggerFireResponse{
+		ID:         tf.ID,
+		TriggerID:  tf.TriggerID,
+		EventID:    tf.EventID,
+		ProjectID:  tf.ProjectID,
+		Subject:    tf.Subject,
+		Status:     tf.Status,
+		ResultRef:  tf.ResultRef,
+		Error:      tf.Error,
+		StartedAt:  tf.StartedAt,
+		FinishedAt: tf.FinishedAt,
+	}
+}
+
+func buildTriggerFireResponses(fires []store.TriggerFire) []TriggerFireResponse {
+	out := make([]TriggerFireResponse, len(fires))
+	for i := range fires {
+		out[i] = buildTriggerFireResponse(fires[i])
+	}
+	return out
+}
+
+func copyTriggerStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func buildTriggerEventSummaryResponse(ev store.TriggerEvent) TriggerEventSummaryResponse {
+	attrs := copyTriggerStringMap(ev.Attributes)
+	if rawCT, hasCT := attrs["content_type"]; hasCT {
+		attrs["content_type"] = sanitizeEventContentType(rawCT)
+	}
+	return TriggerEventSummaryResponse{
+		ID:        ev.ID,
+		ProjectID: ev.ProjectID,
+		Source: TriggerSourceSpec{
+			Kind: ev.SourceKind,
+			ID:   ev.SourceID,
+		},
+		Type:         ev.Type,
+		Subject:      ev.Subject,
+		DedupKey:     ev.DedupKey,
+		OccurredAt:   ev.OccurredAt,
+		ReceivedAt:   ev.ReceivedAt,
+		Attributes:   attrs,
+		PayloadBytes: ev.PayloadBytes,
+		Status:       ev.Status,
+		MatchCount:   ev.MatchCount,
+		FireCount:    ev.FireCount,
+		Error:        ev.Error,
+		ProcessedAt:  ev.ProcessedAt,
+		CreatedAt:    ev.CreatedAt,
+	}
+}
+
+func buildTriggerEventSummaryResponses(events []store.TriggerEvent) []TriggerEventSummaryResponse {
+	out := make([]TriggerEventSummaryResponse, len(events))
+	for i := range events {
+		out[i] = buildTriggerEventSummaryResponse(events[i])
+	}
+	return out
+}
+
+func buildTriggerEventDetailResponse(ev store.TriggerEvent) TriggerEventDetailResponse {
+	var rawPayload json.RawMessage
+	if ev.Payload != "" {
+		if json.Valid([]byte(ev.Payload)) {
+			rawPayload = json.RawMessage(ev.Payload)
+		} else if encoded, err := json.Marshal(ev.Payload); err == nil {
+			rawPayload = json.RawMessage(encoded)
+		}
+	}
+	return TriggerEventDetailResponse{
+		TriggerEventSummaryResponse: buildTriggerEventSummaryResponse(ev),
+		Headers:                     copyTriggerStringMap(ev.Headers),
+		Payload:                     rawPayload,
+	}
 }

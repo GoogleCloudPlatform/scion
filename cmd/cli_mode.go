@@ -221,6 +221,7 @@ var agentAllowed = map[string]bool{
 	"trigger.delete":         true,
 	"trigger.pause":          true,
 	"trigger.resume":         true,
+	"trigger.history":        true,
 	"trigger.webhook":        true,
 	"trigger.webhook.create": true,
 	"trigger.webhook.list":   true,

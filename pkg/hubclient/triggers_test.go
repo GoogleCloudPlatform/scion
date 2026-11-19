@@ -200,6 +200,30 @@ func TestTriggerService(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(sampleTrigger("active", 3))
 	})
+	mux.HandleFunc("/api/v1/projects/proj-1/triggers/tr-456/history", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "5", r.URL.Query().Get("limit"))
+		assert.Equal(t, "cur-1", r.URL.Query().Get("cursor"))
+		w.Header().Set("Content-Type", "application/json")
+		finished := now.Add(time.Second)
+		_ = json.NewEncoder(w).Encode(ListTriggerFiresResponse{
+			Fires: []TriggerFire{
+				{
+					ID:         "fire-1",
+					TriggerID:  "tr-456",
+					EventID:    "evt-1",
+					ProjectID:  "proj-1",
+					Subject:    "webhook:ep-123",
+					Status:     "fired",
+					StartedAt:  now,
+					FinishedAt: &finished,
+				},
+			},
+			NextCursor: "cur-2",
+			TotalCount: 2,
+			ServerTime: now,
+		})
+	})
 
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -246,6 +270,15 @@ func TestTriggerService(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "active", resumed.Status)
 	assert.Equal(t, 3, resumed.AuthorizationRevision)
+
+	hist, err := svc.History(ctx, "tr-456", &ListTriggerFiresOptions{
+		Page: apiclient.PageOptions{Limit: 5, Cursor: "cur-1"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, hist.TotalCount)
+	assert.Equal(t, "cur-2", hist.NextCursor)
+	require.Len(t, hist.Fires, 1)
+	assert.Equal(t, "fired", hist.Fires[0].Status)
 
 	require.NoError(t, svc.Delete(ctx, "tr-456"))
 }

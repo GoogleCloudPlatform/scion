@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 421
+**Operations:** 422
 
 ## Table of Contents
 
@@ -75,12 +75,13 @@
 - [webhookendpoint.read](#webhookendpointread) — Read a webhook endpoint in a project (never returns the signing secret). An agent caller reading another principal's endpoint receives the same 404 as not-found
 - [webhookendpoint.create](#webhookendpointcreate) — Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row
 - [webhookendpoint.delete](#webhookendpointdelete) — Delete a webhook endpoint, removing its hub-scoped internal signing secret rows and pausing dependent triggers with status_reason=source_deleted. An agent caller targeting another principal's endpoint receives the same 404 as not-found
-- [trigger.list](#triggerlist) — List triggers in a project. Agent callers see only triggers they hold (scope=caller)
-- [trigger.read](#triggerread) — Read a trigger definition in a project
+- [trigger.list](#triggerlist) — List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)
+- [trigger.read](#triggerread) — Read a trigger definition, a trigger's fire history, or a trigger event in a project. An agent caller reading an event it neither received on its own endpoint nor fired through a trigger it holds receives the same 404 as not-found
 - [trigger.create](#triggercreate) — Create an event trigger in a project. Resolves the source webhook endpoint through webhookEndpointAccessDecision(read) and passes the action's target checks; a user access token needs trigger:create plus the source and target selectors
 - [trigger.update](#triggerupdate) — Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source endpoint and action target and record the caller's attribution and frozen ceiling
 - [trigger.pause](#triggerpause) — Pause an event trigger. Pausing only stops future fires, so a user access token with trigger:update is admitted
 - [trigger.delete](#triggerdelete) — Delete an event trigger in a project
+- [trigger.fire](#triggerfire) — Fire a matched event trigger's message action through the shared fire core under the authority recorded by the trigger's current revision
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes, one by one or as a zip of a version (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
@@ -3285,13 +3286,14 @@
 
 **Domain:** trigger
 
-**Description:** List triggers in a project. Agent callers see only triggers they hold (scope=caller)
+**Description:** List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{projectId}/triggers` |
+| http_route | GET | `/api/v1/projects/{projectId}/trigger-events` |
 
 **Principals:** `user`, `agent`
 
@@ -3310,6 +3312,7 @@
 ### Tests
 
 - `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestTriggerEventsAndHistory_AuthzMatrix`
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
@@ -3318,13 +3321,15 @@
 
 **Domain:** trigger
 
-**Description:** Read a trigger definition in a project
+**Description:** Read a trigger definition, a trigger's fire history, or a trigger event in a project. An agent caller reading an event it neither received on its own endpoint nor fired through a trigger it holds receives the same 404 as not-found
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{projectId}/triggers/{id}` |
+| http_route | GET | `/api/v1/projects/{projectId}/triggers/{id}/history` |
+| http_route | GET | `/api/v1/projects/{projectId}/trigger-events/{id}` |
 
 **Principals:** `user`, `agent`
 
@@ -3338,11 +3343,12 @@
 
 **Effects:** `read-one`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
 - `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestTriggerEventsAndHistory_AuthzMatrix`
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
@@ -3501,6 +3507,41 @@
 
 - `pkg/hub:TestTriggersAuthzMatrix`
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## trigger.fire
+
+**Domain:** trigger
+
+**Description:** Fire a matched event trigger's message action through the shared fire core under the authority recorded by the trigger's current revision
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| scheduler_job | — | `triggerDrainer:message` |
+
+**Principals:** `system`
+
+**Credentials:** `system_internal`
+
+**Bearer:** `non_user` (pinned by `TestScheduledFire_UsesRecordedTokenCeiling`)
+
+**Resource Resolver:** event-project
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTriggerDispatchE2E_RevokedAuthorityRecordsRefusedFire`
+- `pkg/hub:TestScheduledFire_UsesRecordedTokenCeiling`
+
+### Exemptions
+
+- **internal_only:** The trigger.event durable queue drainer fires matched triggers with no request credential. fireAction resolves the trigger revision's recorded principal and credential via resolveRecordedAuthority, and every fire is bounded by the revision's recorded ceiling, boundary, and live standing (scope: trigger drainer fire) — waives: `base_permission`
 
 ---
 

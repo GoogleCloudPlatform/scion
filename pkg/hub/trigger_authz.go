@@ -466,3 +466,133 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 	}
 	return string(encoded), true
 }
+
+// triggerEventAccess is the outcome of triggerEventAccessDecision.
+type triggerEventAccess struct {
+	allowed           bool
+	reason            string
+	byPolicy          bool
+	notVisibleToAgent bool
+	storeErr          error
+}
+
+// triggerEventAccessDecision decides whether the identity in ctx may list or
+// read trigger events in projectID (§10.2, F1):
+//   - Users are decided via trigger.list / trigger.read.
+//   - Agents are admitted at the project-level gate (ev == nil) for list/read,
+//     and on a specific event row (ev != nil) only when either:
+//     1. ev's webhook endpoint passes webhookEndpointAccessDecision(read) for
+//     the agent, OR
+//     2. a trigger_fires row joins ev to a trigger currently held by the agent
+//     (AgentHasFiredTriggerForEvent).
+func (s *Server) triggerEventAccessDecision(ctx context.Context, projectID string, action Action, ev *store.TriggerEvent) triggerEventAccess {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		return triggerEventAccess{reason: "no identity"}
+	}
+	switch identity.Type() {
+	case "agent":
+		if action != ActionList && action != ActionRead {
+			return triggerEventAccess{reason: "agent callers may only list or read trigger events"}
+		}
+		if ev == nil {
+			return triggerEventAccess{allowed: true}
+		}
+		if ev.ProjectID != projectID {
+			return triggerEventAccess{
+				reason:            "trigger event does not belong to project",
+				notVisibleToAgent: true,
+			}
+		}
+		if ev.SourceKind == store.TriggerSourceKindWebhook && ev.SourceID != "" {
+			ep, err := s.store.GetWebhookEndpoint(ctx, ev.SourceID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalidInput) {
+				return triggerEventAccess{
+					reason:   "webhook endpoint lookup failed",
+					storeErr: err,
+				}
+			}
+			if err == nil && ep != nil && ep.ProjectID == projectID {
+				if s.webhookEndpointAccessDecision(ctx, projectID, ActionRead, ep).allowed {
+					return triggerEventAccess{allowed: true}
+				}
+			}
+		}
+		fired, err := s.store.AgentHasFiredTriggerForEvent(ctx, ev.ID, identity.ID())
+		if err != nil && !errors.Is(err, store.ErrInvalidInput) {
+			return triggerEventAccess{
+				reason:   "trigger fire visibility lookup failed",
+				storeErr: err,
+			}
+		}
+		if fired {
+			return triggerEventAccess{allowed: true}
+		}
+		return triggerEventAccess{
+			reason:            "trigger event is not visible to agent",
+			notVisibleToAgent: true,
+		}
+
+	case "user", "dev", "federated_user":
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			return triggerEventAccess{reason: "invalid user identity"}
+		}
+		if s.authzService == nil {
+			return triggerEventAccess{reason: "authorization service is uninitialized"}
+		}
+		permissionID := "trigger." + string(action)
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   triggerResource(projectID),
+			Action:     action,
+			Permission: permissionID,
+		})
+		if !decision.Allowed {
+			return triggerEventAccess{reason: decision.Reason, byPolicy: true}
+		}
+		return triggerEventAccess{allowed: true}
+
+	default:
+		return triggerEventAccess{reason: "identity type may not access trigger events"}
+	}
+}
+
+func (s *Server) authorizeTriggerEventAccess(w http.ResponseWriter, r *http.Request, projectID string, action Action) bool {
+	return s.authorizeTriggerEventRow(w, r, projectID, action, nil)
+}
+
+// authorizeTriggerEventRow decides action on one trigger event row (nil for the
+// project-level gate). When an agent addresses an event it neither received on
+// its own endpoint nor fired through a trigger it holds, it writes 404
+// identical to a missing event so event IDs cannot be probed (§10.2, §16.7).
+func (s *Server) authorizeTriggerEventRow(w http.ResponseWriter, r *http.Request, projectID string, action Action, ev *store.TriggerEvent) bool {
+	identity := GetIdentityFromContext(r.Context())
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	if ev != nil && identity.Type() != "agent" {
+		return true
+	}
+	d := s.triggerEventAccessDecision(r.Context(), projectID, action, ev)
+	if d.allowed {
+		return true
+	}
+	if d.storeErr != nil {
+		slog.ErrorContext(r.Context(), "trigger event authorization lookup failed",
+			"project_id", projectID, "error", d.storeErr)
+		InternalError(w)
+		return false
+	}
+	logAuthzDenial(r, identity, triggerResource(projectID), action, d.reason)
+	if d.notVisibleToAgent {
+		NotFound(w, "Trigger event")
+	} else if d.byPolicy {
+		writeForbidden(w, "You don't have permission to access triggers in this project")
+	} else {
+		writeForbidden(w, "")
+	}
+	return false
+}

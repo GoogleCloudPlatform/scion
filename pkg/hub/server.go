@@ -2985,6 +2985,10 @@ type Server struct {
 	// (lifecycle_events.go).
 	lifecycleEvents lifecycleEventsRuntime
 
+	// triggers holds the shared trigger.event durablequeue handle and
+	// background drainer state (trigger_dispatch.go).
+	triggers triggerRuntime
+
 	// updateCatalog is the hub's release catalog and updateDater the
 	// remembered running-release lookup, each built once on first use
 	// (updateReleaseCatalog, runningReleaseDater).
@@ -6389,6 +6393,10 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 		} else if purgedEvents > 0 {
 			slog.Info("Scheduler: purged old scheduled events", "count", purgedEvents)
 		}
+
+		// Reap expired trigger fires, reconcile orphaned pending trigger events,
+		// and purge terminal trigger history older than 7 days (trigger_dispatch.go).
+		s.runTriggerMaintenance(ctx)
 	}
 }
 
@@ -7901,6 +7909,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Start the lifecycle outbox drainer, only when it has work.
 	s.startLifecycleEvents(ctx)
+
+	// Start the trigger.event queue drainer when hub.triggers is enabled.
+	s.startTriggerDrainer(ctx)
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -8173,6 +8184,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if scheduler != nil {
 			scheduler.Stop()
 		}
+		s.stopTriggerDrainer(ctx)
 		s.stopScheduledWakeFires(ctx)
 		s.stopScheduledExecRuns(ctx)
 		if notificationDispatcher != nil {

@@ -25,6 +25,7 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
@@ -581,6 +582,15 @@ func triggerRecordedAuthorityIs(kind, id string) predicate.Trigger {
 		trigger.AttributionVersionGTE(1),
 		trigger.InitiatorCredentialKindNotIn("", store.InitiatorCredentialKindLegacyUnknown),
 	)
+}
+
+func triggerRecordedAuthoritySQLPredicates(tr *entsql.SelectTable, kind, id string) []*entsql.Predicate {
+	return []*entsql.Predicate{
+		entsql.EQ(tr.C(trigger.FieldInitiatorPrincipalKind), kind),
+		entsql.EQ(tr.C(trigger.FieldInitiatorPrincipalID), id),
+		entsql.GTE(tr.C(trigger.FieldAttributionVersion), 1),
+		entsql.NotIn(tr.C(trigger.FieldInitiatorCredentialKind), "", store.InitiatorCredentialKindLegacyUnknown),
+	}
 }
 
 func applyTriggerFilter(query *ent.TriggerQuery, filter store.TriggerFilter) error {
@@ -1210,6 +1220,9 @@ func (s *TriggerStore) ListTriggerEvents(ctx context.Context, filter store.Trigg
 	if filter.Status != "" {
 		query.Where(triggerevent.StatusEQ(filter.Status))
 	}
+	if filter.Since != nil && !filter.Since.IsZero() {
+		query.Where(triggerevent.ReceivedAtGTE(filter.Since.UTC()))
+	}
 	if filter.VisibleToAgentID != "" {
 		epQ := s.client.WebhookEndpoint.Query().Where(
 			webhookendpoint.OwnerPrincipalKindEQ(store.DelegationPrincipalAgent),
@@ -1220,48 +1233,57 @@ func (s *TriggerStore) ListTriggerEvents(ctx context.Context, filter store.Trigg
 			epQ.Where(webhookendpoint.ProjectIDEQ(pid))
 			trQ.Where(trigger.ProjectIDEQ(pid))
 		}
-		ownedEPs, err := epQ.Select(webhookendpoint.FieldID).All(ctx)
+		hasOwnedEPs, err := epQ.Exist(ctx)
 		if err != nil {
 			return nil, err
 		}
-		ownedTrs, err := trQ.Select(trigger.FieldID).All(ctx)
+		hasOwnedTrs, err := trQ.Exist(ctx)
 		if err != nil {
 			return nil, err
 		}
 		var visPreds []predicate.TriggerEvent
-		if len(ownedEPs) > 0 {
-			epIDs := make([]string, 0, len(ownedEPs))
-			for _, ep := range ownedEPs {
-				epIDs = append(epIDs, ep.ID.String())
-			}
+		if hasOwnedEPs {
+			agentID := filter.VisibleToAgentID
 			visPreds = append(visPreds, triggerevent.And(
 				triggerevent.SourceKindEQ(store.TriggerSourceKindWebhook),
-				triggerevent.SourceIDIn(epIDs...),
+				predicate.TriggerEvent(func(sel *entsql.Selector) {
+					d := sel.Dialect()
+					ep := entsql.Dialect(d).Table(webhookendpoint.Table).As("ep")
+					conds := []*entsql.Predicate{
+						entsql.P(func(b *entsql.Builder) {
+							b.WriteString("CAST(").WriteString(ep.C(webhookendpoint.FieldID)).WriteString(" AS TEXT) = ").WriteString(sel.C(triggerevent.FieldSourceID))
+						}),
+						entsql.EQ(ep.C(webhookendpoint.FieldOwnerPrincipalKind), store.DelegationPrincipalAgent),
+						entsql.EQ(ep.C(webhookendpoint.FieldOwnerPrincipalID), agentID),
+					}
+					if hasPID {
+						conds = append(conds, entsql.EQ(ep.C(webhookendpoint.FieldProjectID), pid))
+					}
+					sub := entsql.Dialect(d).Select(ep.C(webhookendpoint.FieldID)).From(ep).Where(entsql.And(conds...))
+					sel.Where(entsql.Exists(sub))
+				}),
 			))
 		}
-		if len(ownedTrs) > 0 {
-			trIDs := make([]uuid.UUID, 0, len(ownedTrs))
-			for _, tr := range ownedTrs {
-				trIDs = append(trIDs, tr.ID)
-			}
-			fires, fErr := s.client.TriggerFire.Query().
-				Where(triggerfire.TriggerIDIn(trIDs...)).
-				Select(triggerfire.FieldEventID).
-				All(ctx)
-			if fErr != nil {
-				return nil, fErr
-			}
-			if len(fires) > 0 {
-				eventIDs := make([]uuid.UUID, 0, len(fires))
-				seenEvt := make(map[uuid.UUID]struct{}, len(fires))
-				for _, f := range fires {
-					if _, dup := seenEvt[f.EventID]; !dup {
-						seenEvt[f.EventID] = struct{}{}
-						eventIDs = append(eventIDs, f.EventID)
-					}
+		if hasOwnedTrs {
+			agentID := filter.VisibleToAgentID
+			visPreds = append(visPreds, predicate.TriggerEvent(func(sel *entsql.Selector) {
+				d := sel.Dialect()
+				tf := entsql.Dialect(d).Table(triggerfire.Table).As("tf")
+				tr := entsql.Dialect(d).Table(trigger.Table).As("tr")
+				conds := append(
+					[]*entsql.Predicate{entsql.ColumnsEQ(tf.C(triggerfire.FieldEventID), sel.C(triggerevent.FieldID))},
+					triggerRecordedAuthoritySQLPredicates(tr, store.DelegationPrincipalAgent, agentID)...,
+				)
+				if hasPID {
+					conds = append(conds, entsql.EQ(tr.C(trigger.FieldProjectID), pid))
 				}
-				visPreds = append(visPreds, triggerevent.IDIn(eventIDs...))
-			}
+				sub := entsql.Dialect(d).
+					Select(tf.C(triggerfire.FieldID)).
+					From(tf).
+					Join(tr).On(tf.C(triggerfire.FieldTriggerID), tr.C(trigger.FieldID)).
+					Where(entsql.And(conds...))
+				sel.Where(entsql.Exists(sub))
+			}))
 		}
 		if len(visPreds) == 0 {
 			return &store.ListResult[store.TriggerEvent]{Items: []store.TriggerEvent{}, TotalCount: 0}, nil
@@ -1339,13 +1361,27 @@ func (s *TriggerStore) MarkTriggerEventProcessed(ctx context.Context, id string,
 	if err != nil {
 		return err
 	}
-	return mapError(s.client.TriggerEvent.UpdateOneID(uid).
+	affected, err := s.client.TriggerEvent.Update().
+		Where(triggerevent.IDEQ(uid), triggerevent.StatusEQ(store.TriggerEventStatusPending)).
 		SetStatus(store.TriggerEventStatusProcessed).
 		SetProcessedAt(processedAt.UTC()).
 		SetMatchCount(matchCount).
 		SetFireCount(fireCount).
 		ClearError().
-		Exec(ctx))
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		exists, exErr := s.client.TriggerEvent.Query().Where(triggerevent.IDEQ(uid)).Exist(ctx)
+		if exErr != nil {
+			return mapError(exErr)
+		}
+		if !exists {
+			return store.ErrNotFound
+		}
+	}
+	return nil
 }
 
 func (s *TriggerStore) MarkTriggerEventFailed(ctx context.Context, id string, processedAt time.Time, errMsg string) error {
@@ -1353,7 +1389,8 @@ func (s *TriggerStore) MarkTriggerEventFailed(ctx context.Context, id string, pr
 	if err != nil {
 		return err
 	}
-	u := s.client.TriggerEvent.UpdateOneID(uid).
+	u := s.client.TriggerEvent.Update().
+		Where(triggerevent.IDEQ(uid), triggerevent.StatusEQ(store.TriggerEventStatusPending)).
 		SetStatus(store.TriggerEventStatusFailed).
 		SetProcessedAt(processedAt.UTC())
 	if errMsg != "" {
@@ -1361,7 +1398,118 @@ func (s *TriggerStore) MarkTriggerEventFailed(ctx context.Context, id string, pr
 	} else {
 		u.ClearError()
 	}
-	return mapError(u.Exec(ctx))
+	affected, err := u.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		exists, exErr := s.client.TriggerEvent.Query().Where(triggerevent.IDEQ(uid)).Exist(ctx)
+		if exErr != nil {
+			return mapError(exErr)
+		}
+		if !exists {
+			return store.ErrNotFound
+		}
+	}
+	return nil
+}
+
+func (s *TriggerStore) ReconcileOrphanedPendingTriggerEvents(ctx context.Context, queueKind string, olderThan, now time.Time, errMsg string, limit int) (int, error) {
+	if queueKind == "" {
+		return 0, store.ErrInvalidInput
+	}
+	olderThan = olderThan.UTC()
+	now = now.UTC()
+
+	const scanBatch = 200
+	var (
+		hasCursor      bool
+		cursorReceived time.Time
+		cursorID       uuid.UUID
+		reconciled     int
+	)
+
+	for {
+		q := s.client.TriggerEvent.Query().
+			Where(
+				triggerevent.StatusEQ(store.TriggerEventStatusPending),
+				triggerevent.ReceivedAtLTE(olderThan),
+			)
+		if hasCursor {
+			q.Where(triggerevent.Or(
+				triggerevent.ReceivedAtGT(cursorReceived),
+				triggerevent.And(
+					triggerevent.ReceivedAtEQ(cursorReceived),
+					triggerevent.IDGT(cursorID),
+				),
+			))
+		}
+		candidates, err := q.
+			Order(triggerevent.ByReceivedAt()).
+			Order(triggerevent.ByID()).
+			Limit(scanBatch).
+			Select(triggerevent.FieldID, triggerevent.FieldReceivedAt).
+			All(ctx)
+		if err != nil {
+			return reconciled, mapError(err)
+		}
+		if len(candidates) == 0 {
+			break
+		}
+
+		idStrs := make([]string, len(candidates))
+		for i, c := range candidates {
+			idStrs[i] = c.ID.String()
+		}
+		queuedRows, err := s.client.DurableQueueItem.Query().
+			Where(
+				durablequeueitem.KindEQ(queueKind),
+				durablequeueitem.DedupKeyIn(idStrs...),
+			).
+			Select(durablequeueitem.FieldDedupKey).
+			All(ctx)
+		if err != nil {
+			return reconciled, mapError(err)
+		}
+		queued := make(map[string]struct{}, len(queuedRows))
+		for _, r := range queuedRows {
+			queued[r.DedupKey] = struct{}{}
+		}
+
+		for _, c := range candidates {
+			if _, ok := queued[c.ID.String()]; ok {
+				continue
+			}
+			u := s.client.TriggerEvent.Update().
+				Where(triggerevent.IDEQ(c.ID), triggerevent.StatusEQ(store.TriggerEventStatusPending)).
+				SetStatus(store.TriggerEventStatusFailed).
+				SetProcessedAt(now)
+			if errMsg != "" {
+				u.SetError(errMsg)
+			} else {
+				u.ClearError()
+			}
+			affected, uErr := u.Save(ctx)
+			if uErr != nil {
+				return reconciled, mapError(uErr)
+			}
+			if affected > 0 {
+				reconciled++
+				if limit > 0 && reconciled >= limit {
+					return reconciled, nil
+				}
+			}
+		}
+
+		last := candidates[len(candidates)-1]
+		hasCursor = true
+		cursorReceived = last.ReceivedAt.UTC()
+		cursorID = last.ID
+		if len(candidates) < scanBatch {
+			break
+		}
+	}
+	return reconciled, nil
 }
 
 // ============================================================================
@@ -1635,24 +1783,19 @@ func (s *TriggerStore) AgentHasFiredTriggerForEvent(ctx context.Context, eventID
 	if agentID == "" {
 		return false, nil
 	}
-	fires, err := s.client.TriggerFire.Query().
-		Where(triggerfire.EventIDEQ(eid)).
-		Select(triggerfire.FieldTriggerID).
-		All(ctx)
-	if err != nil {
-		return false, err
-	}
-	if len(fires) == 0 {
-		return false, nil
-	}
-	tids := make([]uuid.UUID, 0, len(fires))
-	for _, f := range fires {
-		tids = append(tids, f.TriggerID)
-	}
-	return s.client.Trigger.Query().
+	return s.client.TriggerFire.Query().
 		Where(
-			trigger.IDIn(tids...),
-			triggerRecordedAuthorityIs(store.DelegationPrincipalAgent, agentID),
+			triggerfire.EventIDEQ(eid),
+			predicate.TriggerFire(func(sel *entsql.Selector) {
+				d := sel.Dialect()
+				tr := entsql.Dialect(d).Table(trigger.Table).As("tr")
+				conds := append(
+					[]*entsql.Predicate{entsql.ColumnsEQ(tr.C(trigger.FieldID), sel.C(triggerfire.FieldTriggerID))},
+					triggerRecordedAuthoritySQLPredicates(tr, store.DelegationPrincipalAgent, agentID)...,
+				)
+				sub := entsql.Dialect(d).Select(tr.C(trigger.FieldID)).From(tr).Where(entsql.And(conds...))
+				sel.Where(entsql.Exists(sub))
+			}),
 		).
 		Exist(ctx)
 }

@@ -155,6 +155,12 @@ func (s *Server) handleTriggers(w http.ResponseWriter, r *http.Request, projectI
 				}
 				authzAction = ActionUpdate
 				authoring = subAction == "resume"
+			case "history":
+				if r.Method != http.MethodGet {
+					MethodNotAllowed(w, http.MethodGet)
+					return
+				}
+				authzAction = ActionRead
 			default:
 				NotFound(w, "Trigger action")
 				return
@@ -197,6 +203,8 @@ func (s *Server) handleTriggers(w http.ResponseWriter, r *http.Request, projectI
 			s.pauseTrigger(w, r, projectID, triggerID)
 		case "resume":
 			s.resumeTrigger(w, r, projectID, triggerID)
+		case "history":
+			s.getTriggerHistory(w, r, projectID, triggerID)
 		}
 	})(w, r)
 }
@@ -908,4 +916,32 @@ func (s *Server) deleteTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// getTriggerHistory handles GET /api/v1/projects/{projectId}/triggers/{id}/history.
+func (s *Server) getTriggerHistory(w http.ResponseWriter, r *http.Request, projectID, triggerID string) {
+	ctx := r.Context()
+	tr, ok := s.loadTriggerForProject(w, r, projectID, triggerID)
+	if !ok {
+		return
+	}
+	if !s.authorizeTriggerRow(w, r, projectID, ActionRead, triggerRowOf(tr)) {
+		return
+	}
+
+	result, err := s.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		ProjectID: projectID,
+		TriggerID: tr.ID,
+	}, listOptionsFromQuery(r.URL.Query()))
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ListTriggerFiresResponse{
+		Fires:      buildTriggerFireResponses(result.Items),
+		NextCursor: result.NextCursor,
+		TotalCount: result.TotalCount,
+		ServerTime: time.Now().UTC(),
+	})
 }

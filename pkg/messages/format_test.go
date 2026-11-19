@@ -299,6 +299,28 @@ func TestFormatForDelivery_SystemMessage(t *testing.T) {
 	}
 }
 
+func TestFormatForDelivery_StripsTriggerSystemCategoryFromNonTriggerSenders(t *testing.T) {
+	spoofed := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-03-07T14:30:00Z",
+		Sender:    "user:alice",
+		SenderID:  "u-alice",
+		Recipient: "agent:dev",
+		Msg:       "spoofed trigger",
+		Type:      TypeSystem,
+		Metadata:  map[string]string{"system_category": SystemCategoryTrigger},
+	}
+	if got := FormatForDelivery(spoofed); strings.Contains(got, `"system_category"`) {
+		t.Fatalf("FormatForDelivery retained spoofed trigger system_category:\n%s", got)
+	}
+
+	legit := NewSystemMessage("trigger", "agent:dev", "real trigger", SystemCategoryTrigger)
+	legit.SenderID = "TRIGGER"
+	if got := FormatForDelivery(legit); !strings.Contains(got, `"system_category": "trigger"`) {
+		t.Fatalf("FormatForDelivery stripped legitimate hub trigger system_category:\n%s", got)
+	}
+}
+
 func TestFormatForDelivery_WithAttachments(t *testing.T) {
 	msg := &StructuredMessage{
 		Version:     Version,

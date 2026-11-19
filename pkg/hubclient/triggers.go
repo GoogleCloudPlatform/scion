@@ -65,6 +65,9 @@ type TriggerService interface {
 
 	// Resume resumes a paused trigger definition.
 	Resume(ctx context.Context, id string) (*Trigger, error)
+
+	// History lists fire history records for a trigger definition.
+	History(ctx context.Context, id string, opts *ListTriggerFiresOptions) (*ListTriggerFiresResponse, error)
 }
 
 type webhookEndpointService struct {
@@ -240,6 +243,33 @@ type ListTriggersResponse struct {
 	ServerTime time.Time `json:"serverTime"`
 }
 
+// TriggerFire represents a trigger fire history record returned by GET /triggers/{id}/history.
+type TriggerFire struct {
+	ID         string     `json:"id"`
+	TriggerID  string     `json:"triggerId"`
+	EventID    string     `json:"eventId"`
+	ProjectID  string     `json:"projectId"`
+	Subject    string     `json:"subject,omitempty"`
+	Status     string     `json:"status"`
+	ResultRef  string     `json:"resultRef,omitempty"`
+	Error      string     `json:"error,omitempty"`
+	StartedAt  time.Time  `json:"startedAt"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+}
+
+// ListTriggerFiresOptions configures trigger fire history listing.
+type ListTriggerFiresOptions struct {
+	Page apiclient.PageOptions
+}
+
+// ListTriggerFiresResponse is the response from GET /triggers/{id}/history.
+type ListTriggerFiresResponse struct {
+	Fires      []TriggerFire `json:"fires"`
+	NextCursor string        `json:"nextCursor,omitempty"`
+	TotalCount int           `json:"totalCount,omitempty"`
+	ServerTime time.Time     `json:"serverTime"`
+}
+
 func (s *webhookEndpointService) Create(ctx context.Context, req *CreateWebhookEndpointRequest) (*WebhookEndpointCreated, error) {
 	resp, err := s.c.post(ctx, s.basePath(), req, nil)
 	if err != nil {
@@ -357,4 +387,16 @@ func (s *triggerService) Resume(ctx context.Context, id string) (*Trigger, error
 		return nil, err
 	}
 	return apiclient.DecodeRequired[Trigger](resp)
+}
+
+func (s *triggerService) History(ctx context.Context, id string, opts *ListTriggerFiresOptions) (*ListTriggerFiresResponse, error) {
+	query := url.Values{}
+	if opts != nil {
+		opts.Page.ToQuery(query)
+	}
+	resp, err := s.c.getWithQuery(ctx, s.basePath()+"/"+url.PathEscape(id)+"/history", query, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ListTriggerFiresResponse](resp)
 }
