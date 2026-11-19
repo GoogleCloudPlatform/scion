@@ -2177,9 +2177,8 @@ func TestTriggerEventAndHistoryCLI_SanitizesTerminalControlAndBidiCharacters(t *
 	})
 
 	const (
-		trID    = "11111111-4444-4333-8444-555555555555"
-		evID    = "22222222-4444-4333-8444-555555555555"
-		rawEvID = "33333333-4444-4333-8444-555555555555"
+		trID = "11111111-4444-4333-8444-555555555555"
+		evID = "22222222-4444-4333-8444-555555555555"
 	)
 
 	// Hostile strings containing C0 ANSI/OSC escapes, CR, LF line-forging, DEL, C1 CSI, and Unicode Cf bidi overrides.
@@ -2236,9 +2235,6 @@ func TestTriggerEventAndHistoryCLI_SanitizesTerminalControlAndBidiCharacters(t *
 				Headers:             map[string]string{"x-scion-subject": hostileHeaderVal},
 				Payload:             json.RawMessage(payloadBytes),
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+rawEvID:
-			// Simulate non-JSON raw payload fallback with multi-line \n/\t plus hostile escapes.
-			w.Write([]byte(`{"id":"` + rawEvID + `","projectId":"proj-1","source":{"kind":"webhook","id":"ep1"},"type":"webhook.received","subject":"sub","occurredAt":"2026-11-19T14:00:00Z","receivedAt":"2026-11-19T14:00:00Z","status":"processed","createdAt":"2026-11-19T14:00:00Z","payload":"not-an-object"}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID+"/history":
 			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerFiresResponse{
 				Fires: []hubclient.TriggerFire{{
