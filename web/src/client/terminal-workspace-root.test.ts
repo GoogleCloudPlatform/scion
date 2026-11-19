@@ -18,8 +18,12 @@ import type { Agent } from '../shared/types.js';
 import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
   TERMINAL_DRAG_MIME,
+  TERMINAL_DROPDOWN_SELECT_EVENT,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   TERMINAL_PANE_DIALOG_OPEN_EVENT,
+  getTerminalWorkspaceSnapshot,
+  resetTerminalWorkspaceEventsForTests,
+  type TerminalDropdownSelectDetail,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
@@ -4609,5 +4613,158 @@ describe('openPaletteIfEmpty (ptone/scion#8468)', () => {
 
     expect(root.element.querySelector('scion-quick-palette')).toBeNull();
     expect(agentListLoads()).toBe(0);
+  });
+});
+
+describe('published terminal workspace snapshot (ptone/scion#8284)', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  beforeEach(() => {
+    resetTerminalWorkspaceEventsForTests();
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    const metadataByAgent: Record<string, { id: string; name: string; lastActivityEvent: string }> =
+      {
+        [AGENT_A]: {
+          id: AGENT_A,
+          name: 'zeta-agent',
+          lastActivityEvent: '2026-11-19T10:00:00Z',
+        },
+        [AGENT_B]: {
+          id: AGENT_B,
+          name: 'alpha-agent',
+          lastActivityEvent: '2026-11-19T12:00:00Z',
+        },
+        [AGENT_C]: {
+          id: AGENT_C,
+          name: 'middle-agent',
+          lastActivityEvent: '2026-11-19T14:00:00Z',
+        },
+      };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const id =
+          [AGENT_A, AGENT_B, AGENT_C].find((agent) => String(url).includes(agent)) ?? AGENT_A;
+        return Promise.resolve(
+          new Response(JSON.stringify({ ...metadataByAgent[id], phase: 'running' }), {
+            status: 200,
+          })
+        );
+      })
+    );
+    stubWebSocketAndEventSource();
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r8284' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    resetTerminalWorkspaceEventsForTests();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function selectSort(mode: 'added' | 'alpha' | 'activity'): void {
+    const menu = root.element.querySelector('.terminal-sort-menu')!;
+    const item = menu.querySelector(`sl-menu-item[value="${mode}"]`)!;
+    menu.dispatchEvent(new CustomEvent('sl-select', { detail: { item } }));
+  }
+
+  it('publishes sessions in the rail sort order with status dots and updates when sort changes', async () => {
+    root.create(reg, AGENT_A);
+    root.withAutoSelectSuspended(() => root.create(reg, AGENT_B, { deferConnect: true }));
+    root.withAutoSelectSuspended(() => root.create(reg, AGENT_C, { deferConnect: true }));
+    reg.metadata.seed(AGENT_B, {
+      id: AGENT_B,
+      name: 'alpha-agent',
+      lastActivityEvent: '2026-11-19T12:00:00Z',
+      phase: 'running',
+    } as Agent);
+    reg.metadata.seed(AGENT_C, {
+      id: AGENT_C,
+      name: 'middle-agent',
+      lastActivityEvent: '2026-11-19T14:00:00Z',
+      phase: 'running',
+    } as Agent);
+
+    await vi.waitFor(() => {
+      const snap = getTerminalWorkspaceSnapshot();
+      expect(snap.sessions.map((s) => s.name)).toEqual([
+        'zeta-agent',
+        'alpha-agent',
+        'middle-agent',
+      ]);
+    });
+
+    const initial = getTerminalWorkspaceSnapshot();
+    expect(initial.count).toBe(3);
+    expect(initial.focusedAgentId).toBe(AGENT_A);
+    expect(initial.sessions[1]?.dot).toEqual({ colour: 'grey', meaning: 'Not connected' });
+
+    selectSort('alpha');
+    expect(getTerminalWorkspaceSnapshot().sessions.map((s) => s.name)).toEqual([
+      'alpha-agent',
+      'middle-agent',
+      'zeta-agent',
+    ]);
+
+    selectSort('activity');
+    expect(getTerminalWorkspaceSnapshot().sessions.map((s) => s.name)).toEqual([
+      'middle-agent',
+      'alpha-agent',
+      'zeta-agent',
+    ]);
+  });
+
+  it('updates focusedAgentId on multi-pane focusin and zoom changes', async () => {
+    root.layoutManager.setLayout('two-columns');
+    const sessionA = root.create(reg, AGENT_A);
+    const sessionB = root.create(reg, AGENT_B);
+    await flush();
+
+    // No pane focused yet in multi-pane mode.
+    expect(getTerminalWorkspaceSnapshot().focusedAgentId).toBeNull();
+
+    const paneB = paneFor(root, AGENT_B);
+    paneB.dispatchEvent(new FocusEvent('focusin', { bubbles: true, composed: true }));
+    expect(getTerminalWorkspaceSnapshot().focusedAgentId).toBe(AGENT_B);
+
+    const paneA = paneFor(root, AGENT_A);
+    paneA.dispatchEvent(new FocusEvent('focusin', { bubbles: true, composed: true }));
+    expect(getTerminalWorkspaceSnapshot().focusedAgentId).toBe(AGENT_A);
+
+    // Zooming pane B makes B the focused agent regardless of prior multi-pane focus.
+    root.layoutManager.zoom(sessionB.state.key);
+    await flush();
+    expect(getTerminalWorkspaceSnapshot().focusedAgentId).toBe(AGENT_B);
+    expect(sessionA.state.agentId).toBe(AGENT_A);
+  });
+
+  it('places an unplaced rail session into the next free multi-pane slot on TERMINAL_DROPDOWN_SELECT_EVENT', async () => {
+    root.layoutManager.setLayout('two-columns');
+    const sessionA = root.create(reg, AGENT_A);
+    const sessionB = root.withAutoSelectSuspended(() =>
+      root.create(reg, AGENT_B, { deferConnect: true })
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([sessionA.state.key, null]);
+
+    window.dispatchEvent(
+      new CustomEvent<TerminalDropdownSelectDetail>(TERMINAL_DROPDOWN_SELECT_EVENT, {
+        detail: { agentId: AGENT_B },
+      })
+    );
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([sessionA.state.key, sessionB.state.key]);
   });
 });

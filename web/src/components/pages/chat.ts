@@ -112,6 +112,7 @@ import {
   type HorizontalScrollRoom,
 } from '../../utils/horizontal-scroll.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
+import { setChatCurrentAgent } from '../../client/terminal-workspace-events.js';
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
 import { PaletteTypeahead, primaryPointerIsTouch } from '../shared/palette/palette-typeahead.js';
@@ -2084,6 +2085,7 @@ export class ScionPageChat extends LitElement {
     this._railCatchUp.cancel();
     // Nothing is on screen any more, so nothing is being actively read.
     chatNotifications.setActiveConversation(null);
+    setChatCurrentAgent(null);
   }
 
   /**
@@ -2183,6 +2185,42 @@ export class ScionPageChat extends LitElement {
         // a DM opened from the hub view keeps showing it in the sidebar.
         this._resetHubSearch({ keepQuery: true });
       }
+    }
+    if (changedProperties.has('v2Conversation') || changedProperties.has('v2AgentMembers')) {
+      this.syncHeaderCurrentAgent();
+    }
+  }
+
+  /**
+   * Publishes the active chat conversation's target agent (DM agent peer, or
+   * thread defaultAgent once resolved to a space member ID) for the header's
+   * Terminals dropdown.
+   */
+  private syncHeaderCurrentAgent(): void {
+    const conv = this.v2Conversation;
+    if (!conv) {
+      setChatCurrentAgent(null);
+      return;
+    }
+    if (conv.isDM) {
+      if (conv.peerKind === 'agent' && conv.peerId) {
+        setChatCurrentAgent({
+          agentId: conv.peerId,
+          name: conv.peerName || conv.peerId,
+        });
+      } else {
+        setChatCurrentAgent(null);
+      }
+      return;
+    }
+    const agentId = conv.defaultAgent ? this.resolveDefaultAgentId(conv.defaultAgent) : '';
+    if (agentId) {
+      setChatCurrentAgent({
+        agentId,
+        name: this.resolveDefaultAgentName(conv.defaultAgent) || agentId,
+      });
+    } else {
+      setChatCurrentAgent(null);
     }
   }
 

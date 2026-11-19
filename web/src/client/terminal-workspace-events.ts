@@ -1,5 +1,48 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { ACCOUNT_TEARDOWN_EVENT } from '../utils/auth.js';
+
+/** The colour of a terminal rail / dropdown row's status dot. */
+export type TerminalSessionDotColour = 'green' | 'amber' | 'red' | 'grey' | 'neutral';
+
+/** A status dot's colour and its short meaning, shown as tooltip and spoken text. */
+export interface TerminalSessionDot {
+  readonly colour: TerminalSessionDotColour;
+  readonly meaning: string;
+}
+
+/** Summary of one open terminal session in the rail's current sort order. */
+export interface TerminalSessionSummary {
+  readonly agentId: string;
+  readonly name: string;
+  readonly dot: TerminalSessionDot;
+}
+
+/** Latest retained snapshot of the terminal workspace rail for header consumers. */
+export interface TerminalWorkspaceSnapshot {
+  readonly count: number;
+  readonly sessions: readonly TerminalSessionSummary[];
+  readonly focusedAgentId: string | null;
+}
+
 export interface TerminalSessionCountDetail {
   readonly count: number;
+  readonly sessions?: readonly TerminalSessionSummary[];
+  readonly focusedAgentId?: string | null;
 }
 
 export const TERMINAL_SESSION_COUNT_EVENT = 'scion:terminal-session-count';
@@ -35,3 +78,128 @@ export const TERMINAL_PALETTE_NEW_AGENT_EVENT = 'scion:terminal-palette-new-agen
  * "Jump to agent" palette so the two modals are never open together.
  */
 export const TERMINAL_PANE_DIALOG_OPEN_EVENT = 'scion:terminal-pane-dialog-open';
+
+/**
+ * Dispatched on `window` when the header's Terminals dropdown selects an
+ * agent, so a mounted `TerminalWorkspaceRoot` can place an existing rail
+ * entry into a free multi-pane slot and move keyboard focus into that pane
+ * just like a rail click.
+ */
+export const TERMINAL_DROPDOWN_SELECT_EVENT = 'scion:terminal-dropdown-select';
+
+export interface TerminalDropdownSelectDetail {
+  readonly agentId: string;
+}
+
+/**
+ * Dispatched on `window` whenever the active chat conversation's or agent
+ * detail/edit page's current agent changes.
+ */
+export const CURRENT_AGENT_CHANGED_EVENT = 'scion:current-agent-changed';
+
+export interface CurrentAgentInfo {
+  readonly agentId: string;
+  readonly name: string;
+}
+
+const EMPTY_SNAPSHOT: TerminalWorkspaceSnapshot = Object.freeze({
+  count: 0,
+  sessions: Object.freeze([]),
+  focusedAgentId: null,
+});
+
+let latestSnapshot: TerminalWorkspaceSnapshot = EMPTY_SNAPSHOT;
+let chatCurrentAgent: CurrentAgentInfo | null = null;
+let agentPageCurrentAgent: CurrentAgentInfo | null = null;
+
+function sameAgent(a: CurrentAgentInfo | null, b: CurrentAgentInfo | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.agentId === b.agentId && a.name === b.name;
+}
+
+/** Latest published terminal workspace snapshot for late-mounting headers. */
+export function getTerminalWorkspaceSnapshot(): TerminalWorkspaceSnapshot {
+  return latestSnapshot;
+}
+
+/**
+ * Stores `snapshot` and announces it via {@link TERMINAL_SESSION_COUNT_EVENT}
+ * (keeping `detail.count` backward-compatible for count-only listeners).
+ */
+export function publishTerminalWorkspaceSnapshot(snapshot: TerminalWorkspaceSnapshot): void {
+  const count = Math.max(0, snapshot.count);
+  const sessions = [...snapshot.sessions];
+  const focusedAgentId = snapshot.focusedAgentId ?? null;
+  latestSnapshot = { count, sessions, focusedAgentId };
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent<TerminalSessionCountDetail>(TERMINAL_SESSION_COUNT_EVENT, {
+        detail: { count, sessions, focusedAgentId },
+      })
+    );
+  }
+}
+
+/** Current agent reported by the chat page (agent DM or thread default agent). */
+export function getChatCurrentAgent(): CurrentAgentInfo | null {
+  return chatCurrentAgent;
+}
+
+export function setChatCurrentAgent(agent: CurrentAgentInfo | null): void {
+  const next = agent ? { agentId: agent.agentId, name: agent.name } : null;
+  if (sameAgent(chatCurrentAgent, next)) return;
+  chatCurrentAgent = next;
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(CURRENT_AGENT_CHANGED_EVENT));
+  }
+}
+
+/** Current agent reported by the agent detail or edit page once loaded. */
+export function getAgentPageCurrentAgent(): CurrentAgentInfo | null {
+  return agentPageCurrentAgent;
+}
+
+export function setAgentPageCurrentAgent(agent: CurrentAgentInfo | null): void {
+  const next = agent ? { agentId: agent.agentId, name: agent.name } : null;
+  if (sameAgent(agentPageCurrentAgent, next)) return;
+  agentPageCurrentAgent = next;
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(CURRENT_AGENT_CHANGED_EVENT));
+  }
+}
+
+/** Clears retained snapshots on logout / auth expiry so nothing leaks across accounts. */
+function handleAccountTeardown(): void {
+  const hadSnapshot =
+    latestSnapshot.count !== 0 ||
+    latestSnapshot.sessions.length !== 0 ||
+    latestSnapshot.focusedAgentId !== null;
+  const hadCurrentAgent = chatCurrentAgent !== null || agentPageCurrentAgent !== null;
+  latestSnapshot = EMPTY_SNAPSHOT;
+  chatCurrentAgent = null;
+  agentPageCurrentAgent = null;
+  if (typeof window !== 'undefined') {
+    if (hadSnapshot) {
+      window.dispatchEvent(
+        new CustomEvent<TerminalSessionCountDetail>(TERMINAL_SESSION_COUNT_EVENT, {
+          detail: { count: 0, sessions: [], focusedAgentId: null },
+        })
+      );
+    }
+    if (hadCurrentAgent) {
+      window.dispatchEvent(new Event(CURRENT_AGENT_CHANGED_EVENT));
+    }
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener(ACCOUNT_TEARDOWN_EVENT, handleAccountTeardown);
+}
+
+/** Resets module-level retained state between unit tests without dispatching events. */
+export function resetTerminalWorkspaceEventsForTests(): void {
+  latestSnapshot = EMPTY_SNAPSHOT;
+  chatCurrentAgent = null;
+  agentPageCurrentAgent = null;
+}
