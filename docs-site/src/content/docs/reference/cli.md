@@ -1653,6 +1653,20 @@ Manage one-shot scheduled events and recurring cron schedules on the Hub for the
 
 When an agent caller looks up an unknown ID prefix or receives `409`, `404`, or `403` from a Hub without a caller-scope hint, the CLI appends a caller-scope hint explaining that schedules and events held by another principal are hidden from agent lists and return `403` by ID (and that `get`, `pause`, `resume`, `delete`, and `history` take an ID or ID prefix rather than a schedule name).
 
+### `scion trigger`
+
+Manage project event triggers, received trigger events, and signed webhook ingress endpoints on the Hub (requires the `hub.triggers` [experiment](/scion/reference/experiments/) on the Hub; available in both human and agent mode, and every subcommand accepts `--json` / `--format json`).
+
+- `scion trigger create`: Create an event trigger attached to a webhook endpoint (`--name`, `--webhook <id|name>`, `--agent <name|id>`, `--message <text>`, repeatable `--type`, repeatable `--where [<dialect>:]<expr>` or `--where-file <path>`, `--subject <cel>`, `--on-subject`, `--interrupt`, `--wake`, `--plain`).
+- `scion trigger get <id|name>`: Display configuration and numbered match rules (`1/N .. N/N`) for a trigger.
+- `scion trigger list`: List triggers in the project (`--source`, `--webhook`, `--status`).
+- `scion trigger pause <id|name>`, `scion trigger resume <id|name>`, `scion trigger delete <id|name>`: Pause, resume, or delete a trigger.
+- `scion trigger history <id|name>`: List fire history records for a trigger (`--limit`, `--cursor`).
+- `scion trigger event list`: List received trigger events, newest first (`--source`, `--webhook`, `--status`, `--since <RFC3339>`, `--limit`, `--cursor`).
+- `scion trigger event get <id> [--payload]`: Inspect a received trigger event's metadata, extracted `attributes`, `lists`, `headers`, and JSON `payload` (or `--payload` for the JSON payload alone). Terminal output escapes C0/DEL/C1 control characters and Unicode `Cf` format characters.
+- `scion trigger webhook create`: Create a signed (`scion_v1`) webhook endpoint and print its one-time HMAC signing secret (`--name`, `--description`). Optionally pass `--agent <name|id> --message <text>` or `--to-self --message <text>` (with optional `--interrupt`, `--wake`) to create the endpoint and a default `webhook.received` message trigger together in one transaction (`--to-self` resolves the target strictly from the calling agent's authenticated Hub identity).
+- `scion trigger webhook get <id|name>`, `scion trigger webhook list [--status]`, `scion trigger webhook delete <id|name>`: Inspect, list, or delete webhook endpoints (never returning the signing secret).
+
 ## Infrastructure
 
 ### `scion runtime-broker`
