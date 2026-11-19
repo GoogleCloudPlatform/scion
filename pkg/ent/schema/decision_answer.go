@@ -66,6 +66,12 @@ func (DecisionAnswer) Fields() []ent.Field {
 			Immutable(),
 		field.String("choice_label").
 			Immutable(),
+		// other_text is the user's trimmed free-form text, set iff
+		// choice_id = "$other" (design-8146 §4.2). Kept on user deletion (D6).
+		field.Text("other_text").
+			Optional().
+			Nillable().
+			Immutable(),
 		// answered_by_user_id is cleared when the user is deleted; the name
 		// and email snapshots stay.
 		field.String("answered_by_user_id").

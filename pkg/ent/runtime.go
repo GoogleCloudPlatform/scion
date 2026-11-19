@@ -1224,14 +1224,30 @@ func init() {
 	decisionDescVersion := decisionFields[11].Descriptor()
 	// decision.VersionValidator is a validator for the "version" field. It is called by the builders before save.
 	decision.VersionValidator = decisionDescVersion.Validators[0].(func(int) error)
+	// decisionDescAllowOther is the schema descriptor for allow_other field.
+	decisionDescAllowOther := decisionFields[15].Descriptor()
+	// decision.DefaultAllowOther holds the default value on creation for the allow_other field.
+	decision.DefaultAllowOther = decisionDescAllowOther.Default.(bool)
+	// decisionDescOtherLabel is the schema descriptor for other_label field.
+	decisionDescOtherLabel := decisionFields[16].Descriptor()
+	// decision.OtherLabelValidator is a validator for the "other_label" field. It is called by the builders before save.
+	decision.OtherLabelValidator = decisionDescOtherLabel.Validators[0].(func(string) error)
+	// decisionDescOtherDescription is the schema descriptor for other_description field.
+	decisionDescOtherDescription := decisionFields[17].Descriptor()
+	// decision.OtherDescriptionValidator is a validator for the "other_description" field. It is called by the builders before save.
+	decision.OtherDescriptionValidator = decisionDescOtherDescription.Validators[0].(func(string) error)
+	// decisionDescOtherPlaceholder is the schema descriptor for other_placeholder field.
+	decisionDescOtherPlaceholder := decisionFields[18].Descriptor()
+	// decision.OtherPlaceholderValidator is a validator for the "other_placeholder" field. It is called by the builders before save.
+	decision.OtherPlaceholderValidator = decisionDescOtherPlaceholder.Validators[0].(func(string) error)
 	// decisionDescIntroLength is the schema descriptor for intro_length field.
-	decisionDescIntroLength := decisionFields[15].Descriptor()
+	decisionDescIntroLength := decisionFields[19].Descriptor()
 	// decision.DefaultIntroLength holds the default value on creation for the intro_length field.
 	decision.DefaultIntroLength = decisionDescIntroLength.Default.(int)
 	// decision.IntroLengthValidator is a validator for the "intro_length" field. It is called by the builders before save.
 	decision.IntroLengthValidator = decisionDescIntroLength.Validators[0].(func(int) error)
 	// decisionDescCreatedAt is the schema descriptor for created_at field.
-	decisionDescCreatedAt := decisionFields[18].Descriptor()
+	decisionDescCreatedAt := decisionFields[22].Descriptor()
 	// decision.DefaultCreatedAt holds the default value on creation for the created_at field.
 	decision.DefaultCreatedAt = decisionDescCreatedAt.Default.(func() time.Time)
 	// decisionDescID is the schema descriptor for id field.
@@ -1281,15 +1297,15 @@ func init() {
 		}
 	}()
 	// decisionanswerDescAnsweredByName is the schema descriptor for answered_by_name field.
-	decisionanswerDescAnsweredByName := decisionanswerFields[10].Descriptor()
+	decisionanswerDescAnsweredByName := decisionanswerFields[11].Descriptor()
 	// decisionanswer.DefaultAnsweredByName holds the default value on creation for the answered_by_name field.
 	decisionanswer.DefaultAnsweredByName = decisionanswerDescAnsweredByName.Default.(string)
 	// decisionanswerDescAnsweredByEmail is the schema descriptor for answered_by_email field.
-	decisionanswerDescAnsweredByEmail := decisionanswerFields[11].Descriptor()
+	decisionanswerDescAnsweredByEmail := decisionanswerFields[12].Descriptor()
 	// decisionanswer.DefaultAnsweredByEmail holds the default value on creation for the answered_by_email field.
 	decisionanswer.DefaultAnsweredByEmail = decisionanswerDescAnsweredByEmail.Default.(string)
 	// decisionanswerDescIdempotencyKey is the schema descriptor for idempotency_key field.
-	decisionanswerDescIdempotencyKey := decisionanswerFields[21].Descriptor()
+	decisionanswerDescIdempotencyKey := decisionanswerFields[22].Descriptor()
 	// decisionanswer.IdempotencyKeyValidator is a validator for the "idempotency_key" field. It is called by the builders before save.
 	decisionanswer.IdempotencyKeyValidator = func() func(string) error {
 		validators := decisionanswerDescIdempotencyKey.Validators
@@ -1307,11 +1323,11 @@ func init() {
 		}
 	}()
 	// decisionanswerDescMatchedDefault is the schema descriptor for matched_default field.
-	decisionanswerDescMatchedDefault := decisionanswerFields[23].Descriptor()
+	decisionanswerDescMatchedDefault := decisionanswerFields[24].Descriptor()
 	// decisionanswer.DefaultMatchedDefault holds the default value on creation for the matched_default field.
 	decisionanswer.DefaultMatchedDefault = decisionanswerDescMatchedDefault.Default.(bool)
 	// decisionanswerDescCreatedAt is the schema descriptor for created_at field.
-	decisionanswerDescCreatedAt := decisionanswerFields[24].Descriptor()
+	decisionanswerDescCreatedAt := decisionanswerFields[25].Descriptor()
 	// decisionanswer.DefaultCreatedAt holds the default value on creation for the created_at field.
 	decisionanswer.DefaultCreatedAt = decisionanswerDescCreatedAt.Default.(func() time.Time)
 	// decisionanswerDescID is the schema descriptor for id field.

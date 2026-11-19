@@ -31,6 +31,8 @@ const (
 	FieldChoiceID = "choice_id"
 	// FieldChoiceLabel holds the string denoting the choice_label field in the database.
 	FieldChoiceLabel = "choice_label"
+	// FieldOtherText holds the string denoting the other_text field in the database.
+	FieldOtherText = "other_text"
 	// FieldAnsweredByUserID holds the string denoting the answered_by_user_id field in the database.
 	FieldAnsweredByUserID = "answered_by_user_id"
 	// FieldAnsweredByName holds the string denoting the answered_by_name field in the database.
@@ -78,6 +80,7 @@ var Columns = []string{
 	FieldQuestionText,
 	FieldChoiceID,
 	FieldChoiceLabel,
+	FieldOtherText,
 	FieldAnsweredByUserID,
 	FieldAnsweredByName,
 	FieldAnsweredByEmail,
@@ -253,6 +256,11 @@ func ByChoiceID(opts ...sql.OrderTermOption) OrderOption {
 // ByChoiceLabel orders the results by the choice_label field.
 func ByChoiceLabel(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldChoiceLabel, opts...).ToFunc()
+}
+
+// ByOtherText orders the results by the other_text field.
+func ByOtherText(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOtherText, opts...).ToFunc()
 }
 
 // ByAnsweredByUserID orders the results by the answered_by_user_id field.

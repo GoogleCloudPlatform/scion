@@ -48,6 +48,14 @@ type Decision struct {
 	Choices []messages.Choice `json:"choices,omitempty"`
 	// DefaultChoiceID holds the value of the "default_choice_id" field.
 	DefaultChoiceID *string `json:"default_choice_id,omitempty"`
+	// AllowOther holds the value of the "allow_other" field.
+	AllowOther bool `json:"allow_other,omitempty"`
+	// OtherLabel holds the value of the "other_label" field.
+	OtherLabel *string `json:"other_label,omitempty"`
+	// OtherDescription holds the value of the "other_description" field.
+	OtherDescription *string `json:"other_description,omitempty"`
+	// OtherPlaceholder holds the value of the "other_placeholder" field.
+	OtherPlaceholder *string `json:"other_placeholder,omitempty"`
 	// IntroLength holds the value of the "intro_length" field.
 	IntroLength int `json:"intro_length,omitempty"`
 	// Status holds the value of the "status" field.
@@ -78,9 +86,11 @@ func (*Decision) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case decision.FieldChoices:
 			values[i] = new([]byte)
+		case decision.FieldAllowOther:
+			values[i] = new(sql.NullBool)
 		case decision.FieldPosition, decision.FieldVersion, decision.FieldIntroLength:
 			values[i] = new(sql.NullInt64)
-		case decision.FieldChatKey, decision.FieldAskerAgentName, decision.FieldKey, decision.FieldKeyNorm, decision.FieldKeySource, decision.FieldQuestion, decision.FieldDefaultChoiceID, decision.FieldStatus, decision.FieldWithdrawnReason:
+		case decision.FieldChatKey, decision.FieldAskerAgentName, decision.FieldKey, decision.FieldKeyNorm, decision.FieldKeySource, decision.FieldQuestion, decision.FieldDefaultChoiceID, decision.FieldOtherLabel, decision.FieldOtherDescription, decision.FieldOtherPlaceholder, decision.FieldStatus, decision.FieldWithdrawnReason:
 			values[i] = new(sql.NullString)
 		case decision.FieldCreatedAt, decision.FieldDecidedAt, decision.FieldReplacedAt, decision.FieldWithdrawnAt, decision.FieldDismissedAt:
 			values[i] = new(sql.NullTime)
@@ -195,6 +205,33 @@ func (_m *Decision) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.DefaultChoiceID = new(string)
 				*_m.DefaultChoiceID = value.String
+			}
+		case decision.FieldAllowOther:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field allow_other", values[i])
+			} else if value.Valid {
+				_m.AllowOther = value.Bool
+			}
+		case decision.FieldOtherLabel:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field other_label", values[i])
+			} else if value.Valid {
+				_m.OtherLabel = new(string)
+				*_m.OtherLabel = value.String
+			}
+		case decision.FieldOtherDescription:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field other_description", values[i])
+			} else if value.Valid {
+				_m.OtherDescription = new(string)
+				*_m.OtherDescription = value.String
+			}
+		case decision.FieldOtherPlaceholder:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field other_placeholder", values[i])
+			} else if value.Valid {
+				_m.OtherPlaceholder = new(string)
+				*_m.OtherPlaceholder = value.String
 			}
 		case decision.FieldIntroLength:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -337,6 +374,24 @@ func (_m *Decision) String() string {
 	builder.WriteString(", ")
 	if v := _m.DefaultChoiceID; v != nil {
 		builder.WriteString("default_choice_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	builder.WriteString("allow_other=")
+	builder.WriteString(fmt.Sprintf("%v", _m.AllowOther))
+	builder.WriteString(", ")
+	if v := _m.OtherLabel; v != nil {
+		builder.WriteString("other_label=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.OtherDescription; v != nil {
+		builder.WriteString("other_description=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.OtherPlaceholder; v != nil {
+		builder.WriteString("other_placeholder=")
 		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")

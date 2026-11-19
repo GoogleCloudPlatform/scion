@@ -95,6 +95,11 @@ func ChoiceLabel(v string) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldEQ(FieldChoiceLabel, v))
 }
 
+// OtherText applies equality check predicate on the "other_text" field. It's identical to OtherTextEQ.
+func OtherText(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldOtherText, v))
+}
+
 // AnsweredByUserID applies equality check predicate on the "answered_by_user_id" field. It's identical to AnsweredByUserIDEQ.
 func AnsweredByUserID(v string) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldEQ(FieldAnsweredByUserID, v))
@@ -578,6 +583,81 @@ func ChoiceLabelEqualFold(v string) predicate.DecisionAnswer {
 // ChoiceLabelContainsFold applies the ContainsFold predicate on the "choice_label" field.
 func ChoiceLabelContainsFold(v string) predicate.DecisionAnswer {
 	return predicate.DecisionAnswer(sql.FieldContainsFold(FieldChoiceLabel, v))
+}
+
+// OtherTextEQ applies the EQ predicate on the "other_text" field.
+func OtherTextEQ(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEQ(FieldOtherText, v))
+}
+
+// OtherTextNEQ applies the NEQ predicate on the "other_text" field.
+func OtherTextNEQ(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNEQ(FieldOtherText, v))
+}
+
+// OtherTextIn applies the In predicate on the "other_text" field.
+func OtherTextIn(vs ...string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldIn(FieldOtherText, vs...))
+}
+
+// OtherTextNotIn applies the NotIn predicate on the "other_text" field.
+func OtherTextNotIn(vs ...string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNotIn(FieldOtherText, vs...))
+}
+
+// OtherTextGT applies the GT predicate on the "other_text" field.
+func OtherTextGT(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldGT(FieldOtherText, v))
+}
+
+// OtherTextGTE applies the GTE predicate on the "other_text" field.
+func OtherTextGTE(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldGTE(FieldOtherText, v))
+}
+
+// OtherTextLT applies the LT predicate on the "other_text" field.
+func OtherTextLT(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldLT(FieldOtherText, v))
+}
+
+// OtherTextLTE applies the LTE predicate on the "other_text" field.
+func OtherTextLTE(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldLTE(FieldOtherText, v))
+}
+
+// OtherTextContains applies the Contains predicate on the "other_text" field.
+func OtherTextContains(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldContains(FieldOtherText, v))
+}
+
+// OtherTextHasPrefix applies the HasPrefix predicate on the "other_text" field.
+func OtherTextHasPrefix(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldHasPrefix(FieldOtherText, v))
+}
+
+// OtherTextHasSuffix applies the HasSuffix predicate on the "other_text" field.
+func OtherTextHasSuffix(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldHasSuffix(FieldOtherText, v))
+}
+
+// OtherTextIsNil applies the IsNil predicate on the "other_text" field.
+func OtherTextIsNil() predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldIsNull(FieldOtherText))
+}
+
+// OtherTextNotNil applies the NotNil predicate on the "other_text" field.
+func OtherTextNotNil() predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldNotNull(FieldOtherText))
+}
+
+// OtherTextEqualFold applies the EqualFold predicate on the "other_text" field.
+func OtherTextEqualFold(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldEqualFold(FieldOtherText, v))
+}
+
+// OtherTextContainsFold applies the ContainsFold predicate on the "other_text" field.
+func OtherTextContainsFold(v string) predicate.DecisionAnswer {
+	return predicate.DecisionAnswer(sql.FieldContainsFold(FieldOtherText, v))
 }
 
 // AnsweredByUserIDEQ applies the EQ predicate on the "answered_by_user_id" field.

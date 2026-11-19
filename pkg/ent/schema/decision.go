@@ -100,6 +100,26 @@ func (Decision) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			Immutable(),
+		// allow_other and other_* configure an optional free-form Other choice
+		// (design-8146 §4.2). other_label is set iff allow_other is true.
+		field.Bool("allow_other").
+			Default(false).
+			Immutable(),
+		field.String("other_label").
+			Optional().
+			Nillable().
+			MaxLen(messages.MaxChoiceLabelLen).
+			Immutable(),
+		field.String("other_description").
+			Optional().
+			Nillable().
+			MaxLen(messages.MaxChoiceDescriptionLen).
+			Immutable(),
+		field.String("other_placeholder").
+			Optional().
+			Nillable().
+			MaxLen(messages.MaxOtherPlaceholderLen).
+			Immutable(),
 		// intro_length is the byte offset in the prompt message's msg where
 		// the markdown fallback starts (messages.RenderDecisionFallback). It is
 		// set on the message's position 0 row only; 0 means no intro.
