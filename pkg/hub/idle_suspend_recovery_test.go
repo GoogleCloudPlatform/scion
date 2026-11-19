@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -40,6 +41,9 @@ type commitFaultStore struct {
 	store.Store
 	failures atomic.Int32
 	attempts atomic.Int32
+	// ambiguous makes the first commit write take effect and still return an
+	// error, as a connection lost after the transaction committed would.
+	ambiguous atomic.Bool
 }
 
 func (c *commitFaultStore) UpdateAgentStatus(ctx context.Context, id string, upd store.AgentStatusUpdate) error {
@@ -47,6 +51,12 @@ func (c *commitFaultStore) UpdateAgentStatus(ctx context.Context, id string, upd
 		c.attempts.Add(1)
 		if c.failures.Add(-1) >= 0 {
 			return errors.New("injected commit write failure")
+		}
+		if c.ambiguous.CompareAndSwap(true, false) {
+			if err := c.Store.UpdateAgentStatus(ctx, id, upd); err != nil {
+				return err
+			}
+			return errors.New("injected connection loss after commit")
 		}
 	}
 	return c.Store.UpdateAgentStatus(ctx, id, upd)
@@ -199,49 +209,66 @@ func TestIdleSuspendRecovery_CrashBetweenStopAndCommit(t *testing.T) {
 }
 
 func TestIdleSuspendRecovery_StopDispatchOutcomes(t *testing.T) {
-	t.Run("a timeout keeps the intent and the claim, and recovery settles it", func(t *testing.T) {
-		for name, stopErr := range map[string]error{
-			"deadline":  fmt.Errorf("dispatch: %w", context.DeadlineExceeded),
-			"transport": fmt.Errorf("failed to send request: %w", &netTimeoutErr{}),
-		} {
-			t.Run(name, func(t *testing.T) {
-				f := newIdleRecoveryFixture(t, "rec-timeout-"+name, false)
-				f.disp.runIntentDispatcher.stopErr = stopErr
+	cc := func(sentinel error, msg string) error {
+		return fmt.Errorf("control channel request failed: %w", &brokerTransportError{msg: msg, sentinel: sentinel})
+	}
+	unknown := map[string]error{
+		"http deadline":             fmt.Errorf("dispatch: %w", context.DeadlineExceeded),
+		"http transport timeout":    fmt.Errorf("failed to send request: %w", &netTimeoutErr{}),
+		"control channel timeout":   cc(errBrokerResponseTimeout, "request timeout after 2m0s"),
+		"control channel conn lost": cc(errBrokerConnectionLost, "connection closed"),
+		"cross-node wait expired":   fmt.Errorf("stop: %w", ErrDispatchFailed),
+	}
+	definite := map[string]error{
+		"broker refusal":       &brokerStatusError{StatusCode: http.StatusInternalServerError},
+		"request not sent":     fmt.Errorf("failed to sign request: %w (%w)", errors.New("sign"), errStartRequestNotSent),
+		"broker not connected": fmt.Errorf("stop: %w", errStartBrokerNotConnected),
+		"dial failure":         fmt.Errorf("failed to send request: %w", &net.OpError{Op: "dial", Err: errors.New("connection refused")}),
+		"run mismatch":         fmt.Errorf("%w (requested run r1)", ErrStopRunNotFound),
+	}
 
-				f.suspendOnce(t)
+	for name, stopErr := range unknown {
+		t.Run("unknown/"+name, func(t *testing.T) {
+			assert.True(t, stopOutcomeUnknown(stopErr))
+			f := newIdleRecoveryFixture(t, "rec-timeout-"+tidSlugSafe(name), false)
+			f.disp.runIntentDispatcher.stopErr = stopErr
 
-				got := f.get(t)
-				assert.Equal(t, store.RunIntentStopped, got.RunIntent, "an unknown outcome does not revert the intent")
-				require.NotNil(t, got.IdleSuspendClaimUntil)
-				assert.Equal(t, string(state.PhaseRunning), got.Phase)
+			f.suspendOnce(t)
 
-				// The row still runs after the lease: recovery does not touch it.
-				expireIdleClaim(t, f.raw, f.agent.ID)
-				f.sweep()
-				assert.Equal(t, string(state.PhaseRunning), f.get(t).Phase)
+			got := f.get(t)
+			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "an unknown outcome does not revert the intent")
+			require.NotNil(t, got.IdleSuspendClaimUntil)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
 
-				// The stop did land after all: the container reports stopped.
-				setPhaseForTest(t, f.raw, f.agent.ID, string(state.PhaseStopped))
-				f.sweep()
-				got = f.get(t)
-				assert.Equal(t, string(state.PhaseSuspended), got.Phase)
-				assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason)
-				assert.Nil(t, got.IdleSuspendClaimUntil)
-			})
-		}
-	})
+			// The row still runs after the lease: recovery does not touch it.
+			expireIdleClaim(t, f.raw, f.agent.ID)
+			f.sweep()
+			assert.Equal(t, string(state.PhaseRunning), f.get(t).Phase)
 
-	t.Run("a definite refusal reverts the intent and clears the claim", func(t *testing.T) {
-		f := newIdleRecoveryFixture(t, "rec-refused", false)
-		f.disp.runIntentDispatcher.stopErr = &brokerStatusError{StatusCode: http.StatusInternalServerError}
+			// The stop did land after all: the container reports stopped.
+			setPhaseForTest(t, f.raw, f.agent.ID, string(state.PhaseStopped))
+			f.sweep()
+			got = f.get(t)
+			assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+			assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason)
+			assert.Nil(t, got.IdleSuspendClaimUntil)
+		})
+	}
 
-		f.suspendOnce(t)
+	for name, stopErr := range definite {
+		t.Run("definite/"+name, func(t *testing.T) {
+			assert.False(t, stopOutcomeUnknown(stopErr))
+			f := newIdleRecoveryFixture(t, "rec-refused-"+tidSlugSafe(name), false)
+			f.disp.runIntentDispatcher.stopErr = stopErr
 
-		got := f.get(t)
-		assert.Equal(t, store.RunIntentRunning, got.RunIntent)
-		assert.Nil(t, got.IdleSuspendClaimUntil)
-		assert.Equal(t, string(state.PhaseRunning), got.Phase)
-	})
+			f.suspendOnce(t)
+
+			got := f.get(t)
+			assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+			assert.Nil(t, got.IdleSuspendClaimUntil)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		})
+	}
 }
 
 type netTimeoutErr struct{}
@@ -271,33 +298,138 @@ func TestIdleSuspendRecovery_UserStopInWindowIsNeverConverted(t *testing.T) {
 	assert.Empty(t, got.SuspendReason)
 }
 
-func TestIdleSuspendRecovery_GatesOff(t *testing.T) {
-	for name, off := range map[string]func(t *testing.T, srv *Server){
-		"experiment off": func(t *testing.T, srv *Server) { setIdleSuspendExperiment(t, srv, false) },
-		"setting off": func(_ *testing.T, srv *Server) {
-			srv.mu.Lock()
-			srv.config.AutoSuspendIdle = false
-			srv.mu.Unlock()
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			fastIdleCommitRetry(t)
-			f := newIdleRecoveryFixture(t, "rec-gate-"+tidSlugSafe(name), true)
-			f.faulty.failures.Store(1 << 20)
-			f.suspendOnce(t)
-			expireIdleClaim(t, f.raw, f.agent.ID)
-			f.faulty.failures.Store(0)
+// strandIdleClaim leaves f's agent stopped with an expired claim: the commit
+// write failed for good and the lease ran out.
+func strandIdleClaim(t *testing.T, f *idleRecoveryFixture) {
+	t.Helper()
+	fastIdleCommitRetry(t)
+	f.faulty.failures.Store(1 << 20)
+	f.suspendOnce(t)
+	expireIdleClaim(t, f.raw, f.agent.ID)
+	f.faulty.failures.Store(0)
+}
 
-			off(t, f.srv)
-			f.srv.agentIdleSuspendHandler()(context.Background())
-			f.srv.recoverIdleSuspendClaims(context.Background())
+// TestIdleSuspendRecovery_Gates: recovery needs the experiment, and nothing
+// else. With auto_suspend_idle turned off mid-claim it still finishes the
+// in-flight suspend; with the experiment off it does nothing.
+func TestIdleSuspendRecovery_Gates(t *testing.T) {
+	t.Run("experiment off does nothing", func(t *testing.T) {
+		f := newIdleRecoveryFixture(t, "rec-gate-exp", true)
+		strandIdleClaim(t, f)
+		setIdleSuspendExperiment(t, f.srv, false)
 
-			got := f.get(t)
-			assert.Equal(t, string(state.PhaseStopped), got.Phase)
-			assert.Empty(t, got.SuspendReason)
-			assert.NotNil(t, got.IdleSuspendClaimUntil)
-		})
-	}
+		f.srv.agentIdleSuspendHandler()(context.Background())
+		f.srv.recoverIdleSuspendClaims(context.Background())
+
+		got := f.get(t)
+		assert.Equal(t, string(state.PhaseStopped), got.Phase)
+		assert.Empty(t, got.SuspendReason)
+		assert.NotNil(t, got.IdleSuspendClaimUntil)
+	})
+
+	t.Run("auto_suspend_idle off still settles the claim", func(t *testing.T) {
+		f := newIdleRecoveryFixture(t, "rec-gate-setting", true)
+		strandIdleClaim(t, f)
+		f.srv.mu.Lock()
+		f.srv.config.AutoSuspendIdle = false
+		f.srv.mu.Unlock()
+
+		f.srv.agentIdleSuspendHandler()(context.Background())
+
+		got := f.get(t)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+		assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason)
+		assert.Nil(t, got.IdleSuspendClaimUntil)
+	})
+}
+
+// TestIdleSuspendRecovery_SettingOffThenDMAutoWakes: a claim left in flight
+// when auto_suspend_idle is turned off is settled by recovery, and a DM then
+// auto-wakes the agent and delivers.
+func TestIdleSuspendRecovery_SettingOffThenDMAutoWakes(t *testing.T) {
+	ctx := context.Background()
+	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+	disp := &wakeTrackingDispatcher{}
+	srv.SetDispatcher(disp)
+	t.Cleanup(srv.waitAutoWakeIdle)
+	enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+	target, cond := claimIdleForTest(t, s, target, "run-setting-off")
+	_, _, _, err := s.ClaimIdleSuspend(ctx, target.ID, cond)
+	require.NoError(t, err)
+	setPhaseForTest(t, s, target.ID, string(state.PhaseStopped))
+	expireIdleClaim(t, s, target.ID)
+	srv.mu.Lock()
+	srv.config.AutoSuspendIdle = false
+	srv.mu.Unlock()
+
+	srv.agentIdleSuspendHandler()(ctx)
+
+	suspended, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseSuspended), suspended.Phase)
+	require.Equal(t, string(state.SuspendReasonIdle), suspended.SuspendReason)
+
+	awReadyOnStart(t, s, target.ID)
+	res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, suspended, "wakes after setting off"))
+	require.Nil(t, dmErr)
+	assert.Equal(t, AgentDMAccepted, res.Outcome)
+	require.Len(t, disp.getStartCalls(), 1)
+	require.Len(t, disp.getMessageCalls(), 1)
+}
+
+// TestIdleSuspendRecovery_DeliveryWaitRecoversOnDemand: a delivery that finds
+// an expired claim on a row that already reports stopped records the
+// suspension itself instead of waiting for the next sweep tick.
+func TestIdleSuspendRecovery_DeliveryWaitRecoversOnDemand(t *testing.T) {
+	ctx := context.Background()
+	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+	disp := &wakeTrackingDispatcher{}
+	srv.SetDispatcher(disp)
+	t.Cleanup(srv.waitAutoWakeIdle)
+	enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+	target, cond := claimIdleForTest(t, s, target, "run-on-demand")
+	_, _, _, err := s.ClaimIdleSuspend(ctx, target.ID, cond)
+	require.NoError(t, err)
+	setPhaseForTest(t, s, target.ID, string(state.PhaseStopped))
+	expireIdleClaim(t, s, target.ID)
+	claimed, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	require.True(t, claimed.IdleSuspendClaimActive)
+
+	awReadyOnStart(t, s, target.ID)
+	res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, claimed, "no sweep tick needed"))
+	require.Nil(t, dmErr)
+	assert.Equal(t, AgentDMAccepted, res.Outcome)
+	require.Len(t, disp.getStartCalls(), 1)
+	msgs := disp.getMessageCalls()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "no sweep tick needed", msgs[0].Message)
+}
+
+// TestIdleSuspendRecovery_AmbiguousCommitWithMembershipHold: a commit that took
+// effect but returned an error is recorded on retry even when a membership
+// hold made the stored reason NULL, so the post-record steps run (the claim
+// is cleared) and the held agent never carries suspend_reason=idle.
+func TestIdleSuspendRecovery_AmbiguousCommitWithMembershipHold(t *testing.T) {
+	ctx := context.Background()
+	f := newIdleRecoveryFixture(t, "rec-ambig-hold", true)
+	_, err := f.raw.(*entadapter.CompositeStore).CreateAgentHolds(ctx, []*store.AgentHold{{
+		AgentID: f.agent.ID, ProjectID: f.agent.ProjectID, Cause: store.AgentHoldCauseOwnerAccessEnded,
+		RootPrincipalType: store.AgentHoldRootUser, RootPrincipalID: "11111111-1111-1111-1111-111111111111",
+		Trigger: store.MembershipLossTriggerMemberRemove,
+	}})
+	require.NoError(t, err)
+	fastIdleCommitRetry(t)
+	f.faulty.ambiguous.Store(true)
+
+	f.suspendOnce(t)
+
+	got := f.get(t)
+	assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+	assert.Empty(t, got.SuspendReason)
+	assert.Nil(t, got.IdleSuspendClaimUntil, "recorded: the post-record steps ran and cleared the claim")
 }
 
 // TestIdleSuspendRecovery_DMNotDispatchedWhileSuspendUnsettled covers the

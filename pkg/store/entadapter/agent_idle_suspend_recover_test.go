@@ -192,4 +192,41 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, inProgress)
 	})
+
+	t.Run("a membership hold records suspended with no suspend reason", func(t *testing.T) {
+		a, until := claimed(t, "rec-hold", true)
+		setPhase(t, a.ID, string(state.PhaseStopped))
+		cs := NewCompositeStore(s.client)
+		_, err := cs.CreateAgentHolds(ctx, []*store.AgentHold{{
+			AgentID: a.ID, ProjectID: projectID, Cause: store.AgentHoldCauseOwnerAccessEnded,
+			RootPrincipalType: store.AgentHoldRootUser, RootPrincipalID: uuid.NewString(),
+			Trigger: store.MembershipLossTriggerMemberRemove,
+		}})
+		require.NoError(t, err)
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, recoverUpdate(a.ID, until)))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+		assert.Empty(t, got.SuspendReason, "a held agent never carries suspend_reason=idle")
+		assert.Nil(t, got.IdleSuspendClaimUntil)
+	})
+
+	t.Run("a held start claim rejects recovery until it is released", func(t *testing.T) {
+		a, until := claimed(t, "rec-startclaim", true)
+		setPhase(t, a.ID, string(state.PhaseStopped))
+		row, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, row.RunIntentAt)
+		// The intent-stop backstop's stop claim yields to nothing once the lease expired.
+		_, err = s.ClaimAgentStop(ctx, a.ID, "backstop", *row.RunIntentAt, time.Minute)
+		require.NoError(t, err)
+		assert.ErrorIs(t, s.UpdateAgentStatus(ctx, a.ID, recoverUpdate(a.ID, until)), store.ErrIdleSuspendPrecondition)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseStopped), got.Phase)
+
+		_, err = clearStartClaim(s.client.Agent.UpdateOneID(uuid.MustParse(a.ID))).Save(ctx)
+		require.NoError(t, err)
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, recoverUpdate(a.ID, until)))
+	})
 }

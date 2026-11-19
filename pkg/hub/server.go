@@ -5921,14 +5921,16 @@ func (s *Server) agentIdleSuspendHandler() func(ctx context.Context) {
 		if !s.experimentEnabled(experiments.IdleSuspend) {
 			return
 		}
+		// Settle idle suspends whose stop landed but whose record did not,
+		// before selecting new candidates. It needs only the experiment: a
+		// claim exists only because the sweep ran, and the operator turning
+		// auto_suspend_idle off must not strand it.
+		s.recoverIdleSuspendClaims(ctx)
+
 		enabled, after := s.idleSuspendSettings()
 		if !enabled {
 			return
 		}
-
-		// Settle idle suspends whose stop landed but whose record did not,
-		// before selecting new candidates (same gates as the sweep).
-		s.recoverIdleSuspendClaims(ctx)
 
 		budget := s.idleAutoSuspendAvailableSlots()
 		if budget <= 0 {

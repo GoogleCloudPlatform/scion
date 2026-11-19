@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -43,22 +42,21 @@ var (
 )
 
 // stopOutcomeUnknown reports whether a failed stop dispatch may nonetheless
-// have stopped the container: a timeout, a cancellation or a transport error.
-// A broker's HTTP refusal, a request that was never sent and a run mismatch
-// are definite and return false, as do errors raised before anything was sent.
+// have stopped the container: a timeout, a lost control-channel connection
+// after the request was sent, a cross-node wait that expired with the stop
+// intent still open, or a network timeout. It reuses the create path's
+// classification (isUnknownDispatchOutcome), so a dial failure, a request that
+// was never sent, a broker's HTTP refusal, a run mismatch and any error raised
+// before anything was sent are definite and return false.
 func stopOutcomeUnknown(err error) bool {
 	if err == nil {
 		return false
 	}
 	var se *brokerStatusError
-	if errors.As(err, &se) || errors.Is(err, errStartRequestNotSent) || errors.Is(err, ErrStopRunNotFound) {
+	if errors.As(err, &se) || errors.Is(err, ErrStopRunNotFound) {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return true
-	}
-	var ne net.Error
-	return errors.As(err, &ne)
+	return isUnknownDispatchOutcome(err)
 }
 
 // recordIdleSuspendCommit writes the idle suspend's status update under the
@@ -66,7 +64,8 @@ func stopOutcomeUnknown(err error) bool {
 // within idleSuspendCommitBudget, on a context detached from the stop's
 // (which may be spent). It reports whether the suspension was recorded. A
 // guard rejection after an earlier attempt failed ambiguously counts as
-// recorded when the row already reads suspended(idle). On a final error the
+// recorded when the row already reads suspended for the same run under the same
+// claim stamp, whatever the reason (a membership hold records it as NULL). On a final error the
 // claim is left in place for sweep recovery.
 func (s *Server) recordIdleSuspendCommit(ctx context.Context, agentID, runID string, claimUntil time.Time, upd store.AgentStatusUpdate) (bool, error) {
 	rctx, cancel := detachedContext(ctx, idleSuspendCommitBudget)
@@ -79,7 +78,7 @@ func (s *Server) recordIdleSuspendCommit(ctx context.Context, agentID, runID str
 		if err == nil {
 			if !recorded && attempt > 0 {
 				if fresh, gerr := s.store.GetAgent(rctx, agentID); gerr == nil && fresh != nil &&
-					fresh.Phase == string(state.PhaseSuspended) && fresh.SuspendReason == upd.SuspendReason &&
+					fresh.Phase == string(state.PhaseSuspended) && fresh.RunID == runID &&
 					fresh.IdleSuspendClaimUntil != nil && fresh.IdleSuspendClaimUntil.Equal(claimUntil) {
 					return true, nil
 				}
@@ -102,15 +101,15 @@ func (s *Server) recordIdleSuspendCommit(ctx context.Context, agentID, runID str
 // recoverIdleSuspendClaims records suspended(idle) for idle suspends whose
 // stop landed but whose record did not (record write failure, hub restart,
 // unknown stop outcome): rows with an expired claim, run_intent=stopped and
-// phase stopping, stopped or error. It runs under the idle sweep's gates and
-// does nothing when either is off. The store guard (IfIdleSuspendRecover)
+// phase stopping, stopped or error. It runs whenever the experiment is on,
+// whether or not auto_suspend_idle is: a stamp exists only because the sweep
+// ran, and finishing a stop that already landed is not a new idle suspend.
+// Gating it on the setting would leave such a row "in progress" forever once
+// the operator turned the setting off. The store guard (IfIdleSuspendRecover)
 // re-checks everything on the locked row, so a row a user or hub lifecycle
 // write has since touched, a new run, a start claim or a deletion is skipped.
 func (s *Server) recoverIdleSuspendClaims(ctx context.Context) {
 	if !s.experimentEnabled(experiments.IdleSuspend) {
-		return
-	}
-	if enabled, _ := s.idleSuspendSettings(); !enabled {
 		return
 	}
 	rows, err := s.store.ListExpiredIdleSuspendClaims(ctx, idleSuspendRecoveryBatch)
@@ -164,4 +163,25 @@ func (s *Server) recoverIdleSuspendClaim(ctx context.Context, agent *store.Agent
 	}
 	endLifecycleOp()
 	s.events.PublishAgentStatus(rctx, agent)
+}
+
+// recoverExpiredIdleClaimOnDemand is called by a delivery wait that finds an
+// idle suspend in progress whose lease has expired (fresh read from
+// MarkAgentDelivery). When the row already reports stopping, stopped or error
+// it tries the recovery write for that one row, instead of leaving the wait to
+// run into the next sweep tick. The store guard re-checks everything, so a
+// row that is not recoverable is left untouched.
+func (s *Server) recoverExpiredIdleClaimOnDemand(ctx context.Context, agent *store.Agent) {
+	if agent == nil || agent.IdleSuspendClaimLeaseActive || !agent.IdleSuspendClaimActive {
+		return
+	}
+	switch state.Phase(agent.Phase) {
+	case state.PhaseStopping, state.PhaseStopped, state.PhaseError:
+	default:
+		return
+	}
+	if !s.experimentEnabled(experiments.IdleSuspend) {
+		return
+	}
+	s.recoverIdleSuspendClaim(ctx, agent)
 }

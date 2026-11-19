@@ -224,6 +224,7 @@ func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Ag
 		if !claimActive {
 			return nil
 		}
+		s.recoverExpiredIdleClaimOnDemand(ctx, fresh)
 		select {
 		case <-ctx.Done():
 			return errIdleSuspendInProgressNotSettled
