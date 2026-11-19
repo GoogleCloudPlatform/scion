@@ -128,13 +128,13 @@ func TestTriggerWebhookCreateHelp_DisclosuresAndSigningExample(t *testing.T) {
 }
 
 func TestBuildCreateTriggerRequest(t *testing.T) {
-	origName, origDesc, origWebhook := triggerName, triggerDescription, triggerWebhookRef
+	origName, origDesc, origWebhook, origGitHub := triggerName, triggerDescription, triggerWebhookRef, triggerGitHubSource
 	origTypes, origWhere, origWhereFile := triggerMatchTypes, triggerWhereRules, triggerWhereFile
 	origAgent, origMessage := triggerAgent, triggerMessage
 	origInt, origWake, origPlain := triggerInterrupt, triggerWake, triggerPlain
 	origSubj, origOnSubj := triggerSubjectExpr, triggerOnSubject
 	t.Cleanup(func() {
-		triggerName, triggerDescription, triggerWebhookRef = origName, origDesc, origWebhook
+		triggerName, triggerDescription, triggerWebhookRef, triggerGitHubSource = origName, origDesc, origWebhook, origGitHub
 		triggerMatchTypes, triggerWhereRules, triggerWhereFile = origTypes, origWhere, origWhereFile
 		triggerAgent, triggerMessage = origAgent, origMessage
 		triggerInterrupt, triggerWake, triggerPlain = origInt, origWake, origPlain
@@ -145,6 +145,7 @@ func TestBuildCreateTriggerRequest(t *testing.T) {
 		triggerName = "deploy-hook"
 		triggerDescription = "Deploy trigger"
 		triggerWebhookRef = "deploys"
+		triggerGitHubSource = false
 		triggerMatchTypes = nil
 		triggerWhereRules = nil
 		triggerWhereFile = ""
@@ -168,7 +169,7 @@ func TestBuildCreateTriggerRequest(t *testing.T) {
 		triggerWebhookRef = ""
 		_, err = buildCreateTriggerRequest()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--webhook is required")
+		assert.Contains(t, err.Error(), "either --webhook or --github is required")
 
 		resetFlags()
 		triggerAgent = ""
@@ -181,6 +182,33 @@ func TestBuildCreateTriggerRequest(t *testing.T) {
 		_, err = buildCreateTriggerRequest()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--message is required")
+	})
+
+	t.Run("github source validation and request shape", func(t *testing.T) {
+		resetFlags()
+		triggerGitHubSource = true
+		triggerWebhookRef = "deploys"
+		_, err := buildCreateTriggerRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--github and --webhook are mutually exclusive")
+
+		resetFlags()
+		triggerGitHubSource = true
+		triggerWebhookRef = ""
+		triggerMatchTypes = nil
+		_, err = buildCreateTriggerRequest()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--type is required when --github is set")
+
+		resetFlags()
+		triggerGitHubSource = true
+		triggerWebhookRef = ""
+		triggerMatchTypes = []string{"github.issue_comment.created"}
+		req, err := buildCreateTriggerRequest()
+		require.NoError(t, err)
+		assert.Equal(t, hubclient.TriggerSourceSpec{Kind: "github", ID: ""}, req.Source)
+		require.NotNil(t, req.Match)
+		assert.Equal(t, []string{"github.issue_comment.created"}, req.Match.Types)
 	})
 
 	t.Run("agent name vs agent UUID", func(t *testing.T) {
@@ -1558,6 +1586,7 @@ func TestTriggerCLI_RuleTextQuotedEscapesSpoofedElementLines(t *testing.T) {
 	outputFormat = ""
 	triggerName = "spoof-guard"
 	triggerWebhookRef = "deploys"
+	triggerGitHubSource = false
 	triggerAgent = "lead"
 	triggerMessage = "ok"
 	triggerWhereFile = ""
@@ -2739,4 +2768,122 @@ func TestTriggerHistoryCLI_MatchedThroughDecidedDialectAndVerboseTrace(t *testin
 	require.NotNil(t, parsed.Fires[0].RuleTrace)
 	assert.Len(t, parsed.Fires[0].RuleTrace.Elements, 2)
 	assert.Equal(t, []int{3}, parsed.Fires[1].RuleTrace.Unexecuted)
+
+func TestTriggerCLI_GitHubCreateGetAndList(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 18, 12, 10, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+	prevZone := clitime.Zone()
+	clitime.SetZone(time.UTC)
+	t.Cleanup(func() { clitime.SetZone(prevZone) })
+
+	origFormat := outputFormat
+	origName, origWebhook, origGitHub := triggerName, triggerWebhookRef, triggerGitHubSource
+	origTypes, origWhere, origWhereFile := triggerMatchTypes, triggerWhereRules, triggerWhereFile
+	origAgent, origMsg := triggerAgent, triggerMessage
+	origListSource, origListWebhook, origListStatus := triggerListSource, triggerListWebhook, triggerListStatus
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerName, triggerWebhookRef, triggerGitHubSource = origName, origWebhook, origGitHub
+		triggerMatchTypes, triggerWhereRules, triggerWhereFile = origTypes, origWhere, origWhereFile
+		triggerAgent, triggerMessage = origAgent, origMsg
+		triggerListSource, triggerListWebhook, triggerListStatus = origListSource, origListWebhook, origListStatus
+	})
+
+	trID := "dddddddd-1111-4222-8333-444444444444"
+	var seenCreateReq hubclient.CreateTriggerRequest
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&seenCreateReq))
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+				ID:        trID,
+				ProjectID: "proj-1",
+				Name:      seenCreateReq.Name,
+				Status:    "active",
+				Source:    seenCreateReq.Source,
+				Match:     *seenCreateReq.Match,
+				Action:    seenCreateReq.Action,
+				CreatedAt: fixedNow,
+				UpdatedAt: fixedNow,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{
+				Scope: hubclient.TriggerListScopeCaller,
+				Triggers: []hubclient.Trigger{{
+					ID:        trID,
+					ProjectID: "proj-1",
+					Name:      "gh-ping",
+					Status:    "active",
+					Source:    hubclient.TriggerSourceSpec{Kind: "github", ID: ""},
+					Match:     hubclient.TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+					Action:    hubclient.TriggerActionSpec{Type: "message", AgentName: "ping-target", Message: "hi"},
+					CreatedAt: fixedNow,
+					UpdatedAt: fixedNow,
+				}},
+				TotalCount: 1,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID:
+			_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+				ID:                    trID,
+				ProjectID:             "proj-1",
+				Name:                  "gh-ping",
+				Status:                "active",
+				AuthorizationRevision: 1,
+				Source:                hubclient.TriggerSourceSpec{Kind: "github", ID: ""},
+				Match: hubclient.TriggerMatchSpec{
+					Types: []string{"github.issue_comment.created"},
+					Rules: []hubclient.TriggerMatchRuleSpec{
+						{Dialect: "cel", Expr: "event.attributes.command == 'ping'"},
+					},
+				},
+				Action:    hubclient.TriggerActionSpec{Type: "message", AgentName: "ping-target", Message: "hi"},
+				CreatedAt: fixedNow,
+				UpdatedAt: fixedNow,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindAgentToken)
+
+	// 1. Create GitHub trigger (--github --type ... --where ...).
+	outputFormat = ""
+	triggerName = "gh-ping"
+	triggerWebhookRef = ""
+	triggerGitHubSource = true
+	triggerMatchTypes = []string{"github.issue_comment.created"}
+	triggerWhereFile = ""
+	triggerWhereRules = []string{"event.attributes.command == 'ping'"}
+	triggerAgent = "ping-target"
+	triggerMessage = "Received GitHub comment trigger event"
+
+	createOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerCreate(triggerCreateCmd, nil))
+	})
+	assert.Equal(t, hubclient.TriggerSourceSpec{Kind: "github", ID: ""}, seenCreateReq.Source)
+	require.NotNil(t, seenCreateReq.Match)
+	assert.Equal(t, []hubclient.TriggerMatchRuleSpec{{Dialect: "cel", Expr: "event.attributes.command == 'ping'"}}, seenCreateReq.Match.Rules)
+	assert.Contains(t, createOut, "Source:  github\n")
+	assert.Contains(t, createOut, "github.issue_comment.created")
+	assert.Contains(t, createOut, `1/1 [cel] "event.attributes.command == 'ping'"`)
+
+	// 2. Get GitHub trigger renders source "github" without a trailing colon and shows numbered rules.
+	trGetOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerGet(triggerGetCmd, []string{trID}))
+	})
+	assert.Contains(t, trGetOut, "Source:      github\n")
+	assert.NotContains(t, trGetOut, "github:")
+	assert.Contains(t, trGetOut, `1/1 [cel] "event.attributes.command == 'ping'"`)
+
+	// 3. List GitHub triggers renders source "github" without a trailing colon.
+	triggerListSource = "github"
+	triggerListWebhook = ""
+	triggerListStatus = ""
+	listOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerList(triggerListCmd, nil))
+	})
+	assert.Contains(t, listOut, "gh-ping")
+	assert.NotContains(t, listOut, "github:")
 }

@@ -41,19 +41,20 @@ import (
 const maxTriggerWhereFileBytes = 64 * 1024
 
 var (
-	triggerName        string
-	triggerDescription string
-	triggerWebhookRef  string
-	triggerMatchTypes  []string
-	triggerWhereRules  []string
-	triggerWhereFile   string
-	triggerAgent       string
-	triggerMessage     string
-	triggerInterrupt   bool
-	triggerWake        bool
-	triggerPlain       bool
-	triggerSubjectExpr string
-	triggerOnSubject   string
+	triggerName         string
+	triggerDescription  string
+	triggerWebhookRef   string
+	triggerGitHubSource bool
+	triggerMatchTypes   []string
+	triggerWhereRules   []string
+	triggerWhereFile    string
+	triggerAgent        string
+	triggerMessage      string
+	triggerInterrupt    bool
+	triggerWake         bool
+	triggerPlain        bool
+	triggerSubjectExpr  string
+	triggerOnSubject    string
 
 	triggerListSource  string
 	triggerListWebhook string
@@ -96,7 +97,7 @@ var triggerCmd = &cobra.Command{
 var triggerCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create an event trigger",
-	Long: `Create an event trigger attached to a webhook endpoint. Requires --name, --webhook, --agent, and --message.
+	Long: `Create an event trigger attached to a webhook endpoint (--webhook) or the project's GitHub App source (--github). Requires --name, either --webhook or --github, --agent, and --message (--github also requires at least one --type).
 
 Ordered Match Rules & CEL Guidance:
   --where [<dialect>:]<expr> is repeatable (1-8 elements, <= 4096 bytes each;
@@ -131,7 +132,7 @@ Examples:
   # Deliver a message to agent "lead" whenever webhook endpoint "deploys" receives an event
   scion trigger create --name deploy-finished --webhook deploys --agent lead --message "Check incoming deploy event" --wake
 
-  # Match specific event types
+  # Match specific webhook event types
   scion trigger create --name prod-deploy --webhook deploys --type webhook.deploy.finished --agent lead --message "Production deploy finished"
 
   # Filter with ordered CEL predicates (put cheap CEL guards first; short-circuits on false)
@@ -140,7 +141,10 @@ Examples:
     --where 'has(event.payload) && has(event.payload.env) && event.payload.env == "prod"' \
     --where 'has(event.attributes.subject) && event.attributes.subject.matches("^release/")' \
     --subject 'has(event.payload) && has(event.payload.service) ? string(event.payload.service) : string(event.subject)' \
-    --agent lead --message "Inspect production release event"`,
+    --agent lead --message "Inspect production release event"
+
+  # Deliver a message to agent "lead" on GitHub issue/PR comments
+  scion trigger create --name gh-ping --github --type github.issue_comment.created --agent lead --message "Check incoming GitHub comment" --wake`,
 	RunE: runTriggerCreate,
 }
 
@@ -489,8 +493,14 @@ func buildCreateTriggerRequest() (*hubclient.CreateTriggerRequest, error) {
 		return nil, newUsageError("--name is required")
 	}
 	webhookRef := strings.TrimSpace(triggerWebhookRef)
-	if webhookRef == "" {
-		return nil, newUsageError("--webhook is required")
+	if triggerGitHubSource && webhookRef != "" {
+		return nil, newUsageError("--github and --webhook are mutually exclusive")
+	}
+	if !triggerGitHubSource && webhookRef == "" {
+		return nil, newUsageError("either --webhook or --github is required")
+	}
+	if triggerGitHubSource && len(triggerMatchTypes) == 0 {
+		return nil, newUsageError("--type is required when --github is set")
 	}
 	agentRef := strings.TrimSpace(triggerAgent)
 	if agentRef == "" {
@@ -513,14 +523,22 @@ func buildCreateTriggerRequest() (*hubclient.CreateTriggerRequest, error) {
 		action.AgentName = agentRef
 	}
 
+	source := hubclient.TriggerSourceSpec{
+		Kind: "webhook",
+		ID:   webhookRef,
+	}
+	if triggerGitHubSource {
+		source = hubclient.TriggerSourceSpec{
+			Kind: "github",
+			ID:   "",
+		}
+	}
+
 	req := &hubclient.CreateTriggerRequest{
 		Name:        name,
 		Description: triggerDescription,
-		Source: hubclient.TriggerSourceSpec{
-			Kind: "webhook",
-			ID:   webhookRef,
-		},
-		Action: action,
+		Source:      source,
+		Action:      action,
 	}
 
 	whereFile := strings.TrimSpace(triggerWhereFile)
@@ -1007,8 +1025,9 @@ func init() {
 
 	triggerCreateCmd.Flags().StringVar(&triggerName, "name", "", "Trigger name (required)")
 	triggerCreateCmd.Flags().StringVar(&triggerDescription, "description", "", "Optional trigger description")
-	triggerCreateCmd.Flags().StringVar(&triggerWebhookRef, "webhook", "", "Webhook endpoint ID or name (required)")
-	triggerCreateCmd.Flags().StringSliceVar(&triggerMatchTypes, "type", nil, "Event type pattern to match (repeatable; default webhook.received)")
+	triggerCreateCmd.Flags().StringVar(&triggerWebhookRef, "webhook", "", "Webhook endpoint ID or name (mutually exclusive with --github)")
+	triggerCreateCmd.Flags().BoolVar(&triggerGitHubSource, "github", false, "Attach to the project's GitHub App source (mutually exclusive with --webhook)")
+	triggerCreateCmd.Flags().StringSliceVar(&triggerMatchTypes, "type", nil, "Event type pattern to match (repeatable; default webhook.received for --webhook; required for --github)")
 	triggerCreateCmd.Flags().StringArrayVar(&triggerWhereRules, "where", nil, "Ordered match rule [<dialect>:]<expr> (repeatable, 1-8 rules, <= 4096B each; put cheap CEL guards first; run matches() on event.attributes.<k> or one event.payload.<field>, not whole payload)")
 	triggerCreateCmd.Flags().StringVar(&triggerWhereFile, "where-file", "", "Path to JSON file containing an ordered array of {dialect, expr} match rules")
 	triggerCreateCmd.Flags().StringVar(&triggerAgent, "agent", "", "Target agent name or ID (required)")
@@ -1019,7 +1038,7 @@ func init() {
 	triggerCreateCmd.Flags().StringVar(&triggerSubjectExpr, "subject", "", "Optional CEL expression deriving the concurrency subject (string, <= 1024B)")
 	triggerCreateCmd.Flags().StringVar(&triggerOnSubject, "on-subject", "", "Subject concurrency policy (new or skip; default new)")
 
-	triggerListCmd.Flags().StringVar(&triggerListSource, "source", "", "Filter by source kind (e.g. webhook)")
+	triggerListCmd.Flags().StringVar(&triggerListSource, "source", "", "Filter by source kind (webhook or github)")
 	triggerListCmd.Flags().StringVar(&triggerListWebhook, "webhook", "", "Filter by webhook endpoint ID or name")
 	triggerListCmd.Flags().StringVar(&triggerListStatus, "status", "", "Filter by status (active or paused)")
 
