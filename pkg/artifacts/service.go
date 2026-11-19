@@ -419,6 +419,9 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //	DELETE /api/v1/artifacts/{id}/links/{linkId}            revoke a share link
 //	PUT  /api/v1/artifacts/{id}/review-sessions/{sid}       heartbeat of an open review tab
 //	DELETE /api/v1/artifacts/{id}/review-sessions/{sid}     the review was closed, or its page left
+//	GET  /api/v1/artifacts/{id}/review-draft                the caller's saved draft review of the artifact
+//	PUT  /api/v1/artifacts/{id}/review-draft                create or replace the caller's saved draft review
+//	DELETE /api/v1/artifacts/{id}/review-draft              delete the caller's saved draft review
 //	GET  /api/v1/artifacts/shared/{token}[/files/{path}]    a share-link read (303 to the view route)
 //
 // Everything else answers 404.
@@ -522,6 +525,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleReviewSession(w, r, id, segs[2])
+	case len(segs) == 2 && segs[1] == reviewDraftSegment:
+		s.handleReviewDraft(w, r, id)
 	case len(segs) == 2 && segs[1] == "versions":
 		switch {
 		case isRead(r.Method):
