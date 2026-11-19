@@ -31,6 +31,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
@@ -2147,4 +2148,195 @@ func TestTriggerCLI_JSONFlagEverywhere(t *testing.T) {
 			require.NoError(t, json.Unmarshal([]byte(out), &decoded), "%s --json must emit valid JSON, got:\n%s", tc.name, out)
 		})
 	}
+}
+
+func TestTriggerEventAndHistoryCLI_SanitizesTerminalControlAndBidiCharacters(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 19, 14, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+	prevZone := clitime.Zone()
+	clitime.SetZone(time.UTC)
+	t.Cleanup(func() { clitime.SetZone(prevZone) })
+
+	origIsTTY := textOutputIsTerminal
+	textOutputIsTerminal = func() bool { return false }
+	t.Cleanup(func() { textOutputIsTerminal = origIsTTY })
+
+	origFormat := outputFormat
+	origJSON := triggerOutputJSON
+	origEvPayload := triggerEventPayloadOnly
+	origEvSource, origEvWebhook, origEvStatus, origEvSince := triggerEventListSource, triggerEventListWebhook, triggerEventListStatus, triggerEventListSince
+	origEvLimit, origEvCursor := triggerEventListLimit, triggerEventListCursor
+	origHistLimit, origHistCursor := triggerHistoryLimit, triggerHistoryCursor
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerOutputJSON = origJSON
+		triggerEventPayloadOnly = origEvPayload
+		triggerEventListSource, triggerEventListWebhook, triggerEventListStatus, triggerEventListSince = origEvSource, origEvWebhook, origEvStatus, origEvSince
+		triggerEventListLimit, triggerEventListCursor = origEvLimit, origEvCursor
+		triggerHistoryLimit, triggerHistoryCursor = origHistLimit, origHistCursor
+	})
+
+	const (
+		trID    = "11111111-4444-4333-8444-555555555555"
+		evID    = "22222222-4444-4333-8444-555555555555"
+		rawEvID = "33333333-4444-4333-8444-555555555555"
+	)
+
+	// Hostile strings containing C0 ANSI/OSC escapes, CR, LF line-forging, DEL, C1 CSI, and Unicode Cf bidi overrides.
+	hostileSubject := "webhook:ep/\x1b[31mPWN\x1b[0m\rFAKE\u202egnp.exe\u2069"
+	hostileAttrVal := "title-\x1b]52;c;aGVsbG8=\x07-\u009b31m-\u202ebidi\n  forged_attr: evil\x7f"
+	hostileAttrKey := "key\x1b[2J\u202e"
+	hostileListVal := "label-\x1b[32m-\u202e-override"
+	hostileHeaderVal := "hdr-\x1b[33m-\u2066isolate\r\n  x-forged: 1"
+	hostileError := "dispatch failed: \x1b[31mboom\u202e\rspoof"
+	hostileCursor := "tok-\x1b[35m-\u202e"
+
+	payloadMap := map[string]any{
+		"title": "PR \x1b[31m#99\x1b[0m \u202eevil-bidi\u2069",
+		"body":  "line1\nline2\t\x7f\u009b31mC1\u2028sep",
+	}
+	payloadBytes, err := json.Marshal(payloadMap)
+	require.NoError(t, err)
+
+	evSummary := hubclient.TriggerEventSummary{
+		ID:        evID,
+		ProjectID: "proj-1",
+		Source:    hubclient.TriggerSourceSpec{Kind: "webhook", ID: "ep-\x1b[31m1"},
+		Type:      "webhook.\x1b[31mreceived\u202e",
+		Subject:   hostileSubject,
+		DedupKey:  "dedup-\x1b[31m-\u202e",
+		Attributes: map[string]string{
+			"clean":        "ok",
+			hostileAttrKey: hostileAttrVal,
+		},
+		Lists: map[string][]string{
+			"labels": {"clean-label", hostileListVal},
+		},
+		OccurredAt:   fixedNow,
+		ReceivedAt:   fixedNow,
+		PayloadBytes: len(payloadBytes),
+		Status:       "failed",
+		Error:        hostileError,
+		CreatedAt:    fixedNow,
+	}
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events":
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerEventsResponse{
+				Events:     []hubclient.TriggerEventSummary{evSummary},
+				NextCursor: hostileCursor,
+				TotalCount: 2,
+				ServerTime: fixedNow,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+evID:
+			_ = json.NewEncoder(w).Encode(hubclient.TriggerEventDetail{
+				TriggerEventSummary: evSummary,
+				Headers:             map[string]string{"x-scion-subject": hostileHeaderVal},
+				Payload:             json.RawMessage(payloadBytes),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+rawEvID:
+			// Simulate non-JSON raw payload fallback with multi-line \n/\t plus hostile escapes.
+			w.Write([]byte(`{"id":"` + rawEvID + `","projectId":"proj-1","source":{"kind":"webhook","id":"ep1"},"type":"webhook.received","subject":"sub","occurredAt":"2026-11-19T14:00:00Z","receivedAt":"2026-11-19T14:00:00Z","status":"processed","createdAt":"2026-11-19T14:00:00Z","payload":"not-an-object"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID+"/history":
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerFiresResponse{
+				Fires: []hubclient.TriggerFire{{
+					ID:        "44444444-4444-4333-8444-555555555555",
+					TriggerID: trID,
+					EventID:   evID,
+					ProjectID: "proj-1",
+					Subject:   hostileSubject,
+					Status:    "failed",
+					Error:     hostileError,
+					StartedAt: fixedNow,
+				}},
+				NextCursor: hostileCursor,
+				TotalCount: 2,
+				ServerTime: fixedNow,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindOAuth)
+
+	assertTerminalSafe := func(t *testing.T, label, out string) {
+		t.Helper()
+		for i, r := range out {
+			if r == '\n' || r == '\t' {
+				continue
+			}
+			require.Falsef(t, r < 0x20 || r == 0x7f, "%s contains raw C0/DEL control U+%04X at byte %d:\n%q", label, r, i, out)
+			require.Falsef(t, r >= 0x80 && r <= 0x9f, "%s contains raw C1 control U+%04X at byte %d:\n%q", label, r, i, out)
+			require.Falsef(t, unicode.Is(unicode.Cf, r), "%s contains raw Unicode Cf format/bidi rune U+%04X at byte %d:\n%q", label, r, i, out)
+			require.Falsef(t, r == '\u2028' || r == '\u2029', "%s contains raw line/paragraph separator U+%04X at byte %d:\n%q", label, r, i, out)
+		}
+		for _, line := range strings.Split(out, "\n") {
+			assert.False(t, strings.HasPrefix(line, "  forged_attr:"), "%s allowed newline spoofing:\n%s", label, out)
+			assert.False(t, strings.HasPrefix(line, "  x-forged:"), "%s allowed header newline spoofing:\n%s", label, out)
+		}
+	}
+
+	// 1. `scion trigger event get <id>` (human mode) escapes ANSI, CR/LF, DEL, C1, and Cf bidi overrides in subject, attributes, lists, headers, error, and payload.
+	outputFormat = ""
+	triggerOutputJSON = false
+	triggerEventPayloadOnly = false
+	evGetOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	})
+	assertTerminalSafe(t, "event get", evGetOut)
+	assert.Contains(t, evGetOut, `\x1b[31m`)
+	assert.Contains(t, evGetOut, `\u{202e}`)
+	assert.Contains(t, evGetOut, `\u202e`)
+
+	// 2. `scion trigger event get <id> --payload` emits terminal-safe valid JSON whose unmarshaled values round-trip cleanly.
+	triggerEventPayloadOnly = true
+	payloadOnlyOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	})
+	assertTerminalSafe(t, "event get --payload", payloadOnlyOut)
+	var decodedPayload map[string]any
+	require.NoError(t, json.Unmarshal([]byte(payloadOnlyOut), &decodedPayload))
+	assert.Equal(t, payloadMap["title"], decodedPayload["title"])
+	assert.Equal(t, payloadMap["body"], decodedPayload["body"])
+
+	// Also unit-test formatTriggerEventPayload directly on malformed non-JSON bytes with multi-line \n/\t + ANSI + bidi override.
+	rawFallback := formatTriggerEventPayload(json.RawMessage("not-json:\n\t\x1b[31mRED\u202e\rFAKE"), "  ")
+	assertTerminalSafe(t, "formatTriggerEventPayload fallback", rawFallback)
+	assert.Contains(t, rawFallback, "\n  \t")
+	assert.Contains(t, rawFallback, `\x1b[31m`)
+	assert.Contains(t, rawFallback, `\u{202e}`)
+
+	// 3. `scion trigger event list` (human mode) escapes hostile subject, source, type, and next-cursor.
+	triggerEventPayloadOnly = false
+	triggerEventListSource, triggerEventListWebhook, triggerEventListStatus, triggerEventListSince = "", "", "", ""
+	triggerEventListLimit = defaultTriggerEventListLimit
+	triggerEventListCursor = ""
+	evListOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventList(triggerEventListCmd, nil))
+	})
+	assertTerminalSafe(t, "event list", evListOut)
+	assert.Contains(t, evListOut, `\x1b[31m`)
+	assert.Contains(t, evListOut, `\u{202e}`)
+
+	// 4. `scion trigger history <id>` (human mode) escapes hostile subject, error, and next-cursor.
+	triggerHistoryLimit = 0
+	triggerHistoryCursor = ""
+	histOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerHistory(triggerHistoryCmd, []string{trID}))
+	})
+	assertTerminalSafe(t, "trigger history", histOut)
+	assert.Contains(t, histOut, `\x1b[31m`)
+	assert.Contains(t, histOut, `\u{202e}`)
+
+	// 5. `--json` output stays standard JSON-escaped and round-trips original strings without corruption.
+	triggerOutputJSON = true
+	jsonGetOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
+	})
+	var gotDetail hubclient.TriggerEventDetail
+	require.NoError(t, json.Unmarshal([]byte(jsonGetOut), &gotDetail))
+	assert.Equal(t, hostileSubject, gotDetail.Subject)
+	assert.Equal(t, hostileAttrVal, gotDetail.Attributes[hostileAttrKey])
+	assert.Equal(t, []string{"clean-label", hostileListVal}, gotDetail.Lists["labels"])
 }

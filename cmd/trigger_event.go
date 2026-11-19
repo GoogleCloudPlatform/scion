@@ -198,11 +198,11 @@ func runTriggerEventList(cmd *cobra.Command, args []string) error {
 			subj = "-"
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
-			shortID,
-			formatTriggerSource(ev.Source, 8),
-			ev.Type,
-			subj,
-			ev.Status,
+			triggerTerminalText(shortID, false),
+			triggerTerminalText(formatTriggerSource(ev.Source, 8), false),
+			triggerTerminalText(ev.Type, false),
+			triggerTerminalText(subj, false),
+			triggerTerminalText(ev.Status, false),
 			ev.MatchCount,
 			ev.FireCount,
 			clitime.Ago(ev.ReceivedAt),
@@ -210,7 +210,8 @@ func runTriggerEventList(cmd *cobra.Command, args []string) error {
 	}
 	_ = w.Flush()
 	if resp.NextCursor != "" {
-		fmt.Printf("\nNext cursor: %s (use 'scion trigger event list --cursor %s' for the next page)\n", resp.NextCursor, resp.NextCursor)
+		safeCursor := triggerTerminalText(resp.NextCursor, false)
+		fmt.Printf("\nNext cursor: %s (use 'scion trigger event list --cursor %s' for the next page)\n", safeCursor, safeCursor)
 	}
 	return nil
 }
@@ -250,14 +251,14 @@ func runTriggerEventGet(cmd *cobra.Command, args []string) error {
 		processed = clitime.Format(*detail.ProcessedAt, clitime.Full)
 	}
 
-	fmt.Printf("Event:        %s\n", detail.ID)
-	fmt.Printf("Type:         %s\n", detail.Type)
-	fmt.Printf("Source:       %s\n", formatTriggerSource(detail.Source, 0))
-	fmt.Printf("Subject:      %s\n", subj)
-	fmt.Printf("Dedup Key:    %s\n", detail.DedupKey)
-	fmt.Printf("Status:       %s\n", detail.Status)
+	fmt.Printf("Event:        %s\n", triggerTerminalText(detail.ID, false))
+	fmt.Printf("Type:         %s\n", triggerTerminalText(detail.Type, false))
+	fmt.Printf("Source:       %s\n", triggerTerminalText(formatTriggerSource(detail.Source, 0), false))
+	fmt.Printf("Subject:      %s\n", triggerTerminalText(subj, false))
+	fmt.Printf("Dedup Key:    %s\n", triggerTerminalText(detail.DedupKey, false))
+	fmt.Printf("Status:       %s\n", triggerTerminalText(detail.Status, false))
 	if detail.Error != "" {
-		fmt.Printf("Error:        %s\n", detail.Error)
+		fmt.Printf("Error:        %s\n", triggerTerminalText(detail.Error, false))
 	}
 	fmt.Printf("Occurred:     %s\n", clitime.Format(detail.OccurredAt, clitime.Full))
 	fmt.Printf("Received:     %s\n", clitime.Format(detail.ReceivedAt, clitime.Full))
@@ -276,7 +277,7 @@ func runTriggerEventGet(cmd *cobra.Command, args []string) error {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Printf("  %s: %s\n", k, detail.Attributes[k])
+			fmt.Printf("  %s: %s\n", triggerTerminalText(k, false), triggerTerminalText(detail.Attributes[k], false))
 		}
 	}
 
@@ -290,16 +291,7 @@ func runTriggerEventGet(cmd *cobra.Command, args []string) error {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			vals := detail.Lists[k]
-			if vals == nil {
-				vals = []string{}
-			}
-			encoded, mErr := json.Marshal(vals)
-			if mErr != nil {
-				fmt.Printf("  %s: [%s]\n", k, strings.Join(vals, ", "))
-				continue
-			}
-			fmt.Printf("  %s: %s\n", k, string(encoded))
+			fmt.Printf("  %s: %s\n", triggerTerminalText(k, false), formatTriggerQuotedList(detail.Lists[k]))
 		}
 	}
 
@@ -311,7 +303,7 @@ func runTriggerEventGet(cmd *cobra.Command, args []string) error {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Printf("  %s: %s\n", k, detail.Headers[k])
+			fmt.Printf("  %s: %s\n", triggerTerminalText(k, false), triggerTerminalText(detail.Headers[k], false))
 		}
 	}
 
@@ -327,9 +319,13 @@ func formatTriggerEventPayload(raw json.RawMessage, prefix string) string {
 	}
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, trimmed, prefix, "  "); err != nil {
-		return prefix + string(trimmed)
+		safe := triggerTerminalText(string(trimmed), true)
+		if prefix != "" {
+			safe = strings.ReplaceAll(safe, "\n", "\n"+prefix)
+		}
+		return prefix + safe
 	}
-	return prefix + buf.String()
+	return prefix + escapeTriggerJSONTerminalRunes(buf.String())
 }
 
 func init() {

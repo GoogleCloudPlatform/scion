@@ -25,6 +25,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
+	"unicode/utf16"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
@@ -810,20 +812,94 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 			errMsg = "-"
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			shortID,
-			shortEvent,
-			fire.Status,
-			subj,
+			triggerTerminalText(shortID, false),
+			triggerTerminalText(shortEvent, false),
+			triggerTerminalText(fire.Status, false),
+			triggerTerminalText(subj, false),
 			started,
 			finished,
-			errMsg,
+			triggerTerminalText(errMsg, false),
 		)
 	}
 	_ = w.Flush()
 	if resp.NextCursor != "" {
-		fmt.Printf("\nNext cursor: %s\n", resp.NextCursor)
+		fmt.Printf("\nNext cursor: %s\n", triggerTerminalText(resp.NextCursor, false))
 	}
 	return nil
+}
+
+// triggerTerminalText unconditionally escapes C0/DEL/C1 control characters,
+// Unicode Cf format characters (including bidirectional overrides), invalid
+// UTF-8 bytes, and Unicode line/paragraph separators for terminal display,
+// regardless of whether stdout is a TTY. Newlines and tabs are preserved only
+// when keepLines is true (multi-line blocks).
+func triggerTerminalText(s string, keepLines bool) string {
+	escaped := escapeForTerminal(s, keepLines)
+	if !strings.ContainsAny(escaped, "\u2028\u2029") {
+		return escaped
+	}
+	var b strings.Builder
+	b.Grow(len(escaped) + 8)
+	for _, r := range escaped {
+		switch r {
+		case '\u2028', '\u2029':
+			fmt.Fprintf(&b, `\u{%04x}`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// formatTriggerQuotedList formats a string slice as [%q,%q,...] using Go's %q
+// quoting (matching 3b-1 rule quoting) so C0/C1 controls, DEL, newlines, and
+// Unicode Cf characters are escaped without breaking clean ["a","b"] output.
+func formatTriggerQuotedList(vals []string) string {
+	if len(vals) == 0 {
+		return "[]"
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, v := range vals {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%q", v)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// escapeTriggerJSONTerminalRunes rewrites DEL (0x7f), C1 controls (0x80..0x9f),
+// and Unicode Cf format characters inside json.Indent output to standard RFC 8259
+// \uXXXX escapes (or UTF-16 surrogate pairs above U+FFFF), keeping the document
+// valid JSON while preventing terminal control or bidi injection.
+func escapeTriggerJSONTerminalRunes(indented string) string {
+	needsEscape := false
+	for _, r := range indented {
+		if r == 0x7f || (r >= 0x80 && r <= 0x9f) || unicode.Is(unicode.Cf, r) {
+			needsEscape = true
+			break
+		}
+	}
+	if !needsEscape {
+		return indented
+	}
+	var b strings.Builder
+	b.Grow(len(indented) + 16)
+	for _, r := range indented {
+		if r == 0x7f || (r >= 0x80 && r <= 0x9f) || unicode.Is(unicode.Cf, r) {
+			if r <= 0xffff {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			} else {
+				r1, r2 := utf16.EncodeRune(r)
+				fmt.Fprintf(&b, `\u%04x\u%04x`, r1, r2)
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func formatTriggerSource(src hubclient.TriggerSourceSpec, maxIDLen int) string {
