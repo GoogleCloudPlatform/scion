@@ -354,16 +354,19 @@ func TestRecordedRuntime_BulkResetAuthMarksRuntimeUnavailable(t *testing.T) {
 }
 
 // TestRecordedRuntime_RestartStartLegFailureRecordsStopped pins that when a
-// restart's stop leg succeeds and its start leg fails, the hub records the
-// agent as stopped the way an explicit stop does (phase, container status,
-// exposed ports cleared, status event published) rather than leaving its
-// pre-restart state in place, and still relays the start leg's
+// restart's stop leg succeeds and its start leg fails with 503
+// runtime_unavailable, the hub reverts the minted run ID to the previous run,
+// records the agent as stopped the way an explicit stop does (phase, container
+// status, exposed ports cleared, status event published) rather than leaving
+// its pre-restart state in place, and still relays the start leg's
 // runtime_unavailable answer.
 func TestRecordedRuntime_RestartStartLegFailureRecordsStopped(t *testing.T) {
 	srv, s := testServer(t)
 	agent := setupBrokerAgentInPhase(t, s, "restart-start-fails", "running")
 	agent.Runtime = "kubernetes"
 	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	_, err := s.SetAgentRunID(context.Background(), agent.ID, "run-prev", nil)
+	require.NoError(t, err)
 	mockClient := &mockRuntimeBrokerClient{}
 	d := NewHTTPAgentDispatcherWithClient(s, startErrClient{mockClient, runtimeUnavailableErr()}, false, slog.Default())
 	d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
@@ -379,6 +382,7 @@ func TestRecordedRuntime_RestartStartLegFailureRecordsStopped(t *testing.T) {
 	require.True(t, mockClient.stopCalled, "stop leg was not dispatched")
 	got, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
+	require.Equal(t, "run-prev", got.RunID, "minted run ID must be reverted to the previous run")
 	require.Equal(t, string(state.PhaseStopped), got.Phase)
 	require.Equal(t, "stopped", got.ContainerStatus)
 	require.Empty(t, got.ExposedPorts, "exposed ports must be cleared as an explicit stop does")

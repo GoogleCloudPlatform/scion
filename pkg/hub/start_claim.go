@@ -809,7 +809,7 @@ func startDidNotHappen(err error) bool {
 	return errors.As(err, &quotaErr) || errors.As(err, &stillMissing) || errors.As(err, &tokenErr) ||
 		isUnsupportedWorkspaceModeError(err) || errors.As(err, &incomplete) ||
 		startRunNotBegunOutsideDelete(err) || pendingFoldRefusedOutsideDelete(err) ||
-		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
+		errors.Is(err, ErrLaunchInvalidPhase) || isStartRefusedBeforeCreate(err)
 }
 
 // pendingFoldRefusedOutsideDelete reports whether err is a start refused by
