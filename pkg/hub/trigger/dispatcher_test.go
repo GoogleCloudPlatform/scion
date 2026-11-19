@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"slices"
 	"strings"
@@ -2087,4 +2088,101 @@ func TestDispatcher_GitHubEventWaitsWhenGitHubTriggersExperimentDisabled(t *test
 	require.NoError(t, err)
 	assert.Equal(t, store.TriggerEventStatusProcessed, ev.Status)
 	assert.Equal(t, 1, ev.FireCount)
+}
+
+func TestDispatcher_GitHubSourceAuthorizerTransientErrorLeavesPendingAndRetries(t *testing.T) {
+	ms := newMemTriggerStore()
+	now := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+
+	core := &fakeCore{}
+	core.enabled.Store(true)
+	var transientFail atomic.Bool
+	transientFail.Store(true)
+	var authCalls atomic.Int32
+	core.authorizeSourceFn = func(_ context.Context, _ *store.TriggerEvent) (bool, error) {
+		authCalls.Add(1)
+		if transientFail.Load() {
+			return false, errors.New("github 502 bad gateway")
+		}
+		return true, nil
+	}
+
+	projID := uuid.NewString()
+	trID := uuid.NewString()
+	evID := uuid.NewString()
+	require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+		ID:           trID,
+		ProjectID:    projID,
+		Name:         "gh-transient",
+		SourceKind:   store.TriggerSourceKindGitHub,
+		SourceID:     "",
+		MatchTypes:   []string{"github.issue_comment.created"},
+		MatchDialect: store.TriggerDialectCEL,
+		ActionType:   store.TriggerActionMessage,
+		SubjectMode:  store.TriggerSubjectModeNew,
+		Status:       store.TriggerStatusActive,
+	}))
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "777001",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#11",
+		DedupKey:   "d-transient",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+
+	// 1. Transient/inconclusive check error: item is NOT Done and NOT Permanent;
+	// event stays pending with zero fire rows (no refused fire).
+	res := disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  raw,
+	}, nopLease{})
+	assert.False(t, res.Done)
+	assert.False(t, res.Permanent, "inconclusive association check must retry until MaxAge, not poison")
+	assert.Error(t, res.Err)
+	assert.Equal(t, int32(1), authCalls.Load())
+
+	ev, err := ms.GetTriggerEvent(context.Background(), evID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusPending, ev.Status)
+
+	fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, fires.Items, "transient check failure must not record a refused fire")
+
+	// 2. Retry after transient error clears: event processes and fires normally.
+	transientFail.Store(false)
+	res = disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  raw,
+	}, nopLease{})
+	assert.True(t, res.Done)
+	assert.NoError(t, res.Err)
+	assert.Equal(t, int32(2), authCalls.Load())
+
+	ev, err = ms.GetTriggerEvent(context.Background(), evID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusProcessed, ev.Status)
+	assert.Equal(t, 1, ev.FireCount)
+
+	fires, err = ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, fires.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, fires.Items[0].Status)
 }

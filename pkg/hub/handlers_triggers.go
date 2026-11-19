@@ -639,6 +639,20 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			tr.SourceKind = store.TriggerSourceKindWebhook
 			tr.SourceID = ep.ID
 		case store.TriggerSourceKindGitHub:
+			if !s.githubTriggersEnabled() {
+				writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+					"GitHub triggers require the hub.github_triggers experiment to be enabled", nil)
+				return
+			}
+			if req.Source.ID != "" {
+				ValidationError(w, "source.id must be empty for github triggers", nil)
+				return
+			}
+			if oldSourceKind != store.TriggerSourceKindGitHub &&
+				(req.Match == nil || req.Match.Types == nil || len(*req.Match.Types) == 0) {
+				ValidationError(w, "match.types is required when changing source.kind to github", nil)
+				return
+			}
 			project, pErr := s.store.GetProject(ctx, projectID)
 			if pErr != nil {
 				if errors.Is(pErr, store.ErrNotFound) || errors.Is(pErr, store.ErrInvalidInput) {

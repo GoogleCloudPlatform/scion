@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -172,6 +173,8 @@ func (s *Server) projectsWithGitHubTriggers(ctx context.Context, projectIDs []st
 	}
 	has, err := s.store.ProjectsWithTriggersBySourceKind(ctx, projectIDs, store.TriggerSourceKindGitHub)
 	if err != nil {
+		slog.WarnContext(ctx, "github app repo routing: failed to query project GitHub triggers",
+			"project_count", len(projectIDs), "error", err)
 		return nil
 	}
 	return has

@@ -397,7 +397,7 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 		InternalError(w)
 		return "", false
 	}
-	if sourceKind == store.TriggerSourceKindGitHub && identity.Type() == "agent" && resolved.AgentID != identity.ID() {
+	if sourceKind == store.TriggerSourceKindGitHub && isAgentCaller(ctx) && resolved.AgentID != identity.ID() {
 		logAuthzDenial(r, identity, Resource{
 			Type:       permissions.ResourceAgent,
 			ID:         resolved.AgentID,

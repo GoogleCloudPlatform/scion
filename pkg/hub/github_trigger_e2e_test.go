@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -289,22 +290,32 @@ func TestGitHubTriggerAuthoring_FlagSourceIDMatchTypesAssociationAndAgentRules(t
 
 	// Patch-to-github with flag off -> 400 experiment_disabled.
 	setTriggerExperimentsForG1bTest(t, f.srv, true, false)
+	patchTypes := []string{"github.pull_request.opened"}
 	patchOff := f.doTrigger(t, f.ownerAuth, whTr.ID, http.MethodPatch, UpdateTriggerRequest{
 		Source: &TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchPatchSpec{Types: &patchTypes},
 	})
 	require.Equal(t, http.StatusBadRequest, patchOff.Code)
 	assert.Equal(t, ErrCodeExperimentDisabled, decodeAPIErrorCode(t, patchOff))
 
-	// Patch-to-github with flag on -> 200 OK.
+	// Patch-to-github with flag on WITHOUT match.types -> 400 Bad Request.
 	setTriggerExperimentsForG1bTest(t, f.srv, true, true)
+	patchMissingMatch := f.doTrigger(t, f.ownerAuth, whTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Source: &TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+	})
+	require.Equal(t, http.StatusBadRequest, patchMissingMatch.Code, patchMissingMatch.Body.String())
+
+	// Patch-to-github with flag on AND match.types -> 200 OK.
 	patchOK := f.doTrigger(t, f.ownerAuth, whTr.ID, http.MethodPatch, UpdateTriggerRequest{
 		Source: &TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchPatchSpec{Types: &patchTypes},
 	})
 	require.Equal(t, http.StatusOK, patchOK.Code, patchOK.Body.String())
 	var patched TriggerResponse
 	require.NoError(t, json.Unmarshal(patchOK.Body.Bytes(), &patched))
 	assert.Equal(t, store.TriggerSourceKindGitHub, patched.Source.Kind)
 	assert.Empty(t, patched.Source.ID)
+	assert.Equal(t, patchTypes, patched.Match.Types)
 
 	// Pause, then verify resume requires both hub.github_triggers and authorized association.
 	pauseRec := f.doTrigger(t, f.ownerAuth, whTr.ID+"/pause", http.MethodPost, nil)
@@ -335,7 +346,15 @@ func TestGitHubTriggerAuthoring_FlagSourceIDMatchTypesAssociationAndAgentRules(t
 		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
 		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.agentB.ID, Message: "Cross-agent disallowed"},
 	})
-	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, agentOtherRec.Code)
+	assert.Equal(t, http.StatusForbidden, agentOtherRec.Code, agentOtherRec.Body.String())
+
+	agentUnreadableRec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "agent-a-unreadable-gh",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: creatorTarget.ID, Message: "Unreadable target disallowed"},
+	})
+	assert.Equal(t, http.StatusNotFound, agentUnreadableRec.Code, agentUnreadableRec.Body.String())
 
 	listBRec := f.doTrigger(t, f.agentBAuth, "?source=github", http.MethodGet, nil)
 	require.Equal(t, http.StatusOK, listBRec.Code)
@@ -565,4 +584,132 @@ func TestGitHubTriggerE2E_SignedWebhookToFakeAgentHistoryRedeliveryAndRefusal(t 
 	require.NotNil(t, updatedProj.GitHubAppStatus)
 	assert.Equal(t, store.GitHubAppStateError, updatedProj.GitHubAppStatus.State)
 	assert.Equal(t, githubAppErrAssociationUnauthorized, updatedProj.GitHubAppStatus.ErrorCode)
+}
+
+func TestGitHubTriggerE2E_InconclusiveAssociationCheckRetriesUntilRecovered(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableWriteDenySwitch(t, f.srv)
+	ctx := context.Background()
+
+	const (
+		appID         int64  = 778899
+		webhookSecret string = "g1b-transient-webhook-secret"
+		fixtureInstID int64  = 987654 // matches pkg/hub/trigger/github/testdata/issue_comment__created_pr.payload.json
+	)
+
+	fixtureBytes, err := os.ReadFile(filepath.Join("trigger", "github", "testdata", "issue_comment__created_pr.payload.json"))
+	require.NoError(t, err)
+
+	gh := newFakeGitHubForAssoc(t)
+	gh.setRepoStatus(http.StatusInternalServerError) // Simulate transient GitHub 500 on creator-proof GET /repos
+
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.APIBaseURL = gh.srv.URL
+	f.srv.config.GitHubAppConfig.AppID = appID
+	f.srv.config.GitHubAppConfig.AppSlug = "octo-app"
+	f.srv.config.GitHubAppConfig.WebhookSecret = webhookSecret
+	f.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.srv.mu.Unlock()
+
+	disp := &recordingDispatcher{}
+	f.srv.SetDispatcher(disp)
+
+	done := f.srv.startTriggerDrainer(ctx)
+	require.NotNil(t, done)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		f.srv.stopTriggerDrainer(stopCtx)
+	})
+
+	createAssocInstallation(t, f.store, fixtureInstID, "octo-org", "octo-org/octo-repo")
+
+	// Creator-proof project (CreatedBy persisted at CreateProject time, no admin binding).
+	instCopy := fixtureInstID
+	creatorProj := createAssocProject(t, f.store, "g1b-transient-proj", gh.remote("octo-org", "octo-repo"), f.owner.ID, &instCopy)
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, creatorProj.ID, f.owner.ID))
+
+	target := &store.Agent{
+		ID:        tid("g1b-transient-target"),
+		Slug:      "transient-target",
+		Name:      "transient-target",
+		ProjectID: creatorProj.ID,
+		Phase:     string(state.PhaseRunning),
+		CreatedBy: f.owner.ID,
+		OwnerID:   f.owner.ID,
+		Ancestry:  []string{f.owner.ID},
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, target))
+
+	_, _, err = f.srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GITHUB_TOKEN",
+		Value:      "ghp_creator_transient_token",
+		SecretType: secret.TypeEnvironment,
+		Scope:      secret.ScopeUser,
+		ScopeID:    f.owner.ID,
+	})
+	require.NoError(t, err)
+
+	setTriggerExperimentsForG1bTest(t, f.srv, true, true)
+
+	// Authoring succeeds on cold cache with zero GitHub calls.
+	createPath := "/api/v1/projects/" + creatorProj.ID + "/triggers"
+	createReq := authoredRequest(t, f.ownerAuth, http.MethodPost, createPath, CreateTriggerRequest{
+		Name:   "on-pr-comment-transient",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: target.ID, Message: "Recovered delivery"},
+	})
+	createRec := httptest.NewRecorder()
+	f.srv.handleTriggers(createRec, createReq, creatorProj.ID, "")
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	// 1. Deliver signed event while GitHub returns 500 -> drainer sets GitHubAppStatus
+	// association_check_failed, leaves event pending, and records NO refused fire.
+	ingRec := postSignedGitHubDelivery(t, f.srv, webhookSecret, appID, "issue_comment", uuid.NewString(), fixtureBytes)
+	require.Equal(t, http.StatusAccepted, ingRec.Code, ingRec.Body.String())
+	var ingResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(ingRec.Body.Bytes(), &ingResp))
+	require.Len(t, ingResp.Events, 1)
+	eventID := ingResp.Events[0].EventID
+
+	require.Eventually(t, func() bool {
+		p, gErr := f.store.GetProject(ctx, creatorProj.ID)
+		return gErr == nil && p != nil && p.GitHubAppStatus != nil &&
+			p.GitHubAppStatus.ErrorCode == githubAppErrAssociationCheckFailed
+	}, 5*time.Second, 20*time.Millisecond)
+
+	pendingEv, err := f.store.GetTriggerEvent(ctx, eventID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusPending, pendingEv.Status, "transient association failure must leave event pending for retry")
+
+	firesWhileDown, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: creatorProj.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, firesWhileDown.Items, "transient association failure must not record a refused fire")
+	assert.Empty(t, disp.getCalls())
+
+	// 2. Recover GitHub 500 -> 200 with pull access; durable queue backoff retries and fires!
+	gh.grant("ghp_creator_transient_token", "octo-org/octo-repo", githubapp.RepoAccess{Pull: true})
+	gh.setRepoStatus(0)
+	if q := f.srv.TriggerEventQueue(); q != nil {
+		q.Wake(trigger.EventQueueKind)
+	}
+
+	require.Eventually(t, func() bool {
+		if q := f.srv.TriggerEventQueue(); q != nil {
+			q.Wake(trigger.EventQueueKind)
+		}
+		stored, gErr := f.store.GetTriggerEvent(ctx, eventID)
+		return gErr == nil && stored != nil && stored.Status == store.TriggerEventStatusProcessed
+	}, 8*time.Second, 50*time.Millisecond)
+
+	calls := disp.getCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, target.ID, calls[0].Agent.ID)
+	assert.Equal(t, "Recovered delivery", calls[0].Message)
+
+	firesAfterRecovery, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: creatorProj.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, firesAfterRecovery.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, firesAfterRecovery.Items[0].Status)
 }
