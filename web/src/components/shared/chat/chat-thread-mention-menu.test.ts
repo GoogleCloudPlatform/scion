@@ -468,7 +468,19 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
       spy.mockRestore();
     }
 
-    // 4. Left-button drag-selection followed by right-click still preserves the browser menu.
+    // 4. Left-button drag-selection followed by right-click still preserves the browser menu,
+    // even after a preceding uncovered right-press recorded covered: false on the same mention.
+    sel.removeAllRanges();
+    mention.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        composed: true,
+        button: 2,
+        buttons: 2,
+        pointerType: 'mouse',
+        isPrimary: true,
+      })
+    );
     mention.dispatchEvent(
       new PointerEvent('pointerdown', {
         bubbles: true,
@@ -547,6 +559,7 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
     expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
       'Agent actions, Lead Coordinator'
     );
+    expect(sel.rangeCount).toBe(1);
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     await el.updateComplete;
@@ -556,16 +569,19 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
     expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
       'Message actions, Code Writer'
     );
+    expect(sel.rangeCount).toBe(1);
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     await el.updateComplete;
 
-    // 2. Selection on `selected-token` in m1 does not block right-clicking sibling @coder in m1.
+    // 2. Selection on `selected-token` in m1 does not block right-clicking sibling @coder in m1,
+    // and opening @coder's menu leaves the sibling selection intact.
     const siblingMentionEv = await rightClick(el, m1Mention);
     expect(siblingMentionEv.defaultPrevented).toBe(true);
     expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
       'Agent actions, Code Writer'
     );
+    expect(sel.toString()).toBe('selected-token');
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     await el.updateComplete;
@@ -625,8 +641,12 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     await el.updateComplete;
 
-    // 2. Right-click message text while the macOS auto-selected @coder is still selected in m-user,
+    // 2. Right-click message text while a pre-existing selection is in m-user,
     // and macOS then selects the word in m-coder before contextmenu.
+    const userNoteRange = document.createRange();
+    userNoteRange.selectNodeContents(messageBody(el, 'm-user')!);
+    sel.removeAllRanges();
+    sel.addRange(userNoteRange);
     const msgEv = await rightClick(el, coderContent, {}, () => {
       const wordRange = document.createRange();
       wordRange.selectNodeContents(coderContent);
@@ -637,6 +657,150 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
     expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
       'Message actions, Code Writer'
     );
+    expect(sel.rangeCount).toBe(0);
+  });
+
+  it('clears macOS auto-selected words so consecutive right-clicks on the same paragraph or mention keep opening custom menus', async () => {
+    const el = await mountThread({
+      messages: [
+        {
+          id: 'm-user',
+          sender: 'user:alice@example.com',
+          senderId: 'user-alice',
+          msg: 'Right-click @coder twice on macOS.',
+          type: 'chat',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+        {
+          id: 'm-coder',
+          sender: 'agent:coder',
+          senderId: 'agent-coder',
+          projectId: 'proj-coder',
+          msg: 'Plain paragraph text on macOS.',
+          type: 'assistant-reply',
+          createdAt: '2026-01-01T00:01:00Z',
+        },
+      ],
+    });
+
+    const sel = window.getSelection()!;
+    const mention = mentionSpan(el, 'm-user', 'coder');
+    const mentionText = mention.firstChild!;
+    const coderContent = messageBody(el, 'm-coder')!;
+    const coderPara = coderContent.querySelector('p') ?? coderContent;
+    const paraText = coderPara.firstChild!;
+
+    // 1. Two consecutive Mac-style right-clicks on the same <p> in a message.
+    const paraEv1 = await rightClick(el, coderPara, {}, () => {
+      const word = document.createRange();
+      word.setStart(paraText, 0);
+      word.setEnd(paraText, 5); // "Plain"
+      sel.removeAllRanges();
+      sel.addRange(word);
+    });
+    expect(paraEv1.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Message actions, Code Writer'
+    );
+    expect(sel.rangeCount).toBe(0);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    const paraEv2 = await rightClick(el, coderPara, {}, () => {
+      const word = document.createRange();
+      word.setStart(paraText, 6);
+      word.setEnd(paraText, 15); // "paragraph"
+      sel.removeAllRanges();
+      sel.addRange(word);
+    });
+    expect(paraEv2.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Message actions, Code Writer'
+    );
+    expect(sel.rangeCount).toBe(0);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    // 2. Two consecutive Mac-style right-clicks (plus macOS Ctrl+click) on the same @coder mention.
+    const selectMentionWord = (): void => {
+      const word = document.createRange();
+      word.setStart(mentionText, 1);
+      word.setEnd(mentionText, 6); // "coder"
+      sel.removeAllRanges();
+      sel.addRange(word);
+    };
+
+    const mentionEv1 = await rightClick(el, mention, {}, selectMentionWord);
+    expect(mentionEv1.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Agent actions, Code Writer'
+    );
+    expect(sel.rangeCount).toBe(0);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    const mentionEv2 = await rightClick(el, mention, {}, selectMentionWord);
+    expect(mentionEv2.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Agent actions, Code Writer'
+    );
+    expect(sel.rangeCount).toBe(0);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    // 3. macOS Ctrl+primary-click (button === 0 && ctrlKey) also records the press and clears auto-selection.
+    mention.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        button: 0,
+        buttons: 1,
+        ctrlKey: true,
+        pointerType: 'mouse',
+        isPrimary: true,
+        clientX: 40,
+        clientY: 60,
+      })
+    );
+    selectMentionWord();
+    const ctrlClickMenu = new MouseEvent('contextmenu', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      button: 0,
+      ctrlKey: true,
+      clientX: 40,
+      clientY: 60,
+    });
+    mention.dispatchEvent(ctrlClickMenu);
+    await el.updateComplete;
+    expect(ctrlClickMenu.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Agent actions, Code Writer'
+    );
+    expect(sel.rangeCount).toBe(0);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await el.updateComplete;
+
+    // 4. Host-level press on <scion-chat-message> itself also snapshots before selection changes.
+    const coderHost = messageHost(el, 'm-coder');
+    const hostEv = await rightClick(el, coderHost, {}, () => {
+      const hostRange = document.createRange();
+      hostRange.selectNode(coderHost);
+      sel.removeAllRanges();
+      sel.addRange(hostRange);
+    });
+    expect(hostEv.defaultPrevented).toBe(true);
+    expect(el.shadowRoot!.querySelector('[role="menu"]')?.getAttribute('aria-label')).toBe(
+      'Message actions, Code Writer'
+    );
+    expect(sel.rangeCount).toBe(0);
   });
 
   it('is keyboard accessible: mention is focusable, ContextMenu and Shift+F10 open the menu, Escape restores focus', async () => {
@@ -729,6 +893,11 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
           clientY: 40,
         })
       );
+      const sel = window.getSelection()!;
+      const holdRange = document.createRange();
+      holdRange.selectNodeContents(mention);
+      sel.removeAllRanges();
+      sel.addRange(holdRange);
       vi.advanceTimersByTime(LONG_PRESS_MS + 10);
       await el.updateComplete;
 
@@ -738,6 +907,7 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
         items: Array<{ id: string; label: string }>;
       };
       expect(actionSheet.open).toBe(true);
+      expect(sel.rangeCount).toBe(0);
       expect(actionSheet.heading).toBe('Code Writer');
       expect(actionSheet.items.map((i) => i.label)).toEqual([
         'Make this agent thread default',
@@ -756,6 +926,40 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
       );
       mention.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
       expect(mentionClicks).toEqual([]);
+
+      // Close sheet; when the user already has @coder selected before touching,
+      // touch long-press does NOT start or open the action sheet.
+      actionSheet.dispatchEvent(new CustomEvent('action-sheet-close'));
+      await el.updateComplete;
+      expect(actionSheet.open).toBe(false);
+
+      const preSelected = document.createRange();
+      preSelected.selectNodeContents(mention);
+      sel.removeAllRanges();
+      sel.addRange(preSelected);
+
+      mention.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          pointerId: 2,
+          pointerType: 'touch',
+          isPrimary: true,
+          clientX: 30,
+          clientY: 40,
+        })
+      );
+      vi.advanceTimersByTime(LONG_PRESS_MS + 10);
+      await el.updateComplete;
+      expect(actionSheet.open).toBe(false);
+      window.dispatchEvent(
+        new PointerEvent('pointerup', {
+          bubbles: true,
+          pointerId: 2,
+          pointerType: 'touch',
+          isPrimary: true,
+        })
+      );
     } finally {
       document.removeEventListener('mention-click', onMentionClick);
     }

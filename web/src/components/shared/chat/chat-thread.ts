@@ -6211,12 +6211,6 @@ export class ScionChatThread extends LitElement {
     return Date.now() - press.at <= PRESS_LINK_WINDOW_MS ? press.href : null;
   }
 
-  private hasMessageSelectionForContextMenu(e: MouseEvent, msg: Message): boolean {
-    const target = e.composedPath()[0];
-    const msgEl = this.messageElement(msg.id);
-    return msgEl ? msgEl.hasSelectionForContextMenu(target) : selectionCoversNode(target);
-  }
-
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
     // A context menu the keyboard raised (the ContextMenu key on a focused
@@ -6231,13 +6225,14 @@ export class ScionChatThread extends LitElement {
         typeof PointerEvent !== 'undefined' &&
         e instanceof PointerEvent &&
         e.pointerType === '');
-    if (
-      e.type === 'contextmenu' &&
-      !fromKeyboard &&
-      this.hasMessageSelectionForContextMenu(e, msg)
-    ) {
-      this._mentionLongPress.cancel();
-      return;
+    if (e.type === 'contextmenu' && !fromKeyboard) {
+      const target = e.composedPath()[0];
+      const msgEl = this.messageElement(msg.id);
+      if (msgEl ? msgEl.hasSelectionForContextMenu(target) : selectionCoversNode(target)) {
+        this._mentionLongPress.cancel();
+        return;
+      }
+      msgEl?.clearContextPressSelection(target);
     }
     e.preventDefault();
     let at = { x: e.clientX, y: e.clientY };
@@ -6266,6 +6261,7 @@ export class ScionChatThread extends LitElement {
     this._mentionLongPress.pointerDown(originalEvent, (at) => {
       const fresh = this.agentMenuTargetFromMention(slug);
       if (!fresh || this.agentMenuActionsForTarget(fresh).length === 0) return;
+      this.messageElement(msg.id)?.clearContextPressSelection(mentionEl);
       this.openAgentMentionMenu(msg, mentionEl, fresh, at);
     });
   }
@@ -7939,9 +7935,9 @@ export class ScionChatThread extends LitElement {
         tpl: html`
           <scion-chat-message
             @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
-            @mention-pointerdown=${(e: CustomEvent<MentionPointerDownDetail>) =>
+            @mention-pointerdown=${(e: CustomEvent<MentionPointerDownDetail>): void =>
               this.handleMentionPointerDown(e, msg)}
-            @mention-contextmenu=${(e: CustomEvent<MentionContextMenuDetail>) =>
+            @mention-contextmenu=${(e: CustomEvent<MentionContextMenuDetail>): void =>
               this.handleMentionContextMenu(e, msg)}
             @pointerdown=${(e: PointerEvent) => this.handleMessagePress(e, msg)}
             @pointerup=${(e: PointerEvent) => this.handleMessagePress(e, msg)}

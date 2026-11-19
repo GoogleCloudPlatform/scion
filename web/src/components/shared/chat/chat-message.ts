@@ -2519,6 +2519,20 @@ export class ScionChatMessage extends LitElement {
     };
   }
 
+  private matchingContextPress(
+    target: Node
+  ): { target: Node; covered: boolean; at: number } | null {
+    const press = this._contextPress;
+    if (
+      press &&
+      Date.now() - press.at <= CONTEXT_PRESS_WINDOW_MS &&
+      (press.target === target || target.contains(press.target))
+    ) {
+      return press;
+    }
+    return null;
+  }
+
   /**
    * Whether `target` was covered by an active text selection when the
    * context-menu press started (ignoring any word selection the browser
@@ -2528,15 +2542,23 @@ export class ScionChatMessage extends LitElement {
    */
   hasSelectionForContextMenu(target?: EventTarget | null): boolean {
     if (!(target instanceof Node)) return false;
-    const press = this._contextPress;
-    if (
-      press &&
-      Date.now() - press.at <= CONTEXT_PRESS_WINDOW_MS &&
-      (press.target === target || target.contains(press.target))
-    ) {
-      return press.covered;
+    const press = this.matchingContextPress(target);
+    return press ? press.covered : selectionCoversNode(target);
+  }
+
+  /**
+   * Clear a selection that the browser created on `target` between
+   * `pointerdown` and `contextmenu` (e.g. macOS right-click word selection
+   * or touch long-press selection) once a custom menu opens. Pre-existing
+   * selections (`press.covered === true`) and selections outside `target`
+   * are preserved.
+   */
+  clearContextPressSelection(target?: EventTarget | null): void {
+    if (!(target instanceof Node) || typeof window === 'undefined') return;
+    const press = this.matchingContextPress(target);
+    if (press && !press.covered && selectionCoversNode(target)) {
+      window.getSelection()?.removeAllRanges();
     }
-    return selectionCoversNode(target);
   }
 
   override willUpdate(changed: Map<string, unknown>): void {
@@ -2990,6 +3012,7 @@ export class ScionChatMessage extends LitElement {
       },
     });
     if (!this.dispatchEvent(ev)) {
+      this.clearContextPressSelection(target);
       e.preventDefault();
       e.stopPropagation();
     }
