@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -33,6 +34,8 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+const pgInsufficientPrivilege = "42501"
 
 func TestRelayRoleGrants_Postgres(t *testing.T) {
 	if !enttest.Active() {
@@ -93,6 +96,7 @@ func TestRelayRoleGrants_Postgres(t *testing.T) {
 		migrateOnce()
 		migrateOnce() // Idempotent second boot.
 
+		// Allowed reads and DML in a clean transaction (rolled back afterward).
 		tx, err := raw.BeginTx(ctx, nil)
 		require.NoError(t, err)
 		defer func() { _ = tx.Rollback() }()
@@ -100,25 +104,70 @@ func TestRelayRoleGrants_Postgres(t *testing.T) {
 		_, err = tx.ExecContext(ctx, "SET LOCAL ROLE "+qRole)
 		require.NoError(t, err)
 
-		// Allowed reads: hub_settings, relay_instances, conduit_sessions, conduit_principal_epochs.
 		for _, tbl := range []string{"hub_settings", "relay_instances", "conduit_sessions", "conduit_principal_epochs"} {
 			var n int
 			qTbl := pgx.Identifier{schemaName, tbl}.Sanitize()
 			require.NoError(t, tx.QueryRowContext(ctx, "SELECT count(*) FROM "+qTbl).Scan(&n), "SELECT on %s", tbl)
 		}
 
-		// Denied writes & hub-only tables: no write on hub_settings, no DELETE on
-		// conduit_principal_epochs, no SELECT on secrets or agents.
-		_, err = tx.ExecContext(ctx, "DELETE FROM "+pgx.Identifier{schemaName, "hub_settings"}.Sanitize())
-		require.Error(t, err, "relay role must not DELETE from hub_settings")
+		// Allowed INSERT ... ON CONFLICT DO UPDATE RETURNING on conduit_principal_epochs
+		// (exercises INSERT + UPDATE + SELECT together, matching ConduitRegistryStore).
+		qEpochs := pgx.Identifier{schemaName, "conduit_principal_epochs"}.Sanitize()
+		upsertEpochSQL := "INSERT INTO " + qEpochs + " AS cpe (principal_kind, principal_id, epoch) " +
+			"VALUES ('agent', 'relay-grant-test', 1) " +
+			"ON CONFLICT (principal_kind, principal_id) DO UPDATE SET epoch = cpe.epoch + 1 RETURNING epoch"
+		var epoch int64
+		require.NoError(t, tx.QueryRowContext(ctx, upsertEpochSQL).Scan(&epoch))
+		assert.Equal(t, int64(1), epoch)
+		require.NoError(t, tx.QueryRowContext(ctx, upsertEpochSQL).Scan(&epoch))
+		assert.Equal(t, int64(2), epoch)
 
-		_, err = tx.ExecContext(ctx, "DELETE FROM "+pgx.Identifier{schemaName, "conduit_principal_epochs"}.Sanitize())
-		require.Error(t, err, "relay role must not DELETE from conduit_principal_epochs")
+		for _, writable := range []string{"relay_instances", "conduit_sessions"} {
+			qTbl := pgx.Identifier{schemaName, writable}.Sanitize()
+			_, err = tx.ExecContext(ctx, "DELETE FROM "+qTbl+" WHERE false")
+			require.NoError(t, err, "DELETE on %s", writable)
+		}
+		require.NoError(t, tx.Rollback())
+
+		// Denied writes & hub-only tables: run each negative check in its own
+		// fresh transaction so an expected permission error never leaves the
+		// transaction in PostgreSQL's aborted state (SQLSTATE 25P02), which would
+		// make later assertions pass vacuously. Also assert SQLSTATE 42501
+		// (insufficient_privilege) on every denial.
+		requireInsufficientPrivilege := func(desc string, op func(tx *sql.Tx) error) {
+			t.Helper()
+			dtx, txErr := raw.BeginTx(ctx, nil)
+			require.NoError(t, txErr, "%s: begin tx", desc)
+			defer func() { _ = dtx.Rollback() }()
+
+			_, txErr = dtx.ExecContext(ctx, "SET LOCAL ROLE "+qRole)
+			require.NoError(t, txErr, "%s: set local role", desc)
+
+			opErr := op(dtx)
+			require.Error(t, opErr, desc)
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, opErr, &pgErr, "%s: expected *pgconn.PgError, got %v", desc, opErr)
+			assert.Equal(t, pgInsufficientPrivilege, pgErr.Code,
+				"%s: expected SQLSTATE %s (insufficient_privilege), got %s (%s)",
+				desc, pgInsufficientPrivilege, pgErr.Code, pgErr.Message)
+		}
+
+		requireInsufficientPrivilege("relay role must not DELETE from hub_settings", func(dtx *sql.Tx) error {
+			_, e := dtx.ExecContext(ctx, "DELETE FROM "+pgx.Identifier{schemaName, "hub_settings"}.Sanitize())
+			return e
+		})
+
+		requireInsufficientPrivilege("relay role must not DELETE from conduit_principal_epochs", func(dtx *sql.Tx) error {
+			_, e := dtx.ExecContext(ctx, "DELETE FROM "+pgx.Identifier{schemaName, "conduit_principal_epochs"}.Sanitize())
+			return e
+		})
 
 		for _, denied := range []string{"secrets", "agents", "users"} {
-			var n int
-			err = tx.QueryRowContext(ctx, "SELECT count(*) FROM "+pgx.Identifier{schemaName, denied}.Sanitize()).Scan(&n)
-			require.Error(t, err, "relay role must not SELECT from %s", denied)
+			denied := denied
+			requireInsufficientPrivilege("relay role must not SELECT from "+denied, func(dtx *sql.Tx) error {
+				var n int
+				return dtx.QueryRowContext(ctx, "SELECT count(*) FROM "+pgx.Identifier{schemaName, denied}.Sanitize()).Scan(&n)
+			})
 		}
 	})
 }

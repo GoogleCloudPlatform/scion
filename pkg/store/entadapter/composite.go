@@ -195,9 +195,11 @@ type CompositeStore struct {
 
 // SetRelayRole configures an optional PostgreSQL role name (from
 // server.database.relay_role) that Migrate grants least-privilege conduit
-// relay permissions to immediately after entc.AutoMigrate completes. On
-// non-PostgreSQL dialects Migrate still validates the role string and skips
-// the SQL grants.
+// relay permissions to immediately after entc.AutoMigrate completes. Hub
+// startup sets this (`scion server migrate` calls EnsureRelayRoleGrants
+// directly); maintenance commands that omit it leave existing table grants in
+// place until the next Hub boot. On non-PostgreSQL dialects Migrate still
+// validates the role string and skips the SQL grants.
 func (c *CompositeStore) SetRelayRole(role string) {
 	c.relayRole = role
 }
