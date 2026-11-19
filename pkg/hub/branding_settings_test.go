@@ -111,20 +111,12 @@ func TestBrandingSettings_PutLiveReloadPublicAndMaintenance(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "dark.")
 	assert.Contains(t, rec.Body.String(), "4.50:1")
 
-	badAssetPathBody := json.RawMessage(`{
-		"server": {
-			"hub": {
-				"branding": {
-					"logo": {
-						"light": "/auth/logout"
-					}
-				}
-			}
-		}
-	}`)
-	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/server-config", badAssetPathBody)
-	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "server.hub.branding.logo.light")
+	for _, badLogoPath := range []string{"/auth/logout.svg", "/x/%2e%2e/api/v1/foo.png"} {
+		badAssetPathBody := json.RawMessage(`{"server":{"hub":{"branding":{"logo":{"light":"` + badLogoPath + `"}}}}}`)
+		rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/server-config", badAssetPathBody)
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "path %s: %s", badLogoPath, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "server.hub.branding.logo.light")
+	}
 
 	// Neutral-scale-only background override (R1) passes 200 OK and re-derives light.primary.
 	neutralOnlyPut := json.RawMessage(`{

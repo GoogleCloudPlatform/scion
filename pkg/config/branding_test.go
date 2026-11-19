@@ -505,3 +505,128 @@ func TestResolveBranding_NeutralScaleOverridesMatchSemanticBgAndSurface(t *testi
 		t.Errorf("viaDarkNeutral.Light.Primary = %q, want untouched stock %q", viaDarkNeutral.Light.Primary, DefaultLightSemanticMode().Primary)
 	}
 }
+
+func TestValidateBranding_SameOriginPathEncodingAndHTTPSQuotes(t *testing.T) {
+	rejectURIs := []struct {
+		name string
+		uri  string
+	}{
+		// Percent-encoded dot-segment traversal variants
+		{"encoded .. lowercase", "/x/%2e%2e/api/v1/foo.png"},
+		{"encoded .. mixed-case %2E.", "/x/%2E./api/v1/foo.png"},
+		{"encoded .. mixed-case .%2e", "/x/.%2e/api/v1/foo.png"},
+		{"encoded .. uppercase %2E%2E", "/x/%2E%2E/auth/logout.svg"},
+		// Double-encoded traversal and prefix variants
+		{"double-encoded ..", "/x/%252e%252e/api/v1/foo.png"},
+		{"double-encoded reserved prefix", "/%2561pi/v1/foo.png"},
+		// Percent-encoded reserved prefixes, slashes, backslashes, and spaces
+		{"encoded /api prefix", "/%61pi/v1/foo.png"},
+		{"encoded /AUTH prefix", "/%41UTH/logout.png"},
+		{"encoded slash traversal", "/assets%2f..%2fapi/v1/foo.png"},
+		{"encoded backslash", "/assets%5clogo.png"},
+		{"encoded space in same-origin path", "/assets/my%20logo.png"},
+		// Mixed-case literal reserved prefixes with valid image extensions
+		{"mixed-case /API prefix", "/API/v1/foo.png"},
+		{"mixed-case /AuTh prefix", "/AuTh/logout.svg"},
+		{"mixed-case /BrAnD prefix", "/BrAnD/logo-light.svg"},
+		{"mixed-case /EvEnTs prefix", "/EvEnTs/stream.png"},
+		{"mixed-case /.WeLl-KnOwN prefix", "/.WeLl-KnOwN/logo.svg"},
+		{"mixed-case /HeAlThZ prefix", "/HeAlThZ/check.png"},
+		{"mixed-case /ReAdYz prefix", "/ReAdYz/check.ico"},
+		// Literal dot segments, empty segments, backslashes, quotes/metacharacters, and C1/bidi controls
+		{"leading ./ segment", "/./logo.svg"},
+		{"leading ../ segment", "/../logo.svg"},
+		{"interior ./ segment", "/assets/./logo.svg"},
+		{"interior ../ segment", "/assets/../logo.svg"},
+		{"empty interior // segment", "/assets//logo.svg"},
+		{"backslash in same-origin path", `/assets\logo.svg`},
+		{"double quote in same-origin path", `/assets/a"b.png`},
+		{"single quote in same-origin path", `/assets/a'b.png`},
+		{"parentheses in same-origin path", `/assets/a(b).png`},
+		{"angle brackets in same-origin path", `/assets/a<b>.png`},
+		{"C1 control in same-origin path", "/assets/logo\u0085.svg"},
+		{"bidi override in same-origin path", "/assets/logo\u202e.svg"},
+		// Quotes, parens, angle brackets, backticks, and backslashes in https:// URLs
+		{"double quote and paren in https URL", `https://e.com/a")x.png`},
+		{"single quote in https URL", `https://e.com/a'x.png`},
+		{"parentheses in https URL", `https://e.com/a(1).png`},
+		{"angle brackets in https URL", `https://e.com/a<x>.png`},
+		{"backtick in https URL", "https://e.com/a`x.png"},
+		{"backslash in https URL", `https://e.com/a\x.png`},
+		{"bidi override in https URL", "https://e.com/a\u202ex.png"},
+	}
+
+	for _, tc := range rejectURIs {
+		t.Run("reject_"+tc.name, func(t *testing.T) {
+			cfg := BrandingConfig{Logo: &BrandingLogoConfig{Light: tc.uri}}
+			if errs := ValidateBranding(&cfg); len(errs) == 0 {
+				t.Fatalf("expected validation error for URI %q, got none", tc.uri)
+			}
+		})
+	}
+
+	// Bidi override and C1 control in display names are also rejected.
+	for _, badName := range []string{"Acme\u202eevil", "Acme\u0085Cloud"} {
+		if errs := ValidateBranding(&BrandingConfig{Name: badName}); len(errs) == 0 {
+			t.Fatalf("expected validation error for Name %q, got none", badName)
+		}
+	}
+
+	// Valid static same-origin paths and https URLs continue to pass.
+	validURIs := []string{
+		"/assets/custom-logo.svg",
+		"/static/v2/acme_brand-dark@2x.png",
+		"/favicon.ico",
+		"https://cdn.example.com/brand/logo-v2.svg?rev=1",
+	}
+	for _, u := range validURIs {
+		cfg := BrandingConfig{Logo: &BrandingLogoConfig{Light: u}}
+		if errs := ValidateBranding(&cfg); len(errs) > 0 {
+			t.Fatalf("expected valid URI %q to pass, got: %v", u, errs)
+		}
+	}
+}
+
+func TestValidateBranding_DarkBadgeCompositeContrast(t *testing.T) {
+	// Branch 1: Custom ramp step 300 fails dark badge composite contrast (20% step 500 over dark.surface)
+	// while steps 600, 400, 800, and 100 remain stock and pass all other button/light-badge checks.
+	errs := ValidateBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Success: BrandingScale{"300": "#334155"},
+		},
+	})
+	if len(errs) != 1 {
+		t.Fatalf("expected exactly 1 error (dark badge contrast on success.300), got %d: %v", len(errs), errs)
+	}
+	if errs[0].Path != "server.hub.branding.palette.success.300" || !strings.Contains(errs[0].Message, "dark badge contrast") {
+		t.Errorf("unexpected dark badge error: %+v", errs[0])
+	}
+
+	// Branch 2: Custom lightish dark.surface triggers dark-badge composite checks even when ramps are stock.
+	surfaceErrs := ValidateBranding(&BrandingConfig{
+		Palette: &BrandingPaletteConfig{
+			Dark: &BrandingSemanticMode{
+				Bg:            "#0f172a",
+				Surface:       "#cbd5e1",
+				Text:          "#0f172a",
+				TextSecondary: "#0f172a",
+				TextMuted:     "#1e293b",
+				Primary:       "#1d4ed8",
+				PrimaryHover:  "#1e40af",
+				PrimaryActive: "#1e3a8a",
+				PrimaryText:   "#ffffff",
+			},
+			Neutral: BrandingScale{"400": "#334155"},
+		},
+	})
+	foundDarkBadge := false
+	for _, e := range surfaceErrs {
+		if strings.HasSuffix(e.Path, ".300") && strings.Contains(e.Message, "dark badge contrast") {
+			foundDarkBadge = true
+			break
+		}
+	}
+	if !foundDarkBadge {
+		t.Fatalf("expected darkSurfaceCustomized branch to flag dark badge contrast on .300, got: %v", surfaceErrs)
+	}
+}

@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -589,12 +590,17 @@ func resolveBrandingInternal(cfg *BrandingConfig) (*ResolvedBranding, []Validati
 	}, nil
 }
 
+func isBidiControl(r rune) bool {
+	return r == 0x061C || r == 0x200E || r == 0x200F ||
+		(r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
+}
+
 func hasControlChars(s string) bool {
 	if !utf8.ValidString(s) {
 		return true
 	}
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) || isBidiControl(r) {
 			return true
 		}
 	}
@@ -606,11 +612,26 @@ func hasControlOrSpace(s string) bool {
 		return true
 	}
 	for _, r := range s {
-		if r <= 0x20 || r == 0x7f || r == '\u00a0' {
+		if unicode.IsControl(r) || unicode.IsSpace(r) || isBidiControl(r) {
 			return true
 		}
 	}
 	return false
+}
+
+func isValidSameOriginSegment(seg string) bool {
+	if seg == "" {
+		return false
+	}
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == '-' || c == '@' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func truncateRunes(s string, maxRunes int) string {
@@ -645,12 +666,18 @@ func parseAndValidateBrandAsset(raw, slot string, pngOnlyData bool) (resolvedURL
 		if len(raw) > MaxBrandPathLen {
 			return "", "", nil, fmt.Errorf("same-origin path exceeds maximum length of %d characters", MaxBrandPathLen)
 		}
+		if strings.IndexByte(raw, '%') >= 0 {
+			return "", "", nil, errors.New("same-origin asset path must not contain percent-encoding ('%')")
+		}
 		if strings.ContainsAny(raw, "?#\\") {
 			return "", "", nil, errors.New("same-origin path must not contain query, fragment, or backslash characters")
 		}
-		for _, seg := range strings.Split(raw, "/") {
+		for _, seg := range strings.Split(raw[1:], "/") {
 			if seg == ".." || seg == "." {
 				return "", "", nil, errors.New("same-origin path must not contain '.' or '..' traversal segments")
+			}
+			if !isValidSameOriginSegment(seg) {
+				return "", "", nil, errors.New("same-origin asset path segments may contain only ASCII letters, digits, '.', '_', '-', or '@' without empty segments")
 			}
 		}
 		if reservedPrefix := matchingReservedHubAssetPrefix(raw); reservedPrefix != "" {
@@ -665,6 +692,9 @@ func parseAndValidateBrandAsset(raw, slot string, pngOnlyData bool) (resolvedURL
 
 	if len(raw) > MaxBrandHTTPSURLLen {
 		return "", "", nil, fmt.Errorf("URL exceeds maximum length of %d characters", MaxBrandHTTPSURLLen)
+	}
+	if strings.ContainsAny(raw, "\"'`()<>\\") {
+		return "", "", nil, errors.New("https:// URL must not contain quote, parenthesis, angle-bracket, or backslash characters")
 	}
 	u, parseErr := url.Parse(raw)
 	if parseErr != nil {
