@@ -245,6 +245,17 @@ export const decisionsPageSharedStyles: CSSResult = css`
     color: var(--scion-badge-primary-text, #1e40af);
   }
 
+  .badge.dec {
+    background: var(--scion-badge-danger-bg, #fee2e2);
+    color: var(--scion-badge-danger-text, #991b1b);
+  }
+
+  .dismiss-reason {
+    font-size: 0.78rem;
+    margin-top: 0.15rem;
+    overflow-wrap: anywhere;
+  }
+
   .badge sl-icon {
     font-size: 0.8rem;
   }
@@ -796,7 +807,16 @@ export function renderAnsweredBy(
   return e.answeredByName || 'Unknown';
 }
 
+function isDismissLogEntry(e: ProjectDecisionLogEntryView): boolean {
+  return e.outcome === 'dismiss' || e.choiceId === '$dismissed';
+}
+
 export function renderProvenanceBadge(e: ProjectDecisionLogEntryView): TemplateResult {
+  if (isDismissLogEntry(e)) {
+    return html`<span class="badge dec"
+      ><sl-icon name="x-circle" aria-hidden="true"></sl-icon>dismissed</span
+    >`;
+  }
   if (e.provenance === 'agent_interpreted') {
     return html`<span class="badge interp"
       ><sl-icon name="robot" aria-hidden="true"></sl-icon>interpreted</span
@@ -824,6 +844,7 @@ export function renderMadeRow(
     resolveProjectName?: ((ref: ProjectDecisionProjectRef | undefined) => string) | undefined;
   }
 ): TemplateResult {
+  const isDismiss = isDismissLogEntry(e);
   const isFollow = e.outcome === 'confirm' || e.outcome === 'override';
   const surf = surfaceDisplay(e.surface);
   const projectId = opts.defaultProjectId || e.project?.id || '';
@@ -834,7 +855,7 @@ export function renderMadeRow(
       : null;
   const whereLabel = conversationDisplayLabel(e.chatKey, e.conversationLabel);
   const convHref = conversationHref(e.chatKey, e.conversationAvailable, projectId);
-  const replyHref = replyHrefForEntry(e, projectId);
+  const replyHref = isDismiss ? null : replyHrefForEntry(e, projectId);
 
   return html`
     <tr class=${isFollow ? 'follow' : ''} data-answer-row=${e.answerId}>
@@ -856,15 +877,23 @@ export function renderMadeRow(
       <td class="q">
         <span class="q-text" title=${e.decision.question}>${e.decision.question}</span>
       </td>
-      <td><b>${e.label || e.choiceId}</b></td>
+      <td data-answer-cell>
+        <b>${isDismiss ? 'Dismissed' : e.label || e.choiceId}</b>
+        ${isDismiss && e.dismissReason
+          ? html`<div class="dismiss-reason muted" data-dismiss-reason>${e.dismissReason}</div>`
+          : nothing}
+      </td>
       <td data-answered-by>${renderAnsweredBy(e, opts.currentUserId)}</td>
       <td data-provenance>
         ${renderProvenanceBadge(e)}
-        ${e.provenance === 'agent_interpreted' && replyHref
+        ${!isDismiss && e.provenance === 'agent_interpreted' && replyHref
           ? html` <a class="linkish" data-reply-link href=${replyHref}>reply</a>`
-          : e.provenance === 'direct' && e.outcome === 'override' && e.previousChoiceLabel
+          : !isDismiss &&
+              e.provenance === 'direct' &&
+              e.outcome === 'override' &&
+              e.previousChoiceLabel
             ? html` <span class="muted">from ${e.previousChoiceLabel}</span>`
-            : e.provenance === 'direct' && e.outcome === 'answer' && e.matchedDefault
+            : !isDismiss && e.provenance === 'direct' && e.outcome === 'answer' && e.matchedDefault
               ? html` <span class="muted">recommended</span>`
               : nothing}
       </td>
@@ -895,27 +924,31 @@ export function renderMadeItem(
     resolveProjectName?: ((ref: ProjectDecisionProjectRef | undefined) => string) | undefined;
   }
 ): TemplateResult {
+  const isDismiss = isDismissLogEntry(e);
   const surf = surfaceDisplay(e.surface);
   const proj = e.project?.id ? e.project : opts.fallbackProject;
   const projectId = opts.defaultProjectId || proj?.id || '';
   const projectName = opts.resolveProjectName ? opts.resolveProjectName(proj) : '';
   const whereLabel = conversationDisplayLabel(e.chatKey, e.conversationLabel);
   const convHref = conversationHref(e.chatKey, e.conversationAvailable, projectId);
-  const replyHref = replyHrefForEntry(e, projectId);
+  const replyHref = isDismiss ? null : replyHrefForEntry(e, projectId);
 
   return html`
     <div class="item" data-mobile-answer=${e.answerId}>
       <div class="top">
         <span class="key">${e.decision.key || e.decision.ref}</span>
-        <b>${e.label || e.choiceId}</b>
+        <b>${isDismiss ? 'Dismissed' : e.label || e.choiceId}</b>
         ${renderProvenanceBadge(e)}
       </div>
       <div>${e.decision.question}</div>
+      ${isDismiss && e.dismissReason
+        ? html`<div class="dismiss-reason muted" data-dismiss-reason>${e.dismissReason}</div>`
+        : nothing}
       <div class="meta">
         ${opts.includeProjectInMeta && projectName
           ? html`${projectName} · `
           : nothing}${renderAnsweredBy(e, opts.currentUserId)}
-        ${e.outcome === 'override' && e.previousChoiceLabel
+        ${!isDismiss && e.outcome === 'override' && e.previousChoiceLabel
           ? html` · from ${e.previousChoiceLabel}`
           : nothing}
         · ${surf.label} · ${e.decision.askerAgentName} ·

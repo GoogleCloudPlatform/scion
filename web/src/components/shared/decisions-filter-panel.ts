@@ -111,6 +111,8 @@ function provenanceTagWord(value: string): string {
       return 'confirmed';
     case 'overridden':
       return 'changed';
+    case 'dismissed':
+      return 'dismissed';
     default:
       return value;
   }
@@ -713,6 +715,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
                           <sl-option value="interpreted">Interpreted</sl-option>
                           <sl-option value="confirmed">Confirmed</sl-option>
                           <sl-option value="overridden">Changed</sl-option>
+                          <sl-option value="dismissed">Dismissed</sl-option>
                         </sl-select>
 
                         <div class="date-pair">

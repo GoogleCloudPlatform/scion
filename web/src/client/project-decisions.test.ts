@@ -321,6 +321,16 @@ describe('Decisions URL state round-trip & validation (D10, D11)', () => {
       from: '2026-11-01',
       to: '2026-11-14',
     });
+
+    const dismissedSearch = buildDecisionsUrlSearch({
+      tab: 'made',
+      provenance: 'dismissed',
+    });
+    expect(dismissedSearch).toBe('tab=made&provenance=dismissed');
+    expect(parseDecisionsUrlState(`?${dismissedSearch}`).provenance).toBe('dismissed');
+    expect(buildProjectDecisionsQuery({ tab: 'made', filter: { provenance: 'dismissed' } })).toBe(
+      '?tab=made&provenance=dismissed'
+    );
   });
 
   it('silently drops invalid URL values on load', () => {

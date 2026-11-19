@@ -207,6 +207,7 @@ function cleanProvenanceValue(raw: string | undefined | null): MadeDecisionsProv
     case 'interpreted':
     case 'confirmed':
     case 'overridden':
+    case 'dismissed':
       return trimmed;
     case 'agent_interpreted':
       return 'interpreted';

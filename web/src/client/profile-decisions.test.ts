@@ -136,6 +136,13 @@ describe('profile-decisions URL state (D10, R6)', () => {
       from: '2026-11-01',
       to: '2026-11-14',
     });
+
+    const dismissedProfileSearch = buildProfileDecisionsUrlSearch({
+      tab: 'made',
+      provenance: 'dismissed',
+    });
+    expect(dismissedProfileSearch).toBe('tab=made&sort=recent&provenance=dismissed');
+    expect(parseProfileDecisionsUrlState(dismissedProfileSearch).provenance).toBe('dismissed');
   });
 
   it('always writes tab and sort in the URL including defaults (R6, R-1)', () => {
