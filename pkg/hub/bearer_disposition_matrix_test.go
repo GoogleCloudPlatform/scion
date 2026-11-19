@@ -466,6 +466,18 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "same as the PUT entry above: the generic refusal probes get the artifact service's 404 for a caller that cannot read the artifact where the matrix expects 403, and the admitting super-admin is neither the owner nor a grantee; TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded drives DELETE with user access tokens and TestArtifactsOpenReviewOnRoutes with principals",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
+	{OperationID: "artifact.review.draft.read", Method: "GET", Pattern: "/api/v1/artifacts/{id}/review-draft"}: {
+		Reason: "the admitting token carries only artifact:create, not artifact:read, so readableArtifact answers it 404; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so canWriteErr would answer 403. TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded drives GET, PUT and DELETE with user access tokens (without artifact:read or bounded to another project 404, read only 403, artifact:read and artifact:create reach the handler) and TestArtifactsReviewDraftsAgentCreatorAndScopedTokenIsolation pins C1 scoped-token isolation",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.review.draft.write", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/review-draft"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so readableArtifact answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so canWriteErr would answer 403. TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded and TestArtifactsReviewDraftsAgentCreatorAndScopedTokenIsolation drive PUT with user access tokens",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.review.draft.write", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/review-draft"}: {
+		Reason: "same as the PUT /api/v1/artifacts/{id}/review-draft entry above: the generic refusal probes get 404 for a caller that cannot read the artifact where the matrix expects 403, and the admitting super-admin lacks artifact:read and holds no grant on the fixture artifact; TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded and TestArtifactsReviewDraftsAgentCreatorAndScopedTokenIsolation drive DELETE with user access tokens",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
 	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}: {
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",

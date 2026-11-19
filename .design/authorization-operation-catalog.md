@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 424
+**Operations:** 426
 
 ## Table of Contents
 
@@ -96,6 +96,8 @@
 - [artifact.delete](#artifactdelete) — Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee), on an artifact owned by an agent for its stewards (an owner of its home project, or the agent's delegating user who reads there), and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
 - [artifact.version.create](#artifactversioncreate) — Start a pending version of an artifact from a manifest; a review grantee may start review versions only
 - [artifact.review.session.write](#artifactreviewsessionwrite) — Record or end the caller's own review session of an artifact (the heartbeat of a review tab, ptone/scion#6849); 404 while the hub.artifacts_open_review_check experiment is off; any caller who may start a review version passes (the write check of artifact.version.create); rate limited per principal after authorization; the row is always the caller's own; a DELETE that deletes the caller's session row writes a review_session_ended decision-log entry; the Hub keeps the row until the reaper deletes it, at least an hour after its last beat, so this includes a session that no longer counts as open; a DELETE when no such row exists writes none (both answer 204)
+- [artifact.review.draft.read](#artifactreviewdraftread) — Read the caller's own saved draft review of an artifact (200 with draft null when none exists, plus currentSeq; ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); the row is always keyed by the caller's own principal with no administrator, steward, owner or publisher override
+- [artifact.review.draft.write](#artifactreviewdraftwrite) — Create, replace or delete the caller's own saved draft review of an artifact with optimistic rev concurrency (ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); rate limited per principal (LimitDraftWrite) after authorization and before reading the request body; the row is always keyed by the caller's own principal with no override; a DELETE that deletes the caller's draft row writes a review_draft_deleted decision-log entry without content, while a DELETE when no draft exists writes none (both answer 204); draft saves never trigger review notifications
 - [artifact.version.upload](#artifactversionupload) — Upload one manifest file of a pending version; only the principal that started the version may upload to it
 - [artifact.version.finalize](#artifactversionfinalize) — Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
 - [artifact.version.view](#artifactversionview) — Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check
@@ -4025,7 +4027,7 @@
 
 - **Event Type:** `artifact_event (deleted)`
 - **Context Fields:** artifact_id, actor_kind, actor_ref, authority
-- **Before Fields:** grantsRemoved, linksRevoked
+- **Before Fields:** grantsRemoved, linksRevoked, draftsRemoved
 - **Atomic:** Yes
 
 **Denial Codes:** `not_found`, `forbidden`
@@ -4112,6 +4114,84 @@
 - `pkg/hub:TestArtifactsOpenReviewOnRoutes`
 - `pkg/artifacts:TestReviewSessionAuthorization`
 - `pkg/artifacts:TestReviewSessionEndLogged`
+
+---
+
+## artifact.review.draft.read
+
+**Domain:** artifact
+
+**Description:** Read the caller's own saved draft review of an artifact (200 with draft null when none exists, plus currentSeq; ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); the row is always keyed by the caller's own principal with no administrator, steward, owner or publisher override
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/review-draft` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsReviewDraftsOnRoutes`
+- `pkg/hub:TestArtifactsReviewDraftsAgentCreatorAndScopedTokenIsolation`
+- `pkg/artifacts:TestReviewDraftAuthorizationOrder`
+
+---
+
+## artifact.review.draft.write
+
+**Domain:** artifact
+
+**Description:** Create, replace or delete the caller's own saved draft review of an artifact with optimistic rev concurrency (ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); rate limited per principal (LimitDraftWrite) after authorization and before reading the request body; the row is always keyed by the caller's own principal with no override; a DELETE that deletes the caller's draft row writes a review_draft_deleted decision-log entry without content, while a DELETE when no draft exists writes none (both answer 204); draft saves never trigger review notifications
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/artifacts/{id}/review-draft` |
+| http_route | DELETE | `/api/v1/artifacts/{id}/review-draft` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `artifact decision log (review_draft_deleted)`
+- **Context Fields:** route, principal_kind, principal_id, project_id
+- **Before Fields:** artifact_id
+- **Atomic:** No
+- **Non-Atomic Justification:** The entry is written after the store deletes the caller's draft row, outside its transaction, as for every artifact decision-log entry (version creates and finalizes included; artifact_event records only artifact lifetime, home and access changes, and never records a reviewer's private draft activity on the artifact). A draft is the caller's own private, 30-day-TTL scratch state rather than a shared resource or authority grant, and is routinely deleted by the caller immediately after submitting a review
+
+**Denial Codes:** `not_found`, `forbidden`, `rate_limited`, `too_many_drafts`
+
+### Tests
+
+- `pkg/hub:TestArtifactsReviewDraftsOnRoutes`
+- `pkg/hub:TestArtifactsReviewDraftsAgentCreatorAndScopedTokenIsolation`
+- `pkg/artifacts:TestReviewDraftAuthorizationOrder`
+- `pkg/artifacts:TestReviewDraftNoContentInLogsOrErrors`
 
 ---
 

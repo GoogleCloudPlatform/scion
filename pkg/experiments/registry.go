@@ -434,6 +434,13 @@ const ArtifactArchive = "hub.artifact_archive"
 // answer 404 and publishing behaves exactly as before.
 const ArtifactsOpenReviewCheck = "hub.artifacts_open_review_check"
 
+// ArtifactsReviewDrafts gates durable per-reviewer draft reviews on the hub
+// (ptone/scion#7116, ptone/scion#8470): GET, PUT and DELETE
+// /api/v1/artifacts/{id}/review-draft and the web editor's autosave and
+// resume UI. While it is off the review-draft routes answer 404 and reviewing
+// behaves as before; the 30-day TTL reaper still runs.
+const ArtifactsReviewDrafts = "hub.artifacts_review_drafts"
+
 // UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
 // DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
 // records a deletion tombstone and stops the user's agents, the GET
@@ -954,6 +961,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#6849",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-02-04",
+	},
+	{
+		Name:        ArtifactsReviewDrafts,
+		Title:       "Durable artifact review drafts",
+		Description: "Saves in-progress artifact reviews as private per-reviewer drafts on the hub so reviewers can resume across browser sessions or devices before submitting. Needs hub.artifacts. While off, the review-draft routes answer 404 and reviewing behaves as before. Must not leave alpha before periodic reaping of drafts whose author lost review access or was deleted has landed (ptone/scion#7116).",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7116",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-02-19",
 	},
 	{
 		Name:        UserDeleteForceCascade,

@@ -39,6 +39,7 @@
         "experiments.hub.artifact_archive:boolean",
         "experiments.hub.artifacts:boolean",
         "experiments.hub.artifacts_open_review_check:boolean",
+        "experiments.hub.artifacts_review_drafts:boolean",
         "experiments.hub.attachment_artifacts:boolean",
         "experiments.hub.chat_retention:boolean",
         "experiments.hub.custom_default_user_role:boolean",
