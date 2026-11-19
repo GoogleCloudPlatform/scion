@@ -28,13 +28,10 @@ import { apiFetch } from '../../client/api.js';
 import {
   actionableReason,
   dismissAvailableAtMs,
-  dismissDecisionPrompt,
   dismissDialogRows,
-  fetchAskerAnswerability,
   patchDecisions,
   type DecisionAnsweredDetail,
 } from '../../client/decision-prompts.js';
-import { showToast } from '../../utils/toast.js';
 import { chatConversationPath } from '../../client/chat-routes.js';
 import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import {
@@ -81,7 +78,6 @@ import {
   MAX_DECISIONS_PAGE_SIZE,
   SEARCH_DEBOUNCE_MS,
   dateBoundToIso,
-  dismissResultToast,
   isEditableTarget,
   promptHasWaitingOnOthers,
 } from './decisions-format.js';
@@ -178,14 +174,9 @@ export class DecisionsPageController implements ReactiveController {
   filterTo = '';
 
   clockNow: () => number = () => Date.now();
-  dismissDialogPrompt: ProjectDecisionPromptView | null = null;
-  dismissReasonDraft = '';
-  dismissSubmitting = false;
-  dismissAskerGone = false;
 
   private readonly dismissAvailableAtOverrides = new Map<string, number>();
   private dismissUnlockTimer: ReturnType<typeof setTimeout> | null = null;
-  private dismissProbeGen = 0;
 
   private pendingSortOverride: ProfileDecisionsSort | null = null;
   private madeSortOverride: ProfileDecisionsSort | null = null;
@@ -344,7 +335,6 @@ export class DecisionsPageController implements ReactiveController {
       clearTimeout(this.dismissUnlockTimer);
       this.dismissUnlockTimer = null;
     }
-    ++this.dismissProbeGen;
     this.pendingResetInFlight = false;
     this.pendingLoading = false;
     this.pendingLoadingMore = false;
@@ -1060,22 +1050,6 @@ export class DecisionsPageController implements ReactiveController {
 
     if (changed) {
       this.pendingPrompts = nextPrompts;
-      if (this.dismissDialogPrompt && !this.dismissSubmitting) {
-        const current = nextPrompts.find(
-          (p) => p.promptMessageId === this.dismissDialogPrompt?.promptMessageId
-        );
-        if (
-          !current ||
-          !current.waitingOnYou ||
-          !current.decisions.some((d) => d.status === 'pending' && !d.decision)
-        ) {
-          this.dismissDialogPrompt = null;
-          this.dismissReasonDraft = '';
-          this.dismissAskerGone = false;
-        } else {
-          this.dismissDialogPrompt = current;
-        }
-      }
       this.scheduleDismissUnlockTimer();
       if (deltaWaitingOnYou !== 0) {
         this.updateCounts({
@@ -1557,7 +1531,9 @@ export class DecisionsPageController implements ReactiveController {
     let earliestMs = Infinity;
     for (const p of this.pendingPrompts) {
       if (!p.waitingOnYou || !p.canAnswer) continue;
-      if (!p.decisions.some((d) => d.status === 'pending' && !d.decision)) continue;
+      if (dismissDialogRows(p.decisions, this.currentUserId, p.waitingReasons).length === 0) {
+        continue;
+      }
       const overrideMs = this.dismissAvailableAtOverrides.get(p.promptMessageId) ?? 0;
       const availMs = Math.max(dismissAvailableAtMs(p.createdAt), overrideMs);
       if (availMs > nowMs && availMs < earliestMs) {
@@ -1574,118 +1550,19 @@ export class DecisionsPageController implements ReactiveController {
     }, delayMs);
   }
 
-  openDismissDialog = (prompt: ProjectDecisionPromptView): void => {
-    if (this.promptDismissRemainingMinutes(prompt) > 0) return;
-    this.dismissDialogPrompt = prompt;
-    this.dismissReasonDraft = '';
-    this.dismissSubmitting = false;
+  isPromptAskerGone = (prompt: ProjectDecisionPromptView): boolean => {
     const facetActor = this.facetsAgents.find((a) => a.id === prompt.askerAgentId);
-    this.dismissAskerGone = Boolean(facetActor?.hint?.includes('deleted'));
-    this.notify();
-    if (prompt.askerAgentId) {
-      const gen = ++this.dismissProbeGen;
-      void fetchAskerAnswerability(prompt.askerAgentId, prompt.askerAgentName).then((ans) => {
-        if (
-          gen !== this.dismissProbeGen ||
-          !this.host.isConnected ||
-          this.dismissDialogPrompt?.promptMessageId !== prompt.promptMessageId
-        ) {
-          return;
-        }
-        const gone = ans.state === 'gone';
-        if (gone !== this.dismissAskerGone) {
-          this.dismissAskerGone = gone;
-          this.notify();
-        }
-      });
-    }
+    return Boolean(facetActor?.hint?.includes('deleted'));
   };
 
-  closeDismissDialog = (): void => {
-    if (this.dismissSubmitting) return;
-    ++this.dismissProbeGen;
-    this.dismissDialogPrompt = null;
-    this.dismissReasonDraft = '';
-    this.dismissAskerGone = false;
+  onPromptDismissTooRecent = (
+    prompt: ProjectDecisionPromptView,
+    e: CustomEvent<{ messageId: string; availableAt: string }>
+  ): void => {
+    const parsed = Date.parse(e.detail?.availableAt ?? '');
+    if (!Number.isFinite(parsed)) return;
+    this.dismissAvailableAtOverrides.set(prompt.promptMessageId, parsed);
+    this.scheduleDismissUnlockTimer();
     this.notify();
-  };
-
-  setDismissReasonDraft = (value: string): void => {
-    this.dismissReasonDraft = value;
-    this.notify();
-  };
-
-  confirmDismissPrompt = async (): Promise<void> => {
-    const prompt = this.dismissDialogPrompt;
-    if (!prompt || this.dismissSubmitting) return;
-    this.dismissSubmitting = true;
-    this.notify();
-    try {
-      const res = await dismissDecisionPrompt(prompt.promptMessageId, {
-        reason: this.dismissReasonDraft,
-        surface: 'decisions_page',
-        decisionIds: dismissDialogRows(prompt.decisions).map((d) => d.rowId),
-      });
-      if (!this.host.isConnected) return;
-      if (res.ok) {
-        const updated = [...res.dismissed, ...res.alreadyDismissed];
-        this.dismissDialogPrompt = null;
-        this.dismissReasonDraft = '';
-        this.dismissAskerGone = false;
-        this.applyIncomingDecisionPatch(prompt.promptMessageId, updated);
-        const toast = dismissResultToast(
-          res.deliveryStatus,
-          res.dismissed.length,
-          res.alreadyDismissed.length,
-          prompt.askerAgentName
-        );
-        showToast(toast.message, toast.variant);
-        this.scheduleLiveRefresh();
-        return;
-      }
-      // Explicit ids turn a too-recent row into dismiss_changed/too_recent;
-      // when that is the only reason, handle it like 409 too_recent.
-      const onlyTooRecent =
-        res.code === 'dismiss_changed' &&
-        !!res.reasons &&
-        Object.keys(res.reasons).length > 0 &&
-        Object.values(res.reasons).every((r) => r === 'too_recent');
-      if (res.code === 'too_recent' || onlyTooRecent) {
-        if (res.availableAt) {
-          const parsed = Date.parse(res.availableAt);
-          if (Number.isFinite(parsed)) {
-            this.dismissAvailableAtOverrides.set(prompt.promptMessageId, parsed);
-          }
-        }
-        this.dismissDialogPrompt = null;
-        this.dismissReasonDraft = '';
-        this.dismissAskerGone = false;
-        this.scheduleDismissUnlockTimer();
-        showToast(
-          onlyTooRecent
-            ? 'Decisions must be at least 5 minutes old before they can be dismissed.'
-            : res.message,
-          'warning'
-        );
-        return;
-      }
-      if (res.code === 'dismiss_changed') {
-        this.dismissDialogPrompt = null;
-        this.dismissReasonDraft = '';
-        this.dismissAskerGone = false;
-        if (res.decisions) {
-          this.applyIncomingDecisionPatch(prompt.promptMessageId, res.decisions);
-        }
-        showToast('Nothing dismissed: this card changed.', 'warning');
-        this.scheduleLiveRefresh();
-        return;
-      }
-      showToast(res.message, 'danger');
-    } finally {
-      this.dismissSubmitting = false;
-      if (this.host.isConnected) {
-        this.notify();
-      }
-    }
   };
 }

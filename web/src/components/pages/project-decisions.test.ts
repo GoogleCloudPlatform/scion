@@ -2555,7 +2555,7 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('[data-prompt-card="m-old-tail-0"]')).toBeNull();
   });
 
-  it('disables Dismiss… with countdown tooltip before 5 minutes and unlocks at the boundary (ptone/scion#8213)', async () => {
+  it('disables Dismiss… in the shared card menu with countdown tooltip before 5 minutes and unlocks at the boundary (ptone/scion#8213, ptone/scion#8216)', async () => {
     enableDecisionsFlag();
     const createdAt = new Date(Date.now() - (5 * 60_000 - 1200)).toISOString();
     pendingResponses = [
@@ -2571,21 +2571,25 @@ describe('<scion-page-project-decisions>', () => {
     const el = await mount({ path: '/projects/p-1/decisions' });
     const root = el.shadowRoot!;
 
-    const disabledBtn = root.querySelector<HTMLElement>('[data-dismiss-prompt="m-1"]')!;
-    expect(disabledBtn).not.toBeNull();
-    expect(disabledBtn.hasAttribute('disabled')).toBe(true);
-    const tip = root.querySelector<HTMLElement>('[data-dismiss-tooltip]')!;
+    expect(root.querySelector('[data-dismiss-prompt="m-1"]')).toBeNull();
+    const card = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="m-1"] scion-chat-decisions'
+    )!;
+    const disabledItem = card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!;
+    expect(disabledItem).not.toBeNull();
+    expect(disabledItem.hasAttribute('disabled')).toBe(true);
+    const tip = card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-tooltip]')!;
     expect(tip?.getAttribute('content')).toBe('Dismiss available in 1 min');
 
-    // Wait past the 1.2s remaining age so the controller's boundary timer fires automatically.
+    // Wait past the 1.2s remaining age so the card's boundary timer fires automatically.
     await settle(el, 1350);
 
-    const enabledBtn = root.querySelector<HTMLElement>('[data-dismiss-prompt="m-1"]')!;
-    expect(enabledBtn.hasAttribute('disabled')).toBe(false);
-    expect(root.querySelector('[data-dismiss-tooltip]')).toBeNull();
+    const enabledItem = card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!;
+    expect(enabledItem.hasAttribute('disabled')).toBe(false);
+    expect(card.shadowRoot!.querySelector('[data-dismiss-tooltip]')).toBeNull();
   });
 
-  it('dismisses a multi-row set from the confirm dialog with reason and removes the card from Waiting on you (ptone/scion#8213)', async () => {
+  it('dismisses a multi-row set from the shared card dialog with reason and removes the card from Waiting on you (ptone/scion#8213, ptone/scion#8216)', async () => {
     enableDecisionsFlag();
     const d1 = makeDecision({ rowId: 'r-1', key: 'D234', ref: 'D234', question: 'Ship v0.9?' });
     const d2 = makeDecision({
@@ -2644,11 +2648,15 @@ describe('<scion-page-project-decisions>', () => {
     const el = await mount({ path: '/projects/p-1/decisions' });
     const root = el.shadowRoot!;
     expect(root.querySelector('[data-waiting-badge]')?.textContent?.trim()).toBe('2');
+    expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
 
-    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-set"]')!.click();
+    const card = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="m-set"] scion-chat-decisions'
+    )!;
+    card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!.click();
     await settle(el, 20);
 
-    const dialog = root.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
+    const dialog = card.shadowRoot!.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
     expect(dialog).not.toBeNull();
     expect(dialog.getAttribute('label')).toBe('Dismiss decisions');
     expect(dialog.querySelector('[data-dismiss-tell="live"]')?.textContent).toContain(
@@ -2668,7 +2676,7 @@ describe('<scion-page-project-decisions>', () => {
     await settle(el, 90);
 
     const dismissReq = requests.find((r) => r.url === '/api/v1/decision-prompts/m-set/dismiss');
-    expect(dismissReq).toEqual({
+    expect(dismissReq).toMatchObject({
       method: 'POST',
       url: '/api/v1/decision-prompts/m-set/dismiss',
       body: {
@@ -2677,14 +2685,16 @@ describe('<scion-page-project-decisions>', () => {
         surface: 'decisions_page',
       },
     });
-    expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
+    expect(typeof (dismissReq?.body as Record<string, unknown> | undefined)?.idempotencyKey).toBe(
+      'string'
+    );
     expect(root.querySelector('[data-prompt-card="m-set"]')).toBeNull();
     expect(root.querySelector('[data-waiting-badge]')).toBeNull();
     expect(root.querySelector('[data-empty="pending"]')).not.toBeNull();
     expect(showToast).toHaveBeenCalledWith('Dismissed 2 decisions.', 'success');
   });
 
-  it('dismisses only the rows the dialog lists, not an interpreted row awaiting the viewer (ptone/scion#8213)', async () => {
+  it('lets the viewer pick open rows (including own interpreted rows, D6) while disabling rows waiting on others (ptone/scion#8216)', async () => {
     enableDecisionsFlag();
     const pending = makeDecision({
       rowId: 'r-pend',
@@ -2693,7 +2703,7 @@ describe('<scion-page-project-decisions>', () => {
       ref: 'D1',
       question: 'Ship v0.9?',
     });
-    const interpreted = makeDecision({
+    const ownInterpreted = makeDecision({
       rowId: 'r-interp',
       messageId: 'm-mixed',
       key: 'D2',
@@ -2713,15 +2723,35 @@ describe('<scion-page-project-decisions>', () => {
         at: '2026-11-13T10:05:00Z',
       },
     });
+    const bobInterpreted = makeDecision({
+      rowId: 'r-bob',
+      messageId: 'm-mixed',
+      key: 'D3',
+      ref: 'D3',
+      question: 'Deploy after tag?',
+      status: 'decided',
+      decision: {
+        choiceId: 'no',
+        label: 'No',
+        answeredByUserId: 'u-bob',
+        answeredByName: 'Bob',
+        provenance: 'agent_interpreted',
+        outcome: 'answer',
+        surface: 'slack',
+        responseMessageId: 'resp-bob',
+        at: '2026-11-13T10:05:00Z',
+      },
+    });
     const prompt = makePrompt({
       promptMessageId: 'm-mixed',
       answerMode: 'set',
       createdAt: '2026-11-13T10:00:00Z',
-      decisions: [pending, interpreted],
+      decisions: [pending, ownInterpreted, bobInterpreted],
+      waitingReasons: { 'r-bob': 'other_user_confirm' },
     });
     pendingResponses = [
       {
-        counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+        counts: { waitingOnYou: 2, waitingOnOthers: 1 },
         prompts: [prompt],
         agents: [{ id: 'a-rel', name: 'release-bot' }],
         answerers: [{ id: 'u-me', name: 'Alice' }],
@@ -2756,22 +2786,44 @@ describe('<scion-page-project-decisions>', () => {
 
     const el = await mount({ path: '/projects/p-1/decisions' });
     const root = el.shadowRoot!;
-    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-mixed"]')!.click();
+    const card = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="m-mixed"] scion-chat-decisions'
+    )!;
+    card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!.click();
     await settle(el, 20);
 
-    const dialog = root.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
+    const dialog = card.shadowRoot!.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
     expect(dialog).not.toBeNull();
-    expect(dialog.getAttribute('label')).toBe('Dismiss decision');
-    expect(dialog.textContent).toContain('D1');
-    expect(dialog.textContent).not.toContain('Which approach?');
-    dialog.querySelector<HTMLElement>('[data-dismiss-confirm]')!.click();
+    expect(dialog.getAttribute('label')).toBe('Dismiss decisions');
+    expect(dialog.querySelector('[data-dismiss-check="r-pend"]')?.hasAttribute('checked')).toBe(
+      true
+    );
+    const interpCheck = dialog.querySelector<HTMLElement & { checked: boolean }>(
+      '[data-dismiss-check="r-interp"]'
+    )!;
+    expect(interpCheck.hasAttribute('checked')).toBe(true);
+    expect(
+      dialog.querySelector('[data-dismiss-row="r-bob"] sl-checkbox')?.hasAttribute('disabled')
+    ).toBe(true);
+    expect(dialog.querySelector('[data-dismiss-row="r-bob"]')?.textContent).toContain(
+      "Waiting on Bob to confirm release-bot's reading"
+    );
+
+    // Uncheck the viewer's interpreted row so only r-pend is sent.
+    interpCheck.checked = false;
+    interpCheck.dispatchEvent(new Event('sl-change'));
+    await settle(el, 10);
+
+    const confirmBtn = dialog.querySelector<HTMLElement>('[data-dismiss-confirm]')!;
+    expect(confirmBtn.textContent?.trim()).toBe('Dismiss 1 decision');
+    confirmBtn.click();
     await settle(el, 90);
 
     const dismissReq = requests.find((r) => r.url === '/api/v1/decision-prompts/m-mixed/dismiss');
-    expect(dismissReq?.body).toEqual({ decisionIds: ['r-pend'], surface: 'decisions_page' });
+    expect(dismissReq?.body).toMatchObject({ decisionIds: ['r-pend'], surface: 'decisions_page' });
   });
 
-  it('closes the dialog and refreshes when the card changed under the dialog (dismiss_changed) (ptone/scion#8213)', async () => {
+  it('closes the dialog and refreshes when the card changed under the dialog (dismiss_changed) (ptone/scion#8213, ptone/scion#8216)', async () => {
     enableDecisionsFlag();
     const d1 = makeDecision({ rowId: 'r-1', messageId: 'm-chg' });
     const prompt = makePrompt({
@@ -2807,20 +2859,25 @@ describe('<scion-page-project-decisions>', () => {
 
     const el = await mount({ path: '/projects/p-1/decisions' });
     const root = el.shadowRoot!;
-    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-chg"]')!.click();
+    const card = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="m-chg"] scion-chat-decisions'
+    )!;
+    card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!.click();
     await settle(el, 20);
-    root
-      .querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]')!
+    card
+      .shadowRoot!.querySelector<HTMLElement>(
+        'sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]'
+      )!
       .click();
     await settle(el, 90);
 
     const dismissReq = requests.find((r) => r.url === '/api/v1/decision-prompts/m-chg/dismiss');
-    expect(dismissReq?.body).toEqual({ decisionIds: ['r-1'], surface: 'decisions_page' });
-    expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
+    expect(dismissReq?.body).toMatchObject({ decisionIds: ['r-1'], surface: 'decisions_page' });
+    expect(card.shadowRoot!.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
     expect(showToast).toHaveBeenCalledWith('Nothing dismissed: this card changed.', 'warning');
   });
 
-  it('treats a dismiss_changed whose only reason is too_recent like too_recent: re-arms the unlock (ptone/scion#8213)', async () => {
+  it('treats a dismiss_changed whose only reason is too_recent like too_recent: re-arms the unlock (ptone/scion#8213, ptone/scion#8216)', async () => {
     enableDecisionsFlag();
     const d1 = makeDecision({ rowId: 'r-1', messageId: 'm-skew' });
     const prompt = makePrompt({
@@ -2857,27 +2914,32 @@ describe('<scion-page-project-decisions>', () => {
 
     const el = await mount({ path: '/projects/p-1/decisions' });
     const root = el.shadowRoot!;
-    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-skew"]')!.click();
+    const card = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="m-skew"] scion-chat-decisions'
+    )!;
+    card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!.click();
     await settle(el, 20);
-    root
-      .querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]')!
+    card
+      .shadowRoot!.querySelector<HTMLElement>(
+        'sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]'
+      )!
       .click();
     await settle(el, 90);
 
-    expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
+    expect(card.shadowRoot!.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
     expect(showToast).toHaveBeenCalledWith(
       'Decisions must be at least 5 minutes old before they can be dismissed.',
       'warning'
     );
     expect(showToast).not.toHaveBeenCalledWith('Nothing dismissed: this card changed.', 'warning');
-    const btn = root.querySelector<HTMLElement>('[data-dismiss-prompt="m-skew"]')!;
-    expect(btn.hasAttribute('disabled')).toBe(true);
-    expect(root.querySelector<HTMLElement>('[data-dismiss-tooltip]')?.getAttribute('content')).toBe(
-      'Dismiss available in 3 min'
-    );
+    const item = card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!;
+    expect(item.hasAttribute('disabled')).toBe(true);
+    expect(
+      card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-tooltip]')?.getAttribute('content')
+    ).toBe('Dismiss available in 3 min');
   });
 
-  it('tells the user a suspended asker was not told, not that it is gone (ptone/scion#8213)', async () => {
+  it('tells the user a suspended asker was not told, not that it is gone (ptone/scion#8213, ptone/scion#8216)', async () => {
     enableDecisionsFlag();
     const d1 = makeDecision({ rowId: 'r-1', messageId: 'm-susp' });
     const prompt = makePrompt({
@@ -2917,10 +2979,16 @@ describe('<scion-page-project-decisions>', () => {
 
     const el = await mount({ path: '/projects/p-1/decisions' });
     const root = el.shadowRoot!;
-    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-susp"]')!.click();
+    const card = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="m-susp"] scion-chat-decisions'
+    )!;
+    card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!.click();
     await settle(el, 20);
-    root
-      .querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]')!
+    expect(card.shadowRoot!.querySelector('[data-dismiss-tell="gone"]')).toBeNull();
+    card
+      .shadowRoot!.querySelector<HTMLElement>(
+        'sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]'
+      )!
       .click();
     await settle(el, 90);
 
@@ -2931,7 +2999,7 @@ describe('<scion-page-project-decisions>', () => {
     expect(showToast).not.toHaveBeenCalledWith('release-bot is gone; nothing was sent.', 'neutral');
   });
 
-  it('shows gone-agent notice in the dismiss dialog when the asking agent returns 404 (ptone/scion#8213)', async () => {
+  it('shows gone-agent notice in the dismiss dialog when the asking agent returns 404 (ptone/scion#8213, ptone/scion#8216)', async () => {
     enableDecisionsFlag();
     const d1 = makeDecision({
       rowId: 'r-gone',
@@ -2993,11 +3061,14 @@ describe('<scion-page-project-decisions>', () => {
 
     const el = await mount({ path: '/projects/p-1/decisions' });
     const root = el.shadowRoot!;
+    const card = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="m-gone"] scion-chat-decisions'
+    )!;
 
-    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-gone"]')!.click();
+    card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!.click();
     await settle(el, 25);
 
-    const dialog = root.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
+    const dialog = card.shadowRoot!.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
     expect(dialog.querySelector('[data-dismiss-tell="gone"]')?.textContent).toContain(
       'nc-x is gone; nothing will be sent.'
     );

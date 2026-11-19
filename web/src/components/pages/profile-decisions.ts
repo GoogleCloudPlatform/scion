@@ -64,7 +64,6 @@ import {
   renderDateRangeError,
   renderDecisionsErrorState,
   renderDecisionsLoadingState,
-  renderDismissPromptDialog,
   renderLoadMoreFooter,
   renderMadeEmptyState,
   renderMadeItem,
@@ -437,15 +436,6 @@ export class ScionPageProfileDecisions extends LitElement {
           ${this.renderMadePanel()}
         </sl-tab-panel>
       </sl-tab-group>
-      ${renderDismissPromptDialog({
-        prompt: this.ctrl.dismissDialogPrompt,
-        reasonDraft: this.ctrl.dismissReasonDraft,
-        submitting: this.ctrl.dismissSubmitting,
-        askerGone: this.ctrl.dismissAskerGone,
-        onReasonInput: this.ctrl.setDismissReasonDraft,
-        onCancel: this.ctrl.closeDismissDialog,
-        onConfirm: () => void this.ctrl.confirmDismissPrompt(),
-      })}
     `;
   }
 
@@ -484,8 +474,8 @@ export class ScionPageProfileDecisions extends LitElement {
                 renderPromptCard(p, {
                   currentUserId: this.ctrl.currentUserId,
                   projectBadgeName: this.ctrl.projectDisplayName(p.project),
-                  dismissRemainingMin: this.ctrl.promptDismissRemainingMinutes(p),
-                  onRequestDismiss: this.ctrl.openDismissDialog,
+                  askerGone: this.ctrl.isPromptAskerGone(p),
+                  onDismissTooRecent: this.ctrl.onPromptDismissTooRecent,
                   onAnswered: this.ctrl.onPromptDecisionAnswered,
                   onJump: this.ctrl.onPromptMessageJump,
                 })
@@ -530,8 +520,8 @@ export class ScionPageProfileDecisions extends LitElement {
           (p) =>
             renderPromptCard(p, {
               currentUserId: this.ctrl.currentUserId,
-              dismissRemainingMin: this.ctrl.promptDismissRemainingMinutes(p),
-              onRequestDismiss: this.ctrl.openDismissDialog,
+              askerGone: this.ctrl.isPromptAskerGone(p),
+              onDismissTooRecent: this.ctrl.onPromptDismissTooRecent,
               onAnswered: this.ctrl.onPromptDecisionAnswered,
               onJump: this.ctrl.onPromptMessageJump,
             })

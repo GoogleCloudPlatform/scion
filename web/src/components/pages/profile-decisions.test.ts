@@ -40,6 +40,9 @@ import {
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
 
+const showToast = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/toast.js', () => ({ showToast }));
+
 class FakeEventSource extends EventTarget {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -192,6 +195,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   beforeEach(() => {
     requestedUrls = [];
     answerRequests = [];
+    showToast.mockReset();
     resetProfileDecisionProbeCacheForTests();
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
@@ -380,6 +384,33 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
         }
         if (url.pathname === '/auth/me') {
           return jsonResponse({ id: 'u-me' });
+        }
+        if (/^\/api\/v1\/decision-prompts\/([^/]+)\/dismiss$/.test(url.pathname)) {
+          const body =
+            typeof init?.body === 'string'
+              ? (JSON.parse(init.body) as Record<string, unknown>)
+              : {};
+          answerRequests.push({ url: url.pathname, body });
+          const ids = Array.isArray(body.decisionIds) ? (body.decisionIds as string[]) : [];
+          return jsonResponse({
+            dismissed: ids.map((rowId) =>
+              makeDecision({
+                rowId,
+                status: 'dismissed',
+                dismissed: {
+                  at: '2026-11-15T07:10:00Z',
+                  byUserId: 'u-me',
+                  byName: 'Alice',
+                  surface: 'decisions_page',
+                  responseMessageId: 'resp-dsm',
+                },
+              })
+            ),
+            alreadyDismissed: [],
+            responseMessageId: 'resp-dsm',
+            delivered: false,
+            deliveryStatus: 'gone',
+          });
         }
         return jsonResponse({}, 404);
       })
@@ -1276,5 +1307,105 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(cssText).toMatch(
       /sl-badge\[variant=['"]neutral['"]\]::part\(base\)\s*\{[^}]*color:\s*var\(--scion-badge-neutral-text/
     );
+  });
+
+  it('uses the shared card ⋯ menu and row-picker dialog on profile Decisions, forwarding gone-asker facet hints and updating counts (ptone/scion#8216)', async () => {
+    setFeatureFlag(DECISIONS_FLAG, true);
+    const r2a = makeDecision({
+      rowId: 'r-2a',
+      messageId: 'm-2',
+      key: 'migrate',
+      askerAgentId: AGENT_NCX,
+      askerAgentName: 'nc-x',
+    });
+    const r2b = makeDecision({
+      rowId: 'r-2b',
+      messageId: 'm-2',
+      key: 'D12',
+      askerAgentId: AGENT_NCX,
+      askerAgentName: 'nc-x',
+    });
+    let dismissedR2a = false;
+    handleDecisionsFetch = (): Promise<Response> =>
+      jsonResponse({
+        counts: { waitingOnYou: dismissedR2a ? 1 : 2, waitingOnOthers: 0 },
+        prompts: [
+          makePrompt({
+            project: PROJ_SCION,
+            promptMessageId: 'm-2',
+            chatKey: 'dm:ncx',
+            conversationLabel: 'DM with nc-x',
+            askerAgentId: AGENT_NCX,
+            askerAgentName: 'nc-x',
+            answerMode: 'set',
+            decisions: [
+              dismissedR2a
+                ? {
+                    ...r2a,
+                    status: 'dismissed',
+                    dismissed: {
+                      at: '2026-11-15T07:10:00Z',
+                      byUserId: 'u-me',
+                      byName: 'Alice',
+                      surface: 'decisions_page',
+                      responseMessageId: 'resp-dsm',
+                    },
+                  }
+                : r2a,
+              r2b,
+            ],
+          }),
+        ],
+        agents: [{ id: AGENT_NCX, name: 'nc-x', hint: '(deleted)', projectId: 'proj-1' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [],
+        projects: [PROJ_SCION],
+        truncatedProjects: false,
+      });
+
+    const emittedCounts: number[] = [];
+    const onCount = (e: Event): void => {
+      emittedCounts.push((e as CustomEvent<{ waitingOnYou: number }>).detail.waitingOnYou);
+    };
+    window.addEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, onCount);
+    try {
+      const el = await mount('/profile/decisions');
+      const root = el.shadowRoot!;
+      expect(root.querySelector('[data-dismiss-prompt="m-2"]')).toBeNull();
+      expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
+
+      const card = root.querySelector<ScionChatDecisions>(
+        '[data-prompt-card="m-2"] scion-chat-decisions'
+      )!;
+      card.shadowRoot!.querySelector<HTMLElement>('[data-dismiss-menu-item]')!.click();
+      await settle(el, 20);
+
+      const dialog = card.shadowRoot!.querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog]')!;
+      expect(dialog.querySelector('[data-dismiss-tell="gone"]')?.textContent).toContain(
+        'nc-x is gone; nothing will be sent.'
+      );
+
+      // Uncheck r-2b so only r-2a is dismissed
+      const check2b = dialog.querySelector<HTMLElement & { checked: boolean }>(
+        '[data-dismiss-check="r-2b"]'
+      )!;
+      check2b.checked = false;
+      check2b.dispatchEvent(new Event('sl-change'));
+      await settle(el, 10);
+
+      dismissedR2a = true;
+      dialog.querySelector<HTMLElement>('[data-dismiss-confirm]')!.click();
+      await settle(el, 90);
+
+      const dsmReq = answerRequests.find((r) => r.url === '/api/v1/decision-prompts/m-2/dismiss');
+      expect(dsmReq?.body).toMatchObject({
+        decisionIds: ['r-2a'],
+        surface: 'decisions_page',
+      });
+      expect(showToast).toHaveBeenCalledWith('nc-x is gone; nothing was sent.', 'neutral');
+      expect(emittedCounts.at(-1)).toBe(1);
+    } finally {
+      window.removeEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, onCount);
+    }
   });
 });
