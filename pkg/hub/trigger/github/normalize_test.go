@@ -839,6 +839,25 @@ func TestNormalize_PerformedViaAppIDAndIsOwnAppActor(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), resHuman.PerformedViaAppID)
 		assert.False(t, resHuman.IsOwnAppActor("scion", appID))
+
+		// Root-level performed_via_github_app is ignored; only the created primary
+		// object's performed_via_github_app is consulted.
+		rootOnlyApp := []byte(`{
+			"action": "created",
+			"installation": {"id": 10},
+			"repository": {"id": 1, "name": "r", "full_name": "o/r", "private": false},
+			"sender": {"login": "alice", "id": 3, "type": "User"},
+			"performed_via_github_app": {"id": 778899},
+			"issue": {"number": 5, "state": "open", "title": "T"},
+			"comment": {
+				"id": 101, "body": "hello",
+				"created_at": "2026-05-01T10:05:00Z"
+			}
+		}`)
+		resRootOnly, err := Normalize(EventIssueComment, "d-root-only", rootOnlyApp, Options{})
+		require.NoError(t, err)
+		assert.Zero(t, resRootOnly.PerformedViaAppID)
+		assert.False(t, resRootOnly.IsOwnAppActor("scion", appID))
 	})
 
 	t.Run("issues_pull_request_review_and_review_comment", func(t *testing.T) {

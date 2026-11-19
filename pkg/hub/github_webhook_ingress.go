@@ -54,6 +54,7 @@ const (
 	GitHubWebhookStatusIgnored             = "ignored"
 	GitHubWebhookStatusUnknownInstallation = "unknown_installation"
 	GitHubWebhookStatusNoProject           = "no_project"
+	GitHubWebhookStatusError               = "error"
 
 	GitHubWebhookSkipReasonQueueFull         = "queue_full"
 	GitHubWebhookSkipReasonAttributesCeiling = "attributes_ceiling"
@@ -673,6 +674,20 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 				if gErr != nil || existing == nil {
 					if anyQueued {
 						queue.Wake(trigger.EventQueueKind)
+						s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
+							Delivery:           deliveryID,
+							Event:              eventType,
+							Action:             normRes.Action,
+							InstallationID:     inst.InstallationID,
+							Repo:               normRes.RepoFullName,
+							PayloadBytes:       len(body),
+							Result:             GitHubWebhookStatusError,
+							Routing:            auditRouting,
+							BypassedProjectIDs: bypassed,
+							ProjectIDs:         selectedIDs,
+							Events:             events,
+							SkippedProjects:    skipped,
+						})
 					}
 					slog.Error("Failed to resolve GitHub trigger event after unique conflict",
 						"project_id", proj.ID,
@@ -696,6 +711,20 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 
 		if anyQueued {
 			queue.Wake(trigger.EventQueueKind)
+			s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
+				Delivery:           deliveryID,
+				Event:              eventType,
+				Action:             normRes.Action,
+				InstallationID:     inst.InstallationID,
+				Repo:               normRes.RepoFullName,
+				PayloadBytes:       len(body),
+				Result:             GitHubWebhookStatusError,
+				Routing:            auditRouting,
+				BypassedProjectIDs: bypassed,
+				ProjectIDs:         selectedIDs,
+				Events:             events,
+				SkippedProjects:    skipped,
+			})
 		}
 		slog.Error("Failed to persist GitHub trigger event",
 			"project_id", proj.ID,
@@ -723,7 +752,7 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 	s.githubWebhookIngress.recordReceiptAudit(ctx, githubReceiptAuditRecord{
 		Delivery:           deliveryID,
 		Event:              eventType,
-		Action:             normRes.Attributes["action"],
+		Action:             normRes.Action,
 		InstallationID:     inst.InstallationID,
 		Repo:               normRes.RepoFullName,
 		PayloadBytes:       len(body),
@@ -773,7 +802,7 @@ func (s *Server) listGitHubInstallationCandidateProjects(ctx context.Context, in
 }
 
 func isValidGitHubDeliveryGUID(s string) bool {
-	if s == "" || len(s) > GitHubWebhookMaxDeliveryBytes || len(s) != 36 {
+	if len(s) != 36 {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
@@ -790,7 +819,7 @@ func isValidGitHubDeliveryGUID(s string) bool {
 			}
 		}
 	}
-	return uuid.Validate(s) == nil
+	return true
 }
 
 func sanitizeGitHubEventHeaders(in map[string]string) map[string]string {

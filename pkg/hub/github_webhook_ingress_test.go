@@ -1702,3 +1702,98 @@ func TestGitHubWebhookIngress_OwnAppPerformedViaOnlyOnObjectCreationActions(t *t
 	assert.Equal(t, "hello", coldEv.Attributes["command_args"])
 	assert.NotContains(t, coldEv.Attributes, "mention_detection")
 }
+
+type ghSecondProjectErrorTxStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	mu      sync.Mutex
+	txCount int
+}
+
+func (w *ghSecondProjectErrorTxStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
+	if w.fault != nil && w.fault.Active() {
+		w.mu.Lock()
+		w.txCount++
+		n := w.txCount
+		w.mu.Unlock()
+		if n == 2 {
+			return errors.New("simulated db failure on second project")
+		}
+	}
+	return w.Store.WithTx(ctx, fn)
+}
+
+func TestGitHubWebhookIngress_PartialFanOut500EmitsErrorReceiptAudit(t *testing.T) {
+	srv, rawStore, wrapper, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *ghSecondProjectErrorTxStore {
+		return &ghSecondProjectErrorTxStore{Store: inner, fault: sw}
+	})
+
+	const (
+		testAppID  int64 = 778899
+		testSecret       = "whsec-github-partial-500-audit"
+		testInstID int64 = 554433
+	)
+	baseNow := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	auditBuf := &ghIngressLogBuffer{}
+	f := &githubIngressTestFixture{
+		srv:           srv,
+		store:         rawStore,
+		appID:         testAppID,
+		webhookSecret: testSecret,
+		instID:        testInstID,
+		auditBuf:      auditBuf,
+		warnBuf:       &ghIngressLogBuffer{},
+		now:           baseNow,
+	}
+
+	srv.mu.Lock()
+	srv.config.GitHubAppConfig.AppID = testAppID
+	srv.config.GitHubAppConfig.WebhookSecret = testSecret
+	srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+	srv.config.GitHubAppConfig.WebhooksEnabled = true
+	srv.mu.Unlock()
+
+	srv.githubWebhookIngress.mu.Lock()
+	srv.githubWebhookIngress.nowFn = f.currentTime
+	srv.githubWebhookIngress.auditLogger = slog.New(slog.NewJSONHandler(auditBuf, nil))
+	srv.githubWebhookIngress.mu.Unlock()
+
+	setTriggerExperimentsForGitHubIngressTest(t, srv, true, true)
+	require.NoError(t, rawStore.CreateGitHubInstallation(context.Background(), &store.GitHubInstallation{
+		InstallationID: testInstID,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          testAppID,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+
+	projA := f.createCandidateProject(t, "part500-a", "https://github.com/acme/widgets.git", testInstID)
+	projB := f.createCandidateProject(t, "part500-b", "https://github.com/acme/widgets.git", testInstID)
+
+	wrapper.mu.Lock()
+	wrapper.txCount = 0
+	wrapper.mu.Unlock()
+	fault.Arm()
+	auditBuf.Reset()
+
+	deliv := uuid.NewString()
+	body := sampleIssueCommentPayload(t, testInstID, "acme/widgets", "alice", "User", "partial-500-test", baseNow)
+	rec := f.postDelivery(t, "issue_comment", deliv, body, nil)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+	audits := parseAuditLines(t, auditBuf.String())
+	require.Len(t, audits, 1, "500 exit after an earlier project committed must still emit trigger.event.received")
+	assert.Equal(t, trigger.AuditEventReceived, audits[0]["event_type"])
+	assert.Equal(t, GitHubWebhookStatusError, audits[0]["result"])
+	assert.Equal(t, "created", audits[0]["action"])
+	assert.Equal(t, deliv, audits[0]["delivery"])
+
+	rawEvents, ok := audits[0]["events"].([]any)
+	require.True(t, ok, "expected committed project event in receipt audit: %+v", audits[0])
+	require.Len(t, rawEvents, 1)
+	evMap, ok := rawEvents[0].(map[string]any)
+	require.True(t, ok)
+	committedProjID, _ := evMap["project_id"].(string)
+	assert.Contains(t, []string{projA.ID, projB.ID}, committedProjID)
+	assert.Equal(t, GitHubWebhookStatusQueued, evMap["status"])
+}

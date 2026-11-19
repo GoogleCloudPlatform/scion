@@ -329,13 +329,11 @@ func extractEventPerformedViaAppID(eventName, action string, root map[string]any
 	if primaryKey == "" {
 		return 0, nil
 	}
-	if primaryMap, ok := optMap(root, primaryKey); ok {
-		id, err := optPerformedViaAppID(primaryMap, primaryKey+".performed_via_github_app")
-		if err != nil || id > 0 {
-			return id, err
-		}
+	primaryMap, ok := optMap(root, primaryKey)
+	if !ok {
+		return 0, nil
 	}
-	return optPerformedViaAppID(root, "performed_via_github_app")
+	return optPerformedViaAppID(primaryMap, primaryKey+".performed_via_github_app")
 }
 
 func optPerformedViaAppID(parent map[string]any, label string) (int64, error) {
