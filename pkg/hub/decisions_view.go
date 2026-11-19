@@ -30,20 +30,21 @@ import (
 // choices v4, 4.4): the web card, the answer endpoint's responses and the
 // decision.updated event.
 type DecisionView struct {
-	RowID           string              `json:"rowId"`
-	MessageID       string              `json:"messageId"`
-	Key             string              `json:"key"`
-	Ref             string              `json:"ref"`
-	Version         int                 `json:"version"`
-	Status          string              `json:"status"`
-	AskerAgentID    string              `json:"askerAgentId"`
-	AskerAgentName  string              `json:"askerAgentName"`
-	Question        string              `json:"question"`
-	DefaultChoiceID string              `json:"defaultChoiceId,omitempty"`
-	Choices         []messages.Choice   `json:"choices"`
-	ReplacedBy      *DecisionReplacedBy `json:"replacedBy,omitempty"`
-	Withdrawn       *DecisionWithdrawn  `json:"withdrawn,omitempty"`
-	Dismissed       *DecisionDismissed  `json:"dismissed,omitempty"`
+	RowID           string                `json:"rowId"`
+	MessageID       string                `json:"messageId"`
+	Key             string                `json:"key"`
+	Ref             string                `json:"ref"`
+	Version         int                   `json:"version"`
+	Status          string                `json:"status"`
+	AskerAgentID    string                `json:"askerAgentId"`
+	AskerAgentName  string                `json:"askerAgentName"`
+	Question        string                `json:"question"`
+	DefaultChoiceID string                `json:"defaultChoiceId,omitempty"`
+	Choices         []messages.Choice     `json:"choices"`
+	Other           *messages.OtherOption `json:"other,omitempty"`
+	ReplacedBy      *DecisionReplacedBy   `json:"replacedBy,omitempty"`
+	Withdrawn       *DecisionWithdrawn    `json:"withdrawn,omitempty"`
+	Dismissed       *DecisionDismissed    `json:"dismissed,omitempty"`
 	// Decision is the effective answer; nil while pending or dismissed.
 	Decision *AnswerView `json:"decision,omitempty"`
 }
@@ -77,6 +78,7 @@ type DecisionDismissed struct {
 type AnswerView struct {
 	ChoiceID             string `json:"choiceId"`
 	Label                string `json:"label"`
+	OtherText            string `json:"otherText,omitempty"`
 	AnsweredByUserID     string `json:"answeredByUserId,omitempty"`
 	AnsweredByName       string `json:"answeredByName,omitempty"`
 	AnsweredByEmail      string `json:"answeredByEmail,omitempty"`
@@ -161,6 +163,7 @@ type DecisionResponseView struct {
 	Question             string `json:"question"`
 	ChoiceID             string `json:"choiceId"`
 	Label                string `json:"label"`
+	OtherText            string `json:"otherText,omitempty"`
 	Provenance           string `json:"provenance"`
 	Outcome              string `json:"outcome,omitempty"`
 	DismissReason        string `json:"dismissReason,omitempty"`
@@ -180,6 +183,7 @@ func answerView(a *store.DecisionAnswer) *AnswerView {
 	return &AnswerView{
 		ChoiceID:             a.ChoiceID,
 		Label:                a.ChoiceLabel,
+		OtherText:            a.OtherText,
 		AnsweredByUserID:     a.AnsweredByUserID,
 		AnsweredByName:       a.AnsweredByName,
 		AnsweredByEmail:      a.AnsweredByEmail,
@@ -213,6 +217,10 @@ func decisionView(d *store.Decision, replacedBy *store.Decision) DecisionView {
 		DefaultChoiceID: d.DefaultChoiceID,
 		Choices:         d.Choices,
 		Decision:        answerView(eff),
+	}
+	if d.Other != nil {
+		otherCopy := *d.Other
+		v.Other = &otherCopy
 	}
 	if v.Decision != nil {
 		v.Decision.PreviousChoiceLabel = previousChoiceLabel(eff, d)
@@ -467,6 +475,7 @@ func decisionResponseViewOf(a *store.DecisionAnswer, d *store.Decision) Decision
 		Question:             a.QuestionText,
 		ChoiceID:             a.ChoiceID,
 		Label:                a.ChoiceLabel,
+		OtherText:            a.OtherText,
 		Provenance:           a.Provenance,
 		Outcome:              a.Outcome,
 		DismissReason:        a.DismissReason,

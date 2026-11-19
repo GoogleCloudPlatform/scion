@@ -24,9 +24,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -779,6 +781,43 @@ func TestDecisionAnswer_IdempotencyKeyOtherAnswer409(t *testing.T) {
 	assert.True(t, a.Replayed)
 }
 
+// Same idempotency key with $other replays 200 when other_text matches (after
+// trim), and returns 409 already_answered when other_text differs.
+func TestDecisionAnswer_IdempotencyKeyOtherTextMismatch409(t *testing.T) {
+	f := newDecisionsFixture(t)
+	_, res := f.topicPrompt(t, `[{"id":"region","question":"Which region?","choices":["us-central1"],"allow_other":"Another region"}]`, false)
+	row := res.Decisions[0].RowID
+
+	first := f.answer(t, f.bob, row, map[string]interface{}{
+		"choice_id":       messages.ChoiceIDOther,
+		"other_text":      "  europe-west4  ",
+		"idempotency_key": "k-other",
+	})
+	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
+
+	// Different other_text under the same idempotency key is 409 already_answered.
+	diffText := f.answer(t, f.bob, row, map[string]interface{}{
+		"choice_id":       messages.ChoiceIDOther,
+		"other_text":      "asia-east1",
+		"idempotency_key": "k-other",
+	})
+	assert.Equal(t, http.StatusConflict, diffText.Code, "different other_text: %s", diffText.Body.String())
+	assert.Equal(t, ErrCodeDecisionAnswered, errorCode(t, diffText))
+
+	// Same trimmed other_text under the same idempotency key replays 200.
+	replay := f.answer(t, f.bob, row, map[string]interface{}{
+		"choice_id":       messages.ChoiceIDOther,
+		"other_text":      "europe-west4",
+		"idempotency_key": "k-other",
+	})
+	require.Equal(t, http.StatusOK, replay.Code, "body: %s", replay.Body.String())
+	var ans DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(replay.Body.Bytes(), &ans))
+	assert.True(t, ans.Replayed)
+	require.NotNil(t, ans.Decision.Decision)
+	assert.Equal(t, "europe-west4", ans.Decision.Decision.OtherText)
+}
+
 // A project member who may read but not post (a reader) can read a
 // decision but not answer it.
 func TestDecisionAnswer_ReaderForbidden(t *testing.T) {
@@ -1330,4 +1369,296 @@ func TestDecisions_CleanBreakLegacyMessageTypes(t *testing.T) {
 	interpMsg, err := f.store.GetMessage(ctx, interpOut.ResponseMessageID)
 	require.NoError(t, err)
 	assert.Equal(t, messages.TypeDecisionResponse, interpMsg.Type)
+}
+
+func TestDecisionResponseAgentLine_OtherGolden(t *testing.T) {
+	cases := []struct {
+		name       string
+		answer     *store.DecisionAnswer
+		overridden *store.DecisionAnswer
+		want       string
+	}{
+		{
+			name: "design 4.5 single Other example",
+			answer: &store.DecisionAnswer{
+				Key:             "region",
+				Version:         1,
+				QuestionText:    "Which region for the canary?",
+				ChoiceID:        messages.ChoiceIDOther,
+				ChoiceLabel:     "Another region",
+				OtherText:       "europe-west4 canary",
+				AnsweredByEmail: "alice@example.com",
+			},
+			want: `[decision-response] region v1 ("Which region for the canary?") answer=Another region (choice $other) text="europe-west4 canary" by alice@example.com`,
+		},
+		{
+			name: "quotes backslashes and non-ASCII Unicode",
+			answer: &store.DecisionAnswer{
+				Key:             "region",
+				Version:         2,
+				QuestionText:    "Which region?",
+				ChoiceID:        messages.ChoiceIDOther,
+				ChoiceLabel:     "Other",
+				OtherText:       `use "eu-west4\a" — café 東京 🚀`,
+				AnsweredByEmail: "alice@example.com",
+			},
+			want: `[decision-response] region v2 ("Which region?") answer=Other (choice $other) text="use \"eu-west4\\a\" — café 東京 🚀" by alice@example.com`,
+		},
+		{
+			name: "override of an interpreted Other answer",
+			answer: &store.DecisionAnswer{
+				Key:             "region",
+				Version:         1,
+				QuestionText:    "Which region for the canary?",
+				ChoiceID:        messages.ChoiceIDOther,
+				ChoiceLabel:     "Another region",
+				OtherText:       "europe-west4 canary",
+				AnsweredByEmail: "alice@example.com",
+				Outcome:         store.DecisionOutcomeOverride,
+			},
+			overridden: &store.DecisionAnswer{
+				ChoiceID:    messages.ChoiceIDOther,
+				ChoiceLabel: "Another region",
+				OtherText:   "europe-west4",
+			},
+			want: `[decision-response] region v1 ("Which region for the canary?") answer=Another region (choice $other) text="europe-west4 canary" by alice@example.com, overriding interpreted answer Another region text="europe-west4"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, decisionResponseAgentLine(tc.answer, tc.overridden))
+		})
+	}
+}
+
+func TestDecisions_AllowOther_SingleEndToEndValidationAndAskerOnlyDelivery(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+
+	// Create a bystander agent in the same project so we can prove @mentions in
+	// other_text never fan out to other agents (acceptance 10).
+	bystander := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "bystander-bot",
+		Name:            "Bystander Bot",
+		ProjectID:       f.project.ID,
+		RuntimeBrokerID: f.agent.RuntimeBrokerID,
+		OwnerID:         f.agent.OwnerID,
+		Phase:           "running",
+		Activity:        "idle",
+		MessageMode:     f.agent.MessageMode,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, bystander))
+
+	// 1. Multi-decision prompt with allow_other is refused in P1 with 400 not_supported.
+	setRefused := f.sendAsAgent(t, OutboundMessageRequest{
+		Recipient:       "conv:" + f.topicID,
+		ConversationRef: "conv:" + f.topicID,
+		Msg:             "Two questions",
+		Decisions: decisionInputs(t, `[
+			{"id":"q1","question":"First?","choices":["a","b"]},
+			{"id":"q2","question":"Second?","choices":["yes"],"allow_other":true}
+		]`),
+	})
+	require.Equal(t, http.StatusBadRequest, setRefused.Code, setRefused.Body.String())
+	code, details := errorCodeAndDetails(t, setRefused)
+	assert.Equal(t, ErrCodeValidationError, code)
+	rawErrs, ok := details["errors"].([]interface{})
+	require.True(t, ok, "details: %v", details)
+	require.Len(t, rawErrs, 1)
+	firstErr, _ := rawErrs[0].(map[string]interface{})
+	assert.Equal(t, "decisions[1].allow_other", firstErr["field"])
+	assert.Equal(t, messages.DecisionErrNotSupported, firstErr["code"])
+
+	// 2. Single decision with 1 fixed choice + allow_other object succeeds.
+	promptMsg, promptRes := f.topicPrompt(t, `[{
+		"id": "region",
+		"question": "Which region for the canary?",
+		"choices": ["us-central1"],
+		"default": "us-central1",
+		"allow_other": {
+			"label": "Another region",
+			"description": "Any GCP region code",
+			"placeholder": "e.g. europe-west4"
+		}
+	}]`, false)
+	row := promptRes.Decisions[0].RowID
+	assert.Contains(t, promptMsg.Msg, "  - Another region: Any GCP region code — *your own answer, in words*\n")
+
+	// GET /api/v1/decisions/{rowId} carries other.
+	getRec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+row, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	var getOut struct {
+		Decision DecisionView `json:"decision"`
+	}
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &getOut))
+	require.NotNil(t, getOut.Decision.Other)
+	assert.Equal(t, messages.OtherOption{
+		Label:       "Another region",
+		Description: "Any GCP region code",
+		Placeholder: "e.g. europe-west4",
+	}, *getOut.Decision.Other)
+
+	// 3. Validation failures on POST /api/v1/decisions/{rowId}/answer.
+	_, noOtherRes := f.topicPrompt(t, `[{"id":"strict","question":"Strict?","choices":["yes","no"]}]`, false)
+	rrNoOther := f.answer(t, f.bob, noOtherRes.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "custom",
+	})
+	require.Equal(t, http.StatusBadRequest, rrNoOther.Code, rrNoOther.Body.String())
+
+	for _, tc := range []struct {
+		name     string
+		body     map[string]interface{}
+		wantCode string
+	}{
+		{"missing text", map[string]interface{}{"choice_id": messages.ChoiceIDOther}, messages.DecisionErrRequired},
+		{"spaces text", map[string]interface{}{"choice_id": messages.ChoiceIDOther, "other_text": "   "}, messages.DecisionErrRequired},
+		{"newline", map[string]interface{}{"choice_id": messages.ChoiceIDOther, "other_text": "eu\nwest"}, messages.DecisionErrInvalid},
+		{"tab", map[string]interface{}{"choice_id": messages.ChoiceIDOther, "other_text": "eu\twest"}, messages.DecisionErrInvalid},
+		{"bidi", map[string]interface{}{"choice_id": messages.ChoiceIDOther, "other_text": "eu\u202ewest"}, messages.DecisionErrInvalid},
+		{"too long", map[string]interface{}{"choice_id": messages.ChoiceIDOther, "other_text": strings.Repeat("é", 201)}, messages.DecisionErrTooLong},
+		{"other_text on fixed choice", map[string]interface{}{"choice_id": "1", "other_text": "extra"}, messages.DecisionErrNotAllowed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := f.answer(t, f.bob, row, tc.body)
+			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			errCode, det := errorCodeAndDetails(t, rr)
+			assert.Equal(t, ErrCodeValidationError, errCode)
+			assert.Equal(t, "other_text", det["field"])
+			assert.Equal(t, tc.wantCode, det["code"])
+		})
+	}
+
+	// 4. Valid Other answer with @mentions, quotes, backslashes, Markdown & HTML.
+	before := len(f.dispatcher.getMessages())
+	typed := `  eu-west4 "canary\1" *bold* <b>tag</b> @bystander-bot @everyone <!channel>  `
+	trimmed := strings.TrimSpace(typed)
+	rr := f.answer(t, f.bob, row, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": typed,
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var ans DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &ans))
+	require.NotNil(t, ans.Decision.Decision)
+	assert.Equal(t, messages.ChoiceIDOther, ans.Decision.Decision.ChoiceID)
+	assert.Equal(t, "Another region", ans.Decision.Decision.Label)
+	assert.Equal(t, trimmed, ans.Decision.Decision.OtherText)
+	assert.False(t, ans.Decision.Decision.MatchedDefault)
+
+	// Only the asking agent received a dispatch; @bystander-bot got nothing.
+	sent := f.dispatcher.getMessages()[before:]
+	require.Len(t, sent, 1)
+	assert.Equal(t, f.agent.Slug, sent[0].agentSlug)
+	sm := sent[0].structured
+	require.NotNil(t, sm)
+	wantLine := fmt.Sprintf(`[decision-response] region v1 ("Which region for the canary?") answer=Another region (choice $other) text=%s by %s`,
+		strconv.Quote(trimmed), f.bob.Email)
+	assert.Equal(t, wantLine, sm.Msg)
+	assert.Equal(t, "region", sm.Metadata[messages.MetadataDecisionKey])
+	assert.Equal(t, "1", sm.Metadata[messages.MetadataDecisionVersion])
+	assert.Equal(t, messages.ChoiceIDOther, sm.Metadata[messages.MetadataChoiceID])
+	assert.Equal(t, store.DecisionProvenanceDirect, sm.Metadata[messages.MetadataDecisionProvenance])
+	assert.Equal(t, trimmed, sm.Metadata[messages.MetadataDecisionOtherText])
+
+	// Stored response fallback message escapes Markdown/HTML and neutralizes mentions.
+	storedResp, err := f.store.GetMessage(ctx, ans.ResponseMessageID)
+	require.NoError(t, err)
+	who := userDisplay(authUser(f.bob))
+	wantStored := fmt.Sprintf(`%s answered "%s" (Another region) for region "Which region for the canary?"`,
+		who, messages.EscapeMarkdownPlain(trimmed))
+	assert.Equal(t, wantStored, storedResp.Msg)
+	assert.Contains(t, storedResp.Msg, `\*bold\*`)
+	assert.Contains(t, storedResp.Msg, `\<b\>tag\</b\>`)
+	assert.Contains(t, storedResp.Msg, "@\u200beveryone")
+	assert.Contains(t, storedResp.Msg, "\\<\u200b!channel\\>")
+
+	// Chat history includes DecisionView.Other, AnswerView.OtherText, and DecisionResponseView.OtherText.
+	histRec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/chat/conversations/"+f.topicID+"/messages", nil)
+	require.Equal(t, http.StatusOK, histRec.Code, histRec.Body.String())
+	var hist chatHistoryResponse
+	require.NoError(t, json.Unmarshal(histRec.Body.Bytes(), &hist))
+	require.Len(t, hist.MessageDecisions[promptMsg.ID], 1)
+	require.NotNil(t, hist.MessageDecisions[promptMsg.ID][0].Other)
+	assert.Equal(t, "Another region", hist.MessageDecisions[promptMsg.ID][0].Other.Label)
+	require.NotNil(t, hist.MessageDecisions[promptMsg.ID][0].Decision)
+	assert.Equal(t, trimmed, hist.MessageDecisions[promptMsg.ID][0].Decision.OtherText)
+	respView, ok := hist.MessageDecisionResponses[ans.ResponseMessageID]
+	require.True(t, ok)
+	assert.Equal(t, messages.ChoiceIDOther, respView.ChoiceID)
+	assert.Equal(t, trimmed, respView.OtherText)
+
+	// Held-message redrive enrichment also populates text=... and decision_other_text.
+	redriveSM := &messages.StructuredMessage{
+		Metadata: map[string]string{messages.MetadataDecisionOtherText: "forged"},
+	}
+	fixedReason, rerr := f.srv.enrichHeldDecisionResponse(ctx, storedResp, redriveSM)
+	require.NoError(t, rerr)
+	assert.Empty(t, fixedReason)
+	assert.Equal(t, wantLine, redriveSM.Msg)
+	assert.Equal(t, trimmed, redriveSM.Metadata[messages.MetadataDecisionOtherText])
+
+	// 5. Withdrawn and replaced rows refuse $other with 409 withdrawn / 409 replaced.
+	_, wdRes := f.topicPrompt(t, `[{"id":"wd-1","question":"Withdraw?","choices":["yes"],"allow_other":true}]`, false)
+	wdCall := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", map[string]interface{}{
+		"keys": []string{"wd-1"},
+	})
+	require.Equal(t, http.StatusOK, wdCall.Code, wdCall.Body.String())
+	rrWd := f.answer(t, f.bob, wdRes.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "too late",
+	})
+	assert.Equal(t, http.StatusConflict, rrWd.Code, rrWd.Body.String())
+	assert.Equal(t, ErrCodeDecisionWithdrawn, errorCode(t, rrWd))
+
+	_, repRes := f.topicPrompt(t, `[{"id":"rep-1","question":"Replace?","choices":["yes"],"allow_other":true}]`, false)
+	f.topicPrompt(t, `[{"id":"rep-1","question":"Replace v2?","choices":["yes","no"]}]`, true)
+	rrRep := f.answer(t, f.bob, repRes.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "too late",
+	})
+	assert.Equal(t, http.StatusConflict, rrRep.Code, rrRep.Body.String())
+	assert.Equal(t, ErrCodeDecisionReplaced, errorCode(t, rrRep))
+
+	// Other "$"-prefixed sentinels (like $dismissed) stay refused on /answer,
+	// and dismissed rows with allow_other refuse $other with 409 dismissed.
+	dsmPrompt, dsmRes := f.topicPrompt(t, `[{"id":"dsm-1","question":"Dismiss?","choices":["yes"],"allow_other":true}]`, false)
+	rrReserved := f.answer(t, f.bob, dsmRes.Decisions[0].RowID, map[string]interface{}{
+		"choice_id": messages.ChoiceIDDismissed,
+	})
+	assert.Equal(t, http.StatusBadRequest, rrReserved.Code, rrReserved.Body.String())
+
+	dsmDec, err := f.store.GetDecision(ctx, dsmRes.Decisions[0].RowID)
+	require.NoError(t, err)
+	_, err = f.store.DismissDecisions(ctx, &store.DismissDecisionsInput{
+		MessageID:      dsmPrompt.ID,
+		Surface:        store.DecisionSurfaceDecisionsPage,
+		IdempotencyKey: "dsm-idem-1",
+		User: store.DecisionAnswerer{
+			UserID: f.bob.ID,
+			Name:   f.bob.DisplayName,
+			Email:  f.bob.Email,
+		},
+		ResponseMessage: &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      f.project.ID,
+			ConversationID: dsmPrompt.ConversationID,
+			Sender:         "user:" + f.bob.Email,
+			SenderID:       f.bob.ID,
+			Recipient:      "agent:" + f.agent.Slug,
+			RecipientID:    f.agent.ID,
+			DispatchState:  store.MessageDispatchDispatched,
+		},
+		FormatMessage: func([]*store.Decision) string { return "dismissed" },
+		Now:           func() time.Time { return dsmDec.CreatedAt.Add(store.DecisionDismissMinAge) },
+	})
+	require.NoError(t, err)
+	rrDsm := f.answer(t, f.bob, dsmRes.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":       messages.ChoiceIDOther,
+		"other_text":      "too late",
+		"idempotency_key": "dsm-idem-1",
+	})
+	assert.Equal(t, http.StatusConflict, rrDsm.Code, rrDsm.Body.String())
+	assert.Equal(t, ErrCodeDecisionDismissed, errorCode(t, rrDsm))
 }
