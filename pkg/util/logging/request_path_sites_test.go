@@ -190,7 +190,7 @@ var requestPathSites = []requestPathSite{
 	{"web.go", "WebServer.sessionAuthMiddleware", "URL.RequestURI", 2, "the post-login redirect target stored in the session cookie, and the sign-in page returnTo on a dev sign-in server (not logged)"},
 	{"web.go", "WebServer.sessionToBearerMiddleware", "URL.Path", 1, "comparison, and the post-login redirect target stored in the session cookie (not logged)"},
 	{"web.go", "WebServer.sessionToBearerMiddleware", "URL.RequestURI", 2, "the post-login redirect target stored in the session cookie, and the sign-in page returnTo on a dev sign-in server (not logged)"},
-	{"web.go", "WebServer.spaHandler", "URL.Path", 4, "routing: SPA page and login-page checks, and the first-segment dot check (not logged)"},
+	{"web.go", "WebServer.spaHandler", "URL.Path", 5, "routing: SPA page, standalone-page (login, invite, onboarding), and first-segment dot checks (not logged)"},
 	{"web.go", "WebServer.tryServeStaticFile", "URL.Path", 3, "routing: serves the static file at the path, after comparing it with its clean form (not logged)"},
 	{"web_branding.go", "WebServer.handleBrandAsset", "URL.Path", 1, "routing: extracts the /brand/{slot} asset slot name, checked against config.IsValidBrandSlot (not logged)"},
 	{"workspace_handlers.go", "Server.handleWorkspaceSyncFrom", "URL(bare)", 1, "not a request URL: a signed storage URL field"},

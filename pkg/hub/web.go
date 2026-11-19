@@ -559,6 +559,8 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
         /* Prevent FOUC for custom elements */
         scion-app:not(:defined),
         scion-login-page:not(:defined),
+        scion-page-invite:not(:defined),
+        scion-page-onboarding:not(:defined),
         scion-nav:not(:defined),
         scion-header:not(:defined),
         scion-breadcrumb:not(:defined),
@@ -608,7 +610,7 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
 </head>
 {{end}}
 {{- define "body"}}<body>
-    <div id="app">{{if .IsLoginPage}}<scion-login-page></scion-login-page>{{else if .IsInvitePage}}<scion-page-invite></scion-page-invite>{{else}}<scion-app></scion-app>{{end}}</div>
+    <div id="app">{{if .IsLoginPage}}<scion-login-page></scion-login-page>{{else if .IsInvitePage}}<scion-page-invite></scion-page-invite>{{else if .IsOnboardingPage}}<scion-page-onboarding></scion-page-onboarding>{{else}}<scion-app></scion-app>{{end}}</div>
 
     <!-- Initial state for hydration -->
     <script id="__SCION_DATA__" type="application/json">{{.InitialData}}</script>
@@ -749,6 +751,7 @@ func renderNoAssetsPage(b *config.ResolvedBranding) string {
 type spaShellData struct {
 	IsLoginPage        bool
 	IsInvitePage       bool
+	IsOnboardingPage   bool
 	BrandTitle         string
 	HasCustomFavicon   bool
 	FaviconHref        string
@@ -2219,6 +2222,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		data := spaShellData{
 			IsLoginPage:        r.URL.Path == "/login",
 			IsInvitePage:       r.URL.Path == "/invite",
+			IsOnboardingPage:   r.URL.Path == "/onboarding",
 			BrandTitle:         branding.Name,
 			HasCustomFavicon:   branding.FaviconURL != "",
 			FaviconHref:        branding.FaviconURL,
