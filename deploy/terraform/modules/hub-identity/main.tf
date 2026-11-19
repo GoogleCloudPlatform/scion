@@ -167,8 +167,11 @@ resource "google_project_iam_member" "agent_sa_project_roles" {
 # --- Separate Conduit Relay SA (opt-in, external relay mode only) ---
 #
 # Least-privilege GSA for `scion server start --role relay` pods: Cloud SQL
-# connectivity + Cloud Logging only. Deliberately receives NO Secret Manager,
-# GCS, cluster-viewer or TokenCreator grants.
+# connectivity + Cloud Logging only (`roles/cloudsql.instanceUser` is
+# pre-granted alongside `roles/cloudsql.client` for parity with the Hub GSA so
+# switching relay.database.auth to IAM requires no IAM rollout race; password
+# auth via the Cloud SQL Auth Proxy uses `roles/cloudsql.client`). Deliberately
+# receives NO Secret Manager, GCS, cluster-viewer or TokenCreator grants.
 resource "google_service_account" "relay" {
   count = var.enable_relay_identity ? 1 : 0
 

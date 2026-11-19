@@ -360,43 +360,56 @@ What Terraform and the `scion-hub` chart wire in this mode:
 
 - **Internal hop TLS (`<hub>-conduit-tls`):** whenever `hub_replica_count > 1`
   or `conduit_relay_mode = "external"`, `modules/hub-gke` generates a per-hub
-  ECDSA CA and leaf certificate (`hashicorp/tls`) with SAN
-  `<hub>-scion-hub-relay.<hub>-system.svc` and mounts it into both Hub and
-  Relay pods (`conduit.internalTls`).
+  ECDSA CA (10-year validity, `early_renewal_hours = 2160` / 90 days) and leaf
+  certificate (1-year validity, `early_renewal_hours = 720` / 30 days) with SAN
+  `<hub>-scion-hub-relay.<hub>-system.svc` (`hashicorp/tls`) and mounts it into
+  both Hub and Relay pods (`conduit.internalTls`). Run `terraform apply` at
+  least once inside the 30-day leaf renewal window (daily CD covers this
+  automatically); Hub and Relay pods hot-reload rotated leaf certificates from
+  the mounted Secret without restarting. Because hop clients read `ca.crt` once
+  at startup, roll both `Deployment/<hub>-scion-hub` and
+  `Deployment/<hub>-scion-hub-relay` (`kubectl rollout restart`) after an apply
+  that replaces the 10-year CA inside its 90-day renewal window.
 - **Relay-peer authentication (`<hub>-conduit-peer`):** in `external` mode,
   `modules/hub-gke` generates a 48-octet secret (distinct from the 64-octet
   session secret) injected via `SCION_SERVER_HUB_CONDUIT_PEERSECRET`, sets
   `conduit.peerAuth = "hmac"` so `hub-lb` stays unchanged (`ingress: proxy`
   forwards WebSocket upgrades through the Hub to Relay pods), and renders the
-  internal `ClusterIP` Service `<hub>-scion-hub-relay:9443` for
-  `server.relay.hub_internal_url`.
+  internal `ClusterIP` Service `<hub>-scion-hub-relay:9443` (selecting Hub pods)
+  for `server.relay.hub_internal_url`.
 - **Fresh-DB bootstrap:** when `server.hub.conduit.relay_mode` is `external`
   and the `experiments` row in `hub_settings` has no explicit `hub.conduit`
   override yet, the Hub seeds `hub.conduit = true` during operational settings
   initialization so both Hub and `--role relay` pods boot cleanly on a brand-new
-  database without manual intervention.
+  database without manual intervention. (On a fresh database, relay pods may
+  restart once if they query `hub_settings` in the brief window before the Hub
+  finishes seeding `hub.conduit = true`; Kubernetes restarts them and the
+  release converges within `helm_timeout`.)
 - **Least-privilege Relay GSA (`<hub>-relay`):** `modules/hub-identity` creates
   `<hub>-relay` with only `roles/cloudsql.client`,
-  `roles/cloudsql.instanceUser`, and `roles/logging.logWriter` (bound via
-  Workload Identity to `<hub>-system/scion-relay` — no Secret Manager, GCS, or
+  `roles/cloudsql.instanceUser` (pre-granted alongside `cloudsql.client` for
+  parity with the Hub GSA), and `roles/logging.logWriter` (bound via Workload
+  Identity to `<hub>-system/scion-relay` — no Secret Manager, GCS, or
   `serviceAccountTokenCreator` access). Relay pods receive an isolated
   `<hub>-scion-hub-relay-settings` Secret containing no Hub session or OAuth
-  secrets, and are probed on `/healthz`.
+  secrets, and are probed on `/healthz`. With the default
+  `enable_relay_db_user = false` (kept default so existing hubs see zero plan
+  diff), relay pods still share the `<hub>` PostgreSQL user's password; enable
+  `enable_relay_db_user = true` below to isolate the PostgreSQL role too.
 - **Optional dedicated Relay DB user (`enable_relay_db_user = true`):**
-  `modules/cloudsql-database` creates the Cloud SQL user `<hub>-relay`. Because
-  Cloud SQL `BUILT_IN` users do not automatically inherit privileges on tables
-  created by `<hub>`, run the following SQL once as `<hub>` (or `postgres`)
-  after the Hub's initial migration before flipping `enable_relay_db_user = true`:
-
-  ```sql
-  GRANT CONNECT ON DATABASE "<hub_with_underscores>" TO "<hub>-relay";
-  GRANT USAGE ON SCHEMA public TO "<hub>-relay";
-  GRANT SELECT, INSERT, UPDATE, DELETE
-    ON TABLE relay_instances, conduit_sessions TO "<hub>-relay";
-  GRANT SELECT, INSERT, UPDATE
-    ON TABLE conduit_principal_epochs TO "<hub>-relay";
-  GRANT SELECT ON TABLE hub_settings TO "<hub>-relay";
-  ```
+  requires `conduit_relay_mode = "external"`. `modules/cloudsql-database`
+  creates the Cloud SQL user `<hub>-relay` before `helm_release.hub`, and the
+  chart wires `relay.database.user = "<hub>-relay"` on relay pods plus
+  `server.database.relay_role = "<hub>-relay"` in the Hub's `settings.yaml`. On
+  startup (including a fresh first install and every future schema upgrade), Hub
+  schema migration automatically runs idempotent PostgreSQL `GRANT`s in
+  `current_schema()` giving `<hub>-relay` `CONNECT`/`USAGE` (when missing),
+  `SELECT, INSERT, UPDATE, DELETE` on `relay_instances` and `conduit_sessions`,
+  `SELECT, INSERT, UPDATE` on `conduit_principal_epochs`, and `SELECT` on
+  `hub_settings` — no manual SQL bootstrap step is required. (Note: on shared
+  Cloud SQL instances, all `BUILT_IN` users remain members of
+  `cloudsqlsuperuser`; see `../../README.md`, "Shared-infra trust domain and
+  sizing".)
 
 ## Destroy
 

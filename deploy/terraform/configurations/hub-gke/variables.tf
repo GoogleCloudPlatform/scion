@@ -196,22 +196,37 @@ variable "relay_replica_count" {
 }
 
 variable "enable_hub_pdb" {
-  description = "Enable the Hub Deployment's PodDisruptionBudget (hub.pdb.enabled)."
+  description = "Enable the Hub Deployment's PodDisruptionBudget (hub.pdb.enabled). Requires hub_replica_count >= 2."
   type        = bool
   default     = false
   nullable    = false
+
+  validation {
+    condition     = !var.enable_hub_pdb || var.hub_replica_count >= 2
+    error_message = "enable_hub_pdb = true requires hub_replica_count >= 2."
+  }
 }
 
 variable "enable_relay_pdb" {
-  description = "Enable the Conduit Relay Deployment's PodDisruptionBudget when conduit_relay_mode is \"external\" (relay.pdb.enabled)."
+  description = "Enable the Conduit Relay Deployment's PodDisruptionBudget when conduit_relay_mode is \"external\" (relay.pdb.enabled). Requires conduit_relay_mode = \"external\" and relay_replica_count >= 2."
   type        = bool
   default     = false
   nullable    = false
+
+  validation {
+    condition     = !var.enable_relay_pdb || (var.conduit_relay_mode == "external" && var.relay_replica_count >= 2)
+    error_message = "enable_relay_pdb = true requires conduit_relay_mode = \"external\" and relay_replica_count >= 2."
+  }
 }
 
 variable "enable_relay_db_user" {
-  description = "Create a dedicated Cloud SQL user \"<hub_name>-relay\" and wire it to separate Conduit Relay pods when conduit_relay_mode is \"external\". Default false reuses the hub's DB user so fresh installs boot with zero manual SQL grants; enable after applying the least-privilege Postgres GRANTs documented in README.md."
+  description = "Create a dedicated Cloud SQL user \"<hub_name>-relay\" and wire it to separate Conduit Relay pods when conduit_relay_mode is \"external\". The chart also sets server.database.relay_role on the Hub so Hub schema migration applies the least-privilege PostgreSQL table grants automatically on first boot and every upgrade. Default false reuses the hub's <hub_name> DB user so existing hubs see zero plan diff."
   type        = bool
   default     = false
   nullable    = false
+
+  validation {
+    condition     = !var.enable_relay_db_user || var.conduit_relay_mode == "external"
+    error_message = "enable_relay_db_user = true requires conduit_relay_mode = \"external\" (in_process mode runs no separate relay pods, so a dedicated relay DB user and secrets would go unused)."
+  }
 }

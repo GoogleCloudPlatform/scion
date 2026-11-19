@@ -319,17 +319,27 @@ variable "relay_replica_count" {
 }
 
 variable "enable_hub_pdb" {
-  description = "Enable the Hub Deployment's PodDisruptionBudget (hub.pdb.enabled)."
+  description = "Enable the Hub Deployment's PodDisruptionBudget (hub.pdb.enabled). Requires hub_replica_count >= 2."
   type        = bool
   default     = false
   nullable    = false
+
+  validation {
+    condition     = !var.enable_hub_pdb || var.hub_replica_count >= 2
+    error_message = "enable_hub_pdb = true requires hub_replica_count >= 2."
+  }
 }
 
 variable "enable_relay_pdb" {
-  description = "Enable the Conduit Relay Deployment's PodDisruptionBudget when conduit_relay_mode is \"external\" (relay.pdb.enabled)."
+  description = "Enable the Conduit Relay Deployment's PodDisruptionBudget when conduit_relay_mode is \"external\" (relay.pdb.enabled). Requires conduit_relay_mode = \"external\" and relay_replica_count >= 2."
   type        = bool
   default     = false
   nullable    = false
+
+  validation {
+    condition     = !var.enable_relay_pdb || (var.conduit_relay_mode == "external" && var.relay_replica_count >= 2)
+    error_message = "enable_relay_pdb = true requires conduit_relay_mode = \"external\" and relay_replica_count >= 2."
+  }
 }
 
 variable "relay_sa_email" {
@@ -346,7 +356,7 @@ variable "relay_ksa_name" {
 }
 
 variable "relay_db_user" {
-  description = "Optional dedicated Postgres user for Conduit Relay pods (cloudsql-database's relay_db_user). Null inherits var.db_user."
+  description = "Optional dedicated Postgres user for Conduit Relay pods (cloudsql-database's relay_db_user). Null inherits var.db_user. When set and distinct from var.db_user, the chart also renders server.database.relay_role on the Hub so schema migration grants least-privilege PostgreSQL table permissions automatically."
   type        = string
   default     = null
 }

@@ -127,18 +127,19 @@ resource "google_secret_manager_secret_version" "db_dsn" {
 
 # --- Optional separate Conduit Relay user (<hub_name>-relay) ---
 #
-# Least-privilege PostgreSQL grants required after the hub's first Ent
-# schema migration creates the tables under owner "<hub_name>" (run once
-# connected to database "<hub_name with - replaced by _>" as "<hub_name>" or
-# postgres):
-#
-#   GRANT CONNECT ON DATABASE "<db_name>" TO "<hub_name>-relay";
-#   GRANT USAGE ON SCHEMA public TO "<hub_name>-relay";
-#   GRANT SELECT, INSERT, UPDATE, DELETE
-#     ON TABLE relay_instances, conduit_sessions TO "<hub_name>-relay";
-#   GRANT SELECT, INSERT, UPDATE
-#     ON TABLE conduit_principal_epochs TO "<hub_name>-relay";
-#   GRANT SELECT ON TABLE hub_settings TO "<hub_name>-relay";
+# Cloud SQL BUILT_IN users do not automatically inherit privileges on tables
+# owned by "<hub_name>". When wired through modules/hub-gke / scion-hub Helm
+# chart (relay.database.user = "<hub_name>-relay"), the chart sets
+# server.database.relay_role = "<hub_name>-relay" in the Hub's settings.yaml so
+# Hub schema migration (CompositeStore.Migrate) automatically runs idempotent
+# PostgreSQL GRANTs in current_schema() after AutoMigrate:
+#   - CONNECT on current_database() and USAGE on current_schema() (when missing)
+#   - SELECT, INSERT, UPDATE, DELETE on relay_instances, conduit_sessions
+#   - SELECT, INSERT, UPDATE on conduit_principal_epochs
+#   - SELECT on hub_settings
+# Non-chart deployments running `--role relay` directly should set
+# server.database.relay_role = "<hub_name>-relay" (or
+# SCION_SERVER_DATABASE_RELAYROLE) on the Hub as well.
 
 resource "random_password" "relay_db" {
   count = var.enable_relay_user ? 1 : 0

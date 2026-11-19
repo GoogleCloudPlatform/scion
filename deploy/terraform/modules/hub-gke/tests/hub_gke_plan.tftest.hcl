@@ -489,6 +489,22 @@ run "multi_replica_in_process_provisions_conduit_tls_only" {
   command = plan
 
   variables {
+    project_id           = "example-project"
+    public_url           = "https://tfha-gke-h3.example.com"
+    image_repository     = "us-central1-docker.pkg.dev/example-project/example-repo/scion-hub-gke"
+    image_digest         = "sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+    hub_sa_email         = "tfha-gke-h3-hub@example-project.iam.gserviceaccount.com"
+    transport_sa_email   = "tfha-gke-h3-transport@example-project.iam.gserviceaccount.com"
+    image_registry       = "us-central1-docker.pkg.dev/example-project/example-repo"
+    sql_connection_name  = "example-project:us-central1:tfha-pg"
+    iap_oauth_client_id  = "123456789-placeholder.apps.googleusercontent.com"
+    admin_emails         = ["admin@example.com"]
+    db_password_rotation = "2026-10-06"
+    nfs = {
+      server  = "nfs.example.com"
+      export  = "/example-export/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
     hub_replica_count = 2
     enable_hub_pdb    = true
   }
@@ -506,21 +522,49 @@ run "multi_replica_in_process_provisions_conduit_tls_only" {
     )
     error_message = "multi-replica in_process mode must provision conduit_tls, set replicaCount=2 and hub.pdb.enabled=true, and create no external relay resources."
   }
+
+  assert {
+    condition = jsonencode(output.chart_values) == jsonencode(merge(
+      yamldecode(file("${path.module}/../../../helm/scion-hub/ci/values-terraform-hub-gke-multi.yaml")),
+      {
+        database = {
+          for k, v in yamldecode(file("${path.module}/../../../helm/scion-hub/ci/values-terraform-hub-gke-multi.yaml")).database :
+          k => v if k != "password"
+        }
+      },
+    ))
+    error_message = "deploy/helm/scion-hub/ci/values-terraform-hub-gke-multi.yaml no longer matches chart_values; update the fixture with the module."
+  }
 }
 
 run "external_relay_ha_provisions_tls_peer_secret_and_relay_values" {
   command = plan
 
   variables {
-    hub_replica_count    = 2
-    conduit_relay_mode   = "external"
-    relay_replica_count  = 3
-    enable_hub_pdb       = true
-    enable_relay_pdb     = true
-    relay_sa_email       = "tfha-gke-h3-relay@tfha-test-project.iam.gserviceaccount.com"
-    relay_db_user        = "tfha-gke-h3-relay"
-    relay_db_password    = "not-a-real-relay-password"
-    db_password_rotation = "2026-11-19"
+    project_id           = "example-project"
+    public_url           = "https://tfha-gke-h3.example.com"
+    image_repository     = "us-central1-docker.pkg.dev/example-project/example-repo/scion-hub-gke"
+    image_digest         = "sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+    hub_sa_email         = "tfha-gke-h3-hub@example-project.iam.gserviceaccount.com"
+    transport_sa_email   = "tfha-gke-h3-transport@example-project.iam.gserviceaccount.com"
+    image_registry       = "us-central1-docker.pkg.dev/example-project/example-repo"
+    sql_connection_name  = "example-project:us-central1:tfha-pg"
+    iap_oauth_client_id  = "123456789-placeholder.apps.googleusercontent.com"
+    admin_emails         = ["admin@example.com"]
+    db_password_rotation = "2026-10-06"
+    nfs = {
+      server  = "nfs.example.com"
+      export  = "/example-export/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
+    hub_replica_count   = 2
+    conduit_relay_mode  = "external"
+    relay_replica_count = 3
+    enable_hub_pdb      = true
+    enable_relay_pdb    = true
+    relay_sa_email      = "tfha-gke-h3-relay@example-project.iam.gserviceaccount.com"
+    relay_db_user       = "tfha-gke-h3-relay"
+    relay_db_password   = "placeholder-not-a-real-relay-password"
   }
 
   assert {
@@ -536,11 +580,67 @@ run "external_relay_ha_provisions_tls_peer_secret_and_relay_values" {
       output.chart_values.relay.replicaCount == 3 &&
       output.chart_values.relay.pdb.enabled == true &&
       output.chart_values.relay.serviceAccount.name == "scion-relay" &&
-      output.chart_values.relay.serviceAccount.gcpServiceAccount == "tfha-gke-h3-relay@tfha-test-project.iam.gserviceaccount.com" &&
+      output.chart_values.relay.serviceAccount.gcpServiceAccount == "tfha-gke-h3-relay@example-project.iam.gserviceaccount.com" &&
       output.chart_values.relay.database.user == "tfha-gke-h3-relay" &&
       !contains(keys(output.chart_values.relay.database), "password") &&
-      output.chart_values.relay.podAnnotations["scion.dev/db-password-rotation"] == "2026-11-19"
+      output.chart_values.relay.podAnnotations["scion.dev/db-password-rotation"] == "2026-10-06"
     )
     error_message = "external relay mode must provision TLS + peer secrets and wire conduit/relay chart_values without leaking relay_db_password in plain values."
   }
+
+  assert {
+    condition = jsonencode(output.chart_values) == jsonencode(merge(
+      yamldecode(file("${path.module}/../../../helm/scion-hub/ci/values-terraform-hub-gke-external.yaml")),
+      {
+        database = {
+          for k, v in yamldecode(file("${path.module}/../../../helm/scion-hub/ci/values-terraform-hub-gke-external.yaml")).database :
+          k => v if k != "password"
+        }
+        relay = merge(
+          yamldecode(file("${path.module}/../../../helm/scion-hub/ci/values-terraform-hub-gke-external.yaml")).relay,
+          {
+            database = {
+              for k, v in yamldecode(file("${path.module}/../../../helm/scion-hub/ci/values-terraform-hub-gke-external.yaml")).relay.database :
+              k => v if k != "password"
+            }
+          },
+        )
+      },
+    ))
+    error_message = "deploy/helm/scion-hub/ci/values-terraform-hub-gke-external.yaml no longer matches chart_values; update the fixture with the module."
+  }
+}
+
+run "hub_pdb_with_single_replica_is_rejected" {
+  command = plan
+
+  variables {
+    hub_replica_count = 1
+    enable_hub_pdb    = true
+  }
+
+  expect_failures = [var.enable_hub_pdb]
+}
+
+run "relay_pdb_without_external_mode_is_rejected" {
+  command = plan
+
+  variables {
+    conduit_relay_mode = "in_process"
+    enable_relay_pdb   = true
+  }
+
+  expect_failures = [var.enable_relay_pdb]
+}
+
+run "relay_pdb_with_single_relay_replica_is_rejected" {
+  command = plan
+
+  variables {
+    conduit_relay_mode  = "external"
+    relay_replica_count = 1
+    enable_relay_pdb    = true
+  }
+
+  expect_failures = [var.enable_relay_pdb]
 }

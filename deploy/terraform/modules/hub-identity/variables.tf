@@ -72,7 +72,7 @@ variable "hub_workload_identity_ksa" {
 }
 
 variable "enable_relay_identity" {
-  description = "Opt-in dedicated Google service account \"<hub_name>-relay\" for separate Conduit Relay pods (--role relay). Granted only roles/cloudsql.client, roles/cloudsql.instanceUser and roles/logging.logWriter (never Secret Manager, GCS or TokenCreator). Default false creates nothing, leaving existing hubs' plans unchanged."
+  description = "Opt-in dedicated Google service account \"<hub_name>-relay\" for separate Conduit Relay pods (--role relay). Granted only roles/cloudsql.client, roles/cloudsql.instanceUser (pre-granted alongside cloudsql.client for IAM DB auth readiness, matching the hub GSA) and roles/logging.logWriter — never Secret Manager, GCS or TokenCreator. Default false creates nothing, leaving existing hubs' plans unchanged."
   type        = bool
   default     = false
   nullable    = false
