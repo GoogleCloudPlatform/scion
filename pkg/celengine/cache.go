@@ -26,19 +26,29 @@ import (
 // retained in an Engine's LRU cache.
 const DefaultCacheMaxEntries = 1024
 
-// DefaultCacheMaxBytes is the default maximum cumulative expression source
-// byte budget retained across cached programs (1 MiB: holds all 1,024 entries
-// for <= 1 KiB rules and ~256 full 4 KiB rules — enough to keep an entire
+// DefaultCacheMaxBytes is the default maximum cumulative program weight budget
+// retained across cached programs (1 MiB: holds all 1,024 entries for <= 1 KiB
+// rules and ~256 full 4 KiB non-regex rules — enough to keep an entire
 // project's 200-trigger cap warm without per-event recompilation churn — while
-// bounding worst-case retained AST+plan heap at ~93-98 MiB vs ~337 MiB
+// bounding worst-case retained AST+plan+RE2 heap at ~93-98 MiB vs ~337-671 MiB
 // unbounded).
 const DefaultCacheMaxBytes = 1 << 20
 
+// RegexInstructionWeightBytes is the cache-weight charge per precompiled RE2
+// instruction in a cached Program (3a security F1, ptone/scion#8030). Go's
+// regexp.Regexp retains ~250-300B of heap per instruction (onePass + syntax
+// tables), whereas non-regex CEL AST+plan entries retain ~85-95B of heap per
+// source byte; charging 64 weight bytes per RE2 instruction keeps regex-heavy
+// expressions well within the same heap-per-weight envelope.
+const RegexInstructionWeightBytes = 64
+
 // CacheConfig configures an Engine's content-addressed compiled-program LRU cache.
 type CacheConfig struct {
-	MaxEntries     int
-	MaxBytes       int
-	MaxPerConsumer int
+	MaxEntries         int
+	MaxBytes           int
+	MaxPerConsumer     int
+	MaxPerProject      int
+	MaxBytesPerProject int
 }
 
 // DefaultCacheConfig returns a CacheConfig with DefaultCacheMaxEntries (1024)
@@ -60,6 +70,12 @@ func (c CacheConfig) normalize() (CacheConfig, error) {
 	if c.MaxPerConsumer < 0 {
 		return CacheConfig{}, fmt.Errorf("celengine: CacheConfig.MaxPerConsumer must be >= 0 (got %d)", c.MaxPerConsumer)
 	}
+	if c.MaxPerProject < 0 {
+		return CacheConfig{}, fmt.Errorf("celengine: CacheConfig.MaxPerProject must be >= 0 (got %d)", c.MaxPerProject)
+	}
+	if c.MaxBytesPerProject < 0 {
+		return CacheConfig{}, fmt.Errorf("celengine: CacheConfig.MaxBytesPerProject must be >= 0 (got %d)", c.MaxBytesPerProject)
+	}
 	if c.MaxEntries == 0 {
 		c.MaxEntries = DefaultCacheMaxEntries
 	}
@@ -69,13 +85,15 @@ func (c CacheConfig) normalize() (CacheConfig, error) {
 	return c, nil
 }
 
-// CacheScope optionally associates a consumer row identity and revision with a
-// cached program for scoped invalidation and per-consumer bounding. CacheScope
-// is never part of the program's content identity.
+// CacheScope optionally associates a consumer, project, row identity, and
+// revision with a cached program for scoped invalidation and per-consumer /
+// per-project residency bounding. CacheScope is never part of the program's
+// content identity.
 type CacheScope struct {
-	Consumer string
-	ID       string
-	Revision int64
+	Consumer  string
+	ProjectID string
+	ID        string
+	Revision  int64
 }
 
 func (s CacheScope) hasID() bool {
@@ -122,15 +140,10 @@ type scopeKey struct {
 	id       string
 }
 
-type slotKey struct {
-	consumer string
-	id       string
-	kind     string
-}
-
 type scopeRecord struct {
-	revision int64
-	byKind   map[string]cacheIdentity
+	projectID string
+	revision  int64
+	entries   map[cacheIdentity]struct{}
 }
 
 type cacheEntry struct {
@@ -138,35 +151,39 @@ type cacheEntry struct {
 	prog       Program
 	weight     int
 	elem       *list.Element
-	slots      map[slotKey]struct{}
+	scopes     map[scopeKey]struct{}
 	everScoped bool
 }
 
 type programCache struct {
-	mu             sync.Mutex
-	maxEntries     int
-	maxBytes       int
-	maxPerConsumer int
-	bytes          int
-	lru            *list.List // front = most recently used; Value = *cacheEntry
-	byKey          map[cacheIdentity]*cacheEntry
-	byScope        map[scopeKey]*scopeRecord
-	hits           uint64
-	misses         uint64
+	mu                 sync.Mutex
+	maxEntries         int
+	maxBytes           int
+	maxPerConsumer     int
+	maxPerProject      int
+	maxBytesPerProject int
+	bytes              int
+	lru                *list.List // front = most recently used; Value = *cacheEntry
+	byKey              map[cacheIdentity]*cacheEntry
+	byScope            map[scopeKey]*scopeRecord
+	hits               uint64
+	misses             uint64
 }
 
 func newProgramCache(cfg CacheConfig) *programCache {
 	return &programCache{
-		maxEntries:     cfg.MaxEntries,
-		maxBytes:       cfg.MaxBytes,
-		maxPerConsumer: cfg.MaxPerConsumer,
-		lru:            list.New(),
-		byKey:          make(map[cacheIdentity]*cacheEntry),
-		byScope:        make(map[scopeKey]*scopeRecord),
+		maxEntries:         cfg.MaxEntries,
+		maxBytes:           cfg.MaxBytes,
+		maxPerConsumer:     cfg.MaxPerConsumer,
+		maxPerProject:      cfg.MaxPerProject,
+		maxBytesPerProject: cfg.MaxBytesPerProject,
+		lru:                list.New(),
+		byKey:              make(map[cacheIdentity]*cacheEntry),
+		byScope:            make(map[scopeKey]*scopeRecord),
 	}
 }
 
-func (c *programCache) get(id cacheIdentity, kindName string, scope CacheScope) (Program, bool) {
+func (c *programCache) get(id cacheIdentity, scope CacheScope) (Program, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -178,41 +195,41 @@ func (c *programCache) get(id cacheIdentity, kindName string, scope CacheScope) 
 	c.hits++
 	c.lru.MoveToFront(ent.elem)
 	if scope.hasID() {
-		c.bindScopeLocked(scope, kindName, ent)
+		c.bindScopeLocked(scope, ent)
+		c.enforceScopeCapsLocked(scope, ent)
 	}
 	return ent.prog, true
 }
 
-func (c *programCache) put(id cacheIdentity, kindName string, exprBytes int, prog Program, scope CacheScope) Program {
+func (c *programCache) put(id cacheIdentity, exprBytes int, prog Program, scope CacheScope) Program {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if ent, ok := c.byKey[id]; ok {
 		c.lru.MoveToFront(ent.elem)
 		if scope.hasID() {
-			c.bindScopeLocked(scope, kindName, ent)
+			c.bindScopeLocked(scope, ent)
+			c.enforceScopeCapsLocked(scope, ent)
 		}
 		return ent.prog
 	}
 
-	weight := max(exprBytes, 1)
+	weight := max(exprBytes, 1) + prog.regexCacheWeight()
 	ent := &cacheEntry{
 		key:    id,
 		prog:   prog,
 		weight: weight,
-		slots:  make(map[slotKey]struct{}),
+		scopes: make(map[scopeKey]struct{}),
 	}
 	ent.elem = c.lru.PushFront(ent)
 	c.byKey[id] = ent
 	c.bytes += weight
 
 	if scope.hasID() {
-		c.bindScopeLocked(scope, kindName, ent)
+		c.bindScopeLocked(scope, ent)
+		c.enforceScopeCapsLocked(scope, ent)
 	}
 
-	if c.maxPerConsumer > 0 && scope.Consumer != "" {
-		c.enforceConsumerCapLocked(scope.Consumer, ent)
-	}
 	for c.lru.Len() > c.maxEntries || (c.maxBytes > 0 && c.bytes > c.maxBytes) {
 		tail := c.lru.Back()
 		if tail == nil {
@@ -223,17 +240,29 @@ func (c *programCache) put(id cacheIdentity, kindName string, exprBytes int, pro
 	return prog
 }
 
-func (c *programCache) bindScopeLocked(scope CacheScope, kindName string, target *cacheEntry) {
+func (c *programCache) enforceScopeCapsLocked(scope CacheScope, keep *cacheEntry) {
+	if scope.Consumer == "" {
+		return
+	}
+	if scope.ProjectID != "" && (c.maxPerProject > 0 || c.maxBytesPerProject > 0) {
+		c.enforceProjectCapLocked(scope.Consumer, scope.ProjectID, keep)
+	}
+	if c.maxPerConsumer > 0 {
+		c.enforceConsumerCapLocked(scope.Consumer, keep)
+	}
+}
+
+func (c *programCache) bindScopeLocked(scope CacheScope, target *cacheEntry) {
 	sk := scopeKey{consumer: scope.Consumer, id: scope.ID}
-	slot := slotKey{consumer: scope.Consumer, id: scope.ID, kind: kindName}
 
 	rec, exists := c.byScope[sk]
 	if !exists {
 		c.byScope[sk] = &scopeRecord{
-			revision: scope.Revision,
-			byKind:   map[string]cacheIdentity{kindName: target.key},
+			projectID: scope.ProjectID,
+			revision:  scope.Revision,
+			entries:   map[cacheIdentity]struct{}{target.key: {}},
 		}
-		target.slots[slot] = struct{}{}
+		target.scopes[sk] = struct{}{}
 		target.everScoped = true
 		return
 	}
@@ -242,41 +271,41 @@ func (c *programCache) bindScopeLocked(scope CacheScope, kindName string, target
 	if scope.Revision > 0 && rec.revision > scope.Revision {
 		return
 	}
+	if scope.ProjectID != "" {
+		rec.projectID = scope.ProjectID
+	}
 
 	// Attach target first so an unchanged expression across a revision bump is never
-	// transiently left with zero slots while detaching prior-revision kinds.
-	target.slots[slot] = struct{}{}
+	// transiently left with zero scopes while detaching prior-revision entries.
+	target.scopes[sk] = struct{}{}
 	target.everScoped = true
 
 	if scope.Revision > 0 && rec.revision > 0 && scope.Revision > rec.revision {
-		for oldKind, oldID := range rec.byKind {
-			if oldKind == kindName && oldID == target.key {
+		for oldID := range rec.entries {
+			if oldID == target.key {
 				continue
 			}
-			c.detachSlotFromEntryLocked(slotKey{consumer: sk.consumer, id: sk.id, kind: oldKind}, oldID)
-			delete(rec.byKind, oldKind)
+			c.detachScopeFromEntryLocked(sk, oldID)
+			delete(rec.entries, oldID)
 		}
 		rec.revision = scope.Revision
-		rec.byKind[kindName] = target.key
+		rec.entries[target.key] = struct{}{}
 		return
 	}
 
-	if prevID, hadKind := rec.byKind[kindName]; hadKind && prevID != target.key {
-		c.detachSlotFromEntryLocked(slot, prevID)
-	}
-	rec.byKind[kindName] = target.key
+	rec.entries[target.key] = struct{}{}
 	if scope.Revision > rec.revision {
 		rec.revision = scope.Revision
 	}
 }
 
-func (c *programCache) detachSlotFromEntryLocked(slot slotKey, id cacheIdentity) {
+func (c *programCache) detachScopeFromEntryLocked(sk scopeKey, id cacheIdentity) {
 	ent, ok := c.byKey[id]
 	if !ok {
 		return
 	}
-	delete(ent.slots, slot)
-	if ent.everScoped && len(ent.slots) == 0 {
+	delete(ent.scopes, sk)
+	if ent.everScoped && len(ent.scopes) == 0 {
 		c.removeEntryLocked(ent)
 	}
 }
@@ -297,23 +326,62 @@ func (c *programCache) enforceConsumerCapLocked(consumer string, keep *cacheEntr
 		if victim == nil {
 			break
 		}
-		// Detach all slots belonging to this consumer from victim; if no other
-		// consumer references victim, remove it.
-		for sl := range victim.slots {
-			if sl.consumer == consumer {
-				delete(victim.slots, sl)
-				sk := scopeKey{consumer: sl.consumer, id: sl.id}
+		// Detach all scopes belonging to this consumer from victim; if no other
+		// scope references victim, remove it.
+		for sk := range victim.scopes {
+			if sk.consumer == consumer {
+				delete(victim.scopes, sk)
 				if rec, ok := c.byScope[sk]; ok {
-					if rec.byKind[sl.kind] == victim.key {
-						delete(rec.byKind, sl.kind)
-					}
-					if len(rec.byKind) == 0 {
+					delete(rec.entries, victim.key)
+					if len(rec.entries) == 0 {
 						delete(c.byScope, sk)
 					}
 				}
 			}
 		}
-		if len(victim.slots) == 0 {
+		if len(victim.scopes) == 0 {
+			c.removeEntryLocked(victim)
+		}
+	}
+}
+
+func (c *programCache) enforceProjectCapLocked(consumer, projectID string, keep *cacheEntry) {
+	for {
+		count, bytes := c.projectUsageLocked(consumer, projectID)
+		overCount := c.maxPerProject > 0 && count > c.maxPerProject
+		overBytes := c.maxBytesPerProject > 0 && bytes > c.maxBytesPerProject
+		if !overCount && !overBytes {
+			break
+		}
+		var victim *cacheEntry
+		for e := c.lru.Back(); e != nil; e = e.Prev() {
+			cand := e.Value.(*cacheEntry)
+			if cand == keep {
+				continue
+			}
+			if c.entryHasProjectLocked(cand, consumer, projectID) {
+				victim = cand
+				break
+			}
+		}
+		if victim == nil {
+			break
+		}
+		for sk := range victim.scopes {
+			if sk.consumer != consumer {
+				continue
+			}
+			rec, ok := c.byScope[sk]
+			if !ok || rec.projectID != projectID {
+				continue
+			}
+			delete(victim.scopes, sk)
+			delete(rec.entries, victim.key)
+			if len(rec.entries) == 0 {
+				delete(c.byScope, sk)
+			}
+		}
+		if len(victim.scopes) == 0 {
 			c.removeEntryLocked(victim)
 		}
 	}
@@ -329,9 +397,31 @@ func (c *programCache) consumerEntryCountLocked(consumer string) int {
 	return n
 }
 
+func (c *programCache) projectUsageLocked(consumer, projectID string) (entries, bytes int) {
+	for _, ent := range c.byKey {
+		if c.entryHasProjectLocked(ent, consumer, projectID) {
+			entries++
+			bytes += ent.weight
+		}
+	}
+	return entries, bytes
+}
+
 func entryHasConsumer(ent *cacheEntry, consumer string) bool {
-	for sl := range ent.slots {
-		if sl.consumer == consumer {
+	for sk := range ent.scopes {
+		if sk.consumer == consumer {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *programCache) entryHasProjectLocked(ent *cacheEntry, consumer, projectID string) bool {
+	for sk := range ent.scopes {
+		if sk.consumer != consumer {
+			continue
+		}
+		if rec, ok := c.byScope[sk]; ok && rec.projectID == projectID {
 			return true
 		}
 	}
@@ -350,13 +440,10 @@ func (c *programCache) removeEntryLocked(ent *cacheEntry) {
 		c.lru.Remove(ent.elem)
 		ent.elem = nil
 	}
-	for sl := range ent.slots {
-		sk := scopeKey{consumer: sl.consumer, id: sl.id}
+	for sk := range ent.scopes {
 		if rec, ok := c.byScope[sk]; ok {
-			if rec.byKind[sl.kind] == ent.key {
-				delete(rec.byKind, sl.kind)
-			}
-			if len(rec.byKind) == 0 {
+			delete(rec.entries, ent.key)
+			if len(rec.entries) == 0 {
 				delete(c.byScope, sk)
 			}
 		}
@@ -372,11 +459,15 @@ func (c *programCache) invalidate(scope CacheScope) {
 	}
 	if scope.ID == "" {
 		for sk, rec := range c.byScope {
-			if sk.consumer == scope.Consumer {
-				delete(c.byScope, sk)
-				for k, id := range rec.byKind {
-					c.detachSlotFromEntryLocked(slotKey{consumer: sk.consumer, id: sk.id, kind: k}, id)
-				}
+			if sk.consumer != scope.Consumer {
+				continue
+			}
+			if scope.ProjectID != "" && rec.projectID != scope.ProjectID {
+				continue
+			}
+			delete(c.byScope, sk)
+			for id := range rec.entries {
+				c.detachScopeFromEntryLocked(sk, id)
 			}
 		}
 		return
@@ -386,12 +477,15 @@ func (c *programCache) invalidate(scope CacheScope) {
 	if !ok {
 		return
 	}
+	if scope.ProjectID != "" && rec.projectID != "" && rec.projectID != scope.ProjectID {
+		return
+	}
 	if scope.Revision > 0 && rec.revision > scope.Revision {
 		return
 	}
 	delete(c.byScope, sk)
-	for k, id := range rec.byKind {
-		c.detachSlotFromEntryLocked(slotKey{consumer: sk.consumer, id: sk.id, kind: k}, id)
+	for id := range rec.entries {
+		c.detachScopeFromEntryLocked(sk, id)
 	}
 }
 
