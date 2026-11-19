@@ -95,6 +95,10 @@ var messageCmd = &cobra.Command{
 	Short:   "Send a message to an agent or user",
 	Long: `Sends a message to a running agent's harness or to a user's inbox.
 
+Agents: read the scion-messaging skill before sending. It covers what this
+help does not: choosing between a conversation and a direct message, who an
+@-mention notifies, where to send replies, and how to format messages for users.
+
 Recipients:
   <agent-name>       Send to an agent (default, same as agent:<name>)
   agent:<name>       Send to an agent explicitly

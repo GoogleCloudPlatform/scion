@@ -131,3 +131,15 @@ func TestMessageHelpCoversAllRefForms(t *testing.T) {
 			"expected at least one deprecation replacement to reference a conversation form")
 	})
 }
+
+// TestMessageHelpPointsToMessagingSkill asserts that the help recommends the
+// scion-messaging skill prominently: in the opening lines, before the recipient
+// reference, so an agent reading `scion message --help` sees it first.
+func TestMessageHelpPointsToMessagingSkill(t *testing.T) {
+	long := messageCmd.Long
+	pointer := strings.Index(long, "read the scion-messaging skill")
+	require.GreaterOrEqual(t, pointer, 0, "messageCmd.Long must recommend reading the scion-messaging skill")
+	recipients := strings.Index(long, "Recipients:")
+	require.GreaterOrEqual(t, recipients, 0, "messageCmd.Long must keep its Recipients reference")
+	assert.Less(t, pointer, recipients, "the scion-messaging pointer must precede the Recipients reference")
+}
