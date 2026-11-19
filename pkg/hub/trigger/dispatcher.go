@@ -403,7 +403,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			Consumer:  triggerrule.ConsumerName,
 			ProjectID: tr.ProjectID,
 			ID:        tr.ID,
-			Revision:  int64(tr.InitiatorAttribution.AuthorizationRevision),
+			Revision:  int64(tr.AuthorizationRevision),
 		}
 		trigRef := hubfire.FireTriggerRef{
 			ID:   tr.ID,
