@@ -40,7 +40,9 @@ func isEgressSentinel(err error) bool {
 		egress.IsSchemeNotAllowed(err) ||
 		egress.IsInvalidEndpoint(err) ||
 		egress.IsResponseTooLarge(err) ||
-		egress.IsAuthError(err)
+		egress.IsAuthError(err) ||
+		egress.IsCredentialUnavailable(err) ||
+		egress.IsInvalidPlacement(err)
 }
 
 // classifyTransportError passes pkg/systemone/egress sentinels through raw so

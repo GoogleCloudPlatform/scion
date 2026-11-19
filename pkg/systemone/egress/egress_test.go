@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -620,6 +621,232 @@ func TestEgress_PreservesContextCancelAndDeadlineAndNon2xxResponsesUnderCap(t *t
 }
 
 // ---------------------------------------------------------------------------
+// PV3 G0: Credential placement (WithCredentialPlacement: header vs bearer)
+// ---------------------------------------------------------------------------
+
+func TestEgress_HeaderCredentialPlacement_OnlyInConfiguredHeaderAndNeverInAuthorization(t *testing.T) {
+	const canaryKey = "AIzaSy-synthetic-canary-gemini-key-884422"
+
+	var (
+		gotHeaders http.Header
+		gotQuery   string
+		gotPath    string
+		gotBody    string
+	)
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		gotQuery = r.URL.RawQuery
+		gotPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"answers":{}}`))
+	}))
+	defer ts.Close()
+
+	client := NewClient(
+		StaticBearer(canaryKey),
+		WithCredentialPlacement(Placement{
+			Kind:       provider.AuthKindHeader,
+			HeaderName: "x-goog-api-key",
+		}),
+		WithLoopbackServerForTesting(ts.URL, ts.Client()),
+	)
+
+	callerReq, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		ts.URL+"/v1beta/decisions",
+		strings.NewReader(`{"model":"gemini-decision-1"}`),
+	)
+	require.NoError(t, err)
+	callerReq.Header.Set("Content-Type", "application/json")
+	// Even if a caller accidentally pre-populated Authorization, header placement
+	// must strip it so Authorization is never sent.
+	callerReq.Header.Set("Authorization", "Bearer pre-existing-should-be-stripped")
+
+	resp, err := client.Do(callerReq)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+
+	// 1. Key appears on the wire ONLY in x-goog-api-key.
+	assert.Equal(t, canaryKey, gotHeaders.Get("x-goog-api-key"))
+	assert.Empty(t, gotHeaders.Get("Authorization"), "Authorization must never be set with header placement")
+
+	// 2. Key appears NOWHERE else in headers, URL path, query, or body.
+	for name, vals := range gotHeaders {
+		if strings.EqualFold(name, "x-goog-api-key") {
+			continue
+		}
+		for _, v := range vals {
+			assert.NotContains(t, v, canaryKey, "header %s leaked secret", name)
+		}
+	}
+	assert.NotContains(t, gotPath, canaryKey)
+	assert.NotContains(t, gotQuery, canaryKey)
+	assert.NotContains(t, gotBody, canaryKey)
+
+	// 3. Caller's original *http.Request was NOT mutated with the credential.
+	assert.Empty(t, callerReq.Header.Get("x-goog-api-key"), "RoundTrip must not mutate caller request headers")
+}
+
+func TestEgress_HeaderCredentialPlacement_ScrubsSecretAndDefaultsZeroPlacementToBearer(t *testing.T) {
+	const canaryKey = "AIzaSy-scrub-canary-secret-551199"
+
+	t.Run("transport_error_scrubs_header_secret", func(t *testing.T) {
+		dialer := &recordingDialer{
+			inner: dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+				return nil, fmt.Errorf("dial failed with echoed header %s", canaryKey)
+			}),
+		}
+		client := NewClient(
+			StaticBearer(canaryKey),
+			WithCredentialPlacement(HeaderPlacement("x-goog-api-key")),
+			WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}}, dialer),
+		)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://generativelanguage.googleapis.com/v1beta/decisions", strings.NewReader(`{}`))
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), canaryKey)
+	})
+
+	t.Run("zero_placement_defaults_to_bearer", func(t *testing.T) {
+		var gotAuth string
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAuth = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer ts.Close()
+
+		client := NewClient(
+			StaticBearer(canaryKey),
+			WithCredentialPlacement(Placement{}),
+			WithLoopbackServerForTesting(ts.URL, ts.Client()),
+		)
+		resp, err := client.Get(ts.URL + "/v1/models")
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, "Bearer "+canaryKey, gotAuth)
+	})
+
+	t.Run("none_placement_attaches_no_auth_header_without_calling_source", func(t *testing.T) {
+		var gotHeaders http.Header
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotHeaders = r.Header.Clone()
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer ts.Close()
+
+		sourceCalled := false
+		client := NewClient(
+			func(context.Context) (string, error) {
+				sourceCalled = true
+				return canaryKey, nil
+			},
+			WithCredentialPlacement(Placement{Kind: provider.AuthKindNone}),
+			WithLoopbackServerForTesting(ts.URL, ts.Client()),
+		)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/v1/models", nil)
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer should-not-be-sent")
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.False(t, sourceCalled, "AuthKindNone must not invoke credential source")
+		assert.Empty(t, gotHeaders.Get("Authorization"))
+	})
+}
+
+func TestEgress_RejectsInvalidAndReservedCredentialPlacements(t *testing.T) {
+	const secretKey = "AIzaSy-never-send-on-invalid-placement"
+	const badHeaderCanary = "CANARY_BAD_HEADER_NAME_DO_NOT_ECHO"
+
+	invalidPlacements := []struct {
+		name      string
+		placement Placement
+	}{
+		{name: "header_empty_name", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: ""}},
+		{name: "header_whitespace_only", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "   "}},
+		{name: "header_leading_space", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: " x-goog-api-key"}},
+		{name: "header_trailing_space", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-goog-api-key "}},
+		{name: "header_internal_space", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x goog api key"}},
+		{name: "header_crlf_injection", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-goog-api-key\r\nX-Injected: " + badHeaderCanary}},
+		{name: "header_lf_injection", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-goog-api-key\n" + badHeaderCanary}},
+		{name: "header_nul_byte", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-key\x00bad"}},
+		{name: "header_del_byte", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-key\x7fbad"}},
+		{name: "header_colon_delimiter", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-goog-api-key: " + badHeaderCanary}},
+		{name: "header_slash_delimiter", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-goog/api-key"}},
+		{name: "header_quotes_delimiter", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: `"x-goog-api-key"`}},
+		{name: "header_non_ascii", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-goog-ключ"}},
+		{name: "header_oversize_name", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "x-" + strings.Repeat("a", 200)}},
+		{name: "reserved_authorization", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Authorization"}},
+		{name: "reserved_authorization_lower", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "authorization"}},
+		{name: "reserved_proxy_authorization", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Proxy-Authorization"}},
+		{name: "reserved_host", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Host"}},
+		{name: "reserved_cookie", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Cookie"}},
+		{name: "reserved_set_cookie", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Set-Cookie"}},
+		{name: "reserved_content_length", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Content-Length"}},
+		{name: "reserved_content_type", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Content-Type"}},
+		{name: "reserved_content_encoding", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Content-Encoding"}},
+		{name: "hop_by_hop_transfer_encoding", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Transfer-Encoding"}},
+		{name: "hop_by_hop_connection", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Connection"}},
+		{name: "hop_by_hop_keep_alive", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Keep-Alive"}},
+		{name: "hop_by_hop_proxy_authenticate", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Proxy-Authenticate"}},
+		{name: "hop_by_hop_proxy_connection", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Proxy-Connection"}},
+		{name: "hop_by_hop_te", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "TE"}},
+		{name: "hop_by_hop_trailer", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Trailer"}},
+		{name: "hop_by_hop_trailers", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Trailers"}},
+		{name: "hop_by_hop_upgrade", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Upgrade"}},
+		{name: "reserved_expect", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Expect"}},
+		{name: "reserved_via", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Via"}},
+		{name: "reserved_forwarded", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "Forwarded"}},
+		{name: "reserved_x_forwarded_for", placement: Placement{Kind: provider.AuthKindHeader, HeaderName: "X-Forwarded-For"}},
+		{name: "bearer_with_header_name", placement: Placement{Kind: provider.AuthKindBearer, HeaderName: "x-goog-api-key"}},
+		{name: "empty_kind_with_header_name", placement: Placement{Kind: "", HeaderName: "x-goog-api-key"}},
+		{name: "none_with_header_name", placement: Placement{Kind: provider.AuthKindNone, HeaderName: "x-goog-api-key"}},
+		{name: "unsupported_google_access_token", placement: Placement{Kind: provider.AuthKindGoogleAccessToken}},
+		{name: "unsupported_unknown_kind", placement: Placement{Kind: provider.AuthKind("digest_" + badHeaderCanary)}},
+	}
+
+	for _, tc := range invalidPlacements {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Error(t, ValidatePlacement(tc.placement))
+
+			var hit bool
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hit = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer ts.Close()
+
+			// Order WithLoopbackServerForTesting BOTH after and before WithCredentialPlacement
+			// to confirm a later option never clears an earlier configErr.
+			for _, opts := range [][]Option{
+				{WithCredentialPlacement(tc.placement), WithLoopbackServerForTesting(ts.URL, ts.Client())},
+				{WithLoopbackServerForTesting(ts.URL, ts.Client()), WithCredentialPlacement(tc.placement)},
+			} {
+				client := NewClient(StaticBearer(secretKey), opts...)
+				req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/v1beta/decisions", strings.NewReader(`{}`))
+				require.NoError(t, err)
+
+				resp, err := client.Do(req)
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				require.Error(t, err)
+				assert.True(t, IsInvalidPlacement(err), "expected ErrInvalidPlacement, got: %v", err)
+				assert.ErrorIs(t, err, ErrInvalidPlacement)
+				assert.False(t, hit, "invalid placement must never contact server or fall back to bearer")
+				assert.NotContains(t, err.Error(), secretKey)
+				assert.NotContains(t, err.Error(), badHeaderCanary, "invalid header/kind text must not be echoed in errors")
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Import Guard (P1 brief §4 & common-dev-context)
 // ---------------------------------------------------------------------------
 
@@ -647,10 +874,12 @@ func TestEgress_ImportGuard(t *testing.T) {
 				continue
 			}
 			// Within this module, egress may depend ONLY on pkg/util/ssrfclient
-			// (never pkg/hub, pkg/store, pkg/secret, pkg/messaging, pkg/ruleengine,
-			// any trigger package, or pkg/systemone/runtime).
-			assert.Equal(t, "github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient", path,
-				"forbidden internal import %q in %s", path, file)
+			// and pkg/systemone/provider (never pkg/hub, pkg/store, pkg/secret,
+			// pkg/messaging, pkg/ruleengine, any trigger package, or
+			// pkg/systemone/runtime).
+			allowed := path == "github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient" ||
+				path == "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+			assert.True(t, allowed, "forbidden internal import %q in %s", path, file)
 		}
 	}
 	require.Greater(t, nonTestCount, 0, "expected at least one non-test Go file")
