@@ -107,15 +107,17 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"agent.identity_token": testAdminPolicyAllow,
 
 	// Projects.
-	"project.create":               testAdminPolicyAllow,
-	"project.read":                 testAdminPolicyAllow,
-	"project.update":               testAdminPolicyAllow,
-	"project.delete":               testAdminPolicyAllow,
-	"project.manage":               testAdminPolicyAllow,
-	"project.register":             testAdminPolicyAllow,
-	"project.set_messaging_policy": testAdminPolicyAllow,
-	"project.clone":                testAdminPolicyAllow,
-	"project.list":                 testAdminPolicyAllow,
+	"project.create":                  testAdminPolicyAllow,
+	"project.read":                    testAdminPolicyAllow,
+	"project.update":                  testAdminPolicyAllow,
+	"project.delete":                  testAdminPolicyAllow,
+	"project.manage":                  testAdminPolicyAllow,
+	"project.register":                testAdminPolicyAllow,
+	"project.set_messaging_policy":    testAdminPolicyAllow,
+	"project.manage_message_policies": testAdminPolicyAllow,
+	"project.read_message_policies":   testAdminPolicyAllow,
+	"project.clone":                   testAdminPolicyAllow,
+	"project.list":                    testAdminPolicyAllow,
 	// Posting into a project's chat threads, held by the built-in
 	// project roles.
 	"project.chat_post": testAdminPolicyAllow,
@@ -424,6 +426,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"handlers_auth.go:handleAuthAdminStatus":                      {Policy: testAdminPolicyAllow, Reason: "display of the caller's own admin status"},
 	"perftrace_middleware.go:perfHeadersAllowed":                  {Policy: testAdminPolicyAllow, Reason: "request timing headers"},
 	"project_messaging_policy.go:messagingPolicyOwnerRule":        {Policy: testAdminPolicyAllow, Reason: "project messaging policy (project.set_messaging_policy is allow)"},
+	"handlers_message_policies.go:messagePolicyOwnerOrAdminRule":  {Policy: testAdminPolicyAllow, Reason: "project message policies (project.manage_message_policies is allow)"},
 	"authorize_message.go:authorizeAgentMessage":                  {Policy: testAdminPolicyAllow, Reason: "messaging agents"},
 	"handlers_agent_message_mode.go:handleSetMessageMode":         {Policy: testAdminPolicyAllow, Reason: "agent message mode"},
 	"deletion_redact.go:callerSeesDeletionDetail":                 {Policy: testAdminPolicyAllow, Reason: "deletion detail display"},
@@ -642,6 +645,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.SystemOne:                    testAdminPolicyDeny,
 	experiments.GitHubTriggers:               testAdminPolicyDeny,
 	experiments.Triggers:                     testAdminPolicyDeny,
+	experiments.MessagePolicies:              testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

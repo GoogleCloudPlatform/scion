@@ -70,8 +70,9 @@ func TestDispatchExperimentNames_CoverPlatformSkillGates(t *testing.T) {
 		}
 	}
 	for id, owner := range map[string]string{
-		experiments.Decisions: "the scion-messaging Choices content",
-		experiments.Artifacts: "the scion-artifacts skill",
+		experiments.Decisions:       "the scion-messaging Choices content",
+		experiments.Artifacts:       "the scion-artifacts skill",
+		experiments.MessagePolicies: "the scion-messaging message policy guidance",
 	} {
 		if _, ok := refs[id]; !ok {
 			t.Errorf("no platform skill gates on %s; %s is expected to", id, owner)
@@ -79,11 +80,11 @@ func TestDispatchExperimentNames_CoverPlatformSkillGates(t *testing.T) {
 	}
 }
 
-// web.decisions and hub.artifacts are dispatched (for the scion-messaging
-// and scion-artifacts skill gates) and are off by default, so a fresh hub
-// still dispatches no experiments.
+// web.decisions, hub.artifacts and hub.message_policies are dispatched (for
+// the scion-messaging and scion-artifacts skill gates) and are off by default,
+// so a fresh hub still dispatches no experiments.
 func TestSkillGateExperiments_Dispatched(t *testing.T) {
-	for _, id := range []string{experiments.Decisions, experiments.Artifacts} {
+	for _, id := range []string{experiments.Decisions, experiments.Artifacts, experiments.MessagePolicies} {
 		exp, ok := experiments.Default().Lookup(id)
 		if !ok {
 			t.Fatalf("%s is not registered", id)

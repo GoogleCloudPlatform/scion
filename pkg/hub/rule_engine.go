@@ -44,6 +44,9 @@ func registerRuleConsumers(s *Server) error {
 	if err := s.registerSystemOneRules(); err != nil {
 		return err
 	}
+	if err := s.registerMessagePolicyRules(); err != nil {
+		return err
+	}
 	return nil
 }
 

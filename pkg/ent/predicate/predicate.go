@@ -192,6 +192,12 @@ type Message func(*sql.Selector)
 // MessageAddressee is the predicate function for messageaddressee builders.
 type MessageAddressee func(*sql.Selector)
 
+// MessagePolicy is the predicate function for messagepolicy builders.
+type MessagePolicy func(*sql.Selector)
+
+// MessagePolicyDecision is the predicate function for messagepolicydecision builders.
+type MessagePolicyDecision func(*sql.Selector)
+
 // MutationAudit is the predicate function for mutationaudit builders.
 type MutationAudit func(*sql.Selector)
 

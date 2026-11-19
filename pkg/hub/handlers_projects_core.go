@@ -2909,6 +2909,15 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Project message policies (ptone/scion#8047):
+	// …/message-policies, …/message-policies/test, …/message-policies/decisions,
+	// …/message-policies/{policyId}, …/message-policies/{policyId}/test, and
+	// …/message-policies/{policyId}/decisions.
+	if rest, ok := strings.CutPrefix(subPath, "message-policies"); ok && (rest == "" || strings.HasPrefix(rest, "/")) {
+		s.handleProjectMessagePolicies(w, r, projectID, rest)
+		return
+	}
+
 	// Check for nested /set-template path
 	if subPath == "set-template" {
 		s.handleSetTemplate(w, r, projectID)

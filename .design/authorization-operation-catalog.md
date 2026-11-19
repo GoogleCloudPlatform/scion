@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 415
+**Operations:** 421
 
 ## Table of Contents
 
@@ -118,6 +118,12 @@
 - [project.settings.update](#projectsettingsupdate) — Replace a project's settings
 - [project.messagingpolicy.read](#projectmessagingpolicyread) — Read a project's cross-project inbound messaging policy
 - [project.messagingpolicy.update](#projectmessagingpolicyupdate) — Set a project's cross-project inbound messaging policy. The caller also must be an active direct project owner or a local unscoped hub admin
+- [project.messagepolicy.read](#projectmessagepolicyread) — List or read a project's configured message policies and surface coverage declaration (ptone/scion#8047; 404 while hub.message_policies is off)
+- [project.messagepolicy.create](#projectmessagepolicycreate) — Create a message policy on covered outbound surfaces in a project. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+- [project.messagepolicy.update](#projectmessagepolicyupdate) — Update a project message policy, bump its revision, and invalidate its compiled rule cache entry. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+- [project.messagepolicy.delete](#projectmessagepolicydelete) — Delete a project message policy and invalidate its compiled rule cache entry. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+- [project.messagepolicy.test](#projectmessagepolicytest) — Dry-run an inline or stored project message policy against synthetic sample send facts without persisting or echoing message content. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+- [project.messagepolicy.decisions](#projectmessagepolicydecisions) — List content-free message policy evaluation decisions for a project or a single policy. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
 - [project.template.set](#projecttemplateset) — Mark or unmark a project as a template. The caller needs project.update and project.clone on the project
 - [template.project.import](#templateprojectimport) — Discover or import templates into a project
 - [harnessconfig.project.import](#harnessconfigprojectimport) — Discover or import harness configs into a project
@@ -4852,6 +4858,209 @@
 ### Tests
 
 - `pkg/hub:TestProjectMessagingPolicyPut_RequiresSetMessagingPolicySelector`
+
+---
+
+## project.messagepolicy.read
+
+**Domain:** project
+
+**Description:** List or read a project's configured message policies and surface coverage declaration (ptone/scion#8047; 404 while hub.message_policies is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/message-policies` |
+| http_route | GET | `/api/v1/projects/{id}/message-policies/{policyId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMessagePolicyAuthz_Target7_CredentialMatrix`)
+
+**Base Permission:** `project.read_message_policies`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`, `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagePolicyAuthz_Target7_CredentialMatrix`
+
+---
+
+## project.messagepolicy.create
+
+**Domain:** project
+
+**Description:** Create a message policy on covered outbound surfaces in a project. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/message-policies` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMessagePolicyAuthz_Target7_CredentialMatrix`)
+
+**Base Permission:** `project.manage_message_policies`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagePolicyAuthz_Target7_CredentialMatrix`
+
+---
+
+## project.messagepolicy.update
+
+**Domain:** project
+
+**Description:** Update a project message policy, bump its revision, and invalidate its compiled rule cache entry. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/projects/{id}/message-policies/{policyId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMessagePolicyAuthz_Target7_CredentialMatrix`)
+
+**Base Permission:** `project.manage_message_policies`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagePolicyAuthz_Target7_CredentialMatrix`
+
+---
+
+## project.messagepolicy.delete
+
+**Domain:** project
+
+**Description:** Delete a project message policy and invalidate its compiled rule cache entry. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/projects/{id}/message-policies/{policyId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMessagePolicyAuthz_Target7_CredentialMatrix`)
+
+**Base Permission:** `project.manage_message_policies`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `project_message_policy_delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** policy_id, policy_name, mode, revision
+- **Atomic:** No
+- **Non-Atomic Justification:** Policy deletion commits in the store and emits a structured mutation audit record immediately afterward via emitMutationAudit
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagePolicyAuthz_Target7_CredentialMatrix`
+
+---
+
+## project.messagepolicy.test
+
+**Domain:** project
+
+**Description:** Dry-run an inline or stored project message policy against synthetic sample send facts without persisting or echoing message content. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/message-policies/test` |
+| http_route | POST | `/api/v1/projects/{id}/message-policies/{policyId}/test` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMessagePolicyAuthz_Target7_CredentialMatrix`)
+
+**Base Permission:** `project.manage_message_policies`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagePolicyAuthz_Target7_CredentialMatrix`
+
+---
+
+## project.messagepolicy.decisions
+
+**Domain:** project
+
+**Description:** List content-free message policy evaluation decisions for a project or a single policy. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/message-policies/decisions` |
+| http_route | GET | `/api/v1/projects/{id}/message-policies/{policyId}/decisions` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMessagePolicyAuthz_Target7_CredentialMatrix`)
+
+**Base Permission:** `project.manage_message_policies`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMessagePolicyAuthz_Target7_CredentialMatrix`
 
 ---
 

@@ -63,6 +63,15 @@ agent-to-agent work.
 - Check the send result. Handle reported delivery failures before assuming the
   intended recipient was reached. Do not duplicate a conversation reply into DMs
   merely to draw attention; use mentions in the conversation.
+<!-- scion:experiment hub.message_policies -->
+
+If an outbound user or conversation send fails with `message_policy_rejected`
+(HTTP 422), an enforced project message policy blocked the message before storage
+or delivery. Read the rejection reason, policy name, and advisory remediation in
+the error output (or inspect active rules with `scion message-policy list` and
+`scion message-policy get <name>`), revise the message to satisfy the policy, and
+do not retry the rejected text verbatim.
+<!-- scion:end-experiment -->
 
 ### Receiving
 
@@ -96,7 +105,8 @@ user-facing format. Agent-only messages do not require it.
 <!-- scion:experiment web.decisions -->
 - **Ask with a decision prompt.** For a decision the user should answer by picking
   an option, send it with `scion message --decisions-file <file>` instead of prose,
-  so the user can answer with a click. See `references/decisions.md`.
+  so the user can answer with a click (including when a `message_policy_rejected`
+  remediation asks for structured options). See `references/decisions.md`.
 <!-- scion:end-experiment -->
 - **Keep details useful.** Avoid dense UUIDs, code line numbers and internal status
   codes unless the user needs them to act. Prefer descriptive Markdown links to

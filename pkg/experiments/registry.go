@@ -531,6 +531,15 @@ const GitHubTriggers = "hub.github_triggers"
 // exposes the flag for UI presentation.
 const Triggers = "hub.triggers"
 
+// MessagePolicies gates project-scoped message admission policies
+// (ptone/scion#8047): /api/v1/projects/{id}/message-policies[/{policyId}[/test|/decisions]],
+// scion message-policy create|list|get|delete|test|decisions, and the H2
+// outbound agent message gate (agent->user DMs, agent conversation posts and
+// choice prompts; shadow and enforce modes). While it is off, the message
+// policy routes answer 404, the outbound gate evaluates and records nothing,
+// and stored policies and decision records are kept.
+const MessagePolicies = "hub.message_policies"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -1056,6 +1065,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#7961",
 		Owner:       "triggers",
 		ReviewBy:    "2027-05-31",
+	},
+	{
+		Name:        MessagePolicies,
+		Title:       "Project message policies",
+		Description: "Enables project-scoped CEL message policies on outbound agent messages to users, conversations and choice prompts (/api/v1/projects/{id}/message-policies[/{policyId}[/test|/decisions]] and scion message-policy create|list|get|delete|test|decisions), with shadow and enforce modes and content-free decision records. Agent-to-agent DMs, group-set fan-out and mention deliveries are not covered yet and are reported in coverage.uncovered_agent_paths. While off, the routes answer 404, the gate evaluates nothing and stored policies and decisions are kept.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8047",
+		Owner:       "system-one",
+		ReviewBy:    "2027-02-15",
 	},
 }
 

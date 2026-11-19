@@ -183,6 +183,42 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the owner rule admits only an active direct project owner, and the matrix's super-admin is not one on the fixture project, so the admitting token is refused by the owner rule after the selector check",
 		Pin:    "TestProjectMessagingPolicyPut_RequiresSetMessagingPolicySelector",
 	},
+	{OperationID: "project.messagepolicy.read", Method: "GET", Pattern: "/api/v1/projects/{id}/message-policies"}: {
+		Reason: "the route answers 404 while the hub.message_policies experiment is off, as in this fixture; the dedicated test enables the experiment and drives the full §4 credential matrix across session, dev, project/hub/other-project UATs, member, viewer, agent, delegated/broker/hub-delivery/federation/visitor, and hub admin",
+		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
+	{OperationID: "project.messagepolicy.read", Method: "GET", Pattern: "/api/v1/projects/{id}/message-policies/{policyId}"}: {
+		Reason: "same as GET /api/v1/projects/{id}/message-policies above: 404 while hub.message_policies is off in this fixture; the dedicated test enables the experiment and drives the full §4 credential matrix",
+		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
+	{OperationID: "project.messagepolicy.create", Method: "POST", Pattern: "/api/v1/projects/{id}/message-policies"}: {
+		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
+		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
+	{OperationID: "project.messagepolicy.update", Method: "PATCH", Pattern: "/api/v1/projects/{id}/message-policies/{policyId}"}: {
+		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
+		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
+	{OperationID: "project.messagepolicy.delete", Method: "DELETE", Pattern: "/api/v1/projects/{id}/message-policies/{policyId}"}: {
+		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
+		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
+	{OperationID: "project.messagepolicy.test", Method: "POST", Pattern: "/api/v1/projects/{id}/message-policies/test"}: {
+		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
+		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
+	{OperationID: "project.messagepolicy.test", Method: "POST", Pattern: "/api/v1/projects/{id}/message-policies/{policyId}/test"}: {
+		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
+		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
+	{OperationID: "project.messagepolicy.decisions", Method: "GET", Pattern: "/api/v1/projects/{id}/message-policies/decisions"}: {
+		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
+		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
+	{OperationID: "project.messagepolicy.decisions", Method: "GET", Pattern: "/api/v1/projects/{id}/message-policies/{policyId}/decisions"}: {
+		Reason: "404 while hub.message_policies is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full §4 credential matrix",
+		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",
+	},
 	{OperationID: "project.template.set", Method: "POST", Pattern: "/api/v1/projects/{id}/set-template"}: {
 		Reason: "the operation needs project:update and project:clone, and a token passes project.clone on a project only when its holder is a member of it; the matrix's super-admin token carries one selector and is not a member of the fixture project",
 		Pin:    "TestSetTemplate_RequiresUpdateAndCloneOnTheProject",

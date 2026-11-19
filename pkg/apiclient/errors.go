@@ -42,7 +42,7 @@ type APIError struct {
 
 // Error implements the error interface.
 func (e *APIError) Error() string {
-	msg := e.Message + e.messageDeniedSuffix()
+	msg := e.Message + e.messageDeniedSuffix() + e.messagePolicyRejectedSuffix()
 	if e.RequestID != "" {
 		return fmt.Sprintf("%s: %s (status: %d, request: %s)",
 			e.Code, msg, e.StatusCode, e.RequestID)
@@ -75,6 +75,27 @@ func (e *APIError) messageDeniedSuffix() string {
 		return ""
 	}
 	return " [" + strings.Join(parts, ", ") + "]"
+}
+
+// messagePolicyRejectedSuffix returns the rejecting policy name and advisory
+// remediation for a 422 message_policy_rejected response (ptone/scion#8047), so
+// an agent or CLI caller reading err.Error() sees which policy rejected the
+// outbound message and how to revise it rather than retrying verbatim.
+func (e *APIError) messagePolicyRejectedSuffix() string {
+	if e.Code != ErrCodeMessagePolicyRejected || len(e.Details) == 0 {
+		return ""
+	}
+	var parts []string
+	if v, ok := e.Details["policy"].(string); ok && v != "" {
+		parts = append(parts, "policy: "+v)
+	}
+	if v, ok := e.Details["remediation"].(string); ok && v != "" {
+		parts = append(parts, "remediation: "+v)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(parts, "; ") + "]"
 }
 
 // IsNotFound returns true if the error is a 404 Not Found.
@@ -149,6 +170,10 @@ const (
 	// ErrCodeMessageDenied is returned when message-send authorization
 	// denies a delivery. Details carry reason, senderMode and recipientMode.
 	ErrCodeMessageDenied = "message_denied"
+	// ErrCodeMessagePolicyRejected is returned (HTTP 422) when an enforced
+	// project message policy rejects an outbound agent send (ptone/scion#8047).
+	// Details carry policy, policy_revision, class, and optional remediation.
+	ErrCodeMessagePolicyRejected = "message_policy_rejected"
 )
 
 // errorResponse matches the API error response format.

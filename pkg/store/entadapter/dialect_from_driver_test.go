@@ -37,6 +37,7 @@ func TestStores_UsesRowLocks_ReadsDriverDialect(t *testing.T) {
 		"access_constraint":   func(c *ent.Client) func() bool { return NewAccessConstraintStore(c).usesRowLocks },
 		"hub_setting":         func(c *ent.Client) func() bool { return NewHubSettingStore(c).usesRowLocks },
 		"lifecycle_hook":      func(c *ent.Client) func() bool { return NewLifecycleHookStore(c).usesRowLocks },
+		"message_policy":      func(c *ent.Client) func() bool { return NewMessagePolicyStore(c).usesRowLocks },
 		"system_one_instance": func(c *ent.Client) func() bool { return NewSystemOneInstanceStore(c).usesRowLocks },
 	}
 	for name, newStore := range stores {

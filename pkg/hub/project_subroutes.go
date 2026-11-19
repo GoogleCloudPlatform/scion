@@ -38,6 +38,7 @@ const (
 	projectSubRoutePreStartHooks     projectSubRouteKind = "pre-start-hooks"
 	projectSubRouteSettings          projectSubRouteKind = "settings"
 	projectSubRouteMessagingPolicy   projectSubRouteKind = "messaging-policy"
+	projectSubRouteMessagePolicies   projectSubRouteKind = "message-policies"
 	projectSubRouteTemplate          projectSubRouteKind = "template"
 	projectSubRouteCatalogImport     projectSubRouteKind = "catalog-import"
 	projectSubRouteWorkspace         projectSubRouteKind = "workspace"
@@ -75,6 +76,7 @@ var projectSubRouteTable = map[string]projectSubRouteKind{
 	"pre-start-hooks":          projectSubRoutePreStartHooks,
 	"settings":                 projectSubRouteSettings,
 	"messaging-policy":         projectSubRouteMessagingPolicy,
+	"message-policies":         projectSubRouteMessagePolicies,
 	"set-template":             projectSubRouteTemplate,
 	"clone":                    projectSubRouteTemplate,
 	"discover-templates":       projectSubRouteCatalogImport,

@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 107
+const expectedTableCount = 109
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -187,6 +187,22 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, store.SystemOneAuthKindAPIKey, soInst.Auth.Kind)
 	assert.Equal(t, "TYPESAFE_API_KEY", soInst.Auth.SecretName)
 	assert.Equal(t, 5*time.Second, soInst.Limits.CallTimeout)
+
+	msgPol, err := composite.GetMessagePolicyByName(ctx, projectID, "no-prose-choices")
+	require.NoError(t, err, "message_policies fixture row must be readable via CompositeStore")
+	assert.Equal(t, "b1000000-0000-0000-0000-000000000001", msgPol.ID)
+	assert.Equal(t, store.MessagePolicyModeShadow, msgPol.Mode)
+	assert.Equal(t, store.MessagePolicyOutcomeAdmit, msgPol.OnFailed)
+	assert.Equal(t, map[string]string{"cost_limit": "reject"}, msgPol.OnFailedReasons)
+	assert.Equal(t, []string{"agent_to_user", "agent_to_conversation"}, msgPol.Scope.Surfaces)
+
+	msgDecs, err := composite.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{ProjectID: projectID}, store.ListOptions{})
+	require.NoError(t, err, "message_policy_decisions fixture rows must be readable via CompositeStore")
+	require.Len(t, msgDecs.Items, 2)
+	assert.Equal(t, "b2000000-0000-0000-0000-000000000002", msgDecs.Items[0].ID)
+	assert.Equal(t, messageID, msgDecs.Items[0].MessageID)
+	assert.Equal(t, "b2000000-0000-0000-0000-000000000001", msgDecs.Items[1].ID)
+	assert.Empty(t, msgDecs.Items[1].MessageID)
 
 	// The agent_delivery_holds marker and awaiting_session message row
 	// (ptone/scion#7881) must decode through the real store adapters.

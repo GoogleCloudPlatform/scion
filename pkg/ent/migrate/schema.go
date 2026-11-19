@@ -2437,6 +2437,92 @@ var (
 			},
 		},
 	}
+	// MessagePoliciesColumns holds the columns for the "message_policies" table.
+	MessagePoliciesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString, Size: 63},
+		{Name: "description", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "enabled", Type: field.TypeBool, Default: true},
+		{Name: "mode", Type: field.TypeEnum, Enums: []string{"shadow", "enforce"}, Default: "shadow"},
+		{Name: "scope", Type: field.TypeJSON},
+		{Name: "violation_rule", Type: field.TypeString, Size: 2147483647},
+		{Name: "system_one_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "system_one_refs", Type: field.TypeJSON, Nullable: true},
+		{Name: "on_uncertain", Type: field.TypeString, Size: 16, Default: ""},
+		{Name: "on_failed", Type: field.TypeEnum, Enums: []string{"admit", "reject"}},
+		{Name: "on_failed_reasons", Type: field.TypeJSON, Nullable: true},
+		{Name: "reject_reason", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "reject_remediation", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "created_by", Type: field.TypeString, Default: ""},
+		{Name: "updated_by", Type: field.TypeString, Default: ""},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// MessagePoliciesTable holds the schema information for the "message_policies" table.
+	MessagePoliciesTable = &schema.Table{
+		Name:       "message_policies",
+		Columns:    MessagePoliciesColumns,
+		PrimaryKey: []*schema.Column{MessagePoliciesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "messagepolicy_project_id_name",
+				Unique:  true,
+				Columns: []*schema.Column{MessagePoliciesColumns[1], MessagePoliciesColumns[2]},
+			},
+			{
+				Name:    "messagepolicy_project_id_enabled_name",
+				Unique:  false,
+				Columns: []*schema.Column{MessagePoliciesColumns[1], MessagePoliciesColumns[4], MessagePoliciesColumns[2]},
+			},
+		},
+	}
+	// MessagePolicyDecisionsColumns holds the columns for the "message_policy_decisions" table.
+	MessagePolicyDecisionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "policy_id", Type: field.TypeUUID},
+		{Name: "policy_name", Type: field.TypeString, Size: 63, Default: ""},
+		{Name: "policy_revision", Type: field.TypeInt64},
+		{Name: "mode", Type: field.TypeEnum, Enums: []string{"shadow", "enforce"}},
+		{Name: "surface", Type: field.TypeString, Size: 64},
+		{Name: "sender_kind", Type: field.TypeString, Size: 32, Default: ""},
+		{Name: "sender_id", Type: field.TypeString, Size: 128, Default: ""},
+		{Name: "recipient_kind", Type: field.TypeString, Size: 32, Default: ""},
+		{Name: "recipient_id", Type: field.TypeString, Size: 128, Default: ""},
+		{Name: "message_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "class", Type: field.TypeEnum, Enums: []string{"pass", "violation", "uncertain", "failed"}},
+		{Name: "action", Type: field.TypeEnum, Enums: []string{"admitted", "rejected", "shadow"}},
+		{Name: "reason", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "cel_error_reason", Type: field.TypeString, Size: 64, Default: ""},
+		{Name: "evaluation", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "elapsed_ms", Type: field.TypeInt64, Default: 0},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// MessagePolicyDecisionsTable holds the schema information for the "message_policy_decisions" table.
+	MessagePolicyDecisionsTable = &schema.Table{
+		Name:       "message_policy_decisions",
+		Columns:    MessagePolicyDecisionsColumns,
+		PrimaryKey: []*schema.Column{MessagePolicyDecisionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "messagepolicydecision_project_id_policy_id_created_at_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagePolicyDecisionsColumns[1], MessagePolicyDecisionsColumns[2], MessagePolicyDecisionsColumns[18], MessagePolicyDecisionsColumns[0]},
+			},
+			{
+				Name:    "messagepolicydecision_project_id_created_at_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagePolicyDecisionsColumns[1], MessagePolicyDecisionsColumns[18], MessagePolicyDecisionsColumns[0]},
+			},
+			{
+				Name:    "messagepolicydecision_created_at_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagePolicyDecisionsColumns[18], MessagePolicyDecisionsColumns[0]},
+			},
+		},
+	}
 	// MutationAuditsColumns holds the columns for the "mutation_audits" table.
 	MutationAuditsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -4285,6 +4371,8 @@ var (
 		MembershipLossChecksTable,
 		MessagesTable,
 		MessageAddresseesTable,
+		MessagePoliciesTable,
+		MessagePolicyDecisionsTable,
 		MutationAuditsTable,
 		NonceCacheTable,
 		NotificationsTable,
@@ -4488,6 +4576,12 @@ func init() {
 	}
 	MessageAddresseesTable.Annotation = &entsql.Annotation{
 		Table: "message_addressees",
+	}
+	MessagePoliciesTable.Annotation = &entsql.Annotation{
+		Table: "message_policies",
+	}
+	MessagePolicyDecisionsTable.Annotation = &entsql.Annotation{
+		Table: "message_policy_decisions",
 	}
 	NonceCacheTable.Annotation = &entsql.Annotation{
 		Table: "nonce_cache",

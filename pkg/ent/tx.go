@@ -136,6 +136,10 @@ type Tx struct {
 	Message *MessageClient
 	// MessageAddressee is the client for interacting with the MessageAddressee builders.
 	MessageAddressee *MessageAddresseeClient
+	// MessagePolicy is the client for interacting with the MessagePolicy builders.
+	MessagePolicy *MessagePolicyClient
+	// MessagePolicyDecision is the client for interacting with the MessagePolicyDecision builders.
+	MessagePolicyDecision *MessagePolicyDecisionClient
 	// MutationAudit is the client for interacting with the MutationAudit builders.
 	MutationAudit *MutationAuditClient
 	// NonceCache is the client for interacting with the NonceCache builders.
@@ -417,6 +421,8 @@ func (tx *Tx) init() {
 	tx.MembershipLossCheck = NewMembershipLossCheckClient(tx.config)
 	tx.Message = NewMessageClient(tx.config)
 	tx.MessageAddressee = NewMessageAddresseeClient(tx.config)
+	tx.MessagePolicy = NewMessagePolicyClient(tx.config)
+	tx.MessagePolicyDecision = NewMessagePolicyDecisionClient(tx.config)
 	tx.MutationAudit = NewMutationAuditClient(tx.config)
 	tx.NonceCache = NewNonceCacheClient(tx.config)
 	tx.Notification = NewNotificationClient(tx.config)

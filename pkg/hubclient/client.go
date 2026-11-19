@@ -175,6 +175,10 @@ type Client interface {
 	// sees them (Waiting on you and Made).
 	ProjectDecisions(projectID string) ProjectDecisionService
 
+	// ProjectMessagePolicies returns the message policy operations interface
+	// scoped to a project (/api/v1/projects/{projectID}/message-policies).
+	ProjectMessagePolicies(projectID string) MessagePolicyService
+
 	// MyDecisions returns the calling user's Decisions roll-up across their
 	// member projects (GET /api/v1/users/me/decisions).
 	MyDecisions() MyDecisionService
@@ -527,9 +531,19 @@ func (c *client) patch(ctx context.Context, path string, body interface{}, heade
 	return c.transport.Patch(ctx, path, body, headers)
 }
 
+// patchNoRetry performs an HTTP PATCH request exactly once via DoNoRetry.
+func (c *client) patchNoRetry(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return c.transport.PatchNoRetry(ctx, path, body, headers)
+}
+
 // delete performs an HTTP DELETE request.
 func (c *client) delete(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	return c.transport.Delete(ctx, path, headers)
+}
+
+// deleteNoRetry performs an HTTP DELETE request exactly once via DoNoRetry.
+func (c *client) deleteNoRetry(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
+	return c.transport.DeleteNoRetry(ctx, path, headers)
 }
 
 // isProxyIntercepted reports whether a 2xx response looks like a proxy
