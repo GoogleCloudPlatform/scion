@@ -252,6 +252,17 @@ func unresolvedMessages() map[string]unresolvedMessage {
 			m := luChannelMessage(luOtherUser, "")
 			m.Attachments = []*discordgo.MessageAttachment{{ID: "att-1", Filename: "a.txt", URL: "https://cdn.example/a.txt"}}
 			return m
+		}, "worker", false, both},
+		"attachment, no default agent": {func() *discordgo.MessageCreate {
+			m := luChannelMessage(luOtherUser, "")
+			m.Attachments = []*discordgo.MessageAttachment{{ID: "att-1", Filename: "a.txt", URL: "https://cdn.example/a.txt"}}
+			return m
+		}, "", false, neither},
+		"attachment, mention of another user, default agent": {func() *discordgo.MessageCreate {
+			m := luChannelMessage(luOtherUser, "")
+			m.Attachments = []*discordgo.MessageAttachment{{ID: "att-1", Filename: "a.txt", URL: "https://cdn.example/a.txt"}}
+			m.Mentions = []*discordgo.User{{ID: "U-HUMAN"}}
+			return m
 		}, "worker", false, routedOnly},
 		"mention of another user, default agent": {func() *discordgo.MessageCreate {
 			m := luChannelMessage(luOtherUser, "<@U-HUMAN> hey")
@@ -414,14 +425,22 @@ func TestUnresolvedSender_DefaultAgentReplyIsThrottledPerSender(t *testing.T) {
 				var d deliveries
 				b.InboundHandler = d.handler
 
+				attOnly := func(author string) *discordgo.MessageCreate {
+					m := luChannelMessage(author, "")
+					m.Attachments = []*discordgo.MessageAttachment{{ID: "att-1", Filename: "a.txt", URL: "https://cdn.example/a.txt"}}
+					return m
+				}
+
 				b.handleIncomingMessage(e.session, luChannelMessage(luOtherUser, "hello"))
 				b.handleIncomingMessage(e.session, luChannelMessage(luOtherUser, "hello again"))
-				b.handleIncomingMessage(e.session, luChannelMessage(luThirdUser, "hi"))
+				b.handleIncomingMessage(e.session, attOnly(luOtherUser))
+				b.handleIncomingMessage(e.session, attOnly(luThirdUser))
+				b.handleIncomingMessage(e.session, attOnly(luThirdUser))
 				b.handleIncomingMessage(e.session, botMention(luOtherUser, "are you there"))
 				b.handleIncomingMessage(e.session, botMention(luOtherUser, "still there?"))
 
 				assert.Equal(t, []string{sc.want, sc.want, sc.want, sc.want}, channelReplies(t, e.discord),
-					"one reply per sender for unaddressed text; addressing the bot is always answered")
+					"one reply per sender for unaddressed text or attachment; addressing the bot is always answered")
 				assert.Empty(t, d.topics)
 			})
 		}
