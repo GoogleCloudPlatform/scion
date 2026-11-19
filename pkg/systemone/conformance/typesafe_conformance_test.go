@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/conformance"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
@@ -29,6 +30,7 @@ import (
 
 func typeSafeSuiteConfig() conformance.SuiteConfig {
 	return conformance.SuiteConfig{
+		Auth: egress.BearerPlacement,
 		ForbiddenHeaders: []string{
 			jevwire.HeaderDangerZoneImages,
 			jevwire.HeaderDangerZoneLongContext,
