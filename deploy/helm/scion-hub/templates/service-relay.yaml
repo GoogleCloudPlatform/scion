@@ -18,6 +18,12 @@ limitations under the License.
 {{- $relayTls := include "scion-hub.relayTls" . | fromYaml }}
 {{- $relayOn := eq (include "scion-hub.relayEnabled" .) "true" }}
 {{- if and $relayTls (or (eq (toString $conduitCfg.relayMode) "external") $relayOn) }}
+# Internal ClusterIP Service selecting HUB pods (app.kubernetes.io/name:
+# scion-hub) on the relay-tls port so separate relay pods reach
+# server.relay.hub_internal_url at <fullname>-relay.<namespace>.svc:9443
+# (matching the default conduit.internalTls.serverName). Relay pods themselves
+# carry app.kubernetes.io/name: scion-hub-relay and are dialed directly by pod
+# IP from relay_instances.
 apiVersion: v1
 kind: Service
 metadata:

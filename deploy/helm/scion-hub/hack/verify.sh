@@ -264,7 +264,15 @@ NO_RENDERED_SETTINGS=(existing-secret)
 #
 # 365 -> 366: grace-period gains the explicit-null arm (null deletes the key,
 # so it must fall back to 45, not int(nil) = 0). Summed, then read off a run.
-EXPECTED_TOTAL=366
+#
+# 366 -> 373 for the three Terraform hub-gke combination fixtures (ptone/scion#8425):
+#    +3  helm lint --strict across terraform-hub-gke, terraform-hub-gke-multi,
+#        and terraform-hub-gke-external
+#    +3  helm template + kubeconform -strict across the same three fixtures
+#        (7, 8, and 13 valid resources, 0 skipped)
+#    +1  relay_role rendered in Hub settings.yaml (and absent from relay
+#        settings.yaml) when relay.database.user differs from database.user
+EXPECTED_TOTAL=373
 
 failures=0
 assertions=0
@@ -2225,7 +2233,7 @@ declare -A PROBE_MUTATION=(
   [hub.topologySpreadConstraints]='--set|hub.topologySpreadConstraints[0].maxSkew=1|--set-string|hub.topologySpreadConstraints[0].topologyKey=topology.kubernetes.io/zone|--set-string|hub.topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway|--set-string|hub.topologySpreadConstraints[0].labelSelector.matchLabels.probe=one'
   [hub.pdb.enabled]='--set|hub.pdb.enabled=true'
   [hub.pdb.minAvailable]='--set|hub.pdb.enabled=true|--set|hub.pdb.minAvailable=2'
-  [hub.pdb.maxUnavailable]='--set|hub.pdb.enabled=true|--set|hub.pdb.maxUnavailable=1'
+  [hub.pdb.maxUnavailable]='--set|hub.pdb.enabled=true|--set|hub.pdb.maxUnavailable=2'
   [conduit.relayMode]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.existingPeerSecret=probe-peer|--set-string|conduit.relayMode=external'
   [conduit.peerAuth]='--set-string|conduit.peerAuth=hmac'
   [conduit.existingPeerSecret]='--set-string|conduit.existingPeerSecret=probe-peer-secret'
@@ -2266,7 +2274,7 @@ declare -A PROBE_MUTATION=(
   [relay.serviceAccount.annotations]="${_RELAY_PROBE_PRE}|--set-string|relay.serviceAccount.annotations.probeKey=probeVal"
   [relay.pdb.enabled]="${_RELAY_PROBE_PRE}|--set|relay.pdb.enabled=true"
   [relay.pdb.minAvailable]="${_RELAY_PROBE_PRE}|--set|relay.pdb.enabled=true|--set|relay.pdb.minAvailable=2"
-  [relay.pdb.maxUnavailable]="${_RELAY_PROBE_PRE}|--set|relay.pdb.enabled=true|--set|relay.pdb.maxUnavailable=1"
+  [relay.pdb.maxUnavailable]="${_RELAY_PROBE_PRE}|--set|relay.pdb.enabled=true|--set|relay.pdb.maxUnavailable=2"
   [relay.database.auth]="${_RELAY_PROBE_PRE}|--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|relay.database.user=probe-relay-user|--set-string|relay.database.password=probe-relay-pw|--set-string|relay.database.auth=password"
   [relay.database.user]="${_RELAY_PROBE_PRE}|--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|relay.database.user=probe-relay-user"
   [relay.database.password]="${_RELAY_PROBE_PRE}|--set-string|database.driver=postgres|--set-string|database.auth=password|--set-string|database.name=probe-db|--set-string|database.user=probe-user|--set-string|database.password=probe-pw|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|relay.database.password=probe-relay-pw"
@@ -3624,7 +3632,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=44   # 44, less the gate-parity step's sites (removed with acknowledgeHAUnlanded), plus the four in its replacement, plus the two in the config.existingSecret + K_SERVICE NOTES rows (= 43), plus grace_default_line in the grace-period null arm (|| true fallback) = 44.
+PIPE_SITES_EXPECTED=45   # 44, plus tfkc in the terraform hub-gke combination fixtures step (|| true fallback) = 45.
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else
@@ -5160,6 +5168,48 @@ else
   fail "the banned-path sweeps exited $(tr '\n' ',' <"$_sweep_rc") over $_rc_n invocations (expected exactly 2, each 0 or 1). A status of 2 or more is grep failing, and an empty result from a failed grep is not an absence."
 fi
 rm -f "$_sweep_err" "$_sweep_rc" "$_sweep_out" "$_git_err"
+
+# --------------------------------------------------------------------------
+step "terraform hub-gke combination fixtures (single, multi in_process, external relay)"
+# --------------------------------------------------------------------------
+declare -A TF_COMBO_DOCS=(
+  [terraform-hub-gke]=7
+  [terraform-hub-gke-multi]=8
+  [terraform-hub-gke-external]=13
+)
+for tfname in terraform-hub-gke terraform-hub-gke-multi terraform-hub-gke-external; do
+  if "$HELM" lint --strict "$CHART_DIR" --values "$CHART_DIR/ci/values-$tfname.yaml" >/dev/null 2>&1; then
+    pass "lint --strict $tfname"
+  else
+    fail "lint --strict $tfname"
+    "$HELM" lint --strict "$CHART_DIR" --values "$CHART_DIR/ci/values-$tfname.yaml" || true
+  fi
+  if "$HELM" template tfha-gke-h3 "$CHART_DIR" --namespace tfha-gke-h3-system \
+    --values "$CHART_DIR/ci/values-$tfname.yaml" >"$WORK/$tfname.yaml" 2>"$WORK/$tfname.err"; then
+    tfkc="$("$KUBECONFORM" "${KC_FLAGS[@]}" -strict -summary <"$WORK/$tfname.yaml" 2>&1 || true)"
+    tfwant="Valid: ${TF_COMBO_DOCS[$tfname]}, Invalid: 0, Errors: 0, Skipped: 0"
+    if grep -qF "failed downloading schema" <<<"$tfkc"; then
+      meta_failure "kubeconform could not retrieve a schema while validating $tfname: $tfkc"
+    elif grep -qF "$tfwant" <<<"$tfkc"; then
+      pass "template + kubeconform $tfname validated ${TF_COMBO_DOCS[$tfname]} documents, none skipped"
+    else
+      fail "kubeconform $tfname: wanted '$tfwant', got '$tfkc'"
+    fi
+  else
+    fail "template $tfname: $(head -3 "$WORK/$tfname.err" | tr '\n' ' ')"
+  fi
+done
+_tf_ext_hub_sec="$("$HELM" template tfha-gke-h3 "$CHART_DIR" --namespace tfha-gke-h3-system \
+  --values "$CHART_DIR/ci/values-terraform-hub-gke-external.yaml" -s templates/secret-settings.yaml 2>&1)"
+_tf_ext_rel_sec="$("$HELM" template tfha-gke-h3 "$CHART_DIR" --namespace tfha-gke-h3-system \
+  --values "$CHART_DIR/ci/values-terraform-hub-gke-external.yaml" -s templates/relay-secret-settings.yaml 2>&1)"
+if grep -qE '^[[:space:]]+relay_role: tfha-gke-h3-relay$' <<<"$_tf_ext_hub_sec" \
+  && ! grep -qF 'relay_role:' <<<"$_tf_ext_rel_sec"; then
+  pass "terraform-hub-gke-external renders server.database.relay_role in Hub settings.yaml only"
+else
+  fail "terraform-hub-gke-external missing server.database.relay_role in Hub settings.yaml (or leaked to relay settings)"
+fi
+unset _tf_ext_hub_sec _tf_ext_rel_sec
 
 # --------------------------------------------------------------------------
 printf '\n'

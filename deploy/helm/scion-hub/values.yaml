@@ -287,7 +287,9 @@ hub:
   # Optional PodDisruptionBudget for the hub Deployment (policy/v1).
   # Set either minAvailable or maxUnavailable (an integer >= 0 or a percentage
   # string such as "50%"); when both are empty and enabled is true, the chart
-  # renders minAvailable: 1. Setting both fails the render.
+  # renders maxUnavailable: 1 (so a single-replica release never deadlocks
+  # voluntary node drains, while >= 2 replicas keep N-1 pods available). Setting
+  # both fails the render.
   pdb:
     enabled: false
     minAvailable: ""
@@ -822,10 +824,10 @@ conduit:
   relayMode: in_process
 
   # Relay-peer authentication mode rendered as server.hub.conduit.peer_auth:
-  # auto (the default; renders nothing and lets the binary choose), hmac, or
-  # oidc. Under proxy ingress (the default on GKE), external relay mode
-  # requires peerAuth: hmac so proxied WebSocket upgrades preserve the
-  # client's Authorization header.
+  # auto (the default: renders nothing under in_process, and resolves to hmac
+  # under external so proxy ingress preserves the client's Authorization
+  # header), hmac, or oidc (refused under external while proxy ingress is in
+  # effect).
   peerAuth: auto
 
   # PREFERRED for external relay mode. Name of a Secret you create holding the
@@ -1309,6 +1311,8 @@ relay:
     gcpServiceAccount: ""
     annotations: {}
 
+  # Optional PodDisruptionBudget for the relay Deployment; defaults to
+  # maxUnavailable: 1 when enabled with neither budget set.
   pdb:
     enabled: false
     minAvailable: ""
@@ -1318,6 +1322,9 @@ relay:
   # Empty auth/user/password inherit database.auth / database.user /
   # database.password (or derive the IAM role from
   # relay.serviceAccount.gcpServiceAccount when effective auth is iam).
+  # When the effective relay database user differs from the hub's database
+  # user, the chart also renders server.database.relay_role on the hub so
+  # schema migration grants that role least-privilege PostgreSQL permissions.
   database:
     auth: ""
     user: ""

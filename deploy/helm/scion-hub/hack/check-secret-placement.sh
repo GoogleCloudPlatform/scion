@@ -97,8 +97,10 @@ declare -A EXPECTED_NEEDLES=(
   [session-existing]=0   # bring-your-own session Secret; nothing rendered
   [settings]=1           # session secret; settings.yaml carries no credential
   [settings-oauth]=2     # session secret + the OAuth web client_secret
-  [terraform-hub-gke]=1  # database.password, from the settings Secret's database url (session Secret is Terraform's)
-  [varied]=1             # session secret
+  [terraform-hub-gke]=1          # database.password, from the settings Secret's database url (session Secret is Terraform's)
+  [terraform-hub-gke-external]=2 # database.password (hub settings Secret) + relay.database.password (relay settings Secret)
+  [terraform-hub-gke-multi]=1    # database.password, from the settings Secret's database url
+  [varied]=1                     # session secret
 )
 
 # ---------------------------------------------------------------------------

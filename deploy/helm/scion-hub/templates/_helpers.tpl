@@ -3388,6 +3388,15 @@ HA preflight as configured.
 */}}
 {{- if eq $driver "postgres" }}
 {{- $database = set $database "url" (include "scion-hub.databaseUrl" .) }}
+{{- $conduitForDb := include "scion-hub.conduitConfig" . | fromYaml }}
+{{- $relayOnForDb := eq (include "scion-hub.relayEnabled" .) "true" }}
+{{- if or (eq (toString $conduitForDb.relayMode) "external") $relayOnForDb }}
+{{- $hubDbUser := include "scion-hub.databaseUser" . }}
+{{- $relayDbUser := include "scion-hub.relayDatabaseUser" . }}
+{{- if and $relayDbUser (ne $relayDbUser $hubDbUser) }}
+{{- $database = set $database "relay_role" $relayDbUser }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 {{- /* server.storage: the HUB'S BLOB STORE. Not the Filestore workspace share. */}}
@@ -4955,7 +4964,7 @@ minAvailable: {{ int $minRaw }}
 minAvailable: {{ $minRaw | quote }}
 {{- end }}
 {{- else }}
-minAvailable: 1
+maxUnavailable: 1
 {{- end }}
 {{- end }}
 {{- end }}
@@ -4992,6 +5001,16 @@ Called unconditionally from templates/deployment.yaml as well as settings.
 {{- $peerAuth := trim (toString ($c.peerAuth | default "auto")) }}
 {{- if not (has $peerAuth (list "auto" "hmac" "oidc")) }}
 {{- fail (printf "conduit.peerAuth is %s; it must be \"auto\", \"hmac\" or \"oidc\"." (include "scion-hub.diagValue" $peerAuth)) }}
+{{- end }}
+{{- if and (eq $relayMode "external") (not .Values.config.existingSecret) }}
+{{- if eq $peerAuth "auto" }}
+{{- $peerAuth = "hmac" }}
+{{- else if eq $peerAuth "oidc" }}
+{{- $extraIngress := trim (toString (dig "server" "hub" "conduit" "ingress" "proxy" (.Values.config.extra | default (dict)))) }}
+{{- if eq $extraIngress "proxy" }}
+{{- fail "conduit.relayMode is external and conduit.peerAuth is \"oidc\", which leaves the hub's proxy ingress disabled at startup (cause ingress_requires_hmac). Set conduit.peerAuth: \"hmac\" (or leave it at \"auto\", which resolves to \"hmac\" in external mode)." }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- $rawPeerSecret := toString ($c.peerSecret | default "") }}
 {{- $normPeerSecret := trimSuffix "\n" $rawPeerSecret }}
@@ -5042,10 +5061,17 @@ Called unconditionally from templates/deployment.yaml as well as settings.
 {{- end }}
 
 {{/*
-Name of the internal ClusterIP Service exposing Hub's relay-tls port (9443) so
-separate relay pods can reach server.relay.hub_internal_url. Matches the
-default conduit.internalTls.serverName (<fullname>-relay.<namespace>.svc) for
-every release whose fullname <= 57 chars.
+Name of the internal ClusterIP Service exposing the Hub pods' relay-tls port
+(9443) so separate relay pods can reach server.relay.hub_internal_url.
+NOTE: Service/<fullname>-relay selects HUB pods (scion-hub.selectorLabels), NOT
+relay pods — that name is fixed by the pre-existing default
+conduit.internalTls.serverName (<fullname>-relay.<namespace>.svc) for every
+release whose fullname <= 57 chars. Separate relay workload objects
+(Deployment/<fullname>-relay, PodDisruptionBudget/<fullname>-relay) share the
+base name in their own API groups/kinds, carry distinct selector labels
+(scion-hub.relaySelectorLabels: app.kubernetes.io/name = scion-hub-relay), and
+have no Service in front of them (Hubs dial relay pods directly by pod IP from
+relay_instances).
 */}}
 {{- define "scion-hub.relayServiceName" -}}
 {{- $base := include "scion-hub.fullname" . }}
@@ -5058,7 +5084,13 @@ every release whose fullname <= 57 chars.
 {{- end -}}
 {{- end }}
 
-{{/* Base resource name for separate Conduit Relay objects. */}}
+{{/*
+Base resource name for separate Conduit Relay workload objects (Deployment,
+PodDisruptionBudget, ServiceAccount, and the -settings Secret suffix). Shares
+the <fullname>-relay stem with Service/<fullname>-relay across distinct resource
+kinds; relay workloads always select scion-hub.relaySelectorLabels, never Hub
+pods.
+*/}}
 {{- define "scion-hub.relayFullname" -}}
 {{- include "scion-hub.relayServiceName" . -}}
 {{- end }}
