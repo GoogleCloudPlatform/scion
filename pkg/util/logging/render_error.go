@@ -16,14 +16,31 @@ package logging
 
 import (
 	"context"
+	"encoding"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
+	"reflect"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
+
+var (
+	timeType          = reflect.TypeFor[time.Time]()
+	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
+	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
+)
+
+type visitKey struct {
+	ptr uintptr
+	typ reflect.Type
+}
 
 // sanitizedErrorText is the one way a log sink renders an error-valued
 // attribute: the error's text through SanitizeText. fmt.Sprint guards an
@@ -32,13 +49,33 @@ func sanitizedErrorText(err error) string {
 	return SanitizeText(fmt.Sprint(err))
 }
 
+// validCloudTime reports whether t encodes cleanly as strict RFC 3339 (matching
+// encoding/json's Time.MarshalJSON check on year [0, 9999] and zone offset).
+func validCloudTime(t time.Time) bool {
+	_, err := t.MarshalText()
+	return err == nil
+}
+
 // cloudAttrValue returns the Cloud Logging payload value for v, a resolved
-// value that is not a group: an error as its sanitized text, any other
-// value that does not encode as JSON as its sanitized string form, and
-// everything else unchanged.
+// value that is not a group: an error as its sanitized text, any value (or
+// nested element) that encoding/json rejects replaced with a string while
+// keeping surrounding composite values intact, and valid values unchanged.
 func cloudAttrValue(v slog.Value) any {
-	if v.Kind() != slog.KindAny {
+	switch v.Kind() {
+	case slog.KindString, slog.KindInt64, slog.KindUint64, slog.KindBool, slog.KindDuration:
 		return v.Any()
+	case slog.KindFloat64:
+		f := v.Float64()
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return strconv.FormatFloat(f, 'g', -1, 64)
+		}
+		return f
+	case slog.KindTime:
+		t := v.Time()
+		if !validCloudTime(t) {
+			return SanitizeText(t.Round(0).String())
+		}
+		return t
 	}
 	a := v.Any()
 	if a == nil {
@@ -48,13 +85,289 @@ func cloudAttrValue(v slog.Value) any {
 		return sanitizedErrorText(err)
 	}
 	switch a.(type) {
-	case string, bool, []string, map[string]string:
+	case string, bool, []string, map[string]string,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64, uintptr:
 		return a // always encodes; skip the trial encoding below
 	}
-	if _, err := json.Marshal(a); err != nil {
-		return SanitizeText(fmt.Sprint(a))
+	if validCloudPayloadValue(a) {
+		return a
 	}
-	return a
+	repaired := sanitizeCloudReflect(reflect.ValueOf(a), make(map[visitKey]bool))
+	if _, err := tryJSONMarshal(repaired); err != nil {
+		return SanitizeText(fmt.Sprintf("!ERROR:%v", err))
+	}
+	return repaired
+}
+
+func tryJSONMarshal(v any) (raw []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return json.Marshal(v)
+}
+
+func tryMarshalText(tm encoding.TextMarshaler) (raw []byte, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return tm.MarshalText()
+}
+
+func validCloudPayloadValue(a any) bool {
+	_, err := tryJSONMarshal(a)
+	return err == nil
+}
+
+// sanitizeCloudReflect clones only the composite path leading to unencodable
+// values, leaving valid subtrees untouched and omitting unexported and
+// json:"-" struct fields. It runs only after validCloudPayloadValue failed on
+// the outer attribute, and re-tests each subtree with validCloudPayloadValue
+// (O(n*depth) on already-broken values) so valid siblings and cycles hidden
+// behind custom marshalers pass through without descent.
+func sanitizeCloudReflect(rv reflect.Value, visiting map[visitKey]bool) any {
+	for rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			return nil
+		}
+		rv = rv.Elem()
+	}
+	if !rv.IsValid() {
+		return nil
+	}
+	if rv.Type() == timeType && rv.CanInterface() {
+		t := rv.Interface().(time.Time)
+		if !validCloudTime(t) {
+			return SanitizeText(t.Round(0).String())
+		}
+		return t
+	}
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
+		return nil
+	}
+	if rv.Kind() != reflect.Pointer && rv.CanAddr() && rv.CanInterface() {
+		pt := reflect.PointerTo(rv.Type())
+		if pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType) {
+			pv := rv.Addr().Interface()
+			if validCloudPayloadValue(pv) {
+				return pv
+			}
+			if errVal, ok := pv.(error); ok {
+				return sanitizedErrorText(errVal)
+			}
+			_, err := tryJSONMarshal(pv)
+			return SanitizeText(fmt.Sprintf("!ERROR:%v", err))
+		}
+	}
+	if rv.CanInterface() && validCloudPayloadValue(rv.Interface()) {
+		return rv.Interface()
+	}
+	if rv.Type().Implements(jsonMarshalerType) || rv.Type().Implements(textMarshalerType) {
+		if rv.CanInterface() {
+			v := rv.Interface()
+			if errVal, ok := v.(error); ok {
+				return sanitizedErrorText(errVal)
+			}
+			_, err := tryJSONMarshal(v)
+			return SanitizeText(fmt.Sprintf("!ERROR:%v", err))
+		}
+	}
+
+	switch rv.Kind() {
+	case reflect.Pointer:
+		vk := visitKey{ptr: rv.Pointer(), typ: rv.Type()}
+		if visiting[vk] {
+			return "<cycle>"
+		}
+		visiting[vk] = true
+		defer delete(visiting, vk)
+		return sanitizeCloudReflect(rv.Elem(), visiting)
+	case reflect.Float32, reflect.Float64:
+		f := rv.Float()
+		bits := 64
+		if rv.Kind() == reflect.Float32 {
+			bits = 32
+		}
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return strconv.FormatFloat(f, 'g', -1, bits)
+		}
+		return f
+	case reflect.Bool:
+		return rv.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return rv.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return rv.Uint()
+	case reflect.String:
+		return rv.String()
+	case reflect.Slice:
+		if rv.IsNil() {
+			return nil
+		}
+		if rv.Len() > 0 {
+			vk := visitKey{ptr: rv.Pointer(), typ: rv.Type()}
+			if visiting[vk] {
+				return "<cycle>"
+			}
+			visiting[vk] = true
+			defer delete(visiting, vk)
+		}
+		out := make([]any, rv.Len())
+		for i := range rv.Len() {
+			out[i] = sanitizeCloudReflect(rv.Index(i), visiting)
+		}
+		return out
+	case reflect.Array:
+		out := make([]any, rv.Len())
+		for i := range rv.Len() {
+			out[i] = sanitizeCloudReflect(rv.Index(i), visiting)
+		}
+		return out
+	case reflect.Map:
+		if rv.IsNil() {
+			return nil
+		}
+		vk := visitKey{ptr: rv.Pointer(), typ: rv.Type()}
+		if visiting[vk] {
+			return "<cycle>"
+		}
+		visiting[vk] = true
+		defer delete(visiting, vk)
+		out := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			out[formatCloudMapKey(iter.Key())] = sanitizeCloudReflect(iter.Value(), visiting)
+		}
+		return out
+	case reflect.Struct:
+		out := make(map[string]any)
+		sanitizeCloudStructFields(rv, out, visiting, false)
+		return out
+	default:
+		if rv.CanInterface() {
+			return SanitizeText(fmt.Sprint(rv.Interface()))
+		}
+		return "<" + rv.Type().String() + ">"
+	}
+}
+
+func formatCloudMapKey(k reflect.Value) string {
+	for k.Kind() == reflect.Interface {
+		if k.IsNil() {
+			return ""
+		}
+		k = k.Elem()
+	}
+	switch k.Kind() {
+	case reflect.String:
+		return k.String()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(k.Int(), 10)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return strconv.FormatUint(k.Uint(), 10)
+	}
+	if k.CanInterface() {
+		if tm, ok := k.Interface().(encoding.TextMarshaler); ok {
+			if b, err := tryMarshalText(tm); err == nil {
+				return string(b)
+			}
+			if k.Type() == timeType {
+				return SanitizeText(k.Interface().(time.Time).Round(0).String())
+			}
+		}
+		if k.Kind() == reflect.Struct || (k.Kind() == reflect.Pointer && !k.IsNil() && k.Elem().Kind() == reflect.Struct) {
+			return "<" + k.Type().String() + ">"
+		}
+		return SanitizeText(fmt.Sprint(k.Interface()))
+	}
+	return "<" + k.Type().String() + ">"
+}
+
+// sanitizeCloudStructFields performs a best-effort field-by-field repair of a
+// struct that already failed json.Marshal, honoring exported visibility,
+// json:"-", explicit field names, basic omitempty, and anonymous embedding.
+func sanitizeCloudStructFields(rv reflect.Value, out map[string]any, visiting map[visitKey]bool, inlined bool) {
+	rt := rv.Type()
+	for i := range rt.NumField() {
+		sf := rt.Field(i)
+		tag := sf.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name, opts, _ := strings.Cut(tag, ",")
+		fv := rv.Field(i)
+		if sf.Anonymous && name == "" {
+			ft := sf.Type
+			if ft.Kind() == reflect.Pointer {
+				if fv.IsNil() {
+					continue
+				}
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct && ft != timeType && !ft.Implements(jsonMarshalerType) && !ft.Implements(textMarshalerType) {
+				if sf.Type.Kind() == reflect.Pointer {
+					vk := visitKey{ptr: fv.Pointer(), typ: sf.Type}
+					if visiting[vk] {
+						continue
+					}
+					visiting[vk] = true
+					sanitizeCloudStructFields(fv.Elem(), out, visiting, true)
+					delete(visiting, vk)
+				} else {
+					sanitizeCloudStructFields(fv, out, visiting, true)
+				}
+				continue
+			}
+		}
+		if !sf.IsExported() {
+			continue
+		}
+		if name == "" {
+			name = sf.Name
+		}
+		if inlined {
+			if _, exists := out[name]; exists {
+				continue
+			}
+		}
+		if hasJSONOpt(opts, "omitempty") && isEmptyJSONField(fv) {
+			continue
+		}
+		out[name] = sanitizeCloudReflect(fv, visiting)
+	}
+}
+
+func hasJSONOpt(opts, target string) bool {
+	for opts != "" {
+		var opt string
+		opt, opts, _ = strings.Cut(opts, ",")
+		if opt == target {
+			return true
+		}
+	}
+	return false
+}
+
+func isEmptyJSONField(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return v.Len() == 0
+	case reflect.Bool:
+		return !v.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Int() == 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return v.Uint() == 0
+	case reflect.Float32, reflect.Float64:
+		return v.Float() == 0
+	case reflect.Interface, reflect.Pointer:
+		return v.IsNil()
+	}
+	return false
 }
 
 // sanitizeErrorAttr is a slog.HandlerOptions.ReplaceAttr that renders an
