@@ -594,6 +594,7 @@ describe('dismissRemainingMinutes and dismissDecisionPrompt', () => {
         alreadyDismissed: [],
         responseMessageId: 'resp-d1',
         delivered: true,
+        deliveryStatus: 'delivered',
       })
     );
 
@@ -607,6 +608,7 @@ describe('dismissRemainingMinutes and dismissDecisionPrompt', () => {
       alreadyDismissed: [],
       responseMessageId: 'resp-d1',
       delivered: true,
+      deliveryStatus: 'delivered',
     });
     const [path, init] = apiFetch.mock.calls[0]!;
     expect(path).toBe('/api/v1/decision-prompts/m%201/dismiss');
@@ -654,6 +656,33 @@ describe('dismissRemainingMinutes and dismissDecisionPrompt', () => {
       code: 'dismiss_changed',
       reasons: { r1: 'decided' },
     });
+  });
+
+  it('reads deliveryStatus, and claims no delivery for a missing or unknown value', async () => {
+    const d1 = view({ status: 'dismissed' });
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        dismissed: [d1],
+        alreadyDismissed: [],
+        responseMessageId: 'resp',
+        delivered: false,
+        deliveryStatus: 'unreachable',
+      })
+    );
+    expect(await dismissDecisionPrompt('m1')).toMatchObject({ deliveryStatus: 'unreachable' });
+
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        dismissed: [d1],
+        alreadyDismissed: [],
+        delivered: true,
+        deliveryStatus: 'teleported',
+      })
+    );
+    expect(await dismissDecisionPrompt('m1')).toMatchObject({ deliveryStatus: 'failed' });
+
+    apiFetch.mockResolvedValueOnce(res(200, { dismissed: [], alreadyDismissed: [d1] }));
+    expect(await dismissDecisionPrompt('m1')).toMatchObject({ deliveryStatus: 'none' });
   });
 
   it('resolves a network failure as status 0', async () => {

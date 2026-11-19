@@ -522,6 +522,30 @@ export function dismissRemainingMinutes(createdAt: string, nowMs = Date.now()): 
   return Math.max(1, Math.ceil((availMs - nowMs) / 60000));
 }
 
+/**
+ * What happened to the asking agent's decision-response after a dismissal
+ * (`DismissDecisionPromptResponse.deliveryStatus`): `delivered`, `held` (sent
+ * at the agent's next session), `gone` (agent deleted), `unreachable`
+ * (suspended or stopped: not sent), `failed`, or `none` (nothing new was
+ * dismissed, so nothing was sent).
+ */
+export type DismissDeliveryStatus =
+  | 'delivered'
+  | 'held'
+  | 'gone'
+  | 'unreachable'
+  | 'failed'
+  | 'none';
+
+const DISMISS_DELIVERY_STATUSES: readonly string[] = [
+  'delivered',
+  'held',
+  'gone',
+  'unreachable',
+  'failed',
+  'none',
+];
+
 /** The outcome of dismissing open decisions of a prompt. */
 export type DismissDecisionPromptResult =
   | {
@@ -530,6 +554,7 @@ export type DismissDecisionPromptResult =
       alreadyDismissed: DecisionView[];
       responseMessageId: string;
       delivered: boolean;
+      deliveryStatus: DismissDeliveryStatus;
     }
   | {
       ok: false;
@@ -550,6 +575,18 @@ export type DismissDecisionPromptResult =
  */
 export function dismissDialogRows(decisions: readonly DecisionView[]): DecisionView[] {
   return decisions.filter((d) => d.status === 'pending' && !d.decision);
+}
+
+/**
+ * Normalizes the hub's deliveryStatus. An unknown or missing value claims no
+ * delivery: `none` when nothing new was dismissed, else `failed`.
+ */
+function dismissDeliveryStatus(
+  raw: string | undefined,
+  anyDismissed: boolean
+): DismissDeliveryStatus {
+  if (raw && DISMISS_DELIVERY_STATUSES.includes(raw)) return raw as DismissDeliveryStatus;
+  return anyDismissed ? 'failed' : 'none';
 }
 
 /**
@@ -596,6 +633,7 @@ export async function dismissDecisionPrompt(
       alreadyDismissed?: unknown;
       responseMessageId?: string;
       delivered?: boolean;
+      deliveryStatus?: string;
     } | null;
     const dismissed = decisionViews(ok?.dismissed);
     const alreadyDismissed = decisionViews(ok?.alreadyDismissed);
@@ -606,6 +644,7 @@ export async function dismissDecisionPrompt(
         alreadyDismissed,
         responseMessageId: ok?.responseMessageId ?? '',
         delivered: Boolean(ok?.delivered),
+        deliveryStatus: dismissDeliveryStatus(ok?.deliveryStatus, dismissed.length > 0),
       };
     }
     return { ok: false, status: res.status, code: '', message: 'Unexpected dismiss response.' };

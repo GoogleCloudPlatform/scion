@@ -81,6 +81,7 @@ import {
   MAX_DECISIONS_PAGE_SIZE,
   SEARCH_DEBOUNCE_MS,
   dateBoundToIso,
+  dismissResultToast,
   isEditableTarget,
   promptHasWaitingOnOthers,
 } from './decisions-format.js';
@@ -1632,16 +1633,40 @@ export class DecisionsPageController implements ReactiveController {
         this.dismissReasonDraft = '';
         this.dismissAskerGone = false;
         this.applyIncomingDecisionPatch(prompt.promptMessageId, updated);
-        if (!res.delivered) {
-          showToast(
-            `${prompt.askerAgentName || 'The agent'} is gone; nothing was sent.`,
-            'neutral'
-          );
-        } else {
-          const n = res.dismissed.length || res.alreadyDismissed.length;
-          showToast(n === 1 ? 'Decision dismissed.' : `Dismissed ${n} decisions.`, 'success');
-        }
+        const toast = dismissResultToast(
+          res.deliveryStatus,
+          res.dismissed.length,
+          res.alreadyDismissed.length,
+          prompt.askerAgentName
+        );
+        showToast(toast.message, toast.variant);
         this.scheduleLiveRefresh();
+        return;
+      }
+      // Explicit ids turn a too-recent row into dismiss_changed/too_recent;
+      // when that is the only reason, handle it like 409 too_recent.
+      const onlyTooRecent =
+        res.code === 'dismiss_changed' &&
+        !!res.reasons &&
+        Object.keys(res.reasons).length > 0 &&
+        Object.values(res.reasons).every((r) => r === 'too_recent');
+      if (res.code === 'too_recent' || onlyTooRecent) {
+        if (res.availableAt) {
+          const parsed = Date.parse(res.availableAt);
+          if (Number.isFinite(parsed)) {
+            this.dismissAvailableAtOverrides.set(prompt.promptMessageId, parsed);
+          }
+        }
+        this.dismissDialogPrompt = null;
+        this.dismissReasonDraft = '';
+        this.dismissAskerGone = false;
+        this.scheduleDismissUnlockTimer();
+        showToast(
+          onlyTooRecent
+            ? 'Decisions must be at least 5 minutes old before they can be dismissed.'
+            : res.message,
+          'warning'
+        );
         return;
       }
       if (res.code === 'dismiss_changed') {
@@ -1653,20 +1678,6 @@ export class DecisionsPageController implements ReactiveController {
         }
         showToast('Nothing dismissed: this card changed.', 'warning');
         this.scheduleLiveRefresh();
-        return;
-      }
-      if (res.code === 'too_recent') {
-        if (res.availableAt) {
-          const parsed = Date.parse(res.availableAt);
-          if (Number.isFinite(parsed)) {
-            this.dismissAvailableAtOverrides.set(prompt.promptMessageId, parsed);
-          }
-        }
-        this.dismissDialogPrompt = null;
-        this.dismissReasonDraft = '';
-        this.dismissAskerGone = false;
-        this.scheduleDismissUnlockTimer();
-        showToast(res.message, 'warning');
         return;
       }
       showToast(res.message, 'danger');

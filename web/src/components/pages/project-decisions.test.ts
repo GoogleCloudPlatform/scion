@@ -2635,6 +2635,7 @@ describe('<scion-page-project-decisions>', () => {
           alreadyDismissed: [],
           responseMessageId: 'resp-dsm',
           delivered: true,
+          deliveryStatus: 'delivered',
         });
       }
       return jsonResponse({}, 404);
@@ -2747,6 +2748,7 @@ describe('<scion-page-project-decisions>', () => {
           alreadyDismissed: [],
           responseMessageId: 'resp-mixed',
           delivered: true,
+          deliveryStatus: 'delivered',
         });
       }
       return jsonResponse({}, 404);
@@ -2818,6 +2820,117 @@ describe('<scion-page-project-decisions>', () => {
     expect(showToast).toHaveBeenCalledWith('Nothing dismissed: this card changed.', 'warning');
   });
 
+  it('treats a dismiss_changed whose only reason is too_recent like too_recent: re-arms the unlock (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const d1 = makeDecision({ rowId: 'r-1', messageId: 'm-skew' });
+    const prompt = makePrompt({
+      promptMessageId: 'm-skew',
+      createdAt: '2026-11-13T10:00:00Z',
+      decisions: [d1],
+    });
+    const availableAt = new Date(Date.now() + 3 * 60_000 - 1_000).toISOString();
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [prompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ id: 'a-rel', name: 'release-bot' });
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-skew/dismiss') {
+        return jsonResponse(
+          {
+            error: {
+              code: 'dismiss_changed',
+              message: 'the decisions to dismiss changed; refresh and try again',
+              details: { reasons: { 'r-1': 'too_recent' }, availableAt },
+            },
+          },
+          409
+        );
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-skew"]')!.click();
+    await settle(el, 20);
+    root
+      .querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]')!
+      .click();
+    await settle(el, 90);
+
+    expect(root.querySelector('sl-dialog[data-dismiss-dialog]')).toBeNull();
+    expect(showToast).toHaveBeenCalledWith(
+      'Decisions must be at least 5 minutes old before they can be dismissed.',
+      'warning'
+    );
+    expect(showToast).not.toHaveBeenCalledWith('Nothing dismissed: this card changed.', 'warning');
+    const btn = root.querySelector<HTMLElement>('[data-dismiss-prompt="m-skew"]')!;
+    expect(btn.hasAttribute('disabled')).toBe(true);
+    expect(root.querySelector<HTMLElement>('[data-dismiss-tooltip]')?.getAttribute('content')).toBe(
+      'Dismiss available in 3 min'
+    );
+  });
+
+  it('tells the user a suspended asker was not told, not that it is gone (ptone/scion#8213)', async () => {
+    enableDecisionsFlag();
+    const d1 = makeDecision({ rowId: 'r-1', messageId: 'm-susp' });
+    const prompt = makePrompt({
+      promptMessageId: 'm-susp',
+      createdAt: '2026-11-13T10:00:00Z',
+      decisions: [d1],
+    });
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [prompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+      {
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    agentHandler = () => jsonResponse({ id: 'a-rel', name: 'release-bot', phase: 'suspended' });
+    answerResponseFn = (url) => {
+      if (url.pathname === '/api/v1/decision-prompts/m-susp/dismiss') {
+        return jsonResponse({
+          dismissed: [{ ...d1, status: 'dismissed' }],
+          alreadyDismissed: [],
+          responseMessageId: 'resp-susp',
+          delivered: false,
+          deliveryStatus: 'unreachable',
+        });
+      }
+      return jsonResponse({}, 404);
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    root.querySelector<HTMLElement>('[data-dismiss-prompt="m-susp"]')!.click();
+    await settle(el, 20);
+    root
+      .querySelector<HTMLElement>('sl-dialog[data-dismiss-dialog] [data-dismiss-confirm]')!
+      .click();
+    await settle(el, 90);
+
+    expect(showToast).toHaveBeenCalledWith(
+      'release-bot is suspended or stopped; it was not told.',
+      'warning'
+    );
+    expect(showToast).not.toHaveBeenCalledWith('release-bot is gone; nothing was sent.', 'neutral');
+  });
+
   it('shows gone-agent notice in the dismiss dialog when the asking agent returns 404 (ptone/scion#8213)', async () => {
     enableDecisionsFlag();
     const d1 = makeDecision({
@@ -2872,6 +2985,7 @@ describe('<scion-page-project-decisions>', () => {
           alreadyDismissed: [],
           responseMessageId: 'resp-gone',
           delivered: false,
+          deliveryStatus: 'gone',
         });
       }
       return jsonResponse({}, 404);

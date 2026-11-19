@@ -27,13 +27,55 @@ import {
   actionableReason,
   isOpenDecision,
   type AskerAnswerability,
+  type DismissDeliveryStatus,
 } from '../../client/decision-prompts.js';
+import type { ToastVariant } from '../../utils/toast.js';
 import { chatConversationPath } from '../../client/chat-routes.js';
 import type {
   ProjectDecisionLogEntryView,
   ProjectDecisionPromptView,
 } from '../../client/project-decisions.js';
 import { effectiveTimeZone, formatInstant, parseWallClock } from '../../utils/time.js';
+
+/**
+ * The toast after a successful dismiss call: what was dismissed, and only a
+ * truthful claim about whether the asking agent was told (deliveryStatus).
+ */
+export function dismissResultToast(
+  deliveryStatus: DismissDeliveryStatus,
+  dismissedCount: number,
+  alreadyDismissedCount: number,
+  askerName: string
+): { message: string; variant: ToastVariant } {
+  const name = askerName || 'The agent';
+  const midName = askerName || 'the agent';
+  const done =
+    dismissedCount === 1 ? 'Decision dismissed.' : `Dismissed ${dismissedCount} decisions.`;
+  switch (deliveryStatus) {
+    case 'none':
+      return {
+        message:
+          alreadyDismissedCount === 1
+            ? 'Already dismissed.'
+            : `${alreadyDismissedCount} decisions were already dismissed.`,
+        variant: 'neutral',
+      };
+    case 'delivered':
+      return { message: done, variant: 'success' };
+    case 'held':
+      return {
+        message: `${done} ${midName} will be told when it can receive messages.`,
+        variant: 'success',
+      };
+    case 'gone':
+      return { message: `${name} is gone; nothing was sent.`, variant: 'neutral' };
+    case 'unreachable':
+      return { message: `${name} is suspended or stopped; it was not told.`, variant: 'warning' };
+    case 'failed':
+    default:
+      return { message: `${done} Could not confirm that ${midName} was told.`, variant: 'warning' };
+  }
+}
 
 export interface WaitingOnOthersItem {
   prompt: ProjectDecisionPromptView;
