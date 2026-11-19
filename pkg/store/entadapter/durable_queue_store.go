@@ -38,6 +38,8 @@ import (
 
 var _ store.DurableQueueStore = (*CompositeStore)(nil)
 var _ store.DurableQueueStore = (*DurableQueueStore)(nil)
+var _ store.DurableQueuePendingCounter = (*CompositeStore)(nil)
+var _ store.DurableQueuePendingCounter = (*DurableQueueStore)(nil)
 
 // durableQueueDeleteBatch bounds the IN lists of durable queue queries and
 // mutations (such as trim deletes and nudge updates).
@@ -675,27 +677,41 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 	return dropped, more, nil
 }
 
-// DurableQueueStats implements store.DurableQueueStore.
-func (s *DurableQueueStore) DurableQueueStats(ctx context.Context, kind, projectID string, now time.Time) (store.DurableQueueStats, error) {
+// CountDurableQueuePending implements store.DurableQueuePendingCounter with a
+// single COUNT query over durable_queue_items.
+func (s *DurableQueueStore) CountDurableQueuePending(ctx context.Context, kind, projectID string) (int64, error) {
 	if err := store.ValidateDurableQueueKind(kind); err != nil {
-		return store.DurableQueueStats{}, err
+		return 0, err
 	}
-	now = now.UTC()
 	preds := []predicate.DurableQueueItem{durablequeueitem.KindEQ(kind)}
 	if projectID != "" {
 		preds = append(preds, durablequeueitem.ProjectIDEQ(projectID))
 	}
-
-	var st store.DurableQueueStats
 	n, err := s.client.DurableQueueItem.Query().
 		Where(preds...).
 		Count(ctx)
 	if err != nil {
-		return st, mapError(err)
+		return 0, mapError(err)
 	}
-	st.Pending = int64(n)
-	if n == 0 {
+	return int64(n), nil
+}
+
+// DurableQueueStats implements store.DurableQueueStore.
+func (s *DurableQueueStore) DurableQueueStats(ctx context.Context, kind, projectID string, now time.Time) (store.DurableQueueStats, error) {
+	pending, err := s.CountDurableQueuePending(ctx, kind, projectID)
+	if err != nil {
+		return store.DurableQueueStats{}, err
+	}
+	var st store.DurableQueueStats
+	st.Pending = pending
+	if pending == 0 {
 		return st, nil
+	}
+
+	now = now.UTC()
+	preds := []predicate.DurableQueueItem{durablequeueitem.KindEQ(kind)}
+	if projectID != "" {
+		preds = append(preds, durablequeueitem.ProjectIDEQ(projectID))
 	}
 
 	leasedPreds := append(slices.Clone(preds),

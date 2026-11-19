@@ -17,6 +17,9 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/spf13/cobra"
@@ -763,4 +767,30 @@ func TestTriggerCLI_NilListResponseGuard(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "empty response from hub")
 	})
+}
+
+func TestTriggerWebhookCreateHelp_SenderContractAndLimits(t *testing.T) {
+	helpText := triggerWebhookCreateCmd.Long
+	assert.Contains(t, helpText, "anyone with read access to this project's triggers can read bodies sent here")
+	assert.Contains(t, helpText, "at most 64 KiB (HTTP 413 above")
+	assert.Contains(t, helpText, `openssl dgst -sha256 -hmac "$SECRET"`)
+	assert.Contains(t, helpText, `printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl`)
+	assert.NotContains(t, helpText, `SIGNED="$(`, "help example must pipe directly into openssl so command substitution never strips trailing newlines from BODY")
+
+	// Prove the documented canonical string + ASCII secret HMAC formula passes
+	// VerifyScionV1Signature, including when BODY ends with a trailing newline.
+	now := time.Date(2026, 11, 16, 19, 30, 0, 0, time.UTC)
+	ts := strconv.FormatInt(now.Unix(), 10)
+	secret := "dGVzdC1zZWNyZXQtYmFzZTY0dXJsLWFzY2lpLWtleQ"
+	delivery := "550e8400-e29b-41d4-a716-446655440000"
+	event := "deploy.finished"
+	subject := "service/api"
+	body := []byte("{\"status\":\"ok\",\"commit\":\"abc1234\"}\n")
+
+	canonical := fmt.Sprintf("v1\n%s\n%s\n%s\n%s\n%s", ts, delivery, event, subject, string(body))
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(canonical))
+	sigHeader := fmt.Sprintf("t=%s,v1=%s", ts, hex.EncodeToString(mac.Sum(nil)))
+
+	assert.True(t, trigger.VerifyScionV1Signature(secret, now, sigHeader, delivery, event, subject, body))
 }

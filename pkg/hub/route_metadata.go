@@ -1624,10 +1624,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Webhook: GitHub webhook
+	// Webhook: GitHub webhook & generic trigger webhook ingress
 	// -------------------------------------------------------------------------
 	"/api/v1/webhooks/github": {
 		Pattern: "/api/v1/webhooks/github", RouteID: "webhooks.github",
+		Classification: RouteWebhook,
+	},
+	"/api/v1/hooks/{id}": {
+		Pattern: "/api/v1/hooks/{id}", RouteID: "hooks.receive",
 		Classification: RouteWebhook,
 	},
 }

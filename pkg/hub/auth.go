@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authctx"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -1099,6 +1100,11 @@ func isUnauthenticatedEndpoint(path string) bool {
 	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (four bools and the issuer audience)
 		return true
 	case "/api/v1/csp-reports": // Browser policy reports for the web pages (no sign-in; browsers send reports on their own)
+		return true
+	}
+	// Generic signed webhook ingress: exact ^/api/v1/hooks/[0-9a-f-]{36}$ match
+	// only (never prefix), so subpaths like /api/v1/hooks/x/y still require auth.
+	if trigger.IsHooksRequestPath(path) {
 		return true
 	}
 	return false

@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -94,6 +96,43 @@ func (s *Server) webhookSecretCipher() *secret.ValueCipher {
 // ValueCipher; a nil cipher fails closed with secret.ErrCipherNotConfigured.
 func (s *Server) sealWebhookEndpointSecret(plaintext string) (string, error) {
 	return s.webhookSecretCipher().Encrypt(plaintext)
+}
+
+// unsealWebhookEndpointSecret decrypts a stored webhook endpoint secret row
+// with the Hub's shared ValueCipher; a nil cipher fails closed.
+func (s *Server) unsealWebhookEndpointSecret(encrypted string) (string, error) {
+	return s.webhookSecretCipher().Decrypt(encrypted)
+}
+
+// errWebhookSecretTypeMismatch is returned when a secret row under the
+// webhook_endpoint.* key namespace does not carry SecretTypeInternal
+// (1b1-rev-2 O3). Ingress fails closed (503) rather than using a non-internal
+// secret row for HMAC verification.
+var errWebhookSecretTypeMismatch = errors.New("webhook endpoint secret row is not SecretTypeInternal")
+
+// loadWebhookEndpointSecret loads and unseals the hub-scoped SecretTypeInternal
+// signing secret row for (projectID, endpointID, version) in a single GetSecret
+// query (§4.1, §8.1 step 6).
+func (s *Server) loadWebhookEndpointSecret(ctx context.Context, projectID, endpointID string, version int) (string, error) {
+	if s == nil || s.store == nil {
+		return "", errors.New("hub store is not configured")
+	}
+	key := store.WebhookEndpointSecretKey(projectID, endpointID, version)
+	meta, err := s.store.GetSecret(ctx, key, store.ScopeHub, s.HubID())
+	if err != nil {
+		return "", err
+	}
+	if meta == nil || meta.SecretType != store.SecretTypeInternal {
+		gotType := ""
+		if meta != nil {
+			gotType = meta.SecretType
+		}
+		return "", fmt.Errorf("%w: got %q", errWebhookSecretTypeMismatch, gotType)
+	}
+	if meta.EncryptedValue == "" {
+		return "", errors.New("webhook endpoint secret row has empty value")
+	}
+	return s.unsealWebhookEndpointSecret(meta.EncryptedValue)
 }
 
 // newWebhookEndpointSecretRow constructs the hub-scoped SecretTypeInternal row
