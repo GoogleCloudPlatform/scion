@@ -74,6 +74,7 @@ type ProjectGitHubTriggerRoutingView struct {
 	PrimaryProject *ProjectGitHubTriggerPrimaryRef `json:"primary_project"`
 	IsPrimary      bool                            `json:"is_primary"`
 	OtherProjects  []string                        `json:"other_projects"`
+	Status         string                          `json:"status,omitempty"`
 }
 
 // ProjectGitHubTriggerSettingsResponse is the response payload for
@@ -428,6 +429,7 @@ func (s *Server) projectGitHubTriggerRoutingView(
 		PrimaryProject: activePrimary,
 		IsPrimary:      activePrimary != nil && activePrimary.ID == project.ID,
 		OtherProjects:  otherProjects,
+		Status:         status,
 	}
 	var warnings []string
 	if len(otherProjects) > 0 && activePrimary == nil {

@@ -650,6 +650,7 @@ func TestProjectGitHubTriggerSettings_ReadinessAndRepoRoutingWarning(t *testing.
 	assert.Equal(t, "scion-triggers-bot", respA.Readiness.AppSlug)
 	assert.Nil(t, respA.Routing.PrimaryProject)
 	assert.False(t, respA.Routing.IsPrimary)
+	assert.Equal(t, GitHubTriggerRoutingStatusNone, respA.Routing.Status)
 	assert.Equal(t, []string{"bravo", "charlie"}, respA.Routing.OtherProjects)
 	assert.Equal(t, []string{WarningGitHubTriggersMultiProjectRepo}, respA.Warnings)
 
@@ -669,6 +670,7 @@ func TestProjectGitHubTriggerSettings_ReadinessAndRepoRoutingWarning(t *testing.
 	assert.Equal(t, projA, respA.Routing.PrimaryProject.ID)
 	assert.Equal(t, "alpha", respA.Routing.PrimaryProject.Name)
 	assert.True(t, respA.Routing.IsPrimary)
+	assert.Equal(t, GitHubTriggerRoutingStatusOK, respA.Routing.Status)
 	assert.Equal(t, []string{"bravo", "charlie"}, respA.Routing.OtherProjects)
 	assert.Empty(t, respA.Warnings)
 
@@ -698,6 +700,7 @@ func TestProjectGitHubTriggerSettings_ReadinessAndRepoRoutingWarning(t *testing.
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &respB))
 	assert.Nil(t, respB.Routing.PrimaryProject)
 	assert.False(t, respB.Routing.IsPrimary)
+	assert.Equal(t, GitHubTriggerRoutingStatusStalePrimary, respB.Routing.Status)
 	assert.Equal(t, []string{"charlie"}, respB.Routing.OtherProjects)
 	assert.Equal(t, []string{WarningGitHubTriggersMultiProjectRepo}, respB.Warnings)
 }

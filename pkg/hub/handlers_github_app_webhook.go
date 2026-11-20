@@ -696,8 +696,15 @@ func (s *Server) resetPermissionDeniedProjectsForInstallation(ctx context.Contex
 
 // checkProjectsForRemovedRepos checks if any projects using the given installation
 // have lost access to their repository. removedRepos is keyed by lowercased
-// owner/repo.
+// owner/repo. For each affected project, it marks GitHubAppStatus as
+// repo_not_accessible and pauses its GitHub-sourced triggers with
+// status_reason = source_deleted (§10.3). Installation trigger_routing entries
+// are intentionally left untouched so they surface as stale_primary (§8.4).
 func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationID int64, removedRepos map[string]bool) {
+	if len(removedRepos) == 0 {
+		return
+	}
+
 	now := timeNow()
 	if err := s.forEachGitHubAppProject(ctx, func(project *store.Project) {
 		if project.GitHubInstallationID == nil || *project.GitHubInstallationID != installationID {
@@ -728,8 +735,97 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 			s.invalidateGitHubAssociation(project.ID)
 			s.events.PublishProjectUpdated(ctx, project)
 		}
+
+		s.pauseGitHubTriggersForRemovedRepo(ctx, project, installationID, ownerRepo)
 	}); err != nil {
 		slog.Error("Failed to list projects for repo removal check", "error", err)
+	}
+}
+
+// pauseGitHubTriggersForRemovedRepo pauses every active (or reason-less paused)
+// GitHub-sourced trigger in project with status_reason = source_deleted and
+// writes a mutation audit record for each paused trigger (§10.3). Triggers
+// already paused with a system reason (including source_deleted on redelivery)
+// are skipped so the operation is idempotent.
+func (s *Server) pauseGitHubTriggersForRemovedRepo(ctx context.Context, project *store.Project, installationID int64, ownerRepo string) {
+	if project == nil || project.ID == "" {
+		return
+	}
+
+	// TODO(ptone/scion#8058): release this project's GitHub trigger subject
+	// claims with release_reason = "association_lost" (§10.3) once Stage 2's
+	// trigger_subject_claims table is merged on main.
+
+	var matches []store.Trigger
+	opts := store.ListOptions{Limit: scheduleCreatorPausePageSize, SkipTotalCount: true}
+	for {
+		page, err := s.store.ListTriggers(ctx, store.TriggerFilter{
+			ProjectID:  project.ID,
+			SourceKind: store.TriggerSourceKindGitHub,
+		}, opts)
+		if err != nil {
+			slog.Warn("Failed to list GitHub triggers after repo removal",
+				"project_id", project.ID, "installation_id", installationID, "error", err)
+			return
+		}
+		for _, tr := range page.Items {
+			if tr.Status == store.TriggerStatusActive ||
+				(tr.Status == store.TriggerStatusPaused && tr.StatusReason == store.TriggerStatusReasonNone) {
+				matches = append(matches, tr)
+			}
+		}
+		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
+			break
+		}
+		opts.Cursor = page.NextCursor
+	}
+
+	lowerRepo := strings.ToLower(strings.TrimSpace(ownerRepo))
+	paused := 0
+	for i, tr := range matches {
+		if err := ctx.Err(); err != nil {
+			slog.Warn("Stopped pausing GitHub triggers after repo removal: context done",
+				"project_id", project.ID, "unpaused", len(matches)-i, "error", err)
+			break
+		}
+
+		audit := newTriggerAudit(ctx, mutationTypeTriggerPause, tr.ID)
+		afterBytes, _ := json.Marshal(map[string]any{
+			"project_id":      project.ID,
+			"trigger_id":      tr.ID,
+			"name":            tr.Name,
+			"status":          store.TriggerStatusPaused,
+			"status_reason":   store.TriggerStatusReasonSourceDeleted,
+			"installation_id": installationID,
+			"repo":            lowerRepo,
+			"cause":           "installation_repositories.removed",
+		})
+		audit.AfterSummary = string(afterBytes)
+
+		err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if pErr := s.pauseTriggerWithReason(ctx, tx, tr, store.TriggerStatusReasonSourceDeleted); pErr != nil {
+				return pErr
+			}
+			return tx.CreateMutationAudit(ctx, audit)
+		})
+		switch {
+		case err == nil:
+			paused++
+		case errors.Is(err, store.ErrRevisionConflict), errors.Is(err, store.ErrNotFound):
+			// Edited, resumed, or deleted since it was listed.
+		default:
+			slog.Warn("Failed to pause GitHub trigger after repo removal",
+				"project_id", project.ID, "trigger_id", tr.ID, "error", err)
+		}
+	}
+	if paused > 0 {
+		slog.Info("Paused GitHub triggers after repository removal from installation",
+			"project_id", project.ID,
+			"installation_id", installationID,
+			"repo", lowerRepo,
+			"paused", paused,
+			"status_reason", store.TriggerStatusReasonSourceDeleted,
+		)
 	}
 }
 
