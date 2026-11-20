@@ -968,13 +968,12 @@ func TestInternalSweepWithoutValidator(t *testing.T) {
 	}
 }
 
-// TestHealthEndpointsRemainUnauthenticated verifies that /healthz, /readyz,
-// and /metrics remain accessible without authentication even when auth is
-// configured.
+// TestHealthEndpointsRemainUnauthenticated verifies that /healthz and /readyz
+// remain accessible without authentication even when auth is configured.
 func TestHealthEndpointsRemainUnauthenticated(t *testing.T) {
 	_, ts, _ := newTestServer(t) // uses apiKey auth scheme
 
-	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
+	for _, path := range []string{"/healthz", "/readyz"} {
 		t.Run(path, func(t *testing.T) {
 			resp, err := http.Get(ts.URL + path)
 			if err != nil {
@@ -987,4 +986,335 @@ func TestHealthEndpointsRemainUnauthenticated(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMetricsEndpointRequiresAuthentication verifies that /metrics enforces
+// the configured authentication scheme: unauthenticated and invalid-credential
+// requests are refused with 401, while valid credentials succeed.
+func TestMetricsEndpointRequiresAuthentication(t *testing.T) {
+	t.Run("apiKey/unauthenticated_refused", func(t *testing.T) {
+		_, ts, _ := newTestServer(t) // uses apiKey auth scheme ("test-api-key")
+
+		resp, err := http.Get(ts.URL + "/metrics")
+		if err != nil {
+			t.Fatalf("GET /metrics: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET /metrics without auth: status = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("apiKey/invalid_key_refused", func(t *testing.T) {
+		_, ts, _ := newTestServer(t)
+
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("X-API-Key", "wrong-key")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /metrics: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET /metrics with wrong key: status = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("apiKey/valid_key_succeeds", func(t *testing.T) {
+		_, ts, _ := newTestServer(t)
+
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("X-API-Key", "test-api-key")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /metrics: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET /metrics with valid key: status = %d, want 200", resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !bytes.Contains(body, []byte("# HELP ")) {
+			t.Errorf("GET /metrics response does not look like Prometheus exposition format: %q", string(body[:min(len(body), 200)]))
+		}
+	})
+
+	t.Run("apiKey/head_requires_auth", func(t *testing.T) {
+		_, ts, _ := newTestServer(t)
+
+		req, err := http.NewRequest(http.MethodHead, ts.URL+"/metrics", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("HEAD /metrics without auth: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("HEAD /metrics without auth: status = %d, want 401", resp.StatusCode)
+		}
+
+		req2, err := http.NewRequest(http.MethodHead, ts.URL+"/metrics", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req2.Header.Set("X-API-Key", "test-api-key")
+		resp2, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			t.Fatalf("HEAD /metrics with valid key: %v", err)
+		}
+		_ = resp2.Body.Close()
+		if resp2.StatusCode != http.StatusOK {
+			t.Errorf("HEAD /metrics with valid key: status = %d, want 200", resp2.StatusCode)
+		}
+	})
+
+	t.Run("bearer/unauthenticated_refused_and_valid_succeeds", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+		if err != nil {
+			t.Fatalf("state.New: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+
+		cfg := &Config{
+			Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+			Auth:   AuthConfig{Scheme: "bearer", APIKey: "scrape-token"},
+		}
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		b := New(store, nil, nil, cfg, nil, log)
+		srv := NewServer(b, cfg, nil, log, testHandler())
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(ts.Close)
+
+		resp, err := http.Get(ts.URL + "/metrics")
+		if err != nil {
+			t.Fatalf("GET /metrics without auth: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET /metrics without auth: status = %d, want 401", resp.StatusCode)
+		}
+
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer scrape-token")
+
+		resp2, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /metrics with bearer: %v", err)
+		}
+		defer func() { _ = resp2.Body.Close() }()
+		if resp2.StatusCode != http.StatusOK {
+			t.Errorf("GET /metrics with valid bearer: status = %d, want 200", resp2.StatusCode)
+		}
+		body, err := io.ReadAll(resp2.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !bytes.Contains(body, []byte("# HELP ")) {
+			t.Errorf("GET /metrics response does not look like Prometheus exposition format: %q", string(body[:min(len(body), 200)]))
+		}
+	})
+
+	t.Run("federation/fails_closed", func(t *testing.T) {
+		hubContacted := false
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hubContacted = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(hub.Close)
+
+		newFedServer := func(t *testing.T, withSnapshot bool) *httptest.Server {
+			t.Helper()
+			dir := t.TempDir()
+			store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+			if err != nil {
+				t.Fatalf("state.New: %v", err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+
+			cfg := &Config{
+				Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+				Hub:    HubConfig{Endpoint: hub.URL, User: "admin@test"},
+				Auth:   AuthConfig{Scheme: "federation"},
+			}
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			b := New(store, nil, nil, cfg, nil, log)
+			srv := NewServer(b, cfg, nil, log, testHandler())
+			if withSnapshot {
+				srv.SetSnapshot(NewSnapshotHolder(BuildSnapshot(*cfg)))
+			}
+			ts := httptest.NewServer(srv.Handler())
+			t.Cleanup(ts.Close)
+			return ts
+		}
+
+		// Minimal JWT-shaped tokens for federation fail-closed coverage.
+		const unsignedAgentToken = "a.eyJzdWIiOiJhZ2VudC0xIn0.c"
+		const unsignedUserToken = "a.eyJzdWIiOiJ1c2VyLTEiLCJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20ifQ.c"
+		const wantBody = "forbidden: metrics endpoint is not available under federation authentication\n"
+
+		for _, withSnapshot := range []bool{false, true} {
+			mode := "static"
+			if withSnapshot {
+				mode = "snapshot"
+			}
+			ts := newFedServer(t, withSnapshot)
+
+			cases := []struct {
+				name   string
+				method string
+				bearer string
+			}{
+				{name: "no_token", method: http.MethodGet, bearer: ""},
+				{name: "unsigned_agent_token_get", method: http.MethodGet, bearer: unsignedAgentToken},
+				{name: "unsigned_agent_token_head", method: http.MethodHead, bearer: unsignedAgentToken},
+				{name: "unsigned_user_token_get", method: http.MethodGet, bearer: unsignedUserToken},
+			}
+			for _, tc := range cases {
+				t.Run(mode+"/"+tc.name, func(t *testing.T) {
+					req, err := http.NewRequest(tc.method, ts.URL+"/metrics", nil)
+					if err != nil {
+						t.Fatalf("new request: %v", err)
+					}
+					if tc.bearer != "" {
+						req.Header.Set("Authorization", "Bearer "+tc.bearer)
+					}
+					resp, err := http.DefaultClient.Do(req)
+					if err != nil {
+						t.Fatalf("%s /metrics: %v", tc.method, err)
+					}
+					defer func() { _ = resp.Body.Close() }()
+
+					if resp.StatusCode != http.StatusForbidden {
+						t.Errorf("%s /metrics: status = %d, want 403", tc.method, resp.StatusCode)
+					}
+					if tc.method == http.MethodGet {
+						body, err := io.ReadAll(resp.Body)
+						if err != nil {
+							t.Fatalf("read body: %v", err)
+						}
+						if string(body) != wantBody {
+							t.Errorf("GET /metrics body = %q, want %q", string(body), wantBody)
+						}
+						if bytes.Contains(body, []byte("# HELP ")) {
+							t.Errorf("GET /metrics leaked Prometheus output under federation")
+						}
+					}
+				})
+			}
+		}
+
+		if hubContacted {
+			t.Errorf("Hub was contacted during federation /metrics requests; expected local fail-closed rejection")
+		}
+	})
+
+	t.Run("none/unauthenticated_succeeds", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+		if err != nil {
+			t.Fatalf("state.New: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+
+		cfg := &Config{
+			Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+			Auth:   AuthConfig{Scheme: "none"},
+		}
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		b := New(store, nil, nil, cfg, nil, log)
+		srv := NewServer(b, cfg, nil, log, testHandler())
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(ts.Close)
+
+		resp, err := http.Get(ts.URL + "/metrics")
+		if err != nil {
+			t.Fatalf("GET /metrics: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET /metrics with scheme=none: status = %d, want 200", resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !bytes.Contains(body, []byte("# HELP ")) {
+			t.Errorf("GET /metrics response does not look like Prometheus exposition format: %q", string(body[:min(len(body), 200)]))
+		}
+	})
+
+	t.Run("snapshot_rate_limit_applies_to_metrics", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+		if err != nil {
+			t.Fatalf("state.New: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+
+		cfg := &Config{
+			Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+			Auth:   AuthConfig{Scheme: "apiKey", APIKey: "test-api-key"},
+			RateLimit: RateLimitConfig{
+				Enabled:        true,
+				RequestsPerSec: 0.01,
+				Burst:          1,
+			},
+		}
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		b := New(store, nil, nil, cfg, nil, log)
+		srv := NewServer(b, cfg, nil, log, testHandler())
+		srv.SetSnapshot(NewSnapshotHolder(BuildSnapshot(*cfg)))
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(ts.Close)
+
+		// First request consumes the single burst token (returns 401 from auth).
+		resp1, err := http.Get(ts.URL + "/metrics")
+		if err != nil {
+			t.Fatalf("first GET /metrics: %v", err)
+		}
+		_ = resp1.Body.Close()
+		if resp1.StatusCode != http.StatusUnauthorized {
+			t.Errorf("first GET /metrics: status = %d, want 401", resp1.StatusCode)
+		}
+
+		// Second request from the same IP is rate-limited before auth.
+		resp2, err := http.Get(ts.URL + "/metrics")
+		if err != nil {
+			t.Fatalf("second GET /metrics: %v", err)
+		}
+		_ = resp2.Body.Close()
+		if resp2.StatusCode != http.StatusTooManyRequests {
+			t.Errorf("second GET /metrics: status = %d, want 429", resp2.StatusCode)
+		}
+
+		// /healthz remains exempt from rate limiting.
+		resp3, err := http.Get(ts.URL + "/healthz")
+		if err != nil {
+			t.Fatalf("GET /healthz: %v", err)
+		}
+		_ = resp3.Body.Close()
+		if resp3.StatusCode != http.StatusOK {
+			t.Errorf("GET /healthz after rate limit: status = %d, want 200", resp3.StatusCode)
+		}
+	})
 }

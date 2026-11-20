@@ -362,6 +362,7 @@ func TestAuthMiddleware_PublicEndpoints(t *testing.T) {
 	// docs-site/src/content/docs/reference/grove-removal.md); this guards
 	// against the public-endpoint matcher silently re-admitting it.
 	notPublic := []string{
+		"/metrics",
 		"/groves/test/agents/agent/.well-known/agent-card.json",
 		"/projects/test/agents/agent/.well-known/other.json",
 		"/projects/test/agents/agent/extra/.well-known/agent-card.json",

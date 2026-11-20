@@ -155,3 +155,38 @@ func TestRateLimitMiddlewareDefaultRateAndBurst(t *testing.T) {
 		}
 	}
 }
+
+func TestRateLimitMiddleware_MetricsIsRateLimited(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := RateLimitMiddleware(inner, RateLimitConfig{
+		Enabled:        true,
+		RequestsPerSec: 0.01,
+		Burst:          1,
+	})
+
+	req1 := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first GET /metrics: status = %d, want 200", rec1.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Errorf("second GET /metrics: status = %d, want 429", rec2.Code)
+	}
+
+	for _, path := range []string{"/healthz", "/readyz"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s after rate limit exhausted: status = %d, want 200", path, rec.Code)
+		}
+	}
+}
