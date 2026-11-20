@@ -502,6 +502,10 @@ func (m *TriggerSnapshotMetrics) GetSnapshot() *TriggerMetricsSnapshot {
 // by SetTriggerMetrics). Because StoreQueue and trigger.Ingress are created in
 // Server.New before SetTriggerMetrics is called, delegating dynamically keeps
 // every producer and drainer attached to the active recorder.
+type triggerMetricsHolder struct {
+	rec TriggerMetricsRecorder
+}
+
 type serverTriggerMetrics struct {
 	srv *Server
 }
@@ -512,8 +516,8 @@ func (m serverTriggerMetrics) recorder() TriggerMetricsRecorder {
 	if m.srv == nil {
 		return nil
 	}
-	if rec := m.srv.triggerMetrics.Load(); rec != nil && *rec != nil {
-		return *rec
+	if holder := m.srv.triggerMetrics.Load(); holder != nil && holder.rec != nil {
+		return holder.rec
 	}
 	if m.srv.triggerMetricsSnapshot == nil {
 		return nil
@@ -601,5 +605,5 @@ func (s *Server) SetTriggerMetrics(rec TriggerMetricsRecorder) {
 		s.triggerMetrics.Store(nil)
 		return
 	}
-	s.triggerMetrics.Store(&rec)
+	s.triggerMetrics.Store(&triggerMetricsHolder{rec: rec})
 }

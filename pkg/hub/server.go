@@ -2972,7 +2972,7 @@ type Server struct {
 	webhookIngress         *trigger.Ingress
 	githubWebhookIngress   githubWebhookIngressState
 	triggerMetricsSnapshot *TriggerSnapshotMetrics
-	triggerMetrics         atomic.Pointer[TriggerMetricsRecorder]
+	triggerMetrics         atomic.Pointer[triggerMetricsHolder]
 
 	// transportTrustedNets is ServerConfig.TransportTrustedProxies,
 	// resolved once in New (config.TransportTrustedProxies) for
