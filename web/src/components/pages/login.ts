@@ -212,7 +212,7 @@ export class ScionLoginPage extends LitElement {
     }
 
     .error-action a:hover {
-      color: var(--scion-status-danger, #7f1d1d);
+      color: var(--scion-error-text-hover, #7f1d1d);
     }
 
     .providers {

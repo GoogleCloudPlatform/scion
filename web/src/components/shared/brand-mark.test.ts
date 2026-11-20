@@ -71,11 +71,14 @@ describe('SPA branding surfaces (logo, collapsed rail, attribution, copy)', () =
       'Powered by Scion'
     );
 
-    // Collapsed 64px rail renders monogram instead of wide wordmark.
+    // Collapsed 64px rail renders monogram with accessible name instead of wide wordmark.
     nav.collapsed = true;
     await nav.updateComplete;
     expect(nav.shadowRoot?.querySelector('img.brand-logo')).toBeNull();
-    expect(nav.shadowRoot?.querySelector('.brand-monogram')?.textContent).toBe('A');
+    const monogram = nav.shadowRoot?.querySelector('.brand-monogram');
+    expect(monogram?.textContent?.trim()).toBe('A');
+    expect(monogram?.getAttribute('role')).toBe('img');
+    expect(monogram?.getAttribute('aria-label')).toBe('Acme Cloud');
 
     // Hiding attribution removes the footer live without reload.
     applyBranding({

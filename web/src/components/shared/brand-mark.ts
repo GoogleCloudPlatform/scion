@@ -160,7 +160,9 @@ export function renderCompactBrandMark(): TemplateResult {
     return html`<img class="brand-favicon" src=${b.faviconUrl} alt=${getBrandName()} />`;
   }
   if (isCustomBranding()) {
-    return html`<span class="brand-monogram" aria-hidden="true">${getBrandMonogram()}</span>`;
+    return html`<span class="brand-monogram" role="img" aria-label=${getBrandName()}
+      >${getBrandMonogram()}</span
+    >`;
   }
   return html`🌱`;
 }

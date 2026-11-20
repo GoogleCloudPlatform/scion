@@ -134,6 +134,7 @@ html .sl-theme-light,
   --scion-error-bg: var(--scion-danger-50);
   --scion-error-border: var(--scion-danger-300);
   --scion-error-text: var(--scion-danger-800);
+  --scion-error-text-hover: var(--scion-danger-900);
   --scion-success-bg: var(--scion-success-100);
   --scion-success-border: var(--scion-success-300);
   --scion-success-text: var(--scion-success-800);
@@ -351,6 +352,7 @@ html .sl-theme-dark,
   --scion-error-bg: color-mix(in srgb, var(--scion-danger-500) 15%, transparent);
   --scion-error-border: color-mix(in srgb, var(--scion-danger-400) 40%, transparent);
   --scion-error-text: var(--scion-danger-300);
+  --scion-error-text-hover: var(--scion-danger-200);
   --scion-success-bg: color-mix(in srgb, var(--scion-success-500) 15%, transparent);
   --scion-success-border: color-mix(in srgb, var(--scion-success-400) 40%, transparent);
   --scion-success-text: var(--scion-success-300);
@@ -559,6 +561,7 @@ html .sl-theme-dark,
     --scion-error-bg: color-mix(in srgb, var(--scion-danger-500) 15%, transparent);
     --scion-error-border: color-mix(in srgb, var(--scion-danger-400) 40%, transparent);
     --scion-error-text: var(--scion-danger-300);
+    --scion-error-text-hover: var(--scion-danger-200);
     --scion-success-bg: color-mix(in srgb, var(--scion-success-500) 15%, transparent);
     --scion-success-border: color-mix(in srgb, var(--scion-success-400) 40%, transparent);
     --scion-success-text: var(--scion-success-300);

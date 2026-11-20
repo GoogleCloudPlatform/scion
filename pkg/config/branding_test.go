@@ -280,7 +280,7 @@ func TestValidateBranding_WCAGContrastRejections(t *testing.T) {
 				},
 			},
 			wantPathSub: "server.hub.branding.palette.primary.300",
-			wantMsgSub:  "minimum WCAG AA is 4.50:1",
+			wantMsgSub:  "dark --sl-color-primary-600 (step 300)",
 		},
 		{
 			name: "dark primary-400 fails dark Shoelace hover neutral-800 foreground contrast",

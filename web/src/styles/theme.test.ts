@@ -318,6 +318,16 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
     expect(get('--sl-color-primary-600')).toEqual([0x25, 0x63, 0xeb, 1]);
     expect(get('--scion-bg')).toEqual([0xf8, 0xfa, 0xfc, 1]);
     expect(get('--scion-surface')).toEqual([255, 255, 255, 1]);
+    // Light-mode equivalence for tokens rewritten to semantic / color-mix() forms in PR 2c.
+    expect(get('--scion-primary-tint')).toEqual([0xef, 0xf6, 0xff, 1]);
+    expect(get('--scion-primary-text')).toEqual([255, 255, 255, 1]);
+    expect(get('--scion-error-bg')).toEqual([0xfe, 0xf2, 0xf2, 1]);
+    expect(get('--scion-error-text')).toEqual([0x99, 0x1b, 0x1b, 1]);
+    expect(get('--scion-error-text-hover')).toEqual([0x7f, 0x1d, 0x1d, 1]);
+    expect(get('--scion-action-hover-danger-bg')).toEqual([239, 68, 68, 0.1]);
+    expect(get('--scion-action-hover-warning-bg')).toEqual([245, 158, 11, 0.1]);
+    expect(get('--scion-action-hover-success-bg')).toEqual([34, 197, 94, 0.1]);
+    expect(get('--scion-action-hover-primary-bg')).toEqual([59, 130, 246, 0.1]);
 
     // Every non-palette --sl-* declaration in the light block must match Shoelace's light.css
     // (except Scion's intentional font-family and border-radius overrides) so light mode never
@@ -450,6 +460,15 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
 
       it('keeps sl-tag and subtle callout pairs AA-readable', () => {
         const ground = get('--scion-surface');
+        const errBg = over(get('--scion-error-bg'), ground);
+        expect(
+          contrast(get('--scion-error-text'), errBg),
+          'error-text on error-bg'
+        ).toBeGreaterThanOrEqual(4.5);
+        expect(
+          contrast(get('--scion-error-text-hover'), errBg),
+          'error-text-hover on error-bg'
+        ).toBeGreaterThanOrEqual(4.5);
         for (const v of variants) {
           const bg50 = over(get(`--sl-color-${v}-50`), ground);
           const bg100 = over(get(`--sl-color-${v}-100`), ground);
