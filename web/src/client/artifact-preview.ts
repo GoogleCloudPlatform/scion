@@ -220,9 +220,23 @@ export interface PreviewTheme {
   text: string;
   muted: string;
   border: string;
+  borderHover: string;
   subtle: string;
   surface: string;
   link: string;
+  errorBg: string;
+  errorBorder: string;
+  errorText: string;
+  reviewInsText: string;
+  reviewInsBg: string;
+  reviewDelText: string;
+  reviewDelBg: string;
+  reviewHlBg: string;
+  reviewNoteText: string;
+  reviewNoteBg: string;
+  reviewNoteBlockText: string;
+  reviewNoteBlockBg: string;
+  reviewNoteLine: string;
   fontMono: string;
 }
 
@@ -230,9 +244,23 @@ const DEFAULT_THEME: PreviewTheme = {
   text: '#1e293b',
   muted: '#64748b',
   border: '#e2e8f0',
+  borderHover: '#cbd5e1',
   subtle: '#f8fafc',
   surface: '#ffffff',
   link: '#2563eb',
+  errorBg: '#fef2f2',
+  errorBorder: '#fca5a5',
+  errorText: '#991b1b',
+  reviewInsText: '#166534',
+  reviewInsBg: '#dcfce7',
+  reviewDelText: '#991b1b',
+  reviewDelBg: '#fee2e2',
+  reviewHlBg: '#fef08a',
+  reviewNoteText: '#6d28d9',
+  reviewNoteBg: '#ede9fe',
+  reviewNoteBlockText: '#4c1d95',
+  reviewNoteBlockBg: '#f5f3ff',
+  reviewNoteLine: '#8b5cf6',
   fontMono: "'SF Mono', 'Fira Code', monospace",
 };
 
@@ -242,23 +270,24 @@ function cssValue(v: string, fallback: string): string {
   return t !== '' && !/[;{}<>\\]/.test(t) ? t : fallback;
 }
 
-/** The full srcdoc of the preview frame for rewritten, sanitized HTML. */
 /**
  * Styles of rendered CriticMarkup (utils/critic.ts): insertions green and
  * underlined, deletions red and struck through, highlights yellow, and
  * comments as numbered notes in a right-hand margin when the frame is wide
  * enough, otherwise as a block under the reference.
  */
-export const CRITIC_CSS = `ins.critic-ins{color:#166534;background:#dcfce7;text-decoration:underline}
-del.critic-del{color:#991b1b;background:#fee2e2;text-decoration:line-through}
-mark.critic-hl{background:#fef08a;color:inherit}
-sup.critic-ref{font-size:.7em;font-weight:600;color:#6d28d9;background:#ede9fe;border-radius:.25rem;padding:0 .25em;margin-left:.1em}
-.critic-note{display:block;margin:.35em 0 .6em;padding:.4em .6em;font-size:.8125rem;line-height:1.45;color:#4c1d95;background:#f5f3ff;border-left:3px solid #8b5cf6;border-radius:.25rem}
+function criticCss(t: PreviewTheme): string {
+  return `ins.critic-ins{color:${t.reviewInsText};background:${t.reviewInsBg};text-decoration:underline}
+del.critic-del{color:${t.reviewDelText};background:${t.reviewDelBg};text-decoration:line-through}
+mark.critic-hl{background:${t.reviewHlBg};color:inherit}
+sup.critic-ref{font-size:.7em;font-weight:600;color:${t.reviewNoteText};background:${t.reviewNoteBg};border-radius:.25rem;padding:0 .25em;margin-left:.1em}
+.critic-note{display:block;margin:.35em 0 .6em;padding:.4em .6em;font-size:.8125rem;line-height:1.45;color:${t.reviewNoteBlockText};background:${t.reviewNoteBlockBg};border-left:3px solid ${t.reviewNoteLine};border-radius:.25rem}
 .critic-note-n{font-weight:600;margin-right:.25em}
-.critic-side{display:block;margin:0 0 1em;font-size:.8125rem;line-height:1.45;color:#64748b}
-.critic-side.empty{padding:.75em 1em;border:1px dashed #cbd5e1;border-radius:.5rem;text-align:center}
+.critic-side{display:block;margin:0 0 1em;font-size:.8125rem;line-height:1.45;color:${t.muted}}
+.critic-side.empty{padding:.75em 1em;border:1px dashed ${t.borderHover};border-radius:.5rem;text-align:center}
 body.notes-margin{padding-right:17rem}
 body.notes-margin .critic-note,body.notes-margin .critic-side{float:right;clear:right;width:14rem;margin:0 -16rem .5em 0}`;
+}
 
 /** Options of a preview document. */
 export interface PreviewOptions {
@@ -309,8 +338,8 @@ th,td{border:1px solid ${t.border};padding:.5em .75em;text-align:left}th{backgro
 hr{border:none;border-top:1px solid ${t.border};margin:1.5em 0}
 img{max-width:100%;height:auto}
 .image-placeholder{display:inline-block;padding:.2em .5em;border:1px dashed ${t.border};border-radius:.25rem;color:${t.muted};background:${t.subtle};font-size:.8125rem}
-.image-placeholder.failed{border-color:#fca5a5;color:#991b1b;background:#fef2f2}
-${CRITIC_CSS}
+.image-placeholder.failed{border-color:${t.errorBorder};color:${t.errorText};background:${t.errorBg}}
+${criticCss(t)}
 </style></head><body${options.marginNotes ? ' class="notes-margin"' : ''}>${
     options.sideNote
       ? `<aside class="critic-side${options.sideNoteEmpty ? ' empty' : ''}">${escapeText(options.sideNote)}</aside>`

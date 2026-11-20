@@ -837,12 +837,12 @@ export class ScionPageAgentDetail extends LitElement {
 
     /* ---- Port link ---- */
     .port-link {
-      color: #4ade80;
+      color: var(--sl-color-success-600, #16a34a);
       text-decoration: none;
     }
     .port-link:hover {
       text-decoration: underline;
-      color: #22c55e;
+      color: var(--sl-color-success-700, #15803d);
     }
   `;
 

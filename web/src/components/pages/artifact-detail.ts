@@ -706,14 +706,14 @@ export class ScionPageArtifactDetail extends LitElement {
         color: var(--sl-color-warning-700, #b45309);
       }
       sl-badge.kind-review::part(base) {
-        background: #ede9fe;
-        color: #6d28d9;
-        border-color: #ddd6fe;
+        background: var(--scion-review-note-bg, #ede9fe);
+        color: var(--scion-review-note-text, #6d28d9);
+        border-color: var(--sl-color-violet-200, #ddd6fe);
       }
       sl-badge.kind-publish::part(base) {
-        background: #e0f2fe;
-        color: #075985;
-        border-color: #bae6fd;
+        background: var(--sl-color-sky-100, #e0f2fe);
+        color: var(--sl-color-sky-800, #075985);
+        border-color: var(--sl-color-sky-200, #bae6fd);
       }
       .history-note {
         font-size: 0.8125rem;

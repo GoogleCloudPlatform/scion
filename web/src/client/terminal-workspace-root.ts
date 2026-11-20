@@ -2423,17 +2423,17 @@ export class TerminalWorkspaceRoot {
         height: 0.625rem;
         border-radius: 50%;
         margin-top: 0.25rem;
-        background: #94a3b8;
+        background: var(--scion-text-disabled, #94a3b8);
         flex: 0 0 auto;
       }
       .terminal-rail-item[data-dot='green'] .terminal-connection-dot {
-        background: #22c55e;
+        background: var(--scion-status-success, #22c55e);
       }
       .terminal-rail-item[data-dot='red'] .terminal-connection-dot {
-        background: #ef4444;
+        background: var(--scion-status-danger, #ef4444);
       }
       .terminal-rail-item[data-dot='amber'] .terminal-connection-dot {
-        background: #f59e0b;
+        background: var(--scion-status-warning, #f59e0b);
       }
       /* Not opened yet: a hollow neutral ring, distinct from solid grey. */
       .terminal-rail-item[data-dot='neutral'] .terminal-connection-dot {

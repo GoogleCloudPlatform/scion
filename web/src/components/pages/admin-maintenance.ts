@@ -777,7 +777,7 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
 
     .maintenance-mode-toggle .toggle-track.active:hover {
-      background: #d97706;
+      background: var(--sl-color-warning-600, #d97706);
     }
 
     .maintenance-mode-toggle .toggle-knob {
