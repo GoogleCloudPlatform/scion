@@ -116,20 +116,21 @@ func (s *Server) resolveHarnessTypeFromConfigRefMemo(ctx context.Context, projec
 		return h
 	}
 
-	if projectID != "" {
-		h := memoized(memo.projectTable(), harnessRefKey{projectID, configRef}, func() string {
-			return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, projectID))
-		})
+	// The scopes in dispatch's order (resolveHarnessConfigBySlug).
+	for _, sc := range s.harnessConfigLookupScopes(projectID) {
+		var h string
+		if sc.scope == store.HarnessConfigScopeGlobal {
+			h = memoized(memo.globalTable(), configRef, func() string {
+				return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeGlobal, ""))
+			})
+		} else {
+			h = memoized(memo.projectTable(), harnessRefKey{projectID, configRef}, func() string {
+				return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, projectID))
+			})
+		}
 		if h != "" {
 			return h
 		}
-	}
-
-	h := memoized(memo.globalTable(), configRef, func() string {
-		return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeGlobal, ""))
-	})
-	if h != "" {
-		return h
 	}
 
 	return inferHarnessFromName(configRef)
@@ -382,16 +383,12 @@ func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Age
 		}
 	}
 
-	// Fallback: by slug (project scope, then global)
+	// Fallback: by slug, in dispatch's scope order
+	// (resolveHarnessConfigBySlug, which also fails closed on a hosted hub's
+	// global lookup error).
 	hcSlug := agent.AppliedConfig.HarnessConfig
 	if hcSlug != "" {
-		var hc *store.HarnessConfig
-		if agent.ProjectID != "" {
-			hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeProject, agent.ProjectID)
-		}
-		if hc == nil {
-			hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeGlobal, "")
-		}
+		hc, _ := s.resolveHarnessConfigBySlug(ctx, agent.ProjectID, hcSlug)
 		if hc != nil {
 			if aliases := s.modelAliasesForHarnessConfig(ctx, hc); len(aliases) > 0 {
 				return config.ResolveModelAlias(model, aliases)

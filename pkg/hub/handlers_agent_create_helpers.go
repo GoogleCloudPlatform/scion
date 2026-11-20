@@ -3173,30 +3173,29 @@ func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.Respo
 	return true
 }
 
-// resolveHarnessConfigBySlug looks up the hub harness config named name:
-// in the project's scope first (when projectID is set), then globally. It
-// returns (nil, nil) when neither scope has one. A store failure other than
-// not-found is logged and returned with a nil config, after the global scope
-// was still tried.
+// resolveHarnessConfigBySlug looks up the hub harness config named name in
+// the scopes harnessConfigLookupScopes gives: project then global on a
+// workstation hub, global then project on a hosted hub. It returns (nil, nil)
+// when no scope has one. A store failure other than not-found is logged; on
+// a workstation hub the next scope is still tried and the failure returned
+// with a nil config if none matches, while on a hosted hub a failed global
+// lookup is returned at once, so the project scope is never consulted
+// without knowing whether a global config of that slug exists.
 func (s *Server) resolveHarnessConfigBySlug(ctx context.Context, projectID, name string) (*store.HarnessConfig, error) {
 	var lookupErr error
-	if projectID != "" {
-		hc, err := s.store.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeProject, projectID)
+	for _, sc := range s.harnessConfigLookupScopes(projectID) {
+		hc, err := s.store.GetHarnessConfigBySlug(ctx, name, sc.scope, sc.scopeID)
 		if err == nil && hc != nil {
 			return hc, nil
 		}
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.agentLifecycleLog.Warn("failed to get project harness config by slug", "slug", name, "project_id", projectID, "error", err)
+			s.agentLifecycleLog.Warn("failed to get "+sc.scope+" harness config by slug",
+				"slug", name, "scope_id", sc.scopeID, "error", err)
+			if !s.workstation && sc.scope == store.HarnessConfigScopeGlobal {
+				return nil, err
+			}
 			lookupErr = err
 		}
-	}
-	hc, err := s.store.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, "")
-	if err == nil && hc != nil {
-		return hc, nil
-	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		s.agentLifecycleLog.Warn("failed to get global harness config by slug", "slug", name, "error", err)
-		lookupErr = err
 	}
 	return nil, lookupErr
 }
