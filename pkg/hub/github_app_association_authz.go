@@ -263,6 +263,25 @@ func (s *Server) githubBindingUserIsAdmin(ctx context.Context, userID string) (b
 	return decision.Allowed, nil
 }
 
+// lookupCreatorGitHubToken returns the project creator's own user-scope
+// GITHUB_TOKEN value, used solely for GitHub App association proof/cache-key
+// checks and never delivered or logged. It returns ("", false, nil) when no
+// creator, secret backend, or non-empty stored token exists, and a non-nil
+// error only on a secret-backend failure other than store.ErrNotFound.
+func (s *Server) lookupCreatorGitHubToken(ctx context.Context, project *store.Project) (string, bool, error) {
+	if project == nil || project.CreatedBy == "" || s.secretBackend == nil {
+		return "", false, nil
+	}
+	sv, err := s.secretBackend.Get(ctx, "GITHUB_TOKEN", "user", project.CreatedBy)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", false, err
+	}
+	if err != nil || sv == nil || sv.Value == "" {
+		return "", false, nil
+	}
+	return sv.Value, true, nil
+}
+
 // githubCreatorRepoAccess asks GitHub, with the project creator's own
 // user-scope GITHUB_TOKEN, what the creator may do on owner/repo. No creator,
 // no secret backend or no stored token is a definitive refusal; a secret
@@ -271,16 +290,16 @@ func (s *Server) githubCreatorRepoAccess(ctx context.Context, project *store.Pro
 	if project.CreatedBy == "" || s.secretBackend == nil {
 		return githubapp.RepoAccess{}, fmt.Errorf("%w: no admin binding and no creator GitHub identity to verify", errGitHubAssociationUnauthorized)
 	}
-	sv, err := s.secretBackend.Get(ctx, "GITHUB_TOKEN", "user", project.CreatedBy)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	creatorToken, hasToken, err := s.lookupCreatorGitHubToken(ctx, project)
+	if err != nil {
 		return githubapp.RepoAccess{}, fmt.Errorf("%w: creator GitHub token lookup: %w", errGitHubAssociationCheckFailed, err)
 	}
-	if err != nil || sv == nil || sv.Value == "" {
+	if !hasToken {
 		return githubapp.RepoAccess{}, fmt.Errorf("%w: no admin binding and the project creator has no GitHub token to verify repository access", errGitHubAssociationUnauthorized)
 	}
 
 	apiBase := s.githubAppAPIBase()
-	key := githubAccessCacheKey(project.ID, installationID, apiBase, owner, repo, project.CreatedBy, sv.Value)
+	key := githubAccessCacheKey(project.ID, installationID, apiBase, owner, repo, project.CreatedBy, creatorToken)
 	if access, denied, ok := s.githubAccessCache.get(key); ok {
 		if denied {
 			return githubapp.RepoAccess{}, fmt.Errorf("%w: the project creator's GitHub identity has no access to %s/%s", errGitHubAssociationUnauthorized, owner, repo)
@@ -292,7 +311,7 @@ func (s *Server) githubCreatorRepoAccess(ctx context.Context, project *store.Pro
 	if check == nil {
 		check = githubapp.CheckUserRepoAccess
 	}
-	access, err := check(ctx, apiBase, sv.Value, owner, repo)
+	access, err := check(ctx, apiBase, creatorToken, owner, repo)
 	if errors.Is(err, githubapp.ErrRepoAccessDenied) {
 		s.githubAccessCache.put(key, project.ID, githubapp.RepoAccess{}, true)
 		return githubapp.RepoAccess{}, fmt.Errorf("%w: the project creator's GitHub identity has no access to %s/%s", errGitHubAssociationUnauthorized, owner, repo)
@@ -908,21 +927,18 @@ func (s *Server) hasAuthorizedGitHubAssociationCached(ctx context.Context, proje
 		return true, nil
 	}
 
-	if project.CreatedBy == "" || s.secretBackend == nil {
-		return false, nil
-	}
-	sv, err := s.secretBackend.Get(ctx, "GITHUB_TOKEN", "user", project.CreatedBy)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	creatorToken, hasToken, err := s.lookupCreatorGitHubToken(ctx, project)
+	if err != nil {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
 		return false, nil
 	}
-	if err != nil || sv == nil || sv.Value == "" {
+	if !hasToken {
 		return false, nil
 	}
 
-	key := githubAccessCacheKey(project.ID, instID, s.githubAppAPIBase(), owner, repo, project.CreatedBy, sv.Value)
+	key := githubAccessCacheKey(project.ID, instID, s.githubAppAPIBase(), owner, repo, project.CreatedBy, creatorToken)
 	if access, denied, cached := s.githubAccessCache.get(key); cached {
 		if denied || (!access.Push && !access.Pull) {
 			return false, nil
