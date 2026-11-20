@@ -107,10 +107,11 @@ type DrainerConfig struct {
 	LeaseDuration  time.Duration // default 30 s
 	HandlerTimeout time.Duration // default 10 s; must be < LeaseDuration
 
-	BatchSize    int           // default 20
-	MaxRows      int           // default 100 000
-	MaxPermanent int           // default 5
-	MaxAge       time.Duration // default 72 h
+	BatchSize     int           // default 20
+	FairByProject bool          // round-robin claim across project_id; requires store.DurableQueueFairClaimer
+	MaxRows       int           // default 100 000
+	MaxPermanent  int           // default 5
+	MaxAge        time.Duration // default 72 h
 
 	// OnDrop is invoked when maintenance trims items by age, overflow, or
 	// poison bounds. Reported Items carry metadata only (Seq, Kind, ProjectID,
@@ -143,16 +144,31 @@ type DrainResult struct {
 // Drainer claims and dispatches items of a single Kind from a DurableQueueStore.
 type Drainer struct {
 	cfg         DrainerConfig
+	fairClaimer store.DurableQueueFairClaimer
 	ownerPrefix string
 	wake        chan struct{}
 	unregister  func()
 
+	// mu guards the blocked-sink state (read concurrently by Blocked()) and
+	// lastProject (defensive: drainPass does not run concurrently).
 	mu             sync.Mutex
 	blocked        bool
 	nextProbe      time.Time
 	probeBackoff   time.Duration
 	lastBlockedLog time.Time
+	lastProject    string
 }
+
+const (
+	// fairSweepMaxCalls bounds consecutive empty, probe-budget-exhausted fair
+	// claims within a single drainPass. This lets a due project behind many
+	// backoff-only or leased projects (up to 128 * probeBudget = 2048 projects
+	// at default BatchSize=4) be claimed in one pass instead of waiting
+	// N/probeBudget poll ticks, while keeping an idle hub with tens of
+	// thousands of non-due projects bounded per tick and releasing the DB
+	// transaction between calls.
+	fairSweepMaxCalls = 128
+)
 
 // NewDrainer validates cfg and constructs a Drainer.
 func NewDrainer(cfg DrainerConfig) (*Drainer, error) {
@@ -202,8 +218,18 @@ func NewDrainer(cfg DrainerConfig) (*Drainer, error) {
 		return nil, fmt.Errorf("durablequeue: handler timeout %s must be shorter than lease duration %s", cfg.HandlerTimeout, cfg.LeaseDuration)
 	}
 
+	var fairClaimer store.DurableQueueFairClaimer
+	if cfg.FairByProject {
+		fc, ok := cfg.Store.(store.DurableQueueFairClaimer)
+		if !ok || fc == nil {
+			return nil, errors.New("durablequeue: FairByProject requires a store implementing store.DurableQueueFairClaimer")
+		}
+		fairClaimer = fc
+	}
+
 	d := &Drainer{
 		cfg:         cfg,
+		fairClaimer: fairClaimer,
 		ownerPrefix: truncateOwnerPrefix(cfg.Owner),
 		wake:        make(chan struct{}, 1),
 	}
@@ -330,7 +356,64 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget t
 		// checks identify this specific claim rather than only the replica
 		// name (protecting against duplicate Owner strings or stale passes).
 		claimOwner := d.nextClaimOwner()
-		rows, err := d.cfg.Store.ClaimDurableItems(ctx, d.cfg.Kind, claimOwner, now, now.Add(d.cfg.LeaseDuration), batch)
+		var (
+			rows         []store.DurableQueueRow
+			nextCursor   string
+			usedFallback bool
+			err          error
+		)
+		if d.fairClaimer != nil {
+			d.mu.Lock()
+			passStart := d.lastProject
+			d.mu.Unlock()
+			afterProject := passStart
+			wrapCount := 0
+			lastExhausted := false
+			for call := 0; call < fairSweepMaxCalls; call++ {
+				if ctx.Err() != nil {
+					break
+				}
+				// Each claim call uses a fresh owner nonce and its own short DB
+				// transaction so SQLite's write connection is released between calls.
+				if call > 0 {
+					claimOwner = d.nextClaimOwner()
+				}
+				claimRes, cerr := d.fairClaimer.ClaimDurableItemsFair(ctx, d.cfg.Kind, claimOwner, afterProject, now, now.Add(d.cfg.LeaseDuration), batch)
+				if cerr != nil {
+					err = cerr
+					break
+				}
+				rows = claimRes.Rows
+				nextCursor = claimRes.NextCursor
+				afterProject = claimRes.NextCursor
+				lastExhausted = claimRes.Exhausted
+				if claimRes.Wrapped {
+					wrapCount++
+				}
+				if len(rows) > 0 || !claimRes.Exhausted {
+					break
+				}
+				// Stop once a full cycle from passStart has been covered so an
+				// idle hub with nothing due never busy-spins.
+				if wrapCount >= 2 || (wrapCount == 1 && nextCursor >= passStart) {
+					lastExhausted = false
+					break
+				}
+			}
+			// If the per-pass sweep cap was hit with zero rows claimed while
+			// the store confirmed due unleased work exists beyond the swept
+			// range (e.g. >2048 backoff-only projects ahead of a due victim),
+			// run one bounded oldest-due fallback claim so the victim is served
+			// in this pass without waiting additional ticks, while still
+			// advancing d.lastProject to nextCursor.
+			if err == nil && len(rows) == 0 && lastExhausted && ctx.Err() == nil {
+				claimOwner = d.nextClaimOwner()
+				rows, err = d.cfg.Store.ClaimDurableItems(ctx, d.cfg.Kind, claimOwner, now, now.Add(d.cfg.LeaseDuration), batch)
+				usedFallback = true
+			}
+		} else {
+			rows, err = d.cfg.Store.ClaimDurableItems(ctx, d.cfg.Kind, claimOwner, now, now.Add(d.cfg.LeaseDuration), batch)
+		}
 		if err != nil {
 			return res, trimMore, fmt.Errorf("claim: %w", err)
 		}
@@ -338,6 +421,10 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget t
 		if len(rows) > 0 {
 			d.cfg.Metrics.Claimed(d.cfg.Kind, len(rows))
 		}
+		var (
+			lastHandledProject string
+			handledCount       int
+		)
 		for i, row := range rows {
 			if ctx.Err() != nil {
 				d.releaseRows(rows[i:], claimOwner)
@@ -350,10 +437,16 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget t
 			switch out {
 			case rowOutcomeDone:
 				res.Done++
+				lastHandledProject = row.ProjectID
+				handledCount++
 			case rowOutcomeRetried:
 				res.Retried++
+				lastHandledProject = row.ProjectID
+				handledCount++
 			case rowOutcomePermanent:
 				res.Permanent++
+				lastHandledProject = row.ProjectID
+				handledCount++
 			case rowOutcomeBlocked:
 				res.Blocked = true
 				d.releaseRows(rows[i+1:], claimOwner)
@@ -361,6 +454,23 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget t
 			}
 			if out == rowOutcomeBlocked {
 				break
+			}
+		}
+		if d.fairClaimer != nil {
+			if len(rows) == 0 || handledCount == len(rows) || usedFallback {
+				// All claimed rows were handled (or none were due in the probed
+				// range, including when the oldest-due fallback served rows from
+				// outside the swept range), so advancing to nextCursor never
+				// skips any due project in (passStart, nextCursor].
+				d.mu.Lock()
+				d.lastProject = nextCursor
+				d.mu.Unlock()
+			} else if handledCount > 0 {
+				// Partial pass (blocked sink or cancelled mid-batch): advance
+				// only to the last handled row so released rows are not skipped.
+				d.mu.Lock()
+				d.lastProject = lastHandledProject
+				d.mu.Unlock()
 			}
 		}
 	}

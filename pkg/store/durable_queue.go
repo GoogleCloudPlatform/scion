@@ -187,3 +187,32 @@ type DurableQueueStore interface {
 type DurableQueuePendingCounter interface {
 	CountDurableQueuePending(ctx context.Context, kind, projectID string) (int64, error)
 }
+
+// DurableQueueFairClaimResult is returned by DurableQueueFairClaimer.ClaimDurableItemsFair.
+type DurableQueueFairClaimResult struct {
+	// Rows are the leased rows, interleaved round-robin across projects.
+	Rows []DurableQueueRow
+	// NextCursor is the furthest project_id probed by the discovery walk.
+	// Callers pass this as afterProjectID on the next claim so non-due projects
+	// already probed are not re-probed.
+	NextCursor string
+	// Exhausted is true when discovery stopped on the per-claim probe budget
+	// before covering a full cycle of projects, found fewer than limit due
+	// projects, and (when zero projects were found) at least one due unleased
+	// row still exists somewhere in the kind. An idle queue with no due rows
+	// reports Exhausted=false so callers do not sweep further.
+	Exhausted bool
+	// Wrapped is true when the discovery walk reached the end of the kind's
+	// project_id range and wrapped around to the beginning during this call.
+	Wrapped bool
+}
+
+// DurableQueueFairClaimer claims due, unleased items of a kind using
+// lexicographic round-robin across active project_ids starting strictly after
+// afterProjectID (wrapping around through <= afterProjectID within a bounded
+// per-claim probe budget), preserving (next_attempt_at, seq) order within each
+// project and returning claimed rows interleaved round-robin across projects.
+// Implemented by entadapter.CompositeStore and entadapter.DurableQueueStore.
+type DurableQueueFairClaimer interface {
+	ClaimDurableItemsFair(ctx context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) (DurableQueueFairClaimResult, error)
+}

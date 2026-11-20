@@ -1574,6 +1574,11 @@ var (
 				Columns: []*schema.Column{DurableQueueItemsColumns[1], DurableQueueItemsColumns[3], DurableQueueItemsColumns[0]},
 			},
 			{
+				Name:    "durablequeueitem_kind_project_id_next_attempt_at_seq",
+				Unique:  false,
+				Columns: []*schema.Column{DurableQueueItemsColumns[1], DurableQueueItemsColumns[3], DurableQueueItemsColumns[9], DurableQueueItemsColumns[0]},
+			},
+			{
 				Name:    "durablequeueitem_kind_created_at",
 				Unique:  false,
 				Columns: []*schema.Column{DurableQueueItemsColumns[1], DurableQueueItemsColumns[6]},

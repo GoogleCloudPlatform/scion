@@ -806,3 +806,275 @@ func TestEchoConsumer_NudgeUnleasedOnlyAndClaimOrder(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, doneLeased)
 }
+
+func TestDurableQueueDrainerFair_FloodDoesNotStarveAcrossTwoDrainers(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	t0 := time.Date(2026, 11, 20, 14, 0, 0, 0, time.UTC)
+	now := t0.Add(5 * time.Minute)
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return t0 }))
+
+	const floodCount = 40
+	const victimCount = 4
+	for i := 0; i < floodCount; i++ {
+		ts := t0.Add(time.Duration(i) * time.Second)
+		_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("flood-%02d", i),
+			ProjectID: "proj-flood",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+	}
+	for i := 0; i < victimCount; i++ {
+		ts := t0.Add(time.Duration(100+i) * time.Second)
+		_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("victim-%02d", i),
+			ProjectID: "proj-victim",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+	}
+
+	var (
+		mu          sync.Mutex
+		order       []string
+		handleCount = make(map[string]int)
+	)
+	handler := func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+		mu.Lock()
+		order = append(order, item.DedupKey)
+		handleCount[item.DedupKey]++
+		mu.Unlock()
+		return durablequeue.Result{Done: true}
+	}
+
+	makeDrainer := func(owner string) *durablequeue.Drainer {
+		d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+			Store:         cs,
+			Queue:         q,
+			Kind:          "trigger.event",
+			Owner:         owner,
+			BatchSize:     4,
+			FairByProject: true,
+			PollInterval:  10 * time.Millisecond,
+			Now:           func() time.Time { return now },
+			Logger:        quietLogger(),
+			Handler:       handler,
+		})
+		require.NoError(t, err)
+		return d
+	}
+
+	d1 := makeDrainer("drainer-1")
+	d2 := makeDrainer("drainer-2")
+
+	runCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	for _, d := range []*durablequeue.Drainer{d1, d2} {
+		wg.Add(1)
+		go func(dr *durablequeue.Drainer) {
+			defer wg.Done()
+			dr.Run(runCtx)
+		}(d)
+	}
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(order) == floodCount+victimCount
+	}, 10*time.Second, 10*time.Millisecond)
+	cancel()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, handleCount, floodCount+victimCount, "no item may be lost")
+	for k, c := range handleCount {
+		assert.Equal(t, 1, c, "item %s must be handled exactly once", k)
+	}
+	// All 4 victim items must complete well before the 40-item flood finishes.
+	lastVictimIdx := -1
+	for idx, key := range order {
+		if len(key) >= 7 && key[:7] == "victim-" {
+			lastVictimIdx = idx
+		}
+	}
+	require.GreaterOrEqual(t, lastVictimIdx, 0)
+	assert.Less(t, lastVictimIdx, floodCount, "victim items must not be starved behind the flooding project")
+}
+
+func TestDurableQueueDrainerFair_MoreProjectsThanBatchSizeRotation(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	t0 := time.Date(2026, 11, 20, 15, 0, 0, 0, time.UTC)
+	now := t0.Add(time.Minute)
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return t0 }))
+
+	const numProjects = 8
+	for p := 0; p < numProjects; p++ {
+		proj := fmt.Sprintf("proj-%02d", p)
+		for i := 0; i < 2; i++ {
+			ts := t0.Add(time.Duration(i) * time.Second)
+			_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+				Kind:      "trigger.event",
+				DedupKey:  fmt.Sprintf("%s-%d", proj, i),
+				ProjectID: proj,
+				Payload:   []byte(`{}`),
+				CreatedAt: ts,
+				NotBefore: ts,
+			})
+			require.NoError(t, err)
+		}
+	}
+
+	var handled []string
+	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:         cs,
+		Queue:         q,
+		Kind:          "trigger.event",
+		Owner:         "rot-drainer",
+		BatchSize:     4,
+		FairByProject: true,
+		Now:           func() time.Time { return now },
+		Logger:        quietLogger(),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			handled = append(handled, item.ProjectID)
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	// Pass 1 serves proj-00..proj-03; Pass 2 must advance cursor and serve proj-04..proj-07.
+	res1, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res1.Done)
+
+	res2, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res2.Done)
+
+	assert.Equal(t, []string{
+		"proj-00", "proj-01", "proj-02", "proj-03",
+		"proj-04", "proj-05", "proj-06", "proj-07",
+	}, handled)
+}
+
+func TestDurableQueueDrainerFair_1000BackoffProjectsClaimedInOnePassAndIdleBounded(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	now := time.Date(2026, 11, 20, 18, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour)
+
+	const backoffProjects = 1000
+	err := cs.WithTx(ctx, func(tx store.Store) error {
+		for i := 0; i < backoffProjects; i++ {
+			proj := fmt.Sprintf("p%04d", i)
+			if _, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+				Kind:      "trigger.event",
+				DedupKey:  "backoff-" + proj,
+				ProjectID: proj,
+				Payload:   []byte(`{}`),
+				CreatedAt: now,
+				NotBefore: future,
+			}); err != nil {
+				return err
+			}
+		}
+		_, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  "victim-due",
+			ProjectID: "z-victim",
+			Payload:   []byte(`{}`),
+			CreatedAt: now,
+			NotBefore: now,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	var handled []string
+	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:         cs,
+		Kind:          "trigger.event",
+		Owner:         "sweep-drainer",
+		BatchSize:     4,
+		FairByProject: true,
+		Now:           func() time.Time { return now },
+		Logger:        quietLogger(),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			handled = append(handled, item.ProjectID+":"+item.DedupKey)
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	// Pass 1: 1000 backoff-only projects precede z-victim. The drainer must sweep
+	// past them in bounded transactions and claim z-victim within ONE DrainOnce pass.
+	pass1Start := time.Now()
+	res1, err := d.DrainOnce(ctx)
+	pass1Elapsed := time.Since(pass1Start)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res1.Claimed)
+	assert.Equal(t, 1, res1.Done)
+	assert.Equal(t, []string{"z-victim:victim-due"}, handled)
+	assert.Less(t, pass1Elapsed, 15*time.Second, "sweeping 1000 backoff projects took %s", pass1Elapsed)
+
+	// Pass 2 (idle hub: 1000 backoff-only projects, 0 due rows): store's O(1)
+	// any-due check clears Exhausted on the very first call, so an idle hub does
+	// 1 single claim call with no sweep and no busy spin.
+	idleStart := time.Now()
+	res2, err := d.DrainOnce(ctx)
+	idleElapsed := time.Since(idleStart)
+	require.NoError(t, err)
+	assert.Zero(t, res2.Claimed)
+	assert.Zero(t, res2.Done)
+	assert.Equal(t, int64(backoffProjects), res2.Remaining)
+	assert.Less(t, idleElapsed, 5*time.Second, "idle check over 1000 backoff projects took %s", idleElapsed)
+	t.Logf("1000 backoff projects: victim pass=%s, idle pass=%s", pass1Elapsed, idleElapsed)
+
+	// Pass 3 + 4 (flood + 1000 backoff-only projects + victim): a flooding project
+	// sorting before the 1000 backoff projects must NOT starve a newer victim sorting
+	// after them (Pass 3 serves flood; Pass 4 sweeps past the 1000 backoff projects
+	// and serves z-victim).
+	err = cs.WithTx(ctx, func(tx store.Store) error {
+		for i := 0; i < 10; i++ {
+			ts := now.Add(-time.Duration(20-i) * time.Second)
+			if _, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+				Kind:      "trigger.event",
+				DedupKey:  fmt.Sprintf("flood-%02d", i),
+				ProjectID: "a-flood",
+				Payload:   []byte(`{}`),
+				CreatedAt: ts,
+				NotBefore: ts,
+			}); err != nil {
+				return err
+			}
+		}
+		_, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  "victim-after-flood",
+			ProjectID: "z-victim",
+			Payload:   []byte(`{}`),
+			CreatedAt: now,
+			NotBefore: now,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handled = nil
+	res3, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res3.Done)
+	res4, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, res4.Done, 1)
+	assert.Contains(t, handled, "z-victim:victim-after-flood",
+		"victim behind 1000 backoff projects must be served within 2 passes even under an active flood")
+}

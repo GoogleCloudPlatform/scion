@@ -1288,3 +1288,378 @@ func TestDurableQueueNudgeChunking(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, claimed, alreadyDue+totalEligible)
 }
+
+func TestDurableQueueClaimFair_FloodDoesNotStarveVictim(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t0 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	var floodSeqs []int64
+	for i := 0; i < 20; i++ {
+		ts := t0.Add(time.Duration(i) * time.Second)
+		seq, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("flood-%02d", i),
+			ProjectID: "proj-a",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+		floodSeqs = append(floodSeqs, seq)
+	}
+	var victimSeqs []int64
+	for i := 0; i < 3; i++ {
+		ts := t0.Add(time.Duration(100+i) * time.Second)
+		seq, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("victim-%02d", i),
+			ProjectID: "proj-b",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+		victimSeqs = append(victimSeqs, seq)
+	}
+
+	now := t0.Add(200 * time.Second)
+	leaseUntil := now.Add(time.Minute)
+
+	// Pass 1 (afterProjectID=""): proj-a and proj-b each get 2 items, interleaved round-robin.
+	res1, err := cs.ClaimDurableItemsFair(ctx, "trigger.event", "owner-1", "", now, leaseUntil, 4)
+	require.NoError(t, err)
+	b1 := res1.Rows
+	require.Len(t, b1, 4)
+	assert.Equal(t, "proj-b", res1.NextCursor)
+	assert.False(t, res1.Exhausted)
+	assert.Equal(t, []string{"proj-a", "proj-b", "proj-a", "proj-b"}, []string{
+		b1[0].ProjectID, b1[1].ProjectID, b1[2].ProjectID, b1[3].ProjectID,
+	})
+	assert.Equal(t, []int64{floodSeqs[0], victimSeqs[0], floodSeqs[1], victimSeqs[1]}, []int64{
+		b1[0].Seq, b1[1].Seq, b1[2].Seq, b1[3].Seq,
+	})
+	for _, r := range b1 {
+		ok, cerr := cs.CompleteDurableItem(ctx, r.Seq, "owner-1")
+		require.NoError(t, cerr)
+		require.True(t, ok)
+	}
+
+	// Pass 2 (afterProjectID="proj-b"): wraps to proj-a then proj-b. proj-b has only 1 item left,
+	// so the top-up pass fills the 4th slot from proj-a (no lost batch capacity), while NextCursor
+	// stays at the furthest probed project ("proj-b").
+	res2, err := cs.ClaimDurableItemsFair(ctx, "trigger.event", "owner-2", res1.NextCursor, now, leaseUntil, 4)
+	require.NoError(t, err)
+	b2 := res2.Rows
+	require.Len(t, b2, 4)
+	assert.Equal(t, "proj-b", res2.NextCursor)
+	assert.False(t, res2.Exhausted)
+	assert.True(t, res2.Wrapped)
+	assert.Equal(t, []string{"proj-a", "proj-b", "proj-a", "proj-a"}, []string{
+		b2[0].ProjectID, b2[1].ProjectID, b2[2].ProjectID, b2[3].ProjectID,
+	})
+	assert.Equal(t, []int64{floodSeqs[2], victimSeqs[2], floodSeqs[3], floodSeqs[4]}, []int64{
+		b2[0].Seq, b2[1].Seq, b2[2].Seq, b2[3].Seq,
+	})
+}
+
+func TestDurableQueueClaimFair_ManyProjectsRoundRobinAndEmptyProjectID(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t0 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	projects := []string{"", "p01", "p02", "p03", "p04", "p05", "p06", "p07", "p08", "p09"}
+	seqsByProj := make(map[string][]int64, len(projects))
+	for _, p := range projects {
+		for i := 0; i < 3; i++ {
+			ts := t0.Add(time.Duration(i) * time.Second)
+			seq, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+				Kind:      "trigger.event",
+				DedupKey:  fmt.Sprintf("%s-%d", p, i),
+				ProjectID: p,
+				Payload:   []byte(`{}`),
+				CreatedAt: ts,
+				NotBefore: ts,
+			})
+			require.NoError(t, err)
+			seqsByProj[p] = append(seqsByProj[p], seq)
+		}
+	}
+
+	now := t0.Add(time.Minute)
+	cursor := ""
+	seenFirstPass := make(map[string]int)
+	gotSeqsByProj := make(map[string][]int64)
+
+	// 3 passes of limit=4 cover 12 slots across 10 projects -> every project (including "") is served.
+	for pass := 0; pass < 3; pass++ {
+		owner := fmt.Sprintf("owner-%d", pass)
+		claimRes, err := cs.ClaimDurableItemsFair(ctx, "trigger.event", owner, cursor, now, now.Add(time.Minute), 4)
+		require.NoError(t, err)
+		require.Len(t, claimRes.Rows, 4)
+		for _, r := range claimRes.Rows {
+			seenFirstPass[r.ProjectID]++
+			gotSeqsByProj[r.ProjectID] = append(gotSeqsByProj[r.ProjectID], r.Seq)
+			ok, cerr := cs.CompleteDurableItem(ctx, r.Seq, owner)
+			require.NoError(t, cerr)
+			require.True(t, ok)
+		}
+		cursor = claimRes.NextCursor
+	}
+
+	for _, p := range projects {
+		assert.GreaterOrEqual(t, seenFirstPass[p], 1, "project %q must be served within 3 passes", p)
+		assert.Equal(t, seqsByProj[p][:len(gotSeqsByProj[p])], gotSeqsByProj[p],
+			"project %q must preserve (next_attempt_at, seq) order", p)
+	}
+}
+
+func TestDurableQueueClaimFair_SingleProjectFullBatchAndBackoffLease(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t0 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	// Project A has 3 items in future backoff; Project B has 6 due items.
+	for i := 0; i < 3; i++ {
+		_, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("a-future-%d", i),
+			ProjectID: "proj-a",
+			Payload:   []byte(`{}`),
+			CreatedAt: t0,
+			NotBefore: t0.Add(10 * time.Minute),
+		})
+		require.NoError(t, err)
+	}
+	var bSeqs []int64
+	for i := 0; i < 6; i++ {
+		ts := t0.Add(time.Duration(i) * time.Second)
+		seq, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("b-due-%d", i),
+			ProjectID: "proj-b",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+		bSeqs = append(bSeqs, seq)
+	}
+
+	now := t0.Add(time.Minute)
+	// Single due project gets full batch of 4 in exact (next_attempt_at, seq) order.
+	res1, err := cs.ClaimDurableItemsFair(ctx, "trigger.event", "owner-1", "", now, now.Add(30*time.Second), 4)
+	require.NoError(t, err)
+	batch := res1.Rows
+	require.Len(t, batch, 4)
+	assert.Equal(t, bSeqs[:4], []int64{batch[0].Seq, batch[1].Seq, batch[2].Seq, batch[3].Seq})
+
+	// Active leases are skipped; next claim gets the remaining 2 due items of proj-b.
+	res2, err := cs.ClaimDurableItemsFair(ctx, "trigger.event", "owner-2", "proj-b", now.Add(5*time.Second), now.Add(35*time.Second), 4)
+	require.NoError(t, err)
+	batch2 := res2.Rows
+	require.Len(t, batch2, 2)
+	assert.Equal(t, bSeqs[4:6], []int64{batch2[0].Seq, batch2[1].Seq})
+
+	// Fail batch[0] with backoff to +5m; renew batch[1]; complete batch[2]; let batch[3] expire.
+	held, err := cs.FailDurableItem(ctx, batch[0].Seq, "owner-1", store.DurableQueueFailure{
+		CountAttempt:  true,
+		NextAttemptAt: now.Add(5 * time.Minute),
+		LastError:     "transient",
+	})
+	require.NoError(t, err)
+	require.True(t, held)
+
+	held, err = cs.RenewDurableLease(ctx, batch[1].Seq, "owner-1", now.Add(2*time.Minute))
+	require.NoError(t, err)
+	require.True(t, held)
+
+	held, err = cs.CompleteDurableItem(ctx, batch[2].Seq, "owner-1")
+	require.NoError(t, err)
+	require.True(t, held)
+
+	// At now+40s: batch[3] and batch2[0..1] leases are expired; batch[1] still leased; batch[0] in backoff.
+	res3, err := cs.ClaimDurableItemsFair(ctx, "trigger.event", "owner-3", "", now.Add(40*time.Second), now.Add(2*time.Minute), 4)
+	require.NoError(t, err)
+	reclaimed := res3.Rows
+	require.Len(t, reclaimed, 3)
+	assert.Equal(t, []int64{bSeqs[3], bSeqs[4], bSeqs[5]}, []int64{reclaimed[0].Seq, reclaimed[1].Seq, reclaimed[2].Seq})
+}
+
+func TestDurableQueueClaimFair_ConcurrentClaimersNoDuplicateNoLoss(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	now := time.Date(2026, 11, 20, 13, 0, 0, 0, time.UTC)
+
+	for round := 0; round < 5; round++ {
+		kind := fmt.Sprintf("claim.fair_round_%d", round)
+		expected := make(map[int64]bool, 30)
+		for i := 0; i < 30; i++ {
+			seq, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+				Kind:      kind,
+				DedupKey:  fmt.Sprintf("item-%02d", i),
+				ProjectID: fmt.Sprintf("proj-%d", i%5),
+				Payload:   []byte(`{}`),
+				CreatedAt: now,
+				NotBefore: now,
+			})
+			require.NoError(t, err)
+			expected[seq] = true
+		}
+
+		start := make(chan struct{})
+		var (
+			c1, c2     []store.DurableQueueRow
+			err1, err2 error
+			wg         sync.WaitGroup
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			var r store.DurableQueueFairClaimResult
+			r, err1 = cs.ClaimDurableItemsFair(ctx, kind, "fair-claimer-1", "", now, now.Add(time.Minute), 20)
+			c1 = r.Rows
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			var r store.DurableQueueFairClaimResult
+			r, err2 = cs.ClaimDurableItemsFair(ctx, kind, "fair-claimer-2", "proj-2", now, now.Add(time.Minute), 20)
+			c2 = r.Rows
+		}()
+		close(start)
+		wg.Wait()
+
+		require.NoError(t, err1)
+		require.NoError(t, err2)
+		assert.GreaterOrEqual(t, len(c1), 10, "round %d: fair-claimer-1 should claim at least 10 of 30 rows", round)
+		assert.GreaterOrEqual(t, len(c2), 10, "round %d: fair-claimer-2 should claim at least 10 of 30 rows", round)
+		assert.Equal(t, 30, len(c1)+len(c2), "round %d: disjoint fair claims must partition all 30 rows", round)
+
+		seen := make(map[int64]string, 30)
+		for _, r := range c1 {
+			assert.NotContains(t, seen, r.Seq, "round %d: duplicate seq %d in fair-claimer-1", round, r.Seq)
+			seen[r.Seq] = "fair-claimer-1"
+		}
+		for _, r := range c2 {
+			assert.NotContains(t, seen, r.Seq, "round %d: seq %d claimed by both fair claimers", round, r.Seq)
+			seen[r.Seq] = "fair-claimer-2"
+		}
+		assert.Len(t, seen, len(expected))
+	}
+}
+
+func TestDurableQueueClaimFair_FutureBacklogBoundedCostAndResumeCursor(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	now := time.Date(2026, 11, 20, 16, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour)
+
+	// Subtest 1: 40 backoff-only projects (p00..p39) + 1 due project (p40), limit=4 (probeBudget=16).
+	// Verify each store call respects its per-tx probe budget, sets Exhausted=true until p40 is found,
+	// and reports Exhausted=false once the cycle completes.
+	const backoffProjects = 40
+	err := cs.WithTx(ctx, func(tx store.Store) error {
+		for p := 0; p < backoffProjects; p++ {
+			proj := fmt.Sprintf("p%02d", p)
+			for i := 0; i < 3; i++ {
+				if _, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+					Kind:      "trigger.backoff_budget",
+					DedupKey:  fmt.Sprintf("%s-%d", proj, i),
+					ProjectID: proj,
+					Payload:   []byte(`{}`),
+					CreatedAt: now,
+					NotBefore: future,
+				}); err != nil {
+					return err
+				}
+			}
+		}
+		_, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+			Kind:      "trigger.backoff_budget",
+			DedupKey:  "p40-due",
+			ProjectID: "p40",
+			Payload:   []byte(`{}`),
+			CreatedAt: now,
+			NotBefore: now,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	// Call 1 (cursor=""): probes p00..p15 (16 projects), returns 0 rows, Exhausted=true, Wrapped=false.
+	r1, err := cs.ClaimDurableItemsFair(ctx, "trigger.backoff_budget", "w1", "", now, now.Add(time.Minute), 4)
+	require.NoError(t, err)
+	assert.Empty(t, r1.Rows)
+	assert.Equal(t, "p15", r1.NextCursor)
+	assert.True(t, r1.Exhausted)
+	assert.False(t, r1.Wrapped)
+
+	// Call 2 (cursor="p15"): probes p16..p31 (16 projects), returns 0 rows, Exhausted=true, Wrapped=false.
+	r2, err := cs.ClaimDurableItemsFair(ctx, "trigger.backoff_budget", "w1", r1.NextCursor, now, now.Add(time.Minute), 4)
+	require.NoError(t, err)
+	assert.Empty(t, r2.Rows)
+	assert.Equal(t, "p31", r2.NextCursor)
+	assert.True(t, r2.Exhausted)
+	assert.False(t, r2.Wrapped)
+
+	// Call 3 (cursor="p31"): probes p32..p40 (9 projects), wraps and probes p00..p06 (7 projects) to fill budget,
+	// claiming p40 with Wrapped=true and NextCursor="p06" (furthest probed project).
+	r3, err := cs.ClaimDurableItemsFair(ctx, "trigger.backoff_budget", "w1", r2.NextCursor, now, now.Add(time.Minute), 4)
+	require.NoError(t, err)
+	require.Len(t, r3.Rows, 1)
+	assert.Equal(t, "p40", r3.Rows[0].ProjectID)
+	assert.Equal(t, "p06", r3.NextCursor)
+	assert.True(t, r3.Wrapped)
+	assert.True(t, r3.Exhausted)
+
+	// Subtest 2: many future rows in one project (p-aaa) + 1 due row in p-zzz.
+	// Pure-index walk + 4-column per-project probe must skip all future rows in O(log N).
+	const futureRows = 10_000
+	const chunkSize = 500
+	for start := 0; start < futureRows; start += chunkSize {
+		end := min(start+chunkSize, futureRows)
+		builders := make([]*ent.DurableQueueItemCreate, 0, end-start)
+		for i := start; i < end; i++ {
+			builders = append(builders, cs.client.DurableQueueItem.Create().
+				SetKind("trigger.heavy_backoff").
+				SetDedupKey(fmt.Sprintf("fut-%05d", i)).
+				SetProjectID("p-aaa").
+				SetPayload("{}").
+				SetNotBefore(future).
+				SetCreatedAt(now).
+				SetNextAttemptAt(future))
+		}
+		require.NoError(t, cs.client.DurableQueueItem.CreateBulk(builders...).Exec(ctx))
+	}
+	_, err = cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+		Kind:      "trigger.heavy_backoff",
+		DedupKey:  "due-zzz",
+		ProjectID: "p-zzz",
+		Payload:   []byte(`{}`),
+		CreatedAt: now,
+		NotBefore: now,
+	})
+	require.NoError(t, err)
+
+	claimStart := time.Now()
+	claimedRes, err := cs.ClaimDurableItemsFair(ctx, "trigger.heavy_backoff", "w-heavy", "p-zzz", now, now.Add(time.Minute), 4)
+	claimElapsed := time.Since(claimStart)
+	require.NoError(t, err)
+	require.Len(t, claimedRes.Rows, 1)
+	assert.Equal(t, "p-zzz", claimedRes.Rows[0].ProjectID)
+	assert.False(t, claimedRes.Exhausted)
+	assert.True(t, claimedRes.Wrapped)
+	assert.Less(t, claimElapsed, 250*time.Millisecond, "fair claim over 10k future rows must stay O(log N), took %s", claimElapsed)
+
+	// Idle queue (0 due rows, 10k future rows) must also stay fast and report Exhausted=false.
+	idleStart := time.Now()
+	idleRes, err := cs.ClaimDurableItemsFair(ctx, "trigger.heavy_backoff", "w-idle", "p-zzz", now, now.Add(time.Minute), 4)
+	idleElapsed := time.Since(idleStart)
+	require.NoError(t, err)
+	assert.Empty(t, idleRes.Rows)
+	assert.False(t, idleRes.Exhausted)
+	assert.True(t, idleRes.Wrapped)
+	assert.Less(t, idleElapsed, 250*time.Millisecond, "idle fair claim over 10k future rows must stay O(log N), took %s", idleElapsed)
+}
