@@ -263,7 +263,7 @@ func TestFixtureProvenance_ScheduledDispatchStamped(t *testing.T) {
 	want := e.stamp()
 	fxID := e.fx.Identity.ID
 
-	require.NoError(t, e.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+	require.NoError(t, fireScheduledActionForTest(ctx, e.srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 		ID: "evt-fp-user", ProjectID: e.project, EventType: "dispatch_agent",
 		Payload: `{"agentName":"fp-sched-user","task":"t"}`, CreatedBy: fxID,
 	}, fxID)))
@@ -276,7 +276,7 @@ func TestFixtureProvenance_ScheduledDispatchStamped(t *testing.T) {
 	fpAssertEdgeDelegator(t, e.store, byUser.ID, store.DelegationPrincipalUser, fxID)
 
 	parent := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fp-sched-parent")
-	require.NoError(t, e.srv.dispatchAgentEventHandler()(ctx, withAgentRevision(t, e.srv, store.ScheduledEvent{
+	require.NoError(t, fireScheduledActionForTest(ctx, e.srv, "dispatch_agent", withAgentRevision(t, e.srv, store.ScheduledEvent{
 		ID: "evt-fp-agent", ProjectID: e.project, EventType: "dispatch_agent",
 		Payload: `{"agentName":"fp-sched-agent","task":"t"}`, CreatedBy: parent,
 	}, parent)))

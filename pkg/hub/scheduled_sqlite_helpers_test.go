@@ -120,7 +120,7 @@ func (f *schedFire) event(agentName string) store.ScheduledEvent {
 
 func (f *schedFire) fire(t *testing.T, evt store.ScheduledEvent) error {
 	t.Helper()
-	return f.srv.dispatchAgentEventHandler()(context.Background(), evt)
+	return fireScheduledActionForTest(context.Background(), f.srv, "dispatch_agent", evt)
 }
 
 // child returns the scheduled child for slug and its single active edge.

@@ -658,7 +658,8 @@ func TestExecuteSchedule_ErroredRowBlocksEveryFire(t *testing.T) {
 	t.Cleanup(pub.Close)
 	f.srv.SetEventPublisher(pub)
 	f.srv.scheduler = NewScheduler(f.store, slog.Default())
-	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+	f.srv.scheduler.srv = f.srv
+	f.srv.RegisterAction(&dispatchAgentAction{srv: f.srv})
 
 	errored := &store.Agent{ID: api.NewUUID(), Slug: "sched-blocked-r", Name: "sched-blocked-r", ProjectID: f.proj.ID}
 	require.NoError(t, f.store.CreateAgent(ctx, errored))
@@ -717,7 +718,8 @@ func TestExecuteSchedule_PlacementRefusedRowDoesNotAdviseDelete(t *testing.T) {
 	t.Cleanup(pub.Close)
 	f.srv.SetEventPublisher(pub)
 	f.srv.scheduler = NewScheduler(f.store, slog.Default())
-	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+	f.srv.scheduler.srv = f.srv
+	f.srv.RegisterAction(&dispatchAgentAction{srv: f.srv})
 
 	errored := &store.Agent{
 		ID: api.NewUUID(), Slug: "sched-placement-r", Name: "sched-placement-r", ProjectID: f.proj.ID,

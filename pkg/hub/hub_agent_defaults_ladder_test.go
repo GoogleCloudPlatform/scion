@@ -978,7 +978,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_MissingTemplate_DoesNotFai
 	logs := captureHarnessLogs(srv)
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "deleted-template"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-ghost-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
@@ -1010,7 +1010,7 @@ func TestDispatchAgentEventHandler_PayloadTemplate_Missing_KeepsName(t *testing.
 	logs := captureHarnessLogs(srv)
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "deleted-template"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-payload-ghost-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
@@ -1058,7 +1058,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_StoreError_KeepsName(t *te
 	logs := captureHarnessLogs(srv)
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-store-error",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
@@ -1087,7 +1087,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_Applies(t *testing.T) {
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-tmpl-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
@@ -1115,7 +1115,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotatio
 		srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
-		err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+		err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 			ID:        "dispatch-rank-payload",
 			ProjectID: "project-1",
 			EventType: "dispatch_agent",
@@ -1140,7 +1140,7 @@ func TestDispatchAgentEventHandler_HubDefaultTemplate_LosesToPayloadAndAnnotatio
 		srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTemplate: "hub-tmpl"})
 
-		err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+		err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 			ID:        "dispatch-rank-annotation",
 			ProjectID: "project-1",
 			EventType: "dispatch_agent",
@@ -1195,7 +1195,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_Applies(t *testing.T)
 	srv := newEventHandlerTestServer(&resolvingHarnessConfigStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-wide-hc"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-hc-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
@@ -1240,7 +1240,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToProjectAnnotat
 	srv := newEventHandlerTestServer(&resolvingHarnessConfigStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-hc-x"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-hc-annotation",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
@@ -1268,7 +1268,7 @@ func TestDispatchAgentEventHandler_HubDefaultHarnessConfig_LosesToTemplate(t *te
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 	setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-wide-hc"})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-hub-hc-2",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
@@ -1295,7 +1295,7 @@ func TestDispatchAgentEventHandler_FileMode_NoHubDefaultRungFires(t *testing.T) 
 	require.Equal(t, opsettings.AgentDefaultsSettings{}, srv.hubAgentDefaults(),
 		"file-mode precondition: no hub agent defaults are cached")
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-file-mode-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",

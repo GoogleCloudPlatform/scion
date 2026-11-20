@@ -16,29 +16,22 @@ package hub
 
 import (
 	"context"
-	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 )
 
-// scheduledFireTracker adapts the hub's wakeFireRun and scheduledWakeFires
-// tracking to the source-neutral hubfire.FireTracker interface without
-// renaming wakeFireRun or scheduledWakeFires (Phase 2 owns detachedFireRun).
+// scheduledFireTracker adapts the hub's detachedFireRun and scheduledDetachedFires
+// tracking to the source-neutral hubfire.FireTracker interface.
 type scheduledFireTracker struct {
 	srv    *Server
 	fireID string
-
-	mu  sync.Mutex
-	run *wakeFireRun
 }
 
-func newScheduledFireTracker(srv *Server, fireID string, run *wakeFireRun) hubfire.FireTracker {
+func newScheduledFireTracker(srv *Server, fireID string) hubfire.FireTracker {
 	return &scheduledFireTracker{
 		srv:    srv,
 		fireID: fireID,
-		run:    run,
 	}
 }
 
@@ -53,21 +46,16 @@ func (t *scheduledFireTracker) Admit(ctx context.Context) (context.Context, func
 	if abort, _ := ctx.Value(scheduledFireAbortKey{}).(context.Context); abort != nil {
 		return ctx, func() {}, true
 	}
-	trackCtx, endWork, ok := t.srv.scheduledWakeFires.begin()
+	trackCtx, endWork, ok := t.srv.scheduledDetachedFires.begin()
 	if !ok {
 		return ctx, func() {}, false
 	}
-	run := &wakeFireRun{eventID: t.fireID, ranAt: time.Now()}
-	t.mu.Lock()
-	if t.run == nil {
-		t.run = run
-	}
-	t.mu.Unlock()
-	t.srv.runningWakeFires.add(run)
+	run := &detachedFireRun{eventID: t.fireID, ranAt: time.Now()}
+	t.srv.runningDetachedFires.add(run)
 	fireCtx, cancelFire := context.WithCancel(ctx)
 	stop := context.AfterFunc(trackCtx, cancelFire)
 	releaseRun := func() {
-		t.srv.runningWakeFires.remove(run)
+		t.srv.runningDetachedFires.remove(run)
 		endWork()
 	}
 	if scope := oneShotFireScopeFromContext(ctx); scope != nil {
@@ -82,21 +70,4 @@ func (t *scheduledFireTracker) Admit(ctx context.Context) (context.Context, func
 		cancelFire()
 		releaseRun()
 	}, true
-}
-
-// Record executes write at most once against the wakeFireRun injected into
-// newScheduledFireTracker or registered with runningWakeFires by Admit. When
-// neither happened, Record refuses (logs an error and returns false) rather
-// than creating a private wakeFireRun outside shutdown/abandon coordination.
-func (t *scheduledFireTracker) Record(write func()) bool {
-	t.mu.Lock()
-	run := t.run
-	t.mu.Unlock()
-	if run == nil {
-		slog.Error("fire tracker Record called without an admitted or injected run",
-			"fireID", t.fireID,
-		)
-		return false
-	}
-	return run.tryRecord(write)
 }

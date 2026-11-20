@@ -68,7 +68,9 @@ func TestPhase9f_Scheduler_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 	// Enable the envelope switch.
 	enableReadSwitch(t, srv)
 
-	handler := srv.messageEventHandler()
+	handler := func(ctx context.Context, evt store.ScheduledEvent) error {
+		return fireScheduledActionForTest(ctx, srv, "message", evt)
+	}
 	payload, _ := json.Marshal(MessageEventPayload{
 		AgentName: "9f-sched-on-agent",
 		Message:   "Phase 9f scheduler delivery text test",
@@ -127,7 +129,9 @@ func TestPhase9f_Scheduler_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
 
 	// Do NOT enable the envelope switch — default is OFF.
 
-	handler := srv.messageEventHandler()
+	handler := func(ctx context.Context, evt store.ScheduledEvent) error {
+		return fireScheduledActionForTest(ctx, srv, "message", evt)
+	}
 	payload, _ := json.Marshal(MessageEventPayload{
 		AgentName: "9f-sched-off-agent",
 		Message:   "Phase 9f scheduler legacy test",

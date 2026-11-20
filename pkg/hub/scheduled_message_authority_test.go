@@ -84,7 +84,7 @@ func (f *schedMsg) msgEvent() store.ScheduledEvent {
 
 func (f *schedMsg) fireMsg(t *testing.T, evt store.ScheduledEvent) error {
 	t.Helper()
-	return f.srv.messageEventHandler()(context.Background(), evt)
+	return fireScheduledActionForTest(context.Background(), f.srv, "message", evt)
 }
 
 // sessionAgent creates the fixture sender agent and clears its create dispatch
@@ -313,7 +313,8 @@ func TestScheduledMessageAuthority(t *testing.T) {
 		grantFixtureRole(t, f.bypassAgentsFixture, ownerUser.ID, store.ProjectRoleOwner)
 		owner := authUser(ownerUser)
 		f.srv.scheduler = NewScheduler(f.store, slog.Default())
-		f.srv.scheduler.RegisterEventHandler("message", f.srv.messageEventHandler())
+		f.srv.scheduler.srv = f.srv
+		f.srv.RegisterAction(&messageAction{srv: f.srv})
 
 		// A legacy message schedule: CreatedBy only, no recorded revision.
 		legacy := f.msgEvent()

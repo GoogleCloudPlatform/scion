@@ -33,7 +33,7 @@ func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *tes
 	linkScheduledDispatchBroker(t, s, project.ID)
 	ctx := context.Background()
 
-	err := srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(ctx, srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 		ID:        tid("scheduled-dispatch-user-role"),
 		ProjectID: project.ID,
 		EventType: "dispatch_agent",
@@ -51,7 +51,7 @@ func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *tes
 	require.Equal(t, string(AgentRoleFull), child.AppliedConfig.AgentRole)
 	require.False(t, child.AppliedConfig.NoAuth)
 
-	err = srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+	err = fireScheduledActionForTest(ctx, srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 		ID:        tid("scheduled-dispatch-user-noauth"),
 		ProjectID: project.ID,
 		EventType: "dispatch_agent",

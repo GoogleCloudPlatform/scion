@@ -2305,15 +2305,15 @@ type Server struct {
 	// it before the store closes (broker_work.go, ptone/scion#4869).
 	brokerWork brokerWorkTracker
 
-	// scheduledWakeFires admits and joins recurring wake fires
-	// (ptone/scion#7734), which run off the schedule evaluator loop
+	// scheduledDetachedFires admits and joins recurring detached fires (wake
+	// and exec, ptone/scion#7734), which run off the schedule evaluator loop
 	// (executeSchedule). Admission closes when the hub stops its dispatch
 	// producers; the background teardown joins them, bounded by
-	// scheduledWakeFireStopGrace.
-	scheduledWakeFires brokerWorkTracker
-	// runningWakeFires are the recurring wake fires in flight, so shutdown
-	// can record the outcome of one it gave up waiting for.
-	runningWakeFires wakeFireRuns
+	// scheduledDetachedFireStopGrace.
+	scheduledDetachedFires brokerWorkTracker
+	// runningDetachedFires are the recurring detached fires in flight, so
+	// shutdown can record the outcome of one it gave up waiting for.
+	runningDetachedFires detachedFireRuns
 
 	// execRuns tracks scheduled exec runs in flight on this replica
 	// (ptone/scion#7883): the inline fires up to exec-start and the
@@ -6778,7 +6778,7 @@ func scheduledBrokerRemedy(project *store.Project, providerCount int) string {
 func (s *Server) evaluateSchedulesHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		now := time.Now().UTC()
-		s.recoverAbandonedWakeFires(ctx, now, false)
+		s.recoverAbandonedDetachedFires(ctx, now, false)
 		dueSchedules, err := s.store.ListDueSchedules(ctx, now)
 		if err != nil {
 			slog.Error("schedule-evaluator: failed to list due schedules",
@@ -6928,10 +6928,10 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	// recorded without touching next_run_at. Once the hub is shutting down
 	// it is not started and is recorded as failed.
 	if detachedFire {
-		run := &wakeFireRun{eventID: evt.ID, scheduleID: sched.ID, ranAt: now, isExec: execFire}
-		s.runningWakeFires.add(run)
-		if s.scheduledWakeFires.goTracked(func(trackCtx context.Context) {
-			defer s.runningWakeFires.remove(run)
+		run := &detachedFireRun{eventID: evt.ID, scheduleID: sched.ID, ranAt: now, isExec: execFire}
+		s.runningDetachedFires.add(run)
+		if s.scheduledDetachedFires.goTracked(func(trackCtx context.Context) {
+			defer s.runningDetachedFires.remove(run)
 			fireCtx, cancelFire := context.WithCancel(context.WithoutCancel(ctx))
 			defer cancelFire()
 			stop := context.AfterFunc(trackCtx, cancelFire)
@@ -6940,7 +6940,7 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		}) {
 			return
 		}
-		s.runningWakeFires.remove(run)
+		s.runningDetachedFires.remove(run)
 		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancelRecord()
 		if execFire {
@@ -6956,11 +6956,11 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	s.runScheduleFire(ctx, log, sched, evt, now, nextRunAt, nil)
 }
 
-// scheduledWakeFireStopGrace bounds how long shutdown waits for recurring
-// wake fires still running (scheduledWakeFires). It is short: a wake can
+// scheduledDetachedFireStopGrace bounds how long shutdown waits for recurring
+// wake fires still running (scheduledDetachedFires). It is short: a wake can
 // take minutes, so the wait only lets fires that are about to finish record
 // their outcome; the rest are logged.
-var scheduledWakeFireStopGrace = 5 * time.Second
+var scheduledDetachedFireStopGrace = 5 * time.Second
 
 // runScheduleFire runs the event materialized from sched and records its
 // outcome on the event and the schedule. run is set for a recurring wake
@@ -6969,7 +6969,7 @@ var scheduledWakeFireStopGrace = 5 * time.Second
 // next_run_at (RecordScheduleRun), and only once (the hub's shutdown may
 // record it first). A wake fire the shutdown aborted that did not deliver
 // records errScheduledWakeShutdown.
-func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched store.Schedule, evt store.ScheduledEvent, now, nextRunAt time.Time, run *wakeFireRun) {
+func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched store.Schedule, evt store.ScheduledEvent, now, nextRunAt time.Time, run *detachedFireRun) {
 	detachedFire := run != nil
 	var (
 		errMsg   string
@@ -6985,12 +6985,12 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 	// E.2b: mark this as deferred execution of the schedule, distinct from the
 	// initiator attribution just copied onto evt above.
 	exec := ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}
-	req := scheduledFireRequest(s, evt, exec, run)
+	req := scheduledFireRequest(s, evt, exec)
 	if req.ActionType == "" {
 		req.ActionType = sched.EventType
 	}
 	handlerCtx, cancel := context.WithTimeout(
-		withFireHistoryCreator(withLegacyScheduledEvent(ContextWithExecutor(ctx, exec), evt), evt.CreatedBy),
+		withFireHistoryCreator(ContextWithExecutor(ctx, exec), evt.CreatedBy),
 		scheduledEventHandlerTimeout)
 	// A detached fire runs on its own goroutine (executeSchedule), outside the
 	// scheduler's panic recovery: contain a handler panic here, as fireEvent
@@ -7015,6 +7015,7 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 			recorded = true
 			log.Info("schedule-evaluator: event outcome recorded by its handler", "status", out.Status)
 		case out.Detached && !detachedFire:
+			afterFn = nil
 			errMsg = "detached fire outcome without pre-fire Detaches declaration"
 			log.Error("schedule-evaluator: detached fire outcome without pre-fire Detaches declaration",
 				"event_type", req.ActionType, "schedule_id", sched.ID)
@@ -7034,12 +7035,12 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 
 	if recorded {
 		if detachedFire {
-			// Claim wakeFireRun without touching the DB: a detaching action
+			// Claim detachedFireRun without touching the DB: a detaching action
 			// returning FireOutcome.Detached must own the terminal write itself
 			// (for example, an admitted exec run whose tracker/sweeper owns
 			// event and schedule accounting), because a firing event claimed
 			// with this no-op is not recovered by the shutdown abandon sweep
-			// (recordAbandonedWakeFires).
+			// (recordAbandonedDetachedFires).
 			run.tryRecord(func() {})
 		}
 		return
@@ -7682,7 +7683,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 			scheduler.Stop()
 		}
 		s.stopTriggerDrainer(ctx)
-		s.stopScheduledWakeFires(ctx)
+		s.stopScheduledDetachedFires(ctx)
 		s.stopScheduledExecRuns(ctx)
 		if notificationDispatcher != nil {
 			notificationDispatcher.Stop()

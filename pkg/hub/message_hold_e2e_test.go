@@ -915,7 +915,7 @@ func TestHoldA2_3_ActiveHoldQueuesAllWritersAndDemotesInterrupt(t *testing.T) {
 		Payload: string(schedPayload), Status: store.ScheduledEventPending, CreatedBy: f.agent.ID,
 	}, f.agent.ID)
 	require.NoError(t, f.store.CreateScheduledEvent(ctx, &schedEvt))
-	require.NoError(t, f.srv.messageEventHandler()(ctx, schedEvt))
+	require.NoError(t, fireScheduledActionForTest(ctx, f.srv, "message", schedEvt))
 
 	// Zero broker dispatches occurred while the hold marker was active!
 	assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug), "holdOrDispatch must queue behind active hold without calling broker")
@@ -1672,7 +1672,7 @@ func TestHoldA2_10_SuspendedCloudRunWakeHoldAndRedrive(t *testing.T) {
 		// messageEventHandler wakes the suspended Cloud Run agent (HTTP status
 		// becomes running before Conduit session connects) and dispatches the
 		// persisted message row.
-		require.NoError(t, f.srv.messageEventHandler()(ctx, evt))
+		require.NoError(t, fireScheduledActionForTest(ctx, f.srv, "message", evt))
 
 		listed, err := f.store.ListMessages(ctx, store.MessageFilter{AgentID: f.launched.ID}, store.ListOptions{Limit: 10})
 		require.NoError(t, err)
@@ -2241,7 +2241,7 @@ func TestHoldA2_Round1_REQ4_FlagOffMatchesPhaseAForSchedulerAndBrokerInbound(t *
 			Payload: payload, Status: store.ScheduledEventPending, CreatedBy: f.agent.ID,
 		}, f.agent.ID)
 		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
-		require.NoError(t, f.srv.messageEventHandler()(ctx, evt))
+		require.NoError(t, fireScheduledActionForTest(ctx, f.srv, "message", evt))
 
 		listed, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: f.launched.ID}, store.ListOptions{Limit: 10})
 		require.NoError(t, err)

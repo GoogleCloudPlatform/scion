@@ -833,7 +833,7 @@ func TestDeleteUser_ScheduledAgentDenied(t *testing.T) {
 		dave := newActiveMember(t, s, "user-dave-headless", "dave-headless@test.com")
 		grantProjectRole(t, s, dave.ID, project.ID, store.ProjectRoleMember)
 
-		require.NoError(t, srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+		require.NoError(t, fireScheduledActionForTest(ctx, srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 			ID:        tid("dave-headless-evt"),
 			ProjectID: project.ID,
 			EventType: "dispatch_agent",

@@ -220,7 +220,7 @@ func TestMessageID3881_SchedulerOmitsMessageID(t *testing.T) {
 		ID: api.NewUUID(), ProjectID: projectID, EventType: "message", Payload: string(payload),
 		Status: store.ScheduledEventPending, CreatedBy: tid("msgid3881-sched-a"),
 	}, tid("msgid3881-sched-a"))
-	require.NoError(t, srv.messageEventHandler()(context.Background(), evt))
+	require.NoError(t, fireScheduledActionForTest(context.Background(), srv, "message", evt))
 
 	calls := dispatcher.getCalls()
 	require.Len(t, calls, 1)
@@ -248,7 +248,7 @@ func TestMessageID3881_SchedulerCarriesStoredMessageIDWithConduitDeliver(t *test
 		Status: store.ScheduledEventPending, CreatedBy: f.agent.ID,
 	}, f.agent.ID)
 	require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
-	require.NoError(t, f.srv.messageEventHandler()(ctx, evt))
+	require.NoError(t, fireScheduledActionForTest(ctx, f.srv, "message", evt))
 
 	calls := dispatcher.getCalls()
 	require.Len(t, calls, 1)

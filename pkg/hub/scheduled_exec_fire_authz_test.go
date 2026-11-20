@@ -85,7 +85,11 @@ func (f *schedExec) authorize(t *testing.T, evt store.ScheduledEvent) error {
 	t.Helper()
 	p, err := decodeScheduledExecPayload(evt.Payload)
 	require.NoError(t, err)
-	_, _, _, err = f.srv.authorizeScheduledExecFire(context.Background(), evt, p)
+	auth, identity, err := resolveScheduledAuthorityForTest(context.Background(), f.srv, evt)
+	if err != nil {
+		return err
+	}
+	_, err = f.srv.authorizeExecFire(context.Background(), evt.ProjectID, auth, identity, p)
 	return err
 }
 
@@ -94,7 +98,7 @@ func (f *schedExec) authorize(t *testing.T, evt store.ScheduledEvent) error {
 func (f *schedExec) assertRefused(t *testing.T, evt store.ScheduledEvent) {
 	t.Helper()
 	logs := captureDefaultLog(t)
-	err := f.srv.fireScheduledExec(context.Background(), evt)
+	err := fireScheduledActionForTest(context.Background(), f.srv, scheduledEventTypeExec, evt)
 	require.Error(t, err)
 	assert.Equal(t, execReasonRefused, err.Error())
 	_, ok := asScheduledSkip(err)
@@ -115,7 +119,7 @@ func TestScheduledExecFire_AuthzMatrix(t *testing.T) {
 		require.NoError(t, f.authorize(t, evt))
 		// Past authorization the fire reaches exec-start; with no conduit
 		// router here the hub gate stops it (skipped, never failed).
-		err := f.srv.fireScheduledExec(ctx, evt)
+		err := fireScheduledActionForTest(ctx, f.srv, scheduledEventTypeExec, evt)
 		reason, ok := asScheduledSkip(err)
 		require.True(t, ok, "%v", err)
 		assert.Equal(t, execReasonDisabled, reason)
@@ -308,7 +312,7 @@ func TestScheduledExecFire_Preflight(t *testing.T) {
 			tc.mutate(a)
 			require.NoError(t, f.store.UpdateAgent(ctx, a))
 			evt := withSessionRevision(f.execEvent(f.target, "true"), f.creator.ID)
-			err = f.srv.fireScheduledExec(ctx, evt)
+			err = fireScheduledActionForTest(ctx, f.srv, scheduledEventTypeExec, evt)
 			reason, ok := asScheduledSkip(err)
 			require.True(t, ok, "%v", err)
 			assert.Equal(t, execReasonTargetNotRunning, reason)
@@ -325,7 +329,7 @@ func TestScheduledExecFire_Preflight(t *testing.T) {
 			f := newSchedExec(t, "sexec-flag")
 			setHubExperiments(t, f.srv, flags)
 			evt := withSessionRevision(f.execEvent(f.target, "true"), f.creator.ID)
-			reason, ok := asScheduledSkip(f.srv.fireScheduledExec(ctx, evt))
+			reason, ok := asScheduledSkip(fireScheduledActionForTest(ctx, f.srv, scheduledEventTypeExec, evt))
 			require.True(t, ok)
 			assert.Equal(t, execReasonDisabled, reason)
 		}
@@ -335,7 +339,7 @@ func TestScheduledExecFire_Preflight(t *testing.T) {
 		f := newSchedExec(t, "sexec-late")
 		evt := withSessionRevision(f.execEvent(f.target, "true"), f.creator.ID)
 		evt.FireAt = time.Now().Add(-scheduledExecMaxWindow - time.Minute)
-		reason, ok := asScheduledSkip(f.srv.fireScheduledExec(ctx, evt))
+		reason, ok := asScheduledSkip(fireScheduledActionForTest(ctx, f.srv, scheduledEventTypeExec, evt))
 		require.True(t, ok)
 		assert.Equal(t, execReasonMissedWindow, reason)
 	})
@@ -353,7 +357,7 @@ func TestScheduledExecFire_Preflight(t *testing.T) {
 		} {
 			evt := withSessionRevision(f.execEvent(f.target, "true"), f.creator.ID)
 			evt.Payload = raw
-			err := f.srv.fireScheduledExec(ctx, evt)
+			err := fireScheduledActionForTest(ctx, f.srv, scheduledEventTypeExec, evt)
 			require.ErrorIs(t, err, errScheduledExecPayloadInvalid, raw)
 		}
 	})
@@ -370,7 +374,7 @@ func TestScheduledExecFire_Preflight(t *testing.T) {
 			scheduledExecSeamMu.Unlock()
 		})
 		evt := withSessionRevision(f.execEvent(f.target, "true"), f.creator.ID)
-		reason, ok := asScheduledSkip(f.srv.fireScheduledExec(ctx, evt))
+		reason, ok := asScheduledSkip(fireScheduledActionForTest(ctx, f.srv, scheduledEventTypeExec, evt))
 		require.True(t, ok)
 		assert.Equal(t, execReasonCapacity, reason)
 	})
@@ -380,7 +384,7 @@ func TestScheduledExecFire_Preflight(t *testing.T) {
 		evt := withSessionRevision(f.execEvent(f.target, "true"), f.creator.ID)
 		evt.ScheduleID = api.NewUUID()
 		evt.FireAt = time.Now().Add(-15 * time.Minute)
-		reason, ok := asScheduledSkip(f.srv.fireScheduledExec(ctx, evt))
+		reason, ok := asScheduledSkip(fireScheduledActionForTest(ctx, f.srv, scheduledEventTypeExec, evt))
 		require.True(t, ok)
 		assert.Equal(t, execReasonMissedWindow, reason)
 	})

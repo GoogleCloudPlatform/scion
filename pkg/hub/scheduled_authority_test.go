@@ -178,7 +178,7 @@ func TestSchedAgentPrincipalCarriesStoredAncestry(t *testing.T) {
 	parent := f.sessionAgent(t, "sched-anc-p")
 	require.NotEmpty(t, parent.Ancestry)
 
-	_, identity, err := f.srv.resolveScheduledAuthority(context.Background(), withAgentRevision(t, f.srv, f.event("sched-anc-c"), parent.ID))
+	_, identity, err := resolveScheduledAuthorityForTest(context.Background(), f.srv, withAgentRevision(t, f.srv, f.event("sched-anc-c"), parent.ID))
 	require.NoError(t, err)
 	agentIdent, ok := identity.(*agentIdentityWrapper)
 	require.True(t, ok)
@@ -282,7 +282,8 @@ func TestSchedUATRevokedOrExpiredDeniesFire(t *testing.T) {
 			}
 			require.NoError(t, f.store.CreateSchedule(ctx, sched))
 			f.srv.scheduler = NewScheduler(f.store, slog.Default())
-			f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+			f.srv.scheduler.srv = f.srv
+			f.srv.RegisterAction(&dispatchAgentAction{srv: f.srv})
 			f.srv.executeSchedule(ctx, *sched, time.Now())
 			res, err := f.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{ScheduleID: sched.ID}, store.ListOptions{})
 			require.NoError(t, err)
@@ -397,7 +398,8 @@ func TestSchedRevisionWithoutCeilingDenied(t *testing.T) {
 	}
 	require.NoError(t, f.store.CreateSchedule(ctx, sched))
 	f.srv.scheduler = NewScheduler(f.store, slog.Default())
-	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+	f.srv.scheduler.srv = f.srv
+	f.srv.RegisterAction(&dispatchAgentAction{srv: f.srv})
 	f.srv.executeSchedule(ctx, *sched, time.Now())
 	res, err := f.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{ScheduleID: sched.ID}, store.ListOptions{})
 	require.NoError(t, err)
@@ -421,7 +423,8 @@ func TestSchedUnrecordedCeilingRemedyFires(t *testing.T) {
 	grantFixtureRole(t, f.bypassAgentsFixture, ownerUser.ID, store.ProjectRoleOwner)
 	owner := authUser(ownerUser)
 	f.srv.scheduler = NewScheduler(f.store, slog.Default())
-	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+	f.srv.scheduler.srv = f.srv
+	f.srv.RegisterAction(&dispatchAgentAction{srv: f.srv})
 
 	sched := &store.Schedule{
 		ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "remedy", CronExpr: "0 * * * *",
@@ -805,16 +808,15 @@ func TestSchedDispatchFailureCompensates(t *testing.T) {
 
 // --- fire-time writes never use the request ceiling ---------------------------
 
-// The fire path takes its ceiling and provenance from scheduledEffectCeiling:
+// The fire path takes its ceiling and provenance from fireEffectCeiling:
 // none of its functions calls sourceEffectCeiling.
 func TestSchedFireNeverCallsSourceEffectCeiling(t *testing.T) {
 	firePath := map[string][]string{
-		"server.go":                       {"applyScheduledProjectDefaultGCPIdentity", "executeSchedule"},
-		"scheduled_authority.go":          {"resolveScheduledAuthority", "intersectEffectCeilings"},
-		"firecore_authority.go":           {"resolveRecordedAuthority", "resolveFireUser", "resolveFireAgent", "fireRevisionCeilingConsistent", "fireEffectCeiling"},
-		"action_dispatch_agent.go":        {"Authorize", "Fire", "authorizeDispatchAgentFire"},
-		"agent_create_headless.go":        {"createAgentHeadless"},
-		"firecore_legacy_helpers_test.go": {"scheduledEffectCeiling", "authorizeScheduledAgentCreate", "scheduledCreatorIdentity", "dispatchAgentEventHandler"},
+		"server.go":                {"applyScheduledProjectDefaultGCPIdentity", "executeSchedule"},
+		"scheduled_authority.go":   {"intersectEffectCeilings"},
+		"firecore_authority.go":    {"resolveRecordedAuthority", "resolveFireUser", "resolveFireAgent", "fireRevisionCeilingConsistent", "fireEffectCeiling"},
+		"action_dispatch_agent.go": {"Authorize", "Fire", "authorizeDispatchAgentFire"},
+		"agent_create_headless.go": {"createAgentHeadless"},
 	}
 	fset := token.NewFileSet()
 	for file, funcs := range firePath {
@@ -1062,7 +1064,7 @@ func TestSchedUserAccountStatusOutcomes(t *testing.T) {
 	f := newSchedFire(t, "sched-acct")
 	ctx := context.Background()
 
-	_, identity, err := f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-active"), f.creator.ID))
+	_, identity, err := resolveScheduledAuthorityForTest(ctx, f.srv, withSessionRevision(f.event("sched-acct-active"), f.creator.ID))
 	require.NoError(t, err)
 	assert.True(t, identity != nil, "active principal has an identity")
 
@@ -1071,12 +1073,12 @@ func TestSchedUserAccountStatusOutcomes(t *testing.T) {
 		grantFixtureRole(t, f.bypassAgentsFixture, u.ID, store.ProjectRoleMember)
 		u.Status = status
 		require.NoError(t, f.store.UpdateUser(ctx, u))
-		_, _, err := f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-"+status), u.ID))
+		_, _, err := resolveScheduledAuthorityForTest(ctx, f.srv, withSessionRevision(f.event("sched-acct-"+status), u.ID))
 		require.ErrorIs(t, err, errScheduledAuthorityDenied, status)
 		assert.Contains(t, err.Error(), reasonPrincipalInactive, status)
 	}
 
-	_, _, err = f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-missing"), "no-such-user"))
+	_, _, err = resolveScheduledAuthorityForTest(ctx, f.srv, withSessionRevision(f.event("sched-acct-missing"), "no-such-user"))
 	require.ErrorIs(t, err, errScheduledAuthorityDenied)
 	assert.Contains(t, err.Error(), reasonPrincipalInactive)
 }

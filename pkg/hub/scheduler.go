@@ -168,10 +168,9 @@ type Scheduler struct {
 	// srv is the owning Hub server when wired (nil in standalone scheduler tests).
 	srv *Server
 
-	// legacyHandlers backs standalone NewScheduler unit tests where srv is nil.
+	// actions backs standalone NewScheduler unit tests where srv is nil.
 	// When srv is wired, Server.actions is the single action registry.
-	// Removed in PR 2 (ptone/scion#8029).
-	legacyHandlers map[string]EventHandler
+	actions actionRegistry
 
 	// Tick counter (monotonically increasing). Written by the ticker loop and
 	// read concurrently by handler goroutines and Status(), so it is atomic.
@@ -270,15 +269,45 @@ func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Sc
 	return s
 }
 
+// RegisterAction registers a FireAction on Server.actions when s.srv is set,
+// or on s.actions when s.srv is nil (standalone NewScheduler unit tests).
+func (s *Scheduler) RegisterAction(a FireAction) {
+	if s.srv != nil {
+		s.srv.RegisterAction(a)
+		return
+	}
+	s.actions.Register(a)
+}
+
 func (s *Scheduler) fireAction(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
 	if s.srv != nil {
 		return s.srv.fireAction(ctx, req)
 	}
-	if h, ok := s.legacyHandlers[req.ActionType]; ok {
+	if action, ok := s.actions.Lookup(req.ActionType); ok {
 		if req.Executor.Kind != "" || req.Executor.ID != "" {
 			ctx = ContextWithExecutor(ctx, req.Executor)
 		}
-		return (&legacyAction{actionType: req.ActionType, handler: h}).run(ctx, req)
+		out, err := action.Fire(ctx, req, nil)
+		if err != nil {
+			if reason, skipped := asScheduledSkip(err); skipped {
+				return hubfire.FireOutcome{
+					Status:      hubfire.FireStatusSkipped,
+					Error:       reason,
+					AfterRecord: out.AfterRecord,
+					Detached:    out.Detached,
+				}
+			}
+			return hubfire.FireOutcome{
+				Status:      hubfire.FireStatusFailed,
+				Error:       err.Error(),
+				AfterRecord: out.AfterRecord,
+				Detached:    out.Detached,
+			}
+		}
+		if out.Status == "" {
+			out.Status = hubfire.FireStatusFired
+		}
+		return out
 	}
 	return hubfire.FireOutcome{
 		Status: hubfire.FireStatusFailed,
@@ -556,7 +585,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 // tracked; they will be cancelled via the parent context when the server
 // shuts down. Recurring wake fires (ptone/scion#7734) are the exception: they
 // run off the evaluator on detached contexts, and the hub's teardown joins
-// them (Server.scheduledWakeFires). The launch reaper's dedicated goroutine is different: it runs
+// them (Server.scheduledDetachedFires). The launch reaper's dedicated goroutine is different: it runs
 // synchronously (no per-tick goroutine), is tracked by the same s.wg, and so
 // Stop also waits for it to exit — including finishing any tick already in
 // flight, bounded by the store's 10s tick timeout plus its up-to-2s
@@ -782,11 +811,11 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// Hooks run after the final status write below, on every return path
 	// after the claim; a lost claim registers none.
 	defer afterRecord.run()
-	wakeFire := s.eventFireDetaches(evt)
+	detachedFire := s.eventFireDetaches(evt)
 	var scope *oneShotFireScope
-	if wakeFire {
+	if detachedFire {
 		// Registered before handlerCtx and before final persistence so
-		// runningWakeFires / scheduledWakeFires stay held until the final
+		// runningDetachedFires / scheduledDetachedFires stay held until the final
 		// status write completes (ptone/scion#7791 b1).
 		ctx, scope = withOneShotFireScope(ctx)
 		defer scope.finish()
@@ -799,8 +828,8 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		finalStatus = store.ScheduledEventExpired
 	}
 	claimStatus := finalStatus
-	if wakeFire {
-		// Claim wake events into provisional "firing" status so an unrecorded
+	if detachedFire {
+		// Claim detached events into provisional "firing" status so an unrecorded
 		// shutdown abandonment never looks like a completed delivery
 		// (ptone/scion#7791 c).
 		claimStatus = store.ScheduledEventFiring
@@ -812,7 +841,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// effect so exactly one replica delivers it. If the store supports claiming
 	// and we lose the race (already claimed/cancelled), skip silently. Backends
 	// without the capability fall through to the legacy run-then-mark behavior,
-	// marking wake events firing first so CompleteFiringScheduledEvent matches.
+	// marking detached events firing first so CompleteFiringScheduledEvent matches.
 	if claimer, ok := s.store.(store.ScheduledEventClaimer); ok {
 		claimed, err := claimer.ClaimScheduledEvent(ctx, evt.ID, claimStatus)
 		if err != nil {
@@ -825,10 +854,10 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 				"eventID", evt.ID, "type", evt.EventType)
 			return
 		}
-	} else if wakeFire && s.store != nil {
+	} else if detachedFire && s.store != nil {
 		claimedAt := time.Now()
 		if err := s.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFiring, &claimedAt, ""); err != nil {
-			s.log.Warn("Scheduler: failed to mark wake event firing; skipping",
+			s.log.Warn("Scheduler: failed to mark detached event firing; skipping",
 				"eventID", evt.ID, "type", evt.EventType, "error", err)
 			return
 		}
@@ -870,7 +899,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		}
 	}()
 
-	var run *wakeFireRun
+	var run *detachedFireRun
 	if scope != nil {
 		var aborted bool
 		run, aborted = scope.state()
@@ -892,8 +921,8 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// Record the outcome on a bounded context of its own: the event was
 	// claimed before the handler ran, and a shutdown that cancelled ctx
 	// meanwhile (halt) must not leave the failure unrecorded
-	// (ptone/scion#7734). When tracked via wakeFireRun, share its single-claim
-	// coordination with recordAbandonedWakeFires so teardown and fireEvent
+	// (ptone/scion#7734). When tracked via detachedFireRun, share its single-claim
+	// coordination with recordAbandonedDetachedFires so teardown and fireEvent
 	// never double-write or overwrite each other (ptone/scion#7791 b2).
 	if s.store == nil || recorded {
 		return
@@ -902,7 +931,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		now := time.Now()
 		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancelRecord()
-		if wakeFire {
+		if detachedFire {
 			_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, status, now, errMsg, "", time.Time{})
 			return
 		}
@@ -922,8 +951,8 @@ func (s *Scheduler) executeEvent(ctx context.Context, evt store.ScheduledEvent) 
 	if existing, ok := ExecutorContextFromContext(ctx); ok {
 		exec = existing
 	}
-	fireCtx := withFireHistoryCreator(withLegacyScheduledEvent(ctx, evt), evt.CreatedBy)
-	out := s.fireAction(fireCtx, scheduledFireRequest(s.srv, evt, exec, nil))
+	fireCtx := withFireHistoryCreator(ctx, evt.CreatedBy)
+	out := s.fireAction(fireCtx, scheduledFireRequest(s.srv, evt, exec))
 	if out.AfterRecord != nil {
 		after := out.AfterRecord
 		afterScheduledRecord(ctx, func() {
@@ -1011,10 +1040,7 @@ func (s *Scheduler) Status() SchedulerStatus {
 	if s.srv != nil {
 		eventHandlers = s.srv.actions.Types()
 	} else {
-		eventHandlers = make([]string, 0, len(s.legacyHandlers))
-		for k := range s.legacyHandlers {
-			eventHandlers = append(eventHandlers, k)
-		}
+		eventHandlers = s.actions.Types()
 	}
 
 	return SchedulerStatus{

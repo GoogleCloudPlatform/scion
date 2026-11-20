@@ -109,7 +109,7 @@ func (c serverTriggerCore) AdmitFire(ctx, itemCtx context.Context) (context.Cont
 		trackCtx = existingAbort
 	} else if c.srv != nil {
 		var ok bool
-		trackCtx, endWork, ok = c.srv.scheduledWakeFires.begin()
+		trackCtx, endWork, ok = c.srv.scheduledDetachedFires.begin()
 		if !ok {
 			return ctx, nil, func() {}, false
 		}

@@ -32,7 +32,7 @@ import (
 
 // TestExecAction_NativeRegistryAndAfterRecord verifies:
 //   - newExecRouteFixture / Server.registerFireActions registers *execAction
-//     natively (not legacyAction);
+//     natively;
 //   - FireOutcome.AfterRecord defers starting trackScheduledExecRun until the
 //     caller invokes AfterRecord (preserving the R1 outcome-persistence order);
 //   - ResultRef and run.EventID equal the event's FireID, with run.ScheduleID
@@ -52,7 +52,7 @@ func TestExecAction_NativeRegistryAndAfterRecord(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, claimed)
 
-	req := scheduledFireRequest(f.srv, evt, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID}, nil)
+	req := scheduledFireRequest(f.srv, evt, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID})
 	out := f.srv.fireAction(withFireHistoryCreator(ctx, evt.CreatedBy), req)
 	require.Equal(t, hubfire.FireStatusFired, out.Status)
 	assert.True(t, out.Detached)
@@ -101,7 +101,7 @@ func TestExecAction_NativeOneShotAndRecurringEndToEnd(t *testing.T) {
 	// CreateScheduledExecRun without sending a second exec-start and carries an
 	// empty ResultRef.
 	startsBefore := f.capture.count(execRoutePath(agentcontrol.RouteExecStart))
-	dupOut := f.srv.fireAction(ctx, scheduledFireRequest(f.srv, oneShot, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + oneShot.ID}, nil))
+	dupOut := f.srv.fireAction(ctx, scheduledFireRequest(f.srv, oneShot, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + oneShot.ID}))
 	assert.Equal(t, hubfire.FireStatusFailed, dupOut.Status)
 	assert.Equal(t, execReasonDispatchFailed, dupOut.Error)
 	assert.Empty(t, dupOut.ResultRef, "unadmitted Fire errors carry an empty ResultRef")
@@ -219,7 +219,7 @@ func TestExecAction_SynchronousTerminalDetachedPreservesRecordedOutcome(t *testi
 			require.True(t, claimed)
 
 			out := f.srv.fireAction(withFireHistoryCreator(ctx, directEvt.CreatedBy),
-				scheduledFireRequest(f.srv, directEvt, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + directEvt.ID}, nil))
+				scheduledFireRequest(f.srv, directEvt, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + directEvt.ID}))
 			assert.Equal(t, tc.wantFireStatus, out.Status)
 			assert.Equal(t, tc.wantReason, out.Error)
 			assert.Equal(t, directEvt.ID, out.ResultRef)

@@ -85,11 +85,11 @@ func grantContainmentMessageRole(ms *containmentMockStore, userID, projectID str
 // the send to agent, in the order messageEventHandler applies them.
 func authorizeScheduledMessageFireFor(srv *Server, evt store.ScheduledEvent, agent *store.Agent) error {
 	ctx := context.Background()
-	auth, identity, err := srv.resolveScheduledAuthority(ctx, evt)
+	auth, identity, err := resolveScheduledAuthorityForTest(ctx, srv, evt)
 	if err != nil {
 		return err
 	}
-	return srv.authorizeScheduledMessageFire(ctx, evt, auth, identity, agent)
+	return srv.authorizeMessageFire(ctx, evt.ProjectID, auth, identity, agent)
 }
 
 // mockDispatchesTo returns the recorded dispatches to slug.

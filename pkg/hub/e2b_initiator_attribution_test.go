@@ -1127,7 +1127,8 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 	f.srv.seedProjectCreatorMembership(ctx, f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
 	f.srv.scheduler = NewScheduler(f.store, slog.Default())
-	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+	f.srv.scheduler.srv = f.srv
+	f.srv.RegisterAction(&dispatchAgentAction{srv: f.srv})
 
 	capture := &capturingHandler{}
 	restoreLog := slog.Default()

@@ -1093,7 +1093,7 @@ func fireScheduledCreate(t *testing.T, srv *Server, s store.Store, projectID, ag
 	require.NoError(t, err)
 	// The event carries the recorded authorization revision a session
 	// create by the dev user writes (a fire refuses an event without one).
-	return srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+	return fireScheduledActionForTest(ctx, srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 		ID: tid("sched-" + agentName + "-" + t.Name()), ProjectID: projectID, EventType: "dispatch_agent",
 		Payload: string(payload), CreatedBy: DevUserID,
 	}, DevUserID))

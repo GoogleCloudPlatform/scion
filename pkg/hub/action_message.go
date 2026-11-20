@@ -61,12 +61,16 @@ func (a *messageAction) Detaches(req hubfire.FireRequest) bool {
 	return scheduledPayloadWakes(req.Payload)
 }
 
-// Validate refuses in Phase 1a: schedule authoring handlers continue to
-// authorize through authorizeScheduledMessageAuthoring /
-// authorizeScheduledMessageReauthoring, and trigger authoring wires shared
-// target validation in a later phase.
-func (a *messageAction) Validate(_ context.Context, _ Identity, _ string, _ string) (string, error) {
-	return "", errors.New("message action authoring validation is not wired in 1a")
+// Validate runs the shared HTTP-free message authoring target rule in strict
+// trigger mode (Stage 1 §5.3, rev 8.24 / rev 8.32): unresolved or unreadable
+// targets return 404 (masked identically to nonexistent), cross-project
+// targets are audited, and the returned payload carries authoritative AgentID
+// and display AgentName.
+func (a *messageAction) Validate(ctx context.Context, caller Identity, projectID string, payload string) (string, error) {
+	if a == nil || a.srv == nil {
+		return "", errors.New("message action: server not configured")
+	}
+	return a.srv.validateMessageAuthoringTarget(ctx, caller, projectID, messageAuthoringCallerTrigger, payload, "", "")
 }
 
 func (a *messageAction) ValidatePayload(req hubfire.FireRequest) error {
@@ -213,6 +217,80 @@ func (a *messageAction) Authorize(
 	}, nil, nil
 }
 
+// revalidateHeldScheduledMessageAuthority re-checks a held deferred message's
+// standing, recorded authority, and live message authorization before re-drive.
+// Kept in action_message.go with source-neutral arguments so neither
+// resolveRecordedAuthority/fireStanding nor store.ScheduledEvent leak across
+// the fire-core boundary (§16.4).
+func (s *Server) revalidateHeldScheduledMessageAuthority(
+	ctx context.Context,
+	projectID string,
+	rec hubfire.RecordedAuthority,
+	createdBy string,
+	target *store.Agent,
+) (bool, error) {
+	standingAuth := FireAuthority{
+		ProjectID:      projectID,
+		Recorded:       rec,
+		historyCreator: createdBy,
+	}
+	if err := s.fireStanding(ctx, standingAuth, target); err != nil {
+		if errors.Is(err, errScheduledMessageRefused) {
+			// Probe whether target hold or authoring agent standing lookup had a
+			// transient store error (R3) vs a definite standing refusal.
+			if _, herr := s.agentHeld(ctx, target.ID); herr != nil {
+				return false, fmt.Errorf("scheduled target hold lookup: %w", herr)
+			}
+			var authors []string
+			if init := s.scheduledInitiator(rec.Attribution); !init.LegacyUnknown &&
+				init.PrincipalKind == store.DelegationPrincipalAgent && init.PrincipalID != "" {
+				authors = append(authors, init.PrincipalID)
+			}
+			if createdBy != "" {
+				authors = append(authors, createdBy)
+			}
+			for _, id := range authors {
+				creator, gerr := s.store.GetAgent(ctx, id)
+				if gerr != nil && !errors.Is(gerr, store.ErrNotFound) {
+					return false, fmt.Errorf("scheduled author lookup: %w", gerr)
+				}
+				if creator != nil {
+					if serr := s.agentStanding(ctx, creator.ID); serr != nil && !errors.Is(serr, errAgentNotInStanding) {
+						return false, fmt.Errorf("scheduled author standing lookup: %w", serr)
+					}
+				}
+			}
+		}
+		return false, nil
+	}
+
+	auth, identity, err := s.resolveRecordedAuthority(
+		withFireHistoryCreator(ctx, createdBy),
+		rec,
+		projectID,
+		scheduledMessagePermission,
+	)
+	if err != nil {
+		if errors.Is(err, errScheduledAuthorityDenied) || errors.Is(err, errScheduledAuthorityUnrecorded) {
+			return false, nil
+		}
+		return false, fmt.Errorf("scheduled authority lookup: %w", err)
+	}
+	// Pre-check transient lookup faults on identity -> target before
+	// authorizeMessageFire evaluates policy.
+	allowed, terr := s.revalidateIdentityToAgent(ctx, identity, target)
+	if terr != nil {
+		return false, terr
+	}
+	if !allowed {
+		return false, nil
+	}
+	if err := s.authorizeMessageFire(ctx, projectID, auth, identity, target); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (a *messageAction) Fire(ctx context.Context, req hubfire.FireRequest, authorized FireAuthorized) (hubfire.FireOutcome, error) {
 	if a == nil || a.srv == nil {
 		return hubfire.FireOutcome{}, errors.New("message action: server not configured")
@@ -261,7 +339,7 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 		}
 		tracker := req.Tracked
 		if tracker == nil {
-			tracker = newScheduledFireTracker(s, fireID, nil)
+			tracker = newScheduledFireTracker(s, fireID)
 		}
 		trackedCtx, endTracking, admitted := tracker.Admit(ctx)
 		if !admitted {
@@ -311,7 +389,7 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 	if woke {
 		tracker := req.Tracked
 		if tracker == nil {
-			tracker = newScheduledFireTracker(s, fireID, nil)
+			tracker = newScheduledFireTracker(s, fireID)
 		}
 		detached, cancelDetached := tracker.Detach(ctx)
 		defer cancelDetached()
@@ -369,7 +447,7 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 				}
 				tracker := req.Tracked
 				if tracker == nil {
-					tracker = newScheduledFireTracker(s, fireID, nil)
+					tracker = newScheduledFireTracker(s, fireID)
 				}
 				if !woke {
 					trackedCtx, endTracking, admitted := tracker.Admit(ctx)

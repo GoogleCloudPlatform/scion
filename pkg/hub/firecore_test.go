@@ -327,42 +327,6 @@ func TestFireCoreOutcomeMapping(t *testing.T) {
 		assert.Equal(t, hubfire.FireStatusFired, out.Status)
 		assert.True(t, out.Detached)
 	})
-
-	t.Run("legacyAction maps skip Detached and AfterRecord directly", func(t *testing.T) {
-		ms := newMockStore()
-		srv := newEventHandlerTestServer(ms)
-
-		afterRan := false
-		srv.RegisterAction(newLegacyAction("legacy_detached", func(ctx context.Context, evt store.ScheduledEvent) error {
-			assert.Equal(t, "fire-leg-1", evt.ID)
-			afterScheduledRecord(ctx, func() { afterRan = true })
-			return outcomeRecorded(nil)
-		}))
-
-		out := srv.fireAction(context.Background(), hubfire.FireRequest{
-			ProjectID:  projectID,
-			Authority:  hubfire.RecordedAuthority{FireID: "fire-leg-1"},
-			ActionType: "legacy_detached",
-		})
-		assert.Equal(t, hubfire.FireStatusFired, out.Status)
-		assert.True(t, out.Detached)
-		require.NotNil(t, out.AfterRecord)
-		assert.False(t, afterRan)
-		out.AfterRecord(context.Background())
-		assert.True(t, afterRan)
-
-		srv.RegisterAction(newLegacyAction("legacy_skip", func(context.Context, store.ScheduledEvent) error {
-			return skipScheduledFire("executor offline")
-		}))
-		skipOut := srv.fireAction(context.Background(), hubfire.FireRequest{
-			ProjectID:  projectID,
-			Authority:  hubfire.RecordedAuthority{FireID: "fire-leg-2"},
-			ActionType: "legacy_skip",
-		})
-		assert.Equal(t, hubfire.FireStatusSkipped, skipOut.Status)
-		assert.Equal(t, "executor offline", skipOut.Error)
-		assert.False(t, skipOut.Detached)
-	})
 }
 
 func TestFireCorePayloadValidatedBeforeAuthority(t *testing.T) {
@@ -551,7 +515,7 @@ func TestFireCoreTracker(t *testing.T) {
 	// Not t.Parallel: subtest captures process-default slog logger.
 	t.Run("Detach survives caller cancel and observes fire abort", func(t *testing.T) {
 		srv := newEventHandlerTestServer(newMockStore())
-		tracker := newScheduledFireTracker(srv, "evt-detach", nil)
+		tracker := newScheduledFireTracker(srv, "evt-detach")
 
 		abortCtx, cancelAbort := context.WithCancel(context.Background())
 		defer cancelAbort()
@@ -569,68 +533,20 @@ func TestFireCoreTracker(t *testing.T) {
 		}, time.Second, 5*time.Millisecond)
 	})
 
-	t.Run("Admit registers with scheduledWakeFires and refuses after stop", func(t *testing.T) {
+	t.Run("Admit registers with scheduledDetachedFires and refuses after stop", func(t *testing.T) {
 		srv := newEventHandlerTestServer(newMockStore())
-		tracker := newScheduledFireTracker(srv, "evt-admit", nil)
+		tracker := newScheduledFireTracker(srv, "evt-admit")
 
 		admittedCtx, done, ok := tracker.Admit(context.Background())
 		require.True(t, ok)
-		assert.Len(t, srv.runningWakeFires.snapshot(), 1)
+		assert.Len(t, srv.runningDetachedFires.snapshot(), 1)
 		done()
-		assert.Empty(t, srv.runningWakeFires.snapshot())
+		assert.Empty(t, srv.runningDetachedFires.snapshot())
 		assert.Error(t, admittedCtx.Err())
 
-		srv.scheduledWakeFires.stop(context.Background(), 0)
+		srv.scheduledDetachedFires.stop(context.Background(), 0)
 		_, _, ok = tracker.Admit(context.Background())
 		assert.False(t, ok)
-	})
-
-	t.Run("Record refuses and logs without Admit or injected run", func(t *testing.T) {
-		logBuf := &fireCoreLogBuffer{}
-		prev := slog.Default()
-		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-		t.Cleanup(func() { slog.SetDefault(prev) })
-
-		srv := newEventHandlerTestServer(newMockStore())
-		tracker := newScheduledFireTracker(srv, "evt-unadmitted", nil)
-
-		called := false
-		assert.False(t, tracker.Record(func() { called = true }))
-		assert.False(t, called)
-		assert.Empty(t, srv.runningWakeFires.snapshot())
-		assert.Contains(t, logBuf.String(), "fire tracker Record called without an admitted or injected run")
-		assert.Contains(t, logBuf.String(), "evt-unadmitted")
-	})
-
-	t.Run("Record executes write at most once after Admit or with injected run", func(t *testing.T) {
-		srv := newEventHandlerTestServer(newMockStore())
-		tracker := newScheduledFireTracker(srv, "evt-record", nil)
-		_, done, ok := tracker.Admit(context.Background())
-		require.True(t, ok)
-		defer done()
-
-		var calls atomic.Int32
-		var wg sync.WaitGroup
-		var wins atomic.Int32
-		for i := 0; i < 8; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if tracker.Record(func() { calls.Add(1) }) {
-					wins.Add(1)
-				}
-			}()
-		}
-		wg.Wait()
-		assert.Equal(t, int32(1), wins.Load())
-		assert.Equal(t, int32(1), calls.Load())
-
-		injectedRun := &wakeFireRun{eventID: "evt-injected", ranAt: time.Now()}
-		injectedTracker := newScheduledFireTracker(srv, "evt-injected", injectedRun)
-		var injectedCalls int
-		assert.True(t, injectedTracker.Record(func() { injectedCalls++ }))
-		assert.False(t, injectedTracker.Record(func() { injectedCalls++ }))
-		assert.Equal(t, 1, injectedCalls)
 	})
 }
 
@@ -896,7 +812,7 @@ func TestFireCoreRefusalLogging(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "scheduled message authority denied at fire time")
 
 	// 2. fireStanding preserves projectID in refusal logs on both the core
-	// FireAuthority path and the scheduledFireStanding shim path.
+	// FireAuthority path and the fireStandingForTest helper path.
 	rec := newFireCoreTestAuthority(ms, projectID)
 	auth, _, err := srv.resolveRecordedAuthority(context.Background(), rec, projectID, scheduledMessagePermission)
 	require.NoError(t, err)
@@ -911,7 +827,7 @@ func TestFireCoreRefusalLogging(t *testing.T) {
 	logBuf.mu.Lock()
 	logBuf.buf.Reset()
 	logBuf.mu.Unlock()
-	err = srv.scheduledFireStanding(context.Background(), store.ScheduledEvent{
+	err = fireStandingForTest(context.Background(), srv, store.ScheduledEvent{
 		ID:        "evt-shim-1",
 		ProjectID: "project-shim-log",
 		EventType: "message",
@@ -940,13 +856,13 @@ func TestFireCoreAuthorityMissingRuleDenialText(t *testing.T) {
 		InitiatorAttribution: rec.Attribution,
 		AuthorityCeiling:     rec.Ceiling,
 	}
-	_, _, err = srv.resolveScheduledAuthority(context.Background(), evt)
+	_, _, err = resolveScheduledAuthorityForTest(context.Background(), srv, evt)
 	require.ErrorIs(t, err, errScheduledAuthorityDenied)
-	assert.ErrorContains(t, err, `event type "unmapped_type" has no scheduled authority rule`)
+	assert.ErrorContains(t, err, "action has no recorded authority rule")
 
 	// Ceiling consistency still runs before the permission-rule check.
 	evt.AuthorityCeiling = store.EffectCeiling{}
-	_, _, err = srv.resolveScheduledAuthority(context.Background(), evt)
+	_, _, err = resolveScheduledAuthorityForTest(context.Background(), srv, evt)
 	require.ErrorIs(t, err, errScheduledAuthorityUnrecorded)
 }
 
@@ -1259,7 +1175,7 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 		detEvt.Status = store.ScheduledEventFiring
 		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &detEvt))
 		srv.runScheduleFire(context.Background(), slog.Default(), detSched, detEvt, now, next,
-			&wakeFireRun{eventID: "rec-evt-2", scheduleID: "sched-2", ranAt: now})
+			&detachedFireRun{eventID: "rec-evt-2", scheduleID: "sched-2", ranAt: now})
 		assert.Equal(t, store.ScheduledEventFiring, ms.getEvent("rec-evt-2").Status, "pre-detached + Detached leaves recording to tracker")
 		assert.Equal(t, 1, fs.afterRunCalls, "UpdateScheduleAfterRun skipped when pre-detached and Detached are true")
 
@@ -1277,69 +1193,52 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 	})
 }
 
-func TestFireCoreLegacyActionDetaches(t *testing.T) {
+func TestFireCoreActionDetaches(t *testing.T) {
 	t.Parallel()
 
 	realMsgAction := &messageAction{}
-	legacyMsgAction := newLegacyAction("message", nil)
 	realExecAction := &execAction{}
-	legacyExecAction := newLegacyAction(scheduledEventTypeExec, nil)
 	realDispAction := &dispatchAgentAction{}
-	legacyDispAction := newLegacyAction("dispatch_agent", nil)
 
 	for _, defKind := range []string{
 		hubfire.DefinitionKindScheduledEvent,
 		hubfire.DefinitionKindSchedule,
 	} {
-		for name, act := range map[string]FireAction{
-			"messageAction": realMsgAction,
-			"legacyAction":  legacyMsgAction,
-		} {
-			assert.True(t, act.Detaches(hubfire.FireRequest{
-				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
-				Payload:   `{"agentName":"worker","message":"hi","wake":true}`,
-			}), "%s wake=true detaches (%s)", name, defKind)
-			assert.False(t, act.Detaches(hubfire.FireRequest{
-				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
-				Payload:   `{"agentName":"worker","message":"hi","wake":false}`,
-			}), "%s wake=false does not detach (%s)", name, defKind)
-			assert.False(t, act.Detaches(hubfire.FireRequest{
-				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
-				Payload:   `{"agentName":"worker","message":"hi"}`,
-			}), "%s wake omitted does not detach (%s)", name, defKind)
-			assert.False(t, act.Detaches(hubfire.FireRequest{
-				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
-				Payload:   `{bad-json`,
-			}), "%s malformed payload does not detach (%s)", name, defKind)
-		}
-		for name, act := range map[string]FireAction{
-			"dispatchAgentAction": realDispAction,
-			"legacyAction":        legacyDispAction,
-		} {
-			assert.False(t, act.Detaches(hubfire.FireRequest{
-				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
-				Payload:   `{"agentName":"worker"}`,
-			}), "%s dispatch_agent never detaches (%s)", name, defKind)
-		}
+		assert.True(t, realMsgAction.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+			Payload:   `{"agentName":"worker","message":"hi","wake":true}`,
+		}), "messageAction wake=true detaches (%s)", defKind)
+		assert.False(t, realMsgAction.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+			Payload:   `{"agentName":"worker","message":"hi","wake":false}`,
+		}), "messageAction wake=false does not detach (%s)", defKind)
+		assert.False(t, realMsgAction.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+			Payload:   `{"agentName":"worker","message":"hi"}`,
+		}), "messageAction wake omitted does not detach (%s)", defKind)
+		assert.False(t, realMsgAction.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+			Payload:   `{bad-json`,
+		}), "messageAction malformed payload does not detach (%s)", defKind)
+
+		assert.False(t, realDispAction.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+			Payload:   `{"agentName":"worker"}`,
+		}), "dispatchAgentAction never detaches (%s)", defKind)
 	}
 
-	for name, act := range map[string]FireAction{
-		"execAction":   realExecAction,
-		"legacyAction": legacyExecAction,
-	} {
-		assert.True(t, act.Detaches(hubfire.FireRequest{
-			Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindSchedule},
-			Payload:   `{"agentId":"a1","command":["true"]}`,
-		}), "%s recurring exec detaches when DefinitionKind == schedule (rev 8.12)", name)
-		assert.False(t, act.Detaches(hubfire.FireRequest{
-			Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent},
-			Payload:   `{"agentId":"a1","command":["true"]}`,
-		}), "%s one-shot exec keeps non-detaching path", name)
-		assert.False(t, act.Detaches(hubfire.FireRequest{
-			Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindTrigger},
-			Payload:   `{"agentId":"a1","command":["true"]}`,
-		}), "%s trigger exec does not use schedule pre-fire detachment", name)
-	}
+	assert.True(t, realExecAction.Detaches(hubfire.FireRequest{
+		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindSchedule},
+		Payload:   `{"agentId":"a1","command":["true"]}`,
+	}), "execAction recurring exec detaches when DefinitionKind == schedule (rev 8.12)")
+	assert.False(t, realExecAction.Detaches(hubfire.FireRequest{
+		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent},
+		Payload:   `{"agentId":"a1","command":["true"]}`,
+	}), "execAction one-shot exec keeps non-detaching path")
+	assert.False(t, realExecAction.Detaches(hubfire.FireRequest{
+		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindTrigger},
+		Payload:   `{"agentId":"a1","command":["true"]}`,
+	}), "execAction trigger exec does not use schedule pre-fire detachment")
 }
 
 func TestFireCoreExecActionValidate(t *testing.T) {
@@ -1368,16 +1267,39 @@ func TestFireCoreMessageActionValidate(t *testing.T) {
 	userID := seedEventHandlerMessageUser(ms, projectID)
 	user, err := ms.GetUser(context.Background(), userID)
 	require.NoError(t, err)
-	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "session")
+	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, store.UserRoleAdmin, "session")
+
+	require.NoError(t, ms.CreateAgent(context.Background(), &store.Agent{
+		ID:        "agent-msg-val-1",
+		Slug:      "worker-one",
+		Name:      "worker-one",
+		ProjectID: projectID,
+		OwnerID:   user.ID,
+		Phase:     "running",
+	}))
 
 	act := &messageAction{srv: srv}
 	normalized, err := act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-one","message":"hello","wake":true}`)
-	require.ErrorContains(t, err, "message action authoring validation is not wired in 1a")
+	require.NoError(t, err)
+	var decoded MessageEventPayload
+	require.NoError(t, json.Unmarshal([]byte(normalized), &decoded))
+	assert.Equal(t, "agent-msg-val-1", decoded.AgentID)
+	assert.Equal(t, "worker-one", decoded.AgentName)
+	assert.Equal(t, "hello", decoded.Message)
+	assert.True(t, decoded.Wake)
+
+	// Unresolved target is refused in strict trigger mode (404).
+	normalized, err = act.Validate(context.Background(), caller, projectID, `{"agentName":"no-such-agent","message":"hello"}`)
+	require.Error(t, err)
+	var authErr *messageAuthoringError
+	require.ErrorAs(t, err, &authErr)
+	assert.Equal(t, 404, authErr.httpStatus)
+	assert.Equal(t, "Agent", authErr.notFoundResource)
 	assert.Empty(t, normalized)
 
 	var nilAction *messageAction
 	normalized, err = nilAction.Validate(context.Background(), nil, "", "")
-	require.ErrorContains(t, err, "message action authoring validation is not wired in 1a")
+	require.ErrorContains(t, err, "message action: server not configured")
 	assert.Empty(t, normalized)
 }
 
@@ -1670,7 +1592,7 @@ func TestFireCoreDispatchAgentAction(t *testing.T) {
 // (rev 8.11 / 8.12): recurring x {detaches, !detaches} x {Detached, !Detached}
 // (including the mismatch cell !detaches && Detached), one-shot x
 // {Detached, detaches && !Detached, !detaches && !Detached}, and recurring +
-// one-shot exec detachment on legacyAction after exec-schedules Phase 2.
+// one-shot exec detachment on execAction.
 func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 	// Not t.Parallel: captures process-default slog logger for mismatch check.
 	const projectID = "project-detaches-matrix"
@@ -1783,6 +1705,7 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 			srv.scheduler = sched
 
 			rec := newFireCoreTestAuthority(ms, projectID)
+			afterCalled := false
 			srv.RegisterAction(&fakeFireAction{
 				actionType: "matrix_act",
 				permission: scheduledMessagePermission,
@@ -1801,8 +1724,9 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 						assert.Equal(t, 1, adv, "AdvanceScheduleNextRun ran before Fire")
 					}
 					return hubfire.FireOutcome{
-						Status:   hubfire.FireStatusFired,
-						Detached: tc.outDetached,
+						Status:      hubfire.FireStatusFired,
+						Detached:    tc.outDetached,
+						AfterRecord: func(context.Context) { afterCalled = true },
 					}, nil
 				},
 			})
@@ -1824,7 +1748,13 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 				ms.schedules[scRow.ID] = scRow
 
 				srv.executeSchedule(context.Background(), *scRow, now)
-				srv.scheduledWakeFires.wg.Wait()
+				srv.scheduledDetachedFires.wg.Wait()
+
+				if !tc.detaches && tc.outDetached {
+					assert.False(t, afterCalled, "F2: mismatch cell must not run AfterRecord for a fire recorded failed")
+				} else {
+					assert.True(t, afterCalled, "AfterRecord should run for non-mismatch recurring cells")
+				}
 
 				fs.mu.Lock()
 				assert.Equal(t, tc.wantAdvance, fs.advanceCalls, "AdvanceScheduleNextRun calls")
@@ -1892,12 +1822,14 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 			Phase:     "running",
 		}))
 		rec := newFireCoreTestAuthority(ms, projectID)
-		srv.RegisterAction(newLegacyAction(scheduledEventTypeExec, func(_ context.Context, evt store.ScheduledEvent) error {
+		srv.RegisterAction(newTestFireAction(scheduledEventTypeExec, func(_ context.Context, req hubfire.FireRequest) error {
 			fs.mu.Lock()
 			adv := fs.advanceCalls
 			fs.mu.Unlock()
 			assert.Equal(t, 1, adv, "AdvanceScheduleNextRun ran before recurring exec handler")
-			assert.Equal(t, store.ScheduledEventFired, evt.Status)
+			gotEvt := ms.getEvent(req.Authority.FireID)
+			require.NotNil(t, gotEvt)
+			assert.Equal(t, store.ScheduledEventFired, gotEvt.Status)
 			return outcomeRecorded(nil)
 		}))
 
@@ -1917,11 +1849,11 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 		ms.schedules[scRow.ID] = scRow
 
 		srv.executeSchedule(context.Background(), *scRow, now)
-		srv.scheduledWakeFires.wg.Wait()
+		srv.scheduledDetachedFires.wg.Wait()
 
 		// Simulate shutdown sweep: run.tryRecord(func(){}) already claimed the
-		// wakeFireRun, so recordAbandonedWakeFires must not clobber the event.
-		srv.recordAbandonedWakeFires(context.Background())
+		// detachedFireRun, so recordAbandonedDetachedFires must not clobber the event.
+		srv.recordAbandonedDetachedFires(context.Background())
 
 		fs.mu.Lock()
 		assert.Equal(t, 1, fs.advanceCalls, "AdvanceScheduleNextRun called once before fire")
@@ -1978,7 +1910,7 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 		// With hub.exec_schedules disabled by default on newEventHandlerTestServer,
 		// execAction.Preauthorize returns unadmitted skip ("exec schedules disabled").
 		srv.executeSchedule(context.Background(), *scRow, now)
-		srv.scheduledWakeFires.wg.Wait()
+		srv.scheduledDetachedFires.wg.Wait()
 
 		fs.mu.Lock()
 		assert.Equal(t, 1, fs.advanceCalls, "AdvanceScheduleNextRun called once before fire")
@@ -2013,7 +1945,7 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 
 		rec := newFireCoreTestAuthority(ms, projectID)
 		admitted := true
-		srv.RegisterAction(newLegacyAction(scheduledEventTypeExec, func(_ context.Context, _ store.ScheduledEvent) error {
+		srv.RegisterAction(newTestFireAction(scheduledEventTypeExec, func(_ context.Context, _ hubfire.FireRequest) error {
 			if admitted {
 				return outcomeRecorded(nil)
 			}
@@ -2388,4 +2320,104 @@ func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
 		assert.False(t, fireOut.Detached)
 		assert.NotContains(t, logBuf.String(), "audit_action=schedule.exec.")
 	})
+}
+
+// TestFireCoreTriggerGenericErrorText pins 1b-3 review N4 (Stage 1 §5.5):
+// trigger fires map raw internal errors onto the generic set so agent slugs,
+// broker HTTP bodies, and context errors never leak into trigger_fires.error,
+// while schedule fires retain their existing scheduled_events.error text.
+func TestFireCoreTriggerGenericErrorText(t *testing.T) {
+	t.Parallel()
+
+	const projectID = "proj-n4-generic"
+	ms := newMockStore()
+	srv := newEventHandlerTestServer(ms)
+	rec := newFireCoreTestAuthority(ms, projectID)
+
+	cases := []struct {
+		name       string
+		actionType string
+		rawErr     string
+		wantTrig   string
+	}{
+		{
+			name:       "dispatch error with slug and deadline",
+			actionType: "message",
+			rawErr:     `failed to dispatch message to agent secret-slug: context deadline exceeded`,
+			wantTrig:   "message delivery failed",
+		},
+		{
+			name:       "target stopped phase message",
+			actionType: "message",
+			rawErr:     `agent "secret-slug" is not running (phase: stopped)`,
+			wantTrig:   "target not running",
+		},
+		{
+			name:       "reincarnation in flight",
+			actionType: "message",
+			rawErr:     "target agent is reincarnating",
+			wantTrig:   "agent restarted during fire",
+		},
+		{
+			name:       "wake error with slug",
+			actionType: "message",
+			rawErr:     `failed to wake agent secret-slug: 502: bad gateway`,
+			wantTrig:   "target wake failed",
+		},
+		{
+			name:       "hub shutting down",
+			actionType: "message",
+			rawErr:     errScheduledWakeShuttingDown.Error(),
+			wantTrig:   "hub shutting down",
+		},
+		{
+			name:       "designed env-gather remedy preserved",
+			actionType: "dispatch_agent",
+			rawErr:     "missing required environment variables (2)",
+			wantTrig:   "missing required environment variables (2)",
+		},
+		{
+			name:       "generic refusal preserved",
+			actionType: "message",
+			rawErr:     errScheduledMessageRefused.Error(),
+			wantTrig:   errScheduledMessageRefused.Error(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv.RegisterAction(&fakeFireAction{
+				actionType: tc.actionType,
+				permission: scheduledMessagePermission,
+				fireFn: func(context.Context, hubfire.FireRequest, FireAuthorized) (hubfire.FireOutcome, error) {
+					return hubfire.FireOutcome{}, errors.New(tc.rawErr)
+				},
+			})
+
+			trigRec := rec
+			trigRec.DefinitionKind = hubfire.DefinitionKindTrigger
+			trigRec.DefinitionID = "tr-1"
+			trigRec.FireID = "fire-1"
+			trigOut := srv.fireAction(context.Background(), hubfire.FireRequest{
+				ProjectID:  projectID,
+				Authority:  trigRec,
+				ActionType: tc.actionType,
+			})
+			assert.Equal(t, hubfire.FireStatusFailed, trigOut.Status)
+			assert.Equal(t, tc.wantTrig, trigOut.Error)
+			assert.NotContains(t, trigOut.Error, "secret-slug")
+
+			schedRec := rec
+			schedRec.DefinitionKind = hubfire.DefinitionKindSchedule
+			schedRec.DefinitionID = "sched-1"
+			schedRec.FireID = "evt-1"
+			schedOut := srv.fireAction(context.Background(), hubfire.FireRequest{
+				ProjectID:  projectID,
+				Authority:  schedRec,
+				ActionType: tc.actionType,
+			})
+			assert.Equal(t, hubfire.FireStatusFailed, schedOut.Status)
+			assert.Equal(t, tc.rawErr, schedOut.Error, "schedule error text must remain bit-identical")
+		})
+	}
 }

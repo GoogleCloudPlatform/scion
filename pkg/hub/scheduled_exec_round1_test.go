@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/google/uuid"
@@ -37,6 +38,22 @@ import (
 
 // Regression tests for review round 1 of ptone/scion#7883 (R1-R5, F1),
 // including the reviewer's reproductions.
+
+// wrappedExecFireAction wraps execAction to run a hook immediately after Fire
+// returns while preserving native Preauthorize, Authorize, Detaches, and
+// OnAuthorityRefused behaviour.
+type wrappedExecFireAction struct {
+	execAction
+	afterFire func(eventID string)
+}
+
+func (a *wrappedExecFireAction) Fire(ctx context.Context, req hubfire.FireRequest, auth FireAuthorized) (hubfire.FireOutcome, error) {
+	out, err := a.execAction.Fire(ctx, req, auth)
+	if a.afterFire != nil {
+		a.afterFire(req.Authority.FireID)
+	}
+	return out, err
+}
 
 // setExecFireHook installs scheduledExecFireHook for the test.
 func setExecFireHook(t *testing.T, hook func(stage, eventID string)) {
@@ -53,15 +70,15 @@ func TestScheduledExecR1_SweepBeforeFireRecord(t *testing.T) {
 	f := newExecRouteFixture(t)
 	f.startAgent(t)
 	evt := f.event(t, 30, "sh", "-c", "sleep 0.1; exit 7")
-	original := f.srv.execEventHandler()
-	f.srv.scheduler.RegisterEventHandler(scheduledEventTypeExec, func(ctx context.Context, e store.ScheduledEvent) error {
-		err := original(ctx, e)
-		f.waitAgentFinished(t, e.ID)
-		run := f.getRun(t, e.ID)
-		var unavailable bool
-		require.True(t, f.srv.pollScheduledExecRunOnce(context.Background(), run, &unavailable))
-		require.Equal(t, store.ScheduledEventFailed, f.getEvent(t, e.ID).Status)
-		return err
+	f.srv.RegisterAction(&wrappedExecFireAction{
+		execAction: execAction{srv: f.srv},
+		afterFire: func(eID string) {
+			f.waitAgentFinished(t, eID)
+			run := f.getRun(t, eID)
+			var unavailable bool
+			require.True(t, f.srv.pollScheduledExecRunOnce(context.Background(), run, &unavailable))
+			require.Equal(t, store.ScheduledEventFailed, f.getEvent(t, eID).Status)
+		},
 	})
 	f.fire(evt)
 	f.waitUntracked(t, evt.ID)
@@ -429,7 +446,8 @@ func TestScheduledExecP2R1_ClaimBeforeRunCrash(t *testing.T) {
 			old := time.Now().Add(-2 * time.Hour)
 			require.NoError(t, f.store.UpdateScheduledEventStatus(ctx, evt.ID, claim, &old, ""))
 			restarted := NewScheduler(f.store, slog.Default())
-			restarted.RegisterEventHandler(scheduledEventTypeExec, f.srv.execEventHandler())
+			restarted.srv = f.srv
+			restarted.RegisterAction(&execAction{srv: f.srv})
 			restarted.loadPersistedTimers(ctx)
 			f.srv.sweepScheduledExecRuns(ctx)
 

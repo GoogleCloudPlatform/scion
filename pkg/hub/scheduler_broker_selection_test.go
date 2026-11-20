@@ -79,7 +79,7 @@ func setSelectionProjectDefault(t *testing.T, f *bypassAgentsFixture, brokerID s
 func interactiveSelection(t *testing.T, f *bypassAgentsFixture, evt store.ScheduledEvent) (string, string) {
 	t.Helper()
 	ctx := context.Background()
-	creator, err := f.srv.authorizeScheduledAgentCreate(ctx, evt)
+	creator, err := authorizeDispatchAgentForTest(ctx, f.srv, evt)
 	require.NoError(t, err)
 	proj, err := f.store.GetProject(ctx, f.proj.ID)
 	require.NoError(t, err)

@@ -5407,7 +5407,7 @@ func TestDispatchAgentEventHandler_SetsCreateInputs(t *testing.T) {
 	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-createinputs-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
@@ -5424,7 +5424,7 @@ func TestDispatchAgentEventHandler_SetsCreateInputs(t *testing.T) {
 	assert.Equal(t, "sched-branch", created.AppliedConfig.CreateInputs.Branch)
 	assert.False(t, created.AppliedConfig.CreateInputs.NoAuth, "default scheduled agent launches with credentials (NoAuth=false)")
 
-	err = srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err = fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-createinputs-noauth",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",

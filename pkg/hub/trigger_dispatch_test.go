@@ -1260,7 +1260,7 @@ func TestTriggerDispatchE2E_ConduitDeliverAwaitingSessionSkipsHoldAndFailsLoud(t
 		CreatedBy: f.agent.ID,
 	}, f.agent.ID)
 	require.NoError(t, f.store.CreateScheduledEvent(ctx, &schedEvt))
-	require.NoError(t, f.srv.messageEventHandler()(ctx, schedEvt))
+	require.NoError(t, fireScheduledActionForTest(ctx, f.srv, "message", schedEvt))
 	assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug), "schedule fire still holds behind awaiting_session")
 
 	beforeMsgs, err := f.store.ListMessages(ctx, store.MessageFilter{AgentID: f.launched.ID}, store.ListOptions{Limit: 20})
@@ -1387,7 +1387,7 @@ func TestTriggerDispatchE2E_ConduitDeliverAwaitingSessionSkipsHoldAndFailsLoud(t
 	})
 	fireNonInt := fireTriggerOnce(t, "non-interrupt", false)
 	assert.Equal(t, store.TriggerFireStatusFailed, fireNonInt.Status)
-	assert.Contains(t, fireNonInt.Error, agent.ErrAwaitingSession.Error())
+	assert.Equal(t, "message delivery failed", fireNonInt.Error)
 
 	// Confirm zero store.Message rows were persisted for either trigger fire.
 	afterMsgs, err := f.store.ListMessages(ctx, store.MessageFilter{AgentID: f.launched.ID}, store.ListOptions{Limit: 20})

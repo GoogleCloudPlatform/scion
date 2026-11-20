@@ -203,7 +203,7 @@ func TestDispatchRefusesStoredNonSlugTemplate(t *testing.T) {
 
 			payload, err := json.Marshal(DispatchAgentEventPayload{AgentName: "stored-agent", Template: ref})
 			require.NoError(t, err)
-			err = srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+			err = fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 				ID:        "dispatch-tplref-1",
 				ProjectID: "project-1",
 				EventType: "dispatch_agent",
@@ -271,7 +271,7 @@ func TestProjectDefaultNonSlugTemplateRefused(t *testing.T) {
 	esrv := newEventHandlerTestServer(ms)
 	payload, err := json.Marshal(DispatchAgentEventPayload{AgentName: "dispatched-agent"})
 	require.NoError(t, err)
-	err = esrv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err = fireScheduledActionForTest(context.Background(), esrv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-projdefault-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",

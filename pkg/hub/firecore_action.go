@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
@@ -69,14 +70,19 @@ type FirePayloadValidator interface {
 // FirePreauthorizer is an optional capability implemented by FireActions that
 // evaluate definition-kind guards, feature gates, or staleness windows after
 // ValidatePayload and before recorded-authority resolution, returning either a
-// *FireRefusal or a skip sentinel without evaluating authority.
+// *FireRefusal or a skip sentinel without evaluating authority. Retained after
+// legacyAction removal because execAction relies on pre-authority experiment,
+// staleness-window, and trigger-kind checks to preserve bit-identical skip/refusal
+// semantics and audit ordering (2a review O6).
 type FirePreauthorizer interface {
 	Preauthorize(ctx context.Context, req hubfire.FireRequest) (*FireRefusal, error)
 }
 
 // FireAuthorityRefusalHandler is an optional capability implemented by
 // FireActions that emit action-specific audit records and return their own
-// generic refusal text when resolveRecordedAuthority denies a fire.
+// generic refusal text when resolveRecordedAuthority denies a fire. Retained
+// after legacyAction removal because execAction emits schedule.exec.refused
+// audit records and records "exec refused" on authority denial (2a review O6).
 type FireAuthorityRefusalHandler interface {
 	OnAuthorityRefused(ctx context.Context, req hubfire.FireRequest, err error) string
 }
@@ -180,7 +186,100 @@ func (s *Server) fireAction(ctx context.Context, req hubfire.FireRequest) hubfir
 			Error:  unknownActionTypeError(req.ActionType),
 		}
 	}
-	return s.fireActionWith(ctx, req, action)
+	out := s.fireActionWith(ctx, req, action)
+	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger && out.Status == hubfire.FireStatusFailed && out.Error != "" {
+		out.Error = sanitizeTriggerFireError(req, out.Status, out.Error)
+	}
+	return out
+}
+
+// sanitizeTriggerFireError maps failed error text persisted to
+// trigger_fires.error onto the Stage 1 §5.5 generic set for built-in actions
+// so internal details (agent slugs, broker HTTP bodies, raw context errors)
+// never leak through trigger history (1b-3 review N4). Refusals and skips
+// already carry generic reasons by contract; schedule fires are never passed
+// here and retain their existing scheduled_events.error text unchanged.
+func sanitizeTriggerFireError(req hubfire.FireRequest, status hubfire.FireStatus, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	switch req.ActionType {
+	case "message", "dispatch_agent", scheduledEventTypeExec:
+	default:
+		return raw
+	}
+	switch raw {
+	case errScheduledMessageRefused.Error(),
+		"dispatch_agent refused",
+		"exec refused",
+		req.ActionType + " refused",
+		errScheduledAuthorityUnrecorded.Error(),
+		"target not running",
+		"agent restarted during fire",
+		"rule evaluation failed",
+		"target wake failed",
+		"hub shutting down",
+		"message delivery failed",
+		"dispatch_agent failed",
+		"exec failed",
+		"fire failed",
+		"invalid message payload",
+		"invalid dispatch_agent payload",
+		errScheduledExecPayloadInvalid.Error(),
+		execReasonDispatchFailed,
+		execReasonOverlap,
+		execReasonCapacity,
+		execReasonStartExpired,
+		execReasonMissedWindow:
+		return raw
+	}
+	if strings.HasPrefix(raw, "missing required environment variables (") ||
+		strings.Contains(raw, "already exists in project in phase error") {
+		return raw
+	}
+
+	var mapped string
+	switch {
+	case raw == "target agent is reincarnating":
+		mapped = "agent restarted during fire"
+	case raw == errScheduledWakeShuttingDown.Error() || raw == errScheduledWakeShutdown.Error():
+		mapped = "hub shutting down"
+	case raw == errScheduledWakeNotReady.Error() || strings.HasPrefix(raw, "failed to wake agent "):
+		mapped = "target wake failed"
+	case strings.Contains(raw, "has no running container") ||
+		strings.Contains(raw, "is not running") ||
+		strings.Contains(raw, "not in a deliverable phase") ||
+		strings.Contains(raw, "cannot receive messages"):
+		mapped = "target not running"
+	case strings.HasPrefix(raw, "invalid message payload") ||
+		raw == "message payload is empty" ||
+		strings.HasPrefix(raw, "message payload must include"):
+		mapped = "invalid message payload"
+	case strings.HasPrefix(raw, "invalid dispatch_agent payload") ||
+		strings.HasPrefix(raw, "dispatch_agent payload:"):
+		mapped = "invalid dispatch_agent payload"
+	default:
+		switch req.ActionType {
+		case "message":
+			mapped = "message delivery failed"
+		case "dispatch_agent":
+			mapped = "dispatch_agent failed"
+		case scheduledEventTypeExec:
+			mapped = "exec failed"
+		default:
+			mapped = "fire failed"
+		}
+	}
+
+	slog.Warn("trigger fire error mapped to generic text",
+		"actionType", req.ActionType,
+		"status", status,
+		"fireID", req.Authority.FireID,
+		"triggerID", req.Authority.DefinitionID,
+		"projectID", req.ProjectID,
+		"mapped", mapped,
+		"raw_error", raw)
+	return mapped
 }
 
 func (s *Server) fireActionWith(ctx context.Context, req hubfire.FireRequest, action FireAction) hubfire.FireOutcome {
@@ -191,13 +290,6 @@ func (s *Server) fireActionWith(ctx context.Context, req hubfire.FireRequest, ac
 func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireRequest, action FireAction) (hubfire.FireOutcome, error) {
 	if req.Executor.Kind != "" || req.Executor.ID != "" {
 		ctx = ContextWithExecutor(ctx, req.Executor)
-	}
-	if legacy, ok := action.(*legacyAction); ok {
-		out := legacy.run(ctx, req)
-		if out.Status == hubfire.FireStatusFired {
-			return out, nil
-		}
-		return out, scheduledKnownError(out.Error)
 	}
 	if pv, ok := action.(FirePayloadValidator); ok {
 		if err := pv.ValidatePayload(req); err != nil {
@@ -236,7 +328,7 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 		}
 	}
 	if req.Tracked == nil {
-		req.Tracked = newScheduledFireTracker(s, req.Authority.FireID, nil)
+		req.Tracked = newScheduledFireTracker(s, req.Authority.FireID)
 	} else if st, ok := req.Tracked.(*scheduledFireTracker); ok && st.srv == nil {
 		st.srv = s
 	}

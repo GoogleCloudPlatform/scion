@@ -292,14 +292,14 @@ func TestAgentCreate_ScheduledCreatorRequiresLiveDelegator(t *testing.T) {
 
 	t.Run("live delegator", func(t *testing.T) {
 		f, a, _ := setup(t)
-		_, err := f.srv.authorizeScheduledAgentCreate(context.Background(), evt(t, f, a.ID))
+		_, err := authorizeDispatchAgentForTest(context.Background(), f.srv, evt(t, f, a.ID))
 		require.NoError(t, err)
 	})
 	t.Run("deleted delegator", func(t *testing.T) {
 		f, a, u := setup(t)
 		e := evt(t, f, a.ID)
 		require.NoError(t, f.store.DeleteUser(context.Background(), u.ID))
-		_, err := f.srv.authorizeScheduledAgentCreate(context.Background(), e)
+		_, err := authorizeDispatchAgentForTest(context.Background(), f.srv, e)
 		require.Error(t, err)
 	})
 	t.Run("delegator without agent.create", func(t *testing.T) {
@@ -308,14 +308,14 @@ func TestAgentCreate_ScheduledCreatorRequiresLiveDelegator(t *testing.T) {
 		u := hubMemberUser(t, f.store, "sched-no-create")
 		a := createFixtureAgent(t, f, "sched-no-create-agent", []string{u.ID}, AgentRoleFull)
 		addProjectEdge(t, f.store, store.DelegationPrincipalUser, u.ID, a.ID, f.proj.ID)
-		_, err := f.srv.authorizeScheduledAgentCreate(context.Background(), evt(t, f, a.ID))
+		_, err := authorizeDispatchAgentForTest(context.Background(), f.srv, evt(t, f, a.ID))
 		require.Error(t, err)
 	})
 	t.Run("soft-deleted creator agent", func(t *testing.T) {
 		f, a, _ := setup(t)
 		e := evt(t, f, a.ID)
 		softDeleteStoredAgent(t, f.store, a.ID)
-		_, err := f.srv.authorizeScheduledAgentCreate(context.Background(), e)
+		_, err := authorizeDispatchAgentForTest(context.Background(), f.srv, e)
 		require.Error(t, err)
 	})
 }
@@ -467,7 +467,7 @@ func TestAgentCreate_AgentCreatorDefaultServiceAccountScope(t *testing.T) {
 			ctx := context.Background()
 			f.srv.seedProjectCreatorMembership(ctx, f.proj)
 			require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
-			err := f.srv.dispatchAgentEventHandler()(ctx, withAgentRevision(t, f.srv, store.ScheduledEvent{
+			err := fireScheduledActionForTest(ctx, f.srv, "dispatch_agent", withAgentRevision(t, f.srv, store.ScheduledEvent{
 				ID: "evt-dsa", ProjectID: f.proj.ID, EventType: "dispatch_agent",
 				Payload: `{"agentName":"dsa-sched","task":"t"}`, CreatedBy: f.caller.ID,
 			}, f.caller.ID))

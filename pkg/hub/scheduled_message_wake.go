@@ -73,7 +73,7 @@ func scheduledWakeNeedsResume(agent *store.Agent) bool {
 
 // authorizeScheduledWake decides a scheduled wake under the event's
 // authorization revision, after the send itself was authorized
-// (authorizeScheduledMessageFire). A target that the wake would resume needs
+// (authorizeMessageFire). A target that the wake would resume needs
 // both:
 //   - the revision's frozen ceiling allowing agent.lifecycle, for user and
 //     agent principals alike. An agent principal's identity is rebuilt from
@@ -87,7 +87,7 @@ func scheduledWakeNeedsResume(agent *store.Agent) bool {
 //
 // A target the wake would not resume needs nothing more. A denial returns an
 // error naming the cause, for the log.
-func (s *Server) authorizeScheduledWake(ctx context.Context, auth ScheduledAuthority, identity Identity, agent *store.Agent) error {
+func (s *Server) authorizeScheduledWake(ctx context.Context, auth FireAuthority, identity Identity, agent *store.Agent) error {
 	if !scheduledWakeNeedsResume(agent) {
 		return nil
 	}
@@ -318,7 +318,7 @@ func (s *Server) waitForStartToBegin(ctx context.Context, agentID string, timeou
 
 // errScheduledWakeShutdown is recorded on a wake fire (one-shot or recurring)
 // that the hub's shutdown cut short: the fire was aborted
-// (scheduledWakeFires), or it was still running when the shutdown grace ended.
+// (scheduledDetachedFires), or it was still running when the shutdown grace ended.
 var errScheduledWakeShutdown = errors.New("hub shut down during the wake; message not delivered")
 
 // errScheduledWakeAbandoned is recorded when recovery finalizes a wake event
@@ -361,12 +361,12 @@ func detachKeepFireAbort(ctx context.Context) (context.Context, context.CancelFu
 	}
 }
 
-// wakeFireRun is one scheduled wake fire in flight: recurring (scheduleID
+// detachedFireRun is one scheduled wake fire in flight: recurring (scheduleID
 // set) or one-shot (scheduleID empty). Its outcome is claimed and recorded
 // once: either by the fire when it ends (runScheduleFire / fireEvent via
 // tryRecord), or by the hub's shutdown for a fire still running when the
-// shutdown stops waiting (recordAbandonedWakeFires via recordOrWait).
-type wakeFireRun struct {
+// shutdown stops waiting (recordAbandonedDetachedFires via recordOrWait).
+type detachedFireRun struct {
 	eventID    string
 	scheduleID string
 	ranAt      time.Time
@@ -380,7 +380,7 @@ type wakeFireRun struct {
 // tryRecord claims the run's outcome and executes write when unclaimed, or
 // returns false immediately without blocking when another caller already
 // claimed the outcome.
-func (r *wakeFireRun) tryRecord(write func()) bool {
+func (r *detachedFireRun) tryRecord(write func()) bool {
 	r.mu.Lock()
 	if r.claimed {
 		r.mu.Unlock()
@@ -399,7 +399,7 @@ func (r *wakeFireRun) tryRecord(write func()) bool {
 // When the fire's own completion write is already in flight, it waits up to
 // ctx's deadline for that write to finish instead of blocking unboundedly,
 // returning whether the outcome write completed in time.
-func (r *wakeFireRun) recordOrWait(ctx context.Context, write func()) bool {
+func (r *detachedFireRun) recordOrWait(ctx context.Context, write func()) bool {
 	r.mu.Lock()
 	if !r.claimed {
 		r.claimed = true
@@ -423,12 +423,12 @@ func (r *wakeFireRun) recordOrWait(ctx context.Context, write func()) bool {
 type oneShotFireScopeKey struct{}
 
 // oneShotFireScope extends a one-shot wake fire's shutdown tracking across
-// Scheduler.fireEvent's final status persistence and shares its wakeFireRun
+// Scheduler.fireEvent's final status persistence and shares its detachedFireRun
 // claim with fireEvent without altering messageEventHandler's direct-call
 // cleanup contract.
 type oneShotFireScope struct {
 	mu       sync.Mutex
-	run      *wakeFireRun
+	run      *detachedFireRun
 	abortCtx context.Context
 	cleanup  func()
 }
@@ -443,7 +443,7 @@ func oneShotFireScopeFromContext(ctx context.Context) *oneShotFireScope {
 	return scope
 }
 
-func (sc *oneShotFireScope) attach(run *wakeFireRun, abortCtx context.Context, cleanup func()) {
+func (sc *oneShotFireScope) attach(run *detachedFireRun, abortCtx context.Context, cleanup func()) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	sc.run = run
@@ -451,7 +451,7 @@ func (sc *oneShotFireScope) attach(run *wakeFireRun, abortCtx context.Context, c
 	sc.cleanup = cleanup
 }
 
-func (sc *oneShotFireScope) state() (*wakeFireRun, bool) {
+func (sc *oneShotFireScope) state() (*detachedFireRun, bool) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	aborted := sc.abortCtx != nil && sc.abortCtx.Err() != nil
@@ -468,102 +468,86 @@ func (sc *oneShotFireScope) finish() {
 	}
 }
 
-// wakeFireRuns is the set of wake fires (one-shot and recurring) in flight.
-type wakeFireRuns struct {
+// detachedFireRuns is the set of wake fires (one-shot and recurring) in flight.
+type detachedFireRuns struct {
 	mu   sync.Mutex
-	runs map[*wakeFireRun]struct{}
+	runs map[*detachedFireRun]struct{}
 }
 
-func (w *wakeFireRuns) add(r *wakeFireRun) {
+func (w *detachedFireRuns) add(r *detachedFireRun) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.runs == nil {
-		w.runs = make(map[*wakeFireRun]struct{})
+		w.runs = make(map[*detachedFireRun]struct{})
 	}
 	w.runs[r] = struct{}{}
 }
 
-func (w *wakeFireRuns) remove(r *wakeFireRun) {
+func (w *detachedFireRuns) remove(r *detachedFireRun) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.runs, r)
 }
 
-func (w *wakeFireRuns) snapshot() []*wakeFireRun {
+func (w *detachedFireRuns) snapshot() []*detachedFireRun {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	out := make([]*wakeFireRun, 0, len(w.runs))
+	out := make([]*detachedFireRun, 0, len(w.runs))
 	for r := range w.runs {
 		out = append(out, r)
 	}
 	return out
 }
 
-// scheduledWakeFireAbortGrace bounds how long shutdown waits, after it
-// aborts the recurring wake fires that outlived scheduledWakeFireStopGrace,
+// scheduledDetachedFireAbortGrace bounds how long shutdown waits, after it
+// aborts the recurring wake fires that outlived scheduledDetachedFireStopGrace,
 // for them to record their own outcome.
-var scheduledWakeFireAbortGrace = 2 * time.Second
-
-// trackScheduledWake joins a scheduled wake (and the dispatch after it) to
-// the hub's shutdown tracking, the same mechanism for one-shot and
-// recurring fires. A recurring wake fire is already tracked from
-// executeSchedule (its ctx carries the fire abort): ctx is returned as is.
-// A one-shot wake is admitted to scheduledWakeFires and registered, and its
-// returned ctx ends, and carries the abort, when the shutdown aborts the
-// tracked work. ok is false once the hub is shutting down: the wake must
-// not start. The caller must call done when the wake and dispatch end.
-//
-// A one-shot fire records its own outcome (fireEvent, on a context that
-// survives the scheduler's halt); the shutdown records the failure for one
-// still running when it stops waiting.
-func (s *Server) trackScheduledWake(ctx context.Context, evt store.ScheduledEvent) (context.Context, func(), bool) {
-	return (&scheduledFireTracker{srv: s, fireID: evt.ID}).Admit(ctx)
-}
+var scheduledDetachedFireAbortGrace = 2 * time.Second
 
 // errScheduledWakeShuttingDown is recorded on a scheduled wake that did
 // not start because the hub is shutting down.
 var errScheduledWakeShuttingDown = errors.New("hub is shutting down; the wake fire did not run")
 
-// scheduledWakeRecordBudget bounds the teardown's outcome writes for all
-// the wake fires it records (recordAbandonedWakeFires) together.
-var scheduledWakeRecordBudget = 5 * time.Second
+// scheduledDetachedRecordBudget bounds the teardown's outcome writes for all
+// the wake fires it records (recordAbandonedDetachedFires) together.
+var scheduledDetachedRecordBudget = 5 * time.Second
 
-// stopScheduledWakeFires is the background teardown's step for scheduled
+// stopScheduledDetachedFires is the background teardown's step for scheduled
 // wake fires, one-shot and recurring: admission closes, running fires get
-// scheduledWakeFireStopGrace to finish, then they are aborted and get
-// scheduledWakeFireAbortGrace to record their outcome
+// scheduledDetachedFireStopGrace to finish, then they are aborted and get
+// scheduledDetachedFireAbortGrace to record their outcome
 // (errScheduledWakeShutdown). A fire still running after that (for example
 // inside a broker launch the shared wake path keeps detached) has the same
 // failure recorded for it, so its event does not stay fired with nothing
 // delivered. It runs before the store closes.
-func (s *Server) stopScheduledWakeFires(ctx context.Context) {
-	n := s.scheduledWakeFires.stop(ctx, scheduledWakeFireStopGrace)
+func (s *Server) stopScheduledDetachedFires(ctx context.Context) {
+	n := s.scheduledDetachedFires.stop(ctx, scheduledDetachedFireStopGrace)
 	if n == 0 {
 		return
 	}
-	n = s.scheduledWakeFires.wait(ctx, scheduledWakeFireAbortGrace)
+	n = s.scheduledDetachedFires.wait(ctx, scheduledDetachedFireAbortGrace)
 	if n == 0 {
 		return
 	}
 	slog.Warn("Scheduled wake fires still running after the shutdown grace; recording them as not delivered",
-		"running", n, "grace", scheduledWakeFireStopGrace+scheduledWakeFireAbortGrace)
-	s.recordAbandonedWakeFires(ctx)
+		"running", n, "grace", scheduledDetachedFireStopGrace+scheduledDetachedFireAbortGrace)
+	s.recordAbandonedDetachedFires(ctx)
 }
 
-// recordAbandonedWakeFires records errScheduledWakeShutdown for every
+// recordAbandonedDetachedFires records errScheduledWakeShutdown for every
 // scheduled wake fire still in flight whose outcome is not recorded yet:
 // on the event, and on the schedule for a recurring fire. All the writes
-// share one deadline (scheduledWakeRecordBudget, or ctx's if sooner); once
+// share one deadline (scheduledDetachedRecordBudget, or ctx's if sooner); once
 // it passes the rest are skipped.
-func (s *Server) recordAbandonedWakeFires(ctx context.Context) {
-	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledWakeRecordBudget)
+func (s *Server) recordAbandonedDetachedFires(ctx context.Context) {
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledDetachedRecordBudget)
 	defer cancel()
 	if deadline, ok := ctx.Deadline(); ok {
 		var cancelEarlier context.CancelFunc
 		recordCtx, cancelEarlier = context.WithDeadline(recordCtx, deadline)
 		defer cancelEarlier()
 	}
-	for _, r := range s.runningWakeFires.snapshot() {
+	for _, r := range s.runningDetachedFires.snapshot() {
 		if recordCtx.Err() != nil {
 			slog.Warn("Scheduled wake fire outcome not recorded: the shutdown record budget ran out",
 				"event_id", r.eventID, "schedule_id", r.scheduleID)
@@ -593,54 +577,54 @@ func (s *Server) recordAbandonedWakeFires(ctx context.Context) {
 	}
 }
 
-// scheduledWakeRecoveryBatchSize bounds each page read when recovering
+// scheduledDetachedRecoveryBatchSize bounds each page read when recovering
 // abandoned "firing" wake events.
-const scheduledWakeRecoveryBatchSize = 200
+const scheduledDetachedRecoveryBatchSize = 200
 
 // Timeouts shared between scheduled event execution, message dispatch, outcome
-// persistence, and scheduledWakeStuckAfter so the shared-store recovery cutoff
+// persistence, and scheduledDetachedStuckAfter so the shared-store recovery cutoff
 // cannot drift below an active wake fire's budget.
 const (
-	scheduledEventHandlerTimeout    = 30 * time.Second
-	scheduledMessageDispatchTimeout = 30 * time.Second
-	scheduledEventRecordTimeout     = 10 * time.Second
-	scheduledWakeStuckSafetyMargin  = time.Minute
+	scheduledEventHandlerTimeout       = 30 * time.Second
+	scheduledMessageDispatchTimeout    = 30 * time.Second
+	scheduledEventRecordTimeout        = 10 * time.Second
+	scheduledDetachedStuckSafetyMargin = time.Minute
 )
 
-// scheduledWakeStuckAfter returns the maximum legitimate lifetime of an active
+// scheduledDetachedStuckAfter returns the maximum legitimate lifetime of an active
 // wake fire (pre-wake handler budget + wake budget + dispatch retry budget +
 // completion write budget + safety margin). On a shared multi-replica store,
 // only "firing" events older than this threshold are swept so another live
 // replica's active wake fire is never clobbered.
-func scheduledWakeStuckAfter() time.Duration {
-	return scheduledEventHandlerTimeout + scheduledWakeBudget + scheduledMessageDispatchTimeout + scheduledEventRecordTimeout + scheduledWakeStuckSafetyMargin
+func scheduledDetachedStuckAfter() time.Duration {
+	return scheduledEventHandlerTimeout + scheduledWakeBudget + scheduledMessageDispatchTimeout + scheduledEventRecordTimeout + scheduledDetachedStuckSafetyMargin
 }
 
-// recoverAbandonedWakeFiresOnStart runs startup recovery before the scheduler
+// recoverAbandonedDetachedFiresOnStart runs startup recovery before the scheduler
 // starts. On SQLite (single hub instance) any "firing" row in the database
 // belongs to a prior process that stopped, so all such rows are finalized
-// immediately; on shared backends only rows older than scheduledWakeStuckAfter
+// immediately; on shared backends only rows older than scheduledDetachedStuckAfter
 // are finalized.
-func (s *Server) recoverAbandonedWakeFiresOnStart(ctx context.Context) {
+func (s *Server) recoverAbandonedDetachedFiresOnStart(ctx context.Context) {
 	_, dbDialect := s.storeDB()
-	s.recoverAbandonedWakeFires(ctx, time.Now().UTC(), dbDialect == dialect.SQLite)
+	s.recoverAbandonedDetachedFires(ctx, time.Now().UTC(), dbDialect == dialect.SQLite)
 }
 
-// recoverAbandonedWakeFires transitions wake events stranded in status
+// recoverAbandonedDetachedFires transitions wake events stranded in status
 // "firing" to "failed" with errScheduledWakeAbandoned and, for recurring
 // schedule fires, records the failed run on the parent schedule without
 // rewinding next_run_at.
-func (s *Server) recoverAbandonedWakeFires(ctx context.Context, now time.Time, immediate bool) {
+func (s *Server) recoverAbandonedDetachedFires(ctx context.Context, now time.Time, immediate bool) {
 	if s.store == nil {
 		return
 	}
 	cutoff := now
 	if !immediate {
-		cutoff = now.Add(-scheduledWakeStuckAfter())
+		cutoff = now.Add(-scheduledDetachedStuckAfter())
 	}
 	msg := errScheduledWakeAbandoned.Error()
 	for {
-		events, err := s.store.ListFiringScheduledEvents(ctx, cutoff, scheduledWakeRecoveryBatchSize)
+		events, err := s.store.ListFiringScheduledEvents(ctx, cutoff, scheduledDetachedRecoveryBatchSize)
 		if err != nil {
 			slog.Warn("Scheduler: failed to list firing scheduled events for recovery", "error", err)
 			return
@@ -668,7 +652,7 @@ func (s *Server) recoverAbandonedWakeFires(ctx context.Context, now time.Time, i
 					"event_id", evt.ID, "schedule_id", evt.ScheduleID)
 			}
 		}
-		if len(events) < scheduledWakeRecoveryBatchSize || !progressed {
+		if len(events) < scheduledDetachedRecoveryBatchSize || !progressed {
 			return
 		}
 	}

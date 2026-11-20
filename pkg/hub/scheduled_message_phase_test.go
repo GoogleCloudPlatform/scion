@@ -163,7 +163,8 @@ func TestScheduledMessage_WithoutWake_RecordsInEventAndScheduleHistory(t *testin
 		wantErr := fmt.Sprintf("agent %q is suspended; use --wake to resume and deliver", f.target.Slug)
 
 		sched := NewScheduler(f.store, slog.Default())
-		sched.RegisterEventHandler("message", f.srv.messageEventHandler())
+		sched.srv = f.srv
+		sched.RegisterAction(&messageAction{srv: f.srv})
 
 		payload, err := json.Marshal(MessageEventPayload{
 			AgentName: f.target.Slug,
@@ -198,7 +199,8 @@ func TestScheduledMessage_WithoutWake_RecordsInEventAndScheduleHistory(t *testin
 		wantErr := fmt.Sprintf("agent %q is suspended; use --wake to resume and deliver", f.target.Slug)
 
 		f.srv.scheduler = NewScheduler(f.store, slog.Default())
-		f.srv.scheduler.RegisterEventHandler("message", f.srv.messageEventHandler())
+		f.srv.scheduler.srv = f.srv
+		f.srv.RegisterAction(&messageAction{srv: f.srv})
 
 		payload, err := json.Marshal(MessageEventPayload{
 			AgentName: f.target.Slug,
