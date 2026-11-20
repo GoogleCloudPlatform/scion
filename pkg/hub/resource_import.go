@@ -149,10 +149,11 @@ type resourceImportKind struct {
 	// it can fail; failures cause that directory to be skipped.
 	newStore func(dir string) (*ResourceStore, error)
 	// checkContent, when set, validates the content of every directory
-	// selected for import before any directory is persisted. A non-nil error
-	// refuses the whole import, so a refused import or reimport writes
-	// nothing. It reports every refused directory, not just the first.
-	checkContent func(dirs []resourceDir) error
+	// selected for import into scope before any directory is persisted. A
+	// non-nil error refuses the whole import, so a refused import or
+	// reimport writes nothing. It reports every refused directory, not just
+	// the first.
+	checkContent func(dirs []resourceDir, scope string) error
 }
 
 // templateImportKind returns the import knobs for templates.
@@ -178,7 +179,12 @@ func (s *Server) harnessConfigImportKind() resourceImportKind {
 			}
 			return s.harnessConfigStore(hcDir.Config.Harness), nil
 		},
-		checkContent: checkHarnessConfigDirsProvisioner,
+		checkContent: func(dirs []resourceDir, scope string) error {
+			if err := checkHarnessConfigDirsProvisioner(dirs); err != nil {
+				return err
+			}
+			return s.checkHostedHarnessConfigDirs(dirs, scope)
+		},
 	}
 }
 
@@ -231,7 +237,7 @@ func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, source
 		return nil, errors.New(noMatch)
 	}
 
-	if err := checkResourceDirsContent(dirs, kind); err != nil {
+	if err := checkResourceDirsContent(dirs, scope, kind); err != nil {
 		return nil, err
 	}
 
@@ -274,7 +280,7 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 		return nil, fmt.Errorf("no scion %s matched the requested names", kind.noun)
 	}
 
-	if err := checkResourceDirsContent(dirs, kind); err != nil {
+	if err := checkResourceDirsContent(dirs, scope, kind); err != nil {
 		return nil, err
 	}
 
@@ -282,13 +288,13 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 }
 
 // checkResourceDirsContent runs the kind's content check over every directory
-// selected for import. It runs before importResourceDirs so that a refusal
-// persists nothing.
-func checkResourceDirsContent(dirs []resourceDir, kind resourceImportKind) error {
+// selected for import into scope. It runs before importResourceDirs so that
+// a refusal persists nothing.
+func checkResourceDirsContent(dirs []resourceDir, scope string, kind resourceImportKind) error {
 	if kind.checkContent == nil {
 		return nil
 	}
-	return kind.checkContent(dirs)
+	return kind.checkContent(dirs, scope)
 }
 
 // fetchRemoteForImport fetches a remote source URL to a local cache directory,

@@ -285,7 +285,7 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	content := []byte(req.Content)
 	// Refuse before writing the object, so refused content never reaches
 	// storage; the commit runs the same check.
-	if isHarnessConfigYAMLPath(filePath) && refuseUnusableProvisionerYAML(w, hc.Name, content) {
+	if isHarnessConfigYAMLPath(filePath) && (refuseUnusableProvisionerYAML(w, hc.Name, content) || s.refuseHostedHarnessConfigYAML(w, hc, content)) {
 		return
 	}
 	// Store the content as a blob, then commit it.
@@ -359,7 +359,7 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 			BadRequest(w, "Failed to read multipart file: "+err.Error())
 			return
 		}
-		if refuseUnusableProvisionerYAML(w, hc.Name, data) {
+		if refuseUnusableProvisionerYAML(w, hc.Name, data) || s.refuseHostedHarnessConfigYAML(w, hc, data) {
 			return
 		}
 	}

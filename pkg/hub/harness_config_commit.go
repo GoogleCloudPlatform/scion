@@ -212,7 +212,9 @@ var errHarnessConfigStorageNotConfigured = errors.New("storage not configured")
 //     read already references are not touched, so a single-file edit costs
 //     a constant number of storage calls whatever the manifest's size;
 //  2. refuses a config.yaml whose provisioner could never provision an
-//     agent (unusableProvisionerInYAML, the one content check);
+//     agent (unusableProvisionerInYAML), and on a hosted hub a
+//     project-scope config.yaml naming host resources
+//     (hostedHarnessConfigYAMLRefusal);
 //  3. computes ContentHash;
 //  4. derives Harness and Config from config.yaml (deriveHarnessConfigIndex);
 //  5. writes the row once, in the blob layout: CreateHarnessConfig with
@@ -281,6 +283,13 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	if present {
 		if perr := unusableProvisionerInYAML(hc.Name, configYAML); perr != nil {
 			return &unusableHarnessConfigError{perr: perr}
+		}
+	}
+	// On a hosted hub a project-scope harness config is member content
+	// (hostedHarnessConfigYAMLRefusal).
+	if s.checksHostedHarnessConfig(hc.Scope) {
+		if err := hostedHarnessConfigYAMLRefusal(hc.Name, configYAML, present); err != nil {
+			return err
 		}
 	}
 
@@ -402,6 +411,9 @@ func writeHarnessConfigCommitError(w http.ResponseWriter, err error) {
 	var unusable *unusableHarnessConfigError
 	if errors.As(err, &unusable) {
 		writeUnusableProvisioner(w, unusable.perr)
+		return
+	}
+	if writeHostedHarnessConfigRefusal(w, err) {
 		return
 	}
 	if errors.Is(err, errHarnessConfigStorageNotConfigured) {

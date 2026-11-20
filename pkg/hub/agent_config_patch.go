@@ -87,8 +87,10 @@ func (p configPatch) subset(keep func(agentEditField) bool) configPatch {
 }
 
 // validateAgentConfigPatch runs the agent PATCH's config validation, which
-// writes nothing: the harness capability check and the thinking-level
-// range. On a failure it writes the error response and returns false. A
+// writes nothing: the harness capability check, the reserved env keys, on a
+// hosted hub the member config check (hostedConfigRefusal, so the live PATCH
+// and a held edit saved through agent_pending_config.go are refused when
+// written), and the thinking-level range. On a failure it writes the error response and returns false. A
 // held edit is validated by the same call when it is saved; the harness is
 // fixed after create, so the check still holds when the edit is applied.
 //
@@ -129,6 +131,15 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 			"value": key,
 		})
 		return false
+	}
+	// On a hosted hub the config a member stores may not name host
+	// resources (hostedguard), as at create; a stored edit would otherwise
+	// be refused only at the agent's next dispatch.
+	if !s.workstation {
+		if err := hostedConfigRefusal(cfg); err != nil {
+			writeRuntimeTargetRefusal(w, err)
+			return false
+		}
 	}
 	if cfg.ThinkingLevel != nil {
 		if tl := *cfg.ThinkingLevel; tl < 0 || tl > 100 {

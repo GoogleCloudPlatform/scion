@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // localLinkedConfigYAMLTree returns a parent directory with two
@@ -329,7 +330,7 @@ func TestHarnessConfigImportKind_LinkedConfigYAMLNotRead(t *testing.T) {
 	if _, err := kind.newStore(linked.path); err == nil {
 		t.Error("newStore accepted a directory whose config.yaml is a link")
 	}
-	if err := kind.checkContent([]resourceDir{linked}); err != nil {
+	if err := kind.checkContent([]resourceDir{linked}, store.HarnessConfigScopeProject); err != nil {
 		t.Errorf("checkContent read the linked config.yaml: %v", err)
 	}
 }

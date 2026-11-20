@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -30,16 +32,35 @@ func (d *HTTPAgentDispatcher) SetHostedMode(hosted bool) {
 	d.hostedMode = hosted
 }
 
+// SetHostedHarnessConfigCheck sets the check hostedConfigPrecheck applies
+// to the hub harness config an agent is dispatched with
+// (Server.checkStoredHostedHarnessConfig). Nil checks nothing.
+func (d *HTTPAgentDispatcher) SetHostedHarnessConfigCheck(check func(ctx context.Context, harnessConfigID string) error) {
+	d.hostedHarnessConfigCheck = check
+}
+
 // hostedConfigPrecheck refuses a dispatch on a hosted hub when the agent's
 // stored inline config (written by the member who created or updated the
-// agent) names host resources, so config stored before the check existed
-// is refused at its next dispatch. The runtime is not known here: rules
-// that depend on it are left to the broker.
-func (d *HTTPAgentDispatcher) hostedConfigPrecheck(agent *store.Agent) error {
+// agent), or the project-scope hub harness config it is dispatched with,
+// names host resources, so config stored before the check existed is
+// refused at its next dispatch. The runtime is not known here: rules that
+// depend on it are left to the broker.
+func (d *HTTPAgentDispatcher) hostedConfigPrecheck(ctx context.Context, agent *store.Agent) error {
 	if !d.hostedMode || agent == nil || agent.AppliedConfig == nil {
 		return nil
 	}
-	return hostedConfigRefusal(agent.AppliedConfig.InlineConfig)
+	if err := hostedConfigRefusal(agent.AppliedConfig.InlineConfig); err != nil {
+		return err
+	}
+	if d.hostedHarnessConfigCheck == nil || agent.AppliedConfig.HarnessConfigID == "" {
+		return nil
+	}
+	err := d.hostedHarnessConfigCheck(ctx, agent.AppliedConfig.HarnessConfigID)
+	var he *hostedHarnessConfigError
+	if errors.As(err, &he) {
+		return &RuntimeTargetRefusal{Code: hostedguard.ErrorCode, Status: http.StatusBadRequest, Message: he.Error()}
+	}
+	return err
 }
 
 // hostedConfigRefusal checks member-written agent config with

@@ -251,6 +251,9 @@ type HTTPAgentDispatcher struct {
 	// dispatch check the agent's member-written config
 	// (hostedConfigPrecheck, SetHostedMode).
 	hostedMode bool
+	// hostedHarnessConfigCheck checks the hub harness config a hosted
+	// dispatch names (SetHostedHarnessConfigCheck); nil checks nothing.
+	hostedHarnessConfigCheck func(ctx context.Context, harnessConfigID string) error
 
 	// attachmentIssuer issues the attachment delivery capabilities of a
 	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.
@@ -2109,7 +2112,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	if err := d.hostedConfigPrecheck(agent); err != nil {
+	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
@@ -2258,7 +2261,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
 		return err
 	}
-	if err := d.hostedConfigPrecheck(agent); err != nil {
+	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
 		return err
 	}
 	if err := d.createHomeFilesPrecheck(ctx, agent, reprovision); err != nil {
@@ -2514,7 +2517,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
-	if err := d.hostedConfigPrecheck(agent); err != nil {
+	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
 	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
@@ -2734,7 +2737,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
-	if err := d.hostedConfigPrecheck(agent); err != nil {
+	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
 	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
@@ -4009,7 +4012,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
-	if err := d.hostedConfigPrecheck(agent); err != nil {
+	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
@@ -4406,7 +4409,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
 		return err
 	}
-	if err := d.hostedConfigPrecheck(agent); err != nil {
+	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
 		return err
 	}
 
