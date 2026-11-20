@@ -4226,6 +4226,11 @@ export class ScionChatSpaceRail extends LitElement {
     this._createThreadGroupId = null;
   }
 
+  /** Update a cached thread's defaultAgent in place so subsequent rail selections carry the latest value. */
+  public updateThreadDefaultAgent(projectId: string, threadId: string, defaultAgent: string): void {
+    this.updateThread(projectId, threadId, { defaultAgent });
+  }
+
   private updateThread(
     projectId: string,
     threadId: string,

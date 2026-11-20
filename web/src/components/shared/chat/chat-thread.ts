@@ -4060,10 +4060,10 @@ export class ScionChatThread extends LitElement {
         }
       );
       if (res.ok) {
-        this.defaultAgent = arg === 'clear' ? '' : arg;
+        const nextDefault = arg === 'clear' ? '' : arg;
         this.dispatchEvent(
           new CustomEvent('default-agent-changed', {
-            detail: { defaultAgent: this.defaultAgent },
+            detail: { defaultAgent: nextDefault },
             bubbles: true,
             composed: true,
           })
@@ -4095,10 +4095,9 @@ export class ScionChatThread extends LitElement {
       // A conversation switch mid-flight makes this response irrelevant: the
       // default agent now belongs to a topic we are no longer showing.
       if (res.ok && currentId === this.fetchId) {
-        this.defaultAgent = newDefault;
         this.dispatchEvent(
           new CustomEvent('default-agent-changed', {
-            detail: { defaultAgent: this.defaultAgent },
+            detail: { defaultAgent: newDefault },
             bubbles: true,
             composed: true,
           })
@@ -6562,10 +6561,9 @@ export class ScionChatThread extends LitElement {
         }
       );
       if (res.ok) {
-        this.defaultAgent = agentSlug;
         this.dispatchEvent(
           new CustomEvent('default-agent-changed', {
-            detail: { defaultAgent: this.defaultAgent },
+            detail: { defaultAgent: agentSlug },
             bubbles: true,
             composed: true,
           })

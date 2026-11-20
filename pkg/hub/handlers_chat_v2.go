@@ -814,6 +814,7 @@ func (s *Server) handleTopicGet(w http.ResponseWriter, r *http.Request, topicID 
 		return
 	}
 
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, topic)
 }
 
