@@ -67,13 +67,14 @@ type DismissDecisionPromptResponse struct {
 const (
 	// DismissDeliveryDelivered: dispatched to the asking agent.
 	DismissDeliveryDelivered = "delivered"
-	// DismissDeliveryHeld: held until the asking agent's next session, and
-	// delivered then.
+	// DismissDeliveryHeld: held until the asking agent's next session (or
+	// queued behind an auto-wake), and delivered then.
 	DismissDeliveryHeld = "held"
 	// DismissDeliveryGone: the asking agent is deleted; nothing was sent.
 	DismissDeliveryGone = "gone"
-	// DismissDeliveryUnreachable: the asking agent is suspended, stopping,
-	// stopped, or in error; the response is stored, marked failed, not sent.
+	// DismissDeliveryUnreachable: the asking agent is unreachable
+	// (user-suspended, held, stopping, stopped, or in error) and will not
+	// auto-wake; the response is stored, marked failed, not sent.
 	DismissDeliveryUnreachable = "unreachable"
 	// DismissDeliveryFailed: dispatch was attempted and failed, or the result
 	// cannot be confirmed.
@@ -282,7 +283,7 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 	}
 
 	now := s.nowDecision().Truncate(time.Microsecond)
-	responseMsg := s.decisionDismissResponseStoreMessage(user, ds[0], chatKey, asker, askerGone, now)
+	responseMsg := s.decisionDismissResponseStoreMessage(ctx, user, ds[0], chatKey, asker, askerGone, now)
 	who := userDisplay(user)
 
 	res, err := s.store.DismissDecisions(ctx, &store.DismissDecisionsInput{
@@ -432,9 +433,10 @@ func dismissChangedDetails(changed *store.DismissChangedError, views []DecisionV
 // stored with a dismissal (design 8194, 4.5). Unlike an answer to a gone
 // asker, a dismissal of a gone asker's prompt stays in DispatchState
 // dispatched (not marked failed), is not delivered, and reports
-// deliveryStatus gone. An unreachable (suspended, stopped, ...) asker's
-// response is stored failed and reports deliveryStatus unreachable.
-func (s *Server) decisionDismissResponseStoreMessage(user UserIdentity, first *store.Decision, chatKey string, asker *store.Agent, askerGone bool, now time.Time) *store.Message {
+// deliveryStatus gone. An unreachable asker that will not auto-wake
+// (user-suspended, held, stopped, ...) has its response stored failed and
+// reports deliveryStatus unreachable.
+func (s *Server) decisionDismissResponseStoreMessage(ctx context.Context, user UserIdentity, first *store.Decision, chatKey string, asker *store.Agent, askerGone bool, now time.Time) *store.Message {
 	m := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      first.ProjectID,
@@ -453,7 +455,7 @@ func (s *Server) decisionDismissResponseStoreMessage(user UserIdentity, first *s
 		m.Recipient = "agent:" + first.AskerAgentName
 	} else {
 		m.Recipient = "agent:" + asker.Slug
-		if unreachable, why := s.isAgentUnreachable(asker); unreachable {
+		if unreachable, why := s.isAgentUnreachable(asker); unreachable && !s.canAutoWakeDecisionAsker(ctx, asker) {
 			reason := agentUnreachableReason(why)
 			m.DispatchState = store.MessageDispatchFailed
 			m.DispatchFailureReason = &reason
@@ -568,8 +570,7 @@ func (s *Server) deliverDecisionDismissResponse(ctx context.Context, asker *stor
 		// Stored failed up front: the asker is unreachable.
 		return DismissDeliveryUnreachable
 	}
-	dispatcher := s.GetDispatcher()
-	if dispatcher == nil {
+	if s.GetDispatcher() == nil {
 		return DismissDeliveryFailed
 	}
 	text := decisionDismissAgentLine(dismissed, answers)
@@ -586,21 +587,10 @@ func (s *Server) deliverDecisionDismissResponse(ctx context.Context, asker *stor
 		ThreadID:       m.ThreadID,
 		ConversationID: m.ConversationID,
 	}
-	// Strip reserved metadata keys explicitly before setting hub-owned decision keys.
-	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
-	if sm.Metadata == nil {
-		sm.Metadata = make(map[string]string, 7)
-	}
-	populateDecisionDismissMetadata(sm.Metadata, batchID, answers)
-
-	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
-	defer cancel()
-	held, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
-		return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), s.recordLog(), dispatcher, asker, text, false, sm)
-	})
+	held, err := s.dispatchDecisionResponse(ctx, asker, m, text, sm, func(meta map[string]string) {
+		populateDecisionDismissMetadata(meta, batchID, answers)
+	}, "dismiss decision-response")
 	if err != nil {
-		s.messageLog.Error("decisions: failed to deliver dismiss decision-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
-		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())
 		return DismissDeliveryFailed
 	}
 	if held {

@@ -27,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -336,7 +335,8 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 	// The decision-response is a message from the user to the asking agent:
 	// the chat send's messaging check, unless nothing is delivered (a gone
 	// asker or an all-confirm set).
-	if !askerGone && !allConfirm {
+	willDeliver := !askerGone && !allConfirm
+	if willDeliver {
 		if allowed, reason, _ := s.authorizeAgentMessage(ctx, user, asker, false); !allowed {
 			writeError(w, http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
 				"reason":        mapReasonToCode(reason),
@@ -346,7 +346,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	responseMsg := s.decisionSetResponseStoreMessage(user, ds, chatKey, requested, choices, asker, askerGone)
+	responseMsg := s.decisionSetResponseStoreMessage(ctx, user, ds, chatKey, requested, choices, asker, askerGone, willDeliver)
 
 	// Steps 5 to 7 in one transaction.
 	res, err := s.store.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
@@ -452,7 +452,7 @@ func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[st
 // position order. A gone asker (askerGone; asker is then unused) or one
 // that cannot take a message gets the row born failed, as for a one-click
 // answer.
-func (s *Server) decisionSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, chatKey string, requested map[string]bool, choices map[string]messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
+func (s *Server) decisionSetResponseStoreMessage(ctx context.Context, user UserIdentity, ds []*store.Decision, chatKey string, requested map[string]bool, choices map[string]messages.Choice, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
 	var parts []string
 	for _, d := range ds {
 		if requested[d.ID] {
@@ -485,7 +485,7 @@ func (s *Server) decisionSetResponseStoreMessage(user UserIdentity, ds []*store.
 		m.DispatchFailureReason = &reason
 	} else {
 		m.Recipient = "agent:" + asker.Slug
-		if unreachable, why := s.isAgentUnreachable(asker); unreachable {
+		if unreachable, why := s.isAgentUnreachable(asker); unreachable && (!willDeliver || !s.canAutoWakeDecisionAsker(ctx, asker)) {
 			reason := agentUnreachableReason(why)
 			m.DispatchState = store.MessageDispatchFailed
 			m.DispatchFailureReason = &reason
@@ -580,8 +580,7 @@ func (s *Server) deliverDecisionSetResponse(ctx context.Context, asker *store.Ag
 	if asker == nil || m.DispatchState != store.MessageDispatchDispatched {
 		return
 	}
-	dispatcher := s.GetDispatcher()
-	if dispatcher == nil {
+	if s.GetDispatcher() == nil {
 		return
 	}
 	text := decisionSetAgentLines(promptID, res.Answers, overridden)
@@ -598,22 +597,10 @@ func (s *Server) deliverDecisionSetResponse(ctx context.Context, asker *store.Ag
 		ThreadID:       m.ThreadID,
 		ConversationID: m.ConversationID,
 	}
-	// Strip the reserved keys first, as every dispatch site does; the set
-	// keys are reserved and only the hub sets them, after the strip.
-	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
-	if sm.Metadata == nil {
-		sm.Metadata = make(map[string]string, 2)
-	}
-	sm.Metadata[messages.MetadataDecisionBatch] = res.BatchID
-	sm.Metadata[messages.MetadataDecisionAnswers] = decisionAnswersMetadata(res.Answers)
-	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
-	defer cancel()
-	if _, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
-		return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), s.recordLog(), dispatcher, asker, text, false, sm)
-	}); err != nil {
-		s.messageLog.Error("decisions: failed to deliver set decision-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
-		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())
-	}
+	_, _ = s.dispatchDecisionResponse(ctx, asker, m, text, sm, func(meta map[string]string) {
+		meta[messages.MetadataDecisionBatch] = res.BatchID
+		meta[messages.MetadataDecisionAnswers] = decisionAnswersMetadata(res.Answers)
+	}, "set decision-response")
 }
 
 // writeBatchRequired answers 409 batch_required for a per-decision answer to

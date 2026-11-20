@@ -433,7 +433,8 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	// it gets the messaging check of a chat send to an agent
 	// (sendAgentRouted), before anything is recorded. Nothing is delivered
 	// to a gone asker or for a confirm, so those need none.
-	if !askerGone && outcome != store.DecisionOutcomeConfirm {
+	willDeliver := !askerGone && outcome != store.DecisionOutcomeConfirm
+	if willDeliver {
 		if allowed, reason, _ := s.authorizeAgentMessage(ctx, user, asker, false); !allowed {
 			writeError(w, http.StatusForbidden, ErrCodeMessageDenied, "Message delivery denied", map[string]interface{}{
 				"reason":        mapReasonToCode(reason),
@@ -443,7 +444,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			return
 		}
 	}
-	responseMsg := s.decisionResponseStoreMessage(user, d, chatKey, choice, asker, askerGone)
+	responseMsg := s.decisionResponseStoreMessage(ctx, user, d, chatKey, choice, asker, askerGone, willDeliver)
 
 	// Step 5: record the answer and store the response, in one transaction.
 	answer, replayed, err := s.store.RecordAnswer(ctx, &store.RecordAnswerInput{
@@ -575,12 +576,24 @@ func (s *Server) writeDecisionAnswered(w http.ResponseWriter, ctx context.Contex
 		map[string]interface{}{"decision": s.decisionViewFor(ctx, d)})
 }
 
+// canAutoWakeDecisionAsker reports whether a decision-response to asker should
+// wake it in the background rather than marking the response unreachable.
+// Mirrors ordinary message auto-wake (ptone/scion#7826): lifecycle.idle_suspend
+// is on, the hub suspended the agent (idle or stalled) or an idle-suspend claim
+// is in flight, and the agent is not deleted, reincarnating, or held.
+func (s *Server) canAutoWakeDecisionAsker(ctx context.Context, asker *store.Agent) bool {
+	if asker == nil || !asker.DeletedAt.IsZero() || reincarnationInFlight(asker) {
+		return false
+	}
+	return s.shouldQueueAutoWake(asker) && !s.agentHeldOrUnknown(ctx, asker.ID)
+}
+
 // decisionResponseStoreMessage builds the decision-response row stored with the
 // answer: sender the answering user, recipient the asking agent, in the
 // prompt's conversation. A gone asker (askerGone; asker is then unused) or
-// one that cannot take a message gets the row born failed, as a chat send
-// to it would.
-func (s *Server) decisionResponseStoreMessage(user UserIdentity, d *store.Decision, chatKey string, choice messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
+// one that cannot take a message (and will not auto-wake) gets the row born
+// failed, as a chat send to it would.
+func (s *Server) decisionResponseStoreMessage(ctx context.Context, user UserIdentity, d *store.Decision, chatKey string, choice messages.Choice, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
 	m := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      d.ProjectID,
@@ -603,7 +616,7 @@ func (s *Server) decisionResponseStoreMessage(user UserIdentity, d *store.Decisi
 		m.DispatchFailureReason = &reason
 	} else {
 		m.Recipient = "agent:" + asker.Slug
-		if unreachable, why := s.isAgentUnreachable(asker); unreachable {
+		if unreachable, why := s.isAgentUnreachable(asker); unreachable && (!willDeliver || !s.canAutoWakeDecisionAsker(ctx, asker)) {
 			reason := agentUnreachableReason(why)
 			m.DispatchState = store.MessageDispatchFailed
 			m.DispatchFailureReason = &reason
@@ -671,6 +684,93 @@ func (s *Server) publishDecisionResponse(ctx context.Context, m *store.Message, 
 	}
 }
 
+// decisionResponseAutoWakeItem queues delivery of a persisted decision-response
+// behind a background auto-wake of the asking agent. It captures only immutable
+// values so it never races with the HTTP handler returning.
+func (s *Server) decisionResponseAutoWakeItem(messageID, agentSlug, text string, sm *messages.StructuredMessage, label string) autoWakeItem {
+	return autoWakeItem{
+		deliver: func(ctx context.Context, woken *store.Agent) {
+			var err error
+			if dispatcher := s.GetDispatcher(); dispatcher == nil {
+				err = errors.New("dispatch not available")
+			} else {
+				dctx, cancel := context.WithTimeout(withDispatchMessageID(ctx, messageID), chatWakeDeliveryBudget)
+				_, err = s.holdOrDispatch(dctx, woken, messageID, nil, func() error {
+					return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), s.recordLog(), dispatcher, woken, text, false, sm)
+				})
+				cancel()
+			}
+			if err != nil {
+				fctx, fcancel := finalizationContext(ctx)
+				defer fcancel()
+				s.messageLog.Error("decisions: failed to deliver "+label+" after auto-wake", "agent", woken.Slug, "message_id", messageID, "error", err)
+				_ = s.markFailed(fctx, messageID, err.Error())
+			}
+		},
+		fail: func(ctx context.Context, dmErr *AgentDMError) {
+			fctx, fcancel := finalizationContext(ctx)
+			defer fcancel()
+			s.messageLog.Error("decisions: auto-wake failed for "+label, "agent", agentSlug, "message_id", messageID, "code", dmErr.Code, "error", dmErr.Message)
+			_ = s.markFailed(fctx, messageID, fmt.Sprintf("auto-wake failed: %s", dmErr.Message))
+		},
+	}
+}
+
+// dispatchDecisionResponse delivers a persisted decision-response to asker,
+// auto-waking a hub-suspended (or idle-suspending) asker in the background
+// just like web chat secondaries and mention fan-out. It returns
+// (queuedOrHeld, err), where queuedOrHeld is true when delivery is held for
+// the next session or queued behind a background auto-wake.
+func (s *Server) dispatchDecisionResponse(ctx context.Context, asker *store.Agent, m *store.Message, text string, sm *messages.StructuredMessage, populateMeta func(map[string]string), label string) (bool, error) {
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return false, nil
+	}
+	// Strip reserved metadata keys first, as every dispatch site does, so no
+	// value from another source reaches the agent; hub-owned decision keys
+	// are populated after the strip.
+	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
+	if sm.Metadata == nil {
+		sm.Metadata = make(map[string]string, 7)
+	}
+	if populateMeta != nil {
+		populateMeta(sm.Metadata)
+	}
+	canAutoWake := func(target *store.Agent) bool {
+		hctx, hcancel := finalizationContext(ctx)
+		defer hcancel()
+		return s.canAutoWakeDecisionAsker(hctx, target)
+	}
+	if canAutoWake(asker) &&
+		s.queueAutoWake(asker, s.decisionResponseAutoWakeItem(m.ID, asker.Slug, text, sm, label)) {
+		return true, nil
+	}
+	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
+	defer cancel()
+	held, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
+		return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), s.recordLog(), dispatcher, asker, text, false, sm)
+	})
+	if err != nil {
+		var idleErr *errAgentIdleSuspending
+		if errors.As(err, &idleErr) {
+			target := idleErr.agent
+			if target == nil {
+				target = asker
+			}
+			if canAutoWake(target) &&
+				s.queueAutoWake(target, s.decisionResponseAutoWakeItem(m.ID, target.Slug, text, sm, label)) {
+				return true, nil
+			}
+		}
+		s.messageLog.Error("decisions: failed to deliver "+label, "agent", asker.Slug, "message_id", m.ID, "error", err)
+		fctx, fcancel := finalizationContext(ctx)
+		_ = s.markFailed(fctx, m.ID, err.Error())
+		fcancel()
+		return false, err
+	}
+	return held, nil
+}
+
 // deliverDecisionResponse dispatches the stored response to the asking agent
 // with the hub-formatted line and the hub-set decision metadata. A stopped or
 // deleted asker leaves the row failed (undeliverable semantics); the answer
@@ -679,8 +779,7 @@ func (s *Server) deliverDecisionResponse(ctx context.Context, asker *store.Agent
 	if asker == nil || m.DispatchState != store.MessageDispatchDispatched {
 		return
 	}
-	dispatcher := s.GetDispatcher()
-	if dispatcher == nil {
+	if s.GetDispatcher() == nil {
 		return
 	}
 	line := decisionResponseAgentLine(a, overridden)
@@ -697,25 +796,12 @@ func (s *Server) deliverDecisionResponse(ctx context.Context, asker *store.Agent
 		ThreadID:       m.ThreadID,
 		ConversationID: m.ConversationID,
 	}
-	// Strip the reserved keys first, as every dispatch site does, so no
-	// value from another source reaches the agent; the four decision keys are
-	// reserved and only the hub sets them, after the strip.
-	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
-	if sm.Metadata == nil {
-		sm.Metadata = make(map[string]string, 4)
-	}
-	sm.Metadata[messages.MetadataDecisionKey] = a.Key
-	sm.Metadata[messages.MetadataDecisionVersion] = strconv.Itoa(a.Version)
-	sm.Metadata[messages.MetadataChoiceID] = a.ChoiceID
-	sm.Metadata[messages.MetadataDecisionProvenance] = a.Provenance
-	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
-	defer cancel()
-	if _, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
-		return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), s.recordLog(), dispatcher, asker, line, false, sm)
-	}); err != nil {
-		s.messageLog.Error("decisions: failed to deliver decision-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
-		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())
-	}
+	_, _ = s.dispatchDecisionResponse(ctx, asker, m, line, sm, func(meta map[string]string) {
+		meta[messages.MetadataDecisionKey] = a.Key
+		meta[messages.MetadataDecisionVersion] = strconv.Itoa(a.Version)
+		meta[messages.MetadataChoiceID] = a.ChoiceID
+		meta[messages.MetadataDecisionProvenance] = a.Provenance
+	}, "decision-response")
 }
 
 // publishDecisionUpdated tells every open card of the decision about its new
