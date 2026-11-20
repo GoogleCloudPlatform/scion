@@ -561,7 +561,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			r.URL.Path == "/.well-known/agent.json" ||
 			r.URL.Path == "/.well-known/openid-configuration" ||
 			r.URL.Path == "/.well-known/jwks.json" ||
-			r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+			r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}

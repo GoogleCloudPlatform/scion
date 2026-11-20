@@ -63,7 +63,7 @@ docker run -p 8443:8443 -p 9090:9090 \
 | `/projects/{project}/agents/{agent}/jsonrpc` | POST | A2A JSON-RPC endpoint |
 | `/healthz` | GET | Liveness check |
 | `/readyz` | GET | Readiness check (database, broker) |
-| `/metrics` | GET | Prometheus metrics (restrict access — see Security) |
+| `/metrics` | GET | Prometheus metrics (authenticated — see Security) |
 
 ### Supported JSON-RPC methods
 
@@ -464,7 +464,13 @@ By default the broker plugin RPC binds to loopback only. Setting `plugin.allow_r
 
 ### `/metrics` endpoint
 
-The `/metrics` endpoint requires the same API key authentication as other non-public endpoints. Prometheus scrapers must include the API key in their scrape configuration (e.g., via `authorization` or `headers` in the Prometheus job config). If this is undesirable, consider running a dedicated metrics listener on a separate port restricted to internal networks.
+The `/metrics` endpoint enforces the bridge's configured authentication scheme (`auth.scheme`), matching other non-public endpoints (while remaining exempt from rate limiting). Prometheus scrapers must supply credentials matching `auth.scheme`:
+
+- **`bearer`, `hubUAT`, `hubBearer`, `hubJWT`, `federation`, `geGoogle`**: send `Authorization: Bearer <token>` (for example, via Prometheus's `authorization` block in the scrape job config).
+- **`apiKey`**: send `X-API-Key: <key>` (standard Prometheus `authorization` sends `Authorization`; use `bearer`, a scraper that supports custom headers, or an internal proxy). When `auth.scheme` is unset, either `X-API-Key` or `Authorization: Bearer` is accepted.
+- **`none`**: unauthenticated, matching all other endpoints when authentication is explicitly disabled.
+
+If authenticating scrapers through the configured A2A scheme is undesirable, consider running a dedicated metrics listener on a separate port restricted to internal networks.
 
 ### Rate limiting and `trust_proxy`
 

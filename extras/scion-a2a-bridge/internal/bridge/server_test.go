@@ -968,13 +968,12 @@ func TestInternalSweepWithoutValidator(t *testing.T) {
 	}
 }
 
-// TestHealthEndpointsRemainUnauthenticated verifies that /healthz, /readyz,
-// and /metrics remain accessible without authentication even when auth is
-// configured.
+// TestHealthEndpointsRemainUnauthenticated verifies that /healthz and /readyz
+// remain accessible without authentication even when auth is configured.
 func TestHealthEndpointsRemainUnauthenticated(t *testing.T) {
 	_, ts, _ := newTestServer(t) // uses apiKey auth scheme
 
-	for _, path := range []string{"/healthz", "/readyz", "/metrics"} {
+	for _, path := range []string{"/healthz", "/readyz"} {
 		t.Run(path, func(t *testing.T) {
 			resp, err := http.Get(ts.URL + path)
 			if err != nil {
@@ -987,4 +986,141 @@ func TestHealthEndpointsRemainUnauthenticated(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMetricsEndpointRequiresAuthentication verifies that /metrics enforces
+// the configured authentication scheme: unauthenticated and invalid-credential
+// requests are refused with 401, while valid credentials succeed.
+func TestMetricsEndpointRequiresAuthentication(t *testing.T) {
+	t.Run("apiKey/unauthenticated_refused", func(t *testing.T) {
+		_, ts, _ := newTestServer(t) // uses apiKey auth scheme ("test-api-key")
+
+		resp, err := http.Get(ts.URL + "/metrics")
+		if err != nil {
+			t.Fatalf("GET /metrics: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET /metrics without auth: status = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("apiKey/invalid_key_refused", func(t *testing.T) {
+		_, ts, _ := newTestServer(t)
+
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("X-API-Key", "wrong-key")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /metrics: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET /metrics with wrong key: status = %d, want 401", resp.StatusCode)
+		}
+	})
+
+	t.Run("apiKey/valid_key_succeeds", func(t *testing.T) {
+		_, ts, _ := newTestServer(t)
+
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("X-API-Key", "test-api-key")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /metrics: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET /metrics with valid key: status = %d, want 200", resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if !bytes.Contains(body, []byte("# HELP ")) {
+			t.Errorf("GET /metrics response does not look like Prometheus exposition format: %q", string(body[:min(len(body), 200)]))
+		}
+	})
+
+	t.Run("bearer/unauthenticated_refused_and_valid_succeeds", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+		if err != nil {
+			t.Fatalf("state.New: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+
+		cfg := &Config{
+			Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+			Auth:   AuthConfig{Scheme: "bearer", APIKey: "scrape-token"},
+		}
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		b := New(store, nil, nil, cfg, nil, log)
+		srv := NewServer(b, cfg, nil, log, testHandler())
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(ts.Close)
+
+		resp, err := http.Get(ts.URL + "/metrics")
+		if err != nil {
+			t.Fatalf("GET /metrics without auth: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET /metrics without auth: status = %d, want 401", resp.StatusCode)
+		}
+
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/metrics", nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer scrape-token")
+
+		resp2, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /metrics with bearer: %v", err)
+		}
+		defer func() { _ = resp2.Body.Close() }()
+		if resp2.StatusCode != http.StatusOK {
+			t.Errorf("GET /metrics with valid bearer: status = %d, want 200", resp2.StatusCode)
+		}
+	})
+
+	t.Run("none/unauthenticated_succeeds", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+		if err != nil {
+			t.Fatalf("state.New: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+
+		cfg := &Config{
+			Bridge: BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+			Auth:   AuthConfig{Scheme: "none"},
+		}
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		b := New(store, nil, nil, cfg, nil, log)
+		srv := NewServer(b, cfg, nil, log, testHandler())
+		ts := httptest.NewServer(srv.Handler())
+		t.Cleanup(ts.Close)
+
+		resp, err := http.Get(ts.URL + "/metrics")
+		if err != nil {
+			t.Fatalf("GET /metrics: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET /metrics with scheme=none: status = %d, want 200", resp.StatusCode)
+		}
+	})
 }

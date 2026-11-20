@@ -471,6 +471,25 @@ Standard A2A JSON-RPC methods supported at the `/jsonrpc` endpoint:
   2. The Hub's broker plugin has successfully dialed and established its active RPC connection.
   * If either component fails, `/readyz` returns `HTTP 503 Service Unavailable`, preventing traffic from hitting the node.
 
+### Metrics Scraping (`/metrics`)
+`/metrics` serves Prometheus metrics and requires the bridge's configured `auth.scheme`, matching other non-public endpoints (it is exempt from rate limiting so scrape traffic does not consume API budget).
+
+Configure your Prometheus scrape job to send credentials matching `auth.scheme`:
+* **Bearer-based schemes (`bearer`, `hubUAT`, `hubBearer`, `hubJWT`, `federation`, `geGoogle`)**: configure `authorization` in the Prometheus scrape job to send `Authorization: Bearer <token>` (for example, using `credentials_file` pointing to a token file).
+* **`apiKey`**: send `X-API-Key: <key>` (Prometheus's built-in `authorization` block sends `Authorization`; use `bearer`, a scraper that supports custom headers, or an internal proxy). When `auth.scheme` is unset, either `X-API-Key` or `Authorization: Bearer` is accepted.
+* **`none`**: no credentials required, matching all other endpoints when authentication is explicitly disabled.
+
+```yaml
+scrape_configs:
+  - job_name: scion-a2a-bridge
+    scheme: https
+    static_configs:
+      - targets: ["a2a.example.com"]
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/a2a-bridge-token
+```
+
 ### SQLite State Database Permissions
 The SQLite database stores task metadata and webhook credentials (`auth_credentials`) in plain text.
 * **File Permissions**: Ensure the database file (default: `state.db`) is readable and writable *only* by the bridge process user (`chmod 0600`).
