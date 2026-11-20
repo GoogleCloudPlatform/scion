@@ -131,7 +131,7 @@ To prevent lateral privilege escalation, Scion implements a strict two-layer del
 Key security attributes of the GCP IAM check include:
 - **Fail-Closed Design**: If the Policy Troubleshooter returns an indeterminate result (due to conditional bindings, or due to insufficient Hub reviewer permissions when configured to fail-closed), the check fails closed and assignment is blocked. There is no fallback to insecure alternatives like getIamPolicy.
 - **Asymmetric Caching**: Approved assignments are cached for **60 seconds**, and denials are cached for **10 seconds**. Indeterminate or error states are never cached.
-- **Auditing**: Every service account assignment check—both allowed and denied—generates a permanent audit log entry detailing the principal, target service account, and Policy Troubleshooter decision.
+- **Auditing**: Every service account assignment check—both allowed and denied—generates an audit log entry detailing the principal, target service account, and Policy Troubleshooter decision (mutation audit records are retained according to [`server.hub.audit_retention_days`](/scion/reference/server-config/#hub-serverhub), default 90 days; set to `0` to retain indefinitely).
 - **Hub-Scoped SAs**: Real hub-scoped service accounts can be assigned across projects. However, to prevent privilege bypasses, hub-scoped assignments are immediately rejected if `gcp_iam_check_mode` is not set to `"enforce"`.
 
 ### 3.4 Fail-Closed API Authorization and Resource Isolation

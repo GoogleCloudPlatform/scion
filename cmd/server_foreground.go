@@ -2978,6 +2978,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		MissingAgentGrace:            cfg.Hub.MissingAgentGrace,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
+		AuditRetentionDays:           cfg.Hub.AuditRetentionDays,
 		ChatSearchTimeout:            chatSearchTimeout(cfg),
 		ChatSearchMaxConcurrent:      cfg.Hub.Chat.Search.MaxConcurrent,
 		DatabaseMaxOpenConns:         cfg.Database.MaxOpenConns,

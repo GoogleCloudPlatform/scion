@@ -2625,6 +2625,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.LaunchKeepaliveSeconds != nil {
 				keys = append(keys, "server.hub.launch_keepalive_seconds")
 			}
+			if hub.AuditRetentionDays != nil {
+				keys = append(keys, "server.hub.audit_retention_days")
+			}
 			if hub.Branding != nil && !hub.Branding.IsZero() {
 				keys = append(keys, config.BrandingSectionKey)
 			}

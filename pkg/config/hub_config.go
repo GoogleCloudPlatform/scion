@@ -98,6 +98,12 @@ type HubServerConfig struct {
 	// When true, the broker skips file cleanup for soft-deleted agents.
 	SoftDeleteRetainFiles bool `json:"softDeleteRetainFiles" yaml:"softDeleteRetainFiles" koanf:"softDeleteRetainFiles"`
 
+	// AuditRetentionDays is the number of days to retain mutation audit records
+	// in the Hub database. Nil means unset (Hub defaults to 90 days); explicit
+	// 0 disables automatic cleanup (retain indefinitely); negative values are
+	// rejected at Hub startup.
+	AuditRetentionDays *int `json:"auditRetentionDays,omitempty" yaml:"auditRetentionDays,omitempty" koanf:"auditRetentionDays"`
+
 	// Chat holds web chat server limits (settings server.hub.chat).
 	Chat HubChatConfig `json:"chat" yaml:"chat" koanf:"chat"`
 

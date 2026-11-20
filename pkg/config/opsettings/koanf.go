@@ -94,6 +94,8 @@ var layer0Prefixes = []string{
 	// ticker and the clamp on LaunchTimeout are both established at startup.
 	"server.hub.launch_timeout",
 	"server.hub.launch_keepalive_seconds",
+	// Audit record retention — read into ServerConfig at startup (ptone/scion#2232).
+	"server.hub.audit_retention_days",
 	// Request performance tracing — the middleware and the authorization
 	// store and audit-emitter decorators are installed at startup.
 	"server.hub.perf_trace",

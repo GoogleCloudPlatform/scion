@@ -1004,9 +1004,50 @@ func newAgentIdentityFromStore(agent *store.Agent) AgentIdentity {
 // Audit Retention Controls
 // =============================================================================
 
-// CleanupAuditRecords removes audit records older than the specified retention period.
+// auditRecordCleanupTimeout bounds one run of the periodic audit record cleanup.
+const auditRecordCleanupTimeout = 30 * time.Second
+
+// auditRetentionDays returns the effective mutation audit retention window in
+// days: DefaultAuditRetentionDays (90) when unset, or the configured value
+// (0 disables automatic cleanup).
+func (s *Server) auditRetentionDays() int {
+	if s.config.AuditRetentionDays == nil {
+		return DefaultAuditRetentionDays
+	}
+	return *s.config.AuditRetentionDays
+}
+
+// auditRecordCleanupHandler returns the recurring singleton handler that
+// deletes mutation audit records older than server.hub.audit_retention_days.
+// When retention is 0 (disabled), the handler is a no-op.
+func (s *Server) auditRecordCleanupHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		retentionDays := s.auditRetentionDays()
+		if retentionDays <= 0 {
+			return
+		}
+		ctx, cancel := context.WithTimeout(ctx, auditRecordCleanupTimeout)
+		defer cancel()
+		if err := s.CleanupAuditRecords(ctx, retentionDays); err != nil {
+			slog.Error("audit-record-cleanup: failed to clean up audit records",
+				"error", err,
+				"retention_days", retentionDays)
+		}
+	}
+}
+
+// CleanupAuditRecords removes mutation audit records older than the specified
+// retention period in days. A retentionDays of 0 disables cleanup (no-op);
+// negative values return an error.
 func (s *Server) CleanupAuditRecords(ctx context.Context, retentionDays int) error {
-	cutoff := time.Now().AddDate(0, 0, -retentionDays)
+	if retentionDays < 0 {
+		return fmt.Errorf("invalid audit retention days %d: must be >= 0", retentionDays)
+	}
+	if retentionDays == 0 {
+		return nil
+	}
+
+	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
 
 	mutationCount, err := s.store.DeleteMutationAuditsBefore(ctx, cutoff)
 	if err != nil {

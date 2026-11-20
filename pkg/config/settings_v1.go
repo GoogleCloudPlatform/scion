@@ -1919,6 +1919,9 @@ type V1ServerHubConfig struct {
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles *bool `json:"soft_delete_retain_files,omitempty" yaml:"soft_delete_retain_files,omitempty" koanf:"soft_delete_retain_files"`
+	// AuditRetentionDays is the number of days to retain mutation audit records
+	// in the Hub database (default 90; 0 disables cleanup; negative rejected).
+	AuditRetentionDays *int `json:"audit_retention_days,omitempty" yaml:"audit_retention_days,omitempty" koanf:"audit_retention_days"`
 	// Chat holds web chat server limits (server.hub.chat).
 	Chat *V1ServerHubChatConfig `json:"chat,omitempty" yaml:"chat,omitempty" koanf:"chat"`
 	// GCPIAMCheckMode controls whether IAM actAs permission is checked when
@@ -4730,6 +4733,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.SoftDeleteRetainFiles != nil {
 			gc.Hub.SoftDeleteRetainFiles = *v1.Hub.SoftDeleteRetainFiles
 		}
+		if v1.Hub.AuditRetentionDays != nil {
+			v := *v1.Hub.AuditRetentionDays
+			gc.Hub.AuditRetentionDays = &v
+		}
 		if v1.Hub.Chat != nil && v1.Hub.Chat.Search != nil {
 			cs := v1.Hub.Chat.Search
 			gc.Hub.Chat.Search.Timeout = cs.Timeout
@@ -5315,6 +5322,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true
 		v1Hub.SoftDeleteRetainFiles = &retainFiles
+	}
+	if gc.Hub.AuditRetentionDays != nil {
+		days := *gc.Hub.AuditRetentionDays
+		v1Hub.AuditRetentionDays = &days
 	}
 	if gc.Hub.DisableLegacyStorageFallback {
 		disableLegacy := true
