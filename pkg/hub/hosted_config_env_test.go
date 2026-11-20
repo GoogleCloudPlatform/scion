@@ -308,7 +308,7 @@ func TestDispatch_HostedHarnessConfigEnvPrecheck(t *testing.T) {
 // hostedguard cannot import pkg/secret, so the prefix sets are compared
 // here, and the PATCH and auto-expose sets must equal the list's edit scope.
 func TestMemberSettableEnv_Parity(t *testing.T) {
-	for _, p := range []string{"SCION_", "GCE_METADATA_", "OTHER_", "SCION", "scion_"} {
+	for _, p := range append(api.ReservedEnvPrefixes(), "OTHER_", "SCION", "scion_") {
 		name := p + "X"
 		assert.Equal(t, secret.IsReservedEnvTarget(name), hostedguard.IsReservedEnvName(name), "reserved prefix parity for %q", name)
 	}

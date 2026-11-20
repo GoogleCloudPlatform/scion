@@ -223,7 +223,7 @@ func TestCheckHostedHarnessConfig(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkHostedHarnessConfig(tc.hosted, tc.dir, tc.runtime)
+			err := CheckHostedHarnessConfig(tc.hosted, tc.dir, tc.runtime)
 			if refused := err != nil; refused != tc.refused {
 				t.Fatalf("refused = %v (%v), want %v", refused, err, tc.refused)
 			}

@@ -555,7 +555,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
 			// Its volumes are applied below on every start.
 			if opts.HostedMode {
-				if err := checkHostedHarnessConfig(true, hcDir, m.Runtime.Name()); err != nil {
+				if err := CheckHostedHarnessConfig(true, hcDir, m.Runtime.Name()); err != nil {
 					return nil, err
 				}
 			}

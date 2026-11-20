@@ -24,6 +24,13 @@ package api
 // list is the one source of truth for both checks; a new reserved name is
 // refused for members until it is added here, with its reason.
 
+// ReservedEnvPrefixes returns the env name prefixes reserved for scion's own
+// control-plane variables. It is the one list: pkg/secret (env secret
+// targets, the Hub's config-edit check) and pkg/hostedguard use it.
+func ReservedEnvPrefixes() []string {
+	return []string{"SCION_", "GCE_METADATA_"}
+}
+
 // MemberEnvScope is a set of sources from which members may set a reserved
 // env name.
 type MemberEnvScope uint8

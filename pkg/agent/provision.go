@@ -1602,7 +1602,7 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		return nil, err
 	}
 	// The runtime is not known here; Start checks again with it.
-	if err := checkHostedHarnessConfig(api.IsHostedModeFromContext(ctx), hcDir, ""); err != nil {
+	if err := CheckHostedHarnessConfig(api.IsHostedModeFromContext(ctx), hcDir, ""); err != nil {
 		return nil, err
 	}
 

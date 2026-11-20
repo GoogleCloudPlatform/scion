@@ -52,7 +52,7 @@ func TestMemberSettableEnvScopes(t *testing.T) {
 func TestMemberSettableEnvEntries(t *testing.T) {
 	seen := map[string]bool{}
 	for _, e := range MemberSettableEnv() {
-		if !strings.HasPrefix(e.Name, "SCION_") && !strings.HasPrefix(e.Name, "GCE_METADATA_") {
+		if !slices.ContainsFunc(ReservedEnvPrefixes(), func(p string) bool { return strings.HasPrefix(e.Name, p) }) {
 			t.Errorf("%s is not a reserved name", e.Name)
 		}
 		if seen[e.Name] {

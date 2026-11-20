@@ -1501,7 +1501,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		required, secretInfo, alternatives, settingsEnv := s.extractRequiredEnvKeys(req, hydratedTemplatePath, hydratedHCPath)
+		required, secretInfo, alternatives, settingsEnv, hostedErr := s.extractRequiredEnvKeysChecked(req, hydratedTemplatePath, hydratedHCPath)
+		// A member-written harness config refused on a hosted broker is
+		// answered before any of its env is evaluated against this host.
+		if re, ok := hostedConfigRefusalFrom(hostedErr); ok {
+			span.SetStatus(codes.Error, hostedguard.ErrorCode)
+			writeHostedConfigRefusalDetails(w, re, nil)
+			return
+		}
 		// Fold in the settings/harness-config-directory env
 		// extractRequiredEnvKeys resolved (its withDir, minus whatever
 		// requestEnv already decided — see settingsEnvSatisfied there), but
@@ -6689,6 +6696,17 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 // directories of the same name are consulted only when no hydrated copy was
 // supplied.
 func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplatePath string, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string, map[string]string) {
+	keys, secretInfo, alternatives, settingsEnv, _ := s.extractRequiredEnvKeysChecked(req, hydratedTemplatePath, hydratedHarnessConfigPath...)
+	return keys, secretInfo, alternatives, settingsEnv
+}
+
+// extractRequiredEnvKeysChecked is extractRequiredEnvKeys, plus the hosted
+// harness-config refusal: on a hosted broker, a project-tier or
+// template-bundled harness config is checked (agent.CheckHostedHarnessConfig)
+// where it is resolved, and when it is refused none of its env is read or
+// expanded against this host, and the refusal is returned.
+func (s *Server) extractRequiredEnvKeysChecked(req CreateAgentRequest, hydratedTemplatePath string, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string, map[string]string, error) {
+	var hostedErr error
 	required := make(map[string]struct{})
 	alternatives := make(map[string][]string)
 	// settingsEnvSatisfied holds the non-empty env values that settings
@@ -6809,10 +6827,16 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		}
 		if hcProjectDir := harnessConfigProjectTier(req.ProjectPath); hydratedHCPath != "" || hcProjectDir != "" {
 			if hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, harnessConfigName, hcProjectDir, harnessConfigTemplatePaths...); err == nil && hcDir != nil {
-				harnessType = hcDir.Config.Harness
-				authType = hcDir.Config.AuthSelectedType
-				authMeta = hcDir.Config.Auth
-				hcDirEnv = hcDir.Config.Env
+				// On a hosted broker a refused member-written harness
+				// config contributes nothing, so its env is never expanded
+				// against this host (the caller answers 400).
+				hostedErr = agent.CheckHostedHarnessConfig(!s.config.WorkstationMode, hcDir, "")
+				if hostedErr == nil {
+					harnessType = hcDir.Config.Harness
+					authType = hcDir.Config.AuthSelectedType
+					authMeta = hcDir.Config.Auth
+					hcDirEnv = hcDir.Config.Env
+				}
 			} else if err != nil && s.config.Debug {
 				s.envSecretLog.Debug("extractRequiredEnvKeys: harness-config dir not resolved",
 					"harnessConfigName", harnessConfigName,
@@ -7221,7 +7245,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 	for k := range required {
 		keys = append(keys, k)
 	}
-	return keys, secretInfo, alternatives, settingsEnvSatisfied
+	return keys, secretInfo, alternatives, settingsEnvSatisfied, hostedErr
 }
 
 // buildRequestEnv returns req.ResolvedEnv overridden per-key by req.Config.Env

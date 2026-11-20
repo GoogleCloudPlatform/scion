@@ -14,18 +14,20 @@
 
 package secret
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+)
 
 // reservedEnvTargetPrefixes lists the environment-variable name prefixes that
 // are reserved for scion's own control-plane variables. These names are
 // always set by the runtime itself, so an environment-type secret may not
 // target one of them. This mirrors the existing SCION_* persistence
 // allowlist in the hub dispatcher (shouldPersistResolvedEnvKey), which
-// already treats SCION_* as a reserved system namespace.
-var reservedEnvTargetPrefixes = []string{
-	"SCION_",
-	"GCE_METADATA_",
-}
+// already treats SCION_* as a reserved system namespace. The list is
+// api.ReservedEnvPrefixes, shared with pkg/hostedguard.
+var reservedEnvTargetPrefixes = api.ReservedEnvPrefixes()
 
 // IsReservedEnvTarget reports whether target falls under a prefix reserved
 // for scion's own control-plane environment variables (see

@@ -137,9 +137,9 @@ func volumeRefusal(v api.VolumeMount, o Origin, runtimeKind string) string {
 }
 
 // reservedEnvPrefixes are the env name prefixes reserved for scion's own
-// control-plane variables, the same set the Hub reserves for env secrets and
-// config edits (secret.IsReservedEnvTarget).
-var reservedEnvPrefixes = []string{"SCION_", "GCE_METADATA_"}
+// control-plane variables (api.ReservedEnvPrefixes), the same set the Hub
+// reserves for env secrets and config edits (secret.IsReservedEnvTarget).
+var reservedEnvPrefixes = api.ReservedEnvPrefixes()
 
 // memberEnvScope is the api.MemberEnvScope of content from o. Agent config
 // uses the create scope here (create requests and stored inline config); an

@@ -20,7 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 )
 
-// checkHostedHarnessConfig refuses, on a hosted Runtime Broker, volumes and
+// CheckHostedHarnessConfig refuses, on a hosted Runtime Broker, volumes and
 // env (hostedguard's env rule) in a harness config written by project
 // members: one bundled in a template, or one in the project's own
 // harness-configs directory. The global harness-configs directory and
@@ -28,7 +28,7 @@ import (
 // checked by the Hub when it was stored; neither is checked. runtimeKind is
 // the runtime that will run the agent, or "" when not known. It returns nil
 // or a *hostedguard.RefusalError.
-func checkHostedHarnessConfig(hosted bool, hcDir *config.HarnessConfigDir, runtimeKind string) error {
+func CheckHostedHarnessConfig(hosted bool, hcDir *config.HarnessConfigDir, runtimeKind string) error {
 	if !hosted || hcDir == nil || (len(hcDir.Config.Volumes) == 0 && len(hcDir.Config.Env) == 0) {
 		return nil
 	}
