@@ -628,16 +628,19 @@ function findBareColorLiterals(text: string): string[] {
  * Categories:
  * - Intentional non-theme palettes: terminal ANSI, CodeMirror syntax tokens,
  *   deterministic avatar wheels, Chart.js categorical series, QR quiet zones,
- *   sandboxed iframe fallback tables, and neutral switch-thumb/scrim literals.
- * - Deferred branding PR 2c scope (ptone/scion#8409): brand surfaces (`login.ts`,
- *   `unauthorized.ts`, `terminal-workspace-root.ts`), `--scion-primary-text`
- *   foreground migrations, and `color-mix(...)` primary/status RGB tints.
+ *   OAuth provider SVGs, offline HTML exports, `<meta name="theme-color">`
+ *   defaults, sandboxed iframe fallback tables, and neutral switch-thumb/scrim
+ *   literals.
  */
 const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
   // Intentional non-theme palettes & fallbacks
   'client/artifact-preview.ts': {
     max: 20,
     reason: 'DEFAULT_THEME fallback table for sandboxed srcdoc iframes without computed styles',
+  },
+  'client/branding-runtime.ts': {
+    max: 1,
+    reason: 'DEFAULT_THEME_COLOR (#1e293b) for <meta name="theme-color"> HTML tag reset',
   },
   'components/app-shell.ts': {
     max: 1,
@@ -646,6 +649,10 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
   'components/pages/admin-maintenance.ts': {
     max: 1,
     reason: 'Switch toggle thumb knob (white)',
+  },
+  'components/pages/login.ts': {
+    max: 6,
+    reason: 'Google and GitHub OAuth provider brand SVG colors',
   },
   'components/pages/metrics-dashboard.ts': {
     max: 10,
@@ -660,6 +667,19 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
     reason:
       'Deterministic 24-hue light/dark avatar wheel (24 hsl), initials (#fff), and presence dots (#22c55e, #f59e0b)',
   },
+  'components/shared/chat/chat-message.ts': {
+    max: 2,
+    reason:
+      'Avatar initials (#fff) on deterministic HSL wheel and lightbox icon (#ffffff) on dark scrim',
+  },
+  'components/shared/chat/chat-space-rail.ts': {
+    max: 1,
+    reason: 'Mention badge foreground (#fff) on --scion-danger-500 fill',
+  },
+  'components/shared/chat/chat-thread.ts': {
+    max: 3,
+    reason: 'Standalone offline HTML export stylesheet',
+  },
   'components/shared/code-editor.ts': {
     max: 21,
     reason: 'CodeMirror One Dark syntax highlighting token palette',
@@ -668,6 +688,18 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
     max: 6,
     reason: 'AVATAR_PALETTE deterministic avatar colors',
   },
+  'components/shared/decisions-views.ts': {
+    max: 1,
+    reason: 'Avatar initials (#ffffff) on deterministic avatar background',
+  },
+  'components/shared/header.ts': {
+    max: 1,
+    reason: 'Theme switch toggle thumb knob (white)',
+  },
+  'components/shared/untrusted-view-frame.ts': {
+    max: 1,
+    reason: 'Sandboxed artifact iframe canvas background (white)',
+  },
   'components/terminal/terminal-pane.ts': {
     max: 35,
     reason: 'xterm.js ANSI color palette and terminal viewport chrome',
@@ -675,100 +707,6 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
   'client/terminal-workspace-root.ts': {
     max: 2,
     reason: 'Intentional dark terminal-pane host background (#111827) and pane border (#333)',
-  },
-
-  // Deferred to branding PR 2c (ptone/scion#8409): brand surfaces, --scion-primary-text, color-mix tints
-  'components/pages/admin-users.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/agents.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/home.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/login.ts': {
-    max: 12,
-    reason: 'PR 2c brand surface + OAuth provider brand SVGs (ptone/scion#8409)',
-  },
-  'components/pages/profile-decisions.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/project-detail.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/project-settings.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/projects.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/unauthorized.ts': {
-    max: 4,
-    reason: 'PR 2c brand surface (ptone/scion#8409)',
-  },
-  'components/profile/profile-nav.ts': {
-    max: 4,
-    reason: 'PR 2c brand surface & --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-composer.ts': {
-    max: 1,
-    reason: 'PR 2c color-mix RGB tint migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-interagent-marker.ts': {
-    max: 4,
-    reason: 'PR 2c color-mix RGB tint migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-members.ts': {
-    max: 1,
-    reason: 'PR 2c color-mix/primary migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-message.ts': {
-    max: 8,
-    reason: 'PR 2c --scion-primary-text & color-mix RGB tints (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-search.ts': {
-    max: 1,
-    reason: 'PR 2c color-mix RGB tint migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-space-rail.ts': {
-    max: 3,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-thread.ts': {
-    max: 6,
-    reason: 'PR 2c --scion-primary-text, color-mix tints & offline HTML export (ptone/scion#8409)',
-  },
-  'components/shared/decisions-views.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/header.ts': {
-    max: 4,
-    reason: 'PR 2c brand surface, --scion-primary-text & toggle knob (ptone/scion#8409)',
-  },
-  'components/shared/nav.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/status-badge.ts': {
-    max: 6,
-    reason: 'PR 2c color-mix status pulse keyframes (ptone/scion#8409)',
-  },
-  'components/shared/untrusted-view-frame.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/view-toggle.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
   },
 };
 
