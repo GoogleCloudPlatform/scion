@@ -215,6 +215,7 @@ func TestHarnessConfigCommit_DerivedFieldsFollowConfigYAMLOnEveryPath(t *testing
 	for _, path := range harnessConfigCommitPaths {
 		t.Run(path.name, func(t *testing.T) {
 			srv, s, _ := newHCCommitTestServer(t)
+			setWorkstationImports(srv)
 
 			full := path.apply(t, srv, s, deriveFullYAML)
 			assertDerivedFrom(t, full, deriveFullYAML)
@@ -281,6 +282,7 @@ func TestHarnessConfigCommit_RefusesUnusableProvisionerOnAPIPaths(t *testing.T) 
 	for _, path := range harnessConfigCommitPaths[:4] { // finalize, file write, multipart, import
 		t.Run(path.name, func(t *testing.T) {
 			srv, s, _ := newHCCommitTestServer(t)
+			setWorkstationImports(srv)
 			before := path.apply(t, srv, s, deriveFullYAML)
 
 			var rec *httptest.ResponseRecorder
@@ -388,6 +390,7 @@ func TestHarnessConfigBuiltImage_SurvivesCommitAndIsTheCheckedImage(t *testing.T
 // source is being fetched), and never creates a row under the source slug.
 func TestHarnessConfigReimport_UpdatesRowByIDAfterSlugRename(t *testing.T) {
 	srv, s, _ := newHCCommitTestServer(t)
+	setWorkstationImports(srv)
 	ctx := context.Background()
 	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveBareYAML)
 

@@ -154,6 +154,10 @@ func (s *Server) handleProjectImportResources(
 		return
 	}
 
+	if req.WorkspacePath == "" && s.refuseImportSource(w, config.NormalizeTemplateSourceURL(req.SourceURL)) {
+		return
+	}
+
 	run := func(progress importProgressFunc) ([]string, error) {
 		if req.WorkspacePath != "" {
 			return s.importFromWorkspace(ctx, project, req.WorkspacePath, options.scope, options.kind, progress, req.Names)
@@ -347,6 +351,10 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"scope must be 'global', 'project', or 'user'", nil)
+		return
+	}
+
+	if s.refuseImportSource(w, sourceURL) {
 		return
 	}
 
@@ -631,6 +639,9 @@ func (s *Server) handleProjectDiscoverResources(
 		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, kind)
 	} else {
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
+		if s.refuseImportSource(w, req.SourceURL) {
+			return
+		}
 		names, skipped, err = s.discoverFromRemote(ctx, store.TemplateScopeProject, projectID, req.SourceURL, kind)
 	}
 	if err != nil {
@@ -759,6 +770,10 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"scope must be 'global', 'project', or 'user'", nil)
+		return
+	}
+
+	if s.refuseImportSource(w, sourceURL) {
 		return
 	}
 

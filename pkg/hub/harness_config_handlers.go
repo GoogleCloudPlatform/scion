@@ -1446,6 +1446,10 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	// target store writes it into the row with hc's ID, whatever the slug
 	// of the entry or the row is by the time it is persisted
 	// (ptone/scion#4219).
+	if s.refuseImportSource(w, sourceURL) {
+		return
+	}
+
 	kind := s.harnessConfigImportKind()
 	kind.newStore = s.reimportHarnessConfigNewStore(hc.ID)
 	slug := reimportTargetSlug(hc)

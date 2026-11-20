@@ -117,6 +117,7 @@ func TestReimportSourceURL_InvalidOverrideRejected(t *testing.T) {
 
 func TestReimportSourceURL_ValidOverrideReimports(t *testing.T) {
 	srv, s := testInstallSourceServer(t)
+	setWorkstationImports(srv)
 	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
 	src := claudeTarGzServer(t)
 	override := src.URL + "/configs/claude.tar.gz"
@@ -137,6 +138,7 @@ func TestReimportSourceURL_ValidOverrideReimports(t *testing.T) {
 
 func TestReimportSourceURL_OmittedOverrideUsesStoredURL(t *testing.T) {
 	srv, s := testInstallSourceServer(t)
+	setWorkstationImports(srv)
 	src := claudeTarGzServer(t)
 	stored := src.URL + "/configs/claude.tar.gz"
 	hc := installClaudeViaHub(t, srv, s, stored)

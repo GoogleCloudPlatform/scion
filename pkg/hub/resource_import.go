@@ -302,10 +302,17 @@ func checkResourceDirsContent(dirs []resourceDir, scope string, kind resourceImp
 // authenticating against GitHub with the credential importCredential selects
 // for the import's scope ("global", "project" or "user") and scopeID. It
 // applies to both resource kinds (templates and harness-configs) and to skill
-// directory discovery. The caller owns the returned cache path and must
-// remove it.
+// directory discovery. On a hosted hub it refuses sources checkImportSource
+// refuses and downloads archives through importArchiveClient. The caller owns
+// the returned cache path and must remove it.
 func (s *Server) fetchRemoteForImport(ctx context.Context, scope, scopeID, sourceURL string) (string, error) {
-	return config.FetchRemoteTemplate(ctx, sourceURL, s.importCredential(ctx, scope, scopeID, sourceURL))
+	if err := s.checkImportSource(sourceURL); err != nil {
+		return "", err
+	}
+	return config.FetchRemoteTemplateWithOptions(ctx, sourceURL, config.FetchOptions{
+		AuthToken:     s.importCredential(ctx, scope, scopeID, sourceURL),
+		ArchiveClient: s.importArchiveClient(),
+	})
 }
 
 // importCredential returns the GitHub credential for fetching sourceURL into

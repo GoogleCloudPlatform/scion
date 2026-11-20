@@ -180,6 +180,26 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 	if len(authToken) > 0 {
 		token = authToken[0]
 	}
+	return FetchRemoteTemplateWithOptions(ctx, uri, FetchOptions{AuthToken: token})
+}
+
+// FetchOptions configures FetchRemoteTemplateWithOptions.
+type FetchOptions struct {
+	// AuthToken authenticates GitHub folder fetches. "" fetches
+	// unauthenticated.
+	AuthToken string
+
+	// ArchiveClient, when non-nil, downloads archive URLs in place of
+	// http.DefaultClient. The URL of an archive is chosen by the caller,
+	// so a server fetching on behalf of others passes a client that
+	// restricts destinations (see pkg/util/ssrfclient). GitHub folder
+	// fetches always go to github.com and do not use it.
+	ArchiveClient *http.Client
+}
+
+// FetchRemoteTemplateWithOptions is FetchRemoteTemplate with explicit options.
+func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchOptions) (string, error) {
+	token := opts.AuthToken
 	cacheDir, err := remoteCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get cache directory: %w", err)
@@ -209,7 +229,7 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 			return "", fmt.Errorf("failed to fetch GitHub folder: %w", err)
 		}
 	case RemoteTypeArchive:
-		if err := fetchArchive(ctx, uri, templateCachePath); err != nil {
+		if err := fetchArchive(ctx, uri, templateCachePath, opts.ArchiveClient); err != nil {
 			return "", fmt.Errorf("failed to fetch archive: %w", err)
 		}
 	case RemoteTypeRclone:
@@ -871,8 +891,12 @@ func dirPerm(mode iofs.FileMode) iofs.FileMode {
 	return mode.Perm() | 0o700
 }
 
-// fetchArchive downloads and extracts a compressed archive.
-func fetchArchive(ctx context.Context, uri string, destPath string) error {
+// fetchArchive downloads and extracts a compressed archive. client nil means
+// http.DefaultClient.
+func fetchArchive(ctx context.Context, uri string, destPath string, client *http.Client) error {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	// Download the archive to a temp file
 	tmpFile, err := os.CreateTemp("", "scion-archive-*")
 	if err != nil {
@@ -888,7 +912,7 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download archive: %w", err)
 	}
