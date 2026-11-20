@@ -1142,6 +1142,14 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
     await settle(el2);
     expect(root(el2).querySelector('.editor')).toBeNull();
     expect(button(el2, '$other').hasAttribute('disabled')).toBe(true);
+    // Reopening on an open row proves the draft itself was cleared, not just hidden.
+    el2.decisions = [viewWithOther({ status: 'pending' })];
+    await settle(el2);
+    button(el2, '$other').click();
+    await settle(el2);
+    expect(
+      root(el2).querySelector<HTMLElement & { value: string }>('.editor sl-input')?.value
+    ).toBe('');
 
     const el3 = await mount([viewWithOther()]);
     button(el3, '$other').click();
@@ -1151,6 +1159,13 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
     await settle(el3);
     expect(root(el3).querySelector('.editor')).toBeNull();
     expect(button(el3, '$other').hasAttribute('disabled')).toBe(true);
+    el3.decisions = [viewWithOther({ status: 'pending' })];
+    await settle(el3);
+    button(el3, '$other').click();
+    await settle(el3);
+    expect(
+      root(el3).querySelector<HTMLElement & { value: string }>('.editor sl-input')?.value
+    ).toBe('');
   });
 
   it('renders stacked layout (O4) with 1 fixed choice and Other inline description + inset editor', async () => {
@@ -1240,6 +1255,170 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
     expect(root(el).querySelector('.editor')).toBeNull();
     expect(button(el, 'europe-west1').getAttribute('variant')).toBe('primary');
     expect(foot(el)).toMatch(/^Answered by Bob · /);
+  });
+
+  it('supports interpreted Other confirm bar, text edit override, fixed override, and non-owner read-only (O9)', async () => {
+    const interpretedOther = viewWithOther({
+      status: 'decided',
+      decision: {
+        choiceId: '$other',
+        label: 'Another region',
+        otherText: 'europe-west4',
+        answeredByUserId: 'u-me',
+        answeredByName: 'Alice',
+        provenance: 'agent_interpreted',
+        outcome: 'answer',
+        sourceMessageId: 'src-1',
+        surface: 'slack',
+        responseMessageId: 'resp-interp-1',
+        at: '2026-11-20T03:00:00Z',
+      },
+    });
+
+    const el = await mount([interpretedOther]);
+    const otherBtn = button(el, '$other');
+    expect(otherBtn.getAttribute('variant')).toBe('primary');
+    expect(otherBtn.hasAttribute('outline')).toBe(true);
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.editor sl-input')!;
+    expect(input).not.toBeNull();
+    expect(input.value).toBe('europe-west4');
+    expect(
+      root(el).querySelector('[data-action="confirm"]')?.textContent?.replace(/\s+/g, ' ').trim()
+    ).toBe('Confirm “Another region”');
+
+    // Editing the text switches from Confirm to Change answer bar.
+    typeIntoOther(el, 'europe-west4 after freeze');
+    await settle(el);
+    const bar = root(el).querySelector('.confirmbar');
+    expect(bar).not.toBeNull();
+    expect(bar?.textContent).toContain(
+      'Change your answer from Another region “europe-west4” to Another region “europe-west4 after freeze”?'
+    );
+
+    // Cancel reverts draft back to recorded text and restores Confirm.
+    root(el).querySelector<HTMLElement>('[data-action="cancel-change"]')!.click();
+    await settle(el);
+    expect(input.value).toBe('europe-west4');
+    expect(root(el).querySelector('.confirmbar')).toBeNull();
+    expect(root(el).querySelector('[data-action="confirm"]')).not.toBeNull();
+
+    // Clicking a fixed choice stages override from Other to fixed.
+    button(el, 'europe-west1').click();
+    await settle(el);
+    expect(root(el).querySelector('.confirmbar')?.textContent).toContain(
+      'Change your answer from Another region “europe-west4” to europe-west1?'
+    );
+    expect(root(el).querySelector('.editor')).toBeNull();
+    expect(root(el).querySelector('.otext')?.textContent).toBe('“europe-west4”');
+
+    // Clicking Other returns to editor; edit and submit override.
+    button(el, '$other').click();
+    await settle(el);
+    typeIntoOther(el, 'asia-east1');
+    await settle(el);
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: viewWithOther({
+          status: 'decided',
+          decision: {
+            choiceId: '$other',
+            label: 'Another region',
+            otherText: 'asia-east1',
+            previousChoiceLabel: 'Another region',
+            previousOtherText: 'europe-west4',
+            answeredByUserId: 'u-me',
+            answeredByName: 'Alice',
+            provenance: 'direct',
+            outcome: 'override',
+            surface: 'native',
+            responseMessageId: 'resp-over-1',
+            at: '2026-11-20T03:05:00Z',
+          },
+        }),
+        responseMessageId: 'resp-over-1',
+      })
+    );
+    root(el).querySelector<HTMLElement>('[data-action="confirm-change"]')!.click();
+    await settle(el);
+    expect(JSON.parse(apiFetch.mock.calls[0]![1]?.body as string)).toEqual({
+      choice_id: '$other',
+      other_text: 'asia-east1',
+      idempotency_key: expect.any(String),
+    });
+    expect(foot(el)).toContain('changed from the interpreted answer Another region “europe-west4”');
+
+    // Non-owner sees disabled robot button and static .otext, no editor.
+    const elOtherUser = await mount([interpretedOther]);
+    elOtherUser.currentUserId = 'u-other';
+    await settle(elOtherUser);
+    expect(root(elOtherUser).querySelector('.editor')).toBeNull();
+    expect(root(elOtherUser).querySelector('.otext')?.textContent).toBe('“europe-west4”');
+    expect(button(elOtherUser, '$other').hasAttribute('disabled')).toBe(true);
+  });
+
+  it('allows changing an interpreted fixed choice to Other from the single card', async () => {
+    const interpretedFixed = viewWithOther({
+      status: 'decided',
+      decision: {
+        choiceId: 'us-central1',
+        label: 'us-central1',
+        answeredByUserId: 'u-me',
+        answeredByName: 'Alice',
+        provenance: 'agent_interpreted',
+        outcome: 'answer',
+        sourceMessageId: 'src-2',
+        surface: 'slack',
+        responseMessageId: 'resp-interp-2',
+        at: '2026-11-20T03:00:00Z',
+      },
+    });
+
+    const el = await mount([interpretedFixed]);
+    const otherBtn = button(el, '$other');
+    expect(otherBtn.hasAttribute('disabled')).toBe(false);
+    otherBtn.click();
+    await settle(el);
+
+    expect(root(el).querySelector('.editor')).not.toBeNull();
+    const changeBtn = root(el).querySelector<HTMLElement>('[data-action="confirm-change"]')!;
+    expect(changeBtn.hasAttribute('disabled')).toBe(true);
+
+    typeIntoOther(el, 'me-central2');
+    await settle(el);
+    expect(changeBtn.hasAttribute('disabled')).toBe(false);
+    expect(root(el).querySelector('.confirmbar')?.textContent).toContain(
+      'Change your answer from us-central1 to Another region “me-central2”?'
+    );
+
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: viewWithOther({
+          status: 'decided',
+          decision: {
+            choiceId: '$other',
+            label: 'Another region',
+            otherText: 'me-central2',
+            previousChoiceLabel: 'us-central1',
+            answeredByUserId: 'u-me',
+            answeredByName: 'Alice',
+            provenance: 'direct',
+            outcome: 'override',
+            surface: 'native',
+            responseMessageId: 'resp-over-2',
+            at: '2026-11-20T03:06:00Z',
+          },
+        }),
+        responseMessageId: 'resp-over-2',
+      })
+    );
+    changeBtn.click();
+    await settle(el);
+    expect(JSON.parse(apiFetch.mock.calls[0]![1]?.body as string)).toEqual({
+      choice_id: '$other',
+      other_text: 'me-central2',
+      idempotency_key: expect.any(String),
+    });
+    expect(root(el).querySelector('.otext')?.textContent).toBe('“me-central2”');
   });
 });
 

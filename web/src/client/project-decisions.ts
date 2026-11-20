@@ -114,8 +114,10 @@ export interface ProjectDecisionLogEntryView {
   decision: ProjectDecisionSummaryView;
   choiceId: string;
   label: string;
+  otherText?: string;
   matchedDefault: boolean;
   previousChoiceLabel?: string;
+  previousOtherText?: string;
   answeredByUserId?: string;
   answeredByName: string;
   provenance: string;

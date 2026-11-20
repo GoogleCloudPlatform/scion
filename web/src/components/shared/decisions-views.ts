@@ -28,6 +28,7 @@ import { repeat } from 'lit/directives/repeat.js';
 
 import {
   dismissAvailableAtMs,
+  isOtherAnswer,
   type DecisionAnsweredDetail,
 } from '../../client/decision-prompts.js';
 import type {
@@ -493,6 +494,22 @@ export const decisionsPageSharedStyles: CSSResult = css`
     -webkit-line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+
+  table.log td.ans {
+    max-width: 22rem;
+  }
+
+  table.log td.ans .ans-clamp {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+
+  .mlist .item .ans-other {
     overflow-wrap: anywhere;
   }
 
@@ -1112,6 +1129,12 @@ export function renderMadeRow(
   const whereLabel = conversationDisplayLabel(e.chatKey, e.conversationLabel);
   const convHref = conversationHref(e.chatKey, e.conversationAvailable, projectId);
   const replyHref = isDismiss ? null : replyHrefForEntry(e, projectId);
+  const answerLabel = e.label || e.choiceId;
+  const otherText = !isDismiss && isOtherAnswer(e) ? e.otherText : undefined;
+  const prevText =
+    !isDismiss && e.provenance === 'direct' && e.outcome === 'override' && e.previousChoiceLabel
+      ? `from ${e.previousChoiceLabel}${e.previousOtherText ? ` “${e.previousOtherText}”` : ''}`
+      : '';
 
   return html`
     <tr class=${isFollow ? 'follow' : ''} data-answer-row=${e.answerId}>
@@ -1133,22 +1156,26 @@ export function renderMadeRow(
       <td class="q">
         <span class="q-text" title=${e.decision.question}>${e.decision.question}</span>
       </td>
-      <td data-answer-cell>
-        <b>${isDismiss ? 'Dismissed' : e.label || e.choiceId}</b>
-        ${isDismiss && e.dismissReason
-          ? html`<div class="dismiss-reason muted" data-dismiss-reason>${e.dismissReason}</div>`
-          : nothing}
+      <td data-answer-cell class=${otherText ? 'ans' : nothing}>
+        ${isDismiss
+          ? html`<b>Dismissed</b>${e.dismissReason
+                ? html`<div class="dismiss-reason muted" data-dismiss-reason>
+                    ${e.dismissReason}
+                  </div>`
+                : nothing}`
+          : otherText
+            ? html`<div class="ans-clamp" title=${`${answerLabel}: “${otherText}”`}>
+                <b>${answerLabel}:</b> “${otherText}”
+              </div>`
+            : html`<b>${answerLabel}</b>`}
       </td>
       <td data-answered-by>${renderAnsweredBy(e, opts.currentUserId)}</td>
       <td data-provenance>
         ${renderProvenanceBadge(e)}
         ${!isDismiss && e.provenance === 'agent_interpreted' && replyHref
           ? html` <a class="linkish" data-reply-link href=${replyHref}>reply</a>`
-          : !isDismiss &&
-              e.provenance === 'direct' &&
-              e.outcome === 'override' &&
-              e.previousChoiceLabel
-            ? html` <span class="muted">from ${e.previousChoiceLabel}</span>`
+          : prevText
+            ? html` <span class="muted">${prevText}</span>`
             : !isDismiss && e.provenance === 'direct' && e.outcome === 'answer' && e.matchedDefault
               ? html` <span class="muted">recommended</span>`
               : nothing}
@@ -1188,12 +1215,22 @@ export function renderMadeItem(
   const whereLabel = conversationDisplayLabel(e.chatKey, e.conversationLabel);
   const convHref = conversationHref(e.chatKey, e.conversationAvailable, projectId);
   const replyHref = isDismiss ? null : replyHrefForEntry(e, projectId);
+  const answerLabel = e.label || e.choiceId;
+  const otherText = !isDismiss && isOtherAnswer(e) ? e.otherText : undefined;
+  const prevText =
+    !isDismiss && e.outcome === 'override' && e.previousChoiceLabel
+      ? `from ${e.previousChoiceLabel}${e.previousOtherText ? ` “${e.previousOtherText}”` : ''}`
+      : '';
 
   return html`
     <div class="item" data-mobile-answer=${e.answerId}>
       <div class="top">
         <span class="key">${e.decision.key || e.decision.ref}</span>
-        <b>${isDismiss ? 'Dismissed' : e.label || e.choiceId}</b>
+        ${isDismiss
+          ? html`<b>Dismissed</b>`
+          : otherText
+            ? html`<b>${answerLabel}:</b> <span class="ans-other">“${otherText}”</span>`
+            : html`<b>${answerLabel}</b>`}
         ${renderProvenanceBadge(e)}
       </div>
       <div>${e.decision.question}</div>
@@ -1204,10 +1241,8 @@ export function renderMadeItem(
         ${opts.includeProjectInMeta && projectName
           ? html`${projectName} · `
           : nothing}${renderAnsweredBy(e, opts.currentUserId)}
-        ${!isDismiss && e.outcome === 'override' && e.previousChoiceLabel
-          ? html` · from ${e.previousChoiceLabel}`
-          : nothing}
-        · ${surf.label} · ${e.decision.askerAgentName} ·
+        ${prevText ? html` · ${prevText}` : nothing} · ${surf.label} · ${e.decision.askerAgentName}
+        ·
         ${convHref
           ? html`<a class="linkish" href=${convHref}>${whereLabel}</a>`
           : html`<span class="muted">${whereLabel}</span>`}
