@@ -91,7 +91,8 @@ appended to the resumed session as a new prompt, if the harness supports it.
 - **`scion resume`** explicitly brings an existing agent back in place:
   - On a **`suspended`** agent, it continues the previous harness conversation.
   - On a **`stopped`** or **`halted`** agent, it restarts the agent in place
-    with a **fresh** harness session (keeping its identity and workspace).
+    with a **fresh** harness session (keeping its identity; the workspace is
+    kept unless it lived on the agent's pod storage).
 
 ### Harness support
 

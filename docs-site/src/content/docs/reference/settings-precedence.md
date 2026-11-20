@@ -1188,7 +1188,7 @@ harness-config or in settings.)
 **Behaviour change to watch for:** a profile that sets `harness_overrides.<name>.image` now
 overrides the image of every template that uses that harness config under that profile. Remove
 the override, or pass `--image`, if a template's own image must win. Conversely, a create-time
-`--image` (or `--config` image) now persists across plain restarts. A later `scion start --image`
+`--image` (or `--config` image) now persists across plain restarts. A later `scion resume --image`
 is not applied to an existing agent; the CLI warns that the flag is ignored. Re-create the agent to
 change or drop a create-time image.
 
@@ -1218,7 +1218,7 @@ settings, then the file default. This was an accepted, narrow trade-off: the cod
 pre-upgrade agent with no recorded inline value" apart from "an agent that never had an inline
 override" from the file alone. A restart through the Hub is unaffected: the Hub resends the
 agent's recorded explicit image and inline config on every dispatch, so the value is re-applied.
-A later `scion start --image` is not applied to an existing agent (the CLI warns that the flag is
+A later `scion resume --image` is not applied to an existing agent (the CLI warns that the flag is
 ignored), so re-create the agent to change a create-time image.
 
 Separately: if an agent's **template** can no longer be resolved at all on a restart

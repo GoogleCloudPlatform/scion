@@ -95,7 +95,7 @@ examples/amp/
 | Feature | Support |
 |---|---|
 | Task delivery (`--task`) | Yes |
-| Resume (`scion start` without task) | Yes — `amp threads continue` |
+| Resume (`scion resume`) | Yes — `amp threads continue` |
 | Attach (`scion attach`) | Yes — tmux session |
 | System prompt | Partial — prepended to `AGENT.md` |
 | Agent instructions | Yes — written to `AGENT.md` |
