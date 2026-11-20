@@ -22,7 +22,7 @@ If a project has no usable installation, agents fall back to a `GITHUB_TOKEN` se
 
 ### Prerequisites
 
-- A running Hub (see [Hub Setup](/scion/hosted/single-node/hub-server/)) and a Hub admin account. Every GitHub App route on the Hub requires the `hub.github_app.read` or `hub.github_app.update` permission, which Hub admins hold.
+- A running Hub (see [Hub Setup](/scion/hosted/single-node/hub-server/)) and a Hub admin account. Every `/api/v1/github-app` route, and binding an installation to a project, requires the `hub.github_app.read` or `hub.github_app.update` permission, which Hub admins hold.
 - Permission to create a GitHub App for, and install it on, the GitHub organization or personal account that owns your repositories.
 - A public HTTPS URL for the Hub (`server.hub.public_url`) if you want webhooks. GitHub must be able to reach `https://<hub-public-url>/api/v1/webhooks/github`. The setup redirect after installation only needs to be reachable from the installing user's browser.
 
@@ -110,7 +110,7 @@ The non-secret values seed the `github_app` section until an admin saves it in t
 
 - **Private key**: the Hub uses the first one it finds: a key held in memory (from `private_key` in `settings.yaml` or the environment, or from a UI save since the last restart), then the file at `private_key_path`, then the stored `GITHUB_APP_PRIVATE_KEY` secret.
 - **Webhook secret**: a value from `settings.yaml` or the environment (or a UI save since the last restart) wins over the stored `GITHUB_APP_WEBHOOK_SECRET` secret.
-- **Storage**: with an external secret backend (such as GCP Secret Manager, `server.secrets.backend`), the two secrets are stored there. Without one, they are stored in the Hub database and sealed with the Hub's value cipher when `server.keyring_file` is configured; without a keyring file they stay plaintext until rewrapped (see [`server.keyring_file`](/scion/reference/server-config/#environment-variables)).
+- **Storage**: with an external secret backend (such as GCP Secret Manager, `server.secrets.backend`), the two secrets are stored there. Otherwise the default `local` backend stores them in the Hub database, encrypted with the Hub's value cipher. The cipher is keyed from the keyring's `encryption` ring when [`server.keyring_file`](/scion/reference/server-config/#environment-variables) is set, and otherwise from the legacy key derived from the session secret. The secrets are stored as plaintext only when the Hub has neither a keyring file nor a session secret.
 
 :::caution[Choose one source for each secret]
 Because a startup value wins, a key set by `private_key_path` or `SCION_SERVER_GITHUBAPP_PRIVATEKEY` replaces a key uploaded in the UI at the next restart. Configure each secret in one place only, and rotate it in that same place.
@@ -130,7 +130,7 @@ The Hub also learns about installations in these ways:
 
 - **Webhooks**: `installation` events (`created`, `deleted`, `suspend`, `unsuspend`) and `installation_repositories` events (`added`, `removed`) update the stored installation.
 - **Discovery**: **Discover from GitHub** in the **Installations** section of the **GitHub App** tab, or `POST /api/v1/github-app/installations/discover`, lists every installation of the App from GitHub, records or updates each one, and associates matching projects. Use it after installing without a Setup URL or webhook, or to catch up after missed deliveries.
-- **Manual record**: `POST /api/v1/github-app/installations` with `installation_id` and `account_login` records an installation without contacting GitHub.
+- **Manual record**: `POST /api/v1/github-app/installations` with `installation_id` and `account_login` records an installation without contacting GitHub. It does not associate any projects: bind them as an admin or run discovery afterwards.
 
 The **Installations** list shows each installation's account, type, repository count, ID and status. `GET /api/v1/github-app/installations` returns the same records, with optional `account_login` and `status` filters.
 
@@ -144,7 +144,7 @@ A project uses an installation only when the **association is authorized**. The 
    - **Admin binding**: a Hub admin bound the installation to the project's current remote, and that admin is still an active Hub admin. Write permissions are allowed.
    - **Creator proof**: the project creator's own user-scope `GITHUB_TOKEN` secret can read the repository on GitHub. With `push` access write permissions are allowed; with only `pull` access every token is reduced to read-only.
 
-If any step cannot be completed (a lookup error, a GitHub error, a timeout or a rate limit), the check fails closed and no token is minted. Successful checks are cached for 10 minutes and failures for 1 minute.
+If any step cannot be completed (a lookup error, a GitHub error, a timeout or a rate limit), the check fails closed and no token is minted. The result of the creator-token check is cached: access for 10 minutes, a definitive denial for 1 minute. Inconclusive failures are retried at the next mint.
 
 ### Automatic association
 
@@ -179,7 +179,7 @@ Commit authorship for agent commits is configured per project at `/api/v1/projec
 
 ### Verify
 
-1. Open the project's settings. For a project with a `github.com` remote, Hub admins see a **GitHub App Integration** section with the status, installation ID, last token mint and permission badges. Click **Check Status** (or **Recheck Status**), which runs `POST /api/v1/projects/<project-id>/github-status`: the Hub runs the association check, mints a token and records the result. A working project shows **Connected** (`ok`). On GitHub Enterprise, or without the UI, call the same endpoint directly; `GET` on it returns the stored status.
+1. Open the project's settings. For a project with a `github.com` remote, Hub admins see a **GitHub App Integration** section with the status, installation ID, last token mint and permission badges. Click **Check Status** (or **Recheck Status**), which runs `POST /api/v1/projects/<project-id>/github-status`: the Hub runs the association check, mints a token and records the result. A working project shows **Active** (`ok`). On GitHub Enterprise, or without the UI, call the same endpoint directly; `GET` on it returns the stored status.
 2. Start an agent in the project and check its git access, for example with `git ls-remote origin` in the agent's terminal. `sciontool doctor` inside the container also checks the GitHub App token.
 
 When an agent starts, the Hub injects `GITHUB_TOKEN`, `SCION_GITHUB_APP_ENABLED=true`, `SCION_GITHUB_TOKEN_EXPIRY` and `SCION_GITHUB_TOKEN_PATH` (`/tmp/.github-token`). If the agent already gets a `GITHUB_TOKEN` from secrets, that token stays in the environment for the `gh` CLI, and `git` still uses App tokens through the credential helper. If minting fails, the agent starts with whatever `GITHUB_TOKEN` secret is available.
