@@ -227,6 +227,13 @@ func init() {
 			RestartRequired: []string{config.HubMetricsEnabledKey, config.HubTracingEnabledKey},
 		},
 		{
+			// branding holds Hub-wide UI branding settings (server.hub.branding),
+			// applied live across replicas via OperationalSettings.
+			Name:       BrandingSectionName,
+			KoanfPaths: BrandingKoanfPaths,
+			New:        func() any { return &BrandingSettings{} },
+		},
+		{
 			Name: "agent_secrets",
 			KoanfPaths: []string{
 				"agent_secrets.user_scope_only",
@@ -574,6 +581,8 @@ func compileSchemas() {
 		// hub_observability is derived from settings-v1.schema.json
 		// (server.hub.observability) like the sections above.
 		"hub_observability": schemaObject(getSchemaProperty(root, "server", "hub", "observability")),
+		// branding is derived from settings-v1.schema.json (server.hub.branding).
+		BrandingSectionName: schemaObject(getSchemaProperty(root, "server", "hub", "branding")),
 		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
 		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
 		// gcp_iam schema is hand-written -- the keys have no definition in
@@ -1080,9 +1089,10 @@ func buildNotificationsSchema() map[string]interface{} {
 	}
 }
 
-// Validate validates a section document (JSON) against the section's schema.
-// Returns nil if valid, or a list of ValidationErrors on failure.
-func Validate(section string, doc json.RawMessage) []config.ValidationError {
+// ValidateSchema validates a section document (JSON) against the section's
+// JSON schema only, without cross-field semantic rules. Used when checking
+// carried-forward keys individually during partial deep-merge updates.
+func ValidateSchema(section string, doc json.RawMessage) []config.ValidationError {
 	if schemaCompileErr != nil {
 		return []config.ValidationError{{Message: schemaCompileErr.Error()}}
 	}
@@ -1104,23 +1114,50 @@ func Validate(section string, doc json.RawMessage) []config.ValidationError {
 	if err != nil {
 		return extractValidationErrors(err)
 	}
+	return nil
+}
+
+// Validate validates a section document (JSON) against the section's schema
+// and any cross-field semantic rules. Returns nil if valid, or a list of
+// ValidationErrors on failure.
+func Validate(section string, doc json.RawMessage) []config.ValidationError {
+	if errs := ValidateSchema(section, doc); len(errs) > 0 {
+		return errs
+	}
 	return validateCrossField(section, doc)
 }
 
 // validateCrossField applies the rules a JSON schema cannot express, so a
 // write that would leave a section unusable is refused instead of stored.
 func validateCrossField(section string, doc json.RawMessage) []config.ValidationError {
-	if section != "artifacts" {
+	switch section {
+	case "artifacts":
+		cfg, err := ParseArtifactsDoc(doc)
+		if err != nil {
+			return []config.ValidationError{{Message: err.Error()}}
+		}
+		if cfg.RemoteImagesInvalid != "" {
+			return []config.ValidationError{{Message: "artifacts settings: " + cfg.RemoteImagesInvalid}}
+		}
+		return nil
+	case BrandingSectionName:
+		var cfg config.BrandingConfig
+		if err := json.Unmarshal(doc, &cfg); err != nil {
+			return []config.ValidationError{{Message: fmt.Sprintf("invalid branding JSON: %v", err)}}
+		}
+		errs := config.ValidateBranding(&cfg)
+		prefix := config.BrandingSectionKey + "."
+		for i := range errs {
+			if errs[i].Path == config.BrandingSectionKey {
+				errs[i].Path = ""
+			} else {
+				errs[i].Path = strings.TrimPrefix(errs[i].Path, prefix)
+			}
+		}
+		return errs
+	default:
 		return nil
 	}
-	cfg, err := ParseArtifactsDoc(doc)
-	if err != nil {
-		return []config.ValidationError{{Message: err.Error()}}
-	}
-	if cfg.RemoteImagesInvalid != "" {
-		return []config.ValidationError{{Message: "artifacts settings: " + cfg.RemoteImagesInvalid}}
-	}
-	return nil
 }
 
 func extractValidationErrors(err error) []config.ValidationError {

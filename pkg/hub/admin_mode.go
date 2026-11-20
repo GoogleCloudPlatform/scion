@@ -105,6 +105,13 @@ func adminModeMiddleware(state *MaintenanceState) func(http.Handler) http.Handle
 				return
 			}
 
+			// Allow unauthenticated public settings GET so /login JS boot, Vite
+			// dev, and CLI auth login can read branding during maintenance mode.
+			if r.Method == http.MethodGet && r.URL.Path == "/api/v1/settings/public" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Allow agents through — system operations must continue.
 			if agent := GetAgentIdentityFromContext(r.Context()); agent != nil {
 				next.ServeHTTP(w, r)

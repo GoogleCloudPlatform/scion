@@ -2988,6 +2988,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		},
 		TelemetryDefault: cfg.TelemetryEnabled,
 		TelemetryConfig:  config.ConvertV1TelemetryToAPI(cfg.TelemetryConfig),
+		Branding:         cfg.Hub.Branding.Clone(),
 		BrokerAuthConfig: hub.DefaultBrokerAuthConfig(),
 		GitHubAppConfig: hub.GitHubAppServerConfig{
 			AppID:                 cfg.GitHubApp.AppID,
@@ -4248,6 +4249,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		wireWebEventStreamMetrics(webSrv, hubSrv)
 		webSrv.SetAccessSettingsProvider(hubSrv)
 		webSrv.SetProfilingSettingsProvider(hubSrv)
+		webSrv.SetBrandingSettingsProvider(hubSrv)
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())

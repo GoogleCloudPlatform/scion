@@ -191,7 +191,7 @@ func mergeSectionOnCurrentWith(ctx context.Context, ops *OperationalSettings, se
 	}
 
 	schema, _ := opsettings.SchemaInfo()[section].Schema.(map[string]interface{})
-	validate := func(doc json.RawMessage) bool { return len(opsettings.Validate(section, doc)) == 0 }
+	validate := func(doc json.RawMessage) bool { return len(opsettings.ValidateSchema(section, doc)) == 0 }
 
 	if opts.baseOut != nil {
 		// The base goes through the same schema drops the write applies to
@@ -266,7 +266,10 @@ func dropCarriedKeysFailingSchema(section string, schema map[string]interface{},
 // dropInvalidCarriedNestedKeys checks a carried nested key on its own,
 // wrapped in its parent objects, so a listed section's nested object
 // schemas must not have required keys (telemetry's have none).
-var deepMergeSections = map[string]bool{"telemetry": true}
+var deepMergeSections = map[string]bool{
+	"telemetry":                    true,
+	opsettings.BrandingSectionName: true,
+}
 
 // sentTree records the keys a body sent at one object level, by the
 // section-level (or nested) JSON key the value was applied to. A key maps
@@ -650,14 +653,18 @@ func dropEnvOverriddenSectionKeys(base map[string]json.RawMessage, section strin
 	if !deepMergeSections[section] {
 		return
 	}
-	prefix := section + "."
-	for _, k := range envKeys {
-		rest, ok := strings.CutPrefix(k, prefix)
-		if !ok {
+	for key := range base {
+		kp := sectionKeyKoanfPath(section, key)
+		if kp == "" {
 			continue
 		}
-		if path := strings.Split(rest, "."); len(path) > 1 {
-			deleteNestedKey(base, path)
+		subPrefix := kp + "."
+		for _, k := range envKeys {
+			rest, ok := strings.CutPrefix(k, subPrefix)
+			if !ok || rest == "" {
+				continue
+			}
+			deleteNestedKey(base, append([]string{key}, strings.Split(rest, ".")...))
 		}
 	}
 }
@@ -832,6 +839,7 @@ func (fp *fieldPresence) sentFold(name string) (json.RawMessage, bool) {
 var bodyMergedSections = []string{
 	"access", "endpoints", "lifecycle", "notifications", "federation",
 	"auto_expose_ports", "quotas", "agent_secrets", hubObservabilitySection,
+	opsettings.BrandingSectionName,
 }
 
 // bodyPathForKoanf returns the JSON path in a server-config PUT body

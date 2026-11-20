@@ -295,6 +295,8 @@ func ExtractSectionFromKoanf(k *koanf.Koanf, sectionName string) (json.RawMessag
 	switch sectionName {
 	case "telemetry":
 		return extractSubtree(k, "telemetry")
+	case BrandingSectionName:
+		return extractSubtree(k, config.BrandingSectionKey)
 	case "runtimes":
 		return extractSubtree(k, "runtimes")
 	case "profiles":
@@ -386,6 +388,8 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 	switch sectionName {
 	case "telemetry":
 		return loadPrefixed(k, "telemetry", raw)
+	case BrandingSectionName:
+		return loadPrefixed(k, config.BrandingSectionKey, raw)
 	case "runtimes":
 		return loadPrefixed(k, "runtimes", raw)
 	case "profiles":
@@ -419,7 +423,12 @@ func loadPrefixed(k *koanf.Koanf, prefix string, raw map[string]interface{}) err
 	if len(pruned) == 0 {
 		return nil
 	}
-	return k.Load(confmap.Provider(map[string]interface{}{prefix: pruned}, ""), nil)
+	wrapped := pruned
+	segs := strings.Split(prefix, ".")
+	for i := len(segs) - 1; i >= 0; i-- {
+		wrapped = map[string]interface{}{segs[i]: wrapped}
+	}
+	return k.Load(confmap.Provider(wrapped, ""), nil)
 }
 
 // withoutEmptyMaps returns a copy of m without nested maps that are empty,
@@ -542,10 +551,26 @@ func init() {
 	}
 }
 
+// subtreeSectionPrefixes maps subtree-extracted sections whose koanf prefix is
+// not "<section>." to their koanf root prefix.
+var subtreeSectionPrefixes = map[string]string{
+	BrandingSectionName: config.BrandingSectionKey,
+}
+
 // SectionKeyFromKoanfPath returns the JSON field name (section-level key) for a
 // given koanf path, or empty string if the path is not in the registry.
 func SectionKeyFromKoanfPath(koanfPath string) string {
-	return koanfPathToJSONKey[koanfPath]
+	if k := koanfPathToJSONKey[koanfPath]; k != "" {
+		return k
+	}
+	for secName, prefix := range subtreeSectionPrefixes {
+		if rest, ok := strings.CutPrefix(koanfPath, prefix+"."); ok && !strings.Contains(rest, ".") {
+			if OwningSection(koanfPath) == secName {
+				return rest
+			}
+		}
+	}
+	return ""
 }
 
 // KoanfPathFromSectionKey returns the full koanf path for a section-level JSON
@@ -553,6 +578,12 @@ func SectionKeyFromKoanfPath(koanfPath string) string {
 func KoanfPathFromSectionKey(sectionName, jsonKey string) string {
 	if mapping, ok := jsonFieldToKoanfPaths[sectionName]; ok {
 		return mapping[jsonKey]
+	}
+	if prefix, ok := subtreeSectionPrefixes[sectionName]; ok && jsonKey != "" && !strings.Contains(jsonKey, ".") {
+		kp := prefix + "." + jsonKey
+		if OwningSection(kp) == sectionName {
+			return kp
+		}
 	}
 	return ""
 }

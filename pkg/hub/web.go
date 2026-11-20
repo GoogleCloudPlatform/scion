@@ -153,6 +153,12 @@ type ProfilingSettingsProvider interface {
 	ReadinessMarksEnabled() bool
 }
 
+// BrandingSettingsProvider supplies the live Hub-wide UI branding snapshot to
+// WebServer. *Server implements it.
+type BrandingSettingsProvider interface {
+	ResolvedBranding() *config.ResolvedBranding
+}
+
 // AccessSettingsProvider supplies the operational access settings that can
 // change at runtime (e.g. via the admin UI or ApplySnapshot). WebServer
 // reads these through the provider instead of holding its own snapshot.
@@ -269,6 +275,7 @@ type WebServer struct {
 	config         WebServerConfig
 	accessSettings AccessSettingsProvider    // live operational settings (nil-safe: falls back to zero values)
 	profiling      ProfilingSettingsProvider // live profiling switches (nil: everything off)
+	branding       BrandingSettingsProvider  // live Hub-wide branding (nil: DefaultResolvedBranding)
 	httpServer     *http.Server
 	mux            *http.ServeMux
 	assets         fs.FS  // embedded or nil
@@ -381,7 +388,7 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-    <title>Scion</title>
+    <title>{{if .BrandTitle}}{{.BrandTitle}}{{else}}Scion{{end}}</title>
 
     <!-- app-icons:start -- kept identical to web/index.html; see TestSPAShellAppIconTags. -->
     <link rel="icon" href="/favicon.ico" sizes="32x32" />
@@ -652,6 +659,7 @@ var noAssetsPage = `<!DOCTYPE html>
 type spaShellData struct {
 	IsLoginPage  bool
 	IsInvitePage bool
+	BrandTitle   string
 	// InitialData is safe-for-HTML JSON embedded in the __SCION_DATA__ script tag.
 	// It is typed as template.JS so html/template does not escape it further.
 	InitialData template.JS
@@ -1080,6 +1088,22 @@ func (ws *WebServer) SetAccessSettingsProvider(p AccessSettingsProvider) {
 // shell's initial data carries for a signed-in user.
 func (ws *WebServer) SetProfilingSettingsProvider(p ProfilingSettingsProvider) {
 	ws.profiling = p
+}
+
+// SetBrandingSettingsProvider sets the live Hub-wide UI branding provider.
+func (ws *WebServer) SetBrandingSettingsProvider(p BrandingSettingsProvider) {
+	ws.branding = p
+}
+
+// resolvedBranding returns the live Hub branding snapshot, or stock Scion
+// defaults when no BrandingSettingsProvider is wired.
+func (ws *WebServer) resolvedBranding() *config.ResolvedBranding {
+	if ws != nil && ws.branding != nil {
+		if b := ws.branding.ResolvedBranding(); b != nil {
+			return b
+		}
+	}
+	return config.DefaultResolvedBranding()
 }
 
 // SetAuthzService sets the authorization service for SSE subject-level checks.
@@ -1893,11 +1917,16 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		// as that endpoint answered the session user in-process. Omitted for
 		// an anonymous shell or when the endpoint did not answer 200.
 		Experiments map[string]bool `json:"experiments,omitempty"`
+		// Branding carries Hub-wide UI branding on both authenticated and
+		// anonymous (/login, /invite) shells when customized.
+		Branding *config.PublicBranding `json:"branding,omitempty"`
 	}
 
+	resolvedBranding := ws.resolvedBranding()
 	envelope := pageDataEnvelope{
-		Path:  r.URL.Path,
-		Title: "Scion",
+		Path:     r.URL.Path,
+		Title:    resolvedBranding.Name,
+		Branding: resolvedBranding.Public(),
 	}
 
 	// Populate user from session context.
@@ -2077,6 +2106,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 		data := spaShellData{
 			IsLoginPage:    r.URL.Path == "/login",
 			IsInvitePage:   r.URL.Path == "/invite",
+			BrandTitle:     ws.resolvedBranding().Name,
 			ModulePreloads: ws.shellModulePreloads,
 			ScriptNonce:    nonce,
 		}

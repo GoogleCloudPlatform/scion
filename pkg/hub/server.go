@@ -408,6 +408,8 @@ type ServerConfig struct {
 	// Used to populate default telemetry config on new agents when no per-agent
 	// or template-level telemetry config is set.
 	TelemetryConfig *api.TelemetryConfig
+	// Branding is the Hub-wide UI branding config from settings.yaml (server.hub.branding).
+	Branding *config.BrandingConfig
 	// AgentDefaults holds the hub operational agent_defaults section
 	// (Layer-1 settings, koanf keys default_template, default_harness_config,
 	// default_max_turns, default_max_model_calls, default_max_duration,
@@ -2058,6 +2060,9 @@ type Server struct {
 	// startupLayer1 holds the startup values ApplySnapshot reverts to when
 	// a saved Layer-1 setting is cleared (recordStartupLayer1Values).
 	startupLayer1 startupLayer1Values
+	// resolvedBranding holds the validated, immutable Hub UI branding snapshot,
+	// read lock-free on web/public-settings request paths and swapped in ApplySnapshot.
+	resolvedBranding atomic.Pointer[config.ResolvedBranding]
 	// notificationApply serializes notification channel registry rebuilds
 	// (applyNotificationChannels) and guards the channels last applied.
 	notificationApply notificationChannelsApplyState
@@ -3193,6 +3198,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// the configured hub_name is unset.
 	srv.startupHubName = cfg.HubName
 	srv.recordStartupLayer1Values()
+	srv.applyBrandingLocked(cfg.Branding)
 	srv.setStartClaimSettings(cfg.StartClaim)
 	// Every start trigger runs under a start claim.
 	srv.startClaimsOn = true

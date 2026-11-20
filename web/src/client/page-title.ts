@@ -23,7 +23,31 @@
  * names once data has loaded.
  */
 
-const APP_NAME = 'Scion';
+export const DEFAULT_APP_NAME = 'Scion';
+
+let appName = DEFAULT_APP_NAME;
+
+/**
+ * Returns the active Hub brand display name ('Scion' when uncustomized).
+ */
+export function getAppName(): string {
+  return appName;
+}
+
+/**
+ * Updates the active Hub brand display name used in `document.title` and
+ * immediately re-applies the document title if it changed. Passing `null`,
+ * `undefined`, or whitespace resets the name to `'Scion'`.
+ */
+export function setAppName(name?: string | null): void {
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  const next = trimmed.length > 0 ? trimmed : DEFAULT_APP_NAME;
+  if (next === appName) return;
+  appName = next;
+  if (typeof document !== 'undefined') {
+    applyDocumentTitle();
+  }
+}
 
 /**
  * Custom event name dispatched by page components to refine the document title
@@ -67,7 +91,7 @@ let unreadCount = 0;
  * otherwise silently drop the badge.
  */
 function applyDocumentTitle(): void {
-  const base = currentSegments.length === 0 ? APP_NAME : [...currentSegments, APP_NAME].join(' — ');
+  const base = currentSegments.length === 0 ? appName : [...currentSegments, appName].join(' — ');
   document.title = unreadCount > 0 ? `(${unreadCount}) ${base}` : base;
 }
 

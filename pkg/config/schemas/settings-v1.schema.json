@@ -1907,6 +1907,11 @@
               "x-since": "1"
             }
           }
+        },
+        "branding": {
+          "$ref": "#/$defs/serverHubBranding",
+          "description": "Hub-wide UI branding settings (product name, logos, icons, accent color, and WCAG AA validated light/dark color palettes).",
+          "x-since": "1"
         }
       }
     },
@@ -3181,6 +3186,147 @@
         "allow_visitor_grants": {
           "type": "boolean",
           "description": "Let project owners grant visitor access to users of this issuer (issuer_type user or hub). Default false."
+        }
+      },
+      "additionalProperties": false
+    },
+    "hexColor": {
+      "type": "string",
+      "pattern": "^#[0-9a-fA-F]{6}$",
+      "description": "6-digit #RRGGBB hex color."
+    },
+    "brandAssetURI": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 180000,
+      "description": "Brand image URI: an https:// URL (<= 2048 chars), a same-origin /path (<= 512 chars), or a base64 data:image/{svg+xml,png,webp,x-icon};base64,... URI (<= 128 KiB decoded)."
+    },
+    "brandScale": {
+      "type": "object",
+      "description": "Optional 50..950 shade step hex overrides.",
+      "patternProperties": {
+        "^(50|100|200|300|400|500|600|700|800|900|950)$": {
+          "$ref": "#/$defs/hexColor"
+        }
+      },
+      "additionalProperties": false
+    },
+    "brandSemanticMode": {
+      "type": "object",
+      "description": "Semantic color token overrides (#RRGGBB) for one theme mode.",
+      "properties": {
+        "bg": { "$ref": "#/$defs/hexColor" },
+        "bg_subtle": { "$ref": "#/$defs/hexColor" },
+        "surface": { "$ref": "#/$defs/hexColor" },
+        "surface_raised": { "$ref": "#/$defs/hexColor" },
+        "text": { "$ref": "#/$defs/hexColor" },
+        "text_secondary": { "$ref": "#/$defs/hexColor" },
+        "text_muted": { "$ref": "#/$defs/hexColor" },
+        "border": { "$ref": "#/$defs/hexColor" },
+        "primary": { "$ref": "#/$defs/hexColor" },
+        "primary_hover": { "$ref": "#/$defs/hexColor" },
+        "primary_active": { "$ref": "#/$defs/hexColor" },
+        "primary_text": { "$ref": "#/$defs/hexColor" }
+      },
+      "additionalProperties": false
+    },
+    "serverHubBranding": {
+      "type": "object",
+      "description": "Hub-wide UI branding configuration. Reloads live without restart.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Product display name (1..64 characters, no control characters; default 'Scion').",
+          "x-env-var": "SCION_SERVER_HUB_BRANDING_NAME"
+        },
+        "short_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24,
+          "description": "Optional compact product name for PWA manifests (1..24 characters; defaults to name truncated to 24 characters).",
+          "x-env-var": "SCION_SERVER_HUB_BRANDING_SHORTNAME"
+        },
+        "subtitle": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Optional tagline shown beneath the brand mark on login surfaces (0..80 characters).",
+          "x-env-var": "SCION_SERVER_HUB_BRANDING_SUBTITLE"
+        },
+        "attribution": {
+          "type": "string",
+          "enum": ["shown", "hidden"],
+          "description": "Whether 'Powered by Scion' attribution is shown ('shown', default) or hidden ('hidden') when custom branding is active.",
+          "x-env-var": "SCION_SERVER_HUB_BRANDING_ATTRIBUTION"
+        },
+        "logo": {
+          "type": "object",
+          "description": "Light and dark theme brand logo URIs.",
+          "properties": {
+            "light": {
+              "$ref": "#/$defs/brandAssetURI",
+              "description": "Logo URI for light theme (also used in dark theme when logo.dark is unset).",
+              "x-env-var": "SCION_SERVER_HUB_BRANDING_LOGO_LIGHT"
+            },
+            "dark": {
+              "$ref": "#/$defs/brandAssetURI",
+              "description": "Optional logo URI for dark theme (falls back to logo.light).",
+              "x-env-var": "SCION_SERVER_HUB_BRANDING_LOGO_DARK"
+            }
+          },
+          "additionalProperties": false
+        },
+        "icons": {
+          "type": "object",
+          "description": "Favicon and PWA icon URIs.",
+          "properties": {
+            "favicon": {
+              "$ref": "#/$defs/brandAssetURI",
+              "description": "Browser favicon URI (.svg, .png, or .ico).",
+              "x-env-var": "SCION_SERVER_HUB_BRANDING_ICONS_FAVICON"
+            },
+            "apple_touch_icon": {
+              "$ref": "#/$defs/brandAssetURI",
+              "description": "180x180 PNG Apple touch icon URI.",
+              "x-env-var": "SCION_SERVER_HUB_BRANDING_ICONS_APPLETOUCHICON"
+            },
+            "icon_192": {
+              "$ref": "#/$defs/brandAssetURI",
+              "description": "192x192 PNG web app manifest icon URI.",
+              "x-env-var": "SCION_SERVER_HUB_BRANDING_ICONS_ICON192"
+            },
+            "icon_512": {
+              "$ref": "#/$defs/brandAssetURI",
+              "description": "512x512 PNG web app manifest icon URI.",
+              "x-env-var": "SCION_SERVER_HUB_BRANDING_ICONS_ICON512"
+            },
+            "icon_maskable_512": {
+              "$ref": "#/$defs/brandAssetURI",
+              "description": "512x512 maskable PNG web app manifest icon URI.",
+              "x-env-var": "SCION_SERVER_HUB_BRANDING_ICONS_ICONMASKABLE512"
+            }
+          },
+          "additionalProperties": false
+        },
+        "accent_color": {
+          "$ref": "#/$defs/hexColor",
+          "description": "Optional #RRGGBB accent shorthand that generates a luminance-calibrated OKLCH primary 50..950 ramp.",
+          "x-env-var": "SCION_SERVER_HUB_BRANDING_ACCENTCOLOR"
+        },
+        "palette": {
+          "type": "object",
+          "description": "Optional 50..950 shade scale overrides and light/dark semantic token overrides.",
+          "properties": {
+            "primary": { "$ref": "#/$defs/brandScale" },
+            "neutral": { "$ref": "#/$defs/brandScale" },
+            "success": { "$ref": "#/$defs/brandScale" },
+            "warning": { "$ref": "#/$defs/brandScale" },
+            "danger": { "$ref": "#/$defs/brandScale" },
+            "light": { "$ref": "#/$defs/brandSemanticMode" },
+            "dark": { "$ref": "#/$defs/brandSemanticMode" }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

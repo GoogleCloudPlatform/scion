@@ -557,3 +557,64 @@ func ParseExperimentsDoc(raw json.RawMessage) (doc ExperimentsSettings, malforme
 	}
 	return doc, false
 }
+
+// BrandingSectionName is the Layer-1 opsettings section name for server.hub.branding.
+const BrandingSectionName = "branding"
+
+// BrandingSettings holds Layer-1 Hub-wide UI branding configuration
+// (server.hub.branding). It embeds config.BrandingConfig to preserve full
+// fidelity across settings.yaml, koanf, and the hub_settings DB store.
+type BrandingSettings struct {
+	config.BrandingConfig
+}
+
+// BrandingKoanfPaths lists every koanf path owned by the "branding" section.
+var BrandingKoanfPaths = []string{
+	"server.hub.branding",
+	"server.hub.branding.name",
+	"server.hub.branding.short_name",
+	"server.hub.branding.subtitle",
+	"server.hub.branding.attribution",
+	"server.hub.branding.logo",
+	"server.hub.branding.logo.light",
+	"server.hub.branding.logo.dark",
+	"server.hub.branding.icons",
+	"server.hub.branding.icons.favicon",
+	"server.hub.branding.icons.apple_touch_icon",
+	"server.hub.branding.icons.icon_192",
+	"server.hub.branding.icons.icon_512",
+	"server.hub.branding.icons.icon_maskable_512",
+	"server.hub.branding.accent_color",
+	"server.hub.branding.palette",
+	"server.hub.branding.palette.primary",
+	"server.hub.branding.palette.neutral",
+	"server.hub.branding.palette.success",
+	"server.hub.branding.palette.warning",
+	"server.hub.branding.palette.danger",
+	"server.hub.branding.palette.light",
+	"server.hub.branding.palette.light.bg",
+	"server.hub.branding.palette.light.bg_subtle",
+	"server.hub.branding.palette.light.surface",
+	"server.hub.branding.palette.light.surface_raised",
+	"server.hub.branding.palette.light.text",
+	"server.hub.branding.palette.light.text_secondary",
+	"server.hub.branding.palette.light.text_muted",
+	"server.hub.branding.palette.light.border",
+	"server.hub.branding.palette.light.primary",
+	"server.hub.branding.palette.light.primary_hover",
+	"server.hub.branding.palette.light.primary_active",
+	"server.hub.branding.palette.light.primary_text",
+	"server.hub.branding.palette.dark",
+	"server.hub.branding.palette.dark.bg",
+	"server.hub.branding.palette.dark.bg_subtle",
+	"server.hub.branding.palette.dark.surface",
+	"server.hub.branding.palette.dark.surface_raised",
+	"server.hub.branding.palette.dark.text",
+	"server.hub.branding.palette.dark.text_secondary",
+	"server.hub.branding.palette.dark.text_muted",
+	"server.hub.branding.palette.dark.border",
+	"server.hub.branding.palette.dark.primary",
+	"server.hub.branding.palette.dark.primary_hover",
+	"server.hub.branding.palette.dark.primary_active",
+	"server.hub.branding.palette.dark.primary_text",
+}

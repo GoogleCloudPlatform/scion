@@ -16,6 +16,8 @@ package hub
 
 import (
 	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // PublicSettingsResponse contains non-sensitive server settings for the web UI.
@@ -43,6 +45,9 @@ type PublicSettingsResponse struct {
 	// unauthenticated endpoint reveals nothing beyond what a 403 would
 	// reveal anyway.
 	AgentSecretsUserScopeOnly bool `json:"agentSecretsUserScopeOnly"`
+	// Branding carries Hub-wide UI branding (non-boolean fields only) when
+	// server.hub.branding is customized; omitted when stock defaults apply.
+	Branding *config.PublicBranding `json:"branding,omitempty"`
 }
 
 // nativeChatEnabled reports whether the built-in chat feature is active.
@@ -82,5 +87,6 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 		DefaultTemplate:           defaults.DefaultTemplate,
 		DefaultModel:              defaults.DefaultModel,
 		AgentSecretsUserScopeOnly: s.agentSecretsUserScopeOnly(),
+		Branding:                  s.ResolvedBranding().Public(),
 	})
 }

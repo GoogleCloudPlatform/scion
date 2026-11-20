@@ -153,6 +153,11 @@ type Layer1Snapshot struct {
 	HubMetricsEnabled *bool
 	HubTracingEnabled *bool
 
+	// Branding (branding section: server.hub.branding); nil when unset.
+	Branding         *config.BrandingConfig
+	BrandingInDB     bool
+	BrandingFromFile bool
+
 	// Agent secrets
 	AgentSecretsUserScopeOnly *bool
 
@@ -733,6 +738,7 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
+	_, snap.BrandingInDB = dbSections[opsettings.BrandingSectionName]
 	snap.FromOperationalSettings = true
 	snap.Revision = revision
 	snap.Seq = seq
@@ -1342,6 +1348,22 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.HubTracingEnabled = &v
 	}
 
+	// Branding
+	brandSub := k.Cut(config.BrandingSectionKey)
+	if brandSub != nil && len(brandSub.Keys()) > 0 {
+		data, err := json.Marshal(brandSub.Raw())
+		if err != nil {
+			slog.Error("operational settings: cannot encode branding settings", "error", err)
+		} else {
+			var bc config.BrandingConfig
+			if err := json.Unmarshal(data, &bc); err != nil {
+				slog.Error("operational settings: cannot decode branding settings; branding left unset", "error", err)
+			} else if !bc.IsZero() {
+				snap.Branding = &bc
+			}
+		}
+	}
+
 	// Agent secrets
 	if k.Exists("agent_secrets.user_scope_only") {
 		v := k.Bool("agent_secrets.user_scope_only")
@@ -1550,6 +1572,10 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Hub observability export switches — read at startup only.
 	snap.HubMetricsEnabled = gc.Hub.Observability.MetricsEnabled
 	snap.HubTracingEnabled = gc.Hub.Observability.TracingEnabled
+
+	// Branding — applied live in file mode too.
+	snap.Branding = gc.Hub.Branding.Clone()
+	snap.BrandingFromFile = true
 
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
@@ -2063,6 +2089,24 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "agent_defaults")
 	}
 	s.config.AgentDefaults = newDefaults
+
+	// Branding (server.hub.branding)
+	brandingCfg := s.config.Branding.Clone()
+	switch {
+	case snap.Branding != nil:
+		brandingCfg = snap.Branding.Clone()
+	case snap.FromOperationalSettings:
+		if snap.BrandingInDB {
+			brandingCfg = nil
+		} else {
+			brandingCfg = s.startupLayer1.Branding.Clone()
+		}
+	case snap.BrandingFromFile:
+		brandingCfg = nil
+	}
+	if s.applyBrandingLocked(brandingCfg) {
+		applied = append(applied, opsettings.BrandingSectionName)
+	}
 
 	s.mu.Unlock()
 

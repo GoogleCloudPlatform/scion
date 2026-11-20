@@ -264,6 +264,10 @@ type HubServerConfig struct {
 	// SystemOne holds Hub-wide System One rule evaluation settings
 	// (server.hub.system_one).
 	SystemOne HubSystemOneConfig `json:"systemOne" yaml:"systemOne" koanf:"systemOne"`
+
+	// Branding holds Hub-wide UI branding settings (server.hub.branding).
+	// Reloadable at runtime via OperationalSettings.
+	Branding BrandingConfig `json:"branding,omitempty" yaml:"branding,omitempty" koanf:"branding"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.

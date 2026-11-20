@@ -106,6 +106,53 @@ var layer1RoundTripSamples = map[string]string{
 	// hub_observability
 	"server.hub.observability.metrics_enabled": `true`,
 	"server.hub.observability.tracing_enabled": `false`,
+	// branding (deep-merged)
+	"server.hub.branding.name":                         `"Acme Cloud"`,
+	"server.hub.branding.short_name":                   `"Acme"`,
+	"server.hub.branding.subtitle":                     `"Engineering Platform"`,
+	"server.hub.branding.attribution":                  `"hidden"`,
+	"server.hub.branding.logo":                         `{"light":"https://cdn.example.com/logo.svg"}`,
+	"server.hub.branding.logo.light":                   `"https://cdn.example.com/logo-light.svg"`,
+	"server.hub.branding.logo.dark":                    `"https://cdn.example.com/logo-dark.svg"`,
+	"server.hub.branding.icons":                        `{"favicon":"https://cdn.example.com/favicon.svg"}`,
+	"server.hub.branding.icons.favicon":                `"https://cdn.example.com/favicon.svg"`,
+	"server.hub.branding.icons.apple_touch_icon":       `"https://cdn.example.com/apple.png"`,
+	"server.hub.branding.icons.icon_192":               `"https://cdn.example.com/192.png"`,
+	"server.hub.branding.icons.icon_512":               `"https://cdn.example.com/512.png"`,
+	"server.hub.branding.icons.icon_maskable_512":      `"https://cdn.example.com/maskable.png"`,
+	"server.hub.branding.accent_color":                 `"#0d9488"`,
+	"server.hub.branding.palette":                      `{"primary":{"600":"#0f766e"}}`,
+	"server.hub.branding.palette.primary":              `{"600":"#0f766e"}`,
+	"server.hub.branding.palette.neutral":              `{"900":"#111827"}`,
+	"server.hub.branding.palette.success":              `{"600":"#15803d"}`,
+	"server.hub.branding.palette.warning":              `{"600":"#b45309"}`,
+	"server.hub.branding.palette.danger":               `{"600":"#b91c1c"}`,
+	"server.hub.branding.palette.light":                `{"primary":"#0f766e"}`,
+	"server.hub.branding.palette.light.bg":             `"#fafaf9"`,
+	"server.hub.branding.palette.light.bg_subtle":      `"#ffffff"`,
+	"server.hub.branding.palette.light.surface":        `"#fafaf9"`,
+	"server.hub.branding.palette.light.surface_raised": `"#fafaf9"`,
+	"server.hub.branding.palette.light.text":           `"#111827"`,
+	"server.hub.branding.palette.light.text_secondary": `"#334155"`,
+	"server.hub.branding.palette.light.text_muted":     `"#475569"`,
+	"server.hub.branding.palette.light.border":         `"#cbd5e1"`,
+	"server.hub.branding.palette.light.primary":        `"#0f766e"`,
+	"server.hub.branding.palette.light.primary_hover":  `"#115e59"`,
+	"server.hub.branding.palette.light.primary_active": `"#134e4a"`,
+	"server.hub.branding.palette.light.primary_text":   `"#f8fafc"`,
+	"server.hub.branding.palette.dark":                 `{"primary":"#2dd4bf"}`,
+	"server.hub.branding.palette.dark.bg":              `"#020617"`,
+	"server.hub.branding.palette.dark.bg_subtle":       `"#0f172a"`,
+	"server.hub.branding.palette.dark.surface":         `"#0f172a"`,
+	"server.hub.branding.palette.dark.surface_raised":  `"#1e293b"`,
+	"server.hub.branding.palette.dark.text":            `"#ffffff"`,
+	"server.hub.branding.palette.dark.text_secondary":  `"#e2e8f0"`,
+	"server.hub.branding.palette.dark.text_muted":      `"#cbd5e1"`,
+	"server.hub.branding.palette.dark.border":          `"#475569"`,
+	"server.hub.branding.palette.dark.primary":         `"#2dd4bf"`,
+	"server.hub.branding.palette.dark.primary_hover":   `"#5eead4"`,
+	"server.hub.branding.palette.dark.primary_active":  `"#99f6e4"`,
+	"server.hub.branding.palette.dark.primary_text":    `"#020617"`,
 	// agent_defaults
 	"default_template":                        `"tmpl-a"`,
 	"default_harness_config":                  `"hc-a"`,
@@ -156,6 +203,7 @@ var layer1RoundTripExempt = map[string]string{
 	"default_max_agent_role": "read-only through server-config: accepted only as an unchanged echo of GET (dbUnwrittenLayer1Paths)",
 	"default_agent_role":     "read-only through server-config: accepted only as an unchanged echo of GET (dbUnwrittenLayer1Paths)",
 	"server.github_app":      "the whole github_app object; each of its fields is covered on its own, and a null object is not a clear (as for telemetry)",
+	"server.hub.branding":    "the whole branding object; each of its fields is covered on its own",
 	"server.hub.gcp_iam_check_mode": "gcp_iam is built by buildGCPIAMDoc: a sent key must carry a recognised value (validateGCPIAMRequest), so it has no explicit clear, " +
 		"and changes are audited; covered by gcp_iam_settings_test.go",
 	"server.hub.gcp_iam_deny_unknown_policy": "gcp_iam is built by buildGCPIAMDoc: a sent key must carry a recognised value (validateGCPIAMRequest), so it has no explicit clear, " +
@@ -217,6 +265,8 @@ func layer1FieldFor(t *testing.T, section, koanf string) layer1Field {
 		return f
 	case section == "telemetry":
 		f.docPath = strings.Split(strings.TrimPrefix(koanf, "telemetry."), ".")
+	case section == opsettings.BrandingSectionName:
+		f.docPath = strings.Split(strings.TrimPrefix(koanf, config.BrandingSectionKey+"."), ".")
 	default:
 		for _, key := range sectionJSONKeys(section) {
 			if sectionKeyKoanfPath(section, key) == koanf {
@@ -537,6 +587,7 @@ func TestPutServerConfigDB_MergedSections_ConcurrentWrite409(t *testing.T) {
 		{"quotas", `{"enforce_broker_quotas":true}`, `{"enforce_broker_quotas":false}`, `{"quotas": {"enforce_broker_quotas": null}}`},
 		{"agent_secrets", `{"user_scope_only":true}`, `{"user_scope_only":false}`, `{"agent_secrets": {"user_scope_only": null}}`},
 		{"hub_observability", `{"metrics_enabled":true}`, `{"metrics_enabled":false}`, `{"server": {"hub": {"observability": {"metrics_enabled": null}}}}`},
+		{"branding", `{"name":"Acme"}`, `{"name":"Other"}`, `{"server": {"hub": {"branding": {"subtitle": "Platform"}}}}`},
 		{"notifications", `{"notification_channels":[{"type":"slack","params":{"channel":"#a"}}]}`, `{"notification_channels":[{"type":"slack","params":{"channel":"#b"}}]}`, `{"server": {"notification_channels": []}}`},
 		{"project_defaults", `{"default_scratchpad":true}`, `{"default_scratchpad":false}`, `{"default_scratchpad": null}`},
 	} {
