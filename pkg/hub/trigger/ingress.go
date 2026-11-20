@@ -663,6 +663,16 @@ func validateSignedRoutingHeaders(hdr http.Header, delivery, eventHdr, subjectHd
 	return nil
 }
 
+// WebhookEventType returns the canonical trigger event.type produced for a
+// signed webhook ingress request with the given X-Scion-Event header value
+// ("webhook.received" when empty, "webhook.<name>" otherwise).
+func WebhookEventType(eventHeader string) string {
+	if eventHeader != "" {
+		return "webhook." + eventHeader
+	}
+	return "webhook.received"
+}
+
 func buildWebhookTriggerEvent(
 	ep *store.WebhookEndpoint,
 	hdr http.Header,
@@ -671,10 +681,9 @@ func buildWebhookTriggerEvent(
 	now time.Time,
 	newEventID func() string,
 ) (store.TriggerEvent, string, bool) {
-	eventType := "webhook.received"
+	eventType := WebhookEventType(eventHdr)
 	eventAttr := "received"
 	if eventHdr != "" {
-		eventType = "webhook." + eventHdr
 		eventAttr = eventHdr
 	}
 

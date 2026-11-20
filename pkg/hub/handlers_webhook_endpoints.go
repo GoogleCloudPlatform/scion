@@ -32,13 +32,30 @@ const (
 	maxWebhookEndpointDescLen = 1024
 )
 
-var errWebhookEndpointLimitExceeded = errors.New("webhook endpoint limit exceeded")
+var (
+	errWebhookEndpointLimitExceeded = errors.New("webhook endpoint limit exceeded")
+	errWebhookEndpointNameExists    = errors.New("webhook endpoint name already exists")
+	errDefaultTriggerNameExists     = errors.New("default trigger name already exists")
+)
+
+// WebhookEndpointDefaultTriggerSpec configures an optional default message
+// trigger created atomically in the same transaction as the webhook endpoint
+// (Stage 1 §10.3, §15 PR 5, rev 8.19).
+type WebhookEndpointDefaultTriggerSpec struct {
+	AgentID   string `json:"agentId,omitempty"`
+	AgentName string `json:"agentName,omitempty"`
+	ToSelf    bool   `json:"toSelf,omitempty"`
+	Message   string `json:"message"`
+	Interrupt bool   `json:"interrupt,omitempty"`
+	Wake      bool   `json:"wake,omitempty"`
+}
 
 // CreateWebhookEndpointRequest is the request body for POST /webhook-endpoints.
 type CreateWebhookEndpointRequest struct {
-	Name          string `json:"name"`
-	Description   string `json:"description,omitempty"`
-	SignatureMode string `json:"signatureMode,omitempty"`
+	Name           string                             `json:"name"`
+	Description    string                             `json:"description,omitempty"`
+	SignatureMode  string                             `json:"signatureMode,omitempty"`
+	DefaultTrigger *WebhookEndpointDefaultTriggerSpec `json:"defaultTrigger,omitempty"`
 }
 
 // handleWebhookEndpoints routes requests under
@@ -131,6 +148,18 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	// When defaultTrigger is requested, run the exact project-level authority
+	// checks that POST /triggers runs (trigger.create plus webhook_endpoint.read
+	// for source attachment) before looking up the project or target agent.
+	if req.DefaultTrigger != nil {
+		if !s.authorizeTriggerAccess(w, r, projectID, ActionCreate) {
+			return
+		}
+		if !s.authorizeWebhookEndpointAccess(w, r, projectID, ActionRead) {
+			return
+		}
+	}
+
 	name, err := validateWebhookEndpointName(req.Name)
 	if err != nil {
 		ValidationError(w, err.Error(), nil)
@@ -157,12 +186,6 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	rawSecret, err := generateWebhookEndpointSecret()
-	if err != nil {
-		InternalError(w)
-		return
-	}
-
 	attr := newInitiatorAttribution(ctx)
 	ownerKind := store.DelegationPrincipalUser
 	if identity.Type() == "agent" {
@@ -183,6 +206,76 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		CreatedBy:           identity.ID(),
 	}
 
+	var defaultTr *store.Trigger
+	if req.DefaultTrigger != nil {
+		dtAgentID := strings.TrimSpace(req.DefaultTrigger.AgentID)
+		dtAgentName := strings.TrimSpace(req.DefaultTrigger.AgentName)
+		actionSpec := TriggerActionSpec{
+			Type:      store.TriggerActionMessage,
+			Message:   req.DefaultTrigger.Message,
+			Interrupt: req.DefaultTrigger.Interrupt,
+			Wake:      req.DefaultTrigger.Wake,
+		}
+		if req.DefaultTrigger.ToSelf {
+			if dtAgentID != "" || dtAgentName != "" {
+				ValidationError(w, "defaultTrigger.toSelf cannot be combined with agentId or agentName", nil)
+				return
+			}
+			// Resolve the calling agent strictly from the authenticated Hub
+			// AgentIdentity so client environment variables cannot target another agent.
+			agentIdentity := GetAgentIdentityFromContext(ctx)
+			if agentIdentity == nil || strings.TrimSpace(agentIdentity.ID()) == "" {
+				ValidationError(w, "defaultTrigger.toSelf requires an agent credential; specify agentId or agentName", nil)
+				return
+			}
+			actionSpec.AgentID = agentIdentity.ID()
+		} else {
+			actionSpec.AgentID = dtAgentID
+			actionSpec.AgentName = dtAgentName
+		}
+
+		matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, nil, true, false)
+		if !ok {
+			return
+		}
+		subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, nil, false)
+		if !ok {
+			return
+		}
+		actionPayload, ok := s.authorizeTriggerMessageAuthoring(w, r, projectID, &actionSpec)
+		if !ok {
+			return
+		}
+		ceiling, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionCreate)
+		if !ok {
+			return
+		}
+		defaultTr = &store.Trigger{
+			ID:                   api.NewUUID(),
+			ProjectID:            projectID,
+			Name:                 name,
+			SourceKind:           store.TriggerSourceKindWebhook,
+			SourceID:             ep.ID,
+			MatchTypes:           matchTypes,
+			MatchRules:           matchRules,
+			ActionType:           store.TriggerActionMessage,
+			ActionPayload:        actionPayload,
+			SubjectDialect:       subjectDialect,
+			SubjectRule:          subjectRule,
+			SubjectMode:          subjectMode,
+			Status:               store.TriggerStatusActive,
+			CreatedBy:            identity.ID(),
+			InitiatorAttribution: attr,
+			AuthorityCeiling:     ceiling,
+		}
+	}
+
+	rawSecret, err := generateWebhookEndpointSecret()
+	if err != nil {
+		InternalError(w)
+		return
+	}
+
 	secretRow, err := s.newWebhookEndpointSecretRow(projectID, ep.ID, 1, rawSecret, identity.ID())
 	if err != nil {
 		InternalError(w)
@@ -190,13 +283,17 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 	}
 
 	audit := newWebhookEndpointAudit(ctx, mutationTypeWebhookEndpointCreate, ep.ID)
-	afterBytes, _ := json.Marshal(map[string]any{
+	afterSummary := map[string]any{
 		"project_id":     projectID,
 		"endpoint_id":    ep.ID,
 		"name":           ep.Name,
 		"signature_mode": ep.SignatureMode,
 		"secret_version": ep.SecretVersion,
-	})
+	}
+	if defaultTr != nil {
+		afterSummary["trigger_id"] = defaultTr.ID
+	}
+	afterBytes, _ := json.Marshal(afterSummary)
 	audit.AfterSummary = string(afterBytes)
 
 	fp := fixturePrincipalFromContext(ctx)
@@ -214,11 +311,46 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		if count >= store.MaxWebhookEndpointsPerProject {
 			return errWebhookEndpointLimitExceeded
 		}
+		if defaultTr != nil {
+			if sErr := stampTrigger(ctx, tx, defaultTr, fp); sErr != nil {
+				return sErr
+			}
+			projCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{ProjectID: projectID})
+			if cErr != nil {
+				return cErr
+			}
+			if projCount >= store.MaxTriggersPerProject {
+				return errTriggerProjectLimitExceeded
+			}
+		}
 		if cErr := tx.CreateWebhookEndpoint(ctx, &ep); cErr != nil {
+			if errors.Is(cErr, store.ErrAlreadyExists) {
+				return errWebhookEndpointNameExists
+			}
 			return cErr
 		}
 		if sErr := tx.CreateSecret(ctx, secretRow); sErr != nil {
 			return sErr
+		}
+		if defaultTr != nil {
+			srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
+				ProjectID:  projectID,
+				SourceKind: defaultTr.SourceKind,
+				SourceID:   defaultTr.SourceID,
+				Status:     store.TriggerStatusActive,
+			})
+			if cErr != nil {
+				return cErr
+			}
+			if srcCount >= store.MaxActiveTriggersPerSource {
+				return errTriggerSourceLimitExceeded
+			}
+			if cErr := tx.CreateTrigger(ctx, defaultTr); cErr != nil {
+				if errors.Is(cErr, store.ErrAlreadyExists) {
+					return errDefaultTriggerNameExists
+				}
+				return cErr
+			}
 		}
 		return tx.CreateMutationAudit(ctx, audit)
 	})
@@ -226,24 +358,38 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		if writeFixtureRootError(w, err) {
 			return
 		}
-		if errors.Is(err, errWebhookEndpointLimitExceeded) {
+		switch {
+		case errors.Is(err, errWebhookEndpointLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("project has reached the maximum of %d webhook endpoints", store.MaxWebhookEndpointsPerProject), nil)
-			return
-		}
-		if errors.Is(err, store.ErrAlreadyExists) {
+		case errors.Is(err, errTriggerProjectLimitExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("project has reached the maximum of %d triggers", store.MaxTriggersPerProject), nil)
+		case errors.Is(err, errTriggerSourceLimitExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("webhook endpoint has reached the maximum of %d active triggers", store.MaxActiveTriggersPerSource), nil)
+		case errors.Is(err, errWebhookEndpointNameExists):
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"a webhook endpoint with this name already exists in this project", nil)
-			return
+		case errors.Is(err, errDefaultTriggerNameExists), errors.Is(err, store.ErrAlreadyExists):
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"a trigger with this name already exists in this project", nil)
+		default:
+			writeErrorFromErr(w, err, "")
 		}
-		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, WebhookEndpointCreatedResponse{
+	resp := WebhookEndpointCreatedResponse{
 		WebhookEndpointResponse: s.buildWebhookEndpointResponse(ep),
 		Secret:                  rawSecret,
-	})
+	}
+	if defaultTr != nil {
+		trResp := buildTriggerResponse(*defaultTr)
+		resp.TriggerID = trResp.ID
+		resp.Trigger = &trResp
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) listWebhookEndpoints(w http.ResponseWriter, r *http.Request, projectID string) {

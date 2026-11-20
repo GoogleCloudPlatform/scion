@@ -1081,7 +1081,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "webhookendpoint.create",
 		Domain:      "webhookendpoint",
-		Description: "Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row",
+		Description: "Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row. When defaultTrigger is supplied, also creates a default message trigger in the same transaction under trigger.create, webhook_endpoint.read, and message-target authoring checks",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/webhook-endpoints", Method: "POST", Response: ResponseCredential},
 		},
@@ -1090,7 +1090,7 @@ var projectOperations = []OperationSpec{
 		ResourceResolver: "project-from-url",
 		BasePermission:   "webhook_endpoint.create",
 		Effects:          []SecurityEffect{EffectCreateResource},
-		DelegationKind:   DelegationNone,
+		DelegationKind:   DelegationNonAmplification,
 		AuthorityEval:    AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:     "webhook_endpoint_create",
@@ -1098,13 +1098,16 @@ var projectOperations = []OperationSpec{
 			AfterFields:   []string{"endpoint_id"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialForbidden},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestTriggersAuthzMatrix"},
 			{Package: "pkg/hub", Function: "TestWebhookEndpointCRUD_SecretLifecycleAndCascadePause"},
+			{Package: "pkg/hub", Function: "TestWebhookEndpointCreate_DefaultTrigger"},
 			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
+		DelegationDescription: "Creating a bare webhook endpoint records only ownership and grants no deferred authority. " +
+			"When defaultTrigger is supplied, the default message trigger records the caller's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) in the same transaction, identical to trigger.create",
 	},
 	{
 		ID:          "webhookendpoint.delete",

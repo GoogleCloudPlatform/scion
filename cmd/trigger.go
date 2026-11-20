@@ -25,6 +25,9 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
@@ -58,13 +61,35 @@ var (
 
 	triggerHistoryLimit  int
 	triggerHistoryCursor string
+
+	triggerOutputJSON bool
 )
+
+func isTriggerJSONOutput() bool {
+	return isJSONOutput() || triggerOutputJSON
+}
+
+func outputTriggerJSON(v any) error {
+	raw, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(os.Stdout, escapeTriggerJSONBytes(raw))
+	return err
+}
+
+func outputTriggerActionResult(r ActionResult) error {
+	if isTriggerJSONOutput() {
+		return outputTriggerJSON(r)
+	}
+	return outputActionResult(r)
+}
 
 // triggerCmd is the top-level command group for trigger and webhook endpoint management.
 var triggerCmd = &cobra.Command{
 	Use:   "trigger",
 	Short: "Manage event triggers and webhook endpoints",
-	Long:  `Create, inspect, list, pause, resume, and delete event triggers and webhook endpoints for the current project.`,
+	Long:  `Create, inspect, list, pause, resume, and delete event triggers, received trigger events, and webhook endpoints for the current project.`,
 }
 
 var triggerCreateCmd = &cobra.Command{
@@ -161,7 +186,7 @@ func triggerHubContext() (*HubContext, string, context.Context, context.CancelFu
 	if err != nil {
 		return nil, "", nil, nil, err
 	}
-	if !isJSONOutput() {
+	if !isTriggerJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
@@ -551,8 +576,8 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create trigger: %w", formatTriggerRuleError(err)))
 	}
 
-	if isJSONOutput() {
-		return outputJSON(created)
+	if isTriggerJSONOutput() {
+		return outputTriggerJSON(created)
 	}
 
 	agentLabel := created.Action.AgentName
@@ -561,7 +586,7 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Trigger created: %s\n", created.ID)
 	fmt.Printf("  Name:    %s\n", created.Name)
-	fmt.Printf("  Source:  %s:%s\n", created.Source.Kind, created.Source.ID)
+	fmt.Printf("  Source:  %s\n", formatTriggerSource(created.Source, 0))
 	fmt.Printf("  Types:   %s\n", strings.Join(created.Match.Types, ", "))
 	rules := effectiveTriggerMatchRules(created.Match)
 	if len(rules) == 1 {
@@ -607,8 +632,8 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list triggers: %w", err))
 	}
 
-	if isJSONOutput() {
-		return outputJSON(resp)
+	if isTriggerJSONOutput() {
+		return outputTriggerJSON(resp)
 	}
 
 	callerScoped := isCallerScopedTriggerView(hubCtx, resp.Scope)
@@ -633,10 +658,6 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
 		}
-		sourceShort := tr.Source.ID
-		if len(sourceShort) > 8 {
-			sourceShort = sourceShort[:8]
-		}
 		agentLabel := tr.Action.AgentName
 		if agentLabel == "" {
 			agentLabel = tr.Action.AgentID
@@ -651,11 +672,10 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 				lastFire += " (" + tr.LastFireStatus + ")"
 			}
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s:%s\t%s\t%s\t%s\t%d\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
 			shortID,
 			tr.Name,
-			tr.Source.Kind,
-			sourceShort,
+			formatTriggerSource(tr.Source, 8),
 			strings.Join(tr.Match.Types, ","),
 			agentLabel,
 			triggerStatusLabel(tr.Status, tr.StatusReason),
@@ -683,7 +703,7 @@ func runTriggerDelete(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to delete trigger: %w", err))
 	}
 
-	return outputActionResult(ActionResult{
+	return outputTriggerActionResult(ActionResult{
 		Status:  "ok",
 		Command: "trigger delete",
 		Message: fmt.Sprintf("Trigger %s deleted.", fullID),
@@ -706,7 +726,7 @@ func runTriggerPause(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to pause trigger: %w", err))
 	}
 
-	return outputActionResult(ActionResult{
+	return outputTriggerActionResult(ActionResult{
 		Status:  "ok",
 		Command: "trigger pause",
 		Message: fmt.Sprintf("Trigger %s paused.", fullID),
@@ -729,7 +749,7 @@ func runTriggerResume(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to resume trigger: %w", formatTriggerRuleError(err)))
 	}
 
-	return outputActionResult(ActionResult{
+	return outputTriggerActionResult(ActionResult{
 		Status:  "ok",
 		Command: "trigger resume",
 		Message: fmt.Sprintf("Trigger %s resumed.", fullID),
@@ -767,8 +787,8 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to get trigger history: %w", err))
 	}
 
-	if isJSONOutput() {
-		return outputJSON(resp)
+	if isTriggerJSONOutput() {
+		return outputTriggerJSON(resp)
 	}
 
 	if len(resp.Fires) == 0 {
@@ -802,20 +822,120 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 			errMsg = "-"
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			shortID,
-			shortEvent,
-			fire.Status,
-			subj,
+			triggerTerminalText(shortID, false),
+			triggerTerminalText(shortEvent, false),
+			triggerTerminalText(fire.Status, false),
+			triggerTerminalText(subj, false),
 			started,
 			finished,
-			errMsg,
+			triggerTerminalText(errMsg, false),
 		)
 	}
 	_ = w.Flush()
 	if resp.NextCursor != "" {
-		fmt.Printf("\nNext cursor: %s\n", resp.NextCursor)
+		fmt.Printf("\nNext cursor: %s\n", triggerTerminalText(resp.NextCursor, false))
 	}
 	return nil
+}
+
+// triggerTerminalText unconditionally escapes C0/DEL/C1 control characters,
+// Unicode Cf format characters (including bidirectional overrides), invalid
+// UTF-8 bytes, and Unicode line/paragraph separators for terminal display,
+// regardless of whether stdout is a TTY. Newlines and tabs are preserved only
+// when keepLines is true (multi-line blocks).
+func triggerTerminalText(s string, keepLines bool) string {
+	escaped := escapeForTerminal(s, keepLines)
+	if !strings.ContainsAny(escaped, "\u2028\u2029") {
+		return escaped
+	}
+	var b strings.Builder
+	b.Grow(len(escaped) + 8)
+	for _, r := range escaped {
+		switch r {
+		case '\u2028', '\u2029':
+			fmt.Fprintf(&b, `\u{%04x}`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// formatTriggerQuotedList formats a string slice as [%q,%q,...] using Go's %q
+// quoting (matching 3b-1 rule quoting) so C0/C1 controls, DEL, newlines, and
+// Unicode Cf characters are escaped without breaking clean ["a","b"] output.
+func formatTriggerQuotedList(vals []string) string {
+	if len(vals) == 0 {
+		return "[]"
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, v := range vals {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%q", v)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// escapeTriggerJSONBytes rewrites DEL (0x7f), C1 controls (0x80..0x9f),
+// Unicode Cf format characters (including bidirectional overrides), U+2028 and
+// U+2029 line/paragraph separators, and non-newline C0 controls inside indented
+// JSON output to standard RFC 8259 \uXXXX escapes (or UTF-16 surrogate pairs
+// above U+FFFF), and normalises invalid UTF-8 bytes to \ufffd. This keeps JSON
+// output valid while preventing raw terminal control or bidi injection.
+func escapeTriggerJSONBytes(encoded []byte) string {
+	needsEscape := false
+	for i := 0; i < len(encoded); {
+		r, size := utf8.DecodeRune(encoded[i:])
+		if (r == utf8.RuneError && size <= 1) ||
+			(r < 0x20 && r != '\n') ||
+			r == 0x7f ||
+			(r >= 0x80 && r <= 0x9f) ||
+			r == '\u2028' ||
+			r == '\u2029' ||
+			unicode.Is(unicode.Cf, r) {
+			needsEscape = true
+			break
+		}
+		i += size
+	}
+	if !needsEscape {
+		return string(encoded)
+	}
+	var b strings.Builder
+	b.Grow(len(encoded) + 16)
+	for i := 0; i < len(encoded); {
+		r, size := utf8.DecodeRune(encoded[i:])
+		switch {
+		case r == utf8.RuneError && size <= 1:
+			b.WriteString(`\ufffd`)
+		case (r < 0x20 && r != '\n') || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == '\u2028' || r == '\u2029' || unicode.Is(unicode.Cf, r):
+			if r <= 0xffff {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			} else {
+				r1, r2 := utf16.EncodeRune(r)
+				fmt.Fprintf(&b, `\u%04x\u%04x`, r1, r2)
+			}
+		default:
+			b.WriteRune(r)
+		}
+		i += size
+	}
+	return b.String()
+}
+
+func formatTriggerSource(src hubclient.TriggerSourceSpec, maxIDLen int) string {
+	if src.ID == "" {
+		return src.Kind
+	}
+	id := src.ID
+	if maxIDLen > 0 && len(id) > maxIDLen {
+		id = id[:maxIDLen]
+	}
+	return src.Kind + ":" + id
 }
 
 func triggerStatusLabel(status, reason string) string {
@@ -827,6 +947,7 @@ func triggerStatusLabel(status, reason string) string {
 
 func init() {
 	rootCmd.AddCommand(triggerCmd)
+	triggerCmd.PersistentFlags().BoolVar(&triggerOutputJSON, "json", false, "Output in JSON format")
 
 	triggerCmd.AddCommand(triggerCreateCmd)
 	triggerCmd.AddCommand(triggerGetCmd)
@@ -835,6 +956,7 @@ func init() {
 	triggerCmd.AddCommand(triggerPauseCmd)
 	triggerCmd.AddCommand(triggerResumeCmd)
 	triggerCmd.AddCommand(triggerHistoryCmd)
+	triggerCmd.AddCommand(triggerEventCmd)
 	triggerCmd.AddCommand(triggerWebhookCmd)
 
 	triggerCreateCmd.Flags().StringVar(&triggerName, "name", "", "Trigger name (required)")

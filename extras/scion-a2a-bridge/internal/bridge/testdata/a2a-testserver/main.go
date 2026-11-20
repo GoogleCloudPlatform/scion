@@ -280,6 +280,7 @@ func (m *mockProdHubClient) ScheduledEvents(string) hubclient.ScheduledEventServ
 func (m *mockProdHubClient) Schedules(string) hubclient.ScheduleService               { return nil }
 func (m *mockProdHubClient) WebhookEndpoints(string) hubclient.WebhookEndpointService { return nil }
 func (m *mockProdHubClient) Triggers(string) hubclient.TriggerService                 { return nil }
+func (m *mockProdHubClient) TriggerEvents(string) hubclient.TriggerEventService       { return nil }
 func (m *mockProdHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService   { return nil }
 func (m *mockProdHubClient) Messages() hubclient.MessageService                       { return nil }
 func (m *mockProdHubClient) Conversations() hubclient.ConversationService             { return nil }

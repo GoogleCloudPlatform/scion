@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -70,6 +71,15 @@ type TriggerService interface {
 	History(ctx context.Context, id string, opts *ListTriggerFiresOptions) (*ListTriggerFiresResponse, error)
 }
 
+// TriggerEventService handles read-only trigger event operations scoped to a project.
+type TriggerEventService interface {
+	// Get retrieves a trigger event by ID, including headers and JSON payload.
+	Get(ctx context.Context, id string) (*TriggerEventDetail, error)
+
+	// List returns trigger events matching the filter criteria.
+	List(ctx context.Context, opts *ListTriggerEventsOptions) (*ListTriggerEventsResponse, error)
+}
+
 type webhookEndpointService struct {
 	c         *client
 	projectID string
@@ -88,11 +98,32 @@ func (s *triggerService) basePath() string {
 	return fmt.Sprintf("/api/v1/projects/%s/triggers", url.PathEscape(s.projectID))
 }
 
+type triggerEventService struct {
+	c         *client
+	projectID string
+}
+
+func (s *triggerEventService) basePath() string {
+	return fmt.Sprintf("/api/v1/projects/%s/trigger-events", url.PathEscape(s.projectID))
+}
+
+// WebhookEndpointDefaultTriggerSpec configures an optional default message
+// trigger created in the same transaction as a webhook endpoint.
+type WebhookEndpointDefaultTriggerSpec struct {
+	AgentID   string `json:"agentId,omitempty"`
+	AgentName string `json:"agentName,omitempty"`
+	ToSelf    bool   `json:"toSelf,omitempty"`
+	Message   string `json:"message"`
+	Interrupt bool   `json:"interrupt,omitempty"`
+	Wake      bool   `json:"wake,omitempty"`
+}
+
 // CreateWebhookEndpointRequest is the client-side request for creating a webhook endpoint.
 type CreateWebhookEndpointRequest struct {
-	Name          string `json:"name"`
-	Description   string `json:"description,omitempty"`
-	SignatureMode string `json:"signatureMode,omitempty"`
+	Name           string                             `json:"name"`
+	Description    string                             `json:"description,omitempty"`
+	SignatureMode  string                             `json:"signatureMode,omitempty"`
+	DefaultTrigger *WebhookEndpointDefaultTriggerSpec `json:"defaultTrigger,omitempty"`
 }
 
 // WebhookEndpoint represents a webhook endpoint returned by GET and LIST routes.
@@ -116,7 +147,9 @@ type WebhookEndpoint struct {
 // WebhookEndpointCreated is returned once when creating a webhook endpoint.
 type WebhookEndpointCreated struct {
 	WebhookEndpoint
-	Secret string `json:"secret"`
+	Secret    string   `json:"secret"`
+	TriggerID string   `json:"triggerId,omitempty"`
+	Trigger   *Trigger `json:"trigger,omitempty"`
 }
 
 // ListWebhookEndpointsOptions configures webhook endpoint listing.
@@ -279,6 +312,52 @@ type ListTriggerFiresResponse struct {
 	ServerTime time.Time     `json:"serverTime"`
 }
 
+// TriggerEventSummary represents a trigger event summary row returned by GET /trigger-events.
+type TriggerEventSummary struct {
+	ID           string              `json:"id"`
+	ProjectID    string              `json:"projectId"`
+	Source       TriggerSourceSpec   `json:"source"`
+	Type         string              `json:"type"`
+	Subject      string              `json:"subject"`
+	DedupKey     string              `json:"dedupKey"`
+	OccurredAt   time.Time           `json:"occurredAt"`
+	ReceivedAt   time.Time           `json:"receivedAt"`
+	Attributes   map[string]string   `json:"attributes,omitempty"`
+	Lists        map[string][]string `json:"lists,omitempty"`
+	PayloadBytes int                 `json:"payloadBytes"`
+	Status       string              `json:"status"`
+	MatchCount   int                 `json:"matchCount"`
+	FireCount    int                 `json:"fireCount"`
+	Error        string              `json:"error,omitempty"`
+	ProcessedAt  *time.Time          `json:"processedAt,omitempty"`
+	CreatedAt    time.Time           `json:"createdAt"`
+}
+
+// TriggerEventDetail represents a trigger event detail returned by GET /trigger-events/{id}.
+type TriggerEventDetail struct {
+	TriggerEventSummary
+	Headers map[string]string `json:"headers,omitempty"`
+	Payload json.RawMessage   `json:"payload,omitempty"`
+}
+
+// ListTriggerEventsOptions configures trigger event listing.
+type ListTriggerEventsOptions struct {
+	Source   string
+	SourceID string
+	Status   string
+	Since    *time.Time
+	Page     apiclient.PageOptions
+}
+
+// ListTriggerEventsResponse is the response from GET /trigger-events.
+type ListTriggerEventsResponse struct {
+	Scope      string                `json:"scope,omitempty"`
+	Events     []TriggerEventSummary `json:"events"`
+	NextCursor string                `json:"nextCursor,omitempty"`
+	TotalCount int                   `json:"totalCount,omitempty"`
+	ServerTime time.Time             `json:"serverTime"`
+}
+
 func (s *webhookEndpointService) Create(ctx context.Context, req *CreateWebhookEndpointRequest) (*WebhookEndpointCreated, error) {
 	resp, err := s.c.post(ctx, s.basePath(), req, nil)
 	if err != nil {
@@ -408,4 +487,36 @@ func (s *triggerService) History(ctx context.Context, id string, opts *ListTrigg
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ListTriggerFiresResponse](resp)
+}
+
+func (s *triggerEventService) Get(ctx context.Context, id string) (*TriggerEventDetail, error) {
+	resp, err := s.c.get(ctx, s.basePath()+"/"+url.PathEscape(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[TriggerEventDetail](resp)
+}
+
+func (s *triggerEventService) List(ctx context.Context, opts *ListTriggerEventsOptions) (*ListTriggerEventsResponse, error) {
+	query := url.Values{}
+	if opts != nil {
+		if opts.Source != "" {
+			query.Set("source", opts.Source)
+		}
+		if opts.SourceID != "" {
+			query.Set("sourceId", opts.SourceID)
+		}
+		if opts.Status != "" {
+			query.Set("status", opts.Status)
+		}
+		if opts.Since != nil {
+			query.Set("since", opts.Since.UTC().Format(time.RFC3339Nano))
+		}
+		opts.Page.ToQuery(query)
+	}
+	resp, err := s.c.getWithQuery(ctx, s.basePath(), query, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ListTriggerEventsResponse](resp)
 }

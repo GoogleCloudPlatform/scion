@@ -92,8 +92,12 @@ var windowsAllowed = map[string]bool{
 	"trigger.pause":          true,
 	"trigger.resume":         true,
 	"trigger.history":        true,
+	"trigger.event":          true,
+	"trigger.event.list":     true,
+	"trigger.event.get":      true,
 	"trigger.webhook":        true,
 	"trigger.webhook.create": true,
+	"trigger.webhook.get":    true,
 	"trigger.webhook.list":   true,
 	"trigger.webhook.delete": true,
 

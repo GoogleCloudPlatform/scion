@@ -57,6 +57,61 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 		assert.NotContains(t, epMap, forbidden, "WebhookEndpointResponse must not expose %q", forbidden)
 	}
 
+	bareCreatedRaw, err := json.Marshal(WebhookEndpointCreatedResponse{
+		WebhookEndpointResponse: epResp,
+		Secret:                  "sec-once",
+	})
+	require.NoError(t, err)
+	var bareCreatedMap map[string]any
+	require.NoError(t, json.Unmarshal(bareCreatedRaw, &bareCreatedMap))
+	assert.NotContains(t, bareCreatedMap, "triggerId", "bare WebhookEndpointCreatedResponse must omit triggerId")
+	assert.NotContains(t, bareCreatedMap, "trigger", "bare WebhookEndpointCreatedResponse must omit trigger")
+
+	trRespForCreated := buildTriggerResponse(store.Trigger{
+		ID:         "tr-default-1",
+		ProjectID:  "proj-1",
+		Name:       "deploy-hook",
+		Status:     store.TriggerStatusActive,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   "ep-1",
+		MatchTypes: []string{"webhook.received"},
+		ActionType: "message",
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind: "user",
+			InitiatorPrincipalID:   "user-1",
+			AuthorizationRevision:  1,
+		},
+		AuthorityCeiling: store.EffectCeiling{
+			Kind:          store.EffectCeilingBounded,
+			Version:       1,
+			PermissionIDs: []string{"trigger.create"},
+		},
+		Fixture: store.FixtureProvenance{
+			RootID:   "ti-secret-id",
+			IssuerID: "ti-issuer-id",
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	withTriggerRaw, err := json.Marshal(WebhookEndpointCreatedResponse{
+		WebhookEndpointResponse: epResp,
+		Secret:                  "sec-once",
+		TriggerID:               trRespForCreated.ID,
+		Trigger:                 &trRespForCreated,
+	})
+	require.NoError(t, err)
+	var withTriggerMap map[string]any
+	require.NoError(t, json.Unmarshal(withTriggerRaw, &withTriggerMap))
+	assert.Equal(t, "tr-default-1", withTriggerMap["triggerId"])
+	nestedTrMap, ok := withTriggerMap["trigger"].(map[string]any)
+	require.True(t, ok, "WebhookEndpointCreatedResponse.trigger must serialize as an object")
+	for _, forbidden := range []string{
+		"initiatorPrincipalKind", "initiatorPrincipalId",
+		"authorityCeiling", "fixture", "actionPayload", "secret",
+	} {
+		assert.NotContains(t, nestedTrMap, forbidden, "nested TriggerResponse must not expose %q", forbidden)
+	}
+
 	trResp := buildTriggerResponse(store.Trigger{
 		ID:             "tr-1",
 		ProjectID:      "proj-1",

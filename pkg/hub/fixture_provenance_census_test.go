@@ -183,6 +183,8 @@ var fixtureCreateSites = []fixtureCreateSite{
 		"trigger API create; stampTrigger from the request principal, in the create transaction"},
 	{"pkg/hub/handlers_webhook_endpoints.go", "tx.CreateWebhookEndpoint(ctx, &ep)", true,
 		"webhook endpoint API create; stampWebhookEndpoint from the request principal, in the create transaction"},
+	{"pkg/hub/handlers_webhook_endpoints.go", "tx.CreateTrigger(ctx, defaultTr)", true,
+		"webhook endpoint API one-call defaultTrigger create; stampTrigger from the request principal, in the create transaction"},
 
 	// ── System paths: no principal, so never fixture-rooted ───────────
 	{"pkg/hub/flat_runtime_brokers.go", "s.store.CreateProject(ctx, p)", false,

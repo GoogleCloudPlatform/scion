@@ -73,7 +73,7 @@
 - [schedule.event.fire](#scheduleeventfire) — Fire a scheduled message, dispatch_agent or exec event, one-shot or materialized from a recurring schedule, under the authority its revision recorded. An exec fire (ptone/scion#7883) re-checks agent.attach on the target under the revision's ceiling before its one exec-start; exec-start and exec-status are reached only from the scheduler's exec fire, run tracker and sweeper, never from a request
 - [webhookendpoint.list](#webhookendpointlist) — List webhook endpoints in a project. Agent callers see only webhook endpoints they own (scope=caller)
 - [webhookendpoint.read](#webhookendpointread) — Read a webhook endpoint in a project (never returns the signing secret). An agent caller reading another principal's endpoint receives the same 404 as not-found
-- [webhookendpoint.create](#webhookendpointcreate) — Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row
+- [webhookendpoint.create](#webhookendpointcreate) — Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row. When defaultTrigger is supplied, also creates a default message trigger in the same transaction under trigger.create, webhook_endpoint.read, and message-target authoring checks
 - [webhookendpoint.delete](#webhookendpointdelete) — Delete a webhook endpoint, removing its hub-scoped internal signing secret rows and pausing dependent triggers with status_reason=source_deleted. An agent caller targeting another principal's endpoint receives the same 404 as not-found
 - [trigger.list](#triggerlist) — List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)
 - [trigger.read](#triggerread) — Read a trigger definition, a trigger's fire history, or a trigger event in a project. An agent caller reading an event it neither received on its own endpoint nor fired through a trigger it holds receives the same 404 as not-found
@@ -3206,7 +3206,7 @@
 
 **Domain:** webhookendpoint
 
-**Description:** Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row
+**Description:** Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row. When defaultTrigger is supplied, also creates a default message trigger in the same transaction under trigger.create, webhook_endpoint.read, and message-target authoring checks
 
 ### Entry Points
 
@@ -3226,6 +3226,11 @@
 
 **Effects:** `create-resource`
 
+### Delegation
+
+- **Kind:** `non_amplification`
+- Creating a bare webhook endpoint records only ownership and grants no deferred authority. When defaultTrigger is supplied, the default message trigger records the caller's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) in the same transaction, identical to trigger.create
+
 ### Audit
 
 - **Event Type:** `webhook_endpoint_create`
@@ -3233,12 +3238,13 @@
 - **After Fields:** endpoint_id
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `not_found`
 
 ### Tests
 
 - `pkg/hub:TestTriggersAuthzMatrix`
 - `pkg/hub:TestWebhookEndpointCRUD_SecretLifecycleAndCascadePause`
+- `pkg/hub:TestWebhookEndpointCreate_DefaultTrigger`
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
