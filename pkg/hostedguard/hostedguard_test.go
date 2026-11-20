@@ -174,7 +174,8 @@ func TestCheckMemberConfig_Env(t *testing.T) {
 		{name: "cli telemetry", env: map[string]string{"SCION_TELEMETRY_ENABLED": "false"}},
 		{name: "codex liveness depth", env: map[string]string{"SCION_LIVENESS_HARNESS_ROOT_DEPTH": "2"}},
 		{name: "exempt name still needs a literal value", env: map[string]string{"SCION_LOG_LEVEL": "${LVL}"}, wantEntry: "SCION_LOG_LEVEL", wantReason: "host environment references"},
-		{name: "exempt name empty", env: map[string]string{"SCION_TELEMETRY_ENABLED": ""}, wantEntry: "SCION_TELEMETRY_ENABLED", wantReason: "empty passthrough"},
+		{name: "exempt name may be empty", env: map[string]string{"SCION_AUTO_EXPOSE_PORTS_LIST": ""}},
+		{name: "exempt names may be empty", env: map[string]string{"SCION_TELEMETRY_ENABLED": "", "SCION_LOG_LEVEL": ""}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -32,9 +32,6 @@ const hostedEnvSecret = "p3-secret-value"
 var hostedRefusedCreateConfig = []struct {
 	name, fragment, wantPrefix string
 }{
-	{"config env reference", `"config": {"env": ["K=${` + hostedEnvSecret + `}"]}`, `env "K": host environment references`},
-	{"config env empty", `"config": {"env": ["AWS_SECRET_ACCESS_KEY="]}`, `env "AWS_SECRET_ACCESS_KEY": host environment references`},
-	{"config env reserved", `"config": {"env": ["SCION_HUB_ENDPOINT=http://` + hostedEnvSecret + `"]}`, `env "SCION_HUB_ENDPOINT": names reserved`},
 	{"inline env reference", `"inlineConfig": {"env": {"K": "a$` + hostedEnvSecret + `"}}`, `env "K": host environment references`},
 	{"inline env empty", `"inlineConfig": {"env": {"GITHUB_TOKEN": ""}}`, `env "GITHUB_TOKEN": host environment references`},
 	{"inline env reserved", `"inlineConfig": {"env": {"GCE_METADATA_HOST": "` + hostedEnvSecret + `"}}`, `env "GCE_METADATA_HOST": names reserved`},
@@ -68,8 +65,8 @@ func assertHostedEnvRefusal(t *testing.T, w *httptest.ResponseRecorder, wantPref
 }
 
 // A hosted broker refuses member env that reaches its own environment or
-// names reserved variables, and a member hub block, at create (request
-// config env and inline config), before anything starts. No volume is in
+// names reserved variables, and a member hub block, at create (inline
+// config), before anything starts. No volume is in
 // these requests: the check runs without one.
 func TestCreateAgent_HostedRefusesMemberEnvAndHub(t *testing.T) {
 	for _, tc := range hostedRefusedCreateConfig {
@@ -108,7 +105,7 @@ func TestCreateAgent_WorkstationKeepsMemberEnvAndHub(t *testing.T) {
 func TestCreateAgent_HostedAcceptsLiteralMemberEnv(t *testing.T) {
 	mgr := &mockManager{}
 	srv := newTestServerWithManager(t, mgr)
-	body := `{"name": "a1", "config": {"env": ["FOO=bar", "NOEQUALS"]}, "inlineConfig": {"env": {` +
+	body := `{"name": "a1", "inlineConfig": {"env": {` +
 		`"PLAIN": "x", "SCION_AUTO_EXPOSE_PORTS": "true", "SCION_LOG_LEVEL": "debug", "SCION_TELEMETRY_ENABLED": "false"}}}`
 	w := postAgentRequest(t, srv, "/api/v1/agents", body)
 	if w.Code >= 400 {
@@ -147,18 +144,14 @@ func TestStartAgent_HostedRefusesInlineMemberEnvAndHub(t *testing.T) {
 	}
 }
 
-func TestRequestConfigEnv(t *testing.T) {
-	got := requestConfigEnv(&CreateAgentConfig{Env: []string{"A=1", "B=", "C=x=y", "NOEQ"}})
-	want := map[string]string{"A": "1", "B": "", "C": "x=y"}
-	if len(got) != len(want) {
-		t.Fatalf("requestConfigEnv = %v, want %v", got, want)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("%s = %q, want %q", k, got[k], v)
-		}
-	}
-	if requestConfigEnv(nil) != nil {
-		t.Error("nil config should give nil env")
+// A create's config env is not checked by hostedguard: its values are used
+// literally, and the broker handles the reserved names it reads from it on
+// its own (clone URL, token remote, auth token, the native Cloud Run marker).
+func TestCreateAgent_HostedLeavesRequestConfigEnvToTheBroker(t *testing.T) {
+	mgr := &mockManager{}
+	srv := newTestServerWithManager(t, mgr)
+	w := postAgentRequest(t, srv, "/api/v1/agents", `{"name": "a1", "config": {"env": ["K=${X}", "E="]}}`)
+	if w.Code >= 400 {
+		t.Fatalf("status = %d, want success: %s", w.Code, w.Body.String())
 	}
 }

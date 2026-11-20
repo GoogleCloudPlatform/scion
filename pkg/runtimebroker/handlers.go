@@ -1077,7 +1077,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeControlPathRefusal(w, err)
 			return
 		}
-		// On a hosted broker, member-written request config (volumes, env,
+		// On a hosted broker, member-written request config (volumes and
 		// inline config) may not name host resources. An unresolvable
 		// profile fails the create later; the default runtime's name is
 		// used for this check then.
@@ -1089,7 +1089,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			})
 			return name
 		}
-		if err := s.checkHostedRequestConfig(runtimeName, &api.ScionConfig{Volumes: cfgVols, Env: requestConfigEnv(req.Config)}, req.InlineConfig); err != nil {
+		if err := s.checkHostedRequestConfig(runtimeName, &api.ScionConfig{Volumes: cfgVols}, req.InlineConfig); err != nil {
 			span.SetStatus(codes.Error, hostedguard.ErrorCode)
 			writeHostedConfigRefusal(w, err)
 			return

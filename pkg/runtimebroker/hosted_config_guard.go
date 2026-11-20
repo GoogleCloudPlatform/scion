@@ -17,15 +17,17 @@ package runtimebroker
 import (
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 )
 
 // checkHostedRequestConfig refuses member-written config in a create or
-// start request (a create's config volumes and env and its inline config, a
-// start's inline config) on a hosted Runtime Broker. runtimeName returns the
+// start request (a create's config volumes and its inline config, a start's
+// inline config) on a hosted Runtime Broker. A create's config env is not
+// checked: its values are used literally (never expanded or passed through
+// from the broker's environment), and the broker drops or refuses the
+// reserved names it must not take from it where it reads them. runtimeName returns the
 // runtime the agent will run in; it is called only when there are volumes to
 // check. A workstation broker checks nothing.
 func (s *Server) checkHostedRequestConfig(runtimeName func() string, cfgs ...*api.ScionConfig) error {
@@ -65,21 +67,6 @@ func anyVolumes(cfgs []*api.ScionConfig) bool {
 		}
 	}
 	return false
-}
-
-// requestConfigEnv returns a create request config's "KEY=VALUE" env entries
-// as a map, skipping entries without "=" as the start context does.
-func requestConfigEnv(cfg *CreateAgentConfig) map[string]string {
-	if cfg == nil || len(cfg.Env) == 0 {
-		return nil
-	}
-	env := make(map[string]string, len(cfg.Env))
-	for _, e := range cfg.Env {
-		if k, v, ok := strings.Cut(e, "="); ok {
-			env[k] = v
-		}
-	}
-	return env
 }
 
 // writeHostedConfigRefusal writes refused member config as a 400 with the

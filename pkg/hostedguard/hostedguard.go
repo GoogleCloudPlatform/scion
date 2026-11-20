@@ -180,8 +180,10 @@ const envReferenceReason = "host environment references and empty passthrough va
 // or value the Runtime Broker would expand against its own environment
 // ($NAME, ${...}), an empty value (which takes the variable of the same
 // name from the broker's environment), and a name reserved for scion's own
-// variables are refused. It returns nil or a *RefusalError for the first
-// refused name, in name order. The message names the env name, never the
+// variables are refused. A reserved name member config may set may also be
+// empty (the configure page clears an auto-expose key that way): it can
+// only take the broker's own setting of the same scion variable. It returns
+// nil or a *RefusalError for the first refused name, in name order. The message names the env name, never the
 // value.
 func CheckMemberEnv(env map[string]string, o Origin) error {
 	if len(env) == 0 {
@@ -196,7 +198,7 @@ func CheckMemberEnv(env map[string]string, o Origin) error {
 		v := env[k]
 		var reason string
 		switch {
-		case expandsHostEnv(k) || expandsHostEnv(v) || v == "":
+		case expandsHostEnv(k) || expandsHostEnv(v) || (v == "" && !memberSettableReservedEnv[k]):
 			reason = fmt.Sprintf(envReferenceReason, o)
 		case IsReservedEnvName(k):
 			reason = fmt.Sprintf("names reserved for scion's own environment variables in %s are not allowed on a hosted server", o)
