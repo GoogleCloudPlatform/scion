@@ -288,6 +288,12 @@ func TestLoadAndReconcileConfig_RefusesDevAuthInHostedMode(t *testing.T) {
 			if !tc.wantRefuse && err != nil {
 				t.Fatalf("loadAndReconcileConfig err = %v", err)
 			}
+			if tc.wantRefuse {
+				return
+			}
+			if cfg == nil {
+				t.Fatal("loadAndReconcileConfig returned a nil config without an error")
+			}
 			if strings.HasPrefix(tc.name, "workstation") && !cfg.Auth.Enabled {
 				t.Errorf("workstation: cfg.Auth.Enabled = false, want dev auth on")
 			}
