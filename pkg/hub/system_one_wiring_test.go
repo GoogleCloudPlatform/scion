@@ -1038,3 +1038,114 @@ func TestHubSystemOneRuntime_ProductionInitHasNoTestingOptions(t *testing.T) {
 	assert.Zero(t, gotOpts, "production Hub initSystemOneRuntime must pass zero testing options")
 	require.NotNil(t, rt)
 }
+
+func TestSystemOneNamedSecret_ProviderPinnedSecretNamePolicyBeforeLookup(t *testing.T) {
+	const (
+		hubID     = "hub-item8-unit"
+		projID    = "proj-item8-id"
+		secretVal = "CANARY_ITEM8_NEVER_READ_8414"
+	)
+	ctx := systemoneruntime.WithEvalProjectID(context.Background(), projID)
+
+	var backendGetCalls atomic.Int32
+	srv := &Server{
+		hubID: hubID,
+		secretBackend: &stubSystemOneSecretBackend{
+			getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+				backendGetCalls.Add(1)
+				return &secret.SecretWithValue{
+					SecretMeta: secret.SecretMeta{
+						Name:       name,
+						SecretType: store.SecretTypeVariable,
+						Scope:      scope,
+						ScopeID:    scopeID,
+						Version:    1,
+					},
+					Value: secretVal,
+				}, nil
+			},
+		},
+	}
+	src := &hubSystemOneCredentialSource{srv: srv}
+
+	// 1. Absent SecretNamePolicy (typesafe) -> refused BEFORE SecretBackend.Get across all scopes.
+	for _, sc := range []string{
+		systemoneprovider.SecretScopeHub,
+		systemoneprovider.SecretScopeProject,
+		systemoneprovider.SecretScopeProjectOrHub,
+	} {
+		backendGetCalls.Store(0)
+		tok, err := src.APIKeyToken(ctx, systemoneruntime.Instance{
+			ID:       "inst-ts-ref",
+			Name:     "ts-ref",
+			Adapter:  "typesafe",
+			Model:    "jev-1.14.0",
+			Endpoint: "https://api.typesafe.ai",
+			Auth: systemoneruntime.InstanceAuth{
+				Kind:       store.SystemOneAuthKindAPIKey,
+				SecretName: "GEMINI_API_KEY",
+			},
+			Options: map[string]string{systemoneprovider.OptionSecretScope: sc},
+			Enabled: true,
+		})
+		assert.Empty(t, tok)
+		require.ErrorIs(t, err, egress.ErrAuth)
+		assert.Zero(t, backendGetCalls.Load(), "SecretBackend.Get must not be called for adapter without SecretNamePolicy (scope=%s)", sc)
+	}
+
+	// 2. Disallowed / case-folded / suffixed / unrelated / infrastructure names on gemini_decisions -> 0 SecretBackend.Get calls across all scopes (including project_or_hub).
+	for _, badName := range []string{
+		"GITHUB_TOKEN",
+		"ANTHROPIC_API_KEY",
+		"gemini_api_key",
+		"GEMINI_API_KEY_2",
+		"MY_GEMINI_API_KEY",
+		SecretKeyUserSigningKey,
+		SecretKeyAgentSigningKey,
+		"systemone.instance.00000000-0000-4000-8000-000000000099",
+		"systemone_instance_other",
+	} {
+		for _, sc := range []string{
+			systemoneprovider.SecretScopeHub,
+			systemoneprovider.SecretScopeProject,
+			systemoneprovider.SecretScopeProjectOrHub,
+		} {
+			backendGetCalls.Store(0)
+			tok, err := src.APIKeyToken(ctx, systemoneruntime.Instance{
+				ID:       "inst-gem-bad",
+				Name:     "gem-bad",
+				Adapter:  geminidecisions.AdapterName,
+				Model:    "gemini-decision-1",
+				Endpoint: geminidecisions.DefaultEndpoint,
+				Auth: systemoneruntime.InstanceAuth{
+					Kind:       store.SystemOneAuthKindAPIKey,
+					SecretName: badName,
+				},
+				Options: map[string]string{systemoneprovider.OptionSecretScope: sc},
+				Enabled: true,
+			})
+			assert.Empty(t, tok, "name=%q scope=%s", badName, sc)
+			require.ErrorIs(t, err, egress.ErrAuth, "name=%q scope=%s", badName, sc)
+			assert.Zero(t, backendGetCalls.Load(), "SecretBackend.Get must never be called for disallowed name %q (scope=%s)", badName, sc)
+		}
+	}
+
+	// 3. Exact allowed name ("GEMINI_API_KEY") on gemini_decisions succeeds.
+	backendGetCalls.Store(0)
+	tok, err := src.APIKeyToken(ctx, systemoneruntime.Instance{
+		ID:       "inst-gem-ok",
+		Name:     "gem-ok",
+		Adapter:  geminidecisions.AdapterName,
+		Model:    "gemini-decision-1",
+		Endpoint: geminidecisions.DefaultEndpoint,
+		Auth: systemoneruntime.InstanceAuth{
+			Kind:       store.SystemOneAuthKindAPIKey,
+			SecretName: "GEMINI_API_KEY",
+		},
+		Options: map[string]string{systemoneprovider.OptionSecretScope: systemoneprovider.SecretScopeHub},
+		Enabled: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, secretVal, tok)
+	assert.Equal(t, int32(1), backendGetCalls.Load())
+}

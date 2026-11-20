@@ -23,6 +23,7 @@ package provider
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/metrics"
@@ -417,4 +418,43 @@ type InstanceValidator interface {
 // gemini_decisions; PV3 Addendum F §§F2, F4).
 type DefaultSecretRefer interface {
 	DefaultSecretRefName() string
+}
+
+// SecretNamePolicy is an optional SPI-adjacent extension implemented by
+// adapters that permit named Hub/project secret references (secret_ref),
+// returning the exact case-sensitive secret key names approved for this
+// provider (PV3 Addendum F §F10). Adapters that do not implement
+// SecretNamePolicy (or return no valid names) cannot use secret_ref.
+type SecretNamePolicy interface {
+	AllowedSecretNames() []string
+}
+
+// AllowedSecretNamesFor returns a deduplicated copy of the valid, exact-case
+// secret names declared by adapter's SecretNamePolicy, or nil when adapter is
+// nil or does not implement SecretNamePolicy.
+func AllowedSecretNamesFor(adapter Adapter) []string {
+	if adapter == nil {
+		return nil
+	}
+	pol, ok := adapter.(SecretNamePolicy)
+	if !ok {
+		return nil
+	}
+	raw := pol.AllowedSecretNames()
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, name := range raw {
+		if !IsValidSecretRefName(name) {
+			continue
+		}
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

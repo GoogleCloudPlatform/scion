@@ -217,12 +217,13 @@ func (s *Server) rebuildSystemOneRuntimeLocked() {
 	credSrc := &hubSystemOneCredentialSource{srv: s}
 	rt := systemoneruntime.New(
 		systemoneruntime.Config{
-			Registry:    reg,
-			Instances:   &hubSystemOneInstanceSource{srv: s},
-			Credentials: credSrc.APIKeyToken,
-			TokenSource: credSrc.GoogleAccessToken,
-			MaxEvalTime: resolveSystemOneMaxEvalTime(s.config),
-			Logger:      logging.Subsystem("hub.system-one"),
+			Registry:           reg,
+			Instances:          &hubSystemOneInstanceSource{srv: s},
+			Credentials:        credSrc.APIKeyToken,
+			TokenSource:        credSrc.GoogleAccessToken,
+			AllowedSecretNames: s.allowedSecretNamesFor,
+			MaxEvalTime:        resolveSystemOneMaxEvalTime(s.config),
+			Logger:             logging.Subsystem("hub.system-one"),
 		},
 		s.systemOneRuntimeOpts...,
 	)
@@ -486,7 +487,7 @@ func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst sys
 		if c.srv != nil && !c.srv.isPinnedInstanceEndpointAllowed(inst.Adapter, inst.Endpoint) {
 			return "", egress.ErrAuth
 		}
-		return c.resolveNamedSecretToken(ctx, secretName, secScope)
+		return c.resolveNamedSecretToken(ctx, inst.Adapter, inst.Auth.SecretName, secScope)
 	}
 	if secretName == "" || !strings.HasPrefix(secretName, systemOneSecretPrefix) {
 		return "", egress.ErrAuth
@@ -514,7 +515,26 @@ func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst sys
 	return sv.Value, nil
 }
 
-func (c *hubSystemOneCredentialSource) resolveNamedSecretToken(ctx context.Context, secretName, secScope string) (string, error) {
+// allowedSecretNamesFor is the single Hub extension point returning the exact,
+// case-sensitive named-secret keys permitted for adapter via
+// provider.SecretNamePolicy (PV3 Addendum F §F10). Adapters without
+// SecretNamePolicy return nil (failing closed).
+func (s *Server) allowedSecretNamesFor(adapter systemoneprovider.Adapter) []string {
+	base := systemoneprovider.AllowedSecretNamesFor(adapter)
+	if len(base) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(base))
+	for _, name := range base {
+		if isSystemOneReservedSecretKey(name) || isHubInfrastructureSecretKey(name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+func (c *hubSystemOneCredentialSource) resolveNamedSecretToken(ctx context.Context, adapterName, secretName, secScope string) (string, error) {
 	if !systemoneprovider.IsValidSecretRefName(secretName) ||
 		isSystemOneReservedSecretKey(secretName) ||
 		isHubInfrastructureSecretKey(secretName) {
@@ -523,7 +543,14 @@ func (c *hubSystemOneCredentialSource) resolveNamedSecretToken(ctx context.Conte
 	if !systemoneprovider.IsValidSecretRefScope(secScope) {
 		return "", egress.ErrAuth
 	}
-	if c.srv == nil || c.srv.secretBackend == nil {
+	if c.srv == nil {
+		return "", egress.ErrAuth
+	}
+	adapter, ok := c.srv.SystemOneProviderRegistry().Lookup(strings.TrimSpace(adapterName))
+	if !ok || !slices.Contains(c.srv.allowedSecretNamesFor(adapter), secretName) {
+		return "", egress.ErrAuth
+	}
+	if c.srv.secretBackend == nil {
 		return "", egress.ErrCredentialUnavailable
 	}
 

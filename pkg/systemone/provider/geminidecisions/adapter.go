@@ -81,9 +81,11 @@ var confidenceMetricDecl = provider.MetricDecl{
 type Adapter struct{}
 
 var (
-	_ provider.Adapter           = (*Adapter)(nil)
-	_ provider.EndpointDefaulter = (*Adapter)(nil)
-	_ provider.InstanceValidator = (*Adapter)(nil)
+	_ provider.Adapter            = (*Adapter)(nil)
+	_ provider.EndpointDefaulter  = (*Adapter)(nil)
+	_ provider.InstanceValidator  = (*Adapter)(nil)
+	_ provider.DefaultSecretRefer = (*Adapter)(nil)
+	_ provider.SecretNamePolicy   = (*Adapter)(nil)
 )
 
 // New constructs a Gemini Decision 1 provider Adapter.
@@ -111,6 +113,12 @@ func (a *Adapter) DefaultEndpoint() string {
 // API key (PV3 Addendum F §§F2, F4).
 func (a *Adapter) DefaultSecretRefName() string {
 	return provider.DefaultGeminiAPIKeySecretName
+}
+
+// AllowedSecretNames returns the provider-pinned named-secret allowlist for
+// gemini_decisions: ["GEMINI_API_KEY"] (PV3 Addendum F §F10).
+func (a *Adapter) AllowedSecretNames() []string {
+	return []string{provider.DefaultGeminiAPIKeySecretName}
 }
 
 // ValidateInstance checks Gemini-specific instance configuration (requiring a

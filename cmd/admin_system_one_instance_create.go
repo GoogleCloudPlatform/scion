@@ -63,6 +63,9 @@ When --auth-kind is api_key (the default), two credential modes are supported
      or with --key-stdin) or --key-file <path>. Passing secret values via
      positional arguments, flags, or process environment variables is refused.
   2. Named Hub/project secret reference (--secret-name / --secret-scope):
+     - Supported only on adapters that declare a provider secret-name policy:
+       gemini_decisions permits GEMINI_API_KEY (exact case-sensitive match;
+       typesafe does not support named secret references).
      - On gemini_decisions, omitting --key-stdin and --key-file defaults to
        --secret-name GEMINI_API_KEY --secret-scope project_or_hub.
      - --secret-scope selects hub, project, or project_or_hub (default:
@@ -167,7 +170,7 @@ func init() {
 	f.StringVar(&adminSystemOneCreateOpts.authKind, "auth-kind", "api_key", "Authentication kind (api_key or google_access_token)")
 	f.StringArrayVar(&adminSystemOneCreateOpts.authScopes, "auth-scope", nil, "OAuth2 scope URL for --auth-kind google_access_token (repeatable; required for google_access_token; must start with https://www.googleapis.com/auth/)")
 	f.StringVar(&adminSystemOneCreateOpts.quotaProject, "quota-project", "", "Optional GCP billing/quota project ID for --auth-kind google_access_token (sent as x-goog-user-project; required only for authorized_user ADC)")
-	f.StringVar(&adminSystemOneCreateOpts.secretName, "secret-name", "", "Named Hub/project secret key for --auth-kind api_key (matches ^[A-Za-z_][A-Za-z0-9_]{0,127}$; defaults to GEMINI_API_KEY on gemini_decisions when no inline key is given)")
+	f.StringVar(&adminSystemOneCreateOpts.secretName, "secret-name", "", "Provider-approved named Hub/project secret key for --auth-kind api_key (exact case-sensitive match; gemini_decisions permits GEMINI_API_KEY)")
 	f.StringVar(&adminSystemOneCreateOpts.secretScope, "secret-scope", "", "Named-secret lookup scope for --auth-kind api_key: hub, project, or project_or_hub (default: project_or_hub)")
 	f.StringVar(&adminSystemOneCreateOpts.keyFile, "key-file", "", "Path to file containing the provider API key (or '-' for stdin)")
 	f.BoolVar(&adminSystemOneCreateOpts.keyStdin, "key-stdin", false, "Read the provider API key from standard input")

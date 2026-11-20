@@ -2744,20 +2744,33 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 		assert.Equal(t, systemoneruntime.ClassFailed, pResp.Class, cr.name)
 		assert.Equal(t, cr.wantReason, pResp.Reason, cr.name)
 		require.NotNil(t, pResp.Evaluation, cr.name)
-		require.Len(t, pResp.Evaluation.Attempts, 1, cr.name)
-		assert.Equal(t, 0, pResp.Evaluation.Attempts[0].Requests, "%s must record 0 provider requests", cr.name)
+		for _, att := range pResp.Evaluation.Attempts {
+			assert.Equal(t, 0, att.Requests, "%s must record 0 provider requests", cr.name)
+		}
 		assert.Zero(t, providerHits.Load(), "httptest provider must receive NO request for %s", cr.name)
 		for _, secretVal := range []string{userSignB64, agentSignB64, projInternalCanary, hubFallbackCanary, ownedKeyCanary} {
 			assert.NotContains(t, pRec.Body.String(), secretVal, cr.name)
 		}
 	}
 
-	// 4. Regression: a previously valid named secret (variable) that later becomes internal fails at the next resolution!
+	// 3b. Even when the secret name IS the provider-approved GEMINI_API_KEY, an internal row in project scope
+	//     is refused at create (400) AND at project_or_hub resolution with NO fallback to a valid Hub GEMINI_API_KEY!
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
-		Name:       "MUTATED_KEY",
+		Name:       "GEMINI_API_KEY",
+		Value:      projInternalCanary,
+		SecretType: store.SecretTypeInternal,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeProject,
+		ScopeID:    proj.ID,
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
 		Value:      mutatedKeyCanary,
 		SecretType: store.SecretTypeVariable,
-		Target:     "MUTATED_KEY",
+		Target:     "GEMINI_API_KEY",
 		Scope:      store.ScopeHub,
 		ScopeID:    srv.hubID,
 		CreatedBy:  admin.ID,
@@ -2765,13 +2778,55 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 	})
 	require.NoError(t, err)
 
+	for _, sc := range []string{"project", "project_or_hub"} {
+		badCreate := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    "c1-bad-gem-proj-" + strings.ReplaceAll(sc, "_", "-"),
+			"adapter": geminidecisions.AdapterName,
+			"model":   "gemini-decision-1",
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": sc},
+			},
+		})
+		require.Equal(t, http.StatusBadRequest, badCreate.Code, sc)
+	}
+
+	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       "99991007-0000-4000-8000-000000000007",
+		Name:     "crafted-gem-proj-int-no-fb",
+		Adapter:  geminidecisions.AdapterName,
+		Model:    "gemini-decision-1",
+		Endpoint: geminidecisions.DefaultEndpoint,
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "GEMINI_API_KEY"},
+		Options:  map[string]string{systemoneprovider.OptionSecretScope: "project_or_hub"},
+		Enabled:  true,
+	}))
+	providerHits.Store(0)
+	noFBRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/crafted-gem-proj-int-no-fb/probe", map[string]any{
+		"project": proj.ID,
+		"spec":    binSpec,
+		"probe":   map[string]any{"text": "Project internal GEMINI_API_KEY must not fall back to Hub."},
+	})
+	require.Equal(t, http.StatusOK, noFBRec.Code)
+	var noFBResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(noFBRec.Body.Bytes(), &noFBResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, noFBResp.Class)
+	assert.Equal(t, "auth", noFBResp.Reason)
+	require.Len(t, noFBResp.Evaluation.Attempts, 1)
+	assert.Equal(t, 0, noFBResp.Evaluation.Attempts[0].Requests)
+	assert.Zero(t, providerHits.Load())
+
+	// Remove the planted project internal row so we can test valid Hub GEMINI_API_KEY mutating to internal.
+	require.NoError(t, s.DeleteSecret(ctx, "GEMINI_API_KEY", store.ScopeProject, proj.ID))
+
+	// 4. Regression: a previously valid named secret (variable) that later becomes internal fails at the next resolution!
 	mutCreateRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
 		"name":    "c1-mutated-type",
 		"adapter": geminidecisions.AdapterName,
 		"model":   "gemini-decision-1",
 		"auth": map[string]any{
 			"kind":      "api_key",
-			"secretRef": map[string]any{"name": "MUTATED_KEY", "scope": "hub"},
+			"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "hub"},
 		},
 	})
 	require.Equal(t, http.StatusCreated, mutCreateRec.Code, mutCreateRec.Body.String())
@@ -2788,9 +2843,9 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 	assert.Equal(t, int32(1), providerHits.Load())
 
 	// Mutate the stored row's SecretType to internal -> next resolution MUST fail closed with auth and 0 provider requests!
-	_, err = s.UpdateSecretMeta(ctx, "MUTATED_KEY", store.ScopeHub, srv.hubID, &store.SecretMetaUpdate{
+	_, err = s.UpdateSecretMeta(ctx, "GEMINI_API_KEY", store.ScopeHub, srv.hubID, &store.SecretMetaUpdate{
 		SecretType: store.SecretTypeInternal,
-		Target:     "MUTATED_KEY",
+		Target:     "GEMINI_API_KEY",
 		UpdatedBy:  admin.ID,
 	})
 	require.NoError(t, err)
@@ -3193,4 +3248,200 @@ func (noEndpointDefaulterTestAdapter) Validate(systemoneprovider.InstanceView, s
 }
 func (noEndpointDefaulterTestAdapter) Invoke(context.Context, systemoneprovider.Transport, systemoneprovider.InstanceView, systemoneprovider.ModelRequest) (systemoneprovider.ModelResult, error) {
 	return systemoneprovider.ModelResult{}, nil
+}
+
+type countingSecretBackendWrapper struct {
+	secret.SecretBackend
+	getCalls atomic.Int32
+}
+
+func (w *countingSecretBackendWrapper) Get(ctx context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	w.getCalls.Add(1)
+	return w.SecretBackend.Get(ctx, name, scope, scopeID)
+}
+
+func TestSystemOneInstances_Item8_ProviderPinnedSecretNames(t *testing.T) {
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+	countingBackend := &countingSecretBackendWrapper{SecretBackend: localBackend}
+	srv.SetSecretBackend(countingBackend)
+
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-f10-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+	hubAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-f10-hubadmin", store.SystemRoleHubAdmin))
+	require.NoError(t, err)
+
+	var providerHits atomic.Int32
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q_ok":{"type":"noul","noul":0.91,"confidence":0.95}}}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	srv.SetSystemOneRuntimeOptionsForTesting(t,
+		systemoneruntime.WithEgressOptionsForTesting(
+			testSystemOneEgressOptions(t, tlsSrv)...,
+		),
+	)
+
+	proj := &store.Project{
+		ID:      tid("f10-proj"),
+		Name:    "f10-proj",
+		Slug:    "f10-proj",
+		OwnerID: admin.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+
+	const (
+		ghCanary  = "CANARY_F10_GITHUB_TOKEN_8414"
+		antCanary = "CANARY_F10_ANTHROPIC_KEY_8414"
+		gemCanary = "CANARY_F10_GEMINI_KEY_8414"
+	)
+
+	for _, seed := range []struct {
+		name, val, scope, scopeID string
+	}{
+		{"GITHUB_TOKEN", ghCanary, store.ScopeProject, proj.ID},
+		{"GITHUB_TOKEN", ghCanary, store.ScopeHub, srv.hubID},
+		{"ANTHROPIC_API_KEY", antCanary, store.ScopeProject, proj.ID},
+		{"ANTHROPIC_API_KEY", antCanary, store.ScopeHub, srv.hubID},
+		{"GEMINI_API_KEY", gemCanary, store.ScopeHub, srv.hubID},
+	} {
+		_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+			Name:       seed.name,
+			Value:      seed.val,
+			SecretType: store.SecretTypeVariable,
+			Target:     seed.name,
+			Scope:      seed.scope,
+			ScopeID:    seed.scopeID,
+			CreatedBy:  admin.ID,
+			UpdatedBy:  admin.ID,
+		})
+		require.NoError(t, err)
+	}
+	_, err = srv.ensureSigningKey(ctx, SecretKeyUserSigningKey, nil)
+	require.NoError(t, err)
+	_, err = srv.ensureSigningKey(ctx, SecretKeyAgentSigningKey, nil)
+	require.NoError(t, err)
+
+	// 1. Disallowed secret names on gemini_decisions (even with canonical Gemini endpoint) -> 400 at create,
+	//    and crafted rows across hub, project, and project_or_hub -> auth with 0 provider requests and 0 SecretBackend.Get calls!
+	rejectedNames := []string{
+		"GITHUB_TOKEN",
+		"ANTHROPIC_API_KEY",
+		"gemini_api_key",
+		"GEMINI_API_KEY_2",
+		SecretKeyUserSigningKey,
+		SecretKeyAgentSigningKey,
+		"systemone.instance.00000000-0000-4000-8000-000000000088",
+	}
+	for i, badName := range rejectedNames {
+		for j, sc := range []string{"hub", "project", "project_or_hub"} {
+			rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+				"name":     fmt.Sprintf("f10-bad-%d-%d", i, j),
+				"adapter":  geminidecisions.AdapterName,
+				"model":    "gemini-decision-1",
+				"endpoint": geminidecisions.DefaultEndpoint,
+				"auth": map[string]any{
+					"kind":      "api_key",
+					"secretRef": map[string]any{"name": badName, "scope": sc},
+				},
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code, "name=%q scope=%s body=%s", badName, sc, rec.Body.String())
+
+			craftedName := fmt.Sprintf("f10-crafted-%d-%d", i, j)
+			require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+				ID:       fmt.Sprintf("999980%02d-0000-4000-8000-0000000000%02d", i, j),
+				Name:     craftedName,
+				Adapter:  geminidecisions.AdapterName,
+				Model:    "gemini-decision-1",
+				Endpoint: geminidecisions.DefaultEndpoint,
+				Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: badName},
+				Options:  map[string]string{systemoneprovider.OptionSecretScope: sc},
+				Enabled:  true,
+			}))
+
+			providerHits.Store(0)
+			countingBackend.getCalls.Store(0)
+			binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check."}]}`)
+			pRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/"+craftedName+"/probe", map[string]any{
+				"project": proj.ID,
+				"spec":    binSpec,
+				"probe":   map[string]any{"text": "Disallowed name check."},
+			})
+			require.Equal(t, http.StatusOK, pRec.Code)
+			var pResp ProbeSystemOneInstanceResponse
+			require.NoError(t, json.Unmarshal(pRec.Body.Bytes(), &pResp))
+			assert.Equal(t, systemoneruntime.ClassFailed, pResp.Class, "%s/%s", badName, sc)
+			if strings.Contains(badName, ".") {
+				assert.Equal(t, "invalid_request", pResp.Reason)
+			} else {
+				assert.Equal(t, "auth", pResp.Reason, "%s/%s", badName, sc)
+			}
+			assert.Zero(t, providerHits.Load(), "provider must receive 0 requests for %s/%s", badName, sc)
+			assert.Zero(t, countingBackend.getCalls.Load(), "SecretBackend.Get must never be called for %s/%s", badName, sc)
+		}
+	}
+
+	// 2. Adapter without SecretNamePolicy (typesafe) cannot use secret_ref -> 400 at create, auth + 0 Get calls on crafted row.
+	tsCreate := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "f10-ts-ref",
+		"adapter":  jevwire.AdapterNameTypeSafe,
+		"model":    "jev-1.14.0",
+		"endpoint": "https://api.typesafe.ai",
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "hub"},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, tsCreate.Code, tsCreate.Body.String())
+
+	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       "99998099-0000-4000-8000-000000000099",
+		Name:     "f10-crafted-ts",
+		Adapter:  jevwire.AdapterNameTypeSafe,
+		Model:    "jev-1.14.0",
+		Endpoint: "https://api.typesafe.ai",
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "GEMINI_API_KEY"},
+		Options:  map[string]string{systemoneprovider.OptionSecretScope: "hub"},
+		Enabled:  true,
+	}))
+	providerHits.Store(0)
+	countingBackend.getCalls.Store(0)
+	tsProbe := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/f10-crafted-ts/probe", map[string]any{
+		"spec":  json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check."}]}`),
+		"probe": map[string]any{"text": "TypeSafe crafted ref."},
+	})
+	require.Equal(t, http.StatusOK, tsProbe.Code)
+	var tsProbeResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(tsProbe.Body.Bytes(), &tsProbeResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, tsProbeResp.Class)
+	assert.Equal(t, "auth", tsProbeResp.Reason)
+	assert.Zero(t, providerHits.Load())
+	assert.Zero(t, countingBackend.getCalls.Load())
+
+	// 3. Allowed GEMINI_API_KEY on gemini_decisions succeeds at create and probe!
+	okCreate := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "f10-gem-ok",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "hub"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, okCreate.Code, okCreate.Body.String())
+	providerHits.Store(0)
+	okProbe := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/f10-gem-ok/probe", map[string]any{
+		"spec":  json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check."}]}`),
+		"probe": map[string]any{"text": "Allowed GEMINI_API_KEY."},
+	})
+	require.Equal(t, http.StatusOK, okProbe.Code)
+	var okProbeResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(okProbe.Body.Bytes(), &okProbeResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, okProbeResp.Class)
+	assert.Equal(t, int32(1), providerHits.Load())
 }

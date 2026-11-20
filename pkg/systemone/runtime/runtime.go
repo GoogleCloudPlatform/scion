@@ -118,6 +118,11 @@ type Config struct {
 	// google_access_token evaluations fail closed with egress.ErrAuth (0 provider
 	// requests) and never fall back to Credentials.
 	TokenSource CredentialSource
+	// AllowedSecretNames optionally overrides how Runtime resolves the exact
+	// provider-pinned named-secret allowlist for an Adapter. When nil, Runtime
+	// uses provider.AllowedSecretNamesFor (failing closed when an adapter does
+	// not implement provider.SecretNamePolicy).
+	AllowedSecretNames func(adapter provider.Adapter) []string
 	// MaxEvalTime is the runtime-wide evaluation ceiling (server.hub.systemone.maxEvalTime;
 	// defaults to DefaultMaxEvalTime = 3s when <= 0, clamped to MaxAllowedEvalTime = 30s).
 	MaxEvalTime time.Duration
@@ -303,14 +308,15 @@ func markPreCallAuthFailed(ctx context.Context) {
 // Runtime executes compiled System One rules under bounded deadlines and
 // content-free provenance records (runtime-design §§6, 7.1, 7.7, 8.1).
 type Runtime struct {
-	registry        *provider.Registry
-	instances       InstanceSource
-	credentials     CredentialSource
-	tokenSource     CredentialSource
-	maxEvalTime     time.Duration
-	defaultInstance string
-	logger          *slog.Logger
-	egressOpts      []egress.Option
+	registry           *provider.Registry
+	instances          InstanceSource
+	credentials        CredentialSource
+	tokenSource        CredentialSource
+	allowedSecretNames func(provider.Adapter) []string
+	maxEvalTime        time.Duration
+	defaultInstance    string
+	logger             *slog.Logger
+	egressOpts         []egress.Option
 
 	transportMu sync.Mutex
 	transports  map[transportKey]provider.Transport
@@ -331,15 +337,21 @@ func New(cfg Config, opts ...Option) *Runtime {
 		maxEval = clampDuration(cfg.MaxEvalTime, MaxAllowedEvalTime)
 	}
 
+	allowedNames := cfg.AllowedSecretNames
+	if allowedNames == nil {
+		allowedNames = provider.AllowedSecretNamesFor
+	}
+
 	r := &Runtime{
-		registry:        reg,
-		instances:       cfg.Instances,
-		credentials:     cfg.Credentials,
-		tokenSource:     cfg.TokenSource,
-		maxEvalTime:     maxEval,
-		defaultInstance: cfg.DefaultInstance,
-		logger:          logger,
-		transports:      make(map[transportKey]provider.Transport),
+		registry:           reg,
+		instances:          cfg.Instances,
+		credentials:        cfg.Credentials,
+		tokenSource:        cfg.TokenSource,
+		allowedSecretNames: allowedNames,
+		maxEvalTime:        maxEval,
+		defaultInstance:    cfg.DefaultInstance,
+		logger:             logger,
+		transports:         make(map[transportKey]provider.Transport),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -498,6 +510,9 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		return r.finishFailed(ctx, compiled.Kind, start, eval, authReason)
 	}
 	eval.Auth = buildInitialAuthProvenance(inst, selectedScheme)
+	if !r.isNamedSecretAllowedForAdapter(adapter, inst) {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, provider.FailAuth)
+	}
 	if projReason := checkInstanceProjectContext(inst, opts.ProjectID); projReason != "" {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, projReason)
 	}
@@ -722,6 +737,9 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	selectedScheme, authReason := selectInstanceAuthScheme(caps, inst)
 	if authReason != "" {
 		return nil, provider.NewProviderError(authReason, false, 0, 0, "instance auth scheme is not supported")
+	}
+	if !r.isNamedSecretAllowedForAdapter(adapter, inst) {
+		return nil, provider.NewProviderError(provider.FailAuth, false, 0, 0, "secret reference name is not permitted for adapter")
 	}
 	if projReason := checkInstanceProjectContext(inst, EvalProjectIDFromContext(ctx)); projReason != "" {
 		return nil, provider.NewProviderError(projReason, false, 0, 0, "project context is required for project-scoped secret reference")
@@ -1263,6 +1281,17 @@ func checkInstanceProjectContext(inst Instance, projectID string) provider.FailR
 		}
 	}
 	return ""
+}
+
+func (r *Runtime) isNamedSecretAllowedForAdapter(adapter provider.Adapter, inst Instance) bool {
+	_, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
+	if !isNamedRef {
+		return true
+	}
+	if r.allowedSecretNames == nil {
+		return slices.Contains(provider.AllowedSecretNamesFor(adapter), inst.Auth.SecretName)
+	}
+	return slices.Contains(r.allowedSecretNames(adapter), inst.Auth.SecretName)
 }
 
 func requiresPinnedDefaultEndpoint(inst Instance, selectedScheme provider.AuthScheme) bool {

@@ -824,6 +824,11 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		}
 
 		if hasExplicitSecretRef || (apiKey == "" && defaultRefName != "") {
+			allowedSecretNames := s.allowedSecretNamesFor(adapter)
+			if len(allowedSecretNames) == 0 {
+				ValidationError(w, fmt.Sprintf("adapter %q does not support named secret references", adapterName), nil)
+				return
+			}
 			canonEndpoint, pinnedOK := systemoneprovider.MatchesAdapterDefaultEndpoint(adapter, req.Endpoint)
 			if !pinnedOK {
 				ValidationError(w, "custom endpoints require an owned API-key credential; named-secret instances must use the adapter's default endpoint", nil)
@@ -833,8 +838,8 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 			refName := defaultRefName
 			refScope := systemoneprovider.DefaultSecretRefScope
 			if hasExplicitSecretRef {
-				if rawName := strings.TrimSpace(req.Auth.SecretRef.Name); rawName != "" {
-					refName = rawName
+				if req.Auth.SecretRef.Name != "" {
+					refName = req.Auth.SecretRef.Name
 				} else if defaultRefName == "" {
 					refName = ""
 				}
@@ -846,6 +851,10 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 				isSystemOneReservedSecretKey(refName) ||
 				isHubInfrastructureSecretKey(refName) {
 				ValidationError(w, "invalid auth.secretRef.name: must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$ and must not reference reserved or Hub-internal secrets", nil)
+				return
+			}
+			if !slices.Contains(allowedSecretNames, refName) {
+				ValidationError(w, fmt.Sprintf("invalid auth.secretRef.name: secret name is not permitted for adapter %q", adapterName), nil)
 				return
 			}
 			if !systemoneprovider.IsValidSecretRefScope(refScope) {

@@ -117,3 +117,20 @@ func TestCanonicalOrigin_AndMatchesAdapterDefaultEndpoint_F9Table(t *testing.T) 
 		assert.False(t, ok4)
 	})
 }
+
+type stubPolicyAdapter struct {
+	stubNoDefaultAdapter
+	names []string
+}
+
+func (a stubPolicyAdapter) AllowedSecretNames() []string { return a.names }
+
+func TestAllowedSecretNamesFor_ExactPolicy(t *testing.T) {
+	assert.Nil(t, provider.AllowedSecretNamesFor(nil))
+	assert.Nil(t, provider.AllowedSecretNamesFor(stubNoDefaultAdapter{}))
+	assert.Nil(t, provider.AllowedSecretNamesFor(stubPolicyAdapter{names: nil}))
+	assert.Nil(t, provider.AllowedSecretNamesFor(stubPolicyAdapter{names: []string{"1invalid", "systemone.instance.x"}}))
+	assert.Equal(t, []string{"GEMINI_API_KEY"}, provider.AllowedSecretNamesFor(stubPolicyAdapter{
+		names: []string{"GEMINI_API_KEY", "GEMINI_API_KEY", "1invalid"},
+	}))
+}

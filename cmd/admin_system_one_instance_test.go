@@ -1214,6 +1214,7 @@ func TestAdminSystemOne_NamedSecretFlagsOutputAndValidation(t *testing.T) {
 		assert.Contains(t, createHelp, "--secret-name")
 		assert.Contains(t, createHelp, "--secret-scope")
 		assert.Contains(t, createHelp, "project_or_hub")
+		assert.Contains(t, createHelp, "gemini_decisions permits GEMINI_API_KEY")
 		assert.Contains(t, createHelp, "environment and variable (internal and file")
 		assert.Contains(t, createHelp, "unresolved (run probe)")
 		assert.Contains(t, createHelp, "pinned to the adapter's canonical default")
