@@ -1658,7 +1658,7 @@ When an agent caller looks up an unknown ID prefix or receives `409`, `404`, or 
 
 Manage project event triggers, received trigger events, and signed webhook ingress endpoints on the Hub (requires the `hub.triggers` [experiment](/scion/reference/experiments/) on the Hub; available in both human and agent mode, and every subcommand accepts `--json` / `--format json`).
 
-- `scion trigger create`: Create an event trigger attached to a webhook endpoint (`--name`, `--webhook <id|name>`, `--agent <name|id>`, `--message <text>`, repeatable `--type`, repeatable `--where [<dialect>:]<expr>` or `--where-file <path>`, `--subject <cel>`, `--on-subject`, `--interrupt`, `--wake`, `--plain`).
+- `scion trigger create`: Create an event trigger attached to a webhook endpoint (`--name`, `--webhook <id|name>`, `--agent <name|id>`, `--message <text>`, repeatable `--type`, repeatable `--where [<dialect>:]<expr>` or `--where-file <path>`, `--subject <cel>`, `--on-subject`, `--interrupt`, `--wake`, `--plain`). Note: `--on-subject` currently accepts `new` (`skip` returns `400` until subject-skip support lands).
 - `scion trigger get <id|name>`: Display configuration and numbered match rules (`1/N .. N/N`) for a trigger.
 - `scion trigger list`: List triggers in the project (`--source`, `--webhook`, `--status`).
 - `scion trigger pause <id|name>`, `scion trigger resume <id|name>`, `scion trigger delete <id|name>`: Pause, resume, or delete a trigger.

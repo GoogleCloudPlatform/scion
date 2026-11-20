@@ -58,6 +58,7 @@ const (
 	HealthAttentionDispatch       = "dispatch"
 	HealthAttentionAgents         = "agents"
 	HealthAttentionSchedule       = "schedule"
+	HealthAttentionTrigger        = "trigger"
 )
 
 // HealthAttentionBrokerHostIdentity is the attention item kind for a
@@ -92,6 +93,8 @@ const (
 	HealthSubjectAgents      = "agents"
 	HealthSubjectSchedule    = "schedule"
 	HealthSubjectSchedules   = "schedules"
+	HealthSubjectTrigger     = "trigger"
+	HealthSubjectTriggers    = "triggers"
 )
 
 // HealthAttentionItem is one entry of the health summary's ranked "Needs
@@ -324,6 +327,7 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 	}
 
 	items = append(items, scheduleAttention(resp.Schedules)...)
+	items = append(items, triggerAttention(resp.Triggers)...)
 
 	return status, items
 }

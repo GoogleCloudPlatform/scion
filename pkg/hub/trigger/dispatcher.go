@@ -69,7 +69,42 @@ const (
 	ErrFireRuleNoLongerCompiles          = "rule no longer compiles"
 	ErrFireGitHubAssociationUnauthorized = "github association not authorized"
 	ErrFireSubjectBusy                   = "subject busy"
+
+	// Closed-set skipped-fire metric reasons (§6.5). Free-text errors are
+	// never emitted as metric labels.
+	FireSkipReasonRuleBudgetExhausted  = "rule_budget_exhausted"
+	FireSkipReasonRuleEvaluationFailed = "rule_evaluation_failed"
+	FireSkipReasonRuleUncertain        = "rule_uncertain"
+	FireSkipReasonRuleNoLongerCompiles = "rule_no_longer_compiles"
+	FireSkipReasonSubjectBusy          = "subject_busy"
+	FireSkipReasonOther                = "other"
 )
+
+// NormalizeFireSkipReason maps a skipped trigger fire's persisted error text
+// onto a closed-set metric label value so label cardinality stays bounded.
+func NormalizeFireSkipReason(errMsg string) string {
+	switch strings.TrimSpace(errMsg) {
+	case ErrFireRuleBudgetExhausted:
+		return FireSkipReasonRuleBudgetExhausted
+	case ErrFireRuleEvaluationFailed:
+		return FireSkipReasonRuleEvaluationFailed
+	case ErrFireRuleUncertain:
+		return FireSkipReasonRuleUncertain
+	case ErrFireRuleNoLongerCompiles:
+		return FireSkipReasonRuleNoLongerCompiles
+	case "subject busy":
+		return FireSkipReasonSubjectBusy
+	default:
+		return FireSkipReasonOther
+	}
+}
+
+// DispatcherMetrics observes terminal trigger fire outcomes with bounded labels.
+// skipReason is empty for non-skipped statuses and a FireSkipReason* constant
+// when status == store.TriggerFireStatusSkipped.
+type DispatcherMetrics interface {
+	RecordTriggerFire(actionType, status, skipReason string)
+}
 
 // Core is the narrow capability interface package hub/trigger consumes from
 // package hub without importing package hub (Stage 1 §11 D-S1-1(c)).
@@ -113,6 +148,7 @@ type DispatcherConfig struct {
 	FireAudit      FireAuditSink
 	PerFireTimeout time.Duration
 	RuleBudget     time.Duration
+	Metrics        DispatcherMetrics
 	Logger         *slog.Logger
 	Now            func() time.Time
 }
@@ -152,6 +188,7 @@ type Dispatcher struct {
 	fireAudit      FireAuditSink
 	perFireTimeout time.Duration
 	ruleBudget     time.Duration
+	metrics        DispatcherMetrics
 	logger         *slog.Logger
 	now            func() time.Time
 
@@ -195,6 +232,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		fireAudit:      fireAudit,
 		perFireTimeout: perFire,
 		ruleBudget:     ruleBudget,
+		metrics:        cfg.Metrics,
 		logger:         logger,
 		now:            nowFn,
 		evalStats:      make(map[RuleEvalKey]RuleEvalBucket),
@@ -233,6 +271,17 @@ func (d *Dispatcher) recordRuleEval(ctx context.Context, dialect, class string, 
 	if d.ruleMetrics != nil {
 		d.ruleMetrics.ObserveRuleEval(ctx, dName, cName, dur)
 	}
+}
+
+func (d *Dispatcher) recordFireMetric(actionType, status, errMsg string) {
+	if d == nil || d.metrics == nil {
+		return
+	}
+	skipReason := ""
+	if status == store.TriggerFireStatusSkipped {
+		skipReason = NormalizeFireSkipReason(errMsg)
+	}
+	d.metrics.RecordTriggerFire(actionType, status, skipReason)
 }
 
 // NewDrainer constructs the trigger.event durablequeue.Drainer with Stage 1
@@ -735,6 +784,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			return durablequeue.Result{Err: errors.New("trigger: finish fire failed")}
 		}
 		if finished {
+			d.recordFireMetric(tr.ActionType, statusStr, out.Error)
 			if statusStr == store.TriggerFireStatusFired {
 				fireCount++
 			}
@@ -844,6 +894,7 @@ func (d *Dispatcher) recordDirectFire(
 		return err
 	}
 	if claimed {
+		d.recordFireMetric(tr.ActionType, status, errMsg)
 		if rErr := d.store.RecordTriggerFire(ctx, tr.ID, now, status, errMsg); rErr != nil {
 			d.logger.Warn("trigger: failed to record direct fire counter",
 				"triggerID", tr.ID, "fireID", fire.ID, "error", rErr)

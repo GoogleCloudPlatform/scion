@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
@@ -727,6 +728,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		Broker         *MetricsSnapshot               `json:"broker,omitempty"`
 		GCP            *GCPTokenMetricsSnapshot       `json:"gcp,omitempty"`
 		ExternalBearer *ExternalBearerMetricsSnapshot `json:"externalBearer,omitempty"`
+		Triggers       *TriggerMetricsSnapshot        `json:"triggers,omitempty"`
 	}
 
 	var combined combinedMetrics
@@ -745,8 +747,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s.externalBearerSnapshot != nil {
 		combined.ExternalBearer = s.externalBearerSnapshot.GetSnapshot()
 	}
+	if s.experimentEnabled(experiments.Triggers) && s.triggerMetricsSnapshot != nil {
+		combined.Triggers = s.triggerMetricsSnapshot.GetSnapshot()
+	}
 
-	if combined.Broker == nil && combined.GCP == nil && combined.ExternalBearer == nil {
+	if combined.Broker == nil && combined.GCP == nil && combined.ExternalBearer == nil && combined.Triggers == nil {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status": "no_metrics",
 			"reason": "metrics not configured",

@@ -77,7 +77,7 @@ func (s *Server) triggerQueueLocked(dqStore store.DurableQueueStore) *durableque
 		return s.durableQueue
 	}
 	if s.triggers.queue == nil {
-		s.triggers.queue = durablequeue.NewQueue(dqStore)
+		s.triggers.queue = durablequeue.NewQueue(dqStore, durablequeue.WithQueueMetrics(serverTriggerMetrics{srv: s}))
 	}
 	return s.triggers.queue
 }
@@ -293,11 +293,13 @@ func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durableq
 			s.triggers.ruleMetrics = m
 		}
 	}
+	metrics := serverTriggerMetrics{srv: s}
 	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
 		Store:       s.store,
 		Core:        core,
 		Rules:       s.TriggerRules(),
 		RuleMetrics: s.triggers.ruleMetrics,
+		Metrics:     metrics,
 		Logger:      logger,
 	})
 	if err != nil {
@@ -307,6 +309,7 @@ func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durableq
 		QueueStore: dqStore,
 		Queue:      queue,
 		Owner:      s.HubID(),
+		Metrics:    metrics,
 	})
 }
 
@@ -336,7 +339,9 @@ func (s *Server) runTriggerMaintenance(ctx context.Context) {
 	if s == nil || s.store == nil {
 		return
 	}
-	res, err := trigger.RunMaintenance(ctx, s.store, time.Now())
+	runAt := time.Now().UTC()
+	res, err := trigger.RunMaintenance(ctx, s.store, runAt)
+	serverTriggerMetrics{srv: s}.RecordReaperRun(res.FiresReaped, runAt, err)
 	if err != nil {
 		slog.Error("Scheduler: trigger maintenance failed", "error", err)
 	}

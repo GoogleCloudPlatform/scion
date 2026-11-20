@@ -17,12 +17,15 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -272,6 +275,43 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// AdminDurableQueueStatus reports one durable queue kind's depth, active lease
+// count, and oldest-item age in GET /api/v1/admin/scheduler (§6.5).
+type AdminDurableQueueStatus struct {
+	Kind             string  `json:"kind"`
+	Pending          int64   `json:"pending"`
+	Leased           int64   `json:"leased"`
+	OldestAgeSeconds float64 `json:"oldestAgeSeconds"`
+}
+
+func (s *Server) adminDurableQueues(r *http.Request, now time.Time) ([]AdminDurableQueueStatus, bool) {
+	if !s.experimentEnabled(experiments.Triggers) {
+		return nil, false
+	}
+	dqs, ok := s.store.(store.DurableQueueStore)
+	if !ok || dqs == nil {
+		return nil, false
+	}
+	stats, err := dqs.DurableQueueStats(r.Context(), trigger.EventQueueKind, "", now)
+	if err != nil {
+		slog.Warn("admin scheduler: failed to sample durable queue stats",
+			"kind", trigger.EventQueueKind, "error", err)
+		return nil, false
+	}
+	oldestAgeSec := 0.0
+	if stats.Oldest != nil {
+		if age := now.Sub(*stats.Oldest); age > 0 {
+			oldestAgeSec = age.Seconds()
+		}
+	}
+	return []AdminDurableQueueStatus{{
+		Kind:             trigger.EventQueueKind,
+		Pending:          stats.Pending,
+		Leased:           stats.Leased,
+		OldestAgeSeconds: oldestAgeSec,
+	}}, true
+}
+
 // handleAdminScheduler handles GET /api/v1/admin/scheduler.
 // Returns the scheduler's current status including recurring handlers,
 // event handlers, and active one-shot timer count.
@@ -309,14 +349,20 @@ func (s *Server) handleAdminScheduler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	now := time.Now().UTC()
+
 	// Exec argv is never shown here (D3): the admin view reveals nothing.
 	rev := s.noExecRevealer(r.Context())
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"scheduler":          status,
 		"scheduledEvents":    s.scheduledEventResponses(r.Context(), rev, events),
 		"recurringSchedules": scheduleResponses(rev, schedules),
-		"serverTime":         time.Now().UTC(),
-	})
+		"serverTime":         now,
+	}
+	if queues, ok := s.adminDurableQueues(r, now); ok {
+		resp["durableQueues"] = queues
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // maintenancePageHTML returns a self-contained HTML maintenance page using

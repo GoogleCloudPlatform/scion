@@ -2968,9 +2968,11 @@ type Server struct {
 	// handles unauthenticated POST /api/v1/hooks/{id} (handlers_hooks_ingress.go),
 	// and githubWebhookIngress holds the Stage 3 verified token bucket and
 	// rate-limited audit/warn state for POST /api/v1/webhooks/github (github_webhook_ingress.go).
-	durableQueue         *durablequeue.StoreQueue
-	webhookIngress       *trigger.Ingress
-	githubWebhookIngress githubWebhookIngressState
+	durableQueue           *durablequeue.StoreQueue
+	webhookIngress         *trigger.Ingress
+	githubWebhookIngress   githubWebhookIngressState
+	triggerMetricsSnapshot *TriggerSnapshotMetrics
+	triggerMetrics         atomic.Pointer[TriggerMetricsRecorder]
 
 	// transportTrustedNets is ServerConfig.TransportTrustedProxies,
 	// resolved once in New (config.TransportTrustedProxies) for
@@ -4076,8 +4078,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if cfg.CSPReportRawSamples {
 		slog.Warn("Browser policy report samples are logged (server.hub.csp_report_raw_samples); samples can hold page content")
 	}
+	srv.triggerMetricsSnapshot = NewTriggerSnapshotMetrics()
 	if dqs, ok := s.(store.DurableQueueStore); ok {
-		srv.durableQueue = durablequeue.NewQueue(dqs)
+		srv.durableQueue = durablequeue.NewQueue(dqs, durablequeue.WithQueueMetrics(serverTriggerMetrics{srv: srv}))
 		srv.webhookIngress = newWebhookIngress(srv, cfg.TrustedProxies)
 	}
 

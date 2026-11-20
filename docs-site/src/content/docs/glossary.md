@@ -351,7 +351,30 @@ Connecting an interactive terminal to a running agent's tmux session for human-i
 The Hub handing an agent lifecycle command to the appropriate runtime broker for execution.
 
 ### Schedule
-A time-based trigger that fires an action — sending a message or dispatching (starting) an agent from a template — either once (a one-shot *scheduled event*, via `--at <time>` or `--in <duration>`) or repeatedly (a recurring *schedule* on a 5-field cron expression). Backs `scion schedule`.
+A time-based schedule that fires an **Action** — sending a message, dispatching (starting) an agent from a template, or running a command (`exec`) — either once (a one-shot *scheduled event*, via `--at <time>` or `--in <duration>`) or repeatedly (a recurring *schedule* on a 5-field cron expression). Backs `scion schedule`. Shares the Hub's fire core with **Trigger**.
+
+## Triggers
+
+Event-driven automation gated by the `hub.triggers` experiment (`scion trigger`). An external **Source** delivers an **Event** into the Hub's durable inbox; matching **Trigger** definitions evaluate rules and execute an **Action**, recording each attempt as a **Fire**.
+
+:::note[Disambiguation]
+"Trigger" is overloaded across three Scion concepts. Here, **Trigger** is the canonical project-scoped automation rule (`scion trigger`). In **Notifications**, qualify the activity that fires a subscription as a *trigger activity* (or *notification trigger*). In container/harness **Lifecycle Hooks** (such as **Pre-Start Hook**), say *hook point* or *lifecycle hook event*.
+:::
+
+### Source (triggers)
+An origin that emits **Events** into a project's trigger inbox, identified by `(source_kind, source_id)` — in Stage 1, a project-owned webhook endpoint (`source_kind: "webhook"`, `scion trigger webhook`, receiving signed `POST /api/v1/hooks/{id}` requests).
+
+### Event (triggers)
+An immutable durable inbox record (`trigger_events`) captured when a **Source** delivers a payload, carrying `type`, `subject`, `dedup_key`, `attributes`, allow-listed `headers`, and a bounded JSON `payload`, processed asynchronously through the Hub's durable queue (`trigger.event`). Distinct from the internal **Event Bus** and from a one-shot *scheduled event*.
+
+### Trigger
+A project-scoped automation rule (`scion trigger`) attached to a **Source** that matches incoming **Events** and executes an **Action** under the authoring principal's recorded authority. May be paused by the Hub with a structured `status_reason` (`creator_deleted`, `target_deleted`, or `source_deleted`).
+
+### Action (triggers / schedules)
+The Hub-executed operation a **Trigger** or **Schedule** performs when it fires (`message`, `dispatch_agent`, or `exec`), sharing one fire core and recorded-authority check. Stage 1 triggers authorize `message` actions.
+
+### Fire (triggers / schedules)
+One execution attempt of a **Trigger** for a specific **Event** (unique per `(event_id, trigger_id)`), or one execution of a **Schedule**. Moves from `firing` to a terminal status (`fired`, `skipped`, `failed`, or `refused`), visible via `scion trigger history`.
 
 ## Observability
 

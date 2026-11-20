@@ -372,9 +372,9 @@ A message mode that seals the agent from all messaging except system-plane notic
 _Avoid_: sealed, quarantined (informal usage acceptable in UI confirmation dialogs, not in technical docs)
 
 **Notification**:
-An event delivered when an agent reaches a tracked trigger activity (e.g. `completed`, `waiting_for_input`, `limits_exceeded`). Recipients register a **Subscription** — scoped to a single agent or to a whole project, naming which trigger activities fire it and whether an agent or a user receives it. Backs `scion notifications` and the `--notify` flag on `scion message`.
-_Avoid_: alert, event (for the notification), watch (for the subscription)
-_See also_: Activity (notifications fire on activity values)
+An event delivered when an agent reaches a tracked trigger activity (e.g. `completed`, `waiting_for_input`, `limits_exceeded`). Recipients register a **Subscription** — scoped to a single agent or to a whole project, naming which trigger activities fire it and whether an agent or a user receives it. Backs `scion notifications` and the `--notify` flag on `scion message`. Note that a notification's *trigger activity* is distinct from an event **Trigger** (under [Triggers](#triggers)).
+_Avoid_: alert, event (for the notification), watch (for the subscription), trigger (bare, when referring to a notification's trigger activity — write *trigger activity* or *notification trigger*)
+_See also_: Activity (notifications fire on activity values), Trigger (distinct concept, same word)
 
 **Piercing** (message authorization):
 The ability of a privileged user to bypass an agent's message mode restrictions. Super-admins pierce all modes including none. Project owners pierce lineage and branch modes. Piercing applies only to user identities — it is never inherited by an owner's agents.
@@ -529,9 +529,40 @@ The Hub handing an agent lifecycle command to the appropriate runtime broker for
 _Avoid_: schedule, route, assign, delegate
 
 **Schedule**:
-A time-based trigger that fires an action — sending a message or dispatching (starting) an agent from a template — either once (a one-shot *scheduled event*, via `--at <time>` or `--in <duration>`) or repeatedly (a recurring *schedule* on a 5-field cron expression). Backs `scion schedule` and the `--at`/`--in` flags on `scion message`.
+A time-based schedule that fires an **Action** — sending a message, dispatching (starting) an agent from a template, or running a command (`exec`) — either once (a one-shot *scheduled event*, via `--at <time>` or `--in <duration>`) or repeatedly (a recurring *schedule* on a 5-field cron expression). Backs `scion schedule` and the `--at`/`--in` flags on `scion message`. Shares the Hub's fire core with **Trigger**.
 _Avoid_: cron job (recurring only), scheduled message (too narrow), reminder, timer
-_See also_: Dispatch
+_See also_: Dispatch, Trigger, Action, Fire
+
+## Triggers
+
+Event-driven automation gated by the `hub.triggers` experiment (`scion trigger`). An external **Source** delivers an **Event** into the Hub's durable inbox; matching **Trigger** definitions evaluate rules and execute an **Action**, recording each attempt as a **Fire**.
+
+> **Disambiguation rule:** "Trigger" is overloaded across three Scion concepts. In the event-automation system below, **Trigger** is the canonical project-scoped rule resource (`triggers` table, `scion trigger`). In **Notifications**, always qualify the activity that fires a subscription as a *trigger activity* (or *notification trigger*). In container/harness **Lifecycle Hooks** (such as **Pre-Start Hook** or harness hook events), say *hook point* or *lifecycle hook event*, never bare "trigger".
+
+**Source** (triggers):
+An origin that emits **Events** into a project's trigger inbox, identified by `(source_kind, source_id)`. In Stage 1, a source is a project-owned **Webhook endpoint** (`source_kind: "webhook"`, managed with `scion trigger webhook`, receiving signed `POST /api/v1/hooks/{id}` requests); Stage 3 adds GitHub App repository sources (`source_kind: "github"`). Deleting a webhook endpoint automatically pauses dependent triggers with `status_reason: "source_deleted"`.
+_Avoid_: producer, provider, webhook (when naming the abstract source concept rather than the `webhook` source kind)
+_See also_: Event, Trigger
+
+**Event** (triggers):
+An immutable durable inbox record (`trigger_events`) captured when a **Source** delivers a payload (for example, an HMAC-verified `POST /api/v1/hooks/{id}`). Carries a canonical `type` (such as `webhook.received` or `webhook.<name>`), a `subject`, a `dedup_key` for idempotent delivery, structured `attributes`, allow-listed `headers`, and a bounded JSON `payload`, and is processed asynchronously through the Hub's durable queue (`trigger.event`). Distinct from the internal **Event Bus** (live SSE change feed) and from a one-shot *scheduled event*.
+_Avoid_: message (for the inbound event), payload (when referring to the whole envelope/record), webhook call
+_See also_: Source, Trigger, Fire, Event Bus (distinct concept)
+
+**Trigger**:
+A project-scoped automation rule (`triggers`, managed with `scion trigger`) attached to a **Source** that matches incoming **Events** (by `match_types` and optional ordered rules) and executes an **Action** under the authoring principal's recorded authority. A trigger has a status (`active` or `paused`) and may be paused by the Hub with a structured `status_reason` (`creator_deleted`, `target_deleted`, or `source_deleted`). Distinct from a **Notification** *trigger activity* and from a **Pre-Start Hook** / lifecycle hook point.
+_Avoid_: webhook rule, automation, hook, listener
+_See also_: Source, Event, Action, Fire, Schedule, Notification (distinct — "trigger activity"), Pre-Start Hook (distinct — lifecycle hook point)
+
+**Action** (triggers / schedules):
+The Hub-executed operation a **Trigger** or **Schedule** performs when it fires, sharing one fire core and recorded-authority check. Built-in action types are `message` (deliver an event envelope to an agent, optionally waking or interrupting it), `dispatch_agent` (headless agent creation from a template), and `exec` (run a command over Conduit). Stage 1 triggers authorize `message` actions; `dispatch_agent` and `exec` are enabled for schedules and reserved for later trigger stages.
+_Avoid_: handler, job, step, task
+_See also_: Trigger, Fire, Schedule
+
+**Fire** (triggers / schedules):
+One execution attempt of a **Trigger** for a specific **Event** (stored as a `trigger_fires` row, unique per `(event_id, trigger_id)` for idempotency), or one execution of a **Schedule**. Moves from `firing` (with a leased horizon reaped on Hub restart) to a terminal status: `fired`, `skipped` (with a bounded reason such as rule evaluation failure or subject policy), `failed`, or `refused` (standing or authority check failed). Visible via `scion trigger history`.
+_Avoid_: run (for triggers; "run" is used for schedules and agent Run IDs), execution, invocation, delivery
+_See also_: Trigger, Event, Action, Run ID (distinct concept)
 
 ## Observability
 
@@ -571,5 +602,4 @@ Terms that recur in the codebase and may warrant canonical entries, but are **no
 - **Content Hash / Manifest** — SHA-based identity for template and harness-config content, used for cache validation and transfer between Hub and runtime brokers.
 - **Transfer** — the signed-URL mechanism that moves templates and harness-configs between the Hub and runtime brokers.
 - **Service Account** — a GCP identity an agent can assume for Google Cloud auth, registered with the Hub.
-- **Webhook / GitHub App** — external event triggers (e.g. GitHub webhooks) that can dispatch agents.
 - **OAuth provider** — a configurable identity provider (Google, GitHub) for CLI and web authentication.
