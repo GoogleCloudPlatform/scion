@@ -1902,3 +1902,72 @@ func TestResumeGitHubTrigger_RefusedUntilRepoReassociated(t *testing.T) {
 		t.Fatalf("expected trigger active with empty reason, got (%q, %q)", resumed.Status, resumed.StatusReason)
 	}
 }
+
+func TestResumeGitHubTrigger_UserPausedResumesWithEmptyRepoCache(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	gh := newFakeGitHubForAssoc(t)
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.APIBaseURL = gh.srv.URL
+	f.srv.config.GitHubAppConfig.AppID = 778899
+	f.srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+	f.srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
+	f.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.srv.mu.Unlock()
+
+	setTriggerExperimentsForG1bTest(t, f.srv, true, true)
+
+	sysAdmin := createAssocAdmin(t, f.store, "resume-empty-cache-admin")
+	const instID int64 = 6203
+	// Create installation with an empty cached Repositories list (non-authoritative cache).
+	createAssocInstallation(t, f.store, instID, "acme")
+
+	remote := gh.remote("acme", "widgets")
+	proj, err := f.store.GetProject(ctx, f.projectID)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	proj.GitRemote = remote
+	idCopy := instID
+	proj.GitHubInstallationID = &idCopy
+	proj.GitHubAppStatus = &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now().UTC()}
+	if err := f.store.UpdateProject(ctx, proj); err != nil {
+		t.Fatalf("UpdateProject: %v", err)
+	}
+	setAdminBinding(t, f.store, proj, instID, util.NormalizeGitRemote(remote), sysAdmin.ID)
+	f.srv.invalidateGitHubAssociation(proj.ID)
+
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-user-paused-empty-cache",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.agentA.ID, Message: "ping"},
+	})
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create trigger: expected 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created TriggerResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created trigger: %v", err)
+	}
+
+	// User-pause the trigger (StatusReason == "").
+	pauseRec := f.doTrigger(t, f.ownerAuth, created.ID+"/pause", http.MethodPost, nil)
+	if pauseRec.Code != http.StatusOK {
+		t.Fatalf("pause trigger: expected 200, got %d: %s", pauseRec.Code, pauseRec.Body.String())
+	}
+
+	// User-paused trigger must resume even while installation.Repositories is empty.
+	resumeRec := f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil)
+	if resumeRec.Code != http.StatusOK {
+		t.Fatalf("resume user-paused trigger with empty repo cache: expected 200, got %d: %s", resumeRec.Code, resumeRec.Body.String())
+	}
+	resumed, err := f.store.GetTrigger(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTrigger: %v", err)
+	}
+	if resumed.Status != store.TriggerStatusActive || resumed.StatusReason != store.TriggerStatusReasonNone {
+		t.Fatalf("expected trigger active with empty reason, got (%q, %q)", resumed.Status, resumed.StatusReason)
+	}
+}

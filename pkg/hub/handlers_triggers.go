@@ -349,7 +349,7 @@ func (s *Server) requireGitHubInstallationHasRepo(w http.ResponseWriter, r *http
 		}
 	}
 	writeError(w, http.StatusConflict, githubapp.ErrCodeRepoNotAccessible,
-		"project repository is not in the GitHub App installation's repository list; re-add the repository to the installation before resuming this trigger", nil)
+		"project repository is not in the GitHub App installation's repository list; re-add the repository to the installation (or discover/sync installations) before resuming this trigger", nil)
 	return false
 }
 
@@ -1131,7 +1131,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if !s.authorizeGitHubTriggerSource(w, r, project, tr.SourceID) {
 			return
 		}
-		if !s.requireGitHubInstallationHasRepo(w, r, project) {
+		if tr.StatusReason == store.TriggerStatusReasonSourceDeleted && !s.requireGitHubInstallationHasRepo(w, r, project) {
 			return
 		}
 	default:
