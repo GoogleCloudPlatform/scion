@@ -964,3 +964,117 @@ func TestDurableQueueDrainerFair_MoreProjectsThanBatchSizeRotation(t *testing.T)
 		"proj-04", "proj-05", "proj-06", "proj-07",
 	}, handled)
 }
+
+func TestDurableQueueDrainerFair_1000BackoffProjectsClaimedInOnePassAndIdleBounded(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	now := time.Date(2026, 11, 20, 18, 0, 0, 0, time.UTC)
+	future := now.Add(time.Hour)
+
+	const backoffProjects = 1000
+	err := cs.WithTx(ctx, func(tx store.Store) error {
+		for i := 0; i < backoffProjects; i++ {
+			proj := fmt.Sprintf("p%04d", i)
+			if _, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+				Kind:      "trigger.event",
+				DedupKey:  "backoff-" + proj,
+				ProjectID: proj,
+				Payload:   []byte(`{}`),
+				CreatedAt: now,
+				NotBefore: future,
+			}); err != nil {
+				return err
+			}
+		}
+		_, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  "victim-due",
+			ProjectID: "z-victim",
+			Payload:   []byte(`{}`),
+			CreatedAt: now,
+			NotBefore: now,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	var handled []string
+	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:         cs,
+		Kind:          "trigger.event",
+		Owner:         "sweep-drainer",
+		BatchSize:     4,
+		FairByProject: true,
+		Now:           func() time.Time { return now },
+		Logger:        quietLogger(),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			handled = append(handled, item.ProjectID+":"+item.DedupKey)
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	// Pass 1: 1000 backoff-only projects precede z-victim. The drainer must sweep
+	// past them in bounded transactions and claim z-victim within ONE DrainOnce pass.
+	pass1Start := time.Now()
+	res1, err := d.DrainOnce(ctx)
+	pass1Elapsed := time.Since(pass1Start)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res1.Claimed)
+	assert.Equal(t, 1, res1.Done)
+	assert.Equal(t, []string{"z-victim:victim-due"}, handled)
+	assert.Less(t, pass1Elapsed, 15*time.Second, "sweeping 1000 backoff projects took %s", pass1Elapsed)
+
+	// Pass 2 (idle hub: 1000 backoff-only projects, 0 due rows): store's O(1)
+	// any-due check clears Exhausted on the very first call, so an idle hub does
+	// 1 single claim call with no sweep and no busy spin.
+	idleStart := time.Now()
+	res2, err := d.DrainOnce(ctx)
+	idleElapsed := time.Since(idleStart)
+	require.NoError(t, err)
+	assert.Zero(t, res2.Claimed)
+	assert.Zero(t, res2.Done)
+	assert.Equal(t, int64(backoffProjects), res2.Remaining)
+	assert.Less(t, idleElapsed, 5*time.Second, "idle check over 1000 backoff projects took %s", idleElapsed)
+	t.Logf("1000 backoff projects: victim pass=%s, idle pass=%s", pass1Elapsed, idleElapsed)
+
+	// Pass 3 + 4 (flood + 1000 backoff-only projects + victim): a flooding project
+	// sorting before the 1000 backoff projects must NOT starve a newer victim sorting
+	// after them (Pass 3 serves flood; Pass 4 sweeps past the 1000 backoff projects
+	// and serves z-victim).
+	err = cs.WithTx(ctx, func(tx store.Store) error {
+		for i := 0; i < 10; i++ {
+			ts := now.Add(-time.Duration(20-i) * time.Second)
+			if _, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+				Kind:      "trigger.event",
+				DedupKey:  fmt.Sprintf("flood-%02d", i),
+				ProjectID: "a-flood",
+				Payload:   []byte(`{}`),
+				CreatedAt: ts,
+				NotBefore: ts,
+			}); err != nil {
+				return err
+			}
+		}
+		_, err := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  "victim-after-flood",
+			ProjectID: "z-victim",
+			Payload:   []byte(`{}`),
+			CreatedAt: now,
+			NotBefore: now,
+		})
+		return err
+	})
+	require.NoError(t, err)
+
+	handled = nil
+	res3, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res3.Done)
+	res4, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, res4.Done, 1)
+	assert.Contains(t, handled, "z-victim:victim-after-flood",
+		"victim behind 1000 backoff projects must be served within 2 passes even under an active flood")
+}

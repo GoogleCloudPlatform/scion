@@ -316,31 +316,41 @@ const (
 // project (with FOR UPDATE SKIP LOCKED on PostgreSQL), topped up if an earlier
 // project met its quota and slots remain, interleaved round-robin across
 // projects, and leased via the unleased CAS UPDATE.
-func (s *DurableQueueStore) ClaimDurableItemsFair(ctx context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) ([]store.DurableQueueRow, string, error) {
+func (s *DurableQueueStore) ClaimDurableItemsFair(ctx context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) (store.DurableQueueFairClaimResult, error) {
 	if err := store.ValidateDurableQueueKind(kind); err != nil {
-		return nil, afterProjectID, err
+		return store.DurableQueueFairClaimResult{NextCursor: afterProjectID}, err
 	}
 	if owner == "" {
-		return nil, afterProjectID, fmt.Errorf("%w: durable queue lease owner is required", store.ErrInvalidInput)
+		return store.DurableQueueFairClaimResult{NextCursor: afterProjectID}, fmt.Errorf("%w: durable queue lease owner is required", store.ErrInvalidInput)
 	}
 	if limit <= 0 {
-		return nil, afterProjectID, nil
+		return store.DurableQueueFairClaimResult{NextCursor: afterProjectID}, nil
 	}
 	now = now.UTC()
 	leaseUntil = leaseUntil.UTC()
 
-	var (
-		out        []store.DurableQueueRow
-		nextCursor = afterProjectID
-	)
+	result := store.DurableQueueFairClaimResult{NextCursor: afterProjectID}
 	err := runInEntTx(ctx, s.client, s.inTx, func(client *ent.Client) error {
 		probeBudget := max(limit*durableQueueFairProbeMultiplier, durableQueueFairMinProbeBudget)
-		projects, resumeCursor, err := discoverDueQueueProjects(ctx, client, kind, afterProjectID, now, limit, probeBudget)
+		projects, resumeCursor, exhausted, wrapped, err := discoverDueQueueProjects(ctx, client, kind, afterProjectID, now, limit, probeBudget)
 		if err != nil {
 			return err
 		}
-		nextCursor = resumeCursor
+		result.NextCursor = resumeCursor
+		result.Exhausted = exhausted
+		result.Wrapped = wrapped
 		if len(projects) == 0 {
+			if exhausted {
+				// O(1) indexed check on (kind, next_attempt_at, seq): when zero
+				// due unleased rows exist anywhere in the kind, clear Exhausted
+				// so an idle hub with many backoff-only projects stops after a
+				// single claim call instead of sweeping further.
+				anyDue, err := hasAnyDueQueueRow(ctx, client, kind, now)
+				if err != nil {
+					return err
+				}
+				result.Exhausted = anyDue
+			}
 			return nil
 		}
 
@@ -440,27 +450,25 @@ func (s *DurableQueueStore) ClaimDurableItemsFair(ctx context.Context, kind, own
 		for _, r := range rows {
 			byID[r.ID] = r
 		}
-		out = make([]store.DurableQueueRow, 0, len(rows))
+		out := make([]store.DurableQueueRow, 0, len(rows))
 		for _, id := range orderedIDs {
 			if r, ok := byID[id]; ok {
 				out = append(out, entDurableQueueItemToStore(r))
 			}
 		}
-		if len(out) > 0 {
-			nextCursor = out[len(out)-1].ProjectID
-		}
+		result.Rows = out
 		return nil
 	})
 	if err != nil {
-		return nil, afterProjectID, mapError(err)
+		return store.DurableQueueFairClaimResult{NextCursor: afterProjectID}, mapError(err)
 	}
-	return out, nextCursor, nil
+	return result, nil
 }
 
-func discoverDueQueueProjects(ctx context.Context, client *ent.Client, kind, afterProjectID string, now time.Time, limit, probeBudget int) ([]string, string, error) {
-	projects := make([]string, 0, limit)
+func discoverDueQueueProjects(ctx context.Context, client *ent.Client, kind, afterProjectID string, now time.Time, limit, probeBudget int) (projects []string, lastProbed string, exhausted, wrapped bool, err error) {
+	projects = make([]string, 0, limit)
 	probes := 0
-	lastProbed := afterProjectID
+	lastProbed = afterProjectID
 
 	hasDueRow := func(proj string) (bool, error) {
 		ids, err := client.DurableQueueItem.Query().
@@ -496,7 +504,7 @@ func discoverDueQueueProjects(ctx context.Context, client *ent.Client, kind, aft
 			Select(durablequeueitem.FieldProjectID).
 			Strings(ctx)
 		if err != nil {
-			return nil, afterProjectID, err
+			return nil, afterProjectID, false, false, err
 		}
 		if len(next) == 0 {
 			reachedEnd = true
@@ -509,58 +517,88 @@ func discoverDueQueueProjects(ctx context.Context, client *ent.Client, kind, aft
 
 		due, err := hasDueRow(proj)
 		if err != nil {
-			return nil, afterProjectID, err
+			return nil, afterProjectID, false, false, err
 		}
 		if due {
 			projects = append(projects, proj)
 		}
 	}
 
-	// Phase 1b: budgeted wrap-around from the start of the kind through
-	// afterProjectID (only when Phase 1a reached the end with budget left).
-	if reachedEnd && len(projects) < limit && probes < probeBudget {
-		firstWrap := true
-		wrapCursor := ""
-		for len(projects) < limit && probes < probeBudget {
-			preds := []predicate.DurableQueueItem{
-				durablequeueitem.KindEQ(kind),
-				durablequeueitem.ProjectIDLTE(afterProjectID),
-			}
-			if !firstWrap {
-				preds = append(preds, durablequeueitem.ProjectIDGT(wrapCursor))
-			}
-			next, err := client.DurableQueueItem.Query().
-				Where(preds...).
-				Order(ent.Asc(durablequeueitem.FieldProjectID)).
-				Limit(1).
-				Select(durablequeueitem.FieldProjectID).
-				Strings(ctx)
-			if err != nil {
-				return nil, afterProjectID, err
-			}
-			if len(next) == 0 {
-				break
-			}
-			proj := next[0]
-			wrapCursor = proj
-			lastProbed = proj
-			firstWrap = false
-			probes++
+	if len(projects) >= limit {
+		return projects, lastProbed, false, false, nil
+	}
+	if !reachedEnd {
+		// Stopped because probes reached probeBudget before reaching the end of the range.
+		return projects, lastProbed, true, false, nil
+	}
 
-			due, err := hasDueRow(proj)
-			if err != nil {
-				return nil, afterProjectID, err
-			}
-			if due {
-				projects = append(projects, proj)
-			}
-			if wrapCursor == afterProjectID {
-				break
-			}
+	// Phase 1b: budgeted wrap-around from the start of the kind through
+	// afterProjectID (reached end of range with budget remaining).
+	wrapped = true
+	completedCycle := false
+	firstWrap := true
+	wrapCursor := ""
+	for len(projects) < limit && probes < probeBudget {
+		preds := []predicate.DurableQueueItem{
+			durablequeueitem.KindEQ(kind),
+			durablequeueitem.ProjectIDLTE(afterProjectID),
+		}
+		if !firstWrap {
+			preds = append(preds, durablequeueitem.ProjectIDGT(wrapCursor))
+		}
+		next, err := client.DurableQueueItem.Query().
+			Where(preds...).
+			Order(ent.Asc(durablequeueitem.FieldProjectID)).
+			Limit(1).
+			Select(durablequeueitem.FieldProjectID).
+			Strings(ctx)
+		if err != nil {
+			return nil, afterProjectID, false, false, err
+		}
+		if len(next) == 0 {
+			completedCycle = true
+			break
+		}
+		proj := next[0]
+		wrapCursor = proj
+		lastProbed = proj
+		firstWrap = false
+		probes++
+
+		due, err := hasDueRow(proj)
+		if err != nil {
+			return nil, afterProjectID, false, false, err
+		}
+		if due {
+			projects = append(projects, proj)
+		}
+		if wrapCursor == afterProjectID {
+			completedCycle = true
+			break
 		}
 	}
 
-	return projects, lastProbed, nil
+	exhausted = !completedCycle && len(projects) < limit && probes >= probeBudget
+	return projects, lastProbed, exhausted, wrapped, nil
+}
+
+func hasAnyDueQueueRow(ctx context.Context, client *ent.Client, kind string, now time.Time) (bool, error) {
+	ids, err := client.DurableQueueItem.Query().
+		Where(
+			durablequeueitem.KindEQ(kind),
+			durablequeueitem.NextAttemptAtLTE(now),
+			queueItemUnleased(now),
+		).
+		Order(
+			ent.Asc(durablequeueitem.FieldNextAttemptAt),
+			ent.Asc(durablequeueitem.FieldID),
+		).
+		Limit(1).
+		IDs(ctx)
+	if err != nil {
+		return false, err
+	}
+	return len(ids) > 0, nil
 }
 
 // RenewDurableLease implements store.DurableQueueStore.

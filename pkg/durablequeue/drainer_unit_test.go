@@ -135,16 +135,16 @@ func (m *memQueueStore) ClaimDurableItems(_ context.Context, kind, owner string,
 	return out, nil
 }
 
-func (m *memQueueStore) ClaimDurableItemsFair(_ context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) ([]store.DurableQueueRow, string, error) {
+func (m *memQueueStore) ClaimDurableItemsFair(_ context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) (store.DurableQueueFairClaimResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.claims++
 	m.lastAfterProject = append(m.lastAfterProject, afterProjectID)
 	if m.fairClaimErr != nil {
-		return nil, afterProjectID, m.fairClaimErr
+		return store.DurableQueueFairClaimResult{NextCursor: afterProjectID}, m.fairClaimErr
 	}
 	if limit <= 0 {
-		return nil, afterProjectID, nil
+		return store.DurableQueueFairClaimResult{NextCursor: afterProjectID}, nil
 	}
 	byProj := make(map[string][]*store.DurableQueueRow)
 	for _, r := range m.rows {
@@ -157,7 +157,7 @@ func (m *memQueueStore) ClaimDurableItemsFair(_ context.Context, kind, owner, af
 		byProj[r.ProjectID] = append(byProj[r.ProjectID], r)
 	}
 	if len(byProj) == 0 {
-		return nil, afterProjectID, nil
+		return store.DurableQueueFairClaimResult{NextCursor: afterProjectID}, nil
 	}
 	var gt, lte []string
 	for p := range byProj {
@@ -235,10 +235,13 @@ func (m *memQueueStore) ClaimDurableItemsFair(_ context.Context, kind, owner, af
 		out[i] = cp
 	}
 	nextCursor := afterProjectID
-	if len(out) > 0 {
-		nextCursor = out[len(out)-1].ProjectID
+	if len(projects) > 0 {
+		nextCursor = projects[len(projects)-1]
 	}
-	return out, nextCursor, nil
+	return store.DurableQueueFairClaimResult{
+		Rows:       out,
+		NextCursor: nextCursor,
+	}, nil
 }
 
 func (m *memQueueStore) RenewDurableLease(ctx context.Context, seq int64, owner string, leaseUntil time.Time) (bool, error) {
@@ -1970,7 +1973,9 @@ func TestDrainerFairByProject_CursorAdvancesToLastHandledRow(t *testing.T) {
 	st := newMemQueueStore()
 	cur := time.Date(2026, 11, 20, 15, 0, 0, 0, time.UTC)
 
-	for _, proj := range []string{"p1", "p2", "p3", "p4"} {
+	// Include p5 so an old last-claimed cursor ("p4") would advance to p5 instead
+	// of serving the released p2 on the next pass (kills MUT=lastclaimed / V3).
+	for _, proj := range []string{"p1", "p2", "p3", "p4", "p5"} {
 		_, err := st.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
 			Kind:      "trigger.event",
 			DedupKey:  proj + "-0",
@@ -2010,10 +2015,132 @@ func TestDrainerFairByProject_CursorAdvancesToLastHandledRow(t *testing.T) {
 	assert.True(t, res.Blocked)
 	assert.Equal(t, []string{"p1"}, handled)
 
-	// Advance clock past 1s blocked probe backoff: probe must start after p1 -> serves p2 next!
+	// Advance clock past 1s blocked probe backoff: probe must start after p1 -> serves p2 next, NOT p5!
 	cur = cur.Add(2 * time.Second)
 	res, err = d.DrainOnce(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.Done)
 	assert.Equal(t, []string{"p1", "p2"}, handled)
+	st.mu.Lock()
+	afterHistory := append([]string(nil), st.lastAfterProject...)
+	st.mu.Unlock()
+	assert.Equal(t, []string{"", "p1"}, afterHistory)
+}
+
+type exhaustedSweepStore struct {
+	*memQueueStore
+	calls      int
+	fifoCalls  int
+	afterSeen  []string
+	wrapOn     int
+	cursors    []string
+	wrapped    []bool
+	stopOnCall int
+}
+
+func (s *exhaustedSweepStore) ClaimDurableItems(ctx context.Context, kind, owner string, now, leaseUntil time.Time, limit int) ([]store.DurableQueueRow, error) {
+	s.fifoCalls++
+	return s.memQueueStore.ClaimDurableItems(ctx, kind, owner, now, leaseUntil, limit)
+}
+
+func (s *exhaustedSweepStore) ClaimDurableItemsFair(_ context.Context, _, _, afterProjectID string, _, _ time.Time, _ int) (store.DurableQueueFairClaimResult, error) {
+	idx := s.calls
+	s.calls++
+	s.afterSeen = append(s.afterSeen, afterProjectID)
+	next := fmt.Sprintf("p%04d", idx+1)
+	wrap := false
+	exhausted := true
+	if s.wrapOn > 0 && idx+1 == s.wrapOn {
+		wrap = true
+		next = "p0000"
+	}
+	if s.stopOnCall > 0 && idx+1 == s.stopOnCall {
+		exhausted = false
+	}
+	if idx < len(s.cursors) {
+		next = s.cursors[idx]
+	}
+	if idx < len(s.wrapped) {
+		wrap = s.wrapped[idx]
+	}
+	return store.DurableQueueFairClaimResult{
+		NextCursor: next,
+		Exhausted:  exhausted,
+		Wrapped:    wrap,
+	}, nil
+}
+
+func TestDrainerFairByProject_ExhaustedSweepBoundsIdleWorkAndStopsOnWrap(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 18, 0, 0, 0, time.UTC)
+	nop := func(context.Context, durablequeue.Item, durablequeue.Lease) durablequeue.Result {
+		return durablequeue.Result{Done: true}
+	}
+
+	// Subtest 1: wrap completes cycle from passStart="" -> stops immediately on wrap call (no busy spin, no fallback).
+	st1 := &exhaustedSweepStore{memQueueStore: newMemQueueStore(), wrapOn: 5}
+	d1, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:         st1,
+		Kind:          "trigger.event",
+		BatchSize:     4,
+		FairByProject: true,
+		Now:           func() time.Time { return now },
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Handler:       nop,
+	})
+	require.NoError(t, err)
+	res1, err := d1.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, res1.Claimed)
+	assert.Equal(t, 5, st1.calls, "sweep must stop as soon as walk wraps back to passStart")
+	assert.Zero(t, st1.fifoCalls, "completed cycle must not trigger oldest-due fallback")
+
+	// Subtest 2 (V1 + cap fallback): if sweep hits fairSweepMaxCalls without wrapping while
+	// Exhausted=true, drainer runs one oldest-due fallback and MUST persist nextCursor across
+	// passes (kills MUT=nodrainercursor).
+	st2 := &exhaustedSweepStore{memQueueStore: newMemQueueStore()}
+	_, err = st2.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+		Kind:      "trigger.event",
+		DedupKey:  "distant-victim",
+		ProjectID: "z-distant",
+		Payload:   []byte(`{}`),
+		CreatedAt: now,
+		NotBefore: now,
+	})
+	require.NoError(t, err)
+	var handled []string
+	d2, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:         st2,
+		Kind:          "trigger.event",
+		BatchSize:     4,
+		FairByProject: true,
+		Now:           func() time.Time { return now },
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			handled = append(handled, item.ProjectID+":"+item.DedupKey)
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+	res2, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 128, st2.calls, "sweep without wrap must stop at fairSweepMaxCalls")
+	assert.Equal(t, 1, st2.fifoCalls, "hitting sweep cap with Exhausted=true must run one oldest-due fallback")
+	assert.Equal(t, 1, res2.Done)
+	assert.Equal(t, []string{"z-distant:distant-victim"}, handled)
+
+	// Pass 2 on d2 (empty pass, Exhausted=false on first call) must start from "p0128",
+	// proving cursor persistence across passes, and Pass 3 must start from "p0129" (kills
+	// MUT=nodrainercursor on empty passes).
+	st2.stopOnCall = 129
+	res3, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, res3.Claimed)
+	assert.Equal(t, "p0128", st2.afterSeen[128], "pass 2 must resume from pass 1's swept cursor")
+
+	st2.stopOnCall = 130
+	res4, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, res4.Claimed)
+	assert.Equal(t, "p0129", st2.afterSeen[129], "pass 3 must resume from empty pass 2's nextCursor")
 }
