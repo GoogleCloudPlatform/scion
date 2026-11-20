@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -495,6 +496,20 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 		assertErrCode(t, postTrigger(userCtx, req), http.StatusBadRequest, ErrCodeValidationError)
 	})
 
+	t.Run("literal_agent_name_create_path_checks_at_authoring", func(t *testing.T) {
+		for _, bad := range []string{"admin", "hub", "UPPER", "bad name!"} {
+			req := baseReq("lit-name-" + api.Slugify(bad))
+			req.Action.AgentName = bad
+			details := assertErrCode(t, postTrigger(userCtx, req), http.StatusBadRequest, "invalid_value")
+			assert.Equal(t, "agentName", details["field"])
+		}
+		// Valid canonical literal succeeds.
+		reqOK := baseReq("lit-name-ok")
+		reqOK.Action.AgentName = "valid-worker-1"
+		rec := postTrigger(userCtx, reqOK)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	})
+
 	t.Run("agent_role_invalid_and_authz_baseline_vs_full_vs_member", func(t *testing.T) {
 		reqBadRole := baseReq("bad-role")
 		reqBadRole.Action.AgentRole = "superadmin"
@@ -964,4 +979,255 @@ func TestScheduleHandlers_RefuseTriggerOnlyDispatchAgentFields(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), "not supported for schedules")
 		})
 	}
+}
+
+type flipEndpointModeStore struct {
+	store.Store
+	active     atomic.Bool
+	endpointID string
+	mode       string
+}
+
+func (s *flipEndpointModeStore) GetWebhookEndpoint(ctx context.Context, id string) (*store.WebhookEndpoint, error) {
+	ep, err := s.Store.GetWebhookEndpoint(ctx, id)
+	if err == nil && ep != nil && s.active.Load() && id == s.endpointID {
+		cp := *ep
+		cp.SignatureMode = s.mode
+		return &cp, nil
+	}
+	return ep, err
+}
+
+func TestTriggerDispatchAgent_UpdateResumeAndRoleCaps(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "upd-resume-caps")
+
+	// Grant project-admin role to a user (members lack trigger.update).
+	adminUser := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "trig-admin@example.com",
+		DisplayName: "Trig Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}
+	require.NoError(t, f.sched.store.CreateUser(ctx, adminUser))
+	adminCtx := f.userAuth(t, adminUser)
+
+	// Install store wrapper before audited trigger mutations so we can flip an
+	// endpoint's signature mode to body_only for the resume test.
+	flipper, _ := installStoreFault(t, f.sched.srv, func(inner store.Store, _ *storeFaultSwitch) *flipEndpointModeStore {
+		return &flipEndpointModeStore{Store: inner, mode: store.WebhookSignatureModeBodyOnly}
+	})
+
+	scionEP := f.createEndpoint(t, adminCtx, "upd-scion-ep")
+	flipper.endpointID = scionEP.ID
+
+	bodyOnlyEP := &store.WebhookEndpoint{
+		ID:                  api.NewUUID(),
+		ProjectID:           f.sched.proj.ID,
+		Name:                "upd-body-only-ep",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    adminUser.ID,
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SecretVersion:       1,
+		SignatureMode:       store.WebhookSignatureModeBodyOnly,
+		Status:              store.WebhookEndpointStatusActive,
+		CreatedAt:           time.Now().UTC(),
+		UpdatedAt:           time.Now().UTC(),
+	}
+	require.NoError(t, f.sched.store.CreateWebhookEndpoint(ctx, bodyOnlyEP))
+
+	// Create a valid dispatch_agent trigger on the scion_v1 endpoint.
+	createDispRec := f.doJSON(t, adminCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:   "disp-trig",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEP.ID},
+			Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+			Action: TriggerActionSpec{Type: store.TriggerActionDispatchAgent, Task: "run"},
+		})
+	require.Equal(t, http.StatusCreated, createDispRec.Code, createDispRec.Body.String())
+	var dispTr TriggerResponse
+	require.NoError(t, json.Unmarshal(createDispRec.Body.Bytes(), &dispTr))
+
+	// 1. PATCH source of a dispatch_agent trigger to a non-replay-protected endpoint -> 400 source_not_replay_protected.
+	t.Run("patch_source_to_non_replay_protected_refused", func(t *testing.T) {
+		rec := f.doJSON(t, adminCtx, http.MethodPatch,
+			fmt.Sprintf("/api/v1/projects/%s/triggers/%s", f.sched.proj.ID, dispTr.ID),
+			UpdateTriggerRequest{
+				Source: &TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: bodyOnlyEP.ID},
+			})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "source_not_replay_protected")
+	})
+
+	// 2. PATCH action of a message trigger on a non-replay-protected endpoint to dispatch_agent -> 400 source_not_replay_protected.
+	t.Run("patch_message_trigger_on_body_only_to_dispatch_agent_refused", func(t *testing.T) {
+		targetAg := &store.Agent{
+			ID:        api.NewUUID(),
+			Slug:      "msg-target",
+			Name:      "msg-target",
+			ProjectID: f.sched.proj.ID,
+			Phase:     "running",
+		}
+		require.NoError(t, f.sched.store.CreateAgent(ctx, targetAg))
+
+		msgRec := f.doJSON(t, adminCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   "msg-on-body-only",
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: bodyOnlyEP.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+				Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAg.ID, Message: "hi"},
+			})
+		require.Equal(t, http.StatusCreated, msgRec.Code, msgRec.Body.String())
+		var msgTr TriggerResponse
+		require.NoError(t, json.Unmarshal(msgRec.Body.Bytes(), &msgTr))
+
+		patchRec := f.doJSON(t, adminCtx, http.MethodPatch,
+			fmt.Sprintf("/api/v1/projects/%s/triggers/%s", f.sched.proj.ID, msgTr.ID),
+			UpdateTriggerRequest{
+				Action: &TriggerActionSpec{Type: store.TriggerActionDispatchAgent, Task: "escalate"},
+			})
+		require.Equal(t, http.StatusBadRequest, patchRec.Code, patchRec.Body.String())
+		assert.Contains(t, patchRec.Body.String(), "source_not_replay_protected")
+	})
+
+	// 3. Pause dispatch_agent trigger, endpoint becomes non-replay-protected, resume -> 400 source_not_replay_protected.
+	t.Run("resume_after_endpoint_becomes_non_replay_protected_refused", func(t *testing.T) {
+		pauseRec := f.doJSON(t, adminCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers/%s/pause", f.sched.proj.ID, dispTr.ID), nil)
+		require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+
+		flipper.active.Store(true)
+		t.Cleanup(func() { flipper.active.Store(false) })
+
+		resumeRec := f.doJSON(t, adminCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers/%s/resume", f.sched.proj.ID, dispTr.ID), nil)
+		require.Equal(t, http.StatusBadRequest, resumeRec.Code, resumeRec.Body.String())
+		assert.Contains(t, resumeRec.Body.String(), "source_not_replay_protected")
+	})
+
+	// 4. Explicit agentRole: full with scion.io/max-agent-role=baseline -> 403.
+	t.Run("explicit_agent_role_exceeding_project_max_refused", func(t *testing.T) {
+		proj, err := f.sched.store.GetProject(ctx, f.sched.proj.ID)
+		require.NoError(t, err)
+		prevAnn := proj.Annotations
+		if proj.Annotations == nil {
+			proj.Annotations = map[string]string{}
+		}
+		proj.Annotations[projectSettingMaxAgentRole] = string(AgentRoleBaseline)
+		require.NoError(t, f.sched.store.UpdateProject(ctx, proj))
+		t.Cleanup(func() {
+			proj.Annotations = prevAnn
+			_ = f.sched.store.UpdateProject(ctx, proj)
+		})
+
+		rec := f.doJSON(t, adminCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   "over-project-max",
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEP.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+				Action: TriggerActionSpec{
+					Type:      store.TriggerActionDispatchAgent,
+					Task:      "run",
+					AgentRole: string(AgentRoleFull),
+				},
+			})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "project maximum")
+	})
+
+	// 5. Frozen-ceiling refusal (DeniedByDelegationCeiling): agent with bounded ceiling
+	// that admits baseline but not full requests explicit agentRole: full -> 403 DeniedByDelegationCeiling.
+	t.Run("explicit_agent_role_exceeding_frozen_ceiling_refused", func(t *testing.T) {
+		boundedAg := &store.Agent{
+			ID:            api.NewUUID(),
+			Slug:          "bounded-ceiling-author",
+			Name:          "bounded-ceiling-author",
+			ProjectID:     f.sched.proj.ID,
+			Phase:         "running",
+			AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+		}
+		require.NoError(t, f.sched.store.CreateAgent(ctx, boundedAg))
+		require.NoError(t, f.sched.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
+			ID:            api.NewUUID(),
+			DelegatorType: store.DelegationPrincipalUser,
+			DelegatorID:   adminUser.ID,
+			DelegateType:  store.DelegationPrincipalAgent,
+			DelegateID:    boundedAg.ID,
+			ScopeType:     store.RoleScopeProject,
+			ScopeID:       f.sched.proj.ID,
+			Role:          string(AgentRoleFull),
+			Active:        true,
+			EffectCeiling: store.EffectCeiling{
+				Kind:              store.EffectCeilingBounded,
+				Version:           1,
+				PermissionIDs:     []string{"agent.create", "agent.read", "project.read", "trigger.create", "webhook_endpoint.read"},
+				BoundaryKind:      "project",
+				BoundaryProjectID: f.sched.proj.ID,
+			},
+		}))
+		boundedCtx := f.agentAuth(t, boundedAg, AgentRoleFull)
+		boundedEP := f.createEndpoint(t, boundedCtx, "bounded-ep")
+
+		rec := f.doJSON(t, boundedCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   "over-ceiling",
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: boundedEP.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+				Action: TriggerActionSpec{
+					Type:      store.TriggerActionDispatchAgent,
+					Task:      "run",
+					AgentRole: string(AgentRoleFull),
+				},
+			})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
+	})
+
+	// 6. Agent author whose stored parent role is baseline (with a token carrying ScopeAgentCreate)
+	// requesting explicit agentRole: full -> 403 parent-role cap refusal.
+	t.Run("agent_author_requesting_role_above_parent_refused", func(t *testing.T) {
+		parentAg := &store.Agent{
+			ID:            api.NewUUID(),
+			Slug:          "downgraded-parent",
+			Name:          "downgraded-parent",
+			ProjectID:     f.sched.proj.ID,
+			Phase:         "running",
+			AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleBaseline)},
+		}
+		require.NoError(t, f.sched.store.CreateAgent(ctx, parentAg))
+		require.NoError(t, f.sched.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
+			ID:            api.NewUUID(),
+			DelegatorType: store.DelegationPrincipalUser,
+			DelegatorID:   adminUser.ID,
+			DelegateType:  store.DelegationPrincipalAgent,
+			DelegateID:    parentAg.ID,
+			ScopeType:     store.RoleScopeProject,
+			ScopeID:       f.sched.proj.ID,
+			Role:          string(AgentRoleBaseline),
+			Active:        true,
+			EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		}))
+		parentCtx := f.agentAuth(t, parentAg, AgentRoleFull)
+		parentEP := f.createEndpoint(t, parentCtx, "parent-cap-ep")
+
+		rec := f.doJSON(t, parentCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   "over-parent-role",
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: parentEP.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+				Action: TriggerActionSpec{
+					Type:      store.TriggerActionDispatchAgent,
+					Task:      "run",
+					AgentRole: string(AgentRoleFull),
+				},
+			})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "parent agent role")
+	})
 }

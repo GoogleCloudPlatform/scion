@@ -273,27 +273,58 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 				message: fmt.Sprintf("invalid label key %q: %v", k, err),
 			}
 		}
-		if err := validateTemplateSlot(payload.Labels[k], triggertemplate.SlotLabel, payload.UntrustedVars); err != nil {
+		if _, err := validateTemplateSlot(payload.Labels[k], triggertemplate.SlotLabel, payload.UntrustedVars); err != nil {
 			return "", err
 		}
 	}
 
 	// Parse and check untrustedVars coverage for all template slots (§5.1, §5.2).
-	if err := validateTemplateSlot(payload.Task, triggertemplate.SlotTask, payload.UntrustedVars); err != nil {
+	if _, err := validateTemplateSlot(payload.Task, triggertemplate.SlotTask, payload.UntrustedVars); err != nil {
 		return "", err
 	}
 	if payload.AgentName != "" {
-		if err := validateTemplateSlot(payload.AgentName, triggertemplate.SlotName, payload.UntrustedVars); err != nil {
+		nameTmpl, err := validateTemplateSlot(payload.AgentName, triggertemplate.SlotName, payload.UntrustedVars)
+		if err != nil {
 			return "", err
+		}
+		// When agentName is a literal (no placeholders), run the same create-path
+		// name checks at authoring so reserved or non-canonical names fail early.
+		if len(nameTmpl.Placeholders()) == 0 {
+			rendered, _, rErr := nameTmpl.Render(nil, nil)
+			if rErr != nil {
+				return "", &dispatchAgentValidationError{
+					status:  http.StatusBadRequest,
+					code:    "invalid_value",
+					message: fmt.Sprintf("invalid literal agentName: %v", rErr),
+					details: map[string]any{"field": "agentName"},
+				}
+			}
+			if _, dErr := api.ValidateDisplayName(rendered); dErr != nil {
+				return "", &dispatchAgentValidationError{
+					status:  http.StatusBadRequest,
+					code:    "invalid_value",
+					message: fmt.Sprintf("invalid literal agentName: %v", dErr),
+					details: map[string]any{"field": "agentName"},
+				}
+			}
+			slug, aErr := api.ValidateAgentName(rendered)
+			if aErr != nil || slug != rendered {
+				return "", &dispatchAgentValidationError{
+					status:  http.StatusBadRequest,
+					code:    "invalid_value",
+					message: "invalid literal agentName: must already be in canonical slug form",
+					details: map[string]any{"field": "agentName"},
+				}
+			}
 		}
 	}
 	if payload.Branch != "" {
-		if err := validateTemplateSlot(payload.Branch, triggertemplate.SlotBranch, payload.UntrustedVars); err != nil {
+		if _, err := validateTemplateSlot(payload.Branch, triggertemplate.SlotBranch, payload.UntrustedVars); err != nil {
 			return "", err
 		}
 	}
 	if payload.ReuseMessage != "" {
-		if err := validateTemplateSlot(payload.ReuseMessage, triggertemplate.SlotMessage, payload.UntrustedVars); err != nil {
+		if _, err := validateTemplateSlot(payload.ReuseMessage, triggertemplate.SlotMessage, payload.UntrustedVars); err != nil {
 			return "", err
 		}
 	}
@@ -310,14 +341,14 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 	return string(normalized), nil
 }
 
-func validateTemplateSlot(raw, slot string, allowed []string) error {
-	_, err := triggertemplate.ValidateSlot(raw, slot, allowed)
+func validateTemplateSlot(raw, slot string, allowed []string) (*triggertemplate.Template, error) {
+	tmpl, err := triggertemplate.ValidateSlot(raw, slot, allowed)
 	if err == nil {
-		return nil
+		return tmpl, nil
 	}
 	var pe *triggertemplate.ParseError
 	if errors.As(err, &pe) {
-		return &dispatchAgentValidationError{
+		return nil, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_template",
 			message: pe.Error(),
@@ -330,7 +361,7 @@ func validateTemplateSlot(raw, slot string, allowed []string) error {
 	}
 	var ue *triggertemplate.UntrustedVarError
 	if errors.As(err, &ue) {
-		return &dispatchAgentValidationError{
+		return nil, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "untrusted_var_not_allowed",
 			message: ue.Error(),
@@ -340,7 +371,7 @@ func validateTemplateSlot(raw, slot string, allowed []string) error {
 			},
 		}
 	}
-	return &dispatchAgentValidationError{
+	return nil, &dispatchAgentValidationError{
 		status:  http.StatusBadRequest,
 		code:    ErrCodeValidationError,
 		message: err.Error(),
