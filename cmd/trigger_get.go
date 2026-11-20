@@ -78,7 +78,7 @@ func runTriggerGet(cmd *cobra.Command, args []string) error {
 	}
 
 	if isTriggerJSONOutput() {
-		return outputJSON(tr)
+		return outputTriggerJSON(tr)
 	}
 
 	printTriggerDetail(tr)

@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
@@ -68,9 +69,18 @@ func isTriggerJSONOutput() bool {
 	return isJSONOutput() || triggerOutputJSON
 }
 
+func outputTriggerJSON(v any) error {
+	raw, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(os.Stdout, escapeTriggerJSONBytes(raw))
+	return err
+}
+
 func outputTriggerActionResult(r ActionResult) error {
 	if isTriggerJSONOutput() {
-		return outputJSON(r)
+		return outputTriggerJSON(r)
 	}
 	return outputActionResult(r)
 }
@@ -567,7 +577,7 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	if isTriggerJSONOutput() {
-		return outputJSON(created)
+		return outputTriggerJSON(created)
 	}
 
 	agentLabel := created.Action.AgentName
@@ -623,7 +633,7 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 	}
 
 	if isTriggerJSONOutput() {
-		return outputJSON(resp)
+		return outputTriggerJSON(resp)
 	}
 
 	callerScoped := isCallerScopedTriggerView(hubCtx, resp.Scope)
@@ -778,7 +788,7 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 	}
 
 	if isTriggerJSONOutput() {
-		return outputJSON(resp)
+		return outputTriggerJSON(resp)
 	}
 
 	if len(resp.Fires) == 0 {
@@ -870,34 +880,49 @@ func formatTriggerQuotedList(vals []string) string {
 	return b.String()
 }
 
-// escapeTriggerJSONTerminalRunes rewrites DEL (0x7f), C1 controls (0x80..0x9f),
-// and Unicode Cf format characters inside json.Indent output to standard RFC 8259
-// \uXXXX escapes (or UTF-16 surrogate pairs above U+FFFF), keeping the document
-// valid JSON while preventing terminal control or bidi injection.
-func escapeTriggerJSONTerminalRunes(indented string) string {
+// escapeTriggerJSONBytes rewrites DEL (0x7f), C1 controls (0x80..0x9f),
+// Unicode Cf format characters (including bidirectional overrides), U+2028 and
+// U+2029 line/paragraph separators, and non-newline C0 controls inside indented
+// JSON output to standard RFC 8259 \uXXXX escapes (or UTF-16 surrogate pairs
+// above U+FFFF), and normalises invalid UTF-8 bytes to \ufffd. This keeps JSON
+// output valid while preventing raw terminal control or bidi injection.
+func escapeTriggerJSONBytes(encoded []byte) string {
 	needsEscape := false
-	for _, r := range indented {
-		if r == 0x7f || (r >= 0x80 && r <= 0x9f) || unicode.Is(unicode.Cf, r) {
+	for i := 0; i < len(encoded); {
+		r, size := utf8.DecodeRune(encoded[i:])
+		if (r == utf8.RuneError && size <= 1) ||
+			(r < 0x20 && r != '\n') ||
+			r == 0x7f ||
+			(r >= 0x80 && r <= 0x9f) ||
+			r == '\u2028' ||
+			r == '\u2029' ||
+			unicode.Is(unicode.Cf, r) {
 			needsEscape = true
 			break
 		}
+		i += size
 	}
 	if !needsEscape {
-		return indented
+		return string(encoded)
 	}
 	var b strings.Builder
-	b.Grow(len(indented) + 16)
-	for _, r := range indented {
-		if r == 0x7f || (r >= 0x80 && r <= 0x9f) || unicode.Is(unicode.Cf, r) {
+	b.Grow(len(encoded) + 16)
+	for i := 0; i < len(encoded); {
+		r, size := utf8.DecodeRune(encoded[i:])
+		switch {
+		case r == utf8.RuneError && size <= 1:
+			b.WriteString(`\ufffd`)
+		case (r < 0x20 && r != '\n') || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == '\u2028' || r == '\u2029' || unicode.Is(unicode.Cf, r):
 			if r <= 0xffff {
 				fmt.Fprintf(&b, `\u%04x`, r)
 			} else {
 				r1, r2 := utf16.EncodeRune(r)
 				fmt.Fprintf(&b, `\u%04x\u%04x`, r1, r2)
 			}
-			continue
+		default:
+			b.WriteRune(r)
 		}
-		b.WriteRune(r)
+		i += size
 	}
 	return b.String()
 }

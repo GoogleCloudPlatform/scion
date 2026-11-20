@@ -274,23 +274,23 @@ func runTriggerWebhookCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	if isTriggerJSONOutput() {
-		return outputJSON(created)
+		return outputTriggerJSON(created)
 	}
 
-	fmt.Printf("Webhook endpoint created: %s\n", created.ID)
-	fmt.Printf("  Name:           %s\n", created.Name)
-	fmt.Printf("  URL:            %s\n", created.URL)
-	fmt.Printf("  Signature Mode: %s\n", created.SignatureMode)
+	fmt.Printf("Webhook endpoint created: %s\n", triggerTerminalText(created.ID, false))
+	fmt.Printf("  Name:           %s\n", triggerTerminalText(created.Name, false))
+	fmt.Printf("  URL:            %s\n", triggerTerminalText(created.URL, false))
+	fmt.Printf("  Signature Mode: %s\n", triggerTerminalText(created.SignatureMode, false))
 	fmt.Printf("  Secret:         %s\n", created.Secret)
 	if created.TriggerID != "" {
-		fmt.Printf("  Trigger:        %s\n", created.TriggerID)
+		fmt.Printf("  Trigger:        %s\n", triggerTerminalText(created.TriggerID, false))
 		if created.Trigger != nil {
 			agentLabel := created.Trigger.Action.AgentName
 			if agentLabel == "" {
 				agentLabel = created.Trigger.Action.AgentID
 			}
 			if agentLabel != "" {
-				fmt.Printf("  Target Agent:   %s\n", agentLabel)
+				fmt.Printf("  Target Agent:   %s\n", triggerTerminalText(agentLabel, false))
 			}
 		}
 	}
@@ -318,7 +318,7 @@ func runTriggerWebhookGet(cmd *cobra.Command, args []string) error {
 	}
 
 	if isTriggerJSONOutput() {
-		return outputJSON(ep)
+		return outputTriggerJSON(ep)
 	}
 
 	printWebhookEndpointDetail(ep)
@@ -326,15 +326,15 @@ func runTriggerWebhookGet(cmd *cobra.Command, args []string) error {
 }
 
 func printWebhookEndpointDetail(ep *hubclient.WebhookEndpoint) {
-	fmt.Printf("Webhook Endpoint: %s\n", ep.ID)
-	fmt.Printf("  Name:           %s\n", ep.Name)
+	fmt.Printf("Webhook Endpoint: %s\n", triggerTerminalText(ep.ID, false))
+	fmt.Printf("  Name:           %s\n", triggerTerminalText(ep.Name, false))
 	if ep.Description != "" {
-		fmt.Printf("  Description:    %s\n", ep.Description)
+		fmt.Printf("  Description:    %s\n", triggerTerminalText(ep.Description, false))
 	}
-	fmt.Printf("  Project:        %s\n", ep.ProjectID)
-	fmt.Printf("  Status:         %s\n", ep.Status)
-	fmt.Printf("  URL:            %s\n", ep.URL)
-	fmt.Printf("  Signature Mode: %s\n", ep.SignatureMode)
+	fmt.Printf("  Project:        %s\n", triggerTerminalText(ep.ProjectID, false))
+	fmt.Printf("  Status:         %s\n", triggerTerminalText(ep.Status, false))
+	fmt.Printf("  URL:            %s\n", triggerTerminalText(ep.URL, false))
+	fmt.Printf("  Signature Mode: %s\n", triggerTerminalText(ep.SignatureMode, false))
 	fmt.Printf("  Secret Version: %d\n", ep.SecretVersion)
 	fmt.Printf("  Received:       %d (rejected: %d)\n", ep.ReceiveCount, ep.RejectCount)
 	lastRecv := "-"
@@ -361,7 +361,7 @@ func runTriggerWebhookList(cmd *cobra.Command, args []string) error {
 	}
 
 	if isTriggerJSONOutput() {
-		return outputJSON(resp)
+		return outputTriggerJSON(resp)
 	}
 
 	callerScoped := isCallerScopedTriggerView(hubCtx, resp.Scope)
@@ -391,11 +391,11 @@ func runTriggerWebhookList(cmd *cobra.Command, args []string) error {
 			lastRecv = clitime.Ago(*ep.LastReceivedAt)
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
-			shortID,
-			ep.Name,
-			ep.Status,
-			ep.SignatureMode,
-			ep.URL,
+			triggerTerminalText(shortID, false),
+			triggerTerminalText(ep.Name, false),
+			triggerTerminalText(ep.Status, false),
+			triggerTerminalText(ep.SignatureMode, false),
+			triggerTerminalText(ep.URL, false),
 			ep.ReceiveCount,
 			lastRecv,
 		)

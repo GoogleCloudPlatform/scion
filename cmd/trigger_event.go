@@ -168,7 +168,7 @@ func runTriggerEventList(cmd *cobra.Command, args []string) error {
 	}
 
 	if isTriggerJSONOutput() {
-		return outputJSON(resp)
+		return outputTriggerJSON(resp)
 	}
 
 	callerScoped := isCallerScopedTriggerView(hubCtx, resp.Scope)
@@ -239,7 +239,7 @@ func runTriggerEventGet(cmd *cobra.Command, args []string) error {
 	}
 
 	if isTriggerJSONOutput() {
-		return outputJSON(detail)
+		return outputTriggerJSON(detail)
 	}
 
 	subj := detail.Subject
@@ -325,7 +325,7 @@ func formatTriggerEventPayload(raw json.RawMessage, prefix string) string {
 		}
 		return prefix + safe
 	}
-	return prefix + escapeTriggerJSONTerminalRunes(buf.String())
+	return prefix + escapeTriggerJSONBytes(buf.Bytes())
 }
 
 func init() {

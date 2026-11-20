@@ -32,6 +32,7 @@ import (
 	"testing"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
@@ -1996,6 +1997,36 @@ func TestTriggerWebhookCLI_GetAndOneCallCreate(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "owned by this agent")
 	})
+
+	// 5. One-call Target Agent and webhook get Name/Description sanitize terminal control and Cf runes (O2).
+	t.Run("one-call Target Agent and webhook get Name/Description sanitize terminal controls", func(t *testing.T) {
+		resetCreateFlags()
+		prevEndpoint := endpointDetail
+		t.Cleanup(func() { endpointDetail = prevEndpoint })
+
+		endpointDetail.Name = "ci-\x1b[31mhook\u202e"
+		endpointDetail.Description = "line1\n  Secret Version: 99\x1b[32m\u202e"
+
+		triggerWebhookName = "ci-hook"
+		triggerWebhookAgent = "target-\x1b[31magent\u202e\n  forged: 1"
+		triggerWebhookMessage = "wake up"
+
+		createOut := captureStdout(t, func() {
+			require.NoError(t, runTriggerWebhookCreate(triggerWebhookCreateCmd, nil))
+		})
+		assert.NotContains(t, createOut, "\x1b[")
+		assert.NotContains(t, createOut, "\u202e")
+		assert.Contains(t, createOut, `Target Agent:   target-\x1b[31magent\u{202e}\x0a  forged: 1`)
+
+		getOut := captureStdout(t, func() {
+			require.NoError(t, runTriggerWebhookGet(triggerWebhookGetCmd, []string{epID}))
+		})
+		assert.NotContains(t, getOut, "\x1b[")
+		assert.NotContains(t, getOut, "\u202e")
+		assert.NotContains(t, getOut, "\n  Secret Version: 99")
+		assert.Contains(t, getOut, `Name:           ci-\x1b[31mhook\u{202e}`)
+		assert.Contains(t, getOut, `Description:    line1\x0a  Secret Version: 99\x1b[32m\u{202e}`)
+	})
 }
 
 func TestTriggerCLI_JSONFlagEverywhere(t *testing.T) {
@@ -2258,6 +2289,7 @@ func TestTriggerEventAndHistoryCLI_SanitizesTerminalControlAndBidiCharacters(t *
 
 	assertTerminalSafe := func(t *testing.T, label, out string) {
 		t.Helper()
+		require.Truef(t, utf8.ValidString(out), "%s contains invalid UTF-8:\n%q", label, out)
 		for i, r := range out {
 			if r == '\n' || r == '\t' {
 				continue
@@ -2325,14 +2357,57 @@ func TestTriggerEventAndHistoryCLI_SanitizesTerminalControlAndBidiCharacters(t *
 	assert.Contains(t, histOut, `\x1b[31m`)
 	assert.Contains(t, histOut, `\u{202e}`)
 
-	// 5. `--json` output stays standard JSON-escaped and round-trips original strings without corruption.
+	// 5. `--json` output on event get, event list, and trigger history ALSO escapes DEL, C1, Cf, and U+2028/U+2029 as \uXXXX, normalises invalid UTF-8, and round-trips original strings via json.Unmarshal.
 	triggerOutputJSON = true
+
 	jsonGetOut := captureStdout(t, func() {
 		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{evID}))
 	})
+	assertTerminalSafe(t, "event get --json", jsonGetOut)
+	assert.Contains(t, jsonGetOut, `\u007f`)
+	assert.Contains(t, jsonGetOut, `\u009b`)
+	assert.Contains(t, jsonGetOut, `\u202e`)
+	assert.Contains(t, jsonGetOut, `\u2028`)
 	var gotDetail hubclient.TriggerEventDetail
 	require.NoError(t, json.Unmarshal([]byte(jsonGetOut), &gotDetail))
 	assert.Equal(t, hostileSubject, gotDetail.Subject)
 	assert.Equal(t, hostileAttrVal, gotDetail.Attributes[hostileAttrKey])
 	assert.Equal(t, []string{"clean-label", hostileListVal}, gotDetail.Lists["labels"])
+
+	jsonListOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventList(triggerEventListCmd, nil))
+	})
+	assertTerminalSafe(t, "event list --json", jsonListOut)
+	assert.Contains(t, jsonListOut, `\u202e`)
+	var gotList hubclient.ListTriggerEventsResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonListOut), &gotList))
+	require.Len(t, gotList.Events, 1)
+	assert.Equal(t, hostileSubject, gotList.Events[0].Subject)
+	assert.Equal(t, hostileCursor, gotList.NextCursor)
+
+	jsonHistOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerHistory(triggerHistoryCmd, []string{trID}))
+	})
+	assertTerminalSafe(t, "trigger history --json", jsonHistOut)
+	assert.Contains(t, jsonHistOut, `\u202e`)
+	var gotHist hubclient.ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonHistOut), &gotHist))
+	require.Len(t, gotHist.Fires, 1)
+	assert.Equal(t, hostileSubject, gotHist.Fires[0].Subject)
+	assert.Equal(t, hostileError, gotHist.Fires[0].Error)
+	assert.Equal(t, hostileCursor, gotHist.NextCursor)
+
+	// 6. Invalid UTF-8 bytes and raw UTF-8 U+2028/U+2029/supplementary Cf inside json.RawMessage are normalised and \uXXXX-escaped (O1).
+	rawInvalidUTF8AndSeparators := json.RawMessage("{\"bad\":\"\xff\",\"sep\":\"\xe2\x80\xa8\xe2\x80\xa9\",\"tag\":\"\U000e0001\"}")
+	indentedInvalid := formatTriggerEventPayload(rawInvalidUTF8AndSeparators, "")
+	assertTerminalSafe(t, "formatTriggerEventPayload invalid UTF-8 + U+2028/U+2029 + supplementary Cf", indentedInvalid)
+	assert.Contains(t, indentedInvalid, `\ufffd`)
+	assert.Contains(t, indentedInvalid, `\u2028`)
+	assert.Contains(t, indentedInvalid, `\u2029`)
+	assert.Contains(t, indentedInvalid, `\udb40\udc01`)
+	var decodedInvalid map[string]string
+	require.NoError(t, json.Unmarshal([]byte(indentedInvalid), &decodedInvalid))
+	assert.Equal(t, "\ufffd", decodedInvalid["bad"])
+	assert.Equal(t, "\u2028\u2029", decodedInvalid["sep"])
+	assert.Equal(t, "\U000e0001", decodedInvalid["tag"])
 }
