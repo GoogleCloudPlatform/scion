@@ -859,6 +859,16 @@ func (e *deletionEngine) run() deletionOutcome {
 		defer cancel()
 		s.pauseTriggersAuthoredByAgent(ctx, agent)
 	})
+	// Release active trigger subject claims bound to this agent (Stage 2 §4.2, §5.6).
+	// Idempotent on retry; hourly trigger maintenance also sweeps claims for deleted agents.
+	e.tailStep("release trigger subject claims", func() {
+		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
+		defer cancel()
+		if _, err := s.store.ReleaseTriggerSubjectClaimsForAgent(ctx, agent.ID, time.Now().UTC()); err != nil {
+			s.agentLifecycleLog.Warn("Failed to release trigger subject claims for deleted agent",
+				"agent_id", agent.ID, "error", err)
+		}
+	})
 
 	return deletionOutcome{kind: deletionOutcomeDeleted}
 }

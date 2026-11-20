@@ -493,15 +493,17 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 		assert.Equal(t, "message", details["slot"])
 	})
 
-	t.Run("subject_mode_skip_refused", func(t *testing.T) {
-		// dispatch_agent + subject.mode=skip is refused until P1c-2 subject claims.
+	t.Run("subject_mode_skip_allowed_for_dispatch_agent", func(t *testing.T) {
+		// dispatch_agent + subject.mode=skip is accepted (P1c-2 subject claims).
 		reqSkip := baseReq("skip-mode")
 		reqSkip.Subject = &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip}
 		recSkip := postTrigger(userCtx, reqSkip)
-		assertErrCode(t, recSkip, http.StatusBadRequest, "dispatch_agent_skip_unsupported")
-		assert.Contains(t, recSkip.Body.String(), "P1c-2")
+		require.Equal(t, http.StatusCreated, recSkip.Code, recSkip.Body.String())
+		var resp TriggerResponse
+		require.NoError(t, json.Unmarshal(recSkip.Body.Bytes(), &resp))
+		assert.Equal(t, store.TriggerSubjectModeSkip, resp.Subject.Mode)
 
-		// dispatch_agent + subject.mode=reuse remains refused until P1c-2.
+		// dispatch_agent + subject.mode=reuse remains refused until Stage 3.
 		reqReuse := baseReq("reuse-mode")
 		reqReuse.Subject = &TriggerSubjectSpec{Mode: "reuse"}
 		assertErrCode(t, postTrigger(userCtx, reqReuse), http.StatusBadRequest, ErrCodeValidationError)

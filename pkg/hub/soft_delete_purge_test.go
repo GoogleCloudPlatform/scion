@@ -28,12 +28,14 @@ import (
 // makes. Every other store method is unused here.
 type purgeCountingStore struct {
 	store.Store
-	mu                      sync.Mutex
-	agentCutoffs            []time.Time
-	eventCalls              int
-	triggerReapCalls        int
-	triggerReconcileCalls   int
-	triggerHistoryPurgeCall int
+	mu                       sync.Mutex
+	agentCutoffs             []time.Time
+	eventCalls               int
+	triggerReapCalls         int
+	triggerReconcileCalls    int
+	triggerHistoryPurgeCall  int
+	triggerClaimReleaseCalls int
+	triggerClaimPurgeCalls   int
 }
 
 // ListSoftDeletedAgentsBefore is the agent purge's first store call
@@ -73,16 +75,30 @@ func (p *purgeCountingStore) PurgeOldTriggerHistory(_ context.Context, _ time.Ti
 	return 0, 0, nil
 }
 
+func (p *purgeCountingStore) ReleaseTerminalTriggerSubjectClaims(_ context.Context, _ time.Time) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.triggerClaimReleaseCalls++
+	return 0, nil
+}
+
+func (p *purgeCountingStore) PurgeOldTriggerSubjectClaims(_ context.Context, _ time.Time) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.triggerClaimPurgeCalls++
+	return 0, nil
+}
+
 func (p *purgeCountingStore) counts() (agents, events int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.agentCutoffs), p.eventCalls
 }
 
-func (p *purgeCountingStore) triggerMaintenanceCounts() (reap, reconcile, purge int) {
+func (p *purgeCountingStore) triggerMaintenanceCounts() (reap, reconcile, purge, claimRelease, claimPurge int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.triggerReapCalls, p.triggerReconcileCalls, p.triggerHistoryPurgeCall
+	return p.triggerReapCalls, p.triggerReconcileCalls, p.triggerHistoryPurgeCall, p.triggerClaimReleaseCalls, p.triggerClaimPurgeCalls
 }
 
 // The scheduled-event purge runs on every tick, whatever the soft-delete
@@ -138,8 +154,10 @@ func TestPurgeHandler_RunsTriggerMaintenance(t *testing.T) {
 	srv.recordStartupLayer1Values()
 
 	srv.purgeHandler()(context.Background())
-	reap, reconcile, purge := st.triggerMaintenanceCounts()
+	reap, reconcile, purge, claimRelease, claimPurge := st.triggerMaintenanceCounts()
 	assert.Equal(t, 1, reap, "purgeHandler reaps expired trigger fires")
 	assert.Equal(t, 1, reconcile, "purgeHandler reconciles orphaned pending trigger events")
 	assert.Equal(t, 1, purge, "purgeHandler purges old trigger history")
+	assert.Equal(t, 1, claimRelease, "purgeHandler releases terminal trigger subject claims")
+	assert.Equal(t, 1, claimPurge, "purgeHandler purges old released trigger subject claims")
 }

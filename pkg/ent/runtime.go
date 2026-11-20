@@ -107,6 +107,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -3726,6 +3727,24 @@ func init() {
 	triggerfireDescID := triggerfireFields[0].Descriptor()
 	// triggerfire.DefaultID holds the default value on creation for the id field.
 	triggerfire.DefaultID = triggerfireDescID.Default.(func() uuid.UUID)
+	triggersubjectclaimFields := schema.TriggerSubjectClaim{}.Fields()
+	_ = triggersubjectclaimFields
+	// triggersubjectclaimDescSubject is the schema descriptor for subject field.
+	triggersubjectclaimDescSubject := triggersubjectclaimFields[2].Descriptor()
+	// triggersubjectclaim.SubjectValidator is a validator for the "subject" field. It is called by the builders before save.
+	triggersubjectclaim.SubjectValidator = triggersubjectclaimDescSubject.Validators[0].(func(string) error)
+	// triggersubjectclaimDescState is the schema descriptor for state field.
+	triggersubjectclaimDescState := triggersubjectclaimFields[3].Descriptor()
+	// triggersubjectclaim.DefaultState holds the default value on creation for the state field.
+	triggersubjectclaim.DefaultState = triggersubjectclaimDescState.Default.(string)
+	// triggersubjectclaimDescClaimedAt is the schema descriptor for claimed_at field.
+	triggersubjectclaimDescClaimedAt := triggersubjectclaimFields[7].Descriptor()
+	// triggersubjectclaim.DefaultClaimedAt holds the default value on creation for the claimed_at field.
+	triggersubjectclaim.DefaultClaimedAt = triggersubjectclaimDescClaimedAt.Default.(func() time.Time)
+	// triggersubjectclaimDescID is the schema descriptor for id field.
+	triggersubjectclaimDescID := triggersubjectclaimFields[0].Descriptor()
+	// triggersubjectclaim.DefaultID holds the default value on creation for the id field.
+	triggersubjectclaim.DefaultID = triggersubjectclaimDescID.Default.(func() uuid.UUID)
 	usagereservationFields := schema.UsageReservation{}.Fields()
 	_ = usagereservationFields
 	// usagereservationDescSubjectID is the schema descriptor for subject_id field.

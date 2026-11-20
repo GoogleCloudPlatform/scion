@@ -214,6 +214,8 @@ type Tx struct {
 	TriggerEvent *TriggerEventClient
 	// TriggerFire is the client for interacting with the TriggerFire builders.
 	TriggerFire *TriggerFireClient
+	// TriggerSubjectClaim is the client for interacting with the TriggerSubjectClaim builders.
+	TriggerSubjectClaim *TriggerSubjectClaimClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// User is the client for interacting with the User builders.
@@ -460,6 +462,7 @@ func (tx *Tx) init() {
 	tx.Trigger = NewTriggerClient(tx.config)
 	tx.TriggerEvent = NewTriggerEventClient(tx.config)
 	tx.TriggerFire = NewTriggerFireClient(tx.config)
+	tx.TriggerSubjectClaim = NewTriggerSubjectClaimClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)

@@ -115,6 +115,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -237,6 +238,7 @@ const (
 	TypeTrigger                       = "Trigger"
 	TypeTriggerEvent                  = "TriggerEvent"
 	TypeTriggerFire                   = "TriggerFire"
+	TypeTriggerSubjectClaim           = "TriggerSubjectClaim"
 	TypeUsageReservation              = "UsageReservation"
 	TypeUser                          = "User"
 	TypeUserAccessToken               = "UserAccessToken"
@@ -120819,6 +120821,830 @@ func (m *TriggerFireMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *TriggerFireMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown TriggerFire edge %s", name)
+}
+
+// TriggerSubjectClaimMutation represents an operation that mutates the TriggerSubjectClaim nodes in the graph.
+type TriggerSubjectClaimMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	trigger_id    *uuid.UUID
+	subject       *string
+	state         *string
+	agent_id      *uuid.UUID
+	event_id      *uuid.UUID
+	fire_id       *uuid.UUID
+	claimed_at    *time.Time
+	bound_at      *time.Time
+	released_at   *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*TriggerSubjectClaim, error)
+	predicates    []predicate.TriggerSubjectClaim
+}
+
+var _ ent.Mutation = (*TriggerSubjectClaimMutation)(nil)
+
+// triggersubjectclaimOption allows management of the mutation configuration using functional options.
+type triggersubjectclaimOption func(*TriggerSubjectClaimMutation)
+
+// newTriggerSubjectClaimMutation creates new mutation for the TriggerSubjectClaim entity.
+func newTriggerSubjectClaimMutation(c config, op Op, opts ...triggersubjectclaimOption) *TriggerSubjectClaimMutation {
+	m := &TriggerSubjectClaimMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeTriggerSubjectClaim,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withTriggerSubjectClaimID sets the ID field of the mutation.
+func withTriggerSubjectClaimID(id uuid.UUID) triggersubjectclaimOption {
+	return func(m *TriggerSubjectClaimMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *TriggerSubjectClaim
+		)
+		m.oldValue = func(ctx context.Context) (*TriggerSubjectClaim, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().TriggerSubjectClaim.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withTriggerSubjectClaim sets the old TriggerSubjectClaim of the mutation.
+func withTriggerSubjectClaim(node *TriggerSubjectClaim) triggersubjectclaimOption {
+	return func(m *TriggerSubjectClaimMutation) {
+		m.oldValue = func(context.Context) (*TriggerSubjectClaim, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m TriggerSubjectClaimMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m TriggerSubjectClaimMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of TriggerSubjectClaim entities.
+func (m *TriggerSubjectClaimMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *TriggerSubjectClaimMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *TriggerSubjectClaimMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().TriggerSubjectClaim.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetTriggerID sets the "trigger_id" field.
+func (m *TriggerSubjectClaimMutation) SetTriggerID(u uuid.UUID) {
+	m.trigger_id = &u
+}
+
+// TriggerID returns the value of the "trigger_id" field in the mutation.
+func (m *TriggerSubjectClaimMutation) TriggerID() (r uuid.UUID, exists bool) {
+	v := m.trigger_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTriggerID returns the old "trigger_id" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldTriggerID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTriggerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTriggerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTriggerID: %w", err)
+	}
+	return oldValue.TriggerID, nil
+}
+
+// ResetTriggerID resets all changes to the "trigger_id" field.
+func (m *TriggerSubjectClaimMutation) ResetTriggerID() {
+	m.trigger_id = nil
+}
+
+// SetSubject sets the "subject" field.
+func (m *TriggerSubjectClaimMutation) SetSubject(s string) {
+	m.subject = &s
+}
+
+// Subject returns the value of the "subject" field in the mutation.
+func (m *TriggerSubjectClaimMutation) Subject() (r string, exists bool) {
+	v := m.subject
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSubject returns the old "subject" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldSubject(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSubject is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSubject requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSubject: %w", err)
+	}
+	return oldValue.Subject, nil
+}
+
+// ResetSubject resets all changes to the "subject" field.
+func (m *TriggerSubjectClaimMutation) ResetSubject() {
+	m.subject = nil
+}
+
+// SetState sets the "state" field.
+func (m *TriggerSubjectClaimMutation) SetState(s string) {
+	m.state = &s
+}
+
+// State returns the value of the "state" field in the mutation.
+func (m *TriggerSubjectClaimMutation) State() (r string, exists bool) {
+	v := m.state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldState returns the old "state" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldState(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldState: %w", err)
+	}
+	return oldValue.State, nil
+}
+
+// ResetState resets all changes to the "state" field.
+func (m *TriggerSubjectClaimMutation) ResetState() {
+	m.state = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *TriggerSubjectClaimMutation) SetAgentID(u uuid.UUID) {
+	m.agent_id = &u
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *TriggerSubjectClaimMutation) AgentID() (r uuid.UUID, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldAgentID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (m *TriggerSubjectClaimMutation) ClearAgentID() {
+	m.agent_id = nil
+	m.clearedFields[triggersubjectclaim.FieldAgentID] = struct{}{}
+}
+
+// AgentIDCleared returns if the "agent_id" field was cleared in this mutation.
+func (m *TriggerSubjectClaimMutation) AgentIDCleared() bool {
+	_, ok := m.clearedFields[triggersubjectclaim.FieldAgentID]
+	return ok
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *TriggerSubjectClaimMutation) ResetAgentID() {
+	m.agent_id = nil
+	delete(m.clearedFields, triggersubjectclaim.FieldAgentID)
+}
+
+// SetEventID sets the "event_id" field.
+func (m *TriggerSubjectClaimMutation) SetEventID(u uuid.UUID) {
+	m.event_id = &u
+}
+
+// EventID returns the value of the "event_id" field in the mutation.
+func (m *TriggerSubjectClaimMutation) EventID() (r uuid.UUID, exists bool) {
+	v := m.event_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEventID returns the old "event_id" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldEventID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEventID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEventID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEventID: %w", err)
+	}
+	return oldValue.EventID, nil
+}
+
+// ResetEventID resets all changes to the "event_id" field.
+func (m *TriggerSubjectClaimMutation) ResetEventID() {
+	m.event_id = nil
+}
+
+// SetFireID sets the "fire_id" field.
+func (m *TriggerSubjectClaimMutation) SetFireID(u uuid.UUID) {
+	m.fire_id = &u
+}
+
+// FireID returns the value of the "fire_id" field in the mutation.
+func (m *TriggerSubjectClaimMutation) FireID() (r uuid.UUID, exists bool) {
+	v := m.fire_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFireID returns the old "fire_id" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldFireID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFireID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFireID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFireID: %w", err)
+	}
+	return oldValue.FireID, nil
+}
+
+// ResetFireID resets all changes to the "fire_id" field.
+func (m *TriggerSubjectClaimMutation) ResetFireID() {
+	m.fire_id = nil
+}
+
+// SetClaimedAt sets the "claimed_at" field.
+func (m *TriggerSubjectClaimMutation) SetClaimedAt(t time.Time) {
+	m.claimed_at = &t
+}
+
+// ClaimedAt returns the value of the "claimed_at" field in the mutation.
+func (m *TriggerSubjectClaimMutation) ClaimedAt() (r time.Time, exists bool) {
+	v := m.claimed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldClaimedAt returns the old "claimed_at" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldClaimedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldClaimedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldClaimedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldClaimedAt: %w", err)
+	}
+	return oldValue.ClaimedAt, nil
+}
+
+// ResetClaimedAt resets all changes to the "claimed_at" field.
+func (m *TriggerSubjectClaimMutation) ResetClaimedAt() {
+	m.claimed_at = nil
+}
+
+// SetBoundAt sets the "bound_at" field.
+func (m *TriggerSubjectClaimMutation) SetBoundAt(t time.Time) {
+	m.bound_at = &t
+}
+
+// BoundAt returns the value of the "bound_at" field in the mutation.
+func (m *TriggerSubjectClaimMutation) BoundAt() (r time.Time, exists bool) {
+	v := m.bound_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBoundAt returns the old "bound_at" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldBoundAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBoundAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBoundAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBoundAt: %w", err)
+	}
+	return oldValue.BoundAt, nil
+}
+
+// ClearBoundAt clears the value of the "bound_at" field.
+func (m *TriggerSubjectClaimMutation) ClearBoundAt() {
+	m.bound_at = nil
+	m.clearedFields[triggersubjectclaim.FieldBoundAt] = struct{}{}
+}
+
+// BoundAtCleared returns if the "bound_at" field was cleared in this mutation.
+func (m *TriggerSubjectClaimMutation) BoundAtCleared() bool {
+	_, ok := m.clearedFields[triggersubjectclaim.FieldBoundAt]
+	return ok
+}
+
+// ResetBoundAt resets all changes to the "bound_at" field.
+func (m *TriggerSubjectClaimMutation) ResetBoundAt() {
+	m.bound_at = nil
+	delete(m.clearedFields, triggersubjectclaim.FieldBoundAt)
+}
+
+// SetReleasedAt sets the "released_at" field.
+func (m *TriggerSubjectClaimMutation) SetReleasedAt(t time.Time) {
+	m.released_at = &t
+}
+
+// ReleasedAt returns the value of the "released_at" field in the mutation.
+func (m *TriggerSubjectClaimMutation) ReleasedAt() (r time.Time, exists bool) {
+	v := m.released_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReleasedAt returns the old "released_at" field's value of the TriggerSubjectClaim entity.
+// If the TriggerSubjectClaim object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerSubjectClaimMutation) OldReleasedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReleasedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReleasedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReleasedAt: %w", err)
+	}
+	return oldValue.ReleasedAt, nil
+}
+
+// ClearReleasedAt clears the value of the "released_at" field.
+func (m *TriggerSubjectClaimMutation) ClearReleasedAt() {
+	m.released_at = nil
+	m.clearedFields[triggersubjectclaim.FieldReleasedAt] = struct{}{}
+}
+
+// ReleasedAtCleared returns if the "released_at" field was cleared in this mutation.
+func (m *TriggerSubjectClaimMutation) ReleasedAtCleared() bool {
+	_, ok := m.clearedFields[triggersubjectclaim.FieldReleasedAt]
+	return ok
+}
+
+// ResetReleasedAt resets all changes to the "released_at" field.
+func (m *TriggerSubjectClaimMutation) ResetReleasedAt() {
+	m.released_at = nil
+	delete(m.clearedFields, triggersubjectclaim.FieldReleasedAt)
+}
+
+// Where appends a list predicates to the TriggerSubjectClaimMutation builder.
+func (m *TriggerSubjectClaimMutation) Where(ps ...predicate.TriggerSubjectClaim) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the TriggerSubjectClaimMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *TriggerSubjectClaimMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.TriggerSubjectClaim, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *TriggerSubjectClaimMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *TriggerSubjectClaimMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (TriggerSubjectClaim).
+func (m *TriggerSubjectClaimMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *TriggerSubjectClaimMutation) Fields() []string {
+	fields := make([]string, 0, 9)
+	if m.trigger_id != nil {
+		fields = append(fields, triggersubjectclaim.FieldTriggerID)
+	}
+	if m.subject != nil {
+		fields = append(fields, triggersubjectclaim.FieldSubject)
+	}
+	if m.state != nil {
+		fields = append(fields, triggersubjectclaim.FieldState)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, triggersubjectclaim.FieldAgentID)
+	}
+	if m.event_id != nil {
+		fields = append(fields, triggersubjectclaim.FieldEventID)
+	}
+	if m.fire_id != nil {
+		fields = append(fields, triggersubjectclaim.FieldFireID)
+	}
+	if m.claimed_at != nil {
+		fields = append(fields, triggersubjectclaim.FieldClaimedAt)
+	}
+	if m.bound_at != nil {
+		fields = append(fields, triggersubjectclaim.FieldBoundAt)
+	}
+	if m.released_at != nil {
+		fields = append(fields, triggersubjectclaim.FieldReleasedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *TriggerSubjectClaimMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case triggersubjectclaim.FieldTriggerID:
+		return m.TriggerID()
+	case triggersubjectclaim.FieldSubject:
+		return m.Subject()
+	case triggersubjectclaim.FieldState:
+		return m.State()
+	case triggersubjectclaim.FieldAgentID:
+		return m.AgentID()
+	case triggersubjectclaim.FieldEventID:
+		return m.EventID()
+	case triggersubjectclaim.FieldFireID:
+		return m.FireID()
+	case triggersubjectclaim.FieldClaimedAt:
+		return m.ClaimedAt()
+	case triggersubjectclaim.FieldBoundAt:
+		return m.BoundAt()
+	case triggersubjectclaim.FieldReleasedAt:
+		return m.ReleasedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *TriggerSubjectClaimMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case triggersubjectclaim.FieldTriggerID:
+		return m.OldTriggerID(ctx)
+	case triggersubjectclaim.FieldSubject:
+		return m.OldSubject(ctx)
+	case triggersubjectclaim.FieldState:
+		return m.OldState(ctx)
+	case triggersubjectclaim.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case triggersubjectclaim.FieldEventID:
+		return m.OldEventID(ctx)
+	case triggersubjectclaim.FieldFireID:
+		return m.OldFireID(ctx)
+	case triggersubjectclaim.FieldClaimedAt:
+		return m.OldClaimedAt(ctx)
+	case triggersubjectclaim.FieldBoundAt:
+		return m.OldBoundAt(ctx)
+	case triggersubjectclaim.FieldReleasedAt:
+		return m.OldReleasedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown TriggerSubjectClaim field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TriggerSubjectClaimMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case triggersubjectclaim.FieldTriggerID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTriggerID(v)
+		return nil
+	case triggersubjectclaim.FieldSubject:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSubject(v)
+		return nil
+	case triggersubjectclaim.FieldState:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetState(v)
+		return nil
+	case triggersubjectclaim.FieldAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case triggersubjectclaim.FieldEventID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEventID(v)
+		return nil
+	case triggersubjectclaim.FieldFireID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFireID(v)
+		return nil
+	case triggersubjectclaim.FieldClaimedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetClaimedAt(v)
+		return nil
+	case triggersubjectclaim.FieldBoundAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBoundAt(v)
+		return nil
+	case triggersubjectclaim.FieldReleasedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReleasedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TriggerSubjectClaim field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *TriggerSubjectClaimMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *TriggerSubjectClaimMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TriggerSubjectClaimMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown TriggerSubjectClaim numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *TriggerSubjectClaimMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(triggersubjectclaim.FieldAgentID) {
+		fields = append(fields, triggersubjectclaim.FieldAgentID)
+	}
+	if m.FieldCleared(triggersubjectclaim.FieldBoundAt) {
+		fields = append(fields, triggersubjectclaim.FieldBoundAt)
+	}
+	if m.FieldCleared(triggersubjectclaim.FieldReleasedAt) {
+		fields = append(fields, triggersubjectclaim.FieldReleasedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *TriggerSubjectClaimMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *TriggerSubjectClaimMutation) ClearField(name string) error {
+	switch name {
+	case triggersubjectclaim.FieldAgentID:
+		m.ClearAgentID()
+		return nil
+	case triggersubjectclaim.FieldBoundAt:
+		m.ClearBoundAt()
+		return nil
+	case triggersubjectclaim.FieldReleasedAt:
+		m.ClearReleasedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TriggerSubjectClaim nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *TriggerSubjectClaimMutation) ResetField(name string) error {
+	switch name {
+	case triggersubjectclaim.FieldTriggerID:
+		m.ResetTriggerID()
+		return nil
+	case triggersubjectclaim.FieldSubject:
+		m.ResetSubject()
+		return nil
+	case triggersubjectclaim.FieldState:
+		m.ResetState()
+		return nil
+	case triggersubjectclaim.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case triggersubjectclaim.FieldEventID:
+		m.ResetEventID()
+		return nil
+	case triggersubjectclaim.FieldFireID:
+		m.ResetFireID()
+		return nil
+	case triggersubjectclaim.FieldClaimedAt:
+		m.ResetClaimedAt()
+		return nil
+	case triggersubjectclaim.FieldBoundAt:
+		m.ResetBoundAt()
+		return nil
+	case triggersubjectclaim.FieldReleasedAt:
+		m.ResetReleasedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TriggerSubjectClaim field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *TriggerSubjectClaimMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *TriggerSubjectClaimMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *TriggerSubjectClaimMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *TriggerSubjectClaimMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *TriggerSubjectClaimMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *TriggerSubjectClaimMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *TriggerSubjectClaimMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown TriggerSubjectClaim unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *TriggerSubjectClaimMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown TriggerSubjectClaim edge %s", name)
 }
 
 // UsageReservationMutation represents an operation that mutates the UsageReservation nodes in the graph.

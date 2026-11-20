@@ -117,6 +117,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -333,6 +334,8 @@ type Client struct {
 	TriggerEvent *TriggerEventClient
 	// TriggerFire is the client for interacting with the TriggerFire builders.
 	TriggerFire *TriggerFireClient
+	// TriggerSubjectClaim is the client for interacting with the TriggerSubjectClaim builders.
+	TriggerSubjectClaim *TriggerSubjectClaimClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// User is the client for interacting with the User builders.
@@ -459,6 +462,7 @@ func (c *Client) init() {
 	c.Trigger = NewTriggerClient(c.config)
 	c.TriggerEvent = NewTriggerEventClient(c.config)
 	c.TriggerFire = NewTriggerFireClient(c.config)
+	c.TriggerSubjectClaim = NewTriggerSubjectClaimClient(c.config)
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.User = NewUserClient(c.config)
 	c.UserAccessToken = NewUserAccessTokenClient(c.config)
@@ -659,6 +663,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		Trigger:                       NewTriggerClient(cfg),
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
+		TriggerSubjectClaim:           NewTriggerSubjectClaimClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
@@ -786,6 +791,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		Trigger:                       NewTriggerClient(cfg),
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
+		TriggerSubjectClaim:           NewTriggerSubjectClaimClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
@@ -849,8 +855,9 @@ func (c *Client) Use(hooks ...Hook) {
 		c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
 		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserTerminalWorkspace,
+		c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -887,8 +894,9 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
 		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserTerminalWorkspace,
+		c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1099,6 +1107,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.TriggerEvent.mutate(ctx, m)
 	case *TriggerFireMutation:
 		return c.TriggerFire.mutate(ctx, m)
+	case *TriggerSubjectClaimMutation:
+		return c.TriggerSubjectClaim.mutate(ctx, m)
 	case *UsageReservationMutation:
 		return c.UsageReservation.mutate(ctx, m)
 	case *UserMutation:
@@ -15095,6 +15105,139 @@ func (c *TriggerFireClient) mutate(ctx context.Context, m *TriggerFireMutation) 
 	}
 }
 
+// TriggerSubjectClaimClient is a client for the TriggerSubjectClaim schema.
+type TriggerSubjectClaimClient struct {
+	config
+}
+
+// NewTriggerSubjectClaimClient returns a client for the TriggerSubjectClaim from the given config.
+func NewTriggerSubjectClaimClient(c config) *TriggerSubjectClaimClient {
+	return &TriggerSubjectClaimClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `triggersubjectclaim.Hooks(f(g(h())))`.
+func (c *TriggerSubjectClaimClient) Use(hooks ...Hook) {
+	c.hooks.TriggerSubjectClaim = append(c.hooks.TriggerSubjectClaim, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `triggersubjectclaim.Intercept(f(g(h())))`.
+func (c *TriggerSubjectClaimClient) Intercept(interceptors ...Interceptor) {
+	c.inters.TriggerSubjectClaim = append(c.inters.TriggerSubjectClaim, interceptors...)
+}
+
+// Create returns a builder for creating a TriggerSubjectClaim entity.
+func (c *TriggerSubjectClaimClient) Create() *TriggerSubjectClaimCreate {
+	mutation := newTriggerSubjectClaimMutation(c.config, OpCreate)
+	return &TriggerSubjectClaimCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of TriggerSubjectClaim entities.
+func (c *TriggerSubjectClaimClient) CreateBulk(builders ...*TriggerSubjectClaimCreate) *TriggerSubjectClaimCreateBulk {
+	return &TriggerSubjectClaimCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TriggerSubjectClaimClient) MapCreateBulk(slice any, setFunc func(*TriggerSubjectClaimCreate, int)) *TriggerSubjectClaimCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TriggerSubjectClaimCreateBulk{err: fmt.Errorf("calling to TriggerSubjectClaimClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TriggerSubjectClaimCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TriggerSubjectClaimCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for TriggerSubjectClaim.
+func (c *TriggerSubjectClaimClient) Update() *TriggerSubjectClaimUpdate {
+	mutation := newTriggerSubjectClaimMutation(c.config, OpUpdate)
+	return &TriggerSubjectClaimUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TriggerSubjectClaimClient) UpdateOne(_m *TriggerSubjectClaim) *TriggerSubjectClaimUpdateOne {
+	mutation := newTriggerSubjectClaimMutation(c.config, OpUpdateOne, withTriggerSubjectClaim(_m))
+	return &TriggerSubjectClaimUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TriggerSubjectClaimClient) UpdateOneID(id uuid.UUID) *TriggerSubjectClaimUpdateOne {
+	mutation := newTriggerSubjectClaimMutation(c.config, OpUpdateOne, withTriggerSubjectClaimID(id))
+	return &TriggerSubjectClaimUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for TriggerSubjectClaim.
+func (c *TriggerSubjectClaimClient) Delete() *TriggerSubjectClaimDelete {
+	mutation := newTriggerSubjectClaimMutation(c.config, OpDelete)
+	return &TriggerSubjectClaimDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TriggerSubjectClaimClient) DeleteOne(_m *TriggerSubjectClaim) *TriggerSubjectClaimDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TriggerSubjectClaimClient) DeleteOneID(id uuid.UUID) *TriggerSubjectClaimDeleteOne {
+	builder := c.Delete().Where(triggersubjectclaim.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TriggerSubjectClaimDeleteOne{builder}
+}
+
+// Query returns a query builder for TriggerSubjectClaim.
+func (c *TriggerSubjectClaimClient) Query() *TriggerSubjectClaimQuery {
+	return &TriggerSubjectClaimQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTriggerSubjectClaim},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a TriggerSubjectClaim entity by its id.
+func (c *TriggerSubjectClaimClient) Get(ctx context.Context, id uuid.UUID) (*TriggerSubjectClaim, error) {
+	return c.Query().Where(triggersubjectclaim.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TriggerSubjectClaimClient) GetX(ctx context.Context, id uuid.UUID) *TriggerSubjectClaim {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *TriggerSubjectClaimClient) Hooks() []Hook {
+	return c.hooks.TriggerSubjectClaim
+}
+
+// Interceptors returns the client interceptors.
+func (c *TriggerSubjectClaimClient) Interceptors() []Interceptor {
+	return c.inters.TriggerSubjectClaim
+}
+
+func (c *TriggerSubjectClaimClient) mutate(ctx context.Context, m *TriggerSubjectClaimMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TriggerSubjectClaimCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TriggerSubjectClaimUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TriggerSubjectClaimUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TriggerSubjectClaimDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown TriggerSubjectClaim mutation op: %q", m.Op())
+	}
+}
+
 // UsageReservationClient is a client for the UsageReservation schema.
 type UsageReservationClient struct {
 	config
@@ -16213,8 +16356,9 @@ type (
 		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
 		SystemOneInstance, Template, TestIdentityDelegation, TestIdentityLoginCode,
 		TestInfraMarker, ThreadGroup, ThreadGroupMember, Trigger, TriggerEvent,
-		TriggerFire, UsageReservation, User, UserAccessToken, UserDeletion,
-		UserDeletionAgent, UserTerminalWorkspace, WebhookEndpoint []ent.Hook
+		TriggerFire, TriggerSubjectClaim, UsageReservation, User, UserAccessToken,
+		UserDeletion, UserDeletionAgent, UserTerminalWorkspace,
+		WebhookEndpoint []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -16241,7 +16385,8 @@ type (
 		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
 		SystemOneInstance, Template, TestIdentityDelegation, TestIdentityLoginCode,
 		TestInfraMarker, ThreadGroup, ThreadGroupMember, Trigger, TriggerEvent,
-		TriggerFire, UsageReservation, User, UserAccessToken, UserDeletion,
-		UserDeletionAgent, UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
+		TriggerFire, TriggerSubjectClaim, UsageReservation, User, UserAccessToken,
+		UserDeletion, UserDeletionAgent, UserTerminalWorkspace,
+		WebhookEndpoint []ent.Interceptor
 	}
 )

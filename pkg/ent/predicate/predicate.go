@@ -309,6 +309,9 @@ type TriggerEvent func(*sql.Selector)
 // TriggerFire is the predicate function for triggerfire builders.
 type TriggerFire func(*sql.Selector)
 
+// TriggerSubjectClaim is the predicate function for triggersubjectclaim builders.
+type TriggerSubjectClaim func(*sql.Selector)
+
 // UsageReservation is the predicate function for usagereservation builders.
 type UsageReservation func(*sql.Selector)
 

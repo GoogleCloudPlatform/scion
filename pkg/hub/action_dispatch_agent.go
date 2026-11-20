@@ -919,6 +919,75 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		return hubfire.FireOutcome{}, errors.New("dispatch_agent trigger fire: missing event")
 	}
 
+	triggerID := req.Authority.DefinitionID
+	triggerName := ""
+	subjectMode := ""
+	if ev.Trigger != nil {
+		if ev.Trigger.ID != "" {
+			triggerID = ev.Trigger.ID
+		}
+		triggerName = ev.Trigger.Name
+		subjectMode = ev.Trigger.SubjectMode
+	}
+
+	// Subject claim (§5.3, §5.6): mode "new" never claims; mode "skip" claims
+	// atomically before render/create, skips "subject busy" if a live claim
+	// exists (lazily releasing a claim whose agent is terminal/deleted via Live),
+	// binds in commitAgentCreate's transaction, and releases on any failure.
+	var (
+		onCommitTx func(ctx context.Context, tx store.Store, agentID string) error
+		keepClaim  bool
+	)
+	if subjectMode == store.TriggerSubjectModeSkip {
+		claims := trigger.NewSubjectClaims(a.srv.store, a.srv.store, time.Now)
+		claimSubject := trigger.DeriveFireSubject(ev.Subject)
+		claim, existing, cErr := claims.Claim(ctx, triggerID, claimSubject, ev.ID, req.Authority.FireID)
+		if cErr != nil {
+			return hubfire.FireOutcome{}, fmt.Errorf("claim trigger subject: %w", cErr)
+		}
+		if existing != nil {
+			if existing.AgentID != "" {
+				live, lErr := claims.Live(ctx, triggerID, claimSubject)
+				if lErr != nil {
+					return hubfire.FireOutcome{}, fmt.Errorf("check live trigger subject claim: %w", lErr)
+				}
+				if live == nil {
+					claim, existing, cErr = claims.Claim(ctx, triggerID, claimSubject, ev.ID, req.Authority.FireID)
+					if cErr != nil {
+						return hubfire.FireOutcome{}, fmt.Errorf("re-claim trigger subject: %w", cErr)
+					}
+				}
+			}
+			if existing != nil {
+				return hubfire.FireOutcome{
+					Status: hubfire.FireStatusSkipped,
+					Error:  "subject busy",
+				}, nil
+			}
+		}
+		defer func() {
+			if keepClaim {
+				return
+			}
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if rErr := claims.Release(rctx, claim); rErr != nil {
+				slog.Warn("trigger: failed to release subject claim",
+					"trigger_id", triggerID,
+					"claim_id", claim.ID,
+					"fire_id", claim.FireID,
+					"error", rErr)
+			}
+		}()
+		onCommitTx = func(txCtx context.Context, tx store.Store, agentID string) error {
+			txClaims := trigger.NewSubjectClaims(tx, tx, nil)
+			if bErr := txClaims.Bind(txCtx, claim, agentID); bErr != nil {
+				return fmt.Errorf("bind trigger subject claim: %w", bErr)
+			}
+			return nil
+		}
+	}
+
 	vars := buildDispatchTemplateVars(req, da)
 	frameOpt := triggertemplate.WithFrame(triggertemplate.FrameContext{
 		EndpointName:  da.sourceName,
@@ -973,14 +1042,6 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			}
 			mergedLabels[k] = val
 		}
-	}
-	triggerID := req.Authority.DefinitionID
-	triggerName := ""
-	if ev.Trigger != nil {
-		if ev.Trigger.ID != "" {
-			triggerID = ev.Trigger.ID
-		}
-		triggerName = ev.Trigger.Name
 	}
 	mergedLabels[triggerLabelKeyTrigger] = triggerID
 	mergedLabels[triggerLabelKeyTriggerEvent] = ev.ID
@@ -1071,8 +1132,10 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			EventEnv:       eventEnv,
 			EventFile:      eventFileBytes,
 			Detached:       true,
+			OnCommitTx:     onCommitTx,
 		})
 		if createErr == nil {
+			keepClaim = true
 			var agentID string
 			if agent != nil {
 				agentID = agent.ID

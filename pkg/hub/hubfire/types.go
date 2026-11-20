@@ -63,8 +63,9 @@ type FireTracker interface {
 
 // FireTriggerRef identifies the trigger rule that initiated a FireEvent.
 type FireTriggerRef struct {
-	ID   string
-	Name string
+	ID          string
+	Name        string
+	SubjectMode string // "new" | "skip" (Stage 2 §5.3, §5.6)
 }
 
 // FireScheduleRef identifies the schedule and firing event for a schedule.fired

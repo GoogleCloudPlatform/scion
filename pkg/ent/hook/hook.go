@@ -1221,6 +1221,18 @@ func (f TriggerFireFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value,
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TriggerFireMutation", m)
 }
 
+// The TriggerSubjectClaimFunc type is an adapter to allow the use of ordinary
+// function as TriggerSubjectClaim mutator.
+type TriggerSubjectClaimFunc func(context.Context, *ent.TriggerSubjectClaimMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TriggerSubjectClaimFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TriggerSubjectClaimMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TriggerSubjectClaimMutation", m)
+}
+
 // The UsageReservationFunc type is an adapter to allow the use of ordinary
 // function as UsageReservation mutator.
 type UsageReservationFunc func(context.Context, *ent.UsageReservationMutation) (ent.Value, error)

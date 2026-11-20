@@ -381,6 +381,27 @@ func (m *memTriggerStore) ReapExpiredTriggerFires(context.Context, time.Time, in
 func (m *memTriggerStore) PurgeOldTriggerHistory(context.Context, time.Time) (int, int, error) {
 	return 0, 0, nil
 }
+func (m *memTriggerStore) ClaimTriggerSubject(context.Context, string, string, string, string, time.Time, time.Time) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
+	return nil, nil, nil
+}
+func (m *memTriggerStore) BindTriggerSubjectClaim(context.Context, string, string, string, time.Time) (bool, error) {
+	return false, nil
+}
+func (m *memTriggerStore) ReleaseTriggerSubjectClaim(context.Context, string, string, time.Time) (bool, error) {
+	return false, nil
+}
+func (m *memTriggerStore) GetActiveTriggerSubjectClaim(context.Context, string, string) (*store.TriggerSubjectClaim, error) {
+	return nil, store.ErrNotFound
+}
+func (m *memTriggerStore) ReleaseTriggerSubjectClaimsForAgent(context.Context, string, time.Time) (int, error) {
+	return 0, nil
+}
+func (m *memTriggerStore) ReleaseTerminalTriggerSubjectClaims(context.Context, time.Time) (int, error) {
+	return 0, nil
+}
+func (m *memTriggerStore) PurgeOldTriggerSubjectClaims(context.Context, time.Time) (int, error) {
+	return 0, nil
+}
 
 func TestDispatcher_WakeFireDetachAndPerFireBudget(t *testing.T) {
 	ms := newMemTriggerStore()
