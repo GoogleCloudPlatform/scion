@@ -146,6 +146,17 @@ TF_OUTPUTS_FILE="${WORKSPACE_DIR}/tf-outputs.json"
 DEPLOYED_JSON_FILE="${WORKSPACE_DIR}/deployed.json"
 DEPLOYED_URI="${STATE_BASE_URI}/deployed.json"
 
+EFFECTIVE_DOWNGRADE_FLOOR="${SOURCE_DOWNGRADE_FLOOR:-}"
+if [[ -n "${EFFECTIVE_DOWNGRADE_FLOOR}" ]]; then
+  floor_vs_target="$(compare_release_refs "${TARGET_TAG}" "${EFFECTIVE_DOWNGRADE_FLOOR}" "${VERSION_DATE}" "")"
+  case "${floor_vs_target}" in
+    upgrade|switch-newer)
+      log_warn "Source pkg/version.DowngradeFloor ('${EFFECTIVE_DOWNGRADE_FLOOR}') is newer than deployed tag '${TARGET_TAG}' (${floor_vs_target}); clamping deployed.json downgrade_floor to '${TARGET_TAG}'."
+      EFFECTIVE_DOWNGRADE_FLOOR="${TARGET_TAG}"
+      ;;
+  esac
+fi
+
 hub_installed_str="$(
   python3 - \
     "${DEPLOYED_JSON_FILE}" \
@@ -155,7 +166,7 @@ hub_installed_str="$(
     "${SHORT_SHA}" \
     "${HUB_IMAGE_DIGEST}" \
     "${TFVARS_SHA256}" \
-    "${SOURCE_DOWNGRADE_FLOOR:-}" \
+    "${EFFECTIVE_DOWNGRADE_FLOOR}" \
     "${BUILD_ID:-}" \
     "${DEPLOYED_AT}" \
     "${TF_OUTPUTS_FILE}" \

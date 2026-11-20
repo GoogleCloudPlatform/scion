@@ -62,6 +62,8 @@ REGISTRY="${REGISTRY%/}"
 AGENT_PLATFORMS="${_AGENT_PLATFORMS:-linux/amd64}"
 FORCE_REDEPLOY="${_FORCE_REDEPLOY:-false}"
 CORE_BASE_CACHE="${CORE_BASE_CACHE:-true}"
+AR_VERIFY_MAX_ATTEMPTS="${AR_VERIFY_MAX_ATTEMPTS:-6}"
+AR_VERIFY_RETRY_DELAY="${AR_VERIFY_RETRY_DELAY:-20}"
 
 if [[ -f "${WORKSPACE_DIR}/SKIP_DEPLOY" ]]; then
   log_info "Skipping build-images (${PHASE}; SKIP_DEPLOY present)."
@@ -202,13 +204,51 @@ discover_release_harnesses() {
     | LC_ALL=C sort -u
 }
 
+verify_registry_with_retry() {
+  local verify_script="$1"
+  local max_attempts="${AR_VERIFY_MAX_ATTEMPTS}"
+  local retry_delay="${AR_VERIFY_RETRY_DELAY}"
+
+  [[ "${max_attempts}" =~ ^[1-9][0-9]*$ ]] \
+    || die "AR_VERIFY_MAX_ATTEMPTS must be a positive integer (got '${max_attempts}')"
+  [[ "${retry_delay}" =~ ^[0-9]+$ ]] \
+    || die "AR_VERIFY_RETRY_DELAY must be a non-negative integer (got '${retry_delay}')"
+
+  local attempt=1 out="" rc=0
+  while true; do
+    rc=0
+    out="$(bash "${verify_script}" "${REGISTRY}" 2>&1)" || rc=$?
+    if [[ ${rc} -eq 0 ]]; then
+      printf '%s\n' "${out}"
+      return 0
+    fi
+
+    if grep -qiE 'Permission denied|PERMISSION_DENIED|Missing push permission|HTTPError 40[13]|forbidden|unauthori[sz]ed' <<<"${out}"; then
+      if [[ ${attempt} -lt ${max_attempts} ]]; then
+        log_warn "Artifact Registry permission check failed (attempt ${attempt}/${max_attempts}); newly bound GCP IAM policies can take ~90s to propagate — retrying in ${retry_delay}s..."
+        if [[ ${retry_delay} -gt 0 ]]; then
+          sleep "${retry_delay}"
+        fi
+        attempt=$((attempt + 1))
+        continue
+      fi
+      printf '%s\n' "${out}" >&2
+      die "Artifact Registry permission check for ${REGISTRY} failed after ${max_attempts} attempts."
+    fi
+
+    # Non-permission errors (e.g. NOT_FOUND) fail fast without retrying.
+    printf '%s\n' "${out}" >&2
+    exit "${rc}"
+  done
+}
+
 run_prepare_phase() {
   local verify_script cred_script
   verify_script="$(find_image_script "verify-registry.sh")"
   cred_script="$(find_image_script "install-registry-cred-helper.sh")"
 
   log_info "Verifying Artifact Registry access (${REGISTRY})..."
-  bash "${verify_script}" "${REGISTRY}"
+  verify_registry_with_retry "${verify_script}"
 
   log_info "Installing fresh-token Docker credential helper for ${REGISTRY}..."
   bash "${cred_script}" "${REGISTRY}"

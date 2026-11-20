@@ -223,6 +223,113 @@ log_info "  State bucket:   gs://${STATE_BUCKET}"
 log_info "  Registry:       ${REGISTRY}"
 log_info "  CD SA:          ${CD_SA_EMAIL}"
 
+# Read-only operator permission preflight (skipped in --dry-run) so missing
+# permissions fail fast before mutating APIs, buckets, service accounts, or IAM.
+run_operator_permission_preflight() {
+  log_info "Preflight: verifying operator IAM permissions before mutating GCP..."
+  local token=""
+  token="$(gcloud auth print-access-token 2>/dev/null || true)"
+
+  # 1. Check core project-level permissions via Resource Manager testIamPermissions
+  if [[ -n "${token}" ]]; then
+    local crm_resp=""
+    crm_resp="$(curl -sf -X POST \
+      "https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:testIamPermissions" \
+      -H "Authorization: Bearer ${token}" \
+      -H "Content-Type: application/json" \
+      -d '{"permissions":["serviceusage.services.enable","iam.serviceAccounts.create","resourcemanager.projects.setIamPolicy"]}' \
+      2>/dev/null || true)"
+    if [[ -n "${crm_resp}" ]]; then
+      local missing_proj=""
+      missing_proj="$(python3 - "${crm_resp}" <<'PY' 2>/dev/null
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(0)
+if not isinstance(data, dict):
+    sys.exit(0)
+held = set(data.get("permissions") or [])
+required = [
+    "serviceusage.services.enable",
+    "iam.serviceAccounts.create",
+    "resourcemanager.projects.setIamPolicy",
+]
+missing = [p for p in required if p not in held]
+if missing:
+    print(", ".join(missing))
+PY
+      )" || true
+      if [[ -n "${missing_proj}" ]]; then
+        die "Operator lacks required project-level IAM permission(s) on '${PROJECT}': ${missing_proj}. Grant roles/serviceusage.serviceUsageAdmin, roles/iam.serviceAccountAdmin, and roles/resourcemanager.projectIamAdmin (see deploy/cd/README.md) before running setup-cd.sh."
+      fi
+    else
+      log_warn "Could not verify project-level IAM permissions via testIamPermissions; proceeding."
+    fi
+  else
+    log_warn "Could not obtain gcloud access token for IAM preflight; proceeding."
+  fi
+
+  # 2. Check Artifact Registry repo-level setIamPolicy when <shared_prefix>-scion already exists
+  local ar_err_file="" ar_rc=0 ar_err=""
+  ar_err_file="$(mktemp "${TMPDIR:-/tmp}/setup-cd-ar-err.XXXXXX")"
+  gcloud artifacts repositories describe "${AR_REPO}" \
+    --location="${REGION}" --project="${PROJECT}" \
+    --format="value(name)" >/dev/null 2>"${ar_err_file}" || ar_rc=$?
+  ar_err="$(cat "${ar_err_file}")"
+  rm -f -- "${ar_err_file}"
+
+  if [[ ${ar_rc} -ne 0 ]]; then
+    if grep -qiE 'PERMISSION_DENIED|HTTPError 40[13]|unauthori[sz]ed|forbidden|does not have permission|permission .* denied' <<<"${ar_err}"; then
+      printf '%s\n' "${ar_err}" >&2
+      die "Operator lacks permission to access Artifact Registry repository '${AR_REPO}' in '${REGION}'. Grant the operator roles/artifactregistry.admin (or repository-level artifactregistry.repositories.get + setIamPolicy) before running setup-cd.sh."
+    fi
+    if grep -qiE 'NOT_FOUND|was not found|does not exist' <<<"${ar_err}"; then
+      log_info "Preflight: Artifact Registry repository '${AR_REPO}' does not exist yet (Step 4b will be skipped until configurations/shared-infra is applied)."
+      return 0
+    fi
+    log_warn "Preflight: could not inspect Artifact Registry repository '${AR_REPO}' (${ar_err}); proceeding."
+    return 0
+  fi
+
+  if [[ -n "${token}" ]]; then
+    local ar_parent="projects/${PROJECT}/locations/${REGION}/repositories/${AR_REPO}"
+    local ar_resp=""
+    ar_resp="$(curl -sf -X POST \
+      "https://artifactregistry.googleapis.com/v1/${ar_parent}:testIamPermissions" \
+      -H "Authorization: Bearer ${token}" \
+      -H "Content-Type: application/json" \
+      -d '{"permissions":["artifactregistry.repositories.setIamPolicy"]}' \
+      2>/dev/null || true)"
+    if [[ -n "${ar_resp}" ]]; then
+      local has_ar_set_iam=""
+      has_ar_set_iam="$(python3 - "${ar_resp}" <<'PY' 2>/dev/null
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    print("unknown")
+    sys.exit(0)
+if not isinstance(data, dict):
+    print("unknown")
+    sys.exit(0)
+held = set(data.get("permissions") or [])
+print("yes" if "artifactregistry.repositories.setIamPolicy" in held else "no")
+PY
+      )" || true
+      if [[ "${has_ar_set_iam}" == "no" ]]; then
+        die "Operator lacks 'artifactregistry.repositories.setIamPolicy' on Artifact Registry repository '${AR_REPO}' (${REGION}). Note: roles/editor and roles/resourcemanager.projectIamAdmin do NOT include repository setIamPolicy. Grant the operator roles/artifactregistry.admin (project-level or on '${AR_REPO}') before running setup-cd.sh so Step 4b can bind roles/artifactregistry.writer for ${CD_SA_EMAIL} without leaving partial state."
+      fi
+    else
+      log_warn "Could not verify Artifact Registry repository setIamPolicy via testIamPermissions; proceeding."
+    fi
+  fi
+}
+
+if [[ "${DRY_RUN}" != "true" ]]; then
+  run_operator_permission_preflight
+fi
+
 # 1. Enable required CD control-plane APIs
 log_info "Step 1: Enabling Cloud Build, Cloud Scheduler, Artifact Registry, and IAM APIs..."
 run_cmd gcloud services enable \
