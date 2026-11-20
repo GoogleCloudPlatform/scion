@@ -213,6 +213,7 @@ export class ScionChatDecisionResponse extends LitElement {
 
     .answers .lbl {
       color: var(--scion-text, #1e293b);
+      overflow-wrap: anywhere;
     }
   `;
 
@@ -373,7 +374,10 @@ export class ScionChatDecisionResponse extends LitElement {
       const q = a.question?.trim();
       return q ? html`${q} — <b>Dismissed</b>` : html`<b>Dismissed</b>`;
     }
-    return html`${a.label}${this.renderSetItemNote(a)}`;
+    const otherText = isOtherAnswer(a) ? a.otherText : undefined;
+    return html`${a.label}${otherText
+      ? html` — <span class="other-text">“${otherText}”</span>`
+      : nothing}${this.renderSetItemNote(a)}`;
   }
 
   private renderSet(rs: DecisionResponseSetView): TemplateResult {

@@ -240,6 +240,10 @@ export class ScionChatDecisions extends LitElement {
   @state()
   private picked = new Map<string, string>();
 
+  /** Set mode: per-row draft text in the inline free-form Other editor (memory only). */
+  @state()
+  private setOtherDrafts = new Map<string, string>();
+
   /** Set mode: the Submit answers POST is in flight. */
   @state()
   private setSubmitting = false;
@@ -1094,6 +1098,21 @@ export class ScionChatDecisions extends LitElement {
       border-style: dashed;
     }
 
+    .sb-other {
+      border-style: dashed;
+    }
+
+    .editor-foot {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+    }
+
+    .set-other-help {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .opt.other-opt {
       border-style: dashed;
     }
@@ -1294,6 +1313,18 @@ export class ScionChatDecisions extends LitElement {
           }
         }
         if (next) this.picked = next;
+      }
+      if (this.setOtherDrafts.size > 0) {
+        const byRow = new Map(this.views.map((d) => [d.rowId, d]));
+        let next: Map<string, string> | null = null;
+        for (const rowId of this.setOtherDrafts.keys()) {
+          const row = byRow.get(rowId);
+          if (!row || !isOpenDecision(row) || !this.rowActionable(row) || !row.other) {
+            next ??= new Map(this.setOtherDrafts);
+            next.delete(rowId);
+          }
+        }
+        if (next) this.setOtherDrafts = next;
       }
     }
     if (
@@ -2892,19 +2923,23 @@ export class ScionChatDecisions extends LitElement {
    */
   private selectionOf(d: DecisionView): string | undefined {
     const picked = this.picked.get(d.rowId);
+    if (picked === OTHER_CHOICE_ID && d.other) return OTHER_CHOICE_ID;
     if (picked && d.choices.some((c) => c.id === picked)) return picked;
     if (
       d.status === 'decided' &&
       d.decision?.provenance === 'agent_interpreted' &&
-      this.rowActionable(d) &&
-      d.choices.some((c) => c.id === d.decision!.choiceId)
+      this.rowActionable(d)
     ) {
-      return d.decision.choiceId;
+      if (isOtherAnswer(d.decision) && d.other) return OTHER_CHOICE_ID;
+      if (d.choices.some((c) => c.id === d.decision!.choiceId)) {
+        return d.decision.choiceId;
+      }
     }
     if (
       preselectRecommendedChoices() &&
       d.status === 'pending' &&
       d.defaultChoiceId &&
+      d.defaultChoiceId !== OTHER_CHOICE_ID &&
       d.choices.some((c) => c.id === d.defaultChoiceId)
     ) {
       return d.defaultChoiceId;
@@ -2912,8 +2947,33 @@ export class ScionChatDecisions extends LitElement {
     return undefined;
   }
 
+  private setRowOtherDraft(d: DecisionView): string {
+    const draft = this.setOtherDrafts.get(d.rowId);
+    if (draft !== undefined) return draft;
+    if (
+      d.status === 'decided' &&
+      d.decision?.provenance === 'agent_interpreted' &&
+      isOtherAnswer(d.decision) &&
+      d.decision.otherText
+    ) {
+      return d.decision.otherText;
+    }
+    return '';
+  }
+
+  private setRowReady(d: DecisionView): boolean {
+    const sel = this.selectionOf(d);
+    if (!sel) return false;
+    if (sel === OTHER_CHOICE_ID) {
+      const len = [...this.setRowOtherDraft(d).trim()].length;
+      return len > 0 && len <= 200;
+    }
+    return true;
+  }
+
   private select(d: DecisionView, choiceId: string): void {
     if (!this.rowActionable(d) || this.setSubmitting || this.answerBlocked) return;
+    if (choiceId === OTHER_CHOICE_ID && !d.other) return;
     // Compare with the click, not the effective selection: a click on a
     // preselected recommended choice is recorded, so it survives the
     // preselect setting being turned off while the card is open.
@@ -2921,6 +2981,22 @@ export class ScionChatDecisions extends LitElement {
     const next = new Map(this.picked);
     next.set(d.rowId, choiceId);
     this.picked = next;
+    if (choiceId === OTHER_CHOICE_ID) {
+      void this.focusSetOtherInput(d.rowId);
+    }
+  }
+
+  private async focusSetOtherInput(rowId: string): Promise<void> {
+    await this.updateComplete;
+    const rows = Array.from(this.shadowRoot?.querySelectorAll<HTMLElement>('.row') ?? []);
+    const row = rows.find((el) => el.dataset.row === rowId);
+    const input = row?.querySelector<HTMLElement & { updateComplete?: Promise<unknown> }>(
+      '.editor sl-input'
+    );
+    if (input?.updateComplete) {
+      await input.updateComplete;
+    }
+    focusElement(input);
   }
 
   /** Sends every actionable row's selection as one set. */
@@ -2931,7 +3007,13 @@ export class ScionChatDecisions extends LitElement {
     for (const d of actionable) {
       const choiceId = this.selectionOf(d);
       if (!choiceId) return;
-      answers.push({ rowId: d.rowId, choiceId });
+      if (choiceId === OTHER_CHOICE_ID) {
+        const trimmed = this.setRowOtherDraft(d).trim();
+        if (!trimmed || [...trimmed].length > 200) return;
+        answers.push({ rowId: d.rowId, choiceId, otherText: trimmed });
+      } else {
+        answers.push({ rowId: d.rowId, choiceId });
+      }
     }
     if (answers.length === 0) return;
     this.changedAlert = null;
@@ -2945,6 +3027,7 @@ export class ScionChatDecisions extends LitElement {
       );
       if (res.ok) {
         this.picked = new Map();
+        this.setOtherDrafts = new Map();
         this.applyOwnViews(res.decisions, res.responseMessageId);
         return;
       }
@@ -2966,7 +3049,8 @@ export class ScionChatDecisions extends LitElement {
 
   /**
    * 409 answer_set_changed: hold the fresh views, keep selections on rows
-   * still actionable, and name the changed rows inline.
+   * still actionable, keep Other drafts on rows still open, and name the
+   * changed rows inline.
    */
   private applySetChanged(fresh: DecisionView[], reasons: Record<string, string>): void {
     const byRow = new Map(fresh.map((d) => [d.rowId, d]));
@@ -2976,6 +3060,14 @@ export class ScionChatDecisions extends LitElement {
       if (row && this.rowActionable(row)) kept.set(rowId, choiceId);
     }
     this.picked = kept;
+    const keptDrafts = new Map<string, string>();
+    for (const [rowId, draft] of this.setOtherDrafts) {
+      const row = byRow.get(rowId);
+      if (row && isOpenDecision(row) && this.rowActionable(row) && row.other) {
+        keptDrafts.set(rowId, draft);
+      }
+    }
+    this.setOtherDrafts = keptDrafts;
     const changed: { key: string; phrase: string }[] = [];
     for (const d of fresh) {
       const reason = reasons[d.rowId];
@@ -3075,7 +3167,12 @@ export class ScionChatDecisions extends LitElement {
   }
 
   private renderSetRow(d: DecisionView, omitFoot = false): TemplateResult {
-    const stacked = (d.choices ?? []).some((c) => !!c.description);
+    const chosenOther = d.status === 'decided' && isOtherAnswer(d.decision);
+    const otherOpt: OtherOption | undefined =
+      d.other ?? (chosenOther ? { label: d.decision?.label || 'Other' } : undefined);
+    const stacked = (d.choices ?? []).some((c) => !!c.description) || !!otherOpt?.description;
+    const otherSelected =
+      this.rowActionable(d) && !this.answerBlocked && this.selectionOf(d) === OTHER_CHOICE_ID;
     const notOwner = actionableReason(d, this.currentUserId) === 'not_recorded_answerer';
     return html`
       <div
@@ -3094,10 +3191,189 @@ export class ScionChatDecisions extends LitElement {
           ${(d.choices ?? []).map((c) =>
             stacked ? this.renderSetOptRow(d, c) : this.renderSetButton(d, c)
           )}
+          ${otherOpt
+            ? stacked
+              ? this.renderSetOtherOptRow(d, otherOpt, otherSelected, chosenOther)
+              : this.renderSetOtherButton(d, otherOpt, otherSelected, chosenOther)
+            : nothing}
         </div>
+        ${!stacked && otherSelected && otherOpt
+          ? this.renderSetOtherEditor(d, otherOpt, false)
+          : nothing}
+        ${chosenOther && !otherSelected && d.decision?.otherText
+          ? html`<div class="otext">“${d.decision.otherText}”</div>`
+          : nothing}
         ${omitFoot ? nothing : (this.renderTerminalFoot(d, true) ?? nothing)}
       </div>
     `;
+  }
+
+  private renderSetOtherButton(
+    d: DecisionView,
+    other: OtherOption,
+    otherSelected: boolean,
+    chosenOther: boolean
+  ): TemplateResult {
+    const actionable = this.rowActionable(d);
+    const notOwner = actionableReason(d, this.currentUserId) === 'not_recorded_answerer';
+    if (chosenOther && !actionable) {
+      const label = d.decision?.label || other.label;
+      const isInterp = d.decision?.provenance === 'agent_interpreted';
+      const icon = isInterp ? 'robot' : 'check-circle-fill';
+      const btn = html`<button
+        type="button"
+        class="sb sb-filled has-prefix"
+        data-choice=${OTHER_CHOICE_ID}
+        data-look="filled"
+        ?disabled=${notOwner}
+        ?data-readonly=${!notOwner}
+        aria-disabled=${notOwner ? 'true' : nothing}
+        title=${notOwner ? this.notOwnerTooltip(d) : label}
+      >
+        <span class="sb-prefix"><sl-icon name=${icon} aria-hidden="true"></sl-icon></span
+        ><span class="sb-label">${label}</span>
+      </button>`;
+      return notOwner
+        ? html`<sl-tooltip content=${this.notOwnerTooltip(d)}>${btn}</sl-tooltip>`
+        : btn;
+    }
+    const disabled = !actionable || this.setSubmitting || this.answerBlocked;
+    const look = otherSelected ? 'filled' : 'default';
+    return html`<button
+      type="button"
+      class="sb sb-${look}${otherSelected ? '' : ' sb-other'} has-prefix"
+      data-choice=${OTHER_CHOICE_ID}
+      data-look=${look}
+      ?disabled=${disabled}
+      ?data-readonly=${!actionable && !disabled}
+      aria-disabled=${disabled ? 'true' : nothing}
+      aria-pressed=${actionable ? String(otherSelected) : nothing}
+      title=${other.label}
+      @click=${() => this.select(d, OTHER_CHOICE_ID)}
+    >
+      <span class="sb-prefix"><sl-icon name="pencil" aria-hidden="true"></sl-icon></span
+      ><span class="sb-label">${other.label}…</span>
+    </button>`;
+  }
+
+  private renderSetOtherOptRow(
+    d: DecisionView,
+    other: OtherOption,
+    otherSelected: boolean,
+    chosenOther: boolean
+  ): TemplateResult {
+    const actionable = this.rowActionable(d);
+    const notOwner = actionableReason(d, this.currentUserId) === 'not_recorded_answerer';
+    if (otherSelected) {
+      return html`<div class="opt sel" data-choice=${OTHER_CHOICE_ID}>
+        <div class="opt-head">
+          <span class="mark"><sl-icon name="pencil"></sl-icon></span>
+          <span>
+            <span class="lbl">${other.label}…</span>
+            ${other.description
+              ? html`<span class="desc">${this.markdown(other.description, true)}</span>`
+              : nothing}
+          </span>
+        </div>
+        ${this.renderSetOtherEditor(d, other, true)}
+      </div>`;
+    }
+    if (chosenOther && !actionable) {
+      const label = d.decision?.label || other.label;
+      const isInterp = d.decision?.provenance === 'agent_interpreted';
+      const icon = isInterp ? 'robot' : 'check-circle-fill';
+      const btn = html`<button
+        type="button"
+        class="opt chosen"
+        data-choice=${OTHER_CHOICE_ID}
+        ?disabled=${notOwner}
+        ?data-readonly=${!notOwner}
+        aria-disabled=${notOwner ? 'true' : 'false'}
+        title=${notOwner ? this.notOwnerTooltip(d) : label}
+      >
+        <span class="mark"><sl-icon name=${icon}></sl-icon></span>
+        <span>
+          <span class="lbl">${label}</span>
+          ${other.description
+            ? html`<span class="desc">${this.markdown(other.description, true)}</span>`
+            : nothing}
+        </span>
+      </button>`;
+      return notOwner
+        ? html`<sl-tooltip content=${this.notOwnerTooltip(d)}>${btn}</sl-tooltip>`
+        : btn;
+    }
+    const disabled = !actionable || this.setSubmitting || this.answerBlocked;
+    return html`<button
+      type="button"
+      class="opt other-opt"
+      data-choice=${OTHER_CHOICE_ID}
+      ?disabled=${disabled && notOwner}
+      aria-pressed=${actionable ? 'false' : nothing}
+      aria-disabled=${disabled ? 'true' : 'false'}
+      title=${other.label}
+      @click=${() => {
+        if (!disabled) this.select(d, OTHER_CHOICE_ID);
+      }}
+    >
+      <span class="mark"><sl-icon name="pencil"></sl-icon></span>
+      <span>
+        <span class="lbl">${other.label}…</span>
+        ${other.description
+          ? html`<span class="desc">${this.markdown(other.description, true)}</span>`
+          : nothing}
+      </span>
+    </button>`;
+  }
+
+  private renderSetOtherEditor(
+    d: DecisionView,
+    other: OtherOption,
+    inset: boolean
+  ): TemplateResult {
+    const draft = this.setRowOtherDraft(d);
+    const trimmed = draft.trim();
+    const trimmedLen = [...trimmed].length;
+    const showCounter = trimmedLen >= 160;
+    const warnCounter = trimmedLen >= 180 && trimmedLen <= 200;
+    const overCounter = trimmedLen > 200;
+    const announceCounter = warnCounter || overCounter;
+    const showHelp = trimmedLen === 0;
+    const counter = showCounter
+      ? html`<span
+          class="cnt${overCounter ? ' over' : warnCounter ? ' warn' : ''}"
+          role=${announceCounter ? 'status' : nothing}
+          aria-live=${announceCounter ? 'polite' : nothing}
+          >${trimmedLen} / 200</span
+        >`
+      : nothing;
+    return html`<div class="editor${inset ? ' inset' : ''}">
+      <div class="ctl">
+        <sl-input
+          size="small"
+          label=${plainText(d.question)}
+          placeholder=${other.placeholder || 'Type your answer'}
+          .value=${draft}
+          ?disabled=${this.setSubmitting}
+          @sl-input=${(e: Event) => {
+            const val = (e.target as HTMLInputElement).value ?? '';
+            const next = new Map(this.setOtherDrafts);
+            next.set(d.rowId, val);
+            this.setOtherDrafts = next;
+          }}
+        ></sl-input>
+      </div>
+      ${showHelp || showCounter
+        ? html`<div class="editor-foot">
+            ${showHelp
+              ? html`<span class="set-other-help"
+                  >Type your answer to include it in the submit.</span
+                >`
+              : nothing}
+            ${counter}
+          </div>`
+        : nothing}
+    </div>`;
   }
 
   private renderSetRowChip(d: DecisionView): TemplateResult | typeof nothing {
@@ -3368,10 +3644,16 @@ export class ScionChatDecisions extends LitElement {
     if (actionable.length === 0) return this.renderSetDoneFoot(views);
     // Blocked (mock s10): the reason line is the footer; no counter or Submit.
     if (this.answerBlocked) return nothing;
-    const missing = actionable.filter((d) => !this.selectionOf(d));
+    const missing = actionable.filter((d) => !this.setRowReady(d));
     const remaining = missing.length;
     const missingKeys = missing.map((d) => d.key || d.ref).join(', ');
-    const hint = remaining > 0 ? `Choose an answer for ${missingKeys} first` : '';
+    const hasOtherMissing = missing.some((d) => !!d.other);
+    const hint =
+      remaining > 0
+        ? hasOtherMissing
+          ? `Choose or type an answer for ${missingKeys} first`
+          : `Choose an answer for ${missingKeys} first`
+        : '';
     const disabled = remaining > 0;
     const submit = html`<sl-button
       class="submit"

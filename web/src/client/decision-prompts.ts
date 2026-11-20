@@ -324,6 +324,7 @@ function isDecisionView(v: unknown): v is DecisionView {
 export interface SetAnswer {
   rowId: string;
   choiceId: string;
+  otherText?: string;
 }
 
 /** The outcome of answering a set prompt. */
@@ -359,7 +360,11 @@ export async function answerDecisionSet(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         idempotency_key: idempotencyKey,
-        answers: answers.map((a) => ({ decision_row_id: a.rowId, choice_id: a.choiceId })),
+        answers: answers.map((a) => ({
+          decision_row_id: a.rowId,
+          choice_id: a.choiceId,
+          ...(a.otherText !== undefined ? { other_text: a.otherText } : {}),
+        })),
         ...(surface === 'decisions_page' ? { surface: 'decisions_page' } : {}),
       }),
     });
