@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,7 +43,106 @@ const (
 	paramTitle = "title"
 	// paramScope is the home scope; it defaults to the caller's own.
 	paramScope = "scope"
+	// paramExpiresIn optionally sets the artifact's retention at publish time
+	// (e.g. "720h", "30d", or "never").
+	paramExpiresIn = "expires_in"
 )
+
+// MinAgentExpiry is the shortest publish-time (and agent-managed) expiry
+// allowed for an agent (ptone/scion#4533, ptone/scion#8155).
+const MinAgentExpiry = 24 * time.Hour
+
+// maxExpiresInDays caps parsed day durations so time.Duration never overflows.
+const maxExpiresInDays = 36500
+
+// ParseExpiresIn parses a publish-time retention value: empty ("") means
+// unset (use hub default); "never" (case-insensitive) clears expiry; "<N>d"
+// is N whole days; otherwise standard Go duration syntax (e.g. "720h").
+// Non-positive, malformed, or overflowing values return an error.
+func ParseExpiresIn(raw string) (dur time.Duration, never bool, err error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, false, nil
+	}
+	if strings.EqualFold(s, "never") {
+		return 0, true, nil
+	}
+	if len(s) > 0 && (s[len(s)-1] == 'd' || s[len(s)-1] == 'D') {
+		digits := s[:len(s)-1]
+		if digits == "" {
+			return 0, false, fmt.Errorf("invalid duration %q: use a duration such as 720h, 30d, or never", raw)
+		}
+		for _, c := range digits {
+			if c < '0' || c > '9' {
+				return 0, false, fmt.Errorf("invalid duration %q: use a duration such as 720h, 30d, or never", raw)
+			}
+		}
+		days, perr := strconv.Atoi(digits)
+		if perr != nil || days <= 0 || days > maxExpiresInDays {
+			return 0, false, fmt.Errorf("invalid duration %q: days must be between 1 and %d", raw, maxExpiresInDays)
+		}
+		return time.Duration(days) * 24 * time.Hour, false, nil
+	}
+	d, perr := time.ParseDuration(s)
+	if perr != nil {
+		return 0, false, fmt.Errorf("invalid duration %q: use a duration such as 720h, 30d, or never", raw)
+	}
+	if d <= 0 || d > time.Duration(maxExpiresInDays)*24*time.Hour {
+		return 0, false, fmt.Errorf("duration %q must be positive and at most %dd", raw, maxExpiresInDays)
+	}
+	return d, false, nil
+}
+
+// resolvePublishExpiry validates raw expires_in/expiresIn against caller kind
+// and hub retention limits, returning the target expiry timestamp, whether an
+// explicit expiry was requested, and any validation error message.
+func resolvePublishExpiry(kind, raw string, l Limits, now time.Time) (*time.Time, bool, string) {
+	if strings.TrimSpace(raw) == "" {
+		return retentionExpiry(l, now), false, ""
+	}
+	dur, never, err := ParseExpiresIn(raw)
+	if err != nil {
+		return nil, false, err.Error()
+	}
+	if kind == PrincipalKindAgent {
+		if never {
+			if l.DefaultRetention > 0 {
+				return nil, false, "cannot set expiry to never when the hub has a default retention"
+			}
+			return nil, true, ""
+		}
+		if dur < MinAgentExpiry {
+			return nil, false, "expiry must be at least 24 hours from now"
+		}
+		if l.DefaultRetention > 0 && dur > l.DefaultRetention {
+			return nil, false, fmt.Sprintf("expiry exceeds the hub's default retention of %s", l.DefaultRetention)
+		}
+		t := now.Add(dur).UTC().Truncate(time.Microsecond)
+		return &t, true, ""
+	}
+	if never {
+		return nil, true, ""
+	}
+	t := now.Add(dur).UTC().Truncate(time.Microsecond)
+	return &t, true, ""
+}
+
+// applyPublishExpiry applies an explicit publish-time expiry to a, recording
+// the artifact_event with actor_kind = kind and authority = owner and writing
+// the decision log entry.
+func (s *Service) applyPublishExpiry(ctx context.Context, r *http.Request, b backend, a *Artifact, exp *time.Time, kind, ref string) (*Artifact, error) {
+	actor := &Actor{Kind: kind, Ref: ref, Authority: AuthorityOwner}
+	updated, err := b.store.SetExpiry(ctx, a.ID, exp, actor)
+	if err != nil {
+		return nil, err
+	}
+	action := logActionExpirySet
+	if exp == nil {
+		action = logActionExpiryCleared
+	}
+	s.logAllowed(r, logEntry{action: action, artifact: updated, authority: AuthorityOwner})
+	return updated, nil
+}
 
 // HeaderContentSHA256 optionally carries the hex SHA-256 of the request
 // body. When present the service rejects a body that does not match.
@@ -137,6 +237,13 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact storage is not configured")
 		return
 	}
+	now := time.Now().UTC()
+	limits := b.currentLimits(ctx)
+	expiresAt, explicitExpiry, expErr := resolvePublishExpiry(kind, q.Get(paramExpiresIn), limits, now)
+	if expErr != "" {
+		writeError(w, http.StatusBadRequest, "bad_request", expErr)
+		return
+	}
 
 	// Reject an oversized body before reading or writing anything.
 	limit := b.maxFileBytes(ctx)
@@ -166,7 +273,6 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC()
 	versionID := uuid.NewString()
 	f := File{VersionID: versionID, Path: name, Size: spool.size, SHA256: spool.digest, MediaType: mediaType}
 	files := []File{f}
@@ -194,7 +300,7 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Title: title, CurrentSeq: 1,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: retentionExpiry(limits, now),
 	}
 	// The delegating user of an agent creating the artifact, resolved by
 	// the host from the agent's delegation chain (ptone/scion#6028); never
@@ -222,6 +328,15 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		s.logVersionError(r, a, 1, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
+	}
+	if explicitExpiry {
+		updated, err := s.applyPublishExpiry(ctx, r, b, a, expiresAt, kind, ref)
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: set publish expiry failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "could not set the artifact expiry")
+			return
+		}
+		a = updated
 	}
 	s.logAllowed(r, logEntry{action: logActionPublished, artifact: a, seq: 1, authority: logAuthorityOwner})
 	s.logSponsorReviewGrants(r, a, grants)

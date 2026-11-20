@@ -41,17 +41,18 @@ import (
 )
 
 var (
-	artifactPublishTitle  string
-	artifactPublishKey    string
-	artifactPublishNote   string
-	artifactPublishEntry  string
-	artifactPublishReview string
-	artifactPublishOf     string
-	artifactGetOut        string
-	artifactGetForce      bool
-	artifactGetClean      bool
-	artifactGetAccept     bool
-	artifactGetKind       string
+	artifactPublishTitle     string
+	artifactPublishKey       string
+	artifactPublishNote      string
+	artifactPublishEntry     string
+	artifactPublishReview    string
+	artifactPublishOf        string
+	artifactPublishExpiresIn string
+	artifactGetOut           string
+	artifactGetForce         bool
+	artifactGetClean         bool
+	artifactGetAccept        bool
+	artifactGetKind          string
 )
 
 // artifactCmd is the command group for artifacts.
@@ -68,7 +69,7 @@ names one version.
 Artifacts require a hub and the hub.artifacts experiment.
 
 Commands:
-  scion artifact publish <file|dir> [--title] [--key] [--note] [--entry]
+  scion artifact publish <file|dir> [--title] [--key] [--note] [--entry] [--expires-in]
   scion artifact publish <file|dir> --version-of <ref> [--note]
   scion artifact publish <file|dir> --review <ref> [--note]
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
@@ -189,6 +190,7 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 	opts := bundlePublishOptions{
 		Title: artifactPublishTitle, Key: artifactPublishKey, Note: artifactPublishNote,
 		Entry: artifactPublishEntry, Scope: artifactPublishScope(settings),
+		ExpiresIn: artifactPublishExpiresIn,
 	}
 	info, err := os.Stat(file)
 	if err != nil {
@@ -196,6 +198,14 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 	}
 	if artifactPublishReview != "" && artifactPublishOf != "" {
 		return errors.New("--review and --version-of cannot be used together")
+	}
+	if opts.ExpiresIn != "" {
+		if artifactPublishReview != "" || artifactPublishOf != "" {
+			return errors.New("--expires-in does not apply with --review or --version-of")
+		}
+		if _, _, err := artifacts.ParseExpiresIn(opts.ExpiresIn); err != nil {
+			return fmt.Errorf("--expires-in: %w", err)
+		}
 	}
 	if artifactPublishReview != "" || artifactPublishOf != "" {
 		if opts.Title != "" || opts.Key != "" {
@@ -207,7 +217,7 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 		return publishVersionOf(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), endpoint, file, artifactPublishOf, opts)
 	}
 	if info.Mode().IsRegular() && opts.Key == "" && opts.Note == "" && opts.Entry == "" {
-		return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), endpoint, file, opts.Title, opts.Scope)
+		return publishArtifactWith(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), endpoint, file, opts.Title, opts.Scope, opts.ExpiresIn)
 	}
 	return publishBundle(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), endpoint, file, opts)
 }
@@ -291,6 +301,7 @@ func init() {
 	artifactPublishCmd.Flags().StringVar(&artifactPublishEntry, "entry", "", "Entry file of a folder, relative to it")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishOf, "version-of", "", "Publish as the next version of the artifact with this reference")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishReview, "review", "", "Publish as a review (CriticMarkup marks only) of the artifact with this reference")
+	artifactPublishCmd.Flags().StringVar(&artifactPublishExpiresIn, "expires-in", "", "Set artifact retention at publish time, e.g. 720h, 30d, or never (for agents: at least 24h, and never or longer than the hub default only when default retention is 0)")
 	artifactGetCmd.Flags().StringVarP(&artifactGetOut, "out", "o", "", "Write to this file or directory instead of stdout")
 	artifactGetCmd.Flags().BoolVar(&artifactGetForce, "force", false, "Replace files that already exist under --out")
 	artifactGetCmd.Flags().BoolVar(&artifactGetClean, "clean", false, "Reject every CriticMarkup mark in text files (the reviewed baseline)")
@@ -329,6 +340,12 @@ func requireArtifactHubClient() (*config.Settings, hubclient.Client, string, err
 // publishArtifact publishes the file at filePath and prints the reference
 // and the artifact's web page.
 func publishArtifact(ctx context.Context, svc hubclient.ArtifactService, out, warn io.Writer, hubEndpoint, filePath, title, scope string) error {
+	return publishArtifactWith(ctx, svc, out, warn, hubEndpoint, filePath, title, scope, "")
+}
+
+// publishArtifactWith publishes the file at filePath with an optional
+// publish-time retention (expiresIn) and prints the reference and web page.
+func publishArtifactWith(ctx context.Context, svc hubclient.ArtifactService, out, warn io.Writer, hubEndpoint, filePath, title, scope, expiresIn string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return err
@@ -349,12 +366,13 @@ func publishArtifact(ctx context.Context, svc hubclient.ArtifactService, out, wa
 		return err
 	}
 	resp, err := svc.Publish(ctx, &hubclient.PublishArtifactRequest{
-		Name:    filepath.Base(filePath),
-		Title:   title,
-		Scope:   scope,
-		Content: f,
-		Size:    info.Size(),
-		SHA256:  hex.EncodeToString(h.Sum(nil)),
+		Name:      filepath.Base(filePath),
+		Title:     title,
+		Scope:     scope,
+		Content:   f,
+		Size:      info.Size(),
+		SHA256:    hex.EncodeToString(h.Sum(nil)),
+		ExpiresIn: expiresIn,
 	})
 	if err != nil {
 		return fmt.Errorf("publish failed: %w%s", err, artifactErrorHint(err, true))

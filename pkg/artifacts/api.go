@@ -129,6 +129,10 @@ type CreateVersionRequest struct {
 	// It has no effect on a review, while the experiment is off, or when
 	// nothing is open.
 	Force bool `json:"force,omitempty"`
+	// ExpiresIn optionally sets the artifact's retention at publish time
+	// (e.g. "720h", "30d", or "never"). Applied when creating an artifact
+	// or publishing a new version by key (ptone/scion#8155).
+	ExpiresIn string `json:"expiresIn,omitempty"`
 }
 
 // FinalizeRequest is the optional JSON body of a finalize request.

@@ -36,7 +36,7 @@ import (
 
 // bundlePublishOptions are the flags of a two-step publish.
 type bundlePublishOptions struct {
-	Title, Key, Note, Entry, Scope string
+	Title, Key, Note, Entry, Scope, ExpiresIn string
 }
 
 // localFile is one file of a bundle on disk.
@@ -164,7 +164,7 @@ func publishBundle(ctx context.Context, svc hubclient.ArtifactService, out, errO
 	if err != nil {
 		return err
 	}
-	req := &hubclient.CreateVersionRequest{Title: opts.Title, Key: opts.Key, Scope: opts.Scope, Entry: entry, Note: opts.Note}
+	req := &hubclient.CreateVersionRequest{Title: opts.Title, Key: opts.Key, Scope: opts.Scope, Entry: entry, Note: opts.Note, ExpiresIn: opts.ExpiresIn}
 	byPath := make(map[string]*localFile, len(files))
 	for i := range files {
 		f := &files[i]
