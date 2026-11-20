@@ -467,6 +467,7 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		Branch: hc.Branch,
 		NoAuth: effectiveNoAuth,
 	}, creatorName, childRole)
+	pinResolvedCreateProfile(agent, project, scheduledBroker, false)
 
 	templateFromProjectDefault := false
 	if templateName == "" && project != nil && project.Annotations != nil {

@@ -235,6 +235,37 @@ func pinResolvedProfile(ac *store.AgentAppliedConfig, profile string) {
 	}
 }
 
+// pinResolvedCreateProfile resolves and records the runtime profile an agent
+// create runs under onto both AppliedConfig.Profile and CreateInputs.Profile
+// when the create request did not name one explicitly (ptone/scion#5149).
+//
+// Precedence matches the rest of create: the project's active profile first
+// (effectiveRuntimeProfileName), then the target Runtime Broker's default or
+// sole profile (resolveAgentRuntimeProfileType). Flat/pinned agents and
+// hub-direct managed agents never take a Runtime Broker profile, and an
+// ambiguous or unresolvable broker default is left empty so we never guess.
+//
+// Called right after buildAppliedConfig — before GCP identity resolution,
+// passthrough translation, and deriveAgentConfig — so the stored profile and
+// every decision derived from it use the same profile and cannot diverge, and
+// so later starts, restarts and reincarnations keep the create-time profile
+// even if the project's active profile or broker default changes.
+func pinResolvedCreateProfile(agent *store.Agent, project *store.Project, broker *store.RuntimeBroker, managed bool) {
+	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.Profile != "" {
+		return
+	}
+	if managed || isManagedAgentRuntime(agent.Runtime) || agent.IsPinned() || (broker != nil && broker.IsFlat()) {
+		return
+	}
+	profile := effectiveRuntimeProfileName("", project)
+	if profile == "" && broker != nil {
+		if resolved, _, ok := resolveAgentRuntimeProfileType(broker, ""); ok {
+			profile = resolved
+		}
+	}
+	pinResolvedProfile(agent.AppliedConfig, profile)
+}
+
 // resolveDefaultSAAssignmentCore is the transport-independent body shared by
 // every default-tier assign rung of the GCP identity ladder: the HTTP
 // project-default and hub-default rungs in the interactive/API create path
