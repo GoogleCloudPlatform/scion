@@ -1091,12 +1091,8 @@ func TestConfigureGitCommand_SkipsCredentialOverrideForNonRootDifferentTarget(t 
 }
 
 // TestConfigureGitCommand_PropagatesTrustBundleEnv proves configureGitCommand
-// passes GIT_SSL_CAINFO through to the `git` subprocess it configures:
-// configureGitCommand (init.go) builds cmd.Env as
-// append(os.Environ(), "GIT_TERMINAL_PROMPT=0") — a full copy of the process
-// environment, not an allowlisted subset — so any CA-bundle var already set
-// in this process's own environment reaches the `git` subprocess unchanged,
-// with no code change needed here to carry it through.
+// passes operator-supplied GIT_SSL_CAINFO through to the `git` subprocess it
+// configures when not withheld (built via initenv.Policy.StartupChildEnv).
 func TestConfigureGitCommand_PropagatesTrustBundleEnv(t *testing.T) {
 	t.Setenv("GIT_SSL_CAINFO", "/run/ate/trust-bundle.pem")
 
@@ -3873,6 +3869,9 @@ func TestGitCloneWorkspace_NoTokenInArgvOrConfig(t *testing.T) {
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	origResolve := resolveGitForInit
+	resolveGitForInit = func(string) (string, error) { return filepath.Join(binDir, "git"), nil }
+	t.Cleanup(func() { resolveGitForInit = origResolve })
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", root)
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "gc"))
@@ -3942,6 +3941,9 @@ func TestGitCloneWorkspace_FetchUsesHostScopedCredential(t *testing.T) {
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	origResolve := resolveGitForInit
+	resolveGitForInit = func(string) (string, error) { return filepath.Join(binDir, "git"), nil }
+	t.Cleanup(func() { resolveGitForInit = origResolve })
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", root)
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "gc"))

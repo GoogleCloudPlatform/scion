@@ -435,12 +435,29 @@ The `command` block defines how the agent's primary LLM tool is invoked.
 
 #### Launcher harnesses and live-work detection
 
-The Hub's live-work detection treats the process `command.base` starts as the harness itself, never as work, because a TUI keeps redrawing while it waits (see [Agent Lifecycle](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents)). Some tools start through a launcher that keeps running and spawns the real TUI as a child. Codex's npm launcher (`node bin/codex.js`) is one. For a harness like that, set `SCION_LIVENESS_HARNESS_ROOT_DEPTH` in the config's `env` map. The value is the number of process levels counted as the harness, so the launcher and its TUI make 2. The default is 1 and the maximum is 4. Without it, a hung agent's animated status can keep it from ever being marked stalled.
+The Hub's live-work detection treats the process `command.base` starts as the harness itself, never as work, because a TUI keeps redrawing while it waits (see [Agent Lifecycle](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents)). Some tools start through a launcher that keeps running and spawns the real TUI as a child. Codex's npm launcher (`node bin/codex.js`) is one. For a harness like that, set `HARNESS_HINT_LIVENESS_ROOT_DEPTH` in the config's `env` map. The value is the number of process levels counted as the harness, so the launcher and its TUI make 2. The default is 1 and the maximum is 4. Without it, a hung agent's animated status can keep it from ever being marked stalled. (An operator- or Hub-supplied `SCION_LIVENESS_HARNESS_ROOT_DEPTH` takes precedence over the hint.)
 
 ```yaml
 env:
-  SCION_LIVENESS_HARNESS_ROOT_DEPTH: "2"
+  HARNESS_HINT_LIVENESS_ROOT_DEPTH: "2"
 ```
+
+### Environment Variables (`env`)
+
+The `env` block in a harness-config's `config.yaml` defines workload environment variables for agents using that harness-config.
+
+- **Literal values:** Values in a bundle's `env` map are used verbatim. The Runtime Broker does not expand `${VAR}` references and never copies variables from the broker host environment.
+  - A value containing `${` or `$VAR` is passed literally to the workload and emits a start warning.
+  - An empty value (`KEY: ""`) declares the key without supplying a value. A higher-precedence layer (Hub environment/secrets, inline agent config, or settings) can fill it; otherwise the key is omitted with a missing-key warning.
+- **Resolved per start:** Bundle `env` entries are resolved fresh from the current harness-config on every start and are not persisted into `scion-agent.json`. Edits to a bundle's `env` take effect on the agent's next start. (An older Runtime Broker restarting an agent provisioned by a newer broker will not load bundle `env` entries until the agent is re-provisioned.)
+- **Reserved `SCION_*` namespace and `HARNESS_HINT_*` hints:** Harness-config layers (`env`, `env_template`, and settings `harness_configs.<name>.env` / profile `harness_overrides`) cannot set `SCION_*` keys; any such key is stripped with a start warning. Safe harness-publishable settings use the `HARNESS_HINT_` prefix:
+  - `HARNESS_HINT_LIVENESS_ROOT_DEPTH`
+  - `HARNESS_HINT_AUTO_EXPOSE_PORTS`
+  - `HARNESS_HINT_AUTO_EXPOSE_MODE`
+  - `HARNESS_HINT_AUTO_EXPOSE_PORTS_LIST`
+
+  An explicit `SCION_*` value from the Hub, inline config, or operator settings takes precedence over the corresponding hint. During the transition window, the four legacy `SCION_*` equivalents (`SCION_LIVENESS_HARNESS_ROOT_DEPTH`, `SCION_AUTO_EXPOSE_PORTS`, `SCION_AUTO_EXPOSE_MODE`, `SCION_AUTO_EXPOSE_PORTS_LIST`) are automatically rewritten to their `HARNESS_HINT_*` names with a deprecation warning.
+- **Workload-only scope:** Environment variables whose effective value comes from a harness-config layer reach the workload (the harness process, SSH sessions, scheduled exec, and `exec` shells), and are withheld from in-container lifecycle/pre-start hooks and startup `git` subprocesses. See [Pre-Start Hooks — Hook Environment](/scion/hosted/user/pre-start-hooks/#hook-environment).
 
 ### Environment Templates (`env_template`)
 
