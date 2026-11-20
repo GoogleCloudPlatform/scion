@@ -179,6 +179,7 @@ func (m *mockHubClient) ScheduledEvents(string) hubclient.ScheduledEventService 
 func (m *mockHubClient) Schedules(string) hubclient.ScheduleService                   { return nil }
 func (m *mockHubClient) WebhookEndpoints(string) hubclient.WebhookEndpointService     { return nil }
 func (m *mockHubClient) Triggers(string) hubclient.TriggerService                     { return nil }
+func (m *mockHubClient) TriggerEvents(string) hubclient.TriggerEventService           { return nil }
 func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService       { return nil }
 func (m *mockHubClient) Messages() hubclient.MessageService                           { return nil }
 func (m *mockHubClient) Conversations() hubclient.ConversationService                 { return nil }
