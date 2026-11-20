@@ -614,10 +614,10 @@ When an agent signals `WAITING_FOR_INPUT` (by calling `sciontool status ask_user
 When the platform [halts](/scion/concepts/#halted-phase-the-platform-ended-the-run) an agent (for example its Kubernetes pod was preempted or evicted, or it was killed for running out of memory), Scion sends one `HALTED` notification for that halt, with text such as:
 
 ```
-worker-1 was halted by the platform (preempted). Workspace kept. Resume: scion start worker-1.
+worker-1 was halted by the platform (preempted). Workspace kept. Resume: scion resume worker-1.
 ```
 
-The workspace part says what `scion start` does with the workspace: `Workspace kept`, `Workspace re-cloned` (a workspace on the pod's own storage), or `Workspace may be re-cloned` (where it lives is not known).
+The workspace part says what `scion resume` does with the workspace: `Workspace kept`, `Workspace re-cloned` (a workspace on the pod's own storage), or `Workspace may be re-cloned` (where it lives is not known).
 
 Who receives it:
 

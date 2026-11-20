@@ -1426,7 +1426,8 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	}
 	// On `scion resume`, warn about config flags the hub does not apply to an
 	// existing agent reused in place (only once the hub has accepted the
-	// request).
+	// request). Exclude provisioning + GatherEnv because the env-gather branch
+	// deletes and recreates the agent, so creation flags do apply.
 	if resume && existingPhase != "" && (!req.GatherEnv || existingPhase != string(state.PhaseProvisioning)) {
 		warnFlagsIgnoredForExistingAgent(cmd, agentName, existingPhaseText)
 	}

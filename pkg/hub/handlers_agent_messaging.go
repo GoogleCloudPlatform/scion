@@ -2661,7 +2661,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		case state.PhaseHalted:
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
-				fmt.Sprintf("Agent %q is halted. Use 'scion start' to restart it.", agent.Slug), nil)
+				fmt.Sprintf("Agent %q is halted. Use 'scion resume' to restart it.", agent.Slug), nil)
 			return
 		case state.PhaseError:
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
