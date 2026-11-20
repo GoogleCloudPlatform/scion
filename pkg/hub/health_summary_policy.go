@@ -76,6 +76,12 @@ const HealthAttentionBrokerCommandPath = "broker_command_path"
 // (ptone/scion#5972). Mirrored as hubclient.HealthAttentionBrokerVersionMismatch.
 const HealthAttentionBrokerVersionMismatch = "broker_version_mismatch"
 
+// HealthAttentionBrokerVersionUnknown is the attention item kind for an
+// online runtime broker that reports no usable version (empty or "unknown")
+// while the hub fleet has a single known version (ptone/scion#7430). Mirrored
+// as hubclient.HealthAttentionBrokerVersionUnknown.
+const HealthAttentionBrokerVersionUnknown = "broker_version_unknown"
+
 // Attention subject types.
 const (
 	HealthSubjectHub         = "hub"
@@ -95,7 +101,8 @@ type HealthAttentionItem struct {
 	Severity string `json:"severity"`
 	// Kind is hub_check, hub_instance, broker_offline, broker_degraded,
 	// broker_command_path, broker_nfs, broker_host_identity,
-	// broker_version_mismatch, integration, dispatch, agents or schedule.
+	// broker_version_mismatch, broker_version_unknown, integration, dispatch,
+	// agents or schedule.
 	Kind    string                 `json:"kind"`
 	Subject HealthAttentionSubject `json:"subject"`
 	// Message is a fixed, server-composed sentence.
@@ -137,8 +144,10 @@ type HealthAttentionSubject struct {
 // agents below the ratio, add warning items only. Failing and hub-paused
 // schedules add warning items only (scheduleAttention): the schedules
 // section holds only what the caller may read, so it must not change the
-// status. An online runtime broker whose version differs from the hub's
-// adds a broker_version_mismatch warning, last among that broker's items,
+// status. An online runtime broker whose version differs from the hub's adds
+// a broker_version_mismatch warning, and an online runtime broker reporting
+// no usable version while the hub has a single known version adds a
+// broker_version_unknown warning; either is last among that broker's items
 // and does not change the status.
 //
 // Hub check items, one per non-healthy check per live hub instance, are
@@ -228,12 +237,19 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 			})
 		}
 		// Last for this broker: an online broker whose version differs
-		// from the hub's. A warning only; it never changes the status.
-		// Both versions are bounded (brokerVersionToken, hubBuildToken).
+		// from the hub's, or reports no usable version while the hub's
+		// version is a single known value. A warning only; it never
+		// changes the status. Both versions are bounded
+		// (brokerVersionToken, hubBuildToken).
 		if healthSummaryBrokerVersionIsProblem(b) {
 			items = append(items, HealthAttentionItem{
 				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerVersionMismatch, Subject: subject,
 				Message: "Runtime broker " + label + " runs " + b.Version + "; the hub runs " + resp.Hub.Version,
+			})
+		} else if healthSummaryBrokerVersionIsUnknown(b, resp.Hub.Version) {
+			items = append(items, HealthAttentionItem{
+				Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerVersionUnknown, Subject: subject,
+				Message: "Runtime broker " + label + " reports no version; cannot verify it matches the hub (" + resp.Hub.Version + ")",
 			})
 		}
 	}

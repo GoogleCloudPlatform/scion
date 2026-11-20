@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -898,6 +899,13 @@ func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, 
 	// untagged build, which must show as unknown rather than keep a stale
 	// token from an earlier join (ptone/scion#5972).
 	broker.Version = brokerVersionToken(req.Version)
+	if broker.Version == "" || broker.Version == "unknown" {
+		slog.Warn("Runtime broker joined without a build version",
+			"broker_id", broker.ID,
+			"broker_name", broker.Name,
+			"version", broker.Version,
+		)
+	}
 	broker.Status = store.BrokerStatusOnline
 	broker.ConnectionState = "connected"
 	broker.LastHeartbeat = now

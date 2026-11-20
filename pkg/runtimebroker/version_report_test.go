@@ -15,8 +15,10 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,5 +63,37 @@ func TestHeartbeatService_ReportsVersion(t *testing.T) {
 	}
 	if got := calls[1].Heartbeat.Version; got != "v1.2.3" {
 		t.Errorf("heartbeat after SetVersion: Version = %q, want %q", got, "v1.2.3")
+	}
+}
+
+// TestServer_WarnIfVersionUnknown verifies that broker startup logs a WARN
+// when the binary has no usable build version ("", "unknown", or "dev"), and
+// stays silent when a real build token is present.
+func TestServer_WarnIfVersionUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		ver      string
+		wantWarn bool
+	}{
+		{"", true},
+		{"unknown", true},
+		{"dev", true},
+		{"v1.3.0", false},
+		{"0a1b2c3d", false},
+	} {
+		t.Run("version="+tc.ver, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			srv := &Server{version: tc.ver}
+			srv.warnIfVersionUnknown()
+
+			got := buf.String()
+			hasWarn := strings.Contains(got, "Runtime Broker binary has no build version")
+			if hasWarn != tc.wantWarn {
+				t.Errorf("version %q: warn logged = %v, want %v (output: %q)", tc.ver, hasWarn, tc.wantWarn, got)
+			}
+		})
 	}
 }

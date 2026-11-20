@@ -78,6 +78,11 @@ type HealthSummary struct {
 // Message.
 const HealthAttentionBrokerVersionMismatch = "broker_version_mismatch"
 
+// HealthAttentionBrokerVersionUnknown is the attention item kind for an
+// online runtime broker that reports no usable version while the hub has a
+// single known version. It mirrors hub.HealthAttentionBrokerVersionUnknown.
+const HealthAttentionBrokerVersionUnknown = "broker_version_unknown"
+
 // HealthAttentionItem is one entry of the "Needs attention" list.
 type HealthAttentionItem struct {
 	// Severity is critical or warning.

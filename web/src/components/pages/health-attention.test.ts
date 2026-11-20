@@ -205,6 +205,24 @@ describe('scion-health-attention', () => {
     expect(li.querySelector('a')?.getAttribute('href')).toBe('/brokers/b%202');
   });
 
+  it('renders a broker_version_unknown item as a warning linked to the broker (ptone/scion#7430)', async () => {
+    const root = await mount([
+      {
+        severity: 'warning',
+        kind: 'broker_version_unknown',
+        subject: { type: 'runtime_broker', id: 'b 3', name: 'cloudrun' },
+        message:
+          'Runtime broker cloudrun reports no version; cannot verify it matches the hub (v1.3.0)',
+      },
+    ]);
+    const li = root.querySelector('li[data-kind="broker_version_unknown"]')!;
+    expect(li.className).toBe('sev-warning');
+    expect(li.textContent).toContain(
+      'Runtime broker cloudrun reports no version; cannot verify it matches the hub (v1.3.0)'
+    );
+    expect(li.querySelector('a')?.getAttribute('href')).toBe('/brokers/b%203');
+  });
+
   it('shows Nothing needs attention for an empty list', async () => {
     const root = await mount([]);
     expect(root.querySelector('ul')).toBeNull();

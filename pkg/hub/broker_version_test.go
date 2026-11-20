@@ -62,6 +62,17 @@ func versionItems(resp HealthSummaryResponse) []HealthAttentionItem {
 	return out
 }
 
+// versionUnknownItems returns the broker_version_unknown items of a summary.
+func versionUnknownItems(resp HealthSummaryResponse) []HealthAttentionItem {
+	var out []HealthAttentionItem
+	for _, it := range resp.Attention {
+		if it.Kind == HealthAttentionBrokerVersionUnknown {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
 func summaryBrokerByID(resp HealthSummaryResponse) map[string]HealthSummaryBroker {
 	out := map[string]HealthSummaryBroker{}
 	for _, b := range resp.Brokers.Items {
@@ -90,9 +101,10 @@ func TestBrokerVersionToken_Bounded(t *testing.T) {
 }
 
 // Mixed fleet during a broker rollout: an older untagged broker (stored "",
-// no heartbeat version) shows unknown and gets no item, next to a matching
-// broker and an older tagged broker that lags the hub upgrade. The overall
-// status is unchanged by any of them.
+// no heartbeat version) shows unknown and gets a broker_version_unknown
+// warning, next to a matching broker and an older tagged broker that lags the
+// hub upgrade and gets broker_version_mismatch. The overall status is
+// unchanged by any of them.
 func TestHealthSummary_BrokerVersionMixedFleet(t *testing.T) {
 	srv, s := testServer(t)
 	setHubFleet(t, s, "v1.3.0")
@@ -106,14 +118,23 @@ func TestHealthSummary_BrokerVersionMixedFleet(t *testing.T) {
 	assert.Equal(t, "match", rows[tid("ver-new")].VersionStatus)
 	assert.Equal(t, "mismatch", rows[tid("ver-old-tagged")].VersionStatus)
 
-	items := versionItems(resp)
-	require.Len(t, items, 1, "only the online mismatched broker gets an item: %+v", resp.Attention)
+	mismatchItems := versionItems(resp)
+	require.Len(t, mismatchItems, 1, "only the online mismatched broker gets a mismatch item: %+v", resp.Attention)
 	assert.Equal(t, HealthAttentionItem{
 		Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerVersionMismatch,
 		Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: tid("ver-old-tagged"), Name: "ver-old-tagged"},
 		Message: "Runtime broker ver-old-tagged runs v1.2.0; the hub runs v1.3.0",
-	}, items[0])
-	assert.Equal(t, HealthStatusHealthy, resp.Status, "a version mismatch never changes the overall status")
+	}, mismatchItems[0])
+
+	unknownItems := versionUnknownItems(resp)
+	require.Len(t, unknownItems, 1, "only the online untagged broker gets an unknown-version item: %+v", resp.Attention)
+	assert.Equal(t, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerVersionUnknown,
+		Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: tid("ver-old-untagged"), Name: "ver-old-untagged"},
+		Message: "Runtime broker ver-old-untagged reports no version; cannot verify it matches the hub (v1.3.0)",
+	}, unknownItems[0])
+
+	assert.Equal(t, HealthStatusHealthy, resp.Status, "version warnings never change the overall status")
 
 	var brokers struct {
 		Items []map[string]json.RawMessage `json:"items"`
@@ -122,6 +143,46 @@ func TestHealthSummary_BrokerVersionMixedFleet(t *testing.T) {
 	for _, row := range brokers.Items {
 		assert.Contains(t, row, "version_status")
 	}
+}
+
+// Online brokers reporting "" or "unknown" get broker_version_unknown when the
+// hub fleet has a single known version; offline and pre-heartbeat brokers stay
+// excluded and the overall status is unchanged by version warnings.
+func TestHealthSummary_BrokerVersionUnknown(t *testing.T) {
+	srv, s := testServer(t)
+	setHubFleet(t, s, "v1.3.0")
+
+	createSummaryBroker(t, s, versionTestBroker("ver-unk-str", "unknown"))
+	createSummaryBroker(t, s, versionTestBroker("ver-unk-empty", ""))
+
+	offUnknown := versionTestBroker("ver-off-unk", "unknown")
+	offUnknown.Status = store.BrokerStatusOffline
+	createSummaryBroker(t, s, offUnknown)
+
+	preHeartbeat := &store.RuntimeBroker{ID: tid("ver-pre-hb"), Name: "ver-pre-hb", Status: store.BrokerStatusOffline}
+	createSummaryBroker(t, s, preHeartbeat)
+
+	resp, _ := getHealthSummary(t, srv)
+	assert.Empty(t, versionItems(resp))
+
+	unknownItems := versionUnknownItems(resp)
+	require.Len(t, unknownItems, 2, "only the two online brokers with empty/unknown version get items: %+v", resp.Attention)
+	byID := map[string]HealthAttentionItem{}
+	for _, it := range unknownItems {
+		byID[it.Subject.ID] = it
+	}
+	assert.Equal(t, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerVersionUnknown,
+		Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: tid("ver-unk-str"), Name: "ver-unk-str"},
+		Message: "Runtime broker ver-unk-str reports no version; cannot verify it matches the hub (v1.3.0)",
+	}, byID[tid("ver-unk-str")])
+	assert.Equal(t, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionBrokerVersionUnknown,
+		Subject: HealthAttentionSubject{Type: HealthSubjectBroker, ID: tid("ver-unk-empty"), Name: "ver-unk-empty"},
+		Message: "Runtime broker ver-unk-empty reports no version; cannot verify it matches the hub (v1.3.0)",
+	}, byID[tid("ver-unk-empty")])
+	assert.NotContains(t, byID, tid("ver-off-unk"))
+	assert.NotContains(t, byID, tid("ver-pre-hb"))
 }
 
 // Exact token: the hub on "v1.2.0" matches a broker on "v1.2.0"; "1.2.0"
@@ -138,9 +199,9 @@ func TestHealthSummary_BrokerVersionExactToken(t *testing.T) {
 	assert.Equal(t, "mismatch", rows[tid("ver-no-v")].VersionStatus)
 }
 
-// A rolling hub upgrade ("mixed") or no live hub instance: every broker is
-// unknown and gets no item, on the summary and on the list, which reports
-// hubVersion as is.
+// A rolling hub upgrade ("mixed"), no live hub instance, or a hub reporting
+// "unknown": every broker is unknown and gets no version item, on the summary
+// and on the list, which reports hubVersion as is.
 func TestBrokerVersion_NoSingleHubVersion(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -149,18 +210,21 @@ func TestBrokerVersion_NoSingleHubVersion(t *testing.T) {
 	}{
 		{"mixed", []string{"v1.2.0", "v1.3.0"}, HubVersionMixed},
 		{"no live instance", nil, ""},
+		{"hub unknown", []string{"unknown"}, "unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testServer(t)
 			setHubFleet(t, s, tc.fleet...)
 			createSummaryBroker(t, s, versionTestBroker("ver-roll-a", "v1.2.0"))
 			createSummaryBroker(t, s, versionTestBroker("ver-roll-b", "v1.3.0"))
+			createSummaryBroker(t, s, versionTestBroker("ver-roll-unk", "unknown"))
 
 			resp, _ := getHealthSummary(t, srv)
 			for _, b := range resp.Brokers.Items {
 				assert.Equal(t, "unknown", b.VersionStatus, b.ID)
 			}
 			assert.Empty(t, versionItems(resp))
+			assert.Empty(t, versionUnknownItems(resp))
 
 			list := listBrokersForVersion(t, srv, "")
 			assert.Equal(t, tc.wantList, list.HubVersion)
@@ -336,20 +400,46 @@ func TestHealthSummaryBrokers_LayoutAndVersionMismatchKeptWhenCapped(t *testing.
 
 func TestHealthSummaryBrokerKeepWhenCapped(t *testing.T) {
 	online := store.BrokerStatusOnline
-	assert.True(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, VersionStatus: "mismatch"}))
-	assert.False(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, VersionStatus: "unknown"}))
-	assert.False(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, VersionStatus: "match"}))
-	assert.True(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: store.BrokerStatusOffline, VersionStatus: "match"}),
+	assert.True(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, VersionStatus: "mismatch"}, "v1.3.0"))
+	assert.True(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, Version: "", VersionStatus: "unknown"}, "v1.3.0"))
+	assert.True(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, Version: "unknown", VersionStatus: "unknown"}, "v1.3.0"))
+	assert.False(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, Version: "", VersionStatus: "unknown"}, ""))
+	assert.False(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, Version: "", VersionStatus: "unknown"}, HubVersionMixed))
+	assert.False(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, Version: "", VersionStatus: "unknown"}, "unknown"))
+	assert.False(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, VersionStatus: "match"}, "v1.3.0"))
+	assert.True(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: store.BrokerStatusOffline, VersionStatus: "match"}, "v1.3.0"),
 		"problem rows are still kept")
 	assert.False(t, healthSummaryBrokerHasProblem(HealthSummaryBroker{Status: online, VersionStatus: "mismatch"}),
 		"a mismatch is not a problem row")
 	assert.True(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, VersionStatus: "match",
-		WorkspaceStorage: &HealthBrokerStorage{Backend: "local", LayoutMismatch: []string{"backend"}}}),
+		WorkspaceStorage: &HealthBrokerStorage{Backend: "local", LayoutMismatch: []string{"backend"}}}, "v1.3.0"),
 		"a layout-mismatched row (a problem row) is kept")
 }
 
-// Order: the version item is the last item of its broker, before the next
-// broker's items.
+// Capped list: an online unknown-version, otherwise healthy broker is kept
+// ahead of a healthy matching one when the hub has a single known version,
+// with its broker_version_unknown item, and the status stays healthy.
+func TestHealthSummaryBrokers_VersionUnknownKeptWhenCapped(t *testing.T) {
+	prev := healthSummaryBrokerLimit
+	healthSummaryBrokerLimit = 1
+	t.Cleanup(func() { healthSummaryBrokerLimit = prev })
+
+	srv, s := testServer(t)
+	setHubFleet(t, s, "v1.3.0")
+	createSummaryBroker(t, s, versionTestBroker("ver-cap-unk", "unknown"))
+	time.Sleep(2 * time.Millisecond)
+	createSummaryBroker(t, s, versionTestBroker("ver-cap-ok", "v1.3.0"))
+
+	resp, _ := getHealthSummary(t, srv)
+	require.Len(t, resp.Brokers.Items, 1)
+	assert.Equal(t, tid("ver-cap-unk"), resp.Brokers.Items[0].ID)
+	assert.True(t, resp.Brokers.Truncated)
+	require.Len(t, versionUnknownItems(resp), 1)
+	assert.Equal(t, HealthStatusHealthy, resp.Status)
+}
+
+// Order: the version item (mismatch or unknown) is the last item of its
+// broker, before the next broker's items.
 func TestDeriveHealthSummaryStatus_BrokerVersionItemOrder(t *testing.T) {
 	unhealthy := false
 	resp := &HealthSummaryResponse{
@@ -358,7 +448,9 @@ func TestDeriveHealthSummaryStatus_BrokerVersionItemOrder(t *testing.T) {
 		Brokers: HealthSummaryBrokers{Items: []HealthSummaryBroker{
 			{ID: "b1", Name: "first", Version: "v1.2.0", VersionStatus: "mismatch", Status: store.BrokerStatusOnline,
 				WorkspaceStorage: &HealthBrokerStorage{Backend: "nfs", NFSHealthy: &unhealthy}},
-			{ID: "b2", Name: "second", Status: store.BrokerStatusOffline},
+			{ID: "b2", Name: "second", Version: "unknown", VersionStatus: "unknown", Status: store.BrokerStatusOnline,
+				WorkspaceStorage: &HealthBrokerStorage{Backend: "nfs", NFSHealthy: &unhealthy}},
+			{ID: "b3", Name: "third", Status: store.BrokerStatusOffline},
 		}},
 	}
 	_, items := deriveHealthSummaryStatus(resp)
@@ -371,7 +463,9 @@ func TestDeriveHealthSummaryStatus_BrokerVersionItemOrder(t *testing.T) {
 	assert.Equal(t, []string{
 		"b1:" + HealthAttentionBrokerNFS,
 		"b1:" + HealthAttentionBrokerVersionMismatch,
-		"b2:" + HealthAttentionBrokerOffline,
+		"b2:" + HealthAttentionBrokerNFS,
+		"b2:" + HealthAttentionBrokerVersionUnknown,
+		"b3:" + HealthAttentionBrokerOffline,
 	}, got)
 }
 
@@ -546,6 +640,7 @@ func TestBrokerJoin_AlwaysStoresVersion(t *testing.T) {
 		rows := summaryBrokerByID(resp)
 		assert.Equal(t, "unknown", rows[f.id].VersionStatus)
 		assert.Empty(t, versionItems(resp))
+		require.Len(t, versionUnknownItems(resp), 1)
 
 		join(strings.Repeat("j", 200))
 		assert.Equal(t, strings.Repeat("j", hubInstanceMaxVersionBytes), f.row(t).Version)

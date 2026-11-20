@@ -237,13 +237,35 @@ describe('scion-page-brokers-area', () => {
       ).toBe('exclamation-triangle');
     });
 
-    it('the Needs attention chip includes an online mismatched broker, not an unknown one', async () => {
+    it('the Needs attention chip includes online mismatched and unknown-version brokers when the hub has a single known version (ptone/scion#7430)', async () => {
       const root = await mount();
       const group = root.querySelector('sl-radio-group') as HTMLElement & { value: string };
       group.value = 'attention';
       group.dispatchEvent(new Event('sl-change'));
       await (mounted[0] as Page).updateComplete;
       expect(row(root, FLAT_DOCKER.id)).not.toBeNull();
+      expect(row(root, LEGACY.id)).not.toBeNull();
+      expect(row(root, FLAT_K8S.id)).toBeNull();
+    });
+
+    it('the Needs attention chip excludes unknown-version brokers when the hub version is mixed (ptone/scion#7430)', async () => {
+      fetchMock.mockImplementation((url: string) => {
+        if (url.startsWith('/api/v1/runtime-brokers')) {
+          return jsonResponse({
+            brokers: [
+              { ...FLAT_K8S, version: 'v1.3.0', versionStatus: 'unknown' },
+              { ...LEGACY, status: 'online', version: '', versionStatus: 'unknown' },
+            ],
+            hubVersion: 'mixed',
+          });
+        }
+        return jsonResponse({}, 404);
+      });
+      const root = await mount();
+      const group = root.querySelector('sl-radio-group') as HTMLElement & { value: string };
+      group.value = 'attention';
+      group.dispatchEvent(new Event('sl-change'));
+      await (mounted[0] as Page).updateComplete;
       expect(row(root, LEGACY.id)).toBeNull();
       expect(row(root, FLAT_K8S.id)).toBeNull();
     });

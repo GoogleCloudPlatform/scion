@@ -443,15 +443,32 @@ describe('scion-health-broker-table version against the hub (ptone/scion#5972)',
     ).toBe('unknown');
   });
 
-  it('sorts an online mismatched broker with the problem rows; unknown is not a problem', () => {
-    expect(brokerHasProblem(broker({ version_status: 'mismatch' }))).toBe(true);
+  it('sorts an online mismatched or unknown-version broker with the problem rows when hub version is single known', () => {
+    expect(brokerHasProblem(broker({ version_status: 'mismatch' }), 'v1.3.0')).toBe(true);
+    expect(brokerHasProblem(broker({ version: '', version_status: 'unknown' }), 'v1.3.0')).toBe(
+      true
+    );
+    expect(
+      brokerHasProblem(broker({ version: 'unknown', version_status: 'unknown' }), 'v1.3.0')
+    ).toBe(true);
+    expect(brokerHasProblem(broker({ version: '', version_status: 'unknown' }), 'mixed')).toBe(
+      false
+    );
+    expect(brokerHasProblem(broker({ version: '', version_status: 'unknown' }), '')).toBe(false);
+    expect(brokerHasProblem(broker({ version: '', version_status: 'unknown' }), 'unknown')).toBe(
+      false
+    );
     expect(brokerHasProblem(broker({ version_status: 'unknown' }))).toBe(false);
-    expect(brokerHasProblem(broker({ version_status: 'match' }))).toBe(false);
-    const sorted = sortBrokers([
-      broker({ id: 'a', name: 'a', version_status: 'match' }),
-      broker({ id: 'z', name: 'z', version_status: 'mismatch' }),
-    ]);
-    expect(sorted.map((b) => b.id)).toEqual(['z', 'a']);
+    expect(brokerHasProblem(broker({ version_status: 'match' }), 'v1.3.0')).toBe(false);
+    const sorted = sortBrokers(
+      [
+        broker({ id: 'a', name: 'a', version_status: 'match' }),
+        broker({ id: 'u', name: 'u', version: 'unknown', version_status: 'unknown' }),
+        broker({ id: 'z', name: 'z', version_status: 'mismatch' }),
+      ],
+      'v1.3.0'
+    );
+    expect(sorted.map((b) => b.id)).toEqual(['u', 'z', 'a']);
   });
 });
 

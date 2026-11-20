@@ -64,17 +64,35 @@ export function healthProblem(health: BrokerHealthInfo | null | undefined): bool
 }
 
 /**
+ * True when the hub version is a single known build token: not empty, not
+ * "mixed" (rolling upgrade), and not "unknown".
+ */
+function hasSingleKnownHubVersion(hubVersion: string | null | undefined): boolean {
+  return !!hubVersion && hubVersion !== 'mixed' && hubVersion !== 'unknown';
+}
+
+/**
  * Whether a broker needs attention: it is offline or degraded, it is online
- * and its version differs from the hub's (the health dashboard's
- * broker_version_mismatch item; unknown does not count), or (when its health
- * is known) its self-reported health is a problem.
+ * and its version differs from the hub's (broker_version_mismatch), it is
+ * online and reports no usable version while the hub has a single known
+ * version (broker_version_unknown), or (when its health is known) its
+ * self-reported health is a problem.
  */
 export function needsAttention(
-  broker: Pick<RuntimeBroker, 'status' | 'versionStatus'>,
-  health?: BrokerHealthInfo | null
+  broker: Pick<RuntimeBroker, 'status' | 'version' | 'versionStatus'>,
+  health?: BrokerHealthInfo | null,
+  hubVersion?: string | null
 ): boolean {
   if (broker.status === 'offline' || broker.status === 'degraded') return true;
   if (broker.status === 'online' && broker.versionStatus === 'mismatch') return true;
+  if (
+    broker.status === 'online' &&
+    broker.versionStatus === 'unknown' &&
+    (!broker.version || broker.version === 'unknown') &&
+    hasSingleKnownHubVersion(hubVersion)
+  ) {
+    return true;
+  }
   return healthProblem(health);
 }
 
@@ -94,7 +112,8 @@ export function parseBrokerFilter(value: string | null | undefined): BrokerFilte
 export function matchesBrokerFilter(
   broker: RuntimeBroker,
   filter: BrokerFilter,
-  health?: BrokerHealthInfo | null
+  health?: BrokerHealthInfo | null,
+  hubVersion?: string | null
 ): boolean {
   switch (filter) {
     case 'flat':
@@ -102,7 +121,7 @@ export function matchesBrokerFilter(
     case 'legacy':
       return !isFlatBroker(broker);
     case 'attention':
-      return needsAttention(broker, health);
+      return needsAttention(broker, health, hubVersion);
     default:
       return true;
   }

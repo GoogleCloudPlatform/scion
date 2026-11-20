@@ -30,9 +30,17 @@ RUN go mod download
 COPY . .
 COPY --from=web-builder /src/web/dist/client ./web/dist/client
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+# Version build arguments (.git is stripped by .dockerignore, so VCS
+# stamping is disabled and version metadata is injected explicitly via
+# ldflags, matching the repo-root Dockerfile).
+ARG GIT_COMMIT=""
+ARG VERSION=""
+ARG BUILD_TIME=""
+
+RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -buildvcs=false \
-      -ldflags "-X github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      -ldflags "-s -w -X github.com/GoogleCloudPlatform/scion/pkg/version.Version=${VERSION} -X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=${GIT_COMMIT} -X github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime=${BUILD_TIME}" \
       -o /scion ./cmd/scion
 
 # ---------------------------------------------------------------------------
