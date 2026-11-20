@@ -289,6 +289,7 @@ func (d *Dispatcher) NewDrainer(opts DrainerOptions) (*durablequeue.Drainer, err
 		LeaseDuration:       leaseDur,
 		HandlerTimeout:      handlerTimeout,
 		BatchSize:           batchSize,
+		FairByProject:       true,
 		MaxRows:             maxRows,
 		MaxPermanent:        maxPerm,
 		MaxAge:              maxAge,

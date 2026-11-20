@@ -187,3 +187,13 @@ type DurableQueueStore interface {
 type DurableQueuePendingCounter interface {
 	CountDurableQueuePending(ctx context.Context, kind, projectID string) (int64, error)
 }
+
+// DurableQueueFairClaimer claims due, unleased items of a kind using
+// lexicographic round-robin across active project_ids starting strictly after
+// afterProjectID (wrapping around through <= afterProjectID), preserving
+// (next_attempt_at, seq) order within each project and returning claimed rows
+// interleaved round-robin across projects.
+// Implemented by entadapter.CompositeStore and entadapter.DurableQueueStore.
+type DurableQueueFairClaimer interface {
+	ClaimDurableItemsFair(ctx context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) ([]DurableQueueRow, error)
+}

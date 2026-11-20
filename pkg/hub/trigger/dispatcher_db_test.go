@@ -859,3 +859,147 @@ func TestDispatcherDB_SubjectModeSkip_WakeInFlightNewAlwaysFiresAndFiresAfterEnd
 	assert.Equal(t, store.TriggerFireStatusFired, statusByEvent[evOther.ID].Status)
 	assert.Equal(t, store.TriggerFireStatusFired, statusByEvent[ev3.ID].Status)
 }
+
+func TestDispatcher_FairDrainFloodDoesNotStarveVictimAcrossTwoDrainers(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	t0 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	now := t0.Add(5 * time.Minute)
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return t0 }))
+
+	floodProj := seedProjectForDispatch(t, cs)
+	victimProj := seedProjectForDispatch(t, cs)
+	floodEP := uuid.NewString()
+	victimEP := uuid.NewString()
+
+	trFlood := makeActiveTrigger(floodProj, floodEP, "tr-flood", []string{"webhook.received"})
+	trVictim := makeActiveTrigger(victimProj, victimEP, "tr-victim", []string{"webhook.received"})
+	require.NoError(t, cs.CreateTrigger(ctx, trFlood))
+	require.NoError(t, cs.CreateTrigger(ctx, trVictim))
+
+	enqueueEvent := func(projID, epID, dedup string, ts time.Time) string {
+		evID := uuid.NewString()
+		ev := &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    "webhook:" + epID,
+			DedupKey:   dedup,
+			OccurredAt: ts,
+			ReceivedAt: ts,
+			Payload:    `{"ok":true}`,
+			Status:     store.TriggerEventStatusPending,
+		}
+		require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.CreateTriggerEvent(ctx, ev); err != nil {
+				return err
+			}
+			raw, err := json.Marshal(trigger.EventQueuePayload{Version: trigger.EventQueuePayloadVersion, EventID: evID})
+			if err != nil {
+				return err
+			}
+			_, err = q.Enqueue(ctx, tx, durablequeue.Item{
+				Kind:      trigger.EventQueueKind,
+				DedupKey:  evID,
+				ProjectID: projID,
+				Payload:   raw,
+				CreatedAt: ts,
+				NotBefore: ts,
+			})
+			return err
+		}))
+		return evID
+	}
+
+	const floodCount = 16
+	const victimCount = 2
+	floodEvs := make([]string, 0, floodCount)
+	for i := 0; i < floodCount; i++ {
+		floodEvs = append(floodEvs, enqueueEvent(floodProj, floodEP, fmt.Sprintf("flood-%02d", i), t0.Add(time.Duration(i)*time.Second)))
+	}
+	victimEvs := make([]string, 0, victimCount)
+	for i := 0; i < victimCount; i++ {
+		victimEvs = append(victimEvs, enqueueEvent(victimProj, victimEP, fmt.Sprintf("victim-%02d", i), t0.Add(time.Duration(100+i)*time.Second)))
+	}
+
+	var (
+		mu       sync.Mutex
+		fireSeq  []string
+		firedMap = make(map[string]int)
+	)
+	core := &fakeCore{
+		fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+			mu.Lock()
+			fireSeq = append(fireSeq, req.ProjectID)
+			firedMap[req.Event.ID]++
+			mu.Unlock()
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		},
+	}
+	core.enabled.Store(true)
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: cs,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	d1, err := disp.NewDrainer(trigger.DrainerOptions{
+		QueueStore:   cs,
+		Queue:        q,
+		Owner:        "replica-1",
+		BatchSize:    4,
+		PollInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	d2, err := disp.NewDrainer(trigger.DrainerOptions{
+		QueueStore:   cs,
+		Queue:        q,
+		Owner:        "replica-2",
+		BatchSize:    4,
+		PollInterval: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	// First single pass on d1 must already serve victimProj despite floodProj having 16 older items.
+	res, err := d1.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.Done)
+	mu.Lock()
+	victimInFirstPass := 0
+	for _, p := range fireSeq {
+		if p == victimProj {
+			victimInFirstPass++
+		}
+	}
+	mu.Unlock()
+	assert.Equal(t, victimCount, victimInFirstPass, "victim project must not be starved behind flooding project")
+
+	// Drain remaining items concurrently across two drainers and verify zero loss / zero double-fire.
+	runCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	for _, d := range []*durablequeue.Drainer{d1, d2} {
+		wg.Add(1)
+		go func(dr *durablequeue.Drainer) {
+			defer wg.Done()
+			dr.Run(runCtx)
+		}(d)
+	}
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(fireSeq) == floodCount+victimCount
+	}, 5*time.Second, 10*time.Millisecond)
+	cancel()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, firedMap, floodCount+victimCount)
+	for _, id := range append(floodEvs, victimEvs...) {
+		assert.Equal(t, 1, firedMap[id], "event %s must fire exactly once", id)
+	}
+}

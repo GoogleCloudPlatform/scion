@@ -806,3 +806,105 @@ func TestEchoConsumer_NudgeUnleasedOnlyAndClaimOrder(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, doneLeased)
 }
+
+func TestDurableQueueDrainerFair_FloodDoesNotStarveAcrossTwoDrainers(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	t0 := time.Date(2026, 11, 20, 14, 0, 0, 0, time.UTC)
+	now := t0.Add(5 * time.Minute)
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return t0 }))
+
+	const floodCount = 40
+	const victimCount = 4
+	for i := 0; i < floodCount; i++ {
+		ts := t0.Add(time.Duration(i) * time.Second)
+		_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("flood-%02d", i),
+			ProjectID: "proj-flood",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+	}
+	for i := 0; i < victimCount; i++ {
+		ts := t0.Add(time.Duration(100+i) * time.Second)
+		_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("victim-%02d", i),
+			ProjectID: "proj-victim",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+	}
+
+	var (
+		mu          sync.Mutex
+		order       []string
+		handleCount = make(map[string]int)
+	)
+	handler := func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+		mu.Lock()
+		order = append(order, item.DedupKey)
+		handleCount[item.DedupKey]++
+		mu.Unlock()
+		return durablequeue.Result{Done: true}
+	}
+
+	makeDrainer := func(owner string) *durablequeue.Drainer {
+		d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+			Store:         cs,
+			Queue:         q,
+			Kind:          "trigger.event",
+			Owner:         owner,
+			BatchSize:     4,
+			FairByProject: true,
+			PollInterval:  10 * time.Millisecond,
+			Now:           func() time.Time { return now },
+			Logger:        quietLogger(),
+			Handler:       handler,
+		})
+		require.NoError(t, err)
+		return d
+	}
+
+	d1 := makeDrainer("drainer-1")
+	d2 := makeDrainer("drainer-2")
+
+	runCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	for _, d := range []*durablequeue.Drainer{d1, d2} {
+		wg.Add(1)
+		go func(dr *durablequeue.Drainer) {
+			defer wg.Done()
+			dr.Run(runCtx)
+		}(d)
+	}
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(order) == floodCount+victimCount
+	}, 10*time.Second, 10*time.Millisecond)
+	cancel()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, handleCount, floodCount+victimCount, "no item may be lost")
+	for k, c := range handleCount {
+		assert.Equal(t, 1, c, "item %s must be handled exactly once", k)
+	}
+	// All 4 victim items must complete well before the 40-item flood finishes.
+	lastVictimIdx := -1
+	for idx, key := range order {
+		if len(key) >= 7 && key[:7] == "victim-" {
+			lastVictimIdx = idx
+		}
+	}
+	require.GreaterOrEqual(t, lastVictimIdx, 0)
+	assert.Less(t, lastVictimIdx, floodCount, "victim items must not be starved behind the flooding project")
+}

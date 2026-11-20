@@ -107,10 +107,11 @@ type DrainerConfig struct {
 	LeaseDuration  time.Duration // default 30 s
 	HandlerTimeout time.Duration // default 10 s; must be < LeaseDuration
 
-	BatchSize    int           // default 20
-	MaxRows      int           // default 100 000
-	MaxPermanent int           // default 5
-	MaxAge       time.Duration // default 72 h
+	BatchSize     int           // default 20
+	FairByProject bool          // round-robin claim across project_id; requires store.DurableQueueFairClaimer
+	MaxRows       int           // default 100 000
+	MaxPermanent  int           // default 5
+	MaxAge        time.Duration // default 72 h
 
 	// OnDrop is invoked when maintenance trims items by age, overflow, or
 	// poison bounds. Reported Items carry metadata only (Seq, Kind, ProjectID,
@@ -143,6 +144,7 @@ type DrainResult struct {
 // Drainer claims and dispatches items of a single Kind from a DurableQueueStore.
 type Drainer struct {
 	cfg         DrainerConfig
+	fairClaimer store.DurableQueueFairClaimer
 	ownerPrefix string
 	wake        chan struct{}
 	unregister  func()
@@ -152,6 +154,7 @@ type Drainer struct {
 	nextProbe      time.Time
 	probeBackoff   time.Duration
 	lastBlockedLog time.Time
+	lastProject    string
 }
 
 // NewDrainer validates cfg and constructs a Drainer.
@@ -202,8 +205,18 @@ func NewDrainer(cfg DrainerConfig) (*Drainer, error) {
 		return nil, fmt.Errorf("durablequeue: handler timeout %s must be shorter than lease duration %s", cfg.HandlerTimeout, cfg.LeaseDuration)
 	}
 
+	var fairClaimer store.DurableQueueFairClaimer
+	if cfg.FairByProject {
+		fc, ok := cfg.Store.(store.DurableQueueFairClaimer)
+		if !ok || fc == nil {
+			return nil, errors.New("durablequeue: FairByProject requires a store implementing store.DurableQueueFairClaimer")
+		}
+		fairClaimer = fc
+	}
+
 	d := &Drainer{
 		cfg:         cfg,
+		fairClaimer: fairClaimer,
 		ownerPrefix: truncateOwnerPrefix(cfg.Owner),
 		wake:        make(chan struct{}, 1),
 	}
@@ -330,7 +343,23 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget t
 		// checks identify this specific claim rather than only the replica
 		// name (protecting against duplicate Owner strings or stale passes).
 		claimOwner := d.nextClaimOwner()
-		rows, err := d.cfg.Store.ClaimDurableItems(ctx, d.cfg.Kind, claimOwner, now, now.Add(d.cfg.LeaseDuration), batch)
+		var (
+			rows []store.DurableQueueRow
+			err  error
+		)
+		if d.fairClaimer != nil {
+			d.mu.Lock()
+			afterProject := d.lastProject
+			d.mu.Unlock()
+			rows, err = d.fairClaimer.ClaimDurableItemsFair(ctx, d.cfg.Kind, claimOwner, afterProject, now, now.Add(d.cfg.LeaseDuration), batch)
+			if err == nil && len(rows) > 0 {
+				d.mu.Lock()
+				d.lastProject = rows[len(rows)-1].ProjectID
+				d.mu.Unlock()
+			}
+		} else {
+			rows, err = d.cfg.Store.ClaimDurableItems(ctx, d.cfg.Kind, claimOwner, now, now.Add(d.cfg.LeaseDuration), batch)
+		}
 		if err != nil {
 			return res, trimMore, fmt.Errorf("claim: %w", err)
 		}

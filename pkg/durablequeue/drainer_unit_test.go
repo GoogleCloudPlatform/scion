@@ -39,17 +39,20 @@ import (
 // memQueueStore is a thread-safe in-memory DurableQueueStore used by fast
 // no_sqlite unit tests.
 type memQueueStore struct {
-	mu        sync.Mutex
-	nextSeq   int64
-	rows      map[int64]*store.DurableQueueRow
-	claims    int
-	renews    int
-	loseAt    int // when > 0, RenewDurableLease returns held=false starting on this renew call
-	renewHook func(ctx context.Context, call int) error
-	trimLimit int // when > 0, caps trimmed rows per TrimDurableQueue pass and sets More
+	mu               sync.Mutex
+	nextSeq          int64
+	rows             map[int64]*store.DurableQueueRow
+	claims           int
+	fairClaimErr     error
+	lastAfterProject []string
+	renews           int
+	loseAt           int // when > 0, RenewDurableLease returns held=false starting on this renew call
+	renewHook        func(ctx context.Context, call int) error
+	trimLimit        int // when > 0, caps trimmed rows per TrimDurableQueue pass and sets More
 }
 
 var _ store.DurableQueueStore = (*memQueueStore)(nil)
+var _ store.DurableQueueFairClaimer = (*memQueueStore)(nil)
 
 func newMemQueueStore() *memQueueStore {
 	return &memQueueStore{rows: make(map[int64]*store.DurableQueueRow)}
@@ -122,6 +125,108 @@ func (m *memQueueStore) ClaimDurableItems(_ context.Context, kind, owner string,
 	}
 	out := make([]store.DurableQueueRow, len(cands))
 	for i, r := range cands {
+		lu := leaseUntil
+		r.LeaseOwner = owner
+		r.LeaseUntil = &lu
+		cp := *r
+		cp.Payload = bytes.Clone(r.Payload)
+		out[i] = cp
+	}
+	return out, nil
+}
+
+func (m *memQueueStore) ClaimDurableItemsFair(_ context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) ([]store.DurableQueueRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claims++
+	m.lastAfterProject = append(m.lastAfterProject, afterProjectID)
+	if m.fairClaimErr != nil {
+		return nil, m.fairClaimErr
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	byProj := make(map[string][]*store.DurableQueueRow)
+	for _, r := range m.rows {
+		if r.Kind != kind || r.NextAttemptAt.After(now) {
+			continue
+		}
+		if r.LeaseUntil != nil && !r.LeaseUntil.Before(now) {
+			continue
+		}
+		byProj[r.ProjectID] = append(byProj[r.ProjectID], r)
+	}
+	if len(byProj) == 0 {
+		return nil, nil
+	}
+	var gt, lte []string
+	for p := range byProj {
+		sort.Slice(byProj[p], func(i, j int) bool {
+			if !byProj[p][i].NextAttemptAt.Equal(byProj[p][j].NextAttemptAt) {
+				return byProj[p][i].NextAttemptAt.Before(byProj[p][j].NextAttemptAt)
+			}
+			return byProj[p][i].Seq < byProj[p][j].Seq
+		})
+		if p > afterProjectID {
+			gt = append(gt, p)
+		} else {
+			lte = append(lte, p)
+		}
+	}
+	sort.Strings(gt)
+	sort.Strings(lte)
+	projects := append(gt, lte...)
+	if len(projects) > limit {
+		projects = projects[:limit]
+	}
+
+	perProj := make([][]*store.DurableQueueRow, len(projects))
+	full := make([]bool, len(projects))
+	remaining := limit
+	for idx, p := range projects {
+		if remaining <= 0 {
+			break
+		}
+		remProj := len(projects) - idx
+		want := (remaining + remProj - 1) / remProj
+		cands := byProj[p]
+		if len(cands) > want {
+			cands = cands[:want]
+		}
+		perProj[idx] = cands
+		full[idx] = len(cands) == want
+		remaining -= len(cands)
+	}
+	for idx, p := range projects {
+		if remaining <= 0 {
+			break
+		}
+		if !full[idx] {
+			continue
+		}
+		extra := byProj[p][len(perProj[idx]):]
+		if len(extra) > remaining {
+			extra = extra[:remaining]
+		}
+		perProj[idx] = append(perProj[idx], extra...)
+		remaining -= len(extra)
+	}
+
+	var chosen []*store.DurableQueueRow
+	for round := 0; ; round++ {
+		added := false
+		for _, slice := range perProj {
+			if round < len(slice) {
+				chosen = append(chosen, slice[round])
+				added = true
+			}
+		}
+		if !added {
+			break
+		}
+	}
+	out := make([]store.DurableQueueRow, len(chosen))
+	for i, r := range chosen {
 		lu := leaseUntil
 		r.LeaseOwner = owner
 		r.LeaseUntil = &lu
@@ -1705,4 +1810,153 @@ func TestQueueNudge_SemanticsAndLocalWake(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), echoStats.Pending)
 	assert.Equal(t, int64(1), echoStats.Leased)
+}
+
+type nonFairStoreWrapper struct {
+	store.DurableQueueStore
+}
+
+func TestNewDrainerRejectsFairByProjectWithoutFairClaimer(t *testing.T) {
+	st := nonFairStoreWrapper{DurableQueueStore: newMemQueueStore()}
+	nop := func(context.Context, durablequeue.Item, durablequeue.Lease) durablequeue.Result {
+		return durablequeue.Result{Done: true}
+	}
+	_, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:         st,
+		Kind:          "test.echo",
+		Handler:       nop,
+		FairByProject: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DurableQueueFairClaimer")
+}
+
+func TestDrainerFairByProject_FloodVictimCursorAndNonFairUnaffected(t *testing.T) {
+	ctx := context.Background()
+	st := newMemQueueStore()
+	base := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	now := base.Add(2 * time.Minute)
+
+	for i := 0; i < 10; i++ {
+		ts := base.Add(time.Duration(i) * time.Second)
+		_, err := st.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("flood-%02d", i),
+			ProjectID: "proj-a",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+	}
+	for i := 0; i < 2; i++ {
+		ts := base.Add(time.Duration(100+i) * time.Second)
+		_, err := st.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  fmt.Sprintf("victim-%02d", i),
+			ProjectID: "proj-b",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+	}
+
+	var handled []string
+	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:         st,
+		Kind:          "trigger.event",
+		BatchSize:     4,
+		FairByProject: true,
+		Now:           func() time.Time { return now },
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			handled = append(handled, item.DedupKey)
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	// Pass 1 claims [flood-00, victim-00, flood-01, victim-01] and sets cursor to proj-b.
+	res, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.Done)
+	assert.Equal(t, []string{"flood-00", "victim-00", "flood-01", "victim-01"}, handled)
+
+	// Error on next pass must NOT advance cursor (remains proj-b).
+	st.mu.Lock()
+	st.fairClaimErr = errors.New("boom")
+	st.mu.Unlock()
+	_, err = d.DrainOnce(ctx)
+	require.Error(t, err)
+
+	st.mu.Lock()
+	st.fairClaimErr = nil
+	st.mu.Unlock()
+
+	// Next pass still starts from cursor "proj-b" and drains remaining proj-a items.
+	res, err = d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.Done)
+	st.mu.Lock()
+	afterHistory := append([]string(nil), st.lastAfterProject...)
+	st.mu.Unlock()
+	require.Len(t, afterHistory, 3)
+	assert.Equal(t, []string{"", "proj-b", "proj-b"}, afterHistory)
+
+	// Drain remaining 4 items, then verify an empty pass leaves cursor at "proj-a".
+	res, err = d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.Done)
+	res, err = d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, res.Claimed)
+	res, err = d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, res.Claimed)
+	st.mu.Lock()
+	afterHistory = append([]string(nil), st.lastAfterProject...)
+	st.mu.Unlock()
+	assert.Equal(t, "proj-a", afterHistory[len(afterHistory)-1])
+
+	// Non-trigger kind with default FairByProject=false retains global FIFO across projects.
+	for i := 0; i < 4; i++ {
+		ts := base.Add(time.Duration(i) * time.Second)
+		_, err := st.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "other.fifo",
+			DedupKey:  fmt.Sprintf("a-%d", i),
+			ProjectID: "proj-a",
+			Payload:   []byte(`{}`),
+			CreatedAt: ts,
+			NotBefore: ts,
+		})
+		require.NoError(t, err)
+	}
+	_, err = st.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+		Kind:      "other.fifo",
+		DedupKey:  "b-0",
+		ProjectID: "proj-b",
+		Payload:   []byte(`{}`),
+		CreatedAt: base.Add(10 * time.Second),
+		NotBefore: base.Add(10 * time.Second),
+	})
+	require.NoError(t, err)
+
+	var fifoHandled []string
+	fifoDrainer, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:     st,
+		Kind:      "other.fifo",
+		BatchSize: 4,
+		Now:       func() time.Time { return now },
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			fifoHandled = append(fifoHandled, item.DedupKey)
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+	res, err = fifoDrainer.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.Done)
+	assert.Equal(t, []string{"a-0", "a-1", "a-2", "a-3"}, fifoHandled)
 }

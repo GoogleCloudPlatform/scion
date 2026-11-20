@@ -40,6 +40,8 @@ var _ store.DurableQueueStore = (*CompositeStore)(nil)
 var _ store.DurableQueueStore = (*DurableQueueStore)(nil)
 var _ store.DurableQueuePendingCounter = (*CompositeStore)(nil)
 var _ store.DurableQueuePendingCounter = (*DurableQueueStore)(nil)
+var _ store.DurableQueueFairClaimer = (*CompositeStore)(nil)
+var _ store.DurableQueueFairClaimer = (*DurableQueueStore)(nil)
 
 // durableQueueDeleteBatch bounds the IN lists of durable queue queries and
 // mutations (such as trim deletes and nudge updates).
@@ -293,6 +295,206 @@ func (s *DurableQueueStore) ClaimDurableItems(ctx context.Context, kind, owner s
 		return nil, mapError(err)
 	}
 	return out, nil
+}
+
+// ClaimDurableItemsFair implements store.DurableQueueFairClaimer.
+// It discovers up to limit distinct project_ids with due, unleased rows of kind
+// in lexicographic round-robin order starting strictly after afterProjectID
+// (wrapping around <= afterProjectID), claims each project's share in
+// (next_attempt_at, seq) order (using FOR UPDATE SKIP LOCKED on PostgreSQL),
+// tops up any unused slots from earlier projects that met their quota, and
+// returns the leased rows interleaved round-robin across projects.
+//
+// Discovery probe cost is typically O(limit*log(N) + non-due/leased rows
+// crossed) and worst-case O(rows of kind) when many consecutive projects have
+// only future/leased rows.
+func (s *DurableQueueStore) ClaimDurableItemsFair(ctx context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) ([]store.DurableQueueRow, error) {
+	if err := store.ValidateDurableQueueKind(kind); err != nil {
+		return nil, err
+	}
+	if owner == "" {
+		return nil, fmt.Errorf("%w: durable queue lease owner is required", store.ErrInvalidInput)
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	now = now.UTC()
+	leaseUntil = leaseUntil.UTC()
+
+	var out []store.DurableQueueRow
+	err := runInEntTx(ctx, s.client, s.inTx, func(client *ent.Client) error {
+		projects, err := discoverDueQueueProjects(ctx, client, kind, afterProjectID, now, limit)
+		if err != nil || len(projects) == 0 {
+			return err
+		}
+
+		selectProjectIDs := func(proj string, want int, exclude []int64) ([]int64, error) {
+			preds := []predicate.DurableQueueItem{
+				durablequeueitem.KindEQ(kind),
+				durablequeueitem.ProjectIDEQ(proj),
+				durablequeueitem.NextAttemptAtLTE(now),
+				queueItemUnleased(now),
+			}
+			if len(exclude) > 0 {
+				preds = append(preds, durablequeueitem.IDNotIn(exclude...))
+			}
+			q := client.DurableQueueItem.Query().
+				Where(preds...).
+				Order(
+					ent.Asc(durablequeueitem.FieldNextAttemptAt),
+					ent.Asc(durablequeueitem.FieldID),
+				).
+				Limit(want)
+			if client.Driver().Dialect() == dialect.Postgres {
+				q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
+			}
+			return q.IDs(ctx)
+		}
+
+		perProj := make([][]int64, len(projects))
+		full := make([]bool, len(projects))
+		remaining := limit
+		for idx, proj := range projects {
+			if remaining <= 0 {
+				break
+			}
+			remProjects := len(projects) - idx
+			want := (remaining + remProjects - 1) / remProjects
+			ids, err := selectProjectIDs(proj, want, nil)
+			if err != nil {
+				return err
+			}
+			perProj[idx] = ids
+			full[idx] = len(ids) == want
+			remaining -= len(ids)
+		}
+		for idx, proj := range projects {
+			if remaining <= 0 {
+				break
+			}
+			if !full[idx] {
+				continue
+			}
+			extra, err := selectProjectIDs(proj, remaining, perProj[idx])
+			if err != nil {
+				return err
+			}
+			perProj[idx] = append(perProj[idx], extra...)
+			remaining -= len(extra)
+		}
+
+		orderedIDs := make([]int64, 0, limit-remaining)
+		for round := 0; ; round++ {
+			added := false
+			for _, ids := range perProj {
+				if round < len(ids) {
+					orderedIDs = append(orderedIDs, ids[round])
+					added = true
+				}
+			}
+			if !added {
+				break
+			}
+		}
+		if len(orderedIDs) == 0 {
+			return nil
+		}
+
+		if _, err := client.DurableQueueItem.Update().
+			Where(
+				durablequeueitem.IDIn(orderedIDs...),
+				durablequeueitem.KindEQ(kind),
+				queueItemUnleased(now),
+			).
+			SetLeaseOwner(owner).
+			SetLeaseUntil(leaseUntil).
+			Save(ctx); err != nil {
+			return err
+		}
+		rows, err := client.DurableQueueItem.Query().
+			Where(
+				durablequeueitem.IDIn(orderedIDs...),
+				durablequeueitem.LeaseOwnerEQ(owner),
+			).
+			All(ctx)
+		if err != nil {
+			return err
+		}
+		byID := make(map[int64]*ent.DurableQueueItem, len(rows))
+		for _, r := range rows {
+			byID[r.ID] = r
+		}
+		out = make([]store.DurableQueueRow, 0, len(rows))
+		for _, id := range orderedIDs {
+			if r, ok := byID[id]; ok {
+				out = append(out, entDurableQueueItemToStore(r))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return out, nil
+}
+
+func discoverDueQueueProjects(ctx context.Context, client *ent.Client, kind, afterProjectID string, now time.Time, limit int) ([]string, error) {
+	projects := make([]string, 0, limit)
+	cursor := afterProjectID
+	for len(projects) < limit {
+		next, err := client.DurableQueueItem.Query().
+			Where(
+				durablequeueitem.KindEQ(kind),
+				durablequeueitem.ProjectIDGT(cursor),
+				durablequeueitem.NextAttemptAtLTE(now),
+				queueItemUnleased(now),
+			).
+			Order(ent.Asc(durablequeueitem.FieldProjectID)).
+			Limit(1).
+			Select(durablequeueitem.FieldProjectID).
+			Strings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(next) == 0 {
+			break
+		}
+		projects = append(projects, next[0])
+		cursor = next[0]
+	}
+
+	firstWrap := true
+	wrapCursor := ""
+	for len(projects) < limit {
+		preds := []predicate.DurableQueueItem{
+			durablequeueitem.KindEQ(kind),
+			durablequeueitem.ProjectIDLTE(afterProjectID),
+			durablequeueitem.NextAttemptAtLTE(now),
+			queueItemUnleased(now),
+		}
+		if !firstWrap {
+			preds = append(preds, durablequeueitem.ProjectIDGT(wrapCursor))
+		}
+		next, err := client.DurableQueueItem.Query().
+			Where(preds...).
+			Order(ent.Asc(durablequeueitem.FieldProjectID)).
+			Limit(1).
+			Select(durablequeueitem.FieldProjectID).
+			Strings(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(next) == 0 {
+			break
+		}
+		projects = append(projects, next[0])
+		wrapCursor = next[0]
+		firstWrap = false
+		if wrapCursor == afterProjectID {
+			break
+		}
+	}
+	return projects, nil
 }
 
 // RenewDurableLease implements store.DurableQueueStore.
