@@ -252,7 +252,7 @@ export class ScionProfileNav extends LitElement {
       gap: 0.75rem;
       padding: 0.875rem 1rem;
       margin: 0.75rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       color: var(--scion-primary, #3b82f6);
       text-decoration: none;
       font-size: 0.875rem;
@@ -404,7 +404,7 @@ export class ScionProfileNav extends LitElement {
       align-items: center;
       gap: 0.75rem;
       padding: 0.625rem 0.75rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       color: var(--scion-text, #1e293b);
       text-decoration: none;
       font-size: 0.875rem;
@@ -480,7 +480,7 @@ export class ScionProfileNav extends LitElement {
       align-items: center;
       gap: 0.75rem;
       padding: 0.625rem 0.75rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       color: var(--scion-text, #1e293b);
       text-decoration: none;
       font-size: 0.875rem;
@@ -598,7 +598,7 @@ export class ScionProfileNav extends LitElement {
       margin: 0.5rem;
       padding: 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       background: transparent;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;

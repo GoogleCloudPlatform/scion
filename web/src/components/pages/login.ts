@@ -128,7 +128,7 @@ export class ScionLoginPage extends LitElement {
       width: 100%;
       max-width: 400px;
       background: var(--scion-surface, #ffffff);
-      border-radius: 1rem;
+      border-radius: var(--scion-radius-xl, 1rem);
       box-shadow:
         0 4px 6px -1px rgba(0, 0, 0, 0.1),
         0 2px 4px -2px rgba(0, 0, 0, 0.1);
@@ -181,7 +181,7 @@ export class ScionLoginPage extends LitElement {
     .error-alert {
       background: var(--scion-error-bg, #fef2f2);
       border: 1px solid var(--scion-badge-danger-border, #fecaca);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       padding: 1rem;
       margin-bottom: 1.5rem;
       display: flex;
@@ -230,7 +230,7 @@ export class ScionLoginPage extends LitElement {
       box-sizing: border-box;
       padding: 0.875rem 1.25rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       background: var(--scion-surface, #ffffff);
       color: var(--scion-text, #1e293b);
       font-size: 0.9375rem;

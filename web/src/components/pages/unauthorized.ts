@@ -56,7 +56,7 @@ export class ScionPageUnauthorized extends LitElement {
       text-align: center;
       max-width: 480px;
       background: var(--scion-surface, #ffffff);
-      border-radius: 1rem;
+      border-radius: var(--scion-radius-xl, 1rem);
       box-shadow:
         0 4px 6px -1px rgba(0, 0, 0, 0.1),
         0 2px 4px -2px rgba(0, 0, 0, 0.1);
@@ -112,7 +112,7 @@ export class ScionPageUnauthorized extends LitElement {
       padding: 1rem;
       background: var(--scion-warning-bg, #fffbeb);
       border: 1px solid var(--scion-warning-border, #fcd34d);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
     }
 
     .actions {
