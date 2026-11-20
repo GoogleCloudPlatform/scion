@@ -801,23 +801,23 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(w, "ID\tEVENT\tSTATUS\tMATCHED\tDIALECT\tSUBJECT\tSTARTED\tFINISHED\tERROR")
 	for _, fire := range resp.Fires {
-		shortID := sanitizeHistoryField(fire.ID)
+		shortID := fire.ID
 		if len(shortID) > 8 {
 			shortID = shortID[:8]
 		}
-		shortEvent := sanitizeHistoryField(fire.EventID)
+		shortEvent := fire.EventID
 		if len(shortEvent) > 8 {
 			shortEvent = shortEvent[:8]
 		}
-		matchedThrough := sanitizeHistoryField(fire.MatchedThrough)
+		matchedThrough := fire.MatchedThrough
 		if matchedThrough == "" {
 			matchedThrough = "-"
 		}
-		decidedDialect := sanitizeHistoryField(fire.DecidedDialect)
+		decidedDialect := fire.DecidedDialect
 		if decidedDialect == "" {
 			decidedDialect = "-"
 		}
-		subj := sanitizeHistoryField(fire.Subject)
+		subj := fire.Subject
 		if subj == "" {
 			subj = "-"
 		}
@@ -826,7 +826,7 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 		if fire.FinishedAt != nil {
 			finished = clitime.Ago(*fire.FinishedAt)
 		}
-		errMsg := sanitizeHistoryField(fire.Error)
+		errMsg := fire.Error
 		if errMsg == "" {
 			errMsg = "-"
 		}
@@ -849,23 +849,23 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 			if fire.RuleTrace == nil {
 				continue
 			}
-			shortID := sanitizeHistoryField(fire.ID)
+			shortID := fire.ID
 			if len(shortID) > 8 {
 				shortID = shortID[:8]
 			}
-			fmt.Printf("\nRule trace (%s):\n", shortID)
+			fmt.Printf("\nRule trace (%s):\n", triggerTerminalText(shortID, false))
 			for _, el := range fire.RuleTrace.Elements {
 				line := fmt.Sprintf("  %d [%s] %s (%dms)",
 					el.Index,
-					sanitizeHistoryField(el.Dialect),
-					sanitizeHistoryField(el.Class),
+					triggerTerminalText(el.Dialect, false),
+					triggerTerminalText(el.Class, false),
 					el.DurationMs,
 				)
 				if el.Reason != "" {
-					line += " reason=" + sanitizeHistoryField(el.Reason)
+					line += " reason=" + triggerTerminalText(el.Reason, false)
 				}
 				if el.Provenance != "" {
-					line += fmt.Sprintf(" provenance=%q", sanitizeHistoryField(el.Provenance))
+					line += fmt.Sprintf(" provenance=%q", triggerTerminalText(el.Provenance, false))
 				}
 				fmt.Println(line)
 			}
@@ -903,21 +903,6 @@ func triggerTerminalText(s string, keepLines bool) string {
 		default:
 			b.WriteRune(r)
 		}
-	}
-	return b.String()
-}
-
-func sanitizeHistoryField(s string) string {
-	if s == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f || !unicode.IsPrint(r) {
-			continue
-		}
-		b.WriteRune(r)
 	}
 	return b.String()
 }
