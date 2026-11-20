@@ -2301,14 +2301,14 @@ type Server struct {
 	// it before the store closes (broker_work.go, ptone/scion#4869).
 	brokerWork brokerWorkTracker
 
-	// scheduledDetachedFires admits and joins recurring wake fires
-	// (ptone/scion#7734), which run off the schedule evaluator loop
+	// scheduledDetachedFires admits and joins recurring detached fires (wake
+	// and exec, ptone/scion#7734), which run off the schedule evaluator loop
 	// (executeSchedule). Admission closes when the hub stops its dispatch
 	// producers; the background teardown joins them, bounded by
 	// scheduledDetachedFireStopGrace.
 	scheduledDetachedFires brokerWorkTracker
-	// runningDetachedFires are the recurring wake fires in flight, so shutdown
-	// can record the outcome of one it gave up waiting for.
+	// runningDetachedFires are the recurring detached fires in flight, so
+	// shutdown can record the outcome of one it gave up waiting for.
 	runningDetachedFires detachedFireRuns
 
 	// execRuns tracks scheduled exec runs in flight on this replica

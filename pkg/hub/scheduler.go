@@ -714,9 +714,9 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// Hooks run after the final status write below, on every return path
 	// after the claim; a lost claim registers none.
 	defer afterRecord.run()
-	wakeFire := s.eventFireDetaches(evt)
+	detachedFire := s.eventFireDetaches(evt)
 	var scope *oneShotFireScope
-	if wakeFire {
+	if detachedFire {
 		// Registered before handlerCtx and before final persistence so
 		// runningDetachedFires / scheduledDetachedFires stay held until the final
 		// status write completes (ptone/scion#7791 b1).
@@ -731,8 +731,8 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		finalStatus = store.ScheduledEventExpired
 	}
 	claimStatus := finalStatus
-	if wakeFire {
-		// Claim wake events into provisional "firing" status so an unrecorded
+	if detachedFire {
+		// Claim detached events into provisional "firing" status so an unrecorded
 		// shutdown abandonment never looks like a completed delivery
 		// (ptone/scion#7791 c).
 		claimStatus = store.ScheduledEventFiring
@@ -744,7 +744,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// effect so exactly one replica delivers it. If the store supports claiming
 	// and we lose the race (already claimed/cancelled), skip silently. Backends
 	// without the capability fall through to the legacy run-then-mark behavior,
-	// marking wake events firing first so CompleteFiringScheduledEvent matches.
+	// marking detached events firing first so CompleteFiringScheduledEvent matches.
 	if claimer, ok := s.store.(store.ScheduledEventClaimer); ok {
 		claimed, err := claimer.ClaimScheduledEvent(ctx, evt.ID, claimStatus)
 		if err != nil {
@@ -757,10 +757,10 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 				"eventID", evt.ID, "type", evt.EventType)
 			return
 		}
-	} else if wakeFire && s.store != nil {
+	} else if detachedFire && s.store != nil {
 		claimedAt := time.Now()
 		if err := s.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFiring, &claimedAt, ""); err != nil {
-			s.log.Warn("Scheduler: failed to mark wake event firing; skipping",
+			s.log.Warn("Scheduler: failed to mark detached event firing; skipping",
 				"eventID", evt.ID, "type", evt.EventType, "error", err)
 			return
 		}
@@ -834,7 +834,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		now := time.Now()
 		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancelRecord()
-		if wakeFire {
+		if detachedFire {
 			_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, status, now, errMsg, "", time.Time{})
 			return
 		}
