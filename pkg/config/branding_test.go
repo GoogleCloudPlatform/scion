@@ -821,3 +821,77 @@ func TestValidateBranding_DeterministicScaleErrorOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestIsValidBrandSlot(t *testing.T) {
+	valid := []string{
+		BrandSlotLogoLight,
+		BrandSlotLogoDark,
+		BrandSlotFavicon,
+		BrandSlotAppleTouchIcon,
+		BrandSlotIcon192,
+		BrandSlotIcon512,
+		BrandSlotIconMaskable512,
+	}
+	for _, slot := range valid {
+		if !IsValidBrandSlot(slot) {
+			t.Errorf("IsValidBrandSlot(%q) = false, want true", slot)
+		}
+	}
+	invalid := []string{"", "logo", "logo-light/extra", "../favicon", "LOGO-LIGHT", "favicon.svg", "unknown"}
+	for _, slot := range invalid {
+		if IsValidBrandSlot(slot) {
+			t.Errorf("IsValidBrandSlot(%q) = true, want false", slot)
+		}
+	}
+}
+
+func TestValidateBranding_SVGAllowlistAndExternalRefs(t *testing.T) {
+	// Valid static brand SVG using gradients, clipPath, filter, <use href="#id"/>, and <style> with url(#grad).
+	richValidSVG := svgDataURI(`<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 32">
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d9488"/>
+      <stop offset="100%" stop-color="#0f766e"/>
+    </linearGradient>
+    <clipPath id="c1"><rect width="32" height="32" rx="6"/></clipPath>
+    <filter id="f1"><feGaussianBlur stdDeviation="1"/></filter>
+    <symbol id="mark" viewBox="0 0 32 32"><path d="M4 16L16 4L28 16L16 28Z"/></symbol>
+  </defs>
+  <style>.badge { fill: url(#g1); }</style>
+  <g clip-path="url(#c1)" filter="url(#f1)">
+    <use href="#mark" class="badge"/>
+  </g>
+  <text x="40" y="22">Acme</text>
+</svg>`)
+	if errs := ValidateBranding(&BrandingConfig{Logo: &BrandingLogoConfig{Light: richValidSVG}}); len(errs) > 0 {
+		t.Fatalf("expected valid rich static SVG to pass, got: %v", errs)
+	}
+
+	rejectSVGs := []struct {
+		name string
+		svg  string
+	}{
+		{"SMIL animate element", `<svg xmlns="http://www.w3.org/2000/svg"><animate attributeName="x" from="0" to="10"/></svg>`},
+		{"SMIL set element", `<svg xmlns="http://www.w3.org/2000/svg"><set attributeName="onbegin" to="alert(1)"/></svg>`},
+		{"SMIL animateTransform element", `<svg xmlns="http://www.w3.org/2000/svg"><animateTransform attributeName="transform" type="rotate"/></svg>`},
+		{"handler element", `<svg xmlns="http://www.w3.org/2000/svg"><handler>alert(1)</handler></svg>`},
+		{"image element", `<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.example/track.png"/></svg>`},
+		{"feImage filter element", `<svg xmlns="http://www.w3.org/2000/svg"><filter id="f"><feImage href="https://evil.example/x.png"/></filter></svg>`},
+		{"hyperlink a element", `<svg xmlns="http://www.w3.org/2000/svg"><a href="https://evil.example"><rect width="10" height="10"/></a></svg>`},
+		{"XHTML namespace element", `<svg xmlns="http://www.w3.org/2000/svg"><div xmlns="http://www.w3.org/1999/xhtml">hi</div></svg>`},
+		{"use with external https href", `<svg xmlns="http://www.w3.org/2000/svg"><use href="https://evil.example/x.svg#a"/></svg>`},
+		{"use with xlink:href data URI", `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><use xlink:href="data:image/svg+xml;base64,PHN2Zy8+"/></svg>`},
+		{"style element external url()", `<svg xmlns="http://www.w3.org/2000/svg"><style>rect { fill: url(https://evil.example/track.svg#a); }</style></svg>`},
+		{"style attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect style="background:url(https://evil.example/track.png)"/></svg>`},
+		{"style element data URI", `<svg xmlns="http://www.w3.org/2000/svg"><style>rect { fill: url(data:image/png;base64,AAAA); }</style></svg>`},
+	}
+	for _, tc := range rejectSVGs {
+		t.Run("reject_"+tc.name, func(t *testing.T) {
+			cfg := BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(tc.svg)}}
+			if errs := ValidateBranding(&cfg); len(errs) == 0 {
+				t.Fatalf("expected SVG validation error for %s, got nil", tc.name)
+			}
+		})
+	}
+}
