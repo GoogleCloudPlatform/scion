@@ -330,7 +330,13 @@ The check runs at each of these points:
 
 ### Volumes in agent config on a hosted server
 
-On a hosted server (one not running in workstation mode), volumes in an agent's own config are restricted further. This covers the `config` of an agent create request and the agent's stored inline config, which is sent again with each start. A refused volume gets `400` with the code `hosted_config_refused`:
+On a hosted server (one not running in workstation mode), volumes written by project members are restricted further. This covers:
+
+- the `config` of an agent create request, the agent's stored inline config (sent again with each start), and config changes saved later through an agent update, including held edits;
+- the `config.yaml` of a project-scope harness config stored in the Hub;
+- on a Runtime Broker, a harness config in the project's own `harness-configs` directory, or one bundled in a template.
+
+A refused volume gets `400` with the code `hosted_config_refused`:
 
 | Volume `type` | On a hosted server |
 | :--- | :--- |
@@ -340,12 +346,12 @@ On a hosted server (one not running in workstation mode), volumes in an agent's 
 | `gcs` (spelled exactly so, in lower case) | Allowed only for agents that run on Kubernetes |
 | Any other type | Refused |
 
-- **Where it is checked.** A hosted Hub checks agent create requests, and checks again before it sends each create, provision, start or restart to a Runtime Broker, whatever mode that Runtime Broker runs in. The Hub does not know which runtime will run the agent, so it leaves the `gcs` decision to the Runtime Broker. A hosted Runtime Broker checks the config and inline config of each create and start request before anything is saved.
-- **Agents created earlier.** An agent whose stored config already holds a refused volume is refused at its next start or restart, with the same error. A running agent keeps its mounts until it stops. Remove the volume from the agent's config, or create the agent again without it.
-- **Operator-configured volumes.** Volumes configured by the server operator are not affected: profiles, flat Runtime Broker instance `agent_defaults`, `harness_configs` in global settings, global harness-config directories and the Hub's global harness configs. To give agents a host directory on a hosted server, use a project shared directory, or ask the operator to configure the volume in one of those places.
+- **Where it is checked.** A hosted Hub checks agent create and update requests, and checks again before it sends each create, provision, start or restart to a Runtime Broker, whatever mode that Runtime Broker runs in. It checks a project-scope harness config whenever its files change (file writes and uploads, finalize, clone into project scope, and import or reimport, which is refused as a whole before anything is stored), and again at dispatch for the harness config the agent uses. A `config.yaml` too large for the Hub to read is refused, because it cannot be checked. The Hub does not know which runtime will run the agent, so it leaves the `gcs` decision to the Runtime Broker. A hosted Runtime Broker checks the config and inline config of each create and start request before anything is saved. It also checks a project-level or template-bundled harness config when it provisions and when it starts an agent. It does not check a harness config the Hub sends with the dispatch, because the Hub checked it when it was stored.
+- **Agents and harness configs created earlier.** An agent whose stored config, or whose project harness config, already holds a refused volume is refused at its next start or restart, with the same error. A running agent keeps its mounts until it stops. Remove the volume from the agent's config or the harness config's `config.yaml`, or create the agent again without it.
+- **Operator-configured volumes.** Volumes configured by the server operator are not affected: profiles, flat Runtime Broker instance `agent_defaults`, `harness_configs` in global settings, global harness-config directories and the Hub's global harness configs. A harness config bundled in a template is checked even when the template is global; move such volumes into one of the operator places above. To give agents a host directory on a hosted server, use a project shared directory, or ask the operator to configure the volume in one of those places.
 - **Workstation mode.** Nothing changes. Volumes in agent config are subject only to the control-path rules above.
 
-The error names the volume by its target and says where it came from (for example `agent config`). It never includes the volume's source, server or bucket.
+The error names the volume by its target and says where it came from (for example `agent config` or `harness config "name"`). It never includes the volume's source, server or bucket.
 
 ## Telemetry Configuration (`telemetry`)
 
