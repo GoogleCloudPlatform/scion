@@ -53,7 +53,10 @@ func runTemplatesRoot(t *testing.T, args ...string) error {
 		}
 	}
 	reset := func() {
-		resetFlags(templatesDeleteCmd.Flags(), "local", "hub")
+		resetFlags(templatesDeleteCmd.Flags(), "local", "hub", "scope")
+		if alias := resolveCommandPath(rootCmd, "template.delete"); alias != nil {
+			resetFlags(alias.Flags(), "local", "hub", "scope")
+		}
 		resetFlags(templatesCloneCmd.Flags(), "local", "hub")
 		resetFlags(rootCmd.PersistentFlags(), "global", "hub", "project", "yes", "non-interactive")
 		rootCmd.SetArgs(nil)
@@ -140,9 +143,9 @@ func TestTemplatesDelete_ProjectScopeStillLinksProject(t *testing.T) {
 		assert.Contains(t, projectHits, "GET /api/v1/projects/"+tuProjectID)
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
-		// Without --global the project template is found (and, with
-		// --yes, every match is deleted).
-		assert.Contains(t, hub.deleted, "tmpl-project-1")
+		// Without --global or --scope, delete defaults to project scope so only
+		// the project template is deleted (ptone/scion#8318).
+		assert.Equal(t, []string{"tmpl-project-1"}, hub.deleted)
 	})
 }
 

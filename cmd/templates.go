@@ -460,35 +460,58 @@ var templatesDeleteCmd = &cobra.Command{
 }
 
 // runTemplateDelete implements the delete command with confirmation prompts.
-// It searches all 4 locations for the template, then prompts for which to delete.
+// Scope defaults to project (the narrowest scope); deleting a global template
+// requires --scope global or the root --global flag.
 func runTemplateDelete(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
 	// Get flags - handle nil cmd for testing
 	var localOnly, hubOnly bool
+	var scope string
 	if cmd != nil {
 		localOnly, _ = cmd.Flags().GetBool("local")
 		hubOnly, _ = cmd.Flags().GetBool("hub")
+		scope, _ = cmd.Flags().GetString("scope")
+	}
+
+	switch scope {
+	case "", "project", "global":
+	default:
+		return newUsageError("--scope must be project or global")
+	}
+
+	// The root --global flag selects the global scope (ptone/scion#1713);
+	// otherwise delete defaults to project scope so an unscoped delete never
+	// widens to global templates (ptone/scion#8318).
+	if globalMode {
+		switch scope {
+		case "", "global":
+			scope = "global"
+		default:
+			return newUsageError("--global conflicts with --scope %s", scope)
+		}
+	} else if scope == "" {
+		scope = templateScopeFromGlobalFlag()
 	}
 
 	// Build resolution options
 	opts := &ResolveOpts{
 		LocalOnly:   localOnly,
 		HubOnly:     hubOnly,
-		ProjectOnly: false,
-		GlobalOnly:  globalMode,
+		ProjectOnly: scope == "project",
+		GlobalOnly:  scope == "global",
 		AutoConfirm: autoConfirm,
 	}
 
 	// A hub error is returned (no silent fallback to the filesystem);
-	// --local is the explicit filesystem-only view. With --global no
-	// project is read, so the project is not linked or looked up
-	// (requireHubForUpload): a hub token without project:read can delete
-	// global templates (ptone/scion#1713).
+	// --local is the explicit filesystem-only view. With --global or
+	// --scope global no project is read, so the project is not linked or
+	// looked up: a hub token without project:read can delete global
+	// templates (ptone/scion#1713, ptone/scion#8318).
 	var hubCtx *HubContext
 	if !localOnly {
 		var err error
-		hubCtx, err = requireHubForUpload(projectPath)
+		hubCtx, err = requireHubWith(projectPath, scope == "global")
 		if err != nil {
 			return err
 		}
@@ -508,6 +531,12 @@ func runTemplateDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func registerTemplateDeleteFlags(cmd *cobra.Command) {
+	cmd.Flags().Bool("local", false, "Only search local filesystem")
+	cmd.Flags().Bool("hub", false, "Only search Hub")
+	cmd.Flags().String("scope", "", "Target scope (project, global; defaults to project, or global with --global)")
 }
 
 // deleteTemplateMatch deletes a single template match after confirmation.
@@ -1725,8 +1754,7 @@ func init() {
 	templatesShowCmd.Flags().Bool("hub", false, "Only search Hub")
 
 	// Flags for delete command
-	templatesDeleteCmd.Flags().Bool("local", false, "Only search local filesystem")
-	templatesDeleteCmd.Flags().Bool("hub", false, "Only search Hub")
+	registerTemplateDeleteFlags(templatesDeleteCmd)
 
 	// Flags for clone command
 	templatesCloneCmd.Flags().Bool("local", false, "Only search local filesystem for source")
@@ -1781,8 +1809,7 @@ func init() {
 		Args:    cobra.ExactArgs(1),
 		RunE:    runTemplateDelete,
 	}
-	deleteAlias.Flags().Bool("local", false, "Only search local filesystem")
-	deleteAlias.Flags().Bool("hub", false, "Only search Hub")
+	registerTemplateDeleteFlags(deleteAlias)
 	templateCmd.AddCommand(deleteAlias)
 
 	cloneAlias := &cobra.Command{

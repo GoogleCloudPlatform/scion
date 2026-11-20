@@ -72,12 +72,40 @@ func (m *TemplateMatch) IsHub() bool {
 	return m.Location == LocationHubProject || m.Location == LocationHubGlobal
 }
 
+// Scope returns the scope ("project" or "global") of the template match.
+func (m *TemplateMatch) Scope() string {
+	switch m.Location {
+	case LocationLocalProject, LocationHubProject:
+		return "project"
+	case LocationLocalGlobal, LocationHubGlobal:
+		return "global"
+	default:
+		if m.HubTemplate != nil && m.HubTemplate.Scope != "" {
+			return m.HubTemplate.Scope
+		}
+		return string(m.Location)
+	}
+}
+
+func distinctTemplateMatchScopes(matches []TemplateMatch) []string {
+	var scopes []string
+	seen := make(map[string]bool, len(matches))
+	for i := range matches {
+		s := matches[i].Scope()
+		if !seen[s] {
+			seen[s] = true
+			scopes = append(scopes, s)
+		}
+	}
+	return scopes
+}
+
 // ResolveOpts controls how template resolution behaves.
 type ResolveOpts struct {
 	LocalOnly   bool // --local flag: only search local filesystem
 	HubOnly     bool // --hub flag: only search Hub
-	ProjectOnly bool // --project flag: only search project scope
-	GlobalOnly  bool // --global flag: only search global scope
+	ProjectOnly bool // --scope project: only search project scope
+	GlobalOnly  bool // --global or --scope global: only search global scope
 	AutoConfirm bool // -y flag: use first match or error if multiple
 }
 
@@ -191,7 +219,9 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 
 		for i := range resp.Templates {
 			t := &resp.Templates[i]
-			if t.Name == name || t.Slug == name {
+			if (t.Name == name || t.Slug == name) &&
+				(t.Scope == "" || t.Scope == "project") &&
+				(t.ScopeID == "" && t.ProjectID == "" || inCurrentProject(t, projectID)) {
 				matches = append(matches, TemplateMatch{
 					Name:        t.Name,
 					Location:    LocationHubProject,
@@ -214,7 +244,7 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 
 		for i := range resp.Templates {
 			t := &resp.Templates[i]
-			if t.Name == name || t.Slug == name {
+			if (t.Name == name || t.Slug == name) && (t.Scope == "" || t.Scope == "global") {
 				matches = append(matches, TemplateMatch{
 					Name:        t.Name,
 					Location:    LocationHubGlobal,
@@ -285,7 +315,7 @@ func PromptTemplateChoiceWithAll(matches []TemplateMatch, action string) ([]Temp
 
 	// Check if we're in an interactive terminal
 	if !util.IsTerminal() {
-		return nil, fmt.Errorf("multiple templates found but running non-interactively; use --local, --hub, --project, or --global flags to specify")
+		return nil, fmt.Errorf("multiple templates found but running non-interactively; use --local, --hub, --scope, or --global flags to specify")
 	}
 
 	fmt.Fprintf(os.Stderr, "\nTemplate '%s' found in multiple locations:\n", matches[0].Name)
@@ -374,6 +404,12 @@ func ResolveTemplateForDelete(ctx context.Context, name string, hubCtx *HubConte
 	}
 
 	if len(matches) == 0 {
+		if opts.ProjectOnly {
+			return nil, fmt.Errorf("template '%s' not found in project scope (use --scope global or --global to delete a global template)", name)
+		}
+		if opts.GlobalOnly {
+			return nil, fmt.Errorf("template '%s' not found in global scope", name)
+		}
 		return nil, fmt.Errorf("template '%s' not found", name)
 	}
 
@@ -383,7 +419,14 @@ func ResolveTemplateForDelete(ctx context.Context, name string, hubCtx *HubConte
 
 	// Multiple matches found
 	if opts.AutoConfirm {
-		// In auto-confirm mode, delete all matches
+		// Refuse to auto-delete across multiple scopes (ptone/scion#8318);
+		// matches within a single scope (e.g. local and Hub copies of a
+		// global or project template) remain unambiguous in scope.
+		scopes := distinctTemplateMatchScopes(matches)
+		if len(scopes) > 1 {
+			return nil, fmt.Errorf("template %q exists in several scopes (%s), use --scope to choose one",
+				name, strings.Join(scopes, ", "))
+		}
 		return matches, nil
 	}
 

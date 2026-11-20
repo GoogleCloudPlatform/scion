@@ -215,15 +215,17 @@ scion templates update github-reviewer --scope global
 
 - Without a terminal, a command that asks for confirmation (such as `templates delete`) answers
   No unless you pass `--yes` or `--non-interactive`. `--non-interactive` also makes ambiguous
-  prompts fail instead of waiting, which suits CI.
+  prompts fail instead of waiting, which suits CI. `templates delete` defaults to `project`
+  scope, so deleting a global template requires `--scope global` or `--global`.
 - `scion skills publish --scope global` adds the version to an existing skill only when it is a
   global skill of that name; a project or user skill of the same name is not reused.
 - The commands above do not link, register or look up a project, so the job needs no linked
   checkout and no `project:read` or `project:list`. Outside a Scion project (for example in a
   plain CI checkout), `hub token create`, `skills publish` and the `templates` commands other
-  than `update` need the root `--global` flag, as above; inside a linked project, `skills publish --scope global` works
-  without it. `templates update` takes `--scope global` or `--global`; `--global` together with
-  a different `--scope` is rejected.
+  than `update --scope global` and `delete --scope global` need the root `--global` flag, as
+  above; inside a linked project, `skills publish --scope global` works without it.
+  `templates update` and `templates delete` take `--scope global` or `--global`; `--global`
+  together with a different `--scope` is rejected.
 - `templates update` refreshes only templates that have a recorded GitHub source URL, such as
   templates imported into the global catalog from a GitHub folder (the web UI's **Load
   Templates**, or `POST /api/v1/resources/import`). A template created with `templates sync` has
