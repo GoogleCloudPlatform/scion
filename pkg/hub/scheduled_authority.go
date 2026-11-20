@@ -179,52 +179,6 @@ func scheduledUserAccount(ctx context.Context, users userRowReader, principalID 
 	}
 }
 
-// scheduledEffectCeiling returns the ceiling and provenance to freeze for a
-// write made at fire time under auth, the authority resolveScheduledAuthority
-// returned for evt.
-//
-// Ceiling: the revision's frozen ceiling. For an agent principal it is
-// intersected with the ceiling a request-authorized write by that agent carries at
-// fire time (agentRowEffectCeiling, including the deliver eligibility of the
-// agent's current chain), so a permission survives only if both allow it.
-// It is never a live UAT or agent ceiling on its own.
-//
-// Provenance: SourceCredentialKind=scheduler, the revision principal, the
-// event, schedule and revision references, and the event's four initiator
-// fields copied verbatim.
-func (s *Server) scheduledEffectCeiling(ctx context.Context, auth ScheduledAuthority, evt store.ScheduledEvent) (store.EffectCeiling, store.AuthorityProvenance, error) {
-	ceiling := auth.Ceiling
-	if auth.PrincipalKind == store.DelegationPrincipalAgent {
-		if auth.agent == nil {
-			return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: principal agent not resolved", errScheduledAuthorityDenied)
-		}
-		row, err := s.authzService.agentRowEffectCeiling(ctx, auth.agent)
-		if err != nil {
-			if cause, structural := ceilingDenyCauseForError(err); structural {
-				return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: %s: %v", errScheduledAuthorityDenied, cause, err)
-			}
-			return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("scheduled authority: agent ceiling: %w", err)
-		}
-		ceiling, err = intersectEffectCeilings(ceiling, row)
-		if err != nil {
-			return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: %v", errScheduledAuthorityDenied, err)
-		}
-	}
-	return ceiling, store.AuthorityProvenance{
-		ProvenanceVersion:           store.ProvenanceVersionV1,
-		SourcePrincipalKind:         auth.PrincipalKind,
-		SourcePrincipalID:           auth.PrincipalID,
-		SourceCredentialKind:        store.SourceCredentialScheduler,
-		SourceEventID:               evt.ID,
-		SourceScheduleID:            evt.ScheduleID,
-		SourceAuthorizationRevision: evt.AuthorizationRevision,
-		InitiatorPrincipalKind:      evt.InitiatorPrincipalKind,
-		InitiatorPrincipalID:        evt.InitiatorPrincipalID,
-		InitiatorCredentialKind:     evt.InitiatorCredentialKind,
-		InitiatorCredentialID:       evt.InitiatorCredentialID,
-	}, nil
-}
-
 // intersectEffectCeilings returns the ceiling that allows exactly what both
 // a and b allow. Principal is the identity element. Two bounded ceilings
 // intersect over the registry (each under its own version) into bounded V1,

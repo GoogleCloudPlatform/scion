@@ -1742,32 +1742,51 @@ func TestHubDelivery_AgentCreatedChain(t *testing.T) {
 		assertNoDeliveryCeilingStep(t, d)
 	})
 
-	// A authors a dispatch_agent schedule; the fire creates C. A scheduled
-	// child's ancestry stays empty, so no progeny item can match it: the
-	// request is denied before step 10. The row pins that existing
-	// property; the deliver permissions on the fire's edge are pinned by
-	// the scheduled-create tests.
+	// Under headless-identity-note.md §2–§3, a user-authored dispatch_agent
+	// schedule creates C with OwnerID == user and Ancestry == [user], so the
+	// author's user-scope secret is deliverable under the same rules as an
+	// interactive create; an agent-authored schedule without progeny
+	// eligibility (parent hop lacks deliver permissions) still denies delivery.
 	t.Run("scheduled_agent", func(t *testing.T) {
 		f := newChainFixture(t, "hd-acc-sched")
 		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
 		authz := f.srv.authzService
 		ctx := context.Background()
-		a, _ := f.sessionParent(t, "hd-acc-sched-a")
-		require.NoError(t, f.srv.dispatchAgentEventHandler()(ctx, withAgentRevision(t, f.srv, store.ScheduledEvent{
-			ID: tid("hd-acc-sched-evt"), ProjectID: f.proj.ID, EventType: "dispatch_agent",
-			Payload: `{"agentName":"hd-acc-sched-c","task":"t"}`, CreatedBy: a.ID,
-		}, a.ID)))
-		c, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "hd-acc-sched-c")
+		require.NoError(t, f.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+			ID: tid("hd-acc-sched-user-evt"), ProjectID: f.proj.ID, EventType: "dispatch_agent",
+			Payload: `{"agentName":"hd-acc-sched-user-c","task":"t"}`, CreatedBy: f.creator.ID,
+		}, f.creator.ID)))
+		userChild, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "hd-acc-sched-user-c")
 		require.NoError(t, err)
-		require.Empty(t, c.Ancestry, "a scheduled child records no ancestry")
+		require.Equal(t, f.creator.ID, userChild.OwnerID)
+		require.Equal(t, []string{f.creator.ID}, userChild.Ancestry)
 
-		d := decidePerm(authz, hdIdentity(t, authz, c.ID), userSecret(t, f, "hd-acc-sched"), ActionDeliver, "secret.deliver", true)
-		assert.False(t, d.Allowed, "reason %q", d.Reason)
-		require.NotNil(t, d.Provenance)
-		for _, rr := range d.Provenance.Relationships {
-			assert.False(t, rr.Accepted, "no relationship candidate holds: %+v", rr)
-		}
-		assertNoDeliveryCeilingStep(t, d)
+		d := decidePerm(authz, hdIdentity(t, authz, userChild.ID), userSecret(t, f, "hd-acc-sched"), ActionDeliver, "secret.deliver", true)
+		require.True(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, ScopeTypeRelationship, d.Scope)
+		assert.Equal(t, 1, countDecisionSteps(d.ExplainTrace, "delegation_ceiling_delivery_hop"))
+		assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_root"))
+	})
+
+	t.Run("scheduled_agent_without_progeny_eligibility", func(t *testing.T) {
+		f := newChainFixture(t, "hd-acc-sched-noprog")
+		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+		authz := f.srv.authzService
+		ctx := context.Background()
+		// A has an unrecorded parent hop, so A's row ceiling carries no deliver
+		// permissions and C's scheduled edge inherits none.
+		a := createFixtureAgent(t, f.bypassAgentsFixture, "hd-acc-sched-noprog-a", []string{f.creator.ID}, AgentRoleFull)
+		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.creator.ID, a.ID, f.proj.ID)
+		require.NoError(t, f.srv.dispatchAgentEventHandler()(ctx, withAgentRevision(t, f.srv, store.ScheduledEvent{
+			ID: tid("hd-acc-sched-noprog-evt"), ProjectID: f.proj.ID, EventType: "dispatch_agent",
+			Payload: `{"agentName":"hd-acc-sched-noprog-c","task":"t"}`, CreatedBy: a.ID,
+		}, a.ID)))
+		c, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "hd-acc-sched-noprog-c")
+		require.NoError(t, err)
+		require.Equal(t, []string{f.creator.ID, a.ID}, c.Ancestry)
+
+		d := decidePerm(authz, hdIdentity(t, authz, c.ID), userSecret(t, f, "hd-acc-sched-noprog"), ActionDeliver, "secret.deliver", true)
+		assertDeniedAtFirstHop(t, d)
 	})
 
 	// On the two-hop fixture of the allowed control: a non-deliver

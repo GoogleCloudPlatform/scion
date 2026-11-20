@@ -103,19 +103,34 @@ var uatIntrinsicPermissionIDs = []string{
 var uatIntrinsicPermissionSet = toPermissionSet(uatIntrinsicPermissionIDs)
 
 // uatRecordedHop reports whether a recorded edge's bounded ceiling was copied
-// from a user access token of the edge's own delegator. delegatorType and
-// delegatorID are the edge's delegator (for a credential not yet recorded on
-// an edge, the requester, which is the source principal). Every writer
-// records a token edge with that user as its delegator; an edge whose
-// delegator is anyone else is inconsistent and gets no intrinsic permission.
+// from a user access token of the edge's own delegator — either directly
+// (SourceCredentialKind == "uat") or through a consistent UAT-initiated
+// scheduler/trigger hop (SourceCredentialKind == "scheduler",
+// InitiatorCredentialKind == "uat", carrying a revision reference and with
+// InitiatorPrincipal == SourcePrincipal == the edge's user delegator;
+// headless-identity-note.md §2.2). delegatorType and delegatorID are the
+// edge's delegator (for a credential not yet recorded on an edge, the
+// requester, which is the source principal). Every writer records a token edge
+// with that user as its delegator; an edge whose delegator or initiator is
+// anyone else is inconsistent and gets no intrinsic permission.
 func uatRecordedHop(delegatorType, delegatorID string, prov store.AuthorityProvenance, c store.EffectCeiling) bool {
-	return c.Kind == store.EffectCeilingBounded &&
-		knownProvenanceVersion(prov.ProvenanceVersion) &&
-		prov.SourceCredentialKind == store.SourceCredentialUAT &&
-		prov.SourcePrincipalKind == store.DelegationPrincipalUser &&
-		prov.SourcePrincipalID != "" &&
-		delegatorType == store.DelegationPrincipalUser &&
-		delegatorID == prov.SourcePrincipalID
+	if c.Kind != store.EffectCeilingBounded ||
+		!knownProvenanceVersion(prov.ProvenanceVersion) ||
+		prov.SourcePrincipalKind != store.DelegationPrincipalUser ||
+		prov.SourcePrincipalID == "" ||
+		delegatorType != store.DelegationPrincipalUser ||
+		delegatorID != prov.SourcePrincipalID {
+		return false
+	}
+	if prov.SourceCredentialKind == store.SourceCredentialUAT {
+		return true
+	}
+	return prov.SourceCredentialKind == store.SourceCredentialScheduler &&
+		prov.SourceEventID != "" &&
+		prov.SourceAuthorizationRevision >= 1 &&
+		prov.InitiatorCredentialKind == store.InitiatorCredentialKindUAT &&
+		prov.InitiatorPrincipalKind == store.DelegationPrincipalUser &&
+		prov.InitiatorPrincipalID == prov.SourcePrincipalID
 }
 
 // uatHopEffectCeiling is the ceiling a recorded hop applies: the stored ceiling,

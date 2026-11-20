@@ -87,6 +87,15 @@ func (f *schedMsg) fireMsg(t *testing.T, evt store.ScheduledEvent) error {
 	return f.srv.messageEventHandler()(context.Background(), evt)
 }
 
+// sessionAgent creates the fixture sender agent and clears its create dispatch
+// from f.spy so subsequent message fire assertions observe only the fire under test.
+func (f *schedMsg) sessionAgent(t *testing.T, slug string) *store.Agent {
+	t.Helper()
+	a := f.schedFire.sessionAgent(t, slug)
+	f.spy.reset()
+	return a
+}
+
 func (f *schedMsg) assertDelivered(t *testing.T, n int) {
 	t.Helper()
 	assert.Len(t, f.spy.getCalls(), n, "scheduled message deliveries")

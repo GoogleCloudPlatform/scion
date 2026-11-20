@@ -1488,8 +1488,14 @@ func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 			if a.AppliedConfig == nil || a.AppliedConfig.Task != "Do the thing" {
 				t.Errorf("expected task 'Do the thing' in applied config")
 			}
-			if a.AppliedConfig.AgentRole != string(AgentRoleNone) {
-				t.Errorf("expected scheduled agent role %q, got %q", AgentRoleNone, a.AppliedConfig.AgentRole)
+			if a.AppliedConfig.AgentRole != string(AgentRoleFull) {
+				t.Errorf("expected scheduled agent role %q, got %q", AgentRoleFull, a.AppliedConfig.AgentRole)
+			}
+			if a.AppliedConfig.NoAuth {
+				t.Errorf("expected default scheduled agent NoAuth=false, got true")
+			}
+			if a.OwnerID != "creator-agent" {
+				t.Errorf("expected scheduled agent OwnerID %q, got %q", "creator-agent", a.OwnerID)
 			}
 			break
 		}
@@ -1533,6 +1539,7 @@ func TestDispatchAgentEventHandler_FireRequiresAgentCreateScope(t *testing.T) {
 func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
 	t.Parallel()
 	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	ms.users["admin-user"] = &store.User{
 		ID:          "admin-user",
 		Email:       "admin@example.com",

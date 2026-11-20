@@ -326,3 +326,67 @@ func (s *Server) fireStanding(ctx context.Context, auth FireAuthority, target *s
 	}
 	return nil
 }
+
+// fireCreatorName returns the display creator name recorded in
+// AppliedConfig.CreatorName for an authority-resolved fire: an agent principal
+// is named by its agent Name, a user principal by their email.
+func fireCreatorName(auth FireAuthority) string {
+	switch {
+	case auth.agent != nil:
+		return auth.agent.Name
+	case auth.user != nil:
+		return auth.user.Email
+	default:
+		return ""
+	}
+}
+
+// fireEffectCeiling returns the ceiling and provenance to freeze for an
+// authority-producing write made at fire time under auth.
+//
+// Ceiling: the revision's frozen ceiling. For an agent principal it is
+// intersected with the ceiling a request-authorized write by that agent
+// carries at fire time (agentRowEffectCeiling, including the deliver
+// eligibility of the agent's current chain), so a permission survives only if
+// both allow it. It is never a live UAT or agent ceiling on its own.
+//
+// Provenance: SourceCredentialKind=scheduler, the revision principal, the
+// fire, schedule (when DefinitionKind == schedule), and revision references,
+// and the recorded attribution's four initiator fields copied verbatim.
+func (s *Server) fireEffectCeiling(ctx context.Context, auth FireAuthority) (store.EffectCeiling, store.AuthorityProvenance, error) {
+	ceiling := auth.Ceiling
+	if auth.PrincipalKind == store.DelegationPrincipalAgent {
+		if auth.agent == nil {
+			return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: principal agent not resolved", errScheduledAuthorityDenied)
+		}
+		row, err := s.authzService.agentRowEffectCeiling(ctx, auth.agent)
+		if err != nil {
+			if cause, structural := ceilingDenyCauseForError(err); structural {
+				return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: %s: %v", errScheduledAuthorityDenied, cause, err)
+			}
+			return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("scheduled authority: agent ceiling: %w", err)
+		}
+		ceiling, err = intersectEffectCeilings(ceiling, row)
+		if err != nil {
+			return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: %v", errScheduledAuthorityDenied, err)
+		}
+	}
+	var scheduleID string
+	if auth.Recorded.DefinitionKind == hubfire.DefinitionKindSchedule {
+		scheduleID = auth.Recorded.DefinitionID
+	}
+	attr := auth.Recorded.Attribution
+	return ceiling, store.AuthorityProvenance{
+		ProvenanceVersion:           store.ProvenanceVersionV1,
+		SourcePrincipalKind:         auth.PrincipalKind,
+		SourcePrincipalID:           auth.PrincipalID,
+		SourceCredentialKind:        store.SourceCredentialScheduler,
+		SourceEventID:               auth.Recorded.FireID,
+		SourceScheduleID:            scheduleID,
+		SourceAuthorizationRevision: attr.AuthorizationRevision,
+		InitiatorPrincipalKind:      attr.InitiatorPrincipalKind,
+		InitiatorPrincipalID:        attr.InitiatorPrincipalID,
+		InitiatorCredentialKind:     attr.InitiatorCredentialKind,
+		InitiatorCredentialID:       attr.InitiatorCredentialID,
+	}, nil
+}

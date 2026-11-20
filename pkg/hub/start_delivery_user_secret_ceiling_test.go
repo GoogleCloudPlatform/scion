@@ -921,7 +921,7 @@ func TestStartDelivery_UATHopBoundedByCeiling(t *testing.T) {
 		for i, mutate := range []func(*store.DelegationEdge){
 			func(e *store.DelegationEdge) { e.SourceCredentialKind = store.SourceCredentialSession },
 			func(e *store.DelegationEdge) {
-				e.AuthorityProvenance = schedulerProv(store.DelegationPrincipalUser, e.DelegatorID, store.InitiatorCredentialKindUAT)
+				e.AuthorityProvenance = schedulerProv(store.DelegationPrincipalUser, e.DelegatorID, store.InitiatorCredentialKindSession)
 			},
 			func(e *store.DelegationEdge) { e.SourceCredentialKind = store.SourceCredentialSystemMigration },
 		} {

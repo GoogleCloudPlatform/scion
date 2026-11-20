@@ -54,6 +54,7 @@ type CreateScheduledEventRequest struct {
 	Template string `json:"template,omitempty"`
 	Task     string `json:"task,omitempty"`
 	Branch   string `json:"branch,omitempty"`
+	NoAuth   bool   `json:"noAuth,omitempty"`
 
 	// Convenience fields for "exec" events (ptone/scion#7883), with
 	// AgentID/AgentName: the argv and its timeout (0: 60 seconds).
@@ -334,6 +335,10 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: %s)", req.EventType, s.supportedScheduledEventTypes()), nil)
 		return
 	}
+	if req.NoAuth && req.EventType != "dispatch_agent" {
+		ValidationError(w, "noAuth applies to dispatch_agent events only", nil)
+		return
+	}
 	if req.EventType == scheduledEventTypeExec {
 		s.createScheduledExecEvent(w, r, projectID, &req)
 		return
@@ -344,6 +349,10 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 	}
 	if req.Wake && req.EventType != "message" {
 		ValidationError(w, "wake applies to message events only", nil)
+		return
+	}
+	if req.NoAuth && req.Payload != "" {
+		ValidationError(w, "give either payload or noAuth, not both", nil)
 		return
 	}
 	// The payload "raw" tombstone applies to both supported event types:
@@ -395,6 +404,7 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 			Template:  req.Template,
 			Task:      req.Task,
 			Branch:    req.Branch,
+			NoAuth:    req.NoAuth,
 		}
 		payloadBytes, err := json.Marshal(p)
 		if err != nil {

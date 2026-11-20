@@ -207,7 +207,7 @@ func (a *legacyAction) run(ctx context.Context, req hubfire.FireRequest) hubfire
 
 func (s *Server) registerFireActions() {
 	s.RegisterAction(&messageAction{srv: s})
-	s.RegisterAction(newLegacyAction("dispatch_agent", s.dispatchAgentEventHandler()))
+	s.RegisterAction(&dispatchAgentAction{srv: s})
 	s.RegisterAction(&execAction{srv: s})
 }
 

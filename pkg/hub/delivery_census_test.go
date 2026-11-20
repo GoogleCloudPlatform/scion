@@ -78,11 +78,15 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 	hdAgent(t, f.store, uatNonMember, alpha, []string{f.memberNoneID})
 	hdEdge(t, f.store, store.DelegationPrincipalUser, f.memberNoneID, uatNonMember, alpha, uatEdge)
 
-	// A scheduler-recorded edge whose schedule was written with a token
-	// counted, and unchanged: scheduler-recorded hops are not token hops.
+	// A scheduler-recorded edge whose schedule was written with a token:
+	// consistent UAT-initiated scheduler hops are recognized by uatRecordedHop
+	// (headless-identity-note.md §2.2), so its bounded ceiling gets the
+	// intrinsic deliver permissions and is counted in both UATCreated and
+	// SchedulerUATInitiated.
 	schedUAT := tid("census-sched-uat")
 	hdAgent(t, f.store, schedUAT, alpha, []string{owner})
 	hdEdge(t, f.store, store.DelegationPrincipalUser, owner, schedUAT, alpha, func(e *store.DelegationEdge) {
+		withBoundedCeiling("agent.read")(e)
 		e.AuthorityProvenance = schedulerProv(store.DelegationPrincipalUser, owner, store.InitiatorCredentialKindUAT)
 	})
 
@@ -104,6 +108,7 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 		unadopted:    legacyDeliveryCohortUnadoptedEdge,
 		adopted:      legacyDeliveryCohortAdoptedReadOnly,
 		uat:          "delivers",
+		schedUAT:     "delivers",
 		uatChild:     "ancestor_" + string(DenyCauseCeilingEffectExceeded),
 		uatNonMember: launchDeliveryCohortUATRootNotAdmitted,
 		parent:       legacyDeliveryCohortNoEdge,
@@ -117,6 +122,7 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 		unadopted:    "unadopted_edge",
 		adopted:      "adopted_readonly",
 		uat:          "delivers",
+		schedUAT:     "delivers",
 		uatChild:     "ancestor_" + string(DenyCauseCeilingEffectExceeded),
 		uatNonMember: launchDeliveryCohortUATRootNotAdmitted,
 		parent:       "no_edge",
@@ -124,9 +130,10 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 		devLocal:     "dev_local_edge",
 	}
 
-	// Both token-created agents store the full role, which their token's
-	// list does not fit.
+	// Token-created agents (direct and UAT-initiated scheduled) store the full
+	// role, which their token's list does not fit.
 	setAgentRole(t, f.store, uat, AgentRoleFull)
+	setAgentRole(t, f.store, schedUAT, AgentRoleFull)
 	setAgentRole(t, f.store, uatNonMember, AgentRoleFull)
 
 	rep, err := f.authz.LaunchDeliveryCensus(ctx, false)
@@ -165,20 +172,20 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 	assert.Equal(t, rep.StrictWithheld, rep.Withheld+rep.Fallback)
 	assert.GreaterOrEqual(t, rep.Fallback, 6, "the six legacy agents above")
 	assert.Equal(t, 1, rep.UATRootNotAdmitted)
-	assert.Equal(t, 2, rep.UATCreated, "the two agents whose own edge was recorded from a token")
+	assert.Equal(t, 3, rep.UATCreated, "the three agents whose own edge was recorded from a token (two direct, one scheduled)")
 	assert.Equal(t, 1, rep.SchedulerUATInitiated)
-	for _, id := range []string{uat, uatNonMember} {
+	for _, id := range []string{uat, schedUAT, uatNonMember} {
 		require.NotNil(t, rows[id].UAT, id)
 		assert.True(t, rows[id].Edge.UATRecorded, id)
 	}
-	for _, id := range []string{ok, uatChild, schedUAT, adopted} {
+	for _, id := range []string{ok, uatChild, adopted} {
 		assert.Nil(t, rows[id].UAT, "%s: the own edge is not token-recorded", id)
 	}
 	assert.Equal(t, store.InitiatorCredentialKindUAT, rows[schedUAT].Edge.InitiatorCredentialKind)
 	// The token's list (agent.read) fits no role: the stored role is filtered.
 	assert.Equal(t, string(AgentRoleFull), rows[uat].UAT.StoredRole)
 	assert.Equal(t, string(AgentRoleNone), rows[uat].UAT.FilteredRole)
-	assert.Equal(t, 2, rep.UATRoleFiltered)
+	assert.Equal(t, 3, rep.UATRoleFiltered)
 
 	// With dev auth on (the workstation hub), the dev_local agent delivers.
 	rep, err = f.authz.LaunchDeliveryCensus(ctx, true)

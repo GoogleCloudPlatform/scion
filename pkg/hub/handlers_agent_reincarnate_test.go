@@ -5422,7 +5422,20 @@ func TestDispatchAgentEventHandler_SetsCreateInputs(t *testing.T) {
 	require.NotNil(t, created.AppliedConfig.CreateInputs,
 		"scheduled dispatch must persist CreateInputs, or the agent is stuck looking legacy to reincarnate forever")
 	assert.Equal(t, "sched-branch", created.AppliedConfig.CreateInputs.Branch)
-	assert.True(t, created.AppliedConfig.CreateInputs.NoAuth, "every scheduled agent is NoAuth by construction")
+	assert.False(t, created.AppliedConfig.CreateInputs.NoAuth, "default scheduled agent launches with credentials (NoAuth=false)")
+
+	err = srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+		ID:        "dispatch-createinputs-noauth",
+		ProjectID: "project-1",
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"sched-createinputs-noauth","branch":"sched-branch","noAuth":true}`,
+		CreatedBy: creatorID,
+	}, creatorID))
+	require.NoError(t, err)
+	optOut := findMockAgent(ms, "sched-createinputs-noauth")
+	require.NotNil(t, optOut)
+	require.NotNil(t, optOut.AppliedConfig.CreateInputs)
+	assert.True(t, optOut.AppliedConfig.CreateInputs.NoAuth, "explicit payload.noAuth=true persists in CreateInputs")
 }
 
 func TestReincarnateAgent_AC2b_TemplateHarnessConfigBeatsHubDefault(t *testing.T) {

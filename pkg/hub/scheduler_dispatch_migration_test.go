@@ -46,8 +46,25 @@ func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *tes
 	child, err := s.GetAgentBySlug(ctx, project.ID, "scheduled-user-child")
 	require.NoError(t, err)
 	require.NotNil(t, child.AppliedConfig)
-	require.Equal(t, string(AgentRoleNone), child.AppliedConfig.AgentRole)
-	require.True(t, child.AppliedConfig.NoAuth)
+	require.Equal(t, user.ID, child.OwnerID)
+	require.Equal(t, []string{user.ID}, child.Ancestry)
+	require.Equal(t, string(AgentRoleFull), child.AppliedConfig.AgentRole)
+	require.False(t, child.AppliedConfig.NoAuth)
+
+	err = srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+		ID:        tid("scheduled-dispatch-user-noauth"),
+		ProjectID: project.ID,
+		EventType: "dispatch_agent",
+		Payload:   `{"agentName":"scheduled-user-noauth","task":"scheduled work","noAuth":true}`,
+		CreatedBy: user.ID,
+		FireAt:    time.Now(),
+	}, user.ID))
+	require.NoError(t, err)
+	noAuthChild, err := s.GetAgentBySlug(ctx, project.ID, "scheduled-user-noauth")
+	require.NoError(t, err)
+	require.NotNil(t, noAuthChild.AppliedConfig)
+	require.Equal(t, string(AgentRoleNone), noAuthChild.AppliedConfig.AgentRole)
+	require.True(t, noAuthChild.AppliedConfig.NoAuth)
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
 	dispatcher.SetSecretBackend(&mockSecretBackend{
@@ -56,17 +73,29 @@ func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *tes
 			{SecretMeta: secret.SecretMeta{Name: "API_KEY", SecretType: "environment", Target: "API_KEY"}, Value: "key-value"},
 		},
 	})
-	req, err := dispatcher.buildCreateRequest(ctx, child, "TestScheduledNoAuth")
+	reqDefault, err := dispatcher.buildCreateRequest(ctx, child, "TestScheduledDefault")
 	require.NoError(t, err)
-	require.True(t, req.NoAuth)
-	require.Empty(t, req.ResolvedSecrets)
-	require.NotContains(t, req.ResolvedEnv, "API_KEY")
+	require.False(t, reqDefault.NoAuth)
+	require.NotEmpty(t, reqDefault.ResolvedSecrets)
+	require.Equal(t, "key-value", reqDefault.ResolvedEnv["API_KEY"])
+
+	reqNoAuth, err := dispatcher.buildCreateRequest(ctx, noAuthChild, "TestScheduledNoAuth")
+	require.NoError(t, err)
+	require.True(t, reqNoAuth.NoAuth)
+	require.Empty(t, reqNoAuth.ResolvedSecrets)
+	require.NotContains(t, reqNoAuth.ResolvedEnv, "API_KEY")
 
 	require.NoError(t, s.Migrate(ctx))
 
 	child, err = s.GetAgent(ctx, child.ID)
 	require.NoError(t, err)
 	require.NotNil(t, child.AppliedConfig)
-	require.Equal(t, string(AgentRoleNone), child.AppliedConfig.AgentRole)
-	require.True(t, child.AppliedConfig.NoAuth)
+	require.Equal(t, string(AgentRoleFull), child.AppliedConfig.AgentRole)
+	require.False(t, child.AppliedConfig.NoAuth)
+
+	noAuthChild, err = s.GetAgent(ctx, noAuthChild.ID)
+	require.NoError(t, err)
+	require.NotNil(t, noAuthChild.AppliedConfig)
+	require.Equal(t, string(AgentRoleNone), noAuthChild.AppliedConfig.AgentRole)
+	require.True(t, noAuthChild.AppliedConfig.NoAuth)
 }

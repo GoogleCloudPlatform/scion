@@ -317,15 +317,13 @@ func TestAdoptedAgentRuntimeSecretFetch(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "adopt-value")
 }
 
-// Scheduled dispatch writes every child with applied role none (and NoAuth)
-// and an edge of role none. A fire runs on the schedule's recorded
-// authorization revision, so the edge carries recorded V1 scheduler
-// provenance and the automatic cohort leaves it as recorded. This pins the
-// role invariant: if the scheduled-create path ever wrote a real role, the
-// child would hold authority its schedule never granted. Legacy unrecorded
-// scheduled rows are excluded as role_none
-// (TestPlanExcludesRoleNoneScheduledRows).
-func TestScheduledDispatchChildEdgeHasRoleNone(t *testing.T) {
+// A scheduled dispatch fire runs on the schedule's recorded authorization
+// revision, so the child and its delegation edge carry recorded V1 scheduler
+// provenance, the resolved default-ladder role, and NoAuth=false unless opted
+// out (headless-identity-note.md §2–§3), and the automatic adoption cohort
+// leaves the hop as recorded. Legacy unrecorded scheduled rows with role none
+// remain excluded as role_none (TestPlanExcludesRoleNoneScheduledRows).
+func TestScheduledDispatchChildEdgeRecordedRole(t *testing.T) {
 	srv, s, user, project := setupAgentRoleTest(t)
 	linkScheduledDispatchBroker(t, s, project.ID)
 	ctx := context.Background()
@@ -342,12 +340,12 @@ func TestScheduledDispatchChildEdgeHasRoleNone(t *testing.T) {
 	child, err := s.GetAgentBySlug(ctx, project.ID, "scheduled-edge-child")
 	require.NoError(t, err)
 	require.NotNil(t, child.AppliedConfig)
-	assert.Equal(t, string(AgentRoleNone), child.AppliedConfig.AgentRole)
-	assert.True(t, child.AppliedConfig.NoAuth)
+	assert.Equal(t, string(AgentRoleFull), child.AppliedConfig.AgentRole)
+	assert.False(t, child.AppliedConfig.NoAuth)
 
 	edges := activeEdgesFor(t, s, child.ID)
 	require.Len(t, edges, 1)
-	assert.Equal(t, string(AgentRoleNone), edges[0].Role)
+	assert.Equal(t, string(AgentRoleFull), edges[0].Role)
 	assertSchedulerProvenance(t, evt, edges[0], store.DelegationPrincipalUser, user.ID)
 	assert.Equal(t, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, edges[0].EffectCeiling)
 

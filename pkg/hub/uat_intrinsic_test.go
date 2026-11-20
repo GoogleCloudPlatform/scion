@@ -46,7 +46,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -129,22 +131,82 @@ func TestUATIntrinsic_HopCeiling(t *testing.T) {
 	}
 }
 
-// TestUATIntrinsic_NotOtherHops: no intrinsic permission reaches a hop for
-// which uatRecordedHop is false: session, agent, scheduler (including a
-// schedule written with a token: scheduler-recorded hops are not token
-// hops), system_migration, dev_local, unrecorded provenance, a principal
-// ceiling, or a uat source missing its user principal.
+// TestUATIntrinsic_NotOtherHops: a consistent UAT-initiated scheduler hop is
+// recognized alongside a direct UAT hop (headless-identity-note.md §2.2),
+// while no intrinsic permission reaches any hop where uatRecordedHop is false:
+// session, agent, non-UAT scheduler, inconsistent UAT-initiated scheduler
+// (principal mismatch, delegator mismatch, missing revision reference),
+// non-scheduler source carrying initiator=uat, system_migration, dev_local,
+// unrecorded provenance, a principal ceiling, or a uat source missing its user
+// principal.
 func TestUATIntrinsic_NotOtherHops(t *testing.T) {
 	user := uuid.NewString()
+	otherUser := uuid.NewString()
 	bounded := boundedCeiling(uiTokenList...)
+
+	t.Run("scheduler of uat (consistent)", func(t *testing.T) {
+		prov := schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindUAT)
+		require.True(t, uatRecordedHop(store.DelegationPrincipalUser, user, prov, bounded))
+		hop := uatHopEffectCeiling(store.DelegationPrincipalUser, user, prov, bounded)
+		for _, p := range uatIntrinsicPermissionIDs {
+			assert.True(t, EffectCeilingAllows(hop, p, false), p)
+			assert.True(t, uatIntrinsicDecides(store.DelegationPrincipalUser, user, prov, bounded, p), p)
+			edge := &store.DelegationEdge{
+				DelegatorType:       store.DelegationPrincipalUser,
+				DelegatorID:         user,
+				AuthorityProvenance: prov,
+				EffectCeiling:       bounded,
+			}
+			cause, _ := hopEffectCeilingDeny(edge, p, Resource{Type: "secret"}, "", true)
+			assert.Empty(t, cause, "%s: consistent UAT-initiated scheduler hop is admitted", p)
+		}
+		assert.False(t, EffectCeilingAllows(hop, "project.secret_read", false), "non-intrinsic permissions remain bounded by frozen UAT ceiling")
+	})
+
+	t.Run("scheduler of uat, delegator mismatch", func(t *testing.T) {
+		prov := schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindUAT)
+		assert.False(t, uatRecordedHop(store.DelegationPrincipalUser, otherUser, prov, bounded))
+		assert.Equal(t, bounded, uatHopEffectCeiling(store.DelegationPrincipalUser, otherUser, prov, bounded))
+	})
+
 	cases := map[string]struct {
 		prov store.AuthorityProvenance
 		c    store.EffectCeiling
 	}{
-		"session":          {recordedProv(store.DelegationPrincipalUser, user, store.SourceCredentialSession), bounded},
-		"agent":            {recordedProv(store.DelegationPrincipalAgent, uuid.NewString(), store.SourceCredentialAgent), bounded},
-		"scheduler":        {schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindSession), bounded},
-		"scheduler of uat": {schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindUAT), bounded},
+		"session":   {recordedProv(store.DelegationPrincipalUser, user, store.SourceCredentialSession), bounded},
+		"agent":     {recordedProv(store.DelegationPrincipalAgent, uuid.NewString(), store.SourceCredentialAgent), bounded},
+		"scheduler": {schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindSession), bounded},
+		"scheduler, agent initiator": {
+			schedulerProv(store.DelegationPrincipalAgent, uuid.NewString(), store.InitiatorCredentialKindAgent),
+			bounded,
+		},
+		"scheduler of uat, initiator principal mismatch": {func() store.AuthorityProvenance {
+			p := schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindUAT)
+			p.InitiatorPrincipalID = otherUser
+			return p
+		}(), bounded},
+		"scheduler of uat, initiator principal kind mismatch": {func() store.AuthorityProvenance {
+			p := schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindUAT)
+			p.InitiatorPrincipalKind = store.DelegationPrincipalAgent
+			return p
+		}(), bounded},
+		"scheduler of uat, missing revision reference": {func() store.AuthorityProvenance {
+			p := schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindUAT)
+			p.SourceAuthorizationRevision = 0
+			return p
+		}(), bounded},
+		"scheduler of uat, missing source event id": {func() store.AuthorityProvenance {
+			p := schedulerProv(store.DelegationPrincipalUser, user, store.InitiatorCredentialKindUAT)
+			p.SourceEventID = ""
+			return p
+		}(), bounded},
+		"source not scheduler (session with uat initiator)": {func() store.AuthorityProvenance {
+			p := recordedProv(store.DelegationPrincipalUser, user, store.SourceCredentialSession)
+			p.InitiatorPrincipalKind = store.DelegationPrincipalUser
+			p.InitiatorPrincipalID = user
+			p.InitiatorCredentialKind = store.InitiatorCredentialKindUAT
+			return p
+		}(), bounded},
 		"system_migration": {recordedProv(store.DelegationPrincipalUser, user, store.SourceCredentialSystemMigration), bounded},
 		"dev_local":        {recordedProv(store.DelegationPrincipalUser, DevUserID, store.SourceCredentialDevLocal), bounded},
 		"unrecorded provenance": {func() store.AuthorityProvenance {
@@ -234,7 +296,6 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 		},
 		"childRoleWithinCeiling": {
 			"planAgentDelegatorReissue": true, // an agent parent's ceiling (agentRowEffectCeiling)
-			"dispatchAgentEventHandler": true, // scheduler edge ceiling with role none: not a token hop
 		},
 		// No exceptions: every caller passes uatHopEffectCeiling inline, so
 		// missingRoleSelectors (below) always reads a hop ceiling.
@@ -940,4 +1001,168 @@ func TestUATIntrinsic_NewChildEdgesCarryDeliver(t *testing.T) {
 		assert.Contains(t, ceiling.PermissionIDs, d)
 	}
 	assert.NotContains(t, ceiling.PermissionIDs, "secret.use", "secret.use reaches a child only through the parent's coverage")
+}
+
+// TestUATIntrinsic_SchedulerUATAuthoredFireAndLiveness covers
+// headless-identity-note.md §2.2:
+//   - a live UAT-authored dispatch_agent fire creates an agent whose scheduler
+//     edge is recognized by uatRecordedHop, delivering owner + shared progeny
+//     user secrets and project launch material across create, start/restart,
+//     and secret.use while keeping the UAT's frozen EffectCeiling intact
+//     (ScopeProjectSecretRead withheld);
+//   - revoking or expiring the UAT after authoring refuses the fire
+//     (FireStatusRefused) before any agent is created, so nothing is delivered
+//     or used.
+func TestUATIntrinsic_SchedulerUATAuthoredFireAndLiveness(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("live_uat_fire_delivers_at_create_and_start_within_frozen_ceiling", func(t *testing.T) {
+		f := newSchedFire(t, "ui-sched-live")
+		client := f.withDispatcher(t)
+		disp := f.srv.GetDispatcher().(*HTTPAgentDispatcher)
+		disp.SetSecretBackend(secret.NewLocalBackend(f.store, "test-hub-id", "test-secret"))
+		disp.SetHubID("test-hub-id")
+		disp.SetAuthzService(f.srv.authzService)
+		f.srv.registerFireActions()
+
+		privateSecretID := api.NewUUID()
+		sharedSecretID := api.NewUUID()
+		projSecretID := api.NewUUID()
+		for _, sc := range []*store.Secret{
+			{
+				ID:             privateSecretID,
+				Key:            "UAT_SCHED_PRIVATE",
+				EncryptedValue: "uat-private-val",
+				SecretType:     store.SecretTypeEnvironment,
+				Target:         "UAT_SCHED_PRIVATE",
+				Scope:          store.ScopeUser,
+				ScopeID:        f.creator.ID,
+				InjectionMode:  store.InjectionModeAlways,
+				AllowProgeny:   false,
+				CreatedBy:      f.creator.ID,
+			},
+			{
+				ID:             sharedSecretID,
+				Key:            "UAT_SCHED_SHARED",
+				EncryptedValue: "uat-shared-val",
+				SecretType:     store.SecretTypeEnvironment,
+				Target:         "UAT_SCHED_SHARED",
+				Scope:          store.ScopeUser,
+				ScopeID:        f.creator.ID,
+				InjectionMode:  store.InjectionModeAlways,
+				AllowProgeny:   true,
+				CreatedBy:      f.creator.ID,
+			},
+			{
+				ID:             projSecretID,
+				Key:            "UAT_SCHED_PROJECT",
+				EncryptedValue: "uat-project-val",
+				SecretType:     store.SecretTypeEnvironment,
+				Target:         "UAT_SCHED_PROJECT",
+				Scope:          store.ScopeProject,
+				ScopeID:        f.proj.ID,
+				InjectionMode:  store.InjectionModeAlways,
+			},
+		} {
+			require.NoError(t, f.store.CreateSecret(ctx, sc))
+		}
+
+		// Mint UAT with minimalSelectors (readonly + agent:create; NO project:secret:read).
+		tok := f.storedUAT(t, minimalSelectors(t)...)
+		evt := withUATRevision(f.event("uat-sched-child"), tok)
+		require.NoError(t, f.fire(t, evt))
+
+		child, edge := f.child(t, "uat-sched-child")
+		require.True(t, uatRecordedHop(edge.DelegatorType, edge.DelegatorID, edge.AuthorityProvenance, edge.EffectCeiling))
+		assert.Equal(t, string(AgentRoleBaseline), child.AppliedConfig.AgentRole, "frozen UAT ceiling caps full down to baseline because project.secret_read is not intrinsic")
+
+		// Minted agent token must NOT gain ScopeProjectSecretRead.
+		require.NotNil(t, client.lastCreateReq)
+		claims, err := f.srv.GetAgentTokenService().ValidateAgentToken(client.lastCreateReq.AgentToken)
+		require.NoError(t, err)
+		assert.NotContains(t, claims.Scopes, ScopeProjectSecretRead)
+
+		// Create-time delivery includes owner private, owner shared, and project launch secrets.
+		byName := make(map[string]string, len(client.lastCreateReq.ResolvedSecrets))
+		for _, rs := range client.lastCreateReq.ResolvedSecrets {
+			byName[rs.Name] = rs.Value
+		}
+		assert.Equal(t, "uat-private-val", byName["UAT_SCHED_PRIVATE"])
+		assert.Equal(t, "uat-shared-val", byName["UAT_SCHED_SHARED"])
+		assert.Equal(t, "uat-project-val", byName["UAT_SCHED_PROJECT"])
+
+		// Start-time delivery (selectDeliverySecrets) and runtime secret.use parent ceiling
+		// also succeed on the UAT-initiated scheduler hop (matching interactive UAT create).
+		startSecrets, _, err := disp.selectDeliverySecrets(ctx, newDeliverySelector(f.srv.authzService, child, PurposeRestart), child)
+		require.NoError(t, err)
+		startMap := make(map[string]string, len(startSecrets))
+		for _, rs := range startSecrets {
+			startMap[rs.Name] = rs.Value
+		}
+		assert.Equal(t, "uat-private-val", startMap["UAT_SCHED_PRIVATE"])
+		assert.Equal(t, "uat-shared-val", startMap["UAT_SCHED_SHARED"])
+		assert.Equal(t, "uat-project-val", startMap["UAT_SCHED_PROJECT"])
+
+		agentIdent := &agentIdentityWrapper{claims}
+		useDecision := f.srv.authzService.EvaluateUserSecretParentCeiling(
+			ctx, agentIdent, userSecretResource(sharedSecretID, f.creator.ID))
+		assert.True(t, useDecision.Allowed, "unexpected deny: %s (%s)", useDecision.Reason, useDecision.DenyCause)
+	})
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, f *schedFire) *store.UserAccessToken
+	}{
+		{
+			name: "revoked_uat_after_authoring_delivers_and_uses_nothing",
+			mutate: func(t *testing.T, f *schedFire) *store.UserAccessToken {
+				tok := f.storedUAT(t, minimalSelectors(t)...)
+				require.NoError(t, f.store.RevokeUserAccessToken(ctx, tok.ID))
+				return tok
+			},
+		},
+		{
+			name: "expired_uat_after_authoring_delivers_and_uses_nothing",
+			mutate: func(t *testing.T, f *schedFire) *store.UserAccessToken {
+				return f.storedUATExpiring(t, time.Now().Add(-time.Minute), minimalSelectors(t)...)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSchedFire(t, "ui-sched-"+strings.Split(tc.name, "_")[0])
+			client := f.withDispatcher(t)
+			disp := f.srv.GetDispatcher().(*HTTPAgentDispatcher)
+			disp.SetSecretBackend(secret.NewLocalBackend(f.store, "test-hub-id", "test-secret"))
+			disp.SetHubID("test-hub-id")
+			disp.SetAuthzService(f.srv.authzService)
+			f.srv.registerFireActions()
+
+			require.NoError(t, f.store.CreateSecret(ctx, &store.Secret{
+				ID:             api.NewUUID(),
+				Key:            "UAT_NEVER_DELIVERED",
+				EncryptedValue: "must-never-leave-hub",
+				SecretType:     store.SecretTypeEnvironment,
+				Target:         "UAT_NEVER_DELIVERED",
+				Scope:          store.ScopeUser,
+				ScopeID:        f.creator.ID,
+				InjectionMode:  store.InjectionModeAlways,
+				AllowProgeny:   true,
+				CreatedBy:      f.creator.ID,
+			}))
+
+			tok := tc.mutate(t, f)
+			evt := withUATRevision(f.event("uat-dead-child"), tok)
+			out := f.srv.fireAction(ctx, hubfire.FireRequest{
+				ProjectID:  f.proj.ID,
+				Authority:  scheduledRecordedAuthority(evt),
+				ActionType: "dispatch_agent",
+				Payload:    evt.Payload,
+				FireAt:     evt.FireAt,
+			})
+			assert.Equal(t, hubfire.FireStatusRefused, out.Status)
+			f.assertNoChild(t, "uat-dead-child")
+			assert.False(t, client.createCalled, "broker must not be called when UAT is revoked or expired")
+			assert.Nil(t, client.lastCreateReq, "no create request or secret material may be built")
+		})
+	}
 }

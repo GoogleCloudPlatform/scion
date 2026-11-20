@@ -810,20 +810,51 @@ func TestDeleteUser_DescendantAgentDenied(t *testing.T) {
 	require.NoError(t, err, "denied delete must keep the user")
 }
 
-// scheduledAgent returns an agent shaped like the scheduler's dispatch
-// (dispatchAgentEventHandler): no owner, no ancestry, and the schedule's
-// creator recorded only as CreatedBy.
+// scheduledAgent returns a legacy pre-2b scheduler-dispatched agent row:
+// no owner, no ancestry, and the schedule's creator recorded only as
+// CreatedBy. Headless creates since PR 2b set OwnerID and Ancestry from the
+// principal (headless-identity-note.md §2–§3), covered in the subtest below.
 func scheduledAgent(slug, projectID, createdBy, phase string) *store.Agent {
 	return &store.Agent{ID: tid("agent-" + slug), Slug: slug, Name: slug, ProjectID: projectID,
 		Phase: phase, Detached: true, CreatedBy: createdBy}
 }
 
-// TestDeleteUser_ScheduledAgentDenied: an agent the scheduler dispatched for
-// the user's schedule (OwnerID empty, CreatedBy the user) blocks the delete
-// on both delete paths, stopped or not; a soft-deleted one does not, and
-// neither does an agent with another owner that names the user as creator.
+// TestDeleteUser_ScheduledAgentDenied: both a post-2b headless agent (which
+// sets OwnerID == user and Ancestry == [user], counted as a direct owned
+// agent) and a legacy pre-2b owner-less scheduled row (OwnerID empty,
+// CreatedBy the user) block user deletion on both delete paths, stopped or
+// not; a soft-deleted one does not, and neither does an agent with another
+// owner that names the user as creator.
 func TestDeleteUser_ScheduledAgentDenied(t *testing.T) {
-	t.Run("users delete", func(t *testing.T) {
+	t.Run("headless owned agent via dispatch_agent fire", func(t *testing.T) {
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		linkScheduledDispatchBroker(t, s, project.ID)
+		ctx := context.Background()
+		dave := newActiveMember(t, s, "user-dave-headless", "dave-headless@test.com")
+		grantProjectRole(t, s, dave.ID, project.ID, store.ProjectRoleMember)
+
+		require.NoError(t, srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+			ID:        tid("dave-headless-evt"),
+			ProjectID: project.ID,
+			EventType: "dispatch_agent",
+			Payload:   `{"agentName":"dave-headless-running"}`,
+			CreatedBy: dave.ID,
+		}, dave.ID)))
+		headlessChild, err := s.GetAgentBySlug(ctx, project.ID, "dave-headless-running")
+		require.NoError(t, err)
+		require.Equal(t, dave.ID, headlessChild.OwnerID)
+		require.Equal(t, []string{dave.ID}, headlessChild.Ancestry)
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+		requireOwnsAgentsDenial(t, rec, headlessChild)
+		_, err = s.GetUser(ctx, dave.ID)
+		require.NoError(t, err, "denied delete must keep the user")
+
+		require.NoError(t, s.DeleteAgent(ctx, headlessChild.ID))
+		rec = doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	})
+	t.Run("users delete (legacy owner-less CreatedBy fallback)", func(t *testing.T) {
 		srv, s, _, _, project := setupDemoPolicyTest(t)
 		ctx := context.Background()
 		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
