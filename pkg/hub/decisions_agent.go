@@ -77,23 +77,23 @@ type AgentDecisionListResponse struct {
 // Answers contains every recorded answer row on this version (interpreted and
 // direct), oldest first.
 type AgentDecisionVersionView struct {
-	RowID           string              `json:"rowId"`
-	Key             string              `json:"key"`
-	Ref             string              `json:"ref"`
-	Version         int                 `json:"version"`
-	Status          string              `json:"status"`
-	Question        string              `json:"question"`
-	ConversationID  string              `json:"conversationId"`
-	PromptMessageID string              `json:"promptMessageId"`
+	RowID           string                `json:"rowId"`
+	Key             string                `json:"key"`
+	Ref             string                `json:"ref"`
+	Version         int                   `json:"version"`
+	Status          string                `json:"status"`
+	Question        string                `json:"question"`
+	ConversationID  string                `json:"conversationId"`
+	PromptMessageID string                `json:"promptMessageId"`
 	Choices         []messages.Choice     `json:"choices"`
 	DefaultChoiceID string                `json:"defaultChoiceId,omitempty"`
 	Other           *messages.OtherOption `json:"other,omitempty"`
 	ReplacedBy      *DecisionReplacedBy   `json:"replacedBy,omitempty"`
-	Withdrawn       *DecisionWithdrawn  `json:"withdrawn,omitempty"`
-	Dismissed       *DecisionDismissed  `json:"dismissed,omitempty"`
-	CreatedAt       time.Time           `json:"createdAt"`
-	DecidedAt       *time.Time          `json:"decidedAt,omitempty"`
-	Answers         []AnswerView        `json:"answers"`
+	Withdrawn       *DecisionWithdrawn    `json:"withdrawn,omitempty"`
+	Dismissed       *DecisionDismissed    `json:"dismissed,omitempty"`
+	CreatedAt       time.Time             `json:"createdAt"`
+	DecidedAt       *time.Time            `json:"decidedAt,omitempty"`
+	Answers         []AnswerView          `json:"answers"`
 }
 
 // AgentDecisionShowResponse is the 200 envelope of GET /api/v1/agent/decisions/{key}.
