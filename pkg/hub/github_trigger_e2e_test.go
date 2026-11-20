@@ -363,6 +363,102 @@ func TestGitHubTriggerAuthoring_FlagSourceIDMatchTypesAssociationAndAgentRules(t
 	assert.Equal(t, "caller", listB.Scope)
 	assert.Empty(t, listB.Triggers, "Agent B must not see Agent A's or owner's GitHub triggers")
 
+	// 9. Stage 1 3b-1 interaction: github triggers enforce ordered match.rules CEL compilation,
+	// dialect admission ("cel" only), ambiguous scalar+rules rejection, PATCH rule validation,
+	// and agent self-only re-authorization when PATCHing a peer-targeting webhook trigger to github.
+	celRulesOK := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-with-cel-rules",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: []string{"github.issue_comment.created"},
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: "has(event.attributes.command) && event.attributes.command == 'review'"},
+				{Dialect: "cel", Expr: "event.attributes.sender_type != 'Bot'"},
+			},
+		},
+		Subject: &TriggerSubjectSpec{
+			Dialect: "cel",
+			Expr:    "string(event.subject)",
+		},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.targetAgent.ID, Message: "Review PR"},
+	})
+	require.Equal(t, http.StatusCreated, celRulesOK.Code, celRulesOK.Body.String())
+	var createdWithRules TriggerResponse
+	require.NoError(t, json.Unmarshal(celRulesOK.Body.Bytes(), &createdWithRules))
+	require.Len(t, createdWithRules.Match.Rules, 2)
+	assert.Equal(t, "cel", createdWithRules.Match.Rules[0].Dialect)
+
+	// Invalid CEL syntax on github trigger -> 400 invalid_rule.
+	badCELRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-bad-cel",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: []string{"github.issue_comment.created"},
+			Rules: []TriggerMatchRuleSpec{{Dialect: "cel", Expr: "event.attributes.command =="}},
+		},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, badCELRec.Code, badCELRec.Body.String())
+	assert.Equal(t, ErrCodeInvalidRule, decodeAPIErrorCode(t, badCELRec))
+
+	// Unadmitted dialect ("system_one") on github trigger -> 400 invalid_rule.
+	badDialectRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-bad-dialect",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: []string{"github.issue_comment.created"},
+			Rules: []TriggerMatchRuleSpec{{Dialect: "system_one", Expr: "classify urgent"}},
+		},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, badDialectRec.Code, badDialectRec.Body.String())
+	assert.Equal(t, ErrCodeInvalidRule, decodeAPIErrorCode(t, badDialectRec))
+
+	// Ambiguous match (both rules and scalar expr) on github trigger -> 400 invalid_rule.
+	ambiguousRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-ambiguous-match",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: []string{"github.issue_comment.created"},
+			Expr:  "true",
+			Rules: []TriggerMatchRuleSpec{{Dialect: "cel", Expr: "true"}},
+		},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, ambiguousRec.Code, ambiguousRec.Body.String())
+	assert.Equal(t, ErrCodeInvalidRule, decodeAPIErrorCode(t, ambiguousRec))
+
+	// PATCH invalid rule onto an existing github trigger -> 400 invalid_rule.
+	badPatchRules := []TriggerMatchRuleSpec{{Dialect: "cel", Expr: "unknown_ident == 1"}}
+	badPatchRec := f.doTrigger(t, f.ownerAuth, createdWithRules.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &badPatchRules},
+	})
+	require.Equal(t, http.StatusBadRequest, badPatchRec.Code, badPatchRec.Body.String())
+	assert.Equal(t, ErrCodeInvalidRule, decodeAPIErrorCode(t, badPatchRec))
+
+	// Agent A creates a webhook trigger targeting peer Agent B (allowed for webhook),
+	// then tries to PATCH source.kind to github without changing action -> 403 Forbidden.
+	agentEpRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "agent-a-ep"})
+	require.Equal(t, http.StatusCreated, agentEpRec.Code, agentEpRec.Body.String())
+	var agentEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(agentEpRec.Body.Bytes(), &agentEp))
+
+	agentPeerWhRec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "agent-a-peer-wh",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: agentEp.ID},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.agentB.ID, Message: "Peer webhook ok"},
+	})
+	require.Equal(t, http.StatusCreated, agentPeerWhRec.Code, agentPeerWhRec.Body.String())
+	var agentPeerWh TriggerResponse
+	require.NoError(t, json.Unmarshal(agentPeerWhRec.Body.Bytes(), &agentPeerWh))
+
+	ghTypes := []string{"github.issue_comment.created"}
+	agentPatchToGH := f.doTrigger(t, f.agentAAuth, agentPeerWh.ID, http.MethodPatch, UpdateTriggerRequest{
+		Source: &TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchPatchSpec{Types: &ghTypes},
+	})
+	assert.Equal(t, http.StatusForbidden, agentPatchToGH.Code, agentPatchToGH.Body.String())
+
 	repoCalls, mints = gh.counts()
 	assert.Zero(t, repoCalls, "entire authoring suite must make zero GitHub HTTP calls")
 	assert.Empty(t, mints)
