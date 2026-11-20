@@ -583,6 +583,8 @@ func TestNewSystemMessage_Categories(t *testing.T) {
 		{SystemCategoryScheduler, "scheduler"},
 		{SystemCategoryPortForward, "port-forward"},
 		{SystemCategoryDeliveryFailed, "delivery-failed"},
+		{SystemCategoryDeliveryDeferred, "delivery-deferred"},
+		{SystemCategoryDeliveryUnconfirmed, "delivery-unconfirmed"},
 		{SystemCategoryArtifactReview, "artifact-review"},
 		{SystemCategoryTrigger, "trigger"},
 	}

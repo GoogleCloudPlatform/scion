@@ -35,16 +35,28 @@ import (
 	"errors"
 	"net/http"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// finalizationTimeout is the maximum time allowed for post-dispatch state
-// transitions (MarkMessageDispatched / MarkMessageFailed) when the original
-// request context has been cancelled. This prevents silently discarding
-// known outcomes (AC-3).
+// finalizationTimeout is the maximum time allowed per post-dispatch state
+// transition attempt (MarkMessageDispatched / MarkMessageFailed) when the
+// original request context has been cancelled. This prevents silently
+// discarding known outcomes (AC-3).
 //
-// 5s is ample for a single-row CAS on the local store; anything slower
-// indicates a store problem that waiting longer would not fix.
+// 5s is ample for a single-row CAS on the local store; transient lock or
+// deadline failures are retried up to finalizationMaxAttempts times on fresh
+// detached contexts (ptone/scion#7405).
 const finalizationTimeout = 5 * time.Second
+
+// finalizationMaxAttempts bounds how many detached store attempts
+// markDispatched and markMessageFailed make before giving up. Only the DB
+// state transition is retried — never the broker delivery (ptone/scion#7405).
+const finalizationMaxAttempts = 3
+
+// finalizationRetryBackoff is the initial pause between finalization store
+// retries (doubled after each attempt). Variable so tests can adjust if needed.
+var finalizationRetryBackoff = 50 * time.Millisecond
 
 // deliveryNoticeTimeout bounds the detached budget for sending a
 // DELIVERY_FAILED notice back to the sender (ptone/scion#1838). Unlike the
@@ -61,6 +73,10 @@ const deliveryNoticeTimeout = 15 * time.Second
 // This check runs before message persistence so that unavailable dispatch
 // does not leave orphaned pending rows or falsely report success (AC-2).
 func (s *Server) checkDispatchAvailability(input *AgentDMInput) *AgentDMError {
+	if s.ShuttingDown() {
+		return shuttingDownDMError("")
+	}
+
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
 		// Managed runtime dispatch is always available at pre-check time;
 		// backend resolution happens at dispatch time and any failure there
@@ -129,21 +145,52 @@ func dispatchContext(parent context.Context, d time.Duration) (context.Context, 
 	return ctx, cancel
 }
 
+func isNonRetryableFinalizationError(err error) bool {
+	return errors.Is(err, store.ErrInvalidInput) || errors.Is(err, store.ErrNotFound)
+}
+
+func retryFinalization(ctx context.Context, fn func(finCtx context.Context) error) error {
+	backoff := finalizationRetryBackoff
+	var lastErr error
+	for attempt := 0; attempt < finalizationMaxAttempts; attempt++ {
+		if attempt > 0 && backoff > 0 {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+		finCtx, finCancel := finalizationContext(ctx)
+		err := fn(finCtx)
+		finCancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if isNonRetryableFinalizationError(err) {
+			break
+		}
+	}
+	return lastErr
+}
+
 // markDispatched transitions a message from pending to dispatched after
-// broker/managed-runtime acceptance. Uses a bounded finalization context
-// so request cancellation does not discard the known outcome.
+// broker/managed-runtime acceptance. Uses fresh bounded finalization contexts
+// across up to finalizationMaxAttempts attempts so request cancellation or a
+// transient store stall does not discard the known outcome (ptone/scion#7405).
 //
 // Returns (dispatched=true) on successful CAS, (dispatched=false) if the
 // row was already transitioned (duplicate protection), or an error on
-// store failure.
+// store failure after exhausting retries.
 func (s *Server) markDispatched(ctx context.Context, msgID string) (bool, error) {
-	finCtx, finCancel := finalizationContext(ctx)
-	defer finCancel()
-	return s.store.MarkMessageDispatched(finCtx, msgID)
+	var dispatched bool
+	err := retryFinalization(ctx, func(finCtx context.Context) error {
+		var casErr error
+		dispatched, casErr = s.store.MarkMessageDispatched(finCtx, msgID)
+		return casErr
+	})
+	return dispatched, err
 }
 
 // markFailed records a definite dispatch failure on the message row.
-// Uses a bounded finalization context for request cancellation resilience.
+// Uses bounded finalization contexts for request cancellation resilience.
 func (s *Server) markFailed(ctx context.Context, msgID string, reason string) error {
 	return markMessageFailed(ctx, s.store, msgID, reason)
 }
@@ -155,23 +202,45 @@ type messageFailureMarker interface {
 	MarkMessageFailed(ctx context.Context, id string, reason string) error
 }
 
-// markMessageFailed records a definite dispatch failure on a message row on a
-// finalizationContext derived from ctx (ptone/scion#1838). The dispatch ctx is
-// frequently already expired by the time a failure is known —
-// dispatchWithBrokerRetry returns ErrBrokerTimeout exactly when it fires — and
-// a mark on that ctx would fail, leaving the row "dispatched" forever (the
-// broker message sweep only reprocesses "pending" rows). Every
-// MarkMessageFailed call site in pkg/hub should go through this helper (or
-// Server.markFailed) rather than calling the store directly.
+// markMessageFailed records a definite dispatch failure on a message row on
+// fresh finalizationContexts derived from ctx (ptone/scion#1838,
+// ptone/scion#7405). The dispatch ctx is frequently already expired by the
+// time a failure is known — dispatchWithBrokerRetry returns ErrBrokerTimeout
+// exactly when it fires — and a mark on that ctx would fail, leaving the row
+// "dispatched" or "pending". Every MarkMessageFailed call site in pkg/hub
+// should go through this helper (or Server.markFailed) rather than calling the
+// store directly.
 //
 // The reason is passed through sanitizeFailureReason before it is persisted
 // as dispatch_failure_reason (ptone/scion#1841): on the synchronous paths it
 // is a raw dispatch error that can embed an arbitrary broker response body.
 // Sanitizing is idempotent, so already-sanitized reasons are unaffected.
 func markMessageFailed(ctx context.Context, st messageFailureMarker, msgID string, reason string) error {
-	finCtx, finCancel := finalizationContext(ctx)
-	defer finCancel()
-	return st.MarkMessageFailed(finCtx, msgID, sanitizeFailureReason(reason))
+	sanitized := sanitizeFailureReason(reason)
+	return retryFinalization(ctx, func(finCtx context.Context) error {
+		return st.MarkMessageFailed(finCtx, msgID, sanitized)
+	})
+}
+
+// shuttingDownDMError constructs a retryable 503 AgentDMError when the hub
+// is shutting down (ptone/scion#7405). When msgID is non-empty (the narrow
+// race where BeginShutdown fired after CreateMessage and before
+// dispatchShutdownGate), message_id is included in details so callers can
+// correlate the failed record; when empty, refusal occurred before persistence.
+func shuttingDownDMError(msgID string) *AgentDMError {
+	var details map[string]interface{}
+	if msgID != "" {
+		details = map[string]interface{}{
+			"message_id": msgID,
+		}
+	}
+	return &AgentDMError{
+		Code:       ErrCodeUnavailable,
+		Message:    "the server is shutting down; retry shortly",
+		HTTPStatus: http.StatusServiceUnavailable,
+		RetryAfter: shutdownRetryAfterSeconds * time.Second,
+		Details:    details,
+	}
 }
 
 // dispatchFailedError constructs an AgentDMError for a definite dispatch

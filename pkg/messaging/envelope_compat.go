@@ -136,6 +136,12 @@ func mapSystemCategory(category string) *EventBody {
 		// would both warn and silently reclassify it as
 		// agent.state-changed).
 		return &EventBody{Type: EventDeliveryFailed, Status: "DELIVERY_DEFERRED"}
+	case messages.SystemCategoryDeliveryUnconfirmed:
+		// ptone/scion#7405: pending-TTL expiry cannot distinguish a never-sent
+		// row from an AC-3/AC-4 row that was or may have been delivered, so the
+		// notice carries Status="DELIVERY_UNCONFIRMED" rather than claiming a
+		// definite failure.
+		return &EventBody{Type: EventDeliveryFailed, Status: "DELIVERY_UNCONFIRMED"}
 	default:
 		slog.Warn("unknown system_category, defaulting to agent.state-changed",
 			"system_category", category)
@@ -514,10 +520,14 @@ func eventTypeToSystemCategory(body *EventBody) string {
 	case EventArtifactReview:
 		return messages.SystemCategoryArtifactReview
 	case EventDeliveryFailed:
-		if body.Status == "DELIVERY_DEFERRED" {
+		switch body.Status {
+		case "DELIVERY_DEFERRED":
 			return messages.SystemCategoryDeliveryDeferred
+		case "DELIVERY_UNCONFIRMED":
+			return messages.SystemCategoryDeliveryUnconfirmed
+		default:
+			return messages.SystemCategoryDeliveryFailed
 		}
-		return messages.SystemCategoryDeliveryFailed
 	default:
 		return ""
 	}

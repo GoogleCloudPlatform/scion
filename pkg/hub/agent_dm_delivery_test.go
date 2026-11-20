@@ -33,11 +33,13 @@ package hub
 // ---------------------------------------------------------------------------
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -575,4 +577,413 @@ func TestDelivery_WriteAgentDMError_DispatchFailedIncludesMessageID(t *testing.T
 	assert.Equal(t, ErrCodeDeliveryFailed, errObj["code"])
 	details := errObj["details"].(map[string]interface{})
 	assert.Equal(t, "test-msg-123", details["message_id"])
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown admission pre-check and post-persist race (ptone/scion#7405)
+// ---------------------------------------------------------------------------
+
+func TestDelivery_ShuttingDown_RefusesBeforePersistenceWith503RetryAfter(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	srv.BeginShutdown()
+
+	_, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "shutting-down-broker"))
+	require.NotNil(t, dmErr, "shutting-down hub must refuse ExecuteAgentDM before persistence")
+	assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+	assert.Equal(t, time.Duration(shutdownRetryAfterSeconds)*time.Second, dmErr.RetryAfter)
+
+	w := httptest.NewRecorder()
+	WriteAgentDMError(w, dmErr)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "10", w.Header().Get("Retry-After"))
+
+	// Managed runtime targets must also be refused before persistence during shutdown.
+	managedTarget := *target
+	managedTarget.Runtime = "gemini-interactions"
+	_, managedErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, &managedTarget, "shutting-down-managed"))
+	require.NotNil(t, managedErr)
+	assert.Equal(t, http.StatusServiceUnavailable, managedErr.HTTPStatus)
+
+	assert.Empty(t, dispatcher.getCalls(), "must not dispatch during shutdown")
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: sender.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "no message row may be persisted when hub is already shutting down")
+}
+
+// TestDelivery_DelegatedSendShuttingDown_RefusesBeforePersistence covers the
+// delegated-send ingress path (handleAgentMessage -> delegatedDeliveryRefusal ->
+// checkDispatchAvailability, review O2 / mutant m1), which does not go through
+// ExecuteAgentDM's Phase 2 re-check.
+func TestDelivery_DelegatedSendShuttingDown_RefusesBeforePersistence(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	srv.BeginShutdown()
+
+	bodyBytes, err := json.Marshal(map[string]any{"message": "delegated-send-during-shutdown"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	delegated := &DelegatedAgentIdentity{
+		agentID:           sender.ID,
+		agentProjectID:    sender.ProjectID,
+		authorizingUserID: target.Ancestry[0],
+		grantID:           tid("delegated-shutdown-grant"),
+	}
+	req = req.WithContext(contextWithIdentity(req.Context(), delegated))
+	rec := httptest.NewRecorder()
+
+	srv.handleAgentMessage(rec, req, target.ID)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Equal(t, "10", rec.Header().Get("Retry-After"))
+	assert.Contains(t, rec.Body.String(), ErrCodeUnavailable)
+	assert.Empty(t, dispatcher.getCalls(), "delegated send during shutdown must not dispatch")
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "delegated send during shutdown must not persist a message row")
+}
+
+func TestDelivery_ShuttingDownDuringWake_RefusesBeforePersistence(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	// Grant owner role so sender is permitted to wake target, and suspend target.
+	target.Phase = "suspended"
+	require.NoError(t, s.UpdateAgent(ctx, target))
+	ownerID := target.Ancestry[0]
+	userCtx := contextWithIdentity(ctx, NewAuthenticatedUser(ownerID, "delivery-owner@test.example", "Owner", "member", "cli"))
+	in := deliveryDMInput(sender, target, "shutting-down-after-wake")
+	in.SenderIdentity = GetIdentityFromContext(userCtx)
+	in.Wake = true
+
+	// Simulate BeginShutdown firing after checkDispatchAvailability, while
+	// Phase 1b wake completes (spy marks target running so wakeAgentForDM returns).
+	wakeDispatcher := &spyStateDispatcher{store: s}
+	srv.SetDispatcher(wakeDispatcher)
+	in.BeforeWake = func() {
+		target.Phase = "running"
+		target.Activity = "idle"
+		_ = s.UpdateAgent(ctx, target)
+		srv.BeginShutdown()
+	}
+
+	_, dmErr := srv.ExecuteAgentDM(ctx, in)
+	require.NotNil(t, dmErr, "must refuse before CreateMessage if shutdown began during Phase 1b")
+	assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+	assert.Equal(t, time.Duration(shutdownRetryAfterSeconds)*time.Second, dmErr.RetryAfter)
+
+	assert.Empty(t, dispatcher.getCalls())
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: sender.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "no message row may be persisted if shutdown began before CreateMessage")
+}
+
+func TestDelivery_ShuttingDownPostPersistRace_MarksFailedAndReturns503RetryAfter(t *testing.T) {
+	srv, s, _, sender, target, _, dispatcher := deliverySetup(t)
+	ctx := context.Background()
+
+	// Simulate BeginShutdown firing in the narrow window after CreateMessage
+	// and before the dispatcher's shutdownGate check.
+	dispatcher.returnErr = ErrHubShuttingDown
+
+	_, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "shutting-down-race"))
+	require.NotNil(t, dmErr)
+	assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+	assert.Equal(t, time.Duration(shutdownRetryAfterSeconds)*time.Second, dmErr.RetryAfter)
+
+	require.NotNil(t, dmErr.Details)
+	msgID, ok := dmErr.Details["message_id"].(string)
+	require.True(t, ok)
+	require.NotEmpty(t, msgID)
+
+	w := httptest.NewRecorder()
+	WriteAgentDMError(w, dmErr)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "10", w.Header().Get("Retry-After"))
+
+	// The persisted row must be marked failed (not left pending).
+	msg, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, msg.DispatchState,
+		"post-persist shutdown race must mark row failed rather than leave it pending")
+	require.NotNil(t, msg.DispatchFailureReason)
+	assert.Contains(t, *msg.DispatchFailureReason, "shutting down")
+}
+
+// ---------------------------------------------------------------------------
+// Bounded finalization retries without duplicate broker dispatch (ptone/scion#7405)
+// ---------------------------------------------------------------------------
+
+type markFinalizationFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+
+	mu                  sync.Mutex
+	dispatchedErrs      []error
+	failedErrs          []error
+	forceCASMiss        bool
+	dispatchedAttempts  int
+	failedAttempts      int
+	dispatchedDeadlines []time.Time
+	failedDeadlines     []time.Time
+	sawExpiredCtx       bool
+}
+
+func (w *markFinalizationFaultStore) MarkMessageDispatched(ctx context.Context, id string) (bool, error) {
+	if !w.fault.Active() {
+		return w.Store.MarkMessageDispatched(ctx, id)
+	}
+	w.mu.Lock()
+	w.dispatchedAttempts++
+	if ctx.Err() != nil {
+		w.sawExpiredCtx = true
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		w.dispatchedDeadlines = append(w.dispatchedDeadlines, dl)
+	}
+	if len(w.dispatchedErrs) > 0 {
+		err := w.dispatchedErrs[0]
+		w.dispatchedErrs = w.dispatchedErrs[1:]
+		w.mu.Unlock()
+		return false, err
+	}
+	casMiss := w.forceCASMiss
+	w.mu.Unlock()
+	if casMiss {
+		return false, nil
+	}
+	return w.Store.MarkMessageDispatched(ctx, id)
+}
+
+func (w *markFinalizationFaultStore) MarkMessageFailed(ctx context.Context, id string, reason string) error {
+	if !w.fault.Active() {
+		return w.Store.MarkMessageFailed(ctx, id, reason)
+	}
+	w.mu.Lock()
+	w.failedAttempts++
+	if ctx.Err() != nil {
+		w.sawExpiredCtx = true
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		w.failedDeadlines = append(w.failedDeadlines, dl)
+	}
+	if len(w.failedErrs) > 0 {
+		err := w.failedErrs[0]
+		w.failedErrs = w.failedErrs[1:]
+		w.mu.Unlock()
+		return err
+	}
+	w.mu.Unlock()
+	return w.Store.MarkMessageFailed(ctx, id, reason)
+}
+
+func deliverySetupWithFinalizationFault(t *testing.T) (
+	*Server, store.Store, *markFinalizationFaultStore, *storeFaultSwitch,
+	*store.Agent, *store.Agent, *recordingDispatcher,
+) {
+	t.Helper()
+	srv, s, faultStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *markFinalizationFaultStore {
+		return &markFinalizationFaultStore{Store: inner, fault: f}
+	})
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID:      tid("fin-retry-owner"),
+		Email:   "fin-retry-owner@test.example",
+		Role:    store.UserRoleMember,
+		Status:  "active",
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+
+	project := &store.Project{
+		ID:        tid("fin-retry-project"),
+		Name:      "fin-retry-project",
+		Slug:      "fin-retry-project",
+		OwnerID:   owner.ID,
+		CreatedBy: owner.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	ensureStandingRoot(t, s, project.ID, owner.ID)
+
+	brokerID := tid("fin-retry-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     brokerID,
+		Name:   "fin-retry-broker",
+		Slug:   "fin-retry-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	sender := &store.Agent{
+		ID:              tid("fin-retry-sender"),
+		Name:            "fin-retry-sender",
+		Slug:            "fin-retry-sender",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: brokerID,
+		MessageMode:     store.MessageModeProject,
+		Ancestry:        []string{owner.ID},
+	}
+	require.NoError(t, s.CreateAgent(ctx, sender))
+
+	target := &store.Agent{
+		ID:              tid("fin-retry-target"),
+		Name:            "fin-retry-target",
+		Slug:            "fin-retry-target",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: brokerID,
+		MessageMode:     store.MessageModeProject,
+		Ancestry:        []string{owner.ID},
+	}
+	require.NoError(t, s.CreateAgent(ctx, target))
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	return srv, s, faultStore, fault, sender, target, dispatcher
+}
+
+func TestDelivery_MarkDispatchedTransientErrors_RetriesWithoutDuplicateBrokerDispatch(t *testing.T) {
+	srv, s, faultStore, fault, sender, target, _ := deliverySetupWithFinalizationFault(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancel caller ctx mid-dispatch and inject two transient deadline errors on
+	// MarkMessageDispatched before allowing the third attempt to succeed.
+	d := &cancelCallerDispatcher{recordingDispatcher: &recordingDispatcher{}, cancel: cancel}
+	srv.SetDispatcher(d)
+
+	faultStore.dispatchedErrs = []error{context.DeadlineExceeded, context.DeadlineExceeded}
+	fault.Arm()
+
+	result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "retry-dispatched-mark"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, result)
+	assert.Equal(t, AgentDMAccepted, result.Outcome,
+		"transient MarkMessageDispatched errors must be recovered by bounded retry")
+
+	// Broker dispatch MUST have run once — never retried when only the DB mark failed.
+	assert.Len(t, d.getCalls(), 1, "broker dispatch must never be retried when MarkMessageDispatched retries")
+
+	faultStore.mu.Lock()
+	attempts := faultStore.dispatchedAttempts
+	deadlines := append([]time.Time(nil), faultStore.dispatchedDeadlines...)
+	sawExpired := faultStore.sawExpiredCtx
+	faultStore.mu.Unlock()
+
+	assert.Equal(t, 3, attempts, "MarkMessageDispatched must retry twice and succeed on attempt 3")
+	assert.False(t, sawExpired, "every MarkMessageDispatched attempt must get a fresh live detached context")
+	require.Len(t, deadlines, 3, "each attempt must carry its own finalization deadline")
+	assert.True(t, deadlines[2].After(deadlines[0]), "later attempts must get freshly minted deadlines")
+
+	msg, err := s.GetMessage(context.Background(), result.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDispatched, msg.DispatchState)
+	assert.NotNil(t, msg.DispatchedAt)
+}
+
+func TestDelivery_MarkDispatchedExhaustsRetries_ReturnsAmbiguousSingleBrokerDispatch(t *testing.T) {
+	srv, s, faultStore, fault, sender, target, dispatcher := deliverySetupWithFinalizationFault(t)
+
+	faultStore.dispatchedErrs = []error{
+		context.DeadlineExceeded,
+		context.DeadlineExceeded,
+		context.DeadlineExceeded,
+		context.DeadlineExceeded,
+		context.DeadlineExceeded,
+	}
+	fault.Arm()
+
+	result, dmErr := srv.ExecuteAgentDM(context.Background(), deliveryDMInput(sender, target, "exhaust-dispatched-mark"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, result)
+	assert.Equal(t, AgentDMAmbiguous, result.Outcome,
+		"exhausted MarkMessageDispatched retries must fall back to ambiguous")
+	assert.NotEmpty(t, result.MessageID)
+
+	assert.Len(t, dispatcher.getCalls(), 1, "broker dispatch must still run only once")
+
+	faultStore.mu.Lock()
+	attempts := faultStore.dispatchedAttempts
+	faultStore.mu.Unlock()
+	assert.Greater(t, attempts, 1, "must retry more than once")
+	assert.LessOrEqual(t, attempts, 4, "retries must be bounded")
+
+	msg, err := s.GetMessage(context.Background(), result.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, msg.DispatchState)
+}
+
+func TestDelivery_MarkDispatchedCASMiss_DoesNotRetry(t *testing.T) {
+	srv, _, faultStore, fault, sender, target, dispatcher := deliverySetupWithFinalizationFault(t)
+
+	faultStore.forceCASMiss = true
+	fault.Arm()
+
+	result, dmErr := srv.ExecuteAgentDM(context.Background(), deliveryDMInput(sender, target, "cas-miss-no-retry"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, result)
+	assert.Equal(t, AgentDMAccepted, result.Outcome)
+	assert.Len(t, dispatcher.getCalls(), 1)
+
+	faultStore.mu.Lock()
+	attempts := faultStore.dispatchedAttempts
+	faultStore.mu.Unlock()
+	assert.Equal(t, 1, attempts, "CAS miss (dispatched=false, err=nil) must not retry")
+}
+
+func TestDelivery_MarkFailedTransientErrors_RetriesWithoutDuplicateBrokerDispatch(t *testing.T) {
+	srv, s, faultStore, fault, sender, target, dispatcher := deliverySetupWithFinalizationFault(t)
+	dispatcher.returnErr = errors.New("definite broker failure")
+
+	faultStore.failedErrs = []error{context.DeadlineExceeded, context.DeadlineExceeded}
+	fault.Arm()
+
+	_, dmErr := srv.ExecuteAgentDM(context.Background(), deliveryDMInput(sender, target, "retry-failed-mark"))
+	require.NotNil(t, dmErr)
+	assert.Equal(t, ErrCodeDeliveryFailed, dmErr.Code)
+	assert.Len(t, dispatcher.getCalls(), 1, "broker dispatch must never be retried when MarkMessageFailed retries")
+
+	faultStore.mu.Lock()
+	attempts := faultStore.failedAttempts
+	deadlines := append([]time.Time(nil), faultStore.failedDeadlines...)
+	sawExpired := faultStore.sawExpiredCtx
+	faultStore.mu.Unlock()
+
+	assert.Equal(t, 3, attempts, "MarkMessageFailed must retry twice and succeed on attempt 3")
+	assert.False(t, sawExpired)
+	require.Len(t, deadlines, 3)
+
+	msgID := dmErr.Details["message_id"].(string)
+	msg, err := s.GetMessage(context.Background(), msgID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, msg.DispatchState,
+		"row must be marked failed after MarkMessageFailed retry succeeds")
+}
+
+func TestDelivery_MarkDispatchedNonRetryableError_StopsImmediately(t *testing.T) {
+	srv, _, faultStore, fault, sender, target, dispatcher := deliverySetupWithFinalizationFault(t)
+
+	faultStore.dispatchedErrs = []error{store.ErrNotFound, context.DeadlineExceeded}
+	fault.Arm()
+
+	result, dmErr := srv.ExecuteAgentDM(context.Background(), deliveryDMInput(sender, target, "non-retryable-mark"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, result)
+	assert.Equal(t, AgentDMAmbiguous, result.Outcome)
+	assert.Len(t, dispatcher.getCalls(), 1, "broker dispatch must run only once")
+
+	faultStore.mu.Lock()
+	attempts := faultStore.dispatchedAttempts
+	faultStore.mu.Unlock()
+	assert.Equal(t, 1, attempts, "non-retryable store error must stop immediately without retry")
 }

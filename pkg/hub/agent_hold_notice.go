@@ -39,11 +39,12 @@ import (
 
 // Hub notice kinds, for logs only.
 const (
-	heldNoticeArtifactReview   = "artifact_review"
-	heldNoticeNotification     = "notification"
-	heldNoticeDeliveryFailed   = "delivery_failed"
-	heldNoticeDeliveryDeferred = "delivery_deferred"
-	heldNoticeBroadcastFailed  = "broadcast_delivery_failed"
+	heldNoticeArtifactReview      = "artifact_review"
+	heldNoticeNotification        = "notification"
+	heldNoticeDeliveryFailed      = "delivery_failed"
+	heldNoticeDeliveryDeferred    = "delivery_deferred"
+	heldNoticeDeliveryUnconfirmed = "delivery_unconfirmed"
+	heldNoticeBroadcastFailed     = "broadcast_delivery_failed"
 )
 
 // agentHoldChecker is the store's active-hold check (store.AgentHoldStore).

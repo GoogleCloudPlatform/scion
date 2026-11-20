@@ -128,6 +128,13 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "messagebroker.go", function: "publishDeliveryDeferred", symbol: "dispatchMarkedAgentMessage",
 		class: "exempt", reason: "derivative: delivery-deferred notice to original sender"},
 
+	// messagebroker.go: publishDeliveryUnconfirmed — derivative notice
+	// (ptone/scion#7405). Same shape as publishDeliveryFailed above: tells the
+	// original sender their expired pending message may already have been
+	// delivered and to check before resending.
+	{file: "messagebroker.go", function: "publishDeliveryUnconfirmed", symbol: "dispatchMarkedAgentMessage",
+		class: "exempt", reason: "derivative: delivery-unconfirmed notice to original sender"},
+
 	// artifacts_review.go: deliverArtifactReview — derivative notice
 	// (ptone/scion#3229). Sent after the artifact service finalized a review
 	// version for a request-authenticated reviewer who could write the

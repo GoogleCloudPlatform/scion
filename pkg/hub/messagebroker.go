@@ -1503,15 +1503,51 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 }
 
 // newDeliveryNotice builds the system notice sent to an agent sender about the
-// fate of its message (DELIVERY_FAILED, DELIVERY_DEFERRED). It goes through
-// messages.NewSystemMessage so every notice carries Version and an RFC3339 UTC
-// Timestamp (ptone/scion#2100); new notice sites should use it rather than a
-// StructuredMessage literal so they cannot drift.
+// fate of its message (DELIVERY_FAILED, DELIVERY_DEFERRED,
+// DELIVERY_UNCONFIRMED). It goes through messages.NewSystemMessage so every
+// notice carries Version and an RFC3339 UTC Timestamp (ptone/scion#2100); new
+// notice sites should use it rather than a StructuredMessage literal so they
+// cannot drift.
 func newDeliveryNotice(recipient, recipientID, text, status, category string) *messages.StructuredMessage {
 	notice := messages.NewSystemMessage("system", recipient, text, category)
 	notice.RecipientID = recipientID
 	notice.Status = status
 	return notice
+}
+
+// publishDeliveryUnconfirmed tells an agent sender that a message row to
+// agentSlug expired in dispatch_state="pending" without dispatch confirmation
+// (ptone/scion#7405): because existing row data cannot distinguish a never-sent
+// pending row from an AC-3 (broker accepted, MarkMessageDispatched failed) or
+// AC-4 (deadline-ambiguous) row, delivery may have occurred and the sender
+// should check before resending rather than blindly duplicating the message.
+func (p *MessageBrokerProxy) publishDeliveryUnconfirmed(ctx context.Context, agentSlug string, msg *messages.StructuredMessage) {
+	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
+		return
+	}
+	ctx, cancel := detachedContext(ctx, deliveryNoticeTimeout)
+	defer cancel()
+	senderAgent, err := p.store.GetAgent(ctx, msg.SenderID)
+	if err != nil {
+		p.log.Warn("Could not resolve sender agent for DELIVERY_UNCONFIRMED notification",
+			"senderID", msg.SenderID, "error", err)
+		return
+	}
+	if heldNoticeWithheld(ctx, p.store, noticeLogger(p.messageLog, p.log), senderAgent, heldNoticeDeliveryUnconfirmed) {
+		return
+	}
+
+	unconfirmedMsg := fmt.Sprintf("Message delivery to agent %q is unconfirmed: it may have been delivered; check before resending", agentSlug)
+	structuredMsg := newDeliveryNotice(msg.Sender, senderAgent.ID, unconfirmedMsg, "DELIVERY_UNCONFIRMED", messages.SystemCategoryDeliveryUnconfirmed)
+
+	dispatcher := p.getDispatcher()
+	if dispatcher == nil {
+		return
+	}
+	if err := dispatchMarkedAgentMessage(ctx, p.deliveryMarker(), p.messageLog, nil, dispatcher, senderAgent, unconfirmedMsg, false, structuredMsg); err != nil {
+		p.log.Warn("Failed to dispatch DELIVERY_UNCONFIRMED notification",
+			"senderID", msg.SenderID, "error", err)
+	}
 }
 
 // publishDeliveryDeferred tells an agent sender that their message to

@@ -207,6 +207,7 @@ func TestHeldNotice_HeldDropLogLine(t *testing.T) {
 	proxy.messageLog = slog.New(slog.NewTextHandler(&proxyBuf, nil))
 	proxy.publishDeliveryFailed(ctx, projectID, target.Slug, msg, errors.New(errText))
 	proxy.publishDeliveryDeferred(ctx, target.Slug, msg)
+	proxy.publishDeliveryUnconfirmed(ctx, target.Slug, msg)
 
 	assert.Zero(t, heldNoticeCount(dispatcher, held.Slug))
 	assert.Zero(t, heldNoticeCount(proxyDispatcher, held.Slug))
@@ -216,7 +217,7 @@ func TestHeldNotice_HeldDropLogLine(t *testing.T) {
 		kinds []string
 	}{
 		"server": {srvBuf.String(), []string{heldNoticeBroadcastFailed}},
-		"proxy":  {proxyBuf.String(), []string{heldNoticeDeliveryFailed, heldNoticeDeliveryDeferred}},
+		"proxy":  {proxyBuf.String(), []string{heldNoticeDeliveryFailed, heldNoticeDeliveryDeferred, heldNoticeDeliveryUnconfirmed}},
 	} {
 		lines := strings.Split(strings.TrimSpace(c.out), "\n")
 		require.Len(t, lines, len(c.kinds), "%s: one log line per withheld notice", name)
