@@ -186,6 +186,10 @@ func (s *Server) handleTemplateReimport(w http.ResponseWriter, r *http.Request, 
 		for i, f := range failures {
 			reasons[i] = f.Name + ": " + f.Reason
 		}
+		if allFailuresHaveCode(failures, ErrCodeInvalidAgentConfig) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidAgentConfig, strings.Join(reasons, "; "), nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "reimport_failed", strings.Join(reasons, "; "), nil)
 		return
 	}

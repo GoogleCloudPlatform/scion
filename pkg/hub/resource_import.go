@@ -574,10 +574,16 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 				s.resourceLog.Warn(kind.noun+" import: failed to import resource, skipping",
 					"name", rd.name, "error", err)
 				failedSlots[i] = rd.name
-				emit(progress, ResourceImportEvent{
+				ev := ResourceImportEvent{
 					Type: ImportEventFailed, Name: rd.name, Reason: err.Error(),
 					Completed: done, Total: total,
-				})
+				}
+				var invalidCfg *invalidAgentConfigError
+				if errors.As(err, &invalidCfg) {
+					ev.Code = ErrCodeInvalidAgentConfig
+					ev.Reason = invalidCfg.PublicMessage()
+				}
+				emit(progress, ev)
 				return nil
 			}
 			importedSlots[i] = rd.name

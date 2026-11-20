@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
@@ -342,10 +343,12 @@ func (s *Server) welcomeResolveAndStage(ctx context.Context) (staged *welcomeSta
 		return nil, welcomeFail("the template source has no "+welcomeSource.Coordinator+" template", nil)
 	}
 
+	fullSchema := s.experimentEnabled(experiments.TemplateConfigValidation)
+
 	// Resolve every skill reference before downloading any skill archive.
 	var uses []welcomeSkillUse
 	for _, tpl := range templates {
-		if aerr := welcomeCheckTemplateAuth(root, tpl); aerr != nil {
+		if aerr := welcomeCheckTemplateAuth(root, tpl, fullSchema); aerr != nil {
 			return nil, aerr
 		}
 		refs, rerr := welcomeTemplateSkillRefs(root, tpl)
@@ -425,7 +428,7 @@ func (s *Server) welcomeResolveAndStage(ctx context.Context) (staged *welcomeSta
 	// Judge the auth type again on the bytes the broker will read: the
 	// skills rewrite re-encodes the config and may reorder its keys.
 	for _, tpl := range templates {
-		if aerr := welcomeCheckTemplateAuth(root, tpl); aerr != nil {
+		if aerr := welcomeCheckTemplateAuth(root, tpl, fullSchema); aerr != nil {
 			return nil, aerr
 		}
 	}
@@ -832,7 +835,7 @@ var welcomeAllowedAuthTypes = map[string]bool{"api-key": true, "oauth-token": tr
 // that is otherwise accepted today is not newly refused here. Staging runs
 // this check again on the final bytes, after the skills rewrite and the
 // line-ending normalization, so neither can change the verdict.
-func welcomeCheckTemplateAuth(root *os.Root, tpl string) error {
+func welcomeCheckTemplateAuth(root *os.Root, tpl string, fullSchema bool) error {
 	p, err := welcomeAgentConfigFile(root, tpl)
 	if err != nil || p == "" {
 		return err
@@ -848,13 +851,23 @@ func welcomeCheckTemplateAuth(root *os.Root, tpl string) error {
 	if cfg.AuthSelectedType != "" && !welcomeAllowedAuthTypes[cfg.AuthSelectedType] {
 		return welcomeFail("template "+tpl+" sets an auth type that is not allowed", nil)
 	}
-	findings, err := config.ValidateAgentConfig(data, "1")
+	fileName := filepath.Base(p)
+	findings, err := config.ValidateTemplateAgentConfig(fileName, data)
 	if err != nil {
 		return welcomeFail("template "+tpl+" has an unreadable agent config", err)
 	}
 	for _, f := range findings {
 		if f.Path == "auth_selectedType" || strings.HasPrefix(f.Path, "auth_selectedType/") {
 			return welcomeFail("template "+tpl+" sets an auth type that is not allowed", nil)
+		}
+	}
+	if len(findings) > 0 {
+		if fullSchema {
+			return welcomeFail(config.FormatAgentConfigValidationError(tpl, fileName, findings), nil)
+		}
+		for _, f := range findings {
+			slog.Warn("welcome preview: template agent config failed schema validation (experiment off)",
+				"template", tpl, "file", fileName, "path", f.Path, "finding", f.Message)
 		}
 	}
 	return nil

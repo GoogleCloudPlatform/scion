@@ -833,3 +833,131 @@ func TestHandleResourcesImport_MissingSourceURL(t *testing.T) {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestHandleResourcesImport_TemplateAgentConfigValidation verifies unified and
+// project template imports (both JSON and NDJSON) with valid and invalid
+// sibling templates, with hub.template_config_validation on and off.
+func TestHandleResourcesImport_TemplateAgentConfigValidation(t *testing.T) {
+	mockTarball := func(t *testing.T, files map[string]string) func() {
+		t.Helper()
+		old := http.DefaultClient.Transport
+		http.DefaultClient.Transport = &mockRoundTripper{
+			roundTrip: func(req *http.Request) (*http.Response, error) {
+				var buf bytes.Buffer
+				gzw := gzip.NewWriter(&buf)
+				tw := tar.NewWriter(gzw)
+				for name, body := range files {
+					if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: int64(len(body))}); err != nil {
+						return nil, err
+					}
+					if _, err := tw.Write([]byte(body)); err != nil {
+						return nil, err
+					}
+				}
+				if err := tw.Close(); err != nil {
+					return nil, err
+				}
+				if err := gzw.Close(); err != nil {
+					return nil, err
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}, nil
+			},
+		}
+		return func() { http.DefaultClient.Transport = old }
+	}
+
+	mixedFiles := map[string]string{
+		"repo-main/templates/valid-tpl/scion-agent.yaml":   "schema_version: \"1\"\ndefault_harness_config: claude\nmax_duration: 2h\n",
+		"repo-main/templates/invalid-tpl/scion-agent.yaml": "schema_version: \"1\"\ndefault_harness_config: claude\nmax_duration: \"2 hours\"\n",
+	}
+	allInvalidFiles := map[string]string{
+		"repo-main/templates/bad-only/scion-agent.yaml": "schema_version: \"1\"\nauth-selectedType: none\n",
+	}
+
+	setupAdmin := func(t *testing.T, on bool) (*Server, store.Store, *store.User) {
+		t.Helper()
+		srv, s, _ := testTemplateBootstrapServer(t)
+		setTemplateValidationExperiment(t, srv, on)
+		admin := &store.User{ID: tid("user-admin-val"), Email: "admin-val@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+		require.NoError(t, s.CreateUser(context.Background(), admin))
+		ensureHubMembership(context.Background(), s, admin.ID)
+		ensureAdminRoleBinding(t, s, admin.ID)
+		return srv, s, admin
+	}
+
+	t.Run("unified_json_mixed_flag_on", func(t *testing.T) {
+		srv, _, admin := setupAdmin(t, true)
+		defer mockTarball(t, mixedFiles)()
+
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+			Kind:      "template",
+			Scope:     "global",
+			SourceURL: "https://github.com/acme/repo/tree/main/templates",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ImportResourcesResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Equal(t, []string{"valid-tpl"}, resp.Imported)
+		require.Len(t, resp.Failed, 1)
+		require.Equal(t, "invalid-tpl", resp.Failed[0].Name)
+		require.Equal(t, ErrCodeInvalidAgentConfig, resp.Failed[0].Code)
+		require.Contains(t, resp.Failed[0].Reason, "max_duration")
+	})
+
+	t.Run("unified_ndjson_mixed_flag_on", func(t *testing.T) {
+		srv, _, admin := setupAdmin(t, true)
+		defer mockTarball(t, mixedFiles)()
+
+		rec := doStreamRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+			Kind:      "template",
+			Scope:     "global",
+			SourceURL: "https://github.com/acme/repo/tree/main/templates",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var failedEv *ResourceImportEvent
+		for _, line := range strings.Split(strings.TrimSpace(rec.Body.String()), "\n") {
+			var ev ResourceImportEvent
+			require.NoError(t, json.Unmarshal([]byte(line), &ev))
+			if ev.Type == ImportEventFailed {
+				cp := ev
+				failedEv = &cp
+			}
+		}
+		require.NotNil(t, failedEv, "expected ImportEventFailed in NDJSON stream")
+		require.Equal(t, "invalid-tpl", failedEv.Name)
+		require.Equal(t, ErrCodeInvalidAgentConfig, failedEv.Code)
+		require.Contains(t, failedEv.Reason, "max_duration")
+	})
+
+	t.Run("project_json_all_invalid_flag_on_returns_422", func(t *testing.T) {
+		srv, s, admin := setupAdmin(t, true)
+		proj := &store.Project{ID: tid("proj-imp-val"), Name: "Imp Val", Slug: "imp-val", OwnerID: admin.ID, CreatedBy: admin.ID}
+		require.NoError(t, s.CreateProject(context.Background(), proj))
+		defer mockTarball(t, allInvalidFiles)()
+
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/"+proj.ID+"/import-templates", ImportTemplatesRequest{
+			SourceURL: "https://github.com/acme/repo/tree/main/templates",
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), ErrCodeInvalidAgentConfig)
+		require.Contains(t, rec.Body.String(), "auth_selectedType")
+	})
+
+	t.Run("unified_json_mixed_flag_off_accepts_and_warns", func(t *testing.T) {
+		srv, _, admin := setupAdmin(t, false)
+		logs := captureSlogDefault(t)
+		defer mockTarball(t, mixedFiles)()
+
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+			Kind:      "template",
+			Scope:     "global",
+			SourceURL: "https://github.com/acme/repo/tree/main/templates",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ImportResourcesResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Imported, 2)
+		require.Empty(t, resp.Failed)
+		require.Contains(t, logs.String(), "agent config failed schema validation")
+	})
+}

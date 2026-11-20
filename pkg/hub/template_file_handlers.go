@@ -16,6 +16,9 @@ package hub
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +28,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -344,6 +348,9 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 		writeTemplateCommitError(w, err)
 		return
 	}
+	if s.refuseInvalidTemplateAgentConfig(ctx, w, template, map[string][]byte{filePath: content}) {
+		return
+	}
 
 	// Store the content as a blob, then commit it.
 	fileHash, blobPath, err := s.writeTemplateFileBlob(ctx, stor, template, content)
@@ -390,6 +397,9 @@ func (s *Server) handleTemplateFileWriteRaw(w http.ResponseWriter, r *http.Reque
 	}
 	if err := s.hostedTemplateFileRefusal(template, filePath, data); err != nil {
 		writeTemplateCommitError(w, err)
+		return
+	}
+	if s.refuseInvalidTemplateAgentConfig(ctx, w, template, map[string][]byte{filePath: data}) {
 		return
 	}
 
@@ -505,6 +515,15 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 	}
 
 	var uploaded []TemplateFileEntry
+	if len(parts) > 0 {
+		batch := make(map[string][]byte, len(parts))
+		for _, part := range parts {
+			batch[part.path] = part.data
+		}
+		if s.refuseInvalidTemplateAgentConfig(ctx, w, template, batch) {
+			return
+		}
+	}
 	next := template.Files
 	written := make(map[string]bool, len(parts))
 	for _, part := range parts {
@@ -571,4 +590,40 @@ func (s *Server) handleTemplateFileDelete(w http.ResponseWriter, r *http.Request
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// refuseInvalidTemplateAgentConfig pre-checks whether applying updates to tmpl
+// changes its effective agent config file to invalid content. When
+// hub.template_config_validation is enabled, it writes 422 invalid_agent_config
+// and returns true before any blob is written. When the experiment is off, it
+// returns false and lets commitTemplateFiles log the warning once.
+func (s *Server) refuseInvalidTemplateAgentConfig(ctx context.Context, w http.ResponseWriter, tmpl *store.Template, updates map[string][]byte) bool {
+	if !s.experimentEnabled(experiments.TemplateConfigValidation) {
+		return false
+	}
+	next := tmpl.Files
+	for p, data := range updates {
+		sum := sha256.Sum256(data)
+		next = upsertTemplateFile(next, store.TemplateFile{
+			Path: p,
+			Size: int64(len(data)),
+			Hash: "sha256:" + hex.EncodeToString(sum[:]),
+		})
+	}
+	nextEff, ok := effectiveAgentConfigFile(next)
+	if !ok {
+		return false
+	}
+	if prevEff, hasPrev := effectiveAgentConfigFile(tmpl.Files); hasPrev && prevEff.Path == nextEff.Path && prevEff.Hash == nextEff.Hash {
+		return false
+	}
+	data, inBatch := updates[nextEff.Path]
+	if !inBatch {
+		return false
+	}
+	if err := s.validateTemplateAgentConfigBytes(ctx, tmpl.Name, nextEff.Path, data); err != nil {
+		writeTemplateCommitError(w, err)
+		return true
+	}
+	return false
 }

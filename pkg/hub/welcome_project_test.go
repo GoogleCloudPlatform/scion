@@ -892,6 +892,39 @@ func TestWelcome_TemplateWithDisallowedAuthTypeFailsByName(t *testing.T) {
 	}
 }
 
+func TestWelcome_FullSchemaValidationBehindExperiment(t *testing.T) {
+	invalidEntry := wpEntry{
+		name: "templates/developer/scion-agent.yaml",
+		body: "harness: claude\nmax_duration: \"2 hours\"\nskills:\n  - uri: gh://scion-frontiers/agent-team/tdd@" + wpTeamSkillAt + "\n",
+	}
+
+	t.Run("flag_on_refuses_at_preview_naming_field", func(t *testing.T) {
+		f := newWelcomeFixture(t)
+		setTemplateValidationExperiment(t, f.srv, true)
+		entries := wpTeamEntries()
+		entries[5] = invalidEntry
+		f.setTeam(entries)
+
+		rec := f.post(welcomePreviewPath, nil)
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "max_duration")
+		assert.Equal(t, welcomeStateFailed, f.ledger().State)
+	})
+
+	t.Run("flag_off_accepts_non_auth_finding_with_warning", func(t *testing.T) {
+		f := newWelcomeFixture(t)
+		setTemplateValidationExperiment(t, f.srv, false)
+		logs := captureSlogDefault(t)
+		entries := wpTeamEntries()
+		entries[5] = invalidEntry
+		f.setTeam(entries)
+
+		rec := f.post(welcomePreviewPath, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Contains(t, logs.String(), "template agent config failed schema validation")
+	})
+}
+
 func TestExtractWelcomeArchive_CapsCountedWhileStreaming(t *testing.T) {
 	top := "r-" + wpTeamSHA
 	small := welcomeLimits{MaxDownload: 1 << 20, MaxUnpacked: 1 << 20, MaxTotal: 10, MaxFiles: 2, MaxFile: 6}

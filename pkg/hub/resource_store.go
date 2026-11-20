@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -752,11 +753,19 @@ func blobPathSet(written map[string]bool) map[string]struct{} {
 }
 
 // CheckDir refuses a template directory that bundles a harness-config with
-// an unusable provisioner, before the shared store uploads anything. The
-// commit path runs the same check again (defence in depth).
-func (p *templatePersistence) CheckDir(ctx context.Context, _ string, cd *collectedDir) error {
-	if err := checkBundledHarnessConfigs(ctx, cd.fileReader(), toResourceFiles(cd.files)); err != nil {
+// an unusable provisioner or (when hub.template_config_validation is enabled)
+// has a schema-invalid agent config, before the shared store uploads anything.
+// The commit path runs the same checks again (defence in depth) and handles
+// warn-logging when the experiment is off.
+func (p *templatePersistence) CheckDir(ctx context.Context, name string, cd *collectedDir) error {
+	manifest := toResourceFiles(cd.files)
+	if err := checkBundledHarnessConfigs(ctx, cd.fileReader(), manifest); err != nil {
 		return fmt.Errorf("%s: template in %q not imported: %w", p.Label(), cd.base(), err)
+	}
+	if p.s.experimentEnabled(experiments.TemplateConfigValidation) {
+		if err := p.s.checkTemplateAgentConfig(ctx, name, cd.fileReader(), nil, manifest); err != nil {
+			return err
+		}
 	}
 	return nil
 }
