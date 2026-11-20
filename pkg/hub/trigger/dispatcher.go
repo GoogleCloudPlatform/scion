@@ -96,7 +96,9 @@ type FireAdmitter interface {
 // matched rule fires. Returning authorized == false with err == nil records
 // every matched candidate fire on the event as refused and marks the event
 // processed; returning a non-nil err treats the check as interrupted (for
-// example drainer context cancellation) so the queue item retries.
+// example drainer context cancellation) so the queue item retries. For github
+// events, a Core that does not implement SourceAuthorizer fails closed with a
+// retryable internal error rather than firing.
 type SourceAuthorizer interface {
 	AuthorizeEventSource(ctx context.Context, ev *store.TriggerEvent) (authorized bool, err error)
 }
@@ -382,7 +384,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		matchCount        int
 		fireCount         int
 		sourceAuthChecked bool
-		sourceAuthorized  = true
+		sourceAuthorized  bool
 	)
 
 	for i := range candidates {
@@ -569,14 +571,18 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		if ev.SourceKind == store.TriggerSourceKindGitHub {
 			if !sourceAuthChecked {
 				sourceAuthChecked = true
-				if sa, ok := d.core.(SourceAuthorizer); ok {
-					var saErr error
-					sourceAuthorized, saErr = sa.AuthorizeEventSource(ctx, ev)
-					if saErr != nil {
-						d.logger.Warn("trigger: failed to authorize event source",
-							"eventID", ev.ID, "projectID", ev.ProjectID, "sourceID", ev.SourceID, "error", saErr)
-						return durablequeue.Result{Err: errors.New("trigger: authorize event source failed")}
-					}
+				sa, ok := d.core.(SourceAuthorizer)
+				if !ok {
+					d.logger.Error("trigger: core does not implement SourceAuthorizer for github event",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceID", ev.SourceID)
+					return durablequeue.Result{Err: errors.New("trigger: source authorizer unavailable")}
+				}
+				var saErr error
+				sourceAuthorized, saErr = sa.AuthorizeEventSource(ctx, ev)
+				if saErr != nil {
+					d.logger.Warn("trigger: failed to authorize event source",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceID", ev.SourceID, "error", saErr)
+					return durablequeue.Result{Err: errors.New("trigger: authorize event source failed")}
 				}
 			}
 			if !sourceAuthorized {

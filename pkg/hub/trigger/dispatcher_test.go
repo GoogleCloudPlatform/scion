@@ -2186,3 +2186,132 @@ func TestDispatcher_GitHubSourceAuthorizerTransientErrorLeavesPendingAndRetries(
 	require.Len(t, fires.Items, 1)
 	assert.Equal(t, store.TriggerFireStatusFired, fires.Items[0].Status)
 }
+
+// coreWithoutSourceAuthorizer implements trigger.Core without implementing
+// trigger.SourceAuthorizer, used to verify github events fail closed.
+type coreWithoutSourceAuthorizer struct {
+	fireFn func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome
+}
+
+func (c *coreWithoutSourceAuthorizer) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+	if c.fireFn != nil {
+		return c.fireFn(ctx, req)
+	}
+	return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+}
+
+func (c *coreWithoutSourceAuthorizer) Experiment(name string) bool {
+	return name == experiments.Triggers || name == experiments.GitHubTriggers
+}
+
+func TestDispatcher_GitHubFailsClosedWithoutSourceAuthorizer(t *testing.T) {
+	ms := newMemTriggerStore()
+	now := time.Date(2026, 11, 20, 6, 15, 0, 0, time.UTC)
+
+	var fireCalls atomic.Int32
+	core := &coreWithoutSourceAuthorizer{
+		fireFn: func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+			fireCalls.Add(1)
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		},
+	}
+	_, implementsAuthorizer := any(core).(trigger.SourceAuthorizer)
+	require.False(t, implementsAuthorizer, "test core must not implement SourceAuthorizer")
+
+	projID := uuid.NewString()
+	ghTrID := uuid.NewString()
+	ghEvID := uuid.NewString()
+	whEpID := uuid.NewString()
+	whTrID := uuid.NewString()
+	whEvID := uuid.NewString()
+
+	require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+		ID:           ghTrID,
+		ProjectID:    projID,
+		Name:         "gh-fail-closed",
+		SourceKind:   store.TriggerSourceKindGitHub,
+		SourceID:     "",
+		MatchTypes:   []string{"github.issue_comment.created"},
+		MatchDialect: store.TriggerDialectCEL,
+		ActionType:   store.TriggerActionMessage,
+		SubjectMode:  store.TriggerSubjectModeNew,
+		Status:       store.TriggerStatusActive,
+	}))
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         ghEvID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "999001",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#42",
+		DedupKey:   "d-no-authorizer",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+		ID:           whTrID,
+		ProjectID:    projID,
+		Name:         "wh-still-fires",
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     whEpID,
+		MatchTypes:   []string{"webhook.received"},
+		MatchDialect: store.TriggerDialectCEL,
+		ActionType:   store.TriggerActionMessage,
+		SubjectMode:  store.TriggerSubjectModeNew,
+		Status:       store.TriggerStatusActive,
+	}))
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         whEvID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   whEpID,
+		Type:       "webhook.received",
+		Subject:    "webhook:test",
+		DedupKey:   "d-wh-ok",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	// GitHub event must fail closed as a retryable internal error without firing.
+	ghRaw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: ghEvID})
+	res := disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: ghEvID,
+		Payload:  ghRaw,
+	}, nopLease{})
+	assert.False(t, res.Done)
+	assert.False(t, res.Permanent)
+	assert.ErrorContains(t, res.Err, "source authorizer unavailable")
+	assert.Zero(t, fireCalls.Load(), "github event must never fire when Core lacks SourceAuthorizer")
+
+	ev, err := ms.GetTriggerEvent(context.Background(), ghEvID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusPending, ev.Status)
+
+	fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID, TriggerID: ghTrID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, fires.Items)
+
+	// Webhook events do not require SourceAuthorizer and still fire normally.
+	whRaw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: whEvID})
+	res = disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: whEvID,
+		Payload:  whRaw,
+	}, nopLease{})
+	assert.True(t, res.Done)
+	assert.NoError(t, res.Err)
+	assert.Equal(t, int32(1), fireCalls.Load())
+}
