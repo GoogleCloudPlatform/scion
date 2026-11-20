@@ -239,30 +239,40 @@ func TestStartAgentViaHub_ExistingAgentPreCheck(t *testing.T) {
 	}
 }
 
-// ptone/scion#8495 (part 2): --no-reuse keeps Resume unset on `scion start`,
-// so an existing stopped/halted agent is not implicitly converted into a
-// resume request and the Hub's 409 conflict fails the command non-zero.
+// ptone/scion#8495 (part 2): --no-reuse refuses to reuse an existing agent in
+// any phase (including suspended, stopped, halted, and created) when found by
+// the pre-check, and keeps Resume unset so a race after the pre-check still
+// surfaces the Hub's 409 conflict without printing an ignored-flags warning.
 func TestStartAgentViaHub_NoReuse(t *testing.T) {
 	const projectID, agentName = "proj-noreuse", "noreuse-agent"
 
-	t.Run("flag registered on start and absent on resume", func(t *testing.T) {
-		assert.NotNil(t, startCmd.Flags().Lookup("no-reuse"), "--no-reuse must be defined on start")
+	t.Run("flag registered on start (all modes) and absent on resume", func(t *testing.T) {
+		f := startCmd.Flags().Lookup("no-reuse")
+		require.NotNil(t, f, "--no-reuse must be defined on start")
+		assert.Equal(t, CLIMode(""), flagModeOf(f), "--no-reuse must not be restricted to a single CLI mode")
+		assert.False(t, f.Hidden, "--no-reuse must not be hidden")
+		assert.True(t, agentAllowed["start"], "start must remain in agentAllowed")
 		assert.Nil(t, resumeCmd.Flags().Lookup("no-reuse"), "--no-reuse must not be defined on resume")
 	})
 
 	for _, tc := range []struct {
-		name        string
-		phase       string
-		resumePhase string
+		name          string
+		phase         string
+		resumePhase   string
+		wantPhaseText string
 	}{
-		{"stopped", "stopped", ""},
-		{"halted", "halted", ""},
-		{"suspended", "suspended", ""},
-		{"error with stopped resumePhase", "error", "stopped"},
-		{"error with halted resumePhase", "error", "halted"},
-		{"error with suspended resumePhase", "error", "suspended"},
+		{"stopped", "stopped", "", "(phase stopped)"},
+		{"halted", "halted", "", "(phase halted)"},
+		{"suspended", "suspended", "", "(phase suspended)"},
+		{"created", "created", "", "(phase created)"},
+		{"running", "running", "", "(phase running)"},
+		{"provisioning", "provisioning", "", "(phase provisioning)"},
+		{"error", "error", "", "(phase error)"},
+		{"error with stopped resumePhase", "error", "stopped", "(phase error, resumes as stopped)"},
+		{"error with halted resumePhase", "error", "halted", "(phase error, resumes as halted)"},
+		{"error with suspended resumePhase", "error", "suspended", "(phase error, resumes as suspended)"},
 	} {
-		t.Run("omits resume for "+tc.name, func(t *testing.T) {
+		t.Run("fails without create for existing "+tc.name, func(t *testing.T) {
 			resetHubStartGlobals(t)
 			startNoReuse = true
 			stub := newHubStartStub(t, projectID, agentName, tc.phase)
@@ -272,24 +282,25 @@ func TestStartAgentViaHub_NoReuse(t *testing.T) {
 					"error": "crash_loop", "resumePhase": tc.resumePhase,
 				}
 			}
+			cmd := newFlagCmd(t, map[string]string{"image": "img:1"})
 			var err error
-			stdout, _ := captureStdIO(t, func() {
-				err = startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "", false, nil)
+			stdout, stderr := captureStdIO(t, func() {
+				err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
 			})
-			require.NoError(t, err)
-			require.Equal(t, 1, stub.createCalls)
-			_, present := stub.createBody["resume"]
-			assert.False(t, present, "resume must be omitted when --no-reuse is set")
-			assert.Contains(t, stdout, "Starting agent '"+agentName+"'")
-			assert.NotContains(t, stdout, "Restarting agent")
-			assert.NotContains(t, stdout, "Resuming agent")
+			require.Error(t, err)
+			assert.Equal(t, 0, stub.createCalls, "must not send create request when pre-check finds existing agent")
+			assert.True(t, isHubFailure(err), "conflict must be reported as a hub failure")
+			assert.Contains(t, err.Error(), "agent '"+agentName+"' already exists "+tc.wantPhaseText)
+			assert.Contains(t, err.Error(), "--no-reuse")
+			assert.Empty(t, stdout, "must not print Starting/Resuming/Restarting when pre-check fails")
+			assert.NotContains(t, stderr, "not applied to an existing agent")
 		})
 	}
 
-	t.Run("stopped agent returns 409 conflict error without ignored-flags warning", func(t *testing.T) {
+	t.Run("race after pre-check sends create without resume and surfaces 409 conflict", func(t *testing.T) {
 		resetHubStartGlobals(t)
 		startNoReuse = true
-		stub := newHubStartStub(t, projectID, agentName, "stopped")
+		stub := newHubStartStub(t, projectID, agentName, "")
 		stub.createStatus = http.StatusConflict
 		stub.createErrCode = "conflict"
 		stub.createErrMsg = "agent already exists"
@@ -337,26 +348,6 @@ func TestStartAgentViaHub_NoReuse(t *testing.T) {
 		require.Equal(t, 1, stub.createCalls)
 		assert.Equal(t, true, stub.createBody["resume"])
 	})
-}
-
-// ptone/scion#8495 (part 2): --no-reuse is available in both human and agent
-// CLI modes (scion start is in agentAllowed and has no mode restriction on
-// --no-reuse).
-func TestStartNoReuseFlag_AvailableInAgentMode(t *testing.T) {
-	assert.True(t, agentAllowed["start"], "start must remain in agentAllowed")
-	f := startCmd.Flags().Lookup("no-reuse")
-	require.NotNil(t, f, "--no-reuse must be registered on startCmd")
-	assert.Equal(t, CLIMode(""), flagModeOf(f), "--no-reuse must not be restricted to a single CLI mode")
-	assert.False(t, f.Hidden, "--no-reuse must not be hidden")
-
-	origVal, origChanged := f.Value.String(), f.Changed
-	t.Cleanup(func() {
-		_ = f.Value.Set(origVal)
-		f.Changed = origChanged
-	})
-	require.NoError(t, startCmd.Flags().Set("no-reuse", "true"))
-	assert.NoError(t, checkFlagsForMode(startCmd, ModeAgent))
-	assert.NoError(t, checkFlagsForMode(startCmd, ModeHuman))
 }
 
 // D-T8 addition (design wave 3 D-c, R3; ptone/scion#4670): an agent left

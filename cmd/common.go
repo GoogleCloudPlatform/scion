@@ -1306,6 +1306,15 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			existingPhaseText = fmt.Sprintf("%s, resumes as %s", existing.Phase, existing.Launch.ResumePhase)
 		}
 	}
+	if !resume && startNoReuse && getErr == nil && existing != nil {
+		phaseNote := ""
+		if existingPhaseText != "" {
+			phaseNote = fmt.Sprintf(" (phase %s)", existingPhaseText)
+		}
+		return &hubError{
+			msg: fmt.Sprintf("agent '%s' already exists%s; delete it or omit --no-reuse", agentName, phaseNote),
+		}
+	}
 	if !resume && !startNoReuse && hubStartImpliesResume(existingPhase) {
 		resume = true
 		req.Resume = true
