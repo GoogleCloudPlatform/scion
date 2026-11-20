@@ -3639,6 +3639,12 @@ export class ScionChatDecisions extends LitElement {
       )}`;
   }
 
+  private setRowOverLimit(d: DecisionView): boolean {
+    return (
+      this.selectionOf(d) === OTHER_CHOICE_ID && [...this.setRowOtherDraft(d).trim()].length > 200
+    );
+  }
+
   private renderSetFoot(views: DecisionView[]): TemplateResult | typeof nothing {
     const actionable = views.filter((d) => this.rowActionable(d));
     if (actionable.length === 0) return this.renderSetDoneFoot(views);
@@ -3647,12 +3653,15 @@ export class ScionChatDecisions extends LitElement {
     const missing = actionable.filter((d) => !this.setRowReady(d));
     const remaining = missing.length;
     const missingKeys = missing.map((d) => d.key || d.ref).join(', ');
+    const onlyOverLimit = remaining > 0 && missing.every((d) => this.setRowOverLimit(d));
     const hasOtherMissing = missing.some((d) => !!d.other);
     const hint =
       remaining > 0
-        ? hasOtherMissing
-          ? `Choose or type an answer for ${missingKeys} first`
-          : `Choose an answer for ${missingKeys} first`
+        ? onlyOverLimit
+          ? `Shorten the answer for ${missingKeys}`
+          : hasOtherMissing
+            ? `Choose or type an answer for ${missingKeys} first`
+            : `Choose an answer for ${missingKeys} first`
         : '';
     const disabled = remaining > 0;
     const submit = html`<sl-button

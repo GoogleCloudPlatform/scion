@@ -1384,6 +1384,12 @@ describe('set card Other free-form answers (ptone/scion#8153, O5–O7)', () => {
     await el.updateComplete;
     expect(rowEl(el, 'r3').querySelector('.cnt.over')?.textContent?.trim()).toBe('201 / 200');
     expect(submitBtn(el).hasAttribute('disabled')).toBe(true);
+    expect(submitHint(el)).toBe('Shorten the answer for proceed');
+    const overHintId = submitBtn(el).getAttribute('aria-describedby');
+    expect(overHintId).toBeTruthy();
+    expect(root(el).querySelector(`#${overHintId}`)?.textContent?.trim()).toBe(
+      'Shorten the answer for proceed'
+    );
 
     typeIntoSetOther(el, 'r3', 'Wait until Monday');
     await el.updateComplete;
