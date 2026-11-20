@@ -489,9 +489,9 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 		// (pkg/hub/handlers_conversations.go): the conversation exists and
 		// is visible on the web, but until a participant row exists the
 		// creator can't read it back via `scion conversation
-		// show/messages/participants` or see it in `scion conversation list`.
+		// get/messages/participants` or see it in `scion conversation list`.
 		fmt.Fprintf(os.Stderr, "warning: created conversation %s but could not add you as a participant; "+
-			"it won't appear in `scion conversation list` or be readable via `scion conversation show` yet\n", conv.ID)
+			"it won't appear in `scion conversation list` or be readable via `scion conversation get` yet\n", conv.ID)
 	}
 
 	fmt.Printf("Conversation created: %s\n", conv.ID)
