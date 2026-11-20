@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -706,6 +707,325 @@ func TestTemplateCommit_CloneUnusableBundledHarnessConfig(t *testing.T) {
 			if tmpl.ScopeID != project.ID {
 				t.Errorf("refused project clone left template %q in scope %q", tmpl.Name, tmpl.ScopeID)
 			}
+		}
+	})
+}
+
+// setTemplateValidationExperiment turns hub.template_config_validation on or
+// off on srv by replacing its experiment registry while preserving any other
+// experiment defaults already configured on srv.
+func setTemplateValidationExperiment(t *testing.T, srv *Server, on bool) {
+	t.Helper()
+	base := experiments.Default().All()
+	if srv.experiments != nil {
+		base = srv.experiments.All()
+	}
+	var active []experiments.Experiment
+	for _, e := range base {
+		if e.Name == experiments.TemplateConfigValidation {
+			e.Default = on
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	srv.experiments = reg
+	if got := srv.experimentEnabled(experiments.TemplateConfigValidation); got != on {
+		t.Fatalf("experimentEnabled(%s) = %v, want %v", experiments.TemplateConfigValidation, got, on)
+	}
+}
+
+// TestTemplateCommit_AgentConfigValidation covers every Hub commit path for
+// template agent config schema validation (ptone/scion#7579) with
+// hub.template_config_validation both on and off.
+func TestTemplateCommit_AgentConfigValidation(t *testing.T) {
+	ctx := context.Background()
+	const (
+		invalidDurationYAML = "default_harness_config: claude\nmax_duration: \"2 hours\"\n"
+		invalidHyphenYAML   = "default_harness_config: claude\nauth-selectedType: none\n"
+		invalidCaseJSON     = `{"default_harness_config":"claude","AUTH_SELECTEDTYPE":"none"}`
+		unparsableYAML      = ": invalid: yaml: ["
+	)
+
+	assertUnchanged := func(t *testing.T, s store.Store, before *store.Template) {
+		t.Helper()
+		got, err := s.GetTemplate(ctx, before.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ContentHash != before.ContentHash || len(got.Files) != len(before.Files) || got.SourceURL != before.SourceURL {
+			t.Errorf("row changed after refused commit: hash %q -> %q, files %d -> %d, sourceURL %q -> %q",
+				before.ContentHash, got.ContentHash, len(before.Files), len(got.Files), before.SourceURL, got.SourceURL)
+		}
+	}
+
+	assert422InvalidConfig := func(t *testing.T, w *httptest.ResponseRecorder, wantField string) {
+		t.Helper()
+		mustStatus(t, w, http.StatusUnprocessableEntity)
+		var resp struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+				Details struct {
+					Findings []struct {
+						Path    string `json:"path"`
+						Message string `json:"message"`
+					} `json:"findings"`
+				} `json:"details"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode 422 body: %v: %s", err, w.Body.String())
+		}
+		if resp.Error.Code != ErrCodeInvalidAgentConfig {
+			t.Errorf("error.code = %q, want %q", resp.Error.Code, ErrCodeInvalidAgentConfig)
+		}
+		if !strings.Contains(resp.Error.Message, wantField) {
+			t.Errorf("error.message %q does not name %q", resp.Error.Message, wantField)
+		}
+		if len(resp.Error.Details.Findings) == 0 {
+			t.Errorf("422 response missing details.findings: %s", w.Body.String())
+		}
+	}
+
+	t.Run("finalize_valid_and_invalid_variants", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			file      string
+			content   string
+			wantField string
+		}{
+			{"invalid max_duration", "scion-agent.yaml", invalidDurationYAML, "max_duration"},
+			{"hyphenated auth-selectedType", "scion-agent.yaml", invalidHyphenYAML, "auth_selectedType"},
+			{"case-variant json AUTH_SELECTEDTYPE", "scion-agent.json", invalidCaseJSON, "auth_selectedType"},
+			{"unparsable yaml", "scion-agent.yaml", unparsableYAML, "failed to parse agent config scion-agent.yaml"},
+		} {
+			t.Run(tc.name+"/flag_on", func(t *testing.T) {
+				srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+				setTemplateValidationExperiment(t, srv, true)
+				tmpl := seedCommittedTemplate(t, srv, "tpl-val-fin", store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": commitCfgOld})
+				next := map[string]string{tc.file: tc.content}
+				stageObjects(t, srv, tmpl, next)
+				w := finalizeTemplate(t, srv, tmpl.ID, commitManifest(next))
+				assert422InvalidConfig(t, w, tc.wantField)
+				assertUnchanged(t, s, tmpl)
+			})
+			t.Run(tc.name+"/flag_off", func(t *testing.T) {
+				srv, _ := newCommitTestServer(t, newCommitTestStorage(t))
+				setTemplateValidationExperiment(t, srv, false)
+				logs := captureSlogDefault(t)
+				tmpl := seedCommittedTemplate(t, srv, "tpl-val-fin-off", store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": commitCfgOld})
+				next := map[string]string{tc.file: tc.content}
+				stageObjects(t, srv, tmpl, next)
+				mustStatus(t, finalizeTemplate(t, srv, tmpl.ID, commitManifest(next)), http.StatusOK)
+				if !strings.Contains(logs.String(), "agent config failed schema validation") {
+					t.Errorf("expected warning log when flag off, got:\n%s", logs.String())
+				}
+			})
+		}
+	})
+
+	t.Run("file_write_raw_multipart_no_blob_on_refusal", func(t *testing.T) {
+		for _, mode := range []string{"json", "raw", "multipart"} {
+			t.Run(mode+"/flag_on", func(t *testing.T) {
+				srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+				setTemplateValidationExperiment(t, srv, true)
+				tmpl := seedCommittedTemplate(t, srv, "tpl-val-"+mode, store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": commitCfgOld})
+				var w *httptest.ResponseRecorder
+				switch mode {
+				case "json":
+					body, _ := json.Marshal(TemplateFileWriteRequest{Content: invalidDurationYAML})
+					w = doTemplateRequest(t, srv, http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/scion-agent.yaml", "application/json", body)
+				case "raw":
+					w = doTemplateRequest(t, srv, http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/scion-agent.yaml", "application/octet-stream", []byte(invalidDurationYAML))
+				case "multipart":
+					w = httptest.NewRecorder()
+					srv.Handler().ServeHTTP(w, templateMultipartRequest(t, tmpl.ID, map[string][]byte{
+						"scion-agent.yaml": []byte(invalidDurationYAML),
+						"other.md":         []byte("should not be stored"),
+					}))
+				}
+				assert422InvalidConfig(t, w, "max_duration")
+				assertUnchanged(t, s, tmpl)
+				if objectExists(t, srv.GetStorage(), blobObjectPath(tmpl, invalidDurationYAML)) {
+					t.Error("refused invalid agent config reached storage")
+				}
+				if mode == "multipart" && objectExists(t, srv.GetStorage(), blobObjectPath(tmpl, "should not be stored")) {
+					t.Error("multipart stored sibling part before refusing invalid agent config")
+				}
+			})
+			t.Run(mode+"/flag_off", func(t *testing.T) {
+				srv, _ := newCommitTestServer(t, newCommitTestStorage(t))
+				setTemplateValidationExperiment(t, srv, false)
+				logs := captureSlogDefault(t)
+				tmpl := seedCommittedTemplate(t, srv, "tpl-val-off-"+mode, store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": commitCfgOld})
+				var w *httptest.ResponseRecorder
+				switch mode {
+				case "json":
+					body, _ := json.Marshal(TemplateFileWriteRequest{Content: invalidDurationYAML})
+					w = doTemplateRequest(t, srv, http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/scion-agent.yaml", "application/json", body)
+				case "raw":
+					w = doTemplateRequest(t, srv, http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/scion-agent.yaml", "application/octet-stream", []byte(invalidDurationYAML))
+				case "multipart":
+					w = httptest.NewRecorder()
+					srv.Handler().ServeHTTP(w, templateMultipartRequest(t, tmpl.ID, map[string][]byte{
+						"scion-agent.yaml": []byte(invalidDurationYAML),
+					}))
+				}
+				mustStatus(t, w, http.StatusOK)
+				if !strings.Contains(logs.String(), "agent config failed schema validation") {
+					t.Errorf("expected warning log when flag off, got:\n%s", logs.String())
+				}
+			})
+		}
+	})
+
+	t.Run("file_delete_exposing_invalid_json_refused", func(t *testing.T) {
+		for _, on := range []bool{true, false} {
+			name := "flag_off"
+			if on {
+				name = "flag_on"
+			}
+			t.Run(name, func(t *testing.T) {
+				srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+				// Seed with valid yaml + invalid json fallback while flag is off.
+				tmpl := seedCommittedTemplate(t, srv, "tpl-del-fallback", store.TemplateScopeGlobal, "", map[string]string{
+					"scion-agent.yaml": commitCfgOld,
+					"scion-agent.json": invalidCaseJSON,
+				})
+				setTemplateValidationExperiment(t, srv, on)
+				logs := captureSlogDefault(t)
+				w := doTemplateRequest(t, srv, http.MethodDelete, "/api/v1/templates/"+tmpl.ID+"/files/scion-agent.yaml", "", nil)
+				if on {
+					assert422InvalidConfig(t, w, "auth_selectedType")
+					assertUnchanged(t, s, tmpl)
+				} else {
+					mustStatus(t, w, http.StatusNoContent)
+					if !strings.Contains(logs.String(), "agent config failed schema validation") {
+						t.Errorf("expected warning log when flag off, got:\n%s", logs.String())
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("clone_and_unchanged_stored_invalid_not_refused", func(t *testing.T) {
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		// Seed a stored invalid template while the flag is off.
+		src := seedCommittedTemplate(t, srv, "tpl-stored-bad", store.TemplateScopeGlobal, "", map[string]string{
+			"scion-agent.yaml": invalidDurationYAML,
+			"extra.md":         "hello",
+		})
+		// Now turn the flag ON.
+		setTemplateValidationExperiment(t, srv, true)
+
+		// 1. Template clone must succeed (D3: clone counts as unchanged content).
+		body, _ := json.Marshal(CloneTemplateRequest{Name: "tpl-stored-bad-clone", Scope: store.TemplateScopeGlobal})
+		mustStatus(t, doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+src.ID+"/clone", "application/json", body), http.StatusCreated)
+
+		// 2. Non-config file delete must succeed (effective agent config unchanged).
+		mustStatus(t, doTemplateRequest(t, srv, http.MethodDelete, "/api/v1/templates/"+src.ID+"/files/extra.md", "", nil), http.StatusNoContent)
+
+		// 3. Metadata update must succeed.
+		metaBody, _ := json.Marshal(map[string]string{"name": "tpl-stored-bad", "description": "updated"})
+		mustStatus(t, doTemplateRequest(t, srv, http.MethodPut, "/api/v1/templates/"+src.ID, "application/json", metaBody), http.StatusOK)
+
+		// 4. Project clone with a stored invalid template must succeed.
+		project := &store.Project{
+			ID: api.NewUUID(), Name: "Bad Tpl Project", Slug: "bad-tpl-project",
+			OwnerID: DevUserID, CreatedBy: DevUserID,
+		}
+		if err := s.CreateProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+		setTemplateValidationExperiment(t, srv, false)
+		seedCommittedTemplate(t, srv, "proj-bad", store.TemplateScopeProject, project.ID, map[string]string{"scion-agent.yaml": invalidDurationYAML})
+		setTemplateValidationExperiment(t, srv, true)
+		pBody, _ := json.Marshal(map[string]string{"name": "Cloned Project"})
+		mustStatus(t, doTemplateRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone", "application/json", pBody), http.StatusCreated)
+	})
+
+	t.Run("reimport_preserves_prior_content_and_sourceURL", func(t *testing.T) {
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		origURL := "https://github.com/acme/repo/tree/main/templates/tpl-reimp-val"
+		seedDir := writeTemplateDir(t, t.TempDir(), "tpl-reimp-val", map[string]string{"scion-agent.yaml": commitCfgOld})
+		if _, err := srv.templateStore().Bootstrap(ctx, "tpl-reimp-val", seedDir, store.TemplateScopeGlobal, "", origURL, true); err != nil {
+			t.Fatal(err)
+		}
+		tmpl, err := s.GetTemplateBySlug(ctx, "tpl-reimp-val", store.TemplateScopeGlobal, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tmpl.SourceURL != origURL {
+			t.Fatalf("seed SourceURL = %q, want %q", tmpl.SourceURL, origURL)
+		}
+		setTemplateValidationExperiment(t, srv, true)
+
+		dir := writeTemplateDir(t, t.TempDir(), "tpl-reimp-val", map[string]string{"scion-agent.yaml": invalidDurationYAML})
+		_, err = srv.targetTemplateStore(tmpl.ID).Bootstrap(ctx, tmpl.Name, dir, tmpl.Scope, tmpl.ScopeID, "https://github.com/acme/other/tree/main/t", true)
+		if err == nil {
+			t.Fatal("expected reimport of invalid agent config to fail when flag is on")
+		}
+		if !strings.Contains(err.Error(), "max_duration") {
+			t.Errorf("reimport error %q does not name max_duration", err.Error())
+		}
+		assertUnchanged(t, s, tmpl)
+	})
+
+	t.Run("bootstrap_skips_invalid_and_continues", func(t *testing.T) {
+		for _, on := range []bool{true, false} {
+			name := "flag_off"
+			if on {
+				name = "flag_on"
+			}
+			t.Run(name, func(t *testing.T) {
+				srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+				setTemplateValidationExperiment(t, srv, on)
+				logs := captureSlogDefault(t)
+
+				parent := t.TempDir()
+				writeTemplateDir(t, parent, "good-boot", map[string]string{"scion-agent.yaml": commitCfgBoth})
+				writeTemplateDir(t, parent, "bad-boot", map[string]string{"scion-agent.yaml": invalidDurationYAML})
+
+				if err := srv.BootstrapTemplatesFromDir(ctx, parent); err != nil {
+					t.Fatalf("BootstrapTemplatesFromDir must continue past invalid template: %v", err)
+				}
+				if _, err := s.GetTemplateBySlug(ctx, "good-boot", store.TemplateScopeGlobal, ""); err != nil {
+					t.Fatalf("valid sibling template not imported: %v", err)
+				}
+				_, badErr := s.GetTemplateBySlug(ctx, "bad-boot", store.TemplateScopeGlobal, "")
+				if on && badErr == nil {
+					t.Error("invalid template was imported while flag is on")
+				}
+				if !on {
+					if badErr != nil {
+						t.Errorf("invalid template should be imported while flag is off: %v", badErr)
+					}
+					if !strings.Contains(logs.String(), "agent config failed schema validation") {
+						t.Errorf("expected warning log when flag off, got:\n%s", logs.String())
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("bootstrap_source", func(t *testing.T) {
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		setTemplateValidationExperiment(t, srv, true)
+
+		bad := testBundledResource(storage.ResourceKindTemplate, "src-bad", map[string]string{"scion-agent.yaml": invalidDurationYAML})
+		if _, err := srv.templateStore().BootstrapSource(ctx, NewFSResourceSource(bad), BootstrapOptions{}); err == nil {
+			t.Fatal("BootstrapSource accepted invalid agent config while flag is on")
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "src-bad", store.TemplateScopeGlobal, ""); err == nil {
+			t.Error("refused BootstrapSource template created a row")
+		}
+
+		good := testBundledResource(storage.ResourceKindTemplate, "src-good", map[string]string{"scion-agent.yaml": commitCfgBoth})
+		if _, err := srv.templateStore().BootstrapSource(ctx, NewFSResourceSource(good), BootstrapOptions{}); err != nil {
+			t.Fatalf("BootstrapSource refused valid template: %v", err)
 		}
 	})
 }

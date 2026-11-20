@@ -398,6 +398,14 @@ const LifecycleEvents = "hub.lifecycle_events"
 // it the default and removes the gate.
 const SkillContentHashV2 = "hub.skill_content_hash_v2"
 
+// TemplateConfigValidation gates schema validation of template agent config
+// files (scion-agent.{yaml,yml,json}) on template commits and imports
+// (ptone/scion#7579). While it is off, invalid agent configs are logged as
+// warnings and still accepted (except the unconditional welcome auth_selectedType
+// refusal). While it is on, commits introducing an invalid agent config are
+// refused with HTTP 422 (code invalid_agent_config).
+const TemplateConfigValidation = "hub.template_config_validation"
+
 // ArtifactReviewEditor gates the graphical review editor for Markdown
 // artifacts (ptone/scion#5913). It is web-only: every save goes through the
 // unchanged review publish, and the hub's review checks are the same
@@ -1110,6 +1118,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#8047",
 		Owner:       "system-one",
 		ReviewBy:    "2027-02-15",
+	},
+	{
+		Name:        TemplateConfigValidation,
+		Title:       "Template agent config validation",
+		Description: "Validates template agent config files (scion-agent.{yaml,yml,json}) against the agent v1 JSON schema on template commits and imports. While off, schema violations are logged as warnings and still accepted; while on, invalid agent configs are refused with HTTP 422 (invalid_agent_config).",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7579",
+		Owner:       "templates",
+		ReviewBy:    "2027-05-31",
 	},
 }
 
