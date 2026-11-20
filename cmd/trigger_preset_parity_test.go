@@ -192,7 +192,7 @@ func TestTriggerPresetCLI_ParityWithDirectCompileAndCreate(t *testing.T) {
 	require.NoError(t, err)
 	directRules := make([]hubclient.TriggerMatchRuleSpec, len(compiled.Match.Rules))
 	for i, r := range compiled.Match.Rules {
-		directRules[i] = hubclient.TriggerMatchRuleSpec{Dialect: r.Dialect, Expr: r.Expr}
+		directRules[i] = hubclient.TriggerMatchRuleSpec(r)
 	}
 	directCreated, err := client.Triggers(proj.ID).Create(ctx, &hubclient.CreateTriggerRequest{
 		Name:        "direct-review-trigger",

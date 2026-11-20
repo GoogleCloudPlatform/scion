@@ -419,10 +419,7 @@ func buildTriggerCreateRequestFromPreset(
 	}
 	rules := make([]hubclient.TriggerMatchRuleSpec, len(compiled.Match.Rules))
 	for i, r := range compiled.Match.Rules {
-		rules[i] = hubclient.TriggerMatchRuleSpec{
-			Dialect: r.Dialect,
-			Expr:    r.Expr,
-		}
+		rules[i] = hubclient.TriggerMatchRuleSpec(r)
 	}
 	types := append([]string(nil), compiled.Match.Types...)
 	req := &hubclient.CreateTriggerRequest{
