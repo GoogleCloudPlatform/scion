@@ -511,7 +511,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 // tracked; they will be cancelled via the parent context when the server
 // shuts down. Recurring wake fires (ptone/scion#7734) are the exception: they
 // run off the evaluator on detached contexts, and the hub's teardown joins
-// them (Server.scheduledWakeFires). The launch reaper's dedicated goroutine is different: it runs
+// them (Server.scheduledDetachedFires). The launch reaper's dedicated goroutine is different: it runs
 // synchronously (no per-tick goroutine), is tracked by the same s.wg, and so
 // Stop also waits for it to exit — including finishing any tick already in
 // flight, bounded by the store's 10s tick timeout plus its up-to-2s
@@ -718,7 +718,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	var scope *oneShotFireScope
 	if wakeFire {
 		// Registered before handlerCtx and before final persistence so
-		// runningWakeFires / scheduledWakeFires stay held until the final
+		// runningDetachedFires / scheduledDetachedFires stay held until the final
 		// status write completes (ptone/scion#7791 b1).
 		ctx, scope = withOneShotFireScope(ctx)
 		defer scope.finish()
@@ -802,7 +802,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		}
 	}()
 
-	var run *wakeFireRun
+	var run *detachedFireRun
 	if scope != nil {
 		var aborted bool
 		run, aborted = scope.state()
@@ -824,8 +824,8 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// Record the outcome on a bounded context of its own: the event was
 	// claimed before the handler ran, and a shutdown that cancelled ctx
 	// meanwhile (halt) must not leave the failure unrecorded
-	// (ptone/scion#7734). When tracked via wakeFireRun, share its single-claim
-	// coordination with recordAbandonedWakeFires so teardown and fireEvent
+	// (ptone/scion#7734). When tracked via detachedFireRun, share its single-claim
+	// coordination with recordAbandonedDetachedFires so teardown and fireEvent
 	// never double-write or overwrite each other (ptone/scion#7791 b2).
 	if s.store == nil || recorded {
 		return

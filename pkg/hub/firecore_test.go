@@ -533,18 +533,18 @@ func TestFireCoreTracker(t *testing.T) {
 		}, time.Second, 5*time.Millisecond)
 	})
 
-	t.Run("Admit registers with scheduledWakeFires and refuses after stop", func(t *testing.T) {
+	t.Run("Admit registers with scheduledDetachedFires and refuses after stop", func(t *testing.T) {
 		srv := newEventHandlerTestServer(newMockStore())
 		tracker := newScheduledFireTracker(srv, "evt-admit")
 
 		admittedCtx, done, ok := tracker.Admit(context.Background())
 		require.True(t, ok)
-		assert.Len(t, srv.runningWakeFires.snapshot(), 1)
+		assert.Len(t, srv.runningDetachedFires.snapshot(), 1)
 		done()
-		assert.Empty(t, srv.runningWakeFires.snapshot())
+		assert.Empty(t, srv.runningDetachedFires.snapshot())
 		assert.Error(t, admittedCtx.Err())
 
-		srv.scheduledWakeFires.stop(context.Background(), 0)
+		srv.scheduledDetachedFires.stop(context.Background(), 0)
 		_, _, ok = tracker.Admit(context.Background())
 		assert.False(t, ok)
 	})
@@ -1175,7 +1175,7 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 		detEvt.Status = store.ScheduledEventFiring
 		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &detEvt))
 		srv.runScheduleFire(context.Background(), slog.Default(), detSched, detEvt, now, next,
-			&wakeFireRun{eventID: "rec-evt-2", scheduleID: "sched-2", ranAt: now})
+			&detachedFireRun{eventID: "rec-evt-2", scheduleID: "sched-2", ranAt: now})
 		assert.Equal(t, store.ScheduledEventFiring, ms.getEvent("rec-evt-2").Status, "pre-detached + Detached leaves recording to tracker")
 		assert.Equal(t, 1, fs.afterRunCalls, "UpdateScheduleAfterRun skipped when pre-detached and Detached are true")
 
@@ -1725,7 +1725,7 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 				ms.schedules[scRow.ID] = scRow
 
 				srv.executeSchedule(context.Background(), *scRow, now)
-				srv.scheduledWakeFires.wg.Wait()
+				srv.scheduledDetachedFires.wg.Wait()
 
 				if !tc.detaches && tc.outDetached {
 					assert.False(t, afterCalled, "F2: mismatch cell must not run AfterRecord for a fire recorded failed")
@@ -1826,11 +1826,11 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 		ms.schedules[scRow.ID] = scRow
 
 		srv.executeSchedule(context.Background(), *scRow, now)
-		srv.scheduledWakeFires.wg.Wait()
+		srv.scheduledDetachedFires.wg.Wait()
 
 		// Simulate shutdown sweep: run.tryRecord(func(){}) already claimed the
-		// wakeFireRun, so recordAbandonedWakeFires must not clobber the event.
-		srv.recordAbandonedWakeFires(context.Background())
+		// detachedFireRun, so recordAbandonedDetachedFires must not clobber the event.
+		srv.recordAbandonedDetachedFires(context.Background())
 
 		fs.mu.Lock()
 		assert.Equal(t, 1, fs.advanceCalls, "AdvanceScheduleNextRun called once before fire")
@@ -1887,7 +1887,7 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 		// With hub.exec_schedules disabled by default on newEventHandlerTestServer,
 		// execAction.Preauthorize returns unadmitted skip ("exec schedules disabled").
 		srv.executeSchedule(context.Background(), *scRow, now)
-		srv.scheduledWakeFires.wg.Wait()
+		srv.scheduledDetachedFires.wg.Wait()
 
 		fs.mu.Lock()
 		assert.Equal(t, 1, fs.advanceCalls, "AdvanceScheduleNextRun called once before fire")

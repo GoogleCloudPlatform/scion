@@ -21,7 +21,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 )
 
-// scheduledFireTracker adapts the hub's wakeFireRun and scheduledWakeFires
+// scheduledFireTracker adapts the hub's detachedFireRun and scheduledDetachedFires
 // tracking to the source-neutral hubfire.FireTracker interface.
 type scheduledFireTracker struct {
 	srv    *Server
@@ -46,16 +46,16 @@ func (t *scheduledFireTracker) Admit(ctx context.Context) (context.Context, func
 	if abort, _ := ctx.Value(scheduledFireAbortKey{}).(context.Context); abort != nil {
 		return ctx, func() {}, true
 	}
-	trackCtx, endWork, ok := t.srv.scheduledWakeFires.begin()
+	trackCtx, endWork, ok := t.srv.scheduledDetachedFires.begin()
 	if !ok {
 		return ctx, func() {}, false
 	}
-	run := &wakeFireRun{eventID: t.fireID, ranAt: time.Now()}
-	t.srv.runningWakeFires.add(run)
+	run := &detachedFireRun{eventID: t.fireID, ranAt: time.Now()}
+	t.srv.runningDetachedFires.add(run)
 	fireCtx, cancelFire := context.WithCancel(ctx)
 	stop := context.AfterFunc(trackCtx, cancelFire)
 	releaseRun := func() {
-		t.srv.runningWakeFires.remove(run)
+		t.srv.runningDetachedFires.remove(run)
 		endWork()
 	}
 	if scope := oneShotFireScopeFromContext(ctx); scope != nil {

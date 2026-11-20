@@ -365,7 +365,7 @@ func TestScheduledMessageWake_RecurringFireAdvancesNextRunFirst(t *testing.T) {
 
 		now := time.Now().UTC()
 		srv.executeSchedule(tickCtx, *row, now)
-		srv.scheduledWakeFires.wg.Wait() // a wake fire runs off the evaluator
+		srv.scheduledDetachedFires.wg.Wait() // a wake fire runs off the evaluator
 		endTick()
 
 		assert.Equal(t, wake, advancedDuringFire, "wake=%v: next run advanced before the handler", wake)
@@ -457,7 +457,7 @@ func TestScheduledMessageWake_OverlappingRecurringRunsKeepNextRun(t *testing.T) 
 	}))
 
 	srv.executeSchedule(ctx, row, now)
-	srv.scheduledWakeFires.wg.Wait() // both fires run off the evaluator
+	srv.scheduledDetachedFires.wg.Wait() // both fires run off the evaluator
 	require.Equal(t, int32(2), calls.Load())
 
 	got, err := s.GetSchedule(ctx, row.ID)
@@ -543,7 +543,7 @@ func TestScheduledMessageWake_RecurringWakeFireDoesNotBlockEvaluator(t *testing.
 	assert.True(t, got.NextRunAt.After(time.Now()), "its next run is already reserved")
 
 	close(release)
-	srv.scheduledWakeFires.wg.Wait()
+	srv.scheduledDetachedFires.wg.Wait()
 	got, err = s.GetSchedule(ctx, slow.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, got.RunCount, "the wake fire's run is recorded when it ends")
@@ -572,7 +572,7 @@ func TestScheduledMessageWake_RecurringWakeFireRefusedWhileShuttingDown(t *testi
 		calls.Add(1)
 		return nil
 	}))
-	srv.scheduledWakeFires.closeAdmission()
+	srv.scheduledDetachedFires.closeAdmission()
 
 	srv.executeSchedule(ctx, *row, time.Now().UTC())
 	assert.Zero(t, calls.Load(), "no wake fire starts once shutdown began")
@@ -585,7 +585,7 @@ func TestScheduledMessageWake_RecurringWakeFireRefusedWhileShuttingDown(t *testi
 	require.NoError(t, err)
 	require.Len(t, events.Items, 1)
 	assert.Equal(t, store.ScheduledEventFailed, events.Items[0].Status)
-	assert.Zero(t, srv.scheduledWakeFires.stop(ctx, time.Second), "nothing left to join")
+	assert.Zero(t, srv.scheduledDetachedFires.stop(ctx, time.Second), "nothing left to join")
 }
 
 // createDueWakeTestSchedule creates a message schedule through the API and
@@ -632,7 +632,7 @@ func TestScheduledMessageWake_RecurringWakeFirePanicIsContained(t *testing.T) {
 	}))
 
 	srv.executeSchedule(ctx, panicky, time.Now().UTC())
-	srv.scheduledWakeFires.wg.Wait()
+	srv.scheduledDetachedFires.wg.Wait()
 
 	got, err := s.GetSchedule(ctx, panicky.ID)
 	require.NoError(t, err)
@@ -697,7 +697,7 @@ func TestScheduledMessageWake_RecurringWakeFireEventNotReplayable(t *testing.T) 
 	}
 
 	close(release)
-	srv.scheduledWakeFires.wg.Wait()
+	srv.scheduledDetachedFires.wg.Wait()
 	evt, err = s.GetScheduledEvent(ctx, eventID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduledEventFired, evt.Status)
@@ -755,7 +755,7 @@ func TestScheduledMessageWake_RecurringWakeEventNeverPending(t *testing.T) {
 	fault.Arm()
 
 	srv.executeSchedule(ctx, sched, time.Now().UTC())
-	srv.scheduledWakeFires.wg.Wait()
+	srv.scheduledDetachedFires.wg.Wait()
 
 	assert.False(t, replay.wasPending.Load(), "the wake fire's event is never pending")
 	assert.False(t, replay.replayClaim.Load(), "a starting replica cannot claim it")
@@ -778,9 +778,9 @@ func TestScheduledMessageWake_RecurringWakeEventNeverPending(t *testing.T) {
 // event never stays fired with nothing delivered, and a late finish does not
 // overwrite the recorded outcome.
 func TestScheduledMessageWake_ShutdownAbortsRunningWakeFire(t *testing.T) {
-	prevStop, prevAbort := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace
-	scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = 100*time.Millisecond, time.Second
-	t.Cleanup(func() { scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = prevStop, prevAbort })
+	prevStop, prevAbort := scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace
+	scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace = 100*time.Millisecond, time.Second
+	t.Cleanup(func() { scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace = prevStop, prevAbort })
 
 	assertShutdownOutcome := func(t *testing.T, s store.Store, projectID, scheduleID string) {
 		t.Helper()
@@ -809,8 +809,8 @@ func TestScheduledMessageWake_ShutdownAbortsRunningWakeFire(t *testing.T) {
 		srv.executeSchedule(ctx, sched, time.Now().UTC())
 		<-started
 
-		srv.stopScheduledWakeFires(ctx)
-		assert.Zero(t, srv.scheduledWakeFires.runningCount(), "the aborted fire ended within the grace")
+		srv.stopScheduledDetachedFires(ctx)
+		assert.Zero(t, srv.scheduledDetachedFires.runningCount(), "the aborted fire ended within the grace")
 		assertShutdownOutcome(t, s, projectID, sched.ID)
 	})
 
@@ -828,11 +828,11 @@ func TestScheduledMessageWake_ShutdownAbortsRunningWakeFire(t *testing.T) {
 		srv.executeSchedule(ctx, sched, time.Now().UTC())
 		<-started
 
-		srv.stopScheduledWakeFires(ctx)
+		srv.stopScheduledDetachedFires(ctx)
 		assertShutdownOutcome(t, s, projectID, sched.ID)
 
 		close(release)
-		srv.scheduledWakeFires.wg.Wait()
+		srv.scheduledDetachedFires.wg.Wait()
 		assertShutdownOutcome(t, s, projectID, sched.ID) // the late finish does not overwrite it
 	})
 }
@@ -902,9 +902,9 @@ func TestScheduledMessageWake_OneShotWakeShutdownOutcome(t *testing.T) {
 	})
 
 	t.Run("teardown aborts a waiting wake and records the shutdown", func(t *testing.T) {
-		prevStop, prevAbort := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace
-		scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = 100*time.Millisecond, 2*time.Second
-		t.Cleanup(func() { scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = prevStop, prevAbort })
+		prevStop, prevAbort := scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace
+		scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace = 100*time.Millisecond, 2*time.Second
+		t.Cleanup(func() { scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace = prevStop, prevAbort })
 		f := newSchedWake(t, state.PhaseStarting) // never becomes ready
 		u := f.user(t, "sw-oneshot-abort", lifecyclePerms...)
 		evt := withSessionRevision(f.event(true), u.ID)
@@ -912,7 +912,7 @@ func TestScheduledMessageWake_OneShotWakeShutdownOutcome(t *testing.T) {
 		<-entered
 		time.Sleep(100 * time.Millisecond)
 		sch.halt()
-		f.srv.stopScheduledWakeFires(context.Background())
+		f.srv.stopScheduledDetachedFires(context.Background())
 		<-finished
 
 		got := waitEventStatus(t, f.store, evt.ID, store.ScheduledEventFailed)
@@ -922,12 +922,12 @@ func TestScheduledMessageWake_OneShotWakeShutdownOutcome(t *testing.T) {
 	})
 
 	t.Run("teardown records a wake stuck in a detached launch", func(t *testing.T) {
-		prevStop, prevAbort := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace
-		scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = 100*time.Millisecond, 200*time.Millisecond
+		prevStop, prevAbort := scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace
+		scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace = 100*time.Millisecond, 200*time.Millisecond
 		prevReady := wakeReadyTimeout
 		wakeReadyTimeout = 300 * time.Millisecond // the woken run never reports ready
 		t.Cleanup(func() {
-			scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace = prevStop, prevAbort
+			scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace = prevStop, prevAbort
 			wakeReadyTimeout = prevReady
 		})
 		f := newSchedWake(t, state.PhaseSuspended)
@@ -940,7 +940,7 @@ func TestScheduledMessageWake_OneShotWakeShutdownOutcome(t *testing.T) {
 		<-entered
 		<-launching
 		sch.halt()
-		f.srv.stopScheduledWakeFires(context.Background())
+		f.srv.stopScheduledDetachedFires(context.Background())
 
 		got, err := f.store.GetScheduledEvent(context.Background(), evt.ID)
 		require.NoError(t, err)
@@ -957,7 +957,7 @@ func TestScheduledMessageWake_OneShotWakeShutdownOutcome(t *testing.T) {
 	t.Run("a wake does not start once shutdown has begun", func(t *testing.T) {
 		f := newSchedWake(t, state.PhaseSuspended)
 		u := f.user(t, "sw-oneshot-closed", lifecyclePerms...)
-		f.srv.scheduledWakeFires.closeAdmission()
+		f.srv.scheduledDetachedFires.closeAdmission()
 
 		err := f.fire(withSessionRevision(f.event(true), u.ID))
 		require.ErrorIs(t, err, errScheduledWakeShuttingDown)
@@ -1091,20 +1091,20 @@ func (b *blockingCompleteStore) CompleteFiringScheduledEvent(
 // TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline covers
 // ptone/scion#7791 (a) across recurring and one-shot wake fires: when a fire's
 // own Detached/WithoutCancel completion write is already in flight as teardown
-// enters recordAbandonedWakeFires, recordAbandonedWakeFires waits up to the
+// enters recordAbandonedDetachedFires, recordAbandonedDetachedFires waits up to the
 // shared record deadline (so fast writes finish cleanly before store close
 // without being overwritten) and returns promptly once that deadline expires
 // instead of blocking on sync.Once.Do.
 func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) {
 	t.Run("recurring in-flight completion write does not block past ctx or record deadline", func(t *testing.T) {
-		prevStop, prevAbort, prevBudget := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace, scheduledWakeRecordBudget
-		scheduledWakeFireStopGrace = 20 * time.Millisecond
-		scheduledWakeFireAbortGrace = 20 * time.Millisecond
-		scheduledWakeRecordBudget = 150 * time.Millisecond
+		prevStop, prevAbort, prevBudget := scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace, scheduledDetachedRecordBudget
+		scheduledDetachedFireStopGrace = 20 * time.Millisecond
+		scheduledDetachedFireAbortGrace = 20 * time.Millisecond
+		scheduledDetachedRecordBudget = 150 * time.Millisecond
 		t.Cleanup(func() {
-			scheduledWakeFireStopGrace = prevStop
-			scheduledWakeFireAbortGrace = prevAbort
-			scheduledWakeRecordBudget = prevBudget
+			scheduledDetachedFireStopGrace = prevStop
+			scheduledDetachedFireAbortGrace = prevAbort
+			scheduledDetachedRecordBudget = prevBudget
 		})
 
 		entered := make(chan struct{})
@@ -1126,24 +1126,24 @@ func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) 
 			t.Fatal("recurring wake fire did not reach CompleteFiringScheduledEvent")
 		}
 
-		// Caller's shutdown ctx has an 80ms deadline, tighter than scheduledWakeRecordBudget.
+		// Caller's shutdown ctx has an 80ms deadline, tighter than scheduledDetachedRecordBudget.
 		stopCtx, cancel := context.WithTimeout(ctx, 80*time.Millisecond)
 		defer cancel()
 		stopDone := make(chan struct{})
 		go func() {
-			srv.stopScheduledWakeFires(stopCtx)
+			srv.stopScheduledDetachedFires(stopCtx)
 			close(stopDone)
 		}()
 		select {
 		case <-stopDone:
 		case <-time.After(600 * time.Millisecond):
 			close(release)
-			t.Fatal("stopScheduledWakeFires blocked on in-flight completion write past shutdown deadline")
+			t.Fatal("stopScheduledDetachedFires blocked on in-flight completion write past shutdown deadline")
 		}
 
 		// Release the hung DB write so the background goroutine exits cleanly.
 		close(release)
-		srv.scheduledWakeFires.wg.Wait()
+		srv.scheduledDetachedFires.wg.Wait()
 		assert.Equal(t, int32(1), wrapped.completeCalls.Load(), "only the fire's completion write ran")
 		events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: sched.ID}, store.ListOptions{})
 		require.NoError(t, err)
@@ -1152,14 +1152,14 @@ func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) 
 	})
 
 	t.Run("one-shot in-flight completion write does not block past record budget", func(t *testing.T) {
-		prevStop, prevAbort, prevBudget := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace, scheduledWakeRecordBudget
-		scheduledWakeFireStopGrace = 20 * time.Millisecond
-		scheduledWakeFireAbortGrace = 20 * time.Millisecond
-		scheduledWakeRecordBudget = 80 * time.Millisecond
+		prevStop, prevAbort, prevBudget := scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace, scheduledDetachedRecordBudget
+		scheduledDetachedFireStopGrace = 20 * time.Millisecond
+		scheduledDetachedFireAbortGrace = 20 * time.Millisecond
+		scheduledDetachedRecordBudget = 80 * time.Millisecond
 		t.Cleanup(func() {
-			scheduledWakeFireStopGrace = prevStop
-			scheduledWakeFireAbortGrace = prevAbort
-			scheduledWakeRecordBudget = prevBudget
+			scheduledDetachedFireStopGrace = prevStop
+			scheduledDetachedFireAbortGrace = prevAbort
+			scheduledDetachedRecordBudget = prevBudget
 		})
 
 		f := newSchedWake(t, state.PhaseRunning)
@@ -1182,18 +1182,18 @@ func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) 
 
 		stopDone := make(chan struct{})
 		go func() {
-			f.srv.stopScheduledWakeFires(context.Background())
+			f.srv.stopScheduledDetachedFires(context.Background())
 			close(stopDone)
 		}()
 		select {
 		case <-stopDone:
 		case <-time.After(600 * time.Millisecond):
 			close(release)
-			t.Fatal("stopScheduledWakeFires blocked on one-shot completion write past record budget")
+			t.Fatal("stopScheduledDetachedFires blocked on one-shot completion write past record budget")
 		}
 
 		close(release)
-		f.srv.scheduledWakeFires.wg.Wait()
+		f.srv.scheduledDetachedFires.wg.Wait()
 		assert.Equal(t, int32(1), wrapped.completeCalls.Load())
 		got, err := f.store.GetScheduledEvent(context.Background(), evt.ID)
 		require.NoError(t, err)
@@ -1201,14 +1201,14 @@ func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) 
 	})
 
 	t.Run("in-flight completion finishing within record budget completes before return and keeps outcome", func(t *testing.T) {
-		prevStop, prevAbort, prevBudget := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace, scheduledWakeRecordBudget
-		scheduledWakeFireStopGrace = 20 * time.Millisecond
-		scheduledWakeFireAbortGrace = 20 * time.Millisecond
-		scheduledWakeRecordBudget = 2 * time.Second
+		prevStop, prevAbort, prevBudget := scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace, scheduledDetachedRecordBudget
+		scheduledDetachedFireStopGrace = 20 * time.Millisecond
+		scheduledDetachedFireAbortGrace = 20 * time.Millisecond
+		scheduledDetachedRecordBudget = 2 * time.Second
 		t.Cleanup(func() {
-			scheduledWakeFireStopGrace = prevStop
-			scheduledWakeFireAbortGrace = prevAbort
-			scheduledWakeRecordBudget = prevBudget
+			scheduledDetachedFireStopGrace = prevStop
+			scheduledDetachedFireAbortGrace = prevAbort
+			scheduledDetachedRecordBudget = prevBudget
 		})
 
 		entered := make(chan struct{})
@@ -1228,23 +1228,23 @@ func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) 
 
 		stopDone := make(chan struct{})
 		go func() {
-			srv.stopScheduledWakeFires(ctx)
+			srv.stopScheduledDetachedFires(ctx)
 			close(stopDone)
 		}()
-		// Let stopGrace + abortGrace expire so recordAbandonedWakeFires enters recordOrWait.
+		// Let stopGrace + abortGrace expire so recordAbandonedDetachedFires enters recordOrWait.
 		time.Sleep(80 * time.Millisecond)
 		select {
 		case <-stopDone:
-			t.Fatal("stopScheduledWakeFires returned before fast in-flight write finished within record budget")
+			t.Fatal("stopScheduledDetachedFires returned before fast in-flight write finished within record budget")
 		default:
 		}
 		close(release)
 		select {
 		case <-stopDone:
 		case <-time.After(2 * time.Second):
-			t.Fatal("stopScheduledWakeFires did not return once in-flight write finished")
+			t.Fatal("stopScheduledDetachedFires did not return once in-flight write finished")
 		}
-		srv.scheduledWakeFires.wg.Wait()
+		srv.scheduledDetachedFires.wg.Wait()
 		assert.Equal(t, int32(1), wrapped.completeCalls.Load())
 		events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: sched.ID}, store.ListOptions{})
 		require.NoError(t, err)
@@ -1256,14 +1256,14 @@ func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) 
 
 // TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown covers
 // ptone/scion#7791 (b): one-shot wake tracking spans Scheduler.fireEvent's
-// final status persistence (b1), and fireEvent shares the wakeFireRun claim
-// with recordAbandonedWakeFires so an abandoned one-shot fire is never
+// final status persistence (b1), and fireEvent shares the detachedFireRun claim
+// with recordAbandonedDetachedFires so an abandoned one-shot fire is never
 // double-written or overwritten on a late return (b2).
 func TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown(t *testing.T) {
 	t.Run("tracking stays active until fireEvent persists final status", func(t *testing.T) {
-		prevStop := scheduledWakeFireStopGrace
-		scheduledWakeFireStopGrace = 2 * time.Second
-		t.Cleanup(func() { scheduledWakeFireStopGrace = prevStop })
+		prevStop := scheduledDetachedFireStopGrace
+		scheduledDetachedFireStopGrace = 2 * time.Second
+		t.Cleanup(func() { scheduledDetachedFireStopGrace = prevStop })
 
 		f := newSchedWake(t, state.PhaseRunning)
 		entered := make(chan struct{})
@@ -1283,17 +1283,17 @@ func TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown(t *tes
 		// messageEventHandler has already returned, yet fireEvent is still inside
 		// CompleteFiringScheduledEvent: tracking must remain active so shutdown
 		// does not return and close the store under the write.
-		assert.Equal(t, 1, f.srv.scheduledWakeFires.runningCount(), "tracking remains active across fireEvent persistence")
+		assert.Equal(t, 1, f.srv.scheduledDetachedFires.runningCount(), "tracking remains active across fireEvent persistence")
 
 		stopDone := make(chan struct{})
 		go func() {
-			f.srv.stopScheduledWakeFires(context.Background())
+			f.srv.stopScheduledDetachedFires(context.Background())
 			close(stopDone)
 		}()
 		time.Sleep(50 * time.Millisecond)
 		select {
 		case <-stopDone:
-			t.Fatal("stopScheduledWakeFires returned while fireEvent final status write was still running")
+			t.Fatal("stopScheduledDetachedFires returned while fireEvent final status write was still running")
 		default:
 		}
 
@@ -1301,9 +1301,9 @@ func TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown(t *tes
 		select {
 		case <-stopDone:
 		case <-time.After(2 * time.Second):
-			t.Fatal("stopScheduledWakeFires did not finish after persistence completed")
+			t.Fatal("stopScheduledDetachedFires did not finish after persistence completed")
 		}
-		assert.Zero(t, f.srv.scheduledWakeFires.runningCount())
+		assert.Zero(t, f.srv.scheduledDetachedFires.runningCount())
 		got, err := f.store.GetScheduledEvent(context.Background(), evt.ID)
 		require.NoError(t, err)
 		assert.Equal(t, store.ScheduledEventFired, got.Status)
@@ -1355,12 +1355,12 @@ func TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown(t *tes
 		{name: "late handler returning error does not double-write abandoned status", handlerErr: errors.New("late failure")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			prevStop, prevAbort := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace
-			scheduledWakeFireStopGrace = 20 * time.Millisecond
-			scheduledWakeFireAbortGrace = 20 * time.Millisecond
+			prevStop, prevAbort := scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace
+			scheduledDetachedFireStopGrace = 20 * time.Millisecond
+			scheduledDetachedFireAbortGrace = 20 * time.Millisecond
 			t.Cleanup(func() {
-				scheduledWakeFireStopGrace = prevStop
-				scheduledWakeFireAbortGrace = prevAbort
+				scheduledDetachedFireStopGrace = prevStop
+				scheduledDetachedFireAbortGrace = prevAbort
 			})
 
 			f := newSchedWake(t, state.PhaseRunning)
@@ -1395,13 +1395,13 @@ func TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown(t *tes
 			}()
 			<-started
 
-			f.srv.stopScheduledWakeFires(context.Background())
-			assert.Equal(t, int32(1), wrapped.completeCalls.Load(), "recordAbandonedWakeFires wrote once")
+			f.srv.stopScheduledDetachedFires(context.Background())
+			assert.Equal(t, int32(1), wrapped.completeCalls.Load(), "recordAbandonedDetachedFires wrote once")
 			assert.Zero(t, wrapped.updateCalls.Load())
 
 			close(release)
 			<-finished
-			f.srv.scheduledWakeFires.wg.Wait()
+			f.srv.scheduledDetachedFires.wg.Wait()
 
 			assert.Equal(t, int32(1), wrapped.completeCalls.Load(), "fireEvent did not issue a second write")
 			assert.Zero(t, wrapped.updateCalls.Load())
@@ -1415,20 +1415,20 @@ func TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown(t *tes
 
 // TestScheduledMessageWake_ProvisionalFiringAndAbandonedRecovery covers
 // ptone/scion#7791 (c) for both recurring and one-shot wake fires: events
-// skipped or whose write failed when scheduledWakeRecordBudget expires stay in
+// skipped or whose write failed when scheduledDetachedRecordBudget expires stay in
 // observable status "firing" (never "fired" or "expired"), and startup /
 // periodic recovery finalizes them as failed and updates recurring schedule
 // counters without rewinding next_run_at.
 func TestScheduledMessageWake_ProvisionalFiringAndAbandonedRecovery(t *testing.T) {
 	t.Run("skipped and failed shutdown writes stay firing and are recovered at startup", func(t *testing.T) {
-		prevStop, prevAbort, prevBudget := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace, scheduledWakeRecordBudget
-		scheduledWakeFireStopGrace = 20 * time.Millisecond
-		scheduledWakeFireAbortGrace = 20 * time.Millisecond
-		scheduledWakeRecordBudget = 60 * time.Millisecond
+		prevStop, prevAbort, prevBudget := scheduledDetachedFireStopGrace, scheduledDetachedFireAbortGrace, scheduledDetachedRecordBudget
+		scheduledDetachedFireStopGrace = 20 * time.Millisecond
+		scheduledDetachedFireAbortGrace = 20 * time.Millisecond
+		scheduledDetachedRecordBudget = 60 * time.Millisecond
 		t.Cleanup(func() {
-			scheduledWakeFireStopGrace = prevStop
-			scheduledWakeFireAbortGrace = prevAbort
-			scheduledWakeRecordBudget = prevBudget
+			scheduledDetachedFireStopGrace = prevStop
+			scheduledDetachedFireAbortGrace = prevAbort
+			scheduledDetachedRecordBudget = prevBudget
 		})
 
 		srv, s, projectID, wrapped, fault := setupScheduleTestWithStore(t, func(inner store.Store, sw *storeFaultSwitch) *blockingCompleteStore {
@@ -1499,10 +1499,10 @@ func TestScheduledMessageWake_ProvisionalFiringAndAbandonedRecovery(t *testing.T
 		<-oneShotEntered
 
 		// Arm the slow/failing CompleteFiringScheduledEvent fault so the first
-		// abandoned write exhausts scheduledWakeRecordBudget and fails, and the
+		// abandoned write exhausts scheduledDetachedRecordBudget and fails, and the
 		// remaining two runs are skipped after the budget expires.
 		fault.Arm()
-		srv.stopScheduledWakeFires(ctx)
+		srv.stopScheduledDetachedFires(ctx)
 		wrapped.disarmed.Store(true)
 
 		for name, id := range map[string]string{
@@ -1524,7 +1524,7 @@ func TestScheduledMessageWake_ProvisionalFiringAndAbandonedRecovery(t *testing.T
 		assert.True(t, reservedNext.After(time.Now().UTC().Add(-10*time.Second)))
 
 		// Simulate next hub startup recovery (immediate=true on single-instance SQLite).
-		srv.recoverAbandonedWakeFires(ctx, time.Now().UTC(), true)
+		srv.recoverAbandonedDetachedFires(ctx, time.Now().UTC(), true)
 
 		for name, id := range map[string]string{
 			"recurring wake":        recEventID,
@@ -1550,7 +1550,7 @@ func TestScheduledMessageWake_ProvisionalFiringAndAbandonedRecovery(t *testing.T
 		close(releaseHandlers)
 		<-oneShotDone
 		<-oneShotDone
-		srv.scheduledWakeFires.wg.Wait()
+		srv.scheduledDetachedFires.wg.Wait()
 
 		schedFinal, err := s.GetSchedule(ctx, sched.ID)
 		require.NoError(t, err)
@@ -1612,7 +1612,7 @@ func TestScheduledMessageWake_ProvisionalFiringAndAbandonedRecovery(t *testing.T
 		now := time.Now().UTC()
 		sched := createDueWakeTestSchedule(t, srv, s, projectID, "periodic-sweep-rec", true, now.Add(time.Hour))
 
-		staleAt := now.Add(-scheduledWakeStuckAfter() - time.Minute)
+		staleAt := now.Add(-scheduledDetachedStuckAfter() - time.Minute)
 		staleRec := store.ScheduledEvent{
 			ID:         api.NewUUID(),
 			ProjectID:  projectID,

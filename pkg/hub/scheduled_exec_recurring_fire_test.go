@@ -465,12 +465,12 @@ func TestScheduledExecRecurring_TargetDeletedPauseAndStrictIDMatch(t *testing.T)
 }
 
 // TestScheduledExecRecurring_ShutdownAndSweeperInterleavingMatrix (AC10):
-//  1. Pre-admission shutdown (scheduledWakeFires closed before executeSchedule)
+//  1. Pre-admission shutdown (scheduledDetachedFires closed before executeSchedule)
 //     records the recurring event failed ("hub shutting down") and bumps
 //     error_count once.
-//  2. Post-admission shutdown (stopScheduledWakeFires + stopScheduledExecRuns
+//  2. Post-admission shutdown (stopScheduledDetachedFires + stopScheduledExecRuns
 //     while the recurring run is executing) leaves the admitted run unfinished
-//     and the event "fired" (never clobbered by recordAbandonedWakeFires), and
+//     and the event "fired" (never clobbered by recordAbandonedDetachedFires), and
 //     a subsequent sweepScheduledExecRuns recovers the real exit-0 outcome and
 //     updates the parent schedule's run_count=2, error_count=1, last_run_status=success!
 //  3. Concurrent tracker + sweeper polls on a recurring run count the run on
@@ -482,7 +482,7 @@ func TestScheduledExecRecurring_ShutdownAndSweeperInterleavingMatrix(t *testing.
 		now := time.Now().UTC()
 		sc := f.createExecSchedule(t, "pre-admit-shutdown", now, 10, "true")
 
-		f.srv.scheduledWakeFires.closeAdmission()
+		f.srv.scheduledDetachedFires.closeAdmission()
 		f.srv.executeSchedule(ctx, sc, now)
 
 		gotSc := waitScheduleRunCount(t, f.store, sc.ID, 1)
@@ -567,7 +567,7 @@ func TestScheduledExecRecurring_ShutdownAndSweeperInterleavingMatrix(t *testing.
 
 		// Simulate Hub shutdown while the command is still running!
 		f.srv.haltDispatchProducers()
-		f.srv.stopScheduledWakeFires(ctx)
+		f.srv.stopScheduledDetachedFires(ctx)
 		f.srv.stopScheduledExecRuns(ctx)
 
 		// Admitted run MUST remain unfinished and event "fired", never clobbered!
