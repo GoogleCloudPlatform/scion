@@ -608,6 +608,13 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Test Image and CD Scripts
+        run: |
+          if ! make test-image-scripts; then
+            echo "::error title=Image and CD script tests::One or more script/contract suites in make test-image-scripts (image-build/scripts/test-*.sh or deploy/cd/scripts/test-cd-scripts.sh) failed. Details are in the step log above."
+            exit 1
+          fi
+
       - name: Check Image Go Directories
         run: |
           # Invoked directly rather than via `make check-image-go-dirs`, for the
