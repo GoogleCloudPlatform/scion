@@ -62,9 +62,9 @@ const (
 	visitorIssuer = "https://issuer.fixture.example"
 	visitorDomain = "partner.example"
 
-	webhookEndpointID = "e0100000-0000-0000-0000-000000000001"
-	triggerID         = "e0200000-0000-0000-0000-000000000001"
-	triggerEventID    = "e0300000-0000-0000-0000-000000000001"
+	webhookEndpointID     = "e0100000-0000-0000-0000-000000000001"
+	triggerID             = "e0200000-0000-0000-0000-000000000001"
+	triggerEventID        = "e0300000-0000-0000-0000-000000000001"
 	triggerFireID         = "e0400000-0000-0000-0000-000000000001"
 	triggerSubjectClaimID = "e0500000-0000-0000-0000-000000000001"
 )

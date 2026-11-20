@@ -136,6 +136,10 @@ type HeadlessCreate struct {
 	// subject claim atomically with the agent create audit, Stage 2 §5.3).
 	OnCommitTx func(ctx context.Context, tx store.Store, agentID string) error
 
+	// OnCommitted, when non-nil, runs immediately after commitAgentCreate's
+	// transaction commits successfully (and never on rollback).
+	OnCommitted func(agentID string)
+
 	// Data-only channels (never material, never participating in secret/env
 	// resolution).
 	EventEnv  map[string]string // allow-listed keys only: SCION_TRIGGER_EVENT_ID, SCION_TRIGGER_ID
@@ -651,6 +655,9 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		OnCommitTx: onCommitTx,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to create agent %q: %w", slug, err)
+	}
+	if hc.OnCommitted != nil {
+		hc.OnCommitted(agent.ID)
 	}
 
 	rollback := func(rb createRollback) error {

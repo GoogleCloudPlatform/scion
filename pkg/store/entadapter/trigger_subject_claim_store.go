@@ -192,6 +192,9 @@ func (s *TriggerStore) ClaimTriggerSubject(
 		return nil, entTriggerSubjectClaimToStore(current), nil
 	}
 
+	// Effectively unreachable: hitting maxAttempts requires another replica to
+	// repeatedly purge or release-and-reclaim the exact same (trigger_id, subject)
+	// row between every INSERT/UPDATE and SELECT in this loop (sustained livelock).
 	return nil, nil, fmt.Errorf("%w: could not resolve trigger subject claim after concurrent retries", store.ErrVersionConflict)
 }
 
@@ -290,16 +293,28 @@ func (s *TriggerStore) ReleaseTriggerSubjectClaimsForAgent(ctx context.Context, 
 	return affected, nil
 }
 
-// ReleaseTerminalTriggerSubjectClaims releases every active bound claim whose
-// agent is missing, soft-deleted (deleted_at IS NOT NULL), or in a terminal
-// phase (stopped, error, halted). Active unbound claims (agent_id IS NULL) are
-// left untouched so in-flight creates are not disturbed.
+// terminalClaimReleaseGrace is the minimum age a bound claim must have before
+// hourly maintenance will release it for a missing/terminal agent. Under
+// PostgreSQL READ COMMITTED, EvalPlanQual re-checks the UPDATE predicate
+// against the latest row version while the NOT EXISTS subplan still reads
+// agents from the statement's older snapshot; requiring bound_at < now - 1m
+// prevents maintenance from releasing a claim that was just re-bound to a
+// newly inserted agent row invisible to the older snapshot.
+const terminalClaimReleaseGrace = time.Minute
+
+// ReleaseTerminalTriggerSubjectClaims releases every active bound claim (bound
+// at least terminalClaimReleaseGrace ago) whose agent is missing, soft-deleted
+// (deleted_at IS NOT NULL), or in a terminal phase (stopped, error, halted).
+// Active unbound claims (agent_id IS NULL) are left untouched so in-flight
+// creates are not disturbed.
 func (s *TriggerStore) ReleaseTerminalTriggerSubjectClaims(ctx context.Context, now time.Time) (int, error) {
 	now = now.UTC().Truncate(time.Microsecond)
+	boundBefore := now.Add(-terminalClaimReleaseGrace)
 	affected, err := s.client.TriggerSubjectClaim.Update().
 		Where(
 			triggersubjectclaim.StateEQ(store.TriggerSubjectClaimStateActive),
 			triggersubjectclaim.AgentIDNotNil(),
+			triggersubjectclaim.BoundAtLT(boundBefore),
 			predicate.TriggerSubjectClaim(func(sel *entsql.Selector) {
 				d := sel.Dialect()
 				ag := entsql.Dialect(d).Table(agent.Table).As("ag")

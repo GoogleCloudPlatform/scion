@@ -933,10 +933,16 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	// Subject claim (§5.3, §5.6): mode "new" never claims; mode "skip" claims
 	// atomically before render/create, skips "subject busy" if a live claim
 	// exists (lazily releasing a claim whose agent is terminal/deleted via Live),
-	// binds in commitAgentCreate's transaction, and releases on any failure.
+	// binds in commitAgentCreate's transaction, and releases explicitly only
+	// when no Bind committed. Once Bind commits, later create errors (including
+	// post-commit paths in createAgentHeadless where the agent row may survive:
+	// ErrLaunchInvalidPhase, errStartingWrite, store.ErrClaimPredicate,
+	// errStartClaimLost) leave the bound claim to Live, hourly maintenance, and
+	// the agent deletion cascade.
 	var (
-		onCommitTx func(ctx context.Context, tx store.Store, agentID string) error
-		keepClaim  bool
+		onCommitTx    func(ctx context.Context, tx store.Store, agentID string) error
+		onCommitted   func(agentID string)
+		bindCommitted bool
 	)
 	if subjectMode == store.TriggerSubjectModeSkip {
 		claims := trigger.NewSubjectClaims(a.srv.store, a.srv.store, time.Now)
@@ -966,7 +972,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			}
 		}
 		defer func() {
-			if keepClaim {
+			if bindCommitted {
 				return
 			}
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -985,6 +991,9 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 				return fmt.Errorf("bind trigger subject claim: %w", bErr)
 			}
 			return nil
+		}
+		onCommitted = func(_ string) {
+			bindCommitted = true
 		}
 	}
 
@@ -1133,9 +1142,10 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			EventFile:      eventFileBytes,
 			Detached:       true,
 			OnCommitTx:     onCommitTx,
+			OnCommitted:    onCommitted,
 		})
 		if createErr == nil {
-			keepClaim = true
+			bindCommitted = true
 			var agentID string
 			if agent != nil {
 				agentID = agent.ID

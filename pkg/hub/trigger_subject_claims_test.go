@@ -320,23 +320,29 @@ func TestDispatchAgentTrigger_SubjectModeSkip_ReleaseOnCreateFailureAndRenderRef
 
 	failSubjectKey := "webhook:" + ep.ID + "/sub-fail"
 
-	// 1. Render refusal after Claim releases the claim.
+	// 1. Pre-commit failure (template render refusal after Claim) releases the claim immediately.
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-refuse", "build_run", "sub-fail", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)
 	_, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, failSubjectKey)
-	assert.ErrorIs(t, err, store.ErrNotFound, "claim must be released after template render refusal")
+	assert.ErrorIs(t, err, store.ErrNotFound, "claim must be released immediately after pre-commit render refusal")
 
-	// 2. Broker create failure releases the claim (even though Bind ran in commitAgentCreate tx).
+	// 2. Post-commit failure (broker dispatch error after commitAgentCreate bound the claim)
+	// leaves the bound claim in place rather than releasing it explicitly (O2: avoids
+	// releasing a claim whose agent row may survive post-commit errors). When the next
+	// event arrives, Live sees the rolled-back agent is gone, lazily releases the claim,
+	// and dispatches the new agent.
 	f.client.mu.Lock()
 	f.client.returnErr = errors.New("broker exploded")
 	f.client.mu.Unlock()
 
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-fail", "build_run", "sub-fail", []byte(`{"job":"ci"}`)).Code)
 	f.drainOneTriggerEvent(t)
-	_, err = f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, failSubjectKey)
-	assert.ErrorIs(t, err, store.ErrNotFound, "claim must be released after create/dispatch failure")
+	boundAfterFail, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, failSubjectKey)
+	require.NoError(t, err, "post-commit failure must keep the bound claim for Live/maintenance/deletion")
+	assert.NotEmpty(t, boundAfterFail.AgentID)
+	assert.NotNil(t, boundAfterFail.BoundAt)
 
-	// 3. Subsequent event succeeds once broker recovers.
+	// 3. Subsequent event succeeds once broker recovers (Live lazily releases the rolled-back agent's claim).
 	f.client.mu.Lock()
 	f.client.returnErr = nil
 	f.client.mu.Unlock()
@@ -345,6 +351,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_ReleaseOnCreateFailureAndRenderRef
 	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, failSubjectKey)
 	require.NoError(t, err)
 	assert.NotEmpty(t, claim.AgentID)
+	assert.NotEqual(t, boundAfterFail.AgentID, claim.AgentID)
 }
 
 func TestDispatchAgentTrigger_SubjectModeNew_NoClaimRowsAndMessageSkipUnchanged(t *testing.T) {

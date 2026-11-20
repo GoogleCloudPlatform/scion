@@ -257,14 +257,17 @@ func TestTriggerSubjectClaimStore_ReleaseForAgentAndMaintenance(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, n2, "idempotent on retry")
 
-	// 2. ReleaseTerminalTriggerSubjectClaims releases stopped, error, halted, soft-deleted, and missing-agent claims (5 total),
-	// leaving running, suspended, and unbound claims active.
+	// 2. ReleaseTerminalTriggerSubjectClaims releases stopped, error, halted, soft-deleted, and missing-agent claims (5 total)
+	// bound at least 1 minute ago, while leaving running, suspended, unbound, and freshly-bound (< 1m) claims active.
 	tMaint := t0.Add(time.Hour)
+	seedBound("s-fresh-missing", uuid.NewString(), tMaint.Add(-30*time.Second))
+	seedBound("s-fresh-stopped", agStopped.ID, tMaint.Add(-30*time.Second))
+
 	released, err := cs.ReleaseTerminalTriggerSubjectClaims(ctx, tMaint)
 	require.NoError(t, err)
 	assert.Equal(t, 5, released)
 
-	for _, keep := range []string{"s-running", "s-suspended", "s-unbound"} {
+	for _, keep := range []string{"s-running", "s-suspended", "s-unbound", "s-fresh-missing", "s-fresh-stopped"} {
 		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, keep)
 		assert.NoError(t, gErr, "expected %s to remain active", keep)
 	}
@@ -273,17 +276,27 @@ func TestTriggerSubjectClaimStore_ReleaseForAgentAndMaintenance(t *testing.T) {
 		assert.ErrorIs(t, gErr, store.ErrNotFound, "expected %s to be released", gone)
 	}
 
+	// Once past the 1m grace window, the freshly-bound missing/terminal claims are released too.
+	tAfterGrace := tMaint.Add(2 * time.Minute)
+	releasedAfterGrace, err := cs.ReleaseTerminalTriggerSubjectClaims(ctx, tAfterGrace)
+	require.NoError(t, err)
+	assert.Equal(t, 2, releasedAfterGrace)
+	for _, gone := range []string{"s-fresh-missing", "s-fresh-stopped"} {
+		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, gone)
+		assert.ErrorIs(t, gErr, store.ErrNotFound, "expected %s to be released after grace window", gone)
+	}
+
 	// 3. PurgeOldTriggerSubjectClaims deletes only released rows older than 7 days.
-	// At t0 + 7d + 30m: the 2 rows released at t0+1m are older than 7d, while the 5 rows
-	// released at t0+1h are still within 7d (and the 3 active rows are never purged).
+	// At cutoff t0+30m: the 2 rows released at t0+1m are older than cutoff, while the 5 rows
+	// released at t0+1h and 2 rows released at tAfterGrace are newer (and active rows are never purged).
 	purged, err := cs.PurgeOldTriggerSubjectClaims(ctx, t0.Add(30*time.Minute))
 	require.NoError(t, err)
 	assert.Equal(t, 2, purged)
 
-	// Purging with cutoff after tMaint removes the remaining 5 released rows, still keeping the 3 active ones.
-	purged2, err := cs.PurgeOldTriggerSubjectClaims(ctx, tMaint.Add(time.Second))
+	// Purging with cutoff after tAfterGrace removes the remaining 7 released rows, still keeping the 3 active ones.
+	purged2, err := cs.PurgeOldTriggerSubjectClaims(ctx, tAfterGrace.Add(time.Second))
 	require.NoError(t, err)
-	assert.Equal(t, 5, purged2)
+	assert.Equal(t, 7, purged2)
 	for _, keep := range []string{"s-running", "s-suspended", "s-unbound"} {
 		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, keep)
 		assert.NoError(t, gErr, "active claim %s must never be purged", keep)
