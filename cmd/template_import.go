@@ -167,8 +167,24 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 
 	// Process each agent
 	var results []importResult
+	var allWarnings []string
 	for _, agent := range agents {
 		result := importResult{Name: agent.Name, Harness: agent.Harness}
+
+		if agent.ParseError != nil {
+			result.Status = "error"
+			result.Error = agent.ParseError.Error()
+			results = append(results, result)
+			continue
+		}
+
+		// Validate scion-format templates before copying (warns per D5; refuses on graduation).
+		if agent.ScionFormat && agent.SourcePath != "" {
+			if warnings := templateimport.ValidateScionTemplateConfig(agent.SourcePath, agent.Name); len(warnings) > 0 {
+				result.Warnings = append(result.Warnings, warnings...)
+				allWarnings = append(allWarnings, warnings...)
+			}
+		}
 
 		if dryRun {
 			result.Status = "would_import"
@@ -187,6 +203,13 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 				if agent.Model != "" {
 					result.Model = agent.Model
 				}
+				// Guard generated scion-agent.yaml on non-scion imports.
+				if !agent.ScionFormat {
+					if warnings := templateimport.ValidateScionTemplateConfig(path, agent.Name); len(warnings) > 0 {
+						result.Warnings = append(result.Warnings, warnings...)
+						allWarnings = append(allWarnings, warnings...)
+					}
+				}
 			}
 		}
 		results = append(results, result)
@@ -195,18 +218,25 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 	// Output results
 	status := resultStatus(results)
 	if isJSONOutput() {
+		details := map[string]interface{}{
+			"templates": results,
+			"dryRun":    dryRun,
+		}
+		if len(allWarnings) > 0 {
+			details["warnings"] = allWarnings
+		}
 		return outputJSONResult(ActionResult{
 			Status:  status,
 			Command: "templates import",
 			Message: resultMessage(results, dryRun),
-			Details: map[string]interface{}{
-				"templates": results,
-				"dryRun":    dryRun,
-			},
+			Details: details,
 		}, status != "success", "one or more templates failed to import")
 	}
 
 	for _, r := range results {
+		for _, w := range r.Warnings {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+		}
 		switch r.Status {
 		case "imported":
 			fmt.Printf("Imported template '%s' (harness: %s) → %s\n", r.Name, r.Harness, r.TemplatePath)
@@ -224,12 +254,13 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 }
 
 type importResult struct {
-	Name         string `json:"name"`
-	Harness      string `json:"harness"`
-	Status       string `json:"status"`
-	TemplatePath string `json:"templatePath,omitempty"`
-	Model        string `json:"model,omitempty"`
-	Error        string `json:"error,omitempty"`
+	Name         string   `json:"name"`
+	Harness      string   `json:"harness"`
+	Status       string   `json:"status"`
+	TemplatePath string   `json:"templatePath,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	Error        string   `json:"error,omitempty"`
+	Warnings     []string `json:"warnings,omitempty"`
 }
 
 // discoverAgents finds all importable agent definitions in a directory.

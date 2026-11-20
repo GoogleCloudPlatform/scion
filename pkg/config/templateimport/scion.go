@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -69,7 +70,13 @@ func DiscoverScionTemplates(dir string) ([]*ImportedAgent, error) {
 
 		agent, err := parseScionTemplate(templateDir, e.Name())
 		if err != nil {
-			continue // skip templates that fail to parse
+			agents = append(agents, &ImportedAgent{
+				Name:        e.Name(),
+				SourcePath:  templateDir,
+				ScionFormat: true,
+				ParseError:  err,
+			})
+			continue
 		}
 		agents = append(agents, agent)
 	}
@@ -122,6 +129,33 @@ func parseScionTemplate(dir, name string) (*ImportedAgent, error) {
 		SourcePath:  dir,
 		ScionFormat: true,
 	}, nil
+}
+
+// ValidateScionTemplateConfig validates the effective agent config file
+// (scion-agent.yaml -> .yml -> .json) in dir with
+// config.ValidateTemplateAgentConfig and returns human-readable warnings when
+// the file is invalid or cannot be parsed. Returns nil when valid or absent.
+func ValidateScionTemplateConfig(dir, templateName string) []string {
+	for _, name := range []string{"scion-agent.yaml", "scion-agent.yml", "scion-agent.json"} {
+		p := filepath.Join(dir, name)
+		info, err := os.Stat(p)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return []string{fmt.Sprintf("template %s: agent config %s is invalid: %v", templateName, name, err)}
+		}
+		findings, err := config.ValidateTemplateAgentConfig(name, data)
+		if err != nil {
+			return []string{fmt.Sprintf("template %s: agent config %s is invalid: %v", templateName, name, err)}
+		}
+		if len(findings) > 0 {
+			return []string{config.FormatAgentConfigValidationError(templateName, name, findings)}
+		}
+		return nil
+	}
+	return nil
 }
 
 // CopyScionTemplate copies a scion template directory tree to the destination.

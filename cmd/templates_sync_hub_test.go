@@ -272,3 +272,48 @@ func TestSyncTemplateToHub_RefusesEmptyLocalDirectory(t *testing.T) {
 	require.Contains(t, err.Error(), "no files to sync")
 	require.Equal(t, 0, hubCalls, "sync must not call the Hub for an empty directory")
 }
+
+// TestSyncTemplateToHub_InvalidAgentConfigWarnsAndSurfacesHub422 verifies that
+// syncTemplateToHub warns on stderr when the local agent config is schema-invalid
+// (D5) and surfaces a Hub 422 invalid_agent_config error from Finalize.
+func TestSyncTemplateToHub_InvalidAgentConfigWarnsAndSurfacesHub422(t *testing.T) {
+	localPath := t.TempDir()
+	writeTemplateFile(t, localPath, "scion-agent.yaml", "default_harness_config: claude\nmax_duration: \"2 hours\"\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": []interface{}{}})
+		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"template": map[string]interface{}{"id": "new-tpl-id", "name": "bad", "status": "pending"},
+			})
+		case r.URL.Path == "/api/v1/templates/new-tpl-id/upload" && r.Method == http.MethodPost:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []interface{}{}})
+		case r.URL.Path == "/api/v1/templates/new-tpl-id/finalize" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    "invalid_agent_config",
+					"message": `template bad: agent config scion-agent.yaml is invalid: max_duration: '2 hours' does not match pattern`,
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	var syncErr error
+	stderrOut := captureStderr(t, func() {
+		_ = captureStdout(t, func() {
+			syncErr = syncTemplateToHub(newTemplateSyncHubCtx(t, server), "bad", localPath, "global", "claude")
+		})
+	})
+	require.Contains(t, stderrOut, "Warning:")
+	require.Contains(t, stderrOut, "max_duration")
+	require.Error(t, syncErr)
+	require.Contains(t, syncErr.Error(), "max_duration")
+}

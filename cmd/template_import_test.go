@@ -425,3 +425,106 @@ func TestDirExists(t *testing.T) {
 	require.NoError(t, os.WriteFile(file, []byte("test"), 0644))
 	assert.False(t, dirExists(file))
 }
+
+func TestRunTemplateImport_InvalidAgentConfigWarns(t *testing.T) {
+	for _, format := range []string{"plain", "json"} {
+		t.Run(format, func(t *testing.T) {
+			oldGlobal, oldFormat := globalMode, outputFormat
+			t.Cleanup(func() { globalMode, outputFormat = oldGlobal, oldFormat })
+			globalMode, outputFormat = false, format
+
+			projectDir := t.TempDir()
+			t.Chdir(projectDir)
+			require.NoError(t, os.MkdirAll(filepath.Join(projectDir, ".scion", "templates"), 0755))
+
+			srcDir := filepath.Join(projectDir, "src", "bad-tpl")
+			require.NoError(t, os.MkdirAll(srcDir, 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(srcDir, "scion-agent.yaml"), []byte("default_harness_config: claude\nmax_duration: \"2 hours\"\n"), 0644))
+
+			command := &cobra.Command{}
+			command.Flags().Bool("all", false, "")
+			command.Flags().Bool("force", false, "")
+			command.Flags().Bool("dry-run", false, "")
+			command.Flags().String("harness", "", "")
+			command.Flags().String("name", "", "")
+
+			var runErr error
+			var stderrOut string
+			stdoutOut := captureStdout(t, func() {
+				stderrOut = captureStderr(t, func() {
+					runErr = runTemplateImport(command, []string{srcDir})
+				})
+			})
+			require.NoError(t, runErr, "D5: local import warns rather than refuses until graduation")
+
+			if format == "json" {
+				var res struct {
+					Status  string `json:"status"`
+					Details struct {
+						Templates []importResult `json:"templates"`
+						Warnings  []string       `json:"warnings"`
+					} `json:"details"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(stdoutOut), &res))
+				assert.Equal(t, "success", res.Status)
+				require.Len(t, res.Details.Templates, 1)
+				require.NotEmpty(t, res.Details.Templates[0].Warnings)
+				assert.Contains(t, res.Details.Templates[0].Warnings[0], "max_duration")
+				require.NotEmpty(t, res.Details.Warnings)
+				assert.Contains(t, res.Details.Warnings[0], "max_duration")
+			} else {
+				assert.Contains(t, stderrOut, "Warning:")
+				assert.Contains(t, stderrOut, "max_duration")
+			}
+		})
+	}
+}
+
+func TestRunTemplateImport_UnparseableScionTemplateReported(t *testing.T) {
+	oldGlobal, oldFormat := globalMode, outputFormat
+	t.Cleanup(func() { globalMode, outputFormat = oldGlobal, oldFormat })
+	globalMode, outputFormat = false, "json"
+
+	projectDir := t.TempDir()
+	t.Chdir(projectDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, ".scion", "templates"), 0755))
+
+	sourceDir := filepath.Join(projectDir, "source")
+	for name, cfg := range map[string]string{
+		"good":   "schema_version: \"1\"\ndefault_harness_config: claude\n",
+		"broken": ": invalid: yaml: [",
+	} {
+		d := filepath.Join(sourceDir, name)
+		require.NoError(t, os.MkdirAll(d, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(d, "scion-agent.yaml"), []byte(cfg), 0644))
+	}
+
+	command := &cobra.Command{}
+	command.Flags().Bool("all", true, "")
+	command.Flags().Bool("force", false, "")
+	command.Flags().Bool("dry-run", false, "")
+	command.Flags().String("harness", "", "")
+	command.Flags().String("name", "", "")
+
+	var runErr error
+	stdoutOut := captureStdout(t, func() {
+		runErr = runTemplateImport(command, []string{sourceDir})
+	})
+	require.Error(t, runErr)
+
+	var res struct {
+		Status  string `json:"status"`
+		Details struct {
+			Templates []importResult `json:"templates"`
+		} `json:"details"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdoutOut), &res))
+	assert.Equal(t, "partial_error", res.Status)
+	byName := map[string]importResult{}
+	for _, r := range res.Details.Templates {
+		byName[r.Name] = r
+	}
+	assert.Equal(t, "imported", byName["good"].Status)
+	assert.Equal(t, "error", byName["broken"].Status)
+	assert.Contains(t, byName["broken"].Error, "failed to parse")
+}
