@@ -234,7 +234,7 @@ func TestProvisionAgent_HomeLayerSymlinkRefused(t *testing.T) {
 		{
 			name:     "harness-config home",
 			linkIn:   func(scionDir string) string { return filepath.Join(scionDir, "harness-configs", "test", "home") },
-			wantMsgs: []string{"harness-config home test", "home/.bashrc is a symbolic link"},
+			wantMsgs: []string{`harness-config home "test"`, "home/.bashrc is a symbolic link"},
 		},
 	}
 	for _, tc := range tests {

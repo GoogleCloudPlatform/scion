@@ -2604,7 +2604,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Step 1: Copy harness-config base home → agentHome
 	if _, err := overlayHomeLayer(agentHomeDir, hcDir.OpenDir); err != nil {
-		return "", "", nil, fmt.Errorf("failed to copy harness-config home %s: %w", harnessConfigName, err)
+		return "", "", nil, fmt.Errorf("failed to copy harness-config home %q: %w", harnessConfigName, err)
 	}
 
 	// Step 2: Copy template home → agentHome (overlay; template files win on conflict)
