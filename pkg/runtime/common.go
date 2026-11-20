@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -1083,11 +1084,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("-e", fmt.Sprintf("SCION_START_CMD=%s", tmuxCmd))
 	}
 
-	// The template env fallback (ptone/scion#4524) is the LAST env step:
-	// only keys no source above emitted, never a suppressed key. Docker
-	// keeps the last -e for a key, so nothing may be added after this.
+	// The template env fallback (ptone/scion#4524) is the LAST user/template
+	// env step: only keys no source above emitted, never a suppressed key.
 	for _, e := range FallbackEnvEntries(config.FallbackEnv, config.SuppressedFallbackKeys, envKeysOfArgs(args)) {
 		addArg("-e", e)
+	}
+
+	// Emit the runtime-owned hook-withheld marker last, after every other env
+	// source (which addArg filters through reservedAgentEnvName), so only the
+	// runtime can supply it.
+	if marker := envpolicy.FormatWithheldMarker(config.HookWithheldEnv); marker != "" {
+		args = append(args, "-e", envpolicy.HookWithheldEnvVar+"="+marker)
 	}
 
 	args = append(args, config.Image)
@@ -2568,7 +2575,9 @@ const stagedSecretWarnThreshold = 100 * 1024
 // (stagedsecrets.ResolvedAuthStagedEnvVar). Each runtime drops it where it
 // assembles the container environment.
 func reservedAgentEnvName(name string) bool {
-	return name == stagedsecrets.HubTokenStagedEnvVar || name == stagedsecrets.ResolvedAuthStagedEnvVar
+	return name == stagedsecrets.HubTokenStagedEnvVar ||
+		name == stagedsecrets.ResolvedAuthStagedEnvVar ||
+		name == envpolicy.HookWithheldEnvVar
 }
 
 // dropReservedAgentEnv deletes the reservedAgentEnvName entries from an

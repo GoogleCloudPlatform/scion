@@ -34,20 +34,24 @@ type RunConfig struct {
 	RepoRoot           string
 	ContainerWorkspace string // The container-side workspace path (e.g., /workspace or /repo-root/.scion/agents/foo/workspace)
 	Env                []string
-	ResolvedSecrets    []api.ResolvedSecret
-	Volumes            []api.VolumeMount
-	Labels             map[string]string
-	Annotations        map[string]string
-	ResolvedAuth       *api.ResolvedAuth
-	Harness            api.Harness
-	Task               string
-	CommandArgs        []string
-	Resume             bool
-	Persistence        api.Persistence // from the dispatch; ephemeral only where HasEphemeralPersistenceSupport (ptone/scion#7780)
-	TelemetryEnabled   bool
-	Resources          *api.ResourceSpec
-	Kubernetes         *api.KubernetesConfig
-	GitClone           *api.GitCloneConfig
+	// HookWithheldEnv lists environment variable names whose values come from
+	// harness-config layers and must be withheld from lifecycle hooks. Each
+	// runtime emits it authoritatively via envpolicy.HookWithheldEnvVar.
+	HookWithheldEnv  []string
+	ResolvedSecrets  []api.ResolvedSecret
+	Volumes          []api.VolumeMount
+	Labels           map[string]string
+	Annotations      map[string]string
+	ResolvedAuth     *api.ResolvedAuth
+	Harness          api.Harness
+	Task             string
+	CommandArgs      []string
+	Resume           bool
+	Persistence      api.Persistence // from the dispatch; ephemeral only where HasEphemeralPersistenceSupport (ptone/scion#7780)
+	TelemetryEnabled bool
+	Resources        *api.ResourceSpec
+	Kubernetes       *api.KubernetesConfig
+	GitClone         *api.GitCloneConfig
 	// AgentOwnWorkspace marks Workspace as the agent's own directory
 	// (<agent dir>/workspace: its worktree or private checkout), as the
 	// broker decided from its own paths. That workspace's .scion is the
