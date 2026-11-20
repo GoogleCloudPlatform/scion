@@ -1472,3 +1472,59 @@ func TestRun_KeepAsideNegatives(t *testing.T) {
 		}
 	})
 }
+
+// A hub-local tree with a .scion marker file (instead of a .scion/ directory)
+// and no workspace record verifies from the marker file, migrates copy-only
+// leaving the local tree and its marker file untouched, and rejects a marker
+// file naming another project even with adoptUnverified.
+func TestRun_LocalTreeScionMarkerFile(t *testing.T) {
+	t.Run("match-migrates-copy-only", func(t *testing.T) {
+		f := newHubFixture(t)
+		marker := projectkeys.ProjectIDFile + ": " + pid1 + "\nproject-name: p1\nproject-slug: p1\n"
+		writeTree(t, f.global, map[string]string{
+			"projects/p1/.scion":    marker,
+			"projects/p1/notes.txt": "notes",
+		})
+		local := filepath.Join(f.global, "projects/p1")
+		before := snapshot(t, local)
+		in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+
+		dry, err := Run(context.Background(), in, opts(true))
+		if err != nil || dry.Failed() || dry.Moves() == 0 {
+			var b bytes.Buffer
+			dry.WriteLog(&b)
+			t.Fatalf("dry run: err=%v failed=%t moves=%d\n%s", err, dry.Failed(), dry.Moves(), b.String())
+		}
+		rep, err := Run(context.Background(), in, opts(false))
+		if err != nil || rep.Failed() {
+			var b bytes.Buffer
+			rep.WriteLog(&b)
+			t.Fatalf("run: err=%v\n%s", err, b.String())
+		}
+		if got := snapshot(t, local); !reflect.DeepEqual(got, before) {
+			t.Fatalf("local tree with marker file changed:\nbefore %v\nafter  %v", before, got)
+		}
+		root := filepath.Join(f.share, "projects", pid1)
+		if readFile(t, filepath.Join(root, "workspace/notes.txt")) != "notes" {
+			t.Fatal("content not copied")
+		}
+		assertAbsent(t, filepath.Join(root, "workspace/.scion"))
+		assertAbsent(t, filepath.Join(root, ".scion"))
+	})
+
+	t.Run("mismatch-never-migrates", func(t *testing.T) {
+		f := newHubFixture(t)
+		marker := projectkeys.ProjectIDFile + ": " + pid2 + "\nproject-name: p1\nproject-slug: p1\n"
+		writeTree(t, f.global, map[string]string{
+			"projects/p1/.scion":     marker,
+			"projects/p1/secret.txt": "other project's data",
+		})
+		o := opts(false)
+		o.AdoptUnverified = func(string) bool { return true }
+		rep, err := Run(context.Background(), f.input(ProjectRef{ID: pid1, Slug: "p1"}), o)
+		if err != nil || !rep.Failed() {
+			t.Fatalf("err=%v failed=%t", err, rep.Failed())
+		}
+		assertAbsent(t, filepath.Join(f.share, "projects", pid1))
+	})
+}

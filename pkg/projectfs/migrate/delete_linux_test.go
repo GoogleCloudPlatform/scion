@@ -228,3 +228,31 @@ func TestDeleteLegacyProjectTrees_CopyIgnoresSlugRecord(t *testing.T) {
 		t.Fatalf("markerless copy: %q, want kept", got)
 	}
 }
+
+// A .scion marker file (regular file) verifies a legacy tree for deletion when
+// it names the project and keeps it when it names another project.
+func TestDeleteLegacyProjectTrees_ScionMarkerFile(t *testing.T) {
+	f := newHubFixture(t)
+	matchDir := filepath.Join(f.global, "projects", "demo")
+	writeTree(t, matchDir, map[string]string{
+		".scion":    projectkeys.ProjectIDFile + ": " + pid1 + "\nproject-slug: demo\n",
+		"README.md": "match",
+	})
+	mismatchDir := filepath.Join(f.share, legacyHubProjectsDir, "demo")
+	writeTree(t, mismatchDir, map[string]string{
+		".scion":    projectkeys.ProjectIDFile + ": " + pid2 + "\nproject-slug: demo\n",
+		"README.md": "mismatch",
+	})
+
+	ds, err := DeleteLegacyProjectTrees(f.layout, f.global, "demo", pid1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := outcomes(ds)
+	if got[matchDir] != projectfs.OutcomeDeleted {
+		t.Errorf("matching marker file: %q, want deleted", got[matchDir])
+	}
+	if got[mismatchDir] != projectfs.OutcomeKept {
+		t.Errorf("mismatching marker file: %q, want kept", got[mismatchDir])
+	}
+}

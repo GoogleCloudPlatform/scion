@@ -37,9 +37,10 @@ import (
 //     <slug> and its <slug>.migrated-<ts> copies.
 //
 // A tree is removed only when the identity markers it carries name
-// projectID (the migration's identity binding: .scion/project-id and its
-// pre-rename name, the project ID keys of .scion/settings.yaml, and, for
-// the host-local tree itself but not its copies, the workspace records). A tree that carries no marker
+// projectID (the migration's identity binding: a .scion marker file, or in a
+// .scion directory .scion/project-id and its pre-rename name and the project
+// ID keys of .scion/settings.yaml, and, for the host-local tree itself but not
+// its copies, the workspace records). A tree that carries no marker
 // or names another project is kept (OutcomeKept, with the markers read as
 // the reason): a slug alone never deletes anything, since a slug can be reused by
 // another project. The removal is shareddirs.DeleteTree's confined walk
