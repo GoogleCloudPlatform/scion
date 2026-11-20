@@ -1677,6 +1677,31 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	}
 
 	switch {
+	case isStartOutcomeUnknown(agentErr) && threadErr == nil:
+		// Synchronous create answered 504 start_outcome_unknown: the hub kept
+		// the agent and it may still be starting (ptone/scion#5133). Leave the
+		// thread unbound and send no kickoff until it is running.
+		h.log.Warn("Thread command: synchronous create start outcome unknown; agent may still be starting",
+			"agent_error", agentErr, "slug", slug, "thread_id", thread.ID)
+		h.reportUnconfirmedStart(s, i, thread.ID, statusMsgID, slug, startOutcomeUnknownReason)
+		return
+
+	case isStartOutcomeUnknown(agentErr) && threadErr != nil:
+		// Hub kept the agent (start outcome unknown), while Discord thread
+		// creation failed.
+		h.log.Warn("Thread command: thread creation failed and agent start outcome is unknown",
+			"agent_error", agentErr, "thread_error", threadErr, "slug", slug)
+		threadErrMsg := threadErr.Error()
+		if strings.Contains(threadErrMsg, "403") || strings.Contains(threadErrMsg, "Missing Access") {
+			threadErrMsg += " (This may be a permissions issue — try re-inviting the bot from the admin settings page.)"
+		}
+		h.followup(s, i, fmt.Sprintf(
+			"Agent **%s** was accepted, but I couldn't confirm that it started, and the Discord thread could not be created.\n"+
+				"Thread error: %s\n"+
+				"The agent may still be starting. Check it with `/scion status`; once it is running, create a thread manually and run `/scion default %s` in it to bind.",
+			slug, threadErrMsg, slug))
+		return
+
 	case agentErr != nil && threadErr != nil:
 		// Both failed — single ephemeral error.
 		h.log.Error("Thread command: both agent and thread creation failed",

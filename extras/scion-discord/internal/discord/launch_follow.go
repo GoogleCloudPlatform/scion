@@ -18,12 +18,41 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/bwmarrin/discordgo"
 )
+
+// startOutcomeUnknownReason describes a synchronous create whose dispatch to
+// the runtime broker ended without an answer (504 start_outcome_unknown): the
+// hub kept the agent, which may still be starting.
+const startOutcomeUnknownReason = "the runtime broker did not answer in time; the agent may still be starting"
+
+// isStartOutcomeUnknown reports whether err is the hub's 504
+// start_outcome_unknown answer to a synchronous create.
+func isStartOutcomeUnknown(err error) bool {
+	var he *HubError
+	return errors.As(err, &he) && he.StatusCode == http.StatusGatewayTimeout && he.Code == apiclient.ErrCodeStartOutcomeUnknown
+}
+
+// reportUnconfirmedStart edits the thread's status message (when present) and
+// sends the ephemeral follow-up for a create whose agent was accepted by the
+// hub without confirming that it started.
+func (h *CommandHandler) reportUnconfirmedStart(s *discordgo.Session, i *discordgo.InteractionCreate, threadID, statusMsgID, slug, reason string) {
+	if statusMsgID != "" {
+		if _, err := s.ChannelMessageEdit(threadID, statusMsgID,
+			fmt.Sprintf("⚠️ Couldn't confirm that agent `%s` started: %s.", slug, reason)); err != nil {
+			h.log.Warn("Failed to edit status message for unconfirmed start", "error", err, "slug", slug)
+		}
+	}
+	h.followup(s, i, fmt.Sprintf(
+		"Agent **%s** was accepted, but I couldn't confirm that it started: %s.\n"+
+			"Check it with `/scion status`. Once it is running, run `/scion default %s` in the thread to bind it.",
+		slug, reason, slug))
+}
 
 // createLaunchWaitCap bounds the wait for an asynchronous create, measured
 // from when Discord sent the interaction. The interaction token is valid
@@ -110,11 +139,7 @@ func (h *CommandHandler) followCreateLaunch(s *discordgo.Session, i *discordgo.I
 	case err != nil:
 		reason := launchWaitErrorText(err, time.Since(receivedAt))
 		h.log.Warn("Stopped following agent launch", "error", err, "agent_id", id, "slug", slug)
-		editStatus(fmt.Sprintf("⚠️ Couldn't confirm that agent `%s` started: %s.", slug, reason))
-		h.followup(s, i, fmt.Sprintf(
-			"Agent **%s** was accepted, but I couldn't confirm that it started: %s.\n"+
-				"Check it with `/scion status`. Once it is running, run `/scion default %s` in the thread to bind it.",
-			slug, reason, slug))
+		h.reportUnconfirmedStart(s, i, threadID, statusMsgID, slug, reason)
 		return false
 	case !out.Running:
 		failure := launchFailureText(out)

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"gopkg.in/yaml.v3"
@@ -942,5 +944,142 @@ func TestCmdCreate_EmptyResponse(t *testing.T) {
 	waitWatchers(t, router)
 	if p := m.posts(); len(p) != 0 {
 		t.Errorf("empty create answer: %d posts, want 0", len(p))
+	}
+}
+
+func startOutcomeUnknownErr(agentID string) error {
+	details := map[string]interface{}{"phase": "provisioning"}
+	if agentID != "" {
+		details["agentId"] = agentID
+	}
+	return &apiclient.APIError{
+		StatusCode: http.StatusGatewayTimeout,
+		Code:       apiclient.ErrCodeStartOutcomeUnknown,
+		Message:    "start outcome unknown: the runtime broker did not answer within 3m0s; the agent may still be starting",
+		Details:    details,
+	}
+}
+
+func TestCmdCreate_SyncStartOutcomeUnknown(t *testing.T) {
+	rec := &recorder{}
+	hub := newAsyncHub(rec, nil)
+	client := hub.client()
+	client.agents.createFunc = func(_ context.Context, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
+		hub.mu.Lock()
+		hub.createReqs = append(hub.createReqs, req)
+		hub.mu.Unlock()
+		return nil, startOutcomeUnknownErr("id-a1")
+	}
+	router, m := newAsyncRouter(t, client, rec)
+	router.SetAsyncCreate(false)
+
+	resp, err := router.cmdCreate(context.Background(), threadEvent(), []string{"a1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Message == nil {
+		t.Fatalf("want a text response, got %+v", resp)
+	}
+	got := resp.Message.Text
+	if strings.Contains(strings.ToLower(got), "failed") {
+		t.Errorf("504 start_outcome_unknown must not report a failed create, got %q", got)
+	}
+	for _, want := range []string{"`a1`", "`id-a1`", "may still be starting", "/scionAdmin status a1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("reply = %q, want it to contain %q", got, want)
+		}
+	}
+	if p := m.posts(); len(p) != 0 {
+		t.Errorf("sync unknown outcome: %d follow-up posts, want 0", len(p))
+	}
+}
+
+func TestCmdThread_SyncStartOutcomeUnknown(t *testing.T) {
+	rec := &recorder{}
+	hub := newAsyncHub(rec, nil)
+	client := hub.client()
+	client.agents.createFunc = func(_ context.Context, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
+		hub.mu.Lock()
+		hub.createReqs = append(hub.createReqs, req)
+		hub.mu.Unlock()
+		return nil, startOutcomeUnknownErr("id-a1")
+	}
+	router, m := newAsyncRouter(t, client, rec)
+	router.SetAsyncCreate(false)
+
+	resp, err := router.cmdThread(context.Background(), threadEvent(), []string{"a1", "do", "X"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Message == nil {
+		t.Fatalf("want a text response, got %+v", resp)
+	}
+	got := resp.Message.Text
+	if strings.Contains(strings.ToLower(got), "failed") {
+		t.Errorf("504 start_outcome_unknown must not report a failed create, got %q", got)
+	}
+	for _, want := range []string{
+		"`a1`",
+		"may still be starting",
+		"/scionAdmin status a1",
+		"No thread was opened and the instruction was not sent",
+		"once `/scionAdmin status a1` shows it running",
+		"`/scion a1 <instruction>`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("reply = %q, want it to contain %q", got, want)
+		}
+	}
+	if hub.starts != 0 {
+		t.Errorf("Start called %d times, want 0", hub.starts)
+	}
+	if n := hub.sendCount(); n != 0 {
+		t.Errorf("SendStructuredMessage called %d times, want 0", n)
+	}
+	if p := m.posts(); len(p) != 0 {
+		t.Errorf("posts = %d, want 0", len(p))
+	}
+}
+
+func TestCmdCreate_PlainGatewayTimeout_StillReportsFailure(t *testing.T) {
+	rec := &recorder{}
+	hub := newAsyncHub(rec, nil)
+	client := hub.client()
+	client.agents.createFunc = func(context.Context, *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
+		return nil, &apiclient.APIError{StatusCode: http.StatusGatewayTimeout, Code: apiclient.ErrCodeUnavailable, Message: "upstream timeout"}
+	}
+	router, _ := newAsyncRouter(t, client, rec)
+	router.SetAsyncCreate(false)
+
+	resp, err := router.cmdCreate(context.Background(), threadEvent(), []string{"a1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Message == nil || !strings.HasPrefix(resp.Message.Text, "Failed to create agent:") {
+		t.Errorf("plain 504 reply = %+v, want Failed to create agent prefix", resp)
+	}
+}
+
+func TestStartOutcomeUnknownHelpers(t *testing.T) {
+	if _, ok := startOutcomeUnknownAgentID(&apiclient.APIError{StatusCode: http.StatusInternalServerError, Code: apiclient.ErrCodeStartOutcomeUnknown}); ok {
+		t.Error("500 with start_outcome_unknown must not match")
+	}
+	if _, ok := startOutcomeUnknownAgentID(&apiclient.APIError{StatusCode: http.StatusGatewayTimeout, Code: apiclient.ErrCodeUnavailable}); ok {
+		t.Error("504 with unavailable must not match")
+	}
+	id, ok := startOutcomeUnknownAgentID(startOutcomeUnknownErr(""))
+	if !ok || id != "" {
+		t.Errorf("startOutcomeUnknownAgentID without agentId = (%q, %v), want (\"\", true)", id, ok)
+	}
+	got := createStartOutcomeUnknownText("My_Agent", "", "")
+	if !strings.Contains(got, "`my-agent`") || !strings.Contains(got, "/scionAdmin status my-agent") {
+		t.Errorf("slugified reply = %q, want my-agent", got)
+	}
+	if strings.Contains(got, "No thread was opened") {
+		t.Errorf("reply without instruction = %q, must not mention dropped instruction", got)
+	}
+	withInst := createStartOutcomeUnknownText("My_Agent", "", "fix tests")
+	if !strings.Contains(withInst, "`/scion my-agent <instruction>`") {
+		t.Errorf("slugified instruction reply = %q, want `/scion my-agent <instruction>`", withInst)
 	}
 }

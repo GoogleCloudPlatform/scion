@@ -17,6 +17,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -875,4 +877,154 @@ func TestSendFollowUp_FirstSendFailed_NoSend(t *testing.T) {
 	if n := len(hub.sends()); n != 0 {
 		t.Errorf("sends = %d, want 0: the follow-up must not be sent after the first send failed", n)
 	}
+}
+
+// --- synchronous create 504 start_outcome_unknown (ptone/scion#5133) ---
+
+func startOutcomeUnknownAPIErr() error {
+	return &apiclient.APIError{
+		StatusCode: http.StatusGatewayTimeout,
+		Code:       apiclient.ErrCodeStartOutcomeUnknown,
+		Message:    "start outcome unknown: the runtime broker did not answer within 3m0s; the agent may still be starting",
+		Details:    map[string]interface{}{"agentId": launchTestAgentID, "phase": "provisioning"},
+	}
+}
+
+// syncUnknownOutcomeBridge sets up an auto-provisioning bridge with
+// async_create: false whose Create answers 504 start_outcome_unknown and whose
+// Hub has kept the non-running agent row (without an async Launch record, as a
+// synchronous create does) and refuses messages while it is not running.
+func syncUnknownOutcomeBridge(t *testing.T) (*Bridge, *int, *int) {
+	t.Helper()
+	keptRow := hubclient.Agent{
+		ID:        launchTestAgentID,
+		Name:      resolveTestSlug,
+		Slug:      resolveTestSlug,
+		ProjectID: "proj-1",
+		Phase:     "provisioning",
+		Message:   "start outcome unknown: the runtime broker did not answer within 3m0s; the agent may still be starting",
+	}
+	listFn, listCalls := listing(nil, []hubclient.Agent{keptRow})
+	createFn, _ := failCreate(startOutcomeUnknownAPIErr())
+	sendCalls := 0
+	agents := &mockAgentService{
+		listFn:   listFn,
+		createFn: createFn,
+		sendFn: func(_ context.Context, _ string, _ *messages.StructuredMessage, _, _, _ bool) (*hubclient.MessageResponse, error) {
+			sendCalls++
+			return nil, &apiclient.APIError{StatusCode: http.StatusConflict, Code: "agent_not_running", Message: "agent is not yet running"}
+		},
+	}
+	b := newLaunchBridge(t, agents, boolPtr(false))
+	return b, listCalls, &sendCalls
+}
+
+func assertStartOutcomeUnknownReport(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("want error reporting unconfirmed start, got nil")
+	}
+	got := err.Error()
+	for _, want := range []string{"Could not confirm", resolveTestSlug, "may still be starting"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("error = %q, want it to contain %q", got, want)
+		}
+	}
+	for _, banned := range []string{"auto-provision agent", "Failed to route", "resolve agent:", "resolve context:"} {
+		if strings.Contains(got, banned) {
+			t.Errorf("error = %q, must not frame 504 start_outcome_unknown as %q", got, banned)
+		}
+	}
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != apiclient.ErrCodeStartOutcomeUnknown {
+		t.Errorf("errors.As(*apiclient.APIError) = %v, want %s", apiErr, apiclient.ErrCodeStartOutcomeUnknown)
+	}
+}
+
+func TestSyncCreate_StartOutcomeUnknown_AllPathsReportMayStillBeStarting(t *testing.T) {
+	t.Run("resolveContext", func(t *testing.T) {
+		b, listCalls, _ := syncUnknownOutcomeBridge(t)
+		_, err := b.resolveContext(context.Background(), "proj-1", resolveTestSlug, "")
+		assertStartOutcomeUnknownReport(t, err)
+		if *listCalls != 1 {
+			t.Errorf("List calls = %d, want 1 (no re-list adopt on start_outcome_unknown)", *listCalls)
+		}
+	})
+
+	t.Run("Execute", func(t *testing.T) {
+		b, listCalls, sendCalls := syncUnknownOutcomeBridge(t)
+		ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj-1", AgentSlug: resolveTestSlug})
+		execCtx := &a2asrv.ExecutorContext{
+			TaskID:    "task-exec-504",
+			ContextID: "ctx-exec-504",
+			Message:   a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello")),
+		}
+		var gotErr error
+		var gotEvents int
+		for ev, err := range NewScionExecutor(b, b.log).Execute(ctx, execCtx) {
+			if err != nil {
+				gotErr = err
+				break
+			}
+			if ev != nil {
+				gotEvents++
+			}
+		}
+		assertStartOutcomeUnknownReport(t, gotErr)
+		if gotEvents != 0 {
+			t.Errorf("events yielded = %d, want 0", gotEvents)
+		}
+		if *listCalls != 1 {
+			t.Errorf("List calls = %d, want 1", *listCalls)
+		}
+		if *sendCalls != 0 {
+			t.Errorf("SendStructuredMessage calls = %d, want 0", *sendCalls)
+		}
+	})
+
+	t.Run("SendMessage blocking", func(t *testing.T) {
+		b, _, sendCalls := syncUnknownOutcomeBridge(t)
+		_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", "", testParts, true)
+		assertStartOutcomeUnknownReport(t, err)
+		if *sendCalls != 0 {
+			t.Errorf("SendStructuredMessage calls = %d, want 0", *sendCalls)
+		}
+	})
+
+	t.Run("SendMessage non-blocking", func(t *testing.T) {
+		b, _, sendCalls := syncUnknownOutcomeBridge(t)
+		_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", "", testParts, false)
+		assertStartOutcomeUnknownReport(t, err)
+		if *sendCalls != 0 {
+			t.Errorf("SendStructuredMessage calls = %d, want 0", *sendCalls)
+		}
+	})
+
+	t.Run("SendStreamingMessage", func(t *testing.T) {
+		b, _, sendCalls := syncUnknownOutcomeBridge(t)
+		_, _, _, err := b.SendStreamingMessage(context.Background(), "proj-1", resolveTestSlug, "", testParts)
+		assertStartOutcomeUnknownReport(t, err)
+		if *sendCalls != 0 {
+			t.Errorf("SendStructuredMessage calls = %d, want 0", *sendCalls)
+		}
+	})
+
+	t.Run("plain 504 still reports auto-provision failure", func(t *testing.T) {
+		listFn, listCalls := listing(nil, nil)
+		createFn, _ := failCreate(&apiclient.APIError{StatusCode: http.StatusGatewayTimeout, Code: apiclient.ErrCodeUnavailable, Message: "upstream timeout"})
+		b := newLaunchBridge(t, &mockAgentService{listFn: listFn, createFn: createFn}, boolPtr(false))
+		_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", "", testParts, true)
+		if err == nil || !strings.Contains(err.Error(), "resolve context: auto-provision agent") {
+			t.Errorf("plain 504 error = %v, want resolve context: auto-provision agent", err)
+		}
+		if *listCalls != 2 {
+			t.Errorf("List calls = %d, want 2 (re-list fallback preserved for other errors)", *listCalls)
+		}
+	})
+
+	t.Run("non-504 with code does not match", func(t *testing.T) {
+		if isStartOutcomeUnknown(&apiclient.APIError{StatusCode: http.StatusInternalServerError, Code: apiclient.ErrCodeStartOutcomeUnknown}) {
+			t.Error("500 must not match isStartOutcomeUnknown")
+		}
+	})
 }

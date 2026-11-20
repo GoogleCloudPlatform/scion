@@ -18,10 +18,43 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
+
+// startOutcomeUnknownAgentID reports whether err is the Hub's 504
+// start_outcome_unknown answer to a synchronous create (the Hub kept the
+// agent, which may still be starting) and returns details.agentId when set.
+func startOutcomeUnknownAgentID(err error) (string, bool) {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusGatewayTimeout || apiErr.Code != apiclient.ErrCodeStartOutcomeUnknown {
+		return "", false
+	}
+	id, _ := apiErr.Details["agentId"].(string)
+	return id, true
+}
+
+// createStartOutcomeUnknownText formats the chat reply for a synchronous
+// create that answered 504 start_outcome_unknown (ptone/scion#5133).
+func createStartOutcomeUnknownText(name, id, instruction string) string {
+	slug := api.Slugify(name)
+	if slug == "" {
+		slug = name
+	}
+	who := fmt.Sprintf("Agent `%s`", slug)
+	if id != "" {
+		who += fmt.Sprintf(" (ID: `%s`)", id)
+	}
+	text := fmt.Sprintf("%s was created, but could not confirm that it started; it may still be starting. Check `/scionAdmin status %s`.", who, slug)
+	if instruction != "" {
+		text += fmt.Sprintf(" No thread was opened and the instruction was not sent; once `/scionAdmin status %s` shows it running, send the instruction with `/scion %s <instruction>`.", slug, slug)
+	}
+	return text
+}
 
 // Following agents that are still launching (ptone/scion#4671).
 //

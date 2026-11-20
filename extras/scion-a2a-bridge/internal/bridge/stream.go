@@ -273,6 +273,9 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 	}
 	agentCtx, launching, err := b.resolveContextLaunch(ctx, projectSlug, agentSlug, contextID)
 	if err != nil {
+		if isStartOutcomeUnknown(err) {
+			return "", nil, nil, err
+		}
 		return "", nil, nil, fmt.Errorf("resolve context: %w", err)
 	}
 
