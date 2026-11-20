@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -101,6 +102,24 @@ func (c *requestDoneLogCapture) find(msg string) []requestDoneLogRecord {
 	return out
 }
 
+func (c *requestDoneLogCapture) reset() {
+	c.mu.Lock()
+	c.records = nil
+	c.mu.Unlock()
+}
+
+func (c *requestDoneLogCapture) warns() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for _, r := range c.records {
+		if r.level == slog.LevelWarn {
+			out = append(out, r.msg)
+		}
+	}
+	return out
+}
+
 // captureRequestDoneDefaultLog routes slog.Default to a capture for the test.
 func captureRequestDoneDefaultLog(t *testing.T) *requestDoneLogCapture {
 	t.Helper()
@@ -138,16 +157,21 @@ func requestDoneNoteField(n *authzStoppedNote, field string) string {
 	return n.class
 }
 
-// requestDoneStore counts reads and can run a hook on GetAgent.
+// requestDoneStore counts reads and can run hooks on store reads.
 type requestDoneStore struct {
 	store.Store
 	// fault gates the wrapper: until it is armed, every call delegates and
 	// nothing is counted, so the fixture's setup (installed before it,
 	// installStoreFault) is invisible to the counts.
-	fault      *storeFaultSwitch
-	mu         sync.Mutex
-	counts     map[string]int
-	onGetAgent func(ctx context.Context) error
+	fault              *storeFaultSwitch
+	mu                 sync.Mutex
+	counts             map[string]int
+	onGetAgent         func(ctx context.Context) error
+	onGetProject       func(ctx context.Context) error
+	onAfterListProject func()
+	onListUserBindings func(ctx context.Context) error
+	onEffectiveGroups  func(ctx context.Context) error
+	onGetRoleDefsByIDs func(ctx context.Context) error
 }
 
 func (s *requestDoneStore) note(op string) {
@@ -212,6 +236,14 @@ func (s *requestDoneStore) GetDelegationEdgesForDelegate(ctx context.Context, t,
 
 func (s *requestDoneStore) GetEffectiveGroups(ctx context.Context, id string) ([]string, error) {
 	s.note("GetEffectiveGroups")
+	s.mu.Lock()
+	h := s.onEffectiveGroups
+	s.mu.Unlock()
+	if h != nil && s.fault.Active() {
+		if err := h(ctx); err != nil {
+			return nil, err
+		}
+	}
 	return s.Store.GetEffectiveGroups(ctx, id)
 }
 
@@ -223,6 +255,68 @@ func (s *requestDoneStore) GetEffectiveGroupsForAgent(ctx context.Context, id st
 func (s *requestDoneStore) ListRoleBindingsForPrincipals(ctx context.Context, p []store.PrincipalRef, st []string, sid []string) ([]*store.RoleBinding, error) {
 	s.note("ListRoleBindingsForPrincipals")
 	return s.Store.ListRoleBindingsForPrincipals(ctx, p, st, sid)
+}
+
+func (s *requestDoneStore) ListRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	s.note("ListRoleBindingsForPrincipal")
+	s.mu.Lock()
+	h := s.onListUserBindings
+	s.mu.Unlock()
+	if h != nil && s.fault.Active() {
+		if err := h(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
+}
+
+func (s *requestDoneStore) GetRoleDefinitionsByIDs(ctx context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
+	s.note("GetRoleDefinitionsByIDs")
+	s.mu.Lock()
+	h := s.onGetRoleDefsByIDs
+	s.mu.Unlock()
+	if h != nil && s.fault.Active() {
+		if err := h(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.GetRoleDefinitionsByIDs(ctx, ids)
+}
+
+func (s *requestDoneStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	s.note("GetProject")
+	s.mu.Lock()
+	h := s.onGetProject
+	s.mu.Unlock()
+	if h != nil && s.fault.Active() {
+		if err := h(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return s.Store.GetProject(ctx, id)
+}
+
+func (s *requestDoneStore) ListProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	s.note("ListProjects")
+	res, err := s.Store.ListProjects(ctx, filter, opts)
+	s.mu.Lock()
+	after := s.onAfterListProject
+	s.mu.Unlock()
+	if err == nil && after != nil && s.fault.Active() {
+		after()
+	}
+	return res, err
+}
+
+func (s *requestDoneStore) clearHooks() {
+	s.mu.Lock()
+	s.onGetAgent = nil
+	s.onGetProject = nil
+	s.onAfterListProject = nil
+	s.onListUserBindings = nil
+	s.onEffectiveGroups = nil
+	s.onGetRoleDefsByIDs = nil
+	s.mu.Unlock()
 }
 
 // newRequestDoneFixture is newMSFixture with the counting store installed
@@ -737,4 +831,279 @@ func TestAuthzRequestDone_StandingMemoNotServedToDetached(t *testing.T) {
 	require.Error(t, f.srv.agentStanding(ctx, f.agentA.ID))
 	assert.Equal(t, 1, requestDoneNoteCount(note))
 	assert.Equal(t, 1, logs.count(slog.LevelWarn, warn))
+}
+
+func requestDoneUserContext(parent context.Context, userID string) context.Context {
+	user := NewAuthenticatedUser(userID, userID+"@test.com", "User", "member", "web")
+	ctx := context.WithValue(parent, userContextKey{}, user)
+	ctx = contextWithIdentity(ctx, user)
+	return contextWithCredentialContext(ctx, credentialContextForIdentity(user))
+}
+
+func requestDoneAgentContext(parent context.Context, agent *store.Agent) context.Context {
+	claims := &AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: agent.ProjectID,
+		Scopes:    []AgentTokenScope{ScopeProjectRead},
+		Ancestry:  agent.Ancestry,
+	}
+	identity := &agentIdentityWrapper{claims}
+	ctx := context.WithValue(parent, agentContextKey{}, claims)
+	ctx = withStandingMemo(ctx)
+	ctx = contextWithIdentity(ctx, identity)
+	return contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
+}
+
+// A cancelled agent list (global or project-scoped) logs at most one
+// authorization WARN across scope resolution, mine/shared classification,
+// enrichment, messageability, agent-create capability checks, and authority
+// rendering, routing request-end stops through the single request-end INFO
+// summary. Genuine store faults on a live request still log WARNs
+// (ptone/scion#6775).
+func TestAuthzRequestDone_CancelledAgentListWarnsAtMostOnce(t *testing.T) {
+	// Install log capture before constructing the server so subsystem loggers
+	// (including srv.authzService.logger) write to the capture.
+	logs := captureRequestDoneDefaultLog(t)
+	f, rs, fault := newRequestDoneFixture(t, "reqdone-agent-list")
+	for i := 0; i < 6; i++ {
+		f.userAgent(fmt.Sprintf("list-row-%d", i), f.userID)
+	}
+	logs.reset()
+	fault.Arm()
+
+	serveUserList := func(ctx context.Context, target, route string, h http.HandlerFunc) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req = req.WithContext(ContextWithRoute(requestDoneUserContext(ctx, f.userID), route))
+		rec := httptest.NewRecorder()
+		serveAfterAuth(rec, h, req)
+		return rec
+	}
+
+	t.Run("cancelled before scope resolution", func(t *testing.T) {
+		logs.reset()
+		rs.clearHooks()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rec := serveUserList(ctx, "/api/v1/agents", "agents.list", f.srv.listAgents)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.LessOrEqual(t, logs.count(slog.LevelWarn), 1, "warns: %v", logs.warns())
+		assert.Zero(t, logs.count(slog.LevelWarn), "warns: %v", logs.warns())
+		assert.Len(t, logs.find(requestDoneSummaryMsg), 1)
+	})
+
+	for _, scope := range []string{"mine", "shared"} {
+		t.Run("cancelled during "+scope+" classification", func(t *testing.T) {
+			logs.reset()
+			rs.clearHooks()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			rs.mu.Lock()
+			rs.onListUserBindings = func(c context.Context) error {
+				cancel()
+				return fmt.Errorf("bindings: %w", c.Err())
+			}
+			rs.mu.Unlock()
+			rec := serveUserList(ctx, "/api/v1/agents?scope="+scope, "agents.list", f.srv.listAgents)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.Zero(t, logs.count(slog.LevelWarn), "warns: %v", logs.warns())
+			assert.Len(t, logs.find(requestDoneSummaryMsg), 1)
+		})
+	}
+
+	t.Run("cancelled after row fetch during page build and agent-create capability check", func(t *testing.T) {
+		logs.reset()
+		rs.clearHooks()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		rs.mu.Lock()
+		rs.onGetProject = func(c context.Context) error {
+			cancel()
+			return fmt.Errorf("project: %w", c.Err())
+		}
+		rs.mu.Unlock()
+		rec := serveUserList(ctx, "/api/v1/agents?include=authority", "agents.list", f.srv.listAgents)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Zero(t, logs.count(slog.LevelWarn), "warns: %v", logs.warns())
+		assert.Len(t, logs.find(requestDoneSummaryMsg), 1)
+	})
+
+	t.Run("cancelled during agent-create role definition lookup", func(t *testing.T) {
+		logs.reset()
+		rs.clearHooks()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		rs.mu.Lock()
+		rs.onGetRoleDefsByIDs = func(c context.Context) error {
+			cancel()
+			return fmt.Errorf("role defs: %w", c.Err())
+		}
+		rs.mu.Unlock()
+		rec := serveUserList(ctx, "/api/v1/agents", "agents.list", f.srv.listAgents)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Zero(t, logs.count(slog.LevelWarn), "warns: %v", logs.warns())
+		assert.Len(t, logs.find(requestDoneSummaryMsg), 1)
+	})
+
+	t.Run("cancelled after row fetch for agent caller", func(t *testing.T) {
+		rd, err := f.s.GetRoleDefinitionByName(context.Background(), store.ProjectRoleMember, store.RoleScopeProject)
+		require.NoError(t, err)
+		_, err = f.s.CreateRoleBinding(context.Background(), &store.RoleBinding{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalAgent,
+			PrincipalID:      f.agentA.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          f.projectID,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+
+		logs.reset()
+		rs.clearHooks()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		rs.mu.Lock()
+		rs.onGetProject = func(c context.Context) error {
+			cancel()
+			return fmt.Errorf("project: %w", c.Err())
+		}
+		rs.mu.Unlock()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
+		req = req.WithContext(ContextWithRoute(requestDoneAgentContext(ctx, f.agentA), "agents.list"))
+		rec := httptest.NewRecorder()
+		serveAfterAuth(rec, http.HandlerFunc(f.srv.listAgents), req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Zero(t, logs.count(slog.LevelWarn), "warns: %v", logs.warns())
+		assert.Len(t, logs.find(requestDoneSummaryMsg), 1)
+	})
+
+	t.Run("cancelled project agent list", func(t *testing.T) {
+		logs.reset()
+		rs.clearHooks()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		rs.mu.Lock()
+		rs.onGetProject = func(c context.Context) error {
+			cancel()
+			return fmt.Errorf("project: %w", c.Err())
+		}
+		rs.mu.Unlock()
+		rec := serveUserList(ctx, "/api/v1/projects/"+f.projectID+"/agents?include=authority", "projects.agents.list",
+			func(w http.ResponseWriter, r *http.Request) {
+				f.srv.listProjectAgents(w, r, f.projectID)
+			})
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Zero(t, logs.count(slog.LevelWarn), "warns: %v", logs.warns())
+		assert.Len(t, logs.find(requestDoneSummaryMsg), 1)
+	})
+
+	t.Run("live store fault still logs WARN", func(t *testing.T) {
+		logs.reset()
+		rs.clearHooks()
+		rs.mu.Lock()
+		rs.onEffectiveGroups = func(context.Context) error {
+			return errors.New("injected group store failure")
+		}
+		rs.mu.Unlock()
+		rec := serveUserList(context.Background(), "/api/v1/agents", "agents.list", f.srv.listAgents)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, 1, logs.count(slog.LevelWarn, "listAgents: could not resolve groups for agent-create capability"))
+		assert.Empty(t, logs.find(requestDoneSummaryMsg))
+	})
+}
+
+// A cancelled projects list logs at most one authorization WARN across scope
+// resolution, mine/shared classification, and per-project/scope capability
+// checks, while genuine store faults on a live request keep their WARN
+// (ptone/scion#6775).
+func TestAuthzRequestDone_CancelledProjectsListWarnsAtMostOnce(t *testing.T) {
+	logs := captureRequestDoneDefaultLog(t)
+	f, rs, fault := newRequestDoneFixture(t, "reqdone-project-list")
+	p2 := tid("ms-reqdone-project-list-p2")
+	require.NoError(t, f.s.CreateProject(context.Background(), &store.Project{
+		ID:        p2,
+		Name:      "Project 2",
+		Slug:      "reqdone-project-2",
+		OwnerID:   f.ownerID,
+		CreatedBy: f.ownerID,
+	}))
+	rd, err := f.s.GetRoleDefinitionByName(context.Background(), store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = f.s.CreateRoleBinding(context.Background(), &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      f.userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          p2,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	logs.reset()
+	fault.Arm()
+
+	serveProjects := func(ctx context.Context, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req = req.WithContext(ContextWithRoute(requestDoneUserContext(ctx, f.userID), "projects.list"))
+		rec := httptest.NewRecorder()
+		serveAfterAuth(rec, http.HandlerFunc(f.srv.listProjects), req)
+		return rec
+	}
+
+	t.Run("cancelled before scope resolution", func(t *testing.T) {
+		logs.reset()
+		rs.clearHooks()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rec := serveProjects(ctx, "/api/v1/projects")
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.LessOrEqual(t, logs.count(slog.LevelWarn), 1, "warns: %v", logs.warns())
+		assert.Zero(t, logs.count(slog.LevelWarn), "warns: %v", logs.warns())
+		assert.Len(t, logs.find(requestDoneSummaryMsg), 1)
+	})
+
+	for _, scope := range []string{"mine", "shared"} {
+		t.Run("cancelled during "+scope+" classification", func(t *testing.T) {
+			logs.reset()
+			rs.clearHooks()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			rs.mu.Lock()
+			rs.onListUserBindings = func(c context.Context) error {
+				cancel()
+				return fmt.Errorf("bindings: %w", c.Err())
+			}
+			rs.mu.Unlock()
+			rec := serveProjects(ctx, "/api/v1/projects?scope="+scope)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.Zero(t, logs.count(slog.LevelWarn), "warns: %v", logs.warns())
+			assert.Len(t, logs.find(requestDoneSummaryMsg), 1)
+		})
+	}
+
+	t.Run("cancelled after row fetch during capability checks", func(t *testing.T) {
+		logs.reset()
+		rs.clearHooks()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		rs.mu.Lock()
+		rs.onAfterListProject = cancel
+		rs.mu.Unlock()
+		rec := serveProjects(ctx, "/api/v1/projects")
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Zero(t, logs.count(slog.LevelWarn), "warns: %v", logs.warns())
+		assert.Len(t, logs.find(requestDoneSummaryMsg), 1)
+	})
+
+	t.Run("live store fault still logs WARN", func(t *testing.T) {
+		logs.reset()
+		rs.clearHooks()
+		rs.mu.Lock()
+		rs.onListUserBindings = func(context.Context) error {
+			return errors.New("injected bindings store failure")
+		}
+		rs.mu.Unlock()
+		rec := serveProjects(context.Background(), "/api/v1/projects?scope=mine")
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.Equal(t, 1, logs.count(slog.LevelWarn, "listProjects: owner resolution failed (fail-closed)"))
+		assert.Empty(t, logs.find(requestDoneSummaryMsg))
+	})
 }

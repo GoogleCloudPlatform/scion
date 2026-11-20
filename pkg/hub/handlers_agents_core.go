@@ -425,8 +425,8 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
 	scopeDone()
 	if err != nil {
-		slog.WarnContext(ctx, "listAgents: authorization scope resolution failed (fail-closed)",
-			"error", err)
+		logAuthzCheckFault(ctx, nil, "list_agents_scope",
+			"listAgents: authorization scope resolution failed (fail-closed)", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"unable to resolve authorization", nil)
 		return
@@ -655,8 +655,8 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 	if err != nil {
 		// GetEffectiveGroups may return ErrNotFound for users with no groups.
 		// Only warn on unexpected errors.
-		slog.WarnContext(ctx, "listAgents: could not resolve groups for agent-create capability",
-			"error", err)
+		logAuthzCheckFault(ctx, nil, "agent_create_capability_groups",
+			"listAgents: could not resolve groups for agent-create capability", err)
 		// Fall through with just the direct user principal.
 	}
 	for _, g := range groups {
@@ -668,8 +668,8 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 	if err != nil {
 		// Advisory only — the button stays hidden and the per-project create
 		// path still works. Not worth failing the list response.
-		slog.WarnContext(ctx, "listAgents: could not resolve role bindings for agent-create capability",
-			"error", err)
+		logAuthzCheckFault(ctx, nil, "agent_create_capability_bindings",
+			"listAgents: could not resolve role bindings for agent-create capability", err)
 		return
 	}
 
@@ -699,8 +699,8 @@ func (s *Server) addAgentCreateIfAnyProjectAllows(
 	}
 	roleDefs, err := s.store.GetRoleDefinitionsByIDs(ctx, roleDefIDs)
 	if err != nil {
-		slog.WarnContext(ctx, "listAgents: could not resolve role definitions for agent-create capability",
-			"error", err)
+		logAuthzCheckFault(ctx, nil, "agent_create_capability_roles",
+			"listAgents: could not resolve role definitions for agent-create capability", err)
 		return
 	}
 

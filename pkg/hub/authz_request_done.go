@@ -137,7 +137,7 @@ func logAuthzCheckFault(ctx context.Context, logger *slog.Logger, site, warnMsg 
 	if authzStoppedByRequestEnd(ctx, err) && noteAuthzStopped(ctx, logger, site, err, attrs...) {
 		return
 	}
-	logger.Warn(warnMsg, append(attrs, "error", err)...)
+	logger.WarnContext(ctx, warnMsg, append(attrs, "error", err)...)
 }
 
 // noteAuthzStopped records one check at site that stopped because the
@@ -164,7 +164,7 @@ func noteAuthzStopped(ctx context.Context, logger *slog.Logger, site string, err
 	if logger == nil {
 		logger = slog.Default()
 	}
-	logger.Debug("authorization check stopped after the request context ended",
+	logger.DebugContext(ctx, "authorization check stopped after the request context ended",
 		append([]any{"site", site, "class", class, "error", err}, attrs...)...)
 	return true
 }

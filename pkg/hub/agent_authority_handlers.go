@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -78,7 +77,8 @@ func (s *Server) newAgentAuthorityReader(identity Identity) *agentAuthorityReade
 func (r *agentAuthorityReader) authority(ctx context.Context, agent *store.Agent) *api.AgentAuthority {
 	out, err := r.res.resolve(ctx, agent)
 	if err != nil {
-		slog.WarnContext(ctx, "agent authority state could not be computed", "agent_id", agent.ID, "error", err)
+		logAuthzCheckFault(ctx, nil, "agent_authority_state",
+			"agent authority state could not be computed", err, "agent_id", agent.ID)
 		return nil
 	}
 	if out.Principal != nil && out.Principal.ID != "" && !r.principalVisible(ctx, agent, *out.Principal) {

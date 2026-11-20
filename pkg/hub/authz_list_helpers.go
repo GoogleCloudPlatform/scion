@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sort"
 	"time"
 
@@ -151,7 +150,8 @@ func (s *Server) resolveProjectListClassification(
 		}
 		ownerIDs, err := s.resolveUserOwnerProjectIDsOrError(ctx, userIdent.ID())
 		if err != nil {
-			slog.WarnContext(ctx, operation+": owner resolution failed (fail-closed)", "error", err)
+			logAuthzCheckFault(ctx, nil, "list_owner_resolution",
+				operation+": owner resolution failed (fail-closed)", err)
 			return result, err
 		}
 		if len(ownerIDs) == 0 {
@@ -167,7 +167,8 @@ func (s *Server) resolveProjectListClassification(
 
 	sharedResult, err := s.resolveSharedProjectFilter(ctx, userIdent.ID(), scopeResult)
 	if err != nil {
-		slog.WarnContext(ctx, operation+": shared resolution failed (fail-closed)", "error", err)
+		logAuthzCheckFault(ctx, nil, "list_shared_resolution",
+			operation+": shared resolution failed (fail-closed)", err)
 		return result, err
 	}
 	if sharedResult.IsAllScope {

@@ -564,7 +564,8 @@ func (s *Server) gcpServiceAccountAgents(ctx context.Context, projectID, saID st
 	}
 	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
 	if err != nil {
-		slog.WarnContext(ctx, "GCP SA status: agent scope resolution failed", "error", err)
+		logAuthzCheckFault(ctx, nil, "gcp_sa_agents_scope",
+			"GCP SA status: agent scope resolution failed", err)
 		return out
 	}
 	if scopeResult.Scopes.IsNone() {
