@@ -32,9 +32,19 @@ import (
 )
 
 // TestSettingsHC_BuildAgentEnv_Golden pins settings harness-config env
-// behavior through resolveAuthEnvOverlayWithPolicy + buildAgentEnv so that
-// removing settings-hc env from persisted scion-agent.json is visibly neutral.
+// behavior through resolveAuthEnvOverlayWithPolicy + buildAgentEnv and
+// compares the pre-P3 shape (settings-hc also merged into finalScionCfg.Env
+// underneath inline env) against the P3 shape (finalScionCfg.Env holds only
+// inline env) to show that dropping settings-hc from persisted config is
+// neutral for all non-auth-filtered keys.
 func TestSettingsHC_BuildAgentEnv_Golden(t *testing.T) {
+	settingsEnv := map[string]string{
+		"SETTINGS_ONLY":             "from-settings",
+		"SETTINGS_HUB_WIN":          "from-settings",
+		"SETTINGS_INLINE_COLLIDE":   "from-settings",
+		"SETTINGS_EMPTY":            "",
+		"SETTINGS_EMPTY_HUB_FILLED": "",
+	}
 	settings := &config.VersionedSettings{
 		SchemaVersion: "1",
 		ActiveProfile: "local",
@@ -44,13 +54,7 @@ func TestSettingsHC_BuildAgentEnv_Golden(t *testing.T) {
 		HarnessConfigs: map[string]config.HarnessConfigEntry{
 			"test-harness": {
 				Harness: "generic",
-				Env: map[string]string{
-					"SETTINGS_ONLY":             "from-settings",
-					"SETTINGS_HUB_WIN":          "from-settings",
-					"SETTINGS_INLINE_COLLIDE":   "from-settings",
-					"SETTINGS_EMPTY":            "",
-					"SETTINGS_EMPTY_HUB_FILLED": "",
-				},
+				Env:     settingsEnv,
 			},
 		},
 	}
@@ -69,25 +73,27 @@ func TestSettingsHC_BuildAgentEnv_Golden(t *testing.T) {
 
 	_, _, _, _ = resolveAuthEnvOverlayWithPolicy(&opts, settings, "local", "test-harness")
 
-	ownCfg := &api.ScionConfig{
-		Env: map[string]string{
-			"INLINE_ONLY":             "from-inline",
-			"SETTINGS_INLINE_COLLIDE": "from-inline",
-		},
+	inlineEnv := map[string]string{
+		"INLINE_ONLY":             "from-inline",
+		"SETTINGS_INLINE_COLLIDE": "from-inline",
 	}
+	// Pre-P3 shape: ProvisionAgent merged settings-hc underneath inline env
+	// into scion-agent.json / finalScionCfg.Env.
+	legacyMergedCfgEnv := maps.Clone(settingsEnv)
+	maps.Copy(legacyMergedCfgEnv, inlineEnv)
+
 	defaultEnv := map[string]string{
 		"DEFAULT_ONLY": "from-default",
 	}
 
-	envSlice, _, missingKeys, _ := buildAgentEnv(ownCfg, opts.Env, defaultEnv, true)
-	sort.Strings(missingKeys)
-
-	got := make(map[string]string, len(envSlice))
-	for _, kv := range envSlice {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			got[k] = v
-		}
+	run := func(cfgEnv map[string]string) (map[string]string, []string) {
+		envSlice, _, missingKeys, _ := buildAgentEnv(&api.ScionConfig{Env: cfgEnv}, opts.Env, defaultEnv, true)
+		sort.Strings(missingKeys)
+		return runEnvMap(envSlice), missingKeys
 	}
+
+	gotOld, missingOld := run(legacyMergedCfgEnv)
+	gotNew, missingNew := run(inlineEnv)
 
 	want := map[string]string{
 		"DEFAULT_ONLY":              "from-default",
@@ -98,13 +104,137 @@ func TestSettingsHC_BuildAgentEnv_Golden(t *testing.T) {
 		"SETTINGS_INLINE_COLLIDE":   "from-settings",
 		"SETTINGS_ONLY":             "from-settings",
 	}
-	if !maps.Equal(got, want) {
-		t.Errorf("buildAgentEnv env = %v, want %v", got, want)
+	wantMissing := []string{"SETTINGS_EMPTY"}
+
+	if !maps.Equal(gotNew, want) {
+		t.Errorf("new-shape buildAgentEnv env = %v, want %v", gotNew, want)
+	}
+	if !slices.Equal(missingNew, wantMissing) {
+		t.Errorf("new-shape buildAgentEnv missingKeys = %v, want %v", missingNew, wantMissing)
+	}
+	if !maps.Equal(gotNew, gotOld) {
+		t.Errorf("P3 shape diverged from pre-P3 shape: new=%v, old=%v", gotNew, gotOld)
+	}
+	if !slices.Equal(missingNew, missingOld) {
+		t.Errorf("P3 missingKeys diverged from pre-P3 shape: new=%v, old=%v", missingNew, missingOld)
+	}
+}
+
+// TestStart_SettingsHC_UnusedAuthKeyDropped pins the one auth-filter
+// interaction of stopping settings-hc persistence: when Start's auth filter
+// (run.go) drops an unused auth-candidate key (here ANTHROPIC_VERTEX_PROJECT_ID
+// and empty CLOUD_ML_REGION under claude api-key auth) from opts.Env, it is no
+// longer re-injected (or host-passed-through) from persisted scion-agent.json,
+// while used auth keys and ordinary settings-hc keys still reach the container.
+func TestStart_SettingsHC_UnusedAuthKeyDropped(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("CLOUD_ML_REGION", "host-region-should-not-pass-through")
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "claude")
+	if err := os.MkdirAll(hcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hcConfig := strings.Join([]string{
+		"harness: claude",
+		"user: scion",
+		"image: test-image:latest",
+		"provisioner:",
+		"  type: container-script",
+		"  interface_version: 1",
+		"  command: [\"python3\", \"/home/scion/.scion/harness/provision.py\"]",
+		"auth_selected_type: api-key",
+		"auth:",
+		"  default_type: api-key",
+		"  types:",
+		"    api-key:",
+		"      required_env:",
+		"        - any_of: [\"ANTHROPIC_API_KEY\"]",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(hcConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "provision.py"), []byte("#!/usr/bin/env python3\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	wantMissing := []string{"SETTINGS_EMPTY"}
-	if !slices.Equal(missingKeys, wantMissing) {
-		t.Errorf("buildAgentEnv missingKeys = %v, want %v", missingKeys, wantMissing)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := strings.Join([]string{
+		"schema_version: \"1\"",
+		"active_profile: local",
+		"profiles:",
+		"  local:",
+		"    runtime: docker",
+		"harness_configs:",
+		"  claude:",
+		"    env:",
+		"      ANTHROPIC_API_KEY: sk-from-settings",
+		"      ANTHROPIC_VERTEX_PROJECT_ID: unused-vertex-proj",
+		"      CLOUD_ML_REGION: \"\"",
+		"      SETTINGS_REGULAR: regular-val",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+	if err := os.MkdirAll(projectScionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured runtime.RunConfig
+	mgr := NewManager(&runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			return nil, nil
+		},
+		RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	})
+
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:          "unused-auth-key-test",
+		ProjectPath:   projectScionDir,
+		Template:      "default",
+		HarnessConfig: "claude",
+		HarnessAuth:   "api-key",
+		BrokerMode:    true,
+	}); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	env := runEnvMap(captured.Env)
+	if env["SETTINGS_REGULAR"] != "regular-val" {
+		t.Errorf("SETTINGS_REGULAR = %q, want regular-val", env["SETTINGS_REGULAR"])
+	}
+	gotAPIKey := env["ANTHROPIC_API_KEY"]
+	if gotAPIKey == "" && captured.ResolvedAuth != nil {
+		gotAPIKey = captured.ResolvedAuth.EnvVars["ANTHROPIC_API_KEY"]
+	}
+	if gotAPIKey != "sk-from-settings" {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want sk-from-settings", gotAPIKey)
+	}
+	for _, unusedKey := range []string{"ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"} {
+		if v, ok := env[unusedKey]; ok {
+			t.Errorf("unused auth-candidate key %s=%q unexpectedly reached RunConfig.Env", unusedKey, v)
+		}
+		if captured.ResolvedAuth != nil {
+			if v, ok := captured.ResolvedAuth.EnvVars[unusedKey]; ok {
+				t.Errorf("unused auth-candidate key %s=%q unexpectedly reached ResolvedAuth.EnvVars", unusedKey, v)
+			}
+		}
 	}
 }
 
