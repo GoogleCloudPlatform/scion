@@ -328,6 +328,20 @@ func (_c *TriggerCreate) SetNillableMatchRules(v *string) *TriggerCreate {
 	return _c
 }
 
+// SetMatchForm sets the "match_form" field.
+func (_c *TriggerCreate) SetMatchForm(v string) *TriggerCreate {
+	_c.mutation.SetMatchForm(v)
+	return _c
+}
+
+// SetNillableMatchForm sets the "match_form" field if the given value is not nil.
+func (_c *TriggerCreate) SetNillableMatchForm(v *string) *TriggerCreate {
+	if v != nil {
+		_c.SetMatchForm(*v)
+	}
+	return _c
+}
+
 // SetActionType sets the "action_type" field.
 func (_c *TriggerCreate) SetActionType(v string) *TriggerCreate {
 	_c.mutation.SetActionType(v)
@@ -873,6 +887,10 @@ func (_c *TriggerCreate) createSpec() (*Trigger, *sqlgraph.CreateSpec) {
 		_spec.SetField(trigger.FieldMatchRules, field.TypeString, value)
 		_node.MatchRules = value
 	}
+	if value, ok := _c.mutation.MatchForm(); ok {
+		_spec.SetField(trigger.FieldMatchForm, field.TypeString, value)
+		_node.MatchForm = value
+	}
 	if value, ok := _c.mutation.ActionType(); ok {
 		_spec.SetField(trigger.FieldActionType, field.TypeString, value)
 		_node.ActionType = value
@@ -1324,6 +1342,24 @@ func (u *TriggerUpsert) SetMatchRules(v string) *TriggerUpsert {
 // UpdateMatchRules sets the "match_rules" field to the value that was provided on create.
 func (u *TriggerUpsert) UpdateMatchRules() *TriggerUpsert {
 	u.SetExcluded(trigger.FieldMatchRules)
+	return u
+}
+
+// SetMatchForm sets the "match_form" field.
+func (u *TriggerUpsert) SetMatchForm(v string) *TriggerUpsert {
+	u.Set(trigger.FieldMatchForm, v)
+	return u
+}
+
+// UpdateMatchForm sets the "match_form" field to the value that was provided on create.
+func (u *TriggerUpsert) UpdateMatchForm() *TriggerUpsert {
+	u.SetExcluded(trigger.FieldMatchForm)
+	return u
+}
+
+// ClearMatchForm clears the value of the "match_form" field.
+func (u *TriggerUpsert) ClearMatchForm() *TriggerUpsert {
+	u.SetNull(trigger.FieldMatchForm)
 	return u
 }
 
@@ -1990,6 +2026,27 @@ func (u *TriggerUpsertOne) SetMatchRules(v string) *TriggerUpsertOne {
 func (u *TriggerUpsertOne) UpdateMatchRules() *TriggerUpsertOne {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateMatchRules()
+	})
+}
+
+// SetMatchForm sets the "match_form" field.
+func (u *TriggerUpsertOne) SetMatchForm(v string) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetMatchForm(v)
+	})
+}
+
+// UpdateMatchForm sets the "match_form" field to the value that was provided on create.
+func (u *TriggerUpsertOne) UpdateMatchForm() *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateMatchForm()
+	})
+}
+
+// ClearMatchForm clears the value of the "match_form" field.
+func (u *TriggerUpsertOne) ClearMatchForm() *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.ClearMatchForm()
 	})
 }
 
@@ -2858,6 +2915,27 @@ func (u *TriggerUpsertBulk) SetMatchRules(v string) *TriggerUpsertBulk {
 func (u *TriggerUpsertBulk) UpdateMatchRules() *TriggerUpsertBulk {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateMatchRules()
+	})
+}
+
+// SetMatchForm sets the "match_form" field.
+func (u *TriggerUpsertBulk) SetMatchForm(v string) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetMatchForm(v)
+	})
+}
+
+// UpdateMatchForm sets the "match_form" field to the value that was provided on create.
+func (u *TriggerUpsertBulk) UpdateMatchForm() *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateMatchForm()
+	})
+}
+
+// ClearMatchForm clears the value of the "match_form" field.
+func (u *TriggerUpsertBulk) ClearMatchForm() *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.ClearMatchForm()
 	})
 }
 

@@ -1022,6 +1022,7 @@ func init() {
 	triggerCmd.AddCommand(triggerHistoryCmd)
 	triggerCmd.AddCommand(triggerEventCmd)
 	triggerCmd.AddCommand(triggerWebhookCmd)
+	triggerCmd.AddCommand(triggerPresetCmd)
 
 	triggerCreateCmd.Flags().StringVar(&triggerName, "name", "", "Trigger name (required)")
 	triggerCreateCmd.Flags().StringVar(&triggerDescription, "description", "", "Optional trigger description")

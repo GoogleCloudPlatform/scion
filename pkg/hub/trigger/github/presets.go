@@ -69,10 +69,11 @@ const (
 	// without adding an in-module dependency to this stdlib-only leaf package.
 	MaxCompiledRuleBytes = 4096
 
-	maxPresetFieldKeyBytes = 64
-	maxPresetListItems     = 32
-	maxPresetLabelBytes    = 100
-	maxPresetBranchBytes   = 200
+	maxPresetFieldKeyBytes      = 64
+	maxPresetListItems          = 32
+	maxPresetLabelBytes         = 100
+	maxPresetBranchBytes        = 200
+	maxPresetUnknownFieldErrors = 10
 )
 
 // On-target enum values for presets spanning PRs and issues (§9.2).
@@ -597,11 +598,22 @@ func CompilePreset(req CompilePresetRequest) (*CompiledPreset, error) {
 			}
 		}
 		sort.Strings(unknownKeys)
-		for _, rawKey := range unknownKeys {
+		limit := len(unknownKeys)
+		if limit > maxPresetUnknownFieldErrors {
+			limit = maxPresetUnknownFieldErrors
+		}
+		for _, rawKey := range unknownKeys[:limit] {
 			fieldErrs = append(fieldErrs, PresetFieldError{
 				Field:   sanitizeFieldKeyForError(rawKey),
 				Code:    "unknown_field",
 				Message: "unknown field for preset",
+			})
+		}
+		if omitted := len(unknownKeys) - limit; omitted > 0 {
+			fieldErrs = append(fieldErrs, PresetFieldError{
+				Field:   "fields",
+				Code:    "too_many_unknown_fields",
+				Message: fmt.Sprintf("%d additional unknown fields omitted", omitted),
 			})
 		}
 	}

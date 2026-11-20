@@ -418,6 +418,26 @@ func (_u *TriggerUpdate) SetNillableMatchRules(v *string) *TriggerUpdate {
 	return _u
 }
 
+// SetMatchForm sets the "match_form" field.
+func (_u *TriggerUpdate) SetMatchForm(v string) *TriggerUpdate {
+	_u.mutation.SetMatchForm(v)
+	return _u
+}
+
+// SetNillableMatchForm sets the "match_form" field if the given value is not nil.
+func (_u *TriggerUpdate) SetNillableMatchForm(v *string) *TriggerUpdate {
+	if v != nil {
+		_u.SetMatchForm(*v)
+	}
+	return _u
+}
+
+// ClearMatchForm clears the value of the "match_form" field.
+func (_u *TriggerUpdate) ClearMatchForm() *TriggerUpdate {
+	_u.mutation.ClearMatchForm()
+	return _u
+}
+
 // SetActionType sets the "action_type" field.
 func (_u *TriggerUpdate) SetActionType(v string) *TriggerUpdate {
 	_u.mutation.SetActionType(v)
@@ -838,6 +858,12 @@ func (_u *TriggerUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.MatchRules(); ok {
 		_spec.SetField(trigger.FieldMatchRules, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.MatchForm(); ok {
+		_spec.SetField(trigger.FieldMatchForm, field.TypeString, value)
+	}
+	if _u.mutation.MatchFormCleared() {
+		_spec.ClearField(trigger.FieldMatchForm, field.TypeString)
 	}
 	if value, ok := _u.mutation.ActionType(); ok {
 		_spec.SetField(trigger.FieldActionType, field.TypeString, value)
@@ -1311,6 +1337,26 @@ func (_u *TriggerUpdateOne) SetNillableMatchRules(v *string) *TriggerUpdateOne {
 	return _u
 }
 
+// SetMatchForm sets the "match_form" field.
+func (_u *TriggerUpdateOne) SetMatchForm(v string) *TriggerUpdateOne {
+	_u.mutation.SetMatchForm(v)
+	return _u
+}
+
+// SetNillableMatchForm sets the "match_form" field if the given value is not nil.
+func (_u *TriggerUpdateOne) SetNillableMatchForm(v *string) *TriggerUpdateOne {
+	if v != nil {
+		_u.SetMatchForm(*v)
+	}
+	return _u
+}
+
+// ClearMatchForm clears the value of the "match_form" field.
+func (_u *TriggerUpdateOne) ClearMatchForm() *TriggerUpdateOne {
+	_u.mutation.ClearMatchForm()
+	return _u
+}
+
 // SetActionType sets the "action_type" field.
 func (_u *TriggerUpdateOne) SetActionType(v string) *TriggerUpdateOne {
 	_u.mutation.SetActionType(v)
@@ -1761,6 +1807,12 @@ func (_u *TriggerUpdateOne) sqlSave(ctx context.Context) (_node *Trigger, err er
 	}
 	if value, ok := _u.mutation.MatchRules(); ok {
 		_spec.SetField(trigger.FieldMatchRules, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.MatchForm(); ok {
+		_spec.SetField(trigger.FieldMatchForm, field.TypeString, value)
+	}
+	if _u.mutation.MatchFormCleared() {
+		_spec.ClearField(trigger.FieldMatchForm, field.TypeString)
 	}
 	if value, ok := _u.mutation.ActionType(); ok {
 		_spec.SetField(trigger.FieldActionType, field.TypeString, value)

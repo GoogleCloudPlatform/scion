@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"time"
@@ -92,6 +93,7 @@ type TriggerMatchSpec struct {
 	Dialect     string                 `json:"dialect,omitempty"`
 	Expr        string                 `json:"expr,omitempty"`
 	Rules       []TriggerMatchRuleSpec `json:"rules"`
+	Form        json.RawMessage        `json:"form,omitempty"`
 	RulesBroken bool                   `json:"rulesBroken,omitempty"`
 }
 
@@ -293,6 +295,9 @@ func buildTriggerResponse(tr store.Trigger) TriggerResponse {
 		Types:       types,
 		Rules:       respRules,
 		RulesBroken: rulesErr != nil,
+	}
+	if trimmedForm := bytes.TrimSpace([]byte(tr.MatchForm)); len(trimmedForm) > 0 && trimmedForm[0] == '{' && json.Valid(trimmedForm) {
+		matchSpec.Form = json.RawMessage(trimmedForm)
 	}
 	if rulesErr == nil && len(respRules) == 1 {
 		matchSpec.Dialect = respRules[0].Dialect

@@ -100,6 +100,9 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 	fmt.Printf("  Status:      %s\n", triggerTerminalText(triggerStatusLabel(tr.Status, tr.StatusReason), false))
 	fmt.Printf("  Revision:    %d\n", tr.AuthorizationRevision)
 	fmt.Printf("  Source:      %s\n", triggerTerminalText(formatTriggerSource(tr.Source, 0), false))
+	if presetLabel := formatTriggerMatchFormLabel(tr.Match.Form); presetLabel != "" {
+		fmt.Printf("  Preset:      %s\n", triggerTerminalText(presetLabel, false))
+	}
 	fmt.Printf("  Types:       %s\n", triggerTerminalText(strings.Join(tr.Match.Types, ", "), false))
 
 	rules := effectiveTriggerMatchRules(tr.Match)

@@ -1486,3 +1486,65 @@ func TestClaimTriggerFireSubjectSkip_ConcurrentContention(t *testing.T) {
 	assert.Equal(t, int32(1), firingCount.Load(), "exactly one concurrent claimant must win firing status")
 	assert.Equal(t, int32(workers-1), skipCount.Load(), "remaining concurrent claimants must skip without mutual skip or double fire")
 }
+
+func TestTriggerStore_MatchFormRoundTripAndClear(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+
+	projID := uuid.NewString()
+	userID := uuid.NewString()
+	trID := uuid.NewString()
+	formJSON := `{"preset":"github.command","version":1,"fields":{"command":"review"}}`
+
+	tr := &store.Trigger{
+		ID:            trID,
+		ProjectID:     projID,
+		Name:          "preset-roundtrip",
+		SourceKind:    store.TriggerSourceKindGitHub,
+		SourceID:      "",
+		MatchTypes:    []string{"github.issue_comment.created"},
+		MatchRules:    []store.TriggerMatchRule{{Dialect: "cel", Expr: "event.attributes.command == 'review'"}},
+		MatchForm:     formJSON,
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"a1","message":"hi"}`,
+		CreatedBy:     userID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    userID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{
+			Kind:          store.EffectCeilingBounded,
+			Version:       1,
+			PermissionIDs: []string{"trigger.create"},
+		},
+	}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	got, err := cs.GetTrigger(ctx, trID)
+	require.NoError(t, err)
+	assert.JSONEq(t, formJSON, got.MatchForm)
+
+	listed, err := cs.ListTriggers(ctx, store.TriggerFilter{ProjectID: projID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, listed.Items, 1)
+	assert.JSONEq(t, formJSON, listed.Items[0].MatchForm)
+
+	// Updating name without MatchForm mask preserves MatchForm.
+	got.Name = "preset-renamed"
+	require.NoError(t, cs.UpdateTrigger(ctx, got, store.TriggerFieldMask{Name: true}, 1, true, nil))
+	afterRename, err := cs.GetTrigger(ctx, trID)
+	require.NoError(t, err)
+	assert.Equal(t, "preset-renamed", afterRename.Name)
+	assert.JSONEq(t, formJSON, afterRename.MatchForm)
+
+	// Clearing MatchForm with MatchForm: true removes it.
+	afterRename.MatchForm = ""
+	require.NoError(t, cs.UpdateTrigger(ctx, afterRename, store.TriggerFieldMask{MatchForm: true}, 1, true, nil))
+	assert.Empty(t, afterRename.MatchForm)
+	afterClear, err := cs.GetTrigger(ctx, trID)
+	require.NoError(t, err)
+	assert.Empty(t, afterClear.MatchForm)
+}

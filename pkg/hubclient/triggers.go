@@ -186,6 +186,7 @@ type TriggerMatchSpec struct {
 	Dialect     string                 `json:"dialect,omitempty"`
 	Expr        string                 `json:"expr,omitempty"`
 	Rules       []TriggerMatchRuleSpec `json:"rules"`
+	Form        json.RawMessage        `json:"form,omitempty"`
 	RulesBroken bool                   `json:"rulesBroken,omitempty"`
 }
 
@@ -195,6 +196,7 @@ type TriggerMatchPatchSpec struct {
 	Dialect *string                 `json:"dialect,omitempty"`
 	Expr    *string                 `json:"expr,omitempty"`
 	Rules   *[]TriggerMatchRuleSpec `json:"rules,omitempty"`
+	Form    *json.RawMessage        `json:"form,omitempty"`
 }
 
 // TriggerActionSpec holds the action executed when a trigger matches.
