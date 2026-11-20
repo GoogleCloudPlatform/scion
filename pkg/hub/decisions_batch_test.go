@@ -26,6 +26,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1037,4 +1038,52 @@ func TestDecisionSetAnswer_AllowOther_EndToEnd(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, mismatchRR.Code, mismatchRR.Body.String())
 	mmCode, _ := errorCodeAndDetails(t, mismatchRR)
 	assert.Equal(t, ErrCodeIdempotencyMismatch, mmCode)
+
+	// 7. Reusing a dismissal's idempotency key on the set route must fall through
+	// to 409 answer_set_changed (dismissed), never 422 idempotency_mismatch.
+	dsmMsg, dsmRes := f.topicPrompt(t, `[
+		{"id":"dsm-set-1","question":"First?","choices":["Yes"],"allow_other":true},
+		{"id":"dsm-set-2","question":"Second?","choices":["Yes","No"]}
+	]`, false)
+	require.Len(t, dsmRes.Decisions, 2)
+	dsmRow0, err := f.store.GetDecision(ctx, dsmRes.Decisions[0].RowID)
+	require.NoError(t, err)
+	_, err = f.store.DismissDecisions(ctx, &store.DismissDecisionsInput{
+		MessageID:      dsmMsg.ID,
+		User:           store.DecisionAnswerer{UserID: f.bob.ID, Name: f.bob.DisplayName, Email: f.bob.Email},
+		Reason:         "No longer needed",
+		Surface:        store.DecisionSurfaceNative,
+		IdempotencyKey: "shared-dsm-set-idem-key",
+		ResponseMessage: &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      f.project.ID,
+			Sender:         "user:" + f.bob.Email,
+			SenderID:       f.bob.ID,
+			Recipient:      "agent:" + f.agent.Slug,
+			RecipientID:    f.agent.ID,
+			Msg:            "dismissed",
+			Type:           messages.TypeDecisionResponse,
+			AgentID:        f.agent.ID,
+			Channel:        "web",
+			ThreadID:       f.topicID,
+			ConversationID: dsmRow0.ConversationID,
+		},
+		Now: func() time.Time { return dsmRow0.CreatedAt.Add(store.DecisionDismissMinAge) },
+	})
+	require.NoError(t, err)
+
+	dsmAnswerRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+dsmMsg.ID+"/answers", map[string]interface{}{
+		"idempotency_key": "shared-dsm-set-idem-key",
+		"answers": []map[string]interface{}{
+			{"decision_row_id": dsmRes.Decisions[0].RowID, "choice_id": messages.ChoiceIDOther, "other_text": "too late"},
+			{"decision_row_id": dsmRes.Decisions[1].RowID, "choice_id": "1"},
+		},
+	})
+	require.Equal(t, http.StatusConflict, dsmAnswerRR.Code, dsmAnswerRR.Body.String())
+	dsmCode, dsmDetails := errorCodeAndDetails(t, dsmAnswerRR)
+	assert.Equal(t, ErrCodeAnswerSetChanged, dsmCode)
+	dsmReasons, ok := dsmDetails["reasons"].(map[string]interface{})
+	require.True(t, ok, "details: %v", dsmDetails)
+	assert.Equal(t, store.AnswerSetReasonDismissed, dsmReasons[dsmRes.Decisions[0].RowID])
+	assert.Equal(t, store.AnswerSetReasonDismissed, dsmReasons[dsmRes.Decisions[1].RowID])
 }

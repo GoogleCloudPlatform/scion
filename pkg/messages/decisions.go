@@ -104,7 +104,6 @@ const (
 	DecisionErrReservedField = "reserved_field"
 	DecisionErrNoMatch       = "no_match"
 	DecisionErrTooLarge      = "too_large"
-	DecisionErrNotSupported  = "not_supported"
 	DecisionErrNotAllowed    = "not_allowed"
 )
 
