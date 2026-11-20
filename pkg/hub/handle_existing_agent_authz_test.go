@@ -61,6 +61,7 @@ func TestHandleExistingAgent_RequiresLifecycleAuthorization(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, f.member, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 			"name":      agent.Slug,
 			"projectId": f.project.ID,
+			"resume":    true,
 		})
 		assert.Equal(t, http.StatusConflict, rec.Code,
 			"a plain project member must not restart another member's suspended agent by name; got: %s", rec.Body.String())
@@ -94,6 +95,7 @@ func TestHandleExistingAgent_RequiresLifecycleAuthorization(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 			"name":      agent.Slug,
 			"projectId": f.project.ID,
+			"resume":    true,
 		})
 		// The owner has no runtime broker configured in this test server, so
 		// the dispatch itself fails after the authorization gate passes --

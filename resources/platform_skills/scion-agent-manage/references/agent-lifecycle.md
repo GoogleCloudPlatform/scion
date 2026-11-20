@@ -81,7 +81,7 @@ until someone with lifecycle permission on it (normally you) resumes it: message
 (`scion-scheduler`). Before suspending, confirm the agent has read any notice you sent; a
 message sent moments earlier can still fail delivery. Keep an agent running while it waits
 on a delivery from a peer that cannot wake it. `scion stop` ends the session (the next
-`start` begins a fresh session) and is justified only for short, time-boxed terminal or
+`scion resume` begins a fresh session) and is justified only for short, time-boxed terminal or
 incident inspection when resume is unsupported or unwanted; do not leave agents stopped
 indefinitely.
 
