@@ -1903,6 +1903,7 @@ authDone:
 		warnings = append(warnings, fmt.Sprintf("Warning: harness-config %q could not be resolved at start; persisted env provenance cannot be verified.", harnessConfigName))
 	}
 	hookWithheldEnv := computeHookWithheldEnv(hookWithheldInput{
+		runtimeName:     m.Runtime.Name(),
 		bundleEnv:       hcBundleEnv,
 		envTemplateEnv:  hcEnvTemplate,
 		settingsHCEnv:   settingsHCEnv,

@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -103,6 +104,7 @@ const (
 // hookWithheldInput collects the sanitized harness-config env layers and the
 // higher-precedence env sources needed to compute RunConfig.HookWithheldEnv.
 type hookWithheldInput struct {
+	runtimeName     string
 	bundleEnv       map[string]string
 	envTemplateEnv  map[string]string
 	settingsHCEnv   map[string]string
@@ -119,17 +121,14 @@ type hookWithheldInput struct {
 // bundle env_template, or settings/profile harness_configs.<name>.env) and must
 // be withheld from lifecycle hooks.
 //
-// Keys supplied with a non-empty value by a higher-precedence non-harness-config
-// source (caller/hub env captured before settings-hc injection, or inline env)
-// are excluded so those sources remain visible to hooks. When provenance from
-// buildAgentEnvWithBundle is supplied, it drives bundle and settings-hc
-// attribution directly instead of re-deriving precedence. Legacy persisted keys
-// that differ from the live bundle value (and thus were not demoted) remain in
-// envSourceConfig and are still withheld when declared by bundleEnv unless
-// overridden by callerEnv or inlineEnv. For env_template (which travels via
-// Harness.GetEnv below RunConfig.Env, resolved auth, and environment secrets),
-// keys overridden by agentEnv, resolved auth, or environment secrets are
-// excluded.
+// Final container-level precedence across RunConfig.Env, Harness.GetEnv(),
+// ResolvedAuth, and ResolvedSecrets is resolved through
+// runtime.ResolveRuntimeEnvWinner using in.runtimeName, so withholding matches
+// each runtime's actual emission order. Within RunConfig.Env, provenance from
+// buildAgentEnvWithBundle identifies bundle, config, extra (caller/settings-hc),
+// and default sources directly. Legacy persisted keys that differ from the live
+// bundle value remain in envSourceConfig and are still withheld when declared
+// by bundleEnv unless overridden by callerEnv or inlineEnv.
 func computeHookWithheldEnv(in hookWithheldInput) []string {
 	if len(in.bundleEnv) == 0 && len(in.settingsHCEnv) == 0 && len(in.envTemplateEnv) == 0 {
 		return nil
@@ -139,6 +138,13 @@ func computeHookWithheldEnv(in hookWithheldInput) []string {
 	for _, entry := range in.agentEnv {
 		if k, _, ok := strings.Cut(entry, "="); ok && k != "" {
 			emitted[k] = struct{}{}
+		}
+	}
+
+	tplKeys := make(map[string]struct{}, len(in.envTemplateEnv))
+	for k := range in.envTemplateEnv {
+		if k != "" {
+			tplKeys[k] = struct{}{}
 		}
 	}
 
@@ -154,19 +160,13 @@ func computeHookWithheldEnv(in hookWithheldInput) []string {
 		}
 	}
 
-	authOrSecret := make(map[string]struct{})
-	if in.resolvedAuth != nil {
-		for k, v := range in.resolvedAuth.EnvVars {
-			if v != "" {
-				authOrSecret[k] = struct{}{}
-			}
-		}
-	}
-	for _, s := range in.resolvedSecrets {
-		if (s.Type == "environment" || s.Type == "") && s.Target != "" && s.Value != "" {
-			authOrSecret[s.Target] = struct{}{}
-		}
-	}
+	winners := runtime.ResolveRuntimeEnvWinner(
+		in.runtimeName,
+		emitted,
+		tplKeys,
+		in.resolvedAuth,
+		in.resolvedSecrets,
+	)
 
 	seen := make(map[string]struct{})
 	var withheld []string
@@ -181,77 +181,45 @@ func computeHookWithheldEnv(in hookWithheldInput) []string {
 		withheld = append(withheld, k)
 	}
 
-	if len(in.provenance) > 0 {
-		for k, src := range in.provenance {
-			if _, ok := emitted[k]; !ok {
-				continue
-			}
-			switch src {
-			case envSourceBundle:
-				add(k)
-			case envSourceConfig:
-				// Persisted own env or a legacy non-demoted bundle key:
-				// withhold when the live bundle declares that name and no
-				// higher-precedence caller or inline override set it.
-				if _, declared := in.bundleEnv[k]; declared {
-					if _, ok := higher[k]; !ok {
-						add(k)
+	for k, winner := range winners {
+		switch winner {
+		case runtime.EnvSourceHarnessTemplate:
+			// Harness.GetEnv() (env_template) won the final container value on
+			// this runtime, so it must be withheld from hooks.
+			add(k)
+		case runtime.EnvSourceConfigEnv:
+			if len(in.provenance) > 0 {
+				switch in.provenance[k] {
+				case envSourceBundle:
+					add(k)
+				case envSourceConfig:
+					// Persisted own env or a legacy non-demoted bundle key:
+					// withhold when the live bundle declares that name and no
+					// higher-precedence caller or inline override set it.
+					if _, declared := in.bundleEnv[k]; declared {
+						if _, ok := higher[k]; !ok {
+							add(k)
+						}
+					}
+				case envSourceExtra:
+					// opts.Env carries callerEnv plus settingsHCEnv for absent keys.
+					if _, fromSettings := in.settingsHCEnv[k]; fromSettings {
+						if v, ok := in.callerEnv[k]; !ok || v == "" {
+							add(k)
+						}
 					}
 				}
-			case envSourceExtra:
-				// opts.Env carries callerEnv plus settingsHCEnv for absent keys.
-				if _, fromSettings := in.settingsHCEnv[k]; fromSettings {
-					if v, ok := in.callerEnv[k]; !ok || v == "" {
-						add(k)
-					}
+			} else {
+				if _, ok := higher[k]; ok {
+					continue
+				}
+				if _, fromBundle := in.bundleEnv[k]; fromBundle {
+					add(k)
+				} else if _, fromSettings := in.settingsHCEnv[k]; fromSettings {
+					add(k)
 				}
 			}
 		}
-	} else {
-		for k := range in.bundleEnv {
-			if k == "" {
-				continue
-			}
-			if _, ok := higher[k]; ok {
-				continue
-			}
-			if _, ok := emitted[k]; !ok {
-				continue
-			}
-			add(k)
-		}
-
-		for k := range in.settingsHCEnv {
-			if k == "" {
-				continue
-			}
-			if _, ok := higher[k]; ok {
-				continue
-			}
-			if _, ok := emitted[k]; !ok {
-				continue
-			}
-			add(k)
-		}
-	}
-
-	for k := range in.envTemplateEnv {
-		if k == "" {
-			continue
-		}
-		if _, ok := higher[k]; ok {
-			continue
-		}
-		if _, ok := authOrSecret[k]; ok {
-			continue
-		}
-		if _, ok := emitted[k]; ok {
-			// If emitted came from bundleEnv or settingsHCEnv, it was already
-			// added above; otherwise a non-harness-config layer in agentEnv
-			// overrides Harness.GetEnv().
-			continue
-		}
-		add(k)
 	}
 
 	sort.Strings(withheld)
