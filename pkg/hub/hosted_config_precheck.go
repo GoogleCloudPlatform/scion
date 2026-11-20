@@ -100,7 +100,7 @@ func hostedRuntimeKind(ctx context.Context, st store.Store, agent *store.Agent) 
 	switch {
 	case !ok || typ == "":
 		return ""
-	case typ == "kubernetes" || typ == "k8s" || typ == "remote":
+	case isKubernetesRuntimeType(typ):
 		return hostedguard.RuntimeKubernetes
 	default:
 		return typ
