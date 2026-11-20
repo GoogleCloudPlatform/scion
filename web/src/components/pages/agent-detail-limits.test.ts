@@ -183,6 +183,21 @@ describe('agent detail Limits & Usage card', () => {
     });
   });
 
+  it.each<[string, string]>([
+    ['Go zero date', '0001-01-01T00:00:00Z'],
+    ['invalid date', 'not-a-date'],
+  ])('treats %s startedAt as unstarted for inherited duration', (_label, startedAt) => {
+    const items = usageItems(
+      renderUsageCard({
+        phase: 'running',
+        startedAt,
+        appliedConfig: { inlineConfig: {} },
+      })
+    );
+    expect(items['Elapsed']).toBeUndefined();
+    expect(items['Max Duration']).toEqual({ value: 'Inherited', hasProgressBar: false });
+  });
+
   it('shows inherited elapsed only while running or stopping, not when stopped', () => {
     vi.useFakeTimers();
     try {

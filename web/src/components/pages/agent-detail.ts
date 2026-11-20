@@ -2250,15 +2250,17 @@ export class ScionPageAgentDetail extends LitElement {
 
     let timeRemainingSec = 0;
     let elapsedSec = 0;
-    if (agent.startedAt) {
-      elapsedSec = Math.max(0, (Date.now() - new Date(agent.startedAt).getTime()) / 1000);
+    const startedAt =
+      agent.startedAt && !this.isZeroDate(agent.startedAt) ? agent.startedAt : undefined;
+    if (startedAt) {
+      elapsedSec = Math.max(0, (Date.now() - new Date(startedAt).getTime()) / 1000);
       if (maxDurationSec > 0) {
         timeRemainingSec = Math.max(0, maxDurationSec - elapsedSec);
       }
     }
 
     const showInheritedElapsed =
-      Boolean(agent.startedAt) && (agent.phase === 'running' || agent.phase === 'stopping');
+      Boolean(startedAt) && (agent.phase === 'running' || agent.phase === 'stopping');
 
     return html`
       <div class="card">
