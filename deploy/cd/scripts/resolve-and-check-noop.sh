@@ -254,13 +254,25 @@ PY
           die "Target version '${TARGET_TAG}' is older than (or unorderable against) deployed version '${DEPLOYED_VERSION}' (classification: ${rel_class}). Rolling back across one-way database migrations or newer Terraform modules can break the hub. Pass _ALLOW_DOWNGRADE=true only after verifying schema compatibility (deployed downgrade_floor='${DEPLOYED_FLOOR:-unknown}')."
         fi
         if [[ -n "${DEPLOYED_FLOOR}" ]]; then
-          floor_class="$(compare_release_refs "${DEPLOYED_FLOOR}" "${TARGET_TAG}" "" "${TARGET_VERSION_DATE}")"
+          effective_floor="${DEPLOYED_FLOOR}"
+          deployed_vs_floor="$(compare_release_refs "${DEPLOYED_VERSION}" "${effective_floor}" "${DEPLOYED_DATE}" "")"
+          case "${deployed_vs_floor}" in
+            upgrade|switch-newer)
+              log_warn "deployed.json downgrade_floor ('${effective_floor}') is newer than deployed version ('${DEPLOYED_VERSION}'); clamping effective floor to '${DEPLOYED_VERSION}'."
+              effective_floor="${DEPLOYED_VERSION}"
+              ;;
+          esac
+          floor_date=""
+          if [[ "${effective_floor}" == "${DEPLOYED_VERSION}" ]]; then
+            floor_date="${DEPLOYED_DATE}"
+          fi
+          floor_class="$(compare_release_refs "${effective_floor}" "${TARGET_TAG}" "${floor_date}" "${TARGET_VERSION_DATE}")"
           case "${floor_class}" in
             downgrade|switch-older|unknown)
               if [[ "${ALLOW_BELOW_DOWNGRADE_FLOOR}" != "true" ]]; then
-                die "Target version '${TARGET_TAG}' is below (or unorderable against) deployed schema downgrade_floor '${DEPLOYED_FLOOR}' (classification: ${floor_class}). Booting an older binary against a one-way-migrated Cloud SQL database breaks Hub startup. Restore Cloud SQL (Point-in-Time Recovery / backup) to a pre-upgrade snapshot first, then pass both _ALLOW_DOWNGRADE=true and _ALLOW_BELOW_DOWNGRADE_FLOOR=true."
+                die "Target version '${TARGET_TAG}' is below (or unorderable against) deployed schema downgrade_floor '${effective_floor}' (classification: ${floor_class}). Booting an older binary against a one-way-migrated Cloud SQL database breaks Hub startup. Restore Cloud SQL (Point-in-Time Recovery / backup) to a pre-upgrade snapshot first, then pass both _ALLOW_DOWNGRADE=true and _ALLOW_BELOW_DOWNGRADE_FLOOR=true."
               fi
-              log_warn "Permitting rollback of '${TARGET_TAG}' below deployed schema downgrade_floor '${DEPLOYED_FLOOR}' (${floor_class}) because _ALLOW_BELOW_DOWNGRADE_FLOOR=true."
+              log_warn "Permitting rollback of '${TARGET_TAG}' below deployed schema downgrade_floor '${effective_floor}' (${floor_class}) because _ALLOW_BELOW_DOWNGRADE_FLOOR=true."
               ;;
           esac
         fi

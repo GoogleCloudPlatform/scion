@@ -955,10 +955,11 @@ time-literals:
 check-harness-coverage:
 	@./image-build/scripts/check-harness-coverage.sh
 
-## test-image-scripts: Test the release image driver (build-release-images.sh), the build-images.sh guards, the assert-no-cgo.sh exit contract, the Cloud Build digest recorder, and the GKE CD pipeline scripts with stubs; no docker, no network
+## test-image-scripts: Test the release image driver (build-release-images.sh), the build-images.sh guards, verify-registry.sh error classification, the assert-no-cgo.sh exit contract, the Cloud Build digest recorder, and the GKE CD pipeline scripts with stubs; no docker, no network
 test-image-scripts:
 	@bash ./image-build/scripts/test-build-release-images.sh
 	@bash ./image-build/scripts/test-build-images.sh
+	@bash ./image-build/scripts/test-verify-registry.sh
 	@bash ./image-build/scripts/test-assert-no-cgo.sh
 	@bash ./image-build/scripts/test-buildx-record-digest.sh
 	@bash ./deploy/cd/scripts/test-cd-scripts.sh

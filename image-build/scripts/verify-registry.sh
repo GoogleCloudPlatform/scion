@@ -39,16 +39,39 @@ reg_location="${reg_host%-docker.pkg.dev}"
 echo "Pre-flight: checking Artifact Registry access..."
 echo "  registry=$REGISTRY (project=$reg_project location=$reg_location repo=$reg_repo)"
 
-# 1. Verify the Artifact Registry repository exists.
-if ! gcloud artifacts repositories describe "$reg_repo" \
+# 1. Verify the Artifact Registry repository exists and is readable.
+describe_err_file="$(mktemp "${TMPDIR:-/tmp}/verify-registry-err.XXXXXX")"
+describe_rc=0
+gcloud artifacts repositories describe "$reg_repo" \
     --location="$reg_location" --project="$reg_project" \
-    --format="value(name)" >/dev/null 2>&1; then
-  echo ""
-  echo "ERROR: Artifact Registry repository not found: $REGISTRY"
-  echo "Create it and grant push access with:"
-  echo "  image-build/scripts/setup-cloud-build.sh --project $reg_project --location $reg_location --repo $reg_repo"
+    --format="value(name)" >/dev/null 2>"$describe_err_file" || describe_rc=$?
+
+if [[ $describe_rc -ne 0 ]]; then
+  describe_err="$(cat "$describe_err_file")"
+  rm -f -- "$describe_err_file"
+  echo "" >&2
+  if grep -qiE 'SERVICE_DISABLED|has not been used|it is disabled|API .* not enabled' <<<"$describe_err"; then
+    printf '%s\n' "$describe_err" >&2
+    echo "ERROR: Artifact Registry API is not enabled in project '$reg_project'." >&2
+    echo "Enable it with:" >&2
+    echo "  gcloud services enable artifactregistry.googleapis.com --project=$reg_project" >&2
+  elif grep -qiE 'PERMISSION_DENIED|HTTPError 40[13]|unauthori[sz]ed|forbidden|does not have permission|permission .* denied|credential' <<<"$describe_err"; then
+    printf '%s\n' "$describe_err" >&2
+    echo "ERROR: Permission denied accessing Artifact Registry repository: $REGISTRY" >&2
+    echo "The active service account lacks artifactregistry.repositories.get (or newly bound IAM policies have not yet propagated)." >&2
+    echo "Grant access with:" >&2
+    echo "  image-build/scripts/setup-cloud-build.sh --project $reg_project --location $reg_location --repo $reg_repo" >&2
+  elif grep -qiE 'NOT_FOUND|was not found|does not exist' <<<"$describe_err"; then
+    echo "ERROR: Artifact Registry repository not found: $REGISTRY" >&2
+    echo "Create it and grant push access with:" >&2
+    echo "  image-build/scripts/setup-cloud-build.sh --project $reg_project --location $reg_location --repo $reg_repo" >&2
+  else
+    printf '%s\n' "$describe_err" >&2
+    echo "ERROR: Failed to describe Artifact Registry repository: $REGISTRY" >&2
+  fi
   exit 1
 fi
+rm -f -- "$describe_err_file"
 
 # 2. Verify push permission via the Artifact Registry testIamPermissions API.
 token=$(gcloud auth print-access-token)
@@ -60,11 +83,11 @@ response=$(curl -sf -X POST \
   -d '{"permissions":["artifactregistry.repositories.uploadArtifacts"]}' 2>/dev/null || echo "{}")
 
 if ! echo "$response" | grep -q "uploadArtifacts"; then
-  echo ""
-  echo "ERROR: Missing push permission on $REGISTRY"
-  echo "The active service account cannot upload artifacts to this repository."
-  echo "Grant access with:"
-  echo "  image-build/scripts/setup-cloud-build.sh --project $reg_project --location $reg_location --repo $reg_repo"
+  echo "" >&2
+  echo "ERROR: Missing push permission on $REGISTRY" >&2
+  echo "The active service account cannot upload artifacts to this repository." >&2
+  echo "Grant access with:" >&2
+  echo "  image-build/scripts/setup-cloud-build.sh --project $reg_project --location $reg_location --repo $reg_repo" >&2
   exit 1
 fi
 

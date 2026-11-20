@@ -82,6 +82,15 @@ Before applying infrastructure, verify the following in your target GCP project:
 
 ### 1.1 Run `setup-cd.sh` (State Bucket + Dedicated CD Service Account)
 
+**Operator prerequisites:** The identity running `setup-cd.sh` needs:
+- `roles/serviceusage.serviceUsageAdmin` (enable APIs)
+- `roles/storage.admin` (create/harden the state bucket and bind bucket IAM)
+- `roles/iam.serviceAccountAdmin` (create the dedicated CD service account)
+- `roles/resourcemanager.projectIamAdmin` (bind project IAM roles)
+- **`roles/artifactregistry.admin`** (or repository-level `artifactregistry.repositories.setIamPolicy` on `<shared_prefix>-scion` — note that `roles/editor` + `roles/resourcemanager.projectIamAdmin` does **not** include `artifactregistry.repositories.setIamPolicy`)
+
+`setup-cd.sh` runs a lightweight read-only IAM preflight check (`testIamPermissions`) before mutating GCP so missing operator permissions fail fast without leaving partial state.
+
 Preview the commands first with `--dry-run`, then execute without `--dry-run` (include `--bootstrap-storage-admin` before Pass 1 so the CD service account can create `<project_id>-<hub_name>-artifacts`; you will revoke the unconditioned storage binding right after Pass 1):
 
 ```bash
@@ -196,7 +205,7 @@ Create an `A` record in your authoritative DNS zone mapping `<hostname>` -> `<lb
 
 ### Option B: Zero-Domain Cloud Endpoints (`*.endpoints.<project_id>.cloud.goog`)
 
-For evaluations, internal environments, or projects without a custom domain registrar, Google provides authoritative public DNS under `<name>.endpoints.<project_id>.cloud.goog`:
+For dev/test hubs, evaluations, or projects without an external DNS zone or Cloud DNS zone, Google provides authoritative public DNS under `<name>.endpoints.<project_id>.cloud.goog`:
 
 1. Set `hostname = "<hub_name>.endpoints.<project_id>.cloud.goog"` in `hub.tfvars` before Pass 1.
 2. Once `lb_ip` is allocated, publish a minimal Cloud Endpoints DNS entry (one-time bootstrap step requiring `roles/servicemanagement.admin` + `roles/endpoints.admin` on the operator):
@@ -276,6 +285,22 @@ gcloud builds triggers run <hub_name>-cd \
   --substitutions=_VERSION_TAG=v0.4.0-preview.4
 ```
 
+#### Submitting `cloudbuild-gke-cd.yaml` manually from local source (without a trigger)
+
+If you invoke `gcloud builds submit` directly from a local checkout with the custom `--service-account`, **pass `--gcs-source-staging-dir`** pointing inside the state bucket (for example `gs://<state_bucket>/<shared_prefix>/cd-source`). Because `<shared_prefix>-cd-deployer` intentionally has no access to the default `gs://<project_id>_cloudbuild` bucket, omitting `--gcs-source-staging-dir` fails when Cloud Build tries to fetch the uploaded source archive:
+
+```bash
+gcloud builds submit . \
+  --project=<project_id> \
+  --region=us-central1 \
+  --config=deploy/cd/cloudbuild-gke-cd.yaml \
+  --service-account="projects/<project_id>/serviceAccounts/<shared_prefix>-cd-deployer@<project_id>.iam.gserviceaccount.com" \
+  --gcs-source-staging-dir="gs://<project_id>-<shared_prefix>-tfstate/<shared_prefix>/cd-source" \
+  --substitutions="^|^_CHANNEL=nightly|_STATE_BUCKET=<project_id>-<shared_prefix>-tfstate|_SHARED_PREFIX=<shared_prefix>|_HUB_NAME=<hub_name>|_REGISTRY=us-central1-docker.pkg.dev/<project_id>/<shared_prefix>-scion"
+```
+
+*(Optional cleanup: delete staged tarballs under `gs://<state_bucket>/<shared_prefix>/cd-source/` after ad-hoc runs.)*
+
 ---
 
 ## Step 6: One-Time Post-Apply Hub Configuration
@@ -315,7 +340,7 @@ Once the Google-managed SSL certificate reaches `ACTIVE` and the Hub is reachabl
 Step 1 refuses any `TARGET_TAG` older than `deployed.json`'s `version` unless `_ALLOW_DOWNGRADE=true`, and **additionally hard-fails** any rollback below (or unorderable against) `deployed.json`'s `downgrade_floor` unless `_ALLOW_BELOW_DOWNGRADE_FLOOR=true` is also set. Before forcing a downgrade, check three constraints:
 
 1. **One-way database migrations (`DowngradeFloor`):**
-   Scion tracks destructive schema changes in `pkg/version.DowngradeFloor` (recorded in `deployed.json` as `downgrade_floor` on each deploy). Rolling `scion-hub-gke` back via Terraform bypasses in-hub binary update guards and boots an older Hub binary directly against the newer Cloud SQL schema. Routine rollbacks to a tag **at or above** `downgrade_floor` require only `_ALLOW_DOWNGRADE=true`. **Never set `_ALLOW_BELOW_DOWNGRADE_FLOOR=true` to roll below `downgrade_floor` without first restoring Cloud SQL (Point-in-Time Recovery / backup) to a pre-upgrade snapshot.**
+   Scion tracks destructive schema changes in `pkg/version.DowngradeFloor` (recorded in `deployed.json` as `downgrade_floor` on each deploy, clamped to `version` if the source constant names a newer release date than the deployed tag). Rolling `scion-hub-gke` back via Terraform bypasses in-hub binary update guards and boots an older Hub binary directly against the newer Cloud SQL schema. Routine rollbacks to a tag **at or above** `downgrade_floor` require only `_ALLOW_DOWNGRADE=true`. **Never set `_ALLOW_BELOW_DOWNGRADE_FLOOR=true` to roll below `downgrade_floor` without first restoring Cloud SQL (Point-in-Time Recovery / backup) to a pre-upgrade snapshot.**
 2. **Terraform resource drift across tags:**
    Because Step 4 runs `plan` and `apply` back-to-back from the checked-out `TARGET_TAG`, rolling backward to an older tag whose Terraform modules lack resources added in a newer release will plan and apply **destroys** of those resources in the same step. Always check out the older tag locally and run `terraform plan` manually to inspect the diff before triggering a cross-minor rollback in Cloud Build.
 3. **`nightly-YYYYMMDD` 14-day tag retention:**

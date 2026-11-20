@@ -185,6 +185,22 @@ fi
 
 # gcloud artifacts repositories describe ...
 if [[ "${1:-}" == "artifacts" && "${2:-}" == "repositories" && "${3:-}" == "describe" ]]; then
+  if [[ -n "${MOCK_AR_DESCRIBE_COUNT_FILE:-}" ]]; then
+    cnt=0
+    if [[ -f "${MOCK_AR_DESCRIBE_COUNT_FILE}" ]]; then
+      cnt="$(cat "${MOCK_AR_DESCRIBE_COUNT_FILE}")"
+    fi
+    cnt=$((cnt + 1))
+    printf '%s\n' "${cnt}" > "${MOCK_AR_DESCRIBE_COUNT_FILE}"
+    if [[ -n "${MOCK_AR_DESCRIBE_DENY_UNTIL:-}" && ${cnt} -le ${MOCK_AR_DESCRIBE_DENY_UNTIL} ]]; then
+      echo "ERROR: (gcloud.artifacts.repositories.describe) PERMISSION_DENIED: Permission 'artifactregistry.repositories.get' denied" >&2
+      exit 1
+    fi
+  fi
+  if [[ "${MOCK_AR_REPO_DENIED:-}" == "true" ]]; then
+    echo "ERROR: (gcloud.artifacts.repositories.describe) PERMISSION_DENIED: Permission 'artifactregistry.repositories.get' denied" >&2
+    exit 1
+  fi
   if [[ "${MOCK_AR_REPO_MISSING:-}" == "true" ]]; then
     echo "ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Repository not found" >&2
     exit 1
@@ -626,6 +642,67 @@ EOF
   else
     fail "accepted nightly-YYYYMMDD.N tag unsupported by ReleaseImageTag"
   fi
+
+  # 15. Future downgrade_floor in deployed.json (e.g. nightly-20261120 with floor nightly-20261121):
+  #     force-redeploy of nightly-20261120 succeeds, and rollback to nightly-20261119 is blocked by clamped floor nightly-20261120.
+  cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json" <<EOF
+{
+  "version": "nightly-20261120",
+  "version_date": "2026-11-20T03:17:37Z",
+  "hub_image_digest": "${digest}",
+  "tfvars_sha256": "${tfvars_sha}",
+  "downgrade_floor": "nightly-20261121"
+}
+EOF
+  rm -rf "${d}/workspace" && mkdir -p "${d}/workspace"
+  env "${base_env[@]}" _FORCE_REDEPLOY=true _CHANNEL="" _VERSION_TAG="nightly-20261120" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" >/dev/null
+  # shellcheck disable=SC1091
+  source "${d}/workspace/target.env"
+  assert_eq "force-redeploy of nightly-20261120 succeeds even with future downgrade_floor" "${TARGET_TAG}" "nightly-20261120"
+
+  rc=0
+  out="$(env "${base_env[@]}" _ALLOW_DOWNGRADE=true _CHANNEL="" _VERSION_TAG="nightly-20261119" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "rollback below clamped floor still fails closed" "${out}" "downgrade_floor 'nightly-20261120'"
+  else
+    fail "rollback to nightly-20261119 succeeded below clamped floor nightly-20261120"
+  fi
+
+  # 15b. Same-day cross-family rollback against clamped floor preserves DEPLOYED_DATE:
+  #      deployed nightly-20261120 (06:00Z), stored floor nightly-20261121, target v0.4.0-preview.3 (03:00Z)
+  #      must still be blocked without _ALLOW_BELOW_DOWNGRADE_FLOOR=true.
+  local manifest_same_day="${d}/LATEST-same-day.json"
+  cat >"${manifest_same_day}" <<'EOF'
+{
+  "channels": {
+    "preview": {
+      "version": "v0.4.0-preview.3",
+      "date": "2026-11-20T03:00:00Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.4.0-preview.3"
+    }
+  }
+}
+EOF
+  cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json" <<EOF
+{
+  "version": "nightly-20261120",
+  "version_date": "2026-11-20T06:00:00Z",
+  "hub_image_digest": "${digest}",
+  "tfvars_sha256": "${tfvars_sha}",
+  "downgrade_floor": "nightly-20261121"
+}
+EOF
+  rc=0
+  out="$(env "${base_env[@]}" MOCK_MANIFEST_FILE="${manifest_same_day}" _ALLOW_DOWNGRADE=true _CHANNEL="preview" _VERSION_TAG="" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "same-day cross-family rollback below clamped floor requires _ALLOW_BELOW_DOWNGRADE_FLOOR" "${out}" "_ALLOW_BELOW_DOWNGRADE_FLOOR"
+    assert_contains "same-day cross-family rollback reports clamped floor nightly-20261120" "${out}" "downgrade_floor 'nightly-20261120'"
+  else
+    fail "same-day cross-family rollback to v0.4.0-preview.3 (03:00Z) slipped past clamped floor nightly-20261120 (06:00Z)"
+  fi
 }
 
 test_slice1
@@ -893,6 +970,52 @@ test_slice3() {
   else
     fail "malformed digest in hub-gke-meta.json did not fail"
   fi
+
+  # 7. Transient PERMISSION_DENIED in verify-registry.sh retries and succeeds once IAM propagates
+  local retry_cnt_file="${d}/ar-describe-count"
+  rm -f "${retry_cnt_file}"
+  local retry_out=""
+  retry_out="$(env "${build_env[@]}" \
+    MOCK_AR_DESCRIBE_COUNT_FILE="${retry_cnt_file}" \
+    MOCK_AR_DESCRIBE_DENY_UNTIL=2 \
+    AR_VERIFY_MAX_ATTEMPTS=4 \
+    AR_VERIFY_RETRY_DELAY=0 \
+    bash "${SCRIPT_DIR}/build-images.sh" --phase prepare 2>&1)"
+  assert_eq "transient PERMISSION_DENIED retries until attempt 3 succeeds" "$(cat "${retry_cnt_file}")" "3"
+  assert_contains "transient PERMISSION_DENIED logs IAM propagation retry warning" "${retry_out}" "propagate"
+
+  # 8. Persistent PERMISSION_DENIED exhausts retries and reports permissions error (never 'repository not found')
+  rm -f "${retry_cnt_file}"
+  rc=0
+  retry_out="$(env "${build_env[@]}" \
+    MOCK_AR_DESCRIBE_COUNT_FILE="${retry_cnt_file}" \
+    MOCK_AR_REPO_DENIED=true \
+    AR_VERIFY_MAX_ATTEMPTS=3 \
+    AR_VERIFY_RETRY_DELAY=0 \
+    bash "${SCRIPT_DIR}/build-images.sh" --phase prepare 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_eq "persistent PERMISSION_DENIED retries exactly AR_VERIFY_MAX_ATTEMPTS times" "$(cat "${retry_cnt_file}")" "3"
+    assert_contains "persistent PERMISSION_DENIED reports permission error" "${retry_out}" "Permission denied"
+    assert_not_contains "persistent PERMISSION_DENIED does not mask as repository not found" "${retry_out}" "repository not found"
+  else
+    fail "persistent PERMISSION_DENIED did not fail"
+  fi
+
+  # 9. Real NOT_FOUND fails fast in 1 attempt without retrying
+  rm -f "${retry_cnt_file}"
+  rc=0
+  retry_out="$(env "${build_env[@]}" \
+    MOCK_AR_DESCRIBE_COUNT_FILE="${retry_cnt_file}" \
+    MOCK_AR_REPO_MISSING=true \
+    AR_VERIFY_MAX_ATTEMPTS=4 \
+    AR_VERIFY_RETRY_DELAY=0 \
+    bash "${SCRIPT_DIR}/build-images.sh" --phase prepare 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_eq "real NOT_FOUND fails fast without retrying" "$(cat "${retry_cnt_file}")" "1"
+    assert_contains "real NOT_FOUND reports repository not found" "${retry_out}" "repository not found"
+  else
+    fail "real NOT_FOUND did not fail"
+  fi
 }
 
 test_slice3
@@ -967,7 +1090,7 @@ TARGET_TAG='nightly-20261118'
 COMMIT_SHA='0123456789abcdef0123456789abcdef01234567'
 SHORT_SHA='0123456'
 BUILD_TIME='2026-11-18T03:00:00Z'
-SOURCE_DOWNGRADE_FLOOR='nightly-20261119'
+SOURCE_DOWNGRADE_FLOOR='nightly-20261117'
 EOF
   printf "HUB_IMAGE_DIGEST='%s'\n" "${digest}" > "${d}/workspace/hub-digest.env"
   cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/hub.tfvars" <<'EOF'
@@ -1043,7 +1166,7 @@ assert d["commit"] == "0123456789abcdef0123456789abcdef01234567"
 assert d["hub_image_digest"].startswith("sha256:abcdef")
 assert d["tfvars_sha256"] == want_tfvars_sha, f"got {d.get('tfvars_sha256')!r}, want {want_tfvars_sha!r}"
 assert d["hub_installed"] is True
-assert d["downgrade_floor"] == "nightly-20261119"
+assert d["downgrade_floor"] == "nightly-20261117"
 assert d["build_id"] == "cb-build-999"
 print("OK")
 PY
@@ -1052,6 +1175,30 @@ PY
   else
     fail "deployed.json was not uploaded to GCS"
   fi
+
+  # 2b. SOURCE_DOWNGRADE_FLOOR newer than TARGET_TAG (e.g. nightly-20261121 on nightly-20261120) is clamped to TARGET_TAG
+  cat >"${d}/workspace/target.env" <<'EOF'
+TARGET_TAG='nightly-20261120'
+TARGET_VERSION_DATE='2026-11-20T03:17:37Z'
+EOF
+  cat >"${d}/workspace/build.env" <<'EOF'
+TARGET_TAG='nightly-20261120'
+COMMIT_SHA='fc5021dc7915d7ed31d7dad99cd9f38602fc567d'
+SHORT_SHA='fc5021d'
+BUILD_TIME='2026-11-20T03:00:00Z'
+SOURCE_DOWNGRADE_FLOOR='nightly-20261121'
+EOF
+  local clamp_out=""
+  clamp_out="$(env "${tf_env[@]}" bash "${SCRIPT_DIR}/gcs-hub-state.sh" write-deployed 2>&1)"
+  assert_contains "clamping future downgrade_floor logs a warning" "${clamp_out}" "clamping deployed.json downgrade_floor to 'nightly-20261120'"
+  local clamped_floor=""
+  clamped_floor="$(python3 - "${deployed_gcs}" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    print(json.load(f).get("downgrade_floor", ""))
+PY
+  )"
+  assert_eq "deployed.json clamps future SOURCE_DOWNGRADE_FLOOR to TARGET_TAG" "${clamped_floor}" "nightly-20261120"
 
   # 3. Post-apply convergence failure (exit code 2) fails Step 4!
   local rc=0
@@ -1172,6 +1319,8 @@ GOEOF
     assert_contains "README documents scion hub env set" "${readme}" "scion hub env set"
     assert_contains "README documents scion hub experiments enable" "${readme}" "scion hub experiments enable"
     assert_contains "README documents DowngradeFloor & rollback" "${readme}" "DowngradeFloor"
+    assert_contains "README documents operator roles/artifactregistry.admin prerequisite" "${readme}" "roles/artifactregistry.admin"
+    assert_contains "README documents --gcs-source-staging-dir for custom-SA local builds submit" "${readme}" "--gcs-source-staging-dir"
   else
     fail "missing deploy/cd/README.md"
   fi
@@ -1259,6 +1408,10 @@ argv = sys.argv[2:]
 with open(out_path, "a", encoding="utf-8") as f:
     f.write(json.dumps(argv) + "\n")
 PY
+if [[ "${1:-}" == "auth" && "${2:-}" == "print-access-token" ]]; then
+  echo "stub-operator-token"
+  exit 0
+fi
 if [[ "${1:-}" == "projects" && "${2:-}" == "describe" ]]; then
   echo "123456789012"
   exit 0
@@ -1270,8 +1423,24 @@ if [[ "${1:-}" == "iam" && "${2:-}" == "service-accounts" && "${3:-}" == "descri
   exit 1
 fi
 if [[ "${1:-}" == "artifacts" && "${2:-}" == "repositories" && "${3:-}" == "describe" ]]; then
-  echo "projects/my-prod-proj/locations/us-central1/repositories/cdha-scion"
-  exit 0
+  case "${MOCK_SETUP_AR_DESCRIBE_MODE:-ok}" in
+    ok)
+      echo "projects/my-prod-proj/locations/us-central1/repositories/cdha-scion"
+      exit 0
+      ;;
+    not_found)
+      echo "ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Repository not found" >&2
+      exit 1
+      ;;
+    service_disabled)
+      echo "ERROR: (gcloud.artifacts.repositories.describe) PERMISSION_DENIED: Artifact Registry API has not been used in project 123456789012 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/artifactregistry.googleapis.com/overview?project=123456789012 then retry." >&2
+      exit 1
+      ;;
+    permission_denied)
+      echo "ERROR: (gcloud.artifacts.repositories.describe) PERMISSION_DENIED: Permission denied" >&2
+      exit 1
+      ;;
+  esac
 fi
 if [[ "${1:-}" == "builds" && "${2:-}" == "triggers" && "${3:-}" == "describe" ]]; then
   if [[ "$*" == *"--format=value(id)"* ]]; then
@@ -1286,6 +1455,38 @@ fi
 exit 0
 EOF
   chmod +x "${setup_stub}/bin/gcloud"
+
+  cat >"${setup_stub}/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+url=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -H|-X|-d|--max-time|-m|-o) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+if [[ "${url}" == *"cloudresourcemanager.googleapis.com"*":testIamPermissions" ]]; then
+  if [[ -n "${MOCK_SETUP_PROJECT_PERMS:-}" ]]; then
+    printf '%s\n' "${MOCK_SETUP_PROJECT_PERMS}"
+  else
+    printf '%s\n' '{"permissions":["serviceusage.services.enable","iam.serviceAccounts.create","resourcemanager.projects.setIamPolicy"]}'
+  fi
+  exit 0
+fi
+if [[ "${url}" == *"artifactregistry.googleapis.com"*":testIamPermissions" ]]; then
+  if [[ -n "${MOCK_SETUP_AR_PERMS:-}" ]]; then
+    printf '%s\n' "${MOCK_SETUP_AR_PERMS}"
+  else
+    printf '%s\n' '{"permissions":["artifactregistry.repositories.setIamPolicy"]}'
+  fi
+  exit 0
+fi
+echo "unexpected setup curl call: ${url}" >&2
+exit 1
+EOF
+  chmod +x "${setup_stub}/bin/curl"
 
   # (a) 1st-gen GitHub + multi-arch _AGENT_PLATFORMS=linux/amd64,linux/arm64 + custom branch
   local jsonl_1st="${setup_stub}/calls-1st.jsonl"
@@ -1395,6 +1596,150 @@ PY
   else
     fail "setup-cd.sh accepted --hub-name not starting with <shared-prefix>-"
   fi
+
+  # Preflight failure tests: verify setup-cd.sh fails BEFORE any mutating gcloud call
+  local jsonl_pf="${setup_stub}/calls-preflight.jsonl"
+  local pf_out=""
+
+  # (c) Missing artifactregistry.repositories.setIamPolicy fails before any mutation
+  : > "${jsonl_pf}"
+  rc=0
+  pf_out="$(env "PATH=${setup_stub}/bin:${PATH}" \
+    "MOCK_SETUP_ARGV_JSONL=${jsonl_pf}" \
+    "MOCK_SETUP_AR_PERMS={}" \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "preflight missing AR setIamPolicy recommends roles/artifactregistry.admin" "${pf_out}" "roles/artifactregistry.admin"
+    assert_not_contains "preflight missing AR setIamPolicy does not mutate APIs" "$(cat "${jsonl_pf}")" '"enable"'
+    assert_not_contains "preflight missing AR setIamPolicy does not create SA or bucket" "$(cat "${jsonl_pf}")" '"create"'
+    assert_not_contains "preflight missing AR setIamPolicy does not bind IAM" "$(cat "${jsonl_pf}")" 'add-iam-policy-binding'
+  else
+    fail "setup-cd.sh preflight did not fail when AR setIamPolicy was missing"
+  fi
+
+  # (d) PERMISSION_DENIED on AR repositories describe fails before any mutation
+  : > "${jsonl_pf}"
+  rc=0
+  pf_out="$(env "PATH=${setup_stub}/bin:${PATH}" \
+    "MOCK_SETUP_ARGV_JSONL=${jsonl_pf}" \
+    "MOCK_SETUP_AR_DESCRIBE_MODE=permission_denied" \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "preflight AR describe PERMISSION_DENIED mentions roles/artifactregistry.admin" "${pf_out}" "roles/artifactregistry.admin"
+    assert_not_contains "preflight AR describe PERMISSION_DENIED does not mutate APIs" "$(cat "${jsonl_pf}")" '"enable"'
+  else
+    fail "setup-cd.sh preflight did not fail on AR describe PERMISSION_DENIED"
+  fi
+
+  # (e) Missing project-level resourcemanager.projects.setIamPolicy fails before any mutation
+  : > "${jsonl_pf}"
+  rc=0
+  pf_out="$(env "PATH=${setup_stub}/bin:${PATH}" \
+    "MOCK_SETUP_ARGV_JSONL=${jsonl_pf}" \
+    'MOCK_SETUP_PROJECT_PERMS={"permissions":["serviceusage.services.enable","iam.serviceAccounts.create"]}' \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "preflight missing project setIamPolicy reports missing permission" "${pf_out}" "resourcemanager.projects.setIamPolicy"
+    assert_not_contains "preflight missing project setIamPolicy does not mutate APIs" "$(cat "${jsonl_pf}")" '"enable"'
+  else
+    fail "setup-cd.sh preflight did not fail when project setIamPolicy was missing"
+  fi
+
+  # (f) AR repo NOT_FOUND (before shared-infra is applied) passes preflight cleanly
+  : > "${jsonl_pf}"
+  pf_out="$(env "PATH=${setup_stub}/bin:${PATH}" \
+    "MOCK_SETUP_ARGV_JSONL=${jsonl_pf}" \
+    "MOCK_SETUP_AR_DESCRIBE_MODE=not_found" \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 2>&1)"
+  assert_contains "preflight allows absent AR repo before shared-infra" "${pf_out}" "does not exist yet"
+  assert_contains "setup-cd.sh proceeds to enable APIs when AR repo not yet created" "$(cat "${jsonl_pf}")" '"enable"'
+
+  # (g) AR API not yet enabled on fresh project (SERVICE_DISABLED / "has not been used") passes preflight cleanly
+  : > "${jsonl_pf}"
+  rc=0
+  pf_out="$(env "PATH=${setup_stub}/bin:${PATH}" \
+    "MOCK_SETUP_ARGV_JSONL=${jsonl_pf}" \
+    "MOCK_SETUP_AR_DESCRIBE_MODE=service_disabled" \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 2>&1)" || rc=$?
+  assert_eq "preflight allows disabled AR API on fresh project" "${rc}" "0"
+  assert_contains "preflight logs skipped AR check when API is disabled" "${pf_out}" "Artifact Registry API is not enabled yet"
+  assert_not_contains "preflight disabled AR API does not misclassify as missing artifactregistry.admin" "${pf_out}" "roles/artifactregistry.admin"
+  assert_contains "setup-cd.sh proceeds to enable APIs when AR API not yet enabled" "$(cat "${jsonl_pf}")" '"enable"'
+
+  # (h) Missing python3 on PATH warns explicitly instead of silently skipping JSON preflight checks
+  local no_py_bin="${TMP_ROOT}/setup-no-py-bin"
+  local no_py_gcloud_log="${TMP_ROOT}/setup-no-py-gcloud.log"
+  local no_py_curl_log="${TMP_ROOT}/setup-no-py-curl.log"
+  mkdir -p "${no_py_bin}"
+  local req_tool req_path
+  for req_tool in bash env dirname mktemp cat rm grep; do
+    req_path="$(command -v "${req_tool}")"
+    ln -sf "${req_path}" "${no_py_bin}/${req_tool}"
+  done
+  cat >"${no_py_bin}/gcloud" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'gcloud %s\n' "$*" >> "${MOCK_NO_PY_GCLOUD_LOG:?}"
+if [[ "${1:-}" == "projects" && "${2:-}" == "describe" ]]; then
+  echo "123456789012"
+  exit 0
+fi
+if [[ "${1:-}" == "artifacts" && "${2:-}" == "repositories" && "${3:-}" == "describe" ]]; then
+  echo "projects/my-prod-proj/locations/us-central1/repositories/cdha-scion"
+  exit 0
+fi
+if [[ "${1:-}" == "storage" && "${2:-}" == "buckets" && "${3:-}" == "describe" ]]; then
+  exit 1
+fi
+if [[ "${1:-}" == "iam" && "${2:-}" == "service-accounts" && "${3:-}" == "describe" ]]; then
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "${no_py_bin}/gcloud"
+  cat >"${no_py_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >> "${MOCK_NO_PY_CURL_LOG:?}"
+exit 1
+EOF
+  chmod +x "${no_py_bin}/curl"
+  : > "${no_py_gcloud_log}"
+  : > "${no_py_curl_log}"
+  rc=0
+  pf_out="$(env "PATH=${no_py_bin}" \
+    "MOCK_NO_PY_GCLOUD_LOG=${no_py_gcloud_log}" \
+    "MOCK_NO_PY_CURL_LOG=${no_py_curl_log}" \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 2>&1)" || rc=$?
+  assert_eq "preflight proceeds cleanly when python3 is absent from PATH" "${rc}" "0"
+  assert_contains "preflight warns explicitly when python3 is missing" "${pf_out}" "python3 not found on PATH; skipping JSON testIamPermissions preflight checks and proceeding."
+  assert_not_contains "preflight missing python3 does not emit misleading AR JSON parse warning" "${pf_out}" "Could not parse Artifact Registry"
+  assert_eq "preflight missing python3 skips testIamPermissions curl calls" "$(cat "${no_py_curl_log}")" ""
+  assert_contains "preflight missing python3 still inspects AR repository via gcloud" "$(cat "${no_py_gcloud_log}")" "gcloud artifacts repositories describe cdha-scion"
+  assert_contains "setup-cd.sh proceeds to enable APIs when python3 is absent" "$(cat "${no_py_gcloud_log}")" "gcloud services enable"
 
   # R4 end-to-end: editing hub.tfvars on an already-deployed tag triggers TF apply
   # with ZERO docker buildx rebuilds, updates tfvars_sha256, and re-converges on next run!
