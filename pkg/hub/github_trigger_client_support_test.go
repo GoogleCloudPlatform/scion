@@ -53,6 +53,18 @@ func TestGitHubInstallationTokenCache_HitExpiryInvalidationPermissionsAndNoLogs(
 	var mintedTokens []string
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":          1,
+			"slug":        "tokcache-app",
+			"permissions": map[string]string{"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read"},
+		})
+	})
 	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/access_tokens") {
 			http.NotFound(w, r)

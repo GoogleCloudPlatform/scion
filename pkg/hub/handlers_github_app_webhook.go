@@ -828,18 +828,50 @@ func (s *Server) mintGitHubAppTokenInternal(
 	}
 
 	var perms githubapp.TokenPermissions
+	var usedDefaults bool
+	var appPermissions map[string]string
 	if requested != nil {
 		var permErr error
 		perms, permErr = scopeRequestedGitHubTokenPermissions(*requested, grant)
 		if permErr != nil {
 			return "", "", permErr
 		}
+	} else if hasUsableStoredGitHubPermissions(project.GitHubPermissions) {
+		// Explicit stored project permissions are requested unchanged (still
+		// capped by the association's proof).
+		perms, _, _ = githubTokenPermissionsForGrant(project.GitHubPermissions, grant, nil)
 	} else {
-		// Never request more than the stored permissions and the association's
-		// proof allow (a pull-only proof gets read-only permissions), and never
-		// an empty set, which GitHub would treat as every installation
-		// permission.
-		perms = githubTokenPermissionsForGrant(project.GitHubPermissions, grant)
+		// No usable stored permissions: intersect DefaultTokenPermissions with
+		// the permissions actually granted to the GitHub App so read-only and
+		// git-only Apps can mint scoped tokens without exceeding their grant.
+		// Fail closed and visibly if the App's permissions are unavailable or
+		// have no overlap with the defaults.
+		id, hasID := s.GitHubAppIdentity(ctx)
+		if !hasID || id == nil {
+			const msg = "Unable to verify GitHub App permissions. See the hub log for details."
+			slog.WarnContext(ctx, "GitHub App token refused: app permissions unavailable",
+				"project_id", project.ID, "installation_id", *project.GitHubInstallationID)
+			s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
+				githubapp.ErrCodeTokenMintFailed, msg)
+			return "", "", &githubapp.TokenMintError{
+				ErrorCode: githubapp.ErrCodeTokenMintFailed,
+				Message:   msg,
+			}
+		}
+		var ok bool
+		perms, usedDefaults, ok = githubTokenPermissionsForGrant(project.GitHubPermissions, grant, id.Permissions)
+		if !ok {
+			const msg = "GitHub App does not have any of the default permissions required for this project. Update the GitHub App's permissions or configure project token permissions."
+			slog.WarnContext(ctx, "GitHub App token refused: default permissions intersection with app grant is empty",
+				"project_id", project.ID, "installation_id", *project.GitHubInstallationID)
+			s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateDegraded,
+				githubapp.ErrCodePermissionDenied, msg)
+			return "", "", &githubapp.TokenMintError{
+				ErrorCode: githubapp.ErrCodePermissionDenied,
+				Message:   msg,
+			}
+		}
+		appPermissions = id.Permissions
 	}
 
 	installationID := *project.GitHubInstallationID
@@ -916,12 +948,34 @@ func (s *Server) mintGitHubAppTokenInternal(
 		s.mu.Unlock()
 	}
 
-	// Success — update project status
+	// Success — update project status. If default permissions were narrowed
+	// because the App lacks part of DefaultTokenPermissions, mark the project
+	// degraded rather than silently dropping permissions.
 	now := timeNow()
-	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-		State:         store.GitHubAppStateOK,
-		LastTokenMint: &now,
-		LastChecked:   now,
+	if usedDefaults {
+		defaults := store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions())
+		if missingPerms := comparePermissions(&defaults, appPermissions); len(missingPerms) > 0 {
+			project.GitHubAppStatus = &store.GitHubAppProjectStatus{
+				State:         store.GitHubAppStateDegraded,
+				ErrorCode:     githubapp.ErrCodePermissionDenied,
+				ErrorMessage:  formatMissingPermissionsMessage(missingPerms),
+				LastTokenMint: &now,
+				LastChecked:   now,
+				LastError:     &now,
+			}
+		} else {
+			project.GitHubAppStatus = &store.GitHubAppProjectStatus{
+				State:         store.GitHubAppStateOK,
+				LastTokenMint: &now,
+				LastChecked:   now,
+			}
+		}
+	} else {
+		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
+			State:         store.GitHubAppStateOK,
+			LastTokenMint: &now,
+			LastChecked:   now,
+		}
 	}
 	if err := s.store.UpdateProject(ctx, project); err != nil {
 		slog.Warn("Failed to update project status after successful token mint", "error", err)

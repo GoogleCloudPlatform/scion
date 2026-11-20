@@ -401,20 +401,48 @@ func (c *githubRepoAccessCache) invalidateProject(projectID string) {
 	}
 }
 
+// hasUsableStoredGitHubPermissions reports whether stored names at least one
+// known permission field with a valid level ("read" or "write").
+func hasUsableStoredGitHubPermissions(stored *store.GitHubTokenPermissions) bool {
+	if stored == nil {
+		return false
+	}
+	for _, v := range []string{
+		stored.Contents,
+		stored.PullRequests,
+		stored.Issues,
+		stored.Metadata,
+		stored.Checks,
+		stored.Actions,
+	} {
+		if v == "read" || v == "write" {
+			return true
+		}
+	}
+	return false
+}
+
 // githubTokenPermissionsForGrant returns the permission set to request for
-// a token minted under grant, from the project's stored permissions:
+// a token minted under grant, from the project's stored permissions or (when
+// nothing usable is stored) DefaultTokenPermissions intersected with the App's
+// granted permissions:
 //
 //   - Only the six known fields are ever requested, each as "read" or
 //     "write"; any other stored value is dropped.
 //   - "write" survives only when grant.WriteAllowed; otherwise it is
-//     lowered to "read". Nothing is ever added above the stored value
-//     except by the fallback below.
-//   - The result is NEVER empty: GitHub grants every installation
-//     permission when a token request carries no permissions. With nothing
-//     usable stored, DefaultTokenPermissions intersected with the proven
-//     level is used (write fields lowered to read for a pull-only grant),
-//     and metadata:read if even that were empty.
-func githubTokenPermissionsForGrant(stored *store.GitHubTokenPermissions, grant githubAssociationGrant) githubapp.TokenPermissions {
+//     lowered to "read". Nothing is ever added above the stored value.
+//   - When nothing usable is stored, DefaultTokenPermissions is intersected
+//     with appPermissions (and write fields lowered to read for a pull-only
+//     grant). If appPermissions is nil/empty or shares no permissions with
+//     the defaults, ok is false with an empty TokenPermissions so the caller
+//     fails closed rather than minting an empty-permissions token (which
+//     GitHub treats as every installation permission) or requesting more than
+//     the App was granted.
+func githubTokenPermissionsForGrant(
+	stored *store.GitHubTokenPermissions,
+	grant githubAssociationGrant,
+	appPermissions map[string]string,
+) (perms githubapp.TokenPermissions, usedDefaults bool, ok bool) {
 	level := func(v string) string {
 		switch v {
 		case "write":
@@ -438,7 +466,6 @@ func githubTokenPermissionsForGrant(stored *store.GitHubTokenPermissions, grant 
 			Actions:      level(p.Actions),
 		}
 	}
-	var perms githubapp.TokenPermissions
 	if stored != nil {
 		perms = scope(githubapp.TokenPermissions{
 			Contents:     stored.Contents,
@@ -449,13 +476,14 @@ func githubTokenPermissionsForGrant(stored *store.GitHubTokenPermissions, grant 
 			Actions:      stored.Actions,
 		})
 	}
-	if perms == (githubapp.TokenPermissions{}) {
-		perms = scope(githubapp.DefaultTokenPermissions())
+	if perms != (githubapp.TokenPermissions{}) {
+		return perms, false, true
 	}
+	perms = scope(githubapp.IntersectTokenPermissions(githubapp.DefaultTokenPermissions(), appPermissions))
 	if perms == (githubapp.TokenPermissions{}) {
-		perms = githubapp.TokenPermissions{Metadata: "read"}
+		return githubapp.TokenPermissions{}, true, false
 	}
-	return perms
+	return perms, true, true
 }
 
 // validGitHubTokenPermissionLevel reports whether v may be stored for a
