@@ -294,6 +294,14 @@ describe('theme.css dark block parity', () => {
   it('declares the exact same properties and values in explicit dark and system dark blocks', () => {
     expect(Object.fromEntries(systemDark)).toEqual(Object.fromEntries(explicitDark));
   });
+
+  it('derives dark --sl-color-primary-900/950 from --scion-primary-50 without overriding --scion-primary-50', () => {
+    for (const darkBlock of [explicitDark, systemDark]) {
+      expect(darkBlock.has('--scion-primary-50')).toBe(false);
+      expect(darkBlock.get('--sl-color-primary-900')).toBe('var(--scion-primary-50)');
+      expect(darkBlock.get('--sl-color-primary-950')).toBe('var(--scion-primary-50)');
+    }
+  });
 });
 
 describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)', () => {
@@ -319,15 +327,23 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
     expect(get('--scion-bg')).toEqual([0xf8, 0xfa, 0xfc, 1]);
     expect(get('--scion-surface')).toEqual([255, 255, 255, 1]);
     // Light-mode equivalence for tokens rewritten to semantic / color-mix() forms in PR 2c.
+    expect(get('--scion-primary')).toEqual([59, 130, 246, 1]);
     expect(get('--scion-primary-tint')).toEqual([0xef, 0xf6, 0xff, 1]);
     expect(get('--scion-primary-text')).toEqual([255, 255, 255, 1]);
     expect(get('--scion-error-bg')).toEqual([0xfe, 0xf2, 0xf2, 1]);
+    expect(get('--scion-badge-danger-border')).toEqual([0xfe, 0xca, 0xca, 1]);
     expect(get('--scion-error-text')).toEqual([0x99, 0x1b, 0x1b, 1]);
     expect(get('--scion-error-text-hover')).toEqual([0x7f, 0x1d, 0x1d, 1]);
     expect(get('--scion-action-hover-danger-bg')).toEqual([239, 68, 68, 0.1]);
     expect(get('--scion-action-hover-warning-bg')).toEqual([245, 158, 11, 0.1]);
     expect(get('--scion-action-hover-success-bg')).toEqual([34, 197, 94, 0.1]);
     expect(get('--scion-action-hover-primary-bg')).toEqual([59, 130, 246, 0.1]);
+    // Explicit scoped light-mode contrast-improvement exceptions (PR 2c):
+    // unauthorized.ts .help-text moved from #64748b on #fef3c7 (4.35:1) to warning tokens (>= 4.5:1 AA).
+    expect(
+      contrast(get('--scion-warning-text'), get('--scion-warning-bg')),
+      'unauthorized .help-text warning-text on warning-bg (light AA improvement)'
+    ).toBeGreaterThanOrEqual(4.5);
 
     // Every non-palette --sl-* declaration in the light block must match Shoelace's light.css
     // (except Scion's intentional font-family and border-radius overrides) so light mode never
@@ -460,6 +476,11 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
 
       it('keeps sl-tag and subtle callout pairs AA-readable', () => {
         const ground = get('--scion-surface');
+        const primaryTintBg = over(get('--scion-primary-tint'), ground);
+        expect(
+          contrast(get('--scion-text'), primaryTintBg),
+          'text on primary-tint over surface'
+        ).toBeGreaterThanOrEqual(4.5);
         const errBg = over(get('--scion-error-bg'), ground);
         expect(
           contrast(get('--scion-error-text'), errBg),

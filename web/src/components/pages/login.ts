@@ -180,7 +180,7 @@ export class ScionLoginPage extends LitElement {
 
     .error-alert {
       background: var(--scion-error-bg, #fef2f2);
-      border: 1px solid var(--scion-error-border, #fecaca);
+      border: 1px solid var(--scion-badge-danger-border, #fecaca);
       border-radius: 0.5rem;
       padding: 1rem;
       margin-bottom: 1.5rem;
@@ -190,7 +190,7 @@ export class ScionLoginPage extends LitElement {
     }
 
     .error-alert sl-icon {
-      color: var(--scion-status-danger, #dc2626);
+      color: var(--scion-error-text, #dc2626);
       flex-shrink: 0;
       margin-top: 0.125rem;
     }
