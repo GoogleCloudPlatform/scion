@@ -3299,3 +3299,211 @@ func TestRecordAnswerSet_AllowOther_AtomicIdempotencyAndDismiss(t *testing.T) {
 	assert.Equal(t, store.AnswerSetReasonDismissed, changedErr.Reasons[dsmRes.Decisions[0].RowID])
 	assert.Equal(t, store.AnswerSetReasonDismissed, changedErr.Reasons[dsmRes.Decisions[1].RowID])
 }
+
+func TestRecordInterpretedAnswers_AllowOther_ReplayConfirmOverrideAndSearch(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	mkSrc := func() *store.Message {
+		m := &store.Message{
+			ID:            uuid.NewString(),
+			ProjectID:     f.projectID,
+			ThreadID:      "topic:general",
+			Sender:        "user:user-1",
+			SenderID:      "user-1",
+			Recipient:     "group:topic",
+			RecipientID:   "topic:general",
+			Msg:           "use europe-west4",
+			DispatchState: store.MessageDispatchDispatched,
+			CreatedAt:     time.Now().UTC(),
+		}
+		require.NoError(t, f.cs.CreateMessage(ctx, m))
+		return m
+	}
+	mkResp := func() *store.Message {
+		return &store.Message{
+			ID:            uuid.NewString(),
+			ProjectID:     f.projectID,
+			ThreadID:      "topic:general",
+			Sender:        "agent:architect",
+			SenderID:      f.agentID,
+			Recipient:     "group:topic",
+			RecipientID:   "topic:general",
+			DispatchState: store.MessageDispatchDispatched,
+			CreatedAt:     time.Now().UTC(),
+		}
+	}
+
+	// Create 4 decisions: 3 with Other enabled, 1 without.
+	withOther := func(key, q string) messages.Decision {
+		return messages.Decision{
+			Key:             key,
+			Question:        q,
+			DefaultChoiceID: "1",
+			Choices:         []messages.Choice{{ID: "1", Label: "us-central1"}},
+			Other: &messages.OtherOption{
+				Label:       "Another region",
+				Placeholder: "e.g. europe-west4",
+			},
+		}
+	}
+	rowConfirm := f.create(t, false, withOther("reg-confirm", "Region for confirm?")).Decisions[0].RowID
+	rowOverride := f.create(t, false, withOther("reg-override", "Region for override?")).Decisions[0].RowID
+	rowFixedToOther := f.create(t, false, withOther("reg-fixed-other", "Region fixed to other?")).Decisions[0].RowID
+	f.create(t, false, yesNo("no-other-interp", "No other here?"))
+
+	src := mkSrc()
+
+	// 1. Input validation rejects reserved $dismissed, invalid/empty/too-long other_text, and other_text on fixed.
+	for name, pair := range map[string]store.InterpretedAnswerPair{
+		"reserved $dismissed": {Key: "reg-confirm", ChoiceID: messages.ChoiceIDDismissed},
+		"empty other_text":    {Key: "reg-confirm", ChoiceID: messages.ChoiceIDOther, OtherText: "   "},
+		"newline other_text":  {Key: "reg-confirm", ChoiceID: messages.ChoiceIDOther, OtherText: "a\nb"},
+		"too long other_text": {Key: "reg-confirm", ChoiceID: messages.ChoiceIDOther, OtherText: strings.Repeat("x", 201)},
+		"text on fixed":       {Key: "reg-confirm", ChoiceID: "1", OtherText: "extra"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := f.cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+				InterpretedByAgentID: f.agentID,
+				SourceMessageID:      src.ID,
+				AnsweredByUserID:     "user-1",
+				AnsweredByName:       "Alice",
+				Surface:              store.DecisionSurfaceSlack,
+				Answers:              []store.InterpretedAnswerPair{pair},
+				ResponseMessage:      mkResp(),
+			})
+			require.ErrorIs(t, err, store.ErrInvalidInput)
+		})
+	}
+
+	// 2. $other on decision without AllowOther returns InterpretedReasonInvalidChoice.
+	_, err := f.cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agentID,
+		SourceMessageID:      src.ID,
+		AnsweredByUserID:     "user-1",
+		AnsweredByName:       "Alice",
+		Surface:              store.DecisionSurfaceSlack,
+		Answers:              []store.InterpretedAnswerPair{{Key: "no-other-interp", ChoiceID: messages.ChoiceIDOther, OtherText: "custom"}},
+		ResponseMessage:      mkResp(),
+	})
+	var iaErr *store.InterpretedAnswersError
+	require.ErrorAs(t, err, &iaErr)
+	require.Len(t, iaErr.Failures, 1)
+	assert.Equal(t, store.InterpretedReasonInvalidChoice, iaErr.Failures[0].Reason)
+
+	// 3. Record interpreted Other on reg-confirm and reg-override, and interpreted fixed on reg-fixed-other.
+	var formattedItems []store.InterpretedFormattedItem
+	recRes, err := f.cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agentID,
+		SourceMessageID:      src.ID,
+		AnsweredByUserID:     "user-1",
+		AnsweredByName:       "Alice",
+		AnsweredByEmail:      "alice@example.com",
+		Surface:              store.DecisionSurfaceSlack,
+		IdempotencyKey:       "interp-other-idem-1",
+		Answers: []store.InterpretedAnswerPair{
+			{Key: "reg-confirm", ChoiceID: messages.ChoiceIDOther, OtherText: "  europe-west4  "},
+			{Key: "reg-override", ChoiceID: messages.ChoiceIDOther, OtherText: "asia-northeast1"},
+		},
+		ResponseMessage: mkResp(),
+		FormatMessage: func(items []store.InterpretedFormattedItem) string {
+			formattedItems = items
+			return "formatted interpreted other"
+		},
+	})
+	require.NoError(t, err)
+	assert.False(t, recRes.Replayed)
+	require.Len(t, recRes.Answers, 2)
+	assert.Equal(t, messages.ChoiceIDOther, recRes.Answers[0].ChoiceID)
+	assert.Equal(t, "Another region", recRes.Answers[0].ChoiceLabel)
+	assert.Equal(t, "europe-west4", recRes.Answers[0].OtherText)
+	assert.False(t, recRes.Answers[0].MatchedDefault)
+	require.Len(t, formattedItems, 2)
+	assert.Equal(t, "europe-west4", formattedItems[0].OtherText)
+	assert.Equal(t, "asia-northeast1", formattedItems[1].OtherText)
+
+	// 4. Idempotency replay compares (choice_id, other_text): same text replays, different text -> ErrIdempotencyMismatch.
+	replaySame, err := f.cs.FindInterpretedReplay(ctx, f.agentID, "interp-other-idem-1", src.ID, []store.InterpretedAnswerPair{
+		{Key: "reg-confirm", ChoiceID: messages.ChoiceIDOther, OtherText: "europe-west4"},
+		{Key: "reg-override", ChoiceID: messages.ChoiceIDOther, OtherText: "  asia-northeast1  "},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, replaySame)
+	assert.True(t, replaySame.Replayed)
+	require.Len(t, replaySame.Answers, 2)
+
+	_, err = f.cs.FindInterpretedReplay(ctx, f.agentID, "interp-other-idem-1", src.ID, []store.InterpretedAnswerPair{
+		{Key: "reg-confirm", ChoiceID: messages.ChoiceIDOther, OtherText: "europe-west4"},
+		{Key: "reg-override", ChoiceID: messages.ChoiceIDOther, OtherText: "us-east1"},
+	})
+	require.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	// 5. ExistingDecisionKey.Hint includes OtherText.
+	_, err = f.cs.CreateDecisionPrompt(ctx, f.prompt("", false, withOther("reg-confirm", "Duplicate?")))
+	var existsErr *store.DecisionKeyExistsError
+	require.ErrorAs(t, err, &existsErr)
+	require.Len(t, existsErr.Existing, 1)
+	assert.Contains(t, existsErr.Existing[0].Hint(), `Another region "europe-west4"`)
+
+	// 6. Direct confirm vs override on interpreted Other.
+	// Confirm with different text fails ErrDecisionOutcomeMismatch.
+	badConfirm := f.answer(rowConfirm, messages.ChoiceIDOther, "user-1", "")
+	badConfirm.OtherText = "europe-west4-changed"
+	badConfirm.Outcome = store.DecisionOutcomeConfirm
+	_, _, err = f.cs.RecordAnswer(ctx, badConfirm)
+	require.ErrorIs(t, err, store.ErrDecisionOutcomeMismatch)
+
+	// Confirm with same text succeeds.
+	okConfirm := f.answer(rowConfirm, messages.ChoiceIDOther, "user-1", "")
+	okConfirm.OtherText = "europe-west4"
+	okConfirm.Outcome = store.DecisionOutcomeConfirm
+	confAns, _, err := f.cs.RecordAnswer(ctx, okConfirm)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionOutcomeConfirm, confAns.Outcome)
+	assert.Equal(t, "europe-west4", confAns.OtherText)
+
+	// Override with same text fails ErrDecisionOutcomeMismatch; with different text succeeds.
+	badOverride := f.answer(rowOverride, messages.ChoiceIDOther, "user-1", "")
+	badOverride.OtherText = "asia-northeast1"
+	badOverride.Outcome = store.DecisionOutcomeOverride
+	_, _, err = f.cs.RecordAnswer(ctx, badOverride)
+	require.ErrorIs(t, err, store.ErrDecisionOutcomeMismatch)
+
+	okOverride := f.answer(rowOverride, messages.ChoiceIDOther, "user-1", "")
+	okOverride.OtherText = "me-central2"
+	okOverride.Outcome = store.DecisionOutcomeOverride
+	overAns, _, err := f.cs.RecordAnswer(ctx, okOverride)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionOutcomeOverride, overAns.Outcome)
+	assert.Equal(t, "me-central2", overAns.OtherText)
+
+	// Interpreted fixed choice overridden by $other succeeds.
+	_, err = f.cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agentID,
+		SourceMessageID:      src.ID,
+		AnsweredByUserID:     "user-1",
+		AnsweredByName:       "Alice",
+		Surface:              store.DecisionSurfaceSlack,
+		Answers:              []store.InterpretedAnswerPair{{Key: "reg-fixed-other", ChoiceID: "1"}},
+		ResponseMessage:      mkResp(),
+	})
+	require.NoError(t, err)
+
+	fixedToOther := f.answer(rowFixedToOther, messages.ChoiceIDOther, "user-1", "")
+	fixedToOther.OtherText = "southamerica-east1"
+	fixedToOther.Outcome = store.DecisionOutcomeOverride
+	ftoAns, _, err := f.cs.RecordAnswer(ctx, fixedToOther)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionOutcomeOverride, ftoAns.Outcome)
+	assert.Equal(t, "southamerica-east1", ftoAns.OtherText)
+
+	// 7. ListAgentDecisions search (-q) matches effective answer's other_text, not superseded interpreted text.
+	foundNew, _, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateDecided, "ME-CENTRAL2", "", 50)
+	require.NoError(t, err)
+	require.Len(t, foundNew, 1)
+	assert.Equal(t, "reg-override", foundNew[0].Key)
+
+	notFoundOld, _, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateDecided, "asia-northeast1", "", 50)
+	require.NoError(t, err)
+	assert.Empty(t, notFoundOld, "superseded interpreted other_text must not match effective-answer search")
+}

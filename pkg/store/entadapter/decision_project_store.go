@@ -476,6 +476,7 @@ func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*e
 	}
 
 	prevChoiceByRow := make(map[uuid.UUID]string)
+	prevOtherByRow := make(map[uuid.UUID]string)
 	if len(overrideRowUUIDs) > 0 {
 		interpRows, err := c.client.DecisionAnswer.Query().
 			Where(
@@ -488,6 +489,9 @@ func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*e
 		}
 		for _, ir := range interpRows {
 			prevChoiceByRow[ir.DecisionRowID] = ir.ChoiceLabel
+			if ir.OtherText != nil {
+				prevOtherByRow[ir.DecisionRowID] = *ir.OtherText
+			}
 		}
 	}
 
@@ -511,6 +515,7 @@ func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*e
 		}
 		if ans.Outcome == store.DecisionOutcomeOverride {
 			entry.PreviousChoiceLabel = prevChoiceByRow[r.DecisionRowID]
+			entry.PreviousOtherText = prevOtherByRow[r.DecisionRowID]
 		}
 		entries = append(entries, entry)
 	}
@@ -695,6 +700,7 @@ func decisionAnswerMatchesQuery(q string, labelKeys []string) predicate.Decision
 	return decisionanswer.Or(
 		decisionanswer.QuestionTextContainsFold(q),
 		decisionanswer.ChoiceLabelContainsFold(q),
+		decisionanswer.OtherTextContainsFold(q),
 		decisionanswer.DismissReasonContainsFold(q),
 		decisionanswer.KeyContainsFold(q),
 		func(s *entsql.Selector) {

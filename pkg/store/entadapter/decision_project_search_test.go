@@ -324,3 +324,115 @@ func TestDecisionAnswers_AskerAgentIndexExists(t *testing.T) {
 	require.NoError(t, cs.DB().QueryRowContext(ctx, query, name).Scan(&n))
 	assert.Equal(t, 1, n)
 }
+
+func TestDecisionSearch_MadeOtherTextAndPreviousOtherText(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	projectID := backfillTestProject(t, cs, "decision-search-other")
+
+	aliceID := uuid.New().String()
+	require.NoError(t, cs.CreateUser(ctx, &store.User{
+		ID:          aliceID,
+		Email:       "alice@example.com",
+		DisplayName: "Alice",
+		Status:      "active",
+		Created:     time.Now(),
+	}))
+
+	botID := uuid.New().String()
+	topic := uuid.New().String()
+	promptMsgID := uuid.New().String()
+	promptRes, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+		Message: &store.Message{
+			ID:        promptMsgID,
+			ProjectID: projectID,
+			Sender:    "agent:release-bot",
+			SenderID:  botID,
+			Recipient: "group:topic",
+			ThreadID:  topic,
+		},
+		AskerAgentID:   botID,
+		AskerAgentName: "release-bot",
+		Decisions: []messages.Decision{{
+			Key:      "region",
+			Question: "Which region?",
+			Choices:  []messages.Choice{{ID: "1", Label: "us-central1"}},
+			Other:    &messages.OtherOption{Label: "Another region"},
+		}},
+	})
+	require.NoError(t, err)
+	rowID := promptRes.Decisions[0].RowID
+
+	srcMsgID := uuid.New().String()
+	require.NoError(t, cs.CreateMessage(ctx, &store.Message{
+		ID:        srcMsgID,
+		ProjectID: projectID,
+		ThreadID:  topic,
+		Sender:    "user:" + aliceID,
+		SenderID:  aliceID,
+		Recipient: "group:topic",
+		Msg:       "use europe-west4",
+	}))
+
+	// Interpreted Other answer, then direct override to a different Other text.
+	interpRes, err := cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: botID,
+		SourceMessageID:      srcMsgID,
+		AnsweredByUserID:     aliceID,
+		AnsweredByName:       "Alice",
+		AnsweredByEmail:      "alice@example.com",
+		Surface:              store.DecisionSurfaceSlack,
+		Answers:              []store.InterpretedAnswerPair{{Key: "region", ChoiceID: messages.ChoiceIDOther, OtherText: "europe-west4"}},
+		ResponseMessage: &store.Message{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			ThreadID:  topic,
+			Sender:    "agent:release-bot",
+			Recipient: "group:topic",
+			Msg:       "interpreted",
+		},
+	})
+	require.NoError(t, err)
+	interpAnsID := interpRes.Answers[0].ID
+
+	overAns, _, err := cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+		DecisionRowID:    rowID,
+		ChoiceID:         messages.ChoiceIDOther,
+		OtherText:        "asia-southeast1 canary",
+		AnsweredByUserID: aliceID,
+		AnsweredByName:   "Alice",
+		AnsweredByEmail:  "alice@example.com",
+		Provenance:       store.DecisionProvenanceDirect,
+		Outcome:          store.DecisionOutcomeOverride,
+		Surface:          store.DecisionSurfaceNative,
+		ResponseMessage: &store.Message{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			ThreadID:  topic,
+			Sender:    "user:Alice",
+			Recipient: "agent:release-bot",
+			Msg:       "override",
+		},
+	})
+	require.NoError(t, err)
+
+	// Search by word in override's other_text returns the override entry with PreviousChoiceLabel & PreviousOtherText.
+	entries, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
+		Query: "SOUTHEAST1",
+	}, "", 50)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, overAns.ID, entries[0].Answer.ID)
+	assert.Equal(t, "asia-southeast1 canary", entries[0].Answer.OtherText)
+	assert.Equal(t, "Another region", entries[0].PreviousChoiceLabel)
+	assert.Equal(t, "europe-west4", entries[0].PreviousOtherText)
+
+	// Search by word in interpreted entry's other_text finds that append-only log entry too.
+	interpEntries, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
+		Query: "EUROPE-WEST4",
+	}, "", 50)
+	require.NoError(t, err)
+	require.Len(t, interpEntries, 1)
+	assert.Equal(t, interpAnsID, interpEntries[0].Answer.ID)
+	assert.Empty(t, interpEntries[0].PreviousOtherText)
+}
