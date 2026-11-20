@@ -84,6 +84,7 @@ export interface EffectivePermissionEntry {
   resource: string;
   action: string;
   description: string;
+  appliesInProjects?: boolean;
   grants: EffectivePermissionGrant[];
 }
 
@@ -100,6 +101,7 @@ export interface EffectivePermissionRemoved {
   resource?: string;
   action?: string;
   description?: string;
+  appliesInProjects?: boolean;
   grants: EffectivePermissionGrant[];
   removedBy: EffectivePermissionBoundaryRef[];
 }
@@ -190,9 +192,117 @@ function renderGrantChip(
   `;
 }
 
+function statusGateMessage(gate: EffectiveStatusGate): string {
+  switch (gate.reason) {
+    case 'suspended':
+      return 'Suspended: holds no effective permissions';
+    case 'invited':
+      return 'Invited: holds no effective permissions';
+    case 'deleting':
+      return 'Deleting: holds no effective permissions';
+    case 'missing':
+      return 'Account unavailable: holds no effective permissions';
+    default: {
+      const reason = String(gate.reason);
+      const label = reason ? reason.charAt(0).toUpperCase() + reason.slice(1) : 'Inactive';
+      return `${label}: holds no effective permissions`;
+    }
+  }
+}
+
+function renderApplicabilityBadge(
+  appliesInProjects: boolean | undefined,
+  isProjectView: boolean
+): TemplateResult | typeof nothing {
+  if (isProjectView || typeof appliesInProjects !== 'boolean') {
+    return nothing;
+  }
+  return html`
+    <span
+      class="scope-applicability-badge ${appliesInProjects ? 'applies-all-projects' : 'hub-only'}"
+      data-applies-in-projects=${appliesInProjects ? 'true' : 'false'}
+    >
+      ${appliesInProjects ? 'applies in all projects' : 'hub only'}
+    </span>
+  `;
+}
+
+function renderRemovedBoundaryChip(boundary: EffectivePermissionBoundaryRef): TemplateResult {
+  const isRedacted = boundary.redacted || !boundary.name;
+  const label = isRedacted ? 'Access constraint (details unavailable)' : boundary.name;
+  const scopeLabel = boundary.scopeType === 'project' ? 'project' : 'hub';
+
+  return html`
+    <span
+      class="removed-boundary-chip ${isRedacted ? 'redacted' : ''}"
+      data-boundary-redacted=${isRedacted ? 'true' : 'false'}
+    >
+      <sl-icon name="shield-x"></sl-icon>
+      <span>${label}</span>
+      ${boundary.scopeType ? html`<span class="boundary-scope-tag">${scopeLabel}</span>` : nothing}
+    </span>
+  `;
+}
+
+function renderRemovedPermissionsSection(
+  removed: ReadonlyArray<EffectivePermissionRemoved>,
+  onCopy: (bindingId: string) => void,
+  isProjectView: boolean
+): TemplateResult | typeof nothing {
+  if (removed.length === 0) {
+    return nothing;
+  }
+
+  return html`
+    <sl-details
+      class="removed-permissions-details"
+      summary=${`Removed by access constraints (${removed.length})`}
+      @sl-show=${(e: Event): void => {
+        if (e.target !== e.currentTarget) return;
+      }}
+      @sl-hide=${(e: Event): void => {
+        if (e.target !== e.currentTarget) return;
+      }}
+    >
+      <div class="removed-rows">
+        ${removed.map(
+          (item) => html`
+            <div class="removed-row" data-removed-permission-id=${item.id}>
+              <div class="perm-meta">
+                <div class="perm-id-line">
+                  <code class="perm-id removed-perm-id">${item.id}</code>
+                  ${renderApplicabilityBadge(item.appliesInProjects, isProjectView)}
+                </div>
+                ${item.description
+                  ? html`<span class="perm-desc">${item.description}</span>`
+                  : nothing}
+              </div>
+              <div class="removed-details-col">
+                <div class="removed-grants">
+                  <span class="removed-label">Would have been granted by</span>
+                  <div class="perm-grants">
+                    ${item.grants.map((g) => renderGrantChip(g, onCopy, isProjectView))}
+                  </div>
+                </div>
+                <div class="removed-by">
+                  <span class="removed-label">Removed by access constraint</span>
+                  <div class="removed-boundaries">
+                    ${item.removedBy.map((b) => renderRemovedBoundaryChip(b))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          `
+        )}
+      </div>
+    </sl-details>
+  `;
+}
+
 /**
  * Pure presentational helper rendering an `EffectivePermissionSet` grouped by
- * resource with origin chips, binding ID tooltips, and expiry badges.
+ * resource with origin chips, binding ID tooltips, expiry badges, statusGate
+ * banner, and collapsed removed-by-access-constraints list.
  */
 export function renderPermissionList(
   data: EffectivePermissionSet,
@@ -204,6 +314,27 @@ export function renderPermissionList(
     ((bindingId: string): void => {
       void copyWithToast(bindingId);
     });
+  const isProjectView = data.scope.type === 'project';
+
+  if (data.statusGate !== null) {
+    return html`
+      <div
+        class="status-gate-banner"
+        role="status"
+        data-status-gate-reason=${data.statusGate.reason}
+      >
+        <sl-icon name="shield-exclamation"></sl-icon>
+        <div class="status-gate-copy">
+          <div class="status-gate-title">${statusGateMessage(data.statusGate)}</div>
+          <p class="status-gate-detail">
+            Stored role bindings are still listed on the Effective roles tab.
+          </p>
+        </div>
+      </div>
+    `;
+  }
+
+  const removedSection = renderRemovedPermissionsSection(data.removed ?? [], onCopy, isProjectView);
 
   if (data.permissions.length === 0) {
     return html`
@@ -212,6 +343,7 @@ export function renderPermissionList(
         <h3>No Effective Permissions</h3>
         <p>This user holds no active permissions at this scope.</p>
       </div>
+      ${removedSection}
     `;
   }
 
@@ -221,6 +353,7 @@ export function renderPermissionList(
       <div class="empty-state compact-empty">
         <p>No permissions match "${filter.trim()}".</p>
       </div>
+      ${removedSection}
     `;
   }
 
@@ -238,15 +371,16 @@ export function renderPermissionList(
                 (perm) => html`
                   <div class="permission-row" data-permission-id=${perm.id}>
                     <div class="perm-meta">
-                      <code class="perm-id">${perm.id}</code>
+                      <div class="perm-id-line">
+                        <code class="perm-id">${perm.id}</code>
+                        ${renderApplicabilityBadge(perm.appliesInProjects, isProjectView)}
+                      </div>
                       ${perm.description
                         ? html`<span class="perm-desc">${perm.description}</span>`
                         : nothing}
                     </div>
                     <div class="perm-grants">
-                      ${perm.grants.map((g) =>
-                        renderGrantChip(g, onCopy, data.scope.type === 'project')
-                      )}
+                      ${perm.grants.map((g) => renderGrantChip(g, onCopy, isProjectView))}
                     </div>
                   </div>
                 `
@@ -256,6 +390,7 @@ export function renderPermissionList(
         `
       )}
     </div>
+    ${removedSection}
   `;
 }
 
@@ -411,6 +546,33 @@ export class ScionEffectivePermissionsView extends LitElement {
       gap: 0.125rem;
       min-width: 0;
       flex: 1 1 14rem;
+    }
+
+    .perm-id-line {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+    }
+
+    .scope-applicability-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.0625rem 0.4375rem;
+      border-radius: 9999px;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      line-height: 1.3;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--scion-bg-subtle, #f8fafc);
+      color: var(--scion-text-muted, #64748b);
+      white-space: nowrap;
+    }
+
+    .scope-applicability-badge.applies-all-projects {
+      border-color: var(--sl-color-primary-200, #bfdbfe);
+      background: var(--sl-color-primary-50, #eff6ff);
+      color: var(--sl-color-primary-700, #1d4ed8);
     }
 
     .perm-id {
@@ -596,13 +758,174 @@ export class ScionEffectivePermissionsView extends LitElement {
       margin: 0;
     }
 
+    .status-gate-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      padding: 0.875rem 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      border: 1px solid var(--sl-color-warning-300, #fcd34d);
+      background: var(--sl-color-warning-50, #fffbeb);
+      color: var(--sl-color-warning-900, #78350f);
+    }
+
+    .status-gate-banner sl-icon {
+      font-size: 1.25rem;
+      flex-shrink: 0;
+      margin-top: 0.125rem;
+      color: var(--sl-color-warning-700, #b45309);
+    }
+
+    .status-gate-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .status-gate-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+    }
+
+    .status-gate-detail {
+      font-size: 0.8125rem;
+      margin: 0;
+      opacity: 0.9;
+    }
+
+    .removed-permissions-details {
+      margin-top: 0.75rem;
+    }
+
+    .removed-permissions-details::part(base) {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    .removed-permissions-details::part(header) {
+      font-size: 0.8125rem;
+      font-weight: 600;
+      color: var(--scion-text-muted, #64748b);
+      padding: 0.5rem 0.75rem;
+    }
+
+    .removed-permissions-details::part(content) {
+      padding: 0;
+    }
+
+    .removed-rows {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .removed-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.625rem 0.75rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .removed-perm-id {
+      text-decoration: line-through;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .removed-details-col {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 0.375rem;
+      flex: 0 1 auto;
+    }
+
+    .removed-grants,
+    .removed-by {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 0.25rem;
+    }
+
+    .removed-label {
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .removed-boundaries {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0.375rem;
+    }
+
+    .removed-boundary-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.1875rem 0.5rem;
+      border-radius: 9999px;
+      border: 1px solid var(--sl-color-danger-200, #fecaca);
+      background: var(--sl-color-danger-50, #fef2f2);
+      color: var(--sl-color-danger-700, #b91c1c);
+      font-size: 0.75rem;
+      line-height: 1.25;
+    }
+
+    .removed-boundary-chip.redacted {
+      border-color: var(--scion-border, #e2e8f0);
+      background: var(--scion-bg-subtle, #f8fafc);
+      color: var(--scion-text-muted, #64748b);
+      font-style: italic;
+    }
+
+    .removed-boundary-chip sl-icon {
+      font-size: 0.75rem;
+      flex-shrink: 0;
+    }
+
+    .boundary-scope-tag {
+      font-size: 0.6875rem;
+      font-style: normal;
+      opacity: 0.8;
+      padding-left: 0.125rem;
+    }
+
+    .ownership-footnote {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.375rem;
+      margin: 0.875rem 0 0 0;
+      padding-top: 0.625rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      line-height: 1.4;
+    }
+
+    .ownership-footnote sl-icon {
+      font-size: 0.875rem;
+      flex-shrink: 0;
+      margin-top: 0.125rem;
+    }
+
     @media (max-width: 768px) {
-      .permission-row {
+      .permission-row,
+      .removed-row {
         flex-direction: column;
       }
 
-      .perm-grants {
+      .perm-grants,
+      .removed-boundaries {
         justify-content: flex-start;
+      }
+
+      .removed-details-col,
+      .removed-grants,
+      .removed-by {
+        align-items: flex-start;
       }
     }
 
@@ -610,8 +933,12 @@ export class ScionEffectivePermissionsView extends LitElement {
       .resource-group,
       .origin-chip,
       .expires-badge,
+      .scope-applicability-badge,
       .error-state,
-      .by-project-details::part(base) {
+      .status-gate-banner,
+      .removed-boundary-chip,
+      .by-project-details::part(base),
+      .removed-permissions-details::part(base) {
         border: 1px solid ButtonText;
       }
     }
@@ -939,6 +1266,13 @@ export class ScionEffectivePermissionsView extends LitElement {
           : nothing}
       </div>
       ${renderPermissionList(this._data, { filter: this._filter })} ${this.renderByProjectSection()}
+      <p class="ownership-footnote">
+        <sl-icon name="info-circle"></sl-icon>
+        <span
+          >Some permissions (for example attaching to your own agents) are granted per resource by
+          ownership and are not listed here.</span
+        >
+      </p>
     `;
   }
 }

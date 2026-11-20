@@ -45,6 +45,7 @@ function samplePermissionSet(
         resource: 'agent',
         action: 'create',
         description: 'Create agents in a project',
+        appliesInProjects: true,
         grants: [
           {
             bindingId: 'bind-direct-1',
@@ -60,6 +61,7 @@ function samplePermissionSet(
         resource: 'project',
         action: 'read',
         description: 'Read project metadata',
+        appliesInProjects: true,
         grants: [
           {
             bindingId: 'bind-direct-1',
@@ -82,6 +84,7 @@ function samplePermissionSet(
         resource: 'user',
         action: 'read',
         description: 'Read user directory records',
+        appliesInProjects: false,
         grants: [
           {
             bindingId: 'bind-group-2',
@@ -192,6 +195,16 @@ describe('renderPermissionList pure helper', () => {
 
     const expiresBadge = host.querySelector('.expires-badge');
     expect(expiresBadge?.textContent?.toLowerCase()).toContain('expires');
+
+    // Hub-scope rows render "applies in all projects" vs "hub only" badges from appliesInProjects.
+    const agentRow = host.querySelector('.permission-row[data-permission-id="agent.create"]');
+    expect(agentRow?.querySelector('.scope-applicability-badge')?.textContent?.trim()).toBe(
+      'applies in all projects'
+    );
+    const userRow = host.querySelector('.permission-row[data-permission-id="user.read"]');
+    expect(userRow?.querySelector('.scope-applicability-badge')?.textContent?.trim()).toBe(
+      'hub only'
+    );
   });
 
   it('filters rows by permission ID substring case-insensitively', () => {
@@ -215,14 +228,127 @@ describe('renderPermissionList pure helper', () => {
     expect(onCopy).toHaveBeenCalledWith('bind-direct-1');
   });
 
-  it('renders Project role and Inherited from hub origin chips for project-scoped sets', () => {
+  it('renders Project role and Inherited from hub origin chips for project-scoped sets and omits applicability badges', () => {
     const data = sampleProjectPermissionSet();
+    data.permissions[0].appliesInProjects = true;
     render(renderPermissionList(data), host);
 
     const chips = Array.from(host.querySelectorAll('.origin-chip'));
     const chipTexts = chips.map((c) => c.textContent?.replace(/\s+/g, ' ').trim());
     expect(chipTexts).toContain('Project role · project-member · via group: Project Eng');
     expect(chipTexts).toContain('Inherited from hub · hub-admin · direct');
+    expect(host.querySelector('.scope-applicability-badge')).toBeNull();
+  });
+
+  it('renders a collapsed Removed by access constraints section with named and redacted boundaries', () => {
+    const onCopy = vi.fn();
+    const data = samplePermissionSet({
+      removed: [
+        {
+          id: 'agent.delete',
+          resource: 'agent',
+          action: 'delete',
+          description: 'Delete agents',
+          grants: [
+            {
+              bindingId: 'bind-ops-1',
+              role: { id: 'role-ops', name: 'ops-admin', system: false },
+              scope: { type: 'system' },
+              via: null,
+              expiresAt: null,
+            },
+          ],
+          removedBy: [
+            {
+              id: 'ac-1',
+              name: 'contractors-cap',
+              scopeType: 'system',
+              redacted: false,
+            },
+          ],
+        },
+        {
+          id: 'broker.delete',
+          resource: 'broker',
+          action: 'delete',
+          description: 'Delete runtime brokers',
+          grants: [
+            {
+              bindingId: 'bind-ops-2',
+              role: { id: 'role-ops', name: 'ops-admin', system: false },
+              scope: { type: 'system' },
+              via: { groupId: 'grp-ops', groupName: 'Ops Team', groupSlug: 'ops-team' },
+              expiresAt: null,
+            },
+          ],
+          removedBy: [
+            {
+              id: '',
+              name: '',
+              scopeType: 'system',
+              redacted: true,
+            },
+          ],
+        },
+      ],
+    });
+    render(renderPermissionList(data, { onCopyBindingId: onCopy }), host);
+
+    const details = host.querySelector('sl-details.removed-permissions-details');
+    expect(details).not.toBeNull();
+    expect(details?.getAttribute('summary')).toBe('Removed by access constraints (2)');
+    expect(details?.hasAttribute('open')).toBe(false);
+
+    const rows = Array.from(details!.querySelectorAll('.removed-row'));
+    expect(rows).toHaveLength(2);
+    expect(rows[0].getAttribute('data-removed-permission-id')).toBe('agent.delete');
+    expect(rows[0].textContent).toContain('ops-admin · direct');
+    expect(rows[0].textContent).toContain('contractors-cap');
+    expect(
+      rows[0].querySelector('.removed-boundary-chip')?.getAttribute('data-boundary-redacted')
+    ).toBe('false');
+
+    expect(rows[1].getAttribute('data-removed-permission-id')).toBe('broker.delete');
+    expect(rows[1].textContent).toContain('ops-admin · via group: Ops Team');
+    expect(rows[1].textContent).toContain('Access constraint (details unavailable)');
+    expect(
+      rows[1].querySelector('.removed-boundary-chip')?.getAttribute('data-boundary-redacted')
+    ).toBe('true');
+
+    // Clicking the granting origin chip inside a removed row copies its binding ID.
+    const removedGrantChip = rows[0].querySelector<HTMLButtonElement>('.origin-chip');
+    expect(removedGrantChip).not.toBeNull();
+    removedGrantChip!.click();
+    expect(onCopy).toHaveBeenCalledWith('bind-ops-1');
+  });
+
+  it('renders statusGate banner instead of the empty list for suspended, invited, deleting, and missing users', () => {
+    const cases: Array<{
+      reason: 'suspended' | 'invited' | 'deleting' | 'missing';
+      expectedText: string;
+    }> = [
+      { reason: 'suspended', expectedText: 'Suspended: holds no effective permissions' },
+      { reason: 'invited', expectedText: 'Invited: holds no effective permissions' },
+      { reason: 'deleting', expectedText: 'Deleting: holds no effective permissions' },
+      { reason: 'missing', expectedText: 'Account unavailable: holds no effective permissions' },
+    ];
+
+    for (const tc of cases) {
+      const data = samplePermissionSet({
+        principal: { type: 'user', id: 'user-inactive', status: tc.reason },
+        statusGate: { reason: tc.reason },
+        permissions: [],
+        removed: [],
+      });
+      render(renderPermissionList(data), host);
+
+      const banner = host.querySelector('.status-gate-banner');
+      expect(banner).not.toBeNull();
+      expect(banner?.getAttribute('data-status-gate-reason')).toBe(tc.reason);
+      expect(banner?.textContent).toContain(tc.expectedText);
+      expect(host.querySelector('.empty-state')).toBeNull();
+      expect(host.querySelector('.permission-groups')).toBeNull();
+    }
   });
 });
 
@@ -500,6 +626,190 @@ describe('scion-effective-permissions-view lazy loading', () => {
     );
     expect(chipTexts).toContain('Project role · project-member · via group: Project Eng');
     expect(chipTexts).toContain('Inherited from hub · hub-admin · direct');
+  });
+
+  it('renders ownership footnote, removed lists in hub and project sections, and guards nested removed sl-details events', async () => {
+    const hubWithRemoved = samplePermissionSet({
+      removed: [
+        {
+          id: 'agent.delete',
+          resource: 'agent',
+          action: 'delete',
+          description: 'Delete agents',
+          grants: [
+            {
+              bindingId: 'bind-direct-1',
+              role: { id: 'role-hub-admin', name: 'hub-admin', system: true },
+              scope: { type: 'system' },
+              via: null,
+              expiresAt: null,
+            },
+          ],
+          removedBy: [
+            {
+              id: '',
+              name: '',
+              scopeType: 'system',
+              redacted: true,
+            },
+          ],
+        },
+      ],
+    });
+    const projWithRemoved: EffectivePermissionSet = {
+      ...sampleProjectPermissionSet(),
+      removed: [
+        {
+          id: 'agent.delete',
+          resource: 'agent',
+          action: 'delete',
+          description: 'Delete agents',
+          grants: [
+            {
+              bindingId: 'bind-sys-direct-1',
+              role: { id: 'role-hub-admin', name: 'hub-admin', system: true },
+              scope: { type: 'system' },
+              via: null,
+              expiresAt: null,
+            },
+          ],
+          removedBy: [
+            {
+              id: 'ac-proj-1',
+              name: 'alpha-no-delete',
+              scopeType: 'project',
+              scopeId: 'proj-alpha',
+              redacted: false,
+            },
+          ],
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const path = requestPath(input);
+        calls.push(path);
+        if (path.includes('/api/v1/auth/admin-status')) {
+          return Promise.resolve(
+            jsonResponse({ isAdmin: true, isSuperAdmin: false, permissions: ['role_binding.read'] })
+          );
+        }
+        if (path.includes('/api/v1/admin/effective-permissions')) {
+          if (path.includes('projectId=proj-alpha')) {
+            return Promise.resolve(jsonResponse(projWithRemoved));
+          }
+          return Promise.resolve(jsonResponse(hubWithRemoved));
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+
+    el = document.createElement(
+      'scion-effective-permissions-view'
+    ) as ScionEffectivePermissionsView;
+    el.principalType = 'user';
+    el.principalId = 'user-target-1';
+    el.active = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    // Ownership footnote is rendered.
+    const footnote = el.shadowRoot?.querySelector('.ownership-footnote');
+    expect(footnote).not.toBeNull();
+    expect(footnote?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'Some permissions (for example attaching to your own agents) are granted per resource by ownership and are not listed here.'
+    );
+
+    // Hub removed section is collapsed and shows redacted boundary text.
+    const hubRemovedDetails = el.shadowRoot?.querySelector(
+      'sl-details.removed-permissions-details'
+    );
+    expect(hubRemovedDetails).not.toBeNull();
+    expect(hubRemovedDetails?.getAttribute('summary')).toBe('Removed by access constraints (1)');
+    expect(hubRemovedDetails?.hasAttribute('open')).toBe(false);
+    expect(hubRemovedDetails?.textContent).toContain('Access constraint (details unavailable)');
+
+    // Expand By project, pick proj-alpha, verify project removed section and event isolation.
+    const byProjectDetails = el.shadowRoot?.querySelector('sl-details.by-project-details');
+    expect(byProjectDetails).not.toBeNull();
+    byProjectDetails!.dispatchEvent(new CustomEvent('sl-show', { bubbles: true, composed: true }));
+    await el.updateComplete;
+
+    const picker = byProjectDetails!.querySelector('scion-project-picker');
+    expect(picker).not.toBeNull();
+    picker!.dispatchEvent(
+      new CustomEvent('project-change', {
+        detail: { projectId: 'proj-alpha', displayLabel: 'Alpha Project' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    const projRemovedDetails = byProjectDetails!.querySelector(
+      'sl-details.removed-permissions-details'
+    );
+    expect(projRemovedDetails).not.toBeNull();
+    expect(projRemovedDetails?.getAttribute('summary')).toBe('Removed by access constraints (1)');
+    expect(projRemovedDetails?.textContent).toContain('alpha-no-delete');
+
+    // Collapsing the nested removed-permissions sl-details must NOT collapse by-project-details.
+    projRemovedDetails!.dispatchEvent(
+      new CustomEvent('sl-hide', { bubbles: true, composed: true })
+    );
+    await el.updateComplete;
+    expect(byProjectDetails?.hasAttribute('open')).toBe(true);
+  });
+
+  it('renders statusGate banner in component view for a suspended user', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const path = requestPath(input);
+        calls.push(path);
+        if (path.includes('/api/v1/auth/admin-status')) {
+          return Promise.resolve(
+            jsonResponse({ isAdmin: true, isSuperAdmin: false, permissions: ['role_binding.read'] })
+          );
+        }
+        if (path.includes('/api/v1/admin/effective-permissions')) {
+          return Promise.resolve(
+            jsonResponse(
+              samplePermissionSet({
+                principal: { type: 'user', id: 'user-susp-1', status: 'suspended' },
+                statusGate: { reason: 'suspended' },
+                permissions: [],
+                removed: [],
+              })
+            )
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+
+    el = document.createElement(
+      'scion-effective-permissions-view'
+    ) as ScionEffectivePermissionsView;
+    el.principalType = 'user';
+    el.principalId = 'user-susp-1';
+    el.active = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    const banner = el.shadowRoot?.querySelector('.status-gate-banner');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('Suspended: holds no effective permissions');
+    expect(el.shadowRoot?.querySelector('.empty-state')).toBeNull();
+    expect(el.shadowRoot?.querySelector('.filter-input')).toBeNull();
   });
 });
 

@@ -317,6 +317,7 @@ func TestAdminEffectivePermissions_ProvenanceDirectAndGroup(t *testing.T) {
 	assert.Equal(t, "role_binding", rbRead.Resource)
 	assert.Equal(t, "read", rbRead.Action)
 	assert.NotEmpty(t, rbRead.Description)
+	assert.True(t, rbRead.AppliesInProjects, "role_binding.read applies in projects")
 	require.Len(t, rbRead.Grants, 2, "both direct and group-derived grants must be listed")
 
 	grantByBinding := map[string]EffectivePermissionGrant{}
@@ -327,6 +328,7 @@ func TestAdminEffectivePermissions_ProvenanceDirectAndGroup(t *testing.T) {
 	// role.read comes from all 3 sources: direct-ops, eng-auditor, and hub-member.
 	roleRead, ok := byPerm["role.read"]
 	require.True(t, ok, "role.read should be in effective permissions")
+	assert.False(t, roleRead.AppliesInProjects, "role.read is hub-only")
 	require.Len(t, roleRead.Grants, 3, "all three contributing grants must be listed")
 
 	directGrant, hasDirect := grantByBinding[directBinding.ID]
@@ -499,24 +501,80 @@ func TestAdminEffectivePermissions_AccessConstraintRemovals(t *testing.T) {
 	srv, s, hubAdmin, _ := setupScopedAdminTest(t)
 	ctx := context.Background()
 
+	// Super-admin caller (holds role_binding.read + access_constraint.read).
+	superAdmin := epCreateUser(t, s, "rm-super", store.UserStatusActive)
+	superAdmin.Role = store.UserRoleAdmin
+	require.NoError(t, s.UpdateUser(ctx, superAdmin))
+	superRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	epBindSystemRole(t, s, superRole.ID, store.RoleBindingPrincipalUser, superAdmin.ID, nil, nil)
+
+	// Custom caller with role_binding.read + project.read, but NOT access_constraint.read.
+	rbNoACRole := epCreateCustomSystemRole(t, s, "rb-no-ac-reader", []string{"role_binding.read", "project.read"})
+	rbNoACCaller := epCreateUser(t, s, "rm-rb-no-ac", store.UserStatusActive)
+	epBindSystemRole(t, s, rbNoACRole.ID, store.RoleBindingPrincipalUser, rbNoACCaller.ID, nil, nil)
+
+	// Target with project.read and agent.delete at system scope.
 	target := epCreateUser(t, s, "constrained-target", store.UserStatusActive)
 	role := epCreateCustomSystemRole(t, s, "ops-plus-delete", []string{"project.read", "agent.delete"})
 	epBindSystemRole(t, s, role.ID, store.RoleBindingPrincipalUser, target.ID, nil, nil)
 
+	// Create a project so we can also verify mixed system + project constraint deduplication.
+	projOwner := epCreateUser(t, s, "rm-proj-owner", store.UserStatusActive)
+	proj := epCreateProject(t, srv, s, "rm-proj", "Removals Project", projOwner.ID)
+
 	pType := store.RoleBindingPrincipalUser
-	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
-		Name:                 "contractors-cap",
+	sysCapA, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "contractors-cap-a",
 		SubjectKind:          store.ConstraintSubjectPrincipal,
 		SubjectPrincipalType: &pType,
 		SubjectPrincipalID:   &target.ID,
 		ScopeType:            store.RoleScopeSystem,
 		MaximumPermissions:   []string{"project.read"},
-		Purpose:              "cap agent.delete",
+		Purpose:              "cap agent.delete (system A)",
 		CreatedBy:            hubAdmin.ID,
 	})
 	require.NoError(t, err)
 
-	// Direct resolver check: populates unredacted boundary metadata.
+	sysCapB, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "contractors-cap-b",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   &target.ID,
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"project.read"},
+		Purpose:              "cap agent.delete (system B)",
+		CreatedBy:            hubAdmin.ID,
+	})
+	require.NoError(t, err)
+
+	projCapA, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "proj-cap-a",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   &target.ID,
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              proj.ID,
+		MaximumPermissions:   []string{"project.read"},
+		Purpose:              "cap agent.delete (project A)",
+		CreatedBy:            hubAdmin.ID,
+	})
+	require.NoError(t, err)
+
+	projCapB, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "proj-cap-b",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   &target.ID,
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              proj.ID,
+		MaximumPermissions:   []string{"project.read"},
+		Purpose:              "cap agent.delete (project B)",
+		CreatedBy:            hubAdmin.ID,
+	})
+	require.NoError(t, err)
+
+	// Direct resolver check: populates unredacted boundary metadata for both system constraints.
 	resolved, err := srv.authzService.ResolveEffectivePermissions(ctx,
 		PrincipalContext{Kind: PrincipalKindUser, ID: target.ID}, EffectiveScope{})
 	require.NoError(t, err)
@@ -524,21 +582,144 @@ func TestAdminEffectivePermissions_AccessConstraintRemovals(t *testing.T) {
 	assert.Equal(t, "project.read", resolved.Permissions[0].ID)
 	require.Len(t, resolved.Removed, 1)
 	assert.Equal(t, "agent.delete", resolved.Removed[0].ID)
-	require.Len(t, resolved.Removed[0].RemovedBy, 1)
-	assert.Equal(t, "contractors-cap", resolved.Removed[0].RemovedBy[0].Name)
-	assert.Equal(t, ScopeTypeSystem, resolved.Removed[0].RemovedBy[0].ScopeType)
+	require.Len(t, resolved.Removed[0].RemovedBy, 2)
+	assert.Equal(t, "contractors-cap-a", resolved.Removed[0].RemovedBy[0].Name)
+	assert.Equal(t, "contractors-cap-b", resolved.Removed[0].RemovedBy[1].Name)
 
-	// HTTP check: includes removed entry in response.
-	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
-		"/api/v1/admin/effective-permissions?principalType=user&principalId="+target.ID, nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	sysURL := "/api/v1/admin/effective-permissions?principalType=user&principalId=" + target.ID
+	projURL := sysURL + "&projectId=" + proj.ID
 
-	var resp EffectivePermissionSet
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Len(t, resp.Permissions, 1)
-	assert.Equal(t, "project.read", resp.Permissions[0].ID)
-	require.Len(t, resp.Removed, 1)
-	assert.Equal(t, "agent.delete", resp.Removed[0].ID)
+	t.Run("caller without access_constraint.read gets redacted and deduplicated system boundaries", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, rbNoACCaller, http.MethodGet, sysURL, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		bodyStr := rec.Body.String()
+		assert.NotContains(t, bodyStr, "contractors-cap-a", "redacted response must not leak constraint names")
+		assert.NotContains(t, bodyStr, "contractors-cap-b", "redacted response must not leak constraint names")
+		assert.NotContains(t, bodyStr, sysCapA.ID, "redacted response must not leak constraint IDs")
+		assert.NotContains(t, bodyStr, sysCapB.ID, "redacted response must not leak constraint IDs")
+
+		var resp EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Permissions, 1)
+		assert.Equal(t, "project.read", resp.Permissions[0].ID)
+		require.Len(t, resp.Removed, 1)
+		assert.Equal(t, "agent.delete", resp.Removed[0].ID)
+		assert.Equal(t, "agent", resp.Removed[0].Resource)
+		assert.Equal(t, "delete", resp.Removed[0].Action)
+		assert.NotEmpty(t, resp.Removed[0].Description)
+		assert.True(t, resp.Removed[0].AppliesInProjects, "agent.delete applies in projects")
+		require.Len(t, resp.Removed[0].Grants, 1)
+		assert.Equal(t, "ops-plus-delete", resp.Removed[0].Grants[0].Role.Name)
+
+		// Two system constraints must collapse to a single redacted entry.
+		require.Len(t, resp.Removed[0].RemovedBy, 1, "identical redacted boundaries must be deduplicated")
+		b := resp.Removed[0].RemovedBy[0]
+		assert.True(t, b.Redacted)
+		assert.Empty(t, b.ID)
+		assert.Empty(t, b.Name)
+		assert.Empty(t, b.ScopeID)
+		assert.Equal(t, ScopeTypeSystem, b.ScopeType)
+	})
+
+	t.Run("caller without access_constraint.read at project scope deduplicates per scopeType and clears scopeId", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, rbNoACCaller, http.MethodGet, projURL, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		bodyStr := rec.Body.String()
+		assert.NotContains(t, bodyStr, "contractors-cap-a")
+		assert.NotContains(t, bodyStr, "proj-cap-a")
+		assert.NotContains(t, bodyStr, projCapA.ID)
+		assert.NotContains(t, bodyStr, projCapB.ID)
+
+		var resp EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Removed, 1)
+		assert.Equal(t, "agent.delete", resp.Removed[0].ID)
+
+		// 2 project constraints + 2 system constraints -> 2 redacted entries preserving scopeType distinction.
+		require.Len(t, resp.Removed[0].RemovedBy, 2, "redacted deduplication must preserve distinct scopeTypes")
+		assert.Equal(t, EffectivePermissionBoundaryRef{
+			ID:        "",
+			Name:      "",
+			ScopeType: ScopeTypeProject,
+			ScopeID:   "",
+			Redacted:  true,
+		}, resp.Removed[0].RemovedBy[0])
+		assert.Equal(t, EffectivePermissionBoundaryRef{
+			ID:        "",
+			Name:      "",
+			ScopeType: ScopeTypeSystem,
+			ScopeID:   "",
+			Redacted:  true,
+		}, resp.Removed[0].RemovedBy[1])
+	})
+
+	t.Run("hub-admin sees revealed constraint names, IDs, and scopeIds", func(t *testing.T) {
+		recSys := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, sysURL, nil)
+		require.Equal(t, http.StatusOK, recSys.Code, recSys.Body.String())
+
+		var respSys EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(recSys.Body.Bytes(), &respSys))
+		require.Len(t, respSys.Removed, 1)
+		require.Len(t, respSys.Removed[0].RemovedBy, 2)
+		assert.Equal(t, EffectivePermissionBoundaryRef{
+			ID:        sysCapA.ID,
+			Name:      "contractors-cap-a",
+			ScopeType: ScopeTypeSystem,
+			ScopeID:   "",
+			Redacted:  false,
+		}, respSys.Removed[0].RemovedBy[0])
+		assert.Equal(t, EffectivePermissionBoundaryRef{
+			ID:        sysCapB.ID,
+			Name:      "contractors-cap-b",
+			ScopeType: ScopeTypeSystem,
+			ScopeID:   "",
+			Redacted:  false,
+		}, respSys.Removed[0].RemovedBy[1])
+
+		recProj := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, projURL, nil)
+		require.Equal(t, http.StatusOK, recProj.Code, recProj.Body.String())
+
+		var respProj EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(recProj.Body.Bytes(), &respProj))
+		require.Len(t, respProj.Removed, 1)
+		require.Len(t, respProj.Removed[0].RemovedBy, 4)
+		byName := make(map[string]EffectivePermissionBoundaryRef, 4)
+		for _, b := range respProj.Removed[0].RemovedBy {
+			byName[b.Name] = b
+		}
+		assert.Equal(t, EffectivePermissionBoundaryRef{
+			ID:        projCapA.ID,
+			Name:      "proj-cap-a",
+			ScopeType: ScopeTypeProject,
+			ScopeID:   proj.ID,
+			Redacted:  false,
+		}, byName["proj-cap-a"])
+		assert.Equal(t, EffectivePermissionBoundaryRef{
+			ID:        projCapB.ID,
+			Name:      "proj-cap-b",
+			ScopeType: ScopeTypeProject,
+			ScopeID:   proj.ID,
+			Redacted:  false,
+		}, byName["proj-cap-b"])
+	})
+
+	t.Run("super-admin sees revealed constraint names and IDs", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, superAdmin, http.MethodGet, sysURL, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Removed, 1)
+		require.Len(t, resp.Removed[0].RemovedBy, 2)
+		assert.False(t, resp.Removed[0].RemovedBy[0].Redacted)
+		assert.Equal(t, "contractors-cap-a", resp.Removed[0].RemovedBy[0].Name)
+		assert.Equal(t, sysCapA.ID, resp.Removed[0].RemovedBy[0].ID)
+		assert.False(t, resp.Removed[0].RemovedBy[1].Redacted)
+		assert.Equal(t, "contractors-cap-b", resp.Removed[0].RemovedBy[1].Name)
+		assert.Equal(t, sysCapB.ID, resp.Removed[0].RemovedBy[1].ID)
+	})
 }
 
 type epCountingStore struct {

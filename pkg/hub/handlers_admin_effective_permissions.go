@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -113,17 +115,48 @@ func (s *Server) handleAdminEffectivePermissions(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Redact boundary identifiers and names until the access_constraint.read
-	// reveal check lands in commit 3, ensuring callers with only
-	// role_binding.read never see constraint details.
-	for i := range set.Removed {
-		for j := range set.Removed[i].RemovedBy {
-			set.Removed[i].RemovedBy[j].ID = ""
-			set.Removed[i].RemovedBy[j].Name = ""
-			set.Removed[i].RemovedBy[j].ScopeID = ""
-			set.Removed[i].RemovedBy[j].Redacted = true
-		}
+	if len(set.Removed) > 0 && !s.canRevealAccessConstraintNames(ctx) {
+		redactRemovedBoundaries(set.Removed)
 	}
 
 	writeJSON(w, http.StatusOK, set)
+}
+
+func (s *Server) canRevealAccessConstraintNames(ctx context.Context) bool {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil || s.authzService == nil {
+		return false
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   hubScopedResource("access_constraint", "hub"),
+		Action:     ActionRead,
+		Permission: "access_constraint.read",
+	})
+	return decision.Allowed
+}
+
+func redactRemovedBoundaries(removed []EffectivePermissionRemoved) {
+	for i := range removed {
+		seenScopeTypes := make(map[string]struct{}, len(removed[i].RemovedBy))
+		deduped := make([]EffectivePermissionBoundaryRef, 0, len(removed[i].RemovedBy))
+		for _, b := range removed[i].RemovedBy {
+			if _, exists := seenScopeTypes[b.ScopeType]; exists {
+				continue
+			}
+			seenScopeTypes[b.ScopeType] = struct{}{}
+			deduped = append(deduped, EffectivePermissionBoundaryRef{
+				ID:        "",
+				Name:      "",
+				ScopeType: b.ScopeType,
+				ScopeID:   "",
+				Redacted:  true,
+			})
+		}
+		sort.Slice(deduped, func(a, b int) bool {
+			return deduped[a].ScopeType < deduped[b].ScopeType
+		})
+		removed[i].RemovedBy = deduped
+	}
 }

@@ -64,11 +64,12 @@ type EffectiveStatusGate struct {
 
 // EffectivePermissionEntry is one effective permission and all contributing grants.
 type EffectivePermissionEntry struct {
-	ID          string                     `json:"id"`
-	Resource    string                     `json:"resource"`
-	Action      string                     `json:"action"`
-	Description string                     `json:"description"`
-	Grants      []EffectivePermissionGrant `json:"grants"`
+	ID                string                     `json:"id"`
+	Resource          string                     `json:"resource"`
+	Action            string                     `json:"action"`
+	Description       string                     `json:"description"`
+	AppliesInProjects bool                       `json:"appliesInProjects"`
+	Grants            []EffectivePermissionGrant `json:"grants"`
 }
 
 // EffectivePermissionGrant is one role binding that grants a permission.
@@ -104,12 +105,13 @@ type EffectivePermissionGroupVia struct {
 // EffectivePermissionRemoved is a permission granted by role bindings that was
 // removed by one or more active access constraints.
 type EffectivePermissionRemoved struct {
-	ID          string                           `json:"id"`
-	Resource    string                           `json:"resource"`
-	Action      string                           `json:"action"`
-	Description string                           `json:"description"`
-	Grants      []EffectivePermissionGrant       `json:"grants"`
-	RemovedBy   []EffectivePermissionBoundaryRef `json:"removedBy"`
+	ID                string                           `json:"id"`
+	Resource          string                           `json:"resource"`
+	Action            string                           `json:"action"`
+	Description       string                           `json:"description"`
+	AppliesInProjects bool                             `json:"appliesInProjects"`
+	Grants            []EffectivePermissionGrant       `json:"grants"`
+	RemovedBy         []EffectivePermissionBoundaryRef `json:"removedBy"`
 }
 
 // EffectivePermissionBoundaryRef identifies an access constraint that removed a permission.
@@ -255,10 +257,10 @@ func (a *AuthzService) ResolveEffectivePermissions(
 		if isDeliverRequest(perm.ID, Action(perm.Action)) {
 			continue
 		}
-		if isProjectScope {
-			if applies, reviewed := permissions.AppliesToExistingProjectTarget(perm.ID); !reviewed || !applies {
-				continue
-			}
+		applies, reviewed := permissions.AppliesToExistingProjectTarget(perm.ID)
+		appliesInProjects := reviewed && applies
+		if isProjectScope && !appliesInProjects {
+			continue
 		}
 
 		permCandidates := candidates
@@ -317,21 +319,23 @@ func (a *AuthzService) ResolveEffectivePermissions(
 
 		if k.Allowed {
 			result.Permissions = append(result.Permissions, EffectivePermissionEntry{
-				ID:          perm.ID,
-				Resource:    perm.Resource,
-				Action:      perm.Action,
-				Description: perm.Description,
-				Grants:      grants,
+				ID:                perm.ID,
+				Resource:          perm.Resource,
+				Action:            perm.Action,
+				Description:       perm.Description,
+				AppliesInProjects: appliesInProjects,
+				Grants:            grants,
 			})
 		} else {
 			removedBy := collectRemovingBoundaries(perm.ID, restrictions)
 			result.Removed = append(result.Removed, EffectivePermissionRemoved{
-				ID:          perm.ID,
-				Resource:    perm.Resource,
-				Action:      perm.Action,
-				Description: perm.Description,
-				Grants:      grants,
-				RemovedBy:   removedBy,
+				ID:                perm.ID,
+				Resource:          perm.Resource,
+				Action:            perm.Action,
+				Description:       perm.Description,
+				AppliesInProjects: appliesInProjects,
+				Grants:            grants,
+				RemovedBy:         removedBy,
 			})
 		}
 	}
