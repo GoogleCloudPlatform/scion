@@ -404,6 +404,20 @@ func (_u *TriggerUpdate) SetNillableMatchRule(v *string) *TriggerUpdate {
 	return _u
 }
 
+// SetMatchRules sets the "match_rules" field.
+func (_u *TriggerUpdate) SetMatchRules(v string) *TriggerUpdate {
+	_u.mutation.SetMatchRules(v)
+	return _u
+}
+
+// SetNillableMatchRules sets the "match_rules" field if the given value is not nil.
+func (_u *TriggerUpdate) SetNillableMatchRules(v *string) *TriggerUpdate {
+	if v != nil {
+		_u.SetMatchRules(*v)
+	}
+	return _u
+}
+
 // SetActionType sets the "action_type" field.
 func (_u *TriggerUpdate) SetActionType(v string) *TriggerUpdate {
 	_u.mutation.SetActionType(v)
@@ -821,6 +835,9 @@ func (_u *TriggerUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.MatchRule(); ok {
 		_spec.SetField(trigger.FieldMatchRule, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.MatchRules(); ok {
+		_spec.SetField(trigger.FieldMatchRules, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.ActionType(); ok {
 		_spec.SetField(trigger.FieldActionType, field.TypeString, value)
@@ -1280,6 +1297,20 @@ func (_u *TriggerUpdateOne) SetNillableMatchRule(v *string) *TriggerUpdateOne {
 	return _u
 }
 
+// SetMatchRules sets the "match_rules" field.
+func (_u *TriggerUpdateOne) SetMatchRules(v string) *TriggerUpdateOne {
+	_u.mutation.SetMatchRules(v)
+	return _u
+}
+
+// SetNillableMatchRules sets the "match_rules" field if the given value is not nil.
+func (_u *TriggerUpdateOne) SetNillableMatchRules(v *string) *TriggerUpdateOne {
+	if v != nil {
+		_u.SetMatchRules(*v)
+	}
+	return _u
+}
+
 // SetActionType sets the "action_type" field.
 func (_u *TriggerUpdateOne) SetActionType(v string) *TriggerUpdateOne {
 	_u.mutation.SetActionType(v)
@@ -1727,6 +1758,9 @@ func (_u *TriggerUpdateOne) sqlSave(ctx context.Context) (_node *Trigger, err er
 	}
 	if value, ok := _u.mutation.MatchRule(); ok {
 		_spec.SetField(trigger.FieldMatchRule, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.MatchRules(); ok {
+		_spec.SetField(trigger.FieldMatchRules, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.ActionType(); ok {
 		_spec.SetField(trigger.FieldActionType, field.TypeString, value)

@@ -141,18 +141,27 @@ type TriggerSourceSpec struct {
 	ID   string `json:"id"`
 }
 
-// TriggerMatchSpec holds the event-type filter and optional match expression.
+// TriggerMatchRuleSpec is one dialect-tagged rule element in a trigger's ordered match list.
+type TriggerMatchRuleSpec struct {
+	Dialect string `json:"dialect"`
+	Expr    string `json:"expr"`
+}
+
+// TriggerMatchSpec holds the event-type filter and ordered match rule list.
 type TriggerMatchSpec struct {
-	Types   []string `json:"types,omitempty"`
-	Dialect string   `json:"dialect,omitempty"`
-	Expr    string   `json:"expr,omitempty"`
+	Types       []string               `json:"types,omitempty"`
+	Dialect     string                 `json:"dialect,omitempty"`
+	Expr        string                 `json:"expr,omitempty"`
+	Rules       []TriggerMatchRuleSpec `json:"rules"`
+	RulesBroken bool                   `json:"rulesBroken,omitempty"`
 }
 
 // TriggerMatchPatchSpec holds partial updates to a trigger's match block.
 type TriggerMatchPatchSpec struct {
-	Types   *[]string `json:"types,omitempty"`
-	Dialect *string   `json:"dialect,omitempty"`
-	Expr    *string   `json:"expr,omitempty"`
+	Types   *[]string               `json:"types,omitempty"`
+	Dialect *string                 `json:"dialect,omitempty"`
+	Expr    *string                 `json:"expr,omitempty"`
+	Rules   *[]TriggerMatchRuleSpec `json:"rules,omitempty"`
 }
 
 // TriggerActionSpec holds the action executed when a trigger matches.

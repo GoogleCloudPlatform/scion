@@ -22,6 +22,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -34,10 +37,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -522,9 +527,14 @@ func TestTriggersAuthoring_Stage1b1ValidationRefusals(t *testing.T) {
 		wantMsg string
 	}{
 		{
-			name:    "non-empty match.expr refused in 1b-1",
-			mutate:  func(r *CreateTriggerRequest) { r.Match = &TriggerMatchSpec{Expr: "true"} },
-			wantMsg: "match_rule is not yet supported",
+			name:    "non-empty match.dialect with empty expr refused",
+			mutate:  func(r *CreateTriggerRequest) { r.Match = &TriggerMatchSpec{Dialect: "cel"} },
+			wantMsg: "match.dialect requires a non-empty match.expr",
+		},
+		{
+			name:    "non-empty subject.dialect with empty expr refused",
+			mutate:  func(r *CreateTriggerRequest) { r.Subject = &TriggerSubjectSpec{Dialect: "cel"} },
+			wantMsg: "subject.dialect requires a non-empty subject.expr",
 		},
 		{
 			name:    "non-cel match.dialect refused",
@@ -535,11 +545,6 @@ func TestTriggersAuthoring_Stage1b1ValidationRefusals(t *testing.T) {
 			name:    "invalid match.types pattern refused",
 			mutate:  func(r *CreateTriggerRequest) { r.Match = &TriggerMatchSpec{Types: []string{"UPPERCASE"}} },
 			wantMsg: "match_types",
-		},
-		{
-			name:    "non-empty subject.expr refused in 1b-1",
-			mutate:  func(r *CreateTriggerRequest) { r.Subject = &TriggerSubjectSpec{Expr: "event.subject"} },
-			wantMsg: "subject_rule is not yet supported",
 		},
 		{
 			name:    "subject.mode skip refused in 1b-1",
@@ -575,7 +580,10 @@ func TestTriggersAuthoring_Stage1b1ValidationRefusals(t *testing.T) {
 	var tr TriggerResponse
 	require.NoError(t, json.Unmarshal(okRec.Body.Bytes(), &tr))
 	assert.Equal(t, []string{"webhook.received"}, tr.Match.Types)
-	assert.Equal(t, "cel", tr.Match.Dialect)
+	assert.NotNil(t, tr.Match.Rules)
+	assert.Empty(t, tr.Match.Rules)
+	assert.Empty(t, tr.Match.Dialect)
+	assert.Empty(t, tr.Match.Expr)
 	assert.Equal(t, store.TriggerSubjectModeNew, tr.Subject.Mode)
 }
 
@@ -1668,4 +1676,1744 @@ func TestTriggers_EndpointDeleteRaceOrdering(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, ep1.ID, stored.SourceID)
 	})
+}
+
+type triggerRuleErrorBody struct {
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details"`
+}
+
+func decodeTriggerRuleError(t *testing.T, rec *httptest.ResponseRecorder) triggerRuleErrorBody {
+	t.Helper()
+	var env struct {
+		Error triggerRuleErrorBody `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env), "body=%s", rec.Body.String())
+	return env.Error
+}
+
+func TestTriggersAuthoring_CELValidRulesCreatePatchResume(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "cel-valid-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	matchExpr := `has(event.attributes.subject) && event.attributes.subject.matches("^release/") && has(event.payload) && has(event.payload.status) && event.payload.status == "ok"`
+	subjExpr := `(has(event.payload) && has(event.payload.service) ? string(event.payload.service) : string(event.subject)) + ":" + string(trigger.name)`
+
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "cel-valid-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Types: []string{"webhook.deploy.*"},
+			Expr:  matchExpr,
+		},
+		Subject: &TriggerSubjectSpec{
+			Expr: subjExpr,
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "deploy ready"},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created TriggerResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	assert.Equal(t, "cel", created.Match.Dialect)
+	assert.Equal(t, matchExpr, created.Match.Expr)
+	assert.Equal(t, []TriggerMatchRuleSpec{{Dialect: "cel", Expr: matchExpr}}, created.Match.Rules)
+	assert.Equal(t, "cel", created.Subject.Dialect)
+	assert.Equal(t, subjExpr, created.Subject.Expr)
+
+	stored, err := f.store.GetTrigger(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.MatchDialect)
+	assert.Empty(t, stored.MatchRule)
+	assert.Equal(t, []store.TriggerMatchRule{{Dialect: "cel", Expr: matchExpr}}, stored.MatchRules)
+	assert.Equal(t, "cel", stored.SubjectDialect)
+	assert.Equal(t, subjExpr, stored.SubjectRule)
+
+	// Update rules via PATCH and then clear subject back to empty string (fallback subject).
+	updatedMatch := `event.type == "webhook.deploy.finished"`
+	emptyExpr := ""
+	patchRec := f.doTrigger(t, f.ownerAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match:   &TriggerMatchPatchSpec{Expr: &updatedMatch},
+		Subject: &TriggerSubjectPatchSpec{Expr: &emptyExpr},
+	})
+	require.Equal(t, http.StatusOK, patchRec.Code, patchRec.Body.String())
+	var updated TriggerResponse
+	require.NoError(t, json.Unmarshal(patchRec.Body.Bytes(), &updated))
+	assert.Equal(t, updatedMatch, updated.Match.Expr)
+	assert.Empty(t, updated.Subject.Expr)
+
+	// PATCH setting non-empty dialect alongside empty expr is also refused 400.
+	celName := "cel"
+	badEmptyExprDialectPatch := f.doTrigger(t, f.ownerAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Subject: &TriggerSubjectPatchSpec{Dialect: &celName, Expr: &emptyExpr},
+	})
+	require.Equal(t, http.StatusBadRequest, badEmptyExprDialectPatch.Code, badEmptyExprDialectPatch.Body.String())
+
+	// Restore non-empty subject rule, pause, and resume -> re-compiles stored rules cleanly.
+	restoredSubj := `event.subject`
+	patchSubjRec := f.doTrigger(t, f.ownerAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Subject: &TriggerSubjectPatchSpec{Expr: &restoredSubj},
+	})
+	require.Equal(t, http.StatusOK, patchSubjRec.Code, patchSubjRec.Body.String())
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, created.ID+"/pause", http.MethodPost, nil).Code)
+	resumeRec := f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, resumeRec.Code, resumeRec.Body.String())
+}
+
+func TestTriggersAuthoring_CELResultTypeMismatchRejected(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "cel-type-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// 1. Static string-typed and int-typed match rules -> 400 invalid_rule (category=result_type).
+	// (Note: event.* and trigger.* index map(string, dyn) and therefore have static type dyn;
+	// string(...), literals, and size(...) have static non-bool types.)
+	for i, expr := range []string{`"not-a-bool"`, `string(event.subject)`, `size(trigger.id)`} {
+		strMatchRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   fmt.Sprintf("bad-str-match-%d", i),
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:  &TriggerMatchSpec{Expr: expr},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusBadRequest, strMatchRec.Code, "expr=%q body=%s", expr, strMatchRec.Body.String())
+		errBody := decodeTriggerRuleError(t, strMatchRec)
+		assert.Equal(t, ErrCodeInvalidRule, errBody.Code)
+		assert.Equal(t, "match", errBody.Details["field"])
+		assert.Equal(t, "filter", errBody.Details["kind"])
+		assert.Equal(t, "result_type", errBody.Details["category"])
+		assert.GreaterOrEqual(t, errBody.Details["line"].(float64), float64(1))
+		assert.GreaterOrEqual(t, errBody.Details["column"].(float64), float64(1))
+	}
+
+	// 2. Bool-typed and int-typed subject rules -> 400 invalid_rule (category=result_type).
+	for i, expr := range []string{`event.type == "webhook.received"`, `size(event.subject)`} {
+		rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:    fmt.Sprintf("bad-subj-type-%d", i),
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Subject: &TriggerSubjectSpec{Expr: expr},
+			Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		eb := decodeTriggerRuleError(t, rec)
+		assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+		assert.Equal(t, "subject", eb.Details["field"])
+		assert.Equal(t, "subject", eb.Details["kind"])
+		assert.Equal(t, "result_type", eb.Details["category"])
+		assert.GreaterOrEqual(t, eb.Details["line"].(float64), float64(1))
+		assert.GreaterOrEqual(t, eb.Details["column"].(float64), float64(1))
+	}
+
+	// 3. PATCH into wrong result type is also rejected 400 without mutating stored trigger.
+	okRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "patch-type-guard",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, okRec.Code)
+	var okTr TriggerResponse
+	require.NoError(t, json.Unmarshal(okRec.Body.Bytes(), &okTr))
+
+	badMatch := `string(trigger.id)`
+	patchBad := f.doTrigger(t, f.ownerAuth, okTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Expr: &badMatch},
+	})
+	require.Equal(t, http.StatusBadRequest, patchBad.Code, patchBad.Body.String())
+	assert.Equal(t, "result_type", decodeTriggerRuleError(t, patchBad).Details["category"])
+}
+
+func TestTriggersAuthoring_CELNonLiteralMatchesRejected(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "cel-regex-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	matchRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "dyn-regex-match",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: `event.subject.matches(event.id)`},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, matchRec.Code, matchRec.Body.String())
+	matchErr := decodeTriggerRuleError(t, matchRec)
+	assert.Equal(t, ErrCodeInvalidRule, matchErr.Code)
+	assert.Equal(t, "match", matchErr.Details["field"])
+	assert.Equal(t, "regex_literal_required", matchErr.Details["category"])
+	assert.Equal(t, float64(1), matchErr.Details["line"])
+	assert.Greater(t, matchErr.Details["column"].(float64), float64(1))
+
+	subjRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:    "dyn-regex-subj",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Subject: &TriggerSubjectSpec{Expr: `event.subject.matches(event.type) ? "a" : "b"`},
+		Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, subjRec.Code, subjRec.Body.String())
+	subjErr := decodeTriggerRuleError(t, subjRec)
+	assert.Equal(t, ErrCodeInvalidRule, subjErr.Code)
+	assert.Equal(t, "subject", subjErr.Details["field"])
+	assert.Equal(t, "regex_literal_required", subjErr.Details["category"])
+}
+
+func TestTriggersAuthoring_CELOversizeRulesRejected(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "cel-size-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// Exact boundary (4096 B match, 1024 B subject) succeeds.
+	exactMatch := "true" + strings.Repeat(" ", 4096-len("true"))
+	exactSubj := `"s"` + strings.Repeat(" ", 1024-len(`"s"`))
+	exactRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:    "exact-cap-rules",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:   &TriggerMatchSpec{Expr: exactMatch},
+		Subject: &TriggerSubjectSpec{Expr: exactSubj},
+		Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, exactRec.Code, exactRec.Body.String())
+
+	// Oversize match (4097 B) -> 400 invalid_rule (category=size).
+	overMatchRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "oversize-match",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: exactMatch + " "},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, overMatchRec.Code, overMatchRec.Body.String())
+	overMatchErr := decodeTriggerRuleError(t, overMatchRec)
+	assert.Equal(t, ErrCodeInvalidRule, overMatchErr.Code)
+	assert.Equal(t, "match", overMatchErr.Details["field"])
+	assert.Equal(t, "size", overMatchErr.Details["category"])
+	assert.Equal(t, float64(1), overMatchErr.Details["line"])
+	assert.Equal(t, float64(1), overMatchErr.Details["column"])
+
+	// Oversize subject (1025 B) -> 400 invalid_rule (category=size).
+	overSubjRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:    "oversize-subj",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Subject: &TriggerSubjectSpec{Expr: exactSubj + " "},
+		Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, overSubjRec.Code, overSubjRec.Body.String())
+	overSubjErr := decodeTriggerRuleError(t, overSubjRec)
+	assert.Equal(t, ErrCodeInvalidRule, overSubjErr.Code)
+	assert.Equal(t, "subject", overSubjErr.Details["field"])
+	assert.Equal(t, "size", overSubjErr.Details["category"])
+
+	// Over-long regex literal (> 512 B) inside <= 4096 B match rule -> 400 category=size.
+	overRegexRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "oversize-regex",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: `event.subject.matches("` + strings.Repeat("a", 513) + `")`},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, overRegexRec.Code, overRegexRec.Body.String())
+	assert.Equal(t, "size", decodeTriggerRuleError(t, overRegexRec).Details["category"])
+}
+
+func TestTriggersAuthoring_CELSyntaxAndUnknownVariableWithPosition(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "cel-pos-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// 1. Multiline syntax error reports line 2 and column > 1 (preserving leading whitespace).
+	syntaxRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "syntax-pos",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "event.type == \"ok\" &&\n    ("},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, syntaxRec.Code, syntaxRec.Body.String())
+	syntaxErr := decodeTriggerRuleError(t, syntaxRec)
+	assert.Equal(t, ErrCodeInvalidRule, syntaxErr.Code)
+	assert.Equal(t, "syntax", syntaxErr.Details["category"])
+	assert.Equal(t, float64(2), syntaxErr.Details["line"])
+	assert.GreaterOrEqual(t, syntaxErr.Details["column"].(float64), float64(5))
+	assert.Contains(t, syntaxErr.Message, "line 2, column")
+
+	// 2. Multiline unknown variable reports exact line 2, column 3 and names the variable.
+	unknownVarRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "unknown-var-pos",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "\n  unknown_var == 1"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, unknownVarRec.Code, unknownVarRec.Body.String())
+	uvErr := decodeTriggerRuleError(t, unknownVarRec)
+	assert.Equal(t, ErrCodeInvalidRule, uvErr.Code)
+	assert.Equal(t, "unknown_variable", uvErr.Details["category"])
+	assert.Equal(t, float64(2), uvErr.Details["line"])
+	assert.Equal(t, float64(3), uvErr.Details["column"])
+	assert.Contains(t, uvErr.Details["message"].(string), "unknown_var")
+
+	// 3. Unknown function -> category=unknown_function.
+	unknownFnRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:    "unknown-fn-pos",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Subject: &TriggerSubjectSpec{Expr: "bogusFunc(event.id)"},
+		Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, unknownFnRec.Code, unknownFnRec.Body.String())
+	ufErr := decodeTriggerRuleError(t, unknownFnRec)
+	assert.Equal(t, ErrCodeInvalidRule, ufErr.Code)
+	assert.Equal(t, "unknown_function", ufErr.Details["category"])
+}
+
+func TestTriggersAuthoring_UnsupportedDialectReturns400Never500(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "dialect-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// Create with unknown ("rego") and denied ("system_one") dialects on match and subject,
+	// with both empty and non-empty expr -> always 400 ErrCodeInvalidRule, never 500.
+	for i, tc := range []struct {
+		slot    string
+		dialect string
+		expr    string
+	}{
+		{"match", "rego", ""},
+		{"match", "rego", "true"},
+		{"match", "system_one", "check deploy"},
+		{"subject", "rego", ""},
+		{"subject", "system_one", "derive subject"},
+	} {
+		req := CreateTriggerRequest{
+			Name:   fmt.Sprintf("bad-dialect-%d", i),
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		}
+		if tc.slot == "match" {
+			req.Match = &TriggerMatchSpec{Dialect: tc.dialect, Expr: tc.expr}
+		} else {
+			req.Subject = &TriggerSubjectSpec{Dialect: tc.dialect, Expr: tc.expr}
+		}
+		rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "case %d (%+v): %s", i, tc, rec.Body.String())
+		eb := decodeTriggerRuleError(t, rec)
+		assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+		assert.Equal(t, tc.slot, eb.Details["field"])
+		assert.Equal(t, tc.dialect, eb.Details["dialect"])
+		assert.Equal(t, "trigger", eb.Details["consumer"])
+		assert.Equal(t, ruleengine.ReasonDialectNotAllowed, eb.Details["reason"])
+		assert.Contains(t, eb.Message, ruleengine.ReasonDialectNotAllowed)
+	}
+
+	// PATCH into unsupported dialect -> 400 ErrCodeInvalidRule with ReasonDialectNotAllowed.
+	okRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "dialect-patch-base",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, okRec.Code)
+	var okTr TriggerResponse
+	require.NoError(t, json.Unmarshal(okRec.Body.Bytes(), &okTr))
+
+	sysOne := "system_one"
+	patchRec := f.doTrigger(t, f.ownerAuth, okTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Dialect: &sysOne},
+	})
+	require.Equal(t, http.StatusBadRequest, patchRec.Code, patchRec.Body.String())
+	patchErr := decodeTriggerRuleError(t, patchRec)
+	assert.Equal(t, ErrCodeInvalidRule, patchErr.Code)
+	assert.Equal(t, ruleengine.ReasonDialectNotAllowed, patchErr.Details["reason"])
+
+	// Resume on a stored paused trigger with a disallowed dialect or broken rule -> 400 (never 500), stays paused.
+	now := time.Now().UTC()
+	pausedBadDialectID := api.NewUUID()
+	require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+		ID:             pausedBadDialectID,
+		ProjectID:      f.projectID,
+		Name:           "stored-bad-dialect",
+		Status:         store.TriggerStatusPaused,
+		SourceKind:     store.TriggerSourceKindWebhook,
+		SourceID:       ep.ID,
+		MatchTypes:     []string{"webhook.received"},
+		MatchDialect:   "system_one",
+		MatchRule:      "admit event",
+		ActionType:     "message",
+		ActionPayload:  `{"agentId":"` + f.targetAgent.ID + `","message":"hi"}`,
+		SubjectDialect: "cel",
+		SubjectMode:    store.TriggerSubjectModeNew,
+		CreatedBy:      f.owner.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    f.owner.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}))
+	resumeBadDialect := f.doTrigger(t, f.ownerAuth, pausedBadDialectID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusBadRequest, resumeBadDialect.Code, resumeBadDialect.Body.String())
+	resumeErr := decodeTriggerRuleError(t, resumeBadDialect)
+	assert.Equal(t, ErrCodeInvalidRule, resumeErr.Code)
+	assert.Equal(t, "system_one", resumeErr.Details["dialect"])
+	assert.Equal(t, ruleengine.ReasonDialectNotAllowed, resumeErr.Details["reason"])
+
+	stillPaused, err := f.store.GetTrigger(ctx, pausedBadDialectID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusPaused, stillPaused.Status)
+
+	// Ungranted consumer on a bare rule engine -> 400 ErrCodeInvalidRule with ReasonConsumerNotRegistered (never 500).
+	bareEng, _, err := newRuleEngine()
+	require.NoError(t, err)
+	origRules, origTriggerRules := f.srv.rules, f.srv.triggerRules
+	f.srv.rules = bareEng
+	f.srv.triggerRules = nil
+	t.Cleanup(func() {
+		f.srv.rules = origRules
+		f.srv.triggerRules = origTriggerRules
+	})
+	ungrantedRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "ungranted-consumer",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, ungrantedRec.Code, ungrantedRec.Body.String())
+	ungrantedErr := decodeTriggerRuleError(t, ungrantedRec)
+	assert.Equal(t, ErrCodeInvalidRule, ungrantedErr.Code)
+	assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, ungrantedErr.Details["reason"])
+	assert.Contains(t, ungrantedErr.Message, ruleengine.ReasonConsumerNotRegistered)
+	f.srv.rules = origRules
+	f.srv.triggerRules = origTriggerRules
+}
+
+func TestTriggersAuthoring_RulePatchBumpsAuthorizationRevision(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "rev-bump-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "rev-bump-rules",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "v1"},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code)
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &tr))
+	require.Equal(t, 1, tr.AuthorizationRevision)
+
+	celDialect := "cel"
+	matchExpr := `event.type == "webhook.received"`
+	subjExpr := `event.subject`
+
+	steps := []struct {
+		actor   Identity
+		actorID string
+		patch   UpdateTriggerRequest
+		wantRev int
+	}{
+		{
+			actor:   f.adminAuth,
+			actorID: f.admin.ID,
+			patch:   UpdateTriggerRequest{Match: &TriggerMatchPatchSpec{Expr: &matchExpr}},
+			wantRev: 2,
+		},
+		{
+			actor:   f.ownerAuth,
+			actorID: f.owner.ID,
+			patch:   UpdateTriggerRequest{Match: &TriggerMatchPatchSpec{Dialect: &celDialect}},
+			wantRev: 3,
+		},
+		{
+			actor:   f.adminAuth,
+			actorID: f.admin.ID,
+			patch:   UpdateTriggerRequest{Subject: &TriggerSubjectPatchSpec{Expr: &subjExpr}},
+			wantRev: 4,
+		},
+		{
+			actor:   f.ownerAuth,
+			actorID: f.owner.ID,
+			patch:   UpdateTriggerRequest{Subject: &TriggerSubjectPatchSpec{Dialect: &celDialect}},
+			wantRev: 5,
+		},
+	}
+
+	for i, st := range steps {
+		rec := f.doTrigger(t, st.actor, tr.ID, http.MethodPatch, st.patch)
+		require.Equal(t, http.StatusOK, rec.Code, "step %d: %s", i, rec.Body.String())
+		assert.Equal(t, fmt.Sprintf("%q", fmt.Sprintf("%d", st.wantRev)), rec.Header().Get("ETag"))
+		stored, err := f.store.GetTrigger(ctx, tr.ID)
+		require.NoError(t, err)
+		assert.Equal(t, st.wantRev, stored.AuthorizationRevision, "step %d", i)
+		assert.Equal(t, st.actorID, stored.InitiatorPrincipalID, "step %d", i)
+	}
+}
+
+func TestTriggersAuthoring_AgentParityWithUserAuthoring(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+
+	epRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "agent-cel-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// Valid CEL authoring by agent succeeds identically to user authoring.
+	okRec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "agent-cel-ok",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: `has(event.payload) && has(event.payload.ok) && event.payload.ok == true`},
+		Subject: &TriggerSubjectSpec{
+			Expr: `has(event.payload) && has(event.payload.pr) ? string(event.payload.pr) : string(event.subject)`,
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "pr event"},
+	})
+	require.Equal(t, http.StatusCreated, okRec.Code, okRec.Body.String())
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(okRec.Body.Bytes(), &tr))
+	assert.Equal(t, 1, tr.AuthorizationRevision)
+
+	// Agent pause + resume re-compiles stored CEL rules and bumps revision to 2
+	// (while PATCH by an agent remains 403 per Stage 1 trigger edit policy).
+	nextExpr := `has(event.attributes.event) && event.attributes.event == "deploy.finished"`
+	patchRec := f.doTrigger(t, f.agentAAuth, tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Expr: &nextExpr},
+	})
+	require.Equal(t, http.StatusForbidden, patchRec.Code, patchRec.Body.String())
+
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.agentAAuth, tr.ID+"/pause", http.MethodPost, nil).Code)
+	resumeRec := f.doTrigger(t, f.agentAAuth, tr.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, resumeRec.Code, resumeRec.Body.String())
+	require.NoError(t, json.Unmarshal(resumeRec.Body.Bytes(), &tr))
+	assert.Equal(t, 2, tr.AuthorizationRevision)
+
+	// Agent invalid CEL and unsupported dialect return identical 400 structured errors to user authoring.
+	ownerEpRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "owner-cel-parity-ep"})
+	require.Equal(t, http.StatusCreated, ownerEpRec.Code)
+	var ownerEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(ownerEpRec.Body.Bytes(), &ownerEp))
+
+	agentBadCEL := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "agent-cel-bad",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: `string(event.subject)`},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	ownerBadCEL := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "owner-cel-bad",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ownerEp.ID},
+		Match:  &TriggerMatchSpec{Expr: `string(event.subject)`},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, agentBadCEL.Code, agentBadCEL.Body.String())
+	require.Equal(t, http.StatusBadRequest, ownerBadCEL.Code, ownerBadCEL.Body.String())
+	assert.Equal(t, decodeTriggerRuleError(t, ownerBadCEL), decodeTriggerRuleError(t, agentBadCEL))
+
+	agentBadDialect := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "agent-dialect-bad",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Dialect: "rego", Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	ownerBadDialect := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "owner-dialect-bad",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ownerEp.ID},
+		Match:  &TriggerMatchSpec{Dialect: "rego", Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, agentBadDialect.Code, agentBadDialect.Body.String())
+	require.Equal(t, http.StatusBadRequest, ownerBadDialect.Code, ownerBadDialect.Body.String())
+	assert.Equal(t, decodeTriggerRuleError(t, ownerBadDialect), decodeTriggerRuleError(t, agentBadDialect))
+}
+
+func TestTriggersAuthoring_PatchDispatchFieldOverBrokenStoredRuleRejected(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "stored-broken-rule-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	now := time.Now().UTC()
+	origPayload := `{"agentId":"` + f.targetAgent.ID + `","message":"original message"}`
+
+	for _, tc := range []struct {
+		name        string
+		matchRule   string
+		subjectRule string
+		wantField   string
+	}{
+		{
+			name:        "stored_broken_match_rule",
+			matchRule:   `string(event.subject)`,
+			subjectRule: "",
+			wantField:   "match",
+		},
+		{
+			name:        "stored_broken_subject_rule",
+			matchRule:   `true`,
+			subjectRule: `event.type == "webhook.received"`,
+			wantField:   "subject",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trID := api.NewUUID()
+			require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+				ID:             trID,
+				ProjectID:      f.projectID,
+				Name:           "broken-" + tc.wantField + "-" + trID[:8],
+				Status:         store.TriggerStatusActive,
+				SourceKind:     store.TriggerSourceKindWebhook,
+				SourceID:       ep.ID,
+				MatchTypes:     []string{"webhook.received"},
+				MatchDialect:   "cel",
+				MatchRule:      tc.matchRule,
+				ActionType:     "message",
+				ActionPayload:  origPayload,
+				SubjectDialect: "cel",
+				SubjectRule:    tc.subjectRule,
+				SubjectMode:    store.TriggerSubjectModeNew,
+				CreatedBy:      f.owner.ID,
+				InitiatorAttribution: store.InitiatorAttribution{
+					InitiatorPrincipalKind:  "user",
+					InitiatorPrincipalID:    f.owner.ID,
+					InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+					AttributionVersion:      1,
+					AuthorizationRevision:   1,
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			}))
+
+			patchRec := f.doTrigger(t, f.adminAuth, trID, http.MethodPatch, UpdateTriggerRequest{
+				Action: &TriggerActionSpec{
+					Type:    "message",
+					AgentID: f.targetAgent.ID,
+					Message: "updated message",
+				},
+			})
+			require.Equal(t, http.StatusBadRequest, patchRec.Code, patchRec.Body.String())
+			eb := decodeTriggerRuleError(t, patchRec)
+			assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+			assert.Equal(t, tc.wantField, eb.Details["field"])
+			assert.Equal(t, "result_type", eb.Details["category"])
+
+			stored, err := f.store.GetTrigger(ctx, trID)
+			require.NoError(t, err)
+			assert.Equal(t, origPayload, stored.ActionPayload, "stored action payload must remain unchanged")
+			assert.Equal(t, 1, stored.AuthorizationRevision, "authorization revision must remain unchanged")
+			assert.Equal(t, f.owner.ID, stored.InitiatorPrincipalID, "initiator attribution must remain unchanged")
+			assert.Equal(t, tc.matchRule, stored.MatchRule)
+			assert.Equal(t, tc.subjectRule, stored.SubjectRule)
+		})
+	}
+}
+
+func TestTriggersAuthoring_RejectControlAndFormatCharactersInRules(t *testing.T) {
+	badExprs := []struct {
+		label string
+		expr  string
+	}{
+		{"nul", "event.type == \"\x00\""},
+		{"bel_osc", "event.type == \"\x1b]0;pwned\x07\x1b[2J\""},
+		{"ansi_comment", "true // \x1b[31mred"},
+		{"vt", "true\x0b"},
+		{"ff", "true\x0c"},
+		{"del", "event.type == \"a\x7fb\""},
+		{"c1_csi", "event.type == \"a\u009b2Jb\""},
+		{"bidi_rlo_cf", "event.type == \"a\u202eb\""},
+		{"bidi_lri_cf", "event.type == \"a\u2066b\""},
+		{"zwsp_cf", "event.type == \"a\u200bb\""},
+		{"bom_cf", "\ufefftrue"},
+		{"line_sep_zl", "true // \u2028next"},
+		{"para_sep_zp", "true // \u2029next"},
+		{"lone_cr", "true // benign\r1/1 [cel] forged"},
+		{"crlf", "event.type == \"webhook.received\" &&\r\ntrue"},
+		{"invalid_utf8", "event.type == \"\xff\""},
+	}
+	for _, tc := range badExprs {
+		t.Run("unit_"+tc.label, func(t *testing.T) {
+			assert.Error(t, validateTriggerRuleExpr("match.expr", tc.expr))
+			assert.Error(t, validateTriggerRuleExpr("subject.expr", tc.expr))
+		})
+	}
+	require.NoError(t, validateTriggerRuleExpr("match.expr", "event.type == \"webhook.received\" &&\n\ttrue"))
+
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "ctrl-rule-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// Multiline rules with \n and \t remain valid at authoring; \r is refused.
+	multilineMatch := "event.type == \"webhook.received\" &&\n\thas(event.attributes.subject)"
+	multilineSubj := "has(event.subject) ?\n\tstring(event.subject) : \"default\""
+	validRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:    "multiline-valid-tr",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:   &TriggerMatchSpec{Expr: multilineMatch},
+		Subject: &TriggerSubjectSpec{Expr: multilineSubj},
+		Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, validRec.Code, validRec.Body.String())
+	var validTr TriggerResponse
+	require.NoError(t, json.Unmarshal(validRec.Body.Bytes(), &validTr))
+
+	// Create and PATCH reject C0 control (including \r) and Unicode Cf characters in match.expr and subject.expr (400).
+	for i, bad := range []struct {
+		matchExpr string
+		subjExpr  string
+	}{
+		{matchExpr: "event.type == \"\x1b]0;pwned\x07\x1b[2J\"", subjExpr: "\"\x1b[31msubj\""},
+		{matchExpr: "event.type == \"a\u202eb\"", subjExpr: "\"subj\u202e\""},
+		{matchExpr: "true // \x1b[31mred", subjExpr: "\"subj\" // \u200bzwsp"},
+		{matchExpr: "true // \r1/1 [cel] spoof", subjExpr: "\"subj\rspoof\""},
+		{matchExpr: "true &&\r\nevent.subject != \"\"", subjExpr: "\"a\" +\r\n\"b\""},
+	} {
+		badMatchCreate := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   fmt.Sprintf("bad-match-ctrl-%d", i),
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:  &TriggerMatchSpec{Expr: bad.matchExpr},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusBadRequest, badMatchCreate.Code, badMatchCreate.Body.String())
+		matchErr := decodeTriggerRuleError(t, badMatchCreate)
+		assert.Equal(t, ErrCodeInvalidRule, matchErr.Code)
+		assert.Contains(t, matchErr.Message, "match.expr must not contain control or format characters")
+
+		badSubjCreate := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:    fmt.Sprintf("bad-subj-ctrl-%d", i),
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Subject: &TriggerSubjectSpec{Expr: bad.subjExpr},
+			Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusBadRequest, badSubjCreate.Code, badSubjCreate.Body.String())
+		subjErr := decodeTriggerRuleError(t, badSubjCreate)
+		assert.Equal(t, ErrCodeValidationError, subjErr.Code)
+		assert.Contains(t, subjErr.Message, "subject.expr must not contain control or format characters")
+
+		matchCopy := bad.matchExpr
+		patchMatchRec := f.doTrigger(t, f.ownerAuth, validTr.ID, http.MethodPatch, UpdateTriggerRequest{
+			Match: &TriggerMatchPatchSpec{Expr: &matchCopy},
+		})
+		require.Equal(t, http.StatusBadRequest, patchMatchRec.Code, patchMatchRec.Body.String())
+		assert.Contains(t, decodeTriggerRuleError(t, patchMatchRec).Message, "match.expr must not contain control or format characters")
+
+		subjCopy := bad.subjExpr
+		patchSubjRec := f.doTrigger(t, f.ownerAuth, validTr.ID, http.MethodPatch, UpdateTriggerRequest{
+			Subject: &TriggerSubjectPatchSpec{Expr: &subjCopy},
+		})
+		require.Equal(t, http.StatusBadRequest, patchSubjRec.Code, patchSubjRec.Body.String())
+		assert.Contains(t, decodeTriggerRuleError(t, patchSubjRec).Message, "subject.expr must not contain control or format characters")
+	}
+
+	// Stored paused trigger with bidi/control characters in MatchRule or SubjectRule is rejected 400 on resume and dispatch PATCH.
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name      string
+		matchRule string
+		subjRule  string
+		wantField string
+	}{
+		{"stored_bidi_match", "event.type == \"a\u202eb\"", "", "match.expr"},
+		{"stored_esc_subject", "true", "\"\x1b[2J\"", "subject.expr"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trID := api.NewUUID()
+			require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+				ID:             trID,
+				ProjectID:      f.projectID,
+				Name:           "paused-ctrl-" + trID[:8],
+				Status:         store.TriggerStatusPaused,
+				SourceKind:     store.TriggerSourceKindWebhook,
+				SourceID:       ep.ID,
+				MatchTypes:     []string{"webhook.received"},
+				MatchDialect:   "cel",
+				MatchRule:      tc.matchRule,
+				ActionType:     "message",
+				ActionPayload:  `{"agentId":"` + f.targetAgent.ID + `","message":"hi"}`,
+				SubjectDialect: "cel",
+				SubjectRule:    tc.subjRule,
+				SubjectMode:    store.TriggerSubjectModeNew,
+				CreatedBy:      f.owner.ID,
+				InitiatorAttribution: store.InitiatorAttribution{
+					InitiatorPrincipalKind:  "user",
+					InitiatorPrincipalID:    f.owner.ID,
+					InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+					AttributionVersion:      1,
+					AuthorizationRevision:   1,
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			}))
+
+			resumeRec := f.doTrigger(t, f.ownerAuth, trID+"/resume", http.MethodPost, nil)
+			require.Equal(t, http.StatusBadRequest, resumeRec.Code, resumeRec.Body.String())
+			assert.Contains(t, decodeTriggerRuleError(t, resumeRec).Message, tc.wantField+" must not contain control or format characters")
+
+			dispatchPatchRec := f.doTrigger(t, f.ownerAuth, trID, http.MethodPatch, UpdateTriggerRequest{
+				Action: &TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "updated"},
+			})
+			require.Equal(t, http.StatusBadRequest, dispatchPatchRec.Code, dispatchPatchRec.Body.String())
+			assert.Contains(t, decodeTriggerRuleError(t, dispatchPatchRec).Message, tc.wantField+" must not contain control or format characters")
+
+			stored, err := f.store.GetTrigger(ctx, trID)
+			require.NoError(t, err)
+			assert.Equal(t, store.TriggerStatusPaused, stored.Status)
+			assert.Equal(t, 1, stored.AuthorizationRevision)
+		})
+	}
+}
+
+func TestTriggersAuthoring_UninitializedRuleEngineReturnsGeneric500(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "uninit-engine-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	baseRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "uninit-base-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, baseRec.Code, baseRec.Body.String())
+	var baseTr TriggerResponse
+	require.NoError(t, json.Unmarshal(baseRec.Body.Bytes(), &baseTr))
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, baseTr.ID+"/pause", http.MethodPost, nil).Code)
+
+	origRules, origTriggerRules := f.srv.rules, f.srv.triggerRules
+	t.Cleanup(func() {
+		f.srv.rules = origRules
+		f.srv.triggerRules = origTriggerRules
+	})
+
+	assertGeneric500 := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		eb := decodeTriggerRuleError(t, rec)
+		assert.Equal(t, ErrCodeInternalError, eb.Code)
+		assert.Equal(t, "Internal server error", eb.Message)
+		assert.Empty(t, eb.Details)
+		assert.NotContains(t, rec.Body.String(), "not initialized")
+		assert.NotContains(t, rec.Body.String(), "unknown CEL environment")
+		assert.NotContains(t, rec.Body.String(), ErrCodeInvalidRule)
+	}
+
+	// 1. Nil rule engine state -> 500 Internal server error (never 400 invalid_rule or internal text).
+	f.srv.rules = nil
+	f.srv.triggerRules = nil
+
+	assertGeneric500(t, f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "uninit-create",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	}))
+
+	newExpr := `event.type == "webhook.received"`
+	assertGeneric500(t, f.doTrigger(t, f.ownerAuth, baseTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Expr: &newExpr},
+	}))
+
+	assertGeneric500(t, f.doTrigger(t, f.ownerAuth, baseTr.ID+"/resume", http.MethodPost, nil))
+
+	// 2. Half-initialized state (s.rules grants "trigger" but s.triggerRules is nil) -> generic 500.
+	misEng, _, err := newRuleEngine()
+	require.NoError(t, err)
+	require.NoError(t, misEng.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)))
+	f.srv.rules = misEng
+	f.srv.triggerRules = nil
+
+	assertGeneric500(t, f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "misconfig-create",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	}))
+
+	// 3. Direct writeTriggerRuleError check on an arbitrary unexpected internal error -> generic 500, no text leak.
+	rec := httptest.NewRecorder()
+	writeTriggerRuleError(rec, "match", fmt.Errorf("ruleengine: unknown CEL environment %q", "trigger"))
+	assertGeneric500(t, rec)
+}
+
+func TestTriggersAndWebhookEndpoints_OversizeRequestBodyReturns413(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	sendRaw := func(method, path string, raw []byte, handler func(http.ResponseWriter, *http.Request)) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		reqCtx := contextWithIdentity(req.Context(), f.ownerAuth)
+		reqCtx = contextWithCredentialContext(reqCtx, credentialContextForIdentity(f.ownerAuth))
+		rec := httptest.NewRecorder()
+		handler(rec, req.WithContext(reqCtx))
+		return rec
+	}
+
+	assert413 := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+		eb := decodeTriggerRuleError(t, rec)
+		assert.Equal(t, "payload_too_large", eb.Code)
+	}
+
+	// 1. POST /webhook-endpoints: exact 64 KiB body succeeds (201), 64 KiB + 1 byte returns 413.
+	epPath := "/api/v1/projects/" + f.projectID + "/webhook-endpoints"
+	epPrefix := `{"name":"cap-ep","description":"ok"}`
+	epExact := []byte(epPrefix + strings.Repeat(" ", maxTriggerRequestBodyBytes-len(epPrefix)))
+	require.Len(t, epExact, maxTriggerRequestBodyBytes)
+
+	epOKRec := sendRaw(http.MethodPost, epPath, epExact, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleWebhookEndpoints(w, r, f.projectID, "")
+	})
+	require.Equal(t, http.StatusCreated, epOKRec.Code, epOKRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epOKRec.Body.Bytes(), &ep))
+
+	epOverJSON := []byte(`{"name":"over-ep","description":"` + strings.Repeat("a", maxTriggerRequestBodyBytes) + `"}`)
+	assert413(t, sendRaw(http.MethodPost, epPath, epOverJSON, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleWebhookEndpoints(w, r, f.projectID, "")
+	}))
+	assert413(t, sendRaw(http.MethodPost, epPath, append(append([]byte{}, epExact...), ' '), func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleWebhookEndpoints(w, r, f.projectID, "")
+	}))
+
+	// 2. POST /triggers: exact 64 KiB body succeeds (201), 64 KiB + 1 byte and oversize JSON object return 413.
+	trPath := "/api/v1/projects/" + f.projectID + "/triggers"
+	trBase, err := json.Marshal(CreateTriggerRequest{
+		Name:   "cap-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hello"},
+	})
+	require.NoError(t, err)
+	trExact := append(append([]byte{}, trBase...), bytes.Repeat([]byte(" "), maxTriggerRequestBodyBytes-len(trBase))...)
+	require.Len(t, trExact, maxTriggerRequestBodyBytes)
+
+	trOKRec := sendRaw(http.MethodPost, trPath, trExact, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, "")
+	})
+	require.Equal(t, http.StatusCreated, trOKRec.Code, trOKRec.Body.String())
+	var createdTr TriggerResponse
+	require.NoError(t, json.Unmarshal(trOKRec.Body.Bytes(), &createdTr))
+
+	trOverJSON := []byte(`{"name":"over-tr","source":{"kind":"webhook","id":"` + ep.ID + `"},"action":{"type":"message","agentId":"` + f.targetAgent.ID + `","message":"` + strings.Repeat("m", maxTriggerRequestBodyBytes) + `"}}`)
+	assert413(t, sendRaw(http.MethodPost, trPath, trOverJSON, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, "")
+	}))
+	assert413(t, sendRaw(http.MethodPost, trPath, append(append([]byte{}, trExact...), ' '), func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, "")
+	}))
+
+	// 3. PATCH /triggers/{id}: exact 64 KiB body succeeds (200), > 64 KiB returns 413 and leaves trigger unchanged.
+	patchPath := trPath + "/" + createdTr.ID
+	patchPrefix := `{"description":"patched-at-cap"}`
+	patchExact := []byte(patchPrefix + strings.Repeat(" ", maxTriggerRequestBodyBytes-len(patchPrefix)))
+	require.Len(t, patchExact, maxTriggerRequestBodyBytes)
+
+	patchOKRec := sendRaw(http.MethodPatch, patchPath, patchExact, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, createdTr.ID)
+	})
+	require.Equal(t, http.StatusOK, patchOKRec.Code, patchOKRec.Body.String())
+
+	patchOverJSON := []byte(`{"description":"` + strings.Repeat("d", maxTriggerRequestBodyBytes) + `"}`)
+	assert413(t, sendRaw(http.MethodPatch, patchPath, patchOverJSON, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, createdTr.ID)
+	}))
+	assert413(t, sendRaw(http.MethodPatch, patchPath, append(append([]byte{}, patchExact...), ' '), func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, createdTr.ID)
+	}))
+
+	stored, err := f.store.GetTrigger(ctx, createdTr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "patched-at-cap", stored.Description)
+}
+
+func TestTriggersAuthoring_MatchRulesArrayAndScalarSugarMirrorAndAmbiguousMatch(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	// 1. Read normalization helper triggerMatchRules (§2.1, R1 fail-closed):
+	//    - MatchRulesCorrupt returns errCorruptTriggerMatchRules (never falls open to MatchRule or nil)
+	//    - non-empty MatchRules wins over legacy scalar columns and defaults empty dialect to "cel"
+	//    - defensive non-empty MatchRule normalizes to 1-element slice
+	//    - empty returns (nil, nil)
+	corruptNorm, corruptErr := triggerMatchRules(store.Trigger{
+		MatchRule:         "true",
+		MatchRulesCorrupt: true,
+	})
+	assert.Nil(t, corruptNorm)
+	require.ErrorIs(t, corruptErr, triggerrule.ErrCorruptMatchRules)
+	reason, isSkip := triggerrule.SkipReason(corruptErr)
+	assert.True(t, isSkip)
+	assert.Equal(t, triggerrule.SkipReasonEvalFailed, reason)
+
+	normMulti, err := triggerMatchRules(store.Trigger{
+		MatchDialect: "cel",
+		MatchRule:    "legacy-ignored",
+		MatchRules: []store.TriggerMatchRule{
+			{Dialect: "", Expr: "a"},
+			{Dialect: "system_one", Expr: "b"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []triggerrule.Rule{
+		{Dialect: "cel", Expr: "a"},
+		{Dialect: "system_one", Expr: "b"},
+	}, normMulti)
+
+	normScalar, err := triggerMatchRules(store.Trigger{
+		MatchRule: "event.type == 'webhook.received'",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []triggerrule.Rule{
+		{Dialect: "cel", Expr: "event.type == 'webhook.received'"},
+	}, normScalar)
+
+	normEmpty, err := triggerMatchRules(store.Trigger{})
+	require.NoError(t, err)
+	assert.Nil(t, normEmpty)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "rules-array-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// 2. Multi-element rules[] create -> preserves order, defaults dialect to "cel", omits scalar mirror.
+	multiRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "multi-rule-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Types: []string{"webhook.received"},
+			Rules: []TriggerMatchRuleSpec{
+				{Expr: `event.attributes["branch"] == "main"`},
+				{Dialect: "cel", Expr: `has(event.payload.pr)`},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "ship it"},
+	})
+	require.Equal(t, http.StatusCreated, multiRec.Code, multiRec.Body.String())
+	var multiResp TriggerResponse
+	require.NoError(t, json.Unmarshal(multiRec.Body.Bytes(), &multiResp))
+	wantMultiRules := []TriggerMatchRuleSpec{
+		{Dialect: "cel", Expr: `event.attributes["branch"] == "main"`},
+		{Dialect: "cel", Expr: `has(event.payload.pr)`},
+	}
+	assert.Equal(t, wantMultiRules, multiResp.Match.Rules)
+	assert.Empty(t, multiResp.Match.Dialect)
+	assert.Empty(t, multiResp.Match.Expr)
+
+	var rawMulti map[string]any
+	require.NoError(t, json.Unmarshal(multiRec.Body.Bytes(), &rawMulti))
+	rawMultiMatch := rawMulti["match"].(map[string]any)
+	assert.NotContains(t, rawMultiMatch, "dialect")
+	assert.NotContains(t, rawMultiMatch, "expr")
+
+	getMultiRec := f.doTrigger(t, f.ownerAuth, multiResp.ID, http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, getMultiRec.Code)
+	var getMultiResp TriggerResponse
+	require.NoError(t, json.Unmarshal(getMultiRec.Body.Bytes(), &getMultiResp))
+	assert.Equal(t, wantMultiRules, getMultiResp.Match.Rules)
+	assert.Empty(t, getMultiResp.Match.Dialect)
+	assert.Empty(t, getMultiResp.Match.Expr)
+
+	// 3. Scalar sugar create -> stored as 1-element MatchRules, response carries rules[] AND mirrors dialect/expr.
+	scalarExpr := `event.attributes["env"] == "prod"`
+	scalarRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "scalar-sugar-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: scalarExpr},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "prod"},
+	})
+	require.Equal(t, http.StatusCreated, scalarRec.Code, scalarRec.Body.String())
+	var scalarResp TriggerResponse
+	require.NoError(t, json.Unmarshal(scalarRec.Body.Bytes(), &scalarResp))
+	assert.Equal(t, []TriggerMatchRuleSpec{{Dialect: "cel", Expr: scalarExpr}}, scalarResp.Match.Rules)
+	assert.Equal(t, "cel", scalarResp.Match.Dialect)
+	assert.Equal(t, scalarExpr, scalarResp.Match.Expr)
+
+	// 4. Empty rules: [] + empty expr -> Types-only trigger with non-null rules: [] and no scalar mirror.
+	emptyRulesRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "empty-rules-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Types: []string{"webhook.received"},
+			Rules: []TriggerMatchRuleSpec{},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "types-only"},
+	})
+	require.Equal(t, http.StatusCreated, emptyRulesRec.Code, emptyRulesRec.Body.String())
+	var rawEmpty map[string]any
+	require.NoError(t, json.Unmarshal(emptyRulesRec.Body.Bytes(), &rawEmpty))
+	rawEmptyMatch := rawEmpty["match"].(map[string]any)
+	assert.Equal(t, []any{}, rawEmptyMatch["rules"])
+	assert.NotContains(t, rawEmptyMatch, "dialect")
+	assert.NotContains(t, rawEmptyMatch, "expr")
+
+	// 5. Defensive legacy row read via GET /triggers/{id} mirrors 1-element rule.
+	legacyID := api.NewUUID()
+	now := time.Now().UTC()
+	require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+		ID:            legacyID,
+		ProjectID:     f.projectID,
+		Name:          "defensive-legacy-tr",
+		Status:        store.TriggerStatusPaused,
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      ep.ID,
+		MatchTypes:    []string{"webhook.received"},
+		MatchRule:     "true",
+		ActionType:    "message",
+		ActionPayload: `{"agentId":"` + f.targetAgent.ID + `","message":"hi"}`,
+		SubjectMode:   store.TriggerSubjectModeNew,
+		CreatedBy:     f.owner.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    f.owner.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}))
+	legacyGetRec := f.doTrigger(t, f.ownerAuth, legacyID, http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, legacyGetRec.Code, legacyGetRec.Body.String())
+	var legacyResp TriggerResponse
+	require.NoError(t, json.Unmarshal(legacyGetRec.Body.Bytes(), &legacyResp))
+	assert.Equal(t, []TriggerMatchRuleSpec{{Dialect: "cel", Expr: "true"}}, legacyResp.Match.Rules)
+	assert.Equal(t, "cel", legacyResp.Match.Dialect)
+	assert.Equal(t, "true", legacyResp.Match.Expr)
+
+	// 6. Ambiguous match requests (mixing rules[] and scalar dialect/expr) -> 400 invalid_rule {category: ambiguous_match}.
+	sendRawTrigger := func(method, triggerPath, rawJSON string) *httptest.ResponseRecorder {
+		path := "/api/v1/projects/" + f.projectID + "/triggers"
+		if triggerPath != "" {
+			path += "/" + triggerPath
+		}
+		req := httptest.NewRequest(method, path, strings.NewReader(rawJSON))
+		req.Header.Set("Content-Type", "application/json")
+		reqCtx := contextWithIdentity(req.Context(), f.ownerAuth)
+		reqCtx = contextWithCredentialContext(reqCtx, credentialContextForIdentity(f.ownerAuth))
+		rec := httptest.NewRecorder()
+		f.srv.handleTriggers(rec, req.WithContext(reqCtx), f.projectID, triggerPath)
+		return rec
+	}
+
+	assertAmbiguous := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		eb := decodeTriggerRuleError(t, rec)
+		assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+		assert.Equal(t, "match", eb.Details["field"])
+		assert.Equal(t, "ambiguous_match", eb.Details["category"])
+	}
+
+	for _, rawCreate := range []string{
+		`{"name":"ambig-1","source":{"kind":"webhook","id":"` + ep.ID + `"},"match":{"expr":"true","rules":[{"dialect":"cel","expr":"true"}]},"action":{"type":"message","agentId":"` + f.targetAgent.ID + `","message":"hi"}}`,
+		`{"name":"ambig-2","source":{"kind":"webhook","id":"` + ep.ID + `"},"match":{"expr":"true","rules":[]},"action":{"type":"message","agentId":"` + f.targetAgent.ID + `","message":"hi"}}`,
+		`{"name":"ambig-3","source":{"kind":"webhook","id":"` + ep.ID + `"},"match":{"dialect":"cel","rules":[{"expr":"true"}]},"action":{"type":"message","agentId":"` + f.targetAgent.ID + `","message":"hi"}}`,
+	} {
+		assertAmbiguous(t, sendRawTrigger(http.MethodPost, "", rawCreate))
+	}
+
+	for _, rawPatch := range []string{
+		`{"match":{"expr":"true","rules":[{"dialect":"cel","expr":"true"}]}}`,
+		`{"match":{"dialect":"cel","rules":[{"dialect":"cel","expr":"true"}]}}`,
+		`{"match":{"dialect":"cel"}}`, // scalar dialect-only patch over a 2-element trigger
+	} {
+		assertAmbiguous(t, sendRawTrigger(http.MethodPatch, multiResp.ID, rawPatch))
+	}
+
+	// 7. Empty or whitespace-only scalar fields alongside rules[] behave identically on create and PATCH (O4).
+	sameMatchCreateRec := sendRawTrigger(http.MethodPost, "", `{"name":"trimmed-scalar-with-rules","source":{"kind":"webhook","id":"`+ep.ID+`"},"match":{"dialect":"","expr":"   ","rules":[{"dialect":"cel","expr":"true"}]},"action":{"type":"message","agentId":"`+f.targetAgent.ID+`","message":"hi"}}`)
+	require.Equal(t, http.StatusCreated, sameMatchCreateRec.Code, sameMatchCreateRec.Body.String())
+	var sameMatchCreated TriggerResponse
+	require.NoError(t, json.Unmarshal(sameMatchCreateRec.Body.Bytes(), &sameMatchCreated))
+	assert.Equal(t, []TriggerMatchRuleSpec{{Dialect: "cel", Expr: "true"}}, sameMatchCreated.Match.Rules)
+
+	sameMatchPatchRec := sendRawTrigger(http.MethodPatch, multiResp.ID, `{"match":{"dialect":"","expr":"   ","rules":[{"dialect":"cel","expr":"true"}]}}`)
+	require.Equal(t, http.StatusOK, sameMatchPatchRec.Code, sameMatchPatchRec.Body.String())
+}
+
+func TestTriggersAuthoring_CorruptStoredMatchRulesFailsClosed(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "corrupt-rules-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "corrupt-stored-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `event.attributes["env"] == "prod"`},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "prod-only"},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created TriggerResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+
+	// Corrupt match_rules directly in SQL storage to simulate DB-level corruption
+	// (including empty-object and renamed-field JSON arrays alongside malformed JSON).
+	cs := f.store.(*entadapter.CompositeStore)
+	setRawMatchRules := func(raw string) {
+		t.Helper()
+		if cs.Dialect() == "postgres" {
+			_, err := cs.DB().ExecContext(ctx, "UPDATE triggers SET match_rules = $1 WHERE id = $2", raw, created.ID)
+			require.NoError(t, err)
+		} else {
+			_, err := cs.DB().ExecContext(ctx, "UPDATE triggers SET match_rules = ? WHERE id = ?", raw, created.ID)
+			require.NoError(t, err)
+		}
+	}
+	for _, probeRaw := range []string{`[{}]`, `[{"dialect":"cel","expression":"x"}]`} {
+		setRawMatchRules(probeRaw)
+		probeStored, gErr := f.store.GetTrigger(ctx, created.ID)
+		require.NoError(t, gErr)
+		assert.True(t, probeStored.MatchRulesCorrupt, "probe payload %s must be marked corrupt", probeRaw)
+		assert.Nil(t, probeStored.MatchRules)
+		pNorm, pErr := triggerMatchRules(*probeStored)
+		assert.Nil(t, pNorm)
+		require.ErrorIs(t, pErr, triggerrule.ErrCorruptMatchRules)
+	}
+	const secretCorruptPayload = "{corrupt-unparseable-raw-db-secret"
+	setRawMatchRules(secretCorruptPayload)
+
+	storedCorrupt, err := f.store.GetTrigger(ctx, created.ID)
+	require.NoError(t, err)
+	assert.True(t, storedCorrupt.MatchRulesCorrupt)
+	assert.Nil(t, storedCorrupt.MatchRules)
+	normRules, normErr := triggerMatchRules(*storedCorrupt)
+	assert.Nil(t, normRules)
+	require.ErrorIs(t, normErr, triggerrule.ErrCorruptMatchRules)
+
+	// 1. GET /triggers/{id} and GET /triggers surface a content-free broken-rule state (never raw DB bytes, never healthy Types-only).
+	getRec := f.doTrigger(t, f.ownerAuth, created.ID, http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	assert.NotContains(t, getRec.Body.String(), "corrupt-unparseable-raw-db-secret")
+	var getResp TriggerResponse
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &getResp))
+	assert.True(t, getResp.Match.RulesBroken)
+	assert.Empty(t, getResp.Match.Rules)
+	assert.Empty(t, getResp.Match.Dialect)
+	assert.Empty(t, getResp.Match.Expr)
+
+	listRec := f.doTrigger(t, f.ownerAuth, "", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+	assert.NotContains(t, listRec.Body.String(), "corrupt-unparseable-raw-db-secret")
+	var listResp ListTriggersResponse
+	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listResp))
+	require.Len(t, listResp.Triggers, 1)
+	assert.True(t, listResp.Triggers[0].Match.RulesBroken)
+
+	assertCorruptRefusal := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "corrupt-unparseable-raw-db-secret")
+		eb := decodeTriggerRuleError(t, rec)
+		assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+		assert.Contains(t, eb.Message, "[element 1]")
+		elems, ok := eb.Details["elements"].([]any)
+		require.True(t, ok)
+		require.Len(t, elems, 1)
+		e1 := elems[0].(map[string]any)
+		assert.Equal(t, float64(1), e1["element"])
+		assert.Equal(t, "corrupt_storage", e1["category"])
+	}
+
+	// 2. Dispatch-relevant PATCHes without replacing match.rules are refused 400 invalid_rule.
+	newTypes := []string{"webhook.deploy.*"}
+	celDialect := "cel"
+	newSubj := `event.subject`
+	assertCorruptRefusal(t, f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Action: &TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "must-refuse"},
+	}))
+	assertCorruptRefusal(t, f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Types: &newTypes},
+	}))
+	assertCorruptRefusal(t, f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Dialect: &celDialect},
+	}))
+	assertCorruptRefusal(t, f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Subject: &TriggerSubjectPatchSpec{Expr: &newSubj},
+	}))
+
+	// 3. Metadata-only PATCH and pause succeed so operators can quarantine; resume is refused while still corrupt.
+	desc := "quarantined corrupt rule"
+	metaRec := f.doTrigger(t, f.ownerAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{Description: &desc})
+	require.Equal(t, http.StatusOK, metaRec.Code, metaRec.Body.String())
+	pauseRec := f.doTrigger(t, f.ownerAuth, created.ID+"/pause", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+	assertCorruptRefusal(t, f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil))
+
+	// 4. Replacing match.rules via PATCH repairs storage, clears rulesBroken, and allows resume.
+	repairedRules := []TriggerMatchRuleSpec{{Dialect: "cel", Expr: `event.attributes["env"] == "prod"`}}
+	repairRec := f.doTrigger(t, f.ownerAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &repairedRules},
+	})
+	require.Equal(t, http.StatusOK, repairRec.Code, repairRec.Body.String())
+	var repairedResp TriggerResponse
+	require.NoError(t, json.Unmarshal(repairRec.Body.Bytes(), &repairedResp))
+	assert.False(t, repairedResp.Match.RulesBroken)
+	assert.Equal(t, repairedRules, repairedResp.Match.Rules)
+
+	resumeOKRec := f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, resumeOKRec.Code, resumeOKRec.Body.String())
+}
+
+func TestTriggersAuthoring_ScalarMatchColumnsNeverWrittenNonEmptyGuard(t *testing.T) {
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs; ensures store.Trigger.MatchDialect and MatchRule are never written non-empty.
+	goFiles, err := globGuardScanDirs(".", "*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, goFiles)
+
+	isEmptyStringLit := func(expr ast.Expr) bool {
+		lit, ok := expr.(*ast.BasicLit)
+		return ok && lit.Kind == token.STRING && lit.Value == `""`
+	}
+	isFieldMaskTrue := func(recv, rhs ast.Expr) bool {
+		recvIdent, ok := recv.(*ast.Ident)
+		if !ok || recvIdent.Name != "fields" {
+			return false
+		}
+		rhsIdent, ok := rhs.(*ast.Ident)
+		return ok && rhsIdent.Name == "true"
+	}
+
+	fset := token.NewFileSet()
+	inspectedFiles := 0
+	for _, file := range goFiles {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		inspectedFiles++
+		parsed, pErr := parser.ParseFile(fset, file, nil, 0)
+		require.NoError(t, pErr, "parse %s", file)
+		ast.Inspect(parsed, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.CompositeLit:
+				isMaskLit := false
+				if sel, ok := node.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "TriggerFieldMask" {
+					isMaskLit = true
+				}
+				for _, elt := range node.Elts {
+					kv, ok := elt.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					ident, ok := kv.Key.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					if ident.Name != "MatchDialect" && ident.Name != "MatchRule" {
+						continue
+					}
+					if isMaskLit {
+						continue
+					}
+					if !isEmptyStringLit(kv.Value) {
+						pos := fset.Position(kv.Pos())
+						t.Errorf("%s:%d writes non-empty %s in composite literal", pos.Filename, pos.Line, ident.Name)
+					}
+				}
+			case *ast.AssignStmt:
+				for idx, lhs := range node.Lhs {
+					sel, ok := lhs.(*ast.SelectorExpr)
+					if !ok {
+						continue
+					}
+					if sel.Sel.Name != "MatchDialect" && sel.Sel.Name != "MatchRule" {
+						continue
+					}
+					if idx >= len(node.Rhs) || (!isEmptyStringLit(node.Rhs[idx]) && !isFieldMaskTrue(sel.X, node.Rhs[idx])) {
+						pos := fset.Position(sel.Pos())
+						t.Errorf("%s:%d assigns non-empty value to %s", pos.Filename, pos.Line, sel.Sel.Name)
+					}
+				}
+			}
+			return true
+		})
+	}
+	require.Greater(t, inspectedFiles, 0)
+
+	// Part B: Runtime HTTP + database row verification across create, PATCH, pause, and resume.
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "scalar-guard-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	assertEmptyScalars := func(id string, wantRules []store.TriggerMatchRule) {
+		t.Helper()
+		stored, gErr := f.store.GetTrigger(ctx, id)
+		require.NoError(t, gErr)
+		assert.Empty(t, stored.MatchDialect, "triggers.match_dialect must never be written non-empty")
+		assert.Empty(t, stored.MatchRule, "triggers.match_rule must never be written non-empty")
+		assert.Equal(t, wantRules, stored.MatchRules)
+	}
+
+	// 1. Types-only create.
+	typesRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "guard-types-only",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, typesRec.Code)
+	var typesTr TriggerResponse
+	require.NoError(t, json.Unmarshal(typesRec.Body.Bytes(), &typesTr))
+	assertEmptyScalars(typesTr.ID, nil)
+
+	// 2. Scalar sugar create.
+	sugarRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "guard-scalar-sugar",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Dialect: "cel", Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, sugarRec.Code)
+	var sugarTr TriggerResponse
+	require.NoError(t, json.Unmarshal(sugarRec.Body.Bytes(), &sugarTr))
+	assertEmptyScalars(sugarTr.ID, []store.TriggerMatchRule{{Dialect: "cel", Expr: "true"}})
+
+	// 3. PATCH scalar -> multi-element -> scalar -> pause -> resume -> clear to empty.
+	twoRules := []TriggerMatchRuleSpec{
+		{Dialect: "cel", Expr: `event.type == "webhook.received"`},
+		{Dialect: "cel", Expr: `has(event.payload.ok)`},
+	}
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, sugarTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &twoRules},
+	}).Code)
+	assertEmptyScalars(sugarTr.ID, []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: `event.type == "webhook.received"`},
+		{Dialect: "cel", Expr: `has(event.payload.ok)`},
+	})
+
+	scalarPatchExpr := `event.subject != ""`
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, sugarTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Expr: &scalarPatchExpr},
+	}).Code)
+	assertEmptyScalars(sugarTr.ID, []store.TriggerMatchRule{{Dialect: "cel", Expr: scalarPatchExpr}})
+
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, sugarTr.ID+"/pause", http.MethodPost, nil).Code)
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, sugarTr.ID+"/resume", http.MethodPost, nil).Code)
+	assertEmptyScalars(sugarTr.ID, []store.TriggerMatchRule{{Dialect: "cel", Expr: scalarPatchExpr}})
+
+	emptyRules := []TriggerMatchRuleSpec{}
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, sugarTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &emptyRules},
+	}).Code)
+	assertEmptyScalars(sugarTr.ID, nil)
+}
+
+func TestTriggersAuthoring_MatchRulesCompileAllFailingElementsAndCaps(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "compile-all-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	mixedBadRules := []TriggerMatchRuleSpec{
+		{Dialect: "cel", Expr: `event.type == "webhook.received"`},                             // element 1: valid
+		{Dialect: "cel", Expr: "true &&\nstring(event.subject)"},                               // element 2: non-bool type error on multiline expr
+		{Dialect: "system_one", Expr: "Does this PR touch authentication?"},                    // element 3: ungranted dialect -> dialect_not_allowed
+		{Dialect: "cel", Expr: "event.type == \"a\u202eb\""},                                   // element 4: bidi format character
+		{Dialect: "Bad-Dialect", Expr: "true"},                                                 // element 5: invalid dialect identifier
+		{Dialect: "cel", Expr: `"` + strings.Repeat("x", triggerrule.MaxMatchRuleBytes) + `"`}, // element 6: > 4096 bytes
+	}
+
+	assertAllElementsReported := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		eb := decodeTriggerRuleError(t, rec)
+		assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+		assert.Equal(t, "match", eb.Details["field"])
+		assert.Contains(t, eb.Message, "[element 2]")
+		assert.Contains(t, eb.Message, "[element 3]")
+		assert.NotContains(t, eb.Message, "[element 0]")
+
+		rawElems, ok := eb.Details["elements"].([]any)
+		require.True(t, ok, "details.elements must be a JSON array: %v", eb.Details)
+		require.Len(t, rawElems, 5, "all 5 failing elements (1-based indices 2..6) must be reported together")
+
+		e1 := rawElems[0].(map[string]any)
+		assert.Equal(t, float64(2), e1["element"])
+		assert.Equal(t, "type", e1["category"])
+		assert.NotEmpty(t, e1["message"])
+		assert.GreaterOrEqual(t, e1["line"].(float64), float64(1))
+		assert.GreaterOrEqual(t, e1["column"].(float64), float64(1))
+
+		e2 := rawElems[1].(map[string]any)
+		assert.Equal(t, float64(3), e2["element"])
+		assert.Equal(t, "system_one", e2["dialect"])
+		assert.Equal(t, ruleengine.ReasonDialectNotAllowed, e2["reason"])
+
+		e3 := rawElems[2].(map[string]any)
+		assert.Equal(t, float64(4), e3["element"])
+		assert.Equal(t, "control_characters", e3["category"])
+		assert.Contains(t, e3["message"], "control or format characters")
+
+		e4 := rawElems[3].(map[string]any)
+		assert.Equal(t, float64(5), e4["element"])
+		assert.Equal(t, "dialect", e4["category"])
+
+		e5 := rawElems[4].(map[string]any)
+		assert.Equal(t, float64(6), e5["element"])
+		assert.Equal(t, "size", e5["category"])
+	}
+
+	// 1. Create reports ALL failing elements in one 400 invalid_rule response.
+	badCreateRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "all-bad-create",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Rules: mixedBadRules},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	assertAllElementsReported(t, badCreateRec)
+
+	// 2. PATCH reports ALL failing elements and leaves stored trigger untouched.
+	eightValid := make([]TriggerMatchRuleSpec, triggerrule.MaxMatchRules)
+	for i := range eightValid {
+		eightValid[i] = TriggerMatchRuleSpec{
+			Dialect: "cel",
+			Expr:    fmt.Sprintf(`event.attributes["k%d"] != "drop"`, i),
+		}
+	}
+	okEightRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "eight-rules-ok",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Rules: eightValid},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, okEightRec.Code, okEightRec.Body.String())
+	var okEightTr TriggerResponse
+	require.NoError(t, json.Unmarshal(okEightRec.Body.Bytes(), &okEightTr))
+	assert.Len(t, okEightTr.Match.Rules, triggerrule.MaxMatchRules)
+
+	badPatchRec := f.doTrigger(t, f.ownerAuth, okEightTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &mixedBadRules},
+	})
+	assertAllElementsReported(t, badPatchRec)
+
+	// 3. Resume on a paused trigger with multiple failing stored elements reports ALL failing elements.
+	pausedBadID := api.NewUUID()
+	now := time.Now().UTC()
+	storedBadRules := make([]store.TriggerMatchRule, len(mixedBadRules))
+	for i, r := range mixedBadRules {
+		storedBadRules[i] = store.TriggerMatchRule{Dialect: r.Dialect, Expr: r.Expr}
+	}
+	require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+		ID:            pausedBadID,
+		ProjectID:     f.projectID,
+		Name:          "paused-multi-bad",
+		Status:        store.TriggerStatusPaused,
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      ep.ID,
+		MatchTypes:    []string{"webhook.received"},
+		MatchRules:    storedBadRules,
+		ActionType:    "message",
+		ActionPayload: `{"agentId":"` + f.targetAgent.ID + `","message":"hi"}`,
+		SubjectMode:   store.TriggerSubjectModeNew,
+		CreatedBy:     f.owner.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    f.owner.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}))
+	assertAllElementsReported(t, f.doTrigger(t, f.ownerAuth, pausedBadID+"/resume", http.MethodPost, nil))
+
+	// 4. Nine elements -> 400 invalid_rule with category == "size".
+	nineRules := make([]TriggerMatchRuleSpec, triggerrule.MaxMatchRules+1)
+	for i := range nineRules {
+		nineRules[i] = TriggerMatchRuleSpec{Dialect: "cel", Expr: "true"}
+	}
+	nineRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "nine-rules-bad",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Rules: nineRules},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, nineRec.Code, nineRec.Body.String())
+	nineErr := decodeTriggerRuleError(t, nineRec)
+	assert.Equal(t, ErrCodeInvalidRule, nineErr.Code)
+	assert.Equal(t, "size", nineErr.Details["category"])
+	assert.Equal(t, float64(triggerrule.MaxMatchRules+1), nineErr.Details["count"])
+
+	// 5. Encoded JSON list > 16 KiB across <= 8 valid <= 4096-byte elements -> 400 invalid_rule {category: "size"}.
+	bigValidExpr := fmt.Sprintf(`event.subject != "%s"`, strings.Repeat("z", 3600))
+	require.LessOrEqual(t, len(bigValidExpr), triggerrule.MaxMatchRuleBytes)
+	fiveBigRules := make([]TriggerMatchRuleSpec, 5)
+	for i := range fiveBigRules {
+		fiveBigRules[i] = TriggerMatchRuleSpec{Dialect: "cel", Expr: bigValidExpr}
+	}
+	over16KiBRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "over-16kib-rules",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Rules: fiveBigRules},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusBadRequest, over16KiBRec.Code, over16KiBRec.Body.String())
+	over16Err := decodeTriggerRuleError(t, over16KiBRec)
+	assert.Equal(t, ErrCodeInvalidRule, over16Err.Code)
+	assert.Equal(t, "size", over16Err.Details["category"])
+}
+
+func TestTriggersAuthoring_MatchRulesRevisionBumpAndBrokenElementGuard(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "rev-bump-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code)
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	ruleA := TriggerMatchRuleSpec{Dialect: "cel", Expr: `event.attributes["branch"] == "main"`}
+	ruleB := TriggerMatchRuleSpec{Dialect: "cel", Expr: `has(event.payload.pr)`}
+
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "rev-array-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Rules: []TriggerMatchRuleSpec{ruleA, ruleB}},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "v1"},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created TriggerResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	assert.Equal(t, 1, created.AuthorizationRevision)
+
+	// 1. Reordering [A, B] -> [B, A] bumps authorization_revision and re-attributes initiator to admin.
+	reordered := []TriggerMatchRuleSpec{ruleB, ruleA}
+	reorderRec := f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &reordered},
+	})
+	require.Equal(t, http.StatusOK, reorderRec.Code, reorderRec.Body.String())
+	storedAfterReorder, err := f.store.GetTrigger(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, storedAfterReorder.AuthorizationRevision)
+	assert.Equal(t, f.admin.ID, storedAfterReorder.InitiatorPrincipalID)
+	assert.Equal(t, []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: ruleB.Expr},
+		{Dialect: "cel", Expr: ruleA.Expr},
+	}, storedAfterReorder.MatchRules)
+
+	// 2. Editing element text bumps authorization_revision and re-attributes initiator back to owner.
+	editedText := []TriggerMatchRuleSpec{
+		ruleB,
+		{Dialect: "cel", Expr: `event.attributes["branch"] == "release"`},
+	}
+	editTextRec := f.doTrigger(t, f.ownerAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &editedText},
+	})
+	require.Equal(t, http.StatusOK, editTextRec.Code, editTextRec.Body.String())
+	storedAfterText, err := f.store.GetTrigger(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, storedAfterText.AuthorizationRevision)
+	assert.Equal(t, f.owner.ID, storedAfterText.InitiatorPrincipalID)
+
+	// 3. Adding a third element bumps authorization_revision and re-attributes initiator to admin.
+	threeRules := append(append([]TriggerMatchRuleSpec{}, editedText...), TriggerMatchRuleSpec{
+		Dialect: "cel",
+		Expr:    `event.subject != ""`,
+	})
+	addElemRec := f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &threeRules},
+	})
+	require.Equal(t, http.StatusOK, addElemRec.Code, addElemRec.Body.String())
+	storedAfterAdd, err := f.store.GetTrigger(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 4, storedAfterAdd.AuthorizationRevision)
+	assert.Equal(t, f.admin.ID, storedAfterAdd.InitiatorPrincipalID)
+
+	// 4. PATCH of a dispatch-relevant field over a stored non-compiling element (1-based element 2) -> 400, trigger unchanged.
+	brokenID := api.NewUUID()
+	now := time.Now().UTC()
+	origPayload := `{"agentId":"` + f.targetAgent.ID + `","message":"keep-me"}`
+	require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+		ID:         brokenID,
+		ProjectID:  f.projectID,
+		Name:       "broken-elem-tr",
+		Status:     store.TriggerStatusActive,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   ep.ID,
+		MatchTypes: []string{"webhook.received"},
+		MatchRules: []store.TriggerMatchRule{
+			{Dialect: "cel", Expr: "true"},
+			{Dialect: "cel", Expr: "string(event.subject)"}, // non-bool element 2
+		},
+		ActionType:    "message",
+		ActionPayload: origPayload,
+		SubjectMode:   store.TriggerSubjectModeNew,
+		CreatedBy:     f.owner.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    f.owner.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   5,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}))
+
+	actionPatchRec := f.doTrigger(t, f.adminAuth, brokenID, http.MethodPatch, UpdateTriggerRequest{
+		Action: &TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "should-not-save"},
+	})
+	require.Equal(t, http.StatusBadRequest, actionPatchRec.Code, actionPatchRec.Body.String())
+	actionPatchErr := decodeTriggerRuleError(t, actionPatchRec)
+	assert.Equal(t, ErrCodeInvalidRule, actionPatchErr.Code)
+	assert.Contains(t, actionPatchErr.Message, "[element 2]")
+	elems, ok := actionPatchErr.Details["elements"].([]any)
+	require.True(t, ok)
+	require.Len(t, elems, 1)
+	assert.Equal(t, float64(2), elems[0].(map[string]any)["element"])
+
+	newTypes := []string{"webhook.deploy.*"}
+	typesPatchRec := f.doTrigger(t, f.adminAuth, brokenID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Types: &newTypes},
+	})
+	require.Equal(t, http.StatusBadRequest, typesPatchRec.Code, typesPatchRec.Body.String())
+
+	storedBroken, err := f.store.GetTrigger(ctx, brokenID)
+	require.NoError(t, err)
+	assert.Equal(t, origPayload, storedBroken.ActionPayload)
+	assert.Equal(t, []string{"webhook.received"}, storedBroken.MatchTypes)
+	assert.Equal(t, 5, storedBroken.AuthorizationRevision)
+	assert.Equal(t, f.owner.ID, storedBroken.InitiatorPrincipalID)
 }

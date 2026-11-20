@@ -86,6 +86,7 @@ var windowsAllowed = map[string]bool{
 	// calls, no local writes.
 	"trigger":                true,
 	"trigger.create":         true,
+	"trigger.get":            true,
 	"trigger.list":           true,
 	"trigger.delete":         true,
 	"trigger.pause":          true,

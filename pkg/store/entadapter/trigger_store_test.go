@@ -1056,3 +1056,109 @@ func TestTriggerEvent_BodySHA256UniquePerProjectAndSourceKind(t *testing.T) {
 		require.NoError(t, cs.CreateTriggerEvent(ctx, wh))
 	}
 }
+
+func TestTriggerStore_OrderedMatchRulesRoundTripAndEmptyScalars(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+	userID := uuid.NewString()
+
+	initialRules := []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: "event.attributes.branch == 'main'"},
+		{Dialect: "cel", Expr: "has(event.payload.pr)"},
+		{Dialect: "system_one", Expr: "classify urgent"},
+	}
+
+	tr := &store.Trigger{
+		ID:            uuid.NewString(),
+		ProjectID:     projID,
+		Name:          "ordered-rules",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      uuid.NewString(),
+		MatchTypes:    []string{"webhook.received"},
+		MatchRules:    initialRules,
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"target-1","message":"pushed"}`,
+		CreatedBy:     userID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+			InitiatorPrincipalID:    userID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+	}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	got, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, initialRules, got.MatchRules)
+	assert.Empty(t, got.MatchDialect, "scalar match_dialect column must stay empty when not explicitly set")
+	assert.Empty(t, got.MatchRule, "scalar match_rule column must stay empty when not explicitly set")
+
+	// Reorder and update MatchRules via TriggerFieldMask.
+	reordered := []store.TriggerMatchRule{
+		{Dialect: "cel", Expr: "has(event.payload.pr)"},
+		{Dialect: "cel", Expr: "event.attributes.branch == 'main'"},
+	}
+	got.MatchRules = reordered
+	newAttr := got.InitiatorAttribution
+	newAttr.AuthorizationRevision = 2
+	require.NoError(t, cs.UpdateTrigger(ctx, got, store.TriggerFieldMask{MatchRules: true}, 1, true, &newAttr))
+
+	got2, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, reordered, got2.MatchRules)
+	assert.Equal(t, 2, got2.AuthorizationRevision)
+	assert.Empty(t, got2.MatchDialect)
+	assert.Empty(t, got2.MatchRule)
+
+	// Clear MatchRules back to empty (Types-only).
+	got2.MatchRules = nil
+	newAttr.AuthorizationRevision = 3
+	require.NoError(t, cs.UpdateTrigger(ctx, got2, store.TriggerFieldMask{MatchRules: true}, 2, true, &newAttr))
+
+	got3, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got3.MatchRules)
+	assert.False(t, got3.MatchRulesCorrupt)
+	assert.Empty(t, got3.MatchDialect)
+	assert.Empty(t, got3.MatchRule)
+
+	// Corrupt stored match_rules payloads must mark MatchRulesCorrupt=true (fail-closed)
+	// rather than silently degrading to a Types-only trigger.
+	trUUID := uuid.MustParse(tr.ID)
+	for _, corruptRaw := range []string{
+		"{not-json",
+		"null",
+		"{}",
+		"[null]",
+		"[123]",
+		`[{"dialect":123}]`,
+		`[{}]`,
+		`[{"dialect":"cel","expr":""}]`,
+		`[{"dialect":"cel","expr":"   \t\n"}]`,
+		`[{"dialect":"cel","expression":"x"}]`,
+		`[{"dialect":"cel","expr":"true","extra":1}]`,
+		`[{"dialect":"cel","expr":"true"},{}]`,
+	} {
+		require.NoError(t, cs.client.Trigger.UpdateOneID(trUUID).SetMatchRules(corruptRaw).Exec(ctx))
+		corruptGot, gErr := cs.GetTrigger(ctx, tr.ID)
+		require.NoError(t, gErr)
+		assert.Nil(t, corruptGot.MatchRules, "corrupt payload %q must not yield partial rules", corruptRaw)
+		assert.True(t, corruptGot.MatchRulesCorrupt, "corrupt payload %q must set MatchRulesCorrupt", corruptRaw)
+	}
+
+	// Replacing MatchRules on a corrupt in-memory Trigger clears MatchRulesCorrupt both in-place and on reload.
+	corruptToRepair, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	require.True(t, corruptToRepair.MatchRulesCorrupt)
+	corruptToRepair.MatchRules = []store.TriggerMatchRule{{Dialect: "cel", Expr: "true"}}
+	newAttr.AuthorizationRevision = 4
+	require.NoError(t, cs.UpdateTrigger(ctx, corruptToRepair, store.TriggerFieldMask{MatchRules: true}, 3, true, &newAttr))
+	assert.False(t, corruptToRepair.MatchRulesCorrupt)
+	repaired, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.False(t, repaired.MatchRulesCorrupt)
+	assert.Equal(t, []store.TriggerMatchRule{{Dialect: "cel", Expr: "true"}}, repaired.MatchRules)
+}

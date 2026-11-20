@@ -65,6 +65,7 @@ const (
 	ErrCodeInvalidJoinToken                 = apierr.ErrCodeInvalidJoinToken
 	ErrCodeInvalidRequest                   = apierr.ErrCodeInvalidRequest
 	ErrCodeInvalidRoleSet                   = apierr.ErrCodeInvalidRoleSet
+	ErrCodeInvalidRule                      = apierr.ErrCodeInvalidRule
 	ErrCodeInvalidSignature                 = apierr.ErrCodeInvalidSignature
 	ErrCodeLastOwner                        = apierr.ErrCodeLastOwner
 	ErrCodeMembershipChanged                = apierr.ErrCodeMembershipChanged

@@ -316,8 +316,14 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 		assert.Equal(t, ruleengine.ReasonEmptyConsumer, unsup.Reason)
 	}
 
-	// 2. P1 registers no consumer allow-list: every named consumer is denied by default.
+	// 2. No consumer is admitted to system_one by default: ungranted consumers fail
+	// with consumer_not_registered, and "trigger" (registered with pure Grant("cel")
+	// only) fails with dialect_not_allowed.
 	for _, consumer := range []string{"trigger", "message", "probe", "admin-probe", "system_one", testSystemOneConsumer} {
+		wantReason := ruleengine.ReasonConsumerNotRegistered
+		if consumer == "trigger" {
+			wantReason = ruleengine.ReasonDialectNotAllowed
+		}
 		assert.False(t, re.Supports(consumer, systemone.DialectName), "consumer %q must not be admitted to system_one by default", consumer)
 		_, err := re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.KindFilter, ruleengine.EnvironmentRef{
 			Consumer: consumer,
@@ -327,19 +333,19 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 		require.ErrorAs(t, err, &unsup)
 		assert.Equal(t, systemone.DialectName, unsup.Dialect)
 		assert.Equal(t, consumer, unsup.Consumer)
-		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
+		assert.Equal(t, wantReason, unsup.Reason)
 
 		forged := ruleengine.NewCompiled(consumer, systemone.DialectName, ruleengine.KindFilter, struct{}{})
 		_, err = re.Evaluate(ctx, forged, ruleengine.Input{Payload: systemone.ProbeInput("text")}, ruleengine.Budget{})
 		unsup = nil
 		require.ErrorAs(t, err, &unsup)
-		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
+		assert.Equal(t, wantReason, unsup.Reason)
 
 		h, err := re.DialectFor(consumer, systemone.DialectName)
 		assert.Nil(t, h)
 		unsup = nil
 		require.ErrorAs(t, err, &unsup)
-		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
+		assert.Equal(t, wantReason, unsup.Reason)
 	}
 
 	// 3. Granting system_one without AllowIO is also denied with io_not_allowed.

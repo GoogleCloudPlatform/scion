@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -27,15 +28,14 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
-	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
 
 const (
-	maxTriggerNameLen        = 128
-	maxTriggerDescriptionLen = 1024
-	defaultWebhookMatchType  = "webhook.received"
+	maxTriggerNameLen          = 128
+	maxTriggerDescriptionLen   = 1024
+	maxTriggerRequestBodyBytes = 64 * 1024
+	defaultWebhookMatchType    = "webhook.received"
 )
 
 var (
@@ -73,9 +73,10 @@ type CreateTriggerRequest struct {
 
 // TriggerMatchPatchSpec holds partial updates to a trigger's match block.
 type TriggerMatchPatchSpec struct {
-	Types   *[]string `json:"types,omitempty"`
-	Dialect *string   `json:"dialect,omitempty"`
-	Expr    *string   `json:"expr,omitempty"`
+	Types   *[]string               `json:"types,omitempty"`
+	Dialect *string                 `json:"dialect,omitempty"`
+	Expr    *string                 `json:"expr,omitempty"`
+	Rules   *[]TriggerMatchRuleSpec `json:"rules,omitempty"`
 }
 
 // TriggerSubjectPatchSpec holds partial updates to a trigger's subject block.
@@ -248,65 +249,38 @@ func validateTriggerName(raw string) (string, error) {
 	return validateTriggerResourceName(raw, maxTriggerNameLen)
 }
 
-func validateStage1b1Match(spec *TriggerMatchSpec) ([]string, string, string, error) {
-	var types []string
-	dialect := ruleengine.DialectCEL
-	expr := ""
-	if spec != nil {
-		types = spec.Types
-		if d := strings.TrimSpace(spec.Dialect); d != "" {
-			dialect = d
-		}
-		expr = strings.TrimSpace(spec.Expr)
-	}
-	if len(types) == 0 {
-		types = []string{defaultWebhookMatchType}
-	}
-	if dialect != ruleengine.DialectCEL {
-		return nil, "", "", fmt.Errorf("unsupported match dialect %q (supported: %s)", dialect, ruleengine.DialectCEL)
-	}
-	if expr != "" {
-		return nil, "", "", errors.New("match_rule is not yet supported")
-	}
-	if err := triggerrule.ValidateMatchTypes(types); err != nil {
-		return nil, "", "", err
-	}
-	copied := make([]string, len(types))
-	copy(copied, types)
-	return copied, dialect, "", nil
-}
-
-func validateStage1b1Subject(spec *TriggerSubjectSpec) (string, string, string, error) {
-	dialect := ruleengine.DialectCEL
-	expr := ""
-	mode := store.TriggerSubjectModeNew
-	if spec != nil {
-		if d := strings.TrimSpace(spec.Dialect); d != "" {
-			dialect = d
-		}
-		expr = strings.TrimSpace(spec.Expr)
-		if m := strings.TrimSpace(spec.Mode); m != "" {
-			mode = m
-		}
-	}
-	if dialect != ruleengine.DialectCEL {
-		return "", "", "", fmt.Errorf("unsupported subject dialect %q (supported: %s)", dialect, ruleengine.DialectCEL)
-	}
-	if expr != "" {
-		return "", "", "", errors.New("subject_rule is not yet supported")
-	}
-	switch mode {
-	case store.TriggerSubjectModeNew:
-		return dialect, "", mode, nil
-	case store.TriggerSubjectModeSkip:
-		return "", "", "", errors.New(`subject_mode "skip" is not yet supported`)
-	default:
-		return "", "", "", fmt.Errorf("unsupported subject mode %q", mode)
-	}
-}
-
 func setTriggerETag(w http.ResponseWriter, rev int) {
 	w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("%d", rev)))
+}
+
+// readTriggerRequestJSON caps trigger and webhook-endpoint write request bodies
+// at maxTriggerRequestBodyBytes (64 KiB) via http.MaxBytesReader and maps
+// *http.MaxBytesError to 413 payload_too_large.
+func readTriggerRequestJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxTriggerRequestBodyBytes)
+	}
+	if err := readJSON(r, v); err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				fmt.Sprintf("request body exceeds %d byte limit", maxTriggerRequestBodyBytes), nil)
+			return false
+		}
+		BadRequest(w, "Invalid JSON body: "+err.Error())
+		return false
+	}
+	if r.Body != nil {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			if isMaxBytesError(err) {
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+					fmt.Sprintf("request body exceeds %d byte limit", maxTriggerRequestBodyBytes), nil)
+				return false
+			}
+			BadRequest(w, "Invalid JSON body: "+err.Error())
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -318,8 +292,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	var req CreateTriggerRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid JSON body: "+err.Error())
+	if !readTriggerRequestJSON(w, r, &req) {
 		return
 	}
 
@@ -352,14 +325,14 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	matchTypes, matchDialect, matchRule, err := validateStage1b1Match(req.Match)
-	if err != nil {
-		ValidationError(w, err.Error(), nil)
+	explicitMatchDialect := req.Match != nil && req.Match.Rules == nil && strings.TrimSpace(req.Match.Dialect) != ""
+	matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, req.Match, true, explicitMatchDialect)
+	if !ok {
 		return
 	}
-	subjectDialect, subjectRule, subjectMode, err := validateStage1b1Subject(req.Subject)
-	if err != nil {
-		ValidationError(w, err.Error(), nil)
+	explicitSubjectDialect := req.Subject != nil && strings.TrimSpace(req.Subject.Dialect) != ""
+	subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, req.Subject, explicitSubjectDialect)
+	if !ok {
 		return
 	}
 
@@ -386,8 +359,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		SourceKind:           store.TriggerSourceKindWebhook,
 		SourceID:             ep.ID,
 		MatchTypes:           matchTypes,
-		MatchDialect:         matchDialect,
-		MatchRule:            matchRule,
+		MatchRules:           matchRules,
 		ActionType:           store.TriggerActionMessage,
 		ActionPayload:        actionPayload,
 		SubjectDialect:       subjectDialect,
@@ -546,8 +518,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	var req UpdateTriggerRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid JSON body: "+err.Error())
+	if !readTriggerRequestJSON(w, r, &req) {
 		return
 	}
 
@@ -611,10 +582,20 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		changesFutureDispatch = true
 	}
 	if req.Match != nil {
+		var patchDialect, patchExpr string
+		if req.Match.Dialect != nil {
+			patchDialect = *req.Match.Dialect
+		}
+		if req.Match.Expr != nil {
+			patchExpr = *req.Match.Expr
+		}
+		if req.Match.Rules != nil && hasAmbiguousScalarWithRules(patchDialect, patchExpr) {
+			writeAmbiguousTriggerMatchError(w)
+			return
+		}
+		existingRules, existingRulesErr := triggerMatchRules(*tr)
 		merged := TriggerMatchSpec{
-			Types:   tr.MatchTypes,
-			Dialect: tr.MatchDialect,
-			Expr:    tr.MatchRule,
+			Types: tr.MatchTypes,
 		}
 		if req.Match.Types != nil {
 			if len(*req.Match.Types) == 0 {
@@ -624,23 +605,58 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			merged.Types = *req.Match.Types
 			fields.MatchTypes = true
 		}
-		if req.Match.Dialect != nil {
-			merged.Dialect = *req.Match.Dialect
-			fields.MatchDialect = true
+		explicitMatchDialect := false
+		updatingRules := false
+		switch {
+		case req.Match.Rules != nil:
+			merged.Rules = *req.Match.Rules
+			updatingRules = true
+		case req.Match.Expr != nil || strings.TrimSpace(patchDialect) != "":
+			updatingRules = true
+			if existingRulesErr != nil {
+				if req.Match.Expr == nil {
+					writeCorruptTriggerMatchRulesError(w)
+					return
+				}
+			} else {
+				if req.Match.Expr == nil && len(existingRules) > 1 {
+					writeAmbiguousTriggerMatchError(w)
+					return
+				}
+				if len(existingRules) == 1 {
+					merged.Dialect = existingRules[0].Dialect
+					merged.Expr = existingRules[0].Expr
+				}
+			}
+			if req.Match.Dialect != nil {
+				merged.Dialect = *req.Match.Dialect
+				explicitMatchDialect = strings.TrimSpace(*req.Match.Dialect) != ""
+			}
+			if req.Match.Expr != nil {
+				merged.Expr = *req.Match.Expr
+			}
+		default:
+			if existingRulesErr != nil {
+				writeCorruptTriggerMatchRulesError(w)
+				return
+			}
+			merged.Rules = triggerRulesToSpecs(existingRules)
 		}
-		if req.Match.Expr != nil {
-			merged.Expr = *req.Match.Expr
-			fields.MatchRule = true
-		}
-		matchTypes, matchDialect, matchRule, err := validateStage1b1Match(&merged)
-		if err != nil {
-			ValidationError(w, err.Error(), nil)
+		matchTypes, matchRules, ok := s.writeAndValidateTriggerMatch(w, ctx, &merged, false, explicitMatchDialect)
+		if !ok {
 			return
 		}
 		tr.MatchTypes = matchTypes
-		tr.MatchDialect = matchDialect
-		tr.MatchRule = matchRule
-		if fields.MatchTypes || fields.MatchDialect || fields.MatchRule {
+		if updatingRules {
+			tr.MatchRules = matchRules
+			tr.MatchRulesCorrupt = false
+			tr.MatchDialect = ""
+			tr.MatchRule = ""
+			fields.MatchRules = true
+			fields.MatchDialect = true
+			fields.MatchRule = true
+		}
+		if fields.MatchTypes || fields.MatchRules {
 			changesFutureDispatch = true
 		}
 	}
@@ -662,9 +678,9 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			merged.Mode = *req.Subject.Mode
 			fields.SubjectMode = true
 		}
-		subjectDialect, subjectRule, subjectMode, err := validateStage1b1Subject(&merged)
-		if err != nil {
-			ValidationError(w, err.Error(), nil)
+		explicitSubjectDialect := req.Subject.Dialect != nil && strings.TrimSpace(*req.Subject.Dialect) != ""
+		subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, &merged, explicitSubjectDialect)
+		if !ok {
 			return
 		}
 		tr.SubjectDialect = subjectDialect
@@ -694,9 +710,32 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	var newAttr *store.InitiatorAttribution
 	if changesFutureDispatch {
 		// Re-authorizing future dispatch requires the editor to hold access to
-		// both the source and the target action of the resulting trigger.
+		// both the source and the target action of the resulting trigger, and
+		// re-validates stored match/subject rules not already compiled above.
 		if req.Source == nil {
 			if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+				return
+			}
+		}
+		if req.Match == nil {
+			existingRules, rErr := triggerMatchRules(*tr)
+			if rErr != nil {
+				writeCorruptTriggerMatchRulesError(w)
+				return
+			}
+			if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
+				Types: tr.MatchTypes,
+				Rules: triggerRulesToSpecs(existingRules),
+			}, false, false); !ok {
+				return
+			}
+		}
+		if req.Subject == nil {
+			if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
+				Dialect: tr.SubjectDialect,
+				Expr:    tr.SubjectRule,
+				Mode:    tr.SubjectMode,
+			}, false); !ok {
 				return
 			}
 		}
@@ -824,6 +863,24 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 	if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+		return
+	}
+	existingRules, rErr := triggerMatchRules(*tr)
+	if rErr != nil {
+		writeCorruptTriggerMatchRulesError(w)
+		return
+	}
+	if _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
+		Types: tr.MatchTypes,
+		Rules: triggerRulesToSpecs(existingRules),
+	}, false, false); !ok {
+		return
+	}
+	if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
+		Dialect: tr.SubjectDialect,
+		Expr:    tr.SubjectRule,
+		Mode:    tr.SubjectMode,
+	}, false); !ok {
 		return
 	}
 	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.ActionType, tr.ActionPayload)

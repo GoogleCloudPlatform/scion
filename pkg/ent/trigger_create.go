@@ -314,6 +314,20 @@ func (_c *TriggerCreate) SetNillableMatchRule(v *string) *TriggerCreate {
 	return _c
 }
 
+// SetMatchRules sets the "match_rules" field.
+func (_c *TriggerCreate) SetMatchRules(v string) *TriggerCreate {
+	_c.mutation.SetMatchRules(v)
+	return _c
+}
+
+// SetNillableMatchRules sets the "match_rules" field if the given value is not nil.
+func (_c *TriggerCreate) SetNillableMatchRules(v *string) *TriggerCreate {
+	if v != nil {
+		_c.SetMatchRules(*v)
+	}
+	return _c
+}
+
 // SetActionType sets the "action_type" field.
 func (_c *TriggerCreate) SetActionType(v string) *TriggerCreate {
 	_c.mutation.SetActionType(v)
@@ -593,6 +607,10 @@ func (_c *TriggerCreate) defaults() {
 		v := trigger.DefaultMatchRule
 		_c.mutation.SetMatchRule(v)
 	}
+	if _, ok := _c.mutation.MatchRules(); !ok {
+		v := trigger.DefaultMatchRules
+		_c.mutation.SetMatchRules(v)
+	}
 	if _, ok := _c.mutation.ActionPayload(); !ok {
 		v := trigger.DefaultActionPayload
 		_c.mutation.SetActionPayload(v)
@@ -684,6 +702,9 @@ func (_c *TriggerCreate) check() error {
 	}
 	if _, ok := _c.mutation.MatchRule(); !ok {
 		return &ValidationError{Name: "match_rule", err: errors.New(`ent: missing required field "Trigger.match_rule"`)}
+	}
+	if _, ok := _c.mutation.MatchRules(); !ok {
+		return &ValidationError{Name: "match_rules", err: errors.New(`ent: missing required field "Trigger.match_rules"`)}
 	}
 	if _, ok := _c.mutation.ActionType(); !ok {
 		return &ValidationError{Name: "action_type", err: errors.New(`ent: missing required field "Trigger.action_type"`)}
@@ -847,6 +868,10 @@ func (_c *TriggerCreate) createSpec() (*Trigger, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.MatchRule(); ok {
 		_spec.SetField(trigger.FieldMatchRule, field.TypeString, value)
 		_node.MatchRule = value
+	}
+	if value, ok := _c.mutation.MatchRules(); ok {
+		_spec.SetField(trigger.FieldMatchRules, field.TypeString, value)
+		_node.MatchRules = value
 	}
 	if value, ok := _c.mutation.ActionType(); ok {
 		_spec.SetField(trigger.FieldActionType, field.TypeString, value)
@@ -1287,6 +1312,18 @@ func (u *TriggerUpsert) SetMatchRule(v string) *TriggerUpsert {
 // UpdateMatchRule sets the "match_rule" field to the value that was provided on create.
 func (u *TriggerUpsert) UpdateMatchRule() *TriggerUpsert {
 	u.SetExcluded(trigger.FieldMatchRule)
+	return u
+}
+
+// SetMatchRules sets the "match_rules" field.
+func (u *TriggerUpsert) SetMatchRules(v string) *TriggerUpsert {
+	u.Set(trigger.FieldMatchRules, v)
+	return u
+}
+
+// UpdateMatchRules sets the "match_rules" field to the value that was provided on create.
+func (u *TriggerUpsert) UpdateMatchRules() *TriggerUpsert {
+	u.SetExcluded(trigger.FieldMatchRules)
 	return u
 }
 
@@ -1939,6 +1976,20 @@ func (u *TriggerUpsertOne) SetMatchRule(v string) *TriggerUpsertOne {
 func (u *TriggerUpsertOne) UpdateMatchRule() *TriggerUpsertOne {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateMatchRule()
+	})
+}
+
+// SetMatchRules sets the "match_rules" field.
+func (u *TriggerUpsertOne) SetMatchRules(v string) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetMatchRules(v)
+	})
+}
+
+// UpdateMatchRules sets the "match_rules" field to the value that was provided on create.
+func (u *TriggerUpsertOne) UpdateMatchRules() *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateMatchRules()
 	})
 }
 
@@ -2793,6 +2844,20 @@ func (u *TriggerUpsertBulk) SetMatchRule(v string) *TriggerUpsertBulk {
 func (u *TriggerUpsertBulk) UpdateMatchRule() *TriggerUpsertBulk {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateMatchRule()
+	})
+}
+
+// SetMatchRules sets the "match_rules" field.
+func (u *TriggerUpsertBulk) SetMatchRules(v string) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetMatchRules(v)
+	})
+}
+
+// UpdateMatchRules sets the "match_rules" field to the value that was provided on create.
+func (u *TriggerUpsertBulk) UpdateMatchRules() *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateMatchRules()
 	})
 }
 

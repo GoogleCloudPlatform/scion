@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1456,5 +1457,747 @@ func TestNewEnforcesDialectForAdmissionAndEnvironmentCheck(t *testing.T) {
 	}
 	if !reNoGrant.Supports(triggerrule.ConsumerName, extraStub.Name()) {
 		t.Fatalf("triggerrule.New unexpectedly clobbered sibling consumer grant")
+	}
+}
+
+func TestDialectAdmissionReasonsAcrossCompileAndEval(t *testing.T) {
+	ctx := context.Background()
+	celEng, err := celengine.New(triggerrule.Env(), triggerrule.Stage1Limits(), celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New: %v", err)
+	}
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	re := ruleengine.NewEngine()
+	if err := re.Register(celDialect); err != nil {
+		t.Fatalf("Register cel: %v", err)
+	}
+	ioStub := &wrappingStubDialect{}
+	if err := re.Register(ioStub); err != nil {
+		t.Fatalf("Register ioStub: %v", err)
+	}
+
+	// ReasonConsumerNotRegistered: New refuses an engine where "trigger" has not been registered.
+	if _, err := triggerrule.New(re); err == nil {
+		t.Fatalf("triggerrule.New without grant succeeded, want consumer_not_registered")
+	} else {
+		var unsup *ruleengine.UnsupportedDialectError
+		if !errors.As(err, &unsup) || unsup.Reason != ruleengine.ReasonConsumerNotRegistered {
+			t.Fatalf("New without grant = %T (%v), want Reason=%q", err, err, ruleengine.ReasonConsumerNotRegistered)
+		}
+	}
+
+	// Grant:
+	// - "cel" (admitted pure dialect)
+	// - "ghost_dialect" (granted, not registered -> ReasonUnknownDialect)
+	// - ioStub.Name() via pure Grant without AllowIO (registered PerformsIO=true -> ReasonIONotAllowed)
+	// Leaving "rego" ungranted (-> ReasonDialectNotAllowed).
+	if err := re.AllowConsumerDialects(
+		triggerrule.ConsumerName,
+		ruleengine.Grant(ruleengine.DialectCEL),
+		ruleengine.Grant("ghost_dialect"),
+		ruleengine.Grant(ioStub.Name()),
+	); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
+
+	rules, err := triggerrule.New(re)
+	if err != nil {
+		t.Fatalf("triggerrule.New: %v", err)
+	}
+
+	ev := sampleFireEvent(`{"ok":true}`)
+	tr := hubfire.FireTriggerRef{ID: "trig-reasons", Name: "reasons"}
+	act, err := triggerrule.NewActivation(ev, tr)
+	if err != nil {
+		t.Fatalf("NewActivation: %v", err)
+	}
+	scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: tr.ID, Revision: 1}
+
+	// Verify empty Expr short-circuit on admitted "cel" (both "" and "cel").
+	for _, d := range []string{"", ruleengine.DialectCEL} {
+		emptyRule := triggerrule.Rule{Dialect: d, Expr: ""}
+		if err := rules.CompileMatch(ctx, emptyRule); err != nil {
+			t.Fatalf("CompileMatch empty (%q) = %v, want nil", d, err)
+		}
+		if err := rules.CompileSubject(ctx, emptyRule); err != nil {
+			t.Fatalf("CompileSubject empty (%q) = %v, want nil", d, err)
+		}
+		if ok, err := rules.Match(ctx, scope, emptyRule, act); err != nil || !ok {
+			t.Fatalf("Match empty (%q) = (%v, %v), want (true, nil)", d, ok, err)
+		}
+		if s, err := rules.Subject(ctx, scope, emptyRule, act); err != nil || s != "" {
+			t.Fatalf("Subject empty (%q) = (%q, %v), want (\"\", nil)", d, s, err)
+		}
+	}
+
+	assertReason := func(op string, got error, wantDialect, wantReason string) {
+		t.Helper()
+		var unsup *ruleengine.UnsupportedDialectError
+		if !errors.As(got, &unsup) {
+			t.Fatalf("%s(%q): got %T (%v), want *UnsupportedDialectError", op, wantDialect, got, got)
+		}
+		if unsup.Dialect != wantDialect || unsup.Consumer != triggerrule.ConsumerName || unsup.Reason != wantReason {
+			t.Fatalf("%s(%q): got %+v, want Dialect=%q Consumer=%q Reason=%q",
+				op, wantDialect, unsup, wantDialect, triggerrule.ConsumerName, wantReason)
+		}
+	}
+
+	cases := []struct {
+		dialect    string
+		wantReason string
+	}{
+		{dialect: "rego", wantReason: ruleengine.ReasonDialectNotAllowed},
+		{dialect: "ghost_dialect", wantReason: ruleengine.ReasonUnknownDialect},
+		{dialect: ioStub.Name(), wantReason: ruleengine.ReasonIONotAllowed},
+	}
+
+	for _, tc := range cases {
+		for _, expr := range []string{"", "true"} {
+			r := triggerrule.Rule{Dialect: tc.dialect, Expr: expr}
+			assertReason("CompileMatch", rules.CompileMatch(ctx, r), tc.dialect, tc.wantReason)
+			assertReason("CompileSubject", rules.CompileSubject(ctx, r), tc.dialect, tc.wantReason)
+
+			_, mErr := rules.Match(ctx, scope, r, act)
+			assertReason("Match", mErr, tc.dialect, tc.wantReason)
+
+			_, sErr := rules.Subject(ctx, scope, r, act)
+			assertReason("Subject", sErr, tc.dialect, tc.wantReason)
+		}
+	}
+}
+
+type fakeOutcome struct {
+	matched bool
+	err     error
+}
+
+type recordingFakeDialect struct {
+	name        string
+	maxEvalTime time.Duration
+	mu          sync.Mutex
+	outcomes    map[string]fakeOutcome
+	compiled    []string
+	evaluated   []string
+}
+
+func newRecordingFakeDialect(name string, maxEvalTime time.Duration) *recordingFakeDialect {
+	return &recordingFakeDialect{
+		name:        name,
+		maxEvalTime: maxEvalTime,
+		outcomes:    make(map[string]fakeOutcome),
+	}
+}
+
+func (d *recordingFakeDialect) Name() string { return d.name }
+
+func (d *recordingFakeDialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{
+		PerformsIO:  false,
+		MaxEvalTime: d.maxEvalTime,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
+	}
+}
+
+func (d *recordingFakeDialect) setOutcome(expr string, matched bool, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.outcomes[expr] = fakeOutcome{matched: matched, err: err}
+}
+
+func (d *recordingFakeDialect) resetCalls() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.compiled = nil
+	d.evaluated = nil
+}
+
+func (d *recordingFakeDialect) calls() (compiled, evaluated []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.compiled), slices.Clone(d.evaluated)
+}
+
+func (d *recordingFakeDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	d.mu.Lock()
+	d.compiled = append(d.compiled, rule)
+	d.mu.Unlock()
+	return ruleengine.NewCompiled(env.Consumer, d.name, kind, rule), nil
+}
+
+func (d *recordingFakeDialect) Evaluate(_ context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	expr, _ := c.Rep().(string)
+	d.mu.Lock()
+	d.evaluated = append(d.evaluated, expr)
+	out, ok := d.outcomes[expr]
+	d.mu.Unlock()
+	if !ok {
+		return ruleengine.Decision{}, &ruleengine.FailedError{Reason: "unconfigured_expr"}
+	}
+	if out.err != nil {
+		return ruleengine.Decision{}, out.err
+	}
+	return ruleengine.Decision{Kind: c.Kind(), Bool: out.matched}, nil
+}
+
+type slowCallObservation struct {
+	expr              string
+	budgetMaxEvalTime time.Duration
+	ctxRemaining      time.Duration
+	hasDeadline       bool
+}
+
+type slowFakeDialect struct {
+	name        string
+	maxEvalTime time.Duration
+	mu          sync.Mutex
+	durations   map[string]time.Duration
+	outcomes    map[string]bool
+	observed    []slowCallObservation
+}
+
+func newSlowFakeDialect(name string, maxEvalTime time.Duration) *slowFakeDialect {
+	return &slowFakeDialect{
+		name:        name,
+		maxEvalTime: maxEvalTime,
+		durations:   make(map[string]time.Duration),
+		outcomes:    make(map[string]bool),
+	}
+}
+
+func (d *slowFakeDialect) Name() string { return d.name }
+
+func (d *slowFakeDialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{
+		PerformsIO:  false,
+		MaxEvalTime: d.maxEvalTime,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
+	}
+}
+
+func (d *slowFakeDialect) configure(expr string, sleep time.Duration, matched bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.durations[expr] = sleep
+	d.outcomes[expr] = matched
+}
+
+func (d *slowFakeDialect) observations() []slowCallObservation {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.observed)
+}
+
+func (d *slowFakeDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	return ruleengine.NewCompiled(env.Consumer, d.name, kind, rule), nil
+}
+
+func (d *slowFakeDialect) Evaluate(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, budget ruleengine.Budget) (ruleengine.Decision, error) {
+	expr, _ := c.Rep().(string)
+	dl, hasDL := ctx.Deadline()
+	var rem time.Duration
+	if hasDL {
+		rem = time.Until(dl)
+	}
+	d.mu.Lock()
+	sleep := d.durations[expr]
+	matched := d.outcomes[expr]
+	d.observed = append(d.observed, slowCallObservation{
+		expr:              expr,
+		budgetMaxEvalTime: budget.MaxEvalTime,
+		ctxRemaining:      rem,
+		hasDeadline:       hasDL,
+	})
+	d.mu.Unlock()
+
+	if sleep > 0 {
+		timer := time.NewTimer(sleep)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return ruleengine.Decision{}, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return ruleengine.Decision{}, err
+	}
+	return ruleengine.Decision{Kind: c.Kind(), Bool: matched}, nil
+}
+
+func newTriggerRulesWithExtraDialects(t *testing.T, extra ...ruleengine.Dialect) (*ruleengine.Engine, *triggerrule.Rules) {
+	t.Helper()
+	celEng, err := celengine.New(triggerrule.Env(), triggerrule.Stage1Limits(), celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New: %v", err)
+	}
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	re := ruleengine.NewEngine()
+	if err := re.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+	grants := []ruleengine.DialectGrant{ruleengine.Grant(ruleengine.DialectCEL)}
+	for _, d := range extra {
+		if err := re.Register(d); err != nil {
+			t.Fatalf("Register %q: %v", d.Name(), err)
+		}
+		grants = append(grants, ruleengine.Grant(d.Name()))
+	}
+	if err := re.AllowConsumerDialects(triggerrule.ConsumerName, grants...); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
+	rules, err := triggerrule.New(re)
+	if err != nil {
+		t.Fatalf("triggerrule.New: %v", err)
+	}
+	return re, rules
+}
+
+func TestMatchAll_OrderAndShortCircuitWithRecordingDialect(t *testing.T) {
+	recA := newRecordingFakeDialect("rec_a", 100*time.Millisecond)
+	recB := newRecordingFakeDialect("rec_b", 100*time.Millisecond)
+	_, rules := newTriggerRulesWithExtraDialects(t, recA, recB)
+
+	recA.setOutcome("a_true_1", true, nil)
+	recA.setOutcome("a_true_2", true, nil)
+	recA.setOutcome("a_false", false, nil)
+	recA.setOutcome("a_uncertain", false, &ruleengine.UncertainError{Reason: "abstain"})
+	recA.setOutcome("a_failed", false, &ruleengine.FailedError{Reason: "provider_error"})
+	recA.setOutcome("must_not_run", true, nil)
+
+	recB.setOutcome("b_true", true, nil)
+	recB.setOutcome("b_false", false, nil)
+	recB.setOutcome("b_must_not_run", true, nil)
+
+	ctx := context.Background()
+	ev := sampleFireEvent(`{"status":"ok","pr":42}`)
+	act, err := triggerrule.NewActivation(ev, hubfire.FireTriggerRef{ID: "trig-order", Name: "order"})
+	if err != nil {
+		t.Fatalf("NewActivation: %v", err)
+	}
+	scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: "trig-order", Revision: 1}
+
+	table := []struct {
+		name      string
+		list      []triggerrule.Rule
+		wantRes   triggerrule.MatchResult
+		wantErr   bool
+		wantErrIs error
+		wantEvalA []string
+		wantEvalB []string
+	}{
+		{
+			name: "empty_list_is_types_only_full_match",
+			list: nil,
+			wantRes: triggerrule.MatchResult{
+				Matched: true,
+				Through: 0,
+				Dialect: "",
+				Class:   triggerrule.MatchClassMatched,
+			},
+		},
+		{
+			name: "mixed_dialects_preserve_strict_author_order_without_reordering",
+			list: []triggerrule.Rule{
+				{Dialect: "rec_a", Expr: "a_true_1"},
+				{Dialect: "", Expr: `event.payload.status == "ok"`},
+				{Dialect: "rec_b", Expr: "b_true"},
+				{Dialect: "rec_a", Expr: "a_true_2"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: true,
+				Through: 4,
+				Dialect: "rec_a",
+				Class:   triggerrule.MatchClassMatched,
+			},
+			wantEvalA: []string{"a_true_1", "a_true_2"},
+			wantEvalB: []string{"b_true"},
+		},
+		{
+			name: "element_1_false_short_circuits_before_element_2",
+			list: []triggerrule.Rule{
+				{Dialect: "rec_a", Expr: "a_false"},
+				{Dialect: "rec_b", Expr: "b_must_not_run"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: false,
+				Through: 1,
+				Dialect: "rec_a",
+				Class:   triggerrule.MatchClassFalse,
+			},
+			wantEvalA: []string{"a_false"},
+			wantEvalB: nil,
+		},
+		{
+			name: "cel_element_1_false_short_circuits_before_recording_element_2",
+			list: []triggerrule.Rule{
+				{Dialect: "cel", Expr: `event.payload.status == "fail"`},
+				{Dialect: "rec_a", Expr: "must_not_run"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: false,
+				Through: 1,
+				Dialect: "cel",
+				Class:   triggerrule.MatchClassFalse,
+			},
+			wantEvalA: nil,
+		},
+		{
+			name: "element_1_uncertain_stops_and_does_not_evaluate_element_2",
+			list: []triggerrule.Rule{
+				{Dialect: "rec_a", Expr: "a_uncertain"},
+				{Dialect: "rec_b", Expr: "b_must_not_run"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: false,
+				Through: 1,
+				Dialect: "rec_a",
+				Class:   triggerrule.MatchClassUncertain,
+				Reason:  "abstain",
+			},
+			wantErr:   true,
+			wantEvalA: []string{"a_uncertain"},
+			wantEvalB: nil,
+		},
+		{
+			name: "element_1_failed_stops_and_does_not_evaluate_element_2",
+			list: []triggerrule.Rule{
+				{Dialect: "rec_a", Expr: "a_failed"},
+				{Dialect: "rec_b", Expr: "b_must_not_run"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: false,
+				Through: 1,
+				Dialect: "rec_a",
+				Class:   triggerrule.MatchClassFailed,
+				Reason:  "provider_error",
+			},
+			wantErr:   true,
+			wantEvalA: []string{"a_failed"},
+			wantEvalB: nil,
+		},
+		{
+			name: "element_2_uncertain_after_cel_guard_stops_before_element_3",
+			list: []triggerrule.Rule{
+				{Dialect: "cel", Expr: `event.payload.pr == 42`},
+				{Dialect: "rec_a", Expr: "a_uncertain"},
+				{Dialect: "rec_b", Expr: "b_must_not_run"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: false,
+				Through: 2,
+				Dialect: "rec_a",
+				Class:   triggerrule.MatchClassUncertain,
+				Reason:  "abstain",
+			},
+			wantErr:   true,
+			wantEvalA: []string{"a_uncertain"},
+			wantEvalB: nil,
+		},
+		{
+			name: "empty_expr_element_inside_list_fails_closed_never_matches",
+			list: []triggerrule.Rule{
+				{},
+				{Dialect: "rec_b", Expr: "b_must_not_run"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: false,
+				Through: 1,
+				Dialect: "cel",
+				Class:   triggerrule.MatchClassFailed,
+				Reason:  triggerrule.SkipReasonEvalFailed,
+			},
+			wantErr:   true,
+			wantErrIs: triggerrule.ErrCorruptMatchRules,
+			wantEvalA: nil,
+			wantEvalB: nil,
+		},
+		{
+			name: "whitespace_only_expr_element_2_fails_closed_before_element_3",
+			list: []triggerrule.Rule{
+				{Dialect: "rec_a", Expr: "a_true_1"},
+				{Dialect: "cel", Expr: "   \t\n  "},
+				{Dialect: "rec_b", Expr: "b_must_not_run"},
+			},
+			wantRes: triggerrule.MatchResult{
+				Matched: false,
+				Through: 2,
+				Dialect: "cel",
+				Class:   triggerrule.MatchClassFailed,
+				Reason:  triggerrule.SkipReasonEvalFailed,
+			},
+			wantErr:   true,
+			wantErrIs: triggerrule.ErrCorruptMatchRules,
+			wantEvalA: []string{"a_true_1"},
+			wantEvalB: nil,
+		},
+	}
+
+	for _, tc := range table {
+		t.Run(tc.name, func(t *testing.T) {
+			recA.resetCalls()
+			recB.resetCalls()
+
+			got, err := rules.MatchAll(ctx, scope, tc.list, act)
+			if tc.wantErr && err == nil {
+				t.Fatalf("MatchAll error = nil, want non-nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("MatchAll unexpected error = %v", err)
+			}
+			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
+				t.Fatalf("MatchAll error = %v, want errors.Is(_, %v)", err, tc.wantErrIs)
+			}
+			if got != tc.wantRes {
+				t.Fatalf("MatchAll result = %+v, want %+v (err=%v)", got, tc.wantRes, err)
+			}
+
+			compiledA, evalA := recA.calls()
+			compiledB, evalB := recB.calls()
+			if !slices.Equal(evalA, tc.wantEvalA) {
+				t.Fatalf("rec_a evaluated = %v (compiled=%v), want %v", evalA, compiledA, tc.wantEvalA)
+			}
+			if !slices.Equal(evalB, tc.wantEvalB) {
+				t.Fatalf("rec_b evaluated = %v (compiled=%v), want %v", evalB, compiledB, tc.wantEvalB)
+			}
+			if tc.wantEvalB == nil && len(compiledB) != 0 {
+				t.Fatalf("rec_b should not even be compiled after short-circuit, got compiled=%v", compiledB)
+			}
+		})
+	}
+}
+
+func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
+	// slow_wide declares a 2s per-element ceiling so tracker remainder (< 2s) clamps it.
+	slowWide := newSlowFakeDialect("slow_wide", 2*time.Second)
+	// slow_tight declares a 50ms per-element ceiling so dialect ceiling (< tracker remainder) clamps it.
+	slowTight := newSlowFakeDialect("slow_tight", 50*time.Millisecond)
+	recGuard := newRecordingFakeDialect("rec_guard", 200*time.Millisecond)
+	recGuard.setOutcome("never_reached", true, nil)
+
+	_, rules := newTriggerRulesWithExtraDialects(t, slowWide, slowTight, recGuard)
+
+	slowWide.configure("step_1", 60*time.Millisecond, true)
+	slowWide.configure("step_2", 60*time.Millisecond, true)
+	slowWide.configure("step_timeout", 1500*time.Millisecond, true)
+	slowTight.configure("tight_timeout", 1000*time.Millisecond, true)
+
+	ctx := context.Background()
+	ev := sampleFireEvent(`{"ok":true}`)
+	baseAct, err := triggerrule.NewEventActivation(ev)
+	if err != nil {
+		t.Fatalf("NewEventActivation: %v", err)
+	}
+
+	// Pre-warm the CEL compiler/cache on trig-1 before creating sharedTracker so
+	// cold parser initialization does not consume the shared evaluation budget.
+	if _, err := rules.MatchAll(
+		ctx,
+		celengine.CacheScope{ID: "trig-1", Revision: 1},
+		[]triggerrule.Rule{{Dialect: "cel", Expr: `event.payload.ok == true`}},
+		baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-1", Name: "one"}),
+	); err != nil {
+		t.Fatalf("pre-warm MatchAll: %v", err)
+	}
+
+	// 1. Shared 400ms aggregate BudgetTracker across three candidate triggers on one event.
+	//    60ms + 60ms leaves ~280ms of headroom for CI scheduling jitter while clamping
+	//    the 1500ms step well below its 2s dialect ceiling.
+	sharedTracker := ruleengine.NewBudgetTracker(400 * time.Millisecond)
+
+	// Trigger 1: [cel(true), slow_wide(60ms -> true)] matches and charges ~60ms.
+	res1, err := rules.MatchAll(
+		ctx,
+		celengine.CacheScope{ID: "trig-1", Revision: 1},
+		[]triggerrule.Rule{
+			{Dialect: "cel", Expr: `event.payload.ok == true`},
+			{Dialect: "slow_wide", Expr: "step_1"},
+		},
+		baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-1", Name: "one"}),
+		triggerrule.WithBudget(sharedTracker),
+	)
+	if err != nil || !res1.Matched || res1.Through != 2 || res1.Class != triggerrule.MatchClassMatched {
+		t.Fatalf("Trigger 1 MatchAll = (%+v, %v), want full match Through=2", res1, err)
+	}
+	remAfter1 := sharedTracker.Remaining()
+	if remAfter1 <= 0 || remAfter1 > 350*time.Millisecond {
+		t.Fatalf("sharedTracker.Remaining after trigger 1 = %v, want in (0, 350ms]", remAfter1)
+	}
+
+	// Trigger 2 shares the same tracker: element 1 (60ms) succeeds with clamped budget,
+	// element 2 (wants 1500ms) is clamped to the remaining <= ~280ms and stops with Class="budget".
+	t2Start := time.Now()
+	res2, err := rules.MatchAll(
+		ctx,
+		celengine.CacheScope{ID: "trig-2", Revision: 1},
+		[]triggerrule.Rule{
+			{Dialect: "slow_wide", Expr: "step_2"},
+			{Dialect: "slow_wide", Expr: "step_timeout"},
+		},
+		baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-2", Name: "two"}),
+		triggerrule.WithBudget(sharedTracker),
+	)
+	t2Elapsed := time.Since(t2Start)
+	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("Trigger 2 err = %v, want ErrBudgetExhausted", err)
+	}
+	wantRes2 := triggerrule.MatchResult{
+		Matched: false,
+		Through: 2,
+		Dialect: "slow_wide",
+		Class:   triggerrule.MatchClassBudget,
+		Reason:  triggerrule.SkipReasonBudgetExhausted,
+	}
+	if res2 != wantRes2 {
+		t.Fatalf("Trigger 2 result = %+v, want %+v", res2, wantRes2)
+	}
+	if t2Elapsed >= 950*time.Millisecond {
+		t.Fatalf("Trigger 2 took %v; element 2 deadline was not clamped to remaining aggregate budget", t2Elapsed)
+	}
+
+	obs := slowWide.observations()
+	if len(obs) != 3 {
+		t.Fatalf("slow_wide observations = %d, want 3: %+v", len(obs), obs)
+	}
+	for idx, o := range obs {
+		if !o.hasDeadline {
+			t.Fatalf("obs[%d] (%s) missing context deadline", idx, o.expr)
+		}
+		if o.budgetMaxEvalTime > 400*time.Millisecond || o.ctxRemaining > 400*time.Millisecond {
+			t.Fatalf("obs[%d] (%s) deadline exceeded aggregate tracker: budget=%v ctx=%v",
+				idx, o.expr, o.budgetMaxEvalTime, o.ctxRemaining)
+		}
+	}
+	// Each successive element must see a strictly smaller remaining budget than the previous one.
+	if obs[2].budgetMaxEvalTime >= obs[1].budgetMaxEvalTime || obs[1].budgetMaxEvalTime >= obs[0].budgetMaxEvalTime {
+		t.Fatalf("expected decreasing clamped MaxEvalTime across shared tracker, got %v -> %v -> %v",
+			obs[0].budgetMaxEvalTime, obs[1].budgetMaxEvalTime, obs[2].budgetMaxEvalTime)
+	}
+
+	// Trigger 3 on the now-exhausted tracker stops before element 1 without invoking rec_guard.
+	res3, err := rules.MatchAll(
+		ctx,
+		celengine.CacheScope{ID: "trig-3", Revision: 1},
+		[]triggerrule.Rule{{Dialect: "rec_guard", Expr: "never_reached"}},
+		baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-3", Name: "three"}),
+		triggerrule.WithBudget(sharedTracker),
+	)
+	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("Trigger 3 err = %v, want ErrBudgetExhausted", err)
+	}
+	if res3.Matched || res3.Through != 1 || res3.Class != triggerrule.MatchClassBudget {
+		t.Fatalf("Trigger 3 result = %+v, want Class=budget Through=1", res3)
+	}
+	if comp, eval := recGuard.calls(); len(comp) != 0 || len(eval) != 0 {
+		t.Fatalf("rec_guard called despite exhausted budget: compiled=%v evaluated=%v", comp, eval)
+	}
+
+	// 2. When dialect MaxEvalTime (50ms) < tracker.Remaining() (2s), deadline clamps to 50ms
+	// and timeout is reported as Class="failed" (Reason="timeout"), not budget exhaustion.
+	generousTracker := ruleengine.NewBudgetTracker(2 * time.Second)
+	resTight, err := rules.MatchAll(
+		ctx,
+		celengine.CacheScope{ID: "trig-tight", Revision: 1},
+		[]triggerrule.Rule{{Dialect: "slow_tight", Expr: "tight_timeout"}},
+		baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-tight", Name: "tight"}),
+		triggerrule.WithBudget(generousTracker),
+	)
+	if err == nil || errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("slow_tight err = %v, want dialect timeout FailedError (not ErrBudgetExhausted)", err)
+	}
+	wantTight := triggerrule.MatchResult{
+		Matched: false,
+		Through: 1,
+		Dialect: "slow_tight",
+		Class:   triggerrule.MatchClassFailed,
+		Reason:  celengine.ReasonTimeout,
+	}
+	if resTight != wantTight {
+		t.Fatalf("slow_tight result = %+v, want %+v", resTight, wantTight)
+	}
+	tightObs := slowTight.observations()
+	if len(tightObs) != 1 || tightObs[0].budgetMaxEvalTime > 50*time.Millisecond {
+		t.Fatalf("slow_tight observed = %+v, want MaxEvalTime <= 50ms", tightObs)
+	}
+	if generousTracker.Exhausted() {
+		t.Fatalf("generousTracker should still have budget remaining after 50ms dialect timeout (spent=%v)", generousTracker.Spent())
+	}
+}
+
+func TestMatchAll_UnGrantedDialectAtEvaluationFailsDenyByDefault(t *testing.T) {
+	revoked := newRecordingFakeDialect("revocable_so", 100*time.Millisecond)
+	revoked.setOutcome("semantic_ok", true, nil)
+	afterGuard := newRecordingFakeDialect("after_guard", 100*time.Millisecond)
+	afterGuard.setOutcome("must_not_run", true, nil)
+
+	re, rules := newTriggerRulesWithExtraDialects(t, revoked, afterGuard)
+	ctx := context.Background()
+	ev := sampleFireEvent(`{"ok":true}`)
+	act, err := triggerrule.NewActivation(ev, hubfire.FireTriggerRef{ID: "trig-revoke", Name: "revoke"})
+	if err != nil {
+		t.Fatalf("NewActivation: %v", err)
+	}
+	scope := celengine.CacheScope{ID: "trig-revoke", Revision: 1}
+	list := []triggerrule.Rule{
+		{Dialect: "cel", Expr: `event.payload.ok == true`},
+		{Dialect: "revocable_so", Expr: "semantic_ok"},
+		{Dialect: "after_guard", Expr: "must_not_run"},
+	}
+
+	// While granted, all 3 elements evaluate and match.
+	resOK, err := rules.MatchAll(ctx, scope, list, act)
+	if err != nil || !resOK.Matched || resOK.Through != 3 {
+		t.Fatalf("MatchAll while granted = (%+v, %v), want Matched Through=3", resOK, err)
+	}
+
+	// Narrow consumer grant back to CEL-only (simulating a stored element whose dialect is later un-granted, §8 item 7).
+	if err := re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		t.Fatalf("AllowConsumerDialects narrow: %v", err)
+	}
+	revoked.resetCalls()
+	afterGuard.resetCalls()
+
+	resDenied, err := rules.MatchAll(ctx, scope, list, act)
+	var unsup *ruleengine.UnsupportedDialectError
+	if !errors.As(err, &unsup) || unsup.Reason != ruleengine.ReasonDialectNotAllowed {
+		t.Fatalf("MatchAll after un-grant err = %T (%v), want UnsupportedDialectError(dialect_not_allowed)", err, err)
+	}
+	wantDenied := triggerrule.MatchResult{
+		Matched: false,
+		Through: 2,
+		Dialect: "revocable_so",
+		Class:   triggerrule.MatchClassFailed,
+		Reason:  ruleengine.ReasonDialectNotAllowed,
+	}
+	if resDenied != wantDenied {
+		t.Fatalf("MatchAll after un-grant result = %+v, want %+v", resDenied, wantDenied)
+	}
+	if c1, e1 := revoked.calls(); len(c1) != 0 || len(e1) != 0 {
+		t.Fatalf("un-granted dialect must not compile or evaluate, got compiled=%v evaluated=%v", c1, e1)
+	}
+	if c2, e2 := afterGuard.calls(); len(c2) != 0 || len(e2) != 0 {
+		t.Fatalf("subsequent element must not evaluate after deny-by-default failure, got compiled=%v evaluated=%v", c2, e2)
+	}
+}
+
+func TestSkipReason_CorruptMatchRulesSentinel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"direct", triggerrule.ErrCorruptMatchRules},
+		{"wrapped", errors.Join(errors.New("normalize"), triggerrule.ErrCorruptMatchRules)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, ok := triggerrule.SkipReason(tc.err)
+			if !ok || reason != triggerrule.SkipReasonEvalFailed {
+				t.Fatalf("SkipReason(%v) = (%q, %v), want (%q, true)", tc.err, reason, ok, triggerrule.SkipReasonEvalFailed)
+			}
+		})
 	}
 }

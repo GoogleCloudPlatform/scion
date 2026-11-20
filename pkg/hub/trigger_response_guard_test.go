@@ -110,6 +110,75 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 		assert.NotContains(t, trMap, forbidden, "TriggerResponse must not expose %q", forbidden)
 	}
 	assert.Equal(t, float64(3), trMap["authorizationRevision"])
+	matchMap, ok := trMap["match"].(map[string]any)
+	require.True(t, ok, "TriggerResponse.match must serialize as an object")
+	assert.Equal(t, []any{}, matchMap["rules"], "0-element TriggerResponse.match.rules must serialize as []")
+	assert.NotContains(t, matchMap, "dialect", "0-element TriggerResponse.match must not mirror dialect")
+	assert.NotContains(t, matchMap, "expr", "0-element TriggerResponse.match must not mirror expr")
+	assert.NotContains(t, matchMap, "rulesBroken", "healthy TriggerResponse.match must omit rulesBroken")
+
+	corruptRaw, err := json.Marshal(buildTriggerResponse(store.Trigger{
+		ID:                "tr-corrupt",
+		ProjectID:         "proj-1",
+		Name:              "corrupt-rule",
+		Status:            store.TriggerStatusPaused,
+		SourceKind:        store.TriggerSourceKindWebhook,
+		SourceID:          "ep-1",
+		MatchTypes:        []string{"webhook.received"},
+		MatchRule:         "legacy-must-not-leak",
+		MatchRulesCorrupt: true,
+		ActionType:        "message",
+	}))
+	require.NoError(t, err)
+	assert.NotContains(t, string(corruptRaw), "legacy-must-not-leak")
+	var corruptMap map[string]any
+	require.NoError(t, json.Unmarshal(corruptRaw, &corruptMap))
+	corruptMatch := corruptMap["match"].(map[string]any)
+	assert.Equal(t, []any{}, corruptMatch["rules"])
+	assert.Equal(t, true, corruptMatch["rulesBroken"])
+	assert.NotContains(t, corruptMatch, "dialect")
+	assert.NotContains(t, corruptMatch, "expr")
+
+	oneRuleRaw, err := json.Marshal(buildTriggerResponse(store.Trigger{
+		ID:         "tr-one",
+		ProjectID:  "proj-1",
+		Name:       "one-rule",
+		Status:     store.TriggerStatusActive,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   "ep-1",
+		MatchTypes: []string{"webhook.received"},
+		MatchRules: []store.TriggerMatchRule{{Dialect: "cel", Expr: "event.type == 'webhook.received'"}},
+		ActionType: "message",
+	}))
+	require.NoError(t, err)
+	var oneRuleMap map[string]any
+	require.NoError(t, json.Unmarshal(oneRuleRaw, &oneRuleMap))
+	oneMatch := oneRuleMap["match"].(map[string]any)
+	assert.Len(t, oneMatch["rules"], 1)
+	assert.Equal(t, "cel", oneMatch["dialect"])
+	assert.Equal(t, "event.type == 'webhook.received'", oneMatch["expr"])
+
+	twoRuleRaw, err := json.Marshal(buildTriggerResponse(store.Trigger{
+		ID:         "tr-two",
+		ProjectID:  "proj-1",
+		Name:       "two-rule",
+		Status:     store.TriggerStatusActive,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   "ep-1",
+		MatchTypes: []string{"webhook.received"},
+		MatchRules: []store.TriggerMatchRule{
+			{Dialect: "cel", Expr: "true"},
+			{Dialect: "cel", Expr: "has(event.payload.pr)"},
+		},
+		ActionType: "message",
+	}))
+	require.NoError(t, err)
+	var twoRuleMap map[string]any
+	require.NoError(t, json.Unmarshal(twoRuleRaw, &twoRuleMap))
+	twoMatch := twoRuleMap["match"].(map[string]any)
+	assert.Len(t, twoMatch["rules"], 2)
+	assert.NotContains(t, twoMatch, "dialect", "multi-element TriggerResponse.match must not mirror dialect")
+	assert.NotContains(t, twoMatch, "expr", "multi-element TriggerResponse.match must not mirror expr")
 
 	fireResp := buildTriggerFireResponse(store.TriggerFire{
 		ID:         "fire-1",

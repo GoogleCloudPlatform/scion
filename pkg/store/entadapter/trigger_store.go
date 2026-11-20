@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -455,33 +456,83 @@ func unmarshalMatchTypes(raw string) []string {
 	return out
 }
 
+func marshalMatchRules(rules []store.TriggerMatchRule) (string, error) {
+	if len(rules) == 0 {
+		return "[]", nil
+	}
+	raw, err := json.Marshal(rules)
+	if err != nil {
+		return "", fmt.Errorf("%w: marshal match_rules: %v", store.ErrInvalidInput, err)
+	}
+	return string(raw), nil
+}
+
+func unmarshalMatchRules(raw string) ([]store.TriggerMatchRule, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "[]" {
+		return nil, false
+	}
+	if trimmed[0] != '[' {
+		return nil, true
+	}
+	var rawElems []json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &rawElems); err != nil {
+		return nil, true
+	}
+	if len(rawElems) == 0 {
+		return nil, false
+	}
+	out := make([]store.TriggerMatchRule, len(rawElems))
+	for i, elemRaw := range rawElems {
+		et := bytes.TrimSpace(elemRaw)
+		if len(et) == 0 || et[0] != '{' {
+			return nil, true
+		}
+		dec := json.NewDecoder(bytes.NewReader(et))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&out[i]); err != nil {
+			return nil, true
+		}
+		if dec.More() || dec.Decode(&struct{}{}) != io.EOF {
+			return nil, true
+		}
+		if strings.TrimSpace(out[i].Expr) == "" {
+			return nil, true
+		}
+	}
+	return out, false
+}
+
 func entTriggerToStore(e *ent.Trigger) *store.Trigger {
+	matchRules, matchRulesCorrupt := unmarshalMatchRules(e.MatchRules)
 	tr := &store.Trigger{
-		ID:             e.ID.String(),
-		ProjectID:      e.ProjectID.String(),
-		Name:           e.Name,
-		Description:    e.Description,
-		SourceKind:     e.SourceKind,
-		SourceID:       e.SourceID,
-		MatchTypes:     unmarshalMatchTypes(e.MatchTypes),
-		MatchDialect:   e.MatchDialect,
-		MatchRule:      e.MatchRule,
-		ActionType:     e.ActionType,
-		ActionPayload:  e.ActionPayload,
-		SubjectDialect: e.SubjectDialect,
-		SubjectRule:    e.SubjectRule,
-		SubjectMode:    e.SubjectMode,
-		Status:         e.Status,
-		StatusReason:   e.StatusReason,
-		LastFireAt:     e.LastFireAt,
-		LastFireStatus: e.LastFireStatus,
-		LastFireError:  e.LastFireError,
-		FireCount:      e.FireCount,
-		ErrorCount:     e.ErrorCount,
-		CreatedBy:      e.CreatedBy,
-		CreatedAt:      e.Created,
-		UpdatedAt:      e.Updated,
-		Fixture:        fixtureProvenanceFromColumns(e.FixtureRootID, e.FixtureIssuerID),
+		ID:                e.ID.String(),
+		ProjectID:         e.ProjectID.String(),
+		Name:              e.Name,
+		Description:       e.Description,
+		SourceKind:        e.SourceKind,
+		SourceID:          e.SourceID,
+		MatchTypes:        unmarshalMatchTypes(e.MatchTypes),
+		MatchDialect:      e.MatchDialect,
+		MatchRule:         e.MatchRule,
+		MatchRules:        matchRules,
+		MatchRulesCorrupt: matchRulesCorrupt,
+		ActionType:        e.ActionType,
+		ActionPayload:     e.ActionPayload,
+		SubjectDialect:    e.SubjectDialect,
+		SubjectRule:       e.SubjectRule,
+		SubjectMode:       e.SubjectMode,
+		Status:            e.Status,
+		StatusReason:      e.StatusReason,
+		LastFireAt:        e.LastFireAt,
+		LastFireStatus:    e.LastFireStatus,
+		LastFireError:     e.LastFireError,
+		FireCount:         e.FireCount,
+		ErrorCount:        e.ErrorCount,
+		CreatedBy:         e.CreatedBy,
+		CreatedAt:         e.Created,
+		UpdatedAt:         e.Updated,
+		Fixture:           fixtureProvenanceFromColumns(e.FixtureRootID, e.FixtureIssuerID),
 	}
 	tr.InitiatorAttribution = initiatorAttributionFromColumns(
 		e.InitiatorPrincipalKind, e.InitiatorPrincipalID,
@@ -646,6 +697,10 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 	if err != nil {
 		return err
 	}
+	matchRulesJSON, err := marshalMatchRules(tr.MatchRules)
+	if err != nil {
+		return err
+	}
 	if err := validateEdgeCeiling(tr.AuthorityCeiling); err != nil {
 		return err
 	}
@@ -654,10 +709,6 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 		return err
 	}
 
-	matchDialect := tr.MatchDialect
-	if matchDialect == "" {
-		matchDialect = store.TriggerDialectCEL
-	}
 	subjectDialect := tr.SubjectDialect
 	if subjectDialect == "" {
 		subjectDialect = store.TriggerDialectCEL
@@ -693,8 +744,9 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 		SetSourceKind(tr.SourceKind).
 		SetSourceID(tr.SourceID).
 		SetMatchTypes(matchTypesJSON).
-		SetMatchDialect(matchDialect).
+		SetMatchDialect(tr.MatchDialect).
 		SetMatchRule(tr.MatchRule).
+		SetMatchRules(matchRulesJSON).
 		SetActionType(tr.ActionType).
 		SetActionPayload(payload).
 		SetSubjectDialect(subjectDialect).
@@ -892,6 +944,13 @@ func (s *TriggerStore) UpdateTrigger(
 	if fields.MatchRule {
 		update = update.SetMatchRule(tr.MatchRule)
 	}
+	if fields.MatchRules {
+		matchRulesJSON, mErr := marshalMatchRules(tr.MatchRules)
+		if mErr != nil {
+			return mErr
+		}
+		update = update.SetMatchRules(matchRulesJSON)
+	}
 	if fields.ActionType {
 		update = update.SetActionType(tr.ActionType)
 	}
@@ -941,6 +1000,9 @@ func (s *TriggerStore) UpdateTrigger(
 	tr.UpdatedAt = updated.Updated
 	tr.Status = updated.Status
 	tr.StatusReason = updated.StatusReason
+	if fields.MatchRules {
+		tr.MatchRules, tr.MatchRulesCorrupt = unmarshalMatchRules(updated.MatchRules)
+	}
 	return nil
 }
 

@@ -3552,44 +3552,48 @@ func init() {
 	triggerDescMatchRule := triggerFields[8].Descriptor()
 	// trigger.DefaultMatchRule holds the default value on creation for the match_rule field.
 	trigger.DefaultMatchRule = triggerDescMatchRule.Default.(string)
+	// triggerDescMatchRules is the schema descriptor for match_rules field.
+	triggerDescMatchRules := triggerFields[9].Descriptor()
+	// trigger.DefaultMatchRules holds the default value on creation for the match_rules field.
+	trigger.DefaultMatchRules = triggerDescMatchRules.Default.(string)
 	// triggerDescActionType is the schema descriptor for action_type field.
-	triggerDescActionType := triggerFields[9].Descriptor()
+	triggerDescActionType := triggerFields[10].Descriptor()
 	// trigger.ActionTypeValidator is a validator for the "action_type" field. It is called by the builders before save.
 	trigger.ActionTypeValidator = triggerDescActionType.Validators[0].(func(string) error)
 	// triggerDescActionPayload is the schema descriptor for action_payload field.
-	triggerDescActionPayload := triggerFields[10].Descriptor()
+	triggerDescActionPayload := triggerFields[11].Descriptor()
 	// trigger.DefaultActionPayload holds the default value on creation for the action_payload field.
 	trigger.DefaultActionPayload = triggerDescActionPayload.Default.(string)
 	// triggerDescSubjectDialect is the schema descriptor for subject_dialect field.
-	triggerDescSubjectDialect := triggerFields[11].Descriptor()
+	triggerDescSubjectDialect := triggerFields[12].Descriptor()
 	// trigger.DefaultSubjectDialect holds the default value on creation for the subject_dialect field.
 	trigger.DefaultSubjectDialect = triggerDescSubjectDialect.Default.(string)
 	// triggerDescSubjectRule is the schema descriptor for subject_rule field.
-	triggerDescSubjectRule := triggerFields[12].Descriptor()
+	triggerDescSubjectRule := triggerFields[13].Descriptor()
 	// trigger.DefaultSubjectRule holds the default value on creation for the subject_rule field.
 	trigger.DefaultSubjectRule = triggerDescSubjectRule.Default.(string)
 	// triggerDescSubjectMode is the schema descriptor for subject_mode field.
-	triggerDescSubjectMode := triggerFields[13].Descriptor()
+	triggerDescSubjectMode := triggerFields[14].Descriptor()
 	// trigger.DefaultSubjectMode holds the default value on creation for the subject_mode field.
 	trigger.DefaultSubjectMode = triggerDescSubjectMode.Default.(string)
 	// triggerDescStatus is the schema descriptor for status field.
-	triggerDescStatus := triggerFields[14].Descriptor()
+	triggerDescStatus := triggerFields[15].Descriptor()
 	// trigger.DefaultStatus holds the default value on creation for the status field.
 	trigger.DefaultStatus = triggerDescStatus.Default.(string)
 	// triggerDescFireCount is the schema descriptor for fire_count field.
-	triggerDescFireCount := triggerFields[19].Descriptor()
+	triggerDescFireCount := triggerFields[20].Descriptor()
 	// trigger.DefaultFireCount holds the default value on creation for the fire_count field.
 	trigger.DefaultFireCount = triggerDescFireCount.Default.(int)
 	// triggerDescErrorCount is the schema descriptor for error_count field.
-	triggerDescErrorCount := triggerFields[20].Descriptor()
+	triggerDescErrorCount := triggerFields[21].Descriptor()
 	// trigger.DefaultErrorCount holds the default value on creation for the error_count field.
 	trigger.DefaultErrorCount = triggerDescErrorCount.Default.(int)
 	// triggerDescCreated is the schema descriptor for created field.
-	triggerDescCreated := triggerFields[22].Descriptor()
+	triggerDescCreated := triggerFields[23].Descriptor()
 	// trigger.DefaultCreated holds the default value on creation for the created field.
 	trigger.DefaultCreated = triggerDescCreated.Default.(func() time.Time)
 	// triggerDescUpdated is the schema descriptor for updated field.
-	triggerDescUpdated := triggerFields[23].Descriptor()
+	triggerDescUpdated := triggerFields[24].Descriptor()
 	// trigger.DefaultUpdated holds the default value on creation for the updated field.
 	trigger.DefaultUpdated = triggerDescUpdated.Default.(func() time.Time)
 	// trigger.UpdateDefaultUpdated holds the default value on update for the updated field.
