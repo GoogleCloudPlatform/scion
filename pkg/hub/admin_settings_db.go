@@ -1829,6 +1829,17 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// harness_configs.<name>.args is honoured only by the "generic" harness;
+	// for other harnesses it is saved and ignored, with the same warning as
+	// config validate and settings load (ptone/scion#8532). Checked after
+	// section validation so a rejected save does not log a save warning.
+	if doc, ok := sectionDocs["harness_configs"]; ok {
+		var harnessConfigs opsettings.HarnessConfigsSettings
+		if err := json.Unmarshal(doc, &harnessConfigs); err == nil {
+			saveWarnings = append(saveWarnings, harnessArgsIgnoredSaveWarnings(harnessConfigs)...)
+		}
+	}
+
 	// Workstation: validate and prepare the settings.yaml part before any DB
 	// write, so a bad file-routed value or a file that cannot be edited
 	// writes nothing. The settings-file lock is held from here to the

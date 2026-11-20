@@ -907,6 +907,9 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			saveWarnings = append(saveWarnings, config.PlacementSettingsWarnings(merged.Runtimes, merged.Profiles)...)
 		}
 	}
+	if req.HarnessConfigs != nil {
+		saveWarnings = append(saveWarnings, harnessArgsIgnoredSaveWarnings(req.HarnessConfigs)...)
+	}
 	saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
 	saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
 	if gcpIdentityWarning != "" {
@@ -972,6 +975,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 // validate. Used by both the file-mode and DB-mode PUT handlers.
 func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) []string {
 	warnings := config.SafeToEvictIgnoredWarnings(runtimes, profiles)
+	for _, msg := range warnings {
+		slog.Warn("Server config saved with an ignored setting", "warning", msg)
+	}
+	return warnings
+}
+
+// harnessArgsIgnoredSaveWarnings returns, and logs, a warning for each
+// harness_configs entry that sets args for a harness type that ignores
+// settings-level args. The value is saved and ignored at agent start; this is
+// the same rule as config validate and settings load (ptone/scion#8532). Used
+// by both the file-mode and DB-mode PUT handlers.
+func harnessArgsIgnoredSaveWarnings(harnessConfigs map[string]config.HarnessConfigEntry) []string {
+	warnings := config.HarnessArgsIgnoredWarnings(harnessConfigs)
 	for _, msg := range warnings {
 		slog.Warn("Server config saved with an ignored setting", "warning", msg)
 	}
