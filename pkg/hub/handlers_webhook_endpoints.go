@@ -246,7 +246,7 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		if !ok {
 			return
 		}
-		ceiling, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionCreate)
+		ceiling, _, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionCreate)
 		if !ok {
 			return
 		}

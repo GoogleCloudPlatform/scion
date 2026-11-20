@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -1224,5 +1225,58 @@ func TestTriggerDispatchAgent_UpdateResumeAndRoleCaps(t *testing.T) {
 			})
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), "parent agent role")
+	})
+
+	// 7. UAT author with a bounded token ceiling: explicit agentRole: full exceeds
+	// the UAT's hop ceiling -> 403 DeniedByDelegationCeiling, while readonly fits -> 201.
+	t.Run("uat_author_explicit_agent_role_capped_by_uat_ceiling", func(t *testing.T) {
+		base := NewAuthenticatedUser(adminUser.ID, adminUser.Email, adminUser.DisplayName, adminUser.Role, "api")
+		uatPerms := append(
+			agentScopeCoverage(ScopesForRole(AgentRoleReadOnly)),
+			"agent.create",
+			"trigger.create",
+			"webhook_endpoint.read",
+		)
+		uatIdent := NewScopedUserIdentityWithCeiling(
+			base,
+			f.sched.proj.ID,
+			[]string{"project:read", "agent:create", "agent:read", "agent:list", "trigger:create", "webhook_endpoint:read"},
+			api.NewUUID(),
+			permissions.FrozenPermissionCeiling{
+				Version:       1,
+				PermissionIDs: sortedUniqueIDs(uatPerms),
+			},
+		)
+		uatCtx := contextWithIdentity(context.Background(), uatIdent)
+		uatCtx = contextWithCredentialContext(uatCtx, credentialContextForIdentity(uatIdent))
+
+		rec := f.doJSON(t, uatCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   "uat-over-ceiling",
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEP.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+				Action: TriggerActionSpec{
+					Type:      store.TriggerActionDispatchAgent,
+					Task:      "run",
+					AgentRole: string(AgentRoleFull),
+				},
+			})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
+
+		recOK := f.doJSON(t, uatCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   "uat-within-ceiling",
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEP.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+				Action: TriggerActionSpec{
+					Type:      store.TriggerActionDispatchAgent,
+					Task:      "run",
+					AgentRole: string(AgentRoleReadOnly),
+				},
+			})
+		require.Equal(t, http.StatusCreated, recOK.Code, recOK.Body.String())
 	})
 }

@@ -72,17 +72,17 @@ func newTriggerAudit(ctx context.Context, mutationType, triggerID string) *store
 }
 
 // triggerRevisionAuthorityCeiling resolves the caller's frozen effect ceiling
-// for a trigger authoring write (create, dispatch-affecting PATCH, or resume),
-// mirroring revisionAuthorityCeiling for schedules.
-func (s *Server) triggerRevisionAuthorityCeiling(w http.ResponseWriter, r *http.Request, projectID string, action Action) (store.EffectCeiling, bool) {
+// and provenance for a trigger authoring write (create, dispatch-affecting
+// PATCH, or resume), mirroring revisionAuthorityCeiling for schedules.
+func (s *Server) triggerRevisionAuthorityCeiling(w http.ResponseWriter, r *http.Request, projectID string, action Action) (store.EffectCeiling, store.AuthorityProvenance, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if s.authzService == nil {
 		slog.ErrorContext(ctx, "trigger authoring: no authorization service", "project_id", projectID)
 		InternalError(w)
-		return store.EffectCeiling{}, false
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, false
 	}
-	ceiling, _, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
 	if err != nil {
 		cause, structural := ceilingDenyCauseForError(err)
 		if !structural {
@@ -90,7 +90,7 @@ func (s *Server) triggerRevisionAuthorityCeiling(w http.ResponseWriter, r *http.
 				"project_id", projectID, "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Unable to evaluate the credential's delegation ceiling; retry later", nil)
-			return store.EffectCeiling{}, false
+			return store.EffectCeiling{}, store.AuthorityProvenance{}, false
 		}
 		logAuthzDenial(r, identity, triggerResource(projectID), action,
 			"effect ceiling denied: "+string(cause)+": "+err.Error())
@@ -99,9 +99,9 @@ func (s *Server) triggerRevisionAuthorityCeiling(w http.ResponseWriter, r *http.
 			msg = "This credential kind cannot authorize trigger work"
 		}
 		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
-		return store.EffectCeiling{}, false
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, false
 	}
-	return ceiling, true
+	return ceiling, prov, true
 }
 
 func writeWebhookEndpointNotFound(w http.ResponseWriter) {
@@ -427,6 +427,7 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	ep *store.WebhookEndpoint,
 	spec *TriggerActionSpec,
 	ceiling store.EffectCeiling,
+	prov store.AuthorityProvenance,
 ) (string, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
@@ -473,10 +474,14 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 		return "", false
 	}
 
-	// Enforce the caller's frozen effect ceiling against an explicit agentRole
+	// Enforce the caller's hop effect ceiling against an explicit agentRole
 	// (mirrors interactive create's applyCreateEffectCeiling; §5.1).
 	if spec.AgentRole != "" {
-		if _, cause, fits := childRoleWithinCeiling(ceiling, AgentRole(spec.AgentRole), true); !fits {
+		if _, cause, fits := childRoleWithinCeiling(
+			uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling),
+			AgentRole(spec.AgentRole),
+			true,
+		); !fits {
 			writeForbiddenDenial(w, "requested agentRole exceeds caller's delegation ceiling: "+string(cause), DeniedByDelegationCeiling)
 			return "", false
 		}
