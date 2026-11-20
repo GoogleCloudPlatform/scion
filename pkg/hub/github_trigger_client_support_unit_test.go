@@ -174,6 +174,20 @@ func TestScopeRequestedGitHubTokenPermissions(t *testing.T) {
 		t.Fatalf("got %+v, want issues:read, metadata:read", gotWithinLimit)
 	}
 
+	// metadata:read is always within a project's stored limit (GitHub grants it implicitly),
+	// so {issues: write} without explicit metadata still allows comment fires, while metadata:write is refused.
+	storedIssuesOnly := &store.GitHubTokenPermissions{Issues: "write"}
+	gotIssuesWithMeta, err := scopeRequestedGitHubTokenPermissions(githubapp.TokenPermissions{Issues: "write", Metadata: "read"}, storedIssuesOnly, writeGrant)
+	if err != nil {
+		t.Fatalf("issues:write + metadata:read against stored {issues:write} failed: %v", err)
+	}
+	if gotIssuesWithMeta != (githubapp.TokenPermissions{Issues: "write", Metadata: "read"}) {
+		t.Fatalf("got %+v, want issues:write, metadata:read", gotIssuesWithMeta)
+	}
+	if _, err := scopeRequestedGitHubTokenPermissions(githubapp.TokenPermissions{Metadata: "write"}, storedIssuesOnly, writeGrant); !errors.Is(err, ErrGitHubPermissionNotPermitted) {
+		t.Fatalf("metadata:write against stored {issues:write} err = %v, want ErrGitHubPermissionNotPermitted", err)
+	}
+
 	// Stored custom limit with checks/actions write allows them under write grant.
 	storedBroad := &store.GitHubTokenPermissions{
 		Checks:  "write",

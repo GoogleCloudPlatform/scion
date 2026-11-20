@@ -425,6 +425,12 @@ func scopeRequestedGitHubTokenPermissions(
 	}
 
 	limit := githubTokenPermissionsForGrant(stored, grant)
+	// GitHub always grants metadata:read implicitly on installation tokens, so
+	// a project limit such as {issues: write} (with metadata omitted) still
+	// permits metadata:read while still refusing metadata:write unless granted.
+	if githubTokenPermRank(limit.Metadata) < githubTokenPermRank("read") {
+		limit.Metadata = "read"
+	}
 	for _, f := range []struct {
 		name string
 		req  string
