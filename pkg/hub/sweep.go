@@ -140,9 +140,9 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 // ExpireAndListStuckPendingMessages transitioned to failed (ptone/scion#7405):
 // agent senders receive a DELIVERY_UNCONFIRMED notice through
 // MessageBrokerProxy (because a pending row may have been delivered under AC-3
-// or AC-4, so claiming definite failure would cause duplicate resends), and
-// human senders get a live SSE delivery_unconfirmed update. Never redelivers to
-// the target agent.
+// or an interrupted dispatch, so claiming definite failure would cause
+// duplicate resends), and human senders get a live SSE delivery_unconfirmed
+// update. Never redelivers to the target agent.
 func (s *Server) notifyExpiredPendingMessages(ctx context.Context, expired []store.ExpiredPendingMessage) {
 	if s.GetMessageBrokerProxy() == nil && s.events == nil {
 		return
