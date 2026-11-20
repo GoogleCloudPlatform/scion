@@ -754,6 +754,15 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		}
 	} else if !s.scheduledChildLive(ctx, agent) {
 		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, errScheduledChildDeletedDuringCreate)
+	} else if !s.preserveTerminalPhase(ctx, agent) {
+		// Persist the broker's synchronous create echo (including the
+		// resolved Profile recorded by store.ApplyBrokerAgentConfig) so
+		// subsequent starts and reincarnations read it from the store
+		// (ptone/scion#5149).
+		if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
+			slog.Warn("Scheduler: failed to persist agent after dispatch",
+				"eventID", fireID, "agent_id", agent.ID, "error", err)
+		}
 	}
 
 	slog.Info("Scheduler: agent dispatched successfully",

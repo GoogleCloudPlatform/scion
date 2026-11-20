@@ -572,13 +572,20 @@ type provisionCapturingManager struct {
 	// onStart, when set, runs at the start of Start, so a test can observe
 	// what the agent's start would read.
 	onStart func(ctx context.Context, opts api.StartOptions)
+	// provisionProfile, when non-empty, is attached as ScionConfig.Info.Profile
+	// on Provision returns so tests can verify the broker echoes it.
+	provisionProfile string
 }
 
 func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	m.provisionCalled = true
 	m.lastOpts = opts
 	m.lastProvisionCtx = ctx
-	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
+	cfg := &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}
+	if m.provisionProfile != "" {
+		cfg.Info = &api.AgentInfo{Profile: m.provisionProfile}
+	}
+	return cfg, nil
 }
 
 func (m *provisionCapturingManager) Preflight(ctx context.Context, opts api.StartOptions) error {

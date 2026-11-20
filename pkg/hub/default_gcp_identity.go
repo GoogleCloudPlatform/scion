@@ -235,21 +235,26 @@ func pinResolvedProfile(ac *store.AgentAppliedConfig, profile string) {
 	}
 }
 
-// pinResolvedCreateProfile resolves and records the runtime profile an agent
-// create runs under onto both AppliedConfig.Profile and CreateInputs.Profile
-// when the create request did not name one explicitly (ptone/scion#5149).
+// pinResolvedCreateProfile records the Hub project's active runtime profile
+// (scion.io/active-profile) onto both AppliedConfig.Profile and
+// CreateInputs.Profile when the create request did not name one explicitly
+// (ptone/scion#5149).
 //
-// Precedence matches the rest of create: the project's active profile first
-// (effectiveRuntimeProfileName), then the target Runtime Broker's default or
-// sole profile (resolveAgentRuntimeProfileType). Flat/pinned agents and
-// hub-direct managed agents never take a Runtime Broker profile, and an
-// ambiguous or unresolvable broker default is left empty so we never guess.
+// It deliberately does NOT resolve or pin the Runtime Broker's global
+// DefaultProfile or sole registered profile before dispatch: when neither the
+// request nor the Hub project names a profile, the create dispatch carries an
+// empty profile so the broker stays authoritative for its project-effective
+// active_profile (such as a linked project's .scion/settings.yaml). The
+// broker's create answer then echoes the profile it resolved, and
+// store.ApplyBrokerAgentConfig records it onto both AppliedConfig.Profile and
+// CreateInputs.Profile.
 //
-// Called right after buildAppliedConfig — before GCP identity resolution,
-// passthrough translation, and deriveAgentConfig — so the stored profile and
-// every decision derived from it use the same profile and cannot diverge, and
-// so later starts, restarts and reincarnations keep the create-time profile
-// even if the project's active profile or broker default changes.
+// Flat/pinned agents and hub-direct managed agents never take a Runtime Broker
+// profile. Called right after buildAppliedConfig — before GCP identity
+// resolution, passthrough translation, and deriveAgentConfig — so the stored
+// profile and every decision derived from it use the same profile and cannot
+// diverge, and so later starts, restarts and reincarnations keep the
+// create-time profile even if the project's active profile changes.
 func pinResolvedCreateProfile(agent *store.Agent, project *store.Project, broker *store.RuntimeBroker, managed bool) {
 	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.Profile != "" {
 		return
@@ -257,13 +262,7 @@ func pinResolvedCreateProfile(agent *store.Agent, project *store.Project, broker
 	if managed || isManagedAgentRuntime(agent.Runtime) || agent.IsPinned() || (broker != nil && broker.IsFlat()) {
 		return
 	}
-	profile := effectiveRuntimeProfileName("", project)
-	if profile == "" && broker != nil {
-		if resolved, _, ok := resolveAgentRuntimeProfileType(broker, ""); ok {
-			profile = resolved
-		}
-	}
-	pinResolvedProfile(agent.AppliedConfig, profile)
+	pinResolvedProfile(agent.AppliedConfig, effectiveRuntimeProfileName("", project))
 }
 
 // resolveDefaultSAAssignmentCore is the transport-independent body shared by

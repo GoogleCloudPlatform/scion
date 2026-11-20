@@ -563,11 +563,9 @@ func TestScheduledDispatch_HubDefaultPassthroughProfileAndSandboxTranslation(t *
 			wantMode:          store.GCPMetadataModePassthrough,
 		},
 		{
-			name:              "cloudrun-sandbox broker default profile is denied and not translated",
-			profiles:          localAndSandbox,
-			brokerDefault:     "sandbox",
-			wantProfile:       "sandbox",
-			wantInputsProfile: "sandbox",
+			name:          "cloudrun-sandbox broker default profile is denied and not translated",
+			profiles:      localAndSandbox,
+			brokerDefault: "sandbox",
 		},
 		{
 			name:                 "cloudrun-sandbox project active profile is denied and not translated",

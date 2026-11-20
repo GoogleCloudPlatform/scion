@@ -150,8 +150,8 @@ func TestAgentCreateDefaults_AgentCallerFollowsProjectThenHub(t *testing.T) {
 
 		agent := df.createAsParent(t, CreateAgentRequest{Name: "hub-default-child"})
 		assert.Equal(t, df.otherBroker.ID, agent.RuntimeBrokerID, "broker from the hub default")
-		assert.Equal(t, "local", agent.AppliedConfig.Profile,
-			"target broker's default profile is recorded at create")
+		assert.Empty(t, agent.AppliedConfig.Profile,
+			"no profile is chosen at create; the broker applies its own default")
 	})
 }
 
@@ -175,8 +175,7 @@ func TestAgentCreateDefaults_ParentPlacementNotInherited(t *testing.T) {
 		agent := df.createAsParent(t, CreateAgentRequest{Name: "same-broker-child"})
 		assert.Equal(t, df.parentBroker.ID, agent.RuntimeBrokerID)
 		assert.NotEqual(t, "gke", agent.AppliedConfig.Profile, "the parent's profile must not be inherited")
-		assert.Equal(t, "local", agent.AppliedConfig.Profile,
-			"broker's default profile is recorded at create")
+		assert.Empty(t, agent.AppliedConfig.Profile)
 	})
 
 	t.Run("project active profile wins over the parent's profile", func(t *testing.T) {
@@ -218,7 +217,6 @@ func TestAgentCreateDefaults_ExplicitFlagsWin(t *testing.T) {
 
 		agent := df.createAsParent(t, CreateAgentRequest{Name: "explicit-broker-child", RuntimeBrokerID: df.otherBroker.ID})
 		assert.Equal(t, df.otherBroker.ID, agent.RuntimeBrokerID)
-		assert.Equal(t, "local", agent.AppliedConfig.Profile,
-			"target broker's default profile is recorded at create")
+		assert.Empty(t, agent.AppliedConfig.Profile)
 	})
 }

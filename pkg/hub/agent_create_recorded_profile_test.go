@@ -26,25 +26,60 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // lifecycleProfileRecordingDispatcher records the profile sent on create,
-// provision, start, and restart dispatches.
+// provision, start, and restart dispatches, and optionally simulates a broker
+// echoing a resolved profile back through store.ApplyBrokerAgentConfig.
 type lifecycleProfileRecordingDispatcher struct {
 	createAgentDispatcher
-	provisionedProfile string
-	provisionCalled    bool
-	startedProfile     string
-	restartedProfile   string
-	restartCalled      bool
+	dispatchedCreateProfile    string
+	dispatchedProvisionProfile string
+	echoProfile                string
+	provisionCalled            bool
+	startedProfile             string
+	restartedProfile           string
+	restartCalled              bool
+}
+
+func (d *lifecycleProfileRecordingDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	if agent.AppliedConfig != nil {
+		d.dispatchedCreateProfile = agent.AppliedConfig.Profile
+	}
+	res, err := d.createAgentDispatcher.DispatchAgentCreate(ctx, agent)
+	if err != nil {
+		return res, err
+	}
+	if d.echoProfile != "" {
+		store.ApplyBrokerAgentConfig(agent, store.BrokerAgentConfig{Profile: d.echoProfile})
+	}
+	return res, nil
+}
+
+func (d *lifecycleProfileRecordingDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	if agent.AppliedConfig != nil {
+		d.dispatchedCreateProfile = agent.AppliedConfig.Profile
+	}
+	res, err := d.createAgentDispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	if err != nil {
+		return res, err
+	}
+	if d.echoProfile != "" {
+		store.ApplyBrokerAgentConfig(agent, store.BrokerAgentConfig{Profile: d.echoProfile})
+	}
+	return res, nil
 }
 
 func (d *lifecycleProfileRecordingDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
 	d.provisionCalled = true
 	d.capturedAgent = agent
 	if agent.AppliedConfig != nil {
-		d.provisionedProfile = agent.AppliedConfig.Profile
+		d.dispatchedProvisionProfile = agent.AppliedConfig.Profile
+	}
+	if d.echoProfile != "" {
+		store.ApplyBrokerAgentConfig(agent, store.BrokerAgentConfig{Profile: d.echoProfile})
 	}
 	agent.Phase = string(state.PhaseCreated)
 	return nil
@@ -69,16 +104,22 @@ func (d *lifecycleProfileRecordingDispatcher) DispatchAgentRestart(_ context.Con
 }
 
 // TestAgentCreate_RecordsResolvedProfileAcrossLifecycle verifies ptone/scion#5149:
-// an agent created without an explicit profile records the resolved runtime
-// profile (from the project's active profile or the broker's default/sole
-// profile) on both AppliedConfig.Profile and CreateInputs.Profile, so later
-// starts, restarts and reincarnations keep that profile even after the
-// project's active profile or the broker's default profile changes.
+//   - When the Hub project sets scion.io/active-profile, create pins it before
+//     dispatch onto both AppliedConfig.Profile and CreateInputs.Profile.
+//   - When neither the request nor the Hub project names a profile, create
+//     dispatches an empty profile so the broker resolves its project-effective
+//     active_profile (which may differ from broker.DefaultProfile), and the
+//     broker's echoed profile is recorded onto both AppliedConfig.Profile and
+//     CreateInputs.Profile via store.ApplyBrokerAgentConfig.
+//   - A broker with a synthetic sole "default" profile is not pinned pre-dispatch.
+//   - Later starts, restarts, and reincarnations keep the recorded create-time
+//     profile even after the broker default and project active profile change.
 func TestAgentCreate_RecordsResolvedProfileAcrossLifecycle(t *testing.T) {
 	t.Parallel()
 
-	localAndK8s := []store.BrokerProfile{
+	localAndRemote := []store.BrokerProfile{
 		{Name: "local", Type: "docker", Available: true},
+		{Name: "remote", Type: "kubernetes", Available: true},
 		{Name: "k8s", Type: "kubernetes", Available: true},
 	}
 
@@ -87,47 +128,57 @@ func TestAgentCreate_RecordsResolvedProfileAcrossLifecycle(t *testing.T) {
 		profiles          []store.BrokerProfile
 		brokerDefault     string
 		projectActive     string
+		requestProfile    string
+		brokerEchoProfile string
+		wantDispatch      string
+		wantRecorded      string
 		laterBrokerDef    string
 		laterProjectAct   string
-		wantProfile       string
 		checkLifecycleOps bool
 	}{
 		{
-			name:              "broker default profile survives default and project active change",
-			profiles:          localAndK8s,
+			name:              "broker project-effective profile differs from global broker default",
+			profiles:          localAndRemote,
 			brokerDefault:     "local",
 			projectActive:     "",
+			brokerEchoProfile: "remote",
+			wantDispatch:      "",
+			wantRecorded:      "remote",
 			laterBrokerDef:    "k8s",
 			laterProjectAct:   "k8s",
-			wantProfile:       "local",
 			checkLifecycleOps: true,
 		},
 		{
-			name:              "project active profile survives active profile change",
-			profiles:          localAndK8s,
+			name:              "project active profile pinned pre-dispatch survives active profile change",
+			profiles:          localAndRemote,
 			brokerDefault:     "k8s",
 			projectActive:     "local",
+			wantDispatch:      "local",
+			wantRecorded:      "local",
 			laterBrokerDef:    "k8s",
 			laterProjectAct:   "k8s",
-			wantProfile:       "local",
 			checkLifecycleOps: true,
 		},
 		{
-			name:              "single broker profile without DefaultProfile is recorded",
-			profiles:          []store.BrokerProfile{{Name: "only", Type: "docker", Available: true}},
-			brokerDefault:     "",
-			projectActive:     "",
-			laterBrokerDef:    "k8s",
-			laterProjectAct:   "k8s",
-			wantProfile:       "only",
+			name:              "explicit request profile is not overwritten by project active profile",
+			profiles:          localAndRemote,
+			brokerDefault:     "local",
+			projectActive:     "k8s",
+			requestProfile:    "remote",
+			wantDispatch:      "remote",
+			wantRecorded:      "remote",
+			laterBrokerDef:    "local",
+			laterProjectAct:   "local",
 			checkLifecycleOps: true,
 		},
 		{
-			name:              "ambiguous multi-profile broker without DefaultProfile stays empty",
-			profiles:          localAndK8s,
+			name:              "synthetic sole default profile is not pinned pre-dispatch",
+			profiles:          []store.BrokerProfile{{Name: "default", Type: "docker", Available: true}},
 			brokerDefault:     "",
 			projectActive:     "",
-			wantProfile:       "",
+			brokerEchoProfile: "",
+			wantDispatch:      "",
+			wantRecorded:      "",
 			checkLifecycleOps: false,
 		},
 	}
@@ -138,6 +189,7 @@ func TestAgentCreate_RecordsResolvedProfileAcrossLifecycle(t *testing.T) {
 			ctx := context.Background()
 			disp := &lifecycleProfileRecordingDispatcher{
 				createAgentDispatcher: createAgentDispatcher{createPhase: string(state.PhaseRunning)},
+				echoProfile:           tc.brokerEchoProfile,
 			}
 			srv, s, project := setupCreateAgentServer(t, disp)
 
@@ -154,6 +206,7 @@ func TestAgentCreate_RecordsResolvedProfileAcrossLifecycle(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 				Name:      "recorded-profile-agent",
 				ProjectID: project.ID,
+				Profile:   tc.requestProfile,
 				Task:      "record resolved profile",
 			})
 			require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -161,16 +214,14 @@ func TestAgentCreate_RecordsResolvedProfileAcrossLifecycle(t *testing.T) {
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 			require.NotNil(t, resp.Agent)
 
-			require.NotNil(t, disp.capturedAgent)
-			require.NotNil(t, disp.capturedAgent.AppliedConfig)
-			assert.Equal(t, tc.wantProfile, disp.capturedAgent.AppliedConfig.Profile, "create dispatch profile")
+			assert.Equal(t, tc.wantDispatch, disp.dispatchedCreateProfile, "pre-dispatch create profile")
 
 			stored, err := s.GetAgent(ctx, resp.Agent.ID)
 			require.NoError(t, err)
 			require.NotNil(t, stored.AppliedConfig)
-			assert.Equal(t, tc.wantProfile, stored.AppliedConfig.Profile, "persisted AppliedConfig.Profile")
+			assert.Equal(t, tc.wantRecorded, stored.AppliedConfig.Profile, "persisted AppliedConfig.Profile")
 			require.NotNil(t, stored.AppliedConfig.CreateInputs)
-			assert.Equal(t, tc.wantProfile, stored.AppliedConfig.CreateInputs.Profile, "persisted CreateInputs.Profile")
+			assert.Equal(t, tc.wantRecorded, stored.AppliedConfig.CreateInputs.Profile, "persisted CreateInputs.Profile")
 
 			if !tc.checkLifecycleOps {
 				return
@@ -189,7 +240,7 @@ func TestAgentCreate_RecordsResolvedProfileAcrossLifecycle(t *testing.T) {
 			rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+stored.ID+"/start", nil)
 			require.Equal(t, http.StatusOK, rec.Code, "start body: %s", rec.Body.String())
 			require.True(t, disp.startCalled)
-			assert.Equal(t, tc.wantProfile, disp.startedProfile, "start dispatch must keep create-time profile")
+			assert.Equal(t, tc.wantRecorded, disp.startedProfile, "start dispatch must keep create-time profile")
 
 			// Restart must keep the create-time profile.
 			disp.startCalled = false
@@ -197,10 +248,10 @@ func TestAgentCreate_RecordsResolvedProfileAcrossLifecycle(t *testing.T) {
 			rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+stored.ID+"/restart", nil)
 			require.Equal(t, http.StatusOK, rec.Code, "restart body: %s", rec.Body.String())
 			if disp.restartCalled {
-				assert.Equal(t, tc.wantProfile, disp.restartedProfile, "restart dispatch must keep create-time profile")
+				assert.Equal(t, tc.wantRecorded, disp.restartedProfile, "restart dispatch must keep create-time profile")
 			} else {
 				require.True(t, disp.startCalled, "restart must dispatch via start or restart")
-				assert.Equal(t, tc.wantProfile, disp.startedProfile, "restart start-leg must keep create-time profile")
+				assert.Equal(t, tc.wantRecorded, disp.startedProfile, "restart start-leg must keep create-time profile")
 			}
 
 			// Reincarnate must replay the create-time profile, not re-derive the new active/default profile.
@@ -211,21 +262,24 @@ func TestAgentCreate_RecordsResolvedProfileAcrossLifecycle(t *testing.T) {
 			fresh, _, err := srv.buildFreshAppliedConfig(ctx, stored, proj, "")
 			require.NoError(t, err)
 			require.NotNil(t, fresh)
-			assert.Equal(t, tc.wantProfile, fresh.Profile, "reincarnate must keep create-time profile")
+			assert.Equal(t, tc.wantRecorded, fresh.Profile, "reincarnate must keep create-time profile")
 			require.NotNil(t, fresh.CreateInputs)
-			assert.Equal(t, tc.wantProfile, fresh.CreateInputs.Profile, "reincarnate CreateInputs must keep create-time profile")
+			assert.Equal(t, tc.wantRecorded, fresh.CreateInputs.Profile, "reincarnate CreateInputs must keep create-time profile")
 		})
 	}
 }
 
-// TestAgentCreate_ProvisionOnly_RecordsResolvedProfile verifies that a
-// provision-only create records the resolved broker default profile so a
-// subsequent start after the default/active profile changes still uses it.
-func TestAgentCreate_ProvisionOnly_RecordsResolvedProfile(t *testing.T) {
+// TestAgentCreate_ProvisionOnly_RecordsBrokerEchoedProfile verifies that a
+// provision-only create without a Hub project active profile dispatches an
+// empty profile, records the broker's echoed project-effective profile onto
+// both AppliedConfig.Profile and CreateInputs.Profile, and uses it on a later
+// start after the broker default and project active profile change.
+func TestAgentCreate_ProvisionOnly_RecordsBrokerEchoedProfile(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	disp := &lifecycleProfileRecordingDispatcher{
 		createAgentDispatcher: createAgentDispatcher{createPhase: string(state.PhaseCreated)},
+		echoProfile:           "remote",
 	}
 	srv, s, project := setupCreateAgentServer(t, disp)
 
@@ -233,6 +287,7 @@ func TestAgentCreate_ProvisionOnly_RecordsResolvedProfile(t *testing.T) {
 	require.NoError(t, err)
 	broker.Profiles = []store.BrokerProfile{
 		{Name: "local", Type: "docker", Available: true},
+		{Name: "remote", Type: "kubernetes", Available: true},
 		{Name: "k8s", Type: "kubernetes", Available: true},
 	}
 	broker.DefaultProfile = "local"
@@ -248,14 +303,14 @@ func TestAgentCreate_ProvisionOnly_RecordsResolvedProfile(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.NotNil(t, resp.Agent)
 	require.True(t, disp.provisionCalled)
-	assert.Equal(t, "local", disp.provisionedProfile)
+	assert.Empty(t, disp.dispatchedProvisionProfile, "broker default must not be sent as explicit profile")
 
 	stored, err := s.GetAgent(ctx, resp.Agent.ID)
 	require.NoError(t, err)
 	require.NotNil(t, stored.AppliedConfig)
-	assert.Equal(t, "local", stored.AppliedConfig.Profile)
+	assert.Equal(t, "remote", stored.AppliedConfig.Profile)
 	require.NotNil(t, stored.AppliedConfig.CreateInputs)
-	assert.Equal(t, "local", stored.AppliedConfig.CreateInputs.Profile)
+	assert.Equal(t, "remote", stored.AppliedConfig.CreateInputs.Profile)
 
 	// Change broker default and project active profile before first start.
 	broker.DefaultProfile = "k8s"
@@ -265,17 +320,21 @@ func TestAgentCreate_ProvisionOnly_RecordsResolvedProfile(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+stored.ID+"/start", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "start body: %s", rec.Body.String())
 	require.True(t, disp.startCalled)
-	assert.Equal(t, "local", disp.startedProfile, "first start after provision-only must keep create-time profile")
+	assert.Equal(t, "remote", disp.startedProfile, "first start after provision-only must keep broker-echoed profile")
 }
 
 // TestAgentCreateHeadless_RecordsResolvedProfile verifies that scheduled /
-// headless creates record the resolved runtime profile onto both
-// AppliedConfig.Profile and CreateInputs.Profile so reincarnation keeps it.
+// headless creates record both:
+//   - a Hub project active profile (pinned pre-dispatch), and
+//   - a broker-echoed project-effective profile (differing from broker.DefaultProfile),
+//
+// onto AppliedConfig.Profile and CreateInputs.Profile so reincarnation keeps it.
 func TestAgentCreateHeadless_RecordsResolvedProfile(t *testing.T) {
 	t.Parallel()
 
-	localAndK8s := []store.BrokerProfile{
+	localAndRemote := []store.BrokerProfile{
 		{Name: "local", Type: "docker", Available: true},
+		{Name: "remote", Type: "kubernetes", Available: true},
 		{Name: "k8s", Type: "kubernetes", Available: true},
 	}
 
@@ -283,19 +342,24 @@ func TestAgentCreateHeadless_RecordsResolvedProfile(t *testing.T) {
 		name          string
 		brokerDefault string
 		projectActive string
+		echoProfile   string
+		wantDispatch  string
 		wantProfile   string
 	}{
 		{
-			name:          "broker default profile",
-			brokerDefault: "local",
-			projectActive: "",
+			name:          "project active profile pinned pre-dispatch",
+			brokerDefault: "k8s",
+			projectActive: "local",
+			wantDispatch:  "local",
 			wantProfile:   "local",
 		},
 		{
-			name:          "project active profile",
-			brokerDefault: "k8s",
-			projectActive: "local",
-			wantProfile:   "local",
+			name:          "broker-echoed project-effective profile differs from broker default",
+			brokerDefault: "local",
+			projectActive: "",
+			echoProfile:   "remote",
+			wantDispatch:  "",
+			wantProfile:   "remote",
 		},
 	}
 
@@ -304,10 +368,15 @@ func TestAgentCreateHeadless_RecordsResolvedProfile(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			f := bypassAgentsSetup(t)
+			disp := &lifecycleProfileRecordingDispatcher{
+				createAgentDispatcher: createAgentDispatcher{createPhase: string(state.PhaseRunning)},
+				echoProfile:           tc.echoProfile,
+			}
+			f.srv.SetDispatcher(disp)
 
 			b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
 			require.NoError(t, err)
-			b.Profiles = localAndK8s
+			b.Profiles = localAndRemote
 			b.DefaultProfile = tc.brokerDefault
 			require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
 
@@ -317,6 +386,8 @@ func TestAgentCreateHeadless_RecordsResolvedProfile(t *testing.T) {
 
 			const agentName = "sched-recorded-profile"
 			require.NoError(t, fireScheduledDispatchAsOwner(t, f, agentName))
+
+			assert.Equal(t, tc.wantDispatch, disp.dispatchedCreateProfile, "pre-dispatch headless profile")
 
 			got, err := f.store.GetAgentBySlug(ctx, f.proj.ID, agentName)
 			require.NoError(t, err)
@@ -340,4 +411,98 @@ func TestAgentCreateHeadless_RecordsResolvedProfile(t *testing.T) {
 			assert.Equal(t, tc.wantProfile, fresh.CreateInputs.Profile)
 		})
 	}
+}
+
+// TestPinResolvedCreateProfile_SkipArms verifies every guard arm of
+// pinResolvedCreateProfile directly: nil inputs, explicit profile not
+// overwritten, managed flag, managed runtime, pinned agent, flat broker,
+// and missing project active profile.
+func TestPinResolvedCreateProfile_SkipArms(t *testing.T) {
+	t.Parallel()
+
+	projWithActive := &store.Project{
+		Annotations: map[string]string{projectSettingActiveProfile: "project-active"},
+	}
+	legacyBroker := &store.RuntimeBroker{
+		DefaultProfile: "broker-default",
+		Profiles: []store.BrokerProfile{
+			{Name: "broker-default", Type: "docker", Available: true},
+		},
+	}
+	flatBroker := &store.RuntimeBroker{
+		RuntimeTarget: &api.RuntimeTargetDescriptor{ID: "rt-1", Type: "docker"},
+	}
+
+	t.Run("nil agent or applied config is a no-op", func(t *testing.T) {
+		pinResolvedCreateProfile(nil, projWithActive, legacyBroker, false)
+		pinResolvedCreateProfile(&store.Agent{}, projWithActive, legacyBroker, false)
+	})
+
+	t.Run("explicit profile is not overwritten", func(t *testing.T) {
+		a := &store.Agent{
+			AppliedConfig: &store.AgentAppliedConfig{
+				Profile:      "explicit",
+				CreateInputs: &store.AgentCreateInputs{Profile: "explicit"},
+			},
+		}
+		pinResolvedCreateProfile(a, projWithActive, legacyBroker, false)
+		assert.Equal(t, "explicit", a.AppliedConfig.Profile)
+		assert.Equal(t, "explicit", a.AppliedConfig.CreateInputs.Profile)
+	})
+
+	t.Run("managed create flag skips pinning", func(t *testing.T) {
+		a := &store.Agent{
+			AppliedConfig: &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}},
+		}
+		pinResolvedCreateProfile(a, projWithActive, legacyBroker, true)
+		assert.Empty(t, a.AppliedConfig.Profile)
+		assert.Empty(t, a.AppliedConfig.CreateInputs.Profile)
+	})
+
+	t.Run("managed agent runtime skips pinning", func(t *testing.T) {
+		a := &store.Agent{
+			Runtime:       ManagedRuntimePrefix + "test",
+			AppliedConfig: &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}},
+		}
+		pinResolvedCreateProfile(a, projWithActive, legacyBroker, false)
+		assert.Empty(t, a.AppliedConfig.Profile)
+		assert.Empty(t, a.AppliedConfig.CreateInputs.Profile)
+	})
+
+	t.Run("pinned agent skips pinning", func(t *testing.T) {
+		a := &store.Agent{
+			PinnedRuntimeTargetID: "rt-1",
+			AppliedConfig:         &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}},
+		}
+		pinResolvedCreateProfile(a, projWithActive, legacyBroker, false)
+		assert.Empty(t, a.AppliedConfig.Profile)
+		assert.Empty(t, a.AppliedConfig.CreateInputs.Profile)
+	})
+
+	t.Run("flat broker skips pinning", func(t *testing.T) {
+		a := &store.Agent{
+			AppliedConfig: &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}},
+		}
+		pinResolvedCreateProfile(a, projWithActive, flatBroker, false)
+		assert.Empty(t, a.AppliedConfig.Profile)
+		assert.Empty(t, a.AppliedConfig.CreateInputs.Profile)
+	})
+
+	t.Run("no project active profile does not pin broker default", func(t *testing.T) {
+		a := &store.Agent{
+			AppliedConfig: &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}},
+		}
+		pinResolvedCreateProfile(a, &store.Project{}, legacyBroker, false)
+		assert.Empty(t, a.AppliedConfig.Profile)
+		assert.Empty(t, a.AppliedConfig.CreateInputs.Profile)
+	})
+
+	t.Run("project active profile is pinned onto both fields", func(t *testing.T) {
+		a := &store.Agent{
+			AppliedConfig: &store.AgentAppliedConfig{CreateInputs: &store.AgentCreateInputs{}},
+		}
+		pinResolvedCreateProfile(a, projWithActive, legacyBroker, false)
+		assert.Equal(t, "project-active", a.AppliedConfig.Profile)
+		assert.Equal(t, "project-active", a.AppliedConfig.CreateInputs.Profile)
+	})
 }
