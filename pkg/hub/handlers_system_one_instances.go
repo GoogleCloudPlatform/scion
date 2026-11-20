@@ -1165,7 +1165,7 @@ func (s *Server) probeSystemOneInstance(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	evalProjectID, ok := s.resolveAndAuthorizeProbeProject(w, r, user, req.Project)
+	evalProjectID, ok := s.resolveAndAuthorizeProbeProject(w, r, user, inst, req.Project)
 	if !ok {
 		return
 	}
@@ -1453,10 +1453,29 @@ func (s *Server) validateNamedSecretRefAtCreate(ctx context.Context, refName, re
 	return true, nil
 }
 
+// probeRequiresProjectSecretRead reports whether probing inst with a project
+// context can resolve a project-scoped named secret ("project" or
+// "project_or_hub"). Hub-scoped refs, owned API-key instances, and ADC
+// instances never read project secrets and do not require project.secret_read.
+func probeRequiresProjectSecretRead(inst *store.SystemOneInstance) bool {
+	if inst == nil {
+		return false
+	}
+	if inst.Auth.Kind != "" && inst.Auth.Kind != store.SystemOneAuthKindAPIKey {
+		return false
+	}
+	secScope, isNamedRef := systemoneprovider.SecretRefModeFromOptions(inst.Options)
+	if !isNamedRef {
+		return false
+	}
+	return secScope == systemoneprovider.SecretScopeProject || secScope == systemoneprovider.SecretScopeProjectOrHub
+}
+
 func (s *Server) resolveAndAuthorizeProbeProject(
 	w http.ResponseWriter,
 	r *http.Request,
 	user UserIdentity,
+	inst *store.SystemOneInstance,
 	rawProject string,
 ) (string, bool) {
 	projRef := strings.TrimSpace(rawProject)
@@ -1498,6 +1517,19 @@ func (s *Server) resolveAndAuthorizeProbeProject(
 	if !decision.Allowed {
 		Forbidden(w)
 		return "", false
+	}
+	if probeRequiresProjectSecretRead(inst) {
+		secretDecision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(user),
+			Credential: credentialContextForIdentity(user),
+			Resource:   projectResource(proj),
+			Action:     actionProjectSecretRead,
+			Permission: permissionProjectSecretRead,
+		})
+		if !secretDecision.Allowed {
+			Forbidden(w)
+			return "", false
+		}
 	}
 	return proj.ID, true
 }

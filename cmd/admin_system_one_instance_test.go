@@ -1226,6 +1226,7 @@ func TestAdminSystemOne_NamedSecretFlagsOutputAndValidation(t *testing.T) {
 		probeHelp, _, err := executeAdminSystemOneSubcmd(t, []string{"probe", "--help"}, nil)
 		require.NoError(t, err)
 		assert.Contains(t, probeHelp, "--project")
+		assert.Contains(t, probeHelp, "project.secret_read")
 	})
 
 	t.Run("pre-request mutual exclusion and grammar errors make zero HTTP calls", func(t *testing.T) {

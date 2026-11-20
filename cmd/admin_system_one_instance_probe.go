@@ -52,6 +52,10 @@ Model listing (--models) requires an adapter that implements model discovery
 (such as typesafe); adapters without model listing (such as gemini_decisions)
 return an "adapter does not support model listing" validation error.
 
+When probing a project- or project_or_hub-scoped named-secret instance with
+--project, the caller must hold both project.read and project.secret_read on
+that project (even when project_or_hub would fall back to the Hub secret).
+
 Exits 0 when the probe completes with class "success", and non-zero when the
 evaluated outcome class is not "success" (for example "failed" or "uncertain")
 or the request fails. The probe result is still written to stdout before exiting.
@@ -76,7 +80,7 @@ Examples:
 func init() {
 	f := adminSystemOneInstanceProbeCmd.Flags()
 	f.BoolVar(&adminSystemOneProbeOpts.models, "models", false, "Query models supported by the provider instance (requires adapter model-listing support, e.g. typesafe)")
-	f.StringVar(&adminSystemOneProbeOpts.project, "project", "", "Optional project ID or slug providing evaluation project context for project- or project_or_hub-scoped named secrets (requires project read access)")
+	f.StringVar(&adminSystemOneProbeOpts.project, "project", "", "Optional project ID or slug providing evaluation project context for project- or project_or_hub-scoped named secrets (requires project.read and project.secret_read on that project)")
 	f.StringVar(&adminSystemOneProbeOpts.specFile, "spec-file", "", "Path to inline System One spec or rule envelope (JSON or YAML, or '-' for stdin)")
 	f.StringVar(&adminSystemOneProbeOpts.text, "text", "", "Synthetic text bound to probe.text")
 	f.StringVar(&adminSystemOneProbeOpts.textFile, "text-file", "", "Path to file containing synthetic text bound to probe.text")

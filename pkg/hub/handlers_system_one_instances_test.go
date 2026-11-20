@@ -2331,7 +2331,7 @@ func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAnd
 	require.NoError(t, err)
 	projReadRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
 		Name:        "g4d-proj-reader",
-		Description: "Project reader",
+		Description: "Project reader (no secret_read)",
 		ScopeType:   store.RoleScopeProject,
 		Permissions: []string{"project.read"},
 	})
@@ -2354,6 +2354,33 @@ func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAnd
 	})
 	assert.Equal(t, http.StatusForbidden, unauthzProjRec.Code)
 	assert.Zero(t, providerHits.Load())
+
+	// L1: project.read alone (without project.secret_read) is refused with 403 for project_or_hub named-ref probes.
+	readOnlyProjRec := doRequestAsUser(t, srv, scopedUser, http.MethodPost, systemOneAdminPath+"/gemini-named-default/probe", map[string]any{
+		"project": projA.Slug,
+		"spec":    binSpec,
+		"probe":   map[string]any{"text": "Synthetic sample."},
+	})
+	assert.Equal(t, http.StatusForbidden, readOnlyProjRec.Code)
+	assert.Zero(t, providerHits.Load())
+
+	// Granting project.secret_read on projA authorizes the probe.
+	projSecretReadRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "g4d-proj-secret-reader",
+		Description: "Project secret reader",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.secret_read"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: projSecretReadRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      scopedUser.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projA.ID,
+		CreatedBy:        admin.ID,
+	})
+	require.NoError(t, err)
 
 	authzSlugRec := doRequestAsUser(t, srv, scopedUser, http.MethodPost, systemOneAdminPath+"/gemini-named-default/probe", map[string]any{
 		"project": projA.Slug,
@@ -3071,7 +3098,7 @@ func TestSystemOneInstances_Item7_EndpointPinForNamedSecretAndADC(t *testing.T) 
 		countingBackend.getCalls.Store(0)
 		attackerHits.Store(0)
 		defaultProviderHits.Store(0)
-		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/"+forcedName+"/probe", map[string]any{
+		rec := doRequestAsUser(t, srv, superAdmin, http.MethodPost, systemOneAdminPath+"/"+forcedName+"/probe", map[string]any{
 			"project": victimProj.ID,
 			"spec":    json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`),
 			"probe":   map[string]any{"text": "Allowed-name custom endpoint probe."},
@@ -3102,7 +3129,7 @@ func TestSystemOneInstances_Item7_EndpointPinForNamedSecretAndADC(t *testing.T) 
 	require.Equal(t, http.StatusCreated, posCreate.Code, posCreate.Body.String())
 	countingBackend.getCalls.Store(0)
 	defaultProviderHits.Store(0)
-	posProbe := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/f9-good-gem-proj/probe", map[string]any{
+	posProbe := doRequestAsUser(t, srv, superAdmin, http.MethodPost, systemOneAdminPath+"/f9-good-gem-proj/probe", map[string]any{
 		"project": victimProj.ID,
 		"spec":    json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`),
 		"probe":   map[string]any{"text": "Positive control canonical endpoint."},
@@ -3157,7 +3184,7 @@ func TestSystemOneInstances_Item7_EndpointPinForNamedSecretAndADC(t *testing.T) 
 	binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`)
 	attackerHits.Store(0)
 	defaultProviderHits.Store(0)
-	forcedRefRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/f9-forced-proj-ref/probe", map[string]any{
+	forcedRefRec := doRequestAsUser(t, srv, superAdmin, http.MethodPost, systemOneAdminPath+"/f9-forced-proj-ref/probe", map[string]any{
 		"project": victimProj.ID,
 		"spec":    binSpec,
 		"probe":   map[string]any{"text": "Exfiltration attempt."},
@@ -3488,7 +3515,7 @@ func TestSystemOneInstances_Item8_ProviderPinnedSecretNames(t *testing.T) {
 			providerHits.Store(0)
 			countingBackend.getCalls.Store(0)
 			binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check."}]}`)
-			pRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/"+craftedName+"/probe", map[string]any{
+			pRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/"+craftedName+"/probe", map[string]any{
 				"project": proj.ID,
 				"spec":    binSpec,
 				"probe":   map[string]any{"text": "Disallowed name check."},
@@ -4185,4 +4212,301 @@ func TestSystemOneInstances_N2_HubFileTypeAllowedNameRefused(t *testing.T) {
 	assert.Equal(t, "auth", pResp.Reason)
 	assert.Zero(t, providerHits.Load(), "forced hub file secret must make 0 provider requests")
 	assert.NotContains(t, pRec.Body.String(), fileSecretCanary)
+}
+
+// TestSystemOneInstances_L1_ProbeProjectRequiresSecretRead (Security L1):
+// Verifies that probing a project- or project_or_hub-scoped named-secret
+// instance with --project requires BOTH project.read and project.secret_read on
+// the validated project before any secret lookup, ADC mint, or provider I/O —
+// even when project_or_hub would fall back to the Hub secret. Hub-scoped refs,
+// owned API-key instances, and ADC instances remain unaffected.
+func TestSystemOneInstances_L1_ProbeProjectRequiresSecretRead(t *testing.T) {
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+	countingBackend := &countingSecretBackendWrapper{SecretBackend: localBackend}
+	srv.SetSecretBackend(countingBackend)
+
+	superAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-l1-super", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+	hubAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-l1-hubadmin", store.SystemRoleHubAdmin))
+	require.NoError(t, err)
+	readOnlyProber, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-l1-readonly", store.SystemRoleHubMember))
+	require.NoError(t, err)
+	secretReadProber, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-l1-secretread", store.SystemRoleHubMember))
+	require.NoError(t, err)
+	projOwner, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-l1-projowner", store.SystemRoleHubMember))
+	require.NoError(t, err)
+
+	const (
+		projKeyCanary  = "CANARY_L1_PROJECT_GEMINI_KEY_8414"
+		hubKeyCanary   = "CANARY_L1_HUB_GEMINI_KEY_8414"
+		ownedKeyCanary = "CANARY_L1_OWNED_API_KEY_8414"
+		adcTokenCanary = "CANARY_L1_ADC_BEARER_TOKEN_8414"
+		testADCScope   = "https://www.googleapis.com/auth/synthetic.l1.scope"
+	)
+
+	var (
+		providerHits     atomic.Int32
+		adcProviderCalls atomic.Int32
+		adcTokenMints    atomic.Int32
+	)
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q_ok":{"type":"noul","noul":0.93,"confidence":0.95}}}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	srv.SetSystemOneADCForTesting(t, func(_ context.Context, _ []string) (*SystemOneADCCredentials, error) {
+		adcProviderCalls.Add(1)
+		return &SystemOneADCCredentials{
+			CredentialType:      SystemOneADCTypeServiceAccount,
+			ServiceAccountEmail: "so-l1-sa@proj.iam.gserviceaccount.com",
+			TokenSource: funcTokenSource(func() (*oauth2.Token, error) {
+				adcTokenMints.Add(1)
+				return &oauth2.Token{AccessToken: adcTokenCanary, Expiry: time.Now().Add(time.Hour)}, nil
+			}),
+		}, nil
+	})
+
+	reg := srv.SystemOneProviderRegistry()
+	srv.mu.Lock()
+	srv.systemOneRuntime = systemoneruntime.New(
+		systemoneruntime.Config{
+			Registry:           reg,
+			Instances:          &hubSystemOneInstanceSource{srv: srv},
+			Credentials:        (&hubSystemOneCredentialSource{srv: srv}).APIKeyToken,
+			TokenSource:        (&hubSystemOneCredentialSource{srv: srv}).GoogleAccessToken,
+			AllowedSecretNames: srv.allowedSecretNamesFor,
+		},
+		systemoneruntime.WithEgressOptionsForTesting(testSystemOneEgressOptions(t, tlsSrv)...),
+	)
+	srv.mu.Unlock()
+
+	projWithSecret := &store.Project{
+		ID:      tid("l1-proj-with-secret"),
+		Name:    "l1-proj-with-secret",
+		Slug:    "l1-proj-with-secret",
+		OwnerID: projOwner.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	projNoSecret := &store.Project{
+		ID:      tid("l1-proj-no-secret"),
+		Name:    "l1-proj-no-secret",
+		Slug:    "l1-proj-no-secret",
+		OwnerID: projOwner.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, projWithSecret))
+	require.NoError(t, s.CreateProject(ctx, projNoSecret))
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      projKeyCanary,
+		SecretType: store.SecretTypeVariable,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeProject,
+		ScopeID:    projWithSecret.ID,
+		CreatedBy:  projOwner.ID,
+		UpdatedBy:  projOwner.ID,
+	})
+	require.NoError(t, err)
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      hubKeyCanary,
+		SecretType: store.SecretTypeVariable,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeHub,
+		ScopeID:    srv.hubID,
+		CreatedBy:  superAdmin.ID,
+		UpdatedBy:  superAdmin.ID,
+	})
+	require.NoError(t, err)
+
+	// Wire roles: both custom probers can execute System One probes.
+	// readOnlyProber holds only project.read on both projects;
+	// secretReadProber holds both project.read and project.secret_read on both projects.
+	hubExecRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "l1-s1-prober",
+		Description: "System One probe operator",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"system_one_instance.read", "system_one_instance.execute"},
+	})
+	require.NoError(t, err)
+	projReadOnlyRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "l1-proj-read-only",
+		Description: "Project read only",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+	projReadAndSecretRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "l1-proj-read-and-secret",
+		Description: "Project read and secret_read",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read", "project.secret_read"},
+	})
+	require.NoError(t, err)
+
+	for _, u := range []*store.User{readOnlyProber, secretReadProber} {
+		ensureHubMembership(ctx, s, u.ID)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: hubExecRole.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      u.ID,
+			ScopeType:        store.RoleScopeSystem,
+			ScopeID:          "",
+			CreatedBy:        superAdmin.ID,
+		})
+		require.NoError(t, err)
+	}
+	for _, p := range []*store.Project{projWithSecret, projNoSecret} {
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: projReadOnlyRole.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      readOnlyProber.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          p.ID,
+			CreatedBy:        superAdmin.ID,
+		})
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: projReadAndSecretRole.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      secretReadProber.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          p.ID,
+			CreatedBy:        superAdmin.ID,
+		})
+		require.NoError(t, err)
+	}
+
+	// Create all 5 instances.
+	for _, body := range []map[string]any{
+		{
+			"name": "l1-proj-ref", "adapter": geminidecisions.AdapterName, "model": "gemini-2.5-flash",
+			"auth": map[string]any{"kind": "api_key", "secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "project"}},
+		},
+		{
+			"name": "l1-poh-ref", "adapter": geminidecisions.AdapterName, "model": "gemini-2.5-flash",
+			"auth": map[string]any{"kind": "api_key", "secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "project_or_hub"}},
+		},
+		{
+			"name": "l1-hub-ref", "adapter": geminidecisions.AdapterName, "model": "gemini-2.5-flash",
+			"auth": map[string]any{"kind": "api_key", "secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "hub"}},
+		},
+		{
+			"name": "l1-owned", "adapter": geminidecisions.AdapterName, "model": "gemini-2.5-flash",
+			"auth": map[string]any{"kind": "api_key", "apiKey": ownedKeyCanary},
+		},
+		{
+			"name": "l1-adc", "adapter": geminidecisions.AdapterName, "model": "gemini-2.5-flash",
+			"auth": map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+		},
+	} {
+		rec := doRequestAsUser(t, srv, superAdmin, http.MethodPost, systemOneAdminPath, body)
+		require.Equal(t, http.StatusCreated, rec.Code, "create %v: %s", body["name"], rec.Body.String())
+	}
+
+	binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`)
+	resetCounters := func() {
+		countingBackend.getCalls.Store(0)
+		adcProviderCalls.Store(0)
+		adcTokenMints.Store(0)
+		providerHits.Store(0)
+	}
+
+	// 1. Negative: principals with project.read but NO project.secret_read (hub-admin and readOnlyProber)
+	//    are refused with 403 for project and project_or_hub named-ref probes — including when projNoSecret
+	//    has NO project secret (would-be Hub fallback) — with 0 SecretBackend.Get, 0 ADC mints, 0 provider hits.
+	for _, actor := range []struct {
+		label string
+		user  *store.User
+	}{
+		{"hub_admin", hubAdmin},
+		{"project_read_only", readOnlyProber},
+	} {
+		for _, tc := range []struct {
+			instName string
+			projID   string
+			desc     string
+		}{
+			{"l1-proj-ref", projWithSecret.ID, "project_scope_with_secret"},
+			{"l1-poh-ref", projWithSecret.ID, "project_or_hub_with_secret"},
+			{"l1-poh-ref", projNoSecret.ID, "project_or_hub_no_project_secret_fallback"},
+		} {
+			resetCounters()
+			rec := doRequestAsUser(t, srv, actor.user, http.MethodPost, systemOneAdminPath+"/"+tc.instName+"/probe", map[string]any{
+				"project": tc.projID,
+				"spec":    binSpec,
+				"probe":   map[string]any{"text": "Unauthorized secret spend attempt."},
+			})
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s/%s: %s", actor.label, tc.desc, rec.Body.String())
+			assert.Zero(t, countingBackend.getCalls.Load(), "%s/%s must make 0 SecretBackend.Get calls", actor.label, tc.desc)
+			assert.Zero(t, adcProviderCalls.Load(), "%s/%s must make 0 ADC calls", actor.label, tc.desc)
+			assert.Zero(t, adcTokenMints.Load(), "%s/%s must mint 0 ADC tokens", actor.label, tc.desc)
+			assert.Zero(t, providerHits.Load(), "%s/%s must make 0 provider requests", actor.label, tc.desc)
+			for _, canary := range []string{projKeyCanary, hubKeyCanary, ownedKeyCanary, adcTokenCanary} {
+				assert.NotContains(t, rec.Body.String(), canary)
+			}
+		}
+	}
+
+	// 2. Positive: principal with BOTH project.read and project.secret_read succeeds across project and project_or_hub
+	//    (both project-secret hit and Hub fallback on projNoSecret).
+	for _, tc := range []struct {
+		instName      string
+		projID        string
+		wantScopeUsed string
+	}{
+		{"l1-proj-ref", projWithSecret.ID, "project"},
+		{"l1-poh-ref", projWithSecret.ID, "project"},
+		{"l1-poh-ref", projNoSecret.ID, "hub"},
+	} {
+		resetCounters()
+		rec := doRequestAsUser(t, srv, secretReadProber, http.MethodPost, systemOneAdminPath+"/"+tc.instName+"/probe", map[string]any{
+			"project": tc.projID,
+			"spec":    binSpec,
+			"probe":   map[string]any{"text": "Authorized probe."},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "%s/%s: %s", tc.instName, tc.projID, rec.Body.String())
+		var pResp ProbeSystemOneInstanceResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pResp))
+		assert.Equal(t, systemoneruntime.ClassSuccess, pResp.Class, "%s/%s", tc.instName, tc.projID)
+		require.NotNil(t, pResp.Evaluation.Auth)
+		require.NotNil(t, pResp.Evaluation.Auth.SecretRef)
+		assert.Equal(t, tc.wantScopeUsed, pResp.Evaluation.Auth.SecretRef.ScopeUsed)
+		assert.Equal(t, int32(1), providerHits.Load())
+	}
+
+	// 3. Unaffected: hub-scope named ref, owned credential, and ADC probes with project.read only
+	//    (both with --project and without --project) behave exactly as before.
+	for _, actor := range []struct {
+		label string
+		user  *store.User
+	}{
+		{"hub_admin", hubAdmin},
+		{"project_read_only", readOnlyProber},
+	} {
+		for _, instName := range []string{"l1-hub-ref", "l1-owned", "l1-adc"} {
+			for _, projArg := range []string{"", projWithSecret.ID} {
+				resetCounters()
+				body := map[string]any{
+					"spec":  binSpec,
+					"probe": map[string]any{"text": "Unaffected probe."},
+				}
+				if projArg != "" {
+					body["project"] = projArg
+				}
+				rec := doRequestAsUser(t, srv, actor.user, http.MethodPost, systemOneAdminPath+"/"+instName+"/probe", body)
+				require.Equal(t, http.StatusOK, rec.Code, "%s/%s/proj=%q: %s", actor.label, instName, projArg, rec.Body.String())
+				var pResp ProbeSystemOneInstanceResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pResp))
+				assert.Equal(t, systemoneruntime.ClassSuccess, pResp.Class, "%s/%s/proj=%q", actor.label, instName, projArg)
+				assert.Equal(t, int32(1), providerHits.Load(), "%s/%s/proj=%q", actor.label, instName, projArg)
+			}
+		}
+	}
 }
