@@ -233,7 +233,7 @@ func writeDecisionsListTable(out io.Writer, items []hubclient.AgentDecisionListI
 			}
 			provenance = "dismissed"
 		case it.Answer != nil && it.Answer.Label != "":
-			answer = collapseSingleLine(it.Answer.Label)
+			answer = formatDecisionListAnswer(it.Answer.ChoiceID, it.Answer.Label, it.Answer.OtherText)
 		case it.Withdrawn != nil:
 			detail := "withdrawn " + clitime.Format(it.Withdrawn.At, clitime.Minute)
 			if it.Withdrawn.Reason != "" {

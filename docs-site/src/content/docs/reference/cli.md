@@ -642,11 +642,12 @@ Requires the `web.decisions` [experiment](/scion/reference/experiments/) (off by
         - Flags: `--pending` (pending Decisions only; the default), `--decided` (answered Decisions that have not been replaced), `--withdrawn` (withdrawn Decisions only), `--all` (pending, decided, replaced and withdrawn versions; pass at most one of the four), `-q`/`--search <text>` (2 to 256 characters; case-insensitive literal substring of the question, the key, or the effective answer's choice label). On a Hub without agent decision search, `-q`/`--search` fails with `this hub does not support decision search`; on a Hub without decision withdrawal, `--withdrawn` fails with `this hub does not support withdrawing decisions; update the hub`.
     - `show <key>` (agent mode): Show every version of a decision key: status, the version that replaced it, question, conversation, prompt message ID, when it was created, decided, or withdrawn (with who withdrew it and the optional reason), its choices (ID and label), and every answer recorded on it, interpreted and direct, with the choice, provenance, who answered, the surface, the time and, for an interpreted answer, the source message ID. An unknown key fails with `404 decision_not_found`.
     - `record <key> <choice-id> --from <message-id>`: Record the answer the agent interpreted from a user's free-text reply. `<choice-id>` is the choice's `id`, as `show` lists it.
-    - `record --from <message-id> <key>=<choice-id>...`: Record 1 to 10 interpreted answers from the same reply in one batch. The batch is atomic: if any pair is refused, nothing is recorded. Don't mix this form with the positional form in one command, and don't repeat a key.
+    - `record --from <message-id> <key>=<choice-id>... [--other <key>=<text>...]`: Record 1 to 10 interpreted answers from the same reply in one batch, including free-form Other answers via repeatable `--other <key>=<text>` flags on Decisions that allow Other. The batch is atomic: if any pair is refused, nothing is recorded. Don't mix the two-argument positional form with `<key>=<choice-id>` or `--other`, and don't repeat a key.
     - `withdraw <key>... [--set] [--reason <text>]` (agent mode): Withdraw 1 to 10 pending Decisions asked by the calling agent (`POST /api/v1/agent/decisions/withdraw`). Prints `<key> v<version> withdrawn` (or `<key> v<version> already withdrawn` when repeating a withdrawal; the original reason is kept). All-or-nothing: if any named key does not exist (`decision_not_found`) or already has an answer — direct, or interpreted awaiting confirmation (`already_answered`) — prints one failure line per failed key and exits with status 1 without withdrawing anything. On a Hub without decision withdrawal, fails with `this hub does not support withdrawing decisions; update the hub`.
 - **Flags:**
     - `--json` (on every subcommand): Output in JSON format. The global `--format json` does the same.
     - `--from <message-id>` (on `record`, required): The ID of the user's reply that the answer is interpreted from: the `message_id` of the inbound message envelope (see [Inbound Message Type Discrimination](/scion/hosted/user/messaging/#3-inbound-message-type-discrimination)).
+    - `--other <key>=<text>` (on `record`, repeatable): Record a free-form Other answer (single-line plain text, 1 to 200 characters) for a Decision that enabled `allow_other`. Cannot be combined with positional `<key> <choice-id>`; combine with `<key>=<choice-id>` pairs for batches.
     - `--set` (on `withdraw`): Also withdraw every other pending Decision of the prompt each named key belongs to; answered siblings (including interpreted answers awaiting confirmation) are skipped.
     - `--reason <text>` (on `withdraw`): Optional plain-text reason why the Decision is no longer needed (at most 500 characters).
 
@@ -672,6 +673,8 @@ scion decisions list --all --json                      # agent mode
 scion decisions show D234
 scion decisions record D234 yes --from 5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17
 scion decisions record --from 5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17 D234=yes 17=b
+scion decisions record --from 5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17 --other region="europe-west4 canary"
+scion decisions record --from 5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17 proceed=1 --other region="europe-west4 canary"
 scion decisions withdraw D234 --reason "CI found a regression"
 scion decisions withdraw D234 --set --reason "Moving release to Monday"
 ```

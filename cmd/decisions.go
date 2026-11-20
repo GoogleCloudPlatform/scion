@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/spf13/cobra"
 )
 
@@ -137,6 +138,13 @@ func decisionAnswererDisplay(a *hubclient.DecisionAnswerView) string {
 
 func collapseSingleLine(s string) string {
 	return strings.Join(strings.Fields(safeText(s)), " ")
+}
+
+func formatDecisionListAnswer(choiceID, label, otherText string) string {
+	if choiceID == messages.ChoiceIDOther && otherText != "" {
+		return truncateRunes(collapseSingleLine(fmt.Sprintf("%s: \"%s\"", label, otherText)), decisionQuestionMaxWidth, true)
+	}
+	return collapseSingleLine(label)
 }
 
 func formatDecisionAPIError(err error) error {
