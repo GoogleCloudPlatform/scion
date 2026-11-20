@@ -162,7 +162,7 @@ func TestCreateExisting_DeleteWinsAfterLanding(t *testing.T) {
 		phase state.Phase
 		body  map[string]interface{}
 	}{
-		{"resume-suspended", state.PhaseSuspended, nil},
+		{"resume-suspended", state.PhaseSuspended, map[string]interface{}{"resume": true}},
 		{"resume-stopped", state.PhaseStopped, map[string]interface{}{"resume": true}},
 		{"force-recover", state.PhaseError, map[string]interface{}{"resume": true, "forceResume": true}},
 		{"start-created", state.PhaseCreated, nil},
@@ -245,7 +245,7 @@ func TestCreateExisting_DeleteWinsAfterReRead_HardDelete409(t *testing.T) {
 		phase state.Phase
 		body  map[string]interface{}
 	}{
-		{"resume-suspended", state.PhaseSuspended, nil},
+		{"resume-suspended", state.PhaseSuspended, map[string]interface{}{"resume": true}},
 		{"resume-stopped", state.PhaseStopped, map[string]interface{}{"resume": true}},
 		{"force-recover", state.PhaseError, map[string]interface{}{"resume": true, "forceResume": true}},
 		{"start-created", state.PhaseCreated, nil},

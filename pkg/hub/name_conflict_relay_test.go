@@ -115,7 +115,7 @@ func TestCreateAgent_ExistingAgentStartBrokerNameConflictBecomes409(t *testing.T
 		phase  state.Phase
 		resume bool
 	}{
-		{name: "suspended", phase: state.PhaseSuspended},
+		{name: "suspended", phase: state.PhaseSuspended, resume: true},
 		{name: "stopped resume", phase: state.PhaseStopped, resume: true},
 		{name: "created", phase: state.PhaseCreated},
 	}
