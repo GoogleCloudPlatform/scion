@@ -204,7 +204,7 @@ func sanitizeTriggerFireError(req hubfire.FireRequest, status hubfire.FireStatus
 		return ""
 	}
 	switch req.ActionType {
-	case "message", "dispatch_agent", scheduledEventTypeExec:
+	case "message", "dispatch_agent", scheduledEventTypeExec, "github.comment":
 	default:
 		return raw
 	}
@@ -212,6 +212,7 @@ func sanitizeTriggerFireError(req hubfire.FireRequest, status hubfire.FireStatus
 	case errScheduledMessageRefused.Error(),
 		"dispatch_agent refused",
 		"exec refused",
+		"github.comment refused",
 		req.ActionType + " refused",
 		errScheduledAuthorityUnrecorded.Error(),
 		"target not running",
@@ -227,6 +228,15 @@ func sanitizeTriggerFireError(req hubfire.FireRequest, status hubfire.FireStatus
 		"fire failed",
 		"invalid message payload",
 		"invalid dispatch_agent payload",
+		"invalid github.comment payload",
+		"github comment refused",
+		"github rate limited",
+		"github comment failed",
+		"github write not permitted",
+		"github permission not permitted",
+		"github association not authorized",
+		"stale event",
+		"comment rate limited",
 		errScheduledExecPayloadInvalid.Error(),
 		execReasonDispatchFailed,
 		execReasonOverlap,
@@ -268,6 +278,8 @@ func sanitizeTriggerFireError(req hubfire.FireRequest, status hubfire.FireStatus
 			mapped = "dispatch_agent failed"
 		case scheduledEventTypeExec:
 			mapped = "exec failed"
+		case "github.comment":
+			mapped = "github comment failed"
 		default:
 			mapped = "fire failed"
 		}

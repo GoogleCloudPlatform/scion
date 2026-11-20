@@ -969,7 +969,7 @@ func (s *Server) clearProjectGitHubAssociationErrorStatus(ctx context.Context, p
 		LastTokenMint: project.GitHubAppStatus.LastTokenMint,
 		LastChecked:   now,
 	}
-	if err := s.store.UpdateProject(ctx, project); err != nil {
+	if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
 		slog.WarnContext(ctx, "Failed to clear project GitHub App association error status",
 			"project_id", project.ID, "error", err)
 		return

@@ -117,6 +117,11 @@ type TriggerActionSpec struct {
 	ReuseMessage  string            `json:"reuseMessage,omitempty"`
 	UntrustedVars []string          `json:"untrustedVars,omitempty"`
 	NoAuth        bool              `json:"noAuth,omitempty"`
+
+	// github.comment action fields (Stage 3 §7.1).
+	Body          string `json:"body,omitempty"`
+	Target        string `json:"target,omitempty"`
+	ReplyInThread bool   `json:"replyInThread,omitempty"`
 }
 
 // TriggerSubjectSpec configures per-subject handling for a trigger.
@@ -309,6 +314,16 @@ func buildTriggerActionSpec(actionType, rawPayload string) TriggerActionSpec {
 				spec.UntrustedVars = append([]string(nil), p.UntrustedVars...)
 			}
 			spec.NoAuth = p.NoAuth
+		}
+	case store.TriggerActionGitHubComment:
+		var p GitHubCommentActionPayload
+		if json.Unmarshal([]byte(rawPayload), &p) == nil {
+			spec.Body = p.Body
+			spec.Target = p.Target
+			spec.ReplyInThread = p.ReplyInThread
+			if len(p.UntrustedVars) > 0 {
+				spec.UntrustedVars = append([]string(nil), p.UntrustedVars...)
+			}
 		}
 	}
 	return spec

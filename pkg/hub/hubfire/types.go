@@ -103,6 +103,7 @@ type FireRequest struct {
 	Event      *FireEvent
 	Executor   ExecutorContext
 	FireAt     time.Time // nominal fire/receipt time for staleness checks
+	Attempts   int       // 1-based delivery attempt count (>1 enables marker-based retry deduplication)
 	Tracked    FireTracker
 }
 

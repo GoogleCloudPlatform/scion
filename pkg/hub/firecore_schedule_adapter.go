@@ -46,6 +46,7 @@ func (s *Server) registerFireActions() {
 	s.RegisterAction(&messageAction{srv: s})
 	s.RegisterAction(&dispatchAgentAction{srv: s})
 	s.RegisterAction(&execAction{srv: s})
+	s.RegisterAction(&githubCommentAction{srv: s})
 }
 
 func scheduledDetachesRequest(evt store.ScheduledEvent, actionType string) hubfire.FireRequest {

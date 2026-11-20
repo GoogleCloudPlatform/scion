@@ -456,8 +456,11 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &req.Action)
 	case store.TriggerActionDispatchAgent:
 		actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &req.Action, ceiling, prov)
+	case store.TriggerActionGitHubComment:
+		actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &req.Action)
 	default:
-		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s)", actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent), nil)
+		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s)",
+			actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionGitHubComment), nil)
 		return
 	}
 	if !ok {
@@ -621,6 +624,7 @@ func (s *Server) authorizeStoredTriggerAction(
 	sourceKind string,
 	ep *store.WebhookEndpoint,
 	subjectMode string,
+	matchTypes []string,
 	actionType string,
 	rawPayload string,
 	ceiling store.EffectCeiling,
@@ -632,8 +636,11 @@ func (s *Server) authorizeStoredTriggerAction(
 		return s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &spec)
 	case store.TriggerActionDispatchAgent:
 		return s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &spec, ceiling, prov)
+	case store.TriggerActionGitHubComment:
+		return s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &spec)
 	default:
-		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s)", actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent), nil)
+		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s)",
+			actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionGitHubComment), nil)
 		return "", false
 	}
 }
@@ -870,8 +877,11 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 	if req.Action != nil {
 		actionType := strings.TrimSpace(req.Action.Type)
-		if actionType != store.TriggerActionMessage && actionType != store.TriggerActionDispatchAgent {
-			ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s)", actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent), nil)
+		if actionType != store.TriggerActionMessage &&
+			actionType != store.TriggerActionDispatchAgent &&
+			actionType != store.TriggerActionGitHubComment {
+			ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s, %s)",
+				actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent, store.TriggerActionGitHubComment), nil)
 			return
 		}
 		tr.ActionType = actionType
@@ -945,13 +955,15 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 				actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, tr.SourceKind, req.Action)
 			case store.TriggerActionDispatchAgent:
 				actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, req.Action, ceiling, prov)
+			case store.TriggerActionGitHubComment:
+				actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, tr.SourceKind, tr.MatchTypes, req.Action)
 			}
 			if !ok {
 				return
 			}
 			tr.ActionPayload = actionPayload
 		} else {
-			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, tr.ActionType, tr.ActionPayload, ceiling, prov)
+			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)
 			if !ok {
 				return
 			}
@@ -1119,7 +1131,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		return
 	}
-	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.SubjectMode, tr.ActionType, tr.ActionPayload, ceiling, prov)
+	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.SubjectMode, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)
 	if !ok {
 		return
 	}

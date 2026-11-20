@@ -512,6 +512,122 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	return normalized, true
 }
 
+// authorizeTriggerGitHubCommentAuthoring enforces Stage 3 §7.1 / §8.1 authoring
+// checks for a github.comment trigger action: source must be github, caller must
+// hold github_trigger.comment (users via authz policy + UAT scope/boundary;
+// agents via AgentRoleFull + delegation ceiling), replyInThread requires
+// pull_request_review_comment match types, and githubCommentAction.Validate
+// compiles and bounds the template and checks the project's GitHub association.
+func (s *Server) authorizeTriggerGitHubCommentAuthoring(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	sourceKind string,
+	matchTypes []string,
+	spec *TriggerActionSpec,
+) (string, bool) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return "", false
+	}
+	if sourceKind != store.TriggerSourceKindGitHub {
+		ValidationError(w, "github.comment action requires a github trigger source", nil)
+		return "", false
+	}
+
+	res := Resource{
+		Type:       permissions.ResourceGitHubTrigger,
+		ID:         projectID,
+		ParentType: permissions.ResourceProject,
+		ParentID:   projectID,
+	}
+	switch identity.Type() {
+	case "user", "dev", "federated_user":
+		userIdent, ok := identity.(UserIdentity)
+		if !ok || s.authzService == nil {
+			writeForbidden(w, "You don't have permission to post GitHub comments through triggers in this project")
+			return "", false
+		}
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   res,
+			Action:     Action(permissions.ActionComment),
+			Permission: githubTriggerCommentPermission,
+		})
+		if !decision.Allowed {
+			logAuthzDenial(r, identity, res, Action(permissions.ActionComment), decision.Reason)
+			writeForbidden(w, "You don't have permission to post GitHub comments through triggers in this project")
+			return "", false
+		}
+
+	case "agent":
+		if s.authzService == nil {
+			writeForbidden(w, "")
+			return "", false
+		}
+		agent, err := s.store.GetAgent(ctx, identity.ID())
+		if err != nil || agent == nil || !agent.DeletedAt.IsZero() {
+			logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent caller not found")
+			writeForbidden(w, "Agent is not authorized to author github.comment triggers")
+			return "", false
+		}
+		callerRole, _ := agentRoleAndScopes(agent)
+		if callerRole != AgentRoleFull {
+			logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent role must be full for github.comment")
+			writeForbidden(w, "Agent requires role full to author github.comment triggers")
+			return "", false
+		}
+		ceiling, _, cErr := s.authzService.sourceEffectCeiling(ctx, identity)
+		if cErr != nil || !EffectCeilingAllows(ceiling, githubTriggerCommentPermission, false) {
+			logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent delegation ceiling denies github_trigger.comment")
+			writeForbiddenDenial(w, "Agent delegation ceiling does not allow github_trigger.comment", DeniedByDelegationCeiling)
+			return "", false
+		}
+
+	default:
+		logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "identity type may not author github.comment triggers")
+		writeForbidden(w, "")
+		return "", false
+	}
+
+	if err := validateGitHubCommentReplyInThreadMatchTypes(spec.ReplyInThread, matchTypes); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return "", false
+	}
+
+	raw, err := json.Marshal(GitHubCommentActionPayload{
+		Body:          spec.Body,
+		Target:        spec.Target,
+		ReplyInThread: spec.ReplyInThread,
+		UntrustedVars: spec.UntrustedVars,
+	})
+	if err != nil {
+		InternalError(w)
+		return "", false
+	}
+
+	action := &githubCommentAction{srv: s}
+	normalized, err := action.Validate(ctx, identity, projectID, string(raw))
+	if err != nil {
+		switch {
+		case errors.Is(err, errGitHubCommentNotAssociated):
+			writeError(w, http.StatusConflict, ErrCodeGitHubNotAssociated,
+				"project does not have an authorized GitHub App association", nil)
+		case errors.Is(err, errGitHubCommentInvalid):
+			ValidationError(w, err.Error(), nil)
+		case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrInvalidInput):
+			NotFound(w, "Project")
+		default:
+			writeErrorFromErr(w, err, "")
+		}
+		return "", false
+	}
+	return normalized, true
+}
+
 // triggerEventAccess is the outcome of triggerEventAccessDecision.
 type triggerEventAccess struct {
 	allowed           bool

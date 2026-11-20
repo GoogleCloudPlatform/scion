@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const (
@@ -51,6 +52,11 @@ var (
 	// write-capable GitHub App installation token under a read-only
 	// association grant (§7.1).
 	ErrGitHubWriteNotPermitted = errors.New("github write not permitted")
+
+	// ErrGitHubPermissionNotPermitted is returned when a caller requests a
+	// GitHub App installation token permission that exceeds the project's
+	// configured GitHub permission limit (PUT /projects/{id}/github-permissions).
+	ErrGitHubPermissionNotPermitted = errors.New("github permission not permitted")
 )
 
 // githubCommentRateLimiter enforces a bounded in-memory per-project token
@@ -352,12 +358,27 @@ func canonicalGitHubTokenPermKey(perms githubapp.TokenPermissions) string {
 	return strings.Join(parts, ";")
 }
 
+func githubTokenPermRank(level string) int {
+	switch level {
+	case "read":
+		return 1
+	case "write":
+		return 2
+	default:
+		return 0
+	}
+}
+
 // scopeRequestedGitHubTokenPermissions validates an explicit permission set
-// against grant. Unknown levels and empty sets are rejected; if any requested
-// field asks for "write" under a read-only grant (!grant.WriteAllowed), it
-// refuses with ErrGitHubWriteNotPermitted rather than silently downgrading.
+// against grant and the project's stored GitHub permission limit
+// (PUT /projects/{id}/github-permissions, G3 S3). Unknown levels and empty sets
+// are rejected; if any requested field asks for "write" under a read-only grant
+// (!grant.WriteAllowed), it refuses with ErrGitHubWriteNotPermitted; if any
+// requested field exceeds the project's effective permission limit, it refuses
+// with ErrGitHubPermissionNotPermitted rather than silently downgrading.
 func scopeRequestedGitHubTokenPermissions(
 	requested githubapp.TokenPermissions,
+	stored *store.GitHubTokenPermissions,
 	grant githubAssociationGrant,
 ) (githubapp.TokenPermissions, error) {
 	requiresWrite := false
@@ -401,6 +422,24 @@ func scopeRequestedGitHubTokenPermissions(
 	}
 	if requiresWrite && !grant.WriteAllowed {
 		return githubapp.TokenPermissions{}, ErrGitHubWriteNotPermitted
+	}
+
+	limit := githubTokenPermissionsForGrant(stored, grant)
+	for _, f := range []struct {
+		name string
+		req  string
+		lim  string
+	}{
+		{"contents", out.Contents, limit.Contents},
+		{"pull_requests", out.PullRequests, limit.PullRequests},
+		{"issues", out.Issues, limit.Issues},
+		{"metadata", out.Metadata, limit.Metadata},
+		{"checks", out.Checks, limit.Checks},
+		{"actions", out.Actions, limit.Actions},
+	} {
+		if githubTokenPermRank(f.req) > githubTokenPermRank(f.lim) {
+			return githubapp.TokenPermissions{}, fmt.Errorf("%w: %s", ErrGitHubPermissionNotPermitted, f.name)
+		}
 	}
 	return out, nil
 }

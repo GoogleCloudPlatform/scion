@@ -447,6 +447,26 @@ func (s *ProjectStore) SetProjectOwnerID(ctx context.Context, projectID, ownerID
 	return nil
 }
 
+// UpdateProjectGitHubAppStatus updates only the github_app_status column of a
+// project, leaving every other column untouched so concurrent admin unbinds or
+// remote/permission changes are never reverted by a stale snapshot writer.
+func (s *ProjectStore) UpdateProjectGitHubAppStatus(ctx context.Context, projectID string, status *store.GitHubAppProjectStatus) error {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return err
+	}
+	update := s.client.Project.UpdateOneID(uid)
+	if status != nil {
+		update.SetGithubAppStatus(marshalRawJSON(status))
+	} else {
+		update.ClearGithubAppStatus()
+	}
+	if err := update.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // UpdateProjectMessagingPolicy atomically updates the cross-project inbound
 // policy using optimistic concurrency on the revision counter. Returns the
 // updated project or ErrRevisionConflict if expectedRevision does not match.
