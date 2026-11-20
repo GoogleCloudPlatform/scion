@@ -1722,6 +1722,10 @@ const stopAllStatusStopRecorded = "stop_recorded"
 // stopped, and the newer run's state is left as it is (ptone/scion#2550).
 const stopAllStatusRunChanged = "run_changed"
 
+// stopAllMaxConcurrency caps how many per-agent stops handleStopAllAgents
+// runs at once, matching the CLI's maxFanOutConcurrency (ptone/scion#8563).
+const stopAllMaxConcurrency = 6
+
 // startInFlightPhase reports whether phase is one a start passes through
 // before the agent is running.
 func startInFlightPhase(phase string) bool {
@@ -1897,14 +1901,40 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	var (
 		mu      sync.Mutex
 		wg      sync.WaitGroup
+		sem     = make(chan struct{}, stopAllMaxConcurrency)
 		results = make([]stopAllResult, 0, len(agents))
 	)
 
 	for i := range agents {
 		agent := &agents[i]
+		if ctx.Err() != nil {
+			mu.Lock()
+			results = append(results, stopAllResult{
+				ID:     agent.ID,
+				Name:   agent.Name,
+				Status: "error",
+				Error:  ctx.Err().Error(),
+			})
+			mu.Unlock()
+			continue
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			mu.Lock()
+			results = append(results, stopAllResult{
+				ID:     agent.ID,
+				Name:   agent.Name,
+				Status: "error",
+				Error:  ctx.Err().Error(),
+			})
+			mu.Unlock()
+			continue
+		}
 		wg.Add(1)
 		go func(agent *store.Agent) {
 			defer wg.Done()
+			defer func() { <-sem }()
 
 			// The filter above used the list snapshot; re-read so a delete
 			// that claimed the row since is skipped the same way (a stop is
