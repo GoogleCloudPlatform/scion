@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 109
+const expectedTableCount = 110
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -235,6 +235,12 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, "1/1", trFire.MatchedThrough)
 	assert.Equal(t, "cel", trFire.DecidedDialect)
 	assert.Contains(t, trFire.RuleTrace, `"class":"matched"`)
+
+	trClaim, err := composite.GetActiveTriggerSubjectClaim(ctx, triggerID, "webhook:"+webhookEndpointID)
+	require.NoError(t, err, "trigger_subject_claims fixture row must be readable via TriggerStore")
+	assert.Equal(t, triggerSubjectClaimID, trClaim.ID)
+	assert.Equal(t, store.TriggerSubjectClaimStateActive, trClaim.State)
+	assert.Equal(t, agentID, trClaim.AgentID)
 
 	withdrawnDec, err := composite.GetDecision(ctx, "dc000000-0000-0000-0000-000000000003")
 	require.NoError(t, err)
