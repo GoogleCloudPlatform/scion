@@ -235,6 +235,10 @@ func (c *ContainerScriptHarness) GetCommand(task string, resume bool, baseArgs [
 	return args
 }
 
+// maxSystemPromptFileBytes bounds a system prompt file read from the agent
+// home.
+const maxSystemPromptFileBytes = 4 << 20
+
 // readSystemPrompt returns the system prompt content if SystemPromptFlag is
 // configured and a staged or native system prompt file exists on disk. Returns
 // empty string if no system prompt is available (not an error — the agent may
@@ -250,16 +254,21 @@ func (c *ContainerScriptHarness) readSystemPrompt() string {
 	// Prefer the staged input written by InjectSystemPrompt; fall back to the
 	// harness-native location (e.g. .claude/system-prompt.md) which may exist
 	// on resume when the staged inputs directory has been cleaned up.
-	paths := []string{
-		filepath.Join(c.agentHome, ".scion", "harness", "inputs", "system-prompt.md"),
-	}
+	//
+	// The agent can change its home, so each file is read without following
+	// a symbolic link at any component or at the file (agenthome.ReadFileAt);
+	// a refused file is skipped with a warning naming its home-relative path.
+	paths := []string{path.Join(inputsRel, "system-prompt.md")}
 	if c.entry.SystemPromptFile != "" {
-		paths = append(paths, filepath.Join(c.agentHome, c.entry.SystemPromptFile))
+		paths = append(paths, c.entry.SystemPromptFile)
 	}
 
 	for _, p := range paths {
-		data, err := os.ReadFile(p)
+		data, err := agenthome.ReadFileAt(c.agentHome, p, maxSystemPromptFileBytes)
 		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("Ignoring a system prompt file that is not a plain regular file inside the agent home (a symbolic link, hard link or special file is refused)", "file", p)
+			}
 			continue
 		}
 		// A placeholder-only file (the default template's, staged by an
@@ -542,35 +551,40 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 		}
 	}
 
+	// Every file below is read from the harness-config directory without
+	// following a symbolic link (openHarnessConfigDir).
+	cfgDir, err := openHarnessConfigDir(c.configDirPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = cfgDir.Close() }()
+
 	// Copy config.yaml from the harness-config root into the bundle.
-	if err := copyHarnessConfigFile(filepath.Join(c.configDirPath, "config.yaml"), home, path.Join(bundleRel, "config.yaml"), 0644); err != nil {
+	if found, err := copyHarnessConfigFile(cfgDir, "config.yaml", home, path.Join(bundleRel, "config.yaml"), 0644); err != nil || !found {
+		if err == nil {
+			err = errors.New("harness-config file config.yaml does not exist")
+		}
 		return fmt.Errorf("stage config.yaml: %w", err)
 	}
 
 	// Copy provision.py if present in the harness-config dir.
-	provisionSrc := filepath.Join(c.configDirPath, "provision.py")
-	if fileExistsHelper(provisionSrc) {
-		if err := copyHarnessConfigFile(provisionSrc, home, path.Join(bundleRel, "provision.py"), 0755); err != nil {
-			return fmt.Errorf("stage provision.py: %w", err)
-		}
+	if _, err := copyHarnessConfigFile(cfgDir, "provision.py", home, path.Join(bundleRel, "provision.py"), 0755); err != nil {
+		return fmt.Errorf("stage provision.py: %w", err)
 	}
 
 	// Stage capture_auth.py and capture-auth-config.json into the bundle.
-	if err := stageCaptureAuthAssets(home, c.configDirPath, c.entry.Auth); err != nil {
+	if err := stageCaptureAuthAssets(home, cfgDir, c.entry.Auth); err != nil {
 		return fmt.Errorf("stage capture-auth assets: %w", err)
 	}
 
 	// Copy dialect.yaml if present.
-	dialectSrc := filepath.Join(c.configDirPath, "dialect.yaml")
-	if fileExistsHelper(dialectSrc) {
-		if err := copyHarnessConfigFile(dialectSrc, home, path.Join(bundleRel, "dialect.yaml"), 0644); err != nil {
-			return fmt.Errorf("stage dialect.yaml: %w", err)
-		}
+	if _, err := copyHarnessConfigFile(cfgDir, "dialect.yaml", home, path.Join(bundleRel, "dialect.yaml"), 0644); err != nil {
+		return fmt.Errorf("stage dialect.yaml: %w", err)
 	}
 
 	// Stage scion_harness.py next to provision.py so the in-container script
 	// can import it. The lib mode (vendored | injected) determines the source.
-	if err := c.stageHarnessLib(home); err != nil {
+	if err := c.stageHarnessLib(home, cfgDir); err != nil {
 		return err
 	}
 
@@ -1188,7 +1202,7 @@ func containerBundlePath(_ string) string {
 //   - injected (or absent): write the binary-embedded copy (legacy behavior).
 //
 // Both modes log the staged source and LIB_VERSION for diagnostics.
-func (c *ContainerScriptHarness) stageHarnessLib(home *agenthome.Home) error {
+func (c *ContainerScriptHarness) stageHarnessLib(home, cfgDir *agenthome.Home) error {
 	dst := path.Join(bundleRel, "scion_harness.py")
 	libMode := "injected"
 	if c.entry.Provisioner != nil && c.entry.Provisioner.Lib != "" {
@@ -1199,12 +1213,12 @@ func (c *ContainerScriptHarness) stageHarnessLib(home *agenthome.Home) error {
 	var staged []byte
 	switch libMode {
 	case "vendored":
-		src := filepath.Join(c.configDirPath, "scion_harness.py")
-		if !fileExistsHelper(src) {
+		data, found, err := readHarnessConfigFile(cfgDir, "scion_harness.py")
+		if err == nil && !found {
+			src := filepath.Join(c.configDirPath, "scion_harness.py")
 			return fmt.Errorf("stage scion_harness.py: provisioner.lib is %q but %s does not exist — "+
 				"run 'go generate ./harnesses/' or include scion_harness.py in the harness bundle", libMode, src)
 		}
-		data, err := os.ReadFile(src)
 		if err == nil {
 			err = home.WriteFile(dst, data, 0644)
 		}
@@ -1336,15 +1350,62 @@ exec sciontool harness provision --manifest "%s/manifest.json"
 	return home.WriteFile(provisionHookRel, []byte(wrapper), 0755)
 }
 
-// copyHarnessConfigFile copies src, a file of the harness-config directory,
-// to dstRel in the agent home with mode, confined to the home. dstRel's
-// parent must exist.
-func copyHarnessConfigFile(src string, home *agenthome.Home, dstRel string, mode os.FileMode) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
+// maxHarnessConfigFileBytes bounds a file read from the harness-config
+// directory.
+const maxHarnessConfigFileBytes = 4 << 20
+
+// openHarnessConfigDir opens the harness-config directory configDirPath
+// for reading, without following a symbolic link at the directory itself
+// (agenthome.OpenBelow its parent). The error never names a host path.
+func openHarnessConfigDir(configDirPath string) (*agenthome.Home, error) {
+	clean := filepath.Clean(configDirPath)
+	dir, err := agenthome.OpenBelow(filepath.Dir(clean), filepath.Base(clean))
+	switch {
+	case errors.Is(err, agenthome.ErrLinkComponent) || errors.Is(err, agenthome.ErrNotDirectory):
+		return nil, errors.New("harness-config directory is a symbolic link or not a directory; replace the link with the directory itself")
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, fmt.Errorf("harness-config directory does not exist: %w", fs.ErrNotExist)
+	case err != nil:
+		return nil, errors.New("harness-config directory cannot be opened")
 	}
-	return home.WriteFile(dstRel, data, mode)
+	return dir, nil
+}
+
+// readHarnessConfigFile reads the file name at the top of the
+// harness-config directory cfgDir without following a symbolic link: a
+// link, special file, hard-linked file or file over
+// maxHarnessConfigFileBytes is refused with an error naming name, never a
+// host path. found is false, with a nil error, when there is no entry.
+func readHarnessConfigFile(cfgDir *agenthome.Home, name string) (data []byte, found bool, err error) {
+	fi, err := cfgDir.Lstat(name)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, false, nil
+	case err != nil:
+		return nil, true, fmt.Errorf("harness-config file %s cannot be inspected", name)
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return nil, true, fmt.Errorf("harness-config file %s is a symbolic link; replace it with the file itself", name)
+	}
+	data, err = cfgDir.ReadFile(name, maxHarnessConfigFileBytes)
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return nil, true, fmt.Errorf("harness-config file %s cannot be read (permission denied)", name)
+	case err != nil:
+		return nil, true, fmt.Errorf("harness-config file %s is not a plain regular file of at most 4 MiB (hard links and special files are refused)", name)
+	}
+	return data, true, nil
+}
+
+// copyHarnessConfigFile copies the file name of the harness-config
+// directory cfgDir (readHarnessConfigFile) to dstRel in the agent home with
+// mode, confined to the home. dstRel's parent must exist. found is false,
+// and nothing is written, when the file does not exist.
+func copyHarnessConfigFile(cfgDir *agenthome.Home, name string, home *agenthome.Home, dstRel string, mode os.FileMode) (found bool, err error) {
+	data, found, err := readHarnessConfigFile(cfgDir, name)
+	if err != nil || !found {
+		return found, err
+	}
+	return true, home.WriteFile(dstRel, data, mode)
 }
 
 func fileExistsHelper(path string) bool {
@@ -1404,23 +1465,26 @@ func StageCaptureAuthAssets(agentHome, configDirPath string, authMeta *config.Ha
 		return err
 	}
 	defer func() { _ = home.Close() }()
-	return stageCaptureAuthAssets(home, configDirPath, authMeta)
+	cfgDir, err := openHarnessConfigDir(configDirPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = cfgDir.Close() }()
+	return stageCaptureAuthAssets(home, cfgDir, authMeta)
 }
 
-// stageCaptureAuthAssets is StageCaptureAuthAssets on an open agent home;
-// every write is confined to the home.
-func stageCaptureAuthAssets(home *agenthome.Home, configDirPath string, authMeta *config.HarnessAuthMetadata) error {
+// stageCaptureAuthAssets is StageCaptureAuthAssets on an open agent home
+// and harness-config directory (openHarnessConfigDir); every write is
+// confined to the home.
+func stageCaptureAuthAssets(home, cfgDir *agenthome.Home, authMeta *config.HarnessAuthMetadata) error {
 	for _, dir := range []string{bundleRel, inputsRel} {
 		if err := home.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("create dir %q: %w", dir, err)
 		}
 	}
 
-	captureAuthSrc := filepath.Join(configDirPath, "capture_auth.py")
-	if fileExistsHelper(captureAuthSrc) {
-		if err := copyHarnessConfigFile(captureAuthSrc, home, path.Join(bundleRel, "capture_auth.py"), 0755); err != nil {
-			return fmt.Errorf("stage capture_auth.py: %w", err)
-		}
+	if _, err := copyHarnessConfigFile(cfgDir, "capture_auth.py", home, path.Join(bundleRel, "capture_auth.py"), 0755); err != nil {
+		return fmt.Errorf("stage capture_auth.py: %w", err)
 	}
 
 	if authMeta == nil || len(authMeta.Types) == 0 {
