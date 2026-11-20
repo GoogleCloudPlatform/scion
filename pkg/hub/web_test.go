@@ -578,7 +578,13 @@ func TestRootLevelStaticFile_ListedFilesServedWithoutSession(t *testing.T) {
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 			assert.Equal(t, http.StatusOK, rec.Code, "GET %s (Accept %q)", p, accept)
-			assert.Equal(t, "data", rec.Body.String(), "GET %s (Accept %q)", p, accept)
+			if p == "/manifest.webmanifest" {
+				// Served dynamically from ResolvedBranding (handleWebManifest), not the disk stub.
+				assert.Equal(t, "application/manifest+json", rec.Header().Get("Content-Type"), "GET %s (Accept %q)", p, accept)
+				assert.Contains(t, rec.Body.String(), `"display":"standalone"`, "GET %s (Accept %q)", p, accept)
+			} else {
+				assert.Equal(t, "data", rec.Body.String(), "GET %s (Accept %q)", p, accept)
+			}
 		}
 	}
 }
@@ -619,7 +625,13 @@ func TestRootLevelStaticFile_SignedInUnaffected(t *testing.T) {
 	for p := range rootStaticFiles {
 		rec := get(p)
 		assert.Equal(t, http.StatusOK, rec.Code, "GET %s", p)
-		assert.Equal(t, "data", rec.Body.String(), "GET %s", p)
+		if p == "/manifest.webmanifest" {
+			// Served dynamically from ResolvedBranding (handleWebManifest), not the disk stub.
+			assert.Equal(t, "application/manifest+json", rec.Header().Get("Content-Type"), "GET %s", p)
+			assert.Contains(t, rec.Body.String(), `"display":"standalone"`, "GET %s", p)
+		} else {
+			assert.Equal(t, "data", rec.Body.String(), "GET %s", p)
+		}
 	}
 	rec := get("/robots.txt")
 	assert.Equal(t, http.StatusOK, rec.Code)
