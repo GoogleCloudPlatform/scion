@@ -29,9 +29,15 @@ import (
 // Seams for tests to simulate foreign-owned files without root/chown.
 var (
 	deletePathOwner  = lstatPathOwner
+	deleteRootOwner  = func(_ string, fi fs.FileInfo) (int, int, bool) { return fileInfoOwner(fi) }
 	deleteProcessUID = os.Getuid
 	deleteProcessGID = os.Getgid
 )
+
+// maxOwnershipWalkEntries bounds the read-only walk inside an os.Root when
+// os.Root.RemoveAll fails with fs.ErrPermission (os.Root.RemoveAll reports
+// only the top-level relative path, not the nested entry that failed).
+const maxOwnershipWalkEntries = 10000
 
 // deleteOwnershipMismatch describes a filesystem permission error during
 // agent or project deletion caused by files owned by a different host UID
@@ -45,13 +51,106 @@ type deleteOwnershipMismatch struct {
 	BrokerGID int
 }
 
+// deleteOwnershipError wraps a filesystem permission error with the nested
+// foreign-owned entry discovered inside an os.Root after os.Root.RemoveAll
+// failed (os.Root.RemoveAll only reports the top-level name it was called with).
+type deleteOwnershipError struct {
+	mismatch *deleteOwnershipMismatch
+	err      error
+}
+
+func (e *deleteOwnershipError) Error() string { return e.err.Error() }
+func (e *deleteOwnershipError) Unwrap() error { return e.err }
+
+// findForeignOwnerInRoot performs a bounded, read-only walk of rel inside root
+// without following symlinks, returning the first directory whose owner UID
+// differs from the Runtime Broker process's UID. Returns nil when no foreign
+// owner is found or the walk limit is reached.
+func findForeignOwnerInRoot(root *os.Root, rootDir, rel string) *deleteOwnershipMismatch {
+	brokerUID := deleteProcessUID()
+	brokerGID := deleteProcessGID()
+
+	queue := []string{filepath.Clean(rel)}
+	visited := 0
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
+		fi, err := root.Lstat(cur)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+
+		fullCur := filepath.Join(rootDir, cur)
+		if uid, gid, ok := deleteRootOwner(fullCur, fi); ok && uid != brokerUID {
+			failingPath := fullCur
+			if child := firstEntryInRootDir(root, cur); child != "" {
+				failingPath = filepath.Join(fullCur, child)
+			}
+			return &deleteOwnershipMismatch{
+				Path:      failingPath,
+				OwnerPath: fullCur,
+				OwnerUID:  uid,
+				OwnerGID:  gid,
+				BrokerUID: brokerUID,
+				BrokerGID: brokerGID,
+			}
+		}
+
+		f, err := root.Open(cur)
+		if err != nil {
+			continue
+		}
+		entries, readErr := f.ReadDir(-1)
+		_ = f.Close()
+		if readErr != nil {
+			continue
+		}
+
+		for _, de := range entries {
+			visited++
+			if visited > maxOwnershipWalkEntries {
+				return nil
+			}
+			if de.Type()&fs.ModeSymlink != 0 {
+				continue
+			}
+			if de.IsDir() {
+				queue = append(queue, filepath.Join(cur, de.Name()))
+			}
+		}
+	}
+	return nil
+}
+
+// firstEntryInRootDir returns the name of the first entry in dir inside root,
+// or "" if dir is empty or unreadable.
+func firstEntryInRootDir(root *os.Root, dir string) string {
+	f, err := root.Open(dir)
+	if err != nil {
+		return ""
+	}
+	entries, err := f.ReadDir(1)
+	_ = f.Close()
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	return entries[0].Name()
+}
+
 // detectDeleteOwnershipMismatch reports whether err is a filesystem permission
 // error whose failing path (or its parent directory) is owned by a different
 // host UID than the Runtime Broker process.
 //
-// rootDir is joined onto a relative fs.PathError.Path (such as errors returned
-// by os.Root.RemoveAll) before inspecting ownership.
+// rootDir is joined onto a relative fs.PathError.Path before inspecting
+// ownership. Errors already annotated by removeProjectConfigsSubtree
+// (*deleteOwnershipError) return their recorded mismatch directly.
 func detectDeleteOwnershipMismatch(err error, rootDir string) (*deleteOwnershipMismatch, bool) {
+	var oe *deleteOwnershipError
+	if errors.As(err, &oe) && oe.mismatch != nil {
+		return oe.mismatch, true
+	}
 	if !errors.Is(err, fs.ErrPermission) {
 		return nil, false
 	}
@@ -99,7 +198,7 @@ func detectDeleteOwnershipMismatch(err error, rootDir string) (*deleteOwnershipM
 // deleteOwnershipMismatchMessage returns the path-free client message for a
 // delete operation blocked by a host UID ownership mismatch.
 func deleteOwnershipMismatchMessage(op string) string {
-	return failedOpText(op) + ": permission denied because files are owned by a different host UID than the runtime broker; fix file ownership on the broker host and retry (see ptone/scion#4403)"
+	return failedOpText(op) + ": permission denied because files are owned by a different host UID than the runtime broker; fix ownership of the agent home on the broker host so the broker user can delete it and retry"
 }
 
 // writeDeleteOpError handles a filesystem deletion error from deleteProject or
@@ -112,7 +211,8 @@ func deleteOwnershipMismatchMessage(op string) string {
 // other errors it delegates to writeRuntimeOpError.
 func (s *Server) writeDeleteOpError(w http.ResponseWriter, ctx context.Context, op string, err error, rootDir string, extra ...any) {
 	if m, ok := detectDeleteOwnershipMismatch(err, rootDir); ok {
-		args := make([]any, 0, len(extra)+18)
+		// 8 fixed key/value pairs (16) + extra + "error"/err (2).
+		args := make([]any, 0, 16+len(extra)+2)
 		args = append(args,
 			"op", op,
 			"reason", "file_ownership_mismatch",

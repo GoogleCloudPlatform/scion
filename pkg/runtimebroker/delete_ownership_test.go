@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,18 +38,24 @@ import (
 func stubDeleteOwnership(t *testing.T, brokerUID, brokerGID int, owners map[string][2]int) {
 	t.Helper()
 	origOwner := deletePathOwner
+	origRootOwner := deleteRootOwner
 	origUID := deleteProcessUID
 	origGID := deleteProcessGID
 	deleteProcessUID = func() int { return brokerUID }
 	deleteProcessGID = func() int { return brokerGID }
-	deletePathOwner = func(path string) (int, int, bool) {
+	lookup := func(path string) (int, int, bool) {
 		if pair, ok := owners[filepath.Clean(path)]; ok {
 			return pair[0], pair[1], true
 		}
-		return 0, 0, false
+		return brokerUID, brokerGID, true
+	}
+	deletePathOwner = lookup
+	deleteRootOwner = func(path string, _ fs.FileInfo) (int, int, bool) {
+		return lookup(path)
 	}
 	t.Cleanup(func() {
 		deletePathOwner = origOwner
+		deleteRootOwner = origRootOwner
 		deleteProcessUID = origUID
 		deleteProcessGID = origGID
 	})
@@ -79,14 +86,14 @@ func TestDetectDeleteOwnershipMismatch(t *testing.T) {
 		}
 	})
 
-	t.Run("foreign-owned parent with os.Root-relative path", func(t *testing.T) {
+	t.Run("foreign-owned parent with relative path", func(t *testing.T) {
 		stubDeleteOwnership(t, 1002, 1002, map[string][2]int{
 			homeDir: {1000, 1000},
 		})
 		err := &fs.PathError{Op: "remove", Path: relBashrc, Err: fs.ErrPermission}
 		m, ok := detectDeleteOwnershipMismatch(err, rootDir)
 		if !ok {
-			t.Fatal("expected ownership mismatch to be detected for relative os.Root path")
+			t.Fatal("expected ownership mismatch to be detected for relative path")
 		}
 		if m.Path != bashrc || m.OwnerPath != homeDir {
 			t.Errorf("got path=%q ownerPath=%q, want path=%q ownerPath=%q", m.Path, m.OwnerPath, bashrc, homeDir)
@@ -130,7 +137,15 @@ func TestDetectDeleteOwnershipMismatch(t *testing.T) {
 	})
 }
 
+// TestDeleteProject_ForeignOwnedHomeReturnsClearErrorAndLogsMismatch drives
+// the real removeProjectConfigsSubtree -> os.Root.RemoveAll producer against
+// a nested non-deletable agent home (.bashrc) under project-configs, simulating
+// foreign UID ownership at the producer's owner-lookup seam.
 func TestDeleteProject_ForeignOwnedHomeReturnsClearErrorAndLogsMismatch(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses DAC read-only directory checks")
+	}
+
 	srv, home := newScopeTestServer(t, &filteringMockManager{})
 	var logBuf bytes.Buffer
 	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(&logBuf, nil))
@@ -139,22 +154,21 @@ func TestDeleteProject_ForeignOwnedHomeReturnsClearErrorAndLogsMismatch(t *testi
 	dirA := seedProjectConfigsEntry(t, home, "proj-a", scopeProjA)
 
 	agentHome := filepath.Join(dirA, config.DotScion, "agents", "test", "home")
-	bashrc := filepath.Join(agentHome, ".bashrc")
-	rootDir := filepath.Join(home, config.DotScion, config.ProjectConfigsDir)
-	relBashrc, err := filepath.Rel(rootDir, bashrc)
-	if err != nil {
+	if err := os.MkdirAll(agentHome, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	bashrc := filepath.Join(agentHome, ".bashrc")
+	if err := os.WriteFile(bashrc, []byte("# bashrc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(agentHome, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(agentHome, 0o755) })
 
 	stubDeleteOwnership(t, 1002, 1002, map[string][2]int{
 		agentHome: {1000, 1000},
 	})
-
-	srv.mu.Lock()
-	srv.projectConfigsRemove = func(string, string) error {
-		return &fs.PathError{Op: "remove", Path: relBashrc, Err: fs.ErrPermission}
-	}
-	srv.mu.Unlock()
 
 	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
 	if rec.Code != http.StatusInternalServerError {
@@ -172,9 +186,9 @@ func TestDeleteProject_ForeignOwnedHomeReturnsClearErrorAndLogsMismatch(t *testi
 	if resp.Error.Message != wantMsg {
 		t.Errorf("message = %q, want %q", resp.Error.Message, wantMsg)
 	}
-	for _, forbidden := range []string{home, ".bashrc", "project-configs", "agents/test"} {
+	for _, forbidden := range []string{home, ".bashrc", "project-configs", "agents/test", "ptone/scion#"} {
 		if strings.Contains(rec.Body.String(), forbidden) {
-			t.Errorf("response leaked host path fragment %q: %s", forbidden, rec.Body.String())
+			t.Errorf("response leaked forbidden fragment %q: %s", forbidden, rec.Body.String())
 		}
 	}
 
@@ -191,6 +205,39 @@ func TestDeleteProject_ForeignOwnedHomeReturnsClearErrorAndLogsMismatch(t *testi
 		if !strings.Contains(logOut, wantLog) {
 			t.Errorf("server log missing %q:\n%s", wantLog, logOut)
 		}
+	}
+}
+
+// TestFindForeignOwnerInRoot_DoesNotFollowSymlink verifies that the read-only
+// ownership walk inside os.Root ignores symlinks pointing to foreign-owned
+// directories outside project-configs.
+func TestFindForeignOwnerInRoot_DoesNotFollowSymlink(t *testing.T) {
+	outside := t.TempDir()
+	globalDir := filepath.Join(t.TempDir(), config.DotScion)
+	rootDir := filepath.Join(globalDir, config.ProjectConfigsDir)
+	entryName := "proj-sym__11111111"
+	subDir := filepath.Join(rootDir, entryName, "sub")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(subDir, "escape")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the symlink target outside project-configs is foreign-owned;
+	// everything inside project-configs is broker-owned.
+	stubDeleteOwnership(t, 1002, 1002, map[string][2]int{
+		outside: {1000, 1000},
+	})
+
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	if m := findForeignOwnerInRoot(root, rootDir, entryName); m != nil {
+		t.Fatalf("expected no ownership mismatch (symlink must not be followed), got %+v", m)
 	}
 }
 
@@ -246,9 +293,9 @@ func TestDeleteAgent_ForeignOwnedHomeReturnsClearErrorAndLogsMismatch(t *testing
 	if resp.Error.Message != wantMsg {
 		t.Errorf("message = %q, want %q", resp.Error.Message, wantMsg)
 	}
-	for _, forbidden := range []string{home, ".bashrc", "project-configs"} {
+	for _, forbidden := range []string{home, ".bashrc", "project-configs", "ptone/scion#"} {
 		if strings.Contains(rec.Body.String(), forbidden) {
-			t.Errorf("response leaked host path fragment %q: %s", forbidden, rec.Body.String())
+			t.Errorf("response leaked forbidden fragment %q: %s", forbidden, rec.Body.String())
 		}
 	}
 

@@ -17,13 +17,13 @@
 package runtimebroker
 
 import (
+	"io/fs"
 	"os"
 	"syscall"
 )
 
-func lstatPathOwner(path string) (uid, gid int, ok bool) {
-	fi, err := os.Lstat(path)
-	if err != nil {
+func fileInfoOwner(fi fs.FileInfo) (uid, gid int, ok bool) {
+	if fi == nil {
 		return 0, 0, false
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
@@ -31,4 +31,12 @@ func lstatPathOwner(path string) (uid, gid int, ok bool) {
 		return 0, 0, false
 	}
 	return int(st.Uid), int(st.Gid), true
+}
+
+func lstatPathOwner(path string) (uid, gid int, ok bool) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	return fileInfoOwner(fi)
 }

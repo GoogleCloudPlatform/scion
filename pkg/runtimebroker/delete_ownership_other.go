@@ -16,7 +16,14 @@
 
 package runtimebroker
 
+import "io/fs"
+
+// fileInfoOwner reports no owner on platforms without numeric POSIX owners.
+func fileInfoOwner(fs.FileInfo) (uid, gid int, ok bool) {
+	return 0, 0, false
+}
+
 // lstatPathOwner reports no owner on platforms without numeric POSIX owners.
-func lstatPathOwner(path string) (uid, gid int, ok bool) {
+func lstatPathOwner(string) (uid, gid int, ok bool) {
 	return 0, 0, false
 }

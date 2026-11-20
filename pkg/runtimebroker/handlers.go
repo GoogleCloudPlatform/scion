@@ -8987,7 +8987,13 @@ func removeProjectConfigsSubtree(globalDir, path string) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	return root.RemoveAll(rel)
+	err = root.RemoveAll(rel)
+	if err != nil && errors.Is(err, os.ErrPermission) {
+		if mismatch := findForeignOwnerInRoot(root, rootDir, rel); mismatch != nil {
+			return &deleteOwnershipError{mismatch: mismatch, err: err}
+		}
+	}
+	return err
 }
 
 // errDeleteTargetNotFound means no agent with the requested slug exists in
