@@ -801,3 +801,197 @@ func TestAdminSystemOne_GeminiADCVerticalRoundTripProbeAndRedaction(t *testing.T
 		assert.Contains(t, delOut, "Deleted System One instance "+name)
 	}
 }
+
+func TestAdminSystemOne_GeminiNamedSecretVerticalCLIProbeFallbackAndDeleteSafety(t *testing.T) {
+	resetAdminSystemOneFlags(t)
+	env := startInProcessSystemOneHub(t)
+	ctx := context.Background()
+
+	const (
+		envIgnoredKey = "CANARY_CLI_G4D_ENV_IGNORED_8414"
+		hubCanaryKey  = "CANARY_CLI_G4D_HUB_KEY_8414"
+		projCanaryKey = "CANARY_CLI_G4D_PROJ_KEY_8414"
+		projRotKey    = "CANARY_CLI_G4D_PROJ_ROTATED_8414"
+	)
+	t.Setenv("GEMINI_API_KEY", envIgnoredKey)
+
+	var providerHits atomic.Int32
+	var lastHeaderKey atomic.Value
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerHits.Add(1)
+		lastHeaderKey.Store(r.Header.Get(geminidecisions.HeaderAPIKey))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"answers": {
+				"mentions_tests": {"type": "noul", "noul": 0.95, "confidence": 0.95},
+				"build_outcome": {
+					"type": "choice",
+					"choice": "passed",
+					"confidence": 0.93,
+					"probabilities": {"failed": 0.04, "passed": 0.93, "unknown": 0.03}
+				}
+			}
+		}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	env.server.SetSystemOneRuntimeOptionsForTesting(
+		t,
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+
+	// Create a project in the Hub's backing SQLite store via hubclient.
+	createdProj, err := env.client.Projects().Create(ctx, &hubclient.CreateProjectRequest{
+		Name: "CLI G4d Project",
+		Slug: "cli-g4d-proj",
+	})
+	require.NoError(t, err)
+
+	// Seed Hub and Project GEMINI_API_KEY secrets directly in the Hub's LocalBackend.
+	_, _, err = env.secretStore.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      hubCanaryKey,
+		SecretType: store.SecretTypeVariable,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeHub,
+		ScopeID:    inProcessSystemOneHubID,
+		CreatedBy:  "test-admin",
+		UpdatedBy:  "test-admin",
+	})
+	require.NoError(t, err)
+
+	_, _, err = env.secretStore.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      projCanaryKey,
+		SecretType: store.SecretTypeVariable,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeProject,
+		ScopeID:    createdProj.ID,
+		CreatedBy:  "test-admin",
+		UpdatedBy:  "test-admin",
+	})
+	require.NoError(t, err)
+
+	specRaw := buildSystemOneLiveProbeSpec(t)
+	specFile := filepath.Join(t.TempDir(), "probe-spec.json")
+	require.NoError(t, os.WriteFile(specFile, specRaw, 0o600))
+
+	// 1. Create gemini_decisions instance via CLI with implicit default (GEMINI_API_KEY / project_or_hub).
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	createOut, createErr, err := executeAdminSystemOneSubcmd(t, []string{
+		"create", "gemini-cli-named",
+		"--adapter", geminidecisions.AdapterName,
+		"--model", "gemini-decision-1",
+		"--endpoint", tlsSrv.URL,
+	}, strings.NewReader(""))
+	require.NoError(t, err)
+	assert.Contains(t, createOut, "Secret Ref:      GEMINI_API_KEY (scope: project_or_hub)")
+	assert.NotContains(t, createOut, hubCanaryKey)
+	assert.NotContains(t, createErr, hubCanaryKey)
+
+	// 2. List shows GEMINI_API_KEY (project_or_hub).
+	resetAdminSystemOneFlags(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	listOut, _, err := executeAdminSystemOneSubcmd(t, []string{"list"}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, listOut, "GEMINI_API_KEY (project_or_hub)")
+
+	// 3. Probe WITHOUT --project fails with invalid_request and 0 provider requests.
+	providerHits.Store(0)
+	resetAdminSystemOneFlags(t)
+	restoreAllSilenceUsage(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	noProjOut, _, noProjErr := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-cli-named",
+		"--spec-file", specFile,
+		"--text", "All 18 unit tests passed.",
+	}, nil)
+	require.Error(t, noProjErr)
+	assert.Contains(t, noProjOut, "Reason: invalid_request")
+	assert.Zero(t, providerHits.Load())
+
+	// 4. Probe WITH --project cli-g4d-proj resolves project secret (v1).
+	resetAdminSystemOneFlags(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	projOut, projErr, err := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-cli-named",
+		"--project", createdProj.Slug,
+		"--spec-file", specFile,
+		"--text", "All 18 unit tests passed.",
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, projCanaryKey, lastHeaderKey.Load())
+	assert.Contains(t, projOut, "Secret Ref:           GEMINI_API_KEY (scope: project_or_hub, scope_used: project)")
+	assert.Contains(t, projOut, "Secret Version:       1")
+	assert.NotContains(t, projOut, projCanaryKey)
+	assert.NotContains(t, projErr, projCanaryKey)
+
+	// 5. Rotate project secret -> next CLI probe uses new key and shows version 2.
+	_, _, err = env.secretStore.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      projRotKey,
+		SecretType: store.SecretTypeVariable,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeProject,
+		ScopeID:    createdProj.ID,
+		CreatedBy:  "test-admin",
+		UpdatedBy:  "test-admin",
+	})
+	require.NoError(t, err)
+
+	resetAdminSystemOneFlags(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	rotOut, _, err := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-cli-named",
+		"--project", createdProj.ID,
+		"--spec-file", specFile,
+		"--text", "All 18 unit tests passed.",
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, projRotKey, lastHeaderKey.Load())
+	assert.Contains(t, rotOut, "Secret Version:       2")
+	assert.NotContains(t, rotOut, projRotKey)
+
+	// 6. Delete project secret -> next CLI probe falls back to Hub secret (scope_used: hub).
+	require.NoError(t, env.secretStore.Delete(ctx, "GEMINI_API_KEY", store.ScopeProject, createdProj.ID))
+
+	resetAdminSystemOneFlags(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	fbOut, _, err := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-cli-named",
+		"--project", createdProj.ID,
+		"--spec-file", specFile,
+		"--text", "All 18 unit tests passed.",
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, hubCanaryKey, lastHeaderKey.Load())
+	assert.Contains(t, fbOut, "Secret Ref:           GEMINI_API_KEY (scope: project_or_hub, scope_used: hub)")
+	assert.NotContains(t, fbOut, hubCanaryKey)
+
+	// 7. Delete instance via CLI -> Hub GEMINI_API_KEY secret remains intact!
+	resetAdminSystemOneFlags(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	delOut, _, err := executeAdminSystemOneSubcmd(t, []string{"delete", "gemini-cli-named"}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, delOut, "Deleted System One instance gemini-cli-named")
+
+	hubAfterDel, err := env.secretStore.Get(ctx, "GEMINI_API_KEY", store.ScopeHub, inProcessSystemOneHubID)
+	require.NoError(t, err)
+	assert.Equal(t, hubCanaryKey, hubAfterDel.Value)
+}

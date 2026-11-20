@@ -38,6 +38,8 @@ type adminSystemOneCreateFlags struct {
 	authKind       string
 	authScopes     []string
 	quotaProject   string
+	secretName     string
+	secretScope    string
 	keyFile        string
 	keyStdin       bool
 	options        []string
@@ -55,10 +57,26 @@ var adminSystemOneInstanceCreateCmd = &cobra.Command{
 	Short: "Register a Hub System One provider instance",
 	Long: `Register a System One provider instance on the Hub.
 
-When --auth-kind is api_key (the default), the provider API key is read ONLY
-from standard input (piped or with --key-stdin) or from --key-file <path>.
-Passing the key via positional arguments, command-line flags, or environment
-variables is not supported.
+When --auth-kind is api_key (the default), two credential modes are supported
+(mutually exclusive):
+  1. Instance-internal secret: pass the API key ONLY via standard input (piped
+     or with --key-stdin) or --key-file <path>. Passing secret values via
+     positional arguments, flags, or process environment variables is refused.
+  2. Named Hub/project secret reference (--secret-name / --secret-scope):
+     - On gemini_decisions, omitting --key-stdin and --key-file defaults to
+       --secret-name GEMINI_API_KEY --secret-scope project_or_hub.
+     - --secret-scope selects hub, project, or project_or_hub (default:
+       project_or_hub, checking the evaluation project's secret first and
+       falling back to the Hub secret only when the project secret is not found).
+     - Allowed secret types are environment, variable, and internal (file is
+       refused). Binding a named secret to an instance never changes that
+       secret's type, injection mode, or delivery. Note that an environment
+       secret with injection mode "always" is also delivered to agent containers
+       in that scope; prefer a non-injected secret (for example --type variable
+       or --injection-mode as_needed) when agents should not receive the policy
+       evaluation key.
+     - Process environment variables (such as GEMINI_API_KEY), user secrets, and
+       runtime-broker secrets are never consulted.
 
 When --auth-kind is google_access_token (supported on gemini_decisions), the Hub
 acquires OAuth2 access tokens in memory via Google Application Default
@@ -94,8 +112,17 @@ Examples:
     --model jev-1.14.0 \
     --key-stdin < /path/to/key.txt
 
-  # Register a Gemini Decision 1 instance reading the API key from standard input
+  # Register a Gemini Decision 1 instance referencing a non-injected named secret
+  # (recommended setup: store GEMINI_API_KEY as --type variable at project or hub scope)
+  scion secret set GEMINI_API_KEY --type variable < /path/to/gemini-key.txt
   scion admin system-one instance create gemini-main \
+    --adapter gemini_decisions \
+    --model gemini-decision-1 \
+    --secret-name GEMINI_API_KEY \
+    --secret-scope project_or_hub
+
+  # Register a Gemini Decision 1 instance with an inline instance-internal API key
+  scion admin system-one instance create gemini-inline \
     --adapter gemini_decisions \
     --model gemini-decision-1 \
     --key-stdin < /path/to/gemini-key.txt
@@ -127,6 +154,8 @@ func init() {
 	f.StringVar(&adminSystemOneCreateOpts.authKind, "auth-kind", "api_key", "Authentication kind (api_key or google_access_token)")
 	f.StringArrayVar(&adminSystemOneCreateOpts.authScopes, "auth-scope", nil, "OAuth2 scope URL for --auth-kind google_access_token (repeatable; required for google_access_token; must start with https://www.googleapis.com/auth/)")
 	f.StringVar(&adminSystemOneCreateOpts.quotaProject, "quota-project", "", "Optional GCP billing/quota project ID for --auth-kind google_access_token (sent as x-goog-user-project; required only for authorized_user ADC)")
+	f.StringVar(&adminSystemOneCreateOpts.secretName, "secret-name", "", "Named Hub/project secret key for --auth-kind api_key (matches ^[A-Za-z_][A-Za-z0-9_]{0,127}$; defaults to GEMINI_API_KEY on gemini_decisions when no inline key is given)")
+	f.StringVar(&adminSystemOneCreateOpts.secretScope, "secret-scope", "", "Named-secret lookup scope for --auth-kind api_key: hub, project, or project_or_hub (default: project_or_hub)")
 	f.StringVar(&adminSystemOneCreateOpts.keyFile, "key-file", "", "Path to file containing the provider API key (or '-' for stdin)")
 	f.BoolVar(&adminSystemOneCreateOpts.keyStdin, "key-stdin", false, "Read the provider API key from standard input")
 	f.StringArrayVar(&adminSystemOneCreateOpts.options, "option", nil, "Non-secret adapter option as KEY=VALUE (repeatable)")
@@ -155,6 +184,14 @@ func runAdminSystemOneInstanceCreate(cmd *cobra.Command, args []string) error {
 		authKind = "api_key"
 	}
 
+	adapterName := strings.TrimSpace(adminSystemOneCreateOpts.adapter)
+	secretNameChanged := cmd.Flags().Changed("secret-name")
+	secretScopeChanged := cmd.Flags().Changed("secret-scope")
+	hasSecretRefFlags := secretNameChanged || secretScopeChanged ||
+		strings.TrimSpace(adminSystemOneCreateOpts.secretName) != "" ||
+		strings.TrimSpace(adminSystemOneCreateOpts.secretScope) != ""
+	hasInlineKeyFlags := adminSystemOneCreateOpts.keyStdin || strings.TrimSpace(adminSystemOneCreateOpts.keyFile) != ""
+
 	var (
 		apiKey  string
 		authReq *hubclient.CreateSystemOneInstanceAuthRequest
@@ -170,18 +207,76 @@ func runAdminSystemOneInstanceCreate(cmd *cobra.Command, args []string) error {
 		if _, hasOptQP := optsMap[provider.OptionQuotaProject]; hasOptQP {
 			return errors.New("option quota_project is only supported with --auth-kind google_access_token")
 		}
-		apiKey, err = readAdminSystemOneAPIKey(cmd, adminSystemOneCreateOpts.keyFile, adminSystemOneCreateOpts.keyStdin)
-		if err != nil {
-			return err
+		if hasSecretRefFlags && hasInlineKeyFlags {
+			return errors.New("--secret-name and --secret-scope cannot be combined with --key-stdin or --key-file")
 		}
-		authReq = &hubclient.CreateSystemOneInstanceAuthRequest{
-			Kind:   "api_key",
-			APIKey: apiKey,
+
+		useSecretRef := hasSecretRefFlags
+		var pipedKey string
+		if !hasSecretRefFlags && !hasInlineKeyFlags && adapterName == "gemini_decisions" {
+			in := cmd.InOrStdin()
+			if isInteractiveTerminalReader(in) {
+				useSecretRef = true
+			} else {
+				raw, readErr := readBoundedReader(in, maxAdminSystemOneAPIKeyReadBytes)
+				if readErr != nil {
+					return fmt.Errorf("read API key from stdin: %w", readErr)
+				}
+				if strings.TrimSpace(string(raw)) == "" {
+					useSecretRef = true
+				} else {
+					valKey, valErr := validateAdminSystemOneAPIKeyBytes(raw)
+					if valErr != nil {
+						return valErr
+					}
+					pipedKey = valKey
+				}
+			}
+		}
+
+		if useSecretRef {
+			refName := strings.TrimSpace(adminSystemOneCreateOpts.secretName)
+			if refName == "" && !secretNameChanged && adapterName == "gemini_decisions" {
+				refName = provider.DefaultGeminiAPIKeySecretName
+			}
+			if !provider.IsValidSecretRefName(refName) || isReservedCLISystemOneSecretName(refName) {
+				return errors.New("invalid --secret-name: must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$ and must not use the reserved System One secret prefix")
+			}
+			refScope := strings.TrimSpace(adminSystemOneCreateOpts.secretScope)
+			if refScope == "" && !secretScopeChanged {
+				refScope = provider.DefaultSecretRefScope
+			}
+			if !provider.IsValidSecretRefScope(refScope) {
+				return errors.New("invalid --secret-scope: must be \"hub\", \"project\", or \"project_or_hub\"")
+			}
+			authReq = &hubclient.CreateSystemOneInstanceAuthRequest{
+				Kind: "api_key",
+				SecretRef: &hubclient.SystemOneSecretRefDTO{
+					Name:  refName,
+					Scope: refScope,
+				},
+			}
+		} else {
+			if pipedKey != "" {
+				apiKey = pipedKey
+			} else {
+				apiKey, err = readAdminSystemOneAPIKey(cmd, adminSystemOneCreateOpts.keyFile, adminSystemOneCreateOpts.keyStdin)
+				if err != nil {
+					return err
+				}
+			}
+			authReq = &hubclient.CreateSystemOneInstanceAuthRequest{
+				Kind:   "api_key",
+				APIKey: apiKey,
+			}
 		}
 
 	case string(provider.AuthKindGoogleAccessToken):
-		if adminSystemOneCreateOpts.keyStdin || strings.TrimSpace(adminSystemOneCreateOpts.keyFile) != "" {
+		if hasInlineKeyFlags {
 			return errors.New("--key-stdin and --key-file cannot be combined with --auth-kind google_access_token")
+		}
+		if hasSecretRefFlags {
+			return errors.New("--secret-name and --secret-scope cannot be combined with --auth-kind google_access_token")
 		}
 		cleanScopes, scopeErr := validateAdminSystemOneCLIScopes(adminSystemOneCreateOpts.authScopes)
 		if scopeErr != nil {
@@ -268,6 +363,9 @@ func runAdminSystemOneInstanceCreate(cmd *cobra.Command, args []string) error {
 	if inst.Auth.SecretName != "" {
 		_, _ = fmt.Fprintf(out, "  Secret:   %s\n", inst.Auth.SecretName)
 	}
+	if inst.Auth.SecretRef != nil {
+		_, _ = fmt.Fprintf(out, "  Secret Ref:      %s (scope: %s)\n", inst.Auth.SecretRef.Name, inst.Auth.SecretRef.Scope)
+	}
 	if len(inst.Auth.Scopes) > 0 {
 		_, _ = fmt.Fprintf(out, "  Scopes:          %s\n", strings.Join(inst.Auth.Scopes, ", "))
 	}
@@ -347,6 +445,10 @@ func readAdminSystemOneAPIKey(cmd *cobra.Command, keyFile string, keyStdin bool)
 		}
 	}
 
+	return validateAdminSystemOneAPIKeyBytes(raw)
+}
+
+func validateAdminSystemOneAPIKeyBytes(raw []byte) (string, error) {
 	key := strings.TrimSpace(string(raw))
 	if key == "" {
 		return "", errors.New("API key is empty; provide a non-empty credential via --key-file or stdin")
@@ -360,6 +462,12 @@ func readAdminSystemOneAPIKey(cmd *cobra.Command, keyFile string, keyStdin bool)
 		}
 	}
 	return key, nil
+}
+
+func isReservedCLISystemOneSecretName(name string) bool {
+	folded := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
+	folded = strings.ReplaceAll(folded, ".", "-")
+	return strings.HasPrefix(folded, "systemone-instance-")
 }
 
 func isInteractiveTerminalReader(r io.Reader) bool {

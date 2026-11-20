@@ -99,6 +99,13 @@ func runAdminSystemOneInstanceList(cmd *cobra.Command, _ []string) error {
 			authKind = "-"
 		}
 		secretName := inst.Auth.SecretName
+		if inst.Auth.SecretRef != nil && inst.Auth.SecretRef.Name != "" {
+			if inst.Auth.SecretRef.Scope != "" {
+				secretName = inst.Auth.SecretRef.Name + " (" + inst.Auth.SecretRef.Scope + ")"
+			} else {
+				secretName = inst.Auth.SecretRef.Name
+			}
+		}
 		if secretName == "" {
 			secretName = "-"
 		}

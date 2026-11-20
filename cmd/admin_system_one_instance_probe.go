@@ -29,6 +29,7 @@ import (
 
 type adminSystemOneProbeFlags struct {
 	models   bool
+	project  string
 	specFile string
 	text     string
 	textFile string
@@ -75,6 +76,7 @@ Examples:
 func init() {
 	f := adminSystemOneInstanceProbeCmd.Flags()
 	f.BoolVar(&adminSystemOneProbeOpts.models, "models", false, "Query models supported by the provider instance (requires adapter model-listing support, e.g. typesafe)")
+	f.StringVar(&adminSystemOneProbeOpts.project, "project", "", "Optional project ID or slug providing evaluation project context for project- or project_or_hub-scoped named secrets (requires project read access)")
 	f.StringVar(&adminSystemOneProbeOpts.specFile, "spec-file", "", "Path to inline System One spec or rule envelope (JSON or YAML, or '-' for stdin)")
 	f.StringVar(&adminSystemOneProbeOpts.text, "text", "", "Synthetic text bound to probe.text")
 	f.StringVar(&adminSystemOneProbeOpts.textFile, "text-file", "", "Path to file containing synthetic text bound to probe.text")
@@ -142,11 +144,16 @@ func buildAdminSystemOneProbeRequest(cmd *cobra.Command, opts adminSystemOneProb
 	kind := strings.TrimSpace(opts.kind)
 	ruleID := strings.TrimSpace(opts.ruleID)
 
+	projectRef := strings.TrimSpace(opts.project)
+
 	if opts.models {
 		if specFile != "" || textChanged || textFile != "" || kind != "" || ruleID != "" || len(opts.params) > 0 {
 			return nil, errors.New("--models cannot be combined with --spec-file, --text, --text-file, --kind, --rule-id, or --param")
 		}
-		return &hubclient.ProbeSystemOneInstanceRequest{Models: true}, nil
+		return &hubclient.ProbeSystemOneInstanceRequest{
+			Models:  true,
+			Project: projectRef,
+		}, nil
 	}
 
 	if specFile == "" {
@@ -197,11 +204,12 @@ func buildAdminSystemOneProbeRequest(cmd *cobra.Command, opts adminSystemOneProb
 	}
 
 	return &hubclient.ProbeSystemOneInstanceRequest{
-		Kind:   kind,
-		RuleID: ruleID,
-		Params: params,
-		Spec:   specRaw,
-		Probe:  &hubclient.ProbeSystemOneInput{Text: probeText},
+		Project: projectRef,
+		Kind:    kind,
+		RuleID:  ruleID,
+		Params:  params,
+		Spec:    specRaw,
+		Probe:   &hubclient.ProbeSystemOneInput{Text: probeText},
 	}, nil
 }
 
@@ -251,6 +259,24 @@ func renderAdminSystemOneEvaluationHuman(out io.Writer, eval *systemoneruntime.E
 	if eval.Auth != nil {
 		if eval.Auth.AuthKind != "" {
 			_, _ = fmt.Fprintf(out, "  Auth Kind:            %s\n", eval.Auth.AuthKind)
+		}
+		if eval.Auth.SecretRef != nil && eval.Auth.SecretRef.Name != "" {
+			switch {
+			case eval.Auth.SecretRef.Scope != "" && eval.Auth.SecretRef.ScopeUsed != "":
+				_, _ = fmt.Fprintf(out, "  Secret Ref:           %s (scope: %s, scope_used: %s)\n",
+					eval.Auth.SecretRef.Name, eval.Auth.SecretRef.Scope, eval.Auth.SecretRef.ScopeUsed)
+			case eval.Auth.SecretRef.ScopeUsed != "":
+				_, _ = fmt.Fprintf(out, "  Secret Ref:           %s (scope_used: %s)\n",
+					eval.Auth.SecretRef.Name, eval.Auth.SecretRef.ScopeUsed)
+			case eval.Auth.SecretRef.Scope != "":
+				_, _ = fmt.Fprintf(out, "  Secret Ref:           %s (scope: %s)\n",
+					eval.Auth.SecretRef.Name, eval.Auth.SecretRef.Scope)
+			default:
+				_, _ = fmt.Fprintf(out, "  Secret Ref:           %s\n", eval.Auth.SecretRef.Name)
+			}
+		}
+		if eval.Auth.SecretVersion > 0 {
+			_, _ = fmt.Fprintf(out, "  Secret Version:       %d\n", eval.Auth.SecretVersion)
 		}
 		if len(eval.Auth.Scopes) > 0 {
 			_, _ = fmt.Fprintf(out, "  Auth Scopes:          %s\n", strings.Join(eval.Auth.Scopes, ", "))

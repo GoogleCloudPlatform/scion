@@ -1165,3 +1165,209 @@ func TestAdminSystemOneListAndProbe_ADCMetadataOutput(t *testing.T) {
 		assert.Equal(t, "so-sa@proj.iam.gserviceaccount.com", parsed.Evaluation.Auth.ServiceAccountEmail)
 	})
 }
+
+func TestAdminSystemOne_NamedSecretFlagsOutputAndValidation(t *testing.T) {
+	now := time.Date(2026, 11, 19, 23, 30, 0, 0, time.UTC)
+
+	t.Run("gemini_decisions create defaults to GEMINI_API_KEY and project_or_hub", func(t *testing.T) {
+		resetAdminSystemOneFlags(t)
+		var captured hubclient.CreateSystemOneInstanceRequest
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&captured))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.SystemOneInstance{
+				ID:       "inst-named-1",
+				Name:     captured.Name,
+				Adapter:  captured.Adapter,
+				Model:    captured.Model,
+				Endpoint: "https://generativelanguage.googleapis.com",
+				Auth: hubclient.SystemOneInstanceAuthDTO{
+					Kind:      "api_key",
+					SecretRef: captured.Auth.SecretRef,
+				},
+				Enabled:   true,
+				Revision:  1,
+				CreatedAt: now,
+				UpdatedAt: now,
+			})
+		}))
+
+		stdout, _, err := executeAdminSystemOneSubcmd(t, []string{
+			"create", "gemini-named",
+			"--adapter", "gemini_decisions",
+			"--model", "gemini-decision-1",
+		}, strings.NewReader(""))
+		require.NoError(t, err)
+		require.NotNil(t, captured.Auth)
+		assert.Empty(t, captured.Auth.APIKey)
+		require.NotNil(t, captured.Auth.SecretRef)
+		assert.Equal(t, "GEMINI_API_KEY", captured.Auth.SecretRef.Name)
+		assert.Equal(t, "project_or_hub", captured.Auth.SecretRef.Scope)
+		assert.Contains(t, stdout, "Secret Ref:      GEMINI_API_KEY (scope: project_or_hub)")
+	})
+
+	t.Run("help documents --secret-name, --secret-scope, exposure semantics, and probe --project", func(t *testing.T) {
+		resetAdminSystemOneFlags(t)
+		createHelp, _, err := executeAdminSystemOneSubcmd(t, []string{"create", "--help"}, nil)
+		require.NoError(t, err)
+		assert.Contains(t, createHelp, "--secret-name")
+		assert.Contains(t, createHelp, "--secret-scope")
+		assert.Contains(t, createHelp, "project_or_hub")
+		assert.Contains(t, createHelp, "--type variable")
+		assert.Contains(t, createHelp, "injection mode \"always\"")
+
+		resetAdminSystemOneFlags(t)
+		probeHelp, _, err := executeAdminSystemOneSubcmd(t, []string{"probe", "--help"}, nil)
+		require.NoError(t, err)
+		assert.Contains(t, probeHelp, "--project")
+	})
+
+	t.Run("pre-request mutual exclusion and grammar errors make zero HTTP calls", func(t *testing.T) {
+		var httpCalls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			httpCalls.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+
+		keyFile := filepath.Join(t.TempDir(), "k.txt")
+		require.NoError(t, os.WriteFile(keyFile, []byte("synthetic-key\n"), 0o600))
+
+		for _, tc := range []struct {
+			name    string
+			args    []string
+			stdin   string
+			wantErr string
+		}{
+			{
+				name: "--secret-name with --key-stdin",
+				args: []string{
+					"create", "g1", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--secret-name", "GEMINI_API_KEY", "--key-stdin",
+				},
+				stdin:   "inline-secret",
+				wantErr: "cannot be combined with --key-stdin or --key-file",
+			},
+			{
+				name: "--secret-scope with --key-file",
+				args: []string{
+					"create", "g1", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--secret-scope", "hub", "--key-file", keyFile,
+				},
+				wantErr: "cannot be combined with --key-stdin or --key-file",
+			},
+			{
+				name: "--secret-name with --auth-kind google_access_token",
+				args: []string{
+					"create", "g1", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--auth-kind", "google_access_token",
+					"--auth-scope", "https://www.googleapis.com/auth/scope-a",
+					"--secret-name", "GEMINI_API_KEY",
+				},
+				wantErr: "cannot be combined with --auth-kind google_access_token",
+			},
+			{
+				name: "invalid --secret-name grammar",
+				args: []string{
+					"create", "g1", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--secret-name", "1BAD-NAME",
+				},
+				wantErr: "invalid --secret-name",
+			},
+			{
+				name: "reserved prefix --secret-name refused",
+				args: []string{
+					"create", "g1", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--secret-name", "systemone_instance_other",
+				},
+				wantErr: "invalid --secret-name",
+			},
+			{
+				name: "invalid --secret-scope refused",
+				args: []string{
+					"create", "g1", "--adapter", "gemini_decisions", "--model", "gemini-decision-1",
+					"--secret-scope", "user",
+				},
+				wantErr: "invalid --secret-scope",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				resetAdminSystemOneFlags(t)
+				useMockSystemOneServer(t, srv.Config.Handler)
+				_, _, err := executeAdminSystemOneSubcmd(t, tc.args, strings.NewReader(tc.stdin))
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.Zero(t, httpCalls.Load())
+			})
+		}
+	})
+
+	t.Run("list and probe --project render secret_ref scope, scope_used, and version", func(t *testing.T) {
+		resetAdminSystemOneFlags(t)
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.ListSystemOneInstancesResponse{
+				Instances: []hubclient.SystemOneInstance{
+					{
+						ID:       "inst-named-list",
+						Name:     "gemini-named",
+						Adapter:  "gemini_decisions",
+						Model:    "gemini-decision-1",
+						Endpoint: "https://generativelanguage.googleapis.com",
+						Auth: hubclient.SystemOneInstanceAuthDTO{
+							Kind:      "api_key",
+							SecretRef: &hubclient.SystemOneSecretRefDTO{Name: "GEMINI_API_KEY", Scope: "project_or_hub"},
+						},
+						Enabled:   true,
+						UpdatedAt: now,
+					},
+				},
+				TotalCount: 1,
+			})
+		}))
+		listOut, _, err := executeAdminSystemOneSubcmd(t, []string{"list"}, nil)
+		require.NoError(t, err)
+		assert.Contains(t, listOut, "GEMINI_API_KEY (project_or_hub)")
+
+		dir := t.TempDir()
+		specPath := filepath.Join(dir, "spec.json")
+		require.NoError(t, os.WriteFile(specPath, []byte(`{"version":1,"questions":[{"id":"q1","type":"binary","instructions":"Check."}]}`), 0o600))
+
+		var capturedProbe hubclient.ProbeSystemOneInstanceRequest
+		yes := true
+		resetAdminSystemOneFlags(t)
+		useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedProbe))
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(hubclient.ProbeSystemOneInstanceResponse{
+				Class:    systemoneruntime.ClassSuccess,
+				Decision: &hubclient.ProbeSystemOneDecision{Kind: spec.KindJudgmentBool, Bool: &yes},
+				Evaluation: &systemoneruntime.Evaluation{
+					EvalID:          "eval-named-1",
+					ConfiguredModel: "gemini-decision-1",
+					Class:           systemoneruntime.ClassSuccess,
+					Auth: &systemoneruntime.AuthProvenance{
+						AuthKind: "api_key",
+						SecretRef: &systemoneruntime.SecretRefProvenance{
+							Name:      "GEMINI_API_KEY",
+							Scope:     "project_or_hub",
+							ScopeUsed: "project",
+						},
+						SecretVersion: 3,
+					},
+				},
+			})
+		}))
+		probeOut, _, err := executeAdminSystemOneSubcmd(t, []string{
+			"probe", "gemini-named",
+			"--project", "my-project",
+			"--spec-file", specPath,
+			"--text", "Synthetic sample.",
+		}, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "my-project", capturedProbe.Project)
+		assert.Contains(t, probeOut, "Secret Ref:           GEMINI_API_KEY (scope: project_or_hub, scope_used: project)")
+		assert.Contains(t, probeOut, "Secret Version:       3")
+	})
+}
