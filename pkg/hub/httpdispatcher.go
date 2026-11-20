@@ -771,7 +771,7 @@ func (d *HTTPAgentDispatcher) repairHarnessConfig(ctx context.Context, agent *st
 	}
 	name := agent.AppliedConfig.HarnessConfig
 	// Prefer the stamped record ID; the name is only a fallback, resolved in
-	// the agent's project then global scope (ptone/scion#2898).
+	// dispatch scope order (harnessConfigLookupScopes) (ptone/scion#2898).
 	ref := HarnessConfigRepairRef{
 		ID:        agent.AppliedConfig.HarnessConfigID,
 		Name:      name,

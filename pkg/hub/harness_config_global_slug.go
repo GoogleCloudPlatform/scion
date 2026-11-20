@@ -30,10 +30,12 @@ import (
 const ErrCodeHarnessConfigSlugReserved = "harness_config_slug_reserved"
 
 // harnessConfigSlugReservedError refuses a project-scope harness config
-// whose slug is taken by a global harness config on a hosted hub. Harness
-// configs resolve by slug in the project scope before the global one, so
-// such a config would replace the global one for every agent in the
-// project.
+// whose slug is taken by a global harness config on a hosted hub. A hosted
+// hub resolves global scope first (harnessConfigLookupScopes), but a
+// same-slug project row would still be ambiguous with the global one, would
+// replace it wherever a workstation-order lookup or a broker-side resolution
+// applies, and would shadow it if the global row were later deleted, so the
+// slug is refused at write time as well.
 type harnessConfigSlugReservedError struct {
 	slug string
 }
