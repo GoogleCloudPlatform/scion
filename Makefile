@@ -654,6 +654,22 @@ USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres
 	TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres \
 	TestUserDeleteToken_InTransactionBindingRefused_Postgres
 
+# INTEGRATIONS_HA_POSTGRES_TESTS are the pkg/hub integrations HA tests
+# (ptone/scion#6947) that require a Postgres backend via enttest.Active().
+# TestUpdateConfig_NoStoredConfigStoresNewKeys is listed by its top-level
+# name so its postgres_null_config_row subtest runs under -tags integration.
+INTEGRATIONS_HA_POSTGRES_TESTS := TestUpdateIntegration_HA_Accepted \
+	TestGetUpdateStatus_ByID \
+	TestGetUpdateStatus_Latest \
+	TestGetUpdateStatus_NotFound \
+	TestGetUpdateStatus_InvalidID \
+	TestGetUpdateStatus_CrossIntegrationRejected \
+	TestUpdateConfig_HA_Integration \
+	TestUpdateConfig_HA_SetsUpdatedBy \
+	TestUpdateConfig_HA_SkipsReconfigure \
+	TestGetIntegration_HA_ReadsFromPostgres \
+	TestUpdateConfig_NoStoredConfigStoresNewKeys
+
 # HUB_INTEGRATION_POSTGRES_TESTS are the pkg/hub Postgres tests that need
 # -tags integration (the integration TestMain sets up the ent test
 # database): the project-delete lock-order test, the two-replica scheduled
@@ -661,8 +677,9 @@ USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres
 # the broker presence registry test (its conduit registry runs on the ent
 # test database), the agent delegation issuance vs reincarnation claim
 # race, the broker reservation transfer tests
-# (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) and the forced user delete
-# tests (USER_DELETION_POSTGRES_TESTS), the chat retention cascade and
+# (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS), the forced user delete
+# tests (USER_DELETION_POSTGRES_TESTS), the integrations HA tests
+# (INTEGRATIONS_HA_POSTGRES_TESTS), the chat retention cascade and
 # replica race and deleted-conversation tests, and the two-replica project
 # quota admission test.
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
@@ -674,6 +691,7 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	$(TEST_IDENTITY_POSTGRES_TESTS) \
 	$(BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) \
 	$(USER_DELETION_POSTGRES_TESTS) \
+	$(INTEGRATIONS_HA_POSTGRES_TESTS) \
 	TestHubInternal_ReplayAcrossHubReplicas \
 	TestChatRetention_Postgres_CascadeAndReplicaRace \
 	TestChatRetention_Postgres_DeletedConversationsAndAttachments \
