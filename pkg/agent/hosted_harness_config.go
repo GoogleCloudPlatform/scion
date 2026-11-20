@@ -20,20 +20,20 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 )
 
-// checkHostedHarnessConfig refuses, on a hosted Runtime Broker, volumes in
-// a harness config written by project members: one bundled in a template,
+// checkHostedHarnessConfig refuses, on a hosted Runtime Broker, volumes and
+// env (hostedguard's env rule) in a harness config written by project members: one bundled in a template,
 // or one in the project's own harness-configs directory. The global
 // harness-configs directory and settings harness_configs are operator
 // content, and a hub-hydrated copy was checked by the Hub when it was
 // stored; neither is checked. runtimeKind is the runtime that will run the
 // agent, or "" when not known. It returns nil or a *hostedguard.RefusalError.
 func checkHostedHarnessConfig(hosted bool, hcDir *config.HarnessConfigDir, runtimeKind string) error {
-	if !hosted || hcDir == nil || len(hcDir.Config.Volumes) == 0 {
+	if !hosted || hcDir == nil || (len(hcDir.Config.Volumes) == 0 && len(hcDir.Config.Env) == 0) {
 		return nil
 	}
 	if hcDir.Source != config.HarnessConfigSourceTemplateBundled && !hcDir.FromProjectTier() {
 		return nil
 	}
-	return hostedguard.CheckMemberConfig(&api.ScionConfig{Volumes: hcDir.Config.Volumes},
+	return hostedguard.CheckMemberConfig(&api.ScionConfig{Volumes: hcDir.Config.Volumes, Env: hcDir.Config.Env},
 		hostedguard.Origin{Kind: hostedguard.OriginHarnessConfig, Name: hcDir.Name}, runtimeKind)
 }
