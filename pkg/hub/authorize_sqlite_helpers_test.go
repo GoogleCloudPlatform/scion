@@ -475,19 +475,14 @@ func authzHelperTargetAgent() *store.Agent {
 	}
 }
 
-// agentToken mints a real, signed agent JWT for a synthetic caller "agent"
-// in callerProjectID with the given scopes. The credential-status gate in
-// the shared auth middleware (auth.go's evaluateAgentCredentialStatus) only
-// consults a credential-ID-keyed store, not store.Agent by ID -- a token
-// with no matching credential row authenticates via the documented legacy
-// compatibility path -- so the caller does not need its own store.Agent row
-// for these routing tests, unlike authorizeAgentKeys' *target*, which must
-// be a real row.
+// agentToken mints a recorded agent JWT for a synthetic caller "agent" in
+// callerProjectID with the given scopes. Because agent_credentials has no
+// foreign-key edge to agents, the caller does not need its own store.Agent row
+// for these routing tests, unlike authorizeAgentKeys' *target*, which must be a
+// real row.
 func (f *agentKeysRouteFixture) agentToken(t *testing.T, callerAgentID, callerProjectID string, scopes ...AgentTokenScope) string {
 	t.Helper()
-	tok, err := f.srv.GetAgentTokenService().GenerateAgentToken(callerAgentID, callerProjectID, scopes, nil)
-	require.NoError(t, err)
-	return tok
+	return f.srv.generateRecordedAgentToken(t, callerAgentID, callerProjectID, scopes, nil)
 }
 
 // keysErrorEnvelope decodes a Hub error envelope response body, including

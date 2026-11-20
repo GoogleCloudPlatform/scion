@@ -117,8 +117,7 @@ func artifactAgent(t *testing.T, srv *Server, s store.Store, projectID, slug str
 	createTestUserWithProjectRole(t, s, delegator, "delegator-"+slug+"@test.com", projectID, store.ProjectRoleOwner)
 	addRecordedArtifactEdge(t, s, delegator, a.ID, projectID)
 	ensureEdgeBackfillComplete(t, s)
-	tok, err := srv.GetAgentTokenService().GenerateAgentToken(a.ID, projectID, ScopesForRole(role), nil)
-	require.NoError(t, err)
+	tok := srv.generateRecordedAgentToken(t, a.ID, projectID, ScopesForRole(role), nil)
 	return a, tok
 }
 

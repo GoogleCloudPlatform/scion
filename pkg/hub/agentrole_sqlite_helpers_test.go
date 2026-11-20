@@ -64,11 +64,7 @@ func setupAgentRoleTest(t *testing.T) (*Server, store.Store, *store.User, *store
 // with the specified scopes.
 func doAgentReadRequest(t *testing.T, srv *Server, agentID, projectID, path string, scopes []AgentTokenScope) *httptest.ResponseRecorder {
 	t.Helper()
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
-	token, err := tokenSvc.GenerateAgentToken(agentID, projectID, scopes, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agentID, projectID, scopes, nil)
 
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.Header.Set("X-Scion-Agent-Token", token)

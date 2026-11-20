@@ -244,8 +244,7 @@ func compactSetup(t *testing.T) *compactFixture {
 	superAdmin, err := s.GetUser(ctx, superAdminID)
 	require.NoError(t, err)
 
-	agentTok, err := srv.GetAgentTokenService().GenerateAgentToken(f.agents[0].ID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
+	agentTok := srv.generateRecordedAgentToken(t, f.agents[0].ID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 	uatKey := mintScopedUAT(t, srv, f.owner.ID, f.project.ID, []string{"agent:manage"})
 
 	asUser := func(u *store.User) func(t *testing.T, path string) *httptest.ResponseRecorder {
@@ -324,14 +323,11 @@ func createFixtureAgent(t *testing.T, f *bypassAgentsFixture, name string, ances
 // ScopeAgentCreate.
 func createAsAgent(t *testing.T, f *bypassAgentsFixture, agentID string, req CreateAgentRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
 	stored, err := f.store.GetAgent(context.Background(), agentID)
 	require.NoError(t, err)
 	role, _ := agentRoleAndScopes(stored)
 	scopes := append([]AgentTokenScope{ScopeProjectRead, ScopeAgentCreate}, ScopesForRole(role)...)
-	tok, err := svc.GenerateAgentToken(agentID, f.proj.ID, scopes, nil)
-	require.NoError(t, err)
+	tok := f.srv.generateRecordedAgentToken(t, agentID, f.proj.ID, scopes, nil)
 	return doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents", req, tok)
 }
 
@@ -3296,11 +3292,7 @@ func (o *ownerChangingAfterMembersStore) ListAgentMembers(ctx context.Context, f
 // the sortedListFixture's project.
 func (f *sortedListFixture) agentJWTFor(t *testing.T, agentID string) string {
 	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
-	tok, err := svc.GenerateAgentToken(agentID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
-	return tok
+	return f.srv.generateRecordedAgentToken(t, agentID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 }
 
 func (f *sortedListFixture) listPath(query string) string {
@@ -3477,9 +3469,8 @@ func (f *mintFixture) tokenClaims(t *testing.T, token string) *AgentTokenClaims 
 // given presented ancestry.
 func (f *mintFixture) refresh(t *testing.T, agent *store.Agent, presentedAncestry []string) *httptest.ResponseRecorder {
 	t.Helper()
-	presented, err := f.srv.agentTokenService.GenerateAgentToken(agent.ID, f.projectID,
+	presented := f.srv.generateRecordedAgentToken(t, agent.ID, f.projectID,
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, presentedAncestry)
-	require.NoError(t, err)
 	claims := f.tokenClaims(t, presented)
 	rec := httptest.NewRecorder()
 	f.srv.handleAgentTokenRefresh(rec, buildAgentRefreshRequest(agent.ID, claims, "", false), agent.ID)

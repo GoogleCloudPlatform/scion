@@ -1102,8 +1102,7 @@ func TestTestAdminPolicy_MaterialPrecheckRootMembershipWithHandMintedToken(t *te
 		seedSecret(t, srv.secretBackend, "TSA_SECRET", "tsa-value", "", "", projectID)
 		// A hand-minted token: the mint path no longer issues this scope to
 		// an admin-rooted agent (A3).
-		tok, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{rootID})
-		require.NoError(t, err)
+		tok := srv.generateRecordedAgentToken(t, agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{rootID})
 		return doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/secrets", secretFetchRequest{Keys: []string{"TSA_SECRET"}}, tok)
 	}
 	rec = fetch(other)
