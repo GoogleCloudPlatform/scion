@@ -160,7 +160,7 @@ func writeDecisionStoreError(w http.ResponseWriter, err error) bool {
 		for i, k := range exists.Existing {
 			entry := map[string]interface{}{"key": k.Key, "version": k.Version, "status": k.Status}
 			if k.Answer != nil {
-				entry["answer"] = k.Answer.ChoiceLabel
+				entry["answer"] = decisionKeyStateAnswer(k.Answer)
 			}
 			keys[i] = entry
 		}
@@ -283,7 +283,7 @@ func decisionSendResults(agentID string, res *store.DecisionPromptResult) []Deci
 		if d.Replaced != nil {
 			r := &DecisionReplaced{Version: d.Replaced.Version, Status: d.Replaced.Status}
 			if a := d.Replaced.Answer; a != nil {
-				r.Answer = a.ChoiceLabel
+				r.Answer = decisionKeyStateAnswer(a)
 				r.AnsweredBy = a.AnsweredByName
 				if r.AnsweredBy == "" {
 					r.AnsweredBy = a.AnsweredByEmail
@@ -293,4 +293,16 @@ func decisionSendResults(agentID string, res *store.DecisionPromptResult) []Deci
 		}
 	}
 	return out
+}
+
+// decisionKeyStateAnswer formats a decision answer for agent-facing key-state
+// summaries (decision_key_exists details, replaced summaries, failure messages).
+func decisionKeyStateAnswer(a *store.DecisionAnswer) string {
+	if a == nil {
+		return ""
+	}
+	if a.ChoiceID == messages.ChoiceIDOther && a.OtherText != "" {
+		return fmt.Sprintf("%s %q", a.ChoiceLabel, a.OtherText)
+	}
+	return a.ChoiceLabel
 }

@@ -430,6 +430,38 @@ func TestProjectDecisions_SearchDeadlineWithNonContextErrorIsTimeout(t *testing.
 	for _, tab := range []string{ProjectDecisionsTabPending, ProjectDecisionsTabMade} {
 		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions?tab="+tab+"&q=deploy", nil)
 		assert.Equal(t, http.StatusServiceUnavailable, rr.Code, "%s: %s", tab, rr.Body.String())
-		assert.Contains(t, rr.Body.String(), "SEARCH_TIMEOUT", tab)
+		assert.Contains(t, string(rr.Body.Bytes()), "SEARCH_TIMEOUT", tab)
 	}
+}
+
+func TestProjectDecisions_SearchOtherTextWaitingAndMade(t *testing.T) {
+	f := newDecisionsSearchFixture(t)
+
+	_, p := f.topicPrompt(t, `[{"id":"reg-search","question":"Which region?","choices":["us-central1"],"allow_other":{"label":"Another region"}}]`, false)
+	reply := f.storeUserReply(t, f.bob, f.topicID, "", "slack", "use europe-north2")
+	recRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: reply.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "reg-search", ChoiceID: messages.ChoiceIDOther, OtherText: "europe-north2 canary"}},
+	})
+	require.Equal(t, http.StatusOK, recRR.Code, recRR.Body.String())
+
+	// Waiting tab (in-memory pendingPromptMatches) matches a word of the interpreted Other text.
+	waitHit := f.pending(t, f.bob, url.Values{"q": {"NORTH2"}})
+	assert.Equal(t, []string{"reg-search"}, promptKeys(waitHit.Prompts))
+	waitMiss := f.pending(t, f.bob, url.Values{"q": {"antarctica"}})
+	assert.Empty(t, waitMiss.Prompts)
+
+	// Override with a new Other text, then verify Made tab search + otherText + previousOtherText.
+	overRR := f.answer(t, f.bob, p.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "australia-southeast2",
+	})
+	require.Equal(t, http.StatusOK, overRR.Code, overRR.Body.String())
+
+	madeHit := f.made(t, f.bob, url.Values{"q": {"AUSTRALIA-SOUTHEAST2"}})
+	require.Len(t, madeHit.Entries, 1)
+	assert.Equal(t, "reg-search", madeHit.Entries[0].Decision.Key)
+	assert.Equal(t, "australia-southeast2", madeHit.Entries[0].OtherText)
+	assert.Equal(t, "Another region", madeHit.Entries[0].PreviousChoiceLabel)
+	assert.Equal(t, "europe-north2 canary", madeHit.Entries[0].PreviousOtherText)
 }
