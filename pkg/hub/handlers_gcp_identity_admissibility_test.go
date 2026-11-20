@@ -380,7 +380,7 @@ func TestHandleExistingAgent_GCPIdentityStartRefusal(t *testing.T) {
 		resume bool
 		verb   string
 	}{
-		{name: "suspended resume", phase: state.PhaseSuspended, verb: "resume"},
+		{name: "suspended resume", phase: state.PhaseSuspended, resume: true, verb: "resume"},
 		{name: "stopped resume in place", phase: state.PhaseStopped, resume: true, verb: "resume"},
 		{name: "created start", phase: state.PhaseCreated, verb: "start"},
 	}
