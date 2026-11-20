@@ -846,6 +846,20 @@ var disallowedSVGElements = map[string]bool{
 	"video":         true,
 }
 
+func checkSafeSVGStyleText(raw string, where string) error {
+	if strings.IndexByte(raw, '\\') >= 0 {
+		return fmt.Errorf("SVG %s must not contain CSS backslash escapes", where)
+	}
+	valNorm := stripASCIIWhitespaceAndControl(strings.ToLower(raw))
+	if strings.Contains(valNorm, "@import") || strings.Contains(valNorm, "expression(") {
+		return fmt.Errorf("SVG %s must not contain @import or expression()", where)
+	}
+	if strings.Contains(valNorm, "javascript:") || strings.Contains(valNorm, "vbscript:") || strings.Contains(valNorm, "data:text/html") {
+		return fmt.Errorf("SVG %s contains a disallowed URI scheme", where)
+	}
+	return nil
+}
+
 func verifySafeSVG(data []byte) error {
 	if !utf8.Valid(data) {
 		return errors.New("SVG payload must be valid UTF-8")
@@ -854,6 +868,8 @@ func verifySafeSVG(data []byte) error {
 	dec.Strict = true
 
 	sawRoot := false
+	styleDepth := 0
+	var styleBuf strings.Builder
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
@@ -868,6 +884,10 @@ func verifySafeSVG(data []byte) error {
 			if strings.Contains(upper, "ENTITY") || strings.Contains(upper, "DOCTYPE") {
 				return errors.New("SVG must not contain DOCTYPE or ENTITY declarations")
 			}
+		case xml.ProcInst:
+			if sawRoot || !strings.EqualFold(t.Target, "xml") {
+				return fmt.Errorf("SVG processing instruction <?%s?> is not allowed", t.Target)
+			}
 		case xml.StartElement:
 			elemName := strings.ToLower(t.Name.Local)
 			if !sawRoot {
@@ -878,6 +898,12 @@ func verifySafeSVG(data []byte) error {
 			}
 			if disallowedSVGElements[elemName] {
 				return fmt.Errorf("SVG element <%s> is not allowed", t.Name.Local)
+			}
+			if elemName == "style" {
+				if styleDepth == 0 {
+					styleBuf.Reset()
+				}
+				styleDepth++
 			}
 			for _, attr := range t.Attr {
 				attrLocal := strings.ToLower(attr.Name.Local)
@@ -892,8 +918,24 @@ func verifySafeSVG(data []byte) error {
 				if strings.Contains(valNorm, "javascript:") || strings.Contains(valNorm, "vbscript:") || strings.Contains(valNorm, "data:text/html") {
 					return fmt.Errorf("SVG attribute %q contains a disallowed URI scheme", attr.Name.Local)
 				}
-				if attrLocal == "style" && (strings.Contains(valNorm, "@import") || strings.Contains(valNorm, "expression(")) {
-					return errors.New("SVG style attribute must not contain @import or expression()")
+				if attrLocal == "style" {
+					if err := checkSafeSVGStyleText(attr.Value, "style attribute"); err != nil {
+						return err
+					}
+				}
+			}
+		case xml.CharData:
+			if styleDepth > 0 {
+				styleBuf.Write(t)
+			}
+		case xml.EndElement:
+			if strings.EqualFold(t.Name.Local, "style") && styleDepth > 0 {
+				styleDepth--
+				if styleDepth == 0 {
+					if err := checkSafeSVGStyleText(styleBuf.String(), "<style> element"); err != nil {
+						return err
+					}
+					styleBuf.Reset()
 				}
 			}
 		}

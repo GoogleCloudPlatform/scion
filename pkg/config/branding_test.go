@@ -382,6 +382,30 @@ func TestValidateBranding_AssetsAndSVGSafety(t *testing.T) {
 			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<!DOCTYPE svg [<!ENTITY xxe "boom">]><svg xmlns="http://www.w3.org/2000/svg"/>`)}},
 		},
 		{
+			name: "svg xml-stylesheet processing instruction rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<?xml-stylesheet type="text/xsl" href="javascript:alert(1)"?><svg xmlns="http://www.w3.org/2000/svg"/>`)}},
+		},
+		{
+			name: "svg style element @import rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<svg xmlns="http://www.w3.org/2000/svg"><style>@import url("https://evil.example/x.css");</style></svg>`)}},
+		},
+		{
+			name: "svg style element expression() rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<svg xmlns="http://www.w3.org/2000/svg"><style>rect { width: expression(alert(1)); }</style></svg>`)}},
+		},
+		{
+			name: "svg style element javascript URI rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<svg xmlns="http://www.w3.org/2000/svg"><style>rect { fill: url(javascript:alert(1)); }</style></svg>`)}},
+		},
+		{
+			name: "svg style element CSS backslash escape rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<svg xmlns="http://www.w3.org/2000/svg"><style>@\69mport "https://evil.example/x.css";</style></svg>`)}},
+		},
+		{
+			name: "svg style element comment-split @import rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<svg xmlns="http://www.w3.org/2000/svg"><style>@im<!--x-->port url("https://evil.example/x.css");</style></svg>`)}},
+		},
+		{
 			name: "oversized single asset > 128 KiB rejected",
 			cfg: BrandingConfig{
 				Logo: &BrandingLogoConfig{
@@ -432,9 +456,10 @@ func TestValidateBranding_AssetsAndSVGSafety(t *testing.T) {
 		t.Fatal("expected > 512 KiB total asset error across 5 slots, got none")
 	}
 
-	// Valid static same-origin image path (outside reserved Hub prefixes) passes.
+	// Valid static same-origin image path (outside reserved Hub prefixes) and standard <?xml?> + benign <style> SVG pass.
+	xmlDeclSVG := svgDataURI(`<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><style>.mark { fill: #0d9488; }</style><circle class="mark" cx="8" cy="8" r="6"/></svg>`)
 	validPathCfg := BrandingConfig{
-		Logo:  &BrandingLogoConfig{Light: "/assets/custom-logo.svg"},
+		Logo:  &BrandingLogoConfig{Light: "/assets/custom-logo.svg", Dark: xmlDeclSVG},
 		Icons: &BrandingIconsConfig{Favicon: "/favicon.ico"},
 	}
 	if errs := ValidateBranding(&validPathCfg); len(errs) > 0 {
