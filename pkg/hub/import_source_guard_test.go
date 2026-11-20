@@ -199,7 +199,7 @@ func TestFetchRemoteForImport_HostedArchiveBlocksLoopbackHost(t *testing.T) {
 	var refused *importSourceRefusedError
 	require.Truef(t, errors.As(err, &refused), "got %v", err)
 	assert.Equal(t, importFetchDisallowedMessage, err.Error())
-	assert.NotContains(t, err.Error(), "127.0.0.1", "the resolved address must not be echoed")
+	assert.NotContains(t, err.Error(), "localhost", "the source host must not be echoed")
 	assert.Zero(t, hits, "the hub must not reach a loopback host")
 }
 

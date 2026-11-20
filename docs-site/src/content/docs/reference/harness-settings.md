@@ -284,8 +284,8 @@ it updated.
 
 The Hub must be able to reach GitHub to fetch the URL. Rclone URIs in `sourceUrl`
 (`:gcs:bucket/path`) and other non-https sources work on **workstation** Hubs only. A hosted Hub
-accepts only `https://` sources on public addresses, and does not follow redirects. On a hosted
-Hub without access to GitHub, use a project workspace import
+accepts only `https://` sources on public addresses, and does not follow redirects for archive
+URLs. On a hosted Hub without access to GitHub, use a project workspace import
 (`POST /api/v1/projects/{id}/import-harness-configs` with `workspacePath`), which creates a
 project-scoped, user-managed config.
 
