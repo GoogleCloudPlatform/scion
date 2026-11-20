@@ -463,10 +463,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// elapsed_ms log lines below.
 	initStart := time.Now()
 
-	// Load and unset the runtime-provided withheld-key marker before any hook
-	// or startup child process runs so it never leaks into child environments.
-	initEnvPolicy := initenv.Load()
-
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
 	startReaper()
@@ -718,6 +714,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
 	}
+
+	// Load and unset the runtime-provided withheld-key marker after the
+	// environ-purge re-exec block (so the marker survives re-exec on
+	// hub-connected starts) and before any hook, startup child, or workload
+	// runs.
+	initEnvPolicy := initenv.Load()
 
 	// The resolved-auth entries the staging pass carried across the re-exec
 	// are read and their file removed now, before anything else runs; they

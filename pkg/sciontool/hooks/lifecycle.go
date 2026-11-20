@@ -522,8 +522,8 @@ var rootHookEnvAllowlist = map[string]bool{
 // interpreter/loader redirector variable (see that var's own doc comment) —
 // including NODE_OPTIONS, PERL5OPT, RUBYOPT, and XDG_CONFIG_HOME — never
 // reaches a root-eligible hook regardless of where it came from. The dropped
-// branch (droppedHookEnv) is unaffected by any of this — a dropped hook gets
-// the same environment the harness child process itself gets, unfiltered.
+// branch (droppedHookEnv) inherits hookEnv's filtering (static denylist plus
+// per-start withheld keys) rather than hardenedRootHookEnv's allowlist.
 //
 // SCION_AGENT_HOME is set explicitly (never via HOME) so a pre-start
 // project/hub hook — which runs once, before the workload exists at all,

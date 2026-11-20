@@ -96,3 +96,45 @@ func TestBuildCommonRunArgs_HookWithheldEnvOmittedWhenEmptyEvenIfForged(t *testi
 		}
 	}
 }
+
+func TestBuildCommonRunArgs_BundleEnvWinsOverAuthAndSecretAndIsWithheld(t *testing.T) {
+	config := RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		Env:          []string{"GOOGLE_CLOUD_PROJECT=bundle-proj", "BUNDLE_ONLY=from-bundle"},
+		ResolvedAuth: &api.ResolvedAuth{
+			EnvVars: map[string]string{"GOOGLE_CLOUD_PROJECT": "auth-proj"},
+		},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Type: "environment", Target: "GOOGLE_CLOUD_PROJECT", Value: "secret-proj"},
+		},
+		HookWithheldEnv: []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT"},
+	}
+
+	args, err := buildCommonRunArgs(config)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+
+	// On Docker, the last -e for a given key wins.
+	effective := make(map[string]string)
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-e" {
+			if k, v, ok := strings.Cut(args[i+1], "="); ok {
+				effective[k] = v
+			}
+			i++
+		}
+	}
+
+	if got := effective["GOOGLE_CLOUD_PROJECT"]; got != "bundle-proj" {
+		t.Errorf("effective GOOGLE_CLOUD_PROJECT = %q, want %q", got, "bundle-proj")
+	}
+	wantMarker := "BUNDLE_ONLY,GOOGLE_CLOUD_PROJECT"
+	if got := effective[envpolicy.HookWithheldEnvVar]; got != wantMarker {
+		t.Errorf("effective %s = %q, want %q", envpolicy.HookWithheldEnvVar, got, wantMarker)
+	}
+}

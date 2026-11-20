@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
@@ -114,5 +115,67 @@ func TestHookEnvVerticalSlice_BundleKeyReachesChildEnvNotPreStartHook(t *testing
 	}
 	if _, present := childMap[envpolicy.HookWithheldEnvVar]; present {
 		t.Errorf("ChildEnv unexpectedly contains %s", envpolicy.HookWithheldEnvVar)
+	}
+}
+
+// TestRunInit_HookWithheldEnvSurvivesReExecAndWiresLifecycleManager drives
+// RunInit with a bootstrap transport token (which triggers reExecWithCleanEnv)
+// and SCION_HOOK_WITHHELD_ENV set. It verifies:
+//  1. When reExecWithCleanEnv runs, SCION_HOOK_WITHHELD_ENV is still present in
+//     os.Environ() so the re-exec'd init process receives it;
+//  2. After the re-exec block, RunInit loads and unsets SCION_HOOK_WITHHELD_ENV
+//     and wires the resulting withheld set onto the LifecycleManager it builds.
+func TestRunInit_HookWithheldEnvSurvivesReExecAndWiresLifecycleManager(t *testing.T) {
+	setupRunInitAsRootlessScion(t, t.TempDir())
+	stubRunInitSideEffects(t)
+	setTransportTokenEnv(t)
+
+	const markerVal = "BUNDLE_ONLY_KEY,PATH"
+	t.Setenv(envpolicy.HookWithheldEnvVar, markerVal)
+	t.Setenv("BUNDLE_ONLY_KEY", "bundle-val")
+	t.Setenv("OPERATOR_KEY", "operator-val")
+
+	var reExecCalls atomic.Int32
+	var markerAtReExec string
+	origReExec := reExecWithCleanEnv
+	reExecWithCleanEnv = func() error {
+		reExecCalls.Add(1)
+		markerAtReExec = os.Getenv(envpolicy.HookWithheldEnvVar)
+		return nil
+	}
+	t.Cleanup(func() { reExecWithCleanEnv = origReExec })
+
+	var wiredLM *hooks.LifecycleManager
+	origNewLM := runNewLifecycleManager
+	runNewLifecycleManager = func(agentHome string, targetUID, targetGID int, requirePrivilegeDrop bool) (*hooks.LifecycleManager, bool) {
+		lm, enforce := origNewLM(agentHome, targetUID, targetGID, requirePrivilegeDrop)
+		wiredLM = lm
+		return lm, enforce
+	}
+	t.Cleanup(func() { runNewLifecycleManager = origNewLM })
+
+	_ = RunInit([]string{"sh", "-c", "true"}, InitRunOptions{
+		DisableTermSignalForwarding: true,
+	})
+
+	if reExecCalls.Load() == 0 {
+		t.Fatal("expected reExecWithCleanEnv to be called for transport token staging")
+	}
+	if markerAtReExec != markerVal {
+		t.Errorf("%s at reExecWithCleanEnv = %q, want %q (must survive environ-purge re-exec)", envpolicy.HookWithheldEnvVar, markerAtReExec, markerVal)
+	}
+	if _, present := os.LookupEnv(envpolicy.HookWithheldEnvVar); present {
+		t.Errorf("%s was not unset after RunInit loaded it", envpolicy.HookWithheldEnvVar)
+	}
+	if wiredLM == nil {
+		t.Fatal("runNewLifecycleManager was never called")
+	}
+	for _, want := range []string{"BUNDLE_ONLY_KEY", "PATH", "LD_PRELOAD"} {
+		if !wiredLM.Withheld.Withholds(want) {
+			t.Errorf("LifecycleManager.Withheld.Withholds(%q) = false, want true", want)
+		}
+	}
+	if wiredLM.Withheld.Withholds("OPERATOR_KEY") {
+		t.Error("LifecycleManager.Withheld.Withholds(OPERATOR_KEY) = true, want false")
 	}
 }
