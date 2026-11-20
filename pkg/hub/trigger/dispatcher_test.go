@@ -90,11 +90,12 @@ func (nopLease) Renew(context.Context) (bool, error) { return true, nil }
 // memTriggerStore is a minimal in-memory TriggerStore + DurableQueueStore for
 // pure unit tests that also compile and run under -tags no_sqlite.
 type memTriggerStore struct {
-	mu       sync.Mutex
-	events   map[string]*store.TriggerEvent
-	triggers []*store.Trigger
-	fires    map[string]*store.TriggerFire // key: eventID + "|" + triggerID
-	byFireID map[string]*store.TriggerFire
+	mu                    sync.Mutex
+	events                map[string]*store.TriggerEvent
+	triggers              []*store.Trigger
+	fires                 map[string]*store.TriggerFire // key: eventID + "|" + triggerID
+	byFireID              map[string]*store.TriggerFire
+	claimSubjectSkipCalls atomic.Int32
 }
 
 func newMemTriggerStore() *memTriggerStore {
@@ -297,6 +298,7 @@ func (m *memTriggerStore) ClaimTriggerFire(_ context.Context, fire *store.Trigge
 	return true, nil, nil
 }
 func (m *memTriggerStore) ClaimTriggerFireSubjectSkip(_ context.Context, fire *store.TriggerFire, skipError string, now time.Time) (bool, bool, *store.TriggerFire, error) {
+	m.claimSubjectSkipCalls.Add(1)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := fire.EventID + "|" + fire.TriggerID
@@ -2843,4 +2845,183 @@ func TestDispatcher_SubjectModeSkip_DerivedSubjectRuleCoalescesAndPreservesSourc
 	assert.Equal(t, "deploy:billing", byEv[ev3].Subject)
 
 	assert.Len(t, auditSink.snapshot(), 3, "every terminal fire including subject-busy skip must emit FireAuditRecord")
+}
+
+func TestDispatcher_GitHubSubjectModeSkip_UnauthorizedRefusesWithoutSkipClaimAndAuthorizedCoalesces(t *testing.T) {
+	ctx := context.Background()
+	ms := newMemTriggerStore()
+	core := &fakeCore{}
+	core.enabled.Store(true)
+	_, rules := newTestTriggerEngineWithDialects(t)
+
+	projID := uuid.NewString()
+	trID := uuid.NewString()
+	t0 := time.Date(2026, 11, 20, 17, 0, 0, 0, time.UTC)
+
+	var sourceAllowed atomic.Bool
+	core.authorizeSourceFn = func(_ context.Context, _ *store.TriggerEvent) (bool, error) {
+		return sourceAllowed.Load(), nil
+	}
+
+	require.NoError(t, ms.CreateTrigger(ctx, &store.Trigger{
+		ID:            trID,
+		ProjectID:     projID,
+		Name:          "gh-pr-skip-tr",
+		SourceKind:    store.TriggerSourceKindGitHub,
+		SourceID:      "",
+		MatchTypes:    []string{"github.pull_request.*", "github.issue_comment.created"},
+		MatchRules:    []store.TriggerMatchRule{{Dialect: "cel", Expr: `event.attributes.repo == "octo-org/octo-repo"`}},
+		SubjectMode:   store.TriggerSubjectModeSkip,
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"a1","message":"review PR","wake":true}`,
+		Status:        store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AuthorizationRevision: 1,
+		},
+	}))
+
+	mkGitHubEvent := func(evType, subject, repo string) string {
+		id := uuid.NewString()
+		require.NoError(t, ms.CreateTriggerEvent(ctx, &store.TriggerEvent{
+			ID:         id,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "9901",
+			Type:       evType,
+			Subject:    subject,
+			DedupKey:   "gh-" + id,
+			OccurredAt: t0,
+			ReceivedAt: t0,
+			Attributes: map[string]string{"repo": repo, "number": "42"},
+			Payload:    `{"number":42}`,
+			Status:     store.TriggerEventStatusPending,
+		}))
+		return id
+	}
+
+	evAuth1Entered := make(chan struct{})
+	releaseEvAuth1 := make(chan struct{})
+	var (
+		mu          sync.Mutex
+		firedEvents []string
+	)
+	var evAuth1 string
+	core.fireFn = func(fctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+		mu.Lock()
+		firedEvents = append(firedEvents, req.Event.ID)
+		mu.Unlock()
+		if req.Event.ID == evAuth1 {
+			detached, cancelDetached := req.Tracked.Detach(fctx)
+			defer cancelDetached()
+			close(evAuth1Entered)
+			select {
+			case <-releaseEvAuth1:
+			case <-detached.Done():
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: detached.Err().Error()}
+			}
+		}
+		return hubfire.FireOutcome{Status: hubfire.FireStatusFired, ResultRef: "msg-" + req.Event.ID[:8]}
+	}
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:           core,
+		Store:          ms,
+		Rules:          rules,
+		Now:            func() time.Time { return t0 },
+		PerFireTimeout: 40 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	makeItem := func(seq int64, evID string) durablequeue.Item {
+		raw, mErr := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		require.NoError(t, mErr)
+		return durablequeue.Item{
+			Seq:       seq,
+			Kind:      trigger.EventQueueKind,
+			DedupKey:  evID,
+			ProjectID: projID,
+			Payload:   raw,
+		}
+	}
+
+	// 1. Unauthorized GitHub association on a skip-mode trigger:
+	// records refused ("github association not authorized"), never evaluates rules,
+	// and NEVER calls ClaimTriggerFireSubjectSkip.
+	sourceAllowed.Store(false)
+	evUnauth := mkGitHubEvent("github.pull_request.opened", "github:octo-org/octo-repo#42", "octo-org/octo-repo")
+	resUnauth := disp.HandleItem(ctx, makeItem(1, evUnauth), nopLease{})
+	require.NoError(t, resUnauth.Err)
+	assert.True(t, resUnauth.Done)
+	assert.Zero(t, ms.claimSubjectSkipCalls.Load(), "unauthorized GitHub event must never reach ClaimTriggerFireSubjectSkip")
+	assert.Empty(t, disp.RuleEvalStats(), "unauthorized GitHub event must be refused before rule evaluation")
+	mu.Lock()
+	assert.Empty(t, firedEvents)
+	mu.Unlock()
+
+	// 2. Authorized GitHub association, but CEL rule evaluates false:
+	// still never reaches ClaimTriggerFireSubjectSkip.
+	sourceAllowed.Store(true)
+	evNonMatch := mkGitHubEvent("github.pull_request.opened", "github:other-org/other-repo#42", "other-org/other-repo")
+	resNonMatch := disp.HandleItem(ctx, makeItem(2, evNonMatch), nopLease{})
+	require.NoError(t, resNonMatch.Err)
+	assert.True(t, resNonMatch.Done)
+	assert.Zero(t, ms.claimSubjectSkipCalls.Load(), "non-matching GitHub event must not reach ClaimTriggerFireSubjectSkip")
+
+	// 3. Authorized + matching GitHub events coalesce on github:<owner>/<repo>#<number>:
+	// evAuth1 on #42 claims firing (and was NOT poisoned by evUnauth's terminal refused row);
+	// evAuth2 (issue_comment on same #42) skips as "subject busy";
+	// evAuth3 (PR #43) fires independently while #42 is in flight.
+	evAuth1 = mkGitHubEvent("github.pull_request.opened", "github:octo-org/octo-repo#42", "octo-org/octo-repo")
+	evAuth2 := mkGitHubEvent("github.issue_comment.created", "github:octo-org/octo-repo#42", "octo-org/octo-repo")
+	evAuth3 := mkGitHubEvent("github.pull_request.opened", "github:octo-org/octo-repo#43", "octo-org/octo-repo")
+
+	ev1Done := make(chan durablequeue.Result, 1)
+	go func() {
+		ev1Done <- disp.HandleItem(ctx, makeItem(3, evAuth1), nopLease{})
+	}()
+	select {
+	case <-evAuth1Entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for evAuth1 firing on github:octo-org/octo-repo#42")
+	}
+
+	resAuth2 := disp.HandleItem(ctx, makeItem(4, evAuth2), nopLease{})
+	require.NoError(t, resAuth2.Err)
+	assert.True(t, resAuth2.Done)
+
+	resAuth3 := disp.HandleItem(ctx, makeItem(5, evAuth3), nopLease{})
+	require.NoError(t, resAuth3.Err)
+	assert.True(t, resAuth3.Done)
+
+	close(releaseEvAuth1)
+	resAuth1 := <-ev1Done
+	require.NoError(t, resAuth1.Err)
+	assert.True(t, resAuth1.Done)
+
+	assert.Equal(t, int32(3), ms.claimSubjectSkipCalls.Load(), "only source-authorized, rule-matched GitHub events reach ClaimTriggerFireSubjectSkip")
+	mu.Lock()
+	assert.Equal(t, []string{evAuth1, evAuth3}, firedEvents)
+	mu.Unlock()
+
+	firesRes, err := ms.ListTriggerFires(ctx, store.TriggerFireFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, firesRes.Items, 4)
+	byEv := make(map[string]store.TriggerFire, 4)
+	for _, f := range firesRes.Items {
+		byEv[f.EventID] = f
+	}
+
+	assert.Equal(t, store.TriggerFireStatusRefused, byEv[evUnauth].Status)
+	assert.Equal(t, trigger.ErrFireGitHubAssociationUnauthorized, byEv[evUnauth].Error)
+	assert.Equal(t, "github:octo-org/octo-repo#42", byEv[evUnauth].Subject)
+
+	assert.Equal(t, store.TriggerFireStatusFired, byEv[evAuth1].Status)
+	assert.Equal(t, "github:octo-org/octo-repo#42", byEv[evAuth1].Subject)
+
+	assert.Equal(t, store.TriggerFireStatusSkipped, byEv[evAuth2].Status)
+	assert.Equal(t, trigger.ErrFireSubjectBusy, byEv[evAuth2].Error)
+	assert.Equal(t, "github:octo-org/octo-repo#42", byEv[evAuth2].Subject)
+
+	assert.Equal(t, store.TriggerFireStatusFired, byEv[evAuth3].Status)
+	assert.Equal(t, "github:octo-org/octo-repo#43", byEv[evAuth3].Subject)
 }
