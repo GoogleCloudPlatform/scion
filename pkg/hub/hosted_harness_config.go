@@ -21,14 +21,13 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/unicode/norm"
 )
 
 // On a hosted hub, a project-scope harness config is member content: its
@@ -84,21 +83,43 @@ func hostedHarnessConfigYAMLRefusal(name string, data []byte, present bool, runt
 }
 
 // hostedHarnessConfigManifestRefusal refuses a member-written harness
-// config whose manifest holds a file named config.yaml in another spelling
-// that full Unicode case folding (cases.Fold over the NFD form, which also
-// maps ligatures such as U+FB01) makes equal to config.yaml: a Runtime
-// Broker on a case-insensitive filesystem could read it as the harness
-// config's config.yaml, which the Hub checks only under its exact name.
-// Paths in a subdirectory never match.
+// config whose manifest holds a root-level file (no "/") with a name a
+// Runtime Broker's filesystem could read as another name, in particular as
+// config.yaml, which the Hub checks only under its exact name
+// (hostedRootFileNameRefusal). Files in subdirectories are not restricted.
 func hostedHarnessConfigManifestRefusal(name string, files []store.TemplateFile) error {
-	fold := cases.Fold()
 	for _, f := range files {
-		if f.Path != harnessConfigYAMLPath && fold.String(norm.NFD.String(f.Path)) == harnessConfigYAMLPath {
-			return &hostedHarnessConfigError{err: fmt.Errorf("file %q in %s: config.yaml must be spelled in lower case on a hosted server",
-				f.Path, hostedguard.Origin{Kind: hostedguard.OriginHarnessConfig, Name: name})}
+		if strings.Contains(f.Path, "/") {
+			continue
+		}
+		if reason := hostedRootFileNameRefusal(f.Path); reason != "" {
+			return &hostedHarnessConfigError{err: fmt.Errorf("file %q in %s: %s on a hosted server",
+				f.Path, hostedguard.Origin{Kind: hostedguard.OriginHarnessConfig, Name: name}, reason)}
 		}
 	}
 	return nil
+}
+
+// hostedRootFileNameRefusal returns why the root-level file name n is
+// refused, or "" when it is allowed. Allowed names are plain ASCII, do not
+// end with a dot or a space (which some filesystems drop), contain no "~"
+// (which can name a short-name alias), and spell config.yaml only in lower
+// case.
+func hostedRootFileNameRefusal(n string) string {
+	for _, r := range n {
+		if r > unicode.MaxASCII {
+			return "top-level file names must be plain ASCII"
+		}
+	}
+	switch {
+	case strings.HasSuffix(n, ".") || strings.HasSuffix(n, " "):
+		return "top-level file names may not end with a dot or a space"
+	case strings.Contains(n, "~"):
+		return `top-level file names may not contain "~"`
+	case n != harnessConfigYAMLPath && strings.EqualFold(n, harnessConfigYAMLPath):
+		return "config.yaml must be spelled in lower case"
+	}
+	return ""
 }
 
 // writeHostedHarnessConfigRefusal writes err as 400 hosted_config_refused

@@ -36,10 +36,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hostedHCConfigYAMLVariants are file names a case-insensitive filesystem
-// can read as config.yaml: other letter case, and the U+FB01 "fi" ligature,
-// which full case folding maps to "fi".
-var hostedHCConfigYAMLVariants = []string{"CONFIG.YAML", "con\ufb01g.yaml", "CON\ufb01G.YAML"}
+// hostedHCConfigYAMLVariants are root-level file names a hosted hub
+// refuses in a project harness config because a broker's filesystem could
+// read them as another name (config.yaml): other letter case, non-ASCII
+// (the U+FB01 ligature, a zero-width non-joiner), a trailing dot or space,
+// and a short-name alias.
+var hostedHCConfigYAMLVariants = []string{
+	"CONFIG.YAML", "con\ufb01g.yaml", "CON\ufb01G.YAML", "con\u200cfig.yaml",
+	"config.yaml.", "config.yaml ", "CONFIG~1.YAM",
+}
 
 const (
 	// hostedHCVolYAML is a harness config with one host bind. Its source
@@ -127,10 +132,9 @@ func TestHarnessConfigFileWrite_HostedProjectScope(t *testing.T) {
 			assert.Equal(t, hc.ContentHash, got.ContentHash, "row unchanged")
 		})
 	}
-	// A file named config.yaml in another spelling that full case folding
-	// maps to config.yaml (letter case, the U+FB01 ligature) is refused on
-	// a hosted hub (a broker on a case-insensitive filesystem could read it
-	// as config.yaml), and accepted on a workstation hub.
+	// A root-level file name a broker's filesystem could read as
+	// config.yaml is refused on a hosted hub, and accepted on a workstation
+	// hub.
 	for _, variant := range hostedHCConfigYAMLVariants {
 		for _, workstation := range []bool{false, true} {
 			t.Run(map[bool]string{false: "hosted", true: "workstation"}[workstation]+" "+variant, func(t *testing.T) {
@@ -146,7 +150,7 @@ func TestHarnessConfigFileWrite_HostedProjectScope(t *testing.T) {
 				code, msg := decodeHostedRefusal(t, rec)
 				assert.Equal(t, hostedguard.ErrorCode, code)
 				assert.Contains(t, msg, `harness config "case-hc"`)
-				assert.Contains(t, msg, "config.yaml must be spelled in lower case")
+				assert.Contains(t, msg, "on a hosted server")
 				assert.NotContains(t, rec.Body.String(), "member-secret-src")
 				got, err := s.GetHarnessConfig(ctx, hc.ID)
 				require.NoError(t, err)
@@ -154,9 +158,9 @@ func TestHarnessConfigFileWrite_HostedProjectScope(t *testing.T) {
 			})
 		}
 	}
-	// Spellings no case-insensitive filesystem reads as config.yaml stay
-	// ordinary files: a subdirectory's CONFIG.YAML and the dotless i.
-	for _, other := range []string{"sub/CONFIG.YAML", "conf\u0131g.yaml"} {
+	// Files in subdirectories, and plain ASCII root files, are not
+	// restricted.
+	for _, other := range []string{"sub/CONFIG.YAML", "home/con\ufb01g.yaml", "home/n\u00f6tes~.md.", "notes.md", "provision.py"} {
 		t.Run("hosted accepts "+other, func(t *testing.T) {
 			srv, s, _ := testHarnessConfigFileServer(t)
 			hc := newHostedTestHC(t, srv, s, "hc-other", "other-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
@@ -380,7 +384,7 @@ func TestDispatch_HostedHarnessConfigPrecheck(t *testing.T) {
 			require.True(t, errors.As(err, &refusal), "refused with a typed refusal: %v", err)
 			assert.Equal(t, hostedguard.ErrorCode, refusal.Code)
 			assert.Contains(t, refusal.Message, `harness config "case-stored-hc"`)
-			assert.Contains(t, refusal.Message, "config.yaml must be spelled in lower case")
+			assert.Contains(t, refusal.Message, "on a hosted server")
 			assert.False(t, m.startCalled, "no broker call")
 		})
 	}
