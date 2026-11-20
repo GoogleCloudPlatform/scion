@@ -613,3 +613,98 @@ func TestRunMaintenance_ReaperReconcileAndPurge(t *testing.T) {
 	_, err = cs.GetTriggerEvent(ctx, oldPurgeEv.ID)
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
+
+func TestDispatcher_MatchRulesFailClosed_DBRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
+	t0 := time.Date(2026, 11, 20, 6, 0, 0, 0, time.UTC)
+	projID := seedProjectForDispatch(t, cs)
+	epID := uuid.NewString()
+
+	trWithRules := makeActiveTrigger(projID, epID, "tr-rules", []string{"webhook.received"})
+	trWithRules.MatchRules = []store.TriggerMatchRule{
+		{Dialect: store.TriggerDialectCEL, Expr: `event.type == "webhook.received"`},
+	}
+	trLegacyScalar := makeActiveTrigger(projID, epID, "tr-legacy", []string{"webhook.received"})
+	trLegacyScalar.MatchRule = `event.type == "webhook.received"`
+	trCorrupt := makeActiveTrigger(projID, epID, "tr-corrupt", []string{"webhook.received"})
+	trEmpty := makeActiveTrigger(projID, epID, "tr-empty", []string{"webhook.received"})
+
+	for _, tr := range []*store.Trigger{trWithRules, trLegacyScalar, trCorrupt, trEmpty} {
+		require.NoError(t, cs.CreateTrigger(ctx, tr))
+	}
+	require.NoError(t, entClient.Trigger.UpdateOneID(uuid.MustParse(trCorrupt.ID)).SetMatchRules("{corrupt").Exec(ctx))
+
+	ev := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		Type:       "webhook.received",
+		Subject:    "webhook:" + epID,
+		DedupKey:   "guard-db-1",
+		OccurredAt: t0,
+		ReceivedAt: t0,
+		Payload:    `{"ok":true}`,
+		Status:     store.TriggerEventStatusPending,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, ev))
+
+	var firedIDs []string
+	core := &fakeCore{
+		fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+			firedIDs = append(firedIDs, req.Authority.DefinitionID)
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		},
+	}
+	core.enabled.Store(true)
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: cs,
+		Now:   func() time.Time { return t0 },
+	})
+	require.NoError(t, err)
+
+	raw, err := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: ev.ID})
+	require.NoError(t, err)
+	res := disp.HandleItem(ctx, durablequeue.Item{
+		Seq:       1,
+		Kind:      trigger.EventQueueKind,
+		DedupKey:  ev.ID,
+		ProjectID: projID,
+		Payload:   raw,
+	}, nopLease{})
+	assert.True(t, res.Done)
+	assert.NoError(t, res.Err)
+	assert.Equal(t, []string{trEmpty.ID}, firedIDs, "only empty-rules trigger may invoke action")
+
+	fires, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: projID, EventID: ev.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires.Items, 4)
+	byTr := make(map[string]store.TriggerFire, len(fires.Items))
+	for _, f := range fires.Items {
+		byTr[f.TriggerID] = f
+	}
+	for _, skippedID := range []string{trWithRules.ID, trLegacyScalar.ID, trCorrupt.ID} {
+		f := byTr[skippedID]
+		assert.Equal(t, store.TriggerFireStatusSkipped, f.Status)
+		assert.Equal(t, "rule evaluation unavailable", f.Error)
+
+		gotTr, gErr := cs.GetTrigger(ctx, skippedID)
+		require.NoError(t, gErr)
+		assert.Equal(t, 1, gotTr.FireCount)
+		assert.Equal(t, 0, gotTr.ErrorCount)
+		assert.Equal(t, store.TriggerFireStatusSkipped, gotTr.LastFireStatus)
+		assert.Equal(t, "rule evaluation unavailable", gotTr.LastFireError)
+	}
+	assert.Equal(t, store.TriggerFireStatusFired, byTr[trEmpty.ID].Status)
+	assert.Empty(t, byTr[trEmpty.ID].Error)
+
+	gotEv, err := cs.GetTriggerEvent(ctx, ev.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusProcessed, gotEv.Status)
+	assert.Equal(t, 1, gotEv.MatchCount)
+	assert.Equal(t, 1, gotEv.FireCount)
+}
