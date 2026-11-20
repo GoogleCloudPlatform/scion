@@ -23,13 +23,32 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func parseDeliveryEnvelope9f(t *testing.T, deliveryText string) messaging.DeliveryEnvelope {
+	t.Helper()
+	const (
+		begin = "---BEGIN SCION MESSAGE---\n"
+		end   = "\n---END SCION MESSAGE---"
+	)
+	start := strings.Index(deliveryText, begin)
+	require.GreaterOrEqual(t, start, 0, "expected BEGIN SCION MESSAGE in DeliveryText: %q", deliveryText)
+	start += len(begin)
+	finish := strings.Index(deliveryText[start:], end)
+	require.GreaterOrEqual(t, finish, 0, "expected END SCION MESSAGE in DeliveryText: %q", deliveryText)
+	var env messaging.DeliveryEnvelope
+	require.NoError(t, json.Unmarshal([]byte(deliveryText[start:start+finish]), &env))
+	return env
+}
 
 // ---------------------------------------------------------------------------
 // Scheduler message delivery — DeliveryText
@@ -75,13 +94,28 @@ func TestPhase9f_Scheduler_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 		AgentName: "9f-sched-on-agent",
 		Message:   "Phase 9f scheduler delivery text test",
 	})
-	evt := store.ScheduledEvent{
+	fireAt := time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
+	sched := store.Schedule{
 		ID:        api.NewUUID(),
 		ProjectID: projectID,
+		Name:      "9f-hourly-check",
+		CronExpr:  "0 * * * *",
 		EventType: "message",
 		Payload:   string(payload),
-		Status:    store.ScheduledEventPending,
+		Status:    store.ScheduleStatusActive,
 		CreatedBy: agentID,
+	}
+	require.NoError(t, s.CreateSchedule(ctx, &sched))
+
+	evt := store.ScheduledEvent{
+		ID:         api.NewUUID(),
+		ProjectID:  projectID,
+		ScheduleID: sched.ID,
+		EventType:  "message",
+		FireAt:     fireAt,
+		Payload:    string(payload),
+		Status:     store.ScheduledEventPending,
+		CreatedBy:  agentID,
 	}
 	// The revision principal is the target agent itself (a self-message).
 	evt = withAgentRevision(t, srv, evt, agentID)
@@ -93,8 +127,28 @@ func TestPhase9f_Scheduler_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 	require.Equal(t, 1, len(calls), "expected 1 dispatch call")
 	require.NotNil(t, calls[0].StructuredMessage)
 	if calls[0].StructuredMessage.DeliveryText == "" {
-		t.Error("DeliveryText is empty — envelope switch is ON, scheduler messages should use the new envelope")
+		t.Fatal("DeliveryText is empty — envelope switch is ON, scheduler messages should use the new envelope")
 	}
+	env := parseDeliveryEnvelope9f(t, calls[0].StructuredMessage.DeliveryText)
+	assert.Equal(t, "event", env.Type)
+	assert.Equal(t, "system:SCHEDULER", env.From)
+	require.NotNil(t, env.Event)
+	assert.Equal(t, messaging.EventScheduleFired, env.Event.Type)
+	assert.Equal(t, "schedule:"+sched.ID, env.Event.Subject)
+	assert.Equal(t, evt.ID, env.Event.EventID)
+	require.NotNil(t, env.Event.Source)
+	assert.Equal(t, messaging.EventSource{
+		Kind: "schedule",
+		ID:   sched.ID,
+		Name: sched.Name,
+	}, *env.Event.Source)
+	require.NotNil(t, env.Event.Schedule)
+	assert.Equal(t, messaging.EventScheduleRef{
+		ID:      sched.ID,
+		Name:    sched.Name,
+		EventID: evt.ID,
+		FireAt:  fireAt.Format(time.RFC3339),
+	}, *env.Event.Schedule)
 }
 
 // TestPhase9f_Scheduler_DeliveryText_EmptyWhenSwitchOff verifies that the

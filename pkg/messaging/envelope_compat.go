@@ -194,14 +194,27 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 	kind, intent, event := MapLegacyType(old.Type, systemCategory, hasAddressee)
 
 	// When StructuredMessage.Event carries a valid serialized EventBody on a
-	// hub-minted trigger system message (§8.3), use it verbatim instead of the
-	// category default. Client-, agent-, user-, and scheduler-originated
-	// messages may never override the EventBody or inject ExternalPayload
-	// integrity labels via StructuredMessage.Event.
-	if kind == KindEvent && len(old.Event) > 0 && isHubMintedTriggerSender(old) {
-		var parsed EventBody
-		if err := json.Unmarshal(old.Event, &parsed); err == nil && parsed.Validate() == nil {
-			event = &parsed
+	// hub-minted trigger or scheduler system message (§8.3, §8.4), use it
+	// verbatim within that sender's allowed event family instead of the category
+	// default. Client-, agent-, and user-originated messages may never override
+	// the EventBody or inject ExternalPayload integrity labels, and scheduler
+	// system messages may carry only schedule.fired metadata (never Trigger or
+	// ExternalPayload).
+	if kind == KindEvent && len(old.Event) > 0 {
+		if isHubMintedTriggerSender(old) {
+			var parsed EventBody
+			if err := json.Unmarshal(old.Event, &parsed); err == nil && parsed.Validate() == nil {
+				event = &parsed
+			}
+		} else if isHubMintedSchedulerSender(old) {
+			var parsed EventBody
+			if err := json.Unmarshal(old.Event, &parsed); err == nil &&
+				parsed.Validate() == nil &&
+				parsed.Type == EventScheduleFired &&
+				parsed.External == nil &&
+				parsed.Trigger == nil {
+				event = &parsed
+			}
 		}
 	}
 
@@ -402,12 +415,18 @@ func NewEnvelopeToLegacy(msg *Message, addrs []Addressee) *messages.StructuredMe
 		Urgent:         msg.Urgent,
 	}
 
-	// Map From to sender fields. Preserve the hub-minted trigger sender tuple
-	// ("trigger" / "TRIGGER") on system:TRIGGER trigger events so a legacy
-	// round-trip stays recognizable to isHubMintedTriggerSender.
+	// Map From to sender fields. Preserve the hub-minted trigger ("trigger" /
+	// "TRIGGER") and rich scheduler ("scheduler" / "SCHEDULER") sender tuples so
+	// a legacy round-trip stays recognizable to isHubMintedTriggerSender /
+	// isHubMintedSchedulerSender.
 	if msg.Kind == KindEvent && msg.From == "system:TRIGGER" && eventTypeToSystemCategory(msg.Event) == messages.SystemCategoryTrigger {
 		old.Sender = "trigger"
 		old.SenderID = "TRIGGER"
+	} else if msg.Kind == KindEvent && msg.From == "system:SCHEDULER" &&
+		eventTypeToSystemCategory(msg.Event) == messages.SystemCategoryScheduler &&
+		hasRichEventBody(msg.Event) {
+		old.Sender = "scheduler"
+		old.SenderID = "SCHEDULER"
 	} else {
 		old.Sender = string(msg.From)
 		old.SenderID = string(msg.From)
@@ -549,6 +568,16 @@ func isHubMintedTriggerSender(old *messages.StructuredMessage) bool {
 		old.Sender == "trigger" &&
 		old.SenderID == "TRIGGER" &&
 		old.Metadata["system_category"] == messages.SystemCategoryTrigger
+}
+
+// isHubMintedSchedulerSender reports whether old carries the hub-minted
+// scheduler system sender identity stamped by buildMessageActionMessage.
+func isHubMintedSchedulerSender(old *messages.StructuredMessage) bool {
+	return old != nil &&
+		old.Type == messages.TypeSystem &&
+		old.Sender == "scheduler" &&
+		old.SenderID == "SCHEDULER" &&
+		old.Metadata["system_category"] == messages.SystemCategoryScheduler
 }
 
 func hasRichEventBody(e *EventBody) bool {

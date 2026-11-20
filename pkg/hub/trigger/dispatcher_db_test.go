@@ -721,3 +721,141 @@ func TestDispatcher_CorruptStoredMatchRulesSQLite_SkipsAndNeverFires(t *testing.
 	assert.Equal(t, triggerrule.SkipReasonEvalFailed, corruptFires.Items[0].Error)
 	assert.Contains(t, corruptFires.Items[0].RuleTrace, triggerrule.MatchReasonCorruptRules)
 }
+
+func TestDispatcherDB_SubjectModeSkip_WakeInFlightNewAlwaysFiresAndFiresAfterEnd(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	t0 := time.Date(2026, 11, 19, 14, 0, 0, 0, time.UTC)
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return t0 }))
+	projID := seedProjectForDispatch(t, cs)
+	epID := uuid.NewString()
+
+	trSkip := makeActiveTrigger(projID, epID, "db-skip-tr", []string{"webhook.received"})
+	trSkip.SubjectMode = store.TriggerSubjectModeSkip
+	require.NoError(t, cs.CreateTrigger(ctx, trSkip))
+
+	trNew := makeActiveTrigger(projID, epID, "db-new-tr", []string{"webhook.received"})
+	trNew.SubjectMode = store.TriggerSubjectModeNew
+	require.NoError(t, cs.CreateTrigger(ctx, trNew))
+
+	enqueueEv := func(dedup, subject string) *store.TriggerEvent {
+		ev := &store.TriggerEvent{
+			ID:         uuid.NewString(),
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    subject,
+			DedupKey:   dedup,
+			OccurredAt: t0,
+			ReceivedAt: t0,
+			Attributes: map[string]string{"endpoint_name": "ci"},
+			Payload:    `{"ok":true}`,
+		}
+		require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+			_, enqErr := trigger.EnqueueEvent(ctx, tx, tx, q, ev)
+			return enqErr
+		}))
+		return ev
+	}
+
+	ev1 := enqueueEv("skip-db-1", "webhook:"+epID+"/pr/101")
+
+	wakeEntered := make(chan struct{})
+	releaseWake := make(chan struct{})
+	var (
+		mu        sync.Mutex
+		skipCalls []string
+		newCalls  []string
+	)
+
+	core := &fakeCore{}
+	core.enabled.Store(true)
+	core.fireFn = func(fctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+		mu.Lock()
+		switch req.Authority.DefinitionID {
+		case trSkip.ID:
+			skipCalls = append(skipCalls, req.Event.ID)
+		case trNew.ID:
+			newCalls = append(newCalls, req.Event.ID)
+		}
+		mu.Unlock()
+
+		if req.Authority.DefinitionID == trSkip.ID && req.Event.ID == ev1.ID {
+			detached, cancelDetached := req.Tracked.Detach(fctx)
+			defer cancelDetached()
+			close(wakeEntered)
+			select {
+			case <-releaseWake:
+			case <-detached.Done():
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: detached.Err().Error()}
+			}
+		}
+		return hubfire.FireOutcome{Status: hubfire.FireStatusFired, ResultRef: "msg-" + req.Event.ID[:8]}
+	}
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:           core,
+		Store:          cs,
+		Now:            func() time.Time { return t0 },
+		PerFireTimeout: 40 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	d1, err := disp.NewDrainer(trigger.DrainerOptions{QueueStore: cs, Queue: q, BatchSize: 1})
+	require.NoError(t, err)
+	d2, err := disp.NewDrainer(trigger.DrainerOptions{QueueStore: cs, Queue: q, BatchSize: 1})
+	require.NoError(t, err)
+
+	d1Err := make(chan error, 1)
+	go func() {
+		_, err := d1.DrainOnce(ctx)
+		d1Err <- err
+	}()
+
+	select {
+	case <-wakeEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for d1 wake fire to enter")
+	}
+
+	// Enqueue and drain ev2 on the same subject via d2 while d1's wake fire is still in flight.
+	ev2 := enqueueEv("skip-db-2", "webhook:"+epID+"/pr/101")
+	res2, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res2.Claimed)
+
+	// Enqueue and drain evOther on a different subject via d2 while pr/101 is still busy.
+	evOther := enqueueEv("skip-db-other", "webhook:"+epID+"/pr/202")
+	resOther, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, resOther.Claimed)
+
+	// End ev1's wake fire.
+	close(releaseWake)
+	require.NoError(t, <-d1Err)
+
+	// Enqueue and drain ev3 on pr/101 after ev1's wake fire has ended: must fire again.
+	ev3 := enqueueEv("skip-db-3", "webhook:"+epID+"/pr/101")
+	res3, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res3.Claimed)
+
+	mu.Lock()
+	assert.Equal(t, []string{ev1.ID, evOther.ID, ev3.ID}, skipCalls)
+	assert.ElementsMatch(t, []string{ev1.ID, ev2.ID, evOther.ID, ev3.ID}, newCalls)
+	mu.Unlock()
+
+	fires, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: trSkip.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires.Items, 4)
+	statusByEvent := make(map[string]store.TriggerFire, len(fires.Items))
+	for _, item := range fires.Items {
+		statusByEvent[item.EventID] = item
+	}
+	assert.Equal(t, store.TriggerFireStatusFired, statusByEvent[ev1.ID].Status)
+	assert.Equal(t, store.TriggerFireStatusSkipped, statusByEvent[ev2.ID].Status)
+	assert.Equal(t, trigger.ErrFireSubjectBusy, statusByEvent[ev2.ID].Error)
+	assert.Equal(t, store.TriggerFireStatusFired, statusByEvent[evOther.ID].Status)
+	assert.Equal(t, store.TriggerFireStatusFired, statusByEvent[ev3.ID].Status)
+}

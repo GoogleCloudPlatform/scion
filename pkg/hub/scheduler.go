@@ -952,7 +952,11 @@ func (s *Scheduler) executeEvent(ctx context.Context, evt store.ScheduledEvent) 
 		exec = existing
 	}
 	fireCtx := withFireHistoryCreator(ctx, evt.CreatedBy)
-	out := s.fireAction(fireCtx, scheduledFireRequest(s.srv, evt, exec))
+	st := s.store
+	if st == nil && s.srv != nil {
+		st = s.srv.store
+	}
+	out := s.fireAction(fireCtx, scheduledFireRequestWithSchedule(fireCtx, s.srv, st, evt, nil, exec))
 	if out.AfterRecord != nil {
 		after := out.AfterRecord
 		afterScheduledRecord(ctx, func() {

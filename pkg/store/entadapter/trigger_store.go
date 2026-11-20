@@ -1766,29 +1766,32 @@ func setTriggerFireInitiatorAttribution(create *ent.TriggerFireCreate, attr stor
 	}
 }
 
-func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.TriggerFire) (bool, *store.TriggerFire, error) {
+func parseTriggerFireUUIDs(fire *store.TriggerFire) (uid, pid, tid, eid uuid.UUID, err error) {
 	if fire == nil || fire.ID == "" || fire.ProjectID == "" || fire.TriggerID == "" ||
 		fire.EventID == "" || fire.ActionType == "" || fire.LeaseUntil.IsZero() {
-		return false, nil, store.ErrInvalidInput
+		return uuid.Nil, uuid.Nil, uuid.Nil, uuid.Nil, store.ErrInvalidInput
 	}
-	uid, err := parseUUID(fire.ID)
+	uid, err = parseUUID(fire.ID)
 	if err != nil {
-		return false, nil, err
+		return uuid.Nil, uuid.Nil, uuid.Nil, uuid.Nil, err
 	}
-	pid, err := parseUUID(fire.ProjectID)
+	pid, err = parseUUID(fire.ProjectID)
 	if err != nil {
-		return false, nil, err
+		return uuid.Nil, uuid.Nil, uuid.Nil, uuid.Nil, err
 	}
-	tid, err := parseUUID(fire.TriggerID)
+	tid, err = parseUUID(fire.TriggerID)
 	if err != nil {
-		return false, nil, err
+		return uuid.Nil, uuid.Nil, uuid.Nil, uuid.Nil, err
 	}
-	eid, err := parseUUID(fire.EventID)
+	eid, err = parseUUID(fire.EventID)
 	if err != nil {
-		return false, nil, err
+		return uuid.Nil, uuid.Nil, uuid.Nil, uuid.Nil, err
 	}
-	now := time.Now().UTC()
-	startedAt := now
+	return uid, pid, tid, eid, nil
+}
+
+func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fire *store.TriggerFire, defaultNow time.Time) *ent.TriggerFireCreate {
+	startedAt := defaultNow
 	if !fire.StartedAt.IsZero() {
 		startedAt = fire.StartedAt.UTC()
 	}
@@ -1801,7 +1804,7 @@ func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.Trigger
 		status = store.TriggerFireStatusFiring
 	}
 
-	create := s.client.TriggerFire.Create().
+	create := client.TriggerFire.Create().
 		SetID(uid).
 		SetProjectID(pid).
 		SetTriggerID(tid).
@@ -1833,8 +1836,16 @@ func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.Trigger
 		create.SetFinishedAt(fire.FinishedAt.UTC())
 	}
 	setTriggerFireInitiatorAttribution(create, fire.InitiatorAttribution)
+	return create
+}
 
-	created, err := create.Save(ctx)
+func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.TriggerFire) (bool, *store.TriggerFire, error) {
+	uid, pid, tid, eid, err := parseTriggerFireUUIDs(fire)
+	if err != nil {
+		return false, nil, err
+	}
+	now := time.Now().UTC()
+	created, err := buildTriggerFireCreate(s.client, uid, pid, tid, eid, fire, now).Save(ctx)
 	if err != nil {
 		mapped := mapError(err)
 		if errors.Is(mapped, store.ErrAlreadyExists) {
@@ -1850,6 +1861,87 @@ func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.Trigger
 	}
 	*fire = *entTriggerFireToStore(created)
 	return true, nil, nil
+}
+
+func (s *TriggerStore) ClaimTriggerFireSubjectSkip(ctx context.Context, fire *store.TriggerFire, skipError string, now time.Time) (bool, bool, *store.TriggerFire, error) {
+	uid, pid, tid, eid, err := parseTriggerFireUUIDs(fire)
+	if err != nil {
+		return false, false, nil, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	var (
+		claimed     bool
+		skippedBusy bool
+		existingOut *store.TriggerFire
+	)
+	txErr := s.withClientTx(ctx, func(client *ent.Client) error {
+		if isPostgres(client) {
+			var res sql.Result
+			lockKey := fire.TriggerID + "\x00" + fire.Subject
+			if lErr := client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
+				[]any{int32(store.LockTriggerSubjectOverlap), store.StableProjectHash(lockKey)}, &res); lErr != nil {
+				return fmt.Errorf("lock trigger subject overlap: %w", lErr)
+			}
+		}
+
+		ex, qErr := client.TriggerFire.Query().
+			Where(triggerfire.EventIDEQ(eid), triggerfire.TriggerIDEQ(tid)).
+			Only(ctx)
+		if qErr == nil {
+			claimed = false
+			skippedBusy = false
+			existingOut = entTriggerFireToStore(ex)
+			return nil
+		}
+		if !ent.IsNotFound(qErr) {
+			return mapError(qErr)
+		}
+
+		busy, bErr := hasLiveTriggerFireForSubjectClient(ctx, client, tid, fire.Subject, now)
+		if bErr != nil {
+			return mapError(bErr)
+		}
+
+		row := *fire
+		if busy {
+			row.Status = store.TriggerFireStatusSkipped
+			row.Error = skipError
+			fin := now
+			row.FinishedAt = &fin
+			skippedBusy = true
+		} else {
+			if row.Status == "" {
+				row.Status = store.TriggerFireStatusFiring
+			}
+			skippedBusy = false
+		}
+
+		created, cErr := buildTriggerFireCreate(client, uid, pid, tid, eid, &row, now).Save(ctx)
+		if cErr != nil {
+			return mapError(cErr)
+		}
+		*fire = *entTriggerFireToStore(created)
+		claimed = true
+		return nil
+	})
+	if txErr != nil {
+		if !s.inTx && errors.Is(txErr, store.ErrAlreadyExists) {
+			ex, qErr := s.client.TriggerFire.Query().
+				Where(triggerfire.EventIDEQ(eid), triggerfire.TriggerIDEQ(tid)).
+				Only(ctx)
+			if qErr != nil {
+				return false, false, nil, mapError(qErr)
+			}
+			return false, false, entTriggerFireToStore(ex), nil
+		}
+		return false, false, nil, txErr
+	}
+	return claimed, skippedBusy, existingOut, nil
 }
 
 func (s *TriggerStore) FinishTriggerFire(ctx context.Context, id, status, resultRef, errMsg string, finishedAt time.Time) (bool, error) {
@@ -1969,12 +2061,8 @@ func (s *TriggerStore) ListTriggerFires(ctx context.Context, filter store.Trigge
 	return result, nil
 }
 
-func (s *TriggerStore) HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error) {
-	tid, err := parseUUID(triggerID)
-	if err != nil {
-		return false, err
-	}
-	return s.client.TriggerFire.Query().
+func hasLiveTriggerFireForSubjectClient(ctx context.Context, client *ent.Client, tid uuid.UUID, subject string, now time.Time) (bool, error) {
+	return client.TriggerFire.Query().
 		Where(
 			triggerfire.TriggerIDEQ(tid),
 			triggerfire.SubjectEQ(subject),
@@ -1982,6 +2070,14 @@ func (s *TriggerStore) HasLiveTriggerFireForSubject(ctx context.Context, trigger
 			triggerfire.LeaseUntilGT(now.UTC()),
 		).
 		Exist(ctx)
+}
+
+func (s *TriggerStore) HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error) {
+	tid, err := parseUUID(triggerID)
+	if err != nil {
+		return false, err
+	}
+	return hasLiveTriggerFireForSubjectClient(ctx, s.client, tid, subject, now)
 }
 
 func (s *TriggerStore) AgentHasFiredTriggerForEvent(ctx context.Context, eventID, agentID string) (bool, error) {

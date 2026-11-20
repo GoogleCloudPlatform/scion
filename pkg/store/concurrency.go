@@ -345,6 +345,15 @@ const (
 	// (ptone/scion#8028) hold across concurrent writers on PostgreSQL.
 	// In the per-object range; not taken through AdvisoryLocker.
 	LockTriggerQuota AdvisoryLockKey = 0x5C101007
+
+	// LockTriggerSubjectOverlap is the CLASS ID for per-(trigger, subject)
+	// subject_mode="skip" live-fire overlap serialization (ptone/scion#8031):
+	// a transaction-scoped pg_advisory_xact_lock(classid, objid) with objid
+	// StableProjectHash(triggerID + "\x00" + subject), taken by
+	// ClaimTriggerFireSubjectSkip so concurrent drainers neither double-fire
+	// nor mutually skip one subject. In the per-object range; not taken
+	// through AdvisoryLocker.
+	LockTriggerSubjectOverlap AdvisoryLockKey = 0x5C101008
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

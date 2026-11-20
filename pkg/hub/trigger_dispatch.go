@@ -489,21 +489,22 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 		return messaging.EventBody{}
 	}
 	var body messaging.EventBody
-	switch ev.Type {
-	case string(messaging.EventWebhookReceived):
-		body.Type = messaging.EventWebhookReceived
-	case string(messaging.EventScheduleFired):
-		body.Type = messaging.EventScheduleFired
-	default:
+	candidateType := messaging.EventType(ev.Type)
+	if messaging.ValidateEventType(candidateType) == nil {
+		body.Type = candidateType
+	} else {
 		body.Type = messaging.EventTriggerFired
 		body.EventType = ev.Type
 	}
 	body.Subject = ev.Subject
 	body.EventID = ev.ID
-	if ev.SourceKind != "" || ev.SourceID != "" {
+	if ev.SourceKind != "" && ev.SourceID != "" {
 		sourceName := ""
 		if ev.Attributes != nil {
 			sourceName = ev.Attributes["endpoint_name"]
+		}
+		if sourceName == "" && ev.Schedule != nil {
+			sourceName = ev.Schedule.Name
 		}
 		body.Source = &messaging.EventSource{
 			Kind: ev.SourceKind,
@@ -515,6 +516,18 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 		body.Trigger = &messaging.EventTriggerRef{
 			ID:   ev.Trigger.ID,
 			Name: ev.Trigger.Name,
+		}
+	}
+	if ev.Schedule != nil {
+		fireAt := ""
+		if !ev.Schedule.FireAt.IsZero() {
+			fireAt = ev.Schedule.FireAt.UTC().Format(time.RFC3339)
+		}
+		body.Schedule = &messaging.EventScheduleRef{
+			ID:      ev.Schedule.ID,
+			Name:    ev.Schedule.Name,
+			EventID: ev.Schedule.EventID,
+			FireAt:  fireAt,
 		}
 	}
 	verified := verifiedLabelForFireEvent(ev)
@@ -576,9 +589,9 @@ func ApplyDispatchedEventEnvelope(structuredMsg *messages.StructuredMessage, req
 			structuredMsg.Metadata = make(map[string]string)
 		}
 		structuredMsg.Metadata["system_category"] = messages.SystemCategoryTrigger
-	}
-	if !req.Event.OccurredAt.IsZero() {
-		structuredMsg.Timestamp = req.Event.OccurredAt.UTC().Format(time.RFC3339)
+		if !req.Event.OccurredAt.IsZero() {
+			structuredMsg.Timestamp = req.Event.OccurredAt.UTC().Format(time.RFC3339)
+		}
 	}
 
 	body := buildDispatchedEventBody(req.Event)

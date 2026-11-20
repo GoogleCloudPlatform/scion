@@ -2421,3 +2421,76 @@ func TestFireCoreTriggerGenericErrorText(t *testing.T) {
 		})
 	}
 }
+
+type countingGetScheduleStore struct {
+	*mockScheduledEventStore
+	getScheduleCalls atomic.Int32
+}
+
+func (s *countingGetScheduleStore) GetSchedule(ctx context.Context, id string) (*store.Schedule, error) {
+	s.getScheduleCalls.Add(1)
+	return s.mockScheduledEventStore.GetSchedule(ctx, id)
+}
+
+func TestFireCoreDetaches_NoScheduleLookup(t *testing.T) {
+	t.Parallel()
+
+	ms := newMockStore()
+	ms.schedules = map[string]*store.Schedule{
+		"sch-det-1": {
+			ID:        "sch-det-1",
+			ProjectID: "proj-det-1",
+			Name:      "det-sched",
+			EventType: "message",
+		},
+	}
+	cs := &countingGetScheduleStore{mockScheduledEventStore: ms}
+	srv := newEventHandlerTestServer(cs)
+	srv.registerFireActions()
+	sched := NewScheduler(cs, slog.Default())
+	sched.srv = srv
+	srv.scheduler = sched
+
+	var seenEvent *hubfire.FireEvent
+	srv.RegisterAction(&fakeFireAction{
+		actionType: "probe_detaches",
+		permission: scheduledMessagePermission,
+		detachesFn: func(req hubfire.FireRequest) bool {
+			seenEvent = req.Event
+			return true
+		},
+	})
+
+	sc := *ms.schedules["sch-det-1"]
+	wakeEvt := store.ScheduledEvent{
+		ID:         "evt-det-wake",
+		ProjectID:  "proj-det-1",
+		ScheduleID: sc.ID,
+		EventType:  "message",
+		Payload:    `{"agentId":"a1","message":"wake up","wake":true}`,
+	}
+	nonWakeEvt := store.ScheduledEvent{
+		ID:         "evt-det-nowake",
+		ProjectID:  "proj-det-1",
+		ScheduleID: sc.ID,
+		EventType:  "message",
+		Payload:    `{"agentId":"a1","message":"stay"}`,
+	}
+
+	assert.True(t, srv.scheduleFireDetaches(sc, wakeEvt))
+	assert.False(t, srv.scheduleFireDetaches(sc, nonWakeEvt))
+	assert.True(t, sched.eventFireDetaches(wakeEvt))
+	assert.False(t, sched.eventFireDetaches(nonWakeEvt))
+
+	// Empty evt.EventType on scheduleFireDetaches falls back to sched.EventType.
+	inheritTypeEvt := wakeEvt
+	inheritTypeEvt.EventType = ""
+	assert.True(t, srv.scheduleFireDetaches(sc, inheritTypeEvt))
+
+	// Detaches request carries nil Event and performs zero GetSchedule reads.
+	probeEvt := wakeEvt
+	probeEvt.EventType = "probe_detaches"
+	assert.True(t, sched.eventFireDetaches(probeEvt))
+	assert.Nil(t, seenEvent, "Detaches path must not construct a FireEvent")
+	assert.Zero(t, cs.getScheduleCalls.Load(), "Detaches path must not read store.GetSchedule")
+}
