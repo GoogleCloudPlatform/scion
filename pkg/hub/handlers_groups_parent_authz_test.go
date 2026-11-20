@@ -722,10 +722,7 @@ func TestCreateGroup_ParentID_AgentCaller(t *testing.T) {
 
 	asAgent := func(t *testing.T, f *agentFixture, method, path string, body interface{}) *httptest.ResponseRecorder {
 		t.Helper()
-		svc := f.srv.GetAgentTokenService()
-		require.NotNil(t, svc)
-		tok, err := svc.GenerateAgentToken(f.agent.ID, f.agent.ProjectID, []AgentTokenScope{ScopeProjectRead}, nil)
-		require.NoError(t, err)
+		tok := f.srv.generateRecordedAgentToken(t, f.agent.ID, f.agent.ProjectID, []AgentTokenScope{ScopeProjectRead}, nil)
 		return doRequestWithAgentToken(t, f.srv, method, path, body, tok)
 	}
 

@@ -174,10 +174,7 @@ func TestListSkills_AgentPredicateAndFilterAgree(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 	// ptone/scion#1968: agents now read the hub catalog plus their own
 	// project's skills, so all 7 seeded rows are in scope. The #1954
@@ -257,8 +254,15 @@ func TestListSkills_AgentWithIsAllScopeStillGetsBoundedScope(t *testing.T) {
 	// this test is pinning.
 	tokenSvc := srv.GetAgentTokenService()
 	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, "", []AgentTokenScope{ScopeProjectRead}, nil)
+	token, cred, err := tokenSvc.SignAgentToken(AgentTokenGrant{
+		AgentID: agent.ID,
+		Scopes:  []AgentTokenScope{ScopeProjectRead},
+	}, "")
 	require.NoError(t, err)
+	// Record the credential under the agent's project ID (the credential table
+	// requires a non-empty project_id) while keeping the JWT's project ID empty.
+	cred.ProjectID = project.ID
+	require.NoError(t, s.CreateAgentCredential(ctx, cred))
 
 	rec := doAgentTokenRequestSkills(t, srv, "/api/v1/skills?status=active", token)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

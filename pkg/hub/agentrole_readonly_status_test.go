@@ -35,8 +35,7 @@ import (
 // holding exactly the readonly role's scopes.
 func doReadonlyAgentRequest(t *testing.T, srv *Server, agentID, projectID, method, path string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
-	token, err := srv.GetAgentTokenService().GenerateAgentToken(agentID, projectID, ScopesForRole(AgentRoleReadOnly), nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agentID, projectID, ScopesForRole(AgentRoleReadOnly), nil)
 
 	// A nil body sends no body at all, not the JSON literal null.
 	var reqBody io.Reader

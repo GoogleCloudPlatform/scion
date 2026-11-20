@@ -330,15 +330,14 @@ func TestFederationMiddleware_AgentTokenTakesPriority(t *testing.T) {
 		t.Fatalf("failed to create agent token service: %v", err)
 	}
 
-	agentToken, err := agentTokenSvc.GenerateAgentToken(
+	credStore := newMemAgentCredentialStore()
+	agentToken := generateRecordedAgentToken(t, agentTokenSvc, credStore,
 		"local-agent-1", "project-local", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
 
 	cfg := AuthConfig{
-		Mode:          "production",
-		AgentTokenSvc: agentTokenSvc,
+		Mode:            "production",
+		AgentTokenSvc:   agentTokenSvc,
+		CredentialStore: credStore,
 		FederationAuth: func() *atomic.Pointer[FederationAuthenticator] {
 			p := &atomic.Pointer[FederationAuthenticator]{}
 			p.Store(auth)

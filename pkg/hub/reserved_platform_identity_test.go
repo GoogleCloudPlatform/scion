@@ -252,15 +252,14 @@ func TestUnifiedAuthMiddleware_AgentToken_SkipsUserProvisioning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create agent token service: %v", err)
 	}
-	agentToken, err := agentTokenSvc.GenerateAgentToken("agent-1", "project-1", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	credStore := newMemAgentCredentialStore()
+	agentToken := generateRecordedAgentToken(t, agentTokenSvc, credStore, "agent-1", "project-1", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	provisionerCalled := false
 	cfg := AuthConfig{
 		Mode:               "production",
 		AgentTokenSvc:      agentTokenSvc,
+		CredentialStore:    credStore,
 		ProxyAuthenticator: &fakeProxyAuthenticator{info: &ProxyUserInfo{Email: testPlatformAuthSA}},
 		ProxyUserProvisioner: func(ctx context.Context, info *ProxyUserInfo) (UserIdentity, error) {
 			provisionerCalled = true

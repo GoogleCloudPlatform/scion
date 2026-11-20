@@ -838,8 +838,7 @@ func TestTestAdminA3_RuntimeSecretReadClamped(t *testing.T) {
 		require.NoError(t, s.CreateAgent(ctx, a))
 		scopes, err := srv.authzService.clampTestAdminRootedScopes(ctx, a, ScopesForRole(AgentRoleFull))
 		require.NoError(t, err)
-		tok, err := srv.agentTokenService.GenerateAgentToken(agentID, own, scopes, []string{rootID})
-		require.NoError(t, err)
+		tok := srv.generateRecordedAgentToken(t, agentID, own, scopes, []string{rootID})
 		return doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/secrets", secretFetchRequest{Keys: []string{"A3_SECRET"}}, tok)
 	}
 	rec := fetch(root.ID, store.FixtureProvenance{RootID: root.ID, IssuerID: issuer.ID})

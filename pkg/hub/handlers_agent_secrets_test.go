@@ -277,10 +277,7 @@ func TestAgentSecrets_NoSecretBackend(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	agentToken := srv.generateRecordedAgentToken(t, agentID, projectID, nil, nil)
 
 	body := AgentSetSecretRequest{
 		Value: base64.StdEncoding.EncodeToString([]byte("value")),

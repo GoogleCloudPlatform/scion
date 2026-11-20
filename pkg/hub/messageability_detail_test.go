@@ -175,9 +175,8 @@ func newMDFixture(t *testing.T, n int) *mdFixture {
 	}
 	f.carolAgent = mk("md-carol-0", f.carol, store.MessageModeProject, n)
 
-	f.agentToken, err = f.srv.GetAgentTokenService().GenerateAgentToken(
+	f.agentToken = f.srv.generateRecordedAgentToken(t,
 		f.aliceAgent.ID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
 	return f
 }
 
