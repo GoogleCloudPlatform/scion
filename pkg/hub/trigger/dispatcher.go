@@ -726,7 +726,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			finishErr error
 		)
 		tracker.record(func() {
-			finished, finishErr = d.store.FinishTriggerFire(writeCtx, fire.ID, statusStr, out.ResultRef, out.Error, finishedAt)
+			finished, finishErr = d.store.FinishTriggerFire(writeCtx, fire.ID, statusStr, out.ResultRef, out.TargetAgentID, out.Error, finishedAt)
 		})
 		if finishErr != nil {
 			cancelWrite()

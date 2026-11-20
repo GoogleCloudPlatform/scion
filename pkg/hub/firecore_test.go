@@ -1363,12 +1363,12 @@ func TestFireCoreDispatchAgentAction(t *testing.T) {
 		}))
 
 		normalized, err := act.Validate(context.Background(), nil, projectID, `{"agentName":"worker"}`)
-		require.ErrorContains(t, err, "dispatch_agent action authoring validation is not wired in Stage 1")
+		require.ErrorContains(t, err, "authentication required")
 		assert.Empty(t, normalized)
 
 		var nilAction *dispatchAgentAction
 		normalized, err = nilAction.Validate(context.Background(), nil, "", "")
-		require.ErrorContains(t, err, "dispatch_agent action authoring validation is not wired in Stage 1")
+		require.ErrorContains(t, err, "dispatch_agent action: server not configured")
 		assert.Empty(t, normalized)
 	})
 

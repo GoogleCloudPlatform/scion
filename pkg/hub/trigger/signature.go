@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Inbound webhook HTTP header names (§8.1a).
@@ -153,4 +155,34 @@ func VerifyScionV1Signature(secret string, now time.Time, sigHeader, delivery, e
 		}
 	}
 	return matched
+}
+
+// SourceReplayProtected reports whether a trigger source provides replay
+// protection sufficient for agent-creating or command-executing actions
+// (Stage 2 design §7.3).
+//
+// Replay-protected sources:
+//   - webhook endpoints in scion_v1 or stripe_v1 signature mode;
+//   - github App sources (Stage 3 §4.4: per-project X-GitHub-Delivery dedup +
+//     signed-body freshness window).
+//
+// Body-only / github_v1 webhook modes do not authenticate timestamps or
+// delivery headers and therefore return false.
+func SourceReplayProtected(sourceKind string, ep *store.WebhookEndpoint) bool {
+	switch sourceKind {
+	case store.TriggerSourceKindGitHub:
+		return true
+	case store.TriggerSourceKindWebhook:
+		if ep == nil {
+			return false
+		}
+		switch ep.SignatureMode {
+		case store.WebhookSignatureModeScionV1, "stripe_v1":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
 }

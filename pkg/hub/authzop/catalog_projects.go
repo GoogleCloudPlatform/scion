@@ -1209,7 +1209,7 @@ var projectOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 		DelegationDescription: "Authoring a trigger records the author's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) on the trigger row. " +
-			"In Stage 1 only the message action is supported, which grants no authority; fire-time delivery remains bounded by the recorded principal's current authority and frozen ceiling",
+			"A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling and creates agents bounded by the recorded principal's current authority and frozen ceiling",
 	},
 	{
 		ID:          "trigger.update",
@@ -1233,7 +1233,7 @@ var projectOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 		DelegationDescription: "A resume, and an update that changes the source, match rules, action, subject rules or status, records the caller's initiator attribution and frozen effect ceiling " +
-			"(triggerRevisionAuthorityCeiling) in place of the stored ones; a metadata-only update changes neither. In Stage 1 only the message action is supported, which grants no authority",
+			"(triggerRevisionAuthorityCeiling) in place of the stored ones; a metadata-only update changes neither. A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling",
 	},
 	{
 		ID:          "trigger.pause",

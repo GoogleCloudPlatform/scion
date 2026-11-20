@@ -401,7 +401,7 @@ func TestTriggerStore_EventsFiresVisibilityAndReaper(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, reaped)
 
-	finished, err := cs.FinishTriggerFire(ctx, fire.ID, store.TriggerFireStatusFired, "", "", now.Add(12*time.Minute))
+	finished, err := cs.FinishTriggerFire(ctx, fire.ID, store.TriggerFireStatusFired, "", "", "", now.Add(12*time.Minute))
 	require.NoError(t, err)
 	assert.False(t, finished)
 }
@@ -841,6 +841,109 @@ func TestListTriggerEvents_AgentVisibility_ManyFiresSubquery(t *testing.T) {
 	hasHidden, err := cs.AgentHasFiredTriggerForEvent(ctx, evHidden.ID, agentA)
 	require.NoError(t, err)
 	assert.False(t, hasHidden)
+}
+
+func TestTriggerFire_TargetAgentIDAndResultRefVisibility(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	ep := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "resref-ep",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    uuid.NewString(),
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SecretVersion:       1,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		Status:              store.WebhookEndpointStatusActive,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, ep))
+
+	tr := &store.Trigger{
+		ID:            uuid.NewString(),
+		ProjectID:     projID,
+		Name:          "resref-trig",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      ep.ID,
+		MatchTypes:    []string{"webhook.received"},
+		MatchDialect:  store.TriggerDialectCEL,
+		ActionType:    store.TriggerActionDispatchAgent,
+		ActionPayload: `{"task":"hello"}`,
+		SubjectMode:   store.TriggerSubjectModeNew,
+		Status:        store.TriggerStatusActive,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	ev := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   ep.ID,
+		Type:       "webhook.received",
+		Subject:    "s1",
+		DedupKey:   "d1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		CreatedAt:  now,
+	}
+	require.NoError(t, cs.CreateTriggerEvent(ctx, ev))
+
+	fire := &store.TriggerFire{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		TriggerID:  tr.ID,
+		EventID:    ev.ID,
+		Subject:    "s1",
+		ActionType: store.TriggerActionDispatchAgent,
+		Status:     store.TriggerFireStatusFiring,
+		LeaseUntil: now.Add(10 * time.Minute),
+		StartedAt:  now,
+		CreatedAt:  now,
+	}
+	claimed, _, err := cs.ClaimTriggerFire(ctx, fire)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	createdAgentID := uuid.NewString()
+	otherAgentID := uuid.NewString()
+	finished, err := cs.FinishTriggerFire(ctx, fire.ID, store.TriggerFireStatusFired, createdAgentID, createdAgentID, "", now.Add(time.Second))
+	require.NoError(t, err)
+	require.True(t, finished)
+
+	gotFire, err := cs.GetTriggerFire(ctx, fire.ID)
+	require.NoError(t, err)
+	assert.Equal(t, createdAgentID, gotFire.ResultRef)
+	assert.Equal(t, createdAgentID, gotFire.TargetAgentID)
+
+	hasRes, err := cs.EventHasTriggerFireForResultRef(ctx, ev.ID, createdAgentID)
+	require.NoError(t, err)
+	assert.True(t, hasRes)
+
+	hasOther, err := cs.EventHasTriggerFireForResultRef(ctx, ev.ID, otherAgentID)
+	require.NoError(t, err)
+	assert.False(t, hasOther)
+
+	listed, err := cs.ListTriggerEvents(ctx, store.TriggerEventFilter{
+		ProjectID:        projID,
+		VisibleToAgentID: createdAgentID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, listed.Items, 1)
+	assert.Equal(t, ev.ID, listed.Items[0].ID)
+
+	listedOther, err := cs.ListTriggerEvents(ctx, store.TriggerEventFilter{
+		ProjectID:        projID,
+		VisibleToAgentID: otherAgentID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, listedOther.Items)
 }
 
 func TestTriggerEvent_ListsPersistenceAndCeiling(t *testing.T) {

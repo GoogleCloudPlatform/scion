@@ -256,9 +256,15 @@ func (s *Server) validateScheduledEventPayloadJSON(w http.ResponseWriter, eventT
 	case "dispatch_agent":
 		var p DispatchAgentEventPayload
 		decodeErr = json.Unmarshal([]byte(payload), &p)
-		if decodeErr == nil && !templateRefAllowed(p.Template) {
-			ValidationError(w, templateRefRefusal, nil)
-			return false
+		if decodeErr == nil {
+			if field := unsupportedScheduledDispatchField(p); field != "" {
+				ValidationError(w, field+" is not supported for schedules", nil)
+				return false
+			}
+			if !templateRefAllowed(p.Template) {
+				ValidationError(w, templateRefRefusal, nil)
+				return false
+			}
 		}
 	case scheduledEventTypeExec:
 		// Strict, bounded decode (ptone/scion#7883); the error text names
@@ -315,4 +321,28 @@ func (s *Server) validateAndRejectScheduledPayload(w http.ResponseWriter, r *htt
 		return false
 	}
 	return s.validateScheduledEventPayloadJSON(w, eventType, payload)
+}
+
+// unsupportedScheduledDispatchField returns the first Stage 2 trigger-only
+// field populated on a dispatch_agent payload when authored for a schedule
+// (Stage 2 design §5.1).
+func unsupportedScheduledDispatchField(p DispatchAgentEventPayload) string {
+	switch {
+	case p.NameConflict != "":
+		return "nameConflict"
+	case p.Labels != nil:
+		return "labels"
+	case p.Ephemeral:
+		return "ephemeral"
+	case p.GithubToken != "":
+		return "githubToken"
+	case p.AgentRole != "":
+		return "agentRole"
+	case p.ReuseMessage != "":
+		return "reuseMessage"
+	case p.UntrustedVars != nil:
+		return "untrustedVars"
+	default:
+		return ""
+	}
 }

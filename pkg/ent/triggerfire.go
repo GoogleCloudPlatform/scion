@@ -54,6 +54,8 @@ type TriggerFire struct {
 	DecidedDialect string `json:"decided_dialect,omitempty"`
 	// RuleTrace holds the value of the "rule_trace" field.
 	RuleTrace string `json:"rule_trace,omitempty"`
+	// TargetAgentID holds the value of the "target_agent_id" field.
+	TargetAgentID *uuid.UUID `json:"target_agent_id,omitempty"`
 	// ExecutorKind holds the value of the "executor_kind" field.
 	ExecutorKind string `json:"executor_kind,omitempty"`
 	// ExecutorID holds the value of the "executor_id" field.
@@ -74,6 +76,8 @@ func (*TriggerFire) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case triggerfire.FieldTargetAgentID:
+			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case triggerfire.FieldAttributionVersion, triggerfire.FieldAuthorizationRevision:
 			values[i] = new(sql.NullInt64)
 		case triggerfire.FieldInitiatorPrincipalKind, triggerfire.FieldInitiatorPrincipalID, triggerfire.FieldInitiatorCredentialKind, triggerfire.FieldInitiatorCredentialID, triggerfire.FieldInitiatorCredentialSnapshot, triggerfire.FieldSubject, triggerfire.FieldActionType, triggerfire.FieldStatus, triggerfire.FieldError, triggerfire.FieldResultRef, triggerfire.FieldMatchedThrough, triggerfire.FieldDecidedDialect, triggerfire.FieldRuleTrace, triggerfire.FieldExecutorKind, triggerfire.FieldExecutorID:
@@ -218,6 +222,13 @@ func (_m *TriggerFire) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.RuleTrace = value.String
 			}
+		case triggerfire.FieldTargetAgentID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field target_agent_id", values[i])
+			} else if value.Valid {
+				_m.TargetAgentID = new(uuid.UUID)
+				*_m.TargetAgentID = *value.S.(*uuid.UUID)
+			}
 		case triggerfire.FieldExecutorKind:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field executor_kind", values[i])
@@ -358,6 +369,11 @@ func (_m *TriggerFire) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("rule_trace=")
 	builder.WriteString(_m.RuleTrace)
+	builder.WriteString(", ")
+	if v := _m.TargetAgentID; v != nil {
+		builder.WriteString("target_agent_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("executor_kind=")
 	builder.WriteString(_m.ExecutorKind)

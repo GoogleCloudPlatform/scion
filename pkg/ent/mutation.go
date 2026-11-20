@@ -118879,6 +118879,7 @@ type TriggerFireMutation struct {
 	matched_through               *string
 	decided_dialect               *string
 	rule_trace                    *string
+	target_agent_id               *uuid.UUID
 	executor_kind                 *string
 	executor_id                   *string
 	lease_until                   *time.Time
@@ -119841,6 +119842,55 @@ func (m *TriggerFireMutation) ResetRuleTrace() {
 	delete(m.clearedFields, triggerfire.FieldRuleTrace)
 }
 
+// SetTargetAgentID sets the "target_agent_id" field.
+func (m *TriggerFireMutation) SetTargetAgentID(u uuid.UUID) {
+	m.target_agent_id = &u
+}
+
+// TargetAgentID returns the value of the "target_agent_id" field in the mutation.
+func (m *TriggerFireMutation) TargetAgentID() (r uuid.UUID, exists bool) {
+	v := m.target_agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTargetAgentID returns the old "target_agent_id" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldTargetAgentID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTargetAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTargetAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTargetAgentID: %w", err)
+	}
+	return oldValue.TargetAgentID, nil
+}
+
+// ClearTargetAgentID clears the value of the "target_agent_id" field.
+func (m *TriggerFireMutation) ClearTargetAgentID() {
+	m.target_agent_id = nil
+	m.clearedFields[triggerfire.FieldTargetAgentID] = struct{}{}
+}
+
+// TargetAgentIDCleared returns if the "target_agent_id" field was cleared in this mutation.
+func (m *TriggerFireMutation) TargetAgentIDCleared() bool {
+	_, ok := m.clearedFields[triggerfire.FieldTargetAgentID]
+	return ok
+}
+
+// ResetTargetAgentID resets all changes to the "target_agent_id" field.
+func (m *TriggerFireMutation) ResetTargetAgentID() {
+	m.target_agent_id = nil
+	delete(m.clearedFields, triggerfire.FieldTargetAgentID)
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (m *TriggerFireMutation) SetExecutorKind(s string) {
 	m.executor_kind = &s
@@ -120104,7 +120154,7 @@ func (m *TriggerFireMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerFireMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, triggerfire.FieldInitiatorPrincipalKind)
 	}
@@ -120158,6 +120208,9 @@ func (m *TriggerFireMutation) Fields() []string {
 	}
 	if m.rule_trace != nil {
 		fields = append(fields, triggerfire.FieldRuleTrace)
+	}
+	if m.target_agent_id != nil {
+		fields = append(fields, triggerfire.FieldTargetAgentID)
 	}
 	if m.executor_kind != nil {
 		fields = append(fields, triggerfire.FieldExecutorKind)
@@ -120221,6 +120274,8 @@ func (m *TriggerFireMutation) Field(name string) (ent.Value, bool) {
 		return m.DecidedDialect()
 	case triggerfire.FieldRuleTrace:
 		return m.RuleTrace()
+	case triggerfire.FieldTargetAgentID:
+		return m.TargetAgentID()
 	case triggerfire.FieldExecutorKind:
 		return m.ExecutorKind()
 	case triggerfire.FieldExecutorID:
@@ -120278,6 +120333,8 @@ func (m *TriggerFireMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldDecidedDialect(ctx)
 	case triggerfire.FieldRuleTrace:
 		return m.OldRuleTrace(ctx)
+	case triggerfire.FieldTargetAgentID:
+		return m.OldTargetAgentID(ctx)
 	case triggerfire.FieldExecutorKind:
 		return m.OldExecutorKind(ctx)
 	case triggerfire.FieldExecutorID:
@@ -120425,6 +120482,13 @@ func (m *TriggerFireMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRuleTrace(v)
 		return nil
+	case triggerfire.FieldTargetAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTargetAgentID(v)
+		return nil
 	case triggerfire.FieldExecutorKind:
 		v, ok := value.(string)
 		if !ok {
@@ -120560,6 +120624,9 @@ func (m *TriggerFireMutation) ClearedFields() []string {
 	if m.FieldCleared(triggerfire.FieldRuleTrace) {
 		fields = append(fields, triggerfire.FieldRuleTrace)
 	}
+	if m.FieldCleared(triggerfire.FieldTargetAgentID) {
+		fields = append(fields, triggerfire.FieldTargetAgentID)
+	}
 	if m.FieldCleared(triggerfire.FieldFinishedAt) {
 		fields = append(fields, triggerfire.FieldFinishedAt)
 	}
@@ -120612,6 +120679,9 @@ func (m *TriggerFireMutation) ClearField(name string) error {
 		return nil
 	case triggerfire.FieldRuleTrace:
 		m.ClearRuleTrace()
+		return nil
+	case triggerfire.FieldTargetAgentID:
+		m.ClearTargetAgentID()
 		return nil
 	case triggerfire.FieldFinishedAt:
 		m.ClearFinishedAt()
@@ -120677,6 +120747,9 @@ func (m *TriggerFireMutation) ResetField(name string) error {
 		return nil
 	case triggerfire.FieldRuleTrace:
 		m.ResetRuleTrace()
+		return nil
+	case triggerfire.FieldTargetAgentID:
+		m.ResetTargetAgentID()
 		return nil
 	case triggerfire.FieldExecutorKind:
 		m.ResetExecutorKind()

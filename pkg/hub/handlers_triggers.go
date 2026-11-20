@@ -428,9 +428,11 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	var resolvedSourceID string
+	var ep *store.WebhookEndpoint
 	switch sourceKind {
 	case store.TriggerSourceKindWebhook:
-		ep, ok := s.resolveTriggerWebhookSource(w, r, projectID, req.Source.ID)
+		var ok bool
+		ep, ok = s.resolveTriggerWebhookSource(w, r, projectID, req.Source.ID)
 		if !ok {
 			return
 		}
@@ -442,17 +444,22 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		resolvedSourceID = ""
 	}
 
-	actionType := strings.TrimSpace(req.Action.Type)
-	if actionType != store.TriggerActionMessage {
-		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s)", actionType, store.TriggerActionMessage), nil)
-		return
-	}
-	actionPayload, ok := s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &req.Action)
+	ceiling, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionCreate)
 	if !ok {
 		return
 	}
 
-	ceiling, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionCreate)
+	actionType := strings.TrimSpace(req.Action.Type)
+	var actionPayload string
+	switch actionType {
+	case store.TriggerActionMessage:
+		actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &req.Action)
+	case store.TriggerActionDispatchAgent:
+		actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &req.Action, ceiling)
+	default:
+		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s)", actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent), nil)
+		return
+	}
 	if !ok {
 		return
 	}
@@ -467,7 +474,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		MatchTypes:           matchTypes,
 		MatchRules:           matchRules,
 		MatchForm:            matchForm,
-		ActionType:           store.TriggerActionMessage,
+		ActionType:           actionType,
 		ActionPayload:        actionPayload,
 		SubjectDialect:       subjectDialect,
 		SubjectRule:          subjectRule,
@@ -607,13 +614,26 @@ func (s *Server) getTrigger(w http.ResponseWriter, r *http.Request, projectID, t
 	writeJSON(w, http.StatusOK, buildTriggerResponse(*tr))
 }
 
-func (s *Server) authorizeStoredTriggerAction(w http.ResponseWriter, r *http.Request, projectID, sourceKind, actionType, rawPayload string) (string, bool) {
-	if actionType != store.TriggerActionMessage {
-		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s)", actionType, store.TriggerActionMessage), nil)
+func (s *Server) authorizeStoredTriggerAction(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	sourceKind string,
+	ep *store.WebhookEndpoint,
+	actionType string,
+	rawPayload string,
+	ceiling store.EffectCeiling,
+) (string, bool) {
+	spec := buildTriggerActionSpec(actionType, rawPayload)
+	switch actionType {
+	case store.TriggerActionMessage:
+		return s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &spec)
+	case store.TriggerActionDispatchAgent:
+		return s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &spec, ceiling)
+	default:
+		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s)", actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent), nil)
 		return "", false
 	}
-	spec := buildTriggerActionSpec(actionType, rawPayload)
-	return s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &spec)
 }
 
 func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID, triggerID string) {
@@ -656,6 +676,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	var fields store.TriggerFieldMask
 	changesFutureDispatch := false
+	var resolvedEP *store.WebhookEndpoint
 
 	if req.Name != nil {
 		name, err := validateTriggerName(*req.Name)
@@ -682,6 +703,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			if !ok {
 				return
 			}
+			resolvedEP = ep
 			tr.SourceKind = store.TriggerSourceKindWebhook
 			tr.SourceID = ep.ID
 		case store.TriggerSourceKindGitHub:
@@ -846,16 +868,11 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 	if req.Action != nil {
 		actionType := strings.TrimSpace(req.Action.Type)
-		if actionType != store.TriggerActionMessage {
-			ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s)", actionType, store.TriggerActionMessage), nil)
+		if actionType != store.TriggerActionMessage && actionType != store.TriggerActionDispatchAgent {
+			ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s)", actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent), nil)
 			return
 		}
-		actionPayload, ok := s.authorizeTriggerMessageAuthoring(w, r, projectID, tr.SourceKind, req.Action)
-		if !ok {
-			return
-		}
-		tr.ActionType = store.TriggerActionMessage
-		tr.ActionPayload = actionPayload
+		tr.ActionType = actionType
 		fields.ActionType = true
 		fields.ActionPayload = true
 		changesFutureDispatch = true
@@ -869,9 +886,11 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if req.Source == nil {
 			switch tr.SourceKind {
 			case store.TriggerSourceKindWebhook:
-				if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+				ep, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID)
+				if !ok {
 					return
 				}
+				resolvedEP = ep
 			case store.TriggerSourceKindGitHub:
 				project, pErr := s.store.GetProject(ctx, projectID)
 				if pErr != nil {
@@ -913,17 +932,29 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 				return
 			}
 		}
-		if req.Action == nil {
-			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, tr.ActionType, tr.ActionPayload)
+		ceiling, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionUpdate)
+		if !ok {
+			return
+		}
+		if req.Action != nil {
+			var actionPayload string
+			switch tr.ActionType {
+			case store.TriggerActionMessage:
+				actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, tr.SourceKind, req.Action)
+			case store.TriggerActionDispatchAgent:
+				actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, req.Action, ceiling)
+			}
+			if !ok {
+				return
+			}
+			tr.ActionPayload = actionPayload
+		} else {
+			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.ActionType, tr.ActionPayload, ceiling)
 			if !ok {
 				return
 			}
 			tr.ActionPayload = normalizedPayload
 			fields.ActionPayload = true
-		}
-		ceiling, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionUpdate)
-		if !ok {
-			return
 		}
 		attr := reattributeInitiator(ctx, tr.InitiatorAttribution)
 		newAttr = &attr
@@ -1038,9 +1069,12 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
+	var ep *store.WebhookEndpoint
 	switch tr.SourceKind {
 	case store.TriggerSourceKindWebhook:
-		if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+		var ok bool
+		ep, ok = s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID)
+		if !ok {
 			return
 		}
 	case store.TriggerSourceKindGitHub:
@@ -1079,12 +1113,11 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}, false); !ok {
 		return
 	}
-	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, tr.ActionType, tr.ActionPayload)
+	ceiling, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionUpdate)
 	if !ok {
 		return
 	}
-
-	ceiling, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionUpdate)
+	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.ActionType, tr.ActionPayload, ceiling)
 	if !ok {
 		return
 	}

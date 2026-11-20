@@ -168,7 +168,7 @@ func authorizeDispatchAgentForTest(ctx context.Context, srv *Server, evt store.S
 		_ = json.Unmarshal([]byte(evt.Payload), &p)
 	}
 	rec := scheduledRecordedAuthority(evt)
-	if _, err := srv.authorizeDispatchAgentFire(ctx, evt.ProjectID, evt.ID, rec.DefinitionKind, auth, identity, p.NoAuth); err != nil {
+	if _, _, err := srv.authorizeDispatchAgentFire(ctx, evt.ProjectID, evt.ID, rec.DefinitionKind, auth, identity, AgentRole(p.AgentRole), p.NoAuth); err != nil {
 		return testDispatchCreator{}, err
 	}
 	return testDispatchCreator{

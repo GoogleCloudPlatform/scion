@@ -330,7 +330,7 @@ func (m *memTriggerStore) ClaimTriggerFireSubjectSkip(_ context.Context, fire *s
 	*fire = cp
 	return true, busy, nil, nil
 }
-func (m *memTriggerStore) FinishTriggerFire(_ context.Context, id, status, resultRef, errMsg string, finishedAt time.Time) (bool, error) {
+func (m *memTriggerStore) FinishTriggerFire(_ context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	f, ok := m.byFireID[id]
@@ -339,6 +339,9 @@ func (m *memTriggerStore) FinishTriggerFire(_ context.Context, id, status, resul
 	}
 	f.Status = status
 	f.ResultRef = resultRef
+	if targetAgentID != "" {
+		f.TargetAgentID = targetAgentID
+	}
 	f.Error = errMsg
 	t := finishedAt
 	f.FinishedAt = &t
@@ -367,6 +370,9 @@ func (m *memTriggerStore) HasLiveTriggerFireForSubject(context.Context, string, 
 	return false, nil
 }
 func (m *memTriggerStore) AgentHasFiredTriggerForEvent(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (m *memTriggerStore) EventHasTriggerFireForResultRef(context.Context, string, string) (bool, error) {
 	return false, nil
 }
 func (m *memTriggerStore) ReapExpiredTriggerFires(context.Context, time.Time, int) (int, error) {

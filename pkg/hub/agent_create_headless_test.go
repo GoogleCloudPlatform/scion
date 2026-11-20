@@ -630,6 +630,7 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 	require.NoError(t, err)
 
 	baseHC := func(name string) HeadlessCreate {
+		rr := headlessResolvedRole{preCapRole: AgentRoleFull}
 		return HeadlessCreate{
 			ProjectID:      f.proj.ID,
 			Authority:      auth,
@@ -637,6 +638,7 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 			EdgeCeiling:    edgeCeiling,
 			EdgeProvenance: edgeProv,
 			AgentRole:      "",
+			resolvedRole:   &rr,
 			Name:           name,
 			GitHubToken:    "",
 			Detached:       true,
@@ -650,8 +652,9 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 			"env":               "staging",
 		}
 		hc.EventEnv = map[string]string{
-			EventEnvKeyTriggerEventID: "tevt-123",
-			EventEnvKeyTriggerID:      "trig-456",
+			EventEnvKeyTriggerEventID:   "tevt-123",
+			EventEnvKeyTriggerID:        "trig-456",
+			EventEnvKeyTriggerEventFile: HeadlessEventFileContainerPath,
 		}
 		agent, err := f.srv.createAgentHeadless(ctx, hc)
 		require.NoError(t, err)
@@ -661,12 +664,47 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 		assert.Equal(t, hc.Labels, stored.Labels)
 		assert.Equal(t, "tevt-123", stored.AppliedConfig.Env[EventEnvKeyTriggerEventID])
 		assert.Equal(t, "trig-456", stored.AppliedConfig.Env[EventEnvKeyTriggerID])
+		assert.Equal(t, HeadlessEventFileContainerPath, stored.AppliedConfig.Env[EventEnvKeyTriggerEventFile])
 
 		req := client.lastCreateReq
 		assert.Equal(t, "tevt-123", req.ResolvedEnv[EventEnvKeyTriggerEventID])
 		assert.Equal(t, "trig-456", req.ResolvedEnv[EventEnvKeyTriggerID])
+		assert.Equal(t, HeadlessEventFileContainerPath, req.ResolvedEnv[EventEnvKeyTriggerEventFile])
 		assert.NotContains(t, resolvedSecretMap(req.ResolvedSecrets), EventEnvKeyTriggerEventID)
 		assert.NotContains(t, resolvedSecretMap(req.ResolvedSecrets), EventEnvKeyTriggerID)
+		assert.NotContains(t, resolvedSecretMap(req.ResolvedSecrets), EventEnvKeyTriggerEventFile)
+	})
+
+	t.Run("nil_resolved_role_fails_closed", func(t *testing.T) {
+		hc := baseHC("nil-resolved-role")
+		hc.resolvedRole = nil
+		agent, err := f.srv.createAgentHeadless(ctx, hc)
+		require.ErrorIs(t, err, errHeadlessMissingResolvedRole)
+		assert.Nil(t, agent)
+		f.assertNoChild(t, hc.Name)
+	})
+
+	t.Run("no_dispatcher_with_event_file_fails_and_rolls_back", func(t *testing.T) {
+		broker, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
+		require.NoError(t, err)
+		prevCaps := broker.Capabilities
+		broker.Capabilities = &store.BrokerCapabilities{HomeFiles: true}
+		require.NoError(t, f.store.UpdateRuntimeBroker(ctx, broker))
+		t.Cleanup(func() {
+			broker.Capabilities = prevCaps
+			_ = f.store.UpdateRuntimeBroker(ctx, broker)
+		})
+
+		prevDispatcher := f.srv.GetDispatcher()
+		f.srv.SetDispatcher(nil)
+		t.Cleanup(func() { f.srv.SetDispatcher(prevDispatcher) })
+
+		hc := baseHC("no-disp-homefiles")
+		hc.EventFile = []byte(`{"event_id":"evt-nodisp"}`)
+		agent, err := f.srv.createAgentHeadless(ctx, hc)
+		require.ErrorIs(t, err, errHeadlessNoDispatcherForHomeFiles)
+		assert.Nil(t, agent)
+		f.assertNoChild(t, hc.Name)
 	})
 
 	t.Run("invalid_labels_rejected_before_commit", func(t *testing.T) {
@@ -1643,6 +1681,7 @@ func TestHeadlessCreate_GetAgentBySlugErrorFailsClosed(t *testing.T) {
 	fault.Arm()
 
 	// 1. Direct createAgentHeadless returns a wrapped error and creates nothing.
+	rr := headlessResolvedRole{preCapRole: AgentRoleFull}
 	agent, err := srv.createAgentHeadless(ctx, HeadlessCreate{
 		ProjectID:      project.ID,
 		Authority:      auth,
@@ -1650,6 +1689,7 @@ func TestHeadlessCreate_GetAgentBySlugErrorFailsClosed(t *testing.T) {
 		CreatorName:    fireCreatorName(auth),
 		EdgeCeiling:    edgeCeiling,
 		EdgeProvenance: edgeProvenance,
+		resolvedRole:   &rr,
 		Name:           targetSlug,
 		Detached:       true,
 	})

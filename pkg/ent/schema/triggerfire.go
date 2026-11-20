@@ -72,6 +72,9 @@ func (TriggerFire) Fields() []ent.Field {
 		field.Text("rule_trace").
 			MaxLen(4096).
 			Optional(),
+		field.UUID("target_agent_id", uuid.UUID{}).
+			Optional().
+			Nillable(),
 		field.String("executor_kind").
 			Default(""),
 		field.String("executor_id").
@@ -96,6 +99,8 @@ func (TriggerFire) Indexes() []ent.Index {
 			Unique(),
 		index.Fields("trigger_id", "subject", "status"),
 		index.Fields("status", "lease_until"),
+		index.Fields("target_agent_id", "status"),
+		index.Fields("result_ref"),
 	}
 }
 

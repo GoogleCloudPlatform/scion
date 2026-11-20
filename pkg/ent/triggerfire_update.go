@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
+	"github.com/google/uuid"
 )
 
 // TriggerFireUpdate is the builder for updating TriggerFire entities.
@@ -296,6 +297,26 @@ func (_u *TriggerFireUpdate) ClearRuleTrace() *TriggerFireUpdate {
 	return _u
 }
 
+// SetTargetAgentID sets the "target_agent_id" field.
+func (_u *TriggerFireUpdate) SetTargetAgentID(v uuid.UUID) *TriggerFireUpdate {
+	_u.mutation.SetTargetAgentID(v)
+	return _u
+}
+
+// SetNillableTargetAgentID sets the "target_agent_id" field if the given value is not nil.
+func (_u *TriggerFireUpdate) SetNillableTargetAgentID(v *uuid.UUID) *TriggerFireUpdate {
+	if v != nil {
+		_u.SetTargetAgentID(*v)
+	}
+	return _u
+}
+
+// ClearTargetAgentID clears the value of the "target_agent_id" field.
+func (_u *TriggerFireUpdate) ClearTargetAgentID() *TriggerFireUpdate {
+	_u.mutation.ClearTargetAgentID()
+	return _u
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (_u *TriggerFireUpdate) SetExecutorKind(v string) *TriggerFireUpdate {
 	_u.mutation.SetExecutorKind(v)
@@ -502,6 +523,12 @@ func (_u *TriggerFireUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	}
 	if _u.mutation.RuleTraceCleared() {
 		_spec.ClearField(triggerfire.FieldRuleTrace, field.TypeString)
+	}
+	if value, ok := _u.mutation.TargetAgentID(); ok {
+		_spec.SetField(triggerfire.FieldTargetAgentID, field.TypeUUID, value)
+	}
+	if _u.mutation.TargetAgentIDCleared() {
+		_spec.ClearField(triggerfire.FieldTargetAgentID, field.TypeUUID)
 	}
 	if value, ok := _u.mutation.ExecutorKind(); ok {
 		_spec.SetField(triggerfire.FieldExecutorKind, field.TypeString, value)
@@ -806,6 +833,26 @@ func (_u *TriggerFireUpdateOne) ClearRuleTrace() *TriggerFireUpdateOne {
 	return _u
 }
 
+// SetTargetAgentID sets the "target_agent_id" field.
+func (_u *TriggerFireUpdateOne) SetTargetAgentID(v uuid.UUID) *TriggerFireUpdateOne {
+	_u.mutation.SetTargetAgentID(v)
+	return _u
+}
+
+// SetNillableTargetAgentID sets the "target_agent_id" field if the given value is not nil.
+func (_u *TriggerFireUpdateOne) SetNillableTargetAgentID(v *uuid.UUID) *TriggerFireUpdateOne {
+	if v != nil {
+		_u.SetTargetAgentID(*v)
+	}
+	return _u
+}
+
+// ClearTargetAgentID clears the value of the "target_agent_id" field.
+func (_u *TriggerFireUpdateOne) ClearTargetAgentID() *TriggerFireUpdateOne {
+	_u.mutation.ClearTargetAgentID()
+	return _u
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (_u *TriggerFireUpdateOne) SetExecutorKind(v string) *TriggerFireUpdateOne {
 	_u.mutation.SetExecutorKind(v)
@@ -1042,6 +1089,12 @@ func (_u *TriggerFireUpdateOne) sqlSave(ctx context.Context) (_node *TriggerFire
 	}
 	if _u.mutation.RuleTraceCleared() {
 		_spec.ClearField(triggerfire.FieldRuleTrace, field.TypeString)
+	}
+	if value, ok := _u.mutation.TargetAgentID(); ok {
+		_spec.SetField(triggerfire.FieldTargetAgentID, field.TypeUUID, value)
+	}
+	if _u.mutation.TargetAgentIDCleared() {
+		_spec.ClearField(triggerfire.FieldTargetAgentID, field.TypeUUID)
 	}
 	if value, ok := _u.mutation.ExecutorKind(); ok {
 		_spec.SetField(triggerfire.FieldExecutorKind, field.TypeString, value)

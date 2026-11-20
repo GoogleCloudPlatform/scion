@@ -123,9 +123,10 @@ func (s FireStatus) String() string {
 
 // FireOutcome is the result returned by the fire core for a single FireRequest.
 type FireOutcome struct {
-	Status    FireStatus
-	Error     string // generic text for the history row; "" when fired
-	ResultRef string // message id, created agent id, or exec run id
+	Status        FireStatus
+	Error         string // generic text for the history row; "" when fired
+	ResultRef     string // message id, created agent id, or exec run id
+	TargetAgentID string // optional created/targeted agent UUID (trigger_fires.target_agent_id)
 	// AfterRecord runs after the caller has persisted the fire outcome.
 	AfterRecord func(ctx context.Context)
 	// Detached indicates that the action owns the fire's terminal outcome write

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -413,6 +414,77 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 	return normalized, true
 }
 
+// authorizeTriggerDispatchAgentAuthoring validates a Stage 2 dispatch_agent
+// action spec for triggers (§5.1, §5.1a, §5.5, §7.3): enforces replay-protected
+// source, delegates payload/template/label/authority checks to
+// dispatchAgentAction.Validate, and enforces the caller's effect ceiling on
+// an explicit agentRole.
+func (s *Server) authorizeTriggerDispatchAgentAuthoring(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	sourceKind string,
+	ep *store.WebhookEndpoint,
+	spec *TriggerActionSpec,
+	ceiling store.EffectCeiling,
+) (string, bool) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return "", false
+	}
+
+	if !trigger.SourceReplayProtected(sourceKind, ep) {
+		writeError(w, http.StatusBadRequest, "source_not_replay_protected",
+			"dispatch_agent triggers require a replay-protected source", nil)
+		return "", false
+	}
+
+	raw, err := json.Marshal(DispatchAgentEventPayload{
+		AgentName:     spec.AgentName,
+		NameConflict:  spec.NameConflict,
+		Template:      spec.Template,
+		Task:          spec.Task,
+		Branch:        spec.Branch,
+		Labels:        spec.Labels,
+		Ephemeral:     spec.Ephemeral,
+		GithubToken:   spec.GithubToken,
+		AgentRole:     spec.AgentRole,
+		ReuseMessage:  spec.ReuseMessage,
+		UntrustedVars: spec.UntrustedVars,
+		NoAuth:        spec.NoAuth,
+	})
+	if err != nil {
+		InternalError(w)
+		return "", false
+	}
+
+	action := &dispatchAgentAction{srv: s}
+	normalized, err := action.Validate(ctx, identity, projectID, string(raw))
+	if err != nil {
+		var ve *dispatchAgentValidationError
+		if errors.As(err, &ve) {
+			writeError(w, ve.status, ve.code, ve.message, ve.details)
+			return "", false
+		}
+		slog.ErrorContext(ctx, "trigger dispatch_agent authoring failed", "project_id", projectID, "error", err)
+		InternalError(w)
+		return "", false
+	}
+
+	// Enforce the caller's frozen effect ceiling against an explicit agentRole
+	// (mirrors interactive create's applyCreateEffectCeiling; §5.1).
+	if spec.AgentRole != "" {
+		if _, cause, fits := childRoleWithinCeiling(ceiling, AgentRole(spec.AgentRole), true); !fits {
+			writeForbiddenDenial(w, "requested agentRole exceeds caller's delegation ceiling: "+string(cause), DeniedByDelegationCeiling)
+			return "", false
+		}
+	}
+
+	return normalized, true
+}
+
 // triggerEventAccess is the outcome of triggerEventAccessDecision.
 type triggerEventAccess struct {
 	allowed           bool
@@ -472,6 +544,16 @@ func (s *Server) triggerEventAccessDecision(ctx context.Context, projectID strin
 			}
 		}
 		if fired {
+			return triggerEventAccess{allowed: true}
+		}
+		dispatched, err := s.store.EventHasTriggerFireForResultRef(ctx, ev.ID, identity.ID())
+		if err != nil && !errors.Is(err, store.ErrInvalidInput) {
+			return triggerEventAccess{
+				reason:   "trigger fire result_ref visibility lookup failed",
+				storeErr: err,
+			}
+		}
+		if dispatched {
 			return triggerEventAccess{allowed: true}
 		}
 		return triggerEventAccess{
