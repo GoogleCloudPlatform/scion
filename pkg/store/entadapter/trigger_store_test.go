@@ -1495,7 +1495,7 @@ func TestClaimTriggerFireSubjectSkip(t *testing.T) {
 	require.True(t, claimedOS)
 	assert.False(t, skippedOS)
 	assert.Equal(t, store.TriggerFireStatusFiring, fOtherSubj.Status)
-	_, err = cs.FinishTriggerFire(ctx, fOtherSubj.ID, store.TriggerFireStatusFired, "msg-os", "", base.Add(4*time.Second))
+	_, err = cs.FinishTriggerFire(ctx, fOtherSubj.ID, store.TriggerFireStatusFired, "msg-os", "", "", base.Add(4*time.Second))
 	require.NoError(t, err)
 
 	// 5. Different trigger on the same subject is independent and claims in status=firing.
@@ -1517,7 +1517,7 @@ func TestClaimTriggerFireSubjectSkip(t *testing.T) {
 	assert.Equal(t, store.TriggerFireStatusFiring, fAfterExpiry.Status)
 
 	// 7. Finishing fAfterExpiry allows the next event on the same (trigger, subject) to fire immediately.
-	finished, err := cs.FinishTriggerFire(ctx, fAfterExpiry.ID, store.TriggerFireStatusFired, "msg-1", "", afterExpiry.Add(time.Second))
+	finished, err := cs.FinishTriggerFire(ctx, fAfterExpiry.ID, store.TriggerFireStatusFired, "msg-1", "", "", afterExpiry.Add(time.Second))
 	require.NoError(t, err)
 	require.True(t, finished)
 

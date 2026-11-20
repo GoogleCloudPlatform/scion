@@ -1849,7 +1849,7 @@ func parseTriggerFireUUIDs(fire *store.TriggerFire) (uid, pid, tid, eid uuid.UUI
 	return uid, pid, tid, eid, nil
 }
 
-func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fire *store.TriggerFire, defaultNow time.Time) *ent.TriggerFireCreate {
+func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fire *store.TriggerFire, defaultNow time.Time) (*ent.TriggerFireCreate, error) {
 	startedAt := defaultNow
 	if !fire.StartedAt.IsZero() {
 		startedAt = fire.StartedAt.UTC()
@@ -1894,7 +1894,7 @@ func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fi
 	if fire.TargetAgentID != "" {
 		taid, err := parseUUID(fire.TargetAgentID)
 		if err != nil {
-			return false, nil, err
+			return nil, err
 		}
 		create.SetTargetAgentID(taid)
 	}
@@ -1902,7 +1902,7 @@ func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fi
 		create.SetFinishedAt(fire.FinishedAt.UTC())
 	}
 	setTriggerFireInitiatorAttribution(create, fire.InitiatorAttribution)
-	return create
+	return create, nil
 }
 
 func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.TriggerFire) (bool, *store.TriggerFire, error) {
@@ -1911,7 +1911,11 @@ func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.Trigger
 		return false, nil, err
 	}
 	now := time.Now().UTC()
-	created, err := buildTriggerFireCreate(s.client, uid, pid, tid, eid, fire, now).Save(ctx)
+	create, err := buildTriggerFireCreate(s.client, uid, pid, tid, eid, fire, now)
+	if err != nil {
+		return false, nil, err
+	}
+	created, err := create.Save(ctx)
 	if err != nil {
 		mapped := mapError(err)
 		if errors.Is(mapped, store.ErrAlreadyExists) {
@@ -1987,7 +1991,11 @@ func (s *TriggerStore) ClaimTriggerFireSubjectSkip(ctx context.Context, fire *st
 			skippedBusy = false
 		}
 
-		created, cErr := buildTriggerFireCreate(client, uid, pid, tid, eid, &row, now).Save(ctx)
+		create, bErr := buildTriggerFireCreate(client, uid, pid, tid, eid, &row, now)
+		if bErr != nil {
+			return bErr
+		}
+		created, cErr := create.Save(ctx)
 		if cErr != nil {
 			return mapError(cErr)
 		}
