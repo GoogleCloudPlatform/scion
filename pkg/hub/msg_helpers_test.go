@@ -68,27 +68,19 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_messaging.go", function: "broadcastDirect", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage per-recipient at handlers_agent_messaging.go:1644"},
 
-	// decisions_answer.go: deliverDecisionResponse — the decision-response of a
-	// user's answer to the asking agent; handleDecisionAnswer calls
-	// authorizeAgentMessage on the asker before the answer is recorded,
-	// and deliverDecisionResponse runs only after that (not for a confirm,
-	// which is not delivered).
-	{file: "decisions_answer.go", function: "deliverDecisionResponse", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "authorizeAgentMessage in handleDecisionAnswer before RecordAnswer and delivery"},
+	// decisions_answer.go: dispatchDecisionResponse — shared delivery helper
+	// for single answer (handleDecisionAnswer), set/batch answer
+	// (handleDecisionSetAnswer), and dismiss (handleDecisionPromptDismiss).
+	// Every caller calls authorizeAgentMessage on the asker before recording
+	// and before delivery (and confirm-only answers are never delivered).
+	{file: "decisions_answer.go", function: "dispatchDecisionResponse", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "authorizeAgentMessage in handleDecisionAnswer / handleDecisionSetAnswer / handleDecisionPromptDismiss before recording and delivery"},
 
-	// decisions_batch.go: deliverDecisionSetResponse — the one decision-response of
-	// a set submit to the asking agent; handleDecisionSetAnswer calls
-	// authorizeAgentMessage on the asker before the set is recorded, and
-	// the delivery runs only after that (not for an all-confirm set, which
-	// is not delivered).
-	{file: "decisions_batch.go", function: "deliverDecisionSetResponse", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "authorizeAgentMessage in handleDecisionSetAnswer before RecordAnswerSet and delivery"},
-
-	// decisions_dismiss.go: deliverDecisionDismissResponse — the one decision-response
-	// of a dismissal to a live asking agent; handleDecisionPromptDismiss calls
-	// authorizeAgentMessage on the asker before DismissDecisions and delivery.
-	{file: "decisions_dismiss.go", function: "deliverDecisionDismissResponse", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "authorizeAgentMessage in handleDecisionPromptDismiss before DismissDecisions and delivery"},
+	// decisions_answer.go: decisionResponseAutoWakeItem — background auto-wake
+	// delivery built only inside dispatchDecisionResponse after the caller's
+	// authorizeAgentMessage admitted delivery (ptone/scion#8517).
+	{file: "decisions_answer.go", function: "decisionResponseAutoWakeItem", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "built only inside dispatchDecisionResponse after authorizeAgentMessage admitted delivery (ptone/scion#8517)"},
 
 	// handlers_agent_messaging.go: publishBroadcastDeliveryFailed — derivative
 	// notice back to the original sender agent.

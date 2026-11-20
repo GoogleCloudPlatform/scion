@@ -726,11 +726,12 @@ func (s *Server) dispatchDecisionResponse(ctx context.Context, asker *store.Agen
 	if dispatcher == nil {
 		return false, nil
 	}
-	if s.canAutoWakeDecisionAsker(ctx, asker) &&
+	bgCtx := context.WithoutCancel(ctx)
+	if s.canAutoWakeDecisionAsker(bgCtx, asker) &&
 		s.queueAutoWake(asker, s.decisionResponseAutoWakeItem(m.ID, asker.Slug, text, sm, label)) {
 		return true, nil
 	}
-	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
+	dctx, cancel := context.WithTimeout(withDispatchMessageID(bgCtx, m.ID), 30*time.Second)
 	defer cancel()
 	held, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
 		return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), s.recordLog(), dispatcher, asker, text, false, sm)
@@ -742,13 +743,13 @@ func (s *Server) dispatchDecisionResponse(ctx context.Context, asker *store.Agen
 			if target == nil {
 				target = asker
 			}
-			if s.canAutoWakeDecisionAsker(ctx, target) &&
+			if s.canAutoWakeDecisionAsker(bgCtx, target) &&
 				s.queueAutoWake(target, s.decisionResponseAutoWakeItem(m.ID, target.Slug, text, sm, label)) {
 				return true, nil
 			}
 		}
 		s.messageLog.Error("decisions: failed to deliver "+label, "agent", asker.Slug, "message_id", m.ID, "error", err)
-		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())
+		_ = s.markFailed(bgCtx, m.ID, err.Error())
 		return false, err
 	}
 	return held, nil
