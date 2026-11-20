@@ -64,6 +64,10 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 		"trigger.webhook.get",
 		"trigger.webhook.list",
 		"trigger.webhook.delete",
+		"trigger.preset",
+		"trigger.preset.list",
+		"trigger.preset.show",
+		"trigger.preset.apply",
 	}
 
 	for _, path := range paths {
@@ -101,6 +105,9 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 		{"trigger", "webhook", "get", "wh1"},
 		{"trigger", "webhook", "create", "--name", "wh1"},
 		{"trigger", "webhook", "delete", "wh1"},
+		{"trigger", "preset", "list"},
+		{"trigger", "preset", "show", "github.command"},
+		{"trigger", "preset", "apply", "github.command", "--dry-run"},
 	} {
 		*ran = nil
 		winTree.SetArgs(args)

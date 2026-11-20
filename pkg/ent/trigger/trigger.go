@@ -62,6 +62,8 @@ const (
 	FieldMatchRule = "match_rule"
 	// FieldMatchRules holds the string denoting the match_rules field in the database.
 	FieldMatchRules = "match_rules"
+	// FieldMatchForm holds the string denoting the match_form field in the database.
+	FieldMatchForm = "match_form"
 	// FieldActionType holds the string denoting the action_type field in the database.
 	FieldActionType = "action_type"
 	// FieldActionPayload holds the string denoting the action_payload field in the database.
@@ -123,6 +125,7 @@ var Columns = []string{
 	FieldMatchDialect,
 	FieldMatchRule,
 	FieldMatchRules,
+	FieldMatchForm,
 	FieldActionType,
 	FieldActionPayload,
 	FieldSubjectDialect,
@@ -325,6 +328,11 @@ func ByMatchRule(opts ...sql.OrderTermOption) OrderOption {
 // ByMatchRules orders the results by the match_rules field.
 func ByMatchRules(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldMatchRules, opts...).ToFunc()
+}
+
+// ByMatchForm orders the results by the match_form field.
+func ByMatchForm(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMatchForm, opts...).ToFunc()
 }
 
 // ByActionType orders the results by the action_type field.

@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -36,6 +37,34 @@ var (
 	errTriggerRuleEngineNotInitialized = errors.New("trigger rule engine is not initialized")
 	ruleDialectNameRE                  = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 )
+
+const maxTriggerMatchFormBytes = 16 * 1024
+
+// validateTriggerMatchForm validates and compacts an opaque Match.Form JSON
+// object (Stage 3 §9.2). Empty or JSON null clears the form and returns ("", nil).
+func validateTriggerMatchForm(raw json.RawMessage) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", nil
+	}
+	if len(trimmed) > maxTriggerMatchFormBytes {
+		return "", fmt.Errorf("match.form exceeds maximum of %d bytes", maxTriggerMatchFormBytes)
+	}
+	if !utf8.Valid(trimmed) {
+		return "", errors.New("match.form must be valid UTF-8 JSON")
+	}
+	if trimmed[0] != '{' {
+		return "", errors.New("match.form must be a JSON object")
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, trimmed); err != nil {
+		return "", fmt.Errorf("invalid match.form JSON: %v", err)
+	}
+	if compact.Len() > maxTriggerMatchFormBytes {
+		return "", fmt.Errorf("match.form exceeds maximum of %d bytes", maxTriggerMatchFormBytes)
+	}
+	return compact.String(), nil
+}
 
 // Trigger rule registration, authoring validation, and engine seam
 // (Stage 1 §7.0, §7.0a, §7.1, §7.2; ptone/scion#8030).

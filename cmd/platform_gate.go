@@ -100,6 +100,10 @@ var windowsAllowed = map[string]bool{
 	"trigger.webhook.get":    true,
 	"trigger.webhook.list":   true,
 	"trigger.webhook.delete": true,
+	"trigger.preset":         true,
+	"trigger.preset.list":    true,
+	"trigger.preset.show":    true,
+	"trigger.preset.apply":   true,
 
 	// Project message policies (ptone/scion#8047): pure Hub API calls and
 	// read-only user input files (--file, --rule-file, --body-file); no local

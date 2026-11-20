@@ -3872,6 +3872,7 @@ var (
 		{Name: "match_dialect", Type: field.TypeString, Default: "cel"},
 		{Name: "match_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "match_rules", Type: field.TypeString, Size: 2147483647, Default: "[]"},
+		{Name: "match_form", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "action_type", Type: field.TypeString},
 		{Name: "action_payload", Type: field.TypeString, Size: 2147483647, Default: "{}"},
 		{Name: "subject_dialect", Type: field.TypeString, Default: "cel"},
@@ -3912,7 +3913,7 @@ var (
 			{
 				Name:    "trigger_project_id_source_kind_source_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[30]},
+				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[31]},
 			},
 			{
 				Name:    "trigger_initiator_principal_id",

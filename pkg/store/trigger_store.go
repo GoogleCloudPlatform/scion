@@ -145,6 +145,7 @@ type Trigger struct {
 	MatchDialect   string             `json:"matchDialect,omitempty"`
 	MatchRule      string             `json:"matchRule,omitempty"`
 	MatchRules     []TriggerMatchRule `json:"matchRules"`
+	MatchForm      string             `json:"matchForm,omitempty"`
 	ActionType     string             `json:"actionType"`
 	ActionPayload  string             `json:"actionPayload"`
 	SubjectDialect string             `json:"subjectDialect"`
@@ -195,6 +196,7 @@ type TriggerFieldMask struct {
 	MatchDialect   bool
 	MatchRule      bool
 	MatchRules     bool
+	MatchForm      bool
 	ActionType     bool
 	ActionPayload  bool
 	SubjectDialect bool

@@ -114432,6 +114432,7 @@ type TriggerMutation struct {
 	match_dialect                         *string
 	match_rule                            *string
 	match_rules                           *string
+	match_form                            *string
 	action_type                           *string
 	action_payload                        *string
 	subject_dialect                       *string
@@ -115641,6 +115642,55 @@ func (m *TriggerMutation) ResetMatchRules() {
 	m.match_rules = nil
 }
 
+// SetMatchForm sets the "match_form" field.
+func (m *TriggerMutation) SetMatchForm(s string) {
+	m.match_form = &s
+}
+
+// MatchForm returns the value of the "match_form" field in the mutation.
+func (m *TriggerMutation) MatchForm() (r string, exists bool) {
+	v := m.match_form
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMatchForm returns the old "match_form" field's value of the Trigger entity.
+// If the Trigger object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerMutation) OldMatchForm(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMatchForm is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMatchForm requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMatchForm: %w", err)
+	}
+	return oldValue.MatchForm, nil
+}
+
+// ClearMatchForm clears the value of the "match_form" field.
+func (m *TriggerMutation) ClearMatchForm() {
+	m.match_form = nil
+	m.clearedFields[trigger.FieldMatchForm] = struct{}{}
+}
+
+// MatchFormCleared returns if the "match_form" field was cleared in this mutation.
+func (m *TriggerMutation) MatchFormCleared() bool {
+	_, ok := m.clearedFields[trigger.FieldMatchForm]
+	return ok
+}
+
+// ResetMatchForm resets all changes to the "match_form" field.
+func (m *TriggerMutation) ResetMatchForm() {
+	m.match_form = nil
+	delete(m.clearedFields, trigger.FieldMatchForm)
+}
+
 // SetActionType sets the "action_type" field.
 func (m *TriggerMutation) SetActionType(s string) {
 	m.action_type = &s
@@ -116320,7 +116370,7 @@ func (m *TriggerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerMutation) Fields() []string {
-	fields := make([]string, 0, 39)
+	fields := make([]string, 0, 40)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, trigger.FieldInitiatorPrincipalKind)
 	}
@@ -116392,6 +116442,9 @@ func (m *TriggerMutation) Fields() []string {
 	}
 	if m.match_rules != nil {
 		fields = append(fields, trigger.FieldMatchRules)
+	}
+	if m.match_form != nil {
+		fields = append(fields, trigger.FieldMatchForm)
 	}
 	if m.action_type != nil {
 		fields = append(fields, trigger.FieldActionType)
@@ -116494,6 +116547,8 @@ func (m *TriggerMutation) Field(name string) (ent.Value, bool) {
 		return m.MatchRule()
 	case trigger.FieldMatchRules:
 		return m.MatchRules()
+	case trigger.FieldMatchForm:
+		return m.MatchForm()
 	case trigger.FieldActionType:
 		return m.ActionType()
 	case trigger.FieldActionPayload:
@@ -116581,6 +116636,8 @@ func (m *TriggerMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldMatchRule(ctx)
 	case trigger.FieldMatchRules:
 		return m.OldMatchRules(ctx)
+	case trigger.FieldMatchForm:
+		return m.OldMatchForm(ctx)
 	case trigger.FieldActionType:
 		return m.OldActionType(ctx)
 	case trigger.FieldActionPayload:
@@ -116787,6 +116844,13 @@ func (m *TriggerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetMatchRules(v)
+		return nil
+	case trigger.FieldMatchForm:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMatchForm(v)
 		return nil
 	case trigger.FieldActionType:
 		v, ok := value.(string)
@@ -117022,6 +117086,9 @@ func (m *TriggerMutation) ClearedFields() []string {
 	if m.FieldCleared(trigger.FieldDescription) {
 		fields = append(fields, trigger.FieldDescription)
 	}
+	if m.FieldCleared(trigger.FieldMatchForm) {
+		fields = append(fields, trigger.FieldMatchForm)
+	}
 	if m.FieldCleared(trigger.FieldStatusReason) {
 		fields = append(fields, trigger.FieldStatusReason)
 	}
@@ -117086,6 +117153,9 @@ func (m *TriggerMutation) ClearField(name string) error {
 		return nil
 	case trigger.FieldDescription:
 		m.ClearDescription()
+		return nil
+	case trigger.FieldMatchForm:
+		m.ClearMatchForm()
 		return nil
 	case trigger.FieldStatusReason:
 		m.ClearStatusReason()
@@ -117181,6 +117251,9 @@ func (m *TriggerMutation) ResetField(name string) error {
 		return nil
 	case trigger.FieldMatchRules:
 		m.ResetMatchRules()
+		return nil
+	case trigger.FieldMatchForm:
+		m.ResetMatchForm()
 		return nil
 	case trigger.FieldActionType:
 		m.ResetActionType()

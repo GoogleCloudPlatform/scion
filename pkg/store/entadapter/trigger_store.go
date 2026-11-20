@@ -516,6 +516,7 @@ func entTriggerToStore(e *ent.Trigger) *store.Trigger {
 		MatchDialect:      e.MatchDialect,
 		MatchRule:         e.MatchRule,
 		MatchRules:        matchRules,
+		MatchForm:         e.MatchForm,
 		MatchRulesCorrupt: matchRulesCorrupt,
 		ActionType:        e.ActionType,
 		ActionPayload:     e.ActionPayload,
@@ -764,6 +765,9 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 	if tr.Description != "" {
 		create.SetDescription(tr.Description)
 	}
+	if tr.MatchForm != "" {
+		create.SetMatchForm(tr.MatchForm)
+	}
 	if tr.StatusReason != "" {
 		create.SetStatusReason(tr.StatusReason)
 	}
@@ -1002,6 +1006,13 @@ func (s *TriggerStore) UpdateTrigger(
 		}
 		update = update.SetMatchRules(matchRulesJSON)
 	}
+	if fields.MatchForm {
+		if tr.MatchForm != "" {
+			update = update.SetMatchForm(tr.MatchForm)
+		} else {
+			update = update.ClearMatchForm()
+		}
+	}
 	if fields.ActionType {
 		update = update.SetActionType(tr.ActionType)
 	}
@@ -1053,6 +1064,9 @@ func (s *TriggerStore) UpdateTrigger(
 	tr.StatusReason = updated.StatusReason
 	if fields.MatchRules {
 		tr.MatchRules, tr.MatchRulesCorrupt = unmarshalMatchRules(updated.MatchRules)
+	}
+	if fields.MatchForm {
+		tr.MatchForm = updated.MatchForm
 	}
 	return nil
 }

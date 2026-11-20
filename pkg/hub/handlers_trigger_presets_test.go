@@ -280,3 +280,264 @@ func TestTriggerPresets_AnyTokenReadsAndCompiles(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
+
+func TestTriggerPresets_UnknownFieldsCappedOverHTTP(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	setGitHubTriggersExperimentForRouting(t, srv, true)
+
+	memberID := tid("presets-s1-member")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: memberID, Email: "presets-s1@example.com", DisplayName: "Member",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}))
+	member := NewAuthenticatedUser(memberID, "presets-s1@example.com", "Member", store.UserRoleMember, "api")
+
+	fields := map[string]any{"command": "review"}
+	for i := 0; i < 25; i++ {
+		fields[fmt.Sprintf("unknown_%02d", i)] = "sensitive_value_do_not_echo"
+	}
+	rawBody, err := json.Marshal(map[string]any{
+		"preset": "github.command",
+		"fields": fields,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trigger-presets/compile", bytes.NewReader(rawBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithCredentialContext(
+		contextWithIdentity(ctx, member),
+		CredentialContext{Kind: CredentialKindInteractive},
+	))
+	rr := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	assert.NotContains(t, rr.Body.String(), "sensitive_value_do_not_echo")
+
+	var errEnv ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errEnv))
+	rawFields, ok := errEnv.Error.Details["fields"].([]any)
+	require.True(t, ok, "expected error.details.fields array: %s", rr.Body.String())
+	require.Len(t, rawFields, 11)
+	last, ok := rawFields[10].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "fields", last["field"])
+	assert.Equal(t, "too_many_unknown_fields", last["code"])
+	assert.Equal(t, "15 additional unknown fields omitted", last["message"])
+}
+
+func TestTriggerPresets_MatchFormRoundTripAndPatchClear(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	setGitHubTriggersExperimentForRouting(t, srv, true)
+
+	adminID := tid("preset-form-admin")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: adminID, Email: "preset-form-admin@example.com", DisplayName: "Admin",
+		Role: store.UserRoleAdmin, Status: store.UserStatusActive, Created: time.Now().UTC(),
+	}))
+	hubAdminRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               tid("preset-form-admin-rb"),
+		RoleDefinitionID: hubAdminRole.ID,
+		PrincipalType:    "user",
+		PrincipalID:      adminID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+	})
+	require.NoError(t, err)
+	adminAuth := NewAuthenticatedUser(adminID, "preset-form-admin@example.com", "Admin", store.UserRoleAdmin, "api")
+
+	const instID int64 = 778899
+	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: instID,
+		AccountLogin:   "octo-org",
+		AccountType:    "Organization",
+		AppID:          12345,
+		Status:         store.GitHubInstallationStatusActive,
+		Repositories:   []string{"octo-org/octo-repo"},
+	}))
+
+	instCopy := instID
+	bindingRaw, err := json.Marshal(githubInstallationBinding{
+		InstallationID: instID,
+		Remote:         "github.com/octo-org/octo-repo",
+		BoundBy:        adminID,
+		BoundAt:        time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	projID := tid("preset-form-proj")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:                   projID,
+		Name:                 "preset-form-proj",
+		Slug:                 "preset-form-proj",
+		GitRemote:            "https://github.com/octo-org/octo-repo.git",
+		GitHubInstallationID: &instCopy,
+		Annotations: map[string]string{
+			githubInstallationBindingAnnotation: string(bindingRaw),
+		},
+		CreatedBy: adminID,
+	}))
+	srv.invalidateGitHubAssociation(projID)
+
+	targetAgentID := tid("preset-form-agent")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:        targetAgentID,
+		Slug:      "lead",
+		Name:      "lead",
+		ProjectID: projID,
+		Phase:     "running",
+		OwnerID:   adminID,
+	}))
+
+	doJSON := func(method, path string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		var bodyReader *bytes.Reader
+		if body != nil {
+			raw, mErr := json.Marshal(body)
+			require.NoError(t, mErr)
+			bodyReader = bytes.NewReader(raw)
+		} else {
+			bodyReader = bytes.NewReader(nil)
+		}
+		req := httptest.NewRequest(method, path, bodyReader)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req = req.WithContext(contextWithCredentialContext(
+			contextWithIdentity(ctx, adminAuth),
+			CredentialContext{Kind: CredentialKindInteractive},
+		))
+		rr := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rr, req)
+		return rr
+	}
+	triggersBase := "/api/v1/projects/" + projID + "/triggers"
+
+	// 1. Compile github.command via /api/v1/trigger-presets/compile.
+	cRec := doJSON(http.MethodPost, "/api/v1/trigger-presets/compile", map[string]any{
+		"preset": "github.command",
+		"fields": map[string]any{
+			"command": "review",
+			"on":      "pull_request",
+		},
+	})
+	require.Equal(t, http.StatusOK, cRec.Code, cRec.Body.String())
+
+	var compiled hubclient.CompiledTriggerPreset
+	require.NoError(t, json.Unmarshal(cRec.Body.Bytes(), &compiled))
+	formBytes, err := json.Marshal(compiled.Form)
+	require.NoError(t, err)
+
+	compiledRules := make([]TriggerMatchRuleSpec, len(compiled.Match.Rules))
+	for i, r := range compiled.Match.Rules {
+		compiledRules[i] = TriggerMatchRuleSpec{Dialect: r.Dialect, Expr: r.Expr}
+	}
+
+	// 2. Create trigger with compiled types, rules, subject, and form.
+	createRec := doJSON(http.MethodPost, triggersBase, CreateTriggerRequest{
+		Name:   "preset-review",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: compiled.Match.Types,
+			Rules: compiledRules,
+			Form:  json.RawMessage(formBytes),
+		},
+		Subject: &TriggerSubjectSpec{
+			Mode: compiled.Subject.Mode,
+			Expr: compiled.Subject.Expr,
+		},
+		Action: TriggerActionSpec{
+			Type:    store.TriggerActionMessage,
+			AgentID: targetAgentID,
+			Message: "Handle /review",
+		},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created TriggerResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	require.NotEmpty(t, created.Match.Form)
+	assert.JSONEq(t, string(formBytes), string(created.Match.Form))
+	assert.Equal(t, compiledRules, created.Match.Rules)
+
+	// 3. GET returns the stored Match.Form and Match.Rules.
+	getRec := doJSON(http.MethodGet, triggersBase+"/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	var fetched TriggerResponse
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &fetched))
+	assert.JSONEq(t, string(formBytes), string(fetched.Match.Form))
+	assert.Equal(t, compiledRules, fetched.Match.Rules)
+
+	// 4. PATCH of name/description preserves Match.Form.
+	newDesc := "updated description"
+	patchDescRec := doJSON(http.MethodPatch, triggersBase+"/"+created.ID, UpdateTriggerRequest{
+		Description: &newDesc,
+	})
+	require.Equal(t, http.StatusOK, patchDescRec.Code, patchDescRec.Body.String())
+	var afterDesc TriggerResponse
+	require.NoError(t, json.Unmarshal(patchDescRec.Body.Bytes(), &afterDesc))
+	assert.JSONEq(t, string(formBytes), string(afterDesc.Match.Form))
+
+	// 5. Hand-editing match.rules via PATCH clears Match.Form.
+	editedRules := []TriggerMatchRuleSpec{{Dialect: "cel", Expr: "event.attributes.command == 'review'"}}
+	patchRulesRec := doJSON(http.MethodPatch, triggersBase+"/"+created.ID, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{
+			Rules: &editedRules,
+		},
+	})
+	require.Equal(t, http.StatusOK, patchRulesRec.Code, patchRulesRec.Body.String())
+	var afterRules TriggerResponse
+	require.NoError(t, json.Unmarshal(patchRulesRec.Body.Bytes(), &afterRules))
+	assert.Empty(t, afterRules.Match.Form, "PATCH of match.rules must clear match.form")
+
+	getAfterRulesRec := doJSON(http.MethodGet, triggersBase+"/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getAfterRulesRec.Code)
+	var fetchedAfterRules TriggerResponse
+	require.NoError(t, json.Unmarshal(getAfterRulesRec.Body.Bytes(), &fetchedAfterRules))
+	assert.Empty(t, fetchedAfterRules.Match.Form)
+
+	// 6. PATCH of match.rules WITH an explicit new match.form stores the new form,
+	//    and scalar match.expr PATCH clears it again.
+	newFormRaw := json.RawMessage(`{"preset":"github.command","version":1,"fields":{"command":"fix"}}`)
+	patchReapplyRec := doJSON(http.MethodPatch, triggersBase+"/"+created.ID, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{
+			Rules: &compiledRules,
+			Form:  &newFormRaw,
+		},
+	})
+	require.Equal(t, http.StatusOK, patchReapplyRec.Code, patchReapplyRec.Body.String())
+	var afterReapply TriggerResponse
+	require.NoError(t, json.Unmarshal(patchReapplyRec.Body.Bytes(), &afterReapply))
+	assert.JSONEq(t, string(newFormRaw), string(afterReapply.Match.Form))
+
+	editedExpr := "event.attributes.command == 'fix'"
+	patchExprRec := doJSON(http.MethodPatch, triggersBase+"/"+created.ID, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{
+			Expr: &editedExpr,
+		},
+	})
+	require.Equal(t, http.StatusOK, patchExprRec.Code, patchExprRec.Body.String())
+	var afterExpr TriggerResponse
+	require.NoError(t, json.Unmarshal(patchExprRec.Body.Bytes(), &afterExpr))
+	assert.Empty(t, afterExpr.Match.Form, "PATCH of scalar match.expr must clear match.form")
+
+	// 7. Invalid match.form (non-object array) returns 400.
+	badRec := doJSON(http.MethodPost, triggersBase, CreateTriggerRequest{
+		Name:   "preset-bad-form",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: compiled.Match.Types,
+			Rules: compiledRules,
+			Form:  json.RawMessage(`["not","an","object"]`),
+		},
+		Action: TriggerActionSpec{
+			Type:    store.TriggerActionMessage,
+			AgentID: targetAgentID,
+			Message: "hi",
+		},
+	})
+	assert.Equal(t, http.StatusBadRequest, badRec.Code, badRec.Body.String())
+}

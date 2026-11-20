@@ -78,6 +78,7 @@ type TriggerMatchPatchSpec struct {
 	Dialect *string                 `json:"dialect,omitempty"`
 	Expr    *string                 `json:"expr,omitempty"`
 	Rules   *[]TriggerMatchRuleSpec `json:"rules,omitempty"`
+	Form    *json.RawMessage        `json:"form,omitempty"`
 }
 
 // TriggerSubjectPatchSpec holds partial updates to a trigger's subject block.
@@ -383,6 +384,14 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		return
 	}
+	var matchForm string
+	if req.Match != nil && len(req.Match.Form) > 0 {
+		matchForm, err = validateTriggerMatchForm(req.Match.Form)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+	}
 	explicitSubjectDialect := req.Subject != nil && strings.TrimSpace(req.Subject.Dialect) != ""
 	subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, req.Subject, explicitSubjectDialect)
 	if !ok {
@@ -428,6 +437,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		SourceID:             resolvedSourceID,
 		MatchTypes:           matchTypes,
 		MatchRules:           matchRules,
+		MatchForm:            matchForm,
 		ActionType:           store.TriggerActionMessage,
 		ActionPayload:        actionPayload,
 		SubjectDialect:       subjectDialect,
@@ -757,6 +767,19 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			fields.MatchRules = true
 			fields.MatchDialect = true
 			fields.MatchRule = true
+		}
+		if req.Match.Form != nil {
+			validatedForm, fErr := validateTriggerMatchForm(*req.Match.Form)
+			if fErr != nil {
+				ValidationError(w, fErr.Error(), nil)
+				return
+			}
+			tr.MatchForm = validatedForm
+			fields.MatchForm = true
+		} else if updatingRules || fields.MatchTypes {
+			// Any hand edit to match rules or types clears the stored preset form (§9.2).
+			tr.MatchForm = ""
+			fields.MatchForm = true
 		}
 		if fields.MatchTypes || fields.MatchRules {
 			changesFutureDispatch = true

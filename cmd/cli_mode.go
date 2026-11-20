@@ -231,6 +231,10 @@ var agentAllowed = map[string]bool{
 	"trigger.webhook.get":    true,
 	"trigger.webhook.list":   true,
 	"trigger.webhook.delete": true,
+	"trigger.preset":         true,
+	"trigger.preset.list":    true,
+	"trigger.preset.show":    true,
+	"trigger.preset.apply":   true,
 
 	// Project message policy read-only inspection (ptone/scion#8047,
 	// maintainer decision m1-agent-cli v1): agents may inspect active project

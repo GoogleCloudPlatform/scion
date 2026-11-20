@@ -175,6 +175,11 @@ func MatchRules(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldMatchRules, v))
 }
 
+// MatchForm applies equality check predicate on the "match_form" field. It's identical to MatchFormEQ.
+func MatchForm(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldMatchForm, v))
+}
+
 // ActionType applies equality check predicate on the "action_type" field. It's identical to ActionTypeEQ.
 func ActionType(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldActionType, v))
@@ -1753,6 +1758,81 @@ func MatchRulesEqualFold(v string) predicate.Trigger {
 // MatchRulesContainsFold applies the ContainsFold predicate on the "match_rules" field.
 func MatchRulesContainsFold(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldContainsFold(FieldMatchRules, v))
+}
+
+// MatchFormEQ applies the EQ predicate on the "match_form" field.
+func MatchFormEQ(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldMatchForm, v))
+}
+
+// MatchFormNEQ applies the NEQ predicate on the "match_form" field.
+func MatchFormNEQ(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNEQ(FieldMatchForm, v))
+}
+
+// MatchFormIn applies the In predicate on the "match_form" field.
+func MatchFormIn(vs ...string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldIn(FieldMatchForm, vs...))
+}
+
+// MatchFormNotIn applies the NotIn predicate on the "match_form" field.
+func MatchFormNotIn(vs ...string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNotIn(FieldMatchForm, vs...))
+}
+
+// MatchFormGT applies the GT predicate on the "match_form" field.
+func MatchFormGT(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGT(FieldMatchForm, v))
+}
+
+// MatchFormGTE applies the GTE predicate on the "match_form" field.
+func MatchFormGTE(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGTE(FieldMatchForm, v))
+}
+
+// MatchFormLT applies the LT predicate on the "match_form" field.
+func MatchFormLT(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLT(FieldMatchForm, v))
+}
+
+// MatchFormLTE applies the LTE predicate on the "match_form" field.
+func MatchFormLTE(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLTE(FieldMatchForm, v))
+}
+
+// MatchFormContains applies the Contains predicate on the "match_form" field.
+func MatchFormContains(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldContains(FieldMatchForm, v))
+}
+
+// MatchFormHasPrefix applies the HasPrefix predicate on the "match_form" field.
+func MatchFormHasPrefix(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldHasPrefix(FieldMatchForm, v))
+}
+
+// MatchFormHasSuffix applies the HasSuffix predicate on the "match_form" field.
+func MatchFormHasSuffix(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldHasSuffix(FieldMatchForm, v))
+}
+
+// MatchFormIsNil applies the IsNil predicate on the "match_form" field.
+func MatchFormIsNil() predicate.Trigger {
+	return predicate.Trigger(sql.FieldIsNull(FieldMatchForm))
+}
+
+// MatchFormNotNil applies the NotNil predicate on the "match_form" field.
+func MatchFormNotNil() predicate.Trigger {
+	return predicate.Trigger(sql.FieldNotNull(FieldMatchForm))
+}
+
+// MatchFormEqualFold applies the EqualFold predicate on the "match_form" field.
+func MatchFormEqualFold(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEqualFold(FieldMatchForm, v))
+}
+
+// MatchFormContainsFold applies the ContainsFold predicate on the "match_form" field.
+func MatchFormContainsFold(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldContainsFold(FieldMatchForm, v))
 }
 
 // ActionTypeEQ applies the EQ predicate on the "action_type" field.

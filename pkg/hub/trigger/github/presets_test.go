@@ -1056,6 +1056,74 @@ func TestCompilePreset_HostileInputsAndCELInjection(t *testing.T) {
 	})
 }
 
+func TestCompilePreset_UnknownFieldsCapped(t *testing.T) {
+	t.Run("at cap (10) returns all unknown fields without summary", func(t *testing.T) {
+		fields := map[string]any{"command": "review"}
+		for i := 0; i < maxPresetUnknownFieldErrors; i++ {
+			fields[fmt.Sprintf("u%02d", i)] = "val"
+		}
+		out, err := CompilePreset(CompilePresetRequest{
+			Preset: PresetCommand,
+			Fields: fields,
+		})
+		require.Error(t, err)
+		assert.Nil(t, out)
+
+		var cErr *PresetCompileError
+		require.ErrorAs(t, err, &cErr)
+		require.Len(t, cErr.Fields, maxPresetUnknownFieldErrors)
+		for i, fe := range cErr.Fields {
+			assert.Equal(t, fmt.Sprintf("u%02d", i), fe.Field)
+			assert.Equal(t, "unknown_field", fe.Code)
+		}
+	})
+
+	t.Run("over cap (11) returns first 10 sorted plus omitted count", func(t *testing.T) {
+		fields := map[string]any{"command": "review"}
+		for i := 0; i < maxPresetUnknownFieldErrors+1; i++ {
+			fields[fmt.Sprintf("u%02d", i)] = "secret_value_marker"
+		}
+		out, err := CompilePreset(CompilePresetRequest{
+			Preset: PresetCommand,
+			Fields: fields,
+		})
+		require.Error(t, err)
+		assert.Nil(t, out)
+
+		var cErr *PresetCompileError
+		require.ErrorAs(t, err, &cErr)
+		require.Len(t, cErr.Fields, maxPresetUnknownFieldErrors+1)
+		for i := 0; i < maxPresetUnknownFieldErrors; i++ {
+			assert.Equal(t, fmt.Sprintf("u%02d", i), cErr.Fields[i].Field)
+			assert.Equal(t, "unknown_field", cErr.Fields[i].Code)
+			assert.NotContains(t, cErr.Fields[i].Message, "secret_value_marker")
+		}
+		summary := cErr.Fields[maxPresetUnknownFieldErrors]
+		assert.Equal(t, "fields", summary.Field)
+		assert.Equal(t, "too_many_unknown_fields", summary.Code)
+		assert.Equal(t, "1 additional unknown fields omitted", summary.Message)
+	})
+
+	t.Run("large unknown key flood (50) is bounded to 10 plus count", func(t *testing.T) {
+		fields := map[string]any{"command": "review"}
+		for i := 0; i < 50; i++ {
+			fields[fmt.Sprintf("k%03d", i)] = i
+		}
+		_, err := CompilePreset(CompilePresetRequest{
+			Preset: PresetCommand,
+			Fields: fields,
+		})
+		require.Error(t, err)
+		var cErr *PresetCompileError
+		require.ErrorAs(t, err, &cErr)
+		require.Len(t, cErr.Fields, maxPresetUnknownFieldErrors+1)
+		assert.Equal(t, "k000", cErr.Fields[0].Field)
+		assert.Equal(t, "k009", cErr.Fields[9].Field)
+		assert.Equal(t, "too_many_unknown_fields", cErr.Fields[10].Code)
+		assert.Equal(t, "40 additional unknown fields omitted", cErr.Fields[10].Message)
+	})
+}
+
 func cloneMap(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m))
 	for k, v := range m {
