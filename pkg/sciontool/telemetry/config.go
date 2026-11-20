@@ -61,7 +61,14 @@ const (
 	EnvCloudProvider = "SCION_TELEMETRY_CLOUD_PROVIDER"
 	// EnvMetricsDebug enables verbose metrics normalization/export debugging.
 	EnvMetricsDebug = "SCION_TELEMETRY_METRICS_DEBUG"
+	// EnvMetadataMode is the GCP metadata server mode ("block", "assign",
+	// or "passthrough"). Set by the broker runtime.
+	EnvMetadataMode = "SCION_METADATA_MODE"
 )
+
+// metadataModeBlock mirrors store.GCPMetadataModeBlock without importing
+// pkg/store into sciontool.
+const metadataModeBlock = "block"
 
 // Default configuration values.
 const (
@@ -122,6 +129,9 @@ type Config struct {
 	CloudProvider string
 	// MetricsDebug enables verbose metric normalization and export logging.
 	MetricsDebug bool
+	// MetadataMode is the GCP metadata mode from SCION_METADATA_MODE
+	// ("block", "assign", "passthrough", or empty when unset).
+	MetadataMode string
 }
 
 // FilterConfig holds include/exclude patterns for event filtering.
@@ -182,6 +192,7 @@ func LoadConfig() *Config {
 		GCPCredentialsFile: os.Getenv(EnvGCPCredentials),
 		CloudProvider:      os.Getenv(EnvCloudProvider),
 		MetricsDebug:       util.ParseBoolEnv(EnvMetricsDebug, false),
+		MetadataMode:       os.Getenv(EnvMetadataMode),
 	}
 
 	// Explicit only when the value parses: ParseBoolEnv returns each default
@@ -264,12 +275,26 @@ func (c *Config) IsCloudConfigured() bool {
 	}
 	// GCP mode: require a non-empty ProjectID so incomplete setups (e.g.
 	// stale credentials file without a project ID) do not silently enable
-	// cloud export and enter an indefinite retry loop.
+	// cloud export and enter an indefinite retry loop. Also disable cloud
+	// export when metadata mode is block and no explicit credentials file
+	// is present, because ADC cannot obtain tokens from a blocked metadata
+	// server (ptone/scion#8494).
 	if c.CloudProvider == "gcp" {
+		if c.isGCPBlockedWithoutCredentials() {
+			return false
+		}
 		return c.ProjectID != ""
 	}
 	// Generic OTLP mode: endpoint is required
 	return c.Endpoint != ""
+}
+
+// isGCPBlockedWithoutCredentials reports whether GCP-native cloud export
+// cannot authenticate because the metadata server is in block mode and no
+// explicit credentials file (SCION_OTEL_GCP_CREDENTIALS or the well-known
+// path) is present.
+func (c *Config) isGCPBlockedWithoutCredentials() bool {
+	return c.IsGCP() && c.GCPCredentialsFile == "" && c.MetadataMode == metadataModeBlock
 }
 
 // IsGCP returns true if the cloud provider is configured for GCP-native export.

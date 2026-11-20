@@ -249,6 +249,47 @@ func TestIsCloudConfigured_GCP(t *testing.T) {
 			expected: true,
 		},
 		{
+			name: "gcp without credentials in metadata mode block returns false",
+			config: &Config{
+				CloudEnabled:  true,
+				CloudProvider: "gcp",
+				ProjectID:     "my-project",
+				MetadataMode:  "block",
+			},
+			expected: false,
+		},
+		{
+			name: "gcp with credentials in metadata mode block returns true",
+			config: &Config{
+				CloudEnabled:       true,
+				CloudProvider:      "gcp",
+				GCPCredentialsFile: "/path/to/creds.json",
+				ProjectID:          "my-project",
+				MetadataMode:       "block",
+			},
+			expected: true,
+		},
+		{
+			name: "gcp without credentials in metadata mode assign returns true",
+			config: &Config{
+				CloudEnabled:  true,
+				CloudProvider: "gcp",
+				ProjectID:     "my-project",
+				MetadataMode:  "assign",
+			},
+			expected: true,
+		},
+		{
+			name: "gcp without credentials in metadata mode passthrough returns true",
+			config: &Config{
+				CloudEnabled:  true,
+				CloudProvider: "gcp",
+				ProjectID:     "my-project",
+				MetadataMode:  "passthrough",
+			},
+			expected: true,
+		},
+		{
 			name: "generic without endpoint",
 			config: &Config{
 				CloudEnabled: true,
@@ -579,6 +620,86 @@ func TestLoadConfig_GCPEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_GCPMetadataModeBlock(t *testing.T) {
+	t.Run("block mode without credentials disables cloud export", func(t *testing.T) {
+		clearTelemetryEnv()
+		t.Cleanup(clearTelemetryEnv)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv(EnvCloudProvider, "gcp")
+		t.Setenv(EnvProjectID, "my-project")
+		t.Setenv(EnvMetadataMode, "block")
+
+		cfg := LoadConfig()
+		if cfg.IsCloudConfigured() {
+			t.Error("IsCloudConfigured() = true, want false when metadata mode is block and no credentials file is present")
+		}
+		if AnalyticsEnabledForHooks(cfg) {
+			t.Error("AnalyticsEnabledForHooks() = true, want false when cloud export is disabled in block mode")
+		}
+	})
+
+	t.Run("block mode with explicit credentials env keeps cloud export enabled", func(t *testing.T) {
+		clearTelemetryEnv()
+		t.Cleanup(clearTelemetryEnv)
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv(EnvCloudProvider, "gcp")
+		t.Setenv(EnvProjectID, "my-project")
+		t.Setenv(EnvGCPCredentials, "/etc/gcp/sa.json")
+		t.Setenv(EnvMetadataMode, "block")
+
+		cfg := LoadConfig()
+		if !cfg.IsCloudConfigured() {
+			t.Error("IsCloudConfigured() = false, want true when explicit credentials file is set in block mode")
+		}
+	})
+
+	t.Run("block mode with well-known credentials file keeps cloud export enabled", func(t *testing.T) {
+		clearTelemetryEnv()
+		t.Cleanup(clearTelemetryEnv)
+		tmpHome := t.TempDir()
+		scionDir := filepath.Join(tmpHome, ".scion")
+		if err := os.MkdirAll(scionDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		credPath := filepath.Join(scionDir, "telemetry-gcp-credentials.json")
+		if err := os.WriteFile(credPath, []byte(`{"type":"service_account","project_id":"wk-project"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", tmpHome)
+		t.Setenv(EnvCloudProvider, "gcp")
+		t.Setenv(EnvMetadataMode, "block")
+
+		cfg := LoadConfig()
+		if !cfg.IsCloudConfigured() {
+			t.Error("IsCloudConfigured() = false, want true when well-known credentials file exists in block mode")
+		}
+	})
+
+	for _, mode := range []string{"assign", "passthrough", ""} {
+		name := mode
+		if name == "" {
+			name = "unset"
+		}
+		t.Run("metadata mode "+name+" without credentials keeps ADC cloud export enabled", func(t *testing.T) {
+			clearTelemetryEnv()
+			t.Cleanup(clearTelemetryEnv)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv(EnvCloudProvider, "gcp")
+			t.Setenv(EnvProjectID, "my-project")
+			if mode != "" {
+				t.Setenv(EnvMetadataMode, mode)
+			} else {
+				_ = os.Unsetenv(EnvMetadataMode)
+			}
+
+			cfg := LoadConfig()
+			if !cfg.IsCloudConfigured() {
+				t.Errorf("IsCloudConfigured() = false, want true for metadata mode %q with project ID", mode)
+			}
+		})
+	}
+}
+
 func clearTelemetryEnv() {
 	_ = os.Unsetenv(EnvEnabled)
 	_ = os.Unsetenv(EnvCloudEnabled)
@@ -598,6 +719,7 @@ func clearTelemetryEnv() {
 	_ = os.Unsetenv(EnvGCPCredentials)
 	_ = os.Unsetenv(EnvCloudProvider)
 	_ = os.Unsetenv(EnvMetricsDebug)
+	_ = os.Unsetenv(EnvMetadataMode)
 	// Mark as sandboxed so LoadConfig's test guard doesn't force-disable cloud.
 	telemetryTestSandboxed = true
 }
