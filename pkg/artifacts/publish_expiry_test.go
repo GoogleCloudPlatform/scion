@@ -297,3 +297,186 @@ func TestPublishManifestAndKeyedExpiresIn(t *testing.T) {
 		t.Errorf("POST /{id}/versions with expiresIn status = %d, want 400", rec.Code)
 	}
 }
+
+func TestPublishKeyedExpiresInLengthening(t *testing.T) {
+	ctx := context.Background()
+	manifest := func(key, scope, expiresIn string, body []byte) []byte {
+		req := CreateVersionRequest{
+			Title:     "Demo",
+			Key:       key,
+			Scope:     scope,
+			Entry:     "demo.md",
+			ExpiresIn: expiresIn,
+			Files:     []ManifestFile{{Path: "demo.md", Size: int64(len(body)), SHA256: sha(body)}},
+		}
+		b, err := json.Marshal(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	t.Run("positive default retention refuses agent lengthening without creating pending version", func(t *testing.T) {
+		f := newFixture(t, false)
+		f.svc.SetLimits(func(context.Context) Limits { return Limits{DefaultRetention: 30 * 24 * time.Hour} })
+
+		// Create keyed artifact with 48h expiry.
+		rec := f.do(&agentA, http.MethodPost, "/api/v1/artifacts", manifest("k", "", "48h", []byte("v1")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create v1 status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var pend1 PendingVersionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &pend1); err != nil {
+			t.Fatal(err)
+		}
+		if pend1.Artifact.ExpiresAt == nil {
+			t.Fatal("v1 ExpiresAt is nil")
+		}
+		origExp := *pend1.Artifact.ExpiresAt
+
+		// Re-publishing with a longer expiry (720h, within default retention) is refused.
+		rec = f.do(&agentA, http.MethodPost, "/api/v1/artifacts", manifest("k", "", "720h", []byte("v2")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("keyed lengthen under retention status = %d, want 400 (%s)", rec.Code, rec.Body.String())
+		}
+
+		// Expiry is unchanged and no pending v2 was created.
+		got, err := f.store.GetArtifact(ctx, pend1.Artifact.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ExpiresAt == nil || !got.ExpiresAt.Equal(origExp) {
+			t.Errorf("ExpiresAt after refused lengthen = %v, want unchanged %v", got.ExpiresAt, origExp)
+		}
+		if _, err := f.store.GetVersion(ctx, pend1.Artifact.ID, 2); err != ErrNotFound {
+			t.Errorf("GetVersion(v2) err = %v, want ErrNotFound (no pending version left behind)", err)
+		}
+		events, err := f.store.ListEvents(ctx, pend1.Artifact.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 1 {
+			t.Errorf("events after refused lengthen = %d, want 1", len(events))
+		}
+
+		// Shortening from 48h to 24h is still allowed.
+		rec = f.do(&agentA, http.MethodPost, "/api/v1/artifacts", manifest("k", "", "24h", []byte("v2")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("keyed shorten 48h->24h status = %d, want 201 (%s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("positive default retention allows agent shortening from nil expiry", func(t *testing.T) {
+		f := newFixture(t, false)
+		// Create with DefaultRetention == 0 so current ExpiresAt is nil.
+		f.svc.SetLimits(func(context.Context) Limits { return Limits{DefaultRetention: 0} })
+		rec := f.do(&agentA, http.MethodPost, "/api/v1/artifacts", manifest("k-nil", "", "", []byte("v1")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create v1 status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var pend1 PendingVersionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &pend1); err != nil {
+			t.Fatal(err)
+		}
+		if pend1.Artifact.ExpiresAt != nil {
+			t.Fatalf("v1 ExpiresAt = %v, want nil", pend1.Artifact.ExpiresAt)
+		}
+
+		// Turn on DefaultRetention = 30d; setting finite 48h on nil expiry is a shortening and allowed.
+		f.svc.SetLimits(func(context.Context) Limits { return Limits{DefaultRetention: 30 * 24 * time.Hour} })
+		rec = f.do(&agentA, http.MethodPost, "/api/v1/artifacts", manifest("k-nil", "", "48h", []byte("v2")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("keyed nil->48h under retention status = %d, want 201 (%s)", rec.Code, rec.Body.String())
+		}
+		var pend2 PendingVersionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &pend2); err != nil {
+			t.Fatal(err)
+		}
+		if pend2.Artifact.ExpiresAt == nil {
+			t.Fatal("v2 ExpiresAt is nil, want ~now+48h")
+		}
+	})
+
+	t.Run("zero default retention allows agent lengthening and clearing", func(t *testing.T) {
+		f := newFixture(t, false)
+		f.svc.SetLimits(func(context.Context) Limits { return Limits{DefaultRetention: 0} })
+
+		rec := f.do(&agentA, http.MethodPost, "/api/v1/artifacts", manifest("k0", "", "48h", []byte("v1")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create v1 status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var pend1 PendingVersionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &pend1); err != nil {
+			t.Fatal(err)
+		}
+		if pend1.Artifact.ExpiresAt == nil {
+			t.Fatal("v1 ExpiresAt is nil")
+		}
+		v1Exp := *pend1.Artifact.ExpiresAt
+
+		// Lengthening 48h -> 720h succeeds when DefaultRetention == 0.
+		rec = f.do(&agentA, http.MethodPost, "/api/v1/artifacts", manifest("k0", "", "720h", []byte("v2")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("keyed lengthen under retention=0 status = %d, want 201 (%s)", rec.Code, rec.Body.String())
+		}
+		var pend2 PendingVersionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &pend2); err != nil {
+			t.Fatal(err)
+		}
+		if pend2.Artifact.ExpiresAt == nil || !pend2.Artifact.ExpiresAt.After(v1Exp) {
+			t.Errorf("v2 ExpiresAt = %v, want > %v", pend2.Artifact.ExpiresAt, v1Exp)
+		}
+
+		// Clearing with "never" succeeds when DefaultRetention == 0.
+		rec = f.do(&agentA, http.MethodPost, "/api/v1/artifacts", manifest("k0", "", "never", []byte("v3")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("keyed clear under retention=0 status = %d, want 201 (%s)", rec.Code, rec.Body.String())
+		}
+		var pend3 PendingVersionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &pend3); err != nil {
+			t.Fatal(err)
+		}
+		if pend3.Artifact.ExpiresAt != nil {
+			t.Errorf("v3 ExpiresAt = %v, want nil", pend3.Artifact.ExpiresAt)
+		}
+	})
+
+	t.Run("user owner can lengthen and clear under positive default retention", func(t *testing.T) {
+		f := newFixture(t, false)
+		f.svc.SetLimits(func(context.Context) Limits { return Limits{DefaultRetention: 30 * 24 * time.Hour} })
+
+		rec := f.do(&userU, http.MethodPost, "/api/v1/artifacts", manifest("ku", "project-1", "48h", []byte("v1")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("user create v1 status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var pend1 PendingVersionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &pend1); err != nil {
+			t.Fatal(err)
+		}
+		v1Exp := *pend1.Artifact.ExpiresAt
+
+		rec = f.do(&userU, http.MethodPost, "/api/v1/artifacts", manifest("ku", "project-1", "720h", []byte("v2")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("user lengthen status = %d, want 201 (%s)", rec.Code, rec.Body.String())
+		}
+		var pend2 PendingVersionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &pend2); err != nil {
+			t.Fatal(err)
+		}
+		if pend2.Artifact.ExpiresAt == nil || !pend2.Artifact.ExpiresAt.After(v1Exp) {
+			t.Errorf("user v2 ExpiresAt = %v, want > %v", pend2.Artifact.ExpiresAt, v1Exp)
+		}
+
+		rec = f.do(&userU, http.MethodPost, "/api/v1/artifacts", manifest("ku", "project-1", "never", []byte("v3")), map[string]string{"Content-Type": "application/json"})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("user clear status = %d, want 201 (%s)", rec.Code, rec.Body.String())
+		}
+		var pend3 PendingVersionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &pend3); err != nil {
+			t.Fatal(err)
+		}
+		if pend3.Artifact.ExpiresAt != nil {
+			t.Errorf("user v3 ExpiresAt = %v, want nil", pend3.Artifact.ExpiresAt)
+		}
+	})
+}

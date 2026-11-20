@@ -67,7 +67,7 @@ func ParseExpiresIn(raw string) (dur time.Duration, never bool, err error) {
 	if strings.EqualFold(s, "never") {
 		return 0, true, nil
 	}
-	if len(s) > 0 && (s[len(s)-1] == 'd' || s[len(s)-1] == 'D') {
+	if s[len(s)-1] == 'd' || s[len(s)-1] == 'D' {
 		digits := s[:len(s)-1]
 		if digits == "" {
 			return 0, false, fmt.Errorf("invalid duration %q: use a duration such as 720h, 30d, or never", raw)
@@ -125,6 +125,19 @@ func resolvePublishExpiry(kind, raw string, l Limits, now time.Time) (*time.Time
 	}
 	t := now.Add(dur).UTC().Truncate(time.Microsecond)
 	return &t, true, ""
+}
+
+// expiryLengthens reports whether changing an artifact's expiry from current
+// to target lengthens (or clears) a finite expiry. A nil current expiry means
+// no limit, so any finite target is a shortening.
+func expiryLengthens(current, target *time.Time) bool {
+	if current == nil {
+		return false
+	}
+	if target == nil {
+		return true
+	}
+	return target.After(*current)
 }
 
 // applyPublishExpiry applies an explicit publish-time expiry to a, recording
