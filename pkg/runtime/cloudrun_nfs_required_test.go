@@ -52,9 +52,19 @@ func TestCloudRunRun_RefusesNonNFSWorkspaceBackend(t *testing.T) {
 			if wantName == "" {
 				wantName = "none"
 			}
-			if msg := err.Error(); !strings.Contains(msg, "(workspace backend: "+wantName+")") ||
-				!strings.Contains(msg, `server.workspace_storage.backend to "nfs"`) {
-				t.Errorf("error %q does not name the backend %q and the nfs setting", msg, wantName)
+			msg := err.Error()
+			for _, want := range []string{
+				"(workspace backend: " + wantName + ")",
+				`server.project_storage.backend to "nfs"`,
+				"server.project_storage.nfs.shares[0]",
+				"server.project_storage.nfs.mount_root",
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error %q does not contain %q", msg, want)
+				}
+			}
+			if strings.Contains(msg, "workspace_storage") {
+				t.Errorf("error %q still mentions deprecated workspace_storage key", msg)
 			}
 			if provisioned != 0 {
 				t.Errorf("NFS provisioning ran %d times, want 0", provisioned)
