@@ -1620,8 +1620,12 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     chevron.click();
     await Promise.resolve();
     await el.updateComplete;
+    await Promise.resolve();
     const dropdown = el.shadowRoot?.querySelector<HTMLElement>('.wide-center .terminals-dropdown');
     expect(dropdown).not.toBeNull();
+    // Replacing the placeholder button with the mounted dropdown must keep focus on the trigger.
+    expect(wideChevron(el)).not.toBe(chevron);
+    expect(el.shadowRoot?.activeElement).toBe(wideChevron(el));
     dropdown?.dispatchEvent(new CustomEvent('sl-show'));
     await el.updateComplete;
 

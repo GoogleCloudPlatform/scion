@@ -274,8 +274,10 @@ function focusMenuItemAfterOpen(
 }
 
 /**
- * Opens a newly-mounted `<sl-dropdown class="terminals-dropdown">` and, when
- * opened via keyboard, moves roving focus to the first or last enabled item.
+ * Opens a newly-mounted `<sl-dropdown class="terminals-dropdown">`. Focuses the
+ * mounted trigger button so replacing the pre-mount placeholder does not drop
+ * focus to `<body>`, and when opened via keyboard moves roving focus to the
+ * first or last enabled item.
  */
 export function openMountedTerminalsDropdown(
   root: ShadowRoot | null,
@@ -283,11 +285,24 @@ export function openMountedTerminalsDropdown(
 ): void {
   const dd = root?.querySelector<SlDropdownLike>('.wide-center .terminals-dropdown');
   if (!dd) return;
+  const focusTrigger = (): void => {
+    root?.querySelector<HTMLElement>('.wide-center .terminals-menu-trigger')?.focus();
+  };
   if (typeof dd.show === 'function') {
-    void Promise.resolve(dd.show()).then(() => {
+    const shown = Promise.resolve(dd.show());
+    // Wait for `<sl-dropdown>` to render its `<slot name="trigger">` before focusing;
+    // focusing an unslotted child of a shadow host is a no-op in Chromium.
+    if (dd.updateComplete) {
+      void dd.updateComplete.then(() => {
+        if (dd.open) focusTrigger();
+      });
+    }
+    void shown.then(() => {
       if (focusTarget !== 'none') focusMenuItemAfterOpen(dd, root, focusTarget);
+      else if (dd.open) focusTrigger();
     });
   } else {
+    focusTrigger();
     dd.open = true;
     if (focusTarget !== 'none') focusMenuItemAfterOpen(dd, root, focusTarget);
   }

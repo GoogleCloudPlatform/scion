@@ -587,3 +587,34 @@ test('wide header Terminals chevron lists current agent and rail sessions, opens
       .getByRole('button', { name: 'Open terminals menu' })
   ).toBeHidden();
 });
+
+test('first click on wide header Terminals chevron keeps focus on trigger so keyboard reaches menu', async ({
+  page,
+}) => {
+  await setup(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  await page.goto(`/agents/${agentB}`);
+  await expect(page.locator('scion-page-agent-detail')).toContainText('beta-agent', {
+    timeout: 15000,
+  });
+
+  const appChevron = page
+    .locator('scion-app scion-header .wide-center')
+    .getByRole('button', { name: 'Open terminals menu' });
+  await expect(appChevron).toBeVisible();
+
+  await appChevron.click();
+  await expect(appChevron).toHaveAttribute('aria-expanded', 'true');
+  await expect(appChevron).toBeFocused();
+
+  await page.keyboard.press('ArrowDown');
+  const rows = page.locator('scion-app scion-header .wide-center .terminals-menu sl-menu-item');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.nth(0)).toContainText('beta-agent');
+  await expect(rows.nth(0)).toBeFocused();
+
+  await page.keyboard.press('Escape');
+  await expect(appChevron).toHaveAttribute('aria-expanded', 'false');
+  await expect(appChevron).toBeFocused();
+});
