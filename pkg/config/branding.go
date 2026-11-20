@@ -868,7 +868,7 @@ func verifySafeSVG(data []byte) error {
 	dec.Strict = true
 
 	sawRoot := false
-	styleDepth := 0
+	inStyle := false
 	var styleBuf strings.Builder
 	for {
 		tok, err := dec.Token()
@@ -889,6 +889,9 @@ func verifySafeSVG(data []byte) error {
 				return fmt.Errorf("SVG processing instruction <?%s?> is not allowed", t.Target)
 			}
 		case xml.StartElement:
+			if inStyle {
+				return fmt.Errorf("SVG <style> element must not contain child elements (got <%s>)", t.Name.Local)
+			}
 			elemName := strings.ToLower(t.Name.Local)
 			if !sawRoot {
 				if elemName != "svg" {
@@ -900,10 +903,8 @@ func verifySafeSVG(data []byte) error {
 				return fmt.Errorf("SVG element <%s> is not allowed", t.Name.Local)
 			}
 			if elemName == "style" {
-				if styleDepth == 0 {
-					styleBuf.Reset()
-				}
-				styleDepth++
+				inStyle = true
+				styleBuf.Reset()
 			}
 			for _, attr := range t.Attr {
 				attrLocal := strings.ToLower(attr.Name.Local)
@@ -925,18 +926,16 @@ func verifySafeSVG(data []byte) error {
 				}
 			}
 		case xml.CharData:
-			if styleDepth > 0 {
+			if inStyle {
 				styleBuf.Write(t)
 			}
 		case xml.EndElement:
-			if strings.EqualFold(t.Name.Local, "style") && styleDepth > 0 {
-				styleDepth--
-				if styleDepth == 0 {
-					if err := checkSafeSVGStyleText(styleBuf.String(), "<style> element"); err != nil {
-						return err
-					}
-					styleBuf.Reset()
+			if inStyle && strings.EqualFold(t.Name.Local, "style") {
+				inStyle = false
+				if err := checkSafeSVGStyleText(styleBuf.String(), "<style> element"); err != nil {
+					return err
 				}
+				styleBuf.Reset()
 			}
 		}
 	}

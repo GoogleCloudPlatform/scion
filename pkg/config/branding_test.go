@@ -406,6 +406,18 @@ func TestValidateBranding_AssetsAndSVGSafety(t *testing.T) {
 			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<svg xmlns="http://www.w3.org/2000/svg"><style>@im<!--x-->port url("https://evil.example/x.css");</style></svg>`)}},
 		},
 		{
+			name: "svg style element child-element-split @import rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<svg xmlns="http://www.w3.org/2000/svg"><style>@im<g>z</g>port url("https://evil.example/x.css");</style></svg>`)}},
+		},
+		{
+			name: "svg style element child-element-split javascript URI rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<svg xmlns="http://www.w3.org/2000/svg"><style>rect{fill:url(java<desc>z</desc>script:alert(1))}</style></svg>`)}},
+		},
+		{
+			name: "svg nested style element rejected",
+			cfg:  BrandingConfig{Logo: &BrandingLogoConfig{Light: svgDataURI(`<svg xmlns="http://www.w3.org/2000/svg"><style>@im<style>z</style>port url("https://evil.example/x.css");</style></svg>`)}},
+		},
+		{
 			name: "oversized single asset > 128 KiB rejected",
 			cfg: BrandingConfig{
 				Logo: &BrandingLogoConfig{
