@@ -1041,4 +1041,52 @@ func TestTemplateCommit_AgentConfigValidation(t *testing.T) {
 			t.Fatalf("CheckDir with nil server returned unexpected error: %v", err)
 		}
 	})
+
+	t.Run("unchanged_stored_invalid_allowed_on_bootstrap_and_reimport_flag_on", func(t *testing.T) {
+		srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+		dir := writeTemplateDir(t, t.TempDir(), "unchanged-bad", map[string]string{
+			"scion-agent.yaml": invalidDurationYAML,
+			"README.md":        "v1",
+		})
+		// Seed while flag is off.
+		setTemplateValidationExperiment(t, srv, false)
+		if _, err := srv.templateStore().Bootstrap(ctx, "unchanged-bad", dir, store.TemplateScopeGlobal, "", "https://github.com/acme/repo/tree/main/templates/unchanged-bad", true); err != nil {
+			t.Fatalf("seed bootstrap failed: %v", err)
+		}
+		tmpl, err := s.GetTemplateBySlug(ctx, "unchanged-bad", store.TemplateScopeGlobal, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Turn flag ON: unchanged effective agent config must NOT be refused.
+		setTemplateValidationExperiment(t, srv, true)
+
+		// 1. Workstation/hub-start bootstrap (force=false, hash match).
+		if _, err := srv.templateStore().Bootstrap(ctx, "unchanged-bad", dir, store.TemplateScopeGlobal, "", "", false); err != nil {
+			t.Fatalf("Bootstrap(force=false) on unchanged stored invalid template refused: %v", err)
+		}
+
+		// 2. Identical reimport via targetTemplateStore (force=true).
+		if _, err := srv.targetTemplateStore(tmpl.ID).Bootstrap(ctx, tmpl.Name, dir, tmpl.Scope, tmpl.ScopeID, tmpl.SourceURL, true); err != nil {
+			t.Fatalf("targetTemplateStore Bootstrap(force=true) on unchanged stored invalid template refused: %v", err)
+		}
+
+		// 3. Forced Bootstrap with another file edited (effective agent config still unchanged).
+		dirEditedOther := writeTemplateDir(t, t.TempDir(), "unchanged-bad", map[string]string{
+			"scion-agent.yaml": invalidDurationYAML,
+			"README.md":        "v2",
+		})
+		if _, err := srv.templateStore().Bootstrap(ctx, "unchanged-bad", dirEditedOther, store.TemplateScopeGlobal, "", "", true); err != nil {
+			t.Fatalf("Bootstrap(force=true) with unchanged agent config refused: %v", err)
+		}
+
+		// 4. BootstrapSource reseed with unchanged agent config.
+		br := testBundledResource(storage.ResourceKindTemplate, "unchanged-bad", map[string]string{
+			"scion-agent.yaml": invalidDurationYAML,
+			"README.md":        "v3",
+		})
+		if _, err := srv.templateStore().BootstrapSource(ctx, NewFSResourceSource(br), BootstrapOptions{OverwritePolicy: OverwriteAlways}); err != nil {
+			t.Fatalf("BootstrapSource on unchanged stored invalid template refused: %v", err)
+		}
+	})
 }
