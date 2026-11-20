@@ -1722,6 +1722,14 @@ const stopAllStatusStopRecorded = "stop_recorded"
 // stopped, and the newer run's state is left as it is (ptone/scion#2550).
 const stopAllStatusRunChanged = "run_changed"
 
+// stopAllMaxConcurrency caps how many per-agent stops handleStopAllAgents
+// runs at once, matching the CLI's maxFanOutConcurrency (ptone/scion#8563).
+const stopAllMaxConcurrency = 6
+
+// stopAllDeadlineSkippedErr is the per-agent error recorded when the stop-all
+// op deadline is reached before an agent's stop begins (ptone/scion#8563).
+const stopAllDeadlineSkippedErr = "stop-all deadline reached before this agent's stop began"
+
 // startInFlightPhase reports whether phase is one a start passes through
 // before the agent is running.
 func startInFlightPhase(phase string) bool {
@@ -1876,35 +1884,69 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	// a client that disconnects or gives up must not cancel the stops in
 	// flight, leaving some agents stopped and others still running with
 	// their intent set to stopped. Each agent's stop runs on this detached
-	// ctx, its broker work still bounded by stopAllAgentOpTimeout, and the
-	// whole stop-all by its write budget. The response is still written on
-	// the request.
-	stopCtx, cancelStops := detachStopFromClient(ctx, stopAllWriteBudget())
+	// ctx, its broker work bounded by stopAllAgentOpTimeout, and the whole
+	// stop-all by its wave-scaled write budget. The response is still written
+	// on the request.
+	opBudget := stopAllOpBudget(len(agents))
+	writeBudget := stopAllWriteBudget(len(agents))
+	stopCtx, cancelStops := detachStopFromClient(ctx, writeBudget)
 	defer cancelStops()
 	ctx = stopCtx
 
-	// The agents are stopped in parallel, each one's broker work bounded by
-	// stopAllAgentOpTimeout, and the response waits for them all: extend
-	// this request's write deadline to cover them (ptone/scion#4212).
+	// The agents are stopped in bounded waves of stopAllMaxConcurrency, each
+	// agent's broker work bounded by stopAllAgentOpTimeout and the whole
+	// stop-all by opBudget (capped at stopAllMaxBudgetWaves waves). Extend
+	// this request's write deadline to cover them (ptone/scion#4212,
+	// ptone/scion#8563).
 	if dispatcher != nil {
-		extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopAllWriteBudget())
+		extendWriteDeadline(ctx, w, s.config.WriteTimeout, writeBudget)
 	}
-	// One deadline for every agent's broker work, taken with the detach: an
-	// agent whose pre-dispatch store writes are slow gets less broker time,
-	// not less of the slack its status write needs.
-	opDeadline := time.Now().Add(stopAllAgentOpTimeout)
+	// Total deadline for the stop-all's broker work, taken with the detach.
+	// For a single wave (<= stopAllMaxConcurrency agents), every agent shares
+	// this deadline so a slow pre-dispatch store write takes broker time, not
+	// status-write slack. Agents whose stop would begin past opDeadline are
+	// skipped without touching their intent or state and reported as errors.
+	opDeadline := time.Now().Add(opBudget)
+	waitCtx, cancelWait := context.WithDeadline(ctx, opDeadline)
+	defer cancelWait()
 
 	var (
 		mu      sync.Mutex
 		wg      sync.WaitGroup
+		sem     = make(chan struct{}, stopAllMaxConcurrency)
 		results = make([]stopAllResult, 0, len(agents))
 	)
+	recordSkipped := func(agent *store.Agent) {
+		errMsg := stopAllDeadlineSkippedErr
+		if ctx.Err() != nil {
+			errMsg = ctx.Err().Error()
+		}
+		mu.Lock()
+		results = append(results, stopAllResult{
+			ID:     agent.ID,
+			Name:   agent.Name,
+			Status: "error",
+			Error:  errMsg,
+		})
+		mu.Unlock()
+	}
 
 	for i := range agents {
 		agent := &agents[i]
+		if waitCtx.Err() != nil {
+			recordSkipped(agent)
+			continue
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-waitCtx.Done():
+			recordSkipped(agent)
+			continue
+		}
 		wg.Add(1)
 		go func(agent *store.Agent) {
 			defer wg.Done()
+			defer func() { <-sem }()
 
 			// The filter above used the list snapshot; re-read so a delete
 			// that claimed the row since is skipped the same way (a stop is
@@ -1916,6 +1958,14 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					return
 				}
 				agent = fresh
+			}
+
+			// Do not touch the agent (no intent or state write) if the
+			// stop-all deadline passed before this agent's stop began
+			// (ptone/scion#8563).
+			if waitCtx.Err() != nil {
+				recordSkipped(agent)
+				return
 			}
 
 			res := stopAllResult{
@@ -1970,7 +2020,11 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			var warnings []string
 			stopRunID := agent.RunID
 			if dispatcher != nil && agent.RuntimeBrokerID != "" {
-				opCtx, cancel := context.WithDeadline(ctx, opDeadline)
+				agentDeadline := time.Now().Add(stopAllAgentOpTimeout)
+				if opDeadline.Before(agentDeadline) {
+					agentDeadline = opDeadline
+				}
+				opCtx, cancel := context.WithDeadline(ctx, agentDeadline)
 				defer cancel()
 				// Each agent collects its own warnings, reported on its
 				// result as a single stop reports them on its response.
