@@ -501,8 +501,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 
 		matchCount++
 
+		// Derived subject_rule output applies to trigger_fires.subject and coalescing
+		// only; FireEvent.Subject for the agent envelope keeps the hub-shaped source
+		// event subject so sender-derived text stays inside external_payload framing
+		// (stage1-design rev 8.34, ledger L23).
 		fireSubject := deriveFireSubject(ev.Subject)
-		envelopeSubject := ev.Subject
 		if strings.TrimSpace(tr.SubjectRule) != "" {
 			if d.rules == nil || actErr != nil {
 				d.logger.Warn("trigger subject_rule skipped; falling back to event subject",
@@ -525,7 +528,6 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				}
 				if derived != "" {
 					fireSubject = derived
-					envelopeSubject = derived
 				}
 			}
 		}
@@ -595,7 +597,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				SourceKind: ev.SourceKind,
 				SourceID:   ev.SourceID,
 				Type:       ev.Type,
-				Subject:    envelopeSubject,
+				Subject:    ev.Subject,
 				OccurredAt: ev.OccurredAt,
 				ReceivedAt: ev.ReceivedAt,
 				Attributes: maps.Clone(ev.Attributes),

@@ -1569,9 +1569,10 @@ func TestDispatcher_SubjectRuleDerivationAndFallbacks(t *testing.T) {
 	}
 	require.Len(t, byTrig, 4)
 
-	// Valid subject_rule overrides both trigger_fires.subject and FireEvent.Subject.
+	// Valid subject_rule derives trigger_fires.subject while keeping FireEvent.Subject
+	// as the unchanged hub-shaped source event subject (stage1-design rev 8.34, L23).
 	assert.Equal(t, "svc:payments", byTrig[trValidSubj.ID].Subject)
-	assert.Equal(t, "svc:payments", deliveredSubj[trValidSubj.ID])
+	assert.Equal(t, longSourceSubj, deliveredSubj[trValidSubj.ID])
 
 	// Fallbacks preserve 256B truncation on trigger_fires.subject and full source subject on FireEvent.Subject.
 	for _, fbID := range []string{trEvalErrSubj.ID, trOversizeSubj.ID, trControlSubj.ID} {

@@ -1657,12 +1657,18 @@ func TestTriggerDispatchE2E_CELMatchRulesSubjectDerivationHistoryAndCacheInvalid
 		return err == nil && stored != nil && stored.Status == store.TriggerEventStatusProcessed
 	}, 5*time.Second, 20*time.Millisecond)
 
-	// Only trMatch delivered to agent, carrying derived subject "deploy:pay-core1" in §8.3 envelope.
+	// Only trMatch delivered to agent: envelope and EventBody keep the hub-shaped source
+	// event subject while trigger_fires.subject records the derived subject_rule value
+	// (stage1-design rev 8.34, ledger L23).
 	calls := disp.getCalls()
 	require.Len(t, calls, 1)
 	assert.Equal(t, f.targetAgent.ID, calls[0].Agent.ID)
+	require.NotNil(t, calls[0].StructuredMessage)
+	var evBody messaging.EventBody
+	require.NoError(t, json.Unmarshal(calls[0].StructuredMessage.Event, &evBody))
+	assert.Equal(t, "webhook:"+ep.ID+"/raw-subject", evBody.Subject)
 	env := extractEnvelopeJSONFromDelivery(t, calls[0].StructuredMessage.DeliveryText)
-	assert.Equal(t, "deploy:pay-core1", env.Event.Subject)
+	assert.Equal(t, "webhook:"+ep.ID+"/raw-subject", env.Event.Subject)
 
 	// History of trMatch: status=fired, subject=deploy:pay-core1, matchedThrough=2/2, decidedDialect=cel, ruleTrace.
 	matchHistRec := f.doTrigger(t, f.ownerAuth, trMatch.ID+"/history", http.MethodGet, nil)
