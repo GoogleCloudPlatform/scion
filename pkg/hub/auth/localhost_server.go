@@ -63,6 +63,7 @@ type CallbackColors struct {
 type CallbackBranding struct {
 	Name        string
 	Attribution string
+	Corners     string
 	LogoLight   string
 	LogoDark    string
 	Light       CallbackColors
@@ -169,9 +170,21 @@ func sanitizeCallbackLogoURL(raw string) string {
 	return ""
 }
 
+func sanitizeCallbackContainerRadius(corners string) string {
+	switch corners {
+	case "square":
+		return "0"
+	case "rounded":
+		return "16px"
+	default:
+		return "12px"
+	}
+}
+
 func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, heading, message string) string {
 	name := defaultCallbackBrandName
 	attribution := callbackAttributionShown
+	containerRadius := sanitizeCallbackContainerRadius("")
 	var logoLight, logoDark string
 	light := defaultCallbackLightColors()
 	dark := defaultCallbackDarkColors()
@@ -181,6 +194,7 @@ func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, h
 		if b.Attribution == callbackAttributionHidden {
 			attribution = callbackAttributionHidden
 		}
+		containerRadius = sanitizeCallbackContainerRadius(b.Corners)
 		logoLight = sanitizeCallbackLogoURL(b.LogoLight)
 		logoDark = sanitizeCallbackLogoURL(b.LogoDark)
 		if logoLight == "" && logoDark != "" {
@@ -272,7 +286,7 @@ func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, h
             background: var(--surface);
             border: 1px solid var(--border);
             padding: 2.5rem 3rem;
-            border-radius: 12px;
+            border-radius: %s;
             max-width: 480px;
             margin: 1rem;
         }
@@ -340,6 +354,7 @@ func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, h
 		html.EscapeString(fullTitle),
 		light.Bg, light.Surface, light.Text, light.TextMuted, light.Border, light.Accent,
 		dark.Bg, dark.Surface, dark.Text, dark.TextMuted, dark.Border, dark.Accent,
+		containerRadius,
 		logoHTML,
 		iconClass,
 		iconEntity,

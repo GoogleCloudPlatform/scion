@@ -524,6 +524,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"server.hub.branding.short_name":                   testAdminPolicyDeny,
 	"server.hub.branding.subtitle":                     testAdminPolicyDeny,
 	"server.hub.branding.attribution":                  testAdminPolicyDeny,
+	"server.hub.branding.corners":                      testAdminPolicyDeny,
 	"server.hub.branding.logo":                         testAdminPolicyDeny,
 	"server.hub.branding.logo.light":                   testAdminPolicyDeny,
 	"server.hub.branding.logo.dark":                    testAdminPolicyDeny,

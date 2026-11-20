@@ -111,6 +111,7 @@ var layer1RoundTripSamples = map[string]string{
 	"server.hub.branding.short_name":                   `"Acme"`,
 	"server.hub.branding.subtitle":                     `"Engineering Platform"`,
 	"server.hub.branding.attribution":                  `"hidden"`,
+	"server.hub.branding.corners":                      `"square"`,
 	"server.hub.branding.logo":                         `{"light":"https://cdn.example.com/logo.svg"}`,
 	"server.hub.branding.logo.light":                   `"https://cdn.example.com/logo-light.svg"`,
 	"server.hub.branding.logo.dark":                    `"https://cdn.example.com/logo-dark.svg"`,

@@ -44,6 +44,12 @@ const (
 	AttributionShown  = "shown"
 	AttributionHidden = "hidden"
 
+	// BrandCornersDefault, BrandCornersSquare, and BrandCornersRounded are the
+	// valid string enum values for BrandingConfig.Corners.
+	BrandCornersDefault = "default"
+	BrandCornersSquare  = "square"
+	BrandCornersRounded = "rounded"
+
 	MaxBrandNameRunes      = 64
 	MaxBrandShortNameRunes = 24
 	MaxBrandSubtitleRunes  = 80
@@ -234,6 +240,7 @@ type BrandingConfig struct {
 	ShortName   string                 `json:"short_name,omitempty" yaml:"short_name,omitempty" koanf:"short_name"`
 	Subtitle    string                 `json:"subtitle,omitempty" yaml:"subtitle,omitempty" koanf:"subtitle"`
 	Attribution string                 `json:"attribution,omitempty" yaml:"attribution,omitempty" koanf:"attribution"`
+	Corners     string                 `json:"corners,omitempty" yaml:"corners,omitempty" koanf:"corners"`
 	Logo        *BrandingLogoConfig    `json:"logo,omitempty" yaml:"logo,omitempty" koanf:"logo"`
 	Icons       *BrandingIconsConfig   `json:"icons,omitempty" yaml:"icons,omitempty" koanf:"icons"`
 	AccentColor string                 `json:"accent_color,omitempty" yaml:"accent_color,omitempty" koanf:"accent_color"`
@@ -246,6 +253,7 @@ func (c BrandingConfig) IsZero() bool {
 		c.ShortName == "" &&
 		c.Subtitle == "" &&
 		c.Attribution == "" &&
+		c.Corners == "" &&
 		c.Logo.IsZero() &&
 		c.Icons.IsZero() &&
 		c.AccentColor == "" &&
@@ -262,6 +270,7 @@ func (c *BrandingConfig) Clone() *BrandingConfig {
 		ShortName:   c.ShortName,
 		Subtitle:    c.Subtitle,
 		Attribution: c.Attribution,
+		Corners:     c.Corners,
 		Logo:        c.Logo.Clone(),
 		Icons:       c.Icons.Clone(),
 		AccentColor: c.AccentColor,
@@ -297,6 +306,7 @@ type PublicBranding struct {
 	ShortName           string                   `json:"shortName"`
 	Subtitle            string                   `json:"subtitle,omitempty"`
 	Attribution         string                   `json:"attribution"`
+	Corners             string                   `json:"corners,omitempty"`
 	LogoLight           string                   `json:"logoLight,omitempty"`
 	LogoDark            string                   `json:"logoDark,omitempty"`
 	FaviconURL          string                   `json:"faviconUrl,omitempty"`
@@ -315,6 +325,7 @@ type ResolvedBranding struct {
 	ShortName           string
 	Subtitle            string
 	Attribution         string
+	Corners             string
 	LogoLight           string
 	LogoDark            string
 	FaviconURL          string
@@ -326,6 +337,7 @@ type ResolvedBranding struct {
 	NotificationIconURL string
 	ThemeColor          string
 	HasCustomPalette    bool
+	HasCustomStyle      bool
 	CSSText             string
 	Light               BrandingSemanticMode
 	Dark                BrandingSemanticMode
@@ -340,6 +352,7 @@ func DefaultResolvedBranding() *ResolvedBranding {
 		Name:        DefaultBrandName,
 		ShortName:   DefaultBrandName,
 		Attribution: AttributionShown,
+		Corners:     BrandCornersDefault,
 		ThemeColor:  DefaultBrandThemeColor,
 		Light:       DefaultLightSemanticMode(),
 		Dark:        DefaultDarkSemanticMode(),
@@ -370,7 +383,8 @@ func (r *ResolvedBranding) IsCustomized() bool {
 		r.Icon192URL != "" ||
 		r.Icon512URL != "" ||
 		r.IconMaskable512URL != "" ||
-		r.HasCustomPalette
+		r.HasCustomPalette ||
+		r.HasCustomStyle
 }
 
 // Public returns a deep-copied PublicBranding for pre-auth delivery, or nil
@@ -391,8 +405,13 @@ func (r *ResolvedBranding) Public() *PublicBranding {
 		NotificationIconURL: r.NotificationIconURL,
 		ThemeColor:          r.ThemeColor,
 	}
-	if r.HasCustomPalette {
+	if r.Corners != "" && r.Corners != BrandCornersDefault {
+		out.Corners = r.Corners
+	}
+	if r.HasCustomPalette || r.HasCustomStyle {
 		out.CSSText = r.CSSText
+	}
+	if r.HasCustomPalette {
 		lightCopy := r.Light
 		darkCopy := r.Dark
 		out.Light = &lightCopy
@@ -505,6 +524,20 @@ func resolveBrandingInternal(cfg *BrandingConfig) (*ResolvedBranding, []Validati
 		}
 	}
 
+	corners := BrandCornersDefault
+	if cfg.Corners != "" {
+		switch cfg.Corners {
+		case BrandCornersDefault, BrandCornersSquare, BrandCornersRounded:
+			corners = cfg.Corners
+		default:
+			errs = append(errs, ValidationError{
+				Path:    BrandingSectionKey + ".corners",
+				Message: fmt.Sprintf("must be %q, %q, or %q", BrandCornersDefault, BrandCornersSquare, BrandCornersRounded),
+			})
+		}
+	}
+	hasCustomStyle := corners != BrandCornersDefault
+
 	// 2. Assets (logos and icons)
 	assets := make(map[string]ResolvedBrandAsset)
 	var totalAssetBytes int
@@ -574,10 +607,12 @@ func resolveBrandingInternal(cfg *BrandingConfig) (*ResolvedBranding, []Validati
 	}
 
 	themeColor := DefaultBrandThemeColor
-	cssText := ""
 	if hasCustomPalette {
 		themeColor = dark.Surface
-		cssText = buildBrandingCSSText(scales, light, dark)
+	}
+	cssText := ""
+	if hasCustomPalette || hasCustomStyle {
+		cssText = buildBrandingCSSText(hasCustomPalette, scales, light, dark, corners)
 	}
 	if len(assets) == 0 {
 		assets = nil
@@ -588,6 +623,7 @@ func resolveBrandingInternal(cfg *BrandingConfig) (*ResolvedBranding, []Validati
 		ShortName:           shortName,
 		Subtitle:            subtitle,
 		Attribution:         attribution,
+		Corners:             corners,
 		LogoLight:           logoLight,
 		LogoDark:            logoDark,
 		FaviconURL:          faviconURL,
@@ -599,6 +635,7 @@ func resolveBrandingInternal(cfg *BrandingConfig) (*ResolvedBranding, []Validati
 		NotificationIconURL: notificationIconURL,
 		ThemeColor:          themeColor,
 		HasCustomPalette:    hasCustomPalette,
+		HasCustomStyle:      hasCustomStyle,
 		CSSText:             cssText,
 		Light:               light,
 		Dark:                dark,

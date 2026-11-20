@@ -62,6 +62,30 @@ func brandLogoHTML(b *config.ResolvedBranding) string {
 	return fmt.Sprintf(`<img class="brand-logo" src="%s" alt="%s">`, light, alt)
 }
 
+func brandPageControlRadius(b *config.ResolvedBranding) string {
+	b = brandOrDefault(b)
+	switch b.Corners {
+	case config.BrandCornersSquare:
+		return "0"
+	case config.BrandCornersRounded:
+		return "10px"
+	default:
+		return "6px"
+	}
+}
+
+func brandPageNoAssetsRadii(b *config.ResolvedBranding) (codeRadius, hintRadius string) {
+	b = brandOrDefault(b)
+	switch b.Corners {
+	case config.BrandCornersSquare:
+		return "0", "0"
+	case config.BrandCornersRounded:
+		return "6px", "12px"
+	default:
+		return "4px", "8px"
+	}
+}
+
 func brandPageColorsCSS(b *config.ResolvedBranding) string {
 	b = brandOrDefault(b)
 	light := b.Light

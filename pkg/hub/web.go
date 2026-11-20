@@ -675,6 +675,7 @@ func renderNoAssetsPage(b *config.ResolvedBranding) string {
 	if b.HasCustomPalette {
 		bodyColor = dark.Text
 	}
+	codeRadius, hintRadius := brandPageNoAssetsRadii(b)
 	var badgeHTML string
 	if isCustomBrandIdentity(b) {
 		badgeHTML = fmt.Sprintf("\n        <span class=\"badge\">%s</span>", html.EscapeString(brandBadgeText(b)))
@@ -704,12 +705,12 @@ func renderNoAssetsPage(b *config.ResolvedBranding) string {
         h1 { font-size: 1.5rem; margin-bottom: 1rem; color: %s; }
         p  { line-height: 1.6; margin-bottom: 1rem; color: %s; }
         code {
-            background: %s; padding: 0.15em 0.4em; border-radius: 4px;
+            background: %s; padding: 0.15em 0.4em; border-radius: %s;
             font-size: 0.9em; color: %s;
         }
         .hint {
             margin-top: 1.5rem; padding: 1rem; background: %s;
-            border-radius: 8px; text-align: left; font-size: 0.9rem;
+            border-radius: %s; text-align: left; font-size: 0.9rem;
         }
         .hint p { margin-bottom: 0.5rem; }
         .hint p:last-child { margin-bottom: 0; }
@@ -737,8 +738,8 @@ func renderNoAssetsPage(b *config.ResolvedBranding) string {
 		dark.Bg, bodyColor,
 		dark.Text,
 		dark.TextMuted,
-		dark.Surface, dark.Primary,
-		dark.Surface,
+		dark.Surface, codeRadius, dark.Primary,
+		dark.Surface, hintRadius,
 		dark.Primary, dark.Border, dark.Surface,
 		brandLogoHTML(b),
 		badgeHTML,
@@ -755,7 +756,7 @@ type spaShellData struct {
 	FaviconType        string
 	AppleTouchIconHref string
 	ThemeColor         string
-	// BrandingCSS holds validated custom palette CSS rules injected into
+	// BrandingCSS holds validated custom palette and style CSS rules injected into
 	// <style id="scion-branding-tokens"> in <head> for zero-FOUC first paint.
 	BrandingCSS template.CSS
 	// InitialData is safe-for-HTML JSON embedded in the __SCION_DATA__ script tag.
@@ -2213,7 +2214,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			themeColor = config.DefaultBrandThemeColor
 		}
 		var brandingCSS template.CSS
-		if branding.HasCustomPalette && branding.CSSText != "" {
+		if (branding.HasCustomPalette || branding.HasCustomStyle) && branding.CSSText != "" {
 			brandingCSS = template.CSS(branding.CSSText)
 		}
 		data := spaShellData{

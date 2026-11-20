@@ -30,6 +30,7 @@ func TestBrandingSection_KoanfRoundTripAndValidation(t *testing.T) {
 		"server.hub.branding.name":            "Acme Cloud",
 		"server.hub.branding.short_name":      "Acme",
 		"server.hub.branding.attribution":     "shown",
+		"server.hub.branding.corners":         "square",
 		"server.hub.branding.accent_color":    "#0d9488",
 		"server.hub.branding.logo.light":      "https://cdn.example.com/acme.svg",
 		"server.hub.branding.palette.primary": map[string]interface{}{"600": "#0f766e"},
@@ -60,6 +61,14 @@ func TestBrandingSection_KoanfRoundTripAndValidation(t *testing.T) {
 	}
 	if got := merged.String("server.hub.branding.palette.primary.600"); got != "#0f766e" {
 		t.Errorf("merged palette.primary.600 = %q, want #0f766e", got)
+	}
+	if got := merged.String("server.hub.branding.corners"); got != "square" {
+		t.Errorf("merged corners = %q, want square", got)
+	}
+
+	// Invalid corners enum value is rejected by JSON schema.
+	if errs := Validate(BrandingSectionName, json.RawMessage(`{"corners":"pill"}`)); len(errs) == 0 {
+		t.Fatal("Validate should reject unknown corners value pill")
 	}
 
 	// Failing WCAG AA contrast is rejected by Validate, while ValidateSchema passes syntax.
