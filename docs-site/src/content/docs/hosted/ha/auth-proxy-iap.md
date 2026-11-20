@@ -493,7 +493,7 @@ If your Scion Hub runs on a private GCE VM (or any internal VPC service) and you
 Key features:
 
 - **IAP header preservation** — forwards `X-Goog-IAP-JWT-Assertion` and authenticated-user headers to the backend Hub.
-- **HTTP/2 cleartext (h2c) support** — uses `h2c` for multiplexed streaming over Cloud Run, which is critical for SSE connections (agent events, live dashboard updates).
+- **HTTP/2 cleartext (h2c) support** — accepts `h2c` in addition to HTTP/1.1. Leave `--use-http2` disabled on Cloud Run when proxying Hub WebSocket endpoints (`scion attach`, tunnels, Conduit), as Cloud Run's TLS frontend already negotiates HTTP/2 with browsers while keeping the container hop on HTTP/1.1 (see [HTTP/2, WebSockets, and Optional Dedicated Events Service](/scion/hosted/ha/setup-gcp/#3g-http2-websockets-and-optional-dedicated-events-service)).
 - **Health probe** — exposes `/proxy-healthz` for Cloud Run health checks without proxying to the backend.
 - **Direct VPC Egress ready** — deploy with Cloud Run Direct VPC Egress to reach internal compute instances on private RFC 1918 IPs.
 

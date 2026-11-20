@@ -1038,6 +1038,10 @@ gcloud run deploy scion-hub \
 
 `--no-cpu-throttling` keeps CPU allocated outside requests. The Runtime Broker in this service needs it to finish asynchronous agent launches after the create response. `SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true` tells the server that CPU is always allocated, which silences its startup warning; remove the variable if you deploy with CPU throttling. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create).
 
+:::caution[Do not enable `--use-http2` on `scion-hub`]
+Leave `scion-hub` on Cloud Run's default HTTP/1.1 container hop. Enabling `--use-http2` switches the container hop to HTTP/2 cleartext (`h2c`), which breaks all Hub WebSocket endpoints (web terminals / `scion attach`, port-forwarding tunnels, Conduit, and standalone Runtime Broker control channels). Cloud Run's HTTPS frontend already negotiates HTTP/2 with browsers by default without `--use-http2`. See [Section 3g](#3g-http2-websockets-and-optional-dedicated-events-service) for details.
+:::
+
 :::note[Why min-instances=2?]
 An HA Hub needs at least two running replicas, so that losing one instance
 (crash, host maintenance, scale-in) never leaves the Hub with zero warm
@@ -1199,6 +1203,44 @@ curl -s "$HUB_URL/health" \
   -H "Authorization: Bearer $TOKEN"
 # Expected: {"status":"healthy",...}
 ```
+
+---
+
+### 3g. HTTP/2, WebSockets, and Optional Dedicated Events Service
+
+#### Why not to enable `--use-http2` on `scion-hub`
+
+:::danger[Enabling `--use-http2` on `scion-hub` breaks Hub WebSockets]
+Do **not** pass `--use-http2` (or set `ports: [{name: h2c}]`) on the `scion-hub` Cloud Run service. Although the Hub listener accepts `h2c`, Cloud Run sends all requests to the container over HTTP/2 cleartext (`h2c`) when `--use-http2` is enabled instead of downgrading the backend hop to HTTP/1.1. That breaks every Hub WebSocket endpoint, which requires an HTTP/1.1 `Upgrade: websocket` handshake:
+
+- Interactive web terminals and `scion attach` (`GET /api/v1/agents/{id}/pty`)
+- Agent port-forwarding tunnels (`GET /api/v1/agents/{id}/tunnel` and `/ports/tunnel`)
+- Conduit relay sessions (`GET /api/v1/conduit`)
+- Standalone Runtime Broker control channels (`GET /api/v1/runtime-brokers/connect`)
+
+Leave `scion-hub` on Cloud Run's default HTTP/1.1 backend hop. Only gRPC-only services with no WebSocket endpoints — such as `scion-discord` in [Section 4c](#4c-deploy-discord-service) — should set `--use-http2`.
+:::
+
+#### What HTTP/2 does and does not change
+
+- **Browser per-origin connection limits (already handled at the TLS edge):** You do **not** need `--use-http2` on Cloud Run for browsers to use HTTP/2. Cloud Run's HTTPS frontend (Google Front End), Cloud Load Balancing, and TLS-terminating proxies already negotiate HTTP/2 with browsers over TLS by default, multiplexing `/events` SSE streams and REST calls over a single connection and avoiding the browser's 6-connections-per-origin HTTP/1.1 cap while keeping the container hop on HTTP/1.1 so WebSockets work. (Plain-HTTP workstation Hubs on `http://localhost` remain on HTTP/1.1 because browsers do not speak cleartext `h2c`.)
+- **Cloud Run request-slot accounting (unchanged):** HTTP/2 does **not** reduce Cloud Run concurrency consumption. Each open `/events` SSE stream or WebSocket connection still holds **one `containerConcurrency` request slot** for its entire lifetime regardless of whether the frontend or backend hop uses HTTP/1.1 or HTTP/2.
+
+#### Optional later improvement: dedicated `/events` service (not part of the current plan)
+
+:::note[Optional architecture — not part of the current plan]
+Most deployments do not need a separate events service; tuning `--concurrency`, instance counts, and `--timeout` on `scion-hub` is the standard path. Documented here only as an optional later scaling option.
+:::
+
+If high browser viewer concurrency ever warrants isolating `/events` SSE streams from the rest of the Hub, you can deploy a second Cloud Run service from the **same Hub container image** behind an External Application Load Balancer URL map:
+
+- **Service configuration:** Run the Hub image with `--hosted --enable-hub --enable-web --foreground --web-port 8080` and **omit** `--enable-runtime-broker`. Mount the same `settings.yaml`, inject the same `SCION_SERVER_SESSION_SECRET`, and attach the same Cloud SQL PostgreSQL instance (cross-instance event fan-out uses PostgreSQL `LISTEN/NOTIFY`). Set a higher `--concurrency` (for example `--concurrency=1000`) on this SSE-only service.
+- **Routing:** Put an External Application Load Balancer in front of both Cloud Run services using two **serverless NEGs**, with a URL map that routes `/events` to the dedicated events service and all other paths (REST API, web UI, and all WebSocket endpoints) to `scion-hub`.
+
+**Trade-offs and constraints:**
+
+- **Requires a load balancer and backend-service IAP:** Direct Cloud Run native IAP (`*.run.app`) cannot split paths across two services. Adding an External Application Load Balancer introduces a managed TLS certificate, two serverless NEGs, and IAP enabled on both backend services (updating `server.auth.proxy.iap.audience` to the load balancer backend-service format `/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID`).
+- **Keep WebSockets off any `--use-http2` backend:** Because the dedicated service handles only `/events` (SSE), `--use-http2` may optionally be enabled on that SSE-only service — but **never** route WebSocket paths (`/api/v1/agents/*/pty`, `/api/v1/agents/*/tunnel`, `/ports/tunnel`, `/api/v1/conduit`, `/api/v1/runtime-brokers/connect`) to a Cloud Run backend with `--use-http2` enabled. Keep all WebSocket traffic on the main HTTP/1.1 `scion-hub` backend.
 
 ---
 
