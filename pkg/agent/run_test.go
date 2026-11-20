@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -641,6 +642,236 @@ func TestStartReturnsRunningStatus(t *testing.T) {
 
 	if result.Phase != "running" {
 		t.Errorf("expected Phase = %q, got %q", "running", result.Phase)
+	}
+}
+
+func TestStartReuseRunningContainer_AgentIDLabel(t *testing.T) {
+	const (
+		oldAgentUUID   = "11111111-1111-1111-1111-111111111111"
+		newAgentUUID   = "22222222-2222-2222-2222-222222222222"
+		mixedAgentUUID = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+		lowerAgentUUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	)
+
+	errStaleDeleted := errors.New("stale container delete invoked")
+
+	tests := []struct {
+		name           string
+		existing       api.AgentInfo
+		scionAgentID   string
+		wantReuse      bool
+		wantDeleteRunI string
+	}{
+		{
+			name: "empty agent_id label with SCION_AGENT_ID reuses",
+			existing: api.AgentInfo{
+				ContainerID:     "ctr-empty-1",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 1 hour",
+				Phase:           string(state.PhaseRunning),
+			},
+			scionAgentID: newAgentUUID,
+			wantReuse:    true,
+		},
+		{
+			name: "empty agent_id label without SCION_AGENT_ID reuses",
+			existing: api.AgentInfo{
+				ContainerID:     "ctr-empty-2",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 1 hour",
+				Phase:           string(state.PhaseRunning),
+			},
+			scionAgentID: "",
+			wantReuse:    true,
+		},
+		{
+			name: "legacy non-UUID agent_id label with SCION_AGENT_ID reuses",
+			existing: api.AgentInfo{
+				ContainerID:     "ctr-legacy-1",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 1 hour",
+				Phase:           string(state.PhaseRunning),
+				Labels:          map[string]string{api.LabelAgentID: "test-agent"},
+			},
+			scionAgentID: newAgentUUID,
+			wantReuse:    true,
+		},
+		{
+			name: "legacy non-UUID agent_id label without SCION_AGENT_ID reuses",
+			existing: api.AgentInfo{
+				ContainerID:     "ctr-legacy-2",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 1 hour",
+				Phase:           string(state.PhaseRunning),
+				Labels:          map[string]string{api.LabelAgentID: "legacy-slug"},
+			},
+			scionAgentID: "",
+			wantReuse:    true,
+		},
+		{
+			name: "matching UUID agent_id label reuses",
+			existing: api.AgentInfo{
+				ContainerID:     "ctr-match-1",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 1 hour",
+				Phase:           string(state.PhaseRunning),
+				Labels:          map[string]string{api.LabelAgentID: newAgentUUID},
+			},
+			scionAgentID: newAgentUUID,
+			wantReuse:    true,
+		},
+		{
+			name: "matching UUID agent_id label canonicalized case reuses",
+			existing: api.AgentInfo{
+				ContainerID:     "ctr-match-case",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 1 hour",
+				Phase:           string(state.PhaseRunning),
+				Labels:          map[string]string{api.LabelAgentID: mixedAgentUUID},
+			},
+			scionAgentID: lowerAgentUUID,
+			wantReuse:    true,
+		},
+		{
+			name: "mismatched UUID agent_id label is treated as stale",
+			existing: api.AgentInfo{
+				ContainerID:     "ctr-stale-1",
+				RunID:           "old-run-1",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 2 hours",
+				Phase:           string(state.PhaseRunning),
+				Labels:          map[string]string{api.LabelAgentID: oldAgentUUID},
+			},
+			scionAgentID:   newAgentUUID,
+			wantReuse:      false,
+			wantDeleteRunI: "old-run-1",
+		},
+		{
+			name: "UUID agent_id label with non-UUID SCION_AGENT_ID is treated as stale",
+			existing: api.AgentInfo{
+				ContainerID:     "ctr-stale-nonuuid",
+				RunID:           "old-run-nonuuid",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 2 hours",
+				Phase:           string(state.PhaseRunning),
+				Labels:          map[string]string{api.LabelAgentID: oldAgentUUID},
+			},
+			scionAgentID:   "not-a-uuid",
+			wantReuse:      false,
+			wantDeleteRunI: "old-run-nonuuid",
+		},
+		{
+			name: "UUID agent_id label with empty SCION_AGENT_ID is treated as stale",
+			existing: api.AgentInfo{
+				ContainerID:     "ctr-stale-2",
+				RunID:           "old-run-2",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 2 hours",
+				Phase:           string(state.PhaseRunning),
+				Labels:          map[string]string{api.LabelAgentID: oldAgentUUID},
+			},
+			scionAgentID:   "",
+			wantReuse:      false,
+			wantDeleteRunI: "old-run-2",
+		},
+		{
+			name: "mismatched UUID in AgentInfo.ID without Labels is treated as stale",
+			existing: api.AgentInfo{
+				ID:              oldAgentUUID,
+				ContainerID:     "ctr-stale-3",
+				RunID:           "old-run-3",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 2 hours",
+				Phase:           string(state.PhaseRunning),
+			},
+			scionAgentID:   newAgentUUID,
+			wantReuse:      false,
+			wantDeleteRunI: "old-run-3",
+		},
+		{
+			name: "matching UUID in AgentInfo.ID without Labels reuses",
+			existing: api.AgentInfo{
+				ID:              newAgentUUID,
+				ContainerID:     "ctr-match-id",
+				Name:            "test-agent",
+				ProjectID:       identityProjB,
+				ContainerStatus: "Up 2 hours",
+				Phase:           string(state.PhaseRunning),
+			},
+			scionAgentID: newAgentUUID,
+			wantReuse:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var deleted []runtime.RunRef
+			var checkpoints []string
+
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{tc.existing}, nil
+				},
+				DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
+					deleted = append(deleted, ref)
+					return errStaleDeleted
+				},
+			}
+
+			env := map[string]string{"SCION_PROJECT_ID": identityProjB}
+			if tc.scionAgentID != "" {
+				env["SCION_AGENT_ID"] = tc.scionAgentID
+			}
+
+			mgr := NewManager(mockRT)
+			result, err := mgr.Start(context.Background(), api.StartOptions{
+				Name: "test-agent",
+				Env:  env,
+				Checkpoint: func(ctx context.Context, step string) error {
+					checkpoints = append(checkpoints, step)
+					return nil
+				},
+			})
+
+			if tc.wantReuse {
+				if err != nil {
+					t.Fatalf("expected reuse without error, got: %v", err)
+				}
+				if len(deleted) != 0 {
+					t.Errorf("expected no Delete calls on reuse, got %+v", deleted)
+				}
+				if result.ContainerID != tc.existing.ContainerID {
+					t.Errorf("reused ContainerID = %q, want %q", result.ContainerID, tc.existing.ContainerID)
+				}
+				if result.Phase != string(state.PhaseRunning) {
+					t.Errorf("reused Phase = %q, want %q", result.Phase, state.PhaseRunning)
+				}
+				return
+			}
+
+			if !errors.Is(err, errStaleDeleted) {
+				t.Fatalf("expected stale container to trigger pre-clean Delete (errStaleDeleted), got result=%+v err=%v", result, err)
+			}
+			if len(checkpoints) != 1 || checkpoints[0] != runtime.CheckpointStepPreClean {
+				t.Errorf("expected CheckpointStepPreClean before Delete, got %v", checkpoints)
+			}
+			if len(deleted) != 1 {
+				t.Fatalf("expected 1 Delete call, got %d (%+v)", len(deleted), deleted)
+			}
+			if deleted[0].ID != tc.existing.ContainerID || deleted[0].RunID != tc.wantDeleteRunI {
+				t.Errorf("Delete ref = %+v, want {ID:%q RunID:%q}", deleted[0], tc.existing.ContainerID, tc.wantDeleteRunI)
+			}
+		})
 	}
 }
 
