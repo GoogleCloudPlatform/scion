@@ -1038,6 +1038,95 @@ func TestProjectStore_AuthorizedProjectIDs(t *testing.T) {
 	})
 }
 
+// TestProjectStore_AuthorizedProjectIDs_WithTemplateExclusion verifies that
+// combining IsTemplate=false (the default project-list template exclusion) with
+// AuthorizedProjectIDs returns only authorized non-template projects, even when
+// unauthorized projects have non-null or null labels. Runs on SQLite locally
+// and against live Postgres in CI (enttest.NewClient) to guard against SQL OR
+// precedence regressions in projectLabelNotContains (ptone/scion#8531,
+// GoogleCloudPlatform/scion#5105).
+func TestProjectStore_AuthorizedProjectIDs_WithTemplateExclusion(t *testing.T) {
+	ctx := context.Background()
+	ps := newTestProjectStore(t)
+
+	authWithLabels := &store.Project{
+		ID:     uuid.NewString(),
+		Name:   "auth-with-labels",
+		Slug:   "auth-with-labels-" + uuid.NewString()[:8],
+		Labels: map[string]string{"env": "prod"},
+	}
+	authNilLabels := &store.Project{
+		ID:   uuid.NewString(),
+		Name: "auth-nil-labels",
+		Slug: "auth-nil-labels-" + uuid.NewString()[:8],
+	}
+	foreignWithLabels := &store.Project{
+		ID:     uuid.NewString(),
+		Name:   "foreign-with-labels",
+		Slug:   "foreign-with-labels-" + uuid.NewString()[:8],
+		Labels: map[string]string{"env": "prod"},
+	}
+	foreignNilLabels := &store.Project{
+		ID:   uuid.NewString(),
+		Name: "foreign-nil-labels",
+		Slug: "foreign-nil-labels-" + uuid.NewString()[:8],
+	}
+	authTemplate := &store.Project{
+		ID:     uuid.NewString(),
+		Name:   "auth-template",
+		Slug:   "auth-template-" + uuid.NewString()[:8],
+		Labels: map[string]string{store.LabelTemplate: "true"},
+	}
+	foreignTemplate := &store.Project{
+		ID:     uuid.NewString(),
+		Name:   "foreign-template",
+		Slug:   "foreign-template-" + uuid.NewString()[:8],
+		Labels: map[string]string{store.LabelTemplate: "true"},
+	}
+	for _, p := range []*store.Project{
+		authWithLabels, authNilLabels,
+		foreignWithLabels, foreignNilLabels,
+		authTemplate, foreignTemplate,
+	} {
+		require.NoError(t, ps.CreateProject(ctx, p))
+	}
+
+	isTemplateFalse := false
+
+	t.Run("member of one project sees only that project", func(t *testing.T) {
+		result, err := ps.ListProjects(ctx, store.ProjectFilter{
+			IsTemplate:           &isTemplateFalse,
+			AuthorizedProjectIDs: []string{authWithLabels.ID},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.TotalCount)
+		require.Len(t, result.Items, 1)
+		assert.Equal(t, authWithLabels.ID, result.Items[0].ID)
+	})
+
+	t.Run("authorized non-template projects with and without labels returned; template and foreign excluded", func(t *testing.T) {
+		result, err := ps.ListProjects(ctx, store.ProjectFilter{
+			IsTemplate:           &isTemplateFalse,
+			AuthorizedProjectIDs: []string{authWithLabels.ID, authNilLabels.ID, authTemplate.ID},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount)
+		require.Len(t, result.Items, 2)
+		gotIDs := []string{result.Items[0].ID, result.Items[1].ID}
+		assert.ElementsMatch(t, []string{authWithLabels.ID, authNilLabels.ID}, gotIDs)
+	})
+
+	t.Run("empty authorized set with template exclusion returns zero projects", func(t *testing.T) {
+		result, err := ps.ListProjects(ctx, store.ProjectFilter{
+			IsTemplate:           &isTemplateFalse,
+			AuthorizedProjectIDs: []string{},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 0, result.TotalCount)
+		assert.Empty(t, result.Items)
+	})
+}
+
 // TestListProjects_MaxLimit verifies that ListProjects with a Limit exceeding
 // 1000 is capped at maxProjectListLimit=1000.
 func TestListProjects_MaxLimit(t *testing.T) {
