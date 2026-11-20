@@ -75,7 +75,7 @@ func hostedHarnessConfigYAMLRefusal(name string, data []byte, present bool, runt
 	if err != nil {
 		return nil
 	}
-	if err := hostedguard.CheckMemberConfig(&api.ScionConfig{Volumes: entry.Volumes},
+	if err := hostedguard.CheckMemberConfig(&api.ScionConfig{Volumes: entry.Volumes, Env: entry.Env},
 		hostedguard.Origin{Kind: hostedguard.OriginHarnessConfig, Name: name}, runtimeKind); err != nil {
 		return &hostedHarnessConfigError{err: err}
 	}
