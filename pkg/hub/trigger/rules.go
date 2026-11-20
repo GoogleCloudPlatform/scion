@@ -32,11 +32,12 @@ import (
 // With unit "s", OpenTelemetry's Prometheus exporter exports MetricTriggerRuleEval
 // as trigger_rule_eval_seconds{dialect, class}.
 const (
-	triggerInstrumentationScope = "github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
-	MetricTriggerRuleEval       = "trigger_rule_eval"
-	MetricTriggerRuleEvalTotal  = "trigger_rule_eval_total"
-	AttrRuleDialect             = "dialect"
-	AttrRuleClass               = "class"
+	triggerInstrumentationScope         = "github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
+	MetricTriggerRuleEval               = "trigger_rule_eval"
+	MetricTriggerRuleEvalTotal          = "trigger_rule_eval_total"
+	MetricTriggerRuleCompileMissesTotal = "trigger_rule_compile_misses_total"
+	AttrRuleDialect                     = "dialect"
+	AttrRuleClass                       = "class"
 )
 
 // MatchRules normalizes a stored Trigger's match_rules on read (mixed-rule-arrays
@@ -100,13 +101,22 @@ type RuleEvalMetrics interface {
 	ObserveRuleEval(ctx context.Context, dialect, class string, elapsed time.Duration)
 }
 
-// OTelRuleEvalMetrics records per-dialect rule evaluation counts and durations
-// using OpenTelemetry instruments (exported to Prometheus as
-// trigger_rule_eval_seconds{dialect, class}).
-type OTelRuleEvalMetrics struct {
-	evalSeconds metric.Float64Histogram
-	evalTotal   metric.Int64Counter
+// RuleCompileMissMetrics is an optional extension of RuleEvalMetrics that
+// observes per-dialect rule cache compile misses (3b-2 C2). No project label is
+// recorded so metric cardinality remains bounded by registered dialects.
+type RuleCompileMissMetrics interface {
+	ObserveRuleCompileMiss(ctx context.Context, dialect string)
 }
+
+// OTelRuleEvalMetrics records per-dialect rule evaluation counts, durations,
+// and compile misses using OpenTelemetry instruments.
+type OTelRuleEvalMetrics struct {
+	evalSeconds   metric.Float64Histogram
+	evalTotal     metric.Int64Counter
+	compileMisses metric.Int64Counter
+}
+
+var _ RuleCompileMissMetrics = (*OTelRuleEvalMetrics)(nil)
 
 // NewOTelRuleEvalMetrics constructs OTel instruments for trigger rule evaluation.
 func NewOTelRuleEvalMetrics(mp metric.MeterProvider) (*OTelRuleEvalMetrics, error) {
@@ -130,9 +140,18 @@ func NewOTelRuleEvalMetrics(mp metric.MeterProvider) (*OTelRuleEvalMetrics, erro
 	if err != nil {
 		return nil, fmt.Errorf("creating %s counter: %w", MetricTriggerRuleEvalTotal, err)
 	}
+	misses, err := meter.Int64Counter(
+		MetricTriggerRuleCompileMissesTotal,
+		metric.WithUnit("{miss}"),
+		metric.WithDescription("Total trigger rule cache compile misses by dialect."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating %s counter: %w", MetricTriggerRuleCompileMissesTotal, err)
+	}
 	return &OTelRuleEvalMetrics{
-		evalSeconds: hist,
-		evalTotal:   total,
+		evalSeconds:   hist,
+		evalTotal:     total,
+		compileMisses: misses,
 	}, nil
 }
 
@@ -148,6 +167,14 @@ func (m *OTelRuleEvalMetrics) ObserveRuleEval(ctx context.Context, dialect, clas
 	)
 	m.evalSeconds.Record(ctx, sec, opt)
 	m.evalTotal.Add(ctx, 1, opt)
+}
+
+// ObserveRuleCompileMiss records one rule cache compile miss for dialect.
+func (m *OTelRuleEvalMetrics) ObserveRuleCompileMiss(ctx context.Context, dialect string) {
+	if m == nil || m.compileMisses == nil {
+		return
+	}
+	m.compileMisses.Add(ctx, 1, metric.WithAttributes(attribute.String(AttrRuleDialect, dialect)))
 }
 
 func normalizeMetricClass(cls string) string {

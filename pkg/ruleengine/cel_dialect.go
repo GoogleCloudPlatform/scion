@@ -148,19 +148,33 @@ func (d *CELDialect) Compile(ctx context.Context, rule string, kind Kind, env En
 
 // CachedCompile retrieves or compiles rule in the environment's content-addressed LRU cache.
 func (d *CELDialect) CachedCompile(ctx context.Context, scope celengine.CacheScope, rule string, kind Kind, env EnvironmentRef) (Compiled, error) {
+	c, _, err := d.CachedCompileWithGate(ctx, scope, rule, kind, env, nil)
+	return c, err
+}
+
+// CachedCompileWithGate implements CachedCompileGateDialect over celengine's
+// content-addressed LRU cache.
+func (d *CELDialect) CachedCompileWithGate(
+	ctx context.Context,
+	scope celengine.CacheScope,
+	rule string,
+	kind Kind,
+	env EnvironmentRef,
+	beforeCompile func() error,
+) (Compiled, bool, error) {
 	eng, opts, err := d.lookupEngine(env)
 	if err != nil {
-		return Compiled{}, err
+		return Compiled{}, false, err
 	}
 	celKind, err := celKindFor(kind, env)
 	if err != nil {
-		return Compiled{}, err
+		return Compiled{}, false, err
 	}
-	prog, err := eng.Cached(ctx, scope, rule, celKind, opts...)
+	prog, hit, err := eng.CachedWithMissGate(ctx, scope, rule, celKind, beforeCompile, opts...)
 	if err != nil {
-		return Compiled{}, err
+		return Compiled{}, false, err
 	}
-	return NewCompiled(env.Consumer, DialectCEL, kind, prog), nil
+	return NewCompiled(env.Consumer, DialectCEL, kind, prog), hit, nil
 }
 
 // Invalidate removes scope bindings in the named CEL environment's program cache.

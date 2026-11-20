@@ -3222,3 +3222,202 @@ func TestDispatcher_EvaluatesCandidatesOldestFirst(t *testing.T) {
 	assert.True(t, res.Done)
 	assert.Equal(t, []string{"oldest", "tie-a", "tie-b", "newest"}, firedNames)
 }
+
+func TestDispatcher_CompileBudgetExhaustionSkipsMissesKeepsHitsAndRecordsMetric(t *testing.T) {
+	ctx := context.Background()
+	ms := newMemTriggerStore()
+	rules, err := triggerrule.NewDefault()
+	require.NoError(t, err)
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	otelMetrics, err := trigger.NewOTelRuleEvalMetrics(mp)
+	require.NoError(t, err)
+
+	projID := uuid.NewString()
+	epID := uuid.NewString()
+	t0 := time.Date(2026, 11, 20, 14, 0, 0, 0, time.UTC)
+
+	// Candidate order (oldest-first):
+	// 1. trCold1: uncached CEL rule -> compiles (1 miss), exhausts 1ns compile budget, evaluates & fires.
+	// 2. trCold2: uncached CEL rule -> gated before compile -> skipped with "rule compile budget exhausted" (R4).
+	// 3. trWarm:  pre-warmed CEL rule + pre-warmed subject_rule -> cache hit STILL evaluates & fires (R3).
+	// 4. trColdSubj: pre-warmed CEL rule + uncached subject_rule -> matches & fires, subject falls back to ev.Subject (R3).
+	// 5. trTypesOnly: no rules -> matches & fires.
+	trCold1 := &store.Trigger{
+		ID:                   uuid.NewString(),
+		ProjectID:            projID,
+		Name:                 "cold-1",
+		SourceKind:           store.TriggerSourceKindWebhook,
+		SourceID:             epID,
+		MatchTypes:           []string{"webhook.received"},
+		MatchRules:           []store.TriggerMatchRule{{Dialect: ruleengine.DialectCEL, Expr: `event.payload.k == "v1"`}},
+		ActionType:           store.TriggerActionMessage,
+		Status:               store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{AuthorizationRevision: 1},
+		CreatedAt:            t0.Add(1 * time.Second),
+	}
+	trCold2 := &store.Trigger{
+		ID:                   uuid.NewString(),
+		ProjectID:            projID,
+		Name:                 "cold-2",
+		SourceKind:           store.TriggerSourceKindWebhook,
+		SourceID:             epID,
+		MatchTypes:           []string{"webhook.received"},
+		MatchRules:           []store.TriggerMatchRule{{Dialect: ruleengine.DialectCEL, Expr: `event.payload.k2 == "v2"`}},
+		ActionType:           store.TriggerActionMessage,
+		Status:               store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{AuthorizationRevision: 1},
+		CreatedAt:            t0.Add(2 * time.Second),
+	}
+	trWarm := &store.Trigger{
+		ID:                   uuid.NewString(),
+		ProjectID:            projID,
+		Name:                 "warm-hit",
+		SourceKind:           store.TriggerSourceKindWebhook,
+		SourceID:             epID,
+		MatchTypes:           []string{"webhook.received"},
+		MatchRules:           []store.TriggerMatchRule{{Dialect: ruleengine.DialectCEL, Expr: `event.payload.warm == true`}},
+		SubjectDialect:       ruleengine.DialectCEL,
+		SubjectRule:          `"warm:" + event.payload.k`,
+		ActionType:           store.TriggerActionMessage,
+		Status:               store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{AuthorizationRevision: 1},
+		CreatedAt:            t0.Add(3 * time.Second),
+	}
+	trColdSubj := &store.Trigger{
+		ID:                   uuid.NewString(),
+		ProjectID:            projID,
+		Name:                 "warm-match-cold-subj",
+		SourceKind:           store.TriggerSourceKindWebhook,
+		SourceID:             epID,
+		MatchTypes:           []string{"webhook.received"},
+		MatchRules:           []store.TriggerMatchRule{{Dialect: ruleengine.DialectCEL, Expr: `event.payload.warm == true`}},
+		SubjectDialect:       ruleengine.DialectCEL,
+		SubjectRule:          `"coldsubj:" + event.payload.k`,
+		ActionType:           store.TriggerActionMessage,
+		Status:               store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{AuthorizationRevision: 1},
+		CreatedAt:            t0.Add(4 * time.Second),
+	}
+	trTypesOnly := &store.Trigger{
+		ID:                   uuid.NewString(),
+		ProjectID:            projID,
+		Name:                 "types-only",
+		SourceKind:           store.TriggerSourceKindWebhook,
+		SourceID:             epID,
+		MatchTypes:           []string{"webhook.received"},
+		ActionType:           store.TriggerActionMessage,
+		Status:               store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{AuthorizationRevision: 1},
+		CreatedAt:            t0.Add(5 * time.Second),
+	}
+
+	// Pre-warm trWarm's match + subject rules and trColdSubj's match rule (leaving trColdSubj's subject rule cold).
+	preAct, err := triggerrule.NewEventActivation(hubfire.FireEvent{
+		ID:        "prewarm",
+		ProjectID: projID,
+		Type:      "webhook.received",
+		Subject:   "webhook:" + epID,
+		Payload:   []byte(`{"k":"v1","k2":"v2","warm":true}`),
+	})
+	require.NoError(t, err)
+	warmScope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ProjectID: projID, ID: trWarm.ID, Revision: 1}
+	_, _, err = rules.MatchAllWithTrace(ctx, warmScope, []triggerrule.Rule{{Dialect: ruleengine.DialectCEL, Expr: trWarm.MatchRules[0].Expr}}, preAct)
+	require.NoError(t, err)
+	_, err = rules.Subject(ctx, warmScope, triggerrule.Rule{Dialect: ruleengine.DialectCEL, Expr: trWarm.SubjectRule}, preAct)
+	require.NoError(t, err)
+	coldSubjScope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ProjectID: projID, ID: trColdSubj.ID, Revision: 1}
+	_, _, err = rules.MatchAllWithTrace(ctx, coldSubjScope, []triggerrule.Rule{{Dialect: ruleengine.DialectCEL, Expr: trColdSubj.MatchRules[0].Expr}}, preAct)
+	require.NoError(t, err)
+
+	for _, tr := range []*store.Trigger{trCold1, trCold2, trWarm, trColdSubj, trTypesOnly} {
+		require.NoError(t, ms.CreateTrigger(ctx, tr))
+	}
+
+	evID := uuid.NewString()
+	require.NoError(t, ms.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		Type:       "webhook.received",
+		Subject:    "webhook:" + epID,
+		DedupKey:   "d-compile-budget",
+		OccurredAt: t0,
+		ReceivedAt: t0,
+		Payload:    `{"k":"v1","k2":"v2","warm":true}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	var firedNames []string
+	core := &fakeCore{
+		fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+			firedNames = append(firedNames, req.Event.Trigger.Name)
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		},
+	}
+	core.enabled.Store(true)
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          core,
+		Store:         ms,
+		Rules:         rules,
+		RuleMetrics:   otelMetrics,
+		CompileBudget: time.Nanosecond,
+		Now:           func() time.Time { return t0 },
+	})
+	require.NoError(t, err)
+
+	raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+	res := disp.HandleItem(ctx, durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  raw,
+	}, nopLease{})
+	require.NoError(t, res.Err)
+	assert.True(t, res.Done, "plain skip completes the item on attempt 0")
+	assert.Equal(t, []string{"cold-1", "warm-hit", "warm-match-cold-subj", "types-only"}, firedNames)
+
+	fires, err := ms.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: evID}, store.ListOptions{})
+	require.NoError(t, err)
+	byTrig := make(map[string]store.TriggerFire, len(fires.Items))
+	for _, f := range fires.Items {
+		byTrig[f.TriggerID] = f
+	}
+	// R4: trCold2 skipped with compile-specific error and trace reason (never "rule evaluation failed" or "rule budget exhausted").
+	fCold2 := byTrig[trCold2.ID]
+	assert.Equal(t, store.TriggerFireStatusSkipped, fCold2.Status)
+	assert.Equal(t, trigger.ErrFireRuleCompileBudgetExhausted, fCold2.Error)
+	assert.Contains(t, fCold2.RuleTrace, `"reason":"compile_budget_exhausted"`)
+
+	// R3: trWarm derived its cached subject; trColdSubj fell back to ev.Subject.
+	assert.Equal(t, "warm:v1", byTrig[trWarm.ID].Subject)
+	assert.Equal(t, "webhook:"+epID, byTrig[trColdSubj.ID].Subject)
+
+	// C2: compile miss metric incremented exactly once (for trCold1) with dialect="cel" and no project_id label.
+	assert.Equal(t, map[string]int64{"cel": 1}, disp.RuleCompileMissStats())
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(ctx, &rm))
+	var missVal int64
+	foundMissMetric := false
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != trigger.MetricTriggerRuleCompileMissesTotal {
+				continue
+			}
+			foundMissMetric = true
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			for _, dp := range sum.DataPoints {
+				for _, kv := range dp.Attributes.ToSlice() {
+					assert.NotEqual(t, "project_id", string(kv.Key), "compile miss metric must not carry project_id label")
+				}
+				missVal += dp.Value
+			}
+		}
+	}
+	assert.True(t, foundMissMetric, "expected %s metric to be exported", trigger.MetricTriggerRuleCompileMissesTotal)
+	assert.Equal(t, int64(1), missVal)
+}
