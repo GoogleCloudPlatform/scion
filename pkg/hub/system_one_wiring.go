@@ -378,11 +378,69 @@ func (c *hubSystemOneCredentialSource) BearerToken(ctx context.Context, inst sys
 	}
 }
 
+// getSecretValue is the single hub-internal SecretBackend.Get call site for
+// System One provider credentials (tracked by TestSecretBackendGet_CallersAreHubInternal).
+// Only store.ScopeHub and store.ScopeProject are ever consulted; user,
+// runtime_broker, and process environment variables are never read.
+func (c *hubSystemOneCredentialSource) getSecretValue(ctx context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	if scope != store.ScopeHub && scope != store.ScopeProject {
+		return nil, store.ErrNotFound
+	}
+	if scope == store.ScopeProject && strings.TrimSpace(scopeID) == "" {
+		return nil, store.ErrNotFound
+	}
+	return c.srv.secretBackend.Get(ctx, name, scope, scopeID)
+}
+
+func classifySecretBackendGetError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, secret.ErrNoSecretBackend) {
+		return egress.ErrCredentialUnavailable
+	}
+	if isSystemOneSecretAuthError(err) {
+		return egress.ErrAuth
+	}
+	return egress.ErrCredentialUnavailable
+}
+
+func isDefiniteSecretNotFound(err error) bool {
+	return errors.Is(err, store.ErrNotFound) || status.Code(err) == codes.NotFound
+}
+
+func isAllowedNamedSecretType(secretType string) bool {
+	switch secretType {
+	case "", store.SecretTypeEnvironment, store.SecretTypeVariable, store.SecretTypeInternal:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateNamedSecretValue(sv *secret.SecretWithValue) error {
+	if sv == nil {
+		return egress.ErrAuth
+	}
+	if !isAllowedNamedSecretType(sv.SecretType) {
+		return egress.ErrAuth
+	}
+	if !isValidSystemOneAPIKey(sv.Value) {
+		return egress.ErrAuth
+	}
+	return nil
+}
+
 // APIKeyToken resolves the provider API key for inst from the Hub's secret
-// backend. Missing, deleted, or rejected secrets return egress.ErrAuth
+// backend—either from the instance-internal secret (systemone.instance.<id>)
+// or from a named Hub/project secret reference (PV3 Addendum F §§F2, F7).
+// Missing, deleted, wrong-type, or rejected secrets return egress.ErrAuth
 // (reason "auth"); other backend faults return egress.ErrCredentialUnavailable
-// (reason "unavailable"). Secret values and raw backend errors are never
-// included in returned errors.
+// (reason "unavailable"). Secret values, process environment variables, and raw
+// backend errors are never read or included in returned errors.
 func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst systemoneruntime.Instance) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -391,28 +449,23 @@ func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst sys
 		return "", egress.ErrAuth
 	}
 	secretName := strings.TrimSpace(inst.Auth.SecretName)
+	secScope, isNamedRef := systemoneprovider.SecretRefModeFromOptions(inst.Options)
+	if isNamedRef {
+		return c.resolveNamedSecretToken(ctx, secretName, secScope)
+	}
 	if secretName == "" || !strings.HasPrefix(secretName, systemOneSecretPrefix) {
+		return "", egress.ErrAuth
+	}
+	if inst.ID != "" && secretName != systemOneInstanceSecretName(inst.ID) {
 		return "", egress.ErrAuth
 	}
 	if c.srv == nil || c.srv.secretBackend == nil {
 		return "", egress.ErrCredentialUnavailable
 	}
 
-	sv, err := c.srv.secretBackend.Get(ctx, secretName, store.ScopeHub, c.srv.hubID)
+	sv, err := c.getSecretValue(ctx, secretName, store.ScopeHub, c.srv.hubID)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", ctxErr
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return "", err
-		}
-		if errors.Is(err, secret.ErrNoSecretBackend) {
-			return "", egress.ErrCredentialUnavailable
-		}
-		if isSystemOneSecretAuthError(err) {
-			return "", egress.ErrAuth
-		}
-		return "", egress.ErrCredentialUnavailable
+		return "", classifySecretBackendGetError(ctx, err)
 	}
 	if sv == nil {
 		return "", egress.ErrAuth
@@ -424,6 +477,75 @@ func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst sys
 		return "", egress.ErrAuth
 	}
 	return sv.Value, nil
+}
+
+func (c *hubSystemOneCredentialSource) resolveNamedSecretToken(ctx context.Context, secretName, secScope string) (string, error) {
+	if !systemoneprovider.IsValidSecretRefName(secretName) || isSystemOneReservedSecretKey(secretName) {
+		return "", egress.ErrAuth
+	}
+	if !systemoneprovider.IsValidSecretRefScope(secScope) {
+		return "", egress.ErrAuth
+	}
+	if c.srv == nil || c.srv.secretBackend == nil {
+		return "", egress.ErrCredentialUnavailable
+	}
+
+	switch secScope {
+	case systemoneprovider.SecretScopeHub:
+		sv, err := c.getSecretValue(ctx, secretName, store.ScopeHub, c.srv.hubID)
+		if err != nil {
+			return "", classifySecretBackendGetError(ctx, err)
+		}
+		if err := validateNamedSecretValue(sv); err != nil {
+			return "", err
+		}
+		systemoneruntime.RecordSecretRefProvenance(ctx, secretName, systemoneprovider.SecretScopeHub, sv.Version)
+		return sv.Value, nil
+
+	case systemoneprovider.SecretScopeProject:
+		evalProj := strings.TrimSpace(systemoneruntime.EvalProjectIDFromContext(ctx))
+		if evalProj == "" {
+			return "", egress.ErrAuth
+		}
+		sv, err := c.getSecretValue(ctx, secretName, store.ScopeProject, evalProj)
+		if err != nil {
+			return "", classifySecretBackendGetError(ctx, err)
+		}
+		if err := validateNamedSecretValue(sv); err != nil {
+			return "", err
+		}
+		systemoneruntime.RecordSecretRefProvenance(ctx, secretName, systemoneprovider.SecretScopeProject, sv.Version)
+		return sv.Value, nil
+
+	case systemoneprovider.SecretScopeProjectOrHub:
+		evalProj := strings.TrimSpace(systemoneruntime.EvalProjectIDFromContext(ctx))
+		if evalProj == "" {
+			return "", egress.ErrAuth
+		}
+		svProj, errProj := c.getSecretValue(ctx, secretName, store.ScopeProject, evalProj)
+		if errProj == nil {
+			if err := validateNamedSecretValue(svProj); err != nil {
+				return "", err
+			}
+			systemoneruntime.RecordSecretRefProvenance(ctx, secretName, systemoneprovider.SecretScopeProject, svProj.Version)
+			return svProj.Value, nil
+		}
+		if !isDefiniteSecretNotFound(errProj) {
+			return "", classifySecretBackendGetError(ctx, errProj)
+		}
+		svHub, errHub := c.getSecretValue(ctx, secretName, store.ScopeHub, c.srv.hubID)
+		if errHub != nil {
+			return "", classifySecretBackendGetError(ctx, errHub)
+		}
+		if err := validateNamedSecretValue(svHub); err != nil {
+			return "", err
+		}
+		systemoneruntime.RecordSecretRefProvenance(ctx, secretName, systemoneprovider.SecretScopeHub, svHub.Version)
+		return svHub.Value, nil
+
+	default:
+		return "", egress.ErrAuth
+	}
 }
 
 // isSystemOneSecretAuthError reports whether err from SecretBackend.Get

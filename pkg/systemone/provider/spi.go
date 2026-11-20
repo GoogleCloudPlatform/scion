@@ -176,6 +176,25 @@ const (
 	maxSecretRefNameBytes = 128
 )
 
+// SecretRefModeFromOptions inspects opts for the explicit named-secret
+// discriminator key (OptionSecretScope = "secret_scope").
+//
+// Key presence—never a secret-name prefix heuristic—decides the credential mode:
+//   - isNamedRef == true: options["secret_scope"] key is present (named Hub or
+//     project secret reference; the instance never owns or deletes the secret).
+//   - isNamedRef == false: options["secret_scope"] key is absent (legacy/inline
+//     instance-internal secret when auth.kind == "api_key").
+func SecretRefModeFromOptions(opts map[string]string) (scope string, isNamedRef bool) {
+	if len(opts) == 0 {
+		return "", false
+	}
+	raw, ok := opts[OptionSecretScope]
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(raw), true
+}
+
 // IsValidSecretRefScope reports whether scope is one of the allowed named-secret
 // resolution scopes ("hub", "project", or "project_or_hub").
 func IsValidSecretRefScope(scope string) bool {
@@ -390,4 +409,12 @@ type EndpointDefaulter interface {
 // coupling static Capabilities(InstanceView{}) discovery to instance fields.
 type InstanceValidator interface {
 	ValidateInstance(inst InstanceView) error
+}
+
+// DefaultSecretRefer is an optional SPI-adjacent extension implemented by
+// adapters that default api_key instances created without an inline API key to
+// a named Hub/project secret reference (for example "GEMINI_API_KEY" on
+// gemini_decisions; PV3 Addendum F §§F2, F4).
+type DefaultSecretRefer interface {
+	DefaultSecretRefName() string
 }

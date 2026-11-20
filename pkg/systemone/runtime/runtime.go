@@ -175,20 +175,21 @@ type EvalOptions struct {
 }
 
 type transportKey struct {
-	id              string
-	name            string
-	revision        int64
-	adapter         string
-	endpoint        string
-	authKind        string
-	secretName      string
-	secretScope     string
-	headerName      string
-	audience        string
-	scopes          string
-	quotaProject    string
-	placementKind   provider.AuthKind
-	placementHeader string
+	id               string
+	name             string
+	revision         int64
+	adapter          string
+	endpoint         string
+	authKind         string
+	secretName       string
+	isNamedSecretRef bool
+	secretScope      string
+	headerName       string
+	audience         string
+	scopes           string
+	quotaProject     string
+	placementKind    provider.AuthKind
+	placementHeader  string
 }
 
 type evalCallTrackerKey struct{}
@@ -558,13 +559,14 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		}
 	}
 	if secName, scopeUsed, secVer := callTracker.secretRefProvenance(); secName != "" || scopeUsed != "" || secVer > 0 {
+		secScope, _ := provider.SecretRefModeFromOptions(inst.Options)
 		if eval.Auth == nil {
 			eval.Auth = &AuthProvenance{AuthKind: inst.Auth.Kind}
 		}
 		if eval.Auth.SecretRef == nil {
 			eval.Auth.SecretRef = &SecretRefProvenance{
 				Name:  secName,
-				Scope: inst.Options[provider.OptionSecretScope],
+				Scope: secScope,
 			}
 		}
 		if secName != "" {
@@ -950,21 +952,23 @@ func (r *Runtime) transportForInstance(inst Instance, adapterScheme provider.Aut
 	if adapterScheme.Kind == provider.AuthKindGoogleAccessToken && len(effScopes) == 0 && len(adapterScheme.Scopes) > 0 {
 		effScopes = adapterScheme.Scopes
 	}
+	secScope, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
 	key := transportKey{
-		id:              inst.ID,
-		name:            inst.Name,
-		revision:        inst.Revision,
-		adapter:         inst.Adapter,
-		endpoint:        inst.Endpoint,
-		authKind:        inst.Auth.Kind,
-		secretName:      inst.Auth.SecretName,
-		secretScope:     inst.Options[provider.OptionSecretScope],
-		headerName:      inst.Auth.HeaderName,
-		audience:        inst.Auth.Audience,
-		scopes:          canonicalScopesKey(effScopes),
-		quotaProject:    placement.QuotaProject,
-		placementKind:   placementKind,
-		placementHeader: placementHeader,
+		id:               inst.ID,
+		name:             inst.Name,
+		revision:         inst.Revision,
+		adapter:          inst.Adapter,
+		endpoint:         inst.Endpoint,
+		authKind:         inst.Auth.Kind,
+		secretName:       inst.Auth.SecretName,
+		isNamedSecretRef: isNamedRef,
+		secretScope:      secScope,
+		headerName:       inst.Auth.HeaderName,
+		audience:         inst.Auth.Audience,
+		scopes:           canonicalScopesKey(effScopes),
+		quotaProject:     placement.QuotaProject,
+		placementKind:    placementKind,
+		placementHeader:  placementHeader,
 	}
 	r.transportMu.Lock()
 	defer r.transportMu.Unlock()
@@ -1165,11 +1169,12 @@ func selectInstanceAuthScheme(caps provider.Capabilities, inst Instance) (provid
 
 func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) provider.FailReason {
 	instAuth := inst.Auth
+	secScope, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
 	switch adapterScheme.Kind {
 	case provider.AuthKindBearer:
 		switch instAuth.Kind {
 		case "", provider.InstanceAuthAPIKey, string(provider.AuthKindBearer):
-			if secScope := inst.Options[provider.OptionSecretScope]; secScope != "" {
+			if isNamedRef {
 				if !provider.IsValidSecretRefScope(secScope) || !provider.IsValidSecretRefName(instAuth.SecretName) {
 					return provider.FailInvalidRequest
 				}
@@ -1184,7 +1189,7 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 	case provider.AuthKindHeader:
 		switch instAuth.Kind {
 		case "", provider.InstanceAuthAPIKey:
-			if secScope := inst.Options[provider.OptionSecretScope]; secScope != "" {
+			if isNamedRef {
 				if !provider.IsValidSecretRefScope(secScope) || !provider.IsValidSecretRefName(instAuth.SecretName) {
 					return provider.FailInvalidRequest
 				}
@@ -1200,7 +1205,7 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 		if instAuth.Kind != string(provider.AuthKindGoogleAccessToken) {
 			return provider.FailUnsupported
 		}
-		if inst.Options[provider.OptionSecretScope] != "" {
+		if isNamedRef {
 			return provider.FailInvalidRequest
 		}
 		effScopes := instAuth.Scopes
@@ -1221,7 +1226,7 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 		return ""
 	case provider.AuthKindNone:
 		if instAuth.Kind == "" || instAuth.Kind == string(provider.AuthKindNone) {
-			if inst.Options[provider.OptionSecretScope] != "" {
+			if isNamedRef {
 				return provider.FailInvalidRequest
 			}
 			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
@@ -1236,7 +1241,11 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 }
 
 func checkInstanceProjectContext(inst Instance, projectID string) provider.FailReason {
-	switch inst.Options[provider.OptionSecretScope] {
+	secScope, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
+	if !isNamedRef {
+		return ""
+	}
+	switch secScope {
 	case provider.SecretScopeProject, provider.SecretScopeProjectOrHub:
 		if strings.TrimSpace(projectID) == "" {
 			return provider.FailInvalidRequest
@@ -1258,18 +1267,18 @@ func isPreCallEgressError(err error) bool {
 }
 
 func buildInitialAuthProvenance(inst Instance, selectedScheme provider.AuthScheme) *AuthProvenance {
-	secScope := inst.Options[provider.OptionSecretScope]
-	if inst.Auth.Kind == "" && secScope == "" {
+	secScope, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
+	if inst.Auth.Kind == "" && !isNamedRef {
 		return nil
 	}
 	authKind := inst.Auth.Kind
-	if authKind == "" && secScope != "" {
+	if authKind == "" && isNamedRef {
 		authKind = provider.InstanceAuthAPIKey
 	}
 	prov := &AuthProvenance{
 		AuthKind: authKind,
 	}
-	if secScope != "" {
+	if isNamedRef {
 		prov.SecretRef = &SecretRefProvenance{
 			Name:  inst.Auth.SecretName,
 			Scope: secScope,

@@ -719,7 +719,7 @@ func TestRuntime_GeminiDecisions_NamedSecretConcurrencyRotationFallbackAndProjec
 			noul = 0.94
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"answers":{"is_damaged":{"type":"noul","noul":%.2f,"confidence":0.95}}}`, noul)))
+		_, _ = fmt.Fprintf(w, `{"answers":{"is_damaged":{"type":"noul","noul":%.2f,"confidence":0.95}}}`, noul)
 	}))
 	t.Cleanup(tlsSrv.Close)
 

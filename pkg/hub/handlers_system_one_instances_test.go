@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1917,4 +1918,576 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 	allLogs := auditBuf.String() + "\n" + runtimeLogBuf.String()
 	assert.NotContains(t, allLogs, canaryADCToken, "ADC canary token must never appear in audit or runtime logs")
 	assert.NotContains(t, allLogs, canaryAPIKeyInput)
+}
+
+func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAndMetadataPreservation(t *testing.T) {
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+
+	var auditBuf, runtimeLogBuf syncBuffer
+	srv.envSecretLog = slog.New(slog.NewJSONHandler(&auditBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-g4d-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	const (
+		envCanaryKey    = "CANARY_G4D_ENV_IGNORED_8414"
+		hubCanaryKey    = "CANARY_G4D_HUB_SECRET_KEY_8414"
+		projACanaryKey  = "CANARY_G4D_PROJA_SECRET_KEY_8414"
+		projARotatedKey = "CANARY_G4D_PROJA_ROTATED_KEY_8414"
+		projBCanaryKey  = "CANARY_G4D_PROJB_SECRET_KEY_8414"
+		projSecKey      = "CANARY_G4D_UNAUTHZ_PROJ_KEY_8414"
+		userCanaryKey   = "CANARY_G4D_USER_SCOPE_KEY_8414"
+	)
+
+	// Setting GEMINI_API_KEY in process env has zero effect.
+	t.Setenv("GEMINI_API_KEY", envCanaryKey)
+
+	var providerHits atomic.Int32
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerHits.Add(1)
+		gotKey := r.Header.Get(geminidecisions.HeaderAPIKey)
+		noul := 0.11
+		switch gotKey {
+		case hubCanaryKey:
+			noul = 0.81
+		case projACanaryKey:
+			noul = 0.82
+		case projARotatedKey:
+			noul = 0.83
+		case projBCanaryKey:
+			noul = 0.84
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"answers":{"q_ok":{"type":"noul","noul":%.2f,"confidence":0.95}}}`, noul)
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	reg := srv.SystemOneProviderRegistry()
+	srv.mu.Lock()
+	srv.systemOneRuntime = systemoneruntime.New(
+		systemoneruntime.Config{
+			Registry:    reg,
+			Instances:   &hubSystemOneInstanceSource{srv: srv},
+			Credentials: (&hubSystemOneCredentialSource{srv: srv}).APIKeyToken,
+			TokenSource: (&hubSystemOneCredentialSource{srv: srv}).GoogleAccessToken,
+			Logger:      slog.New(slog.NewJSONHandler(&runtimeLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		},
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+	srv.mu.Unlock()
+
+	// Seed projects A, B, and Restricted.
+	makeProj := func(slug string) *store.Project {
+		p := &store.Project{
+			ID:      tid("g4d-" + slug),
+			Name:    slug,
+			Slug:    slug,
+			OwnerID: admin.ID,
+			Created: time.Now(),
+			Updated: time.Now(),
+		}
+		require.NoError(t, s.CreateProject(ctx, p))
+		return p
+	}
+	projA := makeProj("g4d-proj-a")
+	projB := makeProj("g4d-proj-b")
+	projRestricted := makeProj("g4d-proj-restricted")
+
+	// Seed Hub secret (variable), Project A secret (environment with injection_mode=always),
+	// Project B secret (variable), Restricted project secret, and User-scope secret.
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:          "GEMINI_API_KEY",
+		Value:         hubCanaryKey,
+		SecretType:    store.SecretTypeVariable,
+		Target:        "GEMINI_API_KEY",
+		InjectionMode: store.InjectionModeAsNeeded,
+		Scope:         store.ScopeHub,
+		ScopeID:       srv.hubID,
+		CreatedBy:     admin.ID,
+		UpdatedBy:     admin.ID,
+	})
+	require.NoError(t, err)
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:          "GEMINI_API_KEY",
+		Value:         projACanaryKey,
+		SecretType:    store.SecretTypeEnvironment,
+		Target:        "GEMINI_API_KEY",
+		InjectionMode: store.InjectionModeAlways,
+		Scope:         store.ScopeProject,
+		ScopeID:       projA.ID,
+		CreatedBy:     admin.ID,
+		UpdatedBy:     admin.ID,
+	})
+	require.NoError(t, err)
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:          "GEMINI_API_KEY",
+		Value:         projBCanaryKey,
+		SecretType:    store.SecretTypeVariable,
+		Target:        "GEMINI_API_KEY",
+		InjectionMode: store.InjectionModeAsNeeded,
+		Scope:         store.ScopeProject,
+		ScopeID:       projB.ID,
+		CreatedBy:     admin.ID,
+		UpdatedBy:     admin.ID,
+	})
+	require.NoError(t, err)
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      projSecKey,
+		SecretType: store.SecretTypeVariable,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeProject,
+		ScopeID:    projRestricted.ID,
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      userCanaryKey,
+		SecretType: store.SecretTypeEnvironment,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeUser,
+		ScopeID:    admin.ID,
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+
+	// Snapshot Project A and Hub secret metadata BEFORE creating any System One instance.
+	snapSecretMeta := func(name, scope, scopeID string) []byte {
+		row, getErr := s.GetSecret(ctx, name, scope, scopeID)
+		require.NoError(t, getErr)
+		raw, mErr := json.Marshal(row)
+		require.NoError(t, mErr)
+		return raw
+	}
+	hubMetaBefore := snapSecretMeta("GEMINI_API_KEY", store.ScopeHub, srv.hubID)
+	projAMetaBefore := snapSecretMeta("GEMINI_API_KEY", store.ScopeProject, projA.ID)
+
+	// 1. Validation & mutual exclusion on create.
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+		msg  string
+	}{
+		{
+			name: "typesafe without apiKey or secretRef still fails 400",
+			body: map[string]any{
+				"name": "ts-no-key", "adapter": jevwire.AdapterNameTypeSafe, "model": "jev-1.14.0",
+			},
+			msg: "apiKey is required",
+		},
+		{
+			name: "apiKey and secretRef mutually exclusive",
+			body: map[string]any{
+				"name": "gem-both", "adapter": geminidecisions.AdapterName, "model": "gemini-decision-1",
+				"auth": map[string]any{
+					"kind":      "api_key",
+					"apiKey":    "SYNTH_INLINE_KEY",
+					"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "hub"},
+				},
+			},
+			msg: "mutually exclusive",
+		},
+		{
+			name: "google_access_token and secretRef mutually exclusive",
+			body: map[string]any{
+				"name": "gem-adc-ref", "adapter": geminidecisions.AdapterName, "model": "gemini-decision-1",
+				"auth": map[string]any{
+					"kind":      "google_access_token",
+					"scopes":    []string{"https://www.googleapis.com/auth/scope-a"},
+					"secretRef": map[string]any{"name": "GEMINI_API_KEY"},
+				},
+			},
+			msg: "auth.secretRef is not supported",
+		},
+		{
+			name: "invalid secretRef.name grammar",
+			body: map[string]any{
+				"name": "gem-bad-name", "adapter": geminidecisions.AdapterName, "model": "gemini-decision-1",
+				"auth": map[string]any{
+					"kind":      "api_key",
+					"secretRef": map[string]any{"name": "1INVALID-NAME"},
+				},
+			},
+			msg: "invalid auth.secretRef.name",
+		},
+		{
+			name: "reserved prefix in secretRef.name refused",
+			body: map[string]any{
+				"name": "gem-res-name", "adapter": geminidecisions.AdapterName, "model": "gemini-decision-1",
+				"auth": map[string]any{
+					"kind":      "api_key",
+					"secretRef": map[string]any{"name": "systemone_instance_other"},
+				},
+			},
+			msg: "invalid auth.secretRef.name",
+		},
+		{
+			name: "invalid secretRef.scope refused",
+			body: map[string]any{
+				"name": "gem-bad-scope", "adapter": geminidecisions.AdapterName, "model": "gemini-decision-1",
+				"auth": map[string]any{
+					"kind":      "api_key",
+					"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "user"},
+				},
+			},
+			msg: "invalid auth.secretRef.scope",
+		},
+	} {
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, tc.body)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", tc.name, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), tc.msg, tc.name)
+	}
+
+	// 2. Create gemini_decisions without apiKey or secretRef -> defaults to GEMINI_API_KEY / project_or_hub.
+	createDefRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "gemini-named-default",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": tlsSrv.URL,
+	})
+	require.Equal(t, http.StatusCreated, createDefRec.Code, createDefRec.Body.String())
+	var createdDef SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(createDefRec.Body.Bytes(), &createdDef))
+	assert.Equal(t, "api_key", createdDef.Auth.Kind)
+	assert.Empty(t, createdDef.Auth.SecretName)
+	require.NotNil(t, createdDef.Auth.SecretRef)
+	assert.Equal(t, "GEMINI_API_KEY", createdDef.Auth.SecretRef.Name)
+	assert.Equal(t, "project_or_hub", createdDef.Auth.SecretRef.Scope)
+	assert.Empty(t, createdDef.Options, "internal secret_scope storage key must not leak in response options")
+
+	// Verify persisted DB row has explicit secret_scope discriminator and GET/LIST both show GEMINI_API_KEY + project_or_hub.
+	storedDef, err := s.GetSystemOneInstanceByName(ctx, "gemini-named-default")
+	require.NoError(t, err)
+	assert.Equal(t, "GEMINI_API_KEY", storedDef.Auth.SecretName)
+	assert.Equal(t, "project_or_hub", storedDef.Options[systemoneprovider.OptionSecretScope])
+
+	getDefRec := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath+"/gemini-named-default", nil)
+	require.Equal(t, http.StatusOK, getDefRec.Code)
+	var gotDef SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(getDefRec.Body.Bytes(), &gotDef))
+	require.NotNil(t, gotDef.Auth.SecretRef)
+	assert.Equal(t, "GEMINI_API_KEY", gotDef.Auth.SecretRef.Name)
+	assert.Equal(t, "project_or_hub", gotDef.Auth.SecretRef.Scope)
+
+	listDefRec := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil)
+	require.Equal(t, http.StatusOK, listDefRec.Code)
+	assert.Contains(t, listDefRec.Body.String(), `"secretRef":{"name":"GEMINI_API_KEY","scope":"project_or_hub"}`)
+
+	// Also create hub-only and project-only named-secret instances.
+	for _, pair := range [][2]string{
+		{"gemini-named-hub", "hub"},
+		{"gemini-named-proj", "project"},
+	} {
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":     pair[0],
+			"adapter":  geminidecisions.AdapterName,
+			"model":    "gemini-decision-1",
+			"endpoint": tlsSrv.URL,
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": pair[1]},
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	}
+
+	// Secret metadata is byte-identical after instance create.
+	assert.Equal(t, hubMetaBefore, snapSecretMeta("GEMINI_API_KEY", store.ScopeHub, srv.hubID))
+	assert.Equal(t, projAMetaBefore, snapSecretMeta("GEMINI_API_KEY", store.ScopeProject, projA.ID))
+
+	binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`)
+
+	// 3. Probe without --project: fails with invalid_request (0 requests) on project_or_hub & project, succeeds on hub!
+	providerHits.Store(0)
+	noProjRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-named-default/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Synthetic sample."},
+	})
+	require.Equal(t, http.StatusOK, noProjRec.Code)
+	var noProjResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(noProjRec.Body.Bytes(), &noProjResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, noProjResp.Class)
+	assert.Equal(t, "invalid_request", noProjResp.Reason)
+	assert.Zero(t, providerHits.Load())
+
+	hubOnlyRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-named-hub/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Synthetic sample."},
+	})
+	require.Equal(t, http.StatusOK, hubOnlyRec.Code)
+	var hubOnlyResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(hubOnlyRec.Body.Bytes(), &hubOnlyResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, hubOnlyResp.Class)
+	require.NotNil(t, hubOnlyResp.Evaluation.Auth.SecretRef)
+	assert.Equal(t, "hub", hubOnlyResp.Evaluation.Auth.SecretRef.ScopeUsed)
+	assert.Equal(t, 1, hubOnlyResp.Evaluation.Auth.SecretVersion)
+
+	// 4. probe --project authorization: non-existent -> 404; unauthorized project -> 403; authorized project -> 200.
+	notFoundProjRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-named-default/probe", map[string]any{
+		"project": "does-not-exist-proj",
+		"spec":    binSpec,
+		"probe":   map[string]any{"text": "Synthetic sample."},
+	})
+	assert.Equal(t, http.StatusNotFound, notFoundProjRec.Code)
+
+	// Scoped operator with system_one_instance.{read,execute} on hub and project.read ONLY on projA.
+	scopedUser := &store.User{
+		ID:          tid("g4d-scoped-op"),
+		Email:       "g4d-scoped@test.com",
+		DisplayName: "Scoped Operator",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, scopedUser))
+	hubExecRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "g4d-s1-prober",
+		Description: "System One probe operator",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"system_one_instance.read", "system_one_instance.execute"},
+	})
+	require.NoError(t, err)
+	ensureHubMembership(ctx, s, scopedUser.ID)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubExecRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      scopedUser.ID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        admin.ID,
+	})
+	require.NoError(t, err)
+	projReadRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "g4d-proj-reader",
+		Description: "Project reader",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: projReadRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      scopedUser.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projA.ID,
+		CreatedBy:        admin.ID,
+	})
+	require.NoError(t, err)
+
+	providerHits.Store(0)
+	unauthzProjRec := doRequestAsUser(t, srv, scopedUser, http.MethodPost, systemOneAdminPath+"/gemini-named-default/probe", map[string]any{
+		"project": projRestricted.ID,
+		"spec":    binSpec,
+		"probe":   map[string]any{"text": "Synthetic sample."},
+	})
+	assert.Equal(t, http.StatusForbidden, unauthzProjRec.Code)
+	assert.Zero(t, providerHits.Load())
+
+	authzSlugRec := doRequestAsUser(t, srv, scopedUser, http.MethodPost, systemOneAdminPath+"/gemini-named-default/probe", map[string]any{
+		"project": projA.Slug,
+		"spec":    binSpec,
+		"probe":   map[string]any{"text": "Synthetic sample."},
+	})
+	require.Equal(t, http.StatusOK, authzSlugRec.Code, authzSlugRec.Body.String())
+	var authzSlugResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(authzSlugRec.Body.Bytes(), &authzSlugResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, authzSlugResp.Class)
+	assert.Equal(t, "project", authzSlugResp.Evaluation.Auth.SecretRef.ScopeUsed)
+	assert.Equal(t, 1, authzSlugResp.Evaluation.Auth.SecretVersion)
+	assert.InDelta(t, 0.82, authzSlugResp.Evaluation.Answers["q_ok"].Distribution["true"], 1e-6)
+
+	// 5. Concurrent Project A & Project B probes through the SAME Hub instance & transport.
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-named-default/probe", map[string]any{
+				"project": projA.ID,
+				"spec":    binSpec,
+				"probe":   map[string]any{"text": "Sample A"},
+			})
+			if assert.Equal(t, http.StatusOK, rec.Code) {
+				var pr ProbeSystemOneInstanceResponse
+				if assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pr)) {
+					assert.Equal(t, "project", pr.Evaluation.Auth.SecretRef.ScopeUsed)
+					assert.InDelta(t, 0.82, pr.Evaluation.Answers["q_ok"].Distribution["true"], 1e-6)
+				}
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-named-default/probe", map[string]any{
+				"project": projB.ID,
+				"spec":    binSpec,
+				"probe":   map[string]any{"text": "Sample B"},
+			})
+			if assert.Equal(t, http.StatusOK, rec.Code) {
+				var pr ProbeSystemOneInstanceResponse
+				if assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pr)) {
+					assert.Equal(t, "project", pr.Evaluation.Auth.SecretRef.ScopeUsed)
+					assert.InDelta(t, 0.84, pr.Evaluation.Answers["q_ok"].Distribution["true"], 1e-6)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 6. Rotation of Project A secret bumps version (1 -> 2) and uses new value immediately.
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:          "GEMINI_API_KEY",
+		Value:         projARotatedKey,
+		SecretType:    store.SecretTypeEnvironment,
+		Target:        "GEMINI_API_KEY",
+		InjectionMode: store.InjectionModeAlways,
+		Scope:         store.ScopeProject,
+		ScopeID:       projA.ID,
+		CreatedBy:     admin.ID,
+		UpdatedBy:     admin.ID,
+	})
+	require.NoError(t, err)
+	projAMetaAfterRotate := snapSecretMeta("GEMINI_API_KEY", store.ScopeProject, projA.ID)
+
+	rotRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/gemini-named-default/probe", map[string]any{
+		"project": projA.ID,
+		"spec":    binSpec,
+		"probe":   map[string]any{"text": "Rotated sample"},
+	})
+	require.Equal(t, http.StatusOK, rotRec.Code)
+	var rotResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(rotRec.Body.Bytes(), &rotResp))
+	assert.Equal(t, 2, rotResp.Evaluation.Auth.SecretVersion)
+	assert.InDelta(t, 0.83, rotResp.Evaluation.Answers["q_ok"].Distribution["true"], 1e-6)
+
+	// 7. Delete instances -> secret metadata (type, injection_mode, target, version) remains byte-identical!
+	for _, instName := range []string{"gemini-named-default", "gemini-named-hub", "gemini-named-proj"} {
+		delRec := doRequestAsUser(t, srv, admin, http.MethodDelete, systemOneAdminPath+"/"+instName, nil)
+		require.Equal(t, http.StatusNoContent, delRec.Code)
+	}
+	assert.Equal(t, hubMetaBefore, snapSecretMeta("GEMINI_API_KEY", store.ScopeHub, srv.hubID))
+	assert.Equal(t, projAMetaAfterRotate, snapSecretMeta("GEMINI_API_KEY", store.ScopeProject, projA.ID))
+
+	// 7b. Delete-safety & planted-row collision/malformed discriminator tests (EM msgs 78332850 & cfc41ad5):
+	// Create a real legacy/inline internal-secret victim instance and confirm planted named-ref or malformed rows
+	// NEVER resolve or delete victim's systemone.instance.<id> secret or GEMINI_API_KEY!
+	const victimInternalKey = "CANARY_G4D_VICTIM_INTERNAL_KEY_8414"
+	victimCreateRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "victim-internal",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": tlsSrv.URL,
+		"auth":     map[string]any{"kind": "api_key", "apiKey": victimInternalKey},
+	})
+	require.Equal(t, http.StatusCreated, victimCreateRec.Code, victimCreateRec.Body.String())
+	var victimCreated SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(victimCreateRec.Body.Bytes(), &victimCreated))
+	victimSecretName := victimCreated.Auth.SecretName
+	require.Equal(t, "systemone.instance."+victimCreated.ID, victimSecretName)
+
+	plantedCases := []*store.SystemOneInstance{
+		{
+			ID:       "99990001-0000-4000-8000-000000000001",
+			Name:     "planted-collide-hub",
+			Adapter:  geminidecisions.AdapterName,
+			Model:    "gemini-decision-1",
+			Endpoint: tlsSrv.URL,
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: victimSecretName},
+			Options:  map[string]string{systemoneprovider.OptionSecretScope: "hub"},
+			Enabled:  true,
+		},
+		{
+			ID:       "99990002-0000-4000-8000-000000000002",
+			Name:     "planted-collide-empty-scope",
+			Adapter:  geminidecisions.AdapterName,
+			Model:    "gemini-decision-1",
+			Endpoint: tlsSrv.URL,
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: victimSecretName},
+			Options:  map[string]string{systemoneprovider.OptionSecretScope: ""},
+			Enabled:  true,
+		},
+		{
+			ID:       "99990003-0000-4000-8000-000000000003",
+			Name:     "planted-unknown-scope",
+			Adapter:  geminidecisions.AdapterName,
+			Model:    "gemini-decision-1",
+			Endpoint: tlsSrv.URL,
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "GEMINI_API_KEY"},
+			Options:  map[string]string{systemoneprovider.OptionSecretScope: "unknown_scope"},
+			Enabled:  true,
+		},
+		{
+			ID:       "99990004-0000-4000-8000-000000000004",
+			Name:     "planted-adc-secret-scope",
+			Adapter:  geminidecisions.AdapterName,
+			Model:    "gemini-decision-1",
+			Endpoint: tlsSrv.URL,
+			Auth: store.SystemOneInstanceAuth{
+				Kind:   store.SystemOneAuthKindGoogleAccessToken,
+				Scopes: []string{"https://www.googleapis.com/auth/scope-a"},
+			},
+			Options: map[string]string{systemoneprovider.OptionSecretScope: "hub"},
+			Enabled: true,
+		},
+	}
+	for _, planted := range plantedCases {
+		require.NoError(t, s.CreateSystemOneInstance(ctx, planted), planted.Name)
+
+		// Probe must fail closed with 0 provider requests and never read victim's secret.
+		providerHits.Store(0)
+		pRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/"+planted.Name+"/probe", map[string]any{
+			"spec":  binSpec,
+			"probe": map[string]any{"text": "Planted row check."},
+		})
+		require.Equal(t, http.StatusOK, pRec.Code, planted.Name)
+		var pResp ProbeSystemOneInstanceResponse
+		require.NoError(t, json.Unmarshal(pRec.Body.Bytes(), &pResp))
+		assert.Equal(t, systemoneruntime.ClassFailed, pResp.Class, planted.Name)
+		assert.Equal(t, "invalid_request", pResp.Reason, planted.Name)
+		assert.Zero(t, providerHits.Load(), "%s must make 0 provider requests", planted.Name)
+
+		// Delete must remove the planted row (204) and NEVER delete victim's internal secret or GEMINI_API_KEY.
+		dRec := doRequestAsUser(t, srv, admin, http.MethodDelete, systemOneAdminPath+"/"+planted.Name, nil)
+		require.Equal(t, http.StatusNoContent, dRec.Code, planted.Name)
+
+		victimSV, vErr := localBackend.Get(ctx, victimSecretName, store.ScopeHub, srv.hubID)
+		require.NoError(t, vErr, "victim internal secret must remain intact after deleting %s", planted.Name)
+		assert.Equal(t, victimInternalKey, victimSV.Value)
+	}
+	assert.Equal(t, hubMetaBefore, snapSecretMeta("GEMINI_API_KEY", store.ScopeHub, srv.hubID))
+	assert.Equal(t, projAMetaAfterRotate, snapSecretMeta("GEMINI_API_KEY", store.ScopeProject, projA.ID))
+
+	// Legacy internal-secret row (Options: nil, no discriminator) still resolves and deletes its own secret cleanly.
+	legacyProbeRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/victim-internal/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Legacy internal check."},
+	})
+	require.Equal(t, http.StatusOK, legacyProbeRec.Code)
+	var legacyProbeResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(legacyProbeRec.Body.Bytes(), &legacyProbeResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, legacyProbeResp.Class)
+
+	legacyDelRec := doRequestAsUser(t, srv, admin, http.MethodDelete, systemOneAdminPath+"/victim-internal", nil)
+	require.Equal(t, http.StatusNoContent, legacyDelRec.Code)
+	_, err = localBackend.Get(ctx, victimSecretName, store.ScopeHub, srv.hubID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "legacy internal secret must be deleted when its owning instance is deleted")
+
+	// 8. Redaction across all logs and HTTP responses.
+	combinedLogs := auditBuf.String() + "\n" + runtimeLogBuf.String()
+	for _, canary := range []string{
+		envCanaryKey, hubCanaryKey, projACanaryKey, projARotatedKey, projBCanaryKey, projSecKey, userCanaryKey, victimInternalKey,
+	} {
+		assert.NotContains(t, combinedLogs, canary)
+		assert.NotContains(t, createDefRec.Body.String(), canary)
+		assert.NotContains(t, rotRec.Body.String(), canary)
+	}
 }

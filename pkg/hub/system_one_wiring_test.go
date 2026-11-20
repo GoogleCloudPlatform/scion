@@ -736,3 +736,248 @@ func TestSystemOneADC_DefaultProviderSyntheticInvalidCredentialsFile(t *testing.
 		assert.NotContains(t, err.Error(), fileSecretCanary)
 	})
 }
+
+func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testing.T) {
+	const (
+		hubID        = "hub-g4d-unit"
+		projID       = "proj-alpha-id"
+		envCanary    = "CANARY_PROCESS_ENV_NEVER_READ_8414"
+		hubCanary    = "CANARY_HUB_GEMINI_KEY_8414"
+		projCanary   = "CANARY_PROJ_ALPHA_KEY_8414"
+		otherCanary  = "CANARY_OTHER_PROJ_NEVER_READ_8414"
+		userCanary   = "CANARY_USER_SCOPE_NEVER_READ_8414"
+		brokerCanary = "CANARY_BROKER_SCOPE_NEVER_READ_8414"
+	)
+
+	// Guard: setting GEMINI_API_KEY in the Hub process environment never has any effect.
+	t.Setenv("GEMINI_API_KEY", envCanary)
+
+	makeInst := func(scope string) systemoneruntime.Instance {
+		return systemoneruntime.Instance{
+			ID:      "inst-named-1",
+			Name:    "gemini-named",
+			Adapter: geminidecisions.AdapterName,
+			Model:   "gemini-decision-1",
+			Auth: systemoneruntime.InstanceAuth{
+				Kind:       store.SystemOneAuthKindAPIKey,
+				SecretName: systemoneprovider.DefaultGeminiAPIKeySecretName,
+			},
+			Options: map[string]string{
+				systemoneprovider.OptionSecretScope: scope,
+			},
+			Enabled: true,
+		}
+	}
+
+	t.Run("allowed_types_environment_variable_internal_succeed_and_file_refused", func(t *testing.T) {
+		for _, secType := range []string{
+			"",
+			store.SecretTypeEnvironment,
+			store.SecretTypeVariable,
+			store.SecretTypeInternal,
+		} {
+			srv := &Server{
+				hubID: hubID,
+				secretBackend: &stubSystemOneSecretBackend{
+					getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+						require.Equal(t, "GEMINI_API_KEY", name)
+						require.Equal(t, store.ScopeHub, scope)
+						require.Equal(t, hubID, scopeID)
+						return &secret.SecretWithValue{
+							SecretMeta: secret.SecretMeta{
+								Name:       name,
+								SecretType: secType,
+								Scope:      scope,
+								ScopeID:    scopeID,
+								Version:    4,
+							},
+							Value: hubCanary,
+						}, nil
+					},
+				},
+			}
+			src := &hubSystemOneCredentialSource{srv: srv}
+			tok, err := src.APIKeyToken(context.Background(), makeInst(systemoneprovider.SecretScopeHub))
+			require.NoError(t, err, "expected secretType=%q to succeed", secType)
+			assert.Equal(t, hubCanary, tok)
+		}
+
+		// File secret is refused with ErrAuth.
+		srvFile := &Server{
+			hubID: hubID,
+			secretBackend: &stubSystemOneSecretBackend{
+				getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+					return &secret.SecretWithValue{
+						SecretMeta: secret.SecretMeta{
+							Name:       name,
+							SecretType: store.SecretTypeFile,
+							Scope:      scope,
+							ScopeID:    scopeID,
+							Version:    1,
+						},
+						Value: hubCanary,
+					}, nil
+				},
+			},
+		}
+		srcFile := &hubSystemOneCredentialSource{srv: srvFile}
+		tok, err := srcFile.APIKeyToken(context.Background(), makeInst(systemoneprovider.SecretScopeHub))
+		assert.Empty(t, tok)
+		require.ErrorIs(t, err, egress.ErrAuth)
+	})
+
+	t.Run("project_or_hub_fallback_matrix_only_falls_back_on_definite_not_found", func(t *testing.T) {
+		ctxProj := systemoneruntime.WithEvalProjectID(context.Background(), projID)
+
+		// 1. Definite store.ErrNotFound and codes.NotFound fall back to hub.
+		for _, nfErr := range []error{
+			store.ErrNotFound,
+			status.Error(codes.NotFound, "secret not found"),
+		} {
+			var hubLookups atomic.Int32
+			srv := &Server{
+				hubID: hubID,
+				secretBackend: &stubSystemOneSecretBackend{
+					getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+						switch scope {
+						case store.ScopeProject:
+							require.Equal(t, projID, scopeID)
+							return nil, nfErr
+						case store.ScopeHub:
+							hubLookups.Add(1)
+							require.Equal(t, hubID, scopeID)
+							return &secret.SecretWithValue{
+								SecretMeta: secret.SecretMeta{Name: name, SecretType: store.SecretTypeVariable, Version: 7},
+								Value:      hubCanary,
+							}, nil
+						default:
+							t.Fatalf("forbidden secret scope consulted: %s/%s", scope, scopeID)
+							return nil, egress.ErrAuth
+						}
+					},
+				},
+			}
+			src := &hubSystemOneCredentialSource{srv: srv}
+			tok, err := src.APIKeyToken(ctxProj, makeInst(systemoneprovider.SecretScopeProjectOrHub))
+			require.NoError(t, err)
+			assert.Equal(t, hubCanary, tok)
+			assert.Equal(t, int32(1), hubLookups.Load())
+		}
+
+		// 2. Non-fallback faults on project lookup NEVER fall back to hub even when hub secret exists!
+		for _, tc := range []struct {
+			name     string
+			projResp *secret.SecretWithValue
+			projErr  error
+			wantErr  error
+		}{
+			{
+				name: "project secret has disallowed file type",
+				projResp: &secret.SecretWithValue{
+					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeFile, Version: 1},
+					Value:      projCanary,
+				},
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name: "project secret has empty/whitespace value",
+				projResp: &secret.SecretWithValue{
+					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeVariable, Version: 1},
+					Value:      "   ",
+				},
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name: "project secret has control-char value",
+				projResp: &secret.SecretWithValue{
+					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeVariable, Version: 1},
+					Value:      projCanary + "\nline2",
+				},
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name:    "project lookup returns PermissionError",
+				projErr: &secret.PermissionError{Err: errors.New("denied " + projCanary)},
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name:    "project lookup returns gRPC PermissionDenied",
+				projErr: status.Error(codes.PermissionDenied, "iam denied"),
+				wantErr: egress.ErrAuth,
+			},
+			{
+				name:    "project lookup returns backend fault",
+				projErr: status.Error(codes.Unavailable, "secret manager unavailable"),
+				wantErr: egress.ErrCredentialUnavailable,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var hubLookups atomic.Int32
+				srv := &Server{
+					hubID: hubID,
+					secretBackend: &stubSystemOneSecretBackend{
+						getFn: func(_ context.Context, _ string, scope, scopeID string) (*secret.SecretWithValue, error) {
+							if scope == store.ScopeHub {
+								hubLookups.Add(1)
+								return &secret.SecretWithValue{
+									SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeVariable, Version: 9},
+									Value:      hubCanary,
+								}, nil
+							}
+							require.Equal(t, store.ScopeProject, scope)
+							require.Equal(t, projID, scopeID)
+							return tc.projResp, tc.projErr
+						},
+					},
+				}
+				src := &hubSystemOneCredentialSource{srv: srv}
+				tok, err := src.APIKeyToken(ctxProj, makeInst(systemoneprovider.SecretScopeProjectOrHub))
+				assert.Empty(t, tok)
+				require.ErrorIs(t, err, tc.wantErr)
+				assert.Zero(t, hubLookups.Load(), "must NEVER fall back to hub on %s", tc.name)
+				assert.NotContains(t, err.Error(), projCanary)
+				assert.NotContains(t, err.Error(), hubCanary)
+			})
+		}
+	})
+
+	t.Run("never_reads_env_user_broker_or_other_project_secrets", func(t *testing.T) {
+		ctxProj := systemoneruntime.WithEvalProjectID(context.Background(), projID)
+		var seenScopes []string
+		srv := &Server{
+			hubID: hubID,
+			secretBackend: &stubSystemOneSecretBackend{
+				getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+					seenScopes = append(seenScopes, scope+":"+scopeID)
+					switch {
+					case scope == store.ScopeUser:
+						return &secret.SecretWithValue{Value: userCanary}, nil
+					case scope == store.ScopeRuntimeBroker:
+						return &secret.SecretWithValue{Value: brokerCanary}, nil
+					case scope == store.ScopeProject && scopeID != projID:
+						return &secret.SecretWithValue{Value: otherCanary}, nil
+					default:
+						return nil, store.ErrNotFound
+					}
+				},
+			},
+		}
+		src := &hubSystemOneCredentialSource{srv: srv}
+		tok, err := src.APIKeyToken(ctxProj, makeInst(systemoneprovider.SecretScopeProjectOrHub))
+		assert.Empty(t, tok)
+		require.ErrorIs(t, err, egress.ErrAuth)
+		assert.Equal(t, []string{
+			store.ScopeProject + ":" + projID,
+			store.ScopeHub + ":" + hubID,
+		}, seenScopes, "must consult ONLY evalProject then hub, never env/user/broker/other-project")
+
+		// Reserved prefix smuggling is refused before consulting SecretBackend.
+		reservedInst := makeInst(systemoneprovider.SecretScopeHub)
+		reservedInst.Auth.SecretName = "systemone_instance_other"
+		seenScopes = nil
+		tok2, err2 := src.APIKeyToken(ctxProj, reservedInst)
+		assert.Empty(t, tok2)
+		require.ErrorIs(t, err2, egress.ErrAuth)
+		assert.Empty(t, seenScopes)
+	})
+}

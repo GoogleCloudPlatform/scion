@@ -106,6 +106,13 @@ func (a *Adapter) DefaultEndpoint() string {
 	return DefaultEndpoint
 }
 
+// DefaultSecretRefName returns the default named-secret key ("GEMINI_API_KEY")
+// used when a gemini_decisions api_key instance is created without an inline
+// API key (PV3 Addendum F §§F2, F4).
+func (a *Adapter) DefaultSecretRefName() string {
+	return provider.DefaultGeminiAPIKeySecretName
+}
+
 // ValidateInstance checks Gemini-specific instance configuration (requiring a
 // non-empty model identifier free of control characters, valid location, and a
 // valid endpoint without userinfo, query parameters, or fragments).
