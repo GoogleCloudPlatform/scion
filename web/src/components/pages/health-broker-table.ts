@@ -35,6 +35,7 @@ import { formatRelative } from '../../utils/time.js';
 import { mismatchLines } from '../../shared/broker-storage.js';
 import {
   brokerVersionStyles,
+  isSingleKnownHubVersion,
   renderBrokerVersion,
   renderHubVersionNote,
 } from '../shared/broker-version.js';
@@ -139,23 +140,30 @@ function healthIsProblem(h: HealthBrokerSelf | null | undefined): boolean {
 
 /**
  * True when the row needs a look: not online, self-reported degraded or
- * unhealthy, an unhealthy NFS share, or online with a version that differs
- * from the hub's (the broker_version_mismatch item; unknown does not count).
+ * unhealthy, an unhealthy NFS share, online with a version that differs
+ * from the hub's (broker_version_mismatch), or online reporting no usable
+ * version while the hub has a single known version (broker_version_unknown).
  */
-export function brokerHasProblem(b: HealthSummaryBroker): boolean {
+export function brokerHasProblem(b: HealthSummaryBroker, hubVersion?: string): boolean {
   return (
     b.status !== 'online' ||
     healthIsProblem(b.health) ||
     b.workspace_storage?.nfs_healthy === false ||
-    b.version_status === 'mismatch'
+    b.version_status === 'mismatch' ||
+    (b.version_status === 'unknown' &&
+      (!b.version || b.version === 'unknown') &&
+      isSingleKnownHubVersion(hubVersion))
   );
 }
 
 /** Problems first, then by display name, then by ID. */
-export function sortBrokers(items: readonly HealthSummaryBroker[]): HealthSummaryBroker[] {
+export function sortBrokers(
+  items: readonly HealthSummaryBroker[],
+  hubVersion?: string
+): HealthSummaryBroker[] {
   return [...items].sort((a, b) => {
-    const pa = brokerHasProblem(a) ? 0 : 1;
-    const pb = brokerHasProblem(b) ? 0 : 1;
+    const pa = brokerHasProblem(a, hubVersion) ? 0 : 1;
+    const pb = brokerHasProblem(b, hubVersion) ? 0 : 1;
     if (pa !== pb) return pa - pb;
     const byName = (a.name || a.id).localeCompare(b.name || b.id);
     return byName !== 0 ? byName : a.id.localeCompare(b.id);
@@ -426,7 +434,7 @@ export class ScionHealthBrokerTable extends LitElement {
               </tr>
             </thead>
             <tbody>
-              ${sortBrokers(items).map((b) => this.renderRow(b))}
+              ${sortBrokers(items, this.hubVersion).map((b) => this.renderRow(b))}
             </tbody>
           </table>
         </div>

@@ -67,13 +67,43 @@ describe('broker area filters', () => {
     );
   });
 
-  it('an online broker whose version differs from the hub counts; unknown does not', () => {
-    expect(needsAttention(broker({ versionStatus: 'mismatch' }))).toBe(true);
+  it('an online broker with mismatched or unknown version counts when hub version is single known', () => {
+    expect(needsAttention(broker({ versionStatus: 'mismatch' }), null, 'v1.3.0')).toBe(true);
+    expect(needsAttention(broker({ version: '', versionStatus: 'unknown' }), null, 'v1.3.0')).toBe(
+      true
+    );
+    expect(
+      needsAttention(broker({ version: 'unknown', versionStatus: 'unknown' }), null, 'v1.3.0')
+    ).toBe(true);
+    expect(needsAttention(broker({ version: '', versionStatus: 'unknown' }), null, 'mixed')).toBe(
+      false
+    );
+    expect(needsAttention(broker({ version: '', versionStatus: 'unknown' }), null, '')).toBe(false);
+    expect(needsAttention(broker({ version: '', versionStatus: 'unknown' }), null, 'unknown')).toBe(
+      false
+    );
     expect(needsAttention(broker({ versionStatus: 'unknown' }))).toBe(false);
-    expect(needsAttention(broker({ versionStatus: 'match' }))).toBe(false);
-    expect(needsAttention(broker({}))).toBe(false);
-    expect(matchesBrokerFilter(broker({ versionStatus: 'mismatch' }), 'attention')).toBe(true);
-    expect(matchesBrokerFilter(broker({ versionStatus: 'unknown' }), 'attention')).toBe(false);
+    expect(needsAttention(broker({ versionStatus: 'match' }), null, 'v1.3.0')).toBe(false);
+    expect(needsAttention(broker({}), null, 'v1.3.0')).toBe(false);
+    expect(
+      matchesBrokerFilter(broker({ versionStatus: 'mismatch' }), 'attention', null, 'v1.3.0')
+    ).toBe(true);
+    expect(
+      matchesBrokerFilter(
+        broker({ version: '', versionStatus: 'unknown' }),
+        'attention',
+        null,
+        'v1.3.0'
+      )
+    ).toBe(true);
+    expect(
+      matchesBrokerFilter(
+        broker({ version: '', versionStatus: 'unknown' }),
+        'attention',
+        null,
+        'mixed'
+      )
+    ).toBe(false);
   });
 
   it('a self-reported degraded or unhealthy status is a problem even with no failing check', () => {

@@ -246,7 +246,9 @@ export class ScionPageBrokersArea extends LitElement {
   }
 
   private get visibleBrokers(): RuntimeBroker[] {
-    return this.brokers.filter((b) => matchesBrokerFilter(b, this.filter, this.health?.get(b.id)));
+    return this.brokers.filter((b) =>
+      matchesBrokerFilter(b, this.filter, this.health?.get(b.id), this.hubVersion)
+    );
   }
 
   private getStatusVariant(status: string): 'success' | 'warning' | 'danger' | 'neutral' {

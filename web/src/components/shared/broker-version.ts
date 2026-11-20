@@ -41,6 +41,16 @@ function hubVersionKnown(hubVersion: string | null | undefined): hubVersion is s
   return !!hubVersion && hubVersion !== 'unknown';
 }
 
+/**
+ * True when the hub version is a single known build token: not empty, not
+ * "mixed" (rolling upgrade), and not "unknown".
+ */
+export function isSingleKnownHubVersion(
+  hubVersion: string | null | undefined
+): hubVersion is string {
+  return hubVersionKnown(hubVersion) && hubVersion !== HUB_VERSION_MIXED;
+}
+
 /** A missing or unexpected status is unknown, never match. */
 export function normalizeVersionStatus(status: string | null | undefined): BrokerVersionStatus {
   return status === 'match' || status === 'mismatch' ? status : 'unknown';
