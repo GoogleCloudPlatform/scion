@@ -52,6 +52,7 @@ type taskRouteAuthFixture struct {
 	hubSendCode    int
 	hubSendCalls   int
 	hubAuthMeCalls int
+	hubCreateCalls int
 }
 
 func newTaskRouteAuthFixture(t *testing.T, scheme, apiKey string, withMinter bool) *taskRouteAuthFixture {
@@ -81,6 +82,20 @@ func newTaskRouteAuthFixture(t *testing.T, scheme, apiKey string, withMinter boo
 				"email":        "visitor@example.com",
 				"display_name": "Visitor",
 				"role":         "member",
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents":
+			f.mu.Lock()
+			f.hubCreateCalls++
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"agent": map[string]any{
+					"id":        "agent-created-001",
+					"name":      "brand-new-agent",
+					"slug":      "brand-new-agent",
+					"projectId": "proj1",
+					"status":    "running",
+				},
 			})
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/agents"):
 			w.Header().Set("Content-Type", "application/json")
@@ -579,8 +594,8 @@ func TestFederationTaskRoutesAuth_OtherSchemesUnchanged(t *testing.T) {
 	}
 }
 
-func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
-	t.Run("executor_hub_send_error_keeps_working_state", func(t *testing.T) {
+func TestCancelTask_BestEffortAndNoAdminFallback(t *testing.T) {
+	t.Run("executor_hub_send_error_cancels_locally_for_legacy_caller", func(t *testing.T) {
 		f := newTaskRouteAuthFixture(t, "none", "", true)
 		f.seedTask(t, "task-cancel-fail", nil, a2a.TaskStateWorking)
 
@@ -590,11 +605,8 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 
 		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
 			[]byte(`{"jsonrpc":"2.0","id":"c1","method":"CancelTask","params":{"id":"task-cancel-fail"}}`), nil)
-		if status != http.StatusOK {
-			t.Fatalf("status = %d, want 200 JSON-RPC envelope; body: %s", status, body)
-		}
-		if !strings.Contains(string(body), `"error"`) {
-			t.Fatalf("expected JSON-RPC error when Hub send fails, got: %s", body)
+		if status != http.StatusOK || strings.Contains(string(body), `"error"`) {
+			t.Fatalf("CancelTask failed: status=%d body=%s", status, body)
 		}
 
 		ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"})
@@ -602,8 +614,8 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("taskStore.Get: %v", err)
 		}
-		if stored.Task.Status.State != a2a.TaskStateWorking {
-			t.Errorf("task state = %v, want %v (must remain unchanged on Hub send failure)", stored.Task.Status.State, a2a.TaskStateWorking)
+		if stored.Task.Status.State != a2a.TaskStateCanceled {
+			t.Errorf("task state = %v, want %v", stored.Task.Status.State, a2a.TaskStateCanceled)
 		}
 	})
 
@@ -705,7 +717,7 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 		}
 	})
 
-	t.Run("v0rest_cancel_hub_send_error_keeps_working_state", func(t *testing.T) {
+	t.Run("v0rest_cancel_hub_send_error_cancels_locally_for_legacy_caller", func(t *testing.T) {
 		f := newTaskRouteAuthFixture(t, "none", "", true)
 		f.seedTask(t, "task-v0-cancel-fail", nil, a2a.TaskStateWorking)
 
@@ -714,8 +726,8 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 		f.mu.Unlock()
 
 		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/tasks/task-v0-cancel-fail:cancel", nil, nil)
-		if status < 400 {
-			t.Fatalf("v0 REST cancel status = %d, want 4xx/5xx; body: %s", status, body)
+		if status != http.StatusOK {
+			t.Fatalf("v0 REST cancel status = %d, want 200; body: %s", status, body)
 		}
 
 		ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"})
@@ -723,12 +735,12 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("taskStore.Get: %v", err)
 		}
-		if stored.Task.Status.State != a2a.TaskStateWorking {
-			t.Errorf("task state = %v, want %v", stored.Task.Status.State, a2a.TaskStateWorking)
+		if stored.Task.Status.State != a2a.TaskStateCanceled {
+			t.Errorf("task state = %v, want %v", stored.Task.Status.State, a2a.TaskStateCanceled)
 		}
 	})
 
-	t.Run("bridge_cancel_task_hub_send_failure_keeps_prior_state", func(t *testing.T) {
+	t.Run("bridge_cancel_task_hub_send_failure_cancels_locally", func(t *testing.T) {
 		f := newTaskRouteAuthFixture(t, "none", "", true)
 		f.mu.Lock()
 		f.hubSendCode = http.StatusInternalServerError
@@ -749,16 +761,16 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 			t.Fatalf("CreateTask: %v", err)
 		}
 
-		if _, err := f.bridge.CancelTask(context.Background(), "state-task-1"); err == nil {
-			t.Fatal("expected error from Bridge.CancelTask when Hub send fails, got nil")
+		if _, err := f.bridge.CancelTask(context.Background(), "state-task-1"); err != nil {
+			t.Fatalf("Bridge.CancelTask returned unexpected error: %v", err)
 		}
 
 		got, err := f.store.GetTask(context.Background(), "state-task-1")
 		if err != nil {
 			t.Fatalf("GetTask: %v", err)
 		}
-		if got.State != TaskStateWorking {
-			t.Errorf("state task State = %q, want %q", got.State, TaskStateWorking)
+		if got.State != TaskStateCanceled {
+			t.Errorf("state task State = %q, want %q", got.State, TaskStateCanceled)
 		}
 	})
 }
@@ -1241,4 +1253,91 @@ func TestFederationTaskRoutesAuth_AllHandlerMethodsClassifiedAndEnforced(t *test
 			})
 		}
 	}
+}
+
+func TestFederationTaskRoutesAuth_FederationAgentDoesNotAutoProvision(t *testing.T) {
+	f := newTaskRouteAuthFixture(t, "federation", "", true)
+	f.bridge.config.Projects = []ProjectConfig{
+		{
+			Slug:            "proj1",
+			AutoProvision:   true,
+			DefaultTemplate: "default-tmpl",
+		},
+	}
+
+	agentToken := buildTestJWT(t, map[string]any{
+		"iss":        "https://hub-a.example.com",
+		"sub":        "agent-a",
+		"project_id": "proj-a",
+	})
+	headers := map[string]string{"Authorization": "Bearer " + agentToken}
+
+	t.Run("jsonrpc", func(t *testing.T) {
+		payload := `{"jsonrpc":"2.0","id":"ap1","method":"SendMessage","params":{"message":{"messageId":"m-ap1","role":"ROLE_USER","parts":[{"text":"hello"}]}}}`
+		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/brand-new-agent/jsonrpc", []byte(payload), headers)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", status, body)
+		}
+		f.mu.Lock()
+		creates := f.hubCreateCalls
+		sends := f.hubSendCalls
+		f.mu.Unlock()
+		if creates != 0 {
+			t.Errorf("hubCreateCalls = %d, want 0 (federation agent must not trigger auto-provisioning)", creates)
+		}
+		if sends != 0 {
+			t.Errorf("hubSendCalls = %d, want 0", sends)
+		}
+	})
+
+	t.Run("v0rest", func(t *testing.T) {
+		payload := `{"message":{"message_id":"m-ap2","role":"user","parts":[{"kind":"text","text":"hello"}]}}`
+		_, _ = f.doRequest(t, http.MethodPost, "/projects/proj1/agents/brand-new-agent/message:send", []byte(payload), headers)
+		f.mu.Lock()
+		creates := f.hubCreateCalls
+		sends := f.hubSendCalls
+		f.mu.Unlock()
+		if creates != 0 {
+			t.Errorf("hubCreateCalls = %d, want 0 (federation agent must not trigger auto-provisioning)", creates)
+		}
+		if sends != 0 {
+			t.Errorf("hubSendCalls = %d, want 0", sends)
+		}
+	})
+}
+
+func TestFederationTaskRoutesAuth_DurableHandlerSubscribeRefusedBeforeStore(t *testing.T) {
+	// Wrap a DurableRequestHandler with nil stores: if SubscribeToTask fell
+	// through to DurableRequestHandler, it would hit the nil sdkStore instead
+	// of returning errFederationTaskRouteUnavailable.
+	durable := NewDurableRequestHandler(nil, nil, nil, nil)
+	guarded := NewFederationTaskAuthHandler(durable)
+
+	agentCaller := &CallerIdentity{
+		TokenType: "federation",
+		AgentID:   "agent-a",
+		IssuerURL: "https://hub-a.example.com",
+	}
+	ctx := WithCallerIdentity(
+		WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"}),
+		agentCaller,
+	)
+
+	var gotErr error
+	for _, err := range guarded.SubscribeToTask(ctx, &a2a.SubscribeToTaskRequest{ID: "task-durable-1"}) {
+		gotErr = err
+	}
+	if gotErr != errFederationTaskRouteUnavailable {
+		t.Fatalf("SubscribeToTask err = %v, want %v", gotErr, errFederationTaskRouteUnavailable)
+	}
+
+	// Verify the same refusal over the JSON-RPC transport wired as in standalone mode.
+	jsonrpcHandler := a2asrv.NewJSONRPCHandler(guarded)
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"jsonrpc":"2.0","id":"d1","method":"SubscribeToTask","params":{"id":"task-durable-1"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	jsonrpcHandler.ServeHTTP(w, req)
+
+	assertFederationAgentRefusalJSONRPC(t, w.Code, w.Body.Bytes(), "task-durable-1")
 }

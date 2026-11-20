@@ -1072,7 +1072,6 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		}
 		if _, err := cancelClient.Agents().SendStructuredMessage(ctx, targetAgentID, interruptMsg, true, false, false); err != nil {
 			b.log.Error("failed to send cancel interrupt to agent", "error", err, "task_id", taskID, "agent_id", targetAgentID)
-			return nil, fmt.Errorf("failed to cancel task")
 		}
 	}
 
@@ -2097,9 +2096,9 @@ func (b *Bridge) resolveContextLaunch(ctx context.Context, projectSlug, agentSlu
 
 	agentID, projectID, launching := adoptAgent(agents.Agents, agentSlug)
 	if agentID == "" {
-		// A federated user never makes the bridge create an agent: it may
-		// only reach agents that exist and that the hub lets it message.
-		if caller := callerIdentityFromContext(ctx); caller != nil && caller.IsFederatedUser() {
+		// Federation callers never trigger bridge auto-provisioning: they may
+		// only reach existing agents.
+		if caller := callerIdentityFromContext(ctx); caller != nil && caller.TokenType == "federation" {
 			return nil, nil, fmt.Errorf("%w: %q", ErrAgentNotFound, agentSlug)
 		}
 		projectCfg := b.GetProjectConfig(projectSlug)
