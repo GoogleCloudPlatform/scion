@@ -197,8 +197,11 @@ func TestBelowFloor(t *testing.T) {
 		{"older nightly", floor, Ref{Version: "nightly-20261008"}, true, true},
 		{"same-day rebuild", floor, Ref{Version: "nightly-20261009.1"}, false, true},
 		{"preview published after the floor", floor, Ref{Version: "v0.3.0-preview.4", Date: day("2026-10-22T10:00:00Z")}, false, true},
+		{"preview published same day as nightly floor", "nightly-20261111", Ref{Version: "v0.4.0-preview.1", Date: day("2026-11-11T14:46:17Z")}, false, true},
+		{"preview published before overshot nightly floor", "nightly-20261112", Ref{Version: "v0.4.0-preview.1", Date: day("2026-11-11T14:46:17Z")}, true, true},
 		{"preview published before the floor", floor, Ref{Version: "v0.3.0-preview.1", Date: day("2026-10-01T10:00:00Z")}, true, true},
 		{"preview without a date", floor, Ref{Version: "v0.3.0-preview.4"}, false, false},
+		{"non-nightly floor against nightly target is unknown", "v0.4.0-preview.1", Ref{Version: "nightly-20261112"}, false, false},
 		{"not a release tag", floor, Ref{Version: "dev"}, false, false},
 		{"no floor", "", Ref{Version: "nightly-20200101"}, false, true},
 	}
@@ -212,14 +215,51 @@ func TestBelowFloor(t *testing.T) {
 	}
 }
 
-// TestDowngradeFloorIsReleaseTag pins that the floor is a release tag the
-// comparison understands: a malformed floor would make every target
-// "unknown" and so refused.
+// TestDowngradeFloorIsReleaseTag pins that the floor is a nightly release tag
+// the comparison understands across every channel: a malformed floor or a
+// non-nightly floor (which carries no embedded date) would make cross-channel
+// targets "unknown" and so refused.
 func TestDowngradeFloorIsReleaseTag(t *testing.T) {
 	if !IsReleaseTag(version.DowngradeFloor) {
 		t.Fatalf("version.DowngradeFloor %q is not a release tag", version.DowngradeFloor)
 	}
+	if _, _, ok := ParseNightly(version.DowngradeFloor); !ok {
+		t.Fatalf("version.DowngradeFloor %q must be a nightly-YYYYMMDD tag so cross-channel BelowFloor comparisons have a floor date", version.DowngradeFloor)
+	}
 	if below, known := BelowFloor(version.DowngradeFloor, Ref{Version: version.DowngradeFloor}); below || !known {
 		t.Fatalf("the floor must not be below itself: below=%v known=%v", below, known)
+	}
+}
+
+// TestBelowFloor_CurrentFloorAgainstReleases checks the shipped
+// version.DowngradeFloor against real release-catalog entries so a nightly
+// floor is not dated later than the earliest preview or nightly release that
+// contains the guarded migrations.
+func TestBelowFloor_CurrentFloorAgainstReleases(t *testing.T) {
+	day := func(s string) time.Time {
+		d, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	tests := []struct {
+		name         string
+		target       Ref
+		below, known bool
+	}{
+		{"v0.4.0-preview.3 contains guarded migrations", Ref{Version: "v0.4.0-preview.3", Date: day("2026-11-20T15:18:38Z")}, false, true},
+		{"nightly-20261120 contains guarded migrations", Ref{Version: "nightly-20261120", Date: day("2026-11-20T03:17:06Z")}, false, true},
+		{"v0.4.0-preview.2 predates guarded migrations", Ref{Version: "v0.4.0-preview.2", Date: day("2026-11-13T15:17:33Z")}, true, true},
+		{"v0.4.0-preview.1 predates guarded migrations", Ref{Version: "v0.4.0-preview.1", Date: day("2026-11-11T14:46:17Z")}, true, true},
+		{"nightly-20261119 predates guarded migrations", Ref{Version: "nightly-20261119", Date: day("2026-11-19T03:17:18Z")}, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			below, known := BelowFloor(version.DowngradeFloor, tt.target)
+			if below != tt.below || known != tt.known {
+				t.Fatalf("BelowFloor(%q, %+v) = %v, %v; want %v, %v", version.DowngradeFloor, tt.target, below, known, tt.below, tt.known)
+			}
+		})
 	}
 }
