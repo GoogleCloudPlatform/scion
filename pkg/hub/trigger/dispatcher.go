@@ -351,6 +351,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		OccurredAt: ev.OccurredAt,
 		ReceivedAt: ev.ReceivedAt,
 		Attributes: ev.Attributes,
+		Lists:      ev.Lists,
 		Payload:    rawPayload,
 	}
 	baseAct, actErr := triggerrule.NewEventActivation(baseEvent)
