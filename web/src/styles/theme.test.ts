@@ -788,9 +788,7 @@ describe('web/src bare color literal guard (ptone/scion#8410)', () => {
     expect(
       findBareColorLiterals('.a { color: white; background: red; border-color: gray; }')
     ).toEqual(['white', 'red', 'gray']);
-    expect(findBareColorLiterals('const re = /var\\(/; .a { color: #ff0000; }')).toEqual([
-      '#ff0000',
-    ]);
+    expect(findBareColorLiterals("const s = 'var('; .a { color: #ff0000; }")).toEqual(['#ff0000']);
     expect(
       findBareColorLiterals(
         '/* #ff0000 */\n// #00ff00\n.a { color: var(--scion-text, #1e293b); box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }'
