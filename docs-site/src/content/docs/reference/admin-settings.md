@@ -105,7 +105,7 @@ If an administrator is locked out after the upgrade:
 
 Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `auto_expose_ports.enabled`, `telemetry.enabled` and `server.auth.authorized_domains` (its startup list comes from `settings.yaml` and the environment only). Clearing `image_registry` returns it to the settings-file value (see below). Two sections revert as a whole:
 
-- **GitHub App:** clearing `app_id` returns all the non-secret GitHub App fields to their startup values. While `app_id` is set, clearing another field applies the empty value, except `private_key_path`, which keeps the startup path.
+- **GitHub App:** clearing `app_id` returns all the non-secret GitHub App fields to their startup values. While `app_id` is set, clearing another field applies the empty value, except `private_key_path`, which keeps the startup path. For setting up the App end to end, see [GitHub App Setup](/scion/hosted/single-node/github-app/).
 - **Telemetry:** a telemetry section with no keys returns to the startup telemetry config. Clearing one telemetry key while others remain applies the config without that key, not its startup value.
 
 Some admin fields are saved only when you change them:

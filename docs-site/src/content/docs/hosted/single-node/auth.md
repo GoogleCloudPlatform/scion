@@ -586,6 +586,8 @@ Administrators can manage available Service Accounts through the **Service Accou
 
 Scion supports native GitHub App integration for secure, automated agent authentication with GitHub repositories. This provides a robust alternative to static personal access tokens.
 
+To register the App, configure it on the Hub, install it and associate projects step by step, see [GitHub App Setup](/scion/hosted/single-node/github-app/).
+
 ### Features
 - **Native Auth**: Uses JWT-based authentication and automated installation token minting.
 - **Automated Token Refresh**: A background refresh loop ensures long-running agents always have valid git credentials.
