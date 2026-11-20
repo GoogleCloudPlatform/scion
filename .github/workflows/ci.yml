@@ -728,6 +728,24 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check Raw SQL Predicates
+        run: |
+          # Invoked directly rather than via `make check-raw-sql-predicates`,
+          # for the same reason as Check Authorization Guards above: make would
+          # collapse the script's exit 1 (violations) and exit 3/4 (nothing was
+          # analysed).
+          ./hack/check-raw-sql-predicates.sh --self-test
+          set +e
+          ./hack/check-raw-sql-predicates.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Raw SQL predicates::An entsql.P or entsql.ExprP predicate emits a top-level OR without enclosing parentheses (ptone/scion#8531, ptone/scion#8533). Wrap the predicate in outer parentheses or add a justified entry to hack/raw-sql-predicates-allowlist.txt; details are in the step log above." ;;
+            *) echo "::error title=Raw SQL predicates NOT checked::check-raw-sql-predicates.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
       - name: Check Debug Defaults
         run: |
           # Invoked directly rather than via `make check-debug-defaults`, for the
