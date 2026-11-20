@@ -41,14 +41,10 @@ func TestTriggerGitHubCLIModesAndWindowsGate(t *testing.T) {
 		"trigger.github.primary.set",
 		"trigger.github.primary.unset",
 	}
-	agentAllowedPaths := map[string]bool{
-		"trigger.github":        true,
-		"trigger.github.status": true,
-	}
 
 	for _, path := range allPaths {
 		assert.True(t, windowsAllowed[path], "windowsAllowed[%q]", path)
-		assert.Equal(t, agentAllowedPaths[path], agentAllowed[path], "agentAllowed[%q]", path)
+		assert.False(t, agentAllowed[path], "agentAllowed[%q] must be false (human-mode only)", path)
 		assert.NotNil(t, resolveCommandPath(rootCmd, path), "rootCmd must contain %q", path)
 	}
 
@@ -64,18 +60,19 @@ func TestTriggerGitHubCLIModesAndWindowsGate(t *testing.T) {
 		assert.Contains(t, humanRemaining, path, "human mode must include %s", path)
 	}
 
-	// Agent mode exposes only trigger.github and trigger.github.status; settings and primary.* are stripped.
+	// Agent mode strips all trigger.github.* subcommands (design rev 1.11 §9.5).
 	agentRoot := &cobra.Command{Use: "scion"}
 	agentRoot.AddCommand(cloneCommandShape(realTrigger))
 	applyModeRestrictions(agentRoot, ModeAgent)
 	agentRemaining := collectCommandNames(agentRoot)
 	for _, path := range allPaths {
-		if agentAllowedPaths[path] {
-			assert.Contains(t, agentRemaining, path, "agent mode must include %s", path)
-		} else {
-			assert.NotContains(t, agentRemaining, path, "agent mode must exclude %s", path)
-		}
+		assert.NotContains(t, agentRemaining, path, "agent mode must exclude %s", path)
+		assert.Nil(t, resolveCommandPath(agentRoot, path), "agent mode tree must not resolve %s", path)
 	}
+	found, rem, err := agentRoot.Find([]string{"trigger", "github", "status"})
+	require.NoError(t, err)
+	assert.Equal(t, "trigger", found.Name(), "trigger github status must not match a subcommand in agent mode")
+	assert.Equal(t, []string{"github", "status"}, rem)
 
 	// Windows platform gate allows all GitHub trigger subcommands.
 	winTree, ran := gateTestTree(t)
@@ -287,23 +284,45 @@ func TestTriggerGitHubStatus_NonAdminAdminAndSanitisation(t *testing.T) {
 		assert.Contains(t, out, "Other Projects:      beta")
 	})
 
-	t.Run("agent credential skips admin GET /api/v1/github-app", func(t *testing.T) {
-		var appConfigCalls int
+	t.Run("transient 5xx on admin GET /api/v1/github-app degrades cleanly", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			switch {
 			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID+"/trigger-sources/github":
 				_ = json.NewEncoder(w).Encode(hubclient.ProjectGitHubTriggerSettings{
-					Readiness: hubclient.GitHubTriggersProjectReadiness{Ready: true},
+					Readiness: hubclient.GitHubTriggersProjectReadiness{Ready: true, AppSlug: "scion-app"},
 				})
 			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
 				_ = json.NewEncoder(w).Encode(hubclient.Project{ID: projectID, Name: "alpha"})
 			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/github-app":
-				appConfigCalls++
-				w.WriteHeader(http.StatusForbidden)
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": "internal_error", "message": "temporary failure"},
+				})
 			default:
 				http.NotFound(w, r)
 			}
+		}))
+		defer srv.Close()
+
+		withStubTriggerGitHubContexts(t, srv.URL, projectID, hubsync.CredentialKindOAuth)
+		triggerOutputJSON = false
+		outputFormat = ""
+
+		out := captureStdout(t, func() {
+			require.NoError(t, runTriggerGitHubStatus(triggerGitHubStatusCmd, nil))
+		})
+		assert.Contains(t, out, "Status:              ready")
+		assert.NotContains(t, out, "Webhooks Enabled:")
+	})
+
+	t.Run("403 from project settings route returns error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"code": "forbidden", "message": "forbidden"},
+			})
 		}))
 		defer srv.Close()
 
@@ -311,10 +330,9 @@ func TestTriggerGitHubStatus_NonAdminAdminAndSanitisation(t *testing.T) {
 		triggerOutputJSON = false
 		outputFormat = ""
 
-		_ = captureStdout(t, func() {
-			require.NoError(t, runTriggerGitHubStatus(triggerGitHubStatusCmd, nil))
-		})
-		assert.Zero(t, appConfigCalls)
+		err := runTriggerGitHubStatus(triggerGitHubStatusCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, strings.ToLower(err.Error()), "forbidden")
 	})
 }
 

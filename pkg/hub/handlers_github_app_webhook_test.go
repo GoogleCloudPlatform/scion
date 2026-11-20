@@ -34,6 +34,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 func TestGitHubOwnerRepo(t *testing.T) {
@@ -1779,5 +1780,125 @@ func TestHandleGitHubWebhook_InstallationReposRemoved_PausesGitHubTriggers(t *te
 	}
 	if len(auditsAfterRedelivery) != 3 {
 		t.Errorf("expected 3 trigger_pause audit records after idempotent redelivery, got %d", len(auditsAfterRedelivery))
+	}
+}
+
+func TestResumeGitHubTrigger_RefusedUntilRepoReassociated(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	gh := newFakeGitHubForAssoc(t)
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.APIBaseURL = gh.srv.URL
+	f.srv.config.GitHubAppConfig.AppID = 778899
+	f.srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+	f.srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
+	f.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.srv.mu.Unlock()
+
+	setTriggerExperimentsForG1bTest(t, f.srv, true, true)
+
+	sysAdmin := createAssocAdmin(t, f.store, "resume-sys-admin")
+	const instID int64 = 6202
+	createAssocInstallation(t, f.store, instID, "acme", "acme/widgets")
+
+	// Associate the fixture project with instID + Acme/Widgets via admin binding.
+	remote := gh.remote("Acme", "Widgets")
+	proj, err := f.store.GetProject(ctx, f.projectID)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	proj.GitRemote = remote
+	idCopy := instID
+	proj.GitHubInstallationID = &idCopy
+	proj.GitHubAppStatus = &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now().UTC()}
+	if err := f.store.UpdateProject(ctx, proj); err != nil {
+		t.Fatalf("UpdateProject: %v", err)
+	}
+	setAdminBinding(t, f.store, proj, instID, util.NormalizeGitRemote(remote), sysAdmin.ID)
+	f.srv.invalidateGitHubAssociation(proj.ID)
+
+	// Create an active github trigger.
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-resume-check",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.agentA.ID, Message: "ping"},
+	})
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create trigger: expected 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created TriggerResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created trigger: %v", err)
+	}
+
+	// Remove acme/widgets via installation_repositories.removed -> pauses trigger with source_deleted.
+	removePayload := mustJSON(t, map[string]any{
+		"action":       "removed",
+		"installation": map[string]any{"id": instID},
+		"repositories_removed": []map[string]any{
+			{"id": 1, "full_name": "acme/widgets", "name": "widgets"},
+		},
+		"repositories_added": []map[string]any{},
+	})
+	removeReq := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(removePayload))
+	removeReq.Header.Set("X-GitHub-Event", "installation_repositories")
+	removeReq.Header.Set("X-Hub-Signature-256", signWebhookPayload(removePayload, "test-webhook-secret"))
+	removeRec := httptest.NewRecorder()
+	f.srv.handleGitHubWebhook(removeRec, removeReq)
+	if removeRec.Code != http.StatusOK {
+		t.Fatalf("removed webhook: expected 200, got %d: %s", removeRec.Code, removeRec.Body.String())
+	}
+
+	// Attempting to resume while repo is absent from installation.Repositories must return 409 repo_not_accessible.
+	refusedRec := f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil)
+	if refusedRec.Code != http.StatusConflict {
+		t.Fatalf("resume before re-association: expected 409, got %d: %s", refusedRec.Code, refusedRec.Body.String())
+	}
+	if code := decodeAPIErrorCode(t, refusedRec); code != githubapp.ErrCodeRepoNotAccessible {
+		t.Errorf("expected error code %q, got %q (body: %s)", githubapp.ErrCodeRepoNotAccessible, code, refusedRec.Body.String())
+	}
+	if !strings.Contains(refusedRec.Body.String(), "repository list") {
+		t.Errorf("expected clear reason in 409 body, got: %s", refusedRec.Body.String())
+	}
+
+	// Trigger must still be paused with source_deleted.
+	stillPaused, err := f.store.GetTrigger(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTrigger: %v", err)
+	}
+	if stillPaused.Status != store.TriggerStatusPaused || stillPaused.StatusReason != store.TriggerStatusReasonSourceDeleted {
+		t.Fatalf("expected trigger still paused (source_deleted), got (%q, %q)", stillPaused.Status, stillPaused.StatusReason)
+	}
+
+	// Re-add the repository via installation_repositories.added (mixed case) -> resume now succeeds.
+	addPayload := mustJSON(t, map[string]any{
+		"action":       "added",
+		"installation": map[string]any{"id": instID},
+		"repositories_added": []map[string]any{
+			{"id": 1, "full_name": "Acme/Widgets", "name": "widgets"},
+		},
+		"repositories_removed": []map[string]any{},
+	})
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(addPayload))
+	addReq.Header.Set("X-GitHub-Event", "installation_repositories")
+	addReq.Header.Set("X-Hub-Signature-256", signWebhookPayload(addPayload, "test-webhook-secret"))
+	addRec := httptest.NewRecorder()
+	f.srv.handleGitHubWebhook(addRec, addReq)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("added webhook: expected 200, got %d: %s", addRec.Code, addRec.Body.String())
+	}
+
+	resumedRec := f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil)
+	if resumedRec.Code != http.StatusOK {
+		t.Fatalf("resume after re-association: expected 200, got %d: %s", resumedRec.Code, resumedRec.Body.String())
+	}
+	resumed, err := f.store.GetTrigger(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTrigger after resume: %v", err)
+	}
+	if resumed.Status != store.TriggerStatusActive || resumed.StatusReason != store.TriggerStatusReasonNone {
+		t.Fatalf("expected trigger active with empty reason, got (%q, %q)", resumed.Status, resumed.StatusReason)
 	}
 }

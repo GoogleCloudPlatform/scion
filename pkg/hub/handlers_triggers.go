@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -312,6 +313,44 @@ func (s *Server) authorizeGitHubTriggerSource(w http.ResponseWriter, r *http.Req
 		return false
 	}
 	return true
+}
+
+// requireGitHubInstallationHasRepo checks that project's repository is still
+// present (case-insensitively) in its GitHub App installation's repository
+// list, enforcing §10.3 ("un-paused after re-association") when resuming a
+// GitHub trigger.
+func (s *Server) requireGitHubInstallationHasRepo(w http.ResponseWriter, r *http.Request, project *store.Project) bool {
+	if project == nil || project.GitHubInstallationID == nil || *project.GitHubInstallationID <= 0 {
+		writeError(w, http.StatusConflict, ErrCodeGitHubNotAssociated,
+			"project does not have a GitHub App installation", nil)
+		return false
+	}
+	ownerRepo := s.githubOwnerRepo(project.GitRemote)
+	if ownerRepo == "" {
+		writeError(w, http.StatusConflict, ErrCodeGitHubNotAssociated,
+			"project does not have a GitHub repository remote", nil)
+		return false
+	}
+	inst, err := s.store.GetGitHubInstallation(r.Context(), *project.GitHubInstallationID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusConflict, ErrCodeGitHubNotAssociated,
+				"project's GitHub App installation was not found", nil)
+			return false
+		}
+		slog.ErrorContext(r.Context(), "Failed to load GitHub installation for trigger resume",
+			"project_id", project.ID, "installation_id", *project.GitHubInstallationID, "error", err)
+		InternalError(w)
+		return false
+	}
+	for _, repo := range inst.Repositories {
+		if strings.EqualFold(repo, ownerRepo) {
+			return true
+		}
+	}
+	writeError(w, http.StatusConflict, githubapp.ErrCodeRepoNotAccessible,
+		"project repository is not in the GitHub App installation's repository list; re-add the repository to the installation before resuming this trigger", nil)
+	return false
 }
 
 func triggerSourceLimitMessage(sourceKind string) string {
@@ -1090,6 +1129,9 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 			return
 		}
 		if !s.authorizeGitHubTriggerSource(w, r, project, tr.SourceID) {
+			return
+		}
+		if !s.requireGitHubInstallationHasRepo(w, r, project) {
 			return
 		}
 	default:

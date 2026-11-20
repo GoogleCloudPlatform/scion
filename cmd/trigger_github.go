@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/spf13/cobra"
 )
 
@@ -168,13 +167,12 @@ func runTriggerGitHubStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Best-effort admin enrichment from GET /api/v1/github-app. Non-admin callers
-	// receive 403/401, which is ignored so project members still see project status.
-	if hubCtx.CredentialKind != hubsync.CredentialKindAgentToken {
-		if appCfg, aErr := hubCtx.Client.GitHubApp().GetConfig(ctx); aErr == nil && appCfg != nil {
-			out.App = appCfg
-		} else if aErr != nil && !apiclient.IsForbiddenError(aErr) && !apiclient.IsUnauthorizedError(aErr) && !apiclient.IsNotFoundError(aErr) {
-			return wrapHubError(aErr)
-		}
+	// receive 403/401, which is ignored silently; transient errors warn on stderr
+	// and still render the project-scoped status.
+	if appCfg, aErr := hubCtx.Client.GitHubApp().GetConfig(ctx); aErr == nil && appCfg != nil {
+		out.App = appCfg
+	} else if aErr != nil && !apiclient.IsForbiddenError(aErr) && !apiclient.IsUnauthorizedError(aErr) && !apiclient.IsNotFoundError(aErr) {
+		fmt.Fprintf(os.Stderr, "Warning: could not fetch Hub GitHub App config: %s\n", triggerTerminalText(aErr.Error(), false))
 	}
 
 	if isTriggerJSONOutput() {
@@ -506,15 +504,11 @@ func resolveProjectRefForRouting(ctx context.Context, projects hubclient.Project
 		}
 	}
 
-	if resp, err := projects.List(ctx, &hubclient.ListProjectsOptions{Slug: ref}); err == nil && resp != nil && len(resp.Projects) > 0 {
-		if len(resp.Projects) == 1 {
-			p := resp.Projects[0]
-			return &p, nil
-		}
-		return nil, fmt.Errorf("project %q matched multiple projects; pass a project ID", ref)
+	resp, err := projects.List(ctx, &hubclient.ListProjectsOptions{Slug: ref})
+	if err != nil {
+		return nil, wrapHubError(err)
 	}
-
-	if resp, err := projects.List(ctx, &hubclient.ListProjectsOptions{Name: ref}); err == nil && resp != nil && len(resp.Projects) > 0 {
+	if resp != nil && len(resp.Projects) > 0 {
 		if len(resp.Projects) == 1 {
 			p := resp.Projects[0]
 			return &p, nil
