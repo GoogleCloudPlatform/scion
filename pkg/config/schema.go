@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -250,50 +251,110 @@ func ValidateAgentConfig(data []byte, schemaVersion string) ([]ValidationError, 
 	return validateAgainstSchema(data, schemaVersion, agentSchemaFiles)
 }
 
-// agentV1TopLevelProps maps lowercased top-level property names from
-// agent-v1.schema.json to their canonical schema property names.
-var agentV1TopLevelProps = sync.OnceValue(func() map[string]string {
-	out := make(map[string]string)
+// agentV1TopLevelProps holds the top-level property names from
+// agent-v1.schema.json for exact and Unicode simple case-folding lookup
+// (matching Go's encoding/json struct field matching).
+type agentV1PropIndex struct {
+	exact map[string]struct{}
+	names []string
+}
+
+var agentV1TopLevelProps = sync.OnceValue(func() agentV1PropIndex {
+	idx := agentV1PropIndex{exact: make(map[string]struct{})}
 	schemaData, err := schemasFS.ReadFile(agentSchemaFiles["1"])
 	if err != nil {
-		return out
+		return idx
 	}
 	var parsed struct {
 		Properties map[string]json.RawMessage `json:"properties"`
 	}
 	if err := json.Unmarshal(schemaData, &parsed); err != nil {
-		return out
+		return idx
 	}
+	idx.names = make([]string, 0, len(parsed.Properties))
 	for k := range parsed.Properties {
-		out[strings.ToLower(k)] = k
+		idx.exact[k] = struct{}{}
+		idx.names = append(idx.names, k)
 	}
-	return out
+	sort.Strings(idx.names)
+	return idx
 })
 
-// canonicalizeJSONTopLevelKeys rewrites top-level JSON object keys that match
-// a schema property name case-insensitively to their canonical schema name,
-// mirroring how Go's encoding/json matches struct fields.
-func canonicalizeJSONTopLevelKeys(doc interface{}) {
-	m, ok := doc.(map[string]interface{})
-	if !ok {
-		return
+// canonicalAgentV1Prop maps key to its canonical top-level property name in
+// agent-v1.schema.json using exact match first, then strings.EqualFold
+// (Unicode simple case folding, matching encoding/json). Keys that do not
+// match any schema property are returned unchanged.
+func canonicalAgentV1Prop(key string) string {
+	idx := agentV1TopLevelProps()
+	if _, ok := idx.exact[key]; ok {
+		return key
 	}
-	props := agentV1TopLevelProps()
-	// Snapshot keys to avoid mutating the map while iterating.
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	for _, k := range keys {
-		canon, ok := props[strings.ToLower(k)]
-		if !ok || canon == k {
-			continue
-		}
-		if _, exists := m[canon]; !exists {
-			m[canon] = m[k]
-			delete(m, k)
+	for _, prop := range idx.names {
+		if strings.EqualFold(key, prop) {
+			return prop
 		}
 	}
+	return key
+}
+
+// decodeJSONCanonicalTopLevel decodes a JSON document using UseNumber and,
+// when the root value is a JSON object, streams its top-level members in
+// document order so each key is canonicalized with canonicalAgentV1Prop and
+// later colliding keys overwrite earlier ones — matching Go's encoding/json
+// unmarshaling into api.ScionConfig.
+func decodeJSONCanonicalTopLevel(data []byte) (interface{}, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := tok.(json.Delim); ok && delim == '{' {
+		m := make(map[string]interface{})
+		for dec.More() {
+			kTok, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := kTok.(string)
+			if !ok {
+				return nil, fmt.Errorf("expected object key string, got %T", kTok)
+			}
+			var val interface{}
+			if err := dec.Decode(&val); err != nil {
+				return nil, err
+			}
+			m[canonicalAgentV1Prop(key)] = val
+		}
+		if _, err := dec.Token(); err != nil { // closing '}'
+			return nil, err
+		}
+		if _, err := dec.Token(); err != io.EOF {
+			if err == nil {
+				err = errors.New("unexpected trailing data")
+			}
+			return nil, err
+		}
+		return m, nil
+	}
+
+	// Non-object root value (array, scalar, null): decode normally so schema
+	// validation reports the type mismatch.
+	dec2 := json.NewDecoder(bytes.NewReader(data))
+	dec2.UseNumber()
+	var doc interface{}
+	if err := dec2.Decode(&doc); err != nil {
+		return nil, err
+	}
+	var trailing interface{}
+	if err := dec2.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = errors.New("unexpected trailing data")
+		}
+		return nil, err
+	}
+	return doc, nil
 }
 
 // ValidateTemplateAgentConfig validates a template's agent config file the way
@@ -302,7 +363,8 @@ func canonicalizeJSONTopLevelKeys(doc interface{}) {
 // Empty or comments-only files return no findings, matching LoadConfig and
 // ParseScionAgentConfig. YAML files normalize top-level hyphenated keys to
 // underscored keys before validation; JSON files canonicalize top-level keys
-// matching schema properties case-insensitively.
+// in document order using Unicode simple case folding (strings.EqualFold),
+// matching encoding/json.
 func ValidateTemplateAgentConfig(name string, data []byte) ([]ValidationError, error) {
 	const schemaVersion = "1"
 	schemaPath := agentSchemaFiles[schemaVersion]
@@ -329,19 +391,11 @@ func ValidateTemplateAgentConfig(name string, data []byte) ([]ValidationError, e
 		if len(bytes.TrimSpace(data)) == 0 {
 			return nil, nil
 		}
-		dec := json.NewDecoder(bytes.NewReader(data))
-		dec.UseNumber()
-		if err := dec.Decode(&doc); err != nil {
+		var err error
+		doc, err = decodeJSONCanonicalTopLevel(data)
+		if err != nil {
 			return nil, fmt.Errorf("failed to parse agent config %s: %w", name, err)
 		}
-		var trailing interface{}
-		if err := dec.Decode(&trailing); err != io.EOF {
-			if err == nil {
-				err = errors.New("unexpected trailing data")
-			}
-			return nil, fmt.Errorf("failed to parse agent config %s: %w", name, err)
-		}
-		canonicalizeJSONTopLevelKeys(doc)
 	}
 
 	schemaData, err := schemasFS.ReadFile(schemaPath)

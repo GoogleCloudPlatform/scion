@@ -783,6 +783,62 @@ func TestValidateTemplateAgentConfig_InvalidAndNormalization(t *testing.T) {
 		assert.Equal(t, "auth_selectedType", findings[0].Path)
 	})
 
+	t.Run("json duplicate case-variant last key wins matching encoding/json", func(t *testing.T) {
+		// Runtime reads "bogus" because encoding/json applies keys in document order.
+		rawAuth := []byte(`{"auth_selectedType":"api-key","AUTH_SELECTEDTYPE":"bogus"}`)
+		cfg, err := ParseScionAgentConfig("scion-agent.json", rawAuth)
+		require.NoError(t, err)
+		assert.Equal(t, "bogus", cfg.AuthSelectedType)
+
+		findings, err := ValidateTemplateAgentConfig("scion-agent.json", rawAuth)
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "auth_selectedType", findings[0].Path)
+
+		rawDur := []byte(`{"max_duration":"2h","MAX_DURATION":"2 hours"}`)
+		cfg, err = ParseScionAgentConfig("scion-agent.json", rawDur)
+		require.NoError(t, err)
+		assert.Equal(t, "2 hours", cfg.MaxDuration)
+
+		findings, err = ValidateTemplateAgentConfig("scion-agent.json", rawDur)
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "max_duration", findings[0].Path)
+
+		// Reverse order: valid key comes last, runtime reads valid value -> accepted.
+		rawValidLast := []byte(`{"AUTH_SELECTEDTYPE":"bogus","auth_selectedType":"api-key"}`)
+		cfg, err = ParseScionAgentConfig("scion-agent.json", rawValidLast)
+		require.NoError(t, err)
+		assert.Equal(t, "api-key", cfg.AuthSelectedType)
+
+		findings, err = ValidateTemplateAgentConfig("scion-agent.json", rawValidLast)
+		require.NoError(t, err)
+		assert.Empty(t, findings)
+	})
+
+	t.Run("json unicode simple case-folding bypass refused", func(t *testing.T) {
+		// U+017F (ſ, Latin small letter long s) folds to 's' under encoding/json.
+		raw := []byte("{\"auth_\u017felectedType\":\"bogus\"}")
+		cfg, err := ParseScionAgentConfig("scion-agent.json", raw)
+		require.NoError(t, err)
+		assert.Equal(t, "bogus", cfg.AuthSelectedType)
+
+		findings, err := ValidateTemplateAgentConfig("scion-agent.json", raw)
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "auth_selectedType", findings[0].Path)
+	})
+
+	t.Run("yaml duplicate key after hyphen normalization refused", func(t *testing.T) {
+		raw := []byte("auth_selectedType: api-key\nauth-selectedType: none\n")
+		_, parseErr := ParseScionAgentConfig("scion-agent.yaml", raw)
+		require.Error(t, parseErr)
+
+		_, valErr := ValidateTemplateAgentConfig("scion-agent.yaml", raw)
+		require.Error(t, valErr)
+		assert.Contains(t, valErr.Error(), "failed to parse agent config scion-agent.yaml")
+	})
+
 	t.Run("missing required nested property names field", func(t *testing.T) {
 		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte("services:\n  - name: web\n"))
 		require.NoError(t, err)
