@@ -436,11 +436,11 @@ func runTriggerGitHubPrimaryList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "INSTALLATION\tREPO\tSTATUS\tPRIMARY\tPROJECTS")
+	_, _ = fmt.Fprintln(w, "INSTALLATION\tREPO\tSTATUS\tPRIMARY\tPROJECTS")
 	for _, entry := range entries {
 		primaryStr := formatRoutingPrimaryColumn(entry)
 		projectsStr := formatRoutingProjectsColumn(entry.Projects)
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
 			entry.InstallationID,
 			triggerTerminalText(entry.Repo, false),
 			triggerTerminalText(entry.Status, false),
