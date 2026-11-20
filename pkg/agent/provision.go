@@ -2594,24 +2594,27 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// 2d. Compose agent home directory
 	homeCopyStart := time.Now()
 
+	// Each layer's home/ is read without following a symbolic link and
+	// written confined to the agent home (overlayHomeLayer).
+	agentHomeDir, err := agenthome.OpenCreate(agentHome, 0755)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to open agent home: %w", err)
+	}
+	defer func() { _ = agentHomeDir.Close() }()
+
 	// Step 1: Copy harness-config base home → agentHome
-	hcHome := filepath.Join(hcDir.Path, "home")
-	if info, err := os.Stat(hcHome); err == nil && info.IsDir() {
-		if err := util.CopyDir(hcHome, agentHome); err != nil {
-			return "", "", nil, fmt.Errorf("failed to copy harness-config home: %w", err)
-		}
+	if _, err := overlayHomeLayer(agentHomeDir, hcDir.OpenDir); err != nil {
+		return "", "", nil, fmt.Errorf("failed to copy harness-config home %s: %w", harnessConfigName, err)
 	}
 
 	// Step 2: Copy template home → agentHome (overlay; template files win on conflict)
 	templateHomeCopied := false
 	for _, tpl := range chain {
-		templateHome := filepath.Join(tpl.Path, "home")
-		if info, err := os.Stat(templateHome); err == nil && info.IsDir() {
-			if err := util.CopyDir(templateHome, agentHome); err != nil {
-				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
-			}
-			templateHomeCopied = true
+		copied, err := overlayHomeLayer(agentHomeDir, tpl.OpenDir)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
 		}
+		templateHomeCopied = templateHomeCopied || copied
 	}
 
 	// Safety net: an agent must never come up without its base home files.
