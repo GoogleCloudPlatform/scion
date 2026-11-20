@@ -291,6 +291,12 @@ func TestGitHubCommentTrigger_AuthoringAndAuthzMatrix(t *testing.T) {
 	rec = f.doTrigger(t, uatWithComment, "", http.MethodPost, validReq("gh-comment-uat-allowed"))
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
+	// 2b. Agent callers cannot author github.comment triggers in Stage 3 (design rev 1.12 §8.1).
+	agentRec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, validReq("gh-comment-agent-denied"))
+	assert.Equal(t, http.StatusForbidden, agentRec.Code, agentRec.Body.String())
+	assert.Contains(t, agentRec.Body.String(), "Agent callers cannot author github.comment triggers")
+	assert.NotContains(t, strings.ToLower(agentRec.Body.String()), "delegation ceiling")
+
 	// 3. Payload & slot validation.
 	// 3a. Non-github source -> 400.
 	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "comment-wh-ep"})
@@ -603,6 +609,26 @@ func TestGitHubCommentTrigger_E2E_PostRetryRefusalRateLimitStaleAndAudit(t *test
 	outRevoked := f.srv.fireAction(ctx, mkReq("fire-revoked", 1, false))
 	assert.Equal(t, hubfire.FireStatusRefused, outRevoked.Status)
 	assert.Equal(t, "github.comment refused", outRevoked.Error)
+
+	// 9. Agent principal cannot execute github.comment fires in Stage 3 (design rev 1.12 §8.1).
+	commentsBeforeAgentFire := len(gh.snapshotComments())
+	agentFireReq := mkReq("fire-agent-principal", 1, false)
+	agentFireReq.Authority.Attribution = store.InitiatorAttribution{
+		AttributionVersion:      1,
+		InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+		InitiatorPrincipalID:    f.agentA.ID,
+		InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+		InitiatorCredentialID:   f.agentA.ID,
+		AuthorizationRevision:   1,
+	}
+	agentFireReq.Authority.Ceiling = store.EffectCeiling{
+		Kind:    store.EffectCeilingBounded,
+		Version: permissions.CeilingVersionV1,
+	}
+	outAgentFire := f.srv.fireAction(ctx, agentFireReq)
+	assert.Equal(t, hubfire.FireStatusRefused, outAgentFire.Status)
+	assert.Equal(t, "github.comment refused", outAgentFire.Error)
+	assert.Len(t, gh.snapshotComments(), commentsBeforeAgentFire, "agent principal fire must not call GitHub")
 
 	// Keep unused proj referenced cleanly.
 	_ = proj

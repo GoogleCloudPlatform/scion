@@ -77,8 +77,8 @@
 - [webhookendpoint.delete](#webhookendpointdelete) — Delete a webhook endpoint, removing its hub-scoped internal signing secret rows and pausing dependent triggers with status_reason=source_deleted. An agent caller targeting another principal's endpoint receives the same 404 as not-found
 - [trigger.list](#triggerlist) — List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)
 - [trigger.read](#triggerread) — Read a trigger definition, a trigger's fire history, or a trigger event in a project. An agent caller reading an event it neither received on its own endpoint nor fired through a trigger it holds receives the same 404 as not-found
-- [trigger.create](#triggercreate) — Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id="") require hub.github_triggers and an authorized GitHub App association on the project; a github.comment action requires github_trigger.comment; all actions pass their target checks
-- [trigger.update](#triggerupdate) — Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target (a github.comment action requires github_trigger.comment) and record the caller's attribution and frozen ceiling
+- [trigger.create](#triggercreate) — Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id="") require hub.github_triggers and an authorized GitHub App association on the project; a github.comment action requires github_trigger.comment (users only in Stage 3; agents cannot author github.comment triggers because github_trigger.comment has no agent scope); all actions pass their target checks
+- [trigger.update](#triggerupdate) — Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target (a github.comment action requires github_trigger.comment, users only in Stage 3) and record the caller's attribution and frozen ceiling
 - [trigger.pause](#triggerpause) — Pause an event trigger. Pausing only stops future fires, so a user access token with trigger:update is admitted
 - [trigger.delete](#triggerdelete) — Delete an event trigger in a project
 - [trigger.fire](#triggerfire) — Fire a matched event trigger's message, dispatch_agent, or github.comment action through the shared fire core under the authority recorded by the trigger's current revision; a dispatch_agent fire re-checks agent.create, CanDelegate, the frozen ceiling and standing, and creates the agent under the recorded principal
@@ -3365,7 +3365,7 @@
 
 **Domain:** trigger
 
-**Description:** Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id="") require hub.github_triggers and an authorized GitHub App association on the project; a github.comment action requires github_trigger.comment; all actions pass their target checks
+**Description:** Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id="") require hub.github_triggers and an authorized GitHub App association on the project; a github.comment action requires github_trigger.comment (users only in Stage 3; agents cannot author github.comment triggers because github_trigger.comment has no agent scope); all actions pass their target checks
 
 ### Entry Points
 
@@ -3388,7 +3388,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- Authoring a trigger records the author's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) on the trigger row. A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling and creates agents bounded by the recorded principal's current authority and frozen ceiling; a github.comment action requires github_trigger.comment
+- Authoring a trigger records the author's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) on the trigger row. A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling and creates agents bounded by the recorded principal's current authority and frozen ceiling; a github.comment action requires github_trigger.comment (users only in Stage 3; agents are refused because github_trigger.comment has no agent scope)
 
 **Denial Codes:** `forbidden`, `not_found`
 
@@ -3403,7 +3403,7 @@
 
 **Domain:** trigger
 
-**Description:** Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target (a github.comment action requires github_trigger.comment) and record the caller's attribution and frozen ceiling
+**Description:** Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target (a github.comment action requires github_trigger.comment, users only in Stage 3) and record the caller's attribution and frozen ceiling
 
 ### Entry Points
 
@@ -3427,7 +3427,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- A resume, and an update that changes the source, match rules, action, subject rules or status, records the caller's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) in place of the stored ones; a metadata-only update changes neither. A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling; a github.comment action requires github_trigger.comment
+- A resume, and an update that changes the source, match rules, action, subject rules or status, records the caller's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) in place of the stored ones; a metadata-only update changes neither. A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling; a github.comment action requires github_trigger.comment (users only in Stage 3; agents have no github_trigger.comment scope)
 
 **Denial Codes:** `forbidden`, `not_found`
 

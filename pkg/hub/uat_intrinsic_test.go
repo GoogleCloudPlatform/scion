@@ -288,13 +288,12 @@ func TestUATIntrinsic_RegistryTableNotWidened(t *testing.T) {
 func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 	allowed := map[string]map[string]bool{
 		"EffectCeilingAllows": {
-			"uatIntrinsicDecides":                    true, // compares the stored and the hop ceiling
-			"deliverIDsAllowedByChain":               true, // a chain fold
-			"authorizeMessageFire":                   true, // scheduler/deferred ceiling: not a token hop
-			"authorizeScheduledWake":                 true, // scheduler ceiling: not a token hop
-			"authorizeExecFire":                      true, // scheduler/deferred ceiling: not a token hop
-			"authorizeGitHubCommentFire":             true, // deferred trigger ceiling and agent-row fold: not a token hop
-			"authorizeTriggerGitHubCommentAuthoring": true, // agent caller's sourceEffectCeiling fold: not a token hop
+			"uatIntrinsicDecides":        true, // compares the stored and the hop ceiling
+			"deliverIDsAllowedByChain":   true, // a chain fold
+			"authorizeMessageFire":       true, // scheduler/deferred ceiling: not a token hop
+			"authorizeScheduledWake":     true, // scheduler ceiling: not a token hop
+			"authorizeExecFire":          true, // scheduler/deferred ceiling: not a token hop
+			"authorizeGitHubCommentFire": true, // deferred trigger ceiling: not a token hop
 		},
 		"childRoleWithinCeiling": {
 			"planAgentDelegatorReissue": true, // an agent parent's ceiling (agentRowEffectCeiling)

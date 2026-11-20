@@ -83,7 +83,7 @@ func init() {
 		},
 	}
 	for _, slot := range slots {
-		if err := triggertemplate.Register(slot); err != nil && !errors.Is(err, triggertemplate.ErrSlotExists) {
+		if err := triggertemplate.Register(slot); err != nil {
 			panic(err)
 		}
 	}
@@ -131,6 +131,22 @@ func (a *githubCommentAction) Permission() string {
 
 func (a *githubCommentAction) Detaches(_ hubfire.FireRequest) bool {
 	return false
+}
+
+// SanitizedReasons implements FireErrorSanitizer so github.comment's generic
+// failure reasons stay with the action rather than in the generic fire core.
+func (a *githubCommentAction) SanitizedReasons() ([]string, string) {
+	return []string{
+		"invalid github.comment payload",
+		"github comment refused",
+		"github rate limited",
+		"github comment failed",
+		"github write not permitted",
+		"github permission not permitted",
+		"github association not authorized",
+		"stale event",
+		"comment rate limited",
+	}, "github comment failed"
 }
 
 func parseAndValidateGitHubCommentPayload(raw string) (GitHubCommentActionPayload, *triggertemplate.Template, error) {
@@ -271,21 +287,9 @@ func (s *Server) authorizeGitHubCommentFire(
 		return nil
 
 	case store.DelegationPrincipalAgent:
-		if auth.agent == nil {
-			return errors.New("principal agent not resolved")
-		}
-		callerRole, _ := agentRoleAndScopes(auth.agent)
-		if callerRole != AgentRoleFull {
-			return fmt.Errorf("agent role %q is not %q", callerRole, AgentRoleFull)
-		}
-		rowCeiling, err := s.authzService.agentRowEffectCeiling(ctx, auth.agent)
-		if err != nil {
-			return fmt.Errorf("agent ceiling lookup failed: %w", err)
-		}
-		if !EffectCeilingAllows(rowCeiling, githubTriggerCommentPermission, false) {
-			return fmt.Errorf("agent delegation ceiling denies %s", githubTriggerCommentPermission)
-		}
-		return nil
+		// Design rev 1.12 §8.1: in Stage 3, github_trigger.comment has no agent
+		// scope, so agent principals cannot execute github.comment triggers.
+		return errors.New("agent principals cannot execute github.comment triggers")
 
 	default:
 		return fmt.Errorf("unsupported principal kind %q", auth.PrincipalKind)

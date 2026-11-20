@@ -564,28 +564,11 @@ func (s *Server) authorizeTriggerGitHubCommentAuthoring(
 		}
 
 	case "agent":
-		if s.authzService == nil {
-			writeForbidden(w, "")
-			return "", false
-		}
-		agent, err := s.store.GetAgent(ctx, identity.ID())
-		if err != nil || agent == nil || !agent.DeletedAt.IsZero() {
-			logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent caller not found")
-			writeForbidden(w, "Agent is not authorized to author github.comment triggers")
-			return "", false
-		}
-		callerRole, _ := agentRoleAndScopes(agent)
-		if callerRole != AgentRoleFull {
-			logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent role must be full for github.comment")
-			writeForbidden(w, "Agent requires role full to author github.comment triggers")
-			return "", false
-		}
-		ceiling, _, cErr := s.authzService.sourceEffectCeiling(ctx, identity)
-		if cErr != nil || !EffectCeilingAllows(ceiling, githubTriggerCommentPermission, false) {
-			logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent delegation ceiling denies github_trigger.comment")
-			writeForbiddenDenial(w, "Agent delegation ceiling does not allow github_trigger.comment", DeniedByDelegationCeiling)
-			return "", false
-		}
+		// Design rev 1.12 §8.1: in Stage 3, github_trigger.comment has no agent
+		// scope, so agents cannot author github.comment triggers.
+		logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent callers cannot author github.comment triggers")
+		writeForbidden(w, "Agent callers cannot author github.comment triggers")
+		return "", false
 
 	default:
 		logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "identity type may not author github.comment triggers")
