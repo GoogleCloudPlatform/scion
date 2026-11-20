@@ -5409,9 +5409,12 @@ type AccessConstraintStore interface {
 	// ErrRevisionConflict if the stored revision differs (optimistic concurrency).
 	UpdateAccessConstraint(ctx context.Context, c *AccessConstraint, expectedRevision int64) (*AccessConstraint, error)
 
-	// DeleteAccessConstraint deletes an access constraint by ID.
+	// DeleteAccessConstraint deletes an access constraint by ID, returning the
+	// deleted constraint state as locked inside the transaction.
 	// Returns ErrNotFound if the constraint doesn't exist.
-	DeleteAccessConstraint(ctx context.Context, id string) error
+	// If expectedRevision > 0, returns ErrRevisionConflict if the stored
+	// revision differs (optimistic concurrency), leaving the constraint intact.
+	DeleteAccessConstraint(ctx context.Context, id string, expectedRevision int64) (*AccessConstraint, error)
 
 	// ListAccessConstraints returns all access constraints with pagination.
 	// limit of 0 defaults to 100. Maximum allowed limit is 1000.

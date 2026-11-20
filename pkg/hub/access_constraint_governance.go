@@ -360,22 +360,19 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 		result = updateResult
 
 	case "delete":
-		// Re-read to verify the revision and capture the deleted state for
-		// the post-commit log event.
-		existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
+		// Atomically lock, verify revision, delete, and capture the deleted
+		// state for the post-commit log event.
+		deleted, err := gs.store.DeleteAccessConstraint(ctx, req.ConstraintID, req.BaseRevision)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load constraint for delete: %w", err)
-		}
-		if req.BaseRevision > 0 && existing.Revision != req.BaseRevision {
-			return nil, &GovernanceError{
-				Code:    ErrCodeStaleAuthorizationPreview,
-				Message: fmt.Sprintf("constraint revision %d does not match expected %d", existing.Revision, req.BaseRevision),
+			if errors.Is(err, store.ErrRevisionConflict) {
+				return nil, &GovernanceError{
+					Code:    ErrCodeStaleAuthorizationPreview,
+					Message: "constraint was modified by another operation since preview",
+				}
 			}
-		}
-		deletedState = existing
-		if err := gs.store.DeleteAccessConstraint(ctx, req.ConstraintID); err != nil {
 			return nil, fmt.Errorf("delete failed: %w", err)
 		}
+		deletedState = deleted
 		result = &CommitResult{
 			Operation:      "delete",
 			Classification: classification,

@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
@@ -367,6 +368,237 @@ func TestAccessConstraintMutationResponses_AuditIDIsUUID(t *testing.T) {
 	// history endpoint answers the non-enumerating 404.
 	gone := doRequest(t, srv, http.MethodGet, "/api/v1/admin/access-constraints/"+created.ID+"/audit", nil)
 	assert.Equal(t, http.StatusNotFound, gone.Code, "body: %s", gone.Body.String())
+}
+
+// ---------------------------------------------------------------------------
+// FU-4 (ptone/scion#5852): atomic DELETE revision check under concurrent writes
+// ---------------------------------------------------------------------------
+
+// p6DeleteRaceStore pauses CommitBoundaryChange right as it enters
+// DeleteAccessConstraint (after preview validation, re-authorization, and the
+// pre-delete GetAccessConstraint have all completed), allowing a concurrent
+// goroutine to commit an update or delete before the store delete executes.
+type p6DeleteRaceStore struct {
+	store.Store
+	targetID      string
+	once          sync.Once
+	reachedDelete chan struct{}
+	releaseDelete chan struct{}
+}
+
+func (s *p6DeleteRaceStore) DeleteAccessConstraint(ctx context.Context, id string, expectedRevision int64) (*store.AccessConstraint, error) {
+	if id == s.targetID {
+		s.once.Do(func() {
+			close(s.reachedDelete)
+			<-s.releaseDelete
+		})
+	}
+	return s.Store.DeleteAccessConstraint(ctx, id, expectedRevision)
+}
+
+func TestGovernanceDelete_ConcurrentUpdateBetweenPreviewAndDeleteReturnsStale(t *testing.T) {
+	gs, ps, authz, realStore := govTestSetup(t)
+	adminID, created := p6SeedUpdatableConstraint(t, gs, ps, realStore, "p6-delete-race-update")
+	require.Equal(t, int64(1), created.Revision)
+
+	historyBefore, err := realStore.ListConstraintHistory(context.Background(), created.ID)
+	require.NoError(t, err)
+	require.Len(t, historyBefore, 1, "seeded constraint has its create history row")
+
+	raceStore := &p6DeleteRaceStore{
+		Store:         realStore,
+		targetID:      created.ID,
+		reachedDelete: make(chan struct{}),
+		releaseDelete: make(chan struct{}),
+	}
+	raceGS := NewGovernanceService(raceStore, ps, authz, gs.logger)
+	raceGS.nowFunc = gs.nowFunc
+	deleteSink := &p6DeleteAuditSink{store: realStore}
+	raceGS.deleteAuditSink = deleteSink
+
+	actor := pvTestActor(adminID)
+	preview, err := ps.GeneratePreview(context.Background(), PreviewRequest{
+		Operation:    "delete",
+		ConstraintID: created.ID,
+		BaseRevision: created.Revision,
+		Actor:        actor,
+	})
+	require.NoError(t, err)
+
+	type commitOutcome struct {
+		result *CommitResult
+		err    error
+	}
+	done := make(chan commitOutcome, 1)
+	go func() {
+		res, commitErr := raceGS.CommitBoundaryChange(p6OperationContext(t, "request-p6-delete-race"), CommitRequest{
+			Operation:    "delete",
+			ConstraintID: created.ID,
+			BaseRevision: created.Revision,
+			PreviewToken: preview.PreviewToken,
+			PreviewID:    preview.PreviewID,
+			DraftHash:    preview.DraftHash,
+			Actor:        actor,
+		})
+		done <- commitOutcome{result: res, err: commitErr}
+	}()
+
+	// Wait until CommitBoundaryChange has passed token validation, re-auth, and
+	// pre-delete reads and is about to execute the store delete.
+	<-raceStore.reachedDelete
+
+	// Commit a concurrent update advancing revision 1 -> 2 before releasing delete.
+	draft := *created
+	draft.Purpose = "updated concurrently before delete"
+	updated, err := realStore.UpdateAccessConstraint(context.Background(), &draft, created.Revision)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), updated.Revision)
+	close(raceStore.releaseDelete)
+
+	outcome := <-done
+	require.Error(t, outcome.err)
+	assert.Nil(t, outcome.result)
+	var govErr *GovernanceError
+	require.ErrorAs(t, outcome.err, &govErr)
+	assert.Equal(t, ErrCodeStaleAuthorizationPreview, govErr.Code)
+	assert.Equal(t, http.StatusConflict, governanceErrorStatus(govErr.Code))
+
+	// Constraint must remain intact at revision 2 with its history un-cascaded,
+	// and no stale access_boundary/delete audit event may be emitted.
+	stillThere, err := realStore.GetAccessConstraint(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), stillThere.Revision)
+	assert.Equal(t, "updated concurrently before delete", stillThere.Purpose)
+
+	historyAfter, err := realStore.ListConstraintHistory(context.Background(), created.ID)
+	require.NoError(t, err)
+	assert.Len(t, historyAfter, len(historyBefore), "failed stale delete must not cascade history")
+	assert.Zero(t, deleteSink.calls, "rejected stale delete must emit no audit event")
+}
+
+func TestGovernanceDelete_ConcurrentUpdateHTTP409AndConcurrentDeleteHTTP404(t *testing.T) {
+	t.Run("concurrent-update-returns-409", func(t *testing.T) {
+		srv, realStore := b7TestServer(t)
+		srv.SetRequestLogger(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+		targetID := pvSeedUser(t, realStore, "p6-http-race-409-target")
+
+		created, err := commitAuditedConstraint(t, p6OperationContext(t, "request-audit-create"),
+			srv.governanceService, srv.previewService, &store.AccessConstraint{
+				Name:                 "p6-http-race-409",
+				SubjectKind:          store.ConstraintSubjectPrincipal,
+				SubjectPrincipalType: pvStrPtr("user"),
+				SubjectPrincipalID:   &targetID,
+				ScopeType:            store.RoleScopeSystem,
+				MaximumPermissions:   []string{"agent.read"},
+				Purpose:              "http race 409",
+				CreatedBy:            DevUserID,
+			}, pvTestActor(DevUserID))
+		require.NoError(t, err)
+
+		raceStore := &p6DeleteRaceStore{
+			Store:         realStore,
+			targetID:      created.Constraint.ID,
+			reachedDelete: make(chan struct{}),
+			releaseDelete: make(chan struct{}),
+		}
+		deleteSink := &p6DeleteAuditSink{store: realStore}
+		raceGS := NewGovernanceService(raceStore, srv.previewService, srv.authzService, srv.governanceService.logger)
+		raceGS.deleteAuditSink = deleteSink
+		srv.governanceService = raceGS
+
+		previewResp := doRequest(t, srv, http.MethodPost, "/api/v1/admin/access-constraint-previews", map[string]any{
+			"operation":    "delete",
+			"constraintId": created.Constraint.ID,
+			"baseRevision": fmt.Sprintf("%d", created.Constraint.Revision),
+		})
+		require.Equal(t, http.StatusOK, previewResp.Code, "preview: %s", previewResp.Body.String())
+		var preview PreviewResult
+		require.NoError(t, json.Unmarshal(previewResp.Body.Bytes(), &preview))
+
+		respCh := make(chan int, 1)
+		bodyCh := make(chan []byte, 1)
+		go func() {
+			rec := doRequestHeaders(t, srv, http.MethodDelete, "/api/v1/admin/access-constraints/"+created.Constraint.ID, nil,
+				map[string]string{"X-Preview-Token": preview.PreviewToken})
+			respCh <- rec.Code
+			bodyCh <- rec.Body.Bytes()
+		}()
+
+		<-raceStore.reachedDelete
+		draft := *created.Constraint
+		draft.Purpose = "concurrent update during http delete"
+		_, updateErr := realStore.UpdateAccessConstraint(context.Background(), &draft, created.Constraint.Revision)
+		require.NoError(t, updateErr)
+		close(raceStore.releaseDelete)
+
+		code := <-respCh
+		body := <-bodyCh
+		assert.Equal(t, http.StatusConflict, code, "body: %s", string(body))
+		assert.Contains(t, string(body), ErrCodeStaleAuthorizationPreview)
+		assert.Zero(t, deleteSink.calls)
+
+		stillThere, getErr := realStore.GetAccessConstraint(context.Background(), created.Constraint.ID)
+		require.NoError(t, getErr)
+		assert.Equal(t, int64(2), stillThere.Revision)
+	})
+
+	t.Run("concurrent-delete-returns-404", func(t *testing.T) {
+		srv, realStore := b7TestServer(t)
+		srv.SetRequestLogger(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+		targetID := pvSeedUser(t, realStore, "p6-http-race-404-target")
+
+		created, err := commitAuditedConstraint(t, p6OperationContext(t, "request-audit-create"),
+			srv.governanceService, srv.previewService, &store.AccessConstraint{
+				Name:                 "p6-http-race-404",
+				SubjectKind:          store.ConstraintSubjectPrincipal,
+				SubjectPrincipalType: pvStrPtr("user"),
+				SubjectPrincipalID:   &targetID,
+				ScopeType:            store.RoleScopeSystem,
+				MaximumPermissions:   []string{"agent.read"},
+				Purpose:              "http race 404",
+				CreatedBy:            DevUserID,
+			}, pvTestActor(DevUserID))
+		require.NoError(t, err)
+
+		raceStore := &p6DeleteRaceStore{
+			Store:         realStore,
+			targetID:      created.Constraint.ID,
+			reachedDelete: make(chan struct{}),
+			releaseDelete: make(chan struct{}),
+		}
+		deleteSink := &p6DeleteAuditSink{store: realStore}
+		raceGS := NewGovernanceService(raceStore, srv.previewService, srv.authzService, srv.governanceService.logger)
+		raceGS.deleteAuditSink = deleteSink
+		srv.governanceService = raceGS
+
+		previewResp := doRequest(t, srv, http.MethodPost, "/api/v1/admin/access-constraint-previews", map[string]any{
+			"operation":    "delete",
+			"constraintId": created.Constraint.ID,
+			"baseRevision": fmt.Sprintf("%d", created.Constraint.Revision),
+		})
+		require.Equal(t, http.StatusOK, previewResp.Code, "preview: %s", previewResp.Body.String())
+		var preview PreviewResult
+		require.NoError(t, json.Unmarshal(previewResp.Body.Bytes(), &preview))
+
+		respCh := make(chan int, 1)
+		bodyCh := make(chan []byte, 1)
+		go func() {
+			rec := doRequestHeaders(t, srv, http.MethodDelete, "/api/v1/admin/access-constraints/"+created.Constraint.ID, nil,
+				map[string]string{"X-Preview-Token": preview.PreviewToken})
+			respCh <- rec.Code
+			bodyCh <- rec.Body.Bytes()
+		}()
+
+		<-raceStore.reachedDelete
+		_, delErr := realStore.DeleteAccessConstraint(context.Background(), created.Constraint.ID, created.Constraint.Revision)
+		require.NoError(t, delErr)
+		close(raceStore.releaseDelete)
+
+		code := <-respCh
+		body := <-bodyCh
+		assert.Equal(t, http.StatusNotFound, code, "body: %s", string(body))
+		assert.Zero(t, deleteSink.calls)
+	})
 }
 
 // ---------------------------------------------------------------------------

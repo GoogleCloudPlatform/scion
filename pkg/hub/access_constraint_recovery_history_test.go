@@ -368,7 +368,8 @@ func TestRecoveryHistory_SkipsConstraintDeletedAfterList(t *testing.T) {
 			ids := p6IDs(constraints)
 			deleted := ids[1]
 			faults := &p6RecoveryFaults{afterList: func() {
-				require.NoError(t, s.DeleteAccessConstraint(context.Background(), deleted))
+				_, delErr := s.DeleteAccessConstraint(context.Background(), deleted, 0)
+				require.NoError(t, delErr)
 			}}
 			rs := NewRecoveryService(&p6RecoveryStore{Store: s, faults: faults}, nil, slog.Default())
 

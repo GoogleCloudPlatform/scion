@@ -112,7 +112,8 @@ func TestConstraintHistory_CascadesWithLiveConstraint(t *testing.T) {
 	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
 		return tx.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, "cascade-event", time.Now().UTC()))
 	}))
-	require.NoError(t, composite.DeleteAccessConstraint(ctx, constraint.ID))
+	_, err = composite.DeleteAccessConstraint(ctx, constraint.ID, 0)
+	require.NoError(t, err)
 	rows, err := composite.ListConstraintHistory(ctx, constraint.ID)
 	require.NoError(t, err)
 	assert.Empty(t, rows)
@@ -203,6 +204,62 @@ func TestUpdateAccessConstraint_InsideWithTxUsesExistingTransaction(t *testing.T
 		return updateErr
 	})
 	require.ErrorIs(t, err, store.ErrRevisionConflict)
+}
+
+func TestDeleteAccessConstraint_InsideWithTxUsesExistingTransaction(t *testing.T) {
+	ctx := context.Background()
+	composite := NewCompositeStore(enttest.NewClient(t))
+	constraint, err := composite.CreateAccessConstraint(ctx, historyTestConstraint("history-delete-in-tx"))
+	require.NoError(t, err)
+	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
+		return tx.AppendConstraintHistoryTx(ctx, historyTestEntry(constraint.ID, "delete-in-tx-seed", time.Now().UTC()))
+	}))
+
+	// Stale revision inside WithTx fails with ErrRevisionConflict and preserves row + history.
+	err = composite.WithTx(ctx, func(tx store.Store) error {
+		_, delErr := tx.DeleteAccessConstraint(ctx, constraint.ID, constraint.Revision+1)
+		return delErr
+	})
+	require.ErrorIs(t, err, store.ErrRevisionConflict)
+	rows, err := composite.ListConstraintHistory(ctx, constraint.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+
+	// Rolled-back path: a failure after tx.DeleteAccessConstraint rolls back
+	// both the delete and the history cascade.
+	sentinel := errors.New("injected failure after delete")
+	err = composite.WithTx(ctx, func(tx store.Store) error {
+		deleted, delErr := tx.DeleteAccessConstraint(ctx, constraint.ID, constraint.Revision)
+		if delErr != nil {
+			return delErr
+		}
+		if deleted.Revision != constraint.Revision {
+			return fmt.Errorf("deleted revision = %d, want %d", deleted.Revision, constraint.Revision)
+		}
+		return sentinel
+	})
+	require.ErrorIs(t, err, sentinel)
+	stillThere, err := composite.GetAccessConstraint(ctx, constraint.ID)
+	require.NoError(t, err)
+	assert.Equal(t, constraint.Revision, stillThere.Revision)
+	rows, err = composite.ListConstraintHistory(ctx, constraint.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+
+	// Committed path: delete commits on the caller's tx and cascades history.
+	var deleted *store.AccessConstraint
+	require.NoError(t, composite.WithTx(ctx, func(tx store.Store) error {
+		var delErr error
+		deleted, delErr = tx.DeleteAccessConstraint(ctx, constraint.ID, constraint.Revision)
+		return delErr
+	}))
+	require.NotNil(t, deleted)
+	assert.Equal(t, constraint.Revision, deleted.Revision)
+	_, err = composite.GetAccessConstraint(ctx, constraint.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	rows, err = composite.ListConstraintHistory(ctx, constraint.ID)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
 }
 
 // TestConstraintHistory_MixedOperationsPruneOldestFirst covers P6-3: the

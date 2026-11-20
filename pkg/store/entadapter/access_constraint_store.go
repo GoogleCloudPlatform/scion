@@ -357,17 +357,68 @@ func (s *AccessConstraintStore) updateAccessConstraint(ctx context.Context, clie
 	return entAccessConstraintToStore(updated), nil
 }
 
-// DeleteAccessConstraint deletes an access constraint by ID.
-func (s *AccessConstraintStore) DeleteAccessConstraint(ctx context.Context, id string) error {
+// DeleteAccessConstraint deletes an access constraint by ID, returning the
+// deleted constraint state as locked inside the transaction.
+// If expectedRevision > 0, returns store.ErrRevisionConflict if the stored
+// revision differs (optimistic concurrency), leaving the constraint intact.
+// Returns store.ErrNotFound if the constraint does not exist.
+func (s *AccessConstraintStore) DeleteAccessConstraint(ctx context.Context, id string, expectedRevision int64) (*store.AccessConstraint, error) {
 	uid, err := parseGetID(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	err = s.client.AccessConstraint.DeleteOneID(uid).Exec(ctx)
+
+	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return mapError(err)
+		if errors.Is(err, ent.ErrTxStarted) {
+			// Already inside a caller's transaction (store.WithTx): run on
+			// it so the delete commits or rolls back with the caller's work.
+			return s.deleteAccessConstraint(ctx, s.client, uid, expectedRevision)
+		}
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	return nil
+	defer func() { _ = tx.Rollback() }()
+	deleted, err := s.deleteAccessConstraint(ctx, tx.Client(), uid, expectedRevision)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return deleted, nil
+}
+
+func (s *AccessConstraintStore) deleteAccessConstraint(ctx context.Context, client *ent.Client, uid uuid.UUID, expectedRevision int64) (*store.AccessConstraint, error) {
+	q := client.AccessConstraint.Query().Where(accessconstraint.IDEQ(uid))
+	if s.usesRowLocks() {
+		q = q.ForUpdate()
+	}
+	existing, err := q.Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	if expectedRevision > 0 && existing.Revision != expectedRevision {
+		return nil, store.ErrRevisionConflict
+	}
+
+	if expectedRevision > 0 {
+		n, err := client.AccessConstraint.Delete().
+			Where(accessconstraint.IDEQ(uid), accessconstraint.RevisionEQ(expectedRevision)).
+			Exec(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if n == 0 {
+			return nil, store.ErrRevisionConflict
+		}
+		return entAccessConstraintToStore(existing), nil
+	}
+
+	if err := client.AccessConstraint.DeleteOneID(uid).Exec(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	return entAccessConstraintToStore(existing), nil
 }
 
 // ListAccessConstraints returns all access constraints with offset-based

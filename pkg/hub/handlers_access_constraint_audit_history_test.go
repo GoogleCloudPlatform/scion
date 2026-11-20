@@ -265,7 +265,8 @@ func TestConstraintAuditHistory_PrivacySafeNotFound(t *testing.T) {
 
 	appendConstraintHistory(t, s, historyEntry(constraint.ID,
 		"00000000-0000-0000-0000-000000000010", time.Now().UTC()))
-	require.NoError(t, s.DeleteAccessConstraint(t.Context(), constraint.ID))
+	_, delErr := s.DeleteAccessConstraint(t.Context(), constraint.ID, 0)
+	require.NoError(t, delErr)
 	deleted := doRequest(t, srv, http.MethodGet,
 		"/api/v1/admin/access-constraints/"+constraint.ID+"/audit", nil)
 	assert.Equal(t, http.StatusNotFound, deleted.Code)

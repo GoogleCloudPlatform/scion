@@ -259,13 +259,101 @@ func TestDeletionRace(t *testing.T) {
 	require.NoError(t, err)
 
 	// Delete the constraint.
-	err = s.DeleteAccessConstraint(ctx, created.ID)
+	_, err = s.DeleteAccessConstraint(ctx, created.ID, 0)
 	require.NoError(t, err)
 
 	// Attempting to update a deleted constraint should return not found.
 	created.Name = "ghost"
 	_, err = s.UpdateAccessConstraint(ctx, created, 0)
 	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestDeleteAccessConstraint_RevisionConflictAndNotFound(t *testing.T) {
+	s, _ := newTestACStore(t)
+	ctx := context.Background()
+
+	created, err := s.CreateAccessConstraint(ctx, newBaseConstraint("test-delete-rev"))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), created.Revision)
+
+	// Advance revision to 2.
+	created.Name = "test-delete-rev-v2"
+	updated, err := s.UpdateAccessConstraint(ctx, created, 1)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), updated.Revision)
+
+	// Deleting with stale revision 1 fails with ErrRevisionConflict and leaves row intact.
+	deleted, err := s.DeleteAccessConstraint(ctx, created.ID, 1)
+	require.ErrorIs(t, err, store.ErrRevisionConflict)
+	assert.Nil(t, deleted)
+
+	stillThere, err := s.GetAccessConstraint(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), stillThere.Revision)
+	assert.Equal(t, "test-delete-rev-v2", stillThere.Name)
+
+	// Deleting with matching revision 2 succeeds and returns the exact deleted state.
+	deleted, err = s.DeleteAccessConstraint(ctx, created.ID, 2)
+	require.NoError(t, err)
+	require.NotNil(t, deleted)
+	assert.Equal(t, created.ID, deleted.ID)
+	assert.Equal(t, int64(2), deleted.Revision)
+	assert.Equal(t, "test-delete-rev-v2", deleted.Name)
+
+	// Deleting again returns ErrNotFound.
+	deleted, err = s.DeleteAccessConstraint(ctx, created.ID, 2)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	assert.Nil(t, deleted)
+
+	// Deleting a non-existent ID returns ErrNotFound.
+	deleted, err = s.DeleteAccessConstraint(ctx, uuid.New().String(), 1)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	assert.Nil(t, deleted)
+}
+
+func TestDeleteAccessConstraint_ConcurrentUpdateRacesDelete(t *testing.T) {
+	client := enttest.NewClient(t)
+	composite := NewCompositeStore(client)
+	ctx := context.Background()
+
+	created, err := composite.CreateAccessConstraint(ctx, newBaseConstraint("test-delete-concurrent-update"))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), created.Revision)
+
+	updateLocked := make(chan struct{})
+	releaseUpdate := make(chan struct{})
+	updateErrCh := make(chan error, 1)
+
+	go func() {
+		updateErrCh <- composite.WithTx(ctx, func(tx store.Store) error {
+			draft := *created
+			draft.Name = "updated-concurrently"
+			if _, err := tx.UpdateAccessConstraint(ctx, &draft, 1); err != nil {
+				return err
+			}
+			close(updateLocked)
+			<-releaseUpdate
+			return nil
+		})
+	}()
+
+	<-updateLocked
+
+	deleteErrCh := make(chan error, 1)
+	go func() {
+		_, err := composite.DeleteAccessConstraint(ctx, created.ID, 1)
+		deleteErrCh <- err
+	}()
+
+	close(releaseUpdate)
+
+	require.NoError(t, <-updateErrCh)
+	require.ErrorIs(t, <-deleteErrCh, store.ErrRevisionConflict)
+
+	remaining, err := composite.GetAccessConstraint(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), remaining.Revision)
+	assert.Equal(t, "updated-concurrently", remaining.Name)
 }
 
 // ---------------------------------------------------------------------------
