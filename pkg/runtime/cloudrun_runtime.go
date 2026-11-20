@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
@@ -1233,6 +1234,11 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	// then ran without a PTY and crashed: "bubbletea: could not open TTY".
 	// A reserved name never reaches the instance, whatever its source.
 	envVars = slices.DeleteFunc(envVars, func(ev *runpb.EnvVar) bool { return reservedAgentEnvName(ev.GetName()) })
+	// Emit the runtime-owned hook-withheld marker last so only the runtime can
+	// supply it.
+	if marker := envpolicy.FormatWithheldMarker(cfg.HookWithheldEnv); marker != "" {
+		envVars = append(envVars, &runpb.EnvVar{Name: envpolicy.HookWithheldEnvVar, Values: &runpb.EnvVar_Value{Value: marker}})
+	}
 	container := &runpb.Container{
 		Name:         "scion-agent",
 		Image:        cfg.Image,

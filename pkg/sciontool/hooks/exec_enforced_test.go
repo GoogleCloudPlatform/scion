@@ -830,6 +830,80 @@ func TestBuildEnforcedCmd_Dropped(t *testing.T) {
 	}
 }
 
+// TestBuildEnforcedCmd_DroppedWithholdsStaticAndDynamicKeys verifies that
+// substrate's dropped hooks (both workload-owned hooks and 20-harness-provision)
+// inherit hookEnv's static denylist and per-start withheld-key filtering,
+// reset a withheld PATH to rootexec.SearchPath, and preserve unrelated operator
+// keys.
+func TestBuildEnforcedCmd_DroppedWithholdsStaticAndDynamicKeys(t *testing.T) {
+	skipUnlessFdExecSupported(t)
+
+	t.Setenv("LD_PRELOAD", "/tmp/evil.so")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("PATH", "/evil/bin")
+	t.Setenv("BUNDLE_CUSTOM", "from-bundle")
+	t.Setenv("OPERATOR_KEEP", "keep-me")
+
+	withheld := envpolicy.NewSet("BUNDLE_CUSTOM", "PATH")
+	m := &LifecycleManager{
+		EnforcePrivilegeDrop: true,
+		AgentHome:            "/home/scion",
+		WorkloadUID:          1000,
+		WorkloadGID:          1000,
+		WorkloadUsername:     "scion",
+		WorkloadWorkingDir:   "/workspace",
+		Withheld:             withheld,
+	}
+
+	cases := []struct {
+		name       string
+		scriptName string
+		event      string
+		asRoot     bool
+	}{
+		{
+			name:       "workload-owned dropped hook",
+			scriptName: "30-project-custom",
+			event:      EventPreStart,
+			asRoot:     false,
+		},
+		{
+			name:       "dropped 20-harness-provision hook",
+			scriptName: HarnessProvisionHookFilename,
+			event:      EventPreStart,
+			asRoot:     true,
+		},
+	}
+
+	wantPath := strings.Join(rootexec.SearchPath, ":")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			script := filepath.Join(dir, tc.scriptName)
+			mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
+			f, _ := openScriptForTest(t, script)
+
+			cmd, err := m.buildEnforcedCmd(f, script, tc.event, tc.asRoot)
+			if err != nil {
+				t.Fatalf("buildEnforcedCmd: %v", err)
+			}
+			for _, denied := range []string{"LD_PRELOAD", "GIT_CONFIG_COUNT", "BUNDLE_CUSTOM"} {
+				for _, kv := range cmd.Env {
+					if k, _, _ := strings.Cut(kv, "="); k == denied {
+						t.Errorf("dropped hook env unexpectedly contains %s (%q)", denied, kv)
+					}
+				}
+			}
+			if got := findEnvVar(cmd.Env, "PATH"); got != wantPath {
+				t.Errorf("PATH = %q, want %q", got, wantPath)
+			}
+			if got := findEnvVar(cmd.Env, "OPERATOR_KEEP"); got != "keep-me" {
+				t.Errorf("OPERATOR_KEEP = %q, want %q", got, "keep-me")
+			}
+		})
+	}
+}
+
 // TestBuildEnforcedCmd_DroppedFailsClosedWithoutWorkloadUIDOrGID proves the
 // dropped (!asRoot) branch never builds a runnable *exec.Cmd — and so never
 // execs anything — when EnforcePrivilegeDrop is set but WorkloadUID or
