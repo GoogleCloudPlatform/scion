@@ -840,7 +840,10 @@ server:
 
 	// loadGlobalConfigFromSettings checks GetGlobalDir() first, then
 	// falls back to configPath. We pass the tmpDir as configPath.
-	gc, found := loadGlobalConfigFromSettings(tmpDir)
+	gc, found, err := loadGlobalConfigFromSettings(tmpDir)
+	if err != nil {
+		t.Fatalf("loadGlobalConfigFromSettings failed: %v", err)
+	}
 	if !found {
 		t.Fatal("expected settings.yaml to be found")
 	}
@@ -901,7 +904,10 @@ server:
 
 	// LoadServerMode reads from the global dir, so we need to override it.
 	// Instead, test the underlying parsing logic via loadServerFromSettingsFile.
-	gc, found := loadServerFromSettingsFile(dir)
+	gc, found, err := loadServerFromSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("loadServerFromSettingsFile failed: %v", err)
+	}
 	if !found {
 		t.Fatal("expected to find server config in settings.yaml")
 	}
@@ -926,7 +932,10 @@ server:
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	gc, found := loadServerFromSettingsFile(dir)
+	gc, found, err := loadServerFromSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("loadServerFromSettingsFile failed: %v", err)
+	}
 	if !found {
 		t.Fatal("expected to find server config in settings.yaml")
 	}
@@ -971,7 +980,10 @@ server:
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	gc, found := loadServerFromSettingsFile(dir)
+	gc, found, err := loadServerFromSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("loadServerFromSettingsFile failed: %v", err)
+	}
 	if !found {
 		t.Fatal("expected to find server config in settings.yaml")
 	}
@@ -991,7 +1003,10 @@ hub:
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	_, found := loadServerFromSettingsFile(dir)
+	_, found, err := loadServerFromSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("loadServerFromSettingsFile failed: %v", err)
+	}
 	if found {
 		t.Fatal("expected not to find server config in settings.yaml")
 	}
@@ -1011,7 +1026,10 @@ quotas:
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	gc, found := loadServerFromSettingsFile(dir)
+	gc, found, err := loadServerFromSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("loadServerFromSettingsFile failed: %v", err)
+	}
 	if !found {
 		t.Fatal("expected to find server config in settings.yaml")
 	}
@@ -1032,7 +1050,10 @@ server:
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	gc, found := loadServerFromSettingsFile(dir)
+	gc, found, err := loadServerFromSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("loadServerFromSettingsFile failed: %v", err)
+	}
 	if !found {
 		t.Fatal("expected to find server config in settings.yaml")
 	}
@@ -1055,7 +1076,10 @@ agent_secrets:
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	gc, found := loadServerFromSettingsFile(dir)
+	gc, found, err := loadServerFromSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("loadServerFromSettingsFile failed: %v", err)
+	}
 	if !found {
 		t.Fatal("expected to find server config in settings.yaml")
 	}
@@ -1076,7 +1100,10 @@ server:
 		t.Fatalf("failed to write settings.yaml: %v", err)
 	}
 
-	gc, found := loadServerFromSettingsFile(dir)
+	gc, found, err := loadServerFromSettingsFile(dir)
+	if err != nil {
+		t.Fatalf("loadServerFromSettingsFile failed: %v", err)
+	}
 	if !found {
 		t.Fatal("expected to find server config in settings.yaml")
 	}
