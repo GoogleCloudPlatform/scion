@@ -30,6 +30,14 @@ const dispatchAgentPermission = "agent.create"
 
 var errDispatchAgentProjectLookup = errors.New("dispatch_agent project lookup failed")
 
+type dispatchAgentProjectNotFoundError struct {
+	projectID string
+}
+
+func (e *dispatchAgentProjectNotFoundError) Error() string {
+	return fmt.Sprintf("project %q no longer exists", e.projectID)
+}
+
 // dispatchAgentAction implements FireAction and FirePayloadValidator for
 // deferred "dispatch_agent" fires executed through createAgentHeadless.
 type dispatchAgentAction struct {
@@ -86,8 +94,10 @@ func (a *dispatchAgentAction) ValidatePayload(req hubfire.FireRequest) error {
 
 func dispatchAgentRefusalReason(req hubfire.FireRequest, err error) *FireRefusal {
 	reason := "dispatch_agent refused"
+	var projNotFound *dispatchAgentProjectNotFoundError
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule ||
-		req.Authority.DefinitionKind == hubfire.DefinitionKindScheduledEvent {
+		req.Authority.DefinitionKind == hubfire.DefinitionKindScheduledEvent ||
+		errors.As(err, &projNotFound) {
 		reason = err.Error()
 	}
 	return &FireRefusal{
@@ -115,13 +125,12 @@ func (s *Server) authorizeDispatchAgentFire(
 			return headlessResolvedRole{}, fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
 		}
 	}
-	var project *store.Project
-	if p, err := s.store.GetProject(ctx, projectID); err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			return headlessResolvedRole{}, fmt.Errorf("%w: failed to resolve project %q: %w", errDispatchAgentProjectLookup, projectID, err)
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return headlessResolvedRole{}, &dispatchAgentProjectNotFoundError{projectID: projectID}
 		}
-	} else {
-		project = p
+		return headlessResolvedRole{}, fmt.Errorf("%w: failed to resolve project %q: %w", errDispatchAgentProjectLookup, projectID, err)
 	}
 	preCapRole, roleExplicit, parentMessageMode, err := s.resolveHeadlessPreCapRole(ctx, project, auth, "", noAuth)
 	if err != nil {

@@ -1539,6 +1539,7 @@ func TestDispatchAgentEventHandler_FireRequiresAgentCreateScope(t *testing.T) {
 func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
 	t.Parallel()
 	ms := newMockStore()
+	ms.projects["project-1"] = &store.Project{ID: "project-1", Name: "test-project"}
 	ms.users["admin-user"] = &store.User{
 		ID:          "admin-user",
 		Email:       "admin@example.com",

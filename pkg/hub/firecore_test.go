@@ -1596,6 +1596,74 @@ func TestFireCoreDispatchAgentAction(t *testing.T) {
 		assert.Equal(t, string(AgentRoleBaseline), created.AppliedConfig.AgentRole)
 		assert.False(t, created.AppliedConfig.NoAuth)
 	})
+
+	t.Run("missing project refuses with same error text for schedule and trigger", func(t *testing.T) {
+		wantErr := `project "project-dispatch-action" no longer exists`
+		for _, defKind := range []string{
+			hubfire.DefinitionKindScheduledEvent,
+			hubfire.DefinitionKindSchedule,
+			hubfire.DefinitionKindTrigger,
+		} {
+			t.Run(defKind, func(t *testing.T) {
+				ms := newMockStore()
+				srv := newEventHandlerTestServer(ms)
+				srv.registerFireActions()
+				userID := seedDispatchUser(ms,
+					"agent.create",
+					"project.read",
+					"project.secret_read",
+					"agent.message",
+					"scheduled_event.create",
+					"scheduled_event.read",
+					"scheduled_event.list",
+				)
+				creatorID := seedFullRoleDispatchCreator(ms, projectID)
+				delete(ms.projects, projectID)
+
+				userEvt := withSessionRevision(store.ScheduledEvent{ID: "fire-noproj-user", ProjectID: projectID}, userID)
+				userOut := srv.fireAction(context.Background(), hubfire.FireRequest{
+					ProjectID: projectID,
+					Authority: hubfire.RecordedAuthority{
+						Attribution:    userEvt.InitiatorAttribution,
+						Ceiling:        userEvt.AuthorityCeiling,
+						DefinitionKind: defKind,
+						DefinitionID:   "def-noproj-user",
+						FireID:         "fire-noproj-user",
+					},
+					ActionType: "dispatch_agent",
+					Payload:    `{"agentName":"worker-noproj-user"}`,
+				})
+				assert.Equal(t, hubfire.FireStatusRefused, userOut.Status)
+				assert.Equal(t, wantErr, userOut.Error)
+
+				agentEvt := withMockAgentRevision(store.ScheduledEvent{ID: "fire-noproj-agent", ProjectID: projectID, CreatedBy: creatorID}, creatorID)
+				agentOut := srv.fireAction(context.Background(), hubfire.FireRequest{
+					ProjectID: projectID,
+					Authority: hubfire.RecordedAuthority{
+						Attribution:    agentEvt.InitiatorAttribution,
+						Ceiling:        agentEvt.AuthorityCeiling,
+						DefinitionKind: defKind,
+						DefinitionID:   "def-noproj-agent",
+						FireID:         "fire-noproj-agent",
+					},
+					ActionType: "dispatch_agent",
+					Payload:    `{"agentName":"worker-noproj-agent"}`,
+				})
+				assert.Equal(t, hubfire.FireStatusRefused, agentOut.Status)
+				assert.Equal(t, wantErr, agentOut.Error)
+
+				srv.mutationAuditWork.stop(context.Background(), time.Second, time.Second)
+				ms.mu.Lock()
+				audits := append([]*store.MutationAuditRecord(nil), ms.audits...)
+				ms.mu.Unlock()
+				assert.Empty(t, audits)
+				_, err := ms.GetAgentBySlug(context.Background(), projectID, "worker-noproj-user")
+				assert.ErrorIs(t, err, store.ErrNotFound)
+				_, err = ms.GetAgentBySlug(context.Background(), projectID, "worker-noproj-agent")
+				assert.ErrorIs(t, err, store.ErrNotFound)
+			})
+		}
+	})
 }
 
 // TestFireCoreAdapterDetachesMatrix covers all seven cells of design §5.1a

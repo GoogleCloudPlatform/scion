@@ -413,6 +413,9 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}
 
 	existingAgent, err := s.store.GetAgentBySlug(ctx, hc.ProjectID, slug)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("failed to check existing agent %q in project %q: %w", slug, hc.ProjectID, err)
+	}
 	if err == nil && existingAgent != nil {
 		slog.Warn("Scheduler: agent already exists, skipping dispatch_agent",
 			"eventID", fireID,

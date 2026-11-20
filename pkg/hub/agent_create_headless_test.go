@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -1273,11 +1274,15 @@ var errInjectedGetProjectFault = errors.New("injected get-project store fault")
 type getProjectFaultStore struct {
 	store.Store
 	fault *storeFaultSwitch
+	err   error
 }
 
 func (s *getProjectFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
 	if !s.fault.Active() {
 		return s.Store.GetProject(ctx, id)
+	}
+	if s.err != nil {
+		return nil, s.err
 	}
 	return nil, errInjectedGetProjectFault
 }
@@ -1385,6 +1390,73 @@ func TestDispatchAgentAction_ProjectLookupFaultAndRoleSnapshot(t *testing.T) {
 		assert.Nil(t, authorized)
 		assert.Nil(t, refusal)
 		_, err = s.GetAgentBySlug(ctx, project.ID, "proj-fault-user-child")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("get_project_not_found_refuses_schedule_and_trigger_with_base_text", func(t *testing.T) {
+		srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *getProjectFaultStore {
+			return &getProjectFaultStore{Store: inner, fault: f, err: store.ErrNotFound}
+		})
+		srv.registerFireActions()
+
+		user := &store.User{
+			ID:          tid("user-proj-nf"),
+			Email:       "projnf@example.com",
+			DisplayName: "Proj NotFound Tester",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, user))
+		ensureHubMembership(ctx, s, user.ID)
+
+		project := &store.Project{
+			ID:        tid("project-proj-nf"),
+			Name:      "proj-nf-project",
+			Slug:      "proj-nf-project",
+			OwnerID:   user.ID,
+			CreatedBy: user.ID,
+			Created:   time.Now(),
+			Updated:   time.Now(),
+		}
+		require.NoError(t, s.CreateProject(ctx, project))
+		srv.seedProjectCreatorMembership(ctx, project)
+		require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
+		linkScheduledDispatchBroker(t, s, project.ID)
+
+		evtBase := withSessionRevision(store.ScheduledEvent{
+			ID:        api.NewUUID(),
+			ProjectID: project.ID,
+			EventType: "dispatch_agent",
+			Payload:   `{"agentName":"proj-nf-child"}`,
+			CreatedBy: user.ID,
+			FireAt:    time.Now(),
+		}, user.ID)
+
+		fault.Arm()
+		wantErr := fmt.Sprintf("project %q no longer exists", project.ID)
+		for _, defKind := range []string{
+			hubfire.DefinitionKindScheduledEvent,
+			hubfire.DefinitionKindSchedule,
+			hubfire.DefinitionKindTrigger,
+		} {
+			out := srv.fireAction(ctx, hubfire.FireRequest{
+				ProjectID: project.ID,
+				Authority: hubfire.RecordedAuthority{
+					Attribution:    evtBase.InitiatorAttribution,
+					Ceiling:        evtBase.AuthorityCeiling,
+					DefinitionKind: defKind,
+					DefinitionID:   "def-" + defKind,
+					FireID:         "fire-" + defKind,
+				},
+				ActionType: "dispatch_agent",
+				Payload:    evtBase.Payload,
+			})
+			assert.Equal(t, hubfire.FireStatusRefused, out.Status, "defKind=%s", defKind)
+			assert.Equal(t, wantErr, out.Error, "defKind=%s", defKind)
+		}
+
+		_, err := s.GetAgentBySlug(ctx, project.ID, "proj-nf-child")
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
 
@@ -1498,4 +1570,99 @@ func TestHeadlessCreate_NoAuthOwnerGitTokenFallback(t *testing.T) {
 	assert.Equal(t, api.EnvKindSecretFetchable, req.EnvClassifications[noAuthGitTokenKey])
 	assert.NotContains(t, req.ResolvedEnv, "ANTHROPIC_API_KEY")
 	assert.NotContains(t, req.ResolvedEnv, "OPENAI_API_KEY")
+}
+
+var errInjectedGetAgentBySlugFault = errors.New("injected get-agent-by-slug store fault")
+
+type getAgentBySlugFaultStore struct {
+	store.Store
+	fault    *storeFaultSwitch
+	failSlug string
+}
+
+func (s *getAgentBySlugFaultStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
+	if s.fault.Active() && slug == s.failSlug {
+		return nil, errInjectedGetAgentBySlugFault
+	}
+	return s.Store.GetAgentBySlug(ctx, projectID, slug)
+}
+
+func TestHeadlessCreate_GetAgentBySlugErrorFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	const targetSlug = "slug-lookup-fault-child"
+
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *getAgentBySlugFaultStore {
+		return &getAgentBySlugFaultStore{Store: inner, fault: f, failSlug: targetSlug}
+	})
+	srv.registerFireActions()
+
+	client := &headlessGatherBrokerClient{}
+	disp := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
+	srv.SetDispatcher(disp)
+
+	user := &store.User{
+		ID:          tid("user-slug-fault"),
+		Email:       "slugfault@example.com",
+		DisplayName: "Slug Fault Tester",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("project-slug-fault"),
+		Name:      "slug-fault-project",
+		Slug:      "slug-fault-project",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
+	linkScheduledDispatchBroker(t, s, project.ID)
+
+	evt := withSessionRevision(store.ScheduledEvent{
+		ID:         api.NewUUID(),
+		ProjectID:  project.ID,
+		EventType:  "dispatch_agent",
+		Payload:    `{"agentName":"` + targetSlug + `"}`,
+		CreatedBy:  user.ID,
+		ScheduleID: "sched-slug-fault",
+		FireAt:     time.Now(),
+	}, user.ID)
+	rec := scheduledRecordedAuthority(evt)
+	auth, identity, err := srv.resolveRecordedAuthority(ctx, rec, project.ID, dispatchAgentPermission)
+	require.NoError(t, err)
+	edgeCeiling, edgeProvenance, err := srv.fireEffectCeiling(ctx, auth)
+	require.NoError(t, err)
+
+	fault.Arm()
+
+	// 1. Direct createAgentHeadless returns a wrapped error and creates nothing.
+	agent, err := srv.createAgentHeadless(ctx, HeadlessCreate{
+		ProjectID:      project.ID,
+		Authority:      auth,
+		Identity:       identity,
+		CreatorName:    fireCreatorName(auth),
+		EdgeCeiling:    edgeCeiling,
+		EdgeProvenance: edgeProvenance,
+		Name:           targetSlug,
+		Detached:       true,
+	})
+	require.ErrorIs(t, err, errInjectedGetAgentBySlugFault)
+	assert.Nil(t, agent)
+	assert.Nil(t, client.lastCreateReq)
+
+	// 2. Full fireAction pipeline fails closed without creating a row or dispatching.
+	out := fireHeadlessDispatch(srv, evt, nil)
+	assert.Equal(t, hubfire.FireStatusFailed, out.Status)
+	assert.Contains(t, out.Error, errInjectedGetAgentBySlugFault.Error())
+	assert.Nil(t, client.lastCreateReq)
+
+	_, err = s.GetAgentBySlug(ctx, project.ID, targetSlug)
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }
