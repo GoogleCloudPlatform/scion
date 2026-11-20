@@ -322,7 +322,7 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 // staleCutoff is supposed to combine — rather than by calling staleCutoff and
 // asserting around whatever it happens to return: that would make this test
 // pass unconditionally, since entries placed relative to staleCutoff's own
-// (possibly wrong) output always look internally consistent with it. The ~3
+// (possibly wrong) output always look internally consistent with it. The ~7.5
 // minute gap between MaxJitteredTTL(30m) and the unjittered 30m is what the
 // one-minute margins below are sized to land on either side of.
 func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {

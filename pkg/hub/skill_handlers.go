@@ -2069,20 +2069,50 @@ func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (inst
 // upstream is unresponsive.
 const hubGitHubRefreshTimeout = 2 * time.Minute
 
-// ghRefreshFailureBackoff bounds how often a background stale-refresh is
-// retried for the same cache key after it fails. Without this, a
-// persistently failing ref (rate limit, outage) would start a brand new
-// refresh attempt on every single stale hit, while silently continuing to
+// ghRefreshFailureBackoff is the nominal duration a background stale-refresh
+// waits before retrying the same cache key after a failure (jittered via
+// agent.JitteredTTL so failed refreshes do not all retry together). Without
+// this, a persistently failing ref (rate limit, outage) would start a brand
+// new refresh attempt on every single stale hit, while silently continuing to
 // serve the stale value regardless.
 const ghRefreshFailureBackoff = 1 * time.Minute
 
+// hubGHRefreshConcurrency bounds how many background GitHub skill refreshes
+// may hit GitHub concurrently across distinct cache keys, so a burst of stale
+// entries (for example right after a rate-limit cooldown ends) drains smoothly
+// instead of stampeding GitHub's rate limit again.
+const hubGHRefreshConcurrency = 2
+
+func (s *Server) ghClockNow() time.Time {
+	if s.ghNow != nil {
+		return s.ghNow()
+	}
+	return time.Now()
+}
+
+func (s *Server) ghRand() func() float64 {
+	if s.ghRandFloat64 != nil {
+		return s.ghRandFloat64
+	}
+	return rand.Float64
+}
+
+func (s *Server) ghRefreshSemaphore() chan struct{} {
+	s.ghRefreshSemOnce.Do(func() {
+		if s.ghRefreshSem == nil {
+			s.ghRefreshSem = make(chan struct{}, hubGHRefreshConcurrency)
+		}
+	})
+	return s.ghRefreshSem
+}
+
 // recentGHRefreshFailure reports whether a background refresh for cacheKey
-// failed within the last ghRefreshFailureBackoff.
+// is still within its jittered failure backoff window.
 func (s *Server) recentGHRefreshFailure(cacheKey string) bool {
 	s.ghRefreshFailMu.Lock()
 	defer s.ghRefreshFailMu.Unlock()
-	t, ok := s.ghLastRefreshFailure[cacheKey]
-	return ok && time.Since(t) < ghRefreshFailureBackoff
+	retryAfter, ok := s.ghLastRefreshFailure[cacheKey]
+	return ok && s.ghClockNow().Before(retryAfter)
 }
 
 func (s *Server) recordGHRefreshFailure(cacheKey string) {
@@ -2091,7 +2121,8 @@ func (s *Server) recordGHRefreshFailure(cacheKey string) {
 	if s.ghLastRefreshFailure == nil {
 		s.ghLastRefreshFailure = make(map[string]time.Time)
 	}
-	s.ghLastRefreshFailure[cacheKey] = time.Now()
+	backoff := agent.JitteredTTL(ghRefreshFailureBackoff, s.ghRand())
+	s.ghLastRefreshFailure[cacheKey] = s.ghClockNow().Add(backoff)
 }
 
 func (s *Server) clearGHRefreshFailure(cacheKey string) {
@@ -2438,6 +2469,27 @@ func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *
 		if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
 			return entry, nil
 		}
+		sem := s.ghRefreshSemaphore()
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		// Re-check after waiting for a refresh slot: another instance may have
+		// populated the cache, or an earlier refresh may have tripped a
+		// rate-limit cooldown.
+		if entry, hit, gerr := s.ghResolutionStore.Get(ctx, cacheKey); gerr == nil && hit {
+			return entry, nil
+		}
+		cooldownID := agent.GitHubCooldownIdentityForInstallation(installID)
+		if retryAt, cooling := s.githubCooldown().Active(cooldownID); cooling {
+			return nil, &agent.GitHubRateLimitError{
+				Ref:             rawURI,
+				RetryAt:         retryAt,
+				Unauthenticated: agent.GitHubCooldownIdentityIsAnonymous(cooldownID),
+			}
+		}
 		return s.fetchAndCacheGitHubSkill(ctx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, nil)
 	})
 
@@ -2549,7 +2601,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 		FileEntries: fileEntries,
 		BundleHash:  bundleHash,
 		TokenScope:  installID,
-		ExpiresAt:   time.Now().Add(agent.JitteredTTL(ttl, rand.Float64)),
+		ExpiresAt:   s.ghClockNow().Add(agent.JitteredTTL(ttl, s.ghRand())),
 		OriginalURI: rawURI,
 	}
 
