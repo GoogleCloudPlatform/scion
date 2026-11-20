@@ -339,7 +339,8 @@ type launchSettleReport struct {
 // failed write is logged and leaves the row as it was, which costs a later
 // delete only a run-scoped refusal or extra 404s, and a completed resend of
 // the report can settle it later. On a swap, row's RunID and
-// PreviousRunIDs are updated to match.
+// PreviousRunIDs are updated to match. When canAdoptBrokerRunID refuses a
+// different run ID, no swap runs and PreviousRunIDs is left unchanged.
 func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *RemoteAgentInfo, rep launchSettleReport) {
 	if info == nil || info.RunID == "" {
 		return

@@ -1915,6 +1915,8 @@ func reportedEntryProjectID(info *RemoteAgentInfo) (string, bool) {
 		projectkeys.ProjectIDFromLabels(info.Labels),
 	}
 	if info.Labels != nil {
+		// Cloud Run sanitizes dotted label keys (runtime.CloudRunRuntime.storedLabelKey),
+		// turning scion.project_id into scion_project_id.
 		candidates = append(candidates, info.Labels["scion_project_id"])
 	}
 	for _, c := range candidates {
@@ -2025,12 +2027,14 @@ func canAdoptBrokerRunID(ctx context.Context, st store.Store, log *slog.Logger, 
 // ("" when the broker reported no run ID, minted when adoption was rejected or
 // matched minted, or the verified adopted run ID).
 //
-// Either way the run has settled, so the swap (a same-value swap when the
-// broker reports the minted run or none) also clears the row's previous
-// runs (ptone/scion#3097): the broker's Start removes every existing entry
-// of the agent's name in its project, whatever run it carries, before it
+// When the run settles (a same-value swap when the broker reports the minted
+// run or none, or a verified adoption swap), the swap also clears the row's
+// previous runs (ptone/scion#3097): the broker's Start removes every existing
+// entry of the agent's name in its project, whatever run it carries, before it
 // creates the new one (agent.AgentManager.Start, step 0), so no previous
-// run's entry is left once a start has landed.
+// run's entry is left once a start has landed. When adoption is refused by
+// canAdoptBrokerRunID, no settle swap runs and PreviousRunIDs is preserved
+// conservatively so a later delete still covers earlier runs.
 func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store.Agent, minted string, resp *RemoteAgentResponse) string {
 	if resp == nil || resp.Agent == nil {
 		return ""
