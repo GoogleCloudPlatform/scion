@@ -139,9 +139,9 @@ func createRunningAgent(t *testing.T, h *hubProc, projectID, name string) (strin
 	return id, sw
 }
 
-// createScheduledEvent schedules a message event with a "+02:00" fireAt and
-// checks it on the create response, GET by ID and the list.
-func createScheduledEvent(t *testing.T, h *hubProc, projectID string) {
+// createScheduledEvent schedules a message event targeting agentName with a
+// "+02:00" fireAt and checks it on the create response, GET by ID and the list.
+func createScheduledEvent(t *testing.T, h *hubProc, projectID, agentName string) {
 	t.Helper()
 	fireAt := time.Now().Add(48 * time.Hour).Truncate(time.Second).In(offsetZone)
 	wireFireAt := fireAt.Format(time.RFC3339)
@@ -151,7 +151,7 @@ func createScheduledEvent(t *testing.T, h *hubProc, projectID string) {
 	w := openWindow()
 	evt := h.mustJSON("POST", "/api/v1/projects/"+projectID+"/scheduled-events", map[string]any{
 		"eventType": "message", "fireAt": wireFireAt,
-		"agentName": "tzcontract-scheduled-target", "message": "tz contract",
+		"agentName": agentName, "message": "tz contract",
 	}, 200, 201)
 	w.close()
 	id := str(evt, "id")
@@ -299,7 +299,7 @@ func runTokyoContract(t *testing.T, b backend) {
 	})
 
 	step(t, "scheduled event fireAt +02:00", func(t *testing.T) {
-		createScheduledEvent(t, h, projectID)
+		createScheduledEvent(t, h, projectID, "tzc-agent")
 	})
 
 	// Notifications: created by the dispatcher on an agent status change.
@@ -525,7 +525,7 @@ func runKathmanduThresholds(t *testing.T, b backend) {
 	staleID, _ := createRunningAgent(t, h, projectID, "tzc-stale")
 	stalledID, _ := createRunningAgent(t, h, projectID, "tzc-stalled")
 	healthyID, _ := createRunningAgent(t, h, projectID, "tzc-healthy")
-	createScheduledEvent(t, h, projectID)
+	createScheduledEvent(t, h, projectID, "tzc-healthy")
 
 	// A chat message, so the webchat tables hold rows written under this TZ.
 	topicID := createTopic(t, h, projectID, "tzcontract-kathmandu")
