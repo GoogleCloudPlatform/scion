@@ -66,6 +66,10 @@ type NotificationDispatcher struct {
 	// idleSuspendGateFn reports whether lifecycle.idle_suspend is enabled;
 	// nil means off (AC 8).
 	idleSuspendGateFn func() bool
+
+	// autoSuspendThresholdFn returns the configured threshold duration for
+	// an automatic suspension reason (idle or stalled); nil means unknown.
+	autoSuspendThresholdFn func(reason state.SuspendReason) time.Duration
 }
 
 func (nd *NotificationDispatcher) deliveryMarker() agentDeliveryMarker {
@@ -417,7 +421,28 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 // to the subscriber, using agent as the watched agent (it is not re-read, so
 // it also works from a snapshot of an agent that has since been deleted).
 func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, sub *store.NotificationSubscription, evt AgentStatusEvent, agent *store.Agent) {
-	nd.storeAndDispatchMessage(ctx, sub, evt, agent, formatNotificationMessage(agent, notificationEventStatus(evt)))
+	nd.storeAndDispatchMessage(ctx, sub, evt, agent, nd.formatEventMessage(evt, agent))
+}
+
+// formatEventMessage formats the notification message for evt and agent.
+// For SUSPENDED events caused by automatic suspension (idle or stalled), it
+// resolves the configured threshold from autoSuspendThresholdFn so the notice
+// names the reason, threshold, and wake instruction; manual suspensions keep
+// the generic SUSPENDED notice.
+func (nd *NotificationDispatcher) formatEventMessage(evt AgentStatusEvent, agent *store.Agent) string {
+	status := notificationEventStatus(evt)
+	if strings.EqualFold(status, string(state.PhaseSuspended)) {
+		reason := state.SuspendReason(evt.SuspendReason)
+		if reason == "" {
+			reason = state.SuspendReason(agent.SuspendReason)
+		}
+		var threshold time.Duration
+		if reason.AutoWakes() && nd.autoSuspendThresholdFn != nil {
+			threshold = nd.autoSuspendThresholdFn(reason)
+		}
+		return formatSuspendedNotificationMessage(agent, reason, threshold)
+	}
+	return formatNotificationMessage(agent, status)
 }
 
 // notificationEventStatus is the status a notification for evt carries: for a
@@ -917,9 +942,39 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 			msg += ": " + agent.Message
 		}
 		return msg
+	case "SUSPENDED":
+		return formatSuspendedNotificationMessage(agent, state.SuspendReason(agent.SuspendReason), 0)
 	default:
 		return fmt.Sprintf("%s has reached status: %s", agent.Slug, upper)
 	}
+}
+
+// formatSuspendedNotificationMessage formats a SUSPENDED notification.
+// Automatic suspensions (idle or stalled) get a dedicated notice naming the
+// reason, the threshold that triggered it (when known), and how to wake the
+// agent. Manual and other suspensions keep the existing generic notice.
+func formatSuspendedNotificationMessage(agent *store.Agent, reason state.SuspendReason, threshold time.Duration) string {
+	switch reason {
+	case state.SuspendReasonIdle, state.SuspendReasonStalled:
+		if dur := formatNotificationThreshold(threshold); dur != "" {
+			return fmt.Sprintf("%s was automatically SUSPENDED (%s for %s; any message wakes it)", agent.Slug, reason, dur)
+		}
+		return fmt.Sprintf("%s was automatically SUSPENDED (%s; any message wakes it)", agent.Slug, reason)
+	default:
+		return fmt.Sprintf("%s has reached status: SUSPENDED", agent.Slug)
+	}
+}
+
+// formatNotificationThreshold formats a configured threshold duration cleanly
+// for notification text (e.g. "15m", "5m", "1h30m", "2m30s", "30s").
+func formatNotificationThreshold(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	if d >= time.Minute && d%time.Minute != 0 {
+		return d.Truncate(time.Second).String()
+	}
+	return formatStallAge(d)
 }
 
 // formatStallAge renders how long a stalled agent has had no activity, in

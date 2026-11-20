@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -710,4 +711,127 @@ func TestNotificationDispatcher_PerPeriodGetAgentErrorFailsSafeAndWarnsOnce(t *t
 	require.Eventually(t, func() bool {
 		return len(watchedAgentCalls(env)) == 4
 	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestNotificationDispatcher_AutoSuspendVsManualSuspendNotice(t *testing.T) {
+	ctx := context.Background()
+
+	setupSub := func(t *testing.T, s store.Store, agent *store.Agent, suffix string) *store.Agent {
+		t.Helper()
+		subscriber := &store.Agent{
+			ID:              tid("autosusp-notice-sub-" + suffix),
+			Name:            "autosusp-notice-sub-" + suffix,
+			Slug:            "autosusp-notice-sub-" + suffix,
+			ProjectID:       agent.ProjectID,
+			RuntimeBrokerID: agent.RuntimeBrokerID,
+			Phase:           string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, subscriber))
+		sub := &store.NotificationSubscription{
+			ID:                tid("autosusp-notice-subrec-" + suffix),
+			Scope:             store.SubscriptionScopeAgent,
+			AgentID:           agent.ID,
+			ProjectID:         agent.ProjectID,
+			SubscriberType:    store.SubscriberTypeAgent,
+			SubscriberID:      subscriber.Slug,
+			TriggerActivities: []string{"SUSPENDED"},
+			CreatedAt:         time.Now(),
+			CreatedBy:         "test",
+		}
+		require.NoError(t, s.CreateNotificationSubscription(ctx, sub))
+		return subscriber
+	}
+
+	t.Run("idle auto-suspend names reason threshold and wake", func(t *testing.T) {
+		srv, s, _, _ := engineTestServer(t)
+		disp := &recordingDispatcher{}
+		srv.SetDispatcher(disp)
+		enableIdleSweepForTest(t, srv, 20*time.Minute)
+		srv.StartNotificationDispatcher()
+		defer srv.notificationDispatcher.Stop()
+
+		now := time.Now().UTC()
+		pastGrace := now.Add(-25 * time.Minute)
+		freshSeen := now.Add(-20 * time.Second)
+		agent := newIdleCandidateBrokerAgent(t, s, "idle-notice-agent", string(state.ActivityIdle), &pastGrace, freshSeen)
+		subscriber := setupSub(t, s, agent, "idle")
+
+		srv.agentIdleSuspendHandler()(ctx)
+		srv.waitAutoSuspendIdle()
+
+		require.Eventually(t, func() bool {
+			return len(disp.getCalls()) >= 1
+		}, 2*time.Second, 20*time.Millisecond)
+
+		wantMsg := agent.Slug + " was automatically SUSPENDED (idle for 20m; any message wakes it)"
+		calls := disp.getCalls()
+		require.Len(t, calls, 1)
+		assert.Equal(t, wantMsg, calls[0].Message)
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeAgent, subscriber.Slug, false)
+		require.NoError(t, err)
+		require.Len(t, notifs, 1)
+		assert.Equal(t, "SUSPENDED", notifs[0].Status)
+		assert.Equal(t, wantMsg, notifs[0].Message)
+	})
+
+	t.Run("stalled auto-suspend names reason threshold and wake", func(t *testing.T) {
+		srv, s, _, _ := engineTestServer(t)
+		disp := &recordingDispatcher{}
+		srv.SetDispatcher(disp)
+		srv.mu.Lock()
+		srv.config.StalledThreshold = 7 * time.Minute
+		srv.mu.Unlock()
+		srv.StartNotificationDispatcher()
+		defer srv.notificationDispatcher.Stop()
+
+		agent := createSuspendActivityTestAgent(t, s, "stalled-notice-agent", string(state.ActivityStalled), string(state.ActivityWorking))
+		subscriber := setupSub(t, s, agent, "stalled")
+
+		srv.autoSuspendStalledAgents(ctx, []store.Agent{*mustGetAgent(t, s, agent.ID)})
+
+		require.Eventually(t, func() bool {
+			return len(disp.getCalls()) >= 1
+		}, 2*time.Second, 20*time.Millisecond)
+
+		wantMsg := agent.Slug + " was automatically SUSPENDED (stalled for 7m; any message wakes it)"
+		calls := disp.getCalls()
+		require.Len(t, calls, 1)
+		assert.Equal(t, wantMsg, calls[0].Message)
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeAgent, subscriber.Slug, false)
+		require.NoError(t, err)
+		require.Len(t, notifs, 1)
+		assert.Equal(t, "SUSPENDED", notifs[0].Status)
+		assert.Equal(t, wantMsg, notifs[0].Message)
+	})
+
+	t.Run("manual suspend keeps existing generic notice", func(t *testing.T) {
+		srv, s, _, _ := engineTestServer(t)
+		disp := &recordingDispatcher{}
+		srv.SetDispatcher(disp)
+		srv.StartNotificationDispatcher()
+		defer srv.notificationDispatcher.Stop()
+
+		agent := createSuspendActivityTestAgent(t, s, "manual-notice-agent", string(state.ActivityIdle), string(state.ActivityIdle))
+		subscriber := setupSub(t, s, agent, "manual")
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		require.Eventually(t, func() bool {
+			return len(disp.getCalls()) >= 1
+		}, 2*time.Second, 20*time.Millisecond)
+
+		wantMsg := agent.Slug + " has reached status: SUSPENDED"
+		calls := disp.getCalls()
+		require.Len(t, calls, 1)
+		assert.Equal(t, wantMsg, calls[0].Message)
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeAgent, subscriber.Slug, false)
+		require.NoError(t, err)
+		require.Len(t, notifs, 1)
+		assert.Equal(t, "SUSPENDED", notifs[0].Status)
+		assert.Equal(t, wantMsg, notifs[0].Message)
+	})
 }
