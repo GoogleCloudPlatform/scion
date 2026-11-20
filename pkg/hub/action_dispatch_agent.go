@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 const (
@@ -233,6 +234,15 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 		}
 	}
 
+	// Validate and deduplicate untrustedVars entries (§5.1, §5.2).
+	if len(payload.UntrustedVars) > 0 {
+		deduped, err := validateUntrustedVars(payload.UntrustedVars)
+		if err != nil {
+			return "", err
+		}
+		payload.UntrustedVars = deduped
+	}
+
 	// Validate labels: reserved keys, count <= 16 including 3 hub labels,
 	// key syntax via pkg/labels, and values as label-slot templates (§5.1, §5.4).
 	if len(payload.Labels)+hubAppliedTriggerLabelCount > labels.MaxLabels {
@@ -335,6 +345,61 @@ func validateTemplateSlot(raw, slot string, allowed []string) error {
 		code:    ErrCodeValidationError,
 		message: err.Error(),
 	}
+}
+
+// validateUntrustedVars verifies that every entry in raw is a valid untrusted
+// placeholder path or trailing ".*" prefix under an untrusted namespace, caps
+// the list at triggertemplate.MaxPlaceholders (64), and removes duplicates in
+// first-appearance order.
+func validateUntrustedVars(raw []string) ([]string, error) {
+	if len(raw) > triggertemplate.MaxPlaceholders {
+		return nil, &dispatchAgentValidationError{
+			status:  http.StatusBadRequest,
+			code:    "invalid_untrusted_var",
+			message: fmt.Sprintf("untrustedVars exceeds maximum of %d entries", triggertemplate.MaxPlaceholders),
+		}
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		if !isValidUntrustedVarPattern(entry) {
+			return nil, &dispatchAgentValidationError{
+				status:  http.StatusBadRequest,
+				code:    "invalid_untrusted_var",
+				message: fmt.Sprintf("invalid untrustedVars entry %q: must be an untrusted variable path or trailing \".*\" prefix", entry),
+				details: map[string]any{"path": entry},
+			}
+		}
+		if !seen[entry] {
+			seen[entry] = true
+			out = append(out, entry)
+		}
+	}
+	return out, nil
+}
+
+func isValidUntrustedVarPattern(pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	if prefix, ok := strings.CutSuffix(pattern, ".*"); ok {
+		if prefix == "" || strings.ContainsAny(prefix, "*?") {
+			return false
+		}
+		if prefix == "event.attributes" || prefix == "event.payload" {
+			return true
+		}
+		if strings.HasPrefix(prefix, "event.payload.") || strings.HasPrefix(prefix, "event.payload[") {
+			cls, err := triggertemplate.Classify(prefix)
+			return err == nil && cls == triggertemplate.ClassUntrusted
+		}
+		return false
+	}
+	if strings.ContainsAny(pattern, "*?") {
+		return false
+	}
+	cls, err := triggertemplate.Classify(pattern)
+	return err == nil && cls == triggertemplate.ClassUntrusted
 }
 
 func (s *Server) validateDispatchAgentAuthoringAuthority(
@@ -563,12 +628,6 @@ func (a *dispatchAgentAction) Authorize(
 			if !trigger.SourceReplayProtected(req.Event.SourceKind, ep) {
 				return nil, &FireRefusal{Reason: "source not replay protected"}, nil
 			}
-			if sourceName == "" && req.Event.Attributes != nil {
-				sourceName = req.Event.Attributes["endpoint_name"]
-			}
-			if signatureMode == "" && req.Event.Attributes != nil {
-				signatureMode = req.Event.Attributes["signature_mode"]
-			}
 		}
 	}
 
@@ -716,12 +775,14 @@ func buildDispatchTemplateVars(req hubfire.FireRequest, da *dispatchAgentAuthori
 		"event.id":          ev.ID,
 		"event.source.kind": ev.SourceKind,
 		"event.source.id":   ev.SourceID,
-		"event.source.name": da.sourceName,
 		"event.received_at": ev.ReceivedAt.UTC().Format(time.RFC3339),
 		"trigger.id":        triggerID,
 		"trigger.name":      triggerName,
 		"project.id":        req.ProjectID,
 		"project.name":      da.projectName,
+	}
+	if da.sourceName != "" {
+		trusted["event.source.name"] = da.sourceName
 	}
 
 	untrusted := triggertemplate.MapVars{
@@ -789,9 +850,10 @@ func (a *dispatchAgentAction) refuseTemplateRender(req hubfire.FireRequest, fall
 	}
 
 	// Never log expanded values or rendered output (§5.2, §5.3).
-	slog.Warn("Trigger dispatch_agent refused: template render error",
+	logging.Subsystem("hub.audit").Warn("trigger.fire.template_refused",
+		"event_type", "trigger.fire.template_refused",
 		"fire_id", req.Authority.FireID,
-		"definition_id", req.Authority.DefinitionID,
+		"trigger_id", req.Authority.DefinitionID,
 		"project_id", req.ProjectID,
 		"slot", slot,
 		"path", path,
@@ -986,13 +1048,6 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			}
 			candidate = suffixed
 			continue
-		}
-		var held *store.ClaimHeldError
-		if errors.As(createErr, &held) {
-			return hubfire.FireOutcome{
-				Status: hubfire.FireStatusSkipped,
-				Error:  "agent claim held",
-			}, nil
 		}
 		return hubfire.FireOutcome{}, createErr
 	}

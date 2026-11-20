@@ -1517,35 +1517,24 @@ func (s *TriggerStore) ListTriggerEvents(ctx context.Context, filter store.Trigg
 			}))
 		}
 		// Stage 2 §5.4: an agent dispatched by a trigger fire (result_ref == agent.ID)
-		// may also read/list the event that created it.
+		// may also read/list the event that created it (indexed on result_ref).
 		agentID := filter.VisibleToAgentID
-		hasDispatchedFires, err := s.client.TriggerFire.Query().
-			Where(triggerfire.ResultRefEQ(agentID)).
-			Exist(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if hasDispatchedFires {
-			visPreds = append(visPreds, predicate.TriggerEvent(func(sel *entsql.Selector) {
-				d := sel.Dialect()
-				tf := entsql.Dialect(d).Table(triggerfire.Table).As("tf_res")
-				conds := []*entsql.Predicate{
-					entsql.ColumnsEQ(tf.C(triggerfire.FieldEventID), sel.C(triggerevent.FieldID)),
-					entsql.EQ(tf.C(triggerfire.FieldResultRef), agentID),
-				}
-				if hasPID {
-					conds = append(conds, entsql.EQ(tf.C(triggerfire.FieldProjectID), pid))
-				}
-				sub := entsql.Dialect(d).
-					Select(tf.C(triggerfire.FieldID)).
-					From(tf).
-					Where(entsql.And(conds...))
-				sel.Where(entsql.Exists(sub))
-			}))
-		}
-		if len(visPreds) == 0 {
-			return &store.ListResult[store.TriggerEvent]{Items: []store.TriggerEvent{}, TotalCount: 0}, nil
-		}
+		visPreds = append(visPreds, predicate.TriggerEvent(func(sel *entsql.Selector) {
+			d := sel.Dialect()
+			tf := entsql.Dialect(d).Table(triggerfire.Table).As("tf_res")
+			conds := []*entsql.Predicate{
+				entsql.ColumnsEQ(tf.C(triggerfire.FieldEventID), sel.C(triggerevent.FieldID)),
+				entsql.EQ(tf.C(triggerfire.FieldResultRef), agentID),
+			}
+			if hasPID {
+				conds = append(conds, entsql.EQ(tf.C(triggerfire.FieldProjectID), pid))
+			}
+			sub := entsql.Dialect(d).
+				Select(tf.C(triggerfire.FieldID)).
+				From(tf).
+				Where(entsql.And(conds...))
+			sel.Where(entsql.Exists(sub))
+		}))
 		query.Where(triggerevent.Or(visPreds...))
 	}
 

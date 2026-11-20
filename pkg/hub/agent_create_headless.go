@@ -415,17 +415,19 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		return nil, fmt.Errorf("failed to check existing agent %q in project %q: %w", slug, hc.ProjectID, err)
 	}
 	if err == nil && existingAgent != nil {
-		slog.Warn("Scheduler: agent already exists, skipping dispatch_agent",
-			"eventID", fireID,
-			"agentName", slug,
-			"projectID", hc.ProjectID,
-			"existingPhase", existingAgent.Phase)
-		if existingAgent.Phase == string(state.PhaseError) {
-			placementRefused := s.isScheduleBlockedPlacementRefusal(ctx, existingAgent)
-			if hc.NotifyBlocked != nil {
-				hc.NotifyBlocked(ctx, existingAgent, placementRefused)
+		if hc.Authority.Recorded.DefinitionKind != hubfire.DefinitionKindTrigger {
+			slog.Warn("Scheduler: agent already exists, skipping dispatch_agent",
+				"eventID", fireID,
+				"agentName", slug,
+				"projectID", hc.ProjectID,
+				"existingPhase", existingAgent.Phase)
+			if existingAgent.Phase == string(state.PhaseError) {
+				placementRefused := s.isScheduleBlockedPlacementRefusal(ctx, existingAgent)
+				if hc.NotifyBlocked != nil {
+					hc.NotifyBlocked(ctx, existingAgent, placementRefused)
+				}
+				return nil, scheduleBlockedError(existingAgent, placementRefused)
 			}
-			return nil, scheduleBlockedError(existingAgent, placementRefused)
 		}
 		return nil, fmt.Errorf("%w: agent %q already exists in project", errHeadlessAgentExists, slug)
 	}

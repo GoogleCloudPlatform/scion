@@ -388,6 +388,57 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 		assert.Equal(t, "event.payload.title", details["path"])
 	})
 
+	t.Run("untrusted_vars_authoring_validation_dedup_and_cap", func(t *testing.T) {
+		for _, bad := range []string{
+			"",
+			"event.id",
+			"trigger.name",
+			"project.id",
+			"result.agent_id",
+			"foo.bar",
+			"event.unknown",
+			"event.*",
+			"*",
+			"event.type.*",
+			"event.payload.*.x",
+		} {
+			req := baseReq("bad-uv-" + api.Slugify(bad))
+			req.Action.UntrustedVars = []string{bad}
+			details := assertErrCode(t, postTrigger(userCtx, req), http.StatusBadRequest, "invalid_untrusted_var")
+			assert.Equal(t, bad, details["path"])
+		}
+
+		// More than 64 entries refused.
+		tooMany := make([]string, 65)
+		for i := range tooMany {
+			tooMany[i] = fmt.Sprintf("event.attributes.k%d", i)
+		}
+		reqCap := baseReq("uv-over-cap")
+		reqCap.Action.UntrustedVars = tooMany
+		assertErrCode(t, postTrigger(userCtx, reqCap), http.StatusBadRequest, "invalid_untrusted_var")
+
+		// Valid entries + duplicates deduplicated in order.
+		reqOK := baseReq("uv-dedup-ok")
+		reqOK.Action.UntrustedVars = []string{
+			"event.type",
+			"event.attributes.*",
+			"event.payload.pr.*",
+			"event.type",
+			"event.payload.pr.*",
+			"event.payload.title",
+		}
+		rec := postTrigger(userCtx, reqOK)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var got TriggerResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		assert.Equal(t, []string{
+			"event.type",
+			"event.attributes.*",
+			"event.payload.pr.*",
+			"event.payload.title",
+		}, got.Action.UntrustedVars)
+	})
+
 	t.Run("reserved_label_keys_and_label_count", func(t *testing.T) {
 		for _, k := range []string{"trigger", "trigger_event", "trigger_source"} {
 			req := baseReq("res-lbl-" + k)
@@ -686,6 +737,114 @@ func TestTriggerDispatchAgent_RenderRefusalAndCollisionMatrix(t *testing.T) {
 		}, baseEvent(`{}`, nil))
 		assert.Equal(t, hubfire.FireStatusSkipped, out3.Status)
 		assert.Equal(t, "agent name in use", out3.Error)
+	})
+
+	t.Run("name_collision_with_error_and_non_running_phase_holders", func(t *testing.T) {
+		for _, phase := range []string{"error", "stopped", "suspended"} {
+			slug := "holder-" + phase
+			require.NoError(t, f.sched.store.CreateAgent(ctx, &store.Agent{
+				ID:        api.NewUUID(),
+				Slug:      slug,
+				Name:      slug,
+				ProjectID: f.sched.proj.ID,
+				Phase:     phase,
+			}))
+
+			// nameConflict=suffix (default) must suffix and fire, never fail as schedule-blocked.
+			outSuffix := fireDirect(t, "coll-"+phase+"-suffix", DispatchAgentEventPayload{
+				AgentName: slug,
+				Task:      "suffix on " + phase,
+			}, baseEvent(`{}`, nil))
+			require.Equal(t, hubfire.FireStatusFired, outSuffix.Status, "phase=%s err=%q", phase, outSuffix.Error)
+			require.NotEmpty(t, outSuffix.ResultRef)
+			ag, err := f.sched.store.GetAgent(ctx, outSuffix.ResultRef)
+			require.NoError(t, err)
+			assert.True(t, strings.HasPrefix(ag.Slug, slug+"-"), "got slug %q", ag.Slug)
+			assert.Equal(t, len(slug)+1+4, len(ag.Slug))
+
+			// nameConflict=skip must return generic skipped "agent name in use" (no schedule wording, no slug).
+			outSkip := fireDirect(t, "coll-"+phase+"-skip", DispatchAgentEventPayload{
+				AgentName:    slug,
+				NameConflict: DispatchAgentNameConflictSkip,
+				Task:         "skip on " + phase,
+			}, baseEvent(`{}`, nil))
+			assert.Equal(t, hubfire.FireStatusSkipped, outSkip.Status, "phase=%s", phase)
+			assert.Equal(t, "agent name in use", outSkip.Error)
+			assert.NotContains(t, outSkip.Error, "schedule")
+			assert.NotContains(t, outSkip.Error, slug)
+		}
+	})
+
+	t.Run("event_attributes_cannot_override_hub_source_name_or_signature_mode", func(t *testing.T) {
+		// 1. Webhook event with spoofed endpoint_name/signature_mode attributes still uses hub endpoint record.
+		ev := baseEvent(`{"x":"ok"}`, map[string]string{
+			"endpoint_name":  "spoofed-ep",
+			"signature_mode": "spoofed_mode",
+		})
+		// baseEvent overwrites endpoint_name/signature_mode; explicitly spoof them after.
+		ev.Attributes["endpoint_name"] = "spoofed-ep"
+		ev.Attributes["signature_mode"] = "spoofed_mode"
+
+		f.client.mu.Lock()
+		beforeCalls := len(f.client.calls)
+		f.client.mu.Unlock()
+
+		out := fireDirect(t, "spoof-webhook", DispatchAgentEventPayload{
+			Task:          "src=${event.source.name} val=${event.payload.x}",
+			UntrustedVars: []string{"event.payload.x"},
+		}, ev)
+		require.Equal(t, hubfire.FireStatusFired, out.Status, out.Error)
+
+		f.client.mu.Lock()
+		require.Greater(t, len(f.client.calls), beforeCalls)
+		req := f.client.calls[len(f.client.calls)-1]
+		f.client.mu.Unlock()
+
+		assert.Contains(t, req.Config.Task, "src="+ep.Name)
+		assert.NotContains(t, req.Config.Task, "spoofed-ep")
+		assert.Contains(t, req.Config.Task, `Source: webhook endpoint "`+ep.Name+`" (scion_v1; integrity verified, content untrusted).`)
+		assert.NotContains(t, req.Config.Task, "spoofed_mode")
+
+		// 2. Non-webhook source (github, no endpoint row) with spoofed attributes:
+		// event.source.name is missing (not answered from attributes), so required ${event.source.name} refuses.
+		ghEv := &hubfire.FireEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  f.sched.proj.ID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "inst-1",
+			Type:       "github.pull_request.opened",
+			Subject:    "github:acme/repo#1",
+			OccurredAt: time.Now().UTC(),
+			ReceivedAt: time.Now().UTC(),
+			Attributes: map[string]string{
+				"endpoint_name":  "spoofed-gh",
+				"signature_mode": "spoofed_mode",
+			},
+			Payload: []byte(`{"x":"ok"}`),
+			Trigger: &hubfire.FireTriggerRef{ID: api.NewUUID(), Name: "gh-trig"},
+		}
+		outMissing := fireDirect(t, "spoof-gh-missing", DispatchAgentEventPayload{
+			Task: "src=${event.source.name}",
+		}, ghEv)
+		assert.Equal(t, hubfire.FireStatusRefused, outMissing.Status)
+		assert.Equal(t, "template value missing", outMissing.Error)
+
+		// With optional ${event.source.name?}, trailer uses default "verified", never spoofed_mode/spoofed-gh.
+		f.client.mu.Lock()
+		beforeCalls = len(f.client.calls)
+		f.client.mu.Unlock()
+		outOpt := fireDirect(t, "spoof-gh-opt", DispatchAgentEventPayload{
+			Task:          "src=${event.source.name?} val=${event.payload.x}",
+			UntrustedVars: []string{"event.payload.x"},
+		}, ghEv)
+		require.Equal(t, hubfire.FireStatusFired, outOpt.Status, outOpt.Error)
+		f.client.mu.Lock()
+		require.Greater(t, len(f.client.calls), beforeCalls)
+		reqGH := f.client.calls[len(f.client.calls)-1]
+		f.client.mu.Unlock()
+		assert.NotContains(t, reqGH.Config.Task, "spoofed-gh")
+		assert.NotContains(t, reqGH.Config.Task, "spoofed_mode")
+		assert.Contains(t, reqGH.Config.Task, "(verified; integrity verified, content untrusted).")
 	})
 
 	t.Run("name_collision_exhausted", func(t *testing.T) {
