@@ -16,7 +16,9 @@ package runtimebroker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // hostedSocketVolume is a member-written host bind that no Runtime Broker
@@ -195,5 +198,85 @@ func TestStartAgent_HostedWithoutInlineConfigStarts(t *testing.T) {
 	}
 	if !mgr.lastStartOpts.HostedMode || !mgr.lastStartOpts.BrokerMode {
 		t.Errorf("HostedMode = %v, BrokerMode = %v on a hosted broker, want both true", mgr.lastStartOpts.HostedMode, mgr.lastStartOpts.BrokerMode)
+	}
+}
+
+// hostedHCRefusal is the refusal pkg/agent raises for a member-written
+// harness config's volume, wrapped as callers in pkg/agent may wrap it with
+// text naming a broker path.
+func hostedHCRefusal() error {
+	re := hostedguard.CheckMemberConfig(&api.ScionConfig{Volumes: []api.VolumeMount{{Source: "/srv/broker-private", Target: "/hc-data"}}},
+		hostedguard.Origin{Kind: hostedguard.OriginHarnessConfig, Name: "hc-vol"}, "docker")
+	return fmt.Errorf("provision in /var/lib/broker-private-dir: %w", re)
+}
+
+func assertHostedHCResponse(t *testing.T, code int, body string) ErrorResponse {
+	t.Helper()
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", code, body)
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("not an ErrorResponse: %v: %s", err, body)
+	}
+	if resp.Error.Code != hostedguard.ErrorCode {
+		t.Errorf("code = %q, want %q", resp.Error.Code, hostedguard.ErrorCode)
+	}
+	if !strings.Contains(resp.Error.Message, `volume "/hc-data"`) || !strings.Contains(resp.Error.Message, `harness config "hc-vol"`) {
+		t.Errorf("message %q does not name the volume and the harness config", resp.Error.Message)
+	}
+	if strings.Contains(body, "broker-private") {
+		t.Errorf("response leaks a broker path or source: %s", body)
+	}
+	return resp
+}
+
+// Every synchronous dispatch path answers a harness config refused inside
+// Manager.Provision or Start with 400 hosted_config_refused and the
+// refusal's own text, not what wraps it.
+func TestHostedHarnessConfigRefusal_DispatchPathsAnswer400(t *testing.T) {
+	cases := []struct {
+		name, at, path, body string
+		startAttempted       bool
+	}{
+		{"create sync start", "start", "/api/v1/agents",
+			`{"name": "h1", "id": "id-h1", "slug": "h1", "config": {"template": "none"}}`, false},
+		{"create provision-only", "provision", "/api/v1/agents",
+			`{"name": "h2", "id": "id-h2", "slug": "h2", "provisionOnly": true, "config": {"template": "none"}}`, false},
+		{"start", "start", "/api/v1/agents/h3/start", `{"runId": "run-h3"}`, true},
+		{"restart", "start", "/api/v1/agents/h4/restart", `{"runId": "run-h4"}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, _ := dispatchTestEnv(t, true)
+			srv.manager = &unusableManager{at: tc.at, err: hostedHCRefusal()}
+			code, body := postJSON(t, srv, tc.path, tc.body)
+			resp := assertHostedHCResponse(t, code, body)
+			if tc.startAttempted && resp.Error.Details[api.BrokerErrorDetailStartAttempted] != true {
+				t.Errorf("expected %s=true in details, got %v", api.BrokerErrorDetailStartAttempted, resp.Error.Details)
+			}
+		})
+	}
+}
+
+// An async create refused at admission (Manager.Preflight) answers the same.
+func TestHostedHarnessConfigRefusal_AsyncAdmission(t *testing.T) {
+	code, body, _ := asyncPreflightFailure(t, "h5", hostedHCRefusal())
+	assertHostedHCResponse(t, code, body)
+}
+
+// An async launch reports the hosted_config_refused code with the
+// refusal's own text, and the hub counts it as refused before any
+// container was created.
+func TestClassifyStartError_HostedHarnessConfigRefusal(t *testing.T) {
+	code, _, msg := classifyStartError(context.Background(), hostedHCRefusal(), "", "", store.LaunchKindStart)
+	if code != hostedguard.ErrorCode {
+		t.Errorf("code = %q, want %q", code, hostedguard.ErrorCode)
+	}
+	if !strings.Contains(msg, `harness config "hc-vol"`) || strings.Contains(msg, "broker-private") {
+		t.Errorf("message should name the harness config without broker paths, got %q", msg)
+	}
+	if !store.IsBrokerPreContainerLaunchRefusal(code) {
+		t.Errorf("%q should be a pre-container launch refusal", code)
 	}
 }

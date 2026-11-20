@@ -97,6 +97,10 @@ const (
 	// agents may not be given. The broker's synchronous refusal uses the
 	// same value (BrokerErrCodeGitConfigRefused).
 	LaunchCodeGitConfigRefused = "git_config_refused"
+	// LaunchCodeHostedConfigRefused: a hosted broker refused config written
+	// by project members (a harness config's volumes). The synchronous
+	// refusal uses the same value (pkg/hostedguard.ErrorCode).
+	LaunchCodeHostedConfigRefused = "hosted_config_refused"
 
 	// LaunchCodeImagePullFailed: the agent image could not be pulled
 	// (Kubernetes ImagePullBackOff or ErrImagePull).

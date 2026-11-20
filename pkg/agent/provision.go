@@ -915,6 +915,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.BrokerMode {
 		ctx = api.ContextWithBrokerMode(ctx)
 	}
+	if opts.HostedMode {
+		ctx = api.ContextWithHostedMode(ctx)
+	}
 	if opts.GitClone != nil {
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
@@ -1596,6 +1599,10 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		return nil, fmt.Errorf("failed to find harness-config %q: %w", harnessConfigName, err)
 	}
 	if err := CheckHarnessConfigPolicy(ctx, harnessConfigName, harness.EffectiveConfig(harnessConfigName, hcDir, settings, profileName)); err != nil {
+		return nil, err
+	}
+	// The runtime is not known here; Start checks again with it.
+	if err := checkHostedHarnessConfig(api.IsHostedModeFromContext(ctx), hcDir, ""); err != nil {
 		return nil, err
 	}
 

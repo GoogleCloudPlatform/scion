@@ -1054,6 +1054,9 @@ func classifyStartErrorCode(err error, templateSlug, op string) (code, message s
 	if ue, ok := unusableProvisionerFrom(err); ok {
 		return ErrCodeHarnessConfigUnusable, ue.PublicMessage()
 	}
+	if re, ok := hostedConfigRefusalFrom(err); ok {
+		return api.LaunchCodeHostedConfigRefused, re.Error()
+	}
 	if emptyGenericCommandFrom(err) {
 		return ErrCodeHarnessConfigUnusable, emptyGenericCommandMessage()
 	}

@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -56,4 +57,22 @@ func anyVolumes(cfgs []*api.ScionConfig) bool {
 // as requested, never a host path or a value.
 func writeHostedConfigRefusal(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadRequest, hostedguard.ErrorCode, err.Error(), nil)
+}
+
+// hostedConfigRefusalFrom reports whether err is (or wraps) refused member
+// config raised inside Manager.Preflight, Provision or Start (a harness
+// config's volumes on a hosted broker).
+func hostedConfigRefusalFrom(err error) (*hostedguard.RefusalError, bool) {
+	var re *hostedguard.RefusalError
+	if errors.As(err, &re) {
+		return re, true
+	}
+	return nil, false
+}
+
+// writeHostedConfigRefusalDetails writes re as writeHostedConfigRefusal
+// does, with the operation's error details. Only re's own text is sent:
+// what wraps it can name broker paths.
+func writeHostedConfigRefusalDetails(w http.ResponseWriter, re *hostedguard.RefusalError, details map[string]interface{}) {
+	writeError(w, http.StatusBadRequest, hostedguard.ErrorCode, re.Error(), details)
 }

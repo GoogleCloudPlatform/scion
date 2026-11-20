@@ -108,8 +108,8 @@ func IsUnconfirmedLaunchError(launchError string) bool {
 // pkg/runtimebroker/run_launch.go; Manager.Start raises each before
 // Runtime.Run): an unusable or policy-refused harness-config, a template or
 // harness-config that does not resolve, a required skill that does not
-// resolve, refused repository git config, or a storage placement that
-// needs migration. Every other code, including runtime_error,
+// resolve, refused repository git config, refused member config on a
+// hosted broker, or a storage placement that needs migration. Every other code, including runtime_error,
 // container_config, name_in_use, agent_error, launch_stopped,
 // dispatch_failed and the Hub's own launch_timeout and broker_lost, can
 // follow a created container or says nothing about one.
@@ -120,6 +120,7 @@ func IsBrokerPreContainerLaunchRefusal(launchError string) bool {
 		api.LaunchCodeTemplateNotFound,
 		api.BrokerErrCodeSkillResolution,
 		api.LaunchCodeGitConfigRefused,
+		api.LaunchCodeHostedConfigRefused,
 		api.BrokerErrCodeStorageMigrationRequired:
 		return true
 	default:

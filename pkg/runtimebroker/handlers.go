@@ -2190,6 +2190,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.writeUnusableProvisioner(w, ue, "provision agent", req.ID, nil)
 				return
 			}
+			if re, ok := hostedConfigRefusalFrom(err); ok {
+				markAttemptFailed(http.StatusBadRequest, re.Error())
+				writeHostedConfigRefusalDetails(w, re, nil)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
 			s.writeRuntimeOpError(w, ctx, "provision agent", err, "agent_id", req.ID)
 			return
@@ -2263,6 +2268,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		isSkillErr := errors.As(err, &skillErr)
 		policyDecision, isPolicyErr := harnessPolicyRefusalFrom(err)
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
+		hostedErr, isHostedRefusal := hostedConfigRefusalFrom(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		isEmptyGenericCmd := emptyGenericCommandFrom(err)
@@ -2271,6 +2277,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
 		case isUnusable:
 			markAttemptFailed(http.StatusUnprocessableEntity, unusableErr.PublicMessage())
+		case isHostedRefusal:
+			markAttemptFailed(http.StatusBadRequest, hostedErr.Error())
 		case isStorageRefusal:
 			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case isResourceRefusal:
@@ -2363,6 +2371,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
 		case isUnusable:
 			s.writeUnusableProvisioner(w, unusableErr, "create agent", req.ID, nil)
+		case isHostedRefusal:
+			writeHostedConfigRefusalDetails(w, hostedErr, nil)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "create agent", req.ID, nil)
 		case isResourceRefusal:
@@ -4417,12 +4427,15 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		var skillErr *agent.SkillResolutionError
 		ue, unusable := unusableProvisionerFrom(err)
+		hostedErr, isHostedRefusal := hostedConfigRefusalFrom(err)
 		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		switch {
 		case unusable:
 			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
+		case isHostedRefusal:
+			writeHostedConfigRefusalDetails(w, hostedErr, details)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "start agent", id, details)
 		case isResourceRefusal:
@@ -5650,6 +5663,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		if ue, ok := unusableProvisionerFrom(err); ok {
 			s.writeUnusableProvisioner(w, ue, "restart agent", id, details)
+			return
+		}
+		if re, ok := hostedConfigRefusalFrom(err); ok {
+			writeHostedConfigRefusalDetails(w, re, details)
 			return
 		}
 		if se, ok := storageMigrationRequiredFrom(err); ok {

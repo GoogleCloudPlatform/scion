@@ -74,6 +74,19 @@ type HarnessConfigDir struct {
 	// this directory from and its slash-separated path below it, for
 	// OpenDir; both are empty for a directory loaded another way.
 	root, rel string
+
+	// projectTier is set when FindHarnessConfigDir resolved this directory
+	// from the project's own harness-configs directory (FromProjectTier).
+	projectTier bool
+}
+
+// FromProjectTier reports whether FindHarnessConfigDir resolved d from the
+// project's own harness-configs directory, as opposed to a template's, the
+// global directory or a hub-hydrated copy. Source does not tell the project
+// and global tiers apart (both are HarnessConfigSourceBrokerLocal). A
+// project directory that is the global directory itself counts as global.
+func (d *HarnessConfigDir) FromProjectTier() bool {
+	return d != nil && d.projectTier
 }
 
 // HarnessConfigSource names the resolution branch a harness-config came from.
@@ -142,6 +155,19 @@ func ResolveHarnessConfigDir(hydratedPath, name, projectPath string, templatePat
 		return hcDir, nil
 	}
 	return FindHarnessConfigDir(name, projectPath, templatePaths...)
+}
+
+// isGlobalDirPath reports whether dir is the global Scion directory, whose
+// harness-configs directory is the global tier even when it is reached as a
+// project directory.
+func isGlobalDirPath(dir string) bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	a, errA := filepath.Abs(dir)
+	b, errB := filepath.Abs(globalDir)
+	return errA == nil && errB == nil && filepath.Clean(a) == filepath.Clean(b)
 }
 
 // LoadHarnessConfigDir loads a harness-config from an on-disk directory.
@@ -366,6 +392,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 		searched = append(searched, filepath.Join(projectPath, harnessConfigsDirName, name))
 		if hcDir := loadHarnessConfigTier(projectPath, "", name, "project"); hcDir != nil {
 			hcDir.Source = HarnessConfigSourceBrokerLocal
+			hcDir.projectTier = !isGlobalDirPath(projectPath)
 			return hcDir, nil
 		}
 	}
