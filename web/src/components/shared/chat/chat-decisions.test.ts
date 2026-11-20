@@ -1354,6 +1354,52 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
     expect(root(elOtherUser).querySelector('.editor')).toBeNull();
     expect(root(elOtherUser).querySelector('.otext')?.textContent).toBe('“europe-west4”');
     expect(button(elOtherUser, '$other').hasAttribute('disabled')).toBe(true);
+
+    // Clicking Confirm on an unchanged interpreted Other posts choice_id=$other and recorded other_text.
+    const elConfirm = await mount([interpretedOther]);
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: viewWithOther({
+          status: 'decided',
+          decision: {
+            choiceId: '$other',
+            label: 'Another region',
+            otherText: 'europe-west4',
+            answeredByUserId: 'u-me',
+            answeredByName: 'Alice',
+            provenance: 'direct',
+            outcome: 'confirm',
+            surface: 'native',
+            responseMessageId: 'resp-conf-1',
+            at: '2026-11-20T03:04:00Z',
+          },
+        }),
+        responseMessageId: 'resp-conf-1',
+      })
+    );
+    root(elConfirm).querySelector<HTMLElement>('[data-action="confirm"]')!.click();
+    await settle(elConfirm);
+    expect(JSON.parse(apiFetch.mock.calls[0]![1]?.body as string)).toEqual({
+      choice_id: '$other',
+      other_text: 'europe-west4',
+      idempotency_key: expect.any(String),
+    });
+
+    // Leaving actionable interpreted-Other state resets the seeded draft so a subsequent
+    // pending row opens with an empty editor (kills willUpdate interpretedOtherSeedKey mutant).
+    const elSeedReset = await mount([interpretedOther]);
+    typeIntoOther(elSeedReset, 'stale-interpreted-draft');
+    await settle(elSeedReset);
+    elSeedReset.decisions = [
+      viewWithOther({ rowId: 'row-pending-after-interp', status: 'pending' }),
+    ];
+    await settle(elSeedReset);
+    button(elSeedReset, '$other').click();
+    await settle(elSeedReset);
+    expect(
+      root(elSeedReset).querySelector<HTMLElement & { value: string }>('.editor sl-input')!.value
+    ).toBe('');
   });
 
   it('allows changing an interpreted fixed choice to Other from the single card', async () => {
@@ -1382,6 +1428,19 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
     expect(root(el).querySelector('.editor')).not.toBeNull();
     const changeBtn = root(el).querySelector<HTMLElement>('[data-action="confirm-change"]')!;
     expect(changeBtn.hasAttribute('disabled')).toBe(true);
+
+    // Typing a draft and then clicking a fixed choice drops the Other draft so re-opening
+    // Other starts empty (kills onSingleChoiceClick interpreted-fixed draft-reset mutant).
+    typeIntoOther(el, 'stale-fixed-draft');
+    await settle(el);
+    button(el, 'europe-west1').click();
+    await settle(el);
+    expect(root(el).querySelector('.editor')).toBeNull();
+    button(el, '$other').click();
+    await settle(el);
+    expect(root(el).querySelector<HTMLElement & { value: string }>('.editor sl-input')!.value).toBe(
+      ''
+    );
 
     typeIntoOther(el, 'me-central2');
     await settle(el);
