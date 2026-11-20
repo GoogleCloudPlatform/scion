@@ -348,6 +348,7 @@ func TestGitHubTriggerAuthoring_FlagSourceIDMatchTypesAssociationAndAgentRules(t
 		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.agentB.ID, Message: "Cross-agent disallowed"},
 	})
 	assert.Equal(t, http.StatusForbidden, agentOtherRec.Code, agentOtherRec.Body.String())
+	assert.Contains(t, agentOtherRec.Body.String(), "agent callers may only target themselves")
 
 	agentUnreadableRec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
 		Name:   "agent-a-unreadable-gh",
@@ -366,7 +367,7 @@ func TestGitHubTriggerAuthoring_FlagSourceIDMatchTypesAssociationAndAgentRules(t
 
 	// 9. Stage 1 3b-1 interaction: github triggers enforce ordered match.rules CEL compilation,
 	// dialect admission ("cel" only), ambiguous scalar+rules rejection, PATCH rule validation,
-	// and agent self-only re-authorization when PATCHing a peer-targeting webhook trigger to github.
+	// and agent callers are refused when attempting to PATCH trigger definitions at all.
 	celRulesOK := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
 		Name:   "gh-with-cel-rules",
 		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
@@ -438,7 +439,10 @@ func TestGitHubTriggerAuthoring_FlagSourceIDMatchTypesAssociationAndAgentRules(t
 	assert.Equal(t, ErrCodeInvalidRule, decodeAPIErrorCode(t, badPatchRec))
 
 	// Agent A creates a webhook trigger targeting peer Agent B (allowed for webhook),
-	// then tries to PATCH source.kind to github without changing action -> 403 Forbidden.
+	// then tries to PATCH it to source.kind=github. Agents cannot PATCH trigger
+	// definitions at all (agentTriggerEditAllowed=false), so the row-edit guard
+	// refuses the request with generic 403 Forbidden before authoring checks run
+	// (github self-only targeting is exercised on create in step 8 above).
 	agentEpRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "agent-a-ep"})
 	require.Equal(t, http.StatusCreated, agentEpRec.Code, agentEpRec.Body.String())
 	var agentEp WebhookEndpointCreatedResponse
@@ -459,6 +463,10 @@ func TestGitHubTriggerAuthoring_FlagSourceIDMatchTypesAssociationAndAgentRules(t
 		Match:  &TriggerMatchPatchSpec{Types: &ghTypes},
 	})
 	assert.Equal(t, http.StatusForbidden, agentPatchToGH.Code, agentPatchToGH.Body.String())
+	assert.Equal(t, ErrCodeForbidden, decodeAPIErrorCode(t, agentPatchToGH))
+	assert.Contains(t, agentPatchToGH.Body.String(), "Insufficient permissions",
+		"agent PATCH must be refused by the row-edit guard (agentTriggerEditAllowed=false)")
+	assert.NotContains(t, agentPatchToGH.Body.String(), "agent callers may only target themselves")
 
 	repoCalls, mints = gh.counts()
 	assert.Zero(t, repoCalls, "entire authoring suite must make zero GitHub HTTP calls")
