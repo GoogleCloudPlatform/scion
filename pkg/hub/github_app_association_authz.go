@@ -921,7 +921,7 @@ func (s *Server) hasAuthorizedGitHubAssociationCached(ctx context.Context, proje
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		return false, nil
+		return false, err
 	}
 	if bound {
 		return true, nil
@@ -932,7 +932,7 @@ func (s *Server) hasAuthorizedGitHubAssociationCached(ctx context.Context, proje
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		return false, nil
+		return false, err
 	}
 	if !hasToken {
 		return false, nil

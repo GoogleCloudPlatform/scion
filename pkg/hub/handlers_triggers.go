@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -266,7 +267,13 @@ func (s *Server) authorizeGitHubTriggerSource(w http.ResponseWriter, r *http.Req
 	}
 	authorized, err := s.hasAuthorizedGitHubAssociationCached(r.Context(), project)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			writeErrorFromErr(w, err, "")
+			return false
+		}
+		slog.ErrorContext(r.Context(), "Failed to check GitHub App association for trigger authoring",
+			"project_id", project.ID, "error", err)
+		InternalError(w)
 		return false
 	}
 	if !authorized {

@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -869,4 +870,145 @@ func TestGitHubTriggerE2E_InconclusiveAssociationCheckRetriesUntilRecovered(t *t
 
 	callsAfter, _ := gh.counts()
 	assert.Equal(t, callsBefore, callsAfter, "cold-cache authoring after status reset must make zero GitHub HTTP calls")
+}
+
+type g1bAssocUserFaultStore struct {
+	store.Store
+	fault        *storeFaultSwitch
+	targetUserID string
+	err          error
+}
+
+func (s *g1bAssocUserFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.fault.Active() && id == s.targetUserID {
+		return nil, s.err
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+type g1bSecretGetFaultStub struct {
+	secret.SecretBackend
+	err error
+}
+
+func (b g1bSecretGetFaultStub) Get(context.Context, string, string, string) (*secret.SecretWithValue, error) {
+	return nil, b.err
+}
+
+func TestGitHubTriggerAuthoring_BackendErrorsReturn500Not409(t *testing.T) {
+	srv, s, faultStore, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *g1bAssocUserFaultStore {
+		return &g1bAssocUserFaultStore{Store: inner, fault: sw}
+	})
+	f := setupTriggersTestFixtureOnServer(t, srv, s)
+	ctx := context.Background()
+
+	gh := newFakeGitHubForAssoc(t)
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.APIBaseURL = gh.srv.URL
+	f.srv.config.GitHubAppConfig.AppID = 778899
+	f.srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+	f.srv.config.GitHubAppConfig.WebhookSecret = "g1b-u1u2-secret"
+	f.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.srv.mu.Unlock()
+	setTriggerExperimentsForG1bTest(t, f.srv, true, true)
+
+	sysAdmin := createAssocAdmin(t, s, "g1b-u1u2-admin")
+	const instID int64 = 6109
+	createAssocInstallation(t, s, instID, "acme", "acme/widgets")
+
+	remote := gh.remote("acme", "widgets")
+	instCopy := instID
+	creatorProj := createAssocProject(t, s, "g1b-u1u2-proj", remote, f.owner.ID, &instCopy)
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, creatorProj.ID, f.owner.ID))
+
+	target := &store.Agent{
+		ID:        tid("g1b-u1u2-target"),
+		Slug:      "u1u2-target",
+		Name:      "u1u2-target",
+		ProjectID: creatorProj.ID,
+		Phase:     string(state.PhaseRunning),
+		CreatedBy: f.owner.ID,
+		OwnerID:   f.owner.ID,
+		Ancestry:  []string{f.owner.ID},
+	}
+	require.NoError(t, s.CreateAgent(ctx, target))
+
+	doCreate := func(name string) *httptest.ResponseRecorder {
+		path := "/api/v1/projects/" + creatorProj.ID + "/triggers"
+		req := authoredRequest(t, f.ownerAuth, http.MethodPost, path, CreateTriggerRequest{
+			Name:   name,
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: target.ID, Message: "hi"},
+		})
+		w := httptest.NewRecorder()
+		f.srv.handleTriggers(w, req, creatorProj.ID, "")
+		return w
+	}
+
+	// 1. U1: githubAdminBindingValid store/user-lookup error -> content-free 500 internal_error (not 409).
+	setAdminBinding(t, s, creatorProj, instID, util.NormalizeGitRemote(remote), sysAdmin.ID)
+	f.srv.invalidateGitHubAssociation(creatorProj.ID)
+
+	faultStore.targetUserID = sysAdmin.ID
+	faultStore.err = errors.New("db-user-lookup-failed: ghp_canary_u1_secret")
+	fault.Arm()
+
+	recU1 := doCreate("u1-store-err")
+	require.Equal(t, http.StatusInternalServerError, recU1.Code, recU1.Body.String())
+	assert.Equal(t, ErrCodeInternalError, decodeAPIErrorCode(t, recU1))
+	assert.NotContains(t, recU1.Body.String(), "ghp_canary_u1_secret")
+	assert.NotContains(t, recU1.Body.String(), "db-user-lookup-failed")
+	assert.NotContains(t, recU1.Body.String(), ErrCodeGitHubNotAssociated)
+
+	// Remove admin binding so subsequent checks exercise creator-token lookup.
+	creatorProj, err := s.GetProject(ctx, creatorProj.ID)
+	require.NoError(t, err)
+	delete(creatorProj.Annotations, githubInstallationBindingAnnotation)
+	require.NoError(t, s.UpdateProject(ctx, creatorProj))
+	f.srv.invalidateGitHubAssociation(creatorProj.ID)
+
+	// 2. Definitive negative (no admin binding and no stored creator GITHUB_TOKEN) -> stays 409 github_not_associated.
+	recNoToken := doCreate("definitive-no-token")
+	require.Equal(t, http.StatusConflict, recNoToken.Code, recNoToken.Body.String())
+	assert.Equal(t, ErrCodeGitHubNotAssociated, decodeAPIErrorCode(t, recNoToken))
+
+	// 3. U2: lookupCreatorGitHubToken secret-backend error (generic error and PermissionError)
+	// -> content-free 500 internal_error, never 409/403 and never echoing backend error or token content.
+	origSB := f.srv.secretBackend
+	t.Cleanup(func() { f.srv.SetSecretBackend(origSB) })
+
+	f.srv.SetSecretBackend(g1bSecretGetFaultStub{
+		SecretBackend: origSB,
+		err:           errors.New("vault-unavailable: ghp_canary_u2_token"),
+	})
+	recU2Generic := doCreate("u2-secret-generic-err")
+	require.Equal(t, http.StatusInternalServerError, recU2Generic.Code, recU2Generic.Body.String())
+	assert.Equal(t, ErrCodeInternalError, decodeAPIErrorCode(t, recU2Generic))
+	assert.NotContains(t, recU2Generic.Body.String(), "ghp_canary_u2_token")
+	assert.NotContains(t, recU2Generic.Body.String(), "vault-unavailable")
+	assert.NotContains(t, recU2Generic.Body.String(), ErrCodeGitHubNotAssociated)
+
+	f.srv.SetSecretBackend(g1bSecretGetFaultStub{
+		SecretBackend: origSB,
+		err: &secret.PermissionError{
+			Operation: "access secret version",
+			Err:       errors.New("sm-iam-denied: ghp_canary_u2_perm"),
+		},
+	})
+	recU2Perm := doCreate("u2-secret-perm-err")
+	require.Equal(t, http.StatusInternalServerError, recU2Perm.Code, recU2Perm.Body.String())
+	assert.Equal(t, ErrCodeInternalError, decodeAPIErrorCode(t, recU2Perm))
+	assert.NotContains(t, recU2Perm.Body.String(), "ghp_canary_u2_perm")
+	assert.NotContains(t, recU2Perm.Body.String(), "sm-iam-denied")
+
+	// 4. Context cancellation is preserved unchanged.
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	_, cErr := f.srv.hasAuthorizedGitHubAssociationCached(canceledCtx, creatorProj)
+	require.ErrorIs(t, cErr, context.Canceled)
+
+	repoCalls, mints := gh.counts()
+	assert.Zero(t, repoCalls)
+	assert.Empty(t, mints)
 }
