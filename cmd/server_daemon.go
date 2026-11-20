@@ -184,6 +184,11 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
 		return err
 	}
+	// Only the flag is visible here; dev auth enabled in settings is refused
+	// by the foreground child (loadAndReconcileConfig).
+	if err := validateHostedDevAuth(hostedMode, cmd.Flags().Changed("dev-auth") && enableDevAuth); err != nil {
+		return err
+	}
 	return validateTestModeFlagsEarly(cmd)
 }
 

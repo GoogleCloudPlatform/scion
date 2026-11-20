@@ -528,9 +528,6 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		if hostedMode {
-			log.Println("WARNING: Development authentication enabled - not for production use")
-		}
 	}
 
 	// 10. Resolve hub endpoint: the operator endpoint (environment, flags,
@@ -1620,6 +1617,11 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	applyKeyringFlagOverrides(cmd.Flags(), cfg)
 	applyConduitFlagOverrides(cmd, cfg)
 
+	// cfg.Auth.Enabled is final here (settings, environment, --dev-auth).
+	if err := validateHostedDevAuth(hostedMode, cfg.Auth.Enabled); err != nil {
+		return nil, err
+	}
+
 	applyServerListenHosts(cfg, hostedMode, cmd.Flags().Changed("host"), hubHost, enableHub)
 
 	// Fallback to legacy environment variable
@@ -1666,6 +1668,18 @@ func isHADeployment(cfg *config.GlobalConfig) bool {
 func validateDebugEndpoints(hosted, enabled bool) error {
 	if hosted && enabled {
 		return fmt.Errorf("--enable-debug-endpoints is not allowed in hosted mode; diagnostic endpoints are for local development only")
+	}
+	return nil
+}
+
+// validateHostedDevAuth refuses dev auth in hosted mode. Dev auth is a
+// single-user workstation mechanism; a hosted server must authenticate users
+// with OAuth or an authenticating proxy, whatever host it listens on.
+func validateHostedDevAuth(hosted, devAuthEnabled bool) error {
+	if hosted && devAuthEnabled {
+		return fmt.Errorf("dev auth is not allowed in hosted mode; it is for single-user workstation servers only. " +
+			"Disable it (--dev-auth=false, or server.auth.dev_mode: false / SCION_SERVER_AUTH_DEVMODE=false) " +
+			"and configure OAuth or proxy authentication")
 	}
 	return nil
 }

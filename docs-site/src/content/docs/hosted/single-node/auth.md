@@ -471,7 +471,7 @@ A domain-scoped GCP project ID such as `example.com:proj` produces service-accou
 
 To minimize friction during local setup, Scion includes a "Dev Auth" mode. When enabled, the Hub auto-generates a token and creates a "Development User" identity.
 
-Dev auth is for a single-user workstation Hub. Pre-registering other users (`POST /api/v1/users`, `scion hub users provision`) is not available while the Hub runs with dev auth, for any caller, and returns `403` with `details.reason: dev_auth_not_supported`.
+Dev auth is for a single-user workstation Hub. A hosted server (`--hosted`, or `server.mode: hosted`) refuses to start with dev auth enabled, from any source, whatever host it listens on; configure OAuth or proxy authentication instead. Pre-registering other users (`POST /api/v1/users`, `scion hub users provision`) is not available while the Hub runs with dev auth, for any caller, and returns `403` with `details.reason: dev_auth_not_supported`.
 
 ### Enabling Dev Auth
 Start the server with the `--dev-auth` flag or set it in your `settings.yaml`:

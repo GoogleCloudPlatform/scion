@@ -229,3 +229,108 @@ func TestLoadAndReconcileConfig_WorkstationHostFlagKeepsBrokerLoopback(t *testin
 		})
 	}
 }
+
+func TestValidateHostedDevAuth(t *testing.T) {
+	for _, tc := range []struct {
+		hosted, devAuth, wantErr bool
+	}{
+		{hosted: false, devAuth: false},
+		{hosted: false, devAuth: true},
+		{hosted: true, devAuth: false},
+		{hosted: true, devAuth: true, wantErr: true},
+	} {
+		err := validateHostedDevAuth(tc.hosted, tc.devAuth)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("validateHostedDevAuth(hosted=%v, devAuth=%v) err = %v, wantErr %v", tc.hosted, tc.devAuth, err, tc.wantErr)
+		}
+	}
+}
+
+// Dev auth stops a hosted server at startup, whether it comes from the
+// settings file, the environment or the --dev-auth flag. Workstation mode,
+// where dev auth is the default, is unchanged.
+func TestLoadAndReconcileConfig_RefusesDevAuthInHostedMode(t *testing.T) {
+	const refusal = "dev auth is not allowed in hosted mode"
+	for _, tc := range []struct {
+		name, settings, env string
+		args                []string
+		wantRefuse          bool
+	}{
+		{name: "hosted, dev_mode in settings", settings: "  mode: hosted\n  auth:\n    dev_mode: true\n", wantRefuse: true},
+		{name: "hosted, dev mode from env", settings: "  mode: hosted\n", env: "true", wantRefuse: true},
+		{name: "hosted, --dev-auth flag", settings: "  mode: hosted\n", args: []string{"--dev-auth"}, wantRefuse: true},
+		{name: "hosted, dev auth off", settings: "  mode: hosted\n"},
+		{name: "hosted, --dev-auth=false overrides settings", settings: "  mode: hosted\n  auth:\n    dev_mode: true\n", args: []string{"--dev-auth=false"}},
+		{name: "workstation default", settings: "  mode: workstation\n"},
+		{name: "workstation, --dev-auth flag", settings: "  mode: workstation\n", args: []string{"--dev-auth"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(resetServerFlags)
+			resetServerFlags()
+			t.Setenv("SCION_SERVER_MODE", "")
+			t.Setenv("SCION_SERVER_AUTH_DEVMODE", tc.env)
+			writeServerSettings(t, "schema_version: \"1\"\nserver:\n"+tc.settings)
+			// A fresh command, so flag Changed state does not leak between
+			// cases the way it would on the shared serverStartCmd.
+			c := &cobra.Command{Use: "start"}
+			c.Flags().BoolVar(&hostedMode, "hosted", false, "")
+			c.Flags().Bool("production", false, "")
+			c.Flags().BoolVar(&enableDevAuth, "dev-auth", false, "")
+			if err := c.ParseFlags(tc.args); err != nil {
+				t.Fatalf("parse %v: %v", tc.args, err)
+			}
+
+			cfg, err := loadAndReconcileConfig(c)
+			refused := err != nil && strings.Contains(err.Error(), refusal)
+			if refused != tc.wantRefuse {
+				t.Fatalf("loadAndReconcileConfig err = %v, want refusal %v", err, tc.wantRefuse)
+			}
+			if !tc.wantRefuse && err != nil {
+				t.Fatalf("loadAndReconcileConfig err = %v", err)
+			}
+			if strings.HasPrefix(tc.name, "workstation") && !cfg.Auth.Enabled {
+				t.Errorf("workstation: cfg.Auth.Enabled = false, want dev auth on")
+			}
+		})
+	}
+}
+
+// The daemon parent refuses an explicit --dev-auth in hosted mode itself,
+// so the reason is reported directly instead of as a failed child start.
+func TestResolveDaemonServerMode_DevAuth(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode string
+		args       []string
+		wantErr    bool
+	}{
+		{name: "hosted, --dev-auth", mode: "hosted", args: []string{"--dev-auth"}, wantErr: true},
+		{name: "hosted, --dev-auth=false", mode: "hosted", args: []string{"--dev-auth=false"}},
+		{name: "hosted, flag unset", mode: "hosted"},
+		{name: "workstation, --dev-auth", mode: "workstation", args: []string{"--dev-auth"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			savedHosted, savedDevAuth, savedEndpoints := hostedMode, enableDevAuth, enableDebugEndpoints
+			t.Cleanup(func() { hostedMode, enableDevAuth, enableDebugEndpoints = savedHosted, savedDevAuth, savedEndpoints })
+			hostedMode, enableDevAuth, enableDebugEndpoints = false, false, false
+			t.Setenv("SCION_SERVER_MODE", "")
+			writeServerSettings(t, "server:\n  mode: "+tc.mode+"\n")
+
+			c := &cobra.Command{Use: "start", RunE: func(*cobra.Command, []string) error { return nil }}
+			c.Flags().BoolVar(&hostedMode, "hosted", false, "")
+			c.Flags().Bool("production", false, "")
+			c.Flags().BoolVar(&enableDevAuth, "dev-auth", false, "")
+			c.SetArgs(tc.args)
+			if err := c.Execute(); err != nil {
+				t.Fatalf("parse %v: %v", tc.args, err)
+			}
+
+			err := resolveDaemonServerMode(c)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolveDaemonServerMode err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "dev auth is not allowed in hosted mode") {
+				t.Fatalf("resolveDaemonServerMode err = %v, want the hosted dev auth refusal", err)
+			}
+		})
+	}
+}
