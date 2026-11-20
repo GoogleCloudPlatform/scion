@@ -1708,3 +1708,90 @@ func TestAgentDecisions_InterpretedOther_ConfirmOverrideKeyStateShowAndList(t *t
 	require.NotNil(t, updPrompt.Decisions[0].Replaced)
 	assert.Equal(t, `Another region "asia-east1 canary"`, updPrompt.Decisions[0].Replaced.Answer)
 }
+
+func TestFormatInterpretedOther_Golden(t *testing.T) {
+	const rawText = `europe-west4 "canary" *urgent* @everyone`
+	const escapedText = "europe-west4 \"canary\" \\*urgent\\* @\u200beveryone"
+
+	// Single-item Other response line escapes markdown & neutralizes @everyone.
+	single := formatInterpretedResponseLine("release-bot", "Alice", []store.InterpretedFormattedItem{
+		{
+			Key:         "region",
+			ChoiceID:    messages.ChoiceIDOther,
+			ChoiceLabel: "Another *region*",
+			OtherText:   rawText,
+		},
+	})
+	assert.Equal(t,
+		`release-bot recorded Alice's answer "`+escapedText+`" (Another \*region\*) to region, interpreted from their reply`,
+		single,
+	)
+
+	// Multi-item batch response line mixes fixed and Other items.
+	batch := formatInterpretedResponseLine("release-bot", "Alice", []store.InterpretedFormattedItem{
+		{Key: "proceed", ChoiceID: "yes", ChoiceLabel: "Yes"},
+		{Key: "region", ChoiceID: messages.ChoiceIDOther, ChoiceLabel: "Another *region*", OtherText: rawText},
+	})
+	assert.Equal(t,
+		`release-bot recorded Alice's answers to 2 decisions: proceed Yes · region Another \*region\* "`+escapedText+`", interpreted from their reply`,
+		batch,
+	)
+
+	// Failure messages for already_answered Other decisions across provenance & outcomes.
+	const quotedAns = `Another region "europe-west4 \"canary\" *urgent* @everyone"`
+	cases := []struct {
+		name       string
+		provenance string
+		outcome    string
+		want       string
+	}{
+		{
+			name:       "interpreted",
+			provenance: store.DecisionProvenanceAgentInterpreted,
+			outcome:    store.DecisionOutcomeAnswer,
+			want:       `region: already answered (interpreted by you from Alice's reply, ` + quotedAns + `)`,
+		},
+		{
+			name:       "confirmed",
+			provenance: store.DecisionProvenanceDirect,
+			outcome:    store.DecisionOutcomeConfirm,
+			want:       `region: already answered (confirmed by Alice, ` + quotedAns + `)`,
+		},
+		{
+			name:       "overridden",
+			provenance: store.DecisionProvenanceDirect,
+			outcome:    store.DecisionOutcomeOverride,
+			want:       `region: already answered (overridden by Alice, ` + quotedAns + `)`,
+		},
+		{
+			name:       "direct",
+			provenance: store.DecisionProvenanceDirect,
+			outcome:    store.DecisionOutcomeAnswer,
+			want:       `region: already answered (by Alice, ` + quotedAns + `)`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &store.Decision{
+				Key:    "region",
+				Status: store.DecisionStatusDecided,
+				Answers: []*store.DecisionAnswer{
+					{
+						ChoiceID:       messages.ChoiceIDOther,
+						ChoiceLabel:    "Another region",
+						OtherText:      rawText,
+						AnsweredByName: "Alice",
+						Provenance:     tc.provenance,
+						Outcome:        tc.outcome,
+					},
+				},
+			}
+			got := formatInterpretedFailureMessage(store.InterpretedKeyFailure{
+				Key:      "region",
+				Reason:   store.InterpretedReasonAlreadyAnswered,
+				Decision: d,
+			})
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

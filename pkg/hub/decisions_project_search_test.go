@@ -430,7 +430,7 @@ func TestProjectDecisions_SearchDeadlineWithNonContextErrorIsTimeout(t *testing.
 	for _, tab := range []string{ProjectDecisionsTabPending, ProjectDecisionsTabMade} {
 		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions?tab="+tab+"&q=deploy", nil)
 		assert.Equal(t, http.StatusServiceUnavailable, rr.Code, "%s: %s", tab, rr.Body.String())
-		assert.Contains(t, string(rr.Body.Bytes()), "SEARCH_TIMEOUT", tab)
+		assert.Contains(t, rr.Body.String(), "SEARCH_TIMEOUT", tab)
 	}
 }
 
