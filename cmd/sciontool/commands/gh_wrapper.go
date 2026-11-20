@@ -114,9 +114,11 @@ func applyGhWrapperTokenEnv(stderr io.Writer) {
 		}
 		if !isManagedHubToken(callerToken, os.Getenv("GITHUB_TOKEN"), os.Getenv(envGhWrapperTokenHash)) {
 			if os.Getenv(envGhWrapperTokenHash) != "" {
+				// Use Setenv("") rather than os.Unsetenv: TestHarnessStrippedEnvNames_MatchInitStripCalls
+				// treats every os.Unsetenv in this package as sciontool init harness stripping.
 				_ = os.Setenv(envGhWrapperTokenHash, "")
 			}
-			_, _ = fmt.Fprintf(stderr, "sciontool gh-wrapper: caller-provided GH_TOKEN detected; using it instead of GitHub App token\n")
+			_, _ = fmt.Fprintf(stderr, "sciontool gh-wrapper: caller-provided GH_TOKEN detected; using it instead of GitHub App token; unset GH_TOKEN to use the GitHub App token\n")
 			return
 		}
 	}

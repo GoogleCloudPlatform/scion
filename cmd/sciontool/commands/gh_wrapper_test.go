@@ -122,6 +122,7 @@ func TestApplyGhWrapperTokenEnv_RespectsCallerToken(t *testing.T) {
 	assert.Equal(t, "ghp_caller_override_secret", os.Getenv("GH_TOKEN"), "caller-provided GH_TOKEN must not be overwritten")
 	assert.Empty(t, os.Getenv(envGhWrapperTokenHash))
 	assert.Contains(t, stderr.String(), "caller-provided GH_TOKEN")
+	assert.Contains(t, stderr.String(), "unset GH_TOKEN to use the GitHub App token")
 	assert.NotContains(t, stderr.String(), "ghp_caller_override_secret", "stderr must never leak caller token")
 	assert.NotContains(t, stderr.String(), "ghs_refreshed_app_token", "stderr must never leak App token")
 }
@@ -193,6 +194,7 @@ func TestApplyGhWrapperTokenEnv_CallerOverrideBeatsInheritedWrapperHash(t *testi
 	assert.Equal(t, "ghp_nested_caller_override", os.Getenv("GH_TOKEN"))
 	assert.Empty(t, os.Getenv(envGhWrapperTokenHash), "stale wrapper hash should be cleared when caller overrides GH_TOKEN")
 	assert.Contains(t, stderr.String(), "caller-provided GH_TOKEN")
+	assert.Contains(t, stderr.String(), "unset GH_TOKEN to use the GitHub App token")
 	assert.NotContains(t, stderr.String(), "ghp_nested_caller_override")
 	assert.NotContains(t, stderr.String(), "ghs_rotated_v2")
 }
@@ -248,5 +250,6 @@ func TestApplyGhWrapperTokenEnv_MissingTokenFile(t *testing.T) {
 
 	assert.Equal(t, "ghp_caller_token", os.Getenv("GH_TOKEN"))
 	assert.Contains(t, stderr.String(), "caller-provided GH_TOKEN")
+	assert.Contains(t, stderr.String(), "unset GH_TOKEN to use the GitHub App token")
 	assert.NotContains(t, stderr.String(), "ghp_caller_token")
 }
