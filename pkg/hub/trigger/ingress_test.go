@@ -1097,30 +1097,19 @@ func (s *countingIngressStore) WithTx(ctx context.Context, fn func(tx store.Stor
 	return errors.New("unexpected WithTx call")
 }
 
-func TestIngress_CacheMissChargesRejectionBeforeDBLookup(t *testing.T) {
+// TestIngress_ColdActiveEndpointSurvivesJunkFlood verifies design acceptance
+// item 8 / PR6A-SEC-01: under a ~1,000 req/s unauthenticated junk flood to
+// random unknown endpoint IDs (50 distinct source IPs at the 20 req/s per-IP
+// cap, draining the 500/s hub-wide rejection bucket), a cold ACTIVE endpoint
+// (not present in the replica's positive cache) is still served and never
+// receives 429 from the rejection bucket.
+func TestIngress_ColdActiveEndpointSurvivesJunkFlood(t *testing.T) {
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
-	cachedActiveID := uuid.NewString()
-	cachedDisabledID := uuid.NewString()
 	coldActiveID := uuid.NewString()
-	unknownRepeatedID := uuid.NewString()
 
 	backing := &countingIngressStore{
 		stubCacheStore: &stubCacheStore{
 			endpoints: map[string]*store.WebhookEndpoint{
-				cachedActiveID: {
-					ID:            cachedActiveID,
-					ProjectID:     "proj-1",
-					SecretVersion: 1,
-					SignatureMode: store.WebhookSignatureModeScionV1,
-					Status:        store.WebhookEndpointStatusActive,
-				},
-				cachedDisabledID: {
-					ID:            cachedDisabledID,
-					ProjectID:     "proj-1",
-					SecretVersion: 1,
-					SignatureMode: store.WebhookSignatureModeScionV1,
-					Status:        store.WebhookEndpointStatusDisabled,
-				},
 				coldActiveID: {
 					ID:            coldActiveID,
 					ProjectID:     "proj-1",
@@ -1135,21 +1124,10 @@ func TestIngress_CacheMissChargesRejectionBeforeDBLookup(t *testing.T) {
 	cache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
 		Now: func() time.Time { return now },
 	})
-	// Pre-warm cachedActiveID and cachedDisabledID.
-	_, err := cache.LookupEndpoint(context.Background(), backing, cachedActiveID)
-	require.NoError(t, err)
-	_, err = cache.LookupEndpoint(context.Background(), backing, cachedDisabledID)
-	require.NoError(t, err)
-	backing.getCalls.Store(0)
-
+	// Production-default limiter parameters: per-IP 20/s burst 100,
+	// rejection 500/s burst 2000, per-endpoint 10/s burst 60.
 	lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
-		PerIPRate:        100,
-		PerIPBurst:       100,
-		RejectionRate:    0.001, // effectively no refill
-		RejectionBurst:   3,
-		PerEndpointRate:  100,
-		PerEndpointBurst: 100,
-		Now:              func() time.Time { return now },
+		Now: func() time.Time { return now },
 	})
 
 	ing := trigger.NewIngress(trigger.IngressConfig{
@@ -1166,48 +1144,55 @@ func TestIngress_CacheMissChargesRejectionBeforeDBLookup(t *testing.T) {
 		Now:     func() time.Time { return now },
 	})
 
-	postHook := func(id string) *httptest.ResponseRecorder {
+	postHook := func(id, remoteIP string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+id, bytes.NewReader([]byte(`{"ok":true}`)))
 		req.Header.Set("Content-Type", "application/json")
-		req.RemoteAddr = "198.51.100.10:12345"
+		req.RemoteAddr = remoteIP + ":12345"
 		rec := httptest.NewRecorder()
 		ing.ServeHTTP(rec, req)
 		return rec
 	}
 
-	// Token 1 of 3: cold unknown ID misses both caches -> charges 1 token BEFORE DB lookup,
-	// hits DB once, caches in negative cache, returns 404 WITHOUT charging a second token.
-	rec := postHook(unknownRepeatedID)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, int64(1), backing.getCalls.Load())
+	// Simulate 10 seconds at 1,000 junk req/s (50 attacker IPs x 20 req/s,
+	// sent in 100ms ticks of 100 junk requests: 2 per attacker IP per 100ms).
+	// Every 500ms, evict coldActiveID from the positive cache and send a
+	// legitimate probe to it from a distinct sender IP.
+	var junk404, junk429, legitPassed, legit429 int
+	for tick := range 100 { // 100 ticks * 100ms = 10s
+		for i := range 100 {
+			attackerIP := fmt.Sprintf("203.0.113.%d", (i%50)+1)
+			rec := postHook(uuid.NewString(), attackerIP)
+			switch rec.Code {
+			case http.StatusNotFound:
+				junk404++
+			case http.StatusTooManyRequests:
+				junk429++
+			default:
+				t.Fatalf("unexpected junk status %d at tick %d req %d", rec.Code, tick, i)
+			}
+		}
 
-	// Token 2 of 3: same unknown ID hits negative cache -> 0 DB lookups, charges 1 token, returns 404.
-	rec = postHook(unknownRepeatedID)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, int64(1), backing.getCalls.Load(), "negative cache hit must not query DB")
+		if tick%5 == 0 { // every 500ms -> 20 cold probes over 10s
+			cache.Invalidate(coldActiveID)
+			rec := postHook(coldActiveID, "198.51.100.10")
+			switch rec.Code {
+			case http.StatusUnauthorized:
+				// Passed step 3 lookup + per-endpoint bucket and reached HMAC verification.
+				legitPassed++
+			case http.StatusTooManyRequests:
+				legit429++
+			default:
+				t.Fatalf("unexpected cold active status %d at tick %d", rec.Code, tick)
+			}
+		}
 
-	// Token 3 of 3: cold active ID misses both caches -> charges 1 token BEFORE DB lookup,
-	// hits DB once, caches active endpoint, proceeds to HMAC check (401 since unsigned).
-	rec = postHook(coldActiveID)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, int64(2), backing.getCalls.Load())
+		now = now.Add(100 * time.Millisecond)
+	}
 
-	// Rejection bucket is now EMPTY (0 tokens left).
-	// A brand-new unknown ID MUST return 429 WITHOUT calling GetWebhookEndpoint (SEC-1).
-	rec = postHook(uuid.NewString())
-	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, int64(2), backing.getCalls.Load(), "unknown ID when rejection bucket is empty must not query DB")
-
-	// A cached disabled endpoint also charges the rejection bucket and gets 429 without querying DB.
-	rec = postHook(cachedDisabledID)
-	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, int64(2), backing.getCalls.Load())
-
-	// Cached active endpoints (both pre-warmed and newly-cached coldActiveID) are completely
-	// unaffected by rejection-bucket exhaustion and never query DB.
-	rec = postHook(cachedActiveID)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	rec = postHook(coldActiveID)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, int64(2), backing.getCalls.Load())
+	// The 1,000 req/s junk flood must drain the 500/s (burst 2000) rejection bucket
+	// and be rate-limited (429), while 100% of cold active endpoint requests pass step 3.
+	assert.Greater(t, junk404, 0, "initial junk requests within rejection burst should answer 404")
+	assert.Greater(t, junk429, 2000, "sustained 1,000 req/s junk flood must drain the 500/s rejection bucket")
+	assert.Equal(t, 20, legitPassed, "every cold active endpoint request must pass step 3 despite drained rejection bucket")
+	assert.Zero(t, legit429, "cold active endpoint must never receive 429 from the hub-wide rejection bucket")
 }

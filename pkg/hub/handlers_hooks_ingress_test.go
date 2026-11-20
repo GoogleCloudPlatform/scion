@@ -368,23 +368,13 @@ func TestWebhookIngress_SplitBucketsIsolationAndIPv6Slash64(t *testing.T) {
 
 	// Install deterministic tight-burst Ingress on f.srv so all 5 split buckets
 	// and trusted-proxy X-Forwarded-For / IPv6 /64 keying are exercised through srv.Handler().
-	// Pre-warm the known active endpoints in the per-replica cache so cold
-	// cache-miss lookup tokens (SEC-1) do not obscure bucket isolation.
 	trustedNets := parseTrustedProxies([]string{"10.0.0.0/8"})
 	dqs := f.store.(store.DurableQueueStore)
-	epCache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
-		Now: func() time.Time { return now },
-	})
-	for _, id := range []string{epProj1A.ID, epProj1B.ID, epProj2.ID} {
-		_, err := epCache.LookupEndpoint(context.Background(), f.store, id)
-		require.NoError(t, err)
-	}
 	f.srv.webhookIngress = trigger.NewIngress(trigger.IngressConfig{
 		Store:      f.store,
 		QueueStore: dqs,
 		Queue:      f.srv.durableQueue,
 		LoadSecret: f.srv.loadWebhookEndpointSecret,
-		Cache:      epCache,
 		ClientIP: func(r *http.Request) string {
 			return geExchangeClientIP(r, trustedNets)
 		},
@@ -1032,17 +1022,11 @@ func TestWebhookIngress_BadSignatureFloodNeverChargesRejectionBucket(t *testing.
 	ep := createTestWebhookEndpointViaAPI(t, f, f.projectID, "badsig-isolation-ep")
 
 	dqs := f.store.(store.DurableQueueStore)
-	epCache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
-		Now: func() time.Time { return now },
-	})
-	_, err := epCache.LookupEndpoint(context.Background(), f.store, ep.ID)
-	require.NoError(t, err)
 	f.srv.webhookIngress = trigger.NewIngress(trigger.IngressConfig{
 		Store:      f.store,
 		QueueStore: dqs,
 		Queue:      f.srv.durableQueue,
 		LoadSecret: f.srv.loadWebhookEndpointSecret,
-		Cache:      epCache,
 		Enabled:    func() bool { return f.srv.experimentEnabled(experiments.Triggers) },
 		Limiter: trigger.NewIngressLimiter(trigger.LimiterConfig{
 			PerIPRate:        0.001,

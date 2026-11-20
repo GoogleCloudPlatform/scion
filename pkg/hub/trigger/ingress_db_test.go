@@ -371,13 +371,6 @@ func TestIngress_IPv6Slash48SprayDoesNotLockOutLegitimateSender(t *testing.T) {
 		PerEndpointBurst: 5,
 		Now:              func() time.Time { return now },
 	})
-	cache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
-		Now: func() time.Time { return now },
-	})
-	for _, id := range []string{epHealthy.ID, epTargeted.ID} {
-		_, err := cache.LookupEndpoint(ctx, cs, id)
-		require.NoError(t, err)
-	}
 	ing := trigger.NewIngress(trigger.IngressConfig{
 		Store:      cs,
 		QueueStore: cs,
@@ -387,7 +380,6 @@ func TestIngress_IPv6Slash48SprayDoesNotLockOutLegitimateSender(t *testing.T) {
 		},
 		ClientIP: func(r *http.Request) string { return r.RemoteAddr },
 		Limiter:  lim,
-		Cache:    cache,
 		Enabled:  func() bool { return true },
 		Audit:    &memAuditSink{},
 		Now:      func() time.Time { return now },
@@ -495,11 +487,6 @@ func TestIngress_BadSignatureFloodNeverChargesRejectionBucket(t *testing.T) {
 		PerEndpointBurst: 6,
 		Now:              func() time.Time { return now },
 	})
-	cache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
-		Now: func() time.Time { return now },
-	})
-	_, err := cache.LookupEndpoint(ctx, cs, ep.ID)
-	require.NoError(t, err)
 	ing := trigger.NewIngress(trigger.IngressConfig{
 		Store:      cs,
 		QueueStore: cs,
@@ -509,7 +496,6 @@ func TestIngress_BadSignatureFloodNeverChargesRejectionBucket(t *testing.T) {
 		},
 		ClientIP: func(r *http.Request) string { return r.RemoteAddr },
 		Limiter:  lim,
-		Cache:    cache,
 		Enabled:  func() bool { return true },
 		Audit:    &memAuditSink{},
 		Now:      func() time.Time { return now },
