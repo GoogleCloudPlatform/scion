@@ -152,14 +152,18 @@ func TestSPAShellAppIconTags(t *testing.T) {
 
 	wantBlock := appIconsBlock(t, string(indexHTML))
 	rendered := renderSPAShell(t)
-	renderedNorm := strings.Join(strings.Fields(rendered), " ")
-	assert.Contains(t, renderedNorm, wantBlock,
-		"default unbranded app icon tags rendered by pkg/hub/web.go must match web/index.html")
+	// html/template strips HTML comments, so extract the exact rendered region
+	// between </title> and the Google Fonts preconnect link and assert strict
+	// equality rather than substring containment.
+	renderedRegion := strings.TrimPrefix(extractBetween(t, rendered, "</title>", `<link rel="preconnect"`), "</title>")
+	renderedBlock := strings.Join(strings.Fields(renderedRegion), " ")
+	assert.Equal(t, wantBlock, renderedBlock,
+		"default unbranded app icon tags rendered by pkg/hub/web.go must match web/index.html exactly")
 
 	for _, tag := range []string{`rel="icon"`, `rel="apple-touch-icon"`, `rel="manifest"`, `name="theme-color"`} {
-		assert.Contains(t, wantBlock, tag)
+		assert.Contains(t, renderedBlock, tag)
 	}
-	for _, m := range appIconHrefRE.FindAllStringSubmatch(wantBlock, -1) {
+	for _, m := range appIconHrefRE.FindAllStringSubmatch(renderedBlock, -1) {
 		assert.True(t, isAppIconPath(m[1]), "%s not in appIconPaths", m[1])
 	}
 

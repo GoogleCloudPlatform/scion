@@ -885,6 +885,14 @@ func TestValidateBranding_SVGAllowlistAndExternalRefs(t *testing.T) {
 		{"style element external url()", `<svg xmlns="http://www.w3.org/2000/svg"><style>rect { fill: url(https://evil.example/track.svg#a); }</style></svg>`},
 		{"style attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect style="background:url(https://evil.example/track.png)"/></svg>`},
 		{"style element data URI", `<svg xmlns="http://www.w3.org/2000/svg"><style>rect { fill: url(data:image/png;base64,AAAA); }</style></svg>`},
+		{"style element image-set external URL", `<svg xmlns="http://www.w3.org/2000/svg"><style>rect { background-image: image-set("https://evil.example/track.png" 1x); }</style></svg>`},
+		{"style attribute image-set external URL", `<svg xmlns="http://www.w3.org/2000/svg"><rect style='background: -webkit-image-set("https://evil.example/track.png" 1x)'/></svg>`},
+		{"fill presentation attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(https://evil.example/paint.svg#g)"/></svg>`},
+		{"stroke presentation attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect stroke="url(https://evil.example/paint.svg#s)"/></svg>`},
+		{"filter presentation attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect filter="url(https://evil.example/f.svg#f)"/></svg>`},
+		{"clip-path presentation attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect clip-path="url(https://evil.example/c.svg#c)"/></svg>`},
+		{"mask presentation attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect mask="url(https://evil.example/m.svg#m)"/></svg>`},
+		{"marker-end presentation attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 L10 10" marker-end="url(https://evil.example/m.svg#a)"/></svg>`},
 	}
 	for _, tc := range rejectSVGs {
 		t.Run("reject_"+tc.name, func(t *testing.T) {

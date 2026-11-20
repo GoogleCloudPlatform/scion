@@ -222,6 +222,7 @@ func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, h
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
     <title>%s</title>
     <style>
         :root {
@@ -429,6 +430,7 @@ func (s *LocalhostAuthServer) Start(ctx context.Context) (callbackURL string, st
 func (s *LocalhostAuthServer) writeCallbackHTML(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(body))

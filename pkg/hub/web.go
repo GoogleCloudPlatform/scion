@@ -615,13 +615,70 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
 </body>
 </html>{{end}}`
 
+// stockNoAssetsPage is the exact stock HTML page served when the binary was
+// built without embedded web assets (e.g. via `go install`) and no
+// --web-assets-dir was provided, with no custom Hub branding configured.
+const stockNoAssetsPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scion – Web UI Not Available</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a; color: #e2e8f0;
+            display: flex; align-items: center; justify-content: center;
+            min-height: 100vh; padding: 2rem;
+        }
+        .container {
+            max-width: 540px; text-align: center;
+        }
+        h1 { font-size: 1.5rem; margin-bottom: 1rem; color: #f1f5f9; }
+        p  { line-height: 1.6; margin-bottom: 1rem; color: #94a3b8; }
+        code {
+            background: #1e293b; padding: 0.15em 0.4em; border-radius: 4px;
+            font-size: 0.9em; color: #60a5fa;
+        }
+        .hint {
+            margin-top: 1.5rem; padding: 1rem; background: #1e293b;
+            border-radius: 8px; text-align: left; font-size: 0.9rem;
+        }
+        .hint p { margin-bottom: 0.5rem; }
+        .hint p:last-child { margin-bottom: 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Web UI Not Available</h1>
+        <p>This hub binary was built without embedded web assets.
+           The Hub API is still fully operational.</p>
+        <div class="hint">
+            <p>To use the web UI, either:</p>
+            <p>1. Rebuild with assets: <code>make all</code> (or <code>make web &amp;&amp; make build</code>)</p>
+            <p>2. Point to pre-built assets: <code>--web-assets-dir /path/to/dist/client</code></p>
+        </div>
+    </div>
+</body>
+</html>`
+
 // renderNoAssetsPage returns a self-contained HTML page served when the binary
 // was built without embedded web assets and no --web-assets-dir was provided.
-// It requires no external resources so it renders correctly even when the
-// static asset routes return 404.
+// When branding is unconfigured, it returns stockNoAssetsPage unchanged.
 func renderNoAssetsPage(b *config.ResolvedBranding) string {
-	b = brandOrDefault(b)
+	if b == nil || !b.IsCustomized() {
+		return stockNoAssetsPage
+	}
 	dark := b.Dark
+	bodyColor := "#e2e8f0"
+	if b.HasCustomPalette {
+		bodyColor = dark.Text
+	}
+	var badgeHTML string
+	if isCustomBrandIdentity(b) {
+		badgeHTML = fmt.Sprintf("\n        <span class=\"badge\">%s</span>", html.EscapeString(brandBadgeText(b)))
+	}
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -672,20 +729,19 @@ func renderNoAssetsPage(b *config.ResolvedBranding) string {
             <p>To use the web UI, either:</p>
             <p>1. Rebuild with assets: <code>make all</code> (or <code>make web &amp;&amp; make build</code>)</p>
             <p>2. Point to pre-built assets: <code>--web-assets-dir /path/to/dist/client</code></p>
-        </div>
-        <span class="badge">%s</span>
+        </div>%s
     </div>
 </body>
 </html>`,
 		html.EscapeString(b.Name),
-		dark.Bg, dark.Text,
+		dark.Bg, bodyColor,
 		dark.Text,
 		dark.TextMuted,
 		dark.Surface, dark.Primary,
 		dark.Surface,
 		dark.Primary, dark.Border, dark.Surface,
 		brandLogoHTML(b),
-		html.EscapeString(brandBadgeText(b)),
+		badgeHTML,
 	)
 }
 

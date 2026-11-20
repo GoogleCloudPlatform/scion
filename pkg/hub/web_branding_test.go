@@ -270,8 +270,12 @@ func TestHubGoPages_BrandingAndAttribution(t *testing.T) {
 	assert.Contains(t, defSusp, `<span class="badge">scion</span>`)
 
 	defNoAssets := renderNoAssetsPage(nil)
+	assert.Equal(t, stockNoAssetsPage, defNoAssets, "unbranded renderNoAssetsPage(nil) must be byte-identical to stockNoAssetsPage")
+	assert.Equal(t, stockNoAssetsPage, renderNoAssetsPage(config.DefaultResolvedBranding()),
+		"unbranded renderNoAssetsPage(DefaultResolvedBranding()) must be byte-identical to stockNoAssetsPage")
 	assert.Contains(t, defNoAssets, "<title>Scion – Web UI Not Available</title>")
-	assert.Contains(t, defNoAssets, `<span class="badge">scion</span>`)
+	assert.Contains(t, defNoAssets, "background: #0f172a; color: #e2e8f0;")
+	assert.NotContains(t, defNoAssets, `class="badge"`)
 
 	// 2. Branded with attribution="shown" (default) and light+dark logos.
 	brandedShown, errs := config.ResolveBranding(&config.BrandingConfig{

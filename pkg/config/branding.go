@@ -929,34 +929,33 @@ var allowedSVGElements = map[string]bool{
 
 const svgXMLNamespace = "http://www.w3.org/2000/svg"
 
+func checkSafeSVGURLRefs(valNorm, where string) error {
+	rest := valNorm
+	for {
+		idx := strings.Index(rest, "url(")
+		if idx < 0 {
+			return nil
+		}
+		after := strings.TrimLeft(rest[idx+4:], "\"'")
+		if !strings.HasPrefix(after, "#") {
+			return fmt.Errorf("SVG %s url() references must be internal fragment (#id) references", where)
+		}
+		rest = rest[idx+4:]
+	}
+}
+
 func checkSafeSVGStyleText(raw string, where string) error {
 	if strings.IndexByte(raw, '\\') >= 0 {
 		return fmt.Errorf("SVG %s must not contain CSS backslash escapes", where)
 	}
 	valNorm := stripASCIIWhitespaceAndControl(strings.ToLower(raw))
-	if strings.Contains(valNorm, "@import") || strings.Contains(valNorm, "expression(") {
-		return fmt.Errorf("SVG %s must not contain @import or expression()", where)
+	if strings.Contains(valNorm, "@import") || strings.Contains(valNorm, "expression(") || strings.Contains(valNorm, "image-set(") {
+		return fmt.Errorf("SVG %s must not contain @import, expression(), or image-set()", where)
 	}
 	if strings.Contains(valNorm, "javascript:") || strings.Contains(valNorm, "vbscript:") || strings.Contains(valNorm, "data:") {
 		return fmt.Errorf("SVG %s contains a disallowed URI scheme", where)
 	}
-	if strings.Contains(valNorm, "url(") {
-		// Permit internal fragment references like url(#grad1) while rejecting
-		// external HTTP(S) or protocol-relative URLs inside SVG CSS.
-		rest := valNorm
-		for {
-			idx := strings.Index(rest, "url(")
-			if idx < 0 {
-				break
-			}
-			after := strings.TrimLeft(rest[idx+4:], "\"'")
-			if !strings.HasPrefix(after, "#") {
-				return fmt.Errorf("SVG %s url() references must be internal fragment (#id) references", where)
-			}
-			rest = rest[idx+4:]
-		}
-	}
-	return nil
+	return checkSafeSVGURLRefs(valNorm, where)
 }
 
 func verifySafeSVG(data []byte) error {
@@ -1031,6 +1030,8 @@ func verifySafeSVG(data []byte) error {
 					if err := checkSafeSVGStyleText(attr.Value, "style attribute"); err != nil {
 						return err
 					}
+				} else if err := checkSafeSVGURLRefs(valNorm, fmt.Sprintf("attribute %q", attr.Name.Local)); err != nil {
+					return err
 				}
 			}
 		case xml.CharData:

@@ -305,7 +305,13 @@ func TestLocalhostAuthServer_CallbackBrandingAndSecurity(t *testing.T) {
 		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
 			t.Errorf("Cache-Control = %q", cc)
 		}
+		if rp := rec.Header().Get("Referrer-Policy"); rp != "no-referrer" {
+			t.Errorf("Referrer-Policy = %q, want no-referrer", rp)
+		}
 		body := rec.Body.String()
+		if !strings.Contains(body, `<meta name="referrer" content="no-referrer">`) {
+			t.Errorf("expected no-referrer meta tag in callback HTML")
+		}
 		for _, legacy := range []string{"#667eea", "#764ba2", "#e74c3c", "#c0392b"} {
 			if strings.Contains(body, legacy) {
 				t.Errorf("callback HTML still contains legacy gradient color %s", legacy)
