@@ -1211,10 +1211,11 @@ curl -s "$HUB_URL/health" \
 #### Why not to enable `--use-http2` on `scion-hub`
 
 :::danger[Enabling `--use-http2` on `scion-hub` breaks Hub WebSockets]
-Do **not** pass `--use-http2` (or set `ports: [{name: h2c}]`) on the `scion-hub` Cloud Run service. Although the Hub listener accepts `h2c`, Cloud Run sends all requests to the container over HTTP/2 cleartext (`h2c`) when `--use-http2` is enabled instead of downgrading the backend hop to HTTP/1.1. That breaks every Hub WebSocket endpoint, which requires an HTTP/1.1 `Upgrade: websocket` handshake:
+Do **not** pass `--use-http2` (or set `ports: [{name: h2c}]`) on the `scion-hub` Cloud Run service. Although the Hub listener accepts `h2c`, Cloud Run sends all requests to the container over HTTP/2 cleartext (`h2c`) when `--use-http2` is enabled instead of downgrading the backend hop to HTTP/1.1. That breaks Hub WebSocket endpoints, which require an HTTP/1.1 `Upgrade: websocket` handshake, including:
 
 - Interactive web terminals and `scion attach` (`GET /api/v1/agents/{id}/pty`)
-- Agent port-forwarding tunnels (`GET /api/v1/agents/{id}/tunnel` and `/ports/tunnel`)
+- Agent port-forwarding tunnels (`GET /api/v1/agents/{id}/ports/tunnel`)
+- Proxied agent-port WebSockets (`/api/v1/agents/{id}/ports/{port}/proxy/...` and, with `hub.port_view` enabled, `/api/v1/port-view/{cap}/...`)
 - Conduit relay sessions (`GET /api/v1/conduit`)
 - Standalone Runtime Broker control channels (`GET /api/v1/runtime-brokers/connect`)
 
@@ -1234,13 +1235,13 @@ Most deployments do not need a separate events service; tuning `--concurrency`, 
 
 If high browser viewer concurrency ever warrants isolating `/events` SSE streams from the rest of the Hub, you can deploy a second Cloud Run service from the **same Hub container image** behind an External Application Load Balancer URL map:
 
-- **Service configuration:** Run the Hub image with `--hosted --enable-hub --enable-web --foreground --web-port 8080` and **omit** `--enable-runtime-broker`. Mount the same `settings.yaml`, inject the same `SCION_SERVER_SESSION_SECRET`, and attach the same Cloud SQL PostgreSQL instance (cross-instance event fan-out uses PostgreSQL `LISTEN/NOTIFY`). Set a higher `--concurrency` (for example `--concurrency=1000`) on this SSE-only service.
+- **Service configuration:** Run the Hub image with `--hosted --enable-hub --enable-web --foreground --web-port 8080` and **omit** `--enable-runtime-broker`. Mount the same base `settings.yaml` (overriding `server.auth.proxy.iap.audience` per backend service — see below), inject the same `SCION_SERVER_SESSION_SECRET`, and attach the same Cloud SQL PostgreSQL instance (cross-instance event fan-out uses PostgreSQL `LISTEN/NOTIFY`). Set a higher `--concurrency` (for example `--concurrency=1000`) on this SSE-only service.
 - **Routing:** Put an External Application Load Balancer in front of both Cloud Run services using two **serverless NEGs**, with a URL map that routes `/events` to the dedicated events service and all other paths (REST API, web UI, and all WebSocket endpoints) to `scion-hub`.
 
 **Trade-offs and constraints:**
 
-- **Requires a load balancer and backend-service IAP:** Direct Cloud Run native IAP (`*.run.app`) cannot split paths across two services. Adding an External Application Load Balancer introduces a managed TLS certificate, two serverless NEGs, and IAP enabled on both backend services (updating `server.auth.proxy.iap.audience` to the load balancer backend-service format `/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID`).
-- **Keep WebSockets off any `--use-http2` backend:** Because the dedicated service handles only `/events` (SSE), `--use-http2` may optionally be enabled on that SSE-only service — but **never** route WebSocket paths (`/api/v1/agents/*/pty`, `/api/v1/agents/*/tunnel`, `/ports/tunnel`, `/api/v1/conduit`, `/api/v1/runtime-brokers/connect`) to a Cloud Run backend with `--use-http2` enabled. Keep all WebSocket traffic on the main HTTP/1.1 `scion-hub` backend.
+- **Requires a load balancer and per-backend IAP audiences:** Direct Cloud Run native IAP (`*.run.app`) cannot split paths across two services. Adding an External Application Load Balancer introduces a managed TLS certificate, two serverless NEGs, and IAP enabled on both backend services. Because IAP signs each backend service's JWT with its own `BACKEND_SERVICE_ID` and `server.auth.proxy.iap.audience` holds a single value (`/projects/PROJECT_NUMBER/global/backendServices/BACKEND_SERVICE_ID`), each Cloud Run service must validate its own backend-service audience (via a separate `settings.yaml` secret or the `SCION_SERVER_AUTH_PROXY_IAP_AUDIENCE` environment variable).
+- **Keep WebSockets off any `--use-http2` backend:** Because the dedicated service handles only `/events` (SSE), `--use-http2` may optionally be enabled on that SSE-only service — but **never** route WebSocket paths (`/api/v1/agents/*/pty`, `/api/v1/agents/*/ports/tunnel`, `/api/v1/agents/*/ports/*/proxy/...`, `/api/v1/port-view/*`, `/api/v1/conduit`, `/api/v1/runtime-brokers/connect`) to a Cloud Run backend with `--use-http2` enabled. Keep all WebSocket traffic on the main HTTP/1.1 `scion-hub` backend.
 
 ---
 
