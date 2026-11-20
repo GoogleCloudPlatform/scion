@@ -454,10 +454,6 @@ func (s *Server) writePortNotExposed(w http.ResponseWriter, r *http.Request) {
 	writePortNotExposedWithBranding(w, r, s.ResolvedBranding())
 }
 
-func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
-	writePortNotExposedWithBranding(w, r, nil)
-}
-
 func writePortNotExposedWithBranding(w http.ResponseWriter, r *http.Request, b *config.ResolvedBranding) {
 	if isBrowserRequest(r) {
 		writeProxyErrorHTMLWithBranding(w, b, http.StatusNotFound, "Port Not Available",
@@ -471,10 +467,6 @@ func writePortNotExposedWithBranding(w http.ResponseWriter, r *http.Request, b *
 // the proxy error page for a browser, else a JSON 403.
 func (s *Server) writePortDenied(w http.ResponseWriter, r *http.Request) {
 	writePortDeniedWithBranding(w, r, s.ResolvedBranding())
-}
-
-func writePortDenied(w http.ResponseWriter, r *http.Request) {
-	writePortDeniedWithBranding(w, r, nil)
 }
 
 func writePortDeniedWithBranding(w http.ResponseWriter, r *http.Request, b *config.ResolvedBranding) {
@@ -694,23 +686,12 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 	)
 }
 
-// writeProxyErrorHTML writes a self-contained HTML error page for browser requests
-// to proxy endpoints using stock Scion branding.
-func writeProxyErrorHTML(w http.ResponseWriter, status int, title, message string) {
-	writeProxyErrorHTMLWithBranding(w, nil, status, title, message)
-}
-
 // writeProxyErrorHTMLWithBranding writes a self-contained HTML error page for
 // browser requests to proxy endpoints with Hub branding applied.
 func writeProxyErrorHTMLWithBranding(w http.ResponseWriter, b *config.ResolvedBranding, status int, title, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = fmt.Fprint(w, proxyErrorPageHTMLWithBranding(b, title, message))
-}
-
-// proxyErrorPageHTML returns a self-contained HTML error page with stock Scion branding.
-func proxyErrorPageHTML(title, message string) string {
-	return proxyErrorPageHTMLWithBranding(nil, title, message)
 }
 
 // proxyErrorPageHTMLWithBranding returns a self-contained HTML error page with
@@ -1115,12 +1096,6 @@ const (
 	portProxyErrorNoCredential = "no-credentials"
 	portProxyHintSandboxedSub  = "sandboxed-subresource"
 )
-
-// writePortProxyNoCredentials answers a request to a port proxy route that
-// carries no credential and is not a page navigation using stock Scion branding.
-func writePortProxyNoCredentials(w http.ResponseWriter, r *http.Request) (hinted bool) {
-	return writePortProxyNoCredentialsWithBranding(w, r, nil)
-}
 
 // writePortProxyNoCredentialsWithBranding answers a request to a port proxy
 // route that carries no credential and is not a page navigation (a script,

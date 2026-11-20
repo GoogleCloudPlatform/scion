@@ -1016,6 +1016,9 @@ func verifySafeSVG(data []byte) error {
 				if strings.HasPrefix(attrLocal, "on") || strings.HasPrefix(attrFull, "on") {
 					return fmt.Errorf("SVG event handler attribute %q is not allowed", attr.Name.Local)
 				}
+				if strings.IndexByte(attr.Value, '\\') >= 0 {
+					return fmt.Errorf("SVG attribute %q must not contain CSS backslash escapes", attr.Name.Local)
+				}
 				valNorm := stripASCIIWhitespaceAndControl(strings.ToLower(attr.Value))
 				if strings.Contains(valNorm, "javascript:") || strings.Contains(valNorm, "vbscript:") || strings.Contains(valNorm, "data:text/html") {
 					return fmt.Errorf("SVG attribute %q contains a disallowed URI scheme", attr.Name.Local)

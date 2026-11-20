@@ -535,10 +535,6 @@ func (s *Server) writePortProxyTimeout(w http.ResponseWriter, r *http.Request) {
 	writePortProxyTimeoutWithBranding(w, r, s.ResolvedBranding())
 }
 
-func writePortProxyTimeout(w http.ResponseWriter, r *http.Request) {
-	writePortProxyTimeoutWithBranding(w, r, nil)
-}
-
 func writePortProxyTimeoutWithBranding(w http.ResponseWriter, r *http.Request, b *config.ResolvedBranding) {
 	if isBrowserRequest(r) {
 		writeProxyErrorHTMLWithBranding(w, b, http.StatusGatewayTimeout, "Gateway Timeout",
@@ -553,10 +549,6 @@ func writePortProxyTimeoutWithBranding(w http.ResponseWriter, r *http.Request, b
 // kept; they work again when the agent reconnects.
 func (s *Server) writeAgentOffline(w http.ResponseWriter, r *http.Request) {
 	writeAgentOfflineWithBranding(w, r, s.ResolvedBranding())
-}
-
-func writeAgentOffline(w http.ResponseWriter, r *http.Request) {
-	writeAgentOfflineWithBranding(w, r, nil)
 }
 
 func writeAgentOfflineWithBranding(w http.ResponseWriter, r *http.Request, b *config.ResolvedBranding) {

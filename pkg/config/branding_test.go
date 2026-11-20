@@ -893,6 +893,8 @@ func TestValidateBranding_SVGAllowlistAndExternalRefs(t *testing.T) {
 		{"clip-path presentation attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect clip-path="url(https://evil.example/c.svg#c)"/></svg>`},
 		{"mask presentation attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect mask="url(https://evil.example/m.svg#m)"/></svg>`},
 		{"marker-end presentation attribute external url()", `<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 L10 10" marker-end="url(https://evil.example/m.svg#a)"/></svg>`},
+		{"fill presentation attribute CSS-escaped url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect fill="u\72l(https://evil.example/p.svg#g)"/></svg>`},
+		{"filter presentation attribute CSS-escaped url()", `<svg xmlns="http://www.w3.org/2000/svg"><rect filter="u\72l(https://evil.example/f.svg#f)"/></svg>`},
 	}
 	for _, tc := range rejectSVGs {
 		t.Run("reject_"+tc.name, func(t *testing.T) {
