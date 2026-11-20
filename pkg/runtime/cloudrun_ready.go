@@ -400,11 +400,11 @@ func cloudRunSpecDiff(existing, want *runpb.Instance, secretEnv map[string]bool)
 
 // cloudRunResourcesEqual reports whether a and b describe the same
 // container resource limits. Unset cpu and memory fall back to the Cloud
-// Run platform defaults (1 vCPU and 512Mi), and values are compared as
-// parsed Kubernetes quantities when both parse so equivalent forms
-// (for example "1" vs "1000m" or "2Gi" vs "2048Mi") match. Only Limits
-// are compared: Cloud Run has no requests field, and CpuIdle and
-// StartupCpuBoost are left unset by Scion.
+// Run platform defaults (cloudRunDefaultCPU and cloudRunDefaultMemoryMiB),
+// and values are compared as parsed Kubernetes quantities when both parse
+// so equivalent forms (for example "1" vs "1000m" or "2Gi" vs "2048Mi")
+// match. Only Limits are compared: Cloud Run has no requests field, and
+// CpuIdle and StartupCpuBoost are left unset by Scion.
 func cloudRunResourcesEqual(a, b *runpb.ResourceRequirements) bool {
 	al, bl := a.GetLimits(), b.GetLimits()
 	if !cloudRunQuantityEqual(

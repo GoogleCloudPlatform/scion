@@ -574,17 +574,18 @@ func TestCloudRunRun_ExistingInstanceMatchingSpecStarted(t *testing.T) {
 
 // ptone/scion#8079: an existing stopped instance whose resources are
 // equivalent after quantity normalization and platform-default resolution
-// (for example Cloud Run returning "2000m" CPU and default "512Mi" memory
-// when the start requests CPU "2" with memory unset) is reused rather than
-// needlessly recreated.
+// (for example Cloud Run returning "2000m" CPU and the platform-default
+// memory when the start requests CPU "2" with memory unset) is reused
+// rather than needlessly recreated.
 func TestCloudRunRun_ExistingInstanceEquivalentResourcesStarted(t *testing.T) {
+	defaultMem := strconv.Itoa(cloudRunDefaultMemoryMiB) + "Mi"
 	cfg := readyRunCfg()
 	cfg.Resources = &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}
 	fake := &fakeInstancesClient{}
 	rt := newReadyTestRuntime(t, fake)
 	existing := computedCloudRunInstance(t, rt, cfg)
 	existing.Containers[0].Resources = &runpb.ResourceRequirements{
-		Limits:  map[string]string{"cpu": "2000m", "memory": "512Mi"},
+		Limits:  map[string]string{"cpu": "2000m", "memory": defaultMem},
 		CpuIdle: true,
 	}
 	fake.getInstance = existing
@@ -599,6 +600,10 @@ func TestCloudRunRun_ExistingInstanceEquivalentResourcesStarted(t *testing.T) {
 // ptone/scion#8079: cloudRunSpecDiff compares container resource limits
 // using normalized quantities and Cloud Run platform defaults.
 func TestCloudRunSpecDiff_Resources(t *testing.T) {
+	defaultCPU := strconv.Itoa(cloudRunDefaultCPU)
+	defaultCPUMillis := strconv.Itoa(cloudRunDefaultCPU*1000) + "m"
+	defaultMem := strconv.Itoa(cloudRunDefaultMemoryMiB) + "Mi"
+	nonDefaultCPU := strconv.Itoa(cloudRunDefaultCPU * 2)
 	instWith := func(res *runpb.ResourceRequirements) *runpb.Instance {
 		return &runpb.Instance{Containers: []*runpb.Container{{Resources: res}}}
 	}
@@ -612,15 +617,15 @@ func TestCloudRunSpecDiff_Resources(t *testing.T) {
 		wantDiff bool
 	}{
 		{name: "both nil", existing: nil, want: nil, wantDiff: false},
-		{name: "nil vs explicit platform defaults", existing: nil, want: lim(map[string]string{"cpu": "1", "memory": "512Mi"}), wantDiff: false},
-		{name: "platform defaults returned as millicores vs nil", existing: lim(map[string]string{"cpu": "1000m", "memory": "512Mi"}), want: nil, wantDiff: false},
+		{name: "nil vs explicit platform defaults", existing: nil, want: lim(map[string]string{"cpu": defaultCPU, "memory": defaultMem}), wantDiff: false},
+		{name: "platform defaults returned as millicores vs nil", existing: lim(map[string]string{"cpu": defaultCPUMillis, "memory": defaultMem}), want: nil, wantDiff: false},
 		{name: "equivalent cpu 1 vs 1000m", existing: lim(map[string]string{"cpu": "1", "memory": "2Gi"}), want: lim(map[string]string{"cpu": "1000m", "memory": "2048Mi"}), wantDiff: false},
 		{name: "equivalent decimal memory 1G vs 1000M", existing: lim(map[string]string{"cpu": "1", "memory": "1G"}), want: lim(map[string]string{"cpu": "1", "memory": "1000M"}), wantDiff: false},
-		{name: "unset memory matches default 512Mi", existing: lim(map[string]string{"cpu": "2000m", "memory": "512Mi"}), want: lim(map[string]string{"cpu": "2"}), wantDiff: false},
-		{name: "unset cpu matches default 1", existing: lim(map[string]string{"cpu": "1", "memory": "4Gi"}), want: lim(map[string]string{"memory": "4096Mi"}), wantDiff: false},
+		{name: "unset memory matches platform default", existing: lim(map[string]string{"cpu": "2000m", "memory": defaultMem}), want: lim(map[string]string{"cpu": "2"}), wantDiff: false},
+		{name: "unset cpu matches platform default", existing: lim(map[string]string{"cpu": defaultCPU, "memory": "4Gi"}), want: lim(map[string]string{"memory": "4096Mi"}), wantDiff: false},
 		{name: "cpu_idle difference ignored", existing: &runpb.ResourceRequirements{Limits: map[string]string{"cpu": "2"}, CpuIdle: true}, want: lim(map[string]string{"cpu": "2"}), wantDiff: false},
 		{name: "cpu changed 1 to 2", existing: lim(map[string]string{"cpu": "1", "memory": "2Gi"}), want: lim(map[string]string{"cpu": "2", "memory": "2Gi"}), wantDiff: true},
-		{name: "cpu changed nil default to 2", existing: nil, want: lim(map[string]string{"cpu": "2"}), wantDiff: true},
+		{name: "cpu changed from nil default", existing: nil, want: lim(map[string]string{"cpu": nonDefaultCPU}), wantDiff: true},
 		{name: "memory changed 2Gi to 4Gi", existing: lim(map[string]string{"cpu": "2", "memory": "2Gi"}), want: lim(map[string]string{"cpu": "2", "memory": "4Gi"}), wantDiff: true},
 		{name: "memory changed decimal 1G vs binary 1Gi", existing: lim(map[string]string{"cpu": "1", "memory": "1G"}), want: lim(map[string]string{"cpu": "1", "memory": "1Gi"}), wantDiff: true},
 		{name: "extra limit key added", existing: lim(map[string]string{"cpu": "4", "memory": "16Gi"}), want: lim(map[string]string{"cpu": "4", "memory": "16Gi", "nvidia.com/gpu": "1"}), wantDiff: true},
