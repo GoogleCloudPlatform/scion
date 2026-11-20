@@ -353,6 +353,19 @@ A refused volume gets `400` with the code `hosted_config_refused`:
 
 The error names the volume by its target and says where it came from (for example `agent config` or `harness config "name"`). It never includes the volume's source, server or bucket.
 
+### Environment and Hub settings in agent config on a hosted server
+
+On a hosted server, the same member-written config is also checked for environment variables and for a `hub` block. It is checked in the same places and at the same times as volumes (see above), with the same `400 hosted_config_refused` error:
+
+- **Host environment references.** An `env` name or value that the Runtime Broker would expand against its own environment (`$NAME`, `${NAME}`) is refused. Use a literal value, or store the value as a secret.
+- **Empty values.** An `env` entry with an empty value is refused, because an empty value takes the variable of the same name from the Runtime Broker's environment.
+- **Reserved names.** An `env` name starting with `SCION_` or `GCE_METADATA_` is refused: these names are reserved for Scion's own variables. These names may still be set: `SCION_AUTO_EXPOSE_PORTS`, `SCION_AUTO_EXPOSE_MODE`, `SCION_AUTO_EXPOSE_PORTS_LIST` and `SCION_AUTO_EXPOSE_INTERVAL` (port auto-expose), `SCION_LOG_LEVEL` and `SCION_TELEMETRY_ENABLED` (set by the CLI's `--agent-log-level`, `--enable-telemetry` and `--disable-telemetry`), and `SCION_LIVENESS_HARNESS_ROOT_DEPTH` (set by the bundled Codex harness config).
+- **Hub endpoint.** A `hub` block with an endpoint in agent config is refused. The server sets the agent's Hub connection.
+
+Harness configs are checked for `env` only; they have no `hub` block. A template's `env` is not checked: its values are used literally, without expansion or passthrough, and its `SCION_*` names and `hub` block are already ignored. Env from operator sources (profiles, settings `harness_configs`, global harness-config directories, the Hub's global harness configs and environment variables and secrets the Hub resolves) is not affected. In workstation mode, nothing changes.
+
+The error names the env variable (or `hub "endpoint"`) and where it came from. It never includes the value.
+
 ## Telemetry Configuration (`telemetry`)
 
 Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). A template's `telemetry` block is ignored; the Hub telemetry configuration and project telemetry policy also apply, and an agent's own config can only turn telemetry on or off. See the [telemetry ladder](/scion/reference/settings-precedence/#the-telemetry-ladder).
