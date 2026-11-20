@@ -40,6 +40,7 @@
     "shared/notification-tray-decisions.test.ts",
     "shared/group-member-editor-membership.test.ts",
     "pages/onboarding.test.ts",
+    "pages/home.test.ts",
     "pages/agent-placement.test.ts",
     "pages/agent-detail-placement.test.ts",
     "pages/agent-detail-reincarnate.test.ts",

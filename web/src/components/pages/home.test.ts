@@ -268,3 +268,95 @@ describe('dashboard Create Project card (hub project.create)', () => {
     expect(hasCreateProjectLink(element)).toBe(false);
   });
 });
+
+describe('dashboard Open Terminal quick action (ptone/scion#8468)', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    await import('./home.js');
+  }, 60_000);
+
+  beforeEach(() => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+    stateManager.setScope({ type: 'brokers-list' });
+    resetHubProjectCapabilitiesCache();
+    vi.stubGlobal('fetch', vi.fn(dashboardFetch({ actions: ['list'] })));
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function openTerminalCard(el: HTMLElement): HTMLAnchorElement | null {
+    const cards = Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLAnchorElement>('a.action-card') ?? []
+    );
+    return (
+      cards.find((card) => card.querySelector('h4')?.textContent?.trim() === 'Open Terminal') ??
+      null
+    );
+  }
+
+  it('links to /terminals instead of /agents', async () => {
+    element = await mountHome();
+
+    const card = openTerminalCard(element);
+    expect(card).not.toBeNull();
+    expect(card?.getAttribute('href')).toBe('/terminals');
+    expect(element.shadowRoot?.querySelector('a.action-card[href="/agents"]')).toBeNull();
+  });
+
+  it('plain click prevents default and dispatches nav-click to /terminals with openPickerWhenEmpty', async () => {
+    element = await mountHome();
+    const card = openTerminalCard(element);
+    expect(card).not.toBeNull();
+
+    const details: Array<{ path: string; openPickerWhenEmpty?: boolean }> = [];
+    const onNav = (e: Event): void => {
+      details.push((e as CustomEvent<{ path: string; openPickerWhenEmpty?: boolean }>).detail);
+    };
+    document.addEventListener('nav-click', onNav);
+    try {
+      const click = new MouseEvent('click', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        button: 0,
+      });
+      const notCancelled = card!.dispatchEvent(click);
+      expect(notCancelled).toBe(false);
+      expect(details).toEqual([{ path: '/terminals', openPickerWhenEmpty: true }]);
+    } finally {
+      document.removeEventListener('nav-click', onNav);
+    }
+  });
+
+  it('modified click leaves default link handling intact and dispatches no nav-click', async () => {
+    element = await mountHome();
+    const card = openTerminalCard(element);
+    expect(card).not.toBeNull();
+
+    const details: unknown[] = [];
+    const onNav = (e: Event): void => {
+      details.push((e as CustomEvent).detail);
+    };
+    document.addEventListener('nav-click', onNav);
+    try {
+      const ctrlClick = new MouseEvent('click', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        button: 0,
+        ctrlKey: true,
+      });
+      const notCancelled = card!.dispatchEvent(ctrlClick);
+      expect(notCancelled).toBe(true);
+      expect(details).toEqual([]);
+    } finally {
+      document.removeEventListener('nav-click', onNav);
+    }
+  });
+});

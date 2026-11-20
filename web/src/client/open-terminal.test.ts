@@ -26,7 +26,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { agentGraphHref } from './open-terminal.js';
+import { agentGraphHref, openTerminalWorkspace } from './open-terminal.js';
 
 describe('agentGraphHref', () => {
   it('builds the plain graph URL for a project and agent id', () => {
@@ -43,5 +43,25 @@ describe('agentGraphHref', () => {
     expect(agentGraphHref('a&b=c', 'x?y#z')).toBe(
       '/agents/graph?project=a%26b%3Dc&focus=x%3Fy%23z'
     );
+  });
+});
+
+describe('openTerminalWorkspace (ptone/scion#8468)', () => {
+  it('dispatches nav-click to /terminals with openPickerWhenEmpty when requested', () => {
+    const details: unknown[] = [];
+    const onNav = (e: Event): void => {
+      details.push((e as CustomEvent).detail);
+    };
+    document.addEventListener('nav-click', onNav);
+    try {
+      openTerminalWorkspace({ openPickerWhenEmpty: true });
+      openTerminalWorkspace();
+      expect(details).toEqual([
+        { path: '/terminals', openPickerWhenEmpty: true },
+        { path: '/terminals', openPickerWhenEmpty: false },
+      ]);
+    } finally {
+      document.removeEventListener('nav-click', onNav);
+    }
   });
 });
