@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // runtimeOrphanKey is a runtime orphan's identity (its unique index).
@@ -109,6 +110,101 @@ func (s *AgentStore) RecordRuntimeOrphans(ctx context.Context, brokerID string, 
 		}
 		if err != nil && !ent.IsNotFound(err) {
 			errs = append(errs, mapError(err))
+		}
+	}
+	return created, errors.Join(errs...)
+}
+
+// RecordNFSOrphans implements store.AgentStore.RecordNFSOrphans (ptone/scion#7932).
+//
+// Key convention for kind=nfs_tree rows in runtime_orphans:
+//   - kind: "nfs_tree" (store.RuntimeOrphanKindNFSTree)
+//   - broker_id: "hub" (store.RuntimeOrphanBrokerHub), because the scan runs on
+//     the Hub itself and broker_id is non-empty in the schema (also surfaces as
+//     broker="hub" on scion.hub.runtime_orphans).
+//   - runtime_target: "agent-root" (agents/<slug>/), "agent-home"
+//     (agents/<slug>/home-<agentID>), or "agent-secrets"
+//     (agents/<slug>/secrets-<agentID>), prefixed with "<share>/" when the
+//     hub's workspace and shared-dir layouts use separate mounts so identical
+//     paths on distinct shares do not collide on the unique index
+//     (kind, broker_id, runtime_target, project_id, slug, agent_id).
+//   - project_id: project directory name under <subpath_root>
+//   - slug: agent directory name under agents/
+//   - agent_id: "" for agent-root, or the canonical UUID suffix for
+//     home-<agentID> / secrets-<agentID>.
+//
+// Absent kind=nfs_tree rows are deleted ONLY when complete is true (an
+// unbounded scan that visited every project without hitting the per-run
+// directory cap or encountering read/store errors). Instance rows are never
+// read or modified.
+func (s *AgentStore) RecordNFSOrphans(ctx context.Context, orphans []store.RuntimeOrphan, now time.Time, complete bool) ([]store.RuntimeOrphan, error) {
+	now = now.UTC()
+	rows, err := s.client.RuntimeOrphan.Query().
+		Where(runtimeorphan.KindEQ(store.RuntimeOrphanKindNFSTree), runtimeorphan.BrokerIDEQ(store.RuntimeOrphanBrokerHub)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	existing := make(map[runtimeOrphanKey]*ent.RuntimeOrphan, len(rows))
+	for _, r := range rows {
+		existing[runtimeOrphanKey{r.Kind, r.RuntimeTarget, r.ProjectID, r.Slug, r.AgentID}] = r
+	}
+
+	var created []store.RuntimeOrphan
+	var errs []error
+	batch := make(map[runtimeOrphanKey]bool, len(orphans))
+	for _, o := range orphans {
+		k := runtimeOrphanKey{store.RuntimeOrphanKindNFSTree, o.RuntimeTarget, o.ProjectID, o.Slug, o.AgentID}
+		if batch[k] {
+			continue
+		}
+		batch[k] = true
+		if ext, seen := existing[k]; seen {
+			delete(existing, k)
+			err = s.client.RuntimeOrphan.UpdateOneID(ext.ID).
+				SetReason(o.Reason).
+				SetLastSeenAt(now).
+				SetMissedInventories(0).
+				Exec(ctx)
+			if err == nil {
+				continue
+			}
+			if !ent.IsNotFound(err) {
+				errs = append(errs, mapError(err))
+				continue
+			}
+			// Row disappeared concurrently: recreate below.
+		}
+		row, err := s.client.RuntimeOrphan.Create().
+			SetKind(k.kind).
+			SetBrokerID(store.RuntimeOrphanBrokerHub).
+			SetRuntimeTarget(k.target).
+			SetProjectID(k.project).
+			SetSlug(k.slug).
+			SetAgentID(k.agentID).
+			SetReason(o.Reason).
+			SetFirstSeenAt(now).
+			SetLastSeenAt(now).
+			Save(ctx)
+		if err != nil {
+			if !ent.IsConstraintError(err) {
+				errs = append(errs, mapError(err))
+			}
+			continue
+		}
+		created = append(created, entRuntimeOrphanToStore(row))
+	}
+
+	// Only resolve absent rows after a complete, untruncated scan.
+	if complete && len(existing) > 0 {
+		ids := make([]uuid.UUID, 0, len(existing))
+		for _, r := range existing {
+			ids = append(ids, r.ID)
+		}
+		for _, batch := range chunkKeys(ids, batchLookupSize) {
+			if _, err := s.client.RuntimeOrphan.Delete().Where(runtimeorphan.IDIn(batch...)).Exec(ctx); err != nil {
+				errs = append(errs, mapError(err))
+			}
 		}
 	}
 	return created, errors.Join(errs...)

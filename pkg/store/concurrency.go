@@ -307,6 +307,11 @@ const (
 	// scans and enqueues eligible idle/completed/harness_error agents.
 	LockAgentIdleSuspend AdvisoryLockKey = 0x5C100030
 
+	// LockNFSOrphanScan guards the daily NFS agent-directory orphan scan
+	// ("nfs-orphan-scan", ptone/scion#7932), so one replica per tick scans
+	// the shared project storage and records kind=nfs_tree runtime_orphans.
+	LockNFSOrphanScan AdvisoryLockKey = 0x5C100031
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid

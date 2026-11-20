@@ -43,6 +43,8 @@ var operationParamAllowlist = map[string][]string{
 	// takes nothing.
 	entadapter.ChatRetentionPreviewKey: {chatRetentionParamDays},
 	entadapter.ChatRetentionRunKey:     {},
+	// The NFS orphan scan takes no parameters.
+	entadapter.NFSOrphanScanKey: {},
 }
 
 // stringParamOperations lists the operations whose parameters must be JSON
@@ -76,6 +78,7 @@ func checkStringParams(body map[string]interface{}) error {
 var maintenanceOperationExperiments = map[string]string{
 	entadapter.ChatRetentionPreviewKey: experiments.ChatRetention,
 	entadapter.ChatRetentionRunKey:     experiments.ChatRetention,
+	entadapter.NFSOrphanScanKey:        experiments.RuntimeOrphanReconcile,
 }
 
 // maintenanceOperationAvailable reports whether operation key exists on
