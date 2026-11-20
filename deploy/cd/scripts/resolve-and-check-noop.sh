@@ -262,7 +262,11 @@ PY
               effective_floor="${DEPLOYED_VERSION}"
               ;;
           esac
-          floor_class="$(compare_release_refs "${effective_floor}" "${TARGET_TAG}" "" "${TARGET_VERSION_DATE}")"
+          floor_date=""
+          if [[ "${effective_floor}" == "${DEPLOYED_VERSION}" ]]; then
+            floor_date="${DEPLOYED_DATE}"
+          fi
+          floor_class="$(compare_release_refs "${effective_floor}" "${TARGET_TAG}" "${floor_date}" "${TARGET_VERSION_DATE}")"
           case "${floor_class}" in
             downgrade|switch-older|unknown)
               if [[ "${ALLOW_BELOW_DOWNGRADE_FLOOR}" != "true" ]]; then

@@ -669,6 +669,40 @@ EOF
   else
     fail "rollback to nightly-20261119 succeeded below clamped floor nightly-20261120"
   fi
+
+  # 15b. Same-day cross-family rollback against clamped floor preserves DEPLOYED_DATE:
+  #      deployed nightly-20261120 (06:00Z), stored floor nightly-20261121, target v0.4.0-preview.3 (03:00Z)
+  #      must still be blocked without _ALLOW_BELOW_DOWNGRADE_FLOOR=true.
+  local manifest_same_day="${d}/LATEST-same-day.json"
+  cat >"${manifest_same_day}" <<'EOF'
+{
+  "channels": {
+    "preview": {
+      "version": "v0.4.0-preview.3",
+      "date": "2026-11-20T03:00:00Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.4.0-preview.3"
+    }
+  }
+}
+EOF
+  cat >"${d}/gcs/myproj-cdha-tfstate/cdha/hubs/cdha-gke-1/deployed.json" <<EOF
+{
+  "version": "nightly-20261120",
+  "version_date": "2026-11-20T06:00:00Z",
+  "hub_image_digest": "${digest}",
+  "tfvars_sha256": "${tfvars_sha}",
+  "downgrade_floor": "nightly-20261121"
+}
+EOF
+  rc=0
+  out="$(env "${base_env[@]}" MOCK_MANIFEST_FILE="${manifest_same_day}" _ALLOW_DOWNGRADE=true _CHANNEL="preview" _VERSION_TAG="" \
+    bash "${SCRIPT_DIR}/resolve-and-check-noop.sh" 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    assert_contains "same-day cross-family rollback below clamped floor requires _ALLOW_BELOW_DOWNGRADE_FLOOR" "${out}" "_ALLOW_BELOW_DOWNGRADE_FLOOR"
+    assert_contains "same-day cross-family rollback reports clamped floor nightly-20261120" "${out}" "downgrade_floor 'nightly-20261120'"
+  else
+    fail "same-day cross-family rollback to v0.4.0-preview.3 (03:00Z) slipped past clamped floor nightly-20261120 (06:00Z)"
+  fi
 }
 
 test_slice1
@@ -1398,6 +1432,10 @@ if [[ "${1:-}" == "artifacts" && "${2:-}" == "repositories" && "${3:-}" == "desc
       echo "ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Repository not found" >&2
       exit 1
       ;;
+    service_disabled)
+      echo "ERROR: (gcloud.artifacts.repositories.describe) PERMISSION_DENIED: Artifact Registry API has not been used in project 123456789012 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/artifactregistry.googleapis.com/overview?project=123456789012 then retry." >&2
+      exit 1
+      ;;
     permission_denied)
       echo "ERROR: (gcloud.artifacts.repositories.describe) PERMISSION_DENIED: Permission denied" >&2
       exit 1
@@ -1631,6 +1669,22 @@ PY
       --hub-name cdha-gke-1 2>&1)"
   assert_contains "preflight allows absent AR repo before shared-infra" "${pf_out}" "does not exist yet"
   assert_contains "setup-cd.sh proceeds to enable APIs when AR repo not yet created" "$(cat "${jsonl_pf}")" '"enable"'
+
+  # (g) AR API not yet enabled on fresh project (SERVICE_DISABLED / "has not been used") passes preflight cleanly
+  : > "${jsonl_pf}"
+  rc=0
+  pf_out="$(env "PATH=${setup_stub}/bin:${PATH}" \
+    "MOCK_SETUP_ARGV_JSONL=${jsonl_pf}" \
+    "MOCK_SETUP_AR_DESCRIBE_MODE=service_disabled" \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 2>&1)" || rc=$?
+  assert_eq "preflight allows disabled AR API on fresh project" "${rc}" "0"
+  assert_contains "preflight logs skipped AR check when API is disabled" "${pf_out}" "Artifact Registry API is not enabled yet"
+  assert_not_contains "preflight disabled AR API does not misclassify as missing artifactregistry.admin" "${pf_out}" "roles/artifactregistry.admin"
+  assert_contains "setup-cd.sh proceeds to enable APIs when AR API not yet enabled" "$(cat "${jsonl_pf}")" '"enable"'
 
   # R4 end-to-end: editing hub.tfvars on an already-deployed tag triggers TF apply
   # with ZERO docker buildx rebuilds, updates tfvars_sha256, and re-converges on next run!

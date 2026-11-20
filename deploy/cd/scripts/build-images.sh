@@ -223,7 +223,8 @@ verify_registry_with_retry() {
       return 0
     fi
 
-    if grep -qiE 'Permission denied|PERMISSION_DENIED|Missing push permission|HTTPError 40[13]|forbidden|unauthori[sz]ed' <<<"${out}"; then
+    if ! grep -qiE 'SERVICE_DISABLED|has not been used|it is disabled|API is not enabled' <<<"${out}" \
+      && grep -qiE 'Permission denied|PERMISSION_DENIED|Missing push permission|HTTPError 40[13]|forbidden|unauthori[sz]ed' <<<"${out}"; then
       if [[ ${attempt} -lt ${max_attempts} ]]; then
         log_warn "Artifact Registry permission check failed (attempt ${attempt}/${max_attempts}); newly bound GCP IAM policies can take ~90s to propagate — retrying in ${retry_delay}s..."
         if [[ ${retry_delay} -gt 0 ]]; then

@@ -50,7 +50,12 @@ if [[ $describe_rc -ne 0 ]]; then
   describe_err="$(cat "$describe_err_file")"
   rm -f -- "$describe_err_file"
   echo "" >&2
-  if grep -qiE 'PERMISSION_DENIED|HTTPError 40[13]|unauthori[sz]ed|forbidden|does not have permission|permission .* denied|credential' <<<"$describe_err"; then
+  if grep -qiE 'SERVICE_DISABLED|has not been used|it is disabled|API .* not enabled' <<<"$describe_err"; then
+    printf '%s\n' "$describe_err" >&2
+    echo "ERROR: Artifact Registry API is not enabled in project '$reg_project'." >&2
+    echo "Enable it with:" >&2
+    echo "  gcloud services enable artifactregistry.googleapis.com --project=$reg_project" >&2
+  elif grep -qiE 'PERMISSION_DENIED|HTTPError 40[13]|unauthori[sz]ed|forbidden|does not have permission|permission .* denied|credential' <<<"$describe_err"; then
     printf '%s\n' "$describe_err" >&2
     echo "ERROR: Permission denied accessing Artifact Registry repository: $REGISTRY" >&2
     echo "The active service account lacks artifactregistry.repositories.get (or newly bound IAM policies have not yet propagated)." >&2

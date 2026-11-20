@@ -280,6 +280,10 @@ PY
   rm -f -- "${ar_err_file}"
 
   if [[ ${ar_rc} -ne 0 ]]; then
+    if grep -qiE 'SERVICE_DISABLED|has not been used|it is disabled|API .* not enabled' <<<"${ar_err}"; then
+      log_info "Preflight: Artifact Registry API is not enabled yet in '${PROJECT}'; skipping repository IAM check (Step 1 will enable it, and Step 4b will be skipped until configurations/shared-infra is applied)."
+      return 0
+    fi
     if grep -qiE 'PERMISSION_DENIED|HTTPError 40[13]|unauthori[sz]ed|forbidden|does not have permission|permission .* denied' <<<"${ar_err}"; then
       printf '%s\n' "${ar_err}" >&2
       die "Operator lacks permission to access Artifact Registry repository '${AR_REPO}' in '${REGION}'. Grant the operator roles/artifactregistry.admin (or repository-level artifactregistry.repositories.get + setIamPolicy) before running setup-cd.sh."
@@ -319,6 +323,8 @@ PY
       )" || true
       if [[ "${has_ar_set_iam}" == "no" ]]; then
         die "Operator lacks 'artifactregistry.repositories.setIamPolicy' on Artifact Registry repository '${AR_REPO}' (${REGION}). Note: roles/editor and roles/resourcemanager.projectIamAdmin do NOT include repository setIamPolicy. Grant the operator roles/artifactregistry.admin (project-level or on '${AR_REPO}') before running setup-cd.sh so Step 4b can bind roles/artifactregistry.writer for ${CD_SA_EMAIL} without leaving partial state."
+      elif [[ "${has_ar_set_iam}" != "yes" ]]; then
+        log_warn "Could not parse Artifact Registry repository testIamPermissions response; proceeding."
       fi
     else
       log_warn "Could not verify Artifact Registry repository setIamPolicy via testIamPermissions; proceeding."

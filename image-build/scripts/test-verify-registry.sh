@@ -90,6 +90,10 @@ if [[ "${1:-}" == "artifacts" && "${2:-}" == "repositories" && "${3:-}" == "desc
       echo "ERROR: (gcloud.artifacts.repositories.describe) HTTPError 403: Caller does not have permission." >&2
       exit 1
       ;;
+    service_disabled)
+      echo "ERROR: (gcloud.artifacts.repositories.describe) PERMISSION_DENIED: Artifact Registry API has not been used in project 123456789012 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/artifactregistry.googleapis.com/overview?project=123456789012 then retry." >&2
+      exit 1
+      ;;
     not_found)
       echo "ERROR: (gcloud.artifacts.repositories.describe) NOT_FOUND: Repository 'cdha-scion' was not found." >&2
       exit 1
@@ -139,6 +143,13 @@ run_verify MOCK_DESCRIBE_MODE=http_403
 assert_eq "HTTPError 403 on describe exits 1" "${RC}" "1"
 assert_contains "HTTPError 403 reports permission error" "${OUT}" "Permission denied accessing Artifact Registry repository"
 assert_not_contains "HTTPError 403 does not claim repository not found" "${OUT}" "repository not found"
+
+# 3b. SERVICE_DISABLED on describe is reported as disabled API, NOT permission denied or not found
+run_verify MOCK_DESCRIBE_MODE=service_disabled
+assert_eq "SERVICE_DISABLED on describe exits 1" "${RC}" "1"
+assert_contains "SERVICE_DISABLED reports API not enabled" "${OUT}" "Artifact Registry API is not enabled"
+assert_not_contains "SERVICE_DISABLED does not report permission denied" "${OUT}" "Permission denied accessing Artifact Registry repository"
+assert_not_contains "SERVICE_DISABLED does not claim repository not found" "${OUT}" "repository not found"
 
 # 4. Real NOT_FOUND on describe is reported as repository not found
 run_verify MOCK_DESCRIBE_MODE=not_found
