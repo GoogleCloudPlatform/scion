@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -96,6 +97,193 @@ func TestOpenWorkspaceTarget_FIFODoesNotBlock(t *testing.T) {
 		}
 		assert.ErrorIs(t, openErr, errWorkspaceWriteRefused)
 	})
+}
+
+func TestOpenWorkspaceRegularForRead_SymlinkMultiComponentAndRegular(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ok.txt"), []byte("hello"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("secret"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "sub", "nested"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub", "nested", "deep.txt"), []byte("deep-ok"), 0o644))
+	require.NoError(t, os.Symlink("secret.txt", filepath.Join(dir, "link.txt")))
+	require.NoError(t, os.Symlink("../secret.txt", filepath.Join(dir, "sub", "leaf-link.txt")))
+	require.NoError(t, os.Symlink("sub", filepath.Join(dir, "symdir")))
+
+	sockPath := filepath.Join(dir, "sock")
+	ln, sockErr := net.Listen("unix", sockPath)
+	if sockErr == nil {
+		t.Cleanup(func() { _ = ln.Close() })
+	}
+
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer func() { _ = root.Close() }()
+
+	t.Run("regular_single_component", func(t *testing.T) {
+		f, info, err := openWorkspaceRegularForRead(root, "ok.txt", nil)
+		require.NoError(t, err)
+		require.NotNil(t, f)
+		require.NotNil(t, info)
+		defer func() { _ = f.Close() }()
+		data, err := io.ReadAll(f)
+		require.NoError(t, err)
+		assert.Equal(t, "hello", string(data))
+	})
+
+	t.Run("regular_multi_component", func(t *testing.T) {
+		expected, err := os.Lstat(filepath.Join(dir, "sub", "nested", "deep.txt"))
+		require.NoError(t, err)
+		f, info, err := openWorkspaceRegularForRead(root, "sub/nested/deep.txt", expected)
+		require.NoError(t, err)
+		require.NotNil(t, f)
+		require.NotNil(t, info)
+		defer func() { _ = f.Close() }()
+		data, err := io.ReadAll(f)
+		require.NoError(t, err)
+		assert.Equal(t, "deep-ok", string(data))
+	})
+
+	t.Run("live_in_root_symlink_nil_expected", func(t *testing.T) {
+		f, info, err := openWorkspaceRegularForRead(root, "link.txt", nil)
+		if f != nil {
+			_ = f.Close()
+		}
+		assert.Nil(t, f)
+		assert.Nil(t, info)
+		assert.ErrorIs(t, err, errWorkspaceWriteRefused)
+	})
+
+	t.Run("live_in_root_symlink_multi_component_leaf", func(t *testing.T) {
+		f, info, err := openWorkspaceRegularForRead(root, "sub/leaf-link.txt", nil)
+		if f != nil {
+			_ = f.Close()
+		}
+		assert.Nil(t, f)
+		assert.Nil(t, info)
+		assert.ErrorIs(t, err, errWorkspaceWriteRefused)
+	})
+
+	t.Run("live_in_root_symlink_intermediate_dir", func(t *testing.T) {
+		f, info, err := openWorkspaceRegularForRead(root, "symdir/nested/deep.txt", nil)
+		if f != nil {
+			_ = f.Close()
+		}
+		assert.Nil(t, f)
+		assert.Nil(t, info)
+		assert.ErrorIs(t, err, errWorkspaceWriteRefused)
+	})
+
+	t.Run("invalid_paths_refused", func(t *testing.T) {
+		for _, bad := range []string{"", ".", "..", "/ok.txt", "sub/../ok.txt", "sub/", "sub//nested/deep.txt"} {
+			f, info, err := openWorkspaceRegularForRead(root, bad, nil)
+			if f != nil {
+				_ = f.Close()
+			}
+			assert.Nil(t, f, "path %q", bad)
+			assert.Nil(t, info, "path %q", bad)
+			assert.ErrorIs(t, err, errWorkspaceWriteRefused, "path %q", bad)
+		}
+	})
+
+	if sockErr == nil {
+		t.Run("unix_socket_refused", func(t *testing.T) {
+			runWithinTimeout(t, 2*time.Second, func() {
+				f, info, err := openWorkspaceRegularForRead(root, "sock", nil)
+				if f != nil {
+					_ = f.Close()
+				}
+				assert.Nil(t, f)
+				assert.Nil(t, info)
+				assert.ErrorIs(t, err, errWorkspaceWriteRefused)
+			})
+		})
+	}
+}
+
+func TestOpenWorkspaceFileForWrite_SymlinkMultiComponentAndRegular(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("git-secret"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "existing.txt"), []byte("before"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub", "target.txt"), []byte("sub-before"), 0o644))
+	require.NoError(t, os.Symlink(".git/config", filepath.Join(dir, "link.txt")))
+	require.NoError(t, os.Symlink("sub", filepath.Join(dir, "symdir")))
+
+	sockPath := filepath.Join(dir, "sock")
+	ln, sockErr := net.Listen("unix", sockPath)
+	if sockErr == nil {
+		t.Cleanup(func() { _ = ln.Close() })
+	}
+
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer func() { _ = root.Close() }()
+
+	t.Run("live_in_root_symlink_exists_true", func(t *testing.T) {
+		f, err := openWorkspaceFileForWrite(root, "link.txt", true)
+		if f != nil {
+			_ = f.Close()
+		}
+		assert.Nil(t, f)
+		assert.ErrorIs(t, err, errWorkspaceWriteRefused)
+	})
+
+	t.Run("live_in_root_symlink_exists_false", func(t *testing.T) {
+		f, err := openWorkspaceFileForWrite(root, "link.txt", false)
+		if f != nil {
+			_ = f.Close()
+		}
+		assert.Nil(t, f)
+		assert.ErrorIs(t, err, errWorkspaceWriteRefused)
+	})
+
+	t.Run("live_in_root_symlink_intermediate_dir", func(t *testing.T) {
+		f, err := openWorkspaceFileForWrite(root, "symdir/target.txt", true)
+		if f != nil {
+			_ = f.Close()
+		}
+		assert.Nil(t, f)
+		assert.ErrorIs(t, err, errWorkspaceWriteRefused)
+	})
+
+	t.Run("regular_existing_file", func(t *testing.T) {
+		f, err := openWorkspaceFileForWrite(root, "existing.txt", true)
+		require.NoError(t, err)
+		require.NotNil(t, f)
+		require.NoError(t, f.Truncate(0))
+		_, err = f.WriteString("after")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		got, err := os.ReadFile(filepath.Join(dir, "existing.txt"))
+		require.NoError(t, err)
+		assert.Equal(t, "after", string(got))
+	})
+
+	t.Run("regular_new_file", func(t *testing.T) {
+		f, err := openWorkspaceFileForWrite(root, "created.txt", false)
+		require.NoError(t, err)
+		require.NotNil(t, f)
+		_, err = f.WriteString("brand-new")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		got, err := os.ReadFile(filepath.Join(dir, "created.txt"))
+		require.NoError(t, err)
+		assert.Equal(t, "brand-new", string(got))
+	})
+
+	if sockErr == nil {
+		t.Run("unix_socket_refused", func(t *testing.T) {
+			runWithinTimeout(t, 2*time.Second, func() {
+				f, err := openWorkspaceFileForWrite(root, "sock", true)
+				if f != nil {
+					_ = f.Close()
+				}
+				assert.Nil(t, f)
+				assert.ErrorIs(t, err, errWorkspaceWriteRefused)
+			})
+		})
+	}
 }
 
 func TestWorkspaceDownload_NonRegularRefused(t *testing.T) {
@@ -247,6 +435,39 @@ func TestWorkspaceArchive_NonRegularAndSwappedEntriesSkipped(t *testing.T) {
 			assert.Equal(t, "control", entries["README.md"])
 			assert.NotContains(t, entries, "swap-fifo.txt")
 			assert.NotContains(t, entries, "swap-link.txt")
+			for name, content := range entries {
+				assert.NotContains(t, content, dotGitReadSecret, "archive entry %q contains .git/config content", name)
+			}
+		})
+	})
+
+	t.Run("swapped_intermediate_dir_symlink", func(t *testing.T) {
+		project, workspacePath := createTestHubManagedProject(t, srv, "Open Archive Swap Subdir")
+		plantDotGitReadTree(t, workspacePath)
+		archiveURL := fmt.Sprintf("/api/v1/projects/%s/workspace/archive", project.ID)
+
+		require.NoError(t, os.MkdirAll(filepath.Join(workspacePath, "keepdir"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(workspacePath, "keepdir", "ok.txt"), []byte("nested-kept"), 0o644))
+		subDir := filepath.Join(workspacePath, "swapdir")
+		require.NoError(t, os.MkdirAll(subDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(subDir, "config"), []byte("regular-nested"), 0o644))
+
+		swap := func(name string) {
+			if name != "swapdir/config" {
+				return
+			}
+			_ = os.RemoveAll(subDir)
+			_ = os.Symlink(".git", subDir)
+		}
+		workspaceBeforeOpenHook.Store(&swap)
+		t.Cleanup(func() { workspaceBeforeOpenHook.Store(nil) })
+
+		runWithinTimeout(t, 2*time.Second, func() {
+			rec := doRequest(t, srv, http.MethodGet, archiveURL, nil)
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+			entries := readZipEntries(t, rec.Body.Bytes())
+			assert.Equal(t, "nested-kept", entries["keepdir/ok.txt"])
+			assert.NotContains(t, entries, "swapdir/config")
 			for name, content := range entries {
 				assert.NotContains(t, content, dotGitReadSecret, "archive entry %q contains .git/config content", name)
 			}
