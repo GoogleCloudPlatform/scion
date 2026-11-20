@@ -131,8 +131,11 @@ func entProjectToStore(p *ent.Project) *store.Project {
 		sp.SharedDirs = dirs
 	}
 	if p.GithubPermissions != "" {
-		sp.GitHubPermissions = &store.GitHubTokenPermissions{}
-		unmarshalRawJSON(p.GithubPermissions, sp.GitHubPermissions)
+		var perms store.GitHubTokenPermissions
+		unmarshalRawJSON(p.GithubPermissions, &perms)
+		if perms != (store.GitHubTokenPermissions{}) {
+			sp.GitHubPermissions = &perms
+		}
 	}
 	if p.GithubAppStatus != "" {
 		sp.GitHubAppStatus = &store.GitHubAppProjectStatus{}

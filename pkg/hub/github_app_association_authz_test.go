@@ -899,6 +899,68 @@ func TestProjectGitHubPermissions_DefaultDisplayedMatchesMinted(t *testing.T) {
 	assert.Equal(t, mints[0].Permissions, displayedMap, "displayed default permissions must match minted default permissions")
 }
 
+// A project row with a legacy stored empty permission set ({}) reads back the
+// same defaults from GET /github-permissions that token minting requests,
+// while leaving non-empty stored permission sets untouched.
+func TestProjectGitHubPermissions_LegacyEmptyRowMatchesMinted(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	gh := newFakeGitHubForAssoc(t)
+	configureFakeGitHubApp(t, srv, gh)
+
+	createAssocInstallation(t, st, 5904, "acme", "acme/legacy")
+	giveUserGitHubToken(t, srv, st, "pusher", "ghp_pusher")
+	gh.grant("ghp_pusher", "acme/legacy", githubapp.RepoAccess{Push: true, Pull: true})
+
+	p := createAssocProject(t, st, "perm-legacy-empty", gh.remote("acme", "legacy"), "pusher", ptrInt64(5904))
+	stored := reloadProject(t, st, p.ID)
+	stored.GitHubPermissions = &store.GitHubTokenPermissions{}
+	require.NoError(t, st.UpdateProject(ctx, stored))
+
+	// Stored empty row reads back as unset from the store.
+	assert.Nil(t, reloadProject(t, st, p.ID).GitHubPermissions)
+
+	// GET github-permissions returns the defaults that minting uses.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+p.ID+"/github-permissions", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var displayedMap map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &displayedMap))
+	var displayedStruct store.GitHubTokenPermissions
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &displayedStruct))
+
+	_, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, p.ID))
+	require.NoError(t, err)
+	_, mints := gh.counts()
+	require.Len(t, mints, 1)
+
+	assert.Equal(t, store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions()), displayedStruct)
+	assert.Equal(t, mints[0].Permissions, displayedMap, "displayed permissions for legacy empty row must match minted defaults")
+
+	// Direct handler defense-in-depth: an in-memory empty pointer also reads as defaults.
+	directRec := httptest.NewRecorder()
+	directReq := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+p.ID+"/github-permissions", nil)
+	srv.handleProjectGitHubPermissions(directRec, directReq, &store.Project{
+		ID:                p.ID,
+		GitHubPermissions: &store.GitHubTokenPermissions{},
+	})
+	require.Equal(t, http.StatusOK, directRec.Code, "body: %s", directRec.Body.String())
+	var directDisplayed store.GitHubTokenPermissions
+	require.NoError(t, json.Unmarshal(directRec.Body.Bytes(), &directDisplayed))
+	assert.Equal(t, store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions()), directDisplayed)
+
+	// Non-empty stored permission set is preserved untouched.
+	stored = reloadProject(t, st, p.ID)
+	stored.GitHubPermissions = &store.GitHubTokenPermissions{Contents: "read"}
+	require.NoError(t, st.UpdateProject(ctx, stored))
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+p.ID+"/github-permissions", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var customDisplayed store.GitHubTokenPermissions
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &customDisplayed))
+	assert.Equal(t, store.GitHubTokenPermissions{Contents: "read"}, customDisplayed)
+}
+
 // PUT github-permissions accepts only the known fields with "", "read" or
 // "write"; anything else is refused and nothing is stored. Revert check:
 // before the fix any body was stored.

@@ -1147,3 +1147,45 @@ func TestFindEmbeddedBroker_IgnoresOwnedRows(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, hubManaged.ID, got.ID)
 }
+
+func TestProject_LegacyEmptyGitHubPermissionsReadAsNil(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "empty object", raw: "{}"},
+		{name: "empty fields", raw: `{"contents":"","metadata":""}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newProject(1)
+			require.NoError(t, ps.CreateProject(ctx, p))
+
+			uid, err := uuid.Parse(p.ID)
+			require.NoError(t, err)
+			require.NoError(t, ps.client.Project.UpdateOneID(uid).SetGithubPermissions(tc.raw).Exec(ctx))
+
+			got, err := ps.GetProject(ctx, p.ID)
+			require.NoError(t, err)
+			assert.Nil(t, got.GitHubPermissions, "legacy empty github_permissions row must read back as nil")
+
+			listed, err := ps.ListProjects(ctx, store.ProjectFilter{Slug: p.Slug}, store.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, listed.Items, 1)
+			assert.Nil(t, listed.Items[0].GitHubPermissions, "listed legacy empty github_permissions row must read back as nil")
+		})
+	}
+
+	t.Run("non-empty preserved", func(t *testing.T) {
+		p := newProject(2)
+		p.GitHubPermissions = &store.GitHubTokenPermissions{Contents: "read"}
+		require.NoError(t, ps.CreateProject(ctx, p))
+
+		got, err := ps.GetProject(ctx, p.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.GitHubPermissions)
+		assert.Equal(t, store.GitHubTokenPermissions{Contents: "read"}, *got.GitHubPermissions)
+	})
+}
