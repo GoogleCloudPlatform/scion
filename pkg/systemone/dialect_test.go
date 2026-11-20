@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -556,150 +557,161 @@ func TestDialect_EngineWrapShapesPreserveEvaluationProvenance(t *testing.T) {
 	}`
 
 	t.Run("margin_allows_runtime_timeout_to_pass_through_before_engine_context_expires", func(t *testing.T) {
-		rt := newFakeAdapterRuntime(t, 3*time.Second, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
-			<-attemptCtx.Done()
-			return provider.ModelResult{}, attemptCtx.Err()
+		synctest.Test(t, func(t *testing.T) {
+			rt := newFakeAdapterRuntime(t, 3*time.Second, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				<-attemptCtx.Done()
+				return provider.ModelResult{}, attemptCtx.Err()
+			})
+			eng := ruleengine.NewEngine()
+			require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
+				Runtime:     rt,
+				MaxEvalTime: 3 * time.Second,
+			})))
+			require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+			c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+				Consumer: testSystemOneConsumer,
+				Name:     spec.ProbeEnvironmentName,
+			})
+			require.NoError(t, err)
+
+			_, err = eng.Evaluate(context.Background(), c, ruleengine.Input{
+				Payload: systemone.ProbeInput("hang"),
+			}, ruleengine.Budget{MaxEvalTime: 120 * time.Millisecond})
+			require.Error(t, err)
+
+			var failedErr *ruleengine.FailedError
+			require.ErrorAs(t, err, &failedErr)
+			assert.Equal(t, celengine.ReasonTimeout, failedErr.Reason)
+
+			eval, ok := systemone.EvaluationFrom(err)
+			require.True(t, ok)
+			assert.Equal(t, systemone.ClassFailed, eval.Class)
+			assert.Equal(t, string(provider.FailTimeout), eval.Reason)
 		})
-		eng := ruleengine.NewEngine()
-		require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
-			Runtime:     rt,
-			MaxEvalTime: 3 * time.Second,
-		})))
-		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
-		c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-			Consumer: testSystemOneConsumer,
-			Name:     spec.ProbeEnvironmentName,
-		})
-		require.NoError(t, err)
-
-		_, err = eng.Evaluate(context.Background(), c, ruleengine.Input{
-			Payload: systemone.ProbeInput("hang"),
-		}, ruleengine.Budget{MaxEvalTime: 120 * time.Millisecond})
-		require.Error(t, err)
-
-		var failedErr *ruleengine.FailedError
-		require.ErrorAs(t, err, &failedErr)
-		assert.Equal(t, celengine.ReasonTimeout, failedErr.Reason)
-
-		eval, ok := systemone.EvaluationFrom(err)
-		require.True(t, ok)
-		assert.Equal(t, systemone.ClassFailed, eval.Class)
-		assert.Equal(t, string(provider.FailTimeout), eval.Reason)
 	})
 
 	t.Run("wrap_shape_1_caller_cancel_joins_caller_err_and_dialect_evaluation", func(t *testing.T) {
-		arrived := make(chan struct{})
-		rt := newFakeAdapterRuntime(t, 3*time.Second, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
-			close(arrived)
-			<-attemptCtx.Done()
-			return provider.ModelResult{}, attemptCtx.Err()
+		synctest.Test(t, func(t *testing.T) {
+			arrived := make(chan struct{})
+			rt := newFakeAdapterRuntime(t, 3*time.Second, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				close(arrived)
+				<-attemptCtx.Done()
+				return provider.ModelResult{}, attemptCtx.Err()
+			})
+			eng := ruleengine.NewEngine()
+			require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
+				Runtime:     rt,
+				MaxEvalTime: 3 * time.Second,
+			})))
+			require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+			c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+				Consumer: testSystemOneConsumer,
+				Name:     spec.ProbeEnvironmentName,
+			})
+			require.NoError(t, err)
+
+			callerCtx, cancel := context.WithCancel(context.Background())
+			cancelDone := make(chan struct{})
+			go func() {
+				defer close(cancelDone)
+				<-arrived
+				cancel()
+			}()
+
+			_, err = eng.Evaluate(callerCtx, c, ruleengine.Input{
+				Payload: systemone.ProbeInput("cancel me"),
+			}, ruleengine.Budget{})
+			<-cancelDone
+			require.Error(t, err)
+
+			var failedErr *ruleengine.FailedError
+			require.ErrorAs(t, err, &failedErr)
+			assert.Equal(t, celengine.ReasonCanceled, failedErr.Reason)
+			assert.ErrorIs(t, err, context.Canceled)
+
+			eval, ok := systemone.EvaluationFrom(err)
+			require.True(t, ok, "EvaluationFrom must reach *Evaluation inside FailedError{canceled, Join(callerErr, dialectErr)}")
+			assert.Equal(t, systemone.ClassFailed, eval.Class)
+			assert.Equal(t, string(provider.FailCanceled), eval.Reason)
+			require.Len(t, eval.Attempts, 1)
+			assert.Equal(t, string(provider.FailCanceled), eval.Attempts[0].Reason)
 		})
-		eng := ruleengine.NewEngine()
-		require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
-			Runtime:     rt,
-			MaxEvalTime: 3 * time.Second,
-		})))
-		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
-		c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-			Consumer: testSystemOneConsumer,
-			Name:     spec.ProbeEnvironmentName,
-		})
-		require.NoError(t, err)
-
-		callerCtx, cancel := context.WithCancel(context.Background())
-		go func() {
-			<-arrived
-			cancel()
-		}()
-
-		_, err = eng.Evaluate(callerCtx, c, ruleengine.Input{
-			Payload: systemone.ProbeInput("cancel me"),
-		}, ruleengine.Budget{})
-		require.Error(t, err)
-
-		var failedErr *ruleengine.FailedError
-		require.ErrorAs(t, err, &failedErr)
-		assert.Equal(t, celengine.ReasonCanceled, failedErr.Reason)
-		assert.ErrorIs(t, err, context.Canceled)
-
-		eval, ok := systemone.EvaluationFrom(err)
-		require.True(t, ok, "EvaluationFrom must reach *Evaluation inside FailedError{canceled, Join(callerErr, dialectErr)}")
-		assert.Equal(t, systemone.ClassFailed, eval.Class)
-		assert.Equal(t, string(provider.FailCanceled), eval.Reason)
-		require.Len(t, eval.Attempts, 1)
-		assert.Equal(t, string(provider.FailCanceled), eval.Attempts[0].Reason)
 	})
 
 	t.Run("wrap_shape_2_engine_timeout_joins_cel_eval_error_and_dialect_evaluation", func(t *testing.T) {
-		// Force d.Evaluate to return AFTER ruleengine's evalCtx has also expired so
-		// Engine.Evaluate hits the errDialectEvalTimeout branch and wraps with
-		// FailedError{timeout, errors.Join(&celengine.EvalError{Reason: "timeout"}, dialectErr)}.
-		rt := newFakeAdapterRuntime(t, 60*time.Millisecond, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
-			<-attemptCtx.Done()
-			// Wait past the 3ms runtime margin so Engine's 60ms evalCtx also expires.
-			time.Sleep(15 * time.Millisecond)
-			return provider.ModelResult{}, attemptCtx.Err()
+		synctest.Test(t, func(t *testing.T) {
+			// Force d.Evaluate to return AFTER ruleengine's evalCtx has also expired so
+			// Engine.Evaluate hits the errDialectEvalTimeout branch and wraps with
+			// FailedError{timeout, errors.Join(&celengine.EvalError{Reason: "timeout"}, dialectErr)}.
+			rt := newFakeAdapterRuntime(t, 60*time.Millisecond, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				<-attemptCtx.Done()
+				// Advance the fake clock past the 3ms runtime margin so Engine's 60ms evalCtx also expires.
+				time.Sleep(15 * time.Millisecond)
+				return provider.ModelResult{}, attemptCtx.Err()
+			})
+			eng := ruleengine.NewEngine()
+			require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
+				Runtime:     rt,
+				MaxEvalTime: 60 * time.Millisecond,
+			})))
+			require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+			c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+				Consumer: testSystemOneConsumer,
+				Name:     spec.ProbeEnvironmentName,
+			})
+			require.NoError(t, err)
+
+			_, err = eng.Evaluate(context.Background(), c, ruleengine.Input{
+				Payload: systemone.ProbeInput("slow unwind"),
+			}, ruleengine.Budget{})
+			require.Error(t, err)
+
+			var failedErr *ruleengine.FailedError
+			require.ErrorAs(t, err, &failedErr)
+			assert.Equal(t, celengine.ReasonTimeout, failedErr.Reason)
+
+			var celEvalErr *celengine.EvalError
+			require.ErrorAs(t, err, &celEvalErr, "expected outer Engine timeout wrap containing *celengine.EvalError")
+			assert.Equal(t, celengine.ReasonTimeout, celEvalErr.Reason)
+
+			eval, ok := systemone.EvaluationFrom(err)
+			require.True(t, ok, "EvaluationFrom must reach *Evaluation inside FailedError{timeout, Join(EvalError{timeout}, dialectErr)}")
+			assert.Equal(t, systemone.ClassFailed, eval.Class)
+			assert.Equal(t, string(provider.FailTimeout), eval.Reason,
+				"outer and inner timeout reasons must agree via latched runtime sentinel")
 		})
-		eng := ruleengine.NewEngine()
-		require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
-			Runtime:     rt,
-			MaxEvalTime: 60 * time.Millisecond,
-		})))
-		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
-		c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-			Consumer: testSystemOneConsumer,
-			Name:     spec.ProbeEnvironmentName,
-		})
-		require.NoError(t, err)
-
-		_, err = eng.Evaluate(context.Background(), c, ruleengine.Input{
-			Payload: systemone.ProbeInput("slow unwind"),
-		}, ruleengine.Budget{})
-		require.Error(t, err)
-
-		var failedErr *ruleengine.FailedError
-		require.ErrorAs(t, err, &failedErr)
-		assert.Equal(t, celengine.ReasonTimeout, failedErr.Reason)
-
-		var celEvalErr *celengine.EvalError
-		require.ErrorAs(t, err, &celEvalErr, "expected outer Engine timeout wrap containing *celengine.EvalError")
-		assert.Equal(t, celengine.ReasonTimeout, celEvalErr.Reason)
-
-		eval, ok := systemone.EvaluationFrom(err)
-		require.True(t, ok, "EvaluationFrom must reach *Evaluation inside FailedError{timeout, Join(EvalError{timeout}, dialectErr)}")
-		assert.Equal(t, systemone.ClassFailed, eval.Class)
-		assert.Equal(t, string(provider.FailTimeout), eval.Reason,
-			"outer and inner timeout reasons must agree via latched runtime sentinel")
 	})
 
 	t.Run("wrap_shape_3_budget_tracker_exhaustion_wraps_err_budget_exhausted_and_evaluation", func(t *testing.T) {
-		rt := newFakeAdapterRuntime(t, 3*time.Second, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
-			<-attemptCtx.Done()
-			return provider.ModelResult{}, attemptCtx.Err()
-		})
-		eng := ruleengine.NewEngine()
-		require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
-			Runtime:     rt,
-			MaxEvalTime: 3 * time.Second,
-		})))
-		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
-		c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-			Consumer: testSystemOneConsumer,
-			Name:     spec.ProbeEnvironmentName,
-		})
-		require.NoError(t, err)
+		synctest.Test(t, func(t *testing.T) {
+			rt := newFakeAdapterRuntime(t, 3*time.Second, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				<-attemptCtx.Done()
+				return provider.ModelResult{}, attemptCtx.Err()
+			})
+			eng := ruleengine.NewEngine()
+			require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
+				Runtime:     rt,
+				MaxEvalTime: 3 * time.Second,
+			})))
+			require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+			c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+				Consumer: testSystemOneConsumer,
+				Name:     spec.ProbeEnvironmentName,
+			})
+			require.NoError(t, err)
 
-		tracker := ruleengine.NewBudgetTracker(80 * time.Millisecond)
-		_, err = eng.Evaluate(context.Background(), c, ruleengine.Input{
-			Payload: systemone.ProbeInput("budget bound"),
-		}, ruleengine.Budget{Tracker: tracker})
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ruleengine.ErrBudgetExhausted)
+			tracker := ruleengine.NewBudgetTracker(80 * time.Millisecond)
+			_, err = eng.Evaluate(context.Background(), c, ruleengine.Input{
+				Payload: systemone.ProbeInput("budget bound"),
+			}, ruleengine.Budget{Tracker: tracker})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ruleengine.ErrBudgetExhausted)
 
-		eval, ok := systemone.EvaluationFrom(err)
-		require.True(t, ok, "EvaluationFrom must reach *Evaluation inside fmt.Errorf(\"%%w: %%w\", ErrBudgetExhausted, dialectErr)")
-		assert.Equal(t, systemone.ClassFailed, eval.Class)
-		assert.Equal(t, string(provider.FailTimeout), eval.Reason)
+			eval, ok := systemone.EvaluationFrom(err)
+			require.True(t, ok, "EvaluationFrom must reach *Evaluation inside fmt.Errorf(\"%%w: %%w\", ErrBudgetExhausted, dialectErr)")
+			assert.Equal(t, systemone.ClassFailed, eval.Class)
+			assert.Equal(t, string(provider.FailTimeout), eval.Reason)
+		})
 	})
 }
 
