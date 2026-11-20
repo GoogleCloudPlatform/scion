@@ -28,11 +28,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -409,4 +411,24 @@ func TestGroupDefaultAgentWake_TopicLinkedElsewhereIsIgnored(t *testing.T) {
 		"a topic linked to another conversation must not supply the default agent")
 	require.Nil(t, resp.DefaultAgentResult)
 	requireNoAgentWoken(t, resp)
+}
+
+func TestGroupDefaultAgentWake_UserSuspendedDefaultReportsPhaseAndReason(t *testing.T) {
+	f := newGroupWakeFixture(t)
+	ctx := context.Background()
+	require.NoError(t, f.s.UpdateAgentStatus(ctx, f.target.ID, store.AgentStatusUpdate{
+		Phase:         string(state.PhaseSuspended),
+		SuspendReason: string(state.SuspendReasonUser),
+	}))
+	f.setDefault(t, f.target.ID)
+	f.dispatcher.returnErr = errors.New("broker: agent not running")
+
+	resp := f.post(t, "status update for user-suspended default", "")
+	requireNoAgentWoken(t, resp)
+	require.NotNil(t, resp.DefaultAgentResult)
+	require.Equal(t, f.target.Slug, resp.DefaultAgentResult.Slug)
+	require.Equal(t, "error", resp.DefaultAgentResult.Status)
+	require.Equal(t, "suspended", resp.DefaultAgentResult.AgentPhase)
+	require.Equal(t, "user", resp.DefaultAgentResult.SuspendReason)
+	require.NotEmpty(t, resp.DefaultAgentResult.Error)
 }

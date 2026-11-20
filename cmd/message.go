@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -602,6 +603,7 @@ func agentMessageSendError(agentName string, err error) error {
 func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, notify bool, wake bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
+		warnInvalidBodyConvRefs(message)
 	}
 
 	// Resolve sender identity for structured messages
@@ -687,6 +689,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, message string, interrupt, wake bool, attachments []string) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
+		warnInvalidBodyConvRefs(message)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -765,6 +768,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, message string, interrupt bool, wake bool, attachments []string) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
+		warnInvalidBodyConvRefs(message)
 	}
 
 	projectID, err := GetProjectID(hubCtx)
@@ -996,6 +1000,7 @@ func printBroadcastAccepted(resp *hubclient.BroadcastResponse) {
 func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message string, urgent bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
+		warnInvalidBodyConvRefs(message)
 	}
 
 	// Validate --channel against registered channels
@@ -1167,6 +1172,16 @@ func parseRecipientArg(recipient string) (recipientArg, error) {
 	} else if strings.Contains(recipient, "@") && !strings.HasPrefix(recipient, "agent:") {
 		// Legacy bare email — treat as user recipient for backward compat.
 		return recipientArg{userRecipient: "user:" + recipient}, nil
+	} else if len(recipient) == 36 {
+		if id, err := uuid.Parse(recipient); err == nil {
+			canonical := id.String()
+			return recipientArg{convRef: &messaging.Reference{
+				Kind:  messaging.RefConversation,
+				Value: canonical,
+				Raw:   "conv:" + canonical,
+			}}, nil
+		}
+		return recipientArg{agentName: api.Slugify(strings.TrimPrefix(recipient, "agent:"))}, nil
 	} else {
 		// Strip optional "agent:" prefix for backwards compatibility
 		return recipientArg{agentName: api.Slugify(strings.TrimPrefix(recipient, "agent:"))}, nil
@@ -1836,14 +1851,123 @@ func printNoAgentWoken(result *hubclient.OutboundMessageResult) {
 		return
 	}
 	if d := result.DefaultAgentResult; d != nil {
+		reason := defaultAgentNotWokenReason(d)
 		if d.Slug == "" {
-			fmt.Fprintf(os.Stderr, "No agent was woken: the default agent could not be reached (%s).\n", d.Status)
+			fmt.Fprintf(os.Stderr, "No agent was woken: the default agent could not be reached (%s).\n", reason)
 		} else {
-			fmt.Fprintf(os.Stderr, "No agent was woken: default agent @%s was not reached (%s).\n", d.Slug, d.Status)
+			fmt.Fprintf(os.Stderr, "No agent was woken: default agent @%s was not reached (%s).\n", d.Slug, reason)
 		}
 		return
 	}
 	fmt.Fprintln(os.Stderr, "No agent was woken by this post.")
+}
+
+func defaultAgentNotWokenReason(d *messages.MentionResult) string {
+	var stateDesc string
+	if d.AgentPhase == "suspended" && d.SuspendReason != "" {
+		stateDesc = "suspended by " + d.SuspendReason
+	} else if d.AgentPhase != "" {
+		stateDesc = "state: " + d.AgentPhase
+	}
+
+	switch {
+	case stateDesc != "" && d.Error != "":
+		if d.Status != "" && d.Status != "error" {
+			return fmt.Sprintf("%s; %s: %s", stateDesc, d.Status, d.Error)
+		}
+		return fmt.Sprintf("%s; %s", stateDesc, d.Error)
+	case stateDesc != "":
+		if d.Status != "" && d.Status != "error" {
+			return fmt.Sprintf("%s; %s", d.Status, stateDesc)
+		}
+		return stateDesc
+	case d.Error != "":
+		if d.Status != "" {
+			return fmt.Sprintf("%s: %s", d.Status, d.Error)
+		}
+		return d.Error
+	default:
+		return d.Status
+	}
+}
+
+// warnInvalidBodyConvRefs emits a stderr warning at send time when the message
+// body contains a truncated or malformed conv:<id> reference (for example
+// conv:69e36cbf or conv:69e36cbf... in a brief), so the sender sees the mistake
+// before the recipient fails to resolve it (ptone/scion#8469).
+func warnInvalidBodyConvRefs(text string) {
+	if isJSONOutput() {
+		return
+	}
+	for _, bad := range findInvalidBodyConvRefs(text) {
+		fmt.Fprintf(os.Stderr, "Warning: message body contains truncated or invalid conversation reference %q; use a full 36-character UUID (conv:<uuid>) so recipients can resolve it.\n", bad)
+	}
+}
+
+func findInvalidBodyConvRefs(text string) []string {
+	const prefix = "conv:"
+	var out []string
+	seen := make(map[string]bool)
+	offset := 0
+	for offset < len(text) {
+		rel := strings.Index(text[offset:], prefix)
+		if rel < 0 {
+			break
+		}
+		idx := offset + rel
+		if idx > 0 {
+			prev := text[idx-1]
+			if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') ||
+				(prev >= '0' && prev <= '9') || prev == '/' || prev == ':' ||
+				prev == '_' || prev == '-' || prev == '.' {
+				offset = idx + len(prefix)
+				continue
+			}
+		}
+		after := text[idx+len(prefix):]
+		if after == "" {
+			break
+		}
+		first := after[0]
+		if first == '<' || first == '$' || first == '{' || first == '[' ||
+			first == '"' || first == '\'' || first == '`' || first == ')' ||
+			first == ']' || first == ',' || first == ';' ||
+			first == ' ' || first == '\t' || first == '\n' || first == '\r' {
+			offset = idx + len(prefix)
+			continue
+		}
+		end := 0
+		for end < len(after) {
+			c := after[end]
+			if c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+				c == ')' || c == ']' || c == '}' || c == '>' ||
+				c == '`' || c == '"' || c == '\'' || c == ',' || c == ';' {
+				break
+			}
+			end++
+		}
+		tok := after[:end]
+		offset = idx + len(prefix) + end
+
+		hasEllipsis := strings.HasSuffix(tok, "...") || strings.HasSuffix(tok, "…")
+		if !hasEllipsis {
+			tok = strings.TrimRight(tok, ".!?")
+		}
+		if tok == "" {
+			continue
+		}
+		if !hasEllipsis && len(tok) == 36 {
+			if _, err := uuid.Parse(tok); err == nil {
+				continue
+			}
+		}
+		candidate := prefix + tok
+		if !seen[candidate] {
+			seen[candidate] = true
+			out = append(out, candidate)
+		}
+	}
+	return out
 }
 
 // printMentionResults prints one line per mention result to stderr,

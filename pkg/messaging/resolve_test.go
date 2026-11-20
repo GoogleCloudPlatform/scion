@@ -228,6 +228,12 @@ func TestParseReference_ConvID_InvalidUUID(t *testing.T) {
 	_, err := ParseReference("conv:not-a-uuid")
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, store.ErrInvalidInput))
+	assert.Contains(t, err.Error(), "36-character UUID")
+	assert.Contains(t, err.Error(), "conv:<uuid>")
+
+	_, shortErr := ParseReference("conv:69e36cbf")
+	require.Error(t, shortErr)
+	assert.Contains(t, shortErr.Error(), "36-character UUID")
 }
 
 func TestParseReference_AgentSlug(t *testing.T) {
@@ -283,12 +289,14 @@ func TestParseReference_InvalidFormat(t *testing.T) {
 		"123",
 		"conversation:123",
 		"!invalid",
+		"69e36cbf-69ac-4782-8ec1-e0604abeb687",
 	}
 	for _, input := range tests {
 		t.Run(input, func(t *testing.T) {
 			_, err := ParseReference(input)
 			require.Error(t, err)
 			assert.True(t, errors.Is(err, store.ErrInvalidInput), "expected ErrInvalidInput for %q, got: %v", input, err)
+			assert.Contains(t, err.Error(), "conv:<uuid>", "invalid format error should hint conv:<uuid> for %q", input)
 		})
 	}
 }

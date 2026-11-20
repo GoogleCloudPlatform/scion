@@ -69,7 +69,7 @@ func ParseReference(raw string) (*Reference, error) {
 	case strings.HasPrefix(raw, "conv:"):
 		id := strings.TrimPrefix(raw, "conv:")
 		if _, err := uuid.Parse(id); err != nil {
-			return nil, fmt.Errorf("invalid conversation ID in %q: %w", raw, store.ErrInvalidInput)
+			return nil, fmt.Errorf("invalid conversation ID in %q (expected full 36-character UUID, conv:<uuid>): %w", raw, store.ErrInvalidInput)
 		}
 		return &Reference{Kind: RefConversation, Value: id, Raw: raw}, nil
 
@@ -96,7 +96,7 @@ func ParseReference(raw string) (*Reference, error) {
 		return &Reference{Kind: RefThread, Value: value, Raw: raw}, nil
 
 	default:
-		return nil, fmt.Errorf("unrecognized reference format %q: %w", raw, store.ErrInvalidInput)
+		return nil, fmt.Errorf("unrecognized reference format %q (expected conv:<uuid>, @<agent>, @<email>, or #<thread>): %w", raw, store.ErrInvalidInput)
 	}
 }
 

@@ -65,9 +65,13 @@ type MentionResult struct {
 	Error  string `json:"error,omitempty"` // human-readable reason on failure
 
 	// AgentPhase is the mentioned agent's lifecycle phase at delivery time
-	// (e.g. "running", "stopped"), set when Status is "delivered". Additive
-	// field: old clients that decode this struct simply ignore it.
+	// (e.g. "running", "stopped", "suspended"). Additive field: old clients
+	// that decode this struct simply ignore it.
 	AgentPhase string `json:"agent_phase,omitempty"`
+
+	// SuspendReason records why the target agent was suspended (e.g. "user",
+	// "idle", "stalled") when AgentPhase is "suspended".
+	SuspendReason string `json:"suspend_reason,omitempty"`
 }
 
 // ExtractMentions scans message text for @name tokens and returns a deduplicated

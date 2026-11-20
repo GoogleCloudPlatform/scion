@@ -115,6 +115,49 @@ func TestSendMessageViaConversation_NoAgentWokenNoticeLookupError(t *testing.T) 
 	assert.Contains(t, stderr, "No agent was woken: the default agent could not be reached (error).")
 }
 
+func TestSendMessageViaConversation_NoAgentWokenIncludesAgentState(t *testing.T) {
+	t.Run("suspended_by_user_with_error", func(t *testing.T) {
+		hubCtx := newNoAgentWokenHub(t, "proj-no-agent-woken-susp-user", map[string]interface{}{
+			"no_agent_woken": true,
+			"default_agent_result": map[string]string{
+				"slug":           "lead",
+				"status":         "error",
+				"agent_phase":    "suspended",
+				"suspend_reason": "user",
+				"error":          "message persisted but the target agent has no running container",
+			},
+		})
+		_, stderr := sendGroupPostForNotice(t, hubCtx)
+		assert.Contains(t, stderr, "No agent was woken: default agent @lead was not reached (suspended by user; message persisted but the target agent has no running container).")
+	})
+
+	t.Run("stopped_phase_without_error_detail", func(t *testing.T) {
+		hubCtx := newNoAgentWokenHub(t, "proj-no-agent-woken-stopped", map[string]interface{}{
+			"no_agent_woken": true,
+			"default_agent_result": map[string]string{
+				"slug":        "lead",
+				"status":      "error",
+				"agent_phase": "stopped",
+			},
+		})
+		_, stderr := sendGroupPostForNotice(t, hubCtx)
+		assert.Contains(t, stderr, "No agent was woken: default agent @lead was not reached (state: stopped).")
+	})
+
+	t.Run("unreachable_with_error_detail", func(t *testing.T) {
+		hubCtx := newNoAgentWokenHub(t, "proj-no-agent-woken-unreach", map[string]interface{}{
+			"no_agent_woken": true,
+			"default_agent_result": map[string]string{
+				"slug":   "lead",
+				"status": "unreachable",
+				"error":  "the conversation's default agent no longer exists",
+			},
+		})
+		_, stderr := sendGroupPostForNotice(t, hubCtx)
+		assert.Contains(t, stderr, "No agent was woken: default agent @lead was not reached (unreachable: the conversation's default agent no longer exists).")
+	})
+}
+
 // The user-recipient send path (--thread-id into a thread) prints the same
 // notice.
 func TestSendOutboundMessageViaHub_NoAgentWokenNotice(t *testing.T) {
