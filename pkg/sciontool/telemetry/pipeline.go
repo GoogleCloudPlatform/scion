@@ -319,6 +319,17 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		}
 	} else {
 		switch {
+		case p.config.CloudEnabled && p.config.isGCPBlockedWithoutCredentials():
+			// Hub-wide GCP telemetry may be enabled on an agent running in
+			// metadata mode block without an assigned service account or
+			// telemetry key file. Disable cloud export cleanly and keep the
+			// local pipeline (and hub-reported counts) running instead of
+			// failing Start or logging repeated ADC auth errors (ptone/scion#8494).
+			p.config.CloudEnabled = false
+			slog.Info("telemetry cloud export disabled: GCP metadata mode is block and no telemetry credentials file is present; assign a service account (--service-account) or configure the scion-telemetry-gcp-credentials secret (SCION_OTEL_GCP_CREDENTIALS)",
+				"metadata_mode", p.config.MetadataMode,
+				"provider", p.config.CloudProvider,
+			)
 		case p.config.CloudEnabled && p.config.CloudEnabledExplicit:
 			// Cloud export was asked for explicitly but has nowhere to go:
 			// a real misconfiguration, so the pipeline refuses to start.

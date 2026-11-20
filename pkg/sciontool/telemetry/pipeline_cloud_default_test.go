@@ -5,7 +5,9 @@ Copyright 2026 The Scion Authors.
 package telemetry
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -140,5 +142,69 @@ func TestPipeline_ExplicitCloudWithoutDestination_Fails(t *testing.T) {
 	}
 	if got := p.DeliveryState(); got != "failed" {
 		t.Errorf("DeliveryState() = %q, want failed", got)
+	}
+}
+
+// TestPipeline_GCPBlockModeWithoutCredentials_RunsLocallyAndLogsOnce verifies
+// that when hub-wide GCP telemetry is enabled explicitly on an agent running in
+// metadata mode block with no telemetry credentials file, cloud export is
+// turned off cleanly with one explanatory log line pointing to the two
+// remedies, while the local pipeline still runs (ptone/scion#8494).
+func TestPipeline_GCPBlockModeWithoutCredentials_RunsLocallyAndLogsOnce(t *testing.T) {
+	cloudDefaultEnv(t, "true")
+	t.Setenv(EnvCloudProvider, "gcp")
+	t.Setenv(EnvProjectID, "my-project")
+	t.Setenv(EnvMetadataMode, "block")
+
+	var buf bytes.Buffer
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(origLogger) })
+
+	p := New()
+	if p == nil {
+		t.Fatal("New() = nil, want a pipeline")
+	}
+	if p.Config().IsCloudConfigured() {
+		t.Fatalf("precondition: IsCloudConfigured() = true, want false in block mode without credentials")
+	}
+
+	ctx := context.Background()
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Start() = %v, want nil (local pipeline must remain running)", err)
+	}
+	if !p.IsRunning() {
+		t.Fatal("pipeline not running after Start")
+	}
+	if p.Config().CloudEnabled {
+		t.Error("CloudEnabled still true after Start; intake would reject batches")
+	}
+	if p.exporter != nil {
+		t.Error("expected nil cloud exporter in block mode without credentials")
+	}
+	if got := p.DeliveryState(); got != "running" {
+		t.Errorf("DeliveryState() = %q, want running", got)
+	}
+
+	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := p.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop() = %v", err)
+	}
+
+	var matched []string
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if strings.Contains(line, "telemetry cloud export disabled") {
+			matched = append(matched, line)
+		}
+	}
+	if len(matched) != 1 {
+		t.Fatalf("expected exactly 1 cloud-export-disabled log line, got %d:\n%s", len(matched), buf.String())
+	}
+	line := matched[0]
+	for _, want := range []string{"block", "service account", "scion-telemetry-gcp-credentials"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log line %q missing expected guidance %q", line, want)
+		}
 	}
 }
