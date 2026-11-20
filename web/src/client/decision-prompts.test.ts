@@ -484,7 +484,14 @@ describe('isOpenDecision, isClosedUnanswered, and isTerminalDecision', () => {
     });
     const directView = decided();
     const replacedView = view({ status: 'replaced' });
-    const withdrawnView = view({ status: 'withdrawn' });
+    const withdrawnView = view({
+      status: 'withdrawn',
+      withdrawn: {
+        at: '2026-11-16T09:12:00Z',
+        reason: 'CI found a regression',
+        byName: 'bot',
+      },
+    });
     const dismissedView = view({
       status: 'dismissed',
       dismissed: {
@@ -520,7 +527,16 @@ describe('isOpenDecision, isClosedUnanswered, and isTerminalDecision', () => {
     expect(isTerminalDecision(withdrawnView)).toBe(true);
     expect(isTerminalDecision(dismissedView)).toBe(true);
 
-    // Dismissed is terminal (rank 3) and never reverts to pending or decided.
+    // Withdrawn and dismissed are terminal (rank 3) and never revert to pending or decided.
+    expect(newerDecisionView(pendingView, withdrawnView)).toBe(withdrawnView);
+    expect(newerDecisionView(interpView, withdrawnView)).toBe(withdrawnView);
+    expect(newerDecisionView(directView, withdrawnView)).toBe(withdrawnView);
+    expect(newerDecisionView(withdrawnView, pendingView)).toBe(withdrawnView);
+    expect(newerDecisionView(withdrawnView, interpView)).toBe(withdrawnView);
+    expect(newerDecisionView(withdrawnView, directView)).toBe(withdrawnView);
+    expect(patchDecisions([withdrawnView], [pendingView])).toBeInstanceOf(Array);
+    expect(patchDecisions([withdrawnView], [pendingView])[0]).toBe(withdrawnView);
+
     expect(newerDecisionView(pendingView, dismissedView)).toBe(dismissedView);
     expect(newerDecisionView(directView, dismissedView)).toBe(dismissedView);
     expect(newerDecisionView(dismissedView, pendingView)).toBe(dismissedView);
@@ -549,6 +565,32 @@ describe('isOpenDecision, isClosedUnanswered, and isTerminalDecision', () => {
       replacedBy: { rowId: 'r2', messageId: 'm2', version: 2, at: '2026-11-16T09:15:00Z' },
     });
     expect(actionableReason(dismissedReasked, 'u1')).toBe('dismissed');
+  });
+
+  it('returns the withdrawn view and code on 409 withdrawn', async () => {
+    const w = view({
+      status: 'withdrawn',
+      withdrawn: { at: '2026-11-16T09:12:00Z', reason: 'Moved to Monday', byName: 'bot' },
+    });
+    apiFetch.mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: () =>
+        Promise.resolve({
+          error: {
+            code: 'withdrawn',
+            message: 'decision D1 v1 was withdrawn',
+            details: { decision: w },
+          },
+        }),
+    } as unknown as Response);
+    const out = await answerDecision('r1', 'y', 'k');
+    expect(out).toMatchObject({
+      ok: false,
+      status: 409,
+      code: 'withdrawn',
+      decision: w,
+    });
   });
 });
 

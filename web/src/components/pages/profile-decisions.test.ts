@@ -1193,4 +1193,75 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(card).not.toBeNull();
     expect(card?.querySelector('.avatar')?.textContent?.trim()).toBe('?');
   });
+
+  it('renders withdrawn sibling rows on partially open profile prompts and drops fully withdrawn prompts live', async () => {
+    setFeatureFlag(DECISIONS_FLAG, true);
+
+    const openRow = makeDecision({ rowId: 'r-open', messageId: 'm-prof-set', key: 'D234' });
+    const wdRow = makeDecision({
+      rowId: 'r-wd',
+      messageId: 'm-prof-set',
+      key: '17',
+      status: 'withdrawn',
+      withdrawn: {
+        at: '2026-11-15T07:10:00Z',
+        reason: 'Resolved offline.',
+        byName: 'release-bot',
+      },
+    });
+    const setPrompt = makePrompt({
+      project: PROJ_SCION,
+      promptMessageId: 'm-prof-set',
+      answerMode: 'set',
+      waitingOnYou: true,
+      decisions: [openRow, wdRow],
+    });
+
+    let liveWithdrawn = false;
+    handleDecisionsFetch = (): Promise<Response> =>
+      jsonResponse({
+        counts: { waitingOnYou: liveWithdrawn ? 0 : 1, waitingOnOthers: 0 },
+        prompts: liveWithdrawn ? [] : [setPrompt],
+        agents: [],
+        answerers: [],
+        conversations: [],
+        projects: [PROJ_SCION],
+        truncatedProjects: false,
+      });
+
+    const el = await mount('/profile/decisions');
+    const root = el.shadowRoot!;
+    const card = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="m-prof-set"] scion-chat-decisions'
+    )!;
+    expect(card).not.toBeNull();
+    await card.updateComplete;
+
+    const wdRowEl = card.shadowRoot!.querySelector('.row[data-row="r-wd"]')!;
+    expect(wdRowEl.classList.contains('withdrawn')).toBe(true);
+    expect(wdRowEl.textContent).toContain('No longer needed');
+    expect(wdRowEl.textContent).toContain('Resolved offline.');
+
+    liveWithdrawn = true;
+    stateManager.dispatchEvent(
+      new CustomEvent('decision-updated', {
+        detail: {
+          data: {
+            projectId: PROJ_SCION.id,
+            messageId: 'm-prof-set',
+            decision: {
+              ...openRow,
+              status: 'withdrawn',
+              withdrawn: { at: '2026-11-15T07:12:00Z', byName: 'release-bot' },
+            },
+          },
+        },
+      })
+    );
+    await el.updateComplete;
+
+    expect(root.querySelector('[data-prompt-card="m-prof-set"]')).toBeNull();
+    expect(root.querySelector('[data-waiting-others]')).toBeNull();
+    expect(root.querySelector('[data-waiting-badge]')).toBeNull();
+  });
 });

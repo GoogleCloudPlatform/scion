@@ -3008,4 +3008,83 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('[data-prompt-card="m-gone"]')).toBeNull();
     expect(showToast).toHaveBeenCalledWith('nc-x is gone; nothing was sent.', 'neutral');
   });
+
+  it('renders withdrawn sibling rows on partially open prompts and drops fully withdrawn prompts live without moving them to Waiting on others', async () => {
+    setFeatureFlag(DECISIONS_FLAG, true);
+
+    const openRow = makeDecision({ rowId: 'r-open', messageId: 'm-set', key: 'D234' });
+    const wdRow = makeDecision({
+      rowId: 'r-wd',
+      messageId: 'm-set',
+      key: '17',
+      status: 'withdrawn',
+      withdrawn: {
+        at: '2026-11-13T15:52:00Z',
+        reason: 'Settled in review.',
+        byName: 'release-bot',
+      },
+    });
+    const setPrompt = makePrompt({
+      promptMessageId: 'm-set',
+      answerMode: 'set',
+      waitingOnYou: true,
+      decisions: [openRow, wdRow],
+    });
+
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [setPrompt],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+      {
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+    const card = root.querySelector<ScionChatDecisions>(
+      '[data-prompt-card="m-set"] scion-chat-decisions'
+    )!;
+    expect(card).not.toBeNull();
+    await card.updateComplete;
+
+    const wdRowEl = card.shadowRoot!.querySelector('.row[data-row="r-wd"]')!;
+    expect(wdRowEl.classList.contains('withdrawn')).toBe(true);
+    expect(wdRowEl.textContent).toContain('No longer needed');
+    expect(wdRowEl.textContent).toContain('Settled in review.');
+
+    // Live SSE patch withdraws the remaining open row before the 60ms refresh completes.
+    stateManager.dispatchEvent(
+      new CustomEvent('decision-updated', {
+        detail: {
+          data: {
+            projectId: 'p-1',
+            messageId: 'm-set',
+            decision: {
+              ...openRow,
+              status: 'withdrawn',
+              withdrawn: { at: '2026-11-13T15:55:00Z', byName: 'release-bot' },
+            },
+          },
+        },
+      })
+    );
+    await el.updateComplete;
+
+    // Immediately leaves Waiting on you and does NOT appear in Waiting on others.
+    expect(root.querySelector('[data-prompt-card="m-set"]')).toBeNull();
+    expect(root.querySelector('[data-waiting-others]')).toBeNull();
+    expect(root.querySelector('[data-waiting-badge]')).toBeNull();
+
+    await settle(el, 90);
+    expect(root.querySelector('[data-empty="pending"]')).not.toBeNull();
+  });
 });
