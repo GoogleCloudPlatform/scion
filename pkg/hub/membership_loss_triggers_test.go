@@ -162,10 +162,13 @@ func groupFixture(t *testing.T, f *msFixture) string {
 func TestMembershipLossTrigger_GroupMemberRemove(t *testing.T) {
 	f := newMSFixture(t, "trig-groupmember")
 	groupID := groupFixture(t, f)
-	f.srv.membershipService.onMembershipLoss = nil
+	var kicked int
+	f.srv.membershipService.onMembershipLoss = func() { kicked++ }
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/groups/"+groupID+"/members/user/"+f.userID, nil)
 	require.Less(t, rec.Code, 300, rec.Body.String())
+	assert.Equal(t, 1, kicked, "group member removal should trigger onMembershipLoss hook")
 	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmitted)
+	requireCheck(t, f.s, f.userID, store.MembershipLossTriggerGroupChange)
 	f.requireTreeHeldAndRefused()
 }
 
@@ -173,9 +176,13 @@ func TestMembershipLossTrigger_GroupMemberRemove(t *testing.T) {
 func TestMembershipLossTrigger_GroupDelete(t *testing.T) {
 	f := newMSFixture(t, "trig-groupdelete")
 	groupID := groupFixture(t, f)
+	var kicked int
+	f.srv.membershipService.onMembershipLoss = func() { kicked++ }
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/groups/"+groupID, nil)
 	require.Less(t, rec.Code, 300, rec.Body.String())
+	assert.Equal(t, 1, kicked, "group delete should trigger onMembershipLoss hook")
 	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmitted)
+	requireCheck(t, f.s, f.userID, store.MembershipLossTriggerGroupChange)
 	f.requireTreeHeldAndRefused()
 }
 
