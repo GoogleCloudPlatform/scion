@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -198,5 +199,47 @@ func TestCreateAgent_HostedEnvGatherRefusesHarnessConfigEnvBeforeExpanding(t *te
 		if code == hostedguard.ErrorCode {
 			t.Fatalf("workstation broker refused: %s", w.Body.String())
 		}
+	}
+}
+
+// On a hosted broker a member-written harness config cannot make env-gather
+// read a broker env var by name through auth metadata
+// (required_files[].alternative_env_keys): the answer is the same whether
+// or not the named variable is set on the broker. A workstation broker still
+// accepts a process env var there (PR #719's ADC path).
+func TestCreateAgent_HostedEnvGatherIgnoresBrokerEnvForAuthAlternatives(t *testing.T) {
+	const probe = "P3_ALT_PROBE_VAR"
+	hcYAML := "harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n" +
+		strings.Replace(claudeAuthBlock, `alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]`, `alternative_env_keys: ["`+probe+`"]`, 1)
+	settings := "schema_version: \"1\"\nprofiles:\n  default:\n    runtime: mock\n"
+	create := func(t *testing.T, workstation bool) *httptest.ResponseRecorder {
+		t.Helper()
+		srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude", hcYAML, settings)
+		srv.config.WorkstationMode = workstation
+		body := `{"name": "alt-probe", "id": "agent-uuid-alt-probe", "gatherEnv": true, "projectPath": "` + projectDir + `",
+			"resolvedEnv": {"GOOGLE_CLOUD_PROJECT": "p", "GOOGLE_CLOUD_REGION": "r"},
+			"config": {"harnessConfig": "claude", "profile": "default"}}`
+		return postAgentRequest(t, srv, "/api/v1/agents", body)
+	}
+	answers := map[bool]string{}
+	for _, set := range []bool{true, false} {
+		if set {
+			t.Setenv(probe, "/broker/only/path")
+		} else {
+			t.Setenv(probe, "")
+			_ = os.Unsetenv(probe)
+		}
+		w := create(t, false)
+		answers[set] = strconv.Itoa(w.Code) + " " + w.Body.String()
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("hosted, var set=%v: status = %d, want 202 (gcloud-adc still needed): %s", set, w.Code, w.Body.String())
+		}
+	}
+	if answers[true] != answers[false] {
+		t.Errorf("the answer depends on the broker env:\nset:   %s\nunset: %s", answers[true], answers[false])
+	}
+	t.Setenv(probe, "/broker/only/path")
+	if w := create(t, true); w.Code == http.StatusAccepted && strings.Contains(w.Body.String(), "gcloud-adc") {
+		t.Errorf("workstation broker did not accept the process env var: %s", w.Body.String())
 	}
 }

@@ -7126,10 +7126,13 @@ func (s *Server) extractRequiredEnvKeysChecked(req CreateAgentRequest, hydratedT
 			for _, as := range authSecrets {
 				if _, ok := fileSecrets[as.Key]; !ok {
 					// Check if any alternative env keys satisfy this requirement
-					// via resolved env, inline config env, or process env (the
-					// latter covers workstation mode where PR #719 sets
-					// GOOGLE_APPLICATION_CREDENTIALS at startup).
-					if !altEnvKeySatisfied(req.ResolvedEnv, as.AlternativeEnvKeys) {
+					// via resolved env, inline config env, or, on a
+					// workstation broker only, process env (PR #719 sets
+					// GOOGLE_APPLICATION_CREDENTIALS at startup). A hosted
+					// broker's launch never reads its own env for auth
+					// (GatherAuthWithEnv in broker mode), and a member-written
+					// harness config must not make it read env by name.
+					if !altEnvKeySatisfied(req.ResolvedEnv, as.AlternativeEnvKeys, s.config.WorkstationMode) {
 						required[as.Key] = struct{}{}
 						secretInfo[as.Key] = api.SecretKeyInfo{
 							Description: as.Description,
@@ -7341,14 +7344,15 @@ func expandDirEnv(dirEnv map[string]string) map[string]string {
 }
 
 // altEnvKeySatisfied reports whether any of altKeys has a non-empty value in
-// resolvedEnv or, for names not refused for agents
-// (util.IsAgentRefusedHostEnvName), in this process's env.
-func altEnvKeySatisfied(resolvedEnv map[string]string, altKeys []string) bool {
+// resolvedEnv or, when processEnv is set (a workstation broker) and for names
+// not refused for agents (util.IsAgentRefusedHostEnvName), in this process's
+// env.
+func altEnvKeySatisfied(resolvedEnv map[string]string, altKeys []string, processEnv bool) bool {
 	for _, altKey := range altKeys {
 		if v, ok := resolvedEnv[altKey]; ok && v != "" {
 			return true
 		}
-		if util.IsAgentRefusedHostEnvName(altKey) {
+		if !processEnv || util.IsAgentRefusedHostEnvName(altKey) {
 			continue
 		}
 		if v := os.Getenv(altKey); v != "" {

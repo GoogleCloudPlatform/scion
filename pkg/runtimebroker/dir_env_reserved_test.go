@@ -54,18 +54,24 @@ func TestExpandDirEnvEntry_ReservedHostEnvIsNotResolved(t *testing.T) {
 func TestAltEnvKeySatisfied_RefusedHostEnvDoesNotSatisfy(t *testing.T) {
 	for _, name := range []string{"SCION_SERVER_SESSION_SECRET", "SESSION_SECRET", "SCION_DEV_TOKEN", "SCION_AUTH_TOKEN"} {
 		t.Setenv(name, "refused-host-value")
-		if altEnvKeySatisfied(nil, []string{name}) {
+		if altEnvKeySatisfied(nil, []string{name}, true) {
 			t.Errorf("%s in this process's env satisfied an auth requirement", name)
 		}
-		if !altEnvKeySatisfied(map[string]string{name: "resolved"}, []string{name}) {
+		if !altEnvKeySatisfied(map[string]string{name: "resolved"}, []string{name}, true) {
 			t.Errorf("%s in the resolved env did not satisfy an auth requirement", name)
 		}
 	}
 	t.Setenv("ORDINARY_CREDENTIAL_PATH", "/path")
-	if !altEnvKeySatisfied(nil, []string{"MISSING_VAR", "ORDINARY_CREDENTIAL_PATH"}) {
+	if !altEnvKeySatisfied(nil, []string{"MISSING_VAR", "ORDINARY_CREDENTIAL_PATH"}, true) {
 		t.Error("an ordinary host env var did not satisfy an auth requirement")
 	}
-	if altEnvKeySatisfied(nil, []string{"MISSING_VAR"}) {
+	if altEnvKeySatisfied(nil, []string{"ORDINARY_CREDENTIAL_PATH"}, false) {
+		t.Error("a hosted broker read its own env for an auth requirement")
+	}
+	if !altEnvKeySatisfied(map[string]string{"ORDINARY_CREDENTIAL_PATH": "/p"}, []string{"ORDINARY_CREDENTIAL_PATH"}, false) {
+		t.Error("the resolved env did not satisfy an auth requirement on a hosted broker")
+	}
+	if altEnvKeySatisfied(nil, []string{"MISSING_VAR"}, true) {
 		t.Error("an unset var satisfied an auth requirement")
 	}
 }
