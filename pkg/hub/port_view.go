@@ -330,7 +330,7 @@ func (s *Server) handlePortView(w http.ResponseWriter, r *http.Request) {
 	}
 	exposed := findExposedPort(agent.ExposedPorts, grant.Port)
 	if exposed == nil {
-		writePortNotExposed(w, r)
+		s.writePortNotExposed(w, r)
 		return
 	}
 	// The link without a trailing slash: GET and HEAD are answered with a

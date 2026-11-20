@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"html/template"
 	"io/fs"
 	"log"
@@ -390,12 +391,16 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
     <title>{{if .BrandTitle}}{{.BrandTitle}}{{else}}Scion{{end}}</title>
 
-    <!-- app-icons:start -- kept identical to web/index.html; see TestSPAShellAppIconTags. -->
+    <!-- app-icons:start -- kept identical to web/index.html when unbranded; see TestSPAShellAppIconTags. -->
+{{- if .HasCustomFavicon}}
+    <link rel="icon" href="{{.FaviconHref}}"{{if .FaviconType}} type="{{.FaviconType}}"{{end}} />
+{{- else}}
     <link rel="icon" href="/favicon.ico" sizes="32x32" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+{{- end}}
+    <link rel="apple-touch-icon" sizes="180x180" href="{{if .AppleTouchIconHref}}{{.AppleTouchIconHref}}{{else}}/apple-touch-icon.png{{end}}" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <meta name="theme-color" content="#1e293b" />
+    <meta name="theme-color" content="{{if .ThemeColor}}{{.ThemeColor}}{{else}}#1e293b{{end}}" />
     <!-- app-icons:end -->
 
     <!-- Preconnect to font CDNs for faster loading -->
@@ -581,6 +586,10 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
             visibility: hidden;
         }
     </style>
+{{- if .BrandingCSS}}
+    <style id="scion-branding-tokens">
+{{.BrandingCSS}}    </style>
+{{- end}}
 
     <!-- Theme detection script (runs before paint). It is the shell's only
          inline executable script, and it carries this response's script
@@ -606,44 +615,57 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
 </body>
 </html>{{end}}`
 
-// noAssetsPage is a self-contained HTML page served when the binary was built
-// without embedded web assets (e.g. via `go install`) and no --web-assets-dir
-// was provided. It requires no external resources so it renders correctly even
-// when the static asset routes return 404.
-var noAssetsPage = `<!DOCTYPE html>
+// renderNoAssetsPage returns a self-contained HTML page served when the binary
+// was built without embedded web assets and no --web-assets-dir was provided.
+// It requires no external resources so it renders correctly even when the
+// static asset routes return 404.
+func renderNoAssetsPage(b *config.ResolvedBranding) string {
+	b = brandOrDefault(b)
+	dark := b.Dark
+	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scion – Web UI Not Available</title>
+    <title>%s – Web UI Not Available</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0f172a; color: #e2e8f0;
+            background: %s; color: %s;
             display: flex; align-items: center; justify-content: center;
             min-height: 100vh; padding: 2rem;
         }
         .container {
             max-width: 540px; text-align: center;
         }
-        h1 { font-size: 1.5rem; margin-bottom: 1rem; color: #f1f5f9; }
-        p  { line-height: 1.6; margin-bottom: 1rem; color: #94a3b8; }
+        .brand-logo-wrap { display: block; }
+        .brand-logo {
+            max-height: 36px; max-width: 180px; width: auto; height: auto;
+            object-fit: contain; display: block; margin: 0 auto 1.25rem;
+        }
+        h1 { font-size: 1.5rem; margin-bottom: 1rem; color: %s; }
+        p  { line-height: 1.6; margin-bottom: 1rem; color: %s; }
         code {
-            background: #1e293b; padding: 0.15em 0.4em; border-radius: 4px;
-            font-size: 0.9em; color: #60a5fa;
+            background: %s; padding: 0.15em 0.4em; border-radius: 4px;
+            font-size: 0.9em; color: %s;
         }
         .hint {
-            margin-top: 1.5rem; padding: 1rem; background: #1e293b;
+            margin-top: 1.5rem; padding: 1rem; background: %s;
             border-radius: 8px; text-align: left; font-size: 0.9rem;
         }
         .hint p { margin-bottom: 0.5rem; }
         .hint p:last-child { margin-bottom: 0; }
+        .badge {
+            display: inline-block; margin-top: 1.5rem; padding: 0.25rem 0.75rem;
+            font-size: 0.75rem; font-weight: 500; color: %s;
+            border: 1px solid %s; border-radius: 9999px; background: %s;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Web UI Not Available</h1>
+        %s<h1>Web UI Not Available</h1>
         <p>This hub binary was built without embedded web assets.
            The Hub API is still fully operational.</p>
         <div class="hint">
@@ -651,15 +673,35 @@ var noAssetsPage = `<!DOCTYPE html>
             <p>1. Rebuild with assets: <code>make all</code> (or <code>make web &amp;&amp; make build</code>)</p>
             <p>2. Point to pre-built assets: <code>--web-assets-dir /path/to/dist/client</code></p>
         </div>
+        <span class="badge">%s</span>
     </div>
 </body>
-</html>`
+</html>`,
+		html.EscapeString(b.Name),
+		dark.Bg, dark.Text,
+		dark.Text,
+		dark.TextMuted,
+		dark.Surface, dark.Primary,
+		dark.Surface,
+		dark.Primary, dark.Border, dark.Surface,
+		brandLogoHTML(b),
+		html.EscapeString(brandBadgeText(b)),
+	)
+}
 
 // spaShellData holds the template data for the SPA shell.
 type spaShellData struct {
-	IsLoginPage  bool
-	IsInvitePage bool
-	BrandTitle   string
+	IsLoginPage        bool
+	IsInvitePage       bool
+	BrandTitle         string
+	HasCustomFavicon   bool
+	FaviconHref        string
+	FaviconType        string
+	AppleTouchIconHref string
+	ThemeColor         string
+	// BrandingCSS holds validated custom palette CSS rules injected into
+	// <style id="scion-branding-tokens"> in <head> for zero-FOUC first paint.
+	BrandingCSS template.CSS
 	// InitialData is safe-for-HTML JSON embedded in the __SCION_DATA__ script tag.
 	// It is typed as template.JS so html/template does not escape it further.
 	InitialData template.JS
@@ -1457,6 +1499,8 @@ func (ws *WebServer) registerRoutes() {
 	ws.mux.HandleFunc("/health", ws.handleHealthz)
 	ws.mux.Handle("/assets/", ws.staticHandler())
 	ws.mux.Handle("/shoelace/", ws.staticHandler())
+	ws.mux.HandleFunc("/brand/", ws.handleBrandAsset)
+	ws.mux.HandleFunc("/manifest.webmanifest", ws.handleWebManifest)
 	// Auth routes (no session auth required)
 	ws.mux.HandleFunc("/auth/login/", ws.handleOAuthLogin)
 	ws.mux.HandleFunc("/auth/callback/", ws.handleOAuthCallback)
@@ -1549,7 +1593,7 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = fmt.Fprint(w, noAssetsPage)
+		_, _ = fmt.Fprint(w, renderNoAssetsPage(ws.resolvedBranding()))
 		return
 	}
 
@@ -2088,7 +2132,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprint(w, noAssetsPage)
+			_, _ = fmt.Fprint(w, renderNoAssetsPage(ws.resolvedBranding()))
 			return
 		}
 
@@ -2103,12 +2147,31 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			return
 		}
 
+		branding := ws.resolvedBranding()
+		appleTouchHref := branding.AppleTouchIconURL
+		if appleTouchHref == "" {
+			appleTouchHref = "/apple-touch-icon.png"
+		}
+		themeColor := branding.ThemeColor
+		if themeColor == "" {
+			themeColor = config.DefaultBrandThemeColor
+		}
+		var brandingCSS template.CSS
+		if branding.HasCustomPalette && branding.CSSText != "" {
+			brandingCSS = template.CSS(branding.CSSText)
+		}
 		data := spaShellData{
-			IsLoginPage:    r.URL.Path == "/login",
-			IsInvitePage:   r.URL.Path == "/invite",
-			BrandTitle:     ws.resolvedBranding().Name,
-			ModulePreloads: ws.shellModulePreloads,
-			ScriptNonce:    nonce,
+			IsLoginPage:        r.URL.Path == "/login",
+			IsInvitePage:       r.URL.Path == "/invite",
+			BrandTitle:         branding.Name,
+			HasCustomFavicon:   branding.FaviconURL != "",
+			FaviconHref:        branding.FaviconURL,
+			FaviconType:        branding.FaviconMediaType,
+			AppleTouchIconHref: appleTouchHref,
+			ThemeColor:         themeColor,
+			BrandingCSS:        brandingCSS,
+			ModulePreloads:     ws.shellModulePreloads,
+			ScriptNonce:        nonce,
 		}
 		// Send the head first and flush it, so the browser starts fetching
 		// the entry and its preloaded chunks while the page data is
@@ -3086,6 +3149,8 @@ func isPublicRoute(path string) bool {
 	case strings.HasPrefix(path, "/assets/"):
 		return true
 	case strings.HasPrefix(path, "/shoelace/"):
+		return true
+	case strings.HasPrefix(path, "/brand/"):
 		return true
 	case strings.HasPrefix(path, "/auth/"):
 		return true

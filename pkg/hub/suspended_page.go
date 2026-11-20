@@ -21,17 +21,20 @@ import (
 	"html"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// suspendedPageHTML returns a self-contained HTML page for suspended users.
-// It uses inline styles (no external dependencies) with dark mode support,
-// consistent with the maintenance and error page patterns. The page includes
-// a working sign-out action and displays the signed-in email.
+// suspendedPageHTMLWithBranding returns a self-contained HTML page for
+// suspended users with Hub branding applied. It uses inline styles (no external
+// dependencies) with dark mode support, consistent with the maintenance and
+// error page patterns. The page includes a working sign-out action and displays
+// the signed-in email.
 //
 // The page deliberately omits the SPA entry script and __SCION_DATA__ to
 // prevent any protected API or SSE bootstrap fan-out.
-func suspendedPageHTML(email string) string {
+func suspendedPageHTMLWithBranding(b *config.ResolvedBranding, email string) string {
+	b = brandOrDefault(b)
 	var emailLine string
 	if email != "" {
 		emailLine = fmt.Sprintf(
@@ -45,27 +48,9 @@ func suspendedPageHTML(email string) string {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scion - Account Suspended</title>
+    <title>%s</title>
     <style>
-        :root {
-            --bg: #f8fafc;
-            --surface: #ffffff;
-            --text: #1e293b;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
-            --accent: #3b82f6;
-        }
-
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #0f172a;
-                --surface: #1e293b;
-                --text: #f1f5f9;
-                --text-muted: #94a3b8;
-                --border: #334155;
-                --accent: #60a5fa;
-            }
-        }
+%s
 
         * {
             box-sizing: border-box;
@@ -91,6 +76,20 @@ func suspendedPageHTML(email string) string {
             text-align: center;
             padding: 2rem;
             max-width: 480px;
+        }
+
+        .brand-logo-wrap {
+            display: block;
+        }
+
+        .brand-logo {
+            max-height: 36px;
+            max-width: 180px;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            display: block;
+            margin: 0 auto 1.25rem;
         }
 
         .icon {
@@ -152,15 +151,22 @@ func suspendedPageHTML(email string) string {
 </head>
 <body>
     <div class="container">
-        <span class="icon" role="img" aria-label="suspended">&#128683;</span>
+        %s<span class="icon" role="img" aria-label="suspended">&#128683;</span>
         <h1>Account Suspended</h1>
-        <p class="message">Your account has been suspended and access to Scion is currently unavailable. Please contact your administrator for assistance.</p>
+        <p class="message">Your account has been suspended and access to %s is currently unavailable. Please contact your administrator for assistance.</p>
         %s
         <div><a href="/auth/logout" class="sign-out">Sign Out</a></div>
-        <span class="badge">scion</span>
+        <span class="badge">%s</span>
     </div>
 </body>
-</html>`, emailLine)
+</html>`,
+		html.EscapeString(brandPageTitle(b, "Account Suspended")),
+		brandPageColorsCSS(b),
+		brandLogoHTML(b),
+		html.EscapeString(b.Name),
+		emailLine,
+		html.EscapeString(brandBadgeText(b)),
+	)
 }
 
 // serveSuspendedPage writes the self-contained suspended-account HTML page
@@ -170,7 +176,7 @@ func (ws *WebServer) serveSuspendedPage(w http.ResponseWriter, email string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.WriteHeader(http.StatusForbidden)
-	_, _ = fmt.Fprint(w, suspendedPageHTML(email))
+	_, _ = fmt.Fprint(w, suspendedPageHTMLWithBranding(ws.resolvedBranding(), email))
 }
 
 // serveSuspendedResponse is the single entry point for all suspension denial

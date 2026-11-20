@@ -143,23 +143,25 @@ func appIconsBlock(t *testing.T, html string) string {
 	return strings.Join(strings.Fields(block), " ")
 }
 
-// TestSPAShellAppIconTags keeps the icon, manifest and theme-color tags in
-// the production shell identical to web/index.html, and every linked file
-// on the admin-mode allowlist.
+// TestSPAShellAppIconTags keeps the default unbranded icon, manifest and
+// theme-color tags rendered by the production shell identical to
+// web/index.html, and every linked file on the admin-mode allowlist.
 func TestSPAShellAppIconTags(t *testing.T) {
 	indexHTML, err := os.ReadFile("../../web/index.html")
 	require.NoError(t, err)
 
-	shellBlock := appIconsBlock(t, spaShellTemplate)
-	assert.Equal(t, shellBlock, appIconsBlock(t, string(indexHTML)),
-		"app icon tags must match between pkg/hub/web.go and web/index.html")
+	wantBlock := appIconsBlock(t, string(indexHTML))
+	rendered := renderSPAShell(t)
+	renderedNorm := strings.Join(strings.Fields(rendered), " ")
+	assert.Contains(t, renderedNorm, wantBlock,
+		"default unbranded app icon tags rendered by pkg/hub/web.go must match web/index.html")
 
 	for _, tag := range []string{`rel="icon"`, `rel="apple-touch-icon"`, `rel="manifest"`, `name="theme-color"`} {
-		assert.Contains(t, shellBlock, tag)
+		assert.Contains(t, wantBlock, tag)
 	}
-	for _, m := range appIconHrefRE.FindAllStringSubmatch(shellBlock, -1) {
+	for _, m := range appIconHrefRE.FindAllStringSubmatch(wantBlock, -1) {
 		assert.True(t, isAppIconPath(m[1]), "%s not in appIconPaths", m[1])
 	}
 
-	assert.Contains(t, renderSPAShell(t), `<link rel="manifest" href="/manifest.webmanifest" />`)
+	assert.Contains(t, rendered, `<link rel="manifest" href="/manifest.webmanifest" />`)
 }

@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -166,8 +167,8 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Allow static assets (required for login page).
-		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/shoelace/") || isAppIconPath(path) {
+		// Allow static assets and branding assets (required for login and maintenance pages).
+		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/shoelace/") || strings.HasPrefix(path, "/brand/") || isAppIconPath(path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -189,7 +190,7 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = fmt.Fprint(w, maintenancePageHTML(ws.maintenance.Message()))
+		_, _ = fmt.Fprint(w, maintenancePageHTMLWithBranding(ws.resolvedBranding(), ws.maintenance.Message()))
 	})
 }
 
@@ -318,8 +319,14 @@ func (s *Server) handleAdminScheduler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// maintenancePageHTML returns a self-contained HTML maintenance page,
-// using the shared renderErrorPage template.
+// maintenancePageHTML returns a self-contained HTML maintenance page using
+// stock Scion branding.
 func maintenancePageHTML(message string) string {
-	return renderErrorPage("Scion - Maintenance", "&#128295;", "maintenance", "Under Maintenance", message)
+	return maintenancePageHTMLWithBranding(nil, message)
+}
+
+// maintenancePageHTMLWithBranding returns a self-contained HTML maintenance
+// page with Hub branding applied, using the shared renderErrorPage template.
+func maintenancePageHTMLWithBranding(b *config.ResolvedBranding, message string) string {
+	return renderErrorPageWithBranding(b, brandPageTitle(b, "Maintenance"), "&#128295;", "maintenance", "Under Maintenance", message)
 }

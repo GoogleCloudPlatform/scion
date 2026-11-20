@@ -290,7 +290,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 					"agent_id", agent.ID, "port", port,
 					"response_header_timeout", headerTimeout)
 				s.recordPortProxyUpstreamTimeout()
-				writePortProxyTimeout(w, r)
+				s.writePortProxyTimeout(w, r)
 				return
 			}
 			status = http.StatusBadGateway
@@ -531,9 +531,17 @@ func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID stri
 // writePortProxyTimeout writes the 504 response for an agent port that
 // did not send its response headers within the bound: the proxy error
 // page for a browser, else the runtime_error JSON error.
+func (s *Server) writePortProxyTimeout(w http.ResponseWriter, r *http.Request) {
+	writePortProxyTimeoutWithBranding(w, r, s.ResolvedBranding())
+}
+
 func writePortProxyTimeout(w http.ResponseWriter, r *http.Request) {
+	writePortProxyTimeoutWithBranding(w, r, nil)
+}
+
+func writePortProxyTimeoutWithBranding(w http.ResponseWriter, r *http.Request, b *config.ResolvedBranding) {
 	if isBrowserRequest(r) {
-		writeProxyErrorHTML(w, http.StatusGatewayTimeout, "Gateway Timeout",
+		writeProxyErrorHTMLWithBranding(w, b, http.StatusGatewayTimeout, "Gateway Timeout",
 			"The service on the agent port did not answer in time.")
 		return
 	}
@@ -543,9 +551,17 @@ func writePortProxyTimeout(w http.ResponseWriter, r *http.Request) {
 // writeAgentOffline writes the 503 agent_offline response: the agent has
 // neither a conduit session nor a port-forward tunnel. Exposed ports are
 // kept; they work again when the agent reconnects.
+func (s *Server) writeAgentOffline(w http.ResponseWriter, r *http.Request) {
+	writeAgentOfflineWithBranding(w, r, s.ResolvedBranding())
+}
+
 func writeAgentOffline(w http.ResponseWriter, r *http.Request) {
+	writeAgentOfflineWithBranding(w, r, nil)
+}
+
+func writeAgentOfflineWithBranding(w http.ResponseWriter, r *http.Request, b *config.ResolvedBranding) {
 	if isBrowserRequest(r) {
-		writeProxyErrorHTML(w, http.StatusServiceUnavailable, "Agent Offline",
+		writeProxyErrorHTMLWithBranding(w, b, http.StatusServiceUnavailable, "Agent Offline",
 			"The agent is not connected to the hub right now. Its exposed ports will be reachable again when it reconnects.")
 		return
 	}

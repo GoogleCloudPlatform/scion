@@ -17,15 +17,87 @@ package hub
 import (
 	"fmt"
 	"html"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// renderErrorPage returns a self-contained HTML error page with the given
-// parameters. It uses inline styles (no external dependencies) with dark mode
-// support. Both proxyErrorPageHTML and maintenancePageHTML delegate to this
-// shared template to avoid duplicating ~80 lines of HTML/CSS.
+func brandOrDefault(b *config.ResolvedBranding) *config.ResolvedBranding {
+	if b == nil {
+		return config.DefaultResolvedBranding()
+	}
+	return b
+}
+
+func isCustomBrandIdentity(b *config.ResolvedBranding) bool {
+	return b.Name != config.DefaultBrandName || b.LogoLight != ""
+}
+
+func brandPageTitle(b *config.ResolvedBranding, suffix string) string {
+	b = brandOrDefault(b)
+	return b.Name + " - " + suffix
+}
+
+func brandBadgeText(b *config.ResolvedBranding) string {
+	b = brandOrDefault(b)
+	if !isCustomBrandIdentity(b) {
+		return "scion"
+	}
+	if b.Attribution == config.AttributionHidden {
+		return b.Name
+	}
+	return b.Name + " · Powered by Scion"
+}
+
+func brandLogoHTML(b *config.ResolvedBranding) string {
+	b = brandOrDefault(b)
+	if b.LogoLight == "" {
+		return ""
+	}
+	alt := html.EscapeString(b.Name)
+	light := html.EscapeString(b.LogoLight)
+	if b.LogoDark != "" && b.LogoDark != b.LogoLight {
+		dark := html.EscapeString(b.LogoDark)
+		return fmt.Sprintf(`<picture class="brand-logo-wrap"><source media="(prefers-color-scheme: dark)" srcset="%s"><img class="brand-logo" src="%s" alt="%s"></picture>`, dark, light, alt)
+	}
+	return fmt.Sprintf(`<img class="brand-logo" src="%s" alt="%s">`, light, alt)
+}
+
+func brandPageColorsCSS(b *config.ResolvedBranding) string {
+	b = brandOrDefault(b)
+	light := b.Light
+	dark := b.Dark
+	return fmt.Sprintf(`        :root {
+            --bg: %s;
+            --surface: %s;
+            --text: %s;
+            --text-muted: %s;
+            --border: %s;
+            --accent: %s;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: %s;
+                --surface: %s;
+                --text: %s;
+                --text-muted: %s;
+                --border: %s;
+                --accent: %s;
+            }
+        }`,
+		light.Bg, light.Surface, light.Text, light.TextMuted, light.Border, light.Primary,
+		dark.Bg, dark.Surface, dark.Text, dark.TextMuted, dark.Border, dark.Primary,
+	)
+}
+
+// renderErrorPageWithBranding returns a self-contained HTML error page with
+// the given parameters and Hub branding. It uses inline styles (no external
+// dependencies) with dark mode support. Both proxyErrorPageHTML and
+// maintenancePageHTML delegate to this shared template.
 //
 // Parameters are HTML-escaped internally, so callers pass raw strings.
-func renderErrorPage(pageTitle, icon, iconLabel, heading, message string) string {
+func renderErrorPageWithBranding(b *config.ResolvedBranding, pageTitle, icon, iconLabel, heading, message string) string {
+	b = brandOrDefault(b)
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -33,25 +105,7 @@ func renderErrorPage(pageTitle, icon, iconLabel, heading, message string) string
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>%s</title>
     <style>
-        :root {
-            --bg: #f8fafc;
-            --surface: #ffffff;
-            --text: #1e293b;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
-            --accent: #3b82f6;
-        }
-
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #0f172a;
-                --surface: #1e293b;
-                --text: #f1f5f9;
-                --text-muted: #94a3b8;
-                --border: #334155;
-                --accent: #60a5fa;
-            }
-        }
+%s
 
         * {
             box-sizing: border-box;
@@ -77,6 +131,20 @@ func renderErrorPage(pageTitle, icon, iconLabel, heading, message string) string
             text-align: center;
             padding: 2rem;
             max-width: 480px;
+        }
+
+        .brand-logo-wrap {
+            display: block;
+        }
+
+        .brand-logo {
+            max-height: 36px;
+            max-width: 180px;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            display: block;
+            margin: 0 auto 1.25rem;
         }
 
         .icon {
@@ -112,17 +180,20 @@ func renderErrorPage(pageTitle, icon, iconLabel, heading, message string) string
 </head>
 <body>
     <div class="container">
-        <span class="icon" role="img" aria-label="%s">%s</span>
+        %s<span class="icon" role="img" aria-label="%s">%s</span>
         <h1>%s</h1>
         <p class="message">%s</p>
-        <span class="badge">scion</span>
+        <span class="badge">%s</span>
     </div>
 </body>
 </html>`,
 		html.EscapeString(pageTitle),
+		brandPageColorsCSS(b),
+		brandLogoHTML(b),
 		html.EscapeString(iconLabel),
 		icon, // icon is a raw HTML entity, not user input
 		html.EscapeString(heading),
 		html.EscapeString(message),
+		html.EscapeString(brandBadgeText(b)),
 	)
 }
