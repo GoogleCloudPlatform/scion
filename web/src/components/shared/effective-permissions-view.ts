@@ -619,6 +619,10 @@ export class ScionEffectivePermissionsView extends LitElement {
 
   /** Clears cached permission data and reloads if currently visible. */
   public invalidate(): void {
+    this._loadSeq++;
+    this._projectLoadSeq++;
+    this._loading = false;
+    this._projectLoading = false;
     this._loadedPrincipalId = null;
     this._permissionsChecked = false;
     this._data = null;
@@ -658,6 +662,16 @@ export class ScionEffectivePermissionsView extends LitElement {
       !this._error
     ) {
       void this.loadHubPermissions();
+    }
+    if (
+      this.active &&
+      this.principalId &&
+      this._selectedProjectId &&
+      !this._projectData &&
+      !this._projectLoading &&
+      !this._projectError
+    ) {
+      void this.loadProjectPermissions(this._selectedProjectId);
     }
   }
 

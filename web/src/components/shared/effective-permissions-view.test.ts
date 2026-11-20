@@ -441,6 +441,66 @@ describe('scion-effective-permissions-view lazy loading', () => {
     expect(chipTexts).toContain('Project role · project-member · via group: Project Eng');
     expect(chipTexts).toContain('Inherited from hub · hub-admin · direct');
   });
+
+  it('reloads selected project permissions lazily on reshow after invalidate() while inactive', async () => {
+    el = document.createElement(
+      'scion-effective-permissions-view'
+    ) as ScionEffectivePermissionsView;
+    el.principalType = 'user';
+    el.principalId = 'user-target-1';
+    el.active = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    // Expand By project and select proj-alpha.
+    const details = el.shadowRoot?.querySelector('sl-details.by-project-details');
+    expect(details).not.toBeNull();
+    details!.dispatchEvent(new CustomEvent('sl-show', { bubbles: true, composed: true }));
+    await el.updateComplete;
+
+    const picker = details?.querySelector('scion-project-picker');
+    expect(picker).not.toBeNull();
+    picker!.dispatchEvent(
+      new CustomEvent('project-change', {
+        detail: { projectId: 'proj-alpha', displayLabel: 'Alpha Project' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    expect(calls.filter((c) => c.includes('projectId=proj-alpha'))).toHaveLength(1);
+    expect(el.shadowRoot?.querySelector('.project-permissions-results')).not.toBeNull();
+
+    // Switch tab away and invalidate while inactive (D4d Add/Delete flow).
+    el.active = false;
+    await el.updateComplete;
+    el.invalidate();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Must not refetch while inactive.
+    expect(calls.filter((c) => c.includes('projectId=proj-alpha'))).toHaveLength(1);
+
+    // Reshow tab -> both hub and selected project permissions refetch and render.
+    el.active = true;
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    expect(calls.filter((c) => c.includes('projectId=proj-alpha'))).toHaveLength(2);
+    const projSection = el.shadowRoot?.querySelector('.project-permissions-results');
+    expect(projSection).not.toBeNull();
+    const chipTexts = Array.from(projSection!.querySelectorAll('.origin-chip')).map((c) =>
+      c.textContent?.replace(/\s+/g, ' ').trim()
+    );
+    expect(chipTexts).toContain('Project role · project-member · via group: Project Eng');
+    expect(chipTexts).toContain('Inherited from hub · hub-admin · direct');
+  });
 });
 
 describe('scion-page-admin-users two-tab Roles dialog', () => {
