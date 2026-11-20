@@ -30,6 +30,9 @@ import (
 func TestSanitizeHarnessConfigEnv(t *testing.T) {
 	raw := map[string]string{
 		"ORDINARY_KEY":                      "ok",
+		"PATH=/opt/custom":                  ":/usr/bin:/bin",
+		"BAD,KEY":                           "comma",
+		" SPACED ":                          "spaces",
 		"SCION_HOOK_WITHHELD_ENV":           "FORGED",
 		"SCION_EXTRA_PATH":                  "/evil/bin",
 		"SCION_AGENT_NAME":                  "spoofed",
@@ -55,6 +58,9 @@ func TestSanitizeHarnessConfigEnv(t *testing.T) {
 		t.Errorf("%s = %q, want explicit %q preserved over legacy rewrite", envpolicy.HintAutoExposeMode, got[envpolicy.HintAutoExposeMode], "allowlist")
 	}
 	for _, refused := range []string{
+		"PATH=/opt/custom",
+		"BAD,KEY",
+		" SPACED ",
 		"SCION_HOOK_WITHHELD_ENV",
 		"SCION_EXTRA_PATH",
 		"SCION_AGENT_NAME",
@@ -68,9 +74,9 @@ func TestSanitizeHarnessConfigEnv(t *testing.T) {
 			t.Errorf("sanitized map unexpectedly contains %q", refused)
 		}
 	}
-	// 4 refused + 3 rewritten = 7 warnings.
-	if len(warnings) != 7 {
-		t.Errorf("len(warnings) = %d, want 7; warnings = %v", len(warnings), warnings)
+	// 3 invalid + 4 refused + 3 rewritten = 10 warnings.
+	if len(warnings) != 10 {
+		t.Errorf("len(warnings) = %d, want 10; warnings = %v", len(warnings), warnings)
 	}
 }
 
@@ -164,6 +170,7 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 		"  base: [\"echo\"]",
 		"env:",
 		"  BUNDLE_ONLY: from-bundle",
+		"  \"BPATH=/opt/bundle\": \":/usr/bin\"",
 		"  COLLIDE_KEY: from-bundle",
 		"  GITHUB_TOKEN: \"\"",
 		"  GOOGLE_CLOUD_PROJECT: bundle-proj",
@@ -174,6 +181,7 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 		"  SCION_LIVENESS_HARNESS_ROOT_DEPTH: \"2\"",
 		"env_template:",
 		"  TPL_ONLY: \"agent-{{ .AgentName }}\"",
+		"  \"PATH=/opt/custom\": \":/usr/bin:/bin\"",
 		"  SCION_HOOK_WITHHELD_ENV: FORGED_TPL",
 		"  SCION_EXTRA_PATH: /evil/tpl",
 		"",
@@ -204,6 +212,7 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 		"  test-harness:",
 		"    env:",
 		"      COLLIDE_KEY: from-settings",
+		"      \"PATHS=/opt/settings\": \":/usr/bin\"",
 		"      SETTINGS_ONLY: from-settings",
 		"      SCION_HOOK_WITHHELD_ENV: FORGED_SETTINGS",
 		"      SCION_EXTRA_PATH: /evil/settings",
@@ -296,9 +305,27 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 	if envMap[envpolicy.HintLivenessRootDepth] != "2" {
 		t.Errorf("RunConfig.Env[%s] = %q, want %q", envpolicy.HintLivenessRootDepth, envMap[envpolicy.HintLivenessRootDepth], "2")
 	}
-	for _, refused := range []string{"SCION_HOOK_WITHHELD_ENV", "SCION_EXTRA_PATH", "SCION_LIVENESS_HARNESS_ROOT_DEPTH"} {
+	for _, refused := range []string{
+		"SCION_HOOK_WITHHELD_ENV",
+		"SCION_EXTRA_PATH",
+		"SCION_LIVENESS_HARNESS_ROOT_DEPTH",
+		"BPATH",
+		"BPATH=/opt/bundle",
+		"PATH",
+		"PATH=/opt/custom",
+		"PATHS",
+		"PATHS=/opt/settings",
+	} {
 		if v, ok := envMap[refused]; ok {
-			t.Errorf("RunConfig.Env unexpectedly contains refused/rewritten key %s=%q", refused, v)
+			t.Errorf("RunConfig.Env unexpectedly contains refused/invalid key %s=%q", refused, v)
+		}
+	}
+	if captured.Harness != nil {
+		tplEnv := captured.Harness.GetEnv("hook-env-test", "/home/scion", "scion")
+		for _, badKey := range []string{"PATH", "PATH=/opt/custom"} {
+			if v, ok := tplEnv[badKey]; ok {
+				t.Errorf("Harness.GetEnv() unexpectedly contains invalid key %s=%q", badKey, v)
+			}
 		}
 	}
 

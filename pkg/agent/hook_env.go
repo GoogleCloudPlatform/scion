@@ -55,6 +55,13 @@ func sanitizeHarnessConfigEnv(raw map[string]string, layerName string, expandKey
 				checkKey = exp
 			}
 		}
+		if !envpolicy.ValidEnvName(checkKey) {
+			warnings = append(warnings, fmt.Sprintf(
+				"Warning: harness-config %s env key %q is invalid and was ignored.",
+				layerName, checkKey,
+			))
+			continue
+		}
 		effectiveKey, disp := envpolicy.ClassifyHarnessConfigEnvKey(checkKey)
 		switch disp {
 		case envpolicy.HarnessConfigKeyRefuse:
