@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // Bounds of the wait for a Cloud Run instance after a create or start
@@ -361,7 +363,9 @@ func waitCloudRunInstanceGone(ctx context.Context, c cloudrun.InstancesAPI, name
 //     whose value comes from a source rather than a literal;
 //   - the set of env var names, so an env var this start does not set
 //     (for example a removed secret) is never kept;
-//   - the volumes and container volume mounts.
+//   - the volumes and container volume mounts;
+//   - the container resource limits (normalized quantities with Cloud Run
+//     platform defaults for unset cpu/memory).
 //
 // Only field names are returned, never values.
 func cloudRunSpecDiff(existing, want *runpb.Instance, secretEnv map[string]bool) []string {
@@ -388,7 +392,72 @@ func cloudRunSpecDiff(existing, want *runpb.Instance, secretEnv map[string]bool)
 	if !slices.EqualFunc(ec.GetVolumeMounts(), wc.GetVolumeMounts(), func(a, b *runpb.VolumeMount) bool { return proto.Equal(a, b) }) {
 		diff = append(diff, "volume_mounts")
 	}
+	if !cloudRunResourcesEqual(ec.GetResources(), wc.GetResources()) {
+		diff = append(diff, "resources")
+	}
 	return diff
+}
+
+// cloudRunResourcesEqual reports whether a and b describe the same
+// container resource limits. Unset cpu and memory fall back to the Cloud
+// Run platform defaults (1 vCPU and 512Mi), and values are compared as
+// parsed Kubernetes quantities when both parse so equivalent forms
+// (for example "1" vs "1000m" or "2Gi" vs "2048Mi") match. Only Limits
+// are compared: Cloud Run has no requests field, and CpuIdle and
+// StartupCpuBoost are left unset by Scion.
+func cloudRunResourcesEqual(a, b *runpb.ResourceRequirements) bool {
+	al, bl := a.GetLimits(), b.GetLimits()
+	if !cloudRunQuantityEqual(
+		cloudRunLimitOrDefault(al, "cpu", strconv.Itoa(cloudRunDefaultCPU)),
+		cloudRunLimitOrDefault(bl, "cpu", strconv.Itoa(cloudRunDefaultCPU)),
+	) {
+		return false
+	}
+	if !cloudRunQuantityEqual(
+		cloudRunLimitOrDefault(al, "memory", strconv.Itoa(cloudRunDefaultMemoryMiB)+"Mi"),
+		cloudRunLimitOrDefault(bl, "memory", strconv.Itoa(cloudRunDefaultMemoryMiB)+"Mi"),
+	) {
+		return false
+	}
+	for k, av := range al {
+		if k == "cpu" || k == "memory" {
+			continue
+		}
+		if !cloudRunQuantityEqual(av, bl[k]) {
+			return false
+		}
+	}
+	for k, bv := range bl {
+		if k == "cpu" || k == "memory" {
+			continue
+		}
+		if _, ok := al[k]; !ok && !cloudRunQuantityEqual("", bv) {
+			return false
+		}
+	}
+	return true
+}
+
+func cloudRunLimitOrDefault(limits map[string]string, key, def string) string {
+	if v := limits[key]; v != "" {
+		return v
+	}
+	return def
+}
+
+func cloudRunQuantityEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" {
+		return false
+	}
+	qa, errA := resource.ParseQuantity(a)
+	qb, errB := resource.ParseQuantity(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return qa.Cmp(qb) == 0
 }
 
 func firstContainer(inst *runpb.Instance) *runpb.Container {

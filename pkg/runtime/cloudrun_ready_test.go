@@ -414,6 +414,9 @@ func TestCloudRunRun_AlreadyExistsAdoptionRules(t *testing.T) {
 		{name: "own run different args refused", mutate: func(inst *runpb.Instance) {
 			inst.Containers[0].Args = []string{"/bin/sh", "-c", "a different launch command"}
 		}, wantInErr: "different args"},
+		{name: "own run different resources refused", mutate: func(inst *runpb.Instance) {
+			inst.Containers[0].Resources = &runpb.ResourceRequirements{Limits: map[string]string{"cpu": "4", "memory": "4Gi"}}
+		}, wantInErr: "different resources"},
 		{name: "own run being deleted refused", mutate: func(inst *runpb.Instance) {
 			inst.DeleteTime = timestamppb.New(time.Unix(1, 0))
 		}, wantInErr: "being deleted"},
@@ -470,6 +473,11 @@ func TestCloudRunRun_ExistingInstanceSpecDiffRecreated(t *testing.T) {
 		}
 		return cfg
 	}
+	resourcesCfg := func(cpu, mem string) RunConfig {
+		cfg := readyRunCfg()
+		cfg.Resources = &api.ResourceSpec{Limits: api.ResourceList{CPU: cpu, Memory: mem}}
+		return cfg
+	}
 	for _, tc := range []struct {
 		field string
 		// existingCfg computes the existing instance; runCfg is the start.
@@ -499,6 +507,18 @@ func TestCloudRunRun_ExistingInstanceSpecDiffRecreated(t *testing.T) {
 		{field: "volume_mounts", existingCfg: readyRunCfg(), runCfg: readyRunCfg(),
 			mutate: func(inst *runpb.Instance) {
 				inst.Containers[0].VolumeMounts[0].MountPath = "/repo-root/other"
+			}},
+		{field: "resources", existingCfg: resourcesCfg("1", "2Gi"), runCfg: resourcesCfg("2", "2Gi"),
+			check: func(t *testing.T, created *runpb.Instance) {
+				if got := created.GetContainers()[0].GetResources().GetLimits()["cpu"]; got != "2" {
+					t.Errorf("created cpu limit = %q, want 2", got)
+				}
+			}},
+		{field: "resources", existingCfg: resourcesCfg("2", "2Gi"), runCfg: resourcesCfg("2", "4Gi"),
+			check: func(t *testing.T, created *runpb.Instance) {
+				if got := created.GetContainers()[0].GetResources().GetLimits()["memory"]; got != "4096Mi" {
+					t.Errorf("created memory limit = %q, want 4096Mi", got)
+				}
 			}},
 	} {
 		t.Run(tc.field+"/"+tc.existingCfg.Labels[api.LabelRunID], func(t *testing.T) {
@@ -549,6 +569,75 @@ func TestCloudRunRun_ExistingInstanceMatchingSpecStarted(t *testing.T) {
 	}
 	if len(fake.startReqs) != 1 || len(fake.createReqs) != 0 || len(fake.deleteReqs) != 0 {
 		t.Errorf("start/create/delete = %d/%d/%d, want 1/0/0", len(fake.startReqs), len(fake.createReqs), len(fake.deleteReqs))
+	}
+}
+
+// ptone/scion#8079: an existing stopped instance whose resources are
+// equivalent after quantity normalization and platform-default resolution
+// (for example Cloud Run returning "2000m" CPU and default "512Mi" memory
+// when the start requests CPU "2" with memory unset) is reused rather than
+// needlessly recreated.
+func TestCloudRunRun_ExistingInstanceEquivalentResourcesStarted(t *testing.T) {
+	cfg := readyRunCfg()
+	cfg.Resources = &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}
+	fake := &fakeInstancesClient{}
+	rt := newReadyTestRuntime(t, fake)
+	existing := computedCloudRunInstance(t, rt, cfg)
+	existing.Containers[0].Resources = &runpb.ResourceRequirements{
+		Limits:  map[string]string{"cpu": "2000m", "memory": "512Mi"},
+		CpuIdle: true,
+	}
+	fake.getInstance = existing
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fake.startReqs) != 1 || len(fake.createReqs) != 0 || len(fake.deleteReqs) != 0 {
+		t.Errorf("start/create/delete = %d/%d/%d, want 1/0/0", len(fake.startReqs), len(fake.createReqs), len(fake.deleteReqs))
+	}
+}
+
+// ptone/scion#8079: cloudRunSpecDiff compares container resource limits
+// using normalized quantities and Cloud Run platform defaults.
+func TestCloudRunSpecDiff_Resources(t *testing.T) {
+	instWith := func(res *runpb.ResourceRequirements) *runpb.Instance {
+		return &runpb.Instance{Containers: []*runpb.Container{{Resources: res}}}
+	}
+	lim := func(m map[string]string) *runpb.ResourceRequirements {
+		return &runpb.ResourceRequirements{Limits: m}
+	}
+	for _, tc := range []struct {
+		name     string
+		existing *runpb.ResourceRequirements
+		want     *runpb.ResourceRequirements
+		wantDiff bool
+	}{
+		{name: "both nil", existing: nil, want: nil, wantDiff: false},
+		{name: "nil vs explicit platform defaults", existing: nil, want: lim(map[string]string{"cpu": "1", "memory": "512Mi"}), wantDiff: false},
+		{name: "platform defaults returned as millicores vs nil", existing: lim(map[string]string{"cpu": "1000m", "memory": "512Mi"}), want: nil, wantDiff: false},
+		{name: "equivalent cpu 1 vs 1000m", existing: lim(map[string]string{"cpu": "1", "memory": "2Gi"}), want: lim(map[string]string{"cpu": "1000m", "memory": "2048Mi"}), wantDiff: false},
+		{name: "equivalent decimal memory 1G vs 1000M", existing: lim(map[string]string{"cpu": "1", "memory": "1G"}), want: lim(map[string]string{"cpu": "1", "memory": "1000M"}), wantDiff: false},
+		{name: "unset memory matches default 512Mi", existing: lim(map[string]string{"cpu": "2000m", "memory": "512Mi"}), want: lim(map[string]string{"cpu": "2"}), wantDiff: false},
+		{name: "unset cpu matches default 1", existing: lim(map[string]string{"cpu": "1", "memory": "4Gi"}), want: lim(map[string]string{"memory": "4096Mi"}), wantDiff: false},
+		{name: "cpu_idle difference ignored", existing: &runpb.ResourceRequirements{Limits: map[string]string{"cpu": "2"}, CpuIdle: true}, want: lim(map[string]string{"cpu": "2"}), wantDiff: false},
+		{name: "cpu changed 1 to 2", existing: lim(map[string]string{"cpu": "1", "memory": "2Gi"}), want: lim(map[string]string{"cpu": "2", "memory": "2Gi"}), wantDiff: true},
+		{name: "cpu changed nil default to 2", existing: nil, want: lim(map[string]string{"cpu": "2"}), wantDiff: true},
+		{name: "memory changed 2Gi to 4Gi", existing: lim(map[string]string{"cpu": "2", "memory": "2Gi"}), want: lim(map[string]string{"cpu": "2", "memory": "4Gi"}), wantDiff: true},
+		{name: "memory changed decimal 1G vs binary 1Gi", existing: lim(map[string]string{"cpu": "1", "memory": "1G"}), want: lim(map[string]string{"cpu": "1", "memory": "1Gi"}), wantDiff: true},
+		{name: "extra limit key added", existing: lim(map[string]string{"cpu": "4", "memory": "16Gi"}), want: lim(map[string]string{"cpu": "4", "memory": "16Gi", "nvidia.com/gpu": "1"}), wantDiff: true},
+		{name: "extra limit key removed", existing: lim(map[string]string{"cpu": "4", "memory": "16Gi", "nvidia.com/gpu": "1"}), want: lim(map[string]string{"cpu": "4", "memory": "16Gi"}), wantDiff: true},
+		{name: "unparseable equal", existing: lim(map[string]string{"cpu": "not-a-qty"}), want: lim(map[string]string{"cpu": "not-a-qty"}), wantDiff: false},
+		{name: "unparseable vs valid", existing: lim(map[string]string{"cpu": "not-a-qty"}), want: lim(map[string]string{"cpu": "1"}), wantDiff: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cloudRunSpecDiff(instWith(tc.existing), instWith(tc.want), nil)
+			var want []string
+			if tc.wantDiff {
+				want = []string{"resources"}
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("cloudRunSpecDiff() = %v, want %v", got, want)
+			}
+		})
 	}
 }
 
