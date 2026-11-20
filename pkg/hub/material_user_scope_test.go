@@ -203,15 +203,14 @@ func TestAgentSecretRead_AgentAuthoredRowRefusedByChain_DeletedSource(t *testing
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{f.UserID, creatorAgentID},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	grandchildToken, err := f.Server.agentTokenService.GenerateAgentToken(grandchildID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, creatorAgentID})
-	require.NoError(t, err)
+	grandchildToken := f.Server.generateRecordedAgentToken(t, grandchildID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, creatorAgentID})
 	// A recorded chain U -> source agent -> grandchild, so the refusal is
 	// the source's, not the unrecorded-chain refusal.
 	uf := &userScopeCeilingFixture{materialFixture: f}
 	uf.recordEdge(t, store.DelegationPrincipalUser, f.UserID, creatorAgentID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 	uf.recordEdge(t, store.DelegationPrincipalAgent, creatorAgentID, grandchildID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 
-	_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
 		Name: "SOURCE_DELETED_KEY", Value: "v", SecretType: store.SecretTypeEnvironment, Target: "SOURCE_DELETED_KEY",
 		Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: creatorAgentID, UpdatedBy: creatorAgentID,
 	})
@@ -253,15 +252,14 @@ func TestAgentSecretRead_AgentAuthoredRowRefusedByChain_SuspendedSourceRoot(t *t
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{f.UserID, creatorAgentID},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	grandchildToken, err := f.Server.agentTokenService.GenerateAgentToken(grandchildID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, creatorAgentID})
-	require.NoError(t, err)
+	grandchildToken := f.Server.generateRecordedAgentToken(t, grandchildID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, creatorAgentID})
 	// A recorded chain U -> source agent -> grandchild, so the refusal is
 	// the source's, not the unrecorded-chain refusal.
 	uf := &userScopeCeilingFixture{materialFixture: f}
 	uf.recordEdge(t, store.DelegationPrincipalUser, f.UserID, creatorAgentID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 	uf.recordEdge(t, store.DelegationPrincipalAgent, creatorAgentID, grandchildID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
 
-	_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+	_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
 		Name: "SOURCE_ROOT_SUSPENDED_KEY", Value: "v", SecretType: store.SecretTypeEnvironment, Target: "SOURCE_ROOT_SUSPENDED_KEY",
 		Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: creatorAgentID, UpdatedBy: creatorAgentID,
 	})

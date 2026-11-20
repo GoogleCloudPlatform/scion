@@ -587,20 +587,14 @@ func TestGetAgent_SelfRead(t *testing.T) {
 
 	t.Run("token without project:read cannot read itself", func(t *testing.T) {
 		f := bypassAgentsSetup(t)
-		svc := f.srv.GetAgentTokenService()
-		require.NotNil(t, svc)
-		tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-		require.NoError(t, err)
+		tok := f.srv.generateRecordedAgentToken(t, f.caller.ID, f.caller.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, tok)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "self-read without project:read: %s", rec.Body.String())
 	})
 
 	t.Run("self ID with a token bound to another project is 404", func(t *testing.T) {
 		f := bypassAgentsSetup(t)
-		svc := f.srv.GetAgentTokenService()
-		require.NotNil(t, svc)
-		tok, err := svc.GenerateAgentToken(f.caller.ID, f.other.ID, ScopesForRole(AgentRoleBaseline), nil)
-		require.NoError(t, err)
+		tok := f.srv.generateRecordedAgentToken(t, f.caller.ID, f.other.ID, ScopesForRole(AgentRoleBaseline), nil)
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.caller.ID, nil, tok)
 		assert.Equal(t, http.StatusNotFound, rec.Code,
 			"project isolation must run before the self-read exemption: %s", rec.Body.String())

@@ -453,18 +453,8 @@ func TestHandleAgentCloudLogs_SeverityCheckOrder(t *testing.T) {
 	agent := createTestAgent(t, s)
 	other := createTestAgent(t, s) // in another project
 
-	tokenSvc := srv.GetAgentTokenService()
-	if tokenSvc == nil {
-		t.Fatal("agent token service is nil")
-	}
-	noReadToken, err := tokenSvc.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	if err != nil {
-		t.Fatalf("GenerateAgentToken: %v", err)
-	}
-	otherProjectToken, err := tokenSvc.GenerateAgentToken(other.ID, other.ProjectID, []AgentTokenScope{ScopeProjectRead}, nil)
-	if err != nil {
-		t.Fatalf("GenerateAgentToken: %v", err)
-	}
+	noReadToken := srv.generateRecordedAgentToken(t, agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	otherProjectToken := srv.generateRecordedAgentToken(t, other.ID, other.ProjectID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 	for _, suffix := range []string{"/cloud-logs", "/cloud-logs/stream"} {
 		path := "/api/v1/agents/" + agent.ID + suffix + "?severity=TRACE"

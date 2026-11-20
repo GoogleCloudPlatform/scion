@@ -678,11 +678,10 @@ func TestAgentDelegation_IssuerLeavesTheAgentsProject(t *testing.T) {
 	adtAssertAPIError(t, rec, http.StatusForbidden, errCodeIssuerNotController)
 }
 
-// TestAgentDelegationExchange_AgentCredentialRowChecks: the exchange handler
-// refuses an agent token with no credential row or an expired row, which
-// the middleware still admits, with 401 agent_credential_invalid (§8.2
-// step 2). A revoked row is refused by the middleware with 401
-// unauthorized. None of them issues a credential.
+// TestAgentDelegationExchange_AgentCredentialRowChecks: an agent token with
+// no credential row or a revoked row is refused by the middleware with 401
+// invalid_token; an expired row is refused by the exchange handler with 401
+// agent_credential_invalid (§8.2 step 2). None of them issues a credential.
 func TestAgentDelegationExchange_AgentCredentialRowChecks(t *testing.T) {
 	f := newADTFixture(t, "adt-acrow")
 	ctx := context.Background()
@@ -697,7 +696,7 @@ func TestAgentDelegationExchange_AgentCredentialRowChecks(t *testing.T) {
 		token, _, err := f.srv.SignAgentToken(tokenGrant, stored.RunID)
 		require.NoError(t, err)
 		rec := f.exchange(t, token, stored.ID, grant.ID, aud)
-		adtAssertAPIError(t, rec, http.StatusUnauthorized, errCodeAgentCredentialInvalid)
+		adtAssertAPIError(t, rec, http.StatusUnauthorized, agentTokenRefusedCode)
 	})
 	t.Run("expired credential row", func(t *testing.T) {
 		token, ac, err := f.srv.SignAgentToken(tokenGrant, stored.RunID)

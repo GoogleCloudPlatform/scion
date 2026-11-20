@@ -230,11 +230,11 @@ func TestAgentDelegationManagement_BoundAgentToken(t *testing.T) {
 		tokenGrant, err := f.srv.AuthorizeAgentToken(ctx, stored)
 		require.NoError(t, err)
 
-		// No credential row (a legacy token): refused in the handler.
+		// No credential row: refused by the agent token middleware.
 		noRow, _, err := f.srv.SignAgentToken(tokenGrant, stored.RunID)
 		require.NoError(t, err)
-		adtAssertAPIError(t, f.readGrant(t, noRow, f.agentA.ID, grant.ID), http.StatusUnauthorized, errCodeAgentCredentialInvalid)
-		adtAssertAPIError(t, f.revokeGrant(t, noRow, f.agentA.ID, grant.ID), http.StatusUnauthorized, errCodeAgentCredentialInvalid)
+		adtAssertAPIError(t, f.readGrant(t, noRow, f.agentA.ID, grant.ID), http.StatusUnauthorized, agentTokenRefusedCode)
+		adtAssertAPIError(t, f.revokeGrant(t, noRow, f.agentA.ID, grant.ID), http.StatusUnauthorized, agentTokenRefusedCode)
 
 		// An expired row: refused in the handler.
 		expired, ac, err := f.srv.SignAgentToken(tokenGrant, stored.RunID)

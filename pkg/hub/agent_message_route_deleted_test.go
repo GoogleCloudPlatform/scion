@@ -153,8 +153,7 @@ func TestAgentMessageRoute_CrossProjectAgentSoftDeletedMatchesUnknown(t *testing
 	ctx := context.Background()
 	sender := accAgentIdentity(f.hubAgentA.ID, f.projectA, f.hubAgentA.Ancestry)
 	require.False(t, f.srv.canReadProject(ctx, sender, f.projectB), "precondition: an agent of project A cannot read project B")
-	token, err := f.srv.GetAgentTokenService().GenerateAgentToken(f.hubAgentA.ID, f.projectA, nil, f.hubAgentA.Ancestry)
-	require.NoError(t, err)
+	token := f.srv.generateRecordedAgentToken(t, f.hubAgentA.ID, f.projectA, nil, f.hubAgentA.Ancestry)
 	deleted := softDeletedAgentB(t, f, "route-xp-deleted")
 	unknownID := tid("route-xp-unknown")
 	path := func(id string) string { return "/api/v1/agents/" + id + "/message" }

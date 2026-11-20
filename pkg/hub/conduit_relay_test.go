@@ -51,8 +51,7 @@ func TestConduitEndpoint_HTTPGate(t *testing.T) {
 	f := newConduitFixture(t)
 	agentTok, err := f.srv.GenerateAgentToken(f.agent.ID, f.agent.ProjectID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
-	noScopeTok, err := f.srv.agentTokenService.GenerateAgentToken(f.agent.ID, f.agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	noScopeTok := f.srv.generateRecordedAgentToken(t, f.agent.ID, f.agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	for _, tc := range []struct {
 		name     string

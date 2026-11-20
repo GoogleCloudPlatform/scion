@@ -71,10 +71,7 @@ func setupAgentSecretGetTest(t *testing.T) (*Server, store.Store, string, string
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	agentToken := srv.generateRecordedAgentToken(t, agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
 
 	return srv, s, agentID, projectID, agentToken
 }
@@ -352,10 +349,7 @@ func TestAgentGetSecret_NoSecretBackend(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	agentToken := srv.generateRecordedAgentToken(t, agentID, projectID, nil, nil)
 
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet,
 		"/api/v1/agents/"+agentID+"/secrets/MY_KEY", nil, agentToken)

@@ -66,7 +66,7 @@ func runTransportRefresh(t *testing.T, minter TransportTokenMinter, audience str
 	require.NoError(t, err)
 
 	rec := httptest.NewRecorder()
-	srv.handleAgentTokenRefresh(rec, buildAgentRefreshRequest(agentID, claims, "", false), agentID)
+	srv.handleAgentTokenRefresh(rec, buildAgentRefreshRequest(agentID, claims, ""), agentID)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	var resp refreshResponseForTest

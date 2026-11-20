@@ -196,10 +196,8 @@ func TestUnifiedAuthMiddleware_NoPerRequestAuthDebugLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create agent token service: %v", err)
 	}
-	agentToken, err := agentTokenSvc.GenerateAgentToken("agent-dbg-1", "project-dbg-1", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	credStore := newMemAgentCredentialStore()
+	agentToken := generateRecordedAgentToken(t, agentTokenSvc, credStore, "agent-dbg-1", "project-dbg-1", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	const devToken = "scion_dev_q7ZmarkerVx93KpL2wRt8YhN4cJ6dFa0s"
 
 	cases := []struct {
@@ -213,12 +211,13 @@ func TestUnifiedAuthMiddleware_NoPerRequestAuthDebugLines(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := newDebugLogRecorder()
 			cfg := AuthConfig{
-				Mode:           "production",
-				AgentTokenSvc:  agentTokenSvc,
-				DevAuthEnabled: true,
-				DevAuthToken:   devToken,
-				Debug:          true,
-				Logger:         slog.New(rec),
+				Mode:            "production",
+				AgentTokenSvc:   agentTokenSvc,
+				CredentialStore: credStore,
+				DevAuthEnabled:  true,
+				DevAuthToken:    devToken,
+				Debug:           true,
+				Logger:          slog.New(rec),
 			}
 			handler := UnifiedAuthMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if GetIdentityFromContext(r.Context()) == nil {

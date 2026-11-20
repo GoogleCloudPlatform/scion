@@ -150,11 +150,8 @@ func fpAgentCreateRequest(t *testing.T, srv *Server, parentID, projectID, name s
 // route, or on /api/v1/agents when topLevel is set.
 func fpAgentCreateRequestOn(t *testing.T, srv *Server, topLevel bool, parentID, projectID, name string) *httptest.ResponseRecorder {
 	t.Helper()
-	svc := srv.GetAgentTokenService()
-	require.NotNil(t, svc)
 	scopes := append([]AgentTokenScope{ScopeProjectRead, ScopeAgentCreate}, ScopesForRole(AgentRoleFull)...)
-	tok, err := svc.GenerateAgentToken(parentID, projectID, scopes, nil)
-	require.NoError(t, err)
+	tok := srv.generateRecordedAgentToken(t, parentID, projectID, scopes, nil)
 	if topLevel {
 		return doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agents",
 			CreateAgentRequest{Name: name, ProjectID: projectID, AgentRole: string(AgentRoleFull)}, tok)

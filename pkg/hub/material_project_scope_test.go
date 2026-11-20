@@ -150,8 +150,7 @@ func TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead(t *testi
 	}))
 	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, plainDelegator, store.DelegationPrincipalAgent, plainAgentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	plainToken, err := f.Server.agentTokenService.GenerateAgentToken(plainAgentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{plainDelegator})
-	require.NoError(t, err)
+	plainToken := f.Server.generateRecordedAgentToken(t, plainAgentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{plainDelegator})
 
 	assertProjectDenied(t, f, plainAgentID, plainToken, "DELEGATOR_KEY")
 
@@ -165,8 +164,7 @@ func TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead(t *testi
 	}))
 	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, ownerDelegator, store.DelegationPrincipalAgent, ownerAgentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	ownerToken, err := f.Server.agentTokenService.GenerateAgentToken(ownerAgentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{ownerDelegator})
-	require.NoError(t, err)
+	ownerToken := f.Server.generateRecordedAgentToken(t, ownerAgentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{ownerDelegator})
 
 	rec2 := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+ownerAgentID+"/secrets/DELEGATOR_KEY", nil, ownerToken)
 	if rec2.Code != http.StatusOK {
@@ -216,8 +214,7 @@ func customOnlyDelegateAgent(t *testing.T, f *materialFixture, name string, perm
 	}))
 	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, userID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	token, err := f.Server.agentTokenService.GenerateAgentToken(agentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
-	require.NoError(t, err)
+	token := f.Server.generateRecordedAgentToken(t, agentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
 	return userID, agentID, token
 }
 
@@ -281,8 +278,7 @@ func TestAgentSecretRead_ProjectScopeAgentDelegatorWithoutSecretReadDenies(t *te
 	}))
 	createDCEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
-	require.NoError(t, err)
+	childToken := f.Server.generateRecordedAgentToken(t, childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
 
 	assertProjectDenied(t, f, childID, childToken, "AGENT_DELEGATOR_KEY")
 }
@@ -308,8 +304,7 @@ func TestAgentSecretRead_ProjectScopeAgentDelegatorWithSecretReadAllowed(t *test
 	}))
 	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
-	require.NoError(t, err)
+	childToken := f.Server.generateRecordedAgentToken(t, childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+childID+"/secrets/AGENT_DELEGATOR_FULL_KEY", nil, childToken)
 	if rec.Code != http.StatusOK {
@@ -376,8 +371,7 @@ func TestAgentSecretRead_ProjectScopeDeletedParentAgentDenies(t *testing.T) {
 	}))
 	createDCEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
-	require.NoError(t, err)
+	childToken := f.Server.generateRecordedAgentToken(t, childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
 
 	require.NoError(t, f.Store.DeleteAgent(ctx, parentID))
 
@@ -422,8 +416,7 @@ func TestAgentSecretRead_ProjectScopeStoppedParentRetainsAuthority(t *testing.T)
 	}))
 	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
-	require.NoError(t, err)
+	childToken := f.Server.generateRecordedAgentToken(t, childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
 
 	parent, err := f.Store.GetAgent(ctx, parentID)
 	require.NoError(t, err)
@@ -470,8 +463,7 @@ func TestAgentSecretRead_ProjectScopeDeletedGrandparentAgentDenies(t *testing.T)
 	}))
 	createDCEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, grandparentID, parentID})
-	require.NoError(t, err)
+	childToken := f.Server.generateRecordedAgentToken(t, childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, grandparentID, parentID})
 
 	require.NoError(t, f.Store.DeleteAgent(ctx, grandparentID))
 

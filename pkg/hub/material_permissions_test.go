@@ -282,8 +282,7 @@ func TestAgentSecretRead_SystemAuthorityForSecretUseDoesNotSubstituteForProjectS
 	createDCEdge(t, s, store.DelegationPrincipalUser, userID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 
-	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
 	seedSecret(t, srv.secretBackend, "SYSAUTH_KEY", "v", "", "", projectID)
 
 	auditor := newRecordingMaterialAuditor()

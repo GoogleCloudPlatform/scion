@@ -328,11 +328,8 @@ func TestEnvVar_ProjectScope_AgentReadOwnProject(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID,
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID,
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
 
 	// Agent should be able to read own project env vars
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/env", nil, agentToken)
@@ -369,11 +366,8 @@ func TestEnvVar_ProjectScope_AgentOtherProjectDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project1.ID,
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project1.ID,
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
 
 	// Agent should NOT be able to read other project env vars (project isolation)
 	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project2.ID+"/env", nil, agentToken)
@@ -403,11 +397,8 @@ func TestEnvVar_ProjectScope_AgentWriteDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID,
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID,
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
 
 	// Agent should NOT be able to write project env vars (write is always denied for agents)
 	body := SetEnvVarRequest{Value: "agent-val"}
@@ -656,10 +647,7 @@ func TestSecret_ProjectScope_AgentReadOwnProject(t *testing.T) {
 		t.Fatalf("failed to seed project secret: %d: %s", putRec.Code, putRec.Body.String())
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, ScopesForRole(AgentRoleFull), nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, ScopesForRole(AgentRoleFull), nil)
 
 	for _, path := range []string{
 		"/api/v1/projects/" + project.ID + "/secrets",
@@ -719,10 +707,7 @@ func TestSecret_ProjectScope_AgentRequiresSecretReadScope(t *testing.T) {
 
 	for _, bundle := range deniedBundles {
 		t.Run(bundle.name, func(t *testing.T) {
-			tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, bundle.scopes, nil)
-			if err != nil {
-				t.Fatalf("failed to generate agent token: %v", err)
-			}
+			tok := srv.generateRecordedAgentToken(t, agent.ID, project.ID, bundle.scopes, nil)
 			for _, path := range paths {
 				rec := doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, tok)
 				if rec.Code != http.StatusForbidden {
@@ -984,10 +969,7 @@ func TestEnvVar_ProjectScope_AgentRequiresSecretReadScopeForSecretMetadata(t *te
 		{"baseline_role", ScopesForRole(AgentRoleBaseline)},
 	} {
 		t.Run(bundle.name, func(t *testing.T) {
-			tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, bundle.scopes, nil)
-			if err != nil {
-				t.Fatalf("generate %s token: %v", bundle.name, err)
-			}
+			tok := srv.generateRecordedAgentToken(t, agent.ID, project.ID, bundle.scopes, nil)
 			assertRestrictedList(t, tok, "/api/v1/projects/"+project.ID+"/env")
 			assertRestrictedList(t, tok, "/api/v1/env?scope=project&scopeId="+project.ID)
 			assertRestrictedFilteredList(t, tok)
@@ -1003,10 +985,7 @@ func TestEnvVar_ProjectScope_AgentRequiresSecretReadScopeForSecretMetadata(t *te
 	// status_only_default lacks project:read (so /api/v1/projects/{id}/env* stays 403),
 	// and also lacks project:secret:read on /api/v1/env?scope=project&scopeId={id}.
 	t.Run("status_only_default", func(t *testing.T) {
-		tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
-		if err != nil {
-			t.Fatalf("generate status_only_default token: %v", err)
-		}
+		tok := srv.generateRecordedAgentToken(t, agent.ID, project.ID, nil, nil)
 		for _, projRoute := range []string{
 			"/api/v1/projects/" + project.ID + "/env",
 			"/api/v1/projects/" + project.ID + "/env/PLAIN_KEY",
@@ -1073,10 +1052,7 @@ func TestEnvVar_ProjectScope_AgentRequiresSecretReadScopeForSecretMetadata(t *te
 	}
 
 	t.Run("full_role_agent_unchanged", func(t *testing.T) {
-		fullTok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, ScopesForRole(AgentRoleFull), nil)
-		if err != nil {
-			t.Fatalf("generate full token: %v", err)
-		}
+		fullTok := srv.generateRecordedAgentToken(t, agent.ID, project.ID, ScopesForRole(AgentRoleFull), nil)
 		assertFullSecretMetadataAccess(t, "full_role", func(path string) *http.Response {
 			return doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, fullTok).Result()
 		})
@@ -1132,10 +1108,7 @@ func TestEnvVar_ProjectScope_RestrictedAgentFailsClosedOnSecretBackendError(t *t
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, ScopesForRole(AgentRoleBaseline), nil)
-	if err != nil {
-		t.Fatalf("generate baseline token: %v", err)
-	}
+	tok := srv.generateRecordedAgentToken(t, agent.ID, project.ID, ScopesForRole(AgentRoleBaseline), nil)
 
 	// When no plain env vars exist at all, listing as a restricted agent needs no
 	// shadow check and succeeds with an empty list even if secretBackend fails.
@@ -1204,10 +1177,7 @@ func TestSecret_ProjectScope_AgentWriteDenied(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, nil, nil)
 
 	body := SetSecretRequest{Value: "agent-secret"}
 	rec := doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/AGENT_SECRET", body, agentToken)
@@ -1892,10 +1862,7 @@ func TestEnvVar_HubScope_AgentCanRead(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, nil, nil)
 
 	// Admin creates a hub env var
 	body := SetEnvVarRequest{Value: "hub-agent-val", Scope: "hub"}

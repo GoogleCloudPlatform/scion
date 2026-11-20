@@ -75,10 +75,7 @@ func TestListProjectAgents_CLIWalk_LegacyBindingSurvivesPagination(t *testing.T)
 			walkerID = id
 			break
 		}
-		svc := f.srv.GetAgentTokenService()
-		require.NotNil(t, svc)
-		tok, err := svc.GenerateAgentToken(walkerID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-		require.NoError(t, err)
+		tok := f.srv.generateRecordedAgentToken(t, walkerID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 		c, err := hubclient.New(httpSrv.URL, hubclient.WithAgentToken(tok))
 		require.NoError(t, err)

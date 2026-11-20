@@ -363,9 +363,7 @@ func (f *agentSkillFixture) newAgent(t *testing.T, name, projectID, delegatorID 
 		ScopeType: store.RoleScopeProject, ScopeID: projectID,
 		Role: string(AgentRoleBaseline), Active: true,
 	}))
-	token, err := f.srv.GetAgentTokenService().GenerateAgentToken(agent.ID, projectID, scopes, []string{delegatorID})
-	require.NoError(t, err)
-	return token
+	return f.srv.generateRecordedAgentToken(t, agent.ID, projectID, scopes, []string{delegatorID})
 }
 
 func (f *agentSkillFixture) agentGet(t *testing.T, token, path string) (int, string) {

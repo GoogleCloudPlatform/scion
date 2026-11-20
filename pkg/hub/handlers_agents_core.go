@@ -5898,59 +5898,29 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Phase 1H: Agent-token authentication requires a successful
-	// credential-status evaluation, including on refresh. The credential-ID
-	// and legacy markers set by UnifiedAuthMiddleware are trusted when
-	// present, but their absence must not skip the check: re-derive the
-	// verified JTI from the validated token and evaluate status directly.
+	// Agent-token authentication requires a non-empty JTI and an active
+	// recorded credential, including on refresh. Always re-evaluate the
+	// presented token's credential status against the store.
 	oldCredentialID := GetAgentCredentialIDFromContext(r.Context())
-	isLegacy := IsLegacyTokenFromContext(r.Context())
-
-	if oldCredentialID != "" {
-		// The credential-ID marker is present: the middleware already found
-		// an active credential for this token. Re-check it hasn't been
-		// revoked since, and require the lookup itself to succeed — a store
-		// error here must not silently allow the refresh to proceed.
-		cred, credErr := s.store.GetAgentCredentialByJTIHash(r.Context(),
-			hashJTI(agentIdent.TokenID()))
-		switch {
-		case credErr == nil && cred == nil:
-			// The store reported success without a credential record, so
-			// the credential's status could not be determined.
-			slog.Error("Token refresh: credential status lookup returned no credential",
-				"agent_id", id)
-			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-				"unable to verify credential status", nil)
-			return
-		case credErr == nil && cred.RevokedAt != nil:
-			refuseAgentToken(r.Context(), w, s.authConfig.Logger, agentTokenCauseRefreshRevoked, "agent_id", id)
-			return
-		case credErr != nil:
-			slog.Error("Token refresh: credential status lookup failed",
-				"agent_id", id, "error", credErr)
-			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-				"unable to verify credential status", nil)
-			return
-		}
-	} else if !isLegacy {
-		// Neither marker is present. Evaluate status directly from the
-		// validated token's JTI.
-		cred, legacy, credErr := evaluateAgentCredentialStatus(r.Context(), s.store, agentIdent.TokenID())
-		switch {
-		case errors.Is(credErr, errAgentCredentialRevoked):
-			refuseAgentToken(r.Context(), w, s.authConfig.Logger, agentTokenCauseRefreshRevoked, "agent_id", id)
-			return
-		case credErr != nil:
-			slog.Error("Token refresh: credential status lookup failed",
-				"agent_id", id, "error", credErr)
-			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
-				"unable to verify credential status", nil)
-			return
-		case legacy:
-			// Legacy compatibility path, retained pending a product
-			// decision: the isLegacy checks below apply.
-			isLegacy = true
-		default:
+	cred, credErr := evaluateAgentCredentialStatus(r.Context(), s.store, agentIdent.TokenID())
+	switch {
+	case errors.Is(credErr, errAgentCredentialRevoked):
+		refuseAgentToken(r.Context(), w, s.authConfig.Logger, agentTokenCauseRefreshRevoked, "agent_id", id)
+		return
+	case errors.Is(credErr, errAgentCredentialNotFound):
+		refuseAgentToken(r.Context(), w, s.authConfig.Logger, agentTokenCauseRefreshUnrecorded, "agent_id", id)
+		return
+	case errors.Is(credErr, errAgentCredentialEmptyJTI):
+		refuseAgentToken(r.Context(), w, s.authConfig.Logger, agentTokenCauseRefreshMissingJTI, "agent_id", id)
+		return
+	case credErr != nil:
+		slog.Error("Token refresh: credential status lookup failed",
+			"agent_id", id, "error", credErr)
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"unable to verify credential status", nil)
+		return
+	default:
+		if oldCredentialID == "" {
 			oldCredentialID = cred.ID
 		}
 	}
@@ -5971,17 +5941,13 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// For legacy tokens, verify the agent is still authorized
-	if isLegacy {
-		if !agent.DeletedAt.IsZero() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"agent has been deleted", nil)
-			return
-		}
+	// A deleted or suspended agent gets no new token. A nil agent (a lookup
+	// with no row and no error) is left to AuthorizeAgentToken, which refuses it.
+	if agent != nil && !agent.DeletedAt.IsZero() {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"agent has been deleted", nil)
+		return
 	}
-	// A suspended agent gets no new token, whatever kind of token it
-	// presents. A nil agent (a lookup with no row and no error) is left to
-	// AuthorizeAgentToken, which refuses it.
 	if agent != nil && agent.Phase == string(state.PhaseSuspended) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"agent is suspended", nil)

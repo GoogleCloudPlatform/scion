@@ -88,12 +88,7 @@ func (f *materialFixture) reissueToken(t *testing.T, scopes []AgentTokenScope, a
 // row, the way a production mint does, so revocation applies to it.
 func mintRecordedMaterialToken(t *testing.T, srv *Server, s store.AgentCredentialStore, agentID, projectID string, scopes []AgentTokenScope, ancestry []string) string {
 	t.Helper()
-	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, scopes, ancestry)
-	require.NoError(t, err)
-	claims, err := srv.agentTokenService.ValidateAgentToken(token)
-	require.NoError(t, err)
-	insertTestAgentCredential(t, s, agentID, projectID, claims.ID)
-	return token
+	return generateRecordedAgentToken(t, srv.agentTokenService, s, agentID, projectID, scopes, ancestry)
 }
 
 // getAgent reloads the fixture's agent record from the store.

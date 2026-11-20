@@ -552,12 +552,9 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 	}
 
 	// Generate an agent token with refresh scope
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(
+	agentToken := srv.generateRecordedAgentToken(t,
 		tid("agent_gh_refresh3"), project.ID,
 		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
 
 	// Agent trying to refresh another agent's token should fail
 	rec := doRequestWithAgentTokenGH(t, srv, http.MethodPost,
@@ -595,12 +592,9 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 		t.Skip("agent token service not available")
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(
+	agentToken := srv.generateRecordedAgentToken(t,
 		tid("agent_gh_refresh4"), project.ID,
 		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
 
 	// Request should fail because project has no GitHub App installation
 	rec := doRequestWithAgentTokenGH(t, srv, http.MethodPost,

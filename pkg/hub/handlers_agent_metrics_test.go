@@ -59,12 +59,8 @@ func TestHandleAgentMetrics_SelfAuth(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
 	// Agent token with only ScopeAgentStatusUpdate (default scope).
-	token1, err := tokenSvc.GenerateAgentToken(agent1.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	token1 := srv.generateRecordedAgentToken(t, agent1.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	payload := metricsPayloadRequest{
 		Type:    "session_metrics",
@@ -129,11 +125,7 @@ func TestHandleAgentMetrics_Validation(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	sendMetrics := func(t *testing.T, payload metricsPayloadRequest) *httptest.ResponseRecorder {
 		t.Helper()
@@ -207,11 +199,7 @@ func TestHandleAgentMetrics_HappyPath(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	payload := metricsPayloadRequest{
 		Type:    "session_metrics",
@@ -248,7 +236,7 @@ func TestHandleAgentMetrics_HappyPath(t *testing.T) {
 
 	// Verify response body contains the created ID.
 	var respBody map[string]string
-	err = json.Unmarshal(rec.Body.Bytes(), &respBody)
+	err := json.Unmarshal(rec.Body.Bytes(), &respBody)
 	require.NoError(t, err, "response body should be valid JSON")
 	assert.NotEmpty(t, respBody["id"], "response should contain created record id")
 
@@ -288,8 +276,7 @@ func TestHandleAgentMetrics_RepeatedReportKeepsOneRow(t *testing.T) {
 		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	token, err := srv.GetAgentTokenService().GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	post := func(turns int, status string) (int, string) {
 		t.Helper()

@@ -356,13 +356,11 @@ const hub = await startHub({
 });
 ```
 
-**Legacy pre-table credential path:** `mintAgentToken` signs a stateless HS256
-JWT with a random `jti` (no `AgentCredential` DB row and no `run_id`). The hub
-accepts it via the legacy pre-table credential branch in
-`pkg/hub/agent_token_verify.go` (which logs one `WARN` per request) and requires
-`server.auth.agent_run_scope` to remain off. If that compatibility branch is
-closed or `agent_run_scope` is enabled, `createTestAgent` fails fast at
-`setStatus` with HTTP `401`.
+**Credential recording:** `createTestAgent` signs an HS256 JWT with a random
+`jti` and, when `hub.dbDir` is present (all `startHub(...)` runs), records the
+matching `agent_credentials` row in the test hub's SQLite database so
+`pkg/hub/agent_token_verify.go` accepts the token. `server.auth.agent_run_scope`
+must remain off because containerless test agents carry no `run_id`.
 
 ### Usage
 

@@ -186,15 +186,14 @@ func TestUnifiedAuthMiddleware_AgentToken(t *testing.T) {
 		t.Fatalf("failed to create agent token service: %v", err)
 	}
 
-	agentToken, err := agentTokenSvc.GenerateAgentToken("agent-456", "project-789", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	credStore := newMemAgentCredentialStore()
+	agentToken := generateRecordedAgentToken(t, agentTokenSvc, credStore, "agent-456", "project-789", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	cfg := AuthConfig{
-		Mode:          "production",
-		AgentTokenSvc: agentTokenSvc,
-		Debug:         false,
+		Mode:            "production",
+		AgentTokenSvc:   agentTokenSvc,
+		CredentialStore: credStore,
+		Debug:           false,
 	}
 
 	middleware := UnifiedAuthMiddleware(cfg)

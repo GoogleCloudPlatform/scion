@@ -32,15 +32,17 @@
  * or `env: { SCION_SERVER_SESSION_SECRET: E2E_SESSION_SECRET }` so the hub's
  * `agent_signing_key` is deterministically derived.
  *
- * Legacy pre-table credential path: `mintAgentToken` mints a stateless JWT with
- * a random `jti` (no `AgentCredential` DB row and no `run_id`). The hub accepts
- * it via the legacy pre-table credential branch in `pkg/hub/agent_token_verify.go`
- * (which logs one `WARN` per request) and requires `server.auth.agent_run_scope`
- * to remain off. If that compatibility branch is closed or `agent_run_scope` is
- * enabled, `createTestAgent` fails fast at `setStatus` with HTTP 401.
+ * Credential recording: `createTestAgent` mints an HS256 agent JWT with a random
+ * `jti` and, when `hub.dbDir` is provided (all real `startHub(...)` runs),
+ * inserts the matching row into the hub's `agent_credentials` SQLite table so
+ * `pkg/hub/agent_token_verify.go` accepts the token. `server.auth.agent_run_scope`
+ * must remain off because no `run_id` is bound to containerless agents.
  */
 
+import { execFileSync } from 'node:child_process';
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { DecisionResponseSetView, DecisionResponseView } from '../../src/shared/types.js';
 import { E2E_SESSION_SECRET, type HubState } from './hub.js';
 
@@ -371,15 +373,12 @@ export interface MintAgentTokenOptions {
 }
 
 /**
- * Signs a stateless HS256 agent JWT matching `AgentTokenService.SignAgentToken`
+ * Signs an HS256 agent JWT matching `AgentTokenService.SignAgentToken`
  * in `pkg/hub/agenttoken.go`.
  *
- * Because no `AgentCredential` DB row is inserted and `run_id` is omitted, the
- * hub admits this token through the legacy pre-table credential branch in
- * `pkg/hub/agent_token_verify.go` (which logs a `WARN` per request) as long as
- * `server.auth.agent_run_scope` remains off. If that compatibility branch is
- * closed or `agent_run_scope` is enabled, `createTestAgent` fails fast at
- * `setStatus` with HTTP 401.
+ * Callers targeting a real hub must also record the token's `jti` hash in
+ * `agent_credentials` (handled automatically by `createTestAgent` when
+ * `hub.dbDir` is present) and keep `server.auth.agent_run_scope` off.
  */
 export function mintAgentToken(options: MintAgentTokenOptions): string {
   const nowSec = options.nowSeconds ?? Math.floor(Date.now() / 1000);
@@ -487,12 +486,86 @@ export function classifyDecisionResponseDelivery(
   return 'logged_without_delivery';
 }
 
+function findHubDatabasePath(
+  hub: Pick<HubState, 'dbDir'> & Partial<Pick<HubState, 'homeDir'>>
+): string {
+  const direct = path.join(hub.dbDir, 'e2e.db');
+  if (fs.existsSync(direct)) {
+    return direct;
+  }
+  const roots = [hub.dbDir, hub.homeDir].filter((d): d is string => Boolean(d));
+  for (const root of roots) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isFile() && (entry.name === 'e2e.db' || entry.name === 'hub.db')) {
+        return path.join(root, entry.name);
+      }
+    }
+  }
+  throw new Error(`createTestAgent: could not locate hub SQLite DB under ${hub.dbDir}`);
+}
+
+/**
+ * Inserts a matching `agent_credentials` row into a test hub's SQLite database
+ * so a locally signed agent JWT passes credential lookup.
+ */
+export function recordAgentCredentialInSQLite(
+  dbPath: string,
+  record: {
+    agentId: string;
+    projectId: string;
+    jti: string;
+    issuedAtIso: string;
+    expiresAtIso: string;
+  }
+): void {
+  const credId = crypto.randomUUID();
+  const jtiHash = crypto.createHash('sha256').update(record.jti).digest('hex');
+  const py = `
+import sqlite3, sys
+db_path, cred_id, agent_id, project_id, jti_hash, issued_at, expires_at = sys.argv[1:8]
+con = sqlite3.connect(db_path, timeout=10.0)
+try:
+    con.execute(
+        """
+        INSERT INTO agent_credentials (
+            id, agent_id, project_id, token_jti_hash, run_id, issued_at, expires_at
+        ) VALUES (?, ?, ?, ?, '', ?, ?)
+        """,
+        (cred_id, agent_id, project_id, jti_hash, issued_at, expires_at),
+    )
+    con.commit()
+finally:
+    con.close()
+`;
+  execFileSync(
+    'python3',
+    [
+      '-c',
+      py,
+      dbPath,
+      credId,
+      record.agentId,
+      record.projectId,
+      jtiHash,
+      record.issuedAtIso,
+      record.expiresAtIso,
+    ],
+    { encoding: 'utf8' }
+  );
+}
+
 /**
  * Provisions a real containerless agent on `hub` (`provisionOnly: true`) and
  * returns an `AgentSender` authenticated via `X-Scion-Agent-Token`.
  */
 export async function createTestAgent(
-  hub: Pick<HubState, 'baseURL' | 'devToken'>,
+  hub: Pick<HubState, 'baseURL' | 'devToken'> & Partial<Pick<HubState, 'dbDir' | 'homeDir'>>,
   options: CreateTestAgentOptions
 ): Promise<AgentSender> {
   const suffix = crypto.randomBytes(4).toString('hex');
@@ -539,15 +612,37 @@ export async function createTestAgent(
   const name = agentRecord.name || slug;
   const projectId = agentRecord.projectId || options.projectId;
 
+  const jti = crypto.randomUUID();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ttlSeconds = options.tokenTtlSeconds ?? 3600;
+
   const token = mintAgentToken({
     agentId: id,
     projectId,
     role,
+    jti,
+    nowSeconds: nowSec,
+    ttlSeconds,
     ...(options.scopes !== undefined ? { scopes: options.scopes } : {}),
     ...(options.ancestry !== undefined ? { ancestry: options.ancestry } : {}),
     ...(options.signingSecret !== undefined ? { signingSecret: options.signingSecret } : {}),
-    ...(options.tokenTtlSeconds !== undefined ? { ttlSeconds: options.tokenTtlSeconds } : {}),
   });
+
+  if (hub.dbDir) {
+    recordAgentCredentialInSQLite(
+      findHubDatabasePath({
+        dbDir: hub.dbDir,
+        ...(hub.homeDir !== undefined ? { homeDir: hub.homeDir } : {}),
+      }),
+      {
+        agentId: id,
+        projectId,
+        jti,
+        issuedAtIso: new Date(nowSec * 1000).toISOString(),
+        expiresAtIso: new Date((nowSec + ttlSeconds) * 1000).toISOString(),
+      }
+    );
+  }
 
   const request = async <T = unknown>(
     apiPath: string,
@@ -591,7 +686,7 @@ export async function createTestAgent(
     if (!res.ok) {
       const hint =
         res.status === 401
-          ? ' (ensure startHub ran with testLogin: true or SCION_SERVER_SESSION_SECRET matching signingSecret, server.auth.agent_run_scope remains off, and the legacy pre-table credential branch in pkg/hub/agent_token_verify.go is active)'
+          ? ' (ensure startHub ran with testLogin: true or SCION_SERVER_SESSION_SECRET matching signingSecret, hub.dbDir is passed so the credential row is recorded, and server.auth.agent_run_scope remains off)'
           : '';
       throw new Error(`agent.setStatus(${id}) answered ${res.status}${hint}: ${res.text}`);
     }

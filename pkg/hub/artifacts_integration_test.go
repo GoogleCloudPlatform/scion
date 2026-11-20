@@ -285,14 +285,13 @@ func TestArtifactGrantsStayWithinAgentReadScope(t *testing.T) {
 			noRead = append(noRead, sc)
 		}
 	}
-	withoutScope, err := srv.GetAgentTokenService().GenerateAgentToken(grantee.ID, p2.ID, noRead, nil)
-	require.NoError(t, err)
+	withoutScope := srv.generateRecordedAgentToken(t, grantee.ID, p2.ID, noRead, nil)
 
 	// Publish as the owner, with a principal read grant for the grantee.
 	content := []byte("granted")
 	sum := sha256.Sum256(content)
 	digest := hex.EncodeToString(sum[:])
-	_, err = blobs.Upload(ctx, artifacts.BlobPath(srv.HubID(), digest), bytes.NewReader(content), storage.UploadOptions{})
+	_, err := blobs.Upload(ctx, artifacts.BlobPath(srv.HubID(), digest), bytes.NewReader(content), storage.UploadOptions{})
 	require.NoError(t, err)
 	now := time.Now()
 	a := &artifacts.Artifact{ID: tid("grant-artifact"), ScopeKind: artifacts.ScopeKindProject, ScopeRef: p1.ID,
@@ -402,8 +401,7 @@ func TestArtifactsPreArtifactCeilingTokenOnRoutes(t *testing.T) {
 	child := &store.Agent{ID: tid("art-preart-child"), Slug: "preart-child", Name: "preart-child", ProjectID: p1.ID, Phase: "running"}
 	require.NoError(t, s.CreateAgent(context.Background(), child))
 	issued := filterScopes(ScopesForRole(AgentRoleBaseline), preArtifactReadCeiling(), ScopeCeilings{})
-	childTok, err := srv.GetAgentTokenService().GenerateAgentToken(child.ID, p1.ID, issued, nil)
-	require.NoError(t, err)
+	childTok := srv.generateRecordedAgentToken(t, child.ID, p1.ID, issued, nil)
 
 	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=a.txt", []byte("a"), ownerTok)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())

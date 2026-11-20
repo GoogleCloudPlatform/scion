@@ -147,8 +147,7 @@ func TestArtifactsListMine(t *testing.T) {
 			noRead = append(noRead, sc)
 		}
 	}
-	noReadTok, err := srv.GetAgentTokenService().GenerateAgentToken(agent1.ID, p1.ID, noRead, nil)
-	require.NoError(t, err)
+	noReadTok := srv.generateRecordedAgentToken(t, agent1.ID, p1.ID, noRead, nil)
 	assert.Empty(t, agentList(noReadTok), "agent without project:artifact:read")
 
 	// The user leaves p1: the p1 artifact drops out; owned and granted stay.

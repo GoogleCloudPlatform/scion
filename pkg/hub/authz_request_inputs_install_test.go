@@ -1085,11 +1085,7 @@ func newListEndpointFixture(t *testing.T) *listEndpointFixture {
 	ensureHubMembership(ctx, f.store, f.nonMember.ID)
 
 	f.uatKey = mintScopedUAT(t, f.srv, f.owner.ID, f.project.ID, []string{"agent:read", "agent:list", "project:read"})
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
-	tok, err := svc.GenerateAgentToken(self.ID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
-	f.agentToken = tok
+	f.agentToken = f.srv.generateRecordedAgentToken(t, self.ID, f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 	return f
 }
 
@@ -1325,10 +1321,7 @@ func TestMemoInstall_ListEndpointsLoadInputsOncePerRequest(t *testing.T) {
 			createDCAgent(t, f.store, selfID, f.project.ID, f.owner.ID, AgentRoleFull)
 			createDCEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, store.DelegationPrincipalAgent, selfID,
 				store.RoleScopeProject, f.project.ID, string(AgentRoleFull))
-			svc := f.srv.GetAgentTokenService()
-			require.NotNil(t, svc)
-			tok, err := svc.GenerateAgentToken(selfID, f.project.ID, ScopesForRole(AgentRoleFull), []string{f.owner.ID})
-			require.NoError(t, err)
+			tok := f.srv.generateRecordedAgentToken(t, selfID, f.project.ID, ScopesForRole(AgentRoleFull), []string{f.owner.ID})
 			counts := func(masked bool) (map[string]int, int) {
 				mstore := newMemoTestStore(f.store)
 				orig := f.srv.authzService.store

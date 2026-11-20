@@ -629,11 +629,7 @@ func TestListProjectInjectedSkills_ForbiddenForAgentToken(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
-	agentToken, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	// Agent tokens are a non-UserIdentity caller; the else-guard must reject them.
 	req := httptest.NewRequest(http.MethodGet,

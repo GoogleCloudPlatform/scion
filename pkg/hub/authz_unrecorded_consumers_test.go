@@ -207,7 +207,6 @@ func TestUnrecordedEdgeDeniesSecretUseAndProjectSecretRead(t *testing.T) {
 		})
 	}
 
-	token, err := f.Server.agentTokenService.GenerateAgentToken(agentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{delegator})
-	require.NoError(t, err)
+	token := f.Server.generateRecordedAgentToken(t, agentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{delegator})
 	assertProjectDenied(t, f, agentID, token, "UNRECORDED_KEY")
 }

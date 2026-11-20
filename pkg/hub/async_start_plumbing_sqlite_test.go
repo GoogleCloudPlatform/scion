@@ -233,9 +233,10 @@ func TestAsyncStartGuard0f_RunlessSelfReportDuringStartLaunch(t *testing.T) {
 	// row's run applies. (The token is signed for the row's run: a run-less
 	// agent token against a row with a minted run is dropped, case below.)
 	plain := mk("g0f-plain", string(state.PhaseStarting))
-	runTok, _, err := srv.GetAgentTokenService().SignAgentToken(AgentTokenGrant{AgentID: plain.ID, ProjectID: plain.ProjectID,
+	runTok, cred, err := srv.GetAgentTokenService().SignAgentToken(AgentTokenGrant{AgentID: plain.ID, ProjectID: plain.ProjectID,
 		Scopes: []AgentTokenScope{ScopeAgentStatusUpdate}}, "run-new")
 	require.NoError(t, err)
+	require.NoError(t, s.CreateAgentCredential(ctx, cred))
 	req, err := http.NewRequest(http.MethodPost, "/api/v1/agents/"+plain.ID+"/status", strings.NewReader(report))
 	require.NoError(t, err)
 	req.Header.Set("X-Scion-Agent-Token", runTok)

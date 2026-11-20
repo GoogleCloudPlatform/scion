@@ -109,7 +109,7 @@ func TestDispatchFailureCompensates(t *testing.T) {
 
 	claims := f.mint().tokenClaims(t, childToken)
 	refresh := httptest.NewRecorder()
-	f.srv.handleAgentTokenRefresh(refresh, buildAgentRefreshRequest(childID, claims, "", false), childID)
+	f.srv.handleAgentTokenRefresh(refresh, buildAgentRefreshRequest(childID, claims, ""), childID)
 	assert.NotEqual(t, http.StatusOK, refresh.Code, refresh.Body.String())
 	_, _, err = f.srv.authzService.sourceEffectCeiling(context.Background(), &agentIdentityWrapper{AgentTokenClaims: claims})
 	assert.ErrorIs(t, err, ErrProvenanceChain)

@@ -330,16 +330,14 @@ func TestListGCPServiceAccounts_AssignStatusReadGate(t *testing.T) {
 	ok, _ := gate(NewAuthenticatedUser(owner.ID, owner.Email, "Owner", "member", "cli"), project.ID)
 	assert.True(t, ok, "the project owner may read the assign status")
 
-	tok, err := srv.agentTokenService.GenerateAgentToken(tid("assign-gate-agent"), "some-other-project", []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
+	tok := srv.generateRecordedAgentToken(t, tid("assign-gate-agent"), "some-other-project", []AgentTokenScope{ScopeProjectRead}, nil)
 	claims, err := srv.agentTokenService.ValidateAgentToken(tok)
 	require.NoError(t, err)
 	ok, code := gate(&agentIdentityWrapper{claims}, project.ID)
 	assert.False(t, ok, "an agent of another project is refused")
 	assert.Equal(t, http.StatusForbidden, code)
 
-	sameTok, err := srv.agentTokenService.GenerateAgentToken(tid("assign-gate-agent-own"), project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
+	sameTok := srv.generateRecordedAgentToken(t, tid("assign-gate-agent-own"), project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 	sameClaims, err := srv.agentTokenService.ValidateAgentToken(sameTok)
 	require.NoError(t, err)
 	ok, _ = gate(&agentIdentityWrapper{sameClaims}, project.ID)

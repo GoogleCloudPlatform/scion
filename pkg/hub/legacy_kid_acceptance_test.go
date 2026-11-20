@@ -234,6 +234,7 @@ func TestLegacyMode_AgentJWTKeyID(t *testing.T) {
 	now := time.Now()
 	claims := AgentTokenClaims{
 		Claims: jwt.Claims{
+			ID:      "jti-legacy-kid",
 			Subject: "agent-1", Issuer: AgentTokenIssuer, Audience: jwt.Audience{AgentTokenAudience},
 			IssuedAt: jwt.NewNumericDate(now), Expiry: jwt.NewNumericDate(now.Add(time.Hour)),
 		},

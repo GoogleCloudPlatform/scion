@@ -579,10 +579,9 @@ func TestHubPreStartHooks_List_AgentTokenRejected(t *testing.T) {
 
 	createHubHook(t, srv, "Baseline", "baseline", "#!/bin/sh\necho baseline\n")
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(
-		"agent-hub-psh", tid("project-hub-psh"), []AgentTokenScope{ScopeAgentStatusUpdate}, nil,
+	agentToken := srv.generateRecordedAgentToken(
+		t, "agent-hub-psh", tid("project-hub-psh"), []AgentTokenScope{ScopeAgentStatusUpdate}, nil,
 	)
-	require.NoError(t, err)
 
 	rec := doRequestWithToken(t, srv, agentToken, http.MethodGet, hubPSHPath, nil)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
@@ -593,10 +592,9 @@ func TestHubPreStartHooks_Get_AgentTokenRejected(t *testing.T) {
 
 	hook := createHubHook(t, srv, "Baseline", "baseline", "#!/bin/sh\necho baseline\n")
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(
-		"agent-hub-psh", tid("project-hub-psh"), []AgentTokenScope{ScopeAgentStatusUpdate}, nil,
+	agentToken := srv.generateRecordedAgentToken(
+		t, "agent-hub-psh", tid("project-hub-psh"), []AgentTokenScope{ScopeAgentStatusUpdate}, nil,
 	)
-	require.NoError(t, err)
 
 	rec := doRequestWithToken(t, srv, agentToken, http.MethodGet, hubPSHPath+"/"+hook.ID, nil)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())

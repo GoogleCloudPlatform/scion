@@ -1279,10 +1279,8 @@ func TestExternalBearer_ValidAgentToken_NeverTouchesGoogleValidator(t *testing.T
 	if err != nil {
 		t.Fatalf("NewAgentTokenService: %v", err)
 	}
-	agentToken, err := agentTokenSvc.GenerateAgentToken("agent-1", "project-1", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	if err != nil {
-		t.Fatalf("GenerateAgentToken: %v", err)
-	}
+	credStore := newMemAgentCredentialStore()
+	agentToken := generateRecordedAgentToken(t, agentTokenSvc, credStore, "agent-1", "project-1", []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	// A default error (rather than a zero-value fakeGoogleValidator, which
 	// returns (nil, nil)) means that if a mutation ever lets this "must not
@@ -1302,6 +1300,7 @@ func TestExternalBearer_ValidAgentToken_NeverTouchesGoogleValidator(t *testing.T
 	cfg := AuthConfig{
 		Mode:            "production",
 		AgentTokenSvc:   agentTokenSvc,
+		CredentialStore: credStore,
 		UserTokenSvc:    userTokenSvc,
 		FederationAuth:  federationAuthPointer(fa),
 		GoogleValidator: counting,

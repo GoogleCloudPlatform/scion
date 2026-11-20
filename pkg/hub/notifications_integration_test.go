@@ -43,7 +43,6 @@ type integrationTestEnv struct {
 	nd       *NotificationDispatcher
 	project  *store.Project
 	broker   *store.RuntimeBroker
-	tokenSvc *AgentTokenService
 }
 
 // setupIntegrationTest creates a test environment with:
@@ -95,9 +94,6 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 	nd.Start()
 	t.Cleanup(func() { nd.Stop() })
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
 	return &integrationTestEnv{
 		srv:      srv,
 		store:    s,
@@ -106,7 +102,6 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 		nd:       nd,
 		project:  project,
 		broker:   broker,
-		tokenSvc: tokenSvc,
 	}
 }
 
@@ -119,12 +114,11 @@ func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent 
 	// so seed a user sharing the calling agent's ID.
 	permSeedUser(t, context.Background(), env.store, callingAgent.ID)
 
-	token, err := env.tokenSvc.GenerateAgentToken(callingAgent.ID, env.project.ID, []AgentTokenScope{
+	token := env.srv.generateRecordedAgentToken(t, callingAgent.ID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 		ScopeAgentNotify,
 	}, nil)
-	require.NoError(t, err)
 
 	body, _ := json.Marshal(CreateAgentRequest{
 		Name:      subAgentName,
@@ -152,10 +146,9 @@ func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent 
 func (env *integrationTestEnv) updateStatusViaAPI(t *testing.T, agentID, status, message, taskSummary string) {
 	t.Helper()
 
-	token, err := env.tokenSvc.GenerateAgentToken(agentID, env.project.ID, []AgentTokenScope{
+	token := env.srv.generateRecordedAgentToken(t, agentID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 	}, nil)
-	require.NoError(t, err)
 
 	// Map status string to the appropriate field
 	statusUpdate := store.AgentStatusUpdate{
@@ -819,11 +812,10 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 	permSeedUser(t, ctx, env.store, parent.ID)
 
 	// Create sub-agent WITHOUT notify
-	token, err := env.tokenSvc.GenerateAgentToken(parent.ID, env.project.ID, []AgentTokenScope{
+	token := env.srv.generateRecordedAgentToken(t, parent.ID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 	}, nil)
-	require.NoError(t, err)
 
 	body, _ := json.Marshal(CreateAgentRequest{
 		Name:      "Child No Notify",

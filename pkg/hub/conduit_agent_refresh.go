@@ -80,7 +80,11 @@ func (s *Server) conduitAgentRefresh(ctx context.Context, p relay.Principal, ses
 // conduitRefreshUnevaluated) and, on ok, the refreshed credential's expiry
 // (zero: none). It logs and counts the outcome.
 func (s *Server) conduitAgentRefreshCheck(ctx context.Context, p relay.Principal, sess relay.RefreshSession, ar *conduitv1.AuthRefresh) (string, time.Time) {
-	log := slog.Default().With("subsystem", "hub.conduit",
+	authLog := s.authConfig.Logger
+	if authLog == nil {
+		authLog = slog.Default()
+	}
+	log := authLog.With("subsystem", "hub.conduit",
 		"principal_kind", p.Kind, "principal_id", p.ID, "session_id", sess.SessionID)
 	refuse := func(reason string) (string, time.Time) {
 		log.Warn("Conduit agent credential refresh refused", "outcome", conduitRefreshRefused, "reason", reason)
@@ -116,14 +120,22 @@ func (s *Server) conduitAgentRefreshCheck(ctx context.Context, p relay.Principal
 		route:     conduitRefreshRoute,
 		hello:     sess.EndpointIncarnation,
 	}
-	authLog := s.authConfig.Logger
-	if authLog == nil {
-		authLog = slog.Default()
-	}
 	switch _, refusal := verifyAgentTokenCredential(ctx, s.authConfig, authLog, claims, req, runScopeSourceConduit); refusal {
 	case agentTokenAccepted:
 	case agentTokenUnevaluated:
 		return unevaluated(errors.New("credential status, hold or token run unavailable"))
+	case agentTokenRevoked:
+		return refuse("credential_revoked")
+	case agentTokenUnrecorded:
+		return refuse("credential_unrecorded")
+	case agentTokenMissingJTI:
+		return refuse("credential_missing_jti")
+	case agentTokenHeld:
+		return refuse("held")
+	case agentTokenInvalidSubject:
+		return refuse("invalid_subject")
+	case agentTokenRunRefused:
+		return refuse("run_refused")
 	default:
 		return refuse("credential")
 	}

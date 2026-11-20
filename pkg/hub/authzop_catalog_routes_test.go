@@ -189,10 +189,7 @@ func assertPortProxyAdmitted(t *testing.T, who string, ep authzop.EntryPoint, pa
 func TestCatalogRoute_PortProxy_AgentSelfAccess(t *testing.T) {
 	srv, s := testServer(t)
 	_, agent := portProxyTestAgent(t, s, "self")
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentPortForward}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentPortForward}, nil)
 
 	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{"port": 4000}, token)
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -210,8 +207,7 @@ func TestCatalogRoute_PortProxy_AgentSelfAccess(t *testing.T) {
 	// A different agent (not the port's own agent) is rejected before
 	// Decide/CheckAccess is ever reached.
 	_, otherAgent := portProxyTestAgent(t, s, "self-other")
-	otherToken, err := tokenSvc.GenerateAgentToken(otherAgent.ID, otherAgent.ProjectID, []AgentTokenScope{ScopeAgentPortForward}, nil)
-	require.NoError(t, err)
+	otherToken := srv.generateRecordedAgentToken(t, otherAgent.ID, otherAgent.ProjectID, []AgentTokenScope{ScopeAgentPortForward}, nil)
 	rec = doAgentTokenRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/4000/proxy", nil, otherToken)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("a different agent's token must be rejected before Decide: got %d, want %d", rec.Code, http.StatusForbidden)
@@ -229,10 +225,7 @@ func TestCatalogRoute_PortProxy_UserSession(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	_, agent := portProxyTestAgent(t, s, "user")
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-	agentToken, err := tokenSvc.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentPortForward}, nil)
-	require.NoError(t, err)
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentPortForward}, nil)
 	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{"port": 4001}, agentToken)
 	require.Equal(t, http.StatusCreated, rec.Code)
 

@@ -1663,12 +1663,8 @@ type bearerFixture struct {
 // the handler-level authorization these tests are designed to exercise.
 func (f *bypassAgentsFixture) token(t *testing.T, scopes ...AgentTokenScope) string {
 	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
 	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
-	tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, allScopes, nil)
-	require.NoError(t, err)
-	return tok
+	return f.srv.generateRecordedAgentToken(t, f.caller.ID, f.caller.ProjectID, allScopes, nil)
 }
 
 // asAgent issues a request carrying the calling agent's token.

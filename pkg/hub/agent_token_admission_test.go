@@ -437,17 +437,13 @@ func TestPortTunnel_OnlyTheAgentItself(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "admin session: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "Only the agent can open its port tunnel")
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
 	other := &store.Agent{ID: tid("pf-other-agent"), Slug: "pf-other-agent", Name: "PF Other", ProjectID: agent.ProjectID, Phase: string(state.PhaseRunning)}
 	require.NoError(t, s.CreateAgent(context.Background(), other))
-	otherToken, err := tokenSvc.GenerateAgentToken(other.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentPortForward}, nil)
-	require.NoError(t, err)
+	otherToken := srv.generateRecordedAgentToken(t, other.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentPortForward}, nil)
 	rec = upgrade("X-Scion-Agent-Token", otherToken)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "another agent: %s", rec.Body.String())
 
-	noScope, err := tokenSvc.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	noScope := srv.generateRecordedAgentToken(t, agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	rec = upgrade("X-Scion-Agent-Token", noScope)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "own agent without the port-forward scope: %s", rec.Body.String())
 

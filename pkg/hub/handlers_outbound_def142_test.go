@@ -660,11 +660,8 @@ func TestDEF142_AC7_ConversationRef_ThroughRealMux(t *testing.T) {
 
 	// Mint a real agent JWT — the outbound-message handler requires agent
 	// auth (GetAgentIdentityFromContext), not user/dev auth.
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc, "agent token service must be available")
-	agentToken, err := tokenSvc.GenerateAgentToken(
+	agentToken := srv.generateRecordedAgentToken(t,
 		agent.ID, project.ID, ScopesForRole(AgentRoleBaseline), nil)
-	require.NoError(t, err)
 
 	// Create a group conversation the agent's project owns.
 	conv := &store.Conversation{

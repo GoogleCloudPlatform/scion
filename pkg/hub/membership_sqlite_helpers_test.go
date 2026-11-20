@@ -342,9 +342,7 @@ func (f *msFixture) agentToken(a *store.Agent, scopes ...AgentTokenScope) string
 	if len(scopes) == 0 {
 		scopes = ScopesForRole(AgentRoleFull)
 	}
-	tok, err := f.srv.agentTokenService.GenerateAgentToken(a.ID, a.ProjectID, scopes, a.Ancestry)
-	require.NoError(f.t, err)
-	return tok
+	return f.srv.generateRecordedAgentToken(f.t, a.ID, a.ProjectID, scopes, a.Ancestry)
 }
 
 // agentIdentity returns an in-process identity for the agent.

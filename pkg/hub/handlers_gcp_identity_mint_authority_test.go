@@ -537,9 +537,8 @@ func ptrMintAgent(t *testing.T, f *ptrFixture, slug, sourceID string) (string, s
 	require.NoError(t, f.store.UpdateAgent(context.Background(), got))
 	row := seedAssignment(t, f.store, got, sourceID, f.record.ID)
 	require.Equal(t, sourceID, row.SourcePrincipalID)
-	token, err := f.srv.agentTokenService.GenerateAgentToken(a.ID, f.project.ID,
+	token := f.srv.generateRecordedAgentToken(t, a.ID, f.project.ID,
 		[]AgentTokenScope{GCPTokenScopeForSA(f.record.ID)}, []string{f.owner.ID})
-	require.NoError(t, err)
 	return a.ID, token
 }
 

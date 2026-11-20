@@ -90,10 +90,11 @@ func agentTokenRefusalCases(t *testing.T, srv *Server, s store.Store, project *s
 	require.NoError(t, err)
 	cases = append(cases, agentTokenRefusalCase{name: "held", cause: "held", agentID: held.ID, token: heldTok})
 
-	subjectTok, _, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+	subjectTok, subjectCred, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
 		AgentID: "not-an-agent", ProjectID: project.ID, Scopes: ScopesForRole(AgentRoleFull),
 	}, "")
 	require.NoError(t, err)
+	require.NoError(t, s.CreateAgentCredential(ctx, subjectCred))
 	cases = append(cases, agentTokenRefusalCase{name: "invalid subject", cause: "invalid_subject", agentID: revoked.ID, token: subjectTok})
 
 	cases = append(cases, agentTokenRefusalCase{name: "invalid token", cause: "invalid_token", agentID: revoked.ID, token: "not-a-token"})
@@ -197,7 +198,7 @@ func revokedRefreshRequest(t *testing.T, srv *Server, s store.Store, project *st
 	if marker {
 		credID = cred.ID
 	}
-	return buildAgentRefreshRequest(agent.ID, claims, credID, false), agent.ID
+	return buildAgentRefreshRequest(agent.ID, claims, credID), agent.ID
 }
 
 // TestAgentTokenRefusalCauseIsLogged: each refusal cause is logged once

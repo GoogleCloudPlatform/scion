@@ -84,8 +84,7 @@ func newHubSecretReadFixture(t *testing.T) *hubSecretReadFixture {
 		Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	token, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, project.ID, nil, nil)
 	return &hubSecretReadFixture{srv: srv, agentToken: token}
 }
 

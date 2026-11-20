@@ -890,10 +890,7 @@ func setupAgentSecretTest(t *testing.T) (*Server, store.Store, string, string, s
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	agentToken := srv.generateRecordedAgentToken(t, agentID, projectID, nil, nil)
 
 	return srv, s, agentID, projectID, agentToken
 }
@@ -1076,10 +1073,7 @@ func clearCreateAgentProviderPath(t *testing.T, s store.Store, project *store.Pr
 // token with ScopeAgentStatusUpdate, the way sciontool does.
 func postAgentStatusAsAgent(t *testing.T, srv *Server, agent *store.Agent, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader([]byte(body)))
 	req.Header.Set("X-Scion-Agent-Token", token)
 	req.Header.Set("Content-Type", "application/json")
@@ -6141,36 +6135,24 @@ func (d *errorDispatcher) DispatchAgentMessage(_ context.Context, agent *store.A
 // "an agent reads its own project-scoped record" self-read path.
 func (f *projectAgentAuthzFixture) selfToken(t *testing.T, scopes ...AgentTokenScope) string {
 	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
 	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
-	tok, err := svc.GenerateAgentToken(f.target.ID, f.target.ProjectID, allScopes, nil)
-	require.NoError(t, err)
-	return tok
+	return f.srv.generateRecordedAgentToken(t, f.target.ID, f.target.ProjectID, allScopes, nil)
 }
 
 // callerToken mints an agent JWT for f.caller -- a different agent from
 // f.target, in the same project.
 func (f *projectAgentAuthzFixture) callerToken(t *testing.T, scopes ...AgentTokenScope) string {
 	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
 	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
-	tok, err := svc.GenerateAgentToken(f.caller.ID, f.caller.ProjectID, allScopes, nil)
-	require.NoError(t, err)
-	return tok
+	return f.srv.generateRecordedAgentToken(t, f.caller.ID, f.caller.ProjectID, allScopes, nil)
 }
 
 // strangerToken mints an agent JWT for f.stranger -- an agent in a different
 // project from f.target.
 func (f *projectAgentAuthzFixture) strangerToken(t *testing.T, scopes ...AgentTokenScope) string {
 	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
 	allScopes := append([]AgentTokenScope{ScopeProjectRead}, scopes...)
-	tok, err := svc.GenerateAgentToken(f.stranger.ID, f.stranger.ProjectID, allScopes, nil)
-	require.NoError(t, err)
-	return tok
+	return f.srv.generateRecordedAgentToken(t, f.stranger.ID, f.stranger.ProjectID, allScopes, nil)
 }
 
 func (f *projectAgentAuthzFixture) targetPath() string {
@@ -6664,11 +6646,8 @@ func (f *brokerAuthFixture) asAgent(t *testing.T, method, path string, body inte
 	_ = f.store.CreateAgent(ctx, agent)
 
 	// Mint an agent token.
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
-	tok, err := svc.GenerateAgentToken(agent.ID, agent.ProjectID,
+	tok := f.srv.generateRecordedAgentToken(t, agent.ID, agent.ProjectID,
 		[]AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
 
 	return doRequestWithAgentToken(t, f.srv, method, path, body, tok)
 }

@@ -18,8 +18,12 @@
  * `npm run test:e2e-support` in CI (ptone/scion#7776).
  */
 
+import { execFileSync } from 'node:child_process';
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { expect, test } from '@playwright/test';
 import {
   canonicalAgentUserDMKey,
@@ -266,6 +270,108 @@ test('createTestAgent provisions with provisionOnly, authenticates, and inspects
     expect(confirmRow?.attemptedAgentDelivery).toBe(false);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('createTestAgent records matching agent_credentials row when hub.dbDir is provided', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scion-agent-fixture-'));
+  const dbPath = path.join(tmpDir, 'e2e.db');
+  // Hand-written DDL mirrors pkg/ent/schema/agentcredential.go and must be kept in sync.
+  execFileSync(
+    'python3',
+    [
+      '-c',
+      `
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("""
+CREATE TABLE agent_credentials (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    token_jti_hash TEXT NOT NULL UNIQUE,
+    run_id TEXT NOT NULL DEFAULT '',
+    issued_at DATETIME NOT NULL,
+    expires_at DATETIME NOT NULL,
+    revoked_at DATETIME,
+    revoked_by TEXT,
+    revoke_reason TEXT,
+    last_seen_at DATETIME
+)
+""")
+con.commit()
+con.close()
+`,
+      dbPath,
+    ],
+    { encoding: 'utf8' }
+  );
+
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === `/api/v1/projects/${PROJECT_ID}/agents`) {
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            agent: {
+              id: AGENT_ID,
+              slug: 'db-asker',
+              name: 'db-asker',
+              projectId: PROJECT_ID,
+            },
+          })
+        );
+        return;
+      }
+      if (req.method === 'POST' && req.url === `/api/v1/agents/${AGENT_ID}/status`) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ applied: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  if (!addr || typeof addr !== 'object') {
+    server.close();
+    throw new Error('Could not bind local server');
+  }
+
+  try {
+    const agent = await createTestAgent(
+      { baseURL: `http://127.0.0.1:${addr.port}`, devToken: 'scion_dev_fake', dbDir: tmpDir },
+      { projectId: PROJECT_ID, name: 'db-asker' }
+    );
+    const payload = JSON.parse(
+      Buffer.from(agent.token.split('.')[1], 'base64url').toString('utf8')
+    ) as { jti: string };
+    const expectedHash = crypto.createHash('sha256').update(payload.jti).digest('hex');
+
+    const rowJson = execFileSync(
+      'python3',
+      [
+        '-c',
+        `
+import json, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+row = con.execute(
+    "SELECT agent_id, project_id, token_jti_hash, run_id, revoked_at FROM agent_credentials"
+).fetchone()
+con.close()
+print(json.dumps(list(row) if row else None))
+`,
+        dbPath,
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(JSON.parse(rowJson.trim())).toEqual([AGENT_ID, PROJECT_ID, expectedHash, '', null]);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 

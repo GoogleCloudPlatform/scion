@@ -117,10 +117,8 @@ func newPerfPairWith(t *testing.T, agentCount int, independent bool) *perfPair {
 	// Both servers share the store and its signing keys, so one agent JWT
 	// and one user access token work on both.
 	if agentCount > 0 {
-		var err error
-		p.agentToken, err = p.off.GetAgentTokenService().GenerateAgentToken(
+		p.agentToken = p.off.generateRecordedAgentToken(t,
 			tid(fmt.Sprintf("perf-%s-0", p.project.Slug)), p.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-		require.NoError(t, err)
 	}
 	p.uatKey = mintScopedUAT(t, p.off, p.alice.ID, p.project.ID, []string{"agent:manage"})
 	// Replace each server's audit emitter with a recorder, wired exactly as

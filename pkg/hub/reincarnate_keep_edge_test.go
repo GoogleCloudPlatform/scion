@@ -107,7 +107,7 @@ func (f *keepEdgeFixture) assertTargetCanCreateAgents(t *testing.T) {
 	assert.Contains(t, claims.Scopes, ScopeAgentCreate, "the mint issues the agent-create scope")
 
 	rec := httptest.NewRecorder()
-	f.srv.handleAgentTokenRefresh(rec, buildAgentRefreshRequest(target.ID, claims, "", false), target.ID)
+	f.srv.handleAgentTokenRefresh(rec, buildAgentRefreshRequest(target.ID, claims, ""), target.ID)
 	refreshed := refreshedToken(t, rec)
 	refreshedClaims, err := f.srv.agentTokenService.ValidateAgentToken(refreshed)
 	require.NoError(t, err)

@@ -658,10 +658,7 @@ func createPortForwardAgent(t *testing.T, srv *Server, s store.Store) (*store.Ag
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentPortForward}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentPortForward}, nil)
 	return agent, token
 }
 
@@ -732,9 +729,8 @@ func TestAgentPortProxyBareURLRedirect(t *testing.T) {
 			Phase:     string(state.PhaseRunning),
 		}
 		require.NoError(t, s.CreateAgent(ctx, other))
-		otherToken, err := srv.GetAgentTokenService().GenerateAgentToken(other.ID, agent.ProjectID,
+		otherToken := srv.generateRecordedAgentToken(t, other.ID, agent.ProjectID,
 			[]AgentTokenScope{ScopeAgentPortForward}, nil)
-		require.NoError(t, err)
 
 		for _, method := range []string{http.MethodGet, http.MethodHead} {
 			bare := doAgentTokenRequest(t, srv, method, base+"?x=1", nil, otherToken)
@@ -1086,9 +1082,8 @@ func TestAgentPortProxyBareURLWebSocketUnchanged(t *testing.T) {
 			Phase:     string(state.PhaseRunning),
 		}
 		require.NoError(t, s.CreateAgent(ctx, other))
-		otherToken, err := srv.GetAgentTokenService().GenerateAgentToken(other.ID, agent.ProjectID,
+		otherToken := srv.generateRecordedAgentToken(t, other.ID, agent.ProjectID,
 			[]AgentTokenScope{ScopeAgentPortForward}, nil)
-		require.NoError(t, err)
 
 		up, plain := send(base, otherToken, true), send(base, otherToken, false)
 		assert.Equal(t, http.StatusForbidden, up.Code, up.Body.String())

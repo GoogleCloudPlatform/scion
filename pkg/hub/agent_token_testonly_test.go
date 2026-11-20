@@ -17,19 +17,11 @@ package hub
 import (
 	"context"
 	"fmt"
-	"log/slog"
 )
 
-// The token helpers below sign tokens without a run. They exist for tests
+// The token helper below signs tokens without a run. It exists for tests
 // only; production mint sites authorize, sign and record mandatorily
 // (agent_token_mint.go).
-
-// GenerateAgentToken generates a JWT for an agent with the specified scopes.
-// Test-only: it records no credential.
-func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes []AgentTokenScope, ancestry []string) (string, error) {
-	token, _, err := s.SignAgentToken(AgentTokenGrant{AgentID: agentID, ProjectID: projectID, Scopes: scopes, Ancestry: ancestry}, "")
-	return token, err
-}
 
 // GenerateAgentToken generates a JWT for an agent.
 // This is a convenience method that delegates to the token service.
@@ -38,10 +30,10 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 // preserving dev-mode behavior where all agents get full access.
 // Additional scopes are merged with the role-based defaults, deduplicated.
 //
-// Test-only: it applies no delegation ceiling, and it records the
-// credential best-effort in the server's store, so it is defined only in a
-// _test.go file. Every mint and
-// refresh site uses AuthorizeAgentToken and a mandatory record.
+// Test-only: it applies no delegation ceiling, so it is defined only in a
+// _test.go file. It records the credential mandatorily in the server's store.
+// Every production mint and refresh site uses AuthorizeAgentToken and a
+// mandatory record.
 func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error) {
 	s.mu.RLock()
 	tokenService := s.agentTokenService
@@ -76,10 +68,11 @@ func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string
 	if err != nil {
 		return "", err
 	}
-	if s.store != nil {
-		if err := s.store.CreateAgentCredential(context.Background(), cred); err != nil {
-			slog.Warn("Failed to record agent credential", "agent_id", agentID, "error", err)
-		}
+	if s.store == nil {
+		return "", fmt.Errorf("agent credential store not initialized")
+	}
+	if err := s.store.CreateAgentCredential(context.Background(), cred); err != nil {
+		return "", fmt.Errorf("failed to record agent credential: %w", err)
 	}
 	return token, nil
 }

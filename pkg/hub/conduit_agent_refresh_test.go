@@ -171,9 +171,7 @@ func TestConduitAgentRefresh_RefusalsClose4401(t *testing.T) {
 		{name: "expired", token: func(t *testing.T, f *relayFixture) string {
 			svc, err := NewAgentTokenService(AgentTokenConfig{SigningKey: f.srv.agentTokenService.config.SigningKey, TokenDuration: -time.Hour})
 			require.NoError(t, err)
-			tok, err := svc.GenerateAgentToken(f.launched.ID, f.launched.ProjectID, ScopesForRole(AgentRoleFull), nil)
-			require.NoError(t, err)
-			return tok
+			return generateRecordedAgentToken(t, svc, f.store, f.launched.ID, f.launched.ProjectID, ScopesForRole(AgentRoleFull), nil)
 		}},
 		{name: "another agent", token: func(t *testing.T, f *relayFixture) string { return f.agentToken(t, f.agent) }},
 		{name: "another project", token: func(t *testing.T, f *relayFixture) string {
@@ -182,9 +180,7 @@ func TestConduitAgentRefresh_RefusalsClose4401(t *testing.T) {
 			return tok
 		}},
 		{name: "without agent:port:forward", token: func(t *testing.T, f *relayFixture) string {
-			tok, err := f.srv.agentTokenService.GenerateAgentToken(f.launched.ID, f.launched.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-			require.NoError(t, err)
-			return tok
+			return f.srv.generateRecordedAgentToken(t, f.launched.ID, f.launched.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 		}},
 		{name: "revoked", token: func(t *testing.T, f *relayFixture) string {
 			tok := f.agentToken(t, f.launched)
