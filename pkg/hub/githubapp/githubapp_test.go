@@ -789,3 +789,424 @@ func TestGetApp_LargeBody(t *testing.T) {
 		t.Errorf("error upstream detail exceeded %d bytes: got %d", upstreamBodyReadLimit, len(mintErr.UpstreamDetail()))
 	}
 }
+
+func makeRealisticRepoObject(id int64, name string) map[string]interface{} {
+	fullName := "acme-org/" + name
+	return map[string]interface{}{
+		"id":                id,
+		"node_id":           fmt.Sprintf("R_kgDO%d", id),
+		"name":              name,
+		"full_name":         fullName,
+		"private":           true,
+		"description":       strings.Repeat("Repository metadata for "+name+". ", 40),
+		"html_url":          "https://github.com/" + fullName,
+		"url":               "https://api.github.com/repos/" + fullName,
+		"clone_url":         "https://github.com/" + fullName + ".git",
+		"ssh_url":           "git@github.com:" + fullName + ".git",
+		"archive_url":       "https://api.github.com/repos/" + fullName + "/{archive_format}{/ref}",
+		"assignees_url":     "https://api.github.com/repos/" + fullName + "/assignees{/user}",
+		"blobs_url":         "https://api.github.com/repos/" + fullName + "/git/blobs{/sha}",
+		"branches_url":      "https://api.github.com/repos/" + fullName + "/branches{/branch}",
+		"collaborators_url": "https://api.github.com/repos/" + fullName + "/collaborators{/collaborator}",
+		"comments_url":      "https://api.github.com/repos/" + fullName + "/comments{/number}",
+		"commits_url":       "https://api.github.com/repos/" + fullName + "/commits{/sha}",
+		"compare_url":       "https://api.github.com/repos/" + fullName + "/compare/{base}...{head}",
+		"contents_url":      "https://api.github.com/repos/" + fullName + "/contents/{+path}",
+		"deployments_url":   "https://api.github.com/repos/" + fullName + "/deployments",
+		"downloads_url":     "https://api.github.com/repos/" + fullName + "/downloads",
+		"events_url":        "https://api.github.com/repos/" + fullName + "/events",
+		"forks_url":         "https://api.github.com/repos/" + fullName + "/forks",
+		"git_commits_url":   "https://api.github.com/repos/" + fullName + "/git/commits{/sha}",
+		"git_refs_url":      "https://api.github.com/repos/" + fullName + "/git/refs{/sha}",
+		"git_tags_url":      "https://api.github.com/repos/" + fullName + "/git/tags{/sha}",
+		"hooks_url":         "https://api.github.com/repos/" + fullName + "/hooks",
+		"issue_comment_url": "https://api.github.com/repos/" + fullName + "/issues/comments{/number}",
+		"issues_url":        "https://api.github.com/repos/" + fullName + "/issues{/number}",
+		"keys_url":          "https://api.github.com/repos/" + fullName + "/keys{/key_id}",
+		"labels_url":        "https://api.github.com/repos/" + fullName + "/labels{/name}",
+		"pulls_url":         "https://api.github.com/repos/" + fullName + "/pulls{/number}",
+		"releases_url":      "https://api.github.com/repos/" + fullName + "/releases{/id}",
+		"statuses_url":      "https://api.github.com/repos/" + fullName + "/statuses/{sha}",
+		"owner": map[string]interface{}{
+			"login":               "acme-org",
+			"id":                  1001,
+			"avatar_url":          "https://avatars.githubusercontent.com/u/1001?v=4",
+			"url":                 "https://api.github.com/users/acme-org",
+			"html_url":            "https://github.com/acme-org",
+			"repos_url":           "https://api.github.com/users/acme-org/repos",
+			"events_url":          "https://api.github.com/users/acme-org/events{/privacy}",
+			"received_events_url": "https://api.github.com/users/acme-org/received_events",
+			"type":                "Organization",
+		},
+	}
+}
+
+func makeRealisticInstallationObject(id int64, login string) map[string]interface{} {
+	return map[string]interface{}{
+		"id":                   id,
+		"app_id":               42,
+		"target_type":          "Organization",
+		"repository_selection": "selected",
+		"access_tokens_url":    fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", id),
+		"repositories_url":     "https://api.github.com/installation/repositories",
+		"html_url":             fmt.Sprintf("https://github.com/organizations/%s/settings/installations/%d", login, id),
+		"account": map[string]interface{}{
+			"login":               login,
+			"id":                  2000 + id,
+			"type":                "Organization",
+			"avatar_url":          fmt.Sprintf("https://avatars.githubusercontent.com/u/%d?v=4", 2000+id),
+			"url":                 "https://api.github.com/users/" + login,
+			"html_url":            "https://github.com/" + login,
+			"followers_url":       "https://api.github.com/users/" + login + "/followers",
+			"following_url":       "https://api.github.com/users/" + login + "/following{/other_user}",
+			"gists_url":           "https://api.github.com/users/" + login + "/gists{/gist_id}",
+			"starred_url":         "https://api.github.com/users/" + login + "/starred{/owner}{/repo}",
+			"subscriptions_url":   "https://api.github.com/users/" + login + "/subscriptions",
+			"organizations_url":   "https://api.github.com/users/" + login + "/orgs",
+			"repos_url":           "https://api.github.com/users/" + login + "/repos",
+			"events_url":          "https://api.github.com/users/" + login + "/events{/privacy}",
+			"received_events_url": "https://api.github.com/users/" + login + "/received_events",
+		},
+		"permissions": map[string]string{
+			"contents":      "write",
+			"issues":        "write",
+			"metadata":      "read",
+			"pull_requests": "write",
+		},
+		"events": []string{
+			"check_run", "check_suite", "commit_comment", "create", "delete",
+			"issue_comment", "issues", "pull_request", "pull_request_review",
+			"pull_request_review_comment", "push", "repository",
+		},
+		"extra_padding": strings.Repeat("installation-metadata-", 200),
+	}
+}
+
+func TestMintInstallationToken_LargeSuccessBody(t *testing.T) {
+	pemData, _ := generateTestKey(t)
+	expiresAt := time.Now().Add(1 * time.Hour).UTC().Truncate(time.Second)
+
+	payload := map[string]interface{}{
+		"token":                "ghs_large_repo_scoped_token",
+		"expires_at":           expiresAt.Format(time.RFC3339),
+		"permissions":          map[string]string{"contents": "write", "metadata": "read"},
+		"repository_selection": "selected",
+		"repositories": []interface{}{
+			makeRealisticRepoObject(101, "service-alpha"),
+			makeRealisticRepoObject(102, "service-beta"),
+		},
+	}
+	body, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if len(body) <= upstreamBodyReadLimit {
+		t.Fatalf("fixture must exceed %d bytes, got %d", upstreamBodyReadLimit, len(body))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{AppID: 42, APIBaseURL: server.URL}, pemData)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	tok, err := client.MintInstallationToken(context.Background(), 12345, []string{"service-alpha", "service-beta"}, DefaultTokenPermissions())
+	if err != nil {
+		t.Fatalf("MintInstallationToken failed on %d-byte response: %v", len(body), err)
+	}
+	if tok.Token != "ghs_large_repo_scoped_token" {
+		t.Errorf("Token = %q, want ghs_large_repo_scoped_token", tok.Token)
+	}
+	if !tok.ExpiresAt.Equal(expiresAt) {
+		t.Errorf("ExpiresAt = %v, want %v", tok.ExpiresAt, expiresAt)
+	}
+	if tok.Permissions["contents"] != "write" || tok.Permissions["metadata"] != "read" {
+		t.Errorf("unexpected permissions: %v", tok.Permissions)
+	}
+}
+
+func TestGetInstallation_LargeSuccessBody(t *testing.T) {
+	pemData, _ := generateTestKey(t)
+	body, err := json.MarshalIndent(makeRealisticInstallationObject(777, "acme-org"), "", "  ")
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if len(body) <= upstreamBodyReadLimit {
+		t.Fatalf("fixture must exceed %d bytes, got %d", upstreamBodyReadLimit, len(body))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{AppID: 42, APIBaseURL: server.URL}, pemData)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	inst, err := client.GetInstallation(context.Background(), 777)
+	if err != nil {
+		t.Fatalf("GetInstallation failed on %d-byte response: %v", len(body), err)
+	}
+	if inst.ID != 777 || inst.Account.Login != "acme-org" || inst.RepositorySelection != "selected" {
+		t.Errorf("unexpected installation: %+v", inst)
+	}
+}
+
+func TestListInstallations_LargeSuccessBody(t *testing.T) {
+	pemData, _ := generateTestKey(t)
+	items := []interface{}{
+		makeRealisticInstallationObject(10, "org-one"),
+		makeRealisticInstallationObject(20, "org-two"),
+	}
+	body, err := json.MarshalIndent(items, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if len(body) <= upstreamBodyReadLimit {
+		t.Fatalf("fixture must exceed %d bytes, got %d", upstreamBodyReadLimit, len(body))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{AppID: 42, APIBaseURL: server.URL}, pemData)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	got, err := client.ListInstallations(context.Background())
+	if err != nil {
+		t.Fatalf("ListInstallations failed on %d-byte response: %v", len(body), err)
+	}
+	if len(got) != 2 || got[0].Account.Login != "org-one" || got[1].Account.Login != "org-two" {
+		t.Errorf("unexpected installations: %+v", got)
+	}
+}
+
+func TestListInstallationRepos_LargeSuccessBody(t *testing.T) {
+	pemData, _ := generateTestKey(t)
+	reposBody, err := json.MarshalIndent(map[string]interface{}{
+		"total_count": 2,
+		"repositories": []interface{}{
+			makeRealisticRepoObject(201, "repo-one"),
+			makeRealisticRepoObject(202, "repo-two"),
+		},
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal repos payload: %v", err)
+	}
+	if len(reposBody) <= upstreamBodyReadLimit {
+		t.Fatalf("fixture must exceed %d bytes, got %d", upstreamBodyReadLimit, len(reposBody))
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(accessTokenResponse{Token: "ghs_list_repos_tok"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(reposBody)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{AppID: 42, APIBaseURL: server.URL}, pemData)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	repos, err := client.ListInstallationRepos(context.Background(), 12345)
+	if err != nil {
+		t.Fatalf("ListInstallationRepos failed on %d-byte response: %v", len(reposBody), err)
+	}
+	if len(repos) != 2 || repos[0].FullName != "acme-org/repo-one" || repos[1].FullName != "acme-org/repo-two" {
+		t.Errorf("unexpected repos: %+v", repos)
+	}
+}
+
+func TestReadBoundedBody(t *testing.T) {
+	t.Run("exact limit succeeds", func(t *testing.T) {
+		input := strings.Repeat("a", 16)
+		got, err := readBoundedBody(strings.NewReader(input), 16)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if string(got) != input {
+			t.Errorf("got %q, want %q", string(got), input)
+		}
+	})
+
+	t.Run("one byte over limit fails without truncating", func(t *testing.T) {
+		input := strings.Repeat("a", 17)
+		got, err := readBoundedBody(strings.NewReader(input), 16)
+		if !errors.Is(err, errResponseBodyTooLarge) {
+			t.Fatalf("expected errResponseBodyTooLarge, got %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil body on overflow, got %d bytes", len(got))
+		}
+	})
+}
+
+func TestSuccessBodyOverLimitRejected(t *testing.T) {
+	pemData, _ := generateTestKey(t)
+
+	// Valid JSON whose total size exceeds githubSuccessBodyReadLimit by a few bytes.
+	oversized := `{"token":"ghs_should_not_parse","pad":"` + strings.Repeat("x", githubSuccessBodyReadLimit) + `"}`
+	oversizedApp := `{"id":1,"pad":"` + strings.Repeat("x", appMetadataReadLimit) + `"}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/app/installations/12345/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(oversized))
+		case "/app/installations/99999/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"ghs_ok"}`))
+		case "/app":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(oversizedApp))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(oversized))
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{AppID: 42, APIBaseURL: server.URL}, pemData)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	t.Run("MintInstallationToken", func(t *testing.T) {
+		_, err := client.MintInstallationToken(context.Background(), 12345, []string{"repo"}, DefaultTokenPermissions())
+		var mintErr *TokenMintError
+		if !errors.As(err, &mintErr) {
+			t.Fatalf("expected TokenMintError, got %T: %v", err, err)
+		}
+		if mintErr.ErrorCode != ErrCodeTokenMintFailed {
+			t.Errorf("ErrorCode = %q, want %q", mintErr.ErrorCode, ErrCodeTokenMintFailed)
+		}
+		if !errors.Is(err, errResponseBodyTooLarge) {
+			t.Errorf("expected error wrapping errResponseBodyTooLarge, got %v", err)
+		}
+		if strings.Contains(mintErr.Message, "ghs_should_not_parse") || strings.Contains(mintErr.UpstreamDetail(), "ghs_should_not_parse") {
+			t.Error("response body content leaked into error")
+		}
+		if mintErr.UpstreamDetail() == "" {
+			t.Error("expected diagnostic UpstreamDetail for oversized response")
+		}
+	})
+
+	t.Run("GetInstallation", func(t *testing.T) {
+		_, err := client.GetInstallation(context.Background(), 12345)
+		if !errors.Is(err, errResponseBodyTooLarge) {
+			t.Fatalf("expected errResponseBodyTooLarge, got %v", err)
+		}
+	})
+
+	t.Run("ListInstallations", func(t *testing.T) {
+		_, err := client.ListInstallations(context.Background())
+		if !errors.Is(err, errResponseBodyTooLarge) {
+			t.Fatalf("expected errResponseBodyTooLarge, got %v", err)
+		}
+	})
+
+	t.Run("ListInstallationRepos", func(t *testing.T) {
+		_, err := client.ListInstallationRepos(context.Background(), 99999)
+		if !errors.Is(err, errResponseBodyTooLarge) {
+			t.Fatalf("expected errResponseBodyTooLarge, got %v", err)
+		}
+	})
+
+	t.Run("GetApp", func(t *testing.T) {
+		_, err := client.GetApp(context.Background())
+		if !errors.Is(err, errResponseBodyTooLarge) {
+			t.Fatalf("expected errResponseBodyTooLarge, got %v", err)
+		}
+	})
+}
+
+func TestListingCalls_ErrorBodiesRemainCapped(t *testing.T) {
+	pemData, _ := generateTestKey(t)
+	const tailMarker = "PAST-ERROR-CAP-MARKER"
+	largeErrBody := strings.Repeat("E", upstreamBodyReadLimit) + tailMarker
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(largeErrBody))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{AppID: 42, APIBaseURL: server.URL}, pemData)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"GetInstallation", func() error { _, err := client.GetInstallation(context.Background(), 1); return err }},
+		{"ListInstallations", func() error { _, err := client.ListInstallations(context.Background()); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			var mintErr *TokenMintError
+			if !errors.As(err, &mintErr) {
+				t.Fatalf("expected TokenMintError, got %T: %v", err, err)
+			}
+			if n := len(mintErr.UpstreamDetail()); n != upstreamBodyReadLimit {
+				t.Errorf("UpstreamDetail length = %d, want %d", n, upstreamBodyReadLimit)
+			}
+			if strings.Contains(mintErr.UpstreamDetail(), tailMarker) {
+				t.Error("bytes past upstreamBodyReadLimit were read")
+			}
+		})
+	}
+}
+
+func TestMintInstallationToken_ParseErrorPopulatesUpstreamDetail(t *testing.T) {
+	pemData, _ := generateTestKey(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"token":"ghs_truncated"`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{AppID: 42, APIBaseURL: server.URL}, pemData)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.MintInstallationToken(context.Background(), 12345, []string{"repo"}, DefaultTokenPermissions())
+	var mintErr *TokenMintError
+	if !errors.As(err, &mintErr) {
+		t.Fatalf("expected TokenMintError, got %T: %v", err, err)
+	}
+	if mintErr.ErrorCode != ErrCodeTokenMintFailed {
+		t.Errorf("ErrorCode = %q, want %q", mintErr.ErrorCode, ErrCodeTokenMintFailed)
+	}
+	if mintErr.UpstreamDetail() == "" {
+		t.Error("expected parse error detail in UpstreamDetail for server logging")
+	}
+	if strings.Contains(mintErr.UpstreamDetail(), "ghs_truncated") || strings.Contains(mintErr.Message, "ghs_truncated") {
+		t.Error("response body leaked into error")
+	}
+}

@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -122,6 +123,30 @@ const upstreamBodyReadLimit = 4 << 10
 // GetApp reads. Realistic GitHub App payloads (owner URLs, description,
 // subscribed events, and permissions) routinely exceed 4 KiB.
 const appMetadataReadLimit = 1 << 20
+
+// githubSuccessBodyReadLimit bounds how much of a successful GitHub API
+// response body MintInstallationToken, GetInstallation, ListInstallations,
+// and ListInstallationRepos read. A 100-item repository or installation page
+// can exceed 1 MiB, and this matches commentListResponseBodyLimit.
+const githubSuccessBodyReadLimit = 8 << 20
+
+// errResponseBodyTooLarge is returned when a successful GitHub API response
+// body exceeds its configured read bound.
+var errResponseBodyTooLarge = errors.New("response body exceeds read limit")
+
+// readBoundedBody reads r up to limit bytes. If r yields more than limit
+// bytes, it returns an error wrapping errResponseBodyTooLarge rather than
+// returning a silently truncated body.
+func readBoundedBody(r io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("%w (%d bytes)", errResponseBodyTooLarge, limit)
+	}
+	return body, nil
+}
 
 // Error codes for token minting failures.
 const (
@@ -400,27 +425,44 @@ func (c *Client) MintInstallationToken(ctx context.Context, installationID int64
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
-	if err != nil {
-		return nil, &TokenMintError{
-			ErrorCode: ErrCodeTokenMintFailed,
-			Message:   "failed to read response body",
-			Err:       err,
-		}
-	}
-
 	c.trackRateLimit(resp)
 
 	if resp.StatusCode != http.StatusCreated {
-		return nil, classifyGitHubError(resp.StatusCode, body)
+		errBody, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
+		if err != nil {
+			return nil, &TokenMintError{
+				ErrorCode: ErrCodeTokenMintFailed,
+				Message:   "failed to read response body",
+				Err:       err,
+				upstream:  err.Error(),
+			}
+		}
+		return nil, classifyGitHubError(resp.StatusCode, errBody)
+	}
+
+	body, err := readBoundedBody(resp.Body, githubSuccessBodyReadLimit)
+	if err != nil {
+		msg := "failed to read response body"
+		if errors.Is(err, errResponseBodyTooLarge) {
+			msg = "GitHub API response body exceeded size limit"
+		}
+		return nil, &TokenMintError{
+			ErrorCode:  ErrCodeTokenMintFailed,
+			StatusCode: resp.StatusCode,
+			Message:    msg,
+			Err:        err,
+			upstream:   err.Error(),
+		}
 	}
 
 	var tokenResp accessTokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, &TokenMintError{
-			ErrorCode: ErrCodeTokenMintFailed,
-			Message:   "failed to parse token response",
-			Err:       err,
+			ErrorCode:  ErrCodeTokenMintFailed,
+			StatusCode: resp.StatusCode,
+			Message:    "failed to parse token response",
+			Err:        err,
+			upstream:   err.Error(),
 		}
 	}
 
@@ -533,15 +575,19 @@ func (c *Client) GetInstallation(ctx context.Context, installationID int64) (*In
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
 	c.trackRateLimit(resp)
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, classifyGitHubError(resp.StatusCode, body)
+		errBody, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
+		}
+		return nil, classifyGitHubError(resp.StatusCode, errBody)
+	}
+
+	body, err := readBoundedBody(resp.Body, githubSuccessBodyReadLimit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	var installation Installation
@@ -578,16 +624,21 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 			return nil, fmt.Errorf("HTTP request failed: %w", err)
 		}
 
-		body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
-		_ = resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response: %w", err)
-		}
-
 		c.trackRateLimit(resp)
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, classifyGitHubError(resp.StatusCode, body)
+			errBody, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
+			_ = resp.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf("failed to read response: %w", err)
+			}
+			return nil, classifyGitHubError(resp.StatusCode, errBody)
+		}
+
+		body, err := readBoundedBody(resp.Body, githubSuccessBodyReadLimit)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
 
 		var installations []Installation
@@ -634,17 +685,19 @@ func (c *Client) ListInstallationRepos(ctx context.Context, installationID int64
 			return nil, fmt.Errorf("HTTP request failed: %w", err)
 		}
 
-		body, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
-		_ = resp.Body.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response: %w", err)
-		}
-
 		c.trackRateLimit(resp)
 
 		if resp.StatusCode != http.StatusOK {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, upstreamBodyReadLimit))
+			_ = resp.Body.Close()
 			// GitHub's body is not part of the error (ptone/scion#7498).
 			return nil, fmt.Errorf("failed to list repos (status %d)", resp.StatusCode)
+		}
+
+		body, err := readBoundedBody(resp.Body, githubSuccessBodyReadLimit)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
 
 		var result struct {
@@ -720,7 +773,7 @@ func (c *Client) GetApp(ctx context.Context) (map[string]interface{}, error) {
 		return nil, classifyGitHubError(resp.StatusCode, errBody)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, appMetadataReadLimit))
+	body, err := readBoundedBody(resp.Body, appMetadataReadLimit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
