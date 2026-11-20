@@ -27,6 +27,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 // On a hosted hub, a project-scope harness config is member content: its
@@ -82,13 +84,16 @@ func hostedHarnessConfigYAMLRefusal(name string, data []byte, present bool, runt
 }
 
 // hostedHarnessConfigManifestRefusal refuses a member-written harness
-// config whose manifest holds a file named config.yaml in another letter
-// case: a Runtime Broker on a case-insensitive filesystem could read it as
-// the harness config's config.yaml, which the Hub checks only under its
-// exact name.
+// config whose manifest holds a file named config.yaml in another spelling
+// that full Unicode case folding (cases.Fold over the NFD form, which also
+// maps ligatures such as U+FB01) makes equal to config.yaml: a Runtime
+// Broker on a case-insensitive filesystem could read it as the harness
+// config's config.yaml, which the Hub checks only under its exact name.
+// Paths in a subdirectory never match.
 func hostedHarnessConfigManifestRefusal(name string, files []store.TemplateFile) error {
+	fold := cases.Fold()
 	for _, f := range files {
-		if f.Path != harnessConfigYAMLPath && strings.EqualFold(f.Path, harnessConfigYAMLPath) {
+		if f.Path != harnessConfigYAMLPath && fold.String(norm.NFD.String(f.Path)) == harnessConfigYAMLPath {
 			return &hostedHarnessConfigError{err: fmt.Errorf("file %q in %s: config.yaml must be spelled in lower case on a hosted server",
 				f.Path, hostedguard.Origin{Kind: hostedguard.OriginHarnessConfig, Name: name})}
 		}

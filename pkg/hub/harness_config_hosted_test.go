@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// hostedHCConfigYAMLVariants are file names a case-insensitive filesystem
+// can read as config.yaml: other letter case, and the U+FB01 "fi" ligature,
+// which full case folding maps to "fi".
+var hostedHCConfigYAMLVariants = []string{"CONFIG.YAML", "con\ufb01g.yaml", "CON\ufb01G.YAML"}
 
 const (
 	// hostedHCVolYAML is a harness config with one host bind. Its source
@@ -92,7 +98,7 @@ func putHarnessConfigYAML(t *testing.T, srv *Server, hcID, yaml string) *httptes
 func putHarnessConfigFile(t *testing.T, srv *Server, hcID, filePath, content string) *httptest.ResponseRecorder {
 	t.Helper()
 	body := `{"content": "` + strings.ReplaceAll(content, "\n", `\n`) + `"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/harness-configs/"+hcID+"/files/"+filePath, strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/harness-configs/"+hcID+"/files/"+url.PathEscape(filePath), strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	rec := httptest.NewRecorder()
@@ -121,27 +127,41 @@ func TestHarnessConfigFileWrite_HostedProjectScope(t *testing.T) {
 			assert.Equal(t, hc.ContentHash, got.ContentHash, "row unchanged")
 		})
 	}
-	// A file named config.yaml in another letter case is refused on a
-	// hosted hub (a broker on a case-insensitive filesystem could read it
+	// A file named config.yaml in another spelling that full case folding
+	// maps to config.yaml (letter case, the U+FB01 ligature) is refused on
+	// a hosted hub (a broker on a case-insensitive filesystem could read it
 	// as config.yaml), and accepted on a workstation hub.
-	for _, workstation := range []bool{false, true} {
-		t.Run(map[bool]string{false: "hosted", true: "workstation"}[workstation]+" CONFIG.YAML", func(t *testing.T) {
+	for _, variant := range hostedHCConfigYAMLVariants {
+		for _, workstation := range []bool{false, true} {
+			t.Run(map[bool]string{false: "hosted", true: "workstation"}[workstation]+" "+variant, func(t *testing.T) {
+				srv, s, _ := testHarnessConfigFileServer(t)
+				hc := newHostedTestHC(t, srv, s, "hc-case", "case-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
+				srv.workstation = workstation
+				rec := putHarnessConfigFile(t, srv, hc.ID, variant, hostedHCVolYAML)
+				if workstation {
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					return
+				}
+				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				code, msg := decodeHostedRefusal(t, rec)
+				assert.Equal(t, hostedguard.ErrorCode, code)
+				assert.Contains(t, msg, `harness config "case-hc"`)
+				assert.Contains(t, msg, "config.yaml must be spelled in lower case")
+				assert.NotContains(t, rec.Body.String(), "member-secret-src")
+				got, err := s.GetHarnessConfig(ctx, hc.ID)
+				require.NoError(t, err)
+				assert.Equal(t, hc.ContentHash, got.ContentHash, "row unchanged")
+			})
+		}
+	}
+	// Spellings no case-insensitive filesystem reads as config.yaml stay
+	// ordinary files: a subdirectory's CONFIG.YAML and the dotless i.
+	for _, other := range []string{"sub/CONFIG.YAML", "conf\u0131g.yaml"} {
+		t.Run("hosted accepts "+other, func(t *testing.T) {
 			srv, s, _ := testHarnessConfigFileServer(t)
-			hc := newHostedTestHC(t, srv, s, "hc-case", "case-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
-			srv.workstation = workstation
-			rec := putHarnessConfigFile(t, srv, hc.ID, "CONFIG.YAML", hostedHCVolYAML)
-			if workstation {
-				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-				return
-			}
-			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-			code, msg := decodeHostedRefusal(t, rec)
-			assert.Equal(t, hostedguard.ErrorCode, code)
-			assert.Contains(t, msg, `file "CONFIG.YAML" in harness config "case-hc"`)
-			assert.NotContains(t, rec.Body.String(), "member-secret-src")
-			got, err := s.GetHarnessConfig(ctx, hc.ID)
-			require.NoError(t, err)
-			assert.Equal(t, hc.ContentHash, got.ContentHash, "row unchanged")
+			hc := newHostedTestHC(t, srv, s, "hc-other", "other-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
+			rec := putHarnessConfigFile(t, srv, hc.ID, other, "notes")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		})
 	}
 	for name, tc := range map[string]struct {
@@ -349,18 +369,21 @@ func TestDispatch_HostedHarnessConfigPrecheck(t *testing.T) {
 			assert.False(t, op.called(m), "no broker call")
 		})
 	}
-	t.Run("start refuses a stored CONFIG.YAML", func(t *testing.T) {
-		srv, s, _ := testHarnessConfigFileServer(t)
-		hc := newHostedTestHC(t, srv, s, "hc-case-stored", "case-stored-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
-		addHostedTestHCFile(t, srv, hc, "CONFIG.YAML", hostedHCVolYAML)
-		d, m, a := hostedHCDispatcher(t, srv, s, hc, true)
-		err := d.DispatchAgentStart(ctx, a, "task", false)
-		var refusal *RuntimeTargetRefusal
-		require.True(t, errors.As(err, &refusal), "refused with a typed refusal: %v", err)
-		assert.Equal(t, hostedguard.ErrorCode, refusal.Code)
-		assert.Contains(t, refusal.Message, `file "CONFIG.YAML" in harness config "case-stored-hc"`)
-		assert.False(t, m.startCalled, "no broker call")
-	})
+	for _, variant := range hostedHCConfigYAMLVariants {
+		t.Run("start refuses a stored "+variant, func(t *testing.T) {
+			srv, s, _ := testHarnessConfigFileServer(t)
+			hc := newHostedTestHC(t, srv, s, "hc-case-stored", "case-stored-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
+			addHostedTestHCFile(t, srv, hc, variant, hostedHCVolYAML)
+			d, m, a := hostedHCDispatcher(t, srv, s, hc, true)
+			err := d.DispatchAgentStart(ctx, a, "task", false)
+			var refusal *RuntimeTargetRefusal
+			require.True(t, errors.As(err, &refusal), "refused with a typed refusal: %v", err)
+			assert.Equal(t, hostedguard.ErrorCode, refusal.Code)
+			assert.Contains(t, refusal.Message, `harness config "case-stored-hc"`)
+			assert.Contains(t, refusal.Message, "config.yaml must be spelled in lower case")
+			assert.False(t, m.startCalled, "no broker call")
+		})
+	}
 	t.Run("workstation hub dispatches a stored CONFIG.YAML", func(t *testing.T) {
 		srv, s, _ := testHarnessConfigFileServer(t)
 		hc := newHostedTestHC(t, srv, s, "hc-case-ws", "case-ws-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
