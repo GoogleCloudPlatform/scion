@@ -40,6 +40,12 @@ import { stateManager } from '../../client/state.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, decisionsEnabled } from '../../utils/feature-flags.js';
 
 import type { User, Project } from '../../shared/types.js';
+import {
+  brandMarkStyles,
+  observeBranding,
+  renderAttribution,
+  renderSidebarBrand,
+} from '../shared/brand-mark.js';
 
 interface NavItem {
   path: string;
@@ -188,6 +194,8 @@ export class ScionProfileNav extends LitElement {
   };
 
   static override styles = css`
+    ${brandMarkStyles}
+
     :host {
       display: flex;
       flex-direction: column;
@@ -410,7 +418,7 @@ export class ScionProfileNav extends LitElement {
 
     .nav-link.active {
       background: var(--scion-primary, #3b82f6);
-      color: white;
+      color: var(--scion-primary-text, #ffffff);
     }
 
     .nav-link.active:hover {
@@ -458,9 +466,9 @@ export class ScionProfileNav extends LitElement {
     }
 
     .nav-link.active .decisions-nav-badge::part(base) {
-      background: rgba(255, 255, 255, 0.22);
-      color: #ffffff;
-      border-color: rgba(255, 255, 255, 0.45);
+      background: color-mix(in srgb, var(--scion-primary-text, #ffffff) 22%, transparent);
+      color: var(--scion-primary-text, #ffffff);
+      border-color: color-mix(in srgb, var(--scion-primary-text, #ffffff) 45%, transparent);
     }
 
     :host([collapsed]) .decisions-nav-badge {
@@ -627,7 +635,25 @@ export class ScionProfileNav extends LitElement {
       width: 0;
       pointer-events: none;
     }
+
+    .sidebar-attribution {
+      padding: 0.25rem 0.75rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    :host([collapsed]) .sidebar-attribution {
+      display: none;
+    }
   `;
+
+  constructor() {
+    super();
+    observeBranding(this);
+  }
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -804,11 +830,11 @@ export class ScionProfileNav extends LitElement {
   override render(): TemplateResult {
     return html`
       <div class="logo">
-        <div class="logo-icon">🌱</div>
-        <div class="logo-text">
-          <h1>Scion</h1>
-          <span>Profile &amp; Settings</span>
-        </div>
+        ${renderSidebarBrand({
+          collapsed: this.collapsed,
+          subtitleFallback: 'Profile & Settings',
+          alwaysShowSubtitle: true,
+        })}
       </div>
 
       <a href="/" class="return-link" aria-label="Return to Hub" title="Return to Hub">
@@ -892,6 +918,7 @@ export class ScionProfileNav extends LitElement {
         )}
       </nav>
 
+      ${renderAttribution('sidebar-attribution')}
       ${this.hideCollapse
         ? ''
         : html`

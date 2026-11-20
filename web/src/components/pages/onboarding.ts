@@ -25,6 +25,8 @@ import {
 } from '../shared/test-hub-banner.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { getBrandName } from '../../client/branding.js';
+import { observeBranding } from '../shared/brand-mark.js';
 import { dispatchMembershipChanged } from '../../utils/membership-events.js';
 import { loadPage } from '../../client/navigation.js';
 import type { HarnessConfig } from '../../shared/types.js';
@@ -243,6 +245,11 @@ export class ScionPageOnboarding extends LitElement {
 
   /** The test-hub banner's status (shared/test-hub-banner.ts). */
   private _testHubBanner = new TestHubBannerController(this, { standalone: true });
+
+  constructor() {
+    super();
+    observeBranding(this);
+  }
 
   static override styles = css`
     ${testHubBannerStyles}
@@ -763,7 +770,7 @@ export class ScionPageOnboarding extends LitElement {
 
   private renderIdentity() {
     return html`
-      <h1>Welcome to Scion</h1>
+      <h1>Welcome to ${getBrandName()}</h1>
       <p>Let's get your workstation set up. First, tell us who you are.</p>
 
       <div class="form-group">
@@ -1535,8 +1542,8 @@ export class ScionPageOnboarding extends LitElement {
     return html`
       <h2>Welcome project</h2>
       <p>
-        Scion can set up a "welcome" project with the latest agent-team templates and a coordinator
-        agent that greets you in chat.
+        ${getBrandName()} can set up a "welcome" project with the latest agent-team templates and a
+        coordinator agent that greets you in chat.
       </p>
       ${this.welcomePhase === 'loading'
         ? html`<div class="loading-state">

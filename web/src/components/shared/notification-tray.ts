@@ -25,6 +25,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
+import { getBrandName, getNotificationIconUrl } from '../../client/branding.js';
 import { stateManager } from '../../client/state.js';
 import { dispatchTrayCount } from '../../client/tray-count-events.js';
 import {
@@ -708,7 +709,7 @@ export class ScionNotificationTray extends LitElement {
     new window.Notification(title, {
       body: excerpt ? `${n.message}\n\u201c${excerpt}\u201d` : n.message,
       tag: decisions ? DECISIONS_WAITING_KIND : n.id, // deduplicate in OS notification center
-      icon: '/scion-notification-icon.png',
+      icon: getNotificationIconUrl(),
     });
   }
 
@@ -729,7 +730,7 @@ export class ScionNotificationTray extends LitElement {
       case DECISIONS_WAITING_STATUS:
         return 'Decisions waiting';
       default:
-        return 'Scion Notification';
+        return `${getBrandName()} Notification`;
     }
   }
 

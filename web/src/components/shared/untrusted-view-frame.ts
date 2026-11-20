@@ -28,6 +28,7 @@
 
 import { html, css } from 'lit';
 import type { TemplateResult } from 'lit';
+import { getBrandName } from '../../client/branding.js';
 
 /**
  * The frame's sandbox. Never add allow-same-origin: combined with
@@ -56,7 +57,7 @@ export function renderUntrustedViewFrame(opts: UntrustedViewFrameOptions): Templ
     <div class="untrusted">
       <div class="untrusted-bar">
         <sl-icon name="shield-lock"></sl-icon>
-        Content published by ${opts.owner} · runs sandboxed, isolated from Scion
+        Content published by ${opts.owner} · runs sandboxed, isolated from ${getBrandName()}
       </div>
       <iframe
         title=${`${opts.title} (sandboxed)`}

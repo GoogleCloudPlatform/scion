@@ -1,4 +1,5 @@
 import type { User } from '../shared/types.js';
+import { BRANDING_UPDATED_EVENT, getBrandName, isCustomBranding } from './branding.js';
 import {
   TerminalSessionRegistry,
   AGENT_UNAVAILABLE_REASONS,
@@ -367,6 +368,10 @@ export class TerminalWorkspaceRoot {
    */
   private _frameEntered = false;
 
+  private terminalViewerTitle(): string {
+    return isCustomBranding() ? `${getBrandName()} Terminal Viewer` : '🌱 Scion Terminal Viewer';
+  }
+
   constructor(user: User | null = null) {
     this.user = user;
     this.element.id = 'terminal-workspace';
@@ -380,8 +385,11 @@ export class TerminalWorkspaceRoot {
     this.installStyles();
     this.header.user = user;
     this.header.currentPath = this.currentPath;
-    this.header.pageTitle = '🌱 Scion Terminal Viewer';
+    this.header.pageTitle = this.terminalViewerTitle();
     this.header.showMobileMenu = false;
+    window.addEventListener(BRANDING_UPDATED_EVENT, () => {
+      this.header.pageTitle = this.terminalViewerTitle();
+    });
 
     this.shell.className = 'terminal-workspace-shell';
     this.rail.className = 'terminal-rail';

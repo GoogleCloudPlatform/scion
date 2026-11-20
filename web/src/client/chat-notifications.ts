@@ -36,6 +36,7 @@
  */
 
 import { apiFetch } from './api.js';
+import { getNotificationIconUrl } from './branding.js';
 import { chatDMsLoad } from './chat-list-cache.js';
 import { chatConversationPath } from './chat-routes.js';
 import { canShowPushNotification } from './push-preference.js';
@@ -444,7 +445,7 @@ export class ChatNotificationDispatcher {
     const popup = this.notify(chatMessageTitle(n, info), {
       body: chatMessageBody(n),
       tag: chatMessageTag(n),
-      icon: '/scion-notification-icon.png',
+      icon: getNotificationIconUrl(),
     });
 
     if (popup && path) {
