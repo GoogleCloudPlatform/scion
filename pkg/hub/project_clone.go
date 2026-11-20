@@ -791,7 +791,13 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 		}
 	})
 
+	srcToClonedID := make(map[string]string, len(accounts))
 	for _, sa := range accounts {
+		if s.isHubOwnServiceAccountEmail(sa.Email) {
+			slog.Warn("project clone skipped reserved GCP service account",
+				"src_project_id", srcProjectID, "clone_id", clone.ID, "sa_id", sa.ID, "email", sa.Email)
+			continue
+		}
 		newSA := &store.GCPServiceAccount{
 			ID:            api.NewUUID(),
 			Scope:         store.ScopeProject,
@@ -810,6 +816,7 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 			return err
 		}
 		clonedIDs = append(clonedIDs, newSA.ID)
+		srcToClonedID[sa.ID] = newSA.ID
 	}
 
 	// Remap the per-profile default SA map's entries that reference a
@@ -817,12 +824,9 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 	if byProfile := profileDefaultSAIDsFromAnnotations(clone.Annotations); len(byProfile) > 0 {
 		changed := false
 		for profile, saID := range byProfile {
-			for i, srcSA := range accounts {
-				if srcSA.ID == saID {
-					byProfile[profile] = clonedIDs[i]
-					changed = true
-					break
-				}
+			if newID, ok := srcToClonedID[saID]; ok {
+				byProfile[profile] = newID
+				changed = true
 			}
 		}
 		if changed {

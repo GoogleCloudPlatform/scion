@@ -280,6 +280,18 @@ func (s *Server) buildGCPServiceAccountStatus(ctx context.Context, project *stor
 		Agents:                  GCPServiceAccountAgents{Names: []string{}},
 	}
 	st.NextStep = gcpSANextStepForBinding(st.Verification.Verified, st.Mappings, st.DefaultFor, st.WorkloadIdentityBinding)
+	if s.isHubOwnServiceAccountEmail(sa.Email) {
+		st.Verification.Verified = false
+		st.Verification.Status = store.GCPVerificationFailed
+		if st.Verification.Error == "" {
+			st.Verification.Error = gcpSAHubIdentityFlagError
+		}
+		st.NextStep = GCPServiceAccountNextStep{
+			Code: GCPSANextStepNotVerified,
+			Message: "This account matches the Hub's own GCP service account identity and cannot be used by agents. " +
+				"Remove this service account registration and assign agents a dedicated service account.",
+		}
+	}
 	return st
 }
 

@@ -645,6 +645,11 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 		}
 	}
 
+	if code, msg, refused := s.gcpServiceAccountEmailRefusal(req.Email); refused {
+		writeError(w, http.StatusBadRequest, code, msg, nil)
+		return
+	}
+
 	sa := &store.GCPServiceAccount{
 		ID:            uuid.New().String(),
 		Scope:         store.ScopeHub,

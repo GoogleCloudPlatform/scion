@@ -586,6 +586,12 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 		return &saAssignDenial{kind: saAssignDenyForbidden}
 	}
 
+	if code, msg, refused := s.gcpServiceAccountEmailRefusal(sa.Email); refused {
+		slog.Warn("service-account assignment denied: reserved service account identity",
+			"surface", surface, "sa_id", sa.ID, "targetSA", sa.Email)
+		return &saAssignDenial{kind: saAssignDenyValidation, code: code, msg: msg}
+	}
+
 	// Preconditions: the shared service-account rules.
 	mode := s.saAssignCheckModeValue()
 	if pre := saAssignPolicyPreconditions(sa, projectID, mode); pre != nil {

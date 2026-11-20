@@ -493,6 +493,11 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "applyGCPVerificationResult", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.verify"},
 
 	// -----------------------------------------------------------------------
+	// pkg/hub/gcp_sa_reserved.go — startup scan for reserved GCP SA identities
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/gcp_sa_reserved.go", Function: "ScanReservedGCPServiceAccounts", Symbol: "UpdateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Startup scan flags existing GCP service account rows matching Hub's own identity", Scope: "pkg/hub/gcp_sa_reserved.go"}},
+
+	// -----------------------------------------------------------------------
 	// pkg/hub/gcp_sa_remove.go — shared delete body (ptone/scion#4022)
 	// -----------------------------------------------------------------------
 	// Both DELETE routes (nested deleteGCPServiceAccount and flat

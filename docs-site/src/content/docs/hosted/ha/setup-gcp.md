@@ -394,19 +394,28 @@ behalf of the transport SA (via `gcpTransportMinter.MintIDToken`). This token is
 `Authorization: Bearer` for all Hub API calls through IAP. The `serviceAccountTokenCreator`
 role authorizes the Hub SA to mint tokens as the transport SA.
 
-### 2d. Hub Runner SA — Token Creator on Itself
+### 2d. Hub Runner SA — Blob Signing on Itself (for Signed URLs)
 
-The Hub generates signed GCS URLs for template files when dispatching agents. This operation requires the `iam.serviceAccounts.signBlob` permission, which requires the Hub Runner SA to have the Token Creator role on **itself**:
+The Hub generates signed GCS URLs for template files and download links when dispatching agents. This operation requires only the `iam.serviceAccounts.signBlob` permission on the Hub Runner SA itself.
+
+Grant a minimal custom role containing only `iam.serviceAccounts.signBlob` on the Hub Runner SA instead of `roles/iam.serviceAccountTokenCreator` (which also grants token minting permissions that the Hub does not need on its own identity):
 
 ```bash
+gcloud iam roles create scionBlobSigner \
+  --project=$PROJECT_ID \
+  --title="Scion Blob Signer" \
+  --description="Minimal role allowing only iam.serviceAccounts.signBlob for GCS signed URLs" \
+  --permissions=iam.serviceAccounts.signBlob \
+  --stage=GA
+
 gcloud iam service-accounts add-iam-policy-binding \
   $SA_HUB \
   --member="serviceAccount:$SA_HUB" \
-  --role="roles/iam.serviceAccountTokenCreator" \
+  --role="projects/$PROJECT_ID/roles/scionBlobSigner" \
   --project=$PROJECT_ID
 ```
 
-Without this binding, template generation will fail with: `Permission 'iam.serviceAccounts.signBlob' denied on resource`.
+Without this binding, signed URL generation will fail with: `Permission 'iam.serviceAccounts.signBlob' denied on resource`.
 
 ### 2e. Hub Runner SA — IAM Security Reviewer (Optional, for Policy Troubleshooter)
 
@@ -736,7 +745,7 @@ gcloud projects get-iam-policy $PROJECT_ID \
 | `scion-hub-runner` | `roles/storage.objectAdmin` | Project | GCS bucket read/write |
 | `scion-hub-runner` | `roles/secretmanager.admin` | Project | Read, write, create secret values |
 | `scion-hub-runner` | `roles/container.developer` | Project | GKE agent dispatch |
-| `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On itself** | Generate GCS signed URLs |
+| `scion-hub-runner` | `projects/$PROJECT_ID/roles/scionBlobSigner` (`iam.serviceAccounts.signBlob`) | **On itself** | Generate GCS signed URLs / download links |
 | `scion-hub-runner` | `roles/iam.serviceAccountTokenCreator` | **On `scion-transport` SA** | Mint IAP tokens for agents |
 | `scion-hub-runner` | `roles/iam.securityReviewer` | Project/Org, plus each project that holds an assigned SA | Policy Troubleshooter (required for SA assignment when `gcp_iam_check_mode: enforce`) |
 | `scion-transport` | `roles/iap.httpsResourceAccessor` | Project | Allow IAP access to Hub |
