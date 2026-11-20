@@ -251,78 +251,33 @@ function selectTerminalFromDropdown(agentId: string): void {
   );
 }
 
-export function onTerminalsTriggerClick(
-  e: MouseEvent,
-  setOpen: (open: boolean) => void,
-  currentOpen: boolean
-): void {
-  const dd = (e.currentTarget as HTMLElement).closest('sl-dropdown') as { show?: unknown } | null;
-  if (!dd?.show) setOpen(!currentOpen);
-}
-
-export function onTerminalsTriggerKey(
-  e: KeyboardEvent,
-  root: ShadowRoot | null,
-  setOpen: (open: boolean) => void
-): void {
+/**
+ * Shoelace `<sl-dropdown>` opens on `Enter`/`Space` via `handleTriggerClick()`
+ * without focusing the first `<sl-menu-item>` (unlike `ArrowDown`/`Home`).
+ * Focus the first enabled item once the dropdown finishes opening so keyboard
+ * users land directly in the menu on `Enter` or `Space` as well.
+ */
+export function onTerminalsTriggerKey(e: KeyboardEvent, root: ShadowRoot | null): void {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
   const dd = (e.currentTarget as HTMLElement).closest('sl-dropdown') as
-    | (HTMLElement & { open?: boolean; show?: unknown; updateComplete?: Promise<boolean> })
+    | (HTMLElement & {
+        open?: boolean;
+        updateComplete?: Promise<boolean>;
+        getMenu?: () => { setCurrentItem?: (item: HTMLElement) => void } | undefined;
+      })
     | null;
-  if (dd?.show) {
-    if (e.key === 'Enter' || e.key === ' ') {
-      queueMicrotask(
-        () => void dd.updateComplete?.then(() => dd.open && menuItems(root)[0]?.focus())
-      );
-    }
-    return;
-  }
-  if (['ArrowDown', 'Home', 'Enter', ' '].includes(e.key)) {
-    e.preventDefault();
-    setOpen(true);
-    menuItems(root)[0]?.focus();
-  } else if (e.key === 'ArrowUp' || e.key === 'End') {
-    e.preventDefault();
-    setOpen(true);
-    menuItems(root).at(-1)?.focus();
-  }
-}
-
-export function onTerminalsMenuKey(
-  e: KeyboardEvent,
-  root: ShadowRoot | null,
-  setOpen: (open: boolean) => void
-): void {
-  const dd = (e.currentTarget as HTMLElement).closest('sl-dropdown');
-  if ((dd as { show?: unknown } | null)?.show) return;
-  if (e.key === 'Escape') {
-    e.preventDefault();
-    e.stopPropagation();
-    setOpen(false);
-    dd?.querySelector<HTMLElement>('.terminals-menu-trigger')?.focus();
-    return;
-  }
-  const items = menuItems(root);
-  const active = root?.activeElement as HTMLElement | null;
-  const idx = active ? items.indexOf(active) : -1;
-  if (!items.length) return;
-  if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    items[(idx + 1) % items.length]?.focus();
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    items[idx <= 0 ? items.length - 1 : idx - 1]?.focus();
-  } else if (e.key === 'Home') {
-    e.preventDefault();
-    items[0]?.focus();
-  } else if (e.key === 'End') {
-    e.preventDefault();
-    items.at(-1)?.focus();
-  } else if ((e.key === 'Enter' || e.key === ' ') && active && idx >= 0) {
-    e.preventDefault();
-    setOpen(false);
-    const id = active.getAttribute('value');
-    if (id) selectTerminalFromDropdown(id);
-  }
+  if (!dd || dd.open) return;
+  queueMicrotask(() => {
+    void dd.updateComplete?.then(() => {
+      requestAnimationFrame(() => {
+        if (!dd.open) return;
+        const first = menuItems(root)[0];
+        if (!first) return;
+        dd.getMenu?.()?.setCurrentItem?.(first);
+        first.focus();
+      });
+    });
+  });
 }
 
 export function onTerminalsMenuSelect(

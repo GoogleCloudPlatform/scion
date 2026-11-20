@@ -187,10 +187,6 @@ export class ScionHeader extends LitElement {
   @state()
   private terminalsMenuOpen = false;
 
-  /** Bumped when page/store current-agent metadata updates so the dropdown re-renders. */
-  @state()
-  private currentAgentRevision = 0;
-
   @state()
   private terminalsMenuMod: HeaderTerminalsMenuMod | null = cachedTerminalsMenuMod;
 
@@ -1176,7 +1172,6 @@ export class ScionHeader extends LitElement {
   }
 
   private renderTerminalsDropdown(isTerminal: boolean): TemplateResult {
-    void this.currentAgentRevision;
     const mod = this.terminalsMenuMod;
     const setOpen = (open: boolean): void => {
       this.terminalsMenuOpen = open;
@@ -1197,10 +1192,7 @@ export class ScionHeader extends LitElement {
         aria-label="Open terminals menu"
         aria-haspopup="menu"
         aria-expanded=${this.terminalsMenuOpen ? 'true' : 'false'}
-        @click=${(e: MouseEvent): void =>
-          mod?.onTerminalsTriggerClick(e, setOpen, this.terminalsMenuOpen)}
-        @keydown=${(e: KeyboardEvent): void =>
-          mod?.onTerminalsTriggerKey(e, this.shadowRoot, setOpen)}
+        @keydown=${(e: KeyboardEvent): void => mod?.onTerminalsTriggerKey(e, this.shadowRoot)}
       >
         <sl-icon name="chevron-down" aria-hidden="true"></sl-icon>
       </button>
@@ -1208,7 +1200,6 @@ export class ScionHeader extends LitElement {
         class="terminals-menu"
         @sl-select=${(e: CustomEvent<{ item: HTMLElement }>): void =>
           mod?.onTerminalsMenuSelect(e, setOpen)}
-        @keydown=${(e: KeyboardEvent): void => mod?.onTerminalsMenuKey(e, this.shadowRoot, setOpen)}
       >
         ${mod
           ? mod.renderTerminalsMenuItems({
@@ -1737,7 +1728,7 @@ export class ScionHeader extends LitElement {
   };
 
   private readonly handleCurrentAgentChanged = (): void => {
-    this.currentAgentRevision++;
+    this.requestUpdate();
   };
 
   private readonly handleGraphPaletteAvailability = (): void => {

@@ -1606,11 +1606,19 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     const el = await mountHeader({ currentPath: '/projects/p1' });
 
     const chevron = wideChevron(el)!;
+    const dropdown = el.shadowRoot?.querySelector<HTMLElement>('.wide-center .terminals-dropdown');
+    expect(dropdown).not.toBeNull();
     chevron.click();
+    dropdown?.dispatchEvent(new CustomEvent('sl-show'));
     await el.updateComplete;
 
     expect(navTargets).toEqual([]);
     expect(chevron.getAttribute('aria-expanded')).toBe('true');
+    expect(chevron.getAttribute('aria-haspopup')).toBe('menu');
+
+    dropdown?.dispatchEvent(new CustomEvent('sl-hide'));
+    await el.updateComplete;
+    expect(chevron.getAttribute('aria-expanded')).toBe('false');
 
     const mainBtn = el.shadowRoot?.querySelector<HTMLButtonElement>(
       '.wide-center .mode-switch button[data-mode="terminals"]'
@@ -1837,7 +1845,7 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     }
   });
 
-  it('supports keyboard navigation (ArrowDown, ArrowUp, Home, End, Enter, Escape) on the chevron and menu', async () => {
+  it('focuses and sets currentItem on the first menu item when Enter or Space opens sl-dropdown', async () => {
     publishTerminalWorkspaceSnapshot({
       count: 2,
       sessions: [
@@ -1852,58 +1860,51 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     });
     const el = await mountHeader({ currentPath: '/projects/p1' });
     const chevron = wideChevron(el)!;
-    const menu = wideMenu(el)!;
-    const items = Array.from(menu.querySelectorAll<HTMLElement>('sl-menu-item'));
+    const dropdown = el.shadowRoot?.querySelector('.wide-center .terminals-dropdown') as
+      | (HTMLElement & {
+          open?: boolean;
+          updateComplete?: Promise<boolean>;
+          getMenu?: () => { setCurrentItem: (item: HTMLElement) => void };
+        })
+      | null;
+    const items = Array.from(wideMenu(el)!.querySelectorAll<HTMLElement>('sl-menu-item'));
     expect(items).toHaveLength(2);
 
-    // ArrowDown on trigger opens the menu and focuses the first item.
+    const setCurrentItem = vi.fn();
+    dropdown!.updateComplete = Promise.resolve(true);
+    dropdown!.getMenu = (): { setCurrentItem: (item: HTMLElement) => void } => ({
+      setCurrentItem,
+    });
+    // Simulate SlDropdown's bubble-phase keydown toggling `open` on Enter/Space.
+    dropdown!.addEventListener('keydown', (e: KeyboardEvent): void => {
+      if (e.key === 'Enter' || e.key === ' ') dropdown!.open = !dropdown!.open;
+    });
+
+    const waitAfterOpen = async (): Promise<void> => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise((r) => requestAnimationFrame(() => r(undefined)));
+    };
+
+    for (const key of ['Enter', ' ']) {
+      dropdown!.open = false;
+      chevron.focus();
+      chevron.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+      await waitAfterOpen();
+      expect(el.shadowRoot?.activeElement).toBe(items[0]);
+      expect(setCurrentItem).toHaveBeenLastCalledWith(items[0]);
+    }
+
+    // When Enter/Space closes an already-open dropdown, focus stays on the trigger.
+    setCurrentItem.mockClear();
+    dropdown!.open = true;
     chevron.focus();
     chevron.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
-    );
-    await el.updateComplete;
-    expect(chevron.getAttribute('aria-expanded')).toBe('true');
-    expect(el.shadowRoot?.activeElement).toBe(items[0]);
-
-    // ArrowDown in menu moves to second item; Home returns to first; End moves to last.
-    items[0].dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
-    );
-    expect(el.shadowRoot?.activeElement).toBe(items[1]);
-
-    items[1].dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true })
-    );
-    expect(el.shadowRoot?.activeElement).toBe(items[0]);
-
-    items[0].dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true })
-    );
-    expect(el.shadowRoot?.activeElement).toBe(items[1]);
-
-    // Escape closes the menu without navigating and restores focus to the chevron trigger.
-    items[1].dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
-    );
-    await el.updateComplete;
-    expect(chevron.getAttribute('aria-expanded')).toBe('false');
-    expect(el.shadowRoot?.activeElement).toBe(chevron);
-    expect(navTargets).toEqual([]);
-
-    // ArrowUp on trigger opens the menu and focuses the last item; Enter activates it.
-    chevron.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true })
-    );
-    await el.updateComplete;
-    expect(chevron.getAttribute('aria-expanded')).toBe('true');
-    expect(el.shadowRoot?.activeElement).toBe(items[1]);
-
-    items[1].dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
     );
-    await el.updateComplete;
-    expect(navTargets).toEqual([`/terminals/${AGENT_2}`]);
-    expect(chevron.getAttribute('aria-expanded')).toBe('false');
+    await waitAfterOpen();
+    expect(el.shadowRoot?.activeElement).toBe(chevron);
+    expect(setCurrentItem).not.toHaveBeenCalled();
   });
 
   it('hydrates from the retained snapshot on late mount and clears on ACCOUNT_TEARDOWN_EVENT', async () => {

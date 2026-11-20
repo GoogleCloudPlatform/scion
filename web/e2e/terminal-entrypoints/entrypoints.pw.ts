@@ -516,17 +516,50 @@ test('wide header Terminals chevron lists current agent and rail sessions, opens
     })
     .toEqual([expect.stringContaining('beta-agent'), expect.stringContaining('alpha-agent')]);
 
-  // Open via keyboard ArrowDown and verify row 1 ("not open") + row 2 ("Connected").
-  await appChevron.focus();
-  await page.keyboard.press('ArrowDown');
+  // Natural Tab order: Tab from main Terminals button lands on the chevron trigger.
+  const appTerminalsBtn = page.locator(
+    'scion-app scion-header .wide-center .mode-switch button[data-mode="terminals"]'
+  );
+  await appTerminalsBtn.focus();
+  await page.keyboard.press('Tab');
+  await expect(appChevron).toBeFocused();
+
+  // Enter on the chevron opens the real Shoelace dropdown and focuses row 1 ("not open").
+  await page.keyboard.press('Enter');
   await expect(appChevron).toHaveAttribute('aria-expanded', 'true');
   const rows = page.locator('scion-app scion-header .wide-center .terminals-menu sl-menu-item');
   await expect(rows).toHaveCount(2);
   await expect(rows.nth(0)).toContainText('beta-agent');
   await expect(rows.nth(0)).toContainText('not open');
   await expect(rows.nth(1)).toContainText('alpha-agent');
+  await expect(rows.nth(0)).toBeFocused();
 
-  // Press Enter on focused row 1 (beta-agent) -> navigates to /terminals/<agentB> and attaches.
+  // Real Shoelace menu roving keyboard navigation: ArrowDown -> End -> Home -> ArrowDown -> ArrowUp.
+  await page.keyboard.press('ArrowDown');
+  await expect(rows.nth(1)).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(rows.nth(0)).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(rows.nth(1)).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(rows.nth(0)).toBeFocused();
+
+  // Escape closes the dropdown without navigating and restores focus to the chevron trigger.
+  await page.keyboard.press('Escape');
+  await expect(appChevron).toHaveAttribute('aria-expanded', 'false');
+  await expect(appChevron).toBeFocused();
+  await expect(page).toHaveURL(`/agents/${agentB}`);
+
+  // ArrowUp on the chevron opens the dropdown and focuses the last item; Escape closes again.
+  await page.keyboard.press('ArrowUp');
+  await expect(appChevron).toHaveAttribute('aria-expanded', 'true');
+  await expect(rows.nth(1)).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(appChevron).toHaveAttribute('aria-expanded', 'false');
+
+  // ArrowDown on the chevron opens and focuses row 1 (beta-agent); Enter activates it.
+  await page.keyboard.press('ArrowDown');
+  await expect(rows.nth(0)).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(`/terminals/${agentB}`);
   await expect.poll(() => socket.attaches).toBe(2);
