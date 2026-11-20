@@ -33,19 +33,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// adtSetExperiment turns hub.agent_delegation on or off on srv
-// by replacing its registry; every other experiment keeps its registered
-// default.
+// adtSetExperiment turns hub.agent_delegation on or off on srv by replacing
+// its registry while preserving any other experiment overrides already set on
+// srv. Callers must invoke this before background server goroutines start
+// serving requests.
 func adtSetExperiment(t *testing.T, srv *Server, on bool) {
 	t.Helper()
+	cur := srv.experimentRegistry()
 	var active []experiments.Experiment
-	for _, e := range experiments.Default().All() {
+	for _, e := range cur.All() {
 		if e.Name == experiments.AgentDelegation {
 			e.Default = on
 		}
 		active = append(active, e)
 	}
-	reg, err := experiments.NewRegistry(active, nil)
+	reg, err := experiments.NewRegistry(active, cur.Retired())
 	require.NoError(t, err)
 	srv.experiments = reg
 	require.Equal(t, on, srv.experimentEnabled(experiments.AgentDelegation))
