@@ -256,9 +256,17 @@ from `./cmd/scion/` with `ENTRYPOINT ["/usr/local/bin/scion"]`). Build and
 push an image from this repo:
 
 ```sh
-docker build -f Dockerfile -t "${BROKER_IMAGE}" .
+docker build -f Dockerfile \
+  --build-arg GIT_COMMIT="$(git rev-parse HEAD)" \
+  --build-arg VERSION="$(git describe --tags --exact-match 2>/dev/null || true)" \
+  -t "${BROKER_IMAGE}" .
 docker push "${BROKER_IMAGE}"
 ```
+
+Passing `GIT_COMMIT` (and `VERSION` on tagged releases) stamps the binary via
+`ldflags` because `.dockerignore` excludes `.git`. Without these build args,
+the broker reports version `unknown` and the Hub flags it with
+`broker_version_unknown`.
 
 Nothing broker-specific is baked into the image — `broker.yaml`'s `args`
 select broker-only mode (`--enable-runtime-broker` without `--enable-hub`).

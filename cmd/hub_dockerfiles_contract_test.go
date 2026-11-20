@@ -96,6 +96,67 @@ func checkCloudRunDockerfileContract(t *testing.T, root, cloudRun string) []stri
 			errs = append(errs, cloudRunDockerfile+": the final stage must be named (FROM <image> AS <name>), or be FROM a named stage, so the default target can be pinned with --target")
 		}
 	}
+
+	builder := findStage(crStages, "go-builder")
+	if builder == nil {
+		errs = append(errs, cloudRunDockerfile+": no stage named go-builder")
+	} else {
+		builderArgs := map[string]bool{}
+		foundGoBuild := false
+		for _, in := range builder.instrs {
+			switch in.cmd {
+			case "ARG":
+				for _, k := range envOrArgKeys(in.args) {
+					builderArgs[k] = true
+				}
+			case "RUN":
+				norm := strings.Join(strings.Fields(in.args), " ")
+				if !strings.Contains(norm, "go build") {
+					continue
+				}
+				foundGoBuild = true
+				for _, argName := range []string{"GIT_COMMIT", "VERSION", "BUILD_TIME"} {
+					if !builderArgs[argName] {
+						errs = append(errs, cloudRunDockerfile+": go-builder stage must declare ARG "+argName+" before `go build`")
+					}
+				}
+				if !strings.Contains(norm, "-buildvcs=false") {
+					errs = append(errs, cloudRunDockerfile+": go-builder stage `go build` must pass -buildvcs=false")
+				}
+				for _, sym := range []string{
+					"-X github.com/GoogleCloudPlatform/scion/pkg/version.Version=${VERSION}",
+					"-X github.com/GoogleCloudPlatform/scion/pkg/version.Commit=${GIT_COMMIT}",
+					"-X github.com/GoogleCloudPlatform/scion/pkg/version.BuildTime=${BUILD_TIME}",
+				} {
+					if !strings.Contains(norm, sym) {
+						errs = append(errs, cloudRunDockerfile+": go-builder stage `go build` must pass ldflags `"+sym+"`")
+					}
+				}
+			}
+		}
+		if !foundGoBuild {
+			errs = append(errs, cloudRunDockerfile+": go-builder stage must run `go build`")
+		}
+	}
+	return errs
+}
+
+const cloudRunDeployScript = "scripts/cloudrun/deploy.sh"
+
+// checkCloudRunDeployScriptContract verifies that scripts/cloudrun/deploy.sh
+// passes GIT_COMMIT, VERSION, and BUILD_TIME build args to docker build so
+// binaries built by the Cloud Run deploy script carry version info.
+func checkCloudRunDeployScriptContract(content string) []string {
+	var errs []string
+	for _, want := range []string{
+		`--build-arg "GIT_COMMIT=${GIT_COMMIT}"`,
+		`--build-arg "VERSION=${VERSION}"`,
+		`--build-arg "BUILD_TIME=${BUILD_TIME}"`,
+	} {
+		if !strings.Contains(content, want) {
+			errs = append(errs, cloudRunDeployScript+": docker build must pass "+want)
+		}
+	}
 	return errs
 }
 
@@ -114,6 +175,29 @@ func TestCloudRunDockerfileTracksRootToolchain(t *testing.T) {
 	}
 }
 
+func TestCloudRunDeployScriptStampsVersion(t *testing.T) {
+	for _, e := range checkCloudRunDeployScriptContract(readRepoFile(t, cloudRunDeployScript)) {
+		t.Error(e)
+	}
+}
+
+func TestSubstrateReadmePassesVersionBuildArgs(t *testing.T) {
+	readme := readRepoFile(t, "deploy/substrate/README.md")
+	_, rest, ok := strings.Cut(readme, "## Building the broker image")
+	if !ok {
+		t.Fatal("deploy/substrate/README.md: section `## Building the broker image` not found")
+	}
+	section, _, _ := strings.Cut(rest, "\n## ")
+	for _, want := range []string{
+		"--build-arg GIT_COMMIT=",
+		"--build-arg VERSION=",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("deploy/substrate/README.md (## Building the broker image): must include %q", want)
+		}
+	}
+}
+
 func TestCloudRunDockerfileContractDetectsViolations(t *testing.T) {
 	root := readRepoFile(t, "Dockerfile")
 	cr := readRepoFile(t, cloudRunDockerfile)
@@ -123,10 +207,23 @@ func TestCloudRunDockerfileContractDetectsViolations(t *testing.T) {
 		{"older go", mustReplace(t, cr, "FROM golang:1.26.1 ", "FROM golang:1.25 "), "uses golang:1.25 "},
 		{"unnamed final stage", mustReplace(t, cr, "FROM debian:bookworm-slim AS runtime", "FROM debian:bookworm-slim"), "final stage must be named"},
 		{"no node stage", mustReplace(t, cr, "FROM node:22-slim", "FROM debian:bookworm-slim"), "node:<version> frontend stage"},
+		{"missing ARG GIT_COMMIT", mustReplace(t, cr, "ARG GIT_COMMIT=\"\"\n", ""), "must declare ARG GIT_COMMIT"},
+		{"missing ARG VERSION", mustReplace(t, cr, "ARG VERSION=\"\"\n", ""), "must declare ARG VERSION"},
+		{"missing ARG BUILD_TIME", mustReplace(t, cr, "ARG BUILD_TIME=\"\"\n", ""), "must declare ARG BUILD_TIME"},
+		{"missing Commit ldflag", mustReplace(t, cr, "pkg/version.Commit=${GIT_COMMIT}", "pkg/version.GitCommit=${GIT_COMMIT}"), "pkg/version.Commit=${GIT_COMMIT}"},
+		{"missing Version ldflag", mustReplace(t, cr, "pkg/version.Version=${VERSION}", "pkg/version.Ver=${VERSION}"), "pkg/version.Version=${VERSION}"},
 	}
 	for _, m := range mutations {
 		expectViolation(t, m.name, checkCloudRunDockerfileContract(t, root, m.src), m.want)
 	}
+
+	deploy := readRepoFile(t, cloudRunDeployScript)
+	expectViolation(t, "deploy missing GIT_COMMIT build-arg",
+		checkCloudRunDeployScriptContract(mustReplace(t, deploy, `--build-arg "GIT_COMMIT=${GIT_COMMIT}"`, "")),
+		"GIT_COMMIT")
+	expectViolation(t, "deploy missing VERSION build-arg",
+		checkCloudRunDeployScriptContract(mustReplace(t, deploy, `--build-arg "VERSION=${VERSION}"`, "")),
+		"VERSION")
 
 	valid := map[string]string{
 		"trailing FROM of a named stage": cr + "\nFROM runtime\n",
