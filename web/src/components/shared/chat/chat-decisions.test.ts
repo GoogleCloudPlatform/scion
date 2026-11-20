@@ -953,7 +953,7 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
       expect(editor).not.toBeNull();
       expect(editor?.querySelector('.lab')?.textContent).toBe('Another region');
       const input = editor?.querySelector('sl-input');
-      expect(input?.getAttribute('maxlength')).toBe('200');
+      expect(input?.hasAttribute('maxlength')).toBe(false);
       expect(input?.getAttribute('placeholder')).toBe('e.g. europe-west4');
       expect(input?.getAttribute('label')).toBe('Which region for the canary?');
       expect(focusMoves.length).toBeGreaterThanOrEqual(1);
@@ -969,31 +969,54 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
     }
   });
 
-  it('shows the character counter from 160 runes and aria-live="polite" warning from 180 runes', async () => {
+  it('counts trimmed runes (including astral emoji), warns from 180, and disables Send above 200', async () => {
     const el = await mount([viewWithOther({ other: { label: 'Other' } })]);
     button(el, '$other').click();
     await settle(el);
 
     const input = root(el).querySelector('.editor sl-input')!;
+    const sendBtn = root(el).querySelector<HTMLElement>('[data-action="send-other"]')!;
     expect(input.getAttribute('placeholder')).toBe('Type your answer');
+    expect(input.hasAttribute('maxlength')).toBe(false);
 
-    typeIntoOther(el, 'a'.repeat(159));
+    // Surrounding whitespace is excluded from the counter (158 trimmed runes < 160).
+    typeIntoOther(el, `   ${'a'.repeat(158)}   `);
     await el.updateComplete;
     expect(root(el).querySelector('.editor .cnt')).toBeNull();
 
-    typeIntoOther(el, 'é'.repeat(160));
+    // Astral emoji use 2 UTF-16 code units per rune: 160 emoji = 320 UTF-16 units, 160 runes.
+    typeIntoOther(el, '🚀'.repeat(160));
     await el.updateComplete;
     const cnt160 = root(el).querySelector('.editor .cnt');
     expect(cnt160?.textContent).toBe('160 / 200');
     expect(cnt160?.classList.contains('warn')).toBe(false);
+    expect(cnt160?.classList.contains('over')).toBe(false);
     expect(cnt160?.hasAttribute('aria-live')).toBe(false);
+    expect(sendBtn.hasAttribute('disabled')).toBe(false);
 
-    typeIntoOther(el, 'é'.repeat(180));
+    typeIntoOther(el, '🚀'.repeat(180));
     await el.updateComplete;
     const cnt180 = root(el).querySelector('.editor .cnt');
     expect(cnt180?.textContent).toBe('180 / 200');
     expect(cnt180?.classList.contains('warn')).toBe(true);
     expect(cnt180?.getAttribute('aria-live')).toBe('polite');
+    expect(sendBtn.hasAttribute('disabled')).toBe(false);
+
+    typeIntoOther(el, `  ${'🚀'.repeat(200)}  `);
+    await el.updateComplete;
+    expect(root(el).querySelector('.editor .cnt')?.textContent).toBe('200 / 200');
+    expect(sendBtn.hasAttribute('disabled')).toBe(false);
+
+    typeIntoOther(el, '🚀'.repeat(201));
+    await el.updateComplete;
+    const cnt201 = root(el).querySelector('.editor .cnt');
+    expect(cnt201?.textContent).toBe('201 / 200');
+    expect(cnt201?.classList.contains('over')).toBe(true);
+    expect(cnt201?.getAttribute('aria-live')).toBe('polite');
+    expect(sendBtn.hasAttribute('disabled')).toBe(true);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle(el);
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 
   it('sends trimmed text on Enter, renders quoted literal plain text when answered, and ignores card Enter while open', async () => {
@@ -1157,5 +1180,65 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
     expect(sel).not.toBeNull();
     expect(sel?.querySelector('.editor.inset')).not.toBeNull();
     expect(sel?.querySelector('.editor.inset .lab')).toBeNull();
+  });
+
+  it('keeps the draft open on 400 validation_error and closes to the winner on 409 already_answered', async () => {
+    const el = await mount([viewWithOther()]);
+    button(el, '$other').click();
+    await settle(el);
+
+    const input = typeIntoOther(el, 'keep-this-draft');
+    await el.updateComplete;
+
+    // 400 validation_error: danger toast, editor stays open with draft preserved.
+    apiFetch.mockResolvedValueOnce(
+      res(400, {
+        error: {
+          code: 'validation_error',
+          message: 'other_text cannot contain control characters',
+        },
+      })
+    );
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle(el);
+    expect(showToast).toHaveBeenCalledWith(
+      'other_text cannot contain control characters',
+      'danger'
+    );
+    expect(root(el).querySelector('.editor')).not.toBeNull();
+    expect(root(el).querySelector<HTMLElement & { value: string }>('.editor sl-input')?.value).toBe(
+      'keep-this-draft'
+    );
+
+    // 409 already_answered while editor is open: warning toast, editor closes, winner applied.
+    showToast.mockClear();
+    const winner = viewWithOther({
+      status: 'decided',
+      decision: {
+        choiceId: 'europe-west1',
+        label: 'europe-west1',
+        answeredByUserId: 'u-bob',
+        answeredByName: 'Bob',
+        provenance: 'direct',
+        surface: 'native',
+        responseMessageId: 'resp-bob',
+        at: '2026-11-12T15:50:00Z',
+      },
+    });
+    apiFetch.mockResolvedValueOnce(
+      res(409, {
+        error: {
+          code: 'already_answered',
+          message: 'already answered',
+          details: { decision: winner },
+        },
+      })
+    );
+    root(el).querySelector<HTMLElement>('[data-action="send-other"]')!.click();
+    await settle(el);
+    expect(showToast).toHaveBeenCalledWith('Already answered by Bob.', 'warning');
+    expect(root(el).querySelector('.editor')).toBeNull();
+    expect(button(el, 'europe-west1').getAttribute('variant')).toBe('primary');
+    expect(foot(el)).toMatch(/^Answered by Bob · /);
   });
 });

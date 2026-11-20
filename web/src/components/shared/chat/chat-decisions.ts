@@ -1162,6 +1162,10 @@ export class ScionChatDecisions extends LitElement {
       color: var(--scion-status-warning, #d97706);
     }
 
+    .editor .cnt.over {
+      color: var(--scion-status-danger, #dc2626);
+    }
+
     .editor .ctl {
       display: flex;
       gap: 0.4rem;
@@ -2332,20 +2336,21 @@ export class ScionChatDecisions extends LitElement {
     other: OtherOption,
     inset: boolean
   ): TemplateResult {
-    const runeLen = [...this.otherDraft].length;
-    const showCounter = runeLen >= 160;
-    const warnCounter = runeLen >= 180;
     const trimmed = this.otherDraft.trim();
     const trimmedLen = [...trimmed].length;
+    const showCounter = trimmedLen >= 160;
+    const warnCounter = trimmedLen >= 180 && trimmedLen <= 200;
+    const overCounter = trimmedLen > 200;
+    const announceCounter = warnCounter || overCounter;
     const loading =
       this.submitting?.rowId === d.rowId && this.submitting.choiceId === OTHER_CHOICE_ID;
     const canSend = trimmedLen > 0 && trimmedLen <= 200 && !this.submitting;
     const counter = showCounter
       ? html`<span
-          class="cnt${warnCounter ? ' warn' : ''}"
-          role=${warnCounter ? 'status' : nothing}
-          aria-live=${warnCounter ? 'polite' : nothing}
-          >${runeLen} / 200</span
+          class="cnt${overCounter ? ' over' : warnCounter ? ' warn' : ''}"
+          role=${announceCounter ? 'status' : nothing}
+          aria-live=${announceCounter ? 'polite' : nothing}
+          >${trimmedLen} / 200</span
         >`
       : nothing;
     return html`
@@ -2357,7 +2362,6 @@ export class ScionChatDecisions extends LitElement {
       <div class="ctl">
         <sl-input
           size="small"
-          maxlength="200"
           label=${plainText(d.question)}
           placeholder=${other.placeholder || 'Type your answer'}
           .value=${this.otherDraft}
