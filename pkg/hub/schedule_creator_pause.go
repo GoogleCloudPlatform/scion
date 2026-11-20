@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 
@@ -297,6 +298,171 @@ func (s *Server) pauseSchedulesWithAuthority(ctx context.Context, projectID stri
 	if paused > 0 {
 		log.Info("Paused schedules whose authority is a deleted principal",
 			"paused", paused, "status_reason", store.ScheduleStatusReasonCreatorDeleted)
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	s.pauseTriggersWithAuthority(ctx, projectID, principal, log)
+}
+
+// triggerAuthorityPrincipal returns the principal the trigger's recorded
+// authority resolves to, or the zero value for legacy attribution with no
+// recorded principal.
+func (s *Server) triggerAuthorityPrincipal(tr store.Trigger) store.ScheduleAuthorityPrincipal {
+	initiator := s.scheduledInitiator(tr.InitiatorAttribution)
+	if initiator.LegacyUnknown || initiator.PrincipalID == "" {
+		return store.ScheduleAuthorityPrincipal{}
+	}
+	return store.ScheduleAuthorityPrincipal{Kind: initiator.PrincipalKind, ID: initiator.PrincipalID}
+}
+
+// pauseTriggerWithReason pauses tr with a system status reason, conditioned on
+// the authorization revision tr was read with so a concurrent resume or edit
+// is never clobbered.
+func (s *Server) pauseTriggerWithReason(ctx context.Context, ts store.TriggerStore, tr store.Trigger, reason string) error {
+	prevRevision := tr.AuthorizationRevision
+	prevRevisionKnown := tr.AuthorizationRevision != 0
+	tr.Status = store.TriggerStatusPaused
+	tr.StatusReason = reason
+	fields := store.TriggerFieldMask{Status: true}
+	return ts.UpdateTrigger(ctx, &tr, fields, prevRevision, prevRevisionKnown, nil)
+}
+
+// pauseTriggersWithAuthority pauses, with status reason creator_deleted, every
+// active trigger whose recorded authority is principal, in projectID or, when
+// projectID is empty, in every project (§5.6). Uses the same page size and
+// revision-CAS pattern as pauseSchedulesWithAuthority.
+func (s *Server) pauseTriggersWithAuthority(ctx context.Context, projectID string, principal store.ScheduleAuthorityPrincipal, log *slog.Logger) {
+	ts, ok := s.store.(store.TriggerStore)
+	if !ok || ts == nil {
+		return
+	}
+
+	var matches []store.Trigger
+	opts := store.ListOptions{Limit: scheduleCreatorPausePageSize, SkipTotalCount: true}
+	for {
+		page, err := ts.ListTriggers(ctx, store.TriggerFilter{
+			ProjectID:          projectID,
+			Status:             store.TriggerStatusActive,
+			AuthorityPrincipal: principal,
+		}, opts)
+		if err != nil {
+			log.Warn("Failed to list triggers whose authority is a deleted principal", "error", err)
+			break
+		}
+		for _, tr := range page.Items {
+			if s.triggerAuthorityPrincipal(tr) == principal {
+				matches = append(matches, tr)
+			}
+		}
+		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
+			break
+		}
+		opts.Cursor = page.NextCursor
+	}
+
+	paused := 0
+	for i, tr := range matches {
+		if err := ctx.Err(); err != nil {
+			log.Warn("Stopped pausing triggers whose authority is a deleted principal: context done",
+				"unpaused", len(matches)-i, "error", err)
+			break
+		}
+		err := s.pauseTriggerWithReason(ctx, ts, tr, store.TriggerStatusReasonCreatorDeleted)
+		switch {
+		case err == nil:
+			paused++
+		case errors.Is(err, store.ErrRevisionConflict), errors.Is(err, store.ErrNotFound):
+			// Resumed (re-attributed) or deleted since it was read.
+		default:
+			log.Warn("Failed to pause trigger whose authority is a deleted principal",
+				"trigger_id", tr.ID, "error", err)
+		}
+	}
+	if paused > 0 {
+		log.Info("Paused triggers whose authority is a deleted principal",
+			"paused", paused, "status_reason", store.TriggerStatusReasonCreatorDeleted)
+	}
+}
+
+// triggerTargetsAgent reports whether a trigger's action payload targets
+// agentID strictly by resolved agentId (never by agentName/slug).
+func triggerTargetsAgent(tr store.Trigger, agentID string) bool {
+	if agentID == "" {
+		return false
+	}
+	switch tr.ActionType {
+	case store.TriggerActionMessage:
+		var p MessageEventPayload
+		if err := json.Unmarshal([]byte(tr.ActionPayload), &p); err != nil {
+			return false
+		}
+		return p.AgentID != "" && p.AgentID == agentID
+	case store.TriggerActionExec:
+		targetID := execPayloadTarget(tr.ActionPayload)
+		return targetID != "" && targetID == agentID
+	default:
+		return false
+	}
+}
+
+// pauseTriggersTargetingAgent pauses, with status reason target_deleted, every
+// active trigger (in any project, covering cross-project message triggers)
+// whose action payload targets agent.ID (§5.6). It runs before
+// pauseSchedulesAuthoredByAgent so self-targeted triggers record target_deleted.
+func (s *Server) pauseTriggersTargetingAgent(ctx context.Context, agent *store.Agent) {
+	if agent == nil || agent.ID == "" {
+		return
+	}
+	ts, ok := s.store.(store.TriggerStore)
+	if !ok || ts == nil {
+		return
+	}
+	log := s.agentLifecycleLog.With("agent_id", agent.ID, "project_id", agent.ProjectID)
+
+	var matches []store.Trigger
+	opts := store.ListOptions{Limit: scheduleCreatorPausePageSize, SkipTotalCount: true}
+	for {
+		page, err := ts.ListTriggers(ctx, store.TriggerFilter{
+			Status: store.TriggerStatusActive,
+		}, opts)
+		if err != nil {
+			log.Warn("Failed to list triggers targeting deleted agent", "error", err)
+			break
+		}
+		for _, tr := range page.Items {
+			if triggerTargetsAgent(tr, agent.ID) {
+				matches = append(matches, tr)
+			}
+		}
+		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
+			break
+		}
+		opts.Cursor = page.NextCursor
+	}
+
+	paused := 0
+	for i, tr := range matches {
+		if err := ctx.Err(); err != nil {
+			log.Warn("Stopped pausing triggers targeting deleted agent: context done",
+				"unpaused", len(matches)-i, "error", err)
+			break
+		}
+		err := s.pauseTriggerWithReason(ctx, ts, tr, store.TriggerStatusReasonTargetDeleted)
+		switch {
+		case err == nil:
+			paused++
+		case errors.Is(err, store.ErrRevisionConflict), errors.Is(err, store.ErrNotFound):
+			// Edited/resumed or deleted since it was listed.
+		default:
+			log.Warn("Failed to pause trigger targeting deleted agent",
+				"trigger_id", tr.ID, "error", err)
+		}
+	}
+	if paused > 0 {
+		log.Info("Paused triggers targeting deleted agent",
+			"paused", paused, "status_reason", store.TriggerStatusReasonTargetDeleted)
 	}
 }
 
