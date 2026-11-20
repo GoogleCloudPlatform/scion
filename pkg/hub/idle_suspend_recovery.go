@@ -258,6 +258,9 @@ func (s *Server) recoverIdleSuspendClaim(ctx context.Context, agent *store.Agent
 	}
 	slog.Info("Scheduler: recovered idle auto-suspend", "agent_id", agent.ID, "agent_name", agent.Name)
 	s.completeAutoSuspendRecord(rctx, agent, agent.RunID, state.SuspendReasonIdle)
+	// End the op before publishing. The defer above is then a no-op: the end
+	// function returned by tryBegin is idempotent (sync.Once), so calling it
+	// here and again at return never decrements the tracker twice.
 	endLifecycleOp()
 	s.events.PublishAgentStatus(rctx, agent)
 }

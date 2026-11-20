@@ -22,6 +22,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 
 	"entgo.io/ent/dialect"
@@ -321,21 +322,18 @@ func (s *AgentStore) ListExpiredIdleSuspendClaims(ctx context.Context, limit int
 		agent.IdleSuspendClaimUntilLTE(claimTime(now)),
 		agent.RunIntentEQ(string(store.RunIntentStopped)),
 		agent.PhaseIn(string(state.PhaseStopping), string(state.PhaseStopped), string(state.PhaseError)),
+		ownIdleIntentPredicate(),
 	).Order(ent.Asc(agent.FieldIdleSuspendClaimUntil), ent.Asc(agent.FieldID))
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
 	rows, err := q.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	out := make([]store.Agent, 0, len(rows))
-	for _, a := range rows {
-		sa := entAgentToStore(a)
-		if !sa.IdleSuspendIntentIsOwn() {
-			continue // a newer system stop intent: not the idle claim's
-		}
-		out = append(out, *sa)
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	out := make([]store.Agent, len(rows))
+	for i, a := range rows {
+		out[i] = *entAgentToStore(a)
 	}
 	return out, nil
 }
@@ -352,24 +350,20 @@ func (s *AgentStore) ListAbandonedIdleSuspendClaims(ctx context.Context, expired
 		agent.IdleSuspendClaimUntilLTE(claimTime(now.Add(-expiredFor))),
 		agent.RunIntentEQ(string(store.RunIntentStopped)),
 		agent.PhaseEQ(string(state.PhaseRunning)),
+		ownIdleIntentPredicate(),
+		// A heartbeat after the lease expired proves the container is alive.
+		heartbeatAfterIdleClaimPredicate(),
 	).Order(ent.Asc(agent.FieldIdleSuspendClaimUntil), ent.Asc(agent.FieldID))
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
 	rows, err := q.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	out := make([]store.Agent, 0, len(rows))
-	for _, a := range rows {
-		sa := entAgentToStore(a)
-		if !sa.IdleSuspendIntentIsOwn() {
-			continue // a newer system stop intent: not the idle claim's
-		}
-		if a.LastSeen == nil || !a.LastSeen.After(*a.IdleSuspendClaimUntil) {
-			continue // no heartbeat since the lease expired: the container may be gone
-		}
-		out = append(out, *sa)
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	out := make([]store.Agent, len(rows))
+	for i, a := range rows {
+		out[i] = *entAgentToStore(a)
 	}
 	return out, nil
 }
@@ -404,5 +398,29 @@ func (s *AgentStore) AbandonIdleSuspend(ctx context.Context, agentID string, cla
 			return false, mapError(err)
 		}
 		return true, nil
+	})
+}
+
+// ownIdleIntentPredicate is the SQL form of store.Agent.IdleSuspendIntentIsOwn:
+// run_intent_at <= idle_suspend_claim_until (the claim writes both in one
+// write; a newer system stop intent is later than the stamp). Applied in the
+// query so a limit cannot starve own-intent rows behind foreign ones.
+func ownIdleIntentPredicate() predicate.Agent {
+	return predicate.Agent(func(sel *entsql.Selector) {
+		sel.Where(entsql.And(
+			entsql.NotNull(sel.C(agent.FieldRunIntentAt)),
+			entsql.ColumnsLTE(sel.C(agent.FieldRunIntentAt), sel.C(agent.FieldIdleSuspendClaimUntil)),
+		))
+	})
+}
+
+// heartbeatAfterIdleClaimPredicate selects rows with last_seen after the claim
+// stamp (a heartbeat since the lease expired).
+func heartbeatAfterIdleClaimPredicate() predicate.Agent {
+	return predicate.Agent(func(sel *entsql.Selector) {
+		sel.Where(entsql.And(
+			entsql.NotNull(sel.C(agent.FieldLastSeen)),
+			entsql.ColumnsGT(sel.C(agent.FieldLastSeen), sel.C(agent.FieldIdleSuspendClaimUntil)),
+		))
 	})
 }

@@ -352,4 +352,31 @@ func TestAgentStore_IdleSuspendRecover(t *testing.T) {
 			assert.NotEqual(t, a.ID, r.ID)
 		}
 	})
+
+	t.Run("a limit does not starve own-intent rows behind foreign ones", func(t *testing.T) {
+		// Foreign row: oldest stamp, so it sorts first, but a system writer wrote a newer intent.
+		foreign, _ := claimed(t, "lim-foreign", true)
+		setPhase(t, foreign.ID, string(state.PhaseStopped))
+		_, err := s.client.Agent.UpdateOneID(uuid.MustParse(foreign.ID)).
+			SetIdleSuspendClaimUntil(time.Now().UTC().Add(-3 * time.Hour)).
+			SetRunIntentAt(time.Now().UTC().Add(-3*time.Hour - time.Minute)).Save(ctx)
+		require.NoError(t, err)
+		_, _, err = s.SwapSystemRunIntent(ctx, foreign.ID, store.RunIntentStopped)
+		require.NoError(t, err)
+
+		own, _ := claimed(t, "lim-own", true)
+		setPhase(t, own.ID, string(state.PhaseStopped))
+		_, err = s.client.Agent.UpdateOneID(uuid.MustParse(own.ID)).
+			SetIdleSuspendClaimUntil(time.Now().UTC().Add(-2 * time.Hour)).
+			SetRunIntentAt(time.Now().UTC().Add(-2*time.Hour - time.Minute)).Save(ctx)
+		require.NoError(t, err)
+
+		rows, err := s.ListExpiredIdleSuspendClaims(ctx, 1)
+		require.NoError(t, err)
+		require.NotEmpty(t, rows)
+		for _, r := range rows {
+			assert.NotEqual(t, foreign.ID, r.ID, "the foreign-intent row is filtered in SQL, before the limit")
+		}
+		assert.Len(t, rows, 1)
+	})
 }
