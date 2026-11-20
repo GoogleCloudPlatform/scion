@@ -1450,27 +1450,9 @@ func TestDecisions_AllowOther_SingleEndToEndValidationAndAskerOnlyDelivery(t *te
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, bystander))
 
-	// 1. Multi-decision prompt with allow_other is refused in P1 with 400 not_supported.
-	setRefused := f.sendAsAgent(t, OutboundMessageRequest{
-		Recipient:       "conv:" + f.topicID,
-		ConversationRef: "conv:" + f.topicID,
-		Msg:             "Two questions",
-		Decisions: decisionInputs(t, `[
-			{"id":"q1","question":"First?","choices":["a","b"]},
-			{"id":"q2","question":"Second?","choices":["yes"],"allow_other":true}
-		]`),
-	})
-	require.Equal(t, http.StatusBadRequest, setRefused.Code, setRefused.Body.String())
-	code, details := errorCodeAndDetails(t, setRefused)
-	assert.Equal(t, ErrCodeValidationError, code)
-	rawErrs, ok := details["errors"].([]interface{})
-	require.True(t, ok, "details: %v", details)
-	require.Len(t, rawErrs, 1)
-	firstErr, _ := rawErrs[0].(map[string]interface{})
-	assert.Equal(t, "decisions[1].allow_other", firstErr["field"])
-	assert.Equal(t, messages.DecisionErrNotSupported, firstErr["code"])
-
-	// 2. Single decision with 1 fixed choice + allow_other object succeeds.
+	// 1. Single decision with 1 fixed choice + allow_other object succeeds.
+	// (Multi-decision prompts with allow_other are now supported in P2 and
+	// covered by TestDecisionSetAnswer_AllowOther_EndToEnd in decisions_batch_test.go.)
 	promptMsg, promptRes := f.topicPrompt(t, `[{
 		"id": "region",
 		"question": "Which region for the canary?",
