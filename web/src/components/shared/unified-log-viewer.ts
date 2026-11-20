@@ -119,8 +119,8 @@ const SOURCE_CONFIG: Record<string, { badge: string; color: string; bg: string }
   },
   messages: {
     badge: 'MSG',
-    color: 'var(--sl-color-violet-600, #7c3aed)',
-    bg: 'var(--sl-color-violet-50, #f5f3ff)',
+    color: 'var(--scion-log-messages-text, #7c3aed)',
+    bg: 'var(--scion-log-messages-bg, #f5f3ff)',
   },
   artifacts: {
     badge: 'ART',

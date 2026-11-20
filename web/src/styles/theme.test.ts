@@ -626,13 +626,12 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
     max: 35,
     reason: 'xterm.js ANSI color palette and terminal viewport chrome',
   },
+  'client/terminal-workspace-root.ts': {
+    max: 2,
+    reason: 'Intentional dark terminal-pane host background (#111827) and pane border (#333)',
+  },
 
   // Deferred to branding PR 2c (ptone/scion#8409): brand surfaces, --scion-primary-text, color-mix tints
-  'client/terminal-workspace-root.ts': {
-    max: 6,
-    reason:
-      'Terminal workspace status dots and dark terminal pane chrome (PR 2c also edits this file, ptone/scion#8409)',
-  },
   'components/pages/admin-users.ts': {
     max: 1,
     reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
@@ -880,8 +879,8 @@ describe('PR 2d light-mode token equivalence (ptone/scion#8410)', () => {
     ['unified-log-viewer broker bg', '--sl-color-emerald-50', '#ecfdf5'],
     ['unified-log-viewer agent color', '--sl-color-warning-600', '#d97706'],
     ['unified-log-viewer agent bg', '--sl-color-warning-50', '#fffbeb'],
-    ['unified-log-viewer messages color', '--sl-color-violet-600', '#7c3aed'],
-    ['unified-log-viewer messages bg', '--sl-color-violet-50', '#f5f3ff'],
+    ['unified-log-viewer messages color', '--scion-log-messages-text', '#7c3aed'],
+    ['unified-log-viewer messages bg', '--scion-log-messages-bg', '#f5f3ff'],
     ['unified-log-viewer artifacts color', '--sl-color-pink-600', '#db2777'],
     ['unified-log-viewer artifacts bg', '--sl-color-pink-50', '#fdf2f8'],
     ['unified-log-viewer server color', '--scion-log-server-text', '#4b5563'],
@@ -893,6 +892,10 @@ describe('PR 2d light-mode token equivalence (ptone/scion#8410)', () => {
     ['not-found gradient stop', '--sl-color-violet-500', '#8b5cf6'],
     ['metrics-dashboard period-btn active text', '--scion-primary-text', '#ffffff'],
     ['metrics-dashboard y grid', '--scion-border-subtle', '#f1f5f9'],
+    ['terminal-workspace-root default dot', '--scion-text-disabled', '#94a3b8'],
+    ['terminal-workspace-root green dot', '--scion-status-success', '#22c55e'],
+    ['terminal-workspace-root red dot', '--scion-status-danger', '#ef4444'],
+    ['terminal-workspace-root amber dot', '--scion-status-warning', '#f59e0b'],
   ];
 
   it('resolves every replaced non-exception token to the exact original light-mode RGB', () => {
@@ -908,16 +911,51 @@ describe('PR 2d light-mode token equivalence (ptone/scion#8410)', () => {
     }
   });
 
-  it('keeps --scion-log-server-text AA-readable on --scion-log-server-bg in both themes', () => {
-    const { light, dark } = themeTokens();
-    for (const [mode, vars] of [
-      ['light', light],
-      ['dark', dark],
-    ] as const) {
-      const get = resolver(vars);
+  it('keeps all unified-log-viewer SOURCE_CONFIG badge pairs AA-readable in dark mode and faithful in light mode', () => {
+    const darkVars = cascade([shoelaceLightCss, shoelaceDarkCss, themeCss], {
+      isRoot: true,
+      classes: new Set(['sl-theme-dark']),
+      dataTheme: 'dark',
+      prefersDark: true,
+    });
+    const resolveFrom = (
+      vars: Map<string, string>,
+      name: string
+    ): [number, number, number, number] => {
+      let cur = name;
+      for (let depth = 0; depth < 8; depth++) {
+        const val = vars.get(cur);
+        if (!val) throw new Error(`Missing token: ${cur}`);
+        const ref = /^var\(\s*(--[\w-]+)\s*\)$/.exec(val.trim());
+        if (!ref) {
+          const [r, g, b] = parseCssColorToRgb(val.trim());
+          return [r, g, b, 1];
+        }
+        cur = ref[1];
+      }
+      throw new Error(`Unresolved token cycle: ${name}`);
+    };
+
+    // [source, fgToken, bgToken, lightMinContrast]
+    // Light-mode values are locked to the original Tailwind literals (broker/agent/artifacts
+    // were 3.05:1–4.33:1 originally); dark mode must meet WCAG AA >= 4.5:1 across all 6.
+    const sources: Array<[string, string, string, number]> = [
+      ['hub', '--sl-color-primary-600', '--sl-color-primary-50', 4.5],
+      ['broker', '--sl-color-emerald-600', '--sl-color-emerald-50', 3.0],
+      ['agent', '--sl-color-warning-600', '--sl-color-warning-50', 3.0],
+      ['messages', '--scion-log-messages-text', '--scion-log-messages-bg', 4.5],
+      ['artifacts', '--sl-color-pink-600', '--sl-color-pink-50', 4.0],
+      ['server', '--scion-log-server-text', '--scion-log-server-bg', 4.5],
+    ];
+
+    for (const [source, fgToken, bgToken, lightMin] of sources) {
       expect(
-        contrast(get('--scion-log-server-text'), get('--scion-log-server-bg')),
-        `log-server contrast in ${mode}`
+        contrast(resolveFrom(lightVars, fgToken), resolveFrom(lightVars, bgToken)),
+        `unified-log-viewer ${source} light contrast`
+      ).toBeGreaterThanOrEqual(lightMin);
+      expect(
+        contrast(resolveFrom(darkVars, fgToken), resolveFrom(darkVars, bgToken)),
+        `unified-log-viewer ${source} dark contrast`
       ).toBeGreaterThanOrEqual(4.5);
     }
   });
