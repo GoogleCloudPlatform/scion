@@ -700,20 +700,16 @@ type revokeFailingCredentialStore struct {
 }
 
 // buildAgentRefreshRequest constructs a POST .../token/refresh request whose
-// context carries the given agent identity and optional credential markers,
+// context carries the given agent identity and optional credential ID marker,
 // without routing it through UnifiedAuthMiddleware, so the refresh handler's
-// own status evaluation (including the "marker absent" fallback) can be
-// exercised directly and deterministically.
-func buildAgentRefreshRequest(agentID string, claims *AgentTokenClaims, credentialID string, legacy bool) *http.Request {
+// own status evaluation can be exercised directly and deterministically.
+func buildAgentRefreshRequest(agentID string, claims *AgentTokenClaims, credentialID string, _ bool) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/token/refresh", nil)
 	ctx := req.Context()
 	identity := &agentIdentityWrapper{claims}
 	ctx = contextWithIdentity(ctx, identity)
 	if credentialID != "" {
 		ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, credentialID)
-	}
-	if legacy {
-		ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
 	}
 	return req.WithContext(ctx)
 }

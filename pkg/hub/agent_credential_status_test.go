@@ -86,9 +86,8 @@ func TestEvaluateAgentCredentialStatus_Active(t *testing.T) {
 	cred := &store.AgentCredential{ID: "cred-1"}
 	fake := &fakeAgentCredentialStore{cred: cred}
 
-	got, isLegacy, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
+	got, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
 	require.NoError(t, err)
-	assert.False(t, isLegacy)
 	assert.Equal(t, cred, got)
 }
 
@@ -97,18 +96,24 @@ func TestEvaluateAgentCredentialStatus_Revoked(t *testing.T) {
 	cred := &store.AgentCredential{ID: "cred-1", RevokedAt: &revokedAt}
 	fake := &fakeAgentCredentialStore{cred: cred}
 
-	got, isLegacy, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
-	assert.True(t, errors.Is(err, errAgentCredentialRevoked))
-	assert.False(t, isLegacy)
+	got, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
+	assert.ErrorIs(t, err, errAgentCredentialRevoked)
 	assert.Nil(t, got)
 }
 
-func TestEvaluateAgentCredentialStatus_NotFoundIsLegacy(t *testing.T) {
+func TestEvaluateAgentCredentialStatus_NotFoundRejected(t *testing.T) {
 	fake := &fakeAgentCredentialStore{err: store.ErrNotFound}
 
-	got, isLegacy, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
-	require.NoError(t, err)
-	assert.True(t, isLegacy)
+	got, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
+	assert.ErrorIs(t, err, errAgentCredentialNotFound)
+	assert.Nil(t, got)
+}
+
+func TestEvaluateAgentCredentialStatus_EmptyJTIRejected(t *testing.T) {
+	fake := &fakeAgentCredentialStore{cred: &store.AgentCredential{ID: "cred-1"}}
+
+	got, err := evaluateAgentCredentialStatus(context.Background(), fake, "")
+	assert.ErrorIs(t, err, errAgentCredentialEmptyJTI)
 	assert.Nil(t, got)
 }
 
@@ -116,10 +121,10 @@ func TestEvaluateAgentCredentialStatus_StoreErrorIsRetryable(t *testing.T) {
 	storeErr := errors.New("credential status lookup failed")
 	fake := &fakeAgentCredentialStore{err: storeErr}
 
-	got, isLegacy, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
+	got, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
 	assert.ErrorIs(t, err, storeErr)
-	assert.False(t, isLegacy)
 	assert.False(t, errors.Is(err, errAgentCredentialRevoked))
+	assert.False(t, errors.Is(err, errAgentCredentialNotFound))
 	assert.Nil(t, got)
 }
 
@@ -313,56 +318,35 @@ func TestAgentRefresh_MarkerAbsent_ActiveRefreshesAndRevokesOldCredential(t *tes
 	require.NotNil(t, got.RevokedAt, "old credential must be revoked after a successful refresh")
 }
 
-func TestAgentRefresh_MarkerAbsent_NotFoundFallsBackToLegacy(t *testing.T) {
+func TestAgentRefresh_MarkerAbsent_UnrecordedRejected(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
 
-	agentID := tid("agent-refresh-nomarker-legacy")
+	agentID := tid("agent-refresh-nomarker-unrecorded")
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
-	claims := newLegacyAgentToken(t, srv, agentID, project.ID)
+	claims := newUnrecordedAgentToken(t, srv, agentID, project.ID)
 
 	req := buildAgentRefreshRequest(agentID, claims, "", false)
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
-	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
-// newLegacyAgentToken returns validated claims for an agent token minted
-// without a credential recorder, so its JTI has no credential row.
-func newLegacyAgentToken(t *testing.T, srv *Server, agentID, projectID string) *AgentTokenClaims {
+// newUnrecordedAgentToken returns validated claims for an agent token signed
+// without recording a credential row, so its JTI is absent from the store.
+func newUnrecordedAgentToken(t *testing.T, srv *Server, agentID, projectID string) *AgentTokenClaims {
 	t.Helper()
-	legacyService, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    srv.agentTokenService.config.SigningKey,
-		TokenDuration: time.Hour,
-	})
+	tok, _, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   agentID,
+		ProjectID: projectID,
+		Scopes:    ScopesForRole(AgentRoleFull),
+	}, "")
 	require.NoError(t, err)
-	legacyToken, err := legacyService.GenerateAgentToken(
-		agentID, projectID, ScopesForRole(AgentRoleFull), nil)
-	require.NoError(t, err)
-	claims, err := srv.agentTokenService.ValidateAgentToken(legacyToken)
+	claims, err := srv.agentTokenService.ValidateAgentToken(tok)
 	require.NoError(t, err)
 	return claims
-}
-
-func TestAgentRefresh_MarkerAbsent_LegacySuspendedAgentDenied(t *testing.T) {
-	srv, s, _, project := setupCredentialTestServer(t)
-
-	agentID := tid("agent-refresh-nomarker-legacy-susp")
-	agent := createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
-	agent.Phase = "suspended"
-	require.NoError(t, s.UpdateAgent(context.Background(), agent))
-
-	claims := newLegacyAgentToken(t, srv, agentID, project.ID)
-
-	// No markers set and no credential row: the handler classifies the token
-	// as legacy and applies the legacy agent-state checks.
-	req := buildAgentRefreshRequest(agentID, claims, "", false)
-	rec := httptest.NewRecorder()
-	srv.handleAgentTokenRefresh(rec, req, agentID)
-
-	require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "suspended")
 }
 
 // A suspended agent's token with an active credential is not refreshed,
@@ -467,18 +451,20 @@ func TestAgentRefresh_NilAgentLookupRefused(t *testing.T) {
 	assert.Nil(t, got.RevokedAt, "a refused refresh leaves the presented credential as it was")
 }
 
-func TestAgentRefresh_MarkerAbsent_LegacyDeletedAgentDenied(t *testing.T) {
+func TestAgentRefresh_DeletedAgentDenied(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
 
-	agentID := tid("agent-refresh-nomarker-legacy-del")
+	agentID := tid("agent-refresh-deleted")
 	agent := createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
+
+	token, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	claims, err := srv.agentTokenService.ValidateAgentToken(token)
+	require.NoError(t, err)
+
 	agent.DeletedAt = time.Now()
 	require.NoError(t, s.UpdateAgent(context.Background(), agent))
 
-	claims := newLegacyAgentToken(t, srv, agentID, project.ID)
-
-	// No markers set and no credential row: the handler classifies the token
-	// as legacy and applies the legacy agent-state checks.
 	req := buildAgentRefreshRequest(agentID, claims, "", false)
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
@@ -497,11 +483,11 @@ func TestAgentRefresh_MarkerAbsent_LegacyDeletedAgentDenied(t *testing.T) {
 func TestEvaluateAgentCredentialStatus_NilCredentialNilErrorIsStoreFailure(t *testing.T) {
 	fake := &fakeAgentCredentialStore{}
 
-	got, isLegacy, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
+	got, err := evaluateAgentCredentialStatus(context.Background(), fake, "some-jti")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errAgentCredentialMissing)
 	assert.False(t, errors.Is(err, errAgentCredentialRevoked))
-	assert.False(t, isLegacy)
+	assert.False(t, errors.Is(err, errAgentCredentialNotFound))
 	assert.Nil(t, got)
 }
 

@@ -549,8 +549,8 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 		refuse(http.StatusForbidden, errCodeCredentialNotAdmitted, "exchange requires the agent's own agent token")
 		return
 	}
-	// 2. Re-load the agent credential row; a token with no row (legacy),
-	// a revoked or expired row, or a lookup error cannot exchange.
+	// 2. Re-load the agent credential row; an unrecorded, revoked, or expired
+	// row, or a lookup error cannot exchange.
 	now := time.Now().UTC()
 	ac, err := s.store.GetAgentCredentialByJTIHash(ctx, hashJTI(agentIdent.Claims.ID))
 	if err != nil || ac == nil || ac.RevokedAt != nil || !now.Before(ac.ExpiresAt) || ac.AgentID != agentIdent.ID() {

@@ -209,7 +209,7 @@ func TestMembershipLossProcessor_vs_CredentialMint_Postgres(t *testing.T) {
 		if cred.RevokedAt != nil {
 			// Revoked by the processor: refused on credential status alone,
 			// with no hold check involved.
-			_, _, statusErr := evaluateAgentCredentialStatus(ctx, f.s, claims.ID)
+			_, statusErr := evaluateAgentCredentialStatus(ctx, f.s, claims.ID)
 			assert.ErrorIs(t, statusErr, errAgentCredentialRevoked)
 			continue
 		}

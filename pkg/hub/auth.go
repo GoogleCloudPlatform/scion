@@ -1229,21 +1229,11 @@ func extractProxyUser(r *http.Request) UserIdentity {
 // agentCredentialIDContextKey stores the credential ID for a validated agent token.
 type agentCredentialIDContextKey struct{}
 
-// legacyTokenContextKey marks that the agent token is a legacy (pre-table) token.
-type legacyTokenContextKey struct{}
-
-// GetAgentCredentialIDFromContext returns the credential ID if the agent token
-// was found in the credential store, or "" if it's a legacy token.
+// GetAgentCredentialIDFromContext returns the credential ID for a validated
+// agent token, or "" if not set.
 func GetAgentCredentialIDFromContext(ctx context.Context) string {
 	id, _ := ctx.Value(agentCredentialIDContextKey{}).(string)
 	return id
-}
-
-// IsLegacyTokenFromContext returns true if the agent token was not found in the
-// credential store (compatibility window for pre-table tokens).
-func IsLegacyTokenFromContext(ctx context.Context) bool {
-	v, _ := ctx.Value(legacyTokenContextKey{}).(bool)
-	return v
 }
 
 // RequireAuth is middleware that ensures a request is authenticated.

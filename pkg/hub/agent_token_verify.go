@@ -33,6 +33,10 @@ const (
 	agentTokenAccepted agentTokenRefusal = iota
 	// agentTokenRevoked: the credential is revoked.
 	agentTokenRevoked
+	// agentTokenUnrecorded: no recorded credential exists for the token's JTI.
+	agentTokenUnrecorded
+	// agentTokenMissingJTI: the token carries no JTI claim.
+	agentTokenMissingJTI
 	// agentTokenHeld: the agent is held.
 	agentTokenHeld
 	// agentTokenInvalidSubject: the subject names no agent.
@@ -45,54 +49,54 @@ const (
 )
 
 // verifyAgentTokenCredential runs the checks that follow a successful
-// ValidateAgentToken (signature and expiry) before an agent token
-// authenticates anything: the credential's status (step 1a), an active
+// ValidateAgentToken (signature, expiry and non-empty JTI) before an agent
+// token authenticates anything: the credential's status (step 1a), an active
 // agent hold (1b) and the token's run (1c). It returns ctx with the
-// credential context values set (legacy marker or credential id) and
-// the outcome. UnifiedAuthMiddleware maps a refusal to its HTTP response
-// with writeAgentTokenRefusal; the conduit relay applies the same checks
-// to a credential presented in band.
+// credential id context value set and the outcome. UnifiedAuthMiddleware maps
+// a refusal to its HTTP response with writeAgentTokenRefusal; the conduit
+// relay applies the same checks to a credential presented in band.
 func verifyAgentTokenCredential(ctx context.Context, cfg AuthConfig, log *slog.Logger, claims *AgentTokenClaims, req runScopeRequest, source string) (context.Context, agentTokenRefusal) {
-	// Step 1a: Agent-token authentication requires a successful
-	// credential-status evaluation (Phase 1H). See
-	// evaluateAgentCredentialStatus for the possible outcomes.
+	// Step 1a: Agent-token authentication requires a non-empty JTI and an
+	// active recorded credential. See evaluateAgentCredentialStatus for the
+	// possible outcomes.
 	var credState agentTokenCredentialState
-	if cfg.CredentialStore != nil && claims.ID != "" {
-		cred, isLegacy, credErr := evaluateAgentCredentialStatus(ctx, cfg.CredentialStore, claims.ID)
-		credState.evaluated = true
-		switch {
-		case errors.Is(credErr, errAgentCredentialRevoked):
-			return ctx, agentTokenRevoked
-		case credErr != nil:
-			// Any store error other than "not found" must not fall
-			// back to authenticating the request: it means the
-			// credential's status could not actually be determined,
-			// so treat it as a retryable failure.
-			log.Error("Agent credential status lookup failed",
-				"agent_id", claims.Subject, "error", credErr)
-			return ctx, agentTokenUnevaluated
-		case isLegacy:
-			// Legacy compatibility path: tokens issued before the
-			// credential table existed have no credential record.
-			// Retained pending a product decision; do not close or
-			// widen this branch.
-			log.Warn("Agent token not found in credential store (legacy/pre-table token)",
-				"agent_id", claims.Subject, "jti_hash", hashJTI(claims.ID)[:8])
-			ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
-		default:
-			// Credential found and active.
-			credState.cred = cred
-			ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
-			// Update last_seen_at (fire-and-forget, at most once per
-			// agentCredentialLastSeenInterval).
-			touchAgentCredentialLastSeen(ctx, cfg.CredentialStore, cred, time.Now())
-		}
+	if claims.ID == "" {
+		return ctx, agentTokenMissingJTI
+	}
+	if cfg.CredentialStore == nil {
+		log.Error("Agent credential store not configured",
+			"agent_id", claims.Subject)
+		return ctx, agentTokenUnevaluated
+	}
+	cred, credErr := evaluateAgentCredentialStatus(ctx, cfg.CredentialStore, claims.ID)
+	credState.evaluated = true
+	switch {
+	case errors.Is(credErr, errAgentCredentialRevoked):
+		return ctx, agentTokenRevoked
+	case errors.Is(credErr, errAgentCredentialNotFound):
+		return ctx, agentTokenUnrecorded
+	case errors.Is(credErr, errAgentCredentialEmptyJTI):
+		return ctx, agentTokenMissingJTI
+	case credErr != nil:
+		// Any store error other than "not found" must not fall
+		// back to authenticating the request: it means the
+		// credential's status could not actually be determined,
+		// so treat it as a retryable failure.
+		log.Error("Agent credential status lookup failed",
+			"agent_id", claims.Subject, "error", credErr)
+		return ctx, agentTokenUnevaluated
+	default:
+		// Credential found and active.
+		credState.cred = cred
+		ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
+		// Update last_seen_at (fire-and-forget, at most once per
+		// agentCredentialLastSeenInterval).
+		touchAgentCredentialLastSeen(ctx, cfg.CredentialStore, cred, time.Now())
 	}
 
-	// Step 1b: a held agent's token is refused on every
-	// request, including tokens on the legacy path above
-	// (ptone/scion#3433). Same response as a revoked
-	// credential; a lookup fault is the same 503.
+	// Step 1b: a held agent's token is refused on every request
+	// (ptone/scion#3433). Same response as a revoked credential; a lookup
+	// fault is the same 503.
 	if cfg.HoldStore != nil {
 		// A subject that is not an agent UUID names no agent:
 		// an authentication failure, refused before the hold
@@ -128,11 +132,15 @@ func verifyAgentTokenCredential(ctx context.Context, cfg AuthConfig, log *slog.L
 // writeAgentTokenRefused whatever the cause.
 const (
 	agentTokenCauseRevoked            = "revoked"              // credential revoked
+	agentTokenCauseUnrecorded         = "unrecorded"           // credential not found in store
+	agentTokenCauseMissingJTI         = "missing_jti"          // token carries no jti claim
 	agentTokenCauseHeld               = "held"                 // agent held
 	agentTokenCauseInvalidSubject     = "invalid_subject"      // subject names no agent
 	agentTokenCauseInvalidToken       = "invalid_token"        // X-Scion-Agent-Token failed validation
 	agentTokenCauseHeaderNotValidated = "header_not_validated" // X-Scion-Agent-Token reached dev auth unvalidated
 	agentTokenCauseRefreshRevoked     = "refresh_revoked"      // token refresh found the credential revoked
+	agentTokenCauseRefreshUnrecorded  = "refresh_unrecorded"   // token refresh found no recorded credential
+	agentTokenCauseRefreshMissingJTI  = "refresh_missing_jti"  // token refresh received a token without jti
 )
 
 // agentTokenRefusedLogMessage is the message of the log line for a
@@ -157,6 +165,10 @@ func writeAgentTokenRefusal(ctx context.Context, w http.ResponseWriter, log *slo
 	switch refusal {
 	case agentTokenRevoked:
 		refuseAgentToken(ctx, w, log, agentTokenCauseRevoked, "agent_id", agentID)
+	case agentTokenUnrecorded:
+		refuseAgentToken(ctx, w, log, agentTokenCauseUnrecorded, "agent_id", agentID)
+	case agentTokenMissingJTI:
+		refuseAgentToken(ctx, w, log, agentTokenCauseMissingJTI, "agent_id", agentID)
 	case agentTokenHeld:
 		refuseAgentToken(ctx, w, log, agentTokenCauseHeld, "agent_id", agentID)
 	case agentTokenInvalidSubject:
