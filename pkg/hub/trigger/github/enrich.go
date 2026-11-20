@@ -143,8 +143,10 @@ func ApplyPullRequestEnrichment(
 	lists := cloneListsMap(existingLists)
 	lists["labels"] = extractObjectStrings(prMap, "labels", "name")
 	lists["requested_reviewers"] = extractObjectStrings(prMap, "requested_reviewers", "login")
+	fetchedKeys = append(fetchedKeys, "labels", "requested_reviewers")
 	if _, hasTeams := prMap["requested_teams"]; hasTeams {
 		lists["requested_teams"] = extractObjectStrings(prMap, "requested_teams", "slug")
+		fetchedKeys = append(fetchedKeys, "requested_teams")
 	}
 	lists[ListEnriched] = fetchedKeys
 

@@ -621,14 +621,16 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					d.logger.Warn("trigger: source enrichment failed",
 						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceKind", ev.SourceKind, "error", enrichErr)
 					if enrichedAttrs != nil {
+						// Use the enricher's ceiling-checked failure attributes (normally
+						// carrying enriched="failed", or preserving existing attributes if
+						// adding enriched="failed" would exceed the 8 KiB bound).
 						ev.Attributes = enrichedAttrs
 						if enrichedLists != nil {
 							ev.Lists = enrichedLists
 						}
 					} else {
-						// Preserve existing attributes if enricher signaled it could not
-						// fit enriched="failed" within the 8 KiB ceiling; otherwise mark
-						// enriched="failed" directly so re-handles short-circuit.
+						// Generic enricher error with no returned attribute map: mark
+						// enriched="failed" so lost-lease re-handles short-circuit.
 						if ev.Attributes == nil {
 							ev.Attributes = map[string]string{"enriched": "failed"}
 						} else if _, already := ev.Attributes["enriched"]; !already {

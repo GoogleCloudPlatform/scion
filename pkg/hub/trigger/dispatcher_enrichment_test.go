@@ -432,4 +432,32 @@ func TestDispatcherEnrichment_IdempotentLostLeaseRehandle(t *testing.T) {
 	res2 := disp.HandleItem(ctx, makeEventQueueItem(t, ev.ID), nil)
 	require.True(t, res2.Done)
 	assert.Equal(t, 1, core.enrichCalls, "lost-lease re-handle must short-circuit via enriched attribute")
+
+	// Also verify the nil-attrs error fallback sets enriched="failed" and
+	// short-circuits a subsequent lost-lease re-handle.
+	evFail := newPRCommentEvent(projectID)
+	require.NoError(t, st.CreateTriggerEvent(ctx, evFail))
+	coreNilErr := &enrichTestCore{
+		authorized: true,
+		enrichFn: func(_ context.Context, _ *hubfire.FireEvent) (map[string]string, map[string][]string, error) {
+			return nil, nil, errors.New("generic enricher failure")
+		},
+	}
+	dispNilErr, err := trigger.NewDispatcher(trigger.DispatcherConfig{Core: coreNilErr, Store: st, Rules: rules})
+	require.NoError(t, err)
+
+	resFail1 := dispNilErr.HandleItem(ctx, makeEventQueueItem(t, evFail.ID), nil)
+	require.True(t, resFail1.Done)
+	assert.Equal(t, 1, coreNilErr.enrichCalls)
+	storedFail, err := st.GetTriggerEvent(ctx, evFail.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", storedFail.Attributes["enriched"])
+
+	st.mu.Lock()
+	st.events[evFail.ID].Status = store.TriggerEventStatusPending
+	st.mu.Unlock()
+
+	resFail2 := dispNilErr.HandleItem(ctx, makeEventQueueItem(t, evFail.ID), nil)
+	require.True(t, resFail2.Done)
+	assert.Equal(t, 1, coreNilErr.enrichCalls, "lost-lease re-handle after enriched=failed must not call Enrich again")
 }

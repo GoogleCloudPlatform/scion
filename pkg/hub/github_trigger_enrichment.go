@@ -63,8 +63,10 @@ func (s *Server) enrichGitHubTriggerEvent(ctx context.Context, ev *hubfire.FireE
 		}
 		failAttrs, failLists, ceilErr := githubtrigger.ApplyPullRequestEnrichmentFailure(ev.Attributes, ev.Lists)
 		if ceilErr != nil {
-			// Deliberately keep attributes within the 8 KiB ceiling rather than
-			// overflowing or silently dropping protected keys.
+			// Existing protected attributes alone already exceed the 8 KiB ceiling,
+			// so even adding enriched="failed" cannot fit without dropping protected
+			// keys; return the existing non-nil map so the dispatcher does not add
+			// enriched="failed" past the bound.
 			return ev.Attributes, ev.Lists, err
 		}
 		return failAttrs, failLists, err

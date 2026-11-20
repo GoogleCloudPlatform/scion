@@ -139,8 +139,21 @@ func TestApplyPullRequestEnrichment_SameRepoAndFork(t *testing.T) {
 		if len(lists["assignees"]) != 1 || lists["assignees"][0] != "alice" {
 			t.Errorf("assignees should be preserved, got %v", lists["assignees"])
 		}
-		if len(lists[ListEnriched]) != 10 {
-			t.Errorf("lists.enriched = %v, want 10 fetched keys", lists[ListEnriched])
+		// 10 fetched attribute keys + 3 overwritten/fetched list keys (labels, requested_reviewers, requested_teams).
+		if len(lists[ListEnriched]) != 13 {
+			t.Errorf("lists.enriched = %v, want 13 fetched keys", lists[ListEnriched])
+		}
+		enrichedSet := make(map[string]bool, len(lists[ListEnriched]))
+		for _, k := range lists[ListEnriched] {
+			enrichedSet[k] = true
+		}
+		for _, wantKey := range []string{"labels", "requested_reviewers", "requested_teams", "is_fork", "head_ref"} {
+			if !enrichedSet[wantKey] {
+				t.Errorf("lists.enriched missing %q: %v", wantKey, lists[ListEnriched])
+			}
+		}
+		if enrichedSet["assignees"] {
+			t.Errorf("lists.enriched must not claim untouched signed key assignees: %v", lists[ListEnriched])
 		}
 	})
 
@@ -159,8 +172,9 @@ func TestApplyPullRequestEnrichment_SameRepoAndFork(t *testing.T) {
 		if attrs["is_fork"] != "true" || attrs["head_repo"] != "" || attrs["draft"] != "true" || attrs[AttrEnriched] != EnrichedTrue {
 			t.Errorf("unexpected fork attrs: %+v", attrs)
 		}
-		if len(lists[ListEnriched]) != 9 {
-			t.Errorf("lists.enriched = %v, want 9 keys (without mergeable_state)", lists[ListEnriched])
+		// 9 fetched attribute keys (no mergeable_state) + 2 list keys (labels, requested_reviewers; no requested_teams).
+		if len(lists[ListEnriched]) != 11 {
+			t.Errorf("lists.enriched = %v, want 11 keys", lists[ListEnriched])
 		}
 	})
 }
@@ -245,7 +259,7 @@ func TestApplyPullRequestEnrichment_Ceilings(t *testing.T) {
 		if attrs["lists_truncated"] != "true" {
 			t.Errorf("expected lists_truncated=true, got %q", attrs["lists_truncated"])
 		}
-		if len(lists[ListEnriched]) != 9 {
+		if len(lists[ListEnriched]) != 11 {
 			t.Errorf("lists.enriched was truncated: %v", lists[ListEnriched])
 		}
 		encodedLists, err := encodeCompactJSON(lists)

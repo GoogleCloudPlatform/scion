@@ -219,6 +219,8 @@ func TestGitHubTriggerE2E_PREnrichmentHappyForkFailureUnauthorizedAndNoCandidate
 	assert.Equal(t, "baseaaa", storedOK.Attributes["base_sha"])
 	assert.Equal(t, []string{"needs-review"}, storedOK.Lists["labels"])
 	assert.Contains(t, storedOK.Lists[githubtrigger.ListEnriched], "is_fork")
+	assert.Contains(t, storedOK.Lists[githubtrigger.ListEnriched], "labels")
+	assert.Contains(t, storedOK.Lists[githubtrigger.ListEnriched], "requested_reviewers")
 
 	calls := disp.getCalls()
 	require.Len(t, calls, 1)
@@ -312,7 +314,8 @@ func TestGitHubTriggerE2E_PREnrichmentHappyForkFailureUnauthorizedAndNoCandidate
 	require.Len(t, disp.getCalls(), 2)
 
 	// 5. Direct enricher ceiling test while association is still valid:
-	//    unshrinkable protected attrs return ErrAttributesCeilingExceeded deliberately.
+	//    a fetched PR whose protected head_ref exceeds 8 KiB triggers
+	//    ErrAttributesCeilingExceeded and returns enriched="failed" within the 8 KiB bound.
 	mu.Lock()
 	prResponseCode = http.StatusOK
 	prResponseBody = `{
@@ -321,10 +324,10 @@ func TestGitHubTriggerE2E_PREnrichmentHappyForkFailureUnauthorizedAndNoCandidate
 		"draft": false,
 		"merged": false,
 		"base": {"ref": "main", "sha": "baseaaa"},
-		"head": {"ref": "feat/enrich", "sha": "headbbb", "repo": {"full_name": "octo-org/octo-repo"}}
+		"head": {"ref": "` + strings.Repeat("r", githubtrigger.DefaultMaxAttributesBytes) + `", "sha": "headbbb", "repo": {"full_name": "octo-org/octo-repo"}}
 	}`
 	mu.Unlock()
-	unshrinkableEv := &hubfire.FireEvent{
+	ceilingEv := &hubfire.FireEvent{
 		ID:         uuid.NewString(),
 		ProjectID:  f.projectID,
 		SourceKind: store.TriggerSourceKindGitHub,
@@ -333,12 +336,16 @@ func TestGitHubTriggerE2E_PREnrichmentHappyForkFailureUnauthorizedAndNoCandidate
 			"event":           "issue_comment",
 			"is_pull_request": "true",
 			"number":          "42",
-			"html_url":        "https://github.com/" + strings.Repeat("a", githubtrigger.DefaultMaxAttributesBytes),
+			"body":            strings.Repeat("b", 1024),
 		},
 	}
-	gotAttrs, _, enrichErr := (serverTriggerCore{srv: f.srv}).Enrich(ctx, unshrinkableEv)
+	gotAttrs, _, enrichErr := (serverTriggerCore{srv: f.srv}).Enrich(ctx, ceilingEv)
 	assert.ErrorIs(t, enrichErr, githubtrigger.ErrAttributesCeilingExceeded)
-	assert.NotNil(t, gotAttrs)
+	require.NotNil(t, gotAttrs)
+	assert.Equal(t, githubtrigger.EnrichedFailed, gotAttrs[githubtrigger.AttrEnriched])
+	rawGotAttrs, mErr := json.Marshal(gotAttrs)
+	require.NoError(t, mErr)
+	assert.LessOrEqual(t, len(rawGotAttrs), githubtrigger.DefaultMaxAttributesBytes)
 	assert.Equal(t, int64(4), prCallCount.Load())
 
 	// 6. Unauthorized association -> 0 additional mints, 0 additional PR API calls, fires refused.

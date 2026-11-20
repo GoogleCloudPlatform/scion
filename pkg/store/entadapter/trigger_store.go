@@ -1609,6 +1609,9 @@ func (s *TriggerStore) CountPendingTriggerEvents(ctx context.Context, projectID 
 		Count(ctx)
 }
 
+// UpdateTriggerEventAttributes is enrichment-only (Stage 3 §5.5): it updates
+// attributes and lists on a pending trigger_events row before rule evaluation
+// and never modifies payload, type, subject, headers, dedup_key, or body_sha256.
 func (s *TriggerStore) UpdateTriggerEventAttributes(ctx context.Context, id string, attributes map[string]string, lists map[string][]string) error {
 	uid, err := parseUUID(id)
 	if err != nil {

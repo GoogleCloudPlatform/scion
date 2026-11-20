@@ -305,7 +305,8 @@ func (r Rule) normalizedDialect() string {
 	return d
 }
 
-// Env returns the load-bearing Stage 1 trigger CEL Environment (Version 1, §7.1).
+// Env returns the load-bearing trigger CEL Environment (Version 2, Stage 1 §7.1;
+// Stage 3 §4.3 adds event.lists).
 func Env() celengine.Environment {
 	return celengine.Environment{
 		Name:    EnvironmentName,

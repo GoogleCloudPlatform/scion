@@ -346,6 +346,10 @@ type TriggerStore interface {
 	GetTriggerEventByBodySHA256(ctx context.Context, projectID, sourceKind, bodySHA256 string) (*TriggerEvent, error)
 	ListTriggerEvents(ctx context.Context, filter TriggerEventFilter, opts ListOptions) (*ListResult[TriggerEvent], error)
 	CountPendingTriggerEvents(ctx context.Context, projectID string) (int, error)
+	// UpdateTriggerEventAttributes is enrichment-only (Stage 3 §5.5): it updates
+	// attributes and lists on a pending event row before rule evaluation and
+	// never modifies payload, type, subject, headers, dedup_key, or body_sha256.
+	// It is a no-op once the event is no longer pending.
 	UpdateTriggerEventAttributes(ctx context.Context, id string, attributes map[string]string, lists map[string][]string) error
 	MarkTriggerEventProcessed(ctx context.Context, id string, processedAt time.Time, matchCount, fireCount int) error
 	MarkTriggerEventFailed(ctx context.Context, id string, processedAt time.Time, errMsg string) error
