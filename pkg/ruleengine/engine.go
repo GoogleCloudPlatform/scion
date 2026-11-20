@@ -116,6 +116,20 @@ func (b *BudgetTracker) Charge(d time.Duration) {
 	b.mu.Unlock()
 }
 
+// Exhaust marks the tracker as having spent at least its full limit so
+// Exhausted() is true and Remaining() is 0. It never reduces Spent() if
+// previous charges already exceeded the limit.
+func (b *BudgetTracker) Exhaust() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	if b.spent < b.limit {
+		b.spent = b.limit
+	}
+	b.mu.Unlock()
+}
+
 // Spent returns total duration charged so far.
 func (b *BudgetTracker) Spent() time.Duration {
 	if b == nil {
@@ -512,6 +526,8 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 		effBudget.MaxEvalTime = evalTimeout
 	}
 
+	start := time.Now()
+
 	evalCtx := ctx
 	var cancel context.CancelFunc
 	if evalTimeout > 0 {
@@ -523,7 +539,6 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 		defer cancel()
 	}
 
-	start := time.Now()
 	dec, err := d.Evaluate(evalCtx, c, input, effBudget)
 	elapsed := time.Since(start)
 	if budget.Tracker != nil {
@@ -537,6 +552,7 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 			}
 		}
 		if boundFromTracker && (isTimeoutFailure(err) || (errors.Is(context.Cause(evalCtx), errTrackerTimeout) && isTimeoutOrCancelFailure(err))) {
+			budget.Tracker.Exhaust()
 			return Decision{}, fmt.Errorf("%w: %w", ErrBudgetExhausted, err)
 		}
 		if errors.Is(context.Cause(evalCtx), errDialectEvalTimeout) && isTimeoutOrCancelFailure(err) {

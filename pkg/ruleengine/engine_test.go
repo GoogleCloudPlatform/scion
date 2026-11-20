@@ -1438,3 +1438,131 @@ func TestDenyByDefault_DialectForEnforcesAllFiveReasons(t *testing.T) {
 		t.Fatalf("DialectFor admitted io_model = (%v, %v), want ioDialect, nil", gotIO, err)
 	}
 }
+
+type earlyTimeoutDialect struct {
+	name        string
+	maxEvalTime time.Duration
+	evalCalls   atomic.Int32
+}
+
+func (d *earlyTimeoutDialect) Name() string { return d.name }
+func (d *earlyTimeoutDialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{
+		MaxEvalTime: d.maxEvalTime,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
+	}
+}
+func (d *earlyTimeoutDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	return ruleengine.NewCompiled(env.Consumer, d.name, kind, rule), nil
+}
+func (d *earlyTimeoutDialect) Evaluate(_ context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	d.evalCalls.Add(1)
+	// Return a timeout immediately (no sleep) to deterministically simulate a
+	// scheduling gap where elapsed < tracker.Remaining() when boundFromTracker trips.
+	return ruleengine.Decision{}, &ruleengine.FailedError{
+		Reason: celengine.ReasonTimeout,
+		Cause:  context.DeadlineExceeded,
+	}
+}
+
+func TestBudgetTracker_Exhaust(t *testing.T) {
+	var nilTracker *ruleengine.BudgetTracker
+	nilTracker.Exhaust() // must not panic
+
+	tr := ruleengine.NewBudgetTracker(100 * time.Millisecond)
+	tr.Charge(10 * time.Millisecond)
+	if tr.Exhausted() || tr.Remaining() != 90*time.Millisecond {
+		t.Fatalf("before Exhaust: Exhausted=%v Remaining=%s", tr.Exhausted(), tr.Remaining())
+	}
+	tr.Exhaust()
+	if !tr.Exhausted() || tr.Remaining() != 0 || tr.Spent() != 100*time.Millisecond {
+		t.Fatalf("after Exhaust: Exhausted=%v Remaining=%s Spent=%s", tr.Exhausted(), tr.Remaining(), tr.Spent())
+	}
+
+	// Already-overspent tracker must not have Spent() reduced by Exhaust().
+	over := ruleengine.NewBudgetTracker(50 * time.Millisecond)
+	over.Charge(80 * time.Millisecond)
+	over.Exhaust()
+	if !over.Exhausted() || over.Remaining() != 0 || over.Spent() != 80*time.Millisecond {
+		t.Fatalf("overspent after Exhaust: Exhausted=%v Remaining=%s Spent=%s", over.Exhausted(), over.Remaining(), over.Spent())
+	}
+
+	// Concurrent Charge/Exhaust/Remaining/Exhausted must be race-free.
+	conc := ruleengine.NewBudgetTracker(50 * time.Millisecond)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				conc.Charge(time.Millisecond)
+			} else {
+				conc.Exhaust()
+			}
+			_ = conc.Exhausted()
+			_ = conc.Remaining()
+			_ = conc.Spent()
+		}(i)
+	}
+	wg.Wait()
+	if !conc.Exhausted() || conc.Remaining() != 0 {
+		t.Fatalf("concurrent Exhaust: Exhausted=%v Remaining=%s", conc.Exhausted(), conc.Remaining())
+	}
+}
+
+func TestEvaluate_BoundFromTrackerTimeoutExhaustsTracker(t *testing.T) {
+	eng := ruleengine.NewEngine()
+	dialect := &earlyTimeoutDialect{name: "early_timeout", maxEvalTime: 100 * time.Millisecond}
+	if err := eng.Register(dialect); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("triggers", ruleengine.Grant("early_timeout")); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
+	comp, err := eng.Compile(context.Background(), "early_timeout", "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "triggers",
+		Name:     "test",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	// 1. Tracker limit (50ms) < dialect MaxEvalTime (100ms) => boundFromTracker is true.
+	// Even though the stub returns immediately (elapsed << 50ms), Evaluate returns
+	// ErrBudgetExhausted and MUST exhaust the tracker so subsequent calls short-circuit.
+	tracker := ruleengine.NewBudgetTracker(50 * time.Millisecond)
+	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
+	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("boundFromTracker timeout err = %v, want ErrBudgetExhausted", err)
+	}
+	if !tracker.Exhausted() || tracker.Remaining() != 0 {
+		t.Fatalf("tracker not exhausted after ErrBudgetExhausted: Exhausted=%v Remaining=%s", tracker.Exhausted(), tracker.Remaining())
+	}
+	if got := dialect.evalCalls.Load(); got != 1 {
+		t.Fatalf("evalCalls = %d, want 1", got)
+	}
+
+	// Subsequent call on the same tracker must short-circuit without invoking the dialect.
+	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
+	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("subsequent Evaluate err = %v, want ErrBudgetExhausted", err)
+	}
+	if got := dialect.evalCalls.Load(); got != 1 {
+		t.Fatalf("dialect invoked after budget exhaustion: evalCalls = %d, want 1", got)
+	}
+
+	// 2. Tracker limit (200ms) > dialect MaxEvalTime (100ms) => boundFromTracker is false.
+	// A per-rule dialect timeout must NOT exhaust the aggregate tracker.
+	wideTracker := ruleengine.NewBudgetTracker(200 * time.Millisecond)
+	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: wideTracker})
+	if errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("non-boundFromTracker timeout unexpectedly returned ErrBudgetExhausted: %v", err)
+	}
+	var failedErr *ruleengine.FailedError
+	if !errors.As(err, &failedErr) || failedErr.Reason != celengine.ReasonTimeout {
+		t.Fatalf("non-boundFromTracker timeout err = %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonTimeout)
+	}
+	if wideTracker.Exhausted() || wideTracker.Remaining() <= 0 {
+		t.Fatalf("wideTracker unexpectedly exhausted on dialect timeout: Exhausted=%v Remaining=%s", wideTracker.Exhausted(), wideTracker.Remaining())
+	}
+}
