@@ -234,36 +234,69 @@ func TestHandleHarnessConfigClone_GlobalSlug(t *testing.T) {
 }
 
 // TestHarnessConfigImport_GlobalSlug covers a project-scope import of a
-// harness config named like a global one: the resource fails with the
-// refusal and no project row is written; a workstation hub imports it.
+// harness config named like a global one: a workstation hub imports it from a
+// remote source; a hosted hub refuses that loopback http:// source before
+// fetching (checkImportSource), and refuses the name itself on a workspace
+// import, writing no project row either way.
 func TestHarnessConfigImport_GlobalSlug(t *testing.T) {
-	for _, workstation := range []bool{false, true} {
-		name := "hosted refuses"
-		if workstation {
-			name = "workstation accepts"
-		}
-		t.Run(name, func(t *testing.T) {
-			srv, s := testInstallSourceServer(t)
-			srv.workstation = workstation
-			_, projectID := seedProjectOwner(t, s, "hc-import-global-slug")
-			seedHarnessConfigRow(t, s, "shared-name", store.HarnessConfigScopeGlobal, "")
+	t.Run("workstation accepts", func(t *testing.T) {
+		srv, s := testInstallSourceServer(t)
+		srv.workstation = true
+		_, projectID := seedProjectOwner(t, s, "hc-import-global-slug")
+		seedHarnessConfigRow(t, s, "shared-name", store.HarnessConfigScopeGlobal, "")
 
-			src := tarGzFilesServer(t, map[string]string{
-				"config.yaml": "name: shared-name\nharness: claude\n",
-			})
-			rec := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
-				Kind: "harness-config", Scope: store.HarnessConfigScopeProject, ScopeID: projectID,
-				SourceURL: src.URL + "/configs/shared-name.tar.gz",
-			})
-			if workstation {
-				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-				assert.True(t, projectHarnessConfigExists(t, s, "shared-name", projectID))
-				return
-			}
-			assert.Contains(t, rec.Body.String(), `harness config slug \"shared-name\" is reserved`, rec.Body.String())
-			assert.False(t, projectHarnessConfigExists(t, s, "shared-name", projectID))
+		src := tarGzFilesServer(t, map[string]string{
+			"config.yaml": "name: shared-name\nharness: claude\n",
 		})
-	}
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+			Kind: "harness-config", Scope: store.HarnessConfigScopeProject, ScopeID: projectID,
+			SourceURL: src.URL + "/configs/shared-name.tar.gz",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.True(t, projectHarnessConfigExists(t, s, "shared-name", projectID))
+	})
+
+	t.Run("hosted refuses remote source", func(t *testing.T) {
+		srv, s := testInstallSourceServer(t)
+		_, projectID := seedProjectOwner(t, s, "hc-import-global-slug-remote")
+		seedHarnessConfigRow(t, s, "shared-name", store.HarnessConfigScopeGlobal, "")
+
+		src := tarGzFilesServer(t, map[string]string{
+			"config.yaml": "name: shared-name\nharness: claude\n",
+		})
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+			Kind: "harness-config", Scope: store.HarnessConfigScopeProject, ScopeID: projectID,
+			SourceURL: src.URL + "/configs/shared-name.tar.gz",
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.False(t, projectHarnessConfigExists(t, s, "shared-name", projectID))
+	})
+
+	t.Run("hosted refuses workspace import", func(t *testing.T) {
+		srv, s, project, wsRoot := setupWorkspaceProject(t, "hc-import-global-slug-ws")
+		require.False(t, srv.workstation)
+		ctx := context.Background()
+		seedHarnessConfigRow(t, s, "shared-name", store.HarnessConfigScopeGlobal, "")
+		writeWorkspaceFiles(t, filepath.Join(wsRoot, ".scion", "harness-configs"), map[string]string{
+			"shared-name/config.yaml": "name: shared-name\nharness: claude\n",
+		})
+
+		admin := &store.User{
+			ID:          tid("user-admin-hc-import-global-slug-ws"),
+			Email:       "hc-import-global-slug-ws@test.com",
+			DisplayName: "Admin",
+			Role:        store.UserRoleAdmin,
+		}
+		require.NoError(t, s.CreateUser(ctx, admin))
+		ensureHubMembership(ctx, s, admin.ID)
+		ensureAdminRoleBinding(t, s, admin.ID)
+
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+			"/api/v1/projects/"+project.ID+"/import-harness-configs",
+			ImportHarnessConfigsRequest{WorkspacePath: "/.scion/harness-configs"})
+		assert.Contains(t, rec.Body.String(), `harness config slug \"shared-name\" is reserved`, rec.Body.String())
+		assert.False(t, projectHarnessConfigExists(t, s, "shared-name", project.ID))
+	})
 }
 
 // TestProjectClone_GlobalSlug covers a project clone whose source project
