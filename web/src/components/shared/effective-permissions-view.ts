@@ -620,6 +620,7 @@ export class ScionEffectivePermissionsView extends LitElement {
   /** Clears cached permission data and reloads if currently visible. */
   public invalidate(): void {
     this._loadedPrincipalId = null;
+    this._permissionsChecked = false;
     this._data = null;
     this._error = null;
     this._projectData = null;
@@ -653,7 +654,8 @@ export class ScionEffectivePermissionsView extends LitElement {
       this.active &&
       this.principalId &&
       this._loadedPrincipalId !== this.principalId &&
-      !this._loading
+      !this._loading &&
+      !this._error
     ) {
       void this.loadHubPermissions();
     }
@@ -670,8 +672,14 @@ export class ScionEffectivePermissionsView extends LitElement {
     try {
       const status = await loadAdminStatus(stateManager.getCurrentUserId());
       if (seq !== this._loadSeq) return;
+      if (status === null) {
+        this._canRead = false;
+        this._permissionsChecked = false;
+        this._error = "Couldn't check your permissions";
+        return;
+      }
       this._canRead = hasAnyPermission(status, ['role_binding.read']);
-      this._permissionsChecked = status !== null;
+      this._permissionsChecked = true;
       if (!this._canRead) {
         this._loadedPrincipalId = targetPrincipal;
         return;
@@ -847,11 +855,23 @@ export class ScionEffectivePermissionsView extends LitElement {
   }
 
   override render(): TemplateResult | typeof nothing {
-    if (!this.active && !this._data && !this._loading && !this._error) {
+    if (
+      !this.active &&
+      !this._data &&
+      !this._loading &&
+      !this._error &&
+      !this._permissionsChecked
+    ) {
       return nothing;
     }
     if (this._permissionsChecked && !this._canRead && !this._loading) {
-      return nothing;
+      return html`
+        <div class="empty-state">
+          <sl-icon name="shield-lock"></sl-icon>
+          <h3>Permission Required</h3>
+          <p>You do not have permission to view effective permissions.</p>
+        </div>
+      `;
     }
 
     if (this._loading) {

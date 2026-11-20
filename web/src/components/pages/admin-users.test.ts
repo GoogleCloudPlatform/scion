@@ -23,6 +23,7 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 import type { AdminUser } from '../../shared/types.js';
+import { clearAdminStatus } from '../../client/admin-status.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
@@ -1914,5 +1915,241 @@ describe('scion-page-admin-users — copy invite link (ptone/scion#7555)', () =>
     expect(el.inviteCopied).toBe(false);
     expect(showToast).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith('Could not copy', 'danger');
+  });
+});
+
+describe('admin-users Roles menu item (D4a–D4c)', () => {
+  let el: (HTMLElement & { updateComplete: Promise<boolean> }) | null = null;
+
+  beforeAll(async () => {
+    mod = await import('./admin-users.js');
+  });
+
+  afterEach(() => {
+    el?.remove();
+    el = null;
+    clearAdminStatus();
+    vi.unstubAllGlobals();
+  });
+
+  async function mountWithPermissions(users: AdminUser[], permissions: string[] | null) {
+    clearAdminStatus();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (path.includes('/auth/me')) {
+          return Promise.resolve(jsonResponse({ id: SELF_ID, role: 'admin' }));
+        }
+        if (path.includes('/api/v1/auth/admin-status')) {
+          if (permissions === null) {
+            return Promise.resolve(jsonResponse({ error: { message: 'fail' } }, 500));
+          }
+          return Promise.resolve(
+            jsonResponse({
+              isAdmin: permissions.length > 0,
+              isSuperAdmin: false,
+              permissions,
+            })
+          );
+        }
+        if (path.includes('/api/v1/users')) {
+          return Promise.resolve(
+            jsonResponse({ users, totalCount: users.length, _capabilities: { actions: ['list'] } })
+          );
+        }
+        return Promise.resolve(jsonResponse([]));
+      })
+    );
+
+    const page = document.createElement('scion-page-admin-users') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    document.body.appendChild(page);
+    await page.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await page.updateComplete;
+    el = page;
+    return page;
+  }
+
+  function rowForEmail(page: HTMLElement, email: string): HTMLTableRowElement {
+    const rows = Array.from(page.shadowRoot?.querySelectorAll('tbody tr') ?? []);
+    const row = rows.find((r) => r.textContent?.includes(email)) as HTMLTableRowElement | undefined;
+    expect(row, `expected row for ${email}`).toBeDefined();
+    return row!;
+  }
+
+  function topLevelMenuLabels(row: HTMLTableRowElement): string[] {
+    const menu = row.querySelector('.actions-cell > sl-dropdown > sl-menu');
+    if (!menu) return [];
+    return Array.from(menu.children)
+      .filter((child) => child.tagName.toLowerCase() === 'sl-menu-item')
+      .map((item) => item.textContent?.replace(/\s+/g, ' ').trim() ?? '');
+  }
+
+  it('D4a: shows "Roles" for role_binding.read holders even without user.* mutation capabilities', async () => {
+    const target = makeUser({
+      id: 'u-readonly',
+      email: 'readonly@example.com',
+      status: 'active',
+      _capabilities: { actions: ['read'] },
+    });
+    const page = await mountWithPermissions([target], ['role_binding.read']);
+    const row = rowForEmail(page, 'readonly@example.com');
+
+    expect(topLevelMenuLabels(row)).toEqual(['Roles']);
+    expect(row.querySelector('.actions-cell sl-divider')).toBeNull();
+  });
+
+  it('D4a: omits "Roles" across all row types when caller lacks role_binding.read', async () => {
+    const users = [
+      makeUser({ id: SELF_ID, email: 'self@example.com', status: 'active' }),
+      makeUser({
+        id: 'u-active-full',
+        email: 'active-full@example.com',
+        status: 'active',
+        _capabilities: { actions: ['read', 'update', 'promote', 'suspend', 'delete'] },
+      }),
+      makeUser({
+        id: 'u-active-update-only',
+        email: 'active-update@example.com',
+        status: 'active',
+        _capabilities: { actions: ['read', 'update'] },
+      }),
+      makeUser({
+        id: 'u-susp',
+        email: 'susp@example.com',
+        status: 'suspended',
+        _capabilities: { actions: ['read', 'suspend', 'delete'] },
+      }),
+      makeUser({
+        id: 'u-inv',
+        email: 'inv@example.com',
+        status: 'invited',
+        _capabilities: { actions: ['read', 'delete'] },
+      }),
+      makeUser({
+        id: 'u-del',
+        email: 'del@example.com',
+        status: 'deleting',
+        _capabilities: { actions: ['read', 'delete'] },
+      }),
+    ];
+    const page = await mountWithPermissions(users, ['user.read']);
+
+    expect(
+      rowForEmail(page, 'self@example.com').querySelector('.actions-cell sl-dropdown')
+    ).toBeNull();
+    expect(
+      rowForEmail(page, 'active-update@example.com').querySelector('.actions-cell sl-dropdown')
+    ).toBeNull();
+
+    const activeFullRow = rowForEmail(page, 'active-full@example.com');
+    const activeLabels = topLevelMenuLabels(activeFullRow);
+    expect(activeLabels).not.toContain('Roles');
+    expect(activeLabels).not.toContain('View Roles');
+    // First child of sl-menu should not be an orphan divider.
+    const firstChildTag = activeFullRow
+      .querySelector('.actions-cell > sl-dropdown > sl-menu')
+      ?.firstElementChild?.tagName.toLowerCase();
+    expect(firstChildTag).toBe('sl-menu-item');
+
+    expect(topLevelMenuLabels(rowForEmail(page, 'susp@example.com'))).toEqual([
+      'Reactivate',
+      'Delete',
+    ]);
+    expect(topLevelMenuLabels(rowForEmail(page, 'inv@example.com'))).toEqual(['Remove']);
+    expect(topLevelMenuLabels(rowForEmail(page, 'del@example.com'))).toEqual(['Deletion status']);
+  });
+
+  it('D4b: renders a minimal Roles-only menu on the caller self row and opens the Roles dialog', async () => {
+    const selfUser = makeUser({
+      id: SELF_ID,
+      email: 'self@example.com',
+      displayName: 'Self Admin',
+      status: 'active',
+      _capabilities: { actions: ['read', 'update', 'promote', 'suspend', 'delete'] },
+    });
+    const page = await mountWithPermissions([selfUser], ['role_binding.read']);
+    const row = rowForEmail(page, 'self@example.com');
+
+    expect(topLevelMenuLabels(row)).toEqual(['Roles']);
+    expect(row.querySelector('.actions-cell sl-divider')).toBeNull();
+
+    const rolesItem = row.querySelector<HTMLElement>('.actions-cell sl-menu-item');
+    expect(rolesItem).not.toBeNull();
+    rolesItem!.click();
+    await page.updateComplete;
+
+    const dialog = page.shadowRoot?.querySelector('sl-dialog.roles-dialog');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.getAttribute('label')).toBe('Roles — Self Admin');
+  });
+
+  it('D4c: shows "Roles" on suspended, invited, and deleting rows with or without user.* actions', async () => {
+    const users = [
+      makeUser({
+        id: 'u-susp-actions',
+        email: 'susp-actions@example.com',
+        status: 'suspended',
+        _capabilities: { actions: ['read', 'suspend', 'delete'] },
+      }),
+      makeUser({
+        id: 'u-susp-ro',
+        email: 'susp-ro@example.com',
+        status: 'suspended',
+        _capabilities: { actions: ['read'] },
+      }),
+      makeUser({
+        id: 'u-inv-actions',
+        email: 'inv-actions@example.com',
+        status: 'invited',
+        _capabilities: { actions: ['read', 'delete'] },
+      }),
+      makeUser({
+        id: 'u-inv-ro',
+        email: 'inv-ro@example.com',
+        status: 'invited',
+        _capabilities: { actions: ['read'] },
+      }),
+      makeUser({
+        id: 'u-del-actions',
+        email: 'del-actions@example.com',
+        status: 'deleting',
+        _capabilities: { actions: ['read', 'delete'] },
+      }),
+      makeUser({
+        id: 'u-del-ro',
+        email: 'del-ro@example.com',
+        status: 'deleting',
+        _capabilities: { actions: ['read'] },
+      }),
+    ];
+    const page = await mountWithPermissions(users, ['role_binding.read']);
+
+    const suspActions = rowForEmail(page, 'susp-actions@example.com');
+    expect(topLevelMenuLabels(suspActions)).toEqual(['Roles', 'Reactivate', 'Delete']);
+    expect(suspActions.querySelectorAll('.actions-cell sl-divider').length).toBe(2);
+
+    const suspRo = rowForEmail(page, 'susp-ro@example.com');
+    expect(topLevelMenuLabels(suspRo)).toEqual(['Roles']);
+    expect(suspRo.querySelector('.actions-cell sl-divider')).toBeNull();
+
+    const invActions = rowForEmail(page, 'inv-actions@example.com');
+    expect(topLevelMenuLabels(invActions)).toEqual(['Roles', 'Remove']);
+    expect(invActions.querySelectorAll('.actions-cell sl-divider').length).toBe(1);
+
+    const invRo = rowForEmail(page, 'inv-ro@example.com');
+    expect(topLevelMenuLabels(invRo)).toEqual(['Roles']);
+    expect(invRo.querySelector('.actions-cell sl-divider')).toBeNull();
+
+    const delActions = rowForEmail(page, 'del-actions@example.com');
+    expect(topLevelMenuLabels(delActions)).toEqual(['Roles', 'Deletion status']);
+    expect(delActions.querySelectorAll('.actions-cell sl-divider').length).toBe(1);
+
+    const delRo = rowForEmail(page, 'del-ro@example.com');
+    expect(topLevelMenuLabels(delRo)).toEqual(['Roles']);
+    expect(delRo.querySelector('.actions-cell sl-divider')).toBeNull();
   });
 });

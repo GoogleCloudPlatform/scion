@@ -26,6 +26,9 @@ import {
 import './effective-permissions-view.js';
 
 vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
+vi.mock('./confirm-dialog.js', () => ({
+  showConfirm: vi.fn(() => Promise.resolve(true)),
+}));
 
 function samplePermissionSet(
   overrides: Partial<EffectivePermissionSet> = {}
@@ -291,7 +294,7 @@ describe('scion-effective-permissions-view lazy loading', () => {
     expect(calls.filter((c) => c.includes('/api/v1/admin/effective-permissions'))).toHaveLength(1);
   });
 
-  it('does not fetch effective-permissions when caller lacks role_binding.read', async () => {
+  it('does not fetch effective-permissions and renders explicit no-access state when caller lacks role_binding.read', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((input: string | URL | Request) => {
@@ -317,6 +320,61 @@ describe('scion-effective-permissions-view lazy loading', () => {
     await el.updateComplete;
 
     expect(calls.filter((c) => c.includes('/api/v1/admin/effective-permissions'))).toHaveLength(0);
+    const text = el.shadowRoot?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    expect(text).toContain('You do not have permission to view effective permissions.');
+  });
+
+  it('shows explicit error state with Retry when loadAdminStatus fails, and loads on Retry', async () => {
+    let adminStatusOk = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const path = requestPath(input);
+        calls.push(path);
+        if (path.includes('/api/v1/auth/admin-status')) {
+          if (!adminStatusOk) {
+            return Promise.resolve(jsonResponse({ error: { message: 'Temporary error' } }, 500));
+          }
+          return Promise.resolve(
+            jsonResponse({ isAdmin: true, isSuperAdmin: false, permissions: ['role_binding.read'] })
+          );
+        }
+        if (path.includes('/api/v1/admin/effective-permissions')) {
+          return Promise.resolve(jsonResponse(samplePermissionSet()));
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+
+    el = document.createElement(
+      'scion-effective-permissions-view'
+    ) as ScionEffectivePermissionsView;
+    el.principalId = 'user-target-1';
+    el.active = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    expect(calls.filter((c) => c.includes('/api/v1/auth/admin-status'))).toHaveLength(1);
+    expect(calls.filter((c) => c.includes('/api/v1/admin/effective-permissions'))).toHaveLength(0);
+
+    const errorEl = el.shadowRoot?.querySelector('.error-state');
+    expect(errorEl).not.toBeNull();
+    expect(errorEl?.textContent).toContain("Couldn't check your permissions");
+
+    const retryBtn = errorEl?.querySelector<HTMLElement>('sl-button');
+    expect(retryBtn).not.toBeNull();
+
+    adminStatusOk = true;
+    retryBtn!.click();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    expect(calls.filter((c) => c.includes('/api/v1/admin/effective-permissions'))).toHaveLength(1);
+    expect(el.shadowRoot?.querySelector('.error-state')).toBeNull();
+    expect(el.shadowRoot?.querySelectorAll('.perm-id').length).toBe(3);
   });
 
   it('renders collapsed By project section, shows picker on first open, and fetches ?projectId= on selection', async () => {
@@ -387,7 +445,7 @@ describe('scion-effective-permissions-view lazy loading', () => {
 
 describe('scion-page-admin-users two-tab Roles dialog', () => {
   let pageEl: (HTMLElement & { updateComplete: Promise<boolean> }) | null = null;
-  let calls: string[] = [];
+  let calls: Array<{ method: string; path: string }> = [];
 
   beforeEach(async () => {
     clearAdminStatus();
@@ -395,15 +453,20 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
     calls = [];
     vi.stubGlobal(
       'fetch',
-      vi.fn((input: string | URL | Request) => {
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
         const path = requestPath(input);
-        calls.push(path);
+        const method = init?.method ?? 'GET';
+        calls.push({ method, path });
         if (path.includes('/auth/me')) {
           return Promise.resolve(jsonResponse({ id: 'admin-self', role: 'admin' }));
         }
         if (path.includes('/api/v1/auth/admin-status')) {
           return Promise.resolve(
-            jsonResponse({ isAdmin: true, isSuperAdmin: false, permissions: ['role_binding.read'] })
+            jsonResponse({
+              isAdmin: true,
+              isSuperAdmin: false,
+              permissions: ['role_binding.read', 'role_binding.create', 'role_binding.delete'],
+            })
           );
         }
         if (path.includes('/api/v1/users')) {
@@ -425,8 +488,38 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
             })
           );
         }
+        if (path.includes('/api/v1/admin/roles')) {
+          return Promise.resolve(
+            jsonResponse({
+              items: [{ id: 'role-auditor', name: 'auditor', scopeType: 'system' }],
+            })
+          );
+        }
+        if (method === 'POST' && path.includes('/api/v1/admin/role-bindings')) {
+          return Promise.resolve(jsonResponse({ id: 'bind-added-1' }, 201));
+        }
+        if (method === 'DELETE' && path.includes('/api/v1/admin/role-bindings/')) {
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
         if (path.includes('/api/v1/admin/role-bindings')) {
-          return Promise.resolve(jsonResponse({ items: [], totalCount: 0 }));
+          return Promise.resolve(
+            jsonResponse({
+              items: [
+                {
+                  id: 'bind-direct-1',
+                  roleDefinitionId: 'role-hub-admin',
+                  roleName: 'hub-admin',
+                  principalType: 'user',
+                  principalId: 'user-target-1',
+                  scopeType: 'system',
+                  scopeId: '',
+                  createdAt: '2026-01-01T00:00:00Z',
+                  source: 'direct',
+                },
+              ],
+              totalCount: 1,
+            })
+          );
         }
         if (path.includes('/api/v1/admin/effective-permissions')) {
           if (path.includes('projectId=proj-alpha')) {
@@ -456,11 +549,11 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
     await new Promise((r) => setTimeout(r, 100));
     await pageEl.updateComplete;
 
-    // Click Roles / View Roles on the target row.
+    // Click Roles on the target row.
     const menuItems = Array.from(pageEl.shadowRoot?.querySelectorAll('sl-menu-item') ?? []);
-    const viewRolesItem = menuItems.find((item) => /\bRoles\b/.test(item.textContent ?? ''));
-    expect(viewRolesItem).toBeDefined();
-    (viewRolesItem as HTMLElement).click();
+    const rolesItem = menuItems.find((item) => item.textContent?.trim() === 'Roles');
+    expect(rolesItem).toBeDefined();
+    (rolesItem as HTMLElement).click();
     await pageEl.updateComplete;
     await new Promise((r) => setTimeout(r, 60));
 
@@ -472,7 +565,9 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
     expect(tabs.map((t) => t.getAttribute('panel'))).toEqual(['roles', 'permissions']);
 
     // Initial tab is roles -> no effective-permissions request yet.
-    expect(calls.filter((c) => c.includes('/api/v1/admin/effective-permissions'))).toHaveLength(0);
+    expect(
+      calls.filter((c) => c.path.includes('/api/v1/admin/effective-permissions'))
+    ).toHaveLength(0);
 
     // Bubbled sl-request-close from a child inside the dialog MUST NOT close the outer dialog.
     const innerProvenance = dialog!.querySelector('scion-effective-role-provenance')!;
@@ -495,7 +590,9 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
     await new Promise((r) => setTimeout(r, 100));
     await pageEl.updateComplete;
 
-    expect(calls.filter((c) => c.includes('/api/v1/admin/effective-permissions'))).toHaveLength(1);
+    expect(
+      calls.filter((c) => c.path.includes('/api/v1/admin/effective-permissions'))
+    ).toHaveLength(1);
 
     // Collapsing the By project details or closing the project picker must NOT close the dialog.
     const permView = dialog!.querySelector(
@@ -520,5 +617,137 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
     dialog!.dispatchEvent(new CustomEvent('sl-request-close', { bubbles: true, composed: true }));
     await pageEl.updateComplete;
     expect(pageEl.shadowRoot?.querySelector('sl-dialog.roles-dialog')).toBeNull();
+  });
+
+  it('invalidates cached permissions after adding or deleting a binding so the next tab show refetches', async () => {
+    pageEl = document.createElement('scion-page-admin-users') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    document.body.appendChild(pageEl);
+    await pageEl.updateComplete;
+    await new Promise((r) => setTimeout(r, 100));
+    await pageEl.updateComplete;
+
+    const rolesItem = Array.from(pageEl.shadowRoot?.querySelectorAll('sl-menu-item') ?? []).find(
+      (item) => item.textContent?.trim() === 'Roles'
+    ) as HTMLElement;
+    expect(rolesItem).toBeDefined();
+    rolesItem.click();
+    await pageEl.updateComplete;
+    await new Promise((r) => setTimeout(r, 100));
+    await pageEl.updateComplete;
+
+    const dialog = pageEl.shadowRoot!.querySelector('sl-dialog.roles-dialog')!;
+    const tabGroup = dialog.querySelector('sl-tab-group')!;
+
+    // 1. Show permissions tab -> initial fetch (#1).
+    tabGroup.dispatchEvent(
+      new CustomEvent('sl-tab-show', {
+        detail: { name: 'permissions' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await pageEl.updateComplete;
+    await new Promise((r) => setTimeout(r, 100));
+    await pageEl.updateComplete;
+    expect(
+      calls.filter((c) => c.path.includes('/api/v1/admin/effective-permissions'))
+    ).toHaveLength(1);
+
+    // 2. Switch back to roles tab and add a binding.
+    tabGroup.dispatchEvent(
+      new CustomEvent('sl-tab-show', {
+        detail: { name: 'roles' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await pageEl.updateComplete;
+
+    const provenance = dialog.querySelector('scion-effective-role-provenance')!;
+    const addBtn = Array.from(provenance.shadowRoot?.querySelectorAll('sl-button') ?? []).find(
+      (b) => b.textContent?.includes('Add Binding')
+    ) as HTMLElement;
+    expect(addBtn).toBeDefined();
+    addBtn.click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    const form = provenance.shadowRoot?.querySelector('scion-role-binding-assignment-form');
+    expect(form).not.toBeNull();
+    form!.dispatchEvent(
+      new CustomEvent('form-change', {
+        detail: { roleId: 'role-auditor', scopeType: 'system', scopeId: '' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await new Promise((r) => setTimeout(r, 30));
+
+    const assignBtn = Array.from(
+      provenance.shadowRoot?.querySelectorAll('sl-dialog sl-button') ?? []
+    ).find((b) => b.textContent?.trim() === 'Assign Role') as HTMLElement;
+    expect(assignBtn).toBeDefined();
+    assignBtn.click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    expect(
+      calls.filter((c) => c.method === 'POST' && c.path.includes('/api/v1/admin/role-bindings'))
+    ).toHaveLength(1);
+    // While still on the roles tab, permissions was invalidated lazily (no eager fetch yet).
+    expect(
+      calls.filter((c) => c.path.includes('/api/v1/admin/effective-permissions'))
+    ).toHaveLength(1);
+
+    // 3. Switch to permissions tab -> refetches (#2).
+    tabGroup.dispatchEvent(
+      new CustomEvent('sl-tab-show', {
+        detail: { name: 'permissions' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await pageEl.updateComplete;
+    await new Promise((r) => setTimeout(r, 100));
+    await pageEl.updateComplete;
+    expect(
+      calls.filter((c) => c.path.includes('/api/v1/admin/effective-permissions'))
+    ).toHaveLength(2);
+
+    // 4. Switch back to roles tab and delete the direct binding.
+    tabGroup.dispatchEvent(
+      new CustomEvent('sl-tab-show', {
+        detail: { name: 'roles' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await pageEl.updateComplete;
+
+    const trashBtn = provenance.shadowRoot?.querySelector<HTMLElement>(
+      'sl-icon-button[name="trash"]'
+    );
+    expect(trashBtn).not.toBeNull();
+    trashBtn!.click();
+    await new Promise((r) => setTimeout(r, 80));
+
+    expect(
+      calls.filter((c) => c.method === 'DELETE' && c.path.includes('/api/v1/admin/role-bindings/'))
+    ).toHaveLength(1);
+
+    // 5. Switch to permissions tab -> refetches (#3).
+    tabGroup.dispatchEvent(
+      new CustomEvent('sl-tab-show', {
+        detail: { name: 'permissions' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await pageEl.updateComplete;
+    await new Promise((r) => setTimeout(r, 100));
+    await pageEl.updateComplete;
+    expect(
+      calls.filter((c) => c.path.includes('/api/v1/admin/effective-permissions'))
+    ).toHaveLength(3);
   });
 });

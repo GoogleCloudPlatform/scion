@@ -557,6 +557,9 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         return;
       }
       this._mutationFeedback = { message: `Removed "${roleName}" assignment`, variant: 'success' };
+      this.dispatchEvent(
+        new CustomEvent('role-bindings-changed', { bubbles: true, composed: true })
+      );
       // Refresh the binding list
       void this.loadEffectiveRoles();
     } catch (err) {
@@ -631,6 +634,9 @@ export class ScionEffectiveRoleProvenance extends LitElement {
         this._addRoles.find((r) => r.id === this._addRoleId)?.name || this._addRoleId;
       this._mutationFeedback = { message: `Assigned "${roleName}" role`, variant: 'success' };
       this._showAddDialog = false;
+      this.dispatchEvent(
+        new CustomEvent('role-bindings-changed', { bubbles: true, composed: true })
+      );
       // Refresh the binding list
       void this.loadEffectiveRoles();
     } catch (err) {
