@@ -123,7 +123,11 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 		}
 		remedy := "A broker operator must add it to kubernetes_service_account_mappings in that broker's settings"
 		if permText != "" {
-			remedy = "A broker operator must grant get, list, and create on serviceaccounts in that namespace, or add an explicit entry to kubernetes_service_account_mappings in that broker's settings"
+			if discovery == "" {
+				remedy = "A broker operator must grant get and create on serviceaccounts in that namespace, or add an explicit entry to kubernetes_service_account_mappings in that broker's settings"
+			} else {
+				remedy = "A broker operator must grant get, list, and create on serviceaccounts in that namespace, or add an explicit entry to kubernetes_service_account_mappings in that broker's settings"
+			}
 		}
 		msg = fmt.Sprintf("%s has no Kubernetes service account mapping on %s. %s%s%s; see %s",
 			accountText, scope, discoveryText, permText, remedy, kubernetesIdentityMappingDocsURL)
@@ -143,9 +147,15 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 		if conflicting != "" {
 			ksaText = fmt.Sprintf("Kubernetes service account %q", conflicting)
 		}
-		msg = fmt.Sprintf("%s in %s already exists and is not annotated for %s on %s; Scion never modifies an existing ServiceAccount. "+
-			"A broker operator must annotate it with iam.gke.io/gcp-service-account, map %s to another ServiceAccount in kubernetes_service_account_mappings, or remove the conflicting ServiceAccount; see %s",
-			ksaText, where, accountText, scope, accountText, kubernetesIdentityMappingDocsURL)
+		if profile == "" && runtimeEntry == "" {
+			msg = fmt.Sprintf("%s in %s already exists and cannot be reused for %s on %s; Scion never modifies an existing ServiceAccount. "+
+				"A broker operator must map %s to the intended ServiceAccount in kubernetes_service_account_mappings, or remove the conflicting ServiceAccount; see %s",
+				ksaText, where, accountText, scope, accountText, kubernetesIdentityMappingDocsURL)
+		} else {
+			msg = fmt.Sprintf("%s in %s already exists and is not annotated for %s on %s; Scion never modifies an existing ServiceAccount. "+
+				"A broker operator must annotate it with iam.gke.io/gcp-service-account, map %s to another ServiceAccount in kubernetes_service_account_mappings, or remove the conflicting ServiceAccount; see %s",
+				ksaText, where, accountText, scope, accountText, kubernetesIdentityMappingDocsURL)
+		}
 
 	default:
 		requested := detail(api.BrokerErrDetailRequestedKSA)

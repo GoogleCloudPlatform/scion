@@ -294,10 +294,11 @@ func TestGCPServiceAccountWIBinding_TargetStaleness(t *testing.T) {
 	assert.NotContains(t, step.Message, "Nothing missing")
 }
 
-// O2 & O3: Missing-pool targets preserve P1's distinction (no_workload_identity_pool,
-// broker_too_old, flat_broker_pool_unreported), and when some Kubernetes targets
-// report no pool while reported pool targets are bound, overall State is unknown
-// and NextStep does not claim "Nothing missing".
+// O2 & O3: Missing-pool targets preserve P1/P3b's distinction
+// (no_workload_identity_pool vs broker_too_old across both legacy and flat
+// brokers), and when some Kubernetes targets report no pool while reported pool
+// targets are bound, overall State is unknown and NextStep does not claim
+// "Nothing missing".
 func TestGCPServiceAccountWIBinding_MissingReasonsAndPartialUnknown(t *testing.T) {
 	base := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	withWIBindingClock(t, base)
@@ -310,8 +311,11 @@ func TestGCPServiceAccountWIBinding_MissingReasonsAndPartialUnknown(t *testing.T
 	tooOld := wiLegacyBroker("old", false, nil, wiK8sProfile("k8s"))
 	tooOld.LastHeartbeat = base.Add(-time.Minute)
 
-	flatNoPool := wiFlatBroker("flat-nopool", "kubernetes", nil)
+	flatNoPool := wiFlatBroker("flat-nopool", "kubernetes", true, []store.WorkloadIdentityTarget{})
 	flatNoPool.LastHeartbeat = base.Add(-time.Minute)
+
+	flatOld := wiFlatBroker("flat-old", "kubernetes", false, nil)
+	flatOld.LastHeartbeat = base.Add(-time.Minute)
 
 	admin := &wiReadStubAdmin{
 		membersFn: func(int, string, string) ([]string, error) {
@@ -321,7 +325,7 @@ func TestGCPServiceAccountWIBinding_MissingReasonsAndPartialUnknown(t *testing.T
 	s := &Server{gcpIAMAdmin: admin}
 	sa := &store.GCPServiceAccount{ID: "sa-1", Email: wiTestGSA, Managed: true}
 
-	brokers := []*store.RuntimeBroker{current, tooOld, flatNoPool}
+	brokers := []*store.RuntimeBroker{current, tooOld, flatNoPool, flatOld}
 	mappings := []GCPServiceAccountProfileMapping{
 		{BrokerID: current.ID, BrokerName: current.Name, Profile: "gke", State: GCPSAMappingMapped},
 		{BrokerID: current.ID, BrokerName: current.Name, Profile: "gke-nopool", State: GCPSAMappingMapped},
@@ -330,15 +334,17 @@ func TestGCPServiceAccountWIBinding_MissingReasonsAndPartialUnknown(t *testing.T
 	binding := s.evaluateWorkloadIdentityStatus(context.Background(), sa, brokers, mappings, base)
 	assert.Equal(t, GCPSABindingUnknown, binding.State, "O2: cannot be overall bound while Kubernetes targets report no pool")
 	assert.Contains(t, binding.Reason, "1 reported target bound")
-	assert.Contains(t, binding.Reason, "3 Kubernetes targets report no pool")
-	require.Len(t, binding.Targets, 4)
+	assert.Contains(t, binding.Reason, "4 Kubernetes targets report no pool")
+	require.Len(t, binding.Targets, 5)
 	assert.Equal(t, GCPSABindingBound, binding.Targets[0].State)
 	assert.Equal(t, "no_workload_identity_pool", binding.Targets[1].Reason)
 	assert.Equal(t, []string{"a/gke-nopool"}, binding.Targets[1].Profiles)
-	assert.Equal(t, "flat_broker_pool_unreported", binding.Targets[2].Reason)
+	assert.Equal(t, "no_workload_identity_pool", binding.Targets[2].Reason)
 	assert.Equal(t, []string{"flat-nopool"}, binding.Targets[2].Profiles)
 	assert.Equal(t, "broker_too_old", binding.Targets[3].Reason)
-	assert.Equal(t, []string{"old/k8s"}, binding.Targets[3].Profiles)
+	assert.Equal(t, []string{"flat-old"}, binding.Targets[3].Profiles)
+	assert.Equal(t, "broker_too_old", binding.Targets[4].Reason)
+	assert.Equal(t, []string{"old/k8s"}, binding.Targets[4].Profiles)
 
 	// Per-profile rows also distinguish no_workload_identity_pool from broker_too_old.
 	assert.Equal(t, GCPSABindingBound, mappings[0].WorkloadIdentityBinding.State)
@@ -351,11 +357,13 @@ func TestGCPServiceAccountWIBinding_MissingReasonsAndPartialUnknown(t *testing.T
 	assert.NotContains(t, step.Message, "Nothing missing")
 
 	// Also when NO broker reported a pool (len(plan.targets) == 0), the missing
-	// target reasons still distinguish all three causes.
+	// target reasons still distinguish no_workload_identity_pool from broker_too_old
+	// across legacy and flat brokers.
 	noPoolBrokers := []*store.RuntimeBroker{
 		wiLegacyBroker("a", true, nil, wiK8sProfile("gke-nopool")),
 		tooOld,
 		flatNoPool,
+		flatOld,
 	}
 	noPoolMappings := []GCPServiceAccountProfileMapping{
 		{BrokerID: "a", BrokerName: "a", Profile: "gke-nopool", State: GCPSAMappingMapped},
@@ -363,10 +371,11 @@ func TestGCPServiceAccountWIBinding_MissingReasonsAndPartialUnknown(t *testing.T
 	}
 	noPoolBinding := s.evaluateWorkloadIdentityStatus(context.Background(), sa, noPoolBrokers, noPoolMappings, base)
 	assert.Equal(t, GCPSABindingUnknown, noPoolBinding.State)
-	require.Len(t, noPoolBinding.Targets, 3)
+	require.Len(t, noPoolBinding.Targets, 4)
 	assert.Equal(t, "no_workload_identity_pool", noPoolBinding.Targets[0].Reason)
-	assert.Equal(t, "flat_broker_pool_unreported", noPoolBinding.Targets[1].Reason)
+	assert.Equal(t, "no_workload_identity_pool", noPoolBinding.Targets[1].Reason)
 	assert.Equal(t, "broker_too_old", noPoolBinding.Targets[2].Reason)
+	assert.Equal(t, "broker_too_old", noPoolBinding.Targets[3].Reason)
 	assert.Equal(t, "no_workload_identity_pool", noPoolMappings[0].WorkloadIdentityBinding.Reason)
 	assert.Equal(t, "broker_too_old", noPoolMappings[1].WorkloadIdentityBinding.Reason)
 }

@@ -314,10 +314,13 @@ pre-provisioned by the operator (Scion never creates or modifies KSAs listed in 
 (2) annotation discovery of the single KSA in the agent's namespace annotated
 `iam.gke.io/gcp-service-account` with the GSA (needs read-only `list` access to
 `serviceaccounts` in that namespace); or (3) opt-in creation of the conventional
-`<account ID>` KSA on first start when both `runtimes.<entry>.create_service_accounts: true`
-on the broker and `hub.k8s_workload_identity_setup` on the Hub are enabled and the GSA was
-minted by the Hub (needs `get`, `list`, and `create` on `serviceaccounts` in a namespace
-dedicated to Scion agents; existing KSAs are never modified and name collisions fail with
+`<account ID>` KSA on first start when both `create_service_accounts: true` on the broker
+(`runtimes.<entry>.create_service_accounts` or flat
+`server.broker.instances[].runtime_target.create_service_accounts`) and
+`hub.k8s_workload_identity_setup` on the Hub are enabled and the GSA was minted by the Hub
+(needs `get`, `list`, and `create` on `serviceaccounts` for legacy brokers, or `get` and
+`create` on flat instances — in a namespace dedicated to Scion agents; existing KSAs are
+never modified, flat instances reuse only Scion-labelled KSAs, and name collisions fail with
 `400 identity_ksa_conflict`). A dispatch whose GSA matches none of these fails before any
 pod is created. See
 [Running Scion on Kubernetes](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping)

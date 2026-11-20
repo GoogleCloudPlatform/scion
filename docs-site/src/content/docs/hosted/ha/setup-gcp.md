@@ -534,15 +534,17 @@ Workload Identity, not via the sciontool metadata emulator used on Docker. By de
 
 For a GSA the Hub mints while the `hub.k8s_workload_identity_setup` experiment is on:
 - Set `workload_identity_pool: <CLUSTER_PROJECT_ID>.svc.id.goog` on the broker's
-  `kubernetes` runtime entry so the Hub grants `roles/iam.workloadIdentityUser` to the
+  `kubernetes` runtime entry (or `server.broker.instances[].runtime_target` on a flat
+  Runtime Broker instance) so the Hub grants `roles/iam.workloadIdentityUser` to the
   conventional `<account ID>` KSA at mint.
-- Optionally set `create_service_accounts: true` on that same runtime entry and grant the
-  broker's Kubernetes identity `get`, `list`, and `create` on `serviceaccounts` in the
-  agent namespace so the broker creates and annotates the conventional `<account ID>` KSA
-  on first `assign` start (existing KSAs are never modified; a colliding KSA fails with
-  `identity_ksa_conflict`). New IAM bindings can take up to a few minutes to propagate in
-  GKE Workload Identity, and agent namespaces should be dedicated to Scion so only the
-  broker identity can create ServiceAccounts and pods there.
+- Optionally set `create_service_accounts: true` on that same runtime entry (or flat
+  `runtime_target`) and grant the broker's Kubernetes identity `get`, `list`, and `create`
+  on `serviceaccounts` in the agent namespace (`get` and `create` on a flat instance, which
+  never lists `serviceaccounts`) so the broker creates and annotates the conventional
+  `<account ID>` KSA on first `assign` start (existing KSAs are never modified; a colliding
+  KSA fails with `identity_ksa_conflict`). New IAM bindings can take up to a few minutes to
+  propagate in GKE Workload Identity, and agent namespaces should be dedicated to Scion so
+  only the broker identity can create ServiceAccounts and pods there.
 See [Workload Identity binding at mint](/scion/hosted/ha/kubernetes/#workload-identity-binding-at-mint)
 and [GCP Identity Mode "assign"](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping).
 

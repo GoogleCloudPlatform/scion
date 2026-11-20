@@ -56,11 +56,11 @@ func (s *Server) storageIssueView(ctx context.Context) projectfs.IssueView {
 }
 
 // brokerStorageForViewer returns b with its workspace storage descriptor's
-// values removed unless the caller of ctx may see them
-// (storageValuesAllowed) or self is set (the broker reading its own
-// record). See redactBrokerStorage.
+// values and reported WorkloadIdentityTargets removed unless the caller of
+// ctx may see them (storageValuesAllowed) or self is set (the broker reading
+// its own record). See redactBrokerStorage.
 func (s *Server) brokerStorageForViewer(ctx context.Context, b store.RuntimeBroker, self bool) store.RuntimeBroker {
-	if b.WorkspaceStorage == nil || self {
+	if (b.WorkspaceStorage == nil && len(b.WorkloadIdentityTargets) == 0) || self {
 		return b
 	}
 	return redactBrokerStorage(b, s.storageValuesAllowed(ctx))
@@ -70,11 +70,18 @@ func (s *Server) brokerStorageForViewer(ctx context.Context, b store.RuntimeBrok
 // workspace storage descriptor keeps the backend, health, homes and
 // shared-dir placement, omits the nfs server, export, subpath root and
 // export identity marker and the volume claim and subpath root, and is
-// marked Redacted so a client can tell redaction from an empty value. A
-// list handler decides show once per request (storageValuesAllowed) and
-// applies it to every row.
+// marked Redacted so a client can tell redaction from an empty value, and
+// WorkloadIdentityTargets is cleared so runtime_target.workload_identity_pool
+// and create_service_accounts are not exposed to readers without
+// hub.config.read (P1 review 3 FYI-3; ptone/scion#7967). A list handler
+// decides show once per request (storageValuesAllowed) and applies it to
+// every row.
 func redactBrokerStorage(b store.RuntimeBroker, show bool) store.RuntimeBroker {
-	if b.WorkspaceStorage == nil || show {
+	if show {
+		return b
+	}
+	b.WorkloadIdentityTargets = nil
+	if b.WorkspaceStorage == nil {
 		return b
 	}
 	ws := *b.WorkspaceStorage

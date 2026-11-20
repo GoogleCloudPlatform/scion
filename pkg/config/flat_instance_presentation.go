@@ -42,9 +42,9 @@ type FlatInstancePresentation struct {
 
 // FlatRuntimeTargetPresentation is the publishable part of an instance's
 // runtime_target. context, kubeconfig, kubernetes_service_account_mappings,
-// kubernetes_block_service_account, workload_identity_pool, home_storage_leaf, project_id,
-// service_account, network, subnetwork and credentials_file are never
-// published.
+// kubernetes_block_service_account, workload_identity_pool,
+// create_service_accounts, home_storage_leaf, project_id, service_account,
+// network, subnetwork and credentials_file are never published.
 type FlatRuntimeTargetPresentation struct {
 	Type                     string            `json:"type"`
 	DisplayName              string            `json:"display_name,omitempty"`

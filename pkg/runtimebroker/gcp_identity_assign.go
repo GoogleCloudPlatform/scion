@@ -28,6 +28,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -207,7 +209,7 @@ func (s *Server) resolveKubernetesAssignIdentity(ctx context.Context, in startCo
 	}
 
 	if s.isFlat() {
-		return s.resolveFlatKubernetesAssignIdentity(in, saEmail, projectID, sel)
+		return s.resolveFlatKubernetesAssignIdentity(ctx, mgr, in, saEmail, projectID, sel)
 	}
 
 	// ProjectSettingsHasKubernetesServiceAccountMappings reads the project's
@@ -330,28 +332,73 @@ func (s *Server) resolveKubernetesAssignIdentity(ctx context.Context, in startCo
 }
 
 // resolveFlatKubernetesAssignIdentity is resolveKubernetesAssignIdentity
-// for a flat instance: the GSA-to-KSA mapping is the instance's own
-// (flatKubernetesIdentityPolicy) and the namespace is the instance's
-// activated namespace. No profile, runtime entry, Hub overlay or project
-// setting is read. The refusals are the legacy path's: an unmapped or
-// invalid entry, an explicit ServiceAccount that differs from the mapped
-// one, and an explicit namespace other than the instance's.
-func (s *Server) resolveFlatKubernetesAssignIdentity(in startContextInputs, saEmail, projectID string, sel dispatchProfileSelection) (kubernetesAssignIdentity, *startContextError) {
-	ksaName, mapped := s.flatK8sIdentity.mappedServiceAccount(saEmail)
+// for a flat instance: the GSA-to-KSA mapping and opt-in ServiceAccount
+// creation come from the instance's own snapshot (flatKubernetesIdentityPolicy)
+// and the namespace is the instance's activated namespace. No profile, runtime
+// entry, Hub overlay or project setting is read, and ServiceAccounts are never
+// listed by annotation. When the mapping misses and both
+// runtime_target.create_service_accounts and the Hub's per-dispatch CreateKSA
+// flag are on, the broker reads the conventional <gsa-account-id> KSA by name
+// (creating it if missing, reusing it only if Scion-labelled for saEmail, and
+// refusing anything else with identity_ksa_conflict; ptone/scion#7967).
+func (s *Server) resolveFlatKubernetesAssignIdentity(ctx context.Context, mgr agent.Manager, in startContextInputs, saEmail, projectID string, sel dispatchProfileSelection) (kubernetesAssignIdentity, *startContextError) {
+	policy := s.flatKubernetesPolicy()
+	explicitKSA, explicitNamespace := explicitKubernetesIdentity(in)
+	ns := s.flatInstanceNamespace()
+	ksaName, mapped := policy.mappedServiceAccount(saEmail)
 	if !mapped {
-		return kubernetesAssignIdentity{}, &startContextError{
-			Status: http.StatusBadRequest,
-			Message: fmt.Sprintf(
-				"GCP identity mode %q on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for %q; add it to kubernetes_service_account_mappings in this flat Runtime Broker instance's runtime_target",
-				store.GCPMetadataModeAssign, saEmail),
-			Code:    ErrCodeIdentityNotMapped,
-			Details: s.identityMappingErrorDetails(saEmail, sel),
+		if !policy.createServiceAccounts || !hubAuthorizedCreateKSA(ctx, in) {
+			return kubernetesAssignIdentity{}, &startContextError{
+				Status: http.StatusBadRequest,
+				Message: fmt.Sprintf(
+					"GCP identity mode %q on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for %q; add it to kubernetes_service_account_mappings in this flat Runtime Broker instance's runtime_target",
+					store.GCPMetadataModeAssign, saEmail),
+				Code:    ErrCodeIdentityNotMapped,
+				Details: s.identityMappingErrorDetails(saEmail, sel),
+			}
 		}
+		conventionalKSA, convErr := k8s.ConventionalKSAName(saEmail)
+		if convErr != nil {
+			return kubernetesAssignIdentity{}, &startContextError{Status: http.StatusBadRequest, Message: convErr.Error()}
+		}
+		// Refuse request-level ServiceAccount or namespace mismatches before
+		// touching Kubernetes so a refused dispatch never leaves an orphan KSA.
+		if explicitKSA != "" && explicitKSA != conventionalKSA {
+			return kubernetesAssignIdentity{}, s.ksaMismatchError(explicitKSA, conventionalKSA, saEmail, ns, api.BrokerKSASourceCreated, sel)
+		}
+		if explicitNamespace != "" && explicitNamespace != ns {
+			return kubernetesAssignIdentity{}, flatExplicitNamespaceMismatchError(explicitNamespace, ns)
+		}
+		if ns == "" {
+			return kubernetesAssignIdentity{}, &startContextError{
+				Status:  http.StatusBadRequest,
+				Message: fmt.Sprintf("GCP identity mode %q on the Kubernetes runtime has no activated namespace for %q on this flat Runtime Broker instance", store.GCPMetadataModeAssign, saEmail),
+				Code:    ErrCodeIdentityNotMapped,
+				Details: s.identityMappingErrorDetails(saEmail, sel),
+			}
+		}
+		client, clientErr := s.assignClientsetFor(mgr)
+		if clientErr != nil {
+			s.agentLifecycleLog.Warn("GCP identity mode assign: flat KSA lookup/create has no Kubernetes client",
+				"agent", in.Name, "service_account", saEmail, "namespace", ns, "error", clientErr)
+			return kubernetesAssignIdentity{}, &startContextError{
+				Status: http.StatusBadRequest,
+				Message: fmt.Sprintf(
+					"GCP identity mode %q on the Kubernetes runtime could not look up or create the conventional ServiceAccount for %q: %v",
+					store.GCPMetadataModeAssign, saEmail, clientErr),
+				Code:    ErrCodeIdentityNotMapped,
+				Details: s.identityMappingErrorDetails(saEmail, sel),
+			}
+		}
+		resolvedKSA, createSCE := s.lookupOrCreateFlatAssignKSA(ctx, client, in.Name, ns, conventionalKSA, saEmail, sel)
+		if createSCE != nil {
+			return kubernetesAssignIdentity{}, createSCE
+		}
+		ksaName = resolvedKSA
 	}
 	if err := config.ValidateKubernetesServiceAccountMappings(map[string]string{saEmail: ksaName}); err != nil {
 		return kubernetesAssignIdentity{}, &startContextError{Status: http.StatusBadRequest, Message: err.Error()}
 	}
-	explicitKSA, explicitNamespace := explicitKubernetesIdentity(in)
 	if explicitKSA != "" && explicitKSA != ksaName {
 		details := s.identityMappingErrorDetails(saEmail, sel)
 		details[api.BrokerErrDetailRequestedKSA] = explicitKSA
@@ -365,15 +412,19 @@ func (s *Server) resolveFlatKubernetesAssignIdentity(in startContextInputs, saEm
 			Details: details,
 		}
 	}
-	if ns := s.flatInstanceNamespace(); explicitNamespace != "" && explicitNamespace != ns {
-		return kubernetesAssignIdentity{}, &startContextError{
-			Status: http.StatusBadRequest,
-			Message: fmt.Sprintf(
-				"explicit Kubernetes namespace %q does not match this flat Runtime Broker instance's namespace %q for GCP identity mode %q; remove the explicit namespace",
-				explicitNamespace, ns, store.GCPMetadataModeAssign),
-		}
+	if explicitNamespace != "" && explicitNamespace != ns {
+		return kubernetesAssignIdentity{}, flatExplicitNamespaceMismatchError(explicitNamespace, ns)
 	}
 	return kubernetesAssignIdentity{KSAName: ksaName, SAEmail: saEmail, ProjectID: projectID, Selection: sel}, nil
+}
+
+func flatExplicitNamespaceMismatchError(explicitNamespace, instanceNamespace string) *startContextError {
+	return &startContextError{
+		Status: http.StatusBadRequest,
+		Message: fmt.Sprintf(
+			"explicit Kubernetes namespace %q does not match this flat Runtime Broker instance's namespace %q for GCP identity mode %q; remove the explicit namespace",
+			explicitNamespace, instanceNamespace, store.GCPMetadataModeAssign),
+	}
 }
 
 // assignDiscoveryTimeout bounds the ServiceAccount list discoverAssignKSA
@@ -467,8 +518,12 @@ func hubAuthorizedCreateKSA(ctx context.Context, in startContextInputs) bool {
 // ksaName in namespace for saEmail, or handles an AlreadyExists race/conflict
 // without ever modifying an existing ServiceAccount (ptone/scion#7966).
 //
-// Designed for reuse by both legacy and flat (P3b) resolvers: takes (client,
-// namespace, ksaName, saEmail) and has no dependency on legacy discovery.
+// Legacy profile/runtime-entry path only: accepts an existing annotated
+// ServiceAccount found on an AlreadyExists race (KSACreateReusedAnnotated),
+// consistent with legacy annotation discovery. Flat instances must NOT call
+// this wrapper: they call k8s.EnsureConventionalServiceAccount directly via
+// lookupOrCreateFlatAssignKSA so annotated-only ServiceAccounts without
+// app.kubernetes.io/managed-by=scion are refused as conflicts (ptone/scion#7967).
 func (s *Server) createOrReuseAssignKSA(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -542,6 +597,111 @@ func (s *Server) ksaPermissionNotMappedError(namespace, saEmail, permission stri
 		Code:   ErrCodeIdentityNotMapped,
 		Message: fmt.Sprintf(
 			"GCP identity mode %q on the Kubernetes runtime could not provision the conventional ServiceAccount for %q in namespace %q because the broker identity lacks %s permission in namespace %q; grant get, list, and create on serviceaccounts in namespace %q, or pre-provision a ServiceAccount and map it in kubernetes_service_account_mappings",
+			store.GCPMetadataModeAssign, saEmail, namespace, permission, namespace, namespace),
+		Details: details,
+	}
+}
+
+// lookupOrCreateFlatAssignKSA resolves the conventional ServiceAccount ksaName
+// in namespace for a flat Kubernetes instance (design §3.10, ptone/scion#7967):
+// it performs one Get by name (never List), reuses an existing ServiceAccount
+// ONLY when it carries both app.kubernetes.io/managed-by=scion and the
+// annotation for saEmail, creates it via k8s.EnsureConventionalServiceAccount
+// when NotFound, and refuses anything else (including annotated-only KSAs)
+// with identity_ksa_conflict without ever modifying an existing ServiceAccount.
+func (s *Server) lookupOrCreateFlatAssignKSA(
+	ctx context.Context,
+	client kubernetes.Interface,
+	agentName, namespace, ksaName, saEmail string,
+	sel dispatchProfileSelection,
+) (string, *startContextError) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	opCtx, cancel := context.WithTimeout(ctx, assignDiscoveryTimeout)
+	defer cancel()
+
+	existing, getErr := client.CoreV1().ServiceAccounts(namespace).Get(opCtx, ksaName, metav1.GetOptions{})
+	switch {
+	case getErr == nil:
+		if k8s.ServiceAccountManagedForGSA(existing, saEmail) {
+			s.agentLifecycleLog.Info("reused Scion-managed conventional Kubernetes ServiceAccount for GCP identity mode assign",
+				"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName)
+			return ksaName, nil
+		}
+		s.agentLifecycleLog.Warn("GCP identity mode assign: conventional Kubernetes ServiceAccount exists on flat instance without Scion ownership for this GSA",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName)
+		return "", s.flatKSAConflictError(namespace, ksaName, saEmail, sel)
+	case apierrors.IsForbidden(getErr):
+		s.agentLifecycleLog.Warn("GCP identity mode assign: forbidden reading conventional Kubernetes ServiceAccount on flat instance",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName, "error", getErr)
+		return "", s.flatKSAPermissionNotMappedError(namespace, saEmail, api.BrokerKSAPermissionGet, sel)
+	case !apierrors.IsNotFound(getErr):
+		s.agentLifecycleLog.Warn("GCP identity mode assign: failed reading conventional Kubernetes ServiceAccount on flat instance",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName, "error", getErr)
+		return "", &startContextError{
+			Status:      http.StatusInternalServerError,
+			Message:     fmt.Sprintf("reading conventional Kubernetes ServiceAccount %q in namespace %q for GCP identity mode %q", ksaName, namespace, store.GCPMetadataModeAssign),
+			OriginalErr: getErr,
+		}
+	}
+
+	outcome, err := k8s.EnsureConventionalServiceAccount(opCtx, client, namespace, ksaName, saEmail)
+	switch outcome {
+	case k8s.KSACreateCreated:
+		s.agentLifecycleLog.Info("created conventional Kubernetes ServiceAccount for GCP identity mode assign",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName)
+		return ksaName, nil
+	case k8s.KSACreateReusedManaged:
+		s.agentLifecycleLog.Info("reused Scion-managed Kubernetes ServiceAccount after concurrent create",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName)
+		return ksaName, nil
+	case k8s.KSACreateReusedAnnotated, k8s.KSACreateConflict:
+		s.agentLifecycleLog.Warn("GCP identity mode assign: conventional Kubernetes ServiceAccount created concurrently without Scion ownership for this GSA",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName)
+		return "", s.flatKSAConflictError(namespace, ksaName, saEmail, sel)
+	case k8s.KSACreateForbiddenCreate:
+		s.agentLifecycleLog.Warn("GCP identity mode assign: forbidden creating conventional Kubernetes ServiceAccount on flat instance",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName, "error", err)
+		return "", s.flatKSAPermissionNotMappedError(namespace, saEmail, api.BrokerKSAPermissionCreate, sel)
+	case k8s.KSACreateForbiddenGet:
+		s.agentLifecycleLog.Warn("GCP identity mode assign: forbidden reading existing conventional Kubernetes ServiceAccount on flat instance",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName, "error", err)
+		return "", s.flatKSAPermissionNotMappedError(namespace, saEmail, api.BrokerKSAPermissionGet, sel)
+	default:
+		s.agentLifecycleLog.Warn("GCP identity mode assign: failed creating conventional Kubernetes ServiceAccount on flat instance",
+			"agent", agentName, "service_account", saEmail, "namespace", namespace, "ksa", ksaName, "error", err)
+		return "", &startContextError{
+			Status:      http.StatusInternalServerError,
+			Message:     fmt.Sprintf("creating conventional Kubernetes ServiceAccount %q in namespace %q for GCP identity mode %q", ksaName, namespace, store.GCPMetadataModeAssign),
+			OriginalErr: err,
+		}
+	}
+}
+
+func (s *Server) flatKSAConflictError(namespace, ksaName, saEmail string, sel dispatchProfileSelection) *startContextError {
+	details := s.identityMappingErrorDetails(saEmail, sel)
+	details[api.BrokerErrDetailConflictingKSA] = ksaName
+	details[api.BrokerErrDetailNamespace] = namespace
+	return &startContextError{
+		Status: http.StatusBadRequest,
+		Code:   ErrCodeIdentityKSAConflict,
+		Message: fmt.Sprintf(
+			"Kubernetes ServiceAccount %q in namespace %q already exists and was not created by Scion for %s (%s=%s and %s: %s); Scion never modifies an existing ServiceAccount, and flat Runtime Broker instances never adopt an unlabelled ServiceAccount by annotation. Map %q to the intended ServiceAccount in runtime_target.kubernetes_service_account_mappings, or delete the conflicting ServiceAccount",
+			ksaName, namespace, saEmail, k8s.ManagedByLabel, k8s.ManagedByScion, k8s.WorkloadIdentityGSAAnnotation, saEmail, saEmail),
+		Details: details,
+	}
+}
+
+func (s *Server) flatKSAPermissionNotMappedError(namespace, saEmail, permission string, sel dispatchProfileSelection) *startContextError {
+	details := s.identityMappingErrorDetails(saEmail, sel)
+	details[api.BrokerErrDetailNamespace] = namespace
+	details[api.BrokerErrDetailMissingPermission] = permission
+	return &startContextError{
+		Status: http.StatusBadRequest,
+		Code:   ErrCodeIdentityNotMapped,
+		Message: fmt.Sprintf(
+			"GCP identity mode %q on the Kubernetes runtime could not provision the conventional ServiceAccount for %q in namespace %q because the broker identity lacks %s permission in namespace %q; grant get and create on serviceaccounts in namespace %q, or pre-provision a ServiceAccount and map it in this flat Runtime Broker instance's runtime_target.kubernetes_service_account_mappings",
 			store.GCPMetadataModeAssign, saEmail, namespace, permission, namespace, namespace),
 		Details: details,
 	}

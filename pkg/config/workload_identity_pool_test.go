@@ -299,3 +299,142 @@ runtimes:
 		t.Error("expected false for an empty runtime entry name")
 	}
 }
+
+const flatCreateServiceAccountsYAML = `schema_version: "1"
+server:
+  broker:
+    instances:
+      - key: gke-1
+        name: gke-1
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          create_service_accounts: true
+`
+
+// The flat runtime_target create_service_accounts key loads strictly, mirrors
+// into the server config and back unchanged, passes the schema, and is
+// excluded from the FC4-a presentation.
+func TestCreateServiceAccounts_FlatRuntimeTargetRoundTrip(t *testing.T) {
+	if errs, err := ValidateSettings([]byte(flatCreateServiceAccountsYAML), "1"); err != nil || len(errs) != 0 {
+		t.Fatalf("schema: %v %v", errs, err)
+	}
+	bad := strings.Replace(flatCreateServiceAccountsYAML, "create_service_accounts: true", `create_service_accounts: "yes"`, 1)
+	if errs, err := ValidateSettings([]byte(bad), "1"); err == nil && len(errs) == 0 {
+		t.Fatal("schema accepted a non-boolean runtime_target.create_service_accounts")
+	}
+	global := flatTestHome(t)
+	writeFlatTestFile(t, filepath.Join(global, "settings.yaml"), flatCreateServiceAccountsYAML)
+	strict, err := LoadRuntimeBrokerInstances("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strict) != 1 || strict[0].RuntimeTarget == nil || !strict[0].RuntimeTarget.CreateServiceAccounts {
+		t.Fatalf("strict load: got %+v", strict)
+	}
+	g := v1InstancesToGlobal(strict)
+	if !g[0].RuntimeTarget.CreateServiceAccounts {
+		t.Fatalf("server config form: got %+v", g[0].RuntimeTarget)
+	}
+	back := globalInstancesToV1(g)
+	if !back[0].RuntimeTarget.CreateServiceAccounts {
+		t.Fatalf("back to settings form: got %+v", back[0].RuntimeTarget)
+	}
+	if p := PresentInstance(strict[0]); p.RuntimeTarget == nil {
+		t.Fatal("no presented runtime target")
+	}
+	if policy := NewFlatInstancePolicy(strict[0]); !policy.Target.CreateServiceAccounts {
+		t.Fatalf("flat instance policy: got %+v", policy.Target)
+	}
+}
+
+// The strict loader refuses a non-boolean value for create_service_accounts.
+func TestCreateServiceAccounts_FlatStrictLoaderRefusesNonBool(t *testing.T) {
+	for _, rawVal := range []string{`"yes"`, "1", "null"} {
+		global := flatTestHome(t)
+		writeFlatTestFile(t, filepath.Join(global, "settings.yaml"),
+			strings.Replace(flatCreateServiceAccountsYAML, "create_service_accounts: true", "create_service_accounts: "+rawVal, 1))
+		_, err := LoadRuntimeBrokerInstances("")
+		if err == nil || !strings.Contains(err.Error(), "create_service_accounts must be true or false") {
+			t.Fatalf("%s: got %v, want a must-be-true-or-false error", rawVal, err)
+		}
+	}
+}
+
+// Validation and schema refuse create_service_accounts: true on non-Kubernetes
+// runtime_target types (docker and cloudrun).
+func TestValidateRuntimeBrokerInstances_CreateServiceAccounts(t *testing.T) {
+	k8sInst := []V1RuntimeBrokerInstanceConfig{{
+		Key: "k", Name: "k",
+		RuntimeTarget: &V1RuntimeTargetConfig{Type: RuntimeTargetTypeKubernetes, CreateServiceAccounts: true},
+	}}
+	if errs := ValidateRuntimeBrokerInstances(k8sInst); len(errs) != 0 {
+		t.Errorf("kubernetes target with create_service_accounts: %v", errs)
+	}
+
+	dockerInst := []V1RuntimeBrokerInstanceConfig{{
+		Key: "d", Name: "d",
+		RuntimeTarget: &V1RuntimeTargetConfig{Type: RuntimeTargetTypeDocker, CreateServiceAccounts: true},
+	}}
+	errs := ValidateRuntimeBrokerInstances(dockerInst)
+	if len(errs) != 1 || errs[0].Path != "server.broker.instances[0].runtime_target.create_service_accounts" {
+		t.Errorf("docker target with create_service_accounts: got %v", errs)
+	}
+	const dockerSchemaYAML = `schema_version: "1"
+server:
+  broker:
+    instances:
+      - key: d
+        name: d
+        runtime_target:
+          type: docker
+          create_service_accounts: true
+`
+	if schemaErrs, err := ValidateSettings([]byte(dockerSchemaYAML), "1"); err == nil && len(schemaErrs) == 0 {
+		t.Error("schema accepted create_service_accounts: true on a docker runtime_target")
+	}
+}
+
+// Legacy-to-flat profile conversion carries create_service_accounts onto a
+// kubernetes runtime_target and reports field_not_valid_for_target_type when
+// set on a non-Kubernetes runtime entry.
+func TestConvertProfilesToInstances_CreateServiceAccounts(t *testing.T) {
+	vs := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke":   {Type: "kubernetes", Namespace: "agents", WorkloadIdentityPool: "cluster-project.svc.id.goog", CreateServiceAccounts: true},
+			"local": {Type: "docker", CreateServiceAccounts: true},
+		},
+		Profiles: map[string]V1ProfileConfig{
+			"k8s": {Runtime: "gke"},
+			"dev": {Runtime: "local"},
+		},
+	}
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
+	var foundK8s, foundDocker bool
+	for _, inst := range got.Instances {
+		switch inst.RuntimeTarget.Type {
+		case RuntimeTargetTypeKubernetes:
+			foundK8s = true
+			if !inst.RuntimeTarget.CreateServiceAccounts {
+				t.Errorf("converted kubernetes runtime_target lost create_service_accounts: %+v", inst.RuntimeTarget)
+			}
+		case RuntimeTargetTypeDocker:
+			foundDocker = true
+			if inst.RuntimeTarget.CreateServiceAccounts {
+				t.Errorf("converted docker runtime_target kept create_service_accounts: %+v", inst.RuntimeTarget)
+			}
+		}
+	}
+	if !foundK8s || !foundDocker {
+		t.Fatalf("missing converted instances: %+v", got.Instances)
+	}
+	var reportedNotValid bool
+	for _, f := range got.Findings {
+		if f.Path == "runtimes.local.create_service_accounts" && f.Code == ConversionFieldNotValidForTargetType {
+			reportedNotValid = true
+		}
+	}
+	if !reportedNotValid {
+		t.Errorf("expected field_not_valid_for_target_type on runtimes.local.create_service_accounts, got %+v", got.Findings)
+	}
+}

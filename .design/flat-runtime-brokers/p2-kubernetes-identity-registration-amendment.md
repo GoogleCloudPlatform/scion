@@ -1,6 +1,6 @@
 # P2 amendment: instance Kubernetes identity policy and registration parity
 
-Status: architecture decision, revision 6, 2026-10-10; block semantics confirmed by the GCP identity feature owner; post-merge evidence substitution recorded below. Revision 5 retained instance-mapping-only assign behavior after upstream added namespace annotation discovery. Revision 6 explicitly preserves omission of per-profile ServiceAccount reports for flat instances. Delivery timing belongs to the delivery lead. This document changes the P2 contract only; it does not reopen the deferred flat dispatch-policy proposal.
+Status: architecture decision, revision 6, 2026-10-10 (amended for opt-in Workload Identity pool reporting and conventional KSA creation in revision 7 below, ptone/scion#7967); block semantics confirmed by the GCP identity feature owner; post-merge evidence substitution recorded below. Revision 5 retained instance-mapping-only assign behavior after upstream added namespace annotation discovery. Revision 6 explicitly preserves omission of per-profile ServiceAccount reports for flat instances. Delivery timing belongs to the delivery lead. This document changes the P2 contract only; it does not reopen the deferred flat dispatch-policy proposal.
 
 Reference surfaces: upstream `75e87c07b`, P2 configuration at `67d7055ba`, and the P1 saved-profile guard at `6b626f1d`. The implementation must be reviewed at its eventual merged revision.
 
@@ -118,3 +118,14 @@ The disposable environment lacks the cloud IAM setup needed to pass the Hub's re
 ## Open questions
 
 No architecture question remains in this amendment. The delivery lead schedules integration and review. Implementation changes to frozen fixture assertions beyond the new configuration and integration cases must be identified explicitly rather than inferred from this amendment.
+
+## Revision 7 note: Workload Identity targets and opt-in conventional KSA creation (ptone/scion#7967)
+
+Phase P3b of ptone/scion#3329 phase 5 (ptone/scion#7967; project log `.design/project-log/k8s-flat-broker-wi-and-ksa-creation-p3b.md`) extends flat Kubernetes instances with two opt-in `runtime_target` settings from the startup snapshot while preserving this amendment's exclusion of namespace annotation discovery and per-profile ServiceAccount reporting:
+
+- **`runtime_target.workload_identity_pool` and `workloadIdentityTargets`:** a flat Kubernetes instance reports at most one entry in the kind-neutral `workloadIdentityTargets` heartbeat field (`profile` empty, `namespace` set to the activated `flatInstanceNamespace`, `ksaCreation` set from `create_service_accounts`) with capability `wiTargetsV1`, so Hub-minted GCP service accounts receive `roles/iam.workloadIdentityUser` bindings at mint when `hub.k8s_workload_identity_setup` is enabled. Flat instances continue to omit `ProfileSAMappings` and `ProfileSAMappingsHashes`.
+- **`runtime_target.create_service_accounts` (`bool`, default `false`):** when `false`, flat `assign` behaviour is unchanged from revision 6. When `true` and the Hub sets per-dispatch `HubAgentDefaults.CreateKSA = true` (`hub.k8s_workload_identity_setup` enabled and a Hub-minted GCP service account), an instance mapping miss performs a single `Get` by the conventional `<gsa-account-id>` name in the activated namespace:
+  - if missing (`NotFound`), creates the ServiceAccount (`iam.gke.io/gcp-service-account`, `scion.dev/created-for-gsa`, `app.kubernetes.io/managed-by: scion`, `automountServiceAccountToken: false`);
+  - if present with both `app.kubernetes.io/managed-by: scion` and `iam.gke.io/gcp-service-account: <gsa>`, reuses it;
+  - otherwise refuses with `400 identity_ksa_conflict` without modifying the existing ServiceAccount.
+  Flat instances never `list` `serviceaccounts` and never adopt an operator-annotated ServiceAccount that lacks `app.kubernetes.io/managed-by: scion`. Explicit entries in `runtime_target.kubernetes_service_account_mappings` remain authoritative.

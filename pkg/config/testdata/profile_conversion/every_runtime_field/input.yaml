@@ -23,6 +23,8 @@ runtimes:
     kubernetes_service_account_mappings:
       agent@proj.iam.gserviceaccount.com: ksa-agent
     kubernetes_block_service_account: zero-priv
+    workload_identity_pool: cluster-project.svc.id.goog
+    create_service_accounts: true
   local:
     type: docker
 profiles:

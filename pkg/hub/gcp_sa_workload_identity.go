@@ -153,12 +153,9 @@ const (
 	// wiMissingNotConfigured: the broker reports targets
 	// (wi_targets_v1), and these have no workload_identity_pool.
 	wiMissingNotConfigured workloadIdentityMissingReason = iota
-	// wiMissingTooOld: a legacy broker without wi_targets_v1, too old to
-	// report a pool.
+	// wiMissingTooOld: a broker without wi_targets_v1, too old to report a
+	// pool.
 	wiMissingTooOld
-	// wiMissingFlat: a flat Runtime Broker instance, which does not report
-	// a pool yet (ptone/scion#3329 phase 5 P3b), whatever its version.
-	wiMissingFlat
 )
 
 // workloadIdentityMintPlan is what a mint binds: the (pool, namespace)
@@ -229,10 +226,7 @@ func workloadIdentityMintPlanFor(brokers []*store.RuntimeBroker) workloadIdentit
 		if len(missing) > 0 {
 			sort.Strings(missing)
 			why := wiMissingNotConfigured
-			switch {
-			case flat:
-				why = wiMissingFlat
-			case b.Capabilities == nil || !b.Capabilities.WITargetsV1:
+			if b.Capabilities == nil || !b.Capabilities.WITargetsV1 {
 				why = wiMissingTooOld
 			}
 			plan.missing = append(plan.missing, workloadIdentityMissing{profiles: missing, why: why})
@@ -327,11 +321,8 @@ func (s *Server) grantWorkloadIdentityBestEffort(ctx context.Context, saEmail st
 	placeholder := workloadIdentityMember("<CLUSTER_PROJECT>.svc.id.goog", "<NAMESPACE>", ksa)
 	for _, m := range plan.missing {
 		detail := "no workload_identity_pool is configured for these Kubernetes runtime targets on the Runtime Broker"
-		switch m.why {
-		case wiMissingTooOld:
+		if m.why == wiMissingTooOld {
 			detail = "the Runtime Broker does not report a Workload Identity pool (upgrade it and set workload_identity_pool)"
-		case wiMissingFlat:
-			detail = "flat Runtime Broker instances do not report a Workload Identity pool yet; make the grant by hand"
 		}
 		out = append(out, api.WorkloadIdentityBinding{
 			KSA: ksa, Profiles: m.profiles,

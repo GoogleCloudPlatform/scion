@@ -129,8 +129,112 @@ func TestHeartbeat_ReportsWorkloadIdentityTargets(t *testing.T) {
 	hb.workloadIdentityTargets = func() []hubclient.WorkloadIdentityTarget { return want }
 	hb.flat = true
 	got = hb.buildHeartbeat(context.Background())
-	assert.Nil(t, got.WorkloadIdentityTargets, "a flat instance has no producer yet (phase 5 P3b)")
-	assert.False(t, got.Capabilities.WITargetsV1)
+	assert.Equal(t, want, got.WorkloadIdentityTargets, "a flat instance reports its own workloadIdentityTargets with wiTargetsV1")
+	assert.True(t, got.Capabilities.WITargetsV1)
+}
+
+func TestFlatWorkloadIdentityTargets(t *testing.T) {
+	t.Run("pool and ksaCreation from instance snapshot, profile empty", func(t *testing.T) {
+		srv := newFlatKubernetesStartServer(t, config.V1RuntimeTargetConfig{
+			Namespace:             "agents-flat",
+			WorkloadIdentityPool:  " cluster-project.svc.id.goog ",
+			CreateServiceAccounts: true,
+		})
+		// Global settings and later mutations to fi.Instance must not change
+		// what the flat producer emits: only the startup snapshot applies.
+		newTestGlobalSettings(t, `schema_version: "1"
+profiles:
+    gke:
+        runtime: kubernetes
+runtimes:
+    kubernetes:
+        type: kubernetes
+        namespace: wrong-ns
+        workload_identity_pool: wrong-project.svc.id.goog
+`)
+		srv.config.FlatInstance.Instance.RuntimeTarget.WorkloadIdentityPool = "mutated-later.svc.id.goog"
+		srv.config.FlatInstance.Instance.RuntimeTarget.CreateServiceAccounts = false
+
+		got := srv.heartbeatWorkloadIdentityTargets()
+		require.Equal(t, []hubclient.WorkloadIdentityTarget{{
+			Profile:     "",
+			Pool:        "cluster-project.svc.id.goog",
+			Namespace:   "agents-flat",
+			KSACreation: true,
+		}}, got)
+
+		hb := srv.newHeartbeatService(&mockRuntimeBrokerService{}, srv.config.FlatInstance.Identity.RuntimeBrokerID, "http://localhost:8080", time.Hour).buildHeartbeat(context.Background())
+		require.Equal(t, got, hb.WorkloadIdentityTargets)
+		assert.True(t, hb.Capabilities.WITargetsV1)
+		assert.Nil(t, hb.DefaultProfile)
+		assert.Empty(t, hb.ProfileAttach)
+		assert.Empty(t, hb.ProfileSAMappings)
+
+		raw, err := json.Marshal(hb)
+		require.NoError(t, err)
+		assert.Contains(t, string(raw), `"workloadIdentityTargets":[{"pool":"cluster-project.svc.id.goog","namespace":"agents-flat","ksaCreation":true}]`)
+		assert.NotContains(t, string(raw), `"profile":`)
+	})
+
+	t.Run("pool only omits ksaCreation", func(t *testing.T) {
+		srv := newFlatKubernetesStartServer(t, config.V1RuntimeTargetConfig{
+			Namespace:            "agents",
+			WorkloadIdentityPool: "cluster-project.svc.id.goog",
+		})
+		got := srv.heartbeatWorkloadIdentityTargets()
+		require.Equal(t, []hubclient.WorkloadIdentityTarget{{
+			Pool:      "cluster-project.svc.id.goog",
+			Namespace: "agents",
+		}}, got)
+	})
+
+	t.Run("ksaCreation only keeps empty pool", func(t *testing.T) {
+		srv := newFlatKubernetesStartServer(t, config.V1RuntimeTargetConfig{
+			Namespace:             "agents",
+			CreateServiceAccounts: true,
+		})
+		got := srv.heartbeatWorkloadIdentityTargets()
+		require.Equal(t, []hubclient.WorkloadIdentityTarget{{
+			Pool:        "",
+			Namespace:   "agents",
+			KSACreation: true,
+		}}, got)
+	})
+
+	t.Run("malformed pool cleared with warning", func(t *testing.T) {
+		srv := newFlatKubernetesStartServer(t, config.V1RuntimeTargetConfig{
+			Namespace:            "agents",
+			WorkloadIdentityPool: "not-a-pool",
+		})
+		srv.saDiscoveryCache = newSADiscoveryCache(nil, discardLogger())
+		got := srv.heartbeatWorkloadIdentityTargets()
+		require.NotNil(t, got)
+		assert.Empty(t, got)
+
+		srvCreate := newFlatKubernetesStartServer(t, config.V1RuntimeTargetConfig{
+			Namespace:             "agents",
+			WorkloadIdentityPool:  "not-a-pool",
+			CreateServiceAccounts: true,
+		})
+		srvCreate.saDiscoveryCache = newSADiscoveryCache(nil, discardLogger())
+		require.Equal(t, []hubclient.WorkloadIdentityTarget{{
+			Pool:        "",
+			Namespace:   "agents",
+			KSACreation: true,
+		}}, srvCreate.heartbeatWorkloadIdentityTargets())
+	})
+
+	t.Run("unconfigured kubernetes and docker targets report non-nil empty list", func(t *testing.T) {
+		k8sSrv := newFlatKubernetesStartServer(t, config.V1RuntimeTargetConfig{Namespace: "agents"})
+		gotK8s := k8sSrv.heartbeatWorkloadIdentityTargets()
+		require.NotNil(t, gotK8s)
+		assert.Empty(t, gotK8s)
+
+		dockerFlat := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+		gotDocker := dockerFlat.srv.heartbeatWorkloadIdentityTargets()
+		require.NotNil(t, gotDocker)
+		assert.Empty(t, gotDocker)
+	})
 }
 
 func TestWorkloadIdentityTargetsFrom_KSACreation(t *testing.T) {

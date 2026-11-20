@@ -2279,6 +2279,14 @@ type V1RuntimeTargetConfig struct {
 	// Local operator policy: never part of the runtime target descriptor,
 	// the persisted target identity or the presentation. Kubernetes only.
 	WorkloadIdentityPool string `json:"workload_identity_pool,omitempty" yaml:"workload_identity_pool,omitempty" koanf:"workload_identity_pool"`
+	// CreateServiceAccounts opts this flat Kubernetes instance into creating
+	// (or reusing a Scion-labeled) conventional Kubernetes ServiceAccount
+	// (<gsa-account-id>) via a single Get-by-name in the instance namespace
+	// when kubernetes_service_account_mappings misses and the Hub authorizes
+	// creation (ptone/scion#7967). Default false. Local operator policy:
+	// never part of the runtime target descriptor, the persisted target
+	// identity or the presentation. Kubernetes only.
+	CreateServiceAccounts bool `json:"create_service_accounts,omitempty" yaml:"create_service_accounts,omitempty" koanf:"create_service_accounts"`
 	// SharedDirStorageClass and SharedDirSize are this Kubernetes
 	// instance's defaults for the ReadWriteMany PVCs backing project shared
 	// dirs: the flat counterparts of the runtime entry and profile settings

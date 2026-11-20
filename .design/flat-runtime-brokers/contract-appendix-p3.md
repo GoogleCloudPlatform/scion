@@ -139,6 +139,7 @@ P3 also freezes the **maximum publishable set**: the Go type `config.FlatInstanc
 | `runtime_target.context` | **never** | a local kubeconfig alias, not a stable identity |
 | `runtime_target.kubeconfig` | **never** | a local credential path |
 | `runtime_target.kubernetes_service_account_mappings`, `kubernetes_block_service_account` | **never** | local operator identity policy |
+| `runtime_target.workload_identity_pool`, `create_service_accounts` | **never** | local operator Workload Identity / ServiceAccount creation policy; reported only in kind-neutral `workloadIdentityTargets` to the Hub and redacted from Runtime Broker read responses unless the viewer holds `hub.config.read` (ptone/scion#7967) |
 | `runtime_target.gke` | as is (bool) | behaviour flag |
 | `runtime_target.priority_class_name`, `shared_dir_storage_class`, `shared_dir_size` | as is | scheduling and storage defaults |
 | `runtime_target.safe_to_evict` | as is, tri-state (unset / true / false) | scheduling default |

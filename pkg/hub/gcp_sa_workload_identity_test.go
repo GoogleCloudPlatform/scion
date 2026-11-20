@@ -84,13 +84,13 @@ func wiK8sProfile(name string) store.BrokerProfile {
 	return store.BrokerProfile{Name: name, Type: "kubernetes"}
 }
 
-func wiFlatBroker(name, typ string, targets []store.WorkloadIdentityTarget) *store.RuntimeBroker {
-	return &store.RuntimeBroker{
+func wiFlatBroker(name, typ string, caps bool, targets []store.WorkloadIdentityTarget) *store.RuntimeBroker {
+	b := &store.RuntimeBroker{
 		ID: name, Name: name, WorkloadIdentityTargets: targets,
 		RuntimeTarget: &api.RuntimeTargetDescriptor{ID: "rt-" + name, Type: typ},
-		// A flat instance never reports wi_targets_v1 before phase 5 P3b.
-		Capabilities: &store.BrokerCapabilities{},
+		Capabilities:  &store.BrokerCapabilities{WITargetsV1: caps},
 	}
+	return b
 }
 
 // The plan merges equal (pool, namespace) pairs across legacy and flat
@@ -106,9 +106,10 @@ func TestWorkloadIdentityMintPlanFor(t *testing.T) {
 			store.BrokerProfile{Name: "cr", Type: "cloudrun"}),
 		wiLegacyBroker("old", false, nil, wiK8sProfile("k8s")),
 		wiLegacyBroker("docker-only", false, nil, store.BrokerProfile{Name: "local", Type: "docker"}),
-		wiFlatBroker("flat", "kubernetes", []store.WorkloadIdentityTarget{{Pool: "p1.svc.id.goog", Namespace: "agents"}}),
-		wiFlatBroker("flat-nopool", "kubernetes", []store.WorkloadIdentityTarget{}),
-		wiFlatBroker("flat-docker", "docker", nil),
+		wiFlatBroker("flat", "kubernetes", true, []store.WorkloadIdentityTarget{{Pool: "p1.svc.id.goog", Namespace: "agents"}}),
+		wiFlatBroker("flat-nopool", "kubernetes", true, []store.WorkloadIdentityTarget{}),
+		wiFlatBroker("flat-old", "kubernetes", false, nil),
+		wiFlatBroker("flat-docker", "docker", true, nil),
 		nil,
 	})
 	require.Len(t, plan.targets, 2)
@@ -116,7 +117,8 @@ func TestWorkloadIdentityMintPlanFor(t *testing.T) {
 	assert.Equal(t, workloadIdentityMintTarget{pool: "p1.svc.id.goog", namespace: "dev", profiles: []string{"a/gke-dev"}}, plan.targets[1])
 	assert.Equal(t, []workloadIdentityMissing{
 		{profiles: []string{"a/gke-nopool"}, why: wiMissingNotConfigured},
-		{profiles: []string{"flat-nopool"}, why: wiMissingFlat},
+		{profiles: []string{"flat-nopool"}, why: wiMissingNotConfigured},
+		{profiles: []string{"flat-old"}, why: wiMissingTooOld},
 		{profiles: []string{"old/k8s"}, why: wiMissingTooOld},
 	}, plan.missing)
 
