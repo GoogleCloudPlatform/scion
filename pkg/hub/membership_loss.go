@@ -1255,5 +1255,11 @@ func (s *Server) enqueueGroupChangeLoss(ctx context.Context, users []string) {
 			"users", len(users), "error", err)
 		return
 	}
+	// Normal production path routes through onMembershipLoss (wired to
+	// kickMembershipLossChecks); direct kick is only for nil-service tests.
+	if s.membershipService != nil {
+		s.membershipService.notifyMembershipLoss()
+		return
+	}
 	s.kickMembershipLossChecks()
 }
