@@ -70,8 +70,7 @@ func TestAgentGetSecret_ExpiredTokenRejected(t *testing.T) {
 		TokenDuration: -time.Hour,
 	})
 	require.NoError(t, err)
-	expiredToken, err := expiredSvc.GenerateAgentToken(f.AgentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID})
-	require.NoError(t, err)
+	expiredToken := generateRecordedAgentToken(t, expiredSvc, f.Server.store, f.AgentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID})
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/ANY_KEY", nil, expiredToken)
 	if rec.Code != http.StatusUnauthorized {
@@ -291,8 +290,7 @@ func TestAgentSecretRead_RootUserWithoutProjectMembershipDenied(t *testing.T) {
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
 
 	seedSecret(t, srv.secretBackend, "NOMEM_KEY", "v", "", "", projectID)
 
@@ -330,8 +328,7 @@ func TestAgentGetSecret_OwnerWithoutMembershipDenied(t *testing.T) {
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
 
 	seedSecret(t, srv.secretBackend, "OWNER_KEY", "v", "", "", projectID)
 
@@ -695,8 +692,7 @@ func TestAgentSecretRead_SuperAdminExactPermissionAdmitted(t *testing.T) {
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agentID, projectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
 
 	seedSecret(t, srv.secretBackend, "SUPERADMIN_KEY", "super-secret-value", "", "", projectID)
 

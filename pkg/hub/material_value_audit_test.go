@@ -538,8 +538,7 @@ func TestAgentListSecrets_UnrecordedChainMatchesPerItemCheck(t *testing.T) {
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{f.UserID, midAgentID, deletedLineageAgentID},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, midAgentID, deletedLineageAgentID})
-	require.NoError(t, err)
+	childToken := f.Server.generateRecordedAgentToken(t, childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, midAgentID, deletedLineageAgentID})
 
 	outsiderAgentID := tid("parity-outsider-agent")
 	require.NoError(t, f.Store.CreateAgent(ctx, &store.Agent{

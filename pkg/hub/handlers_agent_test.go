@@ -69,13 +69,8 @@ func TestAgentStatusUpdate_Authorization(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent2))
 
-	// Get agent token service
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
 	// Generate token for agent 1
-	token1, err := tokenSvc.GenerateAgentToken(agent1.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	token1 := srv.generateRecordedAgentToken(t, agent1.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	t.Run("Agent 1 can update its own status", func(t *testing.T) {
 		status := store.AgentStatusUpdate{
@@ -413,15 +408,11 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
 	t.Run("Agent with project:agent:create scope can create agent in same project", func(t *testing.T) {
-		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, project.ID, []AgentTokenScope{
+		token := srv.generateRecordedAgentToken(t, callingAgent.ID, project.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentCreate,
 		}, nil)
-		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
 			Name:      "Sub Agent",
@@ -456,11 +447,10 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 		}
 		require.NoError(t, s.CreateProject(ctx, otherProject))
 
-		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, project.ID, []AgentTokenScope{
+		token := srv.generateRecordedAgentToken(t, callingAgent.ID, project.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentCreate,
 		}, nil)
-		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
 			Name:      "Cross Project Agent",
@@ -478,10 +468,9 @@ func TestAgentCreateAgent_WithScope(t *testing.T) {
 
 	t.Run("Agent without project:agent:create scope is rejected", func(t *testing.T) {
 		// Token with only status update scope (no create scope)
-		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, project.ID, []AgentTokenScope{
+		token := srv.generateRecordedAgentToken(t, callingAgent.ID, project.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 		}, nil)
-		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
 			Name:      "Unauthorized Sub",
@@ -530,15 +519,11 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
 	t.Run("Agent with project:agent:lifecycle scope can perform lifecycle actions in same project", func(t *testing.T) {
-		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, project.ID, []AgentTokenScope{
+		token := srv.generateRecordedAgentToken(t, callingAgent.ID, project.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentLifecycle,
 		}, nil)
-		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+targetAgent.ID+"/stop", nil)
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -568,11 +553,10 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 		}
 		require.NoError(t, s.CreateAgent(ctx, otherAgent))
 
-		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, project.ID, []AgentTokenScope{
+		token := srv.generateRecordedAgentToken(t, callingAgent.ID, project.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentLifecycle,
 		}, nil)
-		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+otherAgent.ID+"/stop", nil)
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -585,10 +569,9 @@ func TestAgentLifecycle_WithScope(t *testing.T) {
 
 	t.Run("Agent without lifecycle scope cannot perform lifecycle actions", func(t *testing.T) {
 		// Token with only status update scope (existing behavior)
-		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, project.ID, []AgentTokenScope{
+		token := srv.generateRecordedAgentToken(t, callingAgent.ID, project.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 		}, nil)
-		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+targetAgent.ID+"/stop", nil)
 		req.Header.Set("X-Scion-Agent-Token", token)
@@ -661,13 +644,9 @@ func TestAgentGetAgent_ProjectIsolation(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
 	// Token includes ScopeProjectRead (required for read endpoints) and
 	// ScopeAgentStatusUpdate (standard baseline scope).
-	token, err := tokenSvc.GenerateAgentToken(agent1.ID, project1.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent1.ID, project1.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 
 	// CO1: agent.read has no AgentScopes mapping in the permissions registry,
 	// so the agent scope restriction blocks agent-to-agent reads at the kernel
@@ -2700,16 +2679,12 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
 	t.Run("Notify=true creates subscription for agent caller", func(t *testing.T) {
-		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, project.ID, []AgentTokenScope{
+		token := srv.generateRecordedAgentToken(t, callingAgent.ID, project.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentCreate,
 			ScopeAgentNotify,
 		}, nil)
-		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
 			Name:      "Sub Worker",
@@ -2748,11 +2723,10 @@ func TestCreateAgent_NotifyCreatesSubscription(t *testing.T) {
 	})
 
 	t.Run("Notify=false does not create subscription", func(t *testing.T) {
-		token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, project.ID, []AgentTokenScope{
+		token := srv.generateRecordedAgentToken(t, callingAgent.ID, project.ID, []AgentTokenScope{
 			ScopeAgentStatusUpdate,
 			ScopeAgentCreate,
 		}, nil)
-		require.NoError(t, err)
 
 		body, _ := json.Marshal(CreateAgentRequest{
 			Name:      "Sub Worker No Notify",
@@ -2838,13 +2812,11 @@ func TestCreateAgent_NotifySubscriptionCascadeOnDelete(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, callingAgent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	token, err := tokenSvc.GenerateAgentToken(callingAgent.ID, project.ID, []AgentTokenScope{
+	token := srv.generateRecordedAgentToken(t, callingAgent.ID, project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 		ScopeAgentNotify,
 	}, nil)
-	require.NoError(t, err)
 
 	// Create agent with notify
 	body, _ := json.Marshal(CreateAgentRequest{
@@ -5104,10 +5076,7 @@ func TestAgentStatusUpdate_RejectsPhaseRegression(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	// Attempt to regress phase from running → starting (as a spurious session would)
 	status := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
@@ -5142,10 +5111,7 @@ func TestAgentStatusUpdate_ActivityAutoCorrectsPhase(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	// Send an activity-only update (working) while phase is starting.
 	// This should auto-correct the phase to running.
@@ -5279,10 +5245,7 @@ func TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	// The dying container reports stopped+crashed via the async status POST.
 	status := store.AgentStatusUpdate{

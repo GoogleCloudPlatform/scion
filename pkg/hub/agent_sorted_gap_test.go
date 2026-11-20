@@ -653,8 +653,7 @@ func TestListProjectAgentsSortedAgentJWT_CursorBindingPerField(t *testing.T) {
 			ProjectID: other.ID, Phase: string(state.PhaseStopped), CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
 		}))
 	}
-	otherTok, err := f.srv.GetAgentTokenService().GenerateAgentToken(self.ID, other.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
+	otherTok := f.srv.generateRecordedAgentToken(t, self.ID, other.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 	q := "sort=updated&limit=1"
 	cur := mint(q)
 	otherPath := "/api/v1/projects/" + other.ID + "/agents?" + withCursor(q, cur)

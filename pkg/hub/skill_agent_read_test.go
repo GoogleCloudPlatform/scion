@@ -133,10 +133,8 @@ func TestAgentSkillRead_ChildAgentSeesParentGrantedSet(t *testing.T) {
 		ScopeType: store.RoleScopeProject, ScopeID: f.p.ID,
 		Role: string(AgentRoleBaseline), Active: true,
 	}))
-	var childToken string
-	childToken, err = f.srv.GetAgentTokenService().GenerateAgentToken(child.ID, f.p.ID,
+	childToken := f.srv.generateRecordedAgentToken(t, child.ID, f.p.ID,
 		ScopesForRole(AgentRoleBaseline), child.Ancestry)
-	require.NoError(t, err)
 
 	want := agentSkillSet(f.sg, f.sp, f.su)
 	f.assertAgentSees(t, parentToken, want)

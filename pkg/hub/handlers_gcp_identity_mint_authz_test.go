@@ -110,8 +110,7 @@ func newGCPMintFixtureOn(t *testing.T, name string, srv *Server, s store.Store) 
 	require.NoError(t, err)
 	seedAssignment(t, s, agentRow, userID, saID)
 
-	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{GCPTokenScopeForSA(saID)}, []string{userID})
-	require.NoError(t, err)
+	token := srv.generateRecordedAgentToken(t, agentID, projectID, []AgentTokenScope{GCPTokenScopeForSA(saID)}, []string{userID})
 
 	return &gcpMintFixture{Server: srv, Store: s, ProjectID: projectID, UserID: userID, AgentID: agentID, SA: sa, Token: token}
 }
@@ -172,8 +171,7 @@ func (f *gcpMintFixture) reassignSA(t *testing.T, scope, scopeID, email string) 
 	})
 	seedAssignment(t, f.Store, f.getAgent(t), f.UserID, saID)
 
-	token, err := f.Server.agentTokenService.GenerateAgentToken(f.AgentID, f.ProjectID, []AgentTokenScope{GCPTokenScopeForSA(saID)}, []string{f.UserID})
-	require.NoError(t, err)
+	token := f.Server.generateRecordedAgentToken(t, f.AgentID, f.ProjectID, []AgentTokenScope{GCPTokenScopeForSA(saID)}, []string{f.UserID})
 
 	f.SA = sa
 	f.Token = token
@@ -382,9 +380,8 @@ func TestAgentGCPToken_ServiceAccountLookupErrorDenied(t *testing.T) {
 // SA is current.
 func TestAgentGCPToken_AnotherServiceAccountScopeDenied(t *testing.T) {
 	f := newGCPMintFixture(t, "wrong-sa-scope")
-	otherToken, err := f.Server.agentTokenService.GenerateAgentToken(
+	otherToken := f.Server.generateRecordedAgentToken(t,
 		f.AgentID, f.ProjectID, []AgentTokenScope{GCPTokenScopeForSA(tid("some-other-sa"))}, []string{f.UserID})
-	require.NoError(t, err)
 	f.Token = otherToken
 	assertMintDenied(t, f)
 }
@@ -394,8 +391,7 @@ func TestAgentGCPToken_AnotherServiceAccountScopeDenied(t *testing.T) {
 // denies.
 func TestAgentGCPToken_NoServiceAccountScopeDenied(t *testing.T) {
 	f := newGCPMintFixture(t, "no-sa-scope")
-	noScopeToken, err := f.Server.agentTokenService.GenerateAgentToken(f.AgentID, f.ProjectID, nil, []string{f.UserID})
-	require.NoError(t, err)
+	noScopeToken := f.Server.generateRecordedAgentToken(t, f.AgentID, f.ProjectID, nil, []string{f.UserID})
 	f.Token = noScopeToken
 	assertMintDenied(t, f)
 }

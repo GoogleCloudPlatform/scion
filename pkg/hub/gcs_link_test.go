@@ -1236,8 +1236,7 @@ func TestGCSLink_Deny_AgentTokenCaller(t *testing.T) {
 	_, msg := gcsHappyPathFixture(t, f, "agenttoken", "gs://bkt/o.txt")
 	project := gcsTestProject(t, f, "agenttoken-caller-project")
 	callerAgent := gcsTestAgent(t, f.store, project, "agenttoken-caller", nil)
-	token, err := f.srv.agentTokenService.GenerateAgentToken(callerAgent.ID, project.ID, nil, nil)
-	require.NoError(t, err)
+	token := f.srv.generateRecordedAgentToken(t, callerAgent.ID, project.ID, nil, nil)
 
 	rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, gcsRequestPath(msg.ID, "bkt", "o.txt"), nil, token)
 	require.Equal(t, http.StatusNotFound, rec.Code)

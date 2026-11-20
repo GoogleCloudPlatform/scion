@@ -59,8 +59,7 @@ func TestInternalSecretGuard_HiddenAndRefusedAcrossScopes(t *testing.T) {
 		Updated:      time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeProjectSecretRead}, []string{DevUserID})
-	require.NoError(t, err)
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeProjectSecretRead}, []string{DevUserID})
 
 	epID := tid("ep_isg")
 	hubInternalRow, err := srv.newWebhookEndpointSecretRow(project.ID, epID, 1, "whsec-plaintext-value", DevUserID)
@@ -277,8 +276,7 @@ func TestWebhookEndpointReservedSecretPrefix_RefusedAcrossGenericWrites(t *testi
 		Updated:      time.Now(),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeProjectSecretRead}, []string{DevUserID})
-	require.NoError(t, err)
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeProjectSecretRead}, []string{DevUserID})
 
 	// Unoccupied future rotation key (.v2) and sanitized/case-folded colliding forms.
 	reservedKeys := []string{

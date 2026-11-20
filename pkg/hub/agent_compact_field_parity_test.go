@@ -527,13 +527,12 @@ func TestAgentCompactView_FieldParityPerCallerClass(t *testing.T) {
 
 	otherUser := compactUser(t, f.store, "other-only")
 	msgAuthzAddProjectMember(t, f.store, otherUser.ID, f.other.ID, f.other.Slug, store.GroupMemberRoleMember)
-	otherTok, err := f.srv.GetAgentTokenService().GenerateAgentToken(tid("cv-other-0"), f.other.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
+	otherTok := f.srv.generateRecordedAgentToken(t, tid("cv-other-0"), f.other.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 	// The agent principal of fixture agent 2 holds a project role binding
 	// that grants agent.list, so its token reads rows on the global list.
 	listRole := createTestRoleDefinition(t, f.store, "cv-agent-list", store.RoleScopeProject, []string{"agent.list"})
-	_, err = f.store.CreateRoleBinding(context.Background(), &store.RoleBinding{
+	_, err := f.store.CreateRoleBinding(context.Background(), &store.RoleBinding{
 		RoleDefinitionID: listRole.ID,
 		PrincipalType:    store.RoleBindingPrincipalAgent,
 		PrincipalID:      f.agentIDAt(2),
@@ -542,16 +541,14 @@ func TestAgentCompactView_FieldParityPerCallerClass(t *testing.T) {
 		CreatedBy:        "test",
 	})
 	require.NoError(t, err)
-	bindingTok, err := f.srv.GetAgentTokenService().GenerateAgentToken(f.agentIDAt(2), f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-	require.NoError(t, err)
+	bindingTok := f.srv.generateRecordedAgentToken(t, f.agentIDAt(2), f.project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 	hubKey, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(f.owner.ID), CreateTokenParams{
 		UserID: f.owner.ID, Name: "cv-hub-uat", Boundary: hubBoundary(), Scopes: []string{"agent:list"},
 	})
 	require.NoError(t, err)
 
-	noReadTok, err := f.srv.GetAgentTokenService().GenerateAgentToken(f.agentIDAt(0), f.project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	noReadTok := f.srv.generateRecordedAgentToken(t, f.agentIDAt(0), f.project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 
 	asAgent := func(tok string) func(t *testing.T, path string) *httptest.ResponseRecorder {
 		return func(t *testing.T, path string) *httptest.ResponseRecorder {
