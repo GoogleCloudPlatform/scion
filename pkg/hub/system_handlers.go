@@ -526,6 +526,29 @@ func (s *Server) harnessesSeeded(ctx context.Context, globalDir string) bool {
 	return false
 }
 
+// hasUserWorkspace reports whether at least one user project exists in the
+// store, excluding the Hub's built-in global project (isGlobalHubProject).
+// Because project slugs are unique, at most one row can hold the global slug,
+// so a Limit of 2 always sees a non-global project when one exists.
+func (s *Server) hasUserWorkspace(ctx context.Context) bool {
+	if s.store == nil {
+		return false
+	}
+	page, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{}, store.ListOptions{
+		Limit:          2,
+		SkipTotalCount: true,
+	})
+	if err != nil || page == nil {
+		return false
+	}
+	for i := range page.Items {
+		if !isGlobalHubProject(page.Items[i].Slug) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 	var status OnboardingStatus
 
@@ -554,16 +577,12 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 
 	status.HarnessesSeeded = s.harnessesSeeded(ctx, globalDir)
 
-	// HasWorkspace: at least one project in the store
-	if s.store != nil {
-		result, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1})
-		if err == nil && result != nil && len(result.Items) > 0 {
-			status.HasWorkspace = true
-		}
-	}
+	// HasWorkspace: at least one non-global project in the store
+	status.HasWorkspace = s.hasUserWorkspace(ctx)
 
-	// Complete: all required steps done
-	status.Complete = status.Initialized && status.IdentitySet && status.RuntimeOK && status.HarnessesSeeded
+	// Complete: core workstation setup is ready and either web identity is
+	// configured or a user project already exists (e.g. CLI-initialized).
+	status.Complete = status.Initialized && status.RuntimeOK && status.HarnessesSeeded && (status.IdentitySet || status.HasWorkspace)
 
 	status.EmbeddedBrokerID = s.GetEmbeddedBrokerID()
 
