@@ -27,6 +27,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -608,7 +609,7 @@ func mapBridgeStateToSDK(state string) a2a.TaskState {
 }
 
 // Cancel implements a2asrv.AgentExecutor. It sends an interrupt to the Scion
-// agent and emits a canceled status.
+// agent and emits a canceled status only after the Hub send succeeds.
 func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		taskID := execCtx.TaskID
@@ -618,7 +619,7 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 			route, ok := RouteInfoFrom(ctx)
 			if !ok {
 				e.log.Error("cancel: missing route info in context", "task_id", taskID)
-				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil)
+				yield(nil, a2a.NewError(a2a.ErrInternalError, "failed to cancel task"))
 				return
 			}
 
@@ -635,30 +636,52 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 			senderLabel := fmt.Sprintf("user:%s", e.bridge.config.Hub.User)
 			if caller != nil {
 				senderLabel = caller.SenderLabel()
-				if cc, err := e.bridge.callerHubClient(caller); err == nil {
-					cancelClient = cc
-				} else {
-					e.log.Warn("cancel: failed to create per-caller client, falling back to admin",
-						"error", err, "task_id", taskID)
+				cc, err := e.bridge.callerHubClient(caller)
+				if err != nil {
+					e.log.Error("cancel: failed to create per-caller client", "error", err, "task_id", taskID)
+					yield(nil, a2a.NewError(a2a.ErrInternalError, "failed to cancel task"))
+					return
 				}
+				cancelClient = cc
 			}
 
-			if agent := e.bridge.lookupAgent(ctx, route.ProjectSlug, route.AgentSlug); agent != nil {
-				interruptMsg := &messages.StructuredMessage{
-					Version:   1,
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Sender:    senderLabel,
-					Recipient: fmt.Sprintf("agent:%s", route.AgentSlug),
-					Msg:       "Task cancelled by A2A client.",
-					Type:      messages.TypeInstruction,
-					Metadata:  map[string]string{"a2aTaskId": string(taskID)},
-				}
-				if _, err := cancelClient.Agents().SendStructuredMessage(ctx, agent.ID, interruptMsg, true, false, false); err != nil {
-					e.log.Error("failed to send cancel interrupt", "error", err, "task_id", taskID)
-				}
+			agent := e.bridge.lookupAgent(ctx, route.ProjectSlug, route.AgentSlug)
+			if agent == nil {
+				e.log.Error("cancel: failed to resolve agent", "project", route.ProjectSlug, "agent", route.AgentSlug, "task_id", taskID)
+				yield(nil, a2a.NewError(a2a.ErrInternalError, "failed to cancel task"))
+				return
+			}
+
+			interruptMsg := &messages.StructuredMessage{
+				Version:   1,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    senderLabel,
+				Recipient: fmt.Sprintf("agent:%s", route.AgentSlug),
+				Msg:       "Task cancelled by A2A client.",
+				Type:      messages.TypeInstruction,
+				Metadata:  map[string]string{"a2aTaskId": string(taskID)},
+			}
+			if _, err := cancelClient.Agents().SendStructuredMessage(ctx, agent.ID, interruptMsg, true, false, false); err != nil {
+				e.log.Error("failed to send cancel interrupt", "error", err, "task_id", taskID)
+				yield(nil, cancelHubSendError(err))
+				return
 			}
 		}
 
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil)
 	}
+}
+
+// cancelHubSendError maps a Hub interrupt send error to a fixed non-leaky A2A error.
+func cancelHubSendError(err error) error {
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case 401:
+			return a2a.NewError(a2a.ErrUnauthenticated, "unauthorized")
+		case 403:
+			return a2a.NewError(a2a.ErrUnauthorized, "permission denied")
+		}
+	}
+	return a2a.NewError(a2a.ErrInternalError, "failed to cancel task")
 }

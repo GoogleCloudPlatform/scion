@@ -1042,11 +1042,6 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		return nil, fmt.Errorf("task %s is already in terminal state: %s", taskID, task.State)
 	}
 
-	// Unregister from local cache before CAS so concurrent broker messages
-	// cannot overwrite the canceled state.
-	aKey := agentKey(task.ProjectID, task.AgentSlug)
-	b.unregisterActiveTask(taskID, aKey)
-
 	// Send interrupt to the agent via Hub, re-resolving if the stored AgentID is stale.
 	// Use per-user client when CallerIdentity is present (M1). A federated
 	// user gets no interrupt: the hub accepts only a text message from it.
@@ -1059,12 +1054,12 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		senderLabel := fmt.Sprintf("user:%s", b.config.Hub.User)
 		if caller != nil {
 			senderLabel = caller.SenderLabel()
-			if cc, err := b.callerHubClient(caller); err == nil {
-				cancelClient = cc
-			} else {
-				b.log.Warn("CancelTask: failed to create per-caller client, falling back to admin",
-					"error", err, "task_id", taskID)
+			cc, err := b.callerHubClient(caller)
+			if err != nil {
+				b.log.Error("CancelTask: failed to create per-caller client", "error", err, "task_id", taskID)
+				return nil, fmt.Errorf("failed to cancel task")
 			}
+			cancelClient = cc
 		}
 		interruptMsg := &messages.StructuredMessage{
 			Version:   1,
@@ -1077,8 +1072,14 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 		}
 		if _, err := cancelClient.Agents().SendStructuredMessage(ctx, targetAgentID, interruptMsg, true, false, false); err != nil {
 			b.log.Error("failed to send cancel interrupt to agent", "error", err, "task_id", taskID, "agent_id", targetAgentID)
+			return nil, fmt.Errorf("failed to cancel task")
 		}
 	}
+
+	// Unregister from local cache before CAS so concurrent broker messages
+	// cannot overwrite the canceled state.
+	aKey := agentKey(task.ProjectID, task.AgentSlug)
+	b.unregisterActiveTask(taskID, aKey)
 
 	changed, err := b.store.UpdateTaskState(ctx, taskID, TaskStateCanceled)
 	if err != nil {
@@ -1737,6 +1738,9 @@ func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, erro
 		// can identify the federated agent. The bridge acts as a proxy:
 		// its admin identity authorizes the API call, the federation header
 		// carries the agent's identity for the Hub to validate.
+		if b.minter == nil {
+			return nil, fmt.Errorf("federation hub client: bridge has no signing key")
+		}
 		hubUserID := b.config.Hub.UserID
 		if hubUserID == "" {
 			hubUserID = b.config.Hub.User

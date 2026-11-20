@@ -1,0 +1,790 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package bridge
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
+
+	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity"
+	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+)
+
+type taskRouteAuthFixture struct {
+	srv            *Server
+	ts             *httptest.Server
+	bridge         *Bridge
+	taskStore      *ScopedTaskStore
+	store          state.Store
+	hub            *httptest.Server
+	mu             sync.Mutex
+	hubAuthMeCode  int
+	hubAuthMeID    string
+	hubSendCode    int
+	hubSendCalls   int
+	hubAuthMeCalls int
+}
+
+func newTaskRouteAuthFixture(t *testing.T, scheme, apiKey string, withMinter bool) *taskRouteAuthFixture {
+	t.Helper()
+
+	f := &taskRouteAuthFixture{
+		hubAuthMeCode: http.StatusOK,
+		hubAuthMeID:   "11111111-1111-4111-8111-111111111111",
+		hubSendCode:   http.StatusOK,
+	}
+
+	f.hub = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/me":
+			f.mu.Lock()
+			f.hubAuthMeCalls++
+			code := f.hubAuthMeCode
+			id := f.hubAuthMeID
+			f.mu.Unlock()
+			if code != http.StatusOK {
+				http.Error(w, "refused", code)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":           id,
+				"email":        "visitor@example.com",
+				"display_name": "Visitor",
+				"role":         "member",
+			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/agents"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"agents": []map[string]any{{
+					"id":        "agent-001",
+					"name":      "agent1",
+					"slug":      "agent1",
+					"projectId": "proj1",
+					"status":    "running",
+				}},
+				"totalCount": 1,
+			})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/message"):
+			f.mu.Lock()
+			f.hubSendCalls++
+			code := f.hubSendCode
+			f.mu.Unlock()
+			if code != http.StatusOK {
+				http.Error(w, "send failed", code)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"conversationId": "conv-001",
+				"messageId":      "msg-001",
+			})
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(f.hub.Close)
+
+	dir := t.TempDir()
+	st, err := state.NewSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	f.store = st
+
+	cfg := &Config{
+		Bridge: BridgeConfig{ExternalURL: "https://bridge.example.com"},
+		Hub:    HubConfig{Endpoint: f.hub.URL, User: "admin@test"},
+		Auth:   AuthConfig{Scheme: scheme, APIKey: apiKey},
+		Projects: []ProjectConfig{
+			{Slug: "proj1", ExposedAgents: []string{"agent1"}},
+		},
+		Timeouts: TimeoutConfig{SendMessage: 3 * time.Second},
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adminClient, err := hubclient.New(f.hub.URL, hubclient.WithBearerToken("admin-token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var minter *identity.TokenMinter
+	if withMinter {
+		key := bytes.Repeat([]byte("k"), 32)
+		minter, err = identity.NewTokenMinter(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	b := New(st, adminClient, minter, cfg, nil, log)
+	t.Cleanup(b.Shutdown)
+	f.bridge = b
+
+	executor := NewScionExecutor(b, log)
+	innerStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: RouteKeyAuthenticator(),
+	})
+	f.taskStore = NewScopedTaskStore(innerStore)
+
+	sdkReqHandler := a2asrv.NewHandler(
+		executor,
+		a2asrv.WithLogger(log),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{
+			Streaming:         true,
+			PushNotifications: false,
+		}),
+		a2asrv.WithTaskStore(f.taskStore),
+	)
+	guardedHandler := NewFederationTaskAuthHandler(sdkReqHandler)
+	b.SetSDKRequestHandler(guardedHandler)
+
+	jsonrpcHandler := a2asrv.NewJSONRPCHandler(guardedHandler)
+	v0RESTHandler := a2av0.NewRESTHandler(guardedHandler)
+
+	srv := NewServer(b, cfg, nil, log, jsonrpcHandler)
+	srv.SetV0RESTHandler(v0RESTHandler)
+	f.srv = srv
+	f.ts = httptest.NewServer(srv.Handler())
+	t.Cleanup(f.ts.Close)
+
+	return f
+}
+
+func (f *taskRouteAuthFixture) seedTask(t *testing.T, taskID string, caller *CallerIdentity, st a2a.TaskState) {
+	t.Helper()
+	ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"})
+	if caller != nil {
+		ctx = WithCallerIdentity(ctx, caller)
+	}
+	task := &a2a.Task{
+		ID:        a2a.TaskID(taskID),
+		ContextID: "ctx-" + taskID,
+		Status:    a2a.TaskStatus{State: st},
+		History: []*a2a.Message{
+			a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("seed-content-"+taskID)),
+		},
+	}
+	if _, err := f.taskStore.Create(ctx, task); err != nil {
+		t.Fatalf("seed task %s: %v", taskID, err)
+	}
+}
+
+func (f *taskRouteAuthFixture) doRequest(t *testing.T, method, path string, body []byte, headers map[string]string) (int, []byte) {
+	t.Helper()
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, f.ts.URL+path, bodyReader)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := f.ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("do request %s %s: %v", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, respBody
+}
+
+func TestFederationTaskRoutesAuth_FederationAgentRefused(t *testing.T) {
+	f := newTaskRouteAuthFixture(t, "federation", "", true)
+
+	// Seed tasks for agent A and agent B so any local-store read would return real data.
+	agentACaller := &CallerIdentity{
+		TokenType: "federation",
+		AgentID:   "agent-a",
+		IssuerURL: "https://hub-a.example.com",
+	}
+	agentBCaller := &CallerIdentity{
+		TokenType: "federation",
+		AgentID:   "agent-b",
+		IssuerURL: "https://hub-a.example.com",
+	}
+	f.seedTask(t, "task-agent-a", agentACaller, a2a.TaskStateWorking)
+	f.seedTask(t, "task-agent-b", agentBCaller, a2a.TaskStateWorking)
+
+	agentAToken := buildTestJWT(t, map[string]any{
+		"iss":        "https://hub-a.example.com",
+		"sub":        "agent-a",
+		"project_id": "proj-a",
+	})
+	// Unsigned token claiming agent B's subject.
+	agentBClaimToken := buildTestJWT(t, map[string]any{
+		"iss":        "https://hub-a.example.com",
+		"sub":        "agent-b",
+		"project_id": "proj-b",
+	})
+
+	tokens := []struct {
+		name   string
+		token  string
+		taskID string
+	}{
+		{name: "agent_a_own_task", token: agentAToken, taskID: "task-agent-a"},
+		{name: "agent_a_reading_agent_b_task", token: agentAToken, taskID: "task-agent-b"},
+		{name: "unsigned_agent_b_claim_token", token: agentBClaimToken, taskID: "task-agent-b"},
+	}
+
+	for _, tc := range tokens {
+		headers := map[string]string{"Authorization": "Bearer " + tc.token}
+
+		t.Run("jsonrpc/"+tc.name, func(t *testing.T) {
+			rpcMethods := []struct {
+				name    string
+				path    string
+				payload string
+			}{
+				{
+					name:    "GetTask_jsonrpc_path",
+					path:    "/projects/proj1/agents/agent1/jsonrpc",
+					payload: `{"jsonrpc":"2.0","id":"1","method":"GetTask","params":{"id":"` + tc.taskID + `"}}`,
+				},
+				{
+					name:    "GetTask_root_path",
+					path:    "/projects/proj1/agents/agent1",
+					payload: `{"jsonrpc":"2.0","id":"2","method":"GetTask","params":{"id":"` + tc.taskID + `"}}`,
+				},
+				{
+					name:    "ListTasks",
+					path:    "/projects/proj1/agents/agent1/jsonrpc",
+					payload: `{"jsonrpc":"2.0","id":"3","method":"ListTasks","params":{}}`,
+				},
+				{
+					name:    "SubscribeToTask",
+					path:    "/projects/proj1/agents/agent1/jsonrpc",
+					payload: `{"jsonrpc":"2.0","id":"4","method":"SubscribeToTask","params":{"id":"` + tc.taskID + `"}}`,
+				},
+				{
+					name:    "CreateTaskPushNotificationConfig",
+					path:    "/projects/proj1/agents/agent1/jsonrpc",
+					payload: `{"jsonrpc":"2.0","id":"5","method":"CreateTaskPushNotificationConfig","params":{"taskId":"` + tc.taskID + `","url":"https://callback.example.com"}}`,
+				},
+				{
+					name:    "GetTaskPushNotificationConfig",
+					path:    "/projects/proj1/agents/agent1/jsonrpc",
+					payload: `{"jsonrpc":"2.0","id":"6","method":"GetTaskPushNotificationConfig","params":{"taskId":"` + tc.taskID + `","id":"cfg-1"}}`,
+				},
+				{
+					name:    "ListTaskPushNotificationConfigs",
+					path:    "/projects/proj1/agents/agent1/jsonrpc",
+					payload: `{"jsonrpc":"2.0","id":"7","method":"ListTaskPushNotificationConfigs","params":{"taskId":"` + tc.taskID + `"}}`,
+				},
+				{
+					name:    "DeleteTaskPushNotificationConfig",
+					path:    "/projects/proj1/agents/agent1/jsonrpc",
+					payload: `{"jsonrpc":"2.0","id":"8","method":"DeleteTaskPushNotificationConfig","params":{"taskId":"` + tc.taskID + `","id":"cfg-1"}}`,
+				},
+				{
+					name:    "GetExtendedAgentCard",
+					path:    "/projects/proj1/agents/agent1/jsonrpc",
+					payload: `{"jsonrpc":"2.0","id":"9","method":"GetExtendedAgentCard","params":{}}`,
+				},
+			}
+
+			for _, m := range rpcMethods {
+				t.Run(m.name, func(t *testing.T) {
+					status, body := f.doRequest(t, http.MethodPost, m.path, []byte(m.payload), headers)
+					if status != http.StatusOK {
+						t.Fatalf("status = %d, want 200 JSON-RPC envelope; body: %s", status, body)
+					}
+					bodyStr := string(body)
+					if !strings.Contains(bodyStr, `"error"`) {
+						t.Fatalf("expected JSON-RPC error, got: %s", bodyStr)
+					}
+					if !strings.Contains(bodyStr, "-31403") {
+						t.Errorf("expected unauthorized code -31403, got: %s", bodyStr)
+					}
+					if !strings.Contains(bodyStr, "forbidden: task route is not available for federation agent callers") {
+						t.Errorf("expected fixed non-leaky error message, got: %s", bodyStr)
+					}
+					if strings.Contains(bodyStr, "seed-content-") || strings.Contains(bodyStr, tc.taskID) {
+						t.Errorf("response body must not include task data or task ID: %s", bodyStr)
+					}
+				})
+			}
+		})
+
+		t.Run("v0rest/"+tc.name, func(t *testing.T) {
+			restRoutes := []struct {
+				name   string
+				method string
+				path   string
+				body   string
+			}{
+				{
+					name:   "get_task",
+					method: http.MethodGet,
+					path:   "/projects/proj1/agents/agent1/tasks/" + tc.taskID,
+				},
+				{
+					name:   "list_tasks",
+					method: http.MethodGet,
+					path:   "/projects/proj1/agents/agent1/tasks",
+				},
+				{
+					name:   "subscribe_task",
+					method: http.MethodPost,
+					path:   "/projects/proj1/agents/agent1/tasks/" + tc.taskID + ":subscribe",
+				},
+				{
+					name:   "create_push_config",
+					method: http.MethodPost,
+					path:   "/projects/proj1/agents/agent1/tasks/" + tc.taskID + "/pushNotificationConfigs",
+					body:   `{"url":"https://callback.example.com"}`,
+				},
+				{
+					name:   "get_push_config",
+					method: http.MethodGet,
+					path:   "/projects/proj1/agents/agent1/tasks/" + tc.taskID + "/pushNotificationConfigs/cfg-1",
+				},
+				{
+					name:   "list_push_configs",
+					method: http.MethodGet,
+					path:   "/projects/proj1/agents/agent1/tasks/" + tc.taskID + "/pushNotificationConfigs",
+				},
+				{
+					name:   "delete_push_config",
+					method: http.MethodDelete,
+					path:   "/projects/proj1/agents/agent1/tasks/" + tc.taskID + "/pushNotificationConfigs/cfg-1",
+				},
+				{
+					name:   "extended_agent_card",
+					method: http.MethodGet,
+					path:   "/projects/proj1/agents/agent1/extendedAgentCard",
+				},
+			}
+
+			for _, r := range restRoutes {
+				t.Run(r.name, func(t *testing.T) {
+					var reqBody []byte
+					if r.body != "" {
+						reqBody = []byte(r.body)
+					}
+					status, body := f.doRequest(t, r.method, r.path, reqBody, headers)
+					bodyStr := string(body)
+					if r.name == "subscribe_task" {
+						// SSE streaming endpoints return HTTP 200 and emit the 403 error event in the stream.
+						if status != http.StatusOK {
+							t.Fatalf("status = %d, want 200 SSE stream; body: %s", status, bodyStr)
+						}
+						if !strings.Contains(bodyStr, `"code":403`) || !strings.Contains(bodyStr, `"PERMISSION_DENIED"`) {
+							t.Errorf("expected 403 PERMISSION_DENIED error event, got: %s", bodyStr)
+						}
+					} else if status != http.StatusForbidden {
+						t.Fatalf("status = %d, want 403; body: %s", status, bodyStr)
+					}
+					if !strings.Contains(bodyStr, "forbidden: task route is not available for federation agent callers") {
+						t.Errorf("expected fixed non-leaky error message, got: %s", bodyStr)
+					}
+					if strings.Contains(bodyStr, "seed-content-") {
+						t.Errorf("response body must not include task data: %s", bodyStr)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestFederationTaskRoutesAuth_FederatedUserAllowedAndHubFailureFailsClosed(t *testing.T) {
+	f := newTaskRouteAuthFixture(t, "federation", "", true)
+
+	visitorCaller := &CallerIdentity{
+		TokenType: "federation",
+		UserID:    f.hubAuthMeID,
+		Email:     "visitor@example.com",
+		IssuerURL: "https://hub-a.example.com",
+		Subject:   "user-sub-1",
+	}
+	f.seedTask(t, "task-visitor-1", visitorCaller, a2a.TaskStateCompleted)
+
+	userToken := buildTestJWT(t, map[string]any{
+		"iss":              "https://hub-a.example.com",
+		"sub":              "user-sub-1",
+		"email":            "visitor@example.com",
+		"scion_token_kind": "user",
+	})
+	headers := map[string]string{"Authorization": "Bearer " + userToken}
+
+	t.Run("jsonrpc_get_and_list_succeed_for_verified_federated_user", func(t *testing.T) {
+		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+			[]byte(`{"jsonrpc":"2.0","id":"u1","method":"GetTask","params":{"id":"task-visitor-1"}}`), headers)
+		if status != http.StatusOK || strings.Contains(string(body), `"error"`) {
+			t.Fatalf("GetTask failed: status=%d body=%s", status, body)
+		}
+		if !strings.Contains(string(body), "task-visitor-1") {
+			t.Errorf("expected task-visitor-1 in response: %s", body)
+		}
+
+		status, body = f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+			[]byte(`{"jsonrpc":"2.0","id":"u2","method":"ListTasks","params":{}}`), headers)
+		if status != http.StatusOK || strings.Contains(string(body), `"error"`) {
+			t.Fatalf("ListTasks failed: status=%d body=%s", status, body)
+		}
+		if !strings.Contains(string(body), "task-visitor-1") {
+			t.Errorf("expected task-visitor-1 in list response: %s", body)
+		}
+	})
+
+	t.Run("v0rest_get_and_list_succeed_for_verified_federated_user", func(t *testing.T) {
+		status, body := f.doRequest(t, http.MethodGet, "/projects/proj1/agents/agent1/tasks/task-visitor-1", nil, headers)
+		if status != http.StatusOK {
+			t.Fatalf("GET /tasks/task-visitor-1 status=%d body=%s", status, body)
+		}
+		status, body = f.doRequest(t, http.MethodGet, "/projects/proj1/agents/agent1/tasks", nil, headers)
+		if status != http.StatusOK {
+			t.Fatalf("GET /tasks status=%d body=%s", status, body)
+		}
+	})
+
+	t.Run("hub_verification_failure_fails_closed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			hubCode  int
+			wantCode int
+		}{
+			{name: "hub_401", hubCode: http.StatusUnauthorized, wantCode: http.StatusUnauthorized},
+			{name: "hub_403", hubCode: http.StatusForbidden, wantCode: http.StatusForbidden},
+			{name: "hub_500", hubCode: http.StatusInternalServerError, wantCode: http.StatusBadGateway},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f.mu.Lock()
+				f.hubAuthMeCode = tc.hubCode
+				f.mu.Unlock()
+				t.Cleanup(func() {
+					f.mu.Lock()
+					f.hubAuthMeCode = http.StatusOK
+					f.mu.Unlock()
+				})
+
+				status, _ := f.doRequest(t, http.MethodGet, "/projects/proj1/agents/agent1/tasks/task-visitor-1", nil, headers)
+				if status != tc.wantCode {
+					t.Errorf("v0 REST status = %d, want %d", status, tc.wantCode)
+				}
+				status, _ = f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+					[]byte(`{"jsonrpc":"2.0","id":"u3","method":"GetTask","params":{"id":"task-visitor-1"}}`), headers)
+				if status != tc.wantCode {
+					t.Errorf("JSON-RPC status = %d, want %d", status, tc.wantCode)
+				}
+			})
+		}
+	})
+}
+
+func TestFederationTaskRoutesAuth_OtherSchemesUnchanged(t *testing.T) {
+	schemes := []struct {
+		scheme      string
+		apiKey      string
+		authHeaders map[string]string
+		needAuth    bool
+	}{
+		{
+			scheme:      "apiKey",
+			apiKey:      "secret-api-key",
+			authHeaders: map[string]string{"X-API-Key": "secret-api-key"},
+			needAuth:    true,
+		},
+		{
+			scheme:      "bearer",
+			apiKey:      "secret-bearer-key",
+			authHeaders: map[string]string{"Authorization": "Bearer secret-bearer-key"},
+			needAuth:    true,
+		},
+		{
+			scheme:      "none",
+			apiKey:      "",
+			authHeaders: nil,
+			needAuth:    false,
+		},
+	}
+
+	for _, sc := range schemes {
+		t.Run(sc.scheme, func(t *testing.T) {
+			f := newTaskRouteAuthFixture(t, sc.scheme, sc.apiKey, true)
+			f.seedTask(t, "task-legacy-1", nil, a2a.TaskStateCompleted)
+
+			if sc.needAuth {
+				status, _ := f.doRequest(t, http.MethodGet, "/projects/proj1/agents/agent1/tasks/task-legacy-1", nil, nil)
+				if status != http.StatusUnauthorized {
+					t.Errorf("unauthenticated v0 REST status = %d, want 401", status)
+				}
+				status, _ = f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+					[]byte(`{"jsonrpc":"2.0","id":"1","method":"GetTask","params":{"id":"task-legacy-1"}}`), nil)
+				if status != http.StatusUnauthorized {
+					t.Errorf("unauthenticated JSON-RPC status = %d, want 401", status)
+				}
+			}
+
+			// Authenticated (or open under "none"): GetTask and ListTasks succeed on both JSON-RPC and v0 REST.
+			status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+				[]byte(`{"jsonrpc":"2.0","id":"2","method":"GetTask","params":{"id":"task-legacy-1"}}`), sc.authHeaders)
+			if status != http.StatusOK || strings.Contains(string(body), `"error"`) {
+				t.Fatalf("JSON-RPC GetTask failed: status=%d body=%s", status, body)
+			}
+
+			status, body = f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+				[]byte(`{"jsonrpc":"2.0","id":"3","method":"ListTasks","params":{}}`), sc.authHeaders)
+			if status != http.StatusOK || strings.Contains(string(body), `"error"`) {
+				t.Fatalf("JSON-RPC ListTasks failed: status=%d body=%s", status, body)
+			}
+
+			status, body = f.doRequest(t, http.MethodGet, "/projects/proj1/agents/agent1/tasks/task-legacy-1", nil, sc.authHeaders)
+			if status != http.StatusOK {
+				t.Fatalf("v0 REST GetTask failed: status=%d body=%s", status, body)
+			}
+
+			status, body = f.doRequest(t, http.MethodGet, "/projects/proj1/agents/agent1/tasks", nil, sc.authHeaders)
+			if status != http.StatusOK {
+				t.Fatalf("v0 REST ListTasks failed: status=%d body=%s", status, body)
+			}
+		})
+	}
+}
+
+func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
+	t.Run("executor_hub_send_error_keeps_working_state", func(t *testing.T) {
+		f := newTaskRouteAuthFixture(t, "none", "", true)
+		f.seedTask(t, "task-cancel-fail", nil, a2a.TaskStateWorking)
+
+		f.mu.Lock()
+		f.hubSendCode = http.StatusInternalServerError
+		f.mu.Unlock()
+
+		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+			[]byte(`{"jsonrpc":"2.0","id":"c1","method":"CancelTask","params":{"id":"task-cancel-fail"}}`), nil)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200 JSON-RPC envelope; body: %s", status, body)
+		}
+		if !strings.Contains(string(body), `"error"`) {
+			t.Fatalf("expected JSON-RPC error when Hub send fails, got: %s", body)
+		}
+
+		ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"})
+		stored, err := f.taskStore.Get(ctx, "task-cancel-fail")
+		if err != nil {
+			t.Fatalf("taskStore.Get: %v", err)
+		}
+		if stored.Task.Status.State != a2a.TaskStateWorking {
+			t.Errorf("task state = %v, want %v (must remain unchanged on Hub send failure)", stored.Task.Status.State, a2a.TaskStateWorking)
+		}
+	})
+
+	t.Run("executor_federation_agent_hub_401_keeps_working_state", func(t *testing.T) {
+		f := newTaskRouteAuthFixture(t, "federation", "", true)
+		agentCaller := &CallerIdentity{
+			TokenType: "federation",
+			AgentID:   "agent-a",
+			IssuerURL: "https://hub-a.example.com",
+		}
+		f.seedTask(t, "task-fed-cancel-401", agentCaller, a2a.TaskStateWorking)
+
+		f.mu.Lock()
+		f.hubSendCode = http.StatusUnauthorized
+		f.mu.Unlock()
+
+		agentToken := buildTestJWT(t, map[string]any{
+			"iss":        "https://hub-a.example.com",
+			"sub":        "agent-a",
+			"project_id": "proj-a",
+		})
+		headers := map[string]string{"Authorization": "Bearer " + agentToken}
+
+		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+			[]byte(`{"jsonrpc":"2.0","id":"c2","method":"CancelTask","params":{"id":"task-fed-cancel-401"}}`), headers)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200 JSON-RPC envelope; body: %s", status, body)
+		}
+		if !strings.Contains(string(body), `"error"`) {
+			t.Fatalf("expected JSON-RPC error on Hub 401, got: %s", body)
+		}
+
+		ctx := WithCallerIdentity(
+			WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"}),
+			agentCaller,
+		)
+		stored, err := f.taskStore.Get(ctx, "task-fed-cancel-401")
+		if err != nil {
+			t.Fatalf("taskStore.Get: %v", err)
+		}
+		if stored.Task.Status.State != a2a.TaskStateWorking {
+			t.Errorf("task state = %v, want %v", stored.Task.Status.State, a2a.TaskStateWorking)
+		}
+	})
+
+	t.Run("executor_per_caller_client_failure_no_admin_fallback", func(t *testing.T) {
+		// withMinter=false causes callerHubClient for federation callers to fail
+		// (or minting to fail when sending). Cancel must fail closed without
+		// falling back to the admin client.
+		f := newTaskRouteAuthFixture(t, "federation", "", false)
+		agentCaller := &CallerIdentity{
+			TokenType: "federation",
+			AgentID:   "agent-a",
+			IssuerURL: "https://hub-a.example.com",
+		}
+		f.seedTask(t, "task-no-fallback", agentCaller, a2a.TaskStateWorking)
+
+		agentToken := buildTestJWT(t, map[string]any{
+			"iss":        "https://hub-a.example.com",
+			"sub":        "agent-a",
+			"project_id": "proj-a",
+		})
+		headers := map[string]string{"Authorization": "Bearer " + agentToken}
+
+		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+			[]byte(`{"jsonrpc":"2.0","id":"c3","method":"CancelTask","params":{"id":"task-no-fallback"}}`), headers)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200 JSON-RPC envelope; body: %s", status, body)
+		}
+		if !strings.Contains(string(body), `"error"`) {
+			t.Fatalf("expected JSON-RPC error when per-caller client cannot be built, got: %s", body)
+		}
+
+		f.mu.Lock()
+		calls := f.hubSendCalls
+		f.mu.Unlock()
+		if calls != 0 {
+			t.Errorf("hubSendCalls = %d, want 0 (must not fall back to admin client)", calls)
+		}
+
+		ctx := WithCallerIdentity(
+			WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"}),
+			agentCaller,
+		)
+		stored, err := f.taskStore.Get(ctx, "task-no-fallback")
+		if err != nil {
+			t.Fatalf("taskStore.Get: %v", err)
+		}
+		if stored.Task.Status.State != a2a.TaskStateWorking {
+			t.Errorf("task state = %v, want %v", stored.Task.Status.State, a2a.TaskStateWorking)
+		}
+	})
+
+	t.Run("executor_hub_send_success_marks_canceled", func(t *testing.T) {
+		f := newTaskRouteAuthFixture(t, "federation", "", true)
+		agentCaller := &CallerIdentity{
+			TokenType: "federation",
+			AgentID:   "agent-a",
+			IssuerURL: "https://hub-a.example.com",
+		}
+		f.seedTask(t, "task-cancel-ok", agentCaller, a2a.TaskStateWorking)
+
+		agentToken := buildTestJWT(t, map[string]any{
+			"iss":        "https://hub-a.example.com",
+			"sub":        "agent-a",
+			"project_id": "proj-a",
+		})
+		headers := map[string]string{"Authorization": "Bearer " + agentToken}
+
+		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+			[]byte(`{"jsonrpc":"2.0","id":"c4","method":"CancelTask","params":{"id":"task-cancel-ok"}}`), headers)
+		if status != http.StatusOK || strings.Contains(string(body), `"error"`) {
+			t.Fatalf("CancelTask failed: status=%d body=%s", status, body)
+		}
+
+		ctx := WithCallerIdentity(
+			WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"}),
+			agentCaller,
+		)
+		stored, err := f.taskStore.Get(ctx, "task-cancel-ok")
+		if err != nil {
+			t.Fatalf("taskStore.Get: %v", err)
+		}
+		if stored.Task.Status.State != a2a.TaskStateCanceled {
+			t.Errorf("task state = %v, want %v", stored.Task.Status.State, a2a.TaskStateCanceled)
+		}
+	})
+
+	t.Run("v0rest_cancel_hub_send_error_keeps_working_state", func(t *testing.T) {
+		f := newTaskRouteAuthFixture(t, "none", "", true)
+		f.seedTask(t, "task-v0-cancel-fail", nil, a2a.TaskStateWorking)
+
+		f.mu.Lock()
+		f.hubSendCode = http.StatusInternalServerError
+		f.mu.Unlock()
+
+		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/tasks/task-v0-cancel-fail:cancel", nil, nil)
+		if status < 400 {
+			t.Fatalf("v0 REST cancel status = %d, want 4xx/5xx; body: %s", status, body)
+		}
+
+		ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"})
+		stored, err := f.taskStore.Get(ctx, "task-v0-cancel-fail")
+		if err != nil {
+			t.Fatalf("taskStore.Get: %v", err)
+		}
+		if stored.Task.Status.State != a2a.TaskStateWorking {
+			t.Errorf("task state = %v, want %v", stored.Task.Status.State, a2a.TaskStateWorking)
+		}
+	})
+
+	t.Run("bridge_cancel_task_hub_send_failure_keeps_prior_state", func(t *testing.T) {
+		f := newTaskRouteAuthFixture(t, "none", "", true)
+		f.mu.Lock()
+		f.hubSendCode = http.StatusInternalServerError
+		f.mu.Unlock()
+
+		now := time.Now()
+		if err := f.store.CreateTask(context.Background(), &state.Task{
+			ID:        "state-task-1",
+			ContextID: "ctx-1",
+			ProjectID: "proj1",
+			AgentSlug: "agent1",
+			AgentID:   "agent-001",
+			State:     TaskStateWorking,
+			CreatedAt: now,
+			UpdatedAt: now,
+			Metadata:  "{}",
+		}); err != nil {
+			t.Fatalf("CreateTask: %v", err)
+		}
+
+		if _, err := f.bridge.CancelTask(context.Background(), "state-task-1"); err == nil {
+			t.Fatal("expected error from Bridge.CancelTask when Hub send fails, got nil")
+		}
+
+		got, err := f.store.GetTask(context.Background(), "state-task-1")
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if got.State != TaskStateWorking {
+			t.Errorf("state task State = %q, want %q", got.State, TaskStateWorking)
+		}
+	})
+}
