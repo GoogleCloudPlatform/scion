@@ -1020,3 +1020,161 @@ func TestGitHubTriggerAuthoring_BackendErrorsReturn500Not409(t *testing.T) {
 	assert.Zero(t, repoCalls)
 	assert.Empty(t, mints)
 }
+
+func TestGitHubTriggerE2E_CELRuleDispatch(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableWriteDenySwitch(t, f.srv)
+	ctx := context.Background()
+
+	const (
+		appID         int64  = 778899
+		webhookSecret string = "g1b-cel-e2e-webhook-secret"
+		fixtureInstID int64  = 987654 // matches pkg/hub/trigger/github/testdata/issue_comment__created_pr.payload.json
+	)
+
+	fixtureBytes, err := os.ReadFile(filepath.Join("trigger", "github", "testdata", "issue_comment__created_pr.payload.json"))
+	require.NoError(t, err)
+
+	withCommentBody := func(body string, commentID int64) []byte {
+		var doc map[string]any
+		require.NoError(t, json.Unmarshal(fixtureBytes, &doc))
+		comment, ok := doc["comment"].(map[string]any)
+		require.True(t, ok)
+		comment["body"] = body
+		comment["id"] = commentID
+		raw, mErr := json.Marshal(doc)
+		require.NoError(t, mErr)
+		return raw
+	}
+
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.AppID = appID
+	f.srv.config.GitHubAppConfig.AppSlug = "octo-app"
+	f.srv.config.GitHubAppConfig.WebhookSecret = webhookSecret
+	f.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.srv.mu.Unlock()
+
+	disp := &recordingDispatcher{}
+	f.srv.SetDispatcher(disp)
+
+	done := f.srv.startTriggerDrainer(ctx)
+	require.NotNil(t, done)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		f.srv.stopTriggerDrainer(stopCtx)
+	})
+
+	sysAdmin := createAssocAdmin(t, f.store, "g1b-cel-e2e-sys-admin")
+	createAssocInstallation(t, f.store, fixtureInstID, "octo-org", "octo-org/octo-repo")
+
+	proj, err := f.store.GetProject(ctx, f.projectID)
+	require.NoError(t, err)
+	instCopy := fixtureInstID
+	proj.GitRemote = "https://github.com/octo-org/octo-repo.git"
+	proj.GitHubInstallationID = &instCopy
+	require.NoError(t, f.store.UpdateProject(ctx, proj))
+	setAdminBinding(t, f.store, proj, fixtureInstID, "github.com/octo-org/octo-repo", sysAdmin.ID)
+	f.srv.invalidateGitHubAssociation(proj.ID)
+
+	setTriggerExperimentsForG1bTest(t, f.srv, true, true)
+
+	guardedRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "cel-review-guarded",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: []string{"github.issue_comment.created"},
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: store.TriggerDialectCEL, Expr: "has(event.attributes.command) && event.attributes.command == 'review'"},
+			},
+		},
+		Action: TriggerActionSpec{
+			Type:    store.TriggerActionMessage,
+			AgentID: f.targetAgent.ID,
+			Message: "Review requested (guarded)",
+		},
+	})
+	require.Equal(t, http.StatusCreated, guardedRec.Code, guardedRec.Body.String())
+	var guardedTr TriggerResponse
+	require.NoError(t, json.Unmarshal(guardedRec.Body.Bytes(), &guardedTr))
+
+	unguardedRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "cel-review-unguarded",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: []string{"github.issue_comment.created"},
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: store.TriggerDialectCEL, Expr: "event.attributes.command == 'review'"},
+			},
+		},
+		Action: TriggerActionSpec{
+			Type:    store.TriggerActionMessage,
+			AgentID: f.targetAgent.ID,
+			Message: "Review requested (unguarded)",
+		},
+	})
+	require.Equal(t, http.StatusCreated, unguardedRec.Code, unguardedRec.Body.String())
+	var unguardedTr TriggerResponse
+	require.NoError(t, json.Unmarshal(unguardedRec.Body.Bytes(), &unguardedTr))
+
+	deliverAndWait := func(body []byte) *store.TriggerEvent {
+		t.Helper()
+		rec := postSignedGitHubDelivery(t, f.srv, webhookSecret, appID, "issue_comment", uuid.NewString(), body)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		var resp GitHubWebhookAcceptedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Equal(t, GitHubWebhookStatusQueued, resp.Status)
+		require.Len(t, resp.Events, 1)
+		evID := resp.Events[0].EventID
+		require.Eventually(t, func() bool {
+			stored, gErr := f.store.GetTriggerEvent(ctx, evID)
+			return gErr == nil && stored != nil && stored.Status == store.TriggerEventStatusProcessed
+		}, 5*time.Second, 20*time.Millisecond)
+		stored, gErr := f.store.GetTriggerEvent(ctx, evID)
+		require.NoError(t, gErr)
+		return stored
+	}
+
+	// 1. Matching comment (@octo-app /review --thorough): both CEL rules match and fire.
+	matchEv := deliverAndWait(fixtureBytes)
+	assert.Equal(t, 2, matchEv.MatchCount)
+	assert.Equal(t, 2, matchEv.FireCount)
+	require.Len(t, disp.getCalls(), 2)
+
+	matchFires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: f.projectID, EventID: matchEv.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, matchFires.Items, 2)
+	for _, fire := range matchFires.Items {
+		assert.Equal(t, store.TriggerFireStatusFired, fire.Status)
+		assert.Equal(t, "1/1", fire.MatchedThrough)
+		assert.Equal(t, store.TriggerDialectCEL, fire.DecidedDialect)
+	}
+
+	// 2. Non-matching command (@octo-app /deploy prod): CEL evaluates cleanly to false ->
+	// neither trigger fires and no message is delivered.
+	noMatchEv := deliverAndWait(withCommentBody("@octo-app /deploy prod", 900001))
+	assert.Equal(t, 0, noMatchEv.MatchCount)
+	assert.Equal(t, 0, noMatchEv.FireCount)
+	assert.Len(t, disp.getCalls(), 2, "non-matching command must not deliver any message")
+
+	noMatchFires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: f.projectID, EventID: noMatchEv.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, noMatchFires.Items)
+
+	// 3. Plain comment without a /command (no "command" attribute): guarded trigger evaluates
+	// cleanly to false, while unguarded trigger hits a 3b-2 CEL evaluation error and records
+	// a skipped fire with ErrFireRuleEvaluationFailed ("rule evaluation failed").
+	plainEv := deliverAndWait(withCommentBody("Looks good to me!", 900002))
+	assert.Equal(t, 0, plainEv.MatchCount)
+	assert.Equal(t, 0, plainEv.FireCount)
+	assert.Len(t, disp.getCalls(), 2, "skipped CEL rule must not deliver any message")
+
+	plainFires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: f.projectID, EventID: plainEv.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, plainFires.Items, 1)
+	assert.Equal(t, unguardedTr.ID, plainFires.Items[0].TriggerID)
+	assert.Equal(t, store.TriggerFireStatusSkipped, plainFires.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireRuleEvaluationFailed, plainFires.Items[0].Error)
+	assert.Equal(t, "1/1", plainFires.Items[0].MatchedThrough)
+	assert.Equal(t, store.TriggerDialectCEL, plainFires.Items[0].DecidedDialect)
+}
