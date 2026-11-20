@@ -787,7 +787,7 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 	switch r.Method {
 	case http.MethodGet:
 		perms := project.GitHubPermissions
-		if perms == nil {
+		if perms == nil || *perms == (store.GitHubTokenPermissions{}) {
 			// Return the same defaults token minting falls back to.
 			defaults := store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions())
 			perms = &defaults
