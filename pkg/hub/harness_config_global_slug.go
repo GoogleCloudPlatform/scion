@@ -31,11 +31,10 @@ const ErrCodeHarnessConfigSlugReserved = "harness_config_slug_reserved"
 
 // harnessConfigSlugReservedError refuses a project-scope harness config
 // whose slug is taken by a global harness config on a hosted hub. A hosted
-// hub resolves global scope first (harnessConfigLookupScopes), but a
-// same-slug project row would still be ambiguous with the global one, would
-// replace it wherever a workstation-order lookup or a broker-side resolution
-// applies, and would shadow it if the global row were later deleted, so the
-// slug is refused at write time as well.
+// hub resolves global scope first (harnessConfigLookupScopes), so such a row
+// is not used while the global one exists; it is refused at write time as
+// well so the name stays unambiguous and the row cannot take over the name
+// for every agent in the project if the global row is later deleted.
 type harnessConfigSlugReservedError struct {
 	slug string
 }
