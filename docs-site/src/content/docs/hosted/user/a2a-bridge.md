@@ -434,11 +434,11 @@ The bridge exposes the following HTTP endpoints:
 | `/.well-known/agent-card.json` | GET | None | Base bridge registry agent card. |
 | `/.well-known/openid-configuration` | GET | None | OIDC discovery proxy document for deployments behind IAP. Uses bridge transport auth to fetch from the Hub and rewrites the `jwks_uri` to point back to the bridge. Cached for 5 minutes. |
 | `/.well-known/jwks.json` | GET | None | JSON Web Key Set (JWKS) proxy endpoint. Serves Hub public keys with a 5-minute cache. |
-| `/projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json` | GET | Configured Scheme | Per-agent capabilities card. |
+| `/projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json` | GET | None | Per-agent capabilities card. |
 | `/projects/{projectSlug}/agents/{agentSlug}/jsonrpc` | POST | Configured Scheme | Primary A2A JSON-RPC 2.0 communication endpoint. |
 | `/healthz` | GET | None | Liveness check (returns HTTP 200). |
 | `/readyz` | GET | None | Readiness check (checks DB and active broker plugin connection). |
-| `/metrics` | GET | Configured Scheme | Prometheus metrics. |
+| `/metrics` | GET | Configured Scheme | Prometheus metrics (disabled under `federation`). |
 
 ---
 
@@ -472,12 +472,13 @@ Standard A2A JSON-RPC methods supported at the `/jsonrpc` endpoint:
   * If either component fails, `/readyz` returns `HTTP 503 Service Unavailable`, preventing traffic from hitting the node.
 
 ### Metrics Scraping (`/metrics`)
-`/metrics` serves Prometheus metrics and requires the bridge's configured `auth.scheme`, matching other non-public endpoints (it is exempt from rate limiting so scrape traffic does not consume API budget).
+`/metrics` serves Prometheus metrics and requires the bridge's configured `auth.scheme`, matching other non-public endpoints (and is subject to the bridge's standard rate limiting).
 
 Configure your Prometheus scrape job to send credentials matching `auth.scheme`:
-* **Bearer-based schemes (`bearer`, `hubUAT`, `hubBearer`, `hubJWT`, `federation`, `geGoogle`)**: configure `authorization` in the Prometheus scrape job to send `Authorization: Bearer <token>` (for example, using `credentials_file` pointing to a token file).
+* **Bearer-based schemes (`bearer`, `hubUAT`, `hubBearer`, `hubJWT`, `geGoogle`)**: configure `authorization` in the Prometheus scrape job to send `Authorization: Bearer <token>` (for example, using `credentials_file` pointing to a token file).
 * **`apiKey`**: send `X-API-Key: <key>` (Prometheus's built-in `authorization` block sends `Authorization`; use `bearer`, a scraper that supports custom headers, or an internal proxy). When `auth.scheme` is unset, either `X-API-Key` or `Authorization: Bearer` is accepted.
-* **`none`**: no credentials required, matching all other endpoints when authentication is explicitly disabled.
+* **`federation`**: `/metrics` fails closed (`403 Forbidden`) under the federation scheme.
+* **`none`**: open (no credentials required), matching all other endpoints when authentication is explicitly disabled.
 
 ```yaml
 scrape_configs:

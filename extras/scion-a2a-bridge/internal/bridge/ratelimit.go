@@ -150,10 +150,9 @@ func RateLimitMiddleware(next http.Handler, cfg RateLimitConfig) http.Handler {
 	limiter := NewRateLimiter(rate, burst)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Short-circuit rate limiting for operational endpoints so that
-		// Prometheus scrapers, k8s probes, and uptime monitors don't
-		// consume rate-limit budget.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+		// Short-circuit rate limiting for health/readiness probes so that
+		// k8s probes and uptime monitors don't consume rate-limit budget.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -464,13 +464,14 @@ By default the broker plugin RPC binds to loopback only. Setting `plugin.allow_r
 
 ### `/metrics` endpoint
 
-The `/metrics` endpoint enforces the bridge's configured authentication scheme (`auth.scheme`), matching other non-public endpoints (while remaining exempt from rate limiting). Prometheus scrapers must supply credentials matching `auth.scheme`:
+The `/metrics` endpoint enforces the bridge's configured authentication scheme (`auth.scheme`), matching other non-public endpoints, and is subject to the bridge's standard rate limiting. Prometheus scrapers must supply credentials matching `auth.scheme`:
 
-- **`bearer`, `hubUAT`, `hubBearer`, `hubJWT`, `federation`, `geGoogle`**: send `Authorization: Bearer <token>` (for example, via Prometheus's `authorization` block in the scrape job config).
+- **`bearer`, `hubUAT`, `hubBearer`, `hubJWT`, `geGoogle`**: send `Authorization: Bearer <token>` (for example, via Prometheus's `authorization` block in the scrape job config).
 - **`apiKey`**: send `X-API-Key: <key>` (standard Prometheus `authorization` sends `Authorization`; use `bearer`, a scraper that supports custom headers, or an internal proxy). When `auth.scheme` is unset, either `X-API-Key` or `Authorization: Bearer` is accepted.
-- **`none`**: unauthenticated, matching all other endpoints when authentication is explicitly disabled.
+- **`federation`**: `/metrics` fails closed (`403 Forbidden`) under the federation scheme.
+- **`none`**: open (unauthenticated), matching all other endpoints when authentication is explicitly disabled.
 
-If authenticating scrapers through the configured A2A scheme is undesirable, consider running a dedicated metrics listener on a separate port restricted to internal networks.
+If authenticating scrapers through the configured A2A scheme is undesirable (or when using `federation`), consider running a dedicated metrics listener on a separate port restricted to internal networks.
 
 ### Rate limiting and `trust_proxy`
 

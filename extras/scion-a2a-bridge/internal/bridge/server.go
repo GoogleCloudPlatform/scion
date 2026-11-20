@@ -704,6 +704,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 
 		case "federation":
+			// Fail closed on /metrics under the federation scheme.
+			if r.URL.Path == "/metrics" {
+				http.Error(w, "forbidden: metrics endpoint is not available under federation authentication", http.StatusForbidden)
+				return
+			}
 			// Federation pass-through: decode the JWT WITHOUT verification
 			// for bridge-local bookkeeping (task isolation, logging).
 			// The hub validates the token via X-Scion-Federation-Token.
@@ -787,8 +792,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 // A nil limiter (rate limiting disabled) passes through.
 func (s *Server) snapshotRateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip rate limiting for operational endpoints.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+		// Skip rate limiting for health/readiness probes.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}
