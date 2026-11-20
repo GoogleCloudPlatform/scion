@@ -54,25 +54,30 @@ func TestDecisionService_ListShowAndRecord(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(AgentDecisionListResponse{
 			Items: []AgentDecisionListItem{
 				{
-					RowID:           "row-1",
-					Key:             "D234",
-					Ref:             "agent-1/D234",
-					Version:         1,
-					Status:          "decided",
-					Question:        "Ship now?",
+					RowID:    "row-1",
+					Key:      "D234",
+					Ref:      "agent-1/D234",
+					Version:  1,
+					Status:   "decided",
+					Question: "Ship now?",
+					Choices: []messages.Choice{
+						{ID: "1", Label: "yes", Description: "Deploy right away"},
+						{ID: "2", Label: "no", Description: "Hold release"},
+					},
+					DefaultChoiceID: "1",
 					ConversationID:  "conv-1",
 					PromptMessageID: "prompt-1",
 					CreatedAt:       now,
 					DecidedAt:       &now,
 					Answer: &DecisionAnswerView{
-						ChoiceID:        "1",
-						Label:           "yes",
-						AnsweredByName:  "Alice",
-						Provenance:      "agent_interpreted",
-						Outcome:         "answer",
-						SourceMessageID: "reply-1",
-						Surface:         "native",
-						At:              now,
+						ChoiceID:            "2",
+						Label:               "no",
+						AnsweredByName:      "Alice",
+						Provenance:          "direct",
+						Outcome:             "override",
+						PreviousChoiceLabel: "yes",
+						Surface:             "native",
+						At:                  now,
 					},
 				},
 			},
@@ -159,6 +164,12 @@ func TestDecisionService_ListShowAndRecord(t *testing.T) {
 	}
 	if len(listResp.Items) != 1 || listResp.Items[0].Key != "D234" || listResp.NextCursor != "cur-2" {
 		t.Fatalf("unexpected List response: %+v", listResp)
+	}
+	if listResp.Items[0].DefaultChoiceID != "1" || len(listResp.Items[0].Choices) != 2 || listResp.Items[0].Choices[0].Description != "Deploy right away" {
+		t.Fatalf("unexpected List item choices/defaultChoiceId: %+v", listResp.Items[0])
+	}
+	if listResp.Items[0].Answer == nil || listResp.Items[0].Answer.PreviousChoiceLabel != "yes" {
+		t.Fatalf("unexpected List item Answer: %+v", listResp.Items[0].Answer)
 	}
 
 	showResp, err := c.Decisions().Show(ctx, "D234")
