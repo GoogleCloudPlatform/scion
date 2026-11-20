@@ -221,6 +221,7 @@ func sanitizeTriggerFireError(req hubfire.FireRequest, status hubfire.FireStatus
 		"hub shutting down",
 		"message delivery failed",
 		"dispatch_agent failed",
+		"name exhausted",
 		"exec failed",
 		"fire failed",
 		"invalid message payload",
