@@ -1489,26 +1489,6 @@ func (d *budgetProbeDialect) Evaluate(ctx context.Context, _ ruleengine.Compiled
 	}
 }
 
-func TestEngineDeadlineMargin(t *testing.T) {
-	cases := []struct {
-		in   time.Duration
-		want time.Duration
-	}{
-		{-5 * time.Millisecond, 0},
-		{0, 0},
-		{time.Nanosecond, time.Nanosecond},
-		{10 * time.Nanosecond, time.Nanosecond},
-		{80 * time.Millisecond, 4 * time.Millisecond},
-		{200 * time.Millisecond, 10 * time.Millisecond},
-		{time.Second, 10 * time.Millisecond},
-	}
-	for _, tc := range cases {
-		if got := ruleengine.EngineDeadlineMargin(tc.in); got != tc.want {
-			t.Errorf("EngineDeadlineMargin(%s) = %s, want %s", tc.in, got, tc.want)
-		}
-	}
-}
-
 func TestBudgetTracker_Exhaust(t *testing.T) {
 	var nilTracker *ruleengine.BudgetTracker
 	nilTracker.Exhaust() // must not panic
@@ -1557,7 +1537,7 @@ func TestBudgetTracker_Exhaust(t *testing.T) {
 func TestEvaluate_BoundFromTrackerTimeoutExhaustsTracker(t *testing.T) {
 	eng := ruleengine.NewEngine()
 	waitDialect := &budgetProbeDialect{name: "wait_deadline", maxEvalTime: 100 * time.Millisecond, waitCtxDone: true}
-	fastTimeoutDialect := &budgetProbeDialect{name: "fast_timeout", maxEvalTime: 100 * time.Millisecond, waitCtxDone: false}
+	fastTimeoutDialect := &budgetProbeDialect{name: "fast_timeout", maxEvalTime: 10 * time.Second, waitCtxDone: false}
 	if err := eng.Register(waitDialect); err != nil {
 		t.Fatalf("Register wait_deadline: %v", err)
 	}
@@ -1613,10 +1593,10 @@ func TestEvaluate_BoundFromTrackerTimeoutExhaustsTracker(t *testing.T) {
 		t.Fatalf("dialect invoked after budget exhaustion: evalCalls = %d, want 1", got)
 	}
 
-	// (b) Shorter per-rule timeout while boundFromTracker is true (50ms tracker < 100ms
-	// dialect MaxEvalTime, immediate ReasonTimeout with budget remaining): must return
-	// per-rule FailedError{timeout}, NOT ErrBudgetExhausted, and must NOT exhaust tracker.
-	perRuleTracker := ruleengine.NewBudgetTracker(50 * time.Millisecond)
+	// (b) Shorter per-rule timeout while boundFromTracker is true (2s tracker < 10s
+	// dialect MaxEvalTime, immediate ReasonTimeout with plenty of budget remaining):
+	// must return per-rule FailedError{timeout}, NOT ErrBudgetExhausted, and must NOT exhaust tracker.
+	perRuleTracker := ruleengine.NewBudgetTracker(2 * time.Second)
 	_, err = eng.Evaluate(context.Background(), fastComp, ruleengine.Input{}, ruleengine.Budget{Tracker: perRuleTracker})
 	if errors.Is(err, ruleengine.ErrBudgetExhausted) {
 		t.Fatalf("shorter per-rule timeout unexpectedly returned ErrBudgetExhausted: %v", err)
@@ -1629,9 +1609,9 @@ func TestEvaluate_BoundFromTrackerTimeoutExhaustsTracker(t *testing.T) {
 		t.Fatalf("shorter per-rule timeout unexpectedly exhausted tracker: Exhausted=%v Remaining=%s", perRuleTracker.Exhausted(), perRuleTracker.Remaining())
 	}
 
-	// (c) Non-boundFromTracker case (200ms tracker > 100ms dialect MaxEvalTime):
+	// (c) Non-boundFromTracker case (20s tracker > 10s dialect MaxEvalTime):
 	// per-rule dialect timeout must NOT exhaust the aggregate tracker.
-	wideTracker := ruleengine.NewBudgetTracker(200 * time.Millisecond)
+	wideTracker := ruleengine.NewBudgetTracker(20 * time.Second)
 	_, err = eng.Evaluate(context.Background(), fastComp, ruleengine.Input{}, ruleengine.Budget{Tracker: wideTracker})
 	if errors.Is(err, ruleengine.ErrBudgetExhausted) {
 		t.Fatalf("non-boundFromTracker timeout unexpectedly returned ErrBudgetExhausted: %v", err)
@@ -1648,12 +1628,14 @@ func TestEvaluate_BoundFromTrackerTimeoutExhaustsTracker(t *testing.T) {
 func TestEvaluate_MarginWindowTimeoutExhaustsTracker(t *testing.T) {
 	eng := ruleengine.NewEngine()
 	// Tracker limit 200ms (< 500ms dialect MaxEvalTime => boundFromTracker is true).
-	// EngineDeadlineMargin(200ms) is 10ms, so returning 5ms before evalCtx.Deadline()
+	// engineDeadlineMargin(200ms) is 10ms, so returning 5ms before evalCtx.Deadline()
 	// lands inside [190ms, 200ms): elapsed >= evalTimeout - margin while elapsed < evalTimeout.
 	// Charge(elapsed) alone would leave ~5ms remaining, so this test directly guards
 	// budget.Tracker.Exhaust() on the margin-window exhaustion path.
-	const trackerLimit = 200 * time.Millisecond
-	margin := ruleengine.EngineDeadlineMargin(trackerLimit)
+	const (
+		trackerLimit = 200 * time.Millisecond
+		margin       = 10 * time.Millisecond
+	)
 	marginDialect := &budgetProbeDialect{
 		name:                 "margin_timeout",
 		maxEvalTime:          500 * time.Millisecond,

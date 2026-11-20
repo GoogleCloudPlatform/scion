@@ -68,7 +68,7 @@ func TestTrackerDeadlineVsPerRuleTimeoutOnSharedEventBudget(t *testing.T) {
 		t.Fatalf("NewCELDialect: %v", err)
 	}
 	waitDialect := &triggerBudgetProbeDialect{name: "wait_deadline", maxEvalTime: 100 * time.Millisecond, waitCtxDone: true}
-	fastTimeout := &triggerBudgetProbeDialect{name: "fast_timeout", maxEvalTime: 100 * time.Millisecond, waitCtxDone: false}
+	fastTimeout := &triggerBudgetProbeDialect{name: "fast_timeout", maxEvalTime: 10 * time.Second, waitCtxDone: false}
 
 	re := ruleengine.NewEngine()
 	if err := re.Register(celDialect); err != nil {
@@ -166,9 +166,10 @@ func TestTrackerDeadlineVsPerRuleTimeoutOnSharedEventBudget(t *testing.T) {
 	})
 
 	t.Run("shorter_per_rule_timeout_does_not_exhaust_shared_budget", func(t *testing.T) {
-		// Tracker limit (50ms) < fastTimeout MaxEvalTime (100ms) => boundFromTracker is true,
-		// but the dialect returns ReasonTimeout immediately with budget left.
-		budget := ruleengine.NewBudgetTracker(50 * time.Millisecond)
+		// Tracker limit (1s via NewEventBudget) < fastTimeout MaxEvalTime (10s) =>
+		// boundFromTracker is true, while leaving plenty of headroom for the real
+		// CEL compile+eval follow-up under heavy CPU contention.
+		budget := triggerrule.NewEventBudget()
 
 		act1 := baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-fast-timeout", Name: "fast-timeout"})
 		scope1 := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: "trig-fast-timeout", Revision: 1}
