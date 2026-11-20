@@ -131,7 +131,7 @@ func TestAdminEffectivePermissions_HubAppliesInProjectsCatalogFilter(t *testing.
 
 	t.Run("hub-admin project-applicable grants report appliesInProjects=true and hub-only false", func(t *testing.T) {
 		byPerm := fetchSystem(t, hubAdmin.ID)
-		for _, id := range []string{"project.read", "skill.read", "template.read"} {
+		for _, id := range []string{"project.read", "skill.read"} {
 			entry, ok := byPerm[id]
 			require.True(t, ok, "hub-admin should hold %s at hub scope", id)
 			assert.True(t, entry.AppliesInProjects,
@@ -142,7 +142,7 @@ func TestAdminEffectivePermissions_HubAppliesInProjectsCatalogFilter(t *testing.
 		assert.False(t, userRead.AppliesInProjects, "hub-only user.read must report appliesInProjects=false")
 	})
 
-	t.Run("super-admin agent.create reports appliesInProjects=true", func(t *testing.T) {
+	t.Run("super-admin project-applicable grants report appliesInProjects=true", func(t *testing.T) {
 		superAdmin := epCreateUser(t, s, "applies-super", store.UserStatusActive)
 		superAdmin.Role = store.UserRoleAdmin
 		require.NoError(t, s.UpdateUser(ctx, superAdmin))
@@ -151,9 +151,11 @@ func TestAdminEffectivePermissions_HubAppliesInProjectsCatalogFilter(t *testing.
 		epBindSystemRole(t, s, superRole.ID, store.RoleBindingPrincipalUser, superAdmin.ID, nil, nil)
 
 		byPerm := fetchSystem(t, superAdmin.ID)
-		agentCreate, ok := byPerm["agent.create"]
-		require.True(t, ok, "super-admin should hold agent.create at hub scope")
-		assert.True(t, agentCreate.AppliesInProjects, "super-admin agent.create must report appliesInProjects=true")
+		for _, id := range []string{"agent.create", "template.read", "harness_config.read"} {
+			entry, ok := byPerm[id]
+			require.True(t, ok, "super-admin should hold %s at hub scope", id)
+			assert.True(t, entry.AppliesInProjects, "super-admin %s must report appliesInProjects=true", id)
+		}
 	})
 }
 
