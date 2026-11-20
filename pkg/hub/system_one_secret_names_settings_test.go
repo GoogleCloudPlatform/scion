@@ -265,3 +265,53 @@ server:
 		})
 	}
 }
+
+func TestNeverAPIWritable_WorkstationServerNullAbsentVsPresent(t *testing.T) {
+	t.Run("absent_leaves_empty_server_without_secret_names_stub", func(t *testing.T) {
+		const absentYAML = `schema_version: "1"
+server:
+  mode: workstation
+  hub:
+    system_one:
+      max_eval_time: 4s
+`
+		settingsPath := startupBlockHome(t, absentYAML)
+		srv, _, _ := newSQLiteHubInMode(t, true, nil)
+
+		rr := putServerConfig(t, srv, `{"server":null}`)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		m := readYAMLMap(t, settingsPath)
+		serverVal, hasServer := m["server"]
+		require.True(t, hasServer, "server key should remain present as empty map")
+		serverMap, ok := serverVal.(map[string]any)
+		require.True(t, ok, "server should be a map, got %T", serverVal)
+		assert.Empty(t, serverMap, "server: null with no secret_names must clear server to {} with no secret_names stub")
+		assert.Nil(t, yamlAt(m, "server", "hub"))
+		assert.Nil(t, yamlAt(m, "server", "hub", "system_one", "secret_names"))
+	})
+
+	t.Run("present_preserves_only_secret_names", func(t *testing.T) {
+		const presentYAML = `schema_version: "1"
+server:
+  mode: workstation
+  hub:
+    system_one:
+      max_eval_time: 4s
+      secret_names:
+        gemini_decisions:
+          - GEMINI_API_KEY_BILLING_B
+`
+		settingsPath := startupBlockHome(t, presentYAML)
+		srv, _, _ := newSQLiteHubInMode(t, true, nil)
+
+		rr := putServerConfig(t, srv, `{"server":null}`)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		m := readYAMLMap(t, settingsPath)
+		assert.Nil(t, yamlAt(m, "server", "mode"), "server.mode must be cleared by server: null")
+		assert.Nil(t, yamlAt(m, "server", "hub", "system_one", "max_eval_time"), "max_eval_time must be cleared by server: null")
+		gotNames := yamlAt(m, "server", "hub", "system_one", "secret_names", "gemini_decisions")
+		assert.Equal(t, []any{"GEMINI_API_KEY_BILLING_B"}, gotNames, "only secret_names must survive server: null")
+	})
+}
