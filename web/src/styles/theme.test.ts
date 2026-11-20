@@ -533,18 +533,24 @@ function stripVarExpressions(text: string): string {
     if (text.startsWith('var(', i)) {
       let depth = 0;
       let j = i + 3;
+      let found = false;
       for (; j < text.length; j++) {
         if (text[j] === '(') depth++;
         else if (text[j] === ')') {
           depth--;
           if (depth === 0) {
             j++;
+            found = true;
             break;
           }
         }
       }
-      out += 'var()';
-      i = j;
+      if (found) {
+        out += 'var()';
+        i = j;
+      } else {
+        out += text[i++];
+      }
     } else {
       out += text[i++];
     }
@@ -761,6 +767,10 @@ describe('web/src bare color literal guard (ptone/scion#8410)', () => {
         violations.push(
           `${rel}: found ${hits.length} bare color literal(s) (allowed ${maxAllowed}): ${hits.join(', ')}`
         );
+      } else if (hits.length < maxAllowed) {
+        violations.push(
+          `${rel}: allowlist entry has max ${maxAllowed} but only found ${hits.length} bare color literal(s); tighten BARE_COLOR_ALLOWLIST to prevent decay`
+        );
       }
     }
 
@@ -778,6 +788,9 @@ describe('web/src bare color literal guard (ptone/scion#8410)', () => {
     expect(
       findBareColorLiterals('.a { color: white; background: red; border-color: gray; }')
     ).toEqual(['white', 'red', 'gray']);
+    expect(findBareColorLiterals('const re = /var\\(/; .a { color: #ff0000; }')).toEqual([
+      '#ff0000',
+    ]);
     expect(
       findBareColorLiterals(
         '/* #ff0000 */\n// #00ff00\n.a { color: var(--scion-text, #1e293b); box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }'
