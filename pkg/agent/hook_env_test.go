@@ -106,15 +106,6 @@ func TestComputeHookWithheldEnv_AllLayersAndPrecedence(t *testing.T) {
 		"OPERATOR_ONLY":    "keep",
 	}
 
-	// Simulate ProvisionAgent merge: inline overrides bundle in ScionConfig.Env,
-	// and resolveAuthEnvOverlay fills absent settingsHCEnv keys into opts.Env.
-	mergedCfgEnv := make(map[string]string, len(bundleEnv)+len(inlineEnv))
-	for k, v := range bundleEnv {
-		mergedCfgEnv[k] = v
-	}
-	for k, v := range inlineEnv {
-		mergedCfgEnv[k] = v
-	}
 	optsEnv := make(map[string]string, len(callerEnv)+len(settingsHCEnv))
 	for k, v := range callerEnv {
 		optsEnv[k] = v
@@ -125,13 +116,14 @@ func TestComputeHookWithheldEnv_AllLayersAndPrecedence(t *testing.T) {
 		}
 	}
 
-	agentEnv, _, _, _ := buildAgentEnv(&api.ScionConfig{Env: mergedCfgEnv}, optsEnv, nil, true)
+	agentEnv, _, _, _, provenance := buildAgentEnvWithBundle(bundleEnv, &api.ScionConfig{Env: inlineEnv}, optsEnv, nil, true)
 
 	got := computeHookWithheldEnv(hookWithheldInput{
 		bundleEnv:      bundleEnv,
 		envTemplateEnv: envTemplateEnv,
 		settingsHCEnv:  settingsHCEnv,
 		agentEnv:       agentEnv,
+		provenance:     provenance,
 		callerEnv:      callerEnv,
 		inlineEnv:      inlineEnv,
 		resolvedAuth: &api.ResolvedAuth{
@@ -141,7 +133,7 @@ func TestComputeHookWithheldEnv_AllLayersAndPrecedence(t *testing.T) {
 			{Type: "environment", Target: "TPL_SECRET_WIN", Value: "from-secret"},
 		},
 	})
-	want := []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT", "MYKEY", "SETTINGS_ONLY", "TPL_ONLY"}
+	want := []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT", "MY${UNSET_TEST_VAR}KEY", "SETTINGS_ONLY", "TPL_ONLY"}
 	if !slices.Equal(got, want) {
 		t.Errorf("computeHookWithheldEnv() = %v, want %v (agentEnv=%v)", got, want, agentEnv)
 	}
@@ -266,7 +258,7 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 		"COLLIDE_KEY",
 		"GOOGLE_CLOUD_PROJECT",
 		envpolicy.HintLivenessRootDepth,
-		"MYKEY",
+		"MY${UNSET_TEST_VAR}KEY",
 		"SETTINGS_ONLY",
 		"TPL_ONLY",
 	}
@@ -298,8 +290,8 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 	if envMap["INLINE_WIN"] != "from-inline" {
 		t.Errorf("RunConfig.Env[INLINE_WIN] = %q, want %q", envMap["INLINE_WIN"], "from-inline")
 	}
-	if envMap["MYKEY"] != "from-expanded-key" {
-		t.Errorf("RunConfig.Env[MYKEY] = %q, want %q", envMap["MYKEY"], "from-expanded-key")
+	if envMap["MY${UNSET_TEST_VAR}KEY"] != "from-expanded-key" {
+		t.Errorf("RunConfig.Env[MY${UNSET_TEST_VAR}KEY] = %q, want %q", envMap["MY${UNSET_TEST_VAR}KEY"], "from-expanded-key")
 	}
 	if envMap[envpolicy.HintLivenessRootDepth] != "2" {
 		t.Errorf("RunConfig.Env[%s] = %q, want %q", envpolicy.HintLivenessRootDepth, envMap[envpolicy.HintLivenessRootDepth], "2")

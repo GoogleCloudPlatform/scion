@@ -23,6 +23,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -1003,6 +1004,9 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 		}
 		if limits, ok := readPersistedAgentLimits(agentDir); ok {
 			persisted = withLimits(persisted, limits)
+		}
+		if ownEnvVars, ok := readPersistedAgentEnv(agentDir); ok {
+			persisted = withOwnEnv(persisted, ownEnvVars)
 		}
 		cfgData, marshalErr := json.MarshalIndent(persisted, "", "  ")
 		if marshalErr == nil {
@@ -2561,7 +2565,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		hcCfg.TaskFlag = hcDir.Config.TaskFlag
 	}
 	if hcDir.Config.Env != nil {
-		hcCfg.Env, _ = sanitizeHarnessConfigEnv(hcDir.Config.Env, "bundle", true)
+		hcCfg.Env, _ = BundleEnvLayer(hcDir.Config.Env)
 	}
 	if hcDir.Config.Volumes != nil {
 		hcCfg.Volumes = hcDir.Config.Volumes
@@ -2935,14 +2939,19 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// scion-agent.json carries only the requester's own environment values
-	// (the inline image, kubernetes, resources and volumes) and the workspace
-	// mount resolved above. The harness-config file, settings, profile, hub
-	// default and built-in values merged into finalScionCfg are applied by
-	// Start from current settings on every start, so a later settings or
-	// profile change reaches the agent on its next start (ptone/scion#4561).
-	// The returned config keeps the merged values (see the reload below).
-	// Likewise it carries only the agent's own limits (ptone/scion#623).
-	persistedCfg := withLimits(withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume)), ownLimits)
+	// (the inline image, kubernetes, resources and volumes), the workspace
+	// mount resolved above, the agent's own limits (ptone/scion#623), and
+	// the agent's own inline env (no bundle or settings harness-config env).
+	// The harness-config file, settings, profile, hub default and built-in
+	// values merged into finalScionCfg are applied by Start from current
+	// settings and bundle on every start, so later changes reach the agent on
+	// its next start (ptone/scion#4561). The returned config keeps the merged
+	// values (see the reload below).
+	var ownEnvVars map[string]string
+	if inlineCfg != nil {
+		ownEnvVars = inlineCfg.Env
+	}
+	persistedCfg := withOwnEnv(withLimits(withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume)), ownLimits), ownEnvVars)
 	agentCfgData, err := json.MarshalIndent(persistedCfg, "", "  ")
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
@@ -3121,10 +3130,19 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// The same holds for the default limits (ptone/scion#623).
 	effectiveEnv := environmentOf(finalScionCfg)
 	effectiveLimits := limitsOf(finalScionCfg)
+	effectiveEnvVars := maps.Clone(finalScionCfg.Env)
 	reloadTpl := &config.Template{Path: agentDir}
 	if updatedCfg, err := reloadTpl.LoadConfig(); err == nil {
 		updatedCfg.Info = finalScionCfg.Info // Re-attach info
-		finalScionCfg = withLimits(withEnvironment(updatedCfg, effectiveEnv), effectiveLimits)
+		if len(updatedCfg.Env) > 0 {
+			if effectiveEnvVars == nil {
+				effectiveEnvVars = make(map[string]string, len(updatedCfg.Env))
+			}
+			for k, v := range updatedCfg.Env {
+				effectiveEnvVars[k] = v
+			}
+		}
+		finalScionCfg = withOwnEnv(withLimits(withEnvironment(updatedCfg, effectiveEnv), effectiveLimits), effectiveEnvVars)
 	} else {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reload agent config after harness provisioning: %v\n", err)
 	}

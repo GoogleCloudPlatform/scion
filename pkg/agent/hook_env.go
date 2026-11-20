@@ -81,6 +81,18 @@ func sanitizeHarnessConfigEnv(raw map[string]string, layerName string, expandKey
 	return out, warnings
 }
 
+// envLayerSource identifies which layer supplied the final value of an
+// environment variable emitted by buildAgentEnvWithBundle.
+type envLayerSource uint8
+
+const (
+	envSourceNone envLayerSource = iota
+	envSourceBundle
+	envSourceConfig
+	envSourceExtra
+	envSourceDefault
+)
+
 // hookWithheldInput collects the sanitized harness-config env layers and the
 // higher-precedence env sources needed to compute RunConfig.HookWithheldEnv.
 type hookWithheldInput struct {
@@ -88,6 +100,7 @@ type hookWithheldInput struct {
 	envTemplateEnv  map[string]string
 	settingsHCEnv   map[string]string
 	agentEnv        []string
+	provenance      map[string]envLayerSource
 	callerEnv       map[string]string
 	inlineEnv       map[string]string
 	resolvedAuth    *api.ResolvedAuth
@@ -101,12 +114,15 @@ type hookWithheldInput struct {
 //
 // Keys supplied with a non-empty value by a higher-precedence non-harness-config
 // source (caller/hub env captured before settings-hc injection, or inline env)
-// are excluded so those sources remain visible to hooks. For bundle env and
-// settings-hc layers (which travel in RunConfig.Env and outrank resolved auth
-// and colliding environment secrets at runtime), keys absent from agentEnv are
-// omitted. For env_template (which travels via Harness.GetEnv below
-// RunConfig.Env, resolved auth, and environment secrets), keys overridden by
-// agentEnv, resolved auth, or environment secrets are excluded.
+// are excluded so those sources remain visible to hooks. When provenance from
+// buildAgentEnvWithBundle is supplied, it drives bundle and settings-hc
+// attribution directly instead of re-deriving precedence. Legacy persisted keys
+// that differ from the live bundle value (and thus were not demoted) remain in
+// envSourceConfig and are still withheld when declared by bundleEnv unless
+// overridden by callerEnv or inlineEnv. For env_template (which travels via
+// Harness.GetEnv below RunConfig.Env, resolved auth, and environment secrets),
+// keys overridden by agentEnv, resolved auth, or environment secrets are
+// excluded.
 func computeHookWithheldEnv(in hookWithheldInput) []string {
 	if len(in.bundleEnv) == 0 && len(in.settingsHCEnv) == 0 && len(in.envTemplateEnv) == 0 {
 		return nil
@@ -158,31 +174,58 @@ func computeHookWithheldEnv(in hookWithheldInput) []string {
 		withheld = append(withheld, k)
 	}
 
-	for rawK := range in.bundleEnv {
-		k, _, _ := util.ExpandEnvRefusing(rawK, refuseHostEnvForAgent)
-		if k == "" {
-			continue
+	if len(in.provenance) > 0 {
+		for k, src := range in.provenance {
+			if _, ok := emitted[k]; !ok {
+				continue
+			}
+			switch src {
+			case envSourceBundle:
+				add(k)
+			case envSourceConfig:
+				// Persisted own env or a legacy non-demoted bundle key:
+				// withhold when the live bundle declares that name and no
+				// higher-precedence caller or inline override set it.
+				if _, declared := in.bundleEnv[k]; declared {
+					if _, ok := higher[k]; !ok {
+						add(k)
+					}
+				}
+			case envSourceExtra:
+				// opts.Env carries callerEnv plus settingsHCEnv for absent keys.
+				if _, fromSettings := in.settingsHCEnv[k]; fromSettings {
+					if v, ok := in.callerEnv[k]; !ok || v == "" {
+						add(k)
+					}
+				}
+			}
 		}
-		if _, ok := higher[k]; ok {
-			continue
+	} else {
+		for k := range in.bundleEnv {
+			if k == "" {
+				continue
+			}
+			if _, ok := higher[k]; ok {
+				continue
+			}
+			if _, ok := emitted[k]; !ok {
+				continue
+			}
+			add(k)
 		}
-		if _, ok := emitted[k]; !ok {
-			continue
-		}
-		add(k)
-	}
 
-	for k := range in.settingsHCEnv {
-		if k == "" {
-			continue
+		for k := range in.settingsHCEnv {
+			if k == "" {
+				continue
+			}
+			if _, ok := higher[k]; ok {
+				continue
+			}
+			if _, ok := emitted[k]; !ok {
+				continue
+			}
+			add(k)
 		}
-		if _, ok := higher[k]; ok {
-			continue
-		}
-		if _, ok := emitted[k]; !ok {
-			continue
-		}
-		add(k)
 	}
 
 	for k := range in.envTemplateEnv {

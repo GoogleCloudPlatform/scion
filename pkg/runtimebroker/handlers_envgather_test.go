@@ -3299,10 +3299,10 @@ profiles:
 // expansion, and the preflight's search of template-bundled harness-config
 // dirs (matching launch's resolveHarnessConfigDir).
 
-// TestEnvGather_HarnessConfigDirEnv_UnsetVarIsMissing confirms that a dir
-// env value referencing an unset variable is dropped, matching
-// buildAgentEnv (pkg/agent/run.go), which also drops it.
-func TestEnvGather_HarnessConfigDirEnv_UnsetVarIsMissing(t *testing.T) {
+// TestEnvGather_HarnessConfigDirEnv_LiteralVarSyntaxIsSatisfied confirms that
+// a dir env value containing ${...} is treated literally (non-empty) without
+// expanding against the broker host environment, matching agent.BundleEnvLayer.
+func TestEnvGather_HarnessConfigDirEnv_LiteralVarSyntaxIsSatisfied(t *testing.T) {
 	_ = os.Unsetenv("DIR_ENV_UNSET_VAR")
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
@@ -3318,55 +3318,8 @@ profiles:
 `)
 
 	body := `{
-		"name": "test-agent-dirvar-unset",
-		"id": "agent-uuid-dirvar-unset",
-		"gatherEnv": true,
-		"projectPath": "` + projectDir + `",
-		"config": {"template": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
-	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("expected 202 (${DIR_ENV_UNSET_VAR} is unset; buildAgentEnv would drop it), got %d: %s", w.Code, w.Body.String())
-	}
-	var envReqs EnvRequirementsResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
-		t.Fatal("failed to decode response:", err)
-	}
-	found := false
-	for _, k := range envReqs.Needs {
-		if k == "GOOGLE_CLOUD_PROJECT" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected GOOGLE_CLOUD_PROJECT in needs, got %v", envReqs.Needs)
-	}
-}
-
-// TestEnvGather_HarnessConfigDirEnv_SetVarIsSatisfied confirms a dir env
-// value referencing a set variable expands and satisfies the requirement.
-func TestEnvGather_HarnessConfigDirEnv_SetVarIsSatisfied(t *testing.T) {
-	t.Setenv("DIR_ENV_SET_VAR", "proj-x")
-	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
-		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
-			"env:\n  GOOGLE_CLOUD_PROJECT: \"${DIR_ENV_SET_VAR}\"\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
-		`
-schema_version: "1"
-harness_configs:
-  claude:
-    harness: claude
-profiles:
-  default:
-    runtime: mock
-`)
-
-	body := `{
-		"name": "test-agent-dirvar-set",
-		"id": "agent-uuid-dirvar-set",
+		"name": "test-agent-dirvar-literal",
+		"id": "agent-uuid-dirvar-literal",
 		"gatherEnv": true,
 		"projectPath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
@@ -3377,14 +3330,14 @@ profiles:
 	srv.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201 (${DIR_ENV_SET_VAR} expands to a non-empty value), got %d: %s", w.Code, w.Body.String())
+		t.Fatalf("expected 201 (bundle env values are literal, not expanded), got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-// TestEnvGather_HarnessConfigDirEnv_EmptyValueHostPassthrough confirms a
-// literal empty dir env value falls back to the broker process's own env,
-// matching buildAgentEnv's host-env passthrough.
-func TestEnvGather_HarnessConfigDirEnv_EmptyValueHostPassthrough(t *testing.T) {
+// TestEnvGather_HarnessConfigDirEnv_EmptyValueNeverUsesHostPassthrough confirms
+// a literal empty dir env value never falls back to the broker process's own
+// env and instead reports the key as missing (202), matching agent.BundleEnvLayer.
+func TestEnvGather_HarnessConfigDirEnv_EmptyValueNeverUsesHostPassthrough(t *testing.T) {
 	unsetHostGCPEnv(t)
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "host-proj")
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
@@ -3401,8 +3354,8 @@ profiles:
 `)
 
 	body := `{
-		"name": "test-agent-dirvar-hostpass",
-		"id": "agent-uuid-dirvar-hostpass",
+		"name": "test-agent-dirvar-no-hostpass",
+		"id": "agent-uuid-dirvar-no-hostpass",
 		"gatherEnv": true,
 		"projectPath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
@@ -3412,8 +3365,21 @@ profiles:
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201 (empty dir value plus broker process env set means host passthrough), got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (empty bundle env must never read broker host env), got %d: %s", w.Code, w.Body.String())
+	}
+	var envReqs EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+		t.Fatal("failed to decode response:", err)
+	}
+	found := false
+	for _, k := range envReqs.Needs {
+		if k == "GOOGLE_CLOUD_PROJECT" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected GOOGLE_CLOUD_PROJECT in needs, got %v", envReqs.Needs)
 	}
 }
 
@@ -3801,16 +3767,11 @@ func TestEnvGather_CreateAgent_ScoresHydratedTemplate(t *testing.T) {
 	}
 }
 
-// TestEnvGather_AuthCandidateKeyValue_UsesExpandedDirEnvKey covers:
-// authCandidateKeyValue must consult the same expanded dir-env view
-// fillAbsentDirEnv uses (expandDirEnv), not look the directory up by a raw,
-// unexpanded key. A dir entry whose KEY is itself a ${VAR} reference that
-// expands to an auth-candidate name (here GOOGLE_CLOUD_PROJECT) reaches the
-// container under that expanded name — buildAgentEnv (pkg/agent/run.go)
-// expands dir-env keys too — so the preflight must find it. Looking the
-// directory up by the literal, unexpanded key would report a value the pod
-// actually receives as missing (false-missing).
-func TestEnvGather_AuthCandidateKeyValue_UsesExpandedDirEnvKey(t *testing.T) {
+// TestEnvGather_AuthCandidateKeyValue_UsesLiteralDirEnvKey confirms that a
+// dir-env key containing ${VAR} is treated literally (not expanded against the
+// broker host env), so it does not satisfy GOOGLE_CLOUD_PROJECT.
+func TestEnvGather_AuthCandidateKeyValue_UsesLiteralDirEnvKey(t *testing.T) {
+	unsetHostGCPEnv(t)
 	t.Setenv("DIR_ENV_KEY_NAME", "GOOGLE_CLOUD_PROJECT")
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
 		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
@@ -3826,8 +3787,8 @@ profiles:
 `)
 
 	body := `{
-		"name": "test-agent-dirkey-expand",
-		"id": "agent-uuid-dirkey-expand",
+		"name": "test-agent-dirkey-literal",
+		"id": "agent-uuid-dirkey-literal",
 		"gatherEnv": true,
 		"projectPath": "` + projectDir + `",
 		"config": {"template": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
@@ -3837,7 +3798,7 @@ profiles:
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201 (a dir-env key that expands to GOOGLE_CLOUD_PROJECT should satisfy it, matching buildAgentEnv's own key expansion), got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (dir-env keys are literal, not expanded against host env), got %d: %s", w.Code, w.Body.String())
 	}
 }

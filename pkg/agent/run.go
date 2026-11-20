@@ -554,7 +554,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// in the effective model (resolveEffectiveModel).
 	var hcModelAliases map[string]string
 	// The on-disk harness-config bundle env and env_template layers, captured
-	// for hook-env provenance and SCION_* policy enforcement.
+	// for per-start literal delivery, hook-env provenance, and SCION_* policy
+	// enforcement.
+	var rawHCBundleEnv map[string]string
 	var hcBundleEnv map[string]string
 	var hcEnvTemplate map[string]string
 	var hcEnvWarnings []string
@@ -562,10 +564,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if harnessConfigName != "" {
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
 			hcModelAliases = hcDir.Config.ModelAliases
-			var bundleWarns, tplWarns []string
-			hcBundleEnv, bundleWarns = sanitizeHarnessConfigEnv(hcDir.Config.Env, "bundle", true)
+			rawHCBundleEnv = hcDir.Config.Env
+			hcBundleEnv, _ = BundleEnvLayer(rawHCBundleEnv)
+			var tplWarns []string
 			hcEnvTemplate, tplWarns = sanitizeHarnessConfigEnv(hcDir.Config.EnvTemplate, "env_template", false)
-			hcEnvWarnings = append(hcEnvWarnings, bundleWarns...)
 			hcEnvWarnings = append(hcEnvWarnings, tplWarns...)
 			if hcDir.Config.Image != "" {
 				fileImage = hcDir.Config.Image
@@ -585,6 +587,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 
+	var rawSettingsHCEnv map[string]string
 	if settings != nil && harnessConfigName != "" {
 		// Settings are resolved against startProfile (see above).
 		settingsProfile := startProfile
@@ -598,6 +601,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 		hConfig, err := settings.ResolveHarnessConfig(settingsProfile, harnessConfigName)
 		if err == nil {
+			rawSettingsHCEnv = hConfig.Env
 			imageHConfig := hConfig
 			if imageProfile != settingsProfile {
 				if c, imgErr := settings.ResolveHarnessConfig(imageProfile, harnessConfigName); imgErr == nil {
@@ -659,6 +663,31 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if err := runtime.CheckVolumeSources(finalScionCfg.Volumes); err != nil {
 			return nil, err
 		}
+	}
+
+	// Agent's own env (inline/requester env): read from scion-agent.json on
+	// disk rather than from finalScionCfg, which on a first start is the
+	// config ProvisionAgent returned with bundle and settings-hc env merged
+	// in. This ensures first start and restart see the same persisted own env,
+	// bundle env is delivered solely from Start-time resolution, and
+	// scion-agent.json rewrites below never persist bundle or settings-hc env.
+	var ownEnvVars map[string]string
+	if finalScionCfg != nil {
+		ownEnvVars = maps.Clone(finalScionCfg.Env)
+	}
+	if persisted, ok := readPersistedAgentEnv(agentDir); ok {
+		ownEnvVars = persisted
+		if startInlineConfig != nil && len(startInlineConfig.Env) > 0 {
+			if ownEnvVars == nil {
+				ownEnvVars = make(map[string]string, len(startInlineConfig.Env))
+			}
+			for k, v := range startInlineConfig.Env {
+				ownEnvVars[k] = v
+			}
+		}
+	}
+	if finalScionCfg != nil {
+		finalScionCfg = withOwnEnv(finalScionCfg, ownEnvVars)
 	}
 
 	// Limits (ptone/scion#623): the agent's own max_turns, max_model_calls
@@ -1778,7 +1807,7 @@ authDone:
 			finalScionCfg = &api.ScionConfig{}
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withOwnEnv(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), ownEnvVars), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
@@ -1789,7 +1818,7 @@ authDone:
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
 		// Active corruption repair: clear the corrupted value and rewrite.
 		finalScionCfg.AuthSelectedType = ""
-		cfgData, marshalErr := json.MarshalIndent(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withOwnEnv(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), ownEnvVars), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
@@ -1864,7 +1893,8 @@ authDone:
 	suppressedFallbackKeys := sortedKeys(templateFallbackSuppressedKeys(authMeta))
 	envCfg, demotedTemplateKeys := demoteLegacyTemplateEnv(finalScionCfg, templateEnv)
 	warnings = append(warnings, suppressedDemotedKeyWarnings(demotedTemplateKeys, suppressedFallbackKeys)...)
-	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(envCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
+	envCfg, _ = demoteLegacyHarnessConfigEnv(envCfg, rawHCBundleEnv, hcBundleEnv, rawSettingsHCEnv, settingsHCEnv)
+	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv, envProvenance := buildAgentEnvWithBundle(rawHCBundleEnv, envCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
 	var inlineEnv map[string]string
 	if opts.InlineConfig != nil {
 		inlineEnv = opts.InlineConfig.Env
@@ -1877,6 +1907,7 @@ authDone:
 		envTemplateEnv:  hcEnvTemplate,
 		settingsHCEnv:   settingsHCEnv,
 		agentEnv:        agentEnv,
+		provenance:      envProvenance,
 		callerEnv:       callerEnv,
 		inlineEnv:       inlineEnv,
 		resolvedAuth:    resolvedAuth,
@@ -4094,7 +4125,41 @@ func containerName(projectName, agentName string) string {
 // when the key is absent from the merged env or has an empty value, i.e. when
 // no layer would otherwise put it in the container.
 func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaultEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
+	env, warnings, missingKeys, dropped, _ = buildAgentEnvWithBundle(nil, scionCfg, extraEnv, defaultEnv, brokerMode)
+	return env, warnings, missingKeys, dropped
+}
+
+// buildAgentEnvWithBundle merges the per-start literal harness-config bundle
+// env layer (rawBundleEnv, evaluated via BundleEnvLayer), the agent's own
+// persisted config layer (scionCfg.Env), extraEnv (opts.Env, which carries
+// hub/caller env plus settings-hc env for absent keys), and defaultEnv (hub
+// defaults fill) in ascending precedence:
+//
+//	bundleEnv < scionCfg.Env < extraEnv < defaultEnv (fills absent/empty only)
+//
+// It also returns per-key provenance identifying which layer supplied each
+// emitted key's final value.
+func buildAgentEnvWithBundle(rawBundleEnv map[string]string, scionCfg *api.ScionConfig, extraEnv map[string]string, defaultEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv, provenance map[string]envLayerSource) {
 	combined := make(map[string]string)
+	provenance = make(map[string]envLayerSource)
+
+	if len(rawBundleEnv) > 0 {
+		bundleEntries, bundleWarnings := BundleEnvLayer(rawBundleEnv)
+		warnings = append(warnings, bundleWarnings...)
+		for _, k := range sortedKeys(bundleEntries) {
+			v := bundleEntries[k]
+			if skipBrokerLocalEnvKey(brokerMode, k) {
+				dropped = append(dropped, droppedBrokerEnv{Key: k, Value: v, Layer: envLayerConfig})
+				continue
+			}
+			if brokerMode && k == "SCION_AUTH_TOKEN" {
+				warnings = append(warnings, ignoredAuthTokenWarning)
+				continue
+			}
+			combined[k] = v
+			provenance[k] = envSourceBundle
+		}
+	}
 
 	if scionCfg != nil && scionCfg.Env != nil {
 		for k, v := range scionCfg.Env {
@@ -4142,11 +4207,13 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 				continue
 			}
 			combined[expandedKey] = expandedValue
+			provenance[expandedKey] = envSourceConfig
 		}
 	}
 	// Add extraEnv
 	for k, v := range extraEnv {
 		combined[k] = v
+		provenance[k] = envSourceExtra
 	}
 	// Lowest tier: fill only what no layer above set. When k has a
 	// harness-publishable hint equivalent (e.g. SCION_AUTO_EXPOSE_PORTS ->
@@ -4161,23 +4228,26 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 		}
 		if combined[k] == "" {
 			combined[k] = v
+			provenance[k] = envSourceDefault
 		}
 	}
 
 	agentEnv := []string{}
 	for k, v := range combined {
 		if v == "" && skipBrokerLocalEnvKey(brokerMode, k) {
+			delete(provenance, k)
 			continue
 		}
 		if v == "" {
 			missingKeys = append(missingKeys, k)
 			warnings = append(warnings, fmt.Sprintf("Warning: Environment variable '%s' has no value and will be omitted.", k))
+			delete(provenance, k)
 			continue
 		}
 		agentEnv = append(agentEnv, fmt.Sprintf("%s=%s", k, v))
 	}
 	sortDroppedBrokerEnv(dropped)
-	return agentEnv, warnings, missingKeys, dropped
+	return agentEnv, warnings, missingKeys, dropped, provenance
 }
 
 // refuseHostEnvForAgent reports whether the host env value of name must never
