@@ -268,10 +268,26 @@ func TestServer_New_NoNFSConfig_NoReconcileLoop(t *testing.T) {
 func startTestBroker(t *testing.T, srv *Server) (context.CancelFunc, <-chan error) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
+	if srv.runtime != nil {
+		rt := srv.runtime
+		srv.resolveAuxiliaryRuntime = func(_, _, _ string) (runtime.Runtime, config.RuntimeBuildRecord) {
+			return rt, config.RuntimeBuildRecord{}
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- srv.Start(ctx) }()
-	t.Cleanup(cancel)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		done <- srv.Start(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+		}
+	})
 	return cancel, done
 }
 

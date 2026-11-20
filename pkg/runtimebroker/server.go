@@ -1609,6 +1609,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		_ = s.Shutdown(context.Background())
 		return err
 	}
 	s.listening.mark()

@@ -489,6 +489,14 @@ func newTestServerWithManager(t *testing.T, mgr agent.Manager) *Server {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
 
 	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+	// Prevent background auxiliary runtime discovery (started by Start /
+	// StartServices) from invoking real host runtime detection (e.g.
+	// `podman info` on Linux) for built-in profiles such as "remote"
+	// (ptone/scion#8570). Tests that exercise real profile resolution
+	// override resolveAuxiliaryRuntime explicitly.
+	srv.resolveAuxiliaryRuntime = func(_, _, _ string) (runtime.Runtime, config.RuntimeBuildRecord) {
+		return rt, config.RuntimeBuildRecord{}
+	}
 	endAsyncLaunchesAtCleanup(t, srv)
 	return srv
 }
