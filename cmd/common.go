@@ -234,6 +234,11 @@ func validateCreateAgentName(raw string) (string, error) {
 	}
 	for _, r := range raw {
 		if unicode.IsSpace(r) {
+			if hint := api.Slugify(raw); hint != "" {
+				if _, err := api.ValidateDisplayName(hint); err == nil {
+					return "", fmt.Errorf("invalid agent name %q: must not contain whitespace (use %q)", raw, hint)
+				}
+			}
 			return "", fmt.Errorf("invalid agent name %q: must not contain whitespace", raw)
 		}
 	}

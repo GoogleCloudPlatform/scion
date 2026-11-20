@@ -46,33 +46,44 @@ func TestValidateCreateAgentName(t *testing.T) {
 	}
 
 	invalid := []struct {
-		name    string
-		raw     string
-		wantSub string
+		name       string
+		raw        string
+		wantSub    string
+		wantHint   string
+		forbidHint bool
 	}{
-		{"empty", "", "must not be empty"},
-		{"contains space", "foo bar", "whitespace"},
-		{"leading space", " foo", "whitespace"},
-		{"trailing space", "foo ", "whitespace"},
-		{"contains tab", "foo\tbar", "whitespace"},
-		{"contains newline", "foo\nbar", "whitespace"},
-		{"too long", strings.Repeat("a", 64), "too long"},
-		{"unsupported slash", "foo/bar", "unsupported character"},
-		{"unsupported at", "foo@bar", "unsupported character"},
-		{"unsupported bang", "foo!", "unsupported character"},
-		{"empty slug from dashes", "---", "empty key"},
-		{"empty slug from dots", "...", "empty key"},
-		{"reserved admin", "admin", "reserved word"},
-		{"reserved scion mixed case", "Scion", "reserved word"},
-		{"reserved hub", "hub", "reserved word"},
-		{"reserved user", "user", "reserved word"},
-		{"reserved system", "system", "reserved word"},
+		{"empty", "", "must not be empty", "", false},
+		{"contains space", "foo bar", "whitespace", `(use "foo-bar")`, false},
+		{"display name with space", "My Agent", "whitespace", `(use "my-agent")`, false},
+		{"leading space", " foo", "whitespace", `(use "foo")`, false},
+		{"trailing space", "foo ", "whitespace", `(use "foo")`, false},
+		{"contains tab", "foo\tbar", "whitespace", `(use "foo-bar")`, false},
+		{"contains newline", "foo\nbar", "whitespace", `(use "foo-bar")`, false},
+		{"whitespace only", "   ", "whitespace", "", true},
+		{"whitespace around reserved word", " admin ", "whitespace", "", true},
+		{"too long", strings.Repeat("a", 64), "too long", "", false},
+		{"unsupported slash", "foo/bar", "unsupported character", "", false},
+		{"unsupported at", "foo@bar", "unsupported character", "", false},
+		{"unsupported bang", "foo!", "unsupported character", "", false},
+		{"empty slug from dashes", "---", "empty key", "", false},
+		{"empty slug from dots", "...", "empty key", "", false},
+		{"reserved admin", "admin", "reserved word", "", false},
+		{"reserved scion mixed case", "Scion", "reserved word", "", false},
+		{"reserved hub", "hub", "reserved word", "", false},
+		{"reserved user", "user", "reserved word", "", false},
+		{"reserved system", "system", "reserved word", "", false},
 	}
 	for _, tc := range invalid {
 		t.Run("invalid_"+tc.name, func(t *testing.T) {
 			_, err := validateCreateAgentName(tc.raw)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantSub)
+			if tc.wantHint != "" {
+				assert.Contains(t, err.Error(), tc.wantHint)
+			}
+			if tc.forbidHint {
+				assert.NotContains(t, err.Error(), "(use ")
+			}
 			assert.NotContains(t, err.Error(), "display name")
 			assert.NotContains(t, err.Error(), "space, ")
 		})
@@ -141,6 +152,7 @@ func TestStartAndCreate_InputValidationRejectsBeforeHub(t *testing.T) {
 			err := c.run("bad name")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "whitespace")
+			assert.Contains(t, err.Error(), `(use "bad-name")`)
 			var ue *usageError
 			assert.True(t, errors.As(err, &ue), "want usageError, got %T: %v", err, err)
 		})
