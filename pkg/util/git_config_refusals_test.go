@@ -190,7 +190,7 @@ func TestStartRefusalText(t *testing.T) {
 	}{
 		{"seeded, wrapped", fmt.Errorf("seed private git config for agent %q: %w", "a1", seeded), seeded.Error(), true},
 		{"list, wrapped", fmt.Errorf("start: %w", many), many.Error(), true},
-		{"host remote", fmt.Errorf("x: %w", newRepoConfigRefusedError("/srv/r", "", "core.editor", "v", "r", false, AudienceRemote)), "git in the project repository refused: repository config sets core.editor, which is r; remove it from the repository's .git/config (or config.worktree)", true},
+		{"host remote", fmt.Errorf("x: %w", newRepoConfigRefusedError("/srv/r", "", "core.editor", "v", "r", false, AudienceRemote)), "git in the project repository refused: repository config sets core.editor, which is r; remove it from the repository's .git/config (or config.worktree); set it in global git config (~/.gitconfig / git config --global) or pass git -c <key>=<val> per command", true},
 		{"host local names a dir", newRepoConfigRefusedError("/srv/r", "", "core.editor", "v", "r", false, AudienceLocal), "", false},
 		{"other", errors.New("boom"), "", false},
 	} {

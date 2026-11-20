@@ -99,13 +99,18 @@ func TestPrepareSeededGitConfig_RefusesCommandKeyWithoutValue(t *testing.T) {
 	_ = mustRefuseSeed(t, raw, "core.sshcommand", "seedmarker-q7v2")
 }
 
-// The host-side refusal keeps its own wording; only a seed refusal names the
-// per-layer remedy (and never a global config).
-func TestRepoConfigRefusedError_HostWordingUnchanged(t *testing.T) {
+// Host-side refusals point to global git config and per-command git -c; only
+// a seed refusal names the per-layer remedy (and never a global config).
+func TestRepoConfigRefusedError_HostWording(t *testing.T) {
 	host := (&RepoConfigRefusedError{Dir: "/r", Key: "core.sshcommand", Value: "v-marker", Reason: "x"}).Error()
-	want := "git in /r refused: repository config sets core.sshcommand, which is x; remove it from the repository's .git/config (or config.worktree)"
+	want := "git in /r refused: repository config sets core.sshcommand, which is x; remove it from the repository's .git/config (or config.worktree); set it in global git config (~/.gitconfig / git config --global) or pass git -c <key>=<val> per command"
 	if host != want {
 		t.Errorf("host wording = %q, want %q", host, want)
+	}
+	commondir := (&RepoConfigRefusedError{Dir: "/r", Key: ".git/commondir", Reason: "x"}).Error()
+	wantCommonDir := "git in /r refused: repository config sets .git/commondir, which is x; remove that file from the repository's .git directory"
+	if commondir != wantCommonDir {
+		t.Errorf("host commondir wording = %q, want %q", commondir, wantCommonDir)
 	}
 	seed := (&RepoConfigRefusedError{Key: "core.sshcommand", Value: "v-marker", Reason: "x", Seeded: true}).Error()
 	if strings.Contains(seed, "v-marker") || strings.Contains(host, "v-marker") {
@@ -798,11 +803,30 @@ func TestCheckRepoConfigPolicy_RefusalRedactsSubsectionUserinfo(t *testing.T) {
 			t.Errorf("refused key = %q, want credential.<redacted>.username", r.Key)
 		}
 	})
-	t.Run("plain key wording unchanged", func(t *testing.T) {
+	t.Run("plain key wording includes alternatives", func(t *testing.T) {
 		dir, r := hostRefusal(t, "[core]\n\tsshCommand = ssh -v\n")
-		want := "git in " + dir + " refused: repository config sets core.sshcommand, which is not on the linked-checkout allow-list; remove it from the repository's .git/config (or config.worktree)"
+		want := "git in " + dir + " refused: repository config sets core.sshcommand, which is not on the linked-checkout allow-list; remove it from the repository's .git/config (or config.worktree); set it in global git config (~/.gitconfig / git config --global) or pass git -c <key>=<val> per command"
 		if r.Error() != want {
 			t.Errorf("host wording = %q, want %q", r.Error(), want)
+		}
+	})
+	t.Run("command key refusal names key and suggests global config and git -c", func(t *testing.T) {
+		for _, tc := range []struct{ body, key string }{
+			{"[core]\n\teditor = vim\n", "core.editor"},
+			{"[alias]\n\tco = checkout\n", "alias.co"},
+		} {
+			t.Run(tc.key, func(t *testing.T) {
+				_, r := hostRefusal(t, tc.body)
+				if r.Key != tc.key {
+					t.Errorf("refused key = %q, want %q", r.Key, tc.key)
+				}
+				msg := r.Error()
+				for _, wantSub := range []string{tc.key, "global git config", "~/.gitconfig", "git config --global", "git -c <key>=<val>"} {
+					if !strings.Contains(msg, wantSub) {
+						t.Errorf("refusal %q missing %q", msg, wantSub)
+					}
+				}
+			})
 		}
 	})
 }
@@ -1083,14 +1107,15 @@ func TestRepoConfigRefusedError_FormatAndLogValue(t *testing.T) {
 }
 
 // The audience reaches the refusal through the constructor: AudienceRemote
-// names no directory; AudienceLocal keeps the host wording byte for byte.
+// names no directory; AudienceLocal names the repository directory. Both name
+// the offending key and point to global git config / git -c alternatives.
 func TestRepoConfigRefusedError_Audience(t *testing.T) {
 	local := newRepoConfigRefusedError("/r", "", "core.sshCommand", "v", "x", false, AudienceLocal).Error()
-	if want := "git in /r refused: repository config sets core.sshCommand, which is x; remove it from the repository's .git/config (or config.worktree)"; local != want {
+	if want := "git in /r refused: repository config sets core.sshCommand, which is x; remove it from the repository's .git/config (or config.worktree); set it in global git config (~/.gitconfig / git config --global) or pass git -c <key>=<val> per command"; local != want {
 		t.Errorf("local wording = %q, want %q", local, want)
 	}
 	remote := newRepoConfigRefusedError("/r", "", "core.sshCommand", "v", "x", false, AudienceRemote).Error()
-	if want := "git in the project repository refused: repository config sets core.sshCommand, which is x; remove it from the repository's .git/config (or config.worktree)"; remote != want {
+	if want := "git in the project repository refused: repository config sets core.sshCommand, which is x; remove it from the repository's .git/config (or config.worktree); set it in global git config (~/.gitconfig / git config --global) or pass git -c <key>=<val> per command"; remote != want {
 		t.Errorf("remote wording = %q, want %q", remote, want)
 	}
 }

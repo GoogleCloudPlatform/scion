@@ -316,9 +316,14 @@ the agent start or workspace pull rather than being ignored.
 - **Refused on both** (so an agent cannot make the broker's or your own git run a command): any
   `credential.*`, `url.*.insteadOf`, `http.*`, `gpg.*` program/signing-file keys, any `*.program`,
   `alias.*`, `core.sshCommand`/`editor`, a remote's `uploadpack`/`receivepack`/`proxy`, diff/merge
-  command or textconv drivers, non-standard `filter.*` drivers, and any key not on the list. If a
-  command is refused, the error names the key; remove it from the repository's `.git/config` (or
-  `config.worktree`).
+  command or textconv drivers, non-standard `filter.*` drivers, and any key not on the list.
+  Host-side git (including `git worktree add` and branch lookups during agent creation on a linked
+  checkout) always refuses command keys outside the four pinned keys above (`core.hooksPath`,
+  `core.fsmonitor`, `core.pager`, `submodule.recurse`). If a command is refused, the error names
+  the offending key; remove it from the repository's `.git/config` (or `config.worktree`), and
+  instead set personal git preferences in your global git config (`~/.gitconfig` /
+  `git config --global`) or pass them per command with `git -c <key>=<val>` (for example,
+  `git -c core.editor=vim ...`).
 - **Partial clones:** a partial clone made by current git (`git clone --filter=...`, which records
   `remote.<name>.promisor` and `remote.<name>.partialclonefilter`) is allowed; git then fetches
   missing objects from that remote's own URL. `extensions.partialClone` (written by older git) and

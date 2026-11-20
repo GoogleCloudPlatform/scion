@@ -145,7 +145,11 @@ func (e *RepoConfigRefusedError) Error() string {
 	if e.Audience == AudienceRemote {
 		where = "the project repository"
 	}
-	msg := fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", where, e.Key, reason)
+	remedy := "remove it from the repository's .git/config (or config.worktree); set it in global git config (~/.gitconfig / git config --global) or pass git -c <key>=<val> per command"
+	if strings.HasPrefix(e.Key, ".git/") {
+		remedy = "remove that file from the repository's .git directory"
+	}
+	msg := fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; %s", where, e.Key, reason, remedy)
 	if e.Layer != "" {
 		msg += " (in " + e.Layer + ")"
 	}
