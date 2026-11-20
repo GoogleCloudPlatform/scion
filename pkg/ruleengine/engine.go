@@ -70,6 +70,27 @@ type Input struct {
 // ErrBudgetExhausted is returned when an aggregate BudgetTracker has no remaining time.
 var ErrBudgetExhausted = errors.New("rule budget exhausted")
 
+// MaxEngineDeadlineMargin is the upper bound on the safety margin that
+// dialects such as System One subtract from Budget.MaxEvalTime so their own
+// internal deadline fires slightly before the engine's context deadline.
+// Keep in sync with pkg/systemone/runtime.engineDeadlineWithMargin (unification
+// tracked under ptone/scion#8033).
+const MaxEngineDeadlineMargin = 10 * time.Millisecond
+
+// EngineDeadlineMargin returns the deadline safety margin min(10ms, d/20) for
+// an evaluation timeout d (0 when d <= 0). Keep in sync with
+// pkg/systemone/runtime.engineDeadlineWithMargin (ptone/scion#8033).
+func EngineDeadlineMargin(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	margin := min(MaxEngineDeadlineMargin, d/20)
+	if margin <= 0 {
+		return 1
+	}
+	return margin
+}
+
 // BudgetTracker tracks aggregate evaluation wall-clock time across multiple
 // candidate rules (for example the 1s per-event trigger budget).
 type BudgetTracker struct {
@@ -526,6 +547,10 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 		effBudget.MaxEvalTime = evalTimeout
 	}
 
+	// Capture start before arming evalCtx so any scheduling delay between
+	// context.WithTimeoutCause and d.Evaluate is included in elapsed; both
+	// tracker charging and the trackerDeadline margin check below rely on
+	// elapsed >= evalTimeout whenever evalCtx expires.
 	start := time.Now()
 
 	evalCtx := ctx
@@ -551,7 +576,9 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 				Cause:  errors.Join(callerErr, err),
 			}
 		}
-		if boundFromTracker && (isTimeoutFailure(err) || (errors.Is(context.Cause(evalCtx), errTrackerTimeout) && isTimeoutOrCancelFailure(err))) {
+		trackerDeadline := errors.Is(context.Cause(evalCtx), errTrackerTimeout) ||
+			elapsed >= evalTimeout-EngineDeadlineMargin(evalTimeout)
+		if boundFromTracker && trackerDeadline && isTimeoutOrCancelFailure(err) {
 			budget.Tracker.Exhaust()
 			return Decision{}, fmt.Errorf("%w: %w", ErrBudgetExhausted, err)
 		}

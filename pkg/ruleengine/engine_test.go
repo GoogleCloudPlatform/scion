@@ -1439,29 +1439,56 @@ func TestDenyByDefault_DialectForEnforcesAllFiveReasons(t *testing.T) {
 	}
 }
 
-type earlyTimeoutDialect struct {
+type budgetProbeDialect struct {
 	name        string
 	maxEvalTime time.Duration
+	waitCtxDone bool
 	evalCalls   atomic.Int32
 }
 
-func (d *earlyTimeoutDialect) Name() string { return d.name }
-func (d *earlyTimeoutDialect) Declares() ruleengine.Capabilities {
+func (d *budgetProbeDialect) Name() string { return d.name }
+func (d *budgetProbeDialect) Declares() ruleengine.Capabilities {
 	return ruleengine.Capabilities{
 		MaxEvalTime: d.maxEvalTime,
 		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
 	}
 }
-func (d *earlyTimeoutDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+func (d *budgetProbeDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
 	return ruleengine.NewCompiled(env.Consumer, d.name, kind, rule), nil
 }
-func (d *earlyTimeoutDialect) Evaluate(_ context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+func (d *budgetProbeDialect) Evaluate(ctx context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
 	d.evalCalls.Add(1)
-	// Return a timeout immediately (no sleep) to deterministically simulate a
-	// scheduling gap where elapsed < tracker.Remaining() when boundFromTracker trips.
+	if d.waitCtxDone {
+		<-ctx.Done()
+		return ruleengine.Decision{}, &ruleengine.FailedError{
+			Reason: celengine.ReasonTimeout,
+			Cause:  ctx.Err(),
+		}
+	}
+	// Immediate per-rule timeout well before the shared tracker deadline.
 	return ruleengine.Decision{}, &ruleengine.FailedError{
 		Reason: celengine.ReasonTimeout,
 		Cause:  context.DeadlineExceeded,
+	}
+}
+
+func TestEngineDeadlineMargin(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want time.Duration
+	}{
+		{-5 * time.Millisecond, 0},
+		{0, 0},
+		{time.Nanosecond, time.Nanosecond},
+		{10 * time.Nanosecond, time.Nanosecond},
+		{80 * time.Millisecond, 4 * time.Millisecond},
+		{200 * time.Millisecond, 10 * time.Millisecond},
+		{time.Second, 10 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		if got := ruleengine.EngineDeadlineMargin(tc.in); got != tc.want {
+			t.Errorf("EngineDeadlineMargin(%s) = %s, want %s", tc.in, got, tc.want)
+		}
 	}
 }
 
@@ -1512,53 +1539,87 @@ func TestBudgetTracker_Exhaust(t *testing.T) {
 
 func TestEvaluate_BoundFromTrackerTimeoutExhaustsTracker(t *testing.T) {
 	eng := ruleengine.NewEngine()
-	dialect := &earlyTimeoutDialect{name: "early_timeout", maxEvalTime: 100 * time.Millisecond}
-	if err := eng.Register(dialect); err != nil {
-		t.Fatalf("Register: %v", err)
+	waitDialect := &budgetProbeDialect{name: "wait_deadline", maxEvalTime: 100 * time.Millisecond, waitCtxDone: true}
+	fastTimeoutDialect := &budgetProbeDialect{name: "fast_timeout", maxEvalTime: 100 * time.Millisecond, waitCtxDone: false}
+	if err := eng.Register(waitDialect); err != nil {
+		t.Fatalf("Register wait_deadline: %v", err)
 	}
-	if err := eng.AllowConsumerDialects("triggers", ruleengine.Grant("early_timeout")); err != nil {
+	if err := eng.Register(fastTimeoutDialect); err != nil {
+		t.Fatalf("Register fast_timeout: %v", err)
+	}
+	if err := eng.AllowConsumerDialects(
+		"triggers",
+		ruleengine.Grant("wait_deadline"),
+		ruleengine.Grant("fast_timeout"),
+	); err != nil {
 		t.Fatalf("AllowConsumerDialects: %v", err)
 	}
-	comp, err := eng.Compile(context.Background(), "early_timeout", "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+	waitComp, err := eng.Compile(context.Background(), "wait_deadline", "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: "triggers",
 		Name:     "test",
 	})
 	if err != nil {
-		t.Fatalf("Compile: %v", err)
+		t.Fatalf("Compile wait_deadline: %v", err)
+	}
+	fastComp, err := eng.Compile(context.Background(), "fast_timeout", "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "triggers",
+		Name:     "test",
+	})
+	if err != nil {
+		t.Fatalf("Compile fast_timeout: %v", err)
 	}
 
-	// 1. Tracker limit (50ms) < dialect MaxEvalTime (100ms) => boundFromTracker is true.
-	// Even though the stub returns immediately (elapsed << 50ms), Evaluate returns
-	// ErrBudgetExhausted and MUST exhaust the tracker so subsequent calls short-circuit.
-	tracker := ruleengine.NewBudgetTracker(50 * time.Millisecond)
-	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
+	// (a) Tracker-deadline case: small tracker (10ms < 100ms dialect MaxEvalTime)
+	// cuts short a dialect blocking on <-ctx.Done(). Evaluate returns
+	// ErrBudgetExhausted wrapping DeadlineExceeded, exhausts the tracker, and
+	// short-circuits subsequent Evaluate calls without invoking the dialect.
+	tracker := ruleengine.NewBudgetTracker(10 * time.Millisecond)
+	_, err = eng.Evaluate(context.Background(), waitComp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
 	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
-		t.Fatalf("boundFromTracker timeout err = %v, want ErrBudgetExhausted", err)
+		t.Fatalf("tracker-deadline err = %v, want ErrBudgetExhausted", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("tracker-deadline err = %v, want errors.Is(context.DeadlineExceeded)", err)
 	}
 	if !tracker.Exhausted() || tracker.Remaining() != 0 {
-		t.Fatalf("tracker not exhausted after ErrBudgetExhausted: Exhausted=%v Remaining=%s", tracker.Exhausted(), tracker.Remaining())
+		t.Fatalf("tracker not exhausted after tracker deadline: Exhausted=%v Remaining=%s", tracker.Exhausted(), tracker.Remaining())
 	}
-	if got := dialect.evalCalls.Load(); got != 1 {
+	if got := waitDialect.evalCalls.Load(); got != 1 {
 		t.Fatalf("evalCalls = %d, want 1", got)
 	}
 
-	// Subsequent call on the same tracker must short-circuit without invoking the dialect.
-	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
+	_, err = eng.Evaluate(context.Background(), waitComp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
 	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
 		t.Fatalf("subsequent Evaluate err = %v, want ErrBudgetExhausted", err)
 	}
-	if got := dialect.evalCalls.Load(); got != 1 {
+	if got := waitDialect.evalCalls.Load(); got != 1 {
 		t.Fatalf("dialect invoked after budget exhaustion: evalCalls = %d, want 1", got)
 	}
 
-	// 2. Tracker limit (200ms) > dialect MaxEvalTime (100ms) => boundFromTracker is false.
-	// A per-rule dialect timeout must NOT exhaust the aggregate tracker.
+	// (b) Shorter per-rule timeout while boundFromTracker is true (50ms tracker < 100ms
+	// dialect MaxEvalTime, immediate ReasonTimeout with budget remaining): must return
+	// per-rule FailedError{timeout}, NOT ErrBudgetExhausted, and must NOT exhaust tracker.
+	perRuleTracker := ruleengine.NewBudgetTracker(50 * time.Millisecond)
+	_, err = eng.Evaluate(context.Background(), fastComp, ruleengine.Input{}, ruleengine.Budget{Tracker: perRuleTracker})
+	if errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("shorter per-rule timeout unexpectedly returned ErrBudgetExhausted: %v", err)
+	}
+	var failedErr *ruleengine.FailedError
+	if !errors.As(err, &failedErr) || failedErr.Reason != celengine.ReasonTimeout {
+		t.Fatalf("shorter per-rule timeout err = %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonTimeout)
+	}
+	if perRuleTracker.Exhausted() || perRuleTracker.Remaining() <= 0 {
+		t.Fatalf("shorter per-rule timeout unexpectedly exhausted tracker: Exhausted=%v Remaining=%s", perRuleTracker.Exhausted(), perRuleTracker.Remaining())
+	}
+
+	// (c) Non-boundFromTracker case (200ms tracker > 100ms dialect MaxEvalTime):
+	// per-rule dialect timeout must NOT exhaust the aggregate tracker.
 	wideTracker := ruleengine.NewBudgetTracker(200 * time.Millisecond)
-	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: wideTracker})
+	_, err = eng.Evaluate(context.Background(), fastComp, ruleengine.Input{}, ruleengine.Budget{Tracker: wideTracker})
 	if errors.Is(err, ruleengine.ErrBudgetExhausted) {
 		t.Fatalf("non-boundFromTracker timeout unexpectedly returned ErrBudgetExhausted: %v", err)
 	}
-	var failedErr *ruleengine.FailedError
+	failedErr = nil
 	if !errors.As(err, &failedErr) || failedErr.Reason != celengine.ReasonTimeout {
 		t.Fatalf("non-boundFromTracker timeout err = %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonTimeout)
 	}
