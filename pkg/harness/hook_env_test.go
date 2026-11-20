@@ -26,6 +26,11 @@ func TestHarnessGetEnv_EnforcesScionRefusalAndLegacyHintRewrite(t *testing.T) {
 		Harness: "custom",
 		EnvTemplate: map[string]string{
 			"ORDINARY":                          "home={{ .AgentHome }}",
+			"OPENSSL_CONF":                      "/workspace/o.cnf",
+			"PATH=/opt/custom":                  ":/usr/bin:/bin",
+			"BAD,KEY":                           "comma",
+			" SPACED ":                          "spaces",
+			"NUL\x00KEY":                        "nul",
 			"SCION_HOOK_WITHHELD_ENV":           "FORGED",
 			"SCION_EXTRA_PATH":                  "/evil",
 			"SCION_AGENT_NAME":                  "spoofed-name",
@@ -57,6 +62,9 @@ func TestHarnessGetEnv_EnforcesScionRefusalAndLegacyHintRewrite(t *testing.T) {
 			if tc.env["ORDINARY"] != "home=/home/scion" {
 				t.Errorf("ORDINARY = %q, want %q", tc.env["ORDINARY"], "home=/home/scion")
 			}
+			if tc.env["OPENSSL_CONF"] != "/workspace/o.cnf" {
+				t.Errorf("OPENSSL_CONF = %q, want %q", tc.env["OPENSSL_CONF"], "/workspace/o.cnf")
+			}
 			if tc.env[envpolicy.HintLivenessRootDepth] != "2" {
 				t.Errorf("%s = %q, want %q", envpolicy.HintLivenessRootDepth, tc.env[envpolicy.HintLivenessRootDepth], "2")
 			}
@@ -64,6 +72,11 @@ func TestHarnessGetEnv_EnforcesScionRefusalAndLegacyHintRewrite(t *testing.T) {
 				t.Errorf("%s = %q, want explicit %q preserved", envpolicy.HintAutoExposeMode, tc.env[envpolicy.HintAutoExposeMode], "allowlist")
 			}
 			for _, refused := range []string{
+				"PATH=/opt/custom",
+				"PATH",
+				"BAD,KEY",
+				" SPACED ",
+				"NUL\x00KEY",
 				"SCION_HOOK_WITHHELD_ENV",
 				"SCION_EXTRA_PATH",
 				"SCION_LIVENESS_HARNESS_ROOT_DEPTH",

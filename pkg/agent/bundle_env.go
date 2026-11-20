@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
@@ -60,7 +59,7 @@ func BundleEnvLayer(raw map[string]string) (entries map[string]string, warnings 
 	out := make(map[string]string, len(raw))
 	for _, k := range keys {
 		v := raw[k]
-		if k == "" || strings.ContainsAny(k, "=,") || strings.TrimSpace(k) != k {
+		if !envpolicy.ValidEnvName(k) {
 			warnings = append(warnings, fmt.Sprintf(
 				"Warning: harness-config bundle env key %q is invalid and was ignored.",
 				k,

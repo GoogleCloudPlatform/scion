@@ -234,9 +234,40 @@ func TestWithheldMarker_FormatAndParse(t *testing.T) {
 		})
 	}
 
-	// Extra parsing edge cases: stray commas and spaces.
+	// Extra parsing edge cases: stray commas, spaces, and entries containing '='.
 	if got := ParseWithheldMarker(" , B , A , B , "); !slices.Equal(got, []string{"A", "B"}) {
 		t.Errorf("ParseWithheldMarker stray commas = %v, want [A B]", got)
+	}
+	if got := ParseWithheldMarker("PATH=/opt/custom,FOO=bar=baz,PLAIN,=ignored"); !slices.Equal(got, []string{"FOO", "PATH", "PLAIN"}) {
+		t.Errorf("ParseWithheldMarker equals cut = %v, want [FOO PATH PLAIN]", got)
+	}
+	set := NewSet(ParseWithheldMarker("PATH=/opt/custom")...)
+	if !set.Withholds("PATH") {
+		t.Errorf("Set from ParseWithheldMarker(\"PATH=/opt/custom\") does not withhold PATH")
+	}
+}
+
+func TestValidEnvName(t *testing.T) {
+	cases := []struct {
+		name string
+		key  string
+		want bool
+	}{
+		{"plain", "PATH", true},
+		{"underscores and digits", "MY_VAR_2", true},
+		{"empty", "", false},
+		{"contains equals", "PATH=/opt/custom", false},
+		{"contains comma", "A,B", false},
+		{"leading space", " PATH", false},
+		{"trailing space", "PATH ", false},
+		{"contains nul", "FOO\x00BAR", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ValidEnvName(tc.key); got != tc.want {
+				t.Errorf("ValidEnvName(%q) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
 	}
 }
 

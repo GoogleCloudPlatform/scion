@@ -289,8 +289,17 @@ func FormatWithheldMarker(keys []string) string {
 	return strings.Join(cleaned, ",")
 }
 
+// ValidEnvName reports whether name is a single, unambiguous environment
+// variable name (non-empty, no surrounding whitespace, and containing no '=',
+// ',', or NUL byte).
+func ValidEnvName(name string) bool {
+	return name != "" && strings.TrimSpace(name) == name &&
+		!strings.ContainsAny(name, "=,\x00")
+}
+
 // ParseWithheldMarker decodes a comma-separated HookWithheldEnvVar value into a
-// sorted, deduplicated slice of non-empty names.
+// sorted, deduplicated slice of non-empty names. If an entry contains '=', only
+// the name portion before the first '=' is kept.
 func ParseWithheldMarker(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -298,6 +307,9 @@ func ParseWithheldMarker(raw string) []string {
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
+		if k, _, ok := strings.Cut(p, "="); ok {
+			p = k
+		}
 		p = strings.TrimSpace(p)
 		if p != "" {
 			out = append(out, p)

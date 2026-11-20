@@ -312,6 +312,9 @@ func buildHarnessTemplateEnv(envTemplate map[string]string, agentName, agentHome
 		"SCION_AGENT_NAME": agentName,
 	}
 	for k, v := range envTemplate {
+		if !envpolicy.ValidEnvName(k) {
+			continue
+		}
 		effectiveKey, disp := envpolicy.ClassifyHarnessConfigEnvKey(k)
 		switch disp {
 		case envpolicy.HarnessConfigKeyRefuse:
