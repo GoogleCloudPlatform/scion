@@ -571,6 +571,9 @@ func TestPatchAgent_ConfigEnvTZIgnored(t *testing.T) {
 			srv, s, agent := tzPatchServer(t, string(state.PhaseCreated), func(a *store.Agent) {
 				a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
 			})
+			// The strip is the same in both modes; a hosted hub also refuses
+			// an empty env value in agent config outright (hostedguard).
+			srv.workstation = true
 			code, resp := patchAgentTZ(t, srv, agent.ID, map[string]interface{}{
 				"config": map[string]interface{}{"env": map[string]interface{}{"TZ": tc.value, "FOO": "bar"}},
 			})

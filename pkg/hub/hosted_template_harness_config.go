@@ -34,10 +34,12 @@ import (
 // (commitTemplateFiles: file writes, finalize, import, reimport and clone),
 // by the file APIs before they write, by import before anything is
 // persisted, and again at dispatch for the template the agent uses. A path
-// that spells harness-configs or config.yaml in another letter case is
-// refused: a Runtime Broker on a case-insensitive filesystem could load it
-// as the bundled harness config, which the Hub checks only under its exact
-// name. Global templates are operator content and are not checked.
+// a Runtime Broker's filesystem could read under another name (a
+// non-ASCII, trailing-dot or "~" segment, or a case variant of
+// harness-configs or config.yaml) is refused (hostedTemplatePathRefusal):
+// the broker could load it as a bundled harness config, which the Hub
+// checks only under its exact name. Global templates are operator content
+// and are not checked.
 
 const bundledHarnessConfigsDir = "harness-configs"
 
@@ -45,15 +47,6 @@ const bundledHarnessConfigsDir = "harness-configs"
 // harness configs checked: project scope, on a hosted hub.
 func (s *Server) checksHostedTemplate(scope string) bool {
 	return !s.workstation && scope == store.TemplateScopeProject
-}
-
-// foldedBundledHarnessConfigPath reports whether p names a bundled harness
-// config's config.yaml in any letter case of harness-configs and
-// config.yaml.
-func foldedBundledHarnessConfigPath(p string) bool {
-	parts := strings.Split(p, "/")
-	return len(parts) == 3 && parts[1] != "" &&
-		strings.EqualFold(parts[0], bundledHarnessConfigsDir) && strings.EqualFold(parts[2], harnessConfigYAMLPath)
 }
 
 // hostedTemplateError wraps the refusal of a bundled harness config with the
@@ -66,12 +59,31 @@ func hostedTemplateError(tmplName string, err error) error {
 	return err
 }
 
-// hostedTemplatePathRefusal refuses p when it names a bundled harness
-// config's config.yaml in another letter case.
+// hostedTemplatePathRefusal refuses the template file path p when a
+// Runtime Broker's filesystem could read it under another name than the Hub
+// checks, in particular as a bundled harness config: its top-level segment,
+// and under harness-configs/ the harness-config name and the entry in that
+// harness config's root, must pass hostedRootFileNameRefusal (plain ASCII,
+// no trailing dot or space, no "~", config.yaml only in lower case), and
+// harness-configs must be spelled in lower case. Deeper segments are not
+// restricted, as for a project-scope harness config.
 func hostedTemplatePathRefusal(tmplName, p string) error {
-	if foldedBundledHarnessConfigPath(p) {
-		if _, exact := bundledHarnessConfigName(p); !exact {
-			return &hostedHarnessConfigError{err: fmt.Errorf("template %q: file %q: harness-configs/<name>/config.yaml must be spelled in lower case on a hosted server", tmplName, p)}
+	refuse := func(seg, reason string) error {
+		return &hostedHarnessConfigError{err: fmt.Errorf("template %q: file %q: %q: %s on a hosted server", tmplName, p, seg, reason)}
+	}
+	parts := strings.Split(p, "/")
+	if reason := hostedRootFileNameRefusal(parts[0]); reason != "" {
+		return refuse(parts[0], reason)
+	}
+	if parts[0] != bundledHarnessConfigsDir {
+		if strings.EqualFold(parts[0], bundledHarnessConfigsDir) {
+			return refuse(parts[0], "harness-configs must be spelled in lower case")
+		}
+		return nil
+	}
+	for _, seg := range parts[1:min(3, len(parts))] {
+		if reason := hostedRootFileNameRefusal(seg); reason != "" {
+			return refuse(seg, reason)
 		}
 	}
 	return nil
@@ -155,15 +167,20 @@ func (s *Server) checkHostedTemplateDirs(dirs []resourceDir, scope string) error
 	return nil
 }
 
-// checkLocalTemplateHarnessConfigs checks the bundled harness configs of the
-// local template directory rd.
+// checkLocalTemplateHarnessConfigs checks the local template directory rd:
+// its top-level names and the entries of harness-configs/ and of each
+// bundled harness config's root (hostedTemplatePathRefusal), and each
+// bundled config.yaml.
 func checkLocalTemplateHarnessConfigs(rd resourceDir) error {
 	top, err := os.ReadDir(rd.path)
 	if err != nil {
 		return nil
 	}
 	for _, d := range top {
-		if !d.IsDir() || !strings.EqualFold(d.Name(), bundledHarnessConfigsDir) {
+		if err := hostedTemplatePathRefusal(rd.name, d.Name()); err != nil {
+			return err
+		}
+		if !d.IsDir() || d.Name() != bundledHarnessConfigsDir {
 			continue
 		}
 		hcs, err := os.ReadDir(filepath.Join(rd.path, d.Name()))
@@ -171,6 +188,9 @@ func checkLocalTemplateHarnessConfigs(rd resourceDir) error {
 			continue
 		}
 		for _, hc := range hcs {
+			if err := hostedTemplatePathRefusal(rd.name, d.Name()+"/"+hc.Name()); err != nil {
+				return err
+			}
 			if !hc.IsDir() {
 				continue
 			}
@@ -180,8 +200,7 @@ func checkLocalTemplateHarnessConfigs(rd resourceDir) error {
 				continue
 			}
 			for _, f := range files {
-				p := d.Name() + "/" + hc.Name() + "/" + f.Name()
-				if err := hostedTemplatePathRefusal(rd.name, p); err != nil {
+				if err := hostedTemplatePathRefusal(rd.name, d.Name()+"/"+hc.Name()+"/"+f.Name()); err != nil {
 					return err
 				}
 				if f.Name() != harnessConfigYAMLPath {

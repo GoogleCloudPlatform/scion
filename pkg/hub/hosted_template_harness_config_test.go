@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,7 +74,11 @@ func putTemplateFile(t *testing.T, srv *Server, tmplID, p, content string) *http
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"content": content})
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/"+tmplID+"/files/"+p, strings.NewReader(string(body)))
+	segs := strings.Split(p, "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/"+tmplID+"/files/"+strings.Join(segs, "/"), strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	rec := httptest.NewRecorder()
@@ -106,10 +111,19 @@ func TestTemplateFileWrite_HostedProjectBundledHarnessConfig(t *testing.T) {
 		path, content string
 		want          []string
 	}{
-		"host volume":        {hostedTplHCPath, hostedHCVolYAML, []string{`volume "/hc-data"`, `harness config "hc-tpl"`}},
-		"host env reference": {hostedTplHCPath, hostedTplHCEnvYAML, []string{`env "K"`, `harness config "hc-tpl"`}},
-		"folded directory":   {"Harness-Configs/hc-tpl/config.yaml", hostedHCOKYAML, []string{"must be spelled in lower case"}},
-		"folded config.yaml": {"harness-configs/hc-tpl/Config.YAML", hostedHCOKYAML, []string{"must be spelled in lower case"}},
+		"host volume":              {hostedTplHCPath, hostedHCVolYAML, []string{`volume "/hc-data"`, `harness config "hc-tpl"`}},
+		"host env reference":       {hostedTplHCPath, hostedTplHCEnvYAML, []string{`env "K"`, `harness config "hc-tpl"`}},
+		"case variant directory":   {"Harness-Configs/hc-tpl/config.yaml", hostedHCOKYAML, []string{"harness-configs must be spelled in lower case"}},
+		"case variant config.yaml": {"harness-configs/hc-tpl/Config.YAML", hostedHCOKYAML, []string{"config.yaml must be spelled in lower case"}},
+		"zero-width directory":     {"harness-configs\u200b/hc-tpl/config.yaml", hostedHCOKYAML, []string{"plain ASCII"}},
+		"ligature config.yaml":     {"harness-configs/hc-tpl/con\ufb01g.yaml", hostedHCOKYAML, []string{"plain ASCII"}},
+		"non-ASCII name":           {"harness-configs/h\u00e9/config.yaml", hostedHCOKYAML, []string{"plain ASCII"}},
+		"trailing dot directory":   {"harness-configs./hc-tpl/config.yaml", hostedHCOKYAML, []string{"end with a dot or a space"}},
+		"trailing dot config.yaml": {"harness-configs/hc-tpl/config.yaml.", hostedHCOKYAML, []string{"end with a dot or a space"}},
+		"trailing space name":      {"harness-configs/hc-tpl /config.yaml", hostedHCOKYAML, []string{"end with a dot or a space"}},
+		"short name directory":     {"HARNES~1/hc-tpl/config.yaml", hostedHCOKYAML, []string{`may not contain "~"`}},
+		"short name config.yaml":   {"harness-configs/hc-tpl/CONFIG~1.YAM", hostedHCOKYAML, []string{`may not contain "~"`}},
+		"non-ASCII top-level file": {"caf\u00e9.md", "# notes", []string{"plain ASCII"}},
 	} {
 		t.Run(name+" refused", func(t *testing.T) {
 			srv, s, stor := testTemplateFileServer(t)
@@ -133,6 +147,9 @@ func TestTemplateFileWrite_HostedProjectBundledHarnessConfig(t *testing.T) {
 		"workstation hub":         {store.TemplateScopeProject, true, hostedTplHCPath, hostedHCVolYAML},
 		"clean bundled config":    {store.TemplateScopeProject, false, hostedTplHCPath, hostedHCOKYAML},
 		"outside harness-configs": {store.TemplateScopeProject, false, "home/config.yaml", hostedHCVolYAML},
+		"deep non-ASCII path":     {store.TemplateScopeProject, false, "harness-configs/hc-tpl/home/caf\u00e9~.txt", "x"},
+		"deep path outside":       {store.TemplateScopeProject, false, "home/caf\u00e9.txt", "x"},
+		"global non-ASCII":        {store.TemplateScopeGlobal, false, "harness-configs\u200b/hc-tpl/config.yaml", hostedHCVolYAML},
 	} {
 		t.Run(name+" accepted", func(t *testing.T) {
 			srv, s, stor := testTemplateFileServer(t)
@@ -280,7 +297,7 @@ func TestDispatch_HostedTemplateHarnessConfigPrecheck(t *testing.T) {
 			assert.False(t, op.called(m), "no broker call")
 		})
 	}
-	t.Run("folded path refuses", func(t *testing.T) {
+	t.Run("case variant path refuses", func(t *testing.T) {
 		srv, s, stor := testTemplateFileServer(t)
 		tmpl := createHostedTestTemplate(t, s, stor, store.TemplateScopeProject, map[string]string{"harness-configs/hc/CONFIG.yaml": hostedHCOKYAML})
 		d, m, a := hostedTemplateDispatcher(t, srv, s, tmpl, true)
