@@ -86,8 +86,13 @@ func assertHostedHCRefusalBody(t *testing.T, rec *httptest.ResponseRecorder, nam
 
 func putHarnessConfigYAML(t *testing.T, srv *Server, hcID, yaml string) *httptest.ResponseRecorder {
 	t.Helper()
-	body := `{"content": "` + strings.ReplaceAll(yaml, "\n", `\n`) + `"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/harness-configs/"+hcID+"/files/config.yaml", strings.NewReader(body))
+	return putHarnessConfigFile(t, srv, hcID, "config.yaml", yaml)
+}
+
+func putHarnessConfigFile(t *testing.T, srv *Server, hcID, filePath, content string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"content": "` + strings.ReplaceAll(content, "\n", `\n`) + `"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/harness-configs/"+hcID+"/files/"+filePath, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+testDevToken)
 	rec := httptest.NewRecorder()
@@ -111,6 +116,29 @@ func TestHarnessConfigFileWrite_HostedProjectScope(t *testing.T) {
 			rec := putHarnessConfigYAML(t, srv, hc.ID, yaml)
 			assertHostedHCRefusalBody(t, rec, "member-hc")
 			assert.Len(t, stor.content, objects, "no object written for refused content")
+			got, err := s.GetHarnessConfig(ctx, hc.ID)
+			require.NoError(t, err)
+			assert.Equal(t, hc.ContentHash, got.ContentHash, "row unchanged")
+		})
+	}
+	// A file named config.yaml in another letter case is refused on a
+	// hosted hub (a broker on a case-insensitive filesystem could read it
+	// as config.yaml), and accepted on a workstation hub.
+	for _, workstation := range []bool{false, true} {
+		t.Run(map[bool]string{false: "hosted", true: "workstation"}[workstation]+" CONFIG.YAML", func(t *testing.T) {
+			srv, s, _ := testHarnessConfigFileServer(t)
+			hc := newHostedTestHC(t, srv, s, "hc-case", "case-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
+			srv.workstation = workstation
+			rec := putHarnessConfigFile(t, srv, hc.ID, "CONFIG.YAML", hostedHCVolYAML)
+			if workstation {
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				return
+			}
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			code, msg := decodeHostedRefusal(t, rec)
+			assert.Equal(t, hostedguard.ErrorCode, code)
+			assert.Contains(t, msg, `file "CONFIG.YAML" in harness config "case-hc"`)
+			assert.NotContains(t, rec.Body.String(), "member-secret-src")
 			got, err := s.GetHarnessConfig(ctx, hc.ID)
 			require.NoError(t, err)
 			assert.Equal(t, hc.ContentHash, got.ContentHash, "row unchanged")
@@ -252,6 +280,22 @@ func TestHarnessConfigImport_HostedProjectScope(t *testing.T) {
 	assert.NoError(t, check(dirs, store.HarnessConfigScopeProject), "workstation hub")
 }
 
+// addHostedTestHCFile adds file p with content to hc through the commit
+// path with the check off (a row stored before the check existed).
+func addHostedTestHCFile(t *testing.T, srv *Server, hc *store.HarnessConfig, p, content string) {
+	t.Helper()
+	ctx := context.Background()
+	data := []byte(content)
+	hash, blobPath, err := srv.writeHarnessConfigFileBlob(ctx, srv.GetStorage(), hc, data)
+	require.NoError(t, err)
+	was := srv.workstation
+	srv.workstation = true
+	defer func() { srv.workstation = was }()
+	next := upsertTemplateFile(hc.Files, store.TemplateFile{Path: p, Size: int64(len(data)), Hash: hash})
+	require.NoError(t, srv.commitHarnessConfigFiles(ctx, hc, next,
+		harnessConfigCommitOpts{content: map[string][]byte{p: data}, written: map[string]bool{blobPath: true}}))
+}
+
 // hostedHCDispatcher is a hosted (or workstation) dispatcher wired like
 // CreateAuthenticatedDispatcher, over srv's store, with one stored agent
 // dispatched with harness config hc and no inline volumes.
@@ -305,6 +349,28 @@ func TestDispatch_HostedHarnessConfigPrecheck(t *testing.T) {
 			assert.False(t, op.called(m), "no broker call")
 		})
 	}
+	t.Run("start refuses a stored CONFIG.YAML", func(t *testing.T) {
+		srv, s, _ := testHarnessConfigFileServer(t)
+		hc := newHostedTestHC(t, srv, s, "hc-case-stored", "case-stored-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
+		addHostedTestHCFile(t, srv, hc, "CONFIG.YAML", hostedHCVolYAML)
+		d, m, a := hostedHCDispatcher(t, srv, s, hc, true)
+		err := d.DispatchAgentStart(ctx, a, "task", false)
+		var refusal *RuntimeTargetRefusal
+		require.True(t, errors.As(err, &refusal), "refused with a typed refusal: %v", err)
+		assert.Equal(t, hostedguard.ErrorCode, refusal.Code)
+		assert.Contains(t, refusal.Message, `file "CONFIG.YAML" in harness config "case-stored-hc"`)
+		assert.False(t, m.startCalled, "no broker call")
+	})
+	t.Run("workstation hub dispatches a stored CONFIG.YAML", func(t *testing.T) {
+		srv, s, _ := testHarnessConfigFileServer(t)
+		hc := newHostedTestHC(t, srv, s, "hc-case-ws", "case-ws-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
+		addHostedTestHCFile(t, srv, hc, "CONFIG.YAML", hostedHCVolYAML)
+		d, m, a := hostedHCDispatcher(t, srv, s, hc, false)
+		err := d.DispatchAgentStart(ctx, a, "task", false)
+		var refusal *RuntimeTargetRefusal
+		assert.False(t, errors.As(err, &refusal) && refusal.Code == hostedguard.ErrorCode, "no hosted refusal: %v", err)
+		assert.True(t, m.startCalled, "broker called")
+	})
 	for name, tc := range map[string]struct {
 		scope  string
 		hosted bool

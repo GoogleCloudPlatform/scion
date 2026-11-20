@@ -81,6 +81,21 @@ func hostedHarnessConfigYAMLRefusal(name string, data []byte, present bool, runt
 	return nil
 }
 
+// hostedHarnessConfigManifestRefusal refuses a member-written harness
+// config whose manifest holds a file named config.yaml in another letter
+// case: a Runtime Broker on a case-insensitive filesystem could read it as
+// the harness config's config.yaml, which the Hub checks only under its
+// exact name.
+func hostedHarnessConfigManifestRefusal(name string, files []store.TemplateFile) error {
+	for _, f := range files {
+		if f.Path != harnessConfigYAMLPath && strings.EqualFold(f.Path, harnessConfigYAMLPath) {
+			return &hostedHarnessConfigError{err: fmt.Errorf("file %q in %s: config.yaml must be spelled in lower case on a hosted server",
+				f.Path, hostedguard.Origin{Kind: hostedguard.OriginHarnessConfig, Name: name})}
+		}
+	}
+	return nil
+}
+
 // writeHostedHarnessConfigRefusal writes err as 400 hosted_config_refused
 // and returns true when it is (or wraps) a hostedHarnessConfigError.
 func writeHostedHarnessConfigRefusal(w http.ResponseWriter, err error) bool {
@@ -180,6 +195,9 @@ func (s *Server) checkStoredHostedHarnessConfig(ctx context.Context, id, runtime
 	}
 	if !s.checksHostedHarnessConfig(hc.Scope) {
 		return nil
+	}
+	if err := hostedHarnessConfigManifestRefusal(hc.Name, hc.Files); err != nil {
+		return err
 	}
 	if _, ok := templateFileByPath(hc.Files, harnessConfigYAMLPath); !ok {
 		return nil
