@@ -455,7 +455,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	case store.TriggerActionMessage:
 		actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &req.Action)
 	case store.TriggerActionDispatchAgent:
-		actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &req.Action, ceiling, prov)
+		actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &req.Action, ceiling, prov)
 	default:
 		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s)", actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent), nil)
 		return
@@ -620,6 +620,7 @@ func (s *Server) authorizeStoredTriggerAction(
 	projectID string,
 	sourceKind string,
 	ep *store.WebhookEndpoint,
+	subjectMode string,
 	actionType string,
 	rawPayload string,
 	ceiling store.EffectCeiling,
@@ -630,7 +631,7 @@ func (s *Server) authorizeStoredTriggerAction(
 	case store.TriggerActionMessage:
 		return s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &spec)
 	case store.TriggerActionDispatchAgent:
-		return s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &spec, ceiling, prov)
+		return s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &spec, ceiling, prov)
 	default:
 		ValidationError(w, fmt.Sprintf("unsupported action type %q (supported: %s, %s)", actionType, store.TriggerActionMessage, store.TriggerActionDispatchAgent), nil)
 		return "", false
@@ -943,14 +944,14 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			case store.TriggerActionMessage:
 				actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, tr.SourceKind, req.Action)
 			case store.TriggerActionDispatchAgent:
-				actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, req.Action, ceiling, prov)
+				actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, req.Action, ceiling, prov)
 			}
 			if !ok {
 				return
 			}
 			tr.ActionPayload = actionPayload
 		} else {
-			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.ActionType, tr.ActionPayload, ceiling, prov)
+			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, tr.ActionType, tr.ActionPayload, ceiling, prov)
 			if !ok {
 				return
 			}
@@ -1118,7 +1119,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		return
 	}
-	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.ActionType, tr.ActionPayload, ceiling, prov)
+	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.SubjectMode, tr.ActionType, tr.ActionPayload, ceiling, prov)
 	if !ok {
 		return
 	}

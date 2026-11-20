@@ -493,15 +493,42 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 		assert.Equal(t, "message", details["slot"])
 	})
 
-	t.Run("subject_mode_skip_accepted_and_reuse_refused", func(t *testing.T) {
+	t.Run("subject_mode_skip_refused", func(t *testing.T) {
+		// dispatch_agent + subject.mode=skip is refused until P1c-2 subject claims.
 		reqSkip := baseReq("skip-mode")
 		reqSkip.Subject = &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip}
 		recSkip := postTrigger(userCtx, reqSkip)
-		require.Equal(t, http.StatusCreated, recSkip.Code, recSkip.Body.String())
+		assertErrCode(t, recSkip, http.StatusBadRequest, "dispatch_agent_skip_unsupported")
+		assert.Contains(t, recSkip.Body.String(), "P1c-2")
 
+		// dispatch_agent + subject.mode=reuse remains refused until P1c-2.
 		reqReuse := baseReq("reuse-mode")
 		reqReuse.Subject = &TriggerSubjectSpec{Mode: "reuse"}
 		assertErrCode(t, postTrigger(userCtx, reqReuse), http.StatusBadRequest, ErrCodeValidationError)
+
+		// message trigger + subject.mode=skip (Stage 1 PR 4) remains accepted.
+		msgTarget := &store.Agent{
+			ID:        api.NewUUID(),
+			Slug:      "skip-msg-target",
+			Name:      "skip-msg-target",
+			ProjectID: f.sched.proj.ID,
+			Phase:     "running",
+			CreatedBy: f.sched.creator.ID,
+			OwnerID:   f.sched.creator.ID,
+		}
+		require.NoError(t, f.sched.store.CreateAgent(ctx, msgTarget))
+		recMsgSkip := postTrigger(userCtx, CreateTriggerRequest{
+			Name:    "msg-skip-ok",
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:   &TriggerMatchSpec{Types: []string{"webhook.received"}},
+			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip},
+			Action: TriggerActionSpec{
+				Type:    store.TriggerActionMessage,
+				AgentID: msgTarget.ID,
+				Message: "hi",
+			},
+		})
+		require.Equal(t, http.StatusCreated, recMsgSkip.Code, recMsgSkip.Body.String())
 	})
 
 	t.Run("literal_agent_name_create_path_checks_at_authoring", func(t *testing.T) {
