@@ -3056,6 +3056,140 @@ func TestProgramCacheNeverRetainsEntryHeavierThanPerProjectBound(t *testing.T) {
 	}
 }
 
+func TestProgramCachePerProjectByteAccounting(t *testing.T) {
+	ctx := context.Background()
+	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+
+	makeExpr100B := func(tag int) string {
+		prefix := fmt.Sprintf(`meta["k%02d"] == "`, tag)
+		suffix := `"`
+		pad := 100 - len(prefix) - len(suffix)
+		if pad <= 0 {
+			t.Fatalf("invalid 100B expression template for tag %d", tag)
+		}
+		expr := prefix + strings.Repeat("v", pad) + suffix
+		if len(expr) != 100 {
+			t.Fatalf("len(expr) = %d, want 100", len(expr))
+		}
+		return expr
+	}
+
+	assertWarmSet := func(t *testing.T, eng *celengine.Engine, scopes []celengine.CacheScope, exprs []string) {
+		t.Helper()
+		before := eng.CacheStats()
+		for i := range scopes {
+			if _, err := eng.Cached(ctx, scopes[i], exprs[i], filterKind); err != nil {
+				t.Fatalf("warm check[%d]: %v", i, err)
+			}
+		}
+		after := eng.CacheStats()
+		if after.Misses != before.Misses || after.Hits != before.Hits+uint64(len(scopes)) {
+			t.Fatalf("expected %d warm hits and 0 misses, got before=%+v after=%+v (project byte counter failed to decrement)",
+				len(scopes), before, after)
+		}
+	}
+
+	// MaxPerProject (16) and MaxBytes (64 KiB) are intentionally generous so ONLY
+	// MaxBytesPerProject (350B => up to three 100B entries) governs eviction.
+	eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+		MaxEntries:         64,
+		MaxBytes:           64 * 1024,
+		MaxPerProject:      16,
+		MaxBytesPerProject: 350,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	projScope := func(id string, rev int64) celengine.CacheScope {
+		return celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-a", ID: id, Revision: rev}
+	}
+
+	// 1. Byte-cap LRU eviction: inserting 6 x 100B entries into a 350B project cap must
+	// keep the 3 most recent entries (300B) resident rather than shrinking to <= 1 entry.
+	for i := 1; i <= 6; i++ {
+		if _, err := eng.Cached(ctx, projScope(fmt.Sprintf("t%d", i), 1), makeExpr100B(i), filterKind); err != nil {
+			t.Fatalf("seed t%d: %v", i, err)
+		}
+	}
+	if st := eng.CacheStats(); st.Entries != 3 || st.Bytes != 300 {
+		t.Fatalf("after 6 x 100B inserts under 350B project cap: stats=%+v, want Entries=3 Bytes=300", st)
+	}
+	assertWarmSet(t, eng,
+		[]celengine.CacheScope{projScope("t4", 1), projScope("t5", 1), projScope("t6", 1)},
+		[]string{makeExpr100B(4), makeExpr100B(5), makeExpr100B(6)},
+	)
+
+	// 2. Single-trigger Invalidate while sibling entries stay non-empty: invalidating t4
+	// must decrement proj-a bytes 300 -> 200 so adding t7 (100B) keeps t5, t6, t7 warm.
+	eng.Invalidate(projScope("t4", 0))
+	if st := eng.CacheStats(); st.Entries != 2 || st.Bytes != 200 {
+		t.Fatalf("after Invalidate(t4): stats=%+v, want Entries=2 Bytes=200", st)
+	}
+	if _, err := eng.Cached(ctx, projScope("t7", 1), makeExpr100B(7), filterKind); err != nil {
+		t.Fatalf("insert t7: %v", err)
+	}
+	if st := eng.CacheStats(); st.Entries != 3 || st.Bytes != 300 {
+		t.Fatalf("after insert t7 into freed byte headroom: stats=%+v, want Entries=3 Bytes=300", st)
+	}
+	assertWarmSet(t, eng,
+		[]celengine.CacheScope{projScope("t5", 1), projScope("t6", 1), projScope("t7", 1)},
+		[]string{makeExpr100B(5), makeExpr100B(6), makeExpr100B(7)},
+	)
+
+	// 3. Revision supersession while sibling entries stay non-empty: bumping t5 from rev 1
+	// to rev 2 with a new 100B rule must release rev 1's 100B without evicting t6 or t7.
+	if _, err := eng.Cached(ctx, projScope("t5", 2), makeExpr100B(52), filterKind); err != nil {
+		t.Fatalf("revision bump t5@rev2: %v", err)
+	}
+	if st := eng.CacheStats(); st.Entries != 3 || st.Bytes != 300 {
+		t.Fatalf("after t5@rev2 supersession: stats=%+v, want Entries=3 Bytes=300", st)
+	}
+	assertWarmSet(t, eng,
+		[]celengine.CacheScope{projScope("t5", 2), projScope("t6", 1), projScope("t7", 1)},
+		[]string{makeExpr100B(52), makeExpr100B(6), makeExpr100B(7)},
+	)
+
+	// 4. Global LRU eviction of one proj-a entry while another proj-a entry stays resident
+	// must decrement proj-a's byte counter so proj-a can still refill to 3 x 100B entries.
+	engGlobal, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+		MaxEntries:         4,
+		MaxBytes:           64 * 1024,
+		MaxPerProject:      16,
+		MaxBytesPerProject: 350,
+	})
+	if err != nil {
+		t.Fatalf("New(engGlobal): %v", err)
+	}
+	if _, err := engGlobal.Cached(ctx, projScope("ga1", 1), makeExpr100B(81), filterKind); err != nil {
+		t.Fatalf("ga1: %v", err)
+	}
+	if _, err := engGlobal.Cached(ctx, projScope("ga2", 1), makeExpr100B(82), filterKind); err != nil {
+		t.Fatalf("ga2: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		// Keep ga2 at MRU front while global MaxEntries=4 evicts ga1.
+		if _, err := engGlobal.Cached(ctx, projScope("ga2", 1), makeExpr100B(82), filterKind); err != nil {
+			t.Fatalf("touch ga2: %v", err)
+		}
+		otherScope := celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-b", ID: fmt.Sprintf("gb%d", i), Revision: 1}
+		if _, err := engGlobal.Cached(ctx, otherScope, makeExpr100B(90+i), filterKind); err != nil {
+			t.Fatalf("gb%d: %v", i, err)
+		}
+	}
+	// proj-a now has only ga2 (100B); inserting ga3 and ga4 (200B) reaches 300B <= 350B and keeps all 3 warm.
+	if _, err := engGlobal.Cached(ctx, projScope("ga3", 1), makeExpr100B(83), filterKind); err != nil {
+		t.Fatalf("ga3: %v", err)
+	}
+	if _, err := engGlobal.Cached(ctx, projScope("ga4", 1), makeExpr100B(84), filterKind); err != nil {
+		t.Fatalf("ga4: %v", err)
+	}
+	assertWarmSet(t, engGlobal,
+		[]celengine.CacheScope{projScope("ga2", 1), projScope("ga3", 1), projScope("ga4", 1)},
+		[]string{makeExpr100B(82), makeExpr100B(83), makeExpr100B(84)},
+	)
+}
+
 func BenchmarkProgramCacheScopedHit(b *testing.B) {
 	ctx := context.Background()
 	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}

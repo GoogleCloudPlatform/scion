@@ -91,6 +91,23 @@ const (
 	MatchReasonUnsupportedDialect = "unsupported_dialect"
 )
 
+// Dialect-level FailedError / UncertainError reason codes mirrored here so
+// pkg/triggerrule remains a leaf package (see TestLeafImports) without
+// importing dialect implementation packages such as pkg/systemone.
+const (
+	// pkg/ruleengine internal Compiled guard reasons (engine.go, cel_dialect.go).
+	reasonUninitializedProgram   = "uninitialized_program"
+	reasonInvalidCompiledProgram = "invalid_compiled_program"
+
+	// System One uncertainty and provider failure reasons (mixed-rule-arrays §5,
+	// pkg/systemone/provider).
+	reasonSystemOneAbstain             = "abstain"
+	reasonSystemOneTie                 = "tie"
+	reasonSystemOneProviderError       = "provider_error"
+	reasonSystemOneProviderUnavailable = "provider_unavailable"
+	reasonSystemOneRateLimited         = "rate_limited"
+)
+
 var allowedMatchReasons = map[string]bool{
 	celengine.ReasonMissingInput:           true,
 	celengine.ReasonCostLimit:              true,
@@ -115,13 +132,13 @@ var allowedMatchReasons = map[string]bool{
 	MatchReasonEvalFailed:                  true,
 	MatchReasonCompileError:                true,
 	MatchReasonUnsupportedDialect:          true,
-	"uninitialized_program":                true,
-	"invalid_compiled_program":             true,
-	"abstain":                              true,
-	"tie":                                  true,
-	"provider_error":                       true,
-	"provider_unavailable":                 true,
-	"rate_limited":                         true,
+	reasonUninitializedProgram:             true,
+	reasonInvalidCompiledProgram:           true,
+	reasonSystemOneAbstain:                 true,
+	reasonSystemOneTie:                     true,
+	reasonSystemOneProviderError:           true,
+	reasonSystemOneProviderUnavailable:     true,
+	reasonSystemOneRateLimited:             true,
 }
 
 func sanitizeMatchReason(code, fallback string) string {

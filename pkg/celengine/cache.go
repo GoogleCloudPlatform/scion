@@ -291,14 +291,24 @@ func (c *programCache) put(id cacheIdentity, exprBytes int, prog Program, scope 
 		if c.bindScopeLocked(scope, ent) {
 			c.enforceScopeCapsLocked(scope, ent)
 		}
+		if _, retained := c.byKey[ent.key]; !retained {
+			return prog
+		}
 	}
 
 	for c.lru.Len() > c.maxEntries || (c.maxBytes > 0 && c.bytes > c.maxBytes) {
+		beforeLen := c.lru.Len()
+		beforeBytes := c.bytes
 		tail := c.lru.Back()
 		if tail == nil {
+			c.removeEntryLocked(ent)
 			break
 		}
 		c.removeEntryLocked(tail.Value.(*cacheEntry))
+		if c.lru.Len() >= beforeLen && c.bytes >= beforeBytes {
+			c.removeEntryLocked(ent)
+			break
+		}
 	}
 	return prog
 }
@@ -465,7 +475,11 @@ func (c *programCache) enforceScopeCapsLocked(scope CacheScope, keep *cacheEntry
 		evictSteps += c.enforceProjectCapLocked(scope.Consumer, scope.ProjectID, keep)
 	}
 	if c.maxPerConsumer > 0 {
-		evictSteps += c.enforceConsumerCapLocked(scope.Consumer, keep)
+		if keep == nil {
+			evictSteps += c.enforceConsumerCapLocked(scope.Consumer, nil)
+		} else if _, retained := c.byKey[keep.key]; retained {
+			evictSteps += c.enforceConsumerCapLocked(scope.Consumer, keep)
+		}
 	}
 	if c.onCapCheck != nil {
 		c.onCapCheck(evictSteps)
@@ -475,6 +489,7 @@ func (c *programCache) enforceScopeCapsLocked(scope CacheScope, keep *cacheEntry
 func (c *programCache) enforceConsumerCapLocked(consumer string, keep *cacheEntry) int {
 	steps := 0
 	for c.consumerCounts[consumer] > c.maxPerConsumer {
+		beforeCount := c.consumerCounts[consumer]
 		var victim *cacheEntry
 		for e := c.lru.Back(); e != nil; e = e.Prev() {
 			steps++
@@ -488,6 +503,9 @@ func (c *programCache) enforceConsumerCapLocked(consumer string, keep *cacheEntr
 			}
 		}
 		if victim == nil {
+			if keep != nil {
+				c.removeEntryLocked(keep)
+			}
 			break
 		}
 		for sk := range victim.scopes {
@@ -504,6 +522,12 @@ func (c *programCache) enforceConsumerCapLocked(consumer string, keep *cacheEntr
 		}
 		if len(victim.scopes) == 0 {
 			c.removeEntryLocked(victim)
+		}
+		if c.consumerCounts[consumer] >= beforeCount {
+			if keep != nil {
+				c.removeEntryLocked(keep)
+			}
+			break
 		}
 	}
 	return steps
@@ -532,6 +556,9 @@ func (c *programCache) enforceProjectCapLocked(consumer, projectID string, keep 
 			}
 		}
 		if victim == nil {
+			if keep != nil {
+				c.removeEntryLocked(keep)
+			}
 			break
 		}
 		for sk, skProj := range victim.scopes {
@@ -548,6 +575,13 @@ func (c *programCache) enforceProjectCapLocked(consumer, projectID string, keep 
 		}
 		if len(victim.scopes) == 0 {
 			c.removeEntryLocked(victim)
+		}
+		after := c.projectUsage[pk]
+		if after.entries >= u.entries || after.bytes >= u.bytes {
+			if keep != nil {
+				c.removeEntryLocked(keep)
+			}
+			break
 		}
 	}
 	return steps
