@@ -214,9 +214,10 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 		return nil
 	}
 	var vs struct {
-		Runtimes         map[string]V1RuntimeConfig `yaml:"runtimes"`
-		Profiles         map[string]V1ProfileConfig `yaml:"profiles"`
-		DefaultResources *api.ResourceSpec          `yaml:"default_resources"`
+		Runtimes         map[string]V1RuntimeConfig    `yaml:"runtimes"`
+		Profiles         map[string]V1ProfileConfig    `yaml:"profiles"`
+		HarnessConfigs   map[string]HarnessConfigEntry `yaml:"harness_configs"`
+		DefaultResources *api.ResourceSpec             `yaml:"default_resources"`
 		Server           struct {
 			HomeStorage *V1HomeStorageConfig `yaml:"home_storage"`
 		} `yaml:"server"`
@@ -234,6 +235,7 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 	}
 	warnings = append(warnings, PlacementIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
 	warnings = append(warnings, PlacementSettingsWarnings(vs.Runtimes, vs.Profiles)...)
+	warnings = append(warnings, HarnessArgsIgnoredWarnings(vs.HarnessConfigs)...)
 	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)
 }
 

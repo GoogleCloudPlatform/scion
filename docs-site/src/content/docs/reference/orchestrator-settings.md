@@ -160,7 +160,7 @@ harness_configs:
 | `user` | string | Unix username inside the container. |
 | `model` | string | Default model identifier. |
 | `task_flag` | string | CLI flag name for passing the task (e.g., `--input`). When set, the task is delivered as a flag value instead of a positional argument. |
-| `args` | list | Additional CLI arguments for the harness. |
+| `args` | list | Additional CLI arguments for the harness. Honoured only by the `generic` harness; ignored with a warning for all other harnesses (use the harness-config directory's `config.yaml` or template `command_args` for other harnesses). |
 | `env` | map | Environment variables injected into the container. |
 | `volumes` | list | Volume mounts. |
 | `auth_selected_type` | string | Authentication method selection (harness-specific). |

@@ -35,6 +35,14 @@ type commandValidator interface {
 	validateCommand(task string, resume bool, baseArgs []string) error
 }
 
+// HonoursSettingsArgs reports whether settings.yaml's
+// harness_configs.<name>.args field is applied for the given harness type.
+// Only the generic harness honours settings-level harness args; other
+// harnesses ignore the field (ptone/scion#5082, ptone/scion#8490).
+func HonoursSettingsArgs(harnessName string) bool {
+	return config.HarnessHonoursSettingsArgs(harnessName)
+}
+
 // ValidateCommand checks that h produces a non-empty command for the given
 // start inputs. The built-in generic harness has no executable of its own, so
 // an empty command is rejected with ErrEmptyGenericCommand; custom/on-disk
