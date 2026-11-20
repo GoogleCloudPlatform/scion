@@ -21,10 +21,95 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// messageAuthoringCaller identifies which hub authoring surface is invoking
+// the shared HTTP-free message target rule (Stage 1 §5.3, rev 8.24 / rev 8.32
+// option a). It is unexported and derived strictly from the caller kind inside
+// the hub—never from request input—so a trigger caller can never opt into
+// schedule-style unresolved-target acceptance.
+//
+// The zero value is the strictest mode (messageAuthoringCallerTrigger) so an
+// unset caller kind fails closed.
+type messageAuthoringCaller int
+
+const (
+	// messageAuthoringCallerTrigger is the strict trigger authoring mode used
+	// by messageAction.Validate and trigger CRUD handlers: unresolved targets
+	// return 404, unreadable targets are masked as 404 (byte-identical to
+	// nonexistent), and cross-project targets are audited.
+	messageAuthoringCallerTrigger messageAuthoringCaller = iota
+	// messageAuthoringCallerScheduleNew is a schedule or scheduled-event create
+	// naming a new target: unresolved targets and unreadable new targets are
+	// accepted at authoring and refused at fire time.
+	messageAuthoringCallerScheduleNew
+	// messageAuthoringCallerScheduleExisting is a schedule resume or update
+	// keeping its stored target: unresolved targets are accepted, while an
+	// unauthorized existing target is refused with 403.
+	messageAuthoringCallerScheduleExisting
+)
+
+// messageAuthoringError is the HTTP-free denial returned by
+// validateMessageAuthoringTarget so HTTP adapters (schedule and trigger
+// handlers) map it to exact status codes and response bodies without
+// duplicating target-resolution or masking logic.
+type messageAuthoringError struct {
+	httpStatus        int
+	code              string
+	message           string
+	details           map[string]interface{}
+	notFoundResource  string
+	authzDenialReason string
+	authzDenialTarget *store.Agent
+}
+
+func (e *messageAuthoringError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.notFoundResource != "" {
+		return e.notFoundResource + " not found"
+	}
+	return e.message
+}
+
+// writeMessageAuthoringError maps an error returned by
+// validateMessageAuthoringTarget (or messageAction.Validate) onto the exact
+// HTTP error response expected by schedule and trigger callers.
+func writeMessageAuthoringError(w http.ResponseWriter, r *http.Request, identity Identity, err error) {
+	var authErr *messageAuthoringError
+	if !errors.As(err, &authErr) {
+		InternalError(w)
+		return
+	}
+	if authErr.authzDenialTarget != nil && authErr.authzDenialReason != "" && r != nil && identity != nil {
+		logAuthzDenial(r, identity, agentResource(authErr.authzDenialTarget), ActionMessage, authErr.authzDenialReason)
+	}
+	if authErr.notFoundResource != "" {
+		NotFound(w, authErr.notFoundResource)
+		return
+	}
+	switch authErr.httpStatus {
+	case http.StatusUnauthorized:
+		Unauthorized(w)
+	case http.StatusInternalServerError:
+		if authErr.message != "" {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, authErr.message, nil)
+		} else {
+			InternalError(w)
+		}
+	default:
+		code := authErr.code
+		if code == "" {
+			code = ErrCodeValidationError
+		}
+		writeError(w, authErr.httpStatus, code, authErr.message, authErr.details)
+	}
+}
 
 // scheduledTargetMode says whether an authoring request names a new target
 // or re-authors a schedule whose target is already set.
@@ -124,107 +209,196 @@ func (s *Server) authorizeScheduledMessageTarget(
 		return false
 	}
 
-	// Resolve the target from the raw payload first, since that is what gets
-	// persisted and fired. Fall back to convenience fields only when the
-	// payload is empty or does not contain a target. This matches the
-	// storage priority in handlers_scheduled_events.go.
-	var targetAgentID, targetAgentName string
-	if rawPayload != "" {
-		var p MessageEventPayload
-		if err := json.Unmarshal([]byte(rawPayload), &p); err == nil {
-			targetAgentID = p.AgentID
-			targetAgentName = p.AgentName
+	callerKind := messageAuthoringCallerScheduleNew
+	if mode == scheduledTargetExisting {
+		callerKind = messageAuthoringCallerScheduleExisting
+	}
+	if _, err := s.validateMessageAuthoringTarget(ctx, identity, projectID, callerKind, rawPayload, agentID, agentName); err != nil {
+		writeMessageAuthoringError(w, r, identity, err)
+		return false
+	}
+	return true
+}
+
+// validateMessageAuthoringTarget is the single HTTP-free message authoring
+// target rule shared by schedule handlers (authorizeScheduledMessageTarget)
+// and trigger authoring (messageAction.Validate). callerKind is derived inside
+// the hub and never from request input (Stage 1 §5.3, rev 8.24 / rev 8.32).
+func (s *Server) validateMessageAuthoringTarget(
+	ctx context.Context,
+	identity Identity,
+	projectID string,
+	callerKind messageAuthoringCaller,
+	rawPayload string,
+	agentID string,
+	agentName string,
+) (string, error) {
+	if identity == nil {
+		return "", &messageAuthoringError{httpStatus: http.StatusUnauthorized, message: "unauthorized"}
+	}
+	if s == nil || s.store == nil {
+		return "", &messageAuthoringError{httpStatus: http.StatusInternalServerError, message: "server not configured"}
+	}
+
+	isTrigger := callerKind == messageAuthoringCallerTrigger
+
+	var (
+		parsed          MessageEventPayload
+		targetAgentID   string
+		targetAgentName string
+	)
+	if isTrigger {
+		if err := json.Unmarshal([]byte(rawPayload), &parsed); err != nil {
+			return "", &messageAuthoringError{
+				httpStatus: http.StatusBadRequest,
+				code:       ErrCodeValidationError,
+				message:    "invalid message action payload",
+			}
 		}
-	}
-	// If the payload didn't yield a target, use convenience fields.
-	if targetAgentID == "" && targetAgentName == "" {
-		targetAgentID = agentID
-		targetAgentName = agentName
-	}
-	// Reject conflicting representations: if both the payload and
-	// convenience fields specify targets that disagree, the request is
-	// ambiguous and must be denied. Validating one target while storing
-	// another would create a false sense of authorization.
-	if rawPayload != "" && (agentID != "" || agentName != "") {
-		var p MessageEventPayload
-		if err := json.Unmarshal([]byte(rawPayload), &p); err == nil {
-			if (p.AgentID != "" && agentID != "" && p.AgentID != agentID) ||
-				(p.AgentName != "" && agentName != "" && p.AgentName != agentName) {
-				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-					"conflicting target: payload and convenience fields specify different agents", nil)
-				return false
+		if strings.TrimSpace(parsed.Message) == "" {
+			return "", &messageAuthoringError{
+				httpStatus: http.StatusBadRequest,
+				code:       ErrCodeValidationError,
+				message:    "action.message is required for message actions",
+			}
+		}
+		if len(parsed.Message) > maxTriggerActionMessageBytes {
+			return "", &messageAuthoringError{
+				httpStatus: http.StatusBadRequest,
+				code:       ErrCodeValidationError,
+				message:    "action.message exceeds maximum length of 16384 bytes",
+			}
+		}
+		targetAgentID = strings.TrimSpace(parsed.AgentID)
+		targetAgentName = strings.TrimSpace(parsed.AgentName)
+		if targetAgentID == "" && targetAgentName == "" {
+			return "", &messageAuthoringError{
+				httpStatus: http.StatusBadRequest,
+				code:       ErrCodeValidationError,
+				message:    "action.agentId or action.agentName is required for message actions",
+			}
+		}
+	} else {
+		// Resolve the target from the raw payload first, since that is what gets
+		// persisted and fired. Fall back to convenience fields only when the
+		// payload is empty or does not contain a target. This matches the
+		// storage priority in handlers_scheduled_events.go.
+		if rawPayload != "" {
+			var p MessageEventPayload
+			if err := json.Unmarshal([]byte(rawPayload), &p); err == nil {
+				targetAgentID = p.AgentID
+				targetAgentName = p.AgentName
+			}
+		}
+		if targetAgentID == "" && targetAgentName == "" {
+			targetAgentID = agentID
+			targetAgentName = agentName
+		}
+		// Reject conflicting representations: if both the payload and
+		// convenience fields specify targets that disagree, the request is
+		// ambiguous and must be denied. Validating one target while storing
+		// another would create a false sense of authorization.
+		if rawPayload != "" && (agentID != "" || agentName != "") {
+			var p MessageEventPayload
+			if err := json.Unmarshal([]byte(rawPayload), &p); err == nil {
+				if (p.AgentID != "" && agentID != "" && p.AgentID != agentID) ||
+					(p.AgentName != "" && agentName != "" && p.AgentName != agentName) {
+					return "", &messageAuthoringError{
+						httpStatus: http.StatusBadRequest,
+						code:       ErrCodeValidationError,
+						message:    "conflicting target: payload and convenience fields specify different agents",
+					}
+				}
 			}
 		}
 	}
 
 	// Resolve the target agent.
-	var agent *store.Agent
-	var err error
+	var (
+		agent *store.Agent
+		err   error
+	)
 	if targetAgentID != "" {
 		agent, err = s.store.GetAgent(ctx, targetAgentID)
 	} else if targetAgentName != "" && projectID != "" {
 		agent, err = s.store.GetAgentBySlug(ctx, projectID, targetAgentName)
 	}
-	// If the target cannot be resolved at authoring time (not found, no
-	// identifier, or slug-based lookup), allow authoring. The agent may be
-	// created between authoring and fire, and fire-time authorization is
-	// the definitive check. Only store errors (not ErrNotFound) are
-	// surfaced — those indicate an infrastructure problem, not a
-	// user-visible denial.
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			// Agent doesn't exist yet — allow authoring; fire-time catches it.
-			return true
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if isTrigger {
+			slog.ErrorContext(ctx, "trigger message authoring: target lookup failed", "project_id", projectID, "error", err)
+			return "", &messageAuthoringError{httpStatus: http.StatusInternalServerError}
 		}
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to resolve scheduled message target", nil)
-		return false
-	}
-	if agent == nil {
-		// No target identifiers provided or resolvable — allow authoring.
-		return true
+		return "", &messageAuthoringError{
+			httpStatus: http.StatusInternalServerError,
+			code:       ErrCodeInternalError,
+			message:    "failed to resolve scheduled message target",
+		}
 	}
 
-	// A target the caller cannot read, and may not message, is treated
-	// exactly like an unknown agent ID: authoring is accepted and the
-	// fire-time check refuses it. This runs before any answer that would
-	// describe the target. A target the caller can read keeps the answers
-	// below, which name nothing the caller cannot already see.
-	if mode == scheduledTargetNew && !s.scheduledTargetReadable(ctx, identity, agent) {
+	if isTrigger {
+		if err != nil || agent == nil || !agent.DeletedAt.IsZero() ||
+			(targetAgentID != "" && targetAgentName != "" && targetAgentName != agent.Slug) {
+			return "", &messageAuthoringError{httpStatus: http.StatusNotFound, notFoundResource: "Agent"}
+		}
+	} else {
+		// If the target cannot be resolved at schedule authoring time (not
+		// found, no identifier, or slug-based lookup), allow authoring. The
+		// agent may be created between authoring and fire, and fire-time
+		// authorization is the definitive check.
+		if errors.Is(err, store.ErrNotFound) || agent == nil {
+			return rawPayload, nil
+		}
+	}
+
+	// Schedule new-target masking: a target the caller cannot read, and may
+	// not message, is treated exactly like an unknown agent ID: authoring is
+	// accepted and the fire-time check refuses it. This runs before any answer
+	// that would describe the target.
+	if callerKind == messageAuthoringCallerScheduleNew && !s.scheduledTargetReadable(ctx, identity, agent) {
 		if allowed, _, _ := s.authorizeAgentMessage(ctx, identity, agent, false); !allowed {
 			slog.InfoContext(ctx, "scheduled target not readable; treated as unknown",
 				"identity", identity.ID(), "identity_type", identity.Type(),
 				"agent_id", agent.ID, "project_id", projectID)
-			return true
+			return rawPayload, nil
 		}
 	}
 
-	// Phase 5 D3: Cross-project scheduled message support.
-	// The event remains owned/administered in the sender's project; its target
-	// agent/project are separate immutable fields.
+	// Cross-project messaging check and audit.
 	isCrossProject := agent.ProjectID != projectID
 	if isCrossProject {
-		// Cross-project scheduled message: validate the Hub feature is enabled
-		// and the sender has cross-project messaging authorization.
 		ops := s.GetOperationalSettings()
 		if ops == nil || !ops.CrossProjectMessagingEnabled() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"cross-project scheduled messages require cross-project messaging to be enabled", map[string]interface{}{
+			if isTrigger && !s.scheduledTargetReadable(ctx, identity, agent) {
+				return "", &messageAuthoringError{httpStatus: http.StatusNotFound, notFoundResource: "Agent"}
+			}
+			msg := "cross-project scheduled messages require cross-project messaging to be enabled"
+			if isTrigger {
+				msg = "cross-project trigger messages require cross-project messaging to be enabled"
+			}
+			return "", &messageAuthoringError{
+				httpStatus: http.StatusForbidden,
+				code:       ErrCodeForbidden,
+				message:    msg,
+				details: map[string]interface{}{
 					"code": string(MessageDenialCrossProjectScheduledDisabled),
-				})
-			return false
+				},
+			}
 		}
-		// Persist cross-project context with the scheduled event for
-		// fire-time reauthorization.
+		auditAction := "scheduled_author"
+		auditSurface := "scheduled_message"
+		if isTrigger {
+			auditAction = "trigger_author"
+			auditSurface = "trigger_message"
+		}
 		LogCrossProjectDecision(CrossProjectAuditEntry{
 			Timestamp:        time.Now(),
-			Action:           "scheduled_author",
+			Action:           auditAction,
 			SenderID:         identity.ID(),
 			SenderProjectID:  projectID,
 			RecipientID:      agent.ID,
 			RecipientProject: agent.ProjectID,
 			CrossProject:     true,
-			Surface:          "scheduled_message",
+			Surface:          auditSurface,
 		})
 	}
 
@@ -232,20 +406,53 @@ func (s *Server) authorizeScheduledMessageTarget(
 	// agent right now. The definitive check runs at fire time.
 	allowed, reason, _ := s.authorizeAgentMessage(ctx, identity, agent, false)
 	if !allowed {
-		slog.Warn("scheduled message authoring denied",
-			"identity", identity.ID(), "identity_type", identity.Type(),
-			"agent_id", agent.ID, "agent_slug", agent.Slug,
-			"project_id", projectID, "reason", reason,
-			"cross_project", isCrossProject)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"not authorized to message this agent", map[string]interface{}{
+		if isTrigger && !s.scheduledTargetReadable(ctx, identity, agent) {
+			return "", &messageAuthoringError{
+				httpStatus:        http.StatusNotFound,
+				notFoundResource:  "Agent",
+				authzDenialReason: "trigger message authoring: " + reason,
+				authzDenialTarget: agent,
+			}
+		}
+		if isTrigger {
+			slog.WarnContext(ctx, "trigger message authoring denied",
+				"identity", identity.ID(), "identity_type", identity.Type(),
+				"agent_id", agent.ID, "agent_slug", agent.Slug,
+				"project_id", projectID, "reason", reason,
+				"cross_project", isCrossProject)
+		} else {
+			slog.Warn("scheduled message authoring denied",
+				"identity", identity.ID(), "identity_type", identity.Type(),
+				"agent_id", agent.ID, "agent_slug", agent.Slug,
+				"project_id", projectID, "reason", reason,
+				"cross_project", isCrossProject)
+		}
+		return "", &messageAuthoringError{
+			httpStatus: http.StatusForbidden,
+			code:       ErrCodeForbidden,
+			message:    "not authorized to message this agent",
+			details: map[string]interface{}{
 				"reason":     mapReasonToCode(reason),
 				"agent_slug": agent.Slug,
-			})
-		return false
+			},
+		}
 	}
 
-	return true
+	if isTrigger {
+		encoded, err := json.Marshal(MessageEventPayload{
+			AgentID:   agent.ID,
+			AgentName: agent.Slug,
+			Message:   parsed.Message,
+			Interrupt: parsed.Interrupt,
+			Plain:     parsed.Plain,
+			Wake:      parsed.Wake,
+		})
+		if err != nil {
+			return "", &messageAuthoringError{httpStatus: http.StatusInternalServerError}
+		}
+		return string(encoded), nil
+	}
+	return rawPayload, nil
 }
 
 // scheduledTargetReadable reports whether identity may read the target

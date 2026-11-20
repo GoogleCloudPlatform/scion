@@ -359,10 +359,10 @@ func (s *Server) resolveTriggerWebhookSource(w http.ResponseWriter, r *http.Requ
 	return ep, true
 }
 
-// authorizeTriggerMessageAuthoring validates a Stage 1 message action spec,
-// resolves the target agent (storing authoritative AgentID and display
-// AgentName per §4.2), checks live messaging authorization for the caller, and
-// returns the canonical JSON action_payload.
+// authorizeTriggerMessageAuthoring validates a Stage 1 message action spec
+// through the shared HTTP-free target rule (messageAction.Validate), updating
+// spec with the authoritative AgentID and display AgentName and returning the
+// canonical JSON action_payload.
 func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http.Request, projectID string, spec *TriggerActionSpec) (string, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
@@ -371,90 +371,9 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 		return "", false
 	}
 
-	if strings.TrimSpace(spec.Message) == "" {
-		ValidationError(w, "action.message is required for message actions", nil)
-		return "", false
-	}
-	if len(spec.Message) > maxTriggerActionMessageBytes {
-		ValidationError(w, "action.message exceeds maximum length of 16384 bytes", nil)
-		return "", false
-	}
-
-	agentID := strings.TrimSpace(spec.AgentID)
-	agentName := strings.TrimSpace(spec.AgentName)
-	var target *store.Agent
-	var err error
-	switch {
-	case agentID != "":
-		target, err = s.store.GetAgent(ctx, agentID)
-	case agentName != "":
-		target, err = s.store.GetAgentBySlug(ctx, projectID, agentName)
-	default:
-		ValidationError(w, "action.agentId or action.agentName is required for message actions", nil)
-		return "", false
-	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.ErrorContext(ctx, "trigger message authoring: target lookup failed", "project_id", projectID, "error", err)
-		InternalError(w)
-		return "", false
-	}
-	if err != nil || target == nil || !target.DeletedAt.IsZero() ||
-		(agentID != "" && agentName != "" && agentName != target.Slug) {
-		NotFound(w, "Agent")
-		return "", false
-	}
-
-	isCrossProject := target.ProjectID != projectID
-	if isCrossProject {
-		ops := s.GetOperationalSettings()
-		if ops == nil || !ops.CrossProjectMessagingEnabled() {
-			if !s.scheduledTargetReadable(ctx, identity, target) {
-				NotFound(w, "Agent")
-				return "", false
-			}
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"cross-project trigger messages require cross-project messaging to be enabled", map[string]interface{}{
-					"code": string(MessageDenialCrossProjectScheduledDisabled),
-				})
-			return "", false
-		}
-		LogCrossProjectDecision(CrossProjectAuditEntry{
-			Timestamp:        time.Now(),
-			Action:           "trigger_author",
-			SenderID:         identity.ID(),
-			SenderProjectID:  projectID,
-			RecipientID:      target.ID,
-			RecipientProject: target.ProjectID,
-			CrossProject:     true,
-			Surface:          "trigger_message",
-		})
-	}
-
-	allowed, reason, _ := s.authorizeAgentMessage(ctx, identity, target, false)
-	if !allowed {
-		if !s.scheduledTargetReadable(ctx, identity, target) {
-			logAuthzDenial(r, identity, agentResource(target), ActionMessage, "trigger message authoring: "+reason)
-			NotFound(w, "Agent")
-			return "", false
-		}
-		slog.WarnContext(ctx, "trigger message authoring denied",
-			"identity", identity.ID(), "identity_type", identity.Type(),
-			"agent_id", target.ID, "agent_slug", target.Slug,
-			"project_id", projectID, "reason", reason,
-			"cross_project", isCrossProject)
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"not authorized to message this agent", map[string]interface{}{
-				"reason":     mapReasonToCode(reason),
-				"agent_slug": target.Slug,
-			})
-		return "", false
-	}
-
-	spec.AgentID = target.ID
-	spec.AgentName = target.Slug
-	encoded, err := json.Marshal(MessageEventPayload{
-		AgentID:   target.ID,
-		AgentName: target.Slug,
+	raw, err := json.Marshal(MessageEventPayload{
+		AgentID:   spec.AgentID,
+		AgentName: spec.AgentName,
 		Message:   spec.Message,
 		Interrupt: spec.Interrupt,
 		Plain:     spec.Plain,
@@ -464,7 +383,22 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 		InternalError(w)
 		return "", false
 	}
-	return string(encoded), true
+
+	action := &messageAction{srv: s}
+	normalized, err := action.Validate(ctx, identity, projectID, string(raw))
+	if err != nil {
+		writeMessageAuthoringError(w, r, identity, err)
+		return "", false
+	}
+
+	var resolved MessageEventPayload
+	if err := json.Unmarshal([]byte(normalized), &resolved); err != nil {
+		InternalError(w)
+		return "", false
+	}
+	spec.AgentID = resolved.AgentID
+	spec.AgentName = resolved.AgentName
+	return normalized, true
 }
 
 // triggerEventAccess is the outcome of triggerEventAccessDecision.

@@ -61,12 +61,16 @@ func (a *messageAction) Detaches(req hubfire.FireRequest) bool {
 	return scheduledPayloadWakes(req.Payload)
 }
 
-// Validate refuses in Phase 1a: schedule authoring handlers continue to
-// authorize through authorizeScheduledMessageAuthoring /
-// authorizeScheduledMessageReauthoring, and trigger authoring wires shared
-// target validation in a later phase.
-func (a *messageAction) Validate(_ context.Context, _ Identity, _ string, _ string) (string, error) {
-	return "", errors.New("message action authoring validation is not wired in 1a")
+// Validate runs the shared HTTP-free message authoring target rule in strict
+// trigger mode (Stage 1 §5.3, rev 8.24 / rev 8.32): unresolved or unreadable
+// targets return 404 (masked identically to nonexistent), cross-project
+// targets are audited, and the returned payload carries authoritative AgentID
+// and display AgentName.
+func (a *messageAction) Validate(ctx context.Context, caller Identity, projectID string, payload string) (string, error) {
+	if a == nil || a.srv == nil {
+		return "", errors.New("message action: server not configured")
+	}
+	return a.srv.validateMessageAuthoringTarget(ctx, caller, projectID, messageAuthoringCallerTrigger, payload, "", "")
 }
 
 func (a *messageAction) ValidatePayload(req hubfire.FireRequest) error {

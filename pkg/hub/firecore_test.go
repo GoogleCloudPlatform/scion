@@ -1269,14 +1269,36 @@ func TestFireCoreMessageActionValidate(t *testing.T) {
 	require.NoError(t, err)
 	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "session")
 
+	require.NoError(t, ms.CreateAgent(context.Background(), &store.Agent{
+		ID:        "agent-msg-val-1",
+		Slug:      "worker-one",
+		Name:      "worker-one",
+		ProjectID: projectID,
+		Phase:     "running",
+	}))
+
 	act := &messageAction{srv: srv}
 	normalized, err := act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-one","message":"hello","wake":true}`)
-	require.ErrorContains(t, err, "message action authoring validation is not wired in 1a")
+	require.NoError(t, err)
+	var decoded MessageEventPayload
+	require.NoError(t, json.Unmarshal([]byte(normalized), &decoded))
+	assert.Equal(t, "agent-msg-val-1", decoded.AgentID)
+	assert.Equal(t, "worker-one", decoded.AgentName)
+	assert.Equal(t, "hello", decoded.Message)
+	assert.True(t, decoded.Wake)
+
+	// Unresolved target is refused in strict trigger mode (404).
+	normalized, err = act.Validate(context.Background(), caller, projectID, `{"agentName":"no-such-agent","message":"hello"}`)
+	require.Error(t, err)
+	var authErr *messageAuthoringError
+	require.ErrorAs(t, err, &authErr)
+	assert.Equal(t, 404, authErr.httpStatus)
+	assert.Equal(t, "Agent", authErr.notFoundResource)
 	assert.Empty(t, normalized)
 
 	var nilAction *messageAction
 	normalized, err = nilAction.Validate(context.Background(), nil, "", "")
-	require.ErrorContains(t, err, "message action authoring validation is not wired in 1a")
+	require.ErrorContains(t, err, "message action: server not configured")
 	assert.Empty(t, normalized)
 }
 
