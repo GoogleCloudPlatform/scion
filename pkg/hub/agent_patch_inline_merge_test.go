@@ -126,6 +126,9 @@ func TestApplyAgentUpdate_PatchMaxTurnsKeepsUnmentionedInlineConfig(t *testing.T
 func TestApplyAgentUpdate_PatchExplicitKeyChangesOnlyThatKey(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	// Host volumes in agent config are refused on a hosted hub
+	// (hostedguard); the merge behaviour is the workstation one.
+	srv.workstation = true
 	agent := newInlineMergeTestAgent(t, s, project, broker)
 	base := createdInlineConfig()
 
