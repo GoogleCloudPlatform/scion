@@ -111,11 +111,15 @@ export function applyBranding(branding?: PublicBranding | null): void {
     if (needsDomSync) {
       hadCustomDom = next !== null;
       const seq = ++runtimeSyncSeq;
-      void import('./branding-runtime.js').then((mod) => {
-        if (seq === runtimeSyncSeq) {
-          mod.syncBrandingDOM(next);
-        }
-      });
+      void import('./branding-runtime.js')
+        .then((mod) => {
+          if (seq === runtimeSyncSeq) {
+            mod.syncBrandingDOM(next);
+          }
+        })
+        .catch((err: unknown) => {
+          console.error('[Scion] Failed to load branding runtime:', err);
+        });
     }
   }
 
