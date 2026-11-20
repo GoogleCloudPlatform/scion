@@ -129,7 +129,7 @@ type ProjectDecisionSummaryView struct {
 	AskerAgentName  string            `json:"askerAgentName"`
 }
 
-// ProjectDecisionLogEntryView is one Made-tab decision log line on tab=made.
+// ProjectDecisionLogEntryView is one Made-tab entry: a decision version's final answer, with any superseded interpreted answer folded in.
 type ProjectDecisionLogEntryView struct {
 	Project                ProjectDecisionProjectRef  `json:"project"`
 	AnswerID               string                     `json:"answerId"`
@@ -1444,6 +1444,7 @@ func (s *Server) buildProjectDecisionLogViews(
 		}
 		var replacedBy *DecisionRef
 		if d.ReplacedByID != "" {
+			// The replacing version is always active.Version+1 (see loadKeyStates in decision_store.go).
 			replacedBy = &DecisionRef{
 				RowID:   d.ReplacedByID,
 				Version: d.Version + 1,
