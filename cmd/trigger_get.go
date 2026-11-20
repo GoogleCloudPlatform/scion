@@ -91,16 +91,16 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 		agentLabel = tr.Action.AgentID
 	}
 
-	fmt.Printf("Trigger: %s\n", tr.ID)
-	fmt.Printf("  Name:        %s\n", tr.Name)
+	fmt.Printf("Trigger: %s\n", triggerTerminalText(tr.ID, false))
+	fmt.Printf("  Name:        %s\n", triggerTerminalText(tr.Name, false))
 	if tr.Description != "" {
-		fmt.Printf("  Description: %s\n", tr.Description)
+		fmt.Printf("  Description: %s\n", triggerTerminalText(tr.Description, false))
 	}
-	fmt.Printf("  Project:     %s\n", tr.ProjectID)
-	fmt.Printf("  Status:      %s\n", triggerStatusLabel(tr.Status, tr.StatusReason))
+	fmt.Printf("  Project:     %s\n", triggerTerminalText(tr.ProjectID, false))
+	fmt.Printf("  Status:      %s\n", triggerTerminalText(triggerStatusLabel(tr.Status, tr.StatusReason), false))
 	fmt.Printf("  Revision:    %d\n", tr.AuthorizationRevision)
-	fmt.Printf("  Source:      %s:%s\n", tr.Source.Kind, tr.Source.ID)
-	fmt.Printf("  Types:       %s\n", strings.Join(tr.Match.Types, ", "))
+	fmt.Printf("  Source:      %s:%s\n", triggerTerminalText(tr.Source.Kind, false), triggerTerminalText(tr.Source.ID, false))
+	fmt.Printf("  Types:       %s\n", triggerTerminalText(strings.Join(tr.Match.Types, ", "), false))
 
 	rules := effectiveTriggerMatchRules(tr.Match)
 	if tr.Match.RulesBroken {
@@ -110,7 +110,7 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 	} else {
 		fmt.Printf("  Rules:       %d\n", len(rules))
 		for i, r := range rules {
-			fmt.Printf("    %d/%d [%s] %q\n", i+1, len(rules), r.Dialect, r.Expr)
+			fmt.Printf("    %d/%d [%s] %q\n", i+1, len(rules), triggerTerminalText(r.Dialect, false), r.Expr)
 		}
 	}
 
@@ -119,22 +119,22 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 		if subjDialect == "" {
 			subjDialect = ruleengine.DialectCEL
 		}
-		fmt.Printf("  Subject:     [%s] %q (mode: %s)\n", subjDialect, tr.Subject.Expr, tr.Subject.Mode)
+		fmt.Printf("  Subject:     [%s] %q (mode: %s)\n", triggerTerminalText(subjDialect, false), tr.Subject.Expr, triggerTerminalText(tr.Subject.Mode, false))
 	} else if tr.Subject.Mode != "" {
-		fmt.Printf("  Subject:     default (mode: %s)\n", tr.Subject.Mode)
+		fmt.Printf("  Subject:     default (mode: %s)\n", triggerTerminalText(tr.Subject.Mode, false))
 	}
 
-	fmt.Printf("  Agent:       %s\n", agentLabel)
-	fmt.Printf("  Message:     %s\n", tr.Action.Message)
+	fmt.Printf("  Agent:       %s\n", triggerTerminalText(agentLabel, false))
+	fmt.Printf("  Message:     %s\n", triggerTerminalText(tr.Action.Message, true))
 	fmt.Printf("  Fires:       %d (errors: %d)\n", tr.FireCount, tr.ErrorCount)
 	if tr.LastFireAt != nil {
 		lastFire := clitime.Ago(*tr.LastFireAt)
 		if tr.LastFireStatus != "" {
-			lastFire += " (" + tr.LastFireStatus + ")"
+			lastFire += " (" + triggerTerminalText(tr.LastFireStatus, false) + ")"
 		}
 		fmt.Printf("  Last Fire:   %s\n", lastFire)
 	}
 	if tr.LastFireError != "" {
-		fmt.Printf("  Last Error:  %s\n", tr.LastFireError)
+		fmt.Printf("  Last Error:  %s\n", triggerTerminalText(tr.LastFireError, false))
 	}
 }

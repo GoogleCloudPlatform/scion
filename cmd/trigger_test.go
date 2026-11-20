@@ -2461,3 +2461,87 @@ func TestTriggerEventAndHistoryCLI_SanitizesTerminalControlAndBidiCharacters(t *
 	assert.Equal(t, "\u2028\u2029", decodedInvalid["sep"])
 	assert.Equal(t, "\U000e0001", decodedInvalid["tag"])
 }
+
+func TestTriggerGetCLI_SanitizesTerminalControlAndBidiCharacters(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 20, 8, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+	prevZone := clitime.Zone()
+	clitime.SetZone(time.UTC)
+	t.Cleanup(func() { clitime.SetZone(prevZone) })
+
+	origIsTTY := textOutputIsTerminal
+	textOutputIsTerminal = func() bool { return false }
+	t.Cleanup(func() { textOutputIsTerminal = origIsTTY })
+
+	origFormat := outputFormat
+	origJSON := triggerOutputJSON
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerOutputJSON = origJSON
+	})
+
+	const trID = "33333333-4444-4333-8444-555555555555"
+
+	lastFireAt := fixedNow.Add(-5 * time.Minute)
+	tr := hubclient.Trigger{
+		ID:                    trID,
+		ProjectID:             "proj-1",
+		Name:                  "trig-\x1b[31mred\u202e",
+		Description:           "desc \x1b]52;c;aGVsbG8=\x07 \x1b[32mCSI\u009b31m \u202ebidi\u2069\r\n  Forged: line\x7f",
+		Status:                "paused",
+		StatusReason:          "reason-\x1b[33m-\u2066iso\u2069",
+		AuthorizationRevision: 2,
+		Source:                hubclient.TriggerSourceSpec{Kind: "webhook", ID: "ep-\x1b[34m1\u202e"},
+		Match: hubclient.TriggerMatchSpec{
+			Types: []string{"webhook.\x1b[35mreceived\u202e"},
+		},
+		Subject: hubclient.TriggerSubjectSpec{Mode: "single"},
+		Action: hubclient.TriggerActionSpec{
+			AgentName: "agent-\x1b[36m1\u202e",
+			Message:   "line1 \x1b[31mCSI\x1b]0;title\x07 \u009b32mC1 \u202ebidi\u2069\r\nline2\tkeep\u2028sep\x7f",
+		},
+		FireCount:      3,
+		ErrorCount:     1,
+		LastFireAt:     &lastFireAt,
+		LastFireStatus: "failed\x1b[31m",
+		LastFireError:  "err \x1b[31mCSI \x1b]52;c;Zg==\x07 \u009b33mC1 \u202ebidi\u2066iso\u2069\r\n  ForgedErr: 1\x7f",
+	}
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID {
+			_ = json.NewEncoder(w).Encode(tr)
+			return
+		}
+		http.NotFound(w, r)
+	}, hubsync.CredentialKindOAuth)
+
+	outputFormat = ""
+	triggerOutputJSON = false
+	out := captureStdout(t, func() {
+		require.NoError(t, runTriggerGet(triggerGetCmd, []string{trID}))
+	})
+
+	require.Truef(t, utf8.ValidString(out), "trigger get contains invalid UTF-8:\n%q", out)
+	for i, r := range out {
+		if r == '\n' || r == '\t' {
+			continue
+		}
+		require.Falsef(t, r < 0x20 || r == 0x7f, "trigger get contains raw C0/DEL control U+%04X at byte %d:\n%q", r, i, out)
+		require.Falsef(t, r >= 0x80 && r <= 0x9f, "trigger get contains raw C1 control U+%04X at byte %d:\n%q", r, i, out)
+		require.Falsef(t, unicode.Is(unicode.Cf, r), "trigger get contains raw Unicode Cf format/bidi rune U+%04X at byte %d:\n%q", r, i, out)
+		require.Falsef(t, r == '\u2028' || r == '\u2029', "trigger get contains raw line/paragraph separator U+%04X at byte %d:\n%q", r, i, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		assert.False(t, strings.HasPrefix(line, "  Forged:"), "description allowed newline spoofing:\n%s", out)
+		assert.False(t, strings.HasPrefix(line, "  ForgedErr:"), "lastFireError allowed newline spoofing:\n%s", out)
+	}
+
+	// Verify each of Description, Message, and Last Error carries the escaped forms.
+	assert.Contains(t, out, `Description: desc \x1b]52;c;aGVsbG8=\x07 \x1b[32mCSI\u{009b}31m \u{202e}bidi\u{2069}\x0d\x0a  Forged: line\x7f`)
+	assert.Contains(t, out, "Message:     line1 \\x1b[31mCSI\\x1b]0;title\\x07 \\u{009b}32mC1 \\u{202e}bidi\\u{2069}\\x0d\nline2\tkeep\\u{2028}sep\\x7f")
+	assert.Contains(t, out, `Last Error:  err \x1b[31mCSI \x1b]52;c;Zg==\x07 \u{009b}33mC1 \u{202e}bidi\u{2066}iso\u{2069}\x0d\x0a  ForgedErr: 1\x7f`)
+	assert.Contains(t, out, `Name:        trig-\x1b[31mred\u{202e}`)
+	assert.Contains(t, out, `Source:      webhook:ep-\x1b[34m1\u{202e}`)
+	assert.Contains(t, out, `Agent:       agent-\x1b[36m1\u{202e}`)
+}
