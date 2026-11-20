@@ -140,6 +140,55 @@ export A2A_API_KEY="your-secure-static-api-key"
 ### Step 4: Verify Connection
 Return to the Hub **Admin > Integrations** page. Click **Reconnect** on the A2A Bridge integration card. Once the Hub successfully dials the bridge's RPC server on port `9090`, the status badge will update to **Connected**. If the bridge restarts or loses its RPC connection later, the Hub's plugin supervisor automatically re-dials it with exponential backoff and replays topic subscriptions; see [Message-Bus Plugin Supervision](/scion/hosted/user/external-channels/#message-bus-plugin-supervision).
 
+### Step 5: Configure a Reverse Proxy
+
+The A2A HTTP server (`:8443` by default) listens on plain HTTP. Terminate TLS at a reverse proxy such as Caddy, nginx, or a cloud load balancer in front of it, and keep the broker plugin RPC listener (`localhost:9090`) unreachable from outside the host.
+
+:::caution[Avoid Path Collisions When Co-Hosting with the Hub]
+Both the Scion Hub Web Dashboard and the A2A Protocol Bridge serve paths under `/projects/*` (as well as `/.well-known/*`, `/healthz`, `/readyz`, and `/metrics`). **Do not route `/projects/*` on the Hub's hostname directly to the bridge.**
+
+The Web Dashboard uses `/projects/*` for browser pages such as `/projects/<slug>` and `/projects/<slug>/settings`, while the bridge serves A2A endpoints under `/projects/{projectSlug}/agents/...` and enforces A2A credential authentication (`X-API-Key` or `Authorization: Bearer`) on non-public paths. Routing `/projects/*` to the bridge sends direct links and page refreshes for Hub project pages to the bridge, which rejects cookie-authenticated browser requests with `401 Unauthorized` instead of loading the Web Dashboard.
+:::
+
+When co-hosting the bridge and the Hub behind Caddy on the same machine, isolate the bridge with either a separate hostname or a stripped path prefix:
+
+#### Option A: Separate Hostname (Recommended)
+
+Serve the Hub and the bridge on distinct hostnames so neither service shares a URL namespace (including root-level `/.well-known/*` discovery endpoints):
+
+```caddy
+hub.example.com {
+    reverse_proxy localhost:8080
+}
+
+a2a.example.com {
+    reverse_proxy localhost:8443
+}
+```
+
+Set `bridge.external_url` in `scion-a2a-bridge.yaml` (and **External URL** in **Admin > Integrations > A2A Bridge**, if set there) to `https://a2a.example.com`. On a VM provisioned with `scripts/starter-hub/`, which obtains a wildcard certificate (`*.<CERT_DOMAIN>`), include the same `tls /etc/letsencrypt/live/<CERT_DOMAIN>/fullchain.pem /etc/letsencrypt/live/<CERT_DOMAIN>/privkey.pem` directive in both site blocks, and restore your custom `/etc/caddy/Caddyfile` after re-running `gce-start-hub.sh --full` (which writes the default single-site Hub Caddyfile).
+
+#### Option B: Distinct Path Prefix on the Same Hostname
+
+If you only have one hostname, mount the bridge under a dedicated prefix such as `/a2a/*` using Caddy's `handle_path` directive, which strips `/a2a` before forwarding requests to the bridge:
+
+```caddy
+hub.example.com {
+    handle_path /a2a/* {
+        reverse_proxy localhost:8443
+    }
+
+    handle {
+        reverse_proxy localhost:8080
+    }
+}
+```
+
+When serving the bridge under `/a2a/*`:
+* **Use `handle_path /a2a/*` (not `handle /a2a/*`)**: The bridge registers routes at `/projects/...` and `/.well-known/...` and expects the `/a2a` prefix to be stripped by the proxy.
+* **Include the prefix in `external_url`**: Set `bridge.external_url` in `scion-a2a-bridge.yaml` (and **External URL** in **Admin > Integrations > A2A Bridge**, if configured in the Admin UI overlay) to `https://hub.example.com/a2a` so generated Agent Cards and rewritten OIDC `jwks_uri` values advertise `https://hub.example.com/a2a/projects/<project-slug>/agents/<agent-slug>/jsonrpc` rather than the Hub's unprefixed `/projects/...` path.
+* **Point clients at the prefixed URLs**: Configure A2A clients with `https://hub.example.com/a2a/projects/<project-slug>/agents/<agent-slug>` (or `https://hub.example.com/a2a/.well-known/agent-card.json`). Root-level `https://hub.example.com/.well-known/*` remains served by the Hub.
+
 ### Dev-Mode Rebuild
 When running the Scion Hub in development mode (`MaintenanceConfig.RepoPath` is configured in `settings.yaml`), clicking **Update** inside the A2A integration detail page triggers an automatic compilation of the bridge binary directly from your local repository. The Hub will output instructions for you to restart the process manually to apply the new binary.
 
@@ -161,8 +210,9 @@ bridge:
   # Port and address for the A2A HTTP server (JSON-RPC, agent cards, health check).
   listen_address: ":8443"
 
-  # Public-facing base URL where A2A clients reach this bridge. 
+  # Public-facing base URL where A2A clients reach this bridge.
   # Used to construct agent card URLs and self-referencing links.
+  # Include any reverse-proxy path prefix (e.g., "https://hub.example.com/a2a").
   external_url: "https://a2a.example.com"
 
   # Identity included in generated Agent Cards.
@@ -463,6 +513,9 @@ Standard A2A JSON-RPC methods supported at the `/jsonrpc` endpoint:
 ---
 
 ## 10. Troubleshooting & Operations
+
+### Direct Links to `/projects/...` Return `401 Unauthorized`
+If opening or refreshing a Hub project URL (`/projects/<slug>`) in a browser returns `401` (`unauthorized`) instead of the Web Dashboard, your reverse proxy is routing `/projects/*` on the Hub's hostname to the A2A Protocol Bridge. Because the bridge enforces A2A token authentication on `/projects/*` routes, browser session cookies are rejected. Serve the bridge on a separate hostname or behind a stripped path prefix such as `/a2a/*`; see [Step 5: Configure a Reverse Proxy](#step-5-configure-a-reverse-proxy).
 
 ### Health Checks (`/healthz` & `/readyz`)
 * **Liveness (`/healthz`)**: Returns `HTTP 200 OK` as long as the HTTP server is listening. Used by container runtimes to detect deadlocks.
