@@ -258,3 +258,30 @@ func TestDetectLocalRuntime_OnPathButNotFunctioning(t *testing.T) {
 		t.Errorf("expected docker (podman not functioning), got %s", result)
 	}
 }
+
+func TestResetRuntimeDetectionCache(t *testing.T) {
+	mockRuntimeDetectionNone(t)
+
+	if _, err := detectLocalRuntimeOnce(); !errors.Is(err, ErrNoLocalRuntime) {
+		t.Fatalf("expected cached ErrNoLocalRuntime, got: %v", err)
+	}
+
+	lookPathFunc = func(file string) (string, error) {
+		if file == "docker" {
+			return "/usr/bin/docker", nil
+		}
+		return "", fmt.Errorf("not found: %s", file)
+	}
+	runCheckFunc = func(binary string, args []string) error { return nil }
+
+	// Without ResetRuntimeDetectionCache, detectLocalRuntimeOnce returns the cached error.
+	if _, err := detectLocalRuntimeOnce(); !errors.Is(err, ErrNoLocalRuntime) {
+		t.Fatalf("expected stale cached ErrNoLocalRuntime before reset, got: %v", err)
+	}
+
+	ResetRuntimeDetectionCache()
+	got, err := detectLocalRuntimeOnce()
+	if err != nil || got != "docker" {
+		t.Fatalf("expected fresh detection result docker after reset, got %q, %v", got, err)
+	}
+}

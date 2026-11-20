@@ -124,3 +124,10 @@ func OverrideRuntimeDetection(
 		resetDetectLocalRuntimeCache()
 	}
 }
+
+// ResetRuntimeDetectionCache clears the cached DetectLocalRuntime result used
+// by GetDefaultSettingsDataYAML so tests that mutate PATH do not leak cached
+// detection state across tests.
+func ResetRuntimeDetectionCache() {
+	resetDetectLocalRuntimeCache()
+}

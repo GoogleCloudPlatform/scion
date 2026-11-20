@@ -15,12 +15,14 @@
 package cmd
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
-
-	"bufio"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
@@ -28,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -57,8 +60,7 @@ By default, it initializes in:
 With --global, it initializes in the user's home folder.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		embedOnlyHarnesses := harness.EmbedOnlyHarnesses()
-		ep := invocationHubEndpoint()
-		remoteHub := ep != "" && !isLocalWorkstationEndpoint(ep)
+		remoteHub := isRemoteHubEndpoint(invocationHubEndpoint())
 
 		if globalInit || machineInit {
 			if !isJSONOutput() {
@@ -227,6 +229,115 @@ With --global, it initializes in the user's home folder.`,
 }
 
 const hubOnlyInitHint = "To use a remote Hub without a local container runtime, register it with 'scion hub add <name> <url>' and select it with 'scion use --hub <name>' (or run 'scion use <project>' to work without initializing a directory)"
+
+// isRemoteHubEndpoint reports whether endpoint is a validated, genuinely remote
+// Hub URL for which 'scion init' and 'scion init --machine' may skip the local
+// ~/.scion/ prerequisite and local container-runtime detection.
+//
+// It fails closed: empty strings, leading/trailing whitespace, malformed URLs,
+// non-http(s) schemes, userinfo/'@', queries, fragments, invalid ports,
+// plaintext non-loopback HTTP, unspecified bind addresses (0.0.0.0, ::),
+// container host aliases, and all loopback variants (localhost regardless of
+// case or trailing dot, *.localhost, 127.0.0.0/8, ::1, IPv4-mapped loopback,
+// and non-standard numeric IPv4 forms) return false so local checks stay on.
+func isRemoteHubEndpoint(endpoint string) bool {
+	if endpoint == "" || endpoint != strings.TrimSpace(endpoint) {
+		return false
+	}
+	if config.ValidateHubURL(endpoint) != nil || config.CheckHubTransport(endpoint) != nil {
+		return false
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Opaque != "" || u.Host == "" || strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	if portStr := u.Port(); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+	}
+	rawHost := u.Hostname()
+	if rawHost == "" || strings.Contains(rawHost, "%") {
+		return false
+	}
+	if strings.HasPrefix(u.Host, "[") {
+		ip := net.ParseIP(rawHost)
+		return ip != nil && !ip.IsLoopback() && !ip.IsUnspecified()
+	}
+	if ip := net.ParseIP(rawHost); ip != nil {
+		return !ip.IsLoopback() && !ip.IsUnspecified()
+	}
+	if !isValidRemoteHubHostname(rawHost) {
+		return false
+	}
+	canon := transportauth.CanonicalHost(rawHost)
+	if config.IsLoopbackHost(canon) || strings.HasSuffix(canon, ".localhost") || config.IsAgentHostAliasHost(canon) {
+		return false
+	}
+	return true
+}
+
+func isValidRemoteHubHostname(rawHost string) bool {
+	h := strings.TrimSuffix(rawHost, ".")
+	if h == "" || len(h) > 253 || strings.HasSuffix(h, ".") || net.ParseIP(h) != nil {
+		return false
+	}
+	labels := strings.Split(h, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || !isValidHostnameLabel(label) {
+			return false
+		}
+	}
+	last := labels[len(labels)-1]
+	if isAllASCIIDigits(last) {
+		return false
+	}
+	if len(labels) == 1 && isHexIntegerLiteral(last) {
+		return false
+	}
+	return true
+}
+
+func isValidHostnameLabel(label string) bool {
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		isAlphaNumUnderscore := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+		if i == 0 || i == len(label)-1 {
+			if !isAlphaNumUnderscore {
+				return false
+			}
+			continue
+		}
+		if !isAlphaNumUnderscore && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllASCIIDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+func isHexIntegerLiteral(s string) bool {
+	if len(s) <= 2 || s[0] != '0' || (s[1] != 'x' && s[1] != 'X') {
+		return false
+	}
+	for i := 2; i < len(s); i++ {
+		c := s[i]
+		isHexDigit := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHexDigit {
+			return false
+		}
+	}
+	return true
+}
 
 func appendHubOnlyInitHint(err error) error {
 	if errors.Is(err, config.ErrNoLocalRuntime) {
