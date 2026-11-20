@@ -45,12 +45,15 @@ const (
 // GitHubAppConfigResponse is the API response for GitHub App configuration.
 // Sensitive fields (private key, webhook secret) are never returned.
 type GitHubAppConfigResponse struct {
-	AppID                     int64                    `json:"app_id"`
-	APIBaseURL                string                   `json:"api_base_url,omitempty"`
-	WebhooksEnabled           bool                     `json:"webhooks_enabled"`
-	Configured                bool                     `json:"configured"`
-	HasPrivateKey             bool                     `json:"has_private_key"`
-	PrivateKeySource          string                   `json:"private_key_source,omitempty"`
+	AppID           int64  `json:"app_id"`
+	APIBaseURL      string `json:"api_base_url,omitempty"`
+	WebhooksEnabled bool   `json:"webhooks_enabled"`
+	Configured      bool   `json:"configured"`
+	HasPrivateKey   bool   `json:"has_private_key"`
+	// PrivateKeySource reports which private key source is active: "config", "file", or "secret".
+	PrivateKeySource string `json:"private_key_source,omitempty"`
+	// PrivateKeyOverridesSecret is true when a configured private key or private_key_path
+	// takes precedence over a stored GITHUB_APP_PRIVATE_KEY hub secret.
 	PrivateKeyOverridesSecret bool                     `json:"private_key_overrides_secret,omitempty"`
 	HasWebhookSecret          bool                     `json:"has_webhook_secret"`
 	InstallationURL           string                   `json:"installation_url,omitempty"`
@@ -64,7 +67,13 @@ const githubAppHealthCheckName = "github-app-health-check"
 // periodic GitHub App health check on the scheduler to match the current
 // GitHubAppConfig (AppID and WebhooksEnabled). Safe to call at startup and on
 // live config updates without creating duplicate registrations.
+//
+// githubAppScheduleMu is held across the config read and scheduler mutation
+// (and acquired before s.mu) so concurrent updates cannot apply a stale state.
 func (s *Server) syncGitHubAppHealthCheckSchedule() {
+	s.githubAppScheduleMu.Lock()
+	defer s.githubAppScheduleMu.Unlock()
+
 	s.mu.RLock()
 	sched := s.scheduler
 	appConfigured := s.config.GitHubAppConfig.AppID != 0
@@ -155,17 +164,17 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.config.GitHubAppConfig.PrivateKey = *req.PrivateKey
 		s.githubAppPrivateKeyFromSecret = true
-		startupShadowSource := ""
+		overrideSource := ""
 		if s.startupGitHubAppPrivateKey {
-			startupShadowSource = GitHubAppPrivateKeySourceConfig
+			overrideSource = GitHubAppPrivateKeySourceConfig
 		} else if s.config.GitHubAppConfig.PrivateKeyPath != "" {
-			startupShadowSource = GitHubAppPrivateKeySourceFile
+			overrideSource = GitHubAppPrivateKeySourceFile
 		}
 		s.githubAppIdentity.reset()
 		s.mu.Unlock()
-		if startupShadowSource != "" {
-			slog.Warn("GitHub App private key saved to hub secrets, but a startup-configured key will take precedence after restart",
-				"startup_source", startupShadowSource,
+		if overrideSource != "" {
+			slog.Warn("GitHub App private key saved to hub secrets, but a configured private key or private_key_path will take precedence after restart",
+				"override_source", overrideSource,
 				"secret_name", GitHubAppSecretPrivateKey,
 			)
 		}

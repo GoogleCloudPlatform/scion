@@ -2371,11 +2371,15 @@ type Server struct {
 	// startupGitHubAppPrivateKey records whether GitHubAppConfig.PrivateKey
 	// was populated at server startup (env/config). githubAppPrivateKeyFromSecret
 	// (guarded by mu) is set true when a key is uploaded via the Admin API in
-	// this process so status reporting can distinguish an active startup key
+	// this process so status reporting can distinguish an active configured key
 	// from an in-memory cache of the uploaded hub secret.
+	// githubAppKeyOverrideWarned gates the one-time override warning log before
+	// doing any secret-metadata lookup. githubAppScheduleMu serializes
+	// syncGitHubAppHealthCheckSchedule (acquired before mu).
 	startupGitHubAppPrivateKey    bool
 	githubAppPrivateKeyFromSecret bool
-	githubAppKeyOverrideWarnOnce  sync.Once
+	githubAppKeyOverrideWarned    atomic.Bool
+	githubAppScheduleMu           sync.Mutex
 
 	logQueryService  logQuerier               // Cloud Logging query service (nil = disabled)
 	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)

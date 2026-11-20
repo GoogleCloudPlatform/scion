@@ -7615,7 +7615,7 @@ describe('GitHub App card: webhooks hint, private key source, and override warni
     expect(text).not.toContain('Enable to receive installation lifecycle events from GitHub');
   });
 
-  it('shows active key source and warning when a startup file key overrides a stored secret', async () => {
+  it('shows active key source and warning when a file key overrides a stored secret', async () => {
     element = await createComponent(
       mockGitHubAppResponse({
         app_id: 42,
@@ -7633,6 +7633,27 @@ describe('GitHub App card: webhooks hint, private key source, and override warni
     expect(warnEl).not.toBeNull();
     expect(warnEl?.textContent).toContain('overriding the stored hub secret');
     expect(warnEl?.textContent).toContain('private_key_path');
+    expect(warnEl?.textContent).toContain('configured private key');
+  });
+
+  it('shows active key source and warning when a config key overrides a stored secret', async () => {
+    element = await createComponent(
+      mockGitHubAppResponse({
+        app_id: 42,
+        webhooks_enabled: false,
+        configured: true,
+        has_private_key: true,
+        private_key_source: 'config',
+        private_key_overrides_secret: true,
+        has_webhook_secret: false,
+      })
+    );
+    const sourceEl = query(element, '[data-github-app-key-source]');
+    expect(sourceEl?.textContent).toContain('server configuration / environment');
+    const warnEl = query(element, '[data-github-app-key-override-warning]');
+    expect(warnEl).not.toBeNull();
+    expect(warnEl?.textContent).toContain('server configuration / environment');
+    expect(warnEl?.textContent).toContain('overriding the stored hub secret');
   });
 
   it('shows stored secret source without override warning when secret is active', async () => {

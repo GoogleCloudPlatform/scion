@@ -183,7 +183,8 @@ const (
 )
 
 // githubAppKeyStatus describes which private key source is active for the
-// GitHub App and whether a startup-configured key overrides a stored secret.
+// GitHub App and whether a configured private key or private_key_path overrides
+// a stored GITHUB_APP_PRIVATE_KEY hub secret.
 type githubAppKeyStatus struct {
 	hasPrivateKey   bool
 	source          string
@@ -206,8 +207,9 @@ func (s *Server) hasStoredGitHubAppSecret(ctx context.Context, name string) bool
 
 // githubAppPrivateKeyStatus resolves the active GitHub App private key source
 // using the same precedence as getGitHubAppClient (in-memory config, then
-// private_key_path, then hub secret) and reports whether a startup-configured
-// key is overriding a stored GITHUB_APP_PRIVATE_KEY hub secret.
+// private_key_path, then hub secret) and reports whether a configured private
+// key or private_key_path is overriding a stored GITHUB_APP_PRIVATE_KEY hub
+// secret.
 func (s *Server) githubAppPrivateKeyStatus(ctx context.Context) (GitHubAppServerConfig, githubAppKeyStatus) {
 	s.mu.RLock()
 	cfg := s.config.GitHubAppConfig
@@ -243,21 +245,25 @@ func (s *Server) githubAppPrivateKeyStatus(ctx context.Context) (GitHubAppServer
 	return cfg, githubAppKeyStatus{}
 }
 
-// warnGitHubAppKeyOverride logs a warning once per process if a
-// startup-configured private key (in-memory config or private_key_path) is
-// overriding a stored GITHUB_APP_PRIVATE_KEY hub secret. It never logs key
-// material.
+// warnGitHubAppKeyOverride logs a warning once per process if a configured
+// private key or private_key_path is overriding a stored GITHUB_APP_PRIVATE_KEY
+// hub secret. It checks an atomic flag before doing any secret-metadata lookup
+// so hot paths like getGitHubAppClient incur no extra DB reads after the first
+// warning. It never logs key material.
 func (s *Server) warnGitHubAppKeyOverride(ctx context.Context) {
+	if s.githubAppKeyOverrideWarned.Load() {
+		return
+	}
 	_, st := s.githubAppPrivateKeyStatus(ctx)
 	if !st.overridesSecret {
 		return
 	}
-	s.githubAppKeyOverrideWarnOnce.Do(func() {
-		slog.Warn("GitHub App startup-configured private key is overriding the stored hub secret",
+	if s.githubAppKeyOverrideWarned.CompareAndSwap(false, true) {
+		slog.Warn("GitHub App configured private key or private_key_path is overriding the stored hub secret",
 			"active_source", st.source,
 			"overridden_secret", GitHubAppSecretPrivateKey,
 		)
-	})
+	}
 }
 
 // githubAppCredentialPresence checks whether the GitHub App private key and

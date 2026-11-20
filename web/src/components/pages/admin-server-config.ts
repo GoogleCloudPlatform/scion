@@ -8483,7 +8483,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   data-github-app-key-source
                   style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
                   >${this.githubAppPrivateKeySource === 'config'
-                    ? 'Active key source: startup configuration / environment'
+                    ? 'Active key source: server configuration / environment'
                     : this.githubAppPrivateKeySource === 'file'
                       ? 'Active key source: private key file (private_key_path)'
                       : 'Stored as hub secret: GITHUB_APP_PRIVATE_KEY'}</span
@@ -8495,12 +8495,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                   data-github-app-key-override-warning
                   style="margin-top: 0.5rem; margin-bottom: 0;"
                 >
-                  A startup-configured private key
+                  A configured private key
                   (${this.githubAppPrivateKeySource === 'file'
                     ? 'private_key_path'
-                    : 'environment/config'})
-                  is overriding the stored hub secret (GITHUB_APP_PRIVATE_KEY). Remove the startup
-                  key configuration to use the key uploaded here.
+                    : 'server configuration / environment'})
+                  is overriding the stored hub secret (GITHUB_APP_PRIVATE_KEY). Remove the
+                  configured private key or private_key_path to use the key uploaded here.
                 </div>`
               : ''}
           </div>
