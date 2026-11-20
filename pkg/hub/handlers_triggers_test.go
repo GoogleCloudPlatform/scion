@@ -3733,4 +3733,47 @@ func TestWebhookEndpointCreate_DefaultTrigger(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, secretsAfterFault, len(secretsBefore), "internal secret insert must roll back on CreateTrigger store fault")
 	})
+
+	t.Run("stamps default trigger with the same fixture provenance as its endpoint", func(t *testing.T) {
+		f := setupTriggersTestFixture(t)
+		ctx := context.Background()
+
+		ti := tiStoreFixture(t, f.store, f.owner.ID, time.Now().Add(time.Hour))
+		rdOwner, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		require.NoError(t, err)
+		_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rdOwner.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      ti.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          f.projectID,
+			CreatedBy:        f.owner.ID,
+			CreatedAt:        time.Now(),
+		})
+		require.NoError(t, err)
+		tiAuth := NewAuthenticatedUser(ti.ID, ti.Email, ti.DisplayName, store.UserRoleMember, "api")
+
+		rec := f.doWebhookEndpoint(t, tiAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: "fixture-one-call-hook",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentID: f.targetAgent.ID,
+				Message: "fixture provenance check",
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		var created WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		require.NotEmpty(t, created.ID)
+		require.NotEmpty(t, created.TriggerID)
+
+		storedEp, err := f.store.GetWebhookEndpoint(ctx, created.ID)
+		require.NoError(t, err)
+		storedTr, err := f.store.GetTrigger(ctx, created.TriggerID)
+		require.NoError(t, err)
+
+		assert.Equal(t, ti.ID, storedEp.Fixture.RootID)
+		assert.Equal(t, f.owner.ID, storedEp.Fixture.IssuerID)
+		assert.Equal(t, storedEp.Fixture, storedTr.Fixture, "default trigger must carry the same fixture provenance stamp as its endpoint")
+	})
 }

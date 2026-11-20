@@ -1640,3 +1640,73 @@ func TestFixturePurge_PurgesStampedWebhookEndpointsAndSecrets(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "cleanup must delete the leftover stamped endpoint's internal secret row")
 	fpRequireBasis(t, e.store, mutationTypeWebhookEndpointDelete, leftoverEpID, fx2ID, e.issuerID)
 }
+
+// One-call webhook endpoint + defaultTrigger (ptone/scion#8032): the default
+// trigger created inside POST /webhook-endpoints carries the same fixture
+// provenance stamp as its endpoint and is removed together with the endpoint
+// and its secret when the test identity is purged.
+func TestFixturePurge_PurgesOneCallDefaultTriggerWithEndpoint(t *testing.T) {
+	e := newFPEnv(t, "fpp-default-trigger")
+	e.srv.config.HubEndpoint = "https://hub-public.example.com"
+	var active []experiments.Experiment
+	for _, exp := range e.srv.experimentRegistry().All() {
+		if exp.Name == experiments.Triggers {
+			exp.Default = true
+		}
+		active = append(active, exp)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	e.srv.experiments = reg
+
+	ctx := context.Background()
+	fxID := e.fx.Identity.ID
+
+	fxTargetAgent := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fx-onecall-target")
+
+	epRec := doRequestWithToken(t, e.srv, e.fx.AccessToken, http.MethodPost,
+		"/api/v1/projects/"+e.project+"/webhook-endpoints",
+		CreateWebhookEndpointRequest{
+			Name: "fx-onecall-hook",
+			DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+				AgentID: fxTargetAgent,
+				Message: "one-call provenance cascade",
+			},
+		})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var created WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &created))
+	require.NotEmpty(t, created.ID)
+	require.NotEmpty(t, created.TriggerID)
+
+	storedEp, err := e.store.GetWebhookEndpoint(ctx, created.ID)
+	require.NoError(t, err)
+	storedTr, err := e.store.GetTrigger(ctx, created.TriggerID)
+	require.NoError(t, err)
+	assert.Equal(t, e.stamp(), storedEp.Fixture)
+	assert.Equal(t, storedEp.Fixture, storedTr.Fixture, "one-call default trigger must share its endpoint's fixture provenance stamp")
+
+	secretKey := store.WebhookEndpointSecretKey(e.project, created.ID, 1)
+	_, err = e.store.GetSecret(ctx, secretKey, store.ScopeHub, e.srv.hubID)
+	require.NoError(t, err)
+
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.True(t, r.IdentityDeleted)
+	assert.Equal(t, 1, r.Deleted.Agents)
+	assert.Equal(t, 1, r.Deleted.Triggers)
+	assert.Equal(t, 1, r.Deleted.WebhookEndpoints)
+	assert.Equal(t, 1, r.Deleted.Projects)
+
+	_, err = e.store.GetTrigger(ctx, created.TriggerID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "test-identity purge must remove the one-call default trigger")
+	_, err = e.store.GetWebhookEndpoint(ctx, created.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "test-identity purge must remove the webhook endpoint")
+	_, err = e.store.GetSecret(ctx, secretKey, store.ScopeHub, e.srv.hubID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "test-identity purge must remove the endpoint's internal secret")
+
+	fpRequireBasis(t, e.store, mutationTypeTriggerDelete, created.TriggerID, fxID, e.issuerID)
+	fpRequireBasis(t, e.store, mutationTypeWebhookEndpointDelete, created.ID, fxID, e.issuerID)
+}
