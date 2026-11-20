@@ -127,6 +127,7 @@ type realBrokerDispatcher struct {
 	deliverRequests []agentcontrol.DeliverRequest
 	startCalls      int
 	beforeDeliver   func(req *agentcontrol.DeliverRequest)
+	afterDeliver    func(status int, resp agentcontrol.DeliverResponse)
 	onStart         func(ctx context.Context, target *store.Agent)
 }
 
@@ -228,6 +229,12 @@ func (d *realBrokerDispatcher) DeliverMessage(ctx context.Context, agentID strin
 	d.srv.handleRuntimeBrokerRoutes(rr, r)
 	var resp agentcontrol.DeliverResponse
 	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	d.mu.Lock()
+	afterHook := d.afterDeliver
+	d.mu.Unlock()
+	if afterHook != nil {
+		afterHook(rr.Code, resp)
+	}
 	return rr.Code, resp, nil
 }
 
@@ -3394,4 +3401,256 @@ func TestHold_IdleSuspend_StaleClaimSnapshotFallsThroughToSessionHold(t *testing
 	pasted := strings.Join(ca.tmux.pastedTexts(), "\n")
 	assert.Contains(t, pasted, "o1-seed-hold")
 	assert.Contains(t, pasted, "o1-stale-claim-held")
+}
+
+// TestHoldA2_SessionClosedAfterRequestTakenStaysPartialNeverHeld pins the A2
+// design invariant (ptone/scion#8272): once the Hub session writer has taken
+// the deliver-message RpcRequest frame, a session close yields
+// conduit.ErrSessionClosed without conduit.ErrRequestNotSent. Because the
+// request may already have reached the target, /deliver must answer 504 with
+// outcome=unknown, record the row as partial without a no_session proof, and
+// never hold or re-drive the message.
+func TestHoldA2_SessionClosedAfterRequestTakenStaysPartialNeverHeld(t *testing.T) {
+	t.Run("deliver_endpoint_records_partial_and_refuses_hold", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+
+		var logBuf lockedLogBuffer
+		f.srv.messageLog = slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+		requestTaken := make(chan struct{})
+		var takeOnce sync.Once
+		ca := f.connectDeliverSession(t, f.public.URL, true, func(conduit.RPCHandler) conduit.RPCHandler {
+			return conduit.RPCHandlerFunc(func(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+				if req.GetPath() == agentControlPrefix+agentcontrol.RouteDeliverMessage {
+					takeOnce.Do(func() { close(requestTaken) })
+					<-ctx.Done()
+				}
+				return &conduitv1.RpcResponse{Status: http.StatusOK}
+			})
+		})
+
+		m := &store.Message{
+			ID:            uuid.NewString(),
+			ProjectID:     f.launched.ProjectID,
+			AgentID:       f.launched.ID,
+			Sender:        "agent:" + f.agent.Slug,
+			SenderID:      f.agent.ID,
+			Recipient:     "agent:" + f.launched.Slug,
+			RecipientID:   f.launched.ID,
+			Msg:           "taken-before-close",
+			Type:          messages.TypeInstruction,
+			DispatchState: store.MessageDispatchDispatched,
+			HoldLaunchID:  f.launched.RunID,
+		}
+		require.NoError(t, f.store.CreateMessage(ctx, m))
+
+		type deliverResult struct {
+			status int
+			resp   agentcontrol.DeliverResponse
+			err    error
+		}
+		deliverDone := make(chan deliverResult, 1)
+		go func() {
+			status, resp, err := f.disp.DeliverMessage(ctx, f.launched.ID, &agentcontrol.DeliverRequest{
+				V:          1,
+				DeliveryID: "d-taken-close",
+				MessageIDs: []string{m.ID},
+				Op:         agentcontrol.OpPaste,
+				Text:       ptrString("taken-before-close"),
+				DeadlineMS: 5000,
+				SubmitKeys: []string{"Enter"},
+			})
+			deliverDone <- deliverResult{status: status, resp: resp, err: err}
+		}()
+
+		select {
+		case <-requestTaken:
+		case <-time.After(10 * time.Second):
+			t.Fatal("deliver-message request frame never taken and received before timeout")
+		}
+
+		inFlight, err := f.store.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		require.Equal(t, store.MessageDispatchDelivering, inFlight.DispatchState)
+
+		// Close the session while the taken request is in flight without an RPC reply.
+		ca.stop(t)
+
+		var res deliverResult
+		select {
+		case res = <-deliverDone:
+		case <-time.After(10 * time.Second):
+			t.Fatal("/deliver did not return after session close")
+		}
+		require.NoError(t, res.err)
+		assert.Equal(t, http.StatusGatewayTimeout, res.status)
+		assert.Equal(t, deliverOutcomeUnknown, res.resp.Outcome)
+		assert.Empty(t, res.resp.Reason)
+
+		recs := logBuf.records(t, "message delivery outcome unknown")
+		require.Len(t, recs, 1)
+		errText, _ := recs[0]["error"].(string)
+		assert.Contains(t, errText, conduit.ErrSessionClosed.Error())
+		assert.NotContains(t, errText, conduit.ErrRequestNotSent.Error())
+
+		afterDeliver, err := f.store.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchPartial, afterDeliver.DispatchState)
+		assert.Empty(t, afterDeliver.NotReached)
+		assert.Nil(t, afterDeliver.NotReachedAt)
+		assert.Nil(t, afterDeliver.HoldUntil)
+
+		// Same-delivery-id replay returns the stored partial/unknown outcome.
+		replayCode, replayResp, err := f.disp.DeliverMessage(ctx, f.launched.ID, &agentcontrol.DeliverRequest{
+			V:          1,
+			DeliveryID: "d-taken-close",
+			MessageIDs: []string{m.ID},
+			Op:         agentcontrol.OpPaste,
+			Text:       ptrString("taken-before-close"),
+			DeadlineMS: 5000,
+			SubmitKeys: []string{"Enter"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, replayCode)
+		assert.True(t, replayResp.Replayed)
+		assert.Equal(t, agentcontrol.OutcomePartial, replayResp.Outcome)
+		assert.Equal(t, "unknown", replayResp.Stage)
+
+		hasHold, err := f.store.HasAgentDeliveryHold(ctx, f.launched.ID)
+		require.NoError(t, err)
+		assert.False(t, hasHold)
+
+		// Even if a broker reports code=awaiting_session afterward, the partial row
+		// must fail and notify rather than entering awaiting_session.
+		out := f.postReport(t, hubclient.MessageFailure{
+			MessageID: m.ID,
+			AgentID:   f.launched.Slug,
+			ProjectID: f.launched.ProjectID,
+			Code:      hubclient.MessageFailureCodeAwaitingSession,
+			Reason:    "session closed after request taken",
+		})
+		assert.Equal(t, 0, out.Held)
+		assert.Equal(t, 1, out.Marked)
+
+		afterReport, err := f.store.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchFailed, afterReport.DispatchState)
+		assert.Nil(t, afterReport.HoldUntil)
+
+		hasHold, err = f.store.HasAgentDeliveryHold(ctx, f.launched.ID)
+		require.NoError(t, err)
+		assert.False(t, hasHold)
+	})
+
+	t.Run("redrive_session_close_after_request_taken_never_reholds_or_redelivers", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+		origHoldUntil := time.Now().UTC().Add(4 * time.Minute).Truncate(time.Millisecond)
+		m := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "drop-after-taken-redrive", origHoldUntil)
+
+		type deliverSnapshot struct {
+			status int
+			resp   agentcontrol.DeliverResponse
+			msg    *store.Message
+			err    error
+		}
+		snapCh := make(chan deliverSnapshot, 1)
+		var snapOnce sync.Once
+		f.disp.mu.Lock()
+		f.disp.afterDeliver = func(status int, resp agentcontrol.DeliverResponse) {
+			snapOnce.Do(func() {
+				cur, err := f.store.GetMessage(ctx, m.ID)
+				snapCh <- deliverSnapshot{status: status, resp: resp, msg: cur, err: err}
+			})
+		}
+		f.disp.mu.Unlock()
+
+		requestTaken := make(chan struct{})
+		var takeOnce sync.Once
+		ca := f.connectDeliverSession(t, f.public.URL, true, func(conduit.RPCHandler) conduit.RPCHandler {
+			return conduit.RPCHandlerFunc(func(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+				if req.GetPath() == agentControlPrefix+agentcontrol.RouteDeliverMessage {
+					takeOnce.Do(func() { close(requestTaken) })
+					<-ctx.Done()
+				}
+				return &conduitv1.RpcResponse{Status: http.StatusOK}
+			})
+		})
+
+		select {
+		case <-requestTaken:
+		case <-time.After(10 * time.Second):
+			t.Fatal("re-drive never delivered request frame to session before timeout")
+		}
+
+		inFlight, err := f.store.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		require.Equal(t, store.MessageDispatchDelivering, inFlight.DispatchState)
+
+		ca.stop(t)
+
+		var snap deliverSnapshot
+		select {
+		case snap = <-snapCh:
+		case <-time.After(10 * time.Second):
+			t.Fatal("re-drive /deliver call never returned after session close")
+		}
+		require.NoError(t, snap.err)
+		assert.Equal(t, http.StatusGatewayTimeout, snap.status)
+		assert.Equal(t, deliverOutcomeUnknown, snap.resp.Outcome)
+		assert.Empty(t, snap.resp.Reason)
+		require.NotNil(t, snap.msg)
+		assert.Equal(t, store.MessageDispatchPartial, snap.msg.DispatchState)
+		assert.Empty(t, snap.msg.NotReached)
+		assert.Nil(t, snap.msg.NotReachedAt)
+
+		// Broker treats 504 outcome=unknown as PartialDeliveryError (1 attempt, no
+		// retry, no awaiting_session code), transitioning partial -> failed.
+		failed := f.waitMessageState(t, m.ID, store.MessageDispatchFailed)
+		require.NotNil(t, failed.DispatchFailureReason)
+		assert.Contains(t, *failed.DispatchFailureReason, "conduit delivery outcome unknown")
+		assert.Len(t, f.disp.deliveries(), 1, "504 outcome=unknown must not be retried by broker")
+
+		require.Eventually(t, func() bool {
+			ok, herr := f.store.HasAgentDeliveryHold(ctx, f.launched.ID)
+			return herr == nil && !ok
+		}, 5*time.Second, 10*time.Millisecond, "hold marker must clear and stay cleared")
+		require.Eventually(t, func() bool {
+			return len(f.disp.notices()) == 1
+		}, 5*time.Second, 10*time.Millisecond, "sender must receive failure notice")
+
+		// Ensure the closed session is evicted before connecting a replacement session.
+		require.Eventually(t, func() bool {
+			st, serr := f.srv.agentConduitDeliverSessionState(ctx, f.launched)
+			if serr != nil || st != agentDeliverSessionNone {
+				return false
+			}
+			ps, perr := f.sharedRegStore.ListPrincipalSessions(ctx, registry.PrincipalAgent, f.launched.ID)
+			return perr == nil && len(ps.Sessions) == 0
+		}, 10*time.Second, 10*time.Millisecond, "hub relay must evict closed conduit session")
+
+		// Connect a replacement session and send a live control DM to prove m is
+		// never re-driven on reconnect (preventing duplicate delivery).
+		ca2 := f.connectDeliverSession(t, f.public.URL, true, nil)
+		f.srv.sweepHeldMessages(ctx)
+
+		fresh, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		ctrlRes, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    f.agent,
+			SenderIdentity: &storedAgentIdentity{agent: f.agent},
+			TargetAgent:    fresh,
+			ProjectID:      fresh.ProjectID,
+			Msg:            "control-after-reconnect",
+			Type:           messages.TypeInstruction,
+		})
+		require.Nil(t, dmErr)
+		f.waitMessageState(t, ctrlRes.MessageID, store.MessageDispatchDelivered)
+
+		pasted := ca2.tmux.pastedTexts()
+		require.Len(t, pasted, 1)
+		assert.Contains(t, pasted[0], "control-after-reconnect")
+		assert.NotContains(t, pasted[0], "drop-after-taken-redrive")
+	})
 }
