@@ -1135,6 +1135,10 @@ export function renderMadeRow(
     !isDismiss && e.provenance === 'direct' && e.outcome === 'override' && e.previousChoiceLabel
       ? `from ${e.previousChoiceLabel}${e.previousOtherText ? ` “${e.previousOtherText}”` : ''}`
       : '';
+  const dismissReason =
+    isDismiss && e.dismissReason
+      ? html`<div class="dismiss-reason muted" data-dismiss-reason>${e.dismissReason}</div>`
+      : nothing;
 
   return html`
     <tr class=${isFollow ? 'follow' : ''} data-answer-row=${e.answerId}>
@@ -1158,11 +1162,7 @@ export function renderMadeRow(
       </td>
       <td data-answer-cell class=${otherText ? 'ans' : nothing}>
         ${isDismiss
-          ? html`<b>Dismissed</b>${e.dismissReason
-                ? html`<div class="dismiss-reason muted" data-dismiss-reason>
-                    ${e.dismissReason}
-                  </div>`
-                : nothing}`
+          ? html`<b>Dismissed</b>${dismissReason}`
           : otherText
             ? html`<div class="ans-clamp" title=${`${answerLabel}: “${otherText}”`}>
                 <b>${answerLabel}:</b> “${otherText}”
