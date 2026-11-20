@@ -332,11 +332,10 @@ func TestTriggerAutoPause_CreatorPauseIndependentOfScheduleBudget(t *testing.T) 
 	assert.Equal(t, store.TriggerStatusActive, afterTargetPass.Status,
 		"mentioning deleted agent ID in message body must not trigger target_deleted pause")
 
-	// Calling pauseSchedulesAuthoredByAgent (even with a live context) must no
-	// longer pause triggers directly — triggers own their own step/budget.
-	expiredCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	f.srv.pauseSchedulesAuthoredByAgent(expiredCtx, f.agentA)
+	// Calling pauseSchedulesAuthoredByAgent with a live context must not pause
+	// triggers — triggers are decoupled into their own step and budget
+	// (pauseTriggersAuthoredByAgent) so schedule work cannot starve them.
+	f.srv.pauseSchedulesAuthoredByAgent(ctx, f.agentA)
 	afterSchedPass, err := f.store.GetTrigger(ctx, trAuthored.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.TriggerStatusActive, afterSchedPass.Status)
