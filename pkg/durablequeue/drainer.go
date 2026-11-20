@@ -344,19 +344,15 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget t
 		// name (protecting against duplicate Owner strings or stale passes).
 		claimOwner := d.nextClaimOwner()
 		var (
-			rows []store.DurableQueueRow
-			err  error
+			rows       []store.DurableQueueRow
+			nextCursor string
+			err        error
 		)
 		if d.fairClaimer != nil {
 			d.mu.Lock()
 			afterProject := d.lastProject
 			d.mu.Unlock()
-			rows, err = d.fairClaimer.ClaimDurableItemsFair(ctx, d.cfg.Kind, claimOwner, afterProject, now, now.Add(d.cfg.LeaseDuration), batch)
-			if err == nil && len(rows) > 0 {
-				d.mu.Lock()
-				d.lastProject = rows[len(rows)-1].ProjectID
-				d.mu.Unlock()
-			}
+			rows, nextCursor, err = d.fairClaimer.ClaimDurableItemsFair(ctx, d.cfg.Kind, claimOwner, afterProject, now, now.Add(d.cfg.LeaseDuration), batch)
 		} else {
 			rows, err = d.cfg.Store.ClaimDurableItems(ctx, d.cfg.Kind, claimOwner, now, now.Add(d.cfg.LeaseDuration), batch)
 		}
@@ -367,6 +363,10 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget t
 		if len(rows) > 0 {
 			d.cfg.Metrics.Claimed(d.cfg.Kind, len(rows))
 		}
+		var (
+			lastHandledProject string
+			handledAny         bool
+		)
 		for i, row := range rows {
 			if ctx.Err() != nil {
 				d.releaseRows(rows[i:], claimOwner)
@@ -379,10 +379,16 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget t
 			switch out {
 			case rowOutcomeDone:
 				res.Done++
+				lastHandledProject = row.ProjectID
+				handledAny = true
 			case rowOutcomeRetried:
 				res.Retried++
+				lastHandledProject = row.ProjectID
+				handledAny = true
 			case rowOutcomePermanent:
 				res.Permanent++
+				lastHandledProject = row.ProjectID
+				handledAny = true
 			case rowOutcomeBlocked:
 				res.Blocked = true
 				d.releaseRows(rows[i+1:], claimOwner)
@@ -390,6 +396,17 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget t
 			}
 			if out == rowOutcomeBlocked {
 				break
+			}
+		}
+		if d.fairClaimer != nil {
+			if handledAny {
+				d.mu.Lock()
+				d.lastProject = lastHandledProject
+				d.mu.Unlock()
+			} else if len(rows) == 0 {
+				d.mu.Lock()
+				d.lastProject = nextCursor
+				d.mu.Unlock()
 			}
 		}
 	}

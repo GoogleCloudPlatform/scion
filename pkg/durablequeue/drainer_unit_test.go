@@ -135,16 +135,16 @@ func (m *memQueueStore) ClaimDurableItems(_ context.Context, kind, owner string,
 	return out, nil
 }
 
-func (m *memQueueStore) ClaimDurableItemsFair(_ context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) ([]store.DurableQueueRow, error) {
+func (m *memQueueStore) ClaimDurableItemsFair(_ context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) ([]store.DurableQueueRow, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.claims++
 	m.lastAfterProject = append(m.lastAfterProject, afterProjectID)
 	if m.fairClaimErr != nil {
-		return nil, m.fairClaimErr
+		return nil, afterProjectID, m.fairClaimErr
 	}
 	if limit <= 0 {
-		return nil, nil
+		return nil, afterProjectID, nil
 	}
 	byProj := make(map[string][]*store.DurableQueueRow)
 	for _, r := range m.rows {
@@ -157,7 +157,7 @@ func (m *memQueueStore) ClaimDurableItemsFair(_ context.Context, kind, owner, af
 		byProj[r.ProjectID] = append(byProj[r.ProjectID], r)
 	}
 	if len(byProj) == 0 {
-		return nil, nil
+		return nil, afterProjectID, nil
 	}
 	var gt, lte []string
 	for p := range byProj {
@@ -234,7 +234,11 @@ func (m *memQueueStore) ClaimDurableItemsFair(_ context.Context, kind, owner, af
 		cp.Payload = bytes.Clone(r.Payload)
 		out[i] = cp
 	}
-	return out, nil
+	nextCursor := afterProjectID
+	if len(out) > 0 {
+		nextCursor = out[len(out)-1].ProjectID
+	}
+	return out, nextCursor, nil
 }
 
 func (m *memQueueStore) RenewDurableLease(ctx context.Context, seq int64, owner string, leaseUntil time.Time) (bool, error) {
@@ -1959,4 +1963,57 @@ func TestDrainerFairByProject_FloodVictimCursorAndNonFairUnaffected(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, 4, res.Done)
 	assert.Equal(t, []string{"a-0", "a-1", "a-2", "a-3"}, fifoHandled)
+}
+
+func TestDrainerFairByProject_CursorAdvancesToLastHandledRow(t *testing.T) {
+	ctx := context.Background()
+	st := newMemQueueStore()
+	cur := time.Date(2026, 11, 20, 15, 0, 0, 0, time.UTC)
+
+	for _, proj := range []string{"p1", "p2", "p3", "p4"} {
+		_, err := st.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  proj + "-0",
+			ProjectID: proj,
+			Payload:   []byte(`{}`),
+			CreatedAt: cur,
+			NotBefore: cur,
+		})
+		require.NoError(t, err)
+	}
+
+	blockP2 := true
+	var handled []string
+	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:         st,
+		Kind:          "trigger.event",
+		BatchSize:     4,
+		FairByProject: true,
+		Now:           func() time.Time { return cur },
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			if item.ProjectID == "p2" && blockP2 {
+				blockP2 = false
+				return durablequeue.Result{Err: durablequeue.ErrSinkBlocked}
+			}
+			handled = append(handled, item.ProjectID)
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	// Pass 1: claims [p1, p2, p3, p4], handles p1, blocks on p2 (releasing p2, p3, p4).
+	// Cursor must advance only to p1 (the last handled row), NOT p4.
+	res, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Done)
+	assert.True(t, res.Blocked)
+	assert.Equal(t, []string{"p1"}, handled)
+
+	// Advance clock past 1s blocked probe backoff: probe must start after p1 -> serves p2 next!
+	cur = cur.Add(2 * time.Second)
+	res, err = d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Done)
+	assert.Equal(t, []string{"p1", "p2"}, handled)
 }

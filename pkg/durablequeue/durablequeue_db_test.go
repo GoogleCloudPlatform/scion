@@ -908,3 +908,59 @@ func TestDurableQueueDrainerFair_FloodDoesNotStarveAcrossTwoDrainers(t *testing.
 	require.GreaterOrEqual(t, lastVictimIdx, 0)
 	assert.Less(t, lastVictimIdx, floodCount, "victim items must not be starved behind the flooding project")
 }
+
+func TestDurableQueueDrainerFair_MoreProjectsThanBatchSizeRotation(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	t0 := time.Date(2026, 11, 20, 15, 0, 0, 0, time.UTC)
+	now := t0.Add(time.Minute)
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return t0 }))
+
+	const numProjects = 8
+	for p := 0; p < numProjects; p++ {
+		proj := fmt.Sprintf("proj-%02d", p)
+		for i := 0; i < 2; i++ {
+			ts := t0.Add(time.Duration(i) * time.Second)
+			_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+				Kind:      "trigger.event",
+				DedupKey:  fmt.Sprintf("%s-%d", proj, i),
+				ProjectID: proj,
+				Payload:   []byte(`{}`),
+				CreatedAt: ts,
+				NotBefore: ts,
+			})
+			require.NoError(t, err)
+		}
+	}
+
+	var handled []string
+	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:         cs,
+		Queue:         q,
+		Kind:          "trigger.event",
+		Owner:         "rot-drainer",
+		BatchSize:     4,
+		FairByProject: true,
+		Now:           func() time.Time { return now },
+		Logger:        quietLogger(),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			handled = append(handled, item.ProjectID)
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	// Pass 1 serves proj-00..proj-03; Pass 2 must advance cursor and serve proj-04..proj-07.
+	res1, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res1.Done)
+
+	res2, err := d.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res2.Done)
+
+	assert.Equal(t, []string{
+		"proj-00", "proj-01", "proj-02", "proj-03",
+		"proj-04", "proj-05", "proj-06", "proj-07",
+	}, handled)
+}

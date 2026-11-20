@@ -190,10 +190,12 @@ type DurableQueuePendingCounter interface {
 
 // DurableQueueFairClaimer claims due, unleased items of a kind using
 // lexicographic round-robin across active project_ids starting strictly after
-// afterProjectID (wrapping around through <= afterProjectID), preserving
-// (next_attempt_at, seq) order within each project and returning claimed rows
-// interleaved round-robin across projects.
+// afterProjectID (wrapping around through <= afterProjectID within a bounded
+// per-claim probe budget), preserving (next_attempt_at, seq) order within each
+// project and returning claimed rows interleaved round-robin across projects.
+// nextCursor is the resume project_id for the next claim pass (allowing empty
+// passes over backoff-only projects to make bounded forward progress).
 // Implemented by entadapter.CompositeStore and entadapter.DurableQueueStore.
 type DurableQueueFairClaimer interface {
-	ClaimDurableItemsFair(ctx context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) ([]DurableQueueRow, error)
+	ClaimDurableItemsFair(ctx context.Context, kind, owner, afterProjectID string, now, leaseUntil time.Time, limit int) (rows []DurableQueueRow, nextCursor string, err error)
 }
