@@ -67,6 +67,9 @@ var harnessHints = []HarnessHint{
 func HarnessHints() []HarnessHint {
 	out := make([]HarnessHint, len(harnessHints))
 	copy(out, harnessHints)
+	slices.SortFunc(out, func(a, b HarnessHint) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	return out
 }
 

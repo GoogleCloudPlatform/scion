@@ -2230,23 +2230,27 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// the env-type secrets. The runtime keys set further down win over all
 	// of them, and the template fallback fills only names none of them set.
 	var envVars []corev1.EnvVar
+	withheld := newHookWithheldTracker(config)
+	appendEnv := func(ev corev1.EnvVar, isWithheld bool) {
+		envVars = append(envVars, ev)
+		withheld.Record(ev.Name, isWithheld)
+	}
 
 	// Resolved auth env is the lowest source (resolvedAuthEnvEntries: sorted,
 	// an empty value skipped).
 	for _, e := range resolvedAuthEnvEntries(config.ResolvedAuth, nil) {
 		k, v, _ := strings.Cut(e, "=")
-		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
+		appendEnv(corev1.EnvVar{Name: k, Value: v}, false)
 	}
 
 	// The real startup command, consumed by the gate script above.
-	envVars = append(envVars, corev1.EnvVar{Name: k8sStartCmdEnv, Value: tmuxCmd})
+	appendEnv(corev1.EnvVar{Name: k8sStartCmdEnv, Value: tmuxCmd}, false)
 
 	// Harness env (system prompt, agent name, etc.) with the Docker rules
-	// (harnessEnvEntries): GetTelemetryEnv wins over GetEnv when telemetry
-	// is enabled, and an empty value is skipped.
-	for _, e := range harnessEnvEntries(config, config.HomeDir) {
-		k, v, _ := strings.Cut(e, "=")
-		envVars = append(envVars, corev1.EnvVar{Name: k, Value: v})
+	// (harnessEnvEntriesWithSource): GetTelemetryEnv wins over GetEnv when
+	// telemetry is enabled, and an empty value is skipped.
+	for _, e := range harnessEnvEntriesWithSource(config, config.HomeDir) {
+		appendEnv(corev1.EnvVar{Name: e.Key, Value: e.Value}, e.FromTemplate)
 	}
 
 	for _, e := range config.Env {
@@ -2257,7 +2261,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			if name == k8sStartCmdEnv {
 				continue
 			}
-			envVars = append(envVars, corev1.EnvVar{Name: name, Value: value})
+			appendEnv(corev1.EnvVar{Name: name, Value: value}, withheld.IsConfigHC(name))
 		}
 	}
 
@@ -2356,7 +2360,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 					if _, collides := envVarNames[s.Target]; collides || reservedAgentEnvName(s.Target) {
 						continue
 					}
-					envVars = append(envVars, corev1.EnvVar{
+					appendEnv(corev1.EnvVar{
 						Name: s.Target,
 						ValueFrom: &corev1.EnvVarSource{
 							SecretKeyRef: &corev1.SecretKeySelector{
@@ -2364,7 +2368,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 								Key:                  s.Name,
 							},
 						},
-					})
+					}, false)
 					envVarNames[s.Target] = struct{}{}
 					if s.Target == provision.GitTokenEnv {
 						gitTokenRef = &corev1.SecretKeySelector{
@@ -2383,7 +2387,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 					if _, collides := envVarNames[s.Target]; collides || reservedAgentEnvName(s.Target) {
 						continue
 					}
-					envVars = append(envVars, corev1.EnvVar{
+					appendEnv(corev1.EnvVar{
 						Name: s.Target,
 						ValueFrom: &corev1.EnvVarSource{
 							SecretKeyRef: &corev1.SecretKeySelector{
@@ -2391,7 +2395,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 								Key:                  s.Name,
 							},
 						},
-					})
+					}, false)
 					envVarNames[s.Target] = struct{}{}
 					if s.Target == provision.GitTokenEnv {
 						gitTokenRef = &corev1.SecretKeySelector{
@@ -2450,7 +2454,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		if staged := r.k8sStagedPathFor(config, telemetryGCPCredentialsSecretName); nfsHome && staged != "" {
 			credPath = staged
 		}
-		envVars = append(envVars, corev1.EnvVar{Name: telemetryGCPCredentialsEnvVar, Value: credPath})
+		appendEnv(corev1.EnvVar{Name: telemetryGCPCredentialsEnvVar, Value: credPath}, false)
 	}
 
 	// NFS-home pods: the memory-backed directory and the env vars that
@@ -2463,17 +2467,17 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		if err != nil {
 			return nil, err
 		}
-		envVars = append(envVars, nfsEnv...)
+		for _, ev := range nfsEnv {
+			appendEnv(ev, false)
+		}
 	}
 
 	// Pass host user UID/GID for container user synchronization
-	envVars = append(envVars, corev1.EnvVar{Name: "SCION_HOST_UID", Value: fmt.Sprintf("%d", os.Getuid())})
-	envVars = append(envVars, corev1.EnvVar{Name: "SCION_HOST_GID", Value: fmt.Sprintf("%d", os.Getgid())})
-	envVars = append(envVars,
-		corev1.EnvVar{Name: "HOME", Value: containerHome},
-		corev1.EnvVar{Name: "USER", Value: config.UnixUsername},
-		corev1.EnvVar{Name: "LOGNAME", Value: config.UnixUsername},
-	)
+	appendEnv(corev1.EnvVar{Name: "SCION_HOST_UID", Value: fmt.Sprintf("%d", os.Getuid())}, false)
+	appendEnv(corev1.EnvVar{Name: "SCION_HOST_GID", Value: fmt.Sprintf("%d", os.Getgid())}, false)
+	appendEnv(corev1.EnvVar{Name: "HOME", Value: containerHome}, false)
+	appendEnv(corev1.EnvVar{Name: "USER", Value: config.UnixUsername}, false)
+	appendEnv(corev1.EnvVar{Name: "LOGNAME", Value: config.UnixUsername}, false)
 
 	// Worktree-per-agent on NFS: the agent works in its own worktree at
 	// /repo-root/worktrees/<agent name>, not at /workspace. Point sciontool
@@ -2482,7 +2486,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// own directory. Appended last so it wins over any earlier value.
 	nfsWorktree := config.NFSWorktreeName != "" && nfsInitContainerInjected(config)
 	if nfsWorktree {
-		envVars = append(envVars, corev1.EnvVar{Name: "SCION_WORKSPACE_PATH", Value: NFSWorktreeContainerPath(config.NFSWorktreeName)})
+		appendEnv(corev1.EnvVar{Name: "SCION_WORKSPACE_PATH", Value: NFSWorktreeContainerPath(config.NFSWorktreeName)}, false)
 	}
 
 	// Resolve the container's resource requests/limits from the resolved
@@ -2542,6 +2546,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// as the agent user via runAsUser, so sciontool does no privilege drop
 	// here; the variable only drives the umask.
 	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
+	withheld.Record(SupplementalGIDsEnvVar, false)
 
 	// The template env fallback (ptone/scion#4524) is the last env step that
 	// adds entries: only names no source above set (plain or secret-backed),
@@ -2550,9 +2555,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// A reserved name never reaches the container, whatever its source: the
 	// drop runs after every step that adds entries.
 	envVars = slices.DeleteFunc(envVars, func(ev corev1.EnvVar) bool { return reservedAgentEnvName(ev.Name) })
-	// Emit the runtime-owned hook-withheld marker last so only the runtime can
-	// supply it.
-	if marker := envpolicy.FormatWithheldMarker(config.HookWithheldEnv); marker != "" {
+	withheld.DeleteReserved()
+	// Emit the runtime-owned hook-withheld marker last, derived directly from
+	// the winning provenance of the entries emitted above.
+	if marker := withheld.Marker(); marker != "" {
 		envVars = append(envVars, corev1.EnvVar{Name: envpolicy.HookWithheldEnvVar, Value: marker})
 	}
 

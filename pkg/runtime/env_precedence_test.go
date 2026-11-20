@@ -15,17 +15,25 @@
 package runtime
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
 type precedenceTestHarness struct {
 	harness.Generic
-	env map[string]string
+	env       map[string]string
+	telemetry map[string]string
 }
 
 func (h *precedenceTestHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {
@@ -36,75 +44,92 @@ func (h *precedenceTestHarness) GetEnv(agentName, agentHome, unixUsername string
 	return out
 }
 
-// TestResolveRuntimeEnvWinner_MatchesActualRuntimeEmission verifies that
-// ResolveRuntimeEnvWinner agrees with the actual container env emitted by every
-// runtime across all 6 pairs of runtime-level layers (ConfigEnv,
-// HarnessTemplate, ResolvedAuth, ResolvedSecret).
-func TestResolveRuntimeEnvWinner_MatchesActualRuntimeEmission(t *testing.T) {
-	// Six keys, one per unordered pair of the 4 runtime-level sources:
-	//   K_CFG_TPL:  ConfigEnv vs HarnessTemplate
-	//   K_CFG_AUTH: ConfigEnv vs ResolvedAuth
-	//   K_CFG_SEC:  ConfigEnv vs ResolvedSecret
-	//   K_TPL_AUTH: HarnessTemplate vs ResolvedAuth
-	//   K_TPL_SEC:  HarnessTemplate vs ResolvedSecret
-	//   K_AUTH_SEC: ResolvedAuth vs ResolvedSecret
-	// Note: for Cloud Run, non-discovery ResolvedAuth keys go to the staged
-	// blob; use GOOGLE_CLOUD_PROJECT (a discovery key emitted as plain env)
-	// alongside custom keys so plain-env emission is directly observable too.
-	const (
-		valCfg  = "from-config-env"
-		valTpl  = "from-harness-template"
-		valAuth = "from-resolved-auth"
-		valSec  = "from-resolved-secret"
-	)
+func (h *precedenceTestHarness) GetTelemetryEnv() map[string]string {
+	return h.telemetry
+}
 
-	sourceVal := map[EnvSource]string{
-		EnvSourceConfigEnv:       valCfg,
-		EnvSourceHarnessTemplate: valTpl,
-		EnvSourceResolvedAuth:    valAuth,
-		EnvSourceResolvedSecret:  valSec,
-	}
+// TestHookWithheldMarker_MatchesActualRuntimeEmission verifies that across
+// every runtime, the SCION_HOOK_WITHHELD_ENV marker emitted by the runtime's
+// real container env assembly agrees with the actual winning value emitted for
+// every key across all env sources (cfg.Env HC, cfg.Env non-HC,
+// Harness.GetEnv, Harness.GetTelemetryEnv, ResolvedAuth, ResolvedSecrets,
+// FallbackEnv). Because withholding is recorded at the exact emission site,
+// any reordering or bypass immediately breaks this invariant.
+func TestHookWithheldMarker_MatchesActualRuntimeEmission(t *testing.T) {
+	const (
+		valCfgHC    = "from-config-hc"
+		valCfgNonHC = "from-config-non-hc"
+		valTpl      = "from-harness-template"
+		valTelem    = "from-harness-telemetry"
+		valAuth     = "from-resolved-auth"
+		valSec      = "from-resolved-secret"
+		valFallback = "from-fallback"
+	)
 
 	makeCfg := func(rtName string) RunConfig {
 		return RunConfig{
 			Harness: &precedenceTestHarness{
 				env: map[string]string{
-					"K_CFG_TPL":            valTpl,
+					"K_CFGHC_TPL":          valTpl,
+					"K_CFGNONHC_TPL":       valTpl,
 					"K_TPL_AUTH":           valTpl,
 					"K_TPL_SEC":            valTpl,
+					"K_TPL_TELEM":          valTpl,
+					"K_TPL_FB":             valTpl,
 					"GOOGLE_CLOUD_PROJECT": valTpl,
+					"TPL_ONLY":             valTpl,
+					"TPL_EMPTY":            "",
+				},
+				telemetry: map[string]string{
+					"K_TPL_TELEM": valTelem,
 				},
 			},
-			Name:         "prec-agent",
-			UnixUsername: "scion",
-			Image:        "scion-agent:latest",
-			RuntimeName:  rtName,
-			Labels:       map[string]string{"agent_id": "agent-prec", "scion.name": "prec-agent"},
+			Name:             "prec-agent",
+			UnixUsername:     "scion",
+			Image:            "scion-agent:latest",
+			RuntimeName:      rtName,
+			TelemetryEnabled: true,
+			Labels:           map[string]string{"agent_id": "agent-prec", "scion.name": "prec-agent"},
 			Env: []string{
-				"K_CFG_TPL=" + valCfg,
-				"K_CFG_AUTH=" + valCfg,
-				"K_CFG_SEC=" + valCfg,
+				"K_CFGHC_TPL=" + valCfgHC,
+				"K_CFGHC_AUTH=" + valCfgHC,
+				"K_CFGHC_SEC=" + valCfgHC,
+				"K_CFGHC_FB=" + valCfgHC,
+				"CFGHC_ONLY=" + valCfgHC,
+				"K_CFGNONHC_TPL=" + valCfgNonHC,
+				"CFGNONHC_ONLY=" + valCfgNonHC,
+			},
+			HookWithheldEnv: []string{
+				"K_CFGHC_TPL",
+				"K_CFGHC_AUTH",
+				"K_CFGHC_SEC",
+				"K_CFGHC_FB",
+				"CFGHC_ONLY",
 			},
 			ResolvedAuth: &api.ResolvedAuth{
 				Method: "api-key",
 				EnvVars: map[string]string{
-					"K_CFG_AUTH":           valAuth,
+					"K_CFGHC_AUTH":         valAuth,
 					"K_TPL_AUTH":           valAuth,
-					"K_AUTH_SEC":           valAuth,
 					"GOOGLE_CLOUD_PROJECT": valAuth,
 				},
 			},
 			ResolvedSecrets: []api.ResolvedSecret{
-				{Type: "environment", Name: "sec-cfg", Target: "K_CFG_SEC", Value: valSec},
+				{Type: "environment", Name: "sec-cfghc", Target: "K_CFGHC_SEC", Value: valSec},
 				{Type: "environment", Name: "sec-tpl", Target: "K_TPL_SEC", Value: valSec},
-				{Type: "environment", Name: "sec-auth", Target: "K_AUTH_SEC", Value: valSec},
+			},
+			FallbackEnv: map[string]string{
+				"K_CFGHC_FB":    valFallback,
+				"K_TPL_FB":      valFallback,
+				"FALLBACK_ONLY": valFallback,
 			},
 		}
 	}
 
-	// emitActual invokes each runtime's real env assembly and returns the final
-	// effective value (last entry wins for -e / K8s EnvVar slices) for each key.
-	emitActual := func(t *testing.T, rtName string, cfg RunConfig) map[string]string {
+	// emitActual invokes each runtime's real production env assembly and
+	// returns both the final effective container env map and the parsed
+	// SCION_HOOK_WITHHELD_ENV marker slice.
+	emitActual := func(t *testing.T, rtName string, cfg RunConfig) (map[string]string, []string) {
 		t.Helper()
 		out := make(map[string]string)
 		switch rtName {
@@ -146,11 +171,9 @@ func TestResolveRuntimeEnvWinner_MatchesActualRuntimeEmission(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Mirror CloudRunRuntime.Run: fold non-colliding env secrets into cfg.Env
-			// before buildCloudRunInstance.
-			_, resolvedAuthStaged := splitResolvedAuthEnv(cfg.ResolvedAuth, cloudRunResolvedAuthTaken(cfg))
-			if _, _, err := applyStagedSecretsToEnvExtras(&cfg, cloudRunEnvLimit, stagedExtras{ResolvedAuthEnv: resolvedAuthStaged}, cloudRunRuntimeEnvKeys...); err != nil {
-				t.Fatalf("applyStagedSecretsToEnvExtras: %v", err)
+			_, resolvedAuthStaged, _, err := foldCloudRunSecretsAndAuth(&cfg, "", nil)
+			if err != nil {
+				t.Fatalf("foldCloudRunSecretsAndAuth: %v", err)
 			}
 			inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
 			if err != nil {
@@ -159,57 +182,130 @@ func TestResolveRuntimeEnvWinner_MatchesActualRuntimeEmission(t *testing.T) {
 			for _, ev := range inst.Containers[0].Env {
 				out[ev.GetName()] = ev.GetValue()
 			}
-			// Non-discovery staged auth entries only reach the container when
-			// not already taken by cfg.Env, secrets, or harness env.
 			for k, v := range resolvedAuthStaged {
 				if _, exists := out[k]; !exists {
 					out[k] = v
 				}
 			}
 		case "cloudrun-sandbox":
-			// Mirror CloudRunSandboxRuntime.Run env assembly without spawning a
-			// subprocess (keeps this test platform-neutral for Windows).
 			secretKeys, err := applyResolvedSecretsToEnv(&cfg, sandboxEnvLimit, sandboxRuntimeEnvKeys...)
 			if err != nil {
 				t.Fatalf("applyResolvedSecretsToEnv: %v", err)
 			}
-			env := envFor(cfg, scionPaths{agentHome: "/tmp/home", workspace: "/tmp/ws"})
-			if cfg.ResolvedAuth != nil {
-				for k, v := range cfg.ResolvedAuth.EnvVars {
-					env[k] = v
-				}
-			}
-			applySecretEnvOverrides(env, cfg.Env, secretKeys)
+			env, marker := assembleSandboxEnv(cfg, scionPaths{agentHome: "/tmp/home", workspace: "/tmp/ws"}, secretKeys)
 			out = env
+			if marker != "" {
+				out[envpolicy.HookWithheldEnvVar] = marker
+			}
 		case "substrate":
 			out = buildBootstrapEnv(cfg)
 		default:
 			t.Fatalf("unhandled runtime %q", rtName)
 		}
-		return out
+		return out, envpolicy.ParseWithheldMarker(out[envpolicy.HookWithheldEnvVar])
 	}
 
 	runtimes := []string{"docker", "podman", "container", "kubernetes", "cloudrun", "cloudrun-sandbox", "substrate"}
-	keys := []string{"K_CFG_TPL", "K_CFG_AUTH", "K_CFG_SEC", "K_TPL_AUTH", "K_TPL_SEC", "K_AUTH_SEC", "GOOGLE_CLOUD_PROJECT"}
+	keys := []string{
+		"K_CFGHC_TPL",
+		"K_CFGHC_AUTH",
+		"K_CFGHC_SEC",
+		"K_CFGHC_FB",
+		"CFGHC_ONLY",
+		"K_CFGNONHC_TPL",
+		"CFGNONHC_ONLY",
+		"K_TPL_AUTH",
+		"K_TPL_SEC",
+		"K_TPL_TELEM",
+		"K_TPL_FB",
+		"GOOGLE_CLOUD_PROJECT",
+		"TPL_ONLY",
+		"FALLBACK_ONLY",
+	}
 
 	for _, rtName := range runtimes {
 		t.Run(rtName, func(t *testing.T) {
 			cfg := makeCfg(rtName)
-			cfgSet := map[string]struct{}{"K_CFG_TPL": {}, "K_CFG_AUTH": {}, "K_CFG_SEC": {}}
-			tplSet := map[string]struct{}{"K_CFG_TPL": {}, "K_TPL_AUTH": {}, "K_TPL_SEC": {}, "GOOGLE_CLOUD_PROJECT": {}}
+			actual, withheld := emitActual(t, rtName, cfg)
 
-			winners := ResolveRuntimeEnvWinner(rtName, cfgSet, tplSet, cfg.ResolvedAuth, cfg.ResolvedSecrets)
-			actual := emitActual(t, rtName, cfg)
+			if slices.Contains(withheld, "SCION_AGENT_NAME") {
+				t.Errorf("runtime %s: SCION_AGENT_NAME must never be withheld; marker=%v", rtName, withheld)
+			}
+			// On runtimes that skip empty GetEnv values, TPL_EMPTY is not emitted
+			// and must not be withheld. (cloudrun-sandbox emits empty GetEnv values
+			// verbatim, so it withholds TPL_EMPTY when present.)
+			if _, emitted := actual["TPL_EMPTY"]; !emitted && slices.Contains(withheld, "TPL_EMPTY") {
+				t.Errorf("runtime %s: unemitted TPL_EMPTY should not be withheld; marker=%v", rtName, withheld)
+			}
 
 			for _, k := range keys {
-				gotWinner := winners[k]
-				wantVal := sourceVal[gotWinner]
 				gotVal := actual[k]
-				if gotVal != wantVal {
-					t.Errorf("runtime %s key %s: actual emitted=%q, ResolveRuntimeEnvWinner=%v (expected value %q)",
-						rtName, k, gotVal, gotWinner, wantVal)
+				wantWithheld := gotVal == valCfgHC || gotVal == valTpl
+				gotWithheld := slices.Contains(withheld, k)
+				if gotWithheld != wantWithheld {
+					t.Errorf("runtime %s key %s: actual emitted=%q, withheld=%t, want withheld=%t (marker=%v)",
+						rtName, k, gotVal, gotWithheld, wantWithheld, withheld)
 				}
 			}
 		})
+	}
+}
+
+// TestRuntimeEnvEmission_WithheldMarkerAlwaysFromTracker is a structural guard
+// verifying that no non-test file in pkg/runtime formats cfg.HookWithheldEnv
+// directly into SCION_HOOK_WITHHELD_ENV, bypassing hookWithheldTracker.
+func TestRuntimeEnvEmission_WithheldMarkerAlwaysFromTracker(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	fset := token.NewFileSet()
+	markerFiles := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		// env_precedence.go owns hookWithheldTracker itself; common.go also
+		// references HookWithheldEnvVar in reservedAgentEnvName.
+		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		var emitsMarker, usesTracker, formatsRawField bool
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if sel.Sel.Name == "FormatWithheldMarker" && name != "env_precedence.go" {
+					formatsRawField = true
+				}
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "newHookWithheldTracker" {
+				usesTracker = true
+			}
+			return true
+		})
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if ok && sel.Sel.Name == "HookWithheldEnvVar" {
+				emitsMarker = true
+			}
+			return true
+		})
+		if formatsRawField {
+			t.Errorf("%s calls FormatWithheldMarker directly; route marker emission through hookWithheldTracker", name)
+		}
+		if emitsMarker && name != "env_precedence.go" && !usesTracker {
+			t.Errorf("%s references HookWithheldEnvVar without constructing hookWithheldTracker", name)
+		}
+		if usesTracker && name != "env_precedence.go" {
+			markerFiles++
+		}
+	}
+	if markerFiles < 5 {
+		t.Errorf("expected at least 5 runtime files using hookWithheldTracker (common, k8s, cloudrun, cloudrun-sandbox, substrate), found %d", markerFiles)
 	}
 }

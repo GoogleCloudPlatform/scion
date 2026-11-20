@@ -1468,17 +1468,29 @@ func checkSandboxMountSources(paths scionPaths, sharedDirs []api.SharedDir) erro
 // envFor builds the environment variable map for a sandbox agent.
 // Env vars are passed via repeatable --env flags (confirmed by AC-0 retest).
 func envFor(cfg RunConfig, paths scionPaths) map[string]string {
+	env, _ := envForTracked(cfg, paths, nil)
+	return env
+}
+
+func envForTracked(cfg RunConfig, paths scionPaths, withheld *hookWithheldTracker) (map[string]string, *hookWithheldTracker) {
+	if withheld == nil {
+		withheld = newHookWithheldTracker(cfg)
+	}
 	env := make(map[string]string)
+	setEnv := func(k, v string, isWithheld bool) {
+		env[k] = v
+		withheld.Record(k, isWithheld)
+	}
 
 	// PATH is empty inside the sandbox (AC-0 retest finding). Set a
 	// reasonable default so the harness and its children can find binaries.
-	env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	setEnv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", false)
 
 	// Parse broker-provided env vars.
 	for _, e := range cfg.Env {
 		parts := strings.SplitN(e, "=", 2)
 		if len(parts) == 2 {
-			env[parts[0]] = parts[1]
+			setEnv(parts[0], parts[1], withheld.IsConfigHC(parts[0]))
 		}
 	}
 
@@ -1491,7 +1503,7 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 	// this.
 	if cfg.Harness != nil {
 		for k, v := range cfg.Harness.GetEnv(cfg.Name, sandboxAgentHome, cfg.UnixUsername) {
-			env[k] = v
+			setEnv(k, v, isHarnessTemplateEnvKey(k))
 		}
 	}
 
@@ -1502,10 +1514,10 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 
 	// Project identity.
 	if cfg.Project != "" {
-		env["SCION_PROJECT"] = cfg.Project
+		setEnv("SCION_PROJECT", cfg.Project, false)
 	}
 	if cfg.ProjectID != "" {
-		env["SCION_PROJECT_ID"] = cfg.ProjectID
+		setEnv("SCION_PROJECT_ID", cfg.ProjectID, false)
 	}
 
 	// Workspace path: tell sciontool init where the writable workspace is
@@ -1514,11 +1526,11 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 	// Without this, sciontool init defaults to /workspace which is correct,
 	// but setting it explicitly documents the contract and insulates against
 	// any future change to the default.
-	env["SCION_WORKSPACE_PATH"] = sandboxWorkspace
+	setEnv("SCION_WORKSPACE_PATH", sandboxWorkspace, false)
 
 	// Workspace backend.
 	if cfg.WorkspaceBackendName != "" {
-		env["SCION_WORKSPACE_BACKEND"] = cfg.WorkspaceBackendName
+		setEnv("SCION_WORKSPACE_BACKEND", cfg.WorkspaceBackendName, false)
 	}
 
 	// Host UID/GID for container user synchronisation.
@@ -1533,8 +1545,8 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 	// image-build/scion-base/Dockerfile). Pass that UID/GID so that
 	// sciontool init drops privileges to the scion user inside the
 	// sandbox, regardless of the launcher's own UID.
-	env["SCION_HOST_UID"] = strconv.Itoa(sandboxUID)
-	env["SCION_HOST_GID"] = strconv.Itoa(sandboxGID)
+	setEnv("SCION_HOST_UID", strconv.Itoa(sandboxUID), false)
+	setEnv("SCION_HOST_GID", strconv.Itoa(sandboxGID), false)
 
 	// Set HOME, USER and LOGNAME explicitly for the sandbox.
 	// supervisor.go:113 only sets HOME when (UID > 0 || Rootless). On
@@ -1543,11 +1555,56 @@ func envFor(cfg RunConfig, paths scionPaths) map[string]string {
 	// HOME, so the pane-exited hook in the template home is never found.
 	// Setting HOME here ensures the sandbox-mounted agent home at
 	// sandboxAgentHome is used regardless of supervisor behaviour.
-	env["HOME"] = sandboxAgentHome
-	env["USER"] = "scion"
-	env["LOGNAME"] = "scion"
+	setEnv("HOME", sandboxAgentHome, false)
+	setEnv("USER", "scion", false)
+	setEnv("LOGNAME", "scion", false)
 
-	return env
+	return env, withheld
+}
+
+// assembleSandboxEnv builds the complete sandbox container environment and its
+// authoritative hook-withheld marker in one pass, shared by Run and tests so
+// emission and provenance cannot drift.
+func assembleSandboxEnv(cfg RunConfig, paths scionPaths, secretKeys []string) (env map[string]string, withheldMarker string) {
+	env, withheld := envForTracked(cfg, paths, nil)
+
+	// Apply resolved auth env vars (mirrors Docker path at common.go
+	// applyResolvedAuth). Without this, auth env vars like
+	// GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION do not reach the
+	// sandbox process.
+	if cfg.ResolvedAuth != nil {
+		for k, v := range cfg.ResolvedAuth.EnvVars {
+			env[k] = v
+			withheld.Record(k, false)
+		}
+	}
+
+	// Env-type secrets win over harness, auth and synthesised env, as in
+	// Docker, except sandboxRuntimeEnvKeys. Keys from the caller's cfg.Env
+	// still win over secrets.
+	applySecretEnvOverrides(env, cfg.Env, secretKeys)
+	for _, k := range secretKeys {
+		if _, ok := env[k]; ok {
+			withheld.Record(k, false)
+		}
+	}
+
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only keys no source above set, never a suppressed key.
+	emitted := make(map[string]bool, len(env))
+	for k := range env {
+		emitted[k] = true
+	}
+	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
+		k, v, _ := strings.Cut(e, "=")
+		env[k] = v
+		withheld.Record(k, false)
+	}
+
+	// A reserved name never reaches the sandbox, whatever its source.
+	dropReservedAgentEnv(env)
+	withheld.DeleteReserved()
+	return env, withheld.Marker()
 }
 
 // envArgs converts an env map to a sorted list of KEY=VALUE strings
@@ -2311,18 +2368,9 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	}
 	// ENOENT is the normal case for first-ever run: offset stays 0.
 
-	// Build environment.
-	env := envFor(cfg, paths)
-
-	// Apply resolved auth env vars and files (mirrors Docker path at
-	// common.go applyResolvedAuth). Without this, auth env vars like
-	// GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION do not reach the
-	// sandbox process.
+	// Build environment and its authoritative hook-withheld marker in one pass.
+	env, withheldMarker := assembleSandboxEnv(cfg, paths, secretKeys)
 	if cfg.ResolvedAuth != nil {
-		for k, v := range cfg.ResolvedAuth.EnvVars {
-			env[k] = v
-		}
-
 		// Copy auth files into the agent home directory on the host side.
 		// paths.agentHome is bind-mounted into the sandbox at
 		// sandboxAgentHome (/home/scion), so files placed here are visible
@@ -2339,11 +2387,6 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		// written through, and a linked directory component is refused.
 		copySandboxAuthFiles(paths.agentHome, cfg.ResolvedAuth.Files)
 	}
-
-	// Env-type secrets win over harness, auth and synthesised env, as in
-	// Docker, except sandboxRuntimeEnvKeys. Keys from the caller's cfg.Env
-	// still win over secrets.
-	applySecretEnvOverrides(env, cfg.Env, secretKeys)
 
 	// Build entrypoint command.
 	entrypoint, err := buildEntrypoint(cfg)
@@ -2372,27 +2415,14 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		args = append(args, "--mount", m)
 	}
 
-	// The template env fallback (ptone/scion#4524) is the LAST env step:
-	// only keys no source above set, never a suppressed key.
-	emitted := make(map[string]bool, len(env))
-	for k := range env {
-		emitted[k] = true
-	}
-	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
-		k, v, _ := strings.Cut(e, "=")
-		env[k] = v
-	}
-
-	// A reserved name never reaches the sandbox, whatever its source.
-	dropReservedAgentEnv(env)
 	// Environment variables via --env flags (repeatable, confirmed by AC-0 retest).
 	for _, e := range envArgs(env) {
 		args = append(args, "--env", e)
 	}
-	// Emit the runtime-owned hook-withheld marker last so only the runtime can
-	// supply it.
-	if marker := envpolicy.FormatWithheldMarker(cfg.HookWithheldEnv); marker != "" {
-		args = append(args, "--env", envpolicy.HookWithheldEnvVar+"="+marker)
+	// Emit the runtime-owned hook-withheld marker last, derived directly from
+	// the winning provenance of the entries emitted above.
+	if withheldMarker != "" {
+		args = append(args, "--env", envpolicy.HookWithheldEnvVar+"="+withheldMarker)
 	}
 
 	args = append(args, "--")

@@ -34,9 +34,13 @@ type RunConfig struct {
 	RepoRoot           string
 	ContainerWorkspace string // The container-side workspace path (e.g., /workspace or /repo-root/.scion/agents/foo/workspace)
 	Env                []string
-	// HookWithheldEnv lists environment variable names whose values come from
-	// harness-config layers and must be withheld from lifecycle hooks. Each
-	// runtime emits it authoritatively via envpolicy.HookWithheldEnvVar.
+	// HookWithheldEnv lists environment variable names in Env whose broker-side
+	// winning value came from a harness-config layer (bundle env, settings/profile
+	// harness_configs.<name>.env, no-auth-env.yaml, or legacy bundle keys), plus
+	// any explicit withheld names. Each runtime tracks these together with
+	// Harness.GetEnv() and all non-harness-config layers during its own container
+	// env assembly and emits the final winning withheld set authoritatively via
+	// envpolicy.HookWithheldEnvVar.
 	HookWithheldEnv  []string
 	ResolvedSecrets  []api.ResolvedSecret
 	Volumes          []api.VolumeMount

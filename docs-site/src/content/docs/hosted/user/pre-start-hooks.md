@@ -36,7 +36,7 @@ Because of this single-slot model, **exactly one pre-start hook can execute per 
 
 In-container lifecycle hooks (`pre-start`, `post-start`, `pre-stop`, `session-end`) run with a filtered environment rather than the raw container environment:
 
-- **Harness-config variables are withheld:** Any environment variable whose effective value came from a harness-config layer (`config.yaml` `env` or `env_template`, or settings `harness_configs.<name>.env` / `harness_overrides`) is withheld from hooks and delivered only to the workload.
+- **Harness-config variables are withheld:** Any environment variable whose effective value came from a harness-config layer (`config.yaml` `env` or `env_template`, `no-auth-env.yaml`, or settings `harness_configs.<name>.env` / `harness_overrides`) is withheld from hooks and delivered only to the workload.
 - **Static denylist:** Interpreter, loader, shell, and `git` override variables (such as `LD_*`, `DYLD_*`, `BASH_ENV`, `PYTHONPATH`, `NODE_OPTIONS`, `GIT_CONFIG*`, `GIT_SSH_COMMAND`, and `SCION_EXTRA_PATH`) are always withheld from hooks.
 - **Operator and Hub variables survive:** Variables supplied by the Hub, inline agent config, operator settings, or secrets (for example `GITHUB_TOKEN`) remain visible to hooks unless they appear on the static denylist.
 - **Normalized defaults:** `HOME` is set to the agent home directory, `PYTHONDONTWRITEBYTECODE=1` is set, and `PATH` falls back to the standard system search path if it was withheld or empty.

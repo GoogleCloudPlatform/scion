@@ -152,47 +152,52 @@ const defaultFileMode = 0o600
 // ResolvedSecrets.
 func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	env := make(map[string]string)
+	withheld := newHookWithheldTracker(cfg)
+	setEnv := func(k, v string, isWithheld bool) {
+		env[k] = v
+		withheld.Record(k, isWithheld)
+	}
 
 	if cfg.Harness != nil {
 		for k, v := range cfg.Harness.GetEnv(cfg.Name, util.GetHomeDir(cfg.UnixUsername), cfg.UnixUsername) {
 			if v != "" {
-				env[k] = v
+				setEnv(k, v, isHarnessTemplateEnvKey(k))
 			}
 		}
 		if cfg.TelemetryEnabled {
 			for k, v := range cfg.Harness.GetTelemetryEnv() {
-				env[k] = v
+				setEnv(k, v, false)
 			}
 		}
 	}
 
 	for _, e := range cfg.Env {
 		if k, v, ok := strings.Cut(e, "="); ok {
-			env[k] = v
+			setEnv(k, v, withheld.IsConfigHC(k))
 		}
 	}
 
 	if cfg.ResolvedAuth != nil {
 		for k, v := range cfg.ResolvedAuth.EnvVars {
-			env[k] = v
+			setEnv(k, v, false)
 		}
 	}
 
 	for _, s := range cfg.ResolvedSecrets {
 		if (s.Type == "environment" || s.Type == "") && !reservedAgentEnvName(s.Target) {
-			env[s.Target] = s.Value
+			setEnv(s.Target, s.Value, false)
 		}
 	}
 
 	if credPath := findGCPTelemetryCredentialPath(cfg.ResolvedSecrets, util.GetHomeDir(cfg.UnixUsername)); credPath != "" {
-		env[telemetryGCPCredentialsEnvVar] = credPath
+		setEnv(telemetryGCPCredentialsEnvVar, credPath, false)
 	}
 
 	// SCION_RUNTIME=substrate lets sciontool disable autoexpose/port-forward
 	// (blocked by Substrate's default-deny, no-WebSocket-egress posture —
 	// substrate-runtime.md §1) so it does not spin retrying a tunnel that can
 	// never connect.
-	env["SCION_RUNTIME"] = "substrate"
+	setEnv("SCION_RUNTIME", "substrate", false)
 
 	// SCION_HOST_UID/GID: every other runtime sets these (buildCommonRunArgs,
 	// KubernetesRuntime.buildPod) so `sciontool init`'s setupHostUser can
@@ -212,8 +217,8 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	// synchronize with. The stable default (1000:1000, matching the actor
 	// image's built-in "scion" user, the same fallback the NFS backend uses
 	// elsewhere) is the only value that makes sense here, unconditionally.
-	env["SCION_HOST_UID"] = "1000"
-	env["SCION_HOST_GID"] = "1000"
+	setEnv("SCION_HOST_UID", "1000", false)
+	setEnv("SCION_HOST_GID", "1000", false)
 
 	// SCION_KEEPID_UID (the Podman keep-id remap signal, set by
 	// PodmanRuntime elsewhere) has no meaning on Substrate and must not
@@ -223,6 +228,7 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	// container runtime already remapped this uid", which would skip the
 	// very drop SCION_HOST_UID/GID above exists to trigger.
 	delete(env, "SCION_KEEPID_UID")
+	withheld.Delete("SCION_KEEPID_UID")
 
 	// The template env fallback (ptone/scion#4524) is the LAST env step:
 	// only keys no source above set, never a suppressed key.
@@ -232,14 +238,15 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 	}
 	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
 		k, v, _ := strings.Cut(e, "=")
-		env[k] = v
+		setEnv(k, v, false)
 	}
 
 	// A reserved name never reaches the container, whatever its source.
 	dropReservedAgentEnv(env)
+	withheld.DeleteReserved()
 	// Emit the runtime-owned hook-withheld marker after the reserved-name drop
 	// so only the runtime can supply it.
-	if marker := envpolicy.FormatWithheldMarker(cfg.HookWithheldEnv); marker != "" {
+	if marker := withheld.Marker(); marker != "" {
 		env[envpolicy.HookWithheldEnvVar] = marker
 	}
 	return env

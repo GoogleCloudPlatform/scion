@@ -118,11 +118,11 @@ func TestBuildAgentEnvWithBundle_LiteralAndHubFill(t *testing.T) {
 	if !slices.Equal(missingKeys, []string{"BAR"}) {
 		t.Errorf("missingKeys = %v, want [BAR]", missingKeys)
 	}
-	if provenance["FOO"] != envSourceBundle {
-		t.Errorf("provenance[FOO] = %v, want envSourceBundle", provenance["FOO"])
+	if provenance["FOO"] != envOriginBundle {
+		t.Errorf("provenance[FOO] = %v, want envOriginBundle", provenance["FOO"])
 	}
-	if provenance["HUB_FILLED"] != envSourceExtra {
-		t.Errorf("provenance[HUB_FILLED] = %v, want envSourceExtra", provenance["HUB_FILLED"])
+	if provenance["HUB_FILLED"] != envOriginCaller {
+		t.Errorf("provenance[HUB_FILLED] = %v, want envOriginCaller", provenance["HUB_FILLED"])
 	}
 	joined := strings.Join(warnings, "\n")
 	if !strings.Contains(joined, "harness-config env values are not expanded") {

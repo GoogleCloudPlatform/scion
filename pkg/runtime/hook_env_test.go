@@ -29,18 +29,21 @@ import (
 
 type forgedMarkerHarness struct {
 	harness.Generic
+	includeCustomKey bool
 }
 
 func (h *forgedMarkerHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {
 	out := h.Generic.GetEnv(agentName, agentHome, unixUsername)
 	out[envpolicy.HookWithheldEnvVar] = "FORGED_FROM_HARNESS"
-	out["HARNESS_KEY"] = "from-harness"
+	if h.includeCustomKey {
+		out["HARNESS_KEY"] = "from-harness"
+	}
 	return out
 }
 
 func forgedMarkerRunConfig(runtimeName string, withheld []string) RunConfig {
 	return RunConfig{
-		Harness:         &forgedMarkerHarness{},
+		Harness:         &forgedMarkerHarness{includeCustomKey: len(withheld) > 0},
 		Name:            "test-agent",
 		UnixUsername:    "scion",
 		Image:           "scion-agent:latest",
@@ -81,7 +84,7 @@ func TestBuildCommonRunArgs_HookWithheldEnvIsReservedAndEmittedLast(t *testing.T
 				}
 			}
 
-			wantEntry := envpolicy.HookWithheldEnvVar + "=BUNDLE_KEY,Z_KEY"
+			wantEntry := envpolicy.HookWithheldEnvVar + "=BUNDLE_KEY,HARNESS_KEY,Z_KEY"
 			var markerEntries []string
 			for _, e := range envArgs {
 				if k, _, _ := strings.Cut(e, "="); k == envpolicy.HookWithheldEnvVar {
@@ -188,10 +191,10 @@ func TestBuildPod_HookWithheldEnvIsReservedAndEmittedLast(t *testing.T) {
 				}
 			}
 		}
-		if len(markers) != 1 || markers[0] != "BUNDLE_KEY,Z_KEY" {
-			t.Fatalf("k8s marker values = %v, want [BUNDLE_KEY,Z_KEY]", markers)
+		if len(markers) != 1 || markers[0] != "BUNDLE_KEY,HARNESS_KEY,Z_KEY" {
+			t.Fatalf("k8s marker values = %v, want [BUNDLE_KEY,HARNESS_KEY,Z_KEY]", markers)
 		}
-		wantLast := envpolicy.HookWithheldEnvVar + "=BUNDLE_KEY,Z_KEY"
+		wantLast := envpolicy.HookWithheldEnvVar + "=BUNDLE_KEY,HARNESS_KEY,Z_KEY"
 		if len(envVars) == 0 || envVars[len(envVars)-1] != wantLast {
 			t.Errorf("k8s last env = %q, want %q", envVars[len(envVars)-1], wantLast)
 		}
@@ -235,12 +238,12 @@ func TestBuildCloudRunInstance_HookWithheldEnvIsReservedAndEmittedLast(t *testin
 				markers = append(markers, ev.GetValue())
 			}
 		}
-		if len(markers) != 1 || markers[0] != "BUNDLE_KEY,Z_KEY" {
-			t.Fatalf("cloudrun marker values = %v, want [BUNDLE_KEY,Z_KEY]", markers)
+		if len(markers) != 1 || markers[0] != "BUNDLE_KEY,HARNESS_KEY,Z_KEY" {
+			t.Fatalf("cloudrun marker values = %v, want [BUNDLE_KEY,HARNESS_KEY,Z_KEY]", markers)
 		}
 		last := envList[len(envList)-1]
-		if last.GetName() != envpolicy.HookWithheldEnvVar || last.GetValue() != "BUNDLE_KEY,Z_KEY" {
-			t.Errorf("cloudrun last env = %s=%q, want %s=BUNDLE_KEY,Z_KEY", last.GetName(), last.GetValue(), envpolicy.HookWithheldEnvVar)
+		if last.GetName() != envpolicy.HookWithheldEnvVar || last.GetValue() != "BUNDLE_KEY,HARNESS_KEY,Z_KEY" {
+			t.Errorf("cloudrun last env = %s=%q, want %s=BUNDLE_KEY,HARNESS_KEY,Z_KEY", last.GetName(), last.GetValue(), envpolicy.HookWithheldEnvVar)
 		}
 	})
 
@@ -309,7 +312,7 @@ func TestCloudRunSandboxRuntime_HookWithheldEnvIsReservedAndEmittedLast(t *testi
 				i++
 			}
 		}
-		wantEntry := envpolicy.HookWithheldEnvVar + "=BUNDLE_KEY,Z_KEY"
+		wantEntry := envpolicy.HookWithheldEnvVar + "=BUNDLE_KEY,HARNESS_KEY,Z_KEY"
 		var markers []string
 		for _, e := range envArgs {
 			if k, _, _ := strings.Cut(e, "="); k == envpolicy.HookWithheldEnvVar {
@@ -344,8 +347,8 @@ func TestBuildBootstrapEnv_HookWithheldEnvIsReservedAndAuthoritative(t *testing.
 	t.Run("authoritative marker overrides forged sources", func(t *testing.T) {
 		cfg := forgedMarkerRunConfig("substrate", []string{"Z_KEY", "BUNDLE_KEY", "BUNDLE_KEY"})
 		env := buildBootstrapEnv(cfg)
-		if got := env[envpolicy.HookWithheldEnvVar]; got != "BUNDLE_KEY,Z_KEY" {
-			t.Errorf("substrate bootstrap %s = %q, want %q", envpolicy.HookWithheldEnvVar, got, "BUNDLE_KEY,Z_KEY")
+		if got := env[envpolicy.HookWithheldEnvVar]; got != "BUNDLE_KEY,HARNESS_KEY,Z_KEY" {
+			t.Errorf("substrate bootstrap %s = %q, want %q", envpolicy.HookWithheldEnvVar, got, "BUNDLE_KEY,HARNESS_KEY,Z_KEY")
 		}
 	})
 
