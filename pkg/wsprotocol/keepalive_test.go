@@ -15,12 +15,15 @@
 package wsprotocol
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -224,6 +227,85 @@ func TestStartKeepalive_ZeroWriteWaitStillPings(t *testing.T) {
 	<-clientDone
 }
 
+// pipeHijackResponseWriter is a minimal http.ResponseWriter + http.Hijacker
+// used to run gorilla/websocket's Upgrader directly over a net.Pipe without
+// spawning an http.Server or touching real OS sockets.
+type pipeHijackResponseWriter struct {
+	conn   net.Conn
+	brw    *bufio.ReadWriter
+	header http.Header
+}
+
+func (w *pipeHijackResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *pipeHijackResponseWriter) Write(p []byte) (int, error) {
+	return w.brw.Write(p)
+}
+
+func (w *pipeHijackResponseWriter) WriteHeader(int) {}
+
+func (w *pipeHijackResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return w.conn, w.brw, nil
+}
+
+// newPipeKeepaliveWSPair sets up a real gorilla/websocket client/server pair
+// over an in-memory net.Pipe so deadlines and tickers advance solely on the
+// testing/synctest fake clock with no wall-clock races.
+func newPipeKeepaliveWSPair(t *testing.T) (client, server *websocket.Conn, cleanup func()) {
+	t.Helper()
+	cConn, sConn := net.Pipe()
+
+	type serverResult struct {
+		conn *websocket.Conn
+		err  error
+	}
+	ready := make(chan serverResult, 1)
+	go func() {
+		br := bufio.NewReader(sConn)
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			ready <- serverResult{err: err}
+			return
+		}
+		rw := &pipeHijackResponseWriter{
+			conn: sConn,
+			brw:  bufio.NewReadWriter(br, bufio.NewWriter(sConn)),
+		}
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		ws, err := upgrader.Upgrade(rw, req, nil)
+		ready <- serverResult{conn: ws, err: err}
+	}()
+
+	dialer := websocket.Dialer{
+		NetDialContext: func(context.Context, string, string) (net.Conn, error) {
+			return cConn, nil
+		},
+	}
+	c, _, err := dialer.Dial("ws://keepalive.test/ws", nil)
+	if err != nil {
+		_ = cConn.Close()
+		_ = sConn.Close()
+		<-ready
+		t.Fatalf("pipe dial: %v", err)
+	}
+	res := <-ready
+	if res.err != nil {
+		_ = c.Close()
+		_ = sConn.Close()
+		t.Fatalf("pipe upgrade: %v", res.err)
+	}
+
+	return c, res.conn, func() {
+		_ = c.Close()
+		_ = res.conn.Close()
+	}
+}
+
 // TestStartKeepalive_PingIntervalClampedBelowPongWait proves that a partial
 // config leaving PingInterval at its 30s default alongside a much smaller
 // caller-supplied PongWait does not let the read deadline expire before the
@@ -233,44 +315,53 @@ func TestStartKeepalive_PingIntervalClampedBelowPongWait(t *testing.T) {
 	require.Equal(t, 50*time.Millisecond, pingIntervalFor(DefaultPingInterval, 100*time.Millisecond),
 		"a PongWait of 100ms should give a PingInterval of half that, 50ms")
 
-	client, server, cleanup := newRawKeepaliveWSPair(t)
-	defer cleanup()
+	synctest.Test(t, func(t *testing.T) {
+		client, server, cleanup := newPipeKeepaliveWSPair(t)
+		defer cleanup()
 
-	clientDone := make(chan struct{})
-	go func() {
-		defer close(clientDone)
-		for {
-			if _, _, err := client.ReadMessage(); err != nil {
-				return
+		clientDone := make(chan struct{})
+		go func() {
+			defer close(clientDone)
+			for {
+				if _, _, err := client.ReadMessage(); err != nil {
+					return
+				}
 			}
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer func() {
+			cancel()
+			cleanup()
+			<-clientDone
+			synctest.Wait()
+		}()
+		var mu sync.Mutex
+		// Only PongWait is set; PingInterval would otherwise fall back to the
+		// 30s default, which is larger than this PongWait.
+		cfg := ConnectionConfig{PongWait: 100 * time.Millisecond}
+		require.NoError(t, StartKeepalive(ctx, server, &mu, cfg))
+
+		readErrCh := make(chan error, 1)
+		go func() {
+			_, _, err := server.ReadMessage()
+			readErrCh <- err
+		}()
+
+		select {
+		case err := <-readErrCh:
+			t.Fatalf("read ended too early; PingInterval was not clamped below PongWait: %v", err)
+		case <-time.After(300 * time.Millisecond):
+			// A ping must have gone out, and been answered, well within the
+			// 100ms PongWait for the read to still be alive here.
 		}
-	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var mu sync.Mutex
-	// Only PongWait is set; PingInterval would otherwise fall back to the
-	// 30s default, which is larger than this PongWait.
-	cfg := ConnectionConfig{PongWait: 100 * time.Millisecond}
-	require.NoError(t, StartKeepalive(ctx, server, &mu, cfg))
-
-	readErrCh := make(chan error, 1)
-	go func() {
-		_, _, err := server.ReadMessage()
-		readErrCh <- err
-	}()
-
-	select {
-	case err := <-readErrCh:
-		t.Fatalf("read ended too early; PingInterval was not clamped below PongWait: %v", err)
-	case <-time.After(300 * time.Millisecond):
-		// A ping must have gone out, and been answered, well within the
-		// 100ms PongWait for the read to still be alive here.
-	}
-
-	cancel()
-	_ = client.Close()
-	<-clientDone
+		cancel()
+		cleanup()
+		<-clientDone
+		require.Error(t, <-readErrCh)
+		synctest.Wait()
+	})
 }
 
 // TestStartKeepalive_TinyPongWaitDoesNotPanic covers the clamp's own edge
