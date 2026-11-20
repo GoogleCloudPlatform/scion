@@ -58,6 +58,12 @@ type DecisionReplacedBy struct {
 	At        time.Time `json:"at"`
 }
 
+// DecisionRef names a decision version by row ID and version number.
+type DecisionRef struct {
+	RowID   string `json:"rowId"`
+	Version int    `json:"version"`
+}
+
 // DecisionWithdrawn describes when, why, and by which agent a decision was withdrawn.
 type DecisionWithdrawn struct {
 	At     time.Time `json:"at"`

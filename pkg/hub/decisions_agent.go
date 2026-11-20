@@ -55,6 +55,8 @@ type AgentDecisionListItem struct {
 	Version         int                `json:"version"`
 	Status          string             `json:"status"`
 	Question        string             `json:"question"`
+	Choices         []messages.Choice  `json:"choices"`
+	DefaultChoiceID string             `json:"defaultChoiceId,omitempty"`
 	ConversationID  string             `json:"conversationId"`
 	PromptMessageID string             `json:"promptMessageId"`
 	CreatedAt       time.Time          `json:"createdAt"`
@@ -277,6 +279,16 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 		if convID == "" {
 			convID = convByPrompt[d.MessageID]
 		}
+		choices := d.Choices
+		if choices == nil {
+			choices = []messages.Choice{}
+		}
+		eff := d.EffectiveAnswer()
+		ans := answerView(eff)
+		if ans != nil {
+			ans.PreviousChoiceLabel = previousChoiceLabel(eff, d)
+			ans.PreviousOtherText = previousOtherText(eff, d)
+		}
 		items[i] = AgentDecisionListItem{
 			RowID:           d.ID,
 			Key:             d.Key,
@@ -284,13 +296,15 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 			Version:         d.Version,
 			Status:          d.Status,
 			Question:        d.Question,
+			Choices:         choices,
+			DefaultChoiceID: d.DefaultChoiceID,
 			ConversationID:  convID,
 			PromptMessageID: d.MessageID,
 			CreatedAt:       d.CreatedAt,
 			DecidedAt:       d.DecidedAt,
 			Withdrawn:       decisionWithdrawnView(d),
 			Dismissed:       decisionDismissedView(d),
-			Answer:          answerView(d.EffectiveAnswer()),
+			Answer:          ans,
 		}
 	}
 

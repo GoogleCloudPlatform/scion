@@ -161,8 +161,8 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, otherAgent))
 
-	// Post D234 v1 + hub-keyed 1, interpret D234=1, Bob overrides D234=2, then repost D234 v2.
-	p1 := f.sendPromptToBob(t, twoDecisions, false)
+	// Post D234 v1 + hub-keyed 1 (with choice descriptions), interpret D234=1, Bob overrides D234=2, then repost D234 v2.
+	p1 := f.sendPromptToBob(t, `[{"id":"D234","question":"Ship the **feature** now?","choices":[{"id":"1","label":"yes","description":"Deploy immediately"},{"id":"2","label":"no","description":"Hold until Monday"}],"default":"1"},{"question":"Which approach?","choices":[{"id":"a","label":"Extend","description":"Extend existing table"},{"id":"b","label":"New type"}]}]`, false)
 	reply := f.bobDMReply(t, p1.MessageID, "D234: yes")
 	recRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: reply.ID,
@@ -190,15 +190,19 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 		assert.NotEmpty(t, it.PromptMessageID)
 	}
 
-	// List decided: hub-keyed "1" (decided).
+	// List decided: hub-keyed "1" (decided), carrying choices (with descriptions) and empty previousChoiceLabel.
 	decRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=decided", nil)
 	require.Equal(t, http.StatusOK, decRR.Code)
 	var decOut AgentDecisionListResponse
 	require.NoError(t, json.Unmarshal(decRR.Body.Bytes(), &decOut))
 	require.Len(t, decOut.Items, 1)
 	assert.Equal(t, "1", decOut.Items[0].Key)
+	assert.Empty(t, decOut.Items[0].DefaultChoiceID)
+	require.Len(t, decOut.Items[0].Choices, 2)
+	assert.Equal(t, "Extend existing table", decOut.Items[0].Choices[0].Description)
 	require.NotNil(t, decOut.Items[0].Answer)
 	assert.Equal(t, "Extend", decOut.Items[0].Answer.Label)
+	assert.Empty(t, decOut.Items[0].Answer.PreviousChoiceLabel)
 
 	// List all with pagination (limit=2 -> 4 total items across 2 pages: D234 v1 replaced, 1 decided, D234 v2 pending, D900 pending).
 	all1RR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=all&limit=2", nil)
@@ -214,6 +218,24 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 	require.NoError(t, json.Unmarshal(all2RR.Body.Bytes(), &all2))
 	require.Len(t, all2.Items, 2)
 	assert.Empty(t, all2.NextCursor)
+
+	// Verify D234 v1 in state=all carries choices (with descriptions), defaultChoiceId="1", and answer.previousChoiceLabel="yes" on override!
+	var d234v1 *AgentDecisionListItem
+	for _, it := range append(append([]AgentDecisionListItem{}, all1.Items...), all2.Items...) {
+		itCopy := it
+		if itCopy.Key == "D234" && itCopy.Version == 1 {
+			d234v1 = &itCopy
+		}
+	}
+	require.NotNil(t, d234v1)
+	assert.Equal(t, "1", d234v1.DefaultChoiceID)
+	require.Len(t, d234v1.Choices, 2)
+	assert.Equal(t, "Deploy immediately", d234v1.Choices[0].Description)
+	assert.Equal(t, "Hold until Monday", d234v1.Choices[1].Description)
+	require.NotNil(t, d234v1.Answer)
+	assert.Equal(t, store.DecisionOutcomeOverride, d234v1.Answer.Outcome)
+	assert.Equal(t, "no", d234v1.Answer.Label)
+	assert.Equal(t, "yes", d234v1.Answer.PreviousChoiceLabel)
 
 	// Show D234 (case-insensitive "d234"): v1 has BOTH answers (interpreted + direct override), v2 is pending.
 	showRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/d234", nil)
