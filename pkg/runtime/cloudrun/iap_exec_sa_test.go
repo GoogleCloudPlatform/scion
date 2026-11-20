@@ -150,9 +150,16 @@ func startOSLoginServer(t *testing.T, clock *testClock, certValidity time.Durati
 			if err != nil {
 				t.Errorf("parse sshPublicKey: %v", err)
 			}
-			cert := &ssh.Certificate{Key: pub, CertType: ssh.UserCert, ValidBefore: clock.validBefore(certValidity)}
+			cert := &ssh.Certificate{
+				Key:             pub,
+				CertType:        ssh.UserCert,
+				ValidPrincipals: []string{"agent"},
+				ValidBefore:     clock.validBefore(certValidity),
+			}
 			if err := cert.SignCert(rand.Reader, ca); err != nil {
 				t.Errorf("sign cert: %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
 			}
 			signed = string(ssh.MarshalAuthorizedKey(cert))
 		}
