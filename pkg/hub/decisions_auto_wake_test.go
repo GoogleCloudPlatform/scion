@@ -293,7 +293,7 @@ func TestDecisionDismiss_AutoWakesHubSuspendedAgent(t *testing.T) {
 	var out DismissDecisionPromptResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
 	assert.True(t, out.Delivered)
-	assert.Equal(t, DismissDeliveryDelivered, out.DeliveryStatus)
+	assert.Equal(t, DismissDeliveryHeld, out.DeliveryStatus)
 
 	f.srv.autoWakeWork.wg.Wait()
 
@@ -328,6 +328,8 @@ func TestDecisionAnswer_DoesNotAutoWakeUserSuspendedHeldOrExperimentOff(t *testi
 		stored, err := f.store.GetMessage(context.Background(), out.ResponseMessageID)
 		require.NoError(t, err)
 		assert.Equal(t, store.MessageDispatchFailed, stored.DispatchState)
+		require.NotNil(t, stored.DispatchFailureReason)
+		assert.Equal(t, agentUnreachableReason(string(state.PhaseSuspended)), *stored.DispatchFailureReason)
 	})
 
 	t.Run("experiment_off", func(t *testing.T) {
@@ -348,6 +350,8 @@ func TestDecisionAnswer_DoesNotAutoWakeUserSuspendedHeldOrExperimentOff(t *testi
 		stored, err := f.store.GetMessage(context.Background(), out.ResponseMessageID)
 		require.NoError(t, err)
 		assert.Equal(t, store.MessageDispatchFailed, stored.DispatchState)
+		require.NotNil(t, stored.DispatchFailureReason)
+		assert.Equal(t, agentUnreachableReason(string(state.PhaseSuspended)), *stored.DispatchFailureReason)
 	})
 
 	t.Run("held_agent", func(t *testing.T) {
@@ -377,6 +381,36 @@ func TestDecisionAnswer_DoesNotAutoWakeUserSuspendedHeldOrExperimentOff(t *testi
 		stored, err := f.store.GetMessage(context.Background(), out.ResponseMessageID)
 		require.NoError(t, err)
 		assert.Equal(t, store.MessageDispatchFailed, stored.DispatchState)
+		require.NotNil(t, stored.DispatchFailureReason)
+		assert.Equal(t, agentUnreachableReason(string(state.PhaseSuspended)), *stored.DispatchFailureReason)
+	})
+
+	t.Run("dismiss_user_suspended", func(t *testing.T) {
+		f := newDecisionAutoWakeFixture(t, true)
+		f.readyOnStart(t)
+		oldTime := time.Now().UTC().Add(-10 * time.Minute)
+		f.srv.decisionClock = func() time.Time { return time.Now().UTC().Add(10 * time.Minute) }
+		promptMsg, _ := f.seedPrompt(t, `[{"id":"DU1","question":"Still needed?","choices":["yes","no"]}]`, oldTime)
+		f.suspendAgent(t, state.SuspendReasonUser)
+
+		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg.ID+"/dismiss", map[string]any{
+			"reason": "stale",
+		})
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		var out DismissDecisionPromptResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		assert.False(t, out.Delivered)
+		assert.Equal(t, DismissDeliveryUnreachable, out.DeliveryStatus)
+
+		f.srv.autoWakeWork.wg.Wait()
+		assert.Empty(t, f.disp.getStartCalls(), "user-suspended agent must not auto-wake on dismiss")
+		assert.Empty(t, f.disp.delivered())
+
+		stored, err := f.store.GetMessage(context.Background(), out.ResponseMessageID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchFailed, stored.DispatchState)
+		require.NotNil(t, stored.DispatchFailureReason)
+		assert.Equal(t, agentUnreachableReason(string(state.PhaseSuspended)), *stored.DispatchFailureReason)
 	})
 }
 

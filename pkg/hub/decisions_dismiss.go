@@ -67,13 +67,14 @@ type DismissDecisionPromptResponse struct {
 const (
 	// DismissDeliveryDelivered: dispatched to the asking agent.
 	DismissDeliveryDelivered = "delivered"
-	// DismissDeliveryHeld: held until the asking agent's next session, and
-	// delivered then.
+	// DismissDeliveryHeld: held until the asking agent's next session (or
+	// queued behind an auto-wake), and delivered then.
 	DismissDeliveryHeld = "held"
 	// DismissDeliveryGone: the asking agent is deleted; nothing was sent.
 	DismissDeliveryGone = "gone"
-	// DismissDeliveryUnreachable: the asking agent is suspended, stopping,
-	// stopped, or in error; the response is stored, marked failed, not sent.
+	// DismissDeliveryUnreachable: the asking agent is unreachable
+	// (user-suspended, held, stopping, stopped, or in error) and will not
+	// auto-wake; the response is stored, marked failed, not sent.
 	DismissDeliveryUnreachable = "unreachable"
 	// DismissDeliveryFailed: dispatch was attempted and failed, or the result
 	// cannot be confirmed.
@@ -432,8 +433,9 @@ func dismissChangedDetails(changed *store.DismissChangedError, views []DecisionV
 // stored with a dismissal (design 8194, 4.5). Unlike an answer to a gone
 // asker, a dismissal of a gone asker's prompt stays in DispatchState
 // dispatched (not marked failed), is not delivered, and reports
-// deliveryStatus gone. An unreachable (suspended, stopped, ...) asker's
-// response is stored failed and reports deliveryStatus unreachable.
+// deliveryStatus gone. An unreachable asker that will not auto-wake
+// (user-suspended, held, stopped, ...) has its response stored failed and
+// reports deliveryStatus unreachable.
 func (s *Server) decisionDismissResponseStoreMessage(ctx context.Context, user UserIdentity, first *store.Decision, chatKey string, asker *store.Agent, askerGone bool, now time.Time) *store.Message {
 	m := &store.Message{
 		ID:             api.NewUUID(),

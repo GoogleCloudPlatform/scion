@@ -718,8 +718,9 @@ func (s *Server) decisionResponseAutoWakeItem(messageID, agentSlug, text string,
 
 // dispatchDecisionResponse delivers a persisted decision-response to asker,
 // auto-waking a hub-suspended (or idle-suspending) asker in the background
-// just like web chat secondaries and mention fan-out. It returns (held, err),
-// where a queued auto-wake returns (false, nil).
+// just like web chat secondaries and mention fan-out. It returns
+// (queuedOrHeld, err), where queuedOrHeld is true when delivery is held for
+// the next session or queued behind a background auto-wake.
 func (s *Server) dispatchDecisionResponse(ctx context.Context, asker *store.Agent, m *store.Message, text string, sm *messages.StructuredMessage, label string) (bool, error) {
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -727,7 +728,7 @@ func (s *Server) dispatchDecisionResponse(ctx context.Context, asker *store.Agen
 	}
 	if s.canAutoWakeDecisionAsker(ctx, asker) &&
 		s.queueAutoWake(asker, s.decisionResponseAutoWakeItem(m.ID, asker.Slug, text, sm, label)) {
-		return false, nil
+		return true, nil
 	}
 	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
 	defer cancel()
@@ -743,7 +744,7 @@ func (s *Server) dispatchDecisionResponse(ctx context.Context, asker *store.Agen
 			}
 			if s.canAutoWakeDecisionAsker(ctx, target) &&
 				s.queueAutoWake(target, s.decisionResponseAutoWakeItem(m.ID, target.Slug, text, sm, label)) {
-				return false, nil
+				return true, nil
 			}
 		}
 		s.messageLog.Error("decisions: failed to deliver "+label, "agent", asker.Slug, "message_id", m.ID, "error", err)
