@@ -255,7 +255,7 @@ func writeWorkspaceFile(root *os.Root, relPath string, src io.Reader) (int64, fs
 	if err != nil {
 		return 0, nil, err
 	}
-	if notRegular(named) || !os.SameFile(opened, named) {
+	if notRegular(opened) || notRegular(named) || !os.SameFile(opened, named) || (exists && !os.SameFile(opened, before)) {
 		return 0, nil, fmt.Errorf("%w: target changed while opening it", errWorkspaceWriteRefused)
 	}
 	if err := f.Truncate(0); err != nil {
@@ -281,15 +281,7 @@ func writeWorkspaceFile(root *os.Root, relPath string, src io.Reader) (int64, fs
 // refused rather than followed or created through; an entry found present is
 // opened without O_CREATE, so a dangling link swapped in creates nothing.
 func openWorkspaceTarget(dir *os.Root, base string, exists bool) (*os.File, error) {
-	flag := os.O_WRONLY
-	if !exists {
-		flag |= os.O_CREATE | os.O_EXCL
-	}
-	f, err := dir.OpenFile(base, flag, 0644)
-	if errors.Is(err, fs.ErrExist) {
-		return nil, fmt.Errorf("%w: target appeared while opening it", errWorkspaceWriteRefused)
-	}
-	return f, err
+	return openWorkspaceFileForWrite(dir, base, exists)
 }
 
 // notRegular reports whether info is anything but a regular file: the files
