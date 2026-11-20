@@ -163,6 +163,7 @@ func (s *Server) templateImportKind() resourceImportKind {
 		marker:        "scion-agent.yaml",
 		isResourceDir: templateimport.IsScionTemplate,
 		newStore:      func(string) (*ResourceStore, error) { return s.templateStore(), nil },
+		checkContent:  s.checkHostedTemplateDirs,
 	}
 }
 

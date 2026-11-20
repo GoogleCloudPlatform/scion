@@ -327,6 +327,14 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 	if err := checkBundledHarnessConfigs(ctx, read, introduced); err != nil {
 		return err
 	}
+	// On a hosted hub, every bundled harness config of a project-scope
+	// template is member content (checksHostedTemplate), checked on each
+	// commit, not only the ones it introduces.
+	if s.checksHostedTemplate(tmpl.Scope) {
+		if err := hostedTemplateHarnessConfigsRefusal(ctx, tmpl.Name, read, next, "", false); err != nil {
+			return err
+		}
+	}
 
 	// 5. One row write, in the blob layout.
 	prevState := *tmpl
@@ -416,6 +424,9 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, unusable.Error(), nil)
 		return
 	}
+	if writeHostedHarnessConfigRefusal(w, err) {
+		return
+	}
 	if errors.Is(err, errTemplateStorageNotConfigured) {
 		RuntimeError(w, "Storage not configured")
 		return
@@ -429,12 +440,14 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 }
 
 // isTemplateCommitRefusal reports whether err is a commit refused for its
-// content (an unusable bundled harness-config), which callers outside the
+// content (an unusable bundled harness-config, or on a hosted hub a bundled
+// harness config naming host resources), which callers outside the
 // template handlers map with writeTemplateCommitError rather than as an
 // internal error.
 func isTemplateCommitRefusal(err error) bool {
 	var unusable *unusableBundledHarnessConfigError
-	return errors.As(err, &unusable)
+	var hosted *hostedHarnessConfigError
+	return errors.As(err, &unusable) || errors.As(err, &hosted)
 }
 
 // upsertTemplateFile returns a copy of files with entry added, or replacing

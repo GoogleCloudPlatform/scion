@@ -254,6 +254,9 @@ type HTTPAgentDispatcher struct {
 	// hostedHarnessConfigCheck checks the hub harness config a hosted
 	// dispatch names (SetHostedHarnessConfigCheck); nil checks nothing.
 	hostedHarnessConfigCheck func(ctx context.Context, harnessConfigID, runtimeKind string) error
+	// hostedTemplateCheck checks the bundled harness configs of the hub
+	// template a hosted dispatch uses (SetHostedTemplateCheck).
+	hostedTemplateCheck func(ctx context.Context, templateID, runtimeKind string) error
 
 	// attachmentIssuer issues the attachment delivery capabilities of a
 	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.

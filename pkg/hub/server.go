@@ -5750,6 +5750,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetWorkspaceStorage(s.GetStorage)
 	dispatcher.SetHostedMode(!s.config.Workstation)
 	dispatcher.SetHostedHarnessConfigCheck(s.checkStoredHostedHarnessConfig)
+	dispatcher.SetHostedTemplateCheck(s.checkStoredHostedTemplate)
 
 	// Configure token generator if available
 	if s.agentTokenService != nil {

@@ -340,6 +340,10 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 	if refuseUnusableBundledHarnessConfig(w, filePath, content) {
 		return
 	}
+	if err := s.hostedTemplateFileRefusal(template, filePath, content); err != nil {
+		writeTemplateCommitError(w, err)
+		return
+	}
 
 	// Store the content as a blob, then commit it.
 	fileHash, blobPath, err := s.writeTemplateFileBlob(ctx, stor, template, content)
@@ -382,6 +386,10 @@ func (s *Server) handleTemplateFileWriteRaw(w http.ResponseWriter, r *http.Reque
 	}
 
 	if refuseUnusableBundledHarnessConfig(w, filePath, data) {
+		return
+	}
+	if err := s.hostedTemplateFileRefusal(template, filePath, data); err != nil {
+		writeTemplateCommitError(w, err)
 		return
 	}
 
@@ -486,6 +494,10 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 			}
 
 			if refuseUnusableBundledHarnessConfig(w, relPath, data) {
+				return
+			}
+			if err := s.hostedTemplateFileRefusal(template, relPath, data); err != nil {
+				writeTemplateCommitError(w, err)
 				return
 			}
 			parts = append(parts, uploadPart{path: relPath, data: data})

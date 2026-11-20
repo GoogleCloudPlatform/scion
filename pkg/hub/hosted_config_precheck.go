@@ -42,8 +42,9 @@ func (d *HTTPAgentDispatcher) SetHostedHarnessConfigCheck(check func(ctx context
 
 // hostedConfigPrecheck refuses a dispatch on a hosted hub when the agent's
 // stored inline config (written by the member who created or updated the
-// agent), or the project-scope hub harness config it is dispatched with,
-// names host resources, so config stored before the check existed is
+// agent), the project-scope hub harness config it is dispatched with, or a
+// harness config bundled in the project-scope hub template it uses, names
+// host resources, so config stored before the check existed is
 // refused at its next dispatch. The runtime kind is the one the target
 // broker reports for the agent's profile (hostedRuntimeKind); when it is not
 // known, rules that depend on it are left to the broker.
@@ -55,10 +56,21 @@ func (d *HTTPAgentDispatcher) hostedConfigPrecheck(ctx context.Context, agent *s
 	if err := hostedConfigRefusal(agent.AppliedConfig.InlineConfig, kind); err != nil {
 		return err
 	}
-	if d.hostedHarnessConfigCheck == nil || agent.AppliedConfig.HarnessConfigID == "" {
-		return nil
+	if d.hostedHarnessConfigCheck != nil && agent.AppliedConfig.HarnessConfigID != "" {
+		if err := hostedCheckRefusal(d.hostedHarnessConfigCheck(ctx, agent.AppliedConfig.HarnessConfigID, kind)); err != nil {
+			return err
+		}
 	}
-	err := d.hostedHarnessConfigCheck(ctx, agent.AppliedConfig.HarnessConfigID, kind)
+	if d.hostedTemplateCheck != nil && agent.AppliedConfig.TemplateID != "" {
+		return hostedCheckRefusal(d.hostedTemplateCheck(ctx, agent.AppliedConfig.TemplateID, kind))
+	}
+	return nil
+}
+
+// hostedCheckRefusal maps a stored harness-config or template check's
+// refusal to a 400 hosted_config_refused *RuntimeTargetRefusal; other errors
+// are returned as they are.
+func hostedCheckRefusal(err error) error {
 	var he *hostedHarnessConfigError
 	if errors.As(err, &he) {
 		return &RuntimeTargetRefusal{Code: hostedguard.ErrorCode, Status: http.StatusBadRequest, Message: he.Error()}
