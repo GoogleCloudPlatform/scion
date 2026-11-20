@@ -61,6 +61,9 @@ func init() {
 	// Notification flag — on by default; use --no-notify to opt out
 	startCmd.Flags().BoolVar(&startNoNotify, "no-notify", false, "Do not subscribe to notifications for the spawned agent")
 
+	// Opt out of implicitly resuming/restarting an existing agent in place
+	startCmd.Flags().BoolVar(&startNoReuse, "no-reuse", false, "Fail if an agent with this name already exists instead of resuming or restarting it in place")
+
 	// Back-compat: accept --notify without error (it's now the default)
 	startCmd.Flags().BoolVar(&startNotifyDeprecated, "notify", false, "")
 	_ = startCmd.Flags().MarkDeprecated("notify", "notifications are now enabled by default; remove --notify from your instructions")

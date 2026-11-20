@@ -119,6 +119,9 @@ starting a **stopped** or **error** agent runs a fresh session. See
 
 Starting an existing **stopped** agent restarts it in place
 (printed as "Restarting", with a fresh session), the same as `scion resume`.
+Pass `--no-reuse` to opt out so `scion start` sends the request without
+`resume`, causing the Hub to return a `409` conflict and the command to exit
+non-zero when a stopped or halted agent already exists.
 Starting an **error**-phase agent still fails with a conflict: use
 `scion resume --force` or delete it first. When an existing agent is reused in
 place, the Hub applies only the task and `--attach`. Other configuration flags
@@ -148,6 +151,7 @@ warning that names them.
     - `--agent-log-level <spec>`: Set `SCION_LOG_LEVEL` in the agent's environment, for example `debug` or `info,hubsync=debug` (same syntax as [`SCION_LOG_LEVEL`](/scion/hosted/single-node/observability/#debugging-an-agent)). An invalid value fails before anything starts. Agents never inherit `--debug` or the server's debug setting. The value is saved in the agent's applied config and kept on later restarts (remove it by deleting and re-creating the agent); when the Hub reuses an existing agent, the flag is not applied and `scion start` or `scion resume` prints a warning.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
+    - `--no-reuse`: Fail if an agent with this name already exists instead of resuming or restarting it in place. Sends the create request without `resume`, so an existing stopped or halted agent returns a `409` conflict and exits non-zero.
     - `--no-wait`: Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
     - `--wait-timeout <duration>`: How long to wait for the agent to start (for example `10m`); must not be negative. The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
     - `--wait-ready`: After the agent is running, also wait until its harness accepts input (its activity is no longer `initializing`, shown as "starting"). `--wait-timeout`, if set, bounds the whole wait; otherwise the readiness wait is limited to 2 minutes. Prints `Agent '<name>' is ready.` when it is; JSON output adds `"ready": true|false` to `details`. If the agent is not ready in time the command exits with status 3 and the agent is left running. If the agent reports a harness error (`harness_error`: the harness is up but its model calls fail) or leaves the running phase while waiting, the command exits with status 1 and prints the agent's reason. Cannot be combined with `--no-wait`.

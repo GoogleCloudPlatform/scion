@@ -75,6 +75,7 @@ var (
 	harnessAuthFlag       string
 	startNoNotify         bool
 	startNotifyDeprecated bool
+	startNoReuse          bool
 	enableTelemetry       bool
 	disableTelemetry      bool
 	inlineConfigPath      string
@@ -1305,7 +1306,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			existingPhaseText = fmt.Sprintf("%s, resumes as %s", existing.Phase, existing.Launch.ResumePhase)
 		}
 	}
-	if !resume && hubStartImpliesResume(existingPhase) {
+	if !resume && !startNoReuse && hubStartImpliesResume(existingPhase) {
 		resume = true
 		req.Resume = true
 	}
