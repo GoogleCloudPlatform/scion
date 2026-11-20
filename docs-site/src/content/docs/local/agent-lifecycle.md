@@ -399,6 +399,12 @@ same check that marks it stalled, unless the agent's harness does not support
 session resume. Agents already `stalled` when you turn auto-suspend on are not
 suspended unless they become active and stall again.
 
+After a tool call finishes, the agent shows `thinking` until its next event
+(rather than `working`), because the harness's next step is a model call
+carrying the tool result. On a Hub with the 20-minute `thinking` stall cutoff,
+that cutoff therefore also covers the model call after each tool, while
+turn-end events continue to return the agent to `working`.
+
 A long build, a test run or a background job emits no activity events, so the
 Hub also looks for **live work**. On each 30-second heartbeat, `sciontool init`
 checks the container for two things:
