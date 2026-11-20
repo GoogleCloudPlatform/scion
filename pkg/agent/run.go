@@ -1902,7 +1902,7 @@ authDone:
 	if opts.InlineConfig != nil {
 		inlineEnv = opts.InlineConfig.Env
 	}
-	hookWithheldEnv := computeHookWithheldEnv(hcBundleEnv, agentEnv, callerEnv, inlineEnv, resolvedAuth, opts.ResolvedSecrets)
+	hookWithheldEnv := computeHookWithheldEnv(hcBundleEnv, agentEnv, callerEnv, inlineEnv)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
 	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
 	warnings = append(warnings, hubOnlyEnvWarnings...)

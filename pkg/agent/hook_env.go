@@ -18,22 +18,29 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // computeHookWithheldEnv returns the sorted list of environment variable names
-// whose final value comes from the harness-config bundle env layer and must be
-// withheld from lifecycle hooks. Keys supplied with a non-empty value by a
-// higher-precedence source (caller/hub env, inline env, resolved auth, or
-// environment-type secrets) are excluded so those sources remain visible to
-// hooks. Keys not present in the final agentEnv are also omitted.
+// whose final value in agentEnv comes from the harness-config bundle env layer
+// and must be withheld from lifecycle hooks.
+//
+// Keys supplied with a non-empty value by a higher-precedence layer in
+// buildAgentEnv (caller/hub env captured before settings-hc injection, or
+// inline env) are excluded so those sources remain visible to hooks. Keys
+// absent from agentEnv (for example, an empty bundle declaration satisfied only
+// by resolved auth or an environment secret at runtime) are also omitted;
+// conversely, when a bundle key is emitted into agentEnv, runtime config.Env
+// outranks resolved auth and colliding environment secrets, so the key stays
+// withheld.
+//
+// Bundle keys are expanded with the same ExpandEnvRefusing rule buildAgentEnv
+// uses so keys containing ${...} are matched under their emitted name.
 func computeHookWithheldEnv(
 	bundleEnv map[string]string,
 	agentEnv []string,
 	callerEnv map[string]string,
 	inlineEnv map[string]string,
-	resolvedAuth *api.ResolvedAuth,
-	resolvedSecrets []api.ResolvedSecret,
 ) []string {
 	if len(bundleEnv) == 0 {
 		return nil
@@ -57,22 +64,15 @@ func computeHookWithheldEnv(
 			higher[k] = struct{}{}
 		}
 	}
-	if resolvedAuth != nil {
-		for k, v := range resolvedAuth.EnvVars {
-			if v != "" {
-				higher[k] = struct{}{}
-			}
-		}
-	}
-	for _, s := range resolvedSecrets {
-		if (s.Type == "" || s.Type == "environment") && s.Target != "" && s.Value != "" {
-			higher[s.Target] = struct{}{}
-		}
-	}
 
+	seen := make(map[string]struct{}, len(bundleEnv))
 	var withheld []string
-	for k := range bundleEnv {
+	for rawK := range bundleEnv {
+		k, _, _ := util.ExpandEnvRefusing(rawK, refuseHostEnvForAgent)
 		if k == "" {
+			continue
+		}
+		if _, dup := seen[k]; dup {
 			continue
 		}
 		if _, ok := higher[k]; ok {
@@ -81,6 +81,7 @@ func computeHookWithheldEnv(
 		if _, ok := emitted[k]; !ok {
 			continue
 		}
+		seen[k] = struct{}{}
 		withheld = append(withheld, k)
 	}
 	sort.Strings(withheld)
