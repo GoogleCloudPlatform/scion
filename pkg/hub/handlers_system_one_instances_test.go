@@ -2755,7 +2755,8 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 	}
 
 	// 3b. Even when the secret name IS the provider-approved GEMINI_API_KEY, an internal row in project scope
-	//     is refused at create (400) AND at project_or_hub resolution with NO fallback to a valid Hub GEMINI_API_KEY!
+	//     does NOT block global instance creation (N1 / §F11: create performs no project-scope scans),
+	//     and IS refused at project and project_or_hub resolution with NO fallback to a valid Hub GEMINI_API_KEY!
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
 		Value:      projInternalCanary,
@@ -2780,8 +2781,9 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 	require.NoError(t, err)
 
 	for _, sc := range []string{"project", "project_or_hub"} {
-		badCreate := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-			"name":    "c1-bad-gem-proj-" + strings.ReplaceAll(sc, "_", "-"),
+		instName := "c1-gem-proj-" + strings.ReplaceAll(sc, "_", "-")
+		okCreate := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    instName,
 			"adapter": geminidecisions.AdapterName,
 			"model":   "gemini-decision-1",
 			"auth": map[string]any{
@@ -2789,7 +2791,22 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": sc},
 			},
 		})
-		require.Equal(t, http.StatusBadRequest, badCreate.Code, sc)
+		require.Equal(t, http.StatusCreated, okCreate.Code, "scope=%s body=%s", sc, okCreate.Body.String())
+
+		providerHits.Store(0)
+		pRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/"+instName+"/probe", map[string]any{
+			"project": proj.ID,
+			"spec":    binSpec,
+			"probe":   map[string]any{"text": "Project internal GEMINI_API_KEY must fail with auth and no fallback."},
+		})
+		require.Equal(t, http.StatusOK, pRec.Code, sc)
+		var pResp ProbeSystemOneInstanceResponse
+		require.NoError(t, json.Unmarshal(pRec.Body.Bytes(), &pResp))
+		assert.Equal(t, systemoneruntime.ClassFailed, pResp.Class, sc)
+		assert.Equal(t, "auth", pResp.Reason, sc)
+		require.Len(t, pResp.Evaluation.Attempts, 1, sc)
+		assert.Equal(t, 0, pResp.Evaluation.Attempts[0].Requests, sc)
+		assert.Zero(t, providerHits.Load(), sc)
 	}
 
 	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
@@ -2889,6 +2906,8 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 func TestSystemOneInstances_Item7_EndpointPinForNamedSecretAndADC(t *testing.T) {
 	ctx := context.Background()
 	srv, s, localBackend := newSystemOneTestServer(t, true)
+	countingBackend := &countingSecretBackendWrapper{SecretBackend: localBackend}
+	srv.SetSecretBackend(countingBackend)
 
 	var auditBuf, runtimeLogBuf syncBuffer
 	srv.envSecretLog = slog.New(slog.NewJSONHandler(&auditBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -2903,6 +2922,7 @@ func TestSystemOneInstances_Item7_EndpointPinForNamedSecretAndADC(t *testing.T) 
 
 	const (
 		projSecretCanary = "CANARY_F9_PROJECT_GITHUB_TOKEN_8414"
+		projGeminiCanary = "CANARY_F9_PROJECT_GEMINI_KEY_8414"
 		hubSecretCanary  = "CANARY_F9_HUB_GEMINI_KEY_8414"
 		ownedKeyCanary   = "CANARY_F9_OWNED_CUSTOM_EP_KEY_8414"
 		adcCanaryToken   = "CANARY_F9_ADC_BEARER_TOKEN_8414"
@@ -2984,6 +3004,18 @@ func TestSystemOneInstances_Item7_EndpointPinForNamedSecretAndADC(t *testing.T) 
 
 	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       "GEMINI_API_KEY",
+		Value:      projGeminiCanary,
+		SecretType: store.SecretTypeEnvironment,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeProject,
+		ScopeID:    victimProj.ID,
+		CreatedBy:  projOwner.ID,
+		UpdatedBy:  projOwner.ID,
+	})
+	require.NoError(t, err)
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
 		Value:      hubSecretCanary,
 		SecretType: store.SecretTypeVariable,
 		Target:     "GEMINI_API_KEY",
@@ -2993,6 +3025,94 @@ func TestSystemOneInstances_Item7_EndpointPinForNamedSecretAndADC(t *testing.T) 
 		UpdatedBy:  superAdmin.ID,
 	})
 	require.NoError(t, err)
+
+	// 1b. Independent allowed-name endpoint pin (FV-R1 + Hub N2): GEMINI_API_KEY (environment/variable)
+	//     with custom endpoints -> 400 at create with endpoint-pin error for project and project_or_hub!
+	for _, sc := range []string{"project", "project_or_hub"} {
+		for _, badEndpoint := range []string{
+			attackerSrv.URL,
+			"https://attacker.example",
+			"https://generativelanguage.googleapis.com:8443",
+			"https://generativelanguage.googleapis.com/v1beta",
+		} {
+			rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+				"name":     "f9-bad-allowed-ref",
+				"adapter":  geminidecisions.AdapterName,
+				"model":    "gemini-decision-1",
+				"endpoint": badEndpoint,
+				"auth": map[string]any{
+					"kind":      "api_key",
+					"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": sc},
+				},
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code, "scope=%s endpoint=%q body=%s", sc, badEndpoint, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "default endpoint", "scope=%s endpoint=%q", sc, badEndpoint)
+			assert.NotContains(t, rec.Body.String(), projGeminiCanary)
+			assert.NotContains(t, rec.Body.String(), hubSecretCanary)
+		}
+	}
+
+	// 2b. Forced rows with ALLOWED name GEMINI_API_KEY + custom endpoint -> auth with 0 SecretBackend.Get,
+	//     0 attacker hits, and 0 default hits for both project and project_or_hub!
+	for idx, sc := range []string{"project", "project_or_hub"} {
+		forcedID := fmt.Sprintf("9999701%d-0000-4000-8000-000000000001", idx+1)
+		forcedName := "f9-forced-gem-" + strings.ReplaceAll(sc, "_", "-")
+		require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+			ID:       forcedID,
+			Name:     forcedName,
+			Adapter:  geminidecisions.AdapterName,
+			Model:    "gemini-decision-1",
+			Endpoint: attackerSrv.URL,
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "GEMINI_API_KEY"},
+			Options:  map[string]string{systemoneprovider.OptionSecretScope: sc},
+			Enabled:  true,
+		}))
+
+		countingBackend.getCalls.Store(0)
+		attackerHits.Store(0)
+		defaultProviderHits.Store(0)
+		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/"+forcedName+"/probe", map[string]any{
+			"project": victimProj.ID,
+			"spec":    json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`),
+			"probe":   map[string]any{"text": "Allowed-name custom endpoint probe."},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "scope=%s body=%s", sc, rec.Body.String())
+		var pResp ProbeSystemOneInstanceResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pResp))
+		assert.Equal(t, systemoneruntime.ClassFailed, pResp.Class, sc)
+		assert.Equal(t, "auth", pResp.Reason, sc)
+		assert.Zero(t, countingBackend.getCalls.Load(), "allowed-name custom endpoint must make 0 SecretBackend.Get calls (scope=%s)", sc)
+		assert.Zero(t, attackerHits.Load(), "attacker server must receive 0 requests (scope=%s)", sc)
+		assert.Zero(t, defaultProviderHits.Load(), "default provider must receive 0 requests (scope=%s)", sc)
+		assert.NotContains(t, rec.Body.String(), projGeminiCanary)
+		assert.NotContains(t, rec.Body.String(), hubSecretCanary)
+	}
+
+	// Positive control for allowed-name project secret at canonical default endpoint.
+	posCreate := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "f9-good-gem-proj",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": geminidecisions.DefaultEndpoint,
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "project"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, posCreate.Code, posCreate.Body.String())
+	countingBackend.getCalls.Store(0)
+	defaultProviderHits.Store(0)
+	posProbe := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/f9-good-gem-proj/probe", map[string]any{
+		"project": victimProj.ID,
+		"spec":    json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`),
+		"probe":   map[string]any{"text": "Positive control canonical endpoint."},
+	})
+	require.Equal(t, http.StatusOK, posProbe.Code, posProbe.Body.String())
+	var posResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(posProbe.Body.Bytes(), &posResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, posResp.Class)
+	assert.Equal(t, int32(1), countingBackend.getCalls.Load())
+	assert.Equal(t, int32(1), defaultProviderHits.Load())
 
 	// 1. Least-privileged hub-admin PoC case (§F9): custom endpoint + project secret_ref -> 400 at create!
 	for _, badEndpoint := range []string{
@@ -3692,4 +3812,377 @@ func TestSystemOneInstances_Item9_OperatorConfiguredExtraSecretNames(t *testing.
 	assert.Zero(t, providerHits.Load(), "removed extra after Hub restart must make 0 provider requests")
 	assert.Zero(t, countingBackend.getCalls.Load(), "removed extra after Hub restart must fail pre-lookup with 0 SecretBackend.Get calls")
 	assert.NotContains(t, probeAfterRestart.Body.String(), billingBCanary)
+}
+
+type secretReadSpyStore struct {
+	store.Store
+	projectReads atomic.Int32
+	hubReads     atomic.Int32
+}
+
+func (w *secretReadSpyStore) ListSecrets(ctx context.Context, filter store.SecretFilter) ([]store.Secret, error) {
+	if filter.Scope == store.ScopeProject || filter.Scope == "" {
+		w.projectReads.Add(1)
+	}
+	if filter.Scope == store.ScopeHub || filter.Scope == "" {
+		w.hubReads.Add(1)
+	}
+	return w.Store.ListSecrets(ctx, filter)
+}
+
+func (w *secretReadSpyStore) GetSecret(ctx context.Context, key, scope, scopeID string) (*store.Secret, error) {
+	if scope == store.ScopeProject {
+		w.projectReads.Add(1)
+	}
+	if scope == store.ScopeHub {
+		w.hubReads.Add(1)
+	}
+	return w.Store.GetSecret(ctx, key, scope, scopeID)
+}
+
+type secretReadSpyBackend struct {
+	secret.SecretBackend
+	projectReads atomic.Int32
+	hubReads     atomic.Int32
+}
+
+func (w *secretReadSpyBackend) Get(ctx context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	if scope == store.ScopeProject {
+		w.projectReads.Add(1)
+	}
+	if scope == store.ScopeHub {
+		w.hubReads.Add(1)
+	}
+	return w.SecretBackend.Get(ctx, name, scope, scopeID)
+}
+
+func (w *secretReadSpyBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (*secret.SecretMeta, error) {
+	if scope == store.ScopeProject {
+		w.projectReads.Add(1)
+	}
+	if scope == store.ScopeHub {
+		w.hubReads.Add(1)
+	}
+	return w.SecretBackend.GetMeta(ctx, name, scope, scopeID)
+}
+
+// TestSystemOneInstances_N1_CreateDoesNotScanProjectSecrets (Hub N1 / §F11):
+// Proves global instance creation never reads or scans project-scope secrets or
+// metadata, only validates the Hub row when scope is hub/project_or_hub, allows
+// missing Hub rows at create, and enforces bad project rows solely at resolution
+// time per evaluating project with no Hub fallback.
+func TestSystemOneInstances_N1_CreateDoesNotScanProjectSecrets(t *testing.T) {
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+	spyStore, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *secretReadSpyStore {
+		return &secretReadSpyStore{Store: inner}
+	})
+	spyBackend := &secretReadSpyBackend{SecretBackend: localBackend}
+	srv.SetSecretBackend(spyBackend)
+
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-n1-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+	projMember, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-n1-member", store.SystemRoleHubMember))
+	require.NoError(t, err)
+
+	const (
+		hubKeyCanary      = "CANARY_N1_HUB_GEMINI_KEY_8414"
+		badProjFileCanary = "CANARY_N1_BAD_PROJECT_FILE_SECRET_8414"
+	)
+
+	var (
+		providerHits atomic.Int32
+		lastAPIKey   atomic.Value
+	)
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerHits.Add(1)
+		lastAPIKey.Store(r.Header.Get(geminidecisions.HeaderAPIKey))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q_ok":{"type":"noul","noul":0.94,"confidence":0.95}}}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	reg := srv.SystemOneProviderRegistry()
+	srv.mu.Lock()
+	srv.systemOneRuntime = systemoneruntime.New(
+		systemoneruntime.Config{
+			Registry:           reg,
+			Instances:          &hubSystemOneInstanceSource{srv: srv},
+			Credentials:        (&hubSystemOneCredentialSource{srv: srv}).APIKeyToken,
+			TokenSource:        (&hubSystemOneCredentialSource{srv: srv}).GoogleAccessToken,
+			AllowedSecretNames: srv.allowedSecretNamesFor,
+		},
+		systemoneruntime.WithEgressOptionsForTesting(testSystemOneEgressOptions(t, tlsSrv)...),
+	)
+	srv.mu.Unlock()
+
+	badProj := &store.Project{
+		ID:      tid("n1-bad-proj"),
+		Name:    "n1-bad-proj",
+		Slug:    "n1-bad-proj",
+		OwnerID: projMember.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	cleanProj := &store.Project{
+		ID:      tid("n1-clean-proj"),
+		Name:    "n1-clean-proj",
+		Slug:    "n1-clean-proj",
+		OwnerID: admin.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, badProj))
+	require.NoError(t, s.CreateProject(ctx, cleanProj))
+
+	resetSpy := func() {
+		spyStore.projectReads.Store(0)
+		spyStore.hubReads.Store(0)
+		spyBackend.projectReads.Store(0)
+		spyBackend.hubReads.Store(0)
+	}
+
+	// 1. Missing Hub row at create is OK for all scopes, with 0 project-scope reads.
+	for _, sc := range []string{"hub", "project", "project_or_hub"} {
+		resetSpy()
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    "n1-missing-hub-" + strings.ReplaceAll(sc, "_", "-"),
+			"adapter": geminidecisions.AdapterName,
+			"model":   "gemini-2.5-flash",
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": sc},
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, "missing Hub row must be OK at create (scope=%s): %s", sc, rec.Body.String())
+		assert.Zero(t, spyStore.projectReads.Load(), "create must do 0 project-scope store reads (scope=%s)", sc)
+		assert.Zero(t, spyBackend.projectReads.Load(), "create must do 0 project-scope backend reads (scope=%s)", sc)
+	}
+
+	// 2. Hub file and internal rows -> create 400 under hub and project_or_hub,
+	//    but IGNORED (201) under project; 0 project-scope reads across all scopes.
+	for _, badHubType := range []string{store.SecretTypeFile, store.SecretTypeInternal} {
+		_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+			Name:       "GEMINI_API_KEY",
+			Value:      hubKeyCanary,
+			SecretType: badHubType,
+			Target:     "GEMINI_API_KEY",
+			Scope:      store.ScopeHub,
+			ScopeID:    srv.hubID,
+			CreatedBy:  admin.ID,
+			UpdatedBy:  admin.ID,
+		})
+		require.NoError(t, err)
+
+		for _, sc := range []string{"hub", "project_or_hub"} {
+			resetSpy()
+			rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+				"name":    "n1-bad-hub-" + badHubType + "-" + strings.ReplaceAll(sc, "_", "-"),
+				"adapter": geminidecisions.AdapterName,
+				"model":   "gemini-2.5-flash",
+				"auth": map[string]any{
+					"kind":      "api_key",
+					"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": sc},
+				},
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code, "Hub %s row must fail create under %s: %s", badHubType, sc, rec.Body.String())
+			assert.Zero(t, spyStore.projectReads.Load(), "create must do 0 project-scope store reads (type=%s scope=%s)", badHubType, sc)
+			assert.Zero(t, spyBackend.projectReads.Load(), "create must do 0 project-scope backend reads (type=%s scope=%s)", badHubType, sc)
+		}
+
+		resetSpy()
+		projRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    "n1-ignore-hub-" + badHubType + "-proj",
+			"adapter": geminidecisions.AdapterName,
+			"model":   "gemini-2.5-flash",
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "project"},
+			},
+		})
+		require.Equal(t, http.StatusCreated, projRec.Code, "Hub %s row must be ignored at create under project scope: %s", badHubType, projRec.Body.String())
+		assert.Zero(t, spyStore.projectReads.Load())
+		assert.Zero(t, spyBackend.projectReads.Load())
+		assert.Zero(t, spyStore.hubReads.Load(), "project-only create should not read Hub secrets")
+		assert.Zero(t, spyBackend.hubReads.Load(), "project-only create should not read Hub secret metadata")
+	}
+
+	// 3. Valid Hub variable GEMINI_API_KEY + unrelated project holding file-typed GEMINI_API_KEY:
+	//    create returns 201 for both project_or_hub and project with 0 project-scope reads.
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      hubKeyCanary,
+		SecretType: store.SecretTypeVariable,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeHub,
+		ScopeID:    srv.hubID,
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      badProjFileCanary,
+		SecretType: store.SecretTypeFile,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeProject,
+		ScopeID:    badProj.ID,
+		CreatedBy:  projMember.ID,
+		UpdatedBy:  projMember.ID,
+	})
+	require.NoError(t, err)
+
+	for _, sc := range []string{"project_or_hub", "project"} {
+		resetSpy()
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    "n1-cross-proj-" + strings.ReplaceAll(sc, "_", "-"),
+			"adapter": geminidecisions.AdapterName,
+			"model":   "gemini-2.5-flash",
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": sc},
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, "unrelated project file secret must NOT block create (scope=%s): %s", sc, rec.Body.String())
+		assert.Zero(t, spyStore.projectReads.Load(), "create must do 0 project-scope store reads (scope=%s)", sc)
+		assert.Zero(t, spyBackend.projectReads.Load(), "create must do 0 project-scope backend reads (scope=%s)", sc)
+	}
+
+	binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`)
+
+	// 4. Evaluation/probe in badProj (holds file-typed GEMINI_API_KEY) -> auth, 0 provider requests, NO Hub fallback.
+	for _, sc := range []string{"project_or_hub", "project"} {
+		instName := "n1-cross-proj-" + strings.ReplaceAll(sc, "_", "-")
+		providerHits.Store(0)
+		pRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/"+instName+"/probe", map[string]any{
+			"project": badProj.ID,
+			"spec":    binSpec,
+			"probe":   map[string]any{"text": "Bad project evaluation."},
+		})
+		require.Equal(t, http.StatusOK, pRec.Code, sc)
+		var pResp ProbeSystemOneInstanceResponse
+		require.NoError(t, json.Unmarshal(pRec.Body.Bytes(), &pResp))
+		assert.Equal(t, systemoneruntime.ClassFailed, pResp.Class, sc)
+		assert.Equal(t, "auth", pResp.Reason, sc)
+		assert.Zero(t, providerHits.Load(), "bad project must make 0 provider requests and not fall back to Hub (scope=%s)", sc)
+		assert.NotContains(t, pRec.Body.String(), badProjFileCanary)
+		assert.NotContains(t, pRec.Body.String(), hubKeyCanary)
+	}
+
+	// 5. Evaluation/probe in cleanProj (no project row) under project_or_hub falls back to Hub row and succeeds!
+	providerHits.Store(0)
+	lastAPIKey.Store("")
+	cleanRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/n1-cross-proj-project-or-hub/probe", map[string]any{
+		"project": cleanProj.ID,
+		"spec":    binSpec,
+		"probe":   map[string]any{"text": "Clean project fallback to Hub."},
+	})
+	require.Equal(t, http.StatusOK, cleanRec.Code, cleanRec.Body.String())
+	var cleanResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(cleanRec.Body.Bytes(), &cleanResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, cleanResp.Class)
+	assert.Equal(t, int32(1), providerHits.Load())
+	assert.Equal(t, hubKeyCanary, lastAPIKey.Load())
+	assert.NotContains(t, cleanRec.Body.String(), hubKeyCanary)
+
+	// 6. Missing project context is rejected BEFORE any project secret resolution.
+	resetSpy()
+	providerHits.Store(0)
+	missingProjRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/n1-cross-proj-project-or-hub/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Missing project context."},
+	})
+	require.Equal(t, http.StatusOK, missingProjRec.Code, missingProjRec.Body.String())
+	var missingProjResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(missingProjRec.Body.Bytes(), &missingProjResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, missingProjResp.Class)
+	assert.Equal(t, string(systemoneprovider.FailInvalidRequest), missingProjResp.Reason)
+	assert.Zero(t, spyStore.projectReads.Load(), "missing project context must reject before any project store read")
+	assert.Zero(t, spyBackend.projectReads.Load(), "missing project context must reject before any project backend read")
+	assert.Zero(t, providerHits.Load())
+}
+
+// TestSystemOneInstances_N2_HubFileTypeAllowedNameRefused (Hub N2):
+// Proves that even with the allowed name GEMINI_API_KEY on the canonical
+// default endpoint, a Hub-scope file-typed secret is refused at create (400)
+// and on a forced row at resolution (auth, 0 provider hits).
+func TestSystemOneInstances_N2_HubFileTypeAllowedNameRefused(t *testing.T) {
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-n2-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	const fileSecretCanary = "CANARY_N2_HUB_FILE_GEMINI_KEY_8414"
+	var providerHits atomic.Int32
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q_ok":{"type":"noul","noul":0.94,"confidence":0.95}}}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	reg := srv.SystemOneProviderRegistry()
+	srv.mu.Lock()
+	srv.systemOneRuntime = systemoneruntime.New(
+		systemoneruntime.Config{
+			Registry:           reg,
+			Instances:          &hubSystemOneInstanceSource{srv: srv},
+			Credentials:        (&hubSystemOneCredentialSource{srv: srv}).APIKeyToken,
+			TokenSource:        (&hubSystemOneCredentialSource{srv: srv}).GoogleAccessToken,
+			AllowedSecretNames: srv.allowedSecretNamesFor,
+		},
+		systemoneruntime.WithEgressOptionsForTesting(testSystemOneEgressOptions(t, tlsSrv)...),
+	)
+	srv.mu.Unlock()
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      fileSecretCanary,
+		SecretType: store.SecretTypeFile,
+		Target:     "/etc/secret/gemini.key",
+		Scope:      store.ScopeHub,
+		ScopeID:    srv.hubID,
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+
+	for _, sc := range []string{"hub", "project_or_hub"} {
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    "n2-file-hub-" + strings.ReplaceAll(sc, "_", "-"),
+			"adapter": geminidecisions.AdapterName,
+			"model":   "gemini-2.5-flash",
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": sc},
+			},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, "Hub file GEMINI_API_KEY must fail create (scope=%s): %s", sc, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), fileSecretCanary)
+	}
+
+	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       "99998001-0000-4000-8000-000000000001",
+		Name:     "n2-forced-hub-file",
+		Adapter:  geminidecisions.AdapterName,
+		Model:    "gemini-2.5-flash",
+		Endpoint: geminidecisions.DefaultEndpoint,
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "GEMINI_API_KEY"},
+		Options:  map[string]string{systemoneprovider.OptionSecretScope: "hub"},
+		Enabled:  true,
+	}))
+
+	providerHits.Store(0)
+	pRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/n2-forced-hub-file/probe", map[string]any{
+		"spec":  json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`),
+		"probe": map[string]any{"text": "Forced hub file secret check."},
+	})
+	require.Equal(t, http.StatusOK, pRec.Code, pRec.Body.String())
+	var pResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(pRec.Body.Bytes(), &pResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, pResp.Class)
+	assert.Equal(t, "auth", pResp.Reason)
+	assert.Zero(t, providerHits.Load(), "forced hub file secret must make 0 provider requests")
+	assert.NotContains(t, pRec.Body.String(), fileSecretCanary)
 }

@@ -1421,6 +1421,11 @@ func inferProbeSpecKind(raw []byte) spec.Kind {
 	return spec.KindJudgments
 }
 
+// validateNamedSecretRefAtCreate validates the Hub-scope secret row (if
+// present) when creating a named-secret instance with scope "hub" or
+// "project_or_hub". A global instance has no project binding at create time, so
+// project-scope rows are never scanned or read here; project rows are validated
+// per evaluating project during resolution (resolveNamedSecretToken).
 func (s *Server) validateNamedSecretRefAtCreate(ctx context.Context, refName, refScope string) (bool, error) {
 	if s.store == nil {
 		return true, nil
@@ -1441,20 +1446,6 @@ func (s *Server) validateNamedSecretRefAtCreate(ctx context.Context, refName, re
 		if len(hubRows) == 0 && s.secretBackend != nil {
 			meta, metaErr := s.secretBackend.GetMeta(ctx, refName, store.ScopeHub, s.hubID)
 			if metaErr == nil && meta != nil && !isAllowedNamedSecretType(meta.SecretType) {
-				return false, nil
-			}
-		}
-	}
-	if refScope == systemoneprovider.SecretScopeProject || refScope == systemoneprovider.SecretScopeProjectOrHub {
-		projRows, err := s.store.ListSecrets(ctx, store.SecretFilter{
-			Scope: store.ScopeProject,
-			Key:   refName,
-		})
-		if err != nil {
-			return false, err
-		}
-		for i := range projRows {
-			if !isAllowedNamedSecretType(projRows[i].SecretType) {
 				return false, nil
 			}
 		}

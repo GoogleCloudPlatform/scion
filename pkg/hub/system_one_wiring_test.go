@@ -1149,3 +1149,91 @@ func TestSystemOneNamedSecret_ProviderPinnedSecretNamePolicyBeforeLookup(t *test
 	assert.Equal(t, secretVal, tok)
 	assert.Equal(t, int32(1), backendGetCalls.Load())
 }
+
+// TestSystemOneNamedSecret_EndpointPinAllowedNameBeforeLookup (FV-R1):
+// Verifies hubSystemOneCredentialSource.APIKeyToken enforces the endpoint pin
+// independently when both the secret name (GEMINI_API_KEY) and secret type
+// (environment/variable) are allowed, failing with egress.ErrAuth and 0
+// SecretBackend.Get calls.
+func TestSystemOneNamedSecret_EndpointPinAllowedNameBeforeLookup(t *testing.T) {
+	const (
+		hubID     = "hub-fvr1-unit"
+		projID    = "proj-fvr1-id"
+		secretVal = "CANARY_FVR1_UNIT_PIN_8414"
+	)
+	ctx := systemoneruntime.WithEvalProjectID(context.Background(), projID)
+
+	for _, secretType := range []string{store.SecretTypeEnvironment, store.SecretTypeVariable} {
+		t.Run("type_"+secretType, func(t *testing.T) {
+			var backendGetCalls atomic.Int32
+			srv := &Server{
+				hubID: hubID,
+				secretBackend: &stubSystemOneSecretBackend{
+					getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+						backendGetCalls.Add(1)
+						return &secret.SecretWithValue{
+							SecretMeta: secret.SecretMeta{
+								Name:       name,
+								SecretType: secretType,
+								Scope:      scope,
+								ScopeID:    scopeID,
+								Version:    1,
+							},
+							Value: secretVal,
+						}, nil
+					},
+				},
+			}
+			src := &hubSystemOneCredentialSource{srv: srv}
+
+			for _, customEndpoint := range []string{
+				"https://attacker.example",
+				"https://generativelanguage.googleapis.com:8443",
+				"https://generativelanguage.googleapis.com/v1beta",
+			} {
+				for _, sc := range []string{
+					systemoneprovider.SecretScopeHub,
+					systemoneprovider.SecretScopeProject,
+					systemoneprovider.SecretScopeProjectOrHub,
+				} {
+					backendGetCalls.Store(0)
+					tok, err := src.APIKeyToken(ctx, systemoneruntime.Instance{
+						ID:       "inst-fvr1-custom",
+						Name:     "gem-fvr1-custom",
+						Adapter:  geminidecisions.AdapterName,
+						Model:    "gemini-decision-1",
+						Endpoint: customEndpoint,
+						Auth: systemoneruntime.InstanceAuth{
+							Kind:       store.SystemOneAuthKindAPIKey,
+							SecretName: "GEMINI_API_KEY",
+						},
+						Options: map[string]string{systemoneprovider.OptionSecretScope: sc},
+						Enabled: true,
+					})
+					assert.Empty(t, tok, "endpoint=%q scope=%s", customEndpoint, sc)
+					require.ErrorIs(t, err, egress.ErrAuth, "endpoint=%q scope=%s", customEndpoint, sc)
+					assert.Zero(t, backendGetCalls.Load(), "APIKeyToken must refuse custom endpoint before SecretBackend.Get (endpoint=%q scope=%s)", customEndpoint, sc)
+				}
+			}
+
+			// Positive control: canonical default endpoint resolves the allowed secret.
+			backendGetCalls.Store(0)
+			tok, err := src.APIKeyToken(ctx, systemoneruntime.Instance{
+				ID:       "inst-fvr1-ok",
+				Name:     "gem-fvr1-ok",
+				Adapter:  geminidecisions.AdapterName,
+				Model:    "gemini-decision-1",
+				Endpoint: geminidecisions.DefaultEndpoint,
+				Auth: systemoneruntime.InstanceAuth{
+					Kind:       store.SystemOneAuthKindAPIKey,
+					SecretName: "GEMINI_API_KEY",
+				},
+				Options: map[string]string{systemoneprovider.OptionSecretScope: systemoneprovider.SecretScopeProject},
+				Enabled: true,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, secretVal, tok)
+			assert.Equal(t, int32(1), backendGetCalls.Load())
+		})
+	}
+}
