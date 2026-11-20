@@ -736,3 +736,151 @@ func TestDispatcher_WakeFireAdmitWaitPastPerFireTimeoutThenDetach(t *testing.T) 
 		<-resCh
 	})
 }
+
+func TestDispatcher_MatchRulesFailClosedUntilEvaluationLands(t *testing.T) {
+	t0 := time.Date(2026, 11, 20, 6, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name           string
+		matchRules     []store.TriggerMatchRule
+		matchRule      string
+		matchCorrupt   bool
+		wantActionCall bool
+		wantStatus     string
+		wantError      string
+		wantMatchCount int
+		wantFireCount  int
+	}{
+		{
+			name: "non-empty match_rules skips fail-closed",
+			matchRules: []store.TriggerMatchRule{
+				{Dialect: store.TriggerDialectCEL, Expr: `event.type == "webhook.received"`},
+			},
+			wantActionCall: false,
+			wantStatus:     store.TriggerFireStatusSkipped,
+			wantError:      trigger.ErrFireRuleEvaluationUnavailable,
+			wantMatchCount: 0,
+			wantFireCount:  0,
+		},
+		{
+			name:           "scalar legacy match_rule skips fail-closed",
+			matchRule:      `event.type == "webhook.received"`,
+			wantActionCall: false,
+			wantStatus:     store.TriggerFireStatusSkipped,
+			wantError:      trigger.ErrFireRuleEvaluationUnavailable,
+			wantMatchCount: 0,
+			wantFireCount:  0,
+		},
+		{
+			name:           "corrupt match_rules skips fail-closed",
+			matchCorrupt:   true,
+			wantActionCall: false,
+			wantStatus:     store.TriggerFireStatusSkipped,
+			wantError:      trigger.ErrFireRuleEvaluationUnavailable,
+			wantMatchCount: 0,
+			wantFireCount:  0,
+		},
+		{
+			name:           "empty rules still fires on Types match",
+			wantActionCall: true,
+			wantStatus:     store.TriggerFireStatusFired,
+			wantError:      "",
+			wantMatchCount: 1,
+			wantFireCount:  1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := newMemTriggerStore()
+			var actionCalls atomic.Int32
+			core := &fakeCore{
+				fireFn: func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+					actionCalls.Add(1)
+					return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+				},
+			}
+			core.enabled.Store(true)
+
+			projID := uuid.NewString()
+			epID := uuid.NewString()
+			trID := uuid.NewString()
+			evID := uuid.NewString()
+
+			require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+				ID:                trID,
+				ProjectID:         projID,
+				Name:              "guard-tr",
+				SourceKind:        store.TriggerSourceKindWebhook,
+				SourceID:          epID,
+				MatchTypes:        []string{"webhook.received"},
+				MatchDialect:      store.TriggerDialectCEL,
+				MatchRule:         tc.matchRule,
+				MatchRules:        tc.matchRules,
+				MatchRulesCorrupt: tc.matchCorrupt,
+				ActionType:        store.TriggerActionMessage,
+				ActionPayload:     `{"agentId":"a1","message":"hi"}`,
+				SubjectMode:       store.TriggerSubjectModeNew,
+				Status:            store.TriggerStatusActive,
+			}))
+			require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+				ID:         evID,
+				ProjectID:  projID,
+				SourceKind: store.TriggerSourceKindWebhook,
+				SourceID:   epID,
+				Type:       "webhook.received",
+				Subject:    "webhook:" + epID,
+				DedupKey:   "d-guard",
+				OccurredAt: t0,
+				ReceivedAt: t0,
+				Payload:    `{"ok":true}`,
+				Status:     store.TriggerEventStatusPending,
+			}))
+
+			disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+				Core:  core,
+				Store: ms,
+				Now:   func() time.Time { return t0 },
+			})
+			require.NoError(t, err)
+
+			raw, err := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+			require.NoError(t, err)
+			res := disp.HandleItem(context.Background(), durablequeue.Item{
+				Seq:       1,
+				Kind:      trigger.EventQueueKind,
+				DedupKey:  evID,
+				ProjectID: projID,
+				Payload:   raw,
+			}, nopLease{})
+			assert.True(t, res.Done)
+			assert.NoError(t, res.Err)
+
+			if tc.wantActionCall {
+				assert.Equal(t, int32(1), actionCalls.Load())
+			} else {
+				assert.Zero(t, actionCalls.Load(), "action must not be called when trigger is fail-closed skipped")
+			}
+
+			fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{}, store.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, fires.Items, 1)
+			assert.Equal(t, trID, fires.Items[0].TriggerID)
+			assert.Equal(t, tc.wantStatus, fires.Items[0].Status)
+			assert.Equal(t, tc.wantError, fires.Items[0].Error)
+
+			gotTr, err := ms.GetTrigger(context.Background(), trID)
+			require.NoError(t, err)
+			assert.Equal(t, 1, gotTr.FireCount)
+			assert.Equal(t, 0, gotTr.ErrorCount)
+			assert.Equal(t, tc.wantStatus, gotTr.LastFireStatus)
+			assert.Equal(t, tc.wantError, gotTr.LastFireError)
+
+			gotEv, err := ms.GetTriggerEvent(context.Background(), evID)
+			require.NoError(t, err)
+			assert.Equal(t, store.TriggerEventStatusProcessed, gotEv.Status)
+			assert.Equal(t, tc.wantMatchCount, gotEv.MatchCount)
+			assert.Equal(t, tc.wantFireCount, gotEv.FireCount)
+		})
+	}
+}

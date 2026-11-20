@@ -59,10 +59,11 @@ const (
 	ExecutorIDPrefixTriggerEvent = "trigger_event:"
 
 	// Content-free generic error texts persisted on trigger_events / trigger_fires.
-	ErrEventDroppedByQueueLimits = "dropped by queue limits"
-	ErrEventProcessingFailed     = "processing failed"
-	ErrFireRuleBudgetExhausted   = "rule budget exhausted"
-	ErrFireRuleEvaluationFailed  = "rule evaluation failed"
+	ErrEventDroppedByQueueLimits     = "dropped by queue limits"
+	ErrEventProcessingFailed         = "processing failed"
+	ErrFireRuleBudgetExhausted       = "rule budget exhausted"
+	ErrFireRuleEvaluationFailed      = "rule evaluation failed"
+	ErrFireRuleEvaluationUnavailable = "rule evaluation unavailable"
 )
 
 // Core is the narrow capability interface package hub/trigger consumes from
@@ -308,9 +309,10 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			continue
 		}
 
-		// Fail closed if a stored row carries a filter expression before 3b-2 wires evaluation.
-		if strings.TrimSpace(tr.MatchRule) != "" {
-			if rErr := d.recordDirectFire(ctx, tr, ev, deriveFireSubject(ev.Subject), store.TriggerFireStatusSkipped, ErrFireRuleEvaluationFailed); rErr != nil {
+		// Fail closed if a stored row carries match rules, corrupt/undecodable match_rules,
+		// or a legacy scalar match_rule before 3b-2 wires rule evaluation (ptone/scion#8030).
+		if len(tr.MatchRules) > 0 || tr.MatchRulesCorrupt || strings.TrimSpace(tr.MatchRule) != "" {
+			if rErr := d.recordDirectFire(ctx, tr, ev, deriveFireSubject(ev.Subject), store.TriggerFireStatusSkipped, ErrFireRuleEvaluationUnavailable); rErr != nil {
 				return durablequeue.Result{Err: errors.New("trigger: record skipped fire failed")}
 			}
 			continue
