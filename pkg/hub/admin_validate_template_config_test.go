@@ -117,3 +117,45 @@ func TestAdminValidateResources_ListsTemplateEnvironmentKeys(t *testing.T) {
 		t.Errorf("project finding = %+v", p)
 	}
 }
+
+func TestAdminValidateResources_ListsTemplateAgentSchemaFindings(t *testing.T) {
+	srv, _ := newCommitTestServer(t, newCommitTestStorage(t))
+	// Seed invalid and unparseable templates while the flag is off.
+	setTemplateValidationExperiment(t, srv, false)
+	invalid := seedCommittedTemplate(t, srv, "schema-bad-tpl", store.TemplateScopeGlobal, "", map[string]string{
+		"scion-agent.yaml": "default_harness_config: claude\nmax_duration: \"2 hours\"\n",
+	})
+	unparsable := seedCommittedTemplate(t, srv, "schema-unparsable-tpl", store.TemplateScopeGlobal, "", map[string]string{
+		"scion-agent.yaml": ": invalid: yaml: [",
+	})
+	seedCommittedTemplate(t, srv, "schema-good-tpl", store.TemplateScopeGlobal, "", map[string]string{
+		"scion-agent.yaml": commitCfgBoth,
+	})
+
+	w := doTemplateRequest(t, srv, http.MethodGet, "/api/v1/admin/validate-resources", "", nil)
+	mustStatus(t, w, http.StatusOK)
+	var resp struct {
+		TemplateConfigFindings []TemplateConfigFinding `json:"templateConfigFindings"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v: %s", err, w.Body.String())
+	}
+
+	byName := map[string]TemplateConfigFinding{}
+	for _, f := range resp.TemplateConfigFindings {
+		if f.Kind == TemplateFindingAgentSchema {
+			byName[f.Template] = f
+		}
+	}
+	if len(byName) != 2 {
+		t.Fatalf("agent_schema findings = %+v, want exactly schema-bad-tpl and schema-unparsable-tpl", resp.TemplateConfigFindings)
+	}
+	badF := byName["schema-bad-tpl"]
+	if badF.TemplateID != invalid.ID || !reflect.DeepEqual(badF.Keys, []string{"max_duration"}) || !strings.Contains(badF.Message, "max_duration") {
+		t.Errorf("schema-bad-tpl finding = %+v", badF)
+	}
+	unpF := byName["schema-unparsable-tpl"]
+	if unpF.TemplateID != unparsable.ID || !strings.Contains(unpF.Message, "failed to parse agent config scion-agent.yaml") {
+		t.Errorf("schema-unparsable-tpl finding = %+v", unpF)
+	}
+}
