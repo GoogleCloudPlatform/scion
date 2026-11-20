@@ -24,10 +24,10 @@ Every timestamp the Hub returns, over REST, SSE and the Hub↔broker wire, is an
 
 Each user picks a zone with the **Display timezone** card on the profile settings page (see [Web Dashboard](/scion/workstation/dashboard/#display-timezone--clock)).
 
-- **Auto**, the default, follows the browser's zone.
+- **Auto**, the default, follows the browser's zone for display only; the browser-detected zone stays in the browser and is not shared with agents.
 - The value is stored as the `timezone` user preference, an IANA name; empty means Auto. `PATCH /api/v1/users/:id` with an invalid name returns `400` (see the [Users API](/scion/reference/api/)).
 - The display zone never changes an agent's `TZ`.
-- When a user with a non-empty `timezone` preference sends a message to an agent, the Hub attaches `sender_timezone` to the message's `metadata` (see [Inbound Message Type Discrimination](/scion/hosted/user/messaging/#3-inbound-message-type-discrimination)).
+- Only a pinned (non-empty) `timezone` preference is shared with agents you message: when you send a message to an agent, the Hub attaches it as `sender_timezone` in the message's `metadata`, whereas **Auto** sends no `sender_timezone` (see [Inbound Message Type Discrimination](/scion/hosted/user/messaging/#3-inbound-message-type-discrimination)).
 
 ### Metrics dashboard day buckets
 

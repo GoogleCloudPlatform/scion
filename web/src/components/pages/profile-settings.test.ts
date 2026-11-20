@@ -252,6 +252,13 @@ describe('scion-page-profile-settings — display timezone', () => {
     expect(shadowText(element)).not.toContain('Agent timezone');
   });
 
+  it('explains that only a pinned time zone is shared with agents and Auto is display-only', async () => {
+    element = await createComponent(createFetchHandler({}, undefined, { body: makeAuthMe() }));
+    const text = shadowText(element).replace(/\s+/g, ' ');
+    expect(text).toContain('Only a pinned time zone is shared with agents you message');
+    expect(text).toContain('Auto is used for display only');
+  });
+
   it('loads the current preference (Auto when unset)', async () => {
     element = await createComponent(createFetchHandler({}, undefined, { body: makeAuthMe() }));
     const picker = element.shadowRoot.querySelector('scion-timezone-picker');

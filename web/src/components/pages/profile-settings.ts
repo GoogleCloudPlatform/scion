@@ -585,8 +585,9 @@ export class ScionPageProfileSettings extends LitElement {
             <p class="setting-description">
               Controls how times are displayed and how date/time inputs are interpreted in
               native chat and scheduling forms, and the rest of the UI follows over time. Choose
-              "Auto" to follow your browser's zone (currently ${browserTimeZone()}); this never
-              changes how agent containers are configured.
+              "Auto" to follow your browser's zone (currently ${browserTimeZone()}). Only a
+              pinned time zone is shared with agents you message; Auto is used for display only,
+              and neither changes how agent containers are configured.
             </p>
           </div>
           <div class="setting-control">
