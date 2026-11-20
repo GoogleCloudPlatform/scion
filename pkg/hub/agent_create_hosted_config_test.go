@@ -60,6 +60,7 @@ func TestCreateAgent_HostedRefusesMemberVolumes(t *testing.T) {
 		"etc bind":          {Source: "/etc", Target: "/host-etc", ReadOnly: true},
 		"nfs":               {Type: "nfs", Server: "10.1.2.3", Source: "/export", Target: "/n"},
 		"gke shared volume": {Type: "gke-shared-volume", VolumeName: "other-project", Target: "/g"},
+		"gcs not canonical": {Type: "GCS", Bucket: "b", Target: "/b"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}

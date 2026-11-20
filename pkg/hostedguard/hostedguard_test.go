@@ -46,7 +46,12 @@ func TestCheckMemberConfig_Volumes(t *testing.T) {
 		{name: "gcs on podman", vol: api.VolumeMount{Type: "gcs", Bucket: "b", Target: "/b"}, runtimeKind: "podman", wantRefused: true, wantReason: "only for agents run on Kubernetes"},
 		{name: "gcs on apple container", vol: api.VolumeMount{Type: "gcs", Bucket: "b", Target: "/b"}, runtimeKind: "container", wantRefused: true, wantReason: "only for agents run on Kubernetes"},
 		{name: "gcs on kubernetes", vol: api.VolumeMount{Type: "gcs", Bucket: "b", Target: "/b"}, runtimeKind: RuntimeKubernetes},
-		{name: "gcs upper case on kubernetes", vol: api.VolumeMount{Type: "GCS", Bucket: "b", Target: "/b"}, runtimeKind: RuntimeKubernetes},
+		{name: "gcs upper case on kubernetes", vol: api.VolumeMount{Type: "GCS", Bucket: "b", Target: "/b"}, runtimeKind: RuntimeKubernetes, wantRefused: true, wantReason: "volume type must be spelled"},
+		{name: "gcs upper case runtime unknown", vol: api.VolumeMount{Type: "GCS", Bucket: "b", Target: "/b"}, wantRefused: true, wantReason: "volume type must be spelled"},
+		{name: "gcs upper case on docker", vol: api.VolumeMount{Type: "GCS", Bucket: "b", Target: "/b"}, runtimeKind: "docker", wantRefused: true, wantReason: "volume type must be spelled"},
+		{name: "gcs mixed case runtime unknown", vol: api.VolumeMount{Type: "Gcs", Bucket: "b", Target: "/b"}, wantRefused: true, wantReason: "volume type must be spelled"},
+		{name: "gcs mixed case on docker", vol: api.VolumeMount{Type: "Gcs", Bucket: "b", Target: "/b"}, runtimeKind: "docker", wantRefused: true, wantReason: "volume type must be spelled"},
+		{name: "gcs padded runtime unknown", vol: api.VolumeMount{Type: " gcs", Bucket: "b", Target: "/b"}, wantRefused: true, wantReason: "volume type must be spelled"},
 		{name: "gcs runtime unknown", vol: api.VolumeMount{Type: "gcs", Bucket: "b", Target: "/b"}},
 	}
 	for _, tt := range tests {

@@ -112,6 +112,10 @@ func volumeRefusal(v api.VolumeMount, o Origin, runtimeKind string) string {
 	case "", "local":
 		return fmt.Sprintf("host volumes in %s are not allowed on a hosted server; %s", o, volumeRemedy)
 	case "gcs":
+		// Runtimes recognize only the exact spelling.
+		if v.Type != "gcs" {
+			return fmt.Sprintf("volume type must be spelled \"gcs\" in %s on a hosted server; %s", o, volumeRemedy)
+		}
 		if runtimeKind == "" || runtimeKind == RuntimeKubernetes {
 			return ""
 		}

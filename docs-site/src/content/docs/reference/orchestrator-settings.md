@@ -337,7 +337,7 @@ On a hosted server (one not running in workstation mode), volumes in an agent's 
 | `local` or unset (a host file or directory) | Refused |
 | `nfs` | Refused |
 | `cloudrun-volume`, `gke-shared-volume` | Refused |
-| `gcs` | Allowed only for agents that run on Kubernetes |
+| `gcs` (spelled exactly so, in lower case) | Allowed only for agents that run on Kubernetes |
 | Any other type | Refused |
 
 - **Where it is checked.** A hosted Hub checks agent create requests, and checks again before it sends each create, provision, start or restart to a Runtime Broker, whatever mode that Runtime Broker runs in. The Hub does not know which runtime will run the agent, so it leaves the `gcs` decision to the Runtime Broker. A hosted Runtime Broker checks the config and inline config of each create and start request before anything is saved.
