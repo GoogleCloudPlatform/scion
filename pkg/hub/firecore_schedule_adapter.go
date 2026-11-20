@@ -48,17 +48,28 @@ func (s *Server) registerFireActions() {
 	s.RegisterAction(&execAction{srv: s})
 }
 
-func (s *Server) scheduleFireDetaches(sched store.Schedule, evt store.ScheduledEvent) bool {
-	req := scheduledFireRequest(s, evt, ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID})
-	if req.ActionType == "" {
-		req.ActionType = sched.EventType
+func scheduledDetachesRequest(evt store.ScheduledEvent, actionType string) hubfire.FireRequest {
+	return hubfire.FireRequest{
+		ProjectID:  evt.ProjectID,
+		Authority:  scheduledRecordedAuthority(evt),
+		ActionType: actionType,
+		Payload:    evt.Payload,
+		FireAt:     evt.FireAt,
 	}
+}
+
+func (s *Server) scheduleFireDetaches(sched store.Schedule, evt store.ScheduledEvent) bool {
+	actionType := evt.EventType
+	if actionType == "" {
+		actionType = sched.EventType
+	}
+	req := scheduledDetachesRequest(evt, actionType)
 	action, ok := s.LookupAction(req.ActionType)
 	return ok && action.Detaches(req)
 }
 
 func (s *Scheduler) eventFireDetaches(evt store.ScheduledEvent) bool {
-	req := scheduledFireRequest(s.srv, evt, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID})
+	req := scheduledDetachesRequest(evt, evt.EventType)
 	if s.srv != nil {
 		action, ok := s.srv.LookupAction(req.ActionType)
 		return ok && action.Detaches(req)
