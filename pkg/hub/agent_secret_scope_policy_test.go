@@ -136,11 +136,7 @@ func TestAgentSecretScopePolicy_Table(t *testing.T) {
 			// (F1: "agent token lacks user context") must not be confused
 			// with the scope-policy 403 under test.
 			if c.scope == "user" {
-				var err error
-				agentToken, err = srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, []string{tid("origin-user")})
-				if err != nil {
-					t.Fatalf("failed to generate agent token with ancestry: %v", err)
-				}
+				agentToken = srv.generateRecordedAgentToken(t, agentID, projectID, nil, []string{tid("origin-user")})
 			}
 
 			body := AgentSetSecretRequest{

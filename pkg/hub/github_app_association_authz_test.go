@@ -1097,9 +1097,8 @@ func TestGitHubTokenRefresh_ResolvesSourceLikeCreate(t *testing.T) {
 		Labels:    map[string]string{githubTokenSourceProjectLabel: source.ID},
 	}
 	require.NoError(t, st.CreateAgent(ctx, agent))
-	token, err := srv.agentTokenService.GenerateAgentToken(agent.ID, target.ID,
+	token := srv.generateRecordedAgentToken(t, agent.ID, target.ID,
 		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
-	require.NoError(t, err)
 
 	// refreshAndCreate runs the refresh endpoint and the create-time
 	// start/restart token step for agent and reports both outcomes and the
@@ -1434,10 +1433,9 @@ func TestGitHubInstallationBind_HubBearerBoundaryOnly(t *testing.T) {
 	require.NotNil(t, m.srv.agentTokenService, "the test server issues agent tokens")
 	agent, err := m.store.GetAgent(ctx, m.ids.agent)
 	require.NoError(t, err)
-	agentToken, err := m.srv.agentTokenService.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{
+	agentToken := m.srv.generateRecordedAgentToken(t, agent.ID, agent.ProjectID, []AgentTokenScope{
 		ScopeProjectRead, ScopeAgentCreate, ScopeAgentLifecycle, ScopeProjectTemplateWrite, ScopeAgentTokenRefresh,
 	}, nil)
-	require.NoError(t, err)
 	rec = doRequestWithAgentToken(t, m.srv, http.MethodPut, "/api/v1/projects/"+agent.ProjectID+"/github-installation", body, agentToken)
 	assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden}, rec.Code, "agent credential: %s", rec.Body.String())
 	requireNotBound(t, m, agent.ProjectID)

@@ -361,8 +361,7 @@ func TestGetProject_SecurityGatePrecedesGroupWrites(t *testing.T) {
 		createDCAgent(t, s, foreignAgentID, otherProject.ID, bob.ID, AgentRoleBaseline)
 		seedRecordedDelegationEdge(t, s, "user", bob.ID, "agent", foreignAgentID, store.RoleScopeProject, otherProject.ID, string(AgentRoleBaseline))
 
-		tok, err := srv.GetAgentTokenService().GenerateAgentToken(foreignAgentID, otherProject.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-		require.NoError(t, err)
+		tok := srv.generateRecordedAgentToken(t, foreignAgentID, otherProject.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 		rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID, nil, tok)
 		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
@@ -401,8 +400,7 @@ func TestGetProject_SecurityGatePrecedesGroupWrites(t *testing.T) {
 		createDCAgent(t, s, agentID, project.ID, alice.ID, AgentRoleBaseline)
 		seedRecordedDelegationEdge(t, s, "user", alice.ID, "agent", agentID, store.RoleScopeProject, project.ID, string(AgentRoleBaseline))
 
-		tok, err := srv.GetAgentTokenService().GenerateAgentToken(agentID, project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
-		require.NoError(t, err)
+		tok := srv.generateRecordedAgentToken(t, agentID, project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 		rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID, nil, tok)
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())

@@ -459,8 +459,7 @@ func TestMessageLogStream_UsesFullHistoryRule(t *testing.T) {
 	// The token carries exactly the read-only role's scopes, signed
 	// through the token service.
 	require.NotContains(t, ScopesForRole(AgentRoleReadOnly), ScopeAgentLifecycle)
-	readOnlyTok, err := srv.GetAgentTokenService().GenerateAgentToken(readOnlyCaller.ID, readOnlyCaller.ProjectID, ScopesForRole(AgentRoleReadOnly), nil)
-	require.NoError(t, err)
+	readOnlyTok := srv.generateRecordedAgentToken(t, readOnlyCaller.ID, readOnlyCaller.ProjectID, ScopesForRole(AgentRoleReadOnly), nil)
 
 	for _, path := range []string{byID, inProject} {
 		t.Run(path+" agent caller with agent.attach: full history on list and stream", func(t *testing.T) {

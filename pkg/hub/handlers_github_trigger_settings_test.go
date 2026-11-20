@@ -272,8 +272,7 @@ func TestProjectGitHubTriggerSettings_GatingAndAuthz(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rr.Code)
 
 	// 5. Agent credentials are refused on both GET and PUT.
-	agentTok, err := srv.agentTokenService.GenerateAgentToken(tid("ght-agent"), projID, []AgentTokenScope{ScopeProjectRead}, []string{owner.ID})
-	require.NoError(t, err)
+	agentTok := srv.generateRecordedAgentToken(t, tid("ght-agent"), projID, []AgentTokenScope{ScopeProjectRead}, []string{owner.ID})
 	rr = doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, agentTok)
 	assert.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
 	rr = doRequestWithAgentToken(t, srv, http.MethodPut, path, validPut, agentTok)

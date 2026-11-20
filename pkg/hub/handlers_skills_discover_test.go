@@ -379,10 +379,7 @@ func setupSkillDiscoverAgent(t *testing.T, suffix string, scopes []AgentTokenSco
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, scopes, nil)
-	if err != nil {
-		t.Fatalf("failed to generate agent token: %v", err)
-	}
+	token := srv.generateRecordedAgentToken(t, agentID, projectID, scopes, nil)
 	return srv, projectID, token
 }
 

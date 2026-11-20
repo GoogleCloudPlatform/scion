@@ -58,8 +58,7 @@ func TestAgentSecretRead_ProjectScopeSoftDeletedParentDenies(t *testing.T) {
 	}))
 	createDCEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
-	require.NoError(t, err)
+	childToken := f.Server.generateRecordedAgentToken(t, childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
 
 	parent, err := f.Store.GetAgent(ctx, parentID)
 	require.NoError(t, err)
@@ -103,8 +102,7 @@ func TestAgentSecretRead_ProjectScopeSoftDeletedGrandparentDenies(t *testing.T) 
 	}))
 	createDCEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, grandparentID, parentID})
-	require.NoError(t, err)
+	childToken := f.Server.generateRecordedAgentToken(t, childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, grandparentID, parentID})
 
 	grandparent, err := f.Store.GetAgent(ctx, grandparentID)
 	require.NoError(t, err)
