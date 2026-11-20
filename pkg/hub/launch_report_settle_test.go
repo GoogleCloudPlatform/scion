@@ -142,7 +142,11 @@ func newLaunchSettleFixture(t *testing.T, name string) *launchSettleFixture {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 	for _, r := range []string{"run-0", "run-1"} {
-		_, err := s.SetAgentRunID(ctx, agent.ID, r, nil)
+		_, cred, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+			AgentID: agent.ID, ProjectID: agent.ProjectID, Scopes: ScopesForRole(AgentRoleFull),
+		}, r)
+		require.NoError(t, err)
+		_, err = s.SetAgentRunID(ctx, agent.ID, r, cred)
 		require.NoError(t, err)
 	}
 	launchID, err := s.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
@@ -161,7 +165,11 @@ func (f *launchSettleFixture) report(t *testing.T, reportState, runID string) {
 func (f *launchSettleFixture) reportResult(t *testing.T, reportState, runID string) string {
 	t.Helper()
 	rep := AgentLaunchReport{LaunchID: f.launchID, InstanceID: "i1", State: reportState,
-		Agent: &RemoteAgentInfo{ID: f.agent.Slug, Slug: f.agent.Slug, RunID: runID}}
+		Agent: &RemoteAgentInfo{
+			ID: f.agent.ID, Slug: f.agent.Slug, ProjectID: f.agent.ProjectID,
+			Labels: map[string]string{"agent_id": f.agent.ID, "scion.project_id": f.agent.ProjectID},
+			RunID:  runID,
+		}}
 	if reportState == store.LaunchReportStateFailed {
 		rep.ErrorCode = "boom"
 	}

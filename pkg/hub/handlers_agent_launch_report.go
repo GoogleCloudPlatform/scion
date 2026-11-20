@@ -349,6 +349,13 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID)
 		return
 	}
+	fromRun := row.RunID
+	if rep.Result == store.LaunchReportResultCompleted {
+		fromRun = row.LaunchRunID
+	}
+	if info.RunID != fromRun && !canAdoptBrokerRunID(ctx, s.store, s.agentLifecycleLog, "Launch report", row, fromRun, info) {
+		return
+	}
 	var swapped bool
 	var err error
 	if rep.Result == store.LaunchReportResultCompleted {

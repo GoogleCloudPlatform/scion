@@ -1981,20 +1981,22 @@ type RemoteEnvRequirementsResponse struct {
 
 // RemoteAgentInfo contains agent information from a remote runtime broker.
 type RemoteAgentInfo struct {
-	ID              string `json:"id"`          // Hub UUID
-	Slug            string `json:"slug"`        // URL-safe identifier
-	ContainerID     string `json:"containerId"` // Runtime container ID
-	Name            string `json:"name"`
-	Template        string `json:"template,omitempty"`
-	HarnessConfig   string `json:"harnessConfig,omitempty"`
-	HarnessAuth     string `json:"harnessAuth,omitempty"`
-	Image           string `json:"image,omitempty"` // Resolved container image
-	Runtime         string `json:"runtime,omitempty"`
-	Profile         string `json:"profile,omitempty"`  // Settings profile used
-	Phase           string `json:"phase,omitempty"`    // Lifecycle phase
-	Activity        string `json:"activity,omitempty"` // Runtime activity
-	Status          string `json:"status"`             // Legacy: kept for backward compat with older brokers
-	ContainerStatus string `json:"containerStatus,omitempty"`
+	ID              string            `json:"id"`          // Hub UUID
+	Slug            string            `json:"slug"`        // URL-safe identifier
+	ContainerID     string            `json:"containerId"` // Runtime container ID
+	Name            string            `json:"name"`
+	Template        string            `json:"template,omitempty"`
+	HarnessConfig   string            `json:"harnessConfig,omitempty"`
+	HarnessAuth     string            `json:"harnessAuth,omitempty"`
+	Image           string            `json:"image,omitempty"` // Resolved container image
+	Runtime         string            `json:"runtime,omitempty"`
+	Profile         string            `json:"profile,omitempty"`   // Settings profile used
+	ProjectID       string            `json:"projectId,omitempty"` // Project ID reported by the broker
+	Labels          map[string]string `json:"labels,omitempty"`    // Runtime labels reported by the broker
+	Phase           string            `json:"phase,omitempty"`     // Lifecycle phase
+	Activity        string            `json:"activity,omitempty"`  // Runtime activity
+	Status          string            `json:"status"`              // Legacy: kept for backward compat with older brokers
+	ContainerStatus string            `json:"containerStatus,omitempty"`
 	// Warnings mirrors runtimebroker.AgentResponse.Warnings: the broker's
 	// hub-only env drop warnings (for example a broker-local TZ that was
 	// ignored). Older brokers omit it.

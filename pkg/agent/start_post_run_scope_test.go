@@ -162,3 +162,123 @@ func TestPostRunEntryOfRun(t *testing.T) {
 		}
 	}
 }
+
+// Cross-project same-name entries must never match in the post-Run lookup on
+// a non-flat (ownerless) manager: an unlabelled running entry from another
+// project must not be returned, and an unlabelled stopped entry from another
+// project must not cause Start to delete the healthy container it just
+// created or fail the start (ptone/scion#8240).
+func TestStart_PostRunCheck_CrossProjectSameNameUnlabelled(t *testing.T) {
+	t.Run("other project unlabelled running entry is ignored", func(t *testing.T) {
+		resetPostRunTestEnv(t)
+		projADir, _ := startTZFixture(t, "", `""`)
+		projBDir, _ := startTZFixture(t, "", `""`)
+		const ownID = "abcdef1234567890abcdef1234567890"
+		const ownShortID = "abcdef123456"
+		foreign := api.AgentInfo{
+			Name:            "tz-agent",
+			ContainerID:     "foreign-running-cid",
+			Phase:           "running",
+			ContainerStatus: "Up 5 minutes",
+			ProjectID:       "proj-b-id",
+			ProjectPath:     projBDir,
+			Labels:          map[string]string{"scion.name": "tz-agent", "scion.project_id": "proj-b-id"},
+		}
+		own := api.AgentInfo{
+			Name:            "tz-agent",
+			ContainerID:     ownShortID,
+			RunID:           "run-own",
+			Phase:           "running",
+			ContainerStatus: "Up 1 second",
+			ProjectID:       "proj-a-id",
+			ProjectPath:     projADir,
+			Labels:          map[string]string{"scion.name": "tz-agent", "scion.project_id": "proj-a-id", api.LabelRunID: "run-own"},
+		}
+		var deleted []runtime.RunRef
+		rt := postRunListRuntime(ownID, []api.AgentInfo{foreign, own}, &deleted)
+
+		got, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+			Name: "tz-agent", ProjectPath: projADir, BrokerMode: true, NoAuth: true, RunID: "run-own",
+			Template: "default",
+			Env:      map[string]string{"SCION_PROJECT_ID": "proj-a-id"},
+		})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if len(deleted) != 0 {
+			t.Errorf("deletes = %+v, want none", deleted)
+		}
+		if got.ContainerID != ownShortID || got.ProjectID != "proj-a-id" {
+			t.Errorf("Start returned %+v, want own container %s in proj-a-id", got, ownShortID)
+		}
+	})
+
+	t.Run("other project unlabelled stopped entry never deletes or fails start", func(t *testing.T) {
+		resetPostRunTestEnv(t)
+		projADir, _ := startTZFixture(t, "", `""`)
+		projBDir, _ := startTZFixture(t, "", `""`)
+		const ownID = "own-pod-id"
+		foreignStopped := api.AgentInfo{
+			Name:            "tz-agent",
+			ContainerID:     "foreign-stopped-cid",
+			Phase:           "stopped",
+			ContainerStatus: "Exited (1) 2 seconds ago",
+			ProjectID:       "proj-b-id",
+			ProjectPath:     projBDir,
+			Labels:          map[string]string{"scion.name": "tz-agent", "scion.project_id": "proj-b-id"},
+		}
+		var deleted []runtime.RunRef
+		rt := postRunListRuntime(ownID, []api.AgentInfo{foreignStopped}, &deleted)
+
+		got, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+			Name: "tz-agent", ProjectPath: projADir, BrokerMode: true, NoAuth: true, RunID: "run-own",
+			Template: "default",
+			Env:      map[string]string{"SCION_PROJECT_ID": "proj-a-id"},
+		})
+		if err != nil {
+			t.Fatalf("Start: %v, want success: the stopped entry belongs to another project", err)
+		}
+		if len(deleted) != 0 {
+			t.Errorf("deletes = %+v, want none (must not delete newly created healthy container)", deleted)
+		}
+		if got.ID != ownID || got.RunID != "run-own" {
+			t.Errorf("Start returned ID=%q RunID=%q, want ID=%q RunID=%q", got.ID, got.RunID, ownID, "run-own")
+		}
+	})
+
+	t.Run("post-Run List passes scion.project_id when projectID is known", func(t *testing.T) {
+		resetPostRunTestEnv(t)
+		projADir, _ := startTZFixture(t, "", `""`)
+		const ownID = "own-actor-id"
+		var postRunFilter map[string]string
+		started := false
+		rt := noContainers()
+		rt.ListFunc = func(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			if !started {
+				return nil, nil
+			}
+			postRunFilter = filter
+			return []api.AgentInfo{{
+				Name: "tz-agent", ContainerID: ownID, RunID: "run-own", Phase: "running",
+				ProjectID: "proj-a-id", ProjectPath: projADir,
+				Labels: map[string]string{"scion.name": "tz-agent", "scion.project_id": "proj-a-id", api.LabelRunID: "run-own"},
+			}}, nil
+		}
+		rt.RunFunc = func(context.Context, runtime.RunConfig) (string, error) {
+			started = true
+			return ownID, nil
+		}
+
+		_, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+			Name: "tz-agent", ProjectPath: projADir, BrokerMode: true, NoAuth: true, RunID: "run-own",
+			Template: "default",
+			Env:      map[string]string{"SCION_PROJECT_ID": "proj-a-id"},
+		})
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if postRunFilter["scion.project_id"] != "proj-a-id" {
+			t.Errorf("post-Run List filter = %v, want scion.project_id=proj-a-id", postRunFilter)
+		}
+	})
+}

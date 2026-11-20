@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1901,13 +1902,128 @@ func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent, 
 	return runID, previous, token, recorded, nil
 }
 
+// reportedEntryProjectID returns the project ID reported on info (from
+// info.ProjectID and the project-ID labels). If more than one source is set
+// and they disagree, ok is false.
+func reportedEntryProjectID(info *RemoteAgentInfo) (string, bool) {
+	if info == nil {
+		return "", false
+	}
+	var found string
+	candidates := []string{
+		info.ProjectID,
+		projectkeys.ProjectIDFromLabels(info.Labels),
+	}
+	if info.Labels != nil {
+		candidates = append(candidates, info.Labels["scion_project_id"])
+	}
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if found != "" && found != c {
+			return "", false
+		}
+		found = c
+	}
+	return found, found != ""
+}
+
+// reportedEntryAgentID returns the agent ID reported on info (from
+// info.Labels["agent_id"] and info.ID). If both are set and disagree, ok is
+// false.
+func reportedEntryAgentID(info *RemoteAgentInfo) (string, bool) {
+	if info == nil {
+		return "", false
+	}
+	labelID := ""
+	if info.Labels != nil {
+		labelID = info.Labels["agent_id"]
+	}
+	if labelID != "" {
+		if info.ID != "" && info.ID != labelID {
+			return "", false
+		}
+		return labelID, true
+	}
+	if info.ID != "" {
+		return info.ID, true
+	}
+	return "", false
+}
+
+// canAdoptBrokerRunID verifies that a broker-reported run ID (different from
+// the minted run) belongs to agent before the hub adopts it (ptone/scion#8240):
+// the reported entry's project and agent ID must match agent, and the hub must
+// have minted a credential for (agent.ID, info.RunID), matching heartbeat
+// adoption's HasAgentCredentialForRun check. On any mismatch or lookup error,
+// it logs a warning and returns false so the caller keeps the minted run.
+func canAdoptBrokerRunID(ctx context.Context, st store.Store, log *slog.Logger, caller string, agent *store.Agent, minted string, info *RemoteAgentInfo) bool {
+	if agent == nil || agent.ID == "" || info == nil || info.RunID == "" {
+		return false
+	}
+	gotProject, ok := reportedEntryProjectID(info)
+	if !ok || agent.ProjectID == "" || gotProject != agent.ProjectID {
+		if log != nil {
+			log.Warn(caller+": refusing to adopt broker run ID: reported entry project does not match agent",
+				"agent_id", agent.ID, "agent", agent.Slug,
+				"project_id", agent.ProjectID, "reported_project_id", gotProject,
+				"minted_run_id", minted, "broker_run_id", info.RunID)
+		}
+		return false
+	}
+	gotAgent, ok := reportedEntryAgentID(info)
+	if !ok || gotAgent != agent.ID {
+		if log != nil {
+			log.Warn(caller+": refusing to adopt broker run ID: reported entry agent ID does not match agent",
+				"agent_id", agent.ID, "agent", agent.Slug,
+				"reported_agent_id", gotAgent,
+				"minted_run_id", minted, "broker_run_id", info.RunID)
+		}
+		return false
+	}
+	if st == nil {
+		if log != nil {
+			log.Warn(caller+": refusing to adopt broker run ID: no store to verify credential",
+				"agent_id", agent.ID, "agent", agent.Slug,
+				"minted_run_id", minted, "broker_run_id", info.RunID)
+		}
+		return false
+	}
+	credMinted, err := st.HasAgentCredentialForRun(ctx, agent.ID, info.RunID)
+	if err != nil {
+		if log != nil {
+			log.Warn(caller+": refusing to adopt broker run ID: credential lookup failed",
+				"agent_id", agent.ID, "agent", agent.Slug,
+				"minted_run_id", minted, "broker_run_id", info.RunID, "error", err)
+		}
+		return false
+	}
+	if !credMinted {
+		if log != nil {
+			log.Warn(caller+": refusing to adopt broker run ID: hub did not mint a credential for the reported run",
+				"agent_id", agent.ID, "agent", agent.Slug,
+				"minted_run_id", minted, "broker_run_id", info.RunID)
+		}
+		return false
+	}
+	return true
+}
+
 // adoptBrokerRunID records the run ID the broker reports for the entry it
 // created or found, when that differs from the one this dispatch minted:
 // a start that found the agent already running keeps the existing entry
-// and reports its run (ptone/scion#2550). The write is a compare-and-swap
-// against the minted ID, so a late response cannot overwrite a newer run
-// ID that a later dispatch has recorded. A response without a run ID (an
-// older broker) keeps the minted value.
+// and reports its run (ptone/scion#2550). Before adopting a different run ID,
+// it verifies that the reported entry's project and agent ID match agent and
+// that the hub minted a credential for that run (ptone/scion#8240); otherwise
+// it keeps the minted run and logs the mismatch. The write is a
+// compare-and-swap against the minted ID, so a late response cannot overwrite
+// a newer run ID that a later dispatch has recorded. A response without a run
+// ID (an older broker) keeps the minted value.
+//
+// Returns the settled run ID for downstream callers such as compensateLandedRun
+// ("" when the broker reported no run ID, minted when adoption was rejected or
+// matched minted, or the verified adopted run ID).
 //
 // Either way the run has settled, so the swap (a same-value swap when the
 // broker reports the minted run or none) also clears the row's previous
@@ -1915,13 +2031,20 @@ func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent, 
 // of the agent's name in its project, whatever run it carries, before it
 // creates the new one (agent.AgentManager.Start, step 0), so no previous
 // run's entry is left once a start has landed.
-func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store.Agent, minted string, resp *RemoteAgentResponse) {
+func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store.Agent, minted string, resp *RemoteAgentResponse) string {
 	if resp == nil || resp.Agent == nil {
-		return
+		return ""
 	}
-	if resp.Agent.RunID == "" || resp.Agent.RunID == minted {
+	if resp.Agent.RunID == "" {
 		d.swapRunID(ctx, agent, minted, minted, true, "settled the run")
-		return
+		return ""
+	}
+	if resp.Agent.RunID == minted {
+		d.swapRunID(ctx, agent, minted, minted, true, "settled the run")
+		return minted
+	}
+	if !canAdoptBrokerRunID(ctx, d.store, d.log, "Dispatcher", agent, minted, resp.Agent) {
+		return minted
 	}
 	actual := resp.Agent.RunID
 	if d.store != nil && agent.ID != "" {
@@ -1929,12 +2052,12 @@ func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store
 		if err != nil {
 			d.log.Warn("Dispatcher: failed to record the broker's run ID",
 				"agent_id", agent.ID, "minted_run_id", minted, "broker_run_id", actual, "error", err)
-			return
+			return actual
 		}
 		if !swapped {
 			d.log.Debug("Dispatcher: a newer run ID is recorded; not adopting the broker's",
 				"agent_id", agent.ID, "minted_run_id", minted, "broker_run_id", actual)
-			return
+			return actual
 		}
 	}
 	if agent.RunID == minted {
@@ -1943,6 +2066,7 @@ func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store
 	}
 	d.log.Info("Dispatcher: adopted the broker's run ID",
 		"agent_id", agent.ID, "agent", agent.Slug, "minted_run_id", minted, "run_id", actual)
+	return actual
 }
 
 // shouldRevertRun reports whether a failed start or restart left the

@@ -39,10 +39,10 @@ const compensatingDeleteTimeout = 30 * time.Second
 // recorded the run has no row a delete could have removed, so it is not
 // checked.
 func (d *HTTPAgentDispatcher) settleLandedRun(ctx context.Context, agent *store.Agent, minted string, recorded bool, resp *RemoteAgentResponse) {
-	d.adoptBrokerRunID(ctx, agent, minted, resp)
+	settledRunID := d.adoptBrokerRunID(ctx, agent, minted, resp)
 	onSyncDispatchAnswer(ctx, d, agent, resp)
 	if recorded {
-		d.compensateLandedRun(ctx, agent, resp)
+		d.compensateLandedRun(ctx, agent, settledRunID)
 	}
 }
 
@@ -59,25 +59,26 @@ func (d *HTTPAgentDispatcher) settleLandedRun(ctx context.Context, agent *store.
 // the run this dispatch started is deleted again. If the engine's own
 // broker delete is still to come, the second delete is a harmless 404.
 //
-// The delete is scoped to the run the broker reports it labelled
-// (resp.Agent.RunID), so it can never remove a same-name successor, which
-// carries its own run. A broker that reports no run ID (an older broker
-// that may not label entries) gets no compensating delete: a delete by name
-// alone could hit a successor. Files are left alone for the same reason
-// (they are addressed by name); leftover files are for the broker sweep
-// (ptone/scion#3068). The re-read and the delete are best-effort and
-// detached from the request's cancellation: the delete publishes nothing,
-// a failure (including a failed re-read) is logged at warn and counted
-// (scion.dispatch.failed, op=compensating_delete; a success counts as
-// scion.dispatch.done), and the caller's response carries a warning
-// either way.
+// The delete is scoped to the settled run ID returned by adoptBrokerRunID
+// (so a rejected foreign run ID never redirects the delete away from the
+// minted run, ptone/scion#8240), and can never remove a same-name successor,
+// which carries its own run. A broker that reports no run ID (an older broker
+// that may not label entries) yields an empty settled run ID and gets no
+// compensating delete: a delete by name alone could hit a successor. Files are
+// left alone for the same reason (they are addressed by name); leftover files
+// are for the broker sweep (ptone/scion#3068). The re-read and the delete are
+// best-effort and detached from the request's cancellation: the delete
+// publishes nothing, a failure (including a failed re-read) is logged at warn
+// and counted (scion.dispatch.failed, op=compensating_delete; a success counts
+// as scion.dispatch.done), and the caller's response carries a warning either
+// way.
 //
 // Asynchronous launches do not need this: the launch reports back to the
 // hub, which answers a deleted or delete-held agent with a stop or an
 // unknown launch, and the broker then cleans up (runtimebroker run_launch.go
 // classifyGateAnswer, gateAbortCleanup).
-func (d *HTTPAgentDispatcher) compensateLandedRun(ctx context.Context, agent *store.Agent, resp *RemoteAgentResponse) {
-	if d.store == nil || agent == nil || agent.ID == "" || resp == nil || resp.Agent == nil {
+func (d *HTTPAgentDispatcher) compensateLandedRun(ctx context.Context, agent *store.Agent, runID string) {
+	if d.store == nil || agent == nil || agent.ID == "" {
 		return
 	}
 	// The re-read and the delete run detached from the request: a caller
@@ -98,7 +99,6 @@ func (d *HTTPAgentDispatcher) compensateLandedRun(ctx context.Context, agent *st
 		return
 	}
 
-	runID := resp.Agent.RunID
 	if runID == "" {
 		d.log.Warn("Dispatcher: agent was deleted while the broker started it, and the broker reported no run ID; leaving its entry",
 			"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID)

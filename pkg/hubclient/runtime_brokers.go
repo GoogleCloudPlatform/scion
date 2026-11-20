@@ -132,20 +132,22 @@ const (
 // create (ptone/scion#4818), plus RunID and WorkspacePlacement; it ignores
 // the rest.
 type AgentLaunchReportInfo struct {
-	ID              string `json:"id,omitempty"`
-	Slug            string `json:"slug,omitempty"`
-	ContainerID     string `json:"containerId,omitempty"`
-	Name            string `json:"name,omitempty"`
-	Template        string `json:"template,omitempty"`
-	HarnessConfig   string `json:"harnessConfig,omitempty"`
-	HarnessAuth     string `json:"harnessAuth,omitempty"`
-	Image           string `json:"image,omitempty"`
-	Runtime         string `json:"runtime,omitempty"`
-	RuntimeState    string `json:"runtimeState,omitempty"`
-	Profile         string `json:"profile,omitempty"`
-	Phase           string `json:"phase,omitempty"`
-	Activity        string `json:"activity,omitempty"`
-	ContainerStatus string `json:"containerStatus,omitempty"`
+	ID              string            `json:"id,omitempty"`
+	Slug            string            `json:"slug,omitempty"`
+	ContainerID     string            `json:"containerId,omitempty"`
+	Name            string            `json:"name,omitempty"`
+	Template        string            `json:"template,omitempty"`
+	HarnessConfig   string            `json:"harnessConfig,omitempty"`
+	HarnessAuth     string            `json:"harnessAuth,omitempty"`
+	Image           string            `json:"image,omitempty"`
+	Runtime         string            `json:"runtime,omitempty"`
+	RuntimeState    string            `json:"runtimeState,omitempty"`
+	Profile         string            `json:"profile,omitempty"`
+	ProjectID       string            `json:"projectId,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Phase           string            `json:"phase,omitempty"`
+	Activity        string            `json:"activity,omitempty"`
+	ContainerStatus string            `json:"containerStatus,omitempty"`
 	// HarnessConfigSource is which harness-config source the start resolved
 	// (wire key matches RemoteAgentInfo.HarnessConfigSource).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
