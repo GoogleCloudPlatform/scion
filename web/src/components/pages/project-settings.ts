@@ -930,7 +930,7 @@ export class ScionPageProjectSettings extends LitElement {
       background: var(--sl-color-success-600, #16a34a);
     }
     .github-status-dot.degraded {
-      background: var(--scion-status-warning, #f59e0b);
+      background: var(--sl-color-yellow-500, #eab308);
     }
     .github-status-dot.error {
       background: var(--sl-color-danger-600, #dc2626);
@@ -1008,7 +1008,7 @@ export class ScionPageProjectSettings extends LitElement {
       background: var(--scion-text-disabled, #94a3b8);
     }
     .broker-status-dot.degraded {
-      background: var(--scion-status-warning, #f59e0b);
+      background: var(--sl-color-yellow-500, #eab308);
     }
 
     .broker-info {

@@ -156,6 +156,9 @@ html .sl-theme-light,
   --scion-review-note-bg: #ede9fe;
   --scion-review-note-line: #8b5cf6;
 
+  --scion-log-server-text: #4b5563;
+  --scion-log-server-bg: #f9fafb;
+
   --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --scion-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
   --scion-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
@@ -366,6 +369,9 @@ html .sl-theme-dark,
   --scion-review-note-bg: #4c1d95;
   --scion-review-note-line: #a78bfa;
 
+  --scion-log-server-text: #cbd5e1;
+  --scion-log-server-bg: #0f172a;
+
   --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
   --scion-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);
   --scion-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.4);
@@ -567,6 +573,9 @@ html .sl-theme-dark,
     --scion-review-note-text: #ddd6fe;
     --scion-review-note-bg: #4c1d95;
     --scion-review-note-line: #a78bfa;
+
+    --scion-log-server-text: #cbd5e1;
+    --scion-log-server-bg: #0f172a;
 
     --scion-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
     --scion-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.4);

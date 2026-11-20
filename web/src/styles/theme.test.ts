@@ -555,9 +555,13 @@ function stripVarExpressions(text: string): string {
 const NEUTRAL_SHADOW_RE =
   /^(?:rgba\(\s*(?:0\s*,\s*0\s*,\s*0|15\s*,\s*23\s*,\s*42)\s*,|rgb\(\s*(?:0\s+0\s+0|15\s+23\s+42)\s*\/)/i;
 const BARE_HEX_OR_FUNC_RE =
-  /(?<![\w&])#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b|\b(?:rgba?|hsla?)\s*\([^)]*\)/g;
-const BARE_NAMED_COLOR_RE =
-  /(?:^|[;\s{])(?:color|background(?:-color)?|border(?:-(?:top|right|bottom|left))?(?:-color)?|fill|stroke)\s*:\s*[^;{}]*\b(white|black)\b/gi;
+  /(?<![\w&])#(?:[0-9a-fA-F]{3}|(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b|\b(?:rgba?|hsla?)\s*\([^)]*\)/g;
+const NAMED_CSS_COLORS =
+  'white|black|red|green|blue|yellow|orange|purple|pink|gray|grey|silver|maroon|navy|teal|aqua|cyan|magenta|fuchsia|lime|olive|brown|coral|crimson|gold|indigo|ivory|khaki|lavender|linen|orchid|plum|salmon|sienna|tan|thistle|tomato|turquoise|violet|wheat|rebeccapurple|slategray|slategrey|lightgray|lightgrey|darkgray|darkgrey|darkred|darkblue|darkgreen|lightblue|lightgreen|whitesmoke';
+const BARE_NAMED_COLOR_RE = new RegExp(
+  `(?:^|[;\\s{])(?:color|background(?:-color)?|border(?:-(?:top|right|bottom|left))?(?:-color)?|fill|stroke)\\s*:\\s*[^;{}]*?(?<![-\\w])(${NAMED_CSS_COLORS})(?![-\\w])`,
+  'gi'
+);
 
 function findBareColorLiterals(text: string): string[] {
   const clean = stripVarExpressions(stripComments(text));
@@ -586,7 +590,7 @@ function findBareColorLiterals(text: string): string[] {
 const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
   // Intentional non-theme palettes & fallbacks
   'client/artifact-preview.ts': {
-    max: 19,
+    max: 20,
     reason: 'DEFAULT_THEME fallback table for sandboxed srcdoc iframes without computed styles',
   },
   'components/app-shell.ts': {
@@ -607,7 +611,8 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
   },
   'components/shared/chat/chat-avatar.ts': {
     max: 27,
-    reason: 'Deterministic 18-hue light/dark avatar color wheel',
+    reason:
+      'Deterministic 24-hue light/dark avatar wheel (24 hsl), initials (#fff), and presence dots (#22c55e, #f59e0b)',
   },
   'components/shared/code-editor.ts': {
     max: 21,
@@ -625,7 +630,8 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
   // Deferred to branding PR 2c (ptone/scion#8409): brand surfaces, --scion-primary-text, color-mix tints
   'client/terminal-workspace-root.ts': {
     max: 6,
-    reason: 'PR 2c brand surface & terminal workspace chrome (ptone/scion#8409)',
+    reason:
+      'Terminal workspace status dots and dark terminal pane chrome (PR 2c also edits this file, ptone/scion#8409)',
   },
   'components/pages/admin-users.ts': {
     max: 1,
@@ -765,16 +771,154 @@ describe('web/src bare color literal guard (ptone/scion#8410)', () => {
     }
   });
 
-  it('flags planted bare hex, functional, and named colors while allowing var() fallbacks and neutral shadows', () => {
+  it('flags planted bare hex, 4-digit hex, functional, and named colors while allowing var() fallbacks and neutral shadows', () => {
     expect(
       findBareColorLiterals('.a { color: #fef08a; background: rgba(59, 130, 246, 0.2); }')
     ).toEqual(['#fef08a', 'rgba(59, 130, 246, 0.2)']);
-    expect(findBareColorLiterals('.a { color: white; }')).toEqual(['white']);
+    expect(findBareColorLiterals('.a { color: #abcd; }')).toEqual(['#abcd']);
+    expect(
+      findBareColorLiterals('.a { color: white; background: red; border-color: gray; }')
+    ).toEqual(['white', 'red', 'gray']);
     expect(
       findBareColorLiterals(
         '/* #ff0000 */\n// #00ff00\n.a { color: var(--scion-text, #1e293b); box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }'
       )
     ).toEqual([]);
     expect(findBareColorLiterals('<span>&#9654;</span> /* ptone/scion#3067 */')).toEqual([]);
+  });
+});
+
+/** Convert a CSS `#rrggbb` or Shoelace `hsl(h s% l%)` value to `[r, g, b]`. */
+function parseCssColorToRgb(val: string): [number, number, number] {
+  const hex = /^#([0-9a-f]{6})$/i.exec(val.trim());
+  if (hex) {
+    const n = parseInt(hex[1], 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const hsl = /^hsl\(\s*([\d.]+)\s+([\d.]+)%\s+([\d.]+)%\s*\)$/i.exec(val.trim());
+  if (hsl) {
+    const h = parseFloat(hsl[1]) / 360;
+    const s = parseFloat(hsl[2]) / 100;
+    const l = parseFloat(hsl[3]) / 100;
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    const ch = (t: number): number => {
+      const x = ((t % 1) + 1) % 1;
+      if (x < 1 / 6) return p + (q - p) * 6 * x;
+      if (x < 1 / 2) return q;
+      if (x < 2 / 3) return p + (q - p) * (2 / 3 - x) * 6;
+      return p;
+    };
+    return [
+      Math.round(ch(h + 1 / 3) * 255),
+      Math.round(ch(h) * 255),
+      Math.round(ch(h - 1 / 3) * 255),
+    ];
+  }
+  throw new Error(`Unsupported color format for equivalence check: ${val}`);
+}
+
+describe('PR 2d light-mode token equivalence (ptone/scion#8410)', () => {
+  const lightVars = cascade([shoelaceLightCss, shoelaceDarkCss, themeCss], {
+    isRoot: true,
+    classes: new Set(['sl-theme-light']),
+    dataTheme: 'light',
+    prefersDark: false,
+  });
+
+  const resolveLightVal = (name: string): string => {
+    let cur = name;
+    for (let depth = 0; depth < 8; depth++) {
+      const val = lightVars.get(cur);
+      if (!val) throw new Error(`Missing light-mode token: ${cur}`);
+      const ref = /^var\(\s*(--[\w-]+)\s*\)$/.exec(val.trim());
+      if (!ref) return val.trim();
+      cur = ref[1];
+    }
+    throw new Error(`Unresolved token cycle: ${name}`);
+  };
+
+  // Every non-exception bare light-mode hex replaced in PR 2d must resolve to the exact
+  // original light-mode RGB (within ±1 for Shoelace HSL->sRGB rounding).
+  // Scoped exception (disclosed in PR #8543): agent-detail.ts `.port-link` (#4ade80/#22c55e
+  // -> --sl-color-success-600/#16a34a and -700/#15803d) for light-mode contrast improvement.
+  const exactMappings: Array<[string, string, string]> = [
+    ['artifact-preview borderHover', '--scion-border-hover', '#cbd5e1'],
+    ['artifact-preview errorBg', '--scion-error-bg', '#fef2f2'],
+    ['artifact-preview errorBorder', '--scion-error-border', '#fca5a5'],
+    ['artifact-preview errorText', '--scion-error-text', '#991b1b'],
+    ['artifact-preview reviewInsText', '--scion-review-ins-text', '#166534'],
+    ['artifact-preview reviewInsBg', '--scion-review-ins-bg', '#dcfce7'],
+    ['artifact-preview reviewDelText', '--scion-review-del-text', '#991b1b'],
+    ['artifact-preview reviewDelBg', '--scion-review-del-bg', '#fee2e2'],
+    ['artifact-preview/chat-search reviewHlBg', '--scion-review-hl-bg', '#fef08a'],
+    ['artifact-preview/artifact-detail reviewNoteText', '--scion-review-note-text', '#6d28d9'],
+    ['artifact-preview/artifact-detail reviewNoteBg', '--scion-review-note-bg', '#ede9fe'],
+    ['artifact-preview reviewNoteBlockText', '--sl-color-violet-900', '#4c1d95'],
+    ['artifact-preview reviewNoteBlockBg', '--sl-color-violet-50', '#f5f3ff'],
+    ['artifact-preview reviewNoteLine', '--scion-review-note-line', '#8b5cf6'],
+    ['artifact-detail kind-review border', '--sl-color-violet-200', '#ddd6fe'],
+    ['artifact-detail kind-publish bg', '--sl-color-sky-100', '#e0f2fe'],
+    ['artifact-detail kind-publish text', '--sl-color-sky-800', '#075985'],
+    ['artifact-detail kind-publish border', '--sl-color-sky-200', '#bae6fd'],
+    ['project-settings ok/online dot', '--sl-color-success-600', '#16a34a'],
+    ['project-settings degraded dot', '--sl-color-yellow-500', '#eab308'],
+    ['project-settings error dot', '--sl-color-danger-600', '#dc2626'],
+    ['project-settings unchecked/offline dot', '--scion-text-disabled', '#94a3b8'],
+    ['project-settings perm write bg', '--scion-badge-primary-bg', '#dbeafe'],
+    ['project-settings perm write border', '--sl-color-primary-300', '#93c5fd'],
+    ['project-settings perm write text', '--scion-badge-primary-text', '#1e40af'],
+    ['project-settings perm read bg', '--sl-color-success-50', '#f0fdf4'],
+    ['project-settings perm read border', '--scion-success-border', '#86efac'],
+    ['project-settings perm read text', '--scion-success-text', '#166534'],
+    ['project-settings warning bg', '--scion-badge-warning-bg', '#fef3c7'],
+    ['project-settings warning text', '--scion-warning-text', '#92400e'],
+    ['project-settings warning border', '--scion-warning-border', '#fcd34d'],
+    ['unified-log-viewer hub color', '--sl-color-primary-600', '#2563eb'],
+    ['unified-log-viewer hub bg', '--sl-color-primary-50', '#eff6ff'],
+    ['unified-log-viewer broker color', '--sl-color-emerald-600', '#059669'],
+    ['unified-log-viewer broker bg', '--sl-color-emerald-50', '#ecfdf5'],
+    ['unified-log-viewer agent color', '--sl-color-warning-600', '#d97706'],
+    ['unified-log-viewer agent bg', '--sl-color-warning-50', '#fffbeb'],
+    ['unified-log-viewer messages color', '--sl-color-violet-600', '#7c3aed'],
+    ['unified-log-viewer messages bg', '--sl-color-violet-50', '#f5f3ff'],
+    ['unified-log-viewer artifacts color', '--sl-color-pink-600', '#db2777'],
+    ['unified-log-viewer artifacts bg', '--sl-color-pink-50', '#fdf2f8'],
+    ['unified-log-viewer server color', '--scion-log-server-text', '#4b5563'],
+    ['unified-log-viewer server bg', '--scion-log-server-bg', '#f9fafb'],
+    ['admin-server-config active bg', '--scion-badge-success-bg', '#dcfce7'],
+    ['admin-server-config active text', '--scion-badge-success-text', '#166534'],
+    ['admin-maintenance toggle hover', '--sl-color-warning-600', '#d97706'],
+    ['json-browser val-boolean', '--sl-color-violet-600', '#7c3aed'],
+    ['not-found gradient stop', '--sl-color-violet-500', '#8b5cf6'],
+    ['metrics-dashboard period-btn active text', '--scion-primary-text', '#ffffff'],
+    ['metrics-dashboard y grid', '--scion-border-subtle', '#f1f5f9'],
+  ];
+
+  it('resolves every replaced non-exception token to the exact original light-mode RGB', () => {
+    for (const [label, tokenName, expectedHex] of exactMappings) {
+      const actualRgb = parseCssColorToRgb(resolveLightVal(tokenName));
+      const expectedRgb = parseCssColorToRgb(expectedHex);
+      for (let i = 0; i < 3; i++) {
+        expect(
+          Math.abs(actualRgb[i] - expectedRgb[i]),
+          `${label} (${tokenName}): actual ${actualRgb.join(',')} vs expected ${expectedHex} (${expectedRgb.join(',')})`
+        ).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('keeps --scion-log-server-text AA-readable on --scion-log-server-bg in both themes', () => {
+    const { light, dark } = themeTokens();
+    for (const [mode, vars] of [
+      ['light', light],
+      ['dark', dark],
+    ] as const) {
+      const get = resolver(vars);
+      expect(
+        contrast(get('--scion-log-server-text'), get('--scion-log-server-bg')),
+        `log-server contrast in ${mode}`
+      ).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });

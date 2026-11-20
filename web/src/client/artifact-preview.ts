@@ -231,10 +231,11 @@ export interface PreviewTheme {
   reviewInsBg: string;
   reviewDelText: string;
   reviewDelBg: string;
-  reviewHlText: string;
   reviewHlBg: string;
   reviewNoteText: string;
   reviewNoteBg: string;
+  reviewNoteBlockText: string;
+  reviewNoteBlockBg: string;
   reviewNoteLine: string;
   fontMono: string;
 }
@@ -254,10 +255,11 @@ const DEFAULT_THEME: PreviewTheme = {
   reviewInsBg: '#dcfce7',
   reviewDelText: '#991b1b',
   reviewDelBg: '#fee2e2',
-  reviewHlText: '#0f172a',
   reviewHlBg: '#fef08a',
   reviewNoteText: '#6d28d9',
   reviewNoteBg: '#ede9fe',
+  reviewNoteBlockText: '#4c1d95',
+  reviewNoteBlockBg: '#f5f3ff',
   reviewNoteLine: '#8b5cf6',
   fontMono: "'SF Mono', 'Fira Code', monospace",
 };
@@ -277,17 +279,15 @@ function cssValue(v: string, fallback: string): string {
 function criticCss(t: PreviewTheme): string {
   return `ins.critic-ins{color:${t.reviewInsText};background:${t.reviewInsBg};text-decoration:underline}
 del.critic-del{color:${t.reviewDelText};background:${t.reviewDelBg};text-decoration:line-through}
-mark.critic-hl{background:${t.reviewHlBg};color:${t.reviewHlText}}
+mark.critic-hl{background:${t.reviewHlBg};color:inherit}
 sup.critic-ref{font-size:.7em;font-weight:600;color:${t.reviewNoteText};background:${t.reviewNoteBg};border-radius:.25rem;padding:0 .25em;margin-left:.1em}
-.critic-note{display:block;margin:.35em 0 .6em;padding:.4em .6em;font-size:.8125rem;line-height:1.45;color:${t.reviewNoteText};background:${t.reviewNoteBg};border-left:3px solid ${t.reviewNoteLine};border-radius:.25rem}
+.critic-note{display:block;margin:.35em 0 .6em;padding:.4em .6em;font-size:.8125rem;line-height:1.45;color:${t.reviewNoteBlockText};background:${t.reviewNoteBlockBg};border-left:3px solid ${t.reviewNoteLine};border-radius:.25rem}
 .critic-note-n{font-weight:600;margin-right:.25em}
 .critic-side{display:block;margin:0 0 1em;font-size:.8125rem;line-height:1.45;color:${t.muted}}
 .critic-side.empty{padding:.75em 1em;border:1px dashed ${t.borderHover};border-radius:.5rem;text-align:center}
 body.notes-margin{padding-right:17rem}
 body.notes-margin .critic-note,body.notes-margin .critic-side{float:right;clear:right;width:14rem;margin:0 -16rem .5em 0}`;
 }
-
-export const CRITIC_CSS = criticCss(DEFAULT_THEME);
 
 /** Options of a preview document. */
 export interface PreviewOptions {

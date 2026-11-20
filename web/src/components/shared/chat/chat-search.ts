@@ -328,7 +328,7 @@ export class ScionChatSearch extends LitElement {
 
     .result-snippet mark {
       background: var(--scion-review-hl-bg, #fef08a);
-      color: var(--scion-review-hl-text, #0f172a);
+      color: inherit;
       border-radius: 2px;
       padding: 0 1px;
     }

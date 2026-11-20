@@ -101,45 +101,38 @@ function formatLogRow(row: LogRow, zone: string): void {
 
 const SEVERITY_LEVELS = ['DEFAULT', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] as const;
 
-const SOURCE_CONFIG: Record<string, { badge: string; color: string; bg: string; border: string }> =
-  {
-    hub: {
-      badge: 'HUB',
-      color: 'var(--sl-color-primary-600, #2563eb)',
-      bg: 'var(--sl-color-primary-50, #eff6ff)',
-      border: 'var(--sl-color-primary-200, #bfdbfe)',
-    },
-    broker: {
-      badge: 'BRK',
-      color: 'var(--sl-color-emerald-600, #059669)',
-      bg: 'var(--sl-color-emerald-50, #ecfdf5)',
-      border: 'var(--sl-color-emerald-200, #a7f3d0)',
-    },
-    agent: {
-      badge: 'AGT',
-      color: 'var(--sl-color-warning-600, #d97706)',
-      bg: 'var(--sl-color-warning-50, #fffbeb)',
-      border: 'var(--sl-color-warning-200, #fde68a)',
-    },
-    messages: {
-      badge: 'MSG',
-      color: 'var(--scion-review-note-text, #6d28d9)',
-      bg: 'var(--scion-review-note-bg, #ede9fe)',
-      border: 'var(--sl-color-purple-200, #ddd6fe)',
-    },
-    artifacts: {
-      badge: 'ART',
-      color: 'var(--sl-color-pink-600, #db2777)',
-      bg: 'var(--sl-color-pink-50, #fdf2f8)',
-      border: 'var(--sl-color-pink-200, #fbcfe8)',
-    },
-    server: {
-      badge: 'SRV',
-      color: 'var(--sl-color-neutral-600, #475569)',
-      bg: 'var(--sl-color-neutral-50, #f8fafc)',
-      border: 'var(--sl-color-neutral-200, #e2e8f0)',
-    },
-  };
+const SOURCE_CONFIG: Record<string, { badge: string; color: string; bg: string }> = {
+  hub: {
+    badge: 'HUB',
+    color: 'var(--sl-color-primary-600, #2563eb)',
+    bg: 'var(--sl-color-primary-50, #eff6ff)',
+  },
+  broker: {
+    badge: 'BRK',
+    color: 'var(--sl-color-emerald-600, #059669)',
+    bg: 'var(--sl-color-emerald-50, #ecfdf5)',
+  },
+  agent: {
+    badge: 'AGT',
+    color: 'var(--sl-color-warning-600, #d97706)',
+    bg: 'var(--sl-color-warning-50, #fffbeb)',
+  },
+  messages: {
+    badge: 'MSG',
+    color: 'var(--sl-color-violet-600, #7c3aed)',
+    bg: 'var(--sl-color-violet-50, #f5f3ff)',
+  },
+  artifacts: {
+    badge: 'ART',
+    color: 'var(--sl-color-pink-600, #db2777)',
+    bg: 'var(--sl-color-pink-50, #fdf2f8)',
+  },
+  server: {
+    badge: 'SRV',
+    color: 'var(--scion-log-server-text, #4b5563)',
+    bg: 'var(--scion-log-server-bg, #f9fafb)',
+  },
+};
 
 const ALL_SOURCES = ['hub', 'broker', 'agent', 'messages', 'artifacts', 'server'];
 
@@ -795,7 +788,7 @@ export class ScionUnifiedLogViewer extends LitElement {
                 style="background: ${enabled
                   ? config.bg
                   : 'transparent'}; color: ${config.color}; border-color: ${enabled
-                  ? config.border
+                  ? `color-mix(in srgb, ${config.color} 25%, transparent)`
                   : 'var(--scion-border, #e2e8f0)'};"
                 @click=${() => this.handleSourceToggle(src)}
                 >${config.badge}</span

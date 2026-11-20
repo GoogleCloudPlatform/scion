@@ -708,7 +708,7 @@ export class ScionPageArtifactDetail extends LitElement {
       sl-badge.kind-review::part(base) {
         background: var(--scion-review-note-bg, #ede9fe);
         color: var(--scion-review-note-text, #6d28d9);
-        border-color: var(--sl-color-purple-200, #ddd6fe);
+        border-color: var(--sl-color-violet-200, #ddd6fe);
       }
       sl-badge.kind-publish::part(base) {
         background: var(--sl-color-sky-100, #e0f2fe);

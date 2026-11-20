@@ -54,7 +54,7 @@ export class ScionPage404 extends LitElement {
       background: linear-gradient(
         135deg,
         var(--scion-primary, #3b82f6) 0%,
-        var(--scion-review-note-line, #8b5cf6) 100%
+        var(--sl-color-violet-500, #8b5cf6) 100%
       );
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
