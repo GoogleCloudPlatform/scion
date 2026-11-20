@@ -137,6 +137,10 @@ var ErrRepoAccessDenied = errors.New("github: the user's identity has no access 
 // the timeout as an inconclusive check and refuses (fails closed).
 var userAccessHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
+// userRepoAccessResponseBodyLimit bounds a successful GET /repos/{owner}/{repo}
+// response body used to read the caller's repository permissions.
+const userRepoAccessResponseBodyLimit = 1 << 20
+
 // CheckUserRepoAccess asks GitHub, authenticated as the user who owns
 // userToken (never an App installation token, which would always succeed),
 // what that user may do on owner/repo.
@@ -166,22 +170,26 @@ func CheckUserRepoAccess(ctx context.Context, apiBaseURL, userToken, owner, repo
 		return RepoAccess{}, fmt.Errorf("github access check: request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return RepoAccess{}, fmt.Errorf("github access check: read response: %w", err)
-	}
 
 	switch {
 	case resp.StatusCode == http.StatusOK:
 	case resp.StatusCode == http.StatusTooManyRequests,
 		resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0":
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, upstreamBodyReadLimit))
 		return RepoAccess{}, fmt.Errorf("github access check: rate limited (HTTP %d)", resp.StatusCode)
 	case resp.StatusCode == http.StatusUnauthorized,
 		resp.StatusCode == http.StatusForbidden,
 		resp.StatusCode == http.StatusNotFound:
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, upstreamBodyReadLimit))
 		return RepoAccess{}, ErrRepoAccessDenied
 	default:
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, upstreamBodyReadLimit))
 		return RepoAccess{}, fmt.Errorf("github access check: unexpected HTTP %d", resp.StatusCode)
+	}
+
+	body, err := readBoundedBody(resp.Body, userRepoAccessResponseBodyLimit)
+	if err != nil {
+		return RepoAccess{}, fmt.Errorf("github access check: read response: %w", err)
 	}
 
 	var parsed struct {

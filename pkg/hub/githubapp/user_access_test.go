@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -150,6 +151,27 @@ func TestCheckUserRepoAccess(t *testing.T) {
 		}
 		if gotAuth != "unset" {
 			t.Error("GitHub was called without a user token")
+		}
+	})
+
+	t.Run("oversized success body fails explicitly as inconclusive", func(t *testing.T) {
+		status = http.StatusOK
+		body = `{"full_name":"acme/widgets","pad":"` + strings.Repeat("x", userRepoAccessResponseBodyLimit) + `","permissions":{"push":true}}`
+		_, err := CheckUserRepoAccess(ctx, srv.URL, "user-token", "acme", "widgets")
+		if !errors.Is(err, errResponseBodyTooLarge) {
+			t.Fatalf("err = %v, want errResponseBodyTooLarge", err)
+		}
+		if errors.Is(err, ErrRepoAccessDenied) {
+			t.Fatalf("oversized success body should be inconclusive, not ErrRepoAccessDenied")
+		}
+	})
+
+	t.Run("oversized error body still returns denial", func(t *testing.T) {
+		status = http.StatusNotFound
+		body = strings.Repeat("E", userRepoAccessResponseBodyLimit+1024)
+		_, err := CheckUserRepoAccess(ctx, srv.URL, "user-token", "acme", "widgets")
+		if !errors.Is(err, ErrRepoAccessDenied) {
+			t.Fatalf("err = %v, want ErrRepoAccessDenied", err)
 		}
 	})
 }

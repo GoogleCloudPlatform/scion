@@ -629,3 +629,95 @@ func TestCommentMethods_ErrorMappingAndNoLeaks(t *testing.T) {
 		}
 	}
 }
+
+func TestCommentMethods_OversizedSuccessBodyFailsExplicitly(t *testing.T) {
+	const token = "ghs_test_install_token"
+	const leakMarker = "OVERSIZE-COMMENT-BODY-MARKER"
+
+	oversizedSingle := `{"id":1,"body":"` + leakMarker + strings.Repeat("x", commentResponseBodyLimit) + `"}`
+	oversizedList := `[{"id":1,"body":"` + leakMarker + strings.Repeat("y", commentListResponseBodyLimit) + `"}]`
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(oversizedSingle))
+		case http.MethodGet:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(oversizedList))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := newCommentTestClient(t, ts.URL)
+
+	tests := []struct {
+		name       string
+		wantStatus int
+		call       func() error
+	}{
+		{
+			name:       "CreateIssueComment",
+			wantStatus: http.StatusCreated,
+			call: func() error {
+				_, err := client.CreateIssueComment(context.Background(), token, "acme", "widgets", 42, "hello")
+				return err
+			},
+		},
+		{
+			name:       "ReplyToReviewComment",
+			wantStatus: http.StatusCreated,
+			call: func() error {
+				_, err := client.ReplyToReviewComment(context.Background(), token, "acme", "widgets", 42, 777, "hello")
+				return err
+			},
+		},
+		{
+			name:       "ListIssueComments",
+			wantStatus: http.StatusOK,
+			call: func() error {
+				_, err := client.ListIssueComments(context.Background(), token, "acme", "widgets", 42, time.Now())
+				return err
+			},
+		},
+		{
+			name:       "ListPullReviewComments",
+			wantStatus: http.StatusOK,
+			call: func() error {
+				_, err := client.ListPullReviewComments(context.Background(), token, "acme", "widgets", 42, time.Now())
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("expected error for oversized response body")
+			}
+			var apiErr *CommentAPIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("expected *CommentAPIError, got %T (%v)", err, err)
+			}
+			if apiErr.ErrorCode != ErrCodeCommentRequestFailed {
+				t.Errorf("ErrorCode = %q, want %q", apiErr.ErrorCode, ErrCodeCommentRequestFailed)
+			}
+			if apiErr.StatusCode != tc.wantStatus {
+				t.Errorf("StatusCode = %d, want %d", apiErr.StatusCode, tc.wantStatus)
+			}
+			if !errors.Is(err, errResponseBodyTooLarge) {
+				t.Errorf("expected error wrapping errResponseBodyTooLarge, got %v", err)
+			}
+			if apiErr.UpstreamDetail() == "" {
+				t.Error("expected diagnostic UpstreamDetail for oversized response")
+			}
+			if strings.Contains(apiErr.Message, leakMarker) || strings.Contains(apiErr.UpstreamDetail(), leakMarker) {
+				t.Error("response body content leaked into error")
+			}
+		})
+	}
+}
