@@ -1151,7 +1151,6 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			OnCommitted:    onCommitted,
 		})
 		if createErr == nil {
-			bindCommitted = true
 			var agentID string
 			if agent != nil {
 				agentID = agent.ID

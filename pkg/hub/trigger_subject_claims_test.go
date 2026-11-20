@@ -533,3 +533,112 @@ func TestDispatchAgentTrigger_SubjectModeSkip_UsesDerivedSubjectRule(t *testing.
 	_, rawErr := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, "webhook:"+ep.ID)
 	assert.ErrorIs(t, rawErr, store.ErrNotFound, "raw event subject must not have a claim row")
 }
+
+// stealAbandonedClaimStore intercepts the first ClaimTriggerSubject call,
+// persists it aged past the 5-minute abandoned TTL, and immediately takes over
+// the row with a second fire ID so the first fire's Bind inside
+// commitAgentCreate fails with ErrClaimNotHeld.
+type stealAbandonedClaimStore struct {
+	store.Store
+	secondEventID string
+	secondFireID  string
+	stolen        atomic.Bool
+	stealErr      error
+}
+
+func (s *stealAbandonedClaimStore) ClaimTriggerSubject(
+	ctx context.Context,
+	triggerID, subject, eventID, fireID string,
+	now, abandonedBefore time.Time,
+) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
+	if s.stolen.CompareAndSwap(false, true) {
+		aged := now.Add(-trigger.AbandonedClaimTTL - time.Minute)
+		c1, ex1, err := s.Store.ClaimTriggerSubject(ctx, triggerID, subject, eventID, fireID, aged, aged.Add(-trigger.AbandonedClaimTTL))
+		if err != nil || c1 == nil {
+			return c1, ex1, err
+		}
+		c2, ex2, err2 := s.Store.ClaimTriggerSubject(ctx, triggerID, subject, s.secondEventID, s.secondFireID, now, abandonedBefore)
+		if err2 != nil {
+			s.stealErr = err2
+		} else if c2 == nil {
+			s.stealErr = fmt.Errorf("expected second fire to take over aged claim, got existing=%+v", ex2)
+		}
+		return c1, nil, nil
+	}
+	return s.Store.ClaimTriggerSubject(ctx, triggerID, subject, eventID, fireID, now, abandonedBefore)
+}
+
+func TestDispatchAgentTrigger_SubjectModeSkip_LostClaimRollsBackCreate(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "s2-p1c2-lost-claim")
+	userCtx := f.userAuth(t, f.sched.creator)
+
+	ep := f.createEndpoint(t, userCtx, "claims-lost-ep")
+	rec := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:    "claims-lost-trigger",
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:   &TriggerMatchSpec{Types: []string{"webhook.pr_lost"}},
+			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip},
+			Action: TriggerActionSpec{
+				Type:      store.TriggerActionDispatchAgent,
+				AgentName: "lost-claim-agent",
+				Task:      "Work on PR",
+			},
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var trigResp TriggerResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &trigResp))
+
+	secondEventID := uuid.NewString()
+	secondFireID := uuid.NewString()
+	stealer, _ := installStoreFault(t, f.sched.srv, func(inner store.Store, _ *storeFaultSwitch) *stealAbandonedClaimStore {
+		return &stealAbandonedClaimStore{
+			Store:         inner,
+			secondEventID: secondEventID,
+			secondFireID:  secondFireID,
+		}
+	})
+
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-lost-1", "pr_lost", "pr-lost", []byte(`{}`)).Code)
+	f.drainOneTriggerEvent(t)
+
+	require.True(t, stealer.stolen.Load(), "fault wrapper must have intercepted ClaimTriggerSubject")
+	require.NoError(t, stealer.stealErr)
+
+	// 1. Outcome is not fired (Bind failed with ErrClaimNotHeld inside commitAgentCreate).
+	fires, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		ProjectID: f.sched.proj.ID,
+		TriggerID: trigResp.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires.Items, 1)
+	assert.NotEqual(t, store.TriggerFireStatusFired, fires.Items[0].Status)
+	assert.Equal(t, store.TriggerFireStatusFailed, fires.Items[0].Status)
+	assert.Empty(t, fires.Items[0].ResultRef)
+	assert.Empty(t, fires.Items[0].TargetAgentID)
+
+	// 2. Agent row was rolled back (never persisted) and no broker create was dispatched.
+	_, agErr := f.sched.store.GetAgentBySlug(ctx, f.sched.proj.ID, "lost-claim-agent")
+	assert.ErrorIs(t, agErr, store.ErrNotFound, "agent row must be rolled back when Bind fails")
+	f.client.mu.Lock()
+	assert.Empty(t, f.client.calls, "broker must not be called when commitAgentCreate rolls back")
+	f.client.mu.Unlock()
+
+	// 3. Create audit record was rolled back with the transaction.
+	audits, _, err := f.sched.store.ListMutationAudits(ctx, store.MutationAuditFilter{
+		TargetType:   "agent",
+		MutationType: mutationTypeAgentDelegation,
+		Limit:        50,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, audits, "agent create audit must be rolled back when Bind fails")
+
+	// 4. Active claim remains held by the second fire (first fire's deferred Release was fenced out).
+	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, "webhook:"+ep.ID+"/pr-lost")
+	require.NoError(t, err)
+	assert.Equal(t, secondFireID, claim.FireID)
+	assert.Equal(t, secondEventID, claim.EventID)
+	assert.Empty(t, claim.AgentID)
+}
