@@ -1638,7 +1638,7 @@ func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) err
 		hcSource = rt.HarnessConfigDir.Source
 	}
 	var entryArgs []string
-	if entry.Harness == "generic" {
+	if harness.HonoursSettingsArgs(entry.Harness) {
 		entryArgs = entry.Args
 	}
 	runTask, baseCmdArgs := resolveBaseCommandInputs(rt.Config, entryArgs, opts.Task)

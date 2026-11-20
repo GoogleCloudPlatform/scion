@@ -1114,6 +1114,39 @@ func isKubernetesRuntimeEntry(name string, rt V1RuntimeConfig) bool {
 	return t == "kubernetes" || t == "k8s" || t == "remote"
 }
 
+// HarnessHonoursSettingsArgs reports whether settings.yaml's
+// harness_configs.<name>.args field is applied for the given harness type.
+// Only the "generic" harness honours settings-level harness args; other
+// harnesses ignore the field (ptone/scion#5082, ptone/scion#8490).
+func HarnessHonoursSettingsArgs(harnessName string) bool {
+	return harnessName == "generic"
+}
+
+// HarnessArgsIgnoredWarnings returns a warning for every harness_configs entry
+// that sets args for a harness type that ignores settings-level args. Only the
+// "generic" harness honours harness_configs.<name>.args; for other harnesses
+// the field is accepted and ignored. Results are sorted.
+func HarnessArgsIgnoredWarnings(harnessConfigs map[string]HarnessConfigEntry) []string {
+	var warnings []string
+	for name, hc := range harnessConfigs {
+		if len(hc.Args) == 0 {
+			continue
+		}
+		harnessName := hc.Harness
+		if harnessName == "" {
+			harnessName = name
+		}
+		if !HarnessHonoursSettingsArgs(harnessName) {
+			warnings = append(warnings, fmt.Sprintf(
+				"harness_configs.%s.args is set but harness %q ignores settings-level args; it is ignored (only the \"generic\" harness honours harness_configs.<name>.args)",
+				name, harnessName,
+			))
+		}
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
 // GetHubEndpoint returns the Hub endpoint from settings, or empty string if not configured.
 func (vs *VersionedSettings) GetHubEndpoint() string {
 	if vs.Hub != nil {
@@ -5874,6 +5907,7 @@ func loadEffectiveSettings(projectPath string, withGlobalOverlay bool) (*Version
 	if o := globalOverlay; o != nil && withGlobalOverlay {
 		o.Apply(vs)
 	}
+	warnings = append(warnings, HarnessArgsIgnoredWarnings(vs.HarnessConfigs)...)
 	return vs, warnings, nil
 }
 
