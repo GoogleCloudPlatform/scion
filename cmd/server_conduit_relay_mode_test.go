@@ -664,4 +664,44 @@ func TestInitOperationalSettings_ExternalRelayBootstrapsConduitExperiment(t *tes
 		require.NoError(t, err)
 		assert.JSONEq(t, `{"overrides":"not-a-map"}`, string(row.Value))
 	})
+
+	t.Run("external relay writes experiments before _meta sentinel", func(t *testing.T) {
+		ctx, globalDir := setupEnv(t)
+		base := newTestStore(t)
+		rec := &recordingHubSettingStore{Store: base}
+
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite3"
+		cfg.Hub.Conduit = config.HubConduitConfig{
+			RelayMode:  config.ConduitRelayModeExternal,
+			PeerSecret: relayModeTestPeerSecret,
+		}
+		srv, err := hub.New(hub.ServerConfig{}, base)
+		require.NoError(t, err)
+		require.NoError(t, initOperationalSettings(ctx, cfg, srv, rec, globalDir))
+		assert.True(t, srv.ConduitEnabled())
+
+		expIdx, metaIdx := -1, -1
+		for i, sec := range rec.upsertedSections {
+			if sec == "experiments" && expIdx == -1 {
+				expIdx = i
+			}
+			if sec == "_meta" && metaIdx == -1 {
+				metaIdx = i
+			}
+		}
+		require.NotEqual(t, -1, expIdx, "experiments must be written")
+		require.NotEqual(t, -1, metaIdx, "_meta must be written")
+		assert.Less(t, expIdx, metaIdx, "experiments must be written before _meta so a starting relay never sees _meta without experiments (order: %v)", rec.upsertedSections)
+	})
+}
+
+type recordingHubSettingStore struct {
+	store.Store
+	upsertedSections []string
+}
+
+func (r *recordingHubSettingStore) UpsertHubSetting(ctx context.Context, section string, value json.RawMessage, updatedBy string, expectedRevision int64, origin string) (*store.HubSetting, error) {
+	r.upsertedSections = append(r.upsertedSections, section)
+	return r.Store.UpsertHubSetting(ctx, section, value, updatedBy, expectedRevision, origin)
 }

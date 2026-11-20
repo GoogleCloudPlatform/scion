@@ -77,6 +77,15 @@ type ExperimentSource interface {
 	ConduitEnabled(ctx context.Context) (bool, error)
 }
 
+// StartupExperimentSource is optionally implemented by an ExperimentSource
+// that distinguishes a freshly migrated, unseeded database from an
+// initialized hub where hub.conduit is off. When implemented, startup calls
+// ConduitEnabledAtStartup instead of ConduitEnabled; a non-nil error (such
+// as an unseeded hub_settings table) is retried until StartupDeadline.
+type StartupExperimentSource interface {
+	ConduitEnabledAtStartup(ctx context.Context) (bool, error)
+}
+
 // Config configures a separate relay. There is deliberately no session
 // secret input.
 type Config struct {
@@ -233,12 +242,16 @@ type Server struct {
 }
 
 // waitExperiment checks hub.conduit at startup: off refuses to start; an
-// unreadable setting is retried every StartupRetry until StartupDeadline
-// has passed on cfg.Clock, then fails.
+// unreadable or not-yet-seeded setting is retried every StartupRetry until
+// StartupDeadline has passed on cfg.Clock, then fails.
 func waitExperiment(ctx context.Context, cfg *Config) error {
+	read := cfg.Experiment.ConduitEnabled
+	if s, ok := cfg.Experiment.(StartupExperimentSource); ok {
+		read = s.ConduitEnabledAtStartup
+	}
 	deadline := cfg.Clock.Now().Add(cfg.StartupDeadline)
 	for {
-		on, err := cfg.Experiment.ConduitEnabled(ctx)
+		on, err := read(ctx)
 		switch {
 		case err == nil && on:
 			return nil

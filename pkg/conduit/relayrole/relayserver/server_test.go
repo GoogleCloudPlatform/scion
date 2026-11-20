@@ -561,3 +561,113 @@ func TestSingletonRegistersTheFeature(t *testing.T) {
 	}
 	t.Fatal("relay-0 is not registered")
 }
+
+// fakeStartupExperiment implements both ExperimentSource and
+// StartupExperimentSource with separate scripted answers so tests can verify
+// that startup uses ConduitEnabledAtStartup while runtime uses ConduitEnabled.
+type fakeStartupExperiment struct {
+	startup *fakeExperiment
+	runtime *fakeExperiment
+}
+
+func (f *fakeStartupExperiment) ConduitEnabled(ctx context.Context) (bool, error) {
+	return f.runtime.ConduitEnabled(ctx)
+}
+
+func (f *fakeStartupExperiment) ConduitEnabledAtStartup(ctx context.Context) (bool, error) {
+	return f.startup.ConduitEnabled(ctx)
+}
+
+// TestStartUsesStartupExperimentSource verifies that Start retries through
+// pre-migration and unseeded-settings errors via StartupExperimentSource,
+// starts cleanly once hub.conduit is seeded on, immediately refuses when an
+// initialized hub has hub.conduit off, and still uses ConduitEnabled at runtime.
+func TestStartUsesStartupExperimentSource(t *testing.T) {
+	errNotSeeded := errors.New("hub settings not yet seeded")
+
+	t.Run("retries missing table then unseeded then starts", func(t *testing.T) {
+		w := relaytest.NewWorld(t)
+		exp := &fakeStartupExperiment{
+			startup: newFakeExperiment(
+				expAnswer{err: errUnreadable},
+				expAnswer{err: errNotSeeded},
+				expAnswer{err: errNotSeeded},
+				expAnswer{on: true},
+			),
+			runtime: newFakeExperiment(expAnswer{on: false}),
+		}
+		cfg := testConfig(t, w, exp)
+		clk := cfg.Clock.(*clock.Fake)
+		res := startAsync(t, cfg)
+		for i := 0; i < 3; i++ {
+			advanceRetry(t, clk, cfg.StartupRetry)
+		}
+		r := awaitStart(t, res)
+		if r.err != nil {
+			t.Fatalf("start: %v", r.err)
+		}
+		t.Cleanup(func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = r.s.Shutdown(sctx, true, time.Second)
+		})
+		if n := exp.startup.count(); n != 4 {
+			t.Fatalf("%d startup reads, want 4", n)
+		}
+		if n := exp.runtime.count(); n != 0 {
+			t.Fatalf("%d runtime reads during startup, want 0", n)
+		}
+		if !r.s.Relay.Admitting() {
+			t.Fatal("not admitting")
+		}
+		// Runtime re-reads still use ConduitEnabled, not ConduitEnabledAtStartup.
+		r.s.ApplyExperiment(context.Background())
+		if n := exp.runtime.count(); n != 1 {
+			t.Fatalf("%d runtime reads after ApplyExperiment, want 1", n)
+		}
+		if r.s.Relay.Admitting() {
+			t.Fatal("still admitting after runtime read off")
+		}
+	})
+
+	t.Run("refuses immediately once initialized DB has hub.conduit off", func(t *testing.T) {
+		w := relaytest.NewWorld(t)
+		exp := &fakeStartupExperiment{
+			startup: newFakeExperiment(
+				expAnswer{err: errNotSeeded},
+				expAnswer{on: false},
+			),
+			runtime: newFakeExperiment(expAnswer{on: true}),
+		}
+		cfg := testConfig(t, w, exp)
+		clk := cfg.Clock.(*clock.Fake)
+		res := startAsync(t, cfg)
+		advanceRetry(t, clk, cfg.StartupRetry)
+		r := awaitStart(t, res)
+		if !errors.Is(r.err, ErrExperimentOff) {
+			t.Fatalf("start = %v, want ErrExperimentOff", r.err)
+		}
+		if n := exp.startup.count(); n != 2 {
+			t.Fatalf("%d startup reads, want 2", n)
+		}
+	})
+
+	t.Run("fails at startup deadline if DB stays unseeded", func(t *testing.T) {
+		w := relaytest.NewWorld(t)
+		exp := &fakeStartupExperiment{
+			startup: newFakeExperiment(expAnswer{err: errNotSeeded}),
+			runtime: newFakeExperiment(expAnswer{on: true}),
+		}
+		cfg := testConfig(t, w, exp)
+		cfg.StartupDeadline = 2 * cfg.StartupRetry
+		clk := cfg.Clock.(*clock.Fake)
+		res := startAsync(t, cfg)
+		for i := 0; i < 2; i++ {
+			advanceRetry(t, clk, cfg.StartupRetry)
+		}
+		r := awaitStart(t, res)
+		if r.err == nil || !errors.Is(r.err, errNotSeeded) || !strings.Contains(r.err.Error(), "startup deadline") {
+			t.Fatalf("start = %v, want startup deadline wrapping errNotSeeded", r.err)
+		}
+	})
+}
