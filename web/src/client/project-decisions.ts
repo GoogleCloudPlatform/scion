@@ -120,6 +120,7 @@ export interface ProjectDecisionLogEntryView {
   answeredByName: string;
   provenance: string;
   outcome: string;
+  dismissReason?: string;
   surface: string;
   interpretedByAgentId?: string;
   interpretedByAgentName?: string;
@@ -161,7 +162,8 @@ export type MadeDecisionsProvenanceFilter =
   | 'direct'
   | 'interpreted'
   | 'confirmed'
-  | 'overridden';
+  | 'overridden'
+  | 'dismissed';
 
 /** Shared filter criteria accepted by both `tab=pending` and `tab=made` (D6, D7). */
 export interface SharedDecisionsFilter {
@@ -292,6 +294,7 @@ function cleanProvenanceValue(raw: string | undefined | null): MadeDecisionsProv
     case 'interpreted':
     case 'confirmed':
     case 'overridden':
+    case 'dismissed':
       return trimmed;
     case 'agent_interpreted':
       return 'interpreted';

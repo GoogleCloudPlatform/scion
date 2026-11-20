@@ -202,4 +202,32 @@ describe('<scion-decisions-filter-panel> (D13)', () => {
     expect(root.querySelector('[data-active-filter-count]')?.textContent).toBe('5 active');
     expect(root.querySelector('[data-clear-filters]')).not.toBeNull();
   });
+
+  it('includes Dismissed in the Made Provenance select and renders Provenance: dismissed tag (ptone/scion#8217)', async () => {
+    const el = await mountPanel({
+      tab: 'made',
+      provenance: 'dismissed',
+    });
+    const root = el.shadowRoot!;
+    const options = Array.from(
+      root.querySelectorAll<HTMLElement>('sl-select[data-filter="provenance"] sl-option')
+    );
+    expect(
+      options.map((o) => ({ value: o.getAttribute('value'), text: o.textContent?.trim() }))
+    ).toContainEqual({ value: 'dismissed', text: 'Dismissed' });
+
+    const tags = Array.from(root.querySelectorAll<HTMLElement>('sl-tag[data-filter-tag]'));
+    expect(tags.map((t) => t.textContent?.trim())).toEqual(['Provenance: dismissed']);
+
+    const patches: DecisionsFilterPatch[] = [];
+    el.addEventListener('decisions-filter-change', (e) => {
+      patches.push((e as CustomEvent<DecisionsFilterPatch>).detail);
+    });
+    const select = root.querySelector<HTMLElement & { value?: string }>(
+      'sl-select[data-filter="provenance"]'
+    )!;
+    select.value = 'dismissed';
+    select.dispatchEvent(new Event('sl-change'));
+    expect(patches).toEqual([{ provenance: 'dismissed' }]);
+  });
 });

@@ -4247,6 +4247,14 @@ export class ScionChatThread extends LitElement {
     return this.askerAnswerability.get(d.askerAgentId) ?? ANSWERABLE;
   }
 
+  /** Display label of this conversation for a decision card's dismiss dialog. */
+  private get decisionConversationLabel(): string {
+    if (this.isDM || this.conversationKey.startsWith('dm:')) return 'your DM';
+    const name = this.threadName.trim();
+    if (!name) return '';
+    return name.startsWith('#') ? name : `#${name}`;
+  }
+
   /**
    * A card's answer was refused with 403 (design §4.5 step 3):
    * chat_post_denied makes the thread read-only, message_denied blocks
@@ -7779,6 +7787,7 @@ export class ScionChatThread extends LitElement {
             .decisionIntro=${msg.decisionIntro}
             .answerMode=${msg.answerMode}
             .answerability=${this.answerabilityFor(msg)}
+            conversationLabel=${this.decisionConversationLabel}
             .decisionResponse=${msg.decisionResponse}
             .decisionResponseSet=${msg.decisionResponseSet}
             @decision-answered=${this.handleDecisionAnswered}

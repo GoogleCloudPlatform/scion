@@ -25,9 +25,11 @@ import {
   ANSWERABLE,
   GENERIC_ANSWER_DENIED_REASON,
   actionableReason,
+  dismissDialogRows,
   isOpenDecision,
   type AskerAnswerability,
   type DismissDeliveryStatus,
+  type DismissDecisionPromptResult,
 } from '../../client/decision-prompts.js';
 import type { ToastVariant } from '../../utils/toast.js';
 import { chatConversationPath } from '../../client/chat-routes.js';
@@ -86,6 +88,193 @@ export interface WaitingOnOthersItem {
 export const DEFAULT_DECISIONS_PAGE_SIZE = 50;
 export const MAX_DECISIONS_PAGE_SIZE = 200;
 export const SEARCH_DEBOUNCE_MS = 300;
+export const MAX_BULK_DISMISS_SELECTION = 50;
+export const MAX_BULK_DISMISS_CONCURRENCY = 4;
+export const MAX_DISMISS_REASON_RUNES = 500;
+
+export function clampDismissReason(raw: string): string {
+  const runes = [...raw];
+  return runes.length > MAX_DISMISS_REASON_RUNES
+    ? runes.slice(0, MAX_DISMISS_REASON_RUNES).join('')
+    : raw;
+}
+
+export interface BulkDismissCardOutcome {
+  prompt: ProjectDecisionPromptView;
+  result: DismissDecisionPromptResult;
+}
+
+/**
+ * Whether a failed dismiss result failed solely because every listed row is
+ * still inside the 5-minute grace period (`409 too_recent` or
+ * `409 dismiss_changed` where every reason is `'too_recent'`).
+ */
+export function isOnlyTooRecentDismissError(res: DismissDecisionPromptResult): boolean {
+  if (res.ok) return false;
+  if (res.code === 'too_recent') return true;
+  return (
+    res.code === 'dismiss_changed' &&
+    Boolean(res.reasons) &&
+    Object.keys(res.reasons!).length > 0 &&
+    Object.values(res.reasons!).every((r) => r === 'too_recent')
+  );
+}
+
+/**
+ * Runs `fn` over `items` with at most `limit` promises in flight at any time,
+ * resolving to results in the original `items` order.
+ */
+export async function runWithConcurrencyLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const cap = Math.max(1, Math.trunc(limit));
+  const out = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const worker = async (): Promise<void> => {
+    while (nextIndex < items.length) {
+      const idx = nextIndex++;
+      out[idx] = await fn(items[idx], idx);
+    }
+  };
+
+  const workerCount = Math.min(cap, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return out;
+}
+
+function formatCardFailureTarget(p: ProjectDecisionPromptView): string {
+  const agent = p.askerAgentName || 'Agent';
+  const where = conversationDisplayLabel(p.chatKey, p.conversationLabel);
+  return `${agent} · ${where}`;
+}
+
+function formatCappedList(items: readonly string[], maxShown = 3): string {
+  if (items.length <= maxShown) return items.join(', ');
+  return `${items.slice(0, maxShown).join(', ')}, +${items.length - maxShown} more`;
+}
+
+/**
+ * Aggregates multi-card dismiss outcomes into one truthful summary toast:
+ * reports partial failures per card and summarizes `deliveryStatus` without
+ * claiming delivery for gone, suspended/unreachable, or unconfirmed dispatches.
+ */
+export function bulkDismissResultToast(outcomes: readonly BulkDismissCardOutcome[]): {
+  message: string;
+  variant: ToastVariant;
+} {
+  if (outcomes.length === 1 && outcomes[0].result.ok) {
+    const { prompt, result } = outcomes[0];
+    return dismissResultToast(
+      result.deliveryStatus,
+      result.dismissed.length,
+      result.alreadyDismissed.length,
+      prompt.askerAgentName
+    );
+  }
+
+  const total = outcomes.length;
+  let succeededCount = 0;
+  let failedCount = 0;
+  let newlyDismissedCount = 0;
+  const tally: Record<DismissDeliveryStatus, number> = {
+    none: 0,
+    delivered: 0,
+    held: 0,
+    gone: 0,
+    unreachable: 0,
+    failed: 0,
+  };
+  const newlyDismissedAskers = new Set<string>();
+  const changedTargets: string[] = [];
+  const tooRecentTargets: string[] = [];
+  const errorItems: string[] = [];
+
+  for (const { prompt, result } of outcomes) {
+    if (result.ok) {
+      succeededCount++;
+      const status: DismissDeliveryStatus =
+        result.deliveryStatus in tally ? result.deliveryStatus : 'failed';
+      tally[status]++;
+      if (status !== 'none') {
+        newlyDismissedCount++;
+        if (prompt.askerAgentName) newlyDismissedAskers.add(prompt.askerAgentName);
+      }
+      continue;
+    }
+    failedCount++;
+    const target = formatCardFailureTarget(prompt);
+    if (isOnlyTooRecentDismissError(result)) {
+      tooRecentTargets.push(target);
+    } else if (result.code === 'dismiss_changed') {
+      changedTargets.push(target);
+    } else {
+      errorItems.push(`${target}: ${result.message || 'failed'}`);
+    }
+  }
+
+  const failureClause = [
+    changedTargets.length > 0 &&
+      `${changedTargets.length} had changed (${formatCappedList(changedTargets)})`,
+    tooRecentTargets.length > 0 &&
+      `${tooRecentTargets.length} too recent (${formatCappedList(tooRecentTargets)})`,
+    errorItems.length > 0 && `${errorItems.length} failed (${formatCappedList(errorItems)})`,
+  ]
+    .filter(Boolean)
+    .join('; ');
+
+  if (succeededCount > 0 && newlyDismissedCount === 0) {
+    return failedCount === 0
+      ? { message: `${succeededCount} cards were already dismissed.`, variant: 'neutral' }
+      : {
+          message: `${succeededCount} of ${total} cards already dismissed; ${failureClause}.`,
+          variant: 'warning',
+        };
+  }
+
+  const lead =
+    failedCount === 0
+      ? `Dismissed ${succeededCount} ${succeededCount === 1 ? 'card' : 'cards'}.`
+      : `Dismissed ${succeededCount} of ${total} ${total === 1 ? 'card' : 'cards'}; ${failureClause}.`;
+
+  let deliveryTail = '';
+  if (newlyDismissedCount > 0) {
+    if (tally.gone === newlyDismissedCount) {
+      const onlyAsker = newlyDismissedAskers.size === 1 ? [...newlyDismissedAskers][0] : '';
+      deliveryTail = onlyAsker
+        ? `${onlyAsker} is gone; nothing was sent.`
+        : 'Asking agents are gone; nothing was sent.';
+    } else {
+      const notes = [
+        tally.held > 0 &&
+          `${tally.held === 1 ? '1 response' : `${tally.held} responses`} will be sent when the agent can receive messages`,
+        tally.gone > 0 &&
+          `${tally.gone} asking ${tally.gone === 1 ? 'agent is' : 'agents are'} gone (nothing sent)`,
+        tally.unreachable > 0 &&
+          `${tally.unreachable} ${tally.unreachable === 1 ? 'agent is' : 'agents are'} suspended or stopped; not told`,
+        tally.failed > 0 && `could not confirm delivery for ${tally.failed}`,
+      ].filter((s): s is string => Boolean(s));
+      if (notes.length > 0) {
+        const joined = notes.join('; ');
+        deliveryTail = `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`;
+      }
+    }
+  }
+
+  const message = deliveryTail ? `${lead} ${deliveryTail}` : lead;
+  const variant: ToastVariant =
+    succeededCount === 0 && errorItems.length > 0
+      ? 'danger'
+      : failedCount > 0 || tally.unreachable > 0 || tally.failed > 0
+        ? 'warning'
+        : tally.delivered === 0 && tally.held === 0
+          ? 'neutral'
+          : 'success';
+  return { message, variant };
+}
 
 const AVATAR_PALETTE = ['#7c3aed', '#059669', '#0284c7', '#d97706', '#e11d48', '#4f46e5'] as const;
 
@@ -240,6 +429,19 @@ export function collectWaitingOnOthersItems(
     }
   }
   return items;
+}
+
+/**
+ * Decision rows of `p` that wait on the viewer and may be dismissed by the
+ * viewer on Waiting on you (pending rows without a block reason, plus D6
+ * interpreted answers awaiting the viewer's confirmation).
+ */
+export function promptWaitingOnViewerRows(
+  p: ProjectDecisionPromptView,
+  currentUserId: string
+): DecisionView[] {
+  if (!p.waitingOnYou || !p.canAnswer) return [];
+  return dismissDialogRows(p.decisions, currentUserId || undefined, p.waitingReasons);
 }
 
 export function countActionableInPrompt(

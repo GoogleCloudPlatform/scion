@@ -26,28 +26,37 @@
 import { css, html, nothing, type CSSResult, type TemplateResult } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
 
-import { dismissDialogRows, type DecisionAnsweredDetail } from '../../client/decision-prompts.js';
+import {
+  dismissAvailableAtMs,
+  type DecisionAnsweredDetail,
+} from '../../client/decision-prompts.js';
 import type {
   ProjectDecisionCounts,
   ProjectDecisionLogEntryView,
   ProjectDecisionProjectRef,
   ProjectDecisionPromptView,
 } from '../../client/project-decisions.js';
-import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
-import './chat/chat-decisions.js';
+import { formatInstant, formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { dismissDialogStyles } from './chat/chat-decisions.js';
 import {
+  MAX_BULK_DISMISS_SELECTION,
+  MAX_DISMISS_REASON_RUNES,
   avatarColor,
   avatarInitial,
+  clampDismissReason,
   conversationDisplayLabel,
   conversationHref,
   formatDecisionLogWhen,
   promptAnswerability,
+  promptWaitingOnViewerRows,
   replyHrefForEntry,
   surfaceDisplay,
   type WaitingOnOthersItem,
 } from './decisions-format.js';
 
 export const decisionsPageSharedStyles: CSSResult = css`
+  ${dismissDialogStyles}
+
   :host {
     display: block;
     --chat-fs-sm: 0.875rem;
@@ -135,6 +144,119 @@ export const decisionsPageSharedStyles: CSSResult = css`
     border: 1px solid var(--scion-border, #e2e8f0);
     border-radius: var(--scion-radius-lg, 0.75rem);
     margin: 0.75rem 0;
+  }
+
+  .pcard.sel {
+    border-color: var(--scion-primary, #3b82f6);
+    box-shadow: 0 0 0 1px var(--scion-primary, #3b82f6);
+  }
+
+  .pcard-head sl-checkbox.card-select {
+    margin-right: 0.1rem;
+  }
+
+  .pcard-head sl-checkbox.card-select::part(label) {
+    margin-inline-start: 0;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .select-all-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.35rem 0.75rem;
+    margin: 0.35rem 0;
+    font-size: 0.875rem;
+    color: var(--scion-text-secondary, #475569);
+  }
+
+  .selbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    margin: 0.5rem 0;
+    background: var(--scion-primary-50, rgba(59, 130, 246, 0.12));
+    border: 1px solid var(--scion-primary, #3b82f6);
+    border-radius: var(--scion-radius-lg, 0.75rem);
+    font-size: 0.875rem;
+    color: var(--scion-text, #1e293b);
+    flex-wrap: wrap;
+  }
+
+  .selbar .spacer {
+    flex: 1;
+  }
+
+  .bulk-dismiss-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    max-height: 14rem;
+    overflow-y: auto;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--scion-border, #e2e8f0);
+    border-radius: var(--scion-radius, 0.5rem);
+    background: var(--scion-bg-subtle, #f8fafc);
+  }
+
+  .bulk-dismiss-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text, #1e293b);
+    overflow-wrap: anywhere;
+  }
+
+  .bulk-dismiss-item + .bulk-dismiss-item {
+    border-top: 1px solid var(--scion-border, #e2e8f0);
+    padding-top: 0.45rem;
+  }
+
+  .bulk-dismiss-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    font-size: 0.8125rem;
+    color: var(--scion-text-secondary, #475569);
+  }
+
+  .bulk-dismiss-item-meta b {
+    color: var(--scion-text, #1e293b);
+  }
+
+  .bulk-dismiss-item-q {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+  }
+
+  .bulk-dismiss-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .bulk-dismiss-progress-label {
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text-secondary, #475569);
   }
 
   .pcard-head {
@@ -243,6 +365,17 @@ export const decisionsPageSharedStyles: CSSResult = css`
   .badge.over {
     background: var(--scion-badge-primary-bg, #dbeafe);
     color: var(--scion-badge-primary-text, #1e40af);
+  }
+
+  .badge.dec {
+    background: var(--scion-badge-danger-bg, #fee2e2);
+    color: var(--scion-badge-danger-text, #991b1b);
+  }
+
+  .dismiss-reason {
+    font-size: 0.78rem;
+    margin-top: 0.15rem;
+    overflow-wrap: anywhere;
   }
 
   .badge sl-icon {
@@ -420,63 +553,6 @@ export const decisionsPageSharedStyles: CSSResult = css`
 
   .dismiss-tip-wrap {
     display: inline-flex;
-  }
-
-  sl-dialog.dismiss-dialog {
-    --sl-panel-background-color: var(--scion-surface, #ffffff);
-    --sl-panel-border-color: var(--scion-border, #e2e8f0);
-    --sl-color-neutral-700: var(--scion-text, #1e293b);
-  }
-
-  sl-dialog.dismiss-dialog::part(panel) {
-    width: min(32.5rem, calc(100vw - 1.5rem));
-  }
-
-  .dismiss-dialog-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-    font-size: var(--chat-fs-base, 0.9375rem);
-    color: var(--scion-text, #1e293b);
-  }
-
-  .dismiss-dialog-note {
-    font-size: var(--chat-fs-sm, 0.875rem);
-    color: var(--scion-text-muted, #64748b);
-  }
-
-  .dismiss-row-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .dismiss-row-item {
-    display: flex;
-    align-items: baseline;
-    gap: 0.45rem;
-    font-size: var(--chat-fs-sm, 0.875rem);
-    color: var(--scion-text, #1e293b);
-    overflow-wrap: anywhere;
-  }
-
-  .dismiss-tell {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: var(--chat-fs-sm, 0.875rem);
-    color: var(--scion-text-secondary, #475569);
-  }
-
-  .dismiss-tell sl-icon {
-    flex-shrink: 0;
-  }
-
-  .dismiss-dialog-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    width: 100%;
   }
 
   @media (max-width: 640px) {
@@ -667,14 +743,100 @@ export function renderLoadMoreFooter(opts: {
   return nothing;
 }
 
+export function renderPendingSelectionHeader(opts: {
+  selectedCount: number;
+  selectableCount: number;
+  submitting: boolean;
+  onToggleAll: (checked: boolean) => void;
+  onClear: () => void;
+  onDismiss: () => void;
+}): TemplateResult {
+  const cap = Math.min(opts.selectableCount, MAX_BULK_DISMISS_SELECTION);
+  const allSelected = cap > 0 && opts.selectedCount >= cap;
+  const indeterminate = opts.selectedCount > 0 && !allSelected;
+  const selectAllDisabled = cap === 0 || opts.submitting;
+
+  const onSelectAllChange = (e: Event): void => {
+    const box = e.currentTarget as HTMLElement & { checked?: boolean };
+    const nextChecked = Boolean(box.checked) && !allSelected;
+    opts.onToggleAll(nextChecked);
+  };
+
+  if (opts.selectedCount === 0) {
+    return html`
+      <div class="select-all-row">
+        <sl-checkbox
+          data-select-all-prompts
+          ?checked=${false}
+          .checked=${false}
+          ?indeterminate=${false}
+          .indeterminate=${false}
+          ?disabled=${selectAllDisabled}
+          @sl-change=${onSelectAllChange}
+          >Select all on this page</sl-checkbox
+        >
+      </div>
+    `;
+  }
+
+  return html`
+    <div class="selbar" data-selection-bar>
+      <sl-checkbox
+        data-select-all-prompts
+        ?checked=${allSelected}
+        .checked=${allSelected}
+        ?indeterminate=${indeterminate}
+        .indeterminate=${indeterminate}
+        ?disabled=${selectAllDisabled}
+        @sl-change=${onSelectAllChange}
+        >Select all on this page</sl-checkbox
+      >
+      <b data-selected-count
+        >${opts.selectedCount === 1 ? '1 card selected' : `${opts.selectedCount} cards selected`}</b
+      >
+      <span class="spacer"></span>
+      <sl-button
+        size="small"
+        variant="text"
+        data-selection-clear
+        ?disabled=${opts.submitting}
+        @click=${opts.onClear}
+        >Clear</sl-button
+      >
+      <sl-button
+        size="small"
+        variant="danger"
+        outline
+        data-selection-dismiss
+        ?disabled=${opts.submitting}
+        @click=${opts.onDismiss}
+      >
+        <sl-icon slot="prefix" name="x-circle" aria-hidden="true"></sl-icon>
+        Dismiss…
+      </sl-button>
+    </div>
+  `;
+}
+
 export function renderPromptCard(
   p: ProjectDecisionPromptView,
   opts: {
     currentUserId: string;
     defaultProjectId?: string | undefined;
     projectBadgeName?: string | undefined;
+    askerGone?: boolean | undefined;
     dismissRemainingMin?: number | undefined;
-    onRequestDismiss?: ((p: ProjectDecisionPromptView) => void) | undefined;
+    dismissAvailableAtMs?: number | undefined;
+    selected?: boolean | undefined;
+    canSelect?: boolean | undefined;
+    selectionCapReached?: boolean | undefined;
+    onToggleSelect?: ((p: ProjectDecisionPromptView, checked: boolean) => void) | undefined;
+    onDismissTooRecent?:
+      | ((
+          p: ProjectDecisionPromptView,
+          e: CustomEvent<{ messageId: string; availableAt: string }>
+        ) => void)
+      | undefined;
     onAnswered: (p: ProjectDecisionPromptView, e: CustomEvent<DecisionAnsweredDetail>) => void;
     onJump: (p: ProjectDecisionPromptView, e: CustomEvent<{ messageId?: string }>) => void;
   }
@@ -687,22 +849,62 @@ export function renderPromptCard(
       ? `${convHref}#msg-${encodeURIComponent(p.promptMessageId)}`
       : null;
   const mode = p.answerMode === 'set' || p.answerMode === 'single' ? p.answerMode : undefined;
-  const canDismiss =
-    p.waitingOnYou &&
-    p.canAnswer &&
-    Boolean(opts.onRequestDismiss) &&
-    p.decisions.some((d) => d.status === 'pending' && !d.decision);
   const remainingMin = opts.dismissRemainingMin ?? 0;
+  const availMs = opts.dismissAvailableAtMs ?? dismissAvailableAtMs(p.createdAt);
+  const isSelected = Boolean(opts.selected);
+  const canDismissAnyRow =
+    opts.canSelect ?? promptWaitingOnViewerRows(p, opts.currentUserId).length > 0;
+  const capReached = Boolean(opts.selectionCapReached) && !isSelected;
+  const checkboxDisabled = !canDismissAnyRow || remainingMin > 0 || capReached;
+  const checkboxTooltip =
+    canDismissAnyRow && remainingMin > 0
+      ? `Dismiss available in ${remainingMin} min`
+      : capReached
+        ? `Select up to ${MAX_BULK_DISMISS_SELECTION} cards at once`
+        : '';
+
+  const renderSelectCheckbox = (): TemplateResult => {
+    const box = html`
+      <sl-checkbox
+        class="card-select"
+        data-select-prompt=${p.promptMessageId}
+        ?checked=${isSelected}
+        .checked=${isSelected}
+        ?disabled=${checkboxDisabled}
+        @sl-change=${(e: Event): void => {
+          const target = e.currentTarget as HTMLElement & { checked?: boolean };
+          if (checkboxDisabled) {
+            target.checked = isSelected;
+            return;
+          }
+          opts.onToggleSelect?.(p, Boolean(target.checked));
+        }}
+        ><span class="sr-only">Select decision card from ${p.askerAgentName}</span></sl-checkbox
+      >
+    `;
+    if (checkboxTooltip) {
+      return html`
+        <sl-tooltip data-select-prompt-tooltip=${p.promptMessageId} content=${checkboxTooltip}>
+          <span class="dismiss-tip-wrap">${box}</span>
+        </sl-tooltip>
+      `;
+    }
+    return box;
+  };
 
   return html`
     <div
-      class="pcard"
+      class="pcard ${isSelected ? 'sel' : ''}"
       data-prompt-card=${p.promptMessageId}
       @decision-answered=${(e: CustomEvent<DecisionAnsweredDetail>): void => opts.onAnswered(p, e)}
+      @decision-dismiss-too-recent=${(
+        e: CustomEvent<{ messageId: string; availableAt: string }>
+      ): void => opts.onDismissTooRecent?.(p, e)}
       @scroll-to-message=${(e: CustomEvent<{ messageId?: string }>): void => opts.onJump(p, e)}
       @decision-jump=${(e: CustomEvent<{ messageId?: string }>): void => opts.onJump(p, e)}
     >
       <div class="pcard-head">
+        ${opts.onToggleSelect ? renderSelectCheckbox() : nothing}
         ${opts.projectBadgeName
           ? html`<sl-badge variant="neutral" data-card-project>${opts.projectBadgeName}</sl-badge>`
           : nothing}
@@ -713,6 +915,7 @@ export function renderPromptCard(
           >${avatarInitial(p.askerAgentName)}</span
         >
         <b>${p.askerAgentName}</b>
+        ${opts.askerGone ? html`<span class="muted" data-asker-deleted>(deleted)</span>` : nothing}
         <span>
           in
           ${convHref
@@ -722,37 +925,12 @@ export function renderPromptCard(
         <span class="muted" title=${formatInstantWithZone(p.createdAt)}
           >· ${formatRelative(p.createdAt, { style: 'short' })}</span
         >
+        ${canDismissAnyRow && remainingMin > 0 && availMs > 0
+          ? html`<span class="muted" data-dismiss-available-at
+              >${`· dismiss available at ${formatInstant(new Date(availMs).toISOString(), 'time')}`}</span
+            >`
+          : nothing}
         <span class="right">
-          ${canDismiss
-            ? remainingMin > 0
-              ? html`<sl-tooltip
-                  data-dismiss-tooltip
-                  content=${`Dismiss available in ${remainingMin} min`}
-                >
-                  <span class="dismiss-tip-wrap">
-                    <sl-button
-                      size="small"
-                      variant="default"
-                      disabled
-                      aria-disabled="true"
-                      data-dismiss-prompt=${p.promptMessageId}
-                    >
-                      <sl-icon slot="prefix" name="x-circle" aria-hidden="true"></sl-icon>
-                      Dismiss…
-                    </sl-button>
-                  </span>
-                </sl-tooltip>`
-              : html`<sl-button
-                  size="small"
-                  variant="danger"
-                  outline
-                  data-dismiss-prompt=${p.promptMessageId}
-                  @click=${(): void => opts.onRequestDismiss?.(p)}
-                >
-                  <sl-icon slot="prefix" name="x-circle" aria-hidden="true"></sl-icon>
-                  Dismiss…
-                </sl-button>`
-            : nothing}
           ${permalink
             ? html`<a class="linkish" data-open-in-chat href=${permalink}
                 ><sl-icon name="chat-left-text" aria-hidden="true"></sl-icon> Open in chat</a
@@ -771,6 +949,11 @@ export function renderPromptCard(
         .currentUserId=${opts.currentUserId}
         .answerMode=${mode}
         .answerability=${promptAnswerability(p)}
+        .createdAt=${p.createdAt}
+        .conversationLabel=${whereLabel}
+        .permalinkHref=${permalink ?? ''}
+        .waitingReasons=${p.waitingReasons}
+        .askerGone=${Boolean(opts.askerGone)}
         surface="decisions_page"
       ></scion-chat-decisions>
     </div>
@@ -880,7 +1063,16 @@ export function renderAnsweredBy(
   return e.answeredByName || 'Unknown';
 }
 
+function isDismissLogEntry(e: ProjectDecisionLogEntryView): boolean {
+  return e.outcome === 'dismiss' || e.choiceId === '$dismissed';
+}
+
 export function renderProvenanceBadge(e: ProjectDecisionLogEntryView): TemplateResult {
+  if (isDismissLogEntry(e)) {
+    return html`<span class="badge dec"
+      ><sl-icon name="x-circle" aria-hidden="true"></sl-icon>dismissed</span
+    >`;
+  }
   if (e.provenance === 'agent_interpreted') {
     return html`<span class="badge interp"
       ><sl-icon name="robot" aria-hidden="true"></sl-icon>interpreted</span
@@ -908,6 +1100,7 @@ export function renderMadeRow(
     resolveProjectName?: ((ref: ProjectDecisionProjectRef | undefined) => string) | undefined;
   }
 ): TemplateResult {
+  const isDismiss = isDismissLogEntry(e);
   const isFollow = e.outcome === 'confirm' || e.outcome === 'override';
   const surf = surfaceDisplay(e.surface);
   const projectId = opts.defaultProjectId || e.project?.id || '';
@@ -918,7 +1111,7 @@ export function renderMadeRow(
       : null;
   const whereLabel = conversationDisplayLabel(e.chatKey, e.conversationLabel);
   const convHref = conversationHref(e.chatKey, e.conversationAvailable, projectId);
-  const replyHref = replyHrefForEntry(e, projectId);
+  const replyHref = isDismiss ? null : replyHrefForEntry(e, projectId);
 
   return html`
     <tr class=${isFollow ? 'follow' : ''} data-answer-row=${e.answerId}>
@@ -940,15 +1133,23 @@ export function renderMadeRow(
       <td class="q">
         <span class="q-text" title=${e.decision.question}>${e.decision.question}</span>
       </td>
-      <td><b>${e.label || e.choiceId}</b></td>
+      <td data-answer-cell>
+        <b>${isDismiss ? 'Dismissed' : e.label || e.choiceId}</b>
+        ${isDismiss && e.dismissReason
+          ? html`<div class="dismiss-reason muted" data-dismiss-reason>${e.dismissReason}</div>`
+          : nothing}
+      </td>
       <td data-answered-by>${renderAnsweredBy(e, opts.currentUserId)}</td>
       <td data-provenance>
         ${renderProvenanceBadge(e)}
-        ${e.provenance === 'agent_interpreted' && replyHref
+        ${!isDismiss && e.provenance === 'agent_interpreted' && replyHref
           ? html` <a class="linkish" data-reply-link href=${replyHref}>reply</a>`
-          : e.provenance === 'direct' && e.outcome === 'override' && e.previousChoiceLabel
+          : !isDismiss &&
+              e.provenance === 'direct' &&
+              e.outcome === 'override' &&
+              e.previousChoiceLabel
             ? html` <span class="muted">from ${e.previousChoiceLabel}</span>`
-            : e.provenance === 'direct' && e.outcome === 'answer' && e.matchedDefault
+            : !isDismiss && e.provenance === 'direct' && e.outcome === 'answer' && e.matchedDefault
               ? html` <span class="muted">recommended</span>`
               : nothing}
       </td>
@@ -979,27 +1180,31 @@ export function renderMadeItem(
     resolveProjectName?: ((ref: ProjectDecisionProjectRef | undefined) => string) | undefined;
   }
 ): TemplateResult {
+  const isDismiss = isDismissLogEntry(e);
   const surf = surfaceDisplay(e.surface);
   const proj = e.project?.id ? e.project : opts.fallbackProject;
   const projectId = opts.defaultProjectId || proj?.id || '';
   const projectName = opts.resolveProjectName ? opts.resolveProjectName(proj) : '';
   const whereLabel = conversationDisplayLabel(e.chatKey, e.conversationLabel);
   const convHref = conversationHref(e.chatKey, e.conversationAvailable, projectId);
-  const replyHref = replyHrefForEntry(e, projectId);
+  const replyHref = isDismiss ? null : replyHrefForEntry(e, projectId);
 
   return html`
     <div class="item" data-mobile-answer=${e.answerId}>
       <div class="top">
         <span class="key">${e.decision.key || e.decision.ref}</span>
-        <b>${e.label || e.choiceId}</b>
+        <b>${isDismiss ? 'Dismissed' : e.label || e.choiceId}</b>
         ${renderProvenanceBadge(e)}
       </div>
       <div>${e.decision.question}</div>
+      ${isDismiss && e.dismissReason
+        ? html`<div class="dismiss-reason muted" data-dismiss-reason>${e.dismissReason}</div>`
+        : nothing}
       <div class="meta">
         ${opts.includeProjectInMeta && projectName
           ? html`${projectName} · `
           : nothing}${renderAnsweredBy(e, opts.currentUserId)}
-        ${e.outcome === 'override' && e.previousChoiceLabel
+        ${!isDismiss && e.outcome === 'override' && e.previousChoiceLabel
           ? html` · from ${e.previousChoiceLabel}`
           : nothing}
         · ${surf.label} · ${e.decision.askerAgentName} ·
@@ -1071,33 +1276,50 @@ export function renderMadeTableAndMobileList(
   `;
 }
 
-export function renderDismissPromptDialog(opts: {
-  prompt: ProjectDecisionPromptView | null;
+export function renderBulkDismissDialog(opts: {
+  prompts: readonly ProjectDecisionPromptView[];
+  currentUserId: string;
   reasonDraft: string;
   submitting: boolean;
-  askerGone: boolean;
+  completedCount: number;
+  goneAgentIds: ReadonlySet<string>;
   onReasonInput: (value: string) => void;
   onCancel: () => void;
   onConfirm: () => void;
 }): TemplateResult | typeof nothing {
-  const p = opts.prompt;
-  if (!p) return nothing;
+  const prompts = opts.prompts;
+  if (prompts.length === 0) return nothing;
 
-  const openRows = dismissDialogRows(p.decisions);
-  const count = openRows.length;
-  const dialogLabel = count === 1 ? 'Dismiss decision' : 'Dismiss decisions';
-  const confirmLabel = count <= 1 ? 'Dismiss' : `Dismiss ${count} decisions`;
-  const askerName = p.askerAgentName || 'The agent';
-  const whereLabel = conversationDisplayLabel(p.chatKey, p.conversationLabel);
+  const count = prompts.length;
+  const dialogLabel = count === 1 ? 'Dismiss 1 card' : `Dismiss ${count} cards`;
+  const confirmLabel = count === 1 ? 'Dismiss 1 card' : `Dismiss ${count} cards`;
   const onTextareaInput = (e: Event): void => {
-    const val = (e.target as HTMLElement & { value?: string })?.value ?? '';
-    opts.onReasonInput(val);
+    const raw = (e.target as HTMLElement & { value?: string })?.value ?? '';
+    const clamped = clampDismissReason(raw);
+    if (clamped !== raw && e.target && 'value' in e.target) {
+      (e.target as { value: string }).value = clamped;
+    }
+    opts.onReasonInput(clamped);
   };
+
+  let goneCount = 0;
+  const distinctAgentNames = new Set<string>();
+  for (const p of prompts) {
+    if (p.askerAgentName) distinctAgentNames.add(p.askerAgentName);
+    if (p.askerAgentId && opts.goneAgentIds.has(p.askerAgentId)) {
+      goneCount++;
+    }
+  }
+  const allGone = goneCount === count;
+  const someGone = goneCount > 0 && !allGone;
+  const singleAsker = distinctAgentNames.size === 1 ? [...distinctAgentNames][0] : '';
+
+  const progressPct = count > 0 ? Math.round((opts.completedCount / count) * 100) : 0;
 
   return html`
     <sl-dialog
       class="dismiss-dialog"
-      data-dismiss-dialog
+      data-bulk-dismiss-dialog
       label=${dialogLabel}
       open
       @sl-request-close=${(e: Event): void => {
@@ -1109,50 +1331,109 @@ export function renderDismissPromptDialog(opts: {
       }}
     >
       <div class="dismiss-dialog-body">
-        <div class="dismiss-row-list">
-          ${openRows.map(
-            (d) => html`
-              <div class="dismiss-row-item" data-dismiss-row=${d.rowId}>
-                ${d.key ? html`<span class="key">${d.key}</span>` : nothing}
-                <span>${d.question}</span>
-              </div>
-            `
-          )}
-        </div>
         <div class="dismiss-dialog-note">
-          ${count === 1
-            ? 'A dismissed decision closes for everyone and cannot be answered. This cannot be undone.'
-            : 'Dismissed decisions close for everyone and cannot be answered. This cannot be undone.'}
+          Dismissed decisions close for everyone and cannot be answered. This cannot be undone.
+        </div>
+        <div class="bulk-dismiss-list" data-bulk-dismiss-list>
+          ${prompts.map((p) => {
+            const waitingRows = promptWaitingOnViewerRows(p, opts.currentUserId);
+            const firstRow = waitingRows[0] ?? p.decisions[0];
+            const extraCount = Math.max(0, waitingRows.length - 1);
+            const whereLabel = conversationDisplayLabel(p.chatKey, p.conversationLabel);
+            const isGone = Boolean(p.askerAgentId && opts.goneAgentIds.has(p.askerAgentId));
+            return html`
+              <div class="bulk-dismiss-item" data-bulk-dismiss-item=${p.promptMessageId}>
+                <div class="bulk-dismiss-item-meta">
+                  <b>${p.askerAgentName || 'Agent'}</b>
+                  ${isGone ? html`<span class="muted">(deleted)</span>` : nothing}
+                  <span>·</span>
+                  <span>${whereLabel}</span>
+                  ${extraCount > 0
+                    ? html`<span class="muted">· +${extraCount} more</span>`
+                    : nothing}
+                </div>
+                ${firstRow
+                  ? html`
+                      <div class="bulk-dismiss-item-q">
+                        ${firstRow.key ? html`<span class="key">${firstRow.key}</span>` : nothing}
+                        <span>${firstRow.question}</span>
+                      </div>
+                    `
+                  : nothing}
+              </div>
+            `;
+          })}
         </div>
         <sl-textarea
           size="small"
           rows="2"
-          maxlength="500"
           label="Reason (optional)"
-          help-text=${opts.askerGone
-            ? 'Plain text, up to 500 characters. Shown on the card.'
-            : `Plain text, up to 500 characters. Sent to ${askerName} and shown on the card.`}
-          placeholder="Why it no longer applies"
-          data-dismiss-reason
+          help-text=${allGone
+            ? 'Plain text, up to 500 characters. Shown on each card.'
+            : 'Plain text, up to 500 characters. Sent to live asking agents and shown on each card.'}
+          placeholder="Why these no longer apply"
+          data-bulk-dismiss-reason
           ?disabled=${opts.submitting}
           .value=${opts.reasonDraft}
           @sl-input=${onTextareaInput}
           @input=${onTextareaInput}
-        ></sl-textarea>
-        ${opts.askerGone
-          ? html`<div class="dismiss-tell" data-dismiss-tell="gone">
+        >
+          <span slot="help-text" class="dismiss-reason-help">
+            <span
+              >${allGone
+                ? 'Plain text, up to 500 characters. Shown on each card.'
+                : 'Plain text, up to 500 characters. Sent to live asking agents and shown on each card.'}</span
+            >
+            <span class="dismiss-reason-count" data-bulk-dismiss-reason-count
+              >${[...opts.reasonDraft].length}/${MAX_DISMISS_REASON_RUNES}</span
+            >
+          </span>
+        </sl-textarea>
+        ${allGone
+          ? html`<div class="dismiss-tell" data-bulk-dismiss-tell="gone">
               <sl-icon name="person-x" aria-hidden="true"></sl-icon>
-              <span>${askerName} is gone; nothing will be sent.</span>
+              <span
+                >${singleAsker
+                  ? `${singleAsker} is gone; nothing will be sent.`
+                  : 'Asking agents are gone; nothing will be sent.'}</span
+              >
             </div>`
-          : html`<div class="dismiss-tell" data-dismiss-tell="live">
-              <sl-icon name="send" aria-hidden="true"></sl-icon>
-              <span>${askerName} will be told in ${whereLabel}.</span>
-            </div>`}
+          : someGone
+            ? html`<div class="dismiss-tell" data-bulk-dismiss-tell="mixed">
+                <sl-icon name="send" aria-hidden="true"></sl-icon>
+                <span
+                  >Live asking agents will be told; deleted agents are gone and nothing will be sent
+                  to them.</span
+                >
+              </div>`
+            : html`<div class="dismiss-tell" data-bulk-dismiss-tell="live">
+                <sl-icon name="send" aria-hidden="true"></sl-icon>
+                <span
+                  >${singleAsker
+                    ? `${singleAsker} will be told if reachable.`
+                    : 'Live asking agents will be told in their conversations.'}</span
+                >
+              </div>`}
+        ${opts.submitting
+          ? html`
+              <div
+                class="bulk-dismiss-progress"
+                data-bulk-dismiss-progress
+                role="status"
+                aria-live="polite"
+              >
+                <div class="bulk-dismiss-progress-label">
+                  Dismissing ${opts.completedCount} of ${count} ${count === 1 ? 'card' : 'cards'}…
+                </div>
+                <sl-progress-bar value=${progressPct}></sl-progress-bar>
+              </div>
+            `
+          : nothing}
       </div>
       <div slot="footer" class="dismiss-dialog-footer">
         <sl-button
           size="small"
-          data-dismiss-cancel
+          data-bulk-dismiss-cancel
           ?disabled=${opts.submitting}
           @click=${opts.onCancel}
         >
@@ -1162,7 +1443,7 @@ export function renderDismissPromptDialog(opts: {
           size="small"
           variant="danger"
           outline
-          data-dismiss-confirm
+          data-bulk-dismiss-confirm
           ?loading=${opts.submitting}
           ?disabled=${opts.submitting}
           @click=${opts.onConfirm}

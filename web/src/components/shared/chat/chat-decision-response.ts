@@ -116,6 +116,11 @@ export class ScionChatDecisionResponse extends LitElement {
       flex-shrink: 0;
     }
 
+    sl-icon.dismiss {
+      color: var(--scion-status-danger, #dc2626);
+      flex-shrink: 0;
+    }
+
     b {
       color: var(--scion-text, #1e293b);
       font-weight: 600;
@@ -130,7 +135,8 @@ export class ScionChatDecisionResponse extends LitElement {
       white-space: nowrap;
     }
 
-    .q {
+    .q,
+    .reason {
       font-style: italic;
       overflow-wrap: anywhere;
     }
@@ -281,6 +287,10 @@ export class ScionChatDecisionResponse extends LitElement {
     }
 
     const outcome = r.outcome || 'answer';
+    if (outcome === 'dismiss') {
+      return this.renderSingleDismiss(r.key, r.dismissReason, r.promptMessageId);
+    }
+
     if (outcome === 'confirm') {
       return html`<div class="line" data-kind="single" data-outcome="confirm">
         <sl-icon class="ok" name="patch-check" aria-hidden="true"></sl-icon>
@@ -332,11 +342,45 @@ export class ScionChatDecisionResponse extends LitElement {
     return nothing;
   }
 
+  private renderSingleDismiss(
+    key: string,
+    dismissReason: string | undefined,
+    promptMessageId: string | undefined
+  ): TemplateResult {
+    const reason = dismissReason?.trim();
+    return html`<div class="line" data-kind="single" data-outcome="dismiss">
+      <sl-icon class="dismiss" name="x-circle" aria-hidden="true"></sl-icon>
+      <b>${this.who}</b> dismissed ${key ? html`<span class="key">${key}</span>` : nothing}
+      ${reason
+        ? html`<span class="sep" aria-hidden="true">·</span>
+            <span class="reason" data-dismiss-reason>${reason}</span>`
+        : nothing}
+      ${this.renderTime()} ${this.renderNotDelivered()} ${this.renderJumpButton(promptMessageId)}
+    </div>`;
+  }
+
+  private renderSetItemLabel(a: DecisionResponseSetAnswer): TemplateResult {
+    if (a.outcome === 'dismiss') {
+      const q = a.question?.trim();
+      return q ? html`${q} — <b>Dismissed</b>` : html`<b>Dismissed</b>`;
+    }
+    return html`${a.label}${this.renderSetItemNote(a)}`;
+  }
+
   private renderSet(rs: DecisionResponseSetView): TemplateResult {
     const answers = rs.answers ?? [];
     const n = answers.length;
     const interpreted = answers.some((a) => a.provenance === INTERPRETED);
+    const allDismiss = !interpreted && n > 0 && answers.every((a) => a.outcome === 'dismiss');
+    if (allDismiss && n === 1 && answers[0]) {
+      return this.renderSingleDismiss(
+        answers[0].key,
+        answers[0].dismissReason,
+        answers[0].promptMessageId || rs.promptMessageId
+      );
+    }
     const allConfirm = !interpreted && n > 0 && answers.every((a) => a.outcome === 'confirm');
+    const dismissReason = allDismiss ? answers[0]?.dismissReason?.trim() : undefined;
     const agent = this.agentName || 'the agent';
     const whose = this.own ? 'your' : `${this.who}'s`;
     const pronoun = this.own ? 'your' : 'their';
@@ -345,6 +389,7 @@ export class ScionChatDecisionResponse extends LitElement {
     const multiPrompt = !promptMsgId;
     return html`<details
       data-kind="set"
+      data-outcome=${allDismiss ? 'dismiss' : nothing}
       ?open=${this.open}
       @toggle=${(e: Event): void => {
         this.open = (e.currentTarget as HTMLDetailsElement).open;
@@ -352,8 +397,14 @@ export class ScionChatDecisionResponse extends LitElement {
     >
       <summary>
         <sl-icon
-          class=${interpreted ? 'robot' : 'ok'}
-          name=${interpreted ? 'robot' : allConfirm ? 'patch-check' : 'check-circle-fill'}
+          class=${interpreted ? 'robot' : allDismiss ? 'dismiss' : 'ok'}
+          name=${interpreted
+            ? 'robot'
+            : allDismiss
+              ? 'x-circle'
+              : allConfirm
+                ? 'patch-check'
+                : 'check-circle-fill'}
           aria-hidden="true"
         ></sl-icon>
         ${interpreted
@@ -363,7 +414,13 @@ export class ScionChatDecisionResponse extends LitElement {
                 : `answers to ${n} decisions`}
               from ${pronoun} reply</span
             >`
-          : html`<b>${this.who}</b> answered ${n} ${n === 1 ? 'decision' : 'decisions'}`}
+          : allDismiss
+            ? html`<b>${this.who}</b> dismissed ${n} decisions`
+            : html`<b>${this.who}</b> answered ${n} ${n === 1 ? 'decision' : 'decisions'}`}
+        ${dismissReason
+          ? html`<span class="sep" aria-hidden="true">·</span>
+              <span class="reason" data-dismiss-reason>${dismissReason}</span>`
+          : nothing}
         ${this.renderTime()}
         ${this.dispatchState === 'failed'
           ? this.renderNotDelivered()
@@ -372,7 +429,15 @@ export class ScionChatDecisionResponse extends LitElement {
                 <span class="muted" data-state="not-sent">not sent to the agent</span>`
             : nothing}
         <span class="sep" aria-hidden="true">·</span>
-        <span class="link">${this.open ? 'Hide answers ▾' : 'Show answers ▸'}</span>
+        <span class="link"
+          >${allDismiss
+            ? this.open
+              ? 'Hide decisions ▾'
+              : 'Show decisions ▸'
+            : this.open
+              ? 'Hide answers ▾'
+              : 'Show answers ▸'}</span
+        >
       </summary>
       <ul class="answers">
         ${answers.map(
@@ -380,7 +445,7 @@ export class ScionChatDecisionResponse extends LitElement {
             html`<li data-row=${a.rowId}>
               <span class="key">${a.key}</span>
               <span class="lbl"
-                >${a.label}${this.renderSetItemNote(a)}${multiPrompt &&
+                >${this.renderSetItemLabel(a)}${multiPrompt &&
                 a.promptMessageId &&
                 a.promptMessageId !== answers[0]?.promptMessageId
                   ? html` <span class="muted">(other question)</span>`

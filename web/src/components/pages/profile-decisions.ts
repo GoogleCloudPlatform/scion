@@ -61,16 +61,17 @@ import {
 import { DecisionsPageController } from '../shared/decisions-page-controller.js';
 import {
   decisionsPageSharedStyles,
+  renderBulkDismissDialog,
   renderDateRangeError,
   renderDecisionsErrorState,
   renderDecisionsLoadingState,
-  renderDismissPromptDialog,
   renderLoadMoreFooter,
   renderMadeEmptyState,
   renderMadeItem,
   renderMadeTableAndMobileList,
   renderNoMatchState,
   renderPendingEmptyState,
+  renderPendingSelectionHeader,
   renderPromptCard,
   renderSearchTimeoutAlert,
   renderWaitingOnOthersSection,
@@ -437,14 +438,16 @@ export class ScionPageProfileDecisions extends LitElement {
           ${this.renderMadePanel()}
         </sl-tab-panel>
       </sl-tab-group>
-      ${renderDismissPromptDialog({
-        prompt: this.ctrl.dismissDialogPrompt,
-        reasonDraft: this.ctrl.dismissReasonDraft,
-        submitting: this.ctrl.dismissSubmitting,
-        askerGone: this.ctrl.dismissAskerGone,
-        onReasonInput: this.ctrl.setDismissReasonDraft,
-        onCancel: this.ctrl.closeDismissDialog,
-        onConfirm: () => void this.ctrl.confirmDismissPrompt(),
+      ${renderBulkDismissDialog({
+        prompts: this.ctrl.bulkDismissPrompts,
+        currentUserId: this.ctrl.currentUserId,
+        reasonDraft: this.ctrl.bulkDismissReasonDraft,
+        submitting: this.ctrl.bulkDismissSubmitting,
+        completedCount: this.ctrl.bulkDismissCompleted,
+        goneAgentIds: this.ctrl.bulkDismissGoneAgentIds,
+        onReasonInput: this.ctrl.setBulkDismissReasonDraft,
+        onCancel: this.ctrl.closeBulkDismissDialog,
+        onConfirm: () => void this.ctrl.confirmBulkDismiss(),
       })}
     `;
   }
@@ -471,25 +474,40 @@ export class ScionPageProfileDecisions extends LitElement {
               seeMadeHref: '?tab=made&sort=recent',
               onSeeMade: () => this.ctrl.switchTab('made'),
             })
-        : this.ctrl.sort === 'project'
-          ? repeat(
-              this.groupWaitingPromptsByProject(waitingPrompts),
-              (g) => g.project.id,
-              (g) => this.renderPendingProjectGroup(g)
-            )
-          : repeat(
-              waitingPrompts,
-              (p) => p.promptMessageId,
-              (p) =>
-                renderPromptCard(p, {
-                  currentUserId: this.ctrl.currentUserId,
-                  projectBadgeName: this.ctrl.projectDisplayName(p.project),
-                  dismissRemainingMin: this.ctrl.promptDismissRemainingMinutes(p),
-                  onRequestDismiss: this.ctrl.openDismissDialog,
-                  onAnswered: this.ctrl.onPromptDecisionAnswered,
-                  onJump: this.ctrl.onPromptMessageJump,
-                })
-            )}
+        : html`
+            ${renderPendingSelectionHeader({
+              selectedCount: this.ctrl.selectedPromptIds.size,
+              selectableCount: this.ctrl.selectableWaitingPrompts().length,
+              submitting: this.ctrl.bulkDismissSubmitting,
+              onToggleAll: this.ctrl.toggleSelectAllPrompts,
+              onClear: this.ctrl.clearPromptSelection,
+              onDismiss: this.ctrl.openBulkDismissDialog,
+            })}
+            ${this.ctrl.sort === 'project'
+              ? repeat(
+                  this.groupWaitingPromptsByProject(waitingPrompts),
+                  (g) => g.project.id,
+                  (g) => this.renderPendingProjectGroup(g)
+                )
+              : repeat(
+                  waitingPrompts,
+                  (p) => p.promptMessageId,
+                  (p) =>
+                    renderPromptCard(p, {
+                      currentUserId: this.ctrl.currentUserId,
+                      projectBadgeName: this.ctrl.projectDisplayName(p.project),
+                      askerGone: this.ctrl.isPromptAskerGone(p),
+                      dismissRemainingMin: this.ctrl.promptDismissRemainingMinutes(p),
+                      selected: this.ctrl.isPromptSelected(p.promptMessageId),
+                      canSelect: this.ctrl.promptCanDismiss(p),
+                      selectionCapReached: this.ctrl.isPromptSelectionCapReached(p.promptMessageId),
+                      onToggleSelect: this.ctrl.setPromptSelected,
+                      onDismissTooRecent: this.ctrl.onPromptDismissTooRecent,
+                      onAnswered: this.ctrl.onPromptDecisionAnswered,
+                      onJump: this.ctrl.onPromptMessageJump,
+                    })
+                )}
+          `}
       ${renderLoadMoreFooter({
         tab: 'pending',
         nextCursor: this.ctrl.pendingNextCursor,
@@ -530,8 +548,14 @@ export class ScionPageProfileDecisions extends LitElement {
           (p) =>
             renderPromptCard(p, {
               currentUserId: this.ctrl.currentUserId,
+              askerGone: this.ctrl.isPromptAskerGone(p),
               dismissRemainingMin: this.ctrl.promptDismissRemainingMinutes(p),
-              onRequestDismiss: this.ctrl.openDismissDialog,
+              dismissAvailableAtMs: this.ctrl.promptDismissAvailableAtMs(p),
+              selected: this.ctrl.isPromptSelected(p.promptMessageId),
+              canSelect: this.ctrl.promptCanDismiss(p),
+              selectionCapReached: this.ctrl.isPromptSelectionCapReached(p.promptMessageId),
+              onToggleSelect: this.ctrl.setPromptSelected,
+              onDismissTooRecent: this.ctrl.onPromptDismissTooRecent,
               onAnswered: this.ctrl.onPromptDecisionAnswered,
               onJump: this.ctrl.onPromptMessageJump,
             })

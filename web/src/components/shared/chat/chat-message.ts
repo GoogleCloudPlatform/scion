@@ -1073,6 +1073,10 @@ export class ScionChatMessage extends LitElement {
   @property({ attribute: false })
   answerability: AskerAnswerability | undefined = undefined;
 
+  /** Display label of the conversation (e.g. `#release` or `your DM`), forwarded to decision cards. */
+  @property()
+  conversationLabel = '';
+
   /** A decision-response's one-click answer (web.decisions; absent while off). */
   @property({ attribute: false })
   decisionResponse: DecisionResponseView | undefined = undefined;
@@ -3220,6 +3224,8 @@ export class ScionChatMessage extends LitElement {
       .answerMode=${this.answerMode}
       .currentUserId=${this.currentUserId}
       .answerability=${this.answerability ?? ANSWERABLE}
+      .createdAt=${this.timestamp}
+      .conversationLabel=${this.conversationLabel}
     ></scion-chat-decisions>`;
   }
 
