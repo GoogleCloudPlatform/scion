@@ -319,3 +319,12 @@ export const IDLE_SUSPEND_FLAG = 'lifecycle.idle_suspend';
 export function idleSuspendEnabled(): boolean {
   return isFeatureEnabled(IDLE_SUSPEND_FLAG);
 }
+
+/**
+ * Effective permissions viewer (hub.effective_permissions, ptone/scion#8439):
+ * shows the two-tab Roles dialog (Effective roles + Effective permissions) on
+ * the admin Users page. Presentation only: the hub gates GET/HEAD
+ * /api/v1/admin/effective-permissions with requireExperiment (404 while off).
+ * Default OFF.
+ */
+export const EFFECTIVE_PERMISSIONS_FLAG = 'hub.effective_permissions';

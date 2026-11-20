@@ -19,6 +19,11 @@ import { render } from 'lit';
 import { clearAdminStatus } from '../../client/admin-status.js';
 import { stateManager } from '../../client/state.js';
 import {
+  EFFECTIVE_PERMISSIONS_FLAG,
+  resetServerFlagStateForTests,
+  setFeatureFlag,
+} from '../../utils/feature-flags.js';
+import {
   renderPermissionList,
   type EffectivePermissionSet,
   type ScionEffectivePermissionsView,
@@ -811,6 +816,249 @@ describe('scion-effective-permissions-view lazy loading', () => {
     expect(el.shadowRoot?.querySelector('.empty-state')).toBeNull();
     expect(el.shadowRoot?.querySelector('.filter-input')).toBeNull();
   });
+
+  it('ignores an in-flight hub load that resolves after invalidate() and reloads cleanly on reshow', async () => {
+    let resolveFirstHub!: (res: Response) => void;
+    let hubRequestCount = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const path = requestPath(input);
+        calls.push(path);
+        if (path.includes('/api/v1/auth/admin-status')) {
+          return Promise.resolve(
+            jsonResponse({ isAdmin: true, isSuperAdmin: false, permissions: ['role_binding.read'] })
+          );
+        }
+        if (path.includes('/api/v1/admin/effective-permissions')) {
+          hubRequestCount++;
+          if (hubRequestCount === 1) {
+            return new Promise<Response>((resolve) => {
+              resolveFirstHub = resolve;
+            });
+          }
+          return Promise.resolve(
+            jsonResponse(
+              samplePermissionSet({
+                permissions: [
+                  {
+                    id: 'fresh.hub.perm',
+                    resource: 'fresh',
+                    action: 'read',
+                    description: 'Fresh hub permission',
+                    appliesInProjects: false,
+                    grants: [
+                      {
+                        bindingId: 'bind-fresh-hub',
+                        role: { id: 'role-fresh', name: 'fresh-role', system: false },
+                        scope: { type: 'system' },
+                        via: null,
+                        expiresAt: null,
+                      },
+                    ],
+                  },
+                ],
+              })
+            )
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+
+    el = document.createElement(
+      'scion-effective-permissions-view'
+    ) as ScionEffectivePermissionsView;
+    el.principalType = 'user';
+    el.principalId = 'user-target-1';
+    el.active = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 40));
+
+    // First hub request is now in flight.
+    expect(hubRequestCount).toBe(1);
+
+    // Switch tab away and invalidate while the first hub request is still pending.
+    el.active = false;
+    await el.updateComplete;
+    el.invalidate();
+    await el.updateComplete;
+
+    // Resolve the stale in-flight request after invalidate().
+    resolveFirstHub(
+      jsonResponse(
+        samplePermissionSet({
+          permissions: [
+            {
+              id: 'stale.hub.perm',
+              resource: 'stale',
+              action: 'read',
+              description: 'Stale hub permission',
+              appliesInProjects: false,
+              grants: [
+                {
+                  bindingId: 'bind-stale-hub',
+                  role: { id: 'role-stale', name: 'stale-role', system: false },
+                  scope: { type: 'system' },
+                  via: null,
+                  expiresAt: null,
+                },
+              ],
+            },
+          ],
+        })
+      )
+    );
+    await new Promise((r) => setTimeout(r, 60));
+    await el.updateComplete;
+
+    // Stale response must NOT populate cached data or render stale permissions.
+    expect(el.shadowRoot?.querySelectorAll('.perm-id').length).toBe(0);
+
+    // Re-activating must not be stuck in _loading=true or serve stale data; it must fetch fresh data.
+    el.active = true;
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    expect(hubRequestCount).toBe(2);
+    const permIds = Array.from(el.shadowRoot?.querySelectorAll('.perm-id') ?? []).map((n) =>
+      n.textContent?.trim()
+    );
+    expect(permIds).toEqual(['fresh.hub.perm']);
+  });
+
+  it('ignores an in-flight project load that resolves after invalidate() and reloads cleanly on reshow', async () => {
+    let resolveFirstProj!: (res: Response) => void;
+    let projRequestCount = 0;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const path = requestPath(input);
+        calls.push(path);
+        if (path.includes('/api/v1/auth/admin-status')) {
+          return Promise.resolve(
+            jsonResponse({ isAdmin: true, isSuperAdmin: false, permissions: ['role_binding.read'] })
+          );
+        }
+        if (path.includes('/api/v1/admin/effective-permissions')) {
+          if (path.includes('projectId=proj-alpha')) {
+            projRequestCount++;
+            if (projRequestCount === 1) {
+              return new Promise<Response>((resolve) => {
+                resolveFirstProj = resolve;
+              });
+            }
+            return Promise.resolve(
+              jsonResponse({
+                ...sampleProjectPermissionSet(),
+                permissions: [
+                  {
+                    id: 'fresh.project.perm',
+                    resource: 'fresh',
+                    action: 'read',
+                    description: 'Fresh project permission',
+                    grants: [
+                      {
+                        bindingId: 'bind-fresh-proj',
+                        role: { id: 'role-proj-fresh', name: 'project-fresh', system: false },
+                        scope: { type: 'project', id: 'proj-alpha' },
+                        via: null,
+                        expiresAt: null,
+                      },
+                    ],
+                  },
+                ],
+              })
+            );
+          }
+          return Promise.resolve(jsonResponse(samplePermissionSet()));
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+
+    el = document.createElement(
+      'scion-effective-permissions-view'
+    ) as ScionEffectivePermissionsView;
+    el.principalType = 'user';
+    el.principalId = 'user-target-1';
+    el.active = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    // Expand By project and select proj-alpha so the first project request is in flight.
+    const details = el.shadowRoot?.querySelector('sl-details.by-project-details');
+    expect(details).not.toBeNull();
+    details!.dispatchEvent(new CustomEvent('sl-show', { bubbles: true, composed: true }));
+    await el.updateComplete;
+
+    const picker = details!.querySelector('scion-project-picker');
+    expect(picker).not.toBeNull();
+    picker!.dispatchEvent(
+      new CustomEvent('project-change', {
+        detail: { projectId: 'proj-alpha', displayLabel: 'Alpha Project' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 40));
+
+    expect(projRequestCount).toBe(1);
+
+    // Switch tab away and invalidate while the project request is still in flight.
+    el.active = false;
+    await el.updateComplete;
+    el.invalidate();
+    await el.updateComplete;
+
+    // Resolve the stale project response after invalidate().
+    resolveFirstProj(
+      jsonResponse({
+        ...sampleProjectPermissionSet(),
+        permissions: [
+          {
+            id: 'stale.project.perm',
+            resource: 'stale',
+            action: 'read',
+            description: 'Stale project permission',
+            grants: [
+              {
+                bindingId: 'bind-stale-proj',
+                role: { id: 'role-proj-stale', name: 'project-stale', system: false },
+                scope: { type: 'project', id: 'proj-alpha' },
+                via: null,
+                expiresAt: null,
+              },
+            ],
+          },
+        ],
+      })
+    );
+    await new Promise((r) => setTimeout(r, 60));
+    await el.updateComplete;
+
+    // Stale project response must NOT populate cached project data.
+    expect(el.shadowRoot?.querySelector('.project-permissions-results')).toBeNull();
+
+    // Re-activating must not be stuck in _projectLoading=true; it must fetch fresh project data.
+    el.active = true;
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    expect(projRequestCount).toBe(2);
+    const projPermIds = Array.from(
+      el.shadowRoot?.querySelectorAll('.project-permissions-results .perm-id') ?? []
+    ).map((n) => n.textContent?.trim());
+    expect(projPermIds).toEqual(['fresh.project.perm']);
+  });
 });
 
 describe('scion-page-admin-users two-tab Roles dialog', () => {
@@ -819,6 +1067,9 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
 
   beforeEach(async () => {
     clearAdminStatus();
+    resetServerFlagStateForTests();
+    delete window.__SCION_FEATURES__;
+    setFeatureFlag(EFFECTIVE_PERMISSIONS_FLAG, true);
     stateManager.setCurrentUserId('admin-self');
     calls = [];
     vi.stubGlobal(
@@ -907,7 +1158,49 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
     pageEl?.remove();
     pageEl = null;
     clearAdminStatus();
+    resetServerFlagStateForTests();
+    delete window.__SCION_FEATURES__;
     vi.unstubAllGlobals();
+  });
+
+  it('when hub.effective_permissions is off, renders Roles dialog without tabs and keeps D4 Roles menu', async () => {
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
+    setFeatureFlag(EFFECTIVE_PERMISSIONS_FLAG, false);
+
+    pageEl = document.createElement('scion-page-admin-users') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    document.body.appendChild(pageEl);
+    await pageEl.updateComplete;
+    await new Promise((r) => setTimeout(r, 100));
+    await pageEl.updateComplete;
+
+    // D4 menu label ("Roles") still applies when the experiment is off.
+    const menuItems = Array.from(pageEl.shadowRoot?.querySelectorAll('sl-menu-item') ?? []);
+    const rolesItem = menuItems.find((item) => item.textContent?.trim() === 'Roles');
+    expect(rolesItem).toBeDefined();
+    (rolesItem as HTMLElement).click();
+    await pageEl.updateComplete;
+    await new Promise((r) => setTimeout(r, 60));
+
+    const dialog = pageEl.shadowRoot?.querySelector('sl-dialog.roles-dialog');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.getAttribute('label')).toBe('Roles — Target User');
+
+    // No tabs or permissions view while the experiment is off.
+    expect(dialog!.querySelector('sl-tab-group')).toBeNull();
+    expect(dialog!.querySelector('sl-tab')).toBeNull();
+    expect(dialog!.querySelector('scion-effective-permissions-view')).toBeNull();
+
+    // Roles content renders directly inside the dialog.
+    expect(dialog!.querySelector('scion-effective-role-provenance')).not.toBeNull();
+    expect(dialog!.querySelector('scion-effective-access-boundary-notice')).not.toBeNull();
+
+    // Zero requests to /api/v1/admin/effective-permissions.
+    expect(
+      calls.filter((c) => c.path.includes('/api/v1/admin/effective-permissions'))
+    ).toHaveLength(0);
   });
 
   it('renders roles and permissions tabs, lazy-fetches permissions on tab show, and guards sl-request-close bubbling', async () => {

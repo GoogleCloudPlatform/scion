@@ -873,3 +873,24 @@ func TestMessagePoliciesExperimentRegistered(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestEffectivePermissionsExperimentRegistered pins hub.effective_permissions
+// (ptone/scion#8439, D6): server+web layers, alpha, default off, owned by authz.
+func TestEffectivePermissionsExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(EffectivePermissions)
+	if !ok {
+		t.Fatalf("%s is not registered", EffectivePermissions)
+	}
+	if EffectivePermissions != "hub.effective_permissions" {
+		t.Fatalf("frozen name changed: %q", EffectivePermissions)
+	}
+	if e.Default {
+		t.Fatal("hub.effective_permissions must default to off")
+	}
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must have both LayerServer and LayerWeb, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#8439" || e.Stage != StageAlpha || e.Owner != "authz" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}

@@ -43,7 +43,11 @@ import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { stateManager } from '../../client/state.js';
 import { hasAnyPermission } from '../../lib/admin-permissions.js';
-import { isFeatureEnabled, USER_DELETE_FORCE_CASCADE_FLAG } from '../../utils/feature-flags.js';
+import {
+  EFFECTIVE_PERMISSIONS_FLAG,
+  isFeatureEnabled,
+  USER_DELETE_FORCE_CASCADE_FLAG,
+} from '../../utils/feature-flags.js';
 import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 
 type SortField = 'name' | 'created';
@@ -1398,6 +1402,11 @@ export class ScionPageAdminUsers extends LitElement {
   /** Whether the hub offers the forced delete (presentation only). */
   private forceDeleteEnabled(): boolean {
     return isFeatureEnabled(USER_DELETE_FORCE_CASCADE_FLAG);
+  }
+
+  /** Whether the hub offers the Effective permissions tab (presentation only). */
+  private effectivePermissionsEnabled(): boolean {
+    return isFeatureEnabled(EFFECTIVE_PERMISSIONS_FLAG);
   }
 
   /**
@@ -3092,6 +3101,7 @@ export class ScionPageAdminUsers extends LitElement {
   private renderViewRolesDialog() {
     if (!this.viewRolesUser) return nothing;
     const user = this.viewRolesUser;
+    const showEffectivePermissions = this.effectivePermissionsEnabled();
     return html`
       <sl-dialog
         class="roles-dialog"
@@ -3104,61 +3114,80 @@ export class ScionPageAdminUsers extends LitElement {
           this.viewRolesActiveTab = 'roles';
         }}
       >
-        <sl-tab-group
-          @sl-tab-show=${(e: CustomEvent<{ name: string }>) => {
-            const name = e.detail?.name;
-            if (name === 'roles' || name === 'permissions') {
-              this.viewRolesActiveTab = name;
-            }
-          }}
-        >
-          <sl-tab
-            slot="nav"
-            panel="roles"
-            ?active=${this.viewRolesActiveTab === 'roles'}
-            @click=${() => {
-              this.viewRolesActiveTab = 'roles';
-            }}
-          >
-            Effective roles
-          </sl-tab>
-          <sl-tab
-            slot="nav"
-            panel="permissions"
-            ?active=${this.viewRolesActiveTab === 'permissions'}
-            @click=${() => {
-              this.viewRolesActiveTab = 'permissions';
-            }}
-          >
-            Effective permissions
-          </sl-tab>
+        ${showEffectivePermissions
+          ? html`
+              <sl-tab-group
+                @sl-tab-show=${(e: CustomEvent<{ name: string }>) => {
+                  const name = e.detail?.name;
+                  if (name === 'roles' || name === 'permissions') {
+                    this.viewRolesActiveTab = name;
+                  }
+                }}
+              >
+                <sl-tab
+                  slot="nav"
+                  panel="roles"
+                  ?active=${this.viewRolesActiveTab === 'roles'}
+                  @click=${() => {
+                    this.viewRolesActiveTab = 'roles';
+                  }}
+                >
+                  Effective roles
+                </sl-tab>
+                <sl-tab
+                  slot="nav"
+                  panel="permissions"
+                  ?active=${this.viewRolesActiveTab === 'permissions'}
+                  @click=${() => {
+                    this.viewRolesActiveTab = 'permissions';
+                  }}
+                >
+                  Effective permissions
+                </sl-tab>
 
-          <sl-tab-panel name="roles" ?active=${this.viewRolesActiveTab === 'roles'}>
-            <scion-effective-role-provenance
-              principalType="user"
-              principalId=${user.id}
-              sectionTitle="Effective Roles"
-              @role-bindings-changed=${(e: Event) => {
-                if (e.target !== e.currentTarget) return;
-                this.shadowRoot
-                  ?.querySelector<ScionEffectivePermissionsView>('scion-effective-permissions-view')
-                  ?.invalidate();
-              }}
-            ></scion-effective-role-provenance>
-            <scion-effective-access-boundary-notice
-              contextType="user"
-              contextId=${user.id}
-            ></scion-effective-access-boundary-notice>
-          </sl-tab-panel>
+                <sl-tab-panel name="roles" ?active=${this.viewRolesActiveTab === 'roles'}>
+                  <scion-effective-role-provenance
+                    principalType="user"
+                    principalId=${user.id}
+                    sectionTitle="Effective Roles"
+                    @role-bindings-changed=${(e: Event) => {
+                      if (e.target !== e.currentTarget) return;
+                      this.shadowRoot
+                        ?.querySelector<ScionEffectivePermissionsView>(
+                          'scion-effective-permissions-view'
+                        )
+                        ?.invalidate();
+                    }}
+                  ></scion-effective-role-provenance>
+                  <scion-effective-access-boundary-notice
+                    contextType="user"
+                    contextId=${user.id}
+                  ></scion-effective-access-boundary-notice>
+                </sl-tab-panel>
 
-          <sl-tab-panel name="permissions" ?active=${this.viewRolesActiveTab === 'permissions'}>
-            <scion-effective-permissions-view
-              principalType="user"
-              principalId=${user.id}
-              ?active=${this.viewRolesActiveTab === 'permissions'}
-            ></scion-effective-permissions-view>
-          </sl-tab-panel>
-        </sl-tab-group>
+                <sl-tab-panel
+                  name="permissions"
+                  ?active=${this.viewRolesActiveTab === 'permissions'}
+                >
+                  <scion-effective-permissions-view
+                    principalType="user"
+                    principalId=${user.id}
+                    ?active=${this.viewRolesActiveTab === 'permissions'}
+                  ></scion-effective-permissions-view>
+                </sl-tab-panel>
+              </sl-tab-group>
+            `
+          : html`
+              <scion-effective-role-provenance
+                principalType="user"
+                principalId=${user.id}
+                sectionTitle="Effective Roles"
+              ></scion-effective-role-provenance>
+              <scion-effective-access-boundary-notice
+                contextType="user"
+                contextId=${user.id}
+              ></scion-effective-access-boundary-notice>
+            `}
         <sl-button
           slot="footer"
           variant="default"

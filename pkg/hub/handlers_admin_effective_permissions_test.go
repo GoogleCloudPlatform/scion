@@ -26,11 +26,64 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func epSetExperiment(t *testing.T, srv *Server, on bool) {
+	t.Helper()
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		if e.Name == experiments.EffectivePermissions {
+			e.Default = on
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	require.Equal(t, on, srv.experimentEnabled(experiments.EffectivePermissions))
+}
+
+func TestAdminEffectivePermissions_ExperimentGate(t *testing.T) {
+	srv, s, hubAdmin, _ := setupScopedAdminTest(t)
+	ctx := context.Background()
+
+	target := epCreateUser(t, s, "exp-gate-target", store.UserStatusActive)
+	ensureHubMembership(ctx, s, target.ID)
+
+	url := "/api/v1/admin/effective-permissions?principalType=user&principalId=" + target.ID
+
+	t.Run("default off returns 404 for GET and HEAD", func(t *testing.T) {
+		assert.False(t, srv.experimentEnabled(experiments.EffectivePermissions))
+
+		recGet := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, url, nil)
+		assert.Equal(t, http.StatusNotFound, recGet.Code, recGet.Body.String())
+
+		recHead := doRequestAsUser(t, srv, hubAdmin, http.MethodHead, url, nil)
+		assert.Equal(t, http.StatusNotFound, recHead.Code, recHead.Body.String())
+	})
+
+	t.Run("enabled returns 200 for GET and HEAD", func(t *testing.T) {
+		epSetExperiment(t, srv, true)
+
+		recGet := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, url, nil)
+		assert.Equal(t, http.StatusOK, recGet.Code, recGet.Body.String())
+
+		recHead := doRequestAsUser(t, srv, hubAdmin, http.MethodHead, url, nil)
+		assert.Equal(t, http.StatusOK, recHead.Code, recHead.Body.String())
+	})
+
+	t.Run("disabled again returns 404", func(t *testing.T) {
+		epSetExperiment(t, srv, false)
+
+		recGet := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, url, nil)
+		assert.Equal(t, http.StatusNotFound, recGet.Code, recGet.Body.String())
+	})
+}
 
 func epCreateUser(t *testing.T, s store.Store, slug, status string) *store.User {
 	t.Helper()
@@ -134,6 +187,7 @@ func epBindProjectRole(t *testing.T, s store.Store, projectID, roleID, principal
 
 func TestAdminEffectivePermissions_CallerGates(t *testing.T) {
 	srv, s, hubAdmin, member := setupScopedAdminTest(t)
+	epSetExperiment(t, srv, true)
 	ctx := context.Background()
 
 	target := epCreateUser(t, s, "gate-target", store.UserStatusActive)
@@ -239,6 +293,7 @@ func TestAdminEffectivePermissions_CallerGates(t *testing.T) {
 
 func TestAdminEffectivePermissions_ProvenanceDirectAndGroup(t *testing.T) {
 	srv, s, hubAdmin, _ := setupScopedAdminTest(t)
+	epSetExperiment(t, srv, true)
 	ctx := context.Background()
 
 	target := epCreateUser(t, s, "prov-target", store.UserStatusActive)
@@ -361,6 +416,7 @@ func TestAdminEffectivePermissions_ProvenanceDirectAndGroup(t *testing.T) {
 
 func TestAdminEffectivePermissions_ActivationStatusAndTestIdentityClamps(t *testing.T) {
 	srv, s, hubAdmin, _ := setupScopedAdminTest(t)
+	epSetExperiment(t, srv, true)
 	ctx := context.Background()
 
 	t.Run("expired and future bindings contribute nothing", func(t *testing.T) {
@@ -499,6 +555,7 @@ func TestAdminEffectivePermissions_ActivationStatusAndTestIdentityClamps(t *test
 
 func TestAdminEffectivePermissions_AccessConstraintRemovals(t *testing.T) {
 	srv, s, hubAdmin, _ := setupScopedAdminTest(t)
+	epSetExperiment(t, srv, true)
 	ctx := context.Background()
 
 	// Super-admin caller (holds role_binding.read + access_constraint.read).
@@ -808,6 +865,7 @@ func TestAdminEffectivePermissions_NoAuditNoiseAndFixedQueryCount(t *testing.T) 
 	require.NoError(t, err)
 	counting := &epCountingStore{Store: rawStore}
 	srv, s := testServerOnMigratedStore(t, counting)
+	epSetExperiment(t, srv, true)
 	ctx := context.Background()
 
 	// Create hub-admin caller and project P
@@ -932,6 +990,7 @@ func TestAdminEffectivePermissions_NoAuditNoiseAndFixedQueryCount(t *testing.T) 
 
 func TestAdminEffectivePermissions_ProjectScope(t *testing.T) {
 	srv, s, hubAdmin, member := setupScopedAdminTest(t)
+	epSetExperiment(t, srv, true)
 	ctx := context.Background()
 
 	projOwner := epCreateUser(t, s, "proj-owner", store.UserStatusActive)

@@ -88,14 +88,15 @@ func TestResolvedExperiments_WebLayerOnlyFromOneSnapshot(t *testing.T) {
 
 	got := srv.resolvedExperiments()
 	// testRegistry also holds the production federation.project_visitors,
-	// hub.welcome_project, and hub.github_triggers (both layers, default off),
-	// so they are in the web-facing map.
+	// hub.welcome_project, hub.github_triggers, and hub.effective_permissions
+	// (both layers, default off), so they are in the web-facing map.
 	want := map[string]bool{
 		"hub.test_gate":                       false,
 		"web.only_thing":                      true,
 		experiments.FederationProjectVisitors: false,
 		experiments.WelcomeProject:            false,
 		experiments.GitHubTriggers:            false,
+		experiments.EffectivePermissions:      false,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("resolvedExperiments() = %v, want %v", got, want)

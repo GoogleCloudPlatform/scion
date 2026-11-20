@@ -8114,7 +8114,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews", s.guarded("/api/v1/admin/access-constraint-previews", s.handleAdminAccessConstraintPreviews))
 	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews/", s.guarded("/api/v1/admin/access-constraint-previews/", s.handleAdminAccessConstraintPreviews))
 	s.mux.HandleFunc("/api/v1/admin/effective-access", s.guarded("/api/v1/admin/effective-access", s.handleAdminEffectiveAccess))
-	s.mux.HandleFunc("/api/v1/admin/effective-permissions", s.guarded("/api/v1/admin/effective-permissions", s.handleAdminEffectivePermissions))
+	s.mux.HandleFunc("/api/v1/admin/effective-permissions", s.guarded("/api/v1/admin/effective-permissions", s.requireExperiment(experiments.EffectivePermissions, s.handleAdminEffectivePermissions)))
 
 	// Notification endpoints (user-facing)
 	s.mux.HandleFunc("/api/v1/notifications", s.guarded("/api/v1/notifications", s.handleNotifications))
