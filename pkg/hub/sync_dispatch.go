@@ -136,19 +136,40 @@ func stopWriteBudget() time.Duration {
 }
 
 // stopAllAgentOpTimeout bounds each agent's broker work in a stop-all: the
-// ephemeral workspace check and the stop dispatch together. All agents share one
-// deadline, this long after the stops begin. A variable so tests can
-// shorten it.
+// ephemeral workspace check and the stop dispatch together. For a single wave
+// (<= stopAllMaxConcurrency agents), all agents share one deadline this long
+// after the stops begin; for larger stop-alls, see stopAllOpBudget. A variable
+// so tests can shorten it.
 var stopAllAgentOpTimeout = 60 * time.Second
 
+// stopAllMaxBudgetWaves caps how many waves of stopAllMaxConcurrency agents
+// stopAllOpBudget scales for, keeping the HTTP request write deadline and
+// detached context bounded even on very large projects (ptone/scion#8563).
+const stopAllMaxBudgetWaves = 4
+
+// stopAllOpBudget returns the total broker-work budget for stopping agentCount
+// agents in waves of stopAllMaxConcurrency: one stopAllAgentOpTimeout per wave,
+// capped at stopAllMaxBudgetWaves. For a single wave (<= stopAllMaxConcurrency
+// agents) this equals stopAllAgentOpTimeout.
+func stopAllOpBudget(agentCount int) time.Duration {
+	waves := (agentCount + stopAllMaxConcurrency - 1) / stopAllMaxConcurrency
+	if waves < 1 {
+		waves = 1
+	}
+	if waves > stopAllMaxBudgetWaves {
+		waves = stopAllMaxBudgetWaves
+	}
+	return time.Duration(waves) * stopAllAgentOpTimeout
+}
+
 // stopAllWriteBudget is the write deadline, from the start of the stops, of
-// a stop-all: the agents are stopped in parallel, so one agent's broker
-// work (stopAllAgentOpTimeout), plus syncDispatchWriteSlack for each
-// agent's status write and the response write (ptone/scion#4212). It is
-// also the bound of the whole stop-all once it is detached from the client
-// (detachStopFromClient, ptone/scion#2661).
-func stopAllWriteBudget() time.Duration {
-	return stopAllAgentOpTimeout + syncDispatchWriteSlack
+// a stop-all: the wave-scaled broker-work budget (stopAllOpBudget), plus
+// syncDispatchWriteSlack for status writes and the response write
+// (ptone/scion#4212, ptone/scion#8563). It is also the bound of the whole
+// stop-all once it is detached from the client (detachStopFromClient,
+// ptone/scion#2661).
+func stopAllWriteBudget(agentCount int) time.Duration {
+	return stopAllOpBudget(agentCount) + syncDispatchWriteSlack
 }
 
 // dmWakeWriteBudget is the write deadline, from the start of the wake, of a
