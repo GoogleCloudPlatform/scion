@@ -7575,3 +7575,80 @@ describe('scion-page-admin-server-config — section-level saves with revisions'
     expect(captured!).not.toHaveProperty('expected_revisions');
   });
 });
+
+describe('GitHub App card: webhooks hint, private key source, and override warning', () => {
+  let element: ScionPageAdminServerConfig;
+
+  afterEach(() => {
+    element?.remove();
+    vi.restoreAllMocks();
+  });
+
+  function mockGitHubAppResponse(appBody: Record<string, unknown>) {
+    const base = createFetchHandler(makeBaseConfig({ settings_tier: 'db' }));
+    return async (url: string, init?: RequestInit) => {
+      if (url === '/api/v1/github-app' && (!init?.method || init.method === 'GET')) {
+        return new Response(JSON.stringify(appBody), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return base(url, init);
+    };
+  }
+
+  it('describes webhooks_enabled as adjusting health-check interval rather than gating reception', async () => {
+    element = await createComponent(
+      mockGitHubAppResponse({
+        app_id: 42,
+        webhooks_enabled: false,
+        configured: true,
+        has_private_key: true,
+        private_key_source: 'secret',
+        has_webhook_secret: false,
+      })
+    );
+    const text = element.shadowRoot?.textContent ?? '';
+    expect(text).toContain('6 hours');
+    expect(text).toContain('24 hours');
+    expect(text).toContain('webhook secret');
+    expect(text).not.toContain('Enable to receive installation lifecycle events from GitHub');
+  });
+
+  it('shows active key source and warning when a startup file key overrides a stored secret', async () => {
+    element = await createComponent(
+      mockGitHubAppResponse({
+        app_id: 42,
+        webhooks_enabled: false,
+        configured: true,
+        has_private_key: true,
+        private_key_source: 'file',
+        private_key_overrides_secret: true,
+        has_webhook_secret: false,
+      })
+    );
+    const sourceEl = query(element, '[data-github-app-key-source]');
+    expect(sourceEl?.textContent).toContain('private_key_path');
+    const warnEl = query(element, '[data-github-app-key-override-warning]');
+    expect(warnEl).not.toBeNull();
+    expect(warnEl?.textContent).toContain('overriding the stored hub secret');
+    expect(warnEl?.textContent).toContain('private_key_path');
+  });
+
+  it('shows stored secret source without override warning when secret is active', async () => {
+    element = await createComponent(
+      mockGitHubAppResponse({
+        app_id: 42,
+        webhooks_enabled: false,
+        configured: true,
+        has_private_key: true,
+        private_key_source: 'secret',
+        private_key_overrides_secret: false,
+        has_webhook_secret: false,
+      })
+    );
+    const sourceEl = query(element, '[data-github-app-key-source]');
+    expect(sourceEl?.textContent).toContain('GITHUB_APP_PRIVATE_KEY');
+    expect(query(element, '[data-github-app-key-override-warning]')).toBeNull();
+  });
+});

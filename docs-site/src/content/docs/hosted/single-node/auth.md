@@ -599,6 +599,17 @@ Projects can be linked to specific GitHub App installations when the association
 ### Webhook Secret
 GitHub App webhook deliveries must be signed. Set the webhook secret in the "GitHub App" tab of the Admin Server Config UI; the Hub stores it as a hub-scoped secret. Use the same value as the webhook secret in your GitHub App's settings. If no webhook secret is configured, the Hub rejects every webhook event with `503 Service Unavailable` instead of processing it unsigned.
 
+Incoming requests to `/api/v1/webhooks/github` are accepted whenever a valid webhook secret is configured. The `webhooks_enabled` setting does not gate webhook reception; it tells the Hub that webhooks are active on GitHub, which switches the background installation health-check interval from 6 hours to 24 hours and contributes to GitHub triggers readiness.
+
+### Private Key Precedence
+The Hub resolves the GitHub App private key in the following order (highest precedence first):
+
+1. **In-memory / startup configuration** (`server.github_app.private_key` or environment variable).
+2. **Private key file** (`server.github_app.private_key_path`).
+3. **Stored hub secret** (`GITHUB_APP_PRIVATE_KEY`, uploaded via the Admin UI).
+
+Uploading a key in the Admin UI stores it as the `GITHUB_APP_PRIVATE_KEY` hub secret and activates it immediately in memory for the running process. After a Hub restart, however, a startup-configured key or `private_key_path` takes precedence over the stored secret. When this happens, the Hub logs a warning and displays an override notice (along with the active key source) in the Admin UI. Remove the startup key configuration to rely on the UI-uploaded secret.
+
 ### Permissions and Events for GitHub Triggers
 
 When GitHub triggers are used (behind the [`hub.github_triggers`](/scion/reference/experiments/#server-experiments-with-notes) experiment), configure your GitHub App with the following baseline settings in addition to standard Git authentication:

@@ -713,6 +713,8 @@ interface GitHubAppConfigData {
   webhooks_enabled: boolean;
   configured: boolean;
   has_private_key: boolean;
+  private_key_source?: 'config' | 'file' | 'secret' | '';
+  private_key_overrides_secret?: boolean;
   has_webhook_secret: boolean;
   installation_url?: string;
   rate_limit?: RateLimitInfo;
@@ -1357,6 +1359,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private githubAppApiBaseUrl = '';
   @state() private githubAppWebhooksEnabled = false;
   @state() private githubAppHasPrivateKey = false;
+  @state() private githubAppPrivateKeySource = '';
+  @state() private githubAppPrivateKeyOverridesSecret = false;
   @state() private githubAppHasWebhookSecret = false;
   @state() private githubAppPrivateKey = '';
   @state() private githubAppWebhookSecret = '';
@@ -1720,6 +1724,12 @@ export class ScionPageAdminServerConfig extends LitElement {
       background: var(--scion-error-bg, #fef2f2);
       color: var(--scion-error-text, #991b1b);
       border: 1px solid var(--scion-error-border, #fca5a5);
+    }
+
+    .status-message.warning {
+      background: var(--scion-warning-bg, #fefce8);
+      color: var(--scion-warning-text, #854d0e);
+      border: 1px solid var(--scion-warning-border, #fde047);
     }
 
     .reload-info {
@@ -8469,9 +8479,29 @@ export class ScionPageAdminServerConfig extends LitElement {
             ></sl-textarea>
             ${this.renderFieldErrors('server.github_app.private_key')}
             ${this.githubAppHasPrivateKey
-              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
-                  >Stored as hub secret: GITHUB_APP_PRIVATE_KEY</span
+              ? html`<span
+                  data-github-app-key-source
+                  style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
+                  >${this.githubAppPrivateKeySource === 'config'
+                    ? 'Active key source: startup configuration / environment'
+                    : this.githubAppPrivateKeySource === 'file'
+                      ? 'Active key source: private key file (private_key_path)'
+                      : 'Stored as hub secret: GITHUB_APP_PRIVATE_KEY'}</span
                 >`
+              : ''}
+            ${this.githubAppPrivateKeyOverridesSecret
+              ? html`<div
+                  class="status-message warning"
+                  data-github-app-key-override-warning
+                  style="margin-top: 0.5rem; margin-bottom: 0;"
+                >
+                  A startup-configured private key
+                  (${this.githubAppPrivateKeySource === 'file'
+                    ? 'private_key_path'
+                    : 'environment/config'})
+                  is overriding the stored hub secret (GITHUB_APP_PRIVATE_KEY). Remove the startup
+                  key configuration to use the key uploaded here.
+                </div>`
               : ''}
           </div>
           <div class="form-field">
@@ -8501,7 +8531,11 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Webhooks</label>
-            <span class="hint">Enable to receive installation lifecycle events from GitHub</span>
+            <span class="hint"
+              >Indicates webhooks are configured on GitHub: adjusts background installation health
+              checks from every 6 hours to every 24 hours. Incoming webhooks are accepted whenever a
+              webhook secret is configured.</span
+            >
             ${this.renderFieldValue(
               'server.github_app.webhooks_enabled',
               this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled',
@@ -8715,6 +8749,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.githubAppApiBaseUrl = data.api_base_url || '';
         this.githubAppWebhooksEnabled = data.webhooks_enabled;
         this.githubAppHasPrivateKey = data.has_private_key;
+        this.githubAppPrivateKeySource = data.private_key_source || '';
+        this.githubAppPrivateKeyOverridesSecret = Boolean(data.private_key_overrides_secret);
         this.githubAppHasWebhookSecret = data.has_webhook_secret;
         this.githubAppInstallationUrl = data.installation_url || '';
         this.githubAppRateLimit = data.rate_limit || null;
