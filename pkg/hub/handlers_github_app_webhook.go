@@ -732,12 +732,14 @@ func (s *Server) getGitHubAppClient() (*githubapp.Client, error) {
 	if cfg.PrivateKey != "" {
 		keyData = []byte(cfg.PrivateKey)
 		keySource = "in-memory config"
+		s.warnGitHubAppKeyOverride(context.Background())
 	} else if cfg.PrivateKeyPath != "" {
 		keyData, err = os.ReadFile(cfg.PrivateKeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read private key file %q: %w", cfg.PrivateKeyPath, err)
 		}
 		keySource = "file:" + cfg.PrivateKeyPath
+		s.warnGitHubAppKeyOverride(context.Background())
 	} else {
 		// Try loading from secrets backend
 		keyStr, secretErr := s.loadGitHubAppSecret(context.Background(), GitHubAppSecretPrivateKey)

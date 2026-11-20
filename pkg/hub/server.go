@@ -2372,6 +2372,19 @@ type Server struct {
 	// probed on the GitHub webhook endpoint does not fill its log.
 	githubWebhookNoSecretWarnOnce sync.Once
 
+	// startupGitHubAppPrivateKey records whether GitHubAppConfig.PrivateKey
+	// was populated at server startup (env/config). githubAppPrivateKeyFromSecret
+	// (guarded by mu) is set true when a key is uploaded via the Admin API in
+	// this process so status reporting can distinguish an active configured key
+	// from an in-memory cache of the uploaded hub secret.
+	// githubAppKeyOverrideWarned gates the one-time override warning log before
+	// doing any secret-metadata lookup. githubAppScheduleMu serializes
+	// syncGitHubAppHealthCheckSchedule (acquired before mu).
+	startupGitHubAppPrivateKey    bool
+	githubAppPrivateKeyFromSecret bool
+	githubAppKeyOverrideWarned    atomic.Bool
+	githubAppScheduleMu           sync.Mutex
+
 	logQueryService  logQuerier               // Cloud Logging query service (nil = disabled)
 	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)
 
@@ -3201,6 +3214,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// The startup-resolved hub name, which ApplySnapshot returns to when
 	// the configured hub_name is unset.
 	srv.startupHubName = cfg.HubName
+	srv.startupGitHubAppPrivateKey = cfg.GitHubAppConfig.PrivateKey != ""
 	srv.recordStartupLayer1Values()
 	srv.applyBrandingLocked(cfg.Branding)
 	srv.setStartClaimSettings(cfg.StartClaim)
@@ -7199,17 +7213,7 @@ func (s *Server) registerSchedulerHandlers() {
 	}
 
 	// Register GitHub App health check if the app is configured
-	s.mu.RLock()
-	ghAppConfigured := s.config.GitHubAppConfig.AppID != 0
-	ghWebhooksEnabled := s.config.GitHubAppConfig.WebhooksEnabled
-	s.mu.RUnlock()
-	if ghAppConfigured {
-		interval := 360 // 6 hours in minutes when webhooks are disabled
-		if ghWebhooksEnabled {
-			interval = 1440 // 24 hours when webhooks are enabled
-		}
-		s.scheduler.RegisterRecurringSingleton("github-app-health-check", interval, store.LockGitHubAppHealthCheck, s.githubAppHealthCheckHandler())
-	}
+	s.syncGitHubAppHealthCheckSchedule()
 
 	// Register the scheduled release update check unless the update policy
 	// is disabled. The handler skips hubs whose effective mode is git.
@@ -7268,6 +7272,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.mu.Unlock()
 	s.registerSchedulerHandlers()
 	s.startGitHubAppIdentityInit(ctx)
+	s.warnGitHubAppKeyOverride(ctx)
 
 	// Check stored timestamps (SQLite) and, when some are not canonical UTC,
 	// run utc-timestamp-normalize once, after a snapshot. It runs in the

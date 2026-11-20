@@ -175,28 +175,106 @@ func (c *githubAppIdentityState) shouldWarnSlugUnavailable(now time.Time) bool {
 	return true
 }
 
+// Private key source identifiers reported by the GitHub App admin API.
+const (
+	GitHubAppPrivateKeySourceConfig = "config"
+	GitHubAppPrivateKeySourceFile   = "file"
+	GitHubAppPrivateKeySourceSecret = "secret"
+)
+
+// githubAppKeyStatus describes which private key source is active for the
+// GitHub App and whether a configured private key or private_key_path overrides
+// a stored GITHUB_APP_PRIVATE_KEY hub secret.
+type githubAppKeyStatus struct {
+	hasPrivateKey   bool
+	source          string
+	overridesSecret bool
+}
+
+// hasStoredGitHubAppSecret reports whether a hub-scoped GitHub App secret
+// exists in the secrets backend (or store fallback) without decrypting it.
+func (s *Server) hasStoredGitHubAppSecret(ctx context.Context, name string) bool {
+	if s.secretBackend != nil {
+		meta, err := s.secretBackend.GetMeta(ctx, name, store.ScopeHub, s.hubID)
+		return err == nil && meta != nil
+	}
+	if s.store != nil {
+		sec, err := s.store.GetSecret(ctx, name, store.ScopeHub, s.hubID)
+		return err == nil && sec != nil
+	}
+	return false
+}
+
+// githubAppPrivateKeyStatus resolves the active GitHub App private key source
+// using the same precedence as getGitHubAppClient (in-memory config, then
+// private_key_path, then hub secret) and reports whether a configured private
+// key or private_key_path is overriding a stored GITHUB_APP_PRIVATE_KEY hub
+// secret.
+func (s *Server) githubAppPrivateKeyStatus(ctx context.Context) (GitHubAppServerConfig, githubAppKeyStatus) {
+	s.mu.RLock()
+	cfg := s.config.GitHubAppConfig
+	fromSecret := s.githubAppPrivateKeyFromSecret
+	s.mu.RUnlock()
+
+	if cfg.PrivateKey != "" {
+		if fromSecret {
+			return cfg, githubAppKeyStatus{
+				hasPrivateKey: true,
+				source:        GitHubAppPrivateKeySourceSecret,
+			}
+		}
+		return cfg, githubAppKeyStatus{
+			hasPrivateKey:   true,
+			source:          GitHubAppPrivateKeySourceConfig,
+			overridesSecret: s.hasStoredGitHubAppSecret(ctx, GitHubAppSecretPrivateKey),
+		}
+	}
+	if cfg.PrivateKeyPath != "" {
+		return cfg, githubAppKeyStatus{
+			hasPrivateKey:   true,
+			source:          GitHubAppPrivateKeySourceFile,
+			overridesSecret: s.hasStoredGitHubAppSecret(ctx, GitHubAppSecretPrivateKey),
+		}
+	}
+	if s.hasStoredGitHubAppSecret(ctx, GitHubAppSecretPrivateKey) {
+		return cfg, githubAppKeyStatus{
+			hasPrivateKey: true,
+			source:        GitHubAppPrivateKeySourceSecret,
+		}
+	}
+	return cfg, githubAppKeyStatus{}
+}
+
+// warnGitHubAppKeyOverride logs a warning once per process if a configured
+// private key or private_key_path is overriding a stored GITHUB_APP_PRIVATE_KEY
+// hub secret. It checks an atomic flag before doing any secret-metadata lookup
+// so hot paths like getGitHubAppClient incur no extra DB reads after the first
+// warning. It never logs key material.
+func (s *Server) warnGitHubAppKeyOverride(ctx context.Context) {
+	if s.githubAppKeyOverrideWarned.Load() {
+		return
+	}
+	_, st := s.githubAppPrivateKeyStatus(ctx)
+	if !st.overridesSecret {
+		return
+	}
+	if s.githubAppKeyOverrideWarned.CompareAndSwap(false, true) {
+		slog.Warn("GitHub App configured private key or private_key_path is overriding the stored hub secret",
+			"active_source", st.source,
+			"overridden_secret", GitHubAppSecretPrivateKey,
+		)
+	}
+}
+
 // githubAppCredentialPresence checks whether the GitHub App private key and
 // webhook secret are present in in-memory config, a configured key path, or
 // the hub secret backend.
 func (s *Server) githubAppCredentialPresence(ctx context.Context) (cfg GitHubAppServerConfig, hasPrivateKey, hasWebhookSecret bool) {
-	s.mu.RLock()
-	cfg = s.config.GitHubAppConfig
-	s.mu.RUnlock()
-
-	hasPrivateKey = cfg.PrivateKey != "" || cfg.PrivateKeyPath != ""
+	cfg, keyStatus := s.githubAppPrivateKeyStatus(ctx)
+	hasPrivateKey = keyStatus.hasPrivateKey
 	hasWebhookSecret = cfg.WebhookSecret != ""
-
-	if (!hasPrivateKey || !hasWebhookSecret) && s.secretBackend != nil {
-		if !hasPrivateKey {
-			if meta, err := s.secretBackend.GetMeta(ctx, GitHubAppSecretPrivateKey, store.ScopeHub, s.hubID); err == nil && meta != nil {
-				hasPrivateKey = true
-			}
-		}
-		if !hasWebhookSecret {
-			if meta, err := s.secretBackend.GetMeta(ctx, GitHubAppSecretWebhookSecret, store.ScopeHub, s.hubID); err == nil && meta != nil {
-				hasWebhookSecret = true
-			}
-		}
+	if !hasWebhookSecret {
+		hasWebhookSecret = s.hasStoredGitHubAppSecret(ctx, GitHubAppSecretWebhookSecret)
 	}
 	return cfg, hasPrivateKey, hasWebhookSecret
 }

@@ -45,15 +45,53 @@ const (
 // GitHubAppConfigResponse is the API response for GitHub App configuration.
 // Sensitive fields (private key, webhook secret) are never returned.
 type GitHubAppConfigResponse struct {
-	AppID            int64                    `json:"app_id"`
-	APIBaseURL       string                   `json:"api_base_url,omitempty"`
-	WebhooksEnabled  bool                     `json:"webhooks_enabled"`
-	Configured       bool                     `json:"configured"`
-	HasPrivateKey    bool                     `json:"has_private_key"`
-	HasWebhookSecret bool                     `json:"has_webhook_secret"`
-	InstallationURL  string                   `json:"installation_url,omitempty"`
-	RateLimit        *githubapp.RateLimitInfo `json:"rate_limit,omitempty"`
-	Triggers         *GitHubTriggersReadiness `json:"triggers,omitempty"`
+	AppID           int64  `json:"app_id"`
+	APIBaseURL      string `json:"api_base_url,omitempty"`
+	WebhooksEnabled bool   `json:"webhooks_enabled"`
+	Configured      bool   `json:"configured"`
+	HasPrivateKey   bool   `json:"has_private_key"`
+	// PrivateKeySource reports which private key source is active: "config", "file", or "secret".
+	PrivateKeySource string `json:"private_key_source,omitempty"`
+	// PrivateKeyOverridesSecret is true when a configured private key or private_key_path
+	// takes precedence over a stored GITHUB_APP_PRIVATE_KEY hub secret.
+	PrivateKeyOverridesSecret bool                     `json:"private_key_overrides_secret,omitempty"`
+	HasWebhookSecret          bool                     `json:"has_webhook_secret"`
+	InstallationURL           string                   `json:"installation_url,omitempty"`
+	RateLimit                 *githubapp.RateLimitInfo `json:"rate_limit,omitempty"`
+	Triggers                  *GitHubTriggersReadiness `json:"triggers,omitempty"`
+}
+
+const githubAppHealthCheckName = "github-app-health-check"
+
+// syncGitHubAppHealthCheckSchedule registers, reschedules, or unregisters the
+// periodic GitHub App health check on the scheduler to match the current
+// GitHubAppConfig (AppID and WebhooksEnabled). Safe to call at startup and on
+// live config updates without creating duplicate registrations.
+//
+// githubAppScheduleMu is held across the config read and scheduler mutation
+// (and acquired before s.mu) so concurrent updates cannot apply a stale state.
+func (s *Server) syncGitHubAppHealthCheckSchedule() {
+	s.githubAppScheduleMu.Lock()
+	defer s.githubAppScheduleMu.Unlock()
+
+	s.mu.RLock()
+	sched := s.scheduler
+	appConfigured := s.config.GitHubAppConfig.AppID != 0
+	webhooksEnabled := s.config.GitHubAppConfig.WebhooksEnabled
+	s.mu.RUnlock()
+
+	if sched == nil {
+		return
+	}
+	if !appConfigured {
+		sched.UnregisterRecurring(githubAppHealthCheckName)
+		return
+	}
+	interval := 360 // 6 hours in minutes when webhooks are disabled
+	if webhooksEnabled {
+		interval = 1440 // 24 hours when webhooks are enabled
+	}
+	sched.UpsertRecurringSingleton(githubAppHealthCheckName, interval, store.LockGitHubAppHealthCheck, s.githubAppHealthCheckHandler())
 }
 
 // GitHubAppConfigUpdateRequest is the API request to update GitHub App configuration.
@@ -68,7 +106,12 @@ type GitHubAppConfigUpdateRequest struct {
 
 func (s *Server) handleGetGitHubApp(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	cfg, hasPrivateKey, hasWebhookSecret := s.githubAppCredentialPresence(ctx)
+	cfg, keyStatus := s.githubAppPrivateKeyStatus(ctx)
+	hasPrivateKey := keyStatus.hasPrivateKey
+	hasWebhookSecret := cfg.WebhookSecret != ""
+	if !hasWebhookSecret {
+		hasWebhookSecret = s.hasStoredGitHubAppSecret(ctx, GitHubAppSecretWebhookSecret)
+	}
 
 	var triggers *GitHubTriggersReadiness
 	if s.githubTriggersEnabled() {
@@ -81,15 +124,17 @@ func (s *Server) handleGetGitHubApp(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	writeJSON(w, http.StatusOK, GitHubAppConfigResponse{
-		AppID:            cfg.AppID,
-		APIBaseURL:       cfg.APIBaseURL,
-		WebhooksEnabled:  cfg.WebhooksEnabled,
-		Configured:       cfg.AppID != 0 && hasPrivateKey,
-		HasPrivateKey:    hasPrivateKey,
-		HasWebhookSecret: hasWebhookSecret,
-		InstallationURL:  cfg.InstallationURL,
-		RateLimit:        rateLimit,
-		Triggers:         triggers,
+		AppID:                     cfg.AppID,
+		APIBaseURL:                cfg.APIBaseURL,
+		WebhooksEnabled:           cfg.WebhooksEnabled,
+		Configured:                cfg.AppID != 0 && hasPrivateKey,
+		HasPrivateKey:             hasPrivateKey,
+		PrivateKeySource:          keyStatus.source,
+		PrivateKeyOverridesSecret: keyStatus.overridesSecret,
+		HasWebhookSecret:          hasWebhookSecret,
+		InstallationURL:           cfg.InstallationURL,
+		RateLimit:                 rateLimit,
+		Triggers:                  triggers,
 	})
 }
 
@@ -118,8 +163,21 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 		// Update in-memory config so it's immediately available
 		s.mu.Lock()
 		s.config.GitHubAppConfig.PrivateKey = *req.PrivateKey
+		s.githubAppPrivateKeyFromSecret = true
+		overrideSource := ""
+		if s.startupGitHubAppPrivateKey {
+			overrideSource = GitHubAppPrivateKeySourceConfig
+		} else if s.config.GitHubAppConfig.PrivateKeyPath != "" {
+			overrideSource = GitHubAppPrivateKeySourceFile
+		}
 		s.githubAppIdentity.reset()
 		s.mu.Unlock()
+		if overrideSource != "" {
+			slog.Warn("GitHub App private key saved to hub secrets, but a configured private key or private_key_path will take precedence after restart",
+				"override_source", overrideSource,
+				"secret_name", GitHubAppSecretPrivateKey,
+			)
+		}
 	}
 
 	if req.WebhookSecret != nil && *req.WebhookSecret != "" {
@@ -152,6 +210,10 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 	cfg := s.config.GitHubAppConfig
 	s.mu.Unlock()
 
+	if req.AppID != nil || req.WebhooksEnabled != nil {
+		s.syncGitHubAppHealthCheckSchedule()
+	}
+
 	// Persist the non-sensitive config. Whenever OperationalSettings is wired
 	// (every DB driver, SQLite included, since #1432) the durable home for
 	// these fields is the DB-owned `github_app` opsettings section: writing
@@ -174,30 +236,25 @@ func (s *Server) handleUpdateGitHubApp(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("Failed to persist GitHub App config to settings.yaml (in-memory config updated successfully)", "error", err)
 	}
 
-	hasPrivateKey := cfg.PrivateKey != "" || cfg.PrivateKeyPath != ""
+	_, keyStatus := s.githubAppPrivateKeyStatus(ctx)
+	hasPrivateKey := keyStatus.hasPrivateKey
 	hasWebhookSecret := cfg.WebhookSecret != ""
-	// Check secrets backend too
-	if !hasPrivateKey && s.secretBackend != nil {
-		if meta, err := s.secretBackend.GetMeta(ctx, GitHubAppSecretPrivateKey, store.ScopeHub, s.hubID); err == nil && meta != nil {
-			hasPrivateKey = true
-		}
-	}
-	if !hasWebhookSecret && s.secretBackend != nil {
-		if meta, err := s.secretBackend.GetMeta(ctx, GitHubAppSecretWebhookSecret, store.ScopeHub, s.hubID); err == nil && meta != nil {
-			hasWebhookSecret = true
-		}
+	if !hasWebhookSecret {
+		hasWebhookSecret = s.hasStoredGitHubAppSecret(ctx, GitHubAppSecretWebhookSecret)
 	}
 
 	slog.Info("GitHub App configuration updated via admin API", "user", userID, "app_id", cfg.AppID)
 
 	writeJSON(w, http.StatusOK, GitHubAppConfigResponse{
-		AppID:            cfg.AppID,
-		APIBaseURL:       cfg.APIBaseURL,
-		WebhooksEnabled:  cfg.WebhooksEnabled,
-		Configured:       cfg.AppID != 0 && hasPrivateKey,
-		HasPrivateKey:    hasPrivateKey,
-		HasWebhookSecret: hasWebhookSecret,
-		InstallationURL:  cfg.InstallationURL,
+		AppID:                     cfg.AppID,
+		APIBaseURL:                cfg.APIBaseURL,
+		WebhooksEnabled:           cfg.WebhooksEnabled,
+		Configured:                cfg.AppID != 0 && hasPrivateKey,
+		HasPrivateKey:             hasPrivateKey,
+		PrivateKeySource:          keyStatus.source,
+		PrivateKeyOverridesSecret: keyStatus.overridesSecret,
+		HasWebhookSecret:          hasWebhookSecret,
+		InstallationURL:           cfg.InstallationURL,
 	})
 }
 

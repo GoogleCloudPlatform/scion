@@ -126,8 +126,9 @@ func (a *scheduledAfterRecord) run() {
 // via time.AfterFunc. On startup, expired timers fire immediately; future
 // timers are scheduled for their fire_at time.
 //
-// All recurring handlers must be registered via RegisterRecurring before
-// Start is called. RegisterRecurring is not safe for concurrent use.
+// All recurring handlers registered before Start use RegisterRecurring or
+// RegisterRecurringSingleton. UpsertRecurringSingleton and UnregisterRecurring
+// are safe for concurrent use after Start.
 type Scheduler struct {
 	// Store for persisting one-shot events
 	store store.Store
@@ -184,10 +185,14 @@ type Scheduler struct {
 	log *slog.Logger
 
 	// Lifecycle
-	ctx      context.Context // long-lived context from Start(); used for timer callbacks
-	stopCh   chan struct{}
-	stopOnce sync.Once
-	wg       sync.WaitGroup
+	ctx       context.Context    // long-lived context from Start(); used for timer callbacks
+	runCtx    context.Context    // derived from ctx, cancelled on halt(); guarded by mu
+	runCancel context.CancelFunc // cancels runCtx on halt(); guarded by mu
+	started   bool               // true once Start has initialized runCtx; guarded by mu
+	stopped   bool               // true once halt has run; guarded by mu
+	stopCh    chan struct{}
+	stopOnce  sync.Once
+	wg        sync.WaitGroup
 }
 
 // RecurringHandler defines a periodic task driven by the root ticker.
@@ -282,11 +287,11 @@ func (s *Scheduler) fireAction(ctx context.Context, req hubfire.FireRequest) hub
 }
 
 // RegisterRecurring registers a recurring handler that runs every intervalMinutes
-// minutes. All handlers must be registered before Start is called: after
-// Start, recurring is read without a lock by the ticker and Status.
+// minutes.
 //
-// Tick-Zero Behavior: All recurring handlers run immediately on startup (tick 0)
-// because 0 % N == 0 for any interval N. This is intentional.
+// Tick-Zero Behavior: All recurring handlers registered before Start run
+// immediately on startup (tick 0) because 0 % N == 0 for any interval N.
+// This is intentional.
 func (s *Scheduler) RegisterRecurring(name string, intervalMinutes int, fn func(ctx context.Context)) {
 	s.registerRecurring(name, intervalMinutes, fn, false)
 }
@@ -300,12 +305,75 @@ func (s *Scheduler) registerRecurring(name string, intervalMinutes int, fn func(
 	if intervalMinutes < 1 {
 		intervalMinutes = 1
 	}
+	s.mu.Lock()
 	s.recurring = append(s.recurring, RecurringHandler{
 		Name:      name,
 		Interval:  intervalMinutes,
 		Fn:        fn,
 		Singleton: singleton,
 	})
+	s.mu.Unlock()
+}
+
+// UpsertRecurringSingleton registers a singleton recurring handler or updates
+// the interval and callback of an existing handler with the same name in place,
+// avoiding duplicate registrations. Safe for concurrent use after Start.
+//
+// When a NEW handler is added after Start (and before Stop), it is invoked once
+// asynchronously without waiting for the next interval tick, matching tick-zero
+// behavior for handlers registered before Start. Updating an existing handler
+// does not trigger an extra run.
+func (s *Scheduler) UpsertRecurringSingleton(name string, intervalMinutes int, key store.AdvisoryLockKey, fn func(ctx context.Context)) {
+	if intervalMinutes < 1 {
+		intervalMinutes = 1
+	}
+	wrapped := s.singletonGuard(name, key, fn)
+	var (
+		added   RecurringHandler
+		fireCtx context.Context
+	)
+	s.mu.Lock()
+	for i := range s.recurring {
+		if s.recurring[i].Name == name {
+			s.recurring[i].Interval = intervalMinutes
+			s.recurring[i].Fn = wrapped
+			s.recurring[i].Singleton = true
+			s.mu.Unlock()
+			return
+		}
+	}
+	added = RecurringHandler{
+		Name:      name,
+		Interval:  intervalMinutes,
+		Fn:        wrapped,
+		Singleton: true,
+	}
+	s.recurring = append(s.recurring, added)
+	if s.started && !s.stopped && s.runCtx != nil && s.runCtx.Err() == nil {
+		fireCtx = s.runCtx
+	}
+	s.mu.Unlock()
+
+	if fireCtx != nil {
+		s.launchRecurringHandler(fireCtx, added, s.tickCount.Load(), false)
+	}
+}
+
+// UnregisterRecurring removes any recurring handler with the given name.
+// Safe for concurrent use after Start.
+func (s *Scheduler) UnregisterRecurring(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	filtered := s.recurring[:0]
+	for _, h := range s.recurring {
+		if h.Name != name {
+			filtered = append(filtered, h)
+		}
+	}
+	for i := len(filtered); i < len(s.recurring); i++ {
+		s.recurring[i] = RecurringHandler{}
+	}
+	s.recurring = filtered
 }
 
 // RegisterRecurringSingleton registers a recurring handler that runs on AT MOST
@@ -441,7 +509,13 @@ func (s *Scheduler) Start(ctx context.Context) {
 	// Store the long-lived server context for use by timer callbacks.
 	// This prevents timers scheduled via HTTP requests from inheriting
 	// the short-lived request context.
+	s.mu.Lock()
 	s.ctx = ctx
+	if !s.stopped {
+		s.runCtx, s.runCancel = context.WithCancel(ctx)
+		s.started = true
+	}
+	s.mu.Unlock()
 
 	// Load and schedule persisted one-shot timers
 	s.loadPersistedTimers(ctx)
@@ -500,8 +574,12 @@ func (s *Scheduler) halt() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 
-		// Cancel all one-shot timers
+		// Cancel runCtx and all one-shot timers
 		s.mu.Lock()
+		s.stopped = true
+		if s.runCancel != nil {
+			s.runCancel()
+		}
 		for _, st := range s.timers {
 			st.Timer.Stop()
 			if st.Cancel != nil {
@@ -538,65 +616,84 @@ func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 
 	// Collect eligible handlers for this tick.
 	var eligible []RecurringHandler
+	s.mu.Lock()
 	for _, h := range s.recurring {
 		if tick%uint64(h.Interval) == 0 {
 			eligible = append(eligible, h)
 		}
 	}
+	s.mu.Unlock()
 	if len(eligible) == 0 {
 		return
 	}
 
 	for _, h := range eligible {
-		handler := h // capture loop variable
-		go func() {
-			// Stagger start: sleep a random 0–MaxJitter BEFORE acquiring a
-			// semaphore slot. This spreads arrivals at the semaphore over the
-			// jitter window so handlers don't hold concurrency slots during
-			// dead sleep time.
-			jitter := time.Duration(0)
-			if s.MaxJitter > 0 {
-				jitter = time.Duration(rand.Int63n(int64(s.MaxJitter)))
-			}
-			if jitter > 0 {
-				select {
-				case <-time.After(jitter):
-				case <-ctx.Done():
-					return
-				}
-			}
-
-			// Acquire semaphore slot if concurrency is limited.
-			// s.sem is shared across all ticks (initialized once in NewScheduler).
-			if s.sem != nil {
-				select {
-				case s.sem <- struct{}{}:
-					defer func() { <-s.sem }()
-				case <-ctx.Done():
-					return
-				}
-			}
-
-			handlerCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
-			defer cancel()
-
-			start := time.Now()
-			s.log.Debug("Scheduler: running recurring handler", "name", handler.Name, "tick", tick)
-
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						s.log.Error("Scheduler: recurring handler panicked",
-							"name", handler.Name, "panic", r)
-					}
-				}()
-				handler.Fn(handlerCtx)
-			}()
-
-			s.log.Debug("Scheduler: recurring handler completed",
-				"name", handler.Name, "duration", time.Since(start))
-		}()
+		s.launchRecurringHandler(ctx, h, tick, true)
 	}
+}
+
+// launchRecurringHandler runs a single recurring handler in its own goroutine
+// with optional jitter, semaphore gating, timeout, and panic recovery.
+func (s *Scheduler) launchRecurringHandler(ctx context.Context, handler RecurringHandler, tick uint64, applyJitter bool) {
+	go func() {
+		// Stagger start: sleep a random 0–MaxJitter BEFORE acquiring a
+		// semaphore slot. This spreads arrivals at the semaphore over the
+		// jitter window so handlers don't hold concurrency slots during
+		// dead sleep time.
+		jitter := time.Duration(0)
+		if applyJitter && s.MaxJitter > 0 {
+			jitter = time.Duration(rand.Int63n(int64(s.MaxJitter)))
+		}
+		if jitter > 0 {
+			select {
+			case <-time.After(jitter):
+			case <-ctx.Done():
+				return
+			case <-s.stopCh:
+				return
+			}
+		}
+
+		// Acquire semaphore slot if concurrency is limited.
+		// s.sem is shared across all ticks (initialized once in NewScheduler).
+		if s.sem != nil {
+			select {
+			case s.sem <- struct{}{}:
+				defer func() { <-s.sem }()
+			case <-ctx.Done():
+				return
+			case <-s.stopCh:
+				return
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.stopCh:
+			return
+		default:
+		}
+
+		handlerCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
+		defer cancel()
+
+		start := time.Now()
+		s.log.Debug("Scheduler: running recurring handler", "name", handler.Name, "tick", tick)
+
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.Error("Scheduler: recurring handler panicked",
+						"name", handler.Name, "panic", r)
+				}
+			}()
+			handler.Fn(handlerCtx)
+		}()
+
+		s.log.Debug("Scheduler: recurring handler completed",
+			"name", handler.Name, "duration", time.Since(start))
+	}()
 }
 
 // =============================================================================
@@ -899,6 +996,7 @@ type RecurringHandlerInfo struct {
 
 // Status returns a snapshot of the scheduler's current state.
 func (s *Scheduler) Status() SchedulerStatus {
+	s.mu.Lock()
 	recurring := make([]RecurringHandlerInfo, len(s.recurring))
 	for i, h := range s.recurring {
 		recurring[i] = RecurringHandlerInfo{
@@ -906,6 +1004,8 @@ func (s *Scheduler) Status() SchedulerStatus {
 			Interval: h.Interval,
 		}
 	}
+	activeTimers := len(s.timers)
+	s.mu.Unlock()
 
 	var eventHandlers []string
 	if s.srv != nil {
@@ -916,10 +1016,6 @@ func (s *Scheduler) Status() SchedulerStatus {
 			eventHandlers = append(eventHandlers, k)
 		}
 	}
-
-	s.mu.Lock()
-	activeTimers := len(s.timers)
-	s.mu.Unlock()
 
 	return SchedulerStatus{
 		TickCount:      s.tickCount.Load(),

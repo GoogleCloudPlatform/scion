@@ -1962,7 +1962,8 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			gh.CommandMentionAliases = slices.Clone(snap.GitHubCommandMentionAliases)
 		}
 	}
-	if s.setGitHubAppPublicLocked(gh) {
+	githubAppChanged := s.setGitHubAppPublicLocked(gh)
+	if githubAppChanged {
 		applied = append(applied, "github_app")
 	}
 
@@ -2109,6 +2110,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 
 	s.mu.Unlock()
+
+	if githubAppChanged {
+		s.syncGitHubAppHealthCheckSchedule()
+	}
 
 	if iamChanged {
 		s.invalidateCallerPermissionCaches()

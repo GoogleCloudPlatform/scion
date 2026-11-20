@@ -21,8 +21,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -605,4 +608,350 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 (no installation), got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestGitHubAppHealthCheck_LiveConfigChanges(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.scheduler = NewScheduler(srv.store, slog.Default())
+	srv.scheduler.srv = srv
+	srv.registerSchedulerHandlers()
+
+	countAndInterval := func() (int, int) {
+		var count, interval int
+		for _, h := range srv.scheduler.Status().Recurring {
+			if h.Name == "github-app-health-check" {
+				count++
+				interval = h.Interval
+			}
+		}
+		return count, interval
+	}
+
+	// Initially AppID == 0: health check should not be registered.
+	if count, _ := countAndInterval(); count != 0 {
+		t.Fatalf("expected 0 health-check handlers initially, got %d", count)
+	}
+
+	// Setting app_id live registers the health check at 6h (360 min).
+	appID := int64(42)
+	webhooksDisabled := false
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/github-app", GitHubAppConfigUpdateRequest{
+		AppID:           &appID,
+		WebhooksEnabled: &webhooksDisabled,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if count, interval := countAndInterval(); count != 1 || interval != 360 {
+		t.Fatalf("after setting app_id live: got count=%d interval=%d, want count=1 interval=360", count, interval)
+	}
+
+	// Enabling webhooks reschedules to 24h (1440 min) without duplicating.
+	webhooksEnabled := true
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/github-app", GitHubAppConfigUpdateRequest{
+		WebhooksEnabled: &webhooksEnabled,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if count, interval := countAndInterval(); count != 1 || interval != 1440 {
+		t.Fatalf("after enabling webhooks: got count=%d interval=%d, want count=1 interval=1440", count, interval)
+	}
+
+	// Clearing app_id unregisters the health check.
+	zeroAppID := int64(0)
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/github-app", GitHubAppConfigUpdateRequest{
+		AppID: &zeroAppID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if count, _ := countAndInterval(); count != 0 {
+		t.Fatalf("after clearing app_id: got count=%d, want 0", count)
+	}
+
+	// ApplySnapshot setting app_id live also registers the health check.
+	ApplySnapshot(srv, Layer1Snapshot{
+		FromOperationalSettings: true,
+		GitHubAppID:             99,
+		GitHubWebhooksEnabled:   false,
+	})
+	if count, interval := countAndInterval(); count != 1 || interval != 360 {
+		t.Fatalf("after ApplySnapshot setting app_id: got count=%d interval=%d, want count=1 interval=360", count, interval)
+	}
+
+	// ApplySnapshot clearing app_id unregisters the health check.
+	ApplySnapshot(srv, Layer1Snapshot{
+		FromOperationalSettings: true,
+	})
+	if count, _ := countAndInterval(); count != 0 {
+		t.Fatalf("after ApplySnapshot clearing app_id: got count=%d, want 0", count)
+	}
+}
+
+func TestScheduler_UpsertRecurringSingleton_PromptFirstRunAndShutdownSafety(t *testing.T) {
+	sched := NewScheduler(nil, slog.Default(), WithTickInterval(time.Hour))
+	sched.MaxJitter = 0
+
+	var preStartCalls atomic.Int32
+	// Registration before Start does not trigger an extra async run beyond tick-0.
+	sched.UpsertRecurringSingleton("pre-start", 360, store.LockGitHubAppHealthCheck, func(ctx context.Context) {
+		preStartCalls.Add(1)
+	})
+	if got := preStartCalls.Load(); got != 0 {
+		t.Fatalf("pre-Start UpsertRecurringSingleton fired immediately (%d calls), want 0", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sched.Start(ctx)
+
+	// Wait for tick-0 of pre-start handler.
+	deadline := time.Now().Add(2 * time.Second)
+	for preStartCalls.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := preStartCalls.Load(); got != 1 {
+		t.Fatalf("expected 1 tick-0 call for pre-start handler, got %d", got)
+	}
+
+	// New live registration fires once asynchronously promptly.
+	var liveCalls atomic.Int32
+	liveFired := make(chan struct{}, 2)
+	sched.UpsertRecurringSingleton("live-check", 360, store.LockGitHubAppHealthCheck, func(ctx context.Context) {
+		liveCalls.Add(1)
+		liveFired <- struct{}{}
+	})
+	select {
+	case <-liveFired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for immediate async run on new live registration")
+	}
+
+	// Rescheduling an existing handler updates interval without firing an extra run.
+	sched.UpsertRecurringSingleton("live-check", 1440, store.LockGitHubAppHealthCheck, func(ctx context.Context) {
+		liveCalls.Add(1)
+		liveFired <- struct{}{}
+	})
+	select {
+	case <-liveFired:
+		t.Fatal("rescheduling an existing handler must not trigger an extra run")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := liveCalls.Load(); got != 1 {
+		t.Fatalf("expected 1 total live call after reschedule, got %d", got)
+	}
+
+	// Stopping the scheduler prevents any further live registrations from firing.
+	sched.Stop()
+	var afterStopCalls atomic.Int32
+	sched.UpsertRecurringSingleton("after-stop", 360, store.LockGitHubAppHealthCheck, func(ctx context.Context) {
+		afterStopCalls.Add(1)
+	})
+	time.Sleep(100 * time.Millisecond)
+	if got := afterStopCalls.Load(); got != 0 {
+		t.Fatalf("UpsertRecurringSingleton after Stop fired %d times, want 0", got)
+	}
+}
+
+func TestGitHubAppHealthCheck_ConcurrentSyncMatchesFinalState(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.scheduler = NewScheduler(srv.store, slog.Default())
+	srv.scheduler.srv = srv
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			srv.mu.Lock()
+			if i%2 == 0 {
+				srv.config.GitHubAppConfig.AppID = 42
+				srv.config.GitHubAppConfig.WebhooksEnabled = true
+			} else {
+				srv.config.GitHubAppConfig.AppID = 0
+				srv.config.GitHubAppConfig.WebhooksEnabled = false
+			}
+			srv.mu.Unlock()
+			srv.syncGitHubAppHealthCheckSchedule()
+		}(i)
+	}
+	wg.Wait()
+
+	// Final explicit state must always win cleanly with no duplicates.
+	srv.mu.Lock()
+	srv.config.GitHubAppConfig.AppID = 77
+	srv.config.GitHubAppConfig.WebhooksEnabled = false
+	srv.mu.Unlock()
+	srv.syncGitHubAppHealthCheckSchedule()
+
+	var count, interval int
+	for _, h := range srv.scheduler.Status().Recurring {
+		if h.Name == githubAppHealthCheckName {
+			count++
+			interval = h.Interval
+		}
+	}
+	if count != 1 || interval != 360 {
+		t.Fatalf("after concurrent syncs + final sync: got count=%d interval=%d, want count=1 interval=360", count, interval)
+	}
+}
+
+func TestGitHubAppPrivateKeySourceAndOverrideWarning(t *testing.T) {
+	t.Run("startup_config_key_overrides_stored_secret", func(t *testing.T) {
+		srv, _ := testServer(t)
+		ctx := context.Background()
+
+		const startupSecretVal = "SUPER_SECRET_STARTUP_PEM_MATERIAL"
+		const storedSecretVal = "SUPER_SECRET_STORED_PEM_MATERIAL"
+
+		if err := srv.setGitHubAppSecret(ctx, GitHubAppSecretPrivateKey, storedSecretVal, "test", "admin"); err != nil {
+			t.Fatalf("failed to store secret: %v", err)
+		}
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.AppID = 42
+		srv.config.GitHubAppConfig.PrivateKey = startupSecretVal
+		srv.startupGitHubAppPrivateKey = true
+		srv.mu.Unlock()
+
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/github-app", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp GitHubAppConfigResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if !resp.HasPrivateKey {
+			t.Fatal("expected has_private_key=true")
+		}
+		if resp.PrivateKeySource != GitHubAppPrivateKeySourceConfig {
+			t.Errorf("private_key_source = %q, want %q", resp.PrivateKeySource, GitHubAppPrivateKeySourceConfig)
+		}
+		if !resp.PrivateKeyOverridesSecret {
+			t.Errorf("expected private_key_overrides_secret=true")
+		}
+
+		// Capture warning log and verify no key material is logged.
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(prev)
+
+		srv.warnGitHubAppKeyOverride(ctx)
+		if !srv.githubAppKeyOverrideWarned.Load() {
+			t.Errorf("expected githubAppKeyOverrideWarned to be true after first warning")
+		}
+		firstLen := buf.Len()
+		// Subsequent call hits the atomic fast-path and logs nothing further.
+		srv.warnGitHubAppKeyOverride(ctx)
+		if buf.Len() != firstLen {
+			t.Errorf("expected second warnGitHubAppKeyOverride call to be a no-op, got extra output: %q", buf.String()[firstLen:])
+		}
+		logged := buf.String()
+		if !bytes.Contains([]byte(logged), []byte("overriding the stored hub secret")) {
+			t.Errorf("expected override warning log, got: %q", logged)
+		}
+		if !bytes.Contains([]byte(logged), []byte("active_source=config")) {
+			t.Errorf("expected active_source=config in log, got: %q", logged)
+		}
+		if bytes.Contains([]byte(logged), []byte(startupSecretVal)) || bytes.Contains([]byte(logged), []byte(storedSecretVal)) {
+			t.Errorf("log must never contain private key material, got: %q", logged)
+		}
+	})
+
+	t.Run("file_key_overrides_stored_secret", func(t *testing.T) {
+		srv, _ := testServer(t)
+		ctx := context.Background()
+
+		if err := srv.setGitHubAppSecret(ctx, GitHubAppSecretPrivateKey, "stored-key", "test", "admin"); err != nil {
+			t.Fatalf("failed to store secret: %v", err)
+		}
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.AppID = 42
+		srv.config.GitHubAppConfig.PrivateKeyPath = "/etc/ghapp/key.pem"
+		srv.mu.Unlock()
+
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/github-app", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp GitHubAppConfigResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp.PrivateKeySource != GitHubAppPrivateKeySourceFile {
+			t.Errorf("private_key_source = %q, want %q", resp.PrivateKeySource, GitHubAppPrivateKeySourceFile)
+		}
+		if !resp.PrivateKeyOverridesSecret {
+			t.Errorf("expected private_key_overrides_secret=true")
+		}
+	})
+
+	t.Run("stored_secret_only_has_no_override", func(t *testing.T) {
+		srv, _ := testServer(t)
+		ctx := context.Background()
+
+		if err := srv.setGitHubAppSecret(ctx, GitHubAppSecretPrivateKey, "stored-key", "test", "admin"); err != nil {
+			t.Fatalf("failed to store secret: %v", err)
+		}
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.AppID = 42
+		srv.mu.Unlock()
+
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/github-app", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp GitHubAppConfigResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if !resp.HasPrivateKey || resp.PrivateKeySource != GitHubAppPrivateKeySourceSecret {
+			t.Errorf("got has_private_key=%v source=%q, want true/%q", resp.HasPrivateKey, resp.PrivateKeySource, GitHubAppPrivateKeySourceSecret)
+		}
+		if resp.PrivateKeyOverridesSecret {
+			t.Errorf("expected private_key_overrides_secret=false")
+		}
+	})
+
+	t.Run("ui_upload_reports_secret_source_and_warns_if_file_path_set", func(t *testing.T) {
+		srv, _ := testServer(t)
+		srv.mu.Lock()
+		srv.config.GitHubAppConfig.PrivateKeyPath = "/etc/ghapp/key.pem"
+		srv.mu.Unlock()
+
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(prev)
+
+		const uploadedKey = "UPLOADED_PEM_SECRET_DO_NOT_LOG"
+		appID := int64(42)
+		key := uploadedKey
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/github-app", GitHubAppConfigUpdateRequest{
+			AppID:      &appID,
+			PrivateKey: &key,
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp GitHubAppConfigResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp.PrivateKeySource != GitHubAppPrivateKeySourceSecret {
+			t.Errorf("private_key_source = %q, want %q", resp.PrivateKeySource, GitHubAppPrivateKeySourceSecret)
+		}
+		if resp.PrivateKeyOverridesSecret {
+			t.Errorf("expected private_key_overrides_secret=false while uploaded key is active in memory")
+		}
+		logged := buf.String()
+		if !bytes.Contains([]byte(logged), []byte("take precedence after restart")) {
+			t.Errorf("expected restart precedence warning log, got: %q", logged)
+		}
+		if bytes.Contains([]byte(logged), []byte(uploadedKey)) {
+			t.Errorf("log must never contain private key material, got: %q", logged)
+		}
+	})
 }
