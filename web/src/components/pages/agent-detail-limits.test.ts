@@ -183,6 +183,37 @@ describe('agent detail Limits & Usage card', () => {
     });
   });
 
+  it('shows inherited elapsed only while running or stopping, not when stopped', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-11-20T12:15:30Z'));
+      const base = {
+        currentTurns: 7,
+        currentModelCalls: 23,
+        startedAt: '2026-11-20T12:00:00Z',
+        appliedConfig: { inlineConfig: {} },
+      };
+
+      expect(usageItems(renderUsageCard({ ...base, phase: 'running' }))['Elapsed']).toEqual({
+        value: '15m 30s / Inherited',
+        hasProgressBar: false,
+      });
+      expect(usageItems(renderUsageCard({ ...base, phase: 'stopping' }))['Elapsed']).toEqual({
+        value: '15m 30s / Inherited',
+        hasProgressBar: false,
+      });
+
+      const stopped = usageItems(renderUsageCard({ ...base, phase: 'stopped' }));
+      expect(stopped['Elapsed']).toBeUndefined();
+      expect(stopped['Max Duration']).toEqual({
+        value: 'Inherited',
+        hasProgressBar: false,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('mixes explicit limits (with progress bar), inherited limits (no bar), and omits explicit Unlimited', () => {
     const host = renderUsageCard({
       currentTurns: 10,

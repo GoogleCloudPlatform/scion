@@ -2257,6 +2257,9 @@ export class ScionPageAgentDetail extends LitElement {
       }
     }
 
+    const showInheritedElapsed =
+      Boolean(agent.startedAt) && (agent.phase === 'running' || agent.phase === 'stopping');
+
     return html`
       <div class="card">
         <h3 class="card-title">Limits & Usage</h3>
@@ -2272,7 +2275,7 @@ export class ScionPageAgentDetail extends LitElement {
               ? this.renderLimitItem('Model Calls', currentModelCalls, maxModelCalls)
               : nothing}
           ${durationInherited
-            ? this.renderInheritedTimeLimitItem(agent.startedAt ? elapsedSec : null)
+            ? this.renderInheritedTimeLimitItem(showInheritedElapsed ? elapsedSec : null)
             : maxDurationSec > 0
               ? this.renderTimeLimitItem(timeRemainingSec, elapsedSec, maxDurationSec)
               : nothing}
