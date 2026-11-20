@@ -230,6 +230,8 @@ export function acknowledgedNotificationFromEvent(
 }
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
+const UNHEALTHY_POLL_INTERVAL_MS = 30_000; // 30 seconds while SSE is disconnected
+const FOCUS_REFETCH_COOLDOWN_MS = 5_000; // avoid double-fetching when visibilitychange + focus fire together
 
 @customElement('scion-notification-tray')
 export class ScionNotificationTray extends LitElement {
@@ -245,10 +247,18 @@ export class ScionNotificationTray extends LitElement {
 
   /** Stops the fallback poll; paused while the tab is hidden. */
   private stopPollTimer: (() => void) | null = null;
+  /** Whether the shared SSE stream has reported a drop without yet reconnecting. */
+  private sseUnhealthy = false;
+  /** Wall-clock timestamp of the most recent list fetch, for focus-refetch coalescing. */
+  private lastFetchAt = 0;
   /** The user id loading was started for; null when nothing is running. */
   private activeUserId: string | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnNotification = this.onNotificationEvent.bind(this);
+  private boundOnSseDisconnected = (): void => this.onSseDisconnected();
+  private boundOnSseConnected = (): void => this.onSseConnected();
+  private boundOnVisibilityChange = (): void => this.onVisibilityChange();
+  private boundOnWindowFocus = (): void => this.onWindowFocus();
   private boundOnPushPreference = (): void => this.syncPushState();
   private boundOnFeatureFlagsChanged = (): void => this.onFeatureFlagsChanged();
 
@@ -481,12 +491,30 @@ export class ScionNotificationTray extends LitElement {
 
   private startPolling(): void {
     this.stopPolling();
-    this.stopPollTimer = visibleInterval(() => void this.fetchNotifications(), POLL_INTERVAL_MS);
+    const intervalMs = this.sseUnhealthy ? UNHEALTHY_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+    this.stopPollTimer = visibleInterval(() => void this.fetchNotifications(), intervalMs, {
+      catchUpOnVisible: false,
+    });
+    document.addEventListener('visibilitychange', this.boundOnVisibilityChange);
+    window.addEventListener('focus', this.boundOnWindowFocus);
   }
 
   private stopPolling(): void {
     this.stopPollTimer?.();
     this.stopPollTimer = null;
+    document.removeEventListener('visibilitychange', this.boundOnVisibilityChange);
+    window.removeEventListener('focus', this.boundOnWindowFocus);
+  }
+
+  private onVisibilityChange(): void {
+    if (document.hidden || !this.activeUserId) return;
+    void this.fetchNotifications();
+  }
+
+  private onWindowFocus(): void {
+    if (document.hidden || !this.activeUserId) return;
+    if (Date.now() - this.lastFetchAt < FOCUS_REFETCH_COOLDOWN_MS) return;
+    void this.fetchNotifications();
   }
 
   // ---------------------------------------------------------------------------
@@ -495,11 +523,32 @@ export class ScionNotificationTray extends LitElement {
 
   private listenForNotifications(): void {
     stateManager.addEventListener('notification-created', this.boundOnNotification);
+    stateManager.addEventListener('disconnected', this.boundOnSseDisconnected);
+    stateManager.addEventListener('connected', this.boundOnSseConnected);
   }
 
   private stopListeningForNotifications(): void {
     stateManager.removeEventListener('notification-created', this.boundOnNotification);
+    stateManager.removeEventListener('disconnected', this.boundOnSseDisconnected);
+    stateManager.removeEventListener('connected', this.boundOnSseConnected);
+    this.sseUnhealthy = false;
     this.eventFetch.cancel();
+  }
+
+  private onSseDisconnected(): void {
+    if (!this.activeUserId) return;
+    if (!this.sseUnhealthy) {
+      this.sseUnhealthy = true;
+      this.startPolling();
+    }
+  }
+
+  private onSseConnected(): void {
+    if (!this.activeUserId || !this.sseUnhealthy) return;
+    this.sseUnhealthy = false;
+    this.startPolling();
+    void this.fetchNotifications();
+    this.reconcileDecisionsBell();
   }
 
   private onNotificationEvent(e: Event): void {
@@ -566,6 +615,7 @@ export class ScionNotificationTray extends LitElement {
   private async fetchNotifications(): Promise<void> {
     const requestUserId = this.user?.id ?? null;
     const seq = ++this.fetchSeq;
+    this.lastFetchAt = Date.now();
     try {
       const res = await apiFetch('/api/v1/notifications?acknowledged=false');
       if (!res.ok) return;

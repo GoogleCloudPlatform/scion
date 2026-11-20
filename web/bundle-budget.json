@@ -1,7 +1,7 @@
 {
   "$comment": "Bundle budget for the built web client, checked by scripts/check-bundle-budget.mjs after vite build (CI web job). Sizes are bytes; gzip is zlib level 6, as in the vite build report. Raise a limit only with a reason in the PR. See ptone/scion#5306.",
   "files": {
-    "assets/main.js": { "raw": 240000, "gzip": 65000 }
+    "assets/main.js": { "raw": 242000, "gzip": 65000 }
   },
   "manualChunks": {
     "$comment": "Packages vite.config.ts places in a named chunk; forbiddenModules rules refer to them with chunkPackages, so the list lives in one place. Only packages no other code uses may be listed (isolatedChunks checks the result).",
@@ -15,7 +15,7 @@
   },
   "entryClosure": {
     "entry": "src/client/main.ts",
-    "gzip": 140000
+    "gzip": 141000
   },
   "$comment-isolatedChunks": "The review editor chunks (ptone/scion#5913) are reached only through import(): no other chunk, lazy ones included, may import them statically (a shared package placed in them would make, for example, the CodeMirror chunk download the whole editor).",
   "isolatedChunks": ["assets/review-editor-"],
