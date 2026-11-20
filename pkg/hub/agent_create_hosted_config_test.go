@@ -165,7 +165,7 @@ func TestCreateAuthenticatedDispatcher_HostedMode(t *testing.T) {
 		srv, _ := testServerWithStoreConfig(t, createTestStore(t), cfg)
 		d := srv.CreateAuthenticatedDispatcher()
 		assert.Equal(t, !workstation, d.hostedMode, "workstation=%v", workstation)
-		err := d.hostedConfigPrecheck(agent)
+		err := d.hostedConfigPrecheck(context.Background(), agent)
 		var refusal *RuntimeTargetRefusal
 		refused := errors.As(err, &refusal) && refusal.Code == hostedguard.ErrorCode
 		assert.Equal(t, !workstation, refused, "workstation=%v: %v", workstation, err)

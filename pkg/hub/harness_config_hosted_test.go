@@ -182,11 +182,11 @@ func TestHarnessConfigCommit_HostedProjectScope(t *testing.T) {
 	writeHarnessConfigCommitError(rec, he)
 	assertHostedHCRefusalBody(t, rec, "commit-hc")
 
-	tooLarge := hostedHarnessConfigYAMLRefusal("big-hc", nil, true)
+	tooLarge := hostedHarnessConfigYAMLRefusal("big-hc", nil, true, "")
 	require.True(t, errors.As(tooLarge, &he), "too large is refused: %v", tooLarge)
 	assert.Contains(t, tooLarge.Error(), `harness config "big-hc"`)
-	assert.NoError(t, hostedHarnessConfigYAMLRefusal("no-yaml", nil, false), "no config.yaml")
-	assert.NoError(t, hostedHarnessConfigYAMLRefusal("broken", []byte(":\n\t- ["), true), "unparseable: no broker can load it")
+	assert.NoError(t, hostedHarnessConfigYAMLRefusal("no-yaml", nil, false, ""), "no config.yaml")
+	assert.NoError(t, hostedHarnessConfigYAMLRefusal("broken", []byte(":\n\t- ["), true, ""), "unparseable: no broker can load it")
 }
 
 // TestHarnessConfigClone_HostedIntoProjectScope: cloning a global harness
@@ -380,4 +380,125 @@ func TestAgentPendingConfig_HostedRefusesMemberVolumes(t *testing.T) {
 	unchanged := pendingReloadAgent(t, s, agent.ID)
 	assert.Nil(t, unchanged.PendingConfig)
 	assert.Equal(t, agent.StateVersion, unchanged.StateVersion)
+}
+
+// hostedKindDispatcher is a hosted dispatcher over srv's store whose broker
+// reports profiles (name -> type), with one stored agent on profile whose
+// inline config holds inlineVols and which is dispatched with hc (nil for
+// none).
+func hostedKindDispatcher(t *testing.T, srv *Server, s store.Store, profiles map[string]string, profile string, inlineVols []api.VolumeMount, hc *store.HarnessConfig) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
+	t.Helper()
+	ctx := context.Background()
+	broker := &store.RuntimeBroker{
+		ID: tid("kind-broker"), Name: "kind-broker", Slug: "kind-broker",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+	}
+	for name, typ := range profiles {
+		broker.Profiles = append(broker.Profiles, store.BrokerProfile{Name: name, Type: typ, Available: true})
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{ID: tid("project-1"), Name: "kind-project", Slug: "kind-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	applied := &store.AgentAppliedConfig{Profile: profile, InlineConfig: &api.ScionConfig{Harness: "claude", Volumes: inlineVols}}
+	if hc != nil {
+		applied.HarnessConfig, applied.HarnessConfigID, applied.HarnessConfigHash = hc.Name, hc.ID, hc.ContentHash
+	}
+	agent := &store.Agent{
+		ID: tid("kind-agent"), Name: "kind-agent", Slug: "kind-agent",
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID, AppliedConfig: applied,
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	srv.workstation = false
+	m := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, m, false, slog.Default())
+	d.SetHostedMode(true)
+	d.SetHostedHarnessConfigCheck(srv.checkStoredHostedHarnessConfig)
+	return d, m, agent
+}
+
+// TestDispatch_HostedGCSByBrokerProfileType: at dispatch a hosted hub
+// decides gcs from the runtime type the target broker reports for the
+// agent's profile: refused unless it is Kubernetes (kubernetes, k8s,
+// remote), and let through to the broker only when the profile or its type
+// is not known. It applies to the agent's own config and to a project
+// harness config alike.
+func TestDispatch_HostedGCSByBrokerProfileType(t *testing.T) {
+	ctx := context.Background()
+	gcs := []api.VolumeMount{{Type: "gcs", Bucket: "member-bucket", Target: "/hc-data"}}
+	cases := []struct {
+		name     string
+		profiles map[string]string
+		profile  string
+		refused  bool
+	}{
+		{"docker profile", map[string]string{"local": "docker"}, "local", true},
+		{"podman default profile", map[string]string{"only": "podman"}, "", true},
+		{"kubernetes profile", map[string]string{"k8s-prod": "kubernetes"}, "k8s-prod", false},
+		{"k8s alias", map[string]string{"gke": "k8s"}, "gke", false},
+		{"remote alias", map[string]string{"r": "remote"}, "r", false},
+		{"profile type not reported", map[string]string{"blank": ""}, "blank", false},
+		{"profile not on the broker", map[string]string{"local": "docker"}, "missing", false},
+		{"broker reports no profiles", nil, "", false},
+	}
+	for _, src := range []string{"agent config", "harness config"} {
+		for _, tc := range cases {
+			t.Run(src+"/"+tc.name, func(t *testing.T) {
+				srv, s, _ := testHarnessConfigFileServer(t)
+				var hc *store.HarnessConfig
+				inline := gcs
+				if src == "harness config" {
+					hc = newHostedTestHC(t, srv, s, "hc-gcs", "gcs-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCGCSYAML)
+					inline = nil
+				}
+				d, m, a := hostedKindDispatcher(t, srv, s, tc.profiles, tc.profile, inline, hc)
+				err := d.DispatchAgentStart(ctx, a, "task", false)
+				var refusal *RuntimeTargetRefusal
+				isRefusal := errors.As(err, &refusal) && refusal.Code == hostedguard.ErrorCode
+				if tc.refused {
+					require.True(t, isRefusal, "refused: %v", err)
+					assert.Contains(t, refusal.Message, "only for agents run on Kubernetes")
+					assert.Contains(t, refusal.Message, src)
+					assert.NotContains(t, refusal.Message, "member-bucket")
+					assert.False(t, m.startCalled, "no broker call")
+					return
+				}
+				assert.False(t, isRefusal, "not refused: %v", err)
+				assert.True(t, m.startCalled, "broker called")
+			})
+		}
+	}
+}
+
+// TestValidateAgentConfigPatch_HostedGCSByBrokerProfileType: a config
+// PATCH is judged with the same broker-reported profile type.
+func TestValidateAgentConfigPatch_HostedGCSByBrokerProfileType(t *testing.T) {
+	ctx := context.Background()
+	gcsPatch := &api.ScionConfig{Volumes: []api.VolumeMount{{Type: "gcs", Bucket: "b", Target: "/b"}}}
+	for name, tc := range map[string]struct {
+		typ     string
+		refused bool
+	}{
+		"docker":     {"docker", true},
+		"kubernetes": {"kubernetes", false},
+		"unknown":    {"", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, s := testServer(t)
+			require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+				ID: tid("patch-broker"), Name: "patch-broker", Slug: "patch-broker", Status: store.BrokerStatusOnline,
+				Profiles: []store.BrokerProfile{{Name: "p", Type: tc.typ, Available: true}},
+			}))
+			agent := &store.Agent{ID: tid("agent-patch-gcs"), ProjectID: tid("project-patch-gcs"), RuntimeBrokerID: tid("patch-broker"),
+				AppliedConfig: &store.AgentAppliedConfig{Profile: "p"}}
+			rec := httptest.NewRecorder()
+			ok := srv.validateAgentConfigPatch(ctx, rec, agent, gcsPatch, false)
+			if !tc.refused {
+				assert.True(t, ok, rec.Body.String())
+				return
+			}
+			assert.False(t, ok)
+			code, _ := decodeHostedRefusal(t, rec)
+			assert.Equal(t, hostedguard.ErrorCode, code)
+		})
+	}
 }

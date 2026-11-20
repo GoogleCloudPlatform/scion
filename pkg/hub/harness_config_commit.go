@@ -288,7 +288,7 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	// On a hosted hub a project-scope harness config is member content
 	// (hostedHarnessConfigYAMLRefusal).
 	if s.checksHostedHarnessConfig(hc.Scope) {
-		if err := hostedHarnessConfigYAMLRefusal(hc.Name, configYAML, present); err != nil {
+		if err := hostedHarnessConfigYAMLRefusal(hc.Name, configYAML, present, ""); err != nil {
 			return err
 		}
 	}

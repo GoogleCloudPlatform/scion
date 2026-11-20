@@ -2184,7 +2184,7 @@ func (s *Server) createAgentInProject(
 	// On a hosted hub, the requester's config may not name host
 	// resources (hostedguard); refused before anything is stored.
 	if !s.workstation && req.Config != nil {
-		if err := hostedConfigRefusal(req.Config); err != nil {
+		if err := hostedConfigRefusal(req.Config, ""); err != nil {
 			writeRuntimeTargetRefusal(w, err)
 			return
 		}

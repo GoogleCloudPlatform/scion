@@ -59,9 +59,10 @@ func (s *Server) checksHostedHarnessConfig(scope string) bool {
 // harness config name. present is false when there is no config.yaml; data
 // is nil for one too large to read, which is refused because it cannot be
 // checked. A config.yaml that does not parse is not refused here: no Runtime
-// Broker can load it either. The runtime is not known on the hub, so gcs
-// volumes are left to the broker.
-func hostedHarnessConfigYAMLRefusal(name string, data []byte, present bool) error {
+// Broker can load it either. runtimeKind is the runtime that will run the
+// agent, or "" when not known (when the config is stored), which leaves gcs
+// volumes to the broker.
+func hostedHarnessConfigYAMLRefusal(name string, data []byte, present bool, runtimeKind string) error {
 	if !present {
 		return nil
 	}
@@ -74,7 +75,7 @@ func hostedHarnessConfigYAMLRefusal(name string, data []byte, present bool) erro
 		return nil
 	}
 	if err := hostedguard.CheckMemberConfig(&api.ScionConfig{Volumes: entry.Volumes},
-		hostedguard.Origin{Kind: hostedguard.OriginHarnessConfig, Name: name}, ""); err != nil {
+		hostedguard.Origin{Kind: hostedguard.OriginHarnessConfig, Name: name}, runtimeKind); err != nil {
 		return &hostedHarnessConfigError{err: err}
 	}
 	return nil
@@ -98,7 +99,7 @@ func (s *Server) refuseHostedHarnessConfigYAML(w http.ResponseWriter, hc *store.
 	if !s.checksHostedHarnessConfig(hc.Scope) {
 		return false
 	}
-	return writeHostedHarnessConfigRefusal(w, hostedHarnessConfigYAMLRefusal(hc.Name, data, true))
+	return writeHostedHarnessConfigRefusal(w, hostedHarnessConfigYAMLRefusal(hc.Name, data, true, ""))
 }
 
 // hostedHarnessConfigImportError refuses an import or reimport into project
@@ -133,7 +134,7 @@ func (s *Server) checkHostedHarnessConfigDirs(dirs []resourceDir, scope string) 
 		if err != nil {
 			continue
 		}
-		if err := hostedHarnessConfigYAMLRefusal(rd.name, data, true); err != nil {
+		if err := hostedHarnessConfigYAMLRefusal(rd.name, data, true, ""); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -160,12 +161,13 @@ func writeImportContentRefusal(w http.ResponseWriter, err error) bool {
 }
 
 // checkStoredHostedHarnessConfig checks, at dispatch, the stored config.yaml
-// of the hub harness config id an agent is dispatched with. Only a
+// of the hub harness config id an agent is dispatched with, for runtimeKind
+// ("" when not known; hostedRuntimeKind). Only a
 // project-scope harness config on a hosted hub is checked. A record that no
 // longer exists, has no config.yaml, or a hub without storage is left to the
 // dispatch (the broker cannot hydrate it either); a storage read error fails
 // the dispatch.
-func (s *Server) checkStoredHostedHarnessConfig(ctx context.Context, id string) error {
+func (s *Server) checkStoredHostedHarnessConfig(ctx context.Context, id, runtimeKind string) error {
 	if s.workstation || id == "" {
 		return nil
 	}
@@ -189,11 +191,11 @@ func (s *Server) checkStoredHostedHarnessConfig(ctx context.Context, id string) 
 	data, err := s.readHarnessConfigFile(ctx, stor, hc, harnessConfigYAMLPath, maxHarnessConfigFileSize)
 	switch {
 	case errors.Is(err, errTemplateObjectTooLarge):
-		return hostedHarnessConfigYAMLRefusal(hc.Name, nil, true)
+		return hostedHarnessConfigYAMLRefusal(hc.Name, nil, true, runtimeKind)
 	case errors.Is(err, storage.ErrNotFound):
 		return nil
 	case err != nil:
 		return fmt.Errorf("hosted harness-config check: %w", err)
 	}
-	return hostedHarnessConfigYAMLRefusal(hc.Name, data, true)
+	return hostedHarnessConfigYAMLRefusal(hc.Name, data, true, runtimeKind)
 }

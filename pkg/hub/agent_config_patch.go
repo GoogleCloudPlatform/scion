@@ -136,7 +136,7 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 	// resources (hostedguard), as at create; a stored edit would otherwise
 	// be refused only at the agent's next dispatch.
 	if !s.workstation {
-		if err := hostedConfigRefusal(cfg); err != nil {
+		if err := hostedConfigRefusal(cfg, hostedRuntimeKind(ctx, s.store, agent)); err != nil {
 			writeRuntimeTargetRefusal(w, err)
 			return false
 		}
