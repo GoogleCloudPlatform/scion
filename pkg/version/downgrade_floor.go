@@ -24,6 +24,15 @@ package version
 // without a default, a narrowed enum, or rewritten values. Releases older
 // than the floor would run on a schema they do not understand.
 //
-// The value is a release tag. A nightly tag carries its date, which orders
-// it against releases of other channels by their publish date.
-const DowngradeFloor = "nightly-20261121"
+// The value must be a nightly-YYYYMMDD release tag. A nightly tag carries its
+// midnight UTC date, which update.BelowFloor uses to order cross-channel
+// targets (preview and stable releases) by their publish date; a non-nightly
+// floor has no embedded date, so cross-channel comparisons return unknown and
+// fail closed.
+//
+// Set it to the first nightly that will contain the migration (nightlies cut
+// at ~03:00 UTC) and never later than the earliest preview or stable release
+// that contains it. Setting the floor a day late causes that nightly and any
+// preview or stable release published on the same day to sort below the floor
+// and be refused as downgrade targets (below_downgrade_floor).
+const DowngradeFloor = "nightly-20261120"
