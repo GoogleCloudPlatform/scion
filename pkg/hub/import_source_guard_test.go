@@ -20,8 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -194,9 +196,24 @@ func TestFetchRemoteForImport_HostedArchiveBlocksLoopbackHost(t *testing.T) {
 	srv, _ := testServer(t)
 	_, err := srv.fetchRemoteForImport(context.Background(), store.TemplateScopeGlobal, "",
 		"https://localhost:"+port+"/x.tar.gz")
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ssrfclient.ErrBlockedAddress)
+	var refused *importSourceRefusedError
+	require.Truef(t, errors.As(err, &refused), "got %v", err)
+	assert.Equal(t, importFetchDisallowedMessage, err.Error())
+	assert.NotContains(t, err.Error(), "127.0.0.1", "the resolved address must not be echoed")
 	assert.Zero(t, hits, "the hub must not reach a loopback host")
+}
+
+func TestMapImportFetchError(t *testing.T) {
+	for _, sentinel := range []error{ssrfclient.ErrBlockedAddress, ssrfclient.ErrRedirectBlocked} {
+		wrapped := &url.Error{Op: "Get", URL: "https://10.0.0.5/x.tar.gz",
+			Err: fmt.Errorf("failed to download archive: %w", sentinel)}
+		err := mapImportFetchError(fmt.Errorf("failed to fetch archive: %w", wrapped))
+		var refused *importSourceRefusedError
+		require.Truef(t, errors.As(err, &refused), "%v: got %v", sentinel, err)
+		assert.Equal(t, importFetchDisallowedMessage, err.Error())
+	}
+	other := errors.New("failed to download archive: HTTP 404")
+	assert.Same(t, other, mapImportFetchError(other), "other errors pass through")
 }
 
 // A workstation hub keeps fetching plain http sources, including loopback

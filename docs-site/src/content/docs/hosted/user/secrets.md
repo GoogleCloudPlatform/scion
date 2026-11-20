@@ -557,6 +557,8 @@ Reimporting an existing template (`POST /api/v1/templates/{id}/reimport`) uses t
 
 Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), rclone sources and other hosts are always fetched without one.
 
+On a hosted Hub, archive URLs that redirect (for example `github.com/.../archive/...` links and release assets) are refused; give the final URL.
+
 ### Injection Mode Behavior
 
 Convention-keyed GitHub secrets support the standard injection modes:

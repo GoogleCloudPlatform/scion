@@ -76,6 +76,21 @@ func (s *Server) importArchiveClient() *http.Client {
 	return ssrfclient.NewClient(ssrfclient.Config{})
 }
 
+// importFetchDisallowedMessage answers a hosted archive download that the
+// SSRF-safe client stopped. It is fixed, so the resolved address and the
+// redirect target are not echoed.
+const importFetchDisallowedMessage = "sourceUrl redirected or resolved to a disallowed address; on a hosted server give the final public https URL"
+
+// mapImportFetchError replaces an error from the SSRF-safe archive client (a
+// blocked address or a refused redirect) with importFetchDisallowedMessage.
+// Other errors are returned unchanged.
+func mapImportFetchError(err error) error {
+	if errors.Is(err, ssrfclient.ErrBlockedAddress) || errors.Is(err, ssrfclient.ErrRedirectBlocked) {
+		return &importSourceRefusedError{importFetchDisallowedMessage}
+	}
+	return err
+}
+
 // refuseImportSource writes a 400 invalid_request answer and returns true when
 // checkImportSource refuses sourceURL. Handlers call it before fetching, so the
 // refusal also reaches streaming (NDJSON) callers as a plain error answer.

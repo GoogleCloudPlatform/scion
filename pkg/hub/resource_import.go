@@ -309,10 +309,14 @@ func (s *Server) fetchRemoteForImport(ctx context.Context, scope, scopeID, sourc
 	if err := s.checkImportSource(sourceURL); err != nil {
 		return "", err
 	}
-	return config.FetchRemoteTemplateWithOptions(ctx, sourceURL, config.FetchOptions{
+	cachePath, err := config.FetchRemoteTemplateWithOptions(ctx, sourceURL, config.FetchOptions{
 		AuthToken:     s.importCredential(ctx, scope, scopeID, sourceURL),
 		ArchiveClient: s.importArchiveClient(),
 	})
+	if err != nil {
+		return "", mapImportFetchError(err)
+	}
+	return cachePath, nil
 }
 
 // importCredential returns the GitHub credential for fetching sourceURL into
