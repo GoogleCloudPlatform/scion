@@ -1117,7 +1117,7 @@ func (d *concurrentIODialect) Name() string { return "concurrent_io" }
 func (d *concurrentIODialect) Declares() ruleengine.Capabilities {
 	return ruleengine.Capabilities{
 		PerformsIO:  true,
-		MaxEvalTime: 100 * time.Millisecond,
+		MaxEvalTime: time.Second,
 		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
 	}
 }
@@ -1131,7 +1131,24 @@ func (d *concurrentIODialect) Evaluate(_ context.Context, c ruleengine.Compiled,
 }
 
 func TestDenyByDefault_ConcurrentAllowListReplacementRace(t *testing.T) {
-	celEng := newTestCELEngine(t, "race_env")
+	// Use the maximum celengine EvalTimeout (1s) so heavy -race / CPU load
+	// cannot trigger spurious 100ms wall-clock eval timeouts during concurrent
+	// allow-list contention; this test verifies admission-race safety, not eval timeouts.
+	limits := celengine.DefaultLimits()
+	limits.EvalTimeout = time.Second
+	celEng, err := celengine.New(celengine.Environment{
+		Name:    "race_env",
+		Version: 1,
+		Variables: []celengine.Variable{
+			{Name: "event", Type: celengine.Map(celengine.String(), celengine.Dyn())},
+			{Name: "items", Type: celengine.List(celengine.String())},
+		},
+		Extensions: []celengine.Extension{celengine.ExtensionStrings},
+		Macros:     celengine.MacrosStandard,
+	}, limits, celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New: %v", err)
+	}
 	celDialect, err := ruleengine.NewCELDialect(celEng)
 	if err != nil {
 		t.Fatalf("NewCELDialect: %v", err)

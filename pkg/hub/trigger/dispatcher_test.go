@@ -1372,6 +1372,7 @@ func TestDispatcher_SharedEventBudgetAlwaysPassedAndClampsAcrossTriggers(t *test
 		MatchRules: []store.TriggerMatchRule{{Dialect: "slow_probe", Expr: "spend_45ms"}},
 		ActionType: store.TriggerActionMessage,
 		Status:     store.TriggerStatusActive,
+		CreatedAt:  t0,
 	}
 	tr2 := &store.Trigger{
 		ID:         uuid.NewString(),
@@ -1386,6 +1387,7 @@ func TestDispatcher_SharedEventBudgetAlwaysPassedAndClampsAcrossTriggers(t *test
 		},
 		ActionType: store.TriggerActionMessage,
 		Status:     store.TriggerStatusActive,
+		CreatedAt:  t0.Add(time.Second),
 	}
 	tr3 := &store.Trigger{
 		ID:         uuid.NewString(),
@@ -1397,6 +1399,7 @@ func TestDispatcher_SharedEventBudgetAlwaysPassedAndClampsAcrossTriggers(t *test
 		MatchRules: []store.TriggerMatchRule{{Dialect: "slow_probe", Expr: "never_started"}},
 		ActionType: store.TriggerActionMessage,
 		Status:     store.TriggerStatusActive,
+		CreatedAt:  t0.Add(2 * time.Second),
 	}
 	for _, tr := range []*store.Trigger{tr1, tr2, tr3} {
 		require.NoError(t, ms.CreateTrigger(ctx, tr))
@@ -3116,4 +3119,106 @@ func TestDispatcher_DispatchAgentSkipUsesSubjectClaimsNotFireSkip(t *testing.T) 
 	// Only the message trigger uses PR 4's ClaimTriggerFireSubjectSkip;
 	// dispatch_agent uses ClaimTriggerFire and delegates skip to SubjectClaims.
 	assert.Equal(t, int32(1), ms.claimSubjectSkipCalls.Load(), "only message+skip must call ClaimTriggerFireSubjectSkip")
+}
+
+func TestDispatcher_EvaluatesCandidatesOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	ms := newMemTriggerStore()
+	rules, err := triggerrule.NewDefault()
+	require.NoError(t, err)
+
+	projID := uuid.NewString()
+	epID := uuid.NewString()
+	evID := uuid.NewString()
+	t0 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	// Insert newest-first (mirroring Ent ListTriggers' Created DESC, ID DESC order)
+	// including a same-timestamp pair to pin ID ASC tie-breaking.
+	trNewest := &store.Trigger{
+		ID:         "00000000-0000-0000-0000-000000000004",
+		ProjectID:  projID,
+		Name:       "newest",
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		MatchTypes: []string{"webhook.received"},
+		ActionType: store.TriggerActionMessage,
+		Status:     store.TriggerStatusActive,
+		CreatedAt:  t0.Add(3 * time.Minute),
+	}
+	trTieB := &store.Trigger{
+		ID:         "00000000-0000-0000-0000-000000000003",
+		ProjectID:  projID,
+		Name:       "tie-b",
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		MatchTypes: []string{"webhook.received"},
+		ActionType: store.TriggerActionMessage,
+		Status:     store.TriggerStatusActive,
+		CreatedAt:  t0.Add(2 * time.Minute),
+	}
+	trTieA := &store.Trigger{
+		ID:         "00000000-0000-0000-0000-000000000002",
+		ProjectID:  projID,
+		Name:       "tie-a",
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		MatchTypes: []string{"webhook.received"},
+		ActionType: store.TriggerActionMessage,
+		Status:     store.TriggerStatusActive,
+		CreatedAt:  t0.Add(2 * time.Minute),
+	}
+	trOldest := &store.Trigger{
+		ID:         "00000000-0000-0000-0000-000000000001",
+		ProjectID:  projID,
+		Name:       "oldest",
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		MatchTypes: []string{"webhook.received"},
+		ActionType: store.TriggerActionMessage,
+		Status:     store.TriggerStatusActive,
+		CreatedAt:  t0.Add(1 * time.Minute),
+	}
+	for _, tr := range []*store.Trigger{trNewest, trTieB, trTieA, trOldest} {
+		require.NoError(t, ms.CreateTrigger(ctx, tr))
+	}
+	require.NoError(t, ms.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		Type:       "webhook.received",
+		Subject:    "webhook:" + epID,
+		DedupKey:   "d-oldest-first",
+		OccurredAt: t0,
+		ReceivedAt: t0,
+		Payload:    `{"ok":true}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	var firedNames []string
+	core := &fakeCore{
+		fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+			firedNames = append(firedNames, req.Event.Trigger.Name)
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		},
+	}
+	core.enabled.Store(true)
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Rules: rules,
+		Now:   func() time.Time { return t0 },
+	})
+	require.NoError(t, err)
+
+	raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+	res := disp.HandleItem(ctx, durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  raw,
+	}, nopLease{})
+	require.NoError(t, res.Err)
+	assert.True(t, res.Done)
+	assert.Equal(t, []string{"oldest", "tie-a", "tie-b", "newest"}, firedNames)
 }

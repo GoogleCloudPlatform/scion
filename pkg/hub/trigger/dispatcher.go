@@ -15,12 +15,14 @@
 package trigger
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -892,6 +894,15 @@ func (d *Dispatcher) loadActiveTriggers(ctx context.Context, projectID, sourceKi
 		}
 		all = append(all, res.Items...)
 		if res.NextCursor == "" || len(res.Items) == 0 {
+			// SEC-3b2-02: evaluate candidates oldest-first (CreatedAt ASC, ID ASC)
+			// so a newly authored slow trigger cannot exhaust the shared per-event
+			// budget ahead of pre-existing triggers on the same source.
+			slices.SortFunc(all, func(a, b store.Trigger) int {
+				if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+					return c
+				}
+				return cmp.Compare(a.ID, b.ID)
+			})
 			return all, nil
 		}
 		cursor = res.NextCursor
