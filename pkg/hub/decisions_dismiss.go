@@ -587,14 +587,9 @@ func (s *Server) deliverDecisionDismissResponse(ctx context.Context, asker *stor
 		ThreadID:       m.ThreadID,
 		ConversationID: m.ConversationID,
 	}
-	// Strip reserved metadata keys explicitly before setting hub-owned decision keys.
-	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
-	if sm.Metadata == nil {
-		sm.Metadata = make(map[string]string, 7)
-	}
-	populateDecisionDismissMetadata(sm.Metadata, batchID, answers)
-
-	held, err := s.dispatchDecisionResponse(ctx, asker, m, text, sm, "dismiss decision-response")
+	held, err := s.dispatchDecisionResponse(ctx, asker, m, text, sm, func(meta map[string]string) {
+		populateDecisionDismissMetadata(meta, batchID, answers)
+	}, "dismiss decision-response")
 	if err != nil {
 		return DismissDeliveryFailed
 	}

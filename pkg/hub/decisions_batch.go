@@ -27,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -598,15 +597,10 @@ func (s *Server) deliverDecisionSetResponse(ctx context.Context, asker *store.Ag
 		ThreadID:       m.ThreadID,
 		ConversationID: m.ConversationID,
 	}
-	// Strip the reserved keys first, as every dispatch site does; the set
-	// keys are reserved and only the hub sets them, after the strip.
-	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
-	if sm.Metadata == nil {
-		sm.Metadata = make(map[string]string, 2)
-	}
-	sm.Metadata[messages.MetadataDecisionBatch] = res.BatchID
-	sm.Metadata[messages.MetadataDecisionAnswers] = decisionAnswersMetadata(res.Answers)
-	_, _ = s.dispatchDecisionResponse(ctx, asker, m, text, sm, "set decision-response")
+	_, _ = s.dispatchDecisionResponse(ctx, asker, m, text, sm, func(meta map[string]string) {
+		meta[messages.MetadataDecisionBatch] = res.BatchID
+		meta[messages.MetadataDecisionAnswers] = decisionAnswersMetadata(res.Answers)
+	}, "set decision-response")
 }
 
 // writeBatchRequired answers 409 batch_required for a per-decision answer to

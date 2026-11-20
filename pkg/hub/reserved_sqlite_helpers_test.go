@@ -31,12 +31,9 @@ type stripSiteKey struct{ file, function string }
 // helper) before rendering or dispatching to the site's recipient(s). This
 // is the P1+P2 site list from design §4.2 item 1 and §10 P1/P2.
 var strippedSites = map[stripSiteKey]bool{
-	// The decision-response delivered to the asking agent after an answer.
-	{"decisions_answer.go", "deliverDecisionResponse"}: true,
-	// The one decision-response of a set submit.
-	{"decisions_batch.go", "deliverDecisionSetResponse"}: true,
-	// The one decision-response of a prompt dismissal.
-	{"decisions_dismiss.go", "deliverDecisionDismissResponse"}: true,
+	// Shared decision-response delivery (answer, set, dismiss); strips
+	// sm.Metadata before populating hub-owned decision keys and dispatching.
+	{"decisions_answer.go", "dispatchDecisionResponse"}: true,
 	// P1: the two ExecuteAgentDM-routed entry points, covering the outbound
 	// endpoint, the handleAgentMessage agent fork, and #2083's agent mention
 	// fan-out (fanOutAgentMentions reaches dispatch through ExecuteAgentDM,
