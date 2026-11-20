@@ -280,6 +280,18 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
 		assert.Contains(t, rec.Body.String(), c.cause)
 	}
+	assertWriteDenial := func(t *testing.T, c messageWriteCredential, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		if c.name == "agent whose row is not stored" {
+			// With strict target resolution (ptone/scion#8588), an unstored
+			// agent is already refused by live message authorization before
+			// reaching revisionAuthorityCeiling.
+			require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "not authorized to message this agent")
+			return
+		}
+		assertCeilingDenial(t, c, rec)
+	}
 	// Seed a live target in projectID so scheduled-message authoring admits
 	// each credential and the refusal comes from the revision ceiling alone.
 	const unrecTarget = "unrec-ghost-target"
@@ -320,7 +332,7 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 				before := countEvents(t)
 				rec := doAuthoredEventRequest(t, srv, c.identity, projectID,
 					CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentName: unrecTarget, Message: "hi"})
-				assertCeilingDenial(t, c, rec)
+				assertWriteDenial(t, c, rec)
 				assert.Equal(t, before, countEvents(t), "no event is stored")
 			})
 
@@ -328,7 +340,7 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 				before := countSchedules(t)
 				rec := doAuthoredScheduleRequest(t, srv, c.identity, projectID, "", http.MethodPost,
 					CreateScheduleRequest{Name: "unrec-msg" + suffix, CronExpr: "0 * * * *", EventType: "message", AgentName: unrecTarget, Message: "hi"})
-				assertCeilingDenial(t, c, rec)
+				assertWriteDenial(t, c, rec)
 				assert.Equal(t, before, countSchedules(t), "no schedule is stored")
 			})
 
@@ -359,7 +371,7 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 				holdScheduleFor(t, s, id, c.identity)
 				before := loadScheduleRevision(t, s, id)
 				rec := doAuthoredScheduleRequest(t, srv, c.identity, projectID, id+"/resume", http.MethodPost, nil)
-				assertCeilingDenial(t, c, rec)
+				assertWriteDenial(t, c, rec)
 				assert.Equal(t, before, loadScheduleRevision(t, s, id))
 				sc, err := s.GetSchedule(ctx, id)
 				require.NoError(t, err)

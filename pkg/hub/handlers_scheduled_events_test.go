@@ -603,13 +603,12 @@ func TestScheduledEvent_HubAdminCrossProjectAllowed(t *testing.T) {
 
 	t.Run("create allowed", func(t *testing.T) {
 		req := CreateScheduledEventRequest{
-			EventType: "message",
+			EventType: "dispatch_agent",
 			FireIn:    "30m",
-			AgentName: "test-agent",
-			Message:   "Hello from hub admin",
+			AgentName: "hub-admin-worker",
 		}
 		rec := doScheduledEventUserRequest(t, srv, hubAdminUser, http.MethodPost, projectID, "", req)
-		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 }
 

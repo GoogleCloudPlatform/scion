@@ -178,7 +178,7 @@ func TestScheduleTypeChangeToDispatchAgentUsesDispatchRule(t *testing.T) {
 
 	// The same credential re-targeting the message schedule is refused too.
 	rec = doAuthoredScheduleRequest(t, srv, unrecordable, projectID, created.ID, http.MethodPatch,
-		UpdateScheduleRequest{Payload: `{"agentName":"ghost-target-2","message":"hi"}`})
+		UpdateScheduleRequest{Payload: `{"agentName":"all","message":"hi"}`})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
 	assert.Contains(t, rec.Body.String(), "cannot authorize scheduled work")

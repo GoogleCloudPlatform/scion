@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -178,6 +179,8 @@ func TestMessageAuthoringTargetRule_TriggerParity(t *testing.T) {
 //     404 body is byte-identical to not-found.
 func TestMessageAuthoringTargetRule_ScheduleParity(t *testing.T) {
 	f := setupTriggersTestFixture(t)
+	f.srv.scheduler = NewScheduler(f.store, slog.Default())
+	f.srv.scheduler.srv = f.srv
 	ctx := context.Background()
 
 	// Zero value of messageAuthoringCaller must remain the strictest mode.
@@ -441,7 +444,17 @@ func TestMessageAuthoringTargetRule_ScheduleParity(t *testing.T) {
 		assert.Equal(t, bodyMissingRef, resumeDel.Body.String())
 
 		// Contract 3: dispatch-changing updates keeping an unresolved target are
-		// refused with the same masked 404 (payload, cronExpr, timeZone, enable).
+		// refused with the same masked 404 (payload, cronExpr, timeZone, eventType, enable).
+		dispatchAgentSched := seedStoredSchedule(
+			"sched-stored-dispatch-to-msg",
+			`{"agentId":"`+nonexistentID+`","message":"hello"}`,
+			store.ScheduleStatusActive,
+			store.ScheduleStatusReasonNone,
+		)
+		dispatchAgentSched.EventType = "dispatch_agent"
+		require.NoError(t, f.store.UpdateSchedule(ctx, dispatchAgentSched, store.ScheduleFieldMask{EventType: true},
+			dispatchAgentSched.AuthorizationRevision, dispatchAgentSched.AuthorizationRevision != 0, nil))
+
 		tz := "America/Los_Angeles"
 		dispatchUpdates := []struct {
 			name string
@@ -451,6 +464,7 @@ func TestMessageAuthoringTargetRule_ScheduleParity(t *testing.T) {
 			{"payload", neverExistedActive.ID, UpdateScheduleRequest{Payload: `{"agentId":"` + nonexistentID + `","message":"updated text"}`}},
 			{"cronExpr", neverExistedActive.ID, UpdateScheduleRequest{CronExpr: "*/15 * * * *"}},
 			{"timeZone", neverExistedActive.ID, UpdateScheduleRequest{TimeZone: &tz}},
+			{"eventType", dispatchAgentSched.ID, UpdateScheduleRequest{EventType: "message"}},
 			{"enable", deletedPaused.ID, UpdateScheduleRequest{Status: store.ScheduleStatusActive}},
 		}
 		for _, tc := range dispatchUpdates {
