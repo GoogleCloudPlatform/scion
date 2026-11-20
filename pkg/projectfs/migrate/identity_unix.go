@@ -52,9 +52,11 @@ const maxMarkerBytes = 1 << 20
 var workspaceRecordDirs = []string{"hub-workspaces", "broker-workspaces"}
 
 // treeIdentity reports whether the legacy tree src belongs to projectID.
-// Markers: <src>/.scion/project-id (and its pre-rename name), the project
-// ID keys of <src>/.scion/settings.yaml (current and pre-rename, through
-// pkg/projectkeys), and, for the hub-local tree, the workspace records
+// Markers: a .scion marker file (project-id and its pre-rename key, through
+// pkg/projectkeys), or when .scion is a directory, <src>/.scion/project-id
+// (and its pre-rename name) and the project ID keys of
+// <src>/.scion/settings.yaml (current and pre-rename, through
+// pkg/projectkeys), plus, for the hub-local tree, the workspace records
 // under globalDir. Any marker naming another ID is a mismatch; no
 // marker at all is unverified.
 func treeIdentity(src Tree, local bool, globalDir, slug, projectID string) (identity, string, error) {
@@ -68,24 +70,45 @@ func treeIdentity(src Tree, local bool, globalDir, slug, projectID string) (iden
 		}
 	}
 	scion := filepath.Join(src.Rel, ".scion")
+	scionTree := Tree{Base: src.Base, Rel: scion}
+	scionKind, err := entryKind(scionTree)
+	if err != nil {
+		return identityUnverified, "", err
+	}
 	checked := []string{}
-	for _, file := range []string{projectkeys.ProjectIDFile, projectkeys.LegacyProjectIDFile} {
-		checked = append(checked, ".scion/"+file)
-		b, ok, err := readMarker(Tree{Base: src.Base, Rel: filepath.Join(scion, file)})
+	switch scionKind {
+	case kindDir:
+		for _, file := range []string{projectkeys.ProjectIDFile, projectkeys.LegacyProjectIDFile} {
+			checked = append(checked, ".scion/"+file)
+			b, ok, err := readMarker(Tree{Base: src.Base, Rel: filepath.Join(scion, file)})
+			if err != nil {
+				return identityUnverified, "", err
+			}
+			if ok {
+				add(".scion/"+file, string(b))
+			}
+		}
+		checked = append(checked, ".scion/settings.yaml")
+		if b, ok, err := readMarker(Tree{Base: src.Base, Rel: filepath.Join(scion, "settings.yaml")}); err != nil {
+			return identityUnverified, "", err
+		} else if ok {
+			for _, id := range settingsProjectIDs(b) {
+				add(".scion/settings.yaml", id)
+			}
+		}
+	case kindOther:
+		checked = append(checked, ".scion")
+		b, ok, err := readMarker(scionTree)
 		if err != nil {
 			return identityUnverified, "", err
 		}
 		if ok {
-			add(".scion/"+file, string(b))
+			for _, id := range markerFileProjectIDs(b) {
+				add(".scion", id)
+			}
 		}
-	}
-	checked = append(checked, ".scion/settings.yaml")
-	if b, ok, err := readMarker(Tree{Base: src.Base, Rel: filepath.Join(scion, "settings.yaml")}); err != nil {
-		return identityUnverified, "", err
-	} else if ok {
-		for _, id := range settingsProjectIDs(b) {
-			add(".scion/settings.yaml", id)
-		}
+	case kindAbsent:
+		checked = append(checked, ".scion", ".scion/"+projectkeys.ProjectIDFile, ".scion/"+projectkeys.LegacyProjectIDFile, ".scion/settings.yaml")
 	}
 	if local {
 		for _, dir := range workspaceRecordDirs {
@@ -109,6 +132,23 @@ func treeIdentity(src Tree, local bool, globalDir, slug, projectID string) (iden
 		}
 	}
 	return identityVerified, detail, nil
+}
+
+// markerFileProjectIDs returns the project IDs a .scion marker file names:
+// project-id and the pre-rename key pkg/projectkeys names. Unparseable YAML
+// names none.
+func markerFileProjectIDs(b []byte) []string {
+	var doc map[string]any
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return nil
+	}
+	var ids []string
+	for _, key := range []string{projectkeys.ProjectIDFile, projectkeys.LegacyProjectIDFile} {
+		if s, ok := doc[key].(string); ok && s != "" {
+			ids = append(ids, s)
+		}
+	}
+	return ids
 }
 
 // settingsProjectIDs returns the project IDs a settings.yaml names: under
