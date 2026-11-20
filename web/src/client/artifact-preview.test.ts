@@ -253,6 +253,24 @@ describe('previewDocument', () => {
     expect(PREVIEW_CSP).toBe("default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
     expect(PREVIEW_SANDBOX.split(' ')).not.toContain('allow-scripts');
   });
+  it('applies custom dark-mode review and error theme tokens to CriticMarkup and failed image placeholders', () => {
+    const doc = previewDocument('<mark class="critic-hl">hi</mark>', {
+      reviewHlBg: '#713f12',
+      reviewHlText: '#fef9c3',
+      reviewInsBg: '#14532d',
+      reviewInsText: '#bbf7d0',
+      errorBg: 'rgba(239, 68, 68, 0.15)',
+      errorText: '#fca5a5',
+      errorBorder: 'rgba(248, 113, 113, 0.4)',
+    });
+    expect(doc).toContain('mark.critic-hl{background:#713f12;color:#fef9c3}');
+    expect(doc).toContain(
+      'ins.critic-ins{color:#bbf7d0;background:#14532d;text-decoration:underline}'
+    );
+    expect(doc).toContain(
+      '.image-placeholder.failed{border-color:rgba(248, 113, 113, 0.4);color:#fca5a5;background:rgba(239, 68, 68, 0.15)}'
+    );
+  });
 });
 
 /**

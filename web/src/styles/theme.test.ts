@@ -519,3 +519,262 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
     expect(violations).toEqual([]);
   });
 });
+
+/** Strip block and line comments without disturbing URLs (`https://...`). */
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[ \t])\/\/[^\n]*/gm, '$1');
+}
+
+/** Replace balanced `var(...)` expressions so token fallbacks are not treated as bare literals. */
+function stripVarExpressions(text: string): string {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    if (text.startsWith('var(', i)) {
+      let depth = 0;
+      let j = i + 3;
+      for (; j < text.length; j++) {
+        if (text[j] === '(') depth++;
+        else if (text[j] === ')') {
+          depth--;
+          if (depth === 0) {
+            j++;
+            break;
+          }
+        }
+      }
+      out += 'var()';
+      i = j;
+    } else {
+      out += text[i++];
+    }
+  }
+  return out;
+}
+
+const NEUTRAL_SHADOW_RE =
+  /^(?:rgba\(\s*(?:0\s*,\s*0\s*,\s*0|15\s*,\s*23\s*,\s*42)\s*,|rgb\(\s*(?:0\s+0\s+0|15\s+23\s+42)\s*\/)/i;
+const BARE_HEX_OR_FUNC_RE =
+  /(?<![\w&])#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b|\b(?:rgba?|hsla?)\s*\([^)]*\)/g;
+const BARE_NAMED_COLOR_RE =
+  /(?:^|[;\s{])(?:color|background(?:-color)?|border(?:-(?:top|right|bottom|left))?(?:-color)?|fill|stroke)\s*:\s*[^;{}]*\b(white|black)\b/gi;
+
+function findBareColorLiterals(text: string): string[] {
+  const clean = stripVarExpressions(stripComments(text));
+  const found: string[] = [];
+  for (const m of clean.matchAll(BARE_HEX_OR_FUNC_RE)) {
+    if (NEUTRAL_SHADOW_RE.test(m[0])) continue;
+    found.push(m[0]);
+  }
+  for (const m of clean.matchAll(BARE_NAMED_COLOR_RE)) {
+    found.push(m[1]);
+  }
+  return found;
+}
+
+/**
+ * Explicit allowlist of remaining bare color literals outside `styles/theme.css`.
+ *
+ * Categories:
+ * - Intentional non-theme palettes: terminal ANSI, CodeMirror syntax tokens,
+ *   deterministic avatar wheels, Chart.js categorical series, QR quiet zones,
+ *   sandboxed iframe fallback tables, and neutral switch-thumb/scrim literals.
+ * - Deferred branding PR 2c scope (ptone/scion#8409): brand surfaces (`login.ts`,
+ *   `unauthorized.ts`, `terminal-workspace-root.ts`), `--scion-primary-text`
+ *   foreground migrations, and `color-mix(...)` primary/status RGB tints.
+ */
+const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
+  // Intentional non-theme palettes & fallbacks
+  'client/artifact-preview.ts': {
+    max: 19,
+    reason: 'DEFAULT_THEME fallback table for sandboxed srcdoc iframes without computed styles',
+  },
+  'components/app-shell.ts': {
+    max: 1,
+    reason: 'Translucent white loading overlay',
+  },
+  'components/pages/admin-maintenance.ts': {
+    max: 1,
+    reason: 'Switch toggle thumb knob (white)',
+  },
+  'components/pages/metrics-dashboard.ts': {
+    max: 10,
+    reason: 'CHART_COLORS categorical data-visualization series palette',
+  },
+  'components/pages/profile-telegram.ts': {
+    max: 3,
+    reason: 'QR code dark/light quiet zone required for scanner readability',
+  },
+  'components/shared/chat/chat-avatar.ts': {
+    max: 27,
+    reason: 'Deterministic 18-hue light/dark avatar color wheel',
+  },
+  'components/shared/code-editor.ts': {
+    max: 21,
+    reason: 'CodeMirror One Dark syntax highlighting token palette',
+  },
+  'components/shared/decisions-format.ts': {
+    max: 6,
+    reason: 'AVATAR_PALETTE deterministic avatar colors',
+  },
+  'components/terminal/terminal-pane.ts': {
+    max: 35,
+    reason: 'xterm.js ANSI color palette and terminal viewport chrome',
+  },
+
+  // Deferred to branding PR 2c (ptone/scion#8409): brand surfaces, --scion-primary-text, color-mix tints
+  'client/terminal-workspace-root.ts': {
+    max: 6,
+    reason: 'PR 2c brand surface & terminal workspace chrome (ptone/scion#8409)',
+  },
+  'components/pages/admin-users.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/pages/agents.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/pages/home.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/pages/login.ts': {
+    max: 12,
+    reason: 'PR 2c brand surface + OAuth provider brand SVGs (ptone/scion#8409)',
+  },
+  'components/pages/profile-decisions.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/pages/project-detail.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/pages/project-settings.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/pages/projects.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/pages/unauthorized.ts': {
+    max: 4,
+    reason: 'PR 2c brand surface (ptone/scion#8409)',
+  },
+  'components/profile/profile-nav.ts': {
+    max: 4,
+    reason: 'PR 2c brand surface & --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/shared/chat/chat-composer.ts': {
+    max: 1,
+    reason: 'PR 2c color-mix RGB tint migration (ptone/scion#8409)',
+  },
+  'components/shared/chat/chat-interagent-marker.ts': {
+    max: 4,
+    reason: 'PR 2c color-mix RGB tint migration (ptone/scion#8409)',
+  },
+  'components/shared/chat/chat-members.ts': {
+    max: 1,
+    reason: 'PR 2c color-mix/primary migration (ptone/scion#8409)',
+  },
+  'components/shared/chat/chat-message.ts': {
+    max: 8,
+    reason: 'PR 2c --scion-primary-text & color-mix RGB tints (ptone/scion#8409)',
+  },
+  'components/shared/chat/chat-search.ts': {
+    max: 1,
+    reason: 'PR 2c color-mix RGB tint migration (ptone/scion#8409)',
+  },
+  'components/shared/chat/chat-space-rail.ts': {
+    max: 3,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/shared/chat/chat-thread.ts': {
+    max: 6,
+    reason: 'PR 2c --scion-primary-text, color-mix tints & offline HTML export (ptone/scion#8409)',
+  },
+  'components/shared/decisions-views.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/shared/header.ts': {
+    max: 4,
+    reason: 'PR 2c brand surface, --scion-primary-text & toggle knob (ptone/scion#8409)',
+  },
+  'components/shared/nav.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/shared/status-badge.ts': {
+    max: 6,
+    reason: 'PR 2c color-mix status pulse keyframes (ptone/scion#8409)',
+  },
+  'components/shared/untrusted-view-frame.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+  'components/shared/view-toggle.ts': {
+    max: 1,
+    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
+  },
+};
+
+describe('web/src bare color literal guard (ptone/scion#8410)', () => {
+  const srcDir = resolve(__dirname, '..');
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const name of readdirSync(dir)) {
+      if (name === '__fixtures__') continue;
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) out.push(...walk(p));
+      else if (
+        /\.(ts|css)$/.test(name) &&
+        !/\.test\.ts$/.test(name) &&
+        !/\.d\.ts$/.test(name) &&
+        name !== 'theme.css'
+      ) {
+        out.push(p);
+      }
+    }
+    return out;
+  };
+
+  it('rejects new bare color literals outside the explicit allowlist', () => {
+    const sourceFiles = walk(srcDir).sort();
+    const seen = new Set<string>();
+    const violations: string[] = [];
+
+    for (const file of sourceFiles) {
+      const rel = relative(srcDir, file).split(sep).join('/');
+      seen.add(rel);
+      const hits = findBareColorLiterals(readFileSync(file, 'utf8'));
+      const entry = BARE_COLOR_ALLOWLIST[rel];
+      const maxAllowed = entry?.max ?? 0;
+      if (hits.length > maxAllowed) {
+        violations.push(
+          `${rel}: found ${hits.length} bare color literal(s) (allowed ${maxAllowed}): ${hits.join(', ')}`
+        );
+      }
+    }
+
+    expect(violations).toEqual([]);
+    for (const allowedFile of Object.keys(BARE_COLOR_ALLOWLIST)) {
+      expect(seen.has(allowedFile), `stale allowlist entry: ${allowedFile}`).toBe(true);
+    }
+  });
+
+  it('flags planted bare hex, functional, and named colors while allowing var() fallbacks and neutral shadows', () => {
+    expect(
+      findBareColorLiterals('.a { color: #fef08a; background: rgba(59, 130, 246, 0.2); }')
+    ).toEqual(['#fef08a', 'rgba(59, 130, 246, 0.2)']);
+    expect(findBareColorLiterals('.a { color: white; }')).toEqual(['white']);
+    expect(
+      findBareColorLiterals(
+        '/* #ff0000 */\n// #00ff00\n.a { color: var(--scion-text, #1e293b); box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }'
+      )
+    ).toEqual([]);
+    expect(findBareColorLiterals('<span>&#9654;</span> /* ptone/scion#3067 */')).toEqual([]);
+  });
+});
