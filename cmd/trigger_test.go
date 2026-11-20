@@ -2768,6 +2768,7 @@ func TestTriggerHistoryCLI_MatchedThroughDecidedDialectAndVerboseTrace(t *testin
 	require.NotNil(t, parsed.Fires[0].RuleTrace)
 	assert.Len(t, parsed.Fires[0].RuleTrace.Elements, 2)
 	assert.Equal(t, []int{3}, parsed.Fires[1].RuleTrace.Unexecuted)
+}
 
 func TestTriggerCLI_GitHubCreateGetAndList(t *testing.T) {
 	fixedNow := time.Date(2026, 11, 18, 12, 10, 0, 0, time.UTC)
