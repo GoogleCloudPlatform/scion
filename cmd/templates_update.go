@@ -78,10 +78,11 @@ func runTemplatesUpdate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// A global-scope refresh reads no project, so, as requireHubForUpload
-	// does for --global, it neither links nor looks up one: a hub token
-	// without project:read can refresh global templates (ptone/scion#1713).
-	hubCtx, err := requireHubWith(projectPath, scope == "global")
+	// A global-scope or user-scope refresh reads no project, so, as
+	// requireHubForUpload does for --global, it neither links nor looks up
+	// one: a hub token without project:read can refresh global or user
+	// templates (ptone/scion#1713, ptone/scion#8643).
+	hubCtx, err := requireHubWith(projectPath, scope == "global" || scope == "user")
 	if err != nil {
 		return err
 	}
@@ -90,9 +91,10 @@ func runTemplatesUpdate(cmd *cobra.Command, args []string) error {
 	// Project templates are limited to the current project when one is
 	// resolved (from --project or the working directory). Without a project
 	// context, project templates from every project the caller can see are
-	// considered. A global-scope refresh considers no project templates.
+	// considered. A global-scope or user-scope refresh considers no project
+	// templates.
 	var currentProject string
-	if scope != "global" {
+	if scope != "global" && scope != "user" {
 		currentProject, _ = GetProjectID(hubCtx)
 	}
 

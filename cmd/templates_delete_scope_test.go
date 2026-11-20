@@ -497,8 +497,9 @@ func TestTemplatesDelete_ScopedRemovesOnlyChosenScope(t *testing.T) {
 func TestTemplatesDelete_ScopeValidationAndConflicts(t *testing.T) {
 	for name, args := range map[string][]string{
 		"unknown scope":                {"--non-interactive", "templates", "delete", "base", "--scope", "galaxy"},
-		"user scope not accepted":      {"--non-interactive", "templates", "delete", "base", "--scope", "user"},
 		"--global conflicts w project": {"--non-interactive", "--global", "templates", "delete", "base", "--scope", "project"},
+		"--global conflicts w user":    {"--non-interactive", "--global", "templates", "delete", "base", "--scope", "user"},
+		"--local conflicts w user":     {"--non-interactive", "templates", "delete", "base", "--local", "--scope", "user"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			hub, srv := newTUHub(t)

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -36,6 +37,7 @@ const (
 	LocationLocalGlobal  TemplateLocation = "local-global"
 	LocationHubProject   TemplateLocation = "hub-project"
 	LocationHubGlobal    TemplateLocation = "hub-global"
+	LocationHubUser      TemplateLocation = "hub-user"
 )
 
 // TemplateMatch represents a template found during resolution.
@@ -57,6 +59,8 @@ func (m *TemplateMatch) DisplayLocation() string {
 		return fmt.Sprintf("Hub Project      (scope=project, ID: %s)", m.HubTemplate.ID)
 	case LocationHubGlobal:
 		return fmt.Sprintf("Hub Global     (scope=global, ID: %s)", m.HubTemplate.ID)
+	case LocationHubUser:
+		return fmt.Sprintf("Hub User       (scope=user, ID: %s)", m.HubTemplate.ID)
 	default:
 		return string(m.Location)
 	}
@@ -69,16 +73,18 @@ func (m *TemplateMatch) IsLocal() bool {
 
 // IsHub returns true if this is a hub template.
 func (m *TemplateMatch) IsHub() bool {
-	return m.Location == LocationHubProject || m.Location == LocationHubGlobal
+	return m.Location == LocationHubProject || m.Location == LocationHubGlobal || m.Location == LocationHubUser
 }
 
-// Scope returns the scope ("project" or "global") of the template match.
+// Scope returns the scope ("project", "global", or "user") of the template match.
 func (m *TemplateMatch) Scope() string {
 	switch m.Location {
 	case LocationLocalProject, LocationHubProject:
 		return "project"
 	case LocationLocalGlobal, LocationHubGlobal:
 		return "global"
+	case LocationHubUser:
+		return "user"
 	default:
 		if m.HubTemplate != nil && m.HubTemplate.Scope != "" {
 			return m.HubTemplate.Scope
@@ -106,10 +112,12 @@ type ResolveOpts struct {
 	HubOnly     bool // --hub flag: only search Hub
 	ProjectOnly bool // --scope project: only search project scope
 	GlobalOnly  bool // --global or --scope global: only search global scope
+	UserOnly    bool // --scope user: only search user scope (Hub only)
 	AutoConfirm bool // -y flag: use first match or error if multiple
 }
 
-// FindTemplateAllLocations searches all 4 locations for a template by name.
+// FindTemplateAllLocations searches all 5 locations (local project/global and
+// Hub project/global/user) for a template by name.
 // Returns all matches found. The caller should use PromptTemplateChoice if
 // multiple matches are found.
 func FindTemplateAllLocations(ctx context.Context, name string, hubCtx *HubContext, opts *ResolveOpts) ([]TemplateMatch, error) {
@@ -119,8 +127,9 @@ func FindTemplateAllLocations(ctx context.Context, name string, hubCtx *HubConte
 
 	var matches []TemplateMatch
 
-	// Search local templates unless HubOnly is set
-	if !opts.HubOnly {
+	// Search local templates unless HubOnly or UserOnly is set (local
+	// filesystem has no user scope).
+	if !opts.HubOnly && !opts.UserOnly {
 		localMatches, err := findLocalTemplates(name, opts)
 		if err != nil {
 			return nil, err
@@ -198,15 +207,16 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Get project ID for project-scoped lookups. A global-only search
-	// reads no project, so it does not look one up (ptone/scion#1713).
+	// Get project ID for project-scoped lookups. A global-only or user-only
+	// search reads no project, so it does not look one up (ptone/scion#1713,
+	// ptone/scion#8643).
 	var projectID string
-	if !opts.GlobalOnly {
+	if !opts.GlobalOnly && !opts.UserOnly {
 		projectID, _ = GetProjectID(hubCtx)
 	}
 
-	// Search project scope unless GlobalOnly is set
-	if !opts.GlobalOnly && projectID != "" {
+	// Search project scope unless GlobalOnly or UserOnly is set
+	if !opts.GlobalOnly && !opts.UserOnly && projectID != "" {
 		resp, err := hubCtx.Client.Templates().List(listCtx, &hubclient.ListTemplatesOptions{
 			Name:      name,
 			Scope:     "project",
@@ -231,8 +241,8 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 		}
 	}
 
-	// Search global scope unless ProjectOnly is set
-	if !opts.ProjectOnly {
+	// Search global scope unless ProjectOnly or UserOnly is set
+	if !opts.ProjectOnly && !opts.UserOnly {
 		resp, err := hubCtx.Client.Templates().List(listCtx, &hubclient.ListTemplatesOptions{
 			Name:   name,
 			Scope:  "global",
@@ -250,6 +260,36 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 					Location:    LocationHubGlobal,
 					HubTemplate: t,
 				})
+			}
+		}
+	}
+
+	// Search user scope unless ProjectOnly or GlobalOnly is set
+	if !opts.ProjectOnly && !opts.GlobalOnly {
+		resp, err := hubCtx.Client.Templates().List(listCtx, &hubclient.ListTemplatesOptions{
+			Name:   name,
+			Scope:  "user",
+			Status: "active",
+		})
+		if err != nil {
+			// When user scope was explicitly requested (e.g. delete --scope user),
+			// surface all errors including 401/403 (such as agent callers). For
+			// unscoped lookups (show/pull/clone), ignore 401/403 on user scope so
+			// callers without a user identity can still resolve project/global
+			// templates.
+			if opts.UserOnly || (!apiclient.IsUnauthorizedError(err) && !apiclient.IsForbiddenError(err)) {
+				return nil, fmt.Errorf("failed to search Hub user templates: %w", err)
+			}
+		} else {
+			for i := range resp.Templates {
+				t := &resp.Templates[i]
+				if (t.Name == name || t.Slug == name) && (t.Scope == "" || t.Scope == "user") {
+					matches = append(matches, TemplateMatch{
+						Name:        t.Name,
+						Location:    LocationHubUser,
+						HubTemplate: t,
+					})
+				}
 			}
 		}
 	}
@@ -375,9 +415,9 @@ func ResolveTemplate(ctx context.Context, name string, hubCtx *HubContext, opts 
 	// Multiple matches found
 	if opts.AutoConfirm {
 		// In auto-confirm mode with multiple matches, we need a deterministic choice.
-		// Use priority: local-project > local-global > hub-project > hub-global
+		// Use priority: local-project > local-global > hub-project > hub-user > hub-global
 		// This matches the existing FindTemplate behavior.
-		for _, loc := range []TemplateLocation{LocationLocalProject, LocationLocalGlobal, LocationHubProject, LocationHubGlobal} {
+		for _, loc := range []TemplateLocation{LocationLocalProject, LocationLocalGlobal, LocationHubProject, LocationHubUser, LocationHubGlobal} {
 			for i := range matches {
 				if matches[i].Location == loc {
 					return &matches[i], nil
@@ -405,10 +445,13 @@ func ResolveTemplateForDelete(ctx context.Context, name string, hubCtx *HubConte
 
 	if len(matches) == 0 {
 		if opts.ProjectOnly {
-			return nil, fmt.Errorf("template '%s' not found in project scope (use --scope global or --global to delete a global template)", name)
+			return nil, fmt.Errorf("template '%s' not found in project scope (use --scope global, --global, or --scope user for other scopes)", name)
 		}
 		if opts.GlobalOnly {
 			return nil, fmt.Errorf("template '%s' not found in global scope", name)
+		}
+		if opts.UserOnly {
+			return nil, fmt.Errorf("template '%s' not found in user scope", name)
 		}
 		return nil, fmt.Errorf("template '%s' not found", name)
 	}

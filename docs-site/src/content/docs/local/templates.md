@@ -263,7 +263,7 @@ When you reference a template by bare name, Scion searches in this order and use
 
 A template name (anything that is not a remote URI or an absolute path) is a single path component, with no `/`, `\`, `..`, `.`, leading `:` or `://`. A name in another form (for example `team/reviewer`) is refused rather than looked up. The same rule applies to harness-config names. The Hub and store refuse such a name on every write (`CreateTemplate`, `UpdateTemplate`, `CreateHarnessConfig`, `UpdateHarnessConfig`, create, rename, clone or import) with `name must be a single path component`, and when an agent create request names a template (`template must be a template name or ID`) or harness-config (`harness config must be a harness-config name`). `scion templates pull` and `scion harness-config pull` without `--to` build the destination directory only from a name in that form.
 
-When connected to a Hub, templates resolve from the Hub across three scopes. If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search (`templates delete` defaults to `project` scope and takes `--scope <project|global>` or `--global` to delete a global template; `templates update` takes `--scope <global|project|user>`).
+When connected to a Hub, templates resolve from the Hub across three scopes. If a name matches in several locations, the CLI prompts you to choose; the `--local`, `--hub`, and `--global` flags narrow the search (`templates delete` defaults to `project` scope and takes `--scope <project|global|user>` or `--global`; `templates sync`/`push` and `templates update` also take `--scope <global|project|user>`).
 
 ### Hub Template Scopes
 
@@ -312,8 +312,9 @@ scion templates clone code-reviewer my-custom-reviewer
 # Delete a project template (alias: rm); defaults to project scope
 scion templates delete my-old-role
 
-# Delete a global template
+# Delete a global or user template
 scion templates delete my-old-role --scope global
+scion templates delete my-old-role --scope user
 
 # Refresh the built-in default template from the binary
 scion templates update-default --force
@@ -350,8 +351,9 @@ scion templates sync code-reviewer          # alias: scion templates push
 # Sync every local project template at once
 scion templates sync --all
 
-# Sync to global scope, or under a different Hub name
+# Sync to global or user scope, or under a different Hub name
 scion --global templates sync code-reviewer
+scion templates sync code-reviewer --scope user
 scion templates sync code-reviewer --name team-reviewer
 
 # Sync a template directory by path (Hub name defaults to its base name)

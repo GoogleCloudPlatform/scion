@@ -460,38 +460,30 @@ var templatesDeleteCmd = &cobra.Command{
 }
 
 // runTemplateDelete implements the delete command with confirmation prompts.
-// Scope defaults to project (the narrowest scope); deleting a global template
-// requires --scope global or the root --global flag.
+// Scope defaults to project (the narrowest scope); deleting a global or user
+// template requires --scope global, the root --global flag, or --scope user.
 func runTemplateDelete(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
 	// Get flags - handle nil cmd for testing
 	var localOnly, hubOnly bool
-	var scope string
+	var rawScope string
 	if cmd != nil {
 		localOnly, _ = cmd.Flags().GetBool("local")
 		hubOnly, _ = cmd.Flags().GetBool("hub")
-		scope, _ = cmd.Flags().GetString("scope")
-	}
-
-	switch scope {
-	case "", "project", "global":
-	default:
-		return newUsageError("--scope must be project or global")
+		rawScope, _ = cmd.Flags().GetString("scope")
 	}
 
 	// The root --global flag selects the global scope (ptone/scion#1713);
 	// otherwise delete defaults to project scope so an unscoped delete never
-	// widens to global templates (ptone/scion#8318).
-	if globalMode {
-		switch scope {
-		case "", "global":
-			scope = "global"
-		default:
-			return newUsageError("--global conflicts with --scope %s", scope)
-		}
-	} else if scope == "" {
-		scope = templateScopeFromGlobalFlag()
+	// widens to global or user templates (ptone/scion#8318, ptone/scion#8643).
+	scope, err := resolveTemplateTargetScope(rawScope)
+	if err != nil {
+		return err
+	}
+
+	if localOnly && scope == "user" {
+		return newUsageError("--local cannot be used with --scope user (user-scoped templates exist only on the Hub)")
 	}
 
 	// Build resolution options
@@ -500,18 +492,20 @@ func runTemplateDelete(cmd *cobra.Command, args []string) error {
 		HubOnly:     hubOnly,
 		ProjectOnly: scope == "project",
 		GlobalOnly:  scope == "global",
+		UserOnly:    scope == "user",
 		AutoConfirm: autoConfirm,
 	}
 
 	// A hub error is returned (no silent fallback to the filesystem);
-	// --local is the explicit filesystem-only view. With --global or
-	// --scope global no project is read, so the project is not linked or
-	// looked up: a hub token without project:read can delete global
-	// templates (ptone/scion#1713, ptone/scion#8318).
+	// --local is the explicit filesystem-only view. With --global,
+	// --scope global, or --scope user no project is read, so the project is
+	// not linked or looked up: a hub token without project:read can delete
+	// global or user templates (ptone/scion#1713, ptone/scion#8318,
+	// ptone/scion#8643).
 	var hubCtx *HubContext
 	if !localOnly {
 		var err error
-		hubCtx, err = requireHubWith(projectPath, scope == "global")
+		hubCtx, err = requireHubWith(projectPath, scope != "project")
 		if err != nil {
 			return err
 		}
@@ -536,7 +530,7 @@ func runTemplateDelete(cmd *cobra.Command, args []string) error {
 func registerTemplateDeleteFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("local", false, "Only search local filesystem")
 	cmd.Flags().Bool("hub", false, "Only search Hub")
-	cmd.Flags().String("scope", "", "Target scope (project, global; defaults to project, or global with --global)")
+	cmd.Flags().String("scope", "", "Target scope (project, global, user; defaults to project, or global with --global)")
 }
 
 // deleteTemplateMatch deletes a single template match after confirmation.
@@ -749,9 +743,10 @@ or updates it with any changed files if it does. Syncing an existing template
 mirrors the local directory: files deleted locally are removed from the Hub copy.
 
 The harness type is automatically detected from the template's configuration file.
-Use the root --global flag to sync to global scope instead of project scope.
+Use --scope <project|global|user> (or the root --global flag as shorthand for
+--scope global) to choose the target scope on the Hub.
 
-Use --all to sync all project-scoped local templates to the Hub at once.
+Use --all to sync all project-scoped (or global-scoped) local templates to the Hub at once.
 
 The template may also be given as a directory path: . or .., an absolute
 path, or one containing a path separator (such as ./name). The directory is
@@ -776,6 +771,10 @@ Examples:
 
   # Sync with global scope
   scion --global templates sync custom-claude
+  scion templates sync custom-claude --scope global
+
+  # Sync to your user scope
+  scion templates sync custom-claude --scope user
 
   # Sync with a different name on the Hub
   scion templates sync custom-claude --name my-team-claude`,
@@ -801,8 +800,9 @@ Examples:
   # Push all project templates to Hub
   scion templates push --all
 
-  # Push with global scope
-  scion --global templates push custom-claude`,
+  # Push with global or user scope
+  scion --global templates push custom-claude
+  scion templates push custom-claude --scope user`,
 	Args: templateSyncArgs,
 	RunE: runTemplateSync,
 }
@@ -824,10 +824,41 @@ func templateScopeFromGlobalFlag() string {
 	return "project"
 }
 
+// resolveTemplateTargetScope validates an explicit --scope flag value against
+// the template scope vocabulary ("global", "project", "user"), enforces that
+// root --global does not conflict with a non-global --scope, and falls back to
+// templateScopeFromGlobalFlag() when --scope is empty.
+func resolveTemplateTargetScope(rawScope string) (string, error) {
+	switch rawScope {
+	case "", "project", "global", "user":
+	default:
+		return "", newUsageError("--scope must be global, project, or user")
+	}
+	if globalMode {
+		switch rawScope {
+		case "", "global":
+			return "global", nil
+		default:
+			return "", newUsageError("--global conflicts with --scope %s", rawScope)
+		}
+	}
+	if rawScope == "" {
+		return templateScopeFromGlobalFlag(), nil
+	}
+	return rawScope, nil
+}
+
+func registerTemplateSyncFlags(cmd *cobra.Command, verb string) {
+	cmd.Flags().String("name", "", "Name for the template on the Hub (defaults to local template name)")
+	cmd.Flags().Bool("all", false, fmt.Sprintf("%s all local templates to the Hub", verb))
+	cmd.Flags().String("scope", "", "Target scope on the Hub (project, global, user; defaults to project, or global with --global)")
+}
+
 // templateSyncArgs is the Args validator for template sync/push: one
-// template name or --all (not both), and no --name with --all. Validating
-// here, before root's PersistentPreRunE, keeps these reported as usage
-// errors (ptone/scion#2859).
+// template name or --all (not both), no --name with --all, valid --scope
+// without --global conflict, and no --all with --scope user. Validating here,
+// before root's PersistentPreRunE, keeps these reported as usage errors
+// (ptone/scion#2859).
 func templateSyncArgs(cmd *cobra.Command, args []string) error {
 	if err := nameOrAllArgs("template")(cmd, args); err != nil {
 		return err
@@ -837,13 +868,34 @@ func templateSyncArgs(cmd *cobra.Command, args []string) error {
 	if all && hubName != "" {
 		return fmt.Errorf("cannot use --name with --all")
 	}
+	rawScope, _ := cmd.Flags().GetString("scope")
+	destScope, err := resolveTemplateTargetScope(rawScope)
+	if err != nil {
+		return err
+	}
+	if all && destScope == "user" {
+		return newUsageError("cannot use --all with --scope user (local templates have no user scope)")
+	}
 	return nil
 }
 
 // runTemplateSync implements the shared logic for sync and push commands.
 func runTemplateSync(cmd *cobra.Command, args []string) error {
-	hubName, _ := cmd.Flags().GetString("name")
-	syncAll, _ := cmd.Flags().GetBool("all")
+	var hubName, rawScope string
+	var syncAll bool
+	if cmd != nil {
+		hubName, _ = cmd.Flags().GetString("name")
+		syncAll, _ = cmd.Flags().GetBool("all")
+		rawScope, _ = cmd.Flags().GetString("scope")
+	}
+
+	destScope, err := resolveTemplateTargetScope(rawScope)
+	if err != nil {
+		return err
+	}
+	if syncAll && destScope == "user" {
+		return newUsageError("cannot use --all with --scope user (local templates have no user scope)")
+	}
 
 	// Arguments and --all/--name were validated by templateSyncArgs; this
 	// guard only protects args[0] below for a direct caller that skips it.
@@ -870,15 +922,14 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Check Hub availability first (we need it for sync anyway). A
-	// --global sync does not link the project (see requireHubForUpload).
-	hubCtx, err := requireHubForUpload(projectPath)
+	// Check Hub availability first (we need it for sync anyway). A --global,
+	// --scope global, or --scope user sync does not link or look up the
+	// project (ptone/scion#1713, ptone/scion#8643).
+	hubCtx, err := requireHubWith(projectPath, destScope != "project")
 	if err != nil {
 		return err
 	}
 	PrintUsingHub(hubCtx.Endpoint)
-
-	destScope := templateScopeFromGlobalFlag()
 
 	if syncAll {
 		return syncAllTemplatesToHub(hubCtx, destScope)
@@ -1768,12 +1819,10 @@ func init() {
 	templatesImportCmd.Flags().Bool("all", false, "Import all discovered agents")
 
 	// Flags for sync command (--global is inherited from root)
-	templatesSyncCmd.Flags().String("name", "", "Name for the template on the Hub (defaults to local template name)")
-	templatesSyncCmd.Flags().Bool("all", false, "Sync all local templates to the Hub")
+	registerTemplateSyncFlags(templatesSyncCmd, "Sync")
 
 	// Flags for push command (same as sync, since push is an alias)
-	templatesPushCmd.Flags().String("name", "", "Name for the template on the Hub (defaults to local template name)")
-	templatesPushCmd.Flags().Bool("all", false, "Push all local templates to the Hub")
+	registerTemplateSyncFlags(templatesPushCmd, "Push")
 
 	// Flags for pull command
 	templatesPullCmd.Flags().String("to", "", "Destination path for downloaded template")
@@ -1829,8 +1878,7 @@ func init() {
 		Args:  templateSyncArgs,
 		RunE:  runTemplateSync,
 	}
-	syncAlias.Flags().String("name", "", "Name for the template on the Hub (defaults to local template name)")
-	syncAlias.Flags().Bool("all", false, "Sync all local templates to the Hub")
+	registerTemplateSyncFlags(syncAlias, "Sync")
 	templateCmd.AddCommand(syncAlias)
 
 	pushAlias := &cobra.Command{
@@ -1839,8 +1887,7 @@ func init() {
 		Args:  templateSyncArgs,
 		RunE:  runTemplateSync,
 	}
-	pushAlias.Flags().String("name", "", "Name for the template on the Hub (defaults to local template name)")
-	pushAlias.Flags().Bool("all", false, "Push all local templates to the Hub")
+	registerTemplateSyncFlags(pushAlias, "Push")
 	templateCmd.AddCommand(pushAlias)
 
 	statusAlias := &cobra.Command{

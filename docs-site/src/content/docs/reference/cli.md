@@ -1233,8 +1233,8 @@ Manages agent templates. `scion template` (singular) is an accepted alias. Scope
 - `create <name>`: Create a new template (seeded from the `default` template).
 - `clone <src> <dest>`: Clone an existing template (local or Hub source) to a new local one.
     - Flags: `--local`, `--hub` (restrict where the source is searched). This `--hub` switch shadows the root `--hub <url>` flag, so select the Hub with `scion use` or `SCION_HUB_ENDPOINT`; the same holds for `delete`.
-- `delete <name>` (alias `rm`): Delete a template in the target scope (`project` by default; pass `--scope global` or the root `--global` flag to delete a global template).
-    - Flags: `--local`, `--hub`, `--scope <project|global>` (defaults to `project`, or `global` with `--global`; with `global`, it links and looks up no project, so it works with a token outside a project; `--global` with `--scope project` is rejected).
+- `delete <name>` (alias `rm`): Delete a template in the target scope (`project` by default; pass `--scope global`, the root `--global` flag, or `--scope user` to delete a global or user template).
+    - Flags: `--local`, `--hub`, `--scope <project|global|user>` (defaults to `project`, or `global` with `--global`; with `global` or `user`, it links and looks up no project, so it works with a token outside a project; `--global` with a different `--scope` is rejected, and `--local` cannot be used with `--scope user`).
 - `import <source>`: Import agent definitions (Claude/Gemini sub-agents or Scion templates) into your templates directory.
     - Flags: `--all` (import every discovered agent), `-H, --harness <type>` (force `claude`/`gemini`), `--name <name>` (rename a single import), `--force` (overwrite), `--dry-run` (preview).
 - `update-default`: Update the global default template with the latest from the binary.
@@ -1243,11 +1243,11 @@ Manages agent templates. `scion template` (singular) is an accepted alias. Scope
 
 Hub-only commands (require an enabled Hub):
 
-- `sync [template]` (alias `push`): Create or update a template in the Hub; only changed files are uploaded. Use `--all` to sync every local template, or `--name <name>` to sync under a different Hub name.
+- `sync [template]` (alias `push`): Create or update a template in the Hub; only changed files are uploaded. Use `--all` to sync every local template, `--name <name>` to sync under a different Hub name, or `--scope <project|global|user>` to select the target Hub scope (defaults to `project`, or `global` with `--global`; with `global` or `user`, it links and looks up no project, so it works outside a project; `--global` with a different `--scope` is rejected, and `--all` cannot be used with `--scope user`).
     - The template may also be a directory path: `.` or `..`, an absolute path, or one that contains a path separator (such as `./name` or `../name`). That directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Such an argument is read relative to the current directory, not looked up in the templates directories. If the base name cannot be a template name (for example a content-hash cache directory), sync stops and asks for `--name`.
 - `pull <name>`: Download a template from the Hub to the local filesystem. Use `--to <path>` for a custom destination.
 - `update [name]`: Refresh a Hub template from its stored GitHub source URL.
-    - Flags: `--all` (every template with a GitHub source URL), `--scope <global|project|user>` (only templates in this scope; with `global`, or the root `--global` flag, it links and looks up no project, so it works with `--hub <url>` and a token outside a project; `--global` with a different `--scope` is rejected), `--url <url>` (override and store the source URL).
+    - Flags: `--all` (every template with a GitHub source URL), `--scope <global|project|user>` (only templates in this scope; with `global`, `user`, or the root `--global` flag, it links and looks up no project, so it works with `--hub <url>` and a token outside a project; `--global` with a different `--scope` is rejected), `--url <url>` (override and store the source URL).
 - `status`: Show the sync status of templates relative to the Hub.
 
 See [Templates & Roles](/scion/local/templates/) for the full guide.

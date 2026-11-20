@@ -57,6 +57,16 @@ func runTemplatesRoot(t *testing.T, args ...string) error {
 		if alias := resolveCommandPath(rootCmd, "template.delete"); alias != nil {
 			resetFlags(alias.Flags(), "local", "hub", "scope")
 		}
+		resetFlags(templatesSyncCmd.Flags(), "name", "all", "scope")
+		resetFlags(templatesPushCmd.Flags(), "name", "all", "scope")
+		if alias := resolveCommandPath(rootCmd, "template.sync"); alias != nil {
+			resetFlags(alias.Flags(), "name", "all", "scope")
+		}
+		if alias := resolveCommandPath(rootCmd, "template.push"); alias != nil {
+			resetFlags(alias.Flags(), "name", "all", "scope")
+		}
+		resetFlags(templatesShowCmd.Flags(), "local", "hub")
+		resetFlags(templatesPullCmd.Flags(), "to")
 		resetFlags(templatesCloneCmd.Flags(), "local", "hub")
 		resetFlags(rootCmd.PersistentFlags(), "global", "hub", "project", "yes", "non-interactive")
 		rootCmd.SetArgs(nil)
