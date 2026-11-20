@@ -74,26 +74,51 @@ func TestCreateAgent_HostedRefusesMemberVolumes(t *testing.T) {
 }
 
 // A gcs volume is let through on a hosted broker whose agents run on
-// Kubernetes; the create proceeds past the check.
-func TestCreateAgent_HostedAllowsGCSOnKubernetes(t *testing.T) {
-	mgr := &mockManager{}
-	setupTestScionEnv(t)
-	cfg := testServerConfig()
-	cfg.BrokerID = "test-broker-id"
-	cfg.ForceRuntime = "kubernetes"
-	rt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
-	endAsyncLaunchesAtCleanup(t, srv)
-
-	body := `{"name": "a1", "inlineConfig": {"volumes": [{"type": "gcs", "bucket": "b", "target": "/b"}]}}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-	if w.Code == http.StatusBadRequest {
-		if code, _ := decodeError(t, w); code == hostedguard.ErrorCode {
-			t.Fatalf("gcs on Kubernetes refused: %s", w.Body.String())
-		}
+// Kubernetes, under each name a Kubernetes runtime type may have in
+// settings ("kubernetes", and the legacy "k8s" and "remote"); the create or
+// start then runs.
+func TestHostedAllowsGCSOnKubernetes(t *testing.T) {
+	newServer := func(t *testing.T, rtName string, mgr *mockManager) *Server {
+		t.Helper()
+		setupTestScionEnv(t)
+		cfg := testServerConfig()
+		cfg.BrokerID = "test-broker-id"
+		cfg.ForceRuntime = rtName
+		rt := &runtime.MockRuntime{NameFunc: func() string { return rtName }}
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+		endAsyncLaunchesAtCleanup(t, srv)
+		return srv
+	}
+	const gcs = `{"volumes": [{"type": "gcs", "bucket": "b", "target": "/b"}]}`
+	for _, rtName := range []string{"kubernetes", "k8s", "remote"} {
+		t.Run("create on "+rtName, func(t *testing.T) {
+			mgr := &mockManager{}
+			srv := newServer(t, rtName, mgr)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(`{"name": "a1", "inlineConfig": `+gcs+`}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code >= 400 {
+				t.Fatalf("status = %d, want success: %s", w.Code, w.Body.String())
+			}
+			if mgr.startCalls != 1 {
+				t.Fatalf("Start was called %d times, want 1", mgr.startCalls)
+			}
+		})
+		t.Run("start on "+rtName, func(t *testing.T) {
+			mgr := &mockManager{agents: []api.AgentInfo{{ID: "container-1", Name: "test-agent-1", Phase: "stopped"}}}
+			srv := newServer(t, rtName, mgr)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start", strings.NewReader(`{"inlineConfig": `+gcs+`}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code >= 400 {
+				t.Fatalf("status = %d, want success: %s", w.Code, w.Body.String())
+			}
+			if mgr.startCalls != 1 {
+				t.Fatalf("Start was called %d times, want 1", mgr.startCalls)
+			}
+		})
 	}
 }
 

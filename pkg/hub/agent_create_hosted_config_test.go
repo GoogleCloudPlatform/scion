@@ -118,8 +118,19 @@ func TestCreateAgent_WorkstationKeepsMemberVolumes(t *testing.T) {
 // stored agent whose inline config holds vols.
 func hostedPrecheckDispatcher(t *testing.T, hosted bool, vols []api.VolumeMount) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
 	t.Helper()
-	ctx := context.Background()
 	s := createTestStore(t)
+	agent := createHostedPrecheckAgent(t, s, vols)
+	m := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, m, false, slog.Default())
+	d.SetHostedMode(hosted)
+	return d, m, agent
+}
+
+// createHostedPrecheckAgent stores a broker, a project and one agent whose
+// inline config holds vols in s, and returns the agent.
+func createHostedPrecheckAgent(t *testing.T, s store.Store, vols []api.VolumeMount) *store.Agent {
+	t.Helper()
+	ctx := context.Background()
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
 		ID: tid("hosted-broker"), Name: "hosted-broker", Slug: "hosted-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
@@ -135,10 +146,29 @@ func hostedPrecheckDispatcher(t *testing.T, hosted bool, vols []api.VolumeMount)
 		},
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	m := &mockRuntimeBrokerClient{}
-	d := NewHTTPAgentDispatcherWithClient(s, m, false, slog.Default())
-	d.SetHostedMode(hosted)
-	return d, m, agent
+	return agent
+}
+
+// TestCreateAuthenticatedDispatcher_HostedMode: the production dispatcher
+// of a hosted hub is in hosted mode and refuses a host volume in an agent's
+// stored inline config; that of a workstation hub is not and does not.
+func TestCreateAuthenticatedDispatcher_HostedMode(t *testing.T) {
+	agent := &store.Agent{
+		ID: "a1", AppliedConfig: &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{Volumes: []api.VolumeMount{hostedSocketVolume}},
+		},
+	}
+	for _, workstation := range []bool{false, true} {
+		cfg := testServerConfig()
+		cfg.Workstation = workstation
+		srv, _ := testServerWithStoreConfig(t, createTestStore(t), cfg)
+		d := srv.CreateAuthenticatedDispatcher()
+		assert.Equal(t, !workstation, d.hostedMode, "workstation=%v", workstation)
+		err := d.hostedConfigPrecheck(agent)
+		var refusal *RuntimeTargetRefusal
+		refused := errors.As(err, &refusal) && refusal.Code == hostedguard.ErrorCode
+		assert.Equal(t, !workstation, refused, "workstation=%v: %v", workstation, err)
+	}
 }
 
 // TestDispatch_HostedConfigPrecheck: on a hosted hub every dispatch path
