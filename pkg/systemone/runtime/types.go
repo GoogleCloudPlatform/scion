@@ -236,16 +236,26 @@ type InputFingerprint struct {
 	SHA256 string             `json:"sha256,omitempty"`
 }
 
+// SecretRefProvenance records content-free named-secret reference metadata for
+// an evaluation (PV3 brief Addendum F §§F2, F7). Secret values are never stored here.
+type SecretRefProvenance struct {
+	Name      string `json:"name"`
+	Scope     string `json:"scope,omitempty"`
+	ScopeUsed string `json:"scope_used,omitempty"`
+}
+
 // AuthProvenance records content-free, non-secret authentication metadata for
-// an evaluation (PV3 brief Addendum B §§B4, B6, B10). Token and secret values
-// are never stored here.
+// an evaluation (PV3 brief Addendum B §§B4, B6, B10; Addendum F §§F2, F7). Token
+// and secret values are never stored here.
 type AuthProvenance struct {
-	AuthKind            string   `json:"auth_kind,omitempty"`
-	Scopes              []string `json:"scopes,omitempty"`
-	QuotaProject        string   `json:"quota_project,omitempty"`
-	CredentialType      string   `json:"credential_type,omitempty"`
-	ServiceAccountEmail string   `json:"service_account_email,omitempty"`
-	ReasonHint          string   `json:"reason_hint,omitempty"`
+	AuthKind            string               `json:"auth_kind,omitempty"`
+	SecretRef           *SecretRefProvenance `json:"secret_ref,omitempty"`
+	SecretVersion       int                  `json:"secret_version,omitempty"`
+	Scopes              []string             `json:"scopes,omitempty"`
+	QuotaProject        string               `json:"quota_project,omitempty"`
+	CredentialType      string               `json:"credential_type,omitempty"`
+	ServiceAccountEmail string               `json:"service_account_email,omitempty"`
+	ReasonHint          string               `json:"reason_hint,omitempty"`
 }
 
 // Evaluation is the content-free provenance record returned on every evaluation

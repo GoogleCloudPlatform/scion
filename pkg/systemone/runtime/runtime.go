@@ -182,6 +182,7 @@ type transportKey struct {
 	endpoint        string
 	authKind        string
 	secretName      string
+	secretScope     string
 	headerName      string
 	audience        string
 	scopes          string
@@ -191,12 +192,36 @@ type transportKey struct {
 }
 
 type evalCallTrackerKey struct{}
+type evalProjectIDKey struct{}
+
+// WithEvalProjectID attaches a validated evaluation project ID to ctx so
+// CredentialSource implementations resolving project-scoped named secrets
+// receive the evaluation's own project over shared transports (PV3 Addendum F).
+func WithEvalProjectID(ctx context.Context, projectID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, evalProjectIDKey{}, strings.TrimSpace(projectID))
+}
+
+// EvalProjectIDFromContext returns the validated evaluation project ID attached
+// by Runtime.Evaluate or WithEvalProjectID, or "" when unset.
+func EvalProjectIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(evalProjectIDKey{}).(string)
+	return v
+}
 
 type evalCallTracker struct {
-	preCallAuthFailed atomic.Bool
-	mu                sync.Mutex
-	credType          string
-	saEmail           string
+	preCallAuthFailed  atomic.Bool
+	mu                 sync.Mutex
+	credType           string
+	saEmail            string
+	secretRefName      string
+	secretRefScopeUsed string
+	secretVersion      int
 }
 
 // RecordAuthIdentity records non-secret credential category metadata (such as
@@ -228,6 +253,40 @@ func (t *evalCallTracker) authIdentity() (string, string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.credType, t.saEmail
+}
+
+// RecordSecretRefProvenance records non-secret named-secret resolution metadata
+// (secret name, effective scope used: "project" or "hub", and positive metadata
+// version) on the active evaluation's content-free provenance record. Values
+// failing grammar/enum checks are silently ignored; secret values must never be
+// passed here.
+func RecordSecretRefProvenance(ctx context.Context, name, scopeUsed string, version int) {
+	if ctx == nil {
+		return
+	}
+	tracker, ok := ctx.Value(evalCallTrackerKey{}).(*evalCallTracker)
+	if !ok || tracker == nil {
+		return
+	}
+	if !provider.IsValidSecretRefName(name) {
+		return
+	}
+	if scopeUsed != provider.SecretScopeHub && scopeUsed != provider.SecretScopeProject {
+		return
+	}
+	tracker.mu.Lock()
+	tracker.secretRefName = name
+	tracker.secretRefScopeUsed = scopeUsed
+	if version > 0 {
+		tracker.secretVersion = version
+	}
+	tracker.mu.Unlock()
+}
+
+func (t *evalCallTracker) secretRefProvenance() (string, string, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.secretRefName, t.secretRefScopeUsed, t.secretVersion
 }
 
 func markPreCallAuthFailed(ctx context.Context) {
@@ -437,6 +496,9 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		return r.finishFailed(ctx, compiled.Kind, start, eval, authReason)
 	}
 	eval.Auth = buildInitialAuthProvenance(inst, selectedScheme)
+	if projReason := checkInstanceProjectContext(inst, opts.ProjectID); projReason != "" {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, projReason)
+	}
 
 	// Step 5: Tighten runtime-owned deadline with per-instance CallTimeout ceiling (§7.1).
 	attemptOwnDur := r.effectiveOwnDuration(compiled.Timeout, opts, inst.Limits.CallTimeout)
@@ -454,7 +516,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	instView := inst.View()
 	transport := r.transportForInstance(inst, selectedScheme)
 	callTracker := &evalCallTracker{}
-	callCtx := context.WithValue(attemptCtx, evalCallTrackerKey{}, callTracker)
+	callCtx := WithEvalProjectID(context.WithValue(attemptCtx, evalCallTrackerKey{}, callTracker), opts.ProjectID)
 
 	attemptStart := time.Now().UTC()
 	res, invokeErr, panicked := invokeSafely(callCtx, adapter, transport, instView, req)
@@ -493,6 +555,26 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		}
 		if saEmail != "" {
 			eval.Auth.ServiceAccountEmail = saEmail
+		}
+	}
+	if secName, scopeUsed, secVer := callTracker.secretRefProvenance(); secName != "" || scopeUsed != "" || secVer > 0 {
+		if eval.Auth == nil {
+			eval.Auth = &AuthProvenance{AuthKind: inst.Auth.Kind}
+		}
+		if eval.Auth.SecretRef == nil {
+			eval.Auth.SecretRef = &SecretRefProvenance{
+				Name:  secName,
+				Scope: inst.Options[provider.OptionSecretScope],
+			}
+		}
+		if secName != "" {
+			eval.Auth.SecretRef.Name = secName
+		}
+		if scopeUsed != "" {
+			eval.Auth.SecretRef.ScopeUsed = scopeUsed
+		}
+		if secVer > 0 {
+			eval.Auth.SecretVersion = secVer
 		}
 	}
 
@@ -632,6 +714,9 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	selectedScheme, authReason := selectInstanceAuthScheme(caps, inst)
 	if authReason != "" {
 		return nil, provider.NewProviderError(authReason, false, 0, 0, "instance auth scheme is not supported")
+	}
+	if projReason := checkInstanceProjectContext(inst, EvalProjectIDFromContext(ctx)); projReason != "" {
+		return nil, provider.NewProviderError(projReason, false, 0, 0, "project context is required for project-scoped secret reference")
 	}
 
 	start := time.Now()
@@ -873,6 +958,7 @@ func (r *Runtime) transportForInstance(inst Instance, adapterScheme provider.Aut
 		endpoint:        inst.Endpoint,
 		authKind:        inst.Auth.Kind,
 		secretName:      inst.Auth.SecretName,
+		secretScope:     inst.Options[provider.OptionSecretScope],
 		headerName:      inst.Auth.HeaderName,
 		audience:        inst.Auth.Audience,
 		scopes:          canonicalScopesKey(effScopes),
@@ -1083,6 +1169,11 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 	case provider.AuthKindBearer:
 		switch instAuth.Kind {
 		case "", provider.InstanceAuthAPIKey, string(provider.AuthKindBearer):
+			if secScope := inst.Options[provider.OptionSecretScope]; secScope != "" {
+				if !provider.IsValidSecretRefScope(secScope) || !provider.IsValidSecretRefName(instAuth.SecretName) {
+					return provider.FailInvalidRequest
+				}
+			}
 			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
 				return provider.FailInternal
 			}
@@ -1093,6 +1184,11 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 	case provider.AuthKindHeader:
 		switch instAuth.Kind {
 		case "", provider.InstanceAuthAPIKey:
+			if secScope := inst.Options[provider.OptionSecretScope]; secScope != "" {
+				if !provider.IsValidSecretRefScope(secScope) || !provider.IsValidSecretRefName(instAuth.SecretName) {
+					return provider.FailInvalidRequest
+				}
+			}
 			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
 				return provider.FailInternal
 			}
@@ -1103,6 +1199,9 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 	case provider.AuthKindGoogleAccessToken:
 		if instAuth.Kind != string(provider.AuthKindGoogleAccessToken) {
 			return provider.FailUnsupported
+		}
+		if inst.Options[provider.OptionSecretScope] != "" {
+			return provider.FailInvalidRequest
 		}
 		effScopes := instAuth.Scopes
 		if len(effScopes) == 0 && len(adapterScheme.Scopes) > 0 {
@@ -1122,6 +1221,9 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 		return ""
 	case provider.AuthKindNone:
 		if instAuth.Kind == "" || instAuth.Kind == string(provider.AuthKindNone) {
+			if inst.Options[provider.OptionSecretScope] != "" {
+				return provider.FailInvalidRequest
+			}
 			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
 				return provider.FailInternal
 			}
@@ -1131,6 +1233,16 @@ func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) 
 	default:
 		return provider.FailUnsupported
 	}
+}
+
+func checkInstanceProjectContext(inst Instance, projectID string) provider.FailReason {
+	switch inst.Options[provider.OptionSecretScope] {
+	case provider.SecretScopeProject, provider.SecretScopeProjectOrHub:
+		if strings.TrimSpace(projectID) == "" {
+			return provider.FailInvalidRequest
+		}
+	}
+	return ""
 }
 
 func isPreCallEgressError(err error) bool {
@@ -1146,11 +1258,22 @@ func isPreCallEgressError(err error) bool {
 }
 
 func buildInitialAuthProvenance(inst Instance, selectedScheme provider.AuthScheme) *AuthProvenance {
-	if inst.Auth.Kind == "" {
+	secScope := inst.Options[provider.OptionSecretScope]
+	if inst.Auth.Kind == "" && secScope == "" {
 		return nil
 	}
+	authKind := inst.Auth.Kind
+	if authKind == "" && secScope != "" {
+		authKind = provider.InstanceAuthAPIKey
+	}
 	prov := &AuthProvenance{
-		AuthKind: inst.Auth.Kind,
+		AuthKind: authKind,
+	}
+	if secScope != "" {
+		prov.SecretRef = &SecretRefProvenance{
+			Name:  inst.Auth.SecretName,
+			Scope: secScope,
+		}
 	}
 	if selectedScheme.Kind == provider.AuthKindGoogleAccessToken {
 		scopes := inst.Auth.Scopes

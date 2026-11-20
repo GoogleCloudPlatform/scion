@@ -152,7 +152,67 @@ const (
 	// google_access_token instance leaves options["quota_project"] unset so the
 	// service account's associated project bills implicitly (Addendum D).
 	QuotaProjectImplicit = "implicit (service account association)"
+
+	// OptionSecretScope is the non-secret instance option key recording the
+	// secret-store lookup scope ("hub", "project", or "project_or_hub") when an
+	// api_key instance references a named Hub/project secret instead of an
+	// instance-internal systemone.instance.<id> secret (PV3 Addendum F §§F2, F7).
+	OptionSecretScope = "secret_scope"
+
+	// Named-secret lookup scopes for api_key System One instances (Addendum F).
+	SecretScopeHub          = "hub"
+	SecretScopeProject      = "project"
+	SecretScopeProjectOrHub = "project_or_hub"
+
+	// DefaultSecretRefScope is the lead/architect default lookup scope for named
+	// System One API-key secret references (Addendum F §F7).
+	DefaultSecretRefScope = SecretScopeProjectOrHub
+
+	// DefaultGeminiAPIKeySecretName is the default named-secret key for
+	// gemini_decisions api_key instances created without an inline API key
+	// (Addendum F §§F2, F4).
+	DefaultGeminiAPIKeySecretName = "GEMINI_API_KEY"
+
+	maxSecretRefNameBytes = 128
 )
+
+// IsValidSecretRefScope reports whether scope is one of the allowed named-secret
+// resolution scopes ("hub", "project", or "project_or_hub").
+func IsValidSecretRefScope(scope string) bool {
+	switch scope {
+	case SecretScopeHub, SecretScopeProject, SecretScopeProjectOrHub:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSecretRefStartByte(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '_'
+}
+
+func isSecretRefContByte(b byte) bool {
+	return isSecretRefStartByte(b) || (b >= '0' && b <= '9')
+}
+
+// IsValidSecretRefName reports whether name matches the named-secret identifier
+// grammar ^[A-Za-z_][A-Za-z0-9_]{0,127}$ (Addendum F §F2). Note that reserved
+// instance-internal secret names ("systemone.instance.<uuid>") contain dots and
+// never match this grammar.
+func IsValidSecretRefName(name string) bool {
+	if len(name) == 0 || len(name) > maxSecretRefNameBytes {
+		return false
+	}
+	if !isSecretRefStartByte(name[0]) {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		if !isSecretRefContByte(name[i]) {
+			return false
+		}
+	}
+	return true
+}
 
 // FormatQuotaProjectProvenance formats the effective quota-project provenance
 // string for google_access_token instances (Addendum D):

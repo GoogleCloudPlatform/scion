@@ -19,12 +19,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
@@ -674,4 +676,311 @@ func TestRuntime_GeminiDecisionsAdapter_ADCBearerErrorMappingAndCanaryRedaction(
 			assertNoCanaryLeak(t, eval, err)
 		})
 	}
+}
+
+func TestRuntime_GeminiDecisions_NamedSecretConcurrencyRotationFallbackAndProjectContext(t *testing.T) {
+	// Synthetic from docs (not recorded from the live API): ai.google.dev/gemini-api/docs/decisions-api & api/decisions.
+	const (
+		hubCanaryKey   = "canary-hub-gemini-secret-9901"
+		projACanaryKey = "canary-proj-a-gemini-secret-9902"
+		projBCanaryKey = "canary-proj-b-gemini-secret-9903"
+		projARotated   = "canary-proj-a-rotated-secret-9904"
+	)
+
+	type secretEntry struct {
+		val string
+		ver int
+	}
+
+	var (
+		storeMu sync.RWMutex
+		hubSec  = &secretEntry{val: hubCanaryKey, ver: 1}
+		projSec = map[string]*secretEntry{
+			"proj-a": {val: projACanaryKey, ver: 2},
+			"proj-b": {val: projBCanaryKey, ver: 5},
+		}
+		httpHits atomic.Int32
+	)
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpHits.Add(1)
+		gotKey := r.Header.Get(geminidecisions.HeaderAPIKey)
+		// Echo back a binary answer keyed by which canary key arrived so each
+		// concurrent caller proves its own outbound request carried its own key!
+		noul := 0.10
+		switch gotKey {
+		case projACanaryKey:
+			noul = 0.91
+		case projBCanaryKey:
+			noul = 0.92
+		case hubCanaryKey:
+			noul = 0.93
+		case projARotated:
+			noul = 0.94
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"answers":{"is_damaged":{"type":"noul","noul":%.2f,"confidence":0.95}}}`, noul)))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	reg := provider.NewRegistry()
+	require.NoError(t, reg.Register(geminidecisions.New()))
+
+	var logBuf syncLogBuffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	credSrc := func(ctx context.Context, inst runtime.Instance) (string, error) {
+		secScope := inst.Options[provider.OptionSecretScope]
+		secName := inst.Auth.SecretName
+		evalProj := runtime.EvalProjectIDFromContext(ctx)
+
+		storeMu.RLock()
+		defer storeMu.RUnlock()
+
+		switch secScope {
+		case provider.SecretScopeHub:
+			if hubSec == nil {
+				return "", egress.ErrAuth
+			}
+			runtime.RecordSecretRefProvenance(ctx, secName, provider.SecretScopeHub, hubSec.ver)
+			return hubSec.val, nil
+		case provider.SecretScopeProject:
+			if evalProj == "" {
+				return "", egress.ErrAuth
+			}
+			ent := projSec[evalProj]
+			if ent == nil {
+				return "", egress.ErrAuth
+			}
+			runtime.RecordSecretRefProvenance(ctx, secName, provider.SecretScopeProject, ent.ver)
+			return ent.val, nil
+		case provider.SecretScopeProjectOrHub:
+			if evalProj == "" {
+				return "", egress.ErrAuth
+			}
+			if ent := projSec[evalProj]; ent != nil {
+				runtime.RecordSecretRefProvenance(ctx, secName, provider.SecretScopeProject, ent.ver)
+				return ent.val, nil
+			}
+			if hubSec == nil {
+				return "", egress.ErrAuth
+			}
+			runtime.RecordSecretRefProvenance(ctx, secName, provider.SecretScopeHub, hubSec.ver)
+			return hubSec.val, nil
+		default:
+			return "", egress.ErrAuth
+		}
+	}
+
+	instProjOrHub := runtime.Instance{
+		ID:       "inst-gemini-named",
+		Name:     "gemini-named",
+		Adapter:  geminidecisions.AdapterName,
+		Model:    "gemini-decision-1",
+		Endpoint: tlsSrv.URL,
+		Auth: runtime.InstanceAuth{
+			Kind:       provider.InstanceAuthAPIKey,
+			SecretName: provider.DefaultGeminiAPIKeySecretName,
+		},
+		Options: map[string]string{
+			provider.OptionSecretScope: provider.SecretScopeProjectOrHub,
+		},
+		Enabled:  true,
+		Revision: 1,
+	}
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry:        reg,
+			Instances:       runtime.StaticInstances(instProjOrHub),
+			Credentials:     credSrc,
+			DefaultInstance: "gemini-named",
+			Logger:          logger,
+		},
+		runtime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+	t.Cleanup(rt.CloseIdleConnections)
+
+	rawSpec := []byte(`{
+		"version": 1,
+		"questions": [
+			{"id": "is_damaged", "type": "binary", "instructions": "Inspect probe.text."}
+		]
+	}`)
+	compiled, err := spec.Compile(rawSpec, spec.CompileOptions{Kind: spec.KindJudgments})
+	require.NoError(t, err)
+
+	// 1. Missing project context on project_or_hub and project -> FailInvalidRequest, 0 requests.
+	for _, sc := range []string{provider.SecretScopeProjectOrHub, provider.SecretScopeProject} {
+		pinInst := instProjOrHub
+		pinInst.Options = map[string]string{provider.OptionSecretScope: sc}
+		httpHits.Store(0)
+		_, evalErr := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("sample"), runtime.EvalOptions{
+			Instance: &pinInst,
+			Consumer: "probe",
+		})
+		require.Error(t, evalErr)
+		eval, ok := runtime.EvaluationFrom(evalErr)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, eval.Class)
+		assert.Equal(t, string(provider.FailInvalidRequest), eval.Reason)
+		assert.Empty(t, eval.Attempts, "missing project context must fail pre-call with 0 attempts")
+		assert.Zero(t, httpHits.Load(), "missing project context must make 0 outbound requests")
+		require.NotNil(t, eval.Auth)
+		require.NotNil(t, eval.Auth.SecretRef)
+		assert.Equal(t, provider.DefaultGeminiAPIKeySecretName, eval.Auth.SecretRef.Name)
+		assert.Equal(t, sc, eval.Auth.SecretRef.Scope)
+	}
+
+	// 2. scope=hub works WITHOUT project context.
+	instHubOnly := instProjOrHub
+	instHubOnly.Options = map[string]string{provider.OptionSecretScope: provider.SecretScopeHub}
+	decHub, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("sample"), runtime.EvalOptions{
+		Instance: &instHubOnly,
+		Consumer: "probe",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, decHub.Eval.Auth)
+	require.NotNil(t, decHub.Eval.Auth.SecretRef)
+	assert.Equal(t, provider.SecretScopeHub, decHub.Eval.Auth.SecretRef.ScopeUsed)
+	assert.Equal(t, 1, decHub.Eval.Auth.SecretVersion)
+	assert.InDelta(t, 0.93, decHub.Eval.Answers["is_damaged"].Distribution["true"], 1e-6)
+
+	// 3. Concurrent Project A & Project B on shared transport (both have project secrets).
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("sample-a"), runtime.EvalOptions{
+				ProjectID: "proj-a",
+				Consumer:  "trigger",
+			})
+			if assert.NoError(t, err) && assert.NotNil(t, dec.Eval.Auth) && assert.NotNil(t, dec.Eval.Auth.SecretRef) {
+				assert.Equal(t, provider.SecretScopeProject, dec.Eval.Auth.SecretRef.ScopeUsed)
+				assert.Equal(t, 2, dec.Eval.Auth.SecretVersion)
+				assert.InDelta(t, 0.91, dec.Eval.Answers["is_damaged"].Distribution["true"], 1e-6)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("sample-b"), runtime.EvalOptions{
+				ProjectID: "proj-b",
+				Consumer:  "trigger",
+			})
+			if assert.NoError(t, err) && assert.NotNil(t, dec.Eval.Auth) && assert.NotNil(t, dec.Eval.Auth.SecretRef) {
+				assert.Equal(t, provider.SecretScopeProject, dec.Eval.Auth.SecretRef.ScopeUsed)
+				assert.Equal(t, 5, dec.Eval.Auth.SecretVersion)
+				assert.InDelta(t, 0.92, dec.Eval.Answers["is_damaged"].Distribution["true"], 1e-6)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 4. Rotation between evaluations updates key value and version immediately (no stale cache).
+	storeMu.Lock()
+	projSec["proj-a"] = &secretEntry{val: projARotated, ver: 3}
+	storeMu.Unlock()
+
+	decRot, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("sample-rot"), runtime.EvalOptions{
+		ProjectID: "proj-a",
+		Consumer:  "trigger",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, provider.SecretScopeProject, decRot.Eval.Auth.SecretRef.ScopeUsed)
+	assert.Equal(t, 3, decRot.Eval.Auth.SecretVersion)
+	assert.InDelta(t, 0.94, decRot.Eval.Answers["is_damaged"].Distribution["true"], 1e-6)
+
+	// 5. Deletion of Project A secret: concurrent A (not-found -> hub fallback) and B (-> project).
+	storeMu.Lock()
+	delete(projSec, "proj-a")
+	storeMu.Unlock()
+
+	for i := 0; i < 12; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("sample-a-fb"), runtime.EvalOptions{
+				ProjectID: "proj-a",
+				Consumer:  "trigger",
+			})
+			if assert.NoError(t, err) && assert.NotNil(t, dec.Eval.Auth) && assert.NotNil(t, dec.Eval.Auth.SecretRef) {
+				assert.Equal(t, provider.SecretScopeHub, dec.Eval.Auth.SecretRef.ScopeUsed)
+				assert.Equal(t, 1, dec.Eval.Auth.SecretVersion)
+				assert.InDelta(t, 0.93, dec.Eval.Answers["is_damaged"].Distribution["true"], 1e-6)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("sample-b-proj"), runtime.EvalOptions{
+				ProjectID: "proj-b",
+				Consumer:  "trigger",
+			})
+			if assert.NoError(t, err) && assert.NotNil(t, dec.Eval.Auth) && assert.NotNil(t, dec.Eval.Auth.SecretRef) {
+				assert.Equal(t, provider.SecretScopeProject, dec.Eval.Auth.SecretRef.ScopeUsed)
+				assert.Equal(t, 5, dec.Eval.Auth.SecretVersion)
+				assert.InDelta(t, 0.92, dec.Eval.Answers["is_damaged"].Distribution["true"], 1e-6)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 6. Strict scope=project when deleted -> FailAuth, requests=0; deleting hub secret too -> FailAuth, requests=0.
+	instProjStrict := instProjOrHub
+	instProjStrict.Options = map[string]string{provider.OptionSecretScope: provider.SecretScopeProject}
+	httpHits.Store(0)
+	_, errStrict := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("sample"), runtime.EvalOptions{
+		Instance:  &instProjStrict,
+		ProjectID: "proj-a",
+		Consumer:  "trigger",
+	})
+	require.Error(t, errStrict)
+	evalStrict, _ := runtime.EvaluationFrom(errStrict)
+	assert.Equal(t, string(provider.FailAuth), evalStrict.Reason)
+	require.Len(t, evalStrict.Attempts, 1)
+	assert.Equal(t, 0, evalStrict.Attempts[0].Requests)
+	assert.Zero(t, httpHits.Load())
+
+	storeMu.Lock()
+	hubSec = nil
+	storeMu.Unlock()
+	httpHits.Store(0)
+	_, errBothGone := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("sample"), runtime.EvalOptions{
+		ProjectID: "proj-a",
+		Consumer:  "trigger",
+	})
+	require.Error(t, errBothGone)
+	evalBoth, _ := runtime.EvaluationFrom(errBothGone)
+	assert.Equal(t, string(provider.FailAuth), evalBoth.Reason)
+	require.Len(t, evalBoth.Attempts, 1)
+	assert.Equal(t, 0, evalBoth.Attempts[0].Requests)
+	assert.Zero(t, httpHits.Load())
+
+	// 7. Redaction: none of the canary secret values ever appear in logs or Evaluation JSON.
+	rawEvalJSON, _ := json.Marshal(decRot.Eval)
+	logs := logBuf.String()
+	for _, canary := range []string{hubCanaryKey, projACanaryKey, projBCanaryKey, projARotated} {
+		assert.NotContains(t, string(rawEvalJSON), canary)
+		assert.NotContains(t, logs, canary)
+		assert.NotContains(t, errBothGone.Error(), canary)
+	}
+}
+
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

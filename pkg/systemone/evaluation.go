@@ -35,17 +35,18 @@ const (
 // consumers and the ruleengine dialect (P1b/P1-reg) share one canonical type
 // without circular imports (runtime-design §§4.1, 5, 6.3, 8.1; P1 brief §5).
 type (
-	Evaluation       = runtime.Evaluation
-	EvaluationError  = runtime.EvaluationError
-	AuthProvenance   = runtime.AuthProvenance
-	RuleRef          = runtime.RuleRef
-	AnswerRecord     = runtime.AnswerRecord
-	ThresholdCheck   = runtime.ThresholdCheck
-	Attempt          = runtime.Attempt
-	FieldFingerprint = runtime.FieldFingerprint
-	InputFingerprint = runtime.InputFingerprint
-	Input            = runtime.Input
-	Decision         = runtime.Decision
+	Evaluation          = runtime.Evaluation
+	EvaluationError     = runtime.EvaluationError
+	AuthProvenance      = runtime.AuthProvenance
+	SecretRefProvenance = runtime.SecretRefProvenance
+	RuleRef             = runtime.RuleRef
+	AnswerRecord        = runtime.AnswerRecord
+	ThresholdCheck      = runtime.ThresholdCheck
+	Attempt             = runtime.Attempt
+	FieldFingerprint    = runtime.FieldFingerprint
+	InputFingerprint    = runtime.InputFingerprint
+	Input               = runtime.Input
+	Decision            = runtime.Decision
 )
 
 // ProbeInput constructs a single-field Input for the built-in P1 synthetic
