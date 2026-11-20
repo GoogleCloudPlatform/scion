@@ -71,6 +71,26 @@ func TestHandleExistingAgent_RequiresLifecycleAuthorization(t *testing.T) {
 		assert.Equal(t, string(state.PhaseSuspended), got.Phase, "the denied restart must not have changed the agent's phase")
 	})
 
+	t.Run("plain create against another member's suspended agent returns conflict without leaking phase", func(t *testing.T) {
+		f := handleExistingAgentAuthzSetup(t)
+		agent := f.agent(t, "hea-plain-suspended-agent", string(state.PhaseSuspended))
+
+		rec := doRequestAsUser(t, f.srv, f.member, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+			"name":      agent.Slug,
+			"projectId": f.project.ID,
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code,
+			"a plain project member must get a generic conflict, not agent_exists_resumable; got: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"`+ErrCodeConflict+`"`,
+			"a non-owner create collision must return ErrCodeConflict; got: %s", rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), ErrCodeAgentExistsResumable,
+			"a non-owner create collision must not leak phase via agent_exists_resumable; got: %s", rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase, "the denied create must not have changed the agent's phase")
+	})
+
 	t.Run("provisionOnly create against A's agent is denied", func(t *testing.T) {
 		f := handleExistingAgentAuthzSetup(t)
 		agent := f.agent(t, "hea-provision-agent", string(state.PhaseCreated))

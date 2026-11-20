@@ -1258,8 +1258,7 @@ const (
 // read-only. Both read the agent's effective resting phase
 // (store.EffectiveRestingPhase, ptone/scion#4669), never its stored phase:
 // an error row that remembers the phase a failed asynchronous start began
-// from takes the branch that phase would take. The CLI's mirror of this
-// tree (cmd/common.go) must follow the same rule.
+// from takes the branch that phase would take.
 func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgentBranch {
 	rest := store.EffectiveRestingPhase(a)
 	switch {
@@ -1398,7 +1397,7 @@ func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWri
 //     returned as it is (200, request not applied) → existingAgentStarted;
 //     any other start-gate refusal is written → existingAgentErrored.
 //
-// Branches (all but env-gather are skipped for req.ProvisionOnly):
+// Branches (all but branch 0 and env-gather are skipped for req.ProvisionOnly):
 //  0. Resumable without req.Resume (suspended, stopped, halted, or an active
 //     idle-suspend claim): refuse immediately with 409 agent_exists_resumable
 //     naming the phase and hinting `scion resume <name>`, delete, or another

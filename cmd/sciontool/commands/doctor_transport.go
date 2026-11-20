@@ -307,7 +307,7 @@ func printTransportRemediation(diag doctorDiag) bool {
 		fmt.Println("[!] If reset-auth does not deliver one, check the hub's transport minter configuration and logs.")
 	}
 	fmt.Println("[!] Run from the host:  scion reset-auth <agent-name>  (also pushes a fresh transport token)")
-	fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion start <agent-name>")
+	fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion resume <agent-name>")
 	if diag.authRejectedBy == rejectedByProxy && !diag.transportFailed() {
 		fmt.Println("[!] If the credential is current, check that SCION_TRANSPORT_MODE matches the proxy " +
 			"(iap: Proxy-Authorization, cloudrun_invoker: X-Serverless-Authorization) " +

@@ -4257,7 +4257,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 
 	// For Kubernetes, we want to ensure it is in Running phase
 	if agent.Phase != string(state.PhaseRunning) {
-		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
+		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion resume %s' to resume it", id, agent.ContainerStatus, id)
 	}
 
 	fmt.Printf("Attaching to pod '%s' (use Ctrl-b d to detach)...\n", podName)

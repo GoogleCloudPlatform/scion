@@ -490,7 +490,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 	case state.PhaseHalted:
 		return nil, &AgentDMError{
 			Code:       ErrCodeValidationError,
-			Message:    "Agent was halted by the platform — use 'scion start' to restart it",
+			Message:    "Agent was halted by the platform — use 'scion resume' to restart it",
 			HTTPStatus: http.StatusBadRequest,
 		}
 
@@ -589,7 +589,7 @@ func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 	case state.PhaseHalted:
 		return &AgentDMError{
 			Code:       ErrCodeAgentNotRunning,
-			Message:    fmt.Sprintf("agent %q is halted; use 'scion start' to restart it", label),
+			Message:    fmt.Sprintf("agent %q is halted; use 'scion resume' to restart it", label),
 			HTTPStatus: http.StatusConflict,
 		}
 	default:
