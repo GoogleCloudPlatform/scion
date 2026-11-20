@@ -762,7 +762,7 @@ func (p *templatePersistence) CheckDir(ctx context.Context, name string, cd *col
 	if err := checkBundledHarnessConfigs(ctx, cd.fileReader(), manifest); err != nil {
 		return fmt.Errorf("%s: template in %q not imported: %w", p.Label(), cd.base(), err)
 	}
-	if p.s.experimentEnabled(experiments.TemplateConfigValidation) {
+	if p.s != nil && p.s.experimentEnabled(experiments.TemplateConfigValidation) {
 		if err := p.s.checkTemplateAgentConfig(ctx, name, cd.fileReader(), nil, manifest); err != nil {
 			return err
 		}

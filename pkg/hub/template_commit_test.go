@@ -1028,4 +1028,17 @@ func TestTemplateCommit_AgentConfigValidation(t *testing.T) {
 			t.Fatalf("BootstrapSource refused valid template: %v", err)
 		}
 	})
+
+	t.Run("checkdir_nil_server_does_not_panic", func(t *testing.T) {
+		dir := writeTemplateDir(t, t.TempDir(), "nil-srv-tpl", map[string]string{"scion-agent.yaml": commitCfgBoth})
+		rs := &ResourceStore{}
+		cd, err := rs.collectFiles(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = cd.root.Close() }()
+		if err := (&templatePersistence{}).CheckDir(ctx, "nil-srv-tpl", cd); err != nil {
+			t.Fatalf("CheckDir with nil server returned unexpected error: %v", err)
+		}
+	})
 }

@@ -1400,6 +1400,18 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	// first (ptone/scion#4221).
 	var expectedHash string
 
+	// Track a newly created pending template so that if upload or finalize
+	// fails (for example, Hub 422 invalid_agent_config), we clean it up and
+	// retries do not collide with the unique (slug, scope, scope_id) index.
+	var createdPendingID string
+	defer func() {
+		if createdPendingID != "" {
+			if delErr := hubCtx.Client.Templates().Delete(ctx, createdPendingID); delErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to clean up pending template %s: %v\n", createdPendingID, delErr)
+			}
+		}
+	}()
+
 	if existingTemplate != nil {
 		templateID = existingTemplate.ID
 		expectedHash = existingTemplate.ContentHash
@@ -1497,6 +1509,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 		}
 
 		templateID = resp.Template.ID
+		createdPendingID = templateID
 		expectedHash = resp.Template.ContentHash
 		fmt.Printf("Template created with ID: %s\n", templateID)
 
@@ -1561,6 +1574,9 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 			return fmt.Errorf("failed to finalize template after retry: %w", err)
 		}
 	}
+
+	// Finalize succeeded; keep the template.
+	createdPendingID = ""
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{
