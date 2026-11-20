@@ -45,13 +45,21 @@ The agent is provisioned but not started, even when a task is given. Run
 'scion start <agent-name>' to start it.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		agentName := api.Slugify(args[0])
 		task := strings.TrimSpace(strings.Join(args[1:], " "))
 
 		// A target-hub profile refuses the flags that need local state
 		// before anything else (ptone/scion#4240).
 		if err := checkProfileAgentFlags(cmd); err != nil {
 			return err
+		}
+
+		agentName, err := validateCreateAgentName(args[0])
+		if err != nil {
+			return asUsageError(err)
+		}
+
+		if _, err := parseCreateLabels(labelFlags); err != nil {
+			return asUsageError(err)
 		}
 
 		if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
@@ -61,7 +69,7 @@ The agent is provisioned but not started, even when a task is given. Run
 		if err := validateTaskFileStdin(); err != nil {
 			return err
 		}
-		task, err := applyTaskFile(task, taskFilePath, os.Stdin)
+		task, err = applyTaskFile(task, taskFilePath, os.Stdin)
 		if err != nil {
 			return asUsageError(err)
 		}
@@ -249,7 +257,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inline
 		}
 	}
 
-	parsedLabels, err := parseLabels(labelFlags)
+	parsedLabels, err := parseCreateLabels(labelFlags)
 	if err != nil {
 		return asUsageError(err)
 	}

@@ -30,6 +30,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -201,6 +202,48 @@ func parseLabels(raw []string) (map[string]string, error) {
 		return nil, fmt.Errorf("invalid label: %w", err)
 	}
 	return m, nil
+}
+
+// parseCreateLabels parses --label flags for scion start and scion create.
+// Unlike parseLabels (also used by scion list --label), it rejects empty or
+// whitespace-only label values (e.g. "issue="), which are almost always
+// accidental shell expansions and cannot be edited after creation.
+func parseCreateLabels(raw []string) (map[string]string, error) {
+	m, err := parseLabels(raw)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range raw {
+		k, v, _ := strings.Cut(s, "=")
+		if strings.TrimSpace(v) == "" {
+			return nil, fmt.Errorf("invalid label %q: value for key %q must not be empty", s, k)
+		}
+	}
+	return m, nil
+}
+
+// validateCreateAgentName validates the raw <agent-name> argument for
+// scion start and scion create and returns its canonical slug. It rejects
+// whitespace and anything api.ValidateDisplayName rejects (empty names,
+// names over 63 characters, unsupported characters, empty slugs, and
+// reserved words) while still slugifying uppercase letters, underscores,
+// and dots.
+func validateCreateAgentName(raw string) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("agent name must not be empty")
+	}
+	for _, r := range raw {
+		if unicode.IsSpace(r) {
+			return "", fmt.Errorf("invalid agent name %q: must not contain whitespace", raw)
+		}
+	}
+	slug, err := api.ValidateDisplayName(raw)
+	if err != nil {
+		msg := strings.Replace(err.Error(), "display name", "agent name", 1)
+		msg = strings.Replace(msg, "space, ", "", 1)
+		return "", fmt.Errorf("invalid agent name: %s", msg)
+	}
+	return slug, nil
 }
 
 // resolveBranch returns the branch for a new agent: the --branch flag if
@@ -775,13 +818,26 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 }
 
 func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
-	agentName := api.Slugify(args[0])
 	task := strings.Join(args[1:], " ")
 
 	// A target-hub profile refuses the flags that need local state before
 	// anything else (ptone/scion#4240).
 	if err := checkProfileAgentFlags(cmd); err != nil {
 		return err
+	}
+
+	var agentName string
+	if !resume {
+		var err error
+		agentName, err = validateCreateAgentName(args[0])
+		if err != nil {
+			return asUsageError(err)
+		}
+		if _, err := parseCreateLabels(labelFlags); err != nil {
+			return asUsageError(err)
+		}
+	} else {
+		agentName = api.Slugify(args[0])
 	}
 
 	// Reject --format json with --attach (mutually exclusive)
@@ -1136,7 +1192,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		}
 	}
 
-	parsedLabels, err := parseLabels(labelFlags)
+	parsedLabels, err := parseCreateLabels(labelFlags)
 	if err != nil {
 		return asUsageError(err)
 	}
