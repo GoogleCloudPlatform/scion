@@ -150,7 +150,8 @@ async function openDecisionsChat(
   theme: Theme,
   thread: DecisionThread,
   asker: AskerLookup = 'ok',
-  extraRoutes?: (p: Page) => Promise<void>
+  extraRoutes?: (p: Page) => Promise<void>,
+  threadName?: string
 ): Promise<void> {
   await openChatRail(page, async (p) => {
     await p.addInitScript((t) => {
@@ -158,11 +159,42 @@ async function openDecisionsChat(
       window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, 'web.decisions': true };
     }, theme);
     await routeDecisionThread(p, thread, asker);
+    if (threadName) {
+      await p.route(/\/api\/v1\/chat\/spaces\/([^/]+)\/threads/, (route) =>
+        route.fulfill({
+          json: {
+            threads: [
+              {
+                id: GENERAL_THREAD_ID,
+                name: threadName,
+                isGeneral: true,
+                pinned: false,
+                hasUnread: false,
+                hasUnreadMention: false,
+              },
+            ],
+          },
+        })
+      );
+      await p.route(new RegExp(`/api/v1/chat/topics/${GENERAL_THREAD_ID}(\\?|$)`), (route) =>
+        route.fulfill({ json: { id: GENERAL_THREAD_ID, name: threadName } })
+      );
+    }
     if (extraRoutes) {
       await extraRoutes(p);
     }
   });
-  if (isPhone(page)) await openGeneralThread(page);
+  if (isPhone(page)) {
+    if (threadName) {
+      const targetRow = page.locator('.thread-item', { hasText: threadName }).first();
+      await expect(targetRow).toBeVisible({ timeout: 15_000 });
+      await targetRow.click();
+      await expect(page.locator('.v2-thread-header')).toBeVisible({ timeout: 10_000 });
+      await page.waitForTimeout(400);
+    } else {
+      await openGeneralThread(page);
+    }
+  }
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   const first = thread.messages[0]?.id as string;
   await expect(message(page, first)).toBeVisible({ timeout: 15_000 });
@@ -409,7 +441,10 @@ for (const theme of ['light', 'dark'] as const) {
       await openDecisionsChat(
         page,
         theme,
-        setThread('prompt-x4', decisions, 'Three calls before the release.')
+        setThread('prompt-x4', decisions, 'Three calls before the release.'),
+        'ok',
+        undefined,
+        'release'
       );
       await markdownReady(page, 'prompt-x4');
 
@@ -439,8 +474,8 @@ for (const theme of ['light', 'dark'] as const) {
       const textarea = dialog.locator('sl-textarea[data-dismiss-reason] textarea');
       await textarea.fill('Stale: the release already shipped.');
       await expect(dialog.locator('[data-dismiss-reason-count]')).toHaveText('35/500');
-      await expect(dialog.locator('[data-dismiss-tell="live"]')).toContainText(
-        `${ASKER_NAME} will be told`
+      await expect(dialog.locator('[data-dismiss-tell="live"] span')).toHaveText(
+        `${ASKER_NAME} will be told in #release.`
       );
       await expect(dialog.locator('sl-button[data-dismiss-confirm]')).toContainText(
         'Dismiss 2 decisions'
@@ -629,6 +664,12 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(selBar.locator('[data-selected-count]')).toHaveText('2 cards selected');
       await expect(pageEl.locator('[data-prompt-card="m-ncx"]')).toHaveClass(/sel/);
       await expect(pageEl.locator('[data-prompt-card="m-rel-set"]')).toHaveClass(/sel/);
+      await expect(pageEl.locator('[data-prompt-card="m-ncx"] [data-asker-deleted]')).toHaveText(
+        '(deleted)'
+      );
+      await expect(
+        pageEl.locator('[data-prompt-card="m-rel-set"] [data-asker-deleted]')
+      ).toHaveCount(0);
       await expect(
         pageEl.locator('[data-prompt-card="m-ncx"] scion-chat-decisions [data-card-menu]')
       ).toBeVisible();
@@ -914,6 +955,11 @@ for (const theme of ['light', 'dark'] as const) {
 
       const overflow = await c.locator('.card').evaluate((el) => el.scrollWidth - el.clientWidth);
       expect(overflow).toBeLessThanOrEqual(1);
+      const titleBox = (await c.locator('.card-head .title').boundingBox())!;
+      const menuBox = (await c.locator('.card-head .menu').boundingBox())!;
+      expect(titleBox).not.toBeNull();
+      expect(menuBox).not.toBeNull();
+      expect(Math.abs(menuBox.y - titleBox.y)).toBeLessThan(12);
 
       await shotMessages(page, testInfo, theme, 'x8-set-dismissed-ready', ['prompt-x8']);
 
@@ -1025,6 +1071,9 @@ for (const theme of ['light', 'dark'] as const) {
         'disabled',
         ''
       );
+      await expect(
+        pageEl.locator('[data-prompt-card="prompt-x9"] [data-dismiss-available-at]')
+      ).toHaveText(/· dismiss available at \d{2}:\d{2}/);
 
       await shotViewport(page, testInfo, theme, 'x9-too-recent-page');
     });

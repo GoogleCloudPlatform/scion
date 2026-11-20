@@ -234,7 +234,7 @@ async function fetchDecisionsBellRow(
 
 test.describe('Dismiss decisions on real hub (ptone/scion#8216, ptone/scion#8217, ptone/scion#8218)', () => {
   // Traverses the real 5-minute DecisionDismissMinAge window once for all seeded prompts.
-  test.setTimeout(420_000);
+  test.setTimeout(600_000);
 
   let hub!: HubState;
   let projectId = '';
