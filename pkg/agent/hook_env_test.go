@@ -124,7 +124,7 @@ func TestComputeHookWithheldEnv_AllLayersAndPrecedence(t *testing.T) {
 
 	agentEnv, _, _, _, provenance := buildAgentEnvWithBundle(bundleEnv, &api.ScionConfig{Env: inlineEnv}, optsEnv, nil, true)
 
-	got := computeHookWithheldEnv(hookWithheldInput{
+	baseInput := hookWithheldInput{
 		bundleEnv:      bundleEnv,
 		envTemplateEnv: envTemplateEnv,
 		settingsHCEnv:  settingsHCEnv,
@@ -138,10 +138,223 @@ func TestComputeHookWithheldEnv_AllLayersAndPrecedence(t *testing.T) {
 		resolvedSecrets: []api.ResolvedSecret{
 			{Type: "environment", Target: "TPL_SECRET_WIN", Value: "from-secret"},
 		},
-	})
-	want := []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT", "MY${UNSET_TEST_VAR}KEY", "SETTINGS_ONLY", "TPL_ONLY"}
-	if !slices.Equal(got, want) {
-		t.Errorf("computeHookWithheldEnv() = %v, want %v (agentEnv=%v)", got, want, agentEnv)
+	}
+
+	// On docker/podman/container/k8s/cloudrun, Harness.GetEnv() (env_template)
+	// is emitted after ResolvedAuth and wins on collision, so TPL_AUTH_WIN is
+	// withheld. On substrate, ResolvedAuth wins over Harness.GetEnv() and
+	// cfg.Env, so TPL_AUTH_WIN is not withheld. On cloudrun-sandbox,
+	// Harness.GetEnv() wins over cfg.Env (so TPL_HUB_WIN and TPL_INLINE_WIN are
+	// withheld), while ResolvedAuth wins over Harness.GetEnv().
+	runtimeCases := []struct {
+		runtimeName string
+		want        []string
+	}{
+		{
+			runtimeName: "docker",
+			want:        []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT", "MY${UNSET_TEST_VAR}KEY", "SETTINGS_ONLY", "TPL_AUTH_WIN", "TPL_ONLY"},
+		},
+		{
+			runtimeName: "substrate",
+			want:        []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT", "MY${UNSET_TEST_VAR}KEY", "SETTINGS_ONLY", "TPL_ONLY"},
+		},
+		{
+			runtimeName: "cloudrun-sandbox",
+			want:        []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT", "MY${UNSET_TEST_VAR}KEY", "SETTINGS_ONLY", "TPL_HUB_WIN", "TPL_INLINE_WIN", "TPL_ONLY"},
+		},
+	}
+
+	for _, tc := range runtimeCases {
+		t.Run(tc.runtimeName, func(t *testing.T) {
+			in := baseInput
+			in.runtimeName = tc.runtimeName
+			got := computeHookWithheldEnv(in)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("computeHookWithheldEnv(%s) = %v, want %v (agentEnv=%v)", tc.runtimeName, got, tc.want, agentEnv)
+			}
+		})
+	}
+}
+
+// TestComputeHookWithheldEnv_AllLayerPairsPerRuntime verifies every unordered
+// pair of the 7 environment layers (bundle, env_template, settings, hub, own,
+// auth, secrets) across every runtime family, asserting both the final winning
+// layer and whether computeHookWithheldEnv withholds the key.
+func TestComputeHookWithheldEnv_AllLayerPairsPerRuntime(t *testing.T) {
+	type layer string
+	const (
+		layerBundle      layer = "bundle"
+		layerEnvTemplate layer = "env_template"
+		layerSettings    layer = "settings"
+		layerHub         layer = "hub"
+		layerOwn         layer = "own"
+		layerAuth        layer = "auth"
+		layerSecrets     layer = "secrets"
+	)
+
+	isHarnessConfigLayer := func(l layer) bool {
+		return l == layerBundle || l == layerEnvTemplate || l == layerSettings
+	}
+
+	// expectedWinner returns which of layers a and b supplies the final
+	// container value on runtimeName, combining buildAgentEnvWithBundle's
+	// intra-ConfigEnv precedence (bundle < own < settings < hub) with each
+	// runtime's inter-source precedence.
+	expectedWinner := func(runtimeName string, a, b layer) layer {
+		// Intra-ConfigEnv rank (higher wins within RunConfig.Env).
+		cfgRank := map[layer]int{
+			layerBundle:   1,
+			layerOwn:      2,
+			layerSettings: 3,
+			layerHub:      4,
+		}
+		_, aInCfg := cfgRank[a]
+		_, bInCfg := cfgRank[b]
+		if aInCfg && bInCfg {
+			if cfgRank[a] > cfgRank[b] {
+				return a
+			}
+			return b
+		}
+
+		// Runtime-level source rank per runtime family.
+		toRuntimeSrc := func(l layer) runtime.EnvSource {
+			switch l {
+			case layerEnvTemplate:
+				return runtime.EnvSourceHarnessTemplate
+			case layerAuth:
+				return runtime.EnvSourceResolvedAuth
+			case layerSecrets:
+				return runtime.EnvSourceResolvedSecret
+			default:
+				return runtime.EnvSourceConfigEnv
+			}
+		}
+		sa, sb := toRuntimeSrc(a), toRuntimeSrc(b)
+		switch runtimeName {
+		case "substrate":
+			// HarnessTemplate < ConfigEnv < ResolvedAuth < ResolvedSecret
+			rank := map[runtime.EnvSource]int{
+				runtime.EnvSourceHarnessTemplate: 1,
+				runtime.EnvSourceConfigEnv:       2,
+				runtime.EnvSourceResolvedAuth:    3,
+				runtime.EnvSourceResolvedSecret:  4,
+			}
+			if rank[sa] > rank[sb] {
+				return a
+			}
+			return b
+		case "cloudrun-sandbox":
+			// Non-colliding secrets win over auth/tpl, but secrets colliding
+			// with ConfigEnv are skipped; otherwise ConfigEnv < Tpl < Auth.
+			if (sa == runtime.EnvSourceResolvedSecret && sb == runtime.EnvSourceConfigEnv) ||
+				(sb == runtime.EnvSourceResolvedSecret && sa == runtime.EnvSourceConfigEnv) {
+				if sa == runtime.EnvSourceConfigEnv {
+					return a
+				}
+				return b
+			}
+			rank := map[runtime.EnvSource]int{
+				runtime.EnvSourceConfigEnv:       1,
+				runtime.EnvSourceHarnessTemplate: 2,
+				runtime.EnvSourceResolvedAuth:    3,
+				runtime.EnvSourceResolvedSecret:  4,
+			}
+			if rank[sa] > rank[sb] {
+				return a
+			}
+			return b
+		default:
+			// docker, podman, container, kubernetes, cloudrun:
+			// ResolvedAuth < HarnessTemplate < ResolvedSecret (non-colliding) < ConfigEnv
+			rank := map[runtime.EnvSource]int{
+				runtime.EnvSourceResolvedAuth:    1,
+				runtime.EnvSourceHarnessTemplate: 2,
+				runtime.EnvSourceResolvedSecret:  3,
+				runtime.EnvSourceConfigEnv:       4,
+			}
+			if rank[sa] > rank[sb] {
+				return a
+			}
+			return b
+		}
+	}
+
+	allLayers := []layer{layerBundle, layerEnvTemplate, layerSettings, layerHub, layerOwn, layerAuth, layerSecrets}
+	runtimes := []string{"docker", "podman", "container", "kubernetes", "cloudrun", "cloudrun-sandbox", "substrate"}
+
+	const key = "PAIR_TEST_KEY"
+	for _, rtName := range runtimes {
+		t.Run(rtName, func(t *testing.T) {
+			for i := 0; i < len(allLayers); i++ {
+				for j := i + 1; j < len(allLayers); j++ {
+					la, lb := allLayers[i], allLayers[j]
+					t.Run(string(la)+"_vs_"+string(lb), func(t *testing.T) {
+						var bundleEnv, tplEnv, settingsEnv, callerEnv, inlineEnv map[string]string
+						var auth *api.ResolvedAuth
+						var secrets []api.ResolvedSecret
+
+						addLayer := func(l layer) {
+							switch l {
+							case layerBundle:
+								bundleEnv = map[string]string{key: "from-bundle"}
+							case layerEnvTemplate:
+								tplEnv = map[string]string{key: "from-env-template"}
+							case layerSettings:
+								settingsEnv = map[string]string{key: "from-settings"}
+							case layerHub:
+								callerEnv = map[string]string{key: "from-hub"}
+							case layerOwn:
+								inlineEnv = map[string]string{key: "from-own"}
+							case layerAuth:
+								auth = &api.ResolvedAuth{Method: "api-key", EnvVars: map[string]string{key: "from-auth"}}
+							case layerSecrets:
+								secrets = []api.ResolvedSecret{{Type: "environment", Target: key, Value: "from-secret"}}
+							}
+						}
+						addLayer(la)
+						addLayer(lb)
+
+						// Assemble opts.Env as Start does: callerEnv, with settingsEnv filling absent keys.
+						optsEnv := make(map[string]string)
+						for k, v := range callerEnv {
+							optsEnv[k] = v
+						}
+						for k, v := range settingsEnv {
+							if _, exists := optsEnv[k]; !exists {
+								optsEnv[k] = v
+							}
+						}
+						var cfg *api.ScionConfig
+						if len(inlineEnv) > 0 {
+							cfg = &api.ScionConfig{Env: inlineEnv}
+						}
+						agentEnv, _, _, _, provenance := buildAgentEnvWithBundle(bundleEnv, cfg, optsEnv, nil, true)
+
+						gotWithheld := computeHookWithheldEnv(hookWithheldInput{
+							runtimeName:     rtName,
+							bundleEnv:       bundleEnv,
+							envTemplateEnv:  tplEnv,
+							settingsHCEnv:   settingsEnv,
+							agentEnv:        agentEnv,
+							provenance:      provenance,
+							callerEnv:       callerEnv,
+							inlineEnv:       inlineEnv,
+							resolvedAuth:    auth,
+							resolvedSecrets: secrets,
+						})
+
+						winner := expectedWinner(rtName, la, lb)
+						wantWithheld := isHarnessConfigLayer(winner)
+						isWithheld := slices.Contains(gotWithheld, key)
+						if isWithheld != wantWithheld {
+							t.Errorf("runtime=%s pair=(%s,%s) winner=%s: withheld=%v, want %v (gotWithheld=%v)",
+								rtName, la, lb, winner, isWithheld, wantWithheld, gotWithheld)
+						}
+					})
+				}
+			}
+		})
 	}
 }
 
