@@ -767,3 +767,25 @@ func TestRenderDecisionFallback_AllowOther(t *testing.T) {
 		t.Errorf("msg =\n%s\nwant\n%s", msgNoDesc, wantNoDesc)
 	}
 }
+
+func TestNormalizeDecisions_DefaultMatchesFixedChoiceIDBeforeRefusingOtherLabel(t *testing.T) {
+	// Fixed choice "yes" gets auto-id "1"; allow_other shorthand sets Other.Label = "1";
+	// default "1" matches fixed choice id "1" and must succeed.
+	in := parseDecisions(t, `[{"id":"d-id-match","question":"Proceed?","choices":["yes"],"allow_other":"1","default":"1"}]`)
+	ds, err := NormalizeDecisions("decisions", in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ds[0].DefaultChoiceID != "1" {
+		t.Fatalf("DefaultChoiceID = %q, want %q", ds[0].DefaultChoiceID, "1")
+	}
+	if ds[0].Other == nil || ds[0].Other.Label != "1" {
+		t.Fatalf("Other = %+v, want Label=\"1\"", ds[0].Other)
+	}
+
+	// When default matches no fixed choice id or label and names the Other label, it is still refused as no_match.
+	inOtherOnly := parseDecisions(t, `[{"id":"d-other-only","question":"Proceed?","choices":["yes"],"allow_other":"Another","default":"Another"}]`)
+	if _, err := NormalizeDecisions("decisions", inOtherOnly); err == nil {
+		t.Fatal("expected default naming only Other label to fail")
+	}
+}

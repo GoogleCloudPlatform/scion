@@ -108,17 +108,17 @@ func (Decision) Fields() []ent.Field {
 		field.String("other_label").
 			Optional().
 			Nillable().
-			MaxLen(messages.MaxChoiceLabelLen).
+			MaxRuneLen(messages.MaxChoiceLabelLen).
 			Immutable(),
 		field.String("other_description").
 			Optional().
 			Nillable().
-			MaxLen(messages.MaxChoiceDescriptionLen).
+			MaxRuneLen(messages.MaxChoiceDescriptionLen).
 			Immutable(),
 		field.String("other_placeholder").
 			Optional().
 			Nillable().
-			MaxLen(messages.MaxOtherPlaceholderLen).
+			MaxRuneLen(messages.MaxOtherPlaceholderLen).
 			Immutable(),
 		// intro_length is the byte offset in the prompt message's msg where
 		// the markdown fallback starts (messages.RenderDecisionFallback). It is

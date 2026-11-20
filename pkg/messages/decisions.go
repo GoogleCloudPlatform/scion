@@ -266,7 +266,11 @@ func (o *OtherInput) UnmarshalJSON(data []byte) error {
 	}
 }
 
-// MarshalJSON writes the boolean or object form of OtherInput.
+// MarshalJSON writes the boolean or object form of OtherInput. Marshaling is
+// lossy for invalid input: validation markers (such as non-boolean/non-string
+// roots, non-string fields, and unknown object keys) are not preserved, so
+// callers must run NormalizeDecisions on the decoded input rather than after a
+// re-marshal round trip.
 func (o OtherInput) MarshalJSON() ([]byte, error) {
 	if !o.Enabled {
 		return []byte("false"), nil
@@ -345,7 +349,10 @@ func (d *DecisionInput) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON writes the object form with every choice as an object.
+// MarshalJSON writes the object form with every choice as an object. Marshaling
+// is lossy for invalid input: unknown decision fields and disabled/invalid
+// AllowOther markers are omitted, so callers must validate the decoded input
+// directly rather than re-marshaling before NormalizeDecisions.
 func (d DecisionInput) MarshalJSON() ([]byte, error) {
 	var ao *OtherInput
 	if d.AllowOther != nil && d.AllowOther.Enabled {
@@ -543,7 +550,7 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 		if def := strings.TrimSpace(d.Default); def != "" && nd.Choices != nil {
 			var id string
 			var ok bool
-			if !strings.EqualFold(def, ChoiceIDOther) && (nd.Other == nil || nd.Other.Label == "" || !strings.EqualFold(def, nd.Other.Label)) {
+			if !strings.EqualFold(def, ChoiceIDOther) {
 				id, ok = matchDefault(nd.Choices, def)
 			}
 			if !ok {

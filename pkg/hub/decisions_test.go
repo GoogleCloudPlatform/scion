@@ -1661,4 +1661,45 @@ func TestDecisions_AllowOther_SingleEndToEndValidationAndAskerOnlyDelivery(t *te
 	})
 	assert.Equal(t, http.StatusConflict, rrDsm.Code, rrDsm.Body.String())
 	assert.Equal(t, ErrCodeDecisionDismissed, errorCode(t, rrDsm))
+
+	// 6. Multibyte at-limit Other fields (100 Cyrillic runes label, 300 CJK runes
+	// description, 100 CJK runes placeholder) save and round-trip with HTTP 200;
+	// 101 Cyrillic runes returns HTTP 400 validation_error (never 500).
+	mbLabel := strings.Repeat("д", messages.MaxChoiceLabelLen)
+	mbDesc := strings.Repeat("東", messages.MaxChoiceDescriptionLen)
+	mbPlaceholder := strings.Repeat("東", messages.MaxOtherPlaceholderLen)
+	_, mbRes := f.topicPrompt(t, fmt.Sprintf(`[{
+		"id": "mb-other",
+		"question": "Multibyte Other?",
+		"choices": ["yes"],
+		"allow_other": {
+			"label": %q,
+			"description": %q,
+			"placeholder": %q
+		}
+	}]`, mbLabel, mbDesc, mbPlaceholder), false)
+	mbGet := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+mbRes.Decisions[0].RowID, nil)
+	require.Equal(t, http.StatusOK, mbGet.Code, mbGet.Body.String())
+	var mbOut struct {
+		Decision DecisionView `json:"decision"`
+	}
+	require.NoError(t, json.Unmarshal(mbGet.Body.Bytes(), &mbOut))
+	require.NotNil(t, mbOut.Decision.Other)
+	assert.Equal(t, mbLabel, mbOut.Decision.Other.Label)
+	assert.Equal(t, mbDesc, mbOut.Decision.Other.Description)
+	assert.Equal(t, mbPlaceholder, mbOut.Decision.Other.Placeholder)
+
+	mbOver := f.sendAsAgent(t, OutboundMessageRequest{
+		Recipient:       "conv:" + f.topicID,
+		ConversationRef: "conv:" + f.topicID,
+		Msg:             "Over multibyte limit",
+		Decisions: decisionInputs(t, fmt.Sprintf(`[{
+			"id": "mb-over",
+			"question": "Too long?",
+			"choices": ["yes"],
+			"allow_other": {"label": %q}
+		}]`, strings.Repeat("д", messages.MaxChoiceLabelLen+1))),
+	})
+	require.Equal(t, http.StatusBadRequest, mbOver.Code, mbOver.Body.String())
+	assert.Equal(t, ErrCodeValidationError, errorCode(t, mbOver))
 }

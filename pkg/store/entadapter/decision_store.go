@@ -53,11 +53,15 @@ var errDecisionRace = errors.New("concurrent decision write")
 // key need up to n-1 retries for the last one.
 const maxDecisionRaceRetries = 5
 
-// markDecisionRace wraps a constraint violation as errDecisionRace and
-// maps any other error as usual.
+// markDecisionRace wraps a constraint violation as errDecisionRace, maps Ent
+// field validation failures to store.ErrInvalidInput, and maps any other error
+// as usual.
 func markDecisionRace(err error) error {
 	if ent.IsConstraintError(err) {
 		return fmt.Errorf("%w: %v", errDecisionRace, err)
+	}
+	if ent.IsValidationError(err) {
+		return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
 	}
 	return mapError(err)
 }
@@ -123,6 +127,15 @@ func validateDecisionPromptInput(in *store.DecisionPromptInput) error {
 			minChoices = messages.MinChoicesPerDecisionWithOther
 			if strings.TrimSpace(d.Other.Label) == "" {
 				return fmt.Errorf("%w: decision %d has an empty other label", store.ErrInvalidInput, i)
+			}
+			if utf8.RuneCountInString(d.Other.Label) > messages.MaxChoiceLabelLen {
+				return fmt.Errorf("%w: decision %d other label exceeds %d characters", store.ErrInvalidInput, i, messages.MaxChoiceLabelLen)
+			}
+			if utf8.RuneCountInString(d.Other.Description) > messages.MaxChoiceDescriptionLen {
+				return fmt.Errorf("%w: decision %d other description exceeds %d characters", store.ErrInvalidInput, i, messages.MaxChoiceDescriptionLen)
+			}
+			if utf8.RuneCountInString(d.Other.Placeholder) > messages.MaxOtherPlaceholderLen {
+				return fmt.Errorf("%w: decision %d other placeholder exceeds %d characters", store.ErrInvalidInput, i, messages.MaxOtherPlaceholderLen)
 			}
 		}
 		if d.Question == "" || len(d.Choices) < minChoices {
@@ -1175,9 +1188,6 @@ func checkAnswerPreconditions(row *ent.Decision, existing []*ent.DecisionAnswer,
 	}
 	var interpreted *ent.DecisionAnswer
 	for _, a := range existing {
-		if a.Outcome == decisionanswer.OutcomeDismiss {
-			return fmt.Errorf("%w: version %d of %s was dismissed", store.ErrDecisionDismissed, row.Version, row.Key)
-		}
 		if string(a.Provenance) == in.Provenance {
 			return fmt.Errorf("%w: version %d of %s already has a %s answer", store.ErrDecisionAnswerConflict, row.Version, row.Key, in.Provenance)
 		}

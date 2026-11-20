@@ -3069,4 +3069,45 @@ func TestRecordAnswer_AllowOther_RoundTripIdempotencyTerminalAndUserDeletion(t *
 	ansDismissed.OtherText = "too late"
 	_, _, err = f.cs.RecordAnswer(ctx, ansDismissed)
 	assert.ErrorIs(t, err, store.ErrDecisionDismissed)
+
+	// 7. Multibyte at-limit Other fields (100 Cyrillic runes label, 300 CJK runes
+	// description, 100 CJK runes placeholder) round-trip cleanly via MaxRuneLen,
+	// and un-normalized over-limit inputs fail as ErrInvalidInput (never raw Ent ValidationError).
+	cyrillicLabel100 := strings.Repeat("д", messages.MaxChoiceLabelLen)
+	cjkDesc300 := strings.Repeat("東", messages.MaxChoiceDescriptionLen)
+	cjkPlaceholder100 := strings.Repeat("東", messages.MaxOtherPlaceholderLen)
+	multibyteDec := messages.Decision{
+		Key:      "multibyte-other",
+		Question: "Multibyte Other limits?",
+		Choices:  []messages.Choice{{ID: "1", Label: "Yes"}},
+		Other: &messages.OtherOption{
+			Label:       cyrillicLabel100,
+			Description: cjkDesc300,
+			Placeholder: cjkPlaceholder100,
+		},
+	}
+	mbRes := f.create(t, false, multibyteDec)
+	gotMB, err := f.cs.GetDecision(ctx, mbRes.Decisions[0].RowID)
+	require.NoError(t, err)
+	require.NotNil(t, gotMB.Other)
+	assert.Equal(t, cyrillicLabel100, gotMB.Other.Label)
+	assert.Equal(t, cjkDesc300, gotMB.Other.Description)
+	assert.Equal(t, cjkPlaceholder100, gotMB.Other.Placeholder)
+
+	for name, badOther := range map[string]*messages.OtherOption{
+		"label 101 Cyrillic":  {Label: strings.Repeat("д", messages.MaxChoiceLabelLen+1)},
+		"desc 301 CJK":        {Label: "Other", Description: strings.Repeat("東", messages.MaxChoiceDescriptionLen+1)},
+		"placeholder 101 CJK": {Label: "Other", Placeholder: strings.Repeat("東", messages.MaxOtherPlaceholderLen+1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pIn := f.prompt("", false, messages.Decision{
+				Key:      "bad-mb",
+				Question: "Too long?",
+				Choices:  []messages.Choice{{ID: "1", Label: "Yes"}},
+				Other:    badOther,
+			})
+			_, err := f.cs.CreateDecisionPrompt(ctx, pIn)
+			require.ErrorIs(t, err, store.ErrInvalidInput)
+		})
+	}
 }
