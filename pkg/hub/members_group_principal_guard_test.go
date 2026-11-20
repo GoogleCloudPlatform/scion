@@ -274,24 +274,51 @@ func TestMembersGroupPrincipalGuard_AdminRoleBindingRefused(t *testing.T) {
 }
 
 // POST /admin/role-bindings with a built-in project role is authorized by the
-// membership service. An actor with no role on the project gets the ordinary
-// 403 for a members-group principal, not the members-group refusal, and the
-// body does not name the group.
+// membership service. An actor with project read access on the members group's
+// project but no role on the target project gets the ordinary 403, not the
+// members-group refusal, and the body does not name the group. An actor without
+// project read access on the members group's project gets 400 group not found
+// because project members groups are filtered by project read access.
 func TestMembersGroupPrincipalGuard_AdminRoleBindingUnauthorizedActor(t *testing.T) {
 	for kind := range markerKeys() {
 		t.Run(kind, func(t *testing.T) {
 			f := setupMembersGroupGuardFixture(t)
+			ctx := context.Background()
 			g := f.markedGroups()[kind]
-			require.Empty(t, f.srv.membershipService.projectEffectiveRole(context.Background(), f.creator.ID, f.y.ID),
+			body := map[string]interface{}{
+				"principalType": "group", "principalId": g.Slug,
+				"roleDefinitionId": projectRoleDef(t, f.s, store.ProjectRoleAdmin).ID,
+				"scopeType":        store.RoleScopeProject, "scopeId": f.y.ID,
+			}
+
+			// Actor with read access on X (so g resolves) but no role on Y -> 403.
+			xReader := createStaleOwnerUser(t, f.s, tid("mgguard-x-reader-"+kind), "mgguard-x-reader-"+kind+"@test.com")
+			_, err := f.s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: projectRoleDef(t, f.s, store.ProjectRoleMember).ID,
+				PrincipalType:    store.RoleBindingPrincipalUser,
+				PrincipalID:      xReader.ID,
+				ScopeType:        store.RoleScopeProject,
+				ScopeID:          f.project.ID,
+				CreatedBy:        "test-seed",
+			})
+			require.NoError(t, err)
+			require.Empty(t, f.srv.membershipService.projectEffectiveRole(ctx, xReader.ID, f.y.ID),
 				"the actor must hold no role on Y")
-			rec := doRequestAsUser(t, f.srv, f.creator, http.MethodPost, "/api/v1/admin/role-bindings",
-				map[string]interface{}{
-					"principalType": "group", "principalId": g.Slug,
-					"roleDefinitionId": projectRoleDef(t, f.s, store.ProjectRoleAdmin).ID,
-					"scopeType":        store.RoleScopeProject, "scopeId": f.y.ID,
-				})
+
+			rec := doRequestAsUser(t, f.srv, xReader, http.MethodPost, "/api/v1/admin/role-bindings", body)
 			require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 			_, details := errorBody(t, rec)
+			assert.NotContains(t, details, "groupId", rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), g.ID, "the body must not name the group")
+			requireNoGroupBindings(t, f.s, g.ID)
+
+			// Actor without read access on X and no role on Y -> 400 group not found.
+			require.Empty(t, f.srv.membershipService.projectEffectiveRole(ctx, f.creator.ID, f.y.ID),
+				"the actor must hold no role on Y")
+			rec = doRequestAsUser(t, f.srv, f.creator, http.MethodPost, "/api/v1/admin/role-bindings", body)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			code, details := errorBody(t, rec)
+			assert.Equal(t, ErrCodeInvalidRequest, code, rec.Body.String())
 			assert.NotContains(t, details, "groupId", rec.Body.String())
 			assert.NotContains(t, rec.Body.String(), g.ID, "the body must not name the group")
 			requireNoGroupBindings(t, f.s, g.ID)
