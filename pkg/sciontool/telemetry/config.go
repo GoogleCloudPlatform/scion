@@ -294,7 +294,7 @@ func (c *Config) IsCloudConfigured() bool {
 // explicit credentials file (SCION_OTEL_GCP_CREDENTIALS or the well-known
 // path) is present.
 func (c *Config) isGCPBlockedWithoutCredentials() bool {
-	return c != nil && c.CloudProvider == "gcp" && c.GCPCredentialsFile == "" && c.MetadataMode == metadataModeBlock
+	return c.IsGCP() && c.GCPCredentialsFile == "" && c.MetadataMode == metadataModeBlock
 }
 
 // IsGCP returns true if the cloud provider is configured for GCP-native export.
