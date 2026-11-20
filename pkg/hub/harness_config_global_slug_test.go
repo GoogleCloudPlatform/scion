@@ -19,8 +19,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -275,10 +278,83 @@ func TestProjectClone_GlobalSlug(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
 		map[string]string{"name": "Cloned Shadow"})
 	assertSlugReserved(t, rec, "shared-name")
+	assert.Contains(t, rec.Body.String(), "source project", "the refusal must name the source project's config")
 
 	projects, err := s.ListProjects(context.Background(), store.ProjectFilter{}, store.ListOptions{Limit: 100})
 	require.NoError(t, err)
 	for _, p := range projects.Items {
 		assert.NotEqual(t, "Cloned Shadow", p.Name, "a refused clone must be rolled back")
 	}
+}
+
+// TestImportTemplate_BundledHarnessConfigGlobalSlug covers a template that
+// bundles harness-configs/<global-slug>/ imported into a project on a
+// hosted hub: that bundled config is skipped, the other bundled config and
+// the template itself are imported.
+func TestImportTemplate_BundledHarnessConfigGlobalSlug(t *testing.T) {
+	srv, s, project, wsRoot := setupWorkspaceProject(t, "hc-bundle-global-slug")
+	srv.workstation = false
+	ctx := context.Background()
+	seedHarnessConfigRow(t, s, "shared-name", store.HarnessConfigScopeGlobal, "")
+
+	tmplDir := filepath.Join(wsRoot, "templates", "bundle-tmpl")
+	for rel, body := range map[string]string{
+		"scion-agent.yaml":                        "harness: claude\n",
+		"harness-configs/shared-name/config.yaml": "harness: claude\n",
+		"harness-configs/own-bundled/config.yaml": "harness: claude\n",
+	} {
+		full := filepath.Join(tmplDir, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+		require.NoError(t, os.WriteFile(full, []byte(body), 0o644))
+	}
+
+	imported, err := srv.importTemplatesFromWorkspace(ctx, project, "/templates")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"bundle-tmpl"}, imported, "the template import must still succeed")
+
+	assert.True(t, projectHarnessConfigExists(t, s, "own-bundled", project.ID))
+	assert.False(t, projectHarnessConfigExists(t, s, "shared-name", project.ID),
+		"a bundled config under a global slug must be skipped")
+}
+
+// errGlobalSlugLookupFault is returned by globalSlugLookupFaultStore while
+// its switch is armed.
+var errGlobalSlugLookupFault = errors.New("injected global harness config lookup fault")
+
+// globalSlugLookupFaultStore fails the global-scope harness config lookup
+// while armed.
+type globalSlugLookupFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (f *globalSlugLookupFaultStore) GetHarnessConfigBySlug(ctx context.Context, slug, scope, scopeID string) (*store.HarnessConfig, error) {
+	if f.fault.Active() && scope == store.HarnessConfigScopeGlobal {
+		return nil, errGlobalSlugLookupFault
+	}
+	return f.Store.GetHarnessConfigBySlug(ctx, slug, scope, scopeID)
+}
+
+// TestCreateHarnessConfig_GlobalSlugLookupFailsClosed covers a store
+// failure of the global lookup: a hosted hub refuses the project-scope
+// create instead of allowing it, and writes no row.
+func TestCreateHarnessConfig_GlobalSlugLookupFailsClosed(t *testing.T) {
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *globalSlugLookupFaultStore {
+		return &globalSlugLookupFaultStore{Store: inner, fault: fault}
+	})
+	srv.workstation = false
+	projectID := tid("hc-global-slug-fault-project")
+
+	err := srv.checkHarnessConfigSlugNotGlobal(context.Background(), store.HarnessConfigScopeProject, "any-name")
+	require.NoError(t, err, "unarmed lookup finds no global config")
+
+	fault.Arm()
+	err = srv.checkHarnessConfigSlugNotGlobal(context.Background(), store.HarnessConfigScopeProject, "any-name")
+	assert.ErrorIs(t, err, errGlobalSlugLookupFault)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", CreateHarnessConfigRequest{
+		Name: "any-name", Harness: "claude", Scope: store.HarnessConfigScopeProject, ScopeID: projectID,
+	})
+	assert.GreaterOrEqual(t, rec.Code, http.StatusInternalServerError, "body: %s", rec.Body.String())
+	assert.False(t, projectHarnessConfigExists(t, s, "any-name", projectID))
 }

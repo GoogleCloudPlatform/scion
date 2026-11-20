@@ -334,11 +334,17 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	// ── Step 8: Deep-copy project-scoped harness configs ─────────────────
 
 	if err := s.cloneProjectHarnessConfigs(ctx, src.ID, clone, &rollback); err != nil {
-		slog.Error("project clone: harness config copy failed",
-			"source_id", src.ID, "clone_id", clone.ID, "error", err)
-		if writeHarnessConfigSlugReserved(w, err) {
+		var reserved *harnessConfigSlugReservedError
+		if errors.As(err, &reserved) {
+			slog.Info("project clone: source harness config uses a reserved global slug",
+				"source_id", src.ID, "slug", reserved.slug)
+			writeError(w, http.StatusConflict, ErrCodeHarnessConfigSlugReserved,
+				fmt.Sprintf("the source project's harness config %q uses a name reserved by a global harness config; rename it in the source project before cloning", reserved.slug),
+				map[string]interface{}{"field": "slug"})
 			return
 		}
+		slog.Error("project clone: harness config copy failed",
+			"source_id", src.ID, "clone_id", clone.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to copy harness configs: "+err.Error(), nil)
 		return
