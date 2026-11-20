@@ -59,7 +59,7 @@ testdata/hub-v46-fixture.db-shm
 
 # Claude temporary files
 .claude/
-fixturegen
+/fixturegen
 
 # Agent state files
 .agents/
