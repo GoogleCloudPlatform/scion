@@ -719,6 +719,78 @@ func TestBuildCloudRunInstance_HarnessCommand(t *testing.T) {
 	})
 }
 
+func TestBuildCloudRunInstance_WorkingDir(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project",
+		Location:  "us-central1",
+	})
+	if err != nil {
+		t.Fatalf("NewCloudRunRuntime: %v", err)
+	}
+
+	nfsPaths := &cloudRunNFSProvisionPaths{
+		server:              "10.0.0.2",
+		workspaceExportPath: "/share/projects/p1/agents/dev/workspace",
+		homeExportPath:      "/share/projects/p1/agents/dev/home-1",
+	}
+
+	tests := []struct {
+		name               string
+		containerWorkspace string
+		nfsPaths           *cloudRunNFSProvisionPaths
+		wantWorkingDir     string
+	}{
+		{
+			name:           "defaults to /workspace with harness and NFS",
+			nfsPaths:       nfsPaths,
+			wantWorkingDir: "/workspace",
+		},
+		{
+			name:               "uses custom ContainerWorkspace and matches workspace mount",
+			containerWorkspace: "/custom/workspace",
+			nfsPaths:           nfsPaths,
+			wantWorkingDir:     "/custom/workspace",
+		},
+		{
+			name:           "defaults to /workspace when nfsPaths is nil",
+			nfsPaths:       nil,
+			wantWorkingDir: "/workspace",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := RunConfig{
+				Image:              "test-image:latest",
+				ContainerWorkspace: tc.containerWorkspace,
+				Labels:             map[string]string{"agent_id": "agent-1"},
+				Harness: &mockHarness{
+					command: []string{"gemini"},
+				},
+			}
+			inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, tc.nfsPaths)
+			if err != nil {
+				t.Fatalf("buildCloudRunInstance: %v", err)
+			}
+			c := inst.Containers[0]
+			if c.WorkingDir != tc.wantWorkingDir {
+				t.Errorf("Container.WorkingDir = %q, want %q", c.WorkingDir, tc.wantWorkingDir)
+			}
+			if tc.nfsPaths != nil {
+				var wsMount string
+				for _, vm := range c.VolumeMounts {
+					if vm.Name == "workspace" {
+						wsMount = vm.MountPath
+					}
+				}
+				if wsMount != c.WorkingDir {
+					t.Errorf("workspace VolumeMount.MountPath = %q, want match with Container.WorkingDir %q", wsMount, c.WorkingDir)
+				}
+			}
+		})
+	}
+}
+
 func TestCloudRunShortInstanceID(t *testing.T) {
 	tests := []struct {
 		name string

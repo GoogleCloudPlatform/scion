@@ -1141,6 +1141,11 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
 	}
 
+	workspaceMount := cfg.ContainerWorkspace
+	if workspaceMount == "" {
+		workspaceMount = "/workspace"
+	}
+
 	var volumes []*runpb.Volume
 	var volumeMounts []*runpb.VolumeMount
 
@@ -1148,11 +1153,6 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	// Runtime Broker adds to its own NFS mounts are not set here: Cloud Run
 	// instances run sandboxed, and that is the boundary relied on.
 	if nfsPaths != nil {
-		workspaceMount := cfg.ContainerWorkspace
-		if workspaceMount == "" {
-			workspaceMount = "/workspace"
-		}
-
 		volumes = append(volumes, &runpb.Volume{
 			Name: "workspace",
 			VolumeType: &runpb.Volume_Nfs{
@@ -1236,6 +1236,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	container := &runpb.Container{
 		Name:         "scion-agent",
 		Image:        cfg.Image,
+		WorkingDir:   workspaceMount,
 		Env:          envVars,
 		VolumeMounts: volumeMounts,
 		// The agent serves nothing, so without an explicit probe the
