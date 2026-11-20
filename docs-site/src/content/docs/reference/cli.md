@@ -119,16 +119,15 @@ starting a **stopped** or **error** agent runs a fresh session. See
 
 Starting an existing **stopped** agent restarts it in place
 (printed as "Restarting", with a fresh session), the same as `scion resume`.
-Pass `--no-reuse` to opt out: `scion start` fails non-zero if an agent with
-that name already exists in any phase (including suspended, stopped, halted, or
-created) instead of resuming or restarting it in place, and omits `resume` on
-the create request.
 Starting an **error**-phase agent still fails with a conflict: use
 `scion resume --force` or delete it first. When an existing agent is reused in
 place, the Hub applies only the task and `--attach`. Other configuration flags
 you set explicitly (for example `--type`, `--image`, `--harness-config`,
 `--broker`, `--label` or `--no-auth`) are not applied, and the CLI prints a
-warning that names them.
+warning that names them. Pass `--no-reuse` to opt out of reuse: `scion start`
+fails non-zero if an agent with that name already exists in any phase
+(including suspended, stopped, halted, or created), or if existence cannot be
+confirmed, instead of resuming or restarting it in place.
 
 **Usage:** `scion start <agent-name> [task] [flags]`
 

@@ -1306,16 +1306,21 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			existingPhaseText = fmt.Sprintf("%s, resumes as %s", existing.Phase, existing.Launch.ResumePhase)
 		}
 	}
-	if !resume && startNoReuse && getErr == nil && existing != nil {
-		phaseNote := ""
-		if existingPhaseText != "" {
-			phaseNote = fmt.Sprintf(" (phase %s)", existingPhaseText)
+	if !resume && startNoReuse {
+		if getErr != nil && !apiclient.IsNotFoundError(getErr) {
+			return wrapHubError(fmt.Errorf("--no-reuse: could not confirm agent '%s' does not exist: %w", agentName, getErr))
 		}
-		return &hubError{
-			msg: fmt.Sprintf("agent '%s' already exists%s; delete it or omit --no-reuse", agentName, phaseNote),
+		if getErr == nil && existing != nil {
+			phaseNote := ""
+			if existingPhaseText != "" {
+				phaseNote = fmt.Sprintf(" (phase %s)", existingPhaseText)
+			}
+			return &hubError{
+				msg: fmt.Sprintf("agent '%s' already exists%s; delete it or omit --no-reuse", agentName, phaseNote),
+			}
 		}
 	}
-	if !resume && !startNoReuse && hubStartImpliesResume(existingPhase) {
+	if !resume && hubStartImpliesResume(existingPhase) {
 		resume = true
 		req.Resume = true
 	}

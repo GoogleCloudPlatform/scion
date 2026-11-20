@@ -39,6 +39,7 @@ type hubStartStub struct {
 	createBody       map[string]interface{}
 	createCalls      int
 	existingPhase    string                 // "" → existing-agent GET returns 404
+	existingStatus   int                    // non-zero → existing-agent GET fails with this status
 	existingLaunch   map[string]interface{} // launch object of the existing agent (nil → none)
 	project          map[string]interface{}
 	createStatus     int                    // non-zero → the create POST fails with this status
@@ -64,6 +65,13 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": projectID, "name": "p"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+agentName:
+			if stub.existingStatus != 0 {
+				w.WriteHeader(stub.existingStatus)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "internal_error", "message": "hub unavailable"},
+				})
+				return
+			}
 			if stub.existingPhase == "" {
 				w.WriteHeader(http.StatusNotFound)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -241,8 +249,9 @@ func TestStartAgentViaHub_ExistingAgentPreCheck(t *testing.T) {
 
 // ptone/scion#8495 (part 2): --no-reuse refuses to reuse an existing agent in
 // any phase (including suspended, stopped, halted, and created) when found by
-// the pre-check, and keeps Resume unset so a race after the pre-check still
-// surfaces the Hub's 409 conflict without printing an ignored-flags warning.
+// the pre-check, fails closed on non-404 pre-check errors, and keeps Resume
+// unset so a stopped/halted/running/error race after the pre-check surfaces
+// the Hub's 409 conflict without printing an ignored-flags warning.
 func TestStartAgentViaHub_NoReuse(t *testing.T) {
 	const projectID, agentName = "proj-noreuse", "noreuse-agent"
 
@@ -297,7 +306,26 @@ func TestStartAgentViaHub_NoReuse(t *testing.T) {
 		})
 	}
 
-	t.Run("race after pre-check sends create without resume and surfaces 409 conflict", func(t *testing.T) {
+	t.Run("fails closed without create on non-404 pre-check error", func(t *testing.T) {
+		resetHubStartGlobals(t)
+		startNoReuse = true
+		stub := newHubStartStub(t, projectID, agentName, "")
+		stub.existingStatus = http.StatusInternalServerError
+		cmd := newFlagCmd(t, map[string]string{"image": "img:1"})
+
+		var err error
+		stdout, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+		})
+		require.Error(t, err)
+		assert.Equal(t, 0, stub.createCalls, "must not send create request when pre-check fails with non-404")
+		assert.True(t, isHubFailure(err), "pre-check error must be reported as a hub failure")
+		assert.Contains(t, err.Error(), "--no-reuse: could not confirm agent '"+agentName+"' does not exist")
+		assert.Empty(t, stdout, "must not print Starting/Resuming/Restarting when pre-check errors")
+		assert.NotContains(t, stderr, "not applied to an existing agent")
+	})
+
+	t.Run("stopped/halted/running/error race after pre-check sends create without resume and surfaces 409 conflict", func(t *testing.T) {
 		resetHubStartGlobals(t)
 		startNoReuse = true
 		stub := newHubStartStub(t, projectID, agentName, "")
