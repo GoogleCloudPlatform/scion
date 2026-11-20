@@ -244,6 +244,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/access-constraint-previews":   "admin", // Admin access constraint previews
 	"/api/v1/admin/access-constraint-previews/":  "admin", // Admin access constraint preview by ID
 	"/api/v1/admin/effective-access":             "admin", // Admin effective access
+	"/api/v1/admin/effective-permissions":        "admin", // Admin effective permissions
 
 	// ── Access constraint audit (method-scoped) ────────────────────────
 	"GET /api/v1/admin/access-constraints/{id}/audit": "admin", // Constraint audit history — hub.audit.read (super-admin) via Decide in handler; denials return 404

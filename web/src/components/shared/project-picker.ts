@@ -59,6 +59,9 @@ export class ScionProjectPicker extends LitElement {
   /** Disabled state. */
   @property({ type: Boolean }) disabled = false;
 
+  /** Hoist the results popup with fixed positioning to escape overflow clipping inside dialogs/details. */
+  @property({ type: Boolean }) hoist = false;
+
   /** Current selected project ID. */
   @property() value = '';
 
@@ -102,6 +105,11 @@ export class ScionProjectPicker extends LitElement {
       max-height: 200px;
       overflow-y: auto;
       margin-top: 0.25rem;
+    }
+
+    .project-search-dropdown.hoisted {
+      position: static;
+      margin-top: 0;
     }
 
     .project-search-option {
@@ -253,6 +261,7 @@ export class ScionProjectPicker extends LitElement {
         break;
       case 'Escape':
         e.preventDefault();
+        e.stopPropagation();
         this.searchOpen = false;
         this.activeDescendantIndex = -1;
         break;
@@ -283,78 +292,104 @@ export class ScionProjectPicker extends LitElement {
   // Render
   // ---------------------------------------------------------------------------
 
+  private renderSearchInput(asAnchor: boolean) {
+    return html`
+      <sl-input
+        slot=${asAnchor ? 'anchor' : nothing}
+        label=${this.label}
+        placeholder=${this.placeholder}
+        value=${this.searchQuery}
+        type="text"
+        autocomplete="off"
+        role="combobox"
+        aria-expanded=${this.searchOpen ? 'true' : 'false'}
+        aria-controls="project-picker-listbox"
+        aria-activedescendant=${this.activeDescendantIndex >= 0
+          ? `project-picker-option-${this.activeDescendantIndex}`
+          : ''}
+        ?disabled=${this.disabled}
+        @sl-input=${(e: Event) => this.handleSearchInput(e)}
+        @keydown=${(e: KeyboardEvent) => this.handleKeydown(e)}
+        @sl-focus=${() => {
+          if (this.searchResults.length > 0) this.searchOpen = true;
+        }}
+        @sl-blur=${() => {
+          this.blurTimeoutId = setTimeout(() => {
+            this.searchOpen = false;
+            this.activeDescendantIndex = -1;
+            // Emit the raw typed value on blur if no dropdown selection was
+            // made, so the parent has the latest value even when the
+            // debounce timer hasn't fired yet.
+            if (!this.selectedViaDropdown && this.searchQuery.trim()) {
+              this.emitChange(this.searchQuery.trim(), '');
+            }
+          }, 200);
+        }}
+      ></sl-input>
+    `;
+  }
+
+  private renderSearchDropdown(hoisted: boolean) {
+    if (!this.searchOpen) return nothing;
+    return html`
+      <div
+        class="project-search-dropdown ${hoisted ? 'hoisted' : ''}"
+        id="project-picker-listbox"
+        role="listbox"
+        aria-label="Project search results"
+      >
+        ${this.searchLoading
+          ? html`<div class="project-search-loading" role="status" aria-live="polite">
+              <sl-spinner></sl-spinner> Searching...
+            </div>`
+          : this.searchResults.length === 0
+            ? html`<div class="project-search-empty" role="status" aria-live="polite">
+                No projects found
+              </div>`
+            : this.searchResults.map(
+                (project, idx) => html`
+                  <div
+                    class="project-search-option ${idx === this.activeDescendantIndex
+                      ? 'active-descendant'
+                      : ''}"
+                    id="project-picker-option-${idx}"
+                    role="option"
+                    aria-selected=${idx === this.activeDescendantIndex ? 'true' : 'false'}
+                    @mousedown=${(e: Event) => {
+                      e.preventDefault();
+                      this.selectProject(project);
+                    }}
+                  >
+                    <span class="project-name">${project.name}</span>
+                    <span class="project-slug">${project.slug}</span>
+                  </div>
+                `
+              )}
+      </div>
+    `;
+  }
+
   override render() {
+    if (this.hoist) {
+      return html`
+        <div class="project-search-container">
+          <sl-popup
+            placement="bottom-start"
+            strategy="fixed"
+            sync="width"
+            distance="4"
+            flip
+            ?active=${this.searchOpen}
+          >
+            ${this.renderSearchInput(true)} ${this.renderSearchDropdown(true)}
+          </sl-popup>
+        </div>
+      `;
+    }
+
     return html`
       <div class="project-search-container">
-        <sl-input
-          label=${this.label}
-          placeholder=${this.placeholder}
-          value=${this.searchQuery}
-          type="text"
-          autocomplete="off"
-          role="combobox"
-          aria-expanded=${this.searchOpen ? 'true' : 'false'}
-          aria-controls="project-picker-listbox"
-          aria-activedescendant=${this.activeDescendantIndex >= 0
-            ? `project-picker-option-${this.activeDescendantIndex}`
-            : ''}
-          ?disabled=${this.disabled}
-          @sl-input=${(e: Event) => this.handleSearchInput(e)}
-          @keydown=${(e: KeyboardEvent) => this.handleKeydown(e)}
-          @sl-focus=${() => {
-            if (this.searchResults.length > 0) this.searchOpen = true;
-          }}
-          @sl-blur=${() => {
-            this.blurTimeoutId = setTimeout(() => {
-              this.searchOpen = false;
-              this.activeDescendantIndex = -1;
-              // Emit the raw typed value on blur if no dropdown selection was
-              // made, so the parent has the latest value even when the
-              // debounce timer hasn't fired yet.
-              if (!this.selectedViaDropdown && this.searchQuery.trim()) {
-                this.emitChange(this.searchQuery.trim(), '');
-              }
-            }, 200);
-          }}
-        ></sl-input>
-        ${this.searchOpen
-          ? html`
-              <div
-                class="project-search-dropdown"
-                id="project-picker-listbox"
-                role="listbox"
-                aria-label="Project search results"
-              >
-                ${this.searchLoading
-                  ? html`<div class="project-search-loading" role="status" aria-live="polite">
-                      <sl-spinner></sl-spinner> Searching...
-                    </div>`
-                  : this.searchResults.length === 0
-                    ? html`<div class="project-search-empty" role="status" aria-live="polite">
-                        No projects found
-                      </div>`
-                    : this.searchResults.map(
-                        (project, idx) => html`
-                          <div
-                            class="project-search-option ${idx === this.activeDescendantIndex
-                              ? 'active-descendant'
-                              : ''}"
-                            id="project-picker-option-${idx}"
-                            role="option"
-                            aria-selected=${idx === this.activeDescendantIndex ? 'true' : 'false'}
-                            @mousedown=${(e: Event) => {
-                              e.preventDefault();
-                              this.selectProject(project);
-                            }}
-                          >
-                            <span class="project-name">${project.name}</span>
-                            <span class="project-slug">${project.slug}</span>
-                          </div>
-                        `
-                      )}
-              </div>
-            `
-          : nothing}
+        ${this.renderSearchInput(false)} ${this.renderSearchDropdown(false)}
       </div>
     `;
   }

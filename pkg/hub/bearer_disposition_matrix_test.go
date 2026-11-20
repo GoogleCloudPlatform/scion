@@ -71,6 +71,14 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the hub.github_triggers experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET and PUT with project- and hub-boundary tokens carrying and lacking project:read and github_trigger:configure",
 		Pin:    "TestProjectGitHubTriggerSettings_ScopedTokens",
 	},
+	{OperationID: "role.binding.effectivepermissions", Method: "GET", Pattern: "/api/v1/admin/effective-permissions"}: {
+		Reason: "the route answers 404 while the hub.effective_permissions experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET and HEAD with hub- and project-boundary tokens carrying and lacking role_binding:read",
+		Pin:    "TestAdminEffectivePermissions_ScopedTokens",
+	},
+	{OperationID: "role.binding.effectivepermissions", Method: "HEAD", Pattern: "/api/v1/admin/effective-permissions"}: {
+		Reason: "the route answers 404 while the hub.effective_permissions experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET and HEAD with hub- and project-boundary tokens carrying and lacking role_binding:read",
+		Pin:    "TestAdminEffectivePermissions_ScopedTokens",
+	},
 	{OperationID: "project.membership.add", Method: "POST", Pattern: "/api/v1/projects/{id}/members"}: {
 		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
 		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",

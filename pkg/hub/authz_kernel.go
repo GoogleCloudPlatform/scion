@@ -77,6 +77,10 @@ type RolePermissions struct {
 	// (store.RoleDefinition.ConfersProjectMembership). It does not affect
 	// which permissions the role grants.
 	ConfersMembership bool
+
+	// System reports whether this role is a built-in system role
+	// (store.RoleDefinition.System).
+	System bool
 }
 
 // HasPermission returns true if the role contains the given permission ID.

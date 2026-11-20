@@ -34,11 +34,20 @@ import {
 import '../shared/status-badge.js';
 import '../shared/effective-role-provenance.js';
 import '../shared/effective-access-boundary-notice.js';
+import '../shared/effective-permissions-view.js';
+import type { ScionEffectivePermissionsView } from '../shared/effective-permissions-view.js';
 import '../shared/security-review-dialog.js';
 import { invitedStatusTagStyles } from '../shared/styles.js';
 import { formatRelative } from '../../utils/time.js';
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
-import { isFeatureEnabled, USER_DELETE_FORCE_CASCADE_FLAG } from '../../utils/feature-flags.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import { stateManager } from '../../client/state.js';
+import { hasAnyPermission } from '../../lib/admin-permissions.js';
+import {
+  EFFECTIVE_PERMISSIONS_FLAG,
+  isFeatureEnabled,
+  USER_DELETE_FORCE_CASCADE_FLAG,
+} from '../../utils/feature-flags.js';
 import { copyToClipboard, showCopyFailedToast } from '../../utils/clipboard.js';
 
 type SortField = 'name' | 'created';
@@ -344,6 +353,9 @@ export class ScionPageAdminUsers extends LitElement {
   private currentUserId: string | null = null;
 
   @state()
+  private canReadRoleBindings = false;
+
+  @state()
   private confirmAction: ConfirmAction | null = null;
 
   @state()
@@ -427,6 +439,10 @@ export class ScionPageAdminUsers extends LitElement {
   /** User for which we are showing the effective roles dialog. */
   @state()
   private viewRolesUser: AdminUser | null = null;
+
+  /** Active tab inside the Roles dialog. */
+  @state()
+  private viewRolesActiveTab: 'roles' | 'permissions' = 'roles';
 
   // Security review dialog state
   @state()
@@ -1022,6 +1038,14 @@ export class ScionPageAdminUsers extends LitElement {
         color: var(--scion-text-muted, #64748b);
       }
 
+      .roles-dialog sl-tab-group {
+        --indicator-color: var(--scion-primary, #3b82f6);
+      }
+
+      .roles-dialog sl-tab-group::part(body) {
+        padding-top: 1rem;
+      }
+
       @media (max-width: 768px) {
         .hide-mobile {
           display: none;
@@ -1052,6 +1076,12 @@ export class ScionPageAdminUsers extends LitElement {
       }
     } catch {
       // Non-critical — actions will still work, just can't prevent self-actions
+    }
+    try {
+      const status = await loadAdminStatus(stateManager.getCurrentUserId() || this.currentUserId);
+      this.canReadRoleBindings = hasAnyPermission(status, ['role_binding.read']);
+    } catch {
+      this.canReadRoleBindings = false;
     }
   }
 
@@ -1372,6 +1402,11 @@ export class ScionPageAdminUsers extends LitElement {
   /** Whether the hub offers the forced delete (presentation only). */
   private forceDeleteEnabled(): boolean {
     return isFeatureEnabled(USER_DELETE_FORCE_CASCADE_FLAG);
+  }
+
+  /** Whether the hub offers the Effective permissions tab (presentation only). */
+  private effectivePermissionsEnabled(): boolean {
+    return isFeatureEnabled(EFFECTIVE_PERMISSIONS_FLAG);
   }
 
   /**
@@ -2369,66 +2404,104 @@ export class ScionPageAdminUsers extends LitElement {
         <td class="hide-mobile">
           <span class="meta-text">${this.formatRelativeTime(user.created)}</span>
         </td>
-        <td class="actions-cell">${self ? nothing : this.renderUserActions(user)}</td>
+        <td class="actions-cell">${this.renderUserActions(user, self)}</td>
       </tr>
     `;
   }
 
-  private renderUserActions(user: AdminUser) {
+  private renderRolesMenuItem(user: AdminUser) {
+    return html`
+      <sl-menu-item
+        @click=${() => {
+          this.viewRolesActiveTab = 'roles';
+          this.viewRolesUser = user;
+        }}
+      >
+        <sl-icon slot="prefix" name="shield"></sl-icon>
+        Roles
+      </sl-menu-item>
+    `;
+  }
+
+  private renderUserActions(user: AdminUser, self = false) {
+    const canViewRoles = this.canReadRoleBindings;
+
+    if (self) {
+      if (!canViewRoles) return nothing;
+      return html`
+        <sl-dropdown placement="bottom-end" hoist>
+          <sl-button slot="trigger" size="small" variant="text" caret>
+            <sl-icon name="three-dots-vertical"></sl-icon>
+          </sl-button>
+          <sl-menu> ${this.renderRolesMenuItem(user)} </sl-menu>
+        </sl-dropdown>
+      `;
+    }
+
     const caps = user._capabilities;
     const canPromote = can(caps, 'promote');
     const canSuspend = can(caps, 'suspend');
     const canDelete = can(caps, 'delete');
 
     if (user.status === 'invited') {
-      // Invited users: only Remove action (requires delete capability). No
-      // Change role: the role is assigned at first sign-in (PATCH role → 409).
-      if (!canDelete) return nothing;
+      // Invited users: Roles (when role_binding.read) and Remove (requires delete
+      // capability). No Change role: the role is assigned at first sign-in (PATCH role → 409).
+      if (!canViewRoles && !canDelete) return nothing;
       return html`
         <sl-dropdown placement="bottom-end" hoist>
           <sl-button slot="trigger" size="small" variant="text" caret>
             <sl-icon name="three-dots-vertical"></sl-icon>
           </sl-button>
           <sl-menu>
-            <sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
-              <sl-icon slot="prefix" name="trash"></sl-icon>
-              Remove
-            </sl-menu-item>
+            ${canViewRoles ? this.renderRolesMenuItem(user) : nothing}
+            ${canViewRoles && canDelete ? html`<sl-divider></sl-divider>` : nothing}
+            ${canDelete
+              ? html`<sl-menu-item class="menu-item-danger" @click=${() => this.promptDelete(user)}>
+                  <sl-icon slot="prefix" name="trash"></sl-icon>
+                  Remove
+                </sl-menu-item>`
+              : nothing}
           </sl-menu>
         </sl-dropdown>
       `;
     }
 
     if (user.status === 'deleting') {
-      // A forced deletion is in progress: only its status (requires delete).
-      if (!canDelete) return nothing;
+      // A forced deletion is in progress: Roles (when role_binding.read) and deletion status (requires delete).
+      if (!canViewRoles && !canDelete) return nothing;
       return html`
         <sl-dropdown placement="bottom-end" hoist>
           <sl-button slot="trigger" size="small" variant="text" caret>
             <sl-icon name="three-dots-vertical"></sl-icon>
           </sl-button>
           <sl-menu>
-            <sl-menu-item
-              class="menu-item-deletion"
-              @click=${() => void this.openDeletionPanel(user)}
-            >
-              <sl-icon slot="prefix" name="hourglass-split"></sl-icon>
-              Deletion status
-            </sl-menu-item>
+            ${canViewRoles ? this.renderRolesMenuItem(user) : nothing}
+            ${canViewRoles && canDelete ? html`<sl-divider></sl-divider>` : nothing}
+            ${canDelete
+              ? html`<sl-menu-item
+                  class="menu-item-deletion"
+                  @click=${() => void this.openDeletionPanel(user)}
+                >
+                  <sl-icon slot="prefix" name="hourglass-split"></sl-icon>
+                  Deletion status
+                </sl-menu-item>`
+              : nothing}
           </sl-menu>
         </sl-dropdown>
       `;
     }
 
     if (user.status === 'suspended') {
-      // Suspended users: Reactivate (requires suspend), Delete (requires delete)
-      if (!canSuspend && !canDelete) return nothing;
+      // Suspended users: Roles (when role_binding.read), Reactivate (requires suspend), Delete (requires delete)
+      if (!canViewRoles && !canSuspend && !canDelete) return nothing;
       return html`
         <sl-dropdown placement="bottom-end" hoist>
           <sl-button slot="trigger" size="small" variant="text" caret>
             <sl-icon name="three-dots-vertical"></sl-icon>
           </sl-button>
           <sl-menu>
+            ${canViewRoles ? this.renderRolesMenuItem(user) : nothing}
+            ${canViewRoles && (canSuspend || canDelete) ? html`<sl-divider></sl-divider>` : nothing}
             ${canSuspend
               ? html`<sl-menu-item @click=${() => this.promptToggleSuspend(user)}>
                   <sl-icon slot="prefix" name="check-circle"></sl-icon>
@@ -2447,28 +2520,18 @@ export class ScionPageAdminUsers extends LitElement {
       `;
     }
 
-    // Active users: View Roles, Change role, Suspend, Delete
-    // — each action gated by its capability. View Roles requires at least
-    // one admin-level capability since the role-bindings endpoint requires
-    // admin access (R4-R1: don't show dead controls to regular members).
-    const canUpdate = can(caps, 'update');
-    const hasAnyAdminAction = canPromote || canSuspend || canDelete || canUpdate;
-    if (!hasAnyAdminAction) return nothing;
+    // Active users: Roles (gated on role_binding.read independently of user.*),
+    // Change role, Suspend, Delete — each gated by its capability.
+    const hasOtherActions = canPromote || canSuspend || canDelete;
+    if (!canViewRoles && !hasOtherActions) return nothing;
     return html`
       <sl-dropdown placement="bottom-end" hoist>
         <sl-button slot="trigger" size="small" variant="text" caret>
           <sl-icon name="three-dots-vertical"></sl-icon>
         </sl-button>
         <sl-menu>
-          <sl-menu-item
-            @click=${() => {
-              this.viewRolesUser = user;
-            }}
-          >
-            <sl-icon slot="prefix" name="shield"></sl-icon>
-            View Roles
-          </sl-menu-item>
-          ${canPromote || canSuspend || canDelete ? html`<sl-divider></sl-divider>` : nothing}
+          ${canViewRoles ? this.renderRolesMenuItem(user) : nothing}
+          ${canViewRoles && hasOtherActions ? html`<sl-divider></sl-divider>` : nothing}
           ${canPromote ? this.renderChangeRoleMenu(user) : nothing}
           ${canSuspend
             ? html`${canPromote ? html`<sl-divider></sl-divider>` : nothing}
@@ -3038,29 +3101,99 @@ export class ScionPageAdminUsers extends LitElement {
   private renderViewRolesDialog() {
     if (!this.viewRolesUser) return nothing;
     const user = this.viewRolesUser;
+    const showEffectivePermissions = this.effectivePermissionsEnabled();
     return html`
       <sl-dialog
-        label="Effective Roles — ${user.displayName || user.email}"
+        class="roles-dialog"
+        label="Roles — ${user.displayName || user.email}"
         open
-        style="--width: 36rem;"
-        @sl-request-close=${() => {
+        style="--width: 48rem;"
+        @sl-request-close=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
           this.viewRolesUser = null;
+          this.viewRolesActiveTab = 'roles';
         }}
       >
-        <scion-effective-role-provenance
-          principalType="user"
-          principalId=${user.id}
-          sectionTitle="Effective Roles"
-        ></scion-effective-role-provenance>
-        <scion-effective-access-boundary-notice
-          contextType="user"
-          contextId=${user.id}
-        ></scion-effective-access-boundary-notice>
+        ${showEffectivePermissions
+          ? html`
+              <sl-tab-group
+                @sl-tab-show=${(e: CustomEvent<{ name: string }>) => {
+                  const name = e.detail?.name;
+                  if (name === 'roles' || name === 'permissions') {
+                    this.viewRolesActiveTab = name;
+                  }
+                }}
+              >
+                <sl-tab
+                  slot="nav"
+                  panel="roles"
+                  ?active=${this.viewRolesActiveTab === 'roles'}
+                  @click=${() => {
+                    this.viewRolesActiveTab = 'roles';
+                  }}
+                >
+                  Effective roles
+                </sl-tab>
+                <sl-tab
+                  slot="nav"
+                  panel="permissions"
+                  ?active=${this.viewRolesActiveTab === 'permissions'}
+                  @click=${() => {
+                    this.viewRolesActiveTab = 'permissions';
+                  }}
+                >
+                  Effective permissions
+                </sl-tab>
+
+                <sl-tab-panel name="roles" ?active=${this.viewRolesActiveTab === 'roles'}>
+                  <scion-effective-role-provenance
+                    principalType="user"
+                    principalId=${user.id}
+                    sectionTitle="Effective Roles"
+                    @role-bindings-changed=${(e: Event) => {
+                      if (e.target !== e.currentTarget) return;
+                      this.shadowRoot
+                        ?.querySelector<ScionEffectivePermissionsView>(
+                          'scion-effective-permissions-view'
+                        )
+                        ?.invalidate();
+                    }}
+                  ></scion-effective-role-provenance>
+                  <scion-effective-access-boundary-notice
+                    contextType="user"
+                    contextId=${user.id}
+                  ></scion-effective-access-boundary-notice>
+                </sl-tab-panel>
+
+                <sl-tab-panel
+                  name="permissions"
+                  ?active=${this.viewRolesActiveTab === 'permissions'}
+                >
+                  <scion-effective-permissions-view
+                    principalType="user"
+                    principalId=${user.id}
+                    ?active=${this.viewRolesActiveTab === 'permissions'}
+                  ></scion-effective-permissions-view>
+                </sl-tab-panel>
+              </sl-tab-group>
+            `
+          : html`
+              <scion-effective-role-provenance
+                principalType="user"
+                principalId=${user.id}
+                sectionTitle="Effective Roles"
+              ></scion-effective-role-provenance>
+              <scion-effective-access-boundary-notice
+                contextType="user"
+                contextId=${user.id}
+              ></scion-effective-access-boundary-notice>
+            `}
         <sl-button
           slot="footer"
           variant="default"
           @click=${() => {
             this.viewRolesUser = null;
+            this.viewRolesActiveTab = 'roles';
           }}
           >Close</sl-button
         >

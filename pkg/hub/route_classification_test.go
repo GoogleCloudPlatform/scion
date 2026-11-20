@@ -288,7 +288,8 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/access-constraint-previews/": "hub-admin:access_constraint",
 
 	// Effective Access composition (user-admin-role-sync)
-	"/api/v1/admin/effective-access": "hub-admin:audit",
+	"/api/v1/admin/effective-access":      "hub-admin:audit",
+	"/api/v1/admin/effective-permissions": "hub-admin:role_binding",
 
 	// Role import/export
 	"/api/v1/admin/roles/export": "hub-admin:role",

@@ -537,10 +537,27 @@ const Triggers = "hub.triggers"
 // and stored policies and decision records are kept.
 const MessagePolicies = "hub.message_policies"
 
+// EffectivePermissions gates the admin effective-permissions viewer
+// (ptone/scion#8439): GET|HEAD /api/v1/admin/effective-permissions (404 while
+// off) and the Effective permissions tab in the admin Users Roles dialog
+// (while off, the dialog shows only the roles content without tabs).
+const EffectivePermissions = "hub.effective_permissions"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        EffectivePermissions,
+		Title:       "Effective permissions viewer",
+		Description: "Adds an Effective permissions tab to the admin Users Roles dialog backed by GET /api/v1/admin/effective-permissions, showing resolved hub and per-project permissions, all contributing role bindings, and permissions removed by access constraints. Server layer: the endpoint answers 404 while it is off. Web layer: shows the two-tab Roles dialog; while off, the dialog shows roles content without tabs.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8439",
+		Owner:       "authz",
+		ReviewBy:    "2027-05-20",
+	},
 	{
 		Name:        ProjectSelfLeave,
 		Title:       "Leave a project",
