@@ -70,6 +70,27 @@ type Input struct {
 // ErrBudgetExhausted is returned when an aggregate BudgetTracker has no remaining time.
 var ErrBudgetExhausted = errors.New("rule budget exhausted")
 
+// maxEngineDeadlineMargin is the upper bound on the safety margin that
+// dialects such as System One subtract from Budget.MaxEvalTime so their own
+// internal deadline fires slightly before the engine's context deadline.
+// Keep in sync with pkg/systemone/runtime.engineDeadlineWithMargin (unification
+// tracked under ptone/scion#8033).
+const maxEngineDeadlineMargin = 10 * time.Millisecond
+
+// engineDeadlineMargin returns the deadline safety margin min(10ms, d/20) for
+// an evaluation timeout d (0 when d <= 0). Keep in sync with
+// pkg/systemone/runtime.engineDeadlineWithMargin (ptone/scion#8033).
+func engineDeadlineMargin(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	margin := min(maxEngineDeadlineMargin, d/20)
+	if margin <= 0 {
+		return 1
+	}
+	return margin
+}
+
 // BudgetTracker tracks aggregate evaluation wall-clock time across multiple
 // candidate rules (for example the 1s per-event trigger budget).
 type BudgetTracker struct {
@@ -113,6 +134,20 @@ func (b *BudgetTracker) Charge(d time.Duration) {
 	}
 	b.mu.Lock()
 	b.spent += d
+	b.mu.Unlock()
+}
+
+// Exhaust marks the tracker as having spent at least its full limit so
+// Exhausted() is true and Remaining() is 0. It never reduces Spent() if
+// previous charges already exceeded the limit.
+func (b *BudgetTracker) Exhaust() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	if b.spent < b.limit {
+		b.spent = b.limit
+	}
 	b.mu.Unlock()
 }
 
@@ -512,6 +547,12 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 		effBudget.MaxEvalTime = evalTimeout
 	}
 
+	// Capture start before arming evalCtx so any scheduling delay between
+	// context.WithTimeoutCause and d.Evaluate is included in elapsed; both
+	// tracker charging and the trackerDeadline margin check below rely on
+	// elapsed >= evalTimeout whenever evalCtx expires.
+	start := time.Now()
+
 	evalCtx := ctx
 	var cancel context.CancelFunc
 	if evalTimeout > 0 {
@@ -523,7 +564,6 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 		defer cancel()
 	}
 
-	start := time.Now()
 	dec, err := d.Evaluate(evalCtx, c, input, effBudget)
 	elapsed := time.Since(start)
 	if budget.Tracker != nil {
@@ -536,7 +576,10 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 				Cause:  errors.Join(callerErr, err),
 			}
 		}
-		if boundFromTracker && (isTimeoutFailure(err) || (errors.Is(context.Cause(evalCtx), errTrackerTimeout) && isTimeoutOrCancelFailure(err))) {
+		trackerDeadline := errors.Is(context.Cause(evalCtx), errTrackerTimeout) ||
+			elapsed >= evalTimeout-engineDeadlineMargin(evalTimeout)
+		if boundFromTracker && trackerDeadline && isTimeoutOrCancelFailure(err) {
+			budget.Tracker.Exhaust()
 			return Decision{}, fmt.Errorf("%w: %w", ErrBudgetExhausted, err)
 		}
 		if errors.Is(context.Cause(evalCtx), errDialectEvalTimeout) && isTimeoutOrCancelFailure(err) {
