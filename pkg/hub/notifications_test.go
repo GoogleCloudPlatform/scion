@@ -591,12 +591,47 @@ func TestFormatStallAge(t *testing.T) {
 
 // TestNewNotifySubscription_DefaultTriggersIncludeHarnessError pins the
 // triggers an agent created with notify on gets: HARNESS_ERROR is a
-// separate trigger from ERROR, which stays phase-only.
+// separate trigger from ERROR, which stays phase-only, and SUSPENDED is
+// included so creators are notified when a child agent is suspended.
 func TestNewNotifySubscription_DefaultTriggersIncludeHarnessError(t *testing.T) {
 	sub := newNotifySubscription("p1", store.SubscriberTypeAgent, "parent", "test")
 	require.NotNil(t, sub)
-	assert.Equal(t, []string{"COMPLETED", "IDLE", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", "HARNESS_ERROR", "HALTED"}, sub.TriggerActivities)
+	assert.Equal(t, []string{"COMPLETED", "IDLE", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", "HARNESS_ERROR", "HALTED", "SUSPENDED"}, sub.TriggerActivities)
 	assert.True(t, sub.MatchesActivity("harness_error"))
+	assert.True(t, sub.MatchesActivity("suspended"))
+}
+
+// TestNotificationDispatcher_CreatorSubscriptionReceivesSuspended verifies that
+// a creator's default auto-subscription receives a SUSPENDED notification when
+// the watched agent enters PhaseSuspended, while retaining all existing triggers.
+func TestNotificationDispatcher_CreatorSubscriptionReceivesSuspended(t *testing.T) {
+	env := setupNotificationTest(t)
+	ctx := context.Background()
+
+	defaultSub := newNotifySubscription(env.project.ID, store.SubscriberTypeAgent, env.subscriber.Slug, "test")
+	require.NotNil(t, defaultSub)
+	require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(ctx, env.sub.ID, defaultSub.TriggerActivities))
+
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseSuspended),
+		Activity: string(state.ActivityIdle),
+	}))
+
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	env.publishStatusWithPhase(string(state.PhaseSuspended), string(state.ActivityIdle))
+
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 50*time.Millisecond)
+	assert.Equal(t, env.subscriber.ID, env.dispatcher.getCalls()[0].Agent.ID)
+	assert.Contains(t, env.dispatcher.getCalls()[0].Message, "SUSPENDED")
+
+	notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeAgent, env.subscriber.Slug, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+	assert.Equal(t, "SUSPENDED", notifs[0].Status)
 }
 
 func TestNotificationDispatcher_MultipleSubscribers(t *testing.T) {

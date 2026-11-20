@@ -39,6 +39,7 @@ describe('triggerLabel', () => {
       'Error',
       'Harness Error',
       'Halted',
+      'Suspended',
       'Deleted',
     ]);
   });
@@ -55,6 +56,7 @@ describe('triggerLabel', () => {
   it('keeps the API trigger values unchanged and matches the hub and CLI defaults', () => {
     // IDLE is a default in the hub (newNotifySubscription) and the CLI
     // (defaultTriggers in cmd/notifications.go) since ptone/scion#7826.
+    // SUSPENDED is a default in the hub (newNotifySubscription) since ptone/scion#8304.
     expect(DEFAULT_TRIGGERS).toEqual([
       'COMPLETED',
       'IDLE',
@@ -64,6 +66,7 @@ describe('triggerLabel', () => {
       'ERROR',
       'HARNESS_ERROR',
       'HALTED',
+      'SUSPENDED',
     ]);
     expect(AGENT_CREATE_TRIGGERS).toEqual(DEFAULT_TRIGGERS);
   });
@@ -72,7 +75,7 @@ describe('triggerLabel', () => {
 describe('defaultTriggersHint', () => {
   it('lists the default triggers by display label', () => {
     expect(defaultTriggersHint()).toBe(
-      'You will be notified when this agent reaches: Completed, Idle, Waiting on Parent, Limits Exceeded, Stalled, Error, Harness Error, or Halted.'
+      'You will be notified when this agent reaches: Completed, Idle, Waiting on Parent, Limits Exceeded, Stalled, Error, Harness Error, Halted, or Suspended.'
     );
   });
 

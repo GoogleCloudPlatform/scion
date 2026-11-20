@@ -34,6 +34,7 @@ export const DEFAULT_TRIGGERS: readonly string[] = [
   'ERROR',
   'HARNESS_ERROR',
   'HALTED',
+  'SUSPENDED',
 ];
 
 /** Every trigger a subscription can select. */
@@ -46,6 +47,7 @@ export const ALL_TRIGGERS: readonly string[] = [
   'ERROR',
   'HARNESS_ERROR',
   'HALTED',
+  'SUSPENDED',
   'DELETED',
 ];
 
@@ -63,6 +65,8 @@ const TRIGGER_LABELS: Record<string, string> = {
   HARNESS_ERROR: 'Harness Error',
   // The platform ended a run that should still be running (ptone/scion#4853).
   HALTED: 'Halted',
+  // The agent was suspended manually or by auto-suspend (ptone/scion#8304).
+  SUSPENDED: 'Suspended',
   DELETED: 'Deleted',
 };
 
