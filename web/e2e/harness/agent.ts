@@ -629,13 +629,19 @@ export async function createTestAgent(
   });
 
   if (hub.dbDir) {
-    recordAgentCredentialInSQLite(findHubDatabasePath({ dbDir: hub.dbDir, homeDir: hub.homeDir }), {
-      agentId: id,
-      projectId,
-      jti,
-      issuedAtIso: new Date(nowSec * 1000).toISOString(),
-      expiresAtIso: new Date((nowSec + ttlSeconds) * 1000).toISOString(),
-    });
+    recordAgentCredentialInSQLite(
+      findHubDatabasePath({
+        dbDir: hub.dbDir,
+        ...(hub.homeDir !== undefined ? { homeDir: hub.homeDir } : {}),
+      }),
+      {
+        agentId: id,
+        projectId,
+        jti,
+        issuedAtIso: new Date(nowSec * 1000).toISOString(),
+        expiresAtIso: new Date((nowSec + ttlSeconds) * 1000).toISOString(),
+      }
+    );
   }
 
   const request = async <T = unknown>(

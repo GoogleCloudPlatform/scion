@@ -276,6 +276,7 @@ test('createTestAgent provisions with provisionOnly, authenticates, and inspects
 test('createTestAgent records matching agent_credentials row when hub.dbDir is provided', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scion-agent-fixture-'));
   const dbPath = path.join(tmpDir, 'e2e.db');
+  // Hand-written DDL mirrors pkg/ent/schema/agentcredential.go and must be kept in sync.
   execFileSync(
     'python3',
     [
