@@ -426,9 +426,10 @@ func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, 
 
 // formatEventMessage formats the notification message for evt and agent.
 // For SUSPENDED events caused by automatic suspension (idle or stalled), it
-// resolves the configured threshold from autoSuspendThresholdFn so the notice
-// names the reason, threshold, and wake instruction; manual suspensions keep
-// the generic SUSPENDED notice.
+// resolves the configured threshold from autoSuspendThresholdFn and the
+// auto-wake gate from idleSuspendGateFn so the notice names the reason,
+// threshold, and accurate wake/resume instruction; manual suspensions keep the
+// generic SUSPENDED notice.
 func (nd *NotificationDispatcher) formatEventMessage(evt AgentStatusEvent, agent *store.Agent) string {
 	status := notificationEventStatus(evt)
 	if strings.EqualFold(status, string(state.PhaseSuspended)) {
@@ -440,7 +441,8 @@ func (nd *NotificationDispatcher) formatEventMessage(evt AgentStatusEvent, agent
 		if reason.AutoWakes() && nd.autoSuspendThresholdFn != nil {
 			threshold = nd.autoSuspendThresholdFn(reason)
 		}
-		return formatSuspendedNotificationMessage(agent, reason, threshold)
+		autoWakes := nd.idleSuspendGateFn != nil && nd.idleSuspendGateFn()
+		return formatSuspendedNotificationMessage(agent, reason, threshold, autoWakes)
 	}
 	return formatNotificationMessage(agent, status)
 }
@@ -942,8 +944,6 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 			msg += ": " + agent.Message
 		}
 		return msg
-	case "SUSPENDED":
-		return formatSuspendedNotificationMessage(agent, state.SuspendReason(agent.SuspendReason), 0)
 	default:
 		return fmt.Sprintf("%s has reached status: %s", agent.Slug, upper)
 	}
@@ -951,15 +951,21 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 
 // formatSuspendedNotificationMessage formats a SUSPENDED notification.
 // Automatic suspensions (idle or stalled) get a dedicated notice naming the
-// reason, the threshold that triggered it (when known), and how to wake the
-// agent. Manual and other suspensions keep the existing generic notice.
-func formatSuspendedNotificationMessage(agent *store.Agent, reason state.SuspendReason, threshold time.Duration) string {
+// reason, the threshold that triggered it (when known), and how to resume the
+// agent ("any message wakes it" when lifecycle.idle_suspend auto-wake is
+// active, otherwise explicit `scion resume <slug>`). Manual and other
+// suspensions keep the existing generic notice.
+func formatSuspendedNotificationMessage(agent *store.Agent, reason state.SuspendReason, threshold time.Duration, autoWakes bool) string {
 	switch reason {
 	case state.SuspendReasonIdle, state.SuspendReasonStalled:
-		if dur := formatNotificationThreshold(threshold); dur != "" {
-			return fmt.Sprintf("%s was automatically SUSPENDED (%s for %s; any message wakes it)", agent.Slug, reason, dur)
+		wakeHint := fmt.Sprintf("resume with 'scion resume %s'", agent.Slug)
+		if autoWakes {
+			wakeHint = "any message wakes it"
 		}
-		return fmt.Sprintf("%s was automatically SUSPENDED (%s; any message wakes it)", agent.Slug, reason)
+		if dur := formatNotificationThreshold(threshold); dur != "" {
+			return fmt.Sprintf("%s was automatically SUSPENDED (%s for %s; %s)", agent.Slug, reason, dur, wakeHint)
+		}
+		return fmt.Sprintf("%s was automatically SUSPENDED (%s; %s)", agent.Slug, reason, wakeHint)
 	default:
 		return fmt.Sprintf("%s has reached status: SUSPENDED", agent.Slug)
 	}

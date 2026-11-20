@@ -538,30 +538,6 @@ func TestFormatNotificationMessage(t *testing.T) {
 			expected: "bot has a HARNESS_ERROR (harness alive; a new message retries): model API: APIError (status 400)",
 		},
 		{
-			name:     "SUSPENDED manual keeps existing notice",
-			agent:    &store.Agent{Slug: "bot", SuspendReason: string(state.SuspendReasonUser)},
-			status:   "SUSPENDED",
-			expected: "bot has reached status: SUSPENDED",
-		},
-		{
-			name:     "SUSPENDED empty reason keeps existing notice",
-			agent:    &store.Agent{Slug: "bot"},
-			status:   "SUSPENDED",
-			expected: "bot has reached status: SUSPENDED",
-		},
-		{
-			name:     "SUSPENDED idle auto-suspend",
-			agent:    &store.Agent{Slug: "bot", SuspendReason: string(state.SuspendReasonIdle)},
-			status:   "SUSPENDED",
-			expected: "bot was automatically SUSPENDED (idle; any message wakes it)",
-		},
-		{
-			name:     "SUSPENDED stalled auto-suspend",
-			agent:    &store.Agent{Slug: "bot", SuspendReason: string(state.SuspendReasonStalled)},
-			status:   "SUSPENDED",
-			expected: "bot was automatically SUSPENDED (stalled; any message wakes it)",
-		},
-		{
 			name:     "Unknown status",
 			agent:    &store.Agent{Slug: "bot"},
 			status:   "SOMETHING_ELSE",
