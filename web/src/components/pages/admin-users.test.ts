@@ -24,6 +24,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 import type { AdminUser } from '../../shared/types.js';
 import { clearAdminStatus } from '../../client/admin-status.js';
+import { stateManager } from '../../client/state.js';
 import type { AdminStatus } from '../../lib/admin-permissions.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
@@ -2449,5 +2450,62 @@ describe('scion-page-admin-users — Invite Codes tab permission gating (ptone/s
 
     expect(inviteRequests()).toEqual([]);
     expect(element.shadowRoot?.textContent).not.toContain('Create Invite Code');
+  });
+
+  it('ignores a stale admin-status response from a previous user after /auth/me resolves a different user', async () => {
+    clearAdminStatus();
+    vi.spyOn(stateManager, 'getCurrentUserId').mockReturnValue('u-previous');
+
+    let resolvePreviousStatus!: (res: Response) => void;
+    let adminStatusCallCount = 0;
+    const base = createFetchHandler([makeUser({ _capabilities: { actions: ['read'] } })]);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const path = requestUrl(url);
+        if (path.includes('/auth/me')) {
+          return Promise.resolve(jsonResponse({ id: SELF_ID, role: 'member' }));
+        }
+        if (path.includes('/api/v1/auth/admin-status')) {
+          adminStatusCallCount++;
+          if (adminStatusCallCount === 1) {
+            return new Promise<Response>((resolve) => {
+              resolvePreviousStatus = resolve;
+            });
+          }
+          return Promise.resolve(
+            jsonResponse({
+              isAdmin: false,
+              isSuperAdmin: false,
+              permissions: ['user.read', 'user.invite'],
+            } satisfies AdminStatus)
+          );
+        }
+        return base(url, init);
+      })
+    );
+
+    element = document.createElement('scion-page-admin-users') as TabPage;
+    document.body.appendChild(element);
+    await element.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await element.updateComplete;
+
+    expect(adminStatusCallCount).toBe(2);
+    expect(inviteCodesTab(element)).not.toBeNull();
+
+    // Now resolve the earlier user's superseded request; it must not clobber SELF_ID's permission.
+    resolvePreviousStatus(
+      jsonResponse({
+        isAdmin: false,
+        isSuperAdmin: false,
+        permissions: ['user.read'],
+      } satisfies AdminStatus)
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await element.updateComplete;
+
+    expect(inviteCodesTab(element)).not.toBeNull();
   });
 });

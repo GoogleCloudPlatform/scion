@@ -1077,6 +1077,7 @@ export class ScionPageAdminUsers extends LitElement {
   private async loadCurrentUser(): Promise<void> {
     const knownUserId = stateManager.getCurrentUserId();
     if (knownUserId) {
+      this.currentUserId = knownUserId;
       void this.loadInvitePermission(knownUserId);
     }
     try {
@@ -1098,7 +1099,7 @@ export class ScionPageAdminUsers extends LitElement {
       // Non-critical — actions will still work, just can't prevent self-actions
     }
     try {
-      const status = await loadAdminStatus(stateManager.getCurrentUserId() || this.currentUserId);
+      const status = await loadAdminStatus(this.currentUserId || stateManager.getCurrentUserId());
       this.canReadRoleBindings = hasAnyPermission(status, ['role_binding.read']);
     } catch {
       this.canReadRoleBindings = false;
@@ -1107,7 +1108,7 @@ export class ScionPageAdminUsers extends LitElement {
 
   private async loadInvitePermission(userId: string): Promise<void> {
     const status = await loadAdminStatus(userId);
-    if (!this.isConnected) return;
+    if (!this.isConnected || userId !== this.currentUserId) return;
     this.canInviteUsers = hasAnyPermission(status, ['user.invite']);
     if (!this.canInviteUsers && this.activeTab === 'invites') {
       this.activeTab = 'users';
