@@ -247,6 +247,54 @@ func TestValidateBranding_WCAGContrastRejections(t *testing.T) {
 			wantMsgSub:  "minimum WCAG AA is 4.50:1",
 		},
 		{
+			name: "bright primary-600 fails light Shoelace white-foreground contrast",
+			cfg: BrandingConfig{
+				Palette: &BrandingPaletteConfig{
+					Primary: BrandingScale{
+						"600": "#eab308",
+					},
+				},
+			},
+			wantPathSub: "server.hub.branding.palette.primary.600",
+			wantMsgSub:  "minimum WCAG AA is 4.50:1",
+		},
+		{
+			name: "bright success-600 fails light Shoelace white-foreground contrast",
+			cfg: BrandingConfig{
+				Palette: &BrandingPaletteConfig{
+					Success: BrandingScale{
+						"600": "#eab308",
+					},
+				},
+			},
+			wantPathSub: "server.hub.branding.palette.success.600",
+			wantMsgSub:  "minimum WCAG AA is 4.50:1",
+		},
+		{
+			name: "dark primary-300 fails dark Shoelace neutral-800 foreground contrast",
+			cfg: BrandingConfig{
+				Palette: &BrandingPaletteConfig{
+					Primary: BrandingScale{
+						"300": "#1e3a8a",
+					},
+				},
+			},
+			wantPathSub: "server.hub.branding.palette.primary.300",
+			wantMsgSub:  "minimum WCAG AA is 4.50:1",
+		},
+		{
+			name: "dark primary-400 fails dark Shoelace hover neutral-800 foreground contrast",
+			cfg: BrandingConfig{
+				Palette: &BrandingPaletteConfig{
+					Primary: BrandingScale{
+						"400": "#1e3a8a",
+					},
+				},
+			},
+			wantPathSub: "server.hub.branding.palette.primary.400",
+			wantMsgSub:  "minimum WCAG AA is 4.50:1",
+		},
+		{
 			name: "neutral-600 fails 3.0 UI border contrast on light surface",
 			cfg: BrandingConfig{
 				Palette: &BrandingPaletteConfig{
@@ -625,18 +673,31 @@ func TestValidateBranding_SameOriginPathEncodingAndHTTPSQuotes(t *testing.T) {
 }
 
 func TestValidateBranding_DarkBadgeCompositeContrast(t *testing.T) {
-	// Branch 1: Custom ramp step 300 fails dark badge composite contrast (20% step 500 over dark.surface)
-	// while steps 600, 400, 800, and 100 remain stock and pass all other button/light-badge checks.
+	// Branch 1: Custom ramp step 300 fails both dark Shoelace button contrast (against neutral-800)
+	// and dark badge composite contrast (20% step 500 over dark.surface) while untouched steps
+	// (600, 400, 800, 100) do not produce spurious errors.
 	errs := ValidateBranding(&BrandingConfig{
 		Palette: &BrandingPaletteConfig{
 			Success: BrandingScale{"300": "#334155"},
 		},
 	})
-	if len(errs) != 1 {
-		t.Fatalf("expected exactly 1 error (dark badge contrast on success.300), got %d: %v", len(errs), errs)
+	if len(errs) != 2 {
+		t.Fatalf("expected 2 errors on success.300 (dark Shoelace button + dark badge contrast), got %d: %v", len(errs), errs)
 	}
-	if errs[0].Path != "server.hub.branding.palette.success.300" || !strings.Contains(errs[0].Message, "dark badge contrast") {
-		t.Errorf("unexpected dark badge error: %+v", errs[0])
+	var sawButton, sawBadge bool
+	for _, e := range errs {
+		if e.Path != "server.hub.branding.palette.success.300" {
+			t.Errorf("unexpected error path: %+v", e)
+		}
+		if strings.Contains(e.Message, "dark --sl-color-success-600 (step 300)") {
+			sawButton = true
+		}
+		if strings.Contains(e.Message, "dark badge contrast") {
+			sawBadge = true
+		}
+	}
+	if !sawButton || !sawBadge {
+		t.Errorf("expected both dark Shoelace button and dark badge errors, got: %v", errs)
 	}
 
 	// Branch 2: Custom lightish dark.surface triggers dark-badge composite checks even when ramps are stock.
