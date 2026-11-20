@@ -292,6 +292,10 @@ func resetProjectSAFlags() {
 			f.Changed = false
 		})
 	}
+	projectServiceAccountsCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
+		_ = f.Value.Set(f.DefValue)
+		f.Changed = false
+	})
 	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
 		_ = f.Value.Set(f.DefValue)
 		f.Changed = false
@@ -299,6 +303,7 @@ func resetProjectSAFlags() {
 	projectPath, projectSource, contextProjectSlug = "", "", ""
 	globalMode = false
 	hubEndpoint, hubSource = "", ""
+	hubProfileFlag, hubProfileAs, hubProfileRun = "", "", ""
 	outputFormat = ""
 	saOutputJSON = false
 	saMintID, saDisplayName, saProjectID = "", "", ""
@@ -455,6 +460,10 @@ func TestProjectServiceAccounts_HubProfileResolution(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+x3bProjectID:
 			x3bJSON(w, http.StatusOK, hubclient.Project{ID: x3bProjectID, Name: x3bProjectName, Slug: x3bProjectName})
 			return true
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+x3bProjectID+"/gcp-service-accounts/Worker SA/status":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(saStatusCLIBody))
+			return true
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/projects/"):
 			x3bJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"code": "not_found", "message": "project not found"}})
 			return true
@@ -496,27 +505,46 @@ func TestProjectServiceAccounts_HubProfileResolution(t *testing.T) {
 	require.NoError(t, err)
 	hubProfileAs = "owner"
 
-	// 1. Without --project: fails asking for --project, not 'scion hub link'.
-	projectPath = ""
-	globalMode = false
-	_, _, err = resolveLinkedProjectForSA()
+	// 1. Without --project: passes the CLI gate and fails asking for --project, not 'scion hub link'.
+	_, _, err = executeProjectSACLI(t, "list", "--hub-profile", "t1", "--as", "owner", "--run", "r1")
 	require.ErrorIs(t, err, errProfileNeedsProject)
 
-	// 2. With --global: fails rejecting --global under a hub profile.
-	globalMode = true
-	_, _, err = resolveLinkedProjectForSA()
+	// 2. With --global: passes the CLI gate and rejects --global under a hub profile.
+	_, _, err = executeProjectSACLI(t, "list", "--hub-profile", "t1", "--as", "owner", "--run", "r1", "--global")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--global does not apply with a hub profile")
-	globalMode = false
 
-	// 3. With --project <slug>: resolves slug on target hub and runs list cleanly.
-	projectPath = x3bProjectName
-	saOutputJSON = true
-	out := captureStdout(t, func() {
-		require.NoError(t, runSAList(nil, nil))
-	})
+	// 3. Without --as: passes the CLI gate and fails asking for --as <alias>.
+	_, _, err = executeProjectSACLI(t, "list", "--hub-profile", "t1", "--run", "r1", "--project", x3bProjectName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--as <alias>")
+
+	// 4. End to end through rootCmd with --hub-profile, --as, --run, and --project <slug>:
+	// passes checkHubProfileGate, resolves slug on target hub, and never reads local .scion/settings.json.
+	out, _, err := executeProjectSACLI(t, "list", "--hub-profile", "t1", "--as", "owner", "--run", "r1", "--project", x3bProjectName, "--json")
+	require.NoError(t, err)
 	assert.Equal(t, x3bProjectID, seenScopeID)
 	assert.Contains(t, out, "[]")
+
+	// 5. Agent mode: project service-accounts show runs against a target-hub profile
+	// and refuses a profile pointing at the agent's own hub.
+	t.Run("agent mode target profile allowed and own hub refused", func(t *testing.T) {
+		saveCLIModeState(t)
+		t.Setenv("SCION_CLI_MODE", "agent")
+		t.Setenv("SCION_HUB_ENDPOINT", "https://own-hub.example.com")
+		require.NoError(t, hubprofile.Save(home, &hubprofile.Profile{
+			Name:      "own",
+			Endpoint:  "https://own-hub.example.com",
+			Transport: hubprofile.TransportNone,
+		}, false))
+
+		_, _, err := executeProjectSACLI(t, "show", "Worker SA", "--hub-profile", "own", "--as", "owner", "--run", "r1", "--project", x3bProjectName)
+		require.ErrorIs(t, err, hubprofile.ErrOwnHub)
+
+		showOut, _, err := executeProjectSACLI(t, "show", "Worker SA", "--hub-profile", "t1", "--as", "owner", "--run", "r1", "--project", x3bProjectName)
+		require.NoError(t, err)
+		assert.Contains(t, showOut, "Service account: Worker")
+	})
 }
 
 // TestProjectServiceAccounts_UnlinkedDirectoryAndContainerEnv verifies that an

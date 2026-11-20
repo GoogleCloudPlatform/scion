@@ -87,6 +87,9 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 		"hub.test-identity.issue-admin",
 		"hub.projects", "hub.projects.info", "hub.projects.create", "hub.projects.delete",
 		"artifact.publish", "artifact.get", "artifact.versions", "artifact.delete",
+		"project", "project.service-accounts",
+		"project.service-accounts.add", "project.service-accounts.list", "project.service-accounts.show",
+		"project.service-accounts.remove", "project.service-accounts.verify", "project.service-accounts.mint",
 		"create", "start", "list", "stop", "delete", "look", "logs",
 	}
 	for _, p := range allowed {
@@ -132,12 +135,23 @@ func TestHubProfileGate_AsAndRunNeedAProfile(t *testing.T) {
 	assert.Nil(t, rootCmd.PersistentFlags().Lookup("run"))
 	assert.NotNil(t, hubCmd.PersistentFlags().Lookup("as"))
 	assert.NotNil(t, artifactCmd.PersistentFlags().Lookup("run"))
+	assert.NotNil(t, projectServiceAccountsCmd.PersistentFlags().Lookup("as"))
+	assert.NotNil(t, projectServiceAccountsCmd.PersistentFlags().Lookup("run"))
 	_, err = runProfileRoot(t, "artifact", "get", "x", "--as", "owner")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--as needs a hub profile")
 	_, err = runProfileRoot(t, "artifact", "versions", "x", "--run", "r1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--run needs a hub profile")
+	_, err = runProfileRoot(t, "project", "service-accounts", "list", "--as", "owner")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--as needs a hub profile")
+	_, err = runProfileRoot(t, "project", "service-accounts", "list", "--run", "r1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--run needs a hub profile")
+	_, err = runProfileRoot(t, "project", "list", "--as", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown flag: --as")
 	_, err = runProfileRoot(t, "list", "--as", "x")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--as needs a hub profile")
@@ -234,7 +248,7 @@ func runProfileRoot(t *testing.T, args ...string) (profileRun, error) {
 		require.NoError(t, f.Value.Set(f.DefValue))
 		f.Changed = false
 	}
-	for _, c := range []*cobra.Command{hubCmd, artifactCmd} {
+	for _, c := range []*cobra.Command{hubCmd, artifactCmd, projectServiceAccountsCmd} {
 		for _, name := range []string{"as", "run"} {
 			f := c.PersistentFlags().Lookup(name)
 			require.NotNil(t, f, name)
@@ -250,7 +264,7 @@ func runProfileRoot(t *testing.T, args ...string) (profileRun, error) {
 		}
 	}
 	for _, p := range []string{"hub.status", "hub.profile", "hub.test-identity", "hub.projects", "artifact",
-		"create", "start", "list", "stop", "delete", "look", "logs"} {
+		"project.service-accounts", "create", "start", "list", "stop", "delete", "look", "logs"} {
 		walk(realCommand(t, p))
 	}
 	hubOutputJSON, outputFormat, projectPath = false, "", ""
