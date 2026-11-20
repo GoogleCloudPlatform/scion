@@ -494,21 +494,36 @@ func TestValidateThreadName(t *testing.T) {
 	tooLong := string(tooLongRunes)
 
 	tests := []struct {
-		name    string
-		raw     string
-		want    string
-		wantErr bool
+		name        string
+		raw         string
+		want        string
+		wantErr     bool
+		errContains []string
 	}{
 		{name: "trims whitespace", raw: "  hello world  ", want: "hello world"},
 		{name: "empty after trim", raw: "   ", wantErr: true},
-		{name: "invalid characters", raw: "bad/name", wantErr: true},
-		{name: "too long", raw: tooLong, wantErr: true},
+		{
+			name:        "invalid characters slash",
+			raw:         "bad/name",
+			wantErr:     true,
+			errContains: []string{"name contains invalid characters", "letters", "digits", "spaces", "underscores", "hyphens", "100"},
+		},
+		{
+			name:        "invalid characters parentheses and hash",
+			raw:         "#team (1)",
+			wantErr:     true,
+			errContains: []string{"name contains invalid characters", "letters", "digits", "spaces", "underscores", "hyphens", "100"},
+		},
+		{name: "too long", raw: tooLong, wantErr: true, errContains: []string{"100"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := validateThreadName(tt.raw)
 			if tt.wantErr {
 				require.Error(t, err)
+				for _, sub := range tt.errContains {
+					require.Contains(t, err.Error(), sub)
+				}
 				return
 			}
 			require.NoError(t, err)

@@ -898,7 +898,7 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 			return
 		}
 		if !threadNameRegexp.MatchString(name) {
-			ValidationError(w, "name contains invalid characters", nil)
+			ValidationError(w, threadNameInvalidCharsMessage, nil)
 			return
 		}
 		updates.Name = &name
@@ -4505,7 +4505,7 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !threadNameRegexp.MatchString(body.Name) {
-		ValidationError(w, "thread name contains invalid characters", nil)
+		ValidationError(w, "thread "+threadNameInvalidCharsMessage, nil)
 		return
 	}
 
