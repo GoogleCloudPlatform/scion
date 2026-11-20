@@ -61,7 +61,6 @@ command:
   task_position: after_base_args
 
 env_template:
-  SCION_AGENT_NAME: "{{ .AgentName }}"
   COPILOT_AUTO_UPDATE: "false"
   NO_COLOR: "1"
   CI: "1"

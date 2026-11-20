@@ -2086,18 +2086,24 @@ func livenessAgentUID(targetUID int) int {
 	return os.Getuid()
 }
 
-// livenessHarnessRootDepth reads the harness config's
-// state.LivenessHarnessRootDepthEnv for the liveness sampler: unset means
-// 1, and an unparsable value is logged and treated as 1 (the sampler also
-// clamps the range).
+// livenessHarnessRootDepth reads the liveness harness root depth from
+// state.LivenessHarnessRootDepthEnv, falling back to
+// state.LivenessHarnessRootDepthHintEnv when unset: unset means 1, and an
+// unparsable value is logged and treated as 1 (the sampler also clamps the
+// range).
 func livenessHarnessRootDepth(getenv func(string) string) int {
-	raw := getenv(state.LivenessHarnessRootDepthEnv)
+	envName := state.LivenessHarnessRootDepthEnv
+	raw := getenv(envName)
+	if raw == "" {
+		envName = state.LivenessHarnessRootDepthHintEnv
+		raw = getenv(envName)
+	}
 	if raw == "" {
 		return 1
 	}
 	depth, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil {
-		log.Warn("Liveness: ignoring %s=%q (not an integer); using 1", state.LivenessHarnessRootDepthEnv, raw)
+		log.Warn("Liveness: ignoring %s=%q (not an integer); using 1", envName, raw)
 		return 1
 	}
 	return depth

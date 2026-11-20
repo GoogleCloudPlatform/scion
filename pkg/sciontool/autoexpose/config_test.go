@@ -17,6 +17,8 @@ package autoexpose
 import (
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 )
 
 func TestConfigFromEnv_Defaults(t *testing.T) {
@@ -24,6 +26,7 @@ func TestConfigFromEnv_Defaults(t *testing.T) {
 	for _, env := range []string{
 		EnvAutoExposePorts, EnvAutoExposeMode, EnvAutoExposeList,
 		EnvAutoExposeInterval, EnvAutoExposeMinPort,
+		envpolicy.HintAutoExposePorts, envpolicy.HintAutoExposeMode, envpolicy.HintAutoExposePortsList,
 	} {
 		t.Setenv(env, "")
 	}
@@ -230,5 +233,42 @@ func TestConfigFromEnv_FullConfig(t *testing.T) {
 	}
 	if cfg.MinPort != 2048 {
 		t.Errorf("MinPort = %d, want 2048", cfg.MinPort)
+	}
+}
+
+func TestConfigFromEnv_HarnessHintsAndScionPrecedence(t *testing.T) {
+	// Clear primary SCION_* keys; hints alone should populate config.
+	t.Setenv(EnvAutoExposePorts, "")
+	t.Setenv(EnvAutoExposeMode, "")
+	t.Setenv(EnvAutoExposeList, "")
+	t.Setenv(envpolicy.HintAutoExposePorts, "true")
+	t.Setenv(envpolicy.HintAutoExposeMode, "denylist")
+	t.Setenv(envpolicy.HintAutoExposePortsList, "9119,8080")
+
+	cfg := ConfigFromEnv()
+	if !cfg.Enabled {
+		t.Error("expected Enabled=true from HARNESS_HINT_AUTO_EXPOSE_PORTS")
+	}
+	if cfg.FilterMode != FilterModeDenylist {
+		t.Errorf("FilterMode = %q, want %q from hint", cfg.FilterMode, FilterModeDenylist)
+	}
+	if len(cfg.FilterPorts) != 2 || cfg.FilterPorts[0] != 9119 || cfg.FilterPorts[1] != 8080 {
+		t.Errorf("FilterPorts = %v, want [9119 8080] from hint", cfg.FilterPorts)
+	}
+
+	// Hub/inline/operator SCION_* values must win over HARNESS_HINT_*.
+	t.Setenv(EnvAutoExposePorts, "false")
+	t.Setenv(EnvAutoExposeMode, "allowlist")
+	t.Setenv(EnvAutoExposeList, "3000")
+
+	cfg = ConfigFromEnv()
+	if cfg.Enabled {
+		t.Error("expected SCION_AUTO_EXPOSE_PORTS=false to beat HARNESS_HINT_AUTO_EXPOSE_PORTS=true")
+	}
+	if cfg.FilterMode != FilterModeAllowlist {
+		t.Errorf("FilterMode = %q, want %q (SCION_* over hint)", cfg.FilterMode, FilterModeAllowlist)
+	}
+	if len(cfg.FilterPorts) != 1 || cfg.FilterPorts[0] != 3000 {
+		t.Errorf("FilterPorts = %v, want [3000] (SCION_* over hint)", cfg.FilterPorts)
 	}
 }

@@ -56,7 +56,6 @@ command:
   system_prompt_flag: "--system-prompt-override"
 
 env_template:
-  SCION_AGENT_NAME: "{{ .AgentName }}"
   NO_COLOR: "1"
 
 capabilities:

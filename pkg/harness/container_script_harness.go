@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 )
 
 // ContainerScriptHarness is a thin api.Harness implementation that stages a
@@ -298,11 +299,31 @@ func (c *ContainerScriptHarness) readSystemPrompt() string {
 
 // GetEnv returns the templated env for the harness.
 func (c *ContainerScriptHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {
+	return buildHarnessTemplateEnv(c.entry.EnvTemplate, agentName, agentHome, unixUsername)
+}
+
+// buildHarnessTemplateEnv expands env_template entries while enforcing the
+// harness-config SCION_* policy: reserved SCION_* keys are dropped, and
+// grandfathered LegacyHarnessHints keys are rewritten to their HARNESS_HINT_*
+// names unless the explicit hint key is already declared. SCION_AGENT_NAME is
+// always set authoritatively by the harness.
+func buildHarnessTemplateEnv(envTemplate map[string]string, agentName, agentHome, unixUsername string) map[string]string {
 	out := map[string]string{
 		"SCION_AGENT_NAME": agentName,
 	}
-	for k, v := range c.entry.EnvTemplate {
-		out[k] = expandEnvTemplate(v, agentName, agentHome, unixUsername)
+	for k, v := range envTemplate {
+		effectiveKey, disp := envpolicy.ClassifyHarnessConfigEnvKey(k)
+		switch disp {
+		case envpolicy.HarnessConfigKeyRefuse:
+			continue
+		case envpolicy.HarnessConfigKeyRewrite:
+			if _, explicit := envTemplate[effectiveKey]; explicit {
+				continue
+			}
+			out[effectiveKey] = expandEnvTemplate(v, agentName, agentHome, unixUsername)
+		default:
+			out[effectiveKey] = expandEnvTemplate(v, agentName, agentHome, unixUsername)
+		}
 	}
 	return out
 }

@@ -239,3 +239,146 @@ func TestWithheldMarker_FormatAndParse(t *testing.T) {
 		t.Errorf("ParseWithheldMarker stray commas = %v, want [A B]", got)
 	}
 }
+
+func TestClassifyHarnessConfigEnvKey(t *testing.T) {
+	cases := []struct {
+		name     string
+		key      string
+		wantKey  string
+		wantDisp HarnessConfigKeyDisposition
+	}{
+		// Grandfathered legacy hints are rewritten.
+		{
+			name:     "legacy liveness root depth",
+			key:      "SCION_LIVENESS_HARNESS_ROOT_DEPTH",
+			wantKey:  HintLivenessRootDepth,
+			wantDisp: HarnessConfigKeyRewrite,
+		},
+		{
+			name:     "legacy auto expose ports",
+			key:      "SCION_AUTO_EXPOSE_PORTS",
+			wantKey:  HintAutoExposePorts,
+			wantDisp: HarnessConfigKeyRewrite,
+		},
+		{
+			name:     "legacy auto expose mode",
+			key:      "SCION_AUTO_EXPOSE_MODE",
+			wantKey:  HintAutoExposeMode,
+			wantDisp: HarnessConfigKeyRewrite,
+		},
+		{
+			name:     "legacy auto expose ports list",
+			key:      "SCION_AUTO_EXPOSE_PORTS_LIST",
+			wantKey:  HintAutoExposePortsList,
+			wantDisp: HarnessConfigKeyRewrite,
+		},
+		// All other SCION_* keys are refused.
+		{
+			name:     "withheld marker refused",
+			key:      HookWithheldEnvVar,
+			wantKey:  "",
+			wantDisp: HarnessConfigKeyRefuse,
+		},
+		{
+			name:     "SCION_EXTRA_PATH refused",
+			key:      "SCION_EXTRA_PATH",
+			wantKey:  "",
+			wantDisp: HarnessConfigKeyRefuse,
+		},
+		{
+			name:     "SCION_AGENT_NAME refused",
+			key:      "SCION_AGENT_NAME",
+			wantKey:  "",
+			wantDisp: HarnessConfigKeyRefuse,
+		},
+		{
+			name:     "SCION_AUTH_TOKEN refused",
+			key:      "SCION_AUTH_TOKEN",
+			wantKey:  "",
+			wantDisp: HarnessConfigKeyRefuse,
+		},
+		{
+			name:     "arbitrary SCION_ key refused",
+			key:      "SCION_CUSTOM_SETTING",
+			wantKey:  "",
+			wantDisp: HarnessConfigKeyRefuse,
+		},
+		// Hint keys and ordinary keys are allowed.
+		{
+			name:     "hint liveness root depth allowed",
+			key:      HintLivenessRootDepth,
+			wantKey:  HintLivenessRootDepth,
+			wantDisp: HarnessConfigKeyAllow,
+		},
+		{
+			name:     "hint auto expose ports allowed",
+			key:      HintAutoExposePorts,
+			wantKey:  HintAutoExposePorts,
+			wantDisp: HarnessConfigKeyAllow,
+		},
+		{
+			name:     "ordinary key allowed",
+			key:      "GITHUB_TOKEN",
+			wantKey:  "GITHUB_TOKEN",
+			wantDisp: HarnessConfigKeyAllow,
+		},
+		{
+			name:     "prefix without underscore allowed",
+			key:      "SCIONFOO",
+			wantKey:  "SCIONFOO",
+			wantDisp: HarnessConfigKeyAllow,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotKey, gotDisp := ClassifyHarnessConfigEnvKey(tc.key)
+			if gotKey != tc.wantKey || gotDisp != tc.wantDisp {
+				t.Errorf("ClassifyHarnessConfigEnvKey(%q) = (%q, %v), want (%q, %v)",
+					tc.key, gotKey, gotDisp, tc.wantKey, tc.wantDisp)
+			}
+		})
+	}
+}
+
+func TestHarnessHintsAndLegacyMapInvariants(t *testing.T) {
+	hints := HarnessHints()
+	if len(hints) != 4 {
+		t.Fatalf("len(HarnessHints()) = %d, want 4", len(hints))
+	}
+	hintSet := make(map[string]bool, len(hints))
+	for _, h := range hints {
+		if !strings.HasPrefix(h.Name, HarnessHintPrefix) {
+			t.Errorf("hint %q does not start with %q", h.Name, HarnessHintPrefix)
+		}
+		if h.Reader == "" {
+			t.Errorf("hint %q has empty Reader", h.Name)
+		}
+		if HookDenied(h.Name) {
+			t.Errorf("hint %q must not be in static HookDenied", h.Name)
+		}
+		hintSet[h.Name] = true
+	}
+
+	legacy := LegacyHarnessHints()
+	if len(legacy) != 4 {
+		t.Fatalf("len(LegacyHarnessHints()) = %d, want 4", len(legacy))
+	}
+	for oldName, newName := range legacy {
+		if !strings.HasPrefix(oldName, ReservedHarnessConfigPrefix) {
+			t.Errorf("legacy key %q must start with %q", oldName, ReservedHarnessConfigPrefix)
+		}
+		if !hintSet[newName] {
+			t.Errorf("legacy target %q is not registered in HarnessHints()", newName)
+		}
+		got, ok := LegacyHarnessHint(oldName)
+		if !ok || got != newName {
+			t.Errorf("LegacyHarnessHint(%q) = (%q, %v), want (%q, true)", oldName, got, ok, newName)
+		}
+	}
+	// Returned map is a copy.
+	legacy["SCION_MUTATED"] = "HARNESS_HINT_MUTATED"
+	if _, ok := LegacyHarnessHint("SCION_MUTATED"); ok {
+		t.Error("mutating LegacyHarnessHints() map affected package state")
+	}
+}

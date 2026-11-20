@@ -148,13 +148,7 @@ func (d *DeclarativeGenericHarness) validateCommand(task string, resume bool, ba
 }
 
 func (d *DeclarativeGenericHarness) GetEnv(agentName, agentHome, unixUsername string) map[string]string {
-	out := map[string]string{
-		"SCION_AGENT_NAME": agentName,
-	}
-	for k, v := range d.entry.EnvTemplate {
-		out[k] = expandEnvTemplate(v, agentName, agentHome, unixUsername)
-	}
-	return out
+	return buildHarnessTemplateEnv(d.entry.EnvTemplate, agentName, agentHome, unixUsername)
 }
 
 func (d *DeclarativeGenericHarness) GetTelemetryEnv() map[string]string { return nil }
