@@ -135,9 +135,167 @@ func TestCheckMemberConfig_FirstRefusedVolume(t *testing.T) {
 }
 
 func TestCheckMemberConfig_NothingToCheck(t *testing.T) {
-	for _, cfg := range []*api.ScionConfig{nil, {}, {Volumes: []api.VolumeMount{}}, {Harness: "claude", Env: map[string]string{"A": "b"}}} {
+	for _, cfg := range []*api.ScionConfig{nil, {}, {Volumes: []api.VolumeMount{}}, {Harness: "claude", Env: map[string]string{"A": "b"}}, {Hub: &api.AgentHubConfig{}}} {
 		if err := CheckMemberConfig(cfg, Origin{Kind: OriginAgentConfig}, "docker"); err != nil {
 			t.Errorf("CheckMemberConfig(%+v) = %v, want nil", cfg, err)
+		}
+	}
+}
+
+func TestCheckMemberConfig_Env(t *testing.T) {
+	tests := []struct {
+		name       string
+		env        map[string]string
+		wantEntry  string // "" = allowed
+		wantReason string
+	}{
+		{name: "braced reference", env: map[string]string{"AWS_KEY": "${AWS_SECRET_ACCESS_KEY}"}, wantEntry: "AWS_KEY", wantReason: "host environment references"},
+		{name: "bare reference", env: map[string]string{"K": "$HOME"}, wantEntry: "K", wantReason: "host environment references"},
+		{name: "embedded reference", env: map[string]string{"K": "prefix-${X}-suffix"}, wantEntry: "K", wantReason: "host environment references"},
+		{name: "special var", env: map[string]string{"K": "a$1"}, wantEntry: "K", wantReason: "host environment references"},
+		{name: "malformed braces removed by expansion", env: map[string]string{"K": "a${}b"}, wantEntry: "K", wantReason: "host environment references"},
+		{name: "unterminated brace", env: map[string]string{"K": "a${b"}, wantEntry: "K", wantReason: "host environment references"},
+		{name: "reference in name", env: map[string]string{"${HOST_NAME}": "name-value"}, wantEntry: "${HOST_NAME}", wantReason: "host environment references"},
+		{name: "empty passthrough", env: map[string]string{"GITHUB_TOKEN": ""}, wantEntry: "GITHUB_TOKEN", wantReason: "empty passthrough"},
+		{name: "scion name", env: map[string]string{"SCION_HUB_URL": "https://x"}, wantEntry: "SCION_HUB_URL", wantReason: "names reserved"},
+		{name: "scion auth token", env: map[string]string{"SCION_AUTH_TOKEN": "tok-value"}, wantEntry: "SCION_AUTH_TOKEN", wantReason: "names reserved"},
+		{name: "scion metadata", env: map[string]string{"SCION_METADATA_MODE": "passthrough"}, wantEntry: "SCION_METADATA_MODE", wantReason: "names reserved"},
+		{name: "gce metadata", env: map[string]string{"GCE_METADATA_HOST": "10.0.0.1"}, wantEntry: "GCE_METADATA_HOST", wantReason: "names reserved"},
+		{name: "first refused in name order", env: map[string]string{"B": "", "A": "ok", "C": "$X"}, wantEntry: "B", wantReason: "empty passthrough"},
+		{name: "literal value", env: map[string]string{"FOO": "bar"}},
+		{name: "lone dollar at end", env: map[string]string{"PRICE": "5$"}},
+		{name: "dollar before space", env: map[string]string{"K": "a $ b"}},
+		{name: "lower-case scion prefix is not reserved", env: map[string]string{"scion_x": "v"}},
+		{name: "auto-expose ports", env: map[string]string{"SCION_AUTO_EXPOSE_PORTS": "true"}},
+		{name: "auto-expose mode", env: map[string]string{"SCION_AUTO_EXPOSE_MODE": "list"}},
+		{name: "auto-expose list", env: map[string]string{"SCION_AUTO_EXPOSE_PORTS_LIST": "8080"}},
+		{name: "auto-expose interval", env: map[string]string{"SCION_AUTO_EXPOSE_INTERVAL": "5s"}},
+		{name: "cli log level", env: map[string]string{"SCION_LOG_LEVEL": "debug"}},
+		{name: "cli telemetry", env: map[string]string{"SCION_TELEMETRY_ENABLED": "false"}},
+		{name: "codex liveness depth", env: map[string]string{"SCION_LIVENESS_HARNESS_ROOT_DEPTH": "2"}},
+		{name: "exempt name still needs a literal value", env: map[string]string{"SCION_LOG_LEVEL": "${LVL}"}, wantEntry: "SCION_LOG_LEVEL", wantReason: "host environment references"},
+		{name: "exempt name empty", env: map[string]string{"SCION_TELEMETRY_ENABLED": ""}, wantEntry: "SCION_TELEMETRY_ENABLED", wantReason: "empty passthrough"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckMemberConfig(&api.ScionConfig{Env: tt.env}, Origin{Kind: OriginAgentConfig}, "docker")
+			if tt.wantEntry == "" {
+				if err != nil {
+					t.Fatalf("CheckMemberConfig() = %v, want nil", err)
+				}
+				return
+			}
+			var re *RefusalError
+			if !errors.As(err, &re) {
+				t.Fatalf("CheckMemberConfig() = %v, want *RefusalError", err)
+			}
+			if re.Field != "env" || re.Entry != tt.wantEntry {
+				t.Errorf("refused %s %q, want env %q", re.Field, re.Entry, tt.wantEntry)
+			}
+			if !strings.Contains(re.Reason, tt.wantReason) || !strings.Contains(re.Reason, "agent config") {
+				t.Errorf("reason %q, want %q and the origin", re.Reason, tt.wantReason)
+			}
+			if v := tt.env[tt.wantEntry]; v != "" && strings.Contains(err.Error(), v) {
+				t.Errorf("message %q echoes the value %q", err.Error(), v)
+			}
+		})
+	}
+}
+
+func TestCheckMemberEnv_MessageNeverHasValue(t *testing.T) {
+	const secret = "s3cr3t-value"
+	for _, env := range []map[string]string{
+		{"K": "${" + secret + "}"},
+		{"K": secret + "$X"},
+		{"SCION_HUB_ENDPOINT": "http://" + secret},
+		{"GCE_METADATA_HOST": secret},
+	} {
+		err := CheckMemberEnv(env, Origin{Kind: OriginHarnessConfig, Name: "claude"})
+		if err == nil {
+			t.Fatalf("env %v not refused", env)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("message %q echoes the value", err.Error())
+		}
+		if !strings.HasPrefix(err.Error(), `env "`) || !strings.Contains(err.Error(), `in harness config "claude"`) {
+			t.Errorf("message %q does not name the env name and origin", err.Error())
+		}
+	}
+}
+
+func TestCheckMemberConfig_EnvDesignMessage(t *testing.T) {
+	err := CheckMemberEnv(map[string]string{"AWS_KEY": "${AWS_KEY}"}, Origin{Kind: OriginHarnessConfig, Name: "claude"})
+	want := `env "AWS_KEY": host environment references and empty passthrough values in harness config "claude" are not allowed on a hosted server; use a literal value or a secret`
+	if err == nil || err.Error() != want {
+		t.Fatalf("CheckMemberEnv() = %v, want %q", err, want)
+	}
+}
+
+func TestCheckMemberConfig_Hub(t *testing.T) {
+	const endpoint = "http://127.0.0.1:8080/secret-path"
+	for _, tt := range []struct {
+		name    string
+		hub     *api.AgentHubConfig
+		refused bool
+	}{
+		{name: "no hub block", hub: nil},
+		{name: "empty hub block", hub: &api.AgentHubConfig{}},
+		{name: "loopback endpoint", hub: &api.AgentHubConfig{Endpoint: endpoint}, refused: true},
+		{name: "public endpoint", hub: &api.AgentHubConfig{Endpoint: "https://hub.example.com"}, refused: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckMemberConfig(&api.ScionConfig{Hub: tt.hub}, Origin{Kind: OriginAgentConfig}, "")
+			if !tt.refused {
+				if err != nil {
+					t.Fatalf("CheckMemberConfig() = %v, want nil", err)
+				}
+				return
+			}
+			var re *RefusalError
+			if !errors.As(err, &re) || re.Field != "hub" || re.Entry != "endpoint" {
+				t.Fatalf("CheckMemberConfig() = %v, want a hub endpoint refusal", err)
+			}
+			want := `hub "endpoint": a hub endpoint in agent config is not allowed on a hosted server; the server sets the agent's hub connection`
+			if err.Error() != want {
+				t.Errorf("message %q, want %q", err.Error(), want)
+			}
+			if strings.Contains(err.Error(), "127.0.0.1") || strings.Contains(err.Error(), "example.com") {
+				t.Errorf("message %q echoes the endpoint", err.Error())
+			}
+		})
+	}
+}
+
+// Each rule refuses on its own; volumes are checked first, then env, then hub.
+func TestCheckMemberConfig_RuleOrder(t *testing.T) {
+	cfg := &api.ScionConfig{
+		Volumes: []api.VolumeMount{{Source: "/etc", Target: "/e"}},
+		Env:     map[string]string{"K": ""},
+		Hub:     &api.AgentHubConfig{Endpoint: "http://h"},
+	}
+	o := Origin{Kind: OriginAgentConfig}
+	for _, want := range []string{"volume", "env", "hub"} {
+		var re *RefusalError
+		if err := CheckMemberConfig(cfg, o, "docker"); !errors.As(err, &re) || re.Field != want {
+			t.Fatalf("CheckMemberConfig() = %v, want a %s refusal", err, want)
+		}
+		switch want {
+		case "volume":
+			cfg.Volumes = nil
+		case "env":
+			cfg.Env = nil
+		}
+	}
+}
+
+func TestIsReservedEnvName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"SCION_HUB_ENDPOINT": true, "SCION_": true, "GCE_METADATA_IP": true,
+		"SCION_AUTO_EXPOSE_PORTS": false, "SCION_LOG_LEVEL": false, "SCION_TELEMETRY_ENABLED": false,
+		"SCION_LOG_LEVEL_X": true, "PATH": false, "MY_SCION_X": false,
+	} {
+		if got := IsReservedEnvName(name); got != want {
+			t.Errorf("IsReservedEnvName(%q) = %v, want %v", name, got, want)
 		}
 	}
 }
