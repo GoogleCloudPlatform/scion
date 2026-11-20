@@ -82,7 +82,6 @@ func (s execSite) String() string {
 
 // Reasons shared by several execSiteAllowlist entries.
 const (
-	reasonCloneCredential  = "runs as the workload uid via Credential whenever uid>0"
 	reasonDropOrFailClosed = "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop"
 )
 
@@ -100,72 +99,20 @@ const (
 // Changing a listed call's text, moving it into a different function, or
 // adding a second identical call all produce an unlisted site.
 var execSiteAllowlist = map[execSite]string{
-	// gitCloneWorkspace's clone-path git calls (including detectDefaultBranch,
-	// which it calls into): configureGitCommand sets a Credential to (uid,
-	// gid) whenever uid > 0, so the process runs as the workload's own
-	// identity in that case. Under RequirePrivilegeDrop, gitCloneWorkspace
-	// refuses uid/gid <= 0 before any git command, so these always run under
-	// the Credential. Unenforced with uid 0, its scion-user fallback
-	// resolves the image account; if that lookup fails, configureGitCommand
-	// sets no Credential and git runs with init's own credentials, as at
-	// base. Either way the call is not otherwise reachable by a
-	// workload-influenceable PATH, which is what this guard itself checks
-	// for.
+	// newInitGitCommand / newInitGitCommandContext resolve git through
+	// resolveGitForInit (production: rootexec.Resolve; overridden only by tests
+	// to substitute a recording fake git binary outside root-owned SearchPath
+	// directories).
 	{
 		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "init", workspacePath)`,
-	}: reasonCloneCredential,
+		Func: "newInitGitCommandContext",
+		Call: `exec.CommandContext(ctx, gitPath, args...)`,
+	}: "gitPath comes from resolveGitForInit (rootexec.Resolve) a few lines above",
 	{
 		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "-C", workspacePath, "remote", "add", "origin", cloneURLNoCredential)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", fetchArgs...)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", checkoutArgs...)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "-C", workspacePath, "config", cfg.key, cfg.value)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "-C", workspacePath, "remote", "set-url", "origin", normalizeCloneURL(cloneURL))`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "-c", checkoutWorkersArg, "-C", workspacePath, "checkout", branchName)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "-C", workspacePath, "fetch", "origin", branchName)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "-c", checkoutWorkersArg, "-C", workspacePath, "checkout", "-b", branchName, "origin/"+branchName)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "gitCloneWorkspace",
-		Call: `exec.Command("git", "-c", checkoutWorkersArg, "-C", workspacePath, "checkout", "-b", branchName)`,
-	}: reasonCloneCredential,
-	{
-		File: "cmd/sciontool/commands/init.go",
-		Func: "detectDefaultBranch",
-		Call: `exec.Command("git", "-C", workspacePath, "ls-remote", "--symref", "origin", "HEAD")`,
-	}: "runs as the workload uid via Credential whenever uid>0 (git ls-remote for default-branch detection during clone)",
+		Func: "newInitGitCommand",
+		Call: `exec.Command(gitPath, args...)`,
+	}: "gitPath comes from resolveGitForInit (rootexec.Resolve) a few lines above",
 
 	// The harness-provision subcommand's own subprocess: under
 	// RequirePrivilegeDrop, hooks.buildDroppedProvisionCmd sets Credential

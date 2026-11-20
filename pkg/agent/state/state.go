@@ -119,6 +119,11 @@ const HarnessReadyEnv = "SCION_HARNESS_READY"
 // (ptone/scion#5196).
 const LivenessHarnessRootDepthEnv = "SCION_LIVENESS_HARNESS_ROOT_DEPTH"
 
+// LivenessHarnessRootDepthHintEnv is the harness-publishable hint equivalent
+// of LivenessHarnessRootDepthEnv. When both are set, LivenessHarnessRootDepthEnv
+// wins.
+const LivenessHarnessRootDepthHintEnv = "HARNESS_HINT_LIVENESS_ROOT_DEPTH"
+
 // DefaultReadySpec returns the ready spec used for strategy when no value is
 // configured: the readiness constants above. An unknown strategy gets the
 // delay defaults.

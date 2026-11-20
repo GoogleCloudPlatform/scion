@@ -59,13 +59,12 @@
     {
       "name": "override-settings-env",
       "stored_harness": "claude",
-      "override": "claude",
       "override_source": "settings harness_configs.hc-gemini.env",
-      "container_harness": "claude",
+      "container_harness": "gemini-cli",
       "stale_harness": "claude",
-      "fixture": "claude",
+      "fixture": "gemini-cli",
       "want_usage": "parsed",
-      "stale_usage": "parsed"
+      "stale_usage": "unmatched"
     }
   ]
 }

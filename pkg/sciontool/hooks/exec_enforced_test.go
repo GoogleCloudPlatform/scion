@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
@@ -829,6 +830,80 @@ func TestBuildEnforcedCmd_Dropped(t *testing.T) {
 	}
 }
 
+// TestBuildEnforcedCmd_DroppedWithholdsStaticAndDynamicKeys verifies that
+// substrate's dropped hooks (both workload-owned hooks and 20-harness-provision)
+// inherit hookEnv's static denylist and per-start withheld-key filtering,
+// reset a withheld PATH to rootexec.SearchPath, and preserve unrelated operator
+// keys.
+func TestBuildEnforcedCmd_DroppedWithholdsStaticAndDynamicKeys(t *testing.T) {
+	skipUnlessFdExecSupported(t)
+
+	t.Setenv("LD_PRELOAD", "/tmp/evil.so")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("PATH", "/evil/bin")
+	t.Setenv("BUNDLE_CUSTOM", "from-bundle")
+	t.Setenv("OPERATOR_KEEP", "keep-me")
+
+	withheld := envpolicy.NewSet("BUNDLE_CUSTOM", "PATH")
+	m := &LifecycleManager{
+		EnforcePrivilegeDrop: true,
+		AgentHome:            "/home/scion",
+		WorkloadUID:          1000,
+		WorkloadGID:          1000,
+		WorkloadUsername:     "scion",
+		WorkloadWorkingDir:   "/workspace",
+		Withheld:             withheld,
+	}
+
+	cases := []struct {
+		name       string
+		scriptName string
+		event      string
+		asRoot     bool
+	}{
+		{
+			name:       "workload-owned dropped hook",
+			scriptName: "30-project-custom",
+			event:      EventPreStart,
+			asRoot:     false,
+		},
+		{
+			name:       "dropped 20-harness-provision hook",
+			scriptName: HarnessProvisionHookFilename,
+			event:      EventPreStart,
+			asRoot:     true,
+		},
+	}
+
+	wantPath := strings.Join(rootexec.SearchPath, ":")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			script := filepath.Join(dir, tc.scriptName)
+			mustWriteExecutableScript(t, script, "#!/bin/sh\nexit 0\n")
+			f, _ := openScriptForTest(t, script)
+
+			cmd, err := m.buildEnforcedCmd(f, script, tc.event, tc.asRoot)
+			if err != nil {
+				t.Fatalf("buildEnforcedCmd: %v", err)
+			}
+			for _, denied := range []string{"LD_PRELOAD", "GIT_CONFIG_COUNT", "BUNDLE_CUSTOM"} {
+				for _, kv := range cmd.Env {
+					if k, _, _ := strings.Cut(kv, "="); k == denied {
+						t.Errorf("dropped hook env unexpectedly contains %s (%q)", denied, kv)
+					}
+				}
+			}
+			if got := findEnvVar(cmd.Env, "PATH"); got != wantPath {
+				t.Errorf("PATH = %q, want %q", got, wantPath)
+			}
+			if got := findEnvVar(cmd.Env, "OPERATOR_KEEP"); got != "keep-me" {
+				t.Errorf("OPERATOR_KEEP = %q, want %q", got, "keep-me")
+			}
+		})
+	}
+}
+
 // TestBuildEnforcedCmd_DroppedFailsClosedWithoutWorkloadUIDOrGID proves the
 // dropped (!asRoot) branch never builds a runnable *exec.Cmd — and so never
 // execs anything — when EnforcePrivilegeDrop is set but WorkloadUID or
@@ -1124,15 +1199,17 @@ func TestExecuteScriptEnforced_NonEnforcedModeUnchanged(t *testing.T) {
 	}
 }
 
-// TestExecuteScript_NonEnforcedPreStartEnvUnchangedByHardening proves a
-// non-enforced LifecycleManager (EnforcePrivilegeDrop false, the zero
-// value) runs a pre-start hook via the unfiltered m.hookEnv(), never
-// hardenedRootHookEnv's allowlist: variables hardenedRootHookEnv strips in
-// enforced mode (NODE_OPTIONS, GIT_CONFIG_GLOBAL) still reach the script
-// unchanged here, and HOME is the workload-owned AgentHome, not /root.
-func TestExecuteScript_NonEnforcedPreStartEnvUnchangedByHardening(t *testing.T) {
-	t.Setenv("NODE_OPTIONS", "--require /home/scion/evil.js")
-	t.Setenv("GIT_CONFIG_GLOBAL", "/home/scion/.gitconfig")
+// TestExecuteScript_NonEnforcedPreStartHookEnvFiltersWithheld proves a
+// non-enforced LifecycleManager (EnforcePrivilegeDrop false, the zero value)
+// strips both static denylist entries and per-start withheld keys from
+// hookEnv(), resets PATH to rootexec.SearchPath when PATH is withheld, keeps
+// HOME set to AgentHome, and preserves unrelated operator keys.
+func TestExecuteScript_NonEnforcedPreStartHookEnvFiltersWithheld(t *testing.T) {
+	t.Setenv("LD_PRELOAD", "/tmp/evil.so")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("PATH", "/evil")
+	t.Setenv("FOO", "from-bundle")
+	t.Setenv("OPERATOR_KEEP", "operator-value")
 	t.Setenv("HOME", "/should-not-be-used")
 
 	dir := t.TempDir()
@@ -1140,12 +1217,19 @@ func TestExecuteScript_NonEnforcedPreStartEnvUnchangedByHardening(t *testing.T) 
 	out := filepath.Join(dir, "out")
 	script := filepath.Join(dir, "pre-start.d", "30-project-custom")
 	mustWriteExecutableScript(t, script,
-		"#!/bin/sh\nprintenv NODE_OPTIONS > "+out+"\nprintenv GIT_CONFIG_GLOBAL >> "+out+"\nprintenv HOME >> "+out+"\n")
+		"#!/bin/sh\n"+
+			"printf 'LD_PRELOAD=%s\\n' \"${LD_PRELOAD-UNSET}\" > "+out+"\n"+
+			"printf 'GIT_CONFIG_COUNT=%s\\n' \"${GIT_CONFIG_COUNT-UNSET}\" >> "+out+"\n"+
+			"printf 'FOO=%s\\n' \"${FOO-UNSET}\" >> "+out+"\n"+
+			"printf 'PATH=%s\\n' \"${PATH-UNSET}\" >> "+out+"\n"+
+			"printf 'OPERATOR_KEEP=%s\\n' \"${OPERATOR_KEEP-UNSET}\" >> "+out+"\n"+
+			"printf 'HOME=%s\\n' \"${HOME-UNSET}\" >> "+out+"\n")
 
 	m := &LifecycleManager{
 		HooksDirs: []string{dir},
 		Handlers:  map[string][]Handler{},
 		AgentHome: agentHome,
+		Withheld:  envpolicy.NewSet("PATH", "FOO"),
 		// EnforcePrivilegeDrop left at its zero value (false).
 	}
 	if err := m.RunPreStart(); err != nil {
@@ -1155,9 +1239,14 @@ func TestExecuteScript_NonEnforcedPreStartEnvUnchangedByHardening(t *testing.T) 
 	if err != nil {
 		t.Fatalf("read out: %v", err)
 	}
-	want := "--require /home/scion/evil.js\n/home/scion/.gitconfig\n" + agentHome + "\n"
+	want := "LD_PRELOAD=UNSET\n" +
+		"GIT_CONFIG_COUNT=UNSET\n" +
+		"FOO=UNSET\n" +
+		"PATH=" + strings.Join(rootexec.SearchPath, ":") + "\n" +
+		"OPERATOR_KEEP=operator-value\n" +
+		"HOME=" + agentHome + "\n"
 	if string(got) != want {
-		t.Errorf("non-enforced pre-start env = %q, want %q (unfiltered hookEnv, AgentHome-owned HOME, never the enforced-mode allowlist)", got, want)
+		t.Errorf("non-enforced pre-start env =\n%s\nwant:\n%s", got, want)
 	}
 }
 

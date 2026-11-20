@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -342,6 +343,7 @@ var errWorktreeAdminUnresolved = errors.New("cannot resolve the broker-recorded 
 // buildCommonRunArgs constructs the common arguments for 'run' command across different runtimes.
 func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	args := []string{"run", "-d", "-i"}
+	withheld := newHookWithheldTracker(config)
 	addArg := func(flag string, values ...string) {
 		for _, v := range values {
 			if flag == "-e" {
@@ -354,10 +356,21 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			args = append(args, flag, v)
 		}
 	}
-	addEnv := func(name, value string) {
-		if value != "" {
-			addArg("-e", fmt.Sprintf("%s=%s", name, value))
+	addTrackedArgEnv := func(kv string, isWithheld bool) {
+		name, _, _ := strings.Cut(kv, "=")
+		if reservedAgentEnvName(name) {
+			return
 		}
+		args = append(args, "-e", kv)
+		withheld.Record(name, isWithheld)
+	}
+	addTrackedEnv := func(name, value string, isWithheld bool) {
+		if value != "" {
+			addTrackedArgEnv(fmt.Sprintf("%s=%s", name, value), isWithheld)
+		}
+	}
+	addEnv := func(name, value string) {
+		addTrackedEnv(name, value, false)
 	}
 
 	expandPath := func(path string, isTarget bool) string {
@@ -817,11 +830,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 		// Call GetEnv for non-auth env vars (system prompt, agent name, etc.)
 		for k, v := range config.Harness.GetEnv(config.Name, config.HomeDir, config.UnixUsername) {
-			addEnv(k, v)
+			addTrackedEnv(k, v, isHarnessTemplateEnvKey(k))
 		}
 		if config.TelemetryEnabled {
 			for k, v := range config.Harness.GetTelemetryEnv() {
-				addEnv(k, v)
+				addTrackedEnv(k, v, false)
 			}
 		}
 	}
@@ -873,11 +886,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			continue
 		}
 		if len(parts) == 2 {
-			addArg("-e", fmt.Sprintf("%s=%s", parts[0], parts[1]))
+			addTrackedArgEnv(fmt.Sprintf("%s=%s", parts[0], parts[1]), withheld.IsConfigHC(parts[0]))
 		} else if !util.IsAgentRefusedHostEnvName(e) {
 			// A bare name makes the container CLI copy the value from
 			// this process's env; names refused for agents never are.
-			addArg("-e", e)
+			addTrackedArgEnv(e, withheld.IsConfigHC(e))
 		}
 	}
 
@@ -898,7 +911,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar || reservedAgentEnvName(s.Target) {
 			continue
 		}
-		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
+		addTrackedArgEnv(fmt.Sprintf("%s=%s", s.Target, s.Value), false)
 	}
 
 	// Dev-mode binary override: if SCION_DEV_BINARIES points to a local
@@ -1008,9 +1021,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("--cap-add", "NET_ADMIN")
 	}
 	if config.MetadataInterception && config.RuntimeName != appleContainerRuntimeName {
-		addArg("-e", MetadataInterceptionEnvVar+"="+MetadataInterceptionRequired)
+		addTrackedArgEnv(MetadataInterceptionEnvVar+"="+MetadataInterceptionRequired, false)
 	} else {
-		addArg("-e", MetadataInterceptionEnvVar+"="+MetadataInterceptionOff)
+		addTrackedArgEnv(MetadataInterceptionEnvVar+"="+MetadataInterceptionOff, false)
 	}
 
 	// Add extra /etc/hosts entries (e.g. for host.docker.internal on Linux)
@@ -1082,14 +1095,20 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		// interpretation, then safely expanded by sh via "$SCION_START_CMD".
 		// Must be added before the image name — Docker/Podman require all
 		// flags before the image argument.
-		addArg("-e", fmt.Sprintf("SCION_START_CMD=%s", tmuxCmd))
+		addTrackedArgEnv(fmt.Sprintf("SCION_START_CMD=%s", tmuxCmd), false)
 	}
 
-	// The template env fallback (ptone/scion#4524) is the LAST env step:
-	// only keys no source above emitted, never a suppressed key. Docker
-	// keeps the last -e for a key, so nothing may be added after this.
+	// The template env fallback (ptone/scion#4524) is the LAST user/template
+	// env step: only keys no source above emitted, never a suppressed key.
 	for _, e := range FallbackEnvEntries(config.FallbackEnv, config.SuppressedFallbackKeys, envKeysOfArgs(args)) {
-		addArg("-e", e)
+		addTrackedArgEnv(e, false)
+	}
+
+	// Emit the runtime-owned hook-withheld marker last, after every other env
+	// source (which addTrackedArgEnv filters through reservedAgentEnvName),
+	// derived directly from the winning provenance of the entries emitted above.
+	if marker := withheld.Marker(); marker != "" {
+		args = append(args, "-e", envpolicy.HookWithheldEnvVar+"="+marker)
 	}
 
 	args = append(args, config.Image)
@@ -2463,29 +2482,13 @@ func resolvedAuthEnvEntries(ra *api.ResolvedAuth, taken func(name string) bool) 
 // more for its init firewall check; this assumes they are deterministic and
 // side-effect free, as every in-tree harness is.
 func harnessEnvEntries(cfg RunConfig, agentHome string) []string {
-	if cfg.Harness == nil {
+	sourced := harnessEnvEntriesWithSource(cfg, agentHome)
+	if len(sourced) == 0 {
 		return nil
 	}
-	env := make(map[string]string)
-	add := func(src map[string]string) {
-		for k, v := range src {
-			if v != "" {
-				env[k] = v
-			}
-		}
-	}
-	add(cfg.Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername))
-	if cfg.TelemetryEnabled {
-		add(cfg.Harness.GetTelemetryEnv())
-	}
-	names := make([]string, 0, len(env))
-	for k := range env {
-		names = append(names, k)
-	}
-	slices.Sort(names)
-	entries := make([]string, 0, len(names))
-	for _, k := range names {
-		entries = append(entries, k+"="+env[k])
+	entries := make([]string, 0, len(sourced))
+	for _, e := range sourced {
+		entries = append(entries, e.Key+"="+e.Value)
 	}
 	return entries
 }
@@ -2570,7 +2573,9 @@ const stagedSecretWarnThreshold = 100 * 1024
 // (stagedsecrets.ResolvedAuthStagedEnvVar). Each runtime drops it where it
 // assembles the container environment.
 func reservedAgentEnvName(name string) bool {
-	return name == stagedsecrets.HubTokenStagedEnvVar || name == stagedsecrets.ResolvedAuthStagedEnvVar
+	return name == stagedsecrets.HubTokenStagedEnvVar ||
+		name == stagedsecrets.ResolvedAuthStagedEnvVar ||
+		name == envpolicy.HookWithheldEnvVar
 }
 
 // dropReservedAgentEnv deletes the reservedAgentEnvName entries from an

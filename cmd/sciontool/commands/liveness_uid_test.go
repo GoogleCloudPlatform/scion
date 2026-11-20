@@ -31,18 +31,20 @@ func TestLivenessAgentUID(t *testing.T) {
 }
 
 func TestLivenessHarnessRootDepth(t *testing.T) {
-	env := func(v string) func(string) string {
+	envMap := func(m map[string]string) func(string) string {
 		return func(k string) string {
-			if k == state.LivenessHarnessRootDepthEnv {
-				return v
-			}
-			return ""
+			return m[k]
 		}
 	}
-	assert.Equal(t, 1, livenessHarnessRootDepth(env("")), "unset")
-	assert.Equal(t, 2, livenessHarnessRootDepth(env("2")))
-	assert.Equal(t, 2, livenessHarnessRootDepth(env(" 2 ")))
-	assert.Equal(t, 1, livenessHarnessRootDepth(env("two")), "unparsable")
+	assert.Equal(t, 1, livenessHarnessRootDepth(envMap(nil)), "unset")
+	assert.Equal(t, 2, livenessHarnessRootDepth(envMap(map[string]string{state.LivenessHarnessRootDepthEnv: "2"})))
+	assert.Equal(t, 2, livenessHarnessRootDepth(envMap(map[string]string{state.LivenessHarnessRootDepthEnv: " 2 "})))
+	assert.Equal(t, 1, livenessHarnessRootDepth(envMap(map[string]string{state.LivenessHarnessRootDepthEnv: "two"})), "unparsable")
+	assert.Equal(t, 2, livenessHarnessRootDepth(envMap(map[string]string{state.LivenessHarnessRootDepthHintEnv: "2"})), "hint fallback")
+	assert.Equal(t, 3, livenessHarnessRootDepth(envMap(map[string]string{
+		state.LivenessHarnessRootDepthEnv:     "3",
+		state.LivenessHarnessRootDepthHintEnv: "2",
+	})), "SCION_* wins over hint")
 }
 
 // The live-work callback reads the activity and its time afresh on every

@@ -404,7 +404,17 @@ func TestStartDoesNotPassHostCredentialEnvToAgent(t *testing.T) {
 		"  SCION_DEV_TOKEN: \"\"\n"+
 		"  FROM_AUTH: \"${SCION_AUTH_TOKEN}\"\n"+
 		"  FROM_DEV: \"$SCION_DEV_TOKEN\"\n"+
-		"  ORDINARY_HOST_VAR: \"\"\n")
+		"  BUNDLE_LITERAL: ok\n")
+	// Inline config still supports non-refused host env passthrough, while
+	// refusing reserved server/hub credential names.
+	fx.opts.InlineConfig = &api.ScionConfig{
+		Env: map[string]string{
+			"SCION_AUTH_TOKEN":  "",
+			"SCION_DEV_TOKEN":   "",
+			"INLINE_FROM_AUTH":  "${SCION_AUTH_TOKEN}",
+			"ORDINARY_HOST_VAR": "",
+		},
+	}
 
 	if _, err := fx.start(); err != nil {
 		t.Fatalf("Start() failed: %v", err)
@@ -414,6 +424,7 @@ func TestStartDoesNotPassHostCredentialEnvToAgent(t *testing.T) {
 	}
 
 	sawOrdinary := false
+	sawBundle := false
 	for _, e := range fx.captured.Env {
 		if strings.Contains(e, hostSentinel) {
 			t.Errorf("container env carries a host credential value under %q", strings.SplitN(e, "=", 2)[0])
@@ -421,9 +432,15 @@ func TestStartDoesNotPassHostCredentialEnvToAgent(t *testing.T) {
 		if e == "ORDINARY_HOST_VAR=ordinary-value" {
 			sawOrdinary = true
 		}
+		if e == "BUNDLE_LITERAL=ok" {
+			sawBundle = true
+		}
 	}
 	if !sawOrdinary {
-		t.Error("ORDINARY_HOST_VAR did not pass through; the harness-config env did not reach the agent env")
+		t.Error("ORDINARY_HOST_VAR did not pass through from inline config")
+	}
+	if !sawBundle {
+		t.Error("BUNDLE_LITERAL did not reach the agent env from the harness-config bundle")
 	}
 
 	data, err := os.ReadFile(filepath.Join(fx.captured.HomeDir, ".scion", "scion-token"))

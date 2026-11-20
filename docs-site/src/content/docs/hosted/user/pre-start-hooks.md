@@ -32,6 +32,17 @@ Because of this single-slot model, **exactly one pre-start hook can execute per 
 - **Idempotency:** Pre-start hooks execute on *every* container start or resume. Scripts must be idempotent (safe to run multiple times on persistent filesystems).
 - **Size Limit:** Hook scripts are stored directly in the Hub database and are capped at **64 KB** at the API layer.
 
+## Hook Environment
+
+In-container lifecycle hooks (`pre-start`, `post-start`, `pre-stop`, `session-end`) run with a filtered environment rather than the raw container environment:
+
+- **Harness-config variables are withheld:** Any environment variable whose effective value came from a harness-config layer (`config.yaml` `env` or `env_template`, `no-auth-env.yaml`, or settings `harness_configs.<name>.env` / `harness_overrides`) is withheld from hooks and delivered only to the workload.
+- **Static denylist:** Interpreter, loader, shell, and `git` override variables (such as `LD_*`, `DYLD_*`, `BASH_ENV`, `PYTHONPATH`, `NODE_OPTIONS`, `GIT_CONFIG*`, `GIT_SSH_COMMAND`, and `SCION_EXTRA_PATH`) are always withheld from hooks.
+- **Operator and Hub variables survive:** Variables supplied by the Hub, inline agent config, operator settings, or secrets (for example `GITHUB_TOKEN`) remain visible to hooks unless they appear on the static denylist.
+- **Normalized defaults:** `HOME` is set to the agent home directory, `PYTHONDONTWRITEBYTECODE=1` is set, and `PATH` falls back to the standard system search path if it was withheld or empty.
+- **Enforced runtimes (Substrate):** Root-eligible hooks run with a minimal allowlist environment (`HOME=/root`, fixed `PATH`, `LANG`, `TERM`, `PYTHONDONTWRITEBYTECODE=1`, `PYTHONNOUSERSITE=1`, `SCION_AGENT_HOME`, `SCION_HOOK_PATH`), while dropped hooks receive the filtered hook environment above.
+- **Startup `git` subprocesses:** Workspace clone and shared-workspace `git` configuration run with a from-scratch environment (`PATH`, `HOME`, `LANG=C.UTF-8`, `GIT_TERMINAL_PROMPT=0`, plus non-withheld trust-bundle and proxy variables). `GITHUB_TOKEN` is passed only to authenticating remote operations (`fetch` and `ls-remote`).
+
 ---
 
 ## Managing Hooks via CLI

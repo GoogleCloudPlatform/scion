@@ -41,3 +41,13 @@ func enforceWorkspaceGitEnv(env []string, value string, set bool) []string {
 	}
 	return out
 }
+
+// enforceWorkspaceGitTracked updates SCION_WORKSPACE_GIT in env with
+// envOriginBrokerSystem when set, or deletes it when unset.
+func enforceWorkspaceGitTracked(env *trackedAgentEnv, value string, set bool) {
+	if set {
+		env.Set(workspaceGitEnvKey, value, envOriginBrokerSystem)
+	} else {
+		env.Delete(workspaceGitEnvKey)
+	}
+}

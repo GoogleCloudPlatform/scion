@@ -147,7 +147,9 @@ harness_configs:
 		}
 	}
 
-	// Verify it was persisted to scion-agent.json
+	// Verify settings harness-config env and template env are NOT persisted to
+	// scion-agent.json (they are resolved per-start from live settings and
+	// templates instead of being frozen at provision time).
 	agentScionJSON := filepath.Join(projectScionDir, "agents", agentName, "scion-agent.json")
 	data, err := os.ReadFile(agentScionJSON)
 	if err != nil {
@@ -160,9 +162,9 @@ harness_configs:
 		t.Fatal(err)
 	}
 
-	for k, v := range expectedEnv {
-		if persistedCfg.Env[k] != v {
-			t.Errorf("persisted: expected env[%s] = %q, got %q", k, v, persistedCfg.Env[k])
+	for k := range expectedEnv {
+		if v, ok := persistedCfg.Env[k]; ok {
+			t.Errorf("persisted: settings harness-config env %s=%q must not be persisted in scion-agent.json", k, v)
 		}
 	}
 	if v, ok := persistedCfg.Env["TPL_VAR"]; ok {
