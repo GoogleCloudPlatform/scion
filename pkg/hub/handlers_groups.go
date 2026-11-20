@@ -137,16 +137,27 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	var totalCount int
 	var totalApprox bool
 	// Check if user has admin-level list visibility via permission.
+	// Direct unfiltered store listing is only safe when the caller also has
+	// unrestricted hub-wide project read access; otherwise project members
+	// groups must be filtered by project read access.
 	hasAdminView := false
 	if identity != nil {
 		if user, ok := identity.(UserIdentity); ok {
-			hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
+			hasGroupList := s.authzService.Decide(ctx, AuthzRequest{
 				Principal:  principalContextForIdentity(user),
 				Credential: credentialContextForIdentity(user),
 				Resource:   Resource{Type: "group", ID: "hub"},
 				Action:     Action("list"),
 				Permission: "group.list",
 			}).Allowed
+			if hasGroupList {
+				projectScopes, err := s.authzService.ResolveListScopes(ctx, identity, "project.read")
+				if err != nil {
+					writeErrorFromErr(w, err, "")
+					return
+				}
+				hasAdminView = projectScopes.Scopes.IsAll() && len(projectScopes.ExcludedProjectIDs) == 0
+			}
 		}
 	}
 	if hasAdminView {
@@ -158,14 +169,49 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		}
 		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
 	} else if identity != nil {
-		// Authenticated non-admin: use authorizedList for policy-enforced filtering.
-		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Group], error) {
+		// Authenticated non-admin: use authorizedList for policy-enforced filtering
+		// and filter project members groups by project read access.
+		membersGroupsByID := make(map[string]*store.Group)
+		projectReadCache := make(map[string]bool)
+		readCtx := withAuthzInputMemo(ctx)
+		groupReadBatch := func(ctx context.Context, ident Identity, resources []Resource) ([]bool, error) {
+			allowed, err := s.authzService.AuthorizeReadBatch(ctx, ident, resources)
+			if err != nil {
+				return nil, err
+			}
+			for i, res := range resources {
+				if !allowed[i] {
+					continue
+				}
+				g, isMembersGroup := membersGroupsByID[res.ID]
+				if !isMembersGroup {
+					continue
+				}
+				canRead, cached := projectReadCache[g.ProjectID]
+				if !cached {
+					canRead, err = s.isGroupVisibleToCaller(ctx, ident, g)
+					if err != nil {
+						return nil, err
+					}
+					projectReadCache[g.ProjectID] = canRead
+				}
+				allowed[i] = canRead
+			}
+			return allowed, nil
+		}
+		result, err := authorizedList(readCtx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Group], error) {
 			page, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
 			if err != nil {
 				return authorizedCandidatePage[store.Group]{}, err
 			}
+			for i := range page.Items {
+				if store.IsProjectMembersGroup(&page.Items[i]) {
+					g := page.Items[i]
+					membersGroupsByID[g.ID] = &g
+				}
+			}
 			return authorizedCandidatePage[store.Group]{Items: page.Items, NextCursor: page.NextCursor}, nil
-		}, groupResource, func(g *store.Group) string { return authorizedListCursor(g.Created, g.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
+		}, groupResource, func(g *store.Group) string { return authorizedListCursor(g.Created, g.ID, cursorBinding) }, groupReadBatch)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -278,7 +324,7 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	var parentEdge *store.GroupMember
 	var parentGrant groupMemberGrant
 	if req.ParentID != "" {
-		parent, err := s.store.GetGroup(ctx, req.ParentID)
+		parent, err := s.resolveVisibleGroupByID(ctx, GetIdentityFromContext(ctx), req.ParentID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				ValidationError(w, "parent group not found: "+req.ParentID, nil)
@@ -448,22 +494,147 @@ func (s *Server) handleGroupRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isGroupVisibleToCaller is the central visibility decision for groups.
+// Project members groups are visible only to callers with project read access
+// on the owning project; all other groups are visible. Any non-ErrNotFound
+// store error is returned so callers fail closed.
+func (s *Server) isGroupVisibleToCaller(ctx context.Context, identity Identity, group *store.Group) (bool, error) {
+	if group == nil {
+		return false, nil
+	}
+	if !store.IsProjectMembersGroup(group) {
+		return true, nil
+	}
+	return s.canReadProjectStrict(ctx, identity, group.ProjectID)
+}
+
+// canReadProjectStrict reports whether identity may read projectID, returning
+// any non-ErrNotFound store error so callers can fail closed.
+func (s *Server) canReadProjectStrict(ctx context.Context, identity Identity, projectID string) (bool, error) {
+	if identity == nil || projectID == "" {
+		return false, nil
+	}
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if agentIdent.ProjectID() != projectID {
+			return false, nil
+		}
+	}
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead)
+	return decision.Allowed, nil
+}
+
+// resolveVisibleGroupByID resolves a group by ID and applies
+// isGroupVisibleToCaller. A group that is not visible to identity returns
+// store.ErrNotFound, matching a nonexistent group.
+func (s *Server) resolveVisibleGroupByID(ctx context.Context, identity Identity, id string) (*store.Group, error) {
+	group, err := s.store.GetGroup(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	visible, err := s.isGroupVisibleToCaller(ctx, identity, group)
+	if err != nil {
+		return nil, err
+	}
+	if !visible {
+		return nil, store.ErrNotFound
+	}
+	return group, nil
+}
+
+// resolveVisibleGroupByIDOrSlug resolves a group by ID or slug and applies
+// isGroupVisibleToCaller. A group that is not visible to identity returns
+// store.ErrNotFound, matching a nonexistent group.
+func (s *Server) resolveVisibleGroupByIDOrSlug(ctx context.Context, identity Identity, idOrSlug string) (*store.Group, error) {
+	group, err := s.store.GetGroup(ctx, idOrSlug)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		group, err = s.store.GetGroupBySlug(ctx, idOrSlug)
+		if err != nil {
+			return nil, err
+		}
+	}
+	visible, err := s.isGroupVisibleToCaller(ctx, identity, group)
+	if err != nil {
+		return nil, err
+	}
+	if !visible {
+		return nil, store.ErrNotFound
+	}
+	return group, nil
+}
+
+// filterVisibleGroups filters groups through isGroupVisibleToCaller, caching
+// per-project read checks within the call. Always returns a non-nil slice.
+func (s *Server) filterVisibleGroups(ctx context.Context, identity Identity, groups []store.Group) ([]store.Group, error) {
+	readCtx := withAuthzInputMemo(ctx)
+	projectReadCache := make(map[string]bool)
+	filtered := make([]store.Group, 0, len(groups))
+	for i := range groups {
+		g := &groups[i]
+		if !store.IsProjectMembersGroup(g) {
+			filtered = append(filtered, *g)
+			continue
+		}
+		visible, cached := projectReadCache[g.ProjectID]
+		if !cached {
+			var err error
+			visible, err = s.isGroupVisibleToCaller(readCtx, identity, g)
+			if err != nil {
+				return nil, err
+			}
+			projectReadCache[g.ProjectID] = visible
+		}
+		if visible {
+			filtered = append(filtered, *g)
+		}
+	}
+	return filtered, nil
+}
+
+// filterVisibleGroupIDs resolves groupIDs in batch and retains only IDs of
+// groups visible to identity via isGroupVisibleToCaller, preserving order.
+// Always returns a non-nil slice.
+func (s *Server) filterVisibleGroupIDs(ctx context.Context, identity Identity, groupIDs []string) ([]string, error) {
+	if len(groupIDs) == 0 {
+		return []string{}, nil
+	}
+	groups, err := s.store.GetGroupsByIDs(ctx, groupIDs)
+	if err != nil {
+		return nil, err
+	}
+	visibleGroups, err := s.filterVisibleGroups(ctx, identity, groups)
+	if err != nil {
+		return nil, err
+	}
+	visibleSet := make(map[string]struct{}, len(visibleGroups))
+	for i := range visibleGroups {
+		visibleSet[visibleGroups[i].ID] = struct{}{}
+	}
+	out := make([]string, 0, len(visibleGroups))
+	for _, id := range groupIDs {
+		if _, ok := visibleSet[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
 func (s *Server) getGroup(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	group, err := s.store.GetGroup(ctx, id)
+	group, err := s.resolveVisibleGroupByIDOrSlug(ctx, GetIdentityFromContext(ctx), id)
 	if err != nil {
-		if err == store.ErrNotFound {
-			// Try by slug
-			group, err = s.store.GetGroupBySlug(ctx, id)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-		} else {
-			writeErrorFromErr(w, err, "")
-			return
-		}
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	resp := GroupWithCapabilities{Group: *group}
@@ -486,22 +657,14 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	identity := GetIdentityFromContext(ctx)
 	tokenSetsOwner := bodyErr == nil && req.OwnerID != "" && IsScopedUserIdentity(identity)
 
-	group, err := s.store.GetGroup(ctx, id)
+	group, err := s.resolveVisibleGroupByIDOrSlug(ctx, identity, id)
 	if err != nil {
-		if err == store.ErrNotFound {
-			group, err = s.store.GetGroupBySlug(ctx, id)
-			if err != nil {
-				if tokenSetsOwner && errors.Is(err, store.ErrNotFound) {
-					writeForbidden(w, groupOwnerTokenRefusal)
-					return
-				}
-				writeErrorFromErr(w, err, "")
-				return
-			}
-		} else {
-			writeErrorFromErr(w, err, "")
+		if tokenSetsOwner && errors.Is(err, store.ErrNotFound) {
+			writeForbidden(w, groupOwnerTokenRefusal)
 			return
 		}
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	if tokenSetsOwner {
@@ -628,19 +791,11 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Try to get the group first (by ID or slug)
-	group, err := s.store.GetGroup(ctx, id)
+	// Resolve the group (by ID or slug) with visibility filtering.
+	group, err := s.resolveVisibleGroupByIDOrSlug(ctx, GetIdentityFromContext(ctx), id)
 	if err != nil {
-		if err == store.ErrNotFound {
-			group, err = s.store.GetGroupBySlug(ctx, id)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-		} else {
-			writeErrorFromErr(w, err, "")
-			return
-		}
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	// Enforce authorization: only group owner or admins can delete
@@ -713,24 +868,16 @@ func (s *Server) auditGroupDeleteTx(ctx context.Context, tx store.Store, group *
 func (s *Server) handleGroupMembers(w http.ResponseWriter, r *http.Request, groupID string) {
 	ctx := r.Context()
 
-	// Verify group exists (by ID or slug)
-	group, err := s.store.GetGroup(ctx, groupID)
+	// Resolve group (by ID or slug) with visibility filtering.
+	group, err := s.resolveVisibleGroupByIDOrSlug(ctx, GetIdentityFromContext(ctx), groupID)
 	if err != nil {
-		if err == store.ErrNotFound {
-			group, err = s.store.GetGroupBySlug(ctx, groupID)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-		} else {
-			writeErrorFromErr(w, err, "")
-			return
-		}
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		s.listGroupMembers(w, r, group.ID)
+		s.listGroupMembers(w, r, group)
 	case http.MethodPost:
 		s.addGroupMember(w, r, group)
 	default:
@@ -738,10 +885,10 @@ func (s *Server) handleGroupMembers(w http.ResponseWriter, r *http.Request, grou
 	}
 }
 
-func (s *Server) listGroupMembers(w http.ResponseWriter, r *http.Request, groupID string) {
+func (s *Server) listGroupMembers(w http.ResponseWriter, r *http.Request, group *store.Group) {
 	ctx := r.Context()
 
-	members, err := s.store.GetGroupMembers(ctx, groupID)
+	members, err := s.store.GetGroupMembers(ctx, group.ID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -854,26 +1001,17 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 			}
 		}
 	case store.GroupMemberTypeGroup:
-		// Try as ID first, then as slug
-		memberGroup, err := s.store.GetGroup(ctx, req.MemberID)
+		// Resolve by ID or slug with visibility filtering.
+		memberGroup, err := s.resolveVisibleGroupByIDOrSlug(ctx, GetIdentityFromContext(ctx), req.MemberID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				var slugErr error
-				memberGroup, slugErr = s.store.GetGroupBySlug(ctx, req.MemberID)
-				if slugErr != nil {
-					if errors.Is(slugErr, store.ErrNotFound) {
-						ValidationError(w, "group not found: "+req.MemberID, nil)
-						return
-					}
-					writeErrorFromErr(w, slugErr, "")
-					return
-				}
-				resolvedID = memberGroup.ID
-			} else {
-				writeErrorFromErr(w, err, "")
+				ValidationError(w, "group not found: "+req.MemberID, nil)
 				return
 			}
+			writeErrorFromErr(w, err, "")
+			return
 		}
+		resolvedID = memberGroup.ID
 		// Project members groups are system-managed and cannot be nested
 		// as a child of another group.
 		if store.IsProjectMembersGroup(memberGroup) {
@@ -1249,24 +1387,16 @@ func (s *Server) handleGroupMemberByID(w http.ResponseWriter, r *http.Request, g
 		return
 	}
 
-	// Verify group exists (by ID or slug)
-	group, err := s.store.GetGroup(ctx, groupID)
+	// Resolve group (by ID or slug) with visibility filtering.
+	group, err := s.resolveVisibleGroupByIDOrSlug(ctx, GetIdentityFromContext(ctx), groupID)
 	if err != nil {
-		if err == store.ErrNotFound {
-			group, err = s.store.GetGroupBySlug(ctx, groupID)
-			if err != nil {
-				writeErrorFromErr(w, err, "")
-				return
-			}
-		} else {
-			writeErrorFromErr(w, err, "")
-			return
-		}
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		s.getGroupMember(w, r, group.ID, memberType, memberID)
+		s.getGroupMember(w, r, group, memberType, memberID)
 	case http.MethodDelete:
 		s.removeGroupMember(w, r, group, memberType, memberID)
 	default:
@@ -1274,10 +1404,10 @@ func (s *Server) handleGroupMemberByID(w http.ResponseWriter, r *http.Request, g
 	}
 }
 
-func (s *Server) getGroupMember(w http.ResponseWriter, r *http.Request, groupID, memberType, memberID string) {
+func (s *Server) getGroupMember(w http.ResponseWriter, r *http.Request, group *store.Group, memberType, memberID string) {
 	ctx := r.Context()
 
-	member, err := s.store.GetGroupMembership(ctx, groupID, memberType, memberID)
+	member, err := s.store.GetGroupMembership(ctx, group.ID, memberType, memberID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

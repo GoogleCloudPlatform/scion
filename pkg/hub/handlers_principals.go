@@ -87,8 +87,10 @@ func (s *Server) handleMyGroups(w http.ResponseWriter, r *http.Request) {
 		groups = s.boundaryProjectGroups(ctx, token, groups)
 	}
 
-	if groups == nil {
-		groups = []store.Group{}
+	groups, err = s.filterVisibleGroups(ctx, user, groups)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	writeJSON(w, http.StatusOK, GroupsResponse{Groups: groups})
@@ -148,8 +150,10 @@ func (s *Server) handleAgentGroups(w http.ResponseWriter, r *http.Request, agent
 		return
 	}
 
-	if groups == nil {
-		groups = []store.Group{}
+	groups, err = s.filterVisibleGroups(ctx, GetIdentityFromContext(ctx), groups)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
 	}
 
 	writeJSON(w, http.StatusOK, GroupsResponse{Groups: groups})
@@ -200,8 +204,43 @@ func (s *Server) handlePrincipalRoutes(w http.ResponseWriter, r *http.Request) {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if effectiveGroupIDs == nil {
-			effectiveGroupIDs = []string{}
+
+		// Filter both direct and effective group IDs through the central
+		// group visibility decision in a single batch lookup.
+		allIDs := make([]string, 0, len(directGroupIDs)+len(effectiveGroupIDs))
+		seenIDs := make(map[string]struct{}, len(directGroupIDs)+len(effectiveGroupIDs))
+		for _, gid := range directGroupIDs {
+			if _, ok := seenIDs[gid]; !ok {
+				seenIDs[gid] = struct{}{}
+				allIDs = append(allIDs, gid)
+			}
+		}
+		for _, gid := range effectiveGroupIDs {
+			if _, ok := seenIDs[gid]; !ok {
+				seenIDs[gid] = struct{}{}
+				allIDs = append(allIDs, gid)
+			}
+		}
+		visibleIDs, err := s.filterVisibleGroupIDs(ctx, GetIdentityFromContext(ctx), allIDs)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		visibleSet := make(map[string]struct{}, len(visibleIDs))
+		for _, gid := range visibleIDs {
+			visibleSet[gid] = struct{}{}
+		}
+		filteredDirect := make([]string, 0, len(directGroupIDs))
+		for _, gid := range directGroupIDs {
+			if _, ok := visibleSet[gid]; ok {
+				filteredDirect = append(filteredDirect, gid)
+			}
+		}
+		filteredEffective := make([]string, 0, len(effectiveGroupIDs))
+		for _, gid := range effectiveGroupIDs {
+			if _, ok := visibleSet[gid]; ok {
+				filteredEffective = append(filteredEffective, gid)
+			}
 		}
 
 		writeJSON(w, http.StatusOK, PrincipalResolutionResponse{
@@ -210,8 +249,8 @@ func (s *Server) handlePrincipalRoutes(w http.ResponseWriter, r *http.Request) {
 				ID:          u.ID,
 				DisplayName: u.DisplayName,
 			},
-			DirectGroups:    directGroupIDs,
-			EffectiveGroups: effectiveGroupIDs,
+			DirectGroups:    filteredDirect,
+			EffectiveGroups: filteredEffective,
 		})
 
 	case "agent":
@@ -226,8 +265,10 @@ func (s *Server) handlePrincipalRoutes(w http.ResponseWriter, r *http.Request) {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if effectiveGroupIDs == nil {
-			effectiveGroupIDs = []string{}
+		effectiveGroupIDs, err = s.filterVisibleGroupIDs(ctx, GetIdentityFromContext(ctx), effectiveGroupIDs)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
 		}
 
 		resp := PrincipalResolutionResponse{
@@ -256,7 +297,7 @@ func (s *Server) handlePrincipalRoutes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 
 	case "group":
-		g, err := s.store.GetGroup(ctx, principalID)
+		g, err := s.resolveVisibleGroupByID(ctx, GetIdentityFromContext(ctx), principalID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return

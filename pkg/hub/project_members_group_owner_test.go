@@ -90,8 +90,9 @@ func TestProjectMembersGroup_AdoptDoesNotRefillOwnerID(t *testing.T) {
 // TestProjectMembersGroup_RemovedCreatorDeniedGroupMutations is the
 // ptone/scion#2599 regression: a creator removed without a transfer (no
 // binding, OwnerID still names them) must not mutate the members group.
-// Group reads are not asserted as denied: group.read comes from the
-// hub-member binding, not from Group.OwnerID.
+// Because project members groups are filtered by project read access, the
+// removed creator receives 404 on the group endpoints; the direct authz
+// subtest also confirms group mutation permissions are denied.
 func TestProjectMembersGroup_RemovedCreatorDeniedGroupMutations(t *testing.T) {
 	groupPath := func(g *store.Group) string { return "/api/v1/groups/" + g.ID }
 
@@ -100,7 +101,7 @@ func TestProjectMembersGroup_RemovedCreatorDeniedGroupMutations(t *testing.T) {
 		newcomer := createStaleOwnerUser(t, f.s, tid("mg-owner-newcomer"), "mg-newcomer@test.com")
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodPost, groupPath(g)+"/members",
 			map[string]string{"memberType": "user", "memberId": newcomer.ID})
-		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 		_, err := f.s.GetGroupMembership(context.Background(), g.ID, store.GroupMemberTypeUser, newcomer.ID)
 		assert.ErrorIs(t, err, store.ErrNotFound, "add must not create a membership")
 	})
@@ -109,7 +110,7 @@ func TestProjectMembersGroup_RemovedCreatorDeniedGroupMutations(t *testing.T) {
 		f, g, existing := setupStaleOwnerMembersGroup(t)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodDelete,
 			groupPath(g)+"/members/user/"+existing.ID, nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 		_, err := f.s.GetGroupMembership(context.Background(), g.ID, store.GroupMemberTypeUser, existing.ID)
 		assert.NoError(t, err, "remove must not delete the membership")
 	})
@@ -118,7 +119,7 @@ func TestProjectMembersGroup_RemovedCreatorDeniedGroupMutations(t *testing.T) {
 		f, g, _ := setupStaleOwnerMembersGroup(t)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodPatch, groupPath(g),
 			map[string]string{"name": "Renamed By Removed Creator", "ownerId": f.creator.ID})
-		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 		stored := membersGroupFor(t, f.s, f.project)
 		assert.Equal(t, g.Name, stored.Name, "PATCH must not rename the group")
 		assert.Empty(t, stored.OwnerID, "PATCH must not set an owner")
@@ -127,7 +128,7 @@ func TestProjectMembersGroup_RemovedCreatorDeniedGroupMutations(t *testing.T) {
 	t.Run("delete", func(t *testing.T) {
 		f, g, _ := setupStaleOwnerMembersGroup(t)
 		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodDelete, groupPath(g), nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 		_, err := f.s.GetGroup(context.Background(), g.ID)
 		assert.NoError(t, err, "DELETE must not delete the group")
 	})
