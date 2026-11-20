@@ -355,6 +355,10 @@ export class ScionPageAdminUsers extends LitElement {
   @state()
   private canReadRoleBindings = false;
 
+  /**
+   * Whether the signed-in viewer holds `user.invite` (from `/api/v1/auth/admin-status`).
+   * Gates user invite controls and the Invite Codes tab, failing closed until verified.
+   */
   @state()
   private canInviteUsers = false;
 
@@ -1073,8 +1077,7 @@ export class ScionPageAdminUsers extends LitElement {
   private async loadCurrentUser(): Promise<void> {
     const knownUserId = stateManager.getCurrentUserId();
     if (knownUserId) {
-      const status = await loadAdminStatus(knownUserId);
-      this.canInviteUsers = hasAnyPermission(status, ['user.invite']);
+      void this.loadInvitePermission(knownUserId);
     }
     try {
       const res = await apiFetch('/auth/me');
@@ -1083,10 +1086,12 @@ export class ScionPageAdminUsers extends LitElement {
         const userId = data.id || null;
         this.currentUserId = userId;
         if (userId && userId !== knownUserId) {
-          const status = await loadAdminStatus(userId);
-          this.canInviteUsers = hasAnyPermission(status, ['user.invite']);
+          void this.loadInvitePermission(userId);
         } else if (!userId) {
           this.canInviteUsers = false;
+          if (this.activeTab === 'invites') {
+            this.activeTab = 'users';
+          }
         }
       }
     } catch {
@@ -1097,6 +1102,15 @@ export class ScionPageAdminUsers extends LitElement {
       this.canReadRoleBindings = hasAnyPermission(status, ['role_binding.read']);
     } catch {
       this.canReadRoleBindings = false;
+    }
+  }
+
+  private async loadInvitePermission(userId: string): Promise<void> {
+    const status = await loadAdminStatus(userId);
+    if (!this.isConnected) return;
+    this.canInviteUsers = hasAnyPermission(status, ['user.invite']);
+    if (!this.canInviteUsers && this.activeTab === 'invites') {
+      this.activeTab = 'users';
     }
   }
 
@@ -1982,6 +1996,7 @@ export class ScionPageAdminUsers extends LitElement {
   // ==================== Invite Codes Tab ====================
 
   private async loadInvites(): Promise<void> {
+    if (!this.canInviteUsers) return;
     this.invitesLoading = true;
     try {
       const response = await apiFetch('/api/v1/admin/invites');
@@ -2103,6 +2118,9 @@ export class ScionPageAdminUsers extends LitElement {
   // ==================== Render Methods ====================
 
   override render() {
+    const activeTab: AdminTab =
+      this.activeTab === 'invites' && this.canInviteUsers ? 'invites' : 'users';
+
     return html`
       <div class="header">
         <h1>Users</h1>
@@ -2113,30 +2131,34 @@ export class ScionPageAdminUsers extends LitElement {
       <div class="tabs" role="tablist">
         <button
           role="tab"
-          aria-selected=${this.activeTab === 'users'}
+          aria-selected=${activeTab === 'users'}
           aria-controls="panel-users"
-          class="tab-btn ${this.activeTab === 'users' ? 'active' : ''}"
+          class="tab-btn ${activeTab === 'users' ? 'active' : ''}"
           @click=${() => {
             this.activeTab = 'users';
           }}
         >
           Users ${!this.loading ? `(${this.tabCount})` : ''}
         </button>
-        <button
-          role="tab"
-          aria-selected=${this.activeTab === 'invites'}
-          aria-controls="panel-invites"
-          class="tab-btn ${this.activeTab === 'invites' ? 'active' : ''}"
-          @click=${() => {
-            this.activeTab = 'invites';
-            void this.loadInvites();
-          }}
-        >
-          Invite Codes ${this.invitesTotalCount > 0 ? `(${this.invitesTotalCount})` : ''}
-        </button>
+        ${this.canInviteUsers
+          ? html`
+              <button
+                role="tab"
+                aria-selected=${activeTab === 'invites'}
+                aria-controls="panel-invites"
+                class="tab-btn ${activeTab === 'invites' ? 'active' : ''}"
+                @click=${() => {
+                  this.activeTab = 'invites';
+                  void this.loadInvites();
+                }}
+              >
+                Invite Codes ${this.invitesTotalCount > 0 ? `(${this.invitesTotalCount})` : ''}
+              </button>
+            `
+          : nothing}
       </div>
 
-      ${this.activeTab === 'users'
+      ${activeTab === 'users'
         ? this.loading
           ? this.renderLoading()
           : this.error

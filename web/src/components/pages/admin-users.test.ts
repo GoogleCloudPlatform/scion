@@ -62,7 +62,11 @@ function createFetchHandler(users: AdminUser[]) {
     }
     if (path.includes('/api/v1/auth/admin-status')) {
       return Promise.resolve(
-        jsonResponse({ isAdmin: true, isSuperAdmin: true, permissions: [] } satisfies AdminStatus)
+        jsonResponse({
+          isAdmin: true,
+          isSuperAdmin: true,
+          permissions: ['user.read', 'user.invite'],
+        } satisfies AdminStatus)
       );
     }
     if (method === 'PATCH' && path.includes('/api/v1/users/')) {
@@ -2278,5 +2282,172 @@ describe('scion-page-admin-users — Invite User / Import CSV permission gating 
     const labels = buttonLabels(element);
     expect(labels).not.toContain('Invite User');
     expect(labels).not.toContain('Import CSV');
+  });
+});
+
+describe('scion-page-admin-users — Invite Codes tab permission gating (ptone/scion#8345)', () => {
+  type TabPage = HTMLElement & {
+    updateComplete: Promise<boolean>;
+    activeTab: 'users' | 'invites';
+    loadInvites(): Promise<void>;
+  };
+  let element: TabPage | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler([])));
+    mod = await import('./admin-users.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    clearAdminStatus();
+    vi.restoreAllMocks();
+  });
+
+  async function mountWithStatus(
+    adminStatusResponse: () => Response,
+    authMeRole = 'member',
+    invitesResponse: () => Response = () => jsonResponse({ items: [], totalCount: 0 })
+  ): Promise<TabPage> {
+    clearAdminStatus();
+    const base = createFetchHandler([makeUser({ _capabilities: { actions: ['read'] } })]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const path = requestUrl(url);
+        if (path.includes('/auth/me')) {
+          return Promise.resolve(jsonResponse({ id: SELF_ID, role: authMeRole }));
+        }
+        if (path.includes('/api/v1/auth/admin-status')) {
+          return Promise.resolve(adminStatusResponse());
+        }
+        if (path.includes('/api/v1/admin/invites')) {
+          return Promise.resolve(invitesResponse());
+        }
+        return base(url, init);
+      })
+    );
+    const el = document.createElement('scion-page-admin-users') as TabPage;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await el.updateComplete;
+    return el;
+  }
+
+  function inviteRequests(): string[] {
+    return vi
+      .mocked(fetch)
+      .mock.calls.map(([url]) => requestUrl(url))
+      .filter((u) => u.includes('/api/v1/admin/invites'));
+  }
+
+  function inviteCodesTab(el: HTMLElement): HTMLElement | null {
+    return (
+      el.shadowRoot?.querySelector<HTMLElement>('.tab-btn[aria-controls="panel-invites"]') ?? null
+    );
+  }
+
+  it('hides the Invite Codes tab and makes no invite request for a read-only user (user.read only)', async () => {
+    element = await mountWithStatus(
+      () =>
+        jsonResponse({
+          isAdmin: false,
+          isSuperAdmin: false,
+          permissions: ['user.read'],
+        } satisfies AdminStatus),
+      'member',
+      () => jsonResponse({ error: { code: 'forbidden', message: 'forbidden' } }, 403)
+    );
+
+    expect(inviteCodesTab(element)).toBeNull();
+    expect(inviteRequests()).toEqual([]);
+  });
+
+  it('shows the Invite Codes tab and loads invites when the viewer holds user.invite (even with isAdmin=false)', async () => {
+    element = await mountWithStatus(
+      () =>
+        jsonResponse({
+          isAdmin: false,
+          isSuperAdmin: false,
+          permissions: ['user.read', 'user.invite'],
+        } satisfies AdminStatus),
+      'member',
+      () =>
+        jsonResponse({
+          items: [
+            {
+              id: 'inv-1',
+              codePrefix: 'scn_abc',
+              createdBy: SELF_ID,
+              createdAt: '2026-01-01T00:00:00Z',
+              expiresAt: '2099-01-01T00:00:00Z',
+              maxUses: 5,
+              useCount: 1,
+              revoked: false,
+              note: 'team invite',
+            },
+          ],
+          totalCount: 1,
+        })
+    );
+
+    const tab = inviteCodesTab(element);
+    expect(tab).not.toBeNull();
+    expect(inviteRequests()).toEqual([]);
+
+    tab!.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await element.updateComplete;
+
+    expect(inviteRequests()).toHaveLength(1);
+    expect(element.shadowRoot?.textContent).toContain('scn_abc...');
+    expect(element.shadowRoot?.textContent).toContain('1 invite code');
+  });
+
+  it('shows the Invite Codes tab for a super-admin even with an empty permissions array', async () => {
+    element = await mountWithStatus(
+      () =>
+        jsonResponse({
+          isAdmin: true,
+          isSuperAdmin: true,
+          permissions: [],
+        } satisfies AdminStatus),
+      'admin'
+    );
+
+    const tab = inviteCodesTab(element);
+    expect(tab).not.toBeNull();
+    tab!.click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await element.updateComplete;
+
+    expect(inviteRequests()).toHaveLength(1);
+    expect(element.shadowRoot?.textContent).toContain('No Invite Codes');
+  });
+
+  it('fails closed when admin-status fails', async () => {
+    element = await mountWithStatus(() => jsonResponse({ error: 'unavailable' }, 500), 'admin');
+
+    expect(inviteCodesTab(element)).toBeNull();
+    expect(inviteRequests()).toEqual([]);
+  });
+
+  it('does not render the invites panel or fetch invites if invoked without user.invite', async () => {
+    element = await mountWithStatus(() =>
+      jsonResponse({
+        isAdmin: false,
+        isSuperAdmin: false,
+        permissions: ['user.read'],
+      } satisfies AdminStatus)
+    );
+
+    element.activeTab = 'invites';
+    await element.loadInvites();
+    await element.updateComplete;
+
+    expect(inviteRequests()).toEqual([]);
+    expect(element.shadowRoot?.textContent).not.toContain('Create Invite Code');
   });
 });
