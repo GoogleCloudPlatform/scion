@@ -85,6 +85,78 @@ func TestAdminEffectivePermissions_ExperimentGate(t *testing.T) {
 	})
 }
 
+// TestAdminEffectivePermissions_ScopedTokens pins bearer selector and boundary
+// enforcement for GET and HEAD /api/v1/admin/effective-permissions while the
+// hub.effective_permissions experiment defaults to off in the generic matrix.
+func TestAdminEffectivePermissions_ScopedTokens(t *testing.T) {
+	srv, s, hubAdmin, _ := setupScopedAdminTest(t)
+	epSetExperiment(t, srv, true)
+	ctx := context.Background()
+
+	target := epCreateUser(t, s, "tok-target", store.UserStatusActive)
+	ensureHubMembership(ctx, s, target.ID)
+	proj := epCreateProject(t, srv, s, "ep-tok-proj", "EP Token Project", hubAdmin.ID)
+
+	mintHub := func(scopes ...string) string {
+		key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(hubAdmin.ID), CreateTokenParams{
+			UserID: hubAdmin.ID, Name: "ep-hub-" + tid("tok"), Boundary: hubBoundary(), Scopes: scopes,
+		})
+		require.NoError(t, err)
+		return key
+	}
+	mintProj := func(scopes ...string) string {
+		key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(hubAdmin.ID), CreateTokenParams{
+			UserID: hubAdmin.ID, Name: "ep-proj-" + tid("tok"), Boundary: projectBoundary(proj.ID), Scopes: scopes,
+		})
+		require.NoError(t, err)
+		return key
+	}
+
+	// Project-bounded tokens cannot mint hub-only role_binding:read.
+	_, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(hubAdmin.ID), CreateTokenParams{
+		UserID: hubAdmin.ID, Name: "ep-proj-rb-" + tid("tok"), Boundary: projectBoundary(proj.ID), Scopes: []string{"role_binding:read"},
+	})
+	require.Error(t, err, "project-bounded token must not mint role_binding:read")
+
+	rbReadHubTok := mintHub("role_binding:read")
+	rbAndProjReadHubTok := mintHub("role_binding:read", "project:read")
+	unrelatedHubTok := mintHub("template:read")
+	projTok := mintProj("project:read")
+
+	hubURL := "/api/v1/admin/effective-permissions?principalType=user&principalId=" + target.ID
+	projURL := hubURL + "&projectId=" + proj.ID
+
+	// GET requires hub boundary + role_binding:read.
+	rec := doRequestWithToken(t, srv, rbReadHubTok, http.MethodGet, hubURL, nil)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp EffectivePermissionSet
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, target.ID, resp.Principal.ID)
+
+	rec = doRequestWithToken(t, srv, unrelatedHubTok, http.MethodGet, hubURL, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	rec = doRequestWithToken(t, srv, projTok, http.MethodGet, hubURL, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	// Project-scoped GET additionally requires project:read visibility.
+	rec = doRequestWithToken(t, srv, rbReadHubTok, http.MethodGet, projURL, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+
+	rec = doRequestWithToken(t, srv, rbAndProjReadHubTok, http.MethodGet, projURL, nil)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// HEAD requires hub boundary + role_binding:read.
+	rec = doRequestWithToken(t, srv, rbReadHubTok, http.MethodHead, hubURL, nil)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = doRequestWithToken(t, srv, unrelatedHubTok, http.MethodHead, hubURL, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	rec = doRequestWithToken(t, srv, projTok, http.MethodHead, hubURL, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
 func TestAdminEffectivePermissions_HubAppliesInProjectsCatalogFilter(t *testing.T) {
 	srv, s, hubAdmin, member := setupScopedAdminTest(t)
 	epSetExperiment(t, srv, true)
