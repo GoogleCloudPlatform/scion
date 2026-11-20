@@ -119,8 +119,8 @@ func TestCloudRunDockerfileContractDetectsViolations(t *testing.T) {
 	cr := readRepoFile(t, cloudRunDockerfile)
 	mutations := []struct{ name, src, want string }{
 		{"older node major", mustReplace(t, cr, "FROM node:22-slim", "FROM node:20-slim"), "uses Node 20"},
-		{"floating go minor", mustReplace(t, cr, "FROM golang:1.26.1 ", "FROM golang:1.26 "), "uses golang:1.26 "},
-		{"older go", mustReplace(t, cr, "FROM golang:1.26.1 ", "FROM golang:1.25 "), "uses golang:1.25 "},
+		{"floating go minor", mustReplace(t, cr, "FROM golang:1.26.11 ", "FROM golang:1.26 "), "uses golang:1.26 "},
+		{"older go", mustReplace(t, cr, "FROM golang:1.26.11 ", "FROM golang:1.25 "), "uses golang:1.25 "},
 		{"unnamed final stage", mustReplace(t, cr, "FROM debian:bookworm-slim AS runtime", "FROM debian:bookworm-slim"), "final stage must be named"},
 		{"no node stage", mustReplace(t, cr, "FROM node:22-slim", "FROM debian:bookworm-slim"), "node:<version> frontend stage"},
 	}

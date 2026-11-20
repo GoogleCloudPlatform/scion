@@ -1,6 +1,6 @@
 # Go builds, tests and lint in an agent container
 
-- **Toolchain:** Go 1.26.1 everywhere (`go.mod`, `image-build/core-base/Dockerfile`, CI). `fmt-check` failures are real, often misaligned struct fields: run `make fmt` and confirm the diff is pure alignment.
+- **Toolchain:** Go 1.26.11 everywhere (`go.mod`, `image-build/core-base/Dockerfile`, CI). `fmt-check` failures are real, often misaligned struct fields: run `make fmt` and confirm the diff is pure alignment.
 - **extras modules** (`extras/*`) have their own `go` lines. Each Dockerfile's `golang` image must be at least that version; bump both together (`make check-extras-go-images`).
 - **VCS status error** (`exit status 128`) in a worktree: add `-buildvcs=false`.
 - **Running code at main's tip:** `main` is checked out elsewhere, so use a detached worktree: `git worktree add --detach /tmp/check <main-sha>`, then `git worktree remove --force /tmp/check`. For single files, `git show main:path`.

@@ -44,8 +44,8 @@ ARG HELM_SHA256_ARM64=7944e3defd386c76fd92d9e6fec5c2d65a323f6fadc19bfb5e704e3eee
 # GO_VERSION is what gets installed when the base does not already meet the
 # floor. A base that ships something newer keeps it — these images serve many
 # consumers besides scion, so we do not downgrade one to suit the other.
-ARG GO_MIN_VERSION=1.26.1
-ARG GO_VERSION=1.26.1
+ARG GO_MIN_VERSION=1.26.11
+ARG GO_VERSION=1.26.11
 
 # Git is vendored from the Chainguard git image rather than compiled from
 # source. Chainguard tracks upstream closely (currently 2.55.0) and rebuilds on

@@ -20,7 +20,7 @@ COPY web/ .
 RUN npm run build
 
 # Stage 2: Build the Scion Hub binary (with embedded web assets)
-FROM golang:1.26.1-alpine AS builder
+FROM golang:1.26.11-alpine AS builder
 WORKDIR /app
 ENV GOWORK=off
 

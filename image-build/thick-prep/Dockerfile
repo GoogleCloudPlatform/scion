@@ -55,8 +55,8 @@ ARG GIT_IMAGE=chainguard/git:latest
 # Floor and pin, as in core-base. The Workstations base ships 1.27.1, which
 # clears the floor, so GO_VERSION is never actually used on this chain today —
 # it exists so the two Dockerfiles stay literally comparable.
-ARG GO_MIN_VERSION=1.26.1
-ARG GO_VERSION=1.26.1
+ARG GO_MIN_VERSION=1.26.11
+ARG GO_VERSION=1.26.11
 
 ARG GH_VERSION=2.100.0
 

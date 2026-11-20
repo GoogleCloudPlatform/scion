@@ -20,8 +20,8 @@ ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5
 ARG ACTIONS_RUNNER_VERSION=2.338.0
 ARG ACTIONS_RUNNER_SHA256=af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32
 # https://go.dev/dl/ (linux-amd64 archive).
-ARG GO_VERSION=1.26.1
-ARG GO_SHA256=031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a
+ARG GO_VERSION=1.26.11
+ARG GO_SHA256=9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec
 # https://mirrors.edge.kernel.org/pub/software/scm/git/ (git-<v>.tar.xz). The sha256 is from
 # that directory's sha256sums.asc, and the tarball was checked against Junio C Hamano's
 # detached git-<v>.tar.sign (key 96E07AF25771955980DAD10020D04E5A713660A7) when pinned. The
