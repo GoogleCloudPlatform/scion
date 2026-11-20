@@ -808,11 +808,10 @@ var allowedGitHubTokenPermissionFields = map[string]bool{
 	"metadata": true, "checks": true, "actions": true,
 }
 
-// A pull-only proof with an empty stored permission set ({} from PUT
-// github-permissions) still sends an explicit, read-only permissions map:
-// an access_tokens request without permissions would get every installation
-// permission. Revert check: before the fix the request had no permissions
-// key at all.
+// A pull-only proof with an empty stored permission set still sends an
+// explicit, read-only permissions map: an access_tokens request without
+// permissions would get every installation permission. Revert check: before
+// the fix the request had no permissions key at all.
 func TestGitHubAssociation_PullProofEmptyStoredPermissionsExplicitReadOnly(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
@@ -824,8 +823,9 @@ func TestGitHubAssociation_PullProofEmptyStoredPermissionsExplicitReadOnly(t *te
 	gh.grant("ghp_puller", "acme/public", githubapp.RepoAccess{Pull: true})
 
 	p := createAssocProject(t, st, "perm-pull-empty", gh.remote("acme", "public"), "puller", ptrInt64(5901))
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+p.ID+"/github-permissions", map[string]string{})
-	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	stored := reloadProject(t, st, p.ID)
+	stored.GitHubPermissions = &store.GitHubTokenPermissions{}
+	require.NoError(t, st.UpdateProject(ctx, stored))
 
 	_, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, p.ID))
 	require.NoError(t, err)
@@ -926,6 +926,75 @@ func TestProjectGitHubPermissions_PutValidated(t *testing.T) {
 	got := reloadProject(t, st, p.ID).GitHubPermissions
 	require.NotNil(t, got)
 	assert.Equal(t, "read", got.Contents)
+}
+
+// PUT github-permissions rejects empty bodies ({} and all-empty-string payloads)
+// with 400 validation_error directing callers to DELETE, leaving stored state
+// untouched while continuing to accept valid non-empty bodies.
+func TestProjectGitHubPermissions_PutEmptyRejected(t *testing.T) {
+	srv, st := testServer(t)
+	p := createAssocProject(t, st, "perm-put-empty", "https://github.com/acme/widgets", "nobody", nil)
+	path := "/api/v1/projects/" + p.ID + "/github-permissions"
+
+	emptyBodies := map[string]map[string]string{
+		"empty object":     {},
+		"single empty key": {"contents": ""},
+		"all empty keys": {
+			"contents":      "",
+			"pull_requests": "",
+			"issues":        "",
+			"metadata":      "",
+			"checks":        "",
+			"actions":       "",
+		},
+	}
+
+	assertRejected := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+		assert.Contains(t, errResp.Error.Message, "DELETE")
+	}
+
+	// Unset project: empty PUTs are rejected, storage remains nil, GET returns defaults.
+	for name, body := range emptyBodies {
+		t.Run("unset/"+name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPut, path, body)
+			assertRejected(t, rec)
+			assert.Nil(t, reloadProject(t, st, p.ID).GitHubPermissions, "nothing stored")
+		})
+	}
+	getRec := doRequest(t, srv, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, "body: %s", getRec.Body.String())
+	var displayed store.GitHubTokenPermissions
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &displayed))
+	assert.Equal(t, store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions()), displayed)
+
+	// Valid non-empty PUT succeeds and persists.
+	rec := doRequest(t, srv, http.MethodPut, path, map[string]string{"contents": "read", "metadata": "read"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	wantStored := store.GitHubTokenPermissions{Contents: "read", Metadata: "read"}
+	got := reloadProject(t, st, p.ID).GitHubPermissions
+	require.NotNil(t, got)
+	assert.Equal(t, wantStored, *got)
+
+	// Project with existing custom permissions: empty PUTs are rejected and preserve existing grant.
+	for name, body := range emptyBodies {
+		t.Run("existing/"+name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPut, path, body)
+			assertRejected(t, rec)
+			got := reloadProject(t, st, p.ID).GitHubPermissions
+			require.NotNil(t, got)
+			assert.Equal(t, wantStored, *got)
+		})
+	}
+	getRec = doRequest(t, srv, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, "body: %s", getRec.Body.String())
+	displayed = store.GitHubTokenPermissions{}
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &displayed))
+	assert.Equal(t, wantStored, displayed)
 }
 
 // githubTokenPermissionsForGrant never adds a field the stored set does not
