@@ -522,22 +522,30 @@ func TestMigrateLegacyYAMLKeys_Symlink(t *testing.T) {
 }
 
 // TestMigrateLegacyYAMLKeys_ModePreserved pins that the migrated file keeps
-// the original file's permission bits.
+// the original file's permission bits regardless of the process umask.
 func TestMigrateLegacyYAMLKeys_ModePreserved(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "settings.yaml")
-	if err := os.WriteFile(path, []byte("hub:\n  grove_id: \"abc\"\n"), 0640); err != nil {
-		t.Fatal(err)
-	}
+	for _, mask := range []int{0o022, 0o077} {
+		t.Run(fmt.Sprintf("umask_%03o", mask), func(t *testing.T) {
+			setTestUmask(t, mask)
+			dir := t.TempDir()
+			path := filepath.Join(dir, "settings.yaml")
+			if err := os.WriteFile(path, []byte("hub:\n  grove_id: \"abc\"\n"), 0640); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0640); err != nil {
+				t.Fatal(err)
+			}
 
-	migrateLegacyYAMLKeys(path, hubGroveIDRename, &fakeReporter{})
+			migrateLegacyYAMLKeys(path, hubGroveIDRename, &fakeReporter{})
 
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0640 {
-		t.Errorf("mode = %v, want 0640", info.Mode().Perm())
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0640 {
+				t.Errorf("mode = %v, want 0640", info.Mode().Perm())
+			}
+		})
 	}
 }
 
