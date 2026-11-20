@@ -434,3 +434,108 @@ func TestMessageCommand_ChoicesAliasesDeprecatedAndHidden(t *testing.T) {
 		assert.Len(t, *asked, 1)
 	})
 }
+
+func TestDecisionLengthWarnings(t *testing.T) {
+	t.Run("at_or_below_soft_limits_produces_no_warnings", func(t *testing.T) {
+		// Exact boundary using multi-byte runes (UTF-8 rune count, not bytes).
+		qExact := strings.Repeat("é", decisionQuestionSoftMax)
+		lExact := strings.Repeat("é", decisionChoiceLabelSoftMax)
+		raw, err := json.Marshal([]map[string]interface{}{
+			{
+				"id":       "deploy-window",
+				"question": "  " + qExact + "  ",
+				"choices": []interface{}{
+					lExact,
+					map[string]string{"id": "hold", "label": "  " + lExact + "  ", "description": strings.Repeat("d", 200)},
+				},
+			},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, decisionLengthWarnings(raw))
+	})
+
+	t.Run("long_question_and_labels_warn_and_point_to_message_body", func(t *testing.T) {
+		qLong := strings.Repeat("q", decisionQuestionSoftMax+1)
+		lLong := strings.Repeat("l", decisionChoiceLabelSoftMax+1)
+		raw, err := json.Marshal([]map[string]interface{}{
+			{
+				"id":       "deploy-window",
+				"question": qLong,
+				"choices":  []interface{}{lLong, "Hold"},
+			},
+			{
+				"question": "Short question?",
+				"choices": []interface{}{
+					"Yes",
+					map[string]string{"id": "no", "label": lLong},
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		got := decisionLengthWarnings(raw)
+		require.Len(t, got, 3)
+		assert.Contains(t, got[0], "Warning: decision deploy-window question is 201 characters (soft limit 200)")
+		assert.Contains(t, got[0], "message body")
+		assert.Contains(t, got[1], "Warning: decision deploy-window choice 1 label is 41 characters (soft limit 40)")
+		assert.Contains(t, got[1], "message body")
+		assert.Contains(t, got[2], "Warning: decision #2 choice 2 label is 41 characters (soft limit 40)")
+		assert.Contains(t, got[2], "message body")
+	})
+
+	t.Run("malformed_payload_returns_no_warnings", func(t *testing.T) {
+		assert.Empty(t, decisionLengthWarnings(json.RawMessage(`["not-an-object"]`)))
+		assert.Empty(t, decisionLengthWarnings(nil))
+	})
+}
+
+func TestMessageCommand_DecisionsSoftLengthWarningDoesNotBlockSend(t *testing.T) {
+	asked := decisionsState(t, "asker")
+	var got map[string]interface{}
+	hubCtx := newDecisionsHub(t, http.StatusOK, decisionsSentBody(), &got)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_HUB_ENDPOINT", hubCtx.Endpoint)
+	t.Setenv("SCION_HUB_TOKEN", "test-agent-token")
+	t.Setenv("SCION_PROJECT_ID", decisionsTestProject)
+	t.Cleanup(func() {
+		rootCmd.SetArgs(nil)
+		if f := rootCmd.PersistentFlags().Lookup("format"); f != nil {
+			_ = f.Value.Set(f.DefValue)
+			f.Changed = false
+		}
+	})
+
+	payload, err := json.Marshal([]map[string]interface{}{
+		{
+			"id":       "D234",
+			"question": strings.Repeat("x", decisionQuestionSoftMax+5),
+			"choices":  []string{strings.Repeat("y", decisionChoiceLabelSoftMax+3), "Hold"},
+		},
+	})
+	require.NoError(t, err)
+
+	path := filepath.Join(t.TempDir(), "long-decisions.json")
+	require.NoError(t, os.WriteFile(path, payload, 0o600))
+
+	var execErr error
+	stdout, stderr := captureStdoutStderr(t, func() {
+		rootCmd.SetArgs([]string{"message", "user:alice@example.com", "--decisions-file", path, "--format", "json"})
+		execErr = rootCmd.Execute()
+	})
+	require.NoError(t, execErr, "soft length warning must not block the send")
+	assert.Contains(t, stderr, "Warning: decision D234 question is 205 characters (soft limit 200)")
+	assert.Contains(t, stderr, "Warning: decision D234 choice 1 label is 43 characters (soft limit 40)")
+	assert.Contains(t, stderr, "message body")
+
+	var res hubclient.OutboundMessageResult
+	require.NoError(t, json.Unmarshal([]byte(stdout), &res), "stdout must stay pure JSON when soft length warnings go to stderr: %s", stdout)
+	assert.Equal(t, "msg-decisions-1", res.MessageID)
+	assert.Len(t, *asked, 1)
+}
+
+func TestMessageCommand_DecisionsHelpDocumentsSoftLimits(t *testing.T) {
+	assert.Contains(t, messageCmd.Long, "200 characters")
+	assert.Contains(t, messageCmd.Long, "40 characters")
+	assert.Contains(t, messageCmd.Long, "message body")
+}
