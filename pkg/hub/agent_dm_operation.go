@@ -209,11 +209,11 @@ const (
 	AgentDMFailed AgentDMOutcome = "failed"
 
 	// AgentDMAmbiguous: message was persisted and dispatch may or may not
-	// have succeeded — e.g. the broker accepted the message but the
-	// MarkMessageDispatched CAS failed, or context was cancelled mid-flight.
-	// The message row may be in "pending" or "dispatched" state. Callers
-	// must NOT assume delivery and must NOT automatically replay.
-	// No blind retry guidance is returned.
+	// have succeeded — e.g. a dispatch deadline expired mid-flight (row
+	// finalized as "failed" unless already "delivered", ptone/scion#5111),
+	// or the broker accepted the message and the MarkMessageDispatched CAS
+	// failed (row still "pending"). Callers must NOT assume delivery and
+	// must NOT automatically replay. No blind retry guidance is returned.
 	AgentDMAmbiguous AgentDMOutcome = "ambiguous"
 
 	// AgentDMDeferred: the target agent is mid-`scion reincarnate` (design
@@ -756,7 +756,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// Dispatch outcome determines the final message state:
 	//   - Success → CAS pending→dispatched (AC-1)
 	//   - Definite failure → persist failed state, return non-2xx (AC-2)
-	//   - Ambiguous (dispatch deadline) → leave pending, return ambiguous (AC-4)
+	//   - Ambiguous (dispatch deadline) → finalize failed unless delivered, return ambiguous (AC-4, ptone/scion#5111)
 	//
 	// The dispatch runs on dispatchContext: detached from the caller's
 	// cancellation, so a caller that goes away (a client that disconnects,
@@ -827,9 +827,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			// Ambiguous: dispatch may have succeeded but confirmation was
 			// lost (a dispatch deadline expired mid-flight; the caller's
 			// cancellation no longer reaches the dispatch, see dispatchContext).
-			// Leave the row in pending state for inspection; return
-			// ambiguous outcome (AC-4).
-			s.messageLog.Warn("agent DM: dispatch ambiguous (message persisted as pending)",
+			// Finalize the row as failed straight away with
+			// dispatchOutcomeUnknownReason instead of leaving it pending for
+			// the 24h TTL; MarkMessageFailed leaves a row already marked
+			// delivered untouched (ptone/scion#5111). Return ambiguous outcome
+			// so callers do not blindly retry (AC-4).
+			s.messageLog.Warn("agent DM: dispatch ambiguous (message finalized as failed)",
 				"sender_id", input.SenderAgent.ID,
 				"target_agent_id", input.TargetAgent.ID,
 				"message_id", msgID,
@@ -837,6 +840,10 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			)
 			// Audit: dispatch outcome (#1690).
 			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, dispatchErr)
+			if markErr := s.markFailed(ctx, msgID, dispatchOutcomeUnknownReason); markErr != nil {
+				s.messageLog.Error("agent DM: failed to mark message failed",
+					"message_id", msgID, "error", markErr)
+			}
 			return &AgentDMResult{
 				Outcome:            AgentDMAmbiguous,
 				MessageID:          msgID,
@@ -1035,10 +1042,11 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 			}
 			if err != nil {
 				LogDMDispatchOutcome(input.SenderAgent, woken, msgID, DispatchFailed, err)
+				reason := err.Error()
 				if isAmbiguousDispatchError(err) {
-					return
+					reason = dispatchOutcomeUnknownReason
 				}
-				if markErr := s.markFailed(fctx, msgID, err.Error()); markErr != nil {
+				if markErr := s.markFailed(fctx, msgID, reason); markErr != nil {
 					s.messageLog.Error("agent DM: failed to mark message failed",
 						"message_id", msgID, "error", markErr)
 				}

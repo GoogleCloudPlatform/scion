@@ -271,11 +271,19 @@ func agentNotRunningDispatchError(msgID string) *AgentDMError {
 	}
 }
 
+// dispatchOutcomeUnknownReason is recorded as dispatch_failure_reason when an
+// agent DM's dispatch ends with an unknown outcome after the message was
+// stored (for example, the dispatch deadline expired mid-flight), finalizing
+// the row right away instead of leaving it pending until TTL expiry
+// (ptone/scion#5111).
+const dispatchOutcomeUnknownReason = "dispatch outcome unknown"
+
 // isAmbiguousDispatchError returns true if the dispatch error indicates
 // the message may have been accepted by the runtime but confirmation was
 // lost — e.g. context cancellation or deadline during the network call.
-// These errors should result in an ambiguous outcome rather than a
-// definite failure.
+// Callers receive an ambiguous outcome so they do not blindly retry, while the
+// stored row is finalized as failed with dispatchOutcomeUnknownReason unless
+// already delivered (ptone/scion#5111).
 func isAmbiguousDispatchError(err error) bool {
 	if isPreDispatchDeliveryError(err) {
 		return false

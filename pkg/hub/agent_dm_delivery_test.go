@@ -50,15 +50,20 @@ import (
 )
 
 // spyStateDispatcher is a test dispatcher that invokes a callback before
-// returning, allowing tests to inspect mid-flight state.
+// returning, allowing tests to inspect mid-flight state or simulate custom
+// dispatch outcomes.
 type spyStateDispatcher struct {
 	store      store.Store
 	onDispatch func(msgText string)
+	dispatchFn func(ctx context.Context, agent *store.Agent, msgText string, sm *messages.StructuredMessage) error
 }
 
-func (d *spyStateDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, message string, _ bool, _ *messages.StructuredMessage) error {
+func (d *spyStateDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, _ bool, sm *messages.StructuredMessage) error {
 	if d.onDispatch != nil {
 		d.onDispatch(message)
+	}
+	if d.dispatchFn != nil {
+		return d.dispatchFn(ctx, agent, message, sm)
 	}
 	return nil
 }
@@ -354,7 +359,8 @@ func TestDelivery_WriteAgentDMResult_Ambiguous(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC-4: Context cancellation during dispatch → ambiguous outcome
+// AC-4 / ptone/scion#5111: Unknown dispatch outcome → finalized failed,
+// wire outcome stays ambiguous
 // ---------------------------------------------------------------------------
 
 func TestDelivery_ContextCancellation_AmbiguousOutcome(t *testing.T) {
@@ -363,8 +369,8 @@ func TestDelivery_ContextCancellation_AmbiguousOutcome(t *testing.T) {
 	// A dispatcher that itself reports context.Canceled. The caller's
 	// cancellation no longer reaches the dispatch (dispatchContext,
 	// ptone/scion#4827; see TestAgentDM_CallerCancelMidDispatch_RowNotLeftPending),
-	// but a cancellation error that still comes back is classified
-	// ambiguous like any context error.
+	// and an unknown dispatch outcome is finalized as failed right away rather
+	// than left pending for the 24h TTL (ptone/scion#5111).
 	cancelDispatcher := &recordingDispatcher{returnErr: context.Canceled}
 	srv.SetDispatcher(cancelDispatcher)
 
@@ -377,17 +383,20 @@ func TestDelivery_ContextCancellation_AmbiguousOutcome(t *testing.T) {
 	assert.NotEmpty(t, result.MessageID,
 		"ambiguous result must include message ID")
 
-	// Message should remain in pending state (not transitioned).
 	msg, err := s.GetMessage(ctx, result.MessageID)
 	require.NoError(t, err)
-	assert.Equal(t, store.MessageDispatchPending, msg.DispatchState,
-		"message must remain pending on ambiguous dispatch")
+	assert.Equal(t, store.MessageDispatchFailed, msg.DispatchState,
+		"unknown dispatch outcome must finalize row as failed (ptone/scion#5111)")
+	require.NotNil(t, msg.DispatchFailureReason)
+	assert.Equal(t, "dispatch outcome unknown", *msg.DispatchFailureReason)
 }
 
 func TestDelivery_DeadlineExceeded_AmbiguousOutcome(t *testing.T) {
 	srv, s, _, sender, target, _, _ := deliverySetup(t)
 
-	// Context deadline exceeded during dispatch is ambiguous.
+	// Context deadline exceeded during dispatch has an unknown delivery
+	// outcome: wire result stays ambiguous while the stored row is finalized
+	// as failed straight away (ptone/scion#5111).
 	deadlineDispatcher := &recordingDispatcher{returnErr: context.DeadlineExceeded}
 	srv.SetDispatcher(deadlineDispatcher)
 
@@ -397,11 +406,168 @@ func TestDelivery_DeadlineExceeded_AmbiguousOutcome(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, AgentDMAmbiguous, result.Outcome)
 
-	// AC-4: a deadline-ambiguous row stays pending by design.
 	msg, err := s.GetMessage(ctx, result.MessageID)
 	require.NoError(t, err)
-	assert.Equal(t, store.MessageDispatchPending, msg.DispatchState,
-		"a deadline-ambiguous row must stay pending (AC-4)")
+	assert.Equal(t, store.MessageDispatchFailed, msg.DispatchState,
+		"deadline-ambiguous row must be finalized as failed (ptone/scion#5111)")
+	require.NotNil(t, msg.DispatchFailureReason)
+	assert.Equal(t, "dispatch outcome unknown", *msg.DispatchFailureReason)
+}
+
+func TestDelivery_DispatchTimeoutAfterStore_FinalizedFailedNotStuck(t *testing.T) {
+	srv, s, _, sender, target, _, _ := deliverySetup(t)
+
+	var midFlightState string
+	srv.SetDispatcher(&spyStateDispatcher{
+		store: s,
+		dispatchFn: func(ctx context.Context, _ *store.Agent, msgText string, _ *messages.StructuredMessage) error {
+			msgs, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: sender.ID}, store.ListOptions{Limit: 10})
+			if err == nil {
+				for _, m := range msgs.Items {
+					if m.Msg == msgText {
+						midFlightState = m.DispatchState
+						break
+					}
+				}
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	})
+
+	callCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	result, dmErr := srv.ExecuteAgentDM(callCtx, deliveryDMInput(sender, target, "timeout-after-store-5111"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, result)
+	assert.Equal(t, AgentDMAmbiguous, result.Outcome)
+	assert.Equal(t, store.MessageDispatchPending, midFlightState,
+		"precondition: message must be stored as pending while dispatch is in flight")
+
+	ctx := context.Background()
+	msg, err := s.GetMessage(ctx, result.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, msg.DispatchState,
+		"timed-out dispatch after persist must finalize row as failed")
+	require.NotNil(t, msg.DispatchFailureReason)
+	assert.Equal(t, "dispatch outcome unknown", *msg.DispatchFailureReason)
+
+	// The pending-message check must no longer flag this message.
+	stuckCount, err := s.CountStuckPendingMessages(ctx, time.Now().UTC().Add(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 0, stuckCount, "pending-message check must not flag finalized unknown-outcome DM")
+	stuckIDs, err := s.ListStuckPendingMessageIDs(ctx, time.Now().UTC().Add(time.Hour), 10)
+	require.NoError(t, err)
+	assert.Empty(t, stuckIDs)
+}
+
+func TestDelivery_DispatchTimeoutAfterConduitDelivered_LeavesDeliveredUnaffected(t *testing.T) {
+	srv, s, _, sender, target, _, _ := deliverySetup(t)
+	ctx := context.Background()
+
+	// Case 1: conduit delivery finishes and marks the stored row "delivered"
+	// just before the dispatch call itself times out. Finalization must leave
+	// the delivered message unaffected.
+	srv.SetDispatcher(&spyStateDispatcher{
+		store: s,
+		dispatchFn: func(dctx context.Context, _ *store.Agent, msgText string, _ *messages.StructuredMessage) error {
+			msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: sender.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			var msgID string
+			for _, m := range msgs.Items {
+				if m.Msg == msgText {
+					msgID = m.ID
+					break
+				}
+			}
+			require.NotEmpty(t, msgID)
+			_, err = s.BindMessageDelivery(ctx, target.ID, "d-5111", []string{msgID}, time.Now())
+			require.NoError(t, err)
+			n, err := s.FinishMessageDelivery(ctx, "d-5111", []string{msgID}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+
+			<-dctx.Done()
+			return dctx.Err()
+		},
+	})
+
+	callCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+
+	deliveredRes, dmErr := srv.ExecuteAgentDM(callCtx, deliveryDMInput(sender, target, "delivered-before-timeout-5111"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, deliveredRes)
+	assert.Equal(t, AgentDMAmbiguous, deliveredRes.Outcome)
+
+	deliveredMsg, err := s.GetMessage(ctx, deliveredRes.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDelivered, deliveredMsg.DispatchState,
+		"a message already marked delivered must be unaffected by timeout finalization")
+	assert.Nil(t, deliveredMsg.DispatchFailureReason)
+
+	// Case 2: an ordinary dispatch that completes within the deadline is
+	// unaffected as well.
+	srv.SetDispatcher(&recordingDispatcher{})
+	okRes, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "normal-ok-5111"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, okRes)
+	assert.Equal(t, AgentDMAccepted, okRes.Outcome)
+
+	okMsg, err := s.GetMessage(ctx, okRes.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDispatched, okMsg.DispatchState)
+	assert.Nil(t, okMsg.DispatchFailureReason)
+}
+
+func TestDelivery_AutoWakeMentionDispatchTimeout_FinalizedFailed(t *testing.T) {
+	srv, s, project, sender, target, _, _ := deliverySetup(t)
+	ctx := context.Background()
+
+	srv.SetDispatcher(&recordingDispatcher{returnErr: context.DeadlineExceeded})
+
+	storeMsg := &store.Message{
+		ID:            tid("autowake-timeout-5111"),
+		ProjectID:     project.ID,
+		Sender:        "agent:" + sender.Slug,
+		SenderID:      sender.ID,
+		Recipient:     "agent:" + target.Slug,
+		RecipientID:   target.ID,
+		Msg:           "@delivery-target ping",
+		Type:          messages.TypeMention,
+		AgentID:       sender.ID,
+		CreatedAt:     time.Now(),
+		DispatchState: store.MessageDispatchPending,
+	}
+	require.NoError(t, s.CreateMessage(ctx, storeMsg))
+
+	in := deliveryDMInput(sender, target, storeMsg.Msg)
+	in.Type = messages.TypeMention
+	in.SkipPhaseGate = true
+	sm := &messages.StructuredMessage{
+		Version:     messages.Version,
+		Sender:      storeMsg.Sender,
+		SenderID:    storeMsg.SenderID,
+		Recipient:   storeMsg.Recipient,
+		RecipientID: storeMsg.RecipientID,
+		Msg:         storeMsg.Msg,
+		Type:        storeMsg.Type,
+	}
+
+	item := srv.agentDMAutoWakeItem(in, storeMsg, sm, sm)
+	item.deliver(ctx, target)
+
+	got, err := s.GetMessage(ctx, storeMsg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState,
+		"post-auto-wake unknown dispatch outcome must finalize row as failed")
+	require.NotNil(t, got.DispatchFailureReason)
+	assert.Equal(t, "dispatch outcome unknown", *got.DispatchFailureReason)
+
+	stuckCount, err := s.CountStuckPendingMessages(ctx, time.Now().UTC().Add(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 0, stuckCount)
 }
 
 // ---------------------------------------------------------------------------
