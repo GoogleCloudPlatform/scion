@@ -568,6 +568,13 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
 
   // Start the hub binary
   const webAssetsDir = path.join(WEB_DIR, 'dist', 'client');
+  // Tell the hub its public base URL matches baseURL (127.0.0.1:<port>) unless
+  // the caller explicitly overrides it via env; otherwise it defaults to
+  // http://localhost:<port>, which mismatches 127.0.0.1 in CSP host-sources.
+  const hasExplicitBaseURL = Object.keys(extraEnv).some((key) => {
+    const upper = key.toUpperCase();
+    return upper === 'SCION_SERVER_BASE_URL' || upper === 'SCION_SERVER_HUB_ENDPOINT';
+  });
   const args = [
     'server',
     'start',
@@ -576,6 +583,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     '127.0.0.1',
     '--web-port',
     String(port),
+    ...(hasExplicitBaseURL ? [] : ['--base-url', baseURL]),
     '--enable-hub',
     '--enable-web',
     '--hosted',

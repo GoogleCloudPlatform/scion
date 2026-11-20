@@ -36,6 +36,7 @@ global-teardown.ts       ← Kills the hub, cleans up temp files
    - `--foreground` (no daemonization)
    - `--host 127.0.0.1` (loopback only — required for dev-auth)
    - `--web-port <ephemeral>` (random free port)
+   - `--base-url http://127.0.0.1:<ephemeral>` (aligns the hub's public origin and CSP host-sources with `baseURL`, unless overridden via `env`)
    - `--dev-auth` (the admin session comes from a dev sign-in link, `devSignInURL`)
    - `--enable-test-login` (programmatic session creation endpoint)
    - `--session-secret e2e-test-secret` (deterministic signing key)
