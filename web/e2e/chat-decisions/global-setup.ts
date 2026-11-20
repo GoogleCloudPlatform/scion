@@ -31,7 +31,7 @@ async function globalSetup(): Promise<void> {
     testLogin: true,
     testIdentities: true,
     runtimeBroker: true,
-    decisionDismissMinAge: '10s',
+    decisionDismissMinAge: '30s',
     build: process.env.E2E_PREBUILT !== '1',
     stateFile: createStateFile(),
     env: {

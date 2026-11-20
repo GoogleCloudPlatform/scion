@@ -17,7 +17,7 @@
  * (ptone/scion#8216, ptone/scion#8217, ptone/scion#8218, parent ptone/scion#8194):
  *   1. All scenario prompts (a 3-row set in a topic, a single topic prompt, and
  *      a 2-row DM set) are asked up front at t=0 against a test-mode hub whose
- *      `--test-decision-dismiss-min-age=10s` shortens the grace window for E2E
+ *      `--test-decision-dismiss-min-age=30s` shortens the grace window for E2E
  *      (ptone/scion#8582; production enforces 5 minutes).
  *   2. Inside the grace window: verifies disabled UI state + countdown
  *      tooltip on both surfaces, hub `409 too_recent` with `availableAt`, and
@@ -316,7 +316,7 @@ test.describe('Dismiss decisions on real hub (ptone/scion#8216, ptone/scion#8217
     const chatRoute = `/chat/space/${projectId}/thread/${topicId}`;
     const chatSubject = `project.${projectId}.chat.>`;
 
-    // 1. Seed all 3 prompts up front at t=0 so they share one 5-minute grace window:
+    // 1. Seed all 3 prompts up front at t=0 so they share one grace window:
     //    - Prompt 1: 3-row set in #dismiss-e2e (DSM-S1, DSM-S2, DSM-S3)
     //    - Prompt 2: single decision in #dismiss-e2e (DSM-P1)
     //    - Prompt 3: 2-row DM set to Alice (DSM-DM1, DSM-DM2) -> also tests DM-only authz (acceptance 12)
@@ -405,7 +405,7 @@ test.describe('Dismiss decisions on real hub (ptone/scion#8216, ptone/scion#8217
     );
     expect(outsiderDmDismiss.status, JSON.stringify(outsiderDmDismiss.body)).toBe(404);
 
-    // 3. Inside the 5-minute grace window: hub returns 409 too_recent with availableAt.
+    // 3. Inside the grace window: hub returns 409 too_recent with availableAt.
     const earlyDismiss = await hubApi<{
       error?: { code?: string; details?: { availableAt?: string } };
     }>(
@@ -477,7 +477,11 @@ test.describe('Dismiss decisions on real hub (ptone/scion#8216, ptone/scion#8217
       await expect(setCardTab2).toBeVisible({ timeout: 15_000 });
       await expect(setCardTab2.locator('.counter')).toHaveText('3 remaining');
 
-      // Verify pre-5m disabled state on both chat card menu and Profile Waiting on you checkboxes.
+      // Verify pre-window disabled state on both chat card menu and Profile Waiting on you checkboxes.
+      expect(
+        availableAtMs - Date.now(),
+        'grace window elapsed before pre-window assertions'
+      ).toBeGreaterThan(1000);
       await setCardTab1.locator('[data-card-menu-trigger]').click();
       const menuDsmTab1 = setCardTab1.locator('sl-menu-item[data-dismiss-menu-item]');
       await expect(menuDsmTab1).toHaveAttribute('disabled', '');
@@ -495,7 +499,7 @@ test.describe('Dismiss decisions on real hub (ptone/scion#8216, ptone/scion#8217
         profilePage.locator(`sl-checkbox[data-select-prompt="${card3DmSend.message_id}"]`)
       ).toHaveAttribute('disabled', '');
 
-      // 4. Wait out the remaining portion of the single 5-minute grace window.
+      // 4. Wait out the remaining portion of the grace window.
       const waitMs = Math.max(0, lastAvailableAtMs - Date.now() + 350);
       if (waitMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, waitMs));
