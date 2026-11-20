@@ -1,0 +1,13 @@
+# Allowlist for the raw-SQL predicates gate (hack/check-raw-sql-predicates.sh).
+#
+# One exception per line:
+#
+#   <file> | <function> | <rule> | <one-line justification>
+#
+# <file> is the repo-relative path, <function> the enclosing function as the
+# gate prints it (Type.Method, Func, or "(package)"), and <rule> is
+# "top-level-or". No line numbers: entries survive unrelated edits.
+#
+# Prefer wrapping the raw SQL predicate in outer parentheses over adding an
+# allowlist entry. An entry that matches nothing fails the gate, so delete
+# entries together with the code they cover.
