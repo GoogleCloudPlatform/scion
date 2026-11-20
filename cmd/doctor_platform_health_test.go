@@ -553,9 +553,49 @@ func TestHealthSummaryClientTypeMatchesHub(t *testing.T) {
 }
 
 // TestHealthAttentionKindMirror pins hubclient's mirror of the attention
-// kinds it names to the hub's constants (ptone/scion#5972).
+// kinds it names to the hub's constants (ptone/scion#5972, ptone/scion#7430).
 func TestHealthAttentionKindMirror(t *testing.T) {
 	assert.Equal(t, hub.HealthAttentionBrokerVersionMismatch, hubclient.HealthAttentionBrokerVersionMismatch)
+	assert.Equal(t, hub.HealthAttentionBrokerVersionUnknown, hubclient.HealthAttentionBrokerVersionUnknown)
+}
+
+func TestRenderDoctorHealthSummary_BrokerVersionUnknown(t *testing.T) {
+	msg := "Runtime broker cloudrun-1 reports no version; cannot verify it matches the hub (v1.3.0)"
+	s := &hubclient.HealthSummary{
+		Status: healthSummaryHealthy,
+		Hub: hubclient.HealthSummaryHub{
+			Status:    healthSummaryHealthy,
+			Version:   "v1.3.0",
+			Instances: &hubclient.HealthSummaryHubFleet{Live: 1, Healthy: 1},
+		},
+		Brokers: hubclient.HealthSummaryBrokers{
+			Total: 1,
+			Items: []hubclient.HealthSummaryBroker{
+				{ID: "b1", Name: "cloudrun-1", Status: "online", Version: "unknown", VersionStatus: "unknown"},
+			},
+		},
+		Attention: []hubclient.HealthAttentionItem{
+			{
+				Severity: "warning",
+				Kind:     hubclient.HealthAttentionBrokerVersionUnknown,
+				Subject:  hubclient.HealthAttentionSubject{Type: "runtime_broker", ID: "b1", Name: "cloudrun-1"},
+				Message:  msg,
+			},
+		},
+	}
+
+	got := renderDoctorHealthSummary(s, false)
+	require.GreaterOrEqual(t, len(got), 2)
+	assert.Equal(t, "pass", got[0].Status)
+	assert.Equal(t, "Platform is healthy (1 item(s) need attention)", got[0].Message)
+	assert.Equal(t, scionruntime.CheckResult{Name: "attention", Status: "warn", Message: msg}, got[1])
+
+	// Doctor renders the Hub summary verbatim and does not re-derive items.
+	s.Attention = nil
+	gotEmpty := renderDoctorHealthSummary(s, false)
+	for _, c := range gotEmpty {
+		assert.NotEqual(t, "attention", c.Name, "doctor must not re-derive attention items")
+	}
 }
 
 // jsonFieldPaths records the JSON path of every field reachable from t.

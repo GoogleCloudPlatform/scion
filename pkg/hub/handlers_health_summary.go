@@ -590,7 +590,7 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 		opts.Cursor = page.NextCursor
 	}
 	sort.SliceStable(list.Items, func(i, j int) bool {
-		return healthSummaryBrokerKeepWhenCapped(list.Items[i]) && !healthSummaryBrokerKeepWhenCapped(list.Items[j])
+		return healthSummaryBrokerKeepWhenCapped(list.Items[i], hubVersion) && !healthSummaryBrokerKeepWhenCapped(list.Items[j], hubVersion)
 	})
 	list.Total = len(list.Items)
 	if list.Total > healthSummaryBrokerLimit {
@@ -617,18 +617,38 @@ func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
 
 // healthSummaryBrokerKeepWhenCapped is the sort key that decides which
 // runtime broker rows survive the healthSummaryBrokerLimit cap: problem rows
-// (healthSummaryBrokerHasProblem), and online rows whose version differs
-// from the hub's, so every broker_version_mismatch item has its row. A
-// version mismatch never changes the overall status.
-func healthSummaryBrokerKeepWhenCapped(b HealthSummaryBroker) bool {
-	return healthSummaryBrokerHasProblem(b) || healthSummaryBrokerVersionIsProblem(b)
+// (healthSummaryBrokerHasProblem), online rows whose version differs from the
+// hub's, and online rows reporting no usable version when the hub has a single
+// known version, so every broker_version_mismatch and broker_version_unknown
+// item has its row. Neither version warning changes the overall status.
+func healthSummaryBrokerKeepWhenCapped(b HealthSummaryBroker, hubVersion string) bool {
+	return healthSummaryBrokerHasProblem(b) ||
+		healthSummaryBrokerVersionIsProblem(b) ||
+		healthSummaryBrokerVersionIsUnknown(b, hubVersion)
 }
 
 // healthSummaryBrokerVersionIsProblem reports whether a runtime broker row
 // gets a broker_version_mismatch attention item: it is online and its
-// version differs from the hub's. Unknown never counts.
+// version differs from the hub's.
 func healthSummaryBrokerVersionIsProblem(b HealthSummaryBroker) bool {
 	return !healthSummaryBrokerStatusIsProblem(b.Status) && b.VersionStatus == string(version.BuildMatchDifferent)
+}
+
+// hubVersionIsSingleKnown reports whether hubVersion is a single known build
+// token (not empty, "mixed" during a rolling upgrade, or "unknown").
+func hubVersionIsSingleKnown(hubVersion string) bool {
+	return hubVersion != "" && hubVersion != HubVersionMixed && hubVersion != "unknown"
+}
+
+// healthSummaryBrokerVersionIsUnknown reports whether a runtime broker row
+// gets a broker_version_unknown attention item: it is online, reports no
+// usable version (empty or "unknown", giving version_status "unknown"), and
+// the hub fleet has a single known version to compare against.
+func healthSummaryBrokerVersionIsUnknown(b HealthSummaryBroker, hubVersion string) bool {
+	if healthSummaryBrokerStatusIsProblem(b.Status) || !hubVersionIsSingleKnown(hubVersion) {
+		return false
+	}
+	return b.VersionStatus == string(version.BuildMatchUnknown) && (b.Version == "" || b.Version == "unknown")
 }
 
 // healthSummaryBrokerStatusIsProblem reports whether a broker status needs
