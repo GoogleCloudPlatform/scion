@@ -136,6 +136,7 @@ type AgentDecisionListItem struct {
 	Question        string                 `json:"question"`
 	Choices         []messages.Choice      `json:"choices"`
 	DefaultChoiceID string                 `json:"defaultChoiceId,omitempty"`
+	Other           *messages.OtherOption  `json:"other,omitempty"`
 	ConversationID  string                 `json:"conversationId"`
 	PromptMessageID string                 `json:"promptMessageId"`
 	CreatedAt       time.Time              `json:"createdAt"`

@@ -698,3 +698,97 @@ func TestProjectDecisionStore_MadeFoldConfirmDismissReplaceAndFacets(t *testing.
 	}
 	assert.ElementsMatch(t, []string{aliceID, bobID}, answererIDs)
 }
+
+func TestProjectDecisionStore_MadeFoldOtherTextSearchAndPreviousOtherText(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+	projectID := backfillTestProject(t, cs, "project-decision-fold-other-search")
+
+	agentID := uuid.New().String()
+	aliceID := uuid.New().String()
+	require.NoError(t, cs.CreateUser(ctx, &store.User{
+		ID: aliceID, Email: "alice@example.com", DisplayName: "Alice", Status: "active", Created: time.Now().UTC(),
+	}))
+
+	topic := "topic-fold-other"
+	base := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	promptRes, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+		Message: &store.Message{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			Sender:    "agent:fold-bot",
+			SenderID:  agentID,
+			Recipient: "group:topic",
+			ThreadID:  topic,
+			CreatedAt: base.Add(-10 * time.Minute),
+		},
+		AskerAgentID:   agentID,
+		AskerAgentName: "fold-bot",
+		Decisions: []messages.Decision{{
+			Key:      "K-OTHER-FOLD",
+			Question: "Which rollout region?",
+			Choices:  []messages.Choice{{ID: "us", Label: "US Central"}},
+			Other:    &messages.OtherOption{Label: "Custom region", Description: "Any GCP region"},
+		}},
+	})
+	require.NoError(t, err)
+	rowID := promptRes.Decisions[0].RowID
+
+	srcMsgID := uuid.New().String()
+	require.NoError(t, cs.CreateMessage(ctx, &store.Message{
+		ID: srcMsgID, ProjectID: projectID, Sender: "user:alice", SenderID: aliceID,
+		Recipient: "group:topic", ThreadID: topic, Msg: "use canary-only-unique", CreatedAt: base.Add(-5 * time.Minute),
+	}))
+	interpRes, err := cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: agentID,
+		SourceMessageID:      srcMsgID,
+		AnsweredByUserID:     aliceID,
+		AnsweredByName:       "Alice",
+		Surface:              store.DecisionSurfaceNative,
+		Answers: []store.InterpretedAnswerPair{{
+			DecisionRowID: rowID,
+			Key:           "K-OTHER-FOLD",
+			ChoiceID:      messages.ChoiceIDOther,
+			OtherText:     "canary-only-unique",
+		}},
+		ResponseMessage: &store.Message{
+			ID: uuid.New().String(), ProjectID: projectID, Sender: "agent:fold-bot", Recipient: "user:alice", Msg: "recorded",
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, interpRes.Answers, 1)
+
+	directAns, _, err := cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+		DecisionRowID:    rowID,
+		ChoiceID:         messages.ChoiceIDOther,
+		OtherText:        "final-prod-unique",
+		AnsweredByUserID: aliceID,
+		AnsweredByName:   "Alice",
+		Provenance:       store.DecisionProvenanceDirect,
+		Outcome:          store.DecisionOutcomeOverride,
+		Surface:          store.DecisionSurfaceNative,
+		ResponseMessage: &store.Message{
+			ID: uuid.New().String(), ProjectID: projectID, Sender: "user:alice", Recipient: "agent:fold-bot", Msg: "override",
+		},
+	})
+	require.NoError(t, err)
+
+	// Search over other_text applies AFTER the Made fold: superseded interpreted other_text must not match.
+	supersededHits, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
+		Query: "canary-only-unique",
+	}, "", 50)
+	require.NoError(t, err)
+	assert.Empty(t, supersededHits, "superseded interpreted other_text must not match after Made fold")
+
+	// Direct final other_text matches the folded entry and preserves both PreviousOtherText and InterpretedAnswer.OtherText.
+	finalHits, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
+		Query: "final-prod-unique",
+	}, "", 50)
+	require.NoError(t, err)
+	require.Len(t, finalHits, 1)
+	assert.Equal(t, directAns.ID, finalHits[0].Answer.ID)
+	assert.Equal(t, "final-prod-unique", finalHits[0].Answer.OtherText)
+	assert.Equal(t, "canary-only-unique", finalHits[0].PreviousOtherText)
+	require.NotNil(t, finalHits[0].InterpretedAnswer)
+	assert.Equal(t, "canary-only-unique", finalHits[0].InterpretedAnswer.OtherText)
+}

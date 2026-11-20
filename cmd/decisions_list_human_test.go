@@ -940,9 +940,10 @@ func TestDecisionsListHuman_MadeJSONCarriesChoicesRecommendationAndFoldedFields(
 	   "decision": {"rowId": "r8", "promptMessageId": "m8", "promptAvailable": true, "key": "migrate", "ref": "nc-x/migrate", "version": 1,
 	                "status": "replaced", "question": "Backfill before the cutover?", "defaultChoiceId": "1",
 	                "choices": [{"id": "1", "label": "Yes", "description": "Offline backfill"}, {"id": "2", "label": "No", "description": "Live"}],
+	                "other": {"label": "Custom plan", "description": "Describe rollout", "placeholder": "e.g. phased"},
 	                "replacedBy": {"rowId": "r9", "version": 2}, "askerAgentId": "b", "askerAgentName": "nc-x"},
-	   "choiceId": "1", "label": "Yes", "matchedDefault": true, "answeredByUserId": "u-bob", "answeredByName": "Bob",
-	   "provenance": "direct", "outcome": "confirm", "surface": "native", "sourceMessageAvailable": false,
+	   "choiceId": "$other", "label": "Custom plan", "otherText": "phased 10% canary", "matchedDefault": false, "answeredByUserId": "u-bob", "answeredByName": "Bob",
+	   "provenance": "direct", "outcome": "override", "surface": "native", "sourceMessageAvailable": false,
 	   "interpretedAnswer": {"choiceId": "1", "label": "Yes", "provenance": "agent_interpreted", "outcome": "answer", "surface": "native", "responseMessageId": "rm-1", "at": "2026-11-02T09:58:00Z"},
 	   "at": "2026-11-02T10:00:00Z", "chatKey": "` + humanDecisionsTopic + `", "conversationLabel": "#release", "conversationAvailable": true},
 	  {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "answerId": "a-unconf",
@@ -960,7 +961,7 @@ func TestDecisionsListHuman_MadeJSONCarriesChoicesRecommendationAndFoldedFields(
 	// Text table stays unchanged (no extra columns or "(recommended)" marker).
 	textOut, err := runDecisionsTestCmd(t, "decisions", "list", "--made")
 	require.NoError(t, err)
-	assert.Contains(t, textOut, "WHEN            KEY      VER  QUESTION                      ANSWER  ANSWERED BY  PROVENANCE   AGENT  CONVERSATION\n")
+	assert.Contains(t, textOut, "WHEN            KEY      VER  QUESTION                      ANSWER                            ANSWERED BY  PROVENANCE   AGENT  CONVERSATION\n")
 	assert.NotContains(t, textOut, "recommended")
 	assert.NotContains(t, textOut, "Offline backfill")
 
@@ -976,6 +977,10 @@ func TestDecisionsListHuman_MadeJSONCarriesChoicesRecommendationAndFoldedFields(
 	assert.Equal(t, 2, projParsed.Entries[0].Decision.ReplacedBy.Version)
 	require.Len(t, projParsed.Entries[0].Decision.Choices, 2)
 	assert.Equal(t, "Offline backfill", projParsed.Entries[0].Decision.Choices[0].Description)
+	require.NotNil(t, projParsed.Entries[0].Decision.Other)
+	assert.Equal(t, "Custom plan", projParsed.Entries[0].Decision.Other.Label)
+	assert.Equal(t, "Describe rollout", projParsed.Entries[0].Decision.Other.Description)
+	assert.Equal(t, "phased 10% canary", projParsed.Entries[0].OtherText)
 	require.NotNil(t, projParsed.Entries[0].InterpretedAnswer)
 	assert.Equal(t, "1", projParsed.Entries[0].InterpretedAnswer.ChoiceID)
 	assert.False(t, projParsed.Entries[0].AwaitingConfirmation)
@@ -989,6 +994,9 @@ func TestDecisionsListHuman_MadeJSONCarriesChoicesRecommendationAndFoldedFields(
 	require.NoError(t, json.Unmarshal([]byte(profJSON), &profParsed))
 	require.Len(t, profParsed.Entries, 2)
 	assert.Equal(t, "1", profParsed.Entries[0].Decision.DefaultChoiceID)
+	require.NotNil(t, profParsed.Entries[0].Decision.Other)
+	assert.Equal(t, "Custom plan", profParsed.Entries[0].Decision.Other.Label)
+	assert.Equal(t, "phased 10% canary", profParsed.Entries[0].OtherText)
 	require.NotNil(t, profParsed.Entries[0].InterpretedAnswer)
 	assert.True(t, profParsed.Entries[1].AwaitingConfirmation)
 }

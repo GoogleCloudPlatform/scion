@@ -1531,3 +1531,67 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	wdOn := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", map[string]interface{}{})
 	assert.NotEqual(t, http.StatusNotFound, wdOn.Code, "POST /api/v1/agent/decisions/withdraw must be reachable when web.decisions is on")
 }
+
+func TestProjectDecisions_MadeOtherOptionAndText(t *testing.T) {
+	f := newDecisionsFixture(t)
+	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
+
+	// 1. Direct $other answer on an Other-enabled decision.
+	_, resOther := f.topicPrompt(t, `[{"id":"region-other","question":"Which region?","choices":[{"id":"us","label":"US Central"}],"allow_other":{"label":"Custom region","description":"Any GCP region","placeholder":"e.g. europe-west4"}}]`, false)
+	ansRR := f.answer(t, f.bob, resOther.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "europe-west4 canary",
+	})
+	require.Equal(t, http.StatusOK, ansRR.Code, ansRR.Body.String())
+
+	// 2. Interpreted fixed choice later overridden with $other (folded interpretedAnswer + otherText).
+	_, resOverride := f.topicPrompt(t, `[{"id":"region-ovr","question":"Backup region?","choices":[{"id":"us","label":"US Central"},{"id":"eu","label":"EU West"}],"default":"us","allow_other":true}]`, false)
+	recordTestInterpretedForUser(t, f.store, f.project.ID, f.topicID, f.agent, f.bob, resOverride.Decisions[0].RowID, "us")
+	ovrRR := f.answer(t, f.bob, resOverride.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "asia-east1",
+	})
+	require.Equal(t, http.StatusOK, ovrRR.Code, ovrRR.Body.String())
+
+	// 3. Plain non-Other decision (must omit other and otherText).
+	_, resPlain := f.topicPrompt(t, `[{"id":"plain-yn","question":"Proceed?","choices":["yes","no"]}]`, false)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, resPlain.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+
+	rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=made", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	made := decodeMadeDecisions(t, rr)
+	require.Len(t, made.Entries, 3)
+
+	byKey := map[string]ProjectDecisionLogEntryView{}
+	for _, e := range made.Entries {
+		byKey[e.Decision.Key] = e
+	}
+
+	direct := byKey["region-other"]
+	require.NotNil(t, direct.Decision.Other)
+	assert.Equal(t, messages.OtherOption{
+		Label:       "Custom region",
+		Description: "Any GCP region",
+		Placeholder: "e.g. europe-west4",
+	}, *direct.Decision.Other)
+	assert.Equal(t, messages.ChoiceIDOther, direct.ChoiceID)
+	assert.Equal(t, "Custom region", direct.Label)
+	assert.Equal(t, "europe-west4 canary", direct.OtherText)
+	assert.Nil(t, direct.InterpretedAnswer)
+
+	ovr := byKey["region-ovr"]
+	require.NotNil(t, ovr.Decision.Other)
+	assert.Equal(t, messages.DefaultOtherLabel, ovr.Decision.Other.Label)
+	assert.Equal(t, messages.ChoiceIDOther, ovr.ChoiceID)
+	assert.Equal(t, messages.DefaultOtherLabel, ovr.Label)
+	assert.Equal(t, "asia-east1", ovr.OtherText)
+	assert.Equal(t, store.DecisionOutcomeOverride, ovr.Outcome)
+	assert.Equal(t, "US Central", ovr.PreviousChoiceLabel)
+	require.NotNil(t, ovr.InterpretedAnswer)
+	assert.Equal(t, "us", ovr.InterpretedAnswer.ChoiceID)
+	assert.Empty(t, ovr.InterpretedAnswer.OtherText)
+
+	plain := byKey["plain-yn"]
+	assert.Nil(t, plain.Decision.Other)
+	assert.Empty(t, plain.OtherText)
+}

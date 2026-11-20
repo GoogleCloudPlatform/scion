@@ -276,6 +276,60 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 	}
 }
 
+func TestAgentDecisions_ListAndShowOtherOptionAndText(t *testing.T) {
+	f := newDecisionsFixture(t)
+
+	pOther := f.sendPromptToBob(t, `[{"id":"REG","question":"Deploy region?","choices":[{"id":"us","label":"US Central"}],"allow_other":{"label":"Custom region","description":"Specify any GCP region","placeholder":"e.g. europe-west4"}}]`, false)
+	require.Len(t, pOther.Decisions, 1)
+	ansRR := f.answer(t, f.bob, pOther.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "europe-west4 canary",
+	})
+	require.Equal(t, http.StatusOK, ansRR.Code, ansRR.Body.String())
+
+	pPlain := f.sendPromptToBob(t, `[{"id":"PLAIN","question":"Proceed?","choices":["yes","no"]}]`, false)
+	require.Len(t, pPlain.Decisions, 1)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, pPlain.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+
+	listRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=decided", nil)
+	require.Equal(t, http.StatusOK, listRR.Code, listRR.Body.String())
+	var listOut AgentDecisionListResponse
+	require.NoError(t, json.Unmarshal(listRR.Body.Bytes(), &listOut))
+	require.Len(t, listOut.Items, 2)
+	byKey := map[string]AgentDecisionListItem{}
+	for _, it := range listOut.Items {
+		byKey[it.Key] = it
+	}
+
+	reg := byKey["REG"]
+	require.NotNil(t, reg.Other)
+	assert.Equal(t, messages.OtherOption{
+		Label:       "Custom region",
+		Description: "Specify any GCP region",
+		Placeholder: "e.g. europe-west4",
+	}, *reg.Other)
+	require.NotNil(t, reg.Answer)
+	assert.Equal(t, messages.ChoiceIDOther, reg.Answer.ChoiceID)
+	assert.Equal(t, "Custom region", reg.Answer.Label)
+	assert.Equal(t, "europe-west4 canary", reg.Answer.OtherText)
+
+	plain := byKey["PLAIN"]
+	assert.Nil(t, plain.Other)
+	require.NotNil(t, plain.Answer)
+	assert.Empty(t, plain.Answer.OtherText)
+
+	showRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/REG", nil)
+	require.Equal(t, http.StatusOK, showRR.Code, showRR.Body.String())
+	var showOut AgentDecisionShowResponse
+	require.NoError(t, json.Unmarshal(showRR.Body.Bytes(), &showOut))
+	require.Len(t, showOut.Versions, 1)
+	require.NotNil(t, showOut.Versions[0].Other)
+	assert.Equal(t, *reg.Other, *showOut.Versions[0].Other)
+	require.Len(t, showOut.Versions[0].Answers, 1)
+	assert.Equal(t, messages.ChoiceIDOther, showOut.Versions[0].Answers[0].ChoiceID)
+	assert.Equal(t, "europe-west4 canary", showOut.Versions[0].Answers[0].OtherText)
+}
+
 func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) {
 	f := newDecisionsFixture(t)
 	ctx := context.Background()

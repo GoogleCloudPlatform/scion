@@ -114,19 +114,20 @@ type ProjectDecisionPromptView struct {
 // ProjectDecisionSummaryView is the decision metadata embedded in one entry of
 // the tab=made decision log.
 type ProjectDecisionSummaryView struct {
-	RowID           string            `json:"rowId"`
-	PromptMessageID string            `json:"promptMessageId"`
-	PromptAvailable bool              `json:"promptAvailable"`
-	Key             string            `json:"key"`
-	Ref             string            `json:"ref"`
-	Version         int               `json:"version"`
-	Status          string            `json:"status"`
-	Question        string            `json:"question"`
-	Choices         []messages.Choice `json:"choices"`
-	DefaultChoiceID string            `json:"defaultChoiceId,omitempty"`
-	ReplacedBy      *DecisionRef      `json:"replacedBy,omitempty"`
-	AskerAgentID    string            `json:"askerAgentId"`
-	AskerAgentName  string            `json:"askerAgentName"`
+	RowID           string                `json:"rowId"`
+	PromptMessageID string                `json:"promptMessageId"`
+	PromptAvailable bool                  `json:"promptAvailable"`
+	Key             string                `json:"key"`
+	Ref             string                `json:"ref"`
+	Version         int                   `json:"version"`
+	Status          string                `json:"status"`
+	Question        string                `json:"question"`
+	Choices         []messages.Choice     `json:"choices"`
+	DefaultChoiceID string                `json:"defaultChoiceId,omitempty"`
+	Other           *messages.OtherOption `json:"other,omitempty"`
+	ReplacedBy      *DecisionRef          `json:"replacedBy,omitempty"`
+	AskerAgentID    string                `json:"askerAgentId"`
+	AskerAgentName  string                `json:"askerAgentName"`
 }
 
 // ProjectDecisionLogEntryView is one Made-tab entry: a decision version's final answer, with any superseded interpreted answer folded in.
@@ -1465,6 +1466,7 @@ func (s *Server) buildProjectDecisionLogViews(
 				Question:        d.Question,
 				Choices:         choices,
 				DefaultChoiceID: d.DefaultChoiceID,
+				Other:           cloneOtherOption(d.Other),
 				ReplacedBy:      replacedBy,
 				AskerAgentID:    d.AskerAgentID,
 				AskerAgentName:  askerName,

@@ -65,13 +65,15 @@ func TestDecisionService_ListShowAndRecord(t *testing.T) {
 						{ID: "2", Label: "no", Description: "Hold release"},
 					},
 					DefaultChoiceID: "1",
+					Other:           &messages.OtherOption{Label: "Custom", Description: "Free text"},
 					ConversationID:  "conv-1",
 					PromptMessageID: "prompt-1",
 					CreatedAt:       now,
 					DecidedAt:       &now,
 					Answer: &DecisionAnswerView{
-						ChoiceID:            "2",
-						Label:               "no",
+						ChoiceID:            messages.ChoiceIDOther,
+						Label:               "Custom",
+						OtherText:           "europe-west4 canary",
 						AnsweredByName:      "Alice",
 						Provenance:          "direct",
 						Outcome:             "override",
@@ -110,11 +112,12 @@ func TestDecisionService_ListShowAndRecord(t *testing.T) {
 						{ID: "2", Label: "no"},
 					},
 					DefaultChoiceID: "1",
+					Other:           &messages.OtherOption{Label: "Custom", Description: "Free text"},
 					CreatedAt:       now,
 					DecidedAt:       &now,
 					Answers: []DecisionAnswerView{
 						{ChoiceID: "1", Label: "yes", Provenance: "agent_interpreted", Outcome: "answer", At: now},
-						{ChoiceID: "1", Label: "yes", Provenance: "direct", Outcome: "confirm", At: now.Add(time.Minute)},
+						{ChoiceID: messages.ChoiceIDOther, Label: "Custom", OtherText: "europe-west4 canary", Provenance: "direct", Outcome: "override", At: now.Add(time.Minute)},
 					},
 				},
 			},
@@ -168,7 +171,10 @@ func TestDecisionService_ListShowAndRecord(t *testing.T) {
 	if listResp.Items[0].DefaultChoiceID != "1" || len(listResp.Items[0].Choices) != 2 || listResp.Items[0].Choices[0].Description != "Deploy right away" {
 		t.Fatalf("unexpected List item choices/defaultChoiceId: %+v", listResp.Items[0])
 	}
-	if listResp.Items[0].Answer == nil || listResp.Items[0].Answer.PreviousChoiceLabel != "yes" {
+	if listResp.Items[0].Other == nil || listResp.Items[0].Other.Label != "Custom" || listResp.Items[0].Other.Description != "Free text" {
+		t.Fatalf("unexpected List item Other: %+v", listResp.Items[0].Other)
+	}
+	if listResp.Items[0].Answer == nil || listResp.Items[0].Answer.PreviousChoiceLabel != "yes" || listResp.Items[0].Answer.OtherText != "europe-west4 canary" {
 		t.Fatalf("unexpected List item Answer: %+v", listResp.Items[0].Answer)
 	}
 
@@ -178,6 +184,9 @@ func TestDecisionService_ListShowAndRecord(t *testing.T) {
 	}
 	if showResp.Key != "D234" || len(showResp.Versions) != 1 || len(showResp.Versions[0].Answers) != 2 {
 		t.Fatalf("unexpected Show response: %+v", showResp)
+	}
+	if showResp.Versions[0].Other == nil || showResp.Versions[0].Other.Label != "Custom" || showResp.Versions[0].Answers[1].OtherText != "europe-west4 canary" {
+		t.Fatalf("unexpected Show Other/OtherText: %+v", showResp.Versions[0])
 	}
 
 	recResp, err := c.Decisions().RecordInterpreted(ctx, &RecordInterpretedRequest{

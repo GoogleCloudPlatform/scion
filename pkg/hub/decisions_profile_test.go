@@ -1207,8 +1207,15 @@ func TestUserMeDecisions_MadeRecordedDecisionFieldsAndFold(t *testing.T) {
 	_, resUnconf := f.topicPrompt(t, `[{"id":"prof-unconf","question":"Enable cache?","choices":[{"id":"on","label":"On","description":"Warm L1"},{"id":"off","label":"Off"}]}]`, false)
 	recordTestInterpretedForUser(t, f.store, f.project.ID, f.topicID, f.agent, f.bob, resUnconf.Decisions[0].RowID, "on")
 
+	// 3. Other-enabled decision answered with $other (carries decision.other and otherText).
+	_, resOther := f.topicPrompt(t, `[{"id":"prof-other","question":"Target region?","choices":[{"id":"us","label":"US"}],"allow_other":{"label":"Custom region","description":"Specify region","placeholder":"europe-west4"}}]`, false)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, resOther.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "europe-west4 canary",
+	}).Code)
+
 	checkEntries := func(label string, entries []ProjectDecisionLogEntryView) {
-		require.Len(t, entries, 2, "%s must have 1 entry per decision version", label)
+		require.Len(t, entries, 3, "%s must have 1 entry per decision version", label)
 		byKey := map[string]ProjectDecisionLogEntryView{}
 		for _, e := range entries {
 			byKey[e.Decision.Key] = e
@@ -1216,6 +1223,8 @@ func TestUserMeDecisions_MadeRecordedDecisionFieldsAndFold(t *testing.T) {
 		conf := byKey["prof-conf"]
 		assert.Equal(t, "pg", conf.Decision.DefaultChoiceID, label)
 		assert.Equal(t, store.DecisionStatusReplaced, conf.Decision.Status, label)
+		assert.Nil(t, conf.Decision.Other, label)
+		assert.Empty(t, conf.OtherText, label)
 		require.NotNil(t, conf.Decision.ReplacedBy, label)
 		assert.Equal(t, DecisionRef{RowID: resConfV2.Decisions[0].RowID, Version: 2}, *conf.Decision.ReplacedBy, label)
 		require.Len(t, conf.Decision.Choices, 2, label)
@@ -1231,6 +1240,18 @@ func TestUserMeDecisions_MadeRecordedDecisionFieldsAndFold(t *testing.T) {
 		assert.Equal(t, "Warm L1", unconf.Decision.Choices[0].Description, label)
 		assert.True(t, unconf.AwaitingConfirmation, label)
 		assert.Nil(t, unconf.InterpretedAnswer, label)
+
+		oth := byKey["prof-other"]
+		assert.Equal(t, store.DecisionStatusDecided, oth.Decision.Status, label)
+		require.NotNil(t, oth.Decision.Other, label)
+		assert.Equal(t, messages.OtherOption{
+			Label:       "Custom region",
+			Description: "Specify region",
+			Placeholder: "europe-west4",
+		}, *oth.Decision.Other, label)
+		assert.Equal(t, messages.ChoiceIDOther, oth.ChoiceID, label)
+		assert.Equal(t, "Custom region", oth.Label, label)
+		assert.Equal(t, "europe-west4 canary", oth.OtherText, label)
 	}
 
 	recent := decodeProfileMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=recent", nil))
