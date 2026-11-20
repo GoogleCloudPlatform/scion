@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -188,86 +187,56 @@ func TestRefreshFromRevokedTokenFails(t *testing.T) {
 		"expected 401 or 403, got %d: %s", rec.Code, rec.Body.String())
 }
 
-// TestCompatibilityWindowAcceptsLegacyTokens verifies that tokens issued before
-// the credential table (with unknown JTIs) are accepted during the compatibility window.
-func TestCompatibilityWindowAcceptsLegacyTokens(t *testing.T) {
+// TestUnrecordedTokenRejected verifies that a signed agent token with no
+// recorded credential in the store is rejected with 401.
+func TestUnrecordedTokenRejected(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
 
-	agentID := tid("agent-legacy-test")
+	agentID := tid("agent-unrecorded-test")
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
-	// Create a token WITHOUT credential recording (simulating pre-table token)
-	legacyService, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    srv.agentTokenService.config.SigningKey,
-		TokenDuration: time.Hour,
-	})
-	require.NoError(t, err)
-	// Do NOT set credential recorder — simulates legacy behavior
-
-	legacyToken, err := legacyService.GenerateAgentToken(
-		agentID, project.ID,
-		ScopesForRole(AgentRoleFull),
-		nil,
-	)
+	// Sign a token without recording its credential in the store.
+	unrecordedToken, _, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   agentID,
+		ProjectID: project.ID,
+		Scopes:    ScopesForRole(AgentRoleFull),
+	}, "")
 	require.NoError(t, err)
 
-	// Use the legacy token — should be accepted (compatibility window)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agentID, nil)
-	req.Header.Set("X-Scion-Agent-Token", legacyToken)
+	req.Header.Set("X-Scion-Agent-Token", unrecordedToken)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	// Should NOT be 401 — legacy tokens are accepted
-	assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
-		"legacy token should be accepted during compatibility window, got: %s", rec.Body.String())
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"unrecorded token must be rejected, got: %s", rec.Body.String())
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
-// TestCompatibilityWindowRefreshMigratesLegacyToken verifies that refreshing
-// a legacy token creates a new recorded credential.
-func TestCompatibilityWindowRefreshMigratesLegacyToken(t *testing.T) {
+// TestUnrecordedTokenRefreshRejected verifies that refreshing an unrecorded
+// agent token is rejected with 401.
+func TestUnrecordedTokenRefreshRejected(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
 
-	agentID := tid("agent-legacy-migrate")
+	agentID := tid("agent-unrecorded-refresh")
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
-	// Create a legacy token (no credential record)
-	legacyService, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    srv.agentTokenService.config.SigningKey,
-		TokenDuration: time.Hour,
-	})
+	// Sign a token without recording its credential in the store.
+	unrecordedToken, _, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   agentID,
+		ProjectID: project.ID,
+		Scopes:    ScopesForRole(AgentRoleFull),
+	}, "")
 	require.NoError(t, err)
 
-	legacyToken, err := legacyService.GenerateAgentToken(
-		agentID, project.ID,
-		ScopesForRole(AgentRoleFull),
-		nil,
-	)
-	require.NoError(t, err)
-
-	// Refresh the legacy token
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/token/refresh", nil)
-	req.Header.Set("X-Scion-Agent-Token", legacyToken)
+	req.Header.Set("X-Scion-Agent-Token", unrecordedToken)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusOK, rec.Code,
-		"refresh should succeed for legacy token: %s", rec.Body.String())
-
-	// Extract the new token
-	var refreshResp struct {
-		Token string `json:"token"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &refreshResp))
-	require.NotEmpty(t, refreshResp.Token)
-
-	// Verify the new token has a credential record
-	newClaims, err := srv.agentTokenService.ValidateAgentToken(refreshResp.Token)
-	require.NoError(t, err)
-
-	newCred, err := s.GetAgentCredentialByJTIHash(context.Background(), hashJTI(newClaims.ID))
-	require.NoError(t, err)
-	assert.Equal(t, agentID, newCred.AgentID)
-	assert.Nil(t, newCred.RevokedAt)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"refresh must reject unrecorded token, got: %s", rec.Body.String())
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
 // TestTokenRefreshRevokesOldCredential verifies that after a token refresh,
@@ -439,13 +408,16 @@ func TestServiceTokenWithoutStore(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	token, err := service.GenerateAgentToken("agent-1", "project-1", nil, nil)
+	token, cred, err := service.SignAgentToken(AgentTokenGrant{AgentID: "agent-1", ProjectID: "project-1"}, "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
+	assert.NotNil(t, cred)
 
-	token2, err := service.GenerateAgentToken("agent-1", "project-1", nil, nil)
+	token2, cred2, err := service.SignAgentToken(AgentTokenGrant{AgentID: "agent-1", ProjectID: "project-1"}, "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, token2)
+	assert.NotNil(t, cred2)
+	assert.NotEqual(t, cred.TokenJTIHash, cred2.TokenJTIHash)
 }
 
 // TestCredentialStoreOperations verifies the basic CRUD operations on the

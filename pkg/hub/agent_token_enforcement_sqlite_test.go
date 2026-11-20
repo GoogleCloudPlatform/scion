@@ -45,7 +45,7 @@ func TestAgentRefresh_RequiresRecordedCredentialAndJTI(t *testing.T) {
 		createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
 
 		claims := newUnrecordedAgentToken(t, srv, agentID, project.ID)
-		req := buildAgentRefreshRequest(agentID, claims, "", false)
+		req := buildAgentRefreshRequest(agentID, claims, "")
 		rec := httptest.NewRecorder()
 		srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -79,7 +79,7 @@ func TestAgentRefresh_RequiresRecordedCredentialAndJTI(t *testing.T) {
 			Scopes:      ScopesForRole(AgentRoleFull),
 			ScopeSchema: CurrentAgentScopeSchema,
 		}
-		req := buildAgentRefreshRequest(agentID, claims, "", false)
+		req := buildAgentRefreshRequest(agentID, claims, "")
 		rec := httptest.NewRecorder()
 		srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -107,7 +107,7 @@ func TestAgentRefresh_RequiresRecordedCredentialAndJTI(t *testing.T) {
 
 		credFault.Arm()
 
-		req := buildAgentRefreshRequest(agentID, claims, cred.ID, false)
+		req := buildAgentRefreshRequest(agentID, claims, cred.ID)
 		rec := httptest.NewRecorder()
 		srv.handleAgentTokenRefresh(rec, req, agentID)
 

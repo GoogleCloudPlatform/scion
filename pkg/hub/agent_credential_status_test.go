@@ -206,7 +206,7 @@ func TestAgentRefresh_MarkerPresent_StoreErrorReturns503(t *testing.T) {
 	// result itself; a store error there must 503, not proceed.
 	credFault.Arm()
 
-	req := buildAgentRefreshRequest(agentID, claims, cred.ID, false)
+	req := buildAgentRefreshRequest(agentID, claims, cred.ID)
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -229,7 +229,7 @@ func TestAgentRefresh_MarkerPresent_RevokedDenied(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.RevokeAgentCredential(context.Background(), cred.ID, "test", "explicit"))
 
-	req := buildAgentRefreshRequest(agentID, claims, cred.ID, false)
+	req := buildAgentRefreshRequest(agentID, claims, cred.ID)
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -239,12 +239,12 @@ func TestAgentRefresh_MarkerPresent_RevokedDenied(t *testing.T) {
 
 // --- Refresh handler: credential-ID marker absent -------------------------
 //
-// UnifiedAuthMiddleware sets either the credential-ID marker or the legacy
-// marker on every agent-token request it authenticates; a store error returns
-// 503 before the handler is reached. The refresh handler does not rely on
-// that invariant alone: it re-derives the JTI from the validated token and
-// evaluates status directly whenever both markers are absent, so these tests
-// exercise the handler in isolation with no marker set.
+// UnifiedAuthMiddleware sets the credential-ID marker on every agent-token
+// request it authenticates; a store error returns 503 before the handler is
+// reached. The refresh handler does not rely on that invariant alone: it
+// re-derives the JTI from the validated token and evaluates status directly
+// whenever the marker is absent, so these tests exercise the handler in
+// isolation with no marker set.
 
 func TestAgentRefresh_MarkerAbsent_StoreErrorReturns503(t *testing.T) {
 	srv, s, _, project, credFault := setupCredentialTestServerWithCredFault(t, errors.New("boom"))
@@ -259,7 +259,7 @@ func TestAgentRefresh_MarkerAbsent_StoreErrorReturns503(t *testing.T) {
 
 	credFault.Arm()
 
-	req := buildAgentRefreshRequest(agentID, claims, "", false)
+	req := buildAgentRefreshRequest(agentID, claims, "")
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -283,7 +283,7 @@ func TestAgentRefresh_MarkerAbsent_RevokedDenied(t *testing.T) {
 	require.NoError(t, s.RevokeAgentCredential(context.Background(), cred.ID, "test", "explicit"))
 
 	// No markers set: the handler must detect the revocation itself.
-	req := buildAgentRefreshRequest(agentID, claims, "", false)
+	req := buildAgentRefreshRequest(agentID, claims, "")
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -307,7 +307,7 @@ func TestAgentRefresh_MarkerAbsent_ActiveRefreshesAndRevokesOldCredential(t *tes
 
 	// No markers set: the handler evaluates the active credential from the
 	// token JTI and revokes it once the replacement token is minted.
-	req := buildAgentRefreshRequest(agentID, claims, "", false)
+	req := buildAgentRefreshRequest(agentID, claims, "")
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -326,7 +326,7 @@ func TestAgentRefresh_MarkerAbsent_UnrecordedRejected(t *testing.T) {
 
 	claims := newUnrecordedAgentToken(t, srv, agentID, project.ID)
 
-	req := buildAgentRefreshRequest(agentID, claims, "", false)
+	req := buildAgentRefreshRequest(agentID, claims, "")
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -349,10 +349,10 @@ func newUnrecordedAgentToken(t *testing.T, srv *Server, agentID, projectID strin
 	return claims
 }
 
-// A suspended agent's token with an active credential is not refreshed,
-// as for a legacy token: whether or not the credential marker is set, the
-// refresh answers 403 and leaves the presented credential as it was. The
-// control rows run the same fixture unsuspended, which refreshes with 200.
+// A suspended agent's token with an active credential is not refreshed:
+// whether or not the credential marker is set, the refresh answers 403 and
+// leaves the presented credential as it was. The control rows run the same
+// fixture unsuspended, which refreshes with 200.
 func TestAgentRefresh_SuspendedAgentDenied(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -388,7 +388,7 @@ func TestAgentRefresh_SuspendedAgentDenied(t *testing.T) {
 			if tc.marker {
 				credentialID = cred.ID
 			}
-			req := buildAgentRefreshRequest(agentID, claims, credentialID, false)
+			req := buildAgentRefreshRequest(agentID, claims, credentialID)
 			rec := httptest.NewRecorder()
 			srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -441,7 +441,7 @@ func TestAgentRefresh_NilAgentLookupRefused(t *testing.T) {
 	require.NoError(t, err)
 
 	fault.Arm()
-	req := buildAgentRefreshRequest(agentID, claims, cred.ID, false)
+	req := buildAgentRefreshRequest(agentID, claims, cred.ID)
 	rec := httptest.NewRecorder()
 	require.NotPanics(t, func() { srv.handleAgentTokenRefresh(rec, req, agentID) })
 
@@ -465,7 +465,7 @@ func TestAgentRefresh_DeletedAgentDenied(t *testing.T) {
 	agent.DeletedAt = time.Now()
 	require.NoError(t, s.UpdateAgent(context.Background(), agent))
 
-	req := buildAgentRefreshRequest(agentID, claims, "", false)
+	req := buildAgentRefreshRequest(agentID, claims, "")
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -528,7 +528,7 @@ func TestAgentRefresh_MarkerPresent_NilCredentialNilErrorReturns503(t *testing.T
 
 	credFault.Arm()
 
-	req := buildAgentRefreshRequest(agentID, claims, cred.ID, false)
+	req := buildAgentRefreshRequest(agentID, claims, cred.ID)
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
@@ -556,7 +556,7 @@ func TestAgentRefresh_MarkerAbsent_NilCredentialNilErrorReturns503(t *testing.T)
 
 	credFault.Arm()
 
-	req := buildAgentRefreshRequest(agentID, claims, "", false)
+	req := buildAgentRefreshRequest(agentID, claims, "")
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 

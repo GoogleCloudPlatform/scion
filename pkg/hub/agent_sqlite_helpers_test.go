@@ -699,7 +699,7 @@ type revokeFailingCredentialStore struct {
 // context carries the given agent identity and optional credential ID marker,
 // without routing it through UnifiedAuthMiddleware, so the refresh handler's
 // own status evaluation can be exercised directly and deterministically.
-func buildAgentRefreshRequest(agentID string, claims *AgentTokenClaims, credentialID string, _ bool) *http.Request {
+func buildAgentRefreshRequest(agentID string, claims *AgentTokenClaims, credentialID string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/token/refresh", nil)
 	ctx := req.Context()
 	identity := &agentIdentityWrapper{claims}
@@ -3473,7 +3473,7 @@ func (f *mintFixture) refresh(t *testing.T, agent *store.Agent, presentedAncestr
 		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, presentedAncestry)
 	claims := f.tokenClaims(t, presented)
 	rec := httptest.NewRecorder()
-	f.srv.handleAgentTokenRefresh(rec, buildAgentRefreshRequest(agent.ID, claims, "", false), agent.ID)
+	f.srv.handleAgentTokenRefresh(rec, buildAgentRefreshRequest(agent.ID, claims, ""), agent.ID)
 	return rec
 }
 

@@ -403,17 +403,6 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
 		assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 	})
-	t.Run("legacyToken", func(t *testing.T) {
-		legacyService, err := NewAgentTokenService(AgentTokenConfig{
-			SigningKey:    f.srv.agentTokenService.config.SigningKey,
-			TokenDuration: time.Hour,
-		})
-		require.NoError(t, err)
-		legacy, err := legacyService.GenerateAgentToken(f.agentA.ID, f.projectID, ScopesForRole(AgentRoleFull), nil)
-		require.NoError(t, err)
-		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.agentA.ID, nil, legacy)
-		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
-	})
 	// No new external token for a held agent.
 	t.Run("noGitHubTokenAfterHold", func(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agentA.ID+"/refresh-token", nil, tokA)

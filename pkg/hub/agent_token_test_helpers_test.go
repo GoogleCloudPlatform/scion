@@ -38,12 +38,6 @@ func (s *Server) issueAgentTokenForTest(ctx context.Context, agent *store.Agent)
 // generateRecordedAgentToken signs an agent JWT with custom scopes and
 // ancestry, records its credential in s.store, and fails t on any error.
 //
-// Mechanical migration from the unrecorded 4-arg AgentTokenService.GenerateAgentToken:
-//
-//	before: tok, err := srv.GetAgentTokenService().GenerateAgentToken(agentID, projectID, scopes, ancestry)
-//	        require.NoError(t, err)
-//	after:  tok := srv.generateRecordedAgentToken(t, agentID, projectID, scopes, ancestry)
-//
 // For tests without a *Server (e.g. AuthConfig middleware unit tests) or tests
 // using a custom *AgentTokenService (e.g. an expired-token service), use the
 // package-level generateRecordedAgentToken with newMemAgentCredentialStore() or

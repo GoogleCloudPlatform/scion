@@ -19,16 +19,9 @@ import (
 	"fmt"
 )
 
-// The token helpers below sign tokens without a run. They exist for tests
+// The token helper below signs tokens without a run. It exists for tests
 // only; production mint sites authorize, sign and record mandatorily
 // (agent_token_mint.go).
-
-// GenerateAgentToken generates a JWT for an agent with the specified scopes.
-// Test-only: it records no credential.
-func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes []AgentTokenScope, ancestry []string) (string, error) {
-	token, _, err := s.SignAgentToken(AgentTokenGrant{AgentID: agentID, ProjectID: projectID, Scopes: scopes, Ancestry: ancestry}, "")
-	return token, err
-}
 
 // GenerateAgentToken generates a JWT for an agent.
 // This is a convenience method that delegates to the token service.

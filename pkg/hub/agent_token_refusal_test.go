@@ -198,7 +198,7 @@ func revokedRefreshRequest(t *testing.T, srv *Server, s store.Store, project *st
 	if marker {
 		credID = cred.ID
 	}
-	return buildAgentRefreshRequest(agent.ID, claims, credID, false), agent.ID
+	return buildAgentRefreshRequest(agent.ID, claims, credID), agent.ID
 }
 
 // TestAgentTokenRefusalCauseIsLogged: each refusal cause is logged once

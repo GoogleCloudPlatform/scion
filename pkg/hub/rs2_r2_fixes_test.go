@@ -796,12 +796,11 @@ func TestRS2_ProductionAgentJWT(t *testing.T) {
 
 	// Generate a real agent token through the production token service
 	// Agent A is scoped to project A with ScopeProjectRead (needed for list).
-	tokenA, err := srv.agentTokenService.GenerateAgentToken(
-		agentA.ID, projA.ID,
+	tokenA := srv.generateRecordedAgentToken(
+		t, agentA.ID, projA.ID,
 		[]AgentTokenScope{ScopeProjectRead, ScopeAgentStatusUpdate},
 		nil, // no ancestry
 	)
-	require.NoError(t, err)
 
 	t.Run("no_scope_project_caveated", func(t *testing.T) {
 		// Agent token without scope filter → sees only its own project
@@ -868,12 +867,11 @@ func TestRS2_ProductionAgentJWT(t *testing.T) {
 			AddedBy:    "test",
 		}))
 
-		tokenA2, err := srv.agentTokenService.GenerateAgentToken(
-			agentA2.ID, projA.ID,
+		tokenA2 := srv.generateRecordedAgentToken(
+			t, agentA2.ID, projA.ID,
 			[]AgentTokenScope{ScopeProjectRead, ScopeAgentStatusUpdate},
 			nil,
 		)
-		require.NoError(t, err)
 
 		// Mint cursor with agent A's token
 		rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/agents?limit=1", nil, tokenA)
