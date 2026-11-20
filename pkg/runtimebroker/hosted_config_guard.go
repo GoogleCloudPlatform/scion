@@ -27,9 +27,9 @@ import (
 // inline config) on a hosted Runtime Broker. A create's config env is not
 // checked: its values are used literally (never expanded or passed through
 // from the broker's environment), and the broker drops or refuses the
-// reserved names it must not take from it where it reads them. runtimeName returns the
-// runtime the agent will run in; it is called only when there are volumes to
-// check. A workstation broker checks nothing.
+// reserved names it must not take from it where it reads them. runtimeName
+// returns the runtime the agent will run in; it is called only when there
+// are volumes to check. A workstation broker checks nothing.
 func (s *Server) checkHostedRequestConfig(runtimeName func() string, cfgs ...*api.ScionConfig) error {
 	if s.config.WorkstationMode || !anyMemberContent(cfgs) {
 		return nil

@@ -172,7 +172,7 @@ func TestCheckMemberConfig_Env(t *testing.T) {
 		{name: "auto-expose interval", env: map[string]string{"SCION_AUTO_EXPOSE_INTERVAL": "5s"}},
 		{name: "cli log level", env: map[string]string{"SCION_LOG_LEVEL": "debug"}},
 		{name: "cli telemetry", env: map[string]string{"SCION_TELEMETRY_ENABLED": "false"}},
-		{name: "codex liveness depth", env: map[string]string{"SCION_LIVENESS_HARNESS_ROOT_DEPTH": "2"}},
+		{name: "liveness depth is harness-config only", env: map[string]string{"SCION_LIVENESS_HARNESS_ROOT_DEPTH": "2"}, wantEntry: "SCION_LIVENESS_HARNESS_ROOT_DEPTH", wantReason: "names reserved"},
 		{name: "exempt name still needs a literal value", env: map[string]string{"SCION_LOG_LEVEL": "${LVL}"}, wantEntry: "SCION_LOG_LEVEL", wantReason: "host environment references"},
 		{name: "exempt name may be empty", env: map[string]string{"SCION_AUTO_EXPOSE_PORTS_LIST": ""}},
 		{name: "exempt names may be empty", env: map[string]string{"SCION_TELEMETRY_ENABLED": "", "SCION_LOG_LEVEL": ""}},
@@ -292,11 +292,52 @@ func TestCheckMemberConfig_RuleOrder(t *testing.T) {
 func TestIsReservedEnvName(t *testing.T) {
 	for name, want := range map[string]bool{
 		"SCION_HUB_ENDPOINT": true, "SCION_": true, "GCE_METADATA_IP": true,
-		"SCION_AUTO_EXPOSE_PORTS": false, "SCION_LOG_LEVEL": false, "SCION_TELEMETRY_ENABLED": false,
+		"SCION_AUTO_EXPOSE_PORTS": true, "SCION_LOG_LEVEL": true, "SCION_TELEMETRY_ENABLED": true,
 		"SCION_LOG_LEVEL_X": true, "PATH": false, "MY_SCION_X": false,
 	} {
 		if got := IsReservedEnvName(name); got != want {
 			t.Errorf("IsReservedEnvName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// Reserved names members may set depend on the source (api.MemberSettableEnv):
+// agent config uses the create scope, a harness config its own scope, and a
+// template none.
+func TestCheckMemberEnv_ScopeByOrigin(t *testing.T) {
+	agentCfg := Origin{Kind: OriginAgentConfig}
+	hc := Origin{Kind: OriginHarnessConfig, Name: "codex"}
+	tpl := Origin{Kind: OriginTemplate, Name: "t"}
+	for _, tc := range []struct {
+		name    string
+		origin  Origin
+		refused bool
+	}{
+		{"SCION_AUTO_EXPOSE_PORTS", agentCfg, false},
+		{"SCION_AUTO_EXPOSE_PORTS", hc, false},
+		{"SCION_LOG_LEVEL", agentCfg, false},
+		{"SCION_TELEMETRY_ENABLED", agentCfg, false},
+		{"SCION_LOG_LEVEL", hc, true},
+		{"SCION_TELEMETRY_ENABLED", hc, true},
+		{"SCION_LIVENESS_HARNESS_ROOT_DEPTH", hc, false},
+		{"SCION_LIVENESS_HARNESS_ROOT_DEPTH", agentCfg, true},
+		{"SCION_AUTO_EXPOSE_PORTS", tpl, true},
+		{"SCION_HUB_ENDPOINT", hc, true},
+	} {
+		err := CheckMemberEnv(map[string]string{tc.name: "1"}, tc.origin)
+		if refused := err != nil; refused != tc.refused {
+			t.Errorf("%s from %s: refused = %v (%v), want %v", tc.name, tc.origin, refused, err, tc.refused)
+		}
+	}
+	// Every listed name passes from each source its scope lists.
+	for _, e := range api.MemberSettableEnv() {
+		for origin, scope := range map[Origin]api.MemberEnvScope{agentCfg: api.MemberEnvCreate, hc: api.MemberEnvHarnessConfig} {
+			if e.Scope&scope == 0 {
+				continue
+			}
+			if err := CheckMemberEnv(map[string]string{e.Name: "1"}, origin); err != nil {
+				t.Errorf("%s from %s refused: %v", e.Name, origin, err)
+			}
 		}
 	}
 }

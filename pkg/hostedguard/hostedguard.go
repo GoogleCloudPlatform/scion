@@ -141,31 +141,24 @@ func volumeRefusal(v api.VolumeMount, o Origin, runtimeKind string) string {
 // config edits (secret.IsReservedEnvTarget).
 var reservedEnvPrefixes = []string{"SCION_", "GCE_METADATA_"}
 
-// memberSettableReservedEnv are the reserved names (exact, never a prefix)
-// member config may still set: the user-facing auto-expose keys, which a
-// config edit may also change (the Hub's patchableReservedEnvKeys), and the
-// agent log level and telemetry switches the CLI writes into the create
-// request's config.env (startAgentViaHub in cmd/common.go:
-// --agent-log-level, --enable-telemetry, --disable-telemetry), and the
-// liveness sampler depth a shipped harness config sets
-// (harnesses/codex/config.yaml), so a project copy of it still works.
-var memberSettableReservedEnv = map[string]bool{
-	"SCION_AUTO_EXPOSE_PORTS":      true,
-	"SCION_AUTO_EXPOSE_MODE":       true,
-	"SCION_AUTO_EXPOSE_PORTS_LIST": true,
-	"SCION_AUTO_EXPOSE_INTERVAL":   true,
-	"SCION_LOG_LEVEL":              true,
-	"SCION_TELEMETRY_ENABLED":      true,
-	// Tunes only the agent's own liveness sampling.
-	"SCION_LIVENESS_HARNESS_ROOT_DEPTH": true,
+// memberEnvScope is the api.MemberEnvScope of content from o. Agent config
+// uses the create scope here (create requests and stored inline config); an
+// agent config edit is held to the narrower edit scope by the Hub's own PATCH
+// check, which runs first. Other origins get no exemption.
+func memberEnvScope(o Origin) api.MemberEnvScope {
+	switch o.Kind {
+	case OriginAgentConfig:
+		return api.MemberEnvCreate
+	case OriginHarnessConfig:
+		return api.MemberEnvHarnessConfig
+	}
+	return 0
 }
 
-// IsReservedEnvName reports whether member config may not set the env name
-// on a hosted server because it is reserved for scion itself.
+// IsReservedEnvName reports whether the env name is reserved for scion
+// itself (SCION_*, GCE_METADATA_*). Members may set a reserved name only from
+// the sources api.MemberSettableEnv lists for it.
 func IsReservedEnvName(name string) bool {
-	if memberSettableReservedEnv[name] {
-		return false
-	}
 	for _, p := range reservedEnvPrefixes {
 		if strings.HasPrefix(name, p) {
 			return true
@@ -180,11 +173,12 @@ const envReferenceReason = "host environment references and empty passthrough va
 // or value the Runtime Broker would expand against its own environment
 // ($NAME, ${...}), an empty value (which takes the variable of the same
 // name from the broker's environment), and a name reserved for scion's own
-// variables are refused. A reserved name member config may set may also be
-// empty (the configure page clears an auto-expose key that way): it can
-// only take the broker's own setting of the same scion variable. It returns
-// nil or a *RefusalError for the first refused name, in name order. The message names the env name, never the
-// value.
+// variables are refused, unless api.MemberSettableEnv lists the reserved
+// name for o's source. Such a name may also be empty (the configure page
+// clears an auto-expose key that way): it can only take the broker's own
+// setting of the same scion variable. It returns nil or a *RefusalError for
+// the first refused name, in name order. The message names the env name,
+// never the value.
 func CheckMemberEnv(env map[string]string, o Origin) error {
 	if len(env) == 0 {
 		return nil
@@ -194,13 +188,15 @@ func CheckMemberEnv(env map[string]string, o Origin) error {
 		names = append(names, k)
 	}
 	sort.Strings(names)
+	scope := memberEnvScope(o)
 	for _, k := range names {
 		v := env[k]
+		settable := IsReservedEnvName(k) && api.IsMemberSettableEnv(k, scope)
 		var reason string
 		switch {
-		case expandsHostEnv(k) || expandsHostEnv(v) || (v == "" && !memberSettableReservedEnv[k]):
+		case expandsHostEnv(k) || expandsHostEnv(v) || (v == "" && !settable):
 			reason = fmt.Sprintf(envReferenceReason, o)
-		case IsReservedEnvName(k):
+		case IsReservedEnvName(k) && !settable:
 			reason = fmt.Sprintf("names reserved for scion's own environment variables in %s are not allowed on a hosted server", o)
 		default:
 			continue

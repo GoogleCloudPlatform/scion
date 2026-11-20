@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -300,4 +301,65 @@ func TestDispatch_HostedHarnessConfigEnvPrecheck(t *testing.T) {
 			assert.False(t, m.startCalled, "no broker call")
 		})
 	}
+}
+
+// TestMemberSettableEnv_Parity pins the single member-safe list
+// (api.MemberSettableEnv) against the Hub's sets and the reserved prefixes:
+// hostedguard cannot import pkg/secret, so the prefix sets are compared
+// here, and the PATCH and auto-expose sets must equal the list's edit scope.
+func TestMemberSettableEnv_Parity(t *testing.T) {
+	for _, p := range []string{"SCION_", "GCE_METADATA_", "OTHER_", "SCION", "scion_"} {
+		name := p + "X"
+		assert.Equal(t, secret.IsReservedEnvTarget(name), hostedguard.IsReservedEnvName(name), "reserved prefix parity for %q", name)
+	}
+	edit := api.MemberSettableEnvNames(api.MemberEnvEdit)
+	assert.Equal(t, edit, patchableReservedEnvKeys, "PATCH exemptions are the list's edit scope")
+	assert.Equal(t, edit, autoExposeEnvKeys, "the configure page's auto-expose keys are the list's edit scope")
+	for _, e := range api.MemberSettableEnv() {
+		assert.True(t, secret.IsReservedEnvTarget(e.Name), "%s is a reserved name", e.Name)
+		assert.Equal(t, e.Scope&api.MemberEnvEdit != 0, !patchReservedEnvKey(e.Name), "PATCH scope of %s", e.Name)
+	}
+}
+
+// TestValidateAgentConfigPatch_HostedMemberEnvScope: on a hosted hub a
+// config edit may add or change only the edit-scope names (auto-expose);
+// SCION_LOG_LEVEL and SCION_TELEMETRY_ENABLED are create-only and refused
+// when an edit adds or changes them.
+func TestValidateAgentConfigPatch_HostedMemberEnvScope(t *testing.T) {
+	ctx := context.Background()
+	srv, _ := testServer(t)
+	require.False(t, srv.workstation)
+	agent := &store.Agent{ID: tid("agent-patch-scope"), ProjectID: tid("project-patch-scope"),
+		AppliedConfig: &store.AgentAppliedConfig{Env: map[string]string{"SCION_LOG_LEVEL": "info"}}}
+	for name, tc := range map[string]struct {
+		env     map[string]string
+		allowed bool
+	}{
+		"auto-expose added":               {map[string]string{"SCION_LOG_LEVEL": "info", "SCION_AUTO_EXPOSE_PORTS": "true"}, true},
+		"stored create-only value echoed": {map[string]string{"SCION_LOG_LEVEL": "info"}, true},
+		"create-only value changed":       {map[string]string{"SCION_LOG_LEVEL": "debug"}, false},
+		"create-only name added":          {map[string]string{"SCION_LOG_LEVEL": "info", "SCION_TELEMETRY_ENABLED": "false"}, false},
+		"harness-config-only name added":  {map[string]string{"SCION_LOG_LEVEL": "info", "SCION_LIVENESS_HARNESS_ROOT_DEPTH": "2"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			ok := srv.validateAgentConfigPatch(ctx, rec, agent, &api.ScionConfig{Env: tc.env}, false)
+			assert.Equal(t, tc.allowed, ok, rec.Body.String())
+		})
+	}
+}
+
+// TestCreateAgent_HostedMemberEnvScope: at create, agent config may set the
+// create-scope names but not a harness-config-only one.
+func TestCreateAgent_HostedMemberEnvScope(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, _, project := setupCreateAgentServer(t, disp)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "hosted-liveness", ProjectID: project.ID,
+		Config: &api.ScionConfig{Env: map[string]string{"SCION_LIVENESS_HARNESS_ROOT_DEPTH": "2"}},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	code, msg := decodeHostedRefusal(t, rec)
+	assert.Equal(t, hostedguard.ErrorCode, code)
+	assert.True(t, strings.HasPrefix(msg, `env "SCION_LIVENESS_HARNESS_ROOT_DEPTH": names reserved`), msg)
 }

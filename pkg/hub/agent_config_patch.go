@@ -152,17 +152,13 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 }
 
 // patchableReservedEnvKeys are the reserved env keys (by exact name, never
-// a prefix) that config.env may add, change or remove: the user-facing
-// auto-expose keys, which the configure page sends and sciontool reads
-// (the same set as autoExposeEnvKeys). Their values are not validated
-// here: sciontool parses them leniently. A name is added only with a test
+// a prefix) that config.env may add, change or remove: those
+// api.MemberSettableEnv lists for agent config edits, the user-facing
+// auto-expose keys, which the configure page sends and sciontool reads (the
+// same set as autoExposeEnvKeys). Their values are not validated here:
+// sciontool parses them leniently. A name is added there only with a test
 // that patches it.
-var patchableReservedEnvKeys = map[string]bool{
-	"SCION_AUTO_EXPOSE_PORTS":      true,
-	"SCION_AUTO_EXPOSE_MODE":       true,
-	"SCION_AUTO_EXPOSE_PORTS_LIST": true,
-	"SCION_AUTO_EXPOSE_INTERVAL":   true,
-}
+var patchableReservedEnvKeys = api.MemberSettableEnvNames(api.MemberEnvEdit)
 
 // patchReservedEnvKey reports whether k is a reserved key a config patch
 // must not add, change or remove.
