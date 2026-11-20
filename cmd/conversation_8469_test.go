@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -66,18 +65,23 @@ func TestResolveConversationRef_InvalidAndShortRefsHintConvPrefix(t *testing.T) 
 	assert.Contains(t, otherErr.Error(), "conv:<uuid>")
 }
 
-// TestParseRecipientArg_AcceptsBareUUIDAndRejectsShortConvRef covers
-// ptone/scion#8469 items 1 & 3 on `scion message`: a bare 36-char UUID routes
-// as `conv:<uuid>`, while a truncated `conv:69e36cbf` fails immediately at
-// send time with a 36-character UUID message.
-func TestParseRecipientArg_AcceptsBareUUIDAndRejectsShortConvRef(t *testing.T) {
-	const convID = "69e36cbf-69ac-4782-8ec1-e0604abeb687"
-	parsed, err := parseRecipientArg(convID)
+// TestParseRecipientArg_BareUUIDTargetsAgentAndRejectsShortConvRef verifies
+// that a bare 36-char UUID in `scion message <agent-uuid>` still targets an
+// agent (not a conversation), while `conv:<uuid>` routes as a conversation
+// reference and truncated `conv:69e36cbf` fails immediately at send time with
+// a 36-character UUID message (ptone/scion#8469).
+func TestParseRecipientArg_BareUUIDTargetsAgentAndRejectsShortConvRef(t *testing.T) {
+	const id = "69e36cbf-69ac-4782-8ec1-e0604abeb687"
+	parsedAgent, err := parseRecipientArg(id)
 	require.NoError(t, err)
-	require.NotNil(t, parsed.convRef, "bare 36-char UUID should parse as a conversation reference")
-	assert.Equal(t, messaging.RefConversation, parsed.convRef.Kind)
-	assert.Equal(t, convID, parsed.convRef.Value)
-	assert.Equal(t, "conv:"+convID, parsed.convRef.Raw)
+	assert.Nil(t, parsedAgent.convRef, "bare 36-char UUID in scion message must not route as a conversation ref")
+	assert.Equal(t, id, parsedAgent.agentName, "bare 36-char UUID in scion message must target the agent by ID")
+
+	parsedConv, err := parseRecipientArg("conv:" + id)
+	require.NoError(t, err)
+	require.NotNil(t, parsedConv.convRef)
+	assert.Equal(t, messaging.RefConversation, parsedConv.convRef.Kind)
+	assert.Equal(t, id, parsedConv.convRef.Value)
 
 	_, shortErr := parseRecipientArg("conv:69e36cbf")
 	require.Error(t, shortErr)
@@ -85,30 +89,38 @@ func TestParseRecipientArg_AcceptsBareUUIDAndRejectsShortConvRef(t *testing.T) {
 }
 
 // TestSendMessage_WarnsOnTruncatedConvRefInBody covers ptone/scion#8469 item 3:
-// when an agent sends a message or brief containing a truncated `conv:...`
-// reference in the body, `scion message` warns at send time so the sender can
-// fix it before the recipient fails to resolve it.
+// when a message or brief contains a truncated `conv:...` reference in the
+// body, `scion message` warns at send time across all send paths (including
+// direct agent and group[] sends), without false positives on valid full UUIDs
+// wrapped in Markdown/punctuation or prose placeholders.
 func TestSendMessage_WarnsOnTruncatedConvRefInBody(t *testing.T) {
 	orig := saveMessageTestState()
 	origFormat := outputFormat
+	origProjectPath := projectPath
 	t.Cleanup(func() {
 		orig.restore()
 		outputFormat = origFormat
+		projectPath = origProjectPath
 	})
 	outputFormat = ""
-	t.Setenv("SCION_AGENT_NAME", "")
 
 	projectID := "proj-short-conv-warn"
 	server, _ := newMessageMockHubServer(t, projectID, nil)
 	defer server.Close()
-	client, err := hubclient.New(server.URL)
-	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+	isolateHubEnvForTest(t, server.URL, projectID)
+	t.Setenv("SCION_AGENT_NAME", "sender")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Chdir(tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, projectID)
+
+	cmd := &cobra.Command{}
 
 	t.Run("warns_on_short_conv_id", func(t *testing.T) {
 		var sendErr error
 		_, stderr := captureStdoutStderr(t, func() {
-			sendErr = sendMessageViaHub(hubCtx, "worker", "Reply in conv:69e36cbf when done.", false, false, false)
+			sendErr = messageCmd.RunE(cmd, []string{"worker", "Reply in conv:69e36cbf when done."})
 		})
 		require.NoError(t, sendErr)
 		assert.Contains(t, stderr, "Warning:")
@@ -119,19 +131,35 @@ func TestSendMessage_WarnsOnTruncatedConvRefInBody(t *testing.T) {
 	t.Run("warns_on_ellipsis_truncated_conv_id", func(t *testing.T) {
 		var sendErr error
 		_, stderr := captureStdoutStderr(t, func() {
-			sendErr = sendMessageViaHub(hubCtx, "worker", "Use `conv:69e36cbf...` for updates", false, false, false)
+			sendErr = messageCmd.RunE(cmd, []string{"worker", "Use `conv:69e36cbf...` for updates"})
 		})
 		require.NoError(t, sendErr)
 		assert.Contains(t, stderr, "Warning:")
-		assert.Contains(t, stderr, "conv:69e36cbf...")
+		assert.Contains(t, stderr, "conv:69e36cbf")
 	})
 
-	t.Run("no_warning_on_full_uuid_or_placeholder", func(t *testing.T) {
+	t.Run("warns_on_group_send_path", func(t *testing.T) {
 		var sendErr error
 		_, stderr := captureStdoutStderr(t, func() {
-			sendErr = sendMessageViaHub(hubCtx, "worker",
-				"Use conv:69e36cbf-69ac-4782-8ec1-e0604abeb687 (syntax: conv:<uuid> or conv:<id>).",
-				false, false, false)
+			sendErr = messageCmd.RunE(cmd, []string{"group[agent:a,agent:b]", "Check conv:69e36cbf please."})
+		})
+		require.NoError(t, sendErr)
+		assert.Contains(t, stderr, "Warning:")
+		assert.Contains(t, stderr, "conv:69e36cbf")
+	})
+
+	t.Run("no_warning_on_valid_refs_and_prose", func(t *testing.T) {
+		const fullUUID = "69e36cbf-69ac-4782-8ec1-e0604abeb687"
+		body := strings.Join([]string{
+			"Use **conv:" + fullUUID + "**",
+			"or conv:" + fullUUID + ":",
+			"or conv:" + fullUUID + "/x",
+			"or conv:" + fullUUID + "...",
+			"syntax: conv:<uuid>, conv:ID, conv:uuid, conv:default",
+		}, " ")
+		var sendErr error
+		_, stderr := captureStdoutStderr(t, func() {
+			sendErr = messageCmd.RunE(cmd, []string{"worker", body})
 		})
 		require.NoError(t, sendErr)
 		assert.NotContains(t, stderr, "truncated or invalid conversation reference")

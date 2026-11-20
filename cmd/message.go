@@ -398,6 +398,8 @@ Examples:
 			return err
 		}
 
+		warnInvalidBodyConvRefs(message)
+
 		// Handle scheduled messages
 		if msgIn != "" || msgAt != "" {
 			return scheduleMessageViaHub(hubCtx, scheduledAgent, message, msgInterrupt, msgPlain)
@@ -603,7 +605,6 @@ func agentMessageSendError(agentName string, err error) error {
 func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, notify bool, wake bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
-		warnInvalidBodyConvRefs(message)
 	}
 
 	// Resolve sender identity for structured messages
@@ -689,7 +690,6 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, message string, interrupt, wake bool, attachments []string) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
-		warnInvalidBodyConvRefs(message)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -768,7 +768,6 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, message string, interrupt bool, wake bool, attachments []string) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
-		warnInvalidBodyConvRefs(message)
 	}
 
 	projectID, err := GetProjectID(hubCtx)
@@ -1000,7 +999,6 @@ func printBroadcastAccepted(resp *hubclient.BroadcastResponse) {
 func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message string, urgent bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
-		warnInvalidBodyConvRefs(message)
 	}
 
 	// Validate --channel against registered channels
@@ -1172,16 +1170,6 @@ func parseRecipientArg(recipient string) (recipientArg, error) {
 	} else if strings.Contains(recipient, "@") && !strings.HasPrefix(recipient, "agent:") {
 		// Legacy bare email — treat as user recipient for backward compat.
 		return recipientArg{userRecipient: "user:" + recipient}, nil
-	} else if len(recipient) == 36 {
-		if id, err := uuid.Parse(recipient); err == nil {
-			canonical := id.String()
-			return recipientArg{convRef: &messaging.Reference{
-				Kind:  messaging.RefConversation,
-				Value: canonical,
-				Raw:   "conv:" + canonical,
-			}}, nil
-		}
-		return recipientArg{agentName: api.Slugify(strings.TrimPrefix(recipient, "agent:"))}, nil
 	} else {
 		// Strip optional "agent:" prefix for backwards compatibility
 		return recipientArg{agentName: api.Slugify(strings.TrimPrefix(recipient, "agent:"))}, nil
@@ -1864,10 +1852,8 @@ func printNoAgentWoken(result *hubclient.OutboundMessageResult) {
 
 func defaultAgentNotWokenReason(d *messages.MentionResult) string {
 	var stateDesc string
-	if d.AgentPhase == "suspended" && d.SuspendReason != "" {
-		stateDesc = "suspended by " + d.SuspendReason
-	} else if d.AgentPhase != "" {
-		stateDesc = "state: " + d.AgentPhase
+	if d.AgentPhase != "" {
+		stateDesc = "state: " + suspendedPhaseLabel(d.AgentPhase, d.SuspendReason)
 	}
 
 	switch {
@@ -1925,38 +1911,35 @@ func findInvalidBodyConvRefs(text string) []string {
 			}
 		}
 		after := text[idx+len(prefix):]
-		if after == "" {
-			break
-		}
-		first := after[0]
-		if first == '<' || first == '$' || first == '{' || first == '[' ||
-			first == '"' || first == '\'' || first == '`' || first == ')' ||
-			first == ']' || first == ',' || first == ';' ||
-			first == ' ' || first == '\t' || first == '\n' || first == '\r' {
-			offset = idx + len(prefix)
-			continue
-		}
 		end := 0
+		hexCount := 0
 		for end < len(after) {
 			c := after[end]
-			if c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
-				c == ')' || c == ']' || c == '}' || c == '>' ||
-				c == '`' || c == '"' || c == '\'' || c == ',' || c == ';' {
-				break
+			if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+				hexCount++
+				end++
+				continue
 			}
-			end++
+			if c == '-' {
+				end++
+				continue
+			}
+			break
 		}
-		tok := after[:end]
 		offset = idx + len(prefix) + end
-
-		hasEllipsis := strings.HasSuffix(tok, "...") || strings.HasSuffix(tok, "…")
-		if !hasEllipsis {
-			tok = strings.TrimRight(tok, ".!?")
-		}
-		if tok == "" {
+		if end == 0 || hexCount < 4 {
 			continue
 		}
-		if !hasEllipsis && len(tok) == 36 {
+		// Ignore hex prefixes of non-hex words such as "conv:default".
+		if end < len(after) {
+			next := after[end]
+			if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') ||
+				(next >= '0' && next <= '9') || next == '_' {
+				continue
+			}
+		}
+		tok := after[:end]
+		if len(tok) == 36 {
 			if _, err := uuid.Parse(tok); err == nil {
 				continue
 			}

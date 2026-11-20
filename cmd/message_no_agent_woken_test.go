@@ -128,7 +128,37 @@ func TestSendMessageViaConversation_NoAgentWokenIncludesAgentState(t *testing.T)
 			},
 		})
 		_, stderr := sendGroupPostForNotice(t, hubCtx)
-		assert.Contains(t, stderr, "No agent was woken: default agent @lead was not reached (suspended by user; message persisted but the target agent has no running container).")
+		assert.Contains(t, stderr, "No agent was woken: default agent @lead was not reached (state: suspended (user); message persisted but the target agent has no running container).")
+	})
+
+	t.Run("suspended_by_idle_with_error", func(t *testing.T) {
+		hubCtx := newNoAgentWokenHub(t, "proj-no-agent-woken-susp-idle", map[string]interface{}{
+			"no_agent_woken": true,
+			"default_agent_result": map[string]string{
+				"slug":           "lead",
+				"status":         "error",
+				"agent_phase":    "suspended",
+				"suspend_reason": "idle",
+				"error":          "message persisted but the target agent has no running container",
+			},
+		})
+		_, stderr := sendGroupPostForNotice(t, hubCtx)
+		assert.Contains(t, stderr, "No agent was woken: default agent @lead was not reached (state: suspended (idle); message persisted but the target agent has no running container).")
+	})
+
+	t.Run("suspended_with_unknown_reason_ignored", func(t *testing.T) {
+		hubCtx := newNoAgentWokenHub(t, "proj-no-agent-woken-susp-unknown", map[string]interface{}{
+			"no_agent_woken": true,
+			"default_agent_result": map[string]string{
+				"slug":           "lead",
+				"status":         "error",
+				"agent_phase":    "suspended",
+				"suspend_reason": "bogus",
+				"error":          "message persisted but the target agent has no running container",
+			},
+		})
+		_, stderr := sendGroupPostForNotice(t, hubCtx)
+		assert.Contains(t, stderr, "No agent was woken: default agent @lead was not reached (state: suspended; message persisted but the target agent has no running container).")
 	})
 
 	t.Run("stopped_phase_without_error_detail", func(t *testing.T) {
