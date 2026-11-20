@@ -21,8 +21,14 @@ const (
 	// RuntimeOrphanKindInstance is a runtime entry (container, pod or
 	// Cloud Run instance) a broker heartbeat reported.
 	RuntimeOrphanKindInstance = "instance"
-	// RuntimeOrphanKindNFSTree is reserved for orphaned agent storage trees.
+	// RuntimeOrphanKindNFSTree is an orphaned agent storage tree on shared
+	// project storage (ptone/scion#7932).
 	RuntimeOrphanKindNFSTree = "nfs_tree"
+
+	// RuntimeOrphanBrokerHub is the broker_id value recorded for hub-owned
+	// runtime_orphans rows (kind=nfs_tree), because NFS scans run on the
+	// Hub itself and broker_id is non-empty in the schema.
+	RuntimeOrphanBrokerHub = "hub"
 )
 
 // RuntimeOrphan is a runtime object no Hub agent owns (ptone/scion#7930).

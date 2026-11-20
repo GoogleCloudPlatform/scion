@@ -370,6 +370,8 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &ChatRetentionPreviewExecutor{srv: s}, nil
 	case entadapter.ChatRetentionRunKey:
 		return &ChatRetentionRunExecutor{srv: s}, nil
+	case entadapter.NFSOrphanScanKey:
+		return &NFSOrphanScanExecutor{srv: s}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()),

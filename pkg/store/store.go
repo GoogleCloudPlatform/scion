@@ -832,6 +832,22 @@ type AgentStore interface {
 	// A failed write does not stop the others; the errors are joined.
 	RecordRuntimeOrphans(ctx context.Context, brokerID string, completeTargets []string, orphans []RuntimeOrphan, now time.Time, removeAfter int) (created []RuntimeOrphan, err error)
 
+	// RecordNFSOrphans records the kind=nfs_tree orphans observed by a hub
+	// scan of shared NFS project storage (ptone/scion#7932). Every row is
+	// recorded with kind=nfs_tree and broker_id="hub" (RuntimeOrphanBrokerHub);
+	// runtime_target identifies the tree kind ("agent-root", "agent-home", or
+	// "agent-secrets", share-qualified as "<share>/<tree>" when the hub's
+	// workspace and shared-dir layouts use separate mounts) so home-<agentID>
+	// and secrets-<agentID> for the same orphaned agent ID do not collide on
+	// the unique index (kind, broker_id, runtime_target, project_id, slug,
+	// agent_id). Each observed orphan is upserted with last_seen_at = now; a
+	// new row also gets first_seen_at = now and is returned in created.
+	// Existing kind=nfs_tree rows absent from orphans are removed ONLY when
+	// complete is true (the scan finished without hitting the per-run
+	// directory bound or skipping projects due to errors). Instance rows are
+	// never touched. A failed write does not stop the others; errors are joined.
+	RecordNFSOrphans(ctx context.Context, orphans []RuntimeOrphan, now time.Time, complete bool) (created []RuntimeOrphan, err error)
+
 	// ListRuntimeOrphans returns the runtime orphans filter selects,
 	// ordered by first_seen_at.
 	ListRuntimeOrphans(ctx context.Context, filter RuntimeOrphanFilter) ([]RuntimeOrphan, error)

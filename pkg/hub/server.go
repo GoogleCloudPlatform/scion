@@ -2050,6 +2050,10 @@ type Server struct {
 	// (startProjectStorageCleanup, startAgentStorageCleanup), so tests can
 	// wait for them.
 	storageCleanupWG sync.WaitGroup
+	// nfsOrphanUnavailableLogged ensures the daily NFS orphan directory scan
+	// logs unavailability at most once while shared project storage is not
+	// mounted on this Hub (ptone/scion#7932).
+	nfsOrphanUnavailableLogged atomic.Bool
 	// projectConfigIdentity records shared-backend projects whose
 	// <ProjectRoot>/.scion/project-id names another project
 	// (project_config_identity health check).
@@ -7139,6 +7143,10 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.reconcileQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
+	// Daily (24 h) report-only scan for orphaned agent directories on mounted
+	// shared NFS project storage (ptone/scion#7932); gated by
+	// hub.runtime_orphan_reconcile.
+	s.scheduler.RegisterRecurringSingleton("nfs-orphan-scan", nfsOrphanScanIntervalMinutes, store.LockNFSOrphanScan, s.nfsOrphanScanHandler())
 	// Forced user deletions (ptone/scion#2143): every minute, on every
 	// replica (the engine's per-agent lease and the completion's
 	// compare-and-set make concurrent runs safe). It runs whether or not

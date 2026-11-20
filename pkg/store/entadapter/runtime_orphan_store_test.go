@@ -137,3 +137,77 @@ func TestRuntimeOrphans_RowRemovedConcurrently(t *testing.T) {
 		assert.Equal(t, t1, r.LastSeenAt.UTC(), r.Slug)
 	}
 }
+
+func TestRecordNFSOrphans(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestAgentStore(t)
+	t0 := time.Date(2026, 11, 20, 2, 0, 0, 0, time.UTC)
+	t1 := t0.Add(24 * time.Hour)
+	t2 := t1.Add(24 * time.Hour)
+
+	// Seed an instance orphan to verify RecordNFSOrphans never touches instance rows.
+	_, err := s.RecordRuntimeOrphans(ctx, "b1", []string{"cr"}, []store.RuntimeOrphan{
+		{Kind: store.RuntimeOrphanKindInstance, RuntimeTarget: "cr", ProjectID: "p1", Slug: "inst", Reason: "no_agent"},
+	}, t0, 3)
+	require.NoError(t, err)
+
+	agentID := "11111111-1111-1111-1111-111111111111"
+	root := store.RuntimeOrphan{RuntimeTarget: "agent-root", ProjectID: "p1", Slug: "stale", Reason: "no_agent"}
+	home := store.RuntimeOrphan{RuntimeTarget: "agent-home", ProjectID: "p1", Slug: "stale", AgentID: agentID, Reason: "no_agent"}
+	secrets := store.RuntimeOrphan{RuntimeTarget: "agent-secrets", ProjectID: "p1", Slug: "stale", AgentID: agentID, Reason: "no_agent"}
+
+	// First scan creates all three (home and secrets share project/slug/agentID
+	// and are distinguished by runtime_target). Duplicate in same batch is deduped.
+	created, err := s.RecordNFSOrphans(ctx, []store.RuntimeOrphan{root, home, secrets, home}, t0, true)
+	require.NoError(t, err)
+	assert.Len(t, created, 3)
+	for _, c := range created {
+		assert.Equal(t, store.RuntimeOrphanKindNFSTree, c.Kind)
+		assert.Equal(t, store.RuntimeOrphanBrokerHub, c.BrokerID)
+	}
+
+	// List filtered by kind=nfs_tree and count gauge both reflect the new rows.
+	nfsRows, err := s.ListRuntimeOrphans(ctx, store.RuntimeOrphanFilter{Kind: store.RuntimeOrphanKindNFSTree})
+	require.NoError(t, err)
+	assert.Len(t, nfsRows, 3)
+
+	counts, err := s.CountRuntimeOrphans(ctx)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []store.RuntimeOrphanCount{
+		{BrokerID: "b1", Kind: store.RuntimeOrphanKindInstance, Reason: "no_agent", Count: 1},
+		{BrokerID: store.RuntimeOrphanBrokerHub, Kind: store.RuntimeOrphanKindNFSTree, Reason: "no_agent", Count: 3},
+	}, counts)
+
+	// Incomplete (truncated) scan updates seen rows without removing absent ones.
+	updatedHome := home
+	updatedHome.Reason = "superseded"
+	created, err = s.RecordNFSOrphans(ctx, []store.RuntimeOrphan{updatedHome}, t1, false)
+	require.NoError(t, err)
+	assert.Empty(t, created)
+	nfsRows, err = s.ListRuntimeOrphans(ctx, store.RuntimeOrphanFilter{Kind: store.RuntimeOrphanKindNFSTree})
+	require.NoError(t, err)
+	assert.Len(t, nfsRows, 3, "incomplete scan must not resolve absent rows")
+	var foundHome store.RuntimeOrphan
+	for _, r := range nfsRows {
+		if r.RuntimeTarget == "agent-home" {
+			foundHome = r
+		}
+	}
+	assert.Equal(t, "superseded", foundHome.Reason)
+	assert.Equal(t, t0, foundHome.FirstSeenAt.UTC())
+	assert.Equal(t, t1, foundHome.LastSeenAt.UTC())
+
+	// Complete scan removes absent rows while keeping observed ones and instance rows.
+	created, err = s.RecordNFSOrphans(ctx, []store.RuntimeOrphan{updatedHome}, t2, true)
+	require.NoError(t, err)
+	assert.Empty(t, created)
+	nfsRows, err = s.ListRuntimeOrphans(ctx, store.RuntimeOrphanFilter{Kind: store.RuntimeOrphanKindNFSTree})
+	require.NoError(t, err)
+	require.Len(t, nfsRows, 1)
+	assert.Equal(t, "agent-home", nfsRows[0].RuntimeTarget)
+	assert.Equal(t, t2, nfsRows[0].LastSeenAt.UTC())
+
+	instRows, err := s.ListRuntimeOrphans(ctx, store.RuntimeOrphanFilter{Kind: store.RuntimeOrphanKindInstance})
+	require.NoError(t, err)
+	assert.Len(t, instRows, 1, "instance rows must remain untouched")
+}
