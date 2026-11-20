@@ -3687,7 +3687,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			RuntimeError(w, agentFilesDeleteRefusedMessage)
 			return
 		}
-		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
+		s.writeDeleteOpError(w, ctx, "delete agent", err, "", "agent_id", id, "project_id", projectID)
 		return
 	}
 	if target.containerID == "" {
@@ -8705,6 +8705,8 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	// and never fails or rolls back the project delete.
 	s.releaseProjectSharedDirClaims(r.Context(), slug, r.URL.Query().Get("project_id"))
 
+	projectConfigsRoot := filepath.Join(globalDir, config.ProjectConfigsDir)
+
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
 		// The project directory is already gone (an earlier delete got
 		// this far). Its project-configs entry may remain, so remove it
@@ -8718,7 +8720,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		}
 		if dir != "" {
 			if err := s.removeProjectConfigs(globalDir, dir); err != nil {
-				s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "project_id", requestedID, "path", dir)
+				s.writeDeleteOpError(w, r.Context(), opRemoveProjectConfigDir, err, projectConfigsRoot, "project_slug", slug, "project_id", requestedID, "path", dir)
 				return
 			}
 			s.agentLifecycleLog.Info("Removed hub-managed project config directory left by an earlier delete", "slug", slug, "path", dir)
@@ -8770,7 +8772,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		configDir = projectConfigDirFor(globalDir, absProject, slug, requestedID)
 		if sharedDirsBase != "" {
 			if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
-				s.writeRuntimeOpError(w, r.Context(), opRemoveSharedDirStorage, err,
+				s.writeDeleteOpError(w, r.Context(), opRemoveSharedDirStorage, err, projectConfigsRoot,
 					"project_slug", slug, "project_id", requestedID, "path", sharedDirsBase)
 				return
 			}
@@ -8779,7 +8781,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	}
 
 	if err := os.RemoveAll(projectPath); err != nil {
-		s.writeRuntimeOpError(w, r.Context(), opRemoveProjectDir, err, "project_slug", slug, "path", projectPath)
+		s.writeDeleteOpError(w, r.Context(), opRemoveProjectDir, err, "", "project_slug", slug, "path", projectPath)
 		return
 	}
 
@@ -8790,7 +8792,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		// repeated delete removes the entry by its canonical name
 		// (orphanProjectConfigDir) and then succeeds.
 		if err := s.removeProjectConfigs(globalDir, configDir); err != nil {
-			s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "path", configDir)
+			s.writeDeleteOpError(w, r.Context(), opRemoveProjectConfigDir, err, projectConfigsRoot, "project_slug", slug, "path", configDir)
 			return
 		}
 		s.agentLifecycleLog.Info("Removed hub-managed project config directory", "slug", slug, "path", configDir)
