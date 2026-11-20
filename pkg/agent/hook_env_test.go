@@ -16,6 +16,9 @@ package agent
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -80,13 +84,12 @@ func TestSanitizeHarnessConfigEnv(t *testing.T) {
 	}
 }
 
-func TestComputeHookWithheldEnv_AllLayersAndPrecedence(t *testing.T) {
+func TestTrackedAgentEnv_AllLayersAndPrecedence(t *testing.T) {
 	bundleEnv := map[string]string{
 		"BUNDLE_ONLY":            "from-bundle",
 		"GITHUB_TOKEN":           "",
 		"INLINE_WIN":             "from-bundle",
-		"GOOGLE_CLOUD_PROJECT":   "bundle-proj",
-		"EMPTY_AUTH_OR_SECRET":   "",
+		"LEGACY_STALE":           "new-bundle-val",
 		"MY${UNSET_TEST_VAR}KEY": "expanded-key-val",
 	}
 	settingsHCEnv := map[string]string{
@@ -94,21 +97,12 @@ func TestComputeHookWithheldEnv_AllLayersAndPrecedence(t *testing.T) {
 		"SETTINGS_HUB_WIN": "from-settings",
 		"SETTINGS_EMPTY":   "",
 	}
-	envTemplateEnv := map[string]string{
-		"TPL_ONLY":       "from-tpl",
-		"TPL_AUTH_WIN":   "from-tpl",
-		"TPL_SECRET_WIN": "from-tpl",
-		"TPL_HUB_WIN":    "from-tpl",
-		"TPL_INLINE_WIN": "from-tpl",
-	}
 	inlineEnv := map[string]string{
-		"INLINE_WIN":     "from-inline",
-		"TPL_INLINE_WIN": "from-inline",
+		"INLINE_WIN": "from-inline",
 	}
 	callerEnv := map[string]string{
 		"GITHUB_TOKEN":     "ghp_from_hub",
 		"SETTINGS_HUB_WIN": "from-hub",
-		"TPL_HUB_WIN":      "from-hub",
 		"OPERATOR_ONLY":    "keep",
 	}
 
@@ -122,246 +116,50 @@ func TestComputeHookWithheldEnv_AllLayersAndPrecedence(t *testing.T) {
 		}
 	}
 
-	agentEnv, _, _, _, provenance := buildAgentEnvWithBundle(bundleEnv, &api.ScionConfig{Env: inlineEnv}, optsEnv, nil, true)
-
-	baseInput := hookWithheldInput{
-		bundleEnv:      bundleEnv,
-		envTemplateEnv: envTemplateEnv,
-		settingsHCEnv:  settingsHCEnv,
-		agentEnv:       agentEnv,
-		provenance:     provenance,
-		callerEnv:      callerEnv,
-		inlineEnv:      inlineEnv,
-		resolvedAuth: &api.ResolvedAuth{
-			EnvVars: map[string]string{"TPL_AUTH_WIN": "from-auth"},
-		},
-		resolvedSecrets: []api.ResolvedSecret{
-			{Type: "environment", Target: "TPL_SECRET_WIN", Value: "from-secret"},
+	scionCfg := &api.ScionConfig{
+		Env: map[string]string{
+			"INLINE_WIN":   "from-inline",
+			"LEGACY_STALE": "old-persisted-val",
+			"OWN_PERSIST":  "from-own",
 		},
 	}
+	defaultEnv := map[string]string{
+		"DEFAULT_ONLY": "from-default",
+	}
 
-	// On docker/podman/container/k8s/cloudrun, Harness.GetEnv() (env_template)
-	// is emitted after ResolvedAuth and wins on collision, so TPL_AUTH_WIN is
-	// withheld. On substrate, ResolvedAuth wins over Harness.GetEnv() and
-	// cfg.Env, so TPL_AUTH_WIN is not withheld. On cloudrun-sandbox,
-	// Harness.GetEnv() wins over cfg.Env (so TPL_HUB_WIN and TPL_INLINE_WIN are
-	// withheld), while ResolvedAuth wins over Harness.GetEnv().
-	runtimeCases := []struct {
-		runtimeName string
-		want        []string
-	}{
-		{
-			runtimeName: "docker",
-			want:        []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT", "MY${UNSET_TEST_VAR}KEY", "SETTINGS_ONLY", "TPL_AUTH_WIN", "TPL_ONLY"},
-		},
-		{
-			runtimeName: "substrate",
-			want:        []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT", "MY${UNSET_TEST_VAR}KEY", "SETTINGS_ONLY", "TPL_ONLY"},
-		},
-		{
-			runtimeName: "cloudrun-sandbox",
-			want:        []string{"BUNDLE_ONLY", "GOOGLE_CLOUD_PROJECT", "MY${UNSET_TEST_VAR}KEY", "SETTINGS_ONLY", "TPL_HUB_WIN", "TPL_INLINE_WIN", "TPL_ONLY"},
+	tracked, _, _, _ := buildTrackedAgentEnv(bundleEnv, scionCfg, optsEnv, settingsHCEnv, callerEnv, inlineEnv, defaultEnv, true)
+
+	// Post-build mutations: no-auth sidecar (HC) and broker-system override.
+	noAuthCfg := &config.HarnessNoAuthConfig{
+		Behavior: "drop-to-shell",
+		Env: map[string]string{
+			"NO_AUTH_ONLY":  "from-no-auth",
+			"OPERATOR_ONLY": "no-auth-loses",
 		},
 	}
+	applyNoAuthEnvTracked(tracked, noAuthCfg, true, "test-agent")
+	tracked.Set(envLaunchID, "run-123", envOriginBrokerSystem)
 
-	for _, tc := range runtimeCases {
-		t.Run(tc.runtimeName, func(t *testing.T) {
-			in := baseInput
-			in.runtimeName = tc.runtimeName
-			got := computeHookWithheldEnv(in)
-			if !slices.Equal(got, tc.want) {
-				t.Errorf("computeHookWithheldEnv(%s) = %v, want %v (agentEnv=%v)", tc.runtimeName, got, tc.want, agentEnv)
-			}
-		})
+	wantWithheld := []string{
+		"BUNDLE_ONLY",
+		"LEGACY_STALE",
+		"MY${UNSET_TEST_VAR}KEY",
+		"NO_AUTH_ONLY",
+		"SETTINGS_ONLY",
 	}
-}
-
-// TestComputeHookWithheldEnv_AllLayerPairsPerRuntime verifies every unordered
-// pair of the 7 environment layers (bundle, env_template, settings, hub, own,
-// auth, secrets) across every runtime family, asserting both the final winning
-// layer and whether computeHookWithheldEnv withholds the key.
-func TestComputeHookWithheldEnv_AllLayerPairsPerRuntime(t *testing.T) {
-	type layer string
-	const (
-		layerBundle      layer = "bundle"
-		layerEnvTemplate layer = "env_template"
-		layerSettings    layer = "settings"
-		layerHub         layer = "hub"
-		layerOwn         layer = "own"
-		layerAuth        layer = "auth"
-		layerSecrets     layer = "secrets"
-	)
-
-	isHarnessConfigLayer := func(l layer) bool {
-		return l == layerBundle || l == layerEnvTemplate || l == layerSettings
+	gotWithheld := tracked.HarnessConfigKeys()
+	if !slices.Equal(gotWithheld, wantWithheld) {
+		t.Errorf("HarnessConfigKeys() = %v, want %v", gotWithheld, wantWithheld)
 	}
 
-	// expectedWinner returns which of layers a and b supplies the final
-	// container value on runtimeName, combining buildAgentEnvWithBundle's
-	// intra-ConfigEnv precedence (bundle < own < settings < hub) with each
-	// runtime's inter-source precedence.
-	expectedWinner := func(runtimeName string, a, b layer) layer {
-		// Intra-ConfigEnv rank (higher wins within RunConfig.Env).
-		cfgRank := map[layer]int{
-			layerBundle:   1,
-			layerOwn:      2,
-			layerSettings: 3,
-			layerHub:      4,
-		}
-		_, aInCfg := cfgRank[a]
-		_, bInCfg := cfgRank[b]
-		if aInCfg && bInCfg {
-			if cfgRank[a] > cfgRank[b] {
-				return a
-			}
-			return b
-		}
-
-		// Runtime-level source rank per runtime family.
-		toRuntimeSrc := func(l layer) runtime.EnvSource {
-			switch l {
-			case layerEnvTemplate:
-				return runtime.EnvSourceHarnessTemplate
-			case layerAuth:
-				return runtime.EnvSourceResolvedAuth
-			case layerSecrets:
-				return runtime.EnvSourceResolvedSecret
-			default:
-				return runtime.EnvSourceConfigEnv
-			}
-		}
-		sa, sb := toRuntimeSrc(a), toRuntimeSrc(b)
-		switch runtimeName {
-		case "substrate":
-			// HarnessTemplate < ConfigEnv < ResolvedAuth < ResolvedSecret
-			rank := map[runtime.EnvSource]int{
-				runtime.EnvSourceHarnessTemplate: 1,
-				runtime.EnvSourceConfigEnv:       2,
-				runtime.EnvSourceResolvedAuth:    3,
-				runtime.EnvSourceResolvedSecret:  4,
-			}
-			if rank[sa] > rank[sb] {
-				return a
-			}
-			return b
-		case "cloudrun-sandbox":
-			// Non-colliding secrets win over auth/tpl, but secrets colliding
-			// with ConfigEnv are skipped; otherwise ConfigEnv < Tpl < Auth.
-			if (sa == runtime.EnvSourceResolvedSecret && sb == runtime.EnvSourceConfigEnv) ||
-				(sb == runtime.EnvSourceResolvedSecret && sa == runtime.EnvSourceConfigEnv) {
-				if sa == runtime.EnvSourceConfigEnv {
-					return a
-				}
-				return b
-			}
-			rank := map[runtime.EnvSource]int{
-				runtime.EnvSourceConfigEnv:       1,
-				runtime.EnvSourceHarnessTemplate: 2,
-				runtime.EnvSourceResolvedAuth:    3,
-				runtime.EnvSourceResolvedSecret:  4,
-			}
-			if rank[sa] > rank[sb] {
-				return a
-			}
-			return b
-		default:
-			// docker, podman, container, kubernetes, cloudrun:
-			// ResolvedAuth < HarnessTemplate < ResolvedSecret (non-colliding) < ConfigEnv
-			rank := map[runtime.EnvSource]int{
-				runtime.EnvSourceResolvedAuth:    1,
-				runtime.EnvSourceHarnessTemplate: 2,
-				runtime.EnvSourceResolvedSecret:  3,
-				runtime.EnvSourceConfigEnv:       4,
-			}
-			if rank[sa] > rank[sb] {
-				return a
-			}
-			return b
-		}
+	// Verify broker-system overwrite clears withholding and Delete removes it.
+	tracked.Set("NO_AUTH_ONLY", "overridden-by-broker", envOriginBrokerSystem)
+	if slices.Contains(tracked.HarnessConfigKeys(), "NO_AUTH_ONLY") {
+		t.Errorf("NO_AUTH_ONLY remained withheld after envOriginBrokerSystem overwrite")
 	}
-
-	allLayers := []layer{layerBundle, layerEnvTemplate, layerSettings, layerHub, layerOwn, layerAuth, layerSecrets}
-	runtimes := []string{"docker", "podman", "container", "kubernetes", "cloudrun", "cloudrun-sandbox", "substrate"}
-
-	const key = "PAIR_TEST_KEY"
-	for _, rtName := range runtimes {
-		t.Run(rtName, func(t *testing.T) {
-			for i := 0; i < len(allLayers); i++ {
-				for j := i + 1; j < len(allLayers); j++ {
-					la, lb := allLayers[i], allLayers[j]
-					t.Run(string(la)+"_vs_"+string(lb), func(t *testing.T) {
-						var bundleEnv, tplEnv, settingsEnv, callerEnv, inlineEnv map[string]string
-						var auth *api.ResolvedAuth
-						var secrets []api.ResolvedSecret
-
-						addLayer := func(l layer) {
-							switch l {
-							case layerBundle:
-								bundleEnv = map[string]string{key: "from-bundle"}
-							case layerEnvTemplate:
-								tplEnv = map[string]string{key: "from-env-template"}
-							case layerSettings:
-								settingsEnv = map[string]string{key: "from-settings"}
-							case layerHub:
-								callerEnv = map[string]string{key: "from-hub"}
-							case layerOwn:
-								inlineEnv = map[string]string{key: "from-own"}
-							case layerAuth:
-								auth = &api.ResolvedAuth{Method: "api-key", EnvVars: map[string]string{key: "from-auth"}}
-							case layerSecrets:
-								secrets = []api.ResolvedSecret{{Type: "environment", Target: key, Value: "from-secret"}}
-							}
-						}
-						addLayer(la)
-						addLayer(lb)
-
-						// Assemble opts.Env as Start does: callerEnv, with settingsEnv filling absent keys.
-						optsEnv := make(map[string]string)
-						for k, v := range callerEnv {
-							optsEnv[k] = v
-						}
-						for k, v := range settingsEnv {
-							if _, exists := optsEnv[k]; !exists {
-								optsEnv[k] = v
-							}
-						}
-						var cfg *api.ScionConfig
-						if len(inlineEnv) > 0 {
-							cfg = &api.ScionConfig{Env: inlineEnv}
-						}
-						agentEnv, _, _, _, provenance := buildAgentEnvWithBundle(bundleEnv, cfg, optsEnv, nil, true)
-
-						gotWithheld := computeHookWithheldEnv(hookWithheldInput{
-							runtimeName:     rtName,
-							bundleEnv:       bundleEnv,
-							envTemplateEnv:  tplEnv,
-							settingsHCEnv:   settingsEnv,
-							agentEnv:        agentEnv,
-							provenance:      provenance,
-							callerEnv:       callerEnv,
-							inlineEnv:       inlineEnv,
-							resolvedAuth:    auth,
-							resolvedSecrets: secrets,
-						})
-
-						winner := expectedWinner(rtName, la, lb)
-						wantWithheld := isHarnessConfigLayer(winner)
-						isWithheld := slices.Contains(gotWithheld, key)
-						if isWithheld != wantWithheld {
-							t.Errorf("runtime=%s pair=(%s,%s) winner=%s: withheld=%v, want %v (gotWithheld=%v)",
-								rtName, la, lb, winner, isWithheld, wantWithheld, gotWithheld)
-						}
-					})
-				}
-			}
-		})
-	}
-}
-
-func TestComputeHookWithheldEnv_EmptyLayers(t *testing.T) {
-	got := computeHookWithheldEnv(hookWithheldInput{agentEnv: []string{"FOO=bar"}})
-	if len(got) != 0 {
-		t.Errorf("computeHookWithheldEnv(empty) = %v, want empty", got)
+	tracked.Delete("BUNDLE_ONLY")
+	if slices.Contains(tracked.HarnessConfigKeys(), "BUNDLE_ONLY") {
+		t.Errorf("BUNDLE_ONLY remained withheld after Delete")
 	}
 }
 
@@ -475,6 +273,9 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
+	// RunConfig.HookWithheldEnv carries the broker-side RunConfig.Env harness-config
+	// provenance; env_template keys (TPL_ONLY) are tracked directly by each runtime
+	// from Harness.GetEnv() during emission.
 	wantWithheld := []string{
 		"BUNDLE_ONLY",
 		"COLLIDE_KEY",
@@ -482,7 +283,6 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 		envpolicy.HintLivenessRootDepth,
 		"MY${UNSET_TEST_VAR}KEY",
 		"SETTINGS_ONLY",
-		"TPL_ONLY",
 	}
 	if !slices.Equal(captured.HookWithheldEnv, wantWithheld) {
 		t.Errorf("RunConfig.HookWithheldEnv = %v, want %v (RunConfig.Env=%v)", captured.HookWithheldEnv, wantWithheld, captured.Env)
@@ -533,12 +333,16 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 			t.Errorf("RunConfig.Env unexpectedly contains refused/invalid key %s=%q", refused, v)
 		}
 	}
-	if captured.Harness != nil {
-		tplEnv := captured.Harness.GetEnv("hook-env-test", "/home/scion", "scion")
-		for _, badKey := range []string{"PATH", "PATH=/opt/custom"} {
-			if v, ok := tplEnv[badKey]; ok {
-				t.Errorf("Harness.GetEnv() unexpectedly contains invalid key %s=%q", badKey, v)
-			}
+	if captured.Harness == nil {
+		t.Fatalf("captured.Harness is nil")
+	}
+	tplEnv := captured.Harness.GetEnv("hook-env-test", "/home/scion", "scion")
+	if tplEnv["TPL_ONLY"] != "agent-hook-env-test" {
+		t.Errorf("Harness.GetEnv()[TPL_ONLY] = %q, want %q", tplEnv["TPL_ONLY"], "agent-hook-env-test")
+	}
+	for _, badKey := range []string{"PATH", "PATH=/opt/custom"} {
+		if v, ok := tplEnv[badKey]; ok {
+			t.Errorf("Harness.GetEnv() unexpectedly contains invalid key %s=%q", badKey, v)
 		}
 	}
 
@@ -548,5 +352,353 @@ func TestStart_HookWithheldEnv_EndToEnd(t *testing.T) {
 		if !strings.Contains(joinedWarnings, substr) {
 			t.Errorf("expected start warnings to mention %q; got:\n%s", substr, joinedWarnings)
 		}
+	}
+}
+
+// TestStart_HookWithheldEnv_NoAuthSidecar verifies that keys added from a
+// bundle's no-auth-env.yaml sidecar (including PATH) are recorded with
+// harness-config provenance and appear in RunConfig.HookWithheldEnv in no-auth
+// mode, while caller overrides stay visible and non-no-auth starts omit them.
+func TestStart_HookWithheldEnv_NoAuthSidecar(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "noauth-hc")
+	if err := os.MkdirAll(hcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hcYAML := strings.Join([]string{
+		"harness: generic",
+		"user: scion",
+		"image: test-image:latest",
+		"command:",
+		"  base: [\"echo\"]",
+		"no_auth:",
+		"  behavior: drop-to-shell",
+		"  message: sign in",
+		"auth:",
+		"  default_type: api-key",
+		"  types:",
+		"    api-key:",
+		"      required_env:",
+		"        - any_of: [\"TEST_API_KEY\"]",
+		"  autodetect:",
+		"    env:",
+		"      TEST_API_KEY: api-key",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(hcYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := strings.Join([]string{
+		"env:",
+		"  PATH: /workspace/bin:/usr/bin",
+		"  DBUS_SESSION_BUS_ADDRESS: unix:path=/tmp/no-bus",
+		"  CALLER_WINS: from-no-auth",
+		"  \"BAD,KEY\": comma",
+		"  SCION_RESERVED: bad",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(hcDir, config.NoAuthEnvSidecarFile), []byte(sidecar), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	if err := os.MkdirAll(tplDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "noauth-hc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+	if err := os.MkdirAll(projectScionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured runtime.RunConfig
+	mgr := NewManager(&runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+		RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	})
+
+	t.Run("no-auth active withholds sidecar keys", func(t *testing.T) {
+		info, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:          "noauth-agent",
+			ProjectPath:   projectScionDir,
+			Template:      "default",
+			HarnessConfig: "noauth-hc",
+			BrokerMode:    true,
+			HarnessAuth:   "none",
+			Env: map[string]string{
+				"CALLER_WINS": "from-caller",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		envMap := runEnvMap(captured.Env)
+		if envMap["PATH"] != "/workspace/bin:/usr/bin" {
+			t.Errorf("Env[PATH] = %q, want /workspace/bin:/usr/bin", envMap["PATH"])
+		}
+		if envMap["DBUS_SESSION_BUS_ADDRESS"] != "unix:path=/tmp/no-bus" {
+			t.Errorf("Env[DBUS_SESSION_BUS_ADDRESS] = %q, want unix:path=/tmp/no-bus", envMap["DBUS_SESSION_BUS_ADDRESS"])
+		}
+		if envMap["CALLER_WINS"] != "from-caller" {
+			t.Errorf("Env[CALLER_WINS] = %q, want from-caller", envMap["CALLER_WINS"])
+		}
+		if _, ok := envMap["BAD,KEY"]; ok {
+			t.Errorf("invalid key BAD,KEY reached RunConfig.Env")
+		}
+		wantWithheld := []string{"DBUS_SESSION_BUS_ADDRESS", "PATH"}
+		if !slices.Equal(captured.HookWithheldEnv, wantWithheld) {
+			t.Errorf("RunConfig.HookWithheldEnv = %v, want %v", captured.HookWithheldEnv, wantWithheld)
+		}
+		joined := strings.Join(info.Warnings, "\n")
+		if !strings.Contains(joined, "BAD,KEY") {
+			t.Errorf("expected warning for invalid key BAD,KEY; got:\n%s", joined)
+		}
+	})
+
+	t.Run("api-key start omits sidecar keys", func(t *testing.T) {
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:          "apikey-agent",
+			ProjectPath:   projectScionDir,
+			Template:      "default",
+			HarnessConfig: "noauth-hc",
+			BrokerMode:    true,
+			Env: map[string]string{
+				"TEST_API_KEY": "sk-test",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		envMap := runEnvMap(captured.Env)
+		for _, k := range []string{"PATH", "DBUS_SESSION_BUS_ADDRESS"} {
+			if _, ok := envMap[k]; ok {
+				t.Errorf("non-no-auth start unexpectedly has %s in RunConfig.Env", k)
+			}
+			if slices.Contains(captured.HookWithheldEnv, k) {
+				t.Errorf("non-no-auth start unexpectedly withholds %s", k)
+			}
+		}
+	})
+}
+
+// TestStart_HookWithheldEnv_RestartEmptyTemplateDivergentEnvTemplate verifies
+// that on restart with opts.Template == "", env_template provenance and
+// warnings come strictly from the harness resolved by harness.Resolve (the
+// emitter), never from a separate template-path lookup.
+func TestStart_HookWithheldEnv_RestartEmptyTemplateDivergentEnvTemplate(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	// Global harness-config "div-hc" has TPL_FROM_GLOBAL and SCION_FROM_GLOBAL.
+	globalHCDir := filepath.Join(globalScionDir, "harness-configs", "div-hc")
+	if err := os.MkdirAll(globalHCDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalHC := strings.Join([]string{
+		"harness: generic",
+		"user: scion",
+		"image: test-image:latest",
+		"command:",
+		"  base: [\"echo\"]",
+		"env_template:",
+		"  TPL_FROM_GLOBAL: global-val",
+		"  SCION_FROM_GLOBAL: bad",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(globalHCDir, "config.yaml"), []byte(globalHC), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Local template "local-tpl" bundles a DIFFERENT "div-hc" with
+	// TPL_FROM_LOCAL_TPL and SCION_FROM_LOCAL_TPL.
+	tplDir := filepath.Join(globalScionDir, "templates", "local-tpl")
+	tplHCDir := filepath.Join(tplDir, "harness-configs", "div-hc")
+	if err := os.MkdirAll(tplHCDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "div-hc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tplHC := strings.Join([]string{
+		"harness: generic",
+		"user: scion",
+		"image: test-image:latest",
+		"command:",
+		"  base: [\"echo\"]",
+		"env_template:",
+		"  TPL_FROM_LOCAL_TPL: local-tpl-val",
+		"  SCION_FROM_LOCAL_TPL: bad",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(tplHCDir, "config.yaml"), []byte(tplHC), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-existing agent referencing template "local-tpl" and harness_config "div-hc".
+	projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+	agentName := "div-agent"
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	if err := os.MkdirAll(filepath.Join(agentDir, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"harness_config":"div-hc","info":{"template":"local-tpl"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var captured runtime.RunConfig
+	mgr := NewManager(&runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+		RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	})
+
+	// Restart with opts.Template == "" (the broker restart shape).
+	info, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:          agentName,
+		ProjectPath:   projectScionDir,
+		Template:      "",
+		HarnessConfig: "div-hc",
+		BrokerMode:    true,
+		NoAuth:        true,
+	})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if captured.Harness == nil {
+		t.Fatalf("captured.Harness is nil")
+	}
+	emittedTpl := captured.Harness.GetEnv(agentName, "/home/scion", "scion")
+	if emittedTpl["TPL_FROM_GLOBAL"] != "global-val" {
+		t.Errorf("Harness.GetEnv()[TPL_FROM_GLOBAL] = %q, want %q", emittedTpl["TPL_FROM_GLOBAL"], "global-val")
+	}
+	if _, ok := emittedTpl["TPL_FROM_LOCAL_TPL"]; ok {
+		t.Errorf("Harness.GetEnv() unexpectedly emitted TPL_FROM_LOCAL_TPL")
+	}
+	// Warnings must come from the emitting bundle (global), not the non-emitting
+	// template-bundled copy.
+	joined := strings.Join(info.Warnings, "\n")
+	if !strings.Contains(joined, "SCION_FROM_GLOBAL") {
+		t.Errorf("expected warning for SCION_FROM_GLOBAL from emitting bundle; got:\n%s", joined)
+	}
+	if strings.Contains(joined, "SCION_FROM_LOCAL_TPL") {
+		t.Errorf("unexpected warning for SCION_FROM_LOCAL_TPL from non-emitting bundle; got:\n%s", joined)
+	}
+	// RunConfig.HookWithheldEnv must not contain stale env_template keys from
+	// a separate lookup (runtimes withhold env_template directly from GetEnv).
+	if slices.Contains(captured.HookWithheldEnv, "TPL_FROM_LOCAL_TPL") {
+		t.Errorf("RunConfig.HookWithheldEnv unexpectedly contains non-emitting TPL_FROM_LOCAL_TPL: %v", captured.HookWithheldEnv)
+	}
+}
+
+// TestEnvOrigin_AllValuesClassified ensures every envOrigin constant has an
+// explicit classification in isHarnessConfig().
+func TestEnvOrigin_AllValuesClassified(t *testing.T) {
+	cases := []struct {
+		origin envOrigin
+		wantHC bool
+	}{
+		{envOriginNone, false},
+		{envOriginBundle, true},
+		{envOriginSettingsHC, true},
+		{envOriginNoAuthHC, true},
+		{envOriginLegacyHC, true},
+		{envOriginConfigOwn, false},
+		{envOriginCaller, false},
+		{envOriginDefault, false},
+		{envOriginBrokerSystem, false},
+	}
+	for _, tc := range cases {
+		if got := tc.origin.isHarnessConfig(); got != tc.wantHC {
+			t.Errorf("envOrigin(%d).isHarnessConfig() = %t, want %t", tc.origin, got, tc.wantHC)
+		}
+	}
+}
+
+// TestStart_AgentEnvUsesTrackedBuilder is a structural guard verifying that
+// AgentManager.Start builds RunConfig.Env and RunConfig.HookWithheldEnv from
+// trackedAgentEnv and never bypasses it via raw slice mutators.
+func TestStart_AgentEnvUsesTrackedBuilder(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "run.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse run.go: %v", err)
+	}
+
+	var startDecl *ast.FuncDecl
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "Start" && fn.Recv != nil {
+			startDecl = fn
+			break
+		}
+	}
+	if startDecl == nil {
+		t.Fatalf("could not find (*AgentManager).Start in run.go")
+	}
+
+	forbiddenCalls := map[string]bool{
+		"buildAgentEnv":           true,
+		"buildAgentEnvWithBundle": true,
+		"applyNoAuthEnv":          true,
+		"withLaunchIDEnv":         true,
+		"withInitialTaskEnv":      true,
+		"enforceWorkspaceGitEnv":  true,
+		"withEnvValue":            true,
+	}
+	var sawBuildTracked, sawApplyNoAuthTracked, sawHarnessConfigKeys bool
+	ast.Inspect(startDecl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			if forbiddenCalls[fn.Name] {
+				t.Errorf("Start() calls raw env helper %s; use trackedAgentEnv instead", fn.Name)
+			}
+			if fn.Name == "buildTrackedAgentEnv" {
+				sawBuildTracked = true
+			}
+			if fn.Name == "applyNoAuthEnvTracked" {
+				sawApplyNoAuthTracked = true
+			}
+		case *ast.SelectorExpr:
+			if fn.Sel.Name == "HarnessConfigKeys" {
+				sawHarnessConfigKeys = true
+			}
+		}
+		return true
+	})
+
+	if !sawBuildTracked {
+		t.Error("Start() did not call buildTrackedAgentEnv")
+	}
+	if !sawApplyNoAuthTracked {
+		t.Error("Start() did not call applyNoAuthEnvTracked")
+	}
+	if !sawHarnessConfigKeys {
+		t.Error("Start() did not derive RunConfig.HookWithheldEnv from trackedAgentEnv.HarnessConfigKeys()")
 	}
 }

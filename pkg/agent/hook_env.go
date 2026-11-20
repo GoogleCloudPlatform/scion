@@ -17,11 +17,8 @@ package agent
 import (
 	"fmt"
 	"sort"
-	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -89,139 +86,120 @@ func sanitizeHarnessConfigEnv(raw map[string]string, layerName string, expandKey
 	return out, warnings
 }
 
-// envLayerSource identifies which layer supplied the final value of an
-// environment variable emitted by buildAgentEnvWithBundle.
-type envLayerSource uint8
+// envOrigin identifies which layer supplied the winning value of a variable in
+// trackedAgentEnv. Every write to trackedAgentEnv must name its origin so no
+// key can enter RunConfig.Env without its harness-config provenance recorded.
+type envOrigin uint8
 
 const (
-	envSourceNone envLayerSource = iota
-	envSourceBundle
-	envSourceConfig
-	envSourceExtra
-	envSourceDefault
+	envOriginNone envOrigin = iota
+	envOriginBundle
+	envOriginSettingsHC
+	envOriginNoAuthHC
+	envOriginLegacyHC
+	envOriginConfigOwn
+	envOriginCaller
+	envOriginDefault
+	envOriginBrokerSystem
 )
 
-// hookWithheldInput collects the sanitized harness-config env layers and the
-// higher-precedence env sources needed to compute RunConfig.HookWithheldEnv.
-type hookWithheldInput struct {
-	runtimeName     string
-	bundleEnv       map[string]string
-	envTemplateEnv  map[string]string
-	settingsHCEnv   map[string]string
-	agentEnv        []string
-	provenance      map[string]envLayerSource
-	callerEnv       map[string]string
-	inlineEnv       map[string]string
-	resolvedAuth    *api.ResolvedAuth
-	resolvedSecrets []api.ResolvedSecret
+// isHarnessConfig reports whether an envOrigin represents a harness-config
+// layer whose keys must be withheld from lifecycle hooks.
+func (o envOrigin) isHarnessConfig() bool {
+	switch o {
+	case envOriginBundle, envOriginSettingsHC, envOriginNoAuthHC, envOriginLegacyHC:
+		return true
+	default:
+		return false
+	}
 }
 
-// computeHookWithheldEnv returns the sorted list of environment variable names
-// whose final container value comes from a harness-config layer (bundle env,
-// bundle env_template, or settings/profile harness_configs.<name>.env) and must
-// be withheld from lifecycle hooks.
-//
-// Final container-level precedence across RunConfig.Env, Harness.GetEnv(),
-// ResolvedAuth, and ResolvedSecrets is resolved through
-// runtime.ResolveRuntimeEnvWinner using in.runtimeName, so withholding matches
-// each runtime's actual emission order. Within RunConfig.Env, provenance from
-// buildAgentEnvWithBundle identifies bundle, config, extra (caller/settings-hc),
-// and default sources directly. Legacy persisted keys that differ from the live
-// bundle value remain in envSourceConfig and are still withheld when declared
-// by bundleEnv unless overridden by callerEnv or inlineEnv.
-func computeHookWithheldEnv(in hookWithheldInput) []string {
-	if len(in.bundleEnv) == 0 && len(in.settingsHCEnv) == 0 && len(in.envTemplateEnv) == 0 {
+type trackedEnvEntry struct {
+	value  string
+	origin envOrigin
+}
+
+// trackedAgentEnv is the single broker-side container environment builder.
+// Every key added to RunConfig.Env passes through Set/Delete with an explicit
+// envOrigin, so RunConfig.Env and RunConfig.HookWithheldEnv are derived from
+// the exact same map at RunConfig construction time.
+type trackedAgentEnv struct {
+	entries map[string]trackedEnvEntry
+}
+
+func newTrackedAgentEnv() *trackedAgentEnv {
+	return &trackedAgentEnv{entries: make(map[string]trackedEnvEntry)}
+}
+
+// Set writes key=value and records origin as its winning provenance.
+func (e *trackedAgentEnv) Set(key, value string, origin envOrigin) {
+	if key == "" {
+		return
+	}
+	if e.entries == nil {
+		e.entries = make(map[string]trackedEnvEntry)
+	}
+	e.entries[key] = trackedEnvEntry{value: value, origin: origin}
+}
+
+// Delete removes key (both value and provenance).
+func (e *trackedAgentEnv) Delete(key string) {
+	delete(e.entries, key)
+}
+
+// Has reports whether key is currently present.
+func (e *trackedAgentEnv) Has(key string) bool {
+	_, ok := e.entries[key]
+	return ok
+}
+
+// Get returns the current value of key.
+func (e *trackedAgentEnv) Get(key string) (string, bool) {
+	ent, ok := e.entries[key]
+	if !ok {
+		return "", false
+	}
+	return ent.value, true
+}
+
+// Origin returns the recorded envOrigin of key (envOriginNone if absent).
+func (e *trackedAgentEnv) Origin(key string) envOrigin {
+	return e.entries[key].origin
+}
+
+// Slice returns a deterministic sorted snapshot of KEY=VALUE entries for
+// read-only inspection and RunConfig.Env.
+func (e *trackedAgentEnv) Slice() []string {
+	if len(e.entries) == 0 {
+		return []string{}
+	}
+	keys := make([]string, 0, len(e.entries))
+	for k := range e.entries {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k+"="+e.entries[k].value)
+	}
+	return out
+}
+
+// HarnessConfigKeys returns the sorted list of keys currently in the env whose
+// winning value came from a harness-config layer.
+func (e *trackedAgentEnv) HarnessConfigKeys() []string {
+	if len(e.entries) == 0 {
 		return nil
 	}
-
-	emitted := make(map[string]struct{}, len(in.agentEnv))
-	for _, entry := range in.agentEnv {
-		if k, _, ok := strings.Cut(entry, "="); ok && k != "" {
-			emitted[k] = struct{}{}
+	var out []string
+	for k, ent := range e.entries {
+		if ent.origin.isHarnessConfig() {
+			out = append(out, k)
 		}
 	}
-
-	tplKeys := make(map[string]struct{}, len(in.envTemplateEnv))
-	for k := range in.envTemplateEnv {
-		if k != "" {
-			tplKeys[k] = struct{}{}
-		}
+	if len(out) == 0 {
+		return nil
 	}
-
-	higher := make(map[string]struct{})
-	for k, v := range in.callerEnv {
-		if v != "" {
-			higher[k] = struct{}{}
-		}
-	}
-	for k, v := range in.inlineEnv {
-		if v != "" {
-			higher[k] = struct{}{}
-		}
-	}
-
-	winners := runtime.ResolveRuntimeEnvWinner(
-		in.runtimeName,
-		emitted,
-		tplKeys,
-		in.resolvedAuth,
-		in.resolvedSecrets,
-	)
-
-	seen := make(map[string]struct{})
-	var withheld []string
-	add := func(k string) {
-		if k == "" {
-			return
-		}
-		if _, dup := seen[k]; dup {
-			return
-		}
-		seen[k] = struct{}{}
-		withheld = append(withheld, k)
-	}
-
-	for k, winner := range winners {
-		switch winner {
-		case runtime.EnvSourceHarnessTemplate:
-			// Harness.GetEnv() (env_template) won the final container value on
-			// this runtime, so it must be withheld from hooks.
-			add(k)
-		case runtime.EnvSourceConfigEnv:
-			if len(in.provenance) > 0 {
-				switch in.provenance[k] {
-				case envSourceBundle:
-					add(k)
-				case envSourceConfig:
-					// Persisted own env or a legacy non-demoted bundle key:
-					// withhold when the live bundle declares that name and no
-					// higher-precedence caller or inline override set it.
-					if _, declared := in.bundleEnv[k]; declared {
-						if _, ok := higher[k]; !ok {
-							add(k)
-						}
-					}
-				case envSourceExtra:
-					// opts.Env carries callerEnv plus settingsHCEnv for absent keys.
-					if _, fromSettings := in.settingsHCEnv[k]; fromSettings {
-						if v, ok := in.callerEnv[k]; !ok || v == "" {
-							add(k)
-						}
-					}
-				}
-			} else {
-				if _, ok := higher[k]; ok {
-					continue
-				}
-				if _, fromBundle := in.bundleEnv[k]; fromBundle {
-					add(k)
-				} else if _, fromSettings := in.settingsHCEnv[k]; fromSettings {
-					add(k)
-				}
-			}
-		}
-	}
-
-	sort.Strings(withheld)
-	return withheld
+	sort.Strings(out)
+	return out
 }

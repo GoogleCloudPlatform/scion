@@ -15,106 +15,167 @@
 package runtime
 
 import (
+	"slices"
+	"sort"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 )
 
-// EnvSource identifies which runtime-level environment layer supplies a
-// variable's final container value.
-type EnvSource uint8
+// isHarnessTemplateEnvKey reports whether a key returned by Harness.GetEnv
+// originates from a harness-config env_template layer rather than the
+// harness-authored SCION_AGENT_NAME identity variable.
+func isHarnessTemplateEnvKey(name string) bool {
+	return name != "" && name != "SCION_AGENT_NAME"
+}
 
-const (
-	EnvSourceNone EnvSource = iota
-	// EnvSourceConfigEnv is RunConfig.Env (bundle < own < hub/settings < default).
-	EnvSourceConfigEnv
-	// EnvSourceHarnessTemplate is Harness.GetEnv() (harness-config env_template).
-	EnvSourceHarnessTemplate
-	// EnvSourceResolvedAuth is RunConfig.ResolvedAuth.EnvVars.
-	EnvSourceResolvedAuth
-	// EnvSourceResolvedSecret is env-type RunConfig.ResolvedSecrets.
-	EnvSourceResolvedSecret
-)
+// harnessEnvEntry pairs a rendered harness environment entry with whether its
+// winning value came from Harness.GetEnv (env_template) rather than
+// Harness.GetTelemetryEnv or SCION_AGENT_NAME.
+type harnessEnvEntry struct {
+	Key          string
+	Value        string
+	FromTemplate bool
+}
 
-// ResolveRuntimeEnvWinner determines which runtime-level environment layer
-// supplies the final container value for every key present in configEnv,
-// harnessTemplateEnv, resolvedAuth, or resolvedSecrets, following the exact
-// emission order of runtimeName:
-//
-//   - docker, podman, container (apple), kubernetes (k8s), cloudrun,
-//     cloudrun-instances (default):
-//     ResolvedAuth < HarnessTemplate < ResolvedSecret (skipped if in ConfigEnv) < ConfigEnv
-//   - cloudrun-sandbox:
-//     ConfigEnv < HarnessTemplate < ResolvedAuth < ResolvedSecret (skipped if in ConfigEnv)
-//   - substrate:
-//     HarnessTemplate < ConfigEnv < ResolvedAuth < ResolvedSecret
-//
-// Empty resolved-auth and env-secret values are ignored, matching runtime
-// emission. Both hook-env provenance (pkg/agent) and per-runtime emission
-// parity tests share this function so emission order and provenance stay in
-// lockstep.
-func ResolveRuntimeEnvWinner(
-	runtimeName string,
-	configEnv map[string]struct{},
-	harnessTemplateEnv map[string]struct{},
-	resolvedAuth *api.ResolvedAuth,
-	resolvedSecrets []api.ResolvedSecret,
-) map[string]EnvSource {
-	authKeys := make(map[string]struct{})
-	if resolvedAuth != nil {
-		for k, v := range resolvedAuth.EnvVars {
-			if k != "" && v != "" {
-				authKeys[k] = struct{}{}
+// harnessEnvEntriesWithSource returns the sorted, non-empty harness env entries
+// (GetEnv, then GetTelemetryEnv when TelemetryEnabled) together with per-key
+// template provenance so runtimes record withholding from the exact entries they
+// emit.
+func harnessEnvEntriesWithSource(cfg RunConfig, agentHome string) []harnessEnvEntry {
+	if cfg.Harness == nil {
+		return nil
+	}
+	env := make(map[string]harnessEnvEntry)
+	for k, v := range cfg.Harness.GetEnv(cfg.Name, agentHome, cfg.UnixUsername) {
+		if v != "" {
+			env[k] = harnessEnvEntry{
+				Key:          k,
+				Value:        v,
+				FromTemplate: isHarnessTemplateEnvKey(k),
 			}
 		}
 	}
-
-	secretKeys := make(map[string]struct{})
-	for _, s := range resolvedSecrets {
-		if (s.Type == "environment" || s.Type == "") && s.Target != "" && s.Value != "" {
-			secretKeys[s.Target] = struct{}{}
-		}
-	}
-
-	winners := make(map[string]EnvSource, len(configEnv)+len(harnessTemplateEnv)+len(authKeys)+len(secretKeys))
-	apply := func(keys map[string]struct{}, src EnvSource, skipIfInConfig bool) {
-		for k := range keys {
-			if k == "" {
-				continue
-			}
-			if skipIfInConfig {
-				if _, inCfg := configEnv[k]; inCfg {
-					continue
+	if cfg.TelemetryEnabled {
+		for k, v := range cfg.Harness.GetTelemetryEnv() {
+			if v != "" {
+				env[k] = harnessEnvEntry{
+					Key:          k,
+					Value:        v,
+					FromTemplate: false,
 				}
 			}
-			winners[k] = src
+		}
+	}
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	entries := make([]harnessEnvEntry, 0, len(names))
+	for _, k := range names {
+		entries = append(entries, env[k])
+	}
+	return entries
+}
+
+// hookWithheldTracker tracks, during a runtime's own container environment
+// assembly, whether each emitted environment variable's final winning value
+// came from a harness-config layer. Recording happens at the exact emission
+// site in the exact emission order, so SCION_HOOK_WITHHELD_ENV is derived from
+// the same source as container emission and cannot drift from it.
+type hookWithheldTracker struct {
+	configHC map[string]struct{} // keys in cfg.Env that came from a harness-config layer
+	withheld map[string]bool     // current winning withheld state per emitted key
+}
+
+// newHookWithheldTracker initializes a tracker from cfg. Keys in
+// cfg.HookWithheldEnv that also appear in cfg.Env mark those cfg.Env entries as
+// harness-config-sourced (subject to being overridden if a higher-precedence
+// non-harness-config layer emits the same key). Keys in cfg.HookWithheldEnv
+// that are not in cfg.Env are seeded as withheld unless overridden by a
+// non-harness-config layer emitted by the runtime.
+func newHookWithheldTracker(cfg RunConfig) *hookWithheldTracker {
+	envKeys := make(map[string]struct{}, len(cfg.Env))
+	for _, e := range cfg.Env {
+		k, _, _ := strings.Cut(e, "=")
+		if k != "" {
+			envKeys[k] = struct{}{}
 		}
 	}
 
-	switch strings.ToLower(strings.TrimSpace(runtimeName)) {
-	case "substrate":
-		// substrate_bootstrap.go buildBootstrapEnv:
-		// Harness.GetEnv < cfg.Env < ResolvedAuth < ResolvedSecrets.
-		apply(harnessTemplateEnv, EnvSourceHarnessTemplate, false)
-		apply(configEnv, EnvSourceConfigEnv, false)
-		apply(authKeys, EnvSourceResolvedAuth, false)
-		apply(secretKeys, EnvSourceResolvedSecret, false)
-	case "cloudrun-sandbox":
-		// cloudrun_sandbox_runtime.go envFor + Run:
-		// cfg.Env < Harness.GetEnv < ResolvedAuth < non-colliding ResolvedSecrets.
-		apply(configEnv, EnvSourceConfigEnv, false)
-		apply(harnessTemplateEnv, EnvSourceHarnessTemplate, false)
-		apply(authKeys, EnvSourceResolvedAuth, false)
-		apply(secretKeys, EnvSourceResolvedSecret, true)
-	default:
-		// docker, podman, container (apple), kubernetes (k8s), cloudrun,
-		// cloudrun-instances:
-		// ResolvedAuth < Harness.GetEnv < non-colliding ResolvedSecrets < cfg.Env.
-		apply(authKeys, EnvSourceResolvedAuth, false)
-		apply(harnessTemplateEnv, EnvSourceHarnessTemplate, false)
-		apply(secretKeys, EnvSourceResolvedSecret, true)
-		apply(configEnv, EnvSourceConfigEnv, false)
+	t := &hookWithheldTracker{
+		configHC: make(map[string]struct{}, len(cfg.HookWithheldEnv)),
+		withheld: make(map[string]bool, len(cfg.HookWithheldEnv)),
 	}
+	for _, raw := range cfg.HookWithheldEnv {
+		k := strings.TrimSpace(raw)
+		if k == "" || reservedAgentEnvName(k) {
+			continue
+		}
+		if _, inEnv := envKeys[k]; inEnv {
+			t.configHC[k] = struct{}{}
+		} else {
+			t.withheld[k] = true
+		}
+	}
+	return t
+}
 
-	return winners
+// IsConfigHC reports whether key was marked by the broker as coming from a
+// harness-config layer in RunConfig.Env.
+func (t *hookWithheldTracker) IsConfigHC(key string) bool {
+	if len(t.configHC) == 0 {
+		return false
+	}
+	_, ok := t.configHC[key]
+	return ok
+}
+
+// Record records that key was emitted by the runtime, with withheld indicating
+// whether this emission came from a harness-config layer. Later calls overwrite
+// earlier ones, matching last-wins container env semantics.
+func (t *hookWithheldTracker) Record(key string, withheld bool) {
+	if key == "" || reservedAgentEnvName(key) {
+		return
+	}
+	t.withheld[key] = withheld
+}
+
+// Delete removes key from the tracker when the runtime removes an emitted key.
+func (t *hookWithheldTracker) Delete(key string) {
+	delete(t.withheld, key)
+}
+
+// DeleteReserved removes all reserved agent env names from the tracker.
+func (t *hookWithheldTracker) DeleteReserved() {
+	for k := range t.withheld {
+		if reservedAgentEnvName(k) {
+			delete(t.withheld, k)
+		}
+	}
+}
+
+// WithheldKeys returns the sorted list of environment variable names whose
+// final winning container value came from a harness-config layer.
+func (t *hookWithheldTracker) WithheldKeys() []string {
+	if len(t.withheld) == 0 {
+		return nil
+	}
+	var out []string
+	for k, w := range t.withheld {
+		if w && !reservedAgentEnvName(k) {
+			out = append(out, k)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Marker formats the final SCION_HOOK_WITHHELD_ENV marker value.
+func (t *hookWithheldTracker) Marker() string {
+	return envpolicy.FormatWithheldMarker(t.WithheldKeys())
 }

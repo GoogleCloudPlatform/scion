@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -31,42 +32,54 @@ func noAuthModeActive(noAuth bool, cfg *config.HarnessNoAuthConfig) bool {
 	return noAuth && cfg != nil && (cfg.Behavior == "drop-to-shell" || cfg.Behavior == "allow")
 }
 
-// applyNoAuthEnv adds the harness-config's no-auth env (cfg.Env, read from
-// the bundle's no-auth-env.yaml) to the container env when the agent launches
-// in no-auth mode (active). Outside no-auth mode env is returned unchanged, so
-// api-key and auth-file starts never see these entries.
+// applyNoAuthEnvTracked adds the harness-config's no-auth env (cfg.Env, read
+// from the bundle's no-auth-env.yaml) to env with origin envOriginNoAuthHC when
+// the agent launches in no-auth mode (active). Outside no-auth mode env is left
+// unchanged, so api-key and auth-file starts never see these entries.
 //
 // An entry never replaces a key env already sets: settings, agent and hub env
-// win. A key reserved for scion itself (the SCION_* and GCE_METADATA_*
-// namespaces, secret.IsReservedEnvTarget, which also covers the staged-token
-// marker) or one only the hub may supply (config.IsHubOnlyEnvKey) is dropped
-// with a warning, as is an entry with an empty value. Values are literal.
-func applyNoAuthEnv(env []string, cfg *config.HarnessNoAuthConfig, active bool, agentName string) ([]string, []string) {
+// win (preserving their existing provenance). Invalid key names
+// (envpolicy.ValidEnvName), keys reserved for scion itself (the SCION_* and
+// GCE_METADATA_* namespaces, secret.IsReservedEnvTarget, which also covers the
+// staged-token marker), hub-only keys (config.IsHubOnlyEnvKey), and entries
+// with empty values are dropped with a warning. Values are literal.
+func applyNoAuthEnvTracked(env *trackedAgentEnv, cfg *config.HarnessNoAuthConfig, active bool, agentName string) []string {
 	if !active || cfg == nil || len(cfg.Env) == 0 {
-		return env, nil
-	}
-	present := make(map[string]bool, len(env))
-	for _, kv := range env {
-		if k, _, ok := strings.Cut(kv, "="); ok {
-			present[k] = true
-		}
+		return nil
 	}
 	var warnings []string
 	for _, k := range sortedKeys(cfg.Env) {
 		v := cfg.Env[k]
 		switch {
-		case k == "" || strings.Contains(k, "="):
+		case k == "":
 			continue
+		case !envpolicy.ValidEnvName(k):
+			warnings = append(warnings, fmt.Sprintf("Warning: harness-config no-auth-env.yaml env key %q is invalid and was ignored.", k))
 		case secret.IsReservedEnvTarget(k) || config.IsHubOnlyEnvKey(k):
 			warnings = append(warnings, fmt.Sprintf("Warning: harness-config no-auth-env.yaml sets %s, which is reserved for scion; ignored", k))
 		case v == "":
 			warnings = append(warnings, fmt.Sprintf("Warning: harness-config no-auth-env.yaml sets %s to an empty value; ignored", k))
-		case present[k]:
+		case env.Has(k):
 			util.Debugf("no-auth env: %s already set for agent %s; kept", k, agentName)
 		default:
-			env = append(env, k+"="+v)
-			present[k] = true
+			env.Set(k, v, envOriginNoAuthHC)
 		}
 	}
-	return env, warnings
+	return warnings
+}
+
+// applyNoAuthEnv applies cfg.Env to a plain KEY=VALUE slice by delegating to
+// applyNoAuthEnvTracked. Retained for direct slice-level unit tests.
+func applyNoAuthEnv(env []string, cfg *config.HarnessNoAuthConfig, active bool, agentName string) ([]string, []string) {
+	if !active || cfg == nil || len(cfg.Env) == 0 {
+		return env, nil
+	}
+	tracked := newTrackedAgentEnv()
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			tracked.Set(k, v, envOriginCaller)
+		}
+	}
+	warnings := applyNoAuthEnvTracked(tracked, cfg, active, agentName)
+	return tracked.Slice(), warnings
 }
