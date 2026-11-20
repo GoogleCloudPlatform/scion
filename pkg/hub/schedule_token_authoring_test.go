@@ -405,10 +405,10 @@ func TestScheduledFire_UsesRecordedTokenCeiling(t *testing.T) {
 			FireAt:    time.Now().Add(time.Hour),
 			Payload:   `{"agentId":"` + f.target.ID + `","message":"scheduled hello"}`,
 			Status:    store.ScheduledEventPending,
-			CreatedBy: f.owner.ID,
+			CreatedBy: tok.UserID,
 			InitiatorAttribution: store.InitiatorAttribution{
 				InitiatorPrincipalKind:  store.DelegationPrincipalUser,
-				InitiatorPrincipalID:    f.owner.ID,
+				InitiatorPrincipalID:    tok.UserID,
 				InitiatorCredentialKind: store.InitiatorCredentialKindUAT,
 				InitiatorCredentialID:   tok.ID,
 				AuthorizationRevision:   1,
@@ -416,9 +416,10 @@ func TestScheduledFire_UsesRecordedTokenCeiling(t *testing.T) {
 			},
 			AuthorityCeiling: store.EffectCeiling{
 				Kind:              store.EffectCeilingBounded,
-				PermissionIDs:     []string{"scheduled_event.create"},
-				BoundaryKind:      string(BoundaryKindProject),
-				BoundaryProjectID: f.proj.ID,
+				Version:           tok.CeilingVersion,
+				PermissionIDs:     tok.CeilingPermissionIDs,
+				BoundaryKind:      tok.BoundaryKind,
+				BoundaryProjectID: tok.ProjectID,
 			},
 		}
 		require.NoError(t, f.store.CreateScheduledEvent(context.Background(), &storedEvt))
