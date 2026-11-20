@@ -532,7 +532,7 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 			add(p+".question", DecisionErrTooLong, "question is at most %d characters", MaxDecisionQuestionLen)
 		}
 
-		otherOpt, otherEnabled := normalizeAllowOther(p+".allow_other", d.AllowOther, len(in) > 1, add)
+		otherOpt, otherEnabled := normalizeAllowOther(p+".allow_other", d.AllowOther, add)
 		minChoices := MinChoicesPerDecision
 		if otherEnabled {
 			minChoices = MinChoicesPerDecisionWithOther
@@ -577,7 +577,7 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 // normalizeAllowOther validates a decision's allow_other input. It returns
 // the canonical OtherOption and whether Other is enabled (lowering the
 // minimum fixed choices from 2 to 1).
-func normalizeAllowOther(p string, ao *OtherInput, isMulti bool, add func(field, code, format string, args ...any)) (*OtherOption, bool) {
+func normalizeAllowOther(p string, ao *OtherInput, add func(field, code, format string, args ...any)) (*OtherOption, bool) {
 	if ao == nil {
 		return nil, false
 	}
@@ -587,9 +587,6 @@ func normalizeAllowOther(p string, ao *OtherInput, isMulti bool, add func(field,
 	}
 	if !ao.Enabled {
 		return nil, false
-	}
-	if isMulti {
-		add(p, DecisionErrNotSupported, "allow_other is not supported on multi-decision prompts")
 	}
 	for _, name := range ao.extraFields {
 		add(p+"."+name, DecisionErrUnknownField, "unknown field %q", name)
