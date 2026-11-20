@@ -986,24 +986,19 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 		"permission_count", len(appPermissions),
 	)
 
-	// List all projects and check their requested permissions against the app's permissions
-	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
-	if err != nil {
-		return appPermissions, nil, fmt.Errorf("failed to list projects: %v", err)
-	}
-
+	// Page through all projects and check their requested permissions against the app's permissions
 	var affectedProjects []map[string]interface{}
 	now := timeNow()
 
-	for _, project := range projects.Items {
+	if err := s.forEachGitHubAppProject(ctx, func(project *store.Project) {
 		if project.GitHubInstallationID == nil || project.GitHubPermissions == nil {
-			continue
+			return
 		}
 
 		// Compare each project's requested permissions against the app's permissions
 		missingPerms := comparePermissions(project.GitHubPermissions, appPermissions)
 		if len(missingPerms) == 0 {
-			continue
+			return
 		}
 
 		// Project requests permissions the app doesn't have — mark as degraded
@@ -1017,10 +1012,10 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 			LastError:    &now,
 		}
 
-		if err := s.store.UpdateProject(ctx, &project); err != nil {
+		if err := s.store.UpdateProject(ctx, project); err != nil {
 			slog.Error("Failed to update project after permission sync",
 				"project_id", project.ID, "error", err)
-			continue
+			return
 		}
 
 		affectedProjects = append(affectedProjects, map[string]interface{}{
@@ -1033,6 +1028,8 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 			"project_id", project.ID, "project_name", project.Name,
 			"missing_permissions", missingPerms,
 		)
+	}); err != nil {
+		return appPermissions, nil, fmt.Errorf("failed to list projects: %w", err)
 	}
 
 	return appPermissions, affectedProjects, nil

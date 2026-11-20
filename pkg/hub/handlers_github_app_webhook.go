@@ -494,6 +494,38 @@ func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// forEachGitHubAppProject pages through every project in the store via
+// ListProjects cursor pagination and calls visit on each project. The store
+// caps a single ListProjects page at 1000 rows, so callers must follow
+// NextCursor until exhausted rather than relying on a single large Limit.
+func (s *Server) forEachGitHubAppProject(ctx context.Context, visit func(project *store.Project)) error {
+	cursor := ""
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		page, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
+			Limit:          githubAssociationReportPageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			return err
+		}
+		if page == nil {
+			break
+		}
+		for i := range page.Items {
+			visit(&page.Items[i])
+		}
+		if page.NextCursor == "" || page.NextCursor == cursor || len(page.Items) == 0 {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	return nil
+}
+
 // matchProjectsToInstallation finds projects whose git remote matches repos in the
 // installation and auto-associates them. Returns the list of matched project IDs.
 func (s *Server) matchProjectsToInstallation(ctx context.Context, installation *store.GitHubInstallation) []string {
@@ -507,59 +539,55 @@ func (s *Server) matchProjectsToInstallation(ctx context.Context, installation *
 		repoSet[strings.ToLower(r)] = true
 	}
 
-	// List all projects and check their git remote against the installation repos
-	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
-	if err != nil {
-		slog.Error("Failed to list projects for matching", "error", err)
-		return nil
-	}
-
+	// Page through all projects and check their git remote against the installation repos
 	var matched []string
-	for _, project := range projects.Items {
+	if err := s.forEachGitHubAppProject(ctx, func(project *store.Project) {
 		if project.GitRemote == "" {
-			continue
+			return
 		}
 
 		// Extract owner/repo from the git remote URL; a remote on any host
 		// other than the configured GitHub host yields "".
 		ownerRepo := s.githubOwnerRepo(project.GitRemote)
 		if ownerRepo == "" {
-			continue
+			return
 		}
 
 		if !repoSet[strings.ToLower(ownerRepo)] {
-			continue
+			return
 		}
 
 		// Only auto-associate if the project doesn't already have an installation
 		if project.GitHubInstallationID != nil {
-			continue
+			return
 		}
 
 		// A repo-name match only selects the candidate: associate only an
 		// authorized association (host, installation account, and the
 		// creator's own GitHub access; see authorizeGitHubAppAssociation).
-		if _, authzErr := s.authorizeGitHubAppAssociation(ctx, &project, installation.InstallationID); authzErr != nil {
+		if _, authzErr := s.authorizeGitHubAppAssociation(ctx, project, installation.InstallationID); authzErr != nil {
 			slog.Info("Not auto-associating project with GitHub App installation: association not authorized",
 				"project_id", project.ID, "installation_id", installation.InstallationID, "error", authzErr)
-			continue
+			return
 		}
 
 		// Associate the project with this installation
-		s.setGitHubInstallationAssociation(&project, installation.InstallationID)
+		s.setGitHubInstallationAssociation(project, installation.InstallationID)
 
-		if err := s.store.UpdateProject(ctx, &project); err != nil {
+		if err := s.store.UpdateProject(ctx, project); err != nil {
 			slog.Error("Failed to associate project with installation",
 				"project_id", project.ID, "installation_id", installation.InstallationID, "error", err)
-			continue
+			return
 		}
 		s.invalidateGitHubAssociation(project.ID)
-		s.events.PublishProjectUpdated(ctx, &project)
+		s.events.PublishProjectUpdated(ctx, project)
 
 		slog.Info("Auto-associated project with GitHub App installation",
 			"project_id", project.ID, "project_name", project.Name,
 			"installation_id", installation.InstallationID, "account", installation.AccountLogin)
 		matched = append(matched, project.ID)
+	}); err != nil {
+		slog.Error("Failed to list projects for matching", "error", err)
 	}
 
 	return matched
@@ -568,16 +596,10 @@ func (s *Server) matchProjectsToInstallation(ctx context.Context, installation *
 // updateProjectsForInstallation updates the GitHub App status for all projects
 // associated with the given installation.
 func (s *Server) updateProjectsForInstallation(ctx context.Context, installationID int64, state, errorCode, errorMessage string) {
-	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
-	if err != nil {
-		slog.Error("Failed to list projects for status update", "error", err)
-		return
-	}
-
 	now := timeNow()
-	for _, project := range projects.Items {
+	if err := s.forEachGitHubAppProject(ctx, func(project *store.Project) {
 		if project.GitHubInstallationID == nil || *project.GitHubInstallationID != installationID {
-			continue
+			return
 		}
 
 		// Preserve the existing LastTokenMint before overwriting
@@ -597,12 +619,14 @@ func (s *Server) updateProjectsForInstallation(ctx context.Context, installation
 			project.GitHubAppStatus.LastError = &now
 		}
 
-		if err := s.store.UpdateProject(ctx, &project); err != nil {
+		if err := s.store.UpdateProject(ctx, project); err != nil {
 			slog.Error("Failed to update project GitHub App status",
 				"project_id", project.ID, "error", err)
 		} else {
-			s.events.PublishProjectUpdated(ctx, &project)
+			s.events.PublishProjectUpdated(ctx, project)
 		}
+	}); err != nil {
+		slog.Error("Failed to list projects for status update", "error", err)
 	}
 }
 
@@ -674,25 +698,19 @@ func (s *Server) resetPermissionDeniedProjectsForInstallation(ctx context.Contex
 // have lost access to their repository. removedRepos is keyed by lowercased
 // owner/repo.
 func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationID int64, removedRepos map[string]bool) {
-	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
-	if err != nil {
-		slog.Error("Failed to list projects for repo removal check", "error", err)
-		return
-	}
-
 	now := timeNow()
-	for _, project := range projects.Items {
+	if err := s.forEachGitHubAppProject(ctx, func(project *store.Project) {
 		if project.GitHubInstallationID == nil || *project.GitHubInstallationID != installationID {
-			continue
+			return
 		}
 
 		if project.GitRemote == "" {
-			continue
+			return
 		}
 
 		ownerRepo := s.githubOwnerRepo(project.GitRemote)
 		if ownerRepo == "" || !removedRepos[strings.ToLower(ownerRepo)] {
-			continue
+			return
 		}
 
 		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
@@ -703,13 +721,15 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 			LastError:    &now,
 		}
 
-		if err := s.store.UpdateProject(ctx, &project); err != nil {
+		if err := s.store.UpdateProject(ctx, project); err != nil {
 			slog.Error("Failed to update project after repo removal",
 				"project_id", project.ID, "error", err)
 		} else {
 			s.invalidateGitHubAssociation(project.ID)
-			s.events.PublishProjectUpdated(ctx, &project)
+			s.events.PublishProjectUpdated(ctx, project)
 		}
+	}); err != nil {
+		slog.Error("Failed to list projects for repo removal check", "error", err)
 	}
 }
 
