@@ -1581,3 +1581,174 @@ func TestDispatcher_SubjectRuleDerivationAndFallbacks(t *testing.T) {
 		assert.Contains(t, logBuf.String(), fbID, "subject fallback must log warning for %s", fbID)
 	}
 }
+
+func TestDispatcher_LegacyScalarMatchRuleAndEmptyRulesBehavior(t *testing.T) {
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	t.Run("nil_engine_skips_legacy_scalar_and_fires_empty_rules", func(t *testing.T) {
+		ms := newMemTriggerStore()
+		var firedIDs []string
+		core := &fakeCore{
+			fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+				firedIDs = append(firedIDs, req.Authority.DefinitionID)
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+			},
+		}
+		core.enabled.Store(true)
+
+		projID := uuid.NewString()
+		epID := uuid.NewString()
+		evID := uuid.NewString()
+
+		trLegacy := &store.Trigger{
+			ID:           uuid.NewString(),
+			ProjectID:    projID,
+			Name:         "legacy-scalar-no-engine",
+			SourceKind:   store.TriggerSourceKindWebhook,
+			SourceID:     epID,
+			MatchTypes:   []string{"webhook.received"},
+			MatchDialect: store.TriggerDialectCEL,
+			MatchRule:    `event.type == "webhook.received"`,
+			ActionType:   store.TriggerActionMessage,
+			Status:       store.TriggerStatusActive,
+		}
+		trEmpty := &store.Trigger{
+			ID:         uuid.NewString(),
+			ProjectID:  projID,
+			Name:       "empty-rules-no-engine",
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			MatchTypes: []string{"webhook.received"},
+			ActionType: store.TriggerActionMessage,
+			Status:     store.TriggerStatusActive,
+		}
+		require.NoError(t, ms.CreateTrigger(ctx, trLegacy))
+		require.NoError(t, ms.CreateTrigger(ctx, trEmpty))
+		require.NoError(t, ms.CreateTriggerEvent(ctx, &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    "webhook:" + epID,
+			DedupKey:   "d-legacy-nil",
+			OccurredAt: t0,
+			ReceivedAt: t0,
+			Payload:    `{"ok":true}`,
+			Status:     store.TriggerEventStatusPending,
+		}))
+
+		disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+			Core:  core,
+			Store: ms,
+			Now:   func() time.Time { return t0 },
+		})
+		require.NoError(t, err)
+
+		raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		res := disp.HandleItem(ctx, durablequeue.Item{
+			Kind:     trigger.EventQueueKind,
+			DedupKey: evID,
+			Payload:  raw,
+		}, nopLease{})
+		require.NoError(t, res.Err)
+		assert.True(t, res.Done)
+		assert.Equal(t, []string{trEmpty.ID}, firedIDs)
+
+		fires, err := ms.ListTriggerFires(ctx, store.TriggerFireFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		byTrig := make(map[string]store.TriggerFire, len(fires.Items))
+		for _, f := range fires.Items {
+			byTrig[f.TriggerID] = f
+		}
+		assert.Equal(t, store.TriggerFireStatusSkipped, byTrig[trLegacy.ID].Status)
+		assert.Equal(t, trigger.ErrFireRuleEvaluationFailed, byTrig[trLegacy.ID].Error)
+		assert.Equal(t, store.TriggerFireStatusFired, byTrig[trEmpty.ID].Status)
+	})
+
+	t.Run("engine_skips_whitespace_legacy_scalar_and_evaluates_valid_legacy_scalar", func(t *testing.T) {
+		ms := newMemTriggerStore()
+		_, rules := newTestTriggerEngineWithDialects(t)
+		var firedIDs []string
+		core := &fakeCore{
+			fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+				firedIDs = append(firedIDs, req.Authority.DefinitionID)
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+			},
+		}
+		core.enabled.Store(true)
+
+		projID := uuid.NewString()
+		epID := uuid.NewString()
+		evID := uuid.NewString()
+
+		trWhitespaceLegacy := &store.Trigger{
+			ID:           uuid.NewString(),
+			ProjectID:    projID,
+			Name:         "legacy-scalar-whitespace",
+			SourceKind:   store.TriggerSourceKindWebhook,
+			SourceID:     epID,
+			MatchTypes:   []string{"webhook.received"},
+			MatchDialect: store.TriggerDialectCEL,
+			MatchRule:    "   ",
+			ActionType:   store.TriggerActionMessage,
+			Status:       store.TriggerStatusActive,
+		}
+		trValidLegacy := &store.Trigger{
+			ID:           uuid.NewString(),
+			ProjectID:    projID,
+			Name:         "legacy-scalar-valid",
+			SourceKind:   store.TriggerSourceKindWebhook,
+			SourceID:     epID,
+			MatchTypes:   []string{"webhook.received"},
+			MatchDialect: store.TriggerDialectCEL,
+			MatchRule:    `event.type == "webhook.received"`,
+			ActionType:   store.TriggerActionMessage,
+			Status:       store.TriggerStatusActive,
+		}
+		require.NoError(t, ms.CreateTrigger(ctx, trWhitespaceLegacy))
+		require.NoError(t, ms.CreateTrigger(ctx, trValidLegacy))
+		require.NoError(t, ms.CreateTriggerEvent(ctx, &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    "webhook:" + epID,
+			DedupKey:   "d-legacy-eval",
+			OccurredAt: t0,
+			ReceivedAt: t0,
+			Payload:    `{"ok":true}`,
+			Status:     store.TriggerEventStatusPending,
+		}))
+
+		disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+			Core:  core,
+			Store: ms,
+			Rules: rules,
+			Now:   func() time.Time { return t0 },
+		})
+		require.NoError(t, err)
+
+		raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		res := disp.HandleItem(ctx, durablequeue.Item{
+			Kind:     trigger.EventQueueKind,
+			DedupKey: evID,
+			Payload:  raw,
+		}, nopLease{})
+		require.NoError(t, res.Err)
+		assert.True(t, res.Done)
+		assert.Equal(t, []string{trValidLegacy.ID}, firedIDs)
+
+		fires, err := ms.ListTriggerFires(ctx, store.TriggerFireFilter{}, store.ListOptions{})
+		require.NoError(t, err)
+		byTrig := make(map[string]store.TriggerFire, len(fires.Items))
+		for _, f := range fires.Items {
+			byTrig[f.TriggerID] = f
+		}
+		assert.Equal(t, store.TriggerFireStatusSkipped, byTrig[trWhitespaceLegacy.ID].Status)
+		assert.Equal(t, trigger.ErrFireRuleEvaluationFailed, byTrig[trWhitespaceLegacy.ID].Error)
+		assert.Equal(t, store.TriggerFireStatusFired, byTrig[trValidLegacy.ID].Status)
+	})
+}
