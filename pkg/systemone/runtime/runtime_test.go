@@ -45,11 +45,12 @@ import (
 // fakeAdapter is an in-memory provider.Adapter (and optional ModelLister) for
 // testing runtime execution, classification, and provenance without jevwire.
 type fakeAdapter struct {
-	name       string
-	version    string
-	caps       provider.Capabilities
-	validateFn func(inst provider.InstanceView, rule provider.RuleSpec) error
-	invokeFn   func(ctx context.Context, t provider.Transport, inst provider.InstanceView, req provider.ModelRequest) (provider.ModelResult, error)
+	name            string
+	version         string
+	defaultEndpoint string
+	caps            provider.Capabilities
+	validateFn      func(inst provider.InstanceView, rule provider.RuleSpec) error
+	invokeFn        func(ctx context.Context, t provider.Transport, inst provider.InstanceView, req provider.ModelRequest) (provider.ModelResult, error)
 
 	mu       sync.Mutex
 	calls    int
@@ -94,8 +95,9 @@ func newFakeAdapter(invokeFn func(ctx context.Context, t provider.Transport, ins
 	}
 }
 
-func (a *fakeAdapter) Name() string    { return a.name }
-func (a *fakeAdapter) Version() string { return a.version }
+func (a *fakeAdapter) Name() string            { return a.name }
+func (a *fakeAdapter) Version() string         { return a.version }
+func (a *fakeAdapter) DefaultEndpoint() string { return a.defaultEndpoint }
 func (a *fakeAdapter) Capabilities(provider.InstanceView) (provider.Capabilities, error) {
 	return a.caps, nil
 }
@@ -2160,6 +2162,9 @@ func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
 				}, nil
 			})
 			base.caps.AuthScheme = tc.adapterScheme
+			if tc.adapterScheme.Kind == provider.AuthKindGoogleAccessToken {
+				base.defaultEndpoint = "https://synthetic-adc.googleapis.com"
+			}
 			adapter := &dynamicCapsAdapter{fakeAdapter: base}
 
 			reg := provider.NewRegistry()
@@ -2167,6 +2172,9 @@ func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
 
 			inst := defaultTestInstance()
 			inst.Endpoint = srv.URL
+			if tc.adapterScheme.Kind == provider.AuthKindGoogleAccessToken {
+				inst.Endpoint = "https://synthetic-adc.googleapis.com"
+			}
 			inst.Auth = runtime.InstanceAuth{
 				Kind:       tc.instAuthKind,
 				SecretName: "systemone.instance.inst-uuid-1",
@@ -2187,7 +2195,13 @@ func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
 					Credentials: credSrc,
 					TokenSource: tokSrc,
 				},
-				runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+				runtime.WithEgressOptionsForTesting(
+					egress.WithLoopbackServerForTesting(srv.URL, srv.Client()),
+					egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+						targets: map[string]string{"443": srv.Listener.Addr().String()},
+					}),
+					egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+				),
 			)
 			defer rt.CloseIdleConnections()
 
@@ -2664,7 +2678,9 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 			},
 		}, nil
 	})
+	const pinnedOrigin = "https://synthetic-gemini.googleapis.com"
 	adapter.name = "multi-auth-gemini"
+	adapter.defaultEndpoint = pinnedOrigin
 	adapter.caps.AuthScheme = provider.AuthScheme{Kind: provider.AuthKindHeader, HeaderName: "x-goog-api-key"}
 	adapter.caps.SupportedAuth = map[string]provider.AuthScheme{
 		"api_key": {
@@ -2697,7 +2713,13 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 				return canaryToken, nil
 			},
 		},
-		runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+		runtime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(srv.URL, srv.Client()),
+			egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+				targets: map[string]string{"443": srv.Listener.Addr().String()},
+			}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
 	)
 	defer rt.CloseIdleConnections()
 
@@ -2742,7 +2764,7 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 			Revision: 1,
 			Adapter:  "multi-auth-gemini",
 			Model:    "gemini-decision-1",
-			Endpoint: srv.URL,
+			Endpoint: pinnedOrigin,
 			Auth:     runtime.InstanceAuth{Kind: "google_access_token", Scopes: []string{testScope}},
 			Options:  map[string]string{provider.OptionQuotaProject: "paid-gemini-proj-42"},
 			Enabled:  true,
@@ -2769,7 +2791,7 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 			Revision: 1,
 			Adapter:  "multi-auth-gemini",
 			Model:    "gemini-decision-1",
-			Endpoint: srv.URL,
+			Endpoint: pinnedOrigin,
 			Auth:     runtime.InstanceAuth{Kind: "google_access_token", Scopes: []string{testScope}},
 			Enabled:  true,
 		}
@@ -2816,7 +2838,12 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 				},
 				TokenSource: nil,
 			},
-			runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+			runtime.WithEgressOptionsForTesting(
+				egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+					targets: map[string]string{"443": srv.Listener.Addr().String()},
+				}),
+				egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+			),
 		)
 		defer rtNilTok.CloseIdleConnections()
 
@@ -2826,7 +2853,7 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 			Revision: 1,
 			Adapter:  "multi-auth-gemini",
 			Model:    "gemini-decision-1",
-			Endpoint: srv.URL,
+			Endpoint: pinnedOrigin,
 			Auth:     runtime.InstanceAuth{Kind: "google_access_token", Scopes: []string{testScope}},
 			Enabled:  true,
 		}
@@ -2974,7 +3001,9 @@ func TestRuntime_TransportCacheKeyIncludesQuotaProjectAndExcludesToken(t *testin
 			},
 		}, nil
 	})
+	const cachePinnedOrigin = "https://adc-cache.googleapis.com"
 	base.name = "adc-cache-test"
+	base.defaultEndpoint = cachePinnedOrigin
 	base.caps.SupportedAuth = map[string]provider.AuthScheme{
 		"google_access_token": {
 			Kind: provider.AuthKindGoogleAccessToken,
@@ -2995,7 +3024,12 @@ func TestRuntime_TransportCacheKeyIncludesQuotaProjectAndExcludesToken(t *testin
 				return tok, nil
 			},
 		},
-		runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+		runtime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+				targets: map[string]string{"443": srv.Listener.Addr().String()},
+			}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
 	)
 	defer rt.CloseIdleConnections()
 
@@ -3010,7 +3044,7 @@ func TestRuntime_TransportCacheKeyIncludesQuotaProjectAndExcludesToken(t *testin
 			Revision: 1,
 			Adapter:  "adc-cache-test",
 			Model:    "gemini-decision-1",
-			Endpoint: srv.URL,
+			Endpoint: cachePinnedOrigin,
 			Auth: runtime.InstanceAuth{
 				Kind:   "google_access_token",
 				Scopes: []string{"https://www.googleapis.com/auth/synthetic.test"},

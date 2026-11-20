@@ -20,12 +20,14 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1013,4 +1015,90 @@ func TestEgress_ADCBearerQuotaProjectPlacementAndCanaryIsolation(t *testing.T) {
 		assert.Empty(t, hdrs.Get("Authorization"))
 		assert.Empty(t, hdrs.Values("X-Goog-User-Project"))
 	})
+}
+
+func TestEgress_ProductionDefaultsHaveNoTestingSeams(t *testing.T) {
+	// 1. Structural & behavioral check on production NewClient (no options):
+	client := NewClient(StaticBearer("sk-prod-guard"))
+	require.NotNil(t, client)
+	require.NotNil(t, client.CheckRedirect)
+	assert.ErrorIs(t, client.CheckRedirect(nil, nil), ErrRedirectBlocked)
+
+	rt, ok := client.Transport.(*egressRoundTripper)
+	require.True(t, ok)
+	assert.Nil(t, rt.loopbackSeam, "production NewClient must have nil loopbackSeam")
+	assert.NoError(t, rt.configErr)
+
+	prodHTTPTr, ok := rt.prodTransport.(*http.Transport)
+	require.True(t, ok)
+	assert.Nil(t, prodHTTPTr.Proxy, "production egress transport must never consult environment HTTP proxies")
+	require.NotNil(t, prodHTTPTr.TLSClientConfig)
+	assert.False(t, prodHTTPTr.TLSClientConfig.InsecureSkipVerify, "production egress must verify TLS certificates against system roots")
+	assert.GreaterOrEqual(t, prodHTTPTr.TLSClientConfig.MinVersion, uint16(tls.VersionTLS12))
+
+	// 2. Static AST guard across pkg/... and cmd/...: no non-test .go file may
+	//    invoke any System One *ForTesting seam.
+	forbiddenSeams := map[string]bool{
+		"WithLoopbackServerForTesting":         true,
+		"WithTLSConfigForTesting":              true,
+		"WithDialerForTesting":                 true,
+		"WithEgressOptionsForTesting":          true,
+		"SetSystemOneRuntimeOptionsForTesting": true,
+		"SetSystemOneADCForTesting":            true,
+	}
+
+	fset := token.NewFileSet()
+	for _, root := range []string{"../..", "../../../cmd"} {
+		walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				base := filepath.Base(path)
+				if base == "testdata" || base == "vendor" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			slashPath := filepath.ToSlash(path)
+			fileAST, parseErr := parser.ParseFile(fset, path, nil, 0)
+			if parseErr != nil {
+				return parseErr
+			}
+			// pkg/systemone/conformance is the offline adapter test harness (requiring *testing.T);
+			// verify no non-test production file outside conformance ever imports it or calls *ForTesting seams.
+			isConformanceHarness := strings.Contains(slashPath, "systemone/conformance/")
+			if !isConformanceHarness {
+				for _, imp := range fileAST.Imports {
+					if strings.Contains(imp.Path.Value, "pkg/systemone/conformance") {
+						t.Errorf("production file %s must never import test-only conformance package", path)
+					}
+				}
+			} else {
+				return nil
+			}
+			ast.Inspect(fileAST, func(n ast.Node) bool {
+				call, isCall := n.(*ast.CallExpr)
+				if !isCall {
+					return true
+				}
+				switch fn := call.Fun.(type) {
+				case *ast.Ident:
+					if forbiddenSeams[fn.Name] {
+						t.Errorf("non-test file %s calls test-only seam %s at %s", path, fn.Name, fset.Position(call.Pos()))
+					}
+				case *ast.SelectorExpr:
+					if forbiddenSeams[fn.Sel.Name] {
+						t.Errorf("non-test file %s calls test-only seam %s at %s", path, fn.Sel.Name, fset.Position(call.Pos()))
+					}
+				}
+				return true
+			})
+			return nil
+		})
+		require.NoError(t, walkErr)
+	}
 }

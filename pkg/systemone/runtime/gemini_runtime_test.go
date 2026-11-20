@@ -524,7 +524,7 @@ func TestRuntime_GeminiDecisionsAdapter_ADCBearerErrorMappingAndCanaryRedaction(
 		Name:     "gemini-adc",
 		Adapter:  geminidecisions.AdapterName,
 		Model:    "gemini-decision-1",
-		Endpoint: srv.URL,
+		Endpoint: geminidecisions.DefaultEndpoint,
 		Auth: runtime.InstanceAuth{
 			Kind:   "google_access_token",
 			Scopes: []string{testScope},
@@ -543,7 +543,12 @@ func TestRuntime_GeminiDecisionsAdapter_ADCBearerErrorMappingAndCanaryRedaction(
 			},
 			Logger: logger,
 		},
-		runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+		runtime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+				targets: map[string]string{"443": srv.Listener.Addr().String()},
+			}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
 	)
 	defer rt.CloseIdleConnections()
 
@@ -676,6 +681,37 @@ func TestRuntime_GeminiDecisionsAdapter_ADCBearerErrorMappingAndCanaryRedaction(
 			assertNoCanaryLeak(t, eval, err)
 		})
 	}
+
+	t.Run("forced_non_default_endpoint_on_adc_fails_with_auth_zero_requests_and_zero_token_mints", func(t *testing.T) {
+		var mintCalls atomic.Int32
+		mu.Lock()
+		hits = 0
+		mu.Unlock()
+		tokenFn = func(context.Context, runtime.Instance) (string, error) {
+			mintCalls.Add(1)
+			return canaryToken, nil
+		}
+
+		forcedInst := inst
+		forcedInst.Endpoint = "https://attacker.example"
+		_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("cracked glass"), runtime.EvalOptions{
+			Instance: &forcedInst,
+			Consumer: "probe",
+		})
+		require.Error(t, err)
+		eval, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, eval.Class)
+		assert.Equal(t, string(provider.FailAuth), eval.Reason)
+		for _, a := range eval.Attempts {
+			assert.Zero(t, a.Requests)
+		}
+		assert.Zero(t, mintCalls.Load(), "forced ADC row with custom endpoint must mint 0 tokens")
+		mu.Lock()
+		gotHits := hits
+		mu.Unlock()
+		assert.Zero(t, gotHits, "provider must receive 0 requests")
+	})
 }
 
 func TestRuntime_GeminiDecisions_NamedSecretConcurrencyRotationFallbackAndProjectContext(t *testing.T) {
@@ -777,7 +813,7 @@ func TestRuntime_GeminiDecisions_NamedSecretConcurrencyRotationFallbackAndProjec
 		Name:     "gemini-named",
 		Adapter:  geminidecisions.AdapterName,
 		Model:    "gemini-decision-1",
-		Endpoint: tlsSrv.URL,
+		Endpoint: geminidecisions.DefaultEndpoint,
 		Auth: runtime.InstanceAuth{
 			Kind:       provider.InstanceAuthAPIKey,
 			SecretName: provider.DefaultGeminiAPIKeySecretName,
@@ -798,7 +834,10 @@ func TestRuntime_GeminiDecisions_NamedSecretConcurrencyRotationFallbackAndProjec
 			Logger:          logger,
 		},
 		runtime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+				targets: map[string]string{"443": tlsSrv.Listener.Addr().String()},
+			}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
 		),
 	)
 	t.Cleanup(rt.CloseIdleConnections)

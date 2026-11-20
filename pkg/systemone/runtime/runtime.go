@@ -501,6 +501,11 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	if projReason := checkInstanceProjectContext(inst, opts.ProjectID); projReason != "" {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, projReason)
 	}
+	if requiresPinnedDefaultEndpoint(inst, selectedScheme) {
+		if _, ok := provider.MatchesAdapterDefaultEndpoint(adapter, inst.Endpoint); !ok {
+			return r.finishFailed(ctx, compiled.Kind, start, eval, provider.FailAuth)
+		}
+	}
 
 	// Step 5: Tighten runtime-owned deadline with per-instance CallTimeout ceiling (§7.1).
 	attemptOwnDur := r.effectiveOwnDuration(compiled.Timeout, opts, inst.Limits.CallTimeout)
@@ -720,6 +725,11 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	}
 	if projReason := checkInstanceProjectContext(inst, EvalProjectIDFromContext(ctx)); projReason != "" {
 		return nil, provider.NewProviderError(projReason, false, 0, 0, "project context is required for project-scoped secret reference")
+	}
+	if requiresPinnedDefaultEndpoint(inst, selectedScheme) {
+		if _, ok := provider.MatchesAdapterDefaultEndpoint(adapter, inst.Endpoint); !ok {
+			return nil, provider.NewProviderError(provider.FailAuth, false, 0, 0, "custom endpoint is not permitted for named-secret or google_access_token instances")
+		}
 	}
 
 	start := time.Now()
@@ -1253,6 +1263,15 @@ func checkInstanceProjectContext(inst Instance, projectID string) provider.FailR
 		}
 	}
 	return ""
+}
+
+func requiresPinnedDefaultEndpoint(inst Instance, selectedScheme provider.AuthScheme) bool {
+	_, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
+	if isNamedRef {
+		return true
+	}
+	return selectedScheme.Kind == provider.AuthKindGoogleAccessToken ||
+		inst.Auth.Kind == string(provider.AuthKindGoogleAccessToken)
 }
 
 func isPreCallEgressError(err error) bool {

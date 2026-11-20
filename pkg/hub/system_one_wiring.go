@@ -483,6 +483,9 @@ func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst sys
 	secretName := strings.TrimSpace(inst.Auth.SecretName)
 	secScope, isNamedRef := systemoneprovider.SecretRefModeFromOptions(inst.Options)
 	if isNamedRef {
+		if c.srv != nil && !c.srv.isPinnedInstanceEndpointAllowed(inst.Adapter, inst.Endpoint) {
+			return "", egress.ErrAuth
+		}
 		return c.resolveNamedSecretToken(ctx, secretName, secScope)
 	}
 	if secretName == "" || !strings.HasPrefix(secretName, systemOneSecretPrefix) {
@@ -580,6 +583,27 @@ func (c *hubSystemOneCredentialSource) resolveNamedSecretToken(ctx context.Conte
 	default:
 		return "", egress.ErrAuth
 	}
+}
+
+// isPinnedInstanceEndpointAllowed verifies that an instance using a shared
+// named secret or Hub-host ADC credentials targets the adapter's canonical
+// default HTTPS endpoint (PV3 Addendum F §F9). Bare unit-test instances that
+// omit both Adapter and Endpoint are permitted; any non-empty Endpoint or
+// named Adapter must satisfy MatchesAdapterDefaultEndpoint.
+func (s *Server) isPinnedInstanceEndpointAllowed(adapterName, endpoint string) bool {
+	trimmedAdapter := strings.TrimSpace(adapterName)
+	if trimmedAdapter == "" {
+		return strings.TrimSpace(endpoint) == ""
+	}
+	if s == nil {
+		return false
+	}
+	adapter, ok := s.SystemOneProviderRegistry().Lookup(trimmedAdapter)
+	if !ok {
+		return false
+	}
+	_, pinnedOK := systemoneprovider.MatchesAdapterDefaultEndpoint(adapter, endpoint)
+	return pinnedOK
 }
 
 // isSystemOneSecretAuthError reports whether err from SecretBackend.Get

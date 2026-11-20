@@ -75,6 +75,14 @@ When --auth-kind is api_key (the default), two credential modes are supported
        in that scope; prefer a non-injected secret (for example --type variable
        or --injection-mode as_needed) when agents should not receive the policy
        evaluation key.
+     - Named-secret instances are pinned to the adapter's canonical default
+       HTTPS endpoint (for gemini_decisions,
+       https://generativelanguage.googleapis.com); custom --endpoint values
+       require an owned API-key credential (--key-stdin or --key-file).
+     - Selecting a named secret authorizes sending its value to the adapter's
+       provider endpoint; choosing the correct secret is the configuration
+       owner's responsibility (secret name matching does not prove provider
+       ownership).
      - Process environment variables (such as GEMINI_API_KEY), user secrets, and
        runtime-broker secrets are never consulted.
 
@@ -96,6 +104,9 @@ Credentials (ADC) and stores no secret or token:
     --quota-project is required).
   - Do not combine --auth-kind google_access_token with --key-stdin or
     --key-file.
+  - google_access_token instances are pinned to the adapter's canonical default
+    HTTPS endpoint (https://generativelanguage.googleapis.com); custom
+    --endpoint values require an owned API-key credential.
   - ADC credentials and token sources are cached in memory per scope set; a
     changed ADC environment requires a Hub restart. Instance create, get, and
     list perform no ADC discovery or metadata I/O and report Credential Type as
@@ -151,7 +162,7 @@ func init() {
 	f := adminSystemOneInstanceCreateCmd.Flags()
 	f.StringVar(&adminSystemOneCreateOpts.adapter, "adapter", "typesafe", "Provider adapter name (for example: typesafe, gemini_decisions)")
 	f.StringVar(&adminSystemOneCreateOpts.model, "model", "", "Provider model identifier (required for typesafe and gemini_decisions, e.g. jev-1.14.0 or gemini-decision-1)")
-	f.StringVar(&adminSystemOneCreateOpts.endpoint, "endpoint", "", "Provider base HTTPS URL (defaults to adapter default when supported; required otherwise)")
+	f.StringVar(&adminSystemOneCreateOpts.endpoint, "endpoint", "", "Provider base HTTPS URL (pinned to adapter default for named-secret and google_access_token instances; custom values require --key-stdin/--key-file)")
 	f.StringVar(&adminSystemOneCreateOpts.location, "location", "", "Optional provider location or region")
 	f.StringVar(&adminSystemOneCreateOpts.authKind, "auth-kind", "api_key", "Authentication kind (api_key or google_access_token)")
 	f.StringArrayVar(&adminSystemOneCreateOpts.authScopes, "auth-scope", nil, "OAuth2 scope URL for --auth-kind google_access_token (repeatable; required for google_access_token; must start with https://www.googleapis.com/auth/)")

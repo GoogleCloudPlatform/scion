@@ -1216,6 +1216,8 @@ func TestAdminSystemOne_NamedSecretFlagsOutputAndValidation(t *testing.T) {
 		assert.Contains(t, createHelp, "project_or_hub")
 		assert.Contains(t, createHelp, "environment and variable (internal and file")
 		assert.Contains(t, createHelp, "unresolved (run probe)")
+		assert.Contains(t, createHelp, "pinned to the adapter's canonical default")
+		assert.Contains(t, createHelp, "configuration\n       owner's responsibility")
 		assert.Contains(t, createHelp, "--type variable")
 		assert.Contains(t, createHelp, "injection mode \"always\"")
 

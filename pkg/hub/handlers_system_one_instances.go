@@ -824,6 +824,12 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		}
 
 		if hasExplicitSecretRef || (apiKey == "" && defaultRefName != "") {
+			canonEndpoint, pinnedOK := systemoneprovider.MatchesAdapterDefaultEndpoint(adapter, req.Endpoint)
+			if !pinnedOK {
+				ValidationError(w, "custom endpoints require an owned API-key credential; named-secret instances must use the adapter's default endpoint", nil)
+				return
+			}
+			endpoint = canonEndpoint
 			refName := defaultRefName
 			refScope := systemoneprovider.DefaultSecretRefScope
 			if hasExplicitSecretRef {
@@ -892,6 +898,12 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 				return
 			}
 		}
+		canonEndpoint, pinnedOK := systemoneprovider.MatchesAdapterDefaultEndpoint(adapter, req.Endpoint)
+		if !pinnedOK {
+			ValidationError(w, "custom endpoints require an owned API-key credential; google_access_token instances must use the adapter's default endpoint", nil)
+			return
+		}
+		endpoint = canonEndpoint
 		authScopes, err = validateSystemOneGoogleScopes(req.Auth)
 		if err != nil {
 			ValidationError(w, err.Error(), nil)

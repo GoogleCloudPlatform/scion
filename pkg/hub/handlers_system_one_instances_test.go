@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -49,6 +50,44 @@ import (
 )
 
 const systemOneAdminPath = "/api/v1/admin/system-one/instances"
+
+type testSystemOnePublicResolver struct{}
+
+func (testSystemOnePublicResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+}
+
+type testSystemOnePort443Dialer struct {
+	target string
+}
+
+func (d testSystemOnePort443Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	var nd net.Dialer
+	if port == "443" {
+		return nd.DialContext(ctx, network, d.target)
+	}
+	return nd.DialContext(ctx, network, addr)
+}
+
+func testSystemOneEgressOptions(t *testing.T, tlsSrv *httptest.Server) []egress.Option {
+	t.Helper()
+	tr, ok := tlsSrv.Client().Transport.(*http.Transport)
+	require.True(t, ok)
+	require.NotNil(t, tr.TLSClientConfig)
+	tlsCfg := tr.TLSClientConfig.Clone()
+	tlsCfg.ServerName = "127.0.0.1"
+	return []egress.Option{
+		egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		egress.WithDialerForTesting(testSystemOnePublicResolver{}, testSystemOnePort443Dialer{
+			target: tlsSrv.Listener.Addr().String(),
+		}),
+		egress.WithTLSConfigForTesting(tlsCfg),
+	}
+}
 
 func newSystemOneTestServer(t *testing.T, enabled bool) (*Server, store.Store, *secret.LocalBackend) {
 	t.Helper()
@@ -301,7 +340,7 @@ func TestSystemOneInstances_CRUDAndProbe(t *testing.T) {
 
 	srv.setSystemOneRuntimeOptions(
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			testSystemOneEgressOptions(t, tlsSrv)...,
 		),
 	)
 
@@ -467,7 +506,7 @@ func TestSystemOneInstances_CRUDAndProbe(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(origDefault) })
 	srv.setSystemOneRuntimeOptions(
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			testSystemOneEgressOptions(t, tlsSrv)...,
 		),
 	)
 
@@ -677,7 +716,7 @@ func TestSystemOneInstances_CredentialSeparationAndSecretIsolation(t *testing.T)
 	t.Cleanup(tlsSrv.Close)
 	srv.setSystemOneRuntimeOptions(
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			testSystemOneEgressOptions(t, tlsSrv)...,
 		),
 	)
 	instRow, err := s.GetSystemOneInstanceByName(ctx, "sec-isolated")
@@ -775,7 +814,7 @@ func TestSystemOneInstances_DeleteSecretFirstAndForgetRuntime(t *testing.T) {
 
 	srv.setSystemOneRuntimeOptions(
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			testSystemOneEgressOptions(t, tlsSrv)...,
 		),
 	)
 
@@ -1213,7 +1252,7 @@ func TestSystemOneInstances_GeminiDecisionsVerticalProbeAndTypeSafeRegression(t 
 	srv.SetSystemOneRuntimeOptionsForTesting(
 		t,
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			testSystemOneEgressOptions(t, tlsSrv)...,
 		),
 	)
 
@@ -1559,7 +1598,7 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 
 	srv.SetSystemOneRuntimeOptionsForTesting(t,
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			testSystemOneEgressOptions(t, tlsSrv)...,
 		),
 	)
 	reg := srv.SystemOneProviderRegistry()
@@ -1706,12 +1745,11 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 	// 3. Create ADC instance: writes zero secrets, makes 0 ADC calls, stores ONLY options["quota_project"] and auth.{kind,scopes},
 	//    and renders "unresolved (run probe)" until probe populates the in-memory cache.
 	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-		"name":     "gemini-adc-main",
-		"adapter":  geminidecisions.AdapterName,
-		"model":    "gemini-decision-1",
-		"endpoint": tlsSrv.URL,
-		"auth":     map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
-		"options":  map[string]string{"quota_project": quotaProject},
+		"name":    "gemini-adc-main",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
+		"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+		"options": map[string]string{"quota_project": quotaProject},
 	})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
 	assert.NotContains(t, createRec.Body.String(), canaryADCToken)
@@ -1824,7 +1862,7 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 		"name":     "gemini-adc-no-qp",
 		"adapter":  geminidecisions.AdapterName,
 		"model":    "gemini-decision-1",
-		"endpoint": tlsSrv.URL,
+		"endpoint": "https://generativelanguage.googleapis.com:443/",
 		"auth":     map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
 	})
 	require.Equal(t, http.StatusCreated, noQPCreate.Code, noQPCreate.Body.String())
@@ -1998,7 +2036,7 @@ func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAnd
 			Logger:      slog.New(slog.NewJSONHandler(&runtimeLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		},
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			testSystemOneEgressOptions(t, tlsSrv)...,
 		),
 	)
 	srv.mu.Unlock()
@@ -2174,10 +2212,9 @@ func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAnd
 
 	// 2. Create gemini_decisions without apiKey or secretRef -> defaults to GEMINI_API_KEY / project_or_hub.
 	createDefRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-		"name":     "gemini-named-default",
-		"adapter":  geminidecisions.AdapterName,
-		"model":    "gemini-decision-1",
-		"endpoint": tlsSrv.URL,
+		"name":    "gemini-named-default",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
 	})
 	require.Equal(t, http.StatusCreated, createDefRec.Code, createDefRec.Body.String())
 	var createdDef SystemOneInstanceResponse
@@ -2216,7 +2253,7 @@ func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAnd
 			"name":     pair[0],
 			"adapter":  geminidecisions.AdapterName,
 			"model":    "gemini-decision-1",
-			"endpoint": tlsSrv.URL,
+			"endpoint": geminidecisions.DefaultEndpoint,
 			"auth": map[string]any{
 				"kind":      "api_key",
 				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": pair[1]},
@@ -2556,7 +2593,7 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 			Logger:      slog.New(slog.NewJSONHandler(&runtimeLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		},
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			testSystemOneEgressOptions(t, tlsSrv)...,
 		),
 	)
 	srv.mu.Unlock()
@@ -2650,10 +2687,9 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 		{name: "another_instance_owned_secret_sanitized", ref: strings.ReplaceAll(strings.ReplaceAll(ownedSecretName, ".", "_"), "-", "_"), scope: "hub"},
 	} {
 		rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-			"name":     "bad-" + strings.ReplaceAll(tc.name, "_", "-"),
-			"adapter":  geminidecisions.AdapterName,
-			"model":    "gemini-decision-1",
-			"endpoint": tlsSrv.URL,
+			"name":    "bad-" + strings.ReplaceAll(tc.name, "_", "-"),
+			"adapter": geminidecisions.AdapterName,
+			"model":   "gemini-decision-1",
 			"auth": map[string]any{
 				"kind":      "api_key",
 				"secretRef": map[string]any{"name": tc.ref, "scope": tc.scope},
@@ -2690,7 +2726,7 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 			Name:     cr.name,
 			Adapter:  geminidecisions.AdapterName,
 			Model:    "gemini-decision-1",
-			Endpoint: tlsSrv.URL,
+			Endpoint: geminidecisions.DefaultEndpoint,
 			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: cr.secretName},
 			Options:  map[string]string{systemoneprovider.OptionSecretScope: cr.scope},
 			Enabled:  true,
@@ -2730,10 +2766,9 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 	require.NoError(t, err)
 
 	mutCreateRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-		"name":     "c1-mutated-type",
-		"adapter":  geminidecisions.AdapterName,
-		"model":    "gemini-decision-1",
-		"endpoint": tlsSrv.URL,
+		"name":    "c1-mutated-type",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
 		"auth": map[string]any{
 			"kind":      "api_key",
 			"secretRef": map[string]any{"name": "MUTATED_KEY", "scope": "hub"},
@@ -2793,4 +2828,369 @@ func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t
 		assert.NotContains(t, wireStr, forbidden)
 		assert.NotContains(t, allLogs, forbidden)
 	}
+}
+
+func TestSystemOneInstances_Item7_EndpointPinForNamedSecretAndADC(t *testing.T) {
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+
+	var auditBuf, runtimeLogBuf syncBuffer
+	srv.envSecretLog = slog.New(slog.NewJSONHandler(&auditBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	superAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-f9-super", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+	// Built-in hub-admin user (not a member of victimProj, holds no secret permissions).
+	hubAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-f9-hubadmin", store.SystemRoleHubAdmin))
+	require.NoError(t, err)
+	projOwner, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-f9-projowner", store.SystemRoleHubMember))
+	require.NoError(t, err)
+
+	const (
+		projSecretCanary = "CANARY_F9_PROJECT_GITHUB_TOKEN_8414"
+		hubSecretCanary  = "CANARY_F9_HUB_GEMINI_KEY_8414"
+		ownedKeyCanary   = "CANARY_F9_OWNED_CUSTOM_EP_KEY_8414"
+		adcCanaryToken   = "CANARY_F9_ADC_BEARER_TOKEN_8414"
+		testADCScope     = "https://www.googleapis.com/auth/synthetic.f9.scope"
+	)
+
+	var (
+		defaultProviderHits atomic.Int32
+		attackerHits        atomic.Int32
+		adcProviderCalls    atomic.Int32
+		adcTokenMints       atomic.Int32
+	)
+	defaultProviderSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defaultProviderHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q_ok":{"type":"noul","noul":0.92,"confidence":0.95}}}`))
+	}))
+	t.Cleanup(defaultProviderSrv.Close)
+
+	attackerSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attackerHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q_ok":{"type":"noul","noul":0.92,"confidence":0.95}}}`))
+	}))
+	t.Cleanup(attackerSrv.Close)
+
+	srv.SetSystemOneADCForTesting(t, func(_ context.Context, _ []string) (*SystemOneADCCredentials, error) {
+		adcProviderCalls.Add(1)
+		return &SystemOneADCCredentials{
+			CredentialType:      SystemOneADCTypeServiceAccount,
+			ServiceAccountEmail: "so-f9-sa@proj.iam.gserviceaccount.com",
+			TokenSource: funcTokenSource(func() (*oauth2.Token, error) {
+				adcTokenMints.Add(1)
+				return &oauth2.Token{AccessToken: adcCanaryToken, Expiry: time.Now().Add(time.Hour)}, nil
+			}),
+		}, nil
+	})
+
+	reg := srv.SystemOneProviderRegistry()
+	// Route canonical default (:443) to defaultProviderSrv AND allow loopback to attackerSrv for owned-credential regression.
+	egOpts := append(
+		testSystemOneEgressOptions(t, defaultProviderSrv),
+		egress.WithLoopbackServerForTesting(attackerSrv.URL, attackerSrv.Client()),
+	)
+	srv.mu.Lock()
+	srv.systemOneRuntime = systemoneruntime.New(
+		systemoneruntime.Config{
+			Registry:    reg,
+			Instances:   &hubSystemOneInstanceSource{srv: srv},
+			Credentials: (&hubSystemOneCredentialSource{srv: srv}).APIKeyToken,
+			TokenSource: (&hubSystemOneCredentialSource{srv: srv}).GoogleAccessToken,
+			Logger:      slog.New(slog.NewJSONHandler(&runtimeLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		},
+		systemoneruntime.WithEgressOptionsForTesting(egOpts...),
+	)
+	srv.mu.Unlock()
+
+	victimProj := &store.Project{
+		ID:      tid("f9-victim-proj"),
+		Name:    "f9-victim-proj",
+		Slug:    "f9-victim-proj",
+		OwnerID: projOwner.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, victimProj))
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GITHUB_TOKEN",
+		Value:      projSecretCanary,
+		SecretType: store.SecretTypeEnvironment,
+		Target:     "GITHUB_TOKEN",
+		Scope:      store.ScopeProject,
+		ScopeID:    victimProj.ID,
+		CreatedBy:  projOwner.ID,
+		UpdatedBy:  projOwner.ID,
+	})
+	require.NoError(t, err)
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY",
+		Value:      hubSecretCanary,
+		SecretType: store.SecretTypeVariable,
+		Target:     "GEMINI_API_KEY",
+		Scope:      store.ScopeHub,
+		ScopeID:    srv.hubID,
+		CreatedBy:  superAdmin.ID,
+		UpdatedBy:  superAdmin.ID,
+	})
+	require.NoError(t, err)
+
+	// 1. Least-privileged hub-admin PoC case (§F9): custom endpoint + project secret_ref -> 400 at create!
+	for _, badEndpoint := range []string{
+		attackerSrv.URL,
+		"https://attacker.example",
+		"http://generativelanguage.googleapis.com",
+		"https://user:pw@generativelanguage.googleapis.com",
+		"https://generativelanguage.googleapis.com:8443",
+		"https://generativelanguage.googleapis.com/v1beta",
+		"https://generativelanguage.googleapis.com?foo=1",
+		"https://generativelanguage.googleapis.com#frag",
+		"https://generativelanguage.googleapis.com.",
+		"https://142.250.80.42",
+		"https://xn--generativelanguage-123.googleapis.com",
+	} {
+		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":     "f9-bad-ref",
+			"adapter":  geminidecisions.AdapterName,
+			"model":    "gemini-decision-1",
+			"endpoint": badEndpoint,
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": "GITHUB_TOKEN", "scope": "project"},
+			},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, "endpoint=%q body=%s", badEndpoint, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), projSecretCanary)
+	}
+
+	// 2. Forced/planted secret_ref row with custom endpoint + hub-admin probe --project -> auth with 0 requests, attacker receives NOTHING!
+	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       "99997001-0000-4000-8000-000000000001",
+		Name:     "f9-forced-proj-ref",
+		Adapter:  geminidecisions.AdapterName,
+		Model:    "gemini-decision-1",
+		Endpoint: attackerSrv.URL,
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "GITHUB_TOKEN"},
+		Options:  map[string]string{systemoneprovider.OptionSecretScope: "project"},
+		Enabled:  true,
+	}))
+
+	binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`)
+	attackerHits.Store(0)
+	defaultProviderHits.Store(0)
+	forcedRefRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/f9-forced-proj-ref/probe", map[string]any{
+		"project": victimProj.ID,
+		"spec":    binSpec,
+		"probe":   map[string]any{"text": "Exfiltration attempt."},
+	})
+	require.Equal(t, http.StatusOK, forcedRefRec.Code, forcedRefRec.Body.String())
+	var forcedRefResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(forcedRefRec.Body.Bytes(), &forcedRefResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, forcedRefResp.Class)
+	assert.Equal(t, "auth", forcedRefResp.Reason)
+	if forcedRefResp.Evaluation != nil {
+		for _, a := range forcedRefResp.Evaluation.Attempts {
+			assert.Zero(t, a.Requests)
+		}
+	}
+	assert.Zero(t, attackerHits.Load(), "attacker httptest server must receive 0 requests")
+	assert.Zero(t, defaultProviderHits.Load(), "default provider must receive 0 requests")
+	assert.NotContains(t, forcedRefRec.Body.String(), projSecretCanary)
+
+	// 3. ADC with custom endpoint -> 400 at create (0 ADC calls, 0 token mints), and forced row -> auth, 0 requests, 0 token mints!
+	adcProviderCalls.Store(0)
+	adcTokenMints.Store(0)
+	for _, badEndpoint := range []string{
+		attackerSrv.URL,
+		"https://attacker.example",
+		"https://generativelanguage.googleapis.com:8443",
+		"https://generativelanguage.googleapis.com/v1beta",
+	} {
+		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":     "f9-bad-adc",
+			"adapter":  geminidecisions.AdapterName,
+			"model":    "gemini-decision-1",
+			"endpoint": badEndpoint,
+			"auth":     map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, "ADC endpoint=%q body=%s", badEndpoint, rec.Body.String())
+	}
+	assert.Zero(t, adcProviderCalls.Load())
+	assert.Zero(t, adcTokenMints.Load())
+
+	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       "99997002-0000-4000-8000-000000000002",
+		Name:     "f9-forced-adc",
+		Adapter:  geminidecisions.AdapterName,
+		Model:    "gemini-decision-1",
+		Endpoint: attackerSrv.URL,
+		Auth: store.SystemOneInstanceAuth{
+			Kind:   store.SystemOneAuthKindGoogleAccessToken,
+			Scopes: []string{testADCScope},
+		},
+		Enabled: true,
+	}))
+	attackerHits.Store(0)
+	forcedADCRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/f9-forced-adc/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Forced ADC custom endpoint."},
+	})
+	require.Equal(t, http.StatusOK, forcedADCRec.Code)
+	var forcedADCResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(forcedADCRec.Body.Bytes(), &forcedADCResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, forcedADCResp.Class)
+	assert.Equal(t, "auth", forcedADCResp.Reason)
+	assert.Zero(t, attackerHits.Load(), "attacker server must receive 0 requests")
+	assert.Zero(t, adcProviderCalls.Load(), "forced ADC row with custom endpoint must perform 0 ADC calls")
+	assert.Zero(t, adcTokenMints.Load(), "forced ADC row with custom endpoint must mint 0 tokens")
+
+	// 4. Adapter without EndpointDefaulter cannot use secret_ref or ADC -> 400 at create, forced row -> auth with 0 requests!
+	noDefReg := systemoneprovider.NewRegistry()
+	require.NoError(t, geminidecisions.Register(noDefReg))
+	require.NoError(t, noDefReg.Register(jevwire.NewTypeSafe()))
+	require.NoError(t, noDefReg.Register(noEndpointDefaulterTestAdapter{}))
+	srv.mu.Lock()
+	srv.systemOneRegistry = noDefReg
+	srv.systemOneRuntime = systemoneruntime.New(
+		systemoneruntime.Config{
+			Registry:    noDefReg,
+			Instances:   &hubSystemOneInstanceSource{srv: srv},
+			Credentials: (&hubSystemOneCredentialSource{srv: srv}).APIKeyToken,
+			TokenSource: (&hubSystemOneCredentialSource{srv: srv}).GoogleAccessToken,
+			Logger:      slog.New(slog.NewJSONHandler(&runtimeLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		},
+		systemoneruntime.WithEgressOptionsForTesting(egOpts...),
+	)
+	srv.mu.Unlock()
+
+	for _, ep := range []string{"", "https://custom-nodefault.example"} {
+		ndRefRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":     "f9-nd-ref",
+			"adapter":  "no_defaulter_test",
+			"model":    "m1",
+			"endpoint": ep,
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "hub"},
+			},
+		})
+		require.Equal(t, http.StatusBadRequest, ndRefRec.Code, "no-defaulter secret_ref ep=%q: %s", ep, ndRefRec.Body.String())
+
+		ndADCRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":     "f9-nd-adc",
+			"adapter":  "no_defaulter_test",
+			"model":    "m1",
+			"endpoint": ep,
+			"auth":     map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+		})
+		require.Equal(t, http.StatusBadRequest, ndADCRec.Code, "no-defaulter ADC ep=%q: %s", ep, ndADCRec.Body.String())
+	}
+
+	require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+		ID:       "99997003-0000-4000-8000-000000000003",
+		Name:     "f9-forced-nd-ref",
+		Adapter:  "no_defaulter_test",
+		Model:    "m1",
+		Endpoint: "https://custom-nodefault.example",
+		Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "GEMINI_API_KEY"},
+		Options:  map[string]string{systemoneprovider.OptionSecretScope: "hub"},
+		Enabled:  true,
+	}))
+	forcedTSRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/f9-forced-nd-ref/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Forced no-defaulter secret_ref."},
+	})
+	require.Equal(t, http.StatusOK, forcedTSRec.Code)
+	var forcedTSResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(forcedTSRec.Body.Bytes(), &forcedTSResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, forcedTSResp.Class)
+	assert.Equal(t, "auth", forcedTSResp.Reason)
+
+	// 5. Omitted and canonical default forms accepted for both secret_ref and ADC, normalized to canonical default.
+	for i, goodEp := range []string{"", geminidecisions.DefaultEndpoint, "HTTPS://Generativelanguage.googleapis.com:443/"} {
+		refName := fmt.Sprintf("f9-good-ref-%d", i)
+		refRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":     refName,
+			"adapter":  geminidecisions.AdapterName,
+			"model":    "gemini-decision-1",
+			"endpoint": goodEp,
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": "GEMINI_API_KEY", "scope": "hub"},
+			},
+		})
+		require.Equal(t, http.StatusCreated, refRec.Code, refRec.Body.String())
+		var refCreated SystemOneInstanceResponse
+		require.NoError(t, json.Unmarshal(refRec.Body.Bytes(), &refCreated))
+		assert.Equal(t, geminidecisions.DefaultEndpoint, refCreated.Endpoint)
+
+		adcName := fmt.Sprintf("f9-good-adc-%d", i)
+		adcRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":     adcName,
+			"adapter":  geminidecisions.AdapterName,
+			"model":    "gemini-decision-1",
+			"endpoint": goodEp,
+			"auth":     map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+		})
+		require.Equal(t, http.StatusCreated, adcRec.Code, adcRec.Body.String())
+		var adcCreated SystemOneInstanceResponse
+		require.NoError(t, json.Unmarshal(adcRec.Body.Bytes(), &adcCreated))
+		assert.Equal(t, geminidecisions.DefaultEndpoint, adcCreated.Endpoint)
+	}
+
+	// 6. Owned-credential custom-endpoint regression still works!
+	ownedRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "f9-owned-custom-ep",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": attackerSrv.URL,
+		"auth":     map[string]any{"kind": "api_key", "apiKey": ownedKeyCanary},
+	})
+	require.Equal(t, http.StatusCreated, ownedRec.Code, ownedRec.Body.String())
+	attackerHits.Store(0)
+	ownedProbeRec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, systemOneAdminPath+"/f9-owned-custom-ep/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Owned custom endpoint check."},
+	})
+	require.Equal(t, http.StatusOK, ownedProbeRec.Code)
+	var ownedProbeResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(ownedProbeRec.Body.Bytes(), &ownedProbeResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, ownedProbeResp.Class)
+	assert.Equal(t, int32(1), attackerHits.Load())
+
+	allLogs := auditBuf.String() + "\n" + runtimeLogBuf.String()
+	for _, canary := range []string{projSecretCanary, hubSecretCanary, ownedKeyCanary, adcCanaryToken} {
+		assert.NotContains(t, allLogs, canary)
+	}
+}
+
+type noEndpointDefaulterTestAdapter struct{}
+
+func (noEndpointDefaulterTestAdapter) Name() string    { return "no_defaulter_test" }
+func (noEndpointDefaulterTestAdapter) Version() string { return "0.1.0" }
+func (noEndpointDefaulterTestAdapter) Capabilities(systemoneprovider.InstanceView) (systemoneprovider.Capabilities, error) {
+	return systemoneprovider.Capabilities{
+		Primitives: map[string]systemoneprovider.PrimitiveLimits{
+			spec.PrimitiveBinary: {Supported: true, DistributionCompleteness: systemoneprovider.CompletenessComplete},
+		},
+		MaxQuestionsPerRequest: 16,
+		MaxInputTokens:         8192,
+		Truncation:             systemoneprovider.TruncationNever,
+		ReturnsDistribution:    true,
+		SideEffectFree:         true,
+		AuthScheme:             systemoneprovider.AuthBearer,
+		SupportedAuth: map[string]systemoneprovider.AuthScheme{
+			systemoneprovider.InstanceAuthAPIKey:                systemoneprovider.AuthBearer,
+			string(systemoneprovider.AuthKindGoogleAccessToken): {Kind: systemoneprovider.AuthKindGoogleAccessToken},
+		},
+	}, nil
+}
+func (noEndpointDefaulterTestAdapter) Validate(systemoneprovider.InstanceView, systemoneprovider.RuleSpec) error {
+	return nil
+}
+func (noEndpointDefaulterTestAdapter) Invoke(context.Context, systemoneprovider.Transport, systemoneprovider.InstanceView, systemoneprovider.ModelRequest) (systemoneprovider.ModelResult, error) {
+	return systemoneprovider.ModelResult{}, nil
 }

@@ -493,6 +493,9 @@ func (c *hubSystemOneCredentialSource) GoogleAccessToken(ctx context.Context, in
 	if c.srv == nil {
 		return "", egress.ErrAuth
 	}
+	if !c.srv.isPinnedInstanceEndpointAllowed(inst.Adapter, inst.Endpoint) {
+		return "", egress.ErrAuth
+	}
 	cache := c.srv.systemOneADC()
 	if cache == nil {
 		return "", egress.ErrAuth

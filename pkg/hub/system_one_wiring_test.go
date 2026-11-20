@@ -1027,3 +1027,14 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 		assert.Empty(t, seenScopes)
 	})
 }
+
+func TestHubSystemOneRuntime_ProductionInitHasNoTestingOptions(t *testing.T) {
+	srv := &Server{}
+	srv.initSystemOneRuntime()
+	srv.mu.RLock()
+	gotOpts := len(srv.systemOneRuntimeOpts)
+	rt := srv.systemOneRuntime
+	srv.mu.RUnlock()
+	assert.Zero(t, gotOpts, "production Hub initSystemOneRuntime must pass zero testing options")
+	require.NotNil(t, rt)
+}

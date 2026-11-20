@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -49,6 +50,44 @@ import (
 )
 
 const inProcessSystemOneHubID = "system-one-test-hub"
+
+type cliSystemOnePublicResolver struct{}
+
+func (cliSystemOnePublicResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+}
+
+type cliSystemOnePort443Dialer struct {
+	target string
+}
+
+func (d cliSystemOnePort443Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	var nd net.Dialer
+	if port == "443" {
+		return nd.DialContext(ctx, network, d.target)
+	}
+	return nd.DialContext(ctx, network, addr)
+}
+
+func cliDefaultOriginEgressOptions(t *testing.T, tlsSrv *httptest.Server) []egress.Option {
+	t.Helper()
+	tr, ok := tlsSrv.Client().Transport.(*http.Transport)
+	require.True(t, ok)
+	require.NotNil(t, tr.TLSClientConfig)
+	tlsCfg := tr.TLSClientConfig.Clone()
+	tlsCfg.ServerName = "127.0.0.1"
+	return []egress.Option{
+		egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		egress.WithDialerForTesting(cliSystemOnePublicResolver{}, cliSystemOnePort443Dialer{
+			target: tlsSrv.Listener.Addr().String(),
+		}),
+		egress.WithTLSConfigForTesting(tlsCfg),
+	}
+}
 
 type inProcessSystemOneHub struct {
 	server       *hub.Server
@@ -264,7 +303,7 @@ func TestAdminSystemOne_GeminiDecisionsVerticalProbeAndTypeSafeRegression(t *tes
 	env.server.SetSystemOneRuntimeOptionsForTesting(
 		t,
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			cliDefaultOriginEgressOptions(t, tlsSrv)...,
 		),
 	)
 
@@ -556,7 +595,7 @@ func TestAdminSystemOne_GeminiADCVerticalRoundTripProbeAndRedaction(t *testing.T
 	env.server.SetSystemOneRuntimeOptionsForTesting(
 		t,
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			cliDefaultOriginEgressOptions(t, tlsSrv)...,
 		),
 	)
 	var adcProviderCalls atomic.Int32
@@ -588,7 +627,6 @@ func TestAdminSystemOne_GeminiADCVerticalRoundTripProbeAndRedaction(t *testing.T
 		"create", "gemini-adc-implicit",
 		"--adapter", geminidecisions.AdapterName,
 		"--model", "gemini-decision-1",
-		"--endpoint", tlsSrv.URL,
 		"--auth-kind", "google_access_token",
 		"--auth-scope", scopeTestURL,
 	}, nil)
@@ -624,7 +662,7 @@ func TestAdminSystemOne_GeminiADCVerticalRoundTripProbeAndRedaction(t *testing.T
 		"create", "gemini-adc-explicit",
 		"--adapter", geminidecisions.AdapterName,
 		"--model", "gemini-decision-1",
-		"--endpoint", tlsSrv.URL,
+		"--endpoint", "https://generativelanguage.googleapis.com:443/",
 		"--auth-kind", "google_access_token",
 		"--auth-scope", scopeTestURL,
 		"--quota-project", "billing-proj-42",
@@ -854,7 +892,7 @@ func TestAdminSystemOne_GeminiNamedSecretVerticalCLIProbeFallbackAndDeleteSafety
 	env.server.SetSystemOneRuntimeOptionsForTesting(
 		t,
 		systemoneruntime.WithEgressOptionsForTesting(
-			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+			cliDefaultOriginEgressOptions(t, tlsSrv)...,
 		),
 	)
 
@@ -902,7 +940,6 @@ func TestAdminSystemOne_GeminiNamedSecretVerticalCLIProbeFallbackAndDeleteSafety
 		"create", "gemini-cli-named",
 		"--adapter", geminidecisions.AdapterName,
 		"--model", "gemini-decision-1",
-		"--endpoint", tlsSrv.URL,
 	}, strings.NewReader(""))
 	require.NoError(t, err)
 	assert.Contains(t, createOut, "Secret Ref:      GEMINI_API_KEY (scope: project_or_hub)")
