@@ -1024,7 +1024,7 @@ var projectOperations = []OperationSpec{
 		},
 		Exemptions: []Exemption{{
 			Kind: ExemptionInternalOnly,
-			Reason: "The scheduler fires the event with no request credential. resolveScheduledAuthority resolves the revision's recorded principal and credential, " +
+			Reason: "The scheduler fires the event with no request credential. resolveRecordedAuthority resolves the revision's recorded principal and credential, " +
 				"and the fire is bounded by the revision's recorded ceiling and boundary. The exec control routes are internal-only call sites of the exec fire: " +
 				"exec-start follows the full fire-time authorization; exec-status only recovers the outcome of a run already admitted, on its recorded launch",
 			Scope:  "scheduler fire",

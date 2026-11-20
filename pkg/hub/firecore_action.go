@@ -223,7 +223,6 @@ func sanitizeTriggerFireError(req hubfire.FireRequest, status hubfire.FireStatus
 		"dispatch_agent failed",
 		"exec failed",
 		"fire failed",
-		"unknown action type",
 		"invalid message payload",
 		"invalid dispatch_agent payload",
 		errScheduledExecPayloadInvalid.Error(),

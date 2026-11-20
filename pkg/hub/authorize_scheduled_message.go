@@ -183,8 +183,8 @@ func scheduledPayloadTargetChanged(stored, replacement string) bool {
 // resume (scheduledTargetExisting) keeps the refusal below.
 //
 // An admitted revision records its author's ceiling, and each fire
-// re-checks the recorded authority under resolveScheduledAuthority
-// (authorizeScheduledMessageFire).
+// re-checks the recorded authority under resolveRecordedAuthority
+// (authorizeMessageFire).
 //
 // Returns true when authoring is allowed; writes the HTTP error response and
 // returns false when denied.
@@ -209,9 +209,15 @@ func (s *Server) authorizeScheduledMessageTarget(
 		return false
 	}
 
-	callerKind := messageAuthoringCallerScheduleNew
-	if mode == scheduledTargetExisting {
+	var callerKind messageAuthoringCaller
+	switch mode {
+	case scheduledTargetNew:
+		callerKind = messageAuthoringCallerScheduleNew
+	case scheduledTargetExisting:
 		callerKind = messageAuthoringCallerScheduleExisting
+	default:
+		// Fail closed to the strictest mode if an unknown mode is ever passed.
+		callerKind = messageAuthoringCallerTrigger
 	}
 	if _, err := s.validateMessageAuthoringTarget(ctx, identity, projectID, callerKind, rawPayload, agentID, agentName); err != nil {
 		writeMessageAuthoringError(w, r, identity, err)

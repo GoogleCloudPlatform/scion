@@ -73,7 +73,7 @@ func scheduledWakeNeedsResume(agent *store.Agent) bool {
 
 // authorizeScheduledWake decides a scheduled wake under the event's
 // authorization revision, after the send itself was authorized
-// (authorizeScheduledMessageFire). A target that the wake would resume needs
+// (authorizeMessageFire). A target that the wake would resume needs
 // both:
 //   - the revision's frozen ceiling allowing agent.lifecycle, for user and
 //     agent principals alike. An agent principal's identity is rebuilt from

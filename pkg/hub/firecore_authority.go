@@ -125,8 +125,7 @@ func (s *Server) resolveRecordedAuthority(ctx context.Context, rec hubfire.Recor
 	}
 	// resolveRecordedAuthority takes permissionID rather than an event/action
 	// type name so both schedule and trigger definitions share one signature;
-	// resolveScheduledAuthority maps errNoRecordedAuthorityRule back to the
-	// base "event type %q has no scheduled authority rule" text.
+	// an empty permissionID denies with errNoRecordedAuthorityRule.
 	if permissionID == "" {
 		return FireAuthority{}, nil, fmt.Errorf("%w: %w", errScheduledAuthorityDenied, errNoRecordedAuthorityRule)
 	}

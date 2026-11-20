@@ -32,7 +32,7 @@ import (
 
 // TestExecAction_NativeRegistryAndAfterRecord verifies:
 //   - newExecRouteFixture / Server.registerFireActions registers *execAction
-//     natively (not legacyAction);
+//     natively;
 //   - FireOutcome.AfterRecord defers starting trackScheduledExecRun until the
 //     caller invokes AfterRecord (preserving the R1 outcome-persistence order);
 //   - ResultRef and run.EventID equal the event's FireID, with run.ScheduleID

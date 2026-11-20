@@ -119,7 +119,7 @@ func authorizeScheduleAuthoringCredential(w http.ResponseWriter, r *http.Request
 //
 // An admitted revision records its author's frozen effect ceiling with its
 // attribution (revisionAuthorityCeiling), and each fire bounds the scheduled
-// child's delegation edge by that ceiling (resolveScheduledAuthority,
+// child's delegation edge by that ceiling (resolveRecordedAuthority,
 // scheduledEffectCeiling). The caller's own authorization is checked
 // separately: create, update and resume also require authorizeAgentCreate.
 func (s *Server) authorizeScheduledDispatchAgentAuthoring(w http.ResponseWriter, r *http.Request) bool {

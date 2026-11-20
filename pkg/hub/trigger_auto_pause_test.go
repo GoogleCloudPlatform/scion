@@ -18,8 +18,11 @@ package hub
 
 import (
 	"context"
+	"net/http"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -141,6 +144,131 @@ func TestTriggerAutoPause_CreatorAndTargetDeleted(t *testing.T) {
 	assert.Equal(t, store.TriggerStatusReasonCreatorDeleted, gotAuthored.StatusReason)
 
 	gotUnrelated, err := f.store.GetTrigger(ctx, trUnrelated.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusActive, gotUnrelated.Status)
+}
+
+// TestTriggerAutoPause_AgentDeleteEngine exercises the real HTTP agent-delete
+// path through agent_delete_engine.go to verify that the "pause targeted
+// triggers" tail step runs and executes before "pause authored schedules":
+//   - a same-project trigger targeting the deleted agent -> target_deleted;
+//   - a cross-project trigger targeting the deleted agent -> target_deleted;
+//   - a self-targeted trigger (authored by and targeting the deleted agent) ->
+//     target_deleted (proving target pause precedes creator pause);
+//   - a trigger authored by the deleted agent targeting another agent ->
+//     creator_deleted;
+//   - an unrelated active trigger stays active.
+func TestTriggerAutoPause_AgentDeleteEngine(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	ctx := context.Background()
+
+	target := setupBrokerAgentInPhase(t, s, "tr-del-target", state.PhaseStopped)
+	otherAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "tr-del-other",
+		Name:      "tr-del-other",
+		ProjectID: target.ProjectID,
+		Phase:     string(state.PhaseStopped),
+	}
+	require.NoError(t, s.CreateAgent(ctx, otherAgent))
+
+	otherProj := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "tr-del-other-proj",
+		Slug: "tr-del-other-proj",
+	}
+	require.NoError(t, s.CreateProject(ctx, otherProj))
+
+	mkEndpoint := func(projectID, name string) *store.WebhookEndpoint {
+		t.Helper()
+		ep := &store.WebhookEndpoint{
+			ID:                  api.NewUUID(),
+			ProjectID:           projectID,
+			Name:                name,
+			OwnerPrincipalKind:  store.DelegationPrincipalUser,
+			OwnerPrincipalID:    DevUserID,
+			OwnerCredentialKind: store.InitiatorCredentialKindSession,
+			SecretVersion:       1,
+			SignatureMode:       store.WebhookSignatureModeScionV1,
+			Status:              store.WebhookEndpointStatusActive,
+			CreatedBy:           DevUserID,
+		}
+		require.NoError(t, s.CreateWebhookEndpoint(ctx, ep))
+		return ep
+	}
+
+	mkTrigger := func(projectID, epID, name, authorKind, authorID, targetID, targetSlug string) *store.Trigger {
+		t.Helper()
+		credKind := store.InitiatorCredentialKindSession
+		if authorKind == store.DelegationPrincipalAgent {
+			credKind = store.InitiatorCredentialKindAgent
+		}
+		tr := &store.Trigger{
+			ID:             api.NewUUID(),
+			ProjectID:      projectID,
+			Name:           name,
+			SourceKind:     store.TriggerSourceKindWebhook,
+			SourceID:       epID,
+			MatchTypes:     []string{"webhook.received"},
+			MatchDialect:   store.TriggerDialectCEL,
+			ActionType:     store.TriggerActionMessage,
+			ActionPayload:  `{"agentId":"` + targetID + `","agentName":"` + targetSlug + `","message":"hi"}`,
+			SubjectDialect: store.TriggerDialectCEL,
+			SubjectMode:    store.TriggerSubjectModeNew,
+			Status:         store.TriggerStatusActive,
+			CreatedBy:      authorID,
+			InitiatorAttribution: store.InitiatorAttribution{
+				AttributionVersion:      1,
+				InitiatorPrincipalKind:  authorKind,
+				InitiatorPrincipalID:    authorID,
+				InitiatorCredentialKind: credKind,
+				AuthorizationRevision:   1,
+			},
+			AuthorityCeiling: store.EffectCeiling{
+				Version: 1,
+				Kind:    store.EffectCeilingPrincipal,
+			},
+		}
+		require.NoError(t, s.CreateTrigger(ctx, tr))
+		return tr
+	}
+
+	epMain := mkEndpoint(target.ProjectID, "ep-del-main")
+	epOther := mkEndpoint(otherProj.ID, "ep-del-other")
+
+	trSame := mkTrigger(target.ProjectID, epMain.ID, "tr-same", store.DelegationPrincipalUser, DevUserID, target.ID, target.Slug)
+	trCross := mkTrigger(otherProj.ID, epOther.ID, "tr-cross", store.DelegationPrincipalUser, DevUserID, target.ID, target.Slug)
+	trSelf := mkTrigger(target.ProjectID, epMain.ID, "tr-self", store.DelegationPrincipalAgent, target.ID, target.ID, target.Slug)
+	trAuthored := mkTrigger(target.ProjectID, epMain.ID, "tr-authored", store.DelegationPrincipalAgent, target.ID, otherAgent.ID, otherAgent.Slug)
+	trUnrelated := mkTrigger(target.ProjectID, epMain.ID, "tr-unrelated", store.DelegationPrincipalUser, DevUserID, otherAgent.ID, otherAgent.Slug)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+target.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	// Wait for the delete engine tail steps to finish pausing triggers.
+	require.Eventually(t, func() bool {
+		for _, id := range []string{trSame.ID, trCross.ID, trSelf.ID, trAuthored.ID} {
+			got, err := s.GetTrigger(ctx, id)
+			if err != nil || got.Status != store.TriggerStatusPaused {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "delete engine should pause targeted and authored triggers")
+
+	for _, id := range []string{trSame.ID, trCross.ID, trSelf.ID} {
+		got, err := s.GetTrigger(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, store.TriggerStatusPaused, got.Status, "trigger %s", id)
+		assert.Equal(t, store.TriggerStatusReasonTargetDeleted, got.StatusReason, "trigger %s", id)
+	}
+
+	gotAuthored, err := s.GetTrigger(ctx, trAuthored.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusPaused, gotAuthored.Status)
+	assert.Equal(t, store.TriggerStatusReasonCreatorDeleted, gotAuthored.StatusReason)
+
+	gotUnrelated, err := s.GetTrigger(ctx, trUnrelated.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.TriggerStatusActive, gotUnrelated.Status)
 }

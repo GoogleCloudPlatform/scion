@@ -812,7 +812,7 @@ func TestFireCoreRefusalLogging(t *testing.T) {
 	assert.Contains(t, logBuf.String(), "scheduled message authority denied at fire time")
 
 	// 2. fireStanding preserves projectID in refusal logs on both the core
-	// FireAuthority path and the scheduledFireStanding shim path.
+	// FireAuthority path and the fireStandingForTest helper path.
 	rec := newFireCoreTestAuthority(ms, projectID)
 	auth, _, err := srv.resolveRecordedAuthority(context.Background(), rec, projectID, scheduledMessagePermission)
 	require.NoError(t, err)
@@ -1592,7 +1592,7 @@ func TestFireCoreDispatchAgentAction(t *testing.T) {
 // (rev 8.11 / 8.12): recurring x {detaches, !detaches} x {Detached, !Detached}
 // (including the mismatch cell !detaches && Detached), one-shot x
 // {Detached, detaches && !Detached, !detaches && !Detached}, and recurring +
-// one-shot exec detachment on legacyAction after exec-schedules Phase 2.
+// one-shot exec detachment on execAction.
 func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 	// Not t.Parallel: captures process-default slog logger for mismatch check.
 	const projectID = "project-detaches-matrix"
