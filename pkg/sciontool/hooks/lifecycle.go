@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
@@ -86,6 +87,11 @@ type LifecycleManager struct {
 	// runs after it has been set. Ignored when EnforcePrivilegeDrop is
 	// false.
 	WorkloadWorkingDir string
+
+	// Withheld is the set of environment variable names withheld from
+	// lifecycle hooks (static denylist plus any per-start names reported by
+	// the broker). Its zero value enforces the static denylist.
+	Withheld envpolicy.Set
 }
 
 // NewLifecycleManager creates a new lifecycle manager.
@@ -418,25 +424,37 @@ func runEnforcedCmd(cmd *exec.Cmd) error {
 	return nil
 }
 
-// hookEnv builds the environment for hook scripts. When AgentHome is set,
-// HOME is overridden so that $HOME in hook scripts resolves to the scion
-// user's home directory rather than root's. PYTHONDONTWRITEBYTECODE is set
-// to prevent root-owned __pycache__ artifacts from being created during
-// pre-start hooks (which run before privilege drop).
+// hookEnv builds the environment for hook scripts. Entries withheld by
+// m.Withheld (the static denylist plus any per-start harness-config keys) are
+// omitted. If PATH was withheld or is empty, it is set to rootexec.SearchPath.
+// When AgentHome is set, HOME is overridden so that $HOME in hook scripts
+// resolves to the scion user's home directory rather than root's.
+// PYTHONDONTWRITEBYTECODE is set to prevent root-owned __pycache__ artifacts
+// from being created during pre-start hooks.
 func (m *LifecycleManager) hookEnv() []string {
-	env := os.Environ()
-	env = append(env, "PYTHONDONTWRITEBYTECODE=1")
-	if m.AgentHome == "" {
-		return env
-	}
-	override := "HOME=" + m.AgentHome
-	for i, e := range env {
-		if strings.HasPrefix(e, "HOME=") {
-			env[i] = override
-			return env
+	var env []string
+	hasPath := false
+	for _, e := range os.Environ() {
+		key, val, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
 		}
+		if m.Withheld.Withholds(key) {
+			continue
+		}
+		if key == "PATH" && val != "" {
+			hasPath = true
+		}
+		env = append(env, e)
 	}
-	return append(env, override)
+	if !hasPath {
+		env = setEnvVar(env, "PATH", strings.Join(rootexec.SearchPath, ":"))
+	}
+	env = setEnvVar(env, "PYTHONDONTWRITEBYTECODE", "1")
+	if m.AgentHome != "" {
+		env = setEnvVar(env, "HOME", m.AgentHome)
+	}
+	return env
 }
 
 // droppedHookEnv builds the environment for a hook script that

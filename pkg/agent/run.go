@@ -22,6 +22,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"os/user"
@@ -551,9 +552,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// The on-disk harness-config's model_aliases, for resolving a size alias
 	// in the effective model (resolveEffectiveModel).
 	var hcModelAliases map[string]string
+	// The on-disk harness-config bundle env layer, captured for hook-env
+	// provenance.
+	var hcBundleEnv map[string]string
 	if harnessConfigName != "" {
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
 			hcModelAliases = hcDir.Config.ModelAliases
+			hcBundleEnv = hcDir.Config.Env
 			if hcDir.Config.Image != "" {
 				fileImage = hcDir.Config.Image
 				util.Debugf("image resolution: on-disk harness-config image=%s path=%s", fileImage, hcDir.Path)
@@ -1293,6 +1298,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// 3. Resolve credentials via new auth pipeline
 
+	// Snapshot caller/hub env before settings-declared harness-config env is
+	// merged into opts.Env so provenance distinguishes caller-supplied keys.
+	callerEnv := maps.Clone(opts.Env)
+
 	// Inject settings-declared env into opts.Env and build the auth overlay.
 	// Extracted so the injection-then-overlay sequence is testable without
 	// standing up a full agent; see resolveAuthEnvOverlay.
@@ -1845,6 +1854,11 @@ authDone:
 	envCfg, demotedTemplateKeys := demoteLegacyTemplateEnv(finalScionCfg, templateEnv)
 	warnings = append(warnings, suppressedDemotedKeyWarnings(demotedTemplateKeys, suppressedFallbackKeys)...)
 	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(envCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
+	var inlineEnv map[string]string
+	if opts.InlineConfig != nil {
+		inlineEnv = opts.InlineConfig.Env
+	}
+	hookWithheldEnv := computeHookWithheldEnv(hcBundleEnv, agentEnv, callerEnv, inlineEnv, resolvedAuth, opts.ResolvedSecrets)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
 	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
 	warnings = append(warnings, hubOnlyEnvWarnings...)
@@ -2735,6 +2749,7 @@ authDone:
 			return modelCommandArgs(effectiveModel, baseArgs)
 		}(),
 		Env:             agentEnv,
+		HookWithheldEnv: hookWithheldEnv,
 		ResolvedSecrets: opts.ResolvedSecrets,
 
 		FallbackEnv:            templateFallbackEnv,

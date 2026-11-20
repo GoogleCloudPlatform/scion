@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/initenv"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/liveness"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
@@ -462,6 +463,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// elapsed_ms log lines below.
 	initStart := time.Now()
 
+	// Load and unset the runtime-provided withheld-key marker before any hook
+	// or startup child process runs so it never leaks into child environments.
+	initEnvPolicy := initenv.Load()
+
 	// Start the reaper goroutine for zombie process cleanup.
 	// This is critical when running as PID 1 in a container.
 	startReaper()
@@ -812,6 +817,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// rest of RunInit — see EnforceTokenFileOwnerChecks's own doc comment
 	// for why every other caller leaves this at its default.
 	lifecycleManager, enforceTokenOwnerChecks := runNewLifecycleManager(agentHome, targetUID, targetGID, opts.RequirePrivilegeDrop)
+	if lifecycleManager != nil {
+		lifecycleManager.Withheld = initEnvPolicy.Withheld
+	}
 	runEnforceTokenFileOwnerChecks(enforceTokenOwnerChecks)
 
 	// Register status and logging handlers for lifecycle events
