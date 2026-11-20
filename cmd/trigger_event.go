@@ -64,10 +64,14 @@ var triggerEventGetCmd = &cobra.Command{
 	RunE:  runTriggerEventGet,
 }
 
-const defaultTriggerEventListLimit = 50
+const (
+	defaultTriggerEventListLimit   = 50
+	triggerEventPrefixScanMaxPages = 10
+)
 
 // resolveTriggerEventID resolves a full event UUID or unique ID prefix to a
-// full UUID, stopping pagination as soon as a second match is observed.
+// full UUID, stopping pagination as soon as a second match is observed or
+// triggerEventPrefixScanMaxPages pages have been scanned.
 func resolveTriggerEventID(ctx context.Context, hubCtx *HubContext, projectID, ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -85,13 +89,20 @@ func resolveTriggerEventID(ctx context.Context, hubCtx *HubContext, projectID, r
 		prefixMatches []string
 		lastScope     string
 		seenCursors   = map[string]bool{}
+		scannedEvents int
+		truncated     bool
 	)
-	for {
+	for pagesScanned := 0; ; pagesScanned++ {
+		if pagesScanned >= triggerEventPrefixScanMaxPages {
+			truncated = true
+			break
+		}
 		page, err := svc.List(ctx, &opts)
 		if err != nil {
 			return "", wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list trigger events for resolution: %w", err))
 		}
 		lastScope = page.Scope
+		scannedEvents += len(page.Events)
 		for _, ev := range page.Events {
 			if strings.HasPrefix(ev.ID, ref) {
 				prefixMatches = append(prefixMatches, ev.ID)
@@ -109,10 +120,16 @@ func resolveTriggerEventID(ctx context.Context, hubCtx *HubContext, projectID, r
 	}
 
 	if len(prefixMatches) == 0 {
+		if truncated {
+			return "", fmt.Errorf("trigger event ID prefix %q not found in the newest %d events; pass the full event UUID", ref, scannedEvents)
+		}
 		if isCallerScopedTriggerView(hubCtx, lastScope) {
 			return "", fmt.Errorf("no trigger event visible to this agent found matching %q", ref)
 		}
 		return "", fmt.Errorf("no trigger event found matching %q", ref)
+	}
+	if truncated {
+		return "", fmt.Errorf("trigger event ID prefix %q matched %s in the newest %d events, but older events were not scanned; pass the full event UUID", ref, prefixMatches[0], scannedEvents)
 	}
 	return prefixMatches[0], nil
 }

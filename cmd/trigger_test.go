@@ -2545,3 +2545,87 @@ func TestTriggerGetCLI_SanitizesTerminalControlAndBidiCharacters(t *testing.T) {
 	assert.Contains(t, out, `Source:      webhook:ep-\x1b[34m1\u{202e}`)
 	assert.Contains(t, out, `Agent:       agent-\x1b[36m1\u{202e}`)
 }
+
+func TestTriggerEventCLI_ResolvePrefixScanBoundAndFullUUIDSkipsList(t *testing.T) {
+	origFormat := outputFormat
+	origJSON := triggerOutputJSON
+	origEvPayload := triggerEventPayloadOnly
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerOutputJSON = origJSON
+		triggerEventPayloadOnly = origEvPayload
+	})
+	outputFormat = ""
+	triggerOutputJSON = false
+	triggerEventPayloadOnly = false
+
+	const fullUUID = "aaaaaaaa-4444-4333-8444-555555555555"
+	fixedNow := time.Date(2026, 11, 20, 11, 0, 0, 0, time.UTC)
+
+	var (
+		listCalls       int
+		getCalls        int
+		includeFirstHit bool
+	)
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events/"+fullUUID:
+			getCalls++
+			_ = json.NewEncoder(w).Encode(hubclient.TriggerEventDetail{
+				TriggerEventSummary: hubclient.TriggerEventSummary{
+					ID:         fullUUID,
+					ProjectID:  "proj-1",
+					Source:     hubclient.TriggerSourceSpec{Kind: "webhook", ID: "ep-1"},
+					Type:       "webhook.received",
+					Status:     "received",
+					OccurredAt: fixedNow,
+					ReceivedAt: fixedNow,
+					CreatedAt:  fixedNow,
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/trigger-events":
+			listCalls++
+			events := []hubclient.TriggerEventSummary{
+				{ID: fmt.Sprintf("11111111-0000-4000-8000-%012d", listCalls*2-1), Status: "received"},
+				{ID: fmt.Sprintf("11111111-0000-4000-8000-%012d", listCalls*2), Status: "received"},
+			}
+			if includeFirstHit && listCalls == 1 {
+				events[0].ID = fullUUID
+			}
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerEventsResponse{
+				Events:     events,
+				NextCursor: fmt.Sprintf("cursor-%d", listCalls),
+				TotalCount: 9999,
+				ServerTime: fixedNow,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindOAuth)
+
+	// 1. Full UUID performs zero List calls and fetches directly.
+	out := captureStdout(t, func() {
+		require.NoError(t, runTriggerEventGet(triggerEventGetCmd, []string{fullUUID}))
+	})
+	assert.Equal(t, 0, listCalls, "full UUID resolution must not list trigger events")
+	assert.Equal(t, 1, getCalls)
+	assert.Contains(t, out, fullUUID)
+
+	// 2. Missing prefix stops after triggerEventPrefixScanMaxPages pages with a clear error.
+	listCalls = 0
+	includeFirstHit = false
+	err := runTriggerEventGet(triggerEventGetCmd, []string{"deadbeef"})
+	require.Error(t, err)
+	assert.Equal(t, triggerEventPrefixScanMaxPages, listCalls)
+	assert.Contains(t, err.Error(), fmt.Sprintf("not found in the newest %d events; pass the full event UUID", triggerEventPrefixScanMaxPages*2))
+
+	// 3. Single prefix match with unscanned older pages fails safely rather than risking ambiguity.
+	listCalls = 0
+	includeFirstHit = true
+	err = runTriggerEventGet(triggerEventGetCmd, []string{"aaaaaaaa"})
+	require.Error(t, err)
+	assert.Equal(t, triggerEventPrefixScanMaxPages, listCalls)
+	assert.Contains(t, err.Error(), fullUUID)
+	assert.Contains(t, err.Error(), "older events were not scanned; pass the full event UUID")
+}

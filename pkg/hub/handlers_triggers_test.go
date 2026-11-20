@@ -3776,4 +3776,83 @@ func TestWebhookEndpointCreate_DefaultTrigger(t *testing.T) {
 		assert.Equal(t, f.owner.ID, storedEp.Fixture.IssuerID)
 		assert.Equal(t, storedEp.Fixture, storedTr.Fixture, "default trigger must carry the same fixture provenance stamp as its endpoint")
 	})
+
+	t.Run("rejects empty, whitespace, targetless, and oversized defaultTrigger payloads without creating endpoint or secret", func(t *testing.T) {
+		f := setupTriggersTestFixture(t)
+		ctx := context.Background()
+
+		secretsBefore, err := f.store.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeHub, ScopeID: f.srv.hubID})
+		require.NoError(t, err)
+
+		cases := []struct {
+			name    string
+			req     CreateWebhookEndpointRequest
+			wantMsg string
+		}{
+			{
+				name: "empty message",
+				req: CreateWebhookEndpointRequest{
+					Name: "bad-empty-msg",
+					DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+						AgentID: f.targetAgent.ID,
+						Message: "",
+					},
+				},
+				wantMsg: "action.message is required for message actions",
+			},
+			{
+				name: "whitespace-only message",
+				req: CreateWebhookEndpointRequest{
+					Name: "bad-ws-msg",
+					DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+						AgentID: f.targetAgent.ID,
+						Message: "   \t\n  ",
+					},
+				},
+				wantMsg: "action.message is required for message actions",
+			},
+			{
+				name: "missing target",
+				req: CreateWebhookEndpointRequest{
+					Name: "bad-no-target",
+					DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+						Message: "hello",
+					},
+				},
+				wantMsg: "action.agentId or action.agentName is required for message actions",
+			},
+			{
+				name: "oversized message (>16 KiB)",
+				req: CreateWebhookEndpointRequest{
+					Name: "bad-big-msg",
+					DefaultTrigger: &WebhookEndpointDefaultTriggerSpec{
+						AgentID: f.targetAgent.ID,
+						Message: strings.Repeat("m", maxTriggerActionMessageBytes+1),
+					},
+				},
+				wantMsg: "action.message exceeds maximum length of 16384 bytes",
+			},
+		}
+
+		for _, tc := range cases {
+			rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, tc.req)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", tc.name, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.wantMsg, tc.name)
+			_, err := f.store.GetWebhookEndpointByName(ctx, f.projectID, tc.req.Name)
+			assert.ErrorIs(t, err, store.ErrNotFound, "%s must not create an endpoint", tc.name)
+		}
+
+		// Oversized request body (>64 KiB) returns 413 Payload Too Large.
+		overBody := []byte(`{"name":"bad-big-body","defaultTrigger":{"agentId":"` + f.targetAgent.ID + `","message":"` + strings.Repeat("b", maxTriggerRequestBodyBytes) + `"}}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+f.projectID+"/webhook-endpoints", bytes.NewReader(overBody))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), f.ownerAuth))
+		overRec := httptest.NewRecorder()
+		f.srv.handleWebhookEndpoints(overRec, req, f.projectID, "")
+		assert.Equal(t, http.StatusRequestEntityTooLarge, overRec.Code, overRec.Body.String())
+
+		secretsAfter, err := f.store.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeHub, ScopeID: f.srv.hubID})
+		require.NoError(t, err)
+		assert.Len(t, secretsAfter, len(secretsBefore), "rejected defaultTrigger requests must not persist webhook secrets")
+	})
 }
