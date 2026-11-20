@@ -85,6 +85,78 @@ func TestAdminEffectivePermissions_ExperimentGate(t *testing.T) {
 	})
 }
 
+func TestAdminEffectivePermissions_HubAppliesInProjectsCatalogFilter(t *testing.T) {
+	srv, s, hubAdmin, member := setupScopedAdminTest(t)
+	epSetExperiment(t, srv, true)
+	ctx := context.Background()
+
+	viewer := epCreateUser(t, s, "applies-viewer", store.UserStatusActive)
+	viewerRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	epBindSystemRole(t, s, viewerRole.ID, store.RoleBindingPrincipalUser, viewer.ID, nil, nil)
+
+	fetchSystem := func(t *testing.T, targetID string) map[string]EffectivePermissionEntry {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
+			"/api/v1/admin/effective-permissions?principalType=user&principalId="+targetID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		byPerm := make(map[string]EffectivePermissionEntry, len(resp.Permissions))
+		for _, p := range resp.Permissions {
+			byPerm[p.ID] = p
+		}
+		return byPerm
+	}
+
+	t.Run("hub-member curated catalog grants report appliesInProjects=false", func(t *testing.T) {
+		byPerm := fetchSystem(t, member.ID)
+		for _, id := range []string{"skill.read", "template.read", "harness_config.read"} {
+			entry, ok := byPerm[id]
+			require.True(t, ok, "hub-member should hold %s at hub scope", id)
+			assert.False(t, entry.AppliesInProjects,
+				"hub-member %s must report appliesInProjects=false because applyHubWideScopeFilters strips it in projects", id)
+		}
+	})
+
+	t.Run("hub-viewer curated catalog grants report appliesInProjects=false", func(t *testing.T) {
+		byPerm := fetchSystem(t, viewer.ID)
+		for _, id := range []string{"skill.read", "template.read", "harness_config.read"} {
+			entry, ok := byPerm[id]
+			require.True(t, ok, "hub-viewer should hold %s at hub scope", id)
+			assert.False(t, entry.AppliesInProjects,
+				"hub-viewer %s must report appliesInProjects=false because applyHubWideScopeFilters strips it in projects", id)
+		}
+	})
+
+	t.Run("hub-admin project-applicable grants report appliesInProjects=true and hub-only false", func(t *testing.T) {
+		byPerm := fetchSystem(t, hubAdmin.ID)
+		for _, id := range []string{"project.read", "skill.read", "template.read"} {
+			entry, ok := byPerm[id]
+			require.True(t, ok, "hub-admin should hold %s at hub scope", id)
+			assert.True(t, entry.AppliesInProjects,
+				"hub-admin %s must report appliesInProjects=true", id)
+		}
+		userRead, ok := byPerm["user.read"]
+		require.True(t, ok, "hub-admin should hold user.read at hub scope")
+		assert.False(t, userRead.AppliesInProjects, "hub-only user.read must report appliesInProjects=false")
+	})
+
+	t.Run("super-admin agent.create reports appliesInProjects=true", func(t *testing.T) {
+		superAdmin := epCreateUser(t, s, "applies-super", store.UserStatusActive)
+		superAdmin.Role = store.UserRoleAdmin
+		require.NoError(t, s.UpdateUser(ctx, superAdmin))
+		superRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+		require.NoError(t, err)
+		epBindSystemRole(t, s, superRole.ID, store.RoleBindingPrincipalUser, superAdmin.ID, nil, nil)
+
+		byPerm := fetchSystem(t, superAdmin.ID)
+		agentCreate, ok := byPerm["agent.create"]
+		require.True(t, ok, "super-admin should hold agent.create at hub scope")
+		assert.True(t, agentCreate.AppliesInProjects, "super-admin agent.create must report appliesInProjects=true")
+	})
+}
+
 func epCreateUser(t *testing.T, s store.Store, slug, status string) *store.User {
 	t.Helper()
 	u := &store.User{

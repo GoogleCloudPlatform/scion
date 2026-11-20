@@ -317,6 +317,27 @@ func (a *AuthzService) ResolveEffectivePermissions(
 			continue
 		}
 
+		// In system scope, a permission applies in all projects only when it
+		// targets project resources AND at least one granting candidate
+		// survives the hub-wide catalog scope filter (for example, hub-member
+		// and hub-viewer grants for skill/template/harness_config are stripped
+		// at project scope).
+		if !isProjectScope && appliesInProjects {
+			filtered := applyHubWideScopeFilters(candidates, roleDefs, ContemplatedProjectClass(perm.ID))
+			surviving := make(map[string]struct{}, len(filtered))
+			for _, cb := range filtered {
+				surviving[cb.BindingID] = struct{}{}
+			}
+			anySurvives := false
+			for _, g := range grants {
+				if _, ok := surviving[g.BindingID]; ok {
+					anySurvives = true
+					break
+				}
+			}
+			appliesInProjects = anySurvives
+		}
+
 		if k.Allowed {
 			result.Permissions = append(result.Permissions, EffectivePermissionEntry{
 				ID:                perm.ID,
