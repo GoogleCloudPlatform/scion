@@ -65,6 +65,10 @@ var memberSettableEnv = []MemberSettableEnvName{
 	// Set by the shipped Codex harness config (harnesses/codex/config.yaml);
 	// it tunes only the agent's own liveness sampling.
 	{"SCION_LIVENESS_HARNESS_ROOT_DEPTH", "Codex harness config liveness depth", MemberEnvHarnessConfig},
+	// Set in env_template by the shipped Copilot, Grok Build and
+	// Antigravity harness configs; the agent's env carries the agent's own
+	// name under it anyway.
+	{"SCION_AGENT_NAME", "harness config env_template (agent name)", MemberEnvHarnessConfig},
 }
 
 // MemberSettableEnv returns a copy of the member-settable reserved env

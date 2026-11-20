@@ -341,3 +341,44 @@ func TestCheckMemberEnv_ScopeByOrigin(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckMemberEnvTemplate(t *testing.T) {
+	hc := Origin{Kind: OriginHarnessConfig, Name: "copilot"}
+	const secret = "s3cr3t-template-value"
+	for _, tc := range []struct {
+		name    string
+		origin  Origin
+		refused bool
+	}{
+		{"SCION_HUB_ENDPOINT", hc, true},
+		{"SCION_AUTH_TOKEN", hc, true},
+		{"GCE_METADATA_HOST", hc, true},
+		{"SCION_AGENT_NAME", hc, false},
+		{"SCION_AUTO_EXPOSE_PORTS", hc, false},
+		{"NO_COLOR", hc, false},
+		{"SCION_AGENT_NAME", Origin{Kind: OriginTemplate, Name: "t"}, true},
+	} {
+		err := CheckMemberEnvTemplate(map[string]string{tc.name: "{{ .AgentName }}" + secret}, tc.origin)
+		if refused := err != nil; refused != tc.refused {
+			t.Errorf("%s from %s: refused = %v (%v), want %v", tc.name, tc.origin, refused, err, tc.refused)
+			continue
+		}
+		if err == nil {
+			continue
+		}
+		var re *RefusalError
+		if !errors.As(err, &re) || re.Field != "env_template" || re.Entry != tc.name {
+			t.Errorf("refusal = %v, want env_template %q", err, tc.name)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("message %q echoes the value", err.Error())
+		}
+	}
+	// Values are not checked: env_template values never come from the host.
+	if err := CheckMemberEnvTemplate(map[string]string{"X": "${HOME}", "Y": ""}, hc); err != nil {
+		t.Errorf("non-reserved names refused: %v", err)
+	}
+	if err := CheckMemberEnvTemplate(nil, hc); err != nil {
+		t.Errorf("nil env_template: %v", err)
+	}
+}

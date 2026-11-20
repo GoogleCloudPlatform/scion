@@ -220,3 +220,48 @@ func TestHostedTemplateEnv_NeverReachesHost(t *testing.T) {
 		t.Error("a template SCION_* key must not reach the container env")
 	}
 }
+
+// A hosted broker refuses a reserved name in a project-tier harness config's
+// env_template (at admission and at start, no run) unless the member-safe
+// list allows it for harness configs (SCION_AGENT_NAME); a workstation broker
+// runs it.
+func TestHostedHarnessConfigEnvTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		name, key string
+		refused   bool
+	}{
+		{"reserved name", "SCION_HUB_ENDPOINT", true},
+		{"agent name", "SCION_AGENT_NAME", false},
+		{"non-reserved", "NO_COLOR", false},
+	} {
+		for _, hosted := range []bool{true, false} {
+			mode := map[bool]string{true: "hosted", false: "workstation"}[hosted]
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				e := newPolicyTestEnv(t)
+				e.projectHC(t, "hc-tpl-env", policyTestDecl+"env_template:\n  "+tc.key+": \"{{ .AgentName }}\"\n")
+				opts := api.StartOptions{Name: "et-" + mode, ProjectPath: e.scion, HarnessConfig: "hc-tpl-env", NoAuth: true, HostedMode: hosted}
+				preErr := PreflightResolve(context.Background(), opts)
+				var runs []runtime.RunConfig
+				_, startErr := hostedEnvManager(&runs).Start(context.Background(), opts)
+				if hosted && tc.refused {
+					for _, err := range []error{preErr, startErr} {
+						var re *hostedguard.RefusalError
+						if !errors.As(err, &re) || re.Field != "env_template" || re.Entry != tc.key {
+							t.Fatalf("expected an env_template refusal of %s, got %v", tc.key, err)
+						}
+					}
+					if len(runs) != 0 {
+						t.Error("the container must not run when the harness config is refused")
+					}
+					return
+				}
+				if preErr != nil || startErr != nil {
+					t.Fatalf("preflight %v, start %v", preErr, startErr)
+				}
+				if len(runs) != 1 {
+					t.Fatalf("expected one container run, got %d", len(runs))
+				}
+			})
+		}
+	}
+}

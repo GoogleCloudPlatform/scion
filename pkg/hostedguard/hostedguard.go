@@ -206,6 +206,32 @@ func CheckMemberEnv(env map[string]string, o Origin) error {
 	return nil
 }
 
+// CheckMemberEnvTemplate applies the reserved-name part of the env rule to a
+// member-written harness config's env_template from o: a name reserved for
+// scion's own variables is refused unless api.MemberSettableEnv lists it for
+// o's source. Values are not checked: env_template values are filled from
+// the agent's own fields ({{ .AgentName }} and the like), never from the
+// broker's environment. It returns nil or a *RefusalError for the first
+// refused name, in name order, naming the name, never the value.
+func CheckMemberEnvTemplate(envTemplate map[string]string, o Origin) error {
+	if len(envTemplate) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(envTemplate))
+	for k := range envTemplate {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	scope := memberEnvScope(o)
+	for _, k := range names {
+		if IsReservedEnvName(k) && !api.IsMemberSettableEnv(k, scope) {
+			return &RefusalError{Field: "env_template", Entry: k, Origin: o,
+				Reason: fmt.Sprintf("names reserved for scion's own environment variables in %s are not allowed on a hosted server", o)}
+		}
+	}
+	return nil
+}
+
 // expandsHostEnv reports whether expanding s the way the Runtime Broker
 // expands config env (os.Expand) would change it: a $NAME or ${...}
 // reference, including malformed ones that expansion removes.

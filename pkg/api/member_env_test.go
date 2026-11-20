@@ -26,7 +26,7 @@ func TestMemberSettableEnvScopes(t *testing.T) {
 	for scope, want := range map[MemberEnvScope][]string{
 		MemberEnvEdit:          autoExpose,
 		MemberEnvCreate:        append(slices.Clone(autoExpose), "SCION_LOG_LEVEL", "SCION_TELEMETRY_ENABLED"),
-		MemberEnvHarnessConfig: append(slices.Clone(autoExpose), "SCION_LIVENESS_HARNESS_ROOT_DEPTH"),
+		MemberEnvHarnessConfig: append(slices.Clone(autoExpose), "SCION_LIVENESS_HARNESS_ROOT_DEPTH", "SCION_AGENT_NAME"),
 	} {
 		got := slices.Sorted(maps.Keys(MemberSettableEnvNames(scope)))
 		slices.Sort(want)

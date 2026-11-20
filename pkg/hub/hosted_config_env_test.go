@@ -21,6 +21,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -362,4 +364,63 @@ func TestCreateAgent_HostedMemberEnvScope(t *testing.T) {
 	code, msg := decodeHostedRefusal(t, rec)
 	assert.Equal(t, hostedguard.ErrorCode, code)
 	assert.True(t, strings.HasPrefix(msg, `env "SCION_LIVENESS_HARNESS_ROOT_DEPTH": names reserved`), msg)
+}
+
+// TestHarnessConfigFileWrite_HostedProjectScopeEnvTemplate: on a hosted hub a
+// project-scope harness config may not set a reserved name in env_template
+// unless the member-safe list allows it for harness configs
+// (SCION_AGENT_NAME); a workstation hub accepts it.
+func TestHarnessConfigFileWrite_HostedProjectScopeEnvTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		name, key string
+		refused   bool
+	}{
+		{"reserved name", "SCION_HUB_ENDPOINT", true},
+		{"agent name", "SCION_AGENT_NAME", false},
+		{"non-reserved", "NO_COLOR", false},
+	} {
+		for _, workstation := range []bool{false, true} {
+			t.Run(tc.name+map[bool]string{false: "/hosted", true: "/workstation"}[workstation], func(t *testing.T) {
+				srv, s, _ := testHarnessConfigFileServer(t)
+				srv.workstation = workstation
+				hc := newHostedTestHC(t, srv, s, "hc-member", "member-hc", store.HarnessConfigScopeProject, tid("project-1"), hostedHCOKYAML)
+				rec := putHarnessConfigYAML(t, srv, hc.ID, "harness: claude\nenv_template:\n  "+tc.key+": '{{ .AgentName }}-"+hostedEnvSecret+"'\n")
+				if !tc.refused || workstation {
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					return
+				}
+				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				code, msg := decodeHostedRefusal(t, rec)
+				assert.Equal(t, hostedguard.ErrorCode, code)
+				assert.True(t, strings.HasPrefix(msg, `env_template "`+tc.key+`": names reserved`), msg)
+				assert.Contains(t, msg, `harness config "member-hc"`)
+				assertNoHostedValue(t, rec.Body.String())
+			})
+		}
+	}
+}
+
+// TestHarnessConfigClone_HostedShippedConfigsIntoProjectScope: every shipped
+// harness config (harnesses/*/config.yaml) can still be cloned into project
+// scope on a hosted hub.
+func TestHarnessConfigClone_HostedShippedConfigsIntoProjectScope(t *testing.T) {
+	ctx := context.Background()
+	paths, err := filepath.Glob(filepath.Join("..", "..", "harnesses", "*", "config.yaml"))
+	require.NoError(t, err)
+	require.NotEmpty(t, paths)
+	for _, p := range paths {
+		name := filepath.Base(filepath.Dir(p))
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(p)
+			require.NoError(t, err)
+			srv, s, _ := testHarnessConfigFileServer(t)
+			require.False(t, srv.workstation)
+			require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tid("project-clone"), Name: "clone", Slug: "clone"}))
+			src := newHostedTestHC(t, srv, s, "hc-global-shipped", name, store.HarnessConfigScopeGlobal, "", string(data))
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+src.ID+"/clone", map[string]interface{}{
+				"name": "my-" + name, "scope": store.HarnessConfigScopeProject, "projectId": tid("project-clone"),
+			})
+			require.Less(t, rec.Code, 300, rec.Body.String())
+		})
+	}
 }
