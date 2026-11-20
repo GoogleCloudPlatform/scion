@@ -2288,3 +2288,153 @@ func TestBuildDispatchedEventBody_EnumMemberVsTriggerFiredFallback(t *testing.T)
 		})
 	}
 }
+
+func TestTriggerDispatchE2E_SubjectModeSkip_DerivedSubjectRuleAndEnvelopeL23(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableWriteDenySwitch(t, f.srv)
+	ctx := context.Background()
+
+	firstInFlight := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var (
+		holdOnce  sync.Once
+		mu        sync.Mutex
+		delivered []*messages.StructuredMessage
+	)
+	wd := &ctxBlockingWakeDispatcher{
+		onMessage: func(_ context.Context, _ *store.Agent, msg *messages.StructuredMessage) error {
+			isFirst := false
+			holdOnce.Do(func() {
+				isFirst = true
+				close(firstInFlight)
+			})
+			if isFirst {
+				<-releaseFirst
+			}
+			mu.Lock()
+			delivered = append(delivered, msg)
+			mu.Unlock()
+			return nil
+		},
+	}
+	f.srv.SetDispatcher(wd)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "skip-l23-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	trRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "skip-l23-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Types: []string{"webhook.deploy"},
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `has(event.payload.service)`},
+			},
+		},
+		Subject: &TriggerSubjectSpec{
+			Dialect: "cel",
+			Expr:    `"deploy:" + string(event.payload.service)`,
+			Mode:    store.TriggerSubjectModeSkip,
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "Deploy event"},
+	})
+	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &tr))
+
+	postSignedHook := func(delivery, subjectHdr, service string) string {
+		t.Helper()
+		payload := []byte(`{"service":"` + service + `","delivery":"` + delivery + `"}`)
+		ts := time.Now().Unix()
+		sig := trigger.SignScionV1(ep.Secret, ts, delivery, "deploy", subjectHdr, payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ep.ID, bytes.NewReader(payload))
+		req.RemoteAddr = "198.51.100.88:54321"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(trigger.HeaderDelivery, delivery)
+		req.Header.Set(trigger.HeaderEvent, "deploy")
+		req.Header.Set(trigger.HeaderSubject, subjectHdr)
+		req.Header.Set(trigger.HeaderSignature, sig)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		var resp trigger.IngressAcceptedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.EventID
+	}
+
+	dqStore, ok := f.store.(store.DurableQueueStore)
+	require.True(t, ok)
+	q := f.srv.TriggerEventQueue()
+	require.NotNil(t, q)
+	d1, err := f.srv.triggerDrainer(dqStore, q)
+	require.NoError(t, err)
+	d2, err := f.srv.triggerDrainer(dqStore, q)
+	require.NoError(t, err)
+
+	// 1. Hook #1 (source subject "run-101", service "payments" -> derived "deploy:payments") stays firing.
+	ev1ID := postSignedHook("l23-1", "run-101", "payments")
+	d1Err := make(chan error, 1)
+	go func() {
+		_, err := d1.DrainOnce(ctx)
+		d1Err <- err
+	}()
+	select {
+	case <-firstInFlight:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for hook #1 fire to enter delivery")
+	}
+
+	// 2. Hook #2 has a DIFFERENT source subject ("run-202") but derives the SAME subject ("deploy:payments"):
+	// must skip as "subject busy" while hook #1 is firing.
+	ev2ID := postSignedHook("l23-2", "run-202", "payments")
+	res2, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res2.Claimed)
+
+	// 3. Hook #3 derives a DIFFERENT subject ("deploy:billing") with source subject "run-303":
+	// must still fire and deliver even while hook #1 ("deploy:payments") is still firing.
+	ev3ID := postSignedHook("l23-3", "run-303", "billing")
+	res3, err := d2.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res3.Claimed)
+
+	mu.Lock()
+	require.Len(t, delivered, 1, "hook #3 must deliver while hook #1 is still in flight and hook #2 skipped")
+	env3 := extractEnvelopeJSONFromDelivery(t, delivered[0].DeliveryText)
+	mu.Unlock()
+
+	// 4. Release hook #1 -> completes and records status=fired.
+	close(releaseFirst)
+	require.NoError(t, <-d1Err)
+
+	mu.Lock()
+	require.Len(t, delivered, 2, "hook #1 and hook #3 must both deliver; hook #2 skipped")
+	env1 := extractEnvelopeJSONFromDelivery(t, delivered[1].DeliveryText)
+	mu.Unlock()
+
+	// L23: rendered envelope subject stays the hub-shaped source subject, never the derived subject.
+	require.NotNil(t, env1.Event)
+	assert.Equal(t, "webhook:"+ep.ID+"/run-101", env1.Event.Subject)
+	require.NotNil(t, env3.Event)
+	assert.Equal(t, "webhook:"+ep.ID+"/run-303", env3.Event.Subject)
+
+	histRec := f.doTrigger(t, f.ownerAuth, tr.ID+"/history", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, histRec.Code, histRec.Body.String())
+	var hist ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(histRec.Body.Bytes(), &hist))
+	require.Len(t, hist.Fires, 3)
+
+	fireByEvent := make(map[string]TriggerFireResponse, len(hist.Fires))
+	for _, fr := range hist.Fires {
+		fireByEvent[fr.EventID] = fr
+	}
+	assert.Equal(t, store.TriggerFireStatusFired, fireByEvent[ev1ID].Status)
+	assert.Equal(t, "deploy:payments", fireByEvent[ev1ID].Subject)
+	assert.Equal(t, store.TriggerFireStatusSkipped, fireByEvent[ev2ID].Status)
+	assert.Equal(t, trigger.ErrFireSubjectBusy, fireByEvent[ev2ID].Error)
+	assert.Equal(t, "deploy:payments", fireByEvent[ev2ID].Subject)
+	assert.Equal(t, store.TriggerFireStatusFired, fireByEvent[ev3ID].Status)
+	assert.Equal(t, "deploy:billing", fireByEvent[ev3ID].Subject)
+}

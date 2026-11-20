@@ -2683,3 +2683,164 @@ func TestDispatcher_SubjectModeSkip_WhileWakeFireInFlightAndAfter(t *testing.T) 
 	assert.Equal(t, 4, gotSkipTr.FireCount)
 	assert.Equal(t, 0, gotSkipTr.ErrorCount, "skipped subject busy must not increment error_count")
 }
+
+func TestDispatcher_SubjectModeSkip_DerivedSubjectRuleCoalescesAndPreservesSourceSubject(t *testing.T) {
+	ctx := context.Background()
+	ms := newMemTriggerStore()
+	core := &fakeCore{}
+	core.enabled.Store(true)
+	_, rules := newTestTriggerEngineWithDialects(t)
+
+	projID := uuid.NewString()
+	epID := uuid.NewString()
+	trID := uuid.NewString()
+	t0 := time.Date(2026, 11, 20, 14, 0, 0, 0, time.UTC)
+
+	require.NoError(t, ms.CreateTrigger(ctx, &store.Trigger{
+		ID:             trID,
+		ProjectID:      projID,
+		Name:           "skip-derived-subj-tr",
+		SourceKind:     store.TriggerSourceKindWebhook,
+		SourceID:       epID,
+		MatchTypes:     []string{"webhook.received"},
+		MatchRules:     []store.TriggerMatchRule{{Dialect: "cel", Expr: `has(event.payload.service)`}},
+		SubjectDialect: "cel",
+		SubjectRule:    `"deploy:" + string(event.payload.service)`,
+		SubjectMode:    store.TriggerSubjectModeSkip,
+		ActionType:     store.TriggerActionMessage,
+		ActionPayload:  `{"agentId":"a1","message":"deploy","wake":true}`,
+		Status:         store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AuthorizationRevision: 1,
+		},
+	}))
+
+	mkEvent := func(sourceSubj, service string) string {
+		id := uuid.NewString()
+		require.NoError(t, ms.CreateTriggerEvent(ctx, &store.TriggerEvent{
+			ID:         id,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    sourceSubj,
+			DedupKey:   "d-" + id,
+			OccurredAt: t0,
+			ReceivedAt: t0,
+			Payload:    `{"service":"` + service + `"}`,
+			Status:     store.TriggerEventStatusPending,
+		}))
+		return id
+	}
+
+	srcSubj1 := "webhook:" + epID + "/delivery-aaa"
+	srcSubj2 := "webhook:" + epID + "/delivery-bbb"
+	srcSubj3 := "webhook:" + epID + "/delivery-ccc"
+	ev1 := mkEvent(srcSubj1, "payments")
+	ev2 := mkEvent(srcSubj2, "payments")
+	ev3 := mkEvent(srcSubj3, "billing")
+
+	ev1Entered := make(chan struct{})
+	releaseEv1 := make(chan struct{})
+	var (
+		mu              sync.Mutex
+		firedEvents     []string
+		envelopeSubjMap = make(map[string]string)
+	)
+	core.fireFn = func(fctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+		mu.Lock()
+		firedEvents = append(firedEvents, req.Event.ID)
+		envelopeSubjMap[req.Event.ID] = req.Event.Subject
+		mu.Unlock()
+
+		if req.Event.ID == ev1 {
+			detached, cancelDetached := req.Tracked.Detach(fctx)
+			defer cancelDetached()
+			close(ev1Entered)
+			select {
+			case <-releaseEv1:
+			case <-detached.Done():
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: detached.Err().Error()}
+			}
+		}
+		return hubfire.FireOutcome{Status: hubfire.FireStatusFired, ResultRef: "msg-" + req.Event.ID[:8]}
+	}
+
+	var auditSink memFireAuditSink
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:           core,
+		Store:          ms,
+		Rules:          rules,
+		FireAudit:      &auditSink,
+		Now:            func() time.Time { return t0 },
+		PerFireTimeout: 40 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	makeItem := func(seq int64, evID string) durablequeue.Item {
+		raw, mErr := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		require.NoError(t, mErr)
+		return durablequeue.Item{
+			Seq:       seq,
+			Kind:      trigger.EventQueueKind,
+			DedupKey:  evID,
+			ProjectID: projID,
+			Payload:   raw,
+		}
+	}
+
+	ev1Done := make(chan durablequeue.Result, 1)
+	go func() {
+		ev1Done <- disp.HandleItem(ctx, makeItem(1, ev1), nopLease{})
+	}()
+	select {
+	case <-ev1Entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ev1 firing on deploy:payments")
+	}
+
+	// Different source subject (srcSubj2 != srcSubj1) deriving the SAME subject ("deploy:payments")
+	// must skip as "subject busy" while ev1 is firing.
+	res2 := disp.HandleItem(ctx, makeItem(2, ev2), nopLease{})
+	require.NoError(t, res2.Err)
+	assert.True(t, res2.Done)
+
+	// Different derived subject ("deploy:billing") must still fire while ev1 is in flight.
+	res3 := disp.HandleItem(ctx, makeItem(3, ev3), nopLease{})
+	require.NoError(t, res3.Err)
+	assert.True(t, res3.Done)
+
+	close(releaseEv1)
+	res1 := <-ev1Done
+	require.NoError(t, res1.Err)
+	assert.True(t, res1.Done)
+
+	mu.Lock()
+	assert.Equal(t, []string{ev1, ev3}, firedEvents, "ev2 must skip on derived subject collision while ev3 on different derived subject fires")
+	assert.Equal(t, srcSubj1, envelopeSubjMap[ev1], "L23: FireEvent.Subject for envelope must stay source subject")
+	assert.Equal(t, srcSubj3, envelopeSubjMap[ev3], "L23: FireEvent.Subject for envelope must stay source subject")
+	mu.Unlock()
+
+	firesRes, err := ms.ListTriggerFires(ctx, store.TriggerFireFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, firesRes.Items, 3)
+	byEv := make(map[string]store.TriggerFire, 3)
+	for _, f := range firesRes.Items {
+		byEv[f.EventID] = f
+	}
+
+	assert.Equal(t, store.TriggerFireStatusFired, byEv[ev1].Status)
+	assert.Equal(t, "deploy:payments", byEv[ev1].Subject)
+	assert.Equal(t, "1/1", byEv[ev1].MatchedThrough)
+
+	assert.Equal(t, store.TriggerFireStatusSkipped, byEv[ev2].Status)
+	assert.Equal(t, trigger.ErrFireSubjectBusy, byEv[ev2].Error)
+	assert.Equal(t, "deploy:payments", byEv[ev2].Subject)
+	assert.Equal(t, "1/1", byEv[ev2].MatchedThrough)
+	assert.Equal(t, "cel", byEv[ev2].DecidedDialect)
+
+	assert.Equal(t, store.TriggerFireStatusFired, byEv[ev3].Status)
+	assert.Equal(t, "deploy:billing", byEv[ev3].Subject)
+
+	assert.Len(t, auditSink.snapshot(), 3, "every terminal fire including subject-busy skip must emit FireAuditRecord")
+}
