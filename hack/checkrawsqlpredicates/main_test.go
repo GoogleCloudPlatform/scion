@@ -208,6 +208,78 @@ func goodPureAnd(col string) func(*entsql.Selector) {
 	}
 }
 
+const (
+	orClause = "a = 1 OR b = 2"
+	orFormat = "%s = 1 OR %s IS NULL"
+)
+
+var (
+	neverReassignedOR = "x = 1 OR y = 2"
+	reassignedOR      = "x = 1 OR y = 2"
+)
+
+func mutateVar() {
+	reassignedOR = "(x = 1 OR y = 2)"
+}
+
+func badExprPSprintf(col string) func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.ExprP(fmt.Sprintf("%s = 1 OR %s IS NULL", col, col)))
+	}
+}
+
+func goodExprPSprintfParenthesized(col string) func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.ExprP(fmt.Sprintf("(%s = 1 OR %s IS NULL)", col, col)))
+	}
+}
+
+func goodExprPSprintfEscapedPercent(col string) func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.ExprP(fmt.Sprintf("%s LIKE '%%OR%%'", col)))
+	}
+}
+
+func badExprPConst() func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.ExprP(orClause))
+	}
+}
+
+func badBuilderConst() func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.WriteString(orClause)
+		}))
+	}
+}
+
+func badBuilderSprintf(col string) func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.WriteString(fmt.Sprintf("%s = 1 OR %s IS NULL", col, col))
+		}))
+	}
+}
+
+func badExprPSprintfConstFormat(col string) func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.ExprP(fmt.Sprintf(orFormat, col, col)))
+	}
+}
+
+func badExprPNeverReassignedVar() func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.ExprP(neverReassignedOR))
+	}
+}
+
+func ignoredReassignedVar() func(*entsql.Selector) {
+	return func(s *entsql.Selector) {
+		s.Where(entsql.ExprP(reassignedOR))
+	}
+}
+
 type S struct{}
 
 func (s *S) BadMethod(col string) func(*entsql.Selector) {
@@ -232,11 +304,17 @@ func (s *S) BadMethod(col string) func(*entsql.Selector) {
 	}
 
 	wantFuncs := map[string]bool{
-		"badChained":   true,
-		"badExprP":     true,
-		"badWriteOp":   true,
-		"badViaHelper": true,
-		"S.BadMethod":  true,
+		"badChained":                 true,
+		"badExprP":                   true,
+		"badWriteOp":                 true,
+		"badViaHelper":               true,
+		"badExprPSprintf":            true,
+		"badExprPConst":              true,
+		"badBuilderConst":            true,
+		"badBuilderSprintf":          true,
+		"badExprPSprintfConstFormat": true,
+		"badExprPNeverReassignedVar": true,
+		"S.BadMethod":                true,
 	}
 	if len(findings) != len(wantFuncs) {
 		for _, f := range findings {
@@ -306,5 +384,12 @@ func TestRun_NoCandidateFilesExits4(t *testing.T) {
 	rc := run([]string{"-allowlist", "", dir})
 	if rc != 4 {
 		t.Fatalf("run on empty dir = %d, want 4", rc)
+	}
+}
+
+func TestRun_UnknownFlagExits5(t *testing.T) {
+	rc := run([]string{"-definitely-unknown-flag"})
+	if rc != 5 {
+		t.Fatalf("run on unknown flag = %d, want 5", rc)
 	}
 }
