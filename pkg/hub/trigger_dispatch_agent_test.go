@@ -493,10 +493,15 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 		assert.Equal(t, "message", details["slot"])
 	})
 
-	t.Run("subject_mode_skip_refused", func(t *testing.T) {
-		req := baseReq("skip-mode")
-		req.Subject = &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip}
-		assertErrCode(t, postTrigger(userCtx, req), http.StatusBadRequest, ErrCodeValidationError)
+	t.Run("subject_mode_skip_accepted_and_reuse_refused", func(t *testing.T) {
+		reqSkip := baseReq("skip-mode")
+		reqSkip.Subject = &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip}
+		recSkip := postTrigger(userCtx, reqSkip)
+		require.Equal(t, http.StatusCreated, recSkip.Code, recSkip.Body.String())
+
+		reqReuse := baseReq("reuse-mode")
+		reqReuse.Subject = &TriggerSubjectSpec{Mode: "reuse"}
+		assertErrCode(t, postTrigger(userCtx, reqReuse), http.StatusBadRequest, ErrCodeValidationError)
 	})
 
 	t.Run("literal_agent_name_create_path_checks_at_authoring", func(t *testing.T) {
