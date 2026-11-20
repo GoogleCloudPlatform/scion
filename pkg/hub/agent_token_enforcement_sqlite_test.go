@@ -198,6 +198,9 @@ func TestConduitAgentRefreshCheck_RejectsUnrecordedAndEmptyJTI(t *testing.T) {
 	sess := relay.RefreshSession{SessionID: "sess-1"}
 
 	t.Run("unrecorded token refused", func(t *testing.T) {
+		logs := &captureHandler{}
+		srv.authConfig.Logger = slog.New(logs)
+
 		unrecordedTok, _, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
 			AgentID:   agentID,
 			ProjectID: project.ID,
@@ -210,14 +213,61 @@ func TestConduitAgentRefreshCheck_RejectsUnrecordedAndEmptyJTI(t *testing.T) {
 		})
 		assert.Equal(t, conduitRefreshRefused, outcome)
 		assert.True(t, exp.IsZero())
+		recs := logs.records("Conduit agent credential refresh refused")
+		require.Len(t, recs, 1)
+		assert.Equal(t, "credential_unrecorded", recs[0].attrs["reason"])
+
+		var ce *conduit.CloseError
+		err = srv.conduitAgentRefresh(ctx, p, sess, &conduitv1.AuthRefresh{
+			Credential: []byte(unrecordedTok),
+		})
+		require.ErrorAs(t, err, &ce)
+		assert.Equal(t, uint32(conduit.CloseUnauthenticated), ce.Code)
+		assert.Equal(t, relay.ReasonUnauthenticated, ce.Reason)
+	})
+
+	t.Run("revoked token refused with distinct reason", func(t *testing.T) {
+		logs := &captureHandler{}
+		srv.authConfig.Logger = slog.New(logs)
+
+		revokedTok, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+		require.NoError(t, err)
+		claims, err := srv.agentTokenService.ValidateAgentToken(revokedTok)
+		require.NoError(t, err)
+		cred, err := s.GetAgentCredentialByJTIHash(ctx, hashJTI(claims.ID))
+		require.NoError(t, err)
+		require.NoError(t, s.RevokeAgentCredential(ctx, cred.ID, "test", "explicit"))
+
+		outcome, exp := srv.conduitAgentRefreshCheck(ctx, p, sess, &conduitv1.AuthRefresh{
+			Credential: []byte(revokedTok),
+		})
+		assert.Equal(t, conduitRefreshRefused, outcome)
+		assert.True(t, exp.IsZero())
+		recs := logs.records("Conduit agent credential refresh refused")
+		require.Len(t, recs, 1)
+		assert.Equal(t, "credential_revoked", recs[0].attrs["reason"])
+
+		var ce *conduit.CloseError
+		err = srv.conduitAgentRefresh(ctx, p, sess, &conduitv1.AuthRefresh{
+			Credential: []byte(revokedTok),
+		})
+		require.ErrorAs(t, err, &ce)
+		assert.Equal(t, uint32(conduit.CloseUnauthenticated), ce.Code)
+		assert.Equal(t, relay.ReasonUnauthenticated, ce.Reason)
 	})
 
 	t.Run("empty jti token refused", func(t *testing.T) {
+		logs := &captureHandler{}
+		srv.authConfig.Logger = slog.New(logs)
+
 		emptyJTITok := signAgentTokenWithoutJTI(t, srv.agentTokenService, agentID, project.ID)
 		outcome, exp := srv.conduitAgentRefreshCheck(ctx, p, sess, &conduitv1.AuthRefresh{
 			Credential: []byte(emptyJTITok),
 		})
 		assert.Equal(t, conduitRefreshRefused, outcome)
 		assert.True(t, exp.IsZero())
+		recs := logs.records("Conduit agent credential refresh refused")
+		require.Len(t, recs, 1)
+		assert.Equal(t, "invalid_token", recs[0].attrs["reason"])
 	})
 }

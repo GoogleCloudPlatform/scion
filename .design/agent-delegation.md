@@ -100,8 +100,8 @@ Goals:
   (`:197`) stores the credential row. No token is returned unless the row is stored.
 - **Validation at the edge.** The agent arm of `UnifiedAuthMiddleware` (`pkg/hub/auth.go:270-377`)
   looks up the credential by JTI hash (`evaluateAgentCredentialStatus`, `agenttoken.go:216`). A
-  revoked row → 401. A store error → 503. A token with **no** row still authenticates as a legacy
-  token. Step 1b refuses a held agent, and step 1c applies the run-scope check.
+  revoked row, a missing row, or a token without a `jti` → 401 `invalid_token`. A store error →
+  503. Step 1b refuses a held agent, and step 1c applies the run-scope check.
 - **Refresh.** `handleAgentTokenRefresh` (`pkg/hub/handlers_agents_core.go:5188`) re-mints through
   `AuthorizeAgentToken` and then revokes the presented credential **best-effort**
   (`:5320-5325`).
@@ -360,10 +360,11 @@ the claim transaction.
 - **Bound-agent JWT paths.** When the bound agent acts with its agent JWT, the handler itself
   applies exchange steps 1-3 (§8): the credential kind is a local agent JWT, the agent credential
   row is re-loaded by JTI hash and must exist, be unrevoked and be unexpired, and the path
-  `agentId` equals the subject. As at exchange, the middleware refuses a revoked row with 401
-  `unauthorized` and a status lookup fault with 503 `unavailable`; in the handler, a missing row, an
-  expired row or a lookup error denies with 401 `agent_credential_invalid`. G does not rely on the
-  middleware alone, because the middleware still admits a JWT with no credential row (§3.1).
+  `agentId` equals the subject. As at exchange, the middleware refuses a revoked or missing row (or
+  a token without a `jti`) with 401 `invalid_token` and a status lookup fault with 503
+  `unavailable`; in the handler, an expired row, an agent mismatch, or a lookup error denies with
+  401 `agent_credential_invalid`. G re-checks the row in the handler for defense in depth and to
+  enforce row expiry and agent matching.
 - **Effects.** Grant revoke marks the grant and all its credentials revoked, and writes the mutation
   audit (`agent_delegation_grant_revoke`) whose ID is stored as `revocation_audit_id`, all in one
   `WithTx`. Revoking an already revoked grant returns 204 with no new audit row. Credential revoke
@@ -411,14 +412,14 @@ codes. The precise reason goes only to the decision record.
 
 1. The credential kind is `agent_jwt` and the principal is a local agent (`AncestryIsHubAttested`).
    Otherwise 403 `credential_not_admitted`.
-2. **Re-load the agent credential row** by JTI hash. Two outcomes are decided earlier, by the
-   agent-token middleware (`auth.go:270-377`), before the handler runs: a **revoked** row is refused
-   with 401 `unauthorized`, and a credential-status lookup fault with 503 `unavailable`. In the
-   handler, a row that is not found (a legacy token with no row), an expired row, or a handler-level
-   lookup error → 401 `agent_credential_invalid`. sciontool treats **both** 401 responses
-   (`unauthorized` and `agent_credential_invalid`) as "re-authenticate": the current JWT is not
-   retried; it backs off (exponential, capped) and retries only after its next agent JWT refresh.
-   A 503 is retried with backoff using the same JWT.
+2. **Re-load the agent credential row** by JTI hash. Several outcomes are decided earlier, by the
+   agent-token middleware (`auth.go:270-377`), before the handler runs: a **revoked** row, a
+   missing credential row, or a token without a `jti` is refused with 401 `invalid_token`, and a
+   credential-status lookup fault with 503 `unavailable`. In the handler, an expired row, an agent
+   mismatch, or a handler-level lookup error → 401 `agent_credential_invalid`. sciontool treats
+   **both** 401 responses (`invalid_token` and `agent_credential_invalid`) as "re-authenticate":
+   the current JWT is not retried; it backs off (exponential, capped) and retries only after its
+   next agent JWT refresh. A 503 is retried with backoff using the same JWT.
 3. The path `agentId` equals the JWT subject. Otherwise 403 `credential_not_admitted`.
 4. **Load the grant filtered by `agent_id = subject`.** A grant that does not exist, or is bound to
    another agent, returns the same 404 `grant_not_found`. The decision record says which applied.
@@ -489,8 +490,8 @@ external code, goes to the decision record (§14.2).
 | 400 | `validation_error` | malformed body; malformed boundary (`details.field = boundary`, `details.reason` = `boundary_invalid` or `boundary_required`); empty ceiling; unknown selector at exchange; expiry in the past or beyond 30 days; TTL above 60 minutes; invalid name, purpose or labels (the value is never echoed) |
 | 400 | `subdelegation_not_supported` | issuance sets `allowSubdelegation` or `parentGrantId` |
 | 400 | `invalid_audience` | exchange audience is not this hub's |
-| 401 | `unauthorized` | exchange or bound-agent management: the agent credential row is revoked (refused by the agent-token middleware before the handler) |
-| 401 | `agent_credential_invalid` | exchange or bound-agent management: no agent credential row (legacy token), an expired row, or a handler-level lookup error |
+| 401 | `invalid_token` | exchange or bound-agent management: the agent credential row is revoked or missing, or the token has no `jti` (refused by the agent-token middleware before the handler) |
+| 401 | `agent_credential_invalid` | exchange or bound-agent management: an expired agent credential row, an agent mismatch, or a handler-level lookup error |
 | 503 | `unavailable` | exchange or bound-agent management: the middleware's credential-status lookup failed (retry with the same JWT) |
 | 403 | `credential_not_admitted` | a dev session at issuance; anything but a local agent JWT at exchange (including a session super-admin); path agent differs from the JWT subject; a delegated credential on a management route |
 | 403 | `forbidden` with `details.reason = CREDENTIAL_MANAGEMENT`, `details.credential = session_required` | a UAT on a session-only G route (`requireSessionCredentialFor`, `session_only_gate.go:93`) |
@@ -1163,8 +1164,9 @@ These cascades are best-effort, because use-time checks are authoritative:
 
 ### 16.4 Agent credential gaps
 
-- A JWT with no agent credential row cannot exchange (§8 step 2). Mint now records the row before
-  returning a token, so only legacy tokens are affected, until the next refresh writes a row.
+- A JWT with no agent credential row is refused by the agent-token middleware with 401
+  `invalid_token` before reaching exchange or bound-agent management (§8 step 2). Mint and refresh
+  both record the credential row before returning a token.
 - If refresh fails to revoke the old agent credential, credentials exchanged with it stay valid
   until their own expiry (at most 60 minutes).
 
@@ -1224,9 +1226,9 @@ through it (§11.9, ptone/scion#7473).
    identical to a missing grant. The decision record (under the test sink) says "bound to
    another agent".
 2. **Wrong credential at exchange:** a UAT or a user session → refused.
-3. **Legacy, revoked or expired agent JWT**: a revoked row → 401 `unauthorized` from the
-   middleware; no row (legacy) or an expired row → 401 `agent_credential_invalid`; a middleware
-   status lookup fault → 503 `unavailable`. No credential is issued in any case.
+3. **Unrecorded, revoked or expired agent JWT**: a revoked or missing row → 401 `invalid_token`
+   from the middleware; an expired row → 401 `agent_credential_invalid`; a middleware status lookup
+   fault → 503 `unavailable`. No credential is issued in any case.
 4. **Agent suspended, held or deleted after exchange** → the next use and the next exchange deny.
 5. **Issuer suspended, deleted or federated** → use and exchange deny. Issuer demoted from
    super-admin → per-target denial at the next use.
@@ -1472,7 +1474,7 @@ and exchange (agent).
   sciontool. It does not forward a WebSocket upgrade (§16.6). It is never
   written to the token file, a config file or a child process's environment.
 - sciontool re-exchanges before expiry and after every agent JWT refresh. It treats both 401
-  responses from exchange (`unauthorized` and `agent_credential_invalid`) as "re-authenticate" and
+  responses from exchange (`invalid_token` and `agent_credential_invalid`) as "re-authenticate" and
   a 503 as retryable, as in §8 step 2. Any same-UID process in the container that can open the
   socket can use the delegated authority; this is not proof of possession.
 
@@ -1618,11 +1620,11 @@ follow-up, coordinated with the audit workstream and approved by the maintainers
   federation explicitly (§11.5). One admission memo serves both G and the bearer evaluator.
 - The evaluator's `boundary_eligibility` stage has its own G code (§11.2).
 - Actor checks use `agentStanding`, which includes agent holds (§8, §11.2).
-- At exchange and on the bound-agent management paths, a revoked agent credential is refused by
-  the agent-token middleware with 401 `unauthorized`, and a status lookup fault with 503
-  `unavailable`. 401 `agent_credential_invalid` is kept for a legacy token with no row, an expired
-  row and a handler-level lookup error. Clients treat both 401 codes as "re-authenticate" (§8.2
-  step 2, §8.4).
+- At exchange and on the bound-agent management paths, a revoked or missing agent credential row
+  (or a token without a `jti`) is refused by the agent-token middleware with 401 `invalid_token`,
+  and a status lookup fault with 503 `unavailable`. 401 `agent_credential_invalid` covers an
+  expired row, an agent mismatch, and a handler-level lookup error. Clients treat both 401 codes
+  as "re-authenticate" (§8.2 step 2, §8.4).
 - At use, the reserved-identity revocation write happens in the authentication middleware, before
   the decision; `decideAgentDelegation` still denies a reserved issuer and writes nothing (§11.2
   step 4).
