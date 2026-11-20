@@ -250,31 +250,47 @@ func (f *badgeFixture) checkItems(t *testing.T, label string, body []byte, proje
 // TestAgentBadges_ListViewsCarryBadgesWithBoundedLookups pins that every
 // agent list path (global and project, legacy and sorted, full and compact)
 // carries harnessVendor and modelSize, and that the harness of agents with
-// no stamped harness is resolved with per-request memoized lookups: one
-// project-scope read per (project, reference) and one global-scope read per
-// reference, not one per agent.
+// no stamped harness is resolved with per-request memoized lookups: at most
+// one project-scope read per (project, reference) and one global-scope read
+// per reference, not one per agent. The scope order follows
+// harnessConfigLookupScopes: global first on a hosted hub, project first on
+// a workstation hub.
 func TestAgentBadges_ListViewsCarryBadgesWithBoundedLookups(t *testing.T) {
-	f := newBadgeFixture(t)
-	bases := map[string]string{
-		"global":  "/api/v1/agents",
-		"project": "/api/v1/projects/" + f.project.ID + "/agents",
-	}
-	// "team-default" is global. The project list: one project-scope miss
-	// and one global hit, shared by its four older agents. The global
-	// list: a project-scope miss in each of the two projects, and one
-	// global hit shared by all six older agents.
-	wantLookups := map[string]int64{"global": 3, "project": 2}
-	for epName, base := range bases {
-		for _, mode := range []string{"", "sort=updated&fit=500", "sort=updated&dir=desc&limit=50"} {
-			for _, view := range []string{"", "view=compact"} {
-				label := epName + " [" + mode + "] [" + view + "]"
-				f.counter.lookups.Store(0)
-				rec := doRequest(t, f.srv, http.MethodGet, withQuery(base, mode, view), nil)
-				require.Equal(t, http.StatusOK, rec.Code, "%s: %s", label, rec.Body.String())
-				f.checkItems(t, label, rec.Body.Bytes(), epName == "project")
-				assert.Equal(t, wantLookups[epName], f.counter.lookups.Load(), "%s: harness-config lookups", label)
-			}
+	for _, workstation := range []bool{false, true} {
+		name := "hosted"
+		// "team-default" is global. Hosted: the global lookup comes first
+		// and hits, so each list makes one global read shared by all its
+		// older agents and no project-scope read.
+		wantLookups := map[string]int64{"global": 1, "project": 1}
+		if workstation {
+			name = "workstation"
+			// Workstation, project first. The project list: one
+			// project-scope miss and one global hit, shared by its four
+			// older agents. The global list: a project-scope miss in each
+			// of the two projects, and one global hit shared by all six
+			// older agents.
+			wantLookups = map[string]int64{"global": 3, "project": 2}
 		}
+		t.Run(name, func(t *testing.T) {
+			f := newBadgeFixture(t)
+			f.srv.workstation = workstation
+			bases := map[string]string{
+				"global":  "/api/v1/agents",
+				"project": "/api/v1/projects/" + f.project.ID + "/agents",
+			}
+			for epName, base := range bases {
+				for _, mode := range []string{"", "sort=updated&fit=500", "sort=updated&dir=desc&limit=50"} {
+					for _, view := range []string{"", "view=compact"} {
+						label := epName + " [" + mode + "] [" + view + "]"
+						f.counter.lookups.Store(0)
+						rec := doRequest(t, f.srv, http.MethodGet, withQuery(base, mode, view), nil)
+						require.Equal(t, http.StatusOK, rec.Code, "%s: %s", label, rec.Body.String())
+						f.checkItems(t, label, rec.Body.Bytes(), epName == "project")
+						assert.Equal(t, wantLookups[epName], f.counter.lookups.Load(), "%s: harness-config lookups", label)
+					}
+				}
+			}
+		})
 	}
 }
 
