@@ -1058,6 +1058,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Name:               in.Name,
 		Persistence:        in.Persistence,
 		BrokerMode:         true,
+		HostedMode:         !s.config.WorkstationMode,
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,
 		TrustedHubEndpoint: trustedHubEndpoint,

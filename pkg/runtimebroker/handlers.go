@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -1074,6 +1075,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if err := checkRequestVolumes(cfgVols, inlineVols); err != nil {
 			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
 			writeControlPathRefusal(w, err)
+			return
+		}
+		// On a hosted broker, member-written request config may not name
+		// host resources. An unresolvable profile fails the create later;
+		// the default runtime's name is used for this check then.
+		runtimeName := func() string {
+			name, _ := s.resolveRuntimeNameForOpts(api.StartOptions{
+				Name:        req.Name,
+				ProjectPath: req.ProjectPath,
+				Profile:     createRequestProfile(req),
+			})
+			return name
+		}
+		if err := s.checkHostedRequestConfig(runtimeName, &api.ScionConfig{Volumes: cfgVols}, req.InlineConfig); err != nil {
+			span.SetStatus(codes.Error, hostedguard.ErrorCode)
+			writeHostedConfigRefusal(w, err)
 			return
 		}
 	}
@@ -4288,6 +4305,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		if err := checkRequestVolumes(startReq.InlineConfig.Volumes); err != nil {
 			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
 			writeControlPathRefusal(w, err)
+			return
+		}
+		// On a hosted broker, member-written inline config may not name
+		// host resources.
+		if err := s.checkHostedRequestConfig(func() string { return resolvedRuntimeType }, startReq.InlineConfig); err != nil {
+			span.SetStatus(codes.Error, hostedguard.ErrorCode)
+			writeHostedConfigRefusal(w, err)
 			return
 		}
 	}
