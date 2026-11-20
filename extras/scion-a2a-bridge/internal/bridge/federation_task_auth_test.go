@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -606,18 +607,14 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 		}
 	})
 
-	t.Run("executor_federation_agent_hub_401_keeps_working_state", func(t *testing.T) {
+	t.Run("executor_federation_agent_cancel_refused_before_hub", func(t *testing.T) {
 		f := newTaskRouteAuthFixture(t, "federation", "", true)
 		agentCaller := &CallerIdentity{
 			TokenType: "federation",
 			AgentID:   "agent-a",
 			IssuerURL: "https://hub-a.example.com",
 		}
-		f.seedTask(t, "task-fed-cancel-401", agentCaller, a2a.TaskStateWorking)
-
-		f.mu.Lock()
-		f.hubSendCode = http.StatusUnauthorized
-		f.mu.Unlock()
+		f.seedTask(t, "task-fed-cancel-refused", agentCaller, a2a.TaskStateWorking)
 
 		agentToken := buildTestJWT(t, map[string]any{
 			"iss":        "https://hub-a.example.com",
@@ -627,19 +624,21 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 		headers := map[string]string{"Authorization": "Bearer " + agentToken}
 
 		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
-			[]byte(`{"jsonrpc":"2.0","id":"c2","method":"CancelTask","params":{"id":"task-fed-cancel-401"}}`), headers)
-		if status != http.StatusOK {
-			t.Fatalf("status = %d, want 200 JSON-RPC envelope; body: %s", status, body)
-		}
-		if !strings.Contains(string(body), `"error"`) {
-			t.Fatalf("expected JSON-RPC error on Hub 401, got: %s", body)
+			[]byte(`{"jsonrpc":"2.0","id":"c2","method":"CancelTask","params":{"id":"task-fed-cancel-refused"}}`), headers)
+		assertFederationAgentRefusalJSONRPC(t, status, body, "seed-content-", "task-fed-cancel-refused")
+
+		f.mu.Lock()
+		calls := f.hubSendCalls
+		f.mu.Unlock()
+		if calls != 0 {
+			t.Errorf("hubSendCalls = %d, want 0", calls)
 		}
 
 		ctx := WithCallerIdentity(
 			WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"}),
 			agentCaller,
 		)
-		stored, err := f.taskStore.Get(ctx, "task-fed-cancel-401")
+		stored, err := f.taskStore.Get(ctx, "task-fed-cancel-refused")
 		if err != nil {
 			t.Fatalf("taskStore.Get: %v", err)
 		}
@@ -649,31 +648,32 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 	})
 
 	t.Run("executor_per_caller_client_failure_no_admin_fallback", func(t *testing.T) {
-		// withMinter=false causes callerHubClient for federation callers to fail
-		// (or minting to fail when sending). Cancel must fail closed without
-		// falling back to the admin client.
+		// Verify ScionExecutor.Cancel fails closed without falling back to the
+		// admin client when callerHubClient fails (withMinter=false).
 		f := newTaskRouteAuthFixture(t, "federation", "", false)
 		agentCaller := &CallerIdentity{
 			TokenType: "federation",
 			AgentID:   "agent-a",
 			IssuerURL: "https://hub-a.example.com",
 		}
-		f.seedTask(t, "task-no-fallback", agentCaller, a2a.TaskStateWorking)
-
-		agentToken := buildTestJWT(t, map[string]any{
-			"iss":        "https://hub-a.example.com",
-			"sub":        "agent-a",
-			"project_id": "proj-a",
-		})
-		headers := map[string]string{"Authorization": "Bearer " + agentToken}
-
-		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
-			[]byte(`{"jsonrpc":"2.0","id":"c3","method":"CancelTask","params":{"id":"task-no-fallback"}}`), headers)
-		if status != http.StatusOK {
-			t.Fatalf("status = %d, want 200 JSON-RPC envelope; body: %s", status, body)
+		ctx := WithCallerIdentity(
+			WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"}),
+			agentCaller,
+		)
+		exec := NewScionExecutor(f.bridge, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		execCtx := &a2asrv.ExecutorContext{
+			TaskID:     "task-no-fallback",
+			ContextID:  "ctx-no-fallback",
+			StoredTask: &a2a.Task{ID: "task-no-fallback", Status: a2a.TaskStatus{State: a2a.TaskStateWorking}},
 		}
-		if !strings.Contains(string(body), `"error"`) {
-			t.Fatalf("expected JSON-RPC error when per-caller client cannot be built, got: %s", body)
+		var gotErr error
+		for _, err := range exec.Cancel(ctx, execCtx) {
+			if err != nil {
+				gotErr = err
+			}
+		}
+		if gotErr == nil {
+			t.Fatal("expected error when per-caller client cannot be built, got nil")
 		}
 
 		f.mu.Lock()
@@ -682,35 +682,12 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 		if calls != 0 {
 			t.Errorf("hubSendCalls = %d, want 0 (must not fall back to admin client)", calls)
 		}
-
-		ctx := WithCallerIdentity(
-			WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"}),
-			agentCaller,
-		)
-		stored, err := f.taskStore.Get(ctx, "task-no-fallback")
-		if err != nil {
-			t.Fatalf("taskStore.Get: %v", err)
-		}
-		if stored.Task.Status.State != a2a.TaskStateWorking {
-			t.Errorf("task state = %v, want %v", stored.Task.Status.State, a2a.TaskStateWorking)
-		}
 	})
 
 	t.Run("executor_hub_send_success_marks_canceled", func(t *testing.T) {
-		f := newTaskRouteAuthFixture(t, "federation", "", true)
-		agentCaller := &CallerIdentity{
-			TokenType: "federation",
-			AgentID:   "agent-a",
-			IssuerURL: "https://hub-a.example.com",
-		}
-		f.seedTask(t, "task-cancel-ok", agentCaller, a2a.TaskStateWorking)
-
-		agentToken := buildTestJWT(t, map[string]any{
-			"iss":        "https://hub-a.example.com",
-			"sub":        "agent-a",
-			"project_id": "proj-a",
-		})
-		headers := map[string]string{"Authorization": "Bearer " + agentToken}
+		f := newTaskRouteAuthFixture(t, "apiKey", "secret-key", true)
+		f.seedTask(t, "task-cancel-ok", nil, a2a.TaskStateWorking)
+		headers := map[string]string{"X-API-Key": "secret-key"}
 
 		status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
 			[]byte(`{"jsonrpc":"2.0","id":"c4","method":"CancelTask","params":{"id":"task-cancel-ok"}}`), headers)
@@ -718,10 +695,7 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 			t.Fatalf("CancelTask failed: status=%d body=%s", status, body)
 		}
 
-		ctx := WithCallerIdentity(
-			WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"}),
-			agentCaller,
-		)
+		ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"})
 		stored, err := f.taskStore.Get(ctx, "task-cancel-ok")
 		if err != nil {
 			t.Fatalf("taskStore.Get: %v", err)
@@ -787,4 +761,484 @@ func TestCancelTask_HubSendFailureKeepsPriorState(t *testing.T) {
 			t.Errorf("state task State = %q, want %q", got.State, TaskStateWorking)
 		}
 	})
+}
+
+func (f *taskRouteAuthFixture) mustMarshalStoredTask(t *testing.T, taskID string, caller *CallerIdentity) []byte {
+	t.Helper()
+	ctx := WithRouteInfo(context.Background(), RouteInfo{ProjectSlug: "proj1", AgentSlug: "agent1"})
+	if caller != nil {
+		ctx = WithCallerIdentity(ctx, caller)
+	}
+	stored, err := f.taskStore.Get(ctx, a2a.TaskID(taskID))
+	if err != nil {
+		t.Fatalf("taskStore.Get(%s): %v", taskID, err)
+	}
+	raw, err := json.Marshal(stored.Task)
+	if err != nil {
+		t.Fatalf("marshal task %s: %v", taskID, err)
+	}
+	return raw
+}
+
+func assertFederationAgentRefusalJSONRPC(t *testing.T, status int, body []byte, forbiddenSubstrings ...string) {
+	t.Helper()
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 JSON-RPC envelope; body: %s", status, body)
+	}
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"error"`) {
+		t.Fatalf("expected JSON-RPC error, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "-31403") {
+		t.Errorf("expected unauthorized code -31403, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "forbidden: task route is not available for federation agent callers") {
+		t.Errorf("expected fixed error message, got: %s", bodyStr)
+	}
+	for _, s := range forbiddenSubstrings {
+		if s != "" && strings.Contains(bodyStr, s) {
+			t.Errorf("response body must not include %q: %s", s, bodyStr)
+		}
+	}
+}
+
+func assertFederationAgentRefusalV0REST(t *testing.T, streaming bool, status int, body []byte, forbiddenSubstrings ...string) {
+	t.Helper()
+	bodyStr := string(body)
+	if streaming {
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200 SSE stream; body: %s", status, bodyStr)
+		}
+		if !strings.Contains(bodyStr, `"code":403`) || !strings.Contains(bodyStr, `"PERMISSION_DENIED"`) {
+			t.Errorf("expected 403 PERMISSION_DENIED error event, got: %s", bodyStr)
+		}
+	} else if status != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body: %s", status, bodyStr)
+	}
+	if !strings.Contains(bodyStr, "forbidden: task route is not available for federation agent callers") {
+		t.Errorf("expected fixed error message, got: %s", bodyStr)
+	}
+	for _, s := range forbiddenSubstrings {
+		if s != "" && strings.Contains(bodyStr, s) {
+			t.Errorf("response body must not include %q: %s", s, bodyStr)
+		}
+	}
+}
+
+func TestFederationTaskRoutesAuth_ExistingTaskCancelAndFollowUpRefused(t *testing.T) {
+	f := newTaskRouteAuthFixture(t, "federation", "", true)
+	f.mu.Lock()
+	f.hubSendCode = http.StatusUnauthorized
+	f.mu.Unlock()
+
+	agentBCaller := &CallerIdentity{
+		TokenType: "federation",
+		AgentID:   "agent-b",
+		IssuerURL: "https://hub-a.example.com",
+	}
+
+	seededTasks := []struct {
+		name   string
+		taskID string
+		state  a2a.TaskState
+	}{
+		{name: "working", taskID: "task-b-working", state: a2a.TaskStateWorking},
+		{name: "input_required", taskID: "task-b-input", state: a2a.TaskStateInputRequired},
+		{name: "completed", taskID: "task-b-completed", state: a2a.TaskStateCompleted},
+		{name: "canceled", taskID: "task-b-canceled", state: a2a.TaskStateCanceled},
+	}
+
+	beforeSnapshots := make(map[string][]byte, len(seededTasks))
+	for _, st := range seededTasks {
+		f.seedTask(t, st.taskID, agentBCaller, st.state)
+		beforeSnapshots[st.taskID] = f.mustMarshalStoredTask(t, st.taskID, agentBCaller)
+	}
+
+	targetCases := []struct {
+		name   string
+		taskID string
+		seeded bool
+	}{
+		{name: "working", taskID: "task-b-working", seeded: true},
+		{name: "input_required", taskID: "task-b-input", seeded: true},
+		{name: "completed", taskID: "task-b-completed", seeded: true},
+		{name: "canceled", taskID: "task-b-canceled", seeded: true},
+		{name: "nonexistent", taskID: "task-b-missing", seeded: false},
+	}
+
+	agentBToken := buildTestJWT(t, map[string]any{
+		"iss":        "https://hub-a.example.com",
+		"sub":        "agent-b",
+		"project_id": "proj-b",
+	})
+	headers := map[string]string{"Authorization": "Bearer " + agentBToken}
+
+	assertUnchanged := func(t *testing.T) {
+		t.Helper()
+		f.mu.Lock()
+		calls := f.hubSendCalls
+		f.mu.Unlock()
+		if calls != 0 {
+			t.Errorf("hubSendCalls = %d, want 0", calls)
+		}
+		for _, st := range seededTasks {
+			after := f.mustMarshalStoredTask(t, st.taskID, agentBCaller)
+			if !bytes.Equal(beforeSnapshots[st.taskID], after) {
+				t.Errorf("stored task %s modified:\nbefore: %s\nafter:  %s", st.taskID, beforeSnapshots[st.taskID], after)
+			}
+		}
+	}
+
+	for _, tc := range targetCases {
+		t.Run("jsonrpc_cancel/"+tc.name, func(t *testing.T) {
+			payload := `{"jsonrpc":"2.0","id":"1","method":"CancelTask","params":{"id":"` + tc.taskID + `"}}`
+			status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc", []byte(payload), headers)
+			assertFederationAgentRefusalJSONRPC(t, status, body, "seed-content-", tc.taskID)
+			assertUnchanged(t)
+		})
+
+		t.Run("v0rest_cancel/"+tc.name, func(t *testing.T) {
+			status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/tasks/"+tc.taskID+":cancel", nil, headers)
+			assertFederationAgentRefusalV0REST(t, false, status, body, "seed-content-", "ctx-"+tc.taskID)
+			assertUnchanged(t)
+		})
+
+		t.Run("jsonrpc_send_with_task_id/"+tc.name, func(t *testing.T) {
+			payload := `{"jsonrpc":"2.0","id":"2","method":"SendMessage","params":{"message":{"messageId":"m-1","role":"ROLE_USER","taskId":"` + tc.taskID + `","parts":[{"text":"follow-up"}]}}}`
+			status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc", []byte(payload), headers)
+			assertFederationAgentRefusalJSONRPC(t, status, body, "seed-content-", tc.taskID)
+			assertUnchanged(t)
+		})
+
+		t.Run("v0rest_send_with_task_id/"+tc.name, func(t *testing.T) {
+			payload := `{"message":{"message_id":"m-2","role":"user","task_id":"` + tc.taskID + `","parts":[{"kind":"text","text":"follow-up"}]}}`
+			status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/message:send", []byte(payload), headers)
+			assertFederationAgentRefusalV0REST(t, false, status, body, "seed-content-", tc.taskID)
+			assertUnchanged(t)
+		})
+
+		t.Run("jsonrpc_stream_with_task_id/"+tc.name, func(t *testing.T) {
+			payload := `{"jsonrpc":"2.0","id":"3","method":"SendStreamingMessage","params":{"message":{"messageId":"m-3","role":"ROLE_USER","taskId":"` + tc.taskID + `","parts":[{"text":"follow-up-stream"}]}}}`
+			status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc", []byte(payload), headers)
+			assertFederationAgentRefusalJSONRPC(t, status, body, "seed-content-", tc.taskID)
+			assertUnchanged(t)
+		})
+
+		t.Run("v0rest_stream_with_task_id/"+tc.name, func(t *testing.T) {
+			payload := `{"message":{"message_id":"m-4","role":"user","task_id":"` + tc.taskID + `","parts":[{"kind":"text","text":"follow-up-stream"}]}}`
+			status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/message:stream", []byte(payload), headers)
+			assertFederationAgentRefusalV0REST(t, true, status, body, "seed-content-", tc.taskID)
+			assertUnchanged(t)
+		})
+	}
+}
+
+func TestFederationTaskRoutesAuth_OpportunisticSweepSkippedForFederationAgent(t *testing.T) {
+	agentToken := buildTestJWT(t, map[string]any{
+		"iss":        "https://hub-a.example.com",
+		"sub":        "agent-a",
+		"project_id": "proj-a",
+	})
+	userToken := buildTestJWT(t, map[string]any{
+		"iss":              "https://hub-a.example.com",
+		"sub":              "user-sub-1",
+		"email":            "visitor@example.com",
+		"scion_token_kind": "user",
+	})
+
+	t.Run("jsonrpc", func(t *testing.T) {
+		f := newTaskRouteAuthFixture(t, "federation", "", true)
+		if got := f.bridge.lastSweptAt.Load(); got != 0 {
+			t.Fatalf("initial lastSweptAt = %d, want 0", got)
+		}
+
+		// Federation agent request must not trigger opportunistic sweep.
+		_, _ = f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+			[]byte(`{"jsonrpc":"2.0","id":"1","method":"ListTasks","params":{}}`),
+			map[string]string{"Authorization": "Bearer " + agentToken})
+		if got := f.bridge.lastSweptAt.Load(); got != 0 {
+			t.Fatalf("lastSweptAt after federation agent JSON-RPC = %d, want 0", got)
+		}
+
+		// Verified federated user request triggers opportunistic sweep.
+		status, _ := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+			[]byte(`{"jsonrpc":"2.0","id":"2","method":"ListTasks","params":{}}`),
+			map[string]string{"Authorization": "Bearer " + userToken})
+		if status != http.StatusOK {
+			t.Fatalf("verified federated user JSON-RPC status = %d, want 200", status)
+		}
+		if got := f.bridge.lastSweptAt.Load(); got == 0 {
+			t.Fatalf("lastSweptAt after verified federated user JSON-RPC = 0, want non-zero")
+		}
+	})
+
+	t.Run("v0rest", func(t *testing.T) {
+		f := newTaskRouteAuthFixture(t, "federation", "", true)
+		if got := f.bridge.lastSweptAt.Load(); got != 0 {
+			t.Fatalf("initial lastSweptAt = %d, want 0", got)
+		}
+
+		// Federation agent request must not trigger opportunistic sweep.
+		_, _ = f.doRequest(t, http.MethodGet, "/projects/proj1/agents/agent1/tasks", nil,
+			map[string]string{"Authorization": "Bearer " + agentToken})
+		if got := f.bridge.lastSweptAt.Load(); got != 0 {
+			t.Fatalf("lastSweptAt after federation agent v0 REST = %d, want 0", got)
+		}
+
+		// Verified federated user request triggers opportunistic sweep.
+		status, _ := f.doRequest(t, http.MethodGet, "/projects/proj1/agents/agent1/tasks", nil,
+			map[string]string{"Authorization": "Bearer " + userToken})
+		if status != http.StatusOK {
+			t.Fatalf("verified federated user v0 REST status = %d, want 200", status)
+		}
+		if got := f.bridge.lastSweptAt.Load(); got == 0 {
+			t.Fatalf("lastSweptAt after verified federated user v0 REST = 0, want non-zero")
+		}
+	})
+
+	t.Run("non_federation_scheme_runs_sweep", func(t *testing.T) {
+		f := newTaskRouteAuthFixture(t, "apiKey", "secret-key", true)
+		status, _ := f.doRequest(t, http.MethodGet, "/projects/proj1/agents/agent1/tasks", nil,
+			map[string]string{"X-API-Key": "secret-key"})
+		if status != http.StatusOK {
+			t.Fatalf("apiKey v0 REST status = %d, want 200", status)
+		}
+		if got := f.bridge.lastSweptAt.Load(); got == 0 {
+			t.Fatalf("lastSweptAt after apiKey v0 REST = 0, want non-zero")
+		}
+	})
+}
+
+func TestFederationTaskRoutesAuth_AllHandlerMethodsClassifiedAndEnforced(t *testing.T) {
+	handlerType := reflect.TypeFor[a2asrv.RequestHandler]()
+	interfaceMethods := make(map[string]struct{}, handlerType.NumMethod())
+	for i := 0; i < handlerType.NumMethod(); i++ {
+		name := handlerType.Method(i).Name
+		interfaceMethods[name] = struct{}{}
+		if _, ok := federationAgentMethodAllowList[name]; !ok {
+			t.Errorf("a2asrv.RequestHandler method %q is not classified in federationAgentMethodAllowList", name)
+		}
+	}
+	for name := range federationAgentMethodAllowList {
+		if _, ok := interfaceMethods[name]; !ok {
+			t.Errorf("federationAgentMethodAllowList contains unknown method %q not on a2asrv.RequestHandler", name)
+		}
+	}
+
+	type transportSpec struct {
+		jsonrpcPayload string
+		restMethod     string
+		restPath       string
+		restBody       string
+		restStreaming  bool
+	}
+	type methodCase struct {
+		policy  federationAgentMethodPolicy
+		denied  transportSpec
+		newTask *transportSpec // set only for federationAgentAllowNewTaskOnly
+	}
+
+	const seededID = "task-complete-1"
+	methodTable := map[string]methodCase{
+		"GetTask": {
+			policy: federationAgentDeny,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"1","method":"GetTask","params":{"id":"` + seededID + `"}}`,
+				restMethod:     http.MethodGet,
+				restPath:       "/projects/proj1/agents/agent1/tasks/" + seededID,
+			},
+		},
+		"ListTasks": {
+			policy: federationAgentDeny,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"2","method":"ListTasks","params":{}}`,
+				restMethod:     http.MethodGet,
+				restPath:       "/projects/proj1/agents/agent1/tasks",
+			},
+		},
+		"CancelTask": {
+			policy: federationAgentDeny,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"3","method":"CancelTask","params":{"id":"` + seededID + `"}}`,
+				restMethod:     http.MethodPost,
+				restPath:       "/projects/proj1/agents/agent1/tasks/" + seededID + ":cancel",
+			},
+		},
+		"SubscribeToTask": {
+			policy: federationAgentDeny,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"4","method":"SubscribeToTask","params":{"id":"` + seededID + `"}}`,
+				restMethod:     http.MethodPost,
+				restPath:       "/projects/proj1/agents/agent1/tasks/" + seededID + ":subscribe",
+				restStreaming:  true,
+			},
+		},
+		"GetTaskPushConfig": {
+			policy: federationAgentDeny,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"5","method":"GetTaskPushNotificationConfig","params":{"taskId":"` + seededID + `","id":"cfg-1"}}`,
+				restMethod:     http.MethodGet,
+				restPath:       "/projects/proj1/agents/agent1/tasks/" + seededID + "/pushNotificationConfigs/cfg-1",
+			},
+		},
+		"ListTaskPushConfigs": {
+			policy: federationAgentDeny,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"6","method":"ListTaskPushNotificationConfigs","params":{"taskId":"` + seededID + `"}}`,
+				restMethod:     http.MethodGet,
+				restPath:       "/projects/proj1/agents/agent1/tasks/" + seededID + "/pushNotificationConfigs",
+			},
+		},
+		"CreateTaskPushConfig": {
+			policy: federationAgentDeny,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"7","method":"CreateTaskPushNotificationConfig","params":{"taskId":"` + seededID + `","url":"https://callback.example.com"}}`,
+				restMethod:     http.MethodPost,
+				restPath:       "/projects/proj1/agents/agent1/tasks/" + seededID + "/pushNotificationConfigs",
+				restBody:       `{"url":"https://callback.example.com"}`,
+			},
+		},
+		"DeleteTaskPushConfig": {
+			policy: federationAgentDeny,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"8","method":"DeleteTaskPushNotificationConfig","params":{"taskId":"` + seededID + `","id":"cfg-1"}}`,
+				restMethod:     http.MethodDelete,
+				restPath:       "/projects/proj1/agents/agent1/tasks/" + seededID + "/pushNotificationConfigs/cfg-1",
+			},
+		},
+		"GetExtendedAgentCard": {
+			policy: federationAgentDeny,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"9","method":"GetExtendedAgentCard","params":{}}`,
+				restMethod:     http.MethodGet,
+				restPath:       "/projects/proj1/agents/agent1/extendedAgentCard",
+			},
+		},
+		"SendMessage": {
+			policy: federationAgentAllowNewTaskOnly,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"10","method":"SendMessage","params":{"message":{"messageId":"m-10","role":"ROLE_USER","taskId":"` + seededID + `","parts":[{"text":"hi"}]}}}`,
+				restMethod:     http.MethodPost,
+				restPath:       "/projects/proj1/agents/agent1/message:send",
+				restBody:       `{"message":{"message_id":"m-10r","role":"user","task_id":"` + seededID + `","parts":[{"kind":"text","text":"hi"}]}}`,
+			},
+			newTask: &transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"11","method":"SendMessage","params":{"message":{"messageId":"m-11","role":"ROLE_USER","parts":[{"text":"new task"}]}}}`,
+				restMethod:     http.MethodPost,
+				restPath:       "/projects/proj1/agents/agent1/message:send",
+				restBody:       `{"message":{"message_id":"m-11r","role":"user","parts":[{"kind":"text","text":"new task"}]}}`,
+			},
+		},
+		"SendStreamingMessage": {
+			policy: federationAgentAllowNewTaskOnly,
+			denied: transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"12","method":"SendStreamingMessage","params":{"message":{"messageId":"m-12","role":"ROLE_USER","taskId":"` + seededID + `","parts":[{"text":"hi"}]}}}`,
+				restMethod:     http.MethodPost,
+				restPath:       "/projects/proj1/agents/agent1/message:stream",
+				restBody:       `{"message":{"message_id":"m-12r","role":"user","task_id":"` + seededID + `","parts":[{"kind":"text","text":"hi"}]}}`,
+				restStreaming:  true,
+			},
+			newTask: &transportSpec{
+				jsonrpcPayload: `{"jsonrpc":"2.0","id":"13","method":"SendStreamingMessage","params":{"message":{"messageId":"m-13","role":"ROLE_USER","parts":[{"text":"new stream task"}]}}}`,
+				restMethod:     http.MethodPost,
+				restPath:       "/projects/proj1/agents/agent1/message:stream",
+				restBody:       `{"message":{"message_id":"m-13r","role":"user","parts":[{"kind":"text","text":"new stream task"}]}}`,
+				restStreaming:  true,
+			},
+		},
+	}
+
+	// Ensure every interface method is covered by the transport test matrix.
+	for name := range interfaceMethods {
+		tc, ok := methodTable[name]
+		if !ok {
+			t.Fatalf("a2asrv.RequestHandler method %q is missing from transport test table", name)
+		}
+		if got := federationAgentMethodAllowList[name]; got != tc.policy {
+			t.Errorf("policy for %q = %v, want %v", name, got, tc.policy)
+		}
+	}
+
+	f := newTaskRouteAuthFixture(t, "federation", "", true)
+	f.mu.Lock()
+	f.hubSendCode = http.StatusUnauthorized
+	f.mu.Unlock()
+
+	agentCaller := &CallerIdentity{
+		TokenType: "federation",
+		AgentID:   "agent-a",
+		IssuerURL: "https://hub-a.example.com",
+	}
+	f.seedTask(t, seededID, agentCaller, a2a.TaskStateWorking)
+	beforeSnapshot := f.mustMarshalStoredTask(t, seededID, agentCaller)
+
+	agentToken := buildTestJWT(t, map[string]any{
+		"iss":        "https://hub-a.example.com",
+		"sub":        "agent-a",
+		"project_id": "proj-a",
+	})
+	headers := map[string]string{"Authorization": "Bearer " + agentToken}
+
+	for name, tc := range methodTable {
+		t.Run(name+"/denied", func(t *testing.T) {
+			f.mu.Lock()
+			beforeCalls := f.hubSendCalls
+			f.mu.Unlock()
+
+			status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+				[]byte(tc.denied.jsonrpcPayload), headers)
+			assertFederationAgentRefusalJSONRPC(t, status, body, "seed-content-", seededID)
+
+			var restBody []byte
+			if tc.denied.restBody != "" {
+				restBody = []byte(tc.denied.restBody)
+			}
+			status, body = f.doRequest(t, tc.denied.restMethod, tc.denied.restPath, restBody, headers)
+			assertFederationAgentRefusalV0REST(t, tc.denied.restStreaming, status, body, "seed-content-", "ctx-"+seededID)
+
+			f.mu.Lock()
+			afterCalls := f.hubSendCalls
+			f.mu.Unlock()
+			if afterCalls != beforeCalls {
+				t.Errorf("%s denied path made %d Hub send calls, want 0", name, afterCalls-beforeCalls)
+			}
+			afterSnapshot := f.mustMarshalStoredTask(t, seededID, agentCaller)
+			if !bytes.Equal(beforeSnapshot, afterSnapshot) {
+				t.Errorf("%s modified seeded task:\nbefore: %s\nafter:  %s", name, beforeSnapshot, afterSnapshot)
+			}
+		})
+
+		if tc.newTask != nil {
+			t.Run(name+"/new_task_reaches_hub", func(t *testing.T) {
+				f.mu.Lock()
+				beforeCalls := f.hubSendCalls
+				f.mu.Unlock()
+
+				status, body := f.doRequest(t, http.MethodPost, "/projects/proj1/agents/agent1/jsonrpc",
+					[]byte(tc.newTask.jsonrpcPayload), headers)
+				if status != http.StatusOK {
+					t.Fatalf("JSON-RPC new-task status = %d, want 200; body: %s", status, body)
+				}
+				if strings.Contains(string(body), "forbidden: task route is not available for federation agent callers") {
+					t.Errorf("JSON-RPC new-task %s should not be blocked by task-route gate: %s", name, body)
+				}
+
+				status, body = f.doRequest(t, tc.newTask.restMethod, tc.newTask.restPath,
+					[]byte(tc.newTask.restBody), headers)
+				if status != http.StatusOK {
+					t.Fatalf("v0 REST new-task status = %d, want 200; body: %s", status, body)
+				}
+				if strings.Contains(string(body), "forbidden: task route is not available for federation agent callers") {
+					t.Errorf("v0 REST new-task %s should not be blocked by task-route gate: %s", name, body)
+				}
+
+				f.mu.Lock()
+				afterCalls := f.hubSendCalls
+				f.mu.Unlock()
+				if afterCalls-beforeCalls != 2 {
+					t.Errorf("%s new-task Hub send calls = %d, want 2 (JSON-RPC + v0 REST)", name, afterCalls-beforeCalls)
+				}
+			})
+		}
+	}
 }
