@@ -102,13 +102,11 @@ func carryOverBrokerInstances(raw map[string]interface{}, stored interface{}, pr
 	}
 }
 
-// nullPreservedBrokerPaths are settings keys a null on server, server.broker,
-// server.hub, or server.hub.system_one leaves in place in a workstation PUT.
-// Unlike hubOwnedBrokerPaths, server.broker.instances may be changed by an
-// explicit key, while server.hub.system_one.secret_names is never API-writable.
+// nullPreservedBrokerPaths are settings keys a null on server or
+// server.broker leaves in place in a workstation PUT. Unlike
+// hubOwnedBrokerPaths they may be changed by an explicit key.
 var nullPreservedBrokerPaths = [][]string{
 	{"server", "broker", "instances"},
-	{"server", "hub", "system_one", "secret_names"},
 }
 
 // storedSystemOneSecretNames returns the raw server.hub.system_one.secret_names

@@ -449,8 +449,13 @@ func workstationFileEdits(req *ServerConfigUpdateDBRequest, leaves []bodyLeaf, o
 			continue
 		}
 		if l.null {
+			preserved := append(append([][]string{}, hubOwnedBrokerPaths...), nullPreservedBrokerPaths...)
+			if origTyped != nil && origTyped.Server != nil && origTyped.Server.Hub != nil &&
+				origTyped.Server.Hub.SystemOne != nil && len(origTyped.Server.Hub.SystemOne.SecretNames) > 0 {
+				preserved = append(preserved, []string{"server", "hub", "system_one", "secret_names"})
+			}
 			var keep [][]string
-			for _, owned := range append(append([][]string{}, hubOwnedBrokerPaths...), nullPreservedBrokerPaths...) {
+			for _, owned := range preserved {
 				if len(owned) > len(l.path) && pathHasPrefixPath(owned, l.path) {
 					keep = append(keep, owned[len(l.path):])
 				}
