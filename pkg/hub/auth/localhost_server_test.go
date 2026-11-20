@@ -284,3 +284,124 @@ func TestGenerateRandomState(t *testing.T) {
 		t.Error("states should be unique")
 	}
 }
+
+func TestLocalhostAuthServer_CallbackBrandingAndSecurity(t *testing.T) {
+	t.Run("default unbranded uses theme variables without legacy gradients", func(t *testing.T) {
+		srv := NewLocalhostAuthServer()
+		srv.state = "st"
+		req := httptest.NewRequest(http.MethodGet, CallbackPath+"?state=st&code=abc", nil)
+		rec := httptest.NewRecorder()
+		srv.handleCallback(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+			t.Errorf("Content-Type = %q", ct)
+		}
+		if nosniff := rec.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+			t.Errorf("X-Content-Type-Options = %q", nosniff)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("Cache-Control = %q", cc)
+		}
+		body := rec.Body.String()
+		for _, legacy := range []string{"#667eea", "#764ba2", "#e74c3c", "#c0392b"} {
+			if strings.Contains(body, legacy) {
+				t.Errorf("callback HTML still contains legacy gradient color %s", legacy)
+			}
+		}
+		if !strings.Contains(body, "@media (prefers-color-scheme: dark)") {
+			t.Errorf("expected dark mode media query in callback HTML")
+		}
+		if !strings.Contains(body, `<span class="badge">scion</span>`) {
+			t.Errorf("expected stock scion badge:\n%s", body)
+		}
+		if strings.Contains(body, "Powered by Scion") {
+			t.Errorf("unbranded default must not show Powered by Scion")
+		}
+	})
+
+	t.Run("branded with attribution shown and light/dark logos", func(t *testing.T) {
+		srv := NewLocalhostAuthServer().WithBranding(&CallbackBranding{
+			Name:        "Acme Cloud",
+			Attribution: "shown",
+			LogoLight:   "https://hub.example.com/brand/logo-light?v=12345678",
+			LogoDark:    "https://hub.example.com/brand/logo-dark?v=87654321",
+			Light: CallbackColors{
+				Accent: "#0f766e",
+			},
+			Dark: CallbackColors{
+				Bg:     "#0c0a09",
+				Accent: "#2dd4bf",
+			},
+		})
+		srv.state = "st"
+		req := httptest.NewRequest(http.MethodGet, CallbackPath+"?state=st&code=abc", nil)
+		rec := httptest.NewRecorder()
+		srv.handleCallback(rec, req)
+
+		body := rec.Body.String()
+		for _, want := range []string{
+			"<title>Acme Cloud - Authentication Successful</title>",
+			"--accent: #0f766e;",
+			"--bg: #0c0a09;",
+			"--accent: #2dd4bf;",
+			`<source media="(prefers-color-scheme: dark)" srcset="https://hub.example.com/brand/logo-dark?v=87654321">`,
+			`<img class="brand-logo" src="https://hub.example.com/brand/logo-light?v=12345678" alt="Acme Cloud">`,
+			`<span class="badge">Acme Cloud · Powered by Scion</span>`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("body missing %q:\n%s", want, body)
+			}
+		}
+	})
+
+	t.Run("branded with attribution hidden omits Powered by Scion", func(t *testing.T) {
+		srv := NewLocalhostAuthServer().WithBranding(&CallbackBranding{
+			Name:        "Acme Cloud",
+			Attribution: "hidden",
+		})
+		srv.state = "st"
+		req := httptest.NewRequest(http.MethodGet, CallbackPath+"?state=st&code=abc", nil)
+		rec := httptest.NewRecorder()
+		srv.handleCallback(rec, req)
+
+		body := rec.Body.String()
+		if !strings.Contains(body, `<span class="badge">Acme Cloud</span>`) {
+			t.Errorf("expected Acme Cloud badge without attribution:\n%s", body)
+		}
+		if strings.Contains(body, "Powered by Scion") {
+			t.Errorf("hidden attribution must omit Powered by Scion")
+		}
+	})
+
+	t.Run("sanitizes malicious colors, logo URLs, and HTML in brand name", func(t *testing.T) {
+		srv := NewLocalhostAuthServer().WithBranding(&CallbackBranding{
+			Name:      `<script>alert(1)</script>`,
+			LogoLight: `javascript:alert(1)`,
+			LogoDark:  `http://evil.example.com/logo.svg`,
+			Light: CallbackColors{
+				Bg:     `#fff; } body { background: url(https://evil.example/x); }`,
+				Accent: `red`,
+			},
+		})
+		srv.state = "st"
+		req := httptest.NewRequest(http.MethodGet, CallbackPath+"?state=st&code=abc", nil)
+		rec := httptest.NewRecorder()
+		srv.handleCallback(rec, req)
+
+		body := rec.Body.String()
+		for _, forbidden := range []string{"<script>", "javascript:", "evil.example", `<img class="brand-logo"`} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("body must not contain unsanitized %q:\n%s", forbidden, body)
+			}
+		}
+		if !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") {
+			t.Errorf("expected HTML-escaped brand name in body")
+		}
+		if !strings.Contains(body, "--bg: #f8fafc;") || !strings.Contains(body, "--accent: #3b82f6;") {
+			t.Errorf("invalid hex colors must fall back to stock defaults:\n%s", body)
+		}
+	})
+}
