@@ -1002,15 +1002,10 @@ func TestTriggerDispatchAgent_UpdateResumeAndRoleCaps(t *testing.T) {
 	ctx := context.Background()
 	f := newTriggerDispatchAgentFixture(t, "upd-resume-caps")
 
-	// Grant project-admin role to a user (members lack trigger.update).
-	adminUser := &store.User{
-		ID:          api.NewUUID(),
-		Email:       "trig-admin@example.com",
-		DisplayName: "Trig Admin",
-		Role:        store.UserRoleAdmin,
-		Status:      "active",
-	}
-	require.NoError(t, f.sched.store.CreateUser(ctx, adminUser))
+	// Grant project-admin role via a real RBAC RoleBinding (members lack
+	// trigger.update; create a fresh user with hubMemberUser + grantProjectRole).
+	adminUser := hubMemberUser(t, f.sched.store, api.NewUUID())
+	grantProjectRole(t, f.sched.store, adminUser.ID, f.sched.proj.ID, store.ProjectRoleAdmin)
 	adminCtx := f.userAuth(t, adminUser)
 
 	// Install store wrapper before audited trigger mutations so we can flip an
