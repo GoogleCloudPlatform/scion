@@ -951,8 +951,9 @@ describe('PR 2d light-mode token equivalence (ptone/scion#8410)', () => {
 });
 
 const BORDER_RADIUS_DECL_RE =
-  /(?:^|[;\s{])border(?:-(?:top|bottom)-(?:left|right)|-(?:start|end)-(?:start|end))?-radius\s*:\s*([^;{}]+)/gi;
+  /(?:^|[;\s{"'])border(?:-(?:top|bottom)-(?:left|right)|-(?:start|end)-(?:start|end))?-radius\s*:\s*((?:\$\{[^}]*\}|[^;{}'"])+)/gi;
 const NON_ZERO_RECT_RADIUS_RE = /^(?:\d*\.?\d+)(?:px|rem|em|%)$/i;
+const INTERPOLATED_RADIUS_UNIT_RE = /\$\{[^}]*\}\s*(?:px|rem|em|%)/i;
 const ALLOWED_RADIUS_TOKENS = new Set([
   '0',
   '0px',
@@ -973,13 +974,57 @@ const ALLOWED_RADIUS_TOKENS = new Set([
   '/',
 ]);
 
+/** Replace balanced CSS math functions (`calc(...)`, `min(...)`, `max(...)`, `clamp(...)`) that reference `var()`. */
+function stripTokenMathExpressions(text: string): string {
+  const fnRe = /\b(?:calc|min|max|clamp)\(/gi;
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    fnRe.lastIndex = i;
+    const m = fnRe.exec(text);
+    if (!m || m.index !== i) {
+      out += text[i++];
+      continue;
+    }
+    let depth = 0;
+    let j = i + m[0].length - 1;
+    let found = false;
+    for (; j < text.length; j++) {
+      if (text[j] === '(') depth++;
+      else if (text[j] === ')') {
+        depth--;
+        if (depth === 0) {
+          j++;
+          found = true;
+          break;
+        }
+      }
+    }
+    if (found) {
+      const expr = text.slice(i, j);
+      if (expr.includes('var()')) {
+        out += 'var()';
+        i = j;
+        continue;
+      }
+    }
+    out += text[i++];
+  }
+  return out;
+}
+
 function findBareRadiusLiterals(text: string): string[] {
   const clean = stripVarExpressions(stripComments(text));
   const found: string[] = [];
   for (const m of clean.matchAll(BORDER_RADIUS_DECL_RE)) {
     const val = m[1].trim();
-    if (!val || val.includes('${')) continue;
-    const tokens = val.split(/[\s/]+/).filter(Boolean);
+    if (!val) continue;
+    if (INTERPOLATED_RADIUS_UNIT_RE.test(val)) {
+      found.push(val.replace(/\s+/g, ' '));
+      continue;
+    }
+    const stripped = stripTokenMathExpressions(val);
+    const tokens = stripped.split(/[\s/(),]+/).filter(Boolean);
     const bad = tokens.filter((tok) => {
       const lower = tok.toLowerCase();
       if (ALLOWED_RADIUS_TOKENS.has(lower)) return false;
@@ -1228,8 +1273,88 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
     ).toEqual(['0.5rem', '6px', '0 0 0.25rem 0.25rem']);
     expect(
       findBareRadiusLiterals(
-        '/* border-radius: 8px; */\n// border-radius: 4px;\n.a { border-radius: var(--scion-radius, 0.5rem); border-radius: 0; border-radius: 50%; border-radius: 100%; border-radius: 9999px; border-radius: none; }'
+        '.a { border-radius: calc(0.5rem - 2px); } .b { border-radius: ${r}px; } <div style="border-radius: 6px"></div>'
+      )
+    ).toEqual(['calc(0.5rem - 2px)', '${r}px', '6px']);
+    expect(
+      findBareRadiusLiterals(
+        '/* border-radius: 8px; */\n// border-radius: 4px;\n.a { border-radius: var(--scion-radius, 0.5rem); border-radius: calc(var(--scion-radius, 0.5rem) * 0.75); border-radius: calc(var(--scion-radius, 0.5rem) - 0.125rem); border-radius: 0; border-radius: 50%; border-radius: 100%; border-radius: 9999px; border-radius: none; }'
       )
     ).toEqual([]);
+  });
+
+  it('preserves exact default-preset computed radii for all PR 3a migrated shell/pre-auth sites', () => {
+    const defaultVars = cascade([shoelaceLightCss, shoelaceDarkCss, themeCss], {
+      isRoot: true,
+      classes: new Set(['sl-theme-light']),
+      dataTheme: 'light',
+      prefersDark: false,
+    });
+    const toPx = (raw: string): number => {
+      const s = raw.trim();
+      const rem = /^(-?\d*\.?\d+)rem$/i.exec(s);
+      if (rem) return parseFloat(rem[1]) * 16;
+      const px = /^(-?\d*\.?\d+)px$/i.exec(s);
+      if (px) return parseFloat(px[1]);
+      if (s === '0') return 0;
+      throw new Error(`Unsupported length: ${raw}`);
+    };
+    const evalDefaultRadiusPx = (expr: string): number => {
+      const resolved = expr.replace(
+        /var\(\s*(--[\w-]+)(?:\s*,\s*([^)]+))?\s*\)/g,
+        (_, name, fb) => {
+          return defaultVars.get(name) ?? fb?.trim() ?? '';
+        }
+      );
+      const calcMul = /^calc\(\s*([^\s*]+)\s*\*\s*(-?\d*\.?\d+)\s*\)$/i.exec(resolved.trim());
+      if (calcMul) {
+        return toPx(calcMul[1]) * parseFloat(calcMul[2]);
+      }
+      return toPx(resolved);
+    };
+
+    // Every migrated site in PR 3a: [relativePath, cssSelector, originalDefaultPx]
+    const expectedDefaults: Array<[string, string, number]> = [
+      ['components/pages/login.ts', '.login-container', 16],
+      ['components/pages/login.ts', '.error-alert', 8],
+      ['components/pages/login.ts', '.provider-btn', 8],
+      ['components/pages/unauthorized.ts', '.container', 16],
+      ['components/pages/unauthorized.ts', '.help-text', 8],
+      ['components/shared/nav.ts', '.nav-link', 8],
+      ['components/shared/nav.ts', '.collapse-toggle', 8],
+      ['components/profile/profile-nav.ts', '.return-link', 8],
+      ['components/profile/profile-nav.ts', '.nav-link', 8],
+      ['components/profile/profile-nav.ts', '.nav-link-external', 8],
+      ['components/profile/profile-nav.ts', '.collapse-toggle', 8],
+      ['components/shared/header.ts', '.mobile-menu-btn', 6],
+      ['components/shared/header.ts', '.mode-switch', 8],
+      ['components/shared/header.ts', '.mode-switch button', 6],
+      ['components/shared/header.ts', '.chat-unread-badge', 9999],
+      ['components/shared/header.ts', '.palette-button', 6],
+      ['components/shared/header.ts', '.profile-link', 8],
+      ['components/shared/header.ts', '.sign-out-button', 8],
+      ['components/shared/header.ts', '.toggle-track', 9999],
+      ['components/shared/header.ts', '.mode-trigger', 6],
+      ['components/shared/header.ts', '.user-trigger', 6],
+      ['components/shared/header.ts', '.icon-badge-wrapper .trigger-badge', 9999],
+      ['components/shared/header.ts', '.count-badge', 9999],
+      ['components/shared/header.ts', '.sign-in-link', 8],
+    ];
+
+    const fileCache = new Map<string, string>();
+    for (const [rel, selector, wantPx] of expectedDefaults) {
+      let src = fileCache.get(rel);
+      if (src === undefined) {
+        src = stripComments(readFileSync(join(srcDir, rel), 'utf8'));
+        fileCache.set(rel, src);
+      }
+      const escapedSel = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const ruleRe = new RegExp(`(?:^|\\n)\\s*${escapedSel}\\s*\\{([^{}]*)\\}`, 'm');
+      const ruleMatch = ruleRe.exec(src);
+      expect(ruleMatch, `${rel} missing rule for ${selector}`).not.toBeNull();
+      const radMatch = /border-radius\s*:\s*([^;]+)/i.exec(ruleMatch![1]);
+      expect(radMatch, `${rel} ${selector} missing border-radius`).not.toBeNull();
+      expect(evalDefaultRadiusPx(radMatch![1]), `${rel} ${selector} default radius`).toBe(wantPx);
+    }
   });
 });

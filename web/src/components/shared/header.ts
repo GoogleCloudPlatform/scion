@@ -259,7 +259,7 @@ export class ScionHeader extends LitElement {
       padding: 0.5rem;
       background: transparent;
       border: none;
-      border-radius: var(--scion-radius, 0.5rem);
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       cursor: pointer;
       color: var(--scion-text, #1e293b);
     }
@@ -345,7 +345,7 @@ export class ScionHeader extends LitElement {
       gap: 0.375rem;
       padding: 0.5rem 0.75rem;
       border: none;
-      border-radius: var(--scion-radius, 0.5rem);
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       background: transparent;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -441,7 +441,7 @@ export class ScionHeader extends LitElement {
       height: 2rem;
       padding: 0;
       border: none;
-      border-radius: var(--scion-radius, 0.5rem);
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       background: transparent;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -627,7 +627,7 @@ export class ScionHeader extends LitElement {
       gap: 0.375rem;
       padding: 0.375rem 0.625rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       background: transparent;
       color: var(--scion-text, #1e293b);
       cursor: pointer;
@@ -667,7 +667,7 @@ export class ScionHeader extends LitElement {
       gap: 0.25rem;
       padding: 0.375rem 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       background: transparent;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
