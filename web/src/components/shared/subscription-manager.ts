@@ -594,6 +594,8 @@ export class ScionSubscriptionManager extends LitElement {
         return 'Agent encountered an error.';
       case 'HARNESS_ERROR':
         return "Agent's harness reported a model or API error; a new message retries.";
+      case 'SUSPENDED':
+        return 'Agent was suspended.';
       case 'DELETED':
         return 'Agent was deleted.';
       default:

@@ -2083,7 +2083,7 @@ type MessageRequest struct {
 
 	// Notify subscribes the sender to status notifications for this agent
 	// (COMPLETED, IDLE, WAITING_FOR_INPUT, LIMITS_EXCEEDED, STALLED, ERROR,
-	// HARNESS_ERROR, HALTED).
+	// HARNESS_ERROR, HALTED, SUSPENDED).
 	Notify bool `json:"notify,omitempty"`
 
 	// Wake resumes a suspended agent before delivering the message.
