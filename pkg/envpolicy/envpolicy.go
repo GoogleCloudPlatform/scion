@@ -30,6 +30,101 @@ const HookWithheldEnvVar = "SCION_HOOK_WITHHELD_ENV"
 // HookEnvModeDenylist is the default hook environment filtering mode.
 const HookEnvModeDenylist = "denylist"
 
+// ReservedHarnessConfigPrefix is the environment variable prefix reserved for
+// Scion itself. Harness-config layers cannot set keys with this prefix, except
+// for the time-boxed entries in LegacyHarnessHints which are rewritten to
+// HarnessHintPrefix.
+const ReservedHarnessConfigPrefix = "SCION_"
+
+// HarnessHintPrefix is the prefix for safe, harness-publishable hints.
+const HarnessHintPrefix = "HARNESS_HINT_"
+
+// Code-owned harness hint environment variable names.
+const (
+	HintLivenessRootDepth   = "HARNESS_HINT_LIVENESS_ROOT_DEPTH"
+	HintAutoExposePorts     = "HARNESS_HINT_AUTO_EXPOSE_PORTS"
+	HintAutoExposeMode      = "HARNESS_HINT_AUTO_EXPOSE_MODE"
+	HintAutoExposePortsList = "HARNESS_HINT_AUTO_EXPOSE_PORTS_LIST"
+)
+
+// HarnessHint describes a code-owned harness-publishable hint variable and its
+// container-side reader.
+type HarnessHint struct {
+	Name   string
+	Reader string
+}
+
+// harnessHints is the closed, code-owned list of harness-publishable hints.
+// Adding a new hint requires a reader and a test.
+var harnessHints = []HarnessHint{
+	{Name: HintAutoExposeMode, Reader: "pkg/sciontool/autoexpose"},
+	{Name: HintAutoExposePorts, Reader: "pkg/sciontool/autoexpose"},
+	{Name: HintAutoExposePortsList, Reader: "pkg/sciontool/autoexpose"},
+	{Name: HintLivenessRootDepth, Reader: "pkg/agent/state"},
+}
+
+// HarnessHints returns a sorted copy of all code-owned harness hints.
+func HarnessHints() []HarnessHint {
+	out := make([]HarnessHint, len(harnessHints))
+	copy(out, harnessHints)
+	return out
+}
+
+// legacyHarnessHints maps grandfathered SCION_* names that shipped harness
+// configs set onto their HarnessHintPrefix replacements during the transition
+// window (removed in the release after this ships).
+var legacyHarnessHints = map[string]string{
+	"SCION_LIVENESS_HARNESS_ROOT_DEPTH": HintLivenessRootDepth,
+	"SCION_AUTO_EXPOSE_PORTS":           HintAutoExposePorts,
+	"SCION_AUTO_EXPOSE_MODE":            HintAutoExposeMode,
+	"SCION_AUTO_EXPOSE_PORTS_LIST":      HintAutoExposePortsList,
+}
+
+// LegacyHarnessHints returns a copy of the grandfathered SCION_* to
+// HARNESS_HINT_* rewrite map.
+func LegacyHarnessHints() map[string]string {
+	out := make(map[string]string, len(legacyHarnessHints))
+	for k, v := range legacyHarnessHints {
+		out[k] = v
+	}
+	return out
+}
+
+// LegacyHarnessHint reports whether name is a grandfathered SCION_* key and
+// returns its HARNESS_HINT_* replacement.
+func LegacyHarnessHint(name string) (string, bool) {
+	hint, ok := legacyHarnessHints[name]
+	return hint, ok
+}
+
+// HarnessConfigKeyDisposition classifies an environment variable name supplied
+// by a harness-config layer (bundle env, bundle env_template, or settings/profile
+// harness_configs.<name>.env).
+type HarnessConfigKeyDisposition int
+
+const (
+	// HarnessConfigKeyAllow permits the key under its original name.
+	HarnessConfigKeyAllow HarnessConfigKeyDisposition = iota
+	// HarnessConfigKeyRewrite rewrites a grandfathered SCION_* key to its
+	// HARNESS_HINT_* equivalent with a deprecation warning.
+	HarnessConfigKeyRewrite
+	// HarnessConfigKeyRefuse strips a reserved SCION_* key with a warning.
+	HarnessConfigKeyRefuse
+)
+
+// ClassifyHarnessConfigEnvKey classifies a key coming from a harness-config
+// layer. Any SCION_* key is refused except the grandfathered entries in
+// LegacyHarnessHints, which are rewritten to their HARNESS_HINT_* names.
+func ClassifyHarnessConfigEnvKey(name string) (effectiveName string, disp HarnessConfigKeyDisposition) {
+	if hint, ok := legacyHarnessHints[name]; ok {
+		return hint, HarnessConfigKeyRewrite
+	}
+	if strings.HasPrefix(name, ReservedHarnessConfigPrefix) {
+		return "", HarnessConfigKeyRefuse
+	}
+	return name, HarnessConfigKeyAllow
+}
+
 // staticExactDenied is the closed, code-owned set of exact environment variable
 // names always withheld from lifecycle hooks.
 var staticExactDenied = map[string]struct{}{

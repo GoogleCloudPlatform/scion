@@ -35,9 +35,6 @@ command:
   task_position: after_base_args
   resume_flag: "-continue"
 
-env_template:
-  SCION_AGENT_NAME: "{{ .AgentName }}"
-
 model_aliases:
   small: "gemini-4-hydrogen-low"
   medium: "gemini-4-hydrogen-medium"

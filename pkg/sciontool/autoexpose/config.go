@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -79,12 +80,14 @@ type Config struct {
 }
 
 // ConfigFromEnv reads auto-expose configuration from environment variables.
+// SCION_AUTO_EXPOSE_* values (from hub, inline, or operator) take precedence
+// over HARNESS_HINT_AUTO_EXPOSE_* values published by harness configs.
 func ConfigFromEnv() Config {
 	cfg := Config{
-		Enabled:     util.ParseBoolEnv(EnvAutoExposePorts, false),
+		Enabled:     envBoolFallback(EnvAutoExposePorts, envpolicy.HintAutoExposePorts, false),
 		Interval:    envDuration(EnvAutoExposeInterval, DefaultInterval),
-		FilterMode:  envString(EnvAutoExposeMode, FilterModeAllowlist),
-		FilterPorts: envIntList(EnvAutoExposeList),
+		FilterMode:  envStringFallback(EnvAutoExposeMode, envpolicy.HintAutoExposeMode, FilterModeAllowlist),
+		FilterPorts: envIntListFallback(EnvAutoExposeList, envpolicy.HintAutoExposePortsList),
 		DeniedPorts: DefaultDeniedPorts,
 		MaxPorts:    DefaultMaxPorts,
 		MinPort:     envInt(EnvAutoExposeMinPort, DefaultMinPort),
@@ -106,12 +109,24 @@ func ConfigFromEnv() Config {
 	return cfg
 }
 
-func envString(key, defaultVal string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		return defaultVal
+func envBoolFallback(primaryKey, hintKey string, defaultVal bool) bool {
+	if os.Getenv(primaryKey) != "" {
+		return util.ParseBoolEnv(primaryKey, defaultVal)
 	}
-	return v
+	if os.Getenv(hintKey) != "" {
+		return util.ParseBoolEnv(hintKey, defaultVal)
+	}
+	return defaultVal
+}
+
+func envStringFallback(primaryKey, hintKey, defaultVal string) string {
+	if v := os.Getenv(primaryKey); v != "" {
+		return v
+	}
+	if v := os.Getenv(hintKey); v != "" {
+		return v
+	}
+	return defaultVal
 }
 
 func envDuration(key string, defaultVal time.Duration) time.Duration {
@@ -138,8 +153,11 @@ func envInt(key string, defaultVal int) int {
 	return n
 }
 
-func envIntList(key string) []int {
-	v := os.Getenv(key)
+func envIntListFallback(primaryKey, hintKey string) []int {
+	v := os.Getenv(primaryKey)
+	if v == "" {
+		v = os.Getenv(hintKey)
+	}
 	if v == "" {
 		return nil
 	}
