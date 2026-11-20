@@ -18,7 +18,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,9 +44,11 @@ import (
 )
 
 type fakeCore struct {
-	enabled atomic.Bool
-	admitFn func(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool)
-	fireFn  func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome
+	enabled           atomic.Bool
+	githubDisabled    atomic.Bool
+	admitFn           func(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool)
+	fireFn            func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome
+	authorizeSourceFn func(ctx context.Context, ev *store.TriggerEvent) (bool, error)
 }
 
 func (c *fakeCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
@@ -55,10 +59,14 @@ func (c *fakeCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.Fi
 }
 
 func (c *fakeCore) Experiment(name string) bool {
-	if name == experiments.Triggers {
+	switch name {
+	case experiments.Triggers:
 		return c.enabled.Load()
+	case experiments.GitHubTriggers:
+		return c.enabled.Load() && !c.githubDisabled.Load()
+	default:
+		return false
 	}
-	return false
 }
 
 func (c *fakeCore) AdmitFire(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool) {
@@ -66,6 +74,13 @@ func (c *fakeCore) AdmitFire(ctx, itemCtx context.Context) (context.Context, con
 		return c.admitFn(ctx, itemCtx)
 	}
 	return ctx, itemCtx, func() {}, true
+}
+
+func (c *fakeCore) AuthorizeEventSource(ctx context.Context, ev *store.TriggerEvent) (bool, error) {
+	if c.authorizeSourceFn != nil {
+		return c.authorizeSourceFn(ctx, ev)
+	}
+	return true, nil
 }
 
 type nopLease struct{}
@@ -145,6 +160,9 @@ func (m *memTriggerStore) ListTriggers(_ context.Context, filter store.TriggerFi
 		if filter.SourceID != "" && tr.SourceID != filter.SourceID {
 			continue
 		}
+		if len(filter.SourceIDs) > 0 && !slices.Contains(filter.SourceIDs, tr.SourceID) {
+			continue
+		}
 		if filter.Status != "" && tr.Status != filter.Status {
 			continue
 		}
@@ -154,6 +172,17 @@ func (m *memTriggerStore) ListTriggers(_ context.Context, filter store.TriggerFi
 }
 func (m *memTriggerStore) CountTriggers(context.Context, store.TriggerFilter) (int, error) {
 	return 0, nil
+}
+func (m *memTriggerStore) ProjectsWithTriggersBySourceKind(_ context.Context, projectIDs []string, sourceKind string) (map[string]bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]bool)
+	for _, tr := range m.triggers {
+		if tr.SourceKind == sourceKind && slices.Contains(projectIDs, tr.ProjectID) {
+			out[tr.ProjectID] = true
+		}
+	}
+	return out, nil
 }
 func (m *memTriggerStore) UpdateTrigger(context.Context, *store.Trigger, store.TriggerFieldMask, int, bool, *store.InitiatorAttribution) error {
 	return nil
@@ -1750,5 +1779,702 @@ func TestDispatcher_LegacyScalarMatchRuleAndEmptyRulesBehavior(t *testing.T) {
 		assert.Equal(t, store.TriggerFireStatusSkipped, byTrig[trWhitespaceLegacy.ID].Status)
 		assert.Equal(t, trigger.ErrFireRuleEvaluationFailed, byTrig[trWhitespaceLegacy.ID].Error)
 		assert.Equal(t, store.TriggerFireStatusFired, byTrig[trValidLegacy.ID].Status)
+	})
+}
+
+func TestDispatcher_GitHubCandidateQueryMatchesEmptyAndExactSourceIDOnlyForGitHub(t *testing.T) {
+	ms := newMemTriggerStore()
+	now := time.Date(2026, 11, 18, 21, 0, 0, 0, time.UTC)
+
+	var firedTriggerIDs []string
+	var mu sync.Mutex
+	core := &fakeCore{
+		fireFn: func(_ context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+			mu.Lock()
+			firedTriggerIDs = append(firedTriggerIDs, req.Authority.DefinitionID)
+			mu.Unlock()
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		},
+	}
+	core.enabled.Store(true)
+
+	projID := uuid.NewString()
+	ghWildcard := uuid.NewString()
+	ghExact := uuid.NewString()
+	ghOtherInst := uuid.NewString()
+	whWildcard := uuid.NewString()
+	whExact := uuid.NewString()
+	epID := uuid.NewString()
+
+	for _, tc := range []struct {
+		id, name, kind, sourceID, matchType string
+	}{
+		{ghWildcard, "gh-wildcard", store.TriggerSourceKindGitHub, "", "github.issue_comment.created"},
+		{ghExact, "gh-exact", store.TriggerSourceKindGitHub, "424242", "github.*"},
+		{ghOtherInst, "gh-other-inst", store.TriggerSourceKindGitHub, "999999", "github.*"},
+		{whWildcard, "wh-empty-id", store.TriggerSourceKindWebhook, "", "webhook.*"},
+		{whExact, "wh-exact", store.TriggerSourceKindWebhook, epID, "webhook.*"},
+	} {
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:           tc.id,
+			ProjectID:    projID,
+			Name:         tc.name,
+			SourceKind:   tc.kind,
+			SourceID:     tc.sourceID,
+			MatchTypes:   []string{tc.matchType},
+			MatchDialect: store.TriggerDialectCEL,
+			ActionType:   store.TriggerActionMessage,
+			SubjectMode:  store.TriggerSubjectModeNew,
+			Status:       store.TriggerStatusActive,
+		}))
+	}
+
+	ghEvID := uuid.NewString()
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         ghEvID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#7",
+		DedupKey:   "d-gh",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created"}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	whEvID := uuid.NewString()
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         whEvID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		Type:       "webhook.received",
+		Subject:    "webhook:" + epID,
+		DedupKey:   "d-wh",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	ghRaw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: ghEvID})
+	res := disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: ghEvID,
+		Payload:  ghRaw,
+	}, nopLease{})
+	assert.True(t, res.Done)
+	assert.ElementsMatch(t, []string{ghWildcard, ghExact}, firedTriggerIDs)
+
+	firedTriggerIDs = nil
+	whRaw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: whEvID})
+	res = disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: whEvID,
+		Payload:  whRaw,
+	}, nopLease{})
+	assert.True(t, res.Done)
+	assert.Equal(t, []string{whExact}, firedTriggerIDs, "webhook lookup must remain exact source_id equality")
+}
+
+func TestDispatcher_GitHubSourceAuthorizerRefusesAllMatchedCandidatesOnce(t *testing.T) {
+	ms := newMemTriggerStore()
+	now := time.Date(2026, 11, 18, 21, 5, 0, 0, time.UTC)
+
+	var (
+		authCalls atomic.Int32
+		fireCalls atomic.Int32
+	)
+	core := &fakeCore{
+		authorizeSourceFn: func(_ context.Context, _ *store.TriggerEvent) (bool, error) {
+			authCalls.Add(1)
+			return false, nil
+		},
+		fireFn: func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+			fireCalls.Add(1)
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		},
+	}
+	core.enabled.Store(true)
+
+	projID := uuid.NewString()
+	trMatch1 := uuid.NewString()
+	trMatch2 := uuid.NewString()
+	trNonMatch := uuid.NewString()
+
+	for _, tc := range []struct {
+		id, name, matchType string
+	}{
+		{trMatch1, "gh-match-1", "github.issue_comment.created"},
+		{trMatch2, "gh-match-2", "github.issue_comment.*"},
+		{trNonMatch, "gh-nonmatch", "github.pull_request.opened"},
+	} {
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:           tc.id,
+			ProjectID:    projID,
+			Name:         tc.name,
+			SourceKind:   store.TriggerSourceKindGitHub,
+			SourceID:     "",
+			MatchTypes:   []string{tc.matchType},
+			MatchDialect: store.TriggerDialectCEL,
+			ActionType:   store.TriggerActionMessage,
+			SubjectMode:  store.TriggerSubjectModeNew,
+			Status:       store.TriggerStatusActive,
+		}))
+	}
+
+	// Event 1: no rule matches -> AuthorizeEventSource is not called.
+	unmatchedEvID := uuid.NewString()
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         unmatchedEvID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issues.closed",
+		Subject:    "github:acme/widgets#1",
+		DedupKey:   "d-unmatched",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	rawUnmatched, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: unmatchedEvID})
+	res := disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: unmatchedEvID,
+		Payload:  rawUnmatched,
+	}, nopLease{})
+	require.True(t, res.Done)
+	assert.Zero(t, authCalls.Load(), "unmatched event should not check source authorization")
+	assert.Zero(t, fireCalls.Load())
+
+	// Event 2: two rules match -> AuthorizeEventSource runs once, refuses both matched rules, marks event processed.
+	evID := uuid.NewString()
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#12",
+		DedupKey:   "d-refused",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{"action":"created"}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+	rawEv, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+	res = disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  rawEv,
+	}, nopLease{})
+	require.True(t, res.Done)
+	assert.Equal(t, int32(1), authCalls.Load(), "source authorization runs once per event")
+	assert.Zero(t, fireCalls.Load(), "Core.Fire must never run when association is unauthorized")
+
+	ev, err := ms.GetTriggerEvent(context.Background(), evID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusProcessed, ev.Status)
+	assert.Equal(t, 2, ev.MatchCount)
+	assert.Equal(t, 0, ev.FireCount)
+
+	fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, fires.Items, 2)
+	gotTrIDs := make([]string, 0, 2)
+	for _, f := range fires.Items {
+		gotTrIDs = append(gotTrIDs, f.TriggerID)
+		assert.Equal(t, store.TriggerFireStatusRefused, f.Status)
+		assert.Equal(t, trigger.ErrFireGitHubAssociationUnauthorized, f.Error)
+		assert.NotNil(t, f.FinishedAt)
+	}
+	assert.ElementsMatch(t, []string{trMatch1, trMatch2}, gotTrIDs)
+
+	for _, id := range []string{trMatch1, trMatch2} {
+		tr, gErr := ms.GetTrigger(context.Background(), id)
+		require.NoError(t, gErr)
+		assert.Equal(t, 1, tr.FireCount)
+		assert.Equal(t, 1, tr.ErrorCount)
+		assert.Equal(t, store.TriggerFireStatusRefused, tr.LastFireStatus)
+		assert.Equal(t, trigger.ErrFireGitHubAssociationUnauthorized, tr.LastFireError)
+	}
+}
+
+func TestDispatcher_GitHubEventWaitsWhenGitHubTriggersExperimentDisabled(t *testing.T) {
+	ms := newMemTriggerStore()
+	now := time.Date(2026, 11, 18, 21, 10, 0, 0, time.UTC)
+
+	core := &fakeCore{}
+	core.enabled.Store(true)
+	core.githubDisabled.Store(true)
+
+	projID := uuid.NewString()
+	trID := uuid.NewString()
+	evID := uuid.NewString()
+	require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+		ID:           trID,
+		ProjectID:    projID,
+		Name:         "gh-wait",
+		SourceKind:   store.TriggerSourceKindGitHub,
+		SourceID:     "",
+		MatchTypes:   []string{"github.*"},
+		MatchDialect: store.TriggerDialectCEL,
+		ActionType:   store.TriggerActionMessage,
+		SubjectMode:  store.TriggerSubjectModeNew,
+		Status:       store.TriggerStatusActive,
+	}))
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "424242",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#99",
+		DedupKey:   "d-wait",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+	res := disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  raw,
+	}, nopLease{})
+	assert.False(t, res.Done)
+	assert.False(t, res.Permanent, "disabled github_triggers experiment must defer, not poison")
+	assert.Error(t, res.Err)
+
+	ev, err := ms.GetTriggerEvent(context.Background(), evID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusPending, ev.Status)
+
+	// Re-enabling hub.github_triggers processes the queued event.
+	core.githubDisabled.Store(false)
+	res = disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  raw,
+	}, nopLease{})
+	assert.True(t, res.Done)
+	ev, err = ms.GetTriggerEvent(context.Background(), evID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusProcessed, ev.Status)
+	assert.Equal(t, 1, ev.FireCount)
+}
+
+func TestDispatcher_GitHubSourceAuthorizerTransientErrorLeavesPendingAndRetries(t *testing.T) {
+	ms := newMemTriggerStore()
+	now := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+
+	core := &fakeCore{}
+	core.enabled.Store(true)
+	var transientFail atomic.Bool
+	transientFail.Store(true)
+	var authCalls atomic.Int32
+	core.authorizeSourceFn = func(_ context.Context, _ *store.TriggerEvent) (bool, error) {
+		authCalls.Add(1)
+		if transientFail.Load() {
+			return false, errors.New("github 502 bad gateway")
+		}
+		return true, nil
+	}
+
+	projID := uuid.NewString()
+	trID := uuid.NewString()
+	evID := uuid.NewString()
+	require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+		ID:           trID,
+		ProjectID:    projID,
+		Name:         "gh-transient",
+		SourceKind:   store.TriggerSourceKindGitHub,
+		SourceID:     "",
+		MatchTypes:   []string{"github.issue_comment.created"},
+		MatchDialect: store.TriggerDialectCEL,
+		ActionType:   store.TriggerActionMessage,
+		SubjectMode:  store.TriggerSubjectModeNew,
+		Status:       store.TriggerStatusActive,
+	}))
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "777001",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#11",
+		DedupKey:   "d-transient",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+
+	// 1. Transient/inconclusive check error: item is NOT Done and NOT Permanent;
+	// event stays pending with zero fire rows (no refused fire).
+	res := disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  raw,
+	}, nopLease{})
+	assert.False(t, res.Done)
+	assert.False(t, res.Permanent, "inconclusive association check must retry until MaxAge, not poison")
+	assert.Error(t, res.Err)
+	assert.Equal(t, int32(1), authCalls.Load())
+
+	ev, err := ms.GetTriggerEvent(context.Background(), evID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusPending, ev.Status)
+
+	fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, fires.Items, "transient check failure must not record a refused fire")
+
+	// 2. Retry after transient error clears: event processes and fires normally.
+	transientFail.Store(false)
+	res = disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: evID,
+		Payload:  raw,
+	}, nopLease{})
+	assert.True(t, res.Done)
+	assert.NoError(t, res.Err)
+	assert.Equal(t, int32(2), authCalls.Load())
+
+	ev, err = ms.GetTriggerEvent(context.Background(), evID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusProcessed, ev.Status)
+	assert.Equal(t, 1, ev.FireCount)
+
+	fires, err = ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, fires.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, fires.Items[0].Status)
+}
+
+// coreWithoutSourceAuthorizer implements trigger.Core without implementing
+// trigger.SourceAuthorizer, used to verify github events fail closed.
+type coreWithoutSourceAuthorizer struct {
+	fireFn func(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome
+}
+
+func (c *coreWithoutSourceAuthorizer) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+	if c.fireFn != nil {
+		return c.fireFn(ctx, req)
+	}
+	return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+}
+
+func (c *coreWithoutSourceAuthorizer) Experiment(name string) bool {
+	return name == experiments.Triggers || name == experiments.GitHubTriggers
+}
+
+func TestDispatcher_GitHubFailsClosedWithoutSourceAuthorizer(t *testing.T) {
+	ms := newMemTriggerStore()
+	now := time.Date(2026, 11, 20, 6, 15, 0, 0, time.UTC)
+
+	var fireCalls atomic.Int32
+	core := &coreWithoutSourceAuthorizer{
+		fireFn: func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+			fireCalls.Add(1)
+			return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+		},
+	}
+	_, implementsAuthorizer := any(core).(trigger.SourceAuthorizer)
+	require.False(t, implementsAuthorizer, "test core must not implement SourceAuthorizer")
+
+	projID := uuid.NewString()
+	ghTrID := uuid.NewString()
+	ghEvID := uuid.NewString()
+	whEpID := uuid.NewString()
+	whTrID := uuid.NewString()
+	whEvID := uuid.NewString()
+
+	require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+		ID:           ghTrID,
+		ProjectID:    projID,
+		Name:         "gh-fail-closed",
+		SourceKind:   store.TriggerSourceKindGitHub,
+		SourceID:     "",
+		MatchTypes:   []string{"github.issue_comment.created"},
+		MatchDialect: store.TriggerDialectCEL,
+		ActionType:   store.TriggerActionMessage,
+		SubjectMode:  store.TriggerSubjectModeNew,
+		Status:       store.TriggerStatusActive,
+	}))
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         ghEvID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "999001",
+		Type:       "github.issue_comment.created",
+		Subject:    "github:acme/widgets#42",
+		DedupKey:   "d-no-authorizer",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+		ID:           whTrID,
+		ProjectID:    projID,
+		Name:         "wh-still-fires",
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     whEpID,
+		MatchTypes:   []string{"webhook.received"},
+		MatchDialect: store.TriggerDialectCEL,
+		ActionType:   store.TriggerActionMessage,
+		SubjectMode:  store.TriggerSubjectModeNew,
+		Status:       store.TriggerStatusActive,
+	}))
+	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+		ID:         whEvID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   whEpID,
+		Type:       "webhook.received",
+		Subject:    "webhook:test",
+		DedupKey:   "d-wh-ok",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Payload:    `{}`,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	// GitHub event must fail closed as a retryable internal error without firing.
+	ghRaw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: ghEvID})
+	res := disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: ghEvID,
+		Payload:  ghRaw,
+	}, nopLease{})
+	assert.False(t, res.Done)
+	assert.False(t, res.Permanent)
+	assert.ErrorContains(t, res.Err, "source authorizer unavailable")
+	assert.Zero(t, fireCalls.Load(), "github event must never fire when Core lacks SourceAuthorizer")
+
+	ev, err := ms.GetTriggerEvent(context.Background(), ghEvID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusPending, ev.Status)
+
+	fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID, TriggerID: ghTrID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, fires.Items)
+
+	// Webhook events do not require SourceAuthorizer and still fire normally.
+	whRaw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: whEvID})
+	res = disp.HandleItem(context.Background(), durablequeue.Item{
+		Kind:     trigger.EventQueueKind,
+		DedupKey: whEvID,
+		Payload:  whRaw,
+	}, nopLease{})
+	assert.True(t, res.Done)
+	assert.NoError(t, res.Err)
+	assert.Equal(t, int32(1), fireCalls.Load())
+}
+
+func TestDispatcher_GitHubSourceAuthorizationPrecedesRuleEvaluation(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 55, 0, 0, time.UTC)
+
+	setup := func(t *testing.T, authFn func(context.Context, *store.TriggerEvent) (bool, error)) (*memTriggerStore, *trigger.Dispatcher, string, string, string, string, string, *atomic.Int32, *atomic.Int32) {
+		t.Helper()
+		ms := newMemTriggerStore()
+		_, rules := newTestTriggerEngineWithDialects(t)
+		var authCalls, fireCalls atomic.Int32
+		core := &fakeCore{
+			authorizeSourceFn: func(ctx context.Context, ev *store.TriggerEvent) (bool, error) {
+				authCalls.Add(1)
+				return authFn(ctx, ev)
+			},
+			fireFn: func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+				fireCalls.Add(1)
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+			},
+		}
+		core.enabled.Store(true)
+
+		projID := uuid.NewString()
+		trCorruptID := uuid.NewString()
+		trMatchCELID := uuid.NewString()
+		trNoMatchCELID := uuid.NewString()
+		evID := uuid.NewString()
+
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:                trCorruptID,
+			ProjectID:         projID,
+			Name:              "gh-corrupt-rules",
+			SourceKind:        store.TriggerSourceKindGitHub,
+			SourceID:          "",
+			MatchTypes:        []string{"github.issue_comment.created"},
+			MatchDialect:      store.TriggerDialectCEL,
+			MatchRulesCorrupt: true,
+			ActionType:        store.TriggerActionMessage,
+			SubjectMode:       store.TriggerSubjectModeNew,
+			Status:            store.TriggerStatusActive,
+		}))
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:           trMatchCELID,
+			ProjectID:    projID,
+			Name:         "gh-cel-match",
+			SourceKind:   store.TriggerSourceKindGitHub,
+			SourceID:     "",
+			MatchTypes:   []string{"github.issue_comment.created"},
+			MatchDialect: store.TriggerDialectCEL,
+			MatchRules:   []store.TriggerMatchRule{{Dialect: store.TriggerDialectCEL, Expr: `event.attributes.command == "review"`}},
+			ActionType:   store.TriggerActionMessage,
+			SubjectMode:  store.TriggerSubjectModeNew,
+			Status:       store.TriggerStatusActive,
+		}))
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:           trNoMatchCELID,
+			ProjectID:    projID,
+			Name:         "gh-cel-nomatch",
+			SourceKind:   store.TriggerSourceKindGitHub,
+			SourceID:     "",
+			MatchTypes:   []string{"github.issue_comment.created"},
+			MatchDialect: store.TriggerDialectCEL,
+			MatchRules:   []store.TriggerMatchRule{{Dialect: store.TriggerDialectCEL, Expr: `event.attributes.command == "deploy"`}},
+			ActionType:   store.TriggerActionMessage,
+			SubjectMode:  store.TriggerSubjectModeNew,
+			Status:       store.TriggerStatusActive,
+		}))
+		require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "777123",
+			Type:       "github.issue_comment.created",
+			Subject:    "github:acme/widgets#55",
+			DedupKey:   "d-order-" + evID,
+			OccurredAt: now,
+			ReceivedAt: now,
+			Attributes: map[string]string{"command": "review"},
+			Payload:    `{}`,
+			Status:     store.TriggerEventStatusPending,
+		}))
+
+		disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+			Core:  core,
+			Store: ms,
+			Rules: rules,
+			Now:   func() time.Time { return now },
+		})
+		require.NoError(t, err)
+		return ms, disp, projID, trCorruptID, trMatchCELID, trNoMatchCELID, evID, &authCalls, &fireCalls
+	}
+
+	t.Run("unauthorized refuses all type-matched triggers without evaluating rules or recording rule skips", func(t *testing.T) {
+		ms, disp, projID, trCorruptID, trMatchCELID, trNoMatchCELID, evID, authCalls, fireCalls := setup(t, func(context.Context, *store.TriggerEvent) (bool, error) {
+			return false, nil
+		})
+		raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		res := disp.HandleItem(context.Background(), durablequeue.Item{Kind: trigger.EventQueueKind, DedupKey: evID, Payload: raw}, nopLease{})
+		assert.True(t, res.Done)
+		assert.NoError(t, res.Err)
+		assert.Equal(t, int32(1), authCalls.Load())
+		assert.Zero(t, fireCalls.Load())
+
+		fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, fires.Items, 3)
+		byTr := make(map[string]store.TriggerFire, 3)
+		for _, f := range fires.Items {
+			byTr[f.TriggerID] = f
+		}
+		for _, id := range []string{trCorruptID, trMatchCELID, trNoMatchCELID} {
+			assert.Equal(t, store.TriggerFireStatusRefused, byTr[id].Status)
+			assert.Equal(t, trigger.ErrFireGitHubAssociationUnauthorized, byTr[id].Error)
+		}
+	})
+
+	t.Run("transient auth error retries without evaluating rules or recording rule skips", func(t *testing.T) {
+		ms, disp, projID, _, _, _, evID, authCalls, fireCalls := setup(t, func(context.Context, *store.TriggerEvent) (bool, error) {
+			return false, errors.New("github 503")
+		})
+		raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		res := disp.HandleItem(context.Background(), durablequeue.Item{Kind: trigger.EventQueueKind, DedupKey: evID, Payload: raw}, nopLease{})
+		assert.False(t, res.Done)
+		assert.False(t, res.Permanent)
+		assert.Error(t, res.Err)
+		assert.Equal(t, int32(1), authCalls.Load())
+		assert.Zero(t, fireCalls.Load())
+
+		ev, err := ms.GetTriggerEvent(context.Background(), evID)
+		require.NoError(t, err)
+		assert.Equal(t, store.TriggerEventStatusPending, ev.Status)
+
+		fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, fires.Items, "retrying event must not record any rule-skip or fire row")
+	})
+
+	t.Run("authorized runs 3b-2 rule evaluation unchanged", func(t *testing.T) {
+		ms, disp, projID, trCorruptID, trMatchCELID, trNoMatchCELID, evID, authCalls, fireCalls := setup(t, func(context.Context, *store.TriggerEvent) (bool, error) {
+			return true, nil
+		})
+		raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		res := disp.HandleItem(context.Background(), durablequeue.Item{Kind: trigger.EventQueueKind, DedupKey: evID, Payload: raw}, nopLease{})
+		assert.True(t, res.Done)
+		assert.NoError(t, res.Err)
+		assert.Equal(t, int32(1), authCalls.Load())
+		assert.Equal(t, int32(1), fireCalls.Load())
+
+		fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, fires.Items, 2)
+		byTr := make(map[string]store.TriggerFire, 2)
+		for _, f := range fires.Items {
+			byTr[f.TriggerID] = f
+		}
+		assert.Equal(t, store.TriggerFireStatusSkipped, byTr[trCorruptID].Status)
+		assert.Equal(t, trigger.ErrFireRuleEvaluationFailed, byTr[trCorruptID].Error)
+		assert.Equal(t, store.TriggerFireStatusFired, byTr[trMatchCELID].Status)
+		assert.Equal(t, "1/1", byTr[trMatchCELID].MatchedThrough)
+		assert.Equal(t, "cel", byTr[trMatchCELID].DecidedDialect)
+		_, nonMatchFired := byTr[trNoMatchCELID]
+		assert.False(t, nonMatchFired, "non-matching CEL trigger must not record a fire row")
 	})
 }

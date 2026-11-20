@@ -811,3 +811,78 @@ func TestGitHubAppRepoRouting_ConsecutiveWritesPreserveRebuildLimiter(t *testing
 	require.Len(t, list[0].Projects, 2)
 	assert.Equal(t, int64(2), repoAccessChecks.Load(), "DELETE + GET inside rebuild interval must not trigger another full rebuild")
 }
+
+type countingProjectsWithTriggersStore struct {
+	store.Store
+	calls atomic.Int32
+}
+
+func (c *countingProjectsWithTriggersStore) ProjectsWithTriggersBySourceKind(ctx context.Context, projectIDs []string, sourceKind string) (map[string]bool, error) {
+	c.calls.Add(1)
+	return c.Store.ProjectsWithTriggersBySourceKind(ctx, projectIDs, sourceKind)
+}
+
+func TestGitHubAppRepoRouting_BatchesHasGitHubTriggersInSingleQuery(t *testing.T) {
+	srv, s, counter, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *countingProjectsWithTriggersStore {
+		return &countingProjectsWithTriggersStore{Store: inner}
+	})
+	ctx := context.Background()
+	setGitHubTriggersExperimentForRouting(t, srv, true)
+
+	admin := createAssocAdmin(t, s, "routing-batch-admin")
+	adminIdent := NewAuthenticatedUser(admin.ID, admin.Email, admin.DisplayName, admin.Role, "api")
+
+	instID := int64(7301)
+	createAssocInstallation(t, s, instID, "Acme", "Acme/Widgets", "Acme/Gadgets")
+
+	pWithGH := createAssocProject(t, s, "routing-has-gh", "https://github.com/Acme/Widgets.git", "nobody", &instID)
+	setAdminBinding(t, s, pWithGH, instID, "github.com/acme/widgets", admin.ID)
+
+	pOnlyWebhook := createAssocProject(t, s, "routing-only-wh", "https://github.com/Acme/Widgets.git", "nobody", &instID)
+	setAdminBinding(t, s, pOnlyWebhook, instID, "github.com/acme/widgets", admin.ID)
+
+	pGadgets := createAssocProject(t, s, "routing-gadgets", "https://github.com/Acme/Gadgets.git", "nobody", &instID)
+	setAdminBinding(t, s, pGadgets, instID, "github.com/acme/gadgets", admin.ID)
+
+	require.NoError(t, s.CreateTrigger(ctx, &store.Trigger{
+		ID:            tid("trig-gh-1"),
+		ProjectID:     pWithGH.ID,
+		Name:          "on-pr",
+		SourceKind:    store.TriggerSourceKindGitHub,
+		SourceID:      "",
+		MatchTypes:    []string{"github.pull_request.opened"},
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"a1","message":"hi"}`,
+		CreatedBy:     admin.ID,
+	}))
+	require.NoError(t, s.CreateTrigger(ctx, &store.Trigger{
+		ID:            tid("trig-wh-1"),
+		ProjectID:     pOnlyWebhook.ID,
+		Name:          "on-wh",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      tid("ep-1"),
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"a1","message":"hi"}`,
+		CreatedBy:     admin.ID,
+	}))
+
+	counter.calls.Store(0)
+	rr := doRepoRoutingAsUser(t, srv, adminIdent, http.MethodGet, "/api/v1/github-app/repo-routing?installation=7301", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, int32(1), counter.calls.Load(), "GET repo-routing must batch has_github_triggers into a single store query across all candidate projects")
+
+	var list []GitHubRepoRoutingEntry
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &list))
+	require.Len(t, list, 2)
+
+	byProj := make(map[string]bool)
+	for _, entry := range list {
+		for _, proj := range entry.Projects {
+			byProj[proj.ID] = proj.HasGitHubTriggers
+		}
+	}
+	assert.True(t, byProj[pWithGH.ID], "project with github trigger should report has_github_triggers=true")
+	assert.False(t, byProj[pOnlyWebhook.ID], "project with only webhook trigger should report has_github_triggers=false")
+	assert.False(t, byProj[pGadgets.ID], "project with no triggers should report has_github_triggers=false")
+}

@@ -242,7 +242,7 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		if !ok {
 			return
 		}
-		actionPayload, ok := s.authorizeTriggerMessageAuthoring(w, r, projectID, &actionSpec)
+		actionPayload, ok := s.authorizeTriggerMessageAuthoring(w, r, projectID, store.TriggerSourceKindWebhook, &actionSpec)
 		if !ok {
 			return
 		}

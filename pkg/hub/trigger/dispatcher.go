@@ -61,12 +61,13 @@ const (
 	ExecutorIDPrefixTriggerEvent = "trigger_event:"
 
 	// Content-free generic error texts persisted on trigger_events / trigger_fires.
-	ErrEventDroppedByQueueLimits = "dropped by queue limits"
-	ErrEventProcessingFailed     = "processing failed"
-	ErrFireRuleBudgetExhausted   = "rule budget exhausted"
-	ErrFireRuleEvaluationFailed  = "rule evaluation failed"
-	ErrFireRuleUncertain         = "rule uncertain"
-	ErrFireRuleNoLongerCompiles  = "rule no longer compiles"
+	ErrEventDroppedByQueueLimits         = "dropped by queue limits"
+	ErrEventProcessingFailed             = "processing failed"
+	ErrFireRuleBudgetExhausted           = "rule budget exhausted"
+	ErrFireRuleEvaluationFailed          = "rule evaluation failed"
+	ErrFireRuleUncertain                 = "rule uncertain"
+	ErrFireRuleNoLongerCompiles          = "rule no longer compiles"
+	ErrFireGitHubAssociationUnauthorized = "github association not authorized"
 )
 
 // Core is the narrow capability interface package hub/trigger consumes from
@@ -87,6 +88,19 @@ type Core interface {
 // resume longer than PerFireTimeout without outliving shutdown or itemCtx.
 type FireAdmitter interface {
 	AdmitFire(ctx, itemCtx context.Context) (admittedCtx, abortCtx context.Context, cleanup func(), ok bool)
+}
+
+// SourceAuthorizer is an optional interface Core implementations may satisfy
+// to verify source-level authorization (such as GitHub App installation
+// association on the project, Stage 3 §4.2 step 4) once per event before any
+// matched rule fires. Returning authorized == false with err == nil records
+// every matched candidate fire on the event as refused and marks the event
+// processed; returning a non-nil err treats the check as interrupted (for
+// example drainer context cancellation) so the queue item retries. For github
+// events, a Core that does not implement SourceAuthorizer fails closed with a
+// retryable internal error rather than firing.
+type SourceAuthorizer interface {
+	AuthorizeEventSource(ctx context.Context, ev *store.TriggerEvent) (authorized bool, err error)
 }
 
 // DispatcherConfig configures a trigger event Dispatcher.
@@ -325,6 +339,14 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	if ev.Status != store.TriggerEventStatusPending {
 		return durablequeue.Result{Done: true}
 	}
+	if ev.SourceKind == store.TriggerSourceKindGitHub && !d.core.Experiment(experiments.GitHubTriggers) {
+		// Stage 3 §8.2: while hub.github_triggers is off, existing github triggers
+		// and queued events wait without counting toward poison drops.
+		return durablequeue.Result{
+			RetryAt: d.now().UTC().Add(time.Minute),
+			Err:     errors.New("trigger: github triggers experiment disabled"),
+		}
+	}
 
 	candidates, err := d.loadActiveTriggers(ctx, ev.ProjectID, ev.SourceKind, ev.SourceID)
 	if err != nil {
@@ -359,8 +381,10 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	budget.Charge(max(d.now().Sub(parseStart), time.Duration(0)))
 
 	var (
-		matchCount int
-		fireCount  int
+		matchCount        int
+		fireCount         int
+		sourceAuthChecked bool
+		sourceAuthorized  bool
 	)
 
 	for i := range candidates {
@@ -374,6 +398,50 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		budget.Charge(max(d.now().Sub(typeStart), time.Duration(0)))
 		if !matched {
 			continue
+		}
+
+		// Stage 3 §4.2 step 4: before any rule evaluation or fire on a github
+		// event, verify once per event that the project's GitHub App installation
+		// association is authorized now. Running this ahead of rule evaluation
+		// ensures a refused or retrying github event never evaluates rules or
+		// records rule-skip outcomes that mask the refusal.
+		if ev.SourceKind == store.TriggerSourceKindGitHub {
+			if !sourceAuthChecked {
+				if lease != nil {
+					held, lErr := lease.Renew(ctx)
+					if lErr != nil {
+						return durablequeue.Result{Err: errors.New("trigger: renew queue lease failed")}
+					}
+					if !held {
+						return durablequeue.Result{Err: errors.New("trigger: queue lease lost")}
+					}
+				}
+				sourceAuthChecked = true
+				sa, ok := d.core.(SourceAuthorizer)
+				if !ok {
+					d.logger.Error("trigger: core does not implement SourceAuthorizer for github event",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceID", ev.SourceID)
+					return durablequeue.Result{Err: errors.New("trigger: source authorizer unavailable")}
+				}
+				var saErr error
+				sourceAuthorized, saErr = sa.AuthorizeEventSource(ctx, ev)
+				if saErr != nil {
+					d.logger.Warn("trigger: failed to authorize event source",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceID", ev.SourceID, "error", saErr)
+					return durablequeue.Result{Err: errors.New("trigger: authorize event source failed")}
+				}
+			}
+			if !sourceAuthorized {
+				matchCount++
+				if rErr := d.recordDirectFire(
+					ctx, tr, ev, deriveFireSubject(ev.Subject),
+					store.TriggerFireStatusRefused, ErrFireGitHubAssociationUnauthorized,
+					"0/0", "", "", "github_association_unauthorized",
+				); rErr != nil {
+					return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
+				}
+				continue
+			}
 		}
 
 		// SEC-3b1rw-01: fail closed on corrupt stored match_rules before any fire.
@@ -541,7 +609,6 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				return durablequeue.Result{Err: errors.New("trigger: queue lease lost")}
 			}
 		}
-
 		claimNow := d.now().UTC()
 		fire := store.TriggerFire{
 			ID:                   uuid.NewString(),
@@ -673,17 +740,31 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 }
 
 func (d *Dispatcher) loadActiveTriggers(ctx context.Context, projectID, sourceKind, sourceID string) ([]store.Trigger, error) {
+	filter := store.TriggerFilter{
+		ProjectID:  projectID,
+		SourceKind: sourceKind,
+		Status:     store.TriggerStatusActive,
+	}
+	if sourceKind == store.TriggerSourceKindGitHub {
+		// Stage 3 §4.3 / §12.3 item 1: github rules store source_id = "" ("any
+		// associated repository in the project"), while events carry the decimal
+		// installation ID in source_id. Match source_id IN ('', ev.SourceID) for
+		// github only; generic webhook lookups remain exact equality.
+		if sourceID == "" {
+			filter.SourceIDs = []string{""}
+		} else {
+			filter.SourceIDs = []string{"", sourceID}
+		}
+	} else {
+		filter.SourceID = sourceID
+	}
+
 	var (
 		all    []store.Trigger
 		cursor string
 	)
 	for {
-		res, err := d.store.ListTriggers(ctx, store.TriggerFilter{
-			ProjectID:  projectID,
-			SourceKind: sourceKind,
-			SourceID:   sourceID,
-			Status:     store.TriggerStatusActive,
-		}, store.ListOptions{
+		res, err := d.store.ListTriggers(ctx, filter, store.ListOptions{
 			Limit:  store.MaxTriggersPerProject,
 			Cursor: cursor,
 		})

@@ -52,6 +52,7 @@ const (
 	ErrCodeDiscoverFailed                   = apierr.ErrCodeDiscoverFailed
 	ErrCodeEmptyRoleSet                     = apierr.ErrCodeEmptyRoleSet
 	ErrCodeExperimentDisabled               = apierr.ErrCodeExperimentDisabled
+	ErrCodeGitHubNotAssociated              = apierr.ErrCodeGitHubNotAssociated
 	ErrCodeHarnessConfigNotFound            = apierr.ErrCodeHarnessConfigNotFound
 	ErrCodeHarnessCredentialsMissing        = apierr.ErrCodeHarnessCredentialsMissing
 	ErrCodeExpiredJoinToken                 = apierr.ErrCodeExpiredJoinToken

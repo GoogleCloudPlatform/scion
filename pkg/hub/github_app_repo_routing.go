@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -163,11 +164,20 @@ func (s *Server) IsGitHubTriggerCandidate(installationID int64, proj *store.Proj
 	return ownerRepo != "" && strings.EqualFold(ownerRepo, target)
 }
 
-// projectHasGitHubTriggers reports whether projectID has any GitHub-sourced
-// triggers configured. Until the triggers store lands on main, this returns
-// false.
-func (s *Server) projectHasGitHubTriggers(_ context.Context, _ string) bool {
-	return false
+// projectsWithGitHubTriggers reports which of projectIDs have at least one
+// GitHub-sourced trigger configured, using a single batched store query across
+// all candidate projects rather than per-project queries.
+func (s *Server) projectsWithGitHubTriggers(ctx context.Context, projectIDs []string) map[string]bool {
+	if s.store == nil || len(projectIDs) == 0 {
+		return nil
+	}
+	has, err := s.store.ProjectsWithTriggersBySourceKind(ctx, projectIDs, store.TriggerSourceKindGitHub)
+	if err != nil {
+		slog.WarnContext(ctx, "github app repo routing: failed to query project GitHub triggers",
+			"project_count", len(projectIDs), "error", err)
+		return nil
+	}
+	return has
 }
 
 // associationEntriesForRouting reads associated project entries from the
@@ -239,6 +249,7 @@ func (s *Server) buildRepoRoutingEntries(
 	}
 	candidatesByKey := make(map[instRepoKey][]GitHubRepoRoutingProject)
 	seenKey := make(map[instRepoKey]struct{})
+	var candidateProjectIDs []string
 
 	for _, e := range assocEntries {
 		inst, ok := instByID[e.InstallationID]
@@ -262,11 +273,21 @@ func (s *Server) buildRepoRoutingEntries(
 		}
 		key := instRepoKey{instID: inst.InstallationID, repo: lowerRepo}
 		seenKey[key] = struct{}{}
+		candidateProjectIDs = append(candidateProjectIDs, e.ProjectID)
 		candidatesByKey[key] = append(candidatesByKey[key], GitHubRepoRoutingProject{
-			ID:                e.ProjectID,
-			Name:              e.ProjectName,
-			HasGitHubTriggers: s.projectHasGitHubTriggers(ctx, e.ProjectID),
+			ID:   e.ProjectID,
+			Name: e.ProjectName,
 		})
+	}
+
+	hasGitHubTriggers := s.projectsWithGitHubTriggers(ctx, candidateProjectIDs)
+	if len(hasGitHubTriggers) > 0 {
+		for key, list := range candidatesByKey {
+			for i := range list {
+				list[i].HasGitHubTriggers = hasGitHubTriggers[list[i].ID]
+			}
+			candidatesByKey[key] = list
+		}
 	}
 
 	// Include configured primary routes even when their candidate list has

@@ -17,9 +17,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -88,8 +90,9 @@ type serverTriggerCore struct {
 }
 
 var (
-	_ trigger.Core         = serverTriggerCore{}
-	_ trigger.FireAdmitter = serverTriggerCore{}
+	_ trigger.Core             = serverTriggerCore{}
+	_ trigger.FireAdmitter     = serverTriggerCore{}
+	_ trigger.SourceAuthorizer = serverTriggerCore{}
 )
 
 func (c serverTriggerCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
@@ -98,6 +101,60 @@ func (c serverTriggerCore) Fire(ctx context.Context, req hubfire.FireRequest) hu
 
 func (c serverTriggerCore) Experiment(name string) bool {
 	return c.srv.experimentEnabled(name)
+}
+
+// AuthorizeEventSource implements trigger.SourceAuthorizer for Stage 3 §4.2
+// step 4 (rev 1.10): before any fire on a github event, verify that the
+// project's GitHub App installation association is authorized now via
+// authorizeGitHubAppAssociation (using existing caches). Definitive
+// errGitHubAssociationUnauthorized updates project.GitHubAppStatus to
+// association_unauthorized and returns (false, nil) so matched candidates
+// record refused "github association not authorized". Inconclusive
+// errGitHubAssociationCheckFailed updates project.GitHubAppStatus to
+// association_check_failed and returns an error so the durable queue backs off
+// and retries until MaxAge without refusing the event.
+func (c serverTriggerCore) AuthorizeEventSource(ctx context.Context, ev *store.TriggerEvent) (bool, error) {
+	if ev == nil || ev.SourceKind != store.TriggerSourceKindGitHub {
+		return true, nil
+	}
+	if c.srv == nil || c.srv.store == nil {
+		return false, nil
+	}
+	instID, err := strconv.ParseInt(strings.TrimSpace(ev.SourceID), 10, 64)
+	if err != nil || instID <= 0 {
+		return false, nil
+	}
+	project, err := c.srv.store.GetProject(ctx, ev.ProjectID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return false, nil
+		}
+		return false, err
+	}
+	if project == nil || project.GitHubInstallationID == nil || *project.GitHubInstallationID != instID {
+		return false, nil
+	}
+	if _, authzErr := c.srv.authorizeGitHubAppAssociation(ctx, project, instID); authzErr != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		errCode := githubAssociationErrorCode(authzErr)
+		c.srv.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
+			errCode, authzErr.Error())
+		if errors.Is(authzErr, errGitHubAssociationCheckFailed) {
+			slog.WarnContext(ctx, "GitHub trigger fire deferred: installation association check inconclusive; will retry",
+				"project_id", project.ID, "installation_id", instID, "event_id", ev.ID, "error", authzErr)
+			return false, authzErr
+		}
+		slog.WarnContext(ctx, "GitHub trigger fire refused: installation association not authorized",
+			"project_id", project.ID, "installation_id", instID, "event_id", ev.ID, "error", authzErr)
+		return false, nil
+	}
+	c.srv.clearProjectGitHubAssociationErrorStatus(ctx, project)
+	return true, nil
 }
 
 func (c serverTriggerCore) AdmitFire(ctx, itemCtx context.Context) (context.Context, context.Context, func(), bool) {

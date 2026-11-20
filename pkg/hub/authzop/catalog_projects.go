@@ -1191,7 +1191,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "trigger.create",
 		Domain:      "trigger",
-		Description: "Create an event trigger in a project. Resolves the source webhook endpoint through webhookEndpointAccessDecision(read) and passes the action's target checks; a user access token needs trigger:create plus the source and target selectors",
+		Description: "Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id=\"\") require hub.github_triggers and an authorized GitHub App association on the project; both pass the action's target checks",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers", Method: "POST"},
 		},
@@ -1214,7 +1214,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "trigger.update",
 		Domain:      "trigger",
-		Description: "Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source endpoint and action target and record the caller's attribution and frozen ceiling",
+		Description: "Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target and record the caller's attribution and frozen ceiling",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers/{id}", Method: "PATCH"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers/{id}/resume", Method: "POST"},
