@@ -20,6 +20,7 @@ import (
 	"go/parser"
 	"go/token"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
@@ -408,4 +409,63 @@ func TestTestMode_HubIDPinnedCheckWiredInServerStart(t *testing.T) {
 	}
 	assert.Less(t, pos["validateTestModeRequiresHub"][0], pos["validateTestModeHubIDPinned"][0])
 	assert.Less(t, pos["validateTestModeHubIDPinned"][0], pos["initStore"][0])
+}
+
+func TestTestDecisionDismissMinAge_Gating(t *testing.T) {
+	t.Cleanup(resetTestModeFlags)
+
+	t.Run("flag is hidden from normal help", func(t *testing.T) {
+		c := tiaStartCmd(t)
+		f := c.Flags().Lookup(testDecisionDismissMinAgeFlag)
+		require.NotNil(t, f)
+		assert.True(t, f.Hidden)
+	})
+
+	t.Run("refused outside test mode", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"--test-decision-dismiss-min-age=5s"},
+			{"--test-mode=off", "--test-decision-dismiss-min-age=5s"},
+			{"--production", "--test-decision-dismiss-min-age=5s"},
+		} {
+			resetTestModeFlags()
+			err := validateTestModeFlagsEarly(tiaStartCmd(t, args...))
+			assert.ErrorIs(t, err, hub.ErrTestDecisionDismissMinAgeRequiresTestMode, "args=%v", args)
+		}
+	})
+
+	t.Run("refused with explicit --production even with --test-mode", func(t *testing.T) {
+		resetTestModeFlags()
+		err := validateTestModeFlagsEarly(tiaStartCmd(t, "--production", "--test-mode=member:"+tiaCmdHubID, "--test-decision-dismiss-min-age=5s"))
+		assert.ErrorIs(t, err, hub.ErrTestAdminProductionFlag)
+	})
+
+	t.Run("refused when zero or negative", func(t *testing.T) {
+		for _, val := range []string{"0s", "-1s"} {
+			resetTestModeFlags()
+			err := validateTestModeFlagsEarly(tiaStartCmd(t, "--test-mode=member:"+tiaCmdHubID, "--test-decision-dismiss-min-age="+val))
+			assert.ErrorIs(t, err, hub.ErrTestDecisionDismissMinAgeInvalid, "val=%s", val)
+		}
+	})
+
+	t.Run("accepted with active --test-mode and propagated through resolveTestMode", func(t *testing.T) {
+		resetTestModeFlags()
+		require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--hosted", "--test-mode=member:"+tiaCmdHubID, "--test-decision-dismiss-min-age=5s")))
+		assert.Equal(t, 5*time.Second, testDecisionDismissMinAge)
+
+		in := tmMemberInputs()
+		in.DecisionDismissMinAge = 5 * time.Second
+		res, err := resolveTestMode(in)
+		require.NoError(t, err)
+		assert.Equal(t, 5*time.Second, res.DecisionDismissMinAge)
+	})
+
+	t.Run("resolveTestMode refuses override when level is off or negative", func(t *testing.T) {
+		res, err := resolveTestMode(testModeInputs{Level: hub.TestModeOff, DecisionDismissMinAge: 5 * time.Second})
+		assert.ErrorIs(t, err, hub.ErrTestDecisionDismissMinAgeRequiresTestMode)
+		assert.Equal(t, testModeResolution{}, res)
+
+		res, err = resolveTestMode(testModeInputs{Level: hub.TestModeMember, DecisionDismissMinAge: -time.Second})
+		assert.ErrorIs(t, err, hub.ErrTestDecisionDismissMinAgeInvalid)
+		assert.Equal(t, testModeResolution{}, res)
+	})
 }

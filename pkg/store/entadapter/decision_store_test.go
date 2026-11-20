@@ -3623,3 +3623,44 @@ func TestRecordAnswerSet_InterpretedOther_ConfirmAndOverride(t *testing.T) {
 	assert.Equal(t, "after 6 PM", d1.Answers[0].OtherText)
 	assert.Equal(t, "after 8 PM", d1.Answers[1].OtherText)
 }
+
+func TestDismissDecisions_MinAgeOverride(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	msgID, rowIDs := f.createTopicSet(t, yesNo("D-AGE-OVR", "Override min age?"))
+	row, err := f.cs.GetDecision(ctx, rowIDs[0])
+	require.NoError(t, err)
+
+	// Default (MinAge=0) and negative MinAge enforce the production 5m floor.
+	for _, minAge := range []time.Duration{0, -time.Second} {
+		in := f.dismissInput(msgID, "user-1", "early", func() time.Time {
+			return row.CreatedAt.Add(10 * time.Second)
+		})
+		in.MinAge = minAge
+		_, err = f.cs.DismissDecisions(ctx, in)
+		var tooRecent *store.DecisionTooRecentError
+		require.ErrorAs(t, err, &tooRecent, "minAge=%s", minAge)
+		assert.True(t, row.CreatedAt.Add(store.DecisionDismissMinAge).Equal(tooRecent.AvailableAt))
+	}
+
+	// Positive MinAge (test-mode override) enforces the configured duration.
+	override := 3 * time.Second
+	earlyIn := f.dismissInput(msgID, "user-1", "too early for 3s", func() time.Time {
+		return row.CreatedAt.Add(2 * time.Second)
+	})
+	earlyIn.MinAge = override
+	_, err = f.cs.DismissDecisions(ctx, earlyIn)
+	var tooRecent *store.DecisionTooRecentError
+	require.ErrorAs(t, err, &tooRecent)
+	assert.True(t, row.CreatedAt.Add(override).Equal(tooRecent.AvailableAt))
+
+	okIn := f.dismissInput(msgID, "user-1", "ready at 3s", func() time.Time {
+		return row.CreatedAt.Add(override)
+	})
+	okIn.MinAge = override
+	res, err := f.cs.DismissDecisions(ctx, okIn)
+	require.NoError(t, err)
+	require.Len(t, res.Dismissed, 1)
+	assert.Equal(t, store.DecisionStatusDismissed, res.Dismissed[0].Status)
+}

@@ -234,7 +234,7 @@ func (s *Server) decisionViewsFor(ctx context.Context, ds []*store.Decision) []D
 		if d == nil {
 			continue
 		}
-		out = append(out, decisionView(d, replacedBy[d.ReplacedByID]))
+		out = append(out, decisionView(d, replacedBy[d.ReplacedByID], s.decisionDismissMinAge()))
 	}
 	return out
 }
@@ -1305,7 +1305,7 @@ func (s *Server) buildProjectDecisionPromptViews(
 		p := item.raw
 		decViews := make([]DecisionView, 0, len(p.Decisions))
 		for _, d := range p.Decisions {
-			decViews = append(decViews, decisionView(d, replacedBy[d.ReplacedByID]))
+			decViews = append(decViews, decisionView(d, replacedBy[d.ReplacedByID], s.decisionDismissMinAge()))
 		}
 		askerName := p.AskerAgentName
 		if askerName == "" {
