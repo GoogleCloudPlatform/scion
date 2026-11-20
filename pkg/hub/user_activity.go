@@ -24,6 +24,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+const (
+	// userActivityWriteTimeout is the maximum time an async user last-seen
+	// UPDATE may take before the goroutine abandons the attempt and releases
+	// its store reference.
+	userActivityWriteTimeout = 5 * time.Second
+
+	// userActivityCancelDrainGrace bounds how long UserActivityTracker.Close
+	// waits after cancelling stuck last-seen write contexts for those
+	// goroutines to unwind before returning, so cooperative writes exit before
+	// store.Close() runs without letting a non-cooperative store hang shutdown.
+	userActivityCancelDrainGrace = 250 * time.Millisecond
+)
+
 // UserActivityTracker records user last-seen timestamps with in-memory
 // throttling so that at most one database write occurs per user per
 // throttle interval (default: 1 hour).
@@ -33,6 +46,8 @@ type UserActivityTracker struct {
 
 	mu       sync.Mutex
 	lastSeen map[string]time.Time // userID → last flushed time
+
+	work mutationAuditTracker
 }
 
 // NewUserActivityTracker creates a tracker that limits last-seen writes
@@ -60,7 +75,8 @@ func userActivityMiddleware(tracker *UserActivityTracker) func(http.Handler) htt
 
 // Touch records activity for a user. If the user was last written more
 // than the throttle interval ago (or never), the timestamp is persisted
-// asynchronously.
+// asynchronously. Once Close has closed admission, Touch is a no-op so no
+// write races store shutdown.
 func (t *UserActivityTracker) Touch(userID string) {
 	now := time.Now()
 
@@ -73,11 +89,32 @@ func (t *UserActivityTracker) Touch(userID string) {
 	t.lastSeen[userID] = now
 	t.mu.Unlock()
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+	logger := slog.Default()
+	t.work.goTracked(userActivityWriteTimeout, func(ctx context.Context) {
 		if err := t.store.UpdateUserLastSeen(ctx, userID, now); err != nil {
-			slog.Warn("Failed to update user last-seen", "userId", userID, "error", err)
+			logger.Warn("Failed to update user last-seen", "userId", userID, "error", err)
 		}
-	}()
+	})
+}
+
+// Close stops accepting new async user last-seen writes and waits for
+// in-flight writes to complete, bounded by min(ctx deadline,
+// userActivityWriteTimeout). Writes still blocked at that bound have their
+// contexts cancelled and are given up to userActivityCancelDrainGrace to
+// unwind before Close returns. Safe to call on a nil tracker or more than once.
+func (t *UserActivityTracker) Close(ctx context.Context) {
+	if t == nil {
+		return
+	}
+	if cancelled, remaining := t.work.stop(ctx, userActivityWriteTimeout, userActivityCancelDrainGrace); remaining > 0 {
+		slog.Warn("User last-seen updates still running after cancellation grace; proceeding with shutdown",
+			"cancelled", cancelled,
+			"running", remaining,
+			"timeout", userActivityWriteTimeout,
+			"cancel_grace", userActivityCancelDrainGrace)
+	} else if cancelled > 0 {
+		slog.Warn("Cancelled in-flight user last-seen updates at shutdown deadline",
+			"cancelled", cancelled,
+			"timeout", userActivityWriteTimeout)
+	}
 }
