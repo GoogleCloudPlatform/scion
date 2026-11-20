@@ -595,6 +595,15 @@ type Store interface {
 	MessagePolicyStore
 }
 
+// StallCutoffs holds the activity-age cutoffs used by MarkStalledAgents.
+// Running agents eligible for stall detection use Activity, except activity
+// "thinking", which uses Thinking so slow model calls are not prematurely
+// marked stalled.
+type StallCutoffs struct {
+	Activity time.Time // now - StalledThreshold: every included activity except thinking
+	Thinking time.Time // now - effectiveThinkingThreshold
+}
+
 // AgentStore defines agent-related persistence operations.
 type AgentStore interface {
 	// CreateAgent creates a new agent record.
@@ -873,11 +882,13 @@ type AgentStore interface {
 	MarkStaleAgentsOffline(ctx context.Context, threshold time.Time) ([]Agent, error)
 
 	// MarkStalledAgents marks running agents as stalled when their last activity
-	// event is older than activityThreshold but they have a recent heartbeat
+	// event and last stall-suppressing live work predate the applicable cutoff
+	// (cutoffs.Thinking for activity "thinking", cutoffs.Activity for all other
+	// included activities) while they still have a recent heartbeat
 	// (last_seen >= heartbeatRecency). Only affects agents with phase=running
 	// whose activity is not a terminal sticky state or already stalled/offline.
 	// Returns the updated agent records for event publishing.
-	MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]Agent, error)
+	MarkStalledAgents(ctx context.Context, cutoffs StallCutoffs, heartbeatRecency time.Time) ([]Agent, error)
 
 	// ListIdleSuspendCandidates returns non-deleted running agents holding a
 	// suspend-eligible activity (state.SuspendEligibleActivities) whose

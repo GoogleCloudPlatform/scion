@@ -143,7 +143,7 @@ func TestAgentStore_MarkStalledAgents_LiveWork(t *testing.T) {
 	processOnly := mk("process-only")
 	setLive(processOnly, ago(20*time.Second), nil)
 
-	updated, err := s.MarkStalledAgents(ctx, activityThreshold, heartbeatRecency)
+	updated, err := s.MarkStalledAgents(ctx, store.StallCutoffs{Activity: activityThreshold, Thinking: activityThreshold}, heartbeatRecency)
 	require.NoError(t, err)
 	ids := map[string]bool{}
 	for _, a := range updated {
@@ -298,7 +298,8 @@ func TestAgentStore_StallThenLiveWorkThenSweep(t *testing.T) {
 
 	sweep := func() []store.Agent {
 		t.Helper()
-		got, err := s.MarkStalledAgents(ctx, time.Now().Add(-10*time.Minute), time.Now().Add(-2*time.Minute))
+		cutoff := time.Now().Add(-10 * time.Minute)
+		got, err := s.MarkStalledAgents(ctx, store.StallCutoffs{Activity: cutoff, Thinking: cutoff}, time.Now().Add(-2*time.Minute))
 		require.NoError(t, err)
 		return got
 	}

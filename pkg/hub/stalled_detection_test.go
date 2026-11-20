@@ -84,8 +84,8 @@ func TestAgentStalledDetectionHandler_MarksStalledAgents(t *testing.T) {
 		t.Fatalf("failed to update agent status: %v", err)
 	}
 
-	// Make activity stale but keep heartbeat recent
-	staleActivity := time.Now().Add(-10 * time.Minute)
+	// Make activity stale (past the 20m thinking cap) but keep heartbeat recent
+	staleActivity := time.Now().Add(-25 * time.Minute)
 	recentHB := time.Now().Add(-30 * time.Second)
 	db := s.(*entadapter.CompositeStore).DB()
 	if _, err := db.ExecContext(ctx,
@@ -485,7 +485,7 @@ func TestAgentStalledDetectionHandler_AutoSuspendDisabled(t *testing.T) {
 		t.Fatalf("failed to update agent status: %v", err)
 	}
 
-	staleActivity := time.Now().Add(-10 * time.Minute)
+	staleActivity := time.Now().Add(-25 * time.Minute)
 	recentHB := time.Now().Add(-30 * time.Second)
 	db := s.(*entadapter.CompositeStore).DB()
 	if _, err := db.ExecContext(ctx,
@@ -550,7 +550,7 @@ func TestAgentStalledDetectionHandler_AutoSuspendEnabled(t *testing.T) {
 		t.Fatalf("failed to update agent status: %v", err)
 	}
 
-	staleActivity := time.Now().Add(-10 * time.Minute)
+	staleActivity := time.Now().Add(-25 * time.Minute)
 	recentHB := time.Now().Add(-30 * time.Second)
 	db := s.(*entadapter.CompositeStore).DB()
 	if _, err := db.ExecContext(ctx,
@@ -786,5 +786,249 @@ func TestAgentStalledDetectionHandler_NoHookSinceStartHintAndHeartbeatRetention(
 	}
 	if afterActiveHB.Message != "Container detail updated" {
 		t.Errorf("activeThenStalled after heartbeat message = %q, want %q", afterActiveHB.Message, "Container detail updated")
+	}
+}
+
+func TestAgentStalledDetectionHandler_ThinkingCutoff(t *testing.T) {
+	srv, s, ep := setupStalledTestServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "Thinking Cutoff Project",
+		Slug: "thinking-cutoff-project",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	now := time.Now()
+	recentHB := now.Add(-30 * time.Second)
+	db := s.(*entadapter.CompositeStore).DB()
+
+	mkAgent := func(slug, activity string, age time.Duration) *store.Agent {
+		t.Helper()
+		a := &store.Agent{
+			ID:        api.NewUUID(),
+			Slug:      slug,
+			Name:      slug,
+			Template:  "claude",
+			ProjectID: project.ID,
+			Phase:     string(state.PhaseCreated),
+		}
+		if err := s.CreateAgent(ctx, a); err != nil {
+			t.Fatalf("failed to create agent %s: %v", slug, err)
+		}
+		if err := s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: activity,
+		}); err != nil {
+			t.Fatalf("failed to update agent %s status: %v", slug, err)
+		}
+		if _, err := db.ExecContext(ctx,
+			"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
+			now.Add(-age), recentHB, a.ID); err != nil {
+			t.Fatalf("failed to set timestamps for %s: %v", slug, err)
+		}
+		return a
+	}
+
+	thinkingUnderCap := mkAgent("thinking-6m", string(state.ActivityThinking), 6*time.Minute)
+	thinkingNearCap := mkAgent("thinking-19m", string(state.ActivityThinking), 19*time.Minute)
+	thinkingOverCap := mkAgent("thinking-21m", string(state.ActivityThinking), 21*time.Minute)
+	workingStale := mkAgent("working-6m", string(state.ActivityWorking), 6*time.Minute)
+	executingStale := mkAgent("executing-6m", string(state.ActivityExecuting), 6*time.Minute)
+
+	srv.agentStalledDetectionHandler()(ctx)
+
+	published := ep.publishedAgents()
+	publishedIDs := make(map[string]bool, len(published))
+	for _, a := range published {
+		publishedIDs[a.ID] = true
+	}
+
+	for _, stay := range []*store.Agent{thinkingUnderCap, thinkingNearCap} {
+		if publishedIDs[stay.ID] {
+			t.Errorf("%s should not be marked stalled under the 20m thinking cap", stay.Slug)
+		}
+		got, err := s.GetAgent(ctx, stay.ID)
+		if err != nil {
+			t.Fatalf("failed to get %s: %v", stay.Slug, err)
+		}
+		if got.Activity != string(state.ActivityThinking) {
+			t.Errorf("%s activity = %q, want %q", stay.Slug, got.Activity, string(state.ActivityThinking))
+		}
+	}
+
+	for _, want := range []struct {
+		agent *store.Agent
+		from  state.Activity
+	}{
+		{thinkingOverCap, state.ActivityThinking},
+		{workingStale, state.ActivityWorking},
+		{executingStale, state.ActivityExecuting},
+	} {
+		if !publishedIDs[want.agent.ID] {
+			t.Errorf("%s should have been marked stalled", want.agent.Slug)
+		}
+		got, err := s.GetAgent(ctx, want.agent.ID)
+		if err != nil {
+			t.Fatalf("failed to get %s: %v", want.agent.Slug, err)
+		}
+		if got.Activity != string(state.ActivityStalled) {
+			t.Errorf("%s activity = %q, want %q", want.agent.Slug, got.Activity, string(state.ActivityStalled))
+		}
+		if got.StalledFromActivity != string(want.from) {
+			t.Errorf("%s stalled_from_activity = %q, want %q", want.agent.Slug, got.StalledFromActivity, string(want.from))
+		}
+	}
+}
+
+func TestAgentStalledDetectionHandler_ThinkingThresholdRespectsHigherStalledThreshold(t *testing.T) {
+	srv, s, _ := setupStalledTestServer(t)
+	srv.config.StalledThreshold = 30 * time.Minute
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "High Stalled Threshold Project",
+		Slug: "high-stalled-threshold-project",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	now := time.Now()
+	recentHB := now.Add(-30 * time.Second)
+	db := s.(*entadapter.CompositeStore).DB()
+
+	mkThinking := func(slug string, age time.Duration) *store.Agent {
+		t.Helper()
+		a := &store.Agent{
+			ID:        api.NewUUID(),
+			Slug:      slug,
+			Name:      slug,
+			Template:  "claude",
+			ProjectID: project.ID,
+			Phase:     string(state.PhaseCreated),
+		}
+		if err := s.CreateAgent(ctx, a); err != nil {
+			t.Fatalf("failed to create agent %s: %v", slug, err)
+		}
+		if err := s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: string(state.ActivityThinking),
+		}); err != nil {
+			t.Fatalf("failed to update agent %s status: %v", slug, err)
+		}
+		if _, err := db.ExecContext(ctx,
+			"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
+			now.Add(-age), recentHB, a.ID); err != nil {
+			t.Fatalf("failed to set timestamps for %s: %v", slug, err)
+		}
+		return a
+	}
+
+	underConfigured := mkThinking("thinking-25m", 25*time.Minute)
+	overConfigured := mkThinking("thinking-31m", 31*time.Minute)
+
+	srv.agentStalledDetectionHandler()(ctx)
+
+	gotUnder, err := s.GetAgent(ctx, underConfigured.ID)
+	if err != nil {
+		t.Fatalf("failed to get underConfigured: %v", err)
+	}
+	if gotUnder.Activity != string(state.ActivityThinking) {
+		t.Errorf("thinking-25m with StalledThreshold=30m: activity = %q, want %q",
+			gotUnder.Activity, string(state.ActivityThinking))
+	}
+
+	gotOver, err := s.GetAgent(ctx, overConfigured.ID)
+	if err != nil {
+		t.Fatalf("failed to get overConfigured: %v", err)
+	}
+	if gotOver.Activity != string(state.ActivityStalled) {
+		t.Errorf("thinking-31m with StalledThreshold=30m: activity = %q, want %q",
+			gotOver.Activity, string(state.ActivityStalled))
+	}
+}
+
+func TestAgentStalledDetectionHandler_ThinkingPastCapAutoSuspends(t *testing.T) {
+	srv, s, ep := setupStalledTestServer(t)
+	srv.config.AutoSuspendStalled = true
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "Thinking AutoSuspend Project",
+		Slug: "thinking-autosuspend-project",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	now := time.Now()
+	recentHB := now.Add(-30 * time.Second)
+	db := s.(*entadapter.CompositeStore).DB()
+
+	mkThinking := func(slug string, age time.Duration) *store.Agent {
+		t.Helper()
+		a := &store.Agent{
+			ID:        api.NewUUID(),
+			Slug:      slug,
+			Name:      slug,
+			Template:  "claude",
+			ProjectID: project.ID,
+			Phase:     string(state.PhaseCreated),
+		}
+		if err := s.CreateAgent(ctx, a); err != nil {
+			t.Fatalf("failed to create agent %s: %v", slug, err)
+		}
+		if err := s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: string(state.ActivityThinking),
+		}); err != nil {
+			t.Fatalf("failed to update agent %s status: %v", slug, err)
+		}
+		if _, err := db.ExecContext(ctx,
+			"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
+			now.Add(-age), recentHB, a.ID); err != nil {
+			t.Fatalf("failed to set timestamps for %s: %v", slug, err)
+		}
+		return a
+	}
+
+	underCap := mkThinking("thinking-under-cap", 6*time.Minute)
+	pastCap := mkThinking("thinking-past-cap", 21*time.Minute)
+
+	srv.agentStalledDetectionHandler()(ctx)
+	srv.waitAutoSuspendIdle()
+
+	gotUnder, err := s.GetAgent(ctx, underCap.ID)
+	if err != nil {
+		t.Fatalf("failed to get underCap: %v", err)
+	}
+	if gotUnder.Phase != string(state.PhaseRunning) || gotUnder.Activity != string(state.ActivityThinking) {
+		t.Errorf("underCap = (%q, %q), want (running, thinking)", gotUnder.Phase, gotUnder.Activity)
+	}
+
+	gotPast, err := s.GetAgent(ctx, pastCap.ID)
+	if err != nil {
+		t.Fatalf("failed to get pastCap: %v", err)
+	}
+	if gotPast.Phase != string(state.PhaseSuspended) {
+		t.Errorf("pastCap phase = %q, want %q", gotPast.Phase, string(state.PhaseSuspended))
+	}
+	if gotPast.ContainerStatus != "stopped" {
+		t.Errorf("pastCap container_status = %q, want %q", gotPast.ContainerStatus, "stopped")
+	}
+	if gotPast.SuspendReason != string(state.SuspendReasonStalled) {
+		t.Errorf("pastCap suspend_reason = %q, want %q", gotPast.SuspendReason, string(state.SuspendReasonStalled))
+	}
+
+	// 2 events for pastCap (stall + suspend), 0 for underCap.
+	published := ep.publishedAgents()
+	if len(published) != 2 {
+		t.Fatalf("expected 2 published events (stall + suspend for pastCap), got %d", len(published))
 	}
 }

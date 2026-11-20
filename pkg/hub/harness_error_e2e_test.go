@@ -181,7 +181,8 @@ func TestHarnessError_OpencodeEndToEnd(t *testing.T) {
 
 	// 3. Well past the stall threshold (10 minutes on): the idle control
 	// agent stalls, the harness_error agent does not.
-	stalled, err := s.MarkStalledAgents(ctx, time.Now().Add(10*time.Minute), time.Now().Add(-time.Hour))
+	future := time.Now().Add(10 * time.Minute)
+	stalled, err := s.MarkStalledAgents(ctx, store.StallCutoffs{Activity: future, Thinking: future}, time.Now().Add(-time.Hour))
 	require.NoError(t, err)
 	require.Len(t, stalled, 1)
 	assert.Equal(t, control.ID, stalled[0].ID)

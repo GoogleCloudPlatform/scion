@@ -3178,12 +3178,13 @@ func (s *AgentStore) setAgentNativeCloudRunOnce(ctx context.Context, uid uuid.UU
 var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "idle", "stalled", "offline", "waiting_for_input", string(state.ActivityHarnessError)}
 
 // MarkStalledAgents marks running agents whose last activity event predates
-// activityThreshold but whose heartbeat is still recent (>= heartbeatRecency)
-// as stalled, preserving the prior activity in stalled_from_activity. An
-// agent whose container reported stall-suppressing live work since
-// activityThreshold is left alone (ptone/scion#7855): a long tool call or a
-// background job doing CPU work is not a hang.
-func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]store.Agent, error) {
+// the applicable cutoff (cutoffs.Thinking for activity "thinking",
+// cutoffs.Activity for every other included activity) while their heartbeat is
+// still recent (>= heartbeatRecency) as stalled, preserving the prior activity
+// in stalled_from_activity. An agent whose container reported stall-suppressing
+// live work since the applicable cutoff is left alone (ptone/scion#7855): a
+// long tool call or a background job doing CPU work is not a hang.
+func (s *AgentStore) MarkStalledAgents(ctx context.Context, cutoffs store.StallCutoffs, heartbeatRecency time.Time) ([]store.Agent, error) {
 	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
@@ -3196,12 +3197,22 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 
 	q := tx.Agent.Query().Where(
 		agent.LastActivityEventNotNil(),
-		agent.LastActivityEventLT(activityThreshold),
 		agent.LastSeenNotNil(),
 		agent.LastSeenGTE(heartbeatRecency),
 		agent.PhaseEQ("running"),
 		agent.ActivityNotIn(stalledExcluded...),
-		agent.Or(agent.LastLiveWorkAtIsNil(), agent.LastLiveWorkAtLT(activityThreshold)),
+		agent.Or(
+			agent.And(
+				agent.ActivityNEQ(string(state.ActivityThinking)),
+				agent.LastActivityEventLT(cutoffs.Activity),
+				agent.Or(agent.LastLiveWorkAtIsNil(), agent.LastLiveWorkAtLT(cutoffs.Activity)),
+			),
+			agent.And(
+				agent.ActivityEQ(string(state.ActivityThinking)),
+				agent.LastActivityEventLT(cutoffs.Thinking),
+				agent.Or(agent.LastLiveWorkAtIsNil(), agent.LastLiveWorkAtLT(cutoffs.Thinking)),
+			),
+		),
 	)
 	if useLock {
 		q = q.ForUpdate()

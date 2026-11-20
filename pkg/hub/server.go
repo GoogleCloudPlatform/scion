@@ -5885,6 +5885,13 @@ func (s *Server) agentHeartbeatTimeoutHandler() func(ctx context.Context) {
 // an agent's container as online.
 const agentHeartbeatRecency = 2 * time.Minute
 
+// ThinkingStalledThreshold is the minimum inactivity window before a running
+// agent in activity "thinking" (waiting on a model call) is marked stalled.
+// The effective thinking threshold is max(StalledThreshold, ThinkingStalledThreshold)
+// so raising stalled_threshold above 20m never makes thinking stricter than
+// other activities.
+const ThinkingStalledThreshold = 20 * time.Minute
+
 func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		// Tight timeout: fail fast if DB connections are saturated rather than
@@ -5894,10 +5901,19 @@ func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 		tickCtx, cancel := context.WithTimeout(ctx, stalledDetectionTimeout)
 		defer cancel()
 
-		activityThreshold := time.Now().Add(-s.config.StalledThreshold)
-		heartbeatRecency := time.Now().Add(-agentHeartbeatRecency)
+		s.mu.RLock()
+		stalledThreshold := s.config.StalledThreshold
+		s.mu.RUnlock()
 
-		agents, err := s.store.MarkStalledAgents(tickCtx, activityThreshold, heartbeatRecency)
+		thinkingThreshold := max(stalledThreshold, ThinkingStalledThreshold)
+		now := time.Now()
+		cutoffs := store.StallCutoffs{
+			Activity: now.Add(-stalledThreshold),
+			Thinking: now.Add(-thinkingThreshold),
+		}
+		heartbeatRecency := now.Add(-agentHeartbeatRecency)
+
+		agents, err := s.store.MarkStalledAgents(tickCtx, cutoffs, heartbeatRecency)
 		if err != nil {
 			slog.Error("Scheduler: stalled detection check failed", "error", err)
 			return
@@ -5909,7 +5925,7 @@ func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 
 		if len(agents) > 0 {
 			slog.Info("Scheduler: marked stalled agents",
-				"count", len(agents), "threshold", s.config.StalledThreshold)
+				"count", len(agents), "threshold", stalledThreshold, "thinking_threshold", thinkingThreshold)
 		}
 
 		// Auto-suspend stalled agents if enabled.
