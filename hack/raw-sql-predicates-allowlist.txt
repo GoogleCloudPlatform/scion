@@ -9,5 +9,6 @@
 # "top-level-or". No line numbers: entries survive unrelated edits.
 #
 # Prefer wrapping the raw SQL predicate in outer parentheses over adding an
-# allowlist entry. An entry that matches nothing fails the gate, so delete
+# allowlist entry. An entry suppresses all current and future findings for that
+# file | func | rule. An entry that matches nothing fails the gate, so delete
 # entries together with the code they cover.

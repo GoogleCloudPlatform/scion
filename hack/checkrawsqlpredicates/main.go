@@ -39,12 +39,28 @@
 //
 // Non-test, non-generated Go files under pkg, cmd, and internal (default).
 //
+// # Limitations
+//
+// The analyzer is syntactic (go/ast). It models string literals, + concatenation,
+// fmt.Sprintf with a literal or resolvable format string, same-package top-level
+// string constants and never-reassigned vars, and recursive same-directory
+// top-level func(*entsql.Builder) helpers.
+//
+// Unmodeled shapes (silent negatives): local variables, closures inside a builder
+// body, zero-arg entsql.P().Append(...), b.Join(entsql.Expr(...)),
+// defer/go/return/labeled/select/type-switch statements in a builder closure,
+// method helpers taking *entsql.Builder, and cross-package helpers.
+//
+// Postgres E'...\” escape strings and $$...$$ dollar-quoted strings are not
+// lexed and may produce false positives (fail-closed; cover with the allowlist).
+//
 // Exit codes:
 //
 //	0  analysed, no violations
 //	1  violations found, or malformed/stale allowlist entry
 //	3  could not analyse (parse error, unreadable path, bad allowlist path)
 //	4  no candidate files matched
+//	5  usage error (unknown flag)
 package main
 
 import (
@@ -66,6 +82,7 @@ import (
 
 const (
 	entSQLImportPath = "entgo.io/ent/dialect/sql"
+	fmtImportPath    = "fmt"
 	ruleTopLevelOR   = "top-level-or"
 )
 
@@ -213,12 +230,12 @@ func isGenerated(f *ast.File) bool {
 	return false
 }
 
-// entSQLAliases returns the local package identifier(s) importing entgo.io/ent/dialect/sql.
-func entSQLAliases(f *ast.File) map[string]bool {
+// importAliases returns the local package identifier(s) importing importPath.
+func importAliases(f *ast.File, importPath, defaultName string) map[string]bool {
 	aliases := map[string]bool{}
 	for _, imp := range f.Imports {
 		val, err := strconv.Unquote(imp.Path.Value)
-		if err != nil || val != entSQLImportPath {
+		if err != nil || val != importPath {
 			continue
 		}
 		if imp.Name != nil {
@@ -227,17 +244,34 @@ func entSQLAliases(f *ast.File) map[string]bool {
 				aliases[name] = true
 			}
 		} else {
-			aliases["sql"] = true
+			aliases[defaultName] = true
 		}
 	}
 	return aliases
 }
 
+// entSQLAliases returns the local package identifier(s) importing entgo.io/ent/dialect/sql.
+func entSQLAliases(f *ast.File) map[string]bool {
+	return importAliases(f, entSQLImportPath, "sql")
+}
+
+// fmtAliases returns the local package identifier(s) importing fmt.
+func fmtAliases(f *ast.File) map[string]bool {
+	return importAliases(f, fmtImportPath, "fmt")
+}
+
 // builderHelper describes a same-package function that accepts a *entsql.Builder.
 type builderHelper struct {
-	decl      *ast.FuncDecl
-	paramIdx  int
-	paramName string
+	decl       *ast.FuncDecl
+	paramIdx   int
+	paramName  string
+	fmtAliases map[string]bool
+}
+
+// stringDef describes a same-package top-level const or never-reassigned var.
+type stringDef struct {
+	expr       ast.Expr
+	fmtAliases map[string]bool
 }
 
 // collectBuilderHelpers indexes top-level functions taking a *<alias>.Builder parameter
@@ -264,9 +298,10 @@ func collectBuilderHelpers(files []*parsedFile) map[string]builderHelper {
 				for _, name := range field.Names {
 					if isBuilder && name.Name != "_" {
 						helpers[fd.Name.Name] = builderHelper{
-							decl:      fd,
-							paramIdx:  idx,
-							paramName: name.Name,
+							decl:       fd,
+							paramIdx:   idx,
+							paramName:  name.Name,
+							fmtAliases: pf.fmtAliases,
 						}
 					}
 					idx++
@@ -275,6 +310,74 @@ func collectBuilderHelpers(files []*parsedFile) map[string]builderHelper {
 		}
 	}
 	return helpers
+}
+
+// collectStringDefs indexes same-package top-level consts and never-reassigned
+// package-level vars across a directory's parsed files.
+func collectStringDefs(files []*parsedFile) map[string]stringDef {
+	defs := map[string]stringDef{}
+	vars := map[string]stringDef{}
+
+	for _, pf := range files {
+		for _, decl := range pf.ast.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Values) != len(vs.Names) {
+					continue
+				}
+				for i, name := range vs.Names {
+					if name.Name == "_" {
+						continue
+					}
+					def := stringDef{
+						expr:       vs.Values[i],
+						fmtAliases: pf.fmtAliases,
+					}
+					if gd.Tok == token.CONST {
+						defs[name.Name] = def
+					} else {
+						vars[name.Name] = def
+					}
+				}
+			}
+		}
+	}
+
+	if len(vars) > 0 {
+		reassigned := map[string]bool{}
+		for _, pf := range files {
+			ast.Inspect(pf.ast, func(n ast.Node) bool {
+				switch s := n.(type) {
+				case *ast.AssignStmt:
+					if s.Tok != token.DEFINE {
+						for _, lhs := range s.Lhs {
+							if id, ok := lhs.(*ast.Ident); ok {
+								reassigned[id.Name] = true
+							}
+						}
+					}
+				case *ast.UnaryExpr:
+					if s.Op == token.AND {
+						if id, ok := s.X.(*ast.Ident); ok {
+							reassigned[id.Name] = true
+						}
+					}
+				}
+				return true
+			})
+		}
+		for name, def := range vars {
+			if !reassigned[name] {
+				defs[name] = def
+			}
+		}
+	}
+
+	return defs
 }
 
 func isBuilderPtrType(expr ast.Expr, aliases map[string]bool) bool {
@@ -291,9 +394,10 @@ func isBuilderPtrType(expr ast.Expr, aliases map[string]bool) bool {
 }
 
 type parsedFile struct {
-	path    string
-	ast     *ast.File
-	aliases map[string]bool
+	path       string
+	ast        *ast.File
+	aliases    map[string]bool
+	fmtAliases map[string]bool
 }
 
 // AnalyzeFiles parses and inspects the given Go files, returning all findings.
@@ -317,9 +421,10 @@ func AnalyzeFiles(paths []string) ([]Finding, int, error) {
 			dirs = append(dirs, dir)
 		}
 		byDir[dir] = append(byDir[dir], &parsedFile{
-			path:    filepath.ToSlash(p),
-			ast:     f,
-			aliases: entSQLAliases(f),
+			path:       filepath.ToSlash(p),
+			ast:        f,
+			aliases:    entSQLAliases(f),
+			fmtAliases: fmtAliases(f),
 		})
 	}
 	sort.Strings(dirs)
@@ -328,11 +433,12 @@ func AnalyzeFiles(paths []string) ([]Finding, int, error) {
 	for _, dir := range dirs {
 		pfiles := byDir[dir]
 		helpers := collectBuilderHelpers(pfiles)
+		strDefs := collectStringDefs(pfiles)
 		for _, pf := range pfiles {
 			if len(pf.aliases) == 0 {
 				continue
 			}
-			findings = append(findings, analyzeFile(fset, pf, helpers)...)
+			findings = append(findings, analyzeFile(fset, pf, helpers, strDefs)...)
 		}
 	}
 
@@ -348,7 +454,7 @@ func AnalyzeFiles(paths []string) ([]Finding, int, error) {
 	return findings, analysed, nil
 }
 
-func analyzeFile(fset *token.FileSet, pf *parsedFile, helpers map[string]builderHelper) []Finding {
+func analyzeFile(fset *token.FileSet, pf *parsedFile, helpers map[string]builderHelper, strDefs map[string]stringDef) []Finding {
 	var findings []Finding
 	for _, decl := range pf.ast.Decls {
 		funcName := "(package)"
@@ -382,7 +488,7 @@ func analyzeFile(fset *token.FileSet, pf *parsedFile, helpers map[string]builder
 				if bName == "" {
 					return true
 				}
-				tmpl := extractBuilderTemplate(fn.Body, bName, helpers, map[string]bool{})
+				tmpl := extractBuilderTemplate(fn.Body, bName, pf.fmtAliases, helpers, strDefs, map[string]bool{})
 				if HasTopLevelOR(tmpl) {
 					pos := fset.Position(call.Pos())
 					findings = append(findings, Finding{
@@ -398,7 +504,7 @@ func analyzeFile(fset *token.FileSet, pf *parsedFile, helpers map[string]builder
 				if len(call.Args) < 1 {
 					return true
 				}
-				tmpl := evalStringTemplate(call.Args[0])
+				tmpl := evalStringTemplate(call.Args[0], pf.fmtAliases, strDefs, map[string]bool{})
 				if HasTopLevelOR(tmpl) {
 					pos := fset.Position(call.Pos())
 					findings = append(findings, Finding{
@@ -455,7 +561,7 @@ func firstParamName(params *ast.FieldList) string {
 
 // extractBuilderTemplate walks a *entsql.Builder closure body in execution order
 // and reconstructs the emitted SQL template string.
-func extractBuilderTemplate(body *ast.BlockStmt, bName string, helpers map[string]builderHelper, visited map[string]bool) string {
+func extractBuilderTemplate(body *ast.BlockStmt, bName string, fileFmtAliases map[string]bool, helpers map[string]builderHelper, strDefs map[string]stringDef, visited map[string]bool) string {
 	var out strings.Builder
 	var walk func(node ast.Node)
 	walk = func(node ast.Node) {
@@ -472,7 +578,7 @@ func extractBuilderTemplate(body *ast.BlockStmt, bName string, helpers map[strin
 		case *ast.CallExpr:
 			if chain, ok := unwrapBuilderChain(n, bName); ok {
 				for _, step := range chain {
-					emitBuilderMethod(&out, step)
+					emitBuilderMethod(&out, step, fileFmtAliases, strDefs)
 				}
 				return
 			}
@@ -481,7 +587,7 @@ func extractBuilderTemplate(body *ast.BlockStmt, bName string, helpers map[strin
 				if h, found := helpers[id.Name]; found && !visited[id.Name] && h.paramIdx < len(n.Args) {
 					if argID, ok := n.Args[h.paramIdx].(*ast.Ident); ok && argID.Name == bName {
 						visited[id.Name] = true
-						out.WriteString(extractBuilderTemplate(h.decl.Body, h.paramName, helpers, visited))
+						out.WriteString(extractBuilderTemplate(h.decl.Body, h.paramName, h.fmtAliases, helpers, strDefs, visited))
 						delete(visited, id.Name)
 						return
 					}
@@ -556,11 +662,11 @@ func unwrapBuilderChain(call *ast.CallExpr, bName string) ([]builderStep, bool) 
 	}
 }
 
-func emitBuilderMethod(out *strings.Builder, step builderStep) {
+func emitBuilderMethod(out *strings.Builder, step builderStep, fileFmtAliases map[string]bool, strDefs map[string]stringDef) {
 	switch step.method {
 	case "WriteString":
 		if len(step.args) == 1 {
-			out.WriteString(evalStringTemplate(step.args[0]))
+			out.WriteString(evalStringTemplate(step.args[0], fileFmtAliases, strDefs, map[string]bool{}))
 		}
 	case "WriteByte":
 		if len(step.args) == 1 {
@@ -624,9 +730,11 @@ func evalOp(expr ast.Expr) string {
 }
 
 // evalStringTemplate evaluates a Go string expression into a SQL template,
-// keeping string literals verbatim and replacing dynamic expressions with a
-// neutral placeholder token so adjacent SQL tokens do not merge.
-func evalStringTemplate(expr ast.Expr) string {
+// keeping string literals verbatim, expanding fmt.Sprintf format strings and
+// same-package top-level string consts / never-reassigned vars, and replacing
+// dynamic expressions with a neutral placeholder token so adjacent SQL tokens
+// do not merge.
+func evalStringTemplate(expr ast.Expr, fileFmtAliases map[string]bool, strDefs map[string]stringDef, visited map[string]bool) string {
 	switch e := expr.(type) {
 	case *ast.BasicLit:
 		if e.Kind == token.STRING {
@@ -637,14 +745,77 @@ func evalStringTemplate(expr ast.Expr) string {
 		return " __expr__ "
 	case *ast.BinaryExpr:
 		if e.Op == token.ADD {
-			return evalStringTemplate(e.X) + evalStringTemplate(e.Y)
+			return evalStringTemplate(e.X, fileFmtAliases, strDefs, visited) + evalStringTemplate(e.Y, fileFmtAliases, strDefs, visited)
 		}
 		return " __expr__ "
 	case *ast.ParenExpr:
-		return evalStringTemplate(e.X)
+		return evalStringTemplate(e.X, fileFmtAliases, strDefs, visited)
+	case *ast.Ident:
+		if def, ok := strDefs[e.Name]; ok && !visited[e.Name] {
+			visited[e.Name] = true
+			res := evalStringTemplate(def.expr, def.fmtAliases, strDefs, visited)
+			delete(visited, e.Name)
+			return res
+		}
+		return " __expr__ "
+	case *ast.CallExpr:
+		if sel, ok := e.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Sprintf" && len(e.Args) >= 1 {
+			if pkgID, ok := sel.X.(*ast.Ident); ok && fileFmtAliases[pkgID.Name] {
+				format := evalStringTemplate(e.Args[0], fileFmtAliases, strDefs, visited)
+				return replaceFormatVerbs(format)
+			}
+		}
+		return " __expr__ "
 	default:
 		return " __expr__ "
 	}
+}
+
+// replaceFormatVerbs replaces fmt.Sprintf format verbs (%s, %[1]q, %.2f, etc.)
+// with a neutral placeholder token and unescapes %% to %.
+func replaceFormatVerbs(format string) string {
+	var out strings.Builder
+	n := len(format)
+	for i := 0; i < n; {
+		if format[i] != '%' {
+			out.WriteByte(format[i])
+			i++
+			continue
+		}
+		if i+1 < n && format[i+1] == '%' {
+			out.WriteByte('%')
+			i += 2
+			continue
+		}
+		j := i + 1
+		// Skip flags, width, precision, and argument indexes ([n]).
+		for j < n {
+			c := format[j]
+			if c == '+' || c == '-' || c == '#' || c == ' ' || c == '0' || c == '.' || c == '*' || (c >= '0' && c <= '9') {
+				j++
+				continue
+			}
+			if c == '[' {
+				k := j + 1
+				for k < n && format[k] >= '0' && format[k] <= '9' {
+					k++
+				}
+				if k > j+1 && k < n && format[k] == ']' {
+					j = k + 1
+					continue
+				}
+			}
+			break
+		}
+		if j < n && ((format[j] >= 'a' && format[j] <= 'z') || (format[j] >= 'A' && format[j] <= 'Z')) {
+			out.WriteString(" __expr__ ")
+			i = j + 1
+			continue
+		}
+		out.WriteByte(format[i])
+		i++
+	}
+	return out.String()
 }
 
 // HasTopLevelOR reports whether sql contains an OR keyword token at parenthesis
@@ -787,7 +958,7 @@ func run(args []string) int {
 	fs := flag.NewFlagSet("checkrawsqlpredicates", flag.ContinueOnError)
 	allowlistPath := fs.String("allowlist", DefaultAllowlistPath, "path to allowlist file (empty to disable)")
 	if err := fs.Parse(args); err != nil {
-		return 3
+		return 5
 	}
 	paths := fs.Args()
 	customPaths := len(paths) > 0

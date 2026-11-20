@@ -16,6 +16,15 @@
 # hack/raw-sql-predicates-allowlist.txt, anchored on file | func | rule with a
 # one-line justification. A malformed or stale entry fails the gate.
 #
+# LIMITATIONS
+# Syntactic (go/ast) analysis. Unmodeled shapes (silent negatives): local
+# variables, closures inside a builder body, zero-arg entsql.P().Append(...),
+# b.Join(entsql.Expr(...)), defer/go/return/labeled/select/type-switch
+# statements in a builder closure, method helpers taking *entsql.Builder, and
+# cross-package helpers.
+# Postgres E'...\'' escape strings and $$...$$ dollar-quoted strings are not
+# lexed and may produce false positives (fail-closed; cover with the allowlist).
+#
 # SELF-TEST
 #   ./hack/check-raw-sql-predicates.sh --self-test
 # runs the unit tests in hack/checkrawsqlpredicates (positive, negative,
@@ -28,6 +37,7 @@
 #   1  violations, or a malformed or stale allowlist entry (list on stderr)
 #   3  could not analyse (go missing, build failure, parse error)
 #   4  no candidate files (wrong working directory)
+#   5  usage error (unknown flag)
 set -euo pipefail
 
 cd "$(dirname "$0")/.." || exit 3
