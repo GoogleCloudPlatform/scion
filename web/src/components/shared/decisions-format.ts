@@ -90,6 +90,14 @@ export const MAX_DECISIONS_PAGE_SIZE = 200;
 export const SEARCH_DEBOUNCE_MS = 300;
 export const MAX_BULK_DISMISS_SELECTION = 50;
 export const MAX_BULK_DISMISS_CONCURRENCY = 4;
+export const MAX_DISMISS_REASON_RUNES = 500;
+
+export function clampDismissReason(raw: string): string {
+  const runes = [...raw];
+  return runes.length > MAX_DISMISS_REASON_RUNES
+    ? runes.slice(0, MAX_DISMISS_REASON_RUNES).join('')
+    : raw;
+}
 
 export interface BulkDismissCardOutcome {
   prompt: ProjectDecisionPromptView;
@@ -158,139 +166,97 @@ export function bulkDismissResultToast(outcomes: readonly BulkDismissCardOutcome
   message: string;
   variant: ToastVariant;
 } {
-  if (outcomes.length === 1) {
-    const first = outcomes[0];
-    if (first.result.ok) {
-      return dismissResultToast(
-        first.result.deliveryStatus,
-        first.result.dismissed.length,
-        first.result.alreadyDismissed.length,
-        first.prompt.askerAgentName
-      );
-    }
+  if (outcomes.length === 1 && outcomes[0].result.ok) {
+    const { prompt, result } = outcomes[0];
+    return dismissResultToast(
+      result.deliveryStatus,
+      result.dismissed.length,
+      result.alreadyDismissed.length,
+      prompt.askerAgentName
+    );
   }
 
   const total = outcomes.length;
-  const succeeded = outcomes.filter(
-    (
-      o
-    ): o is {
-      prompt: ProjectDecisionPromptView;
-      result: Extract<DismissDecisionPromptResult, { ok: true }>;
-    } => o.result.ok
-  );
-  const failed = outcomes.filter(
-    (
-      o
-    ): o is {
-      prompt: ProjectDecisionPromptView;
-      result: Extract<DismissDecisionPromptResult, { ok: false }>;
-    } => !o.result.ok
-  );
-
+  let succeededCount = 0;
+  let failedCount = 0;
+  let newlyDismissedCount = 0;
+  const tally: Record<DismissDeliveryStatus, number> = {
+    none: 0,
+    delivered: 0,
+    held: 0,
+    gone: 0,
+    unreachable: 0,
+    failed: 0,
+  };
+  const newlyDismissedAskers = new Set<string>();
   const changedTargets: string[] = [];
   const tooRecentTargets: string[] = [];
   const errorItems: string[] = [];
 
-  for (const f of failed) {
-    const target = formatCardFailureTarget(f.prompt);
-    if (isOnlyTooRecentDismissError(f.result)) {
+  for (const { prompt, result } of outcomes) {
+    if (result.ok) {
+      succeededCount++;
+      const status: DismissDeliveryStatus =
+        result.deliveryStatus in tally ? result.deliveryStatus : 'failed';
+      tally[status]++;
+      if (status !== 'none') {
+        newlyDismissedCount++;
+        if (prompt.askerAgentName) newlyDismissedAskers.add(prompt.askerAgentName);
+      }
+      continue;
+    }
+    failedCount++;
+    const target = formatCardFailureTarget(prompt);
+    if (isOnlyTooRecentDismissError(result)) {
       tooRecentTargets.push(target);
-    } else if (f.result.code === 'dismiss_changed') {
+    } else if (result.code === 'dismiss_changed') {
       changedTargets.push(target);
     } else {
-      errorItems.push(`${target}: ${f.result.message || 'failed'}`);
+      errorItems.push(`${target}: ${result.message || 'failed'}`);
     }
   }
 
-  const failureParts: string[] = [];
-  if (changedTargets.length > 0) {
-    failureParts.push(`${changedTargets.length} had changed (${formatCappedList(changedTargets)})`);
-  }
-  if (tooRecentTargets.length > 0) {
-    failureParts.push(
-      `${tooRecentTargets.length} too recent (${formatCappedList(tooRecentTargets)})`
-    );
-  }
-  if (errorItems.length > 0) {
-    failureParts.push(`${errorItems.length} failed (${formatCappedList(errorItems)})`);
-  }
-  const failureClause = failureParts.join('; ');
+  const failureClause = [
+    changedTargets.length > 0 &&
+      `${changedTargets.length} had changed (${formatCappedList(changedTargets)})`,
+    tooRecentTargets.length > 0 &&
+      `${tooRecentTargets.length} too recent (${formatCappedList(tooRecentTargets)})`,
+    errorItems.length > 0 && `${errorItems.length} failed (${formatCappedList(errorItems)})`,
+  ]
+    .filter(Boolean)
+    .join('; ');
 
-  const newlyDismissed = succeeded.filter((o) => o.result.deliveryStatus !== 'none');
-  if (succeeded.length > 0 && newlyDismissed.length === 0) {
-    if (failed.length === 0) {
-      return {
-        message: `${succeeded.length} cards were already dismissed.`,
-        variant: 'neutral',
-      };
-    }
-    return {
-      message: `${succeeded.length} of ${total} cards already dismissed; ${failureClause}.`,
-      variant: 'warning',
-    };
+  if (succeededCount > 0 && newlyDismissedCount === 0) {
+    return failedCount === 0
+      ? { message: `${succeededCount} cards were already dismissed.`, variant: 'neutral' }
+      : {
+          message: `${succeededCount} of ${total} cards already dismissed; ${failureClause}.`,
+          variant: 'warning',
+        };
   }
 
-  let deliveredCount = 0;
-  let heldCount = 0;
-  let goneCount = 0;
-  let unreachableCount = 0;
-  let unconfirmedCount = 0;
-  for (const o of newlyDismissed) {
-    switch (o.result.deliveryStatus) {
-      case 'delivered':
-        deliveredCount++;
-        break;
-      case 'held':
-        heldCount++;
-        break;
-      case 'gone':
-        goneCount++;
-        break;
-      case 'unreachable':
-        unreachableCount++;
-        break;
-      case 'failed':
-      default:
-        unconfirmedCount++;
-        break;
-    }
-  }
-
-  const cardWord = total === 1 ? 'card' : 'cards';
   const lead =
-    failed.length === 0
-      ? `Dismissed ${succeeded.length} ${succeeded.length === 1 ? 'card' : 'cards'}.`
-      : `Dismissed ${succeeded.length} of ${total} ${cardWord}; ${failureClause}.`;
+    failedCount === 0
+      ? `Dismissed ${succeededCount} ${succeededCount === 1 ? 'card' : 'cards'}.`
+      : `Dismissed ${succeededCount} of ${total} ${total === 1 ? 'card' : 'cards'}; ${failureClause}.`;
 
   let deliveryTail = '';
-  if (newlyDismissed.length > 0) {
-    if (goneCount === newlyDismissed.length) {
-      const askers = new Set(newlyDismissed.map((o) => o.prompt.askerAgentName).filter(Boolean));
-      const onlyAsker = askers.size === 1 ? [...askers][0] : '';
+  if (newlyDismissedCount > 0) {
+    if (tally.gone === newlyDismissedCount) {
+      const onlyAsker = newlyDismissedAskers.size === 1 ? [...newlyDismissedAskers][0] : '';
       deliveryTail = onlyAsker
         ? `${onlyAsker} is gone; nothing was sent.`
         : 'Asking agents are gone; nothing was sent.';
     } else {
-      const notes: string[] = [];
-      if (heldCount > 0) {
-        notes.push(
-          `${heldCount === 1 ? '1 response' : `${heldCount} responses`} will be sent when the agent can receive messages`
-        );
-      }
-      if (goneCount > 0) {
-        notes.push(
-          `${goneCount} asking ${goneCount === 1 ? 'agent is' : 'agents are'} gone (nothing sent)`
-        );
-      }
-      if (unreachableCount > 0) {
-        notes.push(
-          `${unreachableCount} ${unreachableCount === 1 ? 'agent is' : 'agents are'} suspended or stopped; not told`
-        );
-      }
-      if (unconfirmedCount > 0) {
-        notes.push(`could not confirm delivery for ${unconfirmedCount}`);
-      }
+      const notes = [
+        tally.held > 0 &&
+          `${tally.held === 1 ? '1 response' : `${tally.held} responses`} will be sent when the agent can receive messages`,
+        tally.gone > 0 &&
+          `${tally.gone} asking ${tally.gone === 1 ? 'agent is' : 'agents are'} gone (nothing sent)`,
+        tally.unreachable > 0 &&
+          `${tally.unreachable} ${tally.unreachable === 1 ? 'agent is' : 'agents are'} suspended or stopped; not told`,
+        tally.failed > 0 && `could not confirm delivery for ${tally.failed}`,
+      ].filter((s): s is string => Boolean(s));
       if (notes.length > 0) {
         const joined = notes.join('; ');
         deliveryTail = `${joined.charAt(0).toUpperCase()}${joined.slice(1)}.`;
@@ -299,15 +265,14 @@ export function bulkDismissResultToast(outcomes: readonly BulkDismissCardOutcome
   }
 
   const message = deliveryTail ? `${lead} ${deliveryTail}` : lead;
-
-  let variant: ToastVariant = 'success';
-  if (succeeded.length === 0 && errorItems.length > 0) {
-    variant = 'danger';
-  } else if (failed.length > 0 || unreachableCount > 0 || unconfirmedCount > 0) {
-    variant = 'warning';
-  } else if (deliveredCount === 0 && heldCount === 0) {
-    variant = 'neutral';
-  }
+  const variant: ToastVariant =
+    succeededCount === 0 && errorItems.length > 0
+      ? 'danger'
+      : failedCount > 0 || tally.unreachable > 0 || tally.failed > 0
+        ? 'warning'
+        : tally.delivered === 0 && tally.held === 0
+          ? 'neutral'
+          : 'success';
   return { message, variant };
 }
 

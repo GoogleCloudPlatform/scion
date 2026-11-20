@@ -26,19 +26,24 @@
 import { css, html, nothing, type CSSResult, type TemplateResult } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
 
-import type { DecisionAnsweredDetail } from '../../client/decision-prompts.js';
+import {
+  dismissAvailableAtMs,
+  type DecisionAnsweredDetail,
+} from '../../client/decision-prompts.js';
 import type {
   ProjectDecisionCounts,
   ProjectDecisionLogEntryView,
   ProjectDecisionProjectRef,
   ProjectDecisionPromptView,
 } from '../../client/project-decisions.js';
-import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
-import './chat/chat-decisions.js';
+import { formatInstant, formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { dismissDialogStyles } from './chat/chat-decisions.js';
 import {
   MAX_BULK_DISMISS_SELECTION,
+  MAX_DISMISS_REASON_RUNES,
   avatarColor,
   avatarInitial,
+  clampDismissReason,
   conversationDisplayLabel,
   conversationHref,
   formatDecisionLogWhen,
@@ -50,6 +55,8 @@ import {
 } from './decisions-format.js';
 
 export const decisionsPageSharedStyles: CSSResult = css`
+  ${dismissDialogStyles}
+
   :host {
     display: block;
     --chat-fs-sm: 0.875rem;
@@ -548,48 +555,6 @@ export const decisionsPageSharedStyles: CSSResult = css`
     display: inline-flex;
   }
 
-  sl-dialog.dismiss-dialog {
-    --sl-panel-background-color: var(--scion-surface, #ffffff);
-    --sl-panel-border-color: var(--scion-border, #e2e8f0);
-    --sl-color-neutral-700: var(--scion-text, #1e293b);
-  }
-
-  sl-dialog.dismiss-dialog::part(panel) {
-    width: min(32.5rem, calc(100vw - 1.5rem));
-  }
-
-  .dismiss-dialog-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-    font-size: var(--chat-fs-base, 0.9375rem);
-    color: var(--scion-text, #1e293b);
-  }
-
-  .dismiss-dialog-note {
-    font-size: var(--chat-fs-sm, 0.875rem);
-    color: var(--scion-text-muted, #64748b);
-  }
-
-  .dismiss-tell {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: var(--chat-fs-sm, 0.875rem);
-    color: var(--scion-text-secondary, #475569);
-  }
-
-  .dismiss-tell sl-icon {
-    flex-shrink: 0;
-  }
-
-  .dismiss-dialog-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    width: 100%;
-  }
-
   @media (max-width: 640px) {
     .ph h1 {
       font-size: 1.2rem;
@@ -861,6 +826,7 @@ export function renderPromptCard(
     projectBadgeName?: string | undefined;
     askerGone?: boolean | undefined;
     dismissRemainingMin?: number | undefined;
+    dismissAvailableAtMs?: number | undefined;
     selected?: boolean | undefined;
     canSelect?: boolean | undefined;
     selectionCapReached?: boolean | undefined;
@@ -884,6 +850,7 @@ export function renderPromptCard(
       : null;
   const mode = p.answerMode === 'set' || p.answerMode === 'single' ? p.answerMode : undefined;
   const remainingMin = opts.dismissRemainingMin ?? 0;
+  const availMs = opts.dismissAvailableAtMs ?? dismissAvailableAtMs(p.createdAt);
   const isSelected = Boolean(opts.selected);
   const canDismissAnyRow =
     opts.canSelect ?? promptWaitingOnViewerRows(p, opts.currentUserId).length > 0;
@@ -948,6 +915,7 @@ export function renderPromptCard(
           >${avatarInitial(p.askerAgentName)}</span
         >
         <b>${p.askerAgentName}</b>
+        ${opts.askerGone ? html`<span class="muted" data-asker-deleted>(deleted)</span>` : nothing}
         <span>
           in
           ${convHref
@@ -957,6 +925,11 @@ export function renderPromptCard(
         <span class="muted" title=${formatInstantWithZone(p.createdAt)}
           >· ${formatRelative(p.createdAt, { style: 'short' })}</span
         >
+        ${canDismissAnyRow && remainingMin > 0 && availMs > 0
+          ? html`<span class="muted" data-dismiss-available-at
+              >${`· dismiss available at ${formatInstant(new Date(availMs).toISOString(), 'time')}`}</span
+            >`
+          : nothing}
         <span class="right">
           ${permalink
             ? html`<a class="linkish" data-open-in-chat href=${permalink}
@@ -1321,8 +1294,12 @@ export function renderBulkDismissDialog(opts: {
   const dialogLabel = count === 1 ? 'Dismiss 1 card' : `Dismiss ${count} cards`;
   const confirmLabel = count === 1 ? 'Dismiss 1 card' : `Dismiss ${count} cards`;
   const onTextareaInput = (e: Event): void => {
-    const val = (e.target as HTMLElement & { value?: string })?.value ?? '';
-    opts.onReasonInput(val);
+    const raw = (e.target as HTMLElement & { value?: string })?.value ?? '';
+    const clamped = clampDismissReason(raw);
+    if (clamped !== raw && e.target && 'value' in e.target) {
+      (e.target as { value: string }).value = clamped;
+    }
+    opts.onReasonInput(clamped);
   };
 
   let goneCount = 0;
@@ -1390,7 +1367,6 @@ export function renderBulkDismissDialog(opts: {
         <sl-textarea
           size="small"
           rows="2"
-          maxlength="500"
           label="Reason (optional)"
           help-text=${allGone
             ? 'Plain text, up to 500 characters. Shown on each card.'
@@ -1401,7 +1377,18 @@ export function renderBulkDismissDialog(opts: {
           .value=${opts.reasonDraft}
           @sl-input=${onTextareaInput}
           @input=${onTextareaInput}
-        ></sl-textarea>
+        >
+          <span slot="help-text" class="dismiss-reason-help">
+            <span
+              >${allGone
+                ? 'Plain text, up to 500 characters. Shown on each card.'
+                : 'Plain text, up to 500 characters. Sent to live asking agents and shown on each card.'}</span
+            >
+            <span class="dismiss-reason-count" data-bulk-dismiss-reason-count
+              >${[...opts.reasonDraft].length}/${MAX_DISMISS_REASON_RUNES}</span
+            >
+          </span>
+        </sl-textarea>
         ${allGone
           ? html`<div class="dismiss-tell" data-bulk-dismiss-tell="gone">
               <sl-icon name="person-x" aria-hidden="true"></sl-icon>

@@ -550,6 +550,7 @@ export class ScionPageProfileDecisions extends LitElement {
               currentUserId: this.ctrl.currentUserId,
               askerGone: this.ctrl.isPromptAskerGone(p),
               dismissRemainingMin: this.ctrl.promptDismissRemainingMinutes(p),
+              dismissAvailableAtMs: this.ctrl.promptDismissAvailableAtMs(p),
               selected: this.ctrl.isPromptSelected(p.promptMessageId),
               canSelect: this.ctrl.promptCanDismiss(p),
               selectionCapReached: this.ctrl.isPromptSelectionCapReached(p.promptMessageId),

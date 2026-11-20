@@ -452,14 +452,16 @@ describe('<scion-chat-decisions> dismissed state (ptone/scion#8213)', () => {
     await el.updateComplete;
     expect(confirmBtn.hasAttribute('disabled')).toBe(false);
 
-    // Reason counter & 500-rune limit clamping
+    // Reason counter & 500-rune limit clamping (including multi-code-unit emoji)
     const reasonField = dialog.querySelector<HTMLElement & { value: string }>(
       '[data-dismiss-reason]'
     )!;
+    expect(reasonField.hasAttribute('maxlength')).toBe(false);
     expect(dialog.querySelector('[data-dismiss-reason-count]')?.textContent).toBe('0/500');
-    reasonField.value = 'x'.repeat(520);
+    reasonField.value = '🚀'.repeat(505);
     reasonField.dispatchEvent(new Event('sl-input', { bubbles: true, composed: true }));
     await el.updateComplete;
+    expect([...reasonField.value]).toHaveLength(500);
     expect(dialog.querySelector('[data-dismiss-reason-count]')?.textContent).toBe('500/500');
 
     reasonField.value = '  Stale: v0.9 shipped.  ';

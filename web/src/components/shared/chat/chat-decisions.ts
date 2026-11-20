@@ -51,7 +51,12 @@ import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { showToast } from '../../../utils/toast.js';
 import { copyWithToast } from '../../../utils/clipboard.js';
-import { dismissResultToast } from '../decisions-format.js';
+import {
+  MAX_DISMISS_REASON_RUNES,
+  clampDismissReason,
+  dismissResultToast,
+  isOnlyTooRecentDismissError,
+} from '../decisions-format.js';
 import {
   ANSWERABLE,
   actionableReason,
@@ -79,6 +84,63 @@ import type {
 import type { DecisionAnswerMode, ChoiceOption, DecisionView } from '../../../shared/types.js';
 
 let hintSeq = 0;
+
+export const dismissDialogStyles = css`
+  sl-dialog.dismiss-dialog {
+    --sl-panel-background-color: var(--scion-surface, #fff);
+    --sl-panel-border-color: var(--scion-border, #e2e8f0);
+    --sl-color-neutral-700: var(--scion-text, #1e293b);
+  }
+
+  sl-dialog.dismiss-dialog::part(panel) {
+    width: min(32.5rem, calc(100vw - 1.5rem));
+  }
+
+  .dismiss-dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    font-size: var(--chat-fs-base, 0.9375rem);
+    color: var(--scion-text, #1e293b);
+  }
+
+  .dismiss-dialog-note {
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text-muted, #64748b);
+  }
+
+  .dismiss-reason-help {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+
+  .dismiss-reason-count {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    color: var(--scion-text-muted, #64748b);
+  }
+
+  .dismiss-tell {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: var(--chat-fs-sm, 0.875rem);
+    color: var(--scion-text-secondary, #475569);
+  }
+
+  .dismiss-tell sl-icon {
+    flex-shrink: 0;
+  }
+
+  .dismiss-dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    width: 100%;
+  }
+`;
 
 @customElement('scion-chat-decisions')
 export class ScionChatDecisions extends LitElement {
@@ -209,6 +271,8 @@ export class ScionChatDecisions extends LitElement {
   private readonly reasonId = `decision-reason-${hintSeq}`;
 
   static override styles = css`
+    ${dismissDialogStyles}
+
     :host {
       display: block;
       margin-top: 0.5rem;
@@ -230,14 +294,23 @@ export class ScionChatDecisions extends LitElement {
 
     .card-head {
       display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.375rem 0.5rem;
+      flex-wrap: nowrap;
+      align-items: flex-start;
+      gap: 0.375rem;
       padding: 0.5rem 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       background: var(--scion-bg, #f8fafc);
       font-size: var(--chat-fs-sm, 0.875rem);
       color: var(--scion-text-secondary, #475569);
+    }
+
+    .card-head-lead {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.375rem 0.5rem;
+      flex: 1 1 auto;
+      min-width: 0;
     }
 
     .card-head sl-icon {
@@ -699,6 +772,7 @@ export class ScionChatDecisions extends LitElement {
 
     .card-head .menu {
       margin-left: auto;
+      flex-shrink: 0;
       display: inline-flex;
       align-items: center;
     }
@@ -742,16 +816,6 @@ export class ScionChatDecisions extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
-    sl-dialog.dismiss-dialog {
-      --sl-panel-background-color: var(--scion-surface, #fff);
-      --sl-panel-border-color: var(--scion-border, #e2e8f0);
-      --sl-color-neutral-700: var(--scion-text, #1e293b);
-    }
-
-    sl-dialog.dismiss-dialog::part(panel) {
-      width: min(32.5rem, calc(100vw - 1.5rem));
-    }
-
     .dismiss-dialog-title {
       display: inline-flex;
       align-items: center;
@@ -762,19 +826,6 @@ export class ScionChatDecisions extends LitElement {
       color: var(--scion-status-danger, #dc2626);
       font-size: 1.05rem;
       flex-shrink: 0;
-    }
-
-    .dismiss-dialog-body {
-      display: flex;
-      flex-direction: column;
-      gap: 0.65rem;
-      font-size: var(--chat-fs-base, 0.9375rem);
-      color: var(--scion-text, #1e293b);
-    }
-
-    .dismiss-dialog-note {
-      font-size: var(--chat-fs-sm, 0.875rem);
-      color: var(--scion-text-muted, #64748b);
     }
 
     .dismiss-row-list {
@@ -821,38 +872,6 @@ export class ScionChatDecisions extends LitElement {
       font-size: var(--chat-fs-sm, 0.875rem);
       color: var(--scion-text-muted, #64748b);
       margin-top: 0.1rem;
-    }
-
-    .dismiss-reason-help {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 0.5rem;
-    }
-
-    .dismiss-reason-count {
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .dismiss-tell {
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-      font-size: var(--chat-fs-sm, 0.875rem);
-      color: var(--scion-text-secondary, #475569);
-    }
-
-    .dismiss-tell sl-icon {
-      flex-shrink: 0;
-    }
-
-    .dismiss-dialog-footer {
-      display: flex;
-      justify-content: flex-end;
-      gap: 0.5rem;
-      width: 100%;
     }
 
     .row-foot a.jump {
@@ -1397,8 +1416,7 @@ export class ScionChatDecisions extends LitElement {
 
   private readonly onDismissReasonInput = (e: Event): void => {
     const raw = (e.target as HTMLElement & { value?: string })?.value ?? '';
-    const runes = [...raw];
-    const clamped = runes.length > 500 ? runes.slice(0, 500).join('') : raw;
+    const clamped = clampDismissReason(raw);
     if (clamped !== raw && e.target && 'value' in e.target) {
       (e.target as { value: string }).value = clamped;
     }
@@ -1446,12 +1464,7 @@ export class ScionChatDecisions extends LitElement {
         showToast(toast.message, toast.variant);
         return;
       }
-      const onlyTooRecent =
-        res.code === 'dismiss_changed' &&
-        !!res.reasons &&
-        Object.keys(res.reasons).length > 0 &&
-        Object.values(res.reasons).every((r) => r === 'too_recent');
-      if (res.code === 'too_recent' || onlyTooRecent) {
+      if (isOnlyTooRecentDismissError(res)) {
         if (res.availableAt) {
           const parsed = Date.parse(res.availableAt);
           if (Number.isFinite(parsed)) {
@@ -1474,7 +1487,7 @@ export class ScionChatDecisions extends LitElement {
         }
         this.scheduleDismissUnlockTimer();
         showToast(
-          onlyTooRecent
+          res.code === 'dismiss_changed'
             ? 'Decisions must be at least 5 minutes old before they can be dismissed.'
             : res.message,
           'warning'
@@ -1691,7 +1704,6 @@ export class ScionChatDecisions extends LitElement {
           <sl-textarea
             size="small"
             rows="2"
-            maxlength="500"
             label="Reason (optional)"
             help-text=${helpText}
             placeholder="Why it no longer applies"
@@ -1703,7 +1715,9 @@ export class ScionChatDecisions extends LitElement {
           >
             <span slot="help-text" class="dismiss-reason-help">
               <span>${helpText}</span>
-              <span class="dismiss-reason-count" data-dismiss-reason-count>${reasonLen}/500</span>
+              <span class="dismiss-reason-count" data-dismiss-reason-count
+                >${reasonLen}/${MAX_DISMISS_REASON_RUNES}</span
+              >
             </span>
           </sl-textarea>
           ${gone
@@ -1914,12 +1928,14 @@ export class ScionChatDecisions extends LitElement {
         @contextmenu=${this.onCardContextMenu}
       >
         <div class="card-head">
-          <sl-icon name="signpost-split"></sl-icon>
-          <span class="title">Decision</span>
-          ${d.key ? html`<span class="key">${d.key}</span>` : nothing}
-          ${d.version > 1 || d.status === 'replaced' || !!d.replacedBy
-            ? html`<span class="version">v${d.version}</span>`
-            : nothing}
+          <span class="card-head-lead">
+            <sl-icon name="signpost-split"></sl-icon>
+            <span class="title">Decision</span>
+            ${d.key ? html`<span class="key">${d.key}</span>` : nothing}
+            ${d.version > 1 || d.status === 'replaced' || !!d.replacedBy
+              ? html`<span class="version">v${d.version}</span>`
+              : nothing}
+          </span>
           ${this.renderSingleBadge(d)} ${this.renderCardMenu([d])}
         </div>
         ${this.renderRow(d, pendingWithDefault)} ${this.renderAskerGoneNote()}
@@ -2608,10 +2624,12 @@ export class ScionChatDecisions extends LitElement {
         @contextmenu=${this.onCardContextMenu}
       >
         <div class="card-head">
-          <sl-icon name="list-check"></sl-icon>
-          <span class="title">${n} decisions</span>
-          ${wholeDismissed ? html`<span class="tag-wd">Dismissed</span>` : nothing}
-          ${views.map((d) => (d.key ? html`<span class="key">${d.key}</span>` : nothing))}
+          <span class="card-head-lead">
+            <sl-icon name="list-check"></sl-icon>
+            <span class="title">${n} decisions</span>
+            ${wholeDismissed ? html`<span class="tag-wd">Dismissed</span>` : nothing}
+            ${views.map((d) => (d.key ? html`<span class="key">${d.key}</span>` : nothing))}
+          </span>
           ${this.renderCardMenu(views)}
         </div>
         ${this.changedAlert?.length

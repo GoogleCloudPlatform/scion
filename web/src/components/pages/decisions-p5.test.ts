@@ -1048,4 +1048,110 @@ describe('Waiting on you multi-select and bulk dismiss (ptone/scion#8217)', () =
       'nc-x is gone; nothing will be sent.'
     );
   });
+
+  it('renders (deleted) and dismiss available at <time> in Waiting on you headers and clamps 500-rune bulk reasons (ptone/scion#8217)', async () => {
+    const goneAgentId = '44444444-5555-6666-7777-888888888888';
+    const docsAgentId = '55555555-6666-7777-8888-999999999999';
+    const recentCreatedAt = new Date(Date.now() - 2 * 60_000).toISOString();
+    const gonePrompt = makePrompt({
+      promptMessageId: 'm-hdr-gone',
+      askerAgentId: goneAgentId,
+      askerAgentName: 'nc-x',
+      chatKey: 'dm:ncx',
+      conversationLabel: 'DM with nc-x',
+      decisions: [
+        makeDecision({
+          rowId: 'r-hg-1',
+          messageId: 'm-hdr-gone',
+          key: 'migrate',
+          question: 'Run backfill?',
+        }),
+      ],
+    });
+    const recentPrompt = makePrompt({
+      promptMessageId: 'm-hdr-recent',
+      askerAgentId: docsAgentId,
+      askerAgentName: 'docs-bot',
+      chatKey: 'topic-docs',
+      conversationLabel: '#docs',
+      createdAt: recentCreatedAt,
+      decisions: [
+        makeDecision({
+          rowId: 'r-hr-1',
+          messageId: 'm-hdr-recent',
+          key: 'toc',
+          question: 'Split CLI reference?',
+        }),
+      ],
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL): Promise<Response> => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const url = new URL(raw, 'http://localhost');
+        if (url.pathname === '/auth/me') return jsonResponse({ id: 'u-me', name: 'Alice' });
+        if (url.pathname === '/api/v1/users/me/decisions') {
+          return jsonResponse({
+            counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+            prompts: [gonePrompt, recentPrompt],
+            agents: [
+              { id: goneAgentId, name: 'nc-x', hint: '(deleted)', projectId: 'p-1' },
+              { id: docsAgentId, name: 'docs-bot', projectId: 'p-1' },
+            ],
+            answerers: [{ id: 'u-me', name: 'Alice' }],
+            conversations: [{ key: 'topic-docs', label: '#docs', projectId: 'p-1' }],
+            projects: [PROJ_SCION],
+            truncatedProjects: false,
+          });
+        }
+        if (url.pathname === `/api/v1/agents/${goneAgentId}`) {
+          return jsonResponse({ error: { code: 'not_found' } }, 404);
+        }
+        return jsonResponse({}, 404);
+      })
+    );
+
+    window.history.replaceState({}, '', '/profile/decisions');
+    const el = document.createElement('scion-page-profile-decisions') as ScionPageProfileDecisions;
+    el.pageData = {
+      path: '/profile/decisions',
+      user: { id: 'u-me', email: 'alice@example.com', name: 'Alice', role: 'member' },
+    };
+    document.body.appendChild(el);
+    await settle(el, 25);
+
+    const root = el.shadowRoot!;
+    expect(
+      root.querySelector('[data-prompt-card="m-hdr-gone"] [data-asker-deleted]')?.textContent
+    ).toBe('(deleted)');
+    expect(root.querySelector('[data-prompt-card="m-hdr-recent"] [data-asker-deleted]')).toBeNull();
+    expect(
+      root.querySelector('[data-prompt-card="m-hdr-recent"] [data-dismiss-available-at]')
+        ?.textContent
+    ).toMatch(/· dismiss available at\s+\d{2}:\d{2}/);
+    expect(
+      root.querySelector('[data-prompt-card="m-hdr-gone"] [data-dismiss-available-at]')
+    ).toBeNull();
+
+    toggleCheckbox(
+      root.querySelector<HTMLElement & { checked?: boolean }>('[data-select-prompt="m-hdr-gone"]')!,
+      true
+    );
+    await settle(el, 10);
+    root.querySelector<HTMLElement>('[data-selection-dismiss]')!.click();
+    await settle(el, 15);
+
+    const dialog = root.querySelector<HTMLElement>('sl-dialog[data-bulk-dismiss-dialog]')!;
+    const textarea = dialog.querySelector<HTMLElement & { value?: string }>(
+      '[data-bulk-dismiss-reason]'
+    )!;
+    expect(textarea.hasAttribute('maxlength')).toBe(false);
+    textarea.value = '🚀'.repeat(505);
+    textarea.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await settle(el, 5);
+    expect([...(textarea.value ?? '')]).toHaveLength(500);
+    expect(dialog.querySelector('[data-bulk-dismiss-reason-count]')?.textContent).toBe('500/500');
+  });
 });

@@ -83,6 +83,7 @@ import {
   MAX_DECISIONS_PAGE_SIZE,
   SEARCH_DEBOUNCE_MS,
   bulkDismissResultToast,
+  clampDismissReason,
   dateBoundToIso,
   isEditableTarget,
   isOnlyTooRecentDismissError,
@@ -1550,10 +1551,14 @@ export class DecisionsPageController implements ReactiveController {
     void this.bootIfEnabled();
   };
 
+  promptDismissAvailableAtMs = (prompt: ProjectDecisionPromptView): number => {
+    const overrideMs = this.dismissAvailableAtOverrides.get(prompt.promptMessageId) ?? 0;
+    return Math.max(dismissAvailableAtMs(prompt.createdAt), overrideMs);
+  };
+
   promptDismissRemainingMinutes = (prompt: ProjectDecisionPromptView): number => {
     const nowMs = this.clockNow();
-    const overrideMs = this.dismissAvailableAtOverrides.get(prompt.promptMessageId) ?? 0;
-    const availMs = Math.max(dismissAvailableAtMs(prompt.createdAt), overrideMs);
+    const availMs = this.promptDismissAvailableAtMs(prompt);
     if (availMs <= 0 || nowMs >= availMs) return 0;
     return Math.max(1, Math.ceil((availMs - nowMs) / 60000));
   };
@@ -1816,7 +1821,7 @@ export class DecisionsPageController implements ReactiveController {
   };
 
   setBulkDismissReasonDraft = (value: string): void => {
-    this.bulkDismissReasonDraft = value;
+    this.bulkDismissReasonDraft = clampDismissReason(value);
     this.notify();
   };
 
