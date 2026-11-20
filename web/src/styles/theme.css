@@ -327,16 +327,16 @@ html .sl-theme-dark,
   --scion-status-info: var(--scion-primary-400);
 
   --scion-badge-success-bg: rgba(34, 197, 94, 0.2);
-  --scion-badge-success-text: #86efac;
+  --scion-badge-success-text: var(--scion-success-300);
   --scion-badge-warning-bg: rgba(245, 158, 11, 0.2);
-  --scion-badge-warning-text: #fcd34d;
+  --scion-badge-warning-text: var(--scion-warning-300);
   --scion-badge-danger-bg: rgba(239, 68, 68, 0.2);
-  --scion-badge-danger-text: #fca5a5;
+  --scion-badge-danger-text: var(--scion-danger-300);
   --scion-badge-danger-border: rgba(248, 113, 113, 0.4);
   --scion-badge-primary-bg: rgba(59, 130, 246, 0.2);
-  --scion-badge-primary-text: #93c5fd;
+  --scion-badge-primary-text: var(--scion-primary-300);
   --scion-badge-neutral-bg: rgba(100, 116, 139, 0.2);
-  --scion-badge-neutral-text: #cbd5e1;
+  --scion-badge-neutral-text: var(--scion-neutral-300);
 
   --scion-error-bg: rgba(239, 68, 68, 0.15);
   --scion-error-border: rgba(248, 113, 113, 0.4);
@@ -529,16 +529,16 @@ html .sl-theme-dark,
     --scion-status-info: var(--scion-primary-400);
 
     --scion-badge-success-bg: rgba(34, 197, 94, 0.2);
-    --scion-badge-success-text: #86efac;
+    --scion-badge-success-text: var(--scion-success-300);
     --scion-badge-warning-bg: rgba(245, 158, 11, 0.2);
-    --scion-badge-warning-text: #fcd34d;
+    --scion-badge-warning-text: var(--scion-warning-300);
     --scion-badge-danger-bg: rgba(239, 68, 68, 0.2);
-    --scion-badge-danger-text: #fca5a5;
+    --scion-badge-danger-text: var(--scion-danger-300);
     --scion-badge-danger-border: rgba(248, 113, 113, 0.4);
     --scion-badge-primary-bg: rgba(59, 130, 246, 0.2);
-    --scion-badge-primary-text: #93c5fd;
+    --scion-badge-primary-text: var(--scion-primary-300);
     --scion-badge-neutral-bg: rgba(100, 116, 139, 0.2);
-    --scion-badge-neutral-text: #cbd5e1;
+    --scion-badge-neutral-text: var(--scion-neutral-300);
 
     --scion-error-bg: rgba(239, 68, 68, 0.15);
     --scion-error-border: rgba(248, 113, 113, 0.4);

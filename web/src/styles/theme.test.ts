@@ -127,6 +127,11 @@ interface CompoundPart {
   value?: string;
 }
 
+/**
+ * Extend `parseCompoundSelector` when adding new custom-property selector
+ * forms to `theme.css`. Non-token utility rules (e.g. `.scion-focus-ring:focus-visible`)
+ * have no `--*` declarations and are already ignored by `parseThemeRules`.
+ */
 function parseCompoundSelector(sel: string): CompoundPart[] {
   const parts: CompoundPart[] = [];
   let rest = sel;

@@ -133,6 +133,10 @@ async function shot(
 }
 
 for (const theme of ['light', 'dark'] as const) {
+  // Filled primary choices and buttons use --sl-color-neutral-0 on --sl-color-primary-600
+  // (white on #2563eb in light mode; slate-800 #1e293b on inverted #93c5fd in dark mode).
+  const filledFg = theme === 'dark' ? 'rgb(30, 41, 59)' : 'rgb(255, 255, 255)';
+
   test.describe(`decision cards (${theme})`, () => {
     // 2x so the saved screenshots are legible next to the mock renders.
     test.use({ colorScheme: theme, timezoneId: 'UTC', locale: 'en-US', deviceScaleFactor: 2 });
@@ -302,8 +306,8 @@ for (const theme of ['light', 'dark'] as const) {
       );
       const hintId = await submit.getAttribute('aria-describedby');
       await expect(c.locator(`[id="${hintId}"]`)).toHaveText('Choose an answer for 17 first');
-      // A filled (selected) choice has a white label in both themes, as in the mocks.
-      await expect(d234.locator('[data-choice="yes"]')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      // A filled (selected) choice uses --sl-color-neutral-0 for AA contrast in both themes.
+      await expect(d234.locator('[data-choice="yes"]')).toHaveCSS('color', filledFg);
       await shot(page, testInfo, theme, '04b-set-pending-preselect', ['prompt-set']);
     });
 
@@ -629,7 +633,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(yes1).toHaveAttribute('variant', 'primary');
       await expect(yes1).not.toHaveAttribute('aria-disabled', 'true');
       await expect(yes1.locator('sl-icon[name="robot"]')).toHaveCount(1);
-      await expect(yes1.locator('[part="base"]')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(yes1.locator('[part="base"]')).toHaveCSS('color', filledFg);
       await expect(c1.locator('sl-button[data-choice="no"]')).not.toHaveAttribute(
         'aria-disabled',
         'true'
@@ -666,7 +670,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(no1).toHaveAttribute('variant', 'primary');
       await expect(no1).toHaveAttribute('aria-pressed', 'true');
       await expect(no1.locator('sl-icon[name="check-lg"]')).toHaveCount(1);
-      await expect(no1.locator('[part="base"]')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(no1.locator('[part="base"]')).toHaveCSS('color', filledFg);
       await expect(yes1).toHaveAttribute('outline', '');
       await expect(yes1.locator('sl-icon[name="robot"]')).toHaveCount(1);
       await shot(page, testInfo, theme, 'p2-6-single-change-bar', ['prompt-p21']);
@@ -758,7 +762,7 @@ for (const theme of ['light', 'dark'] as const) {
       const d234 = c.getByRole('group', { name: 'Ship v0.9 today?' });
       const yesBtn = d234.getByRole('button', { name: /^Yes/, pressed: true });
       await expect(yesBtn).toBeVisible();
-      await expect(yesBtn).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(yesBtn).toHaveCSS('color', filledFg);
       await expect(yesBtn.locator('sl-icon[name="robot"]')).toHaveCount(1);
       await expect(d234.getByRole('button', { name: /^No/, pressed: false })).toBeVisible();
       await expect(d234.locator('.chip.confirm')).toHaveText('will confirm');
@@ -769,12 +773,12 @@ for (const theme of ['light', 'dark'] as const) {
       const q17 = c.getByRole('group', { name: 'Which approach?' });
       const aBtn = q17.getByRole('button', { name: /^a · Extend input-needed/, pressed: true });
       await expect(aBtn).toBeVisible();
-      await expect(aBtn).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(aBtn).toHaveCSS('color', filledFg);
 
       await expect(c.locator('.counter')).toHaveText('2 of 2 ready · 1 confirm');
       const submit = c.locator('sl-button.submit');
       await expect(submit).not.toHaveAttribute('disabled', '');
-      await expect(submit.locator('[part="base"]')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(submit.locator('[part="base"]')).toHaveCSS('color', filledFg);
       await shot(page, testInfo, theme, 'p2-4-set-mixed-confirm', ['prompt-p24']);
     });
 
@@ -815,7 +819,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(d234.locator('.chip.change')).toHaveText('will change');
       const noBtn = d234.getByRole('button', { name: /^No/, pressed: true });
       await expect(noBtn).toBeVisible();
-      await expect(noBtn).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(noBtn).toHaveCSS('color', filledFg);
       await expect(noBtn.locator('sl-icon[name="check-lg"]')).toHaveCount(1);
       const prevBtn = d234.getByRole('button', { name: /^Yes/, pressed: false });
       await expect(prevBtn).toHaveAttribute('data-look', 'subtle');
@@ -1180,10 +1184,10 @@ for (const theme of ['light', 'dark'] as const) {
         await expect(canaryOpt).toHaveClass(/chosen/);
       }
 
-      // Hovering / sticky-hovering the decided .opt.chosen row keeps white text on primary fill (never white-on-white).
+      // Hovering / sticky-hovering the decided .opt.chosen row keeps neutral-0 text on primary fill.
       await canaryOpt.hover();
-      await expect(canaryOpt.locator('.lbl')).toHaveCSS('color', 'rgb(255, 255, 255)');
-      await expect(canaryOpt.locator('.desc')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(canaryOpt.locator('.lbl')).toHaveCSS('color', filledFg);
+      await expect(canaryOpt.locator('.desc')).toHaveCSS('color', filledFg);
       const bg = await canaryOpt.evaluate((el) => getComputedStyle(el).backgroundColor);
       expect(bg).not.toBe('rgb(248, 250, 252)');
       expect(bg).not.toBe('rgb(255, 255, 255)');
