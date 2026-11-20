@@ -437,27 +437,69 @@ func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request)
 	// List all installations from GitHub
 	ghInstallations, err := client.ListInstallations(ctx)
 	if err != nil {
+		slog.Warn("Failed to list GitHub App installations", "error", upstreamText(err.Error()))
 		writeError(w, http.StatusBadGateway, ErrCodeInternalError,
-			fmt.Sprintf("failed to list installations from GitHub: %v", err), nil)
+			"failed to list installations from GitHub", nil)
 		return
 	}
 
 	var discovered []map[string]interface{}
+	var failedCount int
 	for _, ghInst := range ghInstallations {
-		// Try to list repos for each installation
-		repos, err := client.ListInstallationRepos(ctx, ghInst.ID)
-		if err != nil {
-			slog.Warn("Failed to list repos for installation", "installation_id", ghInst.ID, "error", upstreamText(err.Error()))
-		}
-
-		repoNames := make([]string, len(repos))
-		for i, r := range repos {
-			repoNames[i] = r.FullName
-		}
-
 		status := store.GitHubInstallationStatusActive
 		if ghInst.SuspendedAt != nil {
 			status = store.GitHubInstallationStatusSuspended
+		}
+
+		// Try to list repos for each installation
+		repos, listErr := client.ListInstallationRepos(ctx, ghInst.ID)
+		if listErr != nil {
+			failedCount++
+			slog.Warn("Failed to list repos for installation", "installation_id", ghInst.ID, "error", upstreamText(listErr.Error()))
+
+			// Preserve the last known repository list for existing installations.
+			var preservedRepos []string
+			existing, getErr := s.store.GetGitHubInstallation(ctx, ghInst.ID)
+			if getErr == nil {
+				preservedRepos = existing.Repositories
+				existing.AccountLogin = ghInst.Account.Login
+				existing.AccountType = ghInst.Account.Type
+				existing.Status = status
+				if updateErr := s.store.UpdateGitHubInstallation(ctx, existing); updateErr != nil {
+					slog.Error("Failed to update existing installation metadata", "installation_id", ghInst.ID, "error", updateErr)
+				}
+			} else if errors.Is(getErr, store.ErrNotFound) {
+				installation := &store.GitHubInstallation{
+					InstallationID: ghInst.ID,
+					AccountLogin:   ghInst.Account.Login,
+					AccountType:    ghInst.Account.Type,
+					AppID:          ghInst.AppID,
+					Repositories:   []string{},
+					Status:         status,
+				}
+				if createErr := s.store.CreateGitHubInstallation(ctx, installation); createErr != nil {
+					slog.Error("Failed to create installation", "installation_id", ghInst.ID, "error", createErr)
+				}
+			} else {
+				slog.Error("Failed to load existing installation", "installation_id", ghInst.ID, "error", getErr)
+			}
+
+			if preservedRepos == nil {
+				preservedRepos = []string{}
+			}
+			discovered = append(discovered, map[string]interface{}{
+				"installation_id":  ghInst.ID,
+				"account":          ghInst.Account.Login,
+				"repositories":     preservedRepos,
+				"matched_projects": []string(nil),
+				"error":            "failed to list repositories from GitHub",
+			})
+			continue
+		}
+
+		repoNames := make([]string, len(repos))
+		for i, repo := range repos {
+			repoNames[i] = repo.FullName
 		}
 
 		installation := &store.GitHubInstallation{
@@ -469,13 +511,21 @@ func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request)
 			Status:         status,
 		}
 
-		if err := s.store.CreateGitHubInstallation(ctx, installation); err != nil {
-			// Update existing
-			if existing, getErr := s.store.GetGitHubInstallation(ctx, ghInst.ID); getErr == nil {
-				existing.Repositories = repoNames
-				existing.Status = status
-				_ = s.store.UpdateGitHubInstallation(ctx, existing)
+		existing, getErr := s.store.GetGitHubInstallation(ctx, ghInst.ID)
+		if getErr == nil {
+			existing.AccountLogin = ghInst.Account.Login
+			existing.AccountType = ghInst.Account.Type
+			existing.Repositories = repoNames
+			existing.Status = status
+			if updateErr := s.store.UpdateGitHubInstallation(ctx, existing); updateErr != nil {
+				slog.Error("Failed to update existing installation", "installation_id", ghInst.ID, "error", updateErr)
 			}
+		} else if errors.Is(getErr, store.ErrNotFound) {
+			if createErr := s.store.CreateGitHubInstallation(ctx, installation); createErr != nil {
+				slog.Error("Failed to create installation", "installation_id", ghInst.ID, "error", createErr)
+			}
+		} else {
+			slog.Error("Failed to load existing installation", "installation_id", ghInst.ID, "error", getErr)
 		}
 
 		matchedProjects := s.matchProjectsToInstallation(ctx, installation)
@@ -486,6 +536,17 @@ func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request)
 			"repositories":     repoNames,
 			"matched_projects": matchedProjects,
 		})
+	}
+
+	if failedCount > 0 {
+		writeError(w, http.StatusBadGateway, ErrCodeInternalError,
+			fmt.Sprintf("failed to list repositories for %d of %d GitHub App installation(s)", failedCount, len(ghInstallations)),
+			map[string]interface{}{
+				"installations": discovered,
+				"total":         len(discovered),
+				"failed":        failedCount,
+			})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
