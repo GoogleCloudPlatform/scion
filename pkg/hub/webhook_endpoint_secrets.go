@@ -104,11 +104,19 @@ func (s *Server) unsealWebhookEndpointSecret(encrypted string) (string, error) {
 	return s.webhookSecretCipher().Decrypt(encrypted)
 }
 
-// errWebhookSecretTypeMismatch is returned when a secret row under the
-// webhook_endpoint.* key namespace does not carry SecretTypeInternal
-// (1b1-rev-2 O3). Ingress fails closed (503) rather than using a non-internal
-// secret row for HMAC verification.
-var errWebhookSecretTypeMismatch = errors.New("webhook endpoint secret row is not SecretTypeInternal")
+var (
+	// errWebhookSecretMissing is returned when no secret row exists for the
+	// webhook endpoint signing secret version. Ingress still answers the same
+	// content-free 503 externally, while internal errors and logs distinguish
+	// a missing row from a wrong-type row.
+	errWebhookSecretMissing = errors.New("webhook endpoint secret row not found")
+
+	// errWebhookSecretTypeMismatch is returned when a secret row under the
+	// webhook_endpoint.* key namespace does not carry SecretTypeInternal
+	// (1b1-rev-2 O3). Ingress fails closed (503) rather than using a non-internal
+	// secret row for HMAC verification.
+	errWebhookSecretTypeMismatch = errors.New("webhook endpoint secret row is not SecretTypeInternal")
+)
 
 // loadWebhookEndpointSecret loads and unseals the hub-scoped SecretTypeInternal
 // signing secret row for (projectID, endpointID, version) in a single GetSecret
@@ -120,14 +128,16 @@ func (s *Server) loadWebhookEndpointSecret(ctx context.Context, projectID, endpo
 	key := store.WebhookEndpointSecretKey(projectID, endpointID, version)
 	meta, err := s.store.GetSecret(ctx, key, store.ScopeHub, s.HubID())
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", fmt.Errorf("%w: %w", errWebhookSecretMissing, err)
+		}
 		return "", err
 	}
-	if meta == nil || meta.SecretType != store.SecretTypeInternal {
-		gotType := ""
-		if meta != nil {
-			gotType = meta.SecretType
-		}
-		return "", fmt.Errorf("%w: got %q", errWebhookSecretTypeMismatch, gotType)
+	if meta == nil {
+		return "", errWebhookSecretMissing
+	}
+	if meta.SecretType != store.SecretTypeInternal {
+		return "", fmt.Errorf("%w: got %q", errWebhookSecretTypeMismatch, meta.SecretType)
 	}
 	if meta.EncryptedValue == "" {
 		return "", errors.New("webhook endpoint secret row has empty value")

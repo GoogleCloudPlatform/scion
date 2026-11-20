@@ -113,11 +113,32 @@ func NewEndpointCache(cfg EndpointCacheConfig) *EndpointCache {
 	return c
 }
 
+// ErrLookupRateLimited is returned by LookupEndpointGuarded when endpointID
+// misses both the positive and negative caches and its beforeDBLookup gate
+// declines the database lookup.
+var ErrLookupRateLimited = errors.New("webhook endpoint lookup rate limited")
+
 // LookupEndpoint resolves endpointID from the cache or ts.GetWebhookEndpoint.
 // Unknown IDs (store.ErrNotFound) are cached in the bounded negative cache and
 // returned as (nil, store.ErrNotFound). Other store errors are returned without
 // negative-caching.
 func (c *EndpointCache) LookupEndpoint(ctx context.Context, ts store.TriggerStore, endpointID string) (*store.WebhookEndpoint, error) {
+	ep, _, err := c.LookupEndpointGuarded(ctx, ts, endpointID, nil)
+	return ep, err
+}
+
+// LookupEndpointGuarded resolves endpointID from the positive or negative cache
+// first. When endpointID misses both caches, it invokes beforeDBLookup (if
+// non-nil) before calling ts.GetWebhookEndpoint; if beforeDBLookup returns
+// false, no store lookup is performed and ErrLookupRateLimited is returned.
+// cacheMiss is true whenever the lookup missed both caches (so beforeDBLookup
+// ran), allowing callers to avoid double-charging on a 404 or disabled outcome.
+func (c *EndpointCache) LookupEndpointGuarded(
+	ctx context.Context,
+	ts store.TriggerStore,
+	endpointID string,
+	beforeDBLookup func() bool,
+) (ep *store.WebhookEndpoint, cacheMiss bool, err error) {
 	now := c.now()
 
 	c.mu.Lock()
@@ -125,33 +146,37 @@ func (c *EndpointCache) LookupEndpoint(ctx context.Context, ts store.TriggerStor
 		if now.Before(exp) {
 			c.unknown.recordScan(0)
 			c.mu.Unlock()
-			return nil, store.ErrNotFound
+			return nil, false, store.ErrNotFound
 		}
 		c.unknown.delete(endpointID)
 	}
 	if entry, ok := c.endpoints.get(endpointID); ok {
 		if now.Before(entry.expiresAt) {
 			c.endpoints.recordScan(0)
-			ep := entry.ep
+			epCopy := entry.ep
 			c.mu.Unlock()
-			return &ep, nil
+			return &epCopy, false, nil
 		}
 		c.endpoints.delete(endpointID)
 	}
 	c.mu.Unlock()
 
-	ep, err := ts.GetWebhookEndpoint(ctx, endpointID)
+	if beforeDBLookup != nil && !beforeDBLookup() {
+		return nil, true, ErrLookupRateLimited
+	}
+
+	ep, err = ts.GetWebhookEndpoint(ctx, endpointID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			c.putUnknown(endpointID, c.now())
-			return nil, store.ErrNotFound
+			return nil, true, store.ErrNotFound
 		}
-		return nil, err
+		return nil, true, err
 	}
 
 	c.putEndpoint(*ep, c.now())
 	cp := *ep
-	return &cp, nil
+	return &cp, true, nil
 }
 
 func (c *EndpointCache) putUnknown(endpointID string, now time.Time) {

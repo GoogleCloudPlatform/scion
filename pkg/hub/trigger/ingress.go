@@ -378,7 +378,16 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	now := h.now().UTC()
 
 	// Step 3: per-replica endpoint lookup + split unverified buckets (R2).
-	ep, err := h.cache.LookupEndpoint(ctx, h.store, endpointID)
+	// On a miss of both the positive and negative caches, charge one hub-wide
+	// rejection token before querying the database so unknown-ID lookups have
+	// a hub-wide bound (SEC-1). Do not charge a second time if that lookup
+	// returns 404 or a disabled endpoint.
+	ep, chargedRejection, err := h.cache.LookupEndpointGuarded(ctx, h.store, endpointID, h.limiter.AllowRejection)
+	if errors.Is(err, ErrLookupRateLimited) {
+		h.rejectedRateLimit.Add(1)
+		writeRateLimited(w, "1", "rate limit exceeded")
+		return
+	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		h.failedStore.Add(1)
 		h.logger.Error("Webhook endpoint lookup failed", "endpoint_id", endpointID, "error", err)
@@ -386,8 +395,9 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(err, store.ErrNotFound) || ep == nil || ep.Status != store.WebhookEndpointStatusActive {
-		// Unknown or disabled endpoint ID charges ONLY the hub-wide rejection bucket.
-		if !h.limiter.AllowRejection() {
+		// Unknown (negative-cached) or disabled endpoint ID charges ONLY the
+		// hub-wide rejection bucket (already charged above on a cache miss).
+		if !chargedRejection && !h.limiter.AllowRejection() {
 			h.rejectedRateLimit.Add(1)
 			writeRateLimited(w, "1", "rate limit exceeded")
 			return

@@ -15,6 +15,7 @@
 package trigger
 
 import (
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -24,6 +25,8 @@ import (
 const (
 	PerIPRatePerSecond              = 20.0
 	PerIPBurst                      = 100
+	PerIPOverflowRatePerSecond      = 500.0
+	PerIPOverflowBurst              = 1000
 	RejectionRatePerSecond          = 500.0
 	RejectionBurst                  = 2000
 	PerEndpointRatePerSecond        = 10.0
@@ -103,29 +106,41 @@ func (b *singleTokenBucket) allow(now time.Time) bool {
 }
 
 type keyedBucketSet struct {
-	mu               sync.Mutex
-	buckets          *boundedTable[string, *tokenBucket]
-	rate             float64
-	burst            int
-	refillPeriod     time.Duration
-	maxEntries       int
-	maxAge           time.Duration
-	failOpenWhenFull bool
+	mu           sync.Mutex
+	buckets      *boundedTable[string, *tokenBucket]
+	rate         float64
+	burst        int
+	refillPeriod time.Duration
+	maxEntries   int
+	maxAge       time.Duration
+	overflow     *singleTokenBucket
 }
 
-func newKeyedBucketSet(rate float64, burst, maxEntries int, maxAge time.Duration, failOpenWhenFull bool, onScan func(int)) *keyedBucketSet {
-	var refillPeriod time.Duration
-	if rate > 0 && burst > 0 {
-		refillPeriod = time.Duration(float64(time.Second) * float64(burst) / rate)
+// computeRefillPeriod computes burst/rate as a time.Duration, clamping against
+// int64 overflow for extremely small rates so refillPeriod never wraps negative.
+func computeRefillPeriod(rate float64, burst int) time.Duration {
+	if rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) || burst <= 0 {
+		return 0
 	}
+	ns := float64(time.Second) * float64(burst) / rate
+	if math.IsNaN(ns) || math.IsInf(ns, 0) || ns >= float64(math.MaxInt64) {
+		return time.Duration(math.MaxInt64)
+	}
+	if ns < 0 {
+		return 0
+	}
+	return time.Duration(ns)
+}
+
+func newKeyedBucketSet(rate float64, burst, maxEntries int, maxAge time.Duration, overflow *singleTokenBucket, onScan func(int)) *keyedBucketSet {
 	return &keyedBucketSet{
-		buckets:          newBoundedTable[string, *tokenBucket](maxEntries, onScan, nil),
-		rate:             rate,
-		burst:            burst,
-		refillPeriod:     refillPeriod,
-		maxEntries:       maxEntries,
-		maxAge:           maxAge,
-		failOpenWhenFull: failOpenWhenFull,
+		buckets:      newBoundedTable[string, *tokenBucket](maxEntries, onScan, nil),
+		rate:         rate,
+		burst:        burst,
+		refillPeriod: computeRefillPeriod(rate, burst),
+		maxEntries:   maxEntries,
+		maxAge:       maxAge,
+		overflow:     overflow,
 	}
 }
 
@@ -150,7 +165,10 @@ func (s *keyedBucketSet) allow(key string, now time.Time) bool {
 			return cand.lastCheck.Before(cutoff) || s.isRefilled(cand, now)
 		})
 		if !inserted {
-			return s.failOpenWhenFull
+			if s.overflow != nil {
+				return s.overflow.allow(now)
+			}
+			return false
 		}
 		return true
 	}
@@ -194,6 +212,8 @@ func (s *keyedBucketSet) len() int {
 type LimiterConfig struct {
 	PerIPRate               float64
 	PerIPBurst              int
+	PerIPOverflowRate       float64
+	PerIPOverflowBurst      int
 	RejectionRate           float64
 	RejectionBurst          int
 	PerEndpointRate         float64
@@ -231,7 +251,7 @@ type IngressLimiter struct {
 // non-zero overrides in cfg).
 func NewIngressLimiter(cfg LimiterConfig) *IngressLimiter {
 	valFloat := func(v, def float64) float64 {
-		if v > 0 {
+		if v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) {
 			return v
 		}
 		return def
@@ -252,11 +272,16 @@ func NewIngressLimiter(cfg LimiterConfig) *IngressLimiter {
 		nowFn = time.Now
 	}
 
+	perIPOverflow := newSingleTokenBucket(
+		valFloat(cfg.PerIPOverflowRate, PerIPOverflowRatePerSecond),
+		valInt(cfg.PerIPOverflowBurst, PerIPOverflowBurst),
+	)
+
 	return &IngressLimiter{
-		perIP:              newKeyedBucketSet(valFloat(cfg.PerIPRate, PerIPRatePerSecond), valInt(cfg.PerIPBurst, PerIPBurst), maxEntries, maxAge, true, cfg.OnEvictScan),
+		perIP:              newKeyedBucketSet(valFloat(cfg.PerIPRate, PerIPRatePerSecond), valInt(cfg.PerIPBurst, PerIPBurst), maxEntries, maxAge, perIPOverflow, cfg.OnEvictScan),
 		rejection:          newSingleTokenBucket(valFloat(cfg.RejectionRate, RejectionRatePerSecond), valInt(cfg.RejectionBurst, RejectionBurst)),
-		perEndpoint:        newKeyedBucketSet(valFloat(cfg.PerEndpointRate, PerEndpointRatePerSecond), valInt(cfg.PerEndpointBurst, PerEndpointBurst), maxEntries, maxAge, false, cfg.OnEvictScan),
-		perProjectVerified: newKeyedBucketSet(valFloat(cfg.PerProjectVerifiedRate, PerProjectVerifiedRatePerSecond), valInt(cfg.PerProjectVerifiedBurst, PerProjectVerifiedBurst), maxEntries, maxAge, false, cfg.OnEvictScan),
+		perEndpoint:        newKeyedBucketSet(valFloat(cfg.PerEndpointRate, PerEndpointRatePerSecond), valInt(cfg.PerEndpointBurst, PerEndpointBurst), maxEntries, maxAge, nil, cfg.OnEvictScan),
+		perProjectVerified: newKeyedBucketSet(valFloat(cfg.PerProjectVerifiedRate, PerProjectVerifiedRatePerSecond), valInt(cfg.PerProjectVerifiedBurst, PerProjectVerifiedBurst), maxEntries, maxAge, nil, cfg.OnEvictScan),
 		hubVerified:        newSingleTokenBucket(valFloat(cfg.HubVerifiedRate, HubVerifiedRatePerSecond), valInt(cfg.HubVerifiedBurst, HubVerifiedBurst)),
 		now:                nowFn,
 	}
@@ -264,8 +289,9 @@ func NewIngressLimiter(cfg LimiterConfig) *IngressLimiter {
 
 // AllowClientIP charges the per-client-IP bucket (keyed via ClientRateKey).
 // When the bounded per-IP table is full even after evicting refilled buckets,
-// the per-IP tier fails open so an IPv6 /48 subnet spray cannot lock out
-// legitimate new senders hub-wide; the rejection, per-endpoint, verified, and
+// new keys are routed through a shared overflow bucket (500/s burst 1000)
+// rather than failing closed (which would lock out new senders hub-wide) or
+// passing unlimited (SEC-2); the rejection, per-endpoint, verified, and
 // pending-cap tiers remain enforced downstream.
 func (l *IngressLimiter) AllowClientIP(clientIP string) bool {
 	return l.perIP.allow(ClientRateKey(clientIP), l.now())

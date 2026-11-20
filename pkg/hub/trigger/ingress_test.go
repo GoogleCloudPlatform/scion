@@ -597,13 +597,19 @@ func TestBoundedTables_ConstantWorkUnderFullTableFlood(t *testing.T) {
 			},
 		})
 		// Instantaneous 50,000-key flood at elapsed == 0 (0 buckets refilled -> worst-case probe).
+		// After the table fills (LimiterMaxEntries), overflow keys are bounded by the shared
+		// overflow bucket (PerIPOverflowBurst) rather than passing unlimited (SEC-2).
+		allowed := 0
 		for i := range totalKeys {
 			ip := fmt.Sprintf("2001:db8:flood:%04x::1", i)
 			if i >= 65536 {
 				ip = fmt.Sprintf("2001:db8:flood2:%04x::1", i-65536)
 			}
-			require.True(t, lim.AllowClientIP(ip))
+			if lim.AllowClientIP(ip) {
+				allowed++
+			}
 		}
+		assert.Equal(t, trigger.LimiterMaxEntries+trigger.PerIPOverflowBurst, allowed)
 		assert.Equal(t, trigger.LimiterMaxEntries, lim.PerIPLen())
 		assert.Equal(t, totalKeys-trigger.LimiterMaxEntries, evictCalls)
 		assert.LessOrEqual(t, maxSteps, 8, "per-IP full-table probe must do O(1) bounded work per request")
@@ -1039,4 +1045,169 @@ func TestIngress_NoBackgroundCleanupGoroutinesOrTickersOnBoundedTables(t *testin
 	cancel()
 
 	assert.Zero(t, bgTableTouches.Load(), "background loop must never scan or touch any bounded table")
+}
+
+func TestIngressLimiter_PerIPOverflowBucketBoundsFullTable(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+		PerIPRate:          0.001,
+		PerIPBurst:         2,
+		PerIPOverflowRate:  2, // 2 req/s refill on the shared overflow bucket
+		PerIPOverflowBurst: 3, // at most 3 un-tracked keys allowed immediately
+		MaxEntries:         4,
+		Now:                func() time.Time { return now },
+	})
+
+	// Fill all 4 per-IP slots so none are refilled.
+	for i := range 4 {
+		require.True(t, lim.AllowClientIP(fmt.Sprintf("2001:db8:cafe:%04x::1", i)))
+	}
+	assert.Equal(t, 4, lim.PerIPLen())
+
+	// New keys outside the full table are admitted through the shared overflow
+	// bucket (not locked out fail-closed), up to PerIPOverflowBurst = 3, then
+	// rate-limited rather than passing unlimited (SEC-2).
+	for i := range 3 {
+		assert.True(t, lim.AllowClientIP(fmt.Sprintf("2001:db8:dead:%04x::1", i)), "overflow request %d must be allowed", i)
+	}
+	assert.False(t, lim.AllowClientIP("2001:db8:dead:9999::1"), "4th overflow request must be bounded by the shared overflow bucket")
+	assert.Equal(t, 4, lim.PerIPLen(), "table size must stay bounded at MaxEntries")
+
+	// Tracked key still enforces its own per-IP burst independently of the overflow bucket.
+	assert.True(t, lim.AllowClientIP("2001:db8:cafe:0000::2"))
+	assert.False(t, lim.AllowClientIP("2001:db8:cafe:0000::3"))
+
+	// Advancing clock by 500ms refills 1 overflow token (2/s * 0.5s = 1).
+	now = now.Add(500 * time.Millisecond)
+	assert.True(t, lim.AllowClientIP("203.0.113.42"))
+	assert.False(t, lim.AllowClientIP("203.0.113.43"))
+}
+
+type countingIngressStore struct {
+	*stubCacheStore
+	getCalls atomic.Int64
+}
+
+func (s *countingIngressStore) GetWebhookEndpoint(ctx context.Context, id string) (*store.WebhookEndpoint, error) {
+	s.getCalls.Add(1)
+	return s.stubCacheStore.GetWebhookEndpoint(ctx, id)
+}
+
+func (s *countingIngressStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return errors.New("unexpected WithTx call")
+}
+
+func TestIngress_CacheMissChargesRejectionBeforeDBLookup(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	cachedActiveID := uuid.NewString()
+	cachedDisabledID := uuid.NewString()
+	coldActiveID := uuid.NewString()
+	unknownRepeatedID := uuid.NewString()
+
+	backing := &countingIngressStore{
+		stubCacheStore: &stubCacheStore{
+			endpoints: map[string]*store.WebhookEndpoint{
+				cachedActiveID: {
+					ID:            cachedActiveID,
+					ProjectID:     "proj-1",
+					SecretVersion: 1,
+					SignatureMode: store.WebhookSignatureModeScionV1,
+					Status:        store.WebhookEndpointStatusActive,
+				},
+				cachedDisabledID: {
+					ID:            cachedDisabledID,
+					ProjectID:     "proj-1",
+					SecretVersion: 1,
+					SignatureMode: store.WebhookSignatureModeScionV1,
+					Status:        store.WebhookEndpointStatusDisabled,
+				},
+				coldActiveID: {
+					ID:            coldActiveID,
+					ProjectID:     "proj-1",
+					SecretVersion: 1,
+					SignatureMode: store.WebhookSignatureModeScionV1,
+					Status:        store.WebhookEndpointStatusActive,
+				},
+			},
+		},
+	}
+
+	cache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
+		Now: func() time.Time { return now },
+	})
+	// Pre-warm cachedActiveID and cachedDisabledID.
+	_, err := cache.LookupEndpoint(context.Background(), backing, cachedActiveID)
+	require.NoError(t, err)
+	_, err = cache.LookupEndpoint(context.Background(), backing, cachedDisabledID)
+	require.NoError(t, err)
+	backing.getCalls.Store(0)
+
+	lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+		PerIPRate:        100,
+		PerIPBurst:       100,
+		RejectionRate:    0.001, // effectively no refill
+		RejectionBurst:   3,
+		PerEndpointRate:  100,
+		PerEndpointBurst: 100,
+		Now:              func() time.Time { return now },
+	})
+
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      backing,
+		QueueStore: &flushNotifyStore{},
+		Queue:      &fakeEnqueueQueue{},
+		LoadSecret: func(_ context.Context, _, _ string, _ int) (string, error) {
+			return "test-secret", nil
+		},
+		Enabled: func() bool { return true },
+		Limiter: lim,
+		Cache:   cache,
+		Logger:  slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), &slog.HandlerOptions{Level: slog.LevelError})),
+		Now:     func() time.Time { return now },
+	})
+
+	postHook := func(id string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+id, bytes.NewReader([]byte(`{"ok":true}`)))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "198.51.100.10:12345"
+		rec := httptest.NewRecorder()
+		ing.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Token 1 of 3: cold unknown ID misses both caches -> charges 1 token BEFORE DB lookup,
+	// hits DB once, caches in negative cache, returns 404 WITHOUT charging a second token.
+	rec := postHook(unknownRepeatedID)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, int64(1), backing.getCalls.Load())
+
+	// Token 2 of 3: same unknown ID hits negative cache -> 0 DB lookups, charges 1 token, returns 404.
+	rec = postHook(unknownRepeatedID)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, int64(1), backing.getCalls.Load(), "negative cache hit must not query DB")
+
+	// Token 3 of 3: cold active ID misses both caches -> charges 1 token BEFORE DB lookup,
+	// hits DB once, caches active endpoint, proceeds to HMAC check (401 since unsigned).
+	rec = postHook(coldActiveID)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, int64(2), backing.getCalls.Load())
+
+	// Rejection bucket is now EMPTY (0 tokens left).
+	// A brand-new unknown ID MUST return 429 WITHOUT calling GetWebhookEndpoint (SEC-1).
+	rec = postHook(uuid.NewString())
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, int64(2), backing.getCalls.Load(), "unknown ID when rejection bucket is empty must not query DB")
+
+	// A cached disabled endpoint also charges the rejection bucket and gets 429 without querying DB.
+	rec = postHook(cachedDisabledID)
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	assert.Equal(t, int64(2), backing.getCalls.Load())
+
+	// Cached active endpoints (both pre-warmed and newly-cached coldActiveID) are completely
+	// unaffected by rejection-bucket exhaustion and never query DB.
+	rec = postHook(cachedActiveID)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	rec = postHook(coldActiveID)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, int64(2), backing.getCalls.Load())
 }
