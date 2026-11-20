@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
@@ -585,9 +586,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// The on-disk harness-config's model_aliases, for resolving a size alias
 	// in the effective model (resolveEffectiveModel).
 	var hcModelAliases map[string]string
-	// The on-disk harness-config bundle env layer, captured for hook-env
-	// provenance.
+	// The on-disk harness-config bundle env and env_template layers, captured
+	// for hook-env provenance and SCION_* policy enforcement.
 	var hcBundleEnv map[string]string
+	var hcEnvTemplate map[string]string
+	var hcEnvWarnings []string
+	var hcDirUnresolved bool
 	if harnessConfigName != "" {
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
 			// Its volumes are applied below on every start.
@@ -597,7 +601,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				}
 			}
 			hcModelAliases = hcDir.Config.ModelAliases
-			hcBundleEnv = hcDir.Config.Env
+			var bundleWarns, tplWarns []string
+			hcBundleEnv, bundleWarns = sanitizeHarnessConfigEnv(hcDir.Config.Env, "bundle", true)
+			hcEnvTemplate, tplWarns = sanitizeHarnessConfigEnv(hcDir.Config.EnvTemplate, "env_template", false)
+			hcEnvWarnings = append(hcEnvWarnings, bundleWarns...)
+			hcEnvWarnings = append(hcEnvWarnings, tplWarns...)
 			if hcDir.Config.Image != "" {
 				fileImage = hcDir.Config.Image
 				util.Debugf("image resolution: on-disk harness-config image=%s path=%s", fileImage, hcDir.Path)
@@ -612,6 +620,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 		} else {
 			util.Debugf("image resolution: on-disk harness-config %q not found: %v", harnessConfigName, err)
+			hcDirUnresolved = true
 		}
 	}
 
@@ -1343,8 +1352,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// Inject settings-declared env into opts.Env and build the auth overlay.
 	// Extracted so the injection-then-overlay sequence is testable without
-	// standing up a full agent; see resolveAuthEnvOverlay.
-	authEnvOverlay, droppedBrokerEnvVars := resolveAuthEnvOverlay(&opts, settings, profileName, harnessConfigName)
+	// standing up a full agent; see resolveAuthEnvOverlayWithPolicy.
+	authEnvOverlay, droppedBrokerEnvVars, settingsHCEnv, settingsHCWarnings := resolveAuthEnvOverlayWithPolicy(&opts, settings, profileName, harnessConfigName)
+	warnings = append(warnings, hcEnvWarnings...)
+	warnings = append(warnings, settingsHCWarnings...)
 
 	// Agents created in no-auth mode persist auth_selectedType "none". The
 	// start, restart, resume and wake paths may reach here without NoAuth
@@ -1902,7 +1913,19 @@ authDone:
 	if opts.InlineConfig != nil {
 		inlineEnv = opts.InlineConfig.Env
 	}
-	hookWithheldEnv := computeHookWithheldEnv(hcBundleEnv, agentEnv, callerEnv, inlineEnv)
+	if hcDirUnresolved && finalScionCfg != nil && len(finalScionCfg.Env) > 0 {
+		warnings = append(warnings, fmt.Sprintf("Warning: harness-config %q could not be resolved at start; persisted env provenance cannot be verified.", harnessConfigName))
+	}
+	hookWithheldEnv := computeHookWithheldEnv(hookWithheldInput{
+		bundleEnv:       hcBundleEnv,
+		envTemplateEnv:  hcEnvTemplate,
+		settingsHCEnv:   settingsHCEnv,
+		agentEnv:        agentEnv,
+		callerEnv:       callerEnv,
+		inlineEnv:       inlineEnv,
+		resolvedAuth:    resolvedAuth,
+		resolvedSecrets: opts.ResolvedSecrets,
+	})
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
 	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
 	warnings = append(warnings, hubOnlyEnvWarnings...)
@@ -4185,9 +4208,15 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 	for k, v := range extraEnv {
 		combined[k] = v
 	}
-	// Lowest tier: fill only what no layer above set.
+	// Lowest tier: fill only what no layer above set. When k has a
+	// harness-publishable hint equivalent (e.g. SCION_AUTO_EXPOSE_PORTS ->
+	// HARNESS_HINT_AUTO_EXPOSE_PORTS) that is already set, skip the lower-tier
+	// hub default so it does not shadow the harness hint in container readers.
 	for k, v := range defaultEnv {
 		if brokerMode && k == "SCION_AUTH_TOKEN" {
+			continue
+		}
+		if hint, ok := envpolicy.LegacyHarnessHint(k); ok && combined[hint] != "" {
 			continue
 		}
 		if combined[k] == "" {
@@ -4311,6 +4340,15 @@ func withInitialTaskEnv(env []string, hasTask bool) []string {
 // For a broker-mode start, hub-only keys (see IsHubOnlyEnvKey) in the
 // harness-config entry are not merged; they are returned in dropped instead.
 func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSettings, profileName, harnessConfigName string) (overlay map[string]string, dropped []droppedBrokerEnv) {
+	overlay, dropped, _, _ = resolveAuthEnvOverlayWithPolicy(opts, settings, profileName, harnessConfigName)
+	return overlay, dropped
+}
+
+// resolveAuthEnvOverlayWithPolicy injects sanitized settings-declared
+// harness-config env vars into opts.Env and returns the auth overlay, any
+// dropped hub-only broker env entries, the sanitized settings harness-config
+// env map (for hook-env provenance), and any SCION_* policy warnings.
+func resolveAuthEnvOverlayWithPolicy(opts *api.StartOptions, settings *config.VersionedSettings, profileName, harnessConfigName string) (overlay map[string]string, dropped []droppedBrokerEnv, settingsHCEnv map[string]string, hcWarnings []string) {
 	// Inject harness-config env into opts.Env BEFORE the auth overlay is built,
 	// so GatherAuthWithEnv can see credentials the harness config declares
 	// (GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION, ...).
@@ -4326,16 +4364,28 @@ func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSet
 	// only. See design §0.3.
 	if settings != nil && harnessConfigName != "" {
 		if hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil && len(hcEntry.Env) > 0 {
-			if opts.Env == nil {
-				opts.Env = make(map[string]string)
-			}
+			// Check hub-only broker keys first so broker-mode accounting and
+			// warnings stay accurate even for SCION_* hub-only keys (e.g.
+			// SCION_GIT_TOKEN_REMOTE, SCION_GIT_CLONE_URL).
+			nonHubOnly := make(map[string]string, len(hcEntry.Env))
 			for k, v := range hcEntry.Env {
 				if skipBrokerLocalEnvKey(opts.BrokerMode, k) {
 					dropped = append(dropped, droppedBrokerEnv{Key: k, Value: v, Layer: envLayerHarnessConfigEntry})
 					continue
 				}
-				if _, exists := opts.Env[k]; !exists { // never clobber hub-supplied values
-					opts.Env[k] = v
+				nonHubOnly[k] = v
+			}
+			sanitized, warns := sanitizeHarnessConfigEnv(nonHubOnly, "settings", false)
+			hcWarnings = append(hcWarnings, warns...)
+			settingsHCEnv = sanitized
+			if len(sanitized) > 0 {
+				if opts.Env == nil {
+					opts.Env = make(map[string]string)
+				}
+				for k, v := range sanitized {
+					if _, exists := opts.Env[k]; !exists { // never clobber hub-supplied values
+						opts.Env[k] = v
+					}
 				}
 			}
 		}
@@ -4345,7 +4395,7 @@ func resolveAuthEnvOverlay(opts *api.StartOptions, settings *config.VersionedSet
 	// Build a temporary auth overlay from resolved env-type secrets so auth
 	// resolution can detect credentials without mutating opts.Env (which is
 	// later projected into the container environment).
-	return buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets), dropped
+	return buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets), dropped, settingsHCEnv, hcWarnings
 }
 
 // buildAuthEnvOverlay creates an auth-only view of the environment by layering

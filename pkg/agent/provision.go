@@ -2568,7 +2568,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		hcCfg.TaskFlag = hcDir.Config.TaskFlag
 	}
 	if hcDir.Config.Env != nil {
-		hcCfg.Env = hcDir.Config.Env
+		hcCfg.Env, _ = sanitizeHarnessConfigEnv(hcDir.Config.Env, "bundle", true)
 	}
 	if hcDir.Config.Volumes != nil {
 		hcCfg.Volumes = hcDir.Config.Volumes
@@ -2784,7 +2784,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if err == nil {
 			settingsCfg := &api.ScionConfig{}
 			if hConfig.Env != nil {
-				settingsCfg.Env = hConfig.Env
+				settingsCfg.Env, _ = sanitizeHarnessConfigEnv(hConfig.Env, "settings", false)
 			}
 			if hConfig.Volumes != nil {
 				settingsCfg.Volumes = hConfig.Volumes

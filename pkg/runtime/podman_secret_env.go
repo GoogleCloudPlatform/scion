@@ -37,13 +37,15 @@ import (
 func podmanSecretEnvNames(config RunConfig) map[string]bool {
 	names := map[string]bool{stagedsecrets.EnvVar: true}
 	for _, s := range config.ResolvedSecrets {
-		if s.Type == "environment" || s.Type == "" {
+		if (s.Type == "environment" || s.Type == "") && !reservedAgentEnvName(s.Target) {
 			names[s.Target] = true
 		}
 	}
 	if config.ResolvedAuth != nil {
 		for k := range config.ResolvedAuth.EnvVars {
-			names[k] = true
+			if !reservedAgentEnvName(k) {
+				names[k] = true
+			}
 		}
 	}
 	return names

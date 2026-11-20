@@ -217,8 +217,8 @@ func startCase(t *testing.T, c harnessEnvCase) map[string]string {
 		e.provisionExisting(t, name, "hc-claude")
 		opts.HarnessConfig = "hc-gemini"
 	case "override-settings-env":
-		// The settings entry's env, merged into the start env before
-		// SCION_HARNESS is set; not an env: in the config.yaml.
+		// Settings harness_configs.<name>.env cannot set reserved SCION_* keys:
+		// SCION_HARNESS is stripped, so the launched harness (gemini-cli) wins.
 		e.provisionExisting(t, name, "hc-claude")
 		e.rewriteSettings(t, "hc-gemini", "harness_configs:\n  hc-gemini:\n    env:\n      SCION_HARNESS: claude")
 		opts.HarnessConfig = "hc-gemini"

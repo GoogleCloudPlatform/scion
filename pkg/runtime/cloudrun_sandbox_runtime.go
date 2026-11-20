@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
@@ -2387,6 +2388,11 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// Environment variables via --env flags (repeatable, confirmed by AC-0 retest).
 	for _, e := range envArgs(env) {
 		args = append(args, "--env", e)
+	}
+	// Emit the runtime-owned hook-withheld marker last so only the runtime can
+	// supply it.
+	if marker := envpolicy.FormatWithheldMarker(cfg.HookWithheldEnv); marker != "" {
+		args = append(args, "--env", envpolicy.HookWithheldEnvVar+"="+marker)
 	}
 
 	args = append(args, "--")

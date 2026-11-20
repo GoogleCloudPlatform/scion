@@ -33,6 +33,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	substrateserve "github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -236,6 +237,11 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 
 	// A reserved name never reaches the container, whatever its source.
 	dropReservedAgentEnv(env)
+	// Emit the runtime-owned hook-withheld marker after the reserved-name drop
+	// so only the runtime can supply it.
+	if marker := envpolicy.FormatWithheldMarker(cfg.HookWithheldEnv); marker != "" {
+		env[envpolicy.HookWithheldEnvVar] = marker
+	}
 	return env
 }
 

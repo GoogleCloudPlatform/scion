@@ -36,6 +36,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -2549,6 +2550,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// A reserved name never reaches the container, whatever its source: the
 	// drop runs after every step that adds entries.
 	envVars = slices.DeleteFunc(envVars, func(ev corev1.EnvVar) bool { return reservedAgentEnvName(ev.Name) })
+	// Emit the runtime-owned hook-withheld marker last so only the runtime can
+	// supply it.
+	if marker := envpolicy.FormatWithheldMarker(config.HookWithheldEnv); marker != "" {
+		envVars = append(envVars, corev1.EnvVar{Name: envpolicy.HookWithheldEnvVar, Value: marker})
+	}
 
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent
