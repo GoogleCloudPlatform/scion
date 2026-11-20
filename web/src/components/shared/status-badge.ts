@@ -261,18 +261,18 @@ export class ScionStatusBadge extends LitElement {
     @keyframes pulse {
       0% {
         box-shadow:
-          0 0 0 0 rgba(34, 197, 94, 0.5),
-          0 0 0 0 rgba(34, 197, 94, 0.3);
+          0 0 0 0 color-mix(in srgb, var(--scion-status-success, #22c55e) 50%, transparent),
+          0 0 0 0 color-mix(in srgb, var(--scion-status-success, #22c55e) 30%, transparent);
       }
       70% {
         box-shadow:
-          0 0 0 6px rgba(34, 197, 94, 0),
-          0 0 0 10px rgba(34, 197, 94, 0);
+          0 0 0 6px transparent,
+          0 0 0 10px transparent;
       }
       100% {
         box-shadow:
-          0 0 0 0 rgba(34, 197, 94, 0),
-          0 0 0 0 rgba(34, 197, 94, 0);
+          0 0 0 0 transparent,
+          0 0 0 0 transparent;
       }
     }
   `;

@@ -216,7 +216,7 @@ export class ScionChatSearch extends LitElement {
 
     .search-input:focus {
       border-color: var(--scion-primary, #3b82f6);
-      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--scion-primary, #3b82f6) 15%, transparent);
     }
 
     .search-input::placeholder {
@@ -262,7 +262,7 @@ export class ScionChatSearch extends LitElement {
     }
 
     .scope-btn.active {
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       color: var(--scion-primary, #3b82f6);
       border-color: var(--scion-primary, #3b82f6);
     }

@@ -744,7 +744,7 @@ export class ScionChatComposer extends LitElement {
     }
 
     .destination-chip.dm {
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
     }
 
     /* In a narrow composer the chip keeps to one line: a long agent name is
@@ -987,7 +987,7 @@ export class ScionChatComposer extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      background: rgba(59, 130, 246, 0.08);
+      background: color-mix(in srgb, var(--scion-primary, #3b82f6) 8%, transparent);
       border: 2px dashed var(--scion-primary, #3b82f6);
       border-radius: 0.75rem;
       pointer-events: none;

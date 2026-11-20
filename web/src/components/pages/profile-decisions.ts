@@ -167,7 +167,7 @@ export class ScionPageProfileDecisions extends LitElement {
 
       .sort-bar sl-radio-button[checked]::part(button) {
         background: var(--scion-primary, #3b82f6);
-        color: #ffffff;
+        color: var(--scion-primary-text, #ffffff);
         border-color: var(--scion-primary, #3b82f6);
       }
 

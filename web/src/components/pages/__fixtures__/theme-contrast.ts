@@ -63,7 +63,17 @@ export function resolver(vars: Map<string, string>) {
     const v = vars.get(name);
     if (v === undefined || depth > 10) throw new Error(`unresolved ${name}`);
     const ref = /^var\((--[\w-]+)\)$/.exec(v);
-    return ref ? get(ref[1], depth + 1) : parseColor(v);
+    if (ref) return get(ref[1], depth + 1);
+    const mix =
+      /^color-mix\(\s*in\s+srgb\s*,\s*(var\(--[\w-]+\)|#[0-9a-f]{6})\s+([\d.]+)%\s*,\s*transparent\s*\)$/i.exec(
+        v
+      );
+    if (mix) {
+      const innerRef = /^var\((--[\w-]+)\)$/.exec(mix[1]);
+      const base = innerRef ? get(innerRef[1], depth + 1) : parseColor(mix[1]);
+      return [base[0], base[1], base[2], (base[3] * +mix[2]) / 100];
+    }
+    return parseColor(v);
   };
   return get;
 }

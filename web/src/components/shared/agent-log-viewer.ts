@@ -198,7 +198,7 @@ export class ScionAgentLogViewer extends LitElement {
       color: var(--scion-neutral-500, #64748b);
     }
     .sev-INFO {
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       color: var(--scion-primary-700, #1d4ed8);
     }
     .sev-WARNING {

@@ -365,7 +365,7 @@ export class ScionUnifiedLogViewer extends LitElement {
       opacity: 0.7;
     }
     .sev-INFO {
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       color: var(--scion-primary-700, #1d4ed8);
     }
     .sev-WARNING {
@@ -438,7 +438,7 @@ export class ScionUnifiedLogViewer extends LitElement {
       display: flex;
       justify-content: center;
       padding: 0.5rem;
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       border-top: 1px solid var(--scion-primary-200, #bfdbfe);
       cursor: pointer;
       font-size: 0.8125rem;

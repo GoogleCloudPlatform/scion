@@ -559,7 +559,7 @@ export class ScionPageAdminUsers extends LitElement {
         height: 2rem;
         border-radius: 50%;
         background: var(--scion-primary, #3b82f6);
-        color: white;
+        color: var(--scion-primary-text, #ffffff);
         display: flex;
         align-items: center;
         justify-content: center;

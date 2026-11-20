@@ -393,7 +393,7 @@ export class ScionPageHome extends LitElement {
         var(--scion-primary, #3b82f6) 0%,
         var(--scion-primary-700, #1d4ed8) 100%
       );
-      color: white;
+      color: var(--scion-primary-text, #ffffff);
       padding: 2rem;
       border-radius: var(--scion-radius-lg, 0.75rem);
       margin-bottom: 2rem;
@@ -485,7 +485,7 @@ export class ScionPageHome extends LitElement {
       width: 3rem;
       height: 3rem;
       border-radius: var(--scion-radius, 0.5rem);
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       display: flex;
       align-items: center;
       justify-content: center;

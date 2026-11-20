@@ -350,7 +350,7 @@ export class ScionAgentMessageViewer extends LitElement {
       margin-top: 0.125rem;
     }
     .msg-direction.received {
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       color: var(--scion-primary-600, #2563eb);
     }
     .msg-direction.sent {
