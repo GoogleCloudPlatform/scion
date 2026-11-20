@@ -249,9 +249,10 @@ func TestRestartAmbiguousStartLeg_SuspendedThenReportsRunning(t *testing.T) {
 	// while the restart claim is held (ptone/scion#1956 item 5b).
 	_, err := f.s.SetAgentRunID(context.Background(), a.ID, "run-after-restart", nil)
 	require.NoError(t, err)
-	runTok, _, err := f.srv.GetAgentTokenService().SignAgentToken(AgentTokenGrant{AgentID: a.ID, ProjectID: a.ProjectID,
+	runTok, cred, err := f.srv.GetAgentTokenService().SignAgentToken(AgentTokenGrant{AgentID: a.ID, ProjectID: a.ProjectID,
 		Scopes: []AgentTokenScope{ScopeAgentStatusUpdate}}, "run-after-restart")
 	require.NoError(t, err)
+	require.NoError(t, f.s.CreateAgentCredential(context.Background(), cred))
 	req, err := http.NewRequest(http.MethodPost, "/api/v1/agents/"+a.ID+"/status", strings.NewReader(`{"phase":"`+string(state.PhaseRunning)+`"}`))
 	require.NoError(t, err)
 	req.Header.Set("X-Scion-Agent-Token", runTok)
