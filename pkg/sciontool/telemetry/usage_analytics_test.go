@@ -619,7 +619,7 @@ func TestHealthzHubIDResolver(t *testing.T) {
 func TestAnalyticsStateEndToEnd(t *testing.T) {
 	setAnalyticsEnv(t, "claude")
 	var entries []logging.Entry
-	gcp := &GCPExporter{analyticsSink: func(e logging.Entry) error { entries = append(entries, e); return nil }}
+	gcp := &GCPExporter{analyticsSink: func(_ context.Context, e logging.Entry) error { entries = append(entries, e); return nil }}
 	a := analyticsState{
 		outboxDir: filepath.Join(t.TempDir(), "ob"),
 		resolver:  func(context.Context) (string, error) { return "hub-xyz", nil },
