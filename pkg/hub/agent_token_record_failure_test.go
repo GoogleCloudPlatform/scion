@@ -198,7 +198,7 @@ func TestAgentTokenRecordFailureIsFixed500(t *testing.T) {
 			f.agentIn(t, "record-fail-existing-suspended", state.PhaseSuspended)
 			f.fault.Arm()
 			return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-				Name: "record-fail-existing-suspended", ProjectID: f.project.ID, Task: "task",
+				Name: "record-fail-existing-suspended", ProjectID: f.project.ID, Task: "task", Resume: true,
 			}), ""
 		}},
 		{name: "existing agent, resume in place", do: func(t *testing.T, f *recordFailureFixture) (*httptest.ResponseRecorder, string) {

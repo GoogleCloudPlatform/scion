@@ -203,7 +203,7 @@ func TestSyncLaunch_CreateExistingAgent_ClientCancelDuringDispatch(t *testing.T)
 		phase state.Phase
 		req   CreateAgentRequest
 	}{
-		{name: "suspended-resume", phase: state.PhaseSuspended},
+		{name: "suspended-resume", phase: state.PhaseSuspended, req: CreateAgentRequest{Resume: true}},
 		{name: "stopped-resume", phase: state.PhaseStopped, req: CreateAgentRequest{Resume: true}},
 		{name: "provisioning-start", phase: state.PhaseProvisioning},
 	}
@@ -381,7 +381,7 @@ func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
 			name: "existing-suspended-resume",
 			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
 				createSiteAgent(t, s, project, "own-deadline-suspended", state.PhaseSuspended, store.RunIntentStopped)
-				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-suspended", ProjectID: project.ID, Task: "work"}
+				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-suspended", ProjectID: project.ID, Task: "work", Resume: true}
 			},
 			wantCalls: 1,
 		},

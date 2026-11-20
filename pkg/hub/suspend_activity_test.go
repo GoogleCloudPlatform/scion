@@ -267,6 +267,7 @@ func TestResumePathsClearRetainedSuspendActivity(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]any{
 			"name":      agent.Slug,
 			"projectId": f.project.ID,
+			"resume":    true,
 		})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 

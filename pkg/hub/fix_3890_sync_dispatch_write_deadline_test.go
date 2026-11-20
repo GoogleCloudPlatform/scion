@@ -105,7 +105,7 @@ func TestSlowCreateExistingAgent_AfterWriteTimeout_GetsResponse(t *testing.T) {
 		phase state.Phase
 		req   CreateAgentRequest
 	}{
-		{name: "suspended-resume", phase: state.PhaseSuspended},
+		{name: "suspended-resume", phase: state.PhaseSuspended, req: CreateAgentRequest{Resume: true}},
 		{name: "stopped-resume", phase: state.PhaseStopped, req: CreateAgentRequest{Resume: true}},
 		{name: "provisioning-start", phase: state.PhaseProvisioning},
 	} {
