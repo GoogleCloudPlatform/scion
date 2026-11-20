@@ -78,10 +78,10 @@ func TestHubHandler_EventMapping(t *testing.T) {
 			expectedStatus: "executing",
 		},
 		{
-			name:           "tool end sends working",
+			name:           "tool end sends thinking",
 			eventName:      hooks.EventToolEnd,
 			expectCall:     true,
-			expectedStatus: "working",
+			expectedStatus: "thinking",
 		},
 		{
 			name:           "agent end sends working",
@@ -185,6 +185,82 @@ func TestHubHandler_EventMapping(t *testing.T) {
 				if gotCalls != 0 {
 					t.Errorf("Expected no calls, got %d", gotCalls)
 				}
+			}
+		})
+	}
+}
+
+// TestHubHandler_StepCompletedPayloads verifies that tool-end reports
+// thinking/"Processing" while agent-end and model-end continue to report
+// working/"Ready".
+func TestHubHandler_StepCompletedPayloads(t *testing.T) {
+	tests := []struct {
+		name         string
+		eventName    string
+		wantActivity string
+		wantMessage  string
+	}{
+		{
+			name:         "tool-end reports thinking/Processing",
+			eventName:    hooks.EventToolEnd,
+			wantActivity: "thinking",
+			wantMessage:  "Processing",
+		},
+		{
+			name:         "agent-end reports working/Ready",
+			eventName:    hooks.EventAgentEnd,
+			wantActivity: "working",
+			wantMessage:  "Ready",
+		},
+		{
+			name:         "model-end reports working/Ready",
+			eventName:    hooks.EventModelEnd,
+			wantActivity: "working",
+			wantMessage:  "Ready",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+
+			var mu sync.Mutex
+			var got map[string]interface{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var payload map[string]interface{}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				mu.Lock()
+				got = payload
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer server.Close()
+
+			scrubHubEnv(t)
+			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			t.Setenv("SCION_AUTH_TOKEN", "test-token")
+			t.Setenv("SCION_AGENT_ID", "test-agent-id")
+
+			handler := NewHubHandler()
+			if handler == nil {
+				t.Fatal("Expected handler to be created, got nil")
+			}
+
+			if err := handler.Handle(&hooks.Event{Name: tt.eventName}); err != nil {
+				t.Fatalf("Handle returned error: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if got["activity"] != tt.wantActivity {
+				t.Errorf("activity = %v, want %q", got["activity"], tt.wantActivity)
+			}
+			if got["status"] != tt.wantActivity {
+				t.Errorf("status = %v, want %q", got["status"], tt.wantActivity)
+			}
+			if got["message"] != tt.wantMessage {
+				t.Errorf("message = %v, want %q", got["message"], tt.wantMessage)
 			}
 		})
 	}
@@ -306,11 +382,11 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 			expectCall:    false,
 		},
 		{
-			name:           "tool-end sends working when local activity is working",
+			name:           "tool-end sends thinking when local activity is working",
 			localActivity:  "working",
 			eventName:      hooks.EventToolEnd,
 			expectCall:     true,
-			expectedStatus: "working",
+			expectedStatus: "thinking",
 		},
 		{
 			name:          "agent-end skipped when local activity is waiting_for_input",

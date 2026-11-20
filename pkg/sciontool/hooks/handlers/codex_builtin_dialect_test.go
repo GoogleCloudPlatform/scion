@@ -62,7 +62,7 @@ func TestCodexBuiltinDialect_StatusMatchesStagedDialect(t *testing.T) {
 				"tool_name":       "Bash",
 			},
 			before: state.ActivityExecuting,
-			want:   state.ActivityWorking,
+			want:   state.ActivityThinking,
 		},
 		{
 			name: "stop",

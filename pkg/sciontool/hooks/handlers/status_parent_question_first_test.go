@@ -66,15 +66,17 @@ func questionFirstSubagentAsks(t *testing.T, sh *StatusHandler, hh *HubHandler, 
 func TestParentQuestionFirst_SubagentWaitSurvivesParentToolStart(t *testing.T) {
 	for _, h := range questionFirstHolds() {
 		for _, end := range []struct {
-			name  string
-			event func(*testing.T) *hooks.Event
+			name      string
+			event     func(*testing.T) *hooks.Event
+			wantLocal string
+			wantHub   string
 		}{
 			{"answered", func(t *testing.T) *hooks.Event {
 				return parentHeldSub(t, "PostToolUse", "AskUserQuestion", parentHeldSubA)
-			}},
+			}, "thinking", parentHeldThinking},
 			{"sub-agent stops", func(t *testing.T) *hooks.Event {
 				return parentHeldSub(t, "SubagentStop", "", parentHeldSubA)
-			}},
+			}, "working", parentHeldWorking},
 		} {
 			t.Run(h.name+"/"+end.name, func(t *testing.T) {
 				sh, hh, sent := claudeHubSetup(t)
@@ -88,10 +90,10 @@ func TestParentQuestionFirst_SubagentWaitSurvivesParentToolStart(t *testing.T) {
 				assert.Empty(t, got, "no executing update")
 
 				got, info = parentHeldStep(t, sh, hh, sent, end.event(t))
-				assert.Equal(t, "working", info["activity"])
+				assert.Equal(t, end.wantLocal, info["activity"])
 				assert.NotContains(t, info, notificationWaitAgentsKey)
 				assert.NotContains(t, info, parentWaitKey)
-				assert.Equal(t, []string{parentHeldWorking}, got)
+				assert.Equal(t, []string{end.wantHub}, got)
 			})
 		}
 	}

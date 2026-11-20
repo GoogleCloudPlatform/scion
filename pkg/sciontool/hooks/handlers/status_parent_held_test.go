@@ -296,10 +296,10 @@ func TestParentHeld_ParallelSubagentQuestions(t *testing.T) {
 	assert.Empty(t, got)
 
 	got, info = parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "PostToolUse", "Bash", parentHeldSubB))
-	assert.Equal(t, "working", info["activity"])
+	assert.Equal(t, "thinking", info["activity"])
 	assert.NotContains(t, info, activitySourceKey)
 	assert.NotContains(t, info, notificationWaitAgentsKey)
-	assert.Equal(t, []string{parentHeldWorking}, got)
+	assert.Equal(t, []string{parentHeldThinking}, got)
 }
 
 // A sub-agent that holds no question leaves the owner list and the wait
@@ -353,8 +353,8 @@ func TestParentHeld_SubagentEndReleasesOnlyItsOwn(t *testing.T) {
 	assert.Equal(t, []string{parentHeldWorking}, got)
 
 	got, info = parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "PostToolUse", "Agent"))
-	assert.Equal(t, "working", info["activity"])
-	assert.Equal(t, []string{parentHeldWorking}, got)
+	assert.Equal(t, "thinking", info["activity"])
+	assert.Equal(t, []string{parentHeldThinking}, got)
 }
 
 // With nothing held, SubagentStop writes nothing and sends nothing.
@@ -440,8 +440,8 @@ func TestParentHeld_ClaudeSubagentNotification(t *testing.T) {
 	assert.Equal(t, []string{parentHeldWaiting}, got)
 
 	got, info = parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "PostToolUse", "Bash", parentHeldSubA))
-	assert.Equal(t, "working", info["activity"])
-	assert.Equal(t, []string{parentHeldWorking}, got)
+	assert.Equal(t, "thinking", info["activity"])
+	assert.Equal(t, []string{parentHeldThinking}, got)
 }
 
 // Part D: through the claude dialect, an event with agent_id but no
@@ -538,9 +538,9 @@ func TestParentHeld_CapturedClaudeSubagentReplay(t *testing.T) {
 		want := []struct{ local, hub string }{
 			{"executing", parentHeldExecuting}, // parent Agent tool-start
 			{"executing", parentHeldExecuting}, // sub-agent Bash tool-start
-			{"working", parentHeldWorking},     // sub-agent Bash tool-end
-			{"working", ""},                    // SubagentStop: no change
-			{"working", parentHeldWorking},     // parent Agent tool-end
+			{"thinking", parentHeldThinking},   // sub-agent Bash tool-end
+			{"thinking", ""},                   // SubagentStop: no change
+			{"thinking", parentHeldThinking},   // parent Agent tool-end
 			{"working", parentHeldWorking},     // parent Stop
 		}
 		for i, e := range turn {
@@ -656,9 +656,9 @@ func TestParentHeld_MalformedOwnerList(t *testing.T) {
 			assert.Empty(t, waitOwnersOf(readAgentInfoMap(t, sh.StatusPath)))
 
 			got, info := parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "PostToolUse", "Bash", parentHeldSubC))
-			assert.Equal(t, "working", info["activity"])
+			assert.Equal(t, "thinking", info["activity"])
 			assert.NotContains(t, info, notificationWaitAgentsKey)
-			assert.Equal(t, []string{parentHeldWorking}, got)
+			assert.Equal(t, []string{parentHeldThinking}, got)
 		})
 		t.Run(tc.name+"/sub-agent question replaces it", func(t *testing.T) {
 			sh, hh, sent := claudeHubSetup(t)

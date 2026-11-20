@@ -105,11 +105,17 @@ func TestStatusHandler_TurnEndErrorSetsHarnessError(t *testing.T) {
 		assert.Equal(t, "working", readAgentInfoMap(t, h.StatusPath)["activity"])
 	})
 	t.Run("model-end and tool-end errors do not set it", func(t *testing.T) {
-		for _, name := range []string{hooks.EventModelEnd, hooks.EventToolEnd} {
+		for _, tc := range []struct {
+			name string
+			want string
+		}{
+			{hooks.EventModelEnd, "working"},
+			{hooks.EventToolEnd, "thinking"},
+		} {
 			h := newTempStatusHandler(t)
-			writeAgentInfoJSON(t, h, `{"phase":"running","activity":"thinking"}`)
-			require.NoError(t, h.Handle(&hooks.Event{Name: name, Data: hooks.EventData{Error: "503"}}))
-			assert.Equal(t, "working", readAgentInfoMap(t, h.StatusPath)["activity"], name)
+			writeAgentInfoJSON(t, h, `{"phase":"running","activity":"executing"}`)
+			require.NoError(t, h.Handle(&hooks.Event{Name: tc.name, Data: hooks.EventData{Error: "503"}}))
+			assert.Equal(t, tc.want, readAgentInfoMap(t, h.StatusPath)["activity"], tc.name)
 		}
 	})
 }

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,4 +119,28 @@ func TestStatusHandler_CurrentActivitySinceIgnoresBadStamp(t *testing.T) {
 	act, since := h.CurrentActivitySince()
 	assert.Equal(t, state.ActivityExecuting, act)
 	assert.True(t, since.IsZero())
+}
+
+// TestStatusHandler_ToolEndThenModelStartPreservesActivitySince verifies that
+// tool-end transitions to thinking and a subsequent model-start (as emitted by
+// gemini-cli, antigravity, and muse-code) preserves the activitySince stamp.
+func TestStatusHandler_ToolEndThenModelStartPreservesActivitySince(t *testing.T) {
+	statusPath := filepath.Join(t.TempDir(), "agent-info.json")
+	h := &StatusHandler{StatusPath: statusPath}
+
+	require.NoError(t, h.Handle(&hooks.Event{Name: hooks.EventToolStart, Data: hooks.EventData{ToolName: "Bash"}}))
+	act, execSince := h.CurrentActivitySince()
+	require.Equal(t, state.ActivityExecuting, act)
+
+	time.Sleep(5 * time.Millisecond)
+	require.NoError(t, h.Handle(&hooks.Event{Name: hooks.EventToolEnd, Data: hooks.EventData{ToolName: "Bash"}}))
+	act, thinkSince := h.CurrentActivitySince()
+	assert.Equal(t, state.ActivityThinking, act)
+	assert.True(t, thinkSince.After(execSince), "tool-end should advance activitySince: %v -> %v", execSince, thinkSince)
+
+	time.Sleep(5 * time.Millisecond)
+	require.NoError(t, h.Handle(&hooks.Event{Name: hooks.EventModelStart}))
+	act, afterModelStart := h.CurrentActivitySince()
+	assert.Equal(t, state.ActivityThinking, act)
+	assert.True(t, afterModelStart.Equal(thinkSince), "model-start after tool-end should preserve activitySince: %v -> %v", thinkSince, afterModelStart)
 }

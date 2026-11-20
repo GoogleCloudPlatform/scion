@@ -199,7 +199,7 @@ func TestCodexSubagent_NoHoldUpdatesAsBefore(t *testing.T) {
 	}{
 		{"UserPromptSubmit", "thinking", ""},
 		{"PreToolUse", "executing", "Bash"},
-		{"PostToolUse", "working", ""},
+		{"PostToolUse", "thinking", ""},
 	} {
 		t.Run(tc.raw, func(t *testing.T) {
 			statusPath := filepath.Join(t.TempDir(), "agent-info.json")

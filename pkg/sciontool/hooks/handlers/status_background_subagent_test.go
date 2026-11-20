@@ -191,10 +191,10 @@ func TestBackgroundSubagentWait_OwnAnswerReleases(t *testing.T) {
 			bgHeldAfterStop(t, sh, hh, sent, parentHeldSubA)
 
 			got, info := parentHeldStep(t, sh, hh, sent, parentHeldSub(t, raw, "Bash", parentHeldSubA))
-			assert.Equal(t, "working", info["activity"])
+			assert.Equal(t, "thinking", info["activity"])
 			assert.NotContains(t, info, activitySourceKey)
 			assert.NotContains(t, info, notificationWaitAgentsKey)
-			assert.Equal(t, []string{parentHeldWorking}, got)
+			assert.Equal(t, []string{parentHeldThinking}, got)
 		})
 	}
 }
@@ -343,9 +343,9 @@ func TestBackgroundSubagentWait_ForegroundSequence(t *testing.T) {
 		}{
 			{parentHeldParent(t, "PreToolUse", "Agent"), "executing", []string{parentHeldExecuting}},
 			{parentHeldSub(t, "PreToolUse", "AskUserQuestion", parentHeldSubA), "waiting_for_input", []string{parentHeldWaiting}},
-			{parentHeldSub(t, "PostToolUse", "AskUserQuestion", parentHeldSubA), "working", []string{parentHeldWorking}},
-			{bgSubagentStop(t, parentHeldSubA), "working", nil},
-			{parentHeldParent(t, "PostToolUse", "Agent"), "working", []string{parentHeldWorking}},
+			{parentHeldSub(t, "PostToolUse", "AskUserQuestion", parentHeldSubA), "thinking", []string{parentHeldThinking}},
+			{bgSubagentStop(t, parentHeldSubA), "thinking", nil},
+			{parentHeldParent(t, "PostToolUse", "Agent"), "thinking", []string{parentHeldThinking}},
 			{parentHeldParent(t, "Stop", ""), "working", []string{parentHeldWorking}},
 		}
 		for i, s := range steps {
@@ -374,9 +374,9 @@ func TestBackgroundSubagentWait_ForegroundSequence(t *testing.T) {
 		assert.Equal(t, []string{parentHeldWorking}, got, "the release is reported once")
 
 		got, info = parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "PostToolUse", "Agent"))
-		assert.Equal(t, "working", info["activity"])
+		assert.Equal(t, "thinking", info["activity"])
 		assert.NotContains(t, info, activitySourceKey)
-		assert.Equal(t, []string{parentHeldWorking}, got)
+		assert.Equal(t, []string{parentHeldThinking}, got)
 
 		got, info = parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "Stop", ""))
 		assert.Equal(t, "working", info["activity"])
