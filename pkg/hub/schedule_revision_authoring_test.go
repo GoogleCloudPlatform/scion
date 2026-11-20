@@ -551,34 +551,12 @@ func TestUpdateNonAdmittedDenied_MessageReplacementKeepsTarget(t *testing.T) {
 	payload["message"] = "new text, same target"
 	replacement, err := json.Marshal(payload)
 	require.NoError(t, err)
-	require.False(t, scheduledPayloadTargetChanged(stored.Payload, string(replacement)), "precondition: the target is kept")
 
 	outsider := scheduleOnlyUser(t, s, projectID, tid("update-keep-msg-outsider"))
 	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id, http.MethodPatch, UpdateScheduleRequest{Payload: string(replacement)})
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "Agent not found", "unreadable target is masked as 404 (ptone/scion#8588)")
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
-}
-
-// scheduledPayloadTargetChanged compares only the target of two message
-// payloads.
-func TestScheduledPayloadTargetChanged(t *testing.T) {
-	cases := []struct {
-		name                string
-		stored, replacement string
-		want                bool
-	}{
-		{"same target, new text", `{"agentName":"worker","message":"a"}`, `{"agentName":"worker","message":"b"}`, false},
-		{"agentName to agentId", `{"agentName":"worker","message":"a"}`, `{"agentId":"` + tid("payload-target") + `","message":"a"}`, true},
-		{"other agentId", `{"agentId":"` + tid("payload-a") + `"}`, `{"agentId":"` + tid("payload-b") + `"}`, true},
-		{"both undecodable", `not json`, `{also not json`, false},
-		{"both empty", "", "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, scheduledPayloadTargetChanged(tc.stored, tc.replacement))
-		})
-	}
 }
 
 // Resuming a dispatch_agent schedule requires agent creation in the project:

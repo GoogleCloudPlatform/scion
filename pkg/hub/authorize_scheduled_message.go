@@ -156,20 +156,6 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	return true
 }
 
-// scheduledPayloadTargetChanged reports whether a replacement message
-// payload names another target (agentId or agentName) than the stored one.
-// A payload that does not decode names no target.
-func scheduledPayloadTargetChanged(stored, replacement string) bool {
-	target := func(raw string) MessageEventPayload {
-		var p MessageEventPayload
-		if raw != "" {
-			_ = json.Unmarshal([]byte(raw), &p)
-		}
-		return MessageEventPayload{AgentID: p.AgentID, AgentName: p.AgentName}
-	}
-	return target(stored) != target(replacement)
-}
-
 // validateMessageAuthoringTarget is the single HTTP-free message authoring
 // target rule shared by schedule handlers (authorizeScheduledMessageTarget)
 // and trigger authoring (messageAction.Validate). callerKind is derived inside
