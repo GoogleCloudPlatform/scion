@@ -479,6 +479,51 @@ func TestInit_EndpointClassificationProbes_FailClosed(t *testing.T) {
 			initArgs: []string{"init", "--hub", "https://localhost.:8443", "--yes"},
 			wantErr:  "global scion directory (~/.scion/) does not exist",
 		},
+		{
+			name:     "dotted hex IPv4 loopback keeps ~/.scion gate",
+			initArgs: []string{"init", "--hub", "https://0x7f.0x0.0x0.0x1:8443", "--yes"},
+			wantErr:  "global scion directory (~/.scion/) does not exist",
+		},
+		{
+			name:     "short hex IPv4 loopback keeps ~/.scion gate",
+			initArgs: []string{"init", "--hub", "https://0x7f.0x1:8443", "--yes"},
+			wantErr:  "global scion directory (~/.scion/) does not exist",
+		},
+		{
+			name:     "mixed-radix decimal+hex IPv4 loopback keeps ~/.scion gate",
+			initArgs: []string{"init", "--hub", "https://127.0.0.0x1:8443", "--yes"},
+			wantErr:  "global scion directory (~/.scion/) does not exist",
+		},
+		{
+			name:     "mixed-radix octal+hex IPv4 loopback keeps ~/.scion gate",
+			initArgs: []string{"init", "--hub", "https://0177.0.0.0x1:8443", "--yes"},
+			wantErr:  "global scion directory (~/.scion/) does not exist",
+		},
+		{
+			name:     "0.0.0.0/8 non-zero address keeps ~/.scion gate",
+			initArgs: []string{"init", "--hub", "https://0.0.0.1:8443", "--yes"},
+			wantErr:  "global scion directory (~/.scion/) does not exist",
+		},
+		{
+			name:     "IPv4-mapped IPv6 0.0.0.1 keeps ~/.scion gate",
+			initArgs: []string{"init", "--hub", "https://[::ffff:0.0.0.1]:8443", "--yes"},
+			wantErr:  "global scion directory (~/.scion/) does not exist",
+		},
+		{
+			name:     "RFC 1918 private IPv4 keeps ~/.scion gate",
+			initArgs: []string{"init", "--hub", "https://10.0.0.5:8443", "--yes"},
+			wantErr:  "global scion directory (~/.scion/) does not exist",
+		},
+		{
+			name:     "localhost.localdomain alias keeps ~/.scion gate",
+			initArgs: []string{"init", "--hub", "https://localhost.localdomain:8443", "--yes"},
+			wantErr:  "global scion directory (~/.scion/) does not exist",
+		},
+		{
+			name:     "ip6-localhost alias keeps ~/.scion gate",
+			initArgs: []string{"init", "--hub", "https://ip6-localhost:8443", "--yes"},
+			wantErr:  "global scion directory (~/.scion/) does not exist",
+		},
 	}
 
 	for _, tc := range probes {
@@ -515,22 +560,31 @@ func TestIsRemoteHubEndpoint_EndpointShapes(t *testing.T) {
 		endpoint string
 		want     bool
 	}{
-		// Valid HTTPS remote endpoints.
+		// Valid HTTPS remote DNS names (public/multi-label with alphabetic final label).
 		{name: "https remote domain", category: "valid https remote", endpoint: "https://hub.example.com", want: true},
 		{name: "https remote domain with port", category: "valid https remote", endpoint: "https://hub.example.com:8443", want: true},
 		{name: "https remote domain with subpath", category: "valid https remote", endpoint: "https://hub.example.com/subpath", want: true},
 		{name: "uppercase HTTPS scheme and host", category: "valid https remote", endpoint: "HTTPS://HUB.EXAMPLE.COM", want: true},
-		{name: "https remote IPv4 literal", category: "valid https remote", endpoint: "https://10.0.0.5:8443", want: true},
-		{name: "https remote IPv6 literal", category: "valid https remote", endpoint: "https://[2001:db8::1]:8443", want: true},
-		{name: "https single-label internal service", category: "valid https remote", endpoint: "https://scion_hub:8443", want: true},
+		{name: "https remote FQDN with single trailing dot", category: "valid https remote", endpoint: "https://hub.example.com.", want: true},
+		{name: "https remote hyphenated subdomain", category: "valid https remote", endpoint: "https://hub-1.prod.example.io:8443", want: true},
+		{name: "https remote test TLD", category: "valid https remote", endpoint: "https://hub.example.test:8443", want: true},
+		// Lexical-only classification: DNS names that resolve to loopback are out of scope.
+		{name: "https lexical DNS name (nip.io)", category: "valid https remote", endpoint: "https://127.0.0.1.nip.io:8443", want: true},
 
-		// Valid HTTP non-loopback (rejected by CheckHubTransport).
-		{name: "http non-loopback domain", category: "valid http non-loopback", endpoint: "http://hub.example.com", want: false},
-		{name: "http non-loopback domain with port", category: "valid http non-loopback", endpoint: "http://evil.example.com:8080", want: false},
-		{name: "http non-loopback IPv4", category: "valid http non-loopback", endpoint: "http://10.0.0.5:8080", want: false},
-		{name: "http non-loopback IPv6", category: "valid http non-loopback", endpoint: "http://[2001:db8::1]:8080", want: false},
+		// Valid HTTPS globally routable IP literals.
+		{name: "https public IPv4 literal 93.184.216.34", category: "valid https remote ip", endpoint: "https://93.184.216.34:8443", want: true},
+		{name: "https public IPv4 literal 1.1.1.1", category: "valid https remote ip", endpoint: "https://1.1.1.1", want: true},
+		{name: "https public IPv4 literal 8.8.8.8", category: "valid https remote ip", endpoint: "https://8.8.8.8:443", want: true},
+		{name: "https public IPv6 literal 2606:4700:4700::1111", category: "valid https remote ip", endpoint: "https://[2606:4700:4700::1111]:8443", want: true},
+		{name: "https public IPv6 literal 2001:4860:4860::8888", category: "valid https remote ip", endpoint: "https://[2001:4860:4860::8888]", want: true},
 
-		// Loopback variants (must return false both with and without dev token).
+		// Valid HTTP non-loopback (rejected by CheckHubTransport and https-only allowlist).
+		{name: "http non-loopback domain", category: "http non-loopback", endpoint: "http://hub.example.com", want: false},
+		{name: "http non-loopback domain with port", category: "http non-loopback", endpoint: "http://evil.example.com:8080", want: false},
+		{name: "http non-loopback public IPv4", category: "http non-loopback", endpoint: "http://93.184.216.34:8080", want: false},
+		{name: "http non-loopback public IPv6", category: "http non-loopback", endpoint: "http://[2606:4700:4700::1111]:8080", want: false},
+
+		// Loopback IPv4 & localhost variants.
 		{name: "http 127.0.0.1", category: "loopback", endpoint: "http://127.0.0.1:8080", want: false},
 		{name: "http 127.0.0.2 alternate loopback", category: "loopback", endpoint: "http://127.0.0.2:8080", want: false},
 		{name: "http 127.255.255.254 loopback range", category: "loopback", endpoint: "http://127.255.255.254:9810", want: false},
@@ -541,14 +595,72 @@ func TestIsRemoteHubEndpoint_EndpointShapes(t *testing.T) {
 		{name: "https localhost", category: "loopback", endpoint: "https://localhost:8443", want: false},
 		{name: "https uppercase LOCALHOST", category: "loopback", endpoint: "https://LOCALHOST:8443", want: false},
 		{name: "https subdomain of localhost", category: "loopback", endpoint: "https://sub.localhost:8443", want: false},
+		{name: "https nested subdomain of localhost", category: "loopback", endpoint: "https://foo.bar.localhost:8443", want: false},
 
-		// IPv6 loopback variants.
-		{name: "http IPv6 loopback [::1]", category: "ipv6 loopback", endpoint: "http://[::1]:8080", want: false},
-		{name: "https IPv6 loopback [::1]", category: "ipv6 loopback", endpoint: "https://[::1]:8443", want: false},
-		{name: "https expanded IPv6 loopback", category: "ipv6 loopback", endpoint: "https://[0:0:0:0:0:0:0:1]:8443", want: false},
-		{name: "https IPv4-mapped IPv6 loopback 127.0.0.1", category: "ipv6 loopback", endpoint: "https://[::ffff:127.0.0.1]:8443", want: false},
-		{name: "https IPv4-mapped IPv6 loopback 127.0.0.2", category: "ipv6 loopback", endpoint: "https://[::ffff:127.0.0.2]:8443", want: false},
-		{name: "https IPv6 loopback with zone id", category: "ipv6 loopback", endpoint: "https://[::1%25lo0]:8443", want: false},
+		// Common loopback / local / container host aliases and single-label names.
+		{name: "https localhost.localdomain", category: "local alias", endpoint: "https://localhost.localdomain:8443", want: false},
+		{name: "https uppercase LOCALHOST.LOCALDOMAIN", category: "local alias", endpoint: "https://LOCALHOST.LOCALDOMAIN:8443", want: false},
+		{name: "https ip6-localhost", category: "local alias", endpoint: "https://ip6-localhost:8443", want: false},
+		{name: "https ip6-loopback", category: "local alias", endpoint: "https://ip6-loopback:8443", want: false},
+		{name: "https mDNS .local host", category: "local alias", endpoint: "https://myhost.local:8443", want: false},
+		{name: "https container host alias host.containers.internal", category: "local alias", endpoint: "https://host.containers.internal:8443", want: false},
+		{name: "https container host alias host.docker.internal", category: "local alias", endpoint: "https://host.docker.internal:8443", want: false},
+		{name: "https container host alias scion-hub.internal", category: "local alias", endpoint: "https://scion-hub.internal:8443", want: false},
+		{name: "https single-label hostname", category: "single-label", endpoint: "https://myhub:8443", want: false},
+		{name: "https single-label underscore hostname", category: "single-label", endpoint: "https://scion_hub:8443", want: false},
+
+		// Non-standard numeric IPv4 encodings (short, decimal, octal, hex, mixed-radix).
+		{name: "short IPv4 127.1", category: "numeric ipv4", endpoint: "https://127.1:8443", want: false},
+		{name: "short IPv4 127.0.1", category: "numeric ipv4", endpoint: "https://127.0.1:8443", want: false},
+		{name: "decimal integer IPv4 2130706433", category: "numeric ipv4", endpoint: "https://2130706433:8443", want: false},
+		{name: "octal IPv4 0177.0.0.1", category: "numeric ipv4", endpoint: "https://0177.0.0.1:8443", want: false},
+		{name: "short octal IPv4 0177.1", category: "numeric ipv4", endpoint: "https://0177.1:8443", want: false},
+		{name: "hex integer IPv4 0x7f000001", category: "numeric ipv4", endpoint: "https://0x7f000001:8443", want: false},
+		{name: "uppercase hex integer IPv4 0X7F000001", category: "numeric ipv4", endpoint: "https://0X7F000001:8443", want: false},
+		{name: "dotted hex IPv4 0x7f.0x0.0x0.0x1", category: "numeric ipv4", endpoint: "https://0x7f.0x0.0x0.0x1:8443", want: false},
+		{name: "short hex IPv4 0x7f.0x1", category: "numeric ipv4", endpoint: "https://0x7f.0x1:8443", want: false},
+		{name: "mixed-radix decimal+hex IPv4 127.0.0.0x1", category: "numeric ipv4", endpoint: "https://127.0.0.0x1:8443", want: false},
+		{name: "mixed-radix octal+hex IPv4 0177.0.0.0x1", category: "numeric ipv4", endpoint: "https://0177.0.0.0x1:8443", want: false},
+		{name: "dotted hex IPv4 ending in hex letter 0x7f.0x0.0x0.0xa", category: "numeric ipv4", endpoint: "https://0x7f.0x0.0x0.0xa:8443", want: false},
+
+		// 0.0.0.0/8, unspecified, private, link-local, multicast, CGNAT, documentation, reserved IPs.
+		{name: "unspecified IPv4 0.0.0.0", category: "non-global ip", endpoint: "https://0.0.0.0:8443", want: false},
+		{name: "0.0.0.0/8 non-zero 0.0.0.1", category: "non-global ip", endpoint: "https://0.0.0.1:8443", want: false},
+		{name: "0.0.0.0/8 non-zero 0.1.2.3", category: "non-global ip", endpoint: "https://0.1.2.3:8443", want: false},
+		{name: "unspecified IPv6 [::]", category: "non-global ip", endpoint: "https://[::]:8443", want: false},
+		{name: "private IPv4 10.0.0.5", category: "non-global ip", endpoint: "https://10.0.0.5:8443", want: false},
+		{name: "private IPv4 172.16.0.1", category: "non-global ip", endpoint: "https://172.16.0.1:8443", want: false},
+		{name: "private IPv4 192.168.1.10", category: "non-global ip", endpoint: "https://192.168.1.10:8443", want: false},
+		{name: "private IPv6 ULA [fc00::1]", category: "non-global ip", endpoint: "https://[fc00::1]:8443", want: false},
+		{name: "private IPv6 ULA [fd12:3456::1]", category: "non-global ip", endpoint: "https://[fd12:3456::1]:8443", want: false},
+		{name: "link-local IPv4 169.254.169.254", category: "non-global ip", endpoint: "https://169.254.169.254:8443", want: false},
+		{name: "link-local IPv6 [fe80::1]", category: "non-global ip", endpoint: "https://[fe80::1]:8443", want: false},
+		{name: "multicast IPv4 224.0.0.1", category: "non-global ip", endpoint: "https://224.0.0.1:8443", want: false},
+		{name: "multicast IPv6 [ff02::1]", category: "non-global ip", endpoint: "https://[ff02::1]:8443", want: false},
+		{name: "CGNAT IPv4 100.64.0.1", category: "non-global ip", endpoint: "https://100.64.0.1:8443", want: false},
+		{name: "TEST-NET-1 192.0.2.1", category: "non-global ip", endpoint: "https://192.0.2.1:8443", want: false},
+		{name: "TEST-NET-2 198.51.100.1", category: "non-global ip", endpoint: "https://198.51.100.1:8443", want: false},
+		{name: "TEST-NET-3 203.0.113.1", category: "non-global ip", endpoint: "https://203.0.113.1:8443", want: false},
+		{name: "IPv6 documentation [2001:db8::1]", category: "non-global ip", endpoint: "https://[2001:db8::1]:8443", want: false},
+		{name: "reserved IPv4 240.0.0.1", category: "non-global ip", endpoint: "https://240.0.0.1:8443", want: false},
+		{name: "broadcast IPv4 255.255.255.255", category: "non-global ip", endpoint: "https://255.255.255.255:8443", want: false},
+
+		// IPv6 loopback, mapped, translated, NAT64, zone IDs, and bracketed IPv4.
+		{name: "http IPv6 loopback [::1]", category: "ipv6 special", endpoint: "http://[::1]:8080", want: false},
+		{name: "https IPv6 loopback [::1]", category: "ipv6 special", endpoint: "https://[::1]:8443", want: false},
+		{name: "https expanded IPv6 loopback", category: "ipv6 special", endpoint: "https://[0:0:0:0:0:0:0:1]:8443", want: false},
+		{name: "https IPv4-mapped IPv6 loopback 127.0.0.1", category: "ipv6 special", endpoint: "https://[::ffff:127.0.0.1]:8443", want: false},
+		{name: "https IPv4-mapped IPv6 loopback 127.0.0.2", category: "ipv6 special", endpoint: "https://[::ffff:127.0.0.2]:8443", want: false},
+		{name: "https IPv4-mapped IPv6 loopback hex 7f00:1", category: "ipv6 special", endpoint: "https://[::ffff:7f00:1]:8443", want: false},
+		{name: "https IPv4-mapped IPv6 unspecified 0.0.0.0", category: "ipv6 special", endpoint: "https://[::ffff:0.0.0.0]:8443", want: false},
+		{name: "https IPv4-mapped IPv6 0.0.0.1", category: "ipv6 special", endpoint: "https://[::ffff:0.0.0.1]:8443", want: false},
+		{name: "https IPv4-mapped IPv6 public 8.8.8.8", category: "ipv6 special", endpoint: "https://[::ffff:8.8.8.8]:8443", want: false},
+		{name: "https IPv4-compatible IPv6 [::127.0.0.1]", category: "ipv6 special", endpoint: "https://[::127.0.0.1]:8443", want: false},
+		{name: "https IPv4-translated SIIT [::ffff:0:127.0.0.1]", category: "ipv6 special", endpoint: "https://[::ffff:0:127.0.0.1]:8443", want: false},
+		{name: "https NAT64 [64:ff9b::127.0.0.1]", category: "ipv6 special", endpoint: "https://[64:ff9b::127.0.0.1]:8443", want: false},
+		{name: "https IPv6 loopback with zone id", category: "ipv6 special", endpoint: "https://[::1%25lo0]:8443", want: false},
+		{name: "https public IPv6 with zone id", category: "ipv6 special", endpoint: "https://[2606:4700:4700::1111%25eth0]:8443", want: false},
+		{name: "https bracketed IPv4 literal", category: "ipv6 special", endpoint: "https://[1.1.1.1]:8443", want: false},
 
 		// Empty and whitespace.
 		{name: "empty string", category: "empty", endpoint: "", want: false},
@@ -557,7 +669,7 @@ func TestIsRemoteHubEndpoint_EndpointShapes(t *testing.T) {
 		{name: "leading space on valid https URL", category: "whitespace", endpoint: " https://hub.example.com", want: false},
 		{name: "trailing space on valid https URL", category: "whitespace", endpoint: "https://hub.example.com ", want: false},
 
-		// Malformed, non-http(s) schemes, wildcards, aliases, and numeric IP encodings.
+		// Malformed, invalid ports, non-https schemes, and non-alphabetic final labels.
 		{name: "bare word", category: "malformed", endpoint: "not-a-url", want: false},
 		{name: "schemeless host", category: "malformed", endpoint: "hub.example.com", want: false},
 		{name: "missing scheme name", category: "malformed", endpoint: "://hub.example.com", want: false},
@@ -566,19 +678,16 @@ func TestIsRemoteHubEndpoint_EndpointShapes(t *testing.T) {
 		{name: "https with trailing colon empty port", category: "malformed", endpoint: "https://hub.example.com:", want: false},
 		{name: "https with port zero", category: "malformed", endpoint: "https://hub.example.com:0", want: false},
 		{name: "https with port above 65535", category: "malformed", endpoint: "https://hub.example.com:70000", want: false},
+		{name: "https with plus-prefixed port", category: "malformed", endpoint: "https://hub.example.com:+443", want: false},
+		{name: "https with leading-zero port", category: "malformed", endpoint: "https://hub.example.com:0443", want: false},
 		{name: "https with query string", category: "malformed", endpoint: "https://hub.example.com?a=1", want: false},
 		{name: "https with fragment", category: "malformed", endpoint: "https://hub.example.com#frag", want: false},
 		{name: "wss scheme", category: "malformed", endpoint: "wss://hub.example.com", want: false},
 		{name: "ftp scheme", category: "malformed", endpoint: "ftp://hub.example.com", want: false},
 		{name: "invalid hostname punctuation", category: "malformed", endpoint: "https://bad!host.example.com", want: false},
-		{name: "unspecified IPv4 0.0.0.0", category: "malformed", endpoint: "https://0.0.0.0:8443", want: false},
-		{name: "unspecified IPv6 [::]", category: "malformed", endpoint: "https://[::]:8443", want: false},
-		{name: "container host alias host.containers.internal", category: "malformed", endpoint: "https://host.containers.internal:8443", want: false},
-		{name: "container host alias host.docker.internal", category: "malformed", endpoint: "https://host.docker.internal:8443", want: false},
-		{name: "abbreviated numeric IPv4 127.1", category: "malformed", endpoint: "https://127.1:8443", want: false},
-		{name: "decimal integer IPv4 2130706433", category: "malformed", endpoint: "https://2130706433:8443", want: false},
-		{name: "octal IPv4 0177.0.0.1", category: "malformed", endpoint: "https://0177.0.0.1:8443", want: false},
-		{name: "hex integer IPv4 0x7f000001", category: "malformed", endpoint: "https://0x7f000001:8443", want: false},
+		{name: "invalid hostname underscore", category: "malformed", endpoint: "https://bad_label.example.com", want: false},
+		{name: "numeric final label", category: "malformed", endpoint: "https://hub.example.123", want: false},
+		{name: "single-letter final label", category: "malformed", endpoint: "https://hub.a", want: false},
 
 		// Userinfo / '@'.
 		{name: "https user and password", category: "userinfo", endpoint: "https://user:pass@hub.example.com", want: false},
@@ -590,9 +699,10 @@ func TestIsRemoteHubEndpoint_EndpointShapes(t *testing.T) {
 		{name: "http localhost with trailing dot", category: "trailing dot", endpoint: "http://localhost.:8080", want: false},
 		{name: "https localhost with trailing dot", category: "trailing dot", endpoint: "https://localhost.:8443", want: false},
 		{name: "https uppercase LOCALHOST with trailing dot", category: "trailing dot", endpoint: "https://LOCALHOST.:8443", want: false},
-		{name: "https IPv4 literal with trailing dot", category: "trailing dot", endpoint: "https://127.0.0.1.:8443", want: false},
+		{name: "https localhost.localdomain with trailing dot", category: "trailing dot", endpoint: "https://localhost.localdomain.:8443", want: false},
+		{name: "https IPv4 loopback with trailing dot", category: "trailing dot", endpoint: "https://127.0.0.1.:8443", want: false},
+		{name: "https public IPv4 with trailing dot", category: "trailing dot", endpoint: "https://1.1.1.1.:8443", want: false},
 		{name: "https remote domain with double trailing dot", category: "trailing dot", endpoint: "https://hub.example.com..", want: false},
-		{name: "https remote FQDN with single trailing dot", category: "trailing dot", endpoint: "https://hub.example.com.", want: true},
 	}
 
 	tokenEnvs := []struct {

@@ -18,7 +18,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -30,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
-	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -234,12 +233,20 @@ const hubOnlyInitHint = "To use a remote Hub without a local container runtime, 
 // Hub URL for which 'scion init' and 'scion init --machine' may skip the local
 // ~/.scion/ prerequisite and local container-runtime detection.
 //
-// It fails closed: empty strings, leading/trailing whitespace, malformed URLs,
-// non-http(s) schemes, userinfo/'@', queries, fragments, invalid ports,
-// plaintext non-loopback HTTP, unspecified bind addresses (0.0.0.0, ::),
-// container host aliases, and all loopback variants (localhost regardless of
-// case or trailing dot, *.localhost, 127.0.0.0/8, ::1, IPv4-mapped loopback,
-// and non-standard numeric IPv4 forms) return false so local checks stay on.
+// It uses a fail-closed allowlist: endpoint must pass config.ValidateHubURL and
+// config.CheckHubTransport, use https://, have no surrounding whitespace or
+// invalid port, and have a host that is either:
+//   - a multi-label RFC 1123 DNS name with an alphabetic final label (which
+//     excludes all decimal, hex, octal, short, dotted, and mixed-radix IPv4
+//     forms and all IPv6 forms), excluding reserved local domains (localhost,
+//     *.localhost, *.localdomain, *.local) and container host aliases; or
+//   - a globally routable IP literal parsed with net/netip (rejecting loopback,
+//     private, link-local, unspecified, multicast, 0.0.0.0/8, IPv4-mapped IPv6,
+//     zone-scoped IPv6, and other IANA special-purpose ranges).
+//
+// Classification is lexical only: it does not perform DNS lookups or read
+// /etc/hosts, so custom /etc/hosts aliases and DNS names that resolve to
+// loopback are out of scope.
 func isRemoteHubEndpoint(endpoint string) bool {
 	if endpoint == "" || endpoint != strings.TrimSpace(endpoint) {
 		return false
@@ -248,10 +255,13 @@ func isRemoteHubEndpoint(endpoint string) bool {
 		return false
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Opaque != "" || u.Host == "" || strings.HasSuffix(u.Host, ":") {
+	if err != nil || u.Scheme != "https" || u.Opaque != "" || u.Host == "" || strings.HasSuffix(u.Host, ":") {
 		return false
 	}
 	if portStr := u.Port(); portStr != "" {
+		if !isAllASCIIDigits(portStr) || portStr[0] == '0' {
+			return false
+		}
 		port, err := strconv.Atoi(portStr)
 		if err != nil || port < 1 || port > 65535 {
 			return false
@@ -262,58 +272,113 @@ func isRemoteHubEndpoint(endpoint string) bool {
 		return false
 	}
 	if strings.HasPrefix(u.Host, "[") {
-		ip := net.ParseIP(rawHost)
-		return ip != nil && !ip.IsLoopback() && !ip.IsUnspecified()
+		addr, err := netip.ParseAddr(rawHost)
+		return err == nil && addr.Is6() && isGloballyRoutableIP(addr)
 	}
-	if ip := net.ParseIP(rawHost); ip != nil {
-		return !ip.IsLoopback() && !ip.IsUnspecified()
+	if addr, err := netip.ParseAddr(rawHost); err == nil {
+		return addr.Is4() && isGloballyRoutableIP(addr)
 	}
-	if !isValidRemoteHubHostname(rawHost) {
+	return isRemoteHubDNSName(rawHost)
+}
+
+// nonGlobalIPPrefixes lists IANA special-purpose IPv4 and IPv6 ranges that are
+// not globally routable beyond netip.Addr's built-in loopback, private,
+// link-local, unspecified, and multicast predicates.
+var nonGlobalIPPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),       // "this network" (RFC 1122; routes to loopback on Linux)
+	netip.MustParsePrefix("100.64.0.0/10"),   // shared address space / CGNAT (RFC 6598)
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments (RFC 6890)
+	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1 documentation (RFC 5737)
+	netip.MustParsePrefix("192.88.99.0/24"),  // deprecated 6to4 relay anycast (RFC 7526)
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking (RFC 2544)
+	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2 documentation (RFC 5737)
+	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3 documentation (RFC 5737)
+	netip.MustParsePrefix("240.0.0.0/4"),     // reserved for future use + limited broadcast
+	netip.MustParsePrefix("::/96"),           // deprecated IPv4-compatible IPv6
+	netip.MustParsePrefix("::ffff:0:0/96"),   // IPv4-mapped IPv6
+	netip.MustParsePrefix("::ffff:0:0:0/96"), // IPv4-translated (SIIT, RFC 2765)
+	netip.MustParsePrefix("64:ff9b::/96"),    // NAT64 well-known prefix (RFC 6052)
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // NAT64 local-use prefix (RFC 8215)
+	netip.MustParsePrefix("100::/64"),        // discard-only prefix (RFC 6666)
+	netip.MustParsePrefix("2001::/32"),       // Teredo tunneling (RFC 4380)
+	netip.MustParsePrefix("2001:2::/48"),     // benchmarking (RFC 5180)
+	netip.MustParsePrefix("2001:db8::/32"),   // documentation (RFC 3849)
+	netip.MustParsePrefix("2002::/16"),       // 6to4 tunneling (RFC 3056)
+	netip.MustParsePrefix("fec0::/10"),       // deprecated site-local (RFC 3879)
+}
+
+func isGloballyRoutableIP(addr netip.Addr) bool {
+	if !addr.IsValid() || addr.Zone() != "" || addr.Is4In6() {
 		return false
 	}
-	canon := transportauth.CanonicalHost(rawHost)
-	if config.IsLoopbackHost(canon) || strings.HasSuffix(canon, ".localhost") || config.IsAgentHostAliasHost(canon) {
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() ||
+		addr.IsLoopback() || addr.IsUnspecified() ||
+		addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() ||
+		addr.IsInterfaceLocalMulticast() || addr.IsMulticast() {
 		return false
+	}
+	for _, p := range nonGlobalIPPrefixes {
+		if p.Contains(addr) {
+			return false
+		}
 	}
 	return true
 }
 
-func isValidRemoteHubHostname(rawHost string) bool {
+func isRemoteHubDNSName(rawHost string) bool {
 	h := strings.TrimSuffix(rawHost, ".")
-	if h == "" || len(h) > 253 || strings.HasSuffix(h, ".") || net.ParseIP(h) != nil {
+	if h == "" || len(h) > 253 || strings.HasSuffix(h, ".") {
+		return false
+	}
+	if _, err := netip.ParseAddr(h); err == nil {
 		return false
 	}
 	labels := strings.Split(h, ".")
+	if len(labels) < 2 {
+		return false
+	}
 	for _, label := range labels {
-		if len(label) == 0 || len(label) > 63 || !isValidHostnameLabel(label) {
+		if len(label) == 0 || len(label) > 63 || !isValidDNSLabel(label) {
 			return false
 		}
 	}
 	last := labels[len(labels)-1]
-	if isAllASCIIDigits(last) {
+	if len(last) < 2 || !isAllASCIILetters(last) {
 		return false
 	}
-	if len(labels) == 1 && isHexIntegerLiteral(last) {
+	canon := strings.ToLower(h)
+	switch strings.ToLower(last) {
+	case "localhost", "localdomain", "local":
 		return false
 	}
-	return true
+	return !config.IsAgentHostAliasHost(canon)
 }
 
-func isValidHostnameLabel(label string) bool {
+func isValidDNSLabel(label string) bool {
 	for i := 0; i < len(label); i++ {
 		c := label[i]
-		isAlphaNumUnderscore := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+		isAlphaNum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 		if i == 0 || i == len(label)-1 {
-			if !isAlphaNumUnderscore {
+			if !isAlphaNum {
 				return false
 			}
 			continue
 		}
-		if !isAlphaNumUnderscore && c != '-' {
+		if !isAlphaNum && c != '-' {
 			return false
 		}
 	}
 	return true
+}
+
+func isAllASCIILetters(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 func isAllASCIIDigits(s string) bool {
@@ -323,20 +388,6 @@ func isAllASCIIDigits(s string) bool {
 		}
 	}
 	return len(s) > 0
-}
-
-func isHexIntegerLiteral(s string) bool {
-	if len(s) <= 2 || s[0] != '0' || (s[1] != 'x' && s[1] != 'X') {
-		return false
-	}
-	for i := 2; i < len(s); i++ {
-		c := s[i]
-		isHexDigit := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-		if !isHexDigit {
-			return false
-		}
-	}
-	return true
 }
 
 func appendHubOnlyInitHint(err error) error {
