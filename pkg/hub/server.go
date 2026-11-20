@@ -2815,6 +2815,9 @@ type Server struct {
 	// githubAssociationReportCache bounds the admin association report
 	// (github_app_association_authz.go).
 	githubAssociationReportCache githubAssociationReportCache
+	// githubAssociationRefusalLog deduplicates repeated identical token-mint
+	// association refusal warnings per project (github_app_association_authz.go).
+	githubAssociationRefusalLog githubAssociationRefusalLog
 	// githubRepoAccessCheck performs that check; nil selects
 	// githubapp.CheckUserRepoAccess. Tests replace it at the GitHub boundary.
 	githubRepoAccessCheck func(ctx context.Context, apiBaseURL, userToken, owner, repo string) (githubapp.RepoAccess, error)

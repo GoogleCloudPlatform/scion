@@ -663,6 +663,7 @@ func (s *Server) invalidateGitHubAssociation(projectID string) {
 	s.githubAccessCache.invalidateProject(projectID)
 	s.githubTokenCache.invalidateProject(projectID)
 	s.githubAssociationReportCache.invalidate(projectID)
+	s.githubAssociationRefusalLog.clear(projectID)
 }
 
 // githubAssociationReportEntryFor evaluates p against
@@ -1005,4 +1006,101 @@ func (s *Server) clearProjectGitHubAssociationErrorStatus(ctx context.Context, p
 	if s.events != nil {
 		s.events.PublishProjectUpdated(ctx, project)
 	}
+}
+
+const (
+	// githubAssociationRefusalLogMaxEntries caps the number of projects tracked
+	// for association-refusal log deduplication so memory stays bounded.
+	githubAssociationRefusalLogMaxEntries = 4096
+	// githubAssociationRefusalLogTTL prunes refusal state for projects that have
+	// stopped polling, preventing unbounded per-project retention.
+	githubAssociationRefusalLogTTL = 24 * time.Hour
+)
+
+type githubAssociationRefusalEntry struct {
+	installationID int64
+	reason         string
+	lastSeen       time.Time
+}
+
+// githubAssociationRefusalLog suppresses repeated identical association-refusal
+// warnings for the same (project, installation, reason) while logging on every
+// state change (first refusal, changed installation or reason, or re-refusal
+// after recovery/invalidation). The zero value is ready to use.
+type githubAssociationRefusalLog struct {
+	mu      sync.Mutex
+	entries map[string]githubAssociationRefusalEntry
+
+	// maxEntries and ttl override the package defaults when positive (tests).
+	maxEntries int
+	ttl        time.Duration
+}
+
+// shouldLog reports whether a refusal warning for (projectID, installationID, reason)
+// should be emitted now and updates the tracked state.
+func (l *githubAssociationRefusalLog) shouldLog(projectID string, installationID int64, reason string) bool {
+	now := timeNow()
+	maxEntries := l.maxEntries
+	if maxEntries <= 0 {
+		maxEntries = githubAssociationRefusalLogMaxEntries
+	}
+	ttl := l.ttl
+	if ttl <= 0 {
+		ttl = githubAssociationRefusalLogTTL
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if e, ok := l.entries[projectID]; ok {
+		if e.installationID == installationID && e.reason == reason && now.Sub(e.lastSeen) < ttl {
+			e.lastSeen = now
+			l.entries[projectID] = e
+			return false
+		}
+	}
+
+	if l.entries == nil {
+		l.entries = make(map[string]githubAssociationRefusalEntry)
+	}
+
+	// Prune idle entries on state-change writes so inactive/deleted projects
+	// do not accumulate indefinitely.
+	for k, e := range l.entries {
+		if now.Sub(e.lastSeen) >= ttl {
+			delete(l.entries, k)
+		}
+	}
+
+	// If still at capacity for a new project key, evict the least-recently-seen entry.
+	if _, exists := l.entries[projectID]; !exists && len(l.entries) >= maxEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		first := true
+		for k, e := range l.entries {
+			if first || e.lastSeen.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = e.lastSeen
+				first = false
+			}
+		}
+		if !first {
+			delete(l.entries, oldestKey)
+		}
+	}
+
+	l.entries[projectID] = githubAssociationRefusalEntry{
+		installationID: installationID,
+		reason:         reason,
+		lastSeen:       now,
+	}
+	return true
+}
+
+// clear removes any tracked refusal state for projectID so a subsequent refusal
+// is logged again.
+func (l *githubAssociationRefusalLog) clear(projectID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.entries, projectID)
 }
