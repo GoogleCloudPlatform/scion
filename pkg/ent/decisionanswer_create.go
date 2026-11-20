@@ -72,6 +72,20 @@ func (_c *DecisionAnswerCreate) SetChoiceLabel(v string) *DecisionAnswerCreate {
 	return _c
 }
 
+// SetOtherText sets the "other_text" field.
+func (_c *DecisionAnswerCreate) SetOtherText(v string) *DecisionAnswerCreate {
+	_c.mutation.SetOtherText(v)
+	return _c
+}
+
+// SetNillableOtherText sets the "other_text" field if the given value is not nil.
+func (_c *DecisionAnswerCreate) SetNillableOtherText(v *string) *DecisionAnswerCreate {
+	if v != nil {
+		_c.SetOtherText(*v)
+	}
+	return _c
+}
+
 // SetAnsweredByUserID sets the "answered_by_user_id" field.
 func (_c *DecisionAnswerCreate) SetAnsweredByUserID(v string) *DecisionAnswerCreate {
 	_c.mutation.SetAnsweredByUserID(v)
@@ -500,6 +514,10 @@ func (_c *DecisionAnswerCreate) createSpec() (*DecisionAnswer, *sqlgraph.CreateS
 		_spec.SetField(decisionanswer.FieldChoiceLabel, field.TypeString, value)
 		_node.ChoiceLabel = value
 	}
+	if value, ok := _c.mutation.OtherText(); ok {
+		_spec.SetField(decisionanswer.FieldOtherText, field.TypeString, value)
+		_node.OtherText = &value
+	}
 	if value, ok := _c.mutation.AnsweredByUserID(); ok {
 		_spec.SetField(decisionanswer.FieldAnsweredByUserID, field.TypeString, value)
 		_node.AnsweredByUserID = &value
@@ -674,6 +692,9 @@ func (u *DecisionAnswerUpsertOne) UpdateNewValues() *DecisionAnswerUpsertOne {
 		}
 		if _, exists := u.create.mutation.ChoiceLabel(); exists {
 			s.SetIgnore(decisionanswer.FieldChoiceLabel)
+		}
+		if _, exists := u.create.mutation.OtherText(); exists {
+			s.SetIgnore(decisionanswer.FieldOtherText)
 		}
 		if _, exists := u.create.mutation.AnsweredByName(); exists {
 			s.SetIgnore(decisionanswer.FieldAnsweredByName)
@@ -978,6 +999,9 @@ func (u *DecisionAnswerUpsertBulk) UpdateNewValues() *DecisionAnswerUpsertBulk {
 			}
 			if _, exists := b.mutation.ChoiceLabel(); exists {
 				s.SetIgnore(decisionanswer.FieldChoiceLabel)
+			}
+			if _, exists := b.mutation.OtherText(); exists {
+				s.SetIgnore(decisionanswer.FieldOtherText)
 			}
 			if _, exists := b.mutation.AnsweredByName(); exists {
 				s.SetIgnore(decisionanswer.FieldAnsweredByName)

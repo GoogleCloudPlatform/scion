@@ -53,11 +53,15 @@ var errDecisionRace = errors.New("concurrent decision write")
 // key need up to n-1 retries for the last one.
 const maxDecisionRaceRetries = 5
 
-// markDecisionRace wraps a constraint violation as errDecisionRace and
-// maps any other error as usual.
+// markDecisionRace wraps a constraint violation as errDecisionRace, maps Ent
+// field validation failures to store.ErrInvalidInput, and maps any other error
+// as usual.
 func markDecisionRace(err error) error {
 	if ent.IsConstraintError(err) {
 		return fmt.Errorf("%w: %v", errDecisionRace, err)
+	}
+	if ent.IsValidationError(err) {
+		return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
 	}
 	return mapError(err)
 }
@@ -118,7 +122,23 @@ func validateDecisionPromptInput(in *store.DecisionPromptInput) error {
 			}
 			seen[norm] = true
 		}
-		if d.Question == "" || len(d.Choices) < messages.MinChoicesPerDecision {
+		minChoices := messages.MinChoicesPerDecision
+		if d.Other != nil {
+			minChoices = messages.MinChoicesPerDecisionWithOther
+			if strings.TrimSpace(d.Other.Label) == "" {
+				return fmt.Errorf("%w: decision %d has an empty other label", store.ErrInvalidInput, i)
+			}
+			if utf8.RuneCountInString(d.Other.Label) > messages.MaxChoiceLabelLen {
+				return fmt.Errorf("%w: decision %d other label exceeds %d characters", store.ErrInvalidInput, i, messages.MaxChoiceLabelLen)
+			}
+			if utf8.RuneCountInString(d.Other.Description) > messages.MaxChoiceDescriptionLen {
+				return fmt.Errorf("%w: decision %d other description exceeds %d characters", store.ErrInvalidInput, i, messages.MaxChoiceDescriptionLen)
+			}
+			if utf8.RuneCountInString(d.Other.Placeholder) > messages.MaxOtherPlaceholderLen {
+				return fmt.Errorf("%w: decision %d other placeholder exceeds %d characters", store.ErrInvalidInput, i, messages.MaxOtherPlaceholderLen)
+			}
+		}
+		if d.Question == "" || len(d.Choices) < minChoices {
 			return fmt.Errorf("%w: decision %d is not normalized", store.ErrInvalidInput, i)
 		}
 	}
@@ -327,6 +347,12 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 			SetChoices(d.Choices).
 			SetNillableDefaultChoiceID(nullableString(d.DefaultChoiceID)).
 			SetCreatedAt(now)
+		if d.Other != nil {
+			cr.SetAllowOther(true).
+				SetOtherLabel(d.Other.Label).
+				SetNillableOtherDescription(nullableString(d.Other.Description)).
+				SetNillableOtherPlaceholder(nullableString(d.Other.Placeholder))
+		}
 		if i == 0 {
 			cr.SetIntroLength(introLen)
 		}
@@ -626,8 +652,11 @@ func validateRecordAnswerInput(in *store.RecordAnswerInput) error {
 	if in.ChoiceID == "" {
 		return fmt.Errorf("%w: an answer needs a choice id", store.ErrInvalidInput)
 	}
-	if messages.IsReservedChoiceID(in.ChoiceID) {
+	if messages.IsReservedChoiceID(in.ChoiceID) && in.ChoiceID != messages.ChoiceIDOther {
 		return fmt.Errorf("%w: choice %q is reserved", store.ErrInvalidInput, in.ChoiceID)
+	}
+	if _, verr := messages.NormalizeOtherText(in.ChoiceID, in.OtherText); verr != nil {
+		return fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
 	}
 	if err := decisionanswer.ProvenanceValidator(decisionanswer.Provenance(in.Provenance)); err != nil {
 		return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
@@ -654,9 +683,19 @@ func validateRecordAnswerInput(in *store.RecordAnswerInput) error {
 }
 
 // sameAnswer reports whether an existing row is the answer in describes:
-// same choice and same answerer.
-func sameAnswer(row *ent.DecisionAnswer, in *store.RecordAnswerInput) bool {
+// same (choice_id, other_text), non-dismiss outcome, and same answerer.
+func sameAnswer(row *ent.DecisionAnswer, in *store.RecordAnswerInput, otherText string) bool {
+	if row.Outcome == decisionanswer.OutcomeDismiss {
+		return false
+	}
 	if row.ChoiceID != in.ChoiceID {
+		return false
+	}
+	rowOther := ""
+	if row.OtherText != nil {
+		rowOther = *row.OtherText
+	}
+	if rowOther != otherText {
 		return false
 	}
 	if in.AnsweredByUserID != "" || row.AnsweredByUserID != nil {
@@ -669,12 +708,20 @@ func sameAnswer(row *ent.DecisionAnswer, in *store.RecordAnswerInput) bool {
 // it is the same answer. ok is false when there is no such row;
 // ErrDecisionAnswerConflict when the key names a different answer.
 func (c *CompositeStore) replayableAnswer(ctx context.Context, in *store.RecordAnswerInput) (*store.DecisionAnswer, bool, error) {
+	otherText, verr := messages.NormalizeOtherText(in.ChoiceID, in.OtherText)
+	if verr != nil {
+		return nil, false, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+	}
 	rowID, err := parseGetID(in.DecisionRowID)
 	if err != nil {
 		return nil, false, err
 	}
 	row, err := c.client.DecisionAnswer.Query().
-		Where(decisionanswer.DecisionRowID(rowID), decisionanswer.IdempotencyKey(in.IdempotencyKey)).
+		Where(
+			decisionanswer.DecisionRowID(rowID),
+			decisionanswer.IdempotencyKey(in.IdempotencyKey),
+			decisionanswer.OutcomeNEQ(decisionanswer.OutcomeDismiss),
+		).
 		Only(ctx)
 	if ent.IsNotFound(err) {
 		return nil, false, nil
@@ -682,7 +729,7 @@ func (c *CompositeStore) replayableAnswer(ctx context.Context, in *store.RecordA
 	if err != nil {
 		return nil, false, mapError(err)
 	}
-	if !sameAnswer(row, in) {
+	if !sameAnswer(row, in, otherText) {
 		return nil, false, fmt.Errorf("%w: the idempotency key was used for a different answer", store.ErrDecisionAnswerConflict)
 	}
 	return answerToStore(row), true, nil
@@ -691,6 +738,10 @@ func (c *CompositeStore) replayableAnswer(ctx context.Context, in *store.RecordA
 // recordAnswerTx is RecordAnswer inside the transaction c runs in.
 func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAnswerInput) (*store.DecisionAnswer, bool, error) {
 	client := c.client
+	otherText, verr := messages.NormalizeOtherText(in.ChoiceID, in.OtherText)
+	if verr != nil {
+		return nil, false, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+	}
 	rowID, err := parseGetID(in.DecisionRowID)
 	if err != nil {
 		return nil, false, err
@@ -724,9 +775,20 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		}
 	}
 	var label string
-	for _, ch := range row.Choices {
-		if ch.ID == in.ChoiceID {
-			label = ch.Label
+	if in.ChoiceID == messages.ChoiceIDOther {
+		if !row.AllowOther {
+			return nil, false, fmt.Errorf("%w: %s has no choice %q", store.ErrInvalidInput, row.Key, in.ChoiceID)
+		}
+		if row.OtherLabel != nil && *row.OtherLabel != "" {
+			label = *row.OtherLabel
+		} else {
+			label = messages.DefaultOtherLabel
+		}
+	} else {
+		for _, ch := range row.Choices {
+			if ch.ID == in.ChoiceID {
+				label = ch.Label
+			}
 		}
 	}
 	if label == "" {
@@ -740,7 +802,7 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 	if outcome == "" {
 		outcome = store.DecisionOutcomeAnswer
 	}
-	if err := checkAnswerPreconditions(row, existing[rowID], in, outcome); err != nil {
+	if err := checkAnswerPreconditions(row, existing[rowID], in, otherText, outcome); err != nil {
 		return nil, false, err
 	}
 
@@ -759,6 +821,7 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		SetQuestionText(row.Question).
 		SetChoiceID(in.ChoiceID).
 		SetChoiceLabel(label).
+		SetNillableOtherText(nullableString(otherText)).
 		SetNillableAnsweredByUserID(nullableString(in.AnsweredByUserID)).
 		SetAnsweredByName(in.AnsweredByName).
 		SetAnsweredByEmail(in.AnsweredByEmail).
@@ -769,7 +832,7 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		SetNillableAuthorizingUserID(nullableString(in.AuthorizingUserID)).
 		SetNillableDelegationGrantID(nullableString(in.DelegationGrantID)).
 		SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
-		SetMatchedDefault(row.DefaultChoiceID != nil && *row.DefaultChoiceID == in.ChoiceID).
+		SetMatchedDefault(in.ChoiceID != messages.ChoiceIDOther && row.DefaultChoiceID != nil && *row.DefaultChoiceID == in.ChoiceID).
 		SetCreatedAt(now)
 	if in.InterpretedByAgentID != "" {
 		aid, err := parseUUID(in.InterpretedByAgentID)
@@ -1119,7 +1182,7 @@ func replayableAnswerSet(ctx context.Context, client *ent.Client, rows []*ent.De
 // with no answer of either kind; a direct answer over an agent_interpreted
 // one comes only from the user it records, as a confirm (same choice) or
 // an override (another choice); every other answer is outcome answer.
-func checkAnswerPreconditions(row *ent.Decision, existing []*ent.DecisionAnswer, in *store.RecordAnswerInput, outcome string) error {
+func checkAnswerPreconditions(row *ent.Decision, existing []*ent.DecisionAnswer, in *store.RecordAnswerInput, otherText, outcome string) error {
 	if in.Provenance == store.DecisionProvenanceAgentInterpreted && len(existing) > 0 {
 		return fmt.Errorf("%w: version %d of %s is already answered", store.ErrDecisionAnswerConflict, row.Version, row.Key)
 	}
@@ -1147,8 +1210,12 @@ func checkAnswerPreconditions(row *ent.Decision, existing []*ent.DecisionAnswer,
 	if interpreted.AnsweredByUserID == nil || *interpreted.AnsweredByUserID != in.AnsweredByUserID {
 		return fmt.Errorf("%w: version %d of %s", store.ErrNotRecordedAnswerer, row.Version, row.Key)
 	}
+	interpretedOther := ""
+	if interpreted.OtherText != nil {
+		interpretedOther = *interpreted.OtherText
+	}
 	want := store.DecisionOutcomeConfirm
-	if interpreted.ChoiceID != in.ChoiceID {
+	if interpreted.ChoiceID != in.ChoiceID || interpretedOther != otherText {
 		want = store.DecisionOutcomeOverride
 	}
 	if outcome != want {
@@ -1178,6 +1245,20 @@ func decisionToStore(r *ent.Decision) *store.Decision {
 		ReplacedAt:     r.ReplacedAt,
 		WithdrawnAt:    r.WithdrawnAt,
 		DismissedAt:    r.DismissedAt,
+	}
+	if r.AllowOther {
+		lbl := messages.DefaultOtherLabel
+		if r.OtherLabel != nil && *r.OtherLabel != "" {
+			lbl = *r.OtherLabel
+		}
+		opt := &messages.OtherOption{Label: lbl}
+		if r.OtherDescription != nil {
+			opt.Description = *r.OtherDescription
+		}
+		if r.OtherPlaceholder != nil {
+			opt.Placeholder = *r.OtherPlaceholder
+		}
+		d.Other = opt
 	}
 	if r.WithdrawnReason != nil {
 		d.WithdrawnReason = *r.WithdrawnReason
@@ -1227,6 +1308,9 @@ func answerToStore(r *ent.DecisionAnswer) *store.DecisionAnswer {
 		Surface:           string(r.Surface),
 		ResponseMessageID: r.ResponseMessageID.String(),
 		CreatedAt:         r.CreatedAt,
+	}
+	if r.OtherText != nil {
+		a.OtherText = *r.OtherText
 	}
 	if r.AnsweredByUserID != nil {
 		a.AnsweredByUserID = *r.AnsweredByUserID

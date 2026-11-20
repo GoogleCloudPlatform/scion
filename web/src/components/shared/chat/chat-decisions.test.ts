@@ -896,3 +896,349 @@ describe('Phase 2: single card interpreted, confirm, and change (Mocks P2-1, P2-
     });
   });
 });
+
+describe('single Other free-form option (ptone/scion#8152)', () => {
+  function viewWithOther(over: Partial<DecisionView> = {}): DecisionView {
+    return view({
+      key: 'region',
+      ref: 'region',
+      question: 'Which `region` for the canary?',
+      defaultChoiceId: 'us-central1',
+      choices: [
+        { id: 'us-central1', label: 'us-central1' },
+        { id: 'europe-west1', label: 'europe-west1' },
+      ],
+      other: {
+        label: 'Another region',
+        placeholder: 'e.g. europe-west4',
+      },
+      ...over,
+    });
+  }
+
+  function typeIntoOther(el: ScionChatDecisions, val: string): HTMLElement {
+    const input = root(el).querySelector<HTMLElement & { value: string }>('.editor sl-input')!;
+    input.value = val;
+    input.dispatchEvent(new Event('sl-input', { bubbles: true, composed: true }));
+    return input;
+  }
+
+  it('renders Other last with pencil and ellipsis, opens the inline editor without posting, and moves focus', async () => {
+    const focusMoves: Event[] = [];
+    const onMove = (e: Event): void => {
+      focusMoves.push(e);
+    };
+    window.addEventListener('scion-focus-moved', onMove);
+    try {
+      const el = await mount([viewWithOther()]);
+      await settle(el);
+
+      const allButtons = Array.from(root(el).querySelectorAll('.choices [data-choice]'));
+      expect(allButtons.map((b) => b.getAttribute('data-choice'))).toEqual([
+        'us-central1',
+        'europe-west1',
+        '$other',
+      ]);
+      const otherBtn = button(el, '$other');
+      expect(otherBtn.classList.contains('other-btn')).toBe(true);
+      expect(otherBtn.querySelector('sl-icon')?.getAttribute('name')).toBe('pencil');
+      expect(otherBtn.textContent?.trim()).toBe('Another region…');
+      expect(root(el).querySelector('.editor')).toBeNull();
+
+      otherBtn.click();
+      await settle(el);
+      expect(apiFetch).not.toHaveBeenCalled();
+
+      const editor = root(el).querySelector('.editor');
+      expect(editor).not.toBeNull();
+      expect(editor?.querySelector('.lab')?.textContent).toBe('Another region');
+      const input = editor?.querySelector('sl-input');
+      expect(input?.hasAttribute('maxlength')).toBe(false);
+      expect(input?.getAttribute('placeholder')).toBe('e.g. europe-west4');
+      expect(input?.getAttribute('label')).toBe('Which region for the canary?');
+      expect(focusMoves.length).toBeGreaterThanOrEqual(1);
+
+      // Send starts disabled while empty or whitespace-only.
+      const sendBtn = editor!.querySelector<HTMLElement>('[data-action="send-other"]')!;
+      expect(sendBtn.hasAttribute('disabled')).toBe(true);
+      typeIntoOther(el, '   ');
+      await el.updateComplete;
+      expect(sendBtn.hasAttribute('disabled')).toBe(true);
+    } finally {
+      window.removeEventListener('scion-focus-moved', onMove);
+    }
+  });
+
+  it('counts trimmed runes (including astral emoji), warns from 180, and disables Send above 200', async () => {
+    const el = await mount([viewWithOther({ other: { label: 'Other' } })]);
+    button(el, '$other').click();
+    await settle(el);
+
+    const input = root(el).querySelector('.editor sl-input')!;
+    const sendBtn = root(el).querySelector<HTMLElement>('[data-action="send-other"]')!;
+    expect(input.getAttribute('placeholder')).toBe('Type your answer');
+    expect(input.hasAttribute('maxlength')).toBe(false);
+
+    // Surrounding whitespace is excluded from the counter (158 trimmed runes < 160).
+    typeIntoOther(el, `   ${'a'.repeat(158)}   `);
+    await el.updateComplete;
+    expect(root(el).querySelector('.editor .cnt')).toBeNull();
+
+    // Astral emoji use 2 UTF-16 code units per rune: 160 emoji = 320 UTF-16 units, 160 runes.
+    typeIntoOther(el, '🚀'.repeat(160));
+    await el.updateComplete;
+    const cnt160 = root(el).querySelector('.editor .cnt');
+    expect(cnt160?.textContent).toBe('160 / 200');
+    expect(cnt160?.classList.contains('warn')).toBe(false);
+    expect(cnt160?.classList.contains('over')).toBe(false);
+    expect(cnt160?.hasAttribute('aria-live')).toBe(false);
+    expect(sendBtn.hasAttribute('disabled')).toBe(false);
+
+    typeIntoOther(el, '🚀'.repeat(180));
+    await el.updateComplete;
+    const cnt180 = root(el).querySelector('.editor .cnt');
+    expect(cnt180?.textContent).toBe('180 / 200');
+    expect(cnt180?.classList.contains('warn')).toBe(true);
+    expect(cnt180?.getAttribute('aria-live')).toBe('polite');
+    expect(sendBtn.hasAttribute('disabled')).toBe(false);
+
+    typeIntoOther(el, `  ${'🚀'.repeat(200)}  `);
+    await el.updateComplete;
+    expect(root(el).querySelector('.editor .cnt')?.textContent).toBe('200 / 200');
+    expect(sendBtn.hasAttribute('disabled')).toBe(false);
+
+    typeIntoOther(el, '🚀'.repeat(201));
+    await el.updateComplete;
+    const cnt201 = root(el).querySelector('.editor .cnt');
+    expect(cnt201?.textContent).toBe('201 / 200');
+    expect(cnt201?.classList.contains('over')).toBe(true);
+    expect(cnt201?.getAttribute('aria-live')).toBe('polite');
+    expect(sendBtn.hasAttribute('disabled')).toBe(true);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle(el);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('sends trimmed text on Enter, renders quoted literal plain text when answered, and ignores card Enter while open', async () => {
+    const el = await mount([viewWithOther()]);
+    const events: DecisionAnsweredDetail[] = [];
+    el.addEventListener('decision-answered', (e) =>
+      events.push((e as CustomEvent<DecisionAnsweredDetail>).detail)
+    );
+
+    button(el, '$other').click();
+    await settle(el);
+
+    // Card-level Enter does not pick defaultChoiceId while the Other editor is open.
+    card(el).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(apiFetch).not.toHaveBeenCalled();
+
+    const rawText = '  europe-west4 **bold** <script>window.__pwned=1</script> @bot  ';
+    const trimmed = rawText.trim();
+    const decidedOther = viewWithOther({
+      status: 'decided',
+      decision: {
+        choiceId: '$other',
+        label: 'Another region',
+        otherText: trimmed,
+        answeredByUserId: 'u-me',
+        answeredByName: 'Me',
+        provenance: 'direct',
+        surface: 'native',
+        responseMessageId: 'resp-other',
+        at: '2026-11-12T15:44:00Z',
+      },
+    });
+    apiFetch.mockResolvedValueOnce(
+      res(200, { decision: decidedOther, responseMessageId: 'resp-other' })
+    );
+
+    const input = typeIntoOther(el, rawText);
+    await el.updateComplete;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle(el);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(apiFetch.mock.calls[0]![1]?.body as string)).toMatchObject({
+      choice_id: '$other',
+      other_text: trimmed,
+    });
+    expect(events).toHaveLength(1);
+    expect(root(el).querySelector('.editor')).toBeNull();
+
+    // Answered state: Other button filled without ellipsis, quoted text plain (no HTML/Markdown).
+    const chosenBtn = button(el, '$other');
+    expect(chosenBtn.getAttribute('variant')).toBe('primary');
+    expect(chosenBtn.textContent?.trim()).toBe('Another region');
+    const otext = root(el).querySelector('.otext');
+    expect(otext?.textContent).toBe(`“${trimmed}”`);
+    expect(otext?.children.length).toBe(0);
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+    expect(foot(el)).toContain('Answered by you');
+  });
+
+  it('cancels on Escape or Cancel, restores focus to Other, and drops the draft when a fixed choice is clicked or the row changes', async () => {
+    const el = await mount([viewWithOther()]);
+    button(el, '$other').click();
+    await settle(el);
+
+    const input = typeIntoOther(el, 'draft-1');
+    await el.updateComplete;
+
+    let focusMoved = false;
+    window.addEventListener(
+      'scion-focus-moved',
+      () => {
+        focusMoved = true;
+      },
+      { once: true }
+    );
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await settle(el);
+    expect(root(el).querySelector('.editor')).toBeNull();
+    expect(focusMoved).toBe(true);
+
+    // Re-opening starts empty; clicking a fixed choice posts that choice and discards the draft.
+    button(el, '$other').click();
+    await settle(el);
+    expect(root(el).querySelector<HTMLElement & { value: string }>('.editor sl-input')!.value).toBe(
+      ''
+    );
+    typeIntoOther(el, 'draft-2');
+    await el.updateComplete;
+
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: viewWithOther({
+          status: 'decided',
+          decision: {
+            choiceId: 'europe-west1',
+            label: 'europe-west1',
+            answeredByUserId: 'u-me',
+            answeredByName: 'Me',
+            provenance: 'direct',
+            surface: 'native',
+            responseMessageId: 'resp-fixed',
+            at: '2026-11-12T15:45:00Z',
+          },
+        }),
+        responseMessageId: 'resp-fixed',
+      })
+    );
+    button(el, 'europe-west1').click();
+    await settle(el);
+    expect(JSON.parse(apiFetch.mock.calls[0]![1]?.body as string)).toEqual({
+      choice_id: 'europe-west1',
+      idempotency_key: expect.any(String),
+    });
+    expect(root(el).querySelector('.editor')).toBeNull();
+
+    // External update to replaced/withdrawn/dismissed/decided drops open editor & draft.
+    const el2 = await mount([viewWithOther()]);
+    button(el2, '$other').click();
+    await settle(el2);
+    typeIntoOther(el2, 'draft-3');
+    el2.decisions = [viewWithOther({ status: 'withdrawn' })];
+    await settle(el2);
+    expect(root(el2).querySelector('.editor')).toBeNull();
+    expect(button(el2, '$other').hasAttribute('disabled')).toBe(true);
+
+    const el3 = await mount([viewWithOther()]);
+    button(el3, '$other').click();
+    await settle(el3);
+    typeIntoOther(el3, 'draft-4');
+    el3.decisions = [viewWithOther({ status: 'dismissed' })];
+    await settle(el3);
+    expect(root(el3).querySelector('.editor')).toBeNull();
+    expect(button(el3, '$other').hasAttribute('disabled')).toBe(true);
+  });
+
+  it('renders stacked layout (O4) with 1 fixed choice and Other inline description + inset editor', async () => {
+    const el = await mount([
+      view({
+        key: 'proceed',
+        ref: 'proceed',
+        question: 'Tag `v0.9` now?',
+        defaultChoiceId: '1',
+        choices: [{ id: '1', label: 'Yes, tag now', description: 'Tags and drafts notes' }],
+        other: {
+          label: 'Something else',
+          description: 'Tell me `what` to do instead',
+        },
+      }),
+    ]);
+    await settle(el);
+
+    expect(root(el).querySelector('.choices')?.classList.contains('stack')).toBe(true);
+    const otherRow = button(el, '$other');
+    expect(otherRow.classList.contains('other-opt')).toBe(true);
+    expect(otherRow.querySelector('.desc code')?.textContent).toBe('what');
+
+    otherRow.click();
+    await settle(el);
+    const sel = root(el).querySelector('.opt.sel');
+    expect(sel).not.toBeNull();
+    expect(sel?.querySelector('.editor.inset')).not.toBeNull();
+    expect(sel?.querySelector('.editor.inset .lab')).toBeNull();
+  });
+
+  it('keeps the draft open on 400 validation_error and closes to the winner on 409 already_answered', async () => {
+    const el = await mount([viewWithOther()]);
+    button(el, '$other').click();
+    await settle(el);
+
+    const input = typeIntoOther(el, 'keep-this-draft');
+    await el.updateComplete;
+
+    // 400 validation_error: danger toast, editor stays open with draft preserved.
+    apiFetch.mockResolvedValueOnce(
+      res(400, {
+        error: {
+          code: 'validation_error',
+          message: 'other_text cannot contain control characters',
+        },
+      })
+    );
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle(el);
+    expect(showToast).toHaveBeenCalledWith(
+      'other_text cannot contain control characters',
+      'danger'
+    );
+    expect(root(el).querySelector('.editor')).not.toBeNull();
+    expect(root(el).querySelector<HTMLElement & { value: string }>('.editor sl-input')?.value).toBe(
+      'keep-this-draft'
+    );
+
+    // 409 already_answered while editor is open: warning toast, editor closes, winner applied.
+    showToast.mockClear();
+    const winner = viewWithOther({
+      status: 'decided',
+      decision: {
+        choiceId: 'europe-west1',
+        label: 'europe-west1',
+        answeredByUserId: 'u-bob',
+        answeredByName: 'Bob',
+        provenance: 'direct',
+        surface: 'native',
+        responseMessageId: 'resp-bob',
+        at: '2026-11-12T15:50:00Z',
+      },
+    });
+    apiFetch.mockResolvedValueOnce(
+      res(409, {
+        error: {
+          code: 'already_answered',
+          message: 'already answered',
+          details: { decision: winner },
+        },
+      })
+    );
+    root(el).querySelector<HTMLElement>('[data-action="send-other"]')!.click();
+    await settle(el);
+    expect(showToast).toHaveBeenCalledWith('Already answered by Bob.', 'warning');
+    expect(root(el).querySelector('.editor')).toBeNull();
+    expect(button(el, 'europe-west1').getAttribute('variant')).toBe('primary');
+    expect(foot(el)).toMatch(/^Answered by Bob · /);
+  });
+});

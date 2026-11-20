@@ -39038,6 +39038,10 @@ type DecisionMutation struct {
 	choices           *[]messages.Choice
 	appendchoices     []messages.Choice
 	default_choice_id *string
+	allow_other       *bool
+	other_label       *string
+	other_description *string
+	other_placeholder *string
 	intro_length      *int
 	addintro_length   *int
 	status            *decision.Status
@@ -39756,6 +39760,189 @@ func (m *DecisionMutation) ResetDefaultChoiceID() {
 	delete(m.clearedFields, decision.FieldDefaultChoiceID)
 }
 
+// SetAllowOther sets the "allow_other" field.
+func (m *DecisionMutation) SetAllowOther(b bool) {
+	m.allow_other = &b
+}
+
+// AllowOther returns the value of the "allow_other" field in the mutation.
+func (m *DecisionMutation) AllowOther() (r bool, exists bool) {
+	v := m.allow_other
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAllowOther returns the old "allow_other" field's value of the Decision entity.
+// If the Decision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionMutation) OldAllowOther(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAllowOther is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAllowOther requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAllowOther: %w", err)
+	}
+	return oldValue.AllowOther, nil
+}
+
+// ResetAllowOther resets all changes to the "allow_other" field.
+func (m *DecisionMutation) ResetAllowOther() {
+	m.allow_other = nil
+}
+
+// SetOtherLabel sets the "other_label" field.
+func (m *DecisionMutation) SetOtherLabel(s string) {
+	m.other_label = &s
+}
+
+// OtherLabel returns the value of the "other_label" field in the mutation.
+func (m *DecisionMutation) OtherLabel() (r string, exists bool) {
+	v := m.other_label
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOtherLabel returns the old "other_label" field's value of the Decision entity.
+// If the Decision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionMutation) OldOtherLabel(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOtherLabel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOtherLabel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOtherLabel: %w", err)
+	}
+	return oldValue.OtherLabel, nil
+}
+
+// ClearOtherLabel clears the value of the "other_label" field.
+func (m *DecisionMutation) ClearOtherLabel() {
+	m.other_label = nil
+	m.clearedFields[decision.FieldOtherLabel] = struct{}{}
+}
+
+// OtherLabelCleared returns if the "other_label" field was cleared in this mutation.
+func (m *DecisionMutation) OtherLabelCleared() bool {
+	_, ok := m.clearedFields[decision.FieldOtherLabel]
+	return ok
+}
+
+// ResetOtherLabel resets all changes to the "other_label" field.
+func (m *DecisionMutation) ResetOtherLabel() {
+	m.other_label = nil
+	delete(m.clearedFields, decision.FieldOtherLabel)
+}
+
+// SetOtherDescription sets the "other_description" field.
+func (m *DecisionMutation) SetOtherDescription(s string) {
+	m.other_description = &s
+}
+
+// OtherDescription returns the value of the "other_description" field in the mutation.
+func (m *DecisionMutation) OtherDescription() (r string, exists bool) {
+	v := m.other_description
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOtherDescription returns the old "other_description" field's value of the Decision entity.
+// If the Decision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionMutation) OldOtherDescription(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOtherDescription is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOtherDescription requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOtherDescription: %w", err)
+	}
+	return oldValue.OtherDescription, nil
+}
+
+// ClearOtherDescription clears the value of the "other_description" field.
+func (m *DecisionMutation) ClearOtherDescription() {
+	m.other_description = nil
+	m.clearedFields[decision.FieldOtherDescription] = struct{}{}
+}
+
+// OtherDescriptionCleared returns if the "other_description" field was cleared in this mutation.
+func (m *DecisionMutation) OtherDescriptionCleared() bool {
+	_, ok := m.clearedFields[decision.FieldOtherDescription]
+	return ok
+}
+
+// ResetOtherDescription resets all changes to the "other_description" field.
+func (m *DecisionMutation) ResetOtherDescription() {
+	m.other_description = nil
+	delete(m.clearedFields, decision.FieldOtherDescription)
+}
+
+// SetOtherPlaceholder sets the "other_placeholder" field.
+func (m *DecisionMutation) SetOtherPlaceholder(s string) {
+	m.other_placeholder = &s
+}
+
+// OtherPlaceholder returns the value of the "other_placeholder" field in the mutation.
+func (m *DecisionMutation) OtherPlaceholder() (r string, exists bool) {
+	v := m.other_placeholder
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOtherPlaceholder returns the old "other_placeholder" field's value of the Decision entity.
+// If the Decision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionMutation) OldOtherPlaceholder(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOtherPlaceholder is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOtherPlaceholder requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOtherPlaceholder: %w", err)
+	}
+	return oldValue.OtherPlaceholder, nil
+}
+
+// ClearOtherPlaceholder clears the value of the "other_placeholder" field.
+func (m *DecisionMutation) ClearOtherPlaceholder() {
+	m.other_placeholder = nil
+	m.clearedFields[decision.FieldOtherPlaceholder] = struct{}{}
+}
+
+// OtherPlaceholderCleared returns if the "other_placeholder" field was cleared in this mutation.
+func (m *DecisionMutation) OtherPlaceholderCleared() bool {
+	_, ok := m.clearedFields[decision.FieldOtherPlaceholder]
+	return ok
+}
+
+// ResetOtherPlaceholder resets all changes to the "other_placeholder" field.
+func (m *DecisionMutation) ResetOtherPlaceholder() {
+	m.other_placeholder = nil
+	delete(m.clearedFields, decision.FieldOtherPlaceholder)
+}
+
 // SetIntroLength sets the "intro_length" field.
 func (m *DecisionMutation) SetIntroLength(i int) {
 	m.intro_length = &i
@@ -40212,7 +40399,7 @@ func (m *DecisionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 27)
 	if m.project_id != nil {
 		fields = append(fields, decision.FieldProjectID)
 	}
@@ -40254,6 +40441,18 @@ func (m *DecisionMutation) Fields() []string {
 	}
 	if m.default_choice_id != nil {
 		fields = append(fields, decision.FieldDefaultChoiceID)
+	}
+	if m.allow_other != nil {
+		fields = append(fields, decision.FieldAllowOther)
+	}
+	if m.other_label != nil {
+		fields = append(fields, decision.FieldOtherLabel)
+	}
+	if m.other_description != nil {
+		fields = append(fields, decision.FieldOtherDescription)
+	}
+	if m.other_placeholder != nil {
+		fields = append(fields, decision.FieldOtherPlaceholder)
 	}
 	if m.intro_length != nil {
 		fields = append(fields, decision.FieldIntroLength)
@@ -40318,6 +40517,14 @@ func (m *DecisionMutation) Field(name string) (ent.Value, bool) {
 		return m.Choices()
 	case decision.FieldDefaultChoiceID:
 		return m.DefaultChoiceID()
+	case decision.FieldAllowOther:
+		return m.AllowOther()
+	case decision.FieldOtherLabel:
+		return m.OtherLabel()
+	case decision.FieldOtherDescription:
+		return m.OtherDescription()
+	case decision.FieldOtherPlaceholder:
+		return m.OtherPlaceholder()
 	case decision.FieldIntroLength:
 		return m.IntroLength()
 	case decision.FieldStatus:
@@ -40373,6 +40580,14 @@ func (m *DecisionMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldChoices(ctx)
 	case decision.FieldDefaultChoiceID:
 		return m.OldDefaultChoiceID(ctx)
+	case decision.FieldAllowOther:
+		return m.OldAllowOther(ctx)
+	case decision.FieldOtherLabel:
+		return m.OldOtherLabel(ctx)
+	case decision.FieldOtherDescription:
+		return m.OldOtherDescription(ctx)
+	case decision.FieldOtherPlaceholder:
+		return m.OldOtherPlaceholder(ctx)
 	case decision.FieldIntroLength:
 		return m.OldIntroLength(ctx)
 	case decision.FieldStatus:
@@ -40497,6 +40712,34 @@ func (m *DecisionMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetDefaultChoiceID(v)
+		return nil
+	case decision.FieldAllowOther:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAllowOther(v)
+		return nil
+	case decision.FieldOtherLabel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOtherLabel(v)
+		return nil
+	case decision.FieldOtherDescription:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOtherDescription(v)
+		return nil
+	case decision.FieldOtherPlaceholder:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOtherPlaceholder(v)
 		return nil
 	case decision.FieldIntroLength:
 		v, ok := value.(int)
@@ -40639,6 +40882,15 @@ func (m *DecisionMutation) ClearedFields() []string {
 	if m.FieldCleared(decision.FieldDefaultChoiceID) {
 		fields = append(fields, decision.FieldDefaultChoiceID)
 	}
+	if m.FieldCleared(decision.FieldOtherLabel) {
+		fields = append(fields, decision.FieldOtherLabel)
+	}
+	if m.FieldCleared(decision.FieldOtherDescription) {
+		fields = append(fields, decision.FieldOtherDescription)
+	}
+	if m.FieldCleared(decision.FieldOtherPlaceholder) {
+		fields = append(fields, decision.FieldOtherPlaceholder)
+	}
 	if m.FieldCleared(decision.FieldReplacedByID) {
 		fields = append(fields, decision.FieldReplacedByID)
 	}
@@ -40679,6 +40931,15 @@ func (m *DecisionMutation) ClearField(name string) error {
 		return nil
 	case decision.FieldDefaultChoiceID:
 		m.ClearDefaultChoiceID()
+		return nil
+	case decision.FieldOtherLabel:
+		m.ClearOtherLabel()
+		return nil
+	case decision.FieldOtherDescription:
+		m.ClearOtherDescription()
+		return nil
+	case decision.FieldOtherPlaceholder:
+		m.ClearOtherPlaceholder()
 		return nil
 	case decision.FieldReplacedByID:
 		m.ClearReplacedByID()
@@ -40747,6 +41008,18 @@ func (m *DecisionMutation) ResetField(name string) error {
 		return nil
 	case decision.FieldDefaultChoiceID:
 		m.ResetDefaultChoiceID()
+		return nil
+	case decision.FieldAllowOther:
+		m.ResetAllowOther()
+		return nil
+	case decision.FieldOtherLabel:
+		m.ResetOtherLabel()
+		return nil
+	case decision.FieldOtherDescription:
+		m.ResetOtherDescription()
+		return nil
+	case decision.FieldOtherPlaceholder:
+		m.ResetOtherPlaceholder()
 		return nil
 	case decision.FieldIntroLength:
 		m.ResetIntroLength()
@@ -40842,6 +41115,7 @@ type DecisionAnswerMutation struct {
 	question_text           *string
 	choice_id               *string
 	choice_label            *string
+	other_text              *string
 	answered_by_user_id     *string
 	answered_by_name        *string
 	answered_by_email       *string
@@ -41274,6 +41548,55 @@ func (m *DecisionAnswerMutation) OldChoiceLabel(ctx context.Context) (v string, 
 // ResetChoiceLabel resets all changes to the "choice_label" field.
 func (m *DecisionAnswerMutation) ResetChoiceLabel() {
 	m.choice_label = nil
+}
+
+// SetOtherText sets the "other_text" field.
+func (m *DecisionAnswerMutation) SetOtherText(s string) {
+	m.other_text = &s
+}
+
+// OtherText returns the value of the "other_text" field in the mutation.
+func (m *DecisionAnswerMutation) OtherText() (r string, exists bool) {
+	v := m.other_text
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOtherText returns the old "other_text" field's value of the DecisionAnswer entity.
+// If the DecisionAnswer object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionAnswerMutation) OldOtherText(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOtherText is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOtherText requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOtherText: %w", err)
+	}
+	return oldValue.OtherText, nil
+}
+
+// ClearOtherText clears the value of the "other_text" field.
+func (m *DecisionAnswerMutation) ClearOtherText() {
+	m.other_text = nil
+	m.clearedFields[decisionanswer.FieldOtherText] = struct{}{}
+}
+
+// OtherTextCleared returns if the "other_text" field was cleared in this mutation.
+func (m *DecisionAnswerMutation) OtherTextCleared() bool {
+	_, ok := m.clearedFields[decisionanswer.FieldOtherText]
+	return ok
+}
+
+// ResetOtherText resets all changes to the "other_text" field.
+func (m *DecisionAnswerMutation) ResetOtherText() {
+	m.other_text = nil
+	delete(m.clearedFields, decisionanswer.FieldOtherText)
 }
 
 // SetAnsweredByUserID sets the "answered_by_user_id" field.
@@ -41990,7 +42313,7 @@ func (m *DecisionAnswerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DecisionAnswerMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.decision_row_id != nil {
 		fields = append(fields, decisionanswer.FieldDecisionRowID)
 	}
@@ -42014,6 +42337,9 @@ func (m *DecisionAnswerMutation) Fields() []string {
 	}
 	if m.choice_label != nil {
 		fields = append(fields, decisionanswer.FieldChoiceLabel)
+	}
+	if m.other_text != nil {
+		fields = append(fields, decisionanswer.FieldOtherText)
 	}
 	if m.answered_by_user_id != nil {
 		fields = append(fields, decisionanswer.FieldAnsweredByUserID)
@@ -42087,6 +42413,8 @@ func (m *DecisionAnswerMutation) Field(name string) (ent.Value, bool) {
 		return m.ChoiceID()
 	case decisionanswer.FieldChoiceLabel:
 		return m.ChoiceLabel()
+	case decisionanswer.FieldOtherText:
+		return m.OtherText()
 	case decisionanswer.FieldAnsweredByUserID:
 		return m.AnsweredByUserID()
 	case decisionanswer.FieldAnsweredByName:
@@ -42144,6 +42472,8 @@ func (m *DecisionAnswerMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldChoiceID(ctx)
 	case decisionanswer.FieldChoiceLabel:
 		return m.OldChoiceLabel(ctx)
+	case decisionanswer.FieldOtherText:
+		return m.OldOtherText(ctx)
 	case decisionanswer.FieldAnsweredByUserID:
 		return m.OldAnsweredByUserID(ctx)
 	case decisionanswer.FieldAnsweredByName:
@@ -42240,6 +42570,13 @@ func (m *DecisionAnswerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetChoiceLabel(v)
+		return nil
+	case decisionanswer.FieldOtherText:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOtherText(v)
 		return nil
 	case decisionanswer.FieldAnsweredByUserID:
 		v, ok := value.(string)
@@ -42398,6 +42735,9 @@ func (m *DecisionAnswerMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *DecisionAnswerMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(decisionanswer.FieldOtherText) {
+		fields = append(fields, decisionanswer.FieldOtherText)
+	}
 	if m.FieldCleared(decisionanswer.FieldAnsweredByUserID) {
 		fields = append(fields, decisionanswer.FieldAnsweredByUserID)
 	}
@@ -42436,6 +42776,9 @@ func (m *DecisionAnswerMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *DecisionAnswerMutation) ClearField(name string) error {
 	switch name {
+	case decisionanswer.FieldOtherText:
+		m.ClearOtherText()
+		return nil
 	case decisionanswer.FieldAnsweredByUserID:
 		m.ClearAnsweredByUserID()
 		return nil
@@ -42491,6 +42834,9 @@ func (m *DecisionAnswerMutation) ResetField(name string) error {
 		return nil
 	case decisionanswer.FieldChoiceLabel:
 		m.ResetChoiceLabel()
+		return nil
+	case decisionanswer.FieldOtherText:
+		m.ResetOtherText()
 		return nil
 	case decisionanswer.FieldAnsweredByUserID:
 		m.ResetAnsweredByUserID()

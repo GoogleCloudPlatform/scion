@@ -88,6 +88,9 @@ func (_u *DecisionAnswerUpdate) sqlSave(ctx context.Context) (_node int, err err
 			}
 		}
 	}
+	if _u.mutation.OtherTextCleared() {
+		_spec.ClearField(decisionanswer.FieldOtherText, field.TypeString)
+	}
 	if value, ok := _u.mutation.AnsweredByUserID(); ok {
 		_spec.SetField(decisionanswer.FieldAnsweredByUserID, field.TypeString, value)
 	}
@@ -225,6 +228,9 @@ func (_u *DecisionAnswerUpdateOne) sqlSave(ctx context.Context) (_node *Decision
 				ps[i](selector)
 			}
 		}
+	}
+	if _u.mutation.OtherTextCleared() {
+		_spec.ClearField(decisionanswer.FieldOtherText, field.TypeString)
 	}
 	if value, ok := _u.mutation.AnsweredByUserID(); ok {
 		_spec.SetField(decisionanswer.FieldAnsweredByUserID, field.TypeString, value)

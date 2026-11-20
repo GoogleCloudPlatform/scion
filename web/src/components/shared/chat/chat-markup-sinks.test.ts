@@ -399,6 +399,11 @@ describe('chat message markup boundary', () => {
           },
           { id: 'no', label: 'No', description: 'Wait for _owner/repo#812_.' },
         ],
+        other: {
+          label: 'Other <img src=x onerror="window.__pwned=1">',
+          description: 'Custom **region** <script>window.__pwned=1</script>',
+          placeholder: 'e.g. <script>window.__pwned=1</script>',
+        },
       },
     ];
     document.body.appendChild(el);
@@ -431,9 +436,9 @@ describe('chat message markup boundary', () => {
     }
     expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
     expect(flagged()).toEqual([]);
-    // The question and both descriptions parse through DOMPurify's policy.
+    // The question, both choice descriptions, and other.description parse through DOMPurify's policy.
     expect(sinkState.calls.filter((c) => c.policy === 'dompurify').length).toBeGreaterThanOrEqual(
-      3
+      4
     );
   });
 

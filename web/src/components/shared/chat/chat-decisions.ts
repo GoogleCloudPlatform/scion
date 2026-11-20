@@ -57,8 +57,10 @@ import {
   dismissResultToast,
   isOnlyTooRecentDismissError,
 } from '../decisions-format.js';
+import { focusElement } from '../focus-moved.js';
 import {
   ANSWERABLE,
+  OTHER_CHOICE_ID,
   actionableReason,
   answerDecision,
   answerDecisionSet,
@@ -68,6 +70,7 @@ import {
   fetchAskerAnswerability,
   isClosedUnanswered,
   isOpenDecision,
+  isOtherAnswer,
   newerDecisionView,
 } from '../../../client/decision-prompts.js';
 import {
@@ -81,7 +84,12 @@ import type {
   DecisionAnswerSurface,
   SetAnswer,
 } from '../../../client/decision-prompts.js';
-import type { DecisionAnswerMode, ChoiceOption, DecisionView } from '../../../shared/types.js';
+import type {
+  DecisionAnswerMode,
+  ChoiceOption,
+  DecisionView,
+  OtherOption,
+} from '../../../shared/types.js';
 
 let hintSeq = 0;
 
@@ -215,6 +223,14 @@ export class ScionChatDecisions extends LitElement {
   /** Single mode: a non-interpreted choice staged in the inline change bar (Mock P2-6). */
   @state()
   private pendingChange: { rowId: string; choiceId: string } | null = null;
+
+  /** Single mode: whether the inline free-form Other editor is open. */
+  @state()
+  private otherOpen = false;
+
+  /** Single mode: draft text in the inline free-form Other editor (memory only). */
+  @state()
+  private otherDraft = '';
 
   /** Rendered question/description markdown, keyed by source text. */
   @state()
@@ -566,6 +582,7 @@ export class ScionChatDecisions extends LitElement {
       gap: 0.5rem;
       text-align: left;
       width: 100%;
+      box-sizing: border-box;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius, 0.5rem);
       background: var(--scion-surface, #fff);
@@ -584,7 +601,7 @@ export class ScionChatDecisions extends LitElement {
     }
 
     @media (hover: hover) {
-      .opt:hover:not([aria-disabled='true']):not(:disabled):not(.chosen) {
+      .opt:hover:not([aria-disabled='true']):not(:disabled):not(.chosen):not(.sel) {
         border-color: var(--scion-border-hover, #cbd5e1);
         background: var(--scion-bg, #f8fafc);
       }
@@ -1073,6 +1090,139 @@ export class ScionChatDecisions extends LitElement {
       margin-top: 0.35rem;
     }
 
+    .other-btn::part(base) {
+      border-style: dashed;
+    }
+
+    .opt.other-opt {
+      border-style: dashed;
+    }
+
+    .opt.other-opt .mark,
+    .opt.sel .mark {
+      color: var(--scion-primary, #3b82f6);
+    }
+
+    .opt.sel {
+      flex-direction: column;
+      cursor: default;
+      border-color: var(--scion-primary, #3b82f6);
+      background: var(--scion-primary-50, #eff6ff);
+      box-shadow: inset 0 0 0 1px var(--scion-primary, #3b82f6);
+      user-select: auto;
+      -webkit-user-select: auto;
+    }
+
+    .opt.sel .opt-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      width: 100%;
+    }
+
+    .editor {
+      margin-top: 0.55rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      padding: 0.55rem 0.6rem;
+      border: 1px solid var(--scion-primary, #3b82f6);
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--scion-bg, #f8fafc);
+      box-sizing: border-box;
+    }
+
+    .editor.inset {
+      width: 100%;
+      margin-top: 0.2rem;
+      border-color: var(--scion-border, #e2e8f0);
+      background: var(--scion-surface, #fff);
+    }
+
+    .editor-head {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+    }
+
+    .editor .lab {
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-secondary, #475569);
+    }
+
+    .editor .cnt {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-left: auto;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .editor .cnt.warn {
+      color: var(--scion-status-warning, #d97706);
+    }
+
+    .editor .cnt.over {
+      color: var(--scion-status-danger, #dc2626);
+    }
+
+    .editor .ctl {
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .editor .ctl sl-input {
+      flex: 1 1 16rem;
+      min-width: 0;
+    }
+
+    .editor sl-input::part(form-control-label) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .editor sl-input::part(base) {
+      background: var(--scion-surface, #fff);
+      border-color: var(--scion-border, #e2e8f0);
+    }
+
+    .editor sl-input::part(input) {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .editor sl-input::part(input)::placeholder {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .otext {
+      margin-top: 0.45rem;
+      padding: 0.3rem 0.6rem;
+      border-left: 3px solid var(--scion-primary, #3b82f6);
+      color: var(--scion-text, #1e293b);
+      font-size: var(--chat-fs-base, 0.9375rem);
+      overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 480px) {
+      .editor .ctl sl-input {
+        flex-basis: 100%;
+      }
+
+      .editor .ctl {
+        justify-content: flex-end;
+      }
+    }
+
     .sr-only {
       position: absolute;
       width: 1px;
@@ -1164,6 +1314,25 @@ export class ScionChatDecisions extends LitElement {
     ) {
       this.scheduleDismissUnlockTimer();
     }
+    if (
+      !this.isSet &&
+      (this.otherOpen || this.otherDraft) &&
+      (changed.has('decisions') || changed.has('currentUserId') || changed.has('answerability'))
+    ) {
+      const row = this.views[0];
+      if (
+        !row ||
+        !isOpenDecision(row) ||
+        row.status !== 'pending' ||
+        !this.rowActionable(row) ||
+        !row.other
+      ) {
+        this.otherOpen = false;
+        this.otherDraft = '';
+      } else if (this.answerBlocked) {
+        this.otherOpen = false;
+      }
+    }
   }
 
   /**
@@ -1193,6 +1362,9 @@ export class ScionChatDecisions extends LitElement {
       if (d.question && !this.rendered.has(d.question)) sources.push(d.question);
       for (const c of d.choices ?? []) {
         if (c.description && !this.rendered.has(c.description)) sources.push(c.description);
+      }
+      if (d.other?.description && !this.rendered.has(d.other.description)) {
+        sources.push(d.other.description);
       }
     }
     if (sources.length === 0) return;
@@ -1792,7 +1964,7 @@ export class ScionChatDecisions extends LitElement {
 
   /** Enter on the focused card (not on a control inside it) picks the recommended choice on pending cards only. */
   private onCardKeydown(e: KeyboardEvent, d: DecisionView): void {
-    if (e.key !== 'Enter' || e.target !== e.currentTarget) return;
+    if (e.key !== 'Enter' || e.target !== e.currentTarget || this.otherOpen) return;
     if (d.status !== 'pending' || !d.defaultChoiceId || !this.actionable(d)) return;
     e.preventDefault();
     void this.choose(d, d.defaultChoiceId);
@@ -1810,16 +1982,54 @@ export class ScionChatDecisions extends LitElement {
       this.pendingChange = { rowId: d.rowId, choiceId };
       return;
     }
+    this.otherOpen = false;
+    this.otherDraft = '';
     void this.choose(d, choiceId);
   }
 
-  private async choose(d: DecisionView, choiceId: string): Promise<void> {
+  private async openOther(d: DecisionView): Promise<void> {
+    if (!this.actionable(d) || d.status !== 'pending' || !d.other) return;
+    this.otherOpen = true;
+    await this.updateComplete;
+    const input = this.shadowRoot?.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('.editor sl-input');
+    if (input?.updateComplete) {
+      await input.updateComplete;
+    }
+    focusElement(input);
+  }
+
+  private async cancelOther(): Promise<void> {
+    this.otherOpen = false;
+    this.otherDraft = '';
+    await this.updateComplete;
+    const btn = this.shadowRoot?.querySelector<HTMLElement>(`[data-choice="${OTHER_CHOICE_ID}"]`);
+    focusElement(btn);
+  }
+
+  private async submitOther(d: DecisionView): Promise<void> {
+    if (!this.actionable(d) || d.status !== 'pending' || !d.other) return;
+    const trimmed = this.otherDraft.trim();
+    if (!trimmed || [...trimmed].length > 200) return;
+    await this.choose(d, OTHER_CHOICE_ID, trimmed);
+  }
+
+  private async choose(d: DecisionView, choiceId: string, otherText?: string): Promise<void> {
     if (!this.actionable(d)) return;
     this.submitting = { rowId: d.rowId, choiceId };
     try {
-      const res = await answerDecision(d.rowId, choiceId, crypto.randomUUID(), this.surface);
+      const res = await answerDecision(
+        d.rowId,
+        choiceId,
+        crypto.randomUUID(),
+        this.surface,
+        otherText
+      );
       if (res.ok) {
         this.pendingChange = null;
+        this.otherOpen = false;
+        this.otherDraft = '';
         this.applyOwn(res.decision, res.responseMessageId);
         return;
       }
@@ -1829,6 +2039,8 @@ export class ScionChatDecisions extends LitElement {
         // `details.decision`): refresh the card to the authoritative view (read-only
         // for non-owner, not blocked) and warn.
         this.pendingChange = null;
+        this.otherOpen = false;
+        this.otherDraft = '';
         this.applyOwn(res.decision);
         if (res.code === 'already_answered') {
           const who = this.answeredBy(res.decision);
@@ -1851,6 +2063,7 @@ export class ScionChatDecisions extends LitElement {
         return;
       }
       if (res.status === 403) {
+        this.otherOpen = false;
         this.applyDenied(d, res.code, res.reason);
         return;
       }
@@ -1915,7 +2128,8 @@ export class ScionChatDecisions extends LitElement {
     const d = this.views[0];
     if (!d) return nothing;
     const blocked = this.answerBlocked && this.rowActionable(d);
-    const pendingWithDefault = d.status === 'pending' && !!d.defaultChoiceId && !blocked;
+    const pendingWithDefault =
+      d.status === 'pending' && !!d.defaultChoiceId && !blocked && !this.otherOpen;
     return html`
       <div
         class="card"
@@ -1968,7 +2182,12 @@ export class ScionChatDecisions extends LitElement {
   }
 
   private renderRow(d: DecisionView, showHint: boolean): TemplateResult {
-    const stacked = (d.choices ?? []).some((c) => !!c.description);
+    const chosenOther = d.status === 'decided' && isOtherAnswer(d.decision);
+    const otherOpt: OtherOption | undefined =
+      d.other ?? (chosenOther ? { label: d.decision?.label || 'Other' } : undefined);
+    const stacked = (d.choices ?? []).some((c) => !!c.description) || !!otherOpt?.description;
+    const editorOpen =
+      this.otherOpen && d.status === 'pending' && !!otherOpt && !this.answerBlocked;
     return html`
       <div class="row${this.rowStatusClass(d)}" data-row=${d.rowId} data-status=${d.status}>
         <div class="q">${this.markdown(d.question, false)}</div>
@@ -1976,13 +2195,210 @@ export class ScionChatDecisions extends LitElement {
           ${(d.choices ?? []).map((c) =>
             stacked ? this.renderOptRow(d, c) : this.renderButton(d, c)
           )}
+          ${otherOpt
+            ? stacked
+              ? this.renderOtherOptRow(d, otherOpt, editorOpen, chosenOther)
+              : this.renderOtherButton(d, otherOpt, editorOpen, chosenOther)
+            : nothing}
         </div>
+        ${!stacked && editorOpen && otherOpt ? this.renderOtherEditor(d, otherOpt) : nothing}
+        ${chosenOther && d.decision?.otherText
+          ? html`<div class="otext">“${d.decision.otherText}”</div>`
+          : nothing}
         ${this.renderSingleActionsAndFoot(d)}
         ${showHint && !this.submitting
           ? html`<div class="hint" id=${this.hintId}>
               Press Enter to choose the recommended answer (outlined).
             </div>`
           : nothing}
+      </div>
+    `;
+  }
+
+  private renderOtherButton(
+    d: DecisionView,
+    other: OtherOption,
+    editorOpen: boolean,
+    chosenOther: boolean
+  ): TemplateResult {
+    if (chosenOther) {
+      const label = d.decision?.label || other.label;
+      return html`<sl-button
+        size="small"
+        data-choice=${OTHER_CHOICE_ID}
+        variant="primary"
+        data-readonly
+        title=${label}
+        ><sl-icon slot="prefix" name="check-circle-fill"></sl-icon>${label}</sl-button
+      >`;
+    }
+    const loading =
+      this.submitting?.rowId === d.rowId && this.submitting.choiceId === OTHER_CHOICE_ID;
+    const canOpen = d.status === 'pending' && this.actionable(d);
+    const disabled = !canOpen && !loading;
+    return html`<sl-button
+      size="small"
+      class=${editorOpen ? '' : 'other-btn'}
+      data-choice=${OTHER_CHOICE_ID}
+      variant=${editorOpen ? 'primary' : 'default'}
+      ?outline=${editorOpen}
+      ?loading=${loading}
+      ?disabled=${disabled}
+      aria-disabled=${disabled ? 'true' : nothing}
+      title=${other.label}
+      @click=${() => {
+        if (canOpen) void this.openOther(d);
+      }}
+      ><sl-icon slot="prefix" name="pencil"></sl-icon>${other.label}…</sl-button
+    >`;
+  }
+
+  private renderOtherOptRow(
+    d: DecisionView,
+    other: OtherOption,
+    editorOpen: boolean,
+    chosenOther: boolean
+  ): TemplateResult {
+    const loading =
+      this.submitting?.rowId === d.rowId && this.submitting.choiceId === OTHER_CHOICE_ID;
+    if (editorOpen) {
+      return html`<div class="opt sel" data-choice=${OTHER_CHOICE_ID}>
+        <div class="opt-head">
+          <span class="mark"
+            >${loading
+              ? html`<sl-spinner></sl-spinner>`
+              : html`<sl-icon name="pencil"></sl-icon>`}</span
+          >
+          <span>
+            <span class="lbl">${other.label}…</span>
+            ${other.description
+              ? html`<span class="desc">${this.markdown(other.description, true)}</span>`
+              : nothing}
+          </span>
+        </div>
+        <div class="editor inset">${this.renderOtherEditorInner(d, other, true)}</div>
+      </div>`;
+    }
+    if (chosenOther) {
+      const label = d.decision?.label || other.label;
+      return html`<button
+        type="button"
+        class="opt chosen"
+        data-choice=${OTHER_CHOICE_ID}
+        data-readonly
+        aria-disabled="false"
+        title=${label}
+      >
+        <span class="mark"><sl-icon name="check-circle-fill"></sl-icon></span>
+        <span>
+          <span class="lbl">${label}</span>
+          ${other.description
+            ? html`<span class="desc">${this.markdown(other.description, true)}</span>`
+            : nothing}
+        </span>
+      </button>`;
+    }
+    const canOpen = d.status === 'pending' && this.actionable(d);
+    const disabled = !canOpen && !loading;
+    const notOwner = actionableReason(d, this.currentUserId) === 'not_recorded_answerer';
+    return html`<button
+      type="button"
+      class="opt other-opt"
+      data-choice=${OTHER_CHOICE_ID}
+      ?disabled=${disabled && notOwner}
+      aria-disabled=${disabled || loading ? 'true' : 'false'}
+      aria-busy=${loading ? 'true' : nothing}
+      title=${other.label}
+      @click=${() => {
+        if (canOpen) void this.openOther(d);
+      }}
+    >
+      <span class="mark"
+        >${loading
+          ? html`<sl-spinner></sl-spinner>`
+          : html`<sl-icon name="pencil"></sl-icon>`}</span
+      >
+      <span>
+        <span class="lbl">${other.label}…</span>
+        ${other.description
+          ? html`<span class="desc">${this.markdown(other.description, true)}</span>`
+          : nothing}
+      </span>
+    </button>`;
+  }
+
+  private renderOtherEditor(d: DecisionView, other: OtherOption): TemplateResult {
+    return html`<div class="editor">${this.renderOtherEditorInner(d, other, false)}</div>`;
+  }
+
+  private renderOtherEditorInner(
+    d: DecisionView,
+    other: OtherOption,
+    inset: boolean
+  ): TemplateResult {
+    const trimmed = this.otherDraft.trim();
+    const trimmedLen = [...trimmed].length;
+    const showCounter = trimmedLen >= 160;
+    const warnCounter = trimmedLen >= 180 && trimmedLen <= 200;
+    const overCounter = trimmedLen > 200;
+    const announceCounter = warnCounter || overCounter;
+    const loading =
+      this.submitting?.rowId === d.rowId && this.submitting.choiceId === OTHER_CHOICE_ID;
+    const canSend = trimmedLen > 0 && trimmedLen <= 200 && !this.submitting;
+    const counter = showCounter
+      ? html`<span
+          class="cnt${overCounter ? ' over' : warnCounter ? ' warn' : ''}"
+          role=${announceCounter ? 'status' : nothing}
+          aria-live=${announceCounter ? 'polite' : nothing}
+          >${trimmedLen} / 200</span
+        >`
+      : nothing;
+    return html`
+      ${!inset || showCounter
+        ? html`<div class="editor-head">
+            ${!inset ? html`<span class="lab">${other.label}</span>` : nothing} ${counter}
+          </div>`
+        : nothing}
+      <div class="ctl">
+        <sl-input
+          size="small"
+          label=${plainText(d.question)}
+          placeholder=${other.placeholder || 'Type your answer'}
+          .value=${this.otherDraft}
+          ?disabled=${!!this.submitting}
+          @sl-input=${(e: Event) => {
+            this.otherDraft = (e.target as HTMLInputElement).value ?? '';
+          }}
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key === 'Enter' && !e.isComposing) {
+              e.preventDefault();
+              e.stopPropagation();
+              void this.submitOther(d);
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              void this.cancelOther();
+            }
+          }}
+        ></sl-input>
+        <sl-button
+          size="small"
+          variant="primary"
+          data-action="send-other"
+          ?loading=${loading}
+          ?disabled=${!canSend}
+          aria-disabled=${!canSend ? 'true' : nothing}
+          @click=${() => void this.submitOther(d)}
+          >Send</sl-button
+        >
+        <sl-button
+          size="small"
+          variant="text"
+          data-action="cancel-other"
+          ?disabled=${!!this.submitting}
+          @click=${() => void this.cancelOther()}
+          >Cancel</sl-button
+        >
       </div>
     `;
   }
@@ -2100,6 +2516,12 @@ export class ScionChatDecisions extends LitElement {
     for (const node of e.composedPath()) {
       if (node === e.currentTarget) break;
       if (node instanceof HTMLAnchorElement && /^(https?:|mailto:)/i.test(node.href)) return;
+      if (
+        node instanceof HTMLInputElement ||
+        (node instanceof HTMLElement && node.tagName === 'SL-INPUT')
+      ) {
+        return;
+      }
     }
     e.preventDefault();
     e.stopPropagation();

@@ -241,6 +241,45 @@ func TestDecisionAnswer_AutoWakesHubSuspendedAgent(t *testing.T) {
 	}
 }
 
+func TestDecisionAnswer_OtherAutoWakesHubSuspendedAgent(t *testing.T) {
+	f := newDecisionAutoWakeFixture(t, true)
+	f.readyOnStart(t)
+
+	_, promptRes := f.seedPrompt(t, `[{"id":"W2","question":"Which queue?","choices":["sqs","pubsub"],"allow_other":true}]`, time.Now().UTC())
+	f.suspendAgent(t, state.SuspendReasonIdle)
+
+	const wantText = `use "kafka" on port 9092`
+	rr := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decisions/"+promptRes.Decisions[0].RowID+"/answer", map[string]any{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "  " + wantText + "  ",
+	})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var out DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.NotEmpty(t, out.ResponseMessageID)
+
+	f.srv.autoWakeWork.wg.Wait()
+
+	require.Len(t, f.disp.getStartCalls(), 1, "expected one auto-wake start for Other answer")
+	assert.True(t, f.disp.getStartCalls()[0].Continue, "auto-wake must resume existing session")
+
+	delivered := f.disp.delivered()
+	require.Len(t, delivered, 1, "expected exactly one decision-response delivery")
+	assert.Equal(t, f.agent.ID, delivered[0].agentID)
+	require.NotNil(t, delivered[0].structured)
+	assert.Equal(t, messages.TypeDecisionResponse, delivered[0].structured.Type)
+	assert.Equal(t, "W2", delivered[0].structured.Metadata[messages.MetadataDecisionKey])
+	assert.Equal(t, messages.ChoiceIDOther, delivered[0].structured.Metadata[messages.MetadataChoiceID])
+	assert.Equal(t, wantText, delivered[0].structured.Metadata[messages.MetadataDecisionOtherText])
+	assert.Contains(t, delivered[0].message, `answer=Other (choice $other) text="use \"kafka\" on port 9092"`)
+	assert.Equal(t, delivered[0].message, delivered[0].structured.Msg)
+
+	stored, err := f.store.GetMessage(context.Background(), out.ResponseMessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDispatched, stored.DispatchState)
+	assert.Nil(t, stored.DispatchFailureReason)
+}
+
 func TestDecisionSetAnswer_AutoWakesHubSuspendedAgent(t *testing.T) {
 	f := newDecisionAutoWakeFixture(t, true)
 	f.readyOnStart(t)

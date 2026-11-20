@@ -226,6 +226,15 @@ func (_u *DecisionUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.DefaultChoiceIDCleared() {
 		_spec.ClearField(decision.FieldDefaultChoiceID, field.TypeString)
 	}
+	if _u.mutation.OtherLabelCleared() {
+		_spec.ClearField(decision.FieldOtherLabel, field.TypeString)
+	}
+	if _u.mutation.OtherDescriptionCleared() {
+		_spec.ClearField(decision.FieldOtherDescription, field.TypeString)
+	}
+	if _u.mutation.OtherPlaceholderCleared() {
+		_spec.ClearField(decision.FieldOtherPlaceholder, field.TypeString)
+	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(decision.FieldStatus, field.TypeEnum, value)
 	}
@@ -511,6 +520,15 @@ func (_u *DecisionUpdateOne) sqlSave(ctx context.Context) (_node *Decision, err 
 	}
 	if _u.mutation.DefaultChoiceIDCleared() {
 		_spec.ClearField(decision.FieldDefaultChoiceID, field.TypeString)
+	}
+	if _u.mutation.OtherLabelCleared() {
+		_spec.ClearField(decision.FieldOtherLabel, field.TypeString)
+	}
+	if _u.mutation.OtherDescriptionCleared() {
+		_spec.ClearField(decision.FieldOtherDescription, field.TypeString)
+	}
+	if _u.mutation.OtherPlaceholderCleared() {
+		_spec.ClearField(decision.FieldOtherPlaceholder, field.TypeString)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(decision.FieldStatus, field.TypeEnum, value)

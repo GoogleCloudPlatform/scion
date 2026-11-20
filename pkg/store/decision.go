@@ -509,7 +509,8 @@ type Decision struct {
 
 	Question        string
 	Choices         []messages.Choice
-	DefaultChoiceID string // empty when none
+	DefaultChoiceID string                // empty when none
+	Other           *messages.OtherOption // nil when allow_other is off
 
 	// IntroLength is set on the message's position 0 row only: the byte
 	// offset in the prompt's msg where the markdown fallback starts
@@ -590,6 +591,7 @@ type DecisionAnswer struct {
 	QuestionText string
 	ChoiceID     string
 	ChoiceLabel  string
+	OtherText    string // non-empty iff ChoiceID == messages.ChoiceIDOther
 
 	// AnsweredByUserID is empty after the user is deleted; the name and
 	// email snapshots stay.
@@ -677,6 +679,7 @@ type DecisionPromptResult struct {
 type RecordAnswerInput struct {
 	DecisionRowID string
 	ChoiceID      string
+	OtherText     string // required iff ChoiceID == messages.ChoiceIDOther; trimmed by store
 
 	AnsweredByUserID string
 	AnsweredByName   string

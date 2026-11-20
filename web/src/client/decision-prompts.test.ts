@@ -27,6 +27,7 @@ vi.mock('./api.js', async (orig) => ({
 
 const {
   DISMISS_MIN_AGE_MS,
+  OTHER_CHOICE_ID,
   actionableReason,
   answerDecision,
   answerDecisionSet,
@@ -38,6 +39,7 @@ const {
   dismissRemainingMinutes,
   isClosedUnanswered,
   isOpenDecision,
+  isOtherAnswer,
   isTerminalDecision,
   newerDecisionView,
   patchDecisions,
@@ -346,6 +348,41 @@ describe('answerDecision', () => {
     expect(JSON.parse(apiFetch.mock.calls[1]![1]?.body as string)).toEqual({
       choice_id: 'y',
       idempotency_key: 'key-native',
+    });
+  });
+
+  it('includes other_text when answering with OTHER_CHOICE_ID and identifies Other answers via isOtherAnswer', async () => {
+    expect(OTHER_CHOICE_ID).toBe('$other');
+    expect(isOtherAnswer({ choiceId: '$other' })).toBe(true);
+    expect(isOtherAnswer({ choiceId: 'yes' })).toBe(false);
+    expect(isOtherAnswer(null)).toBe(false);
+    expect(isOtherAnswer(undefined)).toBe(false);
+
+    const otherDecided = decided({
+      decision: {
+        choiceId: OTHER_CHOICE_ID,
+        label: 'Another region',
+        otherText: 'europe-west4',
+        provenance: 'direct',
+        surface: 'native',
+        responseMessageId: 'resp-o',
+        at: '2026-11-12T10:00:00Z',
+      },
+    });
+    apiFetch.mockResolvedValue(res(200, { decision: otherDecided, responseMessageId: 'resp-o' }));
+    const out = await answerDecision(
+      'r1',
+      OTHER_CHOICE_ID,
+      'key-other',
+      'decisions_page',
+      'europe-west4'
+    );
+    expect(out).toEqual({ ok: true, decision: otherDecided, responseMessageId: 'resp-o' });
+    expect(JSON.parse(apiFetch.mock.calls[0]![1]?.body as string)).toEqual({
+      choice_id: '$other',
+      idempotency_key: 'key-other',
+      surface: 'decisions_page',
+      other_text: 'europe-west4',
     });
   });
 

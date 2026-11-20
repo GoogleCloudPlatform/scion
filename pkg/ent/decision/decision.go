@@ -43,6 +43,14 @@ const (
 	FieldChoices = "choices"
 	// FieldDefaultChoiceID holds the string denoting the default_choice_id field in the database.
 	FieldDefaultChoiceID = "default_choice_id"
+	// FieldAllowOther holds the string denoting the allow_other field in the database.
+	FieldAllowOther = "allow_other"
+	// FieldOtherLabel holds the string denoting the other_label field in the database.
+	FieldOtherLabel = "other_label"
+	// FieldOtherDescription holds the string denoting the other_description field in the database.
+	FieldOtherDescription = "other_description"
+	// FieldOtherPlaceholder holds the string denoting the other_placeholder field in the database.
+	FieldOtherPlaceholder = "other_placeholder"
 	// FieldIntroLength holds the string denoting the intro_length field in the database.
 	FieldIntroLength = "intro_length"
 	// FieldStatus holds the string denoting the status field in the database.
@@ -82,6 +90,10 @@ var Columns = []string{
 	FieldQuestion,
 	FieldChoices,
 	FieldDefaultChoiceID,
+	FieldAllowOther,
+	FieldOtherLabel,
+	FieldOtherDescription,
+	FieldOtherPlaceholder,
 	FieldIntroLength,
 	FieldStatus,
 	FieldReplacedByID,
@@ -114,6 +126,14 @@ var (
 	KeyNormValidator func(string) error
 	// VersionValidator is a validator for the "version" field. It is called by the builders before save.
 	VersionValidator func(int) error
+	// DefaultAllowOther holds the default value on creation for the "allow_other" field.
+	DefaultAllowOther bool
+	// OtherLabelValidator is a validator for the "other_label" field. It is called by the builders before save.
+	OtherLabelValidator func(string) error
+	// OtherDescriptionValidator is a validator for the "other_description" field. It is called by the builders before save.
+	OtherDescriptionValidator func(string) error
+	// OtherPlaceholderValidator is a validator for the "other_placeholder" field. It is called by the builders before save.
+	OtherPlaceholderValidator func(string) error
 	// DefaultIntroLength holds the default value on creation for the "intro_length" field.
 	DefaultIntroLength int
 	// IntroLengthValidator is a validator for the "intro_length" field. It is called by the builders before save.
@@ -247,6 +267,26 @@ func ByQuestion(opts ...sql.OrderTermOption) OrderOption {
 // ByDefaultChoiceID orders the results by the default_choice_id field.
 func ByDefaultChoiceID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDefaultChoiceID, opts...).ToFunc()
+}
+
+// ByAllowOther orders the results by the allow_other field.
+func ByAllowOther(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAllowOther, opts...).ToFunc()
+}
+
+// ByOtherLabel orders the results by the other_label field.
+func ByOtherLabel(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOtherLabel, opts...).ToFunc()
+}
+
+// ByOtherDescription orders the results by the other_description field.
+func ByOtherDescription(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOtherDescription, opts...).ToFunc()
+}
+
+// ByOtherPlaceholder orders the results by the other_placeholder field.
+func ByOtherPlaceholder(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOtherPlaceholder, opts...).ToFunc()
 }
 
 // ByIntroLength orders the results by the intro_length field.

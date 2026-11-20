@@ -31,6 +31,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
+import { isOtherAnswer } from '../../../client/decision-prompts.js';
 import type {
   DecisionResponseSetAnswer,
   DecisionResponseSetView,
@@ -138,6 +139,11 @@ export class ScionChatDecisionResponse extends LitElement {
     .q,
     .reason {
       font-style: italic;
+      overflow-wrap: anywhere;
+    }
+
+    .other-text {
+      color: var(--scion-text, #1e293b);
       overflow-wrap: anywhere;
     }
 
@@ -316,10 +322,13 @@ export class ScionChatDecisionResponse extends LitElement {
     }
 
     const question = r.question?.trim();
+    const otherText = isOtherAnswer(r) ? r.otherText : undefined;
     return html`<div class="line" data-kind="single">
       <sl-icon class="ok" name="check-circle-fill" aria-hidden="true"></sl-icon>
-      <b>${this.who}</b> chose <b>${r.label}</b> for
-      ${r.key ? html`<span class="key">${r.key}</span>` : nothing}
+      <b>${this.who}</b> chose <b>${r.label}</b>${otherText
+        ? html` — <span class="other-text">“${otherText}”</span>`
+        : nothing}
+      for ${r.key ? html`<span class="key">${r.key}</span>` : nothing}
       ${question ? html`<span class="q">${question}</span>` : nothing} ${this.renderTime()}
       ${this.renderNotDelivered()} ${this.renderJumpButton(r.promptMessageId)}
     </div>`;

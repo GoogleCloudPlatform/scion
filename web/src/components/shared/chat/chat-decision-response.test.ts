@@ -674,3 +674,36 @@ it('renders nothing without a view', async () => {
   const el = await mount({});
   expect(root(el).querySelector('.line, details')).toBeNull();
 });
+
+describe('single Other free-form response line (ptone/scion#8152)', () => {
+  it('shows the Other label and quoted plain text while keeping key, question, time, not-delivered, and Jump', async () => {
+    const literal = '**bold** <img src=x onerror="window.__pwned=1"> @release-bot';
+    const el = await mount({
+      answererName: 'Alice',
+      dispatchState: 'failed',
+      response: single({
+        key: 'region',
+        question: 'Which region for the canary?',
+        choiceId: '$other',
+        label: 'Another region',
+        otherText: literal,
+        promptMessageId: 'prompt-9',
+      }),
+    });
+
+    const line = root(el).querySelector('.line');
+    expect(line).not.toBeNull();
+    expect(text(line)).toMatch(
+      /^Alice chose Another region — “\*\*bold\*\* <img src=x onerror="window\.__pwned=1"> @release-bot” for region Which region for the canary\? · \d\d:\d\d · not delivered \(agent gone\) · Jump$/
+    );
+    // Plain Lit text: no HTML or Markdown elements parsed inside .other-text.
+    const otherSpan = root(el).querySelector('.other-text');
+    expect(otherSpan?.textContent).toBe(`“${literal}”`);
+    expect(otherSpan?.children.length).toBe(0);
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+
+    const got = jumps(el);
+    root(el).querySelector<HTMLButtonElement>('[data-action="jump"]')!.click();
+    expect(got).toEqual(['prompt-9']);
+  });
+});

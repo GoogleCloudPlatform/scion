@@ -276,18 +276,18 @@ func TestNormalizeDecisions_PayloadCap(t *testing.T) {
 
 func TestNormalizeDecisions_UnknownAndReservedFields(t *testing.T) {
 	in := parseDecisions(t, `[
-	  { "question": "q", "multiple": true, "allow_other": true, "expires_in": "1h", "colour": "red",
-	    "choices": [ "a", { "label": "b", "icon": "x", "multiple": 1 } ] }
+	  { "question": "q", "multiple": true, "expires_in": "1h", "colour": "red",
+	    "choices": [ "a", { "label": "b", "icon": "x", "multiple": 1, "allow_other": true } ] }
 	]`)
 	_, err := NormalizeDecisions("decisions", in)
 	des := decisionErrs(t, err)
 	want := []struct{ field, code string }{
 		{"decisions[0].multiple", DecisionErrReservedField},
-		{"decisions[0].allow_other", DecisionErrReservedField},
 		{"decisions[0].expires_in", DecisionErrReservedField},
 		{"decisions[0].colour", DecisionErrUnknownField},
 		{"decisions[0].choices[1].icon", DecisionErrUnknownField},
 		{"decisions[0].choices[1].multiple", DecisionErrReservedField},
+		{"decisions[0].choices[1].allow_other", DecisionErrReservedField},
 	}
 	for _, w := range want {
 		if !hasErr(des, w.field, w.code) {
@@ -296,6 +296,194 @@ func TestNormalizeDecisions_UnknownAndReservedFields(t *testing.T) {
 	}
 	if len(des) != len(want) {
 		t.Errorf("got %d errors, want %d: %v", len(des), len(want), des)
+	}
+}
+
+func TestNormalizeDecisions_AllowOther_AcceptedForms(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want *OtherOption
+	}{
+		{
+			name: "absent",
+			raw:  `[{"id":"region","question":"Which region?","choices":["us-central1","europe-west1"]}]`,
+			want: nil,
+		},
+		{
+			name: "false is same as absent",
+			raw:  `[{"id":"region","question":"Which region?","choices":["us-central1","europe-west1"],"allow_other":false}]`,
+			want: nil,
+		},
+		{
+			name: "true uses default Other label and allows 1 fixed choice",
+			raw:  `[{"id":"proceed","question":"Tag now?","choices":["Yes"],"allow_other":true}]`,
+			want: &OtherOption{Label: "Other"},
+		},
+		{
+			name: "string custom label trimmed",
+			raw:  `[{"id":"proceed","question":"Tag now?","choices":["Yes"],"allow_other":"  Something else  "}]`,
+			want: &OtherOption{Label: "Something else"},
+		},
+		{
+			name: "empty object defaults label to Other",
+			raw:  `[{"id":"proceed","question":"Tag now?","choices":["Yes"],"allow_other":{}}]`,
+			want: &OtherOption{Label: "Other"},
+		},
+		{
+			name: "object with placeholder and omitted label defaults label to Other",
+			raw:  `[{"id":"region","question":"Which region?","choices":["us-central1"],"allow_other":{"placeholder":"  e.g. europe-west4  "}}]`,
+			want: &OtherOption{Label: "Other", Placeholder: "e.g. europe-west4"},
+		},
+		{
+			name: "full object with label description placeholder at boundary lengths",
+			raw: fmt.Sprintf(`[{"id":"region","question":"Which region?","choices":["us-central1"],"allow_other":{"label":%q,"description":%q,"placeholder":%q}}]`,
+				strings.Repeat("é", 100), strings.Repeat("d", 300), strings.Repeat("p", 100)),
+			want: &OtherOption{
+				Label:       strings.Repeat("é", 100),
+				Description: strings.Repeat("d", 300),
+				Placeholder: strings.Repeat("p", 100),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := parseDecisions(t, tc.raw)
+			got, err := NormalizeDecisions("decisions", in)
+			if err != nil {
+				t.Fatalf("NormalizeDecisions: %v", err)
+			}
+			if !reflect.DeepEqual(got[0].Other, tc.want) {
+				t.Fatalf("Other = %+v, want %+v", got[0].Other, tc.want)
+			}
+			for _, c := range got[0].Choices {
+				if c.ID == ChoiceIDOther {
+					t.Fatalf("Other must never appear inside Choices: %+v", got[0].Choices)
+				}
+			}
+		})
+	}
+
+	// False on a multi-decision prompt is treated as absent (not refused as not_supported).
+	in := parseDecisions(t, `[
+	  {"id":"d1","question":"Q1?","choices":["a","b"],"allow_other":false},
+	  {"id":"d2","question":"Q2?","choices":["x","y"]}
+	]`)
+	if _, err := NormalizeDecisions("decisions", in); err != nil {
+		t.Fatalf("multi-decision with allow_other:false rejected: %v", err)
+	}
+}
+
+func TestNormalizeDecisions_AllowOther_ValidationRules(t *testing.T) {
+	tenChoices := `["c1","c2","c3","c4","c5","c6","c7","c8","c9","c10"]`
+	elevenChoices := `["c1","c2","c3","c4","c5","c6","c7","c8","c9","c10","c11"]`
+	cases := []struct {
+		name  string
+		raw   string
+		field string
+		code  string
+	}{
+		{"null", `[{"question":"q","choices":["a","b"],"allow_other":null}]`, "decisions[0].allow_other", DecisionErrInvalid},
+		{"number", `[{"question":"q","choices":["a","b"],"allow_other":1}]`, "decisions[0].allow_other", DecisionErrInvalid},
+		{"array", `[{"question":"q","choices":["a","b"],"allow_other":["Other"]}]`, "decisions[0].allow_other", DecisionErrInvalid},
+		{"empty string", `[{"question":"q","choices":["a"],"allow_other":""}]`, "decisions[0].allow_other.label", DecisionErrInvalid},
+		{"whitespace string", `[{"question":"q","choices":["a"],"allow_other":"   "}]`, "decisions[0].allow_other.label", DecisionErrInvalid},
+		{"string with newline", `[{"question":"q","choices":["a"],"allow_other":"line1\nline2"}]`, "decisions[0].allow_other.label", DecisionErrInvalid},
+		{"string too long", fmt.Sprintf(`[{"question":"q","choices":["a"],"allow_other":%q}]`, strings.Repeat("x", 101)), "decisions[0].allow_other.label", DecisionErrTooLong},
+		{"object empty label", `[{"question":"q","choices":["a"],"allow_other":{"label":" "}}]`, "decisions[0].allow_other.label", DecisionErrInvalid},
+		{"object non-string label", `[{"question":"q","choices":["a"],"allow_other":{"label":5}}]`, "decisions[0].allow_other.label", DecisionErrInvalid},
+		{"object null label", `[{"question":"q","choices":["a"],"allow_other":{"label":null}}]`, "decisions[0].allow_other.label", DecisionErrInvalid},
+		{"object bidi label", `[{"question":"q","choices":["a"],"allow_other":{"label":"a\u202eb"}}]`, "decisions[0].allow_other.label", DecisionErrInvalid},
+		{"object label too long", fmt.Sprintf(`[{"question":"q","choices":["a"],"allow_other":{"label":%q}}]`, strings.Repeat("x", 101)), "decisions[0].allow_other.label", DecisionErrTooLong},
+		{"object description newline", `[{"question":"q","choices":["a"],"allow_other":{"description":"a\nb"}}]`, "decisions[0].allow_other.description", DecisionErrInvalid},
+		{"object description non-string", `[{"question":"q","choices":["a"],"allow_other":{"description":true}}]`, "decisions[0].allow_other.description", DecisionErrInvalid},
+		{"object description too long", fmt.Sprintf(`[{"question":"q","choices":["a"],"allow_other":{"description":%q}}]`, strings.Repeat("d", 301)), "decisions[0].allow_other.description", DecisionErrTooLong},
+		{"object placeholder newline", `[{"question":"q","choices":["a"],"allow_other":{"placeholder":"a\nb"}}]`, "decisions[0].allow_other.placeholder", DecisionErrInvalid},
+		{"object placeholder tab", `[{"question":"q","choices":["a"],"allow_other":{"placeholder":"a\tb"}}]`, "decisions[0].allow_other.placeholder", DecisionErrInvalid},
+		{"object placeholder non-string", `[{"question":"q","choices":["a"],"allow_other":{"placeholder":[]}}]`, "decisions[0].allow_other.placeholder", DecisionErrInvalid},
+		{"object placeholder too long", fmt.Sprintf(`[{"question":"q","choices":["a"],"allow_other":{"placeholder":%q}}]`, strings.Repeat("p", 101)), "decisions[0].allow_other.placeholder", DecisionErrTooLong},
+		{"object unknown key", `[{"question":"q","choices":["a"],"allow_other":{"label":"Custom","free":true}}]`, "decisions[0].allow_other.free", DecisionErrUnknownField},
+		{"duplicate with default Other label", `[{"question":"q","choices":["Yes","other"],"allow_other":true}]`, "decisions[0].allow_other.label", DecisionErrDuplicate},
+		{"duplicate with custom Other label case-insensitive", `[{"question":"q","choices":["Another Region"],"allow_other":"another region"}]`, "decisions[0].allow_other.label", DecisionErrDuplicate},
+		{"zero fixed choices with Other on", `[{"question":"q","choices":[],"allow_other":true}]`, "decisions[0].choices", DecisionErrTooFew},
+		{"11 fixed choices with Other on", fmt.Sprintf(`[{"question":"q","choices":%s,"allow_other":true}]`, elevenChoices), "decisions[0].choices", DecisionErrTooMany},
+		{"1 fixed choice with allow_other false", `[{"question":"q","choices":["only"],"allow_other":false}]`, "decisions[0].choices", DecisionErrTooFew},
+		{"default names $other", `[{"question":"q","choices":["Yes"],"allow_other":true,"default":"$other"}]`, "decisions[0].default", DecisionErrNoMatch},
+		{"default names Other label", `[{"question":"q","choices":["Yes"],"allow_other":"Another region","default":"Another region"}]`, "decisions[0].default", DecisionErrNoMatch},
+		{"fixed choice id $other", `[{"question":"q","choices":[{"id":"$other","label":"Yes"},{"id":"no","label":"No"}]}]`, "decisions[0].choices[0].id", DecisionErrInvalid},
+		{"multi-decision prompt with allow_other refused in P1", `[{"id":"d1","question":"Q1?","choices":["a","b"]},{"id":"d2","question":"Q2?","choices":["x"],"allow_other":true}]`, "decisions[1].allow_other", DecisionErrNotSupported},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := parseDecisions(t, tc.raw)
+			got, err := NormalizeDecisions("decisions", in)
+			if err == nil {
+				t.Fatalf("expected error (%s %s), got %+v", tc.field, tc.code, got)
+			}
+			des := decisionErrs(t, err)
+			if !hasErr(des, tc.field, tc.code) {
+				t.Errorf("errors %v lack %s %s", des, tc.field, tc.code)
+			}
+		})
+	}
+
+	// 10 fixed choices with Other on is valid.
+	in10 := parseDecisions(t, fmt.Sprintf(`[{"question":"q","choices":%s,"allow_other":true}]`, tenChoices))
+	if _, err := NormalizeDecisions("decisions", in10); err != nil {
+		t.Fatalf("10 fixed choices + allow_other rejected: %v", err)
+	}
+}
+
+func TestNormalizeOtherText(t *testing.T) {
+	got, verr := NormalizeOtherText(ChoiceIDOther, "  europe-west4 canary  ")
+	if verr != nil || got != "europe-west4 canary" {
+		t.Fatalf("got (%q, %v), want (\"europe-west4 canary\", nil)", got, verr)
+	}
+
+	atCap := strings.Repeat("é", MaxOtherTextLen)
+	got, verr = NormalizeOtherText(ChoiceIDOther, "  "+atCap+"  ")
+	if verr != nil || got != atCap {
+		t.Fatalf("200-rune text rejected: (%q, %v)", got, verr)
+	}
+
+	got, verr = NormalizeOtherText("1", "")
+	if verr != nil || got != "" {
+		t.Fatalf("empty other_text on fixed choice: (%q, %v)", got, verr)
+	}
+
+	errCases := []struct {
+		name     string
+		choiceID string
+		raw      string
+		wantCode string
+	}{
+		{"empty", ChoiceIDOther, "", DecisionErrRequired},
+		{"spaces only", ChoiceIDOther, "    ", DecisionErrRequired},
+		{"unicode nbsp only", ChoiceIDOther, "\u00a0\u3000", DecisionErrRequired},
+		{"newline", ChoiceIDOther, "a\nb", DecisionErrInvalid},
+		{"trailing newline", ChoiceIDOther, "hello\n", DecisionErrInvalid},
+		{"tab", ChoiceIDOther, "a\tb", DecisionErrInvalid},
+		{"leading tab", ChoiceIDOther, "\thello", DecisionErrInvalid},
+		{"carriage return", ChoiceIDOther, "a\rb", DecisionErrInvalid},
+		{"control NUL", ChoiceIDOther, "a\x00b", DecisionErrInvalid},
+		{"bidi override", ChoiceIDOther, "a\u202eb", DecisionErrInvalid},
+		{"zero width", ChoiceIDOther, "a\u200bb", DecisionErrInvalid},
+		{"line separator", ChoiceIDOther, "a\u2028b", DecisionErrInvalid},
+		{"invalid utf8", ChoiceIDOther, "a\xffb", DecisionErrInvalid},
+		{"201 runes", ChoiceIDOther, strings.Repeat("é", MaxOtherTextLen+1), DecisionErrTooLong},
+		{"other_text on fixed choice", "1", "custom", DecisionErrNotAllowed},
+		{"spaces other_text on fixed choice", "1", "   ", DecisionErrNotAllowed},
+	}
+	for _, tc := range errCases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, verr := NormalizeOtherText(tc.choiceID, tc.raw)
+			if verr == nil {
+				t.Fatalf("expected %s error, got %q", tc.wantCode, out)
+			}
+			if verr.Field != "other_text" || verr.Code != tc.wantCode {
+				t.Errorf("got field=%q code=%q, want other_text %s", verr.Field, verr.Code, tc.wantCode)
+			}
+		})
 	}
 }
 
@@ -542,5 +730,62 @@ func TestNormalizeThenRender_DescriptionsAndQuestionsKeepMarkdown(t *testing.T) 
 		if !strings.Contains(msg, want) {
 			t.Errorf("msg lacks %q:\n%s", want, msg)
 		}
+	}
+}
+
+func TestRenderDecisionFallback_AllowOther(t *testing.T) {
+	ds := []Decision{{
+		Key:             "region",
+		Question:        "Which region for the canary?",
+		DefaultChoiceID: "1",
+		Choices: []Choice{
+			{ID: "1", Label: "us-central1"},
+			{ID: "2", Label: "europe-west1"},
+		},
+		Other: &OtherOption{
+			Label:       "Another *region* @here",
+			Description: "Any `GCP` region <!channel>",
+		},
+	}}
+	msg, _ := RenderDecisionFallback("", ds, "")
+	zw := "\u200b"
+	wantBullet := "  - Another \\*region\\* @" + zw + "here: Any `GCP` region <" + zw + "!channel> — *your own answer, in words*\n"
+	if !strings.Contains(msg, wantBullet) {
+		t.Errorf("msg lacks escaped Other bullet %q:\n%s", wantBullet, msg)
+	}
+
+	// Without description.
+	ds[0].Other.Description = ""
+	ds[0].Other.Label = "Another region"
+	msgNoDesc, _ := RenderDecisionFallback("", ds, "")
+	wantNoDesc := "**1 decision needed**\n\n**region.** Which region for the canary?\n" +
+		"  1) us-central1 _(recommended)_\n" +
+		"  2) europe-west1\n" +
+		"  - Another region — *your own answer, in words*\n\n" +
+		"_Reply here and the agent will record your answer._"
+	if msgNoDesc != wantNoDesc {
+		t.Errorf("msg =\n%s\nwant\n%s", msgNoDesc, wantNoDesc)
+	}
+}
+
+func TestNormalizeDecisions_DefaultMatchesFixedChoiceIDBeforeRefusingOtherLabel(t *testing.T) {
+	// Fixed choice "yes" gets auto-id "1"; allow_other shorthand sets Other.Label = "1";
+	// default "1" matches fixed choice id "1" and must succeed.
+	in := parseDecisions(t, `[{"id":"d-id-match","question":"Proceed?","choices":["yes"],"allow_other":"1","default":"1"}]`)
+	ds, err := NormalizeDecisions("decisions", in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ds[0].DefaultChoiceID != "1" {
+		t.Fatalf("DefaultChoiceID = %q, want %q", ds[0].DefaultChoiceID, "1")
+	}
+	if ds[0].Other == nil || ds[0].Other.Label != "1" {
+		t.Fatalf("Other = %+v, want Label=\"1\"", ds[0].Other)
+	}
+
+	// When default matches no fixed choice id or label and names the Other label, it is still refused as no_match.
+	inOtherOnly := parseDecisions(t, `[{"id":"d-other-only","question":"Proceed?","choices":["yes"],"allow_other":"Another","default":"Another"}]`)
+	if _, err := NormalizeDecisions("decisions", inOtherOnly); err == nil {
+		t.Fatal("expected default naming only Other label to fail")
 	}
 }

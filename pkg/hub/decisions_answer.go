@@ -54,6 +54,7 @@ const decisionResponseQuestionMax = 200
 // the stored decision.
 type DecisionAnswerRequest struct {
 	ChoiceID       string `json:"choice_id"`
+	OtherText      string `json:"other_text,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 	Surface        string `json:"surface,omitempty"`
 }
@@ -330,7 +331,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		ValidationError(w, "choice_id is required", map[string]interface{}{"field": "choice_id"})
 		return
 	}
-	if messages.IsReservedChoiceID(req.ChoiceID) {
+	if messages.IsReservedChoiceID(req.ChoiceID) && req.ChoiceID != messages.ChoiceIDOther {
 		ValidationError(w, fmt.Sprintf("choice %q is reserved", req.ChoiceID), map[string]interface{}{"field": "choice_id"})
 		return
 	}
@@ -361,23 +362,47 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		return
 	}
 	// Step 4: the choice is checked against the stored row; the label is
-	// never taken from the client.
-	choice, ok := d.Choice(req.ChoiceID)
-	if !ok {
-		ValidationError(w, fmt.Sprintf("choice %q is not a choice of decision %s", req.ChoiceID, d.Key),
-			map[string]interface{}{"field": "choice_id"})
+	// never taken from the client. "$other" is allowed explicitly iff the
+	// decision enabled allow_other (design-8146 §4.3).
+	var choice messages.Choice
+	if req.ChoiceID == messages.ChoiceIDOther {
+		if d.Other == nil {
+			ValidationError(w, fmt.Sprintf("choice %q is not a choice of decision %s", req.ChoiceID, d.Key),
+				map[string]interface{}{"field": "choice_id", "code": ErrCodeInvalidChoice})
+			return
+		}
+		choice = messages.Choice{
+			ID:          messages.ChoiceIDOther,
+			Label:       d.Other.Label,
+			Description: d.Other.Description,
+		}
+	} else {
+		var ok bool
+		choice, ok = d.Choice(req.ChoiceID)
+		if !ok {
+			ValidationError(w, fmt.Sprintf("choice %q is not a choice of decision %s", req.ChoiceID, d.Key),
+				map[string]interface{}{"field": "choice_id", "code": ErrCodeInvalidChoice})
+			return
+		}
+	}
+	otherText, verr := messages.NormalizeOtherText(choice.ID, req.OtherText)
+	if verr != nil {
+		ValidationError(w, verr.Message, map[string]interface{}{
+			"field": verr.Field,
+			"code":  verr.Code,
+		})
 		return
 	}
 
 	// Step 3a: a true replay. The answer recorded under this idempotency
-	// key, if it is this user's answer with this choice, is answered again
-	// (200, replayed) before any state check, so a retry after the version
-	// was replaced or answered still gets its answer. The key used for any
-	// other answer is a conflict. A key with no recorded answer is a fresh
-	// answer and gets every check below.
+	// key, if it is this user's answer with this choice and other_text, is
+	// answered again (200, replayed) before any state check, so a retry
+	// after the version was replaced or answered still gets its answer.
+	// The key used for any other answer is a conflict. A key with no
+	// recorded answer is a fresh answer and gets every check below.
 	if req.IdempotencyKey != "" {
 		if prior := answerWithIdempotencyKey(d, req.IdempotencyKey); prior != nil {
-			if prior.ChoiceID != choice.ID || prior.AnsweredByUserID != user.ID() {
+			if prior.ChoiceID != choice.ID || prior.OtherText != otherText || prior.AnsweredByUserID != user.ID() {
 				s.writeDecisionAnswered(w, ctx, d)
 				return
 			}
@@ -414,7 +439,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			return
 		}
 		outcome = store.DecisionOutcomeConfirm
-		if eff.ChoiceID != choice.ID {
+		if eff.ChoiceID != choice.ID || eff.OtherText != otherText {
 			outcome = store.DecisionOutcomeOverride
 			overridden = eff
 		}
@@ -444,12 +469,13 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			return
 		}
 	}
-	responseMsg := s.decisionResponseStoreMessage(ctx, user, d, chatKey, choice, asker, askerGone, willDeliver)
+	responseMsg := s.decisionResponseStoreMessage(ctx, user, d, chatKey, choice, otherText, asker, askerGone, willDeliver)
 
 	// Step 5: record the answer and store the response, in one transaction.
 	answer, replayed, err := s.store.RecordAnswer(ctx, &store.RecordAnswerInput{
 		DecisionRowID:    d.ID,
 		ChoiceID:         choice.ID,
+		OtherText:        otherText,
 		AnsweredByUserID: user.ID(),
 		AnsweredByName:   user.DisplayName(),
 		AnsweredByEmail:  user.Email(),
@@ -523,9 +549,12 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	writeJSON(w, http.StatusOK, DecisionAnswerResponse{Decision: view, ResponseMessageID: answer.ResponseMessageID})
 }
 
-// answerWithIdempotencyKey returns d's answer recorded under key, or nil.
+// answerWithIdempotencyKey returns d's non-dismiss answer recorded under key, or nil.
 func answerWithIdempotencyKey(d *store.Decision, key string) *store.DecisionAnswer {
 	for _, a := range d.Answers {
+		if a.Outcome == store.DecisionOutcomeDismiss {
+			continue
+		}
 		if a.IdempotencyKey == key {
 			return a
 		}
@@ -593,14 +622,18 @@ func (s *Server) canAutoWakeDecisionAsker(ctx context.Context, asker *store.Agen
 // prompt's conversation. A gone asker (askerGone; asker is then unused) or
 // one that cannot take a message (and will not auto-wake) gets the row born
 // failed, as a chat send to it would.
-func (s *Server) decisionResponseStoreMessage(ctx context.Context, user UserIdentity, d *store.Decision, chatKey string, choice messages.Choice, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
+func (s *Server) decisionResponseStoreMessage(ctx context.Context, user UserIdentity, d *store.Decision, chatKey string, choice messages.Choice, otherText string, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
+	body := decisionResponseLine(userDisplay(user), d.Key, choice.Label, d.Question)
+	if choice.ID == messages.ChoiceIDOther {
+		body = decisionOtherResponseLine(userDisplay(user), d.Key, choice.Label, otherText, d.Question)
+	}
 	m := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      d.ProjectID,
 		Sender:         userSenderAddress(user),
 		SenderID:       user.ID(),
 		RecipientID:    d.AskerAgentID,
-		Msg:            decisionResponseLine(userDisplay(user), d.Key, choice.Label, d.Question),
+		Msg:            body,
 		Type:           messages.TypeDecisionResponse,
 		AgentID:        d.AskerAgentID,
 		Channel:        "web",
@@ -642,17 +675,39 @@ func decisionResponseLine(who, key, label, question string) string {
 	return fmt.Sprintf("%s chose %q for %s %q", who, label, key, truncateRunes(plainLine(question), decisionResponseQuestionMax))
 }
 
+// decisionOtherResponseLine is the stored fallback body of a free-form Other
+// decision-response (design-8146 §4.5):
+// `Alice answered "europe-west4 canary" (Another region) for region "Which region for the canary?"`,
+// with EscapeMarkdownPlain (which includes NeutralizeMentions) applied to the
+// typed text so @mentions, Markdown, and HTML stay literal.
+func decisionOtherResponseLine(who, key, label, otherText, question string) string {
+	return fmt.Sprintf("%s answered \"%s\" (%s) for %s %q",
+		who,
+		messages.EscapeMarkdownPlain(otherText),
+		messages.EscapeMarkdownPlain(label),
+		key,
+		truncateRunes(plainLine(question), decisionResponseQuestionMax))
+}
+
 // decisionResponseAgentLine is the hub-formatted line delivered to the asking
-// agent (design 4.4): the question is the agent's own text, truncated.
+// agent (design 4.4; Other free-form text per design-8146 §4.5): the question
+// is the agent's own text, truncated.
 func decisionResponseAgentLine(a *store.DecisionAnswer, overridden *store.DecisionAnswer) string {
 	who := a.AnsweredByEmail
 	if who == "" {
 		who = a.AnsweredByName
 	}
-	line := fmt.Sprintf("[decision-response] %s v%d (%q) answer=%s (choice %s) by %s",
-		a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax), a.ChoiceLabel, a.ChoiceID, who)
+	otherPart := ""
+	if a.ChoiceID == messages.ChoiceIDOther && a.OtherText != "" {
+		otherPart = " text=" + strconv.Quote(a.OtherText)
+	}
+	line := fmt.Sprintf("[decision-response] %s v%d (%q) answer=%s (choice %s)%s by %s",
+		a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax), a.ChoiceLabel, a.ChoiceID, otherPart, who)
 	if overridden != nil {
 		line += ", overriding interpreted answer " + overridden.ChoiceLabel
+		if overridden.ChoiceID == messages.ChoiceIDOther && overridden.OtherText != "" {
+			line += " text=" + strconv.Quote(overridden.OtherText)
+		}
 	}
 	return line
 }
@@ -801,6 +856,9 @@ func (s *Server) deliverDecisionResponse(ctx context.Context, asker *store.Agent
 		meta[messages.MetadataDecisionVersion] = strconv.Itoa(a.Version)
 		meta[messages.MetadataChoiceID] = a.ChoiceID
 		meta[messages.MetadataDecisionProvenance] = a.Provenance
+		if a.ChoiceID == messages.ChoiceIDOther && a.OtherText != "" {
+			meta[messages.MetadataDecisionOtherText] = a.OtherText
+		}
 	}, "decision-response")
 }
 

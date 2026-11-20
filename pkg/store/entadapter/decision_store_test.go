@@ -2879,3 +2879,235 @@ func TestDismissDecisions_InterpretedWithdrawReuseMadeAndAgentList(t *testing.T)
 	require.Len(t, dsmSearch, 1)
 	assert.Equal(t, "D-INT-1", dsmSearch[0].Key)
 }
+
+func TestRecordAnswer_AllowOther_RoundTripIdempotencyTerminalAndUserDeletion(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// Create a real user row so we can verify DeleteUser preserves other_text (D6).
+	userID := uuid.NewString()
+	require.NoError(t, f.cs.CreateUser(ctx, &store.User{
+		ID:          userID,
+		Email:       "alice@example.com",
+		DisplayName: "Alice",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}))
+
+	// 1. Decision with 1 fixed choice + Other round-trips all fields; decision without Other has Other == nil.
+	withOther := messages.Decision{
+		Key:             "region",
+		Question:        "Which region for the canary?",
+		DefaultChoiceID: "1",
+		Choices:         []messages.Choice{{ID: "1", Label: "us-central1"}},
+		Other: &messages.OtherOption{
+			Label:       "Another region",
+			Description: "Any GCP region code",
+			Placeholder: "e.g. europe-west4",
+		},
+	}
+	resOther := f.create(t, false, withOther)
+	rowOther := resOther.Decisions[0].RowID
+
+	gotOther, err := f.cs.GetDecision(ctx, rowOther)
+	require.NoError(t, err)
+	require.NotNil(t, gotOther.Other)
+	assert.Equal(t, *withOther.Other, *gotOther.Other)
+	assert.Len(t, gotOther.Choices, 1)
+
+	byMsg, err := f.cs.GetDecisionsByMessageIDs(ctx, []string{gotOther.MessageID})
+	require.NoError(t, err)
+	require.Len(t, byMsg[gotOther.MessageID], 1)
+	require.NotNil(t, byMsg[gotOther.MessageID][0].Other)
+	assert.Equal(t, *withOther.Other, *byMsg[gotOther.MessageID][0].Other)
+
+	byRow, err := f.cs.GetDecisionRowsByIDs(ctx, []string{rowOther})
+	require.NoError(t, err)
+	require.NotNil(t, byRow[rowOther].Other)
+	assert.Equal(t, *withOther.Other, *byRow[rowOther].Other)
+
+	resNoOther := f.create(t, false, yesNo("no-other", "Plain choice?"))
+	rowNoOther := resNoOther.Decisions[0].RowID
+	gotNoOther, err := f.cs.GetDecision(ctx, rowNoOther)
+	require.NoError(t, err)
+	assert.Nil(t, gotNoOther.Other)
+
+	// 2. Validation rejections on RecordAnswer.
+	badNoOther := f.answer(rowNoOther, messages.ChoiceIDOther, userID, "")
+	badNoOther.OtherText = "custom"
+	_, _, err = f.cs.RecordAnswer(ctx, badNoOther)
+	assert.ErrorIs(t, err, store.ErrInvalidInput, "$other on decision without AllowOther must fail")
+
+	for name, mutate := range map[string]func(in *store.RecordAnswerInput){
+		"empty text":  func(in *store.RecordAnswerInput) { in.ChoiceID = messages.ChoiceIDOther; in.OtherText = "" },
+		"spaces only": func(in *store.RecordAnswerInput) { in.ChoiceID = messages.ChoiceIDOther; in.OtherText = "   " },
+		"newline":     func(in *store.RecordAnswerInput) { in.ChoiceID = messages.ChoiceIDOther; in.OtherText = "a\nb" },
+		"tab":         func(in *store.RecordAnswerInput) { in.ChoiceID = messages.ChoiceIDOther; in.OtherText = "a\tb" },
+		"bidi":        func(in *store.RecordAnswerInput) { in.ChoiceID = messages.ChoiceIDOther; in.OtherText = "a\u202eb" },
+		"201 runes": func(in *store.RecordAnswerInput) {
+			in.ChoiceID = messages.ChoiceIDOther
+			in.OtherText = strings.Repeat("é", 201)
+		},
+		"text on fixed":       func(in *store.RecordAnswerInput) { in.ChoiceID = "1"; in.OtherText = "extra" },
+		"space text on fixed": func(in *store.RecordAnswerInput) { in.ChoiceID = "1"; in.OtherText = " " },
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := f.answer(rowOther, "1", userID, "")
+			mutate(in)
+			_, _, err := f.cs.RecordAnswer(ctx, in)
+			assert.ErrorIs(t, err, store.ErrInvalidInput)
+		})
+	}
+
+	// 3. RecordAnswer with $other stores label snapshot, trimmed text, and MatchedDefault=false.
+	ansIn := f.answer(rowOther, messages.ChoiceIDOther, userID, "idem-other-1")
+	ansIn.AnsweredByName = "Alice"
+	ansIn.AnsweredByEmail = "alice@example.com"
+	ansIn.OtherText = "  europe-west4 canary  "
+	a1, replayed, err := f.cs.RecordAnswer(ctx, ansIn)
+	require.NoError(t, err)
+	assert.False(t, replayed)
+	assert.Equal(t, messages.ChoiceIDOther, a1.ChoiceID)
+	assert.Equal(t, "Another region", a1.ChoiceLabel)
+	assert.Equal(t, "europe-west4 canary", a1.OtherText)
+	assert.False(t, a1.MatchedDefault)
+
+	storedDec, err := f.cs.GetDecision(ctx, rowOther)
+	require.NoError(t, err)
+	require.NotNil(t, storedDec.EffectiveAnswer())
+	assert.Equal(t, "europe-west4 canary", storedDec.EffectiveAnswer().OtherText)
+
+	byResp, err := f.cs.GetDecisionAnswersByResponseMessageIDs(ctx, []string{a1.ResponseMessageID})
+	require.NoError(t, err)
+	require.Len(t, byResp[a1.ResponseMessageID], 1)
+	assert.Equal(t, "europe-west4 canary", byResp[a1.ResponseMessageID][0].OtherText)
+
+	// 4. Idempotency: same key + same (trimmed) text replays; same key + different text conflicts.
+	retrySame := f.answer(rowOther, messages.ChoiceIDOther, userID, "idem-other-1")
+	retrySame.OtherText = "europe-west4 canary"
+	a2, replayed, err := f.cs.RecordAnswer(ctx, retrySame)
+	require.NoError(t, err)
+	assert.True(t, replayed)
+	assert.Equal(t, a1.ID, a2.ID)
+	assert.Equal(t, "europe-west4 canary", a2.OtherText)
+
+	retryDiffText := f.answer(rowOther, messages.ChoiceIDOther, userID, "idem-other-1")
+	retryDiffText.OtherText = "us-east4"
+	_, _, err = f.cs.RecordAnswer(ctx, retryDiffText)
+	assert.ErrorIs(t, err, store.ErrDecisionAnswerConflict)
+
+	retryFixed := f.answer(rowOther, "1", userID, "idem-other-1")
+	_, _, err = f.cs.RecordAnswer(ctx, retryFixed)
+	assert.ErrorIs(t, err, store.ErrDecisionAnswerConflict)
+
+	// 5. User deletion keeps other_text snapshot while clearing answered_by_user_id (D6).
+	require.NoError(t, f.cs.DeleteUser(ctx, userID))
+	afterDel, err := f.cs.GetDecision(ctx, rowOther)
+	require.NoError(t, err)
+	require.NotNil(t, afterDel.EffectiveAnswer())
+	assert.Empty(t, afterDel.EffectiveAnswer().AnsweredByUserID)
+	assert.Equal(t, "Alice", afterDel.EffectiveAnswer().AnsweredByName)
+	assert.Equal(t, "europe-west4 canary", afterDel.EffectiveAnswer().OtherText)
+
+	// 6. Terminal statuses (replaced, withdrawn) refuse $other answers first.
+	repV1 := f.create(t, false, messages.Decision{
+		Key:      "rep-other",
+		Question: "Replace me?",
+		Choices:  []messages.Choice{{ID: "1", Label: "Yes"}},
+		Other:    &messages.OtherOption{Label: "Other"},
+	}).Decisions[0].RowID
+	// Replace v1 with v2 that drops Other.
+	repV2 := f.create(t, true, yesNo("rep-other", "Replaced without Other?")).Decisions[0].RowID
+	gotRepV2, err := f.cs.GetDecision(ctx, repV2)
+	require.NoError(t, err)
+	assert.Nil(t, gotRepV2.Other)
+
+	ansReplaced := f.answer(repV1, messages.ChoiceIDOther, "user-2", "")
+	ansReplaced.OtherText = "too late"
+	_, _, err = f.cs.RecordAnswer(ctx, ansReplaced)
+	assert.ErrorIs(t, err, store.ErrDecisionReplaced)
+
+	wdRow := f.create(t, false, messages.Decision{
+		Key:      "wd-other",
+		Question: "Withdraw me?",
+		Choices:  []messages.Choice{{ID: "1", Label: "Yes"}},
+		Other:    &messages.OtherOption{Label: "Other"},
+	}).Decisions[0].RowID
+	_, err = f.cs.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
+		AskerAgentID: f.agentID,
+		Keys:         []string{"wd-other"},
+	})
+	require.NoError(t, err)
+	ansWithdrawn := f.answer(wdRow, messages.ChoiceIDOther, "user-2", "")
+	ansWithdrawn.OtherText = "too late"
+	_, _, err = f.cs.RecordAnswer(ctx, ansWithdrawn)
+	assert.ErrorIs(t, err, store.ErrDecisionWithdrawn)
+
+	// Dismissed rows refuse $other with ErrDecisionDismissed (even if reusing
+	// the dismissal's idempotency key), and $dismissed is refused on RecordAnswer.
+	badReserved := f.answer(rowOther, messages.ChoiceIDDismissed, "user-2", "")
+	_, _, err = f.cs.RecordAnswer(ctx, badReserved)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	dsmRes := f.create(t, false, messages.Decision{
+		Key:      "dsm-other",
+		Question: "Dismiss me?",
+		Choices:  []messages.Choice{{ID: "1", Label: "Yes"}},
+		Other:    &messages.OtherOption{Label: "Other"},
+	})
+	dsmRow := dsmRes.Decisions[0].RowID
+	dsmDec, err := f.cs.GetDecision(ctx, dsmRow)
+	require.NoError(t, err)
+	dsmIn := f.dismissInput(dsmDec.MessageID, "user-2", "No longer relevant", func() time.Time {
+		return dsmDec.CreatedAt.Add(store.DecisionDismissMinAge)
+	})
+	dsmIn.IdempotencyKey = "shared-dsm-key"
+	_, err = f.cs.DismissDecisions(ctx, dsmIn)
+	require.NoError(t, err)
+
+	ansDismissed := f.answer(dsmRow, messages.ChoiceIDOther, "user-2", "shared-dsm-key")
+	ansDismissed.OtherText = "too late"
+	_, _, err = f.cs.RecordAnswer(ctx, ansDismissed)
+	assert.ErrorIs(t, err, store.ErrDecisionDismissed)
+
+	// 7. Multibyte at-limit Other fields (100 Cyrillic runes label, 300 CJK runes
+	// description, 100 CJK runes placeholder) round-trip cleanly via MaxRuneLen,
+	// and un-normalized over-limit inputs fail as ErrInvalidInput (never raw Ent ValidationError).
+	cyrillicLabel100 := strings.Repeat("д", messages.MaxChoiceLabelLen)
+	cjkDesc300 := strings.Repeat("東", messages.MaxChoiceDescriptionLen)
+	cjkPlaceholder100 := strings.Repeat("東", messages.MaxOtherPlaceholderLen)
+	multibyteDec := messages.Decision{
+		Key:      "multibyte-other",
+		Question: "Multibyte Other limits?",
+		Choices:  []messages.Choice{{ID: "1", Label: "Yes"}},
+		Other: &messages.OtherOption{
+			Label:       cyrillicLabel100,
+			Description: cjkDesc300,
+			Placeholder: cjkPlaceholder100,
+		},
+	}
+	mbRes := f.create(t, false, multibyteDec)
+	gotMB, err := f.cs.GetDecision(ctx, mbRes.Decisions[0].RowID)
+	require.NoError(t, err)
+	require.NotNil(t, gotMB.Other)
+	assert.Equal(t, cyrillicLabel100, gotMB.Other.Label)
+	assert.Equal(t, cjkDesc300, gotMB.Other.Description)
+	assert.Equal(t, cjkPlaceholder100, gotMB.Other.Placeholder)
+
+	for name, badOther := range map[string]*messages.OtherOption{
+		"label 101 Cyrillic":  {Label: strings.Repeat("д", messages.MaxChoiceLabelLen+1)},
+		"desc 301 CJK":        {Label: "Other", Description: strings.Repeat("東", messages.MaxChoiceDescriptionLen+1)},
+		"placeholder 101 CJK": {Label: "Other", Placeholder: strings.Repeat("東", messages.MaxOtherPlaceholderLen+1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pIn := f.prompt("", false, messages.Decision{
+				Key:      "bad-mb",
+				Question: "Too long?",
+				Choices:  []messages.Choice{{ID: "1", Label: "Yes"}},
+				Other:    badOther,
+			})
+			_, err := f.cs.CreateDecisionPrompt(ctx, pIn)
+			require.ErrorIs(t, err, store.ErrInvalidInput)
+		})
+	}
+}

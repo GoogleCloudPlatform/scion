@@ -37,6 +37,14 @@ export type DecisionAnswerSurface = 'native' | 'decisions_page';
 /** Minimum version age before a decision may be dismissed (`store.DecisionDismissMinAge`, 5 minutes). */
 export const DISMISS_MIN_AGE_MS = 5 * 60 * 1000;
 
+/** Reserved choice id for a free-form Other answer (`pkg/messages.ChoiceIDOther`). */
+export const OTHER_CHOICE_ID = '$other';
+
+/** Whether an answer or response row selected the free-form Other option. */
+export function isOtherAnswer(a: { choiceId?: string | null } | null | undefined): boolean {
+  return a?.choiceId === OTHER_CHOICE_ID;
+}
+
 /**
  * Whether `d` is still open (pending without an effective answer, or decided
  * only by an agent-interpreted answer awaiting confirmation). Unknown future
@@ -258,7 +266,8 @@ export async function answerDecision(
   rowId: string,
   choiceId: string,
   idempotencyKey: string,
-  surface?: DecisionAnswerSurface
+  surface?: DecisionAnswerSurface,
+  otherText?: string
 ): Promise<AnswerDecisionResult> {
   let res: Response;
   try {
@@ -269,6 +278,7 @@ export async function answerDecision(
         choice_id: choiceId,
         idempotency_key: idempotencyKey,
         ...(surface === 'decisions_page' ? { surface: 'decisions_page' } : {}),
+        ...(otherText !== undefined ? { other_text: otherText } : {}),
       }),
     });
   } catch {

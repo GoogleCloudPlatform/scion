@@ -133,6 +133,62 @@ func (_c *DecisionCreate) SetNillableDefaultChoiceID(v *string) *DecisionCreate 
 	return _c
 }
 
+// SetAllowOther sets the "allow_other" field.
+func (_c *DecisionCreate) SetAllowOther(v bool) *DecisionCreate {
+	_c.mutation.SetAllowOther(v)
+	return _c
+}
+
+// SetNillableAllowOther sets the "allow_other" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableAllowOther(v *bool) *DecisionCreate {
+	if v != nil {
+		_c.SetAllowOther(*v)
+	}
+	return _c
+}
+
+// SetOtherLabel sets the "other_label" field.
+func (_c *DecisionCreate) SetOtherLabel(v string) *DecisionCreate {
+	_c.mutation.SetOtherLabel(v)
+	return _c
+}
+
+// SetNillableOtherLabel sets the "other_label" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableOtherLabel(v *string) *DecisionCreate {
+	if v != nil {
+		_c.SetOtherLabel(*v)
+	}
+	return _c
+}
+
+// SetOtherDescription sets the "other_description" field.
+func (_c *DecisionCreate) SetOtherDescription(v string) *DecisionCreate {
+	_c.mutation.SetOtherDescription(v)
+	return _c
+}
+
+// SetNillableOtherDescription sets the "other_description" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableOtherDescription(v *string) *DecisionCreate {
+	if v != nil {
+		_c.SetOtherDescription(*v)
+	}
+	return _c
+}
+
+// SetOtherPlaceholder sets the "other_placeholder" field.
+func (_c *DecisionCreate) SetOtherPlaceholder(v string) *DecisionCreate {
+	_c.mutation.SetOtherPlaceholder(v)
+	return _c
+}
+
+// SetNillableOtherPlaceholder sets the "other_placeholder" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableOtherPlaceholder(v *string) *DecisionCreate {
+	if v != nil {
+		_c.SetOtherPlaceholder(*v)
+	}
+	return _c
+}
+
 // SetIntroLength sets the "intro_length" field.
 func (_c *DecisionCreate) SetIntroLength(v int) *DecisionCreate {
 	_c.mutation.SetIntroLength(v)
@@ -308,6 +364,10 @@ func (_c *DecisionCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *DecisionCreate) defaults() {
+	if _, ok := _c.mutation.AllowOther(); !ok {
+		v := decision.DefaultAllowOther
+		_c.mutation.SetAllowOther(v)
+	}
 	if _, ok := _c.mutation.IntroLength(); !ok {
 		v := decision.DefaultIntroLength
 		_c.mutation.SetIntroLength(v)
@@ -390,6 +450,24 @@ func (_c *DecisionCreate) check() error {
 	}
 	if _, ok := _c.mutation.Choices(); !ok {
 		return &ValidationError{Name: "choices", err: errors.New(`ent: missing required field "Decision.choices"`)}
+	}
+	if _, ok := _c.mutation.AllowOther(); !ok {
+		return &ValidationError{Name: "allow_other", err: errors.New(`ent: missing required field "Decision.allow_other"`)}
+	}
+	if v, ok := _c.mutation.OtherLabel(); ok {
+		if err := decision.OtherLabelValidator(v); err != nil {
+			return &ValidationError{Name: "other_label", err: fmt.Errorf(`ent: validator failed for field "Decision.other_label": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.OtherDescription(); ok {
+		if err := decision.OtherDescriptionValidator(v); err != nil {
+			return &ValidationError{Name: "other_description", err: fmt.Errorf(`ent: validator failed for field "Decision.other_description": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.OtherPlaceholder(); ok {
+		if err := decision.OtherPlaceholderValidator(v); err != nil {
+			return &ValidationError{Name: "other_placeholder", err: fmt.Errorf(`ent: validator failed for field "Decision.other_placeholder": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.IntroLength(); !ok {
 		return &ValidationError{Name: "intro_length", err: errors.New(`ent: missing required field "Decision.intro_length"`)}
@@ -501,6 +579,22 @@ func (_c *DecisionCreate) createSpec() (*Decision, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DefaultChoiceID(); ok {
 		_spec.SetField(decision.FieldDefaultChoiceID, field.TypeString, value)
 		_node.DefaultChoiceID = &value
+	}
+	if value, ok := _c.mutation.AllowOther(); ok {
+		_spec.SetField(decision.FieldAllowOther, field.TypeBool, value)
+		_node.AllowOther = value
+	}
+	if value, ok := _c.mutation.OtherLabel(); ok {
+		_spec.SetField(decision.FieldOtherLabel, field.TypeString, value)
+		_node.OtherLabel = &value
+	}
+	if value, ok := _c.mutation.OtherDescription(); ok {
+		_spec.SetField(decision.FieldOtherDescription, field.TypeString, value)
+		_node.OtherDescription = &value
+	}
+	if value, ok := _c.mutation.OtherPlaceholder(); ok {
+		_spec.SetField(decision.FieldOtherPlaceholder, field.TypeString, value)
+		_node.OtherPlaceholder = &value
 	}
 	if value, ok := _c.mutation.IntroLength(); ok {
 		_spec.SetField(decision.FieldIntroLength, field.TypeInt, value)
@@ -768,6 +862,18 @@ func (u *DecisionUpsertOne) UpdateNewValues() *DecisionUpsertOne {
 		}
 		if _, exists := u.create.mutation.DefaultChoiceID(); exists {
 			s.SetIgnore(decision.FieldDefaultChoiceID)
+		}
+		if _, exists := u.create.mutation.AllowOther(); exists {
+			s.SetIgnore(decision.FieldAllowOther)
+		}
+		if _, exists := u.create.mutation.OtherLabel(); exists {
+			s.SetIgnore(decision.FieldOtherLabel)
+		}
+		if _, exists := u.create.mutation.OtherDescription(); exists {
+			s.SetIgnore(decision.FieldOtherDescription)
+		}
+		if _, exists := u.create.mutation.OtherPlaceholder(); exists {
+			s.SetIgnore(decision.FieldOtherPlaceholder)
 		}
 		if _, exists := u.create.mutation.IntroLength(); exists {
 			s.SetIgnore(decision.FieldIntroLength)
@@ -1170,6 +1276,18 @@ func (u *DecisionUpsertBulk) UpdateNewValues() *DecisionUpsertBulk {
 			}
 			if _, exists := b.mutation.DefaultChoiceID(); exists {
 				s.SetIgnore(decision.FieldDefaultChoiceID)
+			}
+			if _, exists := b.mutation.AllowOther(); exists {
+				s.SetIgnore(decision.FieldAllowOther)
+			}
+			if _, exists := b.mutation.OtherLabel(); exists {
+				s.SetIgnore(decision.FieldOtherLabel)
+			}
+			if _, exists := b.mutation.OtherDescription(); exists {
+				s.SetIgnore(decision.FieldOtherDescription)
+			}
+			if _, exists := b.mutation.OtherPlaceholder(); exists {
+				s.SetIgnore(decision.FieldOtherPlaceholder)
 			}
 			if _, exists := b.mutation.IntroLength(); exists {
 				s.SetIgnore(decision.FieldIntroLength)

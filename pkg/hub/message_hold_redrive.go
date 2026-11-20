@@ -1191,6 +1191,9 @@ func (s *Server) enrichHeldDecisionResponse(
 		sm.Metadata[messages.MetadataDecisionVersion] = strconv.Itoa(a.Version)
 		sm.Metadata[messages.MetadataChoiceID] = a.ChoiceID
 		sm.Metadata[messages.MetadataDecisionProvenance] = a.Provenance
+		if a.ChoiceID == messages.ChoiceIDOther && a.OtherText != "" {
+			sm.Metadata[messages.MetadataDecisionOtherText] = a.OtherText
+		}
 		return "", nil
 	}
 

@@ -410,6 +410,16 @@ func Spec() []TableFixture {
 				"status": "dismissed", "created_at": baseTime,
 				"dismissed_at": baseTime.Add(6 * time.Minute),
 			},
+			{ // decision with allow_other options answered with free-form text (ptone/scion#8152)
+				"id": "dc000000-0000-0000-0000-000000000005", "project_id": projectID,
+				"conversation_id": conversationID, "message_id": messageID, "position": 4,
+				"asker_agent_id": agentID, "asker_agent_name": "worker",
+				"key": "region", "key_norm": "region", "key_source": "agent", "version": 1,
+				"question": "Which region for the canary?", "choices": `[{"id":"1","label":"us-central1"}]`,
+				"allow_other": true, "other_label": "Another region",
+				"other_description": "Any GCP region code", "other_placeholder": "e.g. europe-west4",
+				"status": "decided", "created_at": baseTime, "decided_at": baseTime.Add(3 * time.Minute),
+			},
 		}},
 		{Table: "decision_answers", Rows: []row{
 			{ // a direct answer recorded from the web session
@@ -429,6 +439,16 @@ func Spec() []TableFixture {
 				"provenance": "direct", "outcome": "dismiss", "dismiss_reason": "Already handled out of band",
 				"surface": "decisions_page", "response_message_id": messageID, "created_at": baseTime.Add(6 * time.Minute),
 				"batch_id": "ba000000-0000-0000-0000-000000000002", "matched_default": false,
+			},
+			{ // a direct Other free-form answer (ptone/scion#8152)
+				"id": "da000000-0000-0000-0000-000000000003", "decision_row_id": "dc000000-0000-0000-0000-000000000005",
+				"project_id": projectID, "asker_agent_id": agentID, "key": "region", "version": 1,
+				"question_text": "Which region for the canary?", "choice_id": "$other", "choice_label": "Another region",
+				"other_text":          "europe-west4 canary",
+				"answered_by_user_id": userID, "answered_by_name": "Alice", "answered_by_email": "alice@example.com",
+				"provenance": "direct", "outcome": "answer", "surface": "native",
+				"response_message_id": messageID, "idempotency_key": "web-other-1", "created_at": baseTime.Add(3 * time.Minute),
+				"matched_default": false,
 			},
 		}},
 		{Table: "decision_key_counters", Rows: []row{

@@ -251,6 +251,16 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, "$dismissed", dismissedDec.Dismissal().ChoiceID)
 	assert.Equal(t, store.DecisionOutcomeDismiss, dismissedDec.Dismissal().Outcome)
 	assert.Equal(t, "Already handled out of band", dismissedDec.Dismissal().DismissReason)
+
+	otherDec, err := composite.GetDecision(ctx, "dc000000-0000-0000-0000-000000000005")
+	require.NoError(t, err)
+	require.NotNil(t, otherDec.Other)
+	assert.Equal(t, "Another region", otherDec.Other.Label)
+	assert.Equal(t, "Any GCP region code", otherDec.Other.Description)
+	assert.Equal(t, "e.g. europe-west4", otherDec.Other.Placeholder)
+	require.NotNil(t, otherDec.EffectiveAnswer())
+	assert.Equal(t, "$other", otherDec.EffectiveAnswer().ChoiceID)
+	assert.Equal(t, "europe-west4 canary", otherDec.EffectiveAnswer().OtherText)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row
