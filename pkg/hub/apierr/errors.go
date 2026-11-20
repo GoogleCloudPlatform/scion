@@ -72,12 +72,17 @@ type ErrorResponse struct {
 
 // Error codes matching the Hub API specification.
 const (
-	ErrCodeInvalidRequest        = "invalid_request"
-	ErrCodeValidationError       = "validation_error"
-	ErrCodeUnauthorized          = "unauthorized"
-	ErrCodeForbidden             = "forbidden"
-	ErrCodeNotFound              = "not_found"
-	ErrCodeConflict              = "conflict"
+	ErrCodeInvalidRequest  = "invalid_request"
+	ErrCodeValidationError = "validation_error"
+	ErrCodeUnauthorized    = "unauthorized"
+	ErrCodeForbidden       = "forbidden"
+	ErrCodeNotFound        = "not_found"
+	ErrCodeConflict        = "conflict"
+	// ErrCodeAgentExistsResumable is returned (409) when a create/start
+	// request without Resume targets an existing agent in a resumable
+	// resting phase (suspended, stopped, halted, or an active idle-suspend
+	// claim).
+	ErrCodeAgentExistsResumable  = "agent_exists_resumable"
 	ErrCodeVersionConflict       = "version_conflict"
 	ErrCodeTemplateConflict      = "template_conflict"       // 409: a template commit lost its compare-and-swap (ptone/scion#4221)
 	ErrCodeHarnessConfigConflict = "harness_config_conflict" // 409: a harness-config commit lost its compare-and-swap (ptone/scion#4219)

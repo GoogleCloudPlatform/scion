@@ -112,19 +112,22 @@ scion help global-flags
 
 ### `scion start` (or `run`)
 
-Starts a new agent or resumes an existing one. Starting a **suspended** agent
-implicitly resumes its harness session (continuing the prior conversation);
-starting a **stopped** or **error** agent runs a fresh session. See
-[`scion suspend`](#scion-suspend) and [`scion resume`](#scion-resume).
+Starts a new agent, starts an agent previously provisioned with `scion create`,
+or follows a launch already in flight.
 
-Starting an existing **stopped** agent restarts it in place
-(printed as "Restarting", with a fresh session), the same as `scion resume`.
-Starting an **error**-phase agent still fails with a conflict: use
-`scion resume --force` or delete it first. When an existing agent is reused in
-place, the Hub applies only the task and `--attach`. Other configuration flags
-you set explicitly (for example `--type`, `--image`, `--harness-config`,
-`--broker`, `--label` or `--no-auth`) are not applied, and the CLI prints a
-warning that names them.
+`scion start` does **not** implicitly resume or restart an existing agent in a
+`suspended`, `stopped`, or `halted` phase (including an `error` agent whose
+remembered resume phase is one of those, or an agent with an active
+idle-suspend claim). Instead, the Hub refuses the request with
+`409 agent_exists_resumable`, naming the existing phase and hinting to run
+[`scion resume <agent-name>`](#scion-resume), delete the agent, or use another
+name. Starting an **error**-phase agent without a resumable phase still fails
+with a `409 conflict`: use `scion resume --force` or delete it first.
+
+Agents in the `created` or `provisioning` phase (the documented
+`scion create` followed by `scion start` flow) or with a launch already in
+flight continue to be started or followed. Note that starting an existing
+`created` agent hands it the caller's task.
 
 **Usage:** `scion start <agent-name> [task] [flags]`
 
@@ -145,7 +148,7 @@ warning that names them.
     - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID, name, slug, or unique prefix for execution. An ambiguous prefix fails with `runtime_broker_ambiguous` (409) and lists the matching brokers; a broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
-    - `--agent-log-level <spec>`: Set `SCION_LOG_LEVEL` in the agent's environment, for example `debug` or `info,hubsync=debug` (same syntax as [`SCION_LOG_LEVEL`](/scion/hosted/single-node/observability/#debugging-an-agent)). An invalid value fails before anything starts. Agents never inherit `--debug` or the server's debug setting. The value is saved in the agent's applied config and kept on later restarts (remove it by deleting and re-creating the agent); when the Hub reuses an existing agent, the flag is not applied and `scion start` or `scion resume` prints a warning.
+    - `--agent-log-level <spec>`: Set `SCION_LOG_LEVEL` in the agent's environment, for example `debug` or `info,hubsync=debug` (same syntax as [`SCION_LOG_LEVEL`](/scion/hosted/single-node/observability/#debugging-an-agent)). An invalid value fails before anything starts. Agents never inherit `--debug` or the server's debug setting. The value is saved in the agent's applied config and kept on later restarts (remove it by deleting and re-creating the agent); when `scion resume` reuses an existing agent in place, the flag is not applied and `scion resume` prints a warning.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Default: the template's mode, else the parent agent's mode, else the Hub's default message mode ([`server.hub.default_message_mode`](/scion/reference/server-config/#hub-settings-serverhub), `project` unless the operator sets it). See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
     - `--no-wait`: Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
@@ -298,7 +301,7 @@ failed start.
 ### `scion stop`
 
 Stops a running agent. This is a graceful shutdown (`SIGTERM`); the agent's
-phase becomes `stopped` and the next `start` runs a fresh session.
+phase becomes `stopped` and the next `scion resume` runs a fresh session.
 
 Stopping an agent whose Runtime Broker is offline queues the stop: the CLI prints
 "stop queued via Hub", and the Runtime Broker applies the stop when it reconnects, unless a newer
@@ -324,8 +327,7 @@ start or stop was recorded first. With `--rm`, a queued stop does not remove the
 
 Suspends a running agent, preserving its harness session for a later resume.
 Unlike `stop`, suspending sets the agent's phase to `suspended`, and the next
-`start` (or `resume`) **continues** the prior conversation instead of starting
-fresh.
+`scion resume` **continues** the prior conversation instead of starting fresh.
 
 Only running agents can be suspended, and the agent's harness must support
 session resume (Claude Code and Gemini CLI do; the generic harness does not —
@@ -339,10 +341,13 @@ use `stop` instead). See [Agent Lifecycle](/scion/local/agent-lifecycle/).
 
 ### `scion resume`
 
-Resumes an existing agent. For a **suspended** agent, the harness session is
-continued (Claude Code receives `--continue`, Gemini CLI `--resume`, etc.). For
-a **stopped** agent, there is no session to continue, so a fresh session is
-started.
+Resumes an existing agent in place. For a **suspended** agent, the harness
+session is continued (Claude Code receives `--continue`, Gemini CLI `--resume`,
+etc.). For a **stopped** or **halted** agent, there is no session to continue,
+so it is restarted in place with a fresh session. When an existing agent is
+reused in place, the Hub applies only the task and `--attach`; other
+configuration flags set explicitly on `scion resume` are not applied and the
+CLI prints a warning naming them.
 
 A plain `scion resume <agent-name>` (no task) simply **continues** the prior
 session — the agent's original creation task is *not* re-injected. If you pass an

@@ -34,6 +34,7 @@ const (
 	ErrCodeAddrAmbiguous                    = apierr.ErrCodeAddrAmbiguous
 	ErrCodeAddrMalformed                    = apierr.ErrCodeAddrMalformed
 	ErrCodeAddrUnknown                      = apierr.ErrCodeAddrUnknown
+	ErrCodeAgentExistsResumable             = apierr.ErrCodeAgentExistsResumable
 	ErrCodeAgentNotFound                    = apierr.ErrCodeAgentNotFound
 	ErrCodeAgentNotRunning                  = apierr.ErrCodeAgentNotRunning
 	ErrCodeAgentSessionUnavailable          = apierr.ErrCodeAgentSessionUnavailable

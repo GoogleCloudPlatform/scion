@@ -805,7 +805,7 @@ func TestAsyncStart_CreateEndpointAccepted(t *testing.T) {
 		resume     bool
 		wantResume bool
 	}{
-		{"suspended (Branch 1)", state.PhaseSuspended, false, false, true},
+		{"suspended (Branch 1)", state.PhaseSuspended, false, true, true},
 		{"stopped resume in place (Branch 2)", state.PhaseStopped, false, true, false},
 		{"created memory (Branch 4)", state.PhaseCreated, true, false, false},
 	}

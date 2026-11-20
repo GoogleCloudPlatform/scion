@@ -1173,7 +1173,9 @@ func TestCreateAgent_DuplicateSlugStopped_Returns409(t *testing.T) {
 	})
 
 	require.Equal(t, http.StatusConflict, rec.Code)
-	assert.Contains(t, rec.Body.String(), "already exists in this project")
+	assert.Contains(t, rec.Body.String(), ErrCodeAgentExistsResumable)
+	assert.Contains(t, rec.Body.String(), "stopped")
+	assert.Contains(t, rec.Body.String(), "scion resume my-stopped-agent")
 }
 
 func TestCreateAgent_DuplicateSlugError_Returns409(t *testing.T) {

@@ -197,78 +197,17 @@ func TestStartAgentViaHub_SendsNoAuthOnWire(t *testing.T) {
 	}
 }
 
-// ptone/scion#1911: the existing-agent pre-check converts start on a stopped
-// or suspended agent into a resume request, and leaves other phases alone.
-// The success line uses the same verb as the action line (a stopped agent is
-// "Restarting" and then "restarted", not "resumed").
-func TestStartAgentViaHub_ExistingAgentPreCheck(t *testing.T) {
-	const projectID, agentName = "proj-precheck", "precheck-agent"
+// ptone/scion#8584: `scion start` never implicitly sets resume on the wire and
+// always prints "Starting" (never "Restarting" or "Resuming"). Resumable
+// existing agents are refused by the Hub with 409 agent_exists_resumable,
+// while `created` agents continue to be started.
+func TestStartAgentViaHub_DoesNotImplicitlyResume(t *testing.T) {
+	const projectID, agentName = "proj-no-implicit", "start-agent"
 
-	for _, tc := range []struct {
-		phase      string
-		wantResume bool
-		wantAction string
-		wantResult string
-	}{
-		{"", false, "Starting agent", "started"},
-		{"stopped", true, "Restarting agent", "restarted"},
-		{"suspended", true, "Resuming agent", "resumed"},
-		{"running", false, "Starting agent", "started"},
-		// The hub only restarts error-phase agents in place with --force,
-		// so start leaves them as-is (and the hub still reports 409).
-		{"error", false, "Starting agent", "started"},
-	} {
-		t.Run("phase="+tc.phase, func(t *testing.T) {
+	for _, phase := range []string{"", "created", "provisioning", "running", "error"} {
+		t.Run("start/phase="+phase, func(t *testing.T) {
 			resetHubStartGlobals(t)
-			stub := newHubStartStub(t, projectID, agentName, tc.phase)
-			var err error
-			stdout, stderr := captureStdIO(t, func() {
-				err = startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "", false, nil)
-			})
-			require.NoError(t, err)
-			require.Equal(t, 1, stub.createCalls)
-			if tc.wantResume {
-				assert.Equal(t, true, stub.createBody["resume"])
-			} else {
-				_, present := stub.createBody["resume"]
-				assert.False(t, present, "resume must not be set for phase %q", tc.phase)
-			}
-			assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
-			assert.Contains(t, stderr, "Agent '"+agentName+"' "+tc.wantResult+" via Hub.")
-		})
-	}
-}
-
-// D-T8 addition (design wave 3 D-c, R3; ptone/scion#4670): an agent left
-// in error by a failed start carries its resume memory in
-// launch.resumePhase. The CLI decides as the hub does, from the remembered
-// phase: the resume flag on the wire, the action line, the result word and
-// the flags warning. Without resumePhase an error agent behaves as before.
-func TestStartAgentViaHub_ExistingAgentResumeMemory(t *testing.T) {
-	const projectID, agentName = "proj-memory", "memory-agent"
-
-	for _, tc := range []struct {
-		resumePhase string
-		wantResume  bool
-		wantAction  string
-		wantResult  string
-		wantWarning string // "" → no flags warning
-	}{
-		{"suspended", true, "Resuming agent", "resumed", "(phase: error, resumes as suspended)"},
-		{"halted", true, "Restarting agent", "restarted", "(phase: error, resumes as halted)"},
-		{"created", false, "Starting agent", "started", "(phase: error, resumes as created)"},
-		{"provisioning", false, "Starting agent", "started", ""},
-		{"", false, "Starting agent", "started", ""},
-	} {
-		t.Run("resumePhase="+tc.resumePhase, func(t *testing.T) {
-			resetHubStartGlobals(t)
-			stub := newHubStartStub(t, projectID, agentName, "error")
-			stub.existingLaunch = map[string]interface{}{
-				"id": "l1", "state": "ended", "active": false, "kind": "start", "error": "crash_loop",
-			}
-			if tc.resumePhase != "" {
-				stub.existingLaunch["resumePhase"] = tc.resumePhase
-			}
+			stub := newHubStartStub(t, projectID, agentName, phase)
 			cmd := newFlagCmd(t, map[string]string{"image": "img:1"})
 			var err error
 			stdout, stderr := captureStdIO(t, func() {
@@ -276,50 +215,177 @@ func TestStartAgentViaHub_ExistingAgentResumeMemory(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.Equal(t, 1, stub.createCalls)
-			if tc.wantResume {
-				assert.Equal(t, true, stub.createBody["resume"])
-			} else {
-				_, present := stub.createBody["resume"]
-				assert.False(t, present, "resume must not be set for resumePhase %q", tc.resumePhase)
-			}
-			assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
-			assert.Contains(t, stderr, "Agent '"+agentName+"' "+tc.wantResult+" via Hub.")
-			if tc.wantWarning == "" {
-				assert.NotContains(t, stderr, "not applied to an existing agent")
-			} else {
-				assert.Contains(t, stderr, "Warning: agent '"+agentName+"' already exists "+tc.wantWarning+
-					" and is reused in place; these flags are not applied to an existing agent: --image\n")
-			}
+			_, present := stub.createBody["resume"]
+			assert.False(t, present, "start must never set resume for phase %q", phase)
+			assert.Contains(t, stdout, "Starting agent '"+agentName+"'")
+			assert.Contains(t, stderr, "Agent '"+agentName+"' started via Hub.")
+			assert.NotContains(t, stderr, "not applied to an existing agent")
+		})
+	}
+
+	for _, phase := range []string{"suspended", "stopped", "halted"} {
+		t.Run("start-refused/phase="+phase, func(t *testing.T) {
+			resetHubStartGlobals(t)
+			stub := newHubStartStub(t, projectID, agentName, phase)
+			stub.createStatus = http.StatusConflict
+			stub.createErrCode = "agent_exists_resumable"
+			stub.createErrMsg = `agent "` + agentName + `" already exists (phase: ` + phase + `); run 'scion resume ` + agentName + `' to resume it, delete it, or use another name`
+			cmd := newFlagCmd(t, map[string]string{"image": "img:1", "no-auth": "true"})
+			var err error
+			stdout, stderr := captureStdIO(t, func() {
+				err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+			})
+			require.Error(t, err)
+			require.Equal(t, 1, stub.createCalls)
+			_, present := stub.createBody["resume"]
+			assert.False(t, present, "start must not set resume for phase %q", phase)
+			assert.Contains(t, stdout, "Starting agent '"+agentName+"'")
+			assert.Contains(t, err.Error(), phase)
+			assert.Contains(t, err.Error(), "scion resume "+agentName)
+			assert.NotContains(t, stderr, "not applied to an existing agent")
 		})
 	}
 }
 
-// ptone/scion#1911 / #1912: explicitly set config flags that the hub will not
-// apply to an existing agent produce one stderr warning naming them, and
-// --no-auth cites ptone/scion#1855.
+// ptone/scion#8584: `scion resume` sends resume=true, uses the appropriate
+// action/result verb (Restarting/restarted for stopped and halted,
+// Resuming/resumed for suspended, Force-resuming for error+--force), and
+// keeps the ignored-flags warning.
+func TestStartAgentViaHub_ExplicitResumeActionAndResult(t *testing.T) {
+	const projectID, agentName = "proj-resume", "resume-agent"
+
+	for _, tc := range []struct {
+		phase      string
+		force      bool
+		wantAction string
+		wantResult string
+	}{
+		{"suspended", false, "Resuming agent", "resumed"},
+		{"stopped", false, "Restarting agent", "restarted"},
+		{"halted", false, "Restarting agent", "restarted"},
+		{"error", true, "Force-resuming agent", "resumed"},
+	} {
+		t.Run("phase="+tc.phase, func(t *testing.T) {
+			resetHubStartGlobals(t)
+			forceResume = tc.force
+			stub := newHubStartStub(t, projectID, agentName, tc.phase)
+			var err error
+			stdout, stderr := captureStdIO(t, func() {
+				err = startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "", true, nil)
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, stub.createCalls)
+			assert.Equal(t, true, stub.createBody["resume"])
+			if tc.force {
+				assert.Equal(t, true, stub.createBody["forceResume"])
+			}
+			assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
+			assert.Contains(t, stderr, "Agent '"+agentName+"' "+tc.wantResult+" via Hub.")
+		})
+	}
+}
+
+// D-T8 addition (design wave 3 D-c, R3; ptone/scion#4670, updated for #8584):
+// an agent left in error by a failed start carries its resume memory in
+// launch.resumePhase. `scion start` never implies resume from it; `scion resume`
+// uses it for the action line, result word, and ignored-flags warning.
+func TestStartAgentViaHub_ExistingAgentResumeMemory(t *testing.T) {
+	const projectID, agentName = "proj-memory", "memory-agent"
+
+	t.Run("start never implies resume from resumePhase", func(t *testing.T) {
+		for _, resumePhase := range []string{"suspended", "stopped", "halted", "created", "provisioning", ""} {
+			t.Run("resumePhase="+resumePhase, func(t *testing.T) {
+				resetHubStartGlobals(t)
+				stub := newHubStartStub(t, projectID, agentName, "error")
+				stub.existingLaunch = map[string]interface{}{
+					"id": "l1", "state": "ended", "active": false, "kind": "start", "error": "crash_loop",
+				}
+				if resumePhase != "" {
+					stub.existingLaunch["resumePhase"] = resumePhase
+				}
+				cmd := newFlagCmd(t, map[string]string{"image": "img:1"})
+				var err error
+				stdout, stderr := captureStdIO(t, func() {
+					err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+				})
+				require.NoError(t, err)
+				require.Equal(t, 1, stub.createCalls)
+				_, present := stub.createBody["resume"]
+				assert.False(t, present, "start must not set resume for resumePhase %q", resumePhase)
+				assert.Contains(t, stdout, "Starting agent '"+agentName+"'")
+				assert.NotContains(t, stderr, "not applied to an existing agent")
+			})
+		}
+	})
+
+	t.Run("resume uses resumePhase for action and warning", func(t *testing.T) {
+		for _, tc := range []struct {
+			resumePhase string
+			wantAction  string
+			wantResult  string
+			wantWarning string // "" → no flags warning
+		}{
+			{"suspended", "Resuming agent", "resumed", "(phase: error, resumes as suspended)"},
+			{"stopped", "Restarting agent", "restarted", "(phase: error, resumes as stopped)"},
+			{"halted", "Restarting agent", "restarted", "(phase: error, resumes as halted)"},
+			{"provisioning", "Resuming agent", "resumed", ""},
+		} {
+			t.Run("resumePhase="+tc.resumePhase, func(t *testing.T) {
+				resetHubStartGlobals(t)
+				stub := newHubStartStub(t, projectID, agentName, "error")
+				stub.existingLaunch = map[string]interface{}{
+					"id": "l1", "state": "ended", "active": false, "kind": "start", "error": "crash_loop",
+					"resumePhase": tc.resumePhase,
+				}
+				cmd := newFlagCmd(t, map[string]string{"image": "img:1"})
+				var err error
+				stdout, stderr := captureStdIO(t, func() {
+					err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", true, nil)
+				})
+				require.NoError(t, err)
+				require.Equal(t, 1, stub.createCalls)
+				assert.Equal(t, true, stub.createBody["resume"])
+				assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
+				assert.Contains(t, stderr, "Agent '"+agentName+"' "+tc.wantResult+" via Hub.")
+				if tc.wantWarning == "" {
+					assert.NotContains(t, stderr, "not applied to an existing agent")
+				} else {
+					assert.Contains(t, stderr, "Warning: agent '"+agentName+"' already exists "+tc.wantWarning+
+						" and is reused in place; these flags are not applied to an existing agent: --image\n")
+				}
+			})
+		}
+	})
+}
+
+// ptone/scion#1911 / #1912 / #8584: on `scion resume`, explicitly set config
+// flags that the hub will not apply to an existing agent produce one stderr
+// warning naming them, and --no-auth cites ptone/scion#1855. `scion start`
+// does not emit this warning.
 func TestStartAgentViaHub_WarnsIgnoredFlagsForExistingAgent(t *testing.T) {
 	const projectID, agentName = "proj-warn", "warn-agent"
 
-	t.Run("stopped agent with config flags", func(t *testing.T) {
+	t.Run("resume on stopped agent with config flags", func(t *testing.T) {
 		resetHubStartGlobals(t)
 		stub := newHubStartStub(t, projectID, agentName, "stopped")
 		noAuth, agentImage = true, "img:1"
 		cmd := newFlagCmd(t, map[string]string{"image": "img:1", "no-auth": "true", "attach": "true"})
 		attach = false // --attach is applied by the hub; keep the test off the attach path
 		var err error
-		_, stderr := captureStdIO(t, func() {
-			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+		stdout, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", true, nil)
 		})
 		require.NoError(t, err)
+		assert.Contains(t, stdout, "Restarting agent")
 		assert.Contains(t, stderr, "these flags are not applied to an existing agent: --image, --no-auth\n")
 		assert.Contains(t, stderr, "ptone/scion#1855")
 		assert.NotContains(t, stderr, "--attach")
 		assert.NotContains(t, stderr, "--type")
 	})
 
-	t.Run("resume on stopped agent with --no-auth", func(t *testing.T) {
+	t.Run("resume on suspended agent with --no-auth", func(t *testing.T) {
 		resetHubStartGlobals(t)
-		stub := newHubStartStub(t, projectID, agentName, "stopped")
+		stub := newHubStartStub(t, projectID, agentName, "suspended")
 		noAuth = true
 		cmd := newFlagCmd(t, map[string]string{"no-auth": "true"})
 		var err error
@@ -329,7 +395,20 @@ func TestStartAgentViaHub_WarnsIgnoredFlagsForExistingAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, stderr, "--no-auth")
 		assert.Contains(t, stderr, "ptone/scion#1855")
-		assert.Contains(t, stdout, "Restarting agent")
+		assert.Contains(t, stdout, "Resuming agent")
+	})
+
+	t.Run("start on created agent gets no warning", func(t *testing.T) {
+		resetHubStartGlobals(t)
+		stub := newHubStartStub(t, projectID, agentName, "created")
+		noAuth = true
+		cmd := newFlagCmd(t, map[string]string{"image": "img:1", "no-auth": "true"})
+		var err error
+		_, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+		})
+		require.NoError(t, err)
+		assert.NotContains(t, stderr, "not applied to an existing agent")
 	})
 
 	t.Run("new agent gets no warning", func(t *testing.T) {
@@ -346,27 +425,15 @@ func TestStartAgentViaHub_WarnsIgnoredFlagsForExistingAgent(t *testing.T) {
 		assert.Equal(t, true, stub.createBody["noAuth"])
 	})
 
-	t.Run("running agent gets no warning", func(t *testing.T) {
+	t.Run("refused resume gets no warning", func(t *testing.T) {
 		resetHubStartGlobals(t)
 		stub := newHubStartStub(t, projectID, agentName, "running")
-		cmd := newFlagCmd(t, map[string]string{"image": "img:1"})
-		var err error
-		_, stderr := captureStdIO(t, func() {
-			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
-		})
-		require.NoError(t, err)
-		assert.NotContains(t, stderr, "not applied to an existing agent")
-	})
-
-	t.Run("refused create gets no warning", func(t *testing.T) {
-		resetHubStartGlobals(t)
-		stub := newHubStartStub(t, projectID, agentName, "stopped")
 		stub.createStatus = http.StatusConflict
 		noAuth = true
 		cmd := newFlagCmd(t, map[string]string{"image": "img:1", "no-auth": "true"})
 		var err error
 		_, stderr := captureStdIO(t, func() {
-			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", true, nil)
 		})
 		require.Error(t, err)
 		assert.Equal(t, 1, stub.createCalls)
@@ -374,11 +441,11 @@ func TestStartAgentViaHub_WarnsIgnoredFlagsForExistingAgent(t *testing.T) {
 		assert.NotContains(t, stderr, "ptone/scion#1855")
 	})
 
-	t.Run("real start command flags", func(t *testing.T) {
+	t.Run("real resume command flags", func(t *testing.T) {
 		resetHubStartGlobals(t)
 		stub := newHubStartStub(t, projectID, agentName, "stopped")
-		imageFlag := startCmd.Flags().Lookup("image")
-		profileFlag := startCmd.Flag("profile") // inherited persistent flag
+		imageFlag := resumeCmd.Flags().Lookup("image")
+		profileFlag := resumeCmd.Flag("profile") // inherited persistent flag
 		require.NotNil(t, imageFlag)
 		require.NotNil(t, profileFlag)
 		origImageValue, origImageChanged, origProfileChanged := imageFlag.Value.String(), imageFlag.Changed, profileFlag.Changed
@@ -386,12 +453,12 @@ func TestStartAgentViaHub_WarnsIgnoredFlagsForExistingAgent(t *testing.T) {
 			_ = imageFlag.Value.Set(origImageValue)
 			imageFlag.Changed, profileFlag.Changed = origImageChanged, origProfileChanged
 		})
-		require.NoError(t, startCmd.Flags().Set("image", "img:2"))
+		require.NoError(t, resumeCmd.Flags().Set("image", "img:2"))
 		profileFlag.Changed = true // mark explicit without changing the active profile
 
 		var err error
 		_, stderr := captureStdIO(t, func() {
-			err = startAgentViaHub(startCmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+			err = startAgentViaHub(resumeCmd, stub.hubCtx(t, projectID), agentName, "", true, nil)
 		})
 		require.NoError(t, err)
 		assert.Contains(t, stderr, "these flags are not applied to an existing agent: --image, --profile\n")
@@ -402,7 +469,7 @@ func TestStartAgentViaHub_WarnsIgnoredFlagsForExistingAgent(t *testing.T) {
 		stub := newHubStartStub(t, projectID, agentName, "stopped")
 		var err error
 		_, stderr := captureStdIO(t, func() {
-			err = startAgentViaHub(newFlagCmd(t, nil), stub.hubCtx(t, projectID), agentName, "", false, nil)
+			err = startAgentViaHub(newFlagCmd(t, nil), stub.hubCtx(t, projectID), agentName, "", true, nil)
 		})
 		require.NoError(t, err)
 		assert.NotContains(t, stderr, "not applied to an existing agent")
@@ -416,35 +483,6 @@ func TestConfigFlagsNotAppliedToExistingAgent_AreDefined(t *testing.T) {
 		assert.True(t, startCmd.Flag(name) != nil || resumeCmd.Flag(name) != nil,
 			"--%s is not defined on start or resume", name)
 	}
-}
-
-func TestHubCreateReusesExistingAgent(t *testing.T) {
-	for _, tc := range []struct {
-		phase         string
-		resume, force bool
-		want          bool
-	}{
-		{"", true, true, false},
-		{"suspended", false, false, true},
-		{"created", false, false, true},
-		{"stopped", false, false, false},
-		{"stopped", true, false, true},
-		{"error", true, false, false},
-		{"error", true, true, true},
-		{"running", true, true, false},
-		{"provisioning", true, false, false},
-	} {
-		assert.Equal(t, tc.want, hubCreateReusesExistingAgent(tc.phase, tc.resume, tc.force),
-			"phase=%q resume=%v force=%v", tc.phase, tc.resume, tc.force)
-	}
-}
-
-func TestHubStartActionWord(t *testing.T) {
-	assert.Equal(t, "Starting", hubStartActionWord("", false, false))
-	assert.Equal(t, "Restarting", hubStartActionWord("stopped", true, false))
-	assert.Equal(t, "Resuming", hubStartActionWord("suspended", true, false))
-	assert.Equal(t, "Force-resuming", hubStartActionWord("error", true, true))
-	assert.Equal(t, "Resuming", hubStartActionWord("", true, false))
 }
 
 // ptone/scion#1915: the clone log line prints the URL the hub will use (no

@@ -1130,55 +1130,7 @@ func hubCloneTransportNote(cloneURL string) string {
 	}
 }
 
-// hubStartImpliesResume reports whether `scion start` on an existing hub agent
-// in the given phase should be sent as a resume request. Suspended agents
-// resume their session; stopped agents restart in place with a fresh session
-// (the hub's resume-in-place path). Error-phase agents are deliberately not
-// included: the hub only restarts them in place with --force
-// (resumeInPlaceDecision), so `start` on them still reports a conflict.
-func hubStartImpliesResume(phase string) bool {
-	return phase == string(state.PhaseSuspended) || phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted)
-}
-
-// hubCreateReusesExistingAgent mirrors the hub's handleExistingAgent decision
-// tree (pkg/hub/handlers_agent_create_helpers.go) and reports whether a create
-// request for an agent already in the given phase will start, resume or
-// restart that agent in place rather than create a new one. On those paths the
-// hub applies only the task and attach mode; all other create configuration
-// is ignored.
-func hubCreateReusesExistingAgent(phase string, resume, force bool) bool {
-	switch phase {
-	case string(state.PhaseSuspended), string(state.PhaseCreated):
-		return true
-	case string(state.PhaseStopped), string(state.PhaseHalted):
-		return resume
-	case string(state.PhaseError):
-		return resume && force
-	default:
-		// Not found, running (conflict), provisioning (deleted and
-		// re-created by env-gather, so flags do apply), or unknown.
-		return false
-	}
-}
-
-// hubStartActionWord returns the verb printed before a hub start request so it
-// reflects what the hub will actually do with an agent in the given phase.
-func hubStartActionWord(phase string, resume, force bool) string {
-	switch {
-	case (phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted)) && resume:
-		// The hub restarts a stopped or halted agent with a fresh harness
-		// session.
-		return "Restarting"
-	case resume && force:
-		return "Force-resuming"
-	case resume:
-		return "Resuming"
-	default:
-		return "Starting"
-	}
-}
-
-// configFlagsNotAppliedToExistingAgent lists the start/resume flags that carry
+// configFlagsNotAppliedToExistingAgent lists the resume flags that carry
 // agent configuration. When the hub reuses an existing agent in place it
 // applies only the task and --attach, so explicitly setting any of these has
 // no effect.
@@ -1409,10 +1361,11 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Check whether the agent already exists on the hub. A suspended or
-	// stopped agent is resumed/restarted in place (parity with
-	// `scion resume`, ptone/scion#1911). This check is best-effort — if it
-	// fails (agent doesn't exist yet), we fall through to "Starting".
+	// Check whether the agent already exists on the hub (best-effort). This is
+	// used for transport-error unknown-outcome reporting, workspace bootstrap
+	// cleanup, and — on `scion resume` — the action verb and ignored-flags
+	// warning. `scion start` never implies resume; the hub refuses resumable
+	// existing agents with 409 agent_exists_resumable.
 	existingCheckStart := time.Now()
 	checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	existing, getErr := hubCtx.Client.ProjectAgents(projectID).Get(checkCtx, agentName)
@@ -1422,9 +1375,8 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	}
 	// existingPhase is the phase the hub decides from: the resume memory of
 	// a failed start (launch.resumePhase, ptone/scion#4669) when the hub
-	// reports one, else the stored phase. It must match the hub's
-	// store.EffectiveRestingPhase reads in classifyExistingAgent.
-	// existingPhaseText is what the flags warning shows.
+	// reports one, else the stored phase.
+	// existingPhaseText is what the flags warning on `scion resume` shows.
 	existingPhase, existingPhaseText := "", ""
 	if getErr == nil && existing != nil {
 		existingPhase, existingPhaseText = existing.Phase, existing.Phase
@@ -1433,17 +1385,22 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			existingPhaseText = fmt.Sprintf("%s, resumes as %s", existing.Phase, existing.Launch.ResumePhase)
 		}
 	}
-	if !resume && hubStartImpliesResume(existingPhase) {
-		resume = true
-		req.Resume = true
+
+	action := "Starting"
+	restarted := false
+	if resume {
+		switch {
+		case existingPhase == string(state.PhaseStopped) || existingPhase == string(state.PhaseHalted):
+			action = "Restarting"
+			restarted = true
+		case req.ForceResume:
+			action = "Force-resuming"
+		default:
+			action = "Resuming"
+		}
 	}
-	// Warn about flags the hub will not apply, but only once the hub has
-	// accepted the request: a refused start must not claim the agent was
-	// reused.
-	reusesExisting := hubCreateReusesExistingAgent(existingPhase, req.Resume, req.ForceResume)
 
 	if !isJSONOutput() {
-		action := hubStartActionWord(existingPhase, resume, req.ForceResume)
 		fmt.Printf("%s agent '%s'...\n", action, agentName)
 	}
 
@@ -1467,7 +1424,10 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		printDeleteInProgressWarnings(os.Stderr, err)
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
-	if reusesExisting {
+	// On `scion resume`, warn about config flags the hub does not apply to an
+	// existing agent reused in place (only once the hub has accepted the
+	// request).
+	if resume && existingPhase != "" && (!req.GatherEnv || existingPhase != string(state.PhaseProvisioning)) {
 		warnFlagsIgnoredForExistingAgent(cmd, agentName, existingPhaseText)
 	}
 
@@ -1656,9 +1616,6 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		workspaceFinalized = true
 	}
 
-	// A stopped agent is restarted in place with a fresh session; report it
-	// with the same word as the "Restarting agent" line above.
-	restarted := hubStartActionWord(existingPhase, resume, req.ForceResume) == "Restarting"
 	return finishHubStart(hubCtx, projectID, agentName, resume, restarted, resp, remainingWarnings, workspaceFinalized)
 }
 
