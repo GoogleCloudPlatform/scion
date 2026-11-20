@@ -1316,8 +1316,9 @@ func TestIdleSuspend_UserStartDuringActiveClaimSettlesOrPreempts(t *testing.T) {
 		_, _, claimUntil := isoClaimIdleDirectly(t, s, agent, 45*time.Second)
 
 		rec := doRequest(t, srvB, http.MethodPost, "/api/v1/projects/"+proj.ID+"/agents", CreateAgentRequest{
-			Name: agent.Slug,
-			Task: "resume-via-create",
+			Name:   agent.Slug,
+			Task:   "resume-via-create",
+			Resume: true,
 		})
 		require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
 		assert.True(t, sawResume.Load(), "preempting an active idle claim must pass resume=true")
