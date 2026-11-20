@@ -400,6 +400,50 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			continue
 		}
 
+		// Stage 3 §4.2 step 4: before any rule evaluation or fire on a github
+		// event, verify once per event that the project's GitHub App installation
+		// association is authorized now. Running this ahead of rule evaluation
+		// ensures a refused or retrying github event never evaluates rules or
+		// records rule-skip outcomes that mask the refusal.
+		if ev.SourceKind == store.TriggerSourceKindGitHub {
+			if !sourceAuthChecked {
+				if lease != nil {
+					held, lErr := lease.Renew(ctx)
+					if lErr != nil {
+						return durablequeue.Result{Err: errors.New("trigger: renew queue lease failed")}
+					}
+					if !held {
+						return durablequeue.Result{Err: errors.New("trigger: queue lease lost")}
+					}
+				}
+				sourceAuthChecked = true
+				sa, ok := d.core.(SourceAuthorizer)
+				if !ok {
+					d.logger.Error("trigger: core does not implement SourceAuthorizer for github event",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceID", ev.SourceID)
+					return durablequeue.Result{Err: errors.New("trigger: source authorizer unavailable")}
+				}
+				var saErr error
+				sourceAuthorized, saErr = sa.AuthorizeEventSource(ctx, ev)
+				if saErr != nil {
+					d.logger.Warn("trigger: failed to authorize event source",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceID", ev.SourceID, "error", saErr)
+					return durablequeue.Result{Err: errors.New("trigger: authorize event source failed")}
+				}
+			}
+			if !sourceAuthorized {
+				matchCount++
+				if rErr := d.recordDirectFire(
+					ctx, tr, ev, deriveFireSubject(ev.Subject),
+					store.TriggerFireStatusRefused, ErrFireGitHubAssociationUnauthorized,
+					"0/0", "", "", "github_association_unauthorized",
+				); rErr != nil {
+					return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
+				}
+				continue
+			}
+		}
+
 		// SEC-3b1rw-01: fail closed on corrupt stored match_rules before any fire.
 		matchRules, normErr := MatchRules(*tr)
 		if normErr != nil {
@@ -563,37 +607,6 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 			if !held {
 				return durablequeue.Result{Err: errors.New("trigger: queue lease lost")}
-			}
-		}
-
-		// Stage 3 §4.2 step 4: before any fire on a github event, verify that the
-		// project's GitHub App installation association is authorized now.
-		if ev.SourceKind == store.TriggerSourceKindGitHub {
-			if !sourceAuthChecked {
-				sourceAuthChecked = true
-				sa, ok := d.core.(SourceAuthorizer)
-				if !ok {
-					d.logger.Error("trigger: core does not implement SourceAuthorizer for github event",
-						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceID", ev.SourceID)
-					return durablequeue.Result{Err: errors.New("trigger: source authorizer unavailable")}
-				}
-				var saErr error
-				sourceAuthorized, saErr = sa.AuthorizeEventSource(ctx, ev)
-				if saErr != nil {
-					d.logger.Warn("trigger: failed to authorize event source",
-						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceID", ev.SourceID, "error", saErr)
-					return durablequeue.Result{Err: errors.New("trigger: authorize event source failed")}
-				}
-			}
-			if !sourceAuthorized {
-				if rErr := d.recordDirectFire(
-					ctx, tr, ev, fireSubject,
-					store.TriggerFireStatusRefused, ErrFireGitHubAssociationUnauthorized,
-					matchedThrough, decidedDialect, ruleTraceStr, "github_association_unauthorized",
-				); rErr != nil {
-					return durablequeue.Result{Err: errors.New("trigger: record refused fire failed")}
-				}
-				continue
 			}
 		}
 		claimNow := d.now().UTC()

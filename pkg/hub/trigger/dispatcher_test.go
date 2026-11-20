@@ -2315,3 +2315,166 @@ func TestDispatcher_GitHubFailsClosedWithoutSourceAuthorizer(t *testing.T) {
 	assert.NoError(t, res.Err)
 	assert.Equal(t, int32(1), fireCalls.Load())
 }
+
+func TestDispatcher_GitHubSourceAuthorizationPrecedesRuleEvaluation(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 55, 0, 0, time.UTC)
+
+	setup := func(t *testing.T, authFn func(context.Context, *store.TriggerEvent) (bool, error)) (*memTriggerStore, *trigger.Dispatcher, string, string, string, string, string, *atomic.Int32, *atomic.Int32) {
+		t.Helper()
+		ms := newMemTriggerStore()
+		_, rules := newTestTriggerEngineWithDialects(t)
+		var authCalls, fireCalls atomic.Int32
+		core := &fakeCore{
+			authorizeSourceFn: func(ctx context.Context, ev *store.TriggerEvent) (bool, error) {
+				authCalls.Add(1)
+				return authFn(ctx, ev)
+			},
+			fireFn: func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+				fireCalls.Add(1)
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFired}
+			},
+		}
+		core.enabled.Store(true)
+
+		projID := uuid.NewString()
+		trCorruptID := uuid.NewString()
+		trMatchCELID := uuid.NewString()
+		trNoMatchCELID := uuid.NewString()
+		evID := uuid.NewString()
+
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:                trCorruptID,
+			ProjectID:         projID,
+			Name:              "gh-corrupt-rules",
+			SourceKind:        store.TriggerSourceKindGitHub,
+			SourceID:          "",
+			MatchTypes:        []string{"github.issue_comment.created"},
+			MatchDialect:      store.TriggerDialectCEL,
+			MatchRulesCorrupt: true,
+			ActionType:        store.TriggerActionMessage,
+			SubjectMode:       store.TriggerSubjectModeNew,
+			Status:            store.TriggerStatusActive,
+		}))
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:           trMatchCELID,
+			ProjectID:    projID,
+			Name:         "gh-cel-match",
+			SourceKind:   store.TriggerSourceKindGitHub,
+			SourceID:     "",
+			MatchTypes:   []string{"github.issue_comment.created"},
+			MatchDialect: store.TriggerDialectCEL,
+			MatchRules:   []store.TriggerMatchRule{{Dialect: store.TriggerDialectCEL, Expr: `event.attributes.command == "review"`}},
+			ActionType:   store.TriggerActionMessage,
+			SubjectMode:  store.TriggerSubjectModeNew,
+			Status:       store.TriggerStatusActive,
+		}))
+		require.NoError(t, ms.CreateTrigger(context.Background(), &store.Trigger{
+			ID:           trNoMatchCELID,
+			ProjectID:    projID,
+			Name:         "gh-cel-nomatch",
+			SourceKind:   store.TriggerSourceKindGitHub,
+			SourceID:     "",
+			MatchTypes:   []string{"github.issue_comment.created"},
+			MatchDialect: store.TriggerDialectCEL,
+			MatchRules:   []store.TriggerMatchRule{{Dialect: store.TriggerDialectCEL, Expr: `event.attributes.command == "deploy"`}},
+			ActionType:   store.TriggerActionMessage,
+			SubjectMode:  store.TriggerSubjectModeNew,
+			Status:       store.TriggerStatusActive,
+		}))
+		require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
+			ID:         evID,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "777123",
+			Type:       "github.issue_comment.created",
+			Subject:    "github:acme/widgets#55",
+			DedupKey:   "d-order-" + evID,
+			OccurredAt: now,
+			ReceivedAt: now,
+			Attributes: map[string]string{"command": "review"},
+			Payload:    `{}`,
+			Status:     store.TriggerEventStatusPending,
+		}))
+
+		disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+			Core:  core,
+			Store: ms,
+			Rules: rules,
+			Now:   func() time.Time { return now },
+		})
+		require.NoError(t, err)
+		return ms, disp, projID, trCorruptID, trMatchCELID, trNoMatchCELID, evID, &authCalls, &fireCalls
+	}
+
+	t.Run("unauthorized refuses all type-matched triggers without evaluating rules or recording rule skips", func(t *testing.T) {
+		ms, disp, projID, trCorruptID, trMatchCELID, trNoMatchCELID, evID, authCalls, fireCalls := setup(t, func(context.Context, *store.TriggerEvent) (bool, error) {
+			return false, nil
+		})
+		raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		res := disp.HandleItem(context.Background(), durablequeue.Item{Kind: trigger.EventQueueKind, DedupKey: evID, Payload: raw}, nopLease{})
+		assert.True(t, res.Done)
+		assert.NoError(t, res.Err)
+		assert.Equal(t, int32(1), authCalls.Load())
+		assert.Zero(t, fireCalls.Load())
+
+		fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, fires.Items, 3)
+		byTr := make(map[string]store.TriggerFire, 3)
+		for _, f := range fires.Items {
+			byTr[f.TriggerID] = f
+		}
+		for _, id := range []string{trCorruptID, trMatchCELID, trNoMatchCELID} {
+			assert.Equal(t, store.TriggerFireStatusRefused, byTr[id].Status)
+			assert.Equal(t, trigger.ErrFireGitHubAssociationUnauthorized, byTr[id].Error)
+		}
+	})
+
+	t.Run("transient auth error retries without evaluating rules or recording rule skips", func(t *testing.T) {
+		ms, disp, projID, _, _, _, evID, authCalls, fireCalls := setup(t, func(context.Context, *store.TriggerEvent) (bool, error) {
+			return false, errors.New("github 503")
+		})
+		raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		res := disp.HandleItem(context.Background(), durablequeue.Item{Kind: trigger.EventQueueKind, DedupKey: evID, Payload: raw}, nopLease{})
+		assert.False(t, res.Done)
+		assert.False(t, res.Permanent)
+		assert.Error(t, res.Err)
+		assert.Equal(t, int32(1), authCalls.Load())
+		assert.Zero(t, fireCalls.Load())
+
+		ev, err := ms.GetTriggerEvent(context.Background(), evID)
+		require.NoError(t, err)
+		assert.Equal(t, store.TriggerEventStatusPending, ev.Status)
+
+		fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, fires.Items, "retrying event must not record any rule-skip or fire row")
+	})
+
+	t.Run("authorized runs 3b-2 rule evaluation unchanged", func(t *testing.T) {
+		ms, disp, projID, trCorruptID, trMatchCELID, trNoMatchCELID, evID, authCalls, fireCalls := setup(t, func(context.Context, *store.TriggerEvent) (bool, error) {
+			return true, nil
+		})
+		raw, _ := json.Marshal(trigger.EventQueuePayload{Version: 1, EventID: evID})
+		res := disp.HandleItem(context.Background(), durablequeue.Item{Kind: trigger.EventQueueKind, DedupKey: evID, Payload: raw}, nopLease{})
+		assert.True(t, res.Done)
+		assert.NoError(t, res.Err)
+		assert.Equal(t, int32(1), authCalls.Load())
+		assert.Equal(t, int32(1), fireCalls.Load())
+
+		fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{ProjectID: projID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, fires.Items, 2)
+		byTr := make(map[string]store.TriggerFire, 2)
+		for _, f := range fires.Items {
+			byTr[f.TriggerID] = f
+		}
+		assert.Equal(t, store.TriggerFireStatusSkipped, byTr[trCorruptID].Status)
+		assert.Equal(t, trigger.ErrFireRuleEvaluationFailed, byTr[trCorruptID].Error)
+		assert.Equal(t, store.TriggerFireStatusFired, byTr[trMatchCELID].Status)
+		assert.Equal(t, "1/1", byTr[trMatchCELID].MatchedThrough)
+		assert.Equal(t, "cel", byTr[trMatchCELID].DecidedDialect)
+		_, nonMatchFired := byTr[trNoMatchCELID]
+		assert.False(t, nonMatchFired, "non-matching CEL trigger must not record a fire row")
+	})
+}
