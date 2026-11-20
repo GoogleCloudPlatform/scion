@@ -371,4 +371,32 @@ func TestStaticAsset_EncodedTraversalAndDiskContainment(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.Equal(t, "<svg/>", rec.Body.String())
 	})
+
+	t.Run("backslash paths are refused by serveStaticAsset and tryServeStaticFile", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{})
+		ws.assets = fstest.MapFS{
+			"assets/main.js": {Data: []byte("// entry")},
+			"assets/a\\b.js": {Data: []byte(listingMarker)},
+			"a\\b.svg":       {Data: []byte(listingMarker)},
+		}
+		ws.assetsDisk = ""
+		ws.hasAssets = ws.detectWebAssets()
+		require.True(t, ws.hasAssets)
+
+		// serveStaticAsset refuses backslash paths even if a matching entry exists.
+		rec := getListing(t, ws.mux, "/assets/a%5cb.js")
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.NotContains(t, rec.Body.String(), listingMarker)
+
+		// Unauthenticated request does not bypass session auth.
+		rec = getListing(t, ws.Handler(), "/assets/a%5cb.js")
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.NotContains(t, rec.Body.String(), listingMarker)
+
+		// tryServeStaticFile refuses backslash paths even if a matching entry exists.
+		req := httptest.NewRequest(http.MethodGet, "/a%5cb.svg", nil)
+		rec = httptest.NewRecorder()
+		assert.False(t, ws.tryServeStaticFile(rec, req))
+		assert.NotContains(t, rec.Body.String(), listingMarker)
+	})
 }
