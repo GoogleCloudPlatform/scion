@@ -66,6 +66,7 @@ type FireTriggerRef struct {
 	ID          string
 	Name        string
 	SubjectMode string // "new" | "skip" (Stage 2 §5.3, §5.6)
+	FireSubject string // dispatcher-derived fire subject (subject_rule output or bounded event subject, Stage 1 §6.3 / Stage 2 §5.6)
 }
 
 // FireScheduleRef identifies the schedule and firing event for a schedule.fired

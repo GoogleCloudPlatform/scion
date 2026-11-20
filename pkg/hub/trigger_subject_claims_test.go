@@ -454,3 +454,82 @@ func TestDispatchAgentTrigger_SubjectModeNew_NoClaimRowsAndMessageSkipUnchanged(
 	assert.Equal(t, http.StatusBadRequest, patchRec.Code, patchRec.Body.String())
 	assert.Contains(t, patchRec.Body.String(), `subject_mode \"skip\" is not yet supported`)
 }
+
+func TestDispatchAgentTrigger_SubjectModeSkip_UsesDerivedSubjectRule(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "s2-p1c2-subrule")
+	userCtx := f.userAuth(t, f.sched.creator)
+
+	ep := f.createEndpoint(t, userCtx, "claims-subrule-ep")
+	rec := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:   "claims-subrule-trigger",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:  &TriggerMatchSpec{Types: []string{"webhook.pr_event"}},
+			Subject: &TriggerSubjectSpec{
+				Dialect: "cel",
+				Expr:    `"pr:" + string(event.payload.pr)`,
+				Mode:    store.TriggerSubjectModeSkip,
+			},
+			Action: TriggerActionSpec{
+				Type:          store.TriggerActionDispatchAgent,
+				Task:          "Review PR ${event.payload.pr}",
+				UntrustedVars: []string{"event.payload.pr"},
+			},
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var trigResp TriggerResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &trigResp))
+
+	// Send two events with NO X-Scion-Subject header (so both share the same raw
+	// event subject "webhook:<ep.ID>"), but different payload.pr values -> two agents.
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "subrule-1", "pr_event", "", []byte(`{"pr":"101"}`)).Code)
+	f.drainOneTriggerEvent(t)
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "subrule-2", "pr_event", "", []byte(`{"pr":"202"}`)).Code)
+	f.drainOneTriggerEvent(t)
+
+	// Send a third event repeating payload.pr="101" -> skipped "subject busy".
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "subrule-3", "pr_event", "", []byte(`{"pr":"101"}`)).Code)
+	f.drainOneTriggerEvent(t)
+
+	fires, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		ProjectID: f.sched.proj.ID,
+		TriggerID: trigResp.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires.Items, 3)
+
+	var (
+		firedBySubject = map[string]string{}
+		skippedCount   int
+	)
+	for _, fire := range fires.Items {
+		switch fire.Status {
+		case store.TriggerFireStatusFired:
+			firedBySubject[fire.Subject] = fire.TargetAgentID
+		case store.TriggerFireStatusSkipped:
+			skippedCount++
+			assert.Equal(t, "pr:101", fire.Subject)
+			assert.Equal(t, "subject busy", fire.Error)
+		default:
+			t.Fatalf("unexpected fire status %q (err=%q)", fire.Status, fire.Error)
+		}
+	}
+	assert.Len(t, firedBySubject, 2, "two distinct derived subjects must dispatch two agents")
+	assert.Equal(t, 1, skippedCount, "repeated derived subject must be skipped as subject busy")
+	require.Contains(t, firedBySubject, "pr:101")
+	require.Contains(t, firedBySubject, "pr:202")
+	assert.NotEqual(t, firedBySubject["pr:101"], firedBySubject["pr:202"])
+
+	// Claim rows are keyed by the derived fire subject (matching trigger_fires.subject),
+	// never by the shared raw event subject "webhook:<ep.ID>".
+	for _, sub := range []string{"pr:101", "pr:202"} {
+		claim, gErr := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, sub)
+		require.NoError(t, gErr, "expected active claim for derived subject %q", sub)
+		assert.Equal(t, sub, claim.Subject)
+		assert.Equal(t, firedBySubject[sub], claim.AgentID)
+	}
+	_, rawErr := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, "webhook:"+ep.ID)
+	assert.ErrorIs(t, rawErr, store.ErrNotFound, "raw event subject must not have a claim row")
+}

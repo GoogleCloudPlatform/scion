@@ -922,20 +922,23 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	triggerID := req.Authority.DefinitionID
 	triggerName := ""
 	subjectMode := ""
+	fireSubject := ""
 	if ev.Trigger != nil {
 		if ev.Trigger.ID != "" {
 			triggerID = ev.Trigger.ID
 		}
 		triggerName = ev.Trigger.Name
 		subjectMode = ev.Trigger.SubjectMode
+		fireSubject = ev.Trigger.FireSubject
 	}
 
 	// Subject claim (§5.3, §5.6): mode "new" never claims; mode "skip" claims
-	// atomically before render/create, skips "subject busy" if a live claim
-	// exists (lazily releasing a claim whose agent is terminal/deleted via Live),
-	// binds in commitAgentCreate's transaction, and releases explicitly only
-	// when no Bind committed. Once Bind commits, later create errors (including
-	// post-commit paths in createAgentHeadless where the agent row may survive:
+	// atomically on the dispatcher's derived fire subject before render/create,
+	// skips "subject busy" if a live claim exists (lazily releasing a claim
+	// whose agent is terminal/deleted via Live), binds in commitAgentCreate's
+	// transaction, and releases explicitly only when no Bind committed. Once
+	// Bind commits, later create errors (including post-commit paths in
+	// createAgentHeadless where the agent row may survive:
 	// ErrLaunchInvalidPhase, errStartingWrite, store.ErrClaimPredicate,
 	// errStartClaimLost) leave the bound claim to Live, hourly maintenance, and
 	// the agent deletion cascade.
@@ -946,7 +949,10 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	)
 	if subjectMode == store.TriggerSubjectModeSkip {
 		claims := trigger.NewSubjectClaims(a.srv.store, a.srv.store, time.Now)
-		claimSubject := trigger.DeriveFireSubject(ev.Subject)
+		claimSubject := fireSubject
+		if claimSubject == "" {
+			claimSubject = ev.Subject
+		}
 		claim, existing, cErr := claims.Claim(ctx, triggerID, claimSubject, ev.ID, req.Authority.FireID)
 		if cErr != nil {
 			return hubfire.FireOutcome{}, fmt.Errorf("claim trigger subject: %w", cErr)

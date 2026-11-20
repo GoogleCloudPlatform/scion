@@ -673,6 +673,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				}
 			}
 		}
+		trigRef.FireSubject = fireSubject
 
 		if lease != nil {
 			held, lErr := lease.Renew(ctx)
@@ -963,12 +964,6 @@ func normalizeFireStatus(st hubfire.FireStatus, errMsg string) string {
 		}
 		return store.TriggerFireStatusFired
 	}
-}
-
-// DeriveFireSubject bounds a raw subject string to MaxFireSubjectBytes (256)
-// on a valid UTF-8 rune boundary.
-func DeriveFireSubject(raw string) string {
-	return deriveFireSubject(raw)
 }
 
 func deriveFireSubject(raw string) string {
