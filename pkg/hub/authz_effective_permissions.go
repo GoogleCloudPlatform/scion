@@ -25,10 +25,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// errEffectivePermissionsProjectScopeUnsupported is returned when a caller
-// requests project-scoped effective permissions before commit 2 lands.
-var errEffectivePermissionsProjectScopeUnsupported = errors.New("project scope is not yet supported")
-
 // EffectiveScope selects the scope at which effective permissions are resolved.
 // An empty ProjectID resolves the hub (system) scope.
 type EffectiveScope struct {
@@ -143,9 +139,6 @@ func (a *AuthzService) ResolveEffectivePermissions(
 	if err := requireLocalUserPrincipal(principal); err != nil {
 		return nil, err
 	}
-	if scope.ProjectID != "" {
-		return nil, errEffectivePermissionsProjectScopeUnsupported
-	}
 	if a == nil || a.store == nil {
 		return nil, errors.New("authorization store unavailable")
 	}
@@ -155,6 +148,21 @@ func (a *AuthzService) ResolveEffectivePermissions(
 
 	evalTime := a.now()
 	evaluatedAt := evalTime.UTC().Format(time.RFC3339)
+
+	isProjectScope := scope.ProjectID != ""
+	scopeInfo := EffectivePermissionScope{Type: ScopeTypeSystem}
+	if isProjectScope {
+		proj, err := a.store.GetProject(ctx, scope.ProjectID)
+		if err != nil {
+			return nil, fmt.Errorf("load project scope: %w", err)
+		}
+		scopeInfo = EffectivePermissionScope{
+			Type: ScopeTypeProject,
+			ID:   proj.ID,
+			Name: proj.Name,
+			Slug: proj.Slug,
+		}
+	}
 
 	// Step 1: Account status gate (shared with decide via activeUserPredicate).
 	user, err := a.userForStatusGate(ctx, principal.ID)
@@ -175,7 +183,7 @@ func (a *AuthzService) ResolveEffectivePermissions(
 				ID:     principal.ID,
 				Status: reason,
 			},
-			Scope:       EffectivePermissionScope{Type: ScopeTypeSystem},
+			Scope:       scopeInfo,
 			StatusGate:  &EffectiveStatusGate{Reason: reason},
 			EvaluatedAt: evaluatedAt,
 			Permissions: []EffectivePermissionEntry{},
@@ -184,9 +192,12 @@ func (a *AuthzService) ResolveEffectivePermissions(
 	}
 
 	// Steps 2 & 3: Closure CTE + 1 batch clamped bindings + 1 batch role defs,
-	// filtered to active system-scope bindings.
+	// filtered by scope containment (system only, or system + project P).
 	refs, activeBindings, roleDefs, err := a.loadScopedActiveBindings(ctx, principal, evalTime, func(b *store.RoleBinding) bool {
-		return b.ScopeType == ScopeTypeSystem
+		if b.ScopeType == ScopeTypeSystem {
+			return true
+		}
+		return isProjectScope && b.ScopeType == ScopeTypeProject && b.ScopeID == scope.ProjectID
 	})
 	if err != nil {
 		return nil, err
@@ -206,8 +217,9 @@ func (a *AuthzService) ResolveEffectivePermissions(
 		membershipPaths[key] = []string{ref.ID}
 	}
 
-	// Step 4: Access constraints at system scope (fail closed on error).
-	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{})
+	// Step 4: Access constraints at the evaluated scope (fail closed on error).
+	resourceCtx := ResourceContext{ProjectID: scope.ProjectID}
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, resourceCtx)
 	if err != nil {
 		return nil, fmt.Errorf("load access constraints: %w", err)
 	}
@@ -225,7 +237,7 @@ func (a *AuthzService) ResolveEffectivePermissions(
 			ID:     principal.ID,
 			Status: store.UserStatusActive,
 		},
-		Scope:       EffectivePermissionScope{Type: ScopeTypeSystem},
+		Scope:       scopeInfo,
 		StatusGate:  nil,
 		EvaluatedAt: evaluatedAt,
 		Permissions: []EffectivePermissionEntry{},
@@ -243,13 +255,23 @@ func (a *AuthzService) ResolveEffectivePermissions(
 		if isDeliverRequest(perm.ID, Action(perm.Action)) {
 			continue
 		}
+		if isProjectScope {
+			if applies, reviewed := permissions.AppliesToExistingProjectTarget(perm.ID); !reviewed || !applies {
+				continue
+			}
+		}
+
+		permCandidates := candidates
+		if isProjectScope {
+			permCandidates = applyHubWideScopeFilters(candidates, roleDefs, ContemplatedProjectClass(perm.ID))
+		}
 
 		k := Evaluate(KernelRequest{
 			Permission:        perm.ID,
 			PrincipalClosure:  closure,
 			MembershipPaths:   membershipPaths,
-			Resource:          ResourceContext{},
-			CandidateBindings: candidates,
+			Resource:          resourceCtx,
+			CandidateBindings: permCandidates,
 			RoleDefinitions:   roleDefs,
 			Restrictions:      restrictions,
 			Now:               evalTime,

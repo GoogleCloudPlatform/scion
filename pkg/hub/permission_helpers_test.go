@@ -159,6 +159,7 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 		{"handlers_access_constraints.go", "Server.canReadConstraintAudit"},
 	},
 	"project.clone":       {{"project_clone.go", "Server.handleProjectClone"}},
+	"project.read":        {{"handlers_admin_effective_permissions.go", "Server.handleAdminEffectivePermissions"}},
 	"agent.status_update": {{"handlers_agent_lifecycle.go", "Server.updateAgentStatus"}},
 	"project.secret_read": {
 		{"material_runtime.go", "Server.materialRuntimePrecheck"},

@@ -428,4 +428,38 @@ describe('scion-project-picker', () => {
     expect(last.projectId).toBe('proj-uuid-3');
     expect(last.displayLabel).toBe('Gamma Project');
   });
+
+  it('uses fixed-strategy sl-popup when hoist is enabled and stops Escape propagation', async () => {
+    const el = await createElement();
+    el.hoist = true;
+    (el as Record<string, unknown>)['searchOpen'] = true;
+    (el as Record<string, unknown>)['searchResults'] = MOCK_PROJECTS;
+    el.requestUpdate();
+    await el.updateComplete;
+
+    const popup = el.shadowRoot?.querySelector('sl-popup');
+    expect(popup).not.toBeNull();
+    expect(popup?.getAttribute('strategy')).toBe('fixed');
+    expect(popup?.getAttribute('sync')).toBe('width');
+    expect(popup?.hasAttribute('active')).toBe(true);
+
+    let outerSawEscape = false;
+    document.body.addEventListener(
+      'keydown',
+      (evt) => {
+        if (evt.key === 'Escape') outerSawEscape = true;
+      },
+      { once: true }
+    );
+
+    const input = el.shadowRoot?.querySelector('sl-input') ?? null;
+    expect(input).not.toBeNull();
+    input!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, composed: true })
+    );
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchOpen']).toBe(false);
+    expect(outerSawEscape).toBe(false);
+  });
 });

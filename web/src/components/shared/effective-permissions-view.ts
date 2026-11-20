@@ -31,6 +31,10 @@ import { stateManager } from '../../client/state.js';
 import { hasAnyPermission } from '../../lib/admin-permissions.js';
 import { copyWithToast } from '../../utils/clipboard.js';
 import { formatRelative } from '../../utils/time.js';
+import './project-picker.js';
+import type { ProjectChangeDetail } from './project-picker.js';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface EffectivePermissionPrincipal {
   type: string;
@@ -148,20 +152,28 @@ export function groupPermissionsByResource(
 
 function renderGrantChip(
   grant: EffectivePermissionGrant,
-  onCopy: (bindingId: string) => void
+  onCopy: (bindingId: string) => void,
+  isProjectView = false
 ): TemplateResult {
   const isDirect = grant.via === null;
   const groupLabel = grant.via?.groupName || grant.via?.groupId || '';
-  const chipLabel = isDirect
+  const baseLabel = isDirect
     ? `${grant.role.name} · direct`
     : `${grant.role.name} · via group: ${groupLabel}`;
+  const originPrefix = grant.scope.type === 'project' ? 'Project role' : 'Inherited from hub';
+  const chipLabel = isProjectView ? `${originPrefix} · ${baseLabel}` : baseLabel;
+  const scopeClass = isProjectView
+    ? grant.scope.type === 'project'
+      ? 'scope-project'
+      : 'scope-inherited'
+    : '';
 
   return html`
     <span class="grant-item">
       <sl-tooltip content=${`Binding ID: ${grant.bindingId} — click to copy`}>
         <button
           type="button"
-          class="origin-chip ${isDirect ? 'direct' : 'group'}"
+          class="origin-chip ${isDirect ? 'direct' : 'group'} ${scopeClass}"
           @click=${(): void => onCopy(grant.bindingId)}
         >
           <sl-icon name=${isDirect ? 'person' : 'people'}></sl-icon>
@@ -232,7 +244,9 @@ export function renderPermissionList(
                         : nothing}
                     </div>
                     <div class="perm-grants">
-                      ${perm.grants.map((g) => renderGrantChip(g, onCopy))}
+                      ${perm.grants.map((g) =>
+                        renderGrantChip(g, onCopy, data.scope.type === 'project')
+                      )}
                     </div>
                   </div>
                 `
@@ -278,8 +292,30 @@ export class ScionEffectivePermissionsView extends LitElement {
   @state()
   private _permissionsChecked = false;
 
+  @state()
+  private _projectDetailsOpen = false;
+
+  @state()
+  private _projectSectionEverOpened = false;
+
+  @state()
+  private _selectedProjectId = '';
+
+  @state()
+  private _projectLoading = false;
+
+  @state()
+  private _projectError: string | null = null;
+
+  @state()
+  private _projectData: EffectivePermissionSet | null = null;
+
+  @state()
+  private _projectFilter = '';
+
   private _loadedPrincipalId: string | null = null;
   private _loadSeq = 0;
+  private _projectLoadSeq = 0;
 
   static override styles = css`
     :host {
@@ -434,6 +470,61 @@ export class ScionEffectivePermissionsView extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
+    .origin-chip.scope-inherited {
+      border-style: dashed;
+    }
+
+    .by-project-details {
+      margin-top: 1rem;
+    }
+
+    .by-project-details::part(base) {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    .by-project-details::part(header) {
+      font-size: 0.9375rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      padding: 0.75rem 1rem;
+    }
+
+    .by-project-details::part(content) {
+      padding: 0 1rem 1rem 1rem;
+    }
+
+    .by-project-body {
+      display: flex;
+      flex-direction: column;
+      gap: 0.875rem;
+    }
+
+    .project-permissions-results {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .project-results-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+
+    .project-results-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+    }
+
     .origin-chip sl-icon {
       font-size: 0.75rem;
       flex-shrink: 0;
@@ -519,7 +610,8 @@ export class ScionEffectivePermissionsView extends LitElement {
       .resource-group,
       .origin-chip,
       .expires-badge,
-      .error-state {
+      .error-state,
+      .by-project-details::part(base) {
         border: 1px solid ButtonText;
       }
     }
@@ -530,8 +622,13 @@ export class ScionEffectivePermissionsView extends LitElement {
     this._loadedPrincipalId = null;
     this._data = null;
     this._error = null;
+    this._projectData = null;
+    this._projectError = null;
     if (this.active && this.principalId) {
       void this.loadHubPermissions();
+      if (this._selectedProjectId) {
+        void this.loadProjectPermissions(this._selectedProjectId);
+      }
     }
   }
 
@@ -542,6 +639,14 @@ export class ScionEffectivePermissionsView extends LitElement {
         this._data = null;
         this._error = null;
         this._filter = '';
+        this._projectLoadSeq++;
+        this._projectDetailsOpen = false;
+        this._projectSectionEverOpened = false;
+        this._selectedProjectId = '';
+        this._projectData = null;
+        this._projectError = null;
+        this._projectLoading = false;
+        this._projectFilter = '';
       }
     }
     if (
@@ -590,6 +695,155 @@ export class ScionEffectivePermissionsView extends LitElement {
         this._loading = false;
       }
     }
+  }
+
+  private handleProjectChange(e: CustomEvent<ProjectChangeDetail>): void {
+    const detail = e.detail;
+    const projectId = detail?.projectId?.trim() ?? '';
+    if (!projectId) {
+      this._projectLoadSeq++;
+      this._selectedProjectId = '';
+      this._projectData = null;
+      this._projectError = null;
+      this._projectLoading = false;
+      this._projectFilter = '';
+      return;
+    }
+    // Ignore intermediate search-input emissions from scion-project-picker
+    // until a dropdown option is selected (non-empty displayLabel) or a full UUID is entered.
+    if (detail?.displayLabel === '' && !UUID_RE.test(projectId)) {
+      return;
+    }
+    if (detail?.displayLabel === projectId && projectId.length < 2) {
+      return;
+    }
+    if (projectId === this._selectedProjectId && (this._projectData || this._projectLoading)) {
+      return;
+    }
+    this._selectedProjectId = projectId;
+    this._projectFilter = '';
+    void this.loadProjectPermissions(projectId);
+  }
+
+  private async loadProjectPermissions(projectId: string): Promise<void> {
+    if (!this.principalId || !projectId) return;
+    const targetPrincipal = this.principalId;
+    const seq = ++this._projectLoadSeq;
+
+    this._projectLoading = true;
+    this._projectError = null;
+
+    try {
+      const url = `/api/v1/admin/effective-permissions?principalType=${encodeURIComponent(this.principalType)}&principalId=${encodeURIComponent(targetPrincipal)}&projectId=${encodeURIComponent(projectId)}`;
+      const res = await apiFetch(url, { suppressAccessDeniedToast: true });
+      if (seq !== this._projectLoadSeq) return;
+
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+
+      this._projectData = (await res.json()) as EffectivePermissionSet;
+    } catch (err) {
+      if (seq !== this._projectLoadSeq) return;
+      this._projectData = null;
+      this._projectError =
+        err instanceof Error ? err.message : 'Failed to load project effective permissions';
+    } finally {
+      if (seq === this._projectLoadSeq) {
+        this._projectLoading = false;
+      }
+    }
+  }
+
+  private renderByProjectSection(): TemplateResult {
+    return html`
+      <sl-details
+        class="by-project-details"
+        summary="By project"
+        ?open=${this._projectDetailsOpen}
+        @sl-show=${(e: Event): void => {
+          if (e.target !== e.currentTarget) return;
+          this._projectDetailsOpen = true;
+          this._projectSectionEverOpened = true;
+        }}
+        @sl-hide=${(e: Event): void => {
+          if (e.target !== e.currentTarget) return;
+          this._projectDetailsOpen = false;
+        }}
+      >
+        ${this._projectSectionEverOpened
+          ? html`
+              <div class="by-project-body">
+                <scion-project-picker
+                  hoist
+                  label="Project"
+                  .value=${this._selectedProjectId}
+                  @project-change=${(e: CustomEvent<ProjectChangeDetail>): void =>
+                    this.handleProjectChange(e)}
+                ></scion-project-picker>
+
+                ${this._projectLoading
+                  ? html`
+                      <div class="loading-state">
+                        <sl-spinner></sl-spinner>
+                        Loading project permissions...
+                      </div>
+                    `
+                  : this._projectError
+                    ? html`
+                        <div class="error-state" role="alert">
+                          <span>${this._projectError}</span>
+                          <sl-button
+                            size="small"
+                            @click=${(): Promise<void> =>
+                              this.loadProjectPermissions(this._selectedProjectId)}
+                            >Retry</sl-button
+                          >
+                        </div>
+                      `
+                    : this._projectData
+                      ? html`
+                          <div class="project-permissions-results">
+                            <div class="project-results-header">
+                              <h4 class="project-results-title">
+                                <sl-icon name="folder"></sl-icon>
+                                ${this._projectData.scope.name || this._selectedProjectId}
+                                <span class="perm-total"
+                                  >(${this._projectData.permissions.length})</span
+                                >
+                              </h4>
+                              ${this._projectData.permissions.length > 0
+                                ? html`
+                                    <sl-input
+                                      class="filter-input"
+                                      size="small"
+                                      clearable
+                                      placeholder="Filter project permissions..."
+                                      .value=${this._projectFilter}
+                                      @sl-input=${(e: Event): void => {
+                                        this._projectFilter =
+                                          (e.target as HTMLInputElement).value ?? '';
+                                      }}
+                                      @sl-clear=${(): void => {
+                                        this._projectFilter = '';
+                                      }}
+                                    >
+                                      <sl-icon slot="prefix" name="search"></sl-icon>
+                                    </sl-input>
+                                  `
+                                : nothing}
+                            </div>
+                            ${renderPermissionList(this._projectData, {
+                              filter: this._projectFilter,
+                            })}
+                          </div>
+                        `
+                      : nothing}
+              </div>
+            `
+          : nothing}
+      </sl-details>
+    `;
   }
 
   override render(): TemplateResult | typeof nothing {
@@ -650,7 +904,7 @@ export class ScionEffectivePermissionsView extends LitElement {
             `
           : nothing}
       </div>
-      ${renderPermissionList(this._data, { filter: this._filter })}
+      ${renderPermissionList(this._data, { filter: this._filter })} ${this.renderByProjectSection()}
     `;
   }
 }

@@ -95,6 +95,45 @@ function samplePermissionSet(
   };
 }
 
+function sampleProjectPermissionSet(): EffectivePermissionSet {
+  return {
+    principal: { type: 'user', id: 'user-target-1', status: 'active' },
+    scope: {
+      type: 'project',
+      id: 'proj-alpha',
+      name: 'Alpha Project',
+      slug: 'alpha-proj',
+    },
+    statusGate: null,
+    evaluatedAt: '2026-11-19T18:00:00Z',
+    permissions: [
+      {
+        id: 'project.read',
+        resource: 'project',
+        action: 'read',
+        description: 'Read project metadata',
+        grants: [
+          {
+            bindingId: 'bind-proj-grp-1',
+            role: { id: 'role-proj-member', name: 'project-member', system: true },
+            scope: { type: 'project', id: 'proj-alpha' },
+            via: { groupId: 'grp-eng', groupName: 'Project Eng', groupSlug: 'project-eng' },
+            expiresAt: null,
+          },
+          {
+            bindingId: 'bind-sys-direct-1',
+            role: { id: 'role-hub-admin', name: 'hub-admin', system: true },
+            scope: { type: 'system' },
+            via: null,
+            expiresAt: null,
+          },
+        ],
+      },
+    ],
+    removed: [],
+  };
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -172,6 +211,16 @@ describe('renderPermissionList pure helper', () => {
     firstChip!.click();
     expect(onCopy).toHaveBeenCalledWith('bind-direct-1');
   });
+
+  it('renders Project role and Inherited from hub origin chips for project-scoped sets', () => {
+    const data = sampleProjectPermissionSet();
+    render(renderPermissionList(data), host);
+
+    const chips = Array.from(host.querySelectorAll('.origin-chip'));
+    const chipTexts = chips.map((c) => c.textContent?.replace(/\s+/g, ' ').trim());
+    expect(chipTexts).toContain('Project role · project-member · via group: Project Eng');
+    expect(chipTexts).toContain('Inherited from hub · hub-admin · direct');
+  });
 });
 
 describe('scion-effective-permissions-view lazy loading', () => {
@@ -193,6 +242,9 @@ describe('scion-effective-permissions-view lazy loading', () => {
           );
         }
         if (path.includes('/api/v1/admin/effective-permissions')) {
+          if (path.includes('projectId=proj-alpha')) {
+            return Promise.resolve(jsonResponse(sampleProjectPermissionSet()));
+          }
           return Promise.resolve(jsonResponse(samplePermissionSet()));
         }
         return Promise.resolve(jsonResponse({}));
@@ -266,6 +318,71 @@ describe('scion-effective-permissions-view lazy loading', () => {
 
     expect(calls.filter((c) => c.includes('/api/v1/admin/effective-permissions'))).toHaveLength(0);
   });
+
+  it('renders collapsed By project section, shows picker on first open, and fetches ?projectId= on selection', async () => {
+    el = document.createElement(
+      'scion-effective-permissions-view'
+    ) as ScionEffectivePermissionsView;
+    el.principalType = 'user';
+    el.principalId = 'user-target-1';
+    el.active = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    const details = el.shadowRoot?.querySelector('sl-details.by-project-details');
+    expect(details).not.toBeNull();
+    expect(details?.getAttribute('summary')).toBe('By project');
+    expect(details?.hasAttribute('open')).toBe(false);
+    // Picker must not be mounted until first expand.
+    expect(details?.querySelector('scion-project-picker')).toBeNull();
+
+    // Expand By project -> picker mounts with hoist, still zero projectId requests.
+    details!.dispatchEvent(new CustomEvent('sl-show', { bubbles: true, composed: true }));
+    await el.updateComplete;
+    const picker = details?.querySelector('scion-project-picker');
+    expect(picker).not.toBeNull();
+    expect(picker?.hasAttribute('hoist')).toBe(true);
+    expect(calls.filter((c) => c.includes('projectId='))).toHaveLength(0);
+
+    // Bubbled sl-hide from a child inside sl-details must NOT collapse sl-details.
+    picker!.dispatchEvent(new CustomEvent('sl-hide', { bubbles: true, composed: true }));
+    await el.updateComplete;
+    expect(details?.hasAttribute('open')).toBe(true);
+
+    // Partial search typing (displayLabel === '') must not fire a premature projectId request.
+    picker!.dispatchEvent(
+      new CustomEvent('project-change', {
+        detail: { projectId: 'alp', displayLabel: '' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    expect(calls.filter((c) => c.includes('projectId='))).toHaveLength(0);
+
+    // Selecting a project fetches ?projectId=proj-alpha and renders Project role / Inherited from hub chips.
+    picker!.dispatchEvent(
+      new CustomEvent('project-change', {
+        detail: { projectId: 'proj-alpha', displayLabel: 'Alpha Project' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 80));
+    await el.updateComplete;
+
+    expect(calls.filter((c) => c.includes('projectId=proj-alpha'))).toHaveLength(1);
+    const projSection = el.shadowRoot?.querySelector('.project-permissions-results');
+    expect(projSection).not.toBeNull();
+    const chipTexts = Array.from(projSection!.querySelectorAll('.origin-chip')).map((c) =>
+      c.textContent?.replace(/\s+/g, ' ').trim()
+    );
+    expect(chipTexts).toContain('Project role · project-member · via group: Project Eng');
+    expect(chipTexts).toContain('Inherited from hub · hub-admin · direct');
+  });
 });
 
 describe('scion-page-admin-users two-tab Roles dialog', () => {
@@ -312,6 +429,9 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
           return Promise.resolve(jsonResponse({ items: [], totalCount: 0 }));
         }
         if (path.includes('/api/v1/admin/effective-permissions')) {
+          if (path.includes('projectId=proj-alpha')) {
+            return Promise.resolve(jsonResponse(sampleProjectPermissionSet()));
+          }
           return Promise.resolve(jsonResponse(samplePermissionSet()));
         }
         return Promise.resolve(jsonResponse([]));
@@ -336,9 +456,9 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
     await new Promise((r) => setTimeout(r, 100));
     await pageEl.updateComplete;
 
-    // Click View Roles on the target row.
+    // Click Roles / View Roles on the target row.
     const menuItems = Array.from(pageEl.shadowRoot?.querySelectorAll('sl-menu-item') ?? []);
-    const viewRolesItem = menuItems.find((item) => item.textContent?.includes('View Roles'));
+    const viewRolesItem = menuItems.find((item) => /\bRoles\b/.test(item.textContent ?? ''));
     expect(viewRolesItem).toBeDefined();
     (viewRolesItem as HTMLElement).click();
     await pageEl.updateComplete;
@@ -376,6 +496,25 @@ describe('scion-page-admin-users two-tab Roles dialog', () => {
     await pageEl.updateComplete;
 
     expect(calls.filter((c) => c.includes('/api/v1/admin/effective-permissions'))).toHaveLength(1);
+
+    // Collapsing the By project details or closing the project picker must NOT close the dialog.
+    const permView = dialog!.querySelector(
+      'scion-effective-permissions-view'
+    ) as ScionEffectivePermissionsView;
+    const details = permView.shadowRoot?.querySelector('sl-details.by-project-details');
+    expect(details).not.toBeNull();
+    details!.dispatchEvent(new CustomEvent('sl-show', { bubbles: true, composed: true }));
+    await permView.updateComplete;
+    await pageEl.updateComplete;
+
+    const picker = details!.querySelector('scion-project-picker');
+    expect(picker).not.toBeNull();
+    picker!.dispatchEvent(new CustomEvent('sl-hide', { bubbles: true, composed: true }));
+    picker!.dispatchEvent(new CustomEvent('sl-request-close', { bubbles: true, composed: true }));
+    details!.dispatchEvent(new CustomEvent('sl-hide', { bubbles: true, composed: true }));
+    await permView.updateComplete;
+    await pageEl.updateComplete;
+    expect(pageEl.shadowRoot?.querySelector('sl-dialog.roles-dialog')).not.toBeNull();
 
     // Direct sl-request-close on the dialog itself closes it.
     dialog!.dispatchEvent(new CustomEvent('sl-request-close', { bubbles: true, composed: true }));

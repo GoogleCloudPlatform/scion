@@ -55,22 +55,52 @@ func (s *Server) handleAdminEffectivePermissions(w http.ResponseWriter, r *http.
 		BadRequest(w, "unsupported principal type")
 		return
 	}
+
+	ctx := r.Context()
 	if projectID != "" {
-		BadRequest(w, "projectId is not yet supported")
-		return
+		if s.store == nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"store unavailable", nil)
+			return
+		}
+		project, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				NotFound(w, "Project")
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		identity := GetIdentityFromContext(ctx)
+		if identity == nil {
+			NotFound(w, "Project")
+			return
+		}
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(identity),
+			Credential: credentialContextForIdentity(identity),
+			Resource:   projectResource(project),
+			Action:     ActionRead,
+			Permission: "project.read",
+		})
+		if !decision.Allowed {
+			NotFound(w, "Project")
+			return
+		}
 	}
 
 	set, err := s.authzService.ResolveEffectivePermissions(
-		r.Context(),
+		ctx,
 		PrincipalContext{Kind: PrincipalKindUser, ID: principalID},
-		EffectiveScope{},
+		EffectiveScope{ProjectID: projectID},
 	)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrUnsupportedPrincipalKind):
 			BadRequest(w, "unsupported principal type")
-		case errors.Is(err, errEffectivePermissionsProjectScopeUnsupported):
-			BadRequest(w, "projectId is not yet supported")
+		case errors.Is(err, store.ErrNotFound):
+			NotFound(w, "Project")
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"failed to resolve effective permissions", nil)

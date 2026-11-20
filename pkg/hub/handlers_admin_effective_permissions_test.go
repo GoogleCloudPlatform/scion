@@ -82,6 +82,56 @@ func epCreateCustomSystemRole(t *testing.T, s store.Store, name string, perms []
 	return created
 }
 
+func epCreateCustomProjectRole(t *testing.T, s store.Store, name string, perms []string) *store.RoleDefinition {
+	t.Helper()
+	rd := &store.RoleDefinition{
+		ID:          tid("ep-proj-role-" + name),
+		Name:        name,
+		Description: "Custom project role " + name,
+		ScopeType:   store.RoleScopeProject,
+		Permissions: perms,
+		System:      false,
+	}
+	created, err := s.CreateRoleDefinition(context.Background(), rd)
+	require.NoError(t, err)
+	return created
+}
+
+func epCreateProject(t *testing.T, srv *Server, s store.Store, slug, name, ownerID string) *store.Project {
+	t.Helper()
+	now := time.Now().UTC()
+	p := &store.Project{
+		ID:        tid("ep-proj-" + slug),
+		Name:      name,
+		Slug:      slug,
+		OwnerID:   ownerID,
+		CreatedBy: ownerID,
+		Created:   now,
+		Updated:   now,
+	}
+	require.NoError(t, s.CreateProject(context.Background(), p))
+	srv.seedProjectCreatorMembership(context.Background(), p)
+	return p
+}
+
+func epBindProjectRole(t *testing.T, s store.Store, projectID, roleID, principalType, principalID string, notBefore, expiresAt *time.Time) *store.RoleBinding {
+	t.Helper()
+	rb := &store.RoleBinding{
+		ID:               tid("ep-prb-" + projectID + "-" + roleID + "-" + principalType + "-" + principalID),
+		RoleDefinitionID: roleID,
+		PrincipalType:    principalType,
+		PrincipalID:      principalID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		NotBefore:        notBefore,
+		ExpiresAt:        expiresAt,
+		CreatedBy:        "system",
+	}
+	_, err := s.CreateRoleBinding(context.Background(), rb)
+	require.NoError(t, err)
+	return rb
+}
+
 func TestAdminEffectivePermissions_CallerGates(t *testing.T) {
 	srv, s, hubAdmin, member := setupScopedAdminTest(t)
 	ctx := context.Background()
@@ -177,8 +227,9 @@ func TestAdminEffectivePermissions_CallerGates(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, recFederated.Code)
 		assert.Contains(t, recFederated.Body.String(), "unsupported principal type")
 
-		recProject := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, url+"&projectId="+tid("some-proj"), nil)
-		assert.Equal(t, http.StatusBadRequest, recProject.Code)
+		recProject := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, url+"&projectId="+tid("some-missing-proj"), nil)
+		assert.Equal(t, http.StatusNotFound, recProject.Code)
+		assert.Contains(t, recProject.Body.String(), "Project not found")
 
 		recNotFound := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, "/api/v1/admin/effective-permissions?principalType=user&principalId="+tid("missing-user"), nil)
 		assert.Equal(t, http.StatusNotFound, recNotFound.Code)
@@ -566,6 +617,11 @@ func (c *epCountingStore) ListAccessConstraints(ctx context.Context, limit, offs
 	return c.Store.ListAccessConstraints(ctx, limit, offset)
 }
 
+func (c *epCountingStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	c.bump()
+	return c.Store.GetProject(ctx, id)
+}
+
 func TestAdminEffectivePermissions_NoAuditNoiseAndFixedQueryCount(t *testing.T) {
 	rawStore, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
@@ -573,13 +629,20 @@ func TestAdminEffectivePermissions_NoAuditNoiseAndFixedQueryCount(t *testing.T) 
 	srv, s := testServerOnMigratedStore(t, counting)
 	ctx := context.Background()
 
-	// Create hub-admin caller
+	// Create hub-admin caller and project P
 	hubAdmin := epCreateUser(t, s, "count-caller", store.UserStatusActive)
 	hubAdminRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
 	epBindSystemRole(t, s, hubAdminRole.ID, store.RoleBindingPrincipalUser, hubAdmin.ID, nil, nil)
 
-	// Target A: 1 group, small role
+	projOwner := epCreateUser(t, s, "count-proj-owner", store.UserStatusActive)
+	proj := epCreateProject(t, srv, s, "count-proj", "Count Project", projOwner.ID)
+	projMemberRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	projOwnerRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Target A: 1 group, small system role + 1 group project role
 	targetSmall := epCreateUser(t, s, "count-small", store.UserStatusActive)
 	gSmall := &store.Group{ID: tid("ep-cnt-g-small"), Name: "Small", Slug: "small", GroupType: store.GroupTypeExplicit}
 	require.NoError(t, s.CreateGroup(ctx, gSmall))
@@ -588,12 +651,15 @@ func TestAdminEffectivePermissions_NoAuditNoiseAndFixedQueryCount(t *testing.T) 
 	}))
 	smallRole := epCreateCustomSystemRole(t, s, "small-role", []string{"role.read"})
 	epBindSystemRole(t, s, smallRole.ID, store.RoleBindingPrincipalGroup, gSmall.ID, nil, nil)
+	smallProjRole := epCreateCustomProjectRole(t, s, "small-proj-role", []string{"project.read"})
+	epBindProjectRole(t, s, proj.ID, smallProjRole.ID, store.RoleBindingPrincipalGroup, gSmall.ID, nil, nil)
 
-	// Target B: 15 groups + super-admin (~150 permissions)
+	// Target B: 15 groups + super-admin (~150 permissions) + project-owner + 15 group project bindings
 	targetLarge := epCreateUser(t, s, "count-large", store.UserStatusActive)
 	superRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
 	epBindSystemRole(t, s, superRole.ID, store.RoleBindingPrincipalUser, targetLarge.ID, nil, nil)
+	epBindProjectRole(t, s, proj.ID, projOwnerRole.ID, store.RoleBindingPrincipalUser, targetLarge.ID, nil, nil)
 	for i := 0; i < 15; i++ {
 		g := &store.Group{
 			ID:        tid(fmt.Sprintf("ep-cnt-g-%d", i)),
@@ -606,6 +672,7 @@ func TestAdminEffectivePermissions_NoAuditNoiseAndFixedQueryCount(t *testing.T) 
 			GroupID: g.ID, MemberType: store.GroupMemberTypeUser, MemberID: targetLarge.ID, Role: store.GroupMemberRoleMember,
 		}))
 		epBindSystemRole(t, s, smallRole.ID, store.RoleBindingPrincipalGroup, g.ID, nil, nil)
+		epBindProjectRole(t, s, proj.ID, projMemberRole.ID, store.RoleBindingPrincipalGroup, g.ID, nil, nil)
 	}
 
 	emitter := &recordingDecisionAuditEmitter{}
@@ -619,7 +686,7 @@ func TestAdminEffectivePermissions_NoAuditNoiseAndFixedQueryCount(t *testing.T) 
 	require.NoError(t, err)
 	assert.Empty(t, emitter.records, "ResolveEffectivePermissions itself must emit zero decision-audit records")
 
-	// Measure resolver store reads: Small vs Large
+	// Measure resolver store reads at system scope: Small vs Large
 	counting.reads.Store(0)
 	counting.counting.Store(true)
 	resSmall, err := srv.authzService.ResolveEffectivePermissions(ctx, PrincipalContext{Kind: PrincipalKindUser, ID: targetSmall.ID}, EffectiveScope{})
@@ -636,30 +703,400 @@ func TestAdminEffectivePermissions_NoAuditNoiseAndFixedQueryCount(t *testing.T) 
 	largeReads := counting.reads.Load()
 	assert.Greater(t, len(resLarge.Permissions), 100)
 
-	assert.Equal(t, smallReads, largeReads, "store-call count must be independent of permission and group count")
-	assert.LessOrEqual(t, largeReads, int64(6), "resolver should use at most 6 batch/point store reads")
+	assert.Equal(t, smallReads, largeReads, "system store-call count must be independent of permission and group count")
+	assert.LessOrEqual(t, largeReads, int64(6), "system resolver should use at most 6 batch/point store reads")
 
-	// HTTP endpoint check: only the 1 caller route-guard audit record, zero target permission audit records.
+	// Measure resolver store reads at project scope: Small vs Large
+	counting.reads.Store(0)
+	counting.counting.Store(true)
+	resSmallProj, err := srv.authzService.ResolveEffectivePermissions(ctx, PrincipalContext{Kind: PrincipalKindUser, ID: targetSmall.ID}, EffectiveScope{ProjectID: proj.ID})
+	counting.counting.Store(false)
+	require.NoError(t, err)
+	smallProjReads := counting.reads.Load()
+	require.Len(t, resSmallProj.Permissions, 1)
+
+	counting.reads.Store(0)
+	counting.counting.Store(true)
+	resLargeProj, err := srv.authzService.ResolveEffectivePermissions(ctx, PrincipalContext{Kind: PrincipalKindUser, ID: targetLarge.ID}, EffectiveScope{ProjectID: proj.ID})
+	counting.counting.Store(false)
+	require.NoError(t, err)
+	largeProjReads := counting.reads.Load()
+	assert.Greater(t, len(resLargeProj.Permissions), 50)
+
+	assert.Equal(t, smallProjReads, largeProjReads, "project store-call count must be independent of permission and group count")
+	assert.LessOrEqual(t, largeProjReads, int64(7), "project resolver should use at most 7 batch/point store reads (6 + GetProject)")
+	assert.Empty(t, emitter.records, "project-scope ResolveEffectivePermissions must emit zero decision-audit records")
+
+	// HTTP endpoint check (system scope): only the 1 caller route-guard audit record, zero target permission audit records.
 	emitter.records = nil
 	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
 		"/api/v1/admin/effective-permissions?principalType=user&principalId="+targetLarge.ID, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Len(t, emitter.records, 1, "HTTP call should emit only the single route-guard Decide record, never per-permission Decide records")
+	require.Len(t, emitter.records, 1, "system HTTP call should emit only the single route-guard Decide record")
 	assert.Equal(t, "role_binding.read", emitter.records[0].PermissionID)
 	assert.Equal(t, "admin.effectivePermissions", emitter.records[0].Route)
 	assert.Equal(t, hubAdmin.ID, emitter.records[0].PrincipalID)
+
+	// HTTP endpoint check (project scope): only caller route-guard + project.read visibility Decide records, zero target permission audit records.
+	emitter.records = nil
+	recProj := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
+		"/api/v1/admin/effective-permissions?principalType=user&principalId="+targetLarge.ID+"&projectId="+proj.ID, nil)
+	require.Equal(t, http.StatusOK, recProj.Code, recProj.Body.String())
+	require.Len(t, emitter.records, 2, "project HTTP call should emit only caller route-guard + project.read visibility Decide records")
+	assert.Equal(t, "role_binding.read", emitter.records[0].PermissionID)
+	assert.Equal(t, hubAdmin.ID, emitter.records[0].PrincipalID)
+	assert.Equal(t, "project.read", emitter.records[1].PermissionID)
+	assert.Equal(t, hubAdmin.ID, emitter.records[1].PrincipalID)
 }
 
-func TestResolveEffectivePermissions_SystemParityWithDecide(t *testing.T) {
+func TestAdminEffectivePermissions_ProjectScope(t *testing.T) {
 	srv, s, hubAdmin, member := setupScopedAdminTest(t)
 	ctx := context.Background()
 
-	superAdmin := epCreateUser(t, s, "parity-super", store.UserStatusActive)
-	superAdmin.Role = store.UserRoleAdmin
-	require.NoError(t, s.UpdateUser(ctx, superAdmin))
+	projOwner := epCreateUser(t, s, "proj-owner", store.UserStatusActive)
+	ensureHubMembership(ctx, s, projOwner.ID)
+	proj := epCreateProject(t, srv, s, "alpha-proj", "Alpha Project", projOwner.ID)
+	secretProj := epCreateProject(t, srv, s, "secret-proj", "Secret Project", projOwner.ID)
+
+	t.Run("nonexistent vs invisible project return identical 404 Project not found", func(t *testing.T) {
+		// Put a project-scoped AccessConstraint on secretProj removing project.read from hubAdmin.
+		pType := store.RoleBindingPrincipalUser
+		_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+			Name:                 "hide-secret-proj-from-hub-admin",
+			SubjectKind:          store.ConstraintSubjectPrincipal,
+			SubjectPrincipalType: &pType,
+			SubjectPrincipalID:   &hubAdmin.ID,
+			ScopeType:            store.RoleScopeProject,
+			ScopeID:              secretProj.ID,
+			MaximumPermissions:   []string{"agent.read"}, // omits project.read
+			Purpose:              "test caller project visibility 404",
+			CreatedBy:            projOwner.ID,
+		})
+		require.NoError(t, err)
+
+		// Also create a custom-role caller holding role_binding.read at hub scope without project.read.
+		rbOnlyRole := epCreateCustomSystemRole(t, s, "rb-only-caller", []string{"role_binding.read"})
+		rbOnlyCaller := epCreateUser(t, s, "rb-only-user", store.UserStatusActive)
+		epBindSystemRole(t, s, rbOnlyRole.ID, store.RoleBindingPrincipalUser, rbOnlyCaller.ID, nil, nil)
+
+		missingID := tid("ep-nonexistent-project")
+		recMissing := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
+			"/api/v1/admin/effective-permissions?principalType=user&principalId="+member.ID+"&projectId="+missingID, nil)
+		recConstrained := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
+			"/api/v1/admin/effective-permissions?principalType=user&principalId="+member.ID+"&projectId="+secretProj.ID, nil)
+		recNoProjRead := doRequestAsUser(t, srv, rbOnlyCaller, http.MethodGet,
+			"/api/v1/admin/effective-permissions?principalType=user&principalId="+member.ID+"&projectId="+proj.ID, nil)
+
+		assert.Equal(t, http.StatusNotFound, recMissing.Code)
+		assert.Equal(t, http.StatusNotFound, recConstrained.Code)
+		assert.Equal(t, http.StatusNotFound, recNoProjRead.Code)
+		assert.Contains(t, recMissing.Body.String(), "Project not found")
+		assert.Equal(t, recMissing.Body.String(), recConstrained.Body.String(),
+			"nonexistent and constraint-hidden projects must return an identical 404 body")
+		assert.Equal(t, recMissing.Body.String(), recNoProjRead.Body.String(),
+			"nonexistent and role-invisible projects must return an identical 404 body")
+	})
+
+	t.Run("non-member hub-member in P lacks catalog and hub-only permissions", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
+			"/api/v1/admin/effective-permissions?principalType=user&principalId="+member.ID+"&projectId="+proj.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, ScopeTypeProject, resp.Scope.Type)
+		assert.Equal(t, proj.ID, resp.Scope.ID)
+		assert.Equal(t, "Alpha Project", resp.Scope.Name)
+		assert.Equal(t, "alpha-proj", resp.Scope.Slug)
+
+		gotIDs := make(map[string]bool, len(resp.Permissions))
+		for _, p := range resp.Permissions {
+			gotIDs[p.ID] = true
+		}
+		for _, forbidden := range []string{
+			"skill.read", "skill.list",
+			"template.read", "template.list",
+			"harness_config.read", "harness_config.list",
+			"user.read", "project.create", "project.list", "project.read", "role.read",
+		} {
+			assert.False(t, gotIDs[forbidden], "non-member hub-member must not hold %s in project P", forbidden)
+		}
+		// Only hub-member permissions that genuinely apply to project-parented
+		// resources in Decide (group.read, gcp_service_account.read) may appear.
+		for _, p := range resp.Permissions {
+			applies, reviewed := permissions.AppliesToExistingProjectTarget(p.ID)
+			assert.True(t, reviewed && applies, "unexpected non-project permission %s", p.ID)
+		}
+	})
+
+	t.Run("hub-admin in P shows system-scope grants on project-applicable permissions only", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
+			"/api/v1/admin/effective-permissions?principalType=user&principalId="+hubAdmin.ID+"&projectId="+proj.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, ScopeTypeProject, resp.Scope.Type)
+		assert.Equal(t, proj.ID, resp.Scope.ID)
+		assert.Equal(t, "Alpha Project", resp.Scope.Name)
+		assert.Equal(t, "alpha-proj", resp.Scope.Slug)
+		assert.NotEmpty(t, resp.Permissions)
+
+		byPerm := make(map[string]EffectivePermissionEntry, len(resp.Permissions))
+		for _, p := range resp.Permissions {
+			byPerm[p.ID] = p
+			applies, reviewed := permissions.AppliesToExistingProjectTarget(p.ID)
+			assert.True(t, reviewed && applies, "project response included non-project permission %s", p.ID)
+		}
+
+		projRead, ok := byPerm["project.read"]
+		require.True(t, ok, "hub-admin must hold project.read in P")
+		require.NotEmpty(t, projRead.Grants)
+		assert.Equal(t, ScopeTypeSystem, projRead.Grants[0].Scope.Type)
+		assert.Empty(t, projRead.Grants[0].Scope.ID)
+		assert.Equal(t, store.SystemRoleHubAdmin, projRead.Grants[0].Role.Name)
+		assert.True(t, projRead.Grants[0].Role.System)
+
+		// Hub-only permissions held by hub-admin at system scope must be excluded at project scope.
+		for _, hubOnly := range []string{"user.read", "project.create", "project.list", "role.read"} {
+			_, present := byPerm[hubOnly]
+			assert.False(t, present, "hub-only permission %s must be excluded at project scope", hubOnly)
+		}
+	})
+
+	t.Run("hub-admin plus group project-member shows both grants on project.read with via.groupName", func(t *testing.T) {
+		dualTarget := epCreateUser(t, s, "dual-hub-and-proj", store.UserStatusActive)
+		ensureHubMembership(ctx, s, dualTarget.ID)
+
+		hubAdminRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+		require.NoError(t, err)
+		sysBinding := epBindSystemRole(t, s, hubAdminRole.ID, store.RoleBindingPrincipalUser, dualTarget.ID, nil, nil)
+
+		projGroup := &store.Group{
+			ID:        tid("ep-proj-eng-group"),
+			Name:      "Project Eng",
+			Slug:      "project-eng",
+			GroupType: store.GroupTypeExplicit,
+		}
+		require.NoError(t, s.CreateGroup(ctx, projGroup))
+		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+			GroupID:    projGroup.ID,
+			MemberType: store.GroupMemberTypeUser,
+			MemberID:   dualTarget.ID,
+			Role:       store.GroupMemberRoleMember,
+		}))
+
+		projMemberRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+		require.NoError(t, err)
+		projBinding := epBindProjectRole(t, s, proj.ID, projMemberRole.ID, store.RoleBindingPrincipalGroup, projGroup.ID, nil, nil)
+
+		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
+			"/api/v1/admin/effective-permissions?principalType=user&principalId="+dualTarget.ID+"&projectId="+proj.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+		var projRead *EffectivePermissionEntry
+		for i := range resp.Permissions {
+			if resp.Permissions[i].ID == "project.read" {
+				projRead = &resp.Permissions[i]
+				break
+			}
+		}
+		require.NotNil(t, projRead, "project.read must be present")
+		require.Len(t, projRead.Grants, 2, "must list both project-scope and system-scope grants")
+
+		// §3.1: grants sorted project-scope first, then system-scope.
+		g0, g1 := projRead.Grants[0], projRead.Grants[1]
+		assert.Equal(t, projBinding.ID, g0.BindingID)
+		assert.Equal(t, ScopeTypeProject, g0.Scope.Type)
+		assert.Equal(t, proj.ID, g0.Scope.ID)
+		assert.Equal(t, store.ProjectRoleMember, g0.Role.Name)
+		assert.True(t, g0.Role.System)
+		require.NotNil(t, g0.Via)
+		assert.Equal(t, projGroup.ID, g0.Via.GroupID)
+		assert.Equal(t, "Project Eng", g0.Via.GroupName)
+		assert.Equal(t, "project-eng", g0.Via.GroupSlug)
+
+		assert.Equal(t, sysBinding.ID, g1.BindingID)
+		assert.Equal(t, ScopeTypeSystem, g1.Scope.Type)
+		assert.Empty(t, g1.Scope.ID)
+		assert.Equal(t, store.SystemRoleHubAdmin, g1.Role.Name)
+		assert.True(t, g1.Role.System)
+		assert.Nil(t, g1.Via)
+	})
+
+	t.Run("suspended user at project scope preserves project scope metadata", func(t *testing.T) {
+		suspended := epCreateUser(t, s, "proj-suspended", store.UserStatusSuspended)
+		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet,
+			"/api/v1/admin/effective-permissions?principalType=user&principalId="+suspended.ID+"&projectId="+proj.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp EffectivePermissionSet
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, ScopeTypeProject, resp.Scope.Type)
+		assert.Equal(t, proj.ID, resp.Scope.ID)
+		assert.Equal(t, "Alpha Project", resp.Scope.Name)
+		assert.Equal(t, "alpha-proj", resp.Scope.Slug)
+		require.NotNil(t, resp.StatusGate)
+		assert.Equal(t, store.UserStatusSuspended, resp.StatusGate.Reason)
+		assert.Empty(t, resp.Permissions)
+		assert.Empty(t, resp.Removed)
+	})
+}
+
+func TestResolveEffectivePermissions_ParityMatrixWithDecide(t *testing.T) {
+	srv, s, hubAdmin, nonMemberHubMember := setupScopedAdminTest(t)
+	ctx := context.Background()
+
+	// Enable caged test_super_admin tier so the matrix exercises live test-admin caging.
+	setAuthzTestAdminTier(srv.authzService, func(kind string) bool {
+		return kind == store.UserKindTestSuperAdmin
+	}, nil)
+	t.Cleanup(func() {
+		setAuthzTestAdminTier(srv.authzService, nil, nil)
+	})
+
+	projOwnerUser := epCreateUser(t, s, "matrix-proj-owner", store.UserStatusActive)
+	ensureHubMembership(ctx, s, projOwnerUser.ID)
+	projP := epCreateProject(t, srv, s, "matrix-proj-p", "Matrix Project P", projOwnerUser.ID)
+	otherProj := epCreateProject(t, srv, s, "matrix-proj-other", "Matrix Other Project", projOwnerUser.ID)
+
 	superRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
+	hubAdminRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	projMemberRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	projAdminRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	projOwnerRole, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Give nonMemberHubMember owner access in otherProj to verify cross-project isolation in projP.
+	epBindProjectRole(t, s, otherProj.ID, projOwnerRole.ID, store.RoleBindingPrincipalUser, nonMemberHubMember.ID, nil, nil)
+
+	// 1. super-admin
+	superAdmin := epCreateUser(t, s, "matrix-super", store.UserStatusActive)
+	superAdmin.Role = store.UserRoleAdmin
+	require.NoError(t, s.UpdateUser(ctx, superAdmin))
 	epBindSystemRole(t, s, superRole.ID, store.RoleBindingPrincipalUser, superAdmin.ID, nil, nil)
+
+	// 2. project-member direct in P
+	projMemberDirect := epCreateUser(t, s, "matrix-pm-direct", store.UserStatusActive)
+	ensureHubMembership(ctx, s, projMemberDirect.ID)
+	epBindProjectRole(t, s, projP.ID, projMemberRole.ID, store.RoleBindingPrincipalUser, projMemberDirect.ID, nil, nil)
+
+	// 3. project-member via nested group in P
+	projMemberGroup := epCreateUser(t, s, "matrix-pm-group", store.UserStatusActive)
+	ensureHubMembership(ctx, s, projMemberGroup.ID)
+	parentGrp := &store.Group{ID: tid("ep-mat-grp-parent"), Name: "Matrix Parent", Slug: "matrix-parent", GroupType: store.GroupTypeExplicit}
+	childGrp := &store.Group{ID: tid("ep-mat-grp-child"), Name: "Matrix Child", Slug: "matrix-child", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, parentGrp))
+	require.NoError(t, s.CreateGroup(ctx, childGrp))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: parentGrp.ID, MemberType: store.GroupMemberTypeGroup, MemberID: childGrp.ID, Role: store.GroupMemberRoleMember,
+	}))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: childGrp.ID, MemberType: store.GroupMemberTypeUser, MemberID: projMemberGroup.ID, Role: store.GroupMemberRoleMember,
+	}))
+	epBindProjectRole(t, s, projP.ID, projMemberRole.ID, store.RoleBindingPrincipalGroup, parentGrp.ID, nil, nil)
+
+	// 4. hub-admin + group project-member in P
+	hubAdminPlusGroupPM := epCreateUser(t, s, "matrix-ha-plus-gpm", store.UserStatusActive)
+	ensureHubMembership(ctx, s, hubAdminPlusGroupPM.ID)
+	epBindSystemRole(t, s, hubAdminRole.ID, store.RoleBindingPrincipalUser, hubAdminPlusGroupPM.ID, nil, nil)
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: childGrp.ID, MemberType: store.GroupMemberTypeUser, MemberID: hubAdminPlusGroupPM.ID, Role: store.GroupMemberRoleMember,
+	}))
+
+	// 5. Expired/future bindings + system & project access constraints
+	timingAndConstrained := epCreateUser(t, s, "matrix-timing-constrained", store.UserStatusActive)
+	ensureHubMembership(ctx, s, timingAndConstrained.ID)
+	past := time.Now().UTC().Add(-2 * time.Hour)
+	future := time.Now().UTC().Add(2 * time.Hour)
+	expSysRole := epCreateCustomSystemRole(t, s, "mat-exp-sys", []string{"quota.read", "broker.create"})
+	futSysRole := epCreateCustomSystemRole(t, s, "mat-fut-sys", []string{"role.create"})
+	actSysRole := epCreateCustomSystemRole(t, s, "mat-act-sys", []string{"role.read", "broker.read", "agent.delete"})
+	expProjRole := epCreateCustomProjectRole(t, s, "mat-exp-proj", []string{"project.delete"})
+	futProjRole := epCreateCustomProjectRole(t, s, "mat-fut-proj", []string{"project.manage_visitors"})
+	epBindSystemRole(t, s, expSysRole.ID, store.RoleBindingPrincipalUser, timingAndConstrained.ID, nil, &past)
+	epBindSystemRole(t, s, futSysRole.ID, store.RoleBindingPrincipalUser, timingAndConstrained.ID, &future, nil)
+	epBindSystemRole(t, s, actSysRole.ID, store.RoleBindingPrincipalUser, timingAndConstrained.ID, nil, nil)
+	epBindProjectRole(t, s, projP.ID, expProjRole.ID, store.RoleBindingPrincipalUser, timingAndConstrained.ID, nil, &past)
+	epBindProjectRole(t, s, projP.ID, futProjRole.ID, store.RoleBindingPrincipalUser, timingAndConstrained.ID, &future, nil)
+	epBindProjectRole(t, s, projP.ID, projAdminRole.ID, store.RoleBindingPrincipalUser, timingAndConstrained.ID, nil, nil)
+
+	pType := store.RoleBindingPrincipalUser
+	// System constraint allows role.read + project/agent basics, strips broker.read at hub and agent.delete everywhere.
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "mat-sys-cap",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   &timingAndConstrained.ID,
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"role.read", "user.read", "project.read", "project.update", "agent.read", "agent.create", "skill.read"},
+		Purpose:              "matrix system constraint",
+		CreatedBy:            hubAdmin.ID,
+	})
+	require.NoError(t, err)
+	// Project constraint on P further caps timingAndConstrained to project.read + agent.read + skill.read (strips project.update & agent.create in P).
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "mat-proj-cap",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &pType,
+		SubjectPrincipalID:   &timingAndConstrained.ID,
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              projP.ID,
+		MaximumPermissions:   []string{"role.read", "user.read", "project.read", "agent.read", "skill.read"},
+		Purpose:              "matrix project constraint",
+		CreatedBy:            hubAdmin.ID,
+	})
+	require.NoError(t, err)
+
+	// 6. Caged test_super_admin (holds super-admin + direct project-member in P)
+	adminExp := time.Now().UTC().Add(30 * time.Minute)
+	purpose := "parity matrix test"
+	issuance := tid("ep-mat-test-super-issuance")
+	cagedTestAdmin := &store.User{
+		ID:         tid("ep-mat-test-super"),
+		Email:      "matsuper@" + store.TestAdminEmailDomain(store.UserKindTestSuperAdmin),
+		Role:       store.TestAdminRole(store.UserKindTestSuperAdmin),
+		Status:     store.UserStatusActive,
+		Kind:       store.UserKindTestSuperAdmin,
+		ExpiresAt:  &adminExp,
+		IssuedBy:   &hubAdmin.ID,
+		Purpose:    &purpose,
+		IssuanceID: &issuance,
+		Created:    time.Now().UTC(),
+	}
+	_, err = s.CreateTestAdminUser(ctx, cagedTestAdmin, superRole.ID)
+	require.NoError(t, err)
+	epBindProjectRole(t, s, projP.ID, projMemberRole.ID, store.RoleBindingPrincipalUser, cagedTestAdmin.ID, nil, nil)
+
+	// 7. test_fixture target (with clamped extra system role via group + direct project-member in P)
+	fxExp := time.Now().UTC().Add(30 * time.Minute)
+	testFixtureUser := &store.User{
+		ID:        tid("ep-mat-test-fixture"),
+		Email:     "matfx@" + store.TestFixtureEmailDomain,
+		Role:      store.UserRoleMember,
+		Status:    store.UserStatusActive,
+		Kind:      store.UserKindTestFixture,
+		ExpiresAt: &fxExp,
+		IssuedBy:  &hubAdmin.ID,
+		Created:   time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateTestFixtureUser(ctx, testFixtureUser))
+	ensureHubMembership(ctx, s, testFixtureUser.ID)
+	fxSysGrp := &store.Group{ID: tid("ep-mat-fx-grp"), Name: "FX Sys Grp", Slug: "fx-sys-grp", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, fxSysGrp))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: fxSysGrp.ID, MemberType: store.GroupMemberTypeUser, MemberID: testFixtureUser.ID, Role: store.GroupMemberRoleMember,
+	}))
+	fxExtraSysRole := epCreateCustomSystemRole(t, s, "mat-fx-extra", []string{"role.create", "quota.create"})
+	epBindSystemRole(t, s, fxExtraSysRole.ID, store.RoleBindingPrincipalGroup, fxSysGrp.ID, nil, nil)
+	epBindProjectRole(t, s, projP.ID, projMemberRole.ID, store.RoleBindingPrincipalUser, testFixtureUser.ID, nil, nil)
 
 	hubResourceFor := func(p permissions.Permission) Resource {
 		res := Resource{Type: p.Resource, ID: "hub-parity-target"}
@@ -674,38 +1111,95 @@ func TestResolveEffectivePermissions_SystemParityWithDecide(t *testing.T) {
 		return res
 	}
 
-	for _, u := range []*store.User{member, hubAdmin, superAdmin} {
-		t.Run(u.Email, func(t *testing.T) {
-			set, err := srv.authzService.ResolveEffectivePermissions(ctx,
-				PrincipalContext{Kind: PrincipalKindUser, ID: u.ID}, EffectiveScope{})
+	projectResourceFor := func(p permissions.Permission, projectID string) Resource {
+		if p.Resource == permissions.ResourceProject {
+			return Resource{Type: permissions.ResourceProject, ID: projectID}
+		}
+		class := ContemplatedProjectClass(p.ID)
+		return Resource{
+			Type:       p.Resource,
+			ID:         "proj-parity-target",
+			ScopeKind:  class.ScopeKind,
+			ParentType: "project",
+			ParentID:   projectID,
+		}
+	}
+
+	fixtures := []struct {
+		name string
+		user *store.User
+	}{
+		{"hub-admin", hubAdmin},
+		{"hub-member-non-member-of-P", nonMemberHubMember},
+		{"project-member-direct", projMemberDirect},
+		{"project-member-via-group", projMemberGroup},
+		{"hub-admin-plus-group-project-member", hubAdminPlusGroupPM},
+		{"expired-future-and-constrained", timingAndConstrained},
+		{"caged-test-admin", cagedTestAdmin},
+		{"test-fixture-target", testFixtureUser},
+		{"super-admin", superAdmin},
+	}
+
+	for _, fx := range fixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			sysSet, err := srv.authzService.ResolveEffectivePermissions(ctx,
+				PrincipalContext{Kind: PrincipalKindUser, ID: fx.user.ID}, EffectiveScope{})
 			require.NoError(t, err)
 
-			resolved := make(map[string]bool, len(set.Permissions))
-			for _, p := range set.Permissions {
-				resolved[p.ID] = true
+			projSet, err := srv.authzService.ResolveEffectivePermissions(ctx,
+				PrincipalContext{Kind: PrincipalKindUser, ID: fx.user.ID}, EffectiveScope{ProjectID: projP.ID})
+			require.NoError(t, err)
+
+			resolvedSys := make(map[string]bool, len(sysSet.Permissions))
+			for _, p := range sysSet.Permissions {
+				resolvedSys[p.ID] = true
+			}
+			resolvedProj := make(map[string]bool, len(projSet.Permissions))
+			for _, p := range projSet.Permissions {
+				resolvedProj[p.ID] = true
 			}
 
-			ident := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web")
+			ident := NewAuthenticatedUser(fx.user.ID, fx.user.Email, fx.user.DisplayName, fx.user.Role, "web")
 			for _, perm := range permissions.Registry {
 				if perm.IsReserved() {
-					assert.False(t, resolved[perm.ID], "reserved permission %s must never appear", perm.ID)
+					assert.False(t, resolvedSys[perm.ID], "system: reserved permission %s must never appear", perm.ID)
+					assert.False(t, resolvedProj[perm.ID], "project: reserved permission %s must never appear", perm.ID)
 					continue
 				}
-				d := srv.authzService.Decide(ctx, AuthzRequest{
+
+				// System-scope parity: resolver(system) ∋ p ⇔ Decide(hub resource for p)
+				dSys := srv.authzService.Decide(ctx, AuthzRequest{
 					Principal:  principalContextForIdentity(ident),
 					Credential: credentialContextForIdentity(ident),
 					Resource:   hubResourceFor(perm),
 					Action:     Action(perm.Action),
 					Permission: perm.ID,
 				})
-				// Relationship grants (e.g., hub_member_sa_assign on hub-scoped SAs)
-				// are outside role-binding scope resolution (§2, §3.4).
-				if d.Allowed && d.BindingID == "" {
+				if !(dSys.Allowed && dSys.BindingID == "") {
+					assert.Equal(t, dSys.Allowed, resolvedSys[perm.ID],
+						"system parity mismatch for %s on %s (Decide reason=%q binding=%q)",
+						fx.name, perm.ID, dSys.Reason, dSys.BindingID)
+				}
+
+				// Project-scope parity: resolver(P) ∋ p ⇔ AppliesToExistingProjectTarget(p) ∧ Decide(resource of p's class in P)
+				applies, reviewed := permissions.AppliesToExistingProjectTarget(perm.ID)
+				if !reviewed || !applies {
+					assert.False(t, resolvedProj[perm.ID],
+						"project: non-applicable permission %s must not appear for %s", perm.ID, fx.name)
 					continue
 				}
-				assert.Equal(t, d.Allowed, resolved[perm.ID],
-					"parity mismatch for %s on %s (Decide reason=%q binding=%q)",
-					u.Email, perm.ID, d.Reason, d.BindingID)
+				dProj := srv.authzService.Decide(ctx, AuthzRequest{
+					Principal:  principalContextForIdentity(ident),
+					Credential: credentialContextForIdentity(ident),
+					Resource:   projectResourceFor(perm, projP.ID),
+					Action:     Action(perm.Action),
+					Permission: perm.ID,
+				})
+				if !(dProj.Allowed && dProj.BindingID == "") {
+					assert.Equal(t, dProj.Allowed, resolvedProj[perm.ID],
+						"project parity mismatch for %s on %s (Decide reason=%q binding=%q)",
+						fx.name, perm.ID, dProj.Reason, dProj.BindingID)
+				}
 			}
 		})
 	}
