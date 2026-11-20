@@ -106,7 +106,7 @@ export class ScionJsonBrowser extends LitElement {
       color: var(--scion-primary-700, #1d4ed8);
     }
     .val-boolean {
-      color: #7c3aed;
+      color: var(--sl-color-purple-600, #7c3aed);
     }
     .val-null {
       color: var(--scion-text-muted, #64748b);

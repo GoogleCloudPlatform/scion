@@ -172,7 +172,7 @@ export class ScionPageMetrics extends LitElement {
     .period-btn.active {
       background: var(--scion-primary, #3b82f6);
       border-color: var(--scion-primary, #3b82f6);
-      color: #ffffff;
+      color: var(--scion-primary-text, #ffffff);
     }
 
     sl-tab-group {
@@ -543,6 +543,10 @@ export class ScionPageMetrics extends LitElement {
         existing.destroy();
       }
 
+      const gridColor =
+        typeof getComputedStyle === 'function'
+          ? getComputedStyle(this).getPropertyValue('--scion-border-subtle').trim()
+          : '';
       const chart = new Chart(canvas, {
         type,
         data: { labels, datasets },
@@ -567,7 +571,7 @@ export class ScionPageMetrics extends LitElement {
             },
             y: {
               beginAtZero: true,
-              grid: { color: '#f1f5f9' },
+              grid: gridColor ? { color: gridColor } : {},
               ticks: { font: { size: 11 } },
             },
           },

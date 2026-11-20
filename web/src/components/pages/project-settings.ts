@@ -927,16 +927,16 @@ export class ScionPageProjectSettings extends LitElement {
     }
 
     .github-status-dot.ok {
-      background: #16a34a;
+      background: var(--sl-color-success-600, #16a34a);
     }
     .github-status-dot.degraded {
-      background: #eab308;
+      background: var(--scion-status-warning, #f59e0b);
     }
     .github-status-dot.error {
-      background: #dc2626;
+      background: var(--sl-color-danger-600, #dc2626);
     }
     .github-status-dot.unchecked {
-      background: #94a3b8;
+      background: var(--scion-text-disabled, #94a3b8);
     }
 
     .github-permissions {
@@ -960,21 +960,21 @@ export class ScionPageProjectSettings extends LitElement {
     }
 
     .github-perm-badge.write {
-      background: #dbeafe;
-      border-color: #93c5fd;
-      color: #1e40af;
+      background: var(--scion-badge-primary-bg, #dbeafe);
+      border-color: var(--sl-color-primary-300, #93c5fd);
+      color: var(--scion-badge-primary-text, #1e40af);
     }
 
     .github-perm-badge.read {
-      background: #f0fdf4;
-      border-color: #86efac;
-      color: #166534;
+      background: var(--sl-color-success-50, #f0fdf4);
+      border-color: var(--scion-success-border, #86efac);
+      color: var(--scion-success-text, #166534);
     }
 
     .status-message.warning {
-      background: #fef3c7;
-      color: #92400e;
-      border: 1px solid #fcd34d;
+      background: var(--scion-badge-warning-bg, #fef3c7);
+      color: var(--scion-warning-text, #92400e);
+      border: 1px solid var(--scion-warning-border, #fcd34d);
     }
 
     /* Runtime Brokers tab */
@@ -1002,13 +1002,13 @@ export class ScionPageProjectSettings extends LitElement {
     }
 
     .broker-status-dot.online {
-      background: #16a34a;
+      background: var(--sl-color-success-600, #16a34a);
     }
     .broker-status-dot.offline {
-      background: #94a3b8;
+      background: var(--scion-text-disabled, #94a3b8);
     }
     .broker-status-dot.degraded {
-      background: #eab308;
+      background: var(--scion-status-warning, #f59e0b);
     }
 
     .broker-info {

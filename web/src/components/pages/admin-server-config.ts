@@ -8638,10 +8638,11 @@ export class ScionPageAdminServerConfig extends LitElement {
                               <span
                                 style="font-size: 0.6875rem; padding: 0.125rem 0.5rem; border-radius: 9999px; background: ${inst.status ===
                                 'active'
-                                  ? '#dcfce7'
-                                  : '#fef2f2'}; color: ${inst.status === 'active'
-                                  ? '#166534'
-                                  : '#991b1b'};"
+                                  ? 'var(--scion-badge-success-bg, #dcfce7)'
+                                  : 'var(--scion-error-bg, #fef2f2)'}; color: ${inst.status ===
+                                'active'
+                                  ? 'var(--scion-badge-success-text, #166534)'
+                                  : 'var(--scion-error-text, #991b1b)'};"
                               >
                                 ${inst.status}
                               </span>

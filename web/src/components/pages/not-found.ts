@@ -51,7 +51,11 @@ export class ScionPage404 extends LitElement {
       font-size: 8rem;
       font-weight: 800;
       line-height: 1;
-      background: linear-gradient(135deg, var(--scion-primary, #3b82f6) 0%, #8b5cf6 100%);
+      background: linear-gradient(
+        135deg,
+        var(--scion-primary, #3b82f6) 0%,
+        var(--scion-review-note-line, #8b5cf6) 100%
+      );
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
