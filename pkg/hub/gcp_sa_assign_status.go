@@ -200,11 +200,7 @@ var assignStatusMessages = map[string]string{
 	SAMappingReasonAmbiguousMapping:    "Unknown: more than one Kubernetes service account is annotated for it; the broker decides.",
 }
 
-// assignStatusFor builds the status for one account.
-func assignStatusFor(b assignStatusBroker, profile, email string, now time.Time) *GCPServiceAccountAssignStatus {
-	return assignStatusForWithCreate(b, profile, email, false, now)
-}
-
+// assignStatusForWithCreate builds the status for one account.
 func assignStatusForWithCreate(b assignStatusBroker, profile, email string, allowCreate bool, now time.Time) *GCPServiceAccountAssignStatus {
 	d := profileSAMappingDecisionWithCreate(b.broker, profile, email, allowCreate, now)
 	st := &GCPServiceAccountAssignStatus{

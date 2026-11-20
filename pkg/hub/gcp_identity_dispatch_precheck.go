@@ -222,10 +222,11 @@ type SAMappingDecision struct {
 	Namespace string
 }
 
-// profileSAMappingDecision decides, from the hub's stored copy of broker's
-// per-profile service account report, whether account is mapped on
+// profileSAMappingDecisionWithCreate decides, from the hub's stored copy of broker's
+// per-profile service account report, whether account is mapped (or creatable,
+// when allowCreate is true) on
 // profileName. It is the one decision behind the dispatch refusal
-// (kubernetesIdentityNotMapped refuses only on not_mapped), the assign
+// (kubernetesIdentityNotMappedWithCreate refuses only on not_mapped), the assign
 // picker's assignStatus and the per-account status view, so they agree for
 // the same inputs.
 //
@@ -247,10 +248,6 @@ type SAMappingDecision struct {
 // no mapping and gives not_required. Any other non-Kubernetes Type is
 // unknown: a custom runtime key can name a Kubernetes runtime the hub
 // cannot see.
-func profileSAMappingDecision(broker *store.RuntimeBroker, profileName, account string, now time.Time) SAMappingDecision {
-	return profileSAMappingDecisionWithCreate(broker, profileName, account, false, now)
-}
-
 func profileSAMappingDecisionWithCreate(broker *store.RuntimeBroker, profileName, account string, allowCreate bool, now time.Time) SAMappingDecision {
 	d := SAMappingDecision{
 		State:   SAMappingStateUnknown,
@@ -295,16 +292,12 @@ func brokerProfileKSACreation(broker *store.RuntimeBroker, profileName string) (
 	return false, ""
 }
 
-// profileSAMappingDecisionOn is profileSAMappingDecision for a profile the
-// caller already holds, on the broker named brokerName. The per-account
-// status view and the not-mapped warnings use it on the profile rows they
-// collected, so they apply the same rule as the dispatch refusal. A nil
-// profile is unknown with reason no_profile: there is no profile to decide
+// profileSAMappingDecisionOnWithCreate is profileSAMappingDecisionWithCreate
+// for a profile the caller already holds, on the broker named brokerName. The
+// per-account status view and the not-mapped warnings use it on the profile
+// rows they collected, so they apply the same rule as the dispatch refusal. A
+// nil profile is unknown with reason no_profile: there is no profile to decide
 // on.
-func profileSAMappingDecisionOn(brokerName string, profile *store.BrokerProfile, account string, now time.Time) SAMappingDecision {
-	return profileSAMappingDecisionOnWithCreate(brokerName, profile, account, false, false, "", now)
-}
-
 func profileSAMappingDecisionOnWithCreate(
 	brokerName string,
 	profile *store.BrokerProfile,
@@ -385,15 +378,11 @@ func profileSAMappingDecisionOnWithCreate(
 	return d
 }
 
-// kubernetesIdentityNotMapped decides whether a dispatch for an agent with
-// gcpID on profileName is certain to be refused by the broker because the
-// GCP service account is not mapped there. It returns nil, meaning dispatch
-// and let the broker decide, unless the mode is "assign" and
-// profileSAMappingDecision says not_mapped.
-func kubernetesIdentityNotMapped(broker *store.RuntimeBroker, profileName string, gcpID *store.GCPIdentityConfig, now time.Time) *identityNotMappedPrecheck {
-	return kubernetesIdentityNotMappedWithCreate(broker, profileName, gcpID, false, now)
-}
-
+// kubernetesIdentityNotMappedWithCreate decides whether a dispatch for an
+// agent with gcpID on profileName is certain to be refused by the broker
+// because the GCP service account is not mapped (or creatable) there. It
+// returns nil, meaning dispatch and let the broker decide, unless the mode is
+// "assign" and profileSAMappingDecisionWithCreate says not_mapped.
 func kubernetesIdentityNotMappedWithCreate(broker *store.RuntimeBroker, profileName string, gcpID *store.GCPIdentityConfig, allowCreate bool, now time.Time) *identityNotMappedPrecheck {
 	if gcpID == nil || gcpID.MetadataMode != store.GCPMetadataModeAssign {
 		return nil

@@ -302,15 +302,11 @@ func gcpSAVerificationOf(sa *store.GCPServiceAccount) GCPServiceAccountVerificat
 	return v
 }
 
-// gcpSAProfileMappings maps each Kubernetes profile to a state for email,
+// gcpSAProfileMappingsFor maps each Kubernetes profile to a state for email,
 // sorted by broker then profile name. The state is the shared decision's
-// (kubernetesProfileMappings.decision, the dispatch refusal's rule), so the
+// (kubernetesProfileMappings.decisionFor, the dispatch refusal's rule), so the
 // view, the warnings and the refusal agree. A profile with no report at all
 // is "not_reported"; one whose decision is not_required is left out.
-func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, now time.Time) []GCPServiceAccountProfileMapping {
-	return gcpSAProfileMappingsFor(email, false, profiles, now)
-}
-
 func gcpSAProfileMappingsFor(email string, allowCreate bool, profiles []kubernetesProfileMappings, now time.Time) []GCPServiceAccountProfileMapping {
 	out := make([]GCPServiceAccountProfileMapping, 0, len(profiles))
 	key := strings.ToLower(email)
@@ -353,16 +349,12 @@ func gcpSAProfileMappingsFor(email string, allowCreate bool, profiles []kubernet
 	return out
 }
 
-// gcpSAMappedCount counts, with the shared decision at now
-// (kubernetesProfileMappings.decision), the profiles whose decision for
-// email is mapped and the profiles that reported. A profile whose decision
-// is not_required is counted in neither (the status view does not list it);
-// notRequired counts those so the summary can leave them out of the
-// unreported count too.
-func gcpSAMappedCount(email string, profiles []kubernetesProfileMappings, now time.Time) (mapped, reported, notRequired int) {
-	return gcpSAMappedCountFor(email, false, profiles, now)
-}
-
+// gcpSAMappedCountFor counts, with the shared decision at now
+// (kubernetesProfileMappings.decisionFor), the profiles whose decision for
+// email is mapped (or creatable, when allowCreate is true) and the profiles
+// that reported. A profile whose decision is not_required is counted in
+// neither (the status view does not list it); notRequired counts those so the
+// summary can leave them out of the unreported count too.
 func gcpSAMappedCountFor(email string, allowCreate bool, profiles []kubernetesProfileMappings, now time.Time) (mapped, reported, notRequired int) {
 	for _, p := range profiles {
 		if !p.reported {
@@ -613,10 +605,6 @@ type GCPServiceAccountMappingSummary struct {
 }
 
 // annotateGCPSAMappings sets the mapping summary on every listed account.
-func annotateGCPSAMappings(items []GCPServiceAccountWithCapabilities, profiles []kubernetesProfileMappings) {
-	annotateGCPSAMappingsWithExperiment(items, profiles, false)
-}
-
 func (s *Server) annotateGCPSAMappings(items []GCPServiceAccountWithCapabilities, profiles []kubernetesProfileMappings) {
 	annotateGCPSAMappingsWithExperiment(items, profiles, s.experimentEnabled(experiments.K8sWorkloadIdentitySetup))
 }
