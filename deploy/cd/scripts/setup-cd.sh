@@ -227,21 +227,28 @@ log_info "  CD SA:          ${CD_SA_EMAIL}"
 # permissions fail fast before mutating APIs, buckets, service accounts, or IAM.
 run_operator_permission_preflight() {
   log_info "Preflight: verifying operator IAM permissions before mutating GCP..."
-  local token=""
-  token="$(gcloud auth print-access-token 2>/dev/null || true)"
+  local has_python3="true"
+  if ! command -v python3 >/dev/null 2>&1; then
+    has_python3="false"
+    log_warn "python3 not found on PATH; skipping JSON testIamPermissions preflight checks and proceeding."
+  fi
 
-  # 1. Check core project-level permissions via Resource Manager testIamPermissions
-  if [[ -n "${token}" ]]; then
-    local crm_resp=""
-    crm_resp="$(curl -sf -X POST \
-      "https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:testIamPermissions" \
-      -H "Authorization: Bearer ${token}" \
-      -H "Content-Type: application/json" \
-      -d '{"permissions":["serviceusage.services.enable","iam.serviceAccounts.create","resourcemanager.projects.setIamPolicy"]}' \
-      2>/dev/null || true)"
-    if [[ -n "${crm_resp}" ]]; then
-      local missing_proj=""
-      missing_proj="$(python3 - "${crm_resp}" <<'PY' 2>/dev/null
+  local token=""
+  if [[ "${has_python3}" == "true" ]]; then
+    token="$(gcloud auth print-access-token 2>/dev/null || true)"
+
+    # 1. Check core project-level permissions via Resource Manager testIamPermissions
+    if [[ -n "${token}" ]]; then
+      local crm_resp=""
+      crm_resp="$(curl -sf -X POST \
+        "https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT}:testIamPermissions" \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -d '{"permissions":["serviceusage.services.enable","iam.serviceAccounts.create","resourcemanager.projects.setIamPolicy"]}' \
+        2>/dev/null || true)"
+      if [[ -n "${crm_resp}" ]]; then
+        local missing_proj=""
+        missing_proj="$(python3 - "${crm_resp}" <<'PY' 2>/dev/null
 import json, sys
 try:
     data = json.loads(sys.argv[1])
@@ -259,15 +266,16 @@ missing = [p for p in required if p not in held]
 if missing:
     print(", ".join(missing))
 PY
-      )" || true
-      if [[ -n "${missing_proj}" ]]; then
-        die "Operator lacks required project-level IAM permission(s) on '${PROJECT}': ${missing_proj}. Grant roles/serviceusage.serviceUsageAdmin, roles/iam.serviceAccountAdmin, and roles/resourcemanager.projectIamAdmin (see deploy/cd/README.md) before running setup-cd.sh."
+        )" || true
+        if [[ -n "${missing_proj}" ]]; then
+          die "Operator lacks required project-level IAM permission(s) on '${PROJECT}': ${missing_proj}. Grant roles/serviceusage.serviceUsageAdmin, roles/iam.serviceAccountAdmin, and roles/resourcemanager.projectIamAdmin (see deploy/cd/README.md) before running setup-cd.sh."
+        fi
+      else
+        log_warn "Could not verify project-level IAM permissions via testIamPermissions; proceeding."
       fi
     else
-      log_warn "Could not verify project-level IAM permissions via testIamPermissions; proceeding."
+      log_warn "Could not obtain gcloud access token for IAM preflight; proceeding."
     fi
-  else
-    log_warn "Could not obtain gcloud access token for IAM preflight; proceeding."
   fi
 
   # 2. Check Artifact Registry repo-level setIamPolicy when <shared_prefix>-scion already exists
@@ -296,7 +304,7 @@ PY
     return 0
   fi
 
-  if [[ -n "${token}" ]]; then
+  if [[ "${has_python3}" == "true" && -n "${token}" ]]; then
     local ar_parent="projects/${PROJECT}/locations/${REGION}/repositories/${AR_REPO}"
     local ar_resp=""
     ar_resp="$(curl -sf -X POST \

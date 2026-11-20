@@ -1686,6 +1686,61 @@ PY
   assert_not_contains "preflight disabled AR API does not misclassify as missing artifactregistry.admin" "${pf_out}" "roles/artifactregistry.admin"
   assert_contains "setup-cd.sh proceeds to enable APIs when AR API not yet enabled" "$(cat "${jsonl_pf}")" '"enable"'
 
+  # (h) Missing python3 on PATH warns explicitly instead of silently skipping JSON preflight checks
+  local no_py_bin="${TMP_ROOT}/setup-no-py-bin"
+  local no_py_gcloud_log="${TMP_ROOT}/setup-no-py-gcloud.log"
+  local no_py_curl_log="${TMP_ROOT}/setup-no-py-curl.log"
+  mkdir -p "${no_py_bin}"
+  local req_tool req_path
+  for req_tool in bash env dirname mktemp cat rm grep; do
+    req_path="$(command -v "${req_tool}")"
+    ln -sf "${req_path}" "${no_py_bin}/${req_tool}"
+  done
+  cat >"${no_py_bin}/gcloud" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'gcloud %s\n' "$*" >> "${MOCK_NO_PY_GCLOUD_LOG:?}"
+if [[ "${1:-}" == "projects" && "${2:-}" == "describe" ]]; then
+  echo "123456789012"
+  exit 0
+fi
+if [[ "${1:-}" == "artifacts" && "${2:-}" == "repositories" && "${3:-}" == "describe" ]]; then
+  echo "projects/my-prod-proj/locations/us-central1/repositories/cdha-scion"
+  exit 0
+fi
+if [[ "${1:-}" == "storage" && "${2:-}" == "buckets" && "${3:-}" == "describe" ]]; then
+  exit 1
+fi
+if [[ "${1:-}" == "iam" && "${2:-}" == "service-accounts" && "${3:-}" == "describe" ]]; then
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "${no_py_bin}/gcloud"
+  cat >"${no_py_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >> "${MOCK_NO_PY_CURL_LOG:?}"
+exit 1
+EOF
+  chmod +x "${no_py_bin}/curl"
+  : > "${no_py_gcloud_log}"
+  : > "${no_py_curl_log}"
+  rc=0
+  pf_out="$(env "PATH=${no_py_bin}" \
+    "MOCK_NO_PY_GCLOUD_LOG=${no_py_gcloud_log}" \
+    "MOCK_NO_PY_CURL_LOG=${no_py_curl_log}" \
+    bash "${SCRIPT_DIR}/setup-cd.sh" \
+      --project my-prod-proj \
+      --region us-central1 \
+      --shared-prefix cdha \
+      --hub-name cdha-gke-1 2>&1)" || rc=$?
+  assert_eq "preflight proceeds cleanly when python3 is absent from PATH" "${rc}" "0"
+  assert_contains "preflight warns explicitly when python3 is missing" "${pf_out}" "python3 not found on PATH; skipping JSON testIamPermissions preflight checks and proceeding."
+  assert_not_contains "preflight missing python3 does not emit misleading AR JSON parse warning" "${pf_out}" "Could not parse Artifact Registry"
+  assert_eq "preflight missing python3 skips testIamPermissions curl calls" "$(cat "${no_py_curl_log}")" ""
+  assert_contains "preflight missing python3 still inspects AR repository via gcloud" "$(cat "${no_py_gcloud_log}")" "gcloud artifacts repositories describe cdha-scion"
+  assert_contains "setup-cd.sh proceeds to enable APIs when python3 is absent" "$(cat "${no_py_gcloud_log}")" "gcloud services enable"
+
   # R4 end-to-end: editing hub.tfvars on an already-deployed tag triggers TF apply
   # with ZERO docker buildx rebuilds, updates tfvars_sha256, and re-converges on next run!
   local e2e_d="${TMP_ROOT}/r4-e2e"
