@@ -1552,6 +1552,14 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     return el.shadowRoot?.querySelector<HTMLElement>('.wide-center .terminals-menu') ?? null;
   }
 
+  async function openWideMenu(el: ScionHeader): Promise<void> {
+    if (!wideMenu(el)) {
+      wideChevron(el)?.click();
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+  }
+
   function menuRows(el: ScionHeader): Array<{
     value: string | null;
     name: string;
@@ -1600,25 +1608,30 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     ).toBeNull();
     expect(el.shadowRoot?.querySelector('.compact-mode-segments .terminals-dropdown')).toBeNull();
     expect(el.shadowRoot?.querySelector('.compact-mode-dropdown .terminals-dropdown')).toBeNull();
+    // Wide dropdown and menu stay unmounted until the user opens the chevron (keeps closed DOM lean).
+    expect(el.shadowRoot?.querySelector('.wide-center .terminals-dropdown')).toBeNull();
+    expect(wideMenu(el)).toBeNull();
   });
 
   it('gives the chevron a separate click target from the main Terminals button', async () => {
     const el = await mountHeader({ currentPath: '/projects/p1' });
 
     const chevron = wideChevron(el)!;
+    chevron.click();
+    await Promise.resolve();
+    await el.updateComplete;
     const dropdown = el.shadowRoot?.querySelector<HTMLElement>('.wide-center .terminals-dropdown');
     expect(dropdown).not.toBeNull();
-    chevron.click();
     dropdown?.dispatchEvent(new CustomEvent('sl-show'));
     await el.updateComplete;
 
     expect(navTargets).toEqual([]);
-    expect(chevron.getAttribute('aria-expanded')).toBe('true');
-    expect(chevron.getAttribute('aria-haspopup')).toBe('menu');
+    expect(wideChevron(el)?.getAttribute('aria-expanded')).toBe('true');
+    expect(wideChevron(el)?.getAttribute('aria-haspopup')).toBe('menu');
 
     dropdown?.dispatchEvent(new CustomEvent('sl-hide'));
     await el.updateComplete;
-    expect(chevron.getAttribute('aria-expanded')).toBe('false');
+    expect(wideChevron(el)?.getAttribute('aria-expanded')).toBe('false');
 
     const mainBtn = el.shadowRoot?.querySelector<HTMLButtonElement>(
       '.wide-center .mode-switch button[data-mode="terminals"]'
@@ -1630,6 +1643,7 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
 
   it('shows the disabled empty state when no terminal is open and there is no current agent', async () => {
     const el = await mountHeader({ currentPath: '/projects/p1' });
+    await openWideMenu(el);
 
     expect(menuRows(el)).toEqual([
       {
@@ -1668,6 +1682,7 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
         ],
         focusedAgentId: AGENT_1,
       });
+      await openWideMenu(el);
       await el.updateComplete;
 
       expect(menuRows(el)).toEqual([
@@ -1711,6 +1726,7 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
 
     // Agent detail route where current agent is NOT in the rail: listed first as "not open".
     const el = await mountHeader({ currentPath: `/agents/${AGENT_CUR}` });
+    await openWideMenu(el);
     expect(menuRows(el)).toEqual([
       {
         value: AGENT_CUR,
@@ -1778,6 +1794,7 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     // Chat agent DM (URL key fallback before chat page publishes, then with published name).
     const dmPath = `/chat/dm/${encodeURIComponent(`dm:agent:${AGENT_CUR}:user:u1`)}`;
     const el = await mountHeader({ currentPath: dmPath });
+    await openWideMenu(el);
     expect(menuRows(el)[0]).toMatchObject({
       value: AGENT_CUR,
       name: AGENT_CUR,
@@ -1825,6 +1842,7 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
       focusedAgentId: null,
     });
     const el = await mountHeader({ currentPath: '/projects/p1' });
+    await openWideMenu(el);
 
     const selectedEvents: string[] = [];
     const onDropdownSelect = (e: Event): void => {
@@ -1859,6 +1877,7 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
       focusedAgentId: null,
     });
     const el = await mountHeader({ currentPath: '/projects/p1' });
+    await openWideMenu(el);
     const chevron = wideChevron(el)!;
     const dropdown = el.shadowRoot?.querySelector('.wide-center .terminals-dropdown') as
       | (HTMLElement & {
@@ -1869,8 +1888,12 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
       | null;
     const items = Array.from(wideMenu(el)!.querySelectorAll<HTMLElement>('sl-menu-item'));
     expect(items).toHaveLength(2);
+    // No hardcoded tabindex="0" on items; Shoelace SlMenu manages roving tabindex.
+    expect(items[0].hasAttribute('tabindex')).toBe(false);
 
-    const setCurrentItem = vi.fn();
+    const setCurrentItem = vi.fn((item: HTMLElement) => {
+      for (const it of items) it.tabIndex = it === item ? 0 : -1;
+    });
     dropdown!.updateComplete = Promise.resolve(true);
     dropdown!.getMenu = (): { setCurrentItem: (item: HTMLElement) => void } => ({
       setCurrentItem,
@@ -1927,6 +1950,7 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
       '.wide-center .mode-switch button[data-mode="terminals"]'
     );
     expect(mainBtn?.getAttribute('aria-label')).toBe('Terminals (2)');
+    await openWideMenu(el);
     expect(menuRows(el).map((r) => r.name)).toEqual(['worker-alpha', 'worker-beta']);
 
     // Account teardown clears both the mounted header and future mounts.

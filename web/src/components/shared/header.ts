@@ -185,6 +185,9 @@ export class ScionHeader extends LitElement {
   private terminalFocusedAgentId: string | null = null;
 
   @state()
+  private terminalsMenuMounted = false;
+
+  @state()
   private terminalsMenuOpen = false;
 
   @state()
@@ -1172,54 +1175,62 @@ export class ScionHeader extends LitElement {
   }
 
   private renderTerminalsDropdown(isTerminal: boolean): TemplateResult {
-    const mod = this.terminalsMenuMod;
-    const setOpen = (open: boolean): void => {
-      this.terminalsMenuOpen = open;
-      this.syncTerminalsTriggerAria();
-    };
-    return html`<sl-dropdown
-      class="terminals-dropdown"
-      placement="bottom-end"
-      distance="4"
-      @sl-show=${(): void => setOpen(true)}
-      @sl-hide=${(): void => setOpen(false)}
+    const mod = this.terminalsMenuMounted ? this.terminalsMenuMod : null;
+    if (mod) {
+      return mod.renderMountedTerminalsDropdown({
+        isTerminal,
+        open: this.terminalsMenuOpen,
+        currentPath: this.currentPath,
+        userId: this.user?.id ?? '',
+        sessions: this.terminalSessions,
+        focusedAgentId: this.terminalFocusedAgentId,
+        root: this.shadowRoot,
+        setOpen: (open: boolean): void => {
+          this.terminalsMenuOpen = open;
+        },
+      });
+    }
+    return html`<button
+      type="button"
+      class="terminals-menu-trigger ${isTerminal ? 'active' : ''}"
+      title="Open terminals menu"
+      aria-label="Open terminals menu"
+      aria-haspopup="menu"
+      aria-expanded="false"
+      @click=${(): void => {
+        void this.openTerminalsMenu('none');
+      }}
+      @keydown=${(e: KeyboardEvent): void => {
+        const k = e.key;
+        const focus =
+          k === 'Enter' || k === ' ' || k === 'ArrowDown' || k === 'Home'
+            ? 'first'
+            : k === 'ArrowUp' || k === 'End'
+              ? 'last'
+              : null;
+        if (!focus) return;
+        e.preventDefault();
+        void this.openTerminalsMenu(focus);
+      }}
     >
-      <button
-        type="button"
-        slot="trigger"
-        class="terminals-menu-trigger ${isTerminal ? 'active' : ''}"
-        title="Open terminals menu"
-        aria-label="Open terminals menu"
-        aria-haspopup="menu"
-        aria-expanded=${this.terminalsMenuOpen ? 'true' : 'false'}
-        @keydown=${(e: KeyboardEvent): void => mod?.onTerminalsTriggerKey(e, this.shadowRoot)}
-      >
-        <sl-icon name="chevron-down" aria-hidden="true"></sl-icon>
-      </button>
-      <sl-menu
-        class="terminals-menu"
-        @sl-select=${(e: CustomEvent<{ item: HTMLElement }>): void =>
-          mod?.onTerminalsMenuSelect(e, setOpen)}
-      >
-        ${mod
-          ? mod.renderTerminalsMenuItems({
-              currentPath: this.currentPath,
-              userId: this.user?.id ?? '',
-              sessions: this.terminalSessions,
-              focusedAgentId: this.terminalFocusedAgentId,
-            })
-          : html`<sl-menu-item class="terminals-empty-item" disabled
-              >No open terminals</sl-menu-item
-            >`}
-      </sl-menu>
-    </sl-dropdown>`;
+      <sl-icon name="chevron-down" aria-hidden="true"></sl-icon>
+    </button>`;
   }
 
-  private readonly syncTerminalsTriggerAria = (): void => {
-    this.shadowRoot
-      ?.querySelector('.wide-center .terminals-menu-trigger')
-      ?.setAttribute('aria-haspopup', 'menu');
-  };
+  private async openTerminalsMenu(focusTarget: 'none' | 'first' | 'last'): Promise<void> {
+    const mod = this.terminalsMenuMod ?? (await preloadHeaderTerminalsMenu());
+    if (!this.isConnected) return;
+    this.terminalsMenuMod = mod;
+    mod.ensureTerminalsMenuStyles(this.shadowRoot);
+    this.unsubscribeTerminalsMenu ??= mod.subscribeCurrentAgentChanges(
+      this.handleCurrentAgentChanged
+    );
+    this.terminalsMenuMounted = true;
+    this.terminalsMenuOpen = true;
+    await this.updateComplete;
+    mod.syncTerminalsTriggerAria(this.shadowRoot);
+    mod.openMountedTerminalsDropdown(this.shadowRoot, focusTarget);
+  }
 
   // =========================================================================
   // Mode-selector dropdown -- narrow tier
@@ -1624,15 +1635,6 @@ export class ScionHeader extends LitElement {
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
     );
-    const attachMenu = (m: HeaderTerminalsMenuMod): void => {
-      if (!this.isConnected) return;
-      this.terminalsMenuMod = m;
-      this.unsubscribeTerminalsMenu ??= m.subscribeCurrentAgentChanges(
-        this.handleCurrentAgentChanged
-      );
-    };
-    if (cachedTerminalsMenuMod) attachMenu(cachedTerminalsMenuMod);
-    else void preloadHeaderTerminalsMenu().then(attachMenu);
     this.graphPaletteAvailable = isGraphPaletteAvailable();
     window.addEventListener(GRAPH_PALETTE_AVAILABILITY_EVENT, this.handleGraphPaletteAvailability);
     this.rememberModePath();
@@ -1676,7 +1678,6 @@ export class ScionHeader extends LitElement {
     // their shadow DOMs are ready, then hide their trigger buttons.
     requestAnimationFrame(() => {
       this.hideTrayTriggers();
-      this.syncTerminalsTriggerAria();
     });
   }
 
@@ -1686,8 +1687,9 @@ export class ScionHeader extends LitElement {
 
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) this.rememberModePath();
-    this.terminalsMenuMod?.ensureTerminalsMenuStyles(this.shadowRoot);
-    queueMicrotask(this.syncTerminalsTriggerAria);
+    if (this.terminalsMenuMounted) {
+      queueMicrotask(() => this.terminalsMenuMod?.syncTerminalsTriggerAria(this.shadowRoot));
+    }
   }
 
   /**

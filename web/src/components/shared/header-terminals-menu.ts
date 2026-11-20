@@ -210,11 +210,7 @@ export function renderTerminalsMenuItems(
   }
   return rows.map((row) => {
     const status = row.dot ? row.dot.meaning : 'not open';
-    return html`<sl-menu-item
-      value=${row.agentId}
-      tabindex="0"
-      aria-label=${`${row.name}, ${status}`}
-    >
+    return html`<sl-menu-item value=${row.agentId} aria-label=${`${row.name}, ${status}`}>
       <span
         slot="prefix"
         class="terminal-row-dot ${row.dot ? '' : 'placeholder'}"
@@ -251,6 +247,52 @@ function selectTerminalFromDropdown(agentId: string): void {
   );
 }
 
+type SlDropdownLike = HTMLElement & {
+  open?: boolean;
+  show?: () => Promise<void> | void;
+  updateComplete?: Promise<boolean>;
+  getMenu?: () => { setCurrentItem?: (item: HTMLElement) => void } | undefined;
+};
+
+function focusMenuItemAfterOpen(
+  dd: SlDropdownLike,
+  root: ShadowRoot | null,
+  which: 'first' | 'last'
+): void {
+  const focus = (): void => {
+    requestAnimationFrame(() => {
+      if (!dd.open) return;
+      const items = menuItems(root);
+      const target = which === 'last' ? items[items.length - 1] : items[0];
+      if (!target) return;
+      dd.getMenu?.()?.setCurrentItem?.(target);
+      target.focus();
+    });
+  };
+  if (dd.updateComplete) void dd.updateComplete.then(focus);
+  else focus();
+}
+
+/**
+ * Opens a newly-mounted `<sl-dropdown class="terminals-dropdown">` and, when
+ * opened via keyboard, moves roving focus to the first or last enabled item.
+ */
+export function openMountedTerminalsDropdown(
+  root: ShadowRoot | null,
+  focusTarget: 'none' | 'first' | 'last'
+): void {
+  const dd = root?.querySelector<SlDropdownLike>('.wide-center .terminals-dropdown');
+  if (!dd) return;
+  if (typeof dd.show === 'function') {
+    void Promise.resolve(dd.show()).then(() => {
+      if (focusTarget !== 'none') focusMenuItemAfterOpen(dd, root, focusTarget);
+    });
+  } else {
+    dd.open = true;
+    if (focusTarget !== 'none') focusMenuItemAfterOpen(dd, root, focusTarget);
+  }
+}
+
 /**
  * Shoelace `<sl-dropdown>` opens on `Enter`/`Space` via `handleTriggerClick()`
  * without focusing the first `<sl-menu-item>` (unlike `ArrowDown`/`Home`).
@@ -259,25 +301,58 @@ function selectTerminalFromDropdown(agentId: string): void {
  */
 export function onTerminalsTriggerKey(e: KeyboardEvent, root: ShadowRoot | null): void {
   if (e.key !== 'Enter' && e.key !== ' ') return;
-  const dd = (e.currentTarget as HTMLElement).closest('sl-dropdown') as
-    | (HTMLElement & {
-        open?: boolean;
-        updateComplete?: Promise<boolean>;
-        getMenu?: () => { setCurrentItem?: (item: HTMLElement) => void } | undefined;
-      })
-    | null;
+  const dd = (e.currentTarget as HTMLElement).closest('sl-dropdown') as SlDropdownLike | null;
   if (!dd || dd.open) return;
-  queueMicrotask(() => {
-    void dd.updateComplete?.then(() => {
-      requestAnimationFrame(() => {
-        if (!dd.open) return;
-        const first = menuItems(root)[0];
-        if (!first) return;
-        dd.getMenu?.()?.setCurrentItem?.(first);
-        first.focus();
-      });
-    });
-  });
+  queueMicrotask(() => focusMenuItemAfterOpen(dd, root, 'first'));
+}
+
+export interface TerminalsDropdownRenderOptions extends TerminalsMenuRenderContext {
+  readonly isTerminal: boolean;
+  readonly open: boolean;
+  readonly root: ShadowRoot | null;
+  readonly setOpen: (open: boolean) => void;
+}
+
+export function syncTerminalsTriggerAria(root: ShadowRoot | null): void {
+  root
+    ?.querySelector('.wide-center .terminals-menu-trigger')
+    ?.setAttribute('aria-haspopup', 'menu');
+}
+
+export function renderMountedTerminalsDropdown(
+  opts: TerminalsDropdownRenderOptions
+): TemplateResult {
+  const onOpenChange = (open: boolean): void => {
+    opts.setOpen(open);
+    syncTerminalsTriggerAria(opts.root);
+  };
+  return html`<sl-dropdown
+    class="terminals-dropdown"
+    placement="bottom-end"
+    distance="4"
+    @sl-show=${(): void => onOpenChange(true)}
+    @sl-hide=${(): void => onOpenChange(false)}
+  >
+    <button
+      type="button"
+      slot="trigger"
+      class="terminals-menu-trigger ${opts.isTerminal ? 'active' : ''}"
+      title="Open terminals menu"
+      aria-label="Open terminals menu"
+      aria-haspopup="menu"
+      aria-expanded=${opts.open ? 'true' : 'false'}
+      @keydown=${(e: KeyboardEvent): void => onTerminalsTriggerKey(e, opts.root)}
+    >
+      <sl-icon name="chevron-down" aria-hidden="true"></sl-icon>
+    </button>
+    <sl-menu
+      class="terminals-menu"
+      @sl-select=${(e: CustomEvent<{ item: HTMLElement }>): void =>
+        onTerminalsMenuSelect(e, onOpenChange)}
+    >
+      ${renderTerminalsMenuItems(opts)}
+    </sl-menu>
+  </sl-dropdown>`;
 }
 
 export function onTerminalsMenuSelect(

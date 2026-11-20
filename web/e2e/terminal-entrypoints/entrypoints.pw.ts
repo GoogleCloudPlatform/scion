@@ -507,14 +507,7 @@ test('wide header Terminals chevron lists current agent and rail sessions, opens
   );
   await expect(page).toHaveURL(`/agents/${agentB}`);
   // Wait until agent-detail loads beta-agent's name and publishes it.
-  await expect
-    .poll(async () => {
-      const items = page.locator(
-        'scion-app scion-header .wide-center .terminals-menu sl-menu-item'
-      );
-      return items.allTextContents();
-    })
-    .toEqual([expect.stringContaining('beta-agent'), expect.stringContaining('alpha-agent')]);
+  await expect(page.locator('scion-page-agent-detail')).toContainText('beta-agent');
 
   // Natural Tab order: Tab from main Terminals button lands on the chevron trigger.
   const appTerminalsBtn = page.locator(
@@ -564,7 +557,12 @@ test('wide header Terminals chevron lists current agent and rail sessions, opens
   await expect(page).toHaveURL(`/terminals/${agentB}`);
   await expect.poll(() => socket.attaches).toBe(2);
 
-  // Inside /terminals/<agentB>, the focused pane (beta-agent) is listed first and deduplicated.
+  // Inside /terminals/<agentB>, opening the workspace header chevron lists the focused pane
+  // (beta-agent) first and deduplicated.
+  const wsChevron = page
+    .locator('#terminal-workspace scion-header .wide-center')
+    .getByRole('button', { name: 'Open terminals menu' });
+  await wsChevron.click();
   const wsRows = page.locator(
     '#terminal-workspace scion-header .wide-center .terminals-menu sl-menu-item'
   );
@@ -572,6 +570,7 @@ test('wide header Terminals chevron lists current agent and rail sessions, opens
   await expect(wsRows.nth(0)).toContainText('beta-agent');
   await expect(wsRows.nth(0)).not.toContainText('not open');
   await expect(wsRows.nth(1)).toContainText('alpha-agent');
+  await page.keyboard.press('Escape');
 
   // 4. Medium (<=1100px) and narrow (<=768px) tiers hide the wide chevron.
   await page.setViewportSize({ width: 1000, height: 800 });
