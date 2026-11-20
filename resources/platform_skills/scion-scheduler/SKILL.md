@@ -187,6 +187,13 @@ a user, to read it back.
 
 ## Gotchas
 
+- **Target agent must exist at authoring:** Creating a message event or
+  schedule, resuming a paused message schedule, or making a dispatch-changing
+  `PATCH` update (`payload`, `cronExpr`, `timeZone`, `eventType`, or
+  re-enabling) requires a live, resolvable target agent (`404` if missing,
+  deleted, or unreadable). Re-target a schedule whose target was deleted before
+  resuming it. Metadata-only edits (such as renaming), pausing, and deleting
+  remain allowed regardless of target state.
 - **Cron defaults to UTC.** For a local time, pass `--time-zone` rather than
   converting to UTC; a fixed UTC time shifts by an hour against local time
   across DST changes. Zone prefixes in the expression (`CRON_TZ=`, `TZ=`) are

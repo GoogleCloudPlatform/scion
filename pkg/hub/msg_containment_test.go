@@ -1129,10 +1129,15 @@ func TestC1_ScheduledMessageCreate_HubScopedUATAdmittedAtRoute(t *testing.T) {
 	baseUser := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "token")
 	scopedIdent := scheduleTestUAT(t, baseUser, hubBoundary(), "scheduled_event:create", "agent:message")
 
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("uat-hub-target"), Name: "uat-hub-target", Slug: "uat-hub-target",
+		ProjectID: project.ID, Phase: "running", MessageMode: store.MessageModeProject,
+	}))
+
 	reqBody := CreateScheduledEventRequest{
 		EventType: "message",
 		FireIn:    "30m",
-		AgentName: "uat-hub-ghost-target",
+		AgentName: "uat-hub-target",
 		Message:   "hello",
 	}
 	bodyBytes, _ := json.Marshal(reqBody)
@@ -1264,8 +1269,13 @@ func TestC1_RecurringScheduleUpdate_CrossProjectDenied(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, crossAgent))
 
-	// First create a valid schedule in project A (target unresolvable at authoring
-	// time, which is allowed — fire-time will catch it).
+	localAgent := &store.Agent{
+		ID: tid("local-update-agent"), Name: "some-agent", Slug: "some-agent",
+		ProjectID: projectA.ID, Phase: "running", MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, localAgent))
+
+	// First create a valid schedule in project A targeting a live local agent.
 	createRec := doRequest(t, srv, "POST", "/api/v1/projects/"+projectA.ID+"/schedules",
 		CreateScheduleRequest{
 			Name:      "update-me",
@@ -1337,11 +1347,18 @@ func TestC1_RecurringScheduleUpdate_ExistingPayloadDenied(t *testing.T) {
 	}
 	require.NoError(t, s.CreateSchedule(ctx, schedule))
 
-	// Update only the name — the existing payload should be re-validated.
-	updateRec := doRequest(t, srv, "PATCH", "/api/v1/projects/"+projectA.ID+"/schedules/"+schedule.ID,
+	// Name-only PATCH does not bump the revision and stays accepted (ptone/scion#8588).
+	nameRec := doRequest(t, srv, "PATCH", "/api/v1/projects/"+projectA.ID+"/schedules/"+schedule.ID,
 		UpdateScheduleRequest{Name: "updated-name"})
+	assert.Equal(t, http.StatusOK, nameRec.Code,
+		"name-only update stays accepted: %s", nameRec.Body.String())
+
+	// Dispatch-changing PATCH (cron change) re-validates the existing
+	// cross-project payload and denies with 403.
+	updateRec := doRequest(t, srv, "PATCH", "/api/v1/projects/"+projectA.ID+"/schedules/"+schedule.ID,
+		UpdateScheduleRequest{CronExpr: "30 * * * *"})
 	assert.Equal(t, http.StatusForbidden, updateRec.Code,
-		"update must re-validate existing cross-project payload: %s", updateRec.Body.String())
+		"dispatch-changing update must re-validate existing cross-project payload: %s", updateRec.Body.String())
 }
 
 func TestC1_AuthorizeScheduledMessageFire_DirectUnit(t *testing.T) {

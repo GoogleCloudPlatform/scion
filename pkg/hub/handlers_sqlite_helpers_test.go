@@ -4561,6 +4561,7 @@ func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 	seedScheduleAuthorAgent(t, s, project.ID)
+	seedScheduleTargetAgents(t, s, project.ID)
 
 	return srv, s, project.ID
 }
@@ -4613,6 +4614,7 @@ func initScheduleTest(t *testing.T, srv *Server, s store.Store) (*Server, store.
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 	seedScheduleAuthorAgent(t, s, project.ID)
+	seedScheduleTargetAgents(t, s, project.ID)
 
 	return srv, s, project.ID
 }
@@ -6216,6 +6218,24 @@ func seedScheduleAuthorAgent(t *testing.T, s store.Store, projectID string) {
 		Phase:         "running",
 		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
 	}))
+}
+
+// seedScheduleTargetAgents creates the conventional target agents referenced by
+// schedule and scheduled-event handler tests so strict message target
+// resolution (ptone/scion#8588) resolves them cleanly.
+func seedScheduleTargetAgents(t *testing.T, s store.Store, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, slug := range []string{"all", "worker", "worker-1", "test-agent", "some-agent"} {
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+			ID:          tid("sched-target-" + projectID + "-" + slug),
+			Slug:        slug,
+			Name:        slug,
+			ProjectID:   projectID,
+			Phase:       "running",
+			MessageMode: store.MessageModeProject,
+		}))
+	}
 }
 
 func (f *federatedTestIdentity) ID() string          { return f.id }
