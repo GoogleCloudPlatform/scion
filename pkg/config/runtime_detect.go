@@ -16,11 +16,16 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"time"
 )
+
+// ErrNoLocalRuntime is matched (via errors.Is) by the error DetectLocalRuntime
+// returns when no supported container runtime is available on this machine.
+var ErrNoLocalRuntime = errors.New("no supported container runtime found")
 
 // runtimeCandidate defines a container runtime to probe during init.
 type runtimeCandidate struct {
@@ -76,9 +81,9 @@ func DetectLocalRuntime() (string, error) {
 	}
 
 	if hostGOOS() == "darwin" {
-		return "", fmt.Errorf("no supported container runtime found: install podman, docker, or container (Apple Virtualization)")
+		return "", fmt.Errorf("%w: install podman, docker, or container (Apple Virtualization)", ErrNoLocalRuntime)
 	}
-	return "", fmt.Errorf("no supported container runtime found: install podman or docker")
+	return "", fmt.Errorf("%w: install podman or docker", ErrNoLocalRuntime)
 }
 
 // DetectAllLocalRuntimes probes the system for all available container runtimes.
@@ -118,4 +123,11 @@ func OverrideRuntimeDetection(
 		runCheckFunc = origRC
 		resetDetectLocalRuntimeCache()
 	}
+}
+
+// ResetRuntimeDetectionCache clears the cached DetectLocalRuntime result used
+// by GetDefaultSettingsDataYAML so tests that mutate PATH do not leak cached
+// detection state across tests.
+func ResetRuntimeDetectionCache() {
+	resetDetectLocalRuntimeCache()
 }

@@ -15,12 +15,14 @@
 package cmd
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
-
-	"bufio"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
@@ -57,6 +59,7 @@ By default, it initializes in:
 With --global, it initializes in the user's home folder.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		embedOnlyHarnesses := harness.EmbedOnlyHarnesses()
+		remoteHub := isRemoteHubEndpoint(invocationHubEndpoint())
 
 		if globalInit || machineInit {
 			if !isJSONOutput() {
@@ -75,17 +78,18 @@ With --global, it initializes in the user's home folder.`,
 				}
 			}
 			var prompt func() string
-			if !isJSONOutput() {
+			if !isJSONOutput() && !remoteHub {
 				prompt = promptImageRegistry
 			}
 			registryValue, envRegistry := resolveInitImageRegistry(initImageRegistry, fileRegistry, config.ImageRegistryFromEnv(), prompt)
 
 			opts := config.InitMachineOpts{
-				ImageRegistry: registryValue,
-				Force:         machineInitForce,
+				SkipRuntimeCheck: remoteHub,
+				ImageRegistry:    registryValue,
+				Force:            machineInitForce,
 			}
 			if err := config.InitMachine(embedOnlyHarnesses, opts); err != nil {
-				return fmt.Errorf("failed to initialize global config: %w", err)
+				return fmt.Errorf("failed to initialize global config: %w", appendHubOnlyInitHint(err))
 			}
 
 			if isJSONOutput() {
@@ -106,7 +110,7 @@ With --global, it initializes in the user's home folder.`,
 				fmt.Printf("Image registry: %s\n", registryValue)
 			} else if envRegistry != "" {
 				fmt.Printf("Image registry: %s (from %s; not saved to settings)\n", config.RedactImageRegistry(envRegistry), config.EnvImageRegistry)
-			} else {
+			} else if !remoteHub {
 				fmt.Println()
 				fmt.Println("Note: image_registry is not configured. Agents cannot start without it.")
 				fmt.Println("  Build images first — see image-build/README.md")
@@ -122,10 +126,12 @@ With --global, it initializes in the user's home folder.`,
 			return nil
 		}
 
-		// Check if ~/.scion/ exists; error if not since global project is required
-		if globalDir, err := config.GetGlobalDir(); err == nil {
-			if _, err := os.Stat(globalDir); os.IsNotExist(err) {
-				return fmt.Errorf("global scion directory (~/.scion/) does not exist.\nRun 'scion init --machine' first to set up the global configuration")
+		if !remoteHub {
+			// Check if ~/.scion/ exists; error if not since global project is required
+			if globalDir, err := config.GetGlobalDir(); err == nil {
+				if _, err := os.Stat(globalDir); os.IsNotExist(err) {
+					return fmt.Errorf("global scion directory (~/.scion/) does not exist.\nRun 'scion init --machine' first to set up the global configuration.\n%s", hubOnlyInitHint)
+				}
 			}
 		}
 
@@ -166,8 +172,8 @@ With --global, it initializes in the user's home folder.`,
 		if !isJSONOutput() {
 			fmt.Println("Initializing scion project...")
 		}
-		if err := config.InitProject("", embedOnlyHarnesses); err != nil {
-			return fmt.Errorf("failed to initialize project: %w", err)
+		if err := config.InitProject("", embedOnlyHarnesses, config.InitProjectOpts{SkipRuntimeCheck: remoteHub}); err != nil {
+			return fmt.Errorf("failed to initialize project: %w", appendHubOnlyInitHint(err))
 		}
 
 		// Resolve the projectID and save it to settings.
@@ -219,6 +225,176 @@ With --global, it initializes in the user's home folder.`,
 
 		return nil
 	},
+}
+
+const hubOnlyInitHint = "To use a remote Hub without a local container runtime, register it with 'scion hub add <name> <url>' and select it with 'scion use --hub <name>' (or run 'scion use <project>' to work without initializing a directory)"
+
+// isRemoteHubEndpoint reports whether endpoint is a validated, genuinely remote
+// Hub URL for which 'scion init' and 'scion init --machine' may skip the local
+// ~/.scion/ prerequisite and local container-runtime detection.
+//
+// It uses a fail-closed allowlist: endpoint must pass config.ValidateHubURL and
+// config.CheckHubTransport, use https://, have no surrounding whitespace or
+// invalid port, and have a host that is either:
+//   - a multi-label RFC 1123 DNS name with an alphabetic final label (which
+//     excludes all decimal, hex, octal, short, dotted, and mixed-radix IPv4
+//     forms and all IPv6 forms), excluding reserved local domains (localhost,
+//     *.localhost, *.localdomain, *.local) and container host aliases; or
+//   - a globally routable IP literal parsed with net/netip (rejecting loopback,
+//     private, link-local, unspecified, multicast, 0.0.0.0/8, IPv4-mapped IPv6,
+//     zone-scoped IPv6, and other IANA special-purpose ranges).
+//
+// Classification is lexical only: it does not perform DNS lookups or read
+// /etc/hosts, so custom /etc/hosts aliases and DNS names that resolve to
+// loopback are out of scope.
+func isRemoteHubEndpoint(endpoint string) bool {
+	if endpoint == "" || endpoint != strings.TrimSpace(endpoint) {
+		return false
+	}
+	if config.ValidateHubURL(endpoint) != nil || config.CheckHubTransport(endpoint) != nil {
+		return false
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "https" || u.Opaque != "" || u.Host == "" || strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	if portStr := u.Port(); portStr != "" {
+		if !isAllASCIIDigits(portStr) || portStr[0] == '0' {
+			return false
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+	}
+	rawHost := u.Hostname()
+	if rawHost == "" || strings.Contains(rawHost, "%") {
+		return false
+	}
+	if strings.HasPrefix(u.Host, "[") {
+		addr, err := netip.ParseAddr(rawHost)
+		return err == nil && addr.Is6() && isGloballyRoutableIP(addr)
+	}
+	if addr, err := netip.ParseAddr(rawHost); err == nil {
+		return addr.Is4() && isGloballyRoutableIP(addr)
+	}
+	return isRemoteHubDNSName(rawHost)
+}
+
+// nonGlobalIPPrefixes lists IANA special-purpose IPv4 and IPv6 ranges that are
+// not globally routable beyond netip.Addr's built-in loopback, private,
+// link-local, unspecified, and multicast predicates.
+var nonGlobalIPPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),       // "this network" (RFC 1122; routes to loopback on Linux)
+	netip.MustParsePrefix("100.64.0.0/10"),   // shared address space / CGNAT (RFC 6598)
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments (RFC 6890)
+	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1 documentation (RFC 5737)
+	netip.MustParsePrefix("192.88.99.0/24"),  // deprecated 6to4 relay anycast (RFC 7526)
+	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarking (RFC 2544)
+	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2 documentation (RFC 5737)
+	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3 documentation (RFC 5737)
+	netip.MustParsePrefix("240.0.0.0/4"),     // reserved for future use + limited broadcast
+	netip.MustParsePrefix("::/96"),           // deprecated IPv4-compatible IPv6
+	netip.MustParsePrefix("::ffff:0:0/96"),   // IPv4-mapped IPv6
+	netip.MustParsePrefix("::ffff:0:0:0/96"), // IPv4-translated (SIIT, RFC 2765)
+	netip.MustParsePrefix("64:ff9b::/96"),    // NAT64 well-known prefix (RFC 6052)
+	netip.MustParsePrefix("64:ff9b:1::/48"),  // NAT64 local-use prefix (RFC 8215)
+	netip.MustParsePrefix("100::/64"),        // discard-only prefix (RFC 6666)
+	netip.MustParsePrefix("2001::/32"),       // Teredo tunneling (RFC 4380)
+	netip.MustParsePrefix("2001:2::/48"),     // benchmarking (RFC 5180)
+	netip.MustParsePrefix("2001:db8::/32"),   // documentation (RFC 3849)
+	netip.MustParsePrefix("2002::/16"),       // 6to4 tunneling (RFC 3056)
+	netip.MustParsePrefix("fec0::/10"),       // deprecated site-local (RFC 3879)
+}
+
+func isGloballyRoutableIP(addr netip.Addr) bool {
+	if !addr.IsValid() || addr.Zone() != "" || addr.Is4In6() {
+		return false
+	}
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() ||
+		addr.IsLoopback() || addr.IsUnspecified() ||
+		addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() ||
+		addr.IsInterfaceLocalMulticast() || addr.IsMulticast() {
+		return false
+	}
+	for _, p := range nonGlobalIPPrefixes {
+		if p.Contains(addr) {
+			return false
+		}
+	}
+	return true
+}
+
+func isRemoteHubDNSName(rawHost string) bool {
+	h := strings.TrimSuffix(rawHost, ".")
+	if h == "" || len(h) > 253 || strings.HasSuffix(h, ".") {
+		return false
+	}
+	if _, err := netip.ParseAddr(h); err == nil {
+		return false
+	}
+	labels := strings.Split(h, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || !isValidDNSLabel(label) {
+			return false
+		}
+	}
+	last := labels[len(labels)-1]
+	if len(last) < 2 || !isAllASCIILetters(last) {
+		return false
+	}
+	canon := strings.ToLower(h)
+	switch strings.ToLower(last) {
+	case "localhost", "localdomain", "local":
+		return false
+	}
+	return !config.IsAgentHostAliasHost(canon)
+}
+
+func isValidDNSLabel(label string) bool {
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		isAlphaNum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if i == 0 || i == len(label)-1 {
+			if !isAlphaNum {
+				return false
+			}
+			continue
+		}
+		if !isAlphaNum && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllASCIILetters(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+func isAllASCIIDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+func appendHubOnlyInitHint(err error) error {
+	if errors.Is(err, config.ErrNoLocalRuntime) {
+		return fmt.Errorf("%w\n%s", err, hubOnlyInitHint)
+	}
+	return err
 }
 
 // promptHubRegistration links the newly initialised project to the hub,

@@ -114,7 +114,7 @@ skip this if you installed with `brew`.
 - [Download and install Go](https://golang.org/doc/install)
 
 ### 2. Container Runtime
-Scion requires a container runtime to manage agents. You can use Docker, Podman, or the Apple Virtualization Framework (experimental).
+Workstation mode requires a local container runtime to manage agents on your machine (a client that only connects to a remote Hub does not — see [Connecting to a Hub](/scion/hosted/user/hosted-user/)). You can use Docker, Podman, or the Apple Virtualization Framework (experimental).
 
 When no runtime is configured, Scion picks one automatically. On macOS it prefers Podman, then Docker, then Apple `container`. On macOS, when Podman is selected or auto-detected but not on your `PATH`, Scion also looks for it in `/opt/podman/bin`, `/usr/local/bin` and `/usr/bin` when it uses the runtime. Detection during setup, including the onboarding wizard's, looks only on your `PATH` and checks that each runtime runs; on Linux it prefers Podman, then Docker. To use another installed runtime, select it in the onboarding wizard or in your profile's `runtime` setting.
 
@@ -259,7 +259,7 @@ scion init
 
 This creates a `.scion` marker file in the directory, linking it to structures inside the global folder created on the machine initialization.
 When a hub is running (next step), `init` also links the project to it; otherwise it prints a note
-and the project links on its first `scion` command.
+and the project links on its first `scion` command. If this machine only connects to a remote Hub and has no local container runtime, register and select the Hub first (`scion hub add <name> <url>` and `scion use --hub <name>`, or `scion use <project>` to work without initializing a directory); `scion init` then skips both `scion init --machine` and local container-runtime detection.
 
 ### 3. Start the local hub
 Agents run through a hub. Start the workstation server once:

@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -215,6 +216,9 @@ func TestDetectLocalRuntime_NoRuntime(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error when no runtime is available")
 			}
+			if !errors.Is(err, ErrNoLocalRuntime) {
+				t.Errorf("expected errors.Is(err, ErrNoLocalRuntime) to be true, got: %v", err)
+			}
 			if err.Error() != tt.want {
 				t.Errorf("unexpected error message for %s: %s", tt.goos, err.Error())
 			}
@@ -252,5 +256,32 @@ func TestDetectLocalRuntime_OnPathButNotFunctioning(t *testing.T) {
 	}
 	if result != "docker" {
 		t.Errorf("expected docker (podman not functioning), got %s", result)
+	}
+}
+
+func TestResetRuntimeDetectionCache(t *testing.T) {
+	mockRuntimeDetectionNone(t)
+
+	if _, err := detectLocalRuntimeOnce(); !errors.Is(err, ErrNoLocalRuntime) {
+		t.Fatalf("expected cached ErrNoLocalRuntime, got: %v", err)
+	}
+
+	lookPathFunc = func(file string) (string, error) {
+		if file == "docker" {
+			return "/usr/bin/docker", nil
+		}
+		return "", fmt.Errorf("not found: %s", file)
+	}
+	runCheckFunc = func(binary string, args []string) error { return nil }
+
+	// Without ResetRuntimeDetectionCache, detectLocalRuntimeOnce returns the cached error.
+	if _, err := detectLocalRuntimeOnce(); !errors.Is(err, ErrNoLocalRuntime) {
+		t.Fatalf("expected stale cached ErrNoLocalRuntime before reset, got: %v", err)
+	}
+
+	ResetRuntimeDetectionCache()
+	got, err := detectLocalRuntimeOnce()
+	if err != nil || got != "docker" {
+		t.Fatalf("expected fresh detection result docker after reset, got %q, %v", got, err)
 	}
 }
