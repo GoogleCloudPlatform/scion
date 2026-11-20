@@ -339,7 +339,7 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
     expect(get('--scion-action-hover-success-bg')).toEqual([34, 197, 94, 0.1]);
     expect(get('--scion-action-hover-primary-bg')).toEqual([59, 130, 246, 0.1]);
     // Explicit scoped light-mode contrast-improvement exceptions (PR 2c):
-    // unauthorized.ts .help-text moved from #64748b on #fef3c7 (4.35:1) to warning tokens (>= 4.5:1 AA).
+    // unauthorized.ts .help-text moved from #64748b on #fef3c7 (4.27:1) to warning tokens (>= 4.5:1 AA).
     expect(
       contrast(get('--scion-warning-text'), get('--scion-warning-bg')),
       'unauthorized .help-text warning-text on warning-bg (light AA improvement)'

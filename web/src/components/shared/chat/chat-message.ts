@@ -1493,7 +1493,7 @@ export class ScionChatMessage extends LitElement {
 
     /* @mention pills */
     .md-content .mention {
-      background: color-mix(in srgb, var(--scion-primary, #3b82f6) 15%, transparent);
+      background: color-mix(in srgb, var(--scion-primary, #3b82f6) 10%, transparent);
       color: var(--scion-primary, #60a5fa);
       padding: 0 4px;
       border-radius: 3px;
@@ -1505,7 +1505,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .md-content .mention.clickable:hover {
-      background: color-mix(in srgb, var(--scion-primary, #3b82f6) 25%, transparent);
+      background: color-mix(in srgb, var(--scion-primary, #3b82f6) 18%, transparent);
       text-decoration: underline;
     }
 

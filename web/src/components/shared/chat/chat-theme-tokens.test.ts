@@ -266,6 +266,36 @@ describe('chat banner and reply contrast', () => {
     expect(contrast(bg, get('--scion-text'))).toBeGreaterThanOrEqual(4.5);
     expect(bg).not.toEqual(resolver(light)('--scion-bg'));
   });
+
+  it('keeps @mention pill text AA-readable on agent and user bubbles in dark mode', () => {
+    const messageCss = readFileSync(resolve(__dirname, 'chat-message.ts'), 'utf8');
+    const mentionRule = rule(messageCss, '.md-content .mention');
+    const bgDecl = mentionRule.get('background') ?? '';
+    const fgName = token(mentionRule.get('color'));
+    const mix =
+      /^color-mix\(\s*in\s+srgb\s*,\s*var\(\s*(--[\w-]+)(?:\s*,[^)]+)?\)\s+([\d.]+)%\s*,\s*transparent\s*\)$/i.exec(
+        bgDecl
+      );
+    expect(mix, `expected color-mix() mention background, got: ${bgDecl}`).not.toBeNull();
+    const get = resolver(dark);
+    const base = get(mix![1]);
+    const mentionBg: [number, number, number, number] = [
+      base[0],
+      base[1],
+      base[2],
+      (base[3] * +mix![2]) / 100,
+    ];
+    const fg = get(fgName);
+
+    // Agent bubble ground (--scion-bg-subtle = #1e293b)
+    const agentPillBg = over(mentionBg, get('--scion-bg-subtle'));
+    expect(contrast(fg, agentPillBg), 'mention on dark agent bubble').toBeGreaterThanOrEqual(4.5);
+
+    // User bubble ground (--scion-primary-tint over --scion-bg = #0f172a)
+    const userBubbleBg = over(get('--scion-primary-tint'), get('--scion-bg'));
+    const userPillBg = over(mentionBg, userBubbleBg);
+    expect(contrast(fg, userPillBg), 'mention on dark user bubble').toBeGreaterThanOrEqual(4.5);
+  });
 });
 
 describe('callout and notice token contrast (#7221)', () => {
