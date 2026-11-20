@@ -90,10 +90,10 @@ type serverTriggerCore struct {
 }
 
 var (
-	_ trigger.Core                    = serverTriggerCore{}
-	_ trigger.FireAdmitter            = serverTriggerCore{}
-	_ trigger.SourceAuthorizer        = serverTriggerCore{}
-	_ trigger.UnmatchedCommandReplier = serverTriggerCore{}
+	_ trigger.Core               = serverTriggerCore{}
+	_ trigger.FireAdmitter       = serverTriggerCore{}
+	_ trigger.SourceAuthorizer   = serverTriggerCore{}
+	_ trigger.PostEvaluationHook = serverTriggerCore{}
 )
 
 func (c serverTriggerCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
@@ -104,11 +104,16 @@ func (c serverTriggerCore) Experiment(name string) bool {
 	return c.srv.experimentEnabled(name)
 }
 
-func (c serverTriggerCore) HandleUnmatchedGitHubCommand(ctx context.Context, ev *store.TriggerEvent, attempts int) {
-	if c.srv == nil {
+func (c serverTriggerCore) OnEventEvaluated(ctx context.Context, ev *store.TriggerEvent, outcome trigger.EventEvaluationOutcome, attempts int) {
+	if c.srv == nil || ev == nil {
 		return
 	}
-	c.srv.handleUnmatchedGitHubCommand(ctx, ev, attempts)
+	if outcome.AnyFireRecorded || outcome.MatchCount != 0 || outcome.FireCount != 0 {
+		return
+	}
+	if ev.SourceKind == store.TriggerSourceKindGitHub {
+		c.srv.handleUnmatchedGitHubCommand(ctx, ev, attempts)
+	}
 }
 
 // AuthorizeEventSource implements trigger.SourceAuthorizer for Stage 3 §4.2

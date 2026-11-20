@@ -139,12 +139,19 @@ type SourceAuthorizer interface {
 	AuthorizeEventSource(ctx context.Context, ev *store.TriggerEvent) (authorized bool, err error)
 }
 
-// UnmatchedCommandReplier is an optional interface Core implementations may
-// satisfy to post a Stage 3 §8.3 guidance comment when a GitHub event with
-// attributes.command matches no active trigger rule (and produced no
-// skipped/refused/failed fires).
-type UnmatchedCommandReplier interface {
-	HandleUnmatchedGitHubCommand(ctx context.Context, ev *store.TriggerEvent, attempts int)
+// EventEvaluationOutcome summarizes the candidate-loop outcome for an event
+// before it is marked processed.
+type EventEvaluationOutcome struct {
+	MatchCount      int
+	FireCount       int
+	AnyFireRecorded bool
+}
+
+// PostEvaluationHook is an optional interface Core implementations may satisfy
+// to observe an event once after all candidate rules have been evaluated (and
+// before the event is marked processed).
+type PostEvaluationHook interface {
+	OnEventEvaluated(ctx context.Context, ev *store.TriggerEvent, outcome EventEvaluationOutcome, attempts int)
 }
 
 // DispatcherConfig configures a trigger event Dispatcher.
@@ -830,14 +837,12 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	if ctx.Err() != nil {
 		return durablequeue.Result{Err: errors.New("trigger: event handler canceled")}
 	}
-	if !hadAnyFire && matchCount == 0 && fireCount == 0 &&
-		ev.SourceKind == store.TriggerSourceKindGitHub &&
-		strings.TrimSpace(ev.Attributes["command"]) != "" &&
-		!strings.EqualFold(strings.TrimSpace(ev.Attributes["sender_type"]), "Bot") &&
-		ev.Attributes["stale"] != "true" {
-		if replier, ok := d.core.(UnmatchedCommandReplier); ok {
-			replier.HandleUnmatchedGitHubCommand(ctx, ev, item.Attempts)
-		}
+	if hook, ok := d.core.(PostEvaluationHook); ok {
+		hook.OnEventEvaluated(ctx, ev, EventEvaluationOutcome{
+			MatchCount:      matchCount,
+			FireCount:       fireCount,
+			AnyFireRecorded: hadAnyFire,
+		}, item.Attempts)
 	}
 	if err := d.store.MarkTriggerEventProcessed(ctx, ev.ID, d.now().UTC(), matchCount, fireCount); err != nil &&
 		!errors.Is(err, store.ErrNotFound) {
