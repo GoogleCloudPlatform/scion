@@ -238,3 +238,44 @@ func TestLevelFilterSubsystemScanOnlyWithComponents(t *testing.T) {
 		assertLines(t, buf.String(), []string{"inline-info", "plain-info", "with-info"}, []string{"inline-info", "with-info"})
 	})
 }
+
+func TestUnwrapLevelFilter(t *testing.T) {
+	if UnwrapLevelFilter(nil) != nil {
+		t.Fatalf("UnwrapLevelFilter(nil) != nil")
+	}
+
+	var plainBuf bytes.Buffer
+	plain := slog.NewJSONHandler(&plainBuf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	if got := UnwrapLevelFilter(plain); got != plain {
+		t.Fatalf("UnwrapLevelFilter(plain) = %T, want original handler", got)
+	}
+
+	resetLevelState(t)
+	t.Setenv(loglevel.EnvLogLevel, "warn")
+
+	var buf bytes.Buffer
+	inner := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: passAllLevel})
+	filtered := newLevelFilter(inner)
+	if got := UnwrapLevelFilter(filtered); got != inner {
+		t.Fatalf("UnwrapLevelFilter(filtered) = %T, want inner", got)
+	}
+
+	// Filtered logger suppresses info at SCION_LOG_LEVEL=warn.
+	derived := slog.New(filtered).With("component", "hub").WithGroup("audit")
+	derived.Info("suppressed-info", "k", "v")
+	if strings.Contains(buf.String(), "suppressed-info") {
+		t.Fatalf("filtered logger emitted info under SCION_LOG_LEVEL=warn: %s", buf.String())
+	}
+
+	// Unwrapping the derived handler bypasses the level filter while keeping
+	// its attrs and groups.
+	unwrapped := slog.New(UnwrapLevelFilter(derived.Handler()))
+	unwrapped.Info("audit-info", "k", "v")
+	out := buf.String()
+	if !strings.Contains(out, `"msg":"audit-info"`) {
+		t.Fatalf("unwrapped handler dropped info under SCION_LOG_LEVEL=warn: %s", out)
+	}
+	if !strings.Contains(out, `"component":"hub"`) || !strings.Contains(out, `"audit":{"k":"v"}`) {
+		t.Fatalf("unwrapped handler lost attrs or group: %s", out)
+	}
+}

@@ -36,6 +36,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -257,6 +259,72 @@ func TestInitBoundaryServices_DeleteSinkUsesSharedAsyncWriter(t *testing.T) {
 	p6RequireUUID(t, result.AuditID)
 	assert.Equal(t, enqueuedBefore+1, srv.auditWriter.Snapshot().Enqueued,
 		"the committed delete enqueues exactly one record on the shared async writer")
+}
+
+func TestInitBoundaryServices_DeleteAuditEmittedAboveInfoLogLevel(t *testing.T) {
+	prevDefault := slog.Default()
+	t.Cleanup(func() {
+		slog.SetDefault(prevDefault)
+		loglevel.Reset(true)
+	})
+	t.Setenv(loglevel.EnvLogLevel, "warn")
+	t.Setenv(loglevel.EnvDebug, "")
+	loglevel.Reset(true)
+
+	capture := &capturingHandler{}
+	logging.SetupWithOTel("hub", "", false, false, nil, capture)
+	require.False(t, slog.Default().Enabled(context.Background(), slog.LevelInfo),
+		"process default logger must suppress info logs at SCION_LOG_LEVEL=warn")
+
+	srv, s := b7TestServer(t)
+	gs := srv.governanceService
+	require.NotNil(t, gs)
+	require.NotNil(t, srv.auditWriter)
+
+	targetID := pvSeedUser(t, s, "p6-warn-level-target")
+	created, err := commitAuditedConstraint(t, p6OperationContext(t, "request-audit-create"), gs, srv.previewService, &store.AccessConstraint{
+		Name:                 "p6-warn-level-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   &targetID,
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read"},
+		Purpose:              "p6 warn level audit test",
+		CreatedBy:            DevUserID,
+	}, pvTestActor(DevUserID))
+	require.NoError(t, err)
+
+	enqueuedBefore := srv.auditWriter.Snapshot().Enqueued
+	result, err := p6CommitDelete(t, p6OperationContext(t, "request-warn-delete"), gs, srv.previewService, created.Constraint, pvTestActor(DevUserID))
+	require.NoError(t, err)
+	p6RequireUUID(t, result.AuditID)
+	assert.Equal(t, enqueuedBefore+1, srv.auditWriter.Snapshot().Enqueued,
+		"boundary delete must enqueue an audit record even when SCION_LOG_LEVEL=warn")
+
+	require.NoError(t, srv.auditWriter.Close(context.Background()))
+
+	var foundCreate, foundDelete bool
+	for _, rec := range capture.all() {
+		if rec.Message != auditevent.EventName {
+			continue
+		}
+		attrs := recordAttrs(rec)
+		if attrs["family"] != "access_boundary" {
+			continue
+		}
+		switch attrs["action"] {
+		case "create":
+			if attrs["event_id"] == created.AuditID {
+				foundCreate = true
+			}
+		case "delete":
+			if attrs["event_id"] == result.AuditID {
+				foundDelete = true
+			}
+		}
+	}
+	assert.True(t, foundCreate, "access_boundary/create audit event must be emitted when SCION_LOG_LEVEL=warn")
+	assert.True(t, foundDelete, "access_boundary/delete audit event must be emitted when SCION_LOG_LEVEL=warn")
 }
 
 // ---------------------------------------------------------------------------

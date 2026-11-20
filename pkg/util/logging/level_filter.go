@@ -55,6 +55,25 @@ func newLevelFilter(h slog.Handler) slog.Handler {
 	return &levelFilter{inner: h}
 }
 
+// UnwrapLevelFilter removes any process-wide levelFilter installed by Setup or
+// SetupWithOTel, returning the underlying handler with its configured
+// attributes and groups preserved. Handlers that are not wrapped in a
+// levelFilter (including nil) are returned unchanged.
+//
+// Structured audit trails that must not be suppressed when SCION_LOG_LEVEL or
+// server.log_level is raised above info (matching request and message logs)
+// use this to bypass the shared level filter while keeping the same output
+// sinks.
+func UnwrapLevelFilter(h slog.Handler) slog.Handler {
+	for {
+		lf, ok := h.(*levelFilter)
+		if !ok {
+			return h
+		}
+		h = lf.inner
+	}
+}
+
 // Enabled implements slog.Handler.
 func (h *levelFilter) Enabled(ctx context.Context, level slog.Level) bool {
 	var floor slog.Level

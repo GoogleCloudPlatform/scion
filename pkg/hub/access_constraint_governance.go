@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // ---------------------------------------------------------------------------
@@ -49,11 +50,11 @@ type GovernanceService struct {
 	// event after a delete commits. initBoundaryServices sets it to a sink
 	// over the server's shared asynchronous audit writer. Records through it
 	// are async and best-effort, not persisted: queue-full, oversize and
-	// closed-writer rejections are counted, but a record is silently not
-	// emitted (and not counted) when the process log level is above info.
-	// When nil (test constructions), DELETE falls back to auditSink. CREATE
-	// always uses auditSink; UPDATE and recovery write history only and emit
-	// nothing.
+	// closed-writer rejections are counted, and the shared audit writer
+	// bypasses the process-wide level filter so raising SCION_LOG_LEVEL
+	// above info does not drop delete events. When nil (test constructions),
+	// DELETE falls back to auditSink. CREATE always uses auditSink; UPDATE
+	// and recovery write history only and emit nothing.
 	deleteAuditSink auditevent.Sink
 
 	// eventBus publishes invalidation events after successful mutations.
@@ -69,7 +70,7 @@ func NewGovernanceService(s store.Store, preview *PreviewService, authz *AuthzSe
 	if logger == nil {
 		logger = slog.Default()
 	}
-	auditSink, err := auditevent.NewSlogSink(logger)
+	auditSink, err := auditevent.NewSlogSink(slog.New(logging.UnwrapLevelFilter(logger.Handler())))
 	if err != nil {
 		panic(fmt.Sprintf("initialize access-boundary audit sink: %v", err))
 	}
@@ -198,9 +199,8 @@ type CommitResult struct {
 	// not a persisted record and not retrievable through any API, because the
 	// constraint's history is deleted with it. A non-empty delete AuditID
 	// does not guarantee the event was written: a dispatch failure is logged
-	// with this event_id, and the event is silently dropped when the process
-	// log level is above info. For a delete it is empty if the event could
-	// not be built or no sink is configured.
+	// with this event_id. For a delete it is empty if the event could not be
+	// built or no sink is configured.
 	AuditID string
 }
 
