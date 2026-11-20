@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -2177,6 +2178,14 @@ func (s *Server) createAgentInProject(
 	if req.Config != nil && req.Config.ThinkingLevel != nil {
 		if tl := *req.Config.ThinkingLevel; tl < 0 || tl > 100 {
 			BadRequest(w, "thinking_level must be between 0 and 100")
+			return
+		}
+	}
+	// On a hosted hub, the requester's config may not name host
+	// resources (hostedguard); refused before anything is stored.
+	if !s.workstation && req.Config != nil {
+		if err := hostedConfigRefusal(req.Config); err != nil {
+			writeRuntimeTargetRefusal(w, err)
 			return
 		}
 	}
@@ -6375,6 +6384,9 @@ func relayBrokerRefusalWithDefaultTier(w http.ResponseWriter, err error, tier *d
 	code := se.brokerErrorCode()
 	switch {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
+	case se.StatusCode == http.StatusBadRequest && code == hostedguard.ErrorCode:
+		// A hosted broker refused member-written config. The broker's
+		// text names the field and entry only, never a host path or value.
 	case se.StatusCode == http.StatusPreconditionFailed && code == api.BrokerErrCodeUnsupportedCapability:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == storageMigrationRequiredErrorCode:
