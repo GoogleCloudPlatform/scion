@@ -855,7 +855,7 @@ func TestAsyncStart_DeleteWonDuringAcceptedStart(t *testing.T) {
 			return rec.Code, rec.Body.String()
 		}},
 		{"create endpoint resume", state.PhaseSuspended, func(t *testing.T, f *reconcileFixture, a *store.Agent) (int, string) {
-			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: a.Slug, ProjectID: f.projectID, AcceptAsyncLaunch: true})
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: a.Slug, ProjectID: f.projectID, Resume: true, AcceptAsyncLaunch: true})
 			return rec.Code, rec.Body.String()
 		}},
 	}

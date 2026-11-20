@@ -1293,22 +1293,22 @@ func isResumableExistingAgent(a *store.Agent, rest string) bool {
 
 // writeAgentExistsResumable writes a 409 agent_exists_resumable response naming
 // the agent's phase and hinting scion resume, delete, or using another name.
-func writeAgentExistsResumable(w http.ResponseWriter, a *store.Agent, rest string) {
+func writeAgentExistsResumable(w http.ResponseWriter, slug, storedPhase, rest string, idleSuspendClaimActive bool) {
 	phaseDesc := rest
 	details := map[string]interface{}{
-		"agent": a.Slug,
-		"phase": a.Phase,
+		"agent": slug,
+		"phase": storedPhase,
 	}
 	switch {
-	case a.IdleSuspendClaimActive && rest != string(state.PhaseSuspended):
-		phaseDesc = fmt.Sprintf("%s (suspending)", a.Phase)
+	case idleSuspendClaimActive && rest != string(state.PhaseSuspended):
+		phaseDesc = fmt.Sprintf("%s (suspending)", storedPhase)
 		details["restingPhase"] = string(state.PhaseSuspended)
-	case rest != a.Phase && a.Phase != "":
-		phaseDesc = fmt.Sprintf("%s, resumes as %s", a.Phase, rest)
+	case rest != storedPhase && storedPhase != "":
+		phaseDesc = fmt.Sprintf("%s, resumes as %s", storedPhase, rest)
 		details["resumePhase"] = rest
 	}
 	msg := fmt.Sprintf("agent %q already exists (phase: %s); run 'scion resume %s' to resume it, delete it, or use another name",
-		a.Slug, phaseDesc, a.Slug)
+		slug, phaseDesc, slug)
 	writeError(w, http.StatusConflict, ErrCodeAgentExistsResumable, msg, details)
 }
 
@@ -1538,7 +1538,7 @@ func (s *Server) handleExistingAgent(
 	// idle-suspend claim) are never reused implicitly: require req.Resume and
 	// refuse with 409 agent_exists_resumable plus a hint.
 	if !req.Resume && isResumableExistingAgent(existingAgent, rest) {
-		writeAgentExistsResumable(w, existingAgent, rest)
+		writeAgentExistsResumable(w, existingAgent.Slug, storedPhase, rest, existingAgent.IdleSuspendClaimActive)
 		return existingAgentErrored
 	}
 
