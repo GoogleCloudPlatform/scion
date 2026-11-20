@@ -721,14 +721,7 @@ func (s *Server) resolveMemberPrincipal(ctx context.Context, principalType, prin
 		}
 		return u.ID, nil
 	case store.RoleBindingPrincipalGroup:
-		g, err := s.store.GetGroup(ctx, principalID)
-		if err == nil {
-			return g.ID, nil
-		}
-		if !errors.Is(err, store.ErrNotFound) {
-			return "", err
-		}
-		g, err = s.store.GetGroupBySlug(ctx, principalID)
+		g, err := s.resolveVisibleGroupByIDOrSlug(ctx, GetIdentityFromContext(ctx), principalID)
 		if err != nil {
 			return "", err
 		}
