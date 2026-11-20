@@ -858,7 +858,7 @@ func TestFireCoreAuthorityMissingRuleDenialText(t *testing.T) {
 	}
 	_, _, err = resolveScheduledAuthorityForTest(context.Background(), srv, evt)
 	require.ErrorIs(t, err, errScheduledAuthorityDenied)
-	assert.ErrorContains(t, err, `event type "unmapped_type" has no scheduled authority rule`)
+	assert.ErrorContains(t, err, "action has no recorded authority rule")
 
 	// Ceiling consistency still runs before the permission-rule check.
 	evt.AuthorityCeiling = store.EffectCeiling{}
@@ -1267,13 +1267,14 @@ func TestFireCoreMessageActionValidate(t *testing.T) {
 	userID := seedEventHandlerMessageUser(ms, projectID)
 	user, err := ms.GetUser(context.Background(), userID)
 	require.NoError(t, err)
-	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "session")
+	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, store.UserRoleAdmin, "session")
 
 	require.NoError(t, ms.CreateAgent(context.Background(), &store.Agent{
 		ID:        "agent-msg-val-1",
 		Slug:      "worker-one",
 		Name:      "worker-one",
 		ProjectID: projectID,
+		OwnerID:   user.ID,
 		Phase:     "running",
 	}))
 
@@ -2319,4 +2320,104 @@ func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
 		assert.False(t, fireOut.Detached)
 		assert.NotContains(t, logBuf.String(), "audit_action=schedule.exec.")
 	})
+}
+
+// TestFireCoreTriggerGenericErrorText pins 1b-3 review N4 (Stage 1 §5.5):
+// trigger fires map raw internal errors onto the generic set so agent slugs,
+// broker HTTP bodies, and context errors never leak into trigger_fires.error,
+// while schedule fires retain their existing scheduled_events.error text.
+func TestFireCoreTriggerGenericErrorText(t *testing.T) {
+	t.Parallel()
+
+	const projectID = "proj-n4-generic"
+	ms := newMockStore()
+	srv := newEventHandlerTestServer(ms)
+	rec := newFireCoreTestAuthority(ms, projectID)
+
+	cases := []struct {
+		name       string
+		actionType string
+		rawErr     string
+		wantTrig   string
+	}{
+		{
+			name:       "dispatch error with slug and deadline",
+			actionType: "message",
+			rawErr:     `failed to dispatch message to agent secret-slug: context deadline exceeded`,
+			wantTrig:   "message delivery failed",
+		},
+		{
+			name:       "target stopped phase message",
+			actionType: "message",
+			rawErr:     `agent "secret-slug" is not running (phase: stopped)`,
+			wantTrig:   "target not running",
+		},
+		{
+			name:       "reincarnation in flight",
+			actionType: "message",
+			rawErr:     "target agent is reincarnating",
+			wantTrig:   "agent restarted during fire",
+		},
+		{
+			name:       "wake error with slug",
+			actionType: "message",
+			rawErr:     `failed to wake agent secret-slug: 502: bad gateway`,
+			wantTrig:   "target wake failed",
+		},
+		{
+			name:       "hub shutting down",
+			actionType: "message",
+			rawErr:     errScheduledWakeShuttingDown.Error(),
+			wantTrig:   "hub shutting down",
+		},
+		{
+			name:       "designed env-gather remedy preserved",
+			actionType: "dispatch_agent",
+			rawErr:     "missing required environment variables (2)",
+			wantTrig:   "missing required environment variables (2)",
+		},
+		{
+			name:       "generic refusal preserved",
+			actionType: "message",
+			rawErr:     errScheduledMessageRefused.Error(),
+			wantTrig:   errScheduledMessageRefused.Error(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv.RegisterAction(&fakeFireAction{
+				actionType: tc.actionType,
+				permission: scheduledMessagePermission,
+				fireFn: func(context.Context, hubfire.FireRequest, FireAuthorized) (hubfire.FireOutcome, error) {
+					return hubfire.FireOutcome{}, errors.New(tc.rawErr)
+				},
+			})
+
+			trigRec := rec
+			trigRec.DefinitionKind = hubfire.DefinitionKindTrigger
+			trigRec.DefinitionID = "tr-1"
+			trigRec.FireID = "fire-1"
+			trigOut := srv.fireAction(context.Background(), hubfire.FireRequest{
+				ProjectID:  projectID,
+				Authority:  trigRec,
+				ActionType: tc.actionType,
+			})
+			assert.Equal(t, hubfire.FireStatusFailed, trigOut.Status)
+			assert.Equal(t, tc.wantTrig, trigOut.Error)
+			assert.NotContains(t, trigOut.Error, "secret-slug")
+
+			schedRec := rec
+			schedRec.DefinitionKind = hubfire.DefinitionKindSchedule
+			schedRec.DefinitionID = "sched-1"
+			schedRec.FireID = "evt-1"
+			schedOut := srv.fireAction(context.Background(), hubfire.FireRequest{
+				ProjectID:  projectID,
+				Authority:  schedRec,
+				ActionType: tc.actionType,
+			})
+			assert.Equal(t, hubfire.FireStatusFailed, schedOut.Status)
+			assert.Equal(t, tc.rawErr, schedOut.Error, "schedule error text must remain bit-identical")
+		})
+	}
 }

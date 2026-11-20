@@ -1387,7 +1387,7 @@ func TestTriggerDispatchE2E_ConduitDeliverAwaitingSessionSkipsHoldAndFailsLoud(t
 	})
 	fireNonInt := fireTriggerOnce(t, "non-interrupt", false)
 	assert.Equal(t, store.TriggerFireStatusFailed, fireNonInt.Status)
-	assert.Contains(t, fireNonInt.Error, agent.ErrAwaitingSession.Error())
+	assert.Equal(t, "message delivery failed", fireNonInt.Error)
 
 	// Confirm zero store.Message rows were persisted for either trigger fire.
 	afterMsgs, err := f.store.ListMessages(ctx, store.MessageFilter{AgentID: f.launched.ID}, store.ListOptions{Limit: 20})
