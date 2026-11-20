@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base32"
@@ -126,11 +127,16 @@ func (a *dispatchAgentAction) Detaches(_ hubfire.FireRequest) bool {
 // at authoring time (Stage 2 design §5.1). Schedule authoring handlers continue
 // authorizing through authorizeScheduledDispatchAgentAuthoring.
 func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, projectID string, rawPayload string) (string, error) {
+	normalized, _, _, err := a.validateWithRole(ctx, caller, projectID, rawPayload)
+	return normalized, err
+}
+
+func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Identity, projectID string, rawPayload string) (string, AgentRole, bool, error) {
 	if a == nil || a.srv == nil {
-		return "", errors.New("dispatch_agent action: server not configured")
+		return "", "", false, errors.New("dispatch_agent action: server not configured")
 	}
 	if caller == nil {
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusUnauthorized,
 			code:    ErrCodeUnauthorized,
 			message: "authentication required",
@@ -139,7 +145,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 
 	var payload DispatchAgentEventPayload
 	if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: "invalid dispatch_agent payload",
@@ -148,7 +154,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 
 	// Template is literal only (S1 §5.8 rule 1, S2 §5.1).
 	if strings.Contains(payload.Template, "${") {
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_template",
 			message: "template must be a literal template name and cannot contain template placeholders",
@@ -160,7 +166,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 		}
 	}
 	if !templateRefAllowed(payload.Template) {
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: templateRefRefusal,
@@ -169,7 +175,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 
 	// Task <= 16 KiB before rendering (§5.1).
 	if len(payload.Task) > triggertemplate.MaxTaskBytes {
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: fmt.Sprintf("action.task exceeds maximum length of %d bytes", triggertemplate.MaxTaskBytes),
@@ -180,7 +186,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 	switch payload.NameConflict {
 	case "", DispatchAgentNameConflictSuffix, DispatchAgentNameConflictSkip:
 	default:
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
 			message: fmt.Sprintf("unsupported nameConflict %q (supported: suffix, skip)", payload.NameConflict),
@@ -190,7 +196,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 
 	// Ephemeral capability gate (§5.5).
 	if payload.Ephemeral {
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "ephemeral_unsupported",
 			message: "ephemeral agents are not yet supported",
@@ -202,13 +208,13 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 	case "", DispatchAgentGitHubTokenUserPreferred:
 		payload.GithubToken = DispatchAgentGitHubTokenUserPreferred
 	case DispatchAgentGitHubTokenInstallation:
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "github_token_unsupported",
 			message: "githubToken \"installation\" is not yet supported",
 		}
 	default:
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
 			message: fmt.Sprintf("unsupported githubToken %q (supported: user_preferred)", payload.GithubToken),
@@ -218,7 +224,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 
 	// AgentRole syntax validation (§5.1, rev 2.2).
 	if payload.AgentRole != "" && !ValidAgentRole(AgentRole(payload.AgentRole)) {
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
 			message: fmt.Sprintf("invalid agentRole %q", payload.AgentRole),
@@ -226,7 +232,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 		}
 	}
 	if payload.NoAuth && payload.AgentRole != "" && AgentRole(payload.AgentRole) != AgentRoleNone {
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
 			message: fmt.Sprintf("cannot request agentRole %q together with noAuth", payload.AgentRole),
@@ -238,7 +244,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 	if len(payload.UntrustedVars) > 0 {
 		deduped, err := validateUntrustedVars(payload.UntrustedVars)
 		if err != nil {
-			return "", err
+			return "", "", false, err
 		}
 		payload.UntrustedVars = deduped
 	}
@@ -246,7 +252,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 	// Validate labels: reserved keys, count <= 16 including 3 hub labels,
 	// key syntax via pkg/labels, and values as label-slot templates (§5.1, §5.4).
 	if len(payload.Labels)+hubAppliedTriggerLabelCount > labels.MaxLabels {
-		return "", &dispatchAgentValidationError{
+		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
 			message: fmt.Sprintf("too many labels: at most %d author labels allowed (%d reserved for hub provenance)", labels.MaxLabels-hubAppliedTriggerLabelCount, hubAppliedTriggerLabelCount),
@@ -259,7 +265,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 	slices.Sort(labelKeys)
 	for _, k := range labelKeys {
 		if reservedTriggerLabelKeys[k] {
-			return "", &dispatchAgentValidationError{
+			return "", "", false, &dispatchAgentValidationError{
 				status:  http.StatusBadRequest,
 				code:    "reserved_label_key",
 				message: fmt.Sprintf("label key %q is reserved for hub trigger provenance", k),
@@ -267,32 +273,32 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 			}
 		}
 		if err := labels.Validate(map[string]string{k: "x"}); err != nil {
-			return "", &dispatchAgentValidationError{
+			return "", "", false, &dispatchAgentValidationError{
 				status:  http.StatusBadRequest,
 				code:    ErrCodeValidationError,
 				message: fmt.Sprintf("invalid label key %q: %v", k, err),
 			}
 		}
 		if _, err := validateTemplateSlot(payload.Labels[k], triggertemplate.SlotLabel, payload.UntrustedVars); err != nil {
-			return "", err
+			return "", "", false, err
 		}
 	}
 
 	// Parse and check untrustedVars coverage for all template slots (§5.1, §5.2).
 	if _, err := validateTemplateSlot(payload.Task, triggertemplate.SlotTask, payload.UntrustedVars); err != nil {
-		return "", err
+		return "", "", false, err
 	}
 	if payload.AgentName != "" {
 		nameTmpl, err := validateTemplateSlot(payload.AgentName, triggertemplate.SlotName, payload.UntrustedVars)
 		if err != nil {
-			return "", err
+			return "", "", false, err
 		}
 		// When agentName is a literal (no placeholders), run the same create-path
 		// name checks at authoring so reserved or non-canonical names fail early.
 		if len(nameTmpl.Placeholders()) == 0 {
 			rendered, _, rErr := nameTmpl.Render(nil, nil)
 			if rErr != nil {
-				return "", &dispatchAgentValidationError{
+				return "", "", false, &dispatchAgentValidationError{
 					status:  http.StatusBadRequest,
 					code:    "invalid_value",
 					message: fmt.Sprintf("invalid literal agentName: %v", rErr),
@@ -300,7 +306,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 				}
 			}
 			if _, dErr := api.ValidateDisplayName(rendered); dErr != nil {
-				return "", &dispatchAgentValidationError{
+				return "", "", false, &dispatchAgentValidationError{
 					status:  http.StatusBadRequest,
 					code:    "invalid_value",
 					message: fmt.Sprintf("invalid literal agentName: %v", dErr),
@@ -309,7 +315,7 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 			}
 			slug, aErr := api.ValidateAgentName(rendered)
 			if aErr != nil || slug != rendered {
-				return "", &dispatchAgentValidationError{
+				return "", "", false, &dispatchAgentValidationError{
 					status:  http.StatusBadRequest,
 					code:    "invalid_value",
 					message: "invalid literal agentName: must already be in canonical slug form",
@@ -320,25 +326,26 @@ func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, pro
 	}
 	if payload.Branch != "" {
 		if _, err := validateTemplateSlot(payload.Branch, triggertemplate.SlotBranch, payload.UntrustedVars); err != nil {
-			return "", err
+			return "", "", false, err
 		}
 	}
 	if payload.ReuseMessage != "" {
 		if _, err := validateTemplateSlot(payload.ReuseMessage, triggertemplate.SlotMessage, payload.UntrustedVars); err != nil {
-			return "", err
+			return "", "", false, err
 		}
 	}
 
 	// Caller authority & agentRole capping (§5.1).
-	if err := a.srv.validateDispatchAgentAuthoringAuthority(ctx, caller, projectID, AgentRole(payload.AgentRole), payload.NoAuth); err != nil {
-		return "", err
+	preCapRole, roleExplicit, err := a.srv.validateDispatchAgentAuthoringAuthority(ctx, caller, projectID, AgentRole(payload.AgentRole), payload.NoAuth)
+	if err != nil {
+		return "", "", false, err
 	}
 
 	normalized, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal dispatch_agent payload: %w", err)
+		return "", "", false, fmt.Errorf("marshal dispatch_agent payload: %w", err)
 	}
-	return string(normalized), nil
+	return string(normalized), preCapRole, roleExplicit, nil
 }
 
 func validateTemplateSlot(raw, slot string, allowed []string) (*triggertemplate.Template, error) {
@@ -439,11 +446,11 @@ func (s *Server) validateDispatchAgentAuthoringAuthority(
 	projectID string,
 	requestedRole AgentRole,
 	noAuth bool,
-) error {
+) (AgentRole, bool, error) {
 	if caller.Type() == "agent" {
 		agentIdent, ok := caller.(AgentIdentity)
 		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
-			return &dispatchAgentValidationError{
+			return "", false, &dispatchAgentValidationError{
 				status:  http.StatusForbidden,
 				code:    ErrCodeForbidden,
 				message: "agent caller lacks required scope to author dispatch_agent triggers",
@@ -451,7 +458,7 @@ func (s *Server) validateDispatchAgentAuthoringAuthority(
 		}
 	}
 	if decision := s.agentCreateDecision(ctx, caller, projectID); !decision.Allowed {
-		return &dispatchAgentValidationError{
+		return "", false, &dispatchAgentValidationError{
 			status:  http.StatusForbidden,
 			code:    ErrCodeForbidden,
 			message: "not authorized to create agents in this project",
@@ -461,22 +468,22 @@ func (s *Server) validateDispatchAgentAuthoringAuthority(
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return &dispatchAgentValidationError{
+			return "", false, &dispatchAgentValidationError{
 				status:  http.StatusNotFound,
 				code:    ErrCodeNotFound,
 				message: "project not found",
 			}
 		}
-		return fmt.Errorf("resolve project %q: %w", projectID, err)
+		return "", false, fmt.Errorf("resolve project %q: %w", projectID, err)
 	}
 
 	auth := FireAuthority{
 		PrincipalKind: principalKindForIdentity(caller),
 		PrincipalID:   caller.ID(),
 	}
-	preCapRole, _, _, err := s.resolveHeadlessPreCapRole(ctx, project, auth, requestedRole, noAuth)
+	preCapRole, roleExplicit, _, err := s.resolveHeadlessPreCapRole(ctx, project, auth, requestedRole, noAuth)
 	if err != nil {
-		return &dispatchAgentValidationError{
+		return "", false, &dispatchAgentValidationError{
 			status:  http.StatusForbidden,
 			code:    ErrCodeForbidden,
 			message: err.Error(),
@@ -492,14 +499,14 @@ func (s *Server) validateDispatchAgentAuthoringAuthority(
 			ScopeID:   projectID,
 		})
 		if !delegateDecision.Allowed {
-			return &dispatchAgentValidationError{
+			return "", false, &dispatchAgentValidationError{
 				status:  http.StatusForbidden,
 				code:    ErrCodeForbidden,
 				message: fmt.Sprintf("cannot delegate agent role %q: %s", preCapRole, delegateDecision.Reason),
 			}
 		}
 	}
-	return nil
+	return preCapRole, roleExplicit, nil
 }
 
 func principalKindForIdentity(identity Identity) string {
@@ -663,6 +670,10 @@ func (a *dispatchAgentAction) Authorize(
 	}
 
 	fireID := req.Authority.FireID
+	var requestedRole AgentRole
+	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
+		requestedRole = AgentRole(payload.AgentRole)
+	}
 	resolvedRole, projectName, err := s.authorizeDispatchAgentFire(
 		ctx,
 		req.ProjectID,
@@ -670,7 +681,7 @@ func (a *dispatchAgentAction) Authorize(
 		req.Authority.DefinitionKind,
 		auth,
 		identity,
-		AgentRole(payload.AgentRole),
+		requestedRole,
 		payload.NoAuth,
 	)
 	if err != nil {
@@ -1009,9 +1020,18 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	}
 	eventBody := buildDispatchedEventBody(ev)
 	eventBody.FireID = req.Authority.FireID
-	eventFileBytes, err := json.Marshal(eventBody)
-	if err != nil {
+	var eventFileBuf bytes.Buffer
+	enc := json.NewEncoder(&eventFileBuf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(eventBody); err != nil {
 		return hubfire.FireOutcome{}, fmt.Errorf("marshal trigger event file: %w", err)
+	}
+	eventFileBytes := bytes.TrimSuffix(eventFileBuf.Bytes(), []byte("\n"))
+	if len(eventFileBytes) > maxHeadlessEventFileBytes {
+		return hubfire.FireOutcome{
+			Status: hubfire.FireStatusFailed,
+			Error:  "event file too large",
+		}, nil
 	}
 
 	nameConflict := da.payload.NameConflict

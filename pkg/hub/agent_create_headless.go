@@ -66,6 +66,18 @@ var (
 	errHeadlessAgentExists                 = errors.New("agent already exists in project")
 )
 
+type headlessAgentExistsError struct {
+	slug string
+}
+
+func (e *headlessAgentExistsError) Error() string {
+	return fmt.Sprintf("agent %q already exists in project", e.slug)
+}
+
+func (e *headlessAgentExistsError) Is(target error) bool {
+	return target == errHeadlessAgentExists
+}
+
 // HeadlessMissingEnvError is the content-free error returned when a headless
 // agent create still has unsatisfied required environment variables after
 // DispatchAgentCreateWithGather's as-needed second pass. Only the count is
@@ -429,7 +441,7 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 				return nil, scheduleBlockedError(existingAgent, placementRefused)
 			}
 		}
-		return nil, fmt.Errorf("%w: agent %q already exists in project", errHeadlessAgentExists, slug)
+		return nil, &headlessAgentExistsError{slug: slug}
 	}
 
 	var clonedLabels map[string]string

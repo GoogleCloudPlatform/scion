@@ -30,11 +30,13 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -922,6 +924,38 @@ func TestTriggerDispatchAgent_RenderRefusalAndCollisionMatrix(t *testing.T) {
 		assert.Equal(t, hubfire.FireStatusFailed, out.Status)
 		assert.Equal(t, "name exhausted", out.Error)
 	})
+
+	// O1: HTML-heavy <=16 KiB JSON payload fires without \u003c expansion overflow;
+	// control-byte-heavy 16 KiB text payload fails with specific "event file too large".
+	t.Run("event_file_html_chars_do_not_overflow", func(t *testing.T) {
+		f.client.mu.Lock()
+		before := len(f.client.calls)
+		f.client.mu.Unlock()
+		htmlBody := `{"data":"` + strings.Repeat("<", 15000) + `"}`
+		out := fireDirect(t, "html-heavy", DispatchAgentEventPayload{
+			AgentName: "html-heavy-agent",
+			Task:      "handle html body",
+		}, baseEvent(htmlBody, nil))
+		require.Equal(t, hubfire.FireStatusFired, out.Status, out.Error)
+		require.Empty(t, out.Error)
+		f.client.mu.Lock()
+		require.Greater(t, len(f.client.calls), before)
+		createReq := f.client.calls[len(f.client.calls)-1]
+		f.client.mu.Unlock()
+		require.Len(t, createReq.HomeFiles, 1)
+		assert.Contains(t, string(createReq.HomeFiles[0].Content), "<<<<")
+		assert.NotContains(t, string(createReq.HomeFiles[0].Content), `\u003c`)
+	})
+
+	t.Run("event_file_control_bytes_overflow_specific_reason", func(t *testing.T) {
+		ctrlBody := strings.Repeat("\x01", 16000)
+		out := fireDirect(t, "ctrl-heavy", DispatchAgentEventPayload{
+			AgentName: "ctrl-heavy-agent",
+			Task:      "handle control bytes",
+		}, baseEvent(ctrlBody, nil))
+		assert.Equal(t, hubfire.FireStatusFailed, out.Status)
+		assert.Equal(t, "event file too large", out.Error)
+	})
 }
 
 type alwaysCollidingSlugStore struct {
@@ -1279,4 +1313,222 @@ func TestTriggerDispatchAgent_UpdateResumeAndRoleCaps(t *testing.T) {
 			})
 		require.Equal(t, http.StatusCreated, recOK.Code, recOK.Body.String())
 	})
+
+	// 8. O2: UAT whose ceiling admits agent.create and trigger.create but no
+	// agent role (not even readonly) is refused at authoring even when agentRole
+	// is omitted (default ladder).
+	t.Run("uat_author_omitted_agent_role_no_role_fits_ceiling_refused", func(t *testing.T) {
+		base := NewAuthenticatedUser(adminUser.ID, adminUser.Email, adminUser.DisplayName, adminUser.Role, "api")
+		uatIdent := NewScopedUserIdentityWithCeiling(
+			base,
+			f.sched.proj.ID,
+			[]string{"project:read", "agent:create", "trigger:create", "webhook_endpoint:read"},
+			api.NewUUID(),
+			permissions.FrozenPermissionCeiling{
+				Version: 1,
+				PermissionIDs: []string{
+					"agent.create",
+					"project.read",
+					"trigger.create",
+					"webhook_endpoint.read",
+				},
+			},
+		)
+		uatCtx := contextWithIdentity(context.Background(), uatIdent)
+		uatCtx = contextWithCredentialContext(uatCtx, credentialContextForIdentity(uatIdent))
+
+		rec := f.doJSON(t, uatCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   "uat-omitted-role-no-fit",
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEP.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+				Action: TriggerActionSpec{
+					Type: store.TriggerActionDispatchAgent,
+					Task: "run",
+				},
+			})
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
+	})
+}
+
+func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
+	f := newTriggerDispatchAgentFixture(t, "gh-unsupported")
+	ctx := context.Background()
+
+	// Enable both hub.triggers and hub.github_triggers.
+	var active []experiments.Experiment
+	for _, e := range f.sched.srv.experimentRegistry().All() {
+		if e.Name == experiments.Triggers || e.Name == experiments.GitHubTriggers {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	f.sched.srv.experiments = reg
+
+	adminUser := hubMemberUser(t, f.sched.store, api.NewUUID())
+	adminCtx := f.userAuth(t, adminUser)
+
+	// Set up a project with an authorized GitHub App association (CreatedBy persisted
+	// at creation + creator GITHUB_TOKEN + matching active installation).
+	const instID int64 = 9101
+	require.NoError(t, f.sched.store.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: instID,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          42,
+		Repositories:   []string{"acme/widgets"},
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	idCopy := instID
+	ghProj := &store.Project{
+		ID:                   api.NewUUID(),
+		Slug:                 "gh-unsupported-proj",
+		Name:                 "gh-unsupported-proj",
+		GitRemote:            "https://github.com/acme/widgets.git",
+		GitHubInstallationID: &idCopy,
+		CreatedBy:            adminUser.ID,
+	}
+	require.NoError(t, f.sched.store.CreateProject(ctx, ghProj))
+	grantProjectRole(t, f.sched.store, adminUser.ID, ghProj.ID, store.ProjectRoleAdmin)
+	_, _, err = f.sched.srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GITHUB_TOKEN",
+		Value:      "ghp_test_token",
+		SecretType: secret.TypeEnvironment,
+		Scope:      secret.ScopeUser,
+		ScopeID:    adminUser.ID,
+	})
+	require.NoError(t, err)
+	f.sched.srv.invalidateGitHubAssociation(ghProj.ID)
+
+	// Target agent for a valid github message trigger.
+	targetAg := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "gh-msg-target",
+		Name:      "gh-msg-target",
+		ProjectID: ghProj.ID,
+		Phase:     "running",
+		CreatedBy: adminUser.ID,
+		OwnerID:   adminUser.ID,
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, targetAg))
+
+	// 1. Create github + dispatch_agent -> 400 dispatch_agent_github_unsupported.
+	rec := f.doJSON(t, adminCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", ghProj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-dispatch-refused",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type: store.TriggerActionDispatchAgent,
+				Task: "triage",
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "dispatch_agent_github_unsupported")
+	assert.Contains(t, rec.Body.String(), "P1c-3")
+
+	// 2. Create github + message -> 201, then PATCH action to dispatch_agent -> 400.
+	recMsg := f.doJSON(t, adminCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", ghProj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-msg-ok",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:    store.TriggerActionMessage,
+				AgentID: targetAg.ID,
+				Message: "hello",
+			},
+		})
+	require.Equal(t, http.StatusCreated, recMsg.Code, recMsg.Body.String())
+	var msgTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recMsg.Body.Bytes(), &msgTrig))
+
+	recPatch := f.doJSON(t, adminCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, msgTrig.ID),
+		map[string]any{
+			"action": TriggerActionSpec{
+				Type: store.TriggerActionDispatchAgent,
+				Task: "escalate",
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, recPatch.Code, recPatch.Body.String())
+	assert.Contains(t, recPatch.Body.String(), "dispatch_agent_github_unsupported")
+
+	// 3. webhook + dispatch_agent remains accepted (201).
+	grantProjectRole(t, f.sched.store, adminUser.ID, f.sched.proj.ID, store.ProjectRoleAdmin)
+	ep := f.createEndpoint(t, adminCtx, "wh-still-ok")
+	recWH := f.doJSON(t, adminCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:   "wh-dispatch-ok",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+			Action: TriggerActionSpec{
+				Type: store.TriggerActionDispatchAgent,
+				Task: "run",
+			},
+		})
+	require.Equal(t, http.StatusCreated, recWH.Code, recWH.Body.String())
+}
+
+func TestScheduleDispatchAgent_IgnoresStrayAgentRoleAndCleanCollisionError(t *testing.T) {
+	f := newTriggerDispatchAgentFixture(t, "sched-o3-n1")
+	ctx := context.Background()
+
+	// Cap project max role to baseline so an explicit "full" would be refused,
+	// whereas a schedule fire (which ignores stray agentRole) caps to baseline.
+	proj, err := f.sched.store.GetProject(ctx, f.sched.proj.ID)
+	require.NoError(t, err)
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingMaxAgentRole] = string(AgentRoleBaseline)
+	require.NoError(t, f.sched.store.UpdateProject(ctx, proj))
+
+	raw, err := json.Marshal(DispatchAgentEventPayload{
+		AgentName: "sched-stray-role",
+		Task:      "scheduled work",
+		AgentRole: string(AgentRoleFull),
+	})
+	require.NoError(t, err)
+
+	req := hubfire.FireRequest{
+		ProjectID: f.sched.proj.ID,
+		Authority: hubfire.RecordedAuthority{
+			Attribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+				InitiatorPrincipalID:    f.sched.creator.ID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+				AttributionVersion:      1,
+				AuthorizationRevision:   1,
+			},
+			Ceiling:        store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			DefinitionKind: hubfire.DefinitionKindSchedule,
+			DefinitionID:   api.NewUUID(),
+			FireID:         api.NewUUID(),
+		},
+		ActionType: store.TriggerActionDispatchAgent,
+		Payload:    string(raw),
+		FireAt:     time.Now().UTC(),
+	}
+
+	// O3: Schedule fire ignores stray "agentRole": "full" and succeeds with baseline.
+	out := f.sched.srv.fireAction(ctx, req)
+	require.Equal(t, hubfire.FireStatusFired, out.Status, out.Error)
+	created, err := f.sched.store.GetAgentBySlug(ctx, f.sched.proj.ID, "sched-stray-role")
+	require.NoError(t, err)
+	require.NotNil(t, created.AppliedConfig)
+	assert.Equal(t, string(AgentRoleBaseline), created.AppliedConfig.AgentRole)
+
+	// N1: Second schedule fire with the same slug returns non-duplicated error text.
+	req.Authority.FireID = api.NewUUID()
+	out2 := f.sched.srv.fireAction(ctx, req)
+	assert.Equal(t, hubfire.FireStatusFailed, out2.Status)
+	assert.Equal(t, `agent "sched-stray-role" already exists in project`, out2.Error)
 }

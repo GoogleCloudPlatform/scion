@@ -436,6 +436,15 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 		return "", false
 	}
 
+	// TODO(P1c-3): remove this refusal once P1c-3 implements githubToken="installation"
+	// (Stage 2 §5.1a requires omitted githubToken on github sources to default to
+	// "installation" so an author's PAT never drives a GitHub-triggered agent).
+	if sourceKind == store.TriggerSourceKindGitHub {
+		writeError(w, http.StatusBadRequest, "dispatch_agent_github_unsupported",
+			"dispatch_agent triggers on github sources need githubToken installation support (Stage 2 P1c-3)", nil)
+		return "", false
+	}
+
 	if !trigger.SourceReplayProtected(sourceKind, ep) {
 		writeError(w, http.StatusBadRequest, "source_not_replay_protected",
 			"dispatch_agent triggers require a replay-protected source", nil)
@@ -462,7 +471,7 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	}
 
 	action := &dispatchAgentAction{srv: s}
-	normalized, err := action.Validate(ctx, identity, projectID, string(raw))
+	normalized, preCapRole, roleExplicit, err := action.validateWithRole(ctx, identity, projectID, string(raw))
 	if err != nil {
 		var ve *dispatchAgentValidationError
 		if errors.As(err, &ve) {
@@ -474,17 +483,20 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 		return "", false
 	}
 
-	// Enforce the caller's hop effect ceiling against an explicit agentRole
-	// (mirrors interactive create's applyCreateEffectCeiling; §5.1).
-	if spec.AgentRole != "" {
-		if _, cause, fits := childRoleWithinCeiling(
-			uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling),
-			AgentRole(spec.AgentRole),
-			true,
-		); !fits {
-			writeForbiddenDenial(w, "requested agentRole exceeds caller's delegation ceiling: "+string(cause), DeniedByDelegationCeiling)
-			return "", false
+	// Enforce the caller's hop effect ceiling against both explicit and
+	// omitted (default-ladder) agentRole (mirrors interactive create's
+	// applyCreateEffectCeiling; §5.1).
+	if _, cause, fits := childRoleWithinCeiling(
+		uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling),
+		preCapRole,
+		roleExplicit,
+	); !fits {
+		msg := "requested agentRole exceeds caller's delegation ceiling: " + string(cause)
+		if !roleExplicit {
+			msg = "no agent role fits caller's delegation ceiling: " + string(cause)
 		}
+		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
+		return "", false
 	}
 
 	return normalized, true
