@@ -37,9 +37,13 @@ package cmd
 //     Matching reuses gitIgnoredBy (real gitignore semantics, see
 //     gcloudignore_contract_test.go).
 //
+// Docs coverage: every `--ignore-file=<path>` named anywhere under docs-site/
+// must name a tracked file in the repository (TestDocsSiteIgnoreFilesExist).
+//
 // Not covered: the per-harness config that cloud-build.sh generates on the
-// fly (it mirrors cloudbuild-harnesses.yaml), and builds started by hand from
-// docs; the repo-root Dockerfile's header documents its ignore file.
+// fly (it mirrors cloudbuild-harnesses.yaml), and hand-run doc commands that
+// omit `--ignore-file=`; the repo-root Dockerfile's header documents its
+// ignore file.
 
 import (
 	"encoding/json"
@@ -456,5 +460,137 @@ func TestCloudBuildDockerfileFlagForms(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "cfg.yaml step s: ") || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want an error for cfg.yaml step s containing %q", tc.name, err, tc.want)
 		}
+	}
+}
+
+// docIgnoreFileRef is one `--ignore-file=<path>` occurrence found in a doc.
+type docIgnoreFileRef struct {
+	line int
+	path string
+}
+
+var docIgnoreFileTokenRE = regexp.MustCompile(`--ignore-file=(\S*)`)
+
+// docIgnoreFileRefs extracts every `--ignore-file=<path>` occurrence from a
+// documentation file (code blocks and inline Markdown prose). Surrounding
+// quotes, backticks, brackets, parentheses, trailing punctuation, and shell
+// line-continuation backslashes are stripped from the path value.
+func docIgnoreFileRefs(content string) []docIgnoreFileRef {
+	var refs []docIgnoreFileRef
+	for i, line := range strings.Split(content, "\n") {
+		for _, m := range docIgnoreFileTokenRE.FindAllStringSubmatch(line, -1) {
+			raw := m[1]
+			if len(raw) > 0 && (raw[0] == '"' || raw[0] == '\'') {
+				raw = raw[1:]
+			}
+			if idx := strings.IndexAny(raw, "`\"'()[]*,;:\\"); idx >= 0 {
+				raw = raw[:idx]
+			}
+			val := strings.TrimRight(raw, ".")
+			refs = append(refs, docIgnoreFileRef{line: i + 1, path: val})
+		}
+	}
+	return refs
+}
+
+// checkDocsSiteIgnoreFiles scans every tracked file under docs-site/ and
+// returns the number of `--ignore-file=` references found plus one violation
+// per reference whose path is empty or does not name a tracked repository file.
+func checkDocsSiteIgnoreFiles(tracked []string, readFile func(string) string) (int, []string) {
+	trackedSet := make(map[string]bool, len(tracked))
+	for _, f := range tracked {
+		trackedSet[f] = true
+	}
+	var count int
+	var errs []string
+	for _, f := range tracked {
+		if !strings.HasPrefix(f, "docs-site/") {
+			continue
+		}
+		for _, ref := range docIgnoreFileRefs(readFile(f)) {
+			count++
+			if ref.path == "" {
+				errs = append(errs, fmt.Sprintf("%s:%d: --ignore-file= has an empty path", f, ref.line))
+				continue
+			}
+			if !trackedSet[path.Clean(ref.path)] {
+				errs = append(errs, fmt.Sprintf("%s:%d: --ignore-file=%s does not name a tracked file in the repository", f, ref.line, ref.path))
+			}
+		}
+	}
+	return count, errs
+}
+
+// TestDocsSiteIgnoreFilesExist checks that every `--ignore-file=<path>` flag
+// named anywhere in docs-site/ points to an existing tracked file in the
+// repository, preventing doc drift such as ptone/scion#5662.
+func TestDocsSiteIgnoreFilesExist(t *testing.T) {
+	tracked := repoTrackedFiles(t)
+	count, errs := checkDocsSiteIgnoreFiles(tracked, func(rel string) string {
+		return readRepoFile(t, rel)
+	})
+	if count == 0 {
+		t.Fatal("found no --ignore-file= references under docs-site/")
+	}
+	for _, e := range errs {
+		t.Error(e)
+	}
+	t.Logf("checked %d --ignore-file= references across docs-site/", count)
+}
+
+// TestDocsSiteIgnoreFilesContractDetectsViolations proves the docs-site
+// ignore-file scanner parses Markdown and shell forms accurately and catches
+// missing or empty ignore-file paths.
+func TestDocsSiteIgnoreFilesContractDetectsViolations(t *testing.T) {
+	sample := strings.Join([]string{
+		"  --ignore-file=image-build/gcloudignore-omni \\",
+		"Use `--ignore-file=.dockerignore` and `--ignore-file=./image-build/gcloudignore-omni`.",
+		":::caution[Use `--ignore-file=.dockerignore`]",
+		"3. **Build with `--ignore-file=.dockerignore`** (always):",
+		`  --ignore-file="image-build/gcloudignore-omni" \`,
+		"  --ignore-file='image-build/gcloudignore-omni'\\",
+		"Pass --ignore-file=image-build/gcloudignore-omni.",
+	}, "\n")
+	wantRefs := []docIgnoreFileRef{
+		{line: 1, path: "image-build/gcloudignore-omni"},
+		{line: 2, path: ".dockerignore"},
+		{line: 2, path: "./image-build/gcloudignore-omni"},
+		{line: 3, path: ".dockerignore"},
+		{line: 4, path: ".dockerignore"},
+		{line: 5, path: "image-build/gcloudignore-omni"},
+		{line: 6, path: "image-build/gcloudignore-omni"},
+		{line: 7, path: "image-build/gcloudignore-omni"},
+	}
+	if got := docIgnoreFileRefs(sample); fmt.Sprint(got) != fmt.Sprint(wantRefs) {
+		t.Errorf("docIgnoreFileRefs:\n got %+v\nwant %+v", got, wantRefs)
+	}
+
+	tracked := []string{
+		".dockerignore",
+		"image-build/gcloudignore-omni",
+		"docs-site/src/content/docs/good.md",
+		"docs-site/src/content/docs/bad.md",
+		"README.md",
+	}
+	files := map[string]string{
+		"docs-site/src/content/docs/good.md": sample,
+		"docs-site/src/content/docs/bad.md": strings.Join([]string{
+			"  --ignore-file=image-build/gcloudignore-hub-gke \\",
+			":::caution[Use `--ignore-file=image-build/no-such-ignore`]",
+			"  --ignore-file= \\",
+			`  --ignore-file=""`,
+		}, "\n"),
+		"README.md": "  --ignore-file=not-under-docs-site",
+	}
+	count, errs := checkDocsSiteIgnoreFiles(tracked, func(rel string) string { return files[rel] })
+	if count != len(wantRefs)+4 {
+		t.Errorf("checked count = %d, want %d", count, len(wantRefs)+4)
+	}
+	expectViolation(t, "non-existent hub-gke ignore file", errs, "docs-site/src/content/docs/bad.md:1: --ignore-file=image-build/gcloudignore-hub-gke does not name a tracked file")
+	expectViolation(t, "non-existent ignore file in admonition", errs, "docs-site/src/content/docs/bad.md:2: --ignore-file=image-build/no-such-ignore does not name a tracked file")
+	expectViolation(t, "empty ignore file flag", errs, "docs-site/src/content/docs/bad.md:3: --ignore-file= has an empty path")
+	expectViolation(t, "empty quoted ignore file flag", errs, "docs-site/src/content/docs/bad.md:4: --ignore-file= has an empty path")
+	if len(errs) != 4 {
+		t.Errorf("expected exactly 4 violations, got %d: %q", len(errs), errs)
 	}
 }
