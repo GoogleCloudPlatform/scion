@@ -255,3 +255,44 @@ func TestMessageAuthoringTargetRule_ScheduleParity(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, resumeRec.Code, resumeRec.Body.String())
 	assert.Contains(t, resumeRec.Body.String(), "cross-project scheduled messages require cross-project messaging to be enabled")
 }
+
+// TestMessageAuthoringTargetRule_OutOfRangeCallerKindFailsClosed pins S2C-I1:
+// any out-of-range messageAuthoringCaller value (zero, negative, or non-zero
+// unknown) must fail closed to strict trigger mode and never fall into
+// schedule-style acceptance for unresolved or unreadable targets.
+func TestMessageAuthoringTargetRule_OutOfRangeCallerKindFailsClosed(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	unreadableTarget := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "s2c-i1-secret-agent",
+		Name:      "s2c-i1-secret-agent",
+		ProjectID: f.otherProjID,
+		Phase:     "running",
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, unreadableTarget))
+
+	nonexistentID := api.NewUUID()
+	outOfRangeKinds := []messageAuthoringCaller{
+		messageAuthoringCaller(0),
+		messageAuthoringCaller(-1),
+		messageAuthoringCaller(99),
+	}
+
+	for _, kind := range outOfRangeKinds {
+		for _, tc := range []struct {
+			name    string
+			payload string
+		}{
+			{name: "unresolved", payload: `{"agentId":"` + nonexistentID + `","message":"ping"}`},
+			{name: "unreadable_cross_project", payload: `{"agentId":"` + unreadableTarget.ID + `","message":"ping"}`},
+		} {
+			_, err := f.srv.validateMessageAuthoringTarget(ctx, f.memberAuth, f.projectID, kind, tc.payload, "", "")
+			var authErr *messageAuthoringError
+			require.ErrorAs(t, err, &authErr, "callerKind=%d case=%s must fail closed", kind, tc.name)
+			assert.Equal(t, http.StatusNotFound, authErr.httpStatus, "callerKind=%d case=%s", kind, tc.name)
+			assert.Equal(t, "Agent", authErr.notFoundResource, "callerKind=%d case=%s", kind, tc.name)
+		}
+	}
+}

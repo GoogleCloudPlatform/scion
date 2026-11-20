@@ -254,9 +254,15 @@ func (s *TriggerStore) ListWebhookEndpoints(ctx context.Context, filter store.We
 		query.Where(webhookendpoint.OwnerPrincipalIDEQ(filter.OwnerPrincipalID))
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	var (
+		totalCount int
+		err        error
+	)
+	if !opts.SkipTotalCount {
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var (
@@ -669,6 +675,14 @@ func applyTriggerFilter(query *ent.TriggerQuery, filter store.TriggerFilter) err
 	if filter.Name != "" {
 		query.Where(trigger.NameEQ(filter.Name))
 	}
+	if len(filter.ActionTypes) > 0 {
+		query.Where(trigger.ActionTypeIn(filter.ActionTypes...))
+	}
+	if filter.TargetAgentID != "" {
+		// Pre-filter in SQL on action_payload containing the target agent ID;
+		// callers still decode action_payload to confirm the exact agentId field.
+		query.Where(trigger.ActionPayloadContains(filter.TargetAgentID))
+	}
 	if filter.InitiatorAgentID != "" {
 		query.Where(triggerRecordedAuthorityIs(store.DelegationPrincipalAgent, filter.InitiatorAgentID))
 	}
@@ -840,9 +854,15 @@ func (s *TriggerStore) ListTriggers(ctx context.Context, filter store.TriggerFil
 		return nil, err
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	var (
+		totalCount int
+		err        error
+	)
+	if !opts.SkipTotalCount {
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var (
@@ -1502,9 +1522,15 @@ func (s *TriggerStore) ListTriggerEvents(ctx context.Context, filter store.Trigg
 		query.Where(triggerevent.Or(visPreds...))
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	var (
+		totalCount int
+		err        error
+	)
+	if !opts.SkipTotalCount {
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var (
@@ -2023,9 +2049,15 @@ func (s *TriggerStore) ListTriggerFires(ctx context.Context, filter store.Trigge
 		query.Where(triggerfire.StatusEQ(filter.Status))
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	var (
+		totalCount int
+		err        error
+	)
+	if !opts.SkipTotalCount {
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var (

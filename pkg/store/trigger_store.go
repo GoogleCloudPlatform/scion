@@ -179,6 +179,8 @@ type TriggerFilter struct {
 	SourceIDs          []string
 	Status             string
 	Name               string
+	ActionTypes        []string
+	TargetAgentID      string
 	InitiatorAgentID   string
 	AuthorityPrincipal ScheduleAuthorityPrincipal
 	SystemPausedOnly   bool

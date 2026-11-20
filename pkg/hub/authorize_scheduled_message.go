@@ -246,7 +246,15 @@ func (s *Server) validateMessageAuthoringTarget(
 		return "", &messageAuthoringError{httpStatus: http.StatusInternalServerError, message: "server not configured"}
 	}
 
-	isTrigger := callerKind == messageAuthoringCallerTrigger
+	var isTrigger bool
+	switch callerKind {
+	case messageAuthoringCallerScheduleNew, messageAuthoringCallerScheduleExisting:
+		isTrigger = false
+	default:
+		// Fail closed to the strictest trigger mode for messageAuthoringCallerTrigger
+		// and any out-of-range value (S2C-I1).
+		isTrigger = true
+	}
 
 	var (
 		parsed          MessageEventPayload

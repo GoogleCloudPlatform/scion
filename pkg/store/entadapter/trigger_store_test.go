@@ -1548,3 +1548,78 @@ func TestTriggerStore_MatchFormRoundTripAndClear(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, afterClear.MatchForm)
 }
+
+func TestTriggerStore_ListTriggers_SkipTotalCountAndTargetFilter(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+
+	p1ID := uuid.NewString()
+	p2ID := uuid.NewString()
+
+	targetID := uuid.NewString()
+	otherID := uuid.NewString()
+
+	mkTrigger := func(projectID, name, actionType, payload string) *store.Trigger {
+		t.Helper()
+		tr := &store.Trigger{
+			ID:             uuid.NewString(),
+			ProjectID:      projectID,
+			Name:           name,
+			SourceKind:     store.TriggerSourceKindWebhook,
+			SourceID:       uuid.NewString(),
+			MatchTypes:     []string{"webhook.received"},
+			ActionType:     actionType,
+			ActionPayload:  payload,
+			SubjectDialect: store.TriggerDialectCEL,
+			SubjectMode:    store.TriggerSubjectModeNew,
+			Status:         store.TriggerStatusActive,
+			InitiatorAttribution: store.InitiatorAttribution{
+				AttributionVersion:      1,
+				InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+				InitiatorPrincipalID:    uuid.NewString(),
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+				AuthorizationRevision:   1,
+			},
+			AuthorityCeiling: store.EffectCeiling{Version: 1, Kind: store.EffectCeilingPrincipal},
+		}
+		require.NoError(t, cs.CreateTrigger(ctx, tr))
+		return tr
+	}
+
+	trSameProj := mkTrigger(p1ID, "msg-same", store.TriggerActionMessage, `{"agentId":"`+targetID+`","message":"hi"}`)
+	trCrossProj := mkTrigger(p2ID, "msg-cross", store.TriggerActionMessage, `{"agentId":"`+targetID+`","message":"hi"}`)
+	trOtherAgent := mkTrigger(p1ID, "msg-other", store.TriggerActionMessage, `{"agentId":"`+otherID+`","message":"hi"}`)
+	trDispatch := mkTrigger(p1ID, "dispatch-same", store.TriggerActionDispatchAgent, `{"agentId":"`+targetID+`"}`)
+
+	// SkipTotalCount skips the COUNT query (TotalCount == 0) while keeping items and NextCursor intact.
+	skipped, err := cs.ListTriggers(ctx, store.TriggerFilter{Status: store.TriggerStatusActive}, store.ListOptions{
+		Limit:          2,
+		SkipTotalCount: true,
+	})
+	require.NoError(t, err)
+	assert.Zero(t, skipped.TotalCount, "SkipTotalCount must skip COUNT")
+	assert.Len(t, skipped.Items, 2)
+	assert.NotEmpty(t, skipped.NextCursor)
+
+	counted, err := cs.ListTriggers(ctx, store.TriggerFilter{Status: store.TriggerStatusActive}, store.ListOptions{
+		Limit: 2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 4, counted.TotalCount)
+
+	// ActionTypes + TargetAgentID filters in SQL across projects and excludes unrelated triggers and action types.
+	filtered, err := cs.ListTriggers(ctx, store.TriggerFilter{
+		Status:        store.TriggerStatusActive,
+		ActionTypes:   []string{store.TriggerActionMessage, store.TriggerActionExec},
+		TargetAgentID: targetID,
+	}, store.ListOptions{SkipTotalCount: true})
+	require.NoError(t, err)
+	assert.Zero(t, filtered.TotalCount)
+	gotIDs := make([]string, 0, len(filtered.Items))
+	for _, item := range filtered.Items {
+		gotIDs = append(gotIDs, item.ID)
+	}
+	assert.ElementsMatch(t, []string{trSameProj.ID, trCrossProj.ID}, gotIDs)
+	assert.NotContains(t, gotIDs, trOtherAgent.ID)
+	assert.NotContains(t, gotIDs, trDispatch.ID)
+}

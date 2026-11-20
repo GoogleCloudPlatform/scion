@@ -1872,10 +1872,11 @@ func (s *Server) afterUserDeleted(ctx context.Context, userID string) {
 	// grant never blocks the delete, and exchange and use deny a missing
 	// issuer (.design/agent-delegation.md §16.3).
 	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{IssuerUserID: userID}, revokeReasonIssuerDeleted)
-	// The user's schedules would be refused at every fire: pause them with
-	// creator_deleted (they never block the delete). The evaluator
-	// backstop pauses any left active.
+	// The user's schedules and triggers would be refused at every fire: pause
+	// them with creator_deleted (they never block the delete). The evaluator
+	// backstop and trigger fire-time standing check cover any left active.
 	s.pauseSchedulesAuthoredByUser(ctx, userID)
+	s.pauseTriggersAuthoredByUser(ctx, userID)
 }
 
 // lastOwnerProjectRef identifies a project that deleting a user would leave

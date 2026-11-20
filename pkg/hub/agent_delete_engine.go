@@ -845,13 +845,19 @@ func (e *deletionEngine) run() deletionOutcome {
 		s.pauseTriggersTargetingAgent(ctx, agent)
 	})
 	// Pause the schedules and triggers whose authority is this agent, with
-	// status reason creator_deleted (ptone/scion#5403, Stage 1 §5.6). Run only
-	// after the delete committed; the schedule evaluator pauses any schedules
-	// it misses.
+	// status reason creator_deleted (ptone/scion#5403, Stage 1 §5.6). Each
+	// runs in its own tail step with an independent budget so schedules cannot
+	// starve trigger pausing; the schedule evaluator and trigger fire-time
+	// standing check remain the backstops.
 	e.tailStep("pause authored schedules", func() {
 		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 		defer cancel()
 		s.pauseSchedulesAuthoredByAgent(ctx, agent)
+	})
+	e.tailStep("pause authored triggers", func() {
+		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
+		defer cancel()
+		s.pauseTriggersAuthoredByAgent(ctx, agent)
 	})
 
 	return deletionOutcome{kind: deletionOutcomeDeleted}
