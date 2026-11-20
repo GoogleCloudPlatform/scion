@@ -559,6 +559,12 @@ func TestDialect_EngineWrapShapesPreserveEvaluationProvenance(t *testing.T) {
 	t.Run("margin_allows_runtime_timeout_to_pass_through_before_engine_context_expires", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			rt := newFakeAdapterRuntime(t, 3*time.Second, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				// Under synctest fake time the margin only guarantees deadline ordering, so
+				// assert the exact 120ms - min(10ms, 5%) = 114ms deadline explicitly.
+				dl, ok := attemptCtx.Deadline()
+				assert.True(t, ok)
+				assert.Equal(t, 114*time.Millisecond, time.Until(dl),
+					"runtime deadline must sit min(10ms, 5%) before the engine deadline")
 				<-attemptCtx.Done()
 				return provider.ModelResult{}, attemptCtx.Err()
 			})
@@ -644,6 +650,10 @@ func TestDialect_EngineWrapShapesPreserveEvaluationProvenance(t *testing.T) {
 			// Engine.Evaluate hits the errDialectEvalTimeout branch and wraps with
 			// FailedError{timeout, errors.Join(&celengine.EvalError{Reason: "timeout"}, dialectErr)}.
 			rt := newFakeAdapterRuntime(t, 60*time.Millisecond, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				dl, ok := attemptCtx.Deadline()
+				assert.True(t, ok)
+				assert.Equal(t, 57*time.Millisecond, time.Until(dl),
+					"runtime deadline must sit min(10ms, 5%) before the 60ms engine deadline")
 				<-attemptCtx.Done()
 				// Advance the fake clock past the 3ms runtime margin so Engine's 60ms evalCtx also expires.
 				time.Sleep(15 * time.Millisecond)
