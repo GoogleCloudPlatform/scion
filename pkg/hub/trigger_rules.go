@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
@@ -33,12 +34,7 @@ import (
 
 var (
 	errTriggerRuleEngineNotInitialized = errors.New("trigger rule engine is not initialized")
-	// errCorruptTriggerMatchRules is returned by triggerMatchRules when a stored
-	// trigger's match_rules column cannot be parsed. It aliases
-	// triggerrule.ErrCorruptMatchRules so 3b-2 dispatch maps it directly via
-	// triggerrule.SkipReason to skipped ("rule evaluation failed").
-	errCorruptTriggerMatchRules = triggerrule.ErrCorruptMatchRules
-	ruleDialectNameRE           = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	ruleDialectNameRE                  = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 )
 
 // Trigger rule registration, authoring validation, and engine seam
@@ -68,7 +64,7 @@ func (s *Server) registerTriggerRules() error {
 	celEng, err := celengine.New(
 		triggerrule.Env(),
 		triggerrule.Stage1Limits(),
-		celengine.DefaultCacheConfig(),
+		triggerrule.Stage1CacheConfig(),
 	)
 	if err != nil {
 		return fmt.Errorf("create trigger CEL engine: %w", err)
@@ -96,6 +92,44 @@ func (s *Server) TriggerRules() *triggerrule.Rules {
 		return nil
 	}
 	return s.triggerRules
+}
+
+// invalidateTriggerRuleCache removes cached compiled programs bound to
+// (projectID, triggerID, revision) across registered dialects (3b-1 F4).
+// Passing revision <= 0 invalidates every revision of triggerID.
+func (s *Server) invalidateTriggerRuleCache(projectID, triggerID string, revision int64) {
+	if s == nil || s.triggerRules == nil || triggerID == "" {
+		return
+	}
+	scope := celengine.CacheScope{
+		Consumer:  triggerrule.ConsumerName,
+		ProjectID: projectID,
+		ID:        triggerID,
+		Revision:  revision,
+	}
+	s.invalidateTriggerScopeAllDialects(scope)
+}
+
+// invalidateTriggerRuleCacheForProject removes all cached trigger programs
+// scoped to projectID (3b-1 F4 / project cascade deletion).
+func (s *Server) invalidateTriggerRuleCacheForProject(projectID string) {
+	if s == nil || s.triggerRules == nil || projectID == "" {
+		return
+	}
+	s.invalidateTriggerScopeAllDialects(celengine.CacheScope{
+		Consumer:  triggerrule.ConsumerName,
+		ProjectID: projectID,
+	})
+}
+
+func (s *Server) invalidateTriggerScopeAllDialects(scope celengine.CacheScope) {
+	if s.rules != nil {
+		for _, d := range s.rules.Dialects() {
+			s.triggerRules.Invalidate(d, scope)
+		}
+		return
+	}
+	s.triggerRules.Invalidate(ruleengine.DialectCEL, scope)
 }
 
 func (s *Server) compileTriggerMatchRule(ctx context.Context, dialect, expr string) error {
@@ -164,40 +198,7 @@ func validateTriggerDialectName(dialect string) error {
 // wins; else a defensive non-empty scalar MatchRule normalizes to a one-element
 // slice with MatchDialect (defaulting to "cel"); else (nil, nil).
 func triggerMatchRules(tr store.Trigger) ([]triggerrule.Rule, error) {
-	if tr.MatchRulesCorrupt {
-		return nil, errCorruptTriggerMatchRules
-	}
-	if len(tr.MatchRules) > 0 {
-		out := make([]triggerrule.Rule, len(tr.MatchRules))
-		for i, r := range tr.MatchRules {
-			if strings.TrimSpace(r.Expr) == "" {
-				return nil, errCorruptTriggerMatchRules
-			}
-			d := strings.TrimSpace(r.Dialect)
-			if d == "" {
-				d = ruleengine.DialectCEL
-			}
-			out[i] = triggerrule.Rule{
-				Dialect: d,
-				Expr:    r.Expr,
-			}
-		}
-		return out, nil
-	}
-	if tr.MatchRule != "" {
-		if strings.TrimSpace(tr.MatchRule) == "" {
-			return nil, errCorruptTriggerMatchRules
-		}
-		d := strings.TrimSpace(tr.MatchDialect)
-		if d == "" {
-			d = ruleengine.DialectCEL
-		}
-		return []triggerrule.Rule{{
-			Dialect: d,
-			Expr:    tr.MatchRule,
-		}}, nil
-	}
-	return nil, nil
+	return trigger.MatchRules(tr)
 }
 
 func hasAmbiguousScalarWithRules(dialect, expr string) bool {

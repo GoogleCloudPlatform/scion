@@ -130,6 +130,21 @@ func ResultRef(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldResultRef, v))
 }
 
+// MatchedThrough applies equality check predicate on the "matched_through" field. It's identical to MatchedThroughEQ.
+func MatchedThrough(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldMatchedThrough, v))
+}
+
+// DecidedDialect applies equality check predicate on the "decided_dialect" field. It's identical to DecidedDialectEQ.
+func DecidedDialect(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldDecidedDialect, v))
+}
+
+// RuleTrace applies equality check predicate on the "rule_trace" field. It's identical to RuleTraceEQ.
+func RuleTrace(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldRuleTrace, v))
+}
+
 // ExecutorKind applies equality check predicate on the "executor_kind" field. It's identical to ExecutorKindEQ.
 func ExecutorKind(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldExecutorKind, v))
@@ -1098,6 +1113,231 @@ func ResultRefEqualFold(v string) predicate.TriggerFire {
 // ResultRefContainsFold applies the ContainsFold predicate on the "result_ref" field.
 func ResultRefContainsFold(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldContainsFold(FieldResultRef, v))
+}
+
+// MatchedThroughEQ applies the EQ predicate on the "matched_through" field.
+func MatchedThroughEQ(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldMatchedThrough, v))
+}
+
+// MatchedThroughNEQ applies the NEQ predicate on the "matched_through" field.
+func MatchedThroughNEQ(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldMatchedThrough, v))
+}
+
+// MatchedThroughIn applies the In predicate on the "matched_through" field.
+func MatchedThroughIn(vs ...string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIn(FieldMatchedThrough, vs...))
+}
+
+// MatchedThroughNotIn applies the NotIn predicate on the "matched_through" field.
+func MatchedThroughNotIn(vs ...string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotIn(FieldMatchedThrough, vs...))
+}
+
+// MatchedThroughGT applies the GT predicate on the "matched_through" field.
+func MatchedThroughGT(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGT(FieldMatchedThrough, v))
+}
+
+// MatchedThroughGTE applies the GTE predicate on the "matched_through" field.
+func MatchedThroughGTE(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGTE(FieldMatchedThrough, v))
+}
+
+// MatchedThroughLT applies the LT predicate on the "matched_through" field.
+func MatchedThroughLT(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLT(FieldMatchedThrough, v))
+}
+
+// MatchedThroughLTE applies the LTE predicate on the "matched_through" field.
+func MatchedThroughLTE(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLTE(FieldMatchedThrough, v))
+}
+
+// MatchedThroughContains applies the Contains predicate on the "matched_through" field.
+func MatchedThroughContains(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldContains(FieldMatchedThrough, v))
+}
+
+// MatchedThroughHasPrefix applies the HasPrefix predicate on the "matched_through" field.
+func MatchedThroughHasPrefix(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldHasPrefix(FieldMatchedThrough, v))
+}
+
+// MatchedThroughHasSuffix applies the HasSuffix predicate on the "matched_through" field.
+func MatchedThroughHasSuffix(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldHasSuffix(FieldMatchedThrough, v))
+}
+
+// MatchedThroughIsNil applies the IsNil predicate on the "matched_through" field.
+func MatchedThroughIsNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIsNull(FieldMatchedThrough))
+}
+
+// MatchedThroughNotNil applies the NotNil predicate on the "matched_through" field.
+func MatchedThroughNotNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotNull(FieldMatchedThrough))
+}
+
+// MatchedThroughEqualFold applies the EqualFold predicate on the "matched_through" field.
+func MatchedThroughEqualFold(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEqualFold(FieldMatchedThrough, v))
+}
+
+// MatchedThroughContainsFold applies the ContainsFold predicate on the "matched_through" field.
+func MatchedThroughContainsFold(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldContainsFold(FieldMatchedThrough, v))
+}
+
+// DecidedDialectEQ applies the EQ predicate on the "decided_dialect" field.
+func DecidedDialectEQ(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldDecidedDialect, v))
+}
+
+// DecidedDialectNEQ applies the NEQ predicate on the "decided_dialect" field.
+func DecidedDialectNEQ(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldDecidedDialect, v))
+}
+
+// DecidedDialectIn applies the In predicate on the "decided_dialect" field.
+func DecidedDialectIn(vs ...string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIn(FieldDecidedDialect, vs...))
+}
+
+// DecidedDialectNotIn applies the NotIn predicate on the "decided_dialect" field.
+func DecidedDialectNotIn(vs ...string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotIn(FieldDecidedDialect, vs...))
+}
+
+// DecidedDialectGT applies the GT predicate on the "decided_dialect" field.
+func DecidedDialectGT(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGT(FieldDecidedDialect, v))
+}
+
+// DecidedDialectGTE applies the GTE predicate on the "decided_dialect" field.
+func DecidedDialectGTE(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGTE(FieldDecidedDialect, v))
+}
+
+// DecidedDialectLT applies the LT predicate on the "decided_dialect" field.
+func DecidedDialectLT(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLT(FieldDecidedDialect, v))
+}
+
+// DecidedDialectLTE applies the LTE predicate on the "decided_dialect" field.
+func DecidedDialectLTE(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLTE(FieldDecidedDialect, v))
+}
+
+// DecidedDialectContains applies the Contains predicate on the "decided_dialect" field.
+func DecidedDialectContains(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldContains(FieldDecidedDialect, v))
+}
+
+// DecidedDialectHasPrefix applies the HasPrefix predicate on the "decided_dialect" field.
+func DecidedDialectHasPrefix(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldHasPrefix(FieldDecidedDialect, v))
+}
+
+// DecidedDialectHasSuffix applies the HasSuffix predicate on the "decided_dialect" field.
+func DecidedDialectHasSuffix(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldHasSuffix(FieldDecidedDialect, v))
+}
+
+// DecidedDialectIsNil applies the IsNil predicate on the "decided_dialect" field.
+func DecidedDialectIsNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIsNull(FieldDecidedDialect))
+}
+
+// DecidedDialectNotNil applies the NotNil predicate on the "decided_dialect" field.
+func DecidedDialectNotNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotNull(FieldDecidedDialect))
+}
+
+// DecidedDialectEqualFold applies the EqualFold predicate on the "decided_dialect" field.
+func DecidedDialectEqualFold(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEqualFold(FieldDecidedDialect, v))
+}
+
+// DecidedDialectContainsFold applies the ContainsFold predicate on the "decided_dialect" field.
+func DecidedDialectContainsFold(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldContainsFold(FieldDecidedDialect, v))
+}
+
+// RuleTraceEQ applies the EQ predicate on the "rule_trace" field.
+func RuleTraceEQ(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldRuleTrace, v))
+}
+
+// RuleTraceNEQ applies the NEQ predicate on the "rule_trace" field.
+func RuleTraceNEQ(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldRuleTrace, v))
+}
+
+// RuleTraceIn applies the In predicate on the "rule_trace" field.
+func RuleTraceIn(vs ...string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIn(FieldRuleTrace, vs...))
+}
+
+// RuleTraceNotIn applies the NotIn predicate on the "rule_trace" field.
+func RuleTraceNotIn(vs ...string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotIn(FieldRuleTrace, vs...))
+}
+
+// RuleTraceGT applies the GT predicate on the "rule_trace" field.
+func RuleTraceGT(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGT(FieldRuleTrace, v))
+}
+
+// RuleTraceGTE applies the GTE predicate on the "rule_trace" field.
+func RuleTraceGTE(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGTE(FieldRuleTrace, v))
+}
+
+// RuleTraceLT applies the LT predicate on the "rule_trace" field.
+func RuleTraceLT(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLT(FieldRuleTrace, v))
+}
+
+// RuleTraceLTE applies the LTE predicate on the "rule_trace" field.
+func RuleTraceLTE(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLTE(FieldRuleTrace, v))
+}
+
+// RuleTraceContains applies the Contains predicate on the "rule_trace" field.
+func RuleTraceContains(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldContains(FieldRuleTrace, v))
+}
+
+// RuleTraceHasPrefix applies the HasPrefix predicate on the "rule_trace" field.
+func RuleTraceHasPrefix(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldHasPrefix(FieldRuleTrace, v))
+}
+
+// RuleTraceHasSuffix applies the HasSuffix predicate on the "rule_trace" field.
+func RuleTraceHasSuffix(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldHasSuffix(FieldRuleTrace, v))
+}
+
+// RuleTraceIsNil applies the IsNil predicate on the "rule_trace" field.
+func RuleTraceIsNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIsNull(FieldRuleTrace))
+}
+
+// RuleTraceNotNil applies the NotNil predicate on the "rule_trace" field.
+func RuleTraceNotNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotNull(FieldRuleTrace))
+}
+
+// RuleTraceEqualFold applies the EqualFold predicate on the "rule_trace" field.
+func RuleTraceEqualFold(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEqualFold(FieldRuleTrace, v))
+}
+
+// RuleTraceContainsFold applies the ContainsFold predicate on the "rule_trace" field.
+func RuleTraceContainsFold(v string) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldContainsFold(FieldRuleTrace, v))
 }
 
 // ExecutorKindEQ applies the EQ predicate on the "executor_kind" field.

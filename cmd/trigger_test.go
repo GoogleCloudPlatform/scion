@@ -2629,3 +2629,114 @@ func TestTriggerEventCLI_ResolvePrefixScanBoundAndFullUUIDSkipsList(t *testing.T
 	assert.Contains(t, err.Error(), fullUUID)
 	assert.Contains(t, err.Error(), "older events were not scanned; pass the full event UUID")
 }
+
+func TestTriggerHistoryCLI_MatchedThroughDecidedDialectAndVerboseTrace(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+
+	origFormat := outputFormat
+	origLimit, origCursor, origVerbose := triggerHistoryLimit, triggerHistoryCursor, triggerHistoryVerbose
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerHistoryLimit, triggerHistoryCursor, triggerHistoryVerbose = origLimit, origCursor, origVerbose
+	})
+
+	trID := "11111111-2222-4333-8444-555555555555"
+	started := fixedNow.Add(-1 * time.Minute)
+	finished := fixedNow.Add(-55 * time.Second)
+	remMs := int64(992)
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID+"/history" {
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerFiresResponse{
+				Fires: []hubclient.TriggerFire{
+					{
+						ID:             "aaaaaaaa-1111-4222-8333-444444444444",
+						TriggerID:      trID,
+						EventID:        "bbbbbbbb-1111-4222-8333-444444444444",
+						ProjectID:      "proj-1",
+						Subject:        "svc:payments",
+						Status:         "fired",
+						MatchedThrough: "2/2",
+						DecidedDialect: "cel",
+						RuleTrace: &hubclient.TriggerRuleTrace{
+							Elements: []hubclient.TriggerRuleTraceElement{
+								{Index: 1, Dialect: "cel", Class: "matched", DurationMs: 1},
+								{Index: 2, Dialect: "cel", Class: "matched", DurationMs: 2},
+							},
+							BudgetRemainingMs: &remMs,
+						},
+						StartedAt:  started,
+						FinishedAt: &finished,
+					},
+					{
+						ID:             "cccccccc-1111-4222-8333-444444444444",
+						TriggerID:      trID,
+						EventID:        "dddddddd-1111-4222-8333-444444444444",
+						ProjectID:      "proj-1",
+						Subject:        "webhook:ep-1",
+						Status:         "skipped",
+						Error:          "rule uncertain",
+						MatchedThrough: "2/3",
+						DecidedDialect: "system_one",
+						RuleTrace: &hubclient.TriggerRuleTrace{
+							Elements: []hubclient.TriggerRuleTraceElement{
+								{Index: 1, Dialect: "cel", Class: "matched", DurationMs: 0},
+								{Index: 2, Dialect: "system_one", Class: "uncertain", Reason: "abstain", DurationMs: 14, Provenance: "verdict=abstain\n\x1b[31mspoof"},
+							},
+							Unexecuted:        []int{3},
+							BudgetRemainingMs: &remMs,
+						},
+						StartedAt:  started,
+						FinishedAt: &finished,
+					},
+				},
+				TotalCount: 2,
+				ServerTime: fixedNow,
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}, hubsync.CredentialKindOAuth)
+
+	// 1. Default table shows MATCHED and DIALECT columns, hiding rule_trace behind --verbose.
+	outputFormat = ""
+	triggerHistoryLimit = 0
+	triggerHistoryCursor = ""
+	triggerHistoryVerbose = false
+	defaultOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerHistory(triggerHistoryCmd, []string{trID}))
+	})
+	assert.Contains(t, defaultOut, "MATCHED")
+	assert.Contains(t, defaultOut, "DIALECT")
+	assert.Contains(t, defaultOut, "2/2")
+	assert.Contains(t, defaultOut, "2/3")
+	assert.Contains(t, defaultOut, "cel")
+	assert.Contains(t, defaultOut, "system_one")
+	assert.NotContains(t, defaultOut, "unexecuted", "rule_trace must stay behind --verbose")
+
+	// 2. --verbose renders per-element trace, unexecuted indices, and sanitizes control bytes.
+	triggerHistoryVerbose = true
+	verboseOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerHistory(triggerHistoryCmd, []string{trID}))
+	})
+	assert.Contains(t, verboseOut, "1 [cel] matched (1ms)")
+	assert.Contains(t, verboseOut, "2 [system_one] uncertain (14ms) reason=abstain")
+	assert.Contains(t, verboseOut, "unexecuted: [3]")
+	assert.NotContains(t, verboseOut, "\x1b[", "control characters in provenance must never reach terminal raw")
+
+	// 3. --format json includes matchedThrough, decidedDialect, and ruleTrace.
+	outputFormat = "json"
+	jsonOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerHistory(triggerHistoryCmd, []string{trID}))
+	})
+	var parsed hubclient.ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+	require.Len(t, parsed.Fires, 2)
+	assert.Equal(t, "2/2", parsed.Fires[0].MatchedThrough)
+	assert.Equal(t, "cel", parsed.Fires[0].DecidedDialect)
+	require.NotNil(t, parsed.Fires[0].RuleTrace)
+	assert.Len(t, parsed.Fires[0].RuleTrace.Elements, 2)
+	assert.Equal(t, []int{3}, parsed.Fires[1].RuleTrace.Unexecuted)
+}

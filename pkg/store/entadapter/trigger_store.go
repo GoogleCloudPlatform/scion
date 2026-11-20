@@ -1664,21 +1664,24 @@ func (s *TriggerStore) ReconcileOrphanedPendingTriggerEvents(ctx context.Context
 
 func entTriggerFireToStore(e *ent.TriggerFire) *store.TriggerFire {
 	tf := &store.TriggerFire{
-		ID:           e.ID.String(),
-		ProjectID:    e.ProjectID.String(),
-		TriggerID:    e.TriggerID.String(),
-		EventID:      e.EventID.String(),
-		Subject:      e.Subject,
-		ActionType:   e.ActionType,
-		Status:       e.Status,
-		Error:        e.Error,
-		ResultRef:    e.ResultRef,
-		ExecutorKind: e.ExecutorKind,
-		ExecutorID:   e.ExecutorID,
-		LeaseUntil:   e.LeaseUntil,
-		StartedAt:    e.StartedAt,
-		FinishedAt:   e.FinishedAt,
-		CreatedAt:    e.Created,
+		ID:             e.ID.String(),
+		ProjectID:      e.ProjectID.String(),
+		TriggerID:      e.TriggerID.String(),
+		EventID:        e.EventID.String(),
+		Subject:        e.Subject,
+		ActionType:     e.ActionType,
+		Status:         e.Status,
+		Error:          e.Error,
+		ResultRef:      e.ResultRef,
+		MatchedThrough: e.MatchedThrough,
+		DecidedDialect: e.DecidedDialect,
+		RuleTrace:      e.RuleTrace,
+		ExecutorKind:   e.ExecutorKind,
+		ExecutorID:     e.ExecutorID,
+		LeaseUntil:     e.LeaseUntil,
+		StartedAt:      e.StartedAt,
+		FinishedAt:     e.FinishedAt,
+		CreatedAt:      e.Created,
 	}
 	tf.InitiatorAttribution = initiatorAttributionFromColumns(
 		e.InitiatorPrincipalKind, e.InitiatorPrincipalID,
@@ -1765,6 +1768,15 @@ func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.Trigger
 	}
 	if fire.ResultRef != "" {
 		create.SetResultRef(fire.ResultRef)
+	}
+	if fire.MatchedThrough != "" {
+		create.SetMatchedThrough(fire.MatchedThrough)
+	}
+	if fire.DecidedDialect != "" {
+		create.SetDecidedDialect(fire.DecidedDialect)
+	}
+	if fire.RuleTrace != "" {
+		create.SetRuleTrace(fire.RuleTrace)
 	}
 	if fire.FinishedAt != nil {
 		create.SetFinishedAt(fire.FinishedAt.UTC())

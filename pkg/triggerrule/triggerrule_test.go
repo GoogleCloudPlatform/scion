@@ -1910,7 +1910,7 @@ func TestMatchAll_OrderAndShortCircuitWithRecordingDialect(t *testing.T) {
 				Through: 1,
 				Dialect: "cel",
 				Class:   triggerrule.MatchClassFailed,
-				Reason:  triggerrule.SkipReasonEvalFailed,
+				Reason:  triggerrule.MatchReasonCorruptRules,
 			},
 			wantErr:   true,
 			wantErrIs: triggerrule.ErrCorruptMatchRules,
@@ -1929,7 +1929,7 @@ func TestMatchAll_OrderAndShortCircuitWithRecordingDialect(t *testing.T) {
 				Through: 2,
 				Dialect: "cel",
 				Class:   triggerrule.MatchClassFailed,
-				Reason:  triggerrule.SkipReasonEvalFailed,
+				Reason:  triggerrule.MatchReasonCorruptRules,
 			},
 			wantErr:   true,
 			wantErrIs: triggerrule.ErrCorruptMatchRules,
@@ -2051,7 +2051,7 @@ func TestMatchAll_SharedBudgetTrackerAndDeadlineClamp(t *testing.T) {
 		Through: 2,
 		Dialect: "slow_wide",
 		Class:   triggerrule.MatchClassBudget,
-		Reason:  triggerrule.SkipReasonBudgetExhausted,
+		Reason:  triggerrule.MatchReasonBudgetExhausted,
 	}
 	if res2 != wantRes2 {
 		t.Fatalf("Trigger 2 result = %+v, want %+v", res2, wantRes2)
@@ -2199,5 +2199,278 @@ func TestSkipReason_CorruptMatchRulesSentinel(t *testing.T) {
 				t.Fatalf("SkipReason(%v) = (%q, %v), want (%q, true)", tc.err, reason, ok, triggerrule.SkipReasonEvalFailed)
 			}
 		})
+	}
+}
+
+type slowCompileDialect struct {
+	compileSleep time.Duration
+	evalSleep    time.Duration
+}
+
+func (d *slowCompileDialect) Name() string { return "slow_compile" }
+
+func (d *slowCompileDialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{
+		PerformsIO:  false,
+		MaxEvalTime: 500 * time.Millisecond,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter, ruleengine.KindSubject},
+	}
+}
+
+func (d *slowCompileDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	if d.compileSleep > 0 {
+		time.Sleep(d.compileSleep)
+	}
+	return ruleengine.NewCompiled(env.Consumer, d.Name(), kind, rule), nil
+}
+
+func (d *slowCompileDialect) Evaluate(_ context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	if d.evalSleep > 0 {
+		time.Sleep(d.evalSleep)
+	}
+	if c.Kind() == ruleengine.KindSubject {
+		return ruleengine.Decision{Kind: c.Kind(), String: "derived-subj"}, nil
+	}
+	return ruleengine.Decision{Kind: c.Kind(), Bool: true, Trace: "q1=yes"}, nil
+}
+
+func TestCompileTimeNotChargedToEventBudget(t *testing.T) {
+	// Compile takes 120ms while the shared per-event budget is only 60ms.
+	// Per O2 / 3a F2, compile time must NOT be charged to the per-event budget,
+	// so both MatchAll and Subject succeed without exhausting the 60ms budget.
+	slowComp := &slowCompileDialect{compileSleep: 120 * time.Millisecond, evalSleep: 2 * time.Millisecond}
+	_, rules := newTriggerRulesWithExtraDialects(t, slowComp)
+
+	ctx := context.Background()
+	ev := sampleFireEvent(`{"ok":true}`)
+	act, err := triggerrule.NewActivation(ev, hubfire.FireTriggerRef{ID: "trig-comp", Name: "comp"})
+	if err != nil {
+		t.Fatalf("NewActivation: %v", err)
+	}
+	tracker := ruleengine.NewBudgetTracker(60 * time.Millisecond)
+	scope := celengine.CacheScope{ID: "trig-comp", Revision: 1}
+
+	res, trace, err := rules.MatchAllWithTrace(
+		ctx,
+		scope,
+		[]triggerrule.Rule{{Dialect: "slow_compile", Expr: "check_1"}},
+		act,
+		triggerrule.WithBudget(tracker),
+	)
+	if err != nil || !res.Matched {
+		t.Fatalf("MatchAllWithTrace = (%+v, %v), want Matched=true (compile time must not exhaust 60ms tracker)", res, err)
+	}
+	subj, err := rules.Subject(ctx, scope, triggerrule.Rule{Dialect: "slow_compile", Expr: "subj_1"}, act, triggerrule.WithBudget(tracker))
+	if err != nil || subj != "derived-subj" {
+		t.Fatalf("Subject = (%q, %v), want (\"derived-subj\", nil)", subj, err)
+	}
+	if tracker.Spent() >= 60*time.Millisecond {
+		t.Fatalf("tracker.Spent() = %v; compile sleep (240ms total) was charged to event budget", tracker.Spent())
+	}
+	if len(trace.Elements) != 1 || trace.Elements[0].Provenance != "q1=yes" {
+		t.Fatalf("unexpected trace elements: %+v", trace.Elements)
+	}
+}
+
+func TestMatchAll_EvaluationCapsClosedReasonVocabularyAndTrace(t *testing.T) {
+	rec := newRecordingFakeDialect("rec_vocab", 100*time.Millisecond)
+	rec.setOutcome("secret_leak_fail", false, &ruleengine.FailedError{
+		Reason: "leaked rule text event.payload.secret == 'hunter2'",
+	})
+	rec.setOutcome("secret_leak_uncertain", false, &ruleengine.UncertainError{
+		Reason: "raw prompt content with spaces",
+	})
+	rec.setOutcome("ok_true", true, nil)
+	re, rules := newTriggerRulesWithExtraDialects(t, rec)
+
+	ctx := context.Background()
+	ev := sampleFireEvent(`{"ok":true}`)
+	act, err := triggerrule.NewActivation(ev, hubfire.FireTriggerRef{ID: "trig-caps", Name: "caps"})
+	if err != nil {
+		t.Fatalf("NewActivation: %v", err)
+	}
+	scope := celengine.CacheScope{ID: "trig-caps", Revision: 1}
+	budget := ruleengine.NewBudgetTracker(time.Second)
+
+	// 1. > MaxMatchRules (9 elements) fails closed before evaluating any element.
+	nineRules := make([]triggerrule.Rule, triggerrule.MaxMatchRules+1)
+	for i := range nineRules {
+		nineRules[i] = triggerrule.Rule{Dialect: "rec_vocab", Expr: "ok_true"}
+	}
+	res9, _, err9 := rules.MatchAllWithTrace(ctx, scope, nineRules, act, triggerrule.WithBudget(budget))
+	if err9 == nil || res9.Matched || res9.Class != triggerrule.MatchClassFailed || res9.Reason != celengine.CategorySize {
+		t.Fatalf(">MaxMatchRules: res=%+v err=%v, want Class=failed Reason=size", res9, err9)
+	}
+	if skip, ok := triggerrule.SkipReason(err9); !ok || skip != triggerrule.SkipReasonEvalFailed {
+		t.Fatalf("SkipReason(>MaxMatchRules) = (%q, %v), want (%q, true)", skip, ok, triggerrule.SkipReasonEvalFailed)
+	}
+	if _, evalCalls := rec.calls(); len(evalCalls) != 0 {
+		t.Fatalf(">MaxMatchRules must not evaluate any element, got %v", evalCalls)
+	}
+
+	// 2b. List-total JSON size > MaxMatchRulesJSONBytes (16 KiB) with <= 8 elements and each element <= 4096B
+	// fails closed at evaluation time before evaluating any element (O3).
+	fiveNearMax := make([]triggerrule.Rule, 5)
+	for i := range fiveNearMax {
+		fiveNearMax[i] = triggerrule.Rule{
+			Dialect: "rec_vocab",
+			Expr:    fmt.Sprintf("elem_%d_%s", i, strings.Repeat("q", 3500)),
+		}
+	}
+	resTotalBig, _, errTotalBig := rules.MatchAllWithTrace(ctx, scope, fiveNearMax, act, triggerrule.WithBudget(budget))
+	if errTotalBig == nil || resTotalBig.Matched || resTotalBig.Through != 1 || resTotalBig.Class != triggerrule.MatchClassFailed || resTotalBig.Reason != celengine.CategorySize {
+		t.Fatalf(">MaxMatchRulesJSONBytes: res=%+v err=%v, want Through=1 Class=failed Reason=size", resTotalBig, errTotalBig)
+	}
+	if skip, ok := triggerrule.SkipReason(errTotalBig); !ok || skip != triggerrule.SkipReasonEvalFailed {
+		t.Fatalf("SkipReason(>MaxMatchRulesJSONBytes) = (%q, %v), want (%q, true)", skip, ok, triggerrule.SkipReasonEvalFailed)
+	}
+	if _, evalCalls := rec.calls(); len(evalCalls) != 0 {
+		t.Fatalf(">MaxMatchRulesJSONBytes must not evaluate any element, got %v", evalCalls)
+	}
+
+	// 2. Oversized element (> MaxMatchRuleBytes) fails closed even on non-CEL dialect.
+	oversized := strings.Repeat("x", triggerrule.MaxMatchRuleBytes+1)
+	resBig, traceBig, errBig := rules.MatchAllWithTrace(ctx, scope, []triggerrule.Rule{
+		{Dialect: "rec_vocab", Expr: "ok_true"},
+		{Dialect: "rec_vocab", Expr: oversized},
+		{Dialect: "rec_vocab", Expr: "ok_true"},
+	}, act, triggerrule.WithBudget(budget))
+	if errBig == nil || resBig.Matched || resBig.Through != 2 || resBig.Class != triggerrule.MatchClassFailed || resBig.Reason != celengine.CategorySize {
+		t.Fatalf(">MaxMatchRuleBytes: res=%+v err=%v, want Through=2 Class=failed Reason=size", resBig, errBig)
+	}
+	if !slices.Equal(traceBig.Unexecuted, []int{3}) {
+		t.Fatalf("traceBig.Unexecuted = %v, want [3]", traceBig.Unexecuted)
+	}
+
+	// 3. Tainted/free-text dialect error reasons are scrubbed to closed content-free codes.
+	resFail, traceFail, errFail := rules.MatchAllWithTrace(ctx, scope, []triggerrule.Rule{
+		{Dialect: "rec_vocab", Expr: "secret_leak_fail"},
+	}, act, triggerrule.WithBudget(budget))
+	if errFail == nil || resFail.Class != triggerrule.MatchClassFailed || resFail.Reason != triggerrule.MatchReasonEvalFailed {
+		t.Fatalf("tainted FailedError: res=%+v err=%v, want Class=failed Reason=eval_failed", resFail, errFail)
+	}
+	encodedFail := triggerrule.EncodeRuleTrace(traceFail)
+	if strings.Contains(encodedFail, "hunter2") || strings.Contains(encodedFail, "secret") {
+		t.Fatalf("encoded RuleTrace leaked error text: %s", encodedFail)
+	}
+
+	resUnc, traceUnc, errUnc := rules.MatchAllWithTrace(ctx, scope, []triggerrule.Rule{
+		{Dialect: "rec_vocab", Expr: "secret_leak_uncertain"},
+	}, act, triggerrule.WithBudget(budget))
+	if errUnc == nil || resUnc.Class != triggerrule.MatchClassUncertain || resUnc.Reason != triggerrule.MatchReasonUncertain {
+		t.Fatalf("tainted UncertainError: res=%+v err=%v, want Class=uncertain Reason=uncertain", resUnc, errUnc)
+	}
+	encodedUnc := triggerrule.EncodeRuleTrace(traceUnc)
+	if strings.Contains(encodedUnc, "raw prompt") {
+		t.Fatalf("encoded RuleTrace leaked uncertain error text: %s", encodedUnc)
+	}
+
+	// 4. Un-granted dialect at fire time maps via SkipReason to "rule evaluation failed" (design §8 item 7, SEC-3b1rw-03).
+	if err := re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
+	_, _, errUngranted := rules.MatchAllWithTrace(ctx, scope, []triggerrule.Rule{
+		{Dialect: "rec_vocab", Expr: "ok_true"},
+	}, act, triggerrule.WithBudget(budget))
+	if skip, ok := triggerrule.SkipReason(errUngranted); !ok || skip != triggerrule.SkipReasonEvalFailed {
+		t.Fatalf("SkipReason(ungranted dialect) = (%q, %v), want (%q, true)", skip, ok, triggerrule.SkipReasonEvalFailed)
+	}
+}
+
+func TestStage1CacheConfigBudgetAndPrecompiledRegexHeapBound(t *testing.T) {
+	cfg := triggerrule.Stage1CacheConfig()
+	if cfg.MaxEntries != celengine.DefaultCacheMaxEntries {
+		t.Fatalf("Stage1CacheConfig().MaxEntries = %d, want DefaultCacheMaxEntries (%d)", cfg.MaxEntries, celengine.DefaultCacheMaxEntries)
+	}
+	if cfg.MaxBytes != celengine.DefaultCacheMaxBytes {
+		t.Fatalf("Stage1CacheConfig().MaxBytes = %d, want DefaultCacheMaxBytes (%d)", cfg.MaxBytes, celengine.DefaultCacheMaxBytes)
+	}
+	if cfg.MaxBytesPerProject <= 0 || cfg.MaxBytesPerProject > cfg.MaxBytes/2 {
+		t.Fatalf("Stage1CacheConfig().MaxBytesPerProject = %d, want positive fraction <= MaxBytes/2 (%d)", cfg.MaxBytesPerProject, cfg.MaxBytes/2)
+	}
+	if cfg.MaxPerProject <= 0 || cfg.MaxPerProject > cfg.MaxEntries/2 {
+		t.Fatalf("Stage1CacheConfig().MaxPerProject = %d, want positive fraction <= MaxEntries/2 (%d)", cfg.MaxPerProject, cfg.MaxEntries/2)
+	}
+
+	eng, err := celengine.New(triggerrule.Env(), triggerrule.Stage1Limits(), cfg)
+	if err != nil {
+		t.Fatalf("celengine.New(Stage1CacheConfig): %v", err)
+	}
+	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	// Build regex-bearing trigger rules (~110-130 KiB weight each, fitting inside the
+	// 256 KiB per-project cap while packing multiple rules across 20 projects to stress
+	// the 1 MiB global Stage1CacheConfig heap ceiling) plus ~600 KiB extreme regex rules
+	// (> 256 KiB per-project cap, exercising O1 compile-use-don't-retain).
+	buildProjectRegexRule := func(projIdx, ruleIdx int, maxTerms int) string {
+		var b strings.Builder
+		for j := 0; j < maxTerms; j++ {
+			term := fmt.Sprintf(`string(event.payload.s).matches("^p%d_r%d_%d[a-z]{1,100}$")`, projIdx, ruleIdx, j)
+			sep := ""
+			if j > 0 {
+				sep = " || "
+			}
+			if b.Len()+len(sep)+len(term) > triggerrule.MaxMatchRuleBytes {
+				break
+			}
+			b.WriteString(sep)
+			b.WriteString(term)
+		}
+		return b.String()
+	}
+
+	runtime.GC()
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	for p := 0; p < 20; p++ {
+		projID := fmt.Sprintf("proj-%d", p)
+		// 6 medium-heavy regex rules (~115 KiB weight each) + 2 extreme ~4 KiB regex rules (~550 KiB weight > 256 KiB).
+		for r := 0; r < 6; r++ {
+			expr := buildProjectRegexRule(p, r, 16)
+			scope := celengine.CacheScope{
+				Consumer:  triggerrule.ConsumerName,
+				ProjectID: projID,
+				ID:        fmt.Sprintf("trig-med-%d-%d", p, r),
+				Revision:  1,
+			}
+			if _, err := eng.Cached(ctx, scope, expr, filterKind); err != nil {
+				t.Fatalf("Cached med[%d,%d]: %v", p, r, err)
+			}
+		}
+		for r := 0; r < 2; r++ {
+			expr := buildProjectRegexRule(p, 100+r, 90)
+			scope := celengine.CacheScope{
+				Consumer:  triggerrule.ConsumerName,
+				ProjectID: projID,
+				ID:        fmt.Sprintf("trig-huge-%d-%d", p, r),
+				Revision:  1,
+			}
+			if _, err := eng.Cached(ctx, scope, expr, filterKind); err != nil {
+				t.Fatalf("Cached huge[%d,%d]: %v", p, r, err)
+			}
+		}
+	}
+
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+
+	stats := eng.CacheStats()
+	if stats.Bytes > celengine.DefaultCacheMaxBytes {
+		t.Fatalf("CacheStats.Bytes = %d, want <= %d (1 MiB)", stats.Bytes, celengine.DefaultCacheMaxBytes)
+	}
+	if stats.Entries == 0 || stats.Entries > 16 {
+		t.Fatalf("CacheStats.Entries = %d, want 1..16 under 1 MiB Stage1CacheConfig", stats.Entries)
+	}
+	var retained int64
+	if after.HeapAlloc > before.HeapAlloc {
+		retained = int64(after.HeapAlloc - before.HeapAlloc)
+	}
+	const maxRetainedBytes = 64 << 20 // 64 MiB
+	if retained > maxRetainedBytes {
+		t.Fatalf("Stage1CacheConfig retained heap delta = %d MiB, want <= %d MiB", retained>>20, maxRetainedBytes>>20)
 	}
 }

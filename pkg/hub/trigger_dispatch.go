@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
@@ -37,12 +39,13 @@ import (
 // triggerRuntime holds the hub's shared trigger.event durablequeue handle and
 // background drainer lifecycle state. The zero value is ready to use.
 type triggerRuntime struct {
-	mu      sync.Mutex
-	queue   *durablequeue.StoreQueue
-	drainer *durablequeue.Drainer
-	cancel  context.CancelFunc
-	done    chan struct{}
-	started bool
+	mu          sync.Mutex
+	queue       *durablequeue.StoreQueue
+	ruleMetrics *trigger.OTelRuleEvalMetrics
+	drainer     *durablequeue.Drainer
+	cancel      context.CancelFunc
+	done        chan struct{}
+	started     bool
 }
 
 // TriggerEventQueue returns the hub's shared durablequeue.StoreQueue for
@@ -225,10 +228,20 @@ func (s *Server) reconcileTriggerDrainerLocked(ctx context.Context, dqStore stor
 func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durablequeue.StoreQueue) (*durablequeue.Drainer, error) {
 	core := serverTriggerCore{srv: s}
 	logger := logging.Subsystem("hub.trigger-drainer")
+	if s.triggers.ruleMetrics == nil {
+		m, mErr := trigger.NewOTelRuleEvalMetrics(otel.GetMeterProvider())
+		if mErr != nil {
+			logger.Warn("hub.triggers: failed to initialize rule eval metrics", "error", mErr)
+		} else {
+			s.triggers.ruleMetrics = m
+		}
+	}
 	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
-		Store:  s.store,
-		Core:   core,
-		Logger: logger,
+		Store:       s.store,
+		Core:        core,
+		Rules:       s.TriggerRules(),
+		RuleMetrics: s.triggers.ruleMetrics,
+		Logger:      logger,
 	})
 	if err != nil {
 		return nil, err

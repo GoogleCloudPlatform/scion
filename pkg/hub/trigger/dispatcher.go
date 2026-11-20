@@ -28,9 +28,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
@@ -59,11 +61,12 @@ const (
 	ExecutorIDPrefixTriggerEvent = "trigger_event:"
 
 	// Content-free generic error texts persisted on trigger_events / trigger_fires.
-	ErrEventDroppedByQueueLimits     = "dropped by queue limits"
-	ErrEventProcessingFailed         = "processing failed"
-	ErrFireRuleBudgetExhausted       = "rule budget exhausted"
-	ErrFireRuleEvaluationFailed      = "rule evaluation failed"
-	ErrFireRuleEvaluationUnavailable = "rule evaluation unavailable"
+	ErrEventDroppedByQueueLimits = "dropped by queue limits"
+	ErrEventProcessingFailed     = "processing failed"
+	ErrFireRuleBudgetExhausted   = "rule budget exhausted"
+	ErrFireRuleEvaluationFailed  = "rule evaluation failed"
+	ErrFireRuleUncertain         = "rule uncertain"
+	ErrFireRuleNoLongerCompiles  = "rule no longer compiles"
 )
 
 // Core is the narrow capability interface package hub/trigger consumes from
@@ -90,6 +93,9 @@ type FireAdmitter interface {
 type DispatcherConfig struct {
 	Core           Core
 	Store          store.TriggerStore
+	Rules          *triggerrule.Rules
+	RuleMetrics    RuleEvalMetrics
+	FireAudit      FireAuditSink
 	PerFireTimeout time.Duration
 	RuleBudget     time.Duration
 	Logger         *slog.Logger
@@ -116,13 +122,26 @@ type DrainerOptions struct {
 // Dispatcher consumes trigger.event items from durablequeue, matches active
 // triggers, claims idempotent trigger_fires rows, invokes Core.Fire, and marks
 // trigger_events rows processed (§6.3).
+//
+// Security L1 seam note (ptone/scion#8030; mixed-rule-arrays §7): consumer
+// "trigger" remains admitted exclusively to pure, no-I/O Grant("cel"), where
+// celengine.Program.Eval enforces a post-return wall-clock deadline backstop.
+// Admitting any second dialect to consumer "trigger" requires a dialect-level
+// or engine-level post-return deadline check so evaluation never trusts a
+// dialect to honor context cancellation.
 type Dispatcher struct {
 	core           Core
 	store          store.TriggerStore
+	rules          *triggerrule.Rules
+	ruleMetrics    RuleEvalMetrics
+	fireAudit      FireAuditSink
 	perFireTimeout time.Duration
 	ruleBudget     time.Duration
 	logger         *slog.Logger
 	now            func() time.Time
+
+	statsMu   sync.Mutex
+	evalStats map[RuleEvalKey]RuleEvalBucket
 }
 
 // NewDispatcher validates cfg and constructs a Dispatcher.
@@ -149,14 +168,56 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	if nowFn == nil {
 		nowFn = time.Now
 	}
+	fireAudit := cfg.FireAudit
+	if fireAudit == nil {
+		fireAudit = NewSlogAuditSink(SlogAuditConfig{Now: nowFn})
+	}
 	return &Dispatcher{
 		core:           cfg.Core,
 		store:          cfg.Store,
+		rules:          cfg.Rules,
+		ruleMetrics:    cfg.RuleMetrics,
+		fireAudit:      fireAudit,
 		perFireTimeout: perFire,
 		ruleBudget:     ruleBudget,
 		logger:         logger,
 		now:            nowFn,
+		evalStats:      make(map[RuleEvalKey]RuleEvalBucket),
 	}, nil
+}
+
+// RuleEvalStats returns a point-in-time snapshot of per-(dialect, class) rule
+// evaluation counts and durations observed by this Dispatcher.
+func (d *Dispatcher) RuleEvalStats() map[RuleEvalKey]RuleEvalBucket {
+	if d == nil {
+		return nil
+	}
+	d.statsMu.Lock()
+	defer d.statsMu.Unlock()
+	out := make(map[RuleEvalKey]RuleEvalBucket, len(d.evalStats))
+	maps.Copy(out, d.evalStats)
+	return out
+}
+
+func (d *Dispatcher) recordRuleEval(ctx context.Context, dialect, class string, elapsed time.Duration) {
+	if d == nil {
+		return
+	}
+	dName := normalizeMetricDialect(dialect, d.rules)
+	cName := normalizeMetricClass(class)
+	dur := max(elapsed, time.Duration(0))
+
+	d.statsMu.Lock()
+	key := RuleEvalKey{Dialect: dName, Class: cName}
+	b := d.evalStats[key]
+	b.Count++
+	b.TotalDuration += dur
+	d.evalStats[key] = b
+	d.statsMu.Unlock()
+
+	if d.ruleMetrics != nil {
+		d.ruleMetrics.ObserveRuleEval(ctx, dName, cName, dur)
+	}
 }
 
 // NewDrainer constructs the trigger.event durablequeue.Drainer with Stage 1
@@ -272,17 +333,30 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		return durablequeue.Result{Err: errors.New("trigger: list candidates failed")}
 	}
 
-	// Parse payload JSON once per event so rule evaluation shares one value (§6.3, F5).
-	// Phase 3b-2 (ptone/scion#8030) consumes parsedPayload when building the CEL
-	// rule activation; Stage 1b-3 performs Types-only matching and still charges
-	// the once-per-event JSON parse against ruleElapsed.
+	// Parse payload JSON once per event via NewEventActivation so every candidate
+	// trigger rule shares one parsed activation and one aggregate per-event
+	// BudgetTracker (§6.3, F5, N3; mixed-rule-arrays §3, §6).
 	parseStart := d.now()
-	var parsedPayload any
+	var rawPayload []byte
 	if ev.Payload != "" {
-		_ = json.Unmarshal([]byte(ev.Payload), &parsedPayload)
+		rawPayload = []byte(ev.Payload)
 	}
-	_ = parsedPayload
-	ruleElapsed := max(d.now().Sub(parseStart), time.Duration(0))
+	baseEvent := hubfire.FireEvent{
+		ID:         ev.ID,
+		ProjectID:  ev.ProjectID,
+		SourceKind: ev.SourceKind,
+		SourceID:   ev.SourceID,
+		Type:       ev.Type,
+		Subject:    ev.Subject,
+		OccurredAt: ev.OccurredAt,
+		ReceivedAt: ev.ReceivedAt,
+		Attributes: ev.Attributes,
+		Lists:      ev.Lists,
+		Payload:    rawPayload,
+	}
+	baseAct, actErr := triggerrule.NewEventActivation(baseEvent)
+	budget := ruleengine.NewBudgetTracker(d.ruleBudget)
+	budget.Charge(max(d.now().Sub(parseStart), time.Duration(0)))
 
 	var (
 		matchCount int
@@ -297,28 +371,166 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 
 		typeStart := d.now()
 		matched := triggerrule.MatchTypes(tr.MatchTypes, ev.Type)
-		ruleElapsed += max(d.now().Sub(typeStart), time.Duration(0))
+		budget.Charge(max(d.now().Sub(typeStart), time.Duration(0)))
 		if !matched {
 			continue
 		}
 
-		if ruleElapsed >= d.ruleBudget {
-			if rErr := d.recordDirectFire(ctx, tr, ev, deriveFireSubject(ev.Subject), store.TriggerFireStatusSkipped, ErrFireRuleBudgetExhausted); rErr != nil {
+		// SEC-3b1rw-01: fail closed on corrupt stored match_rules before any fire.
+		matchRules, normErr := MatchRules(*tr)
+		if normErr != nil {
+			remMs := budget.Remaining().Milliseconds()
+			traceStr := triggerrule.EncodeRuleTrace(triggerrule.RuleTrace{
+				Elements: []triggerrule.RuleTraceElement{{
+					Index:   1,
+					Dialect: "unknown",
+					Class:   triggerrule.MatchClassFailed,
+					Reason:  triggerrule.MatchReasonCorruptRules,
+				}},
+				BudgetRemainingMs: &remMs,
+			})
+			d.recordRuleEval(ctx, "unknown", triggerrule.MatchClassFailed, 0)
+			if rErr := d.recordDirectFire(
+				ctx, tr, ev, deriveFireSubject(ev.Subject),
+				store.TriggerFireStatusSkipped, ErrFireRuleEvaluationFailed,
+				"0/0", "", traceStr, triggerrule.MatchReasonCorruptRules,
+			); rErr != nil {
 				return durablequeue.Result{Err: errors.New("trigger: record skipped fire failed")}
 			}
 			continue
 		}
 
-		// Fail closed if a stored row carries match rules, corrupt/undecodable match_rules,
-		// or a legacy scalar match_rule before 3b-2 wires rule evaluation (ptone/scion#8030).
-		if len(tr.MatchRules) > 0 || tr.MatchRulesCorrupt || strings.TrimSpace(tr.MatchRule) != "" {
-			if rErr := d.recordDirectFire(ctx, tr, ev, deriveFireSubject(ev.Subject), store.TriggerFireStatusSkipped, ErrFireRuleEvaluationUnavailable); rErr != nil {
-				return durablequeue.Result{Err: errors.New("trigger: record skipped fire failed")}
+		scope := celengine.CacheScope{
+			Consumer:  triggerrule.ConsumerName,
+			ProjectID: tr.ProjectID,
+			ID:        tr.ID,
+			Revision:  int64(tr.AuthorizationRevision),
+		}
+		trigRef := hubfire.FireTriggerRef{
+			ID:   tr.ID,
+			Name: tr.Name,
+		}
+		trigAct := baseAct.WithTrigger(trigRef)
+
+		matchedThrough := "0/0"
+		decidedDialect := ""
+		ruleTraceStr := ""
+
+		if len(matchRules) == 0 {
+			if budget.Exhausted() {
+				if rErr := d.recordDirectFire(
+					ctx, tr, ev, deriveFireSubject(ev.Subject),
+					store.TriggerFireStatusSkipped, ErrFireRuleBudgetExhausted,
+					"0/0", "", "", triggerrule.MatchReasonBudgetExhausted,
+				); rErr != nil {
+					return durablequeue.Result{Err: errors.New("trigger: record skipped fire failed")}
+				}
+				continue
 			}
-			continue
+		} else {
+			if d.rules == nil || actErr != nil {
+				firstDialect := triggerrule.SafeDialectName(matchRules[0].Dialect)
+				remMs := budget.Remaining().Milliseconds()
+				traceStr := triggerrule.EncodeRuleTrace(triggerrule.RuleTrace{
+					Elements: []triggerrule.RuleTraceElement{{
+						Index:   1,
+						Dialect: firstDialect,
+						Class:   triggerrule.MatchClassFailed,
+						Reason:  triggerrule.MatchReasonEvalFailed,
+					}},
+					BudgetRemainingMs: &remMs,
+				})
+				d.recordRuleEval(ctx, firstDialect, triggerrule.MatchClassFailed, 0)
+				if rErr := d.recordDirectFire(
+					ctx, tr, ev, deriveFireSubject(ev.Subject),
+					store.TriggerFireStatusSkipped, ErrFireRuleEvaluationFailed,
+					fmt.Sprintf("1/%d", len(matchRules)), firstDialect, traceStr, triggerrule.MatchReasonEvalFailed,
+				); rErr != nil {
+					return durablequeue.Result{Err: errors.New("trigger: record skipped fire failed")}
+				}
+				continue
+			}
+
+			// SEC-3b1rw-01: ALWAYS pass WithBudget(budget) so rule evaluation is
+			// bounded by the shared per-event aggregate tracker.
+			res, trace, evalErr := d.rules.MatchAllWithTrace(
+				ctx,
+				scope,
+				matchRules,
+				trigAct,
+				triggerrule.WithBudget(budget),
+			)
+			for _, el := range trace.Elements {
+				d.recordRuleEval(ctx, el.Dialect, el.Class, el.Elapsed)
+			}
+			matchedThrough = fmt.Sprintf("%d/%d", res.Through, len(matchRules))
+			decidedDialect = res.Dialect
+			ruleTraceStr = triggerrule.EncodeRuleTrace(trace)
+
+			if evalErr != nil {
+				skipReason, isSkip := triggerrule.SkipReason(evalErr)
+				if !isSkip {
+					if ctx.Err() != nil || res.Reason == celengine.ReasonCanceled {
+						return durablequeue.Result{Err: errors.New("trigger: event handler canceled")}
+					}
+					skipReason = ErrFireRuleEvaluationFailed
+				}
+				var ce *celengine.CompileError
+				if errors.As(evalErr, &ce) {
+					d.logger.Warn("trigger: stored match rule no longer compiles",
+						"triggerID", tr.ID,
+						"eventID", ev.ID,
+						"element", res.Through,
+						"dialect", res.Dialect,
+						"category", ce.Category,
+					)
+				}
+				if rErr := d.recordDirectFire(
+					ctx, tr, ev, deriveFireSubject(ev.Subject),
+					store.TriggerFireStatusSkipped, skipReason,
+					matchedThrough, decidedDialect, ruleTraceStr, res.Reason,
+				); rErr != nil {
+					return durablequeue.Result{Err: errors.New("trigger: record skipped fire failed")}
+				}
+				continue
+			}
+			if !res.Matched {
+				continue
+			}
 		}
 
 		matchCount++
+
+		// Derived subject_rule output applies to trigger_fires.subject and coalescing
+		// only; FireEvent.Subject for the agent envelope keeps the hub-shaped source
+		// event subject so sender-derived text stays inside external_payload framing
+		// (stage1-design rev 8.34, ledger L23).
+		fireSubject := deriveFireSubject(ev.Subject)
+		if strings.TrimSpace(tr.SubjectRule) != "" {
+			if d.rules == nil || actErr != nil {
+				d.logger.Warn("trigger subject_rule skipped; falling back to event subject",
+					"trigger_id", tr.ID,
+					"event_id", ev.ID,
+					"reason", "rule_engine_unavailable",
+				)
+			} else {
+				derived := d.rules.DeriveSubject(
+					ctx,
+					scope,
+					triggerrule.Rule{Dialect: tr.SubjectDialect, Expr: tr.SubjectRule},
+					trigAct,
+					"",
+					d.logger,
+					triggerrule.WithBudget(budget),
+				)
+				if ctx.Err() != nil {
+					return durablequeue.Result{Err: errors.New("trigger: event handler canceled")}
+				}
+				if derived != "" {
+					fireSubject = derived
+				}
+			}
+		}
 
 		if lease != nil {
 			held, lErr := lease.Renew(ctx)
@@ -330,7 +542,6 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 		}
 
-		fireSubject := deriveFireSubject(ev.Subject)
 		claimNow := d.now().UTC()
 		fire := store.TriggerFire{
 			ID:                   uuid.NewString(),
@@ -340,6 +551,9 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			Subject:              fireSubject,
 			ActionType:           tr.ActionType,
 			Status:               store.TriggerFireStatusFiring,
+			MatchedThrough:       matchedThrough,
+			DecidedDialect:       decidedDialect,
+			RuleTrace:            ruleTraceStr,
 			ExecutorKind:         ExecutorKindTriggerDrainer,
 			ExecutorID:           ExecutorIDPrefixTriggerEvent + ev.ID,
 			LeaseUntil:           claimNow.Add(FireLeaseHorizon),
@@ -366,10 +580,6 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		}
 
 		tracker := newTriggerFireTracker(ctx, d.core)
-		var rawPayload []byte
-		if ev.Payload != "" {
-			rawPayload = []byte(ev.Payload)
-		}
 		req := hubfire.FireRequest{
 			ProjectID: tr.ProjectID,
 			Authority: hubfire.RecordedAuthority{
@@ -393,10 +603,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				Attributes: maps.Clone(ev.Attributes),
 				Lists:      cloneStringListMap(ev.Lists),
 				Payload:    rawPayload,
-				Trigger: &hubfire.FireTriggerRef{
-					ID:   tr.ID,
-					Name: tr.Name,
-				},
+				Trigger:    &trigRef,
 			},
 			Executor: hubfire.ExecutorContext{
 				Kind: ExecutorKindTriggerDrainer,
@@ -437,6 +644,18 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, finishedAt, statusStr, out.Error); rErr != nil {
 				d.logger.Warn("trigger: failed to update trigger fire counters",
 					"triggerID", tr.ID, "fireID", fire.ID, "error", rErr)
+			}
+			if d.fireAudit != nil {
+				d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
+					ProjectID:      tr.ProjectID,
+					TriggerID:      tr.ID,
+					EventID:        ev.ID,
+					FireID:         fire.ID,
+					ActionType:     tr.ActionType,
+					Status:         statusStr,
+					MatchedThrough: fire.MatchedThrough,
+					DecidedDialect: fire.DecidedDialect,
+				})
 			}
 		}
 		cancelWrite()
@@ -479,7 +698,12 @@ func (d *Dispatcher) loadActiveTriggers(ctx context.Context, projectID, sourceKi
 	}
 }
 
-func (d *Dispatcher) recordDirectFire(ctx context.Context, tr *store.Trigger, ev *store.TriggerEvent, subject, status, errMsg string) error {
+func (d *Dispatcher) recordDirectFire(
+	ctx context.Context,
+	tr *store.Trigger,
+	ev *store.TriggerEvent,
+	subject, status, errMsg, matchedThrough, decidedDialect, ruleTrace, auditReason string,
+) error {
 	now := d.now().UTC()
 	fire := store.TriggerFire{
 		ID:                   uuid.NewString(),
@@ -490,6 +714,9 @@ func (d *Dispatcher) recordDirectFire(ctx context.Context, tr *store.Trigger, ev
 		ActionType:           tr.ActionType,
 		Status:               status,
 		Error:                errMsg,
+		MatchedThrough:       matchedThrough,
+		DecidedDialect:       decidedDialect,
+		RuleTrace:            ruleTrace,
 		ExecutorKind:         ExecutorKindTriggerDrainer,
 		ExecutorID:           ExecutorIDPrefixTriggerEvent + ev.ID,
 		LeaseUntil:           now.Add(FireLeaseHorizon),
@@ -506,6 +733,19 @@ func (d *Dispatcher) recordDirectFire(ctx context.Context, tr *store.Trigger, ev
 		if rErr := d.store.RecordTriggerFire(ctx, tr.ID, now, status, errMsg); rErr != nil {
 			d.logger.Warn("trigger: failed to record direct fire counter",
 				"triggerID", tr.ID, "fireID", fire.ID, "error", rErr)
+		}
+		if d.fireAudit != nil {
+			d.fireAudit.RecordFire(ctx, FireAuditRecord{
+				ProjectID:      tr.ProjectID,
+				TriggerID:      tr.ID,
+				EventID:        ev.ID,
+				FireID:         fire.ID,
+				ActionType:     tr.ActionType,
+				Status:         status,
+				MatchedThrough: matchedThrough,
+				DecidedDialect: decidedDialect,
+				Reason:         auditReason,
+			})
 		}
 	}
 	return nil

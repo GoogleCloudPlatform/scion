@@ -63,6 +63,15 @@ func (TriggerFire) Fields() []ent.Field {
 			Optional(),
 		field.String("result_ref").
 			Optional(),
+		field.String("matched_through").
+			MaxLen(16).
+			Optional(),
+		field.String("decided_dialect").
+			MaxLen(32).
+			Optional(),
+		field.Text("rule_trace").
+			MaxLen(4096).
+			Optional(),
 		field.String("executor_kind").
 			Default(""),
 		field.String("executor_id").

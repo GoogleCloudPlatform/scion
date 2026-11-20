@@ -47,10 +47,11 @@ import (
 
 // ProjectDeletionService is the bounded domain service for project deletion.
 type ProjectDeletionService struct {
-	store   store.Store
-	authz   *AuthzService
-	logger  *slog.Logger
-	nowFunc func() time.Time
+	store            store.Store
+	authz            *AuthzService
+	logger           *slog.Logger
+	nowFunc          func() time.Time
+	onProjectDeleted func(projectID string)
 }
 
 // NewProjectDeletionService creates a new ProjectDeletionService.
@@ -384,6 +385,10 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 			Reason:     "project deletion failed",
 			HTTPStatus: 500,
 		}
+	}
+
+	if svc.onProjectDeleted != nil {
+		svc.onProjectDeleted(req.ProjectID)
 	}
 
 	// The project's storage (its tree on the shared project storage, the

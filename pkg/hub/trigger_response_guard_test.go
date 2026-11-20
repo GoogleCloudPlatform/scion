@@ -236,24 +236,31 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 	assert.NotContains(t, twoMatch, "expr", "multi-element TriggerResponse.match must not mirror expr")
 
 	fireResp := buildTriggerFireResponse(store.TriggerFire{
-		ID:         "fire-1",
-		TriggerID:  "tr-1",
-		EventID:    "evt-1",
-		ProjectID:  "proj-1",
-		ActionType: "message",
-		Status:     store.TriggerFireStatusFired,
-		CreatedAt:  now,
-		StartedAt:  now,
-		LeaseUntil: now.Add(time.Minute),
-		ResultRef:  "msg-1",
+		ID:             "fire-1",
+		TriggerID:      "tr-1",
+		EventID:        "evt-1",
+		ProjectID:      "proj-1",
+		ActionType:     "message",
+		Status:         store.TriggerFireStatusFired,
+		MatchedThrough: "2/2",
+		DecidedDialect: "cel",
+		RuleTrace:      `{"elements":[{"i":1,"dialect":"cel","class":"matched","duration_ms":1,"expr":"must-not-pass-through"}],"unexecuted":[3],"raw_payload":"must-not-pass-through"}`,
+		CreatedAt:      now,
+		StartedAt:      now,
+		LeaseUntil:     now.Add(time.Minute),
+		ResultRef:      "msg-1",
 	})
 	fireRaw, err := json.Marshal(fireResp)
 	require.NoError(t, err)
+	assert.NotContains(t, string(fireRaw), "must-not-pass-through", "TriggerFireResponse must strip unknown JSON keys in ruleTrace")
 	var fireMap map[string]any
 	require.NoError(t, json.Unmarshal(fireRaw, &fireMap))
-	for _, forbidden := range []string{"leaseUntil", "lease_until", "executorKind", "executorId"} {
+	for _, forbidden := range []string{"leaseUntil", "lease_until", "executorKind", "executorId", "raw_payload", "expr"} {
 		assert.NotContains(t, fireMap, forbidden, "TriggerFireResponse must not expose %q", forbidden)
 	}
+	assert.Equal(t, "2/2", fireMap["matchedThrough"])
+	assert.Equal(t, "cel", fireMap["decidedDialect"])
+	require.Contains(t, fireMap, "ruleTrace")
 
 	evtSummary := buildTriggerEventSummaryResponse(store.TriggerEvent{
 		ID:           "evt-1",

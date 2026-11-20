@@ -154,8 +154,8 @@ func TestTrackerDeadlineVsPerRuleTimeoutOnSharedEventBudget(t *testing.T) {
 		if res.Matched {
 			t.Fatalf("benign MatchAll candidate after budget exhaustion unexpectedly matched")
 		}
-		if res.Class != triggerrule.MatchClassBudget || res.Reason != triggerrule.SkipReasonBudgetExhausted {
-			t.Fatalf("benign MatchAll result = %+v, want Class=%q Reason=%q", res, triggerrule.MatchClassBudget, triggerrule.SkipReasonBudgetExhausted)
+		if res.Class != triggerrule.MatchClassBudget || res.Reason != triggerrule.MatchReasonBudgetExhausted {
+			t.Fatalf("benign MatchAll result = %+v, want Class=%q Reason=%q", res, triggerrule.MatchClassBudget, triggerrule.MatchReasonBudgetExhausted)
 		}
 		if !errors.Is(evalErr, ruleengine.ErrBudgetExhausted) {
 			t.Fatalf("benign MatchAll err = %v, want ErrBudgetExhausted", evalErr)

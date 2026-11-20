@@ -118457,6 +118457,9 @@ type TriggerFireMutation struct {
 	status                        *string
 	error                         *string
 	result_ref                    *string
+	matched_through               *string
+	decided_dialect               *string
+	rule_trace                    *string
 	executor_kind                 *string
 	executor_id                   *string
 	lease_until                   *time.Time
@@ -119272,6 +119275,153 @@ func (m *TriggerFireMutation) ResetResultRef() {
 	delete(m.clearedFields, triggerfire.FieldResultRef)
 }
 
+// SetMatchedThrough sets the "matched_through" field.
+func (m *TriggerFireMutation) SetMatchedThrough(s string) {
+	m.matched_through = &s
+}
+
+// MatchedThrough returns the value of the "matched_through" field in the mutation.
+func (m *TriggerFireMutation) MatchedThrough() (r string, exists bool) {
+	v := m.matched_through
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMatchedThrough returns the old "matched_through" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldMatchedThrough(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMatchedThrough is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMatchedThrough requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMatchedThrough: %w", err)
+	}
+	return oldValue.MatchedThrough, nil
+}
+
+// ClearMatchedThrough clears the value of the "matched_through" field.
+func (m *TriggerFireMutation) ClearMatchedThrough() {
+	m.matched_through = nil
+	m.clearedFields[triggerfire.FieldMatchedThrough] = struct{}{}
+}
+
+// MatchedThroughCleared returns if the "matched_through" field was cleared in this mutation.
+func (m *TriggerFireMutation) MatchedThroughCleared() bool {
+	_, ok := m.clearedFields[triggerfire.FieldMatchedThrough]
+	return ok
+}
+
+// ResetMatchedThrough resets all changes to the "matched_through" field.
+func (m *TriggerFireMutation) ResetMatchedThrough() {
+	m.matched_through = nil
+	delete(m.clearedFields, triggerfire.FieldMatchedThrough)
+}
+
+// SetDecidedDialect sets the "decided_dialect" field.
+func (m *TriggerFireMutation) SetDecidedDialect(s string) {
+	m.decided_dialect = &s
+}
+
+// DecidedDialect returns the value of the "decided_dialect" field in the mutation.
+func (m *TriggerFireMutation) DecidedDialect() (r string, exists bool) {
+	v := m.decided_dialect
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDecidedDialect returns the old "decided_dialect" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldDecidedDialect(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDecidedDialect is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDecidedDialect requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDecidedDialect: %w", err)
+	}
+	return oldValue.DecidedDialect, nil
+}
+
+// ClearDecidedDialect clears the value of the "decided_dialect" field.
+func (m *TriggerFireMutation) ClearDecidedDialect() {
+	m.decided_dialect = nil
+	m.clearedFields[triggerfire.FieldDecidedDialect] = struct{}{}
+}
+
+// DecidedDialectCleared returns if the "decided_dialect" field was cleared in this mutation.
+func (m *TriggerFireMutation) DecidedDialectCleared() bool {
+	_, ok := m.clearedFields[triggerfire.FieldDecidedDialect]
+	return ok
+}
+
+// ResetDecidedDialect resets all changes to the "decided_dialect" field.
+func (m *TriggerFireMutation) ResetDecidedDialect() {
+	m.decided_dialect = nil
+	delete(m.clearedFields, triggerfire.FieldDecidedDialect)
+}
+
+// SetRuleTrace sets the "rule_trace" field.
+func (m *TriggerFireMutation) SetRuleTrace(s string) {
+	m.rule_trace = &s
+}
+
+// RuleTrace returns the value of the "rule_trace" field in the mutation.
+func (m *TriggerFireMutation) RuleTrace() (r string, exists bool) {
+	v := m.rule_trace
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuleTrace returns the old "rule_trace" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldRuleTrace(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuleTrace is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuleTrace requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuleTrace: %w", err)
+	}
+	return oldValue.RuleTrace, nil
+}
+
+// ClearRuleTrace clears the value of the "rule_trace" field.
+func (m *TriggerFireMutation) ClearRuleTrace() {
+	m.rule_trace = nil
+	m.clearedFields[triggerfire.FieldRuleTrace] = struct{}{}
+}
+
+// RuleTraceCleared returns if the "rule_trace" field was cleared in this mutation.
+func (m *TriggerFireMutation) RuleTraceCleared() bool {
+	_, ok := m.clearedFields[triggerfire.FieldRuleTrace]
+	return ok
+}
+
+// ResetRuleTrace resets all changes to the "rule_trace" field.
+func (m *TriggerFireMutation) ResetRuleTrace() {
+	m.rule_trace = nil
+	delete(m.clearedFields, triggerfire.FieldRuleTrace)
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (m *TriggerFireMutation) SetExecutorKind(s string) {
 	m.executor_kind = &s
@@ -119535,7 +119685,7 @@ func (m *TriggerFireMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerFireMutation) Fields() []string {
-	fields := make([]string, 0, 21)
+	fields := make([]string, 0, 24)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, triggerfire.FieldInitiatorPrincipalKind)
 	}
@@ -119580,6 +119730,15 @@ func (m *TriggerFireMutation) Fields() []string {
 	}
 	if m.result_ref != nil {
 		fields = append(fields, triggerfire.FieldResultRef)
+	}
+	if m.matched_through != nil {
+		fields = append(fields, triggerfire.FieldMatchedThrough)
+	}
+	if m.decided_dialect != nil {
+		fields = append(fields, triggerfire.FieldDecidedDialect)
+	}
+	if m.rule_trace != nil {
+		fields = append(fields, triggerfire.FieldRuleTrace)
 	}
 	if m.executor_kind != nil {
 		fields = append(fields, triggerfire.FieldExecutorKind)
@@ -119637,6 +119796,12 @@ func (m *TriggerFireMutation) Field(name string) (ent.Value, bool) {
 		return m.Error()
 	case triggerfire.FieldResultRef:
 		return m.ResultRef()
+	case triggerfire.FieldMatchedThrough:
+		return m.MatchedThrough()
+	case triggerfire.FieldDecidedDialect:
+		return m.DecidedDialect()
+	case triggerfire.FieldRuleTrace:
+		return m.RuleTrace()
 	case triggerfire.FieldExecutorKind:
 		return m.ExecutorKind()
 	case triggerfire.FieldExecutorID:
@@ -119688,6 +119853,12 @@ func (m *TriggerFireMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldError(ctx)
 	case triggerfire.FieldResultRef:
 		return m.OldResultRef(ctx)
+	case triggerfire.FieldMatchedThrough:
+		return m.OldMatchedThrough(ctx)
+	case triggerfire.FieldDecidedDialect:
+		return m.OldDecidedDialect(ctx)
+	case triggerfire.FieldRuleTrace:
+		return m.OldRuleTrace(ctx)
 	case triggerfire.FieldExecutorKind:
 		return m.OldExecutorKind(ctx)
 	case triggerfire.FieldExecutorID:
@@ -119813,6 +119984,27 @@ func (m *TriggerFireMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetResultRef(v)
+		return nil
+	case triggerfire.FieldMatchedThrough:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMatchedThrough(v)
+		return nil
+	case triggerfire.FieldDecidedDialect:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDecidedDialect(v)
+		return nil
+	case triggerfire.FieldRuleTrace:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuleTrace(v)
 		return nil
 	case triggerfire.FieldExecutorKind:
 		v, ok := value.(string)
@@ -119940,6 +120132,15 @@ func (m *TriggerFireMutation) ClearedFields() []string {
 	if m.FieldCleared(triggerfire.FieldResultRef) {
 		fields = append(fields, triggerfire.FieldResultRef)
 	}
+	if m.FieldCleared(triggerfire.FieldMatchedThrough) {
+		fields = append(fields, triggerfire.FieldMatchedThrough)
+	}
+	if m.FieldCleared(triggerfire.FieldDecidedDialect) {
+		fields = append(fields, triggerfire.FieldDecidedDialect)
+	}
+	if m.FieldCleared(triggerfire.FieldRuleTrace) {
+		fields = append(fields, triggerfire.FieldRuleTrace)
+	}
 	if m.FieldCleared(triggerfire.FieldFinishedAt) {
 		fields = append(fields, triggerfire.FieldFinishedAt)
 	}
@@ -119983,6 +120184,15 @@ func (m *TriggerFireMutation) ClearField(name string) error {
 		return nil
 	case triggerfire.FieldResultRef:
 		m.ClearResultRef()
+		return nil
+	case triggerfire.FieldMatchedThrough:
+		m.ClearMatchedThrough()
+		return nil
+	case triggerfire.FieldDecidedDialect:
+		m.ClearDecidedDialect()
+		return nil
+	case triggerfire.FieldRuleTrace:
+		m.ClearRuleTrace()
 		return nil
 	case triggerfire.FieldFinishedAt:
 		m.ClearFinishedAt()
@@ -120039,6 +120249,15 @@ func (m *TriggerFireMutation) ResetField(name string) error {
 		return nil
 	case triggerfire.FieldResultRef:
 		m.ResetResultRef()
+		return nil
+	case triggerfire.FieldMatchedThrough:
+		m.ResetMatchedThrough()
+		return nil
+	case triggerfire.FieldDecidedDialect:
+		m.ResetDecidedDialect()
+		return nil
+	case triggerfire.FieldRuleTrace:
+		m.ResetRuleTrace()
 		return nil
 	case triggerfire.FieldExecutorKind:
 		m.ResetExecutorKind()

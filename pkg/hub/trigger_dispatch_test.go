@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1546,4 +1547,212 @@ func TestApplyDispatchedEventEnvelope_ContentTypeSanitization(t *testing.T) {
 			assert.JSONEq(t, string(payloadBytes), string(detail.Payload))
 		})
 	}
+}
+
+func TestTriggerDispatchE2E_CELMatchRulesSubjectDerivationHistoryAndCacheInvalidation(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableWriteDenySwitch(t, f.srv)
+	ctx := context.Background()
+
+	disp := &recordingDispatcher{}
+	f.srv.SetDispatcher(disp)
+
+	done := f.srv.startTriggerDrainer(ctx)
+	require.NotNil(t, done)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		f.srv.stopTriggerDrainer(stopCtx)
+	})
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name: "deploy-events",
+	})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// 1. Trigger with 2 ordered CEL match_rules + subject_rule -> matches and overrides subject.
+	trMatchRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "prod-pay-deploy",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Types: []string{"webhook.received"},
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `event.attributes.branch == "main"`},
+				{Dialect: "cel", Expr: `has(event.payload.pr) && event.payload.pr.merged == true && string(event.payload.service).matches("^pay-[a-z0-9]+$")`},
+			},
+		},
+		Subject: &TriggerSubjectSpec{
+			Dialect: "cel",
+			Expr:    `"deploy:" + string(event.payload.service)`,
+			Mode:    store.TriggerSubjectModeNew,
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "Deploy merged"},
+	})
+	require.Equal(t, http.StatusCreated, trMatchRec.Code, trMatchRec.Body.String())
+	var trMatch TriggerResponse
+	require.NoError(t, json.Unmarshal(trMatchRec.Body.Bytes(), &trMatch))
+
+	// 2. Trigger whose element 1 evaluates false -> short-circuits before element 2, writes no fire row.
+	trFalseRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "release-only",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Types: []string{"webhook.received"},
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `event.attributes.branch == "release"`},
+				{Dialect: "cel", Expr: `event.payload.missing_must_not_eval == 1`},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "Release"},
+	})
+	require.Equal(t, http.StatusCreated, trFalseRec.Code, trFalseRec.Body.String())
+	var trFalse TriggerResponse
+	require.NoError(t, json.Unmarshal(trFalseRec.Body.Bytes(), &trFalse))
+
+	// 3. Trigger whose element 2 fails at runtime -> skipped "rule evaluation failed", matchedThrough "2/2".
+	trFailRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "unguarded-key",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match: &TriggerMatchSpec{
+			Types: []string{"webhook.received"},
+			Rules: []TriggerMatchRuleSpec{
+				{Dialect: "cel", Expr: `event.attributes.branch == "main"`},
+				{Dialect: "cel", Expr: `event.payload.absent_field == "boom"`},
+			},
+		},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "Never sent"},
+	})
+	require.Equal(t, http.StatusCreated, trFailRec.Code, trFailRec.Body.String())
+	var trFail TriggerResponse
+	require.NoError(t, json.Unmarshal(trFailRec.Body.Bytes(), &trFail))
+
+	celEng, hasEnv := f.srv.celDialect.CELEngine(triggerrule.EnvironmentName)
+	require.True(t, hasEnv)
+	assert.Zero(t, celEng.CacheStats().Entries, "authoring Compile must not populate evaluation program cache")
+
+	now := time.Now().UTC().Truncate(time.Second)
+	const rawBody = `{"pr":{"merged":true},"service":"pay-core1"}`
+	ev := &store.TriggerEvent{
+		ID:           api.NewUUID(),
+		ProjectID:    f.projectID,
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     ep.ID,
+		Type:         "webhook.received",
+		Subject:      "webhook:" + ep.ID + "/raw-subject",
+		DedupKey:     "e2e-cel-1",
+		OccurredAt:   now,
+		ReceivedAt:   now,
+		Attributes:   map[string]string{"endpoint_name": "deploy-events", "branch": "main", "signature_mode": "scion_v1"},
+		Headers:      map[string]string{"Content-Type": "application/json", "X-Scion-Delivery": "e2e-cel-1"},
+		Payload:      rawBody,
+		PayloadBytes: len(rawBody),
+		CreatedAt:    now,
+	}
+	enqueueTestTriggerEvent(t, f, ev)
+
+	require.Eventually(t, func() bool {
+		stored, err := f.store.GetTriggerEvent(ctx, ev.ID)
+		return err == nil && stored != nil && stored.Status == store.TriggerEventStatusProcessed
+	}, 5*time.Second, 20*time.Millisecond)
+
+	// Only trMatch delivered to agent: envelope and EventBody keep the hub-shaped source
+	// event subject while trigger_fires.subject records the derived subject_rule value
+	// (stage1-design rev 8.34, ledger L23).
+	calls := disp.getCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, f.targetAgent.ID, calls[0].Agent.ID)
+	require.NotNil(t, calls[0].StructuredMessage)
+	var evBody messaging.EventBody
+	require.NoError(t, json.Unmarshal(calls[0].StructuredMessage.Event, &evBody))
+	assert.Equal(t, "webhook:"+ep.ID+"/raw-subject", evBody.Subject)
+	env := extractEnvelopeJSONFromDelivery(t, calls[0].StructuredMessage.DeliveryText)
+	assert.Equal(t, "webhook:"+ep.ID+"/raw-subject", env.Event.Subject)
+
+	// History of trMatch: status=fired, subject=deploy:pay-core1, matchedThrough=2/2, decidedDialect=cel, ruleTrace.
+	matchHistRec := f.doTrigger(t, f.ownerAuth, trMatch.ID+"/history", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, matchHistRec.Code, matchHistRec.Body.String())
+	var matchHist ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(matchHistRec.Body.Bytes(), &matchHist))
+	require.Len(t, matchHist.Fires, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, matchHist.Fires[0].Status)
+	assert.Equal(t, "deploy:pay-core1", matchHist.Fires[0].Subject)
+	assert.Equal(t, "2/2", matchHist.Fires[0].MatchedThrough)
+	assert.Equal(t, "cel", matchHist.Fires[0].DecidedDialect)
+	require.NotNil(t, matchHist.Fires[0].RuleTrace)
+	assert.Len(t, matchHist.Fires[0].RuleTrace.Elements, 2)
+
+	// History of trFalse: 0 rows (silent non-match).
+	falseHistRec := f.doTrigger(t, f.ownerAuth, trFalse.ID+"/history", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, falseHistRec.Code)
+	var falseHist ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(falseHistRec.Body.Bytes(), &falseHist))
+	assert.Empty(t, falseHist.Fires)
+
+	// History of trFail: status=skipped, error="rule evaluation failed", matchedThrough=2/2, decidedDialect=cel.
+	failHistRec := f.doTrigger(t, f.ownerAuth, trFail.ID+"/history", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, failHistRec.Code, failHistRec.Body.String())
+	var failHist ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(failHistRec.Body.Bytes(), &failHist))
+	require.Len(t, failHist.Fires, 1)
+	assert.Equal(t, store.TriggerFireStatusSkipped, failHist.Fires[0].Status)
+	assert.Equal(t, triggerrule.SkipReasonEvalFailed, failHist.Fires[0].Error)
+	assert.Equal(t, "2/2", failHist.Fires[0].MatchedThrough)
+	assert.Equal(t, "cel", failHist.Fires[0].DecidedDialect)
+	require.NotNil(t, failHist.Fires[0].RuleTrace)
+	require.Len(t, failHist.Fires[0].RuleTrace.Elements, 2)
+	assert.Equal(t, "missing_input", failHist.Fires[0].RuleTrace.Elements[1].Reason)
+
+	// F4 cache invalidation verification across PATCH, resume, delete, and project deletion:
+	// Evaluated distinct programs so far:
+	// - `event.attributes.branch == "main"` (shared by trMatch & trFail)
+	// - trMatch element 2
+	// - trMatch subject_rule
+	// - trFalse element 1 (`event.attributes.branch == "release"`)
+	// - trFail element 2 (`event.payload.absent_field == "boom"`)
+	// Total = 5 distinct compiled programs in celEng.
+	assert.Equal(t, 5, celEng.CacheStats().Entries)
+
+	// PATCH trFail's rules -> invalidates trFail's old revision scope (evicts trFail's unique element 2;
+	// shared `branch == "main"` stays because trMatch still holds it!).
+	newRules := []TriggerMatchRuleSpec{{Dialect: "cel", Expr: `has(event.payload.service)`}}
+	patchRec := f.doTrigger(t, f.ownerAuth, trFail.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Rules: &newRules},
+	})
+	require.Equal(t, http.StatusOK, patchRec.Code, patchRec.Body.String())
+	assert.Equal(t, 4, celEng.CacheStats().Entries, "PATCH must invalidate unique old-revision program while keeping shared program")
+
+	// DELETE trFalse -> evicts trFalse's cached program.
+	delFalseRec := f.doTrigger(t, f.ownerAuth, trFalse.ID, http.MethodDelete, nil)
+	require.Equal(t, http.StatusNoContent, delFalseRec.Code)
+	assert.Equal(t, 3, celEng.CacheStats().Entries, "DELETE must invalidate deleted trigger's cached program")
+
+	// Pause + Resume trMatch -> invalidates old revision scope (all 3 remaining programs belonged only to trMatch rev 1!).
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, trMatch.ID+"/pause", http.MethodPost, nil).Code)
+	resumeRec := f.doTrigger(t, f.ownerAuth, trMatch.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, resumeRec.Code, resumeRec.Body.String())
+	assert.Zero(t, celEng.CacheStats().Entries, "resume bumps revision and must invalidate old revision bindings")
+
+	// Re-populate cache for f.projectID, then verify ProjectDeletionService invalidates the project's entries.
+	ev2 := *ev
+	ev2.ID = api.NewUUID()
+	ev2.DedupKey = "e2e-cel-2"
+	ev2.Status = ""
+	enqueueTestTriggerEvent(t, f, &ev2)
+	require.Eventually(t, func() bool {
+		stored, err := f.store.GetTriggerEvent(ctx, ev2.ID)
+		return err == nil && stored != nil && stored.Status == store.TriggerEventStatusProcessed
+	}, 5*time.Second, 20*time.Millisecond)
+	require.Greater(t, celEng.CacheStats().Entries, 0)
+
+	ownerSession := NewAuthenticatedUser(f.owner.ID, f.owner.Email, f.owner.DisplayName, f.owner.Role, "web")
+	delRes, delDecision := f.srv.deletionService.Delete(contextWithIdentity(ctx, ownerSession), ProjectDeleteRequest{
+		ProjectID: f.projectID,
+		Actor:     ownerSession,
+		Force:     true,
+	})
+	require.Nil(t, delDecision, "expected project delete to succeed: %+v", delDecision)
+	require.NotNil(t, delRes)
+	assert.Zero(t, celEng.CacheStats().Entries, "project deletion must invalidate all cached trigger programs for that project")
 }

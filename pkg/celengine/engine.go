@@ -282,14 +282,14 @@ func (e *Engine) Cached(ctx context.Context, scope CacheScope, expr string, kind
 	}
 
 	id := computeCacheIdentity(e.env.Name, e.env.Version, e.fnSetHash, kind, expr, maxBytes)
-	if prog, ok := e.cache.get(id, kind.Name, scope); ok {
+	if prog, ok := e.cache.get(id, scope); ok {
 		return prog, nil
 	}
 	prog, err := e.compileInternal(expr, kind, maxBytes)
 	if err != nil {
 		return Program{}, err
 	}
-	return e.cache.put(id, kind.Name, len(expr), prog, scope), nil
+	return e.cache.put(id, len(expr), prog, scope), nil
 }
 
 func (e *Engine) effectiveMaxExprBytes(opts ...Option) int {
@@ -548,6 +548,19 @@ type Program struct {
 // IsZero reports whether p is an uninitialized Program value.
 func (p Program) IsZero() bool {
 	return p.celProg == nil
+}
+
+func (p Program) regexCacheWeight() int {
+	if len(p.regexes) == 0 {
+		return 0
+	}
+	total := 0
+	for _, r := range p.regexes {
+		if r.progSize > 0 {
+			total += r.progSize * RegexInstructionWeightBytes
+		}
+	}
+	return total
 }
 
 // Kind returns the Kind this Program was compiled for.

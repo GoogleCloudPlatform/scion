@@ -59,8 +59,9 @@ var (
 	triggerListWebhook string
 	triggerListStatus  string
 
-	triggerHistoryLimit  int
-	triggerHistoryCursor string
+	triggerHistoryLimit   int
+	triggerHistoryCursor  string
+	triggerHistoryVerbose bool
 
 	triggerOutputJSON bool
 )
@@ -798,7 +799,7 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("FIRE HISTORY (%d of %d fires)\n", len(resp.Fires), resp.TotalCount)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tEVENT\tSTATUS\tSUBJECT\tSTARTED\tFINISHED\tERROR")
+	_, _ = fmt.Fprintln(w, "ID\tEVENT\tSTATUS\tMATCHED\tDIALECT\tSUBJECT\tSTARTED\tFINISHED\tERROR")
 	for _, fire := range resp.Fires {
 		shortID := fire.ID
 		if len(shortID) > 8 {
@@ -807,6 +808,14 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 		shortEvent := fire.EventID
 		if len(shortEvent) > 8 {
 			shortEvent = shortEvent[:8]
+		}
+		matchedThrough := fire.MatchedThrough
+		if matchedThrough == "" {
+			matchedThrough = "-"
+		}
+		decidedDialect := fire.DecidedDialect
+		if decidedDialect == "" {
+			decidedDialect = "-"
 		}
 		subj := fire.Subject
 		if subj == "" {
@@ -821,10 +830,12 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 		if errMsg == "" {
 			errMsg = "-"
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			triggerTerminalText(shortID, false),
 			triggerTerminalText(shortEvent, false),
 			triggerTerminalText(fire.Status, false),
+			triggerTerminalText(matchedThrough, false),
+			triggerTerminalText(decidedDialect, false),
 			triggerTerminalText(subj, false),
 			started,
 			finished,
@@ -832,6 +843,41 @@ func runTriggerHistory(cmd *cobra.Command, args []string) error {
 		)
 	}
 	_ = w.Flush()
+
+	if triggerHistoryVerbose {
+		for _, fire := range resp.Fires {
+			if fire.RuleTrace == nil {
+				continue
+			}
+			shortID := fire.ID
+			if len(shortID) > 8 {
+				shortID = shortID[:8]
+			}
+			fmt.Printf("\nRule trace (%s):\n", triggerTerminalText(shortID, false))
+			for _, el := range fire.RuleTrace.Elements {
+				line := fmt.Sprintf("  %d [%s] %s (%dms)",
+					el.Index,
+					triggerTerminalText(el.Dialect, false),
+					triggerTerminalText(el.Class, false),
+					el.DurationMs,
+				)
+				if el.Reason != "" {
+					line += " reason=" + triggerTerminalText(el.Reason, false)
+				}
+				if el.Provenance != "" {
+					line += fmt.Sprintf(" provenance=%q", triggerTerminalText(el.Provenance, false))
+				}
+				fmt.Println(line)
+			}
+			if len(fire.RuleTrace.Unexecuted) > 0 {
+				fmt.Printf("  unexecuted: %v\n", fire.RuleTrace.Unexecuted)
+			}
+			if fire.RuleTrace.BudgetRemainingMs != nil {
+				fmt.Printf("  budget_remaining_ms: %d\n", *fire.RuleTrace.BudgetRemainingMs)
+			}
+		}
+	}
+
 	if resp.NextCursor != "" {
 		fmt.Printf("\nNext cursor: %s\n", triggerTerminalText(resp.NextCursor, false))
 	}
@@ -979,4 +1025,5 @@ func init() {
 
 	triggerHistoryCmd.Flags().IntVar(&triggerHistoryLimit, "limit", 0, "Maximum number of fire records to return")
 	triggerHistoryCmd.Flags().StringVar(&triggerHistoryCursor, "cursor", "", "Pagination cursor from a previous history response")
+	triggerHistoryCmd.Flags().BoolVar(&triggerHistoryVerbose, "verbose", false, "Show content-free per-element rule evaluation trace")
 }

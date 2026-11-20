@@ -236,6 +236,66 @@ func (_u *TriggerFireUpdate) ClearResultRef() *TriggerFireUpdate {
 	return _u
 }
 
+// SetMatchedThrough sets the "matched_through" field.
+func (_u *TriggerFireUpdate) SetMatchedThrough(v string) *TriggerFireUpdate {
+	_u.mutation.SetMatchedThrough(v)
+	return _u
+}
+
+// SetNillableMatchedThrough sets the "matched_through" field if the given value is not nil.
+func (_u *TriggerFireUpdate) SetNillableMatchedThrough(v *string) *TriggerFireUpdate {
+	if v != nil {
+		_u.SetMatchedThrough(*v)
+	}
+	return _u
+}
+
+// ClearMatchedThrough clears the value of the "matched_through" field.
+func (_u *TriggerFireUpdate) ClearMatchedThrough() *TriggerFireUpdate {
+	_u.mutation.ClearMatchedThrough()
+	return _u
+}
+
+// SetDecidedDialect sets the "decided_dialect" field.
+func (_u *TriggerFireUpdate) SetDecidedDialect(v string) *TriggerFireUpdate {
+	_u.mutation.SetDecidedDialect(v)
+	return _u
+}
+
+// SetNillableDecidedDialect sets the "decided_dialect" field if the given value is not nil.
+func (_u *TriggerFireUpdate) SetNillableDecidedDialect(v *string) *TriggerFireUpdate {
+	if v != nil {
+		_u.SetDecidedDialect(*v)
+	}
+	return _u
+}
+
+// ClearDecidedDialect clears the value of the "decided_dialect" field.
+func (_u *TriggerFireUpdate) ClearDecidedDialect() *TriggerFireUpdate {
+	_u.mutation.ClearDecidedDialect()
+	return _u
+}
+
+// SetRuleTrace sets the "rule_trace" field.
+func (_u *TriggerFireUpdate) SetRuleTrace(v string) *TriggerFireUpdate {
+	_u.mutation.SetRuleTrace(v)
+	return _u
+}
+
+// SetNillableRuleTrace sets the "rule_trace" field if the given value is not nil.
+func (_u *TriggerFireUpdate) SetNillableRuleTrace(v *string) *TriggerFireUpdate {
+	if v != nil {
+		_u.SetRuleTrace(*v)
+	}
+	return _u
+}
+
+// ClearRuleTrace clears the value of the "rule_trace" field.
+func (_u *TriggerFireUpdate) ClearRuleTrace() *TriggerFireUpdate {
+	_u.mutation.ClearRuleTrace()
+	return _u
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (_u *TriggerFireUpdate) SetExecutorKind(v string) *TriggerFireUpdate {
 	_u.mutation.SetExecutorKind(v)
@@ -330,7 +390,30 @@ func (_u *TriggerFireUpdate) ExecX(ctx context.Context) {
 	}
 }
 
+// check runs all checks and user-defined validators on the builder.
+func (_u *TriggerFireUpdate) check() error {
+	if v, ok := _u.mutation.MatchedThrough(); ok {
+		if err := triggerfire.MatchedThroughValidator(v); err != nil {
+			return &ValidationError{Name: "matched_through", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.matched_through": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.DecidedDialect(); ok {
+		if err := triggerfire.DecidedDialectValidator(v); err != nil {
+			return &ValidationError{Name: "decided_dialect", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.decided_dialect": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.RuleTrace(); ok {
+		if err := triggerfire.RuleTraceValidator(v); err != nil {
+			return &ValidationError{Name: "rule_trace", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.rule_trace": %w`, err)}
+		}
+	}
+	return nil
+}
+
 func (_u *TriggerFireUpdate) sqlSave(ctx context.Context) (_node int, err error) {
+	if err := _u.check(); err != nil {
+		return _node, err
+	}
 	_spec := sqlgraph.NewUpdateSpec(triggerfire.Table, triggerfire.Columns, sqlgraph.NewFieldSpec(triggerfire.FieldID, field.TypeUUID))
 	if ps := _u.mutation.predicates; len(ps) > 0 {
 		_spec.Predicate = func(selector *sql.Selector) {
@@ -401,6 +484,24 @@ func (_u *TriggerFireUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	}
 	if _u.mutation.ResultRefCleared() {
 		_spec.ClearField(triggerfire.FieldResultRef, field.TypeString)
+	}
+	if value, ok := _u.mutation.MatchedThrough(); ok {
+		_spec.SetField(triggerfire.FieldMatchedThrough, field.TypeString, value)
+	}
+	if _u.mutation.MatchedThroughCleared() {
+		_spec.ClearField(triggerfire.FieldMatchedThrough, field.TypeString)
+	}
+	if value, ok := _u.mutation.DecidedDialect(); ok {
+		_spec.SetField(triggerfire.FieldDecidedDialect, field.TypeString, value)
+	}
+	if _u.mutation.DecidedDialectCleared() {
+		_spec.ClearField(triggerfire.FieldDecidedDialect, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuleTrace(); ok {
+		_spec.SetField(triggerfire.FieldRuleTrace, field.TypeString, value)
+	}
+	if _u.mutation.RuleTraceCleared() {
+		_spec.ClearField(triggerfire.FieldRuleTrace, field.TypeString)
 	}
 	if value, ok := _u.mutation.ExecutorKind(); ok {
 		_spec.SetField(triggerfire.FieldExecutorKind, field.TypeString, value)
@@ -645,6 +746,66 @@ func (_u *TriggerFireUpdateOne) ClearResultRef() *TriggerFireUpdateOne {
 	return _u
 }
 
+// SetMatchedThrough sets the "matched_through" field.
+func (_u *TriggerFireUpdateOne) SetMatchedThrough(v string) *TriggerFireUpdateOne {
+	_u.mutation.SetMatchedThrough(v)
+	return _u
+}
+
+// SetNillableMatchedThrough sets the "matched_through" field if the given value is not nil.
+func (_u *TriggerFireUpdateOne) SetNillableMatchedThrough(v *string) *TriggerFireUpdateOne {
+	if v != nil {
+		_u.SetMatchedThrough(*v)
+	}
+	return _u
+}
+
+// ClearMatchedThrough clears the value of the "matched_through" field.
+func (_u *TriggerFireUpdateOne) ClearMatchedThrough() *TriggerFireUpdateOne {
+	_u.mutation.ClearMatchedThrough()
+	return _u
+}
+
+// SetDecidedDialect sets the "decided_dialect" field.
+func (_u *TriggerFireUpdateOne) SetDecidedDialect(v string) *TriggerFireUpdateOne {
+	_u.mutation.SetDecidedDialect(v)
+	return _u
+}
+
+// SetNillableDecidedDialect sets the "decided_dialect" field if the given value is not nil.
+func (_u *TriggerFireUpdateOne) SetNillableDecidedDialect(v *string) *TriggerFireUpdateOne {
+	if v != nil {
+		_u.SetDecidedDialect(*v)
+	}
+	return _u
+}
+
+// ClearDecidedDialect clears the value of the "decided_dialect" field.
+func (_u *TriggerFireUpdateOne) ClearDecidedDialect() *TriggerFireUpdateOne {
+	_u.mutation.ClearDecidedDialect()
+	return _u
+}
+
+// SetRuleTrace sets the "rule_trace" field.
+func (_u *TriggerFireUpdateOne) SetRuleTrace(v string) *TriggerFireUpdateOne {
+	_u.mutation.SetRuleTrace(v)
+	return _u
+}
+
+// SetNillableRuleTrace sets the "rule_trace" field if the given value is not nil.
+func (_u *TriggerFireUpdateOne) SetNillableRuleTrace(v *string) *TriggerFireUpdateOne {
+	if v != nil {
+		_u.SetRuleTrace(*v)
+	}
+	return _u
+}
+
+// ClearRuleTrace clears the value of the "rule_trace" field.
+func (_u *TriggerFireUpdateOne) ClearRuleTrace() *TriggerFireUpdateOne {
+	_u.mutation.ClearRuleTrace()
+	return _u
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (_u *TriggerFireUpdateOne) SetExecutorKind(v string) *TriggerFireUpdateOne {
 	_u.mutation.SetExecutorKind(v)
@@ -752,7 +913,30 @@ func (_u *TriggerFireUpdateOne) ExecX(ctx context.Context) {
 	}
 }
 
+// check runs all checks and user-defined validators on the builder.
+func (_u *TriggerFireUpdateOne) check() error {
+	if v, ok := _u.mutation.MatchedThrough(); ok {
+		if err := triggerfire.MatchedThroughValidator(v); err != nil {
+			return &ValidationError{Name: "matched_through", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.matched_through": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.DecidedDialect(); ok {
+		if err := triggerfire.DecidedDialectValidator(v); err != nil {
+			return &ValidationError{Name: "decided_dialect", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.decided_dialect": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.RuleTrace(); ok {
+		if err := triggerfire.RuleTraceValidator(v); err != nil {
+			return &ValidationError{Name: "rule_trace", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.rule_trace": %w`, err)}
+		}
+	}
+	return nil
+}
+
 func (_u *TriggerFireUpdateOne) sqlSave(ctx context.Context) (_node *TriggerFire, err error) {
+	if err := _u.check(); err != nil {
+		return _node, err
+	}
 	_spec := sqlgraph.NewUpdateSpec(triggerfire.Table, triggerfire.Columns, sqlgraph.NewFieldSpec(triggerfire.FieldID, field.TypeUUID))
 	id, ok := _u.mutation.ID()
 	if !ok {
@@ -840,6 +1024,24 @@ func (_u *TriggerFireUpdateOne) sqlSave(ctx context.Context) (_node *TriggerFire
 	}
 	if _u.mutation.ResultRefCleared() {
 		_spec.ClearField(triggerfire.FieldResultRef, field.TypeString)
+	}
+	if value, ok := _u.mutation.MatchedThrough(); ok {
+		_spec.SetField(triggerfire.FieldMatchedThrough, field.TypeString, value)
+	}
+	if _u.mutation.MatchedThroughCleared() {
+		_spec.ClearField(triggerfire.FieldMatchedThrough, field.TypeString)
+	}
+	if value, ok := _u.mutation.DecidedDialect(); ok {
+		_spec.SetField(triggerfire.FieldDecidedDialect, field.TypeString, value)
+	}
+	if _u.mutation.DecidedDialectCleared() {
+		_spec.ClearField(triggerfire.FieldDecidedDialect, field.TypeString)
+	}
+	if value, ok := _u.mutation.RuleTrace(); ok {
+		_spec.SetField(triggerfire.FieldRuleTrace, field.TypeString, value)
+	}
+	if _u.mutation.RuleTraceCleared() {
+		_spec.ClearField(triggerfire.FieldRuleTrace, field.TypeString)
 	}
 	if value, ok := _u.mutation.ExecutorKind(); ok {
 		_spec.SetField(triggerfire.FieldExecutorKind, field.TypeString, value)

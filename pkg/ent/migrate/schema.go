@@ -3989,6 +3989,9 @@ var (
 		{Name: "status", Type: field.TypeString, Default: "firing"},
 		{Name: "error", Type: field.TypeString, Nullable: true},
 		{Name: "result_ref", Type: field.TypeString, Nullable: true},
+		{Name: "matched_through", Type: field.TypeString, Nullable: true, Size: 16},
+		{Name: "decided_dialect", Type: field.TypeString, Nullable: true, Size: 32},
+		{Name: "rule_trace", Type: field.TypeString, Nullable: true, Size: 4096},
 		{Name: "executor_kind", Type: field.TypeString, Default: ""},
 		{Name: "executor_id", Type: field.TypeString, Default: ""},
 		{Name: "lease_until", Type: field.TypeTime},
@@ -4005,7 +4008,7 @@ var (
 			{
 				Name:    "triggerfire_trigger_id_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[21]},
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[24]},
 			},
 			{
 				Name:    "triggerfire_event_id_trigger_id",
@@ -4020,7 +4023,7 @@ var (
 			{
 				Name:    "triggerfire_status_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[13], TriggerFiresColumns[18]},
+				Columns: []*schema.Column{TriggerFiresColumns[13], TriggerFiresColumns[21]},
 			},
 		},
 	}

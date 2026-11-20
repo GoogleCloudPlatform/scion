@@ -239,21 +239,24 @@ type TriggerEventFilter struct {
 
 // TriggerFire represents one per-(event, trigger) claim and history row (§4.4).
 type TriggerFire struct {
-	ID           string     `json:"id"`
-	ProjectID    string     `json:"projectId"`
-	TriggerID    string     `json:"triggerId"`
-	EventID      string     `json:"eventId"`
-	Subject      string     `json:"subject"`
-	ActionType   string     `json:"actionType"`
-	Status       string     `json:"status"`
-	Error        string     `json:"error,omitempty"`
-	ResultRef    string     `json:"resultRef,omitempty"`
-	ExecutorKind string     `json:"executorKind,omitempty"`
-	ExecutorID   string     `json:"executorId,omitempty"`
-	LeaseUntil   time.Time  `json:"leaseUntil"`
-	StartedAt    time.Time  `json:"startedAt"`
-	FinishedAt   *time.Time `json:"finishedAt,omitempty"`
-	CreatedAt    time.Time  `json:"createdAt"`
+	ID             string     `json:"id"`
+	ProjectID      string     `json:"projectId"`
+	TriggerID      string     `json:"triggerId"`
+	EventID        string     `json:"eventId"`
+	Subject        string     `json:"subject"`
+	ActionType     string     `json:"actionType"`
+	Status         string     `json:"status"`
+	Error          string     `json:"error,omitempty"`
+	ResultRef      string     `json:"resultRef,omitempty"`
+	MatchedThrough string     `json:"matchedThrough,omitempty"`
+	DecidedDialect string     `json:"decidedDialect,omitempty"`
+	RuleTrace      string     `json:"ruleTrace,omitempty"`
+	ExecutorKind   string     `json:"executorKind,omitempty"`
+	ExecutorID     string     `json:"executorId,omitempty"`
+	LeaseUntil     time.Time  `json:"leaseUntil"`
+	StartedAt      time.Time  `json:"startedAt"`
+	FinishedAt     *time.Time `json:"finishedAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
 
 	InitiatorAttribution `json:"-"`
 }

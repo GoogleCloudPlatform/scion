@@ -2680,3 +2680,555 @@ func TestMaxRegexWorkPinnedAtRaisedCostLimit(t *testing.T) {
 		t.Fatalf("expected false match, got true")
 	}
 }
+
+// TestProgramCachePrecompiledRegexWeightBoundsHeap reproduces the 3a security
+// F1 probe (~90 distinct anchored counted-repeat regexes per <= 4 KiB rule) and
+// verifies that precompiled RE2 instruction footprints are charged to cache
+// entry weight so retained heap stays well within the documented bound.
+func TestProgramCachePrecompiledRegexWeightBoundsHeap(t *testing.T) {
+	eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	buildRegexHeavyRule := func(ruleIdx int) string {
+		var b strings.Builder
+		for j := 0; ; j++ {
+			term := fmt.Sprintf(`event.s.matches("^%d_%d[a-z]{1,100}$")`, ruleIdx, j)
+			sep := ""
+			if j > 0 {
+				sep = " || "
+			}
+			if b.Len()+len(sep)+len(term) > 4096 {
+				break
+			}
+			b.WriteString(sep)
+			b.WriteString(term)
+		}
+		return b.String()
+	}
+
+	runtime.GC()
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	const totalRules = 120
+	for i := 0; i < totalRules; i++ {
+		expr := buildRegexHeavyRule(i)
+		scope := celengine.CacheScope{
+			Consumer: "trigger",
+			ID:       fmt.Sprintf("regex-heavy-%d", i),
+			Revision: 1,
+		}
+		if _, err := eng.Cached(ctx, scope, expr, boolKind); err != nil {
+			t.Fatalf("Cached[%d] (len=%d): %v", i, len(expr), err)
+		}
+	}
+
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+
+	stats := eng.CacheStats()
+	if stats.Bytes > celengine.DefaultCacheMaxBytes {
+		t.Fatalf("CacheStats.Bytes = %d, want <= %d", stats.Bytes, celengine.DefaultCacheMaxBytes)
+	}
+	// Without charging precompiled regex instructions, ~120 rules of ~4 KiB source
+	// would all sit inside the 1 MiB source-only budget (Entries == 120, ~310 MiB heap).
+	// Charging precompiled regex instructions (~8,500-9,500 instructions * 64B ~= 550-610 KiB)
+	// caps retention to <= 2 entries under a 1 MiB budget.
+	if stats.Entries > 8 {
+		t.Fatalf("CacheStats.Entries = %d, want <= 8 when precompiled regex instructions are weighted", stats.Entries)
+	}
+	var retained int64
+	if after.HeapAlloc > before.HeapAlloc {
+		retained = int64(after.HeapAlloc - before.HeapAlloc)
+	}
+	const maxRetainedBytes = 64 << 20 // 64 MiB (vs ~310-671 MiB without regex weighting)
+	if retained > maxRetainedBytes {
+		t.Fatalf("retained heap delta = %d MiB, want <= %d MiB", retained>>20, maxRetainedBytes>>20)
+	}
+}
+
+func TestProgramCachePerProjectBoundAndMultiElementScope(t *testing.T) {
+	ctx := context.Background()
+	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	subjectKind := celengine.Kind{Name: "subject", Result: celengine.String()}
+
+	t.Run("multiple_filter_elements_and_subject_coexist_on_same_scope", func(t *testing.T) {
+		eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.DefaultCacheConfig())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		scopeRev1 := celengine.CacheScope{
+			Consumer:  "trigger",
+			ProjectID: "proj-1",
+			ID:        "trig-arr",
+			Revision:  1,
+		}
+		for iter := 0; iter < 4; iter++ {
+			for _, expr := range []string{`active == true`, `count > 0`, `meta["env"] == "prod"`} {
+				if _, err := eng.Cached(ctx, scopeRev1, expr, filterKind); err != nil {
+					t.Fatalf("iter %d filter %q: %v", iter, expr, err)
+				}
+			}
+			if _, err := eng.Cached(ctx, scopeRev1, `"svc:" + meta["svc"]`, subjectKind); err != nil {
+				t.Fatalf("iter %d subject: %v", iter, err)
+			}
+		}
+		stats := eng.CacheStats()
+		if stats.Entries != 4 || stats.Misses != 4 || stats.Hits != 12 {
+			t.Fatalf("expected 3 filter elements + 1 subject cached without self-eviction (Entries=4, Misses=4, Hits=12), got %+v", stats)
+		}
+
+		// Revision bump to rev 2 with 2 elements detaches rev 1's unreferenced elements.
+		scopeRev2 := celengine.CacheScope{
+			Consumer:  "trigger",
+			ProjectID: "proj-1",
+			ID:        "trig-arr",
+			Revision:  2,
+		}
+		if _, err := eng.Cached(ctx, scopeRev2, `active == true`, filterKind); err != nil {
+			t.Fatalf("rev2 elem 1: %v", err)
+		}
+		if _, err := eng.Cached(ctx, scopeRev2, `count > 100`, filterKind); err != nil {
+			t.Fatalf("rev2 elem 2: %v", err)
+		}
+		if got := eng.CacheStats().Entries; got != 2 {
+			t.Fatalf("Entries after rev2 rebind = %d, want 2", got)
+		}
+
+		// Invalidate without ProjectID still evicts by (Consumer, ID).
+		eng.Invalidate(celengine.CacheScope{Consumer: "trigger", ID: "trig-arr", Revision: 2})
+		if got := eng.CacheStats().Entries; got != 0 {
+			t.Fatalf("Entries after Invalidate = %d, want 0", got)
+		}
+	})
+
+	t.Run("per_project_entry_and_byte_bounds_isolate_victim_project", func(t *testing.T) {
+		eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+			MaxEntries:         100,
+			MaxBytes:           128 * 1024,
+			MaxPerProject:      3,
+			MaxBytesPerProject: 10 * 1024,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		// Victim project caches 2 rules (including one expression shared with attacker).
+		const sharedExpr = `active && count == 42`
+		victim1 := celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-victim", ID: "v-1", Revision: 1}
+		victim2 := celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-victim", ID: "v-2", Revision: 1}
+		if _, err := eng.Cached(ctx, victim1, sharedExpr, filterKind); err != nil {
+			t.Fatalf("victim1: %v", err)
+		}
+		if _, err := eng.Cached(ctx, victim2, `count == 777`, filterKind); err != nil {
+			t.Fatalf("victim2: %v", err)
+		}
+
+		// Attacker project references sharedExpr, then churns 20 distinct ~3.5 KiB rules
+		// exceeding both MaxPerProject (3) and MaxBytesPerProject (10 KiB).
+		pad := strings.Repeat("p", 3500)
+		attShared := celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-attacker", ID: "a-shared", Revision: 1}
+		if _, err := eng.Cached(ctx, attShared, sharedExpr, filterKind); err != nil {
+			t.Fatalf("attShared: %v", err)
+		}
+		for i := 0; i < 20; i++ {
+			sc := celengine.CacheScope{
+				Consumer:  "trigger",
+				ProjectID: "proj-attacker",
+				ID:        fmt.Sprintf("a-%d", i),
+				Revision:  1,
+			}
+			expr := fmt.Sprintf(`meta["k"] == "%s_%03d"`, pad, i)
+			if _, err := eng.Cached(ctx, sc, expr, filterKind); err != nil {
+				t.Fatalf("attacker[%d]: %v", i, err)
+			}
+		}
+
+		// Total entries must be <= 2 (victim) + 2 (attacker fits at most 2 x ~3.5 KiB in 10 KiB) = 4.
+		if got := eng.CacheStats().Entries; got > 5 {
+			t.Fatalf("Entries = %d, want <= 5 with per-project bounds enforced", got)
+		}
+
+		// Both of victim's rules (including sharedExpr) MUST still be warm cache hits!
+		hitsBefore := eng.CacheStats().Hits
+		if _, err := eng.Cached(ctx, victim1, sharedExpr, filterKind); err != nil {
+			t.Fatalf("victim1 re-read: %v", err)
+		}
+		if _, err := eng.Cached(ctx, victim2, `count == 777`, filterKind); err != nil {
+			t.Fatalf("victim2 re-read: %v", err)
+		}
+		if got := eng.CacheStats().Hits; got != hitsBefore+2 {
+			t.Fatalf("victim cache entries were evicted by attacker project: Hits = %d, want %d", got, hitsBefore+2)
+		}
+
+		// Project-level invalidation on proj-attacker removes attacker's private entries
+		// while preserving victim's entries (including sharedExpr).
+		eng.Invalidate(celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-attacker"})
+		if got := eng.CacheStats().Entries; got != 2 {
+			t.Fatalf("Entries after invalidating proj-attacker = %d, want 2 (victim's entries)", got)
+		}
+	})
+}
+
+func TestProgramCacheScopedHitCostIndependentOfTableSize(t *testing.T) {
+	ctx := context.Background()
+	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+
+	runAtTableSize := func(t *testing.T, tableSize int) (boundHitChecks, boundHitSteps, newScopeHitChecks, newScopeHitSteps int) {
+		t.Helper()
+		var checks, steps int
+		eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+			MaxEntries:         2048,
+			MaxBytes:           4 << 20,
+			MaxPerConsumer:     1500,
+			MaxPerProject:      1500,
+			MaxBytesPerProject: 2 << 20,
+			OnCapCheck: func(evictSteps int) {
+				checks++
+				steps += evictSteps
+			},
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		for i := 0; i < tableSize; i++ {
+			sc := celengine.CacheScope{
+				Consumer:  "trigger",
+				ProjectID: fmt.Sprintf("proj-%d", i%8),
+				ID:        fmt.Sprintf("trig-%d", i),
+				Revision:  1,
+			}
+			expr := fmt.Sprintf(`count == %d`, i)
+			if _, err := eng.Cached(ctx, sc, expr, filterKind); err != nil {
+				t.Fatalf("seed[%d]: %v", i, err)
+			}
+		}
+
+		// 1. 500 hits on already-bound (scope, entry) pairs must perform ZERO cap checks and ZERO scan steps.
+		checks, steps = 0, 0
+		for i := 0; i < 500; i++ {
+			idx := i % tableSize
+			sc := celengine.CacheScope{
+				Consumer:  "trigger",
+				ProjectID: fmt.Sprintf("proj-%d", idx%8),
+				ID:        fmt.Sprintf("trig-%d", idx),
+				Revision:  1,
+			}
+			expr := fmt.Sprintf(`count == %d`, idx)
+			if _, err := eng.Cached(ctx, sc, expr, filterKind); err != nil {
+				t.Fatalf("bound hit[%d]: %v", i, err)
+			}
+		}
+		boundHitChecks, boundHitSteps = checks, steps
+
+		// 2. Hit binding a brand-new trigger scope to an existing cached program must check caps in O(1) (0 scan steps).
+		checks, steps = 0, 0
+		newScope := celengine.CacheScope{
+			Consumer:  "trigger",
+			ProjectID: "proj-0",
+			ID:        "trig-shared-reader",
+			Revision:  1,
+		}
+		if _, err := eng.Cached(ctx, newScope, `count == 0`, filterKind); err != nil {
+			t.Fatalf("new scope hit: %v", err)
+		}
+		newScopeHitChecks, newScopeHitSteps = checks, steps
+		return boundHitChecks, boundHitSteps, newScopeHitChecks, newScopeHitSteps
+	}
+
+	bChecks8, bSteps8, nChecks8, nSteps8 := runAtTableSize(t, 8)
+	bChecks1000, bSteps1000, nChecks1000, nSteps1000 := runAtTableSize(t, 1000)
+
+	if bChecks8 != 0 || bSteps8 != 0 || bChecks1000 != 0 || bSteps1000 != 0 {
+		t.Fatalf("already-bound scoped hits did cap/scan work: size8=(%d,%d) size1000=(%d,%d), want all 0",
+			bChecks8, bSteps8, bChecks1000, bSteps1000)
+	}
+	if nChecks8 != 1 || nSteps8 != 0 || nChecks1000 != 1 || nSteps1000 != 0 {
+		t.Fatalf("new-scope hit cap check was not O(1): size8=(%d,%d) size1000=(%d,%d), want (1,0) for both",
+			nChecks8, nSteps8, nChecks1000, nSteps1000)
+	}
+
+	// 3. Verify incremental counters stay exact across bind, revision bump, eviction, and invalidation.
+	eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+		MaxEntries:     64,
+		MaxBytes:       256 * 1024,
+		MaxPerConsumer: 4,
+		MaxPerProject:  3,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		sc := celengine.CacheScope{Consumer: "trigger", ProjectID: "p1", ID: fmt.Sprintf("t-%d", i), Revision: 1}
+		if _, err := eng.Cached(ctx, sc, fmt.Sprintf(`count == %d`, i), filterKind); err != nil {
+			t.Fatalf("fill[%d]: %v", i, err)
+		}
+	}
+	// Invalidate all of p1, then re-insert 3 fresh entries: incremental p1 counter must have returned to 0 so all 3 stay resident.
+	eng.Invalidate(celengine.CacheScope{Consumer: "trigger", ProjectID: "p1"})
+	if got := eng.CacheStats().Entries; got != 0 {
+		t.Fatalf("Entries after p1 invalidate = %d, want 0", got)
+	}
+	for i := 10; i < 13; i++ {
+		sc := celengine.CacheScope{Consumer: "trigger", ProjectID: "p1", ID: fmt.Sprintf("t-%d", i), Revision: 1}
+		if _, err := eng.Cached(ctx, sc, fmt.Sprintf(`count == %d`, i), filterKind); err != nil {
+			t.Fatalf("refill[%d]: %v", i, err)
+		}
+	}
+	if got := eng.CacheStats().Entries; got != 3 {
+		t.Fatalf("Entries after refill = %d, want 3 (stale counter drift would evict prematurely)", got)
+	}
+}
+
+func TestProgramCacheNeverRetainsEntryHeavierThanPerProjectBound(t *testing.T) {
+	ctx := context.Background()
+	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+
+	eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+		MaxEntries:         64,
+		MaxBytes:           128 * 1024,
+		MaxPerProject:      16,
+		MaxBytesPerProject: 4 * 1024, // 4 KiB per project
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Warm a small valid rule in proj-a so we also verify an uncacheable heavy rule does not evict existing project entries.
+	smallScope := celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-a", ID: "trig-small", Revision: 1}
+	if _, err := eng.Cached(ctx, smallScope, `active == true`, filterKind); err != nil {
+		t.Fatalf("small Cached: %v", err)
+	}
+	baseStats := eng.CacheStats()
+	if baseStats.Entries != 1 {
+		t.Fatalf("base Entries = %d, want 1", baseStats.Entries)
+	}
+
+	// Build a regex-bearing expression whose weight (exprBytes + 64 * regexInst) exceeds 4 KiB (MaxBytesPerProject)
+	// while staying well below 128 KiB (MaxBytes).
+	heavyExpr := `event.s.matches("^[a-z]{1,80}$") && event.s.matches("^[a-z0-9]{1,80}$")`
+	heavyScope := celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-a", ID: "trig-heavy", Revision: 1}
+	prog, err := eng.Cached(ctx, heavyScope, heavyExpr, filterKind)
+	if err != nil {
+		t.Fatalf("heavy Cached: %v", err)
+	}
+	res, _, err := prog.Eval(ctx, map[string]any{"event": map[string]any{"s": "abc"}}, celengine.DefaultLimits())
+	if err != nil {
+		t.Fatalf("heavy Eval: %v", err)
+	}
+	if ok, bErr := res.Bool(); bErr != nil || !ok {
+		t.Fatalf("heavy Bool = (%v, %v), want (true, nil)", ok, bErr)
+	}
+
+	// O1: entry heavier than MaxBytesPerProject must NOT be retained, and must NOT evict trig-small.
+	afterStats := eng.CacheStats()
+	if afterStats.Entries != 1 || afterStats.Bytes != baseStats.Bytes {
+		t.Fatalf("after heavy scoped Cached: stats=%+v, want Entries=1 Bytes=%d (heavy entry must not be retained)", afterStats, baseStats.Bytes)
+	}
+
+	// Even if an unscoped caller caches heavyExpr globally, a subsequent scoped lookup for proj-a
+	// must evaluate cleanly without binding proj-a over its 4 KiB per-project cap.
+	if _, err := eng.Cached(ctx, celengine.CacheScope{}, heavyExpr, filterKind); err != nil {
+		t.Fatalf("unscoped heavy Cached: %v", err)
+	}
+	if _, err := eng.Cached(ctx, heavyScope, heavyExpr, filterKind); err != nil {
+		t.Fatalf("scoped hit on unscoped heavy entry: %v", err)
+	}
+	// Adding ~3.5 KiB to proj-a still fits alongside trig-small without evicting trig-small!
+	medScope := celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-a", ID: "trig-med", Revision: 1}
+	medExpr := fmt.Sprintf(`meta["k"] == "%s"`, strings.Repeat("m", 3000))
+	if _, err := eng.Cached(ctx, medScope, medExpr, filterKind); err != nil {
+		t.Fatalf("med Cached: %v", err)
+	}
+	hitsBefore := eng.CacheStats().Hits
+	if _, err := eng.Cached(ctx, smallScope, `active == true`, filterKind); err != nil {
+		t.Fatalf("small re-read: %v", err)
+	}
+	if got := eng.CacheStats().Hits; got != hitsBefore+1 {
+		t.Fatalf("trig-small was evicted: Hits=%d, want %d", got, hitsBefore+1)
+	}
+}
+
+func TestProgramCachePerProjectByteAccounting(t *testing.T) {
+	ctx := context.Background()
+	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+
+	makeExpr100B := func(tag int) string {
+		prefix := fmt.Sprintf(`meta["k%02d"] == "`, tag)
+		suffix := `"`
+		pad := 100 - len(prefix) - len(suffix)
+		if pad <= 0 {
+			t.Fatalf("invalid 100B expression template for tag %d", tag)
+		}
+		expr := prefix + strings.Repeat("v", pad) + suffix
+		if len(expr) != 100 {
+			t.Fatalf("len(expr) = %d, want 100", len(expr))
+		}
+		return expr
+	}
+
+	assertWarmSet := func(t *testing.T, eng *celengine.Engine, scopes []celengine.CacheScope, exprs []string) {
+		t.Helper()
+		before := eng.CacheStats()
+		for i := range scopes {
+			if _, err := eng.Cached(ctx, scopes[i], exprs[i], filterKind); err != nil {
+				t.Fatalf("warm check[%d]: %v", i, err)
+			}
+		}
+		after := eng.CacheStats()
+		if after.Misses != before.Misses || after.Hits != before.Hits+uint64(len(scopes)) {
+			t.Fatalf("expected %d warm hits and 0 misses, got before=%+v after=%+v (project byte counter failed to decrement)",
+				len(scopes), before, after)
+		}
+	}
+
+	// MaxPerProject (16) and MaxBytes (64 KiB) are intentionally generous so ONLY
+	// MaxBytesPerProject (350B => up to three 100B entries) governs eviction.
+	eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+		MaxEntries:         64,
+		MaxBytes:           64 * 1024,
+		MaxPerProject:      16,
+		MaxBytesPerProject: 350,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	projScope := func(id string, rev int64) celengine.CacheScope {
+		return celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-a", ID: id, Revision: rev}
+	}
+
+	// 1. Byte-cap LRU eviction: inserting 6 x 100B entries into a 350B project cap must
+	// keep the 3 most recent entries (300B) resident rather than shrinking to <= 1 entry.
+	for i := 1; i <= 6; i++ {
+		if _, err := eng.Cached(ctx, projScope(fmt.Sprintf("t%d", i), 1), makeExpr100B(i), filterKind); err != nil {
+			t.Fatalf("seed t%d: %v", i, err)
+		}
+	}
+	if st := eng.CacheStats(); st.Entries != 3 || st.Bytes != 300 {
+		t.Fatalf("after 6 x 100B inserts under 350B project cap: stats=%+v, want Entries=3 Bytes=300", st)
+	}
+	assertWarmSet(t, eng,
+		[]celengine.CacheScope{projScope("t4", 1), projScope("t5", 1), projScope("t6", 1)},
+		[]string{makeExpr100B(4), makeExpr100B(5), makeExpr100B(6)},
+	)
+
+	// 2. Single-trigger Invalidate while sibling entries stay non-empty: invalidating t4
+	// must decrement proj-a bytes 300 -> 200 so adding t7 (100B) keeps t5, t6, t7 warm.
+	eng.Invalidate(projScope("t4", 0))
+	if st := eng.CacheStats(); st.Entries != 2 || st.Bytes != 200 {
+		t.Fatalf("after Invalidate(t4): stats=%+v, want Entries=2 Bytes=200", st)
+	}
+	if _, err := eng.Cached(ctx, projScope("t7", 1), makeExpr100B(7), filterKind); err != nil {
+		t.Fatalf("insert t7: %v", err)
+	}
+	if st := eng.CacheStats(); st.Entries != 3 || st.Bytes != 300 {
+		t.Fatalf("after insert t7 into freed byte headroom: stats=%+v, want Entries=3 Bytes=300", st)
+	}
+	assertWarmSet(t, eng,
+		[]celengine.CacheScope{projScope("t5", 1), projScope("t6", 1), projScope("t7", 1)},
+		[]string{makeExpr100B(5), makeExpr100B(6), makeExpr100B(7)},
+	)
+
+	// 3. Revision supersession while sibling entries stay non-empty: bumping t5 from rev 1
+	// to rev 2 with a new 100B rule must release rev 1's 100B without evicting t6 or t7.
+	if _, err := eng.Cached(ctx, projScope("t5", 2), makeExpr100B(52), filterKind); err != nil {
+		t.Fatalf("revision bump t5@rev2: %v", err)
+	}
+	if st := eng.CacheStats(); st.Entries != 3 || st.Bytes != 300 {
+		t.Fatalf("after t5@rev2 supersession: stats=%+v, want Entries=3 Bytes=300", st)
+	}
+	assertWarmSet(t, eng,
+		[]celengine.CacheScope{projScope("t5", 2), projScope("t6", 1), projScope("t7", 1)},
+		[]string{makeExpr100B(52), makeExpr100B(6), makeExpr100B(7)},
+	)
+
+	// 4. Global LRU eviction of one proj-a entry while another proj-a entry stays resident
+	// must decrement proj-a's byte counter so proj-a can still refill to 3 x 100B entries.
+	engGlobal, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+		MaxEntries:         4,
+		MaxBytes:           64 * 1024,
+		MaxPerProject:      16,
+		MaxBytesPerProject: 350,
+	})
+	if err != nil {
+		t.Fatalf("New(engGlobal): %v", err)
+	}
+	if _, err := engGlobal.Cached(ctx, projScope("ga1", 1), makeExpr100B(81), filterKind); err != nil {
+		t.Fatalf("ga1: %v", err)
+	}
+	if _, err := engGlobal.Cached(ctx, projScope("ga2", 1), makeExpr100B(82), filterKind); err != nil {
+		t.Fatalf("ga2: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		// Keep ga2 at MRU front while global MaxEntries=4 evicts ga1.
+		if _, err := engGlobal.Cached(ctx, projScope("ga2", 1), makeExpr100B(82), filterKind); err != nil {
+			t.Fatalf("touch ga2: %v", err)
+		}
+		otherScope := celengine.CacheScope{Consumer: "trigger", ProjectID: "proj-b", ID: fmt.Sprintf("gb%d", i), Revision: 1}
+		if _, err := engGlobal.Cached(ctx, otherScope, makeExpr100B(90+i), filterKind); err != nil {
+			t.Fatalf("gb%d: %v", i, err)
+		}
+	}
+	// proj-a now has only ga2 (100B); inserting ga3 and ga4 (200B) reaches 300B <= 350B and keeps all 3 warm.
+	if _, err := engGlobal.Cached(ctx, projScope("ga3", 1), makeExpr100B(83), filterKind); err != nil {
+		t.Fatalf("ga3: %v", err)
+	}
+	if _, err := engGlobal.Cached(ctx, projScope("ga4", 1), makeExpr100B(84), filterKind); err != nil {
+		t.Fatalf("ga4: %v", err)
+	}
+	assertWarmSet(t, engGlobal,
+		[]celengine.CacheScope{projScope("ga2", 1), projScope("ga3", 1), projScope("ga4", 1)},
+		[]string{makeExpr100B(82), makeExpr100B(83), makeExpr100B(84)},
+	)
+}
+
+func BenchmarkProgramCacheScopedHit(b *testing.B) {
+	ctx := context.Background()
+	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+
+	for _, tableSize := range []int{16, 1024} {
+		b.Run(fmt.Sprintf("entries_%d", tableSize), func(b *testing.B) {
+			eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+				MaxEntries:         2048,
+				MaxBytes:           4 << 20,
+				MaxPerConsumer:     1500,
+				MaxPerProject:      1500,
+				MaxBytesPerProject: 2 << 20,
+			})
+			if err != nil {
+				b.Fatalf("New: %v", err)
+			}
+			for i := 0; i < tableSize; i++ {
+				sc := celengine.CacheScope{
+					Consumer:  "trigger",
+					ProjectID: fmt.Sprintf("proj-%d", i%8),
+					ID:        fmt.Sprintf("trig-%d", i),
+					Revision:  1,
+				}
+				if _, err := eng.Cached(ctx, sc, fmt.Sprintf(`count == %d`, i), filterKind); err != nil {
+					b.Fatalf("seed[%d]: %v", i, err)
+				}
+			}
+			targetScope := celengine.CacheScope{
+				Consumer:  "trigger",
+				ProjectID: "proj-0",
+				ID:        "trig-0",
+				Revision:  1,
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := eng.Cached(ctx, targetScope, `count == 0`, filterKind); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

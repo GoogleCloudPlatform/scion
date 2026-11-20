@@ -194,6 +194,48 @@ func (_c *TriggerFireCreate) SetNillableResultRef(v *string) *TriggerFireCreate 
 	return _c
 }
 
+// SetMatchedThrough sets the "matched_through" field.
+func (_c *TriggerFireCreate) SetMatchedThrough(v string) *TriggerFireCreate {
+	_c.mutation.SetMatchedThrough(v)
+	return _c
+}
+
+// SetNillableMatchedThrough sets the "matched_through" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableMatchedThrough(v *string) *TriggerFireCreate {
+	if v != nil {
+		_c.SetMatchedThrough(*v)
+	}
+	return _c
+}
+
+// SetDecidedDialect sets the "decided_dialect" field.
+func (_c *TriggerFireCreate) SetDecidedDialect(v string) *TriggerFireCreate {
+	_c.mutation.SetDecidedDialect(v)
+	return _c
+}
+
+// SetNillableDecidedDialect sets the "decided_dialect" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableDecidedDialect(v *string) *TriggerFireCreate {
+	if v != nil {
+		_c.SetDecidedDialect(*v)
+	}
+	return _c
+}
+
+// SetRuleTrace sets the "rule_trace" field.
+func (_c *TriggerFireCreate) SetRuleTrace(v string) *TriggerFireCreate {
+	_c.mutation.SetRuleTrace(v)
+	return _c
+}
+
+// SetNillableRuleTrace sets the "rule_trace" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableRuleTrace(v *string) *TriggerFireCreate {
+	if v != nil {
+		_c.SetRuleTrace(*v)
+	}
+	return _c
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (_c *TriggerFireCreate) SetExecutorKind(v string) *TriggerFireCreate {
 	_c.mutation.SetExecutorKind(v)
@@ -363,6 +405,21 @@ func (_c *TriggerFireCreate) check() error {
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "TriggerFire.status"`)}
 	}
+	if v, ok := _c.mutation.MatchedThrough(); ok {
+		if err := triggerfire.MatchedThroughValidator(v); err != nil {
+			return &ValidationError{Name: "matched_through", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.matched_through": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.DecidedDialect(); ok {
+		if err := triggerfire.DecidedDialectValidator(v); err != nil {
+			return &ValidationError{Name: "decided_dialect", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.decided_dialect": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.RuleTrace(); ok {
+		if err := triggerfire.RuleTraceValidator(v); err != nil {
+			return &ValidationError{Name: "rule_trace", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.rule_trace": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.ExecutorKind(); !ok {
 		return &ValidationError{Name: "executor_kind", err: errors.New(`ent: missing required field "TriggerFire.executor_kind"`)}
 	}
@@ -473,6 +530,18 @@ func (_c *TriggerFireCreate) createSpec() (*TriggerFire, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ResultRef(); ok {
 		_spec.SetField(triggerfire.FieldResultRef, field.TypeString, value)
 		_node.ResultRef = value
+	}
+	if value, ok := _c.mutation.MatchedThrough(); ok {
+		_spec.SetField(triggerfire.FieldMatchedThrough, field.TypeString, value)
+		_node.MatchedThrough = value
+	}
+	if value, ok := _c.mutation.DecidedDialect(); ok {
+		_spec.SetField(triggerfire.FieldDecidedDialect, field.TypeString, value)
+		_node.DecidedDialect = value
+	}
+	if value, ok := _c.mutation.RuleTrace(); ok {
+		_spec.SetField(triggerfire.FieldRuleTrace, field.TypeString, value)
+		_node.RuleTrace = value
 	}
 	if value, ok := _c.mutation.ExecutorKind(); ok {
 		_spec.SetField(triggerfire.FieldExecutorKind, field.TypeString, value)
@@ -733,6 +802,60 @@ func (u *TriggerFireUpsert) UpdateResultRef() *TriggerFireUpsert {
 // ClearResultRef clears the value of the "result_ref" field.
 func (u *TriggerFireUpsert) ClearResultRef() *TriggerFireUpsert {
 	u.SetNull(triggerfire.FieldResultRef)
+	return u
+}
+
+// SetMatchedThrough sets the "matched_through" field.
+func (u *TriggerFireUpsert) SetMatchedThrough(v string) *TriggerFireUpsert {
+	u.Set(triggerfire.FieldMatchedThrough, v)
+	return u
+}
+
+// UpdateMatchedThrough sets the "matched_through" field to the value that was provided on create.
+func (u *TriggerFireUpsert) UpdateMatchedThrough() *TriggerFireUpsert {
+	u.SetExcluded(triggerfire.FieldMatchedThrough)
+	return u
+}
+
+// ClearMatchedThrough clears the value of the "matched_through" field.
+func (u *TriggerFireUpsert) ClearMatchedThrough() *TriggerFireUpsert {
+	u.SetNull(triggerfire.FieldMatchedThrough)
+	return u
+}
+
+// SetDecidedDialect sets the "decided_dialect" field.
+func (u *TriggerFireUpsert) SetDecidedDialect(v string) *TriggerFireUpsert {
+	u.Set(triggerfire.FieldDecidedDialect, v)
+	return u
+}
+
+// UpdateDecidedDialect sets the "decided_dialect" field to the value that was provided on create.
+func (u *TriggerFireUpsert) UpdateDecidedDialect() *TriggerFireUpsert {
+	u.SetExcluded(triggerfire.FieldDecidedDialect)
+	return u
+}
+
+// ClearDecidedDialect clears the value of the "decided_dialect" field.
+func (u *TriggerFireUpsert) ClearDecidedDialect() *TriggerFireUpsert {
+	u.SetNull(triggerfire.FieldDecidedDialect)
+	return u
+}
+
+// SetRuleTrace sets the "rule_trace" field.
+func (u *TriggerFireUpsert) SetRuleTrace(v string) *TriggerFireUpsert {
+	u.Set(triggerfire.FieldRuleTrace, v)
+	return u
+}
+
+// UpdateRuleTrace sets the "rule_trace" field to the value that was provided on create.
+func (u *TriggerFireUpsert) UpdateRuleTrace() *TriggerFireUpsert {
+	u.SetExcluded(triggerfire.FieldRuleTrace)
+	return u
+}
+
+// ClearRuleTrace clears the value of the "rule_trace" field.
+func (u *TriggerFireUpsert) ClearRuleTrace() *TriggerFireUpsert {
+	u.SetNull(triggerfire.FieldRuleTrace)
 	return u
 }
 
@@ -1073,6 +1196,69 @@ func (u *TriggerFireUpsertOne) UpdateResultRef() *TriggerFireUpsertOne {
 func (u *TriggerFireUpsertOne) ClearResultRef() *TriggerFireUpsertOne {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.ClearResultRef()
+	})
+}
+
+// SetMatchedThrough sets the "matched_through" field.
+func (u *TriggerFireUpsertOne) SetMatchedThrough(v string) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetMatchedThrough(v)
+	})
+}
+
+// UpdateMatchedThrough sets the "matched_through" field to the value that was provided on create.
+func (u *TriggerFireUpsertOne) UpdateMatchedThrough() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateMatchedThrough()
+	})
+}
+
+// ClearMatchedThrough clears the value of the "matched_through" field.
+func (u *TriggerFireUpsertOne) ClearMatchedThrough() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearMatchedThrough()
+	})
+}
+
+// SetDecidedDialect sets the "decided_dialect" field.
+func (u *TriggerFireUpsertOne) SetDecidedDialect(v string) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetDecidedDialect(v)
+	})
+}
+
+// UpdateDecidedDialect sets the "decided_dialect" field to the value that was provided on create.
+func (u *TriggerFireUpsertOne) UpdateDecidedDialect() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateDecidedDialect()
+	})
+}
+
+// ClearDecidedDialect clears the value of the "decided_dialect" field.
+func (u *TriggerFireUpsertOne) ClearDecidedDialect() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearDecidedDialect()
+	})
+}
+
+// SetRuleTrace sets the "rule_trace" field.
+func (u *TriggerFireUpsertOne) SetRuleTrace(v string) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetRuleTrace(v)
+	})
+}
+
+// UpdateRuleTrace sets the "rule_trace" field to the value that was provided on create.
+func (u *TriggerFireUpsertOne) UpdateRuleTrace() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateRuleTrace()
+	})
+}
+
+// ClearRuleTrace clears the value of the "rule_trace" field.
+func (u *TriggerFireUpsertOne) ClearRuleTrace() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearRuleTrace()
 	})
 }
 
@@ -1589,6 +1775,69 @@ func (u *TriggerFireUpsertBulk) UpdateResultRef() *TriggerFireUpsertBulk {
 func (u *TriggerFireUpsertBulk) ClearResultRef() *TriggerFireUpsertBulk {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.ClearResultRef()
+	})
+}
+
+// SetMatchedThrough sets the "matched_through" field.
+func (u *TriggerFireUpsertBulk) SetMatchedThrough(v string) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetMatchedThrough(v)
+	})
+}
+
+// UpdateMatchedThrough sets the "matched_through" field to the value that was provided on create.
+func (u *TriggerFireUpsertBulk) UpdateMatchedThrough() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateMatchedThrough()
+	})
+}
+
+// ClearMatchedThrough clears the value of the "matched_through" field.
+func (u *TriggerFireUpsertBulk) ClearMatchedThrough() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearMatchedThrough()
+	})
+}
+
+// SetDecidedDialect sets the "decided_dialect" field.
+func (u *TriggerFireUpsertBulk) SetDecidedDialect(v string) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetDecidedDialect(v)
+	})
+}
+
+// UpdateDecidedDialect sets the "decided_dialect" field to the value that was provided on create.
+func (u *TriggerFireUpsertBulk) UpdateDecidedDialect() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateDecidedDialect()
+	})
+}
+
+// ClearDecidedDialect clears the value of the "decided_dialect" field.
+func (u *TriggerFireUpsertBulk) ClearDecidedDialect() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearDecidedDialect()
+	})
+}
+
+// SetRuleTrace sets the "rule_trace" field.
+func (u *TriggerFireUpsertBulk) SetRuleTrace(v string) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetRuleTrace(v)
+	})
+}
+
+// UpdateRuleTrace sets the "rule_trace" field to the value that was provided on create.
+func (u *TriggerFireUpsertBulk) UpdateRuleTrace() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateRuleTrace()
+	})
+}
+
+// ClearRuleTrace clears the value of the "rule_trace" field.
+func (u *TriggerFireUpsertBulk) ClearRuleTrace() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearRuleTrace()
 	})
 }
 

@@ -802,6 +802,10 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
+	if changesFutureDispatch {
+		s.invalidateTriggerRuleCache(projectID, triggerID, int64(prevRevision))
+	}
+
 	setTriggerETag(w, tr.AuthorizationRevision)
 	writeJSON(w, http.StatusOK, buildTriggerResponse(*tr))
 }
@@ -940,6 +944,8 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
+	s.invalidateTriggerRuleCache(projectID, triggerID, int64(prevRevision))
+
 	setTriggerETag(w, tr.AuthorizationRevision)
 	writeJSON(w, http.StatusOK, buildTriggerResponse(*tr))
 }
@@ -971,6 +977,8 @@ func (s *Server) deleteTrigger(w http.ResponseWriter, r *http.Request, projectID
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	s.invalidateTriggerRuleCache(projectID, triggerID, 0)
 
 	w.WriteHeader(http.StatusNoContent)
 }
