@@ -252,7 +252,7 @@ func TestSAParentCeiling_ScheduledProjectPassthroughOnSandboxRecordsNothing(t *t
 		Payload:   `{"agentName":"sa-rec-sched-pt","task":"scheduled work"}`,
 		CreatedBy: owner.ID,
 	}, owner.ID)
-	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, evt), "the scheduled create on a sandbox broker succeeds")
+	require.NoError(t, fireScheduledActionForTest(ctx, srv, "dispatch_agent", evt), "the scheduled create on a sandbox broker succeeds")
 
 	agent := agentBySlug(t, s, project.ID, "sa-rec-sched-pt")
 	assert.Nil(t, agent.AppliedConfig.GCPIdentity, "the project default is not applied on this broker")

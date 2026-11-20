@@ -490,7 +490,7 @@ func TestCanDelegate_ScheduledDispatch_FireTimeRecheck(t *testing.T) {
 		EventType: "dispatch_agent",
 		CreatedBy: userID,
 	}, userID)
-	_, err = srv.authorizeScheduledAgentCreate(ctx, evt)
+	_, err = authorizeDispatchAgentForTest(ctx, srv, evt)
 	require.NoError(t, err, "should succeed while user has project-admin role")
 
 	// Phase 2: revoke the user's project-admin role binding — simulating
@@ -499,7 +499,7 @@ func TestCanDelegate_ScheduledDispatch_FireTimeRecheck(t *testing.T) {
 
 	// Phase 3: at fire time, authorizeScheduledAgentCreate should now deny
 	// because the user no longer has the required permissions.
-	_, err = srv.authorizeScheduledAgentCreate(ctx, evt)
+	_, err = authorizeDispatchAgentForTest(ctx, srv, evt)
 	require.Error(t, err, "should be denied after permission revocation")
 	assert.Contains(t, err.Error(), userID, "error should reference the user")
 }

@@ -4558,7 +4558,7 @@ func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
 	// Initialize the scheduler (normally done by Server.Start)
 	srv.scheduler = NewScheduler(s, slog.Default())
 	srv.scheduler.srv = srv
-	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
+	srv.RegisterAction(&messageAction{srv: srv})
 
 	project := &store.Project{
 		ID:   tid("project-sched-test"),
@@ -4610,7 +4610,7 @@ func initScheduleTest(t *testing.T, srv *Server, s store.Store) (*Server, store.
 
 	srv.scheduler = NewScheduler(s, slog.Default())
 	srv.scheduler.srv = srv
-	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
+	srv.RegisterAction(&messageAction{srv: srv})
 
 	project := &store.Project{
 		ID:   tid("project-sched-recurring"),

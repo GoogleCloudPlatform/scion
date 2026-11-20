@@ -1752,7 +1752,7 @@ func TestHubDelivery_AgentCreatedChain(t *testing.T) {
 		withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
 		authz := f.srv.authzService
 		ctx := context.Background()
-		require.NoError(t, f.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+		require.NoError(t, fireScheduledActionForTest(ctx, f.srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 			ID: tid("hd-acc-sched-user-evt"), ProjectID: f.proj.ID, EventType: "dispatch_agent",
 			Payload: `{"agentName":"hd-acc-sched-user-c","task":"t"}`, CreatedBy: f.creator.ID,
 		}, f.creator.ID)))
@@ -1777,7 +1777,7 @@ func TestHubDelivery_AgentCreatedChain(t *testing.T) {
 		// permissions and C's scheduled edge inherits none.
 		a := createFixtureAgent(t, f.bypassAgentsFixture, "hd-acc-sched-noprog-a", []string{f.creator.ID}, AgentRoleFull)
 		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.creator.ID, a.ID, f.proj.ID)
-		require.NoError(t, f.srv.dispatchAgentEventHandler()(ctx, withAgentRevision(t, f.srv, store.ScheduledEvent{
+		require.NoError(t, fireScheduledActionForTest(ctx, f.srv, "dispatch_agent", withAgentRevision(t, f.srv, store.ScheduledEvent{
 			ID: tid("hd-acc-sched-noprog-evt"), ProjectID: f.proj.ID, EventType: "dispatch_agent",
 			Payload: `{"agentName":"hd-acc-sched-noprog-c","task":"t"}`, CreatedBy: a.ID,
 		}, a.ID)))

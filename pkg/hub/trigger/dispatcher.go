@@ -416,12 +416,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			finished  bool
 			finishErr error
 		)
-		// NOTE (PR 2): triggerFireTracker.Record runs at most one write per fire.
-		// Stage 1's message action never calls req.Tracked.Record itself; if a PR 2
-		// action records via req.Tracked.Record directly, this outer tracker.Record
-		// call becomes a no-op and—unless that action also updates trigger_fires—the
-		// firing row would be left to the hourly reaper.
-		tracker.Record(func() {
+		tracker.record(func() {
 			finished, finishErr = d.store.FinishTriggerFire(writeCtx, fire.ID, statusStr, out.ResultRef, out.Error, finishedAt)
 		})
 		if finishErr != nil {
@@ -636,7 +631,7 @@ func (t *triggerFireTracker) Admit(ctx context.Context) (context.Context, func()
 	return ctx, func() {}, true
 }
 
-func (t *triggerFireTracker) Record(write func()) bool {
+func (t *triggerFireTracker) record(write func()) bool {
 	ran := false
 	t.once.Do(func() {
 		ran = true

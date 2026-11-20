@@ -984,7 +984,9 @@ func TestCPMAcceptance_Scheduler_CrossProjectDenied(t *testing.T) {
 	evt = withSessionRevision(evt, "creator-user")
 	ms.events[evt.ID] = &evt
 
-	handler := srv.messageEventHandler()
+	handler := func(ctx context.Context, evt store.ScheduledEvent) error {
+		return fireScheduledActionForTest(ctx, srv, "message", evt)
+	}
 	err := handler(context.Background(), evt)
 	assert.Error(t, err, "cross-project scheduled message must be denied")
 	assert.Empty(t, spy.getCalls(), "no dispatch for cross-project scheduled message")
@@ -1011,7 +1013,9 @@ func TestCPMAcceptance_Scheduler_SameProjectAllowed(t *testing.T) {
 	}
 	evt = withSessionRevision(evt, f.ownerA.ID)
 
-	handler := f.srv.messageEventHandler()
+	handler := func(ctx context.Context, evt store.ScheduledEvent) error {
+		return fireScheduledActionForTest(ctx, f.srv, "message", evt)
+	}
 	err := handler(context.Background(), evt)
 	assert.NoError(t, err, "same-project scheduled message should fire: %v", err)
 	assert.NotEmpty(t, f.dispatcher.getCalls(), "dispatch should occur for same-project scheduled message")

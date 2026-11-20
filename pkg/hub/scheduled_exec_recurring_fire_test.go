@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -301,10 +302,10 @@ func TestScheduledExecRecurring_SlowRunDoesNotDelayMessageScheduleInSameTick(t *
 	ctx := context.Background()
 
 	var msgFired atomic.Int32
-	f.srv.scheduler.RegisterEventHandler("message", func(ctx context.Context, evt store.ScheduledEvent) error {
+	f.srv.RegisterAction(newTestFireAction("message", func(_ context.Context, _ hubfire.FireRequest) error {
 		msgFired.Add(1)
 		return nil
-	})
+	}))
 
 	now := time.Now().UTC()
 	execSc := f.createExecSchedule(t, "slow-exec-120", now.Add(-time.Second), 120, "sleep", "120")

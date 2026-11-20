@@ -729,7 +729,7 @@ func TestSAAssign2147_MemberScheduledDispatch_Enforce_EvaluatesScheduleCreator(t
 			enforceSAAssign(m.srv, checker)
 
 			agentName := "2147-path-sched-" + tc.name
-			err := m.srv.dispatchAgentEventHandler()(context.Background(), withSessionRevision(store.ScheduledEvent{
+			err := fireScheduledActionForTest(context.Background(), m.srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 				ID:        "evt-" + agentName,
 				ProjectID: m.proj.ID,
 				EventType: "dispatch_agent",

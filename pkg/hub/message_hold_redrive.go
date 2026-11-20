@@ -1531,56 +1531,7 @@ func (s *Server) revalidateScheduledHeldMessage(ctx context.Context, row *store.
 		return false, nil
 	}
 
-	if err := s.scheduledFireStanding(ctx, *evt, target); err != nil {
-		if errors.Is(err, errScheduledMessageRefused) {
-			// Probe whether target hold or authoring agent standing lookup had a
-			// transient store error (R3) vs a definite standing refusal.
-			if _, herr := s.agentHeld(ctx, target.ID); herr != nil {
-				return false, fmt.Errorf("scheduled target hold lookup: %w", herr)
-			}
-			var authors []string
-			if init := s.scheduledInitiator(evt.InitiatorAttribution); !init.LegacyUnknown &&
-				init.PrincipalKind == store.DelegationPrincipalAgent && init.PrincipalID != "" {
-				authors = append(authors, init.PrincipalID)
-			}
-			if evt.CreatedBy != "" {
-				authors = append(authors, evt.CreatedBy)
-			}
-			for _, id := range authors {
-				creator, gerr := s.store.GetAgent(ctx, id)
-				if gerr != nil && !errors.Is(gerr, store.ErrNotFound) {
-					return false, fmt.Errorf("scheduled author lookup: %w", gerr)
-				}
-				if creator != nil {
-					if serr := s.agentStanding(ctx, creator.ID); serr != nil && !errors.Is(serr, errAgentNotInStanding) {
-						return false, fmt.Errorf("scheduled author standing lookup: %w", serr)
-					}
-				}
-			}
-		}
-		return false, nil
-	}
-
-	auth, identity, err := s.resolveScheduledAuthority(ctx, *evt)
-	if err != nil {
-		if errors.Is(err, errScheduledAuthorityDenied) || errors.Is(err, errScheduledAuthorityUnrecorded) {
-			return false, nil
-		}
-		return false, fmt.Errorf("scheduled authority lookup: %w", err)
-	}
-	// Pre-check transient lookup faults on identity -> target before
-	// authorizeScheduledMessageFire evaluates policy.
-	allowed, terr := s.revalidateIdentityToAgent(ctx, identity, target)
-	if terr != nil {
-		return false, terr
-	}
-	if !allowed {
-		return false, nil
-	}
-	if err := s.authorizeScheduledMessageFire(ctx, *evt, auth, identity, target); err != nil {
-		return false, nil
-	}
-	return true, nil
+	return s.revalidateHeldScheduledMessageAuthority(ctx, evt.ProjectID, scheduledRecordedAuthority(*evt), evt.CreatedBy, target)
 }
 
 func (s *Server) revalidateUserHeldMessage(ctx context.Context, row *store.Message, target *store.Agent) (bool, error) {

@@ -472,7 +472,9 @@ func runDispatchAgentEvent(t *testing.T, srv *Server, s store.Store, projectID, 
 	})
 	require.NoError(t, err)
 
-	handler := srv.dispatchAgentEventHandler()
+	handler := func(ctx context.Context, evt store.ScheduledEvent) error {
+		return fireScheduledActionForTest(ctx, srv, "dispatch_agent", evt)
+	}
 	require.NoError(t, handler(ctx, withSessionRevision(store.ScheduledEvent{
 		ID:        tid("sched-" + agentName + "-" + t.Name()),
 		ProjectID: projectID,

@@ -69,14 +69,19 @@ type FirePayloadValidator interface {
 // FirePreauthorizer is an optional capability implemented by FireActions that
 // evaluate definition-kind guards, feature gates, or staleness windows after
 // ValidatePayload and before recorded-authority resolution, returning either a
-// *FireRefusal or a skip sentinel without evaluating authority.
+// *FireRefusal or a skip sentinel without evaluating authority. Retained after
+// legacyAction removal because execAction relies on pre-authority experiment,
+// staleness-window, and trigger-kind checks to preserve bit-identical skip/refusal
+// semantics and audit ordering (2a review O6).
 type FirePreauthorizer interface {
 	Preauthorize(ctx context.Context, req hubfire.FireRequest) (*FireRefusal, error)
 }
 
 // FireAuthorityRefusalHandler is an optional capability implemented by
 // FireActions that emit action-specific audit records and return their own
-// generic refusal text when resolveRecordedAuthority denies a fire.
+// generic refusal text when resolveRecordedAuthority denies a fire. Retained
+// after legacyAction removal because execAction emits schedule.exec.refused
+// audit records and records "exec refused" on authority denial (2a review O6).
 type FireAuthorityRefusalHandler interface {
 	OnAuthorityRefused(ctx context.Context, req hubfire.FireRequest, err error) string
 }
@@ -192,13 +197,6 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 	if req.Executor.Kind != "" || req.Executor.ID != "" {
 		ctx = ContextWithExecutor(ctx, req.Executor)
 	}
-	if legacy, ok := action.(*legacyAction); ok {
-		out := legacy.run(ctx, req)
-		if out.Status == hubfire.FireStatusFired {
-			return out, nil
-		}
-		return out, scheduledKnownError(out.Error)
-	}
 	if pv, ok := action.(FirePayloadValidator); ok {
 		if err := pv.ValidatePayload(req); err != nil {
 			return hubfire.FireOutcome{
@@ -236,7 +234,7 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 		}
 	}
 	if req.Tracked == nil {
-		req.Tracked = newScheduledFireTracker(s, req.Authority.FireID, nil)
+		req.Tracked = newScheduledFireTracker(s, req.Authority.FireID)
 	} else if st, ok := req.Tracked.(*scheduledFireTracker); ok && st.srv == nil {
 		st.srv = s
 	}

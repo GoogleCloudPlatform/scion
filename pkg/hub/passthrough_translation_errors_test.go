@@ -110,7 +110,7 @@ func (f *pteFixture) dispatchDefault(t *testing.T, name string) error {
 	}
 	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModePassthrough
 	require.NoError(t, f.store.UpdateProject(ctx, proj))
-	return f.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+	return fireScheduledActionForTest(ctx, f.srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 		ID:        "evt-" + name,
 		ProjectID: f.project.ID,
 		EventType: "dispatch_agent",

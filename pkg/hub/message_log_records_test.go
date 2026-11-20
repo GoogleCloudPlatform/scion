@@ -358,7 +358,7 @@ func TestMessageLog_Scheduler_OneRecord(t *testing.T) {
 		ID: api.NewUUID(), ProjectID: projectID, EventType: "message",
 		Payload: string(payload), Status: store.ScheduledEventPending, CreatedBy: agentID,
 	}, agentID)
-	require.NoError(t, srv.messageEventHandler()(ctx, evt))
+	require.NoError(t, fireScheduledActionForTest(ctx, srv, "message", evt))
 
 	recs := messageRecords(t, messageLogEntries(t, buf))
 	require.Len(t, recs, 1)

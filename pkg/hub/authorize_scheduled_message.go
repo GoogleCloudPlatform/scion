@@ -259,21 +259,9 @@ func (s *Server) scheduledTargetReadable(ctx context.Context, identity Identity,
 	return s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionRead).Allowed
 }
 
-// scheduledMessagePermission is the permission a scheduled message fire
-// exercises; scheduledEventPermissions maps the message event type to it.
+// scheduledMessagePermission is the permission a deferred message fire
+// exercises.
 const scheduledMessagePermission = "agent.message"
-
-// authorizeScheduledMessageFire is the store.ScheduledEvent compatibility shim
-// over authorizeMessageFire for held-message re-drive and existing unit tests.
-func (s *Server) authorizeScheduledMessageFire(
-	ctx context.Context,
-	evt store.ScheduledEvent,
-	auth ScheduledAuthority,
-	identity Identity,
-	agent *store.Agent,
-) error {
-	return s.authorizeMessageFire(ctx, evt.ProjectID, auth, identity, agent)
-}
 
 // authorizeMessageFire authorizes a deferred message fire immediately before
 // dispatch under auth and identity: the authority and identity

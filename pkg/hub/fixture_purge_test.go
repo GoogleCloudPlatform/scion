@@ -234,7 +234,7 @@ func TestFixturePurge_TransitivePurge(t *testing.T) {
 	a := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fpp-a")
 	b := fpCreateSubAgent(t, e.srv, a, e.project, "fpp-b")
 	c := fpCreateSubAgent(t, e.srv, b, e.project, "fpp-c")
-	require.NoError(t, e.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+	require.NoError(t, fireScheduledActionForTest(ctx, e.srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 		ID: "evt-fpp", ProjectID: e.project, EventType: "dispatch_agent",
 		Payload: `{"agentName":"fpp-sched","task":"t"}`, CreatedBy: fxID,
 	}, fxID)))

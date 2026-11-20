@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -77,7 +78,7 @@ func (f *schedWake) event(wake bool) store.ScheduledEvent {
 }
 
 func (f *schedWake) fire(evt store.ScheduledEvent) error {
-	return f.srv.messageEventHandler()(context.Background(), evt)
+	return fireScheduledActionForTest(context.Background(), f.srv, "message", evt)
 }
 
 // reportReadyOnStart marks the target running once the wake has written
@@ -211,13 +212,13 @@ func TestScheduledMessageWake_AgentPrincipalNeedsLifecycleScope(t *testing.T) {
 		assert.Empty(t, f.disp.getMessageCalls(), "a refused revision delivers nothing")
 		assert.Equal(t, string(state.PhaseSuspended), f.phase(t))
 
-		auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: f.sender.ID, Ceiling: evt.AuthorityCeiling}
+		auth := FireAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: f.sender.ID, Ceiling: evt.AuthorityCeiling}
 		err = f.srv.authorizeScheduledWake(context.Background(), auth, wakeDMSenderIdentity(f.sender, ScopeAgentLifecycle), f.target)
 		require.ErrorIs(t, err, errScheduledAuthorityDenied)
 	})
 	t.Run("authorizeScheduledWake refuses an agent identity without the scope", func(t *testing.T) {
 		f := newSchedWake(t, state.PhaseSuspended)
-		auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: f.sender.ID,
+		auth := FireAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: f.sender.ID,
 			Ceiling: store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1,
 				PermissionIDs: []string{"agent.lifecycle", "agent.message"}}}
 		require.Error(t, f.srv.authorizeScheduledWake(context.Background(), auth, wakeDMSenderIdentity(f.sender), f.target))
@@ -234,7 +235,7 @@ func TestScheduledMessageWake_RevisionCeilingMustAllowLifecycle(t *testing.T) {
 		return store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: ids}
 	}
 
-	auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalUser, PrincipalID: u.ID,
+	auth := FireAuthority{PrincipalKind: store.DelegationPrincipalUser, PrincipalID: u.ID,
 		Ceiling: bounded("agent.message", "agent.read")}
 	err := f.srv.authorizeScheduledWake(context.Background(), auth, identity, f.target)
 	require.ErrorIs(t, err, errScheduledAuthorityDenied)
@@ -354,13 +355,13 @@ func TestScheduledMessageWake_RecurringFireAdvancesNextRunFirst(t *testing.T) {
 
 		tickCtx, endTick := context.WithCancel(context.Background())
 		var advancedDuringFire bool
-		srv.scheduler.RegisterEventHandler("message", func(ctx context.Context, evt store.ScheduledEvent) error {
+		srv.RegisterAction(newTestFireAction("message", func(ctx context.Context, _ hubfire.FireRequest) error {
 			cur, err := s.GetSchedule(context.Background(), created.ID)
 			require.NoError(t, err)
 			advancedDuringFire = cur.NextRunAt != nil && cur.NextRunAt.After(time.Now())
 			endTick() // the fire outlasted the tick
 			return assert.AnError
-		})
+		}))
 
 		now := time.Now().UTC()
 		srv.executeSchedule(tickCtx, *row, now)
@@ -431,13 +432,16 @@ func TestScheduledMessageWake_OverlappingRecurringRunsKeepNextRun(t *testing.T) 
 		AgentName: "worker", Message: "poke", Wake: true,
 	})
 	require.Equal(t, 201, rec.Code, rec.Body.String())
-	var row store.Schedule
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&row))
+	var created store.Schedule
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	rowPtr, err := s.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	row := *rowPtr
 
 	now := time.Now().UTC().Truncate(time.Minute)
 	later := now.Add(time.Minute)
 	var calls atomic.Int32
-	srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+	srv.RegisterAction(newTestFireAction("message", func(context.Context, hubfire.FireRequest) error {
 		if calls.Add(1) == 1 {
 			// The older run is still waking when the next minute's
 			// evaluator selects the schedule and runs it to completion.
@@ -450,7 +454,7 @@ func TestScheduledMessageWake_OverlappingRecurringRunsKeepNextRun(t *testing.T) 
 			return assert.AnError // the older run then fails
 		}
 		return nil
-	})
+	}))
 
 	srv.executeSchedule(ctx, row, now)
 	srv.scheduledWakeFires.wg.Wait() // both fires run off the evaluator
@@ -504,14 +508,14 @@ func TestScheduledMessageWake_RecurringWakeFireDoesNotBlockEvaluator(t *testing.
 
 	release := make(chan struct{})
 	otherFired := make(chan struct{})
-	srv.scheduler.RegisterEventHandler("message", func(_ context.Context, evt store.ScheduledEvent) error {
-		if evt.ScheduleID == slow.ID {
+	srv.RegisterAction(newTestFireAction("message", func(_ context.Context, req hubfire.FireRequest) error {
+		if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule && req.Authority.DefinitionID == slow.ID {
 			<-release // a wake that takes a long time
 			return nil
 		}
 		close(otherFired)
 		return nil
-	})
+	}))
 
 	evaluated := make(chan struct{})
 	go func() {
@@ -564,10 +568,10 @@ func TestScheduledMessageWake_RecurringWakeFireRefusedWhileShuttingDown(t *testi
 	require.NoError(t, err)
 
 	var calls atomic.Int32
-	srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+	srv.RegisterAction(newTestFireAction("message", func(context.Context, hubfire.FireRequest) error {
 		calls.Add(1)
 		return nil
-	})
+	}))
 	srv.scheduledWakeFires.closeAdmission()
 
 	srv.executeSchedule(ctx, *row, time.Now().UTC())
@@ -619,13 +623,13 @@ func TestScheduledMessageWake_RecurringWakeFirePanicIsContained(t *testing.T) {
 	other := createDueWakeTestSchedule(t, srv, s, projectID, "after-panic", false, past)
 
 	var otherRan atomic.Int32
-	srv.scheduler.RegisterEventHandler("message", func(_ context.Context, evt store.ScheduledEvent) error {
-		if evt.ScheduleID == panicky.ID {
+	srv.RegisterAction(newTestFireAction("message", func(_ context.Context, req hubfire.FireRequest) error {
+		if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule && req.Authority.DefinitionID == panicky.ID {
 			panic("wake handler exploded")
 		}
 		otherRan.Add(1)
 		return nil
-	})
+	}))
 
 	srv.executeSchedule(ctx, panicky, time.Now().UTC())
 	srv.scheduledWakeFires.wg.Wait()
@@ -663,11 +667,11 @@ func TestScheduledMessageWake_RecurringWakeFireEventNotReplayable(t *testing.T) 
 
 	running := make(chan string, 1)
 	release := make(chan struct{})
-	srv.scheduler.RegisterEventHandler("message", func(_ context.Context, evt store.ScheduledEvent) error {
-		running <- evt.ID
+	srv.RegisterAction(newTestFireAction("message", func(_ context.Context, req hubfire.FireRequest) error {
+		running <- req.Authority.FireID
 		<-release
 		return nil
-	})
+	}))
 
 	srv.executeSchedule(ctx, sched, time.Now().UTC())
 	var eventID string
@@ -744,10 +748,10 @@ func TestScheduledMessageWake_RecurringWakeEventNeverPending(t *testing.T) {
 	ctx := context.Background()
 	sched := createDueWakeTestSchedule(t, srv, s, projectID, "never-pending", true, time.Now().UTC().Add(-time.Minute))
 	var calls atomic.Int32
-	srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+	srv.RegisterAction(newTestFireAction("message", func(context.Context, hubfire.FireRequest) error {
 		calls.Add(1)
 		return nil
-	})
+	}))
 	fault.Arm()
 
 	srv.executeSchedule(ctx, sched, time.Now().UTC())
@@ -797,11 +801,11 @@ func TestScheduledMessageWake_ShutdownAbortsRunningWakeFire(t *testing.T) {
 		ctx := context.Background()
 		sched := createDueWakeTestSchedule(t, srv, s, projectID, "abort-respects", true, time.Now().UTC().Add(-time.Minute))
 		started := make(chan struct{})
-		srv.scheduler.RegisterEventHandler("message", func(hctx context.Context, _ store.ScheduledEvent) error {
+		srv.RegisterAction(newTestFireAction("message", func(hctx context.Context, _ hubfire.FireRequest) error {
 			close(started)
 			<-hctx.Done() // a wake step that honours its context
 			return hctx.Err()
-		})
+		}))
 		srv.executeSchedule(ctx, sched, time.Now().UTC())
 		<-started
 
@@ -816,11 +820,11 @@ func TestScheduledMessageWake_ShutdownAbortsRunningWakeFire(t *testing.T) {
 		sched := createDueWakeTestSchedule(t, srv, s, projectID, "abort-ignores", true, time.Now().UTC().Add(-time.Minute))
 		started := make(chan struct{})
 		release := make(chan struct{})
-		srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+		srv.RegisterAction(newTestFireAction("message", func(context.Context, hubfire.FireRequest) error {
 			close(started)
 			<-release // ignores its context, like a detached broker launch
 			return nil
-		})
+		}))
 		srv.executeSchedule(ctx, sched, time.Now().UTC())
 		<-started
 
@@ -845,11 +849,11 @@ func fireOneShotWake(t *testing.T, f *schedWake, evt store.ScheduledEvent) (*Sch
 	sch := NewScheduler(f.srv.store, slog.Default())
 	entered := make(chan struct{})
 	finished := make(chan struct{})
-	sch.RegisterEventHandler("message", func(ctx context.Context, e store.ScheduledEvent) error {
+	sch.RegisterAction(newTestFireAction("message", func(ctx context.Context, _ hubfire.FireRequest) error {
 		close(entered)
 		defer close(finished)
-		return f.srv.messageEventHandler()(ctx, e)
-	})
+		return fireScheduledActionForTest(ctx, f.srv, "message", evt)
+	}))
 	sch.scheduleTimer(context.Background(), evt)
 	return sch, entered, finished
 }
@@ -1110,9 +1114,9 @@ func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) 
 		})
 		ctx := context.Background()
 		sched := createDueWakeTestSchedule(t, srv, s, projectID, "slow-complete-rec", true, time.Now().UTC().Add(-time.Minute))
-		srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+		srv.RegisterAction(newTestFireAction("message", func(context.Context, hubfire.FireRequest) error {
 			return nil
-		})
+		}))
 		fault.Arm()
 
 		srv.executeSchedule(ctx, sched, time.Now().UTC())
@@ -1214,9 +1218,9 @@ func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) 
 		})
 		ctx := context.Background()
 		sched := createDueWakeTestSchedule(t, srv, s, projectID, "fast-complete-rec", true, time.Now().UTC().Add(-time.Minute))
-		srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+		srv.RegisterAction(newTestFireAction("message", func(context.Context, hubfire.FireRequest) error {
 			return nil
-		})
+		}))
 		fault.Arm()
 
 		srv.executeSchedule(ctx, sched, time.Now().UTC())
@@ -1318,11 +1322,11 @@ func TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown(t *tes
 		inHandler := make(chan struct{})
 		release := make(chan struct{})
 		sch := NewScheduler(f.srv.store, slog.Default())
-		sch.RegisterEventHandler("message", func(ctx context.Context, e store.ScheduledEvent) error {
+		sch.RegisterAction(newTestFireAction("message", func(ctx context.Context, _ hubfire.FireRequest) error {
 			close(inHandler)
 			<-release
-			return f.srv.messageEventHandler()(ctx, e)
-		})
+			return fireScheduledActionForTest(ctx, f.srv, "message", evt)
+		}))
 
 		done := make(chan struct{})
 		go func() {
@@ -1375,15 +1379,15 @@ func TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown(t *tes
 			release := make(chan struct{})
 			finished := make(chan struct{})
 			sch := NewScheduler(f.srv.store, slog.Default())
-			sch.RegisterEventHandler("message", func(ctx context.Context, e store.ScheduledEvent) error {
-				trackedCtx, endTracking, ok := f.srv.trackScheduledWake(ctx, e)
+			sch.RegisterAction(newTestFireAction("message", func(ctx context.Context, req hubfire.FireRequest) error {
+				trackedCtx, endTracking, ok := newScheduledFireTracker(f.srv, req.Authority.FireID).Admit(ctx)
 				require.True(t, ok)
 				defer endTracking()
 				_ = trackedCtx
 				close(started)
 				<-release // ignores abort, simulating a detached step finishing after abandonment
 				return tc.handlerErr
-			})
+			}))
 
 			go func() {
 				defer close(finished)
@@ -1465,19 +1469,19 @@ func TestScheduledMessageWake_ProvisionalFiringAndAbandonedRecovery(t *testing.T
 		recEntered := make(chan string, 1)
 		oneShotEntered := make(chan struct{}, 2)
 		releaseHandlers := make(chan struct{})
-		srv.scheduler.RegisterEventHandler("message", func(hctx context.Context, evt store.ScheduledEvent) error {
-			if evt.ScheduleID != "" {
-				recEntered <- evt.ID
+		srv.RegisterAction(newTestFireAction("message", func(hctx context.Context, req hubfire.FireRequest) error {
+			if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule {
+				recEntered <- req.Authority.FireID
 				<-releaseHandlers
 				return nil
 			}
-			_, endTracking, ok := srv.trackScheduledWake(hctx, evt)
+			_, endTracking, ok := newScheduledFireTracker(srv, req.Authority.FireID).Admit(hctx)
 			require.True(t, ok)
 			defer endTracking()
 			oneShotEntered <- struct{}{}
 			<-releaseHandlers
 			return nil
-		})
+		}))
 
 		srv.executeSchedule(ctx, sched, time.Now().UTC())
 		recEventID := <-recEntered

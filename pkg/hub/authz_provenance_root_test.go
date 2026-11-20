@@ -132,9 +132,10 @@ func TestProvenanceRoot_SchedulerWriterRoundTrip(t *testing.T) {
 		evt.AuthorizationRevision = 3
 		return evt
 	}
-	writeAndResolve := func(t *testing.T, f provenanceFixture, srv *Server, auth ScheduledAuthority, evt store.ScheduledEvent) RecordedProvenanceRoot {
+	writeAndResolve := func(t *testing.T, f provenanceFixture, srv *Server, auth FireAuthority, evt store.ScheduledEvent) RecordedProvenanceRoot {
 		t.Helper()
-		c, prov, err := srv.scheduledEffectCeiling(ctx, auth, evt)
+		auth.Recorded = scheduledRecordedAuthority(evt)
+		c, prov, err := srv.fireEffectCeiling(ctx, auth)
 		require.NoError(t, err)
 		ag := f.agent(t, "rt-"+auth.CredentialKind, AgentRoleFull)
 		f.edge(t, auth.PrincipalKind, auth.PrincipalID, ag.ID, c, prov)
@@ -152,7 +153,7 @@ func TestProvenanceRoot_SchedulerWriterRoundTrip(t *testing.T) {
 			if cred == store.InitiatorCredentialKindUAT {
 				c = boundedCeiling("agent.create")
 			}
-			auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalUser, PrincipalID: f.userID, CredentialKind: cred, Ceiling: c}
+			auth := FireAuthority{PrincipalKind: store.DelegationPrincipalUser, PrincipalID: f.userID, CredentialKind: cred, Ceiling: c}
 			root := writeAndResolve(t, f, &Server{authzService: f.a}, auth, scheduledEvent(store.DelegationPrincipalUser, f.userID, cred))
 			require.NotNil(t, root.RootUser)
 			assert.Equal(t, f.userID, root.RootUser.ID)
@@ -161,7 +162,7 @@ func TestProvenanceRoot_SchedulerWriterRoundTrip(t *testing.T) {
 	t.Run("agent", func(t *testing.T) {
 		f := newProvenanceFixture(t, "sched-rt-agent", false)
 		p := f.userChild(t, "sched-rt-agent-p", ceilPrincip)
-		auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: p.ID, CredentialKind: store.InitiatorCredentialKindAgent, Ceiling: boundedCeiling("agent.create"), agent: p}
+		auth := FireAuthority{PrincipalKind: store.DelegationPrincipalAgent, PrincipalID: p.ID, CredentialKind: store.InitiatorCredentialKindAgent, Ceiling: boundedCeiling("agent.create"), agent: p}
 		root := writeAndResolve(t, f, &Server{authzService: f.a}, auth, scheduledEvent(store.DelegationPrincipalAgent, p.ID, store.InitiatorCredentialKindAgent))
 		require.NotNil(t, root.RootUser)
 		assert.Equal(t, f.userID, root.RootUser.ID)
@@ -169,7 +170,7 @@ func TestProvenanceRoot_SchedulerWriterRoundTrip(t *testing.T) {
 	t.Run("dev_local", func(t *testing.T) {
 		f := newProvenanceFixture(t, "sched-rt-dev", true)
 		f.devUserInProject(t, store.UserStatusActive)
-		auth := ScheduledAuthority{PrincipalKind: store.DelegationPrincipalUser, PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal, Ceiling: ceilPrincip}
+		auth := FireAuthority{PrincipalKind: store.DelegationPrincipalUser, PrincipalID: DevUserID, CredentialKind: store.InitiatorCredentialKindDevLocal, Ceiling: ceilPrincip}
 		root := writeAndResolve(t, f, &Server{authzService: f.a}, auth, scheduledEvent(string(PrincipalKindDev), DevUserID, store.InitiatorCredentialKindDevLocal))
 		require.NotNil(t, root.RootUser)
 		assert.Equal(t, DevUserID, root.RootUser.ID)

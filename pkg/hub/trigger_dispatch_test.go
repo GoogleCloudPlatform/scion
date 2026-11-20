@@ -1260,7 +1260,7 @@ func TestTriggerDispatchE2E_ConduitDeliverAwaitingSessionSkipsHoldAndFailsLoud(t
 		CreatedBy: f.agent.ID,
 	}, f.agent.ID)
 	require.NoError(t, f.store.CreateScheduledEvent(ctx, &schedEvt))
-	require.NoError(t, f.srv.messageEventHandler()(ctx, schedEvt))
+	require.NoError(t, fireScheduledActionForTest(ctx, f.srv, "message", schedEvt))
 	assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug), "schedule fire still holds behind awaiting_session")
 
 	beforeMsgs, err := f.store.ListMessages(ctx, store.MessageFilter{AgentID: f.launched.ID}, store.ListOptions{Limit: 20})

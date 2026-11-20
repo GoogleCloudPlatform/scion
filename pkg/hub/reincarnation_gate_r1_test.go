@@ -453,7 +453,9 @@ func TestMessageEventHandler_R3_MigratingTargetFailsLoudly(t *testing.T) {
 		CreatedBy: creator.ID,
 	}, creator.ID)
 
-	handler := srv.messageEventHandler()
+	handler := func(ctx context.Context, evt store.ScheduledEvent) error {
+		return fireScheduledActionForTest(ctx, srv, "message", evt)
+	}
 	err = handler(ctx, evt)
 	require.Error(t, err, "a scheduled message to a migrating agent must fail, not silently succeed")
 	assert.Contains(t, err.Error(), "reincarnating")
@@ -501,7 +503,9 @@ func TestMessageEventHandler_OA_AuthzDenialPrecedesReincarnationCheck(t *testing
 		CreatedBy: creator.ID,
 	}, creator.ID)
 
-	handler := srv.messageEventHandler()
+	handler := func(ctx context.Context, evt store.ScheduledEvent) error {
+		return fireScheduledActionForTest(ctx, srv, "message", evt)
+	}
 	err = handler(ctx, evt)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "reincarnating",

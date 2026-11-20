@@ -300,8 +300,9 @@ func schedFireMint(t *testing.T, f *schedFire, boundary TokenBoundary, scopes ..
 // can fire them.
 func withFireScheduler(srv *Server, s store.Store) {
 	srv.scheduler = NewScheduler(s, slog.Default())
-	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
-	srv.scheduler.RegisterEventHandler("dispatch_agent", srv.dispatchAgentEventHandler())
+	srv.scheduler.srv = srv
+	srv.RegisterAction(&messageAction{srv: srv})
+	srv.RegisterAction(&dispatchAgentAction{srv: srv})
 }
 
 // createTokenEvent creates a one-shot event with key over the route and
@@ -426,7 +427,7 @@ func TestScheduledFire_UsesRecordedTokenBoundary(t *testing.T) {
 			assert.Equal(t, string(boundary.Kind), evt.AuthorityCeiling.BoundaryKind, slug)
 			assert.Equal(t, boundary.ProjectID, evt.AuthorityCeiling.BoundaryProjectID, slug)
 
-			_, identity, err := f.srv.resolveScheduledAuthority(context.Background(), evt)
+			_, identity, err := resolveScheduledAuthorityForTest(context.Background(), f.srv, evt)
 			require.NoError(t, err, slug)
 			scoped, ok := identity.(*ScopedUserIdentity)
 			require.True(t, ok, "%s: the fire runs as a token identity, got %T", slug, identity)
@@ -451,7 +452,7 @@ func TestScheduledFire_UsesRecordedTokenBoundary(t *testing.T) {
 			evt := createTokenEvent(t, f.srv, f.store, key, f.proj.ID, body)
 			assertTokenRevision(t, label, tok, evt.InitiatorAttribution, evt.AuthorityCeiling)
 
-			_, identity, err := f.srv.resolveScheduledAuthority(context.Background(), evt)
+			_, identity, err := resolveScheduledAuthorityForTest(context.Background(), f.srv, evt)
 			require.NoError(t, err, label)
 			scoped, ok := identity.(*ScopedUserIdentity)
 			require.True(t, ok, "%s: the fire runs as a token identity, got %T", label, identity)
@@ -483,7 +484,7 @@ func TestScheduledFire_UsesRecordedTokenBoundary(t *testing.T) {
 		assertOutsideBoundary := func(label string, evt store.ScheduledEvent, wantErr string) {
 			t.Helper()
 			require.Equal(t, other, evt.AuthorityCeiling.BoundaryProjectID, label)
-			_, identity, err := f.srv.resolveScheduledAuthority(ctx, evt)
+			_, identity, err := resolveScheduledAuthorityForTest(ctx, f.srv, evt)
 			require.NoError(t, err, label)
 			scoped, ok := identity.(*ScopedUserIdentity)
 			require.True(t, ok, "%s: the fire runs as a token identity, got %T", label, identity)

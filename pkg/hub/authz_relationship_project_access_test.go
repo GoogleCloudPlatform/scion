@@ -805,7 +805,9 @@ func TestRelationshipProjectAccess_RefusalSurfaces(t *testing.T) {
 			f.counting.setFault(userFaultID)
 			f.counting.setBindingFault(bindingFaultID)
 
-			handler := f.srv.messageEventHandler()
+			handler := func(ctx context.Context, evt store.ScheduledEvent) error {
+				return fireScheduledActionForTest(ctx, f.srv, "message", evt)
+			}
 			fire := func(creatorID, agentID string) string {
 				t.Helper()
 				payload := `{"agentId":"` + agentID + `","message":"hello"}`
@@ -869,7 +871,7 @@ func TestRelationshipProjectAccess_ScheduledTargetLookupFault(t *testing.T) {
 	t.Cleanup(func() { f.srv.store = orig })
 	logs := installSentinelLogCapture(t)
 
-	err := f.srv.messageEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(ctx, f.srv, "message", withSessionRevision(store.ScheduledEvent{
 		ID: tid("rpa-schedfault-evt"), ProjectID: f.projectID, EventType: "message",
 		Payload: `{"agentId":"` + agent.ID + `","message":"hello"}`, CreatedBy: f.ownerID,
 	}, f.ownerID))

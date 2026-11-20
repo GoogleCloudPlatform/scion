@@ -238,7 +238,7 @@ func TestDispatchAgentEventHandler_CapturesTimezone(t *testing.T) {
 	creatorID := seedFullRoleDispatchCreator(ms, "project-1")
 	srv := newEventHandlerTestServer(&tzTemplateStore{ms})
 
-	err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(context.Background(), srv, "dispatch_agent", withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-tz-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",

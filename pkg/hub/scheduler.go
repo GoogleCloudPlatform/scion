@@ -167,10 +167,9 @@ type Scheduler struct {
 	// srv is the owning Hub server when wired (nil in standalone scheduler tests).
 	srv *Server
 
-	// legacyHandlers backs standalone NewScheduler unit tests where srv is nil.
+	// actions backs standalone NewScheduler unit tests where srv is nil.
 	// When srv is wired, Server.actions is the single action registry.
-	// Removed in PR 2 (ptone/scion#8029).
-	legacyHandlers map[string]EventHandler
+	actions actionRegistry
 
 	// Tick counter (monotonically increasing). Written by the ticker loop and
 	// read concurrently by handler goroutines and Status(), so it is atomic.
@@ -265,15 +264,45 @@ func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Sc
 	return s
 }
 
+// RegisterAction registers a FireAction on Server.actions when s.srv is set,
+// or on s.actions when s.srv is nil (standalone NewScheduler unit tests).
+func (s *Scheduler) RegisterAction(a FireAction) {
+	if s.srv != nil {
+		s.srv.RegisterAction(a)
+		return
+	}
+	s.actions.Register(a)
+}
+
 func (s *Scheduler) fireAction(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
 	if s.srv != nil {
 		return s.srv.fireAction(ctx, req)
 	}
-	if h, ok := s.legacyHandlers[req.ActionType]; ok {
+	if action, ok := s.actions.Lookup(req.ActionType); ok {
 		if req.Executor.Kind != "" || req.Executor.ID != "" {
 			ctx = ContextWithExecutor(ctx, req.Executor)
 		}
-		return (&legacyAction{actionType: req.ActionType, handler: h}).run(ctx, req)
+		out, err := action.Fire(ctx, req, nil)
+		if err != nil {
+			if reason, skipped := asScheduledSkip(err); skipped {
+				return hubfire.FireOutcome{
+					Status:      hubfire.FireStatusSkipped,
+					Error:       reason,
+					AfterRecord: out.AfterRecord,
+					Detached:    out.Detached,
+				}
+			}
+			return hubfire.FireOutcome{
+				Status:      hubfire.FireStatusFailed,
+				Error:       err.Error(),
+				AfterRecord: out.AfterRecord,
+				Detached:    out.Detached,
+			}
+		}
+		if out.Status == "" {
+			out.Status = hubfire.FireStatusFired
+		}
+		return out
 	}
 	return hubfire.FireOutcome{
 		Status: hubfire.FireStatusFailed,
@@ -825,8 +854,8 @@ func (s *Scheduler) executeEvent(ctx context.Context, evt store.ScheduledEvent) 
 	if existing, ok := ExecutorContextFromContext(ctx); ok {
 		exec = existing
 	}
-	fireCtx := withFireHistoryCreator(withLegacyScheduledEvent(ctx, evt), evt.CreatedBy)
-	out := s.fireAction(fireCtx, scheduledFireRequest(s.srv, evt, exec, nil))
+	fireCtx := withFireHistoryCreator(ctx, evt.CreatedBy)
+	out := s.fireAction(fireCtx, scheduledFireRequest(s.srv, evt, exec))
 	if out.AfterRecord != nil {
 		after := out.AfterRecord
 		afterScheduledRecord(ctx, func() {
@@ -911,10 +940,7 @@ func (s *Scheduler) Status() SchedulerStatus {
 	if s.srv != nil {
 		eventHandlers = s.srv.actions.Types()
 	} else {
-		eventHandlers = make([]string, 0, len(s.legacyHandlers))
-		for k := range s.legacyHandlers {
-			eventHandlers = append(eventHandlers, k)
-		}
+		eventHandlers = s.actions.Types()
 	}
 
 	s.mu.Lock()

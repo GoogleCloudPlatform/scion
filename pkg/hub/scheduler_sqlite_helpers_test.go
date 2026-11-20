@@ -59,7 +59,7 @@ func fireScheduledDispatchAsOwner(t *testing.T, f *bypassAgentsFixture, agentNam
 	ctx := context.Background()
 	f.srv.seedProjectCreatorMembership(ctx, f.proj)
 	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
-	return f.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+	return fireScheduledActionForTest(ctx, f.srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 		ID:        "evt-" + agentName,
 		ProjectID: f.proj.ID,
 		EventType: "dispatch_agent",

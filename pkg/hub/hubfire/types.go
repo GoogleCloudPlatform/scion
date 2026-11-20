@@ -50,8 +50,8 @@ type RecordedAuthority struct {
 // hub/trigger share the identical executor attribution type without conversion.
 type ExecutorContext = principal.ExecutorContext
 
-// FireTracker coordinates fires that outlive their caller's context, shutdown
-// admission, and once-only outcome persistence.
+// FireTracker coordinates fires that outlive their caller's context and
+// shutdown admission.
 type FireTracker interface {
 	// Detach returns a context that survives the caller's deadline while still
 	// observing hub shutdown.
@@ -59,9 +59,6 @@ type FireTracker interface {
 	// Admit registers a long-running fire with the hub's shutdown tracking;
 	// returns false when shutdown has begun.
 	Admit(ctx context.Context) (context.Context, func(), bool)
-	// Record executes write at most once across normal completion and abandon
-	// paths.
-	Record(write func()) bool
 }
 
 // FireTriggerRef identifies the trigger rule that initiated a FireEvent.

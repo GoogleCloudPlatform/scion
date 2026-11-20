@@ -126,37 +126,6 @@ var (
 	errScheduledAuthorityDenied = errors.New("schedule authority denied")
 )
 
-// scheduledEventPermissions maps an event type to the permission its fire
-// exercises in the event's project. resolveScheduledAuthority checks the
-// revision principal's current project admission for it. An event type with
-// no entry is denied.
-//
-// For exec (ptone/scion#7883) the project admission this checks is only a
-// project-boundary and liveness gate: ProjectAdmissionForClass admits on
-// project membership, not on a binding of agent.attach. The real decision
-// is authorizeScheduledExecFire's target-scoped agent.attach check, which
-// must never be skipped.
-var scheduledEventPermissions = map[string]string{
-	"dispatch_agent":       "agent.create",
-	"message":              scheduledMessagePermission,
-	scheduledEventTypeExec: scheduledExecPermission,
-}
-
-// ScheduledAuthority aliases FireAuthority until all scheduled actions migrate
-// to FireAction.
-// Removed in PR 2 (ptone/scion#8029).
-type ScheduledAuthority = FireAuthority
-
-// resolveScheduledAuthority forwards to resolveRecordedAuthority.
-// Removed in PR 2 (ptone/scion#8029).
-func (s *Server) resolveScheduledAuthority(ctx context.Context, evt store.ScheduledEvent) (ScheduledAuthority, Identity, error) {
-	auth, identity, err := s.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), evt.ProjectID, scheduledEventPermissions[evt.EventType])
-	if errors.Is(err, errNoRecordedAuthorityRule) {
-		return ScheduledAuthority{}, nil, fmt.Errorf("%w: event type %q has no scheduled authority rule", errScheduledAuthorityDenied, evt.EventType)
-	}
-	return auth, identity, err
-}
-
 // scheduledUserAccount applies the account-status rule (checkUserAccount)
 // to a scheduled revision's user principal and returns its active users
 // row. A lookup fault is returned as a fault (not errScheduledAuthorityDenied).

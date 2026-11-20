@@ -591,12 +591,6 @@ func standingStartRefusal(agentID string, err error) *startRefusal {
 	}
 }
 
-// scheduledFireStanding forwards to fireStanding.
-// Removed in PR 2 (ptone/scion#8029).
-func (s *Server) scheduledFireStanding(ctx context.Context, evt store.ScheduledEvent, target *store.Agent) error {
-	return s.fireStanding(ctx, scheduledStandingAuthority(evt), target)
-}
-
 // ErrAgentNotInStanding is returned by the dispatcher when the standing
 // check refuses a start or restart.
 var ErrAgentNotInStanding = errors.New("agent is suspended")

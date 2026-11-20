@@ -336,7 +336,7 @@ func TestScheduledDispatchChildEdgeRecordedRole(t *testing.T) {
 		ScheduleID: tid("scheduled-dispatch-edge-role-schedule"),
 		FireAt:     time.Now(),
 	}, user.ID)
-	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, evt))
+	require.NoError(t, fireScheduledActionForTest(ctx, srv, "dispatch_agent", evt))
 	child, err := s.GetAgentBySlug(ctx, project.ID, "scheduled-edge-child")
 	require.NoError(t, err)
 	require.NotNil(t, child.AppliedConfig)

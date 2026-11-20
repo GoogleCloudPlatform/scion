@@ -187,7 +187,7 @@ func TestPassthroughTranslation_ProjectDefault_Scheduled_NotAppliedOnSandbox(t *
 	enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(ptgHostSA))
 	ctx := context.Background()
 
-	err := f.srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
+	err := fireScheduledActionForTest(ctx, f.srv, "dispatch_agent", withSessionRevision(store.ScheduledEvent{
 		ID:        "evt-ptg-sched",
 		ProjectID: f.project.ID,
 		EventType: "dispatch_agent",

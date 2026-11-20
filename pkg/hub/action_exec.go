@@ -475,7 +475,10 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 			return terminal(outcome, &res, status, reason, fireStatus)
 		}
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-		if changed, err := s.store.MarkScheduledExecRunRunning(recordCtx, fireID); err == nil && changed {
+		if changed, err := s.store.MarkScheduledExecRunRunning(recordCtx, fireID); err != nil {
+			slog.Warn("Scheduler: failed to mark scheduled exec run running",
+				"eventID", fireID, "scheduleID", scheduleID, "error", err)
+		} else if changed {
 			run.Outcome = store.ScheduledExecOutcomeRunning
 		}
 		cancel()

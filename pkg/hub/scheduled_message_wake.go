@@ -87,7 +87,7 @@ func scheduledWakeNeedsResume(agent *store.Agent) bool {
 //
 // A target the wake would not resume needs nothing more. A denial returns an
 // error naming the cause, for the log.
-func (s *Server) authorizeScheduledWake(ctx context.Context, auth ScheduledAuthority, identity Identity, agent *store.Agent) error {
+func (s *Server) authorizeScheduledWake(ctx context.Context, auth FireAuthority, identity Identity, agent *store.Agent) error {
 	if !scheduledWakeNeedsResume(agent) {
 		return nil
 	}
@@ -503,22 +503,6 @@ func (w *wakeFireRuns) snapshot() []*wakeFireRun {
 // aborts the recurring wake fires that outlived scheduledWakeFireStopGrace,
 // for them to record their own outcome.
 var scheduledWakeFireAbortGrace = 2 * time.Second
-
-// trackScheduledWake joins a scheduled wake (and the dispatch after it) to
-// the hub's shutdown tracking, the same mechanism for one-shot and
-// recurring fires. A recurring wake fire is already tracked from
-// executeSchedule (its ctx carries the fire abort): ctx is returned as is.
-// A one-shot wake is admitted to scheduledWakeFires and registered, and its
-// returned ctx ends, and carries the abort, when the shutdown aborts the
-// tracked work. ok is false once the hub is shutting down: the wake must
-// not start. The caller must call done when the wake and dispatch end.
-//
-// A one-shot fire records its own outcome (fireEvent, on a context that
-// survives the scheduler's halt); the shutdown records the failure for one
-// still running when it stops waiting.
-func (s *Server) trackScheduledWake(ctx context.Context, evt store.ScheduledEvent) (context.Context, func(), bool) {
-	return (&scheduledFireTracker{srv: s, fireID: evt.ID}).Admit(ctx)
-}
 
 // errScheduledWakeShuttingDown is recorded on a scheduled wake that did
 // not start because the hub is shutting down.

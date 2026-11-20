@@ -321,11 +321,11 @@ func TestStandingGates_RemovedRootDenied(t *testing.T) {
 	})
 	t.Run("scheduledAuthorAgent", func(t *testing.T) {
 		evt := store.ScheduledEvent{ID: "evt", EventType: "message", ProjectID: f.projectID, CreatedBy: f.agentA.ID}
-		require.Error(t, f.srv.scheduledFireStanding(ctx, evt, f.childC))
+		require.Error(t, fireStandingForTest(ctx, f.srv, evt, f.childC))
 	})
 	t.Run("scheduledDispatchAuthor", func(t *testing.T) {
 		evt := store.ScheduledEvent{ID: "evt2", EventType: "dispatch_agent", ProjectID: f.projectID, CreatedBy: f.agentA.ID}
-		require.Error(t, f.srv.scheduledFireStanding(ctx, evt, nil))
+		require.Error(t, fireStandingForTest(ctx, f.srv, evt, nil))
 	})
 	t.Run("agentCreatesChild", func(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agents",
@@ -458,10 +458,10 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 		}, f.ownerID)
 		// Control: every precondition other than the hold admits the send,
 		// so the refusal below comes from the held target.
-		auth, identity, err := f.srv.resolveScheduledAuthority(ctx, evt)
+		auth, identity, err := resolveScheduledAuthorityForTest(ctx, f.srv, evt)
 		require.NoError(t, err)
-		require.NoError(t, f.srv.authorizeScheduledMessageFire(ctx, evt, auth, identity, f.agentA))
-		err = f.srv.messageEventHandler()(ctx, evt)
+		require.NoError(t, f.srv.authorizeMessageFire(ctx, evt.ProjectID, auth, identity, f.agentA))
+		err = fireScheduledActionForTest(ctx, f.srv, "message", evt)
 		require.Error(t, err)
 		assert.Equal(t, errScheduledMessageRefused.Error(), err.Error())
 	})
@@ -470,7 +470,7 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 			ID: tid("ms-held-dispatch-evt"), ProjectID: f.projectID, EventType: "dispatch_agent",
 			Payload: `{"agentName":"ms-held-sched-child","task":"t"}`, CreatedBy: f.agentA.ID,
 		}, f.agentA.ID)
-		err := f.srv.dispatchAgentEventHandler()(ctx, evt)
+		err := fireScheduledActionForTest(ctx, f.srv, "dispatch_agent", evt)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "scheduled dispatch refused")
 		_, getErr := f.s.GetAgentBySlug(ctx, f.projectID, "ms-held-sched-child")
@@ -538,7 +538,7 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 	})
 	t.Run("scheduledTargetHeld", func(t *testing.T) {
 		evt := store.ScheduledEvent{ID: "evt3", EventType: "message", ProjectID: f.projectID, CreatedBy: f.ownerID}
-		require.ErrorIs(t, f.srv.scheduledFireStanding(ctx, evt, f.agentA), errScheduledMessageRefused)
+		require.ErrorIs(t, fireStandingForTest(ctx, f.srv, evt, f.agentA), errScheduledMessageRefused)
 	})
 	t.Run("ceilingAgentHop", func(t *testing.T) {
 		_, _, err := f.srv.authzService.checkAgentHoldsPermission(ctx, f.agentA.ID, "agent.read", store.RoleScopeProject, f.projectID)
