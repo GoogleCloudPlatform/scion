@@ -64,6 +64,9 @@ type HealthSummary struct {
 	// Schedules lists the failing schedules the caller may read; nil when
 	// the hub could not list them.
 	Schedules *HealthSummarySchedules `json:"schedules"`
+	// Triggers lists failing and hub-paused triggers the caller may read
+	// when hub.triggers is enabled; nil when the experiment is off.
+	Triggers *HealthSummaryTriggers `json:"triggers,omitempty"`
 
 	// Raw is the response body exactly as the hub sent it, so callers can
 	// pass the summary through without dropping fields this client does
@@ -380,6 +383,50 @@ type HealthFailingSchedule struct {
 // HealthSummaryLinks holds operator-configured Health page links.
 type HealthSummaryLinks struct {
 	MonitoringDashboard string `json:"monitoring_dashboard,omitempty"`
+}
+
+// HealthSummaryTriggers is the triggers section of the health summary: active
+// triggers whose last fire failed or was refused, and triggers the hub paused
+// itself with their normalized reason codes. Present when hub.triggers is on.
+type HealthSummaryTriggers struct {
+	Unavailable       bool                   `json:"unavailable,omitempty"`
+	Failing           []HealthFailingTrigger `json:"failing"`
+	Total             int                    `json:"total"`
+	Truncated         bool                   `json:"truncated"`
+	ScanLimited       bool                   `json:"scan_limited"`
+	Paused            []HealthPausedTrigger  `json:"paused"`
+	PausedByReason    map[string]int         `json:"paused_by_reason"`
+	PausedUnavailable bool                   `json:"paused_unavailable"`
+	PausedTotal       int                    `json:"paused_total"`
+	PausedTruncated   bool                   `json:"paused_truncated"`
+	PausedScanLimited bool                   `json:"paused_scan_limited"`
+}
+
+// HealthFailingTrigger is one active trigger whose last fire failed or was refused.
+type HealthFailingTrigger struct {
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	ProjectID      string     `json:"project_id"`
+	ProjectSlug    string     `json:"project_slug"`
+	SourceKind     string     `json:"source_kind"`
+	ActionType     string     `json:"action_type"`
+	LastFireStatus string     `json:"last_fire_status"`
+	FireCount      int        `json:"fire_count"`
+	ErrorCount     int        `json:"error_count"`
+	LastFailureAt  *time.Time `json:"last_failure_at"`
+	LastError      string     `json:"last_error"`
+}
+
+// HealthPausedTrigger is one trigger the hub paused itself, with its reason.
+type HealthPausedTrigger struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	ProjectID   string     `json:"project_id"`
+	ProjectSlug string     `json:"project_slug"`
+	SourceKind  string     `json:"source_kind"`
+	ActionType  string     `json:"action_type"`
+	Reason      string     `json:"reason"`
+	UpdatedAt   *time.Time `json:"updated_at"`
 }
 
 // HealthSummary fetches GET /api/v1/admin/health/summary. A 403 (caller
