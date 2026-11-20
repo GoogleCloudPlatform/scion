@@ -795,9 +795,8 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusOK, perms)
 
 	case http.MethodPut:
-		// Only the known fields, each "", "read" or "write". The mint
-		// never requests an empty set (githubTokenPermissionsForGrant), but
-		// an invalid body is refused here rather than stored.
+		// Only the known fields, each "", "read" or "write", with at least one
+		// non-empty permission. Use DELETE to reset to default permissions.
 		var perms store.GitHubTokenPermissions
 		if err := readJSONStrict(r, &perms); err != nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body: only contents, pull_requests, issues, metadata, checks and actions are accepted", nil)
@@ -806,6 +805,11 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 		if field, ok := validateGitHubTokenPermissions(perms); !ok {
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 				fmt.Sprintf("%s must be \"read\", \"write\" or empty", field), nil)
+			return
+		}
+		if perms == (store.GitHubTokenPermissions{}) {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"at least one permission must be set; use DELETE to reset to default permissions", nil)
 			return
 		}
 
