@@ -54,6 +54,7 @@ import {
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
 import { projectDisplayName } from '../../client/project-label.js';
+import { isZeroDurationLimit } from '../../shared/duration-limit.js';
 
 interface AgentNotificationsResponse {
   userNotifications: Notification[];
@@ -201,13 +202,13 @@ function formatDurationHMS(totalSeconds: number): string {
 
 /**
  * A stored config limit as Limits card text, matching the Edit page: a count
- * limit of 0 or a duration of "0" is Unlimited; an absent limit is Inherited
- * (the hub fills it from the template, hub or broker defaults); otherwise the
- * stored value.
+ * limit of 0 or any Go zero-duration spelling ("0", "0s", "0m", "0h", etc.) is
+ * Unlimited; an absent limit is Inherited (the hub fills it from the template,
+ * hub or broker defaults); otherwise the stored value.
  */
 function formatConfigLimit(value: number | string | undefined): string {
   if (value == null || value === '') return 'Inherited';
-  if (value === 0 || value === '0') return 'Unlimited';
+  if (value === 0 || isZeroDurationLimit(value)) return 'Unlimited';
   return String(value);
 }
 
@@ -3276,7 +3277,7 @@ export class ScionPageAgentDetail extends LitElement {
     const maxModelCalls = inline?.max_model_calls;
     const maxDuration = inline?.max_duration;
 
-    // A stored 0 (or "0" for the duration) is Unlimited, so the card hides
+    // A stored 0 (or any zero duration spelling) is Unlimited, so the card hides
     // only when no limit is stored at all.
     if (maxTurns == null && maxModelCalls == null && !maxDuration) return nothing;
 
