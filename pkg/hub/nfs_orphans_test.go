@@ -139,6 +139,12 @@ func TestNFSOrphans_ClassificationAndNeverDeletes(t *testing.T) {
 		filepath.Join(env.subRoot, projID, "agents", "live", "secrets-"+liveID, "tok"),
 		filepath.Join(env.subRoot, projID, "agents", "live", "home-"+oldIncarnationID, "old.txt"),
 		filepath.Join(env.subRoot, projID, "agents", "live", "secrets-"+oldIncarnationID, "oldtok"),
+		// Legacy Cloud Run ID-named directories (agents/<agentID>/home):
+		// live and soft-deleted-within-retention must NOT be reported;
+		// soft-deleted-past-retention must be reported as deleted (not no_agent).
+		filepath.Join(env.subRoot, projID, "agents", liveID, "home", "legacy-keep.txt"),
+		filepath.Join(env.subRoot, projID, "agents", softRecentID, "home", "legacy-recent.txt"),
+		filepath.Join(env.subRoot, projID, "agents", softOldID, "home", "legacy-stale.txt"),
 		filepath.Join(env.subRoot, projID, "agents", "soft-recent", "home-"+softRecentID, "keep.txt"),
 		filepath.Join(env.subRoot, projID, "agents", "soft-old", "home-"+softOldID, "stale.txt"),
 		filepath.Join(env.subRoot, projID, "agents", "soft-old", "secrets-"+softOldID, "stale.tok"),
@@ -151,6 +157,8 @@ func TestNFSOrphans_ClassificationAndNeverDeletes(t *testing.T) {
 	}
 	// Non-UUID child directory under live agent should be ignored.
 	require.NoError(t, os.MkdirAll(filepath.Join(env.subRoot, projID, "agents", "live", "home-not-a-uuid"), 0o755))
+	// Stray non-project-ID directory under subpath root must be skipped (O4).
+	require.NoError(t, os.MkdirAll(filepath.Join(env.subRoot, "not a valid project id!", "agents", "ignored"), 0o755))
 	// Symlink under agents/ must never be followed or reported.
 	outside := t.TempDir()
 	require.NoError(t, os.Symlink(outside, filepath.Join(env.subRoot, projID, "agents", "symlink-agent")))
@@ -176,6 +184,7 @@ func TestNFSOrphans_ClassificationAndNeverDeletes(t *testing.T) {
 	want := []rowKey{
 		{"agent-home", projID, "live", oldIncarnationID, orphanSuperseded},
 		{"agent-secrets", projID, "live", oldIncarnationID, orphanSuperseded},
+		{"agent-root", projID, softOldID, "", orphanDeleted},
 		{"agent-root", projID, "soft-old", "", orphanDeleted},
 		{"agent-home", projID, "soft-old", softOldID, orphanDeleted},
 		{"agent-secrets", projID, "soft-old", softOldID, orphanDeleted},
@@ -243,6 +252,53 @@ func TestNFSOrphans_BoundedScanNoFalseResolution(t *testing.T) {
 	rows, err := env.s.ListRuntimeOrphans(ctx, store.RuntimeOrphanFilter{Kind: store.RuntimeOrphanKindNFSTree})
 	require.NoError(t, err)
 	assert.Len(t, rows, 4, "truncated scan must not resolve unvisited rows")
+
+	// Scheduled handler logs a warning when truncated at the per-run bound (O1).
+	origMax := defaultNFSOrphanMaxDirs
+	defaultNFSOrphanMaxDirs = 2
+	defer func() { defaultNFSOrphanMaxDirs = origMax }()
+	env.srv.nfsOrphanScanHandler()(ctx)
+	assert.Len(t, env.logs.records("nfs orphan scan truncated at directory bound; absent rows were not resolved"), 1)
+}
+
+func TestNFSOrphans_ContextCancelledRecordsPartialNoFalseResolution(t *testing.T) {
+	env := newNFSOrphanTestEnv(t, true, true)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	projID := uuid.NewString()
+	require.NoError(t, env.s.CreateProject(ctx, &store.Project{ID: projID, Name: "proj", Slug: "proj"}))
+
+	// Pre-record an existing orphan row that is not present in the partial scan.
+	_, err := env.s.RecordNFSOrphans(ctx, []store.RuntimeOrphan{
+		{RuntimeTarget: "agent-root", ProjectID: projID, Slug: "pre-existing", Reason: orphanNoAgent},
+	}, now.Add(-24*time.Hour), true)
+	require.NoError(t, err)
+
+	// Two new orphan dirs on disk; cancel the context right after the first visit.
+	require.NoError(t, os.MkdirAll(filepath.Join(env.subRoot, projID, "agents", "a1"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(env.subRoot, projID, "agents", "a2"), 0o755))
+
+	scanCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	nfsOrphanVisitHook = func() { cancel() }
+	defer func() { nfsOrphanVisitHook = nil }()
+
+	report, err := env.srv.scanNFSOrphans(scanCtx, now, 100)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, report.Complete)
+	assert.Equal(t, 1, report.DirsVisited)
+	assert.Equal(t, 1, report.OrphansFound)
+	assert.Equal(t, 1, report.OrphansCreated)
+
+	rows, err := env.s.ListRuntimeOrphans(ctx, store.RuntimeOrphanFilter{Kind: store.RuntimeOrphanKindNFSTree})
+	require.NoError(t, err)
+	slugs := make([]string, 0, len(rows))
+	for _, r := range rows {
+		slugs = append(slugs, r.Slug)
+	}
+	assert.ElementsMatch(t, []string{"pre-existing", "a1"}, slugs,
+		"partial finding must be recorded and pre-existing row must not be resolved on cancellation")
 }
 
 func TestNFSOrphans_UnavailableLogsOnce(t *testing.T) {

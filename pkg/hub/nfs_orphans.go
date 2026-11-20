@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -40,21 +41,31 @@ import (
 // It inspects <SubPathRoot>/<projectID>/agents/<slug>/ and its immediate
 // home-<agentID> and secrets-<agentID> children on each mounted shared
 // Layout of the Hub, and records unmatched trees in runtime_orphans with
-// kind=nfs_tree and broker_id="hub". Directories belonging to live agents,
-// agents with an in-flight deletion, or agents soft-deleted within the Hub's
-// soft-delete purge retention window are not reported.
+// kind=nfs_tree and broker_id="hub". Directories belonging to live agents
+// (including legacy Cloud Run agents/<agentID>/ directories), agents with an
+// in-flight deletion, or agents soft-deleted within the Hub's soft-delete
+// purge retention window are not reported.
 
 const (
 	// nfsOrphanScanIntervalMinutes is the recurring singleton cadence (24 h).
 	nfsOrphanScanIntervalMinutes = 24 * 60
 
-	// defaultNFSOrphanMaxDirs bounds how many agent/leaf directories one scan
-	// inspects before stopping (without resolving absent rows).
-	defaultNFSOrphanMaxDirs = 5000
+	// nfsOrphanPartialWriteTimeout bounds the detached store write when the
+	// caller's scan context expires mid-scan and partial findings are flushed.
+	nfsOrphanPartialWriteTimeout = 5 * time.Second
 
 	nfsAgentHomePrefix    = "home-"
 	nfsAgentSecretsPrefix = "secrets-"
 )
+
+// defaultNFSOrphanMaxDirs bounds how many agent/leaf directories one scan
+// inspects before stopping (without resolving absent rows). Var so tests can
+// lower it.
+var defaultNFSOrphanMaxDirs = 5000
+
+// nfsOrphanVisitHook, when non-nil, is called right after each visited
+// directory in scanNFSProjectAgents. Tests only.
+var nfsOrphanVisitHook func()
 
 // nfsOrphanScanReport summarizes one execution of scanNFSOrphans.
 type nfsOrphanScanReport struct {
@@ -65,6 +76,8 @@ type nfsOrphanScanReport struct {
 	Complete          bool
 	OrphansFound      int
 	OrphansCreated    int
+	LastProjectID     string
+	LastSlug          string
 }
 
 // nfsOrphanScanHandler returns the 24h recurring singleton handler.
@@ -73,26 +86,19 @@ func (s *Server) nfsOrphanScanHandler() func(context.Context) {
 		if !s.experimentEnabled(experiments.RuntimeOrphanReconcile) {
 			return
 		}
-		if _, err := s.scanNFSOrphans(ctx, time.Now(), defaultNFSOrphanMaxDirs); err != nil {
-			s.agentLifecycleLog.Warn("nfs orphan scan failed", "error", err)
+		report, err := s.scanNFSOrphans(ctx, time.Now(), defaultNFSOrphanMaxDirs)
+		if err != nil {
+			s.agentLifecycleLog.Warn("nfs orphan scan failed", "error", err,
+				"dirs_visited", report.DirsVisited, "orphans_found", report.OrphansFound,
+				"last_project_id", report.LastProjectID, "last_slug", report.LastSlug)
+		}
+		if report.Truncated {
+			s.agentLifecycleLog.Warn("nfs orphan scan truncated at directory bound; absent rows were not resolved",
+				"max_dirs", defaultNFSOrphanMaxDirs, "dirs_visited", report.DirsVisited,
+				"orphans_found", report.OrphansFound, "last_project_id", report.LastProjectID,
+				"last_slug", report.LastSlug)
 		}
 	}
-}
-
-// distinctSharedLayouts returns the distinct shared Layouts of layout (layout
-// itself and its transitional SharedDirLayout when on a different share).
-func distinctSharedLayouts(layout projectfs.Layout) []projectfs.Layout {
-	var out []projectfs.Layout
-	seen := map[string]bool{}
-	for _, c := range []projectfs.Layout{layout, layout.SharedDirLayout()} {
-		c.SharedDirs = nil
-		if !c.Backend.Shared() || seen[c.Key()] {
-			continue
-		}
-		seen[c.Key()] = true
-		out = append(out, c)
-	}
-	return out
 }
 
 // nfsOrphanTarget returns the runtime_target label for tree on sl. When the
@@ -131,7 +137,7 @@ func (s *Server) scanNFSOrphans(ctx context.Context, now time.Time, maxDirs int)
 		s.logNFSOrphanUnavailableOnce(reason)
 		return nfsOrphanScanReport{Available: false, UnavailableReason: reason}, nil
 	}
-	shared := distinctSharedLayouts(layout)
+	shared := sharedStorageLayouts(layout)
 	if len(shared) == 0 {
 		reason := "hub project storage backend is not shared"
 		s.logNFSOrphanUnavailableOnce(reason)
@@ -163,10 +169,12 @@ func (s *Server) scanNFSOrphans(ctx context.Context, now time.Time, maxDirs int)
 	}
 
 	var orphans []store.RuntimeOrphan
+	var scanErr error
 	for _, sl := range mounted {
-		if ctx.Err() != nil {
+		if err := ctx.Err(); err != nil {
 			report.Complete = false
-			return report, ctx.Err()
+			scanErr = err
+			break
 		}
 		subRoot := sl.SubPathRoot
 		if subRoot == "" {
@@ -180,15 +188,20 @@ func (s *Server) scanNFSOrphans(ctx context.Context, now time.Time, maxDirs int)
 			continue
 		}
 		for _, pe := range projEntries {
-			if ctx.Err() != nil {
+			if err := ctx.Err(); err != nil {
 				report.Complete = false
-				return report, ctx.Err()
+				scanErr = err
+				break
 			}
-			// Skip non-directories and symlinks without following them.
+			// Skip non-directories, symlinks, and entries that are not valid
+			// project IDs (matching projectfs.Layout.ProjectTreeIDs).
 			if pe.Type()&os.ModeSymlink != 0 || !pe.IsDir() {
 				continue
 			}
 			projectID := pe.Name()
+			if !shareddirs.ValidProjectID(projectID) {
+				continue
+			}
 			agentsDir := filepath.Join(projectsRoot, projectID, "agents")
 			fi, err := os.Lstat(agentsDir)
 			if err != nil {
@@ -201,10 +214,15 @@ func (s *Server) scanNFSOrphans(ctx context.Context, now time.Time, maxDirs int)
 				continue
 			}
 
-			projOrphans, ok, truncated := s.scanNFSProjectAgents(ctx, sl, multiShare, projectID, agentsDir, now, retention, maxDirs, &report.DirsVisited)
+			projOrphans, ok, truncated := s.scanNFSProjectAgents(ctx, sl, multiShare, projectID, agentsDir, now, retention, maxDirs, &report)
 			orphans = append(orphans, projOrphans...)
 			if !ok {
 				report.Complete = false
+			}
+			if err := ctx.Err(); err != nil {
+				report.Complete = false
+				scanErr = err
+				break
 			}
 			if truncated {
 				report.Truncated = true
@@ -212,23 +230,32 @@ func (s *Server) scanNFSOrphans(ctx context.Context, now time.Time, maxDirs int)
 				break
 			}
 		}
-		if report.Truncated {
+		if report.Truncated || scanErr != nil {
 			break
 		}
 	}
 
 	report.OrphansFound = len(orphans)
-	created, err := s.store.RecordNFSOrphans(ctx, orphans, now, report.Complete)
-	if err != nil {
-		return report, err
+	// If the caller's context expired mid-scan, still flush partial findings
+	// with complete=false (never resolving absent rows) using a short detached
+	// context so findings collected before the deadline are not lost.
+	if scanErr != nil && len(orphans) == 0 {
+		return report, scanErr
 	}
-	report.OrphansCreated = len(created)
+	writeCtx := ctx
+	var cancel context.CancelFunc
+	if scanErr != nil {
+		writeCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), nfsOrphanPartialWriteTimeout)
+		defer cancel()
+	}
+	created, writeErr := s.store.RecordNFSOrphans(writeCtx, orphans, now, report.Complete)
 	for _, o := range created {
 		s.agentLifecycleLog.Warn("runtime orphan: nfs agent directory has no hub agent",
 			"kind", o.Kind, "reason", o.Reason, "runtime_target", o.RuntimeTarget,
 			"project_id", o.ProjectID, "slug", o.Slug, "agent_id", o.AgentID)
 	}
-	return report, nil
+	report.OrphansCreated = len(created)
+	return report, errors.Join(scanErr, writeErr)
 }
 
 // scanNFSProjectAgents scans one project's agents/ directory (stat-only, no
@@ -244,7 +271,7 @@ func (s *Server) scanNFSProjectAgents(
 	now time.Time,
 	retention time.Duration,
 	maxDirs int,
-	visited *int,
+	report *nfsOrphanScanReport,
 ) (orphans []store.RuntimeOrphan, ok bool, truncated bool) {
 	projectKnown := true
 	if _, err := s.store.GetProject(ctx, projectID); err != nil {
@@ -295,12 +322,14 @@ func (s *Server) scanNFSProjectAgents(
 		if se.Type()&os.ModeSymlink != 0 || !se.IsDir() {
 			continue
 		}
-		if *visited >= maxDirs {
+		if report.DirsVisited >= maxDirs {
 			return orphans, false, true
 		}
-		*visited++
-
+		report.DirsVisited++
 		slug := se.Name()
+		report.LastProjectID = projectID
+		report.LastSlug = slug
+
 		if !projectKnown {
 			orphans = append(orphans, store.RuntimeOrphan{
 				Kind:          store.RuntimeOrphanKindNFSTree,
@@ -310,11 +339,7 @@ func (s *Server) scanNFSProjectAgents(
 				Slug:          slug,
 				Reason:        orphanUnknownProject,
 			})
-		} else if !protectedBySlug[slug] {
-			reason := orphanNoAgent
-			if deletedBySlug[slug] {
-				reason = orphanDeleted
-			}
+		} else if reason := classifyNFSAgentRoot(slug, protectedBySlug, protectedByID, allByID, deletedBySlug); reason != "" {
 			orphans = append(orphans, store.RuntimeOrphan{
 				Kind:          store.RuntimeOrphanKindNFSTree,
 				BrokerID:      store.RuntimeOrphanBrokerHub,
@@ -323,6 +348,9 @@ func (s *Server) scanNFSProjectAgents(
 				Slug:          slug,
 				Reason:        reason,
 			})
+		}
+		if nfsOrphanVisitHook != nil {
+			nfsOrphanVisitHook()
 		}
 
 		// Inspect immediate children of agents/<slug>/ only (never recurse).
@@ -343,27 +371,53 @@ func (s *Server) scanNFSProjectAgents(
 			if !matched {
 				continue
 			}
-			if *visited >= maxDirs {
+			if report.DirsVisited >= maxDirs {
 				return orphans, false, true
 			}
-			*visited++
+			report.DirsVisited++
 
 			reason := classifyNFSAgentLeaf(projectKnown, slug, agentID, protectedBySlug, protectedByID, allByID)
-			if reason == "" {
-				continue
+			if reason != "" {
+				orphans = append(orphans, store.RuntimeOrphan{
+					Kind:          store.RuntimeOrphanKindNFSTree,
+					BrokerID:      store.RuntimeOrphanBrokerHub,
+					RuntimeTarget: nfsOrphanTarget(sl, tree, multiShare),
+					ProjectID:     projectID,
+					Slug:          slug,
+					AgentID:       agentID,
+					Reason:        reason,
+				})
 			}
-			orphans = append(orphans, store.RuntimeOrphan{
-				Kind:          store.RuntimeOrphanKindNFSTree,
-				BrokerID:      store.RuntimeOrphanBrokerHub,
-				RuntimeTarget: nfsOrphanTarget(sl, tree, multiShare),
-				ProjectID:     projectID,
-				Slug:          slug,
-				AgentID:       agentID,
-				Reason:        reason,
-			})
+			if nfsOrphanVisitHook != nil {
+				nfsOrphanVisitHook()
+			}
 		}
 	}
 	return orphans, ok, false
+}
+
+// classifyNFSAgentRoot returns the orphan reason for an agents/<name>/
+// directory in a known project, or "" when a protected agent owns it.
+// Legacy Cloud Run directories named by agent UUID (agents/<agentID>/) are
+// recognized via allByID/protectedByID so un-migrated live agents (and agents
+// soft-deleted within retention) are never reported as orphans.
+func classifyNFSAgentRoot(
+	name string,
+	protectedBySlug map[string]bool,
+	protectedByID map[string]bool,
+	allByID map[string]*store.Agent,
+	deletedBySlug map[string]bool,
+) string {
+	if protectedByID[name] || protectedBySlug[name] {
+		return ""
+	}
+	if a := allByID[name]; a != nil && !a.DeletedAt.IsZero() {
+		return orphanDeleted
+	}
+	if deletedBySlug[name] {
+		return orphanDeleted
+	}
+	return orphanNoAgent
 }
 
 // agentProtectsNFSTree reports whether agent a owns its NFS directories:
