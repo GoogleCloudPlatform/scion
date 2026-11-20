@@ -99,34 +99,20 @@ describe('main.ts dashboard Open Terminal quick action (ptone/scion#8468)', () =
     expect(window.location.pathname).toBe('/terminals');
     expect(workspace.openPaletteIfEmptyCalls).toBe(0);
 
-    // Finish restore with zero sessions -> auto-opens picker.
+    // Finish restore -> main.ts invokes openPaletteIfEmpty (the empty/non-empty
+    // session guard itself is unit-tested in terminal-workspace-root.test.ts).
     finishRestore();
     await vi.waitFor(() => expect(workspace.openPaletteIfEmptyCalls).toBe(1), BOOT_WAIT);
-    expect(workspace.autoOpenedPaletteCount).toBe(1);
-
-    // When sessions are open (restored or retained), clicking Dashboard Open
-    // Terminal restores /terminals without auto-opening the picker.
-    restoreHook = (): Promise<void> => {
-      workspace.sessionCount = 2;
-      return Promise.resolve();
-    };
-    main.navigateTo('/');
-    await vi.waitFor(() => expect(findOpenTerminalCard()).not.toBeNull(), BOOT_WAIT);
-    findOpenTerminalCard()!.click();
-    await vi.waitFor(() => expect(workspace.openPaletteIfEmptyCalls).toBe(2), BOOT_WAIT);
-    expect(workspace.autoOpenedPaletteCount).toBe(1);
 
     // Plain navigateTo('/terminals') (as the header Terminals mode button does)
-    // does NOT invoke openPaletteIfEmpty even when zero terminals are open.
-    workspace.sessionCount = 0;
+    // does NOT invoke openPaletteIfEmpty.
     restoreHook = null;
     main.navigateTo('/');
     await vi.waitFor(() => expect(window.location.pathname).toBe('/'), BOOT_WAIT);
     main.navigateTo('/terminals');
     await vi.waitFor(() => expect(window.location.pathname).toBe('/terminals'), BOOT_WAIT);
     await new Promise((r) => setTimeout(r, 20));
-    expect(workspace.openPaletteIfEmptyCalls).toBe(2);
-    expect(workspace.autoOpenedPaletteCount).toBe(1);
+    expect(workspace.openPaletteIfEmptyCalls).toBe(1);
 
     // When terminals are open in another window, clicking Dashboard Open Terminal
     // shows the move state instead of calling openPaletteIfEmpty.
@@ -136,7 +122,6 @@ describe('main.ts dashboard Open Terminal quick action (ptone/scion#8468)', () =
     findOpenTerminalCard()!.click();
     await vi.waitFor(() => expect(window.location.pathname).toBe('/terminals'), BOOT_WAIT);
     await new Promise((r) => setTimeout(r, 20));
-    expect(workspace.openPaletteIfEmptyCalls).toBe(2);
-    expect(workspace.autoOpenedPaletteCount).toBe(1);
+    expect(workspace.openPaletteIfEmptyCalls).toBe(1);
   }, 20_000);
 });

@@ -4509,6 +4509,17 @@ describe('openPaletteIfEmpty (ptone/scion#8468)', () => {
   let root: TerminalWorkspaceRoot;
   let reg: TerminalSessionRegistry;
 
+  // Load the palette module up front so a wrongly-triggered lazy mount finishes
+  // quickly even if a negative test is run in isolation.
+  beforeAll(async () => {
+    await import('../components/shared/palette/quick-palette.js');
+  });
+
+  /** Wait past the lazy palette import and mount microtasks/macrotask. */
+  async function waitPastLazyPaletteMount(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
   beforeEach(() => {
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
       cb(0);
@@ -4553,9 +4564,10 @@ describe('openPaletteIfEmpty (ptone/scion#8468)', () => {
     await flush();
 
     root.openPaletteIfEmpty();
-    await flush();
+    await waitPastLazyPaletteMount();
 
     expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+    expect(agentListLoads()).toBe(0);
   });
 
   it('does not open the palette when a restored idle terminal entry is present', async () => {
@@ -4565,9 +4577,10 @@ describe('openPaletteIfEmpty (ptone/scion#8468)', () => {
     await flush();
 
     root.openPaletteIfEmpty();
-    await flush();
+    await waitPastLazyPaletteMount();
 
     expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+    expect(agentListLoads()).toBe(0);
   });
 
   it('does not open the palette when terminals are open in another window (status action active)', async () => {
@@ -4581,9 +4594,10 @@ describe('openPaletteIfEmpty (ptone/scion#8468)', () => {
     await flush();
 
     root.openPaletteIfEmpty();
-    await flush();
+    await waitPastLazyPaletteMount();
 
     expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+    expect(agentListLoads()).toBe(0);
   });
 
   it('does not open the palette when the workspace is hidden', async () => {
@@ -4591,8 +4605,9 @@ describe('openPaletteIfEmpty (ptone/scion#8468)', () => {
     root.show(false);
 
     root.openPaletteIfEmpty();
-    await flush();
+    await waitPastLazyPaletteMount();
 
     expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+    expect(agentListLoads()).toBe(0);
   });
 });
