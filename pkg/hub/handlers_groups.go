@@ -137,16 +137,27 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	var totalCount int
 	var totalApprox bool
 	// Check if user has admin-level list visibility via permission.
+	// Direct unfiltered store listing is only safe when the caller also has
+	// unrestricted hub-wide project read access; otherwise project members
+	// groups must be filtered by project read access.
 	hasAdminView := false
 	if identity != nil {
 		if user, ok := identity.(UserIdentity); ok {
-			hasAdminView = s.authzService.Decide(ctx, AuthzRequest{
+			hasGroupList := s.authzService.Decide(ctx, AuthzRequest{
 				Principal:  principalContextForIdentity(user),
 				Credential: credentialContextForIdentity(user),
 				Resource:   Resource{Type: "group", ID: "hub"},
 				Action:     Action("list"),
 				Permission: "group.list",
 			}).Allowed
+			if hasGroupList {
+				projectScopes, err := s.authzService.ResolveListScopes(ctx, identity, "project.read")
+				if err != nil {
+					writeErrorFromErr(w, err, "")
+					return
+				}
+				hasAdminView = projectScopes.Scopes.IsAll() && len(projectScopes.ExcludedProjectIDs) == 0
+			}
 		}
 	}
 	if hasAdminView {
@@ -158,14 +169,48 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		}
 		groupItems, nextCursor, totalCount = result.Items, result.NextCursor, result.TotalCount
 	} else if identity != nil {
-		// Authenticated non-admin: use authorizedList for policy-enforced filtering.
-		result, err := authorizedList(ctx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Group], error) {
+		// Authenticated non-admin: use authorizedList for policy-enforced filtering
+		// and filter project members groups by project read access.
+		membersGroupProjects := make(map[string]string)
+		projectReadCache := make(map[string]bool)
+		readCtx := withAuthzInputMemo(ctx)
+		groupReadBatch := func(ctx context.Context, ident Identity, resources []Resource) ([]bool, error) {
+			allowed, err := s.authzService.AuthorizeReadBatch(ctx, ident, resources)
+			if err != nil {
+				return nil, err
+			}
+			for i, res := range resources {
+				if !allowed[i] {
+					continue
+				}
+				projectID, isMembersGroup := membersGroupProjects[res.ID]
+				if !isMembersGroup {
+					continue
+				}
+				canRead, cached := projectReadCache[projectID]
+				if !cached {
+					canRead, err = s.canReadProjectStrict(ctx, ident, projectID)
+					if err != nil {
+						return nil, err
+					}
+					projectReadCache[projectID] = canRead
+				}
+				allowed[i] = canRead
+			}
+			return allowed, nil
+		}
+		result, err := authorizedList(readCtx, identity, cursor, limit, func(ctx context.Context, cursor string, limit int) (authorizedCandidatePage[store.Group], error) {
 			page, err := s.store.ListGroups(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, SkipTotalCount: true, CursorBinding: cursorBinding})
 			if err != nil {
 				return authorizedCandidatePage[store.Group]{}, err
 			}
+			for i := range page.Items {
+				if store.IsProjectMembersGroup(&page.Items[i]) {
+					membersGroupProjects[page.Items[i].ID] = page.Items[i].ProjectID
+				}
+			}
 			return authorizedCandidatePage[store.Group]{Items: page.Items, NextCursor: page.NextCursor}, nil
-		}, groupResource, func(g *store.Group) string { return authorizedListCursor(g.Created, g.ID, cursorBinding) }, s.authzService.AuthorizeReadBatch)
+		}, groupResource, func(g *store.Group) string { return authorizedListCursor(g.Created, g.ID, cursorBinding) }, groupReadBatch)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -448,6 +493,52 @@ func (s *Server) handleGroupRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// canReadProjectMembersGroup reports whether identity may read group when it is
+// a project members group. Non-project-members groups return (true, nil).
+func (s *Server) canReadProjectMembersGroup(ctx context.Context, identity Identity, group *store.Group) (bool, error) {
+	if !store.IsProjectMembersGroup(group) {
+		return true, nil
+	}
+	return s.canReadProjectStrict(ctx, identity, group.ProjectID)
+}
+
+// canReadProjectStrict reports whether identity may read projectID, returning
+// any non-ErrNotFound store error so callers can fail closed.
+func (s *Server) canReadProjectStrict(ctx context.Context, identity Identity, projectID string) (bool, error) {
+	if identity == nil || projectID == "" {
+		return false, nil
+	}
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if agentIdent.ProjectID() != projectID {
+			return false, nil
+		}
+	}
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead)
+	return decision.Allowed, nil
+}
+
+// authorizeProjectMembersGroupRead filters project members group reads by
+// project read access, returning a 404 matching an unknown group when denied.
+func (s *Server) authorizeProjectMembersGroupRead(w http.ResponseWriter, r *http.Request, group *store.Group) bool {
+	allowed, err := s.canReadProjectMembersGroup(r.Context(), GetIdentityFromContext(r.Context()), group)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !allowed {
+		writeErrorFromErr(w, store.ErrNotFound, "")
+		return false
+	}
+	return true
+}
+
 func (s *Server) getGroup(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
@@ -464,6 +555,10 @@ func (s *Server) getGroup(w http.ResponseWriter, r *http.Request, id string) {
 			writeErrorFromErr(w, err, "")
 			return
 		}
+	}
+
+	if !s.authorizeProjectMembersGroupRead(w, r, group) {
+		return
 	}
 
 	resp := GroupWithCapabilities{Group: *group}
@@ -730,7 +825,7 @@ func (s *Server) handleGroupMembers(w http.ResponseWriter, r *http.Request, grou
 
 	switch r.Method {
 	case http.MethodGet:
-		s.listGroupMembers(w, r, group.ID)
+		s.listGroupMembers(w, r, group)
 	case http.MethodPost:
 		s.addGroupMember(w, r, group)
 	default:
@@ -738,10 +833,14 @@ func (s *Server) handleGroupMembers(w http.ResponseWriter, r *http.Request, grou
 	}
 }
 
-func (s *Server) listGroupMembers(w http.ResponseWriter, r *http.Request, groupID string) {
+func (s *Server) listGroupMembers(w http.ResponseWriter, r *http.Request, group *store.Group) {
 	ctx := r.Context()
 
-	members, err := s.store.GetGroupMembers(ctx, groupID)
+	if !s.authorizeProjectMembersGroupRead(w, r, group) {
+		return
+	}
+
+	members, err := s.store.GetGroupMembers(ctx, group.ID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1266,7 +1365,7 @@ func (s *Server) handleGroupMemberByID(w http.ResponseWriter, r *http.Request, g
 
 	switch r.Method {
 	case http.MethodGet:
-		s.getGroupMember(w, r, group.ID, memberType, memberID)
+		s.getGroupMember(w, r, group, memberType, memberID)
 	case http.MethodDelete:
 		s.removeGroupMember(w, r, group, memberType, memberID)
 	default:
@@ -1274,10 +1373,14 @@ func (s *Server) handleGroupMemberByID(w http.ResponseWriter, r *http.Request, g
 	}
 }
 
-func (s *Server) getGroupMember(w http.ResponseWriter, r *http.Request, groupID, memberType, memberID string) {
+func (s *Server) getGroupMember(w http.ResponseWriter, r *http.Request, group *store.Group, memberType, memberID string) {
 	ctx := r.Context()
 
-	member, err := s.store.GetGroupMembership(ctx, groupID, memberType, memberID)
+	if !s.authorizeProjectMembersGroupRead(w, r, group) {
+		return
+	}
+
+	member, err := s.store.GetGroupMembership(ctx, group.ID, memberType, memberID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

@@ -87,9 +87,18 @@ func (s *Server) handleMyGroups(w http.ResponseWriter, r *http.Request) {
 		groups = s.boundaryProjectGroups(ctx, token, groups)
 	}
 
-	if groups == nil {
-		groups = []store.Group{}
+	filtered := make([]store.Group, 0, len(groups))
+	for i := range groups {
+		ok, err := s.canReadProjectMembersGroup(ctx, user, &groups[i])
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if ok {
+			filtered = append(filtered, groups[i])
+		}
 	}
+	groups = filtered
 
 	writeJSON(w, http.StatusOK, GroupsResponse{Groups: groups})
 }
