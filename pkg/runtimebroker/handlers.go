@@ -6866,30 +6866,26 @@ func (s *Server) extractRequiredEnvKeysChecked(req CreateAgentRequest, hydratedT
 		//     ResolveHarnessConfig) filling only keys absent from requestEnv
 		//     — mirroring resolveAuthEnvOverlay exactly.
 		//  3. withDir: withSettings, with the harness-config directory's own
-		//     env (pre-expanded once into expandedDirEnv, the way
-		//     buildAgentEnv, pkg/agent/run.go, expands it: ${VAR}
-		//     references, empty-after-expansion falls back to a host-env
-		//     passthrough) filling only keys still absent — since the
-		//     directory's env is the lowest-ranked source and only reaches
-		//     the container via finalScionCfg.Env when nothing
-		//     higher-ranked set the key.
+		//     env (evaluated once via the shared agent.BundleEnvLayer, matching
+		//     launch: literal keys and values, no ${VAR} expansion, no
+		//     empty-value broker-host passthrough) filling only keys still
+		//     absent — since the directory's env is the lowest-ranked source.
 		//
 		// This "an empty entry blocks every lower layer" rule is correct for
 		// an ordinary key, but NOT for a GCP-shared or harness-auth
 		// "auth-candidate" key: run.go's Start deletes an empty auth-candidate
 		// entry from opts.Env after auth resolves (its resolved.EnvVars only
-		// ever carries non-empty values), clearing the way for
-		// finalScionCfg.Env to supply the value instead. The auth-key-group
-		// check below uses authCandidateKeySatisfied for that reason, rather
-		// than withDir, for every key it evaluates.
+		// ever carries non-empty values), clearing the way for the bundle env
+		// layer to supply the value instead. The auth-key-group check below
+		// uses authCandidateKeySatisfied for that reason, rather than withDir,
+		// for every key it evaluates.
 		requestEnv := buildRequestEnv(req)
 		rawSettingsEnv := rawSettingsHarnessEnv(settings, profileName, harnessConfigName)
 		withSettings := fillAbsentEnv(requestEnv, rawSettingsEnv)
-		// expandedDirEnv is built once so fillAbsentDirEnv and
-		// authCandidateKeyValue consult the identical expanded view,
-		// so both index the directory by the expanded key, as
-		// buildAgentEnv does.
-		expandedDirEnv := expandDirEnv(hcDirEnv)
+		// expandedDirEnv is built once via the shared agent.BundleEnvLayer so
+		// fillAbsentDirEnv and authCandidateKeyValue consult the identical
+		// literal view that launch uses.
+		expandedDirEnv, _ := agent.BundleEnvLayer(hcDirEnv)
 		withDir := fillAbsentDirEnv(withSettings, expandedDirEnv)
 
 		// Settings harness_configs entry can provide/override
@@ -7328,24 +7324,6 @@ func fillAbsentDirEnv(base, expandedDirEnv map[string]string) map[string]string 
 	return merged
 }
 
-// expandDirEnv expands every harness-config-directory env entry once, the
-// way buildAgentEnv expands them (expandDirEnvEntry), so callers that need
-// more than one view of the directory's env (fillAbsentDirEnv,
-// authCandidateKeyValue) consult the identical result instead of each
-// re-deriving it per key. An entry expandDirEnvEntry drops (an empty
-// expanded key, or an unresolved variable reference) is simply absent here.
-func expandDirEnv(dirEnv map[string]string) map[string]string {
-	expanded := make(map[string]string, len(dirEnv))
-	for k, v := range dirEnv {
-		expandedKey, expandedValue, ok := expandDirEnvEntry(k, v)
-		if !ok {
-			continue
-		}
-		expanded[expandedKey] = expandedValue
-	}
-	return expanded
-}
-
 // altEnvKeySatisfied reports whether any of altKeys has a non-empty value in
 // resolvedEnv or, when processEnv is set (a workstation broker) and for names
 // not refused for agents (util.IsAgentRefusedHostEnvName), in this process's
@@ -7365,65 +7343,13 @@ func altEnvKeySatisfied(resolvedEnv map[string]string, altKeys []string, process
 	return false
 }
 
-// expandDirEnvEntry mirrors buildAgentEnv's treatment of a single
-// harness-config-directory env entry (pkg/agent/run.go): the key and value
-// may reference ${VAR}; a value left empty after expansion is an implicit
-// host-env passthrough. ok is false when the entry should be dropped
-// entirely — an empty expanded key, or an unresolved variable reference that
-// buildAgentEnv would also warn about and skip.
-//
-// Names refused for agents (util.IsAgentRefusedHostEnvName) expand
-// to empty and are never passed through, as in buildAgentEnv; an entry left
-// empty only because of them is dropped.
-func expandDirEnvEntry(key, value string) (expandedKey, expandedValue string, ok bool) {
-	expandedKey, _, _ = quietExpandEnv(key)
-	if expandedKey == "" {
-		return "", "", false
-	}
-	var warned, refused bool
-	expandedValue, warned, refused = quietExpandEnv(value)
-	if expandedValue == "" {
-		if warned || refused || util.IsAgentRefusedHostEnvName(expandedKey) {
-			return "", "", false
-		}
-		if hostVal, hasHost := os.LookupEnv(expandedKey); hasHost && hostVal != "" {
-			expandedValue = hostVal
-		}
-	}
-	return expandedKey, expandedValue, true
-}
-
-// quietExpandEnv mirrors util.ExpandEnv (pkg/util/env.go: os.Expand with an
-// os.LookupEnv closure) without its side-effecting stderr warning. The
-// preflight may evaluate the same ${VAR} dir-env reference on every
-// gather-env request, including ones that end in 202 and are retried, and
-// launch prints the same warning again when it expands the value for real —
-// so the preflight's own copy would be pure duplicate noise on the broker's
-// stderr, not new information. Names refused for agents
-// (util.IsAgentRefusedHostEnvName) expand to empty and set refused.
-func quietExpandEnv(s string) (expanded string, warned, refused bool) {
-	expanded = os.Expand(s, func(key string) string {
-		if util.IsAgentRefusedHostEnvName(key) {
-			refused = true
-			return ""
-		}
-		val, ok := os.LookupEnv(key)
-		if !ok {
-			warned = true
-			return ""
-		}
-		return val
-	})
-	return expanded, warned, refused
-}
-
 // authCandidateKeyValue returns the value key — a GCP-shared name or one of
 // the harness's own auth required_env names — would have in the container,
 // resolved the way launch actually resolves it, which differs from an
 // ordinary key's requestEnv/settings/dir layering (withDir,
 // fillAbsentDirEnv). satisfied reports whether that value is non-empty.
-// expandedDirEnv must already be expanded (expandDirEnv), the same map
-// fillAbsentDirEnv consults, so both agree on what a dir key expands to.
+// bundleDirEnv must be evaluated via agent.BundleEnvLayer, the same map
+// fillAbsentDirEnv consults, so both agree on the literal bundle entries.
 //
 // After auth resolves, run.go's Start deletes any such key from opts.Env
 // whenever its value did not make it into the resolved auth's EnvVars —
@@ -7432,36 +7358,20 @@ func quietExpandEnv(s string) (expanded string, warned, refused bool) {
 // imported to avoid depending on that package's unexported details — keep
 // in sync if that list changes). So an empty settings value for one of
 // these keys does not block the directory the way it would for an ordinary
-// key: deleting it from opts.Env clears the way for finalScionCfg.Env — the
-// directory, or, when the directory has no entry, the settings value
-// itself, both expanded the way buildAgentEnv expands them — to supply the
-// container's value.
+// key: deleting it from opts.Env clears the way for the bundle env layer to
+// supply the container's value.
 //
 // An empty requestEnv (ResolvedEnv/Config.Env) entry is still treated as
-// blocking, conservatively, rather than as a launch-exact mirror: at launch
-// the same deletion applies to an empty opts.Env entry regardless of where
-// it came from, so the pod may still receive the settings or directory
-// value — or the broker process's own value, via host passthrough — even
-// when requestEnv itself is empty. In a real Hub dispatch, though, such an
-// entry usually also comes from template or inline config env, which also
-// outranks the directory and settings inside finalScionCfg, so the
-// container would usually end up empty anyway — and the preflight has no
-// way to tell that case apart from one where it would not. Getting this
-// wrong can only produce a false-missing report (the preflight asks for a
-// value the pod would have had), never a false-satisfied one.
-func authCandidateKeyValue(key string, requestEnv, rawSettingsEnv, expandedDirEnv map[string]string) (value string, satisfied bool) {
+// blocking, conservatively, rather than as a launch-exact mirror.
+func authCandidateKeyValue(key string, requestEnv, rawSettingsEnv, bundleDirEnv map[string]string) (value string, satisfied bool) {
 	if v, ok := requestEnv[key]; ok {
 		return v, v != ""
 	}
 	if v, ok := rawSettingsEnv[key]; ok && v != "" {
 		return v, true
 	}
-	if v, ok := expandedDirEnv[key]; ok {
+	if v, ok := bundleDirEnv[key]; ok {
 		return v, v != ""
-	}
-	if v, ok := rawSettingsEnv[key]; ok {
-		_, expanded, ok := expandDirEnvEntry(key, v)
-		return expanded, ok && expanded != ""
 	}
 	return "", false
 }
