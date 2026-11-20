@@ -74,19 +74,29 @@ func TestCloudRunContainerResources(t *testing.T) {
 			want: map[string]string{"cpu": "8", "memory": "32768Mi"},
 		},
 		{
-			name: "memory only checked against default 1 vCPU",
-			spec: &api.ResourceSpec{Limits: limits("", "4Gi")},
-			want: map[string]string{"memory": "4096Mi"},
+			name: "memory only checked against default 2 vCPU",
+			spec: &api.ResourceSpec{Limits: limits("", "6Gi")},
+			want: map[string]string{"memory": "6144Mi"},
 		},
 		{
-			name:    "memory only above the 1 vCPU band",
-			spec:    &api.ResourceSpec{Limits: limits("", "6Gi")},
-			wantErr: []string{"1 vCPU (platform default)", "512Mi to 4096Mi", "6144Mi"},
+			name: "memory only at top of default 2 vCPU band",
+			spec: &api.ResourceSpec{Limits: limits("", "8Gi")},
+			want: map[string]string{"memory": "8192Mi"},
+		},
+		{
+			name:    "memory only above the 2 vCPU band",
+			spec:    &api.ResourceSpec{Limits: limits("", "10Gi")},
+			wantErr: []string{"2 vCPU (platform default)", "512Mi to 8192Mi", "10240Mi"},
+		},
+		{
+			name: "cpu only checked against default 2048Mi memory",
+			spec: &api.ResourceSpec{Limits: limits("4", "")},
+			want: map[string]string{"cpu": "4"},
 		},
 		{
 			name:    "cpu needing more than the default memory",
-			spec:    &api.ResourceSpec{Limits: limits("4", "")},
-			wantErr: []string{"4 vCPU (from resolved resources.limits.cpu)", "2048Mi to 16384Mi", "512Mi (platform default)", "set resources.limits.cpu or resources.limits.memory"},
+			spec:    &api.ResourceSpec{Limits: limits("6", "")},
+			wantErr: []string{"6 vCPU (from resolved resources.limits.cpu)", "4096Mi to 24576Mi", "2048Mi (platform default)", "set resources.limits.cpu or resources.limits.memory"},
 		},
 		{
 			name:    "band error from requests names the request",
@@ -100,8 +110,8 @@ func TestCloudRunContainerResources(t *testing.T) {
 		},
 		{
 			name:    "cpu limit raised to the request named as resolved",
-			spec:    &api.ResourceSpec{Requests: limits("4", ""), Limits: limits("4", "")},
-			wantErr: []string{"4 vCPU (from resolved resources.limits.cpu)", "512Mi (platform default)"},
+			spec:    &api.ResourceSpec{Requests: limits("6", ""), Limits: limits("6", "")},
+			wantErr: []string{"6 vCPU (from resolved resources.limits.cpu)", "2048Mi (platform default)"},
 		},
 		{
 			name:    "any cpu limit named as resolved",
@@ -258,6 +268,44 @@ func TestCloudRunRun_NoResourcesKeepsPlatformDefaults(t *testing.T) {
 	}
 	if res := fake.createReqs[0].GetInstance().GetContainers()[0].GetResources(); res != nil {
 		t.Errorf("container resources = %v, want nil (platform defaults)", res)
+	}
+}
+
+// TestCloudRunRun_InstancesProfileUnsetResourcesUsesInstancesDefaults verifies
+// that a Cloud Run Instances profile with CPU and memory unset leaves
+// Resources nil so the platform applies the Instances defaults (2 vCPU /
+// 2 GiB) and logs those Instances defaults rather than the Services defaults
+// (ptone/scion#8098).
+func TestCloudRunRun_InstancesProfileUnsetResourcesUsesInstancesDefaults(t *testing.T) {
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt, err := NewCloudRunRuntimeFromInstances(&config.V1CloudRunInstancesConfig{
+		ProjectID: "test-proj",
+		Region:    "us-central1",
+	})
+	if err != nil {
+		t.Fatalf("NewCloudRunRuntimeFromInstances: %v", err)
+	}
+	rt.newClient = func(context.Context) (cloudrun.InstancesAPI, error) { return fake, nil }
+	rt.provisionNFS = stubCloudRunNFSProvision
+
+	logs := captureRuntimeLog(t)
+	cfg := runConfigForTest()
+	cfg.Resources = &api.ResourceSpec{}
+
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fake.createReqs) != 1 {
+		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
+	}
+	if res := fake.createReqs[0].GetInstance().GetContainers()[0].GetResources(); res != nil {
+		t.Errorf("container resources = %v, want nil (platform defaults)", res)
+	}
+	logOut := logs.String()
+	for _, want := range []string{`cpu="2 (platform default)"`, `memory="2048Mi (platform default)"`} {
+		if !strings.Contains(logOut, want) {
+			t.Errorf("log output %q does not contain %s", logOut, want)
+		}
 	}
 }
 
