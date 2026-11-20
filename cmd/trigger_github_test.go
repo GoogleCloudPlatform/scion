@@ -636,4 +636,36 @@ func TestTriggerGitHubPrimary(t *testing.T) {
 		assert.True(t, strings.Contains(out, `"repo": "acme/widgets"`))
 		assert.True(t, strings.Contains(out, `"installation_id": 888`))
 	})
+
+	t.Run("resolveInstallationForRepoSet with nil project and multiple installations returns usage error without panic", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodGet && r.URL.Path == "/api/v1/github-app/repo-routing" {
+				_ = json.NewEncoder(w).Encode([]hubclient.GitHubRepoRoutingEntry{
+					{
+						InstallationID: 200,
+						Repo:           "acme/widgets",
+						Status:         "none",
+						Projects:       []hubclient.GitHubRepoRoutingProject{{ID: p1, Name: "Alpha"}},
+					},
+					{
+						InstallationID: 100,
+						Repo:           "acme/widgets",
+						Status:         "none",
+						Projects:       []hubclient.GitHubRepoRoutingProject{{ID: p2, Name: "Beta"}},
+					},
+				})
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer srv.Close()
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+
+		_, err = resolveInstallationForRepoSet(context.Background(), client.GitHubApp(), "Acme", "Widgets", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple installations match Acme/Widgets (100, 200); pass --installation <id>")
+	})
 }

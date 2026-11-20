@@ -542,17 +542,19 @@ func resolveInstallationForRepoSet(
 		return matching[0].InstallationID, nil
 	}
 	if len(matching) > 1 {
-		var projMatches []int64
-		for _, entry := range matching {
-			for _, p := range entry.Projects {
-				if p.ID == proj.ID {
-					projMatches = append(projMatches, entry.InstallationID)
-					break
+		if proj != nil {
+			var projMatches []int64
+			for _, entry := range matching {
+				for _, p := range entry.Projects {
+					if p.ID == proj.ID {
+						projMatches = append(projMatches, entry.InstallationID)
+						break
+					}
 				}
 			}
-		}
-		if len(projMatches) == 1 {
-			return projMatches[0], nil
+			if len(projMatches) == 1 {
+				return projMatches[0], nil
+			}
 		}
 		ids := make([]string, len(matching))
 		for i, entry := range matching {
