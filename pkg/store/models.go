@@ -1592,8 +1592,7 @@ type WorkloadIdentityTarget struct {
 	// Namespace is the namespace the broker runs the target's agents in.
 	Namespace string `json:"namespace"`
 	// KSACreation reports that the broker may create the conventional
-	// Kubernetes ServiceAccount (create_service_accounts). Always false
-	// until that setting exists (ptone/scion#3329 phase 5, P3).
+	// Kubernetes ServiceAccount (create_service_accounts; ptone/scion#7966).
 	KSACreation bool `json:"ksaCreation,omitempty"`
 }
 

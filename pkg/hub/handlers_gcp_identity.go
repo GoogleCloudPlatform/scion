@@ -650,14 +650,14 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 	if len(items) > 0 {
 		profiles = s.projectKubernetesProfileMappings(ctx, projectID)
 	}
-	annotateGCPSAMappings(items, profiles)
+	s.annotateGCPSAMappings(items, profiles)
 	s.annotateGCPSAAssignStatus(ctx, items, projectID, assignReq)
 
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,
 		Capabilities: scopeCap,
 		MintQuota:    mintQuota,
-		Warnings: projectSAMappingWarningsFrom(projectID,
+		Warnings: s.projectSAMappingWarningsFrom(projectID,
 			func() projectSAMappingView { return projectSAMappingViewFrom(profiles) }, saPtrs...),
 	})
 }
@@ -1162,7 +1162,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 
 	writeJSON(w, http.StatusCreated, gcpServiceAccountWithWarnings{
 		GCPServiceAccount:        *sa,
-		Warnings:                 projectSAMappingWarningsFrom(projectID, warningView, sa),
+		Warnings:                 s.projectSAMappingWarningsFrom(projectID, warningView, sa),
 		WorkloadIdentityBindings: wiBindings,
 	})
 }

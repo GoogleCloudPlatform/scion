@@ -88,6 +88,7 @@ describe('assignStatusLabel', () => {
     const mapped = assignStatusLabel({ state: 'mapped', message: 'm' });
     expect(mapped).toBe('mapped');
     expect(mapped).not.toMatch(/ready/i);
+    expect(assignStatusLabel({ state: 'creatable', message: 'm' })).toBe('KSA created at start');
     expect(assignStatusLabel({ state: 'not_mapped', message: 'm' })).toBe(
       'not mapped on this profile'
     );
@@ -127,11 +128,12 @@ describe('orderByAssignStatus', () => {
     const list = [
       account('a', { state: 'not_mapped', message: 'm' }),
       account('b', { state: 'mapped', message: 'm' }),
+      account('b2', { state: 'creatable', message: 'm' }),
       account('c', { state: 'unknown', reason: 'report_stale', message: 'm' }),
       account('d', { state: 'not_mapped', message: 'm' }),
       account('e'),
     ];
-    expect(orderByAssignStatus(list).map((sa) => sa.id)).toEqual(['b', 'c', 'e', 'a', 'd']);
+    expect(orderByAssignStatus(list).map((sa) => sa.id)).toEqual(['b', 'b2', 'c', 'e', 'a', 'd']);
   });
 
   it('leaves a list without mapping state unchanged', () => {

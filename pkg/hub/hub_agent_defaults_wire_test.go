@@ -304,6 +304,7 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 			Disk:     "10Gi",
 		},
 		AutoExposePorts: func() *bool { b := true; return &b }(),
+		CreateKSA:       true,
 	}
 
 	blob, err := json.Marshal(&RemoteAgentConfig{HubAgentDefaults: sent})
@@ -330,7 +331,8 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 		got.HubAgentDefaults.Resources == nil ||
 		*got.HubAgentDefaults.Resources != *want.Resources ||
 		got.HubAgentDefaults.AutoExposePorts == nil ||
-		!*got.HubAgentDefaults.AutoExposePorts {
+		!*got.HubAgentDefaults.AutoExposePorts ||
+		!got.HubAgentDefaults.CreateKSA {
 		t.Errorf("wire round-trip mismatch:\n sent %+v\n got  %+v (resources %+v)",
 			want, got.HubAgentDefaults, got.HubAgentDefaults.Resources)
 	}

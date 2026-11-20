@@ -209,8 +209,8 @@ type GCPServiceAccountStatus struct {
 		Error      string     `json:"error,omitempty"`
 	} `json:"verification"`
 	// Mappings has one entry per Kubernetes broker profile of the project.
-	// State is "mapped", "not_mapped" (on a complete, fresh report),
-	// "unknown" or "not_reported".
+	// State is "mapped", "creatable", "not_mapped" (on a complete, fresh
+	// report), "unknown" or "not_reported".
 	Mappings []GCPServiceAccountProfileMapping `json:"mappings"`
 	// WorkloadIdentityBinding.State is "bound", "not_bound" or "unknown".
 	WorkloadIdentityBinding struct {

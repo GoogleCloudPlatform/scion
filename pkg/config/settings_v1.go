@@ -364,9 +364,12 @@ func ValidateSharedDirSize(size string) error {
 // that need to distinguish "no mapping" from "settings error" should call
 // ResolveRuntime themselves first.
 //
-// Scion never creates, annotates, or binds the returned KSA: it must already
-// exist and already be bound to gsaEmail via Workload Identity, out of band,
-// by the operator (see docs-site/.../ha/setup-gcp.md).
+// Scion never creates, annotates, or binds a KSA returned from
+// kubernetes_service_account_mappings: an explicit mapping must already exist
+// and already be bound to gsaEmail via Workload Identity, out of band, by the
+// operator (see docs-site/.../ha/setup-gcp.md). Opt-in broker KSA creation
+// (CreateServiceAccounts) applies only to the conventional <gsa-account-id>
+// KSA when neither a mapping nor annotation discovery matches.
 //
 // This is the profileName-only convenience form: it resolves profileName's
 // own runtime entry name internally (via ResolveRuntime) before delegating
@@ -712,6 +715,32 @@ func ProjectSettingsHasWorkloadIdentityPool(projectPath, runtimeEntryName string
 		return false
 	}
 	return probe.Runtimes[runtimeEntryName].WorkloadIdentityPool != ""
+}
+
+// ProjectSettingsHasCreateServiceAccounts reports whether a project's OWN
+// settings.yaml sets create_service_accounts (true or false) on the named
+// runtime entry. Like ProjectSettingsHasWorkloadIdentityPool it exists only so
+// a caller can warn that the setting has no effect there: KSA creation is read
+// only from the broker's global settings (with the hub settings overlay on a
+// co-located server), never from a project's settings. Best-effort: an
+// unreadable file returns false.
+func ProjectSettingsHasCreateServiceAccounts(projectPath, runtimeEntryName string) bool {
+	if runtimeEntryName == "" {
+		return false
+	}
+	raw, ok := readProjectOwnSettings(projectPath)
+	if !ok {
+		return false
+	}
+	var probe struct {
+		Runtimes map[string]struct {
+			CreateServiceAccounts *bool `yaml:"create_service_accounts" json:"create_service_accounts"`
+		} `yaml:"runtimes" json:"runtimes"`
+	}
+	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
+		return false
+	}
+	return probe.Runtimes[runtimeEntryName].CreateServiceAccounts != nil
 }
 
 // readProjectOwnSettings returns the bytes of a project's OWN settings file,
@@ -3278,12 +3307,11 @@ type V1RuntimeConfig struct {
 	// to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload
 	// Identity, when Type is "kubernetes". Used by GCP identity mode "assign"
 	// dispatches on Kubernetes (ptone/scion#2328) to set the pod's
-	// spec.serviceAccountName. Scion never creates or annotates these
-	// KSAs — the operator must pre-provision each one (KSA exists, is
+	// spec.serviceAccountName. Scion never creates or annotates KSAs listed in
+	// these mappings — the operator must pre-provision each mapped KSA (exists,
 	// annotated with iam.gke.io/gcp-service-account, and holds
-	// roles/iam.workloadIdentityUser for the named GSA) out of band; the hub
-	// grants that role itself only for a GSA it mints while
-	// hub.k8s_workload_identity_setup is on (WorkloadIdentityPool). A
+	// roles/iam.workloadIdentityUser for the named GSA) out of band; for
+	// Hub-minted GSAs, see WorkloadIdentityPool and CreateServiceAccounts. A
 	// same-keyed entry in the active profile's own
 	// KubernetesServiceAccountMappings overrides this one; see
 	// VersionedSettings.ResolveKubernetesServiceAccountMapping.
@@ -3308,6 +3336,15 @@ type V1RuntimeConfig struct {
 	// overlay on a co-located server), never from a project's settings.
 	// See ValidateWorkloadIdentityPool.
 	WorkloadIdentityPool string `json:"workload_identity_pool,omitempty" yaml:"workload_identity_pool,omitempty" koanf:"workload_identity_pool"`
+	// CreateServiceAccounts opts this Kubernetes runtime entry into creating
+	// the conventional Kubernetes ServiceAccount (<gsa-account-id>) in the
+	// agent namespace on GCP identity mode "assign" start when the Hub
+	// authorizes creation (hub.k8s_workload_identity_setup enabled and a
+	// Hub-minted GSA) and neither kubernetes_service_account_mappings nor
+	// annotation discovery matched (ptone/scion#7966). Default false. Read
+	// only from the broker's own global settings (with the hub settings
+	// overlay on a co-located server), never from a project's settings.
+	CreateServiceAccounts bool `json:"create_service_accounts,omitempty" yaml:"create_service_accounts,omitempty" koanf:"create_service_accounts"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to

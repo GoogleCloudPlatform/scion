@@ -79,6 +79,8 @@ func saAssignColumn(st *hubclient.GCPServiceAccountAssignStatus) string {
 	switch st.State {
 	case "mapped":
 		return "mapped"
+	case "creatable":
+		return "KSA created at start"
 	case "not_mapped":
 		return "not mapped"
 	case "not_required":

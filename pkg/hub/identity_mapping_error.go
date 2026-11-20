@@ -29,6 +29,7 @@ import (
 const (
 	ErrCodeIdentityNotMapped   = api.BrokerErrCodeIdentityNotMapped
 	ErrCodeIdentityKSAMismatch = api.BrokerErrCodeIdentityKSAMismatch
+	ErrCodeIdentityKSAConflict = api.BrokerErrCodeIdentityKSAConflict
 )
 
 // kubernetesIdentityMappingDocsURL links the docs section on mapping a GCP
@@ -67,7 +68,7 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 		return identityMappingError{}, false
 	}
 	code := se.brokerErrorCode()
-	if code != ErrCodeIdentityNotMapped && code != ErrCodeIdentityKSAMismatch {
+	if code != ErrCodeIdentityNotMapped && code != ErrCodeIdentityKSAMismatch && code != ErrCodeIdentityKSAConflict {
 		return identityMappingError{}, false
 	}
 	bd := se.brokerErrorDetails()
@@ -99,7 +100,8 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 	}
 
 	var msg string
-	if code == ErrCodeIdentityNotMapped {
+	switch code {
+	case ErrCodeIdentityNotMapped:
 		discovery := detail(api.BrokerErrDetailDiscovery)
 		namespace := detail(api.BrokerErrDetailNamespace)
 		discoveryText := identityDiscoveryText(discovery, namespace)
@@ -110,10 +112,42 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 			}
 			discoveryText += " "
 		}
-		msg = fmt.Sprintf("%s has no Kubernetes service account mapping on %s. %s"+
-			"A broker operator must add it to kubernetes_service_account_mappings in that broker's settings; see %s",
-			accountText, scope, discoveryText, kubernetesIdentityMappingDocsURL)
-	} else {
+		missingPerm := detail(api.BrokerErrDetailMissingPermission)
+		permText := identityMissingPermissionText(missingPerm, namespace)
+		if permText != "" {
+			details[api.BrokerErrDetailMissingPermission] = missingPerm
+			if namespace != "" {
+				details[api.BrokerErrDetailNamespace] = namespace
+			}
+			permText += " "
+		}
+		remedy := "A broker operator must add it to kubernetes_service_account_mappings in that broker's settings"
+		if permText != "" {
+			remedy = "A broker operator must grant get, list, and create on serviceaccounts in that namespace, or add an explicit entry to kubernetes_service_account_mappings in that broker's settings"
+		}
+		msg = fmt.Sprintf("%s has no Kubernetes service account mapping on %s. %s%s%s; see %s",
+			accountText, scope, discoveryText, permText, remedy, kubernetesIdentityMappingDocsURL)
+
+	case ErrCodeIdentityKSAConflict:
+		conflicting := detail(api.BrokerErrDetailConflictingKSA)
+		namespace := detail(api.BrokerErrDetailNamespace)
+		if conflicting != "" {
+			details[api.BrokerErrDetailConflictingKSA] = conflicting
+		}
+		where := "the agent's namespace"
+		if namespace != "" {
+			details[api.BrokerErrDetailNamespace] = namespace
+			where = fmt.Sprintf("namespace %q", namespace)
+		}
+		ksaText := "The conventional Kubernetes service account"
+		if conflicting != "" {
+			ksaText = fmt.Sprintf("Kubernetes service account %q", conflicting)
+		}
+		msg = fmt.Sprintf("%s in %s already exists and is not annotated for %s on %s; Scion never modifies an existing ServiceAccount. "+
+			"A broker operator must annotate it with iam.gke.io/gcp-service-account, map %s to another ServiceAccount in kubernetes_service_account_mappings, or remove the conflicting ServiceAccount; see %s",
+			ksaText, where, accountText, scope, accountText, kubernetesIdentityMappingDocsURL)
+
+	default:
 		requested := detail(api.BrokerErrDetailRequestedKSA)
 		mapped := detail(api.BrokerErrDetailMappedKSA)
 		if requested != "" {
@@ -126,11 +160,17 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 		if requested != "" {
 			requestedText = fmt.Sprintf("The requested Kubernetes service account %q", requested)
 		}
-		discovered := detail(api.BrokerErrDetailKSASource) == api.BrokerKSASourceDiscovered
+		source := detail(api.BrokerErrDetailKSASource)
 		oneText, toText, remedy := "the one mapped", "to", "change kubernetes_service_account_mappings in that broker's settings"
-		if discovered {
+		switch source {
+		case api.BrokerKSASourceDiscovered:
 			details[api.BrokerErrDetailKSASource] = api.BrokerKSASourceDiscovered
 			oneText = "the one found by its iam.gke.io/gcp-service-account annotation"
+			toText = "for"
+			remedy = "add an entry to kubernetes_service_account_mappings in that broker's settings"
+		case api.BrokerKSASourceCreated:
+			details[api.BrokerErrDetailKSASource] = api.BrokerKSASourceCreated
+			oneText = "the conventional one that would be created"
 			toText = "for"
 			remedy = "add an entry to kubernetes_service_account_mappings in that broker's settings"
 		}
@@ -143,6 +183,19 @@ func identityMappingDispatchError(err error) (identityMappingError, bool) {
 			requestedText, mappedText, toText, accountText, scope, remedy, kubernetesIdentityMappingDocsURL)
 	}
 	return identityMappingError{Code: code, Message: msg, Details: details}, true
+}
+
+func identityMissingPermissionText(perm, namespace string) string {
+	where := "the agent's namespace"
+	if namespace != "" {
+		where = fmt.Sprintf("namespace %q", namespace)
+	}
+	switch perm {
+	case api.BrokerKSAPermissionCreate, api.BrokerKSAPermissionGet:
+		return fmt.Sprintf("Opt-in ServiceAccount creation could not proceed because the broker lacks %s permission in %s.", perm, where)
+	default:
+		return ""
+	}
 }
 
 // identityDiscoveryText is the fixed sentence the hub adds to an

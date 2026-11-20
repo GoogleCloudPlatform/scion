@@ -29,6 +29,8 @@ import (
 const saAssignBody = `{"items":[
  {"id":"sa-mapped","scope":"project","scopeId":"scion-proj-1","email":"mapped@x.iam.gserviceaccount.com","projectId":"gcp","verified":true,
   "assignStatus":{"state":"mapped","message":"m","brokerId":"b1","brokerName":"broker-a","profile":"gke","namespace":"agents"}},
+ {"id":"sa-creatable","scope":"project","scopeId":"scion-proj-1","email":"scion-minted@x.iam.gserviceaccount.com","projectId":"gcp","verified":true,
+  "assignStatus":{"state":"creatable","message":"m","brokerId":"b1","brokerName":"broker-a","profile":"gke","namespace":"agents"}},
  {"id":"sa-unmapped","scope":"project","scopeId":"scion-proj-1","email":"unmapped@x.iam.gserviceaccount.com","projectId":"gcp","verified":true,
   "assignStatus":{"state":"not_mapped","message":"m","brokerId":"b1","brokerName":"broker-a","profile":"gke"}},
  {"id":"sa-unknown","scope":"hub","scopeId":"hub","email":"shared@x.iam.gserviceaccount.com","projectId":"gcp","verified":true,
@@ -70,6 +72,7 @@ func TestSAScopedList_AssignColumn(t *testing.T) {
 		return ""
 	}
 	assert.True(t, strings.HasSuffix(row("sa-mapped"), "  mapped"), row("sa-mapped"))
+	assert.True(t, strings.HasSuffix(row("sa-creatable"), "  KSA created at start"), row("sa-creatable"))
 	assert.True(t, strings.HasSuffix(row("sa-unmapped"), "  not mapped"), row("sa-unmapped"))
 	assert.True(t, strings.HasSuffix(row("sa-unknown"), "  unknown (report_stale)"), "unknown is shown, not hidden: %s", row("sa-unknown"))
 	assert.Contains(t, out, "broker broker-a, profile gke")

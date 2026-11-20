@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -68,6 +69,7 @@ func (s *Server) profileDefaultSAWarnings(ctx context.Context, projectID string,
 	}
 	brokers, complete := s.projectProviderBrokers(ctx, projectID)
 	rows := s.brokerKubernetesProfileMappings(brokers)
+	expOn := s.experimentEnabled(experiments.K8sWorkloadIdentitySetup)
 	now := time.Now()
 
 	var out []string
@@ -98,7 +100,7 @@ func (s *Server) profileDefaultSAWarnings(ctx context.Context, projectID string,
 				profileRows = append(profileRows, row)
 			}
 		}
-		c := projectSAMappingViewFrom(profileRows).check(sa.Email, now)
+		c := projectSAMappingViewFrom(profileRows).checkFor(sa.Email, expOn && sa.Managed, now)
 		if !c.warns() {
 			continue
 		}

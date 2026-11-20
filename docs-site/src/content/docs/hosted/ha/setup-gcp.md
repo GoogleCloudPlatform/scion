@@ -530,14 +530,21 @@ Pods dispatched to a different namespace (e.g. `default`) will fail with
 ### 2i. GKE Workload Identity for GCP Identity Mode Assign
 
 GCP identity mode **assign** on the Kubernetes runtime authenticates agent pods via
-Workload Identity, not via the sciontool metadata emulator used on Docker. Scion does
-not create or annotate Kubernetes ServiceAccounts (KSAs) for this — pre-provision
-each one yourself, then tell the broker about it in its own `settings.yaml`.
+Workload Identity, not via the sciontool metadata emulator used on Docker. By default, Scion does not create or annotate Kubernetes ServiceAccounts (KSAs) — you pre-provision each KSA yourself and map or annotate it.
 
-For a GSA the Hub mints, the Hub can make the `roles/iam.workloadIdentityUser` grant
-below for you: set `workload_identity_pool` on the broker's runtime entry, turn on the
-`hub.k8s_workload_identity_setup` experiment, and name the KSA after the GSA's account ID.
-See [Workload Identity binding at mint](/scion/hosted/ha/kubernetes/#workload-identity-binding-at-mint).
+For a GSA the Hub mints while the `hub.k8s_workload_identity_setup` experiment is on:
+- Set `workload_identity_pool: <CLUSTER_PROJECT_ID>.svc.id.goog` on the broker's
+  `kubernetes` runtime entry so the Hub grants `roles/iam.workloadIdentityUser` to the
+  conventional `<account ID>` KSA at mint.
+- Optionally set `create_service_accounts: true` on that same runtime entry and grant the
+  broker's Kubernetes identity `get`, `list`, and `create` on `serviceaccounts` in the
+  agent namespace so the broker creates and annotates the conventional `<account ID>` KSA
+  on first `assign` start (existing KSAs are never modified; a colliding KSA fails with
+  `identity_ksa_conflict`). New IAM bindings can take up to a few minutes to propagate in
+  GKE Workload Identity, and agent namespaces should be dedicated to Scion so only the
+  broker identity can create ServiceAccounts and pods there.
+See [Workload Identity binding at mint](/scion/hosted/ha/kubernetes/#workload-identity-binding-at-mint)
+and [GCP Identity Mode "assign"](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping).
 
 This section covers the cluster side: the Workload Identity binding and the broker
 mapping. Registering the GSA with the Hub and granting the Hub token-creator on it come

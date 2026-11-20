@@ -132,3 +132,40 @@ func TestHeartbeat_ReportsWorkloadIdentityTargets(t *testing.T) {
 	assert.Nil(t, got.WorkloadIdentityTargets, "a flat instance has no producer yet (phase 5 P3b)")
 	assert.False(t, got.Capabilities.WITargetsV1)
 }
+
+func TestWorkloadIdentityTargetsFrom_KSACreation(t *testing.T) {
+	vs := &config.VersionedSettings{
+		Profiles: map[string]config.V1ProfileConfig{
+			"both":        {Runtime: "rt-both"},
+			"create-only": {Runtime: "rt-create"},
+			"bad-pool":    {Runtime: "rt-bad-pool"},
+			"docker":      {Runtime: "rt-docker"},
+			"neither":     {Runtime: "rt-neither"},
+		},
+		Runtimes: map[string]config.V1RuntimeConfig{
+			"rt-both":     {Type: "kubernetes", Namespace: "agents", WorkloadIdentityPool: "cluster-project.svc.id.goog", CreateServiceAccounts: true},
+			"rt-create":   {Type: "kubernetes", Namespace: "agents", CreateServiceAccounts: true},
+			"rt-bad-pool": {Type: "kubernetes", Namespace: "agents", WorkloadIdentityPool: "not-a-pool", CreateServiceAccounts: true},
+			"rt-docker":   {Type: "docker", CreateServiceAccounts: true},
+			"rt-neither":  {Type: "kubernetes", Namespace: "agents"},
+		},
+	}
+	var invalid []string
+	got := workloadIdentityTargetsFrom(vs, func(profile, pool string) {
+		invalid = append(invalid, profile+"="+pool)
+	})
+	require.Equal(t, []hubclient.WorkloadIdentityTarget{
+		{Profile: "bad-pool", Pool: "", Namespace: "agents", KSACreation: true},
+		{Profile: "both", Pool: "cluster-project.svc.id.goog", Namespace: "agents", KSACreation: true},
+		{Profile: "create-only", Pool: "", Namespace: "agents", KSACreation: true},
+	}, got)
+	assert.Equal(t, []string{"bad-pool=not-a-pool"}, invalid)
+
+	raw, err := json.Marshal(got[1])
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"ksaCreation":true`)
+
+	rawFalse, err := json.Marshal(hubclient.WorkloadIdentityTarget{Profile: "p", Pool: "cluster-project.svc.id.goog", Namespace: "agents"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(rawFalse), "ksaCreation")
+}

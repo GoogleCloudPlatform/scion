@@ -1395,6 +1395,14 @@ type HubAgentDefaults struct {
 	// image_registry rewrite; an absent value leaves the image unchanged,
 	// which is also what a broker that predates the field does.
 	ImageTag string `json:"imageTag,omitempty"`
+	// CreateKSA authorizes the broker to create the conventional Kubernetes
+	// ServiceAccount (<gsa-account-id>) on GCP identity mode "assign" start
+	// when the broker's own create_service_accounts setting is also enabled
+	// (ptone/scion#7966). The Hub sets it only when
+	// hub.k8s_workload_identity_setup is on and the assigned GCP service
+	// account was minted by the Hub (Managed == true), never for BYO
+	// accounts.
+	CreateKSA bool `json:"createKSA,omitempty"`
 }
 
 // ResolvedImageTag returns the hub-resolved image tag, or "" when the hub
@@ -1436,7 +1444,7 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 		return true
 	}
 	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
-		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil && d.ImageTag == ""
+		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil && d.ImageTag == "" && !d.CreateKSA
 }
 
 // EnvAutoExposePorts is the env key that enables in-container port

@@ -690,7 +690,7 @@
             "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
             "maxLength": 253
           },
-          "description": "Maps a lowercase GCP service account email to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload Identity, for GCP identity mode 'assign' on the Kubernetes runtime. Scion does not create, annotate, or bind the KSA; it must already be pre-provisioned by the operator. Only settings the broker itself resolves (this runtime entry, or a same-keyed entry in a profile defined in the same operator-controlled settings) are consulted; a project's own settings.yaml cannot add or override entries here. A same-keyed entry in the active profile overrides this one."
+          "description": "Maps a lowercase GCP service account email to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload Identity, for GCP identity mode 'assign' on the Kubernetes runtime. Scion does not create, annotate, or bind KSAs listed here; each mapped KSA must already be pre-provisioned by the operator (for opt-in creation of the conventional KSA for Hub-minted GSAs, see create_service_accounts). Only settings the broker itself resolves (this runtime entry, or a same-keyed entry in a profile defined in the same operator-controlled settings) are consulted; a project's own settings.yaml cannot add or override entries here. A same-keyed entry in the active profile overrides this one."
         },
         "kubernetes_block_service_account": {
           "type": "string",
@@ -702,6 +702,10 @@
           "type": "string",
           "pattern": "^$|^[a-z][a-z0-9-]{4,28}[a-z0-9]\\.svc\\.id\\.goog$",
           "description": "Kubernetes only. The GKE Workload Identity pool of this entry's cluster, <cluster-project-id>.svc.id.goog. The broker reports it with the entry's namespace, and when the hub.k8s_workload_identity_setup experiment is on, a GCP service account the Hub mints is bound (roles/iam.workloadIdentityUser) to the Kubernetes ServiceAccount named after its account ID in that namespace. Read only from the broker's own operator-controlled settings, never from a project's settings.yaml."
+        },
+        "create_service_accounts": {
+          "type": "boolean",
+          "description": "Kubernetes only. When true (default false) and the hub.k8s_workload_identity_setup experiment is on, the broker creates the conventional Kubernetes ServiceAccount (<gsa-account-id>) in this entry's namespace on GCP identity mode 'assign' start of a Hub-minted GCP service account when no mapping or discovered annotation matches. Requires get, list, and create on serviceaccounts in the agent namespace. Read only from the broker's own operator-controlled settings, never from a project's settings.yaml."
         }
       },
       "additionalProperties": false

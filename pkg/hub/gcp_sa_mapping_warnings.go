@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -103,10 +104,14 @@ type kubernetesProfileMappings struct {
 	// liveExplicit holds the GSAs, lowercased, that the embedded broker's
 	// live settings map explicitly. Nil for every other row.
 	liveExplicit map[string]bool
+	// ksaCreation and ksaNamespace come from broker.WorkloadIdentityTargets
+	// (or live settings on the embedded broker) for opt-in KSA creation.
+	ksaCreation  bool
+	ksaNamespace string
 }
 
-// decision decides account on the row with the dispatch refusal's rule
-// (profileSAMappingDecisionOn) on its stored report. On the embedded
+// decisionFor decides account on the row with the dispatch refusal's rule
+// (profileSAMappingDecisionOnWithCreate) on its stored report. On the embedded
 // broker, an explicit mapping in the live settings is mapped whatever the
 // stored report says: the broker resolves explicit mappings from those
 // settings at dispatch, and the stored report catches up on its next
@@ -123,14 +128,14 @@ type kubernetesProfileMappings struct {
 //     while the refusal still reads that entry as mapped and leaves the
 //     dispatch to the broker, which refuses it. This is the safe direction:
 //     the hub never refuses a dispatch the broker would accept.
-func (p kubernetesProfileMappings) decision(account string, now time.Time) SAMappingDecision {
+func (p kubernetesProfileMappings) decisionFor(account string, allowCreate bool, now time.Time) SAMappingDecision {
 	if key := strings.ToLower(strings.TrimSpace(account)); key != "" && p.liveExplicit[key] {
 		return SAMappingDecision{
 			State: SAMappingStateMapped, Account: key, Profile: p.profile, Broker: p.brokerName,
 			Namespace: p.entries[key].Namespace,
 		}
 	}
-	return profileSAMappingDecisionOn(p.brokerName, &p.report, account, now)
+	return profileSAMappingDecisionOnWithCreate(p.brokerName, &p.report, account, allowCreate, p.ksaCreation, p.ksaNamespace, now)
 }
 
 // label names the profile as "broker/profile".
@@ -193,6 +198,7 @@ func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker)
 				brokerID: broker.ID, brokerName: broker.Name, profile: p.Name,
 				entries: map[string]store.BrokerProfileSAMapping{},
 			}
+			row.ksaCreation, row.ksaNamespace = brokerProfileKSACreation(broker, p.Name)
 			if embedded && !localOnlyProfileTypes[p.Type] {
 				if !liveLoaded {
 					liveLoaded = true
@@ -208,6 +214,11 @@ func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker)
 					gsas, isKubernetes, known := live.ProfileKubernetesSAMappings(p.Name)
 					if known {
 						if isKubernetes {
+							rtEntry := live.Profiles[p.Name].Runtime
+							row.ksaCreation = live.Runtimes[rtEntry].CreateServiceAccounts
+							if ns, ok := live.ResolveKubernetesNamespace(rtEntry); ok {
+								row.ksaNamespace = ns
+							}
 							stored := storedProfileSAEntries(p)
 							// The live settings hold the explicit mappings only.
 							// Discovery, completeness and the report time come
@@ -407,12 +418,12 @@ type saMappingCheck struct {
 	unknown int
 }
 
-// check decides gsaEmail on every profile of the view at now.
-func (v projectSAMappingView) check(gsaEmail string, now time.Time) saMappingCheck {
+// checkFor decides gsaEmail on every profile of the view at now.
+func (v projectSAMappingView) checkFor(gsaEmail string, allowCreate bool, now time.Time) saMappingCheck {
 	var c saMappingCheck
 	for _, p := range v.profiles {
-		switch p.decision(gsaEmail, now).State {
-		case SAMappingStateMapped:
+		switch p.decisionFor(gsaEmail, allowCreate, now).State {
+		case SAMappingStateMapped, SAMappingStateCreatable:
 			c.mapped = true
 		case SAMappingStateNotMapped:
 			c.notMapped = append(c.notMapped, p.label())
@@ -458,13 +469,19 @@ func (v projectSAMappingView) warningFor(gsaEmail string) string {
 // The first warning also lists the profiles checked, so the set is not
 // repeated per account. Nil when there is nothing to warn about.
 func (s *Server) projectSAMappingWarnings(ctx context.Context, projectID string, sas ...*store.GCPServiceAccount) []string {
-	return projectSAMappingWarningsFrom(projectID, func() projectSAMappingView { return s.projectSAMappings(ctx, projectID) }, sas...)
+	return projectSAMappingWarningsFromWithExperiment(projectID,
+		s.experimentEnabled(experiments.K8sWorkloadIdentitySetup),
+		func() projectSAMappingView { return s.projectSAMappings(ctx, projectID) }, sas...)
 }
 
 // projectSAMappingWarningsFrom is projectSAMappingWarnings with the view
 // supplied by the caller, so a handler that already read the profiles does
 // not read them again. view is called only when an account needs checking.
-func projectSAMappingWarningsFrom(projectID string, view func() projectSAMappingView, sas ...*store.GCPServiceAccount) []string {
+func (s *Server) projectSAMappingWarningsFrom(projectID string, view func() projectSAMappingView, sas ...*store.GCPServiceAccount) []string {
+	return projectSAMappingWarningsFromWithExperiment(projectID, s.experimentEnabled(experiments.K8sWorkloadIdentitySetup), view, sas...)
+}
+
+func projectSAMappingWarningsFromWithExperiment(projectID string, expOn bool, view func() projectSAMappingView, sas ...*store.GCPServiceAccount) []string {
 	var candidates []*store.GCPServiceAccount
 	for _, sa := range sas {
 		if sa == nil {
@@ -477,7 +494,7 @@ func projectSAMappingWarningsFrom(projectID string, view func() projectSAMapping
 	if len(candidates) == 0 {
 		return nil
 	}
-	return view().warnings(candidates)
+	return view().warningsAtWithExperiment(candidates, expOn, time.Now())
 }
 
 // hubSAMappingWarnings returns one warning per hub-scoped service account in
@@ -486,13 +503,17 @@ func projectSAMappingWarningsFrom(projectID string, view func() projectSAMapping
 // routes, which have no project to narrow the brokers to. Project-scoped
 // accounts are skipped. Nil when there is nothing to warn about.
 func (s *Server) hubSAMappingWarnings(ctx context.Context, sas ...*store.GCPServiceAccount) []string {
-	return hubSAMappingWarningsFrom(func() projectSAMappingView { return s.hubSAMappings(ctx) }, sas...)
+	return s.hubSAMappingWarningsFrom(func() projectSAMappingView { return s.hubSAMappings(ctx) }, sas...)
 }
 
 // hubSAMappingWarningsFrom is hubSAMappingWarnings with the view supplied by
 // the caller, so a handler that already walked the brokers does not walk them
 // again. view is called only when an account needs checking.
-func hubSAMappingWarningsFrom(view func() projectSAMappingView, sas ...*store.GCPServiceAccount) []string {
+func (s *Server) hubSAMappingWarningsFrom(view func() projectSAMappingView, sas ...*store.GCPServiceAccount) []string {
+	return hubSAMappingWarningsFromWithExperiment(s.experimentEnabled(experiments.K8sWorkloadIdentitySetup), view, sas...)
+}
+
+func hubSAMappingWarningsFromWithExperiment(expOn bool, view func() projectSAMappingView, sas ...*store.GCPServiceAccount) []string {
 	var candidates []*store.GCPServiceAccount
 	for _, sa := range sas {
 		if sa != nil && sa.Scope == store.ScopeHub {
@@ -502,22 +523,18 @@ func hubSAMappingWarningsFrom(view func() projectSAMappingView, sas ...*store.GC
 	if len(candidates) == 0 {
 		return nil
 	}
-	return view().warnings(candidates)
+	return view().warningsAtWithExperiment(candidates, expOn, time.Now())
 }
 
-// warnings returns the warning for each account in sas whose check warns
-// (saMappingCheck.warns). The profiles checked are added to the first
-// warning, and to a later one only when they differ from the last listed.
-func (v projectSAMappingView) warnings(sas []*store.GCPServiceAccount) []string {
-	return v.warningsAt(sas, time.Now())
-}
-
-// warningsAt is warnings with the decisions made at now.
-func (v projectSAMappingView) warningsAt(sas []*store.GCPServiceAccount, now time.Time) []string {
+// warningsAtWithExperiment returns the warning for each account in sas whose
+// check warns (saMappingCheck.warns) at now. The profiles checked are added to
+// the first warning, and to a later one only when they differ from the last
+// listed.
+func (v projectSAMappingView) warningsAtWithExperiment(sas []*store.GCPServiceAccount, expOn bool, now time.Time) []string {
 	var out []string
 	lastContext := ""
 	for _, sa := range sas {
-		c := v.check(sa.Email, now)
+		c := v.checkFor(sa.Email, expOn && sa.Managed, now)
 		if !c.warns() {
 			continue
 		}

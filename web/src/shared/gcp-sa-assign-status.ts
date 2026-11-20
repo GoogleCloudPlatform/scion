@@ -97,6 +97,8 @@ export function assignStatusLabel(status: GCPServiceAccountAssignStatus | undefi
   switch (status.state) {
     case 'mapped':
       return 'mapped';
+    case 'creatable':
+      return 'KSA created at start';
     case 'not_mapped':
       return 'not mapped on this profile';
     case 'not_required':

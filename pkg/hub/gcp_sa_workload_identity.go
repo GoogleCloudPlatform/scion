@@ -92,7 +92,7 @@ func normalizeWorkloadIdentityTargets(reported []store.WorkloadIdentityTarget, f
 		t.Profile = strings.TrimSpace(t.Profile)
 		t.Pool = strings.TrimSpace(t.Pool)
 		t.Namespace = strings.TrimSpace(t.Namespace)
-		if t.Pool == "" {
+		if t.Pool == "" && !t.KSACreation {
 			continue
 		}
 		if config.ValidateWorkloadIdentityPool(t.Pool) != nil ||

@@ -511,8 +511,9 @@ func runDoctor() error {
 				opts.GKEMode = rtConfig.GKE
 			}
 			var srv *config.V1ServerConfig
-			if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil && gs != nil {
+			if gs, _, gErr := config.LoadGlobalSettingsWithOverlay(); gErr == nil && gs != nil {
 				srv = gs.Server
+				opts.CreateServiceAccounts = doctorCreateServiceAccounts(vs, gs, profile)
 			}
 			opts.SharedDirStorageClass, opts.SharedDirStorageShared = doctorSharedDirStorage(vs, srv, profile)
 			opts.Server = srv
@@ -520,6 +521,23 @@ func runDoctor() error {
 	}
 	r.runtimeSection(rt.Name(), diag, opts)
 	return r.finish()
+}
+
+// doctorCreateServiceAccounts reports whether the active profile's runtime
+// entry sets create_service_accounts in the broker's global settings (with DB
+// overlay), never from a project's own settings.yaml.
+func doctorCreateServiceAccounts(vs, gs *config.VersionedSettings, profileName string) bool {
+	if vs == nil || gs == nil {
+		return false
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok || p.Runtime == "" {
+		return false
+	}
+	return gs.Runtimes[p.Runtime].CreateServiceAccounts
 }
 
 // hubChecks runs the Hub checks (D1-D4, D9) and reads the health summary

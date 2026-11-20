@@ -60,3 +60,28 @@ func TestHubAgentDefaults_ImageTag(t *testing.T) {
 		t.Error("the zero value must be empty")
 	}
 }
+
+func TestHubAgentDefaults_CreateKSA(t *testing.T) {
+	d := &HubAgentDefaults{CreateKSA: true}
+	if d.IsEmpty() {
+		t.Error("a value with only CreateKSA must not be empty")
+	}
+	got := HubAgentDefaultsFromContext(ContextWithHubAgentDefaults(context.Background(), d))
+	if got == nil || !got.CreateKSA {
+		t.Fatalf("CreateKSA from context = %+v, want CreateKSA=true", got)
+	}
+	blob, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(blob) != `{"createKSA":true}` {
+		t.Errorf("JSON = %s, want {\"createKSA\":true}", blob)
+	}
+	blob, err = json.Marshal(&HubAgentDefaults{MaxTurns: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "createKSA") {
+		t.Errorf("false CreateKSA must be omitted: %s", blob)
+	}
+}

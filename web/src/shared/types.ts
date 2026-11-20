@@ -2222,7 +2222,12 @@ export interface WorkloadIdentityBinding {
 }
 
 /** Mapping state of a GCP service account on one broker profile (mirrors hub GCPServiceAccountAssignStatus). */
-export type GCPServiceAccountAssignState = 'mapped' | 'not_mapped' | 'not_required' | 'unknown';
+export type GCPServiceAccountAssignState =
+  | 'mapped'
+  | 'creatable'
+  | 'not_mapped'
+  | 'not_required'
+  | 'unknown';
 
 export interface GCPServiceAccountAssignStatus {
   /** One of GCPServiceAccountAssignState; a newer hub may send others. */
@@ -2243,7 +2248,7 @@ export interface GCPServiceAccountAssignStatus {
  * 'not_mapped' need a complete, current report; otherwise the state is
  * 'unknown' with `unknownReason`. 'not_reported' means no report at all.
  */
-export type GCPSAMappingState = 'mapped' | 'not_mapped' | 'unknown' | 'not_reported';
+export type GCPSAMappingState = 'mapped' | 'creatable' | 'not_mapped' | 'unknown' | 'not_reported';
 
 export interface GCPServiceAccountProfileBinding {
   state: string;
@@ -2280,7 +2285,7 @@ export interface GCPServiceAccountProfileMapping {
   state: GCPSAMappingState;
   kubernetesServiceAccount?: string;
   namespace?: string;
-  /** 'mapped' (explicit mapping) or 'discovered' (annotation discovery). */
+  /** 'mapped' (explicit mapping), 'discovered' (annotation discovery), or 'created' (opt-in KSA creation). */
   source?: string;
   /** When the hub last stored or confirmed the profile's report. */
   reportedAt?: string;

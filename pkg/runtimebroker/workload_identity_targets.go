@@ -24,16 +24,19 @@ import (
 
 // heartbeatWorkloadIdentityTargets returns, sorted by profile name, one
 // Workload Identity target per Kubernetes profile (by resolved runtime
-// type) whose runtime entry sets workload_identity_pool in the broker's
-// global settings, for the heartbeat's WorkloadIdentityTargets field
-// (ptone/scion#3329 phase 5). The namespace is the one a dispatch on the
-// profile resolves for the Workload Identity principal
-// (resolveAssignNamespace), the same as the profile SA report.
+// type) whose runtime entry sets workload_identity_pool or
+// create_service_accounts in the broker's global settings, for the
+// heartbeat's WorkloadIdentityTargets field (ptone/scion#3329 phase 5,
+// ptone/scion#7966). The namespace is the one a dispatch on the profile
+// resolves for the Workload Identity principal (resolveAssignNamespace),
+// the same as the profile SA report.
 //
-// The pool is read from the settings the profile SA report reads (global
-// settings plus the hub settings overlay on a co-located server; design
-// amendment A-1), never from a project's settings. A pool that fails
-// ValidateWorkloadIdentityPool is left out with a rate-limited warning.
+// Both settings are read from the settings the profile SA report reads
+// (global settings plus the hub settings overlay on a co-located server;
+// design amendment A-1), never from a project's settings. A pool that fails
+// ValidateWorkloadIdentityPool is cleared with a rate-limited warning (the
+// target is still emitted with an empty pool when create_service_accounts
+// is true, so the hub precheck knows KSA creation is enabled).
 //
 // With ForceRuntime set, dispatch ignores the profiles and runs on the
 // forced runtime, so no target is reported (an empty list). It returns nil
@@ -69,20 +72,23 @@ func workloadIdentityTargetsFrom(vs *config.VersionedSettings, invalid func(prof
 			continue
 		}
 		entry := vs.Profiles[name].Runtime
-		pool := strings.TrimSpace(vs.Runtimes[entry].WorkloadIdentityPool)
-		if pool == "" {
-			continue
-		}
-		if config.ValidateWorkloadIdentityPool(pool) != nil {
+		rt := vs.Runtimes[entry]
+		ksaCreation := rt.CreateServiceAccounts
+		pool := strings.TrimSpace(rt.WorkloadIdentityPool)
+		if pool != "" && config.ValidateWorkloadIdentityPool(pool) != nil {
 			if invalid != nil {
 				invalid(name, pool)
 			}
+			pool = ""
+		}
+		if pool == "" && !ksaCreation {
 			continue
 		}
 		out = append(out, hubclient.WorkloadIdentityTarget{
-			Profile:   name,
-			Pool:      pool,
-			Namespace: resolveAssignNamespace(vs, entry),
+			Profile:     name,
+			Pool:        pool,
+			Namespace:   resolveAssignNamespace(vs, entry),
+			KSACreation: ksaCreation,
 		})
 	}
 	return out

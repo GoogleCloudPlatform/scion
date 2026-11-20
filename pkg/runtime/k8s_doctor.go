@@ -52,6 +52,9 @@ func (r *KubernetesRuntime) RunDiagnostics(opts DiagnosticOpts) DiagnosticReport
 	report.Checks = append(report.Checks, r.checkNamespaceAccess(namespace))
 	report.Checks = append(report.Checks, r.checkPodPermissions(namespace))
 	report.Checks = append(report.Checks, r.checkSecretPermissions(namespace))
+	if opts.CreateServiceAccounts {
+		report.Checks = append(report.Checks, r.checkServiceAccountPermissions(namespace))
+	}
 	report.Checks = append(report.Checks, r.checkSharedDirStorageClass(opts))
 	if c, ok := r.checkSharedDirClaimClasses(namespace, opts); ok {
 		report.Checks = append(report.Checks, c)
@@ -273,6 +276,47 @@ func (r *KubernetesRuntime) checkSecretPermissions(namespace string) CheckResult
 		Name:    "secret-permissions",
 		Status:  "pass",
 		Message: fmt.Sprintf("Secret permissions verified in namespace %q", namespace),
+	}
+}
+
+func (r *KubernetesRuntime) checkServiceAccountPermissions(namespace string) CheckResult {
+	ctx, cancel := r.diagnosticContext()
+	defer cancel()
+
+	for _, verb := range []string{"get", "list", "create"} {
+		review := &authv1.SelfSubjectAccessReview{
+			Spec: authv1.SelfSubjectAccessReviewSpec{
+				ResourceAttributes: &authv1.ResourceAttributes{
+					Namespace: namespace,
+					Verb:      verb,
+					Resource:  "serviceaccounts",
+				},
+			},
+		}
+
+		result, err := r.Client.Clientset.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
+		if err != nil {
+			return CheckResult{
+				Name:        "serviceaccount-permissions",
+				Status:      "warn",
+				Message:     fmt.Sprintf("Could not verify serviceaccount %s permission in %q: %v", verb, namespace, err),
+				Remediation: brokerRoleRemediation(namespace),
+			}
+		}
+		if !result.Status.Allowed {
+			return CheckResult{
+				Name:        "serviceaccount-permissions",
+				Status:      "fail",
+				Message:     fmt.Sprintf("Missing serviceaccount %q permission in namespace %q (required by create_service_accounts)", verb, namespace),
+				Remediation: fmt.Sprintf("Grant %q permission on serviceaccounts. %s", verb, brokerRoleRemediation(namespace)),
+			}
+		}
+	}
+
+	return CheckResult{
+		Name:    "serviceaccount-permissions",
+		Status:  "pass",
+		Message: fmt.Sprintf("ServiceAccount get, list, and create permissions verified in namespace %q", namespace),
 	}
 }
 
