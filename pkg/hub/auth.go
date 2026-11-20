@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authctx"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -192,6 +193,9 @@ type AuthConfig struct {
 	// 401 on a port proxy route (Server.recordPortProxyNoCredentials).
 	// Nil counts nothing.
 	RecordPortProxyNoCredentials func()
+	// ResolvedBranding returns the current Hub branding snapshot for
+	// unauthenticated plain-text port proxy errors. Nil falls back to defaults.
+	ResolvedBranding func() *config.ResolvedBranding
 }
 
 // tokenType represents the type of authentication token.
@@ -611,7 +615,11 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// one; placed below it, its port proxy requests would get
 				// this 401 instead.
 				if isProxyRoute(r.URL.Path) && !isBrowserRequest(r) {
-					hinted := writePortProxyNoCredentials(w, r)
+					var b *config.ResolvedBranding
+					if cfg.ResolvedBranding != nil {
+						b = cfg.ResolvedBranding()
+					}
+					hinted := writePortProxyNoCredentialsWithBranding(w, r, b)
 					if cfg.RecordPortProxyNoCredentials != nil {
 						cfg.RecordPortProxyNoCredentials()
 					}

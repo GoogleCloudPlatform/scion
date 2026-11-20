@@ -18,8 +18,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
@@ -279,4 +282,65 @@ func TestStoreTokenAndPrintResult_WritesToOut(t *testing.T) {
 	cred, err := credentials.Load("https://hub.example.com")
 	require.NoError(t, err)
 	assert.Equal(t, "tok", cred.AccessToken)
+}
+
+func TestFetchHubCallbackBranding(t *testing.T) {
+	t.Run("fetches branded settings and resolves relative brand logo URL", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v1/settings/public" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"branding": {
+					"name": "Acme Cloud",
+					"attribution": "shown",
+					"logoLight": "/brand/logo-light?v=12345678",
+					"logoDark": "https://cdn.example.com/dark.svg",
+					"light": {"bg": "#fafaf9", "surface": "#ffffff", "text": "#292524", "text_muted": "#78716c", "border": "#e7e5e4", "primary": "#0f766e"},
+					"dark": {"bg": "#0c0a09", "surface": "#1c1917", "text": "#f5f5f4", "text_muted": "#a8a29e", "border": "#44403c", "primary": "#2dd4bf"}
+				}
+			}`))
+		}))
+		defer srv.Close()
+
+		got := fetchHubCallbackBranding(context.Background(), srv.URL)
+		require.NotNil(t, got)
+		assert.Equal(t, "Acme Cloud", got.Name)
+		assert.Equal(t, "shown", got.Attribution)
+		assert.Equal(t, srv.URL+"/brand/logo-light?v=12345678", got.LogoLight)
+		assert.Equal(t, "https://cdn.example.com/dark.svg", got.LogoDark)
+		assert.Equal(t, "#0f766e", got.Light.Accent)
+		assert.Equal(t, "#2dd4bf", got.Dark.Accent)
+	})
+
+	t.Run("returns nil when branding is omitted or server errors", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"telemetryEnabled": false}`))
+		}))
+		defer srv.Close()
+		assert.Nil(t, fetchHubCallbackBranding(context.Background(), srv.URL))
+
+		errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}))
+		defer errSrv.Close()
+		assert.Nil(t, fetchHubCallbackBranding(context.Background(), errSrv.URL))
+	})
+
+	t.Run("falls back to nil on canceled context", func(t *testing.T) {
+		slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+		}))
+		defer slowSrv.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		assert.Nil(t, fetchHubCallbackBranding(ctx, slowSrv.URL))
+	})
 }

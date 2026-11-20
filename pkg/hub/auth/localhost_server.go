@@ -23,8 +23,12 @@ import (
 	"html"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -34,98 +38,316 @@ const (
 	CallbackPath = "/callback"
 	// DefaultTimeout is the default timeout for waiting for authentication.
 	DefaultTimeout = 5 * time.Minute
+
+	defaultCallbackBrandName  = "Scion"
+	callbackAttributionShown  = "shown"
+	callbackAttributionHidden = "hidden"
+	maxCallbackBrandNameRunes = 64
+	maxCallbackLogoURLLen     = 2048
 )
 
-// authSuccessHTML is the HTML page shown after successful authentication.
-const authSuccessHTML = `<!DOCTYPE html>
-<html>
-<head>
-    <title>Authentication Successful</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        }
-        .container {
-            text-align: center;
-            background: white;
-            padding: 40px 60px;
-            border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-        }
-        .checkmark {
-            font-size: 64px;
-            margin-bottom: 20px;
-        }
-        h1 {
-            color: #333;
-            margin: 0 0 10px 0;
-        }
-        p {
-            color: #666;
-            margin: 0;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="checkmark">&#10004;</div>
-        <h1>Authentication Successful</h1>
-        <p>You can close this window and return to the terminal.</p>
-    </div>
-</body>
-</html>`
+// CallbackColors holds validated #RRGGBB hex tokens for one theme mode of the
+// localhost OAuth callback HTML page.
+type CallbackColors struct {
+	Bg        string
+	Surface   string
+	Text      string
+	TextMuted string
+	Border    string
+	Accent    string
+}
 
-// authErrorHTML is the HTML template for authentication errors. The
-// message inserted at %s must be escaped with html.EscapeString.
-const authErrorHTML = `<!DOCTYPE html>
-<html>
+// CallbackBranding holds optional Hub branding applied to the localhost OAuth
+// callback HTML pages. Every color is validated as #RRGGBB before rendering;
+// invalid or empty fields fall back to stock Scion defaults.
+type CallbackBranding struct {
+	Name        string
+	Attribution string
+	LogoLight   string
+	LogoDark    string
+	Light       CallbackColors
+	Dark        CallbackColors
+}
+
+func defaultCallbackLightColors() CallbackColors {
+	return CallbackColors{
+		Bg:        "#f8fafc",
+		Surface:   "#ffffff",
+		Text:      "#1e293b",
+		TextMuted: "#64748b",
+		Border:    "#e2e8f0",
+		Accent:    "#3b82f6",
+	}
+}
+
+func defaultCallbackDarkColors() CallbackColors {
+	return CallbackColors{
+		Bg:        "#0f172a",
+		Surface:   "#1e293b",
+		Text:      "#f1f5f9",
+		TextMuted: "#94a3b8",
+		Border:    "#334155",
+		Accent:    "#60a5fa",
+	}
+}
+
+func isValidHexColor(s string) bool {
+	if len(s) != 7 || s[0] != '#' {
+		return false
+	}
+	for i := 1; i < 7; i++ {
+		c := s[i]
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHex {
+			return false
+		}
+	}
+	return true
+}
+
+func pickHexOrDefault(val, fallback string) string {
+	if isValidHexColor(val) {
+		return strings.ToLower(val)
+	}
+	return fallback
+}
+
+func sanitizeCallbackColors(in, def CallbackColors) CallbackColors {
+	return CallbackColors{
+		Bg:        pickHexOrDefault(in.Bg, def.Bg),
+		Surface:   pickHexOrDefault(in.Surface, def.Surface),
+		Text:      pickHexOrDefault(in.Text, def.Text),
+		TextMuted: pickHexOrDefault(in.TextMuted, def.TextMuted),
+		Border:    pickHexOrDefault(in.Border, def.Border),
+		Accent:    pickHexOrDefault(in.Accent, def.Accent),
+	}
+}
+
+func sanitizeCallbackName(raw string) string {
+	if !utf8.ValidString(raw) {
+		return defaultCallbackBrandName
+	}
+	for _, r := range raw {
+		if unicode.IsControl(r) || r == 0x061C || r == 0x200E || r == 0x200F ||
+			(r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069) {
+			return defaultCallbackBrandName
+		}
+	}
+	trimmed := strings.TrimSpace(raw)
+	n := utf8.RuneCountInString(trimmed)
+	if n == 0 || n > maxCallbackBrandNameRunes {
+		return defaultCallbackBrandName
+	}
+	return trimmed
+}
+
+func sanitizeCallbackLogoURL(raw string) string {
+	if raw == "" || len(raw) > maxCallbackLogoURLLen || !utf8.ValidString(raw) {
+		return ""
+	}
+	for _, r := range raw {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return ""
+		}
+	}
+	if strings.ContainsAny(raw, "\"'`()<>\\") {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil {
+		return ""
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return raw
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		host := u.Hostname()
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return raw
+		}
+	}
+	return ""
+}
+
+func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, heading, message string) string {
+	name := defaultCallbackBrandName
+	attribution := callbackAttributionShown
+	var logoLight, logoDark string
+	light := defaultCallbackLightColors()
+	dark := defaultCallbackDarkColors()
+
+	if b != nil {
+		name = sanitizeCallbackName(b.Name)
+		if b.Attribution == callbackAttributionHidden {
+			attribution = callbackAttributionHidden
+		}
+		logoLight = sanitizeCallbackLogoURL(b.LogoLight)
+		logoDark = sanitizeCallbackLogoURL(b.LogoDark)
+		if logoLight == "" && logoDark != "" {
+			logoLight = logoDark
+		}
+		light = sanitizeCallbackColors(b.Light, light)
+		dark = sanitizeCallbackColors(b.Dark, dark)
+	}
+
+	fullTitle := pageTitle
+	if name != defaultCallbackBrandName {
+		fullTitle = name + " - " + pageTitle
+	}
+
+	var logoHTML string
+	if logoLight != "" {
+		alt := html.EscapeString(name)
+		if logoDark != "" && logoDark != logoLight {
+			logoHTML = fmt.Sprintf(
+				`<picture class="brand-logo-wrap"><source media="(prefers-color-scheme: dark)" srcset="%s"><img class="brand-logo" src="%s" alt="%s"></picture>`,
+				html.EscapeString(logoDark), html.EscapeString(logoLight), alt,
+			)
+		} else {
+			logoHTML = fmt.Sprintf(`<img class="brand-logo" src="%s" alt="%s">`, html.EscapeString(logoLight), alt)
+		}
+	}
+
+	badge := "scion"
+	if name != defaultCallbackBrandName || logoLight != "" {
+		if attribution == callbackAttributionHidden {
+			badge = name
+		} else {
+			badge = name + " · Powered by Scion"
+		}
+	}
+
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
 <head>
-    <title>Authentication Failed</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>%s</title>
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-            background: linear-gradient(135deg, #e74c3c 0%%, #c0392b 100%%);
+        :root {
+            --bg: %s;
+            --surface: %s;
+            --text: %s;
+            --text-muted: %s;
+            --border: %s;
+            --accent: %s;
+            --error-accent: #dc2626;
         }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: %s;
+                --surface: %s;
+                --text: %s;
+                --text-muted: %s;
+                --border: %s;
+                --accent: %s;
+                --error-accent: #f87171;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html, body {
+            height: 100%%;
+            font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
         .container {
             text-align: center;
-            background: white;
-            padding: 40px 60px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            padding: 2.5rem 3rem;
             border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            max-width: 480px;
+            margin: 1rem;
         }
+
+        .brand-logo-wrap {
+            display: block;
+        }
+
+        .brand-logo {
+            max-height: 36px;
+            max-width: 180px;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            display: block;
+            margin: 0 auto 1.25rem;
+        }
+
+        .checkmark {
+            font-size: 3rem;
+            color: var(--accent);
+            margin-bottom: 1rem;
+        }
+
         .error-icon {
-            font-size: 64px;
-            margin-bottom: 20px;
+            font-size: 3rem;
+            color: var(--error-accent);
+            margin-bottom: 1rem;
         }
+
         h1 {
-            color: #333;
-            margin: 0 0 10px 0;
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
         }
+
         p {
-            color: #666;
-            margin: 0;
+            color: var(--text-muted);
+            font-size: 1rem;
+            line-height: 1.6;
+        }
+
+        .badge {
+            display: inline-block;
+            margin-top: 1.5rem;
+            padding: 0.25rem 0.75rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: var(--accent);
+            border: 1px solid var(--border);
+            border-radius: 9999px;
+            background: var(--bg);
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="error-icon">&#10008;</div>
-        <h1>Authentication Failed</h1>
+        %s<div class="%s">%s</div>
+        <h1>%s</h1>
         <p>%s</p>
+        <span class="badge">%s</span>
     </div>
 </body>
-</html>`
+</html>`,
+		html.EscapeString(fullTitle),
+		light.Bg, light.Surface, light.Text, light.TextMuted, light.Border, light.Accent,
+		dark.Bg, dark.Surface, dark.Text, dark.TextMuted, dark.Border, dark.Accent,
+		logoHTML,
+		iconClass,
+		iconEntity,
+		html.EscapeString(heading),
+		html.EscapeString(message),
+		html.EscapeString(badge),
+	)
+}
 
 // LocalhostAuthServer handles the OAuth callback on localhost.
 type LocalhostAuthServer struct {
@@ -135,6 +357,7 @@ type LocalhostAuthServer struct {
 	errChan  chan error
 	state    string
 	port     int
+	branding *CallbackBranding
 	mu       sync.Mutex
 	started  bool
 }
@@ -151,6 +374,12 @@ func NewLocalhostAuthServer() *LocalhostAuthServer {
 // WithPort sets a custom port for the server.
 func (s *LocalhostAuthServer) WithPort(port int) *LocalhostAuthServer {
 	s.port = port
+	return s
+}
+
+// WithBranding sets optional Hub branding for the callback HTML pages.
+func (s *LocalhostAuthServer) WithBranding(b *CallbackBranding) *LocalhostAuthServer {
+	s.branding = b
 	return s
 }
 
@@ -198,15 +427,23 @@ func (s *LocalhostAuthServer) Start(ctx context.Context) (callbackURL string, st
 	return callbackURL, s.state, nil
 }
 
+func (s *LocalhostAuthServer) writeCallbackHTML(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body))
+}
+
 // handleCallback handles the OAuth callback request.
 func (s *LocalhostAuthServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Verify state matches (CSRF protection)
 	state := r.URL.Query().Get("state")
 	if state != s.state {
 		s.sendError(fmt.Errorf("state mismatch"))
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = fmt.Fprintf(w, authErrorHTML, html.EscapeString("State mismatch - possible CSRF attack"))
+		s.writeCallbackHTML(w, http.StatusBadRequest,
+			renderCallbackPage(s.branding, "Authentication Failed", "error-icon", "&#10008;", "Authentication Failed", "State mismatch - possible CSRF attack"))
 		return
 	}
 
@@ -217,9 +454,8 @@ func (s *LocalhostAuthServer) handleCallback(w http.ResponseWriter, r *http.Requ
 			errDesc = errCode
 		}
 		s.sendError(fmt.Errorf("auth failed: %s", errDesc))
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = fmt.Fprintf(w, authErrorHTML, html.EscapeString(errDesc))
+		s.writeCallbackHTML(w, http.StatusBadRequest,
+			renderCallbackPage(s.branding, "Authentication Failed", "error-icon", "&#10008;", "Authentication Failed", errDesc))
 		return
 	}
 
@@ -227,16 +463,14 @@ func (s *LocalhostAuthServer) handleCallback(w http.ResponseWriter, r *http.Requ
 	code := r.URL.Query().Get("code")
 	if code == "" {
 		s.sendError(fmt.Errorf("no authorization code received"))
-		w.Header().Set("Content-Type", "text/html")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = fmt.Fprintf(w, authErrorHTML, html.EscapeString("No authorization code received"))
+		s.writeCallbackHTML(w, http.StatusBadRequest,
+			renderCallbackPage(s.branding, "Authentication Failed", "error-icon", "&#10008;", "Authentication Failed", "No authorization code received"))
 		return
 	}
 
 	// Send success page to browser
-	w.Header().Set("Content-Type", "text/html")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(authSuccessHTML))
+	s.writeCallbackHTML(w, http.StatusOK,
+		renderCallbackPage(s.branding, "Authentication Successful", "checkmark", "&#10004;", "Authentication Successful", "You can close this window and return to the terminal."))
 
 	// Send code through channel
 	select {

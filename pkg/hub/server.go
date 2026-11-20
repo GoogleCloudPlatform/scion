@@ -3920,6 +3920,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 		// Plain-text no-credentials 401s on port proxy routes.
 		RecordPortProxyNoCredentials: srv.recordPortProxyNoCredentials,
+		ResolvedBranding:             srv.ResolvedBranding,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {

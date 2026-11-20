@@ -93,7 +93,12 @@ const TZ_LOAD_BUDGET_MS = 1500;
 {
   const style = document.createElement('style');
   style.textContent = themeCSS;
-  document.head.appendChild(style);
+  const brandingStyle = document.getElementById('scion-branding-tokens');
+  if (brandingStyle?.parentNode === document.head) {
+    document.head.insertBefore(style, brandingStyle);
+  } else {
+    document.head.appendChild(style);
+  }
 }
 
 // Import Shoelace base path config (needed for icons).

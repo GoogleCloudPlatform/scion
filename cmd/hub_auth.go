@@ -16,9 +16,11 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -181,7 +183,7 @@ func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string, extra ...hubc
 		return tokenResp, nil
 	}
 	// Browser-based OAuth flow
-	return runBrowserAuthFlow(cmd, client, provider)
+	return runBrowserAuthFlow(cmd, client, hubURL, provider)
 }
 
 // finishHubAuthLogin completes a successful login: it stores the
@@ -352,15 +354,106 @@ func resolveExplicitDeviceFlowProvider(ctx context.Context, authSvc hubclient.Au
 	return resolveHubAuthProvider(ctx, authSvc, hubclient.OAuthClientTypeDevice, requestedProvider)
 }
 
+const callbackBrandingFetchTimeout = 1500 * time.Millisecond
+const maxCallbackBrandingBodyBytes = 256 << 10
+
+// fetchHubCallbackBranding performs a best-effort unauthenticated GET to
+// /api/v1/settings/public with a 1.5s timeout to theme the localhost OAuth
+// callback page. Any network, timeout, HTTP, or parse error silently falls
+// back to nil (stock Scion defaults).
+func fetchHubCallbackBranding(ctx context.Context, hubURL string) *auth.CallbackBranding {
+	base := strings.TrimRight(strings.TrimSpace(hubURL), "/")
+	if base == "" {
+		return nil
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, callbackBrandingFetchTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, base+"/api/v1/settings/public", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Accept", "application/json")
+
+	httpClient := &http.Client{
+		Timeout: callbackBrandingFetchTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 2 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var payload struct {
+		Branding *config.PublicBranding `json:"branding"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxCallbackBrandingBodyBytes)).Decode(&payload); err != nil {
+		return nil
+	}
+	if payload.Branding == nil {
+		return nil
+	}
+	b := payload.Branding
+	cb := &auth.CallbackBranding{
+		Name:        b.Name,
+		Attribution: b.Attribution,
+		LogoLight:   resolveCallbackLogoURL(base, b.LogoLight),
+		LogoDark:    resolveCallbackLogoURL(base, b.LogoDark),
+	}
+	if b.Light != nil {
+		cb.Light = auth.CallbackColors{
+			Bg:        b.Light.Bg,
+			Surface:   b.Light.Surface,
+			Text:      b.Light.Text,
+			TextMuted: b.Light.TextMuted,
+			Border:    b.Light.Border,
+			Accent:    b.Light.Primary,
+		}
+	}
+	if b.Dark != nil {
+		cb.Dark = auth.CallbackColors{
+			Bg:        b.Dark.Bg,
+			Surface:   b.Dark.Surface,
+			Text:      b.Dark.Text,
+			TextMuted: b.Dark.TextMuted,
+			Border:    b.Dark.Border,
+			Accent:    b.Dark.Primary,
+		}
+	}
+	return cb
+}
+
+func resolveCallbackLogoURL(hubBaseURL, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "/") && !strings.HasPrefix(raw, "//") {
+		return hubBaseURL + raw
+	}
+	return raw
+}
+
 // runBrowserAuthFlow performs the browser-based OAuth flow.
-func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client, requestedProvider string) (*hubclient.CLITokenResponse, error) {
+func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client, hubURL, requestedProvider string) (*hubclient.CLITokenResponse, error) {
 	provider, err := resolveHubAuthProvider(cmd.Context(), client.Auth(), hubclient.OAuthClientTypeCLI, requestedProvider)
 	if err != nil {
 		return nil, err
 	}
 
+	// Best-effort branding fetch for the localhost callback page (1.5s cap).
+	callbackBranding := fetchHubCallbackBranding(cmd.Context(), hubURL)
+
 	// Start localhost callback server
-	authServer := auth.NewLocalhostAuthServer()
+	authServer := auth.NewLocalhostAuthServer().WithBranding(callbackBranding)
 	callbackURL, state, err := authServer.Start(cmd.Context())
 	if err != nil {
 		return nil, fmt.Errorf("failed to start auth server: %w", err)

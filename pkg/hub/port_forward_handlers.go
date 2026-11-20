@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -398,11 +399,11 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	}
 	exposed := findExposedPort(agent.ExposedPorts, port)
 	if exposed == nil {
-		writePortNotExposed(w, r)
+		s.writePortNotExposed(w, r)
 		return
 	}
 	if s.config.ConduitPolicy.PortDenied(exposed.Port) {
-		writePortDenied(w, r)
+		s.writePortDenied(w, r)
 		return
 	}
 	// The bare proxy URL (.../proxy, no trailing slash) is answered with a
@@ -449,9 +450,13 @@ type portProxyPolicy struct {
 
 // writePortNotExposed answers a request for a port the agent has not
 // exposed: the proxy error page for a browser, else a JSON 404.
-func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
+func (s *Server) writePortNotExposed(w http.ResponseWriter, r *http.Request) {
+	writePortNotExposedWithBranding(w, r, s.ResolvedBranding())
+}
+
+func writePortNotExposedWithBranding(w http.ResponseWriter, r *http.Request, b *config.ResolvedBranding) {
 	if isBrowserRequest(r) {
-		writeProxyErrorHTML(w, http.StatusNotFound, "Port Not Available",
+		writeProxyErrorHTMLWithBranding(w, b, http.StatusNotFound, "Port Not Available",
 			"The requested port is not exposed on this agent.")
 		return
 	}
@@ -460,9 +465,13 @@ func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
 
 // writePortDenied answers a request for a port denied by operator policy:
 // the proxy error page for a browser, else a JSON 403.
-func writePortDenied(w http.ResponseWriter, r *http.Request) {
+func (s *Server) writePortDenied(w http.ResponseWriter, r *http.Request) {
+	writePortDeniedWithBranding(w, r, s.ResolvedBranding())
+}
+
+func writePortDeniedWithBranding(w http.ResponseWriter, r *http.Request, b *config.ResolvedBranding) {
 	if isBrowserRequest(r) {
-		writeProxyErrorHTML(w, http.StatusForbidden, "Port Not Available",
+		writeProxyErrorHTMLWithBranding(w, b, http.StatusForbidden, "Port Not Available",
 			"The operator does not allow access to this port.")
 		return
 	}
@@ -542,7 +551,7 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 	// answered (served) or the tunnel could not reach it (offline).
 	transport, outcome = portViewTransportLegacy, portViewRequestRefused
 	if s.config.ConduitPolicy.PortDenied(port) {
-		writePortDenied(w, r)
+		s.writePortDenied(w, r)
 		return
 	}
 	// No path without a target-side deadline (design §3.5 Q14, v2.21.46):
@@ -555,7 +564,7 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 	if isWebSocketUpgrade(r) {
 		if conduitOn && !s.portTunnels.has(agent.ID) {
 			outcome = portViewRequestOffline
-			writeAgentOffline(w, r)
+			s.writeAgentOffline(w, r)
 			return
 		}
 		writeError(w, http.StatusNotImplemented, ErrCodeInvalidRequest, "WebSocket port forwarding is not supported in this revision", nil)
@@ -605,11 +614,11 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 		outcome = portViewRequestOffline
 		if errors.Is(err, errNoPortTunnel) {
 			if conduitOn {
-				writeAgentOffline(w, r)
+				s.writeAgentOffline(w, r)
 				return
 			}
 			if isBrowserRequest(r) {
-				writeProxyErrorHTML(w, http.StatusServiceUnavailable, "Service Unavailable",
+				writeProxyErrorHTMLWithBranding(w, s.ResolvedBranding(), http.StatusServiceUnavailable, "Service Unavailable",
 					"No active port-forward tunnel for this agent. The agent may not be running or the tunnel has not been established yet.")
 			} else {
 				writeError(w, http.StatusServiceUnavailable, ErrCodeRuntimeError, "No active port-forward tunnel for this agent", nil)
@@ -677,18 +686,18 @@ func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identi
 	)
 }
 
-// writeProxyErrorHTML writes a self-contained HTML error page for browser requests
-// to proxy endpoints. It delegates to the shared renderErrorPage template.
-func writeProxyErrorHTML(w http.ResponseWriter, status int, title, message string) {
+// writeProxyErrorHTMLWithBranding writes a self-contained HTML error page for
+// browser requests to proxy endpoints with Hub branding applied.
+func writeProxyErrorHTMLWithBranding(w http.ResponseWriter, b *config.ResolvedBranding, status int, title, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_, _ = fmt.Fprint(w, proxyErrorPageHTML(title, message))
+	_, _ = fmt.Fprint(w, proxyErrorPageHTMLWithBranding(b, title, message))
 }
 
-// proxyErrorPageHTML returns a self-contained HTML error page with the given
-// title and message, using the shared renderErrorPage template.
-func proxyErrorPageHTML(title, message string) string {
-	return renderErrorPage("Scion - "+title, "&#9888;&#65039;", "error", title, message)
+// proxyErrorPageHTMLWithBranding returns a self-contained HTML error page with
+// the given title, message, and Hub branding, using the shared renderErrorPage template.
+func proxyErrorPageHTMLWithBranding(b *config.ResolvedBranding, title, message string) string {
+	return renderErrorPageWithBranding(b, brandPageTitle(b, title), "&#9888;&#65039;", "error", title, message)
 }
 
 func (s *Server) handleAgentPortTunnel(w http.ResponseWriter, r *http.Request, agentID string) {
@@ -1072,11 +1081,13 @@ func encodeLocationQuery(q string) string {
 // no-credentials answer points to.
 const portProxyMultiFileDocsURL = "https://googlecloudplatform.github.io/scion/hosted/user/port-forwarding/#multi-file-apps"
 
-// portProxyNoCredentialsBody is the static body of the no-credentials
-// answer on proxy routes (writePortProxyNoCredentials).
-const portProxyNoCredentialsBody = "Scion port proxy: pages opened through this URL can only use what is " +
+const portProxyNoCredentialsBodySuffix = " port proxy: pages opened through this URL can only use what is " +
 	"inside the page itself; separate scripts, stylesheets and requests back to the app are not served. " +
 	"Serve a single self-contained page. See " + portProxyMultiFileDocsURL + ".\n"
+
+// portProxyNoCredentialsBody is the default static body of the no-credentials
+// answer on proxy routes (writePortProxyNoCredentials).
+const portProxyNoCredentialsBody = config.DefaultBrandName + portProxyNoCredentialsBodySuffix
 
 // Headers of the no-credentials answer on proxy routes.
 const (
@@ -1086,14 +1097,15 @@ const (
 	portProxyHintSandboxedSub  = "sandboxed-subresource"
 )
 
-// writePortProxyNoCredentials answers a request to a port proxy route that
-// carries no credential and is not a page navigation (a script,
-// stylesheet, image or fetch requested by a proxied page) with a
-// plain-text 401 the browser can show and the page can read, instead of
-// the hub's JSON 401, which browsers report only as a MIME type error.
-// The body is static. It reports whether the request looked like a
-// sub-request from a proxied page (Origin "null" or a cross-site fetch).
-func writePortProxyNoCredentials(w http.ResponseWriter, r *http.Request) (hinted bool) {
+// writePortProxyNoCredentialsWithBranding answers a request to a port proxy
+// route that carries no credential and is not a page navigation (a script,
+// stylesheet, image or fetch requested by a proxied page) with a plain-text
+// 401 the browser can show and the page can read, instead of the hub's JSON
+// 401, which browsers report only as a MIME type error. It reports whether the
+// request looked like a sub-request from a proxied page (Origin "null" or a
+// cross-site fetch).
+func writePortProxyNoCredentialsWithBranding(w http.ResponseWriter, r *http.Request, b *config.ResolvedBranding) (hinted bool) {
+	b = brandOrDefault(b)
 	h := w.Header()
 	h.Set("Content-Type", "text/plain; charset=utf-8")
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -1106,7 +1118,11 @@ func writePortProxyNoCredentials(w http.ResponseWriter, r *http.Request) (hinted
 	if hinted {
 		h.Set(portProxyHintHeader, portProxyHintSandboxedSub)
 	}
+	body := portProxyNoCredentialsBody
+	if b.Name != config.DefaultBrandName {
+		body = b.Name + portProxyNoCredentialsBodySuffix
+	}
 	w.WriteHeader(http.StatusUnauthorized)
-	_, _ = io.WriteString(w, portProxyNoCredentialsBody)
+	_, _ = io.WriteString(w, body)
 	return hinted
 }

@@ -1245,7 +1245,7 @@ func TestSuspendedResponse_Never200HTML(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSuspendedPage_EmailEscaped(t *testing.T) {
-	html := suspendedPageHTML("<script>alert('xss')</script>@example.com")
+	html := suspendedPageHTMLWithBranding(nil, "<script>alert('xss')</script>@example.com")
 	assert.NotContains(t, html, "<script>alert")
 	assert.Contains(t, html, "&lt;script&gt;")
 }

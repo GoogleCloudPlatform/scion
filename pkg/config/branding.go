@@ -65,6 +65,23 @@ const (
 	BrandSlotIconMaskable512 = "icon-maskable-512"
 )
 
+// IsValidBrandSlot reports whether slot is one of the canonical /brand/{slot}
+// asset slot names produced by ResolveBranding.
+func IsValidBrandSlot(slot string) bool {
+	switch slot {
+	case BrandSlotLogoLight,
+		BrandSlotLogoDark,
+		BrandSlotFavicon,
+		BrandSlotAppleTouchIcon,
+		BrandSlotIcon192,
+		BrandSlotIcon512,
+		BrandSlotIconMaskable512:
+		return true
+	default:
+		return false
+	}
+}
+
 // ScaleSteps enumerates the allowed shade keys in BrandingScale.
 var ScaleSteps = []string{"50", "100", "200", "300", "400", "500", "600", "700", "800", "900", "950"}
 
@@ -836,14 +853,95 @@ func verifyAssetBytes(mediaType string, data []byte) error {
 	}
 }
 
-var disallowedSVGElements = map[string]bool{
-	"script":        true,
-	"foreignobject": true,
-	"iframe":        true,
-	"object":        true,
-	"embed":         true,
-	"audio":         true,
-	"video":         true,
+// allowedSVGElements is an explicit allowlist of static SVG 1.1/2 elements
+// permitted in admin-supplied data:image/svg+xml branding logos and favicons.
+//
+// Rationale (allowlist vs denylist): brand logos and favicons are static vector
+// graphics served pre-auth from /brand/{slot}. A denylist misses SVG/XML active
+// or external-loading constructs such as SMIL animation (<animate>, <set>,
+// <animateTransform>, <animateMotion>), event/script bindings (<handler>,
+// <listener>), external resource loaders (<image>, <feImage>), hyperlinks (<a>),
+// and foreign-namespace elements (XHTML/MathML). An explicit allowlist covers
+// standard Figma/Illustrator/Inkscape/SVGO vector exports while failing closed
+// on every unknown or active element, complementing the /brand/{slot}
+// Content-Security-Policy sandbox header as defense-in-depth.
+var allowedSVGElements = map[string]bool{
+	// Structure and metadata
+	"svg":      true,
+	"g":        true,
+	"defs":     true,
+	"symbol":   true,
+	"use":      true,
+	"switch":   true,
+	"title":    true,
+	"desc":     true,
+	"metadata": true,
+	// Basic shapes and paths
+	"path":     true,
+	"circle":   true,
+	"ellipse":  true,
+	"rect":     true,
+	"line":     true,
+	"polyline": true,
+	"polygon":  true,
+	// Text
+	"text":     true,
+	"tspan":    true,
+	"textpath": true,
+	// Gradients and patterns
+	"lineargradient": true,
+	"radialgradient": true,
+	"stop":           true,
+	"pattern":        true,
+	// Clipping, masking, and markers
+	"clippath": true,
+	"mask":     true,
+	"marker":   true,
+	// Static filter primitives (deliberately excludes feimage)
+	"filter":              true,
+	"feblend":             true,
+	"fecolormatrix":       true,
+	"fecomponenttransfer": true,
+	"fecomposite":         true,
+	"feconvolvematrix":    true,
+	"fediffuselighting":   true,
+	"fedisplacementmap":   true,
+	"fedistantlight":      true,
+	"fedropshadow":        true,
+	"feflood":             true,
+	"fefunca":             true,
+	"fefuncb":             true,
+	"fefuncg":             true,
+	"fefuncr":             true,
+	"fegaussianblur":      true,
+	"femerge":             true,
+	"femergenode":         true,
+	"femorphology":        true,
+	"feoffset":            true,
+	"fepointlight":        true,
+	"fespecularlighting":  true,
+	"fespotlight":         true,
+	"fetile":              true,
+	"feturbulence":        true,
+	// Inline styling (checked by checkSafeSVGStyleText)
+	"style": true,
+}
+
+const svgXMLNamespace = "http://www.w3.org/2000/svg"
+
+func checkSafeSVGURLRefs(valNorm, where string) error {
+	rest := valNorm
+	for {
+		idx := strings.Index(rest, "url(")
+		if idx < 0 {
+			return nil
+		}
+		after := strings.TrimLeft(rest[idx+4:], "\"'")
+		if !strings.HasPrefix(after, "#") {
+			return fmt.Errorf("SVG %s url() references must be internal fragment (#id) references", where)
+		}
+		rest = rest[idx+4:]
+	}
 }
 
 func checkSafeSVGStyleText(raw string, where string) error {
@@ -851,13 +949,13 @@ func checkSafeSVGStyleText(raw string, where string) error {
 		return fmt.Errorf("SVG %s must not contain CSS backslash escapes", where)
 	}
 	valNorm := stripASCIIWhitespaceAndControl(strings.ToLower(raw))
-	if strings.Contains(valNorm, "@import") || strings.Contains(valNorm, "expression(") {
-		return fmt.Errorf("SVG %s must not contain @import or expression()", where)
+	if strings.Contains(valNorm, "@import") || strings.Contains(valNorm, "expression(") || strings.Contains(valNorm, "image-set(") {
+		return fmt.Errorf("SVG %s must not contain @import, expression(), or image-set()", where)
 	}
-	if strings.Contains(valNorm, "javascript:") || strings.Contains(valNorm, "vbscript:") || strings.Contains(valNorm, "data:text/html") {
+	if strings.Contains(valNorm, "javascript:") || strings.Contains(valNorm, "vbscript:") || strings.Contains(valNorm, "data:") {
 		return fmt.Errorf("SVG %s contains a disallowed URI scheme", where)
 	}
-	return nil
+	return checkSafeSVGURLRefs(valNorm, where)
 }
 
 func verifySafeSVG(data []byte) error {
@@ -892,6 +990,9 @@ func verifySafeSVG(data []byte) error {
 			if inStyle {
 				return fmt.Errorf("SVG <style> element must not contain child elements (got <%s>)", t.Name.Local)
 			}
+			if t.Name.Space != "" && !strings.EqualFold(t.Name.Space, svgXMLNamespace) {
+				return fmt.Errorf("SVG element <%s> uses disallowed XML namespace %q", t.Name.Local, t.Name.Space)
+			}
 			elemName := strings.ToLower(t.Name.Local)
 			if !sawRoot {
 				if elemName != "svg" {
@@ -899,7 +1000,7 @@ func verifySafeSVG(data []byte) error {
 				}
 				sawRoot = true
 			}
-			if disallowedSVGElements[elemName] {
+			if !allowedSVGElements[elemName] {
 				return fmt.Errorf("SVG element <%s> is not allowed", t.Name.Local)
 			}
 			if elemName == "style" {
@@ -915,14 +1016,25 @@ func verifySafeSVG(data []byte) error {
 				if strings.HasPrefix(attrLocal, "on") || strings.HasPrefix(attrFull, "on") {
 					return fmt.Errorf("SVG event handler attribute %q is not allowed", attr.Name.Local)
 				}
+				if strings.IndexByte(attr.Value, '\\') >= 0 {
+					return fmt.Errorf("SVG attribute %q must not contain CSS backslash escapes", attr.Name.Local)
+				}
 				valNorm := stripASCIIWhitespaceAndControl(strings.ToLower(attr.Value))
 				if strings.Contains(valNorm, "javascript:") || strings.Contains(valNorm, "vbscript:") || strings.Contains(valNorm, "data:text/html") {
 					return fmt.Errorf("SVG attribute %q contains a disallowed URI scheme", attr.Name.Local)
+				}
+				if attrLocal == "href" {
+					trimmed := strings.TrimSpace(attr.Value)
+					if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+						return fmt.Errorf("SVG attribute %q must be an internal fragment (#id) reference", attr.Name.Local)
+					}
 				}
 				if attrLocal == "style" {
 					if err := checkSafeSVGStyleText(attr.Value, "style attribute"); err != nil {
 						return err
 					}
+				} else if err := checkSafeSVGURLRefs(valNorm, fmt.Sprintf("attribute %q", attr.Name.Local)); err != nil {
+					return err
 				}
 			}
 		case xml.CharData:
