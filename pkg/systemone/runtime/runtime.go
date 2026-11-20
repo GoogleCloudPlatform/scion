@@ -1288,9 +1288,6 @@ func (r *Runtime) isNamedSecretAllowedForAdapter(adapter provider.Adapter, inst 
 	if !isNamedRef {
 		return true
 	}
-	if r.allowedSecretNames == nil {
-		return slices.Contains(provider.AllowedSecretNamesFor(adapter), inst.Auth.SecretName)
-	}
 	return slices.Contains(r.allowedSecretNames(adapter), inst.Auth.SecretName)
 }
 

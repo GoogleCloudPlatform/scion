@@ -1007,6 +1007,163 @@ func TestRuntime_GeminiDecisions_NamedSecretConcurrencyRotationFallbackAndProjec
 	}
 }
 
+// TestRuntime_GeminiDecisions_NamedSecretEndpointPin_AllowedName (FV-R1):
+// Exercises the runtime-layer endpoint pin independently with an ALLOWED secret
+// name (GEMINI_API_KEY) and a custom endpoint routed to a local TLS server so
+// disabling the runtime pin would actually transmit the key and hit the server.
+func TestRuntime_GeminiDecisions_NamedSecretEndpointPin_AllowedName(t *testing.T) {
+	const apiKeyCanary = "CANARY_FV_R1_RUNTIME_PIN_KEY_8414"
+	var (
+		httpHits  atomic.Int32
+		credCalls atomic.Int32
+	)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q1":{"type":"noul","noul":0.95,"confidence":0.95}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	reg := provider.NewRegistry()
+	require.NoError(t, geminidecisions.Register(reg))
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry: reg,
+			Credentials: func(_ context.Context, _ runtime.Instance) (string, error) {
+				credCalls.Add(1)
+				return apiKeyCanary, nil
+			},
+		},
+		runtime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+				targets: map[string]string{"443": srv.Listener.Addr().String()},
+			}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+	t.Cleanup(rt.CloseIdleConnections)
+
+	compiled, err := spec.Compile([]byte(`{
+		"version": 1,
+		"questions": [{"id": "q1", "type": "binary", "instructions": "Inspect probe.text."}]
+	}`), spec.CompileOptions{Kind: spec.KindJudgments})
+	require.NoError(t, err)
+
+	customInst := runtime.Instance{
+		ID:       "inst-fv-r1-custom",
+		Name:     "gem-fv-r1-custom",
+		Revision: 1,
+		Adapter:  geminidecisions.AdapterName,
+		Model:    "gemini-2.5-flash",
+		Endpoint: "https://attacker.example",
+		Auth: runtime.InstanceAuth{
+			Kind:       "api_key",
+			SecretName: provider.DefaultGeminiAPIKeySecretName,
+		},
+		Options: map[string]string{provider.OptionSecretScope: provider.SecretScopeHub},
+		Enabled: true,
+	}
+
+	_, evalErr := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("check"), runtime.EvalOptions{
+		Instance: &customInst,
+		Consumer: "probe",
+	})
+	require.Error(t, evalErr)
+	eval, ok := runtime.EvaluationFrom(evalErr)
+	require.True(t, ok)
+	assert.Equal(t, runtime.ClassFailed, eval.Class)
+	assert.Equal(t, string(provider.FailAuth), eval.Reason)
+	assert.Empty(t, eval.Attempts, "runtime endpoint pin must fail pre-call with 0 attempts")
+	assert.Zero(t, credCalls.Load(), "runtime endpoint pin must make 0 credential calls")
+	assert.Zero(t, httpHits.Load(), "runtime endpoint pin must make 0 provider HTTP requests")
+
+	// Positive control: canonical default endpoint succeeds with 1 credential call and 1 hit.
+	canonicalInst := customInst
+	canonicalInst.ID = "inst-fv-r1-canonical"
+	canonicalInst.Endpoint = geminidecisions.DefaultEndpoint
+	dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("check"), runtime.EvalOptions{
+		Instance: &canonicalInst,
+		Consumer: "probe",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, runtime.ClassSuccess, dec.Eval.Class)
+	assert.Equal(t, int32(1), credCalls.Load())
+	assert.Equal(t, int32(1), httpHits.Load())
+}
+
+// TestRuntime_GeminiDecisions_NamedSecretNamePolicy_IndependentOfHub (FV-O1):
+// Exercises the runtime-layer SecretNamePolicy check directly with a disallowed
+// secret name (GITHUB_TOKEN) on the canonical default endpoint and a counting
+// CredentialSource, without any Hub-layer check masking it.
+func TestRuntime_GeminiDecisions_NamedSecretNamePolicy_IndependentOfHub(t *testing.T) {
+	const apiKeyCanary = "CANARY_FV_O1_DISALLOWED_NAME_KEY_8414"
+	var (
+		httpHits  atomic.Int32
+		credCalls atomic.Int32
+	)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q1":{"type":"noul","noul":0.95,"confidence":0.95}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	reg := provider.NewRegistry()
+	require.NoError(t, geminidecisions.Register(reg))
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry: reg,
+			Credentials: func(_ context.Context, _ runtime.Instance) (string, error) {
+				credCalls.Add(1)
+				return apiKeyCanary, nil
+			},
+		},
+		runtime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+				targets: map[string]string{"443": srv.Listener.Addr().String()},
+			}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+	t.Cleanup(rt.CloseIdleConnections)
+
+	compiled, err := spec.Compile([]byte(`{
+		"version": 1,
+		"questions": [{"id": "q1", "type": "binary", "instructions": "Inspect probe.text."}]
+	}`), spec.CompileOptions{Kind: spec.KindJudgments})
+	require.NoError(t, err)
+
+	disallowedInst := runtime.Instance{
+		ID:       "inst-fv-o1-disallowed",
+		Name:     "gem-fv-o1-disallowed",
+		Revision: 1,
+		Adapter:  geminidecisions.AdapterName,
+		Model:    "gemini-2.5-flash",
+		Endpoint: geminidecisions.DefaultEndpoint,
+		Auth: runtime.InstanceAuth{
+			Kind:       "api_key",
+			SecretName: "GITHUB_TOKEN",
+		},
+		Options: map[string]string{provider.OptionSecretScope: provider.SecretScopeHub},
+		Enabled: true,
+	}
+
+	_, evalErr := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("check"), runtime.EvalOptions{
+		Instance: &disallowedInst,
+		Consumer: "probe",
+	})
+	require.Error(t, evalErr)
+	eval, ok := runtime.EvaluationFrom(evalErr)
+	require.True(t, ok)
+	assert.Equal(t, runtime.ClassFailed, eval.Class)
+	assert.Equal(t, string(provider.FailAuth), eval.Reason)
+	assert.Empty(t, eval.Attempts, "runtime name policy must fail pre-call with 0 attempts")
+	assert.Zero(t, credCalls.Load(), "runtime name policy must make 0 credential calls")
+	assert.Zero(t, httpHits.Load(), "runtime name policy must make 0 provider HTTP requests")
+}
+
 type syncLogBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
