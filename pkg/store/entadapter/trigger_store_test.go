@@ -1313,7 +1313,7 @@ func TestTriggerFire_RuleEvalMetadataRoundTrip(t *testing.T) {
 	assert.Equal(t, traceJSON, dupExisting.RuleTrace)
 
 	// FinishTriggerFire preserves rule evaluation metadata written at claim time.
-	finished, err := cs.FinishTriggerFire(ctx, fire.ID, store.TriggerFireStatusFired, "msg-99", "", now.Add(time.Second))
+	finished, err := cs.FinishTriggerFire(ctx, fire.ID, store.TriggerFireStatusFired, "msg-99", "", "", now.Add(time.Second))
 	require.NoError(t, err)
 	assert.True(t, finished)
 
