@@ -97,8 +97,7 @@ func CanonicalOrigin(raw string) (string, error) {
 			return "", ErrInvalidCanonicalOrigin
 		}
 		for i := 0; i < len(lbl); i++ {
-			b := lbl[i]
-			if !((b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-') {
+			if !isLowerASCIIHostnameByte(lbl[i]) {
 				return "", ErrInvalidCanonicalOrigin
 			}
 		}
@@ -109,6 +108,10 @@ func CanonicalOrigin(raw string) (string, error) {
 	}
 
 	return "https://" + hostLower, nil
+}
+
+func isLowerASCIIHostnameByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '-'
 }
 
 func isAllDigitsASCII(s string) bool {

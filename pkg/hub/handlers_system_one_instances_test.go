@@ -37,6 +37,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -3444,4 +3445,251 @@ func TestSystemOneInstances_Item8_ProviderPinnedSecretNames(t *testing.T) {
 	require.NoError(t, json.Unmarshal(okProbe.Body.Bytes(), &okProbeResp))
 	assert.Equal(t, systemoneruntime.ClassSuccess, okProbeResp.Class)
 	assert.Equal(t, int32(1), providerHits.Load())
+}
+
+type secondPolicyTestAdapter struct {
+	noEndpointDefaulterTestAdapter
+}
+
+func (secondPolicyTestAdapter) Name() string            { return "second_policy_test" }
+func (secondPolicyTestAdapter) DefaultEndpoint() string { return geminidecisions.DefaultEndpoint }
+func (secondPolicyTestAdapter) AllowedSecretNames() []string {
+	return []string{"SECOND_PROVIDER_API_KEY"}
+}
+
+func TestSystemOneInstances_Item9_OperatorConfiguredExtraSecretNames(t *testing.T) {
+	ctx := context.Background()
+	st := newBareTestStore(t)
+	localBackend := secret.NewLocalBackend(st, "test-hub-id", "test-secret-signing-key")
+	countingBackend := &countingSecretBackendWrapper{SecretBackend: localBackend}
+
+	var providerHits atomic.Int32
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q_ok":{"type":"noul","noul":0.89,"confidence":0.94}}}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	customReg := systemoneprovider.NewRegistry()
+	require.NoError(t, customReg.Register(geminidecisions.New()))
+	require.NoError(t, customReg.Register(jevwire.NewTypeSafe()))
+	require.NoError(t, customReg.Register(secondPolicyTestAdapter{}))
+
+	// Verify startup snapshot warnings directly for unregistered adapters,
+	// adapters without SecretNamePolicy (typesafe), and invalid/reserved/infra extras.
+	var warnBuf bytes.Buffer
+	warnLogger := slog.New(slog.NewTextHandler(&warnBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	configuredExtras := map[string][]string{
+		geminidecisions.AdapterName: {
+			"GEMINI_API_KEY_BILLING_B",
+			"1invalid-name",
+			"systemone.instance.00000000-0000-4000-8000-000000000001",
+			"SystemOne_Instance_ sneaky",
+			SecretKeyUserSigningKey,
+		},
+		jevwire.AdapterNameTypeSafe: {"TYPESAFE_EXTRA_KEY"},
+		"unregistered_adapter":      {"UNREGISTERED_EXTRA_KEY"},
+	}
+	snap := snapshotSystemOneExtraSecretNames(ServerConfig{
+		StartupServerSettings: &config.V1ServerConfig{
+			Hub: &config.V1ServerHubConfig{
+				SystemOne: &config.V1ServerHubSystemOneConfig{SecretNames: configuredExtras},
+			},
+		},
+	}, customReg, warnLogger)
+	assert.Equal(t, map[string][]string{
+		geminidecisions.AdapterName: {"GEMINI_API_KEY_BILLING_B"},
+	}, snap)
+	warnings := warnBuf.String()
+	assert.Contains(t, warnings, "unregistered_adapter")
+	assert.Contains(t, warnings, jevwire.AdapterNameTypeSafe)
+	assert.Contains(t, warnings, "1invalid-name")
+	assert.Contains(t, warnings, "systemone.instance.")
+	assert.Contains(t, warnings, SecretKeyUserSigningKey)
+
+	buildHubOnStore := func(t *testing.T, secretNames map[string][]string) *Server {
+		t.Helper()
+		cfg := DefaultServerConfig()
+		cfg.DevAuthToken = testDevToken
+		cfg.DevUserConfig = DevUserConfig{Username: "dev", DisplayName: "Development User", Email: "dev@localhost"}
+		cfg.StartupServerSettings = &config.V1ServerConfig{
+			Hub: &config.V1ServerHubConfig{
+				SystemOne: &config.V1ServerHubSystemOneConfig{
+					SecretNames: secretNames,
+				},
+			},
+		}
+		h, err := newTestHubServer(t, cfg, st)
+		require.NoError(t, err)
+		h.SetHubID("test-hub-id")
+		h.systemOneRegistry = customReg
+		h.mu.Lock()
+		h.systemOneExtraSecretNamesSnapshotted = false
+		h.mu.Unlock()
+		h.initSystemOneRuntime()
+		h.SetSecretBackend(countingBackend)
+		h.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+			return nil, egress.ErrAuth
+		})
+		h.SetSystemOneRuntimeOptionsForTesting(t,
+			systemoneruntime.WithEgressOptionsForTesting(
+				testSystemOneEgressOptions(t, tlsSrv)...,
+			),
+		)
+		ops := NewOperationalSettings(st, emptyKoanf(), emptyKoanf())
+		_, err = ops.Refresh(ctx)
+		require.NoError(t, err)
+		doc := fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.SystemOne)
+		_, err = ops.Update(ctx, "experiments", json.RawMessage(doc), "test", ops.SectionRevision("experiments"), "managed")
+		require.NoError(t, err)
+		h.SetOperationalSettings(ops)
+		return h
+	}
+
+	// Start Hub #1 with GEMINI_API_KEY_BILLING_B configured for gemini_decisions
+	// (plus ignored invalid/reserved/no-policy entries).
+	srv1 := buildHubOnStore(t, configuredExtras)
+	admin, err := st.GetUser(ctx, hubConfigTokenUser(t, st, "s1-item9-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+	hubAdmin, err := st.GetUser(ctx, hubConfigTokenUser(t, st, "s1-item9-hubadmin", store.SystemRoleHubAdmin))
+	require.NoError(t, err)
+
+	const billingBCanary = "CANARY_ITEM9_BILLING_B_KEY_8414"
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "GEMINI_API_KEY_BILLING_B",
+		Value:      billingBCanary,
+		SecretType: store.SecretTypeVariable,
+		Target:     "GEMINI_API_KEY_BILLING_B",
+		Scope:      store.ScopeHub,
+		ScopeID:    "test-hub-id",
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "TYPESAFE_EXTRA_KEY",
+		Value:      "CANARY_ITEM9_TYPESAFE_EXTRA",
+		SecretType: store.SecretTypeVariable,
+		Target:     "TYPESAFE_EXTRA_KEY",
+		Scope:      store.ScopeHub,
+		ScopeID:    "test-hub-id",
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+
+	specDoc := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check."}]}`)
+
+	// 1. Positive: configured extra GEMINI_API_KEY_BILLING_B works for gemini_decisions!
+	createRec := doRequestAsUser(t, srv1, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "item9-gem-billing-b",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": "GEMINI_API_KEY_BILLING_B", "scope": "hub"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	providerHits.Store(0)
+	probe1 := doRequestAsUser(t, srv1, hubAdmin, http.MethodPost, systemOneAdminPath+"/item9-gem-billing-b/probe", map[string]any{
+		"spec":  specDoc,
+		"probe": map[string]any{"text": "Billing B check."},
+	})
+	require.Equal(t, http.StatusOK, probe1.Code, probe1.Body.String())
+	var probe1Resp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(probe1.Body.Bytes(), &probe1Resp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, probe1Resp.Class)
+	assert.Equal(t, int32(1), providerHits.Load())
+
+	// 2. Negative: extra for gemini_decisions does NOT apply to second_policy_test!
+	crossAdapterRec := doRequestAsUser(t, srv1, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "item9-cross-adapter",
+		"adapter": "second_policy_test",
+		"model":   "m1",
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": "GEMINI_API_KEY_BILLING_B", "scope": "hub"},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, crossAdapterRec.Code, crossAdapterRec.Body.String())
+
+	// 3. Negative: adapter without SecretNamePolicy (typesafe) + configured extra is STILL refused!
+	tsExtraRec := doRequestAsUser(t, srv1, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "item9-ts-extra",
+		"adapter":  jevwire.AdapterNameTypeSafe,
+		"model":    "jev-1.14.0",
+		"endpoint": "https://api.typesafe.ai",
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": "TYPESAFE_EXTRA_KEY", "scope": "hub"},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, tsExtraRec.Code, tsExtraRec.Body.String())
+
+	// 4. Negative: reserved / Hub-infrastructure extras configured in settings were ignored and are refused at create!
+	for _, badExtra := range []string{SecretKeyUserSigningKey, "systemone.instance.00000000-0000-4000-8000-000000000001"} {
+		badRec := doRequestAsUser(t, srv1, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":    "item9-bad-extra",
+			"adapter": geminidecisions.AdapterName,
+			"model":   "gemini-decision-1",
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": badExtra, "scope": "hub"},
+			},
+		})
+		require.Equal(t, http.StatusBadRequest, badRec.Code, "bad extra %q must be refused", badExtra)
+	}
+
+	// 5. Negative: instance options cannot supply or expand permitted secret names!
+	optExpandRec := doRequestAsUser(t, srv1, hubAdmin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "item9-opt-expand",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
+		"options": map[string]string{
+			"secret_names":         "UNAPPROVED_KEY",
+			"allowed_secret_names": "UNAPPROVED_KEY",
+		},
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": "UNAPPROVED_KEY", "scope": "hub"},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, optExpandRec.Code, optExpandRec.Body.String())
+
+	// 6. Immutable snapshot before restart: mutating StartupServerSettings in memory
+	// without restarting the Hub does NOT revoke GEMINI_API_KEY_BILLING_B yet.
+	srv1.config.StartupServerSettings.Hub.SystemOne.SecretNames = nil
+	providerHits.Store(0)
+	probeBeforeRestart := doRequestAsUser(t, srv1, hubAdmin, http.MethodPost, systemOneAdminPath+"/item9-gem-billing-b/probe", map[string]any{
+		"spec":  specDoc,
+		"probe": map[string]any{"text": "Before restart check."},
+	})
+	require.Equal(t, http.StatusOK, probeBeforeRestart.Code)
+	var beforeRestartResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(probeBeforeRestart.Body.Bytes(), &beforeRestartResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, beforeRestartResp.Class)
+	assert.Equal(t, int32(1), providerHits.Load())
+
+	// 7. Removal + Hub restart fails closed: start Hub #2 against the same SQLite
+	// store and secret backend with GEMINI_API_KEY_BILLING_B removed -> existing
+	// instance fails closed with class=failed, reason="auth", 0 provider requests,
+	// and 0 SecretBackend.Get calls!
+	srv2 := buildHubOnStore(t, nil)
+	providerHits.Store(0)
+	countingBackend.getCalls.Store(0)
+	probeAfterRestart := doRequestAsUser(t, srv2, hubAdmin, http.MethodPost, systemOneAdminPath+"/item9-gem-billing-b/probe", map[string]any{
+		"spec":  specDoc,
+		"probe": map[string]any{"text": "After restart removal check."},
+	})
+	require.Equal(t, http.StatusOK, probeAfterRestart.Code, probeAfterRestart.Body.String())
+	var afterRestartResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(probeAfterRestart.Body.Bytes(), &afterRestartResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, afterRestartResp.Class)
+	assert.Equal(t, "auth", afterRestartResp.Reason)
+	assert.Zero(t, providerHits.Load(), "removed extra after Hub restart must make 0 provider requests")
+	assert.Zero(t, countingBackend.getCalls.Load(), "removed extra after Hub restart must fail pre-lookup with 0 SecretBackend.Get calls")
+	assert.NotContains(t, probeAfterRestart.Body.String(), billingBCanary)
 }

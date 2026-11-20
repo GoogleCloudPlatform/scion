@@ -64,8 +64,16 @@ When --auth-kind is api_key (the default), two credential modes are supported
      positional arguments, flags, or process environment variables is refused.
   2. Named Hub/project secret reference (--secret-name / --secret-scope):
      - Supported only on adapters that declare a provider secret-name policy:
-       gemini_decisions permits GEMINI_API_KEY (exact case-sensitive match;
-       typesafe does not support named secret references).
+       gemini_decisions permits GEMINI_API_KEY by default (exact case-sensitive
+       match; typesafe does not support named secret references).
+     - A Hub operator may extend permitted names for an adapter that supports
+       named secret references via the startup-only Layer-0 setting
+       server.hub.system_one.secret_names in settings.yaml (or SCION_SERVER_*
+       environment variables; never writable via the server-config API). That
+       allowlist is snapshotted once at Hub startup: adding or removing extra
+       names takes effect only after a Hub restart, after which existing
+       instances referencing a removed name fail closed with reason "auth" and
+       0 provider requests.
      - On gemini_decisions, omitting --key-stdin and --key-file defaults to
        --secret-name GEMINI_API_KEY --secret-scope project_or_hub.
      - --secret-scope selects hub, project, or project_or_hub (default:
@@ -170,7 +178,7 @@ func init() {
 	f.StringVar(&adminSystemOneCreateOpts.authKind, "auth-kind", "api_key", "Authentication kind (api_key or google_access_token)")
 	f.StringArrayVar(&adminSystemOneCreateOpts.authScopes, "auth-scope", nil, "OAuth2 scope URL for --auth-kind google_access_token (repeatable; required for google_access_token; must start with https://www.googleapis.com/auth/)")
 	f.StringVar(&adminSystemOneCreateOpts.quotaProject, "quota-project", "", "Optional GCP billing/quota project ID for --auth-kind google_access_token (sent as x-goog-user-project; required only for authorized_user ADC)")
-	f.StringVar(&adminSystemOneCreateOpts.secretName, "secret-name", "", "Provider-approved named Hub/project secret key for --auth-kind api_key (exact case-sensitive match; gemini_decisions permits GEMINI_API_KEY)")
+	f.StringVar(&adminSystemOneCreateOpts.secretName, "secret-name", "", "Provider-approved named Hub/project secret key for --auth-kind api_key (exact case-sensitive match; gemini_decisions permits GEMINI_API_KEY plus any startup server.hub.system_one.secret_names extras; changes require a Hub restart)")
 	f.StringVar(&adminSystemOneCreateOpts.secretScope, "secret-scope", "", "Named-secret lookup scope for --auth-kind api_key: hub, project, or project_or_hub (default: project_or_hub)")
 	f.StringVar(&adminSystemOneCreateOpts.keyFile, "key-file", "", "Path to file containing the provider API key (or '-' for stdin)")
 	f.BoolVar(&adminSystemOneCreateOpts.keyStdin, "key-stdin", false, "Read the provider API key from standard input")

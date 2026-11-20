@@ -77,9 +77,11 @@ func TestBuildHubServerConfig_SystemOneMaxEvalTime(t *testing.T) {
 	}
 
 	cfg.Hub.SystemOne.MaxEvalTime = "5s"
+	cfg.Hub.SystemOne.SecretNames = map[string][]string{"gemini_decisions": {"GEMINI_API_KEY_BILLING_B"}}
 	hubCfg = buildHubServerConfig(cfg, "https://hub.example.com", "", nil, false, "", nil)
 	require.NotNil(t, hubCfg.StartupServerSettings)
 	require.NotNil(t, hubCfg.StartupServerSettings.Hub)
 	require.NotNil(t, hubCfg.StartupServerSettings.Hub.SystemOne)
 	assert.Equal(t, "5s", hubCfg.StartupServerSettings.Hub.SystemOne.MaxEvalTime)
+	assert.Equal(t, map[string][]string{"gemini_decisions": {"GEMINI_API_KEY_BILLING_B"}}, hubCfg.StartupServerSettings.Hub.SystemOne.SecretNames)
 }

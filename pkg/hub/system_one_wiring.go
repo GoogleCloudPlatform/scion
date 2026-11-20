@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strings"
@@ -214,6 +215,11 @@ func (s *Server) rebuildSystemOneRuntimeLocked() {
 	if reg == nil {
 		reg = systemoneprovider.DefaultRegistry()
 	}
+	logger := logging.Subsystem("hub.system-one")
+	if !s.systemOneExtraSecretNamesSnapshotted {
+		s.systemOneExtraSecretNames = snapshotSystemOneExtraSecretNames(s.config, reg, logger)
+		s.systemOneExtraSecretNamesSnapshotted = true
+	}
 	credSrc := &hubSystemOneCredentialSource{srv: s}
 	rt := systemoneruntime.New(
 		systemoneruntime.Config{
@@ -223,7 +229,7 @@ func (s *Server) rebuildSystemOneRuntimeLocked() {
 			TokenSource:        credSrc.GoogleAccessToken,
 			AllowedSecretNames: s.allowedSecretNamesFor,
 			MaxEvalTime:        resolveSystemOneMaxEvalTime(s.config),
-			Logger:             logging.Subsystem("hub.system-one"),
+			Logger:             logger,
 		},
 		s.systemOneRuntimeOpts...,
 	)
@@ -515,10 +521,110 @@ func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst sys
 	return sv.Value, nil
 }
 
+// snapshotSystemOneExtraSecretNames validates and freezes the operator-only
+// server.hub.system_one.secret_names map once at Hub startup against reg
+// (PV3 Addendum F §F10). Entries for unregistered adapters, adapters without
+// SecretNamePolicy, or invalid/reserved/infrastructure secret names are logged
+// as warnings and ignored.
+func snapshotSystemOneExtraSecretNames(cfg ServerConfig, reg *systemoneprovider.Registry, logger *slog.Logger) map[string][]string {
+	if cfg.StartupServerSettings == nil ||
+		cfg.StartupServerSettings.Hub == nil ||
+		cfg.StartupServerSettings.Hub.SystemOne == nil ||
+		len(cfg.StartupServerSettings.Hub.SystemOne.SecretNames) == 0 {
+		return nil
+	}
+	if reg == nil {
+		reg = systemoneprovider.DefaultRegistry()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	configured := cfg.StartupServerSettings.Hub.SystemOne.SecretNames
+	adapterKeys := make([]string, 0, len(configured))
+	for k := range configured {
+		adapterKeys = append(adapterKeys, k)
+	}
+	slices.Sort(adapterKeys)
+
+	var out map[string][]string
+	for _, rawAdapter := range adapterKeys {
+		rawNames := configured[rawAdapter]
+		adapterID := strings.TrimSpace(rawAdapter)
+		adapter, ok := reg.Lookup(adapterID)
+		if !ok {
+			logger.Warn("ignoring server.hub.system_one.secret_names entry for unregistered adapter",
+				"setting", config.SystemOneSecretNamesKey,
+				"adapter", rawAdapter,
+			)
+			continue
+		}
+		base := systemoneprovider.AllowedSecretNamesFor(adapter)
+		if len(base) == 0 {
+			logger.Warn("ignoring server.hub.system_one.secret_names entry: adapter does not support named secret references",
+				"setting", config.SystemOneSecretNamesKey,
+				"adapter", adapter.Name(),
+			)
+			continue
+		}
+		var valid []string
+		for _, extra := range rawNames {
+			if !systemoneprovider.IsValidSecretRefName(extra) ||
+				isSystemOneReservedSecretKey(extra) ||
+				isHubInfrastructureSecretKey(extra) {
+				logger.Warn("ignoring invalid or reserved secret name in server.hub.system_one.secret_names",
+					"setting", config.SystemOneSecretNamesKey,
+					"adapter", adapter.Name(),
+					"secret_name", extra,
+				)
+				continue
+			}
+			if !slices.Contains(base, extra) && !slices.Contains(valid, extra) {
+				valid = append(valid, extra)
+			}
+		}
+		if len(valid) > 0 {
+			if out == nil {
+				out = make(map[string][]string)
+			}
+			out[adapter.Name()] = append(out[adapter.Name()], valid...)
+		}
+	}
+	return out
+}
+
+func (s *Server) extraSecretNamesForAdapter(adapterName string) []string {
+	if s == nil || adapterName == "" {
+		return nil
+	}
+	s.mu.RLock()
+	snapDone := s.systemOneExtraSecretNamesSnapshotted
+	var extras []string
+	if snapDone {
+		extras = s.systemOneExtraSecretNames[adapterName]
+	}
+	s.mu.RUnlock()
+	if snapDone {
+		return extras
+	}
+	s.mu.Lock()
+	if !s.systemOneExtraSecretNamesSnapshotted {
+		reg := s.systemOneRegistry
+		if reg == nil {
+			reg = systemoneprovider.DefaultRegistry()
+		}
+		s.systemOneExtraSecretNames = snapshotSystemOneExtraSecretNames(s.config, reg, logging.Subsystem("hub.system-one"))
+		s.systemOneExtraSecretNamesSnapshotted = true
+	}
+	extras = s.systemOneExtraSecretNames[adapterName]
+	s.mu.Unlock()
+	return extras
+}
+
 // allowedSecretNamesFor is the single Hub extension point returning the exact,
-// case-sensitive named-secret keys permitted for adapter via
-// provider.SecretNamePolicy (PV3 Addendum F §F10). Adapters without
-// SecretNamePolicy return nil (failing closed).
+// case-sensitive named-secret keys permitted for adapter: the union of
+// provider.SecretNamePolicy and the startup-snapshotted operator extras in
+// server.hub.system_one.secret_names for that adapter (PV3 Addendum F §F10).
+// Adapters without SecretNamePolicy always return nil (failing closed).
 func (s *Server) allowedSecretNamesFor(adapter systemoneprovider.Adapter) []string {
 	base := systemoneprovider.AllowedSecretNamesFor(adapter)
 	if len(base) == 0 {
@@ -530,6 +636,19 @@ func (s *Server) allowedSecretNamesFor(adapter systemoneprovider.Adapter) []stri
 			continue
 		}
 		out = append(out, name)
+	}
+	for _, extra := range s.extraSecretNamesForAdapter(adapter.Name()) {
+		if !systemoneprovider.IsValidSecretRefName(extra) ||
+			isSystemOneReservedSecretKey(extra) ||
+			isHubInfrastructureSecretKey(extra) {
+			continue
+		}
+		if !slices.Contains(out, extra) {
+			out = append(out, extra)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

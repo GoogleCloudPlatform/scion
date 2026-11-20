@@ -2607,6 +2607,14 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.TestIdentities != nil {
 				keys = append(keys, config.TestIdentitiesKey)
 			}
+			if hub.SystemOne != nil {
+				if hub.SystemOne.MaxEvalTime != "" {
+					keys = append(keys, "server.hub.system_one.max_eval_time")
+				}
+				if hub.SystemOne.SecretNames != nil {
+					keys = append(keys, config.SystemOneSecretNamesKey)
+				}
+			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")
 			}

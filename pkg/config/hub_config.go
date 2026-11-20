@@ -2164,11 +2164,15 @@ func envKeyToConfigKey(envKey string) string {
 	if directServerEnvNames[strings.ToUpper(name)] {
 		return "" // read directly with os.Getenv, never a GlobalConfig field
 	}
+	if _, ok := parseSystemOneSecretNamesEnvRest(envKey); ok {
+		return "" // decoded by applySystemOneSecretNamesEnv after file load
+	}
 	// The residue takes one segment per GlobalConfig field (the collapsed
 	// spelling, as before the table): SCION_SERVER_ADMIN_MODE does not
 	// become adminMode.
 	segs := strings.Split(strings.ToLower(envKey), "_")
 	if p, end, ok := koanfTagPathEnd(reflect.TypeOf(GlobalConfig{}), segs); ok && !isObjectListType(end) &&
+		derefType(end).Kind() != reflect.Map &&
 		!ownsGlobalConfigEnvPath(strings.Join(p, ".")) {
 		return strings.Join(p, ".")
 	}
@@ -2195,6 +2199,12 @@ func serverEnvToOpsettingsKey(envKey string) string {
 	}
 	if directServerEnvNames[strings.ToUpper(name)] {
 		return ""
+	}
+	if adapter, ok := parseSystemOneSecretNamesEnvRest(envKey); ok {
+		if adapter == "" {
+			return SystemOneSecretNamesKey
+		}
+		return SystemOneSecretNamesKey + "." + adapter
 	}
 	return settingsEnvResidue(strings.Split(strings.ToLower(envKey), "_"), true, true)
 }
@@ -2705,6 +2715,9 @@ type globalConfigEnvOverlay struct {
 // does every koanf field. A variable leaves the rest of its section in
 // place. It runs after the file values are applied.
 func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
+	if err := applySystemOneSecretNamesEnv(gc); err != nil {
+		return err
+	}
 	k := koanf.New(".")
 	_ = k.Load(nonEmptyEnvProvider(serverEnvPrefix, func(rest string) string {
 		if e, ok := resolveServerEnv(serverEnvPrefix+rest, false); ok {

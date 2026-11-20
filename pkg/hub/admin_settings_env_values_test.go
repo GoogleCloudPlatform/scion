@@ -68,6 +68,9 @@ func secretEnvKeys() map[string]any {
 	keys["server.auth.proxy.driver_principals"] = []any{envSecretSentinel("server.auth.proxy.driver_principals")}
 	keys["server.trusted_proxies"] = []any{envSecretSentinel("server.trusted_proxies")}
 	keys[config.AllowedImportSourcesKey] = []any{envSecretSentinel(config.AllowedImportSourcesKey)}
+	keys["server.hub.system_one.secret_names"] = map[string]any{
+		"gemini_decisions": []any{envSecretSentinel("server.hub.system_one.secret_names")},
+	}
 	keys["server.notification_channels"] = []any{map[string]any{
 		"type":   "webhook",
 		"params": map[string]any{"url": envSecretSentinel("server.notification_channels")},

@@ -215,6 +215,9 @@ func serverEnvMatches(name string, isLayer1 func(string) bool) bool {
 	if rest == "" {
 		return false
 	}
+	if _, ok := parseSystemOneSecretNamesEnvRest(rest); ok {
+		return true
+	}
 	// A name the env mapping table holds (canonical or alias) sets a
 	// setting. An alias that another spelling of the same setting
 	// overrides is reported by WarnDeprecatedServerEnvAliases, not here.
