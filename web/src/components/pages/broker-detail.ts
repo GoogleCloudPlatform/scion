@@ -925,7 +925,7 @@ export class ScionPageBrokerDetail extends LitElement {
 
         ${this.brokerSettingsError
           ? html`<div
-              style="margin-bottom: 0.75rem; font-size: 0.8125rem; color: var(--scion-danger, #dc2626);"
+              style="margin-bottom: 0.75rem; font-size: 0.8125rem; color: var(--sl-color-danger-600, #dc2626);"
             >
               ${this.brokerSettingsError}
             </div>`

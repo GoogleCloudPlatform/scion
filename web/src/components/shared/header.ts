@@ -370,7 +370,7 @@ export class ScionHeader extends LitElement {
       border-radius: 8px;
       background: var(--sl-color-danger-600, #dc2626);
       box-shadow: 0 0 0 1px var(--scion-surface, #ffffff);
-      color: #fff;
+      color: var(--sl-color-neutral-0, #fff);
       font-size: 10px;
       font-weight: 600;
       line-height: 16px;
@@ -666,7 +666,7 @@ export class ScionHeader extends LitElement {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: var(--scion-danger, #ef4444);
+      background: var(--scion-status-danger, #ef4444);
       pointer-events: none;
     }
 
@@ -684,7 +684,7 @@ export class ScionHeader extends LitElement {
       padding: 0 4px;
       border-radius: 8px;
       background: var(--sl-color-danger-600, #dc2626);
-      color: white;
+      color: var(--sl-color-neutral-0, #fff);
       font-size: 10px;
       font-weight: 600;
       line-height: 16px;

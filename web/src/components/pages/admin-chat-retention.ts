@@ -489,9 +489,9 @@ export class ScionAdminChatRetention extends LitElement {
       border: 1px solid var(--scion-success-border, #86efac);
     }
     .status-message.error {
-      background: var(--scion-danger-bg, #fee2e2);
-      color: var(--scion-danger-text, #991b1b);
-      border: 1px solid var(--scion-danger-border, #fca5a5);
+      background: var(--scion-badge-danger-bg, #fee2e2);
+      color: var(--scion-badge-danger-text, #991b1b);
+      border: 1px solid var(--scion-error-border, #fca5a5);
     }
     .status-message.warning {
       background: var(--sl-color-warning-50, #fffbeb);

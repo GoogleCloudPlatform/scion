@@ -1264,4 +1264,17 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(root.querySelector('[data-waiting-others]')).toBeNull();
     expect(root.querySelector('[data-waiting-badge]')).toBeNull();
   });
+
+  it('styles neutral group-count badges with Scion neutral badge tokens in both themes', () => {
+    const ctor = customElements.get('scion-page-profile-decisions') as unknown as {
+      styles: unknown;
+    };
+    const cssText = String(ctor.styles);
+    expect(cssText).toMatch(
+      /sl-badge\[variant=['"]neutral['"]\]::part\(base\)\s*\{[^}]*background:\s*var\(--scion-badge-neutral-bg/
+    );
+    expect(cssText).toMatch(
+      /sl-badge\[variant=['"]neutral['"]\]::part\(base\)\s*\{[^}]*color:\s*var\(--scion-badge-neutral-text/
+    );
+  });
 });

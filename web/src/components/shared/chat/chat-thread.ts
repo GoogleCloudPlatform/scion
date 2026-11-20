@@ -1643,20 +1643,6 @@ export class ScionChatThread extends LitElement {
         flex-shrink: 0;
       }
 
-      /* The theme maps Shoelace's neutral scale to the same slate values in
-         both themes, so a default button's label (neutral-700) would sit
-         on a neutral-800 button in the dark theme. Theme tokens keep the
-         label, border and fill readable in both. */
-      .star-filter-show-all::part(base) {
-        background: var(--scion-surface, #ffffff);
-        border-color: var(--scion-border-hover, #cbd5e1);
-        color: var(--scion-text, #1e293b);
-      }
-
-      .star-filter-show-all::part(base):hover {
-        color: var(--scion-primary-hover, #2563eb);
-      }
-
       /* A 44 px touch target on a phone or tablet; Shoelace centres the
          label from this height. */
       @media (max-width: 768px), (pointer: coarse) {
