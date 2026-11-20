@@ -83,7 +83,7 @@ Example (curl + openssl):
   SECRET="<one-time-secret>"
   TS="$(date +%s)"
   DELIVERY="$(uuidgen)"
-  EVENT="deploy.finished"
+  EVENT=""
   SUBJECT="service/api"
   BODY='{"status":"ok","commit":"abc1234"}'
   SIG="$(printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
@@ -91,9 +91,11 @@ Example (curl + openssl):
     -H "Content-Type: application/json" \
     -H "X-Scion-Signature: t=${TS},v1=${SIG}" \
     -H "X-Scion-Delivery: ${DELIVERY}" \
-    -H "X-Scion-Event: ${EVENT}" \
     -H "X-Scion-Subject: ${SUBJECT}" \
-    --data-raw "$BODY"`,
+    --data-raw "$BODY"
+
+  Note: X-Scion-Event: <name> sets event.type to webhook.<name>; match it with
+  scion trigger create --type webhook.<name> (default triggers match webhook.received).`,
 	RunE: runTriggerWebhookCreate,
 }
 

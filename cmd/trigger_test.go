@@ -879,6 +879,56 @@ func TestTriggerWebhookCreateHelp_SenderContractAndLimits(t *testing.T) {
 	assert.True(t, trigger.VerifyScionV1Signature(secret, now, sigHeader, delivery, event, subject, body))
 }
 
+func TestTriggerWebhookCreateHelp_CurlExampleFiresDefaultTrigger(t *testing.T) {
+	helpText := triggerWebhookCreateCmd.Long
+	idx := strings.Index(helpText, "Example (curl + openssl")
+	require.NotEqual(t, -1, idx, "expected curl + openssl example section in triggerWebhookCreateCmd.Long")
+	exampleBlock := helpText[idx:]
+
+	eventAssign := regexp.MustCompile(`(?m)^\s*EVENT="([^"]*)"`).FindStringSubmatch(exampleBlock)
+	require.Len(t, eventAssign, 2, "expected EVENT=\"...\" variable in curl example:\n%s", exampleBlock)
+	eventVar := eventAssign[1]
+
+	// Determine the X-Scion-Event header actually sent by curl in the example.
+	sentEventHeader := ""
+	headerMatches := regexp.MustCompile(`-H\s+"([^"]+)"`).FindAllStringSubmatch(exampleBlock, -1)
+	require.NotEmpty(t, headerMatches, "expected -H headers in curl example")
+	for _, m := range headerMatches {
+		hdr := m[1]
+		if strings.HasPrefix(hdr, trigger.HeaderEvent+":") {
+			val := strings.TrimSpace(strings.TrimPrefix(hdr, trigger.HeaderEvent+":"))
+			val = strings.ReplaceAll(val, "${EVENT}", eventVar)
+			val = strings.ReplaceAll(val, "$EVENT", eventVar)
+			sentEventHeader = val
+		}
+	}
+	assert.Empty(t, sentEventHeader, "printed curl example should omit X-Scion-Event so it fires a default webhook.received trigger")
+	assert.Equal(t, sentEventHeader, eventVar, "signed EVENT field must match the X-Scion-Event header sent by curl")
+
+	// Derive the real Hub event.type from the example's X-Scion-Event header and assert
+	// it matches the default trigger match.types (["webhook.received"]).
+	derivedEventType := trigger.WebhookEventType(sentEventHeader)
+	assert.Equal(t, "webhook.received", derivedEventType)
+	assert.True(t, triggerrule.MatchTypes([]string{"webhook.received"}, derivedEventType),
+		"help curl example produces event.type %q, which would not match default trigger match.types [webhook.received]", derivedEventType)
+
+	// Verify the canonical signature signed with EVENT="" passes VerifyScionV1Signature when X-Scion-Event is omitted.
+	now := time.Date(2026, 11, 20, 2, 0, 0, 0, time.UTC)
+	ts := strconv.FormatInt(now.Unix(), 10)
+	secret := "dGVzdC1zZWNyZXQtYmFzZTY0dXJsLWFzY2lpLWtleQ"
+	delivery := "550e8400-e29b-41d4-a716-446655440000"
+	subject := "service/api"
+	body := []byte(`{"status":"ok","commit":"abc1234"}`)
+	canonical := fmt.Sprintf("v1\n%s\n%s\n%s\n%s\n%s", ts, delivery, eventVar, subject, string(body))
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(canonical))
+	sigHeader := fmt.Sprintf("t=%s,v1=%s", ts, hex.EncodeToString(mac.Sum(nil)))
+	assert.True(t, trigger.VerifyScionV1Signature(secret, now, sigHeader, delivery, sentEventHeader, subject, body))
+
+	flatHelp := strings.Join(strings.Fields(helpText), " ")
+	assert.Contains(t, flatHelp, "X-Scion-Event: <name> sets event.type to webhook.<name>; match it with scion trigger create --type webhook.<name>")
+}
+
 func TestTriggerHistoryCLI_NameAndUUIDResolutionFlagsAndFormats(t *testing.T) {
 	fixedNow := time.Date(2026, 11, 16, 8, 0, 0, 0, time.UTC)
 	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
