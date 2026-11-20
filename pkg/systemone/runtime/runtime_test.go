@@ -2173,8 +2173,10 @@ func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
 				Scopes:     tc.instScopes,
 			}
 
-			var credSrc runtime.CredentialSource
-			if tc.adapterScheme.Kind != provider.AuthKindNone {
+			var credSrc, tokSrc runtime.CredentialSource
+			if tc.adapterScheme.Kind == provider.AuthKindGoogleAccessToken {
+				tokSrc = runtime.StaticCredential("fake-adc-matrix-token")
+			} else if tc.adapterScheme.Kind != provider.AuthKindNone {
 				credSrc = runtime.StaticCredential("sk-matrix-key")
 			}
 
@@ -2183,6 +2185,7 @@ func TestRuntime_InstanceAuthSupportMatrix(t *testing.T) {
 					Registry:    reg,
 					Instances:   runtime.StaticInstances(inst),
 					Credentials: credSrc,
+					TokenSource: tokSrc,
 				},
 				runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
 			)
@@ -2781,6 +2784,70 @@ func TestRuntime_SupportedAuthSelectionMatrixAndTokenSourceBranching(t *testing.
 		assert.Equal(t, "Bearer "+canaryToken, wireCalls[0].authHeader)
 		assert.Empty(t, wireCalls[0].quotaProject)
 		assert.Empty(t, wireCalls[0].googKey)
+	})
+
+	t.Run("google_access_token_with_nil_token_source_fails_closed_without_calling_credentials", func(t *testing.T) {
+		resetCounters()
+		var nilTokCredCalls int
+		nilTokAdapter := &fakeModelListerAdapter{
+			fakeAdapter: adapter,
+			modelsFn: func(ctx context.Context, tr provider.Transport, inst provider.InstanceView) ([]string, error) {
+				req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, inst.Endpoint+"/v1beta/models", nil)
+				if reqErr != nil {
+					return nil, reqErr
+				}
+				resp, doErr := tr.Do(req)
+				if doErr != nil {
+					return nil, doErr
+				}
+				_ = resp.Body.Close()
+				return []string{"gemini-decision-1"}, nil
+			},
+		}
+		nilTokReg := provider.NewRegistry()
+		nilTokReg.MustRegister(nilTokAdapter)
+
+		rtNilTok := runtime.New(
+			runtime.Config{
+				Registry: nilTokReg,
+				Credentials: func(_ context.Context, _ runtime.Instance) (string, error) {
+					nilTokCredCalls++
+					return canaryAPIKey, nil
+				},
+				TokenSource: nil,
+			},
+			runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(srv.URL, srv.Client())),
+		)
+		defer rtNilTok.CloseIdleConnections()
+
+		inst := runtime.Instance{
+			ID:       "inst-nil-tok",
+			Name:     "gem-adc-nil-tok",
+			Revision: 1,
+			Adapter:  "multi-auth-gemini",
+			Model:    "gemini-decision-1",
+			Endpoint: srv.URL,
+			Auth:     runtime.InstanceAuth{Kind: "google_access_token", Scopes: []string{testScope}},
+			Enabled:  true,
+		}
+		_, err := rtNilTok.Evaluate(context.Background(), compiled, runtime.ProbeInput("hi"), runtime.EvalOptions{Instance: &inst})
+		require.Error(t, err)
+		eval, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, eval.Class)
+		assert.Equal(t, string(provider.FailAuth), eval.Reason)
+		require.Len(t, eval.Attempts, 1)
+		assert.Equal(t, 0, eval.Attempts[0].Requests, "nil TokenSource must fail pre-call with 0 provider requests")
+		assert.Equal(t, 0, nilTokCredCalls, "nil TokenSource on google_access_token must never fall back to Credentials")
+		assert.Empty(t, wireCalls, "provider must receive 0 requests")
+
+		_, listErr := rtNilTok.ListModels(context.Background(), inst)
+		require.Error(t, listErr)
+		pe, ok := provider.AsProviderError(listErr)
+		require.True(t, ok)
+		assert.Equal(t, provider.FailAuth, pe.Reason)
+		assert.Equal(t, 0, nilTokCredCalls, "ListModels with nil TokenSource must never fall back to Credentials")
+		assert.Empty(t, wireCalls)
 	})
 
 	t.Run("google_access_token_without_scopes_fails_pre_call_invalid_request", func(t *testing.T) {

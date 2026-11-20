@@ -53,6 +53,11 @@ const (
 	SystemOneADCTypeAuthorizedUser             = "authorized_user"
 	SystemOneADCTypeMetadata                   = "metadata"
 
+	// SystemOneADCUnresolved is rendered on instance create/get/list when ADC
+	// credential metadata has not yet been resolved in-process by an evaluation
+	// or probe, avoiding any ADC discovery or metadata I/O on read/create paths.
+	SystemOneADCUnresolved = "unresolved (run probe)"
+
 	maxSystemOneADCEmailBytes = 128
 )
 
@@ -323,6 +328,29 @@ func (c *hubSystemOneADCCache) resolve(ctx context.Context, scopes []string) (*S
 	return entry, nil
 }
 
+// peek reads already-resolved non-secret ADC metadata from the in-memory scope
+// cache without invoking provider discovery or performing any file/network I/O.
+func (c *hubSystemOneADCCache) peek(scopes []string) (SystemOneADCMetadata, bool) {
+	if c == nil {
+		return SystemOneADCMetadata{}, false
+	}
+	canonScopes, err := canonicalADCScopes(scopes)
+	if err != nil {
+		return SystemOneADCMetadata{}, false
+	}
+	key := canonicalADCScopesKey(canonScopes)
+	c.mu.Lock()
+	cached, ok := c.entries[key]
+	c.mu.Unlock()
+	if !ok || cached == nil {
+		return SystemOneADCMetadata{}, false
+	}
+	return SystemOneADCMetadata{
+		CredentialType:      cached.CredentialType,
+		ServiceAccountEmail: cached.ServiceAccountEmail,
+	}, true
+}
+
 // SetSystemOneADCForTesting replaces the Hub's Google Application Default
 // Credentials provider and clears any in-memory cached ADC token sources so
 // offline tests inject a fake oauth2.TokenSource without touching live ADC
@@ -349,22 +377,15 @@ func (s *Server) systemOneADC() *hubSystemOneADCCache {
 	return cache
 }
 
-// inspectSystemOneADCMetadata resolves non-secret ADC credential metadata
-// (credential type category and service-account email when exposed) for scopes
-// without minting or returning any OAuth access token.
-func (s *Server) inspectSystemOneADCMetadata(ctx context.Context, scopes []string) (SystemOneADCMetadata, error) {
+// peekSystemOneADCMetadata reads non-secret ADC credential metadata from the
+// in-memory scope cache if already resolved in-process by a prior evaluation or
+// probe, performing zero ADC discovery or metadata I/O on cold cache misses.
+func (s *Server) peekSystemOneADCMetadata(scopes []string) (SystemOneADCMetadata, bool) {
 	cache := s.systemOneADC()
 	if cache == nil {
-		return SystemOneADCMetadata{}, egress.ErrAuth
+		return SystemOneADCMetadata{}, false
 	}
-	adc, err := cache.resolve(ctx, scopes)
-	if err != nil {
-		return SystemOneADCMetadata{}, err
-	}
-	return SystemOneADCMetadata{
-		CredentialType:      adc.CredentialType,
-		ServiceAccountEmail: adc.ServiceAccountEmail,
-	}, nil
+	return cache.peek(scopes)
 }
 
 // classifySystemOneADCError maps ADC discovery and OAuth/STS/metadata token

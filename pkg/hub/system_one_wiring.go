@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/oidckeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
@@ -414,7 +415,38 @@ func isDefiniteSecretNotFound(err error) bool {
 
 func isAllowedNamedSecretType(secretType string) bool {
 	switch secretType {
-	case "", store.SecretTypeEnvironment, store.SecretTypeVariable, store.SecretTypeInternal:
+	case "", // legacy => environment
+		store.SecretTypeEnvironment,
+		store.SecretTypeVariable:
+		return true
+	default:
+		return false
+	}
+}
+
+// isHubInfrastructureSecretKey reports whether key matches any Hub-owned
+// signing, capability, OIDC, conduit, or webhook secret key (defense-in-depth
+// alongside SecretTypeInternal refusal so even a legacy empty-typed row could
+// never be referenced by a System One named secret).
+func isHubInfrastructureSecretKey(key string) bool {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return false
+	}
+	if isWebhookEndpointReservedSecretKey(trimmed) {
+		return true
+	}
+	switch strings.ToLower(trimmed) {
+	case SecretKeyAgentSigningKey,
+		SecretKeyUserSigningKey,
+		SecretKeyDownloadSigningKey,
+		SecretKeyArtifactViewKey,
+		SecretKeyAttachmentDeliveryKey,
+		SecretKeyPortViewKey,
+		SecretKeyListCursorKey,
+		oidckeys.SecretKeyOIDCSigningKey,
+		oidckeys.SecretKeyOIDCKeyset,
+		conduitGrantKeySecretName:
 		return true
 	default:
 		return false
@@ -480,7 +512,9 @@ func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst sys
 }
 
 func (c *hubSystemOneCredentialSource) resolveNamedSecretToken(ctx context.Context, secretName, secScope string) (string, error) {
-	if !systemoneprovider.IsValidSecretRefName(secretName) || isSystemOneReservedSecretKey(secretName) {
+	if !systemoneprovider.IsValidSecretRefName(secretName) ||
+		isSystemOneReservedSecretKey(secretName) ||
+		isHubInfrastructureSecretKey(secretName) {
 		return "", egress.ErrAuth
 	}
 	if !systemoneprovider.IsValidSecretRefScope(secScope) {

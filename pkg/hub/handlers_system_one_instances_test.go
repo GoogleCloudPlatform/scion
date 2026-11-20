@@ -1529,8 +1529,10 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 	}))
 	defer tlsSrv.Close()
 
+	var adcProviderCalls atomic.Int32
 	installFakeADC := func() {
 		srv.SetSystemOneADCForTesting(t, func(_ context.Context, _ []string) (*SystemOneADCCredentials, error) {
+			adcProviderCalls.Add(1)
 			mu.Lock()
 			ct := currentADCType
 			em := currentSAEmail
@@ -1692,31 +1694,17 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 		assert.NotContains(t, rec.Body.String(), canaryAPIKeyInput)
 	}
 
-	// 2. authorized_user without quota_project refused at create (400 invalid_request).
-	mu.Lock()
-	currentADCType = SystemOneADCTypeAuthorizedUser
-	currentSAEmail = ""
-	mu.Unlock()
-	installFakeADC()
-
-	authUserNoQPRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-		"name":    "gem-adc-user-no-qp",
-		"adapter": geminidecisions.AdapterName,
-		"model":   "gemini-decision-1",
-		"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
-	})
-	require.Equal(t, http.StatusBadRequest, authUserNoQPRec.Code, authUserNoQPRec.Body.String())
-	assert.Contains(t, authUserNoQPRec.Body.String(), "quota_project is required")
-	assert.Contains(t, authUserNoQPRec.Body.String(), `"reason":"invalid_request"`)
-
-	// Restore service_account ADC for create/get/list/probe.
+	// 2. hub O1: create/get/list perform ZERO ADC discovery or metadata I/O on cold cache.
+	//    Before any probe/evaluation, create/get/list render "unresolved (run probe)" with 0 provider calls.
+	adcProviderCalls.Store(0)
 	mu.Lock()
 	currentADCType = SystemOneADCTypeServiceAccount
 	currentSAEmail = saEmail
 	mu.Unlock()
 	installFakeADC()
 
-	// 3. Create ADC instance: writes zero secrets, stores ONLY options["quota_project"] and auth.{kind,scopes}, exposes metadata on create/get/list.
+	// 3. Create ADC instance: writes zero secrets, makes 0 ADC calls, stores ONLY options["quota_project"] and auth.{kind,scopes},
+	//    and renders "unresolved (run probe)" until probe populates the in-memory cache.
 	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
 		"name":     "gemini-adc-main",
 		"adapter":  geminidecisions.AdapterName,
@@ -1727,6 +1715,7 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 	})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
 	assert.NotContains(t, createRec.Body.String(), canaryADCToken)
+	assert.Zero(t, adcProviderCalls.Load(), "create must perform 0 ADC discovery or metadata calls")
 
 	var created SystemOneInstanceResponse
 	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
@@ -1734,8 +1723,8 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 	assert.Empty(t, created.Auth.SecretName)
 	assert.Equal(t, []string{testADCScope}, created.Auth.Scopes)
 	assert.Equal(t, "explicit: "+quotaProject, created.Auth.QuotaProject)
-	assert.Equal(t, SystemOneADCTypeServiceAccount, created.Auth.CredentialType)
-	assert.Equal(t, saEmail, created.Auth.ServiceAccountEmail)
+	assert.Equal(t, SystemOneADCUnresolved, created.Auth.CredentialType)
+	assert.Empty(t, created.Auth.ServiceAccountEmail)
 	assert.Equal(t, map[string]string{"quota_project": quotaProject}, created.Options)
 
 	// Verify store round-trip persists nothing new (no credential_type, service_account_email, or duplicate quota_project).
@@ -1751,13 +1740,14 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 	require.NoError(t, err)
 	assert.Empty(t, secretsList, "creating a google_access_token instance must store zero secrets")
 
-	// GET /instances/{name} and GET /instances show auth_kind, scopes, explicit quota_project, credential_type, service_account_email, and never token.
+	// Cold GET /instances/{name} and GET /instances make 0 ADC calls and show "unresolved (run probe)".
 	getRec := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath+"/gemini-adc-main", nil)
 	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
 	assert.NotContains(t, getRec.Body.String(), canaryADCToken)
 	var gotResp SystemOneInstanceResponse
 	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &gotResp))
 	assert.Equal(t, created.Auth, gotResp.Auth)
+	assert.Zero(t, adcProviderCalls.Load(), "GET must perform 0 ADC discovery or metadata calls")
 
 	listRec := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil)
 	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
@@ -1766,8 +1756,10 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 	require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listResp))
 	require.Len(t, listResp.Instances, 1)
 	assert.Equal(t, created.Auth, listResp.Instances[0].Auth)
+	assert.Zero(t, adcProviderCalls.Load(), "LIST must perform 0 ADC discovery or metadata calls")
 
-	// 4. Probe success: Authorization: Bearer + X-Goog-User-Project on wire, no x-goog-api-key, provenance populated, no canary leaked.
+	// 4. Probe success: resolves ADC once (1 provider call), sends Authorization: Bearer + X-Goog-User-Project on wire,
+	//    no x-goog-api-key, populates provenance, and subsequent GET/LIST show resolved metadata with 0 additional ADC calls.
 	binSpec := map[string]any{
 		"version": 1,
 		"form":    "portable",
@@ -1782,6 +1774,25 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 	})
 	require.Equal(t, http.StatusOK, probeRec.Code, probeRec.Body.String())
 	assert.NotContains(t, probeRec.Body.String(), canaryADCToken)
+	assert.Equal(t, int32(1), adcProviderCalls.Load(), "probe must resolve ADC exactly once")
+
+	// Subsequent GET and LIST read the populated in-memory cache with 0 additional ADC discovery calls.
+	getAfterProbe := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath+"/gemini-adc-main", nil)
+	require.Equal(t, http.StatusOK, getAfterProbe.Code)
+	var gotAfterProbeResp SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(getAfterProbe.Body.Bytes(), &gotAfterProbeResp))
+	assert.Equal(t, SystemOneADCTypeServiceAccount, gotAfterProbeResp.Auth.CredentialType)
+	assert.Equal(t, saEmail, gotAfterProbeResp.Auth.ServiceAccountEmail)
+	assert.Equal(t, int32(1), adcProviderCalls.Load(), "warm GET must perform 0 additional ADC discovery calls")
+
+	listAfterProbe := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil)
+	require.Equal(t, http.StatusOK, listAfterProbe.Code)
+	var listAfterProbeResp ListSystemOneInstancesResponse
+	require.NoError(t, json.Unmarshal(listAfterProbe.Body.Bytes(), &listAfterProbeResp))
+	require.Len(t, listAfterProbeResp.Instances, 1)
+	assert.Equal(t, SystemOneADCTypeServiceAccount, listAfterProbeResp.Instances[0].Auth.CredentialType)
+	assert.Equal(t, saEmail, listAfterProbeResp.Instances[0].Auth.ServiceAccountEmail)
+	assert.Equal(t, int32(1), adcProviderCalls.Load(), "warm LIST must perform 0 additional ADC discovery calls")
 
 	var probeOK ProbeSystemOneInstanceResponse
 	require.NoError(t, json.Unmarshal(probeRec.Body.Bytes(), &probeOK))
@@ -1862,6 +1873,19 @@ func TestSystemOneInstances_GeminiADCVerticalCreateGetListDeleteProbeAndRedactio
 	mu.Lock()
 	assert.Empty(t, captures, "authorized_user without quota_project must fail pre-call with 0 provider requests")
 	mu.Unlock()
+
+	// Once authorized_user is already resolved in-process, create without quota_project rejects (400) with 0 additional ADC calls.
+	callsBeforeWarmCreate := adcProviderCalls.Load()
+	authUserNoQPRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gem-adc-user-no-qp",
+		"adapter": geminidecisions.AdapterName,
+		"model":   "gemini-decision-1",
+		"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{testADCScope}},
+	})
+	require.Equal(t, http.StatusBadRequest, authUserNoQPRec.Code, authUserNoQPRec.Body.String())
+	assert.Contains(t, authUserNoQPRec.Body.String(), "quota_project is required")
+	assert.Contains(t, authUserNoQPRec.Body.String(), `"reason":"invalid_request"`)
+	assert.Equal(t, callsBeforeWarmCreate, adcProviderCalls.Load(), "create must read cached ADC metadata with 0 additional provider calls")
 
 	// 6. Pre-call token endpoint 503 -> unavailable, requests=0, canary scrubbed.
 	mu.Lock()
@@ -2489,5 +2513,284 @@ func TestSystemOneInstances_GeminiNamedSecretVerticalConcurrencyAuthzRotationAnd
 		assert.NotContains(t, combinedLogs, canary)
 		assert.NotContains(t, createDefRec.Body.String(), canary)
 		assert.NotContains(t, rotRec.Body.String(), canary)
+	}
+}
+
+func TestSystemOneInstances_C1_NamedSecretRefusesInternalAndInfrastructureKeys(t *testing.T) {
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+
+	var auditBuf, runtimeLogBuf syncBuffer
+	srv.envSecretLog = slog.New(slog.NewJSONHandler(&auditBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-c1-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	const (
+		projInternalCanary = "CANARY_C1_PROJECT_INTERNAL_SECRET_8414"
+		hubFallbackCanary  = "CANARY_C1_HUB_VALID_VARIABLE_8414"
+		mutatedKeyCanary   = "CANARY_C1_MUTATED_TO_INTERNAL_8414"
+		ownedKeyCanary     = "CANARY_C1_OWNED_INTERNAL_KEY_8414"
+	)
+
+	var (
+		providerHits atomic.Int32
+		wireHeaders  syncBuffer
+	)
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerHits.Add(1)
+		_, _ = fmt.Fprintf(&wireHeaders, "%s\n", r.Header.Get(geminidecisions.HeaderAPIKey))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"q_ok":{"type":"noul","noul":0.90,"confidence":0.95}}}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	reg := srv.SystemOneProviderRegistry()
+	srv.mu.Lock()
+	srv.systemOneRuntime = systemoneruntime.New(
+		systemoneruntime.Config{
+			Registry:    reg,
+			Instances:   &hubSystemOneInstanceSource{srv: srv},
+			Credentials: (&hubSystemOneCredentialSource{srv: srv}).APIKeyToken,
+			TokenSource: (&hubSystemOneCredentialSource{srv: srv}).GoogleAccessToken,
+			Logger:      slog.New(slog.NewJSONHandler(&runtimeLogBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		},
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+	srv.mu.Unlock()
+
+	// 1. Seed user_signing_key and agent_signing_key via ensureSigningKey (exactly as Hub startup writes them)
+	//    and assert the backend/store NEVER returns SecretType == "" for them (stored as SecretTypeInternal).
+	userSignRaw, err := srv.ensureSigningKey(ctx, SecretKeyUserSigningKey, nil)
+	require.NoError(t, err)
+	agentSignRaw, err := srv.ensureSigningKey(ctx, SecretKeyAgentSigningKey, nil)
+	require.NoError(t, err)
+
+	userSignSV, err := localBackend.Get(ctx, SecretKeyUserSigningKey, store.ScopeHub, srv.hubID)
+	require.NoError(t, err)
+	assert.Equal(t, store.SecretTypeInternal, userSignSV.SecretType, "ensureSigningKey must persist user_signing_key as SecretTypeInternal, never empty")
+	userSignB64 := userSignSV.Value
+	require.NotEmpty(t, userSignB64)
+
+	agentSignSV, err := localBackend.Get(ctx, SecretKeyAgentSigningKey, store.ScopeHub, srv.hubID)
+	require.NoError(t, err)
+	assert.Equal(t, store.SecretTypeInternal, agentSignSV.SecretType, "ensureSigningKey must persist agent_signing_key as SecretTypeInternal, never empty")
+	agentSignB64 := agentSignSV.Value
+	require.NotEmpty(t, agentSignB64)
+	_ = userSignRaw
+	_ = agentSignRaw
+
+	// Seed a project and plant a project-scope internal secret row (PROJ_INTERNAL_KEY), plus a valid Hub variable
+	// secret of the SAME name so project_or_hub proves NO fallback to Hub when the project row is internal!
+	proj := &store.Project{
+		ID:      tid("c1-proj"),
+		Name:    "c1-proj",
+		Slug:    "c1-proj",
+		OwnerID: admin.ID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "PROJ_INTERNAL_KEY",
+		Value:      projInternalCanary,
+		SecretType: store.SecretTypeInternal,
+		Target:     "PROJ_INTERNAL_KEY",
+		Scope:      store.ScopeProject,
+		ScopeID:    proj.ID,
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "PROJ_INTERNAL_KEY",
+		Value:      hubFallbackCanary,
+		SecretType: store.SecretTypeVariable,
+		Target:     "PROJ_INTERNAL_KEY",
+		Scope:      store.ScopeHub,
+		ScopeID:    srv.hubID,
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+
+	// Create a legitimate instance-owned internal-secret instance (--key-stdin / apiKey path) to prove
+	// (a) its systemone.instance.<id> secret cannot be referenced by another instance's secret_ref, AND
+	// (b) the owning instance itself continues resolving normally!
+	ownedCreateRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "c1-owned-victim",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": tlsSrv.URL,
+		"auth":     map[string]any{"kind": "api_key", "apiKey": ownedKeyCanary},
+	})
+	require.Equal(t, http.StatusCreated, ownedCreateRec.Code, ownedCreateRec.Body.String())
+	var ownedCreated SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(ownedCreateRec.Body.Bytes(), &ownedCreated))
+	ownedSecretName := ownedCreated.Auth.SecretName
+	require.Equal(t, "systemone.instance."+ownedCreated.ID, ownedSecretName)
+
+	// 2. Authoring / create refusal (400 validation_error, content-free) for all internal secrets.
+	for _, tc := range []struct {
+		name  string
+		ref   string
+		scope string
+	}{
+		{name: "hub_user_signing_key", ref: SecretKeyUserSigningKey, scope: "hub"},
+		{name: "proj_or_hub_user_signing_key", ref: SecretKeyUserSigningKey, scope: "project_or_hub"},
+		{name: "hub_agent_signing_key", ref: SecretKeyAgentSigningKey, scope: "hub"},
+		{name: "proj_or_hub_agent_signing_key", ref: SecretKeyAgentSigningKey, scope: "project_or_hub"},
+		{name: "project_internal_row_direct", ref: "PROJ_INTERNAL_KEY", scope: "project"},
+		{name: "project_internal_row_via_project_or_hub", ref: "PROJ_INTERNAL_KEY", scope: "project_or_hub"},
+		{name: "another_instance_owned_secret_exact", ref: ownedSecretName, scope: "hub"},
+		{name: "another_instance_owned_secret_sanitized", ref: strings.ReplaceAll(strings.ReplaceAll(ownedSecretName, ".", "_"), "-", "_"), scope: "hub"},
+	} {
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+			"name":     "bad-" + strings.ReplaceAll(tc.name, "_", "-"),
+			"adapter":  geminidecisions.AdapterName,
+			"model":    "gemini-decision-1",
+			"endpoint": tlsSrv.URL,
+			"auth": map[string]any{
+				"kind":      "api_key",
+				"secretRef": map[string]any{"name": tc.ref, "scope": tc.scope},
+			},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", tc.name, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeValidationError, tc.name)
+		for _, secretVal := range []string{userSignB64, agentSignB64, projInternalCanary, ownedKeyCanary} {
+			assert.NotContains(t, rec.Body.String(), secretVal, tc.name)
+		}
+	}
+
+	binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check probe.text."}]}`)
+
+	// 3. Resolution refusal on crafted / legacy instance rows: auth with 0 provider requests (httptest receives NOTHING),
+	//    including NO fallback to Hub when project row is internal in project_or_hub!
+	craftedRows := []struct {
+		id         string
+		name       string
+		secretName string
+		scope      string
+		wantReason string
+	}{
+		{id: "99991001-0000-4000-8000-000000000001", name: "crafted-user-sign-hub", secretName: SecretKeyUserSigningKey, scope: "hub", wantReason: "auth"},
+		{id: "99991002-0000-4000-8000-000000000002", name: "crafted-agent-sign-hub", secretName: SecretKeyAgentSigningKey, scope: "hub", wantReason: "auth"},
+		{id: "99991003-0000-4000-8000-000000000003", name: "crafted-user-sign-poh", secretName: SecretKeyUserSigningKey, scope: "project_or_hub", wantReason: "auth"},
+		{id: "99991004-0000-4000-8000-000000000004", name: "crafted-proj-int-direct", secretName: "PROJ_INTERNAL_KEY", scope: "project", wantReason: "auth"},
+		{id: "99991005-0000-4000-8000-000000000005", name: "crafted-proj-int-no-fb", secretName: "PROJ_INTERNAL_KEY", scope: "project_or_hub", wantReason: "auth"},
+		{id: "99991006-0000-4000-8000-000000000006", name: "crafted-other-inst-san", secretName: "systemone_instance_other", scope: "hub", wantReason: "auth"},
+	}
+	for _, cr := range craftedRows {
+		require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+			ID:       cr.id,
+			Name:     cr.name,
+			Adapter:  geminidecisions.AdapterName,
+			Model:    "gemini-decision-1",
+			Endpoint: tlsSrv.URL,
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: cr.secretName},
+			Options:  map[string]string{systemoneprovider.OptionSecretScope: cr.scope},
+			Enabled:  true,
+		}))
+
+		providerHits.Store(0)
+		pRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/"+cr.name+"/probe", map[string]any{
+			"project": proj.ID,
+			"spec":    binSpec,
+			"probe":   map[string]any{"text": "Crafted row check."},
+		})
+		require.Equal(t, http.StatusOK, pRec.Code, cr.name)
+		var pResp ProbeSystemOneInstanceResponse
+		require.NoError(t, json.Unmarshal(pRec.Body.Bytes(), &pResp))
+		assert.Equal(t, systemoneruntime.ClassFailed, pResp.Class, cr.name)
+		assert.Equal(t, cr.wantReason, pResp.Reason, cr.name)
+		require.NotNil(t, pResp.Evaluation, cr.name)
+		require.Len(t, pResp.Evaluation.Attempts, 1, cr.name)
+		assert.Equal(t, 0, pResp.Evaluation.Attempts[0].Requests, "%s must record 0 provider requests", cr.name)
+		assert.Zero(t, providerHits.Load(), "httptest provider must receive NO request for %s", cr.name)
+		for _, secretVal := range []string{userSignB64, agentSignB64, projInternalCanary, hubFallbackCanary, ownedKeyCanary} {
+			assert.NotContains(t, pRec.Body.String(), secretVal, cr.name)
+		}
+	}
+
+	// 4. Regression: a previously valid named secret (variable) that later becomes internal fails at the next resolution!
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       "MUTATED_KEY",
+		Value:      mutatedKeyCanary,
+		SecretType: store.SecretTypeVariable,
+		Target:     "MUTATED_KEY",
+		Scope:      store.ScopeHub,
+		ScopeID:    srv.hubID,
+		CreatedBy:  admin.ID,
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+
+	mutCreateRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":     "c1-mutated-type",
+		"adapter":  geminidecisions.AdapterName,
+		"model":    "gemini-decision-1",
+		"endpoint": tlsSrv.URL,
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": "MUTATED_KEY", "scope": "hub"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, mutCreateRec.Code, mutCreateRec.Body.String())
+
+	providerHits.Store(0)
+	mutOKRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/c1-mutated-type/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Before type mutation."},
+	})
+	require.Equal(t, http.StatusOK, mutOKRec.Code)
+	var mutOKResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(mutOKRec.Body.Bytes(), &mutOKResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, mutOKResp.Class)
+	assert.Equal(t, int32(1), providerHits.Load())
+
+	// Mutate the stored row's SecretType to internal -> next resolution MUST fail closed with auth and 0 provider requests!
+	_, err = s.UpdateSecretMeta(ctx, "MUTATED_KEY", store.ScopeHub, srv.hubID, &store.SecretMetaUpdate{
+		SecretType: store.SecretTypeInternal,
+		Target:     "MUTATED_KEY",
+		UpdatedBy:  admin.ID,
+	})
+	require.NoError(t, err)
+
+	providerHits.Store(0)
+	mutFailRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/c1-mutated-type/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "After type mutation to internal."},
+	})
+	require.Equal(t, http.StatusOK, mutFailRec.Code)
+	var mutFailResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(mutFailRec.Body.Bytes(), &mutFailResp))
+	assert.Equal(t, systemoneruntime.ClassFailed, mutFailResp.Class)
+	assert.Equal(t, "auth", mutFailResp.Reason)
+	require.Len(t, mutFailResp.Evaluation.Attempts, 1)
+	assert.Equal(t, 0, mutFailResp.Evaluation.Attempts[0].Requests)
+	assert.Zero(t, providerHits.Load(), "provider must receive 0 requests once secret row becomes internal")
+
+	// 5. Instance-owned internal secret path (c1-owned-victim, no secret_scope) continues working normally!
+	providerHits.Store(0)
+	ownedProbeRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/c1-owned-victim/probe", map[string]any{
+		"spec":  binSpec,
+		"probe": map[string]any{"text": "Owned credential check."},
+	})
+	require.Equal(t, http.StatusOK, ownedProbeRec.Code)
+	var ownedProbeResp ProbeSystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(ownedProbeRec.Body.Bytes(), &ownedProbeResp))
+	assert.Equal(t, systemoneruntime.ClassSuccess, ownedProbeResp.Class)
+	assert.Equal(t, int32(1), providerHits.Load())
+
+	// Confirm user_signing_key, agent_signing_key, and projInternalCanary never hit the wire or logs.
+	wireStr := wireHeaders.String()
+	allLogs := auditBuf.String() + "\n" + runtimeLogBuf.String()
+	for _, forbidden := range []string{userSignB64, agentSignB64, projInternalCanary, hubFallbackCanary} {
+		assert.NotContains(t, wireStr, forbidden)
+		assert.NotContains(t, allLogs, forbidden)
 	}
 }

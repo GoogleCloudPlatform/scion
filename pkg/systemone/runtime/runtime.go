@@ -110,12 +110,13 @@ type Config struct {
 	// Instances resolves configured provider instances. Optional when callers
 	// supply EvalOptions.Instance directly.
 	Instances InstanceSource
-	// Credentials supplies per-instance bearer API keys at request time (and
-	// acts as the fallback credential resolver when TokenSource is nil).
+	// Credentials supplies per-instance bearer/header API keys at request time
+	// for API-key authentication modes.
 	Credentials CredentialSource
-	// TokenSource optionally supplies per-instance OAuth/ADC access tokens at
-	// request time when Instance.Auth.Kind is "google_access_token". When nil,
-	// Runtime falls back to Credentials.
+	// TokenSource supplies per-instance OAuth/ADC access tokens at request time
+	// when Instance.Auth.Kind is "google_access_token". When nil,
+	// google_access_token evaluations fail closed with egress.ErrAuth (0 provider
+	// requests) and never fall back to Credentials.
 	TokenSource CredentialSource
 	// MaxEvalTime is the runtime-wide evaluation ceiling (server.hub.systemone.maxEvalTime;
 	// defaults to DefaultMaxEvalTime = 3s when <= 0, clamped to MaxAllowedEvalTime = 30s).
@@ -995,7 +996,7 @@ func (r *Runtime) transportForInstance(inst Instance, adapterScheme provider.Aut
 	tokSrc := r.tokenSource
 	bearer := func(reqCtx context.Context) (string, error) {
 		src := creds
-		if instSnap.Auth.Kind == string(provider.AuthKindGoogleAccessToken) && tokSrc != nil {
+		if instSnap.Auth.Kind == string(provider.AuthKindGoogleAccessToken) {
 			src = tokSrc
 		}
 		if src == nil {

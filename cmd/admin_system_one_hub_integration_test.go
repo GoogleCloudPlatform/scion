@@ -559,7 +559,9 @@ func TestAdminSystemOne_GeminiADCVerticalRoundTripProbeAndRedaction(t *testing.T
 			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
 		),
 	)
+	var adcProviderCalls atomic.Int32
 	env.server.SetSystemOneADCForTesting(t, func(_ context.Context, scopes []string) (*hub.SystemOneADCCredentials, error) {
+		adcProviderCalls.Add(1)
 		require.Equal(t, []string{scopeTestURL}, scopes)
 		return &hub.SystemOneADCCredentials{
 			CredentialType:      hub.SystemOneADCTypeServiceAccount,
@@ -595,11 +597,12 @@ func TestAdminSystemOne_GeminiADCVerticalRoundTripProbeAndRedaction(t *testing.T
 	assert.Contains(t, createImpOut, "Auth Kind:       google_access_token")
 	assert.Contains(t, createImpOut, "Scopes:          "+scopeTestURL)
 	assert.Contains(t, createImpOut, "Quota Project:   implicit (service account association)")
-	assert.Contains(t, createImpOut, "Credential Type: service_account")
-	assert.Contains(t, createImpOut, "Service Account: "+saEmail)
+	assert.Contains(t, createImpOut, "Credential Type: unresolved (run probe)")
+	assert.NotContains(t, createImpOut, "Service Account:")
 	assert.NotContains(t, createImpOut, "Secret:")
 	assert.NotContains(t, createImpOut, adcCanaryToken)
 	assert.NotContains(t, createImpErr, adcCanaryToken)
+	assert.Zero(t, adcProviderCalls.Load(), "CLI create must perform 0 ADC discovery calls")
 
 	// Confirm zero System One instance secrets created for keyless ADC.
 	secretsList, err := env.secretStore.List(context.Background(), secret.Filter{
@@ -642,9 +645,11 @@ func TestAdminSystemOne_GeminiADCVerticalRoundTripProbeAndRedaction(t *testing.T
 	assert.Contains(t, listHuman, "gemini-adc-explicit")
 	assert.Contains(t, listHuman, "implicit (service account association)")
 	assert.Contains(t, listHuman, "explicit: billing-proj-42")
-	assert.Contains(t, listHuman, "service_account ("+saEmail+")")
+	assert.Contains(t, listHuman, "unresolved (run probe)")
+	assert.NotContains(t, listHuman, saEmail)
 	assert.NotContains(t, listHuman, adcCanaryToken)
 	assert.NotContains(t, listHumanErr, adcCanaryToken)
+	assert.Zero(t, adcProviderCalls.Load(), "CLI create + list before probe must perform 0 ADC discovery calls")
 
 	// 4. Probe implicit instance: sends Authorization: Bearer <token>, NO x-goog-api-key, NO X-Goog-User-Project.
 	resetAdminSystemOneFlags(t)
@@ -690,8 +695,19 @@ func TestAdminSystemOne_GeminiADCVerticalRoundTripProbeAndRedaction(t *testing.T
 	assert.Equal(t, "service_account", parsedProbe.Evaluation.Auth.CredentialType)
 	assert.Equal(t, saEmail, parsedProbe.Evaluation.Auth.ServiceAccountEmail)
 
-	// Both instances share the same canonical scope set, so ReuseTokenSource minted only once.
+	// Both instances share the same canonical scope set, so ADC provider was resolved once and ReuseTokenSource minted once.
+	assert.Equal(t, int32(1), adcProviderCalls.Load())
 	assert.Equal(t, int32(1), tokenMints.Load())
+
+	// Subsequent CLI list reads the populated in-memory ADC cache with 0 additional ADC discovery calls.
+	resetAdminSystemOneFlags(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	listWarm, _, err := executeAdminSystemOneSubcmd(t, []string{"list"}, nil)
+	require.NoError(t, err)
+	assert.Contains(t, listWarm, "service_account ("+saEmail+")")
+	assert.Equal(t, int32(1), adcProviderCalls.Load(), "CLI list after probe must perform 0 additional ADC discovery calls")
 
 	providerMu.Lock()
 	require.Len(t, recorded, 2)

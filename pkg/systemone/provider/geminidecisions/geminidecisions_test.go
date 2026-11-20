@@ -717,6 +717,14 @@ func TestInvoke_HeaderPlacementWireGuardsAndErrorMapping(t *testing.T) {
 				wantRetryAfter: 3500 * time.Millisecond,
 			},
 			{
+				name:           "429_multiple_retry_info_first_detail_wins",
+				status:         http.StatusTooManyRequests,
+				body:           `{"error":{"code":429,"message":"CANARY_429_MULTI_RETRY","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"3.5s"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"9s"}]}}`,
+				wantReason:     provider.FailRateLimited,
+				wantRetryable:  true,
+				wantRetryAfter: 3500 * time.Millisecond,
+			},
+			{
 				name:          "500_internal",
 				status:        http.StatusInternalServerError,
 				body:          `{"error":{"code":500,"message":"CANARY_500_INTERNAL","status":"INTERNAL"}}`,

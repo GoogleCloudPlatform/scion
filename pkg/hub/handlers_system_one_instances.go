@@ -47,6 +47,7 @@ const (
 	maxSystemOneAPIKeyBytes              = 8 * 1024
 	maxSystemOneModelBytes               = 128
 	maxSystemOneRuleIDBytes              = 128
+	maxSystemOneProjectRefBytes          = 128
 	maxSystemOneLocationBytes            = 128
 	maxSystemOneOptionsEntries           = 32
 	maxSystemOneOptionKeyBytes           = 64
@@ -245,7 +246,7 @@ type ProbeSystemOneInstanceResponse struct {
 	Evaluation *systemoneruntime.Evaluation `json:"evaluation,omitempty"`
 }
 
-func (s *Server) toSystemOneInstanceResponse(ctx context.Context, inst *store.SystemOneInstance) SystemOneInstanceResponse {
+func (s *Server) toSystemOneInstanceResponse(_ context.Context, inst *store.SystemOneInstance) SystemOneInstanceResponse {
 	if inst == nil {
 		return SystemOneInstanceResponse{}
 	}
@@ -283,9 +284,11 @@ func (s *Server) toSystemOneInstanceResponse(ctx context.Context, inst *store.Sy
 	}
 	if inst.Auth.Kind == store.SystemOneAuthKindGoogleAccessToken {
 		authDTO.QuotaProject = systemoneprovider.FormatQuotaProjectProvenance(inst.Options[systemoneprovider.OptionQuotaProject])
-		if meta, err := s.inspectSystemOneADCMetadata(ctx, inst.Auth.Scopes); err == nil {
+		if meta, ok := s.peekSystemOneADCMetadata(inst.Auth.Scopes); ok {
 			authDTO.CredentialType = meta.CredentialType
 			authDTO.ServiceAccountEmail = meta.ServiceAccountEmail
+		} else {
+			authDTO.CredentialType = SystemOneADCUnresolved
 		}
 	}
 	return SystemOneInstanceResponse{
@@ -833,12 +836,23 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 					refScope = rawScope
 				}
 			}
-			if !systemoneprovider.IsValidSecretRefName(refName) || isSystemOneReservedSecretKey(refName) {
-				ValidationError(w, "invalid auth.secretRef.name: must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$ and must not use the reserved System One secret prefix", nil)
+			if !systemoneprovider.IsValidSecretRefName(refName) ||
+				isSystemOneReservedSecretKey(refName) ||
+				isHubInfrastructureSecretKey(refName) {
+				ValidationError(w, "invalid auth.secretRef.name: must match ^[A-Za-z_][A-Za-z0-9_]{0,127}$ and must not reference reserved or Hub-internal secrets", nil)
 				return
 			}
 			if !systemoneprovider.IsValidSecretRefScope(refScope) {
 				ValidationError(w, "invalid auth.secretRef.scope: must be \"hub\", \"project\", or \"project_or_hub\"", nil)
+				return
+			}
+			allowedRef, checkErr := s.validateNamedSecretRefAtCreate(ctx, refName, refScope)
+			if checkErr != nil {
+				InternalError(w)
+				return
+			}
+			if !allowedRef {
+				ValidationError(w, "invalid auth.secretRef: named secret must have type \"environment\" or \"variable\" (internal and file secrets are refused)", nil)
 				return
 			}
 			secretName = refName
@@ -888,7 +902,7 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 				ValidationError(w, "invalid options.quota_project: must be a valid GCP project ID (6..30 lowercase letters, digits, or hyphens)", nil)
 				return
 			}
-		} else if meta, metaErr := s.inspectSystemOneADCMetadata(ctx, authScopes); metaErr == nil && meta.CredentialType == SystemOneADCTypeAuthorizedUser {
+		} else if meta, ok := s.peekSystemOneADCMetadata(authScopes); ok && meta.CredentialType == SystemOneADCTypeAuthorizedUser {
 			ValidationError(w, "options.quota_project is required when using authorized_user Application Default Credentials", map[string]any{
 				"reason": string(systemoneprovider.FailInvalidRequest),
 			})
@@ -1297,7 +1311,7 @@ func (s *Server) probeSystemOneInstance(w http.ResponseWriter, r *http.Request, 
 				}
 			}
 			if eval.Auth.CredentialType == "" {
-				if meta, metaErr := s.inspectSystemOneADCMetadata(ctx, inst.Auth.Scopes); metaErr == nil {
+				if meta, ok := s.peekSystemOneADCMetadata(inst.Auth.Scopes); ok {
 					eval.Auth.CredentialType = meta.CredentialType
 					eval.Auth.ServiceAccountEmail = meta.ServiceAccountEmail
 				}
@@ -1386,6 +1400,47 @@ func inferProbeSpecKind(raw []byte) spec.Kind {
 	return spec.KindJudgments
 }
 
+func (s *Server) validateNamedSecretRefAtCreate(ctx context.Context, refName, refScope string) (bool, error) {
+	if s.store == nil {
+		return true, nil
+	}
+	if refScope == systemoneprovider.SecretScopeHub || refScope == systemoneprovider.SecretScopeProjectOrHub {
+		hubRows, err := s.store.ListSecrets(ctx, store.SecretFilter{
+			Scope: store.ScopeHub,
+			Key:   refName,
+		})
+		if err != nil {
+			return false, err
+		}
+		for i := range hubRows {
+			if !isAllowedNamedSecretType(hubRows[i].SecretType) {
+				return false, nil
+			}
+		}
+		if len(hubRows) == 0 && s.secretBackend != nil {
+			meta, metaErr := s.secretBackend.GetMeta(ctx, refName, store.ScopeHub, s.hubID)
+			if metaErr == nil && meta != nil && !isAllowedNamedSecretType(meta.SecretType) {
+				return false, nil
+			}
+		}
+	}
+	if refScope == systemoneprovider.SecretScopeProject || refScope == systemoneprovider.SecretScopeProjectOrHub {
+		projRows, err := s.store.ListSecrets(ctx, store.SecretFilter{
+			Scope: store.ScopeProject,
+			Key:   refName,
+		})
+		if err != nil {
+			return false, err
+		}
+		for i := range projRows {
+			if !isAllowedNamedSecretType(projRows[i].SecretType) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
 func (s *Server) resolveAndAuthorizeProbeProject(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -1396,7 +1451,7 @@ func (s *Server) resolveAndAuthorizeProbeProject(
 	if projRef == "" {
 		return "", true
 	}
-	if len(projRef) > maxSystemOneRuleIDBytes || hasControlChars(projRef) {
+	if len(projRef) > maxSystemOneProjectRefBytes || hasControlChars(projRef) {
 		ValidationError(w, "invalid project identifier", nil)
 		return "", false
 	}

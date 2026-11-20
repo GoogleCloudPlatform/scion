@@ -769,12 +769,11 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 		}
 	}
 
-	t.Run("allowed_types_environment_variable_internal_succeed_and_file_refused", func(t *testing.T) {
+	t.Run("allowed_types_environment_variable_legacy_empty_succeed_and_internal_and_file_refused", func(t *testing.T) {
 		for _, secType := range []string{
 			"",
 			store.SecretTypeEnvironment,
 			store.SecretTypeVariable,
-			store.SecretTypeInternal,
 		} {
 			srv := &Server{
 				hubID: hubID,
@@ -802,28 +801,67 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 			assert.Equal(t, hubCanary, tok)
 		}
 
-		// File secret is refused with ErrAuth.
-		srvFile := &Server{
-			hubID: hubID,
-			secretBackend: &stubSystemOneSecretBackend{
-				getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
-					return &secret.SecretWithValue{
-						SecretMeta: secret.SecretMeta{
-							Name:       name,
-							SecretType: store.SecretTypeFile,
-							Scope:      scope,
-							ScopeID:    scopeID,
-							Version:    1,
-						},
-						Value: hubCanary,
-					}, nil
+		// Both internal and file secrets are refused with ErrAuth.
+		for _, disallowedType := range []string{
+			store.SecretTypeInternal,
+			store.SecretTypeFile,
+		} {
+			srvDisallowed := &Server{
+				hubID: hubID,
+				secretBackend: &stubSystemOneSecretBackend{
+					getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+						return &secret.SecretWithValue{
+							SecretMeta: secret.SecretMeta{
+								Name:       name,
+								SecretType: disallowedType,
+								Scope:      scope,
+								ScopeID:    scopeID,
+								Version:    1,
+							},
+							Value: hubCanary,
+						}, nil
+					},
 				},
-			},
+			}
+			srcDisallowed := &hubSystemOneCredentialSource{srv: srvDisallowed}
+			tok, err := srcDisallowed.APIKeyToken(context.Background(), makeInst(systemoneprovider.SecretScopeHub))
+			assert.Empty(t, tok, "expected secretType=%q to be refused", disallowedType)
+			require.ErrorIs(t, err, egress.ErrAuth, "expected secretType=%q to fail with ErrAuth", disallowedType)
 		}
-		srcFile := &hubSystemOneCredentialSource{srv: srvFile}
-		tok, err := srcFile.APIKeyToken(context.Background(), makeInst(systemoneprovider.SecretScopeHub))
-		assert.Empty(t, tok)
-		require.ErrorIs(t, err, egress.ErrAuth)
+
+		// Hub infrastructure keys are refused BEFORE consulting SecretBackend even if a legacy row had SecretType=="".
+		for _, infraKey := range []string{
+			SecretKeyUserSigningKey,
+			SecretKeyAgentSigningKey,
+			SecretKeyDownloadSigningKey,
+			SecretKeyArtifactViewKey,
+			SecretKeyAttachmentDeliveryKey,
+			SecretKeyPortViewKey,
+			SecretKeyListCursorKey,
+			"oidc_signing_key",
+			"oidc_signing_keyset",
+			conduitGrantKeySecretName,
+		} {
+			var backendCalls atomic.Int32
+			srvInfra := &Server{
+				hubID: hubID,
+				secretBackend: &stubSystemOneSecretBackend{
+					getFn: func(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+						backendCalls.Add(1)
+						return &secret.SecretWithValue{
+							SecretMeta: secret.SecretMeta{Name: name, SecretType: "", Scope: scope, ScopeID: scopeID, Version: 1},
+							Value:      hubCanary,
+						}, nil
+					},
+				},
+			}
+			instInfra := makeInst(systemoneprovider.SecretScopeHub)
+			instInfra.Auth.SecretName = infraKey
+			tok, err := (&hubSystemOneCredentialSource{srv: srvInfra}).APIKeyToken(context.Background(), instInfra)
+			assert.Empty(t, tok, infraKey)
+			require.ErrorIs(t, err, egress.ErrAuth, infraKey)
+			assert.Zero(t, backendCalls.Load(), "SecretBackend.Get must never be called for Hub infrastructure key %q", infraKey)
+		}
 	})
 
 	t.Run("project_or_hub_fallback_matrix_only_falls_back_on_definite_not_found", func(t *testing.T) {
@@ -871,6 +909,14 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 			projErr  error
 			wantErr  error
 		}{
+			{
+				name: "project secret has disallowed internal type",
+				projResp: &secret.SecretWithValue{
+					SecretMeta: secret.SecretMeta{SecretType: store.SecretTypeInternal, Version: 1},
+					Value:      projCanary,
+				},
+				wantErr: egress.ErrAuth,
+			},
 			{
 				name: "project secret has disallowed file type",
 				projResp: &secret.SecretWithValue{

@@ -125,7 +125,7 @@ func parseGoogleError(body []byte) parsedGoogleError {
 		if rawDelay == "" {
 			rawDelay = strings.TrimSpace(d.RetryDelayAlt)
 		}
-		if dur := parseProtobufDuration(rawDelay); dur > 0 {
+		if dur := parseProtobufDuration(rawDelay); out.retryDelay == 0 && dur > 0 {
 			out.retryDelay = dur
 		}
 	}

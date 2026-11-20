@@ -68,9 +68,9 @@ When --auth-kind is api_key (the default), two credential modes are supported
      - --secret-scope selects hub, project, or project_or_hub (default:
        project_or_hub, checking the evaluation project's secret first and
        falling back to the Hub secret only when the project secret is not found).
-     - Allowed secret types are environment, variable, and internal (file is
-       refused). Binding a named secret to an instance never changes that
-       secret's type, injection mode, or delivery. Note that an environment
+     - Allowed secret types are environment and variable (internal and file
+       secrets are refused). Binding a named secret to an instance never changes
+       that secret's type, injection mode, or delivery. Note that an environment
        secret with injection mode "always" is also delivered to agent containers
        in that scope; prefer a non-injected secret (for example --type variable
        or --injection-mode as_needed) when agents should not receive the policy
@@ -97,7 +97,9 @@ Credentials (ADC) and stores no secret or token:
   - Do not combine --auth-kind google_access_token with --key-stdin or
     --key-file.
   - ADC credentials and token sources are cached in memory per scope set; a
-    changed ADC environment requires a Hub restart.
+    changed ADC environment requires a Hub restart. Instance create, get, and
+    list perform no ADC discovery or metadata I/O and report Credential Type as
+    "unresolved (run probe)" until resolved in-process by a probe or evaluation.
 
 Examples:
   # Register a TypeSafe instance reading the API key from a file
