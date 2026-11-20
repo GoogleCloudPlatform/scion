@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // runtimeOrphanKey is a runtime orphan's identity (its unique index).
@@ -195,9 +196,13 @@ func (s *AgentStore) RecordNFSOrphans(ctx context.Context, orphans []store.Runti
 	}
 
 	// Only resolve absent rows after a complete, untruncated scan.
-	if complete {
+	if complete && len(existing) > 0 {
+		ids := make([]uuid.UUID, 0, len(existing))
 		for _, r := range existing {
-			if err := s.client.RuntimeOrphan.DeleteOneID(r.ID).Exec(ctx); err != nil && !ent.IsNotFound(err) {
+			ids = append(ids, r.ID)
+		}
+		for _, batch := range chunkKeys(ids, batchLookupSize) {
+			if _, err := s.client.RuntimeOrphan.Delete().Where(runtimeorphan.IDIn(batch...)).Exec(ctx); err != nil {
 				errs = append(errs, mapError(err))
 			}
 		}

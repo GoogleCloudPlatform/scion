@@ -479,6 +479,9 @@ func (s *Server) listAllProjectAgentsIncludingDeleted(ctx context.Context, proje
 	var all []store.Agent
 	cursor := ""
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		res, err := s.store.ListAgents(ctx,
 			store.AgentFilter{ProjectID: projectID, IncludeDeleted: true},
 			store.ListOptions{Limit: 500, SkipTotalCount: true, Cursor: cursor},
