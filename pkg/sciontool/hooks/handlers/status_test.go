@@ -116,6 +116,18 @@ func TestStatusHandler_Handle(t *testing.T) {
 			wantActivity: "thinking",
 		},
 		{
+			name: "ToolEnd from sub-agent sets working",
+			event: &hooks.Event{
+				Name:    hooks.EventToolEnd,
+				Dialect: "claude",
+				Data: hooks.EventData{
+					SessionID: "parent-1",
+					Raw:       map[string]interface{}{"agent_id": "child-1"},
+				},
+			},
+			wantActivity: "working",
+		},
+		{
 			name:         "AgentEnd sets working",
 			event:        &hooks.Event{Name: hooks.EventAgentEnd},
 			wantActivity: "working",

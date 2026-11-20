@@ -191,10 +191,10 @@ func TestBackgroundSubagentWait_OwnAnswerReleases(t *testing.T) {
 			bgHeldAfterStop(t, sh, hh, sent, parentHeldSubA)
 
 			got, info := parentHeldStep(t, sh, hh, sent, parentHeldSub(t, raw, "Bash", parentHeldSubA))
-			assert.Equal(t, "thinking", info["activity"])
+			assert.Equal(t, "working", info["activity"])
 			assert.NotContains(t, info, activitySourceKey)
 			assert.NotContains(t, info, notificationWaitAgentsKey)
-			assert.Equal(t, []string{parentHeldThinking}, got)
+			assert.Equal(t, []string{parentHeldWorking}, got)
 		})
 	}
 }
@@ -343,8 +343,8 @@ func TestBackgroundSubagentWait_ForegroundSequence(t *testing.T) {
 		}{
 			{parentHeldParent(t, "PreToolUse", "Agent"), "executing", []string{parentHeldExecuting}},
 			{parentHeldSub(t, "PreToolUse", "AskUserQuestion", parentHeldSubA), "waiting_for_input", []string{parentHeldWaiting}},
-			{parentHeldSub(t, "PostToolUse", "AskUserQuestion", parentHeldSubA), "thinking", []string{parentHeldThinking}},
-			{bgSubagentStop(t, parentHeldSubA), "thinking", nil},
+			{parentHeldSub(t, "PostToolUse", "AskUserQuestion", parentHeldSubA), "working", []string{parentHeldWorking}},
+			{bgSubagentStop(t, parentHeldSubA), "working", nil},
 			{parentHeldParent(t, "PostToolUse", "Agent"), "thinking", []string{parentHeldThinking}},
 			{parentHeldParent(t, "Stop", ""), "working", []string{parentHeldWorking}},
 		}

@@ -246,7 +246,7 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		// replaced locally on tool-end/agent-end; this mirrors that result.
 		activity := state.ActivityWorking
 		message := "Ready"
-		if event.Name == hooks.EventToolEnd {
+		if event.Name == hooks.EventToolEnd && !isSubagentEvent(event) {
 			activity = state.ActivityThinking
 			message = "Processing"
 		}

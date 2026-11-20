@@ -190,31 +190,44 @@ func TestHubHandler_EventMapping(t *testing.T) {
 	}
 }
 
-// TestHubHandler_StepCompletedPayloads verifies that tool-end reports
-// thinking/"Processing" while agent-end and model-end continue to report
-// working/"Ready".
+// TestHubHandler_StepCompletedPayloads verifies that a parent tool-end reports
+// thinking/"Processing" while sub-agent tool-end, agent-end, and model-end
+// continue to report working/"Ready".
 func TestHubHandler_StepCompletedPayloads(t *testing.T) {
 	tests := []struct {
 		name         string
-		eventName    string
+		event        *hooks.Event
 		wantActivity string
 		wantMessage  string
 	}{
 		{
-			name:         "tool-end reports thinking/Processing",
-			eventName:    hooks.EventToolEnd,
+			name:         "parent tool-end reports thinking/Processing",
+			event:        &hooks.Event{Name: hooks.EventToolEnd},
 			wantActivity: "thinking",
 			wantMessage:  "Processing",
 		},
 		{
+			name: "sub-agent tool-end reports working/Ready",
+			event: &hooks.Event{
+				Name:    hooks.EventToolEnd,
+				Dialect: "claude",
+				Data: hooks.EventData{
+					SessionID: "parent-1",
+					Raw:       map[string]interface{}{"agent_id": "child-1"},
+				},
+			},
+			wantActivity: "working",
+			wantMessage:  "Ready",
+		},
+		{
 			name:         "agent-end reports working/Ready",
-			eventName:    hooks.EventAgentEnd,
+			event:        &hooks.Event{Name: hooks.EventAgentEnd},
 			wantActivity: "working",
 			wantMessage:  "Ready",
 		},
 		{
 			name:         "model-end reports working/Ready",
-			eventName:    hooks.EventModelEnd,
+			event:        &hooks.Event{Name: hooks.EventModelEnd},
 			wantActivity: "working",
 			wantMessage:  "Ready",
 		},
@@ -247,7 +260,7 @@ func TestHubHandler_StepCompletedPayloads(t *testing.T) {
 				t.Fatal("Expected handler to be created, got nil")
 			}
 
-			if err := handler.Handle(&hooks.Event{Name: tt.eventName}); err != nil {
+			if err := handler.Handle(tt.event); err != nil {
 				t.Fatalf("Handle returned error: %v", err)
 			}
 

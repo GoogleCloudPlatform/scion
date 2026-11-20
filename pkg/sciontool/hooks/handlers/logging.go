@@ -50,6 +50,9 @@ func (h *LoggingHandler) eventToTag(event *hooks.Event) string {
 	case hooks.EventToolStart:
 		return string(state.ActivityExecuting)
 	case hooks.EventToolEnd:
+		if isSubagentEvent(event) {
+			return string(state.ActivityWorking)
+		}
 		return string(state.ActivityThinking)
 	case hooks.EventAgentEnd:
 		return string(state.ActivityWorking)

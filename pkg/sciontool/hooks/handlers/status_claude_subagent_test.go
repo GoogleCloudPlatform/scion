@@ -183,7 +183,7 @@ func TestClaudeSubagent_NoHoldUpdatesAsBefore(t *testing.T) {
 	}{
 		{"UserPromptSubmit", "thinking", ""},
 		{"PreToolUse", "executing", "Bash"},
-		{"PostToolUse", "thinking", ""},
+		{"PostToolUse", "working", ""},
 	} {
 		t.Run(tc.raw, func(t *testing.T) {
 			statusPath := filepath.Join(t.TempDir(), "agent-info.json")
@@ -369,7 +369,7 @@ func TestClaudeSubagent_UserWaitToolSetsWaiting(t *testing.T) {
 // reported, locally and to the Hub. The wait does not outlive the answer.
 func TestClaudeSubagent_UserWaitAnsweredThenContinues(t *testing.T) {
 	waitingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWaitingForInput}.DisplayStatus()
-	thinkingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityThinking}.DisplayStatus()
+	workingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}.DisplayStatus()
 	executingStatus := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityExecuting}.DisplayStatus()
 	for _, tool := range []string{"AskUserQuestion", "ExitPlanMode"} {
 		t.Run(tool, func(t *testing.T) {
@@ -380,14 +380,14 @@ func TestClaudeSubagent_UserWaitAnsweredThenContinues(t *testing.T) {
 			assert.Equal(t, "waiting_for_input", readAgentInfo(t, statusHandler.StatusPath).Activity, "after the sub-agent asks")
 
 			claudeHubHandle(t, statusHandler, hubHandler, claudeEvent(t, "PostToolUse", tool, claudeSubagentChildID))
-			assert.Equal(t, "thinking", readAgentInfo(t, statusHandler.StatusPath).Activity, "after the user answers")
+			assert.Equal(t, "working", readAgentInfo(t, statusHandler.StatusPath).Activity, "after the user answers")
 
 			claudeHubHandle(t, statusHandler, hubHandler, claudeSubagentEvent(t, "PreToolUse"))
 			info := readAgentInfo(t, statusHandler.StatusPath)
 			assert.Equal(t, "executing", info.Activity, "sub-agent work after the answer")
 			assert.Equal(t, "Bash", info.ToolName)
 
-			assert.Equal(t, []string{waitingStatus, thinkingStatus, executingStatus}, sent())
+			assert.Equal(t, []string{waitingStatus, workingStatus, executingStatus}, sent())
 		})
 	}
 }
