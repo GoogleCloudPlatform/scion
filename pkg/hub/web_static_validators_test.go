@@ -424,21 +424,15 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 	}
 	for mode, servers := range validatorServers(t) {
 		t.Run(mode, func(t *testing.T) {
-			ws, wsAuth := servers[0], servers[1]
+			_, wsAuth := servers[0], servers[1]
 			signedIn := devSignedIn(t, wsAuth)
-			srv := func(root bool) http.Handler {
-				if root {
-					return signedIn
-				}
-				return ws.Handler()
-			}
 			for _, tc := range cases {
 				for _, suffix := range []string{"", "/", "%2F", "%2f", "/.", "%2f.", "/..", "%2f..", "%2F%2E", "%2f%2e%2e"} {
 					target := tc.base + suffix
 					req := httptest.NewRequest(http.MethodGet, target, nil)
 					req.Header.Set("Accept-Encoding", "br, gzip")
 					rec := httptest.NewRecorder()
-					srv(tc.root).ServeHTTP(rec, req)
+					signedIn.ServeHTTP(rec, req)
 					if isRedirect(rec.Code) {
 						// The mux cleans a literal dot segment with a
 						// redirect; follow it once and check where it lands.
@@ -449,7 +443,7 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 						req = httptest.NewRequest(http.MethodGet, loc, nil)
 						req.Header.Set("Accept-Encoding", "br, gzip")
 						rec = httptest.NewRecorder()
-						srv(tc.root).ServeHTTP(rec, req)
+						signedIn.ServeHTTP(rec, req)
 						target += " -> " + loc
 					}
 					check(t, target, rec, tc.stored, tc.root)

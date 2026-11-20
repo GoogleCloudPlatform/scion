@@ -1685,7 +1685,7 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 	// always the name checked here.
 	// A segment starting with a dot (such as .vite) is never public.
 	clean := cleanStaticPath(r.URL.Path)
-	if clean != r.URL.Path || webassets.IsVariantName(clean) || hasDotSegment(clean) {
+	if clean != r.URL.Path || webassets.IsVariantName(clean) || hasDotSegment(clean) || strings.Contains(clean, "\\") {
 		http.NotFound(w, r)
 		return
 	}
@@ -2263,17 +2263,22 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 		return false
 	}
 	// A non-clean decoded path (dot or empty segments left by %2e or %2f),
-	// a precompressed sibling (*.br, *.gz, checked on the clean name) and a
-	// path with a segment starting with a dot (such as .vite) are never
-	// public files: treat them as missing.
-	if clean := cleanStaticPath(r.URL.Path); clean != r.URL.Path || webassets.IsVariantName(clean) || hasDotSegment(clean) {
+	// a precompressed sibling (*.br, *.gz, checked on the clean name), a
+	// path with a segment starting with a dot (such as .vite), and any path
+	// containing a backslash are never public files: treat them as missing.
+	clean := cleanStaticPath(r.URL.Path)
+	if clean != r.URL.Path || webassets.IsVariantName(clean) || hasDotSegment(clean) || strings.Contains(clean, "\\") {
 		return false
 	}
 
 	if ws.assetsDisk != "" {
-		p := filepath.Join(ws.assetsDisk, filepath.FromSlash(name))
-		info, err := os.Stat(p)
-		if err != nil || info.IsDir() {
+		f, err := webassets.DirFileSystem(ws.assetsDisk).Open(clean)
+		if err != nil {
+			return false
+		}
+		info, statErr := f.Stat()
+		_ = f.Close()
+		if statErr != nil || info.IsDir() {
 			return false
 		}
 	} else if ws.assets != nil {
@@ -3202,14 +3207,27 @@ func isAllowedSubjectChar(c rune) bool {
 		c == '*' || c == '>'
 }
 
+// isStaticAssetPath reports whether p is a normalized public static asset path
+// under /assets/ or /shoelace/. It requires the cleaned path to remain under
+// one of those prefixes and rejects non-clean paths (such as dot or empty
+// segments left by %2e or %2f), any segment starting with a dot, and backslashes.
+func isStaticAssetPath(p string) bool {
+	if p == "" || p[0] != '/' || strings.Contains(p, "\\") {
+		return false
+	}
+	clean := cleanStaticPath(p)
+	if clean != p || hasDotSegment(clean) {
+		return false
+	}
+	return strings.HasPrefix(clean, "/assets/") || strings.HasPrefix(clean, "/shoelace/")
+}
+
 // isPublicRoute returns true for routes that do not require authentication.
 func isPublicRoute(path string) bool {
 	switch {
 	case path == "/healthz" || path == "/health" || path == "/readyz":
 		return true
-	case strings.HasPrefix(path, "/assets/"):
-		return true
-	case strings.HasPrefix(path, "/shoelace/"):
+	case isStaticAssetPath(path):
 		return true
 	case strings.HasPrefix(path, "/brand/"):
 		return true

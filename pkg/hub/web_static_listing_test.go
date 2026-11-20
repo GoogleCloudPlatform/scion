@@ -182,13 +182,22 @@ func TestStaticFile_DotPath404(t *testing.T) {
 				"/.env",
 				"/%2evite/manifest.json",
 			})
-			for _, h := range []http.Handler{ws.Handler(), signedIn} {
-				check(h, []string{
-					"/assets/.hidden",
-					"/assets/.missing",
-					"/shoelace/assets/.icons/check.svg",
-					"/assets/%2ehidden",
-				})
+			dotAssetTargets := []string{
+				"/assets/.hidden",
+				"/assets/.missing",
+				"/shoelace/assets/.icons/check.svg",
+				"/assets/%2ehidden",
+			}
+			// Signed-in requests reach serveStaticAsset and get 404.
+			check(signedIn, dotAssetTargets)
+			// Unauthenticated requests do not bypass session auth because
+			// dot-segment paths are not public static asset routes.
+			for _, target := range dotAssetTargets {
+				rec := getListing(t, ws.Handler(), target)
+				assert.Equal(t, http.StatusUnauthorized, rec.Code, target)
+				assert.NotContains(t, rec.Body.String(), listingMarker, target)
+				assert.NotContains(t, rec.Body.String(), "isEntry", target)
+				assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
 			}
 			// A deeper dot segment can be part of a client-side route: it
 			// still gets the shell, and never a file.
@@ -279,4 +288,87 @@ func TestHasDotSegment(t *testing.T) {
 	}
 	allocs := testing.AllocsPerRun(100, func() { _ = hasDotSegment("/shoelace/assets/icons/check-circle.svg") })
 	assert.Zero(t, allocs)
+}
+
+func TestStaticAsset_EncodedTraversalAndDiskContainment(t *testing.T) {
+	traversalTargets := []string{
+		"/assets/%2e%2e/favicon.svg",
+		"/assets/%2e%2e/.vite/manifest.json",
+		"/assets/%2e%2e/assets/main.js",
+		"/assets/%2e/main.js",
+		"/assets/sub/%2e%2e/main.js",
+		"/assets/%2ehidden",
+		"/shoelace/%2e%2e/favicon.svg",
+		"/shoelace/%2e%2e/.vite/manifest.json",
+		"/shoelace/%2e%2e/shoelace/assets/icons/check.svg",
+		"/shoelace/%2e/assets/icons/check.svg",
+		"/shoelace/assets/%2e%2e/assets/icons/check.svg",
+		"/shoelace/assets/%2eicons/check.svg",
+	}
+
+	for mode, servers := range listingServers(t) {
+		t.Run(mode, func(t *testing.T) {
+			ws, wsAuth := servers[0], servers[1]
+			signedIn := devSignedIn(t, wsAuth)
+
+			// Valid static assets under both prefixes remain publicly served.
+			for _, target := range []string{"/assets/main.js", "/shoelace/assets/icons/check.svg"} {
+				rec := getListing(t, wsAuth.Handler(), target)
+				assert.Equal(t, http.StatusOK, rec.Code, target)
+			}
+
+			// Encoded traversal and dot-segment paths must not bypass session
+			// auth on either server.
+			for _, h := range []http.Handler{ws.Handler(), wsAuth.Handler()} {
+				for _, target := range traversalTargets {
+					rec := getListing(t, h, target)
+					assert.Equal(t, http.StatusUnauthorized, rec.Code, "unauthenticated %s should not bypass auth", target)
+					assert.NotContains(t, rec.Body.String(), listingMarker, target)
+					assert.NotContains(t, rec.Body.String(), "isEntry", target)
+				}
+			}
+
+			// When authenticated (or hitting the mux directly), serveStaticAsset
+			// still refuses all encoded traversal and dot-segment paths with 404.
+			for _, h := range []http.Handler{ws.mux, signedIn} {
+				for _, target := range traversalTargets {
+					rec := getListing(t, h, target)
+					assert.Equal(t, http.StatusNotFound, rec.Code, target)
+					assert.NotContains(t, rec.Body.String(), listingMarker, target)
+					assert.NotContains(t, rec.Body.String(), "isEntry", target)
+				}
+			}
+		})
+	}
+
+	t.Run("tryServeStaticFile disk existence check stays inside assets dir", func(t *testing.T) {
+		outside := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(outside, "secret.txt"), []byte(listingMarker), 0o644))
+
+		dir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "assets"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "assets", "main.js"), []byte("// entry"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "favicon.svg"), []byte("<svg/>"), 0o644))
+		if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(dir, "escaped.txt")); err != nil {
+			t.Skipf("symlinks unsupported: %v", err)
+		}
+
+		ws := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
+
+		// A symlink pointing outside AssetsDir must not be treated as an
+		// existing static file by tryServeStaticFile.
+		for _, target := range []string{"/escaped.txt", "/../secret.txt", "/%2e%2e/secret.txt"} {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			rec := httptest.NewRecorder()
+			assert.False(t, ws.tryServeStaticFile(rec, req), "tryServeStaticFile(%q) should return false", target)
+			assert.NotContains(t, rec.Body.String(), listingMarker, target)
+		}
+
+		// A real file inside AssetsDir is still found and served.
+		req := httptest.NewRequest(http.MethodGet, "/favicon.svg", nil)
+		rec := httptest.NewRecorder()
+		assert.True(t, ws.tryServeStaticFile(rec, req))
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "<svg/>", rec.Body.String())
+	})
 }

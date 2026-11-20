@@ -371,17 +371,44 @@ func TestAdminModeWebMiddleware_APIRoutesPassThrough(t *testing.T) {
 func TestAdminModeWebMiddleware_StaticAssetsPassThrough(t *testing.T) {
 	ws := newTestWebServerWithMaintenance(true, "")
 	ws.mux.HandleFunc("/assets/main.js", passthrough)
+	ws.mux.HandleFunc("/shoelace/assets/icons/check.svg", passthrough)
 	ws.mux.HandleFunc("/favicon.ico", passthrough)
 
 	handler := ws.adminModeWebMiddleware(ws.mux)
 
-	for _, path := range []string{"/assets/main.js", "/favicon.ico"} {
+	for _, path := range []string{"/assets/main.js", "/shoelace/assets/icons/check.svg", "/favicon.ico"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 
 		if rr.Code != http.StatusOK {
 			t.Errorf("path %s should pass through in admin mode, got %d", path, rr.Code)
+		}
+	}
+}
+
+func TestAdminModeWebMiddleware_NonCleanStaticPathsBlocked(t *testing.T) {
+	ws := newTestWebServerWithMaintenance(true, "")
+	ws.mux.HandleFunc("/", passthrough)
+
+	handler := ws.adminModeWebMiddleware(ws.mux)
+
+	for _, target := range []string{
+		"/assets/%2e%2e/index.html",
+		"/assets/../index.html",
+		"/assets/.hidden",
+		"/assets/./main.js",
+		"/shoelace/%2e%2e/index.html",
+		"/shoelace/../index.html",
+		"/shoelace/.hidden",
+		"/shoelace/./assets/icons/check.svg",
+	} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Errorf("path %s should be blocked in admin mode, got %d", target, rr.Code)
 		}
 	}
 }
