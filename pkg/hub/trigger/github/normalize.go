@@ -948,6 +948,7 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		"event": true, "action": true, "sender": true, "sender_id": true,
 		"sender_type": true, "author_association": true, "number": true,
 		"is_pull_request": true, "is_fork": true, "draft": true, "merged": true,
+		"state": true, "mergeable_state": true, "head_repo": true, "enriched": true,
 		"stale": true, "payload_truncated": true, "lists_truncated": true,
 		"mention_detection": true, "mention": true, "command": true,
 		"head_ref": true, "head_sha": true, "base_ref": true, "base_sha": true,
@@ -999,6 +1000,9 @@ func enforceListsCeiling(lists map[string][]string, maxBytes int) (bool, error) 
 		longestKey := ""
 		longestCount := 0
 		for k, items := range lists {
+			if k == ListEnriched {
+				continue
+			}
 			if len(items) > longestCount || (len(items) == longestCount && len(items) > 0 && k > longestKey) {
 				longestCount = len(items)
 				longestKey = k

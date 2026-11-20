@@ -1609,6 +1609,39 @@ func (s *TriggerStore) CountPendingTriggerEvents(ctx context.Context, projectID 
 		Count(ctx)
 }
 
+func (s *TriggerStore) UpdateTriggerEventAttributes(ctx context.Context, id string, attributes map[string]string, lists map[string][]string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	attrsJSON, err := marshalStringMap(attributes)
+	if err != nil {
+		return err
+	}
+	listsJSON, err := marshalStringListMap(lists)
+	if err != nil {
+		return err
+	}
+	affected, err := s.client.TriggerEvent.Update().
+		Where(triggerevent.IDEQ(uid), triggerevent.StatusEQ(store.TriggerEventStatusPending)).
+		SetAttributes(attrsJSON).
+		SetLists(listsJSON).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		exists, exErr := s.client.TriggerEvent.Query().Where(triggerevent.IDEQ(uid)).Exist(ctx)
+		if exErr != nil {
+			return mapError(exErr)
+		}
+		if !exists {
+			return store.ErrNotFound
+		}
+	}
+	return nil
+}
+
 func (s *TriggerStore) MarkTriggerEventProcessed(ctx context.Context, id string, processedAt time.Time, matchCount, fireCount int) error {
 	uid, err := parseUUID(id)
 	if err != nil {

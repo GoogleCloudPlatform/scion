@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -242,6 +243,28 @@ func (m *memTriggerStore) ListTriggerEvents(context.Context, store.TriggerEventF
 }
 func (m *memTriggerStore) CountPendingTriggerEvents(context.Context, string) (int, error) {
 	return 0, nil
+}
+func (m *memTriggerStore) UpdateTriggerEventAttributes(_ context.Context, id string, attributes map[string]string, lists map[string][]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ev, ok := m.events[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	if ev.Status != store.TriggerEventStatusPending {
+		return nil
+	}
+	ev.Attributes = maps.Clone(attributes)
+	if lists != nil {
+		cp := make(map[string][]string, len(lists))
+		for k, vals := range lists {
+			s := make([]string, len(vals))
+			copy(s, vals)
+			cp[k] = s
+		}
+		ev.Lists = cp
+	}
+	return nil
 }
 func (m *memTriggerStore) MarkTriggerEventProcessed(_ context.Context, id string, processedAt time.Time, matchCount, fireCount int) error {
 	m.mu.Lock()

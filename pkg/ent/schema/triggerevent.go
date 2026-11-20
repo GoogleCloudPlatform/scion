@@ -63,11 +63,9 @@ func (TriggerEvent) Fields() []ent.Field {
 		field.Time("received_at").
 			Immutable(),
 		field.Text("attributes").
-			Default("{}").
-			Immutable(),
+			Default("{}"),
 		field.Text("lists").
-			Default("{}").
-			Immutable(),
+			Default("{}"),
 		field.Text("headers").
 			Default("{}").
 			Immutable(),

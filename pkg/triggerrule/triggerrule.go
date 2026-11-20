@@ -42,7 +42,7 @@ import (
 const (
 	ConsumerName       = "trigger"
 	EnvironmentName    = "trigger"
-	EnvironmentVersion = 1
+	EnvironmentVersion = 2
 )
 
 // Stage 1 trigger rule limits (§7.2, §4.2, §4.4, §8.1; mixed-rule-arrays §2.1, §6).
@@ -470,6 +470,13 @@ func NewEventActivation(ev hubfire.FireEvent) (Activation, error) {
 	attrs := make(map[string]string, len(ev.Attributes))
 	maps.Copy(attrs, ev.Attributes)
 
+	lists := make(map[string][]string, len(ev.Lists))
+	for k, vals := range ev.Lists {
+		cp := make([]string, len(vals))
+		copy(cp, vals)
+		lists[k] = cp
+	}
+
 	eventMap := map[string]any{
 		"id":   ev.ID,
 		"type": ev.Type,
@@ -481,6 +488,7 @@ func NewEventActivation(ev hubfire.FireEvent) (Activation, error) {
 		"occurred_at": ev.OccurredAt.UTC(),
 		"received_at": ev.ReceivedAt.UTC(),
 		"attributes":  attrs,
+		"lists":       lists,
 	}
 
 	if trimmed := bytes.TrimSpace(ev.Payload); len(trimmed) > 0 {

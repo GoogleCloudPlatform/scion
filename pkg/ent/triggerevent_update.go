@@ -28,6 +28,34 @@ func (_u *TriggerEventUpdate) Where(ps ...predicate.TriggerEvent) *TriggerEventU
 	return _u
 }
 
+// SetAttributes sets the "attributes" field.
+func (_u *TriggerEventUpdate) SetAttributes(v string) *TriggerEventUpdate {
+	_u.mutation.SetAttributes(v)
+	return _u
+}
+
+// SetNillableAttributes sets the "attributes" field if the given value is not nil.
+func (_u *TriggerEventUpdate) SetNillableAttributes(v *string) *TriggerEventUpdate {
+	if v != nil {
+		_u.SetAttributes(*v)
+	}
+	return _u
+}
+
+// SetLists sets the "lists" field.
+func (_u *TriggerEventUpdate) SetLists(v string) *TriggerEventUpdate {
+	_u.mutation.SetLists(v)
+	return _u
+}
+
+// SetNillableLists sets the "lists" field if the given value is not nil.
+func (_u *TriggerEventUpdate) SetNillableLists(v *string) *TriggerEventUpdate {
+	if v != nil {
+		_u.SetLists(*v)
+	}
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *TriggerEventUpdate) SetStatus(v string) *TriggerEventUpdate {
 	_u.mutation.SetStatus(v)
@@ -165,6 +193,12 @@ func (_u *TriggerEventUpdate) sqlSave(ctx context.Context) (_node int, err error
 			}
 		}
 	}
+	if value, ok := _u.mutation.Attributes(); ok {
+		_spec.SetField(triggerevent.FieldAttributes, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Lists(); ok {
+		_spec.SetField(triggerevent.FieldLists, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(triggerevent.FieldStatus, field.TypeString, value)
 	}
@@ -210,6 +244,34 @@ type TriggerEventUpdateOne struct {
 	fields   []string
 	hooks    []Hook
 	mutation *TriggerEventMutation
+}
+
+// SetAttributes sets the "attributes" field.
+func (_u *TriggerEventUpdateOne) SetAttributes(v string) *TriggerEventUpdateOne {
+	_u.mutation.SetAttributes(v)
+	return _u
+}
+
+// SetNillableAttributes sets the "attributes" field if the given value is not nil.
+func (_u *TriggerEventUpdateOne) SetNillableAttributes(v *string) *TriggerEventUpdateOne {
+	if v != nil {
+		_u.SetAttributes(*v)
+	}
+	return _u
+}
+
+// SetLists sets the "lists" field.
+func (_u *TriggerEventUpdateOne) SetLists(v string) *TriggerEventUpdateOne {
+	_u.mutation.SetLists(v)
+	return _u
+}
+
+// SetNillableLists sets the "lists" field if the given value is not nil.
+func (_u *TriggerEventUpdateOne) SetNillableLists(v *string) *TriggerEventUpdateOne {
+	if v != nil {
+		_u.SetLists(*v)
+	}
+	return _u
 }
 
 // SetStatus sets the "status" field.
@@ -378,6 +440,12 @@ func (_u *TriggerEventUpdateOne) sqlSave(ctx context.Context) (_node *TriggerEve
 				ps[i](selector)
 			}
 		}
+	}
+	if value, ok := _u.mutation.Attributes(); ok {
+		_spec.SetField(triggerevent.FieldAttributes, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.Lists(); ok {
+		_spec.SetField(triggerevent.FieldLists, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(triggerevent.FieldStatus, field.TypeString, value)

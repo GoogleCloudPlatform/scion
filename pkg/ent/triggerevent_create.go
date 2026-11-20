@@ -584,6 +584,30 @@ type (
 	}
 )
 
+// SetAttributes sets the "attributes" field.
+func (u *TriggerEventUpsert) SetAttributes(v string) *TriggerEventUpsert {
+	u.Set(triggerevent.FieldAttributes, v)
+	return u
+}
+
+// UpdateAttributes sets the "attributes" field to the value that was provided on create.
+func (u *TriggerEventUpsert) UpdateAttributes() *TriggerEventUpsert {
+	u.SetExcluded(triggerevent.FieldAttributes)
+	return u
+}
+
+// SetLists sets the "lists" field.
+func (u *TriggerEventUpsert) SetLists(v string) *TriggerEventUpsert {
+	u.Set(triggerevent.FieldLists, v)
+	return u
+}
+
+// UpdateLists sets the "lists" field to the value that was provided on create.
+func (u *TriggerEventUpsert) UpdateLists() *TriggerEventUpsert {
+	u.SetExcluded(triggerevent.FieldLists)
+	return u
+}
+
 // SetStatus sets the "status" field.
 func (u *TriggerEventUpsert) SetStatus(v string) *TriggerEventUpsert {
 	u.Set(triggerevent.FieldStatus, v)
@@ -712,12 +736,6 @@ func (u *TriggerEventUpsertOne) UpdateNewValues() *TriggerEventUpsertOne {
 		if _, exists := u.create.mutation.ReceivedAt(); exists {
 			s.SetIgnore(triggerevent.FieldReceivedAt)
 		}
-		if _, exists := u.create.mutation.Attributes(); exists {
-			s.SetIgnore(triggerevent.FieldAttributes)
-		}
-		if _, exists := u.create.mutation.Lists(); exists {
-			s.SetIgnore(triggerevent.FieldLists)
-		}
 		if _, exists := u.create.mutation.Headers(); exists {
 			s.SetIgnore(triggerevent.FieldHeaders)
 		}
@@ -759,6 +777,34 @@ func (u *TriggerEventUpsertOne) Update(set func(*TriggerEventUpsert)) *TriggerEv
 		set(&TriggerEventUpsert{UpdateSet: update})
 	}))
 	return u
+}
+
+// SetAttributes sets the "attributes" field.
+func (u *TriggerEventUpsertOne) SetAttributes(v string) *TriggerEventUpsertOne {
+	return u.Update(func(s *TriggerEventUpsert) {
+		s.SetAttributes(v)
+	})
+}
+
+// UpdateAttributes sets the "attributes" field to the value that was provided on create.
+func (u *TriggerEventUpsertOne) UpdateAttributes() *TriggerEventUpsertOne {
+	return u.Update(func(s *TriggerEventUpsert) {
+		s.UpdateAttributes()
+	})
+}
+
+// SetLists sets the "lists" field.
+func (u *TriggerEventUpsertOne) SetLists(v string) *TriggerEventUpsertOne {
+	return u.Update(func(s *TriggerEventUpsert) {
+		s.SetLists(v)
+	})
+}
+
+// UpdateLists sets the "lists" field to the value that was provided on create.
+func (u *TriggerEventUpsertOne) UpdateLists() *TriggerEventUpsertOne {
+	return u.Update(func(s *TriggerEventUpsert) {
+		s.UpdateLists()
+	})
 }
 
 // SetStatus sets the "status" field.
@@ -1069,12 +1115,6 @@ func (u *TriggerEventUpsertBulk) UpdateNewValues() *TriggerEventUpsertBulk {
 			if _, exists := b.mutation.ReceivedAt(); exists {
 				s.SetIgnore(triggerevent.FieldReceivedAt)
 			}
-			if _, exists := b.mutation.Attributes(); exists {
-				s.SetIgnore(triggerevent.FieldAttributes)
-			}
-			if _, exists := b.mutation.Lists(); exists {
-				s.SetIgnore(triggerevent.FieldLists)
-			}
 			if _, exists := b.mutation.Headers(); exists {
 				s.SetIgnore(triggerevent.FieldHeaders)
 			}
@@ -1117,6 +1157,34 @@ func (u *TriggerEventUpsertBulk) Update(set func(*TriggerEventUpsert)) *TriggerE
 		set(&TriggerEventUpsert{UpdateSet: update})
 	}))
 	return u
+}
+
+// SetAttributes sets the "attributes" field.
+func (u *TriggerEventUpsertBulk) SetAttributes(v string) *TriggerEventUpsertBulk {
+	return u.Update(func(s *TriggerEventUpsert) {
+		s.SetAttributes(v)
+	})
+}
+
+// UpdateAttributes sets the "attributes" field to the value that was provided on create.
+func (u *TriggerEventUpsertBulk) UpdateAttributes() *TriggerEventUpsertBulk {
+	return u.Update(func(s *TriggerEventUpsert) {
+		s.UpdateAttributes()
+	})
+}
+
+// SetLists sets the "lists" field.
+func (u *TriggerEventUpsertBulk) SetLists(v string) *TriggerEventUpsertBulk {
+	return u.Update(func(s *TriggerEventUpsert) {
+		s.SetLists(v)
+	})
+}
+
+// UpdateLists sets the "lists" field to the value that was provided on create.
+func (u *TriggerEventUpsertBulk) UpdateLists() *TriggerEventUpsertBulk {
+	return u.Update(func(s *TriggerEventUpsert) {
+		s.UpdateLists()
+	})
 }
 
 // SetStatus sets the "status" field.
