@@ -505,7 +505,7 @@ func TestTriggerPresets_MatchFormRoundTripAndPatchClear(t *testing.T) {
 	patchReapplyRec := doJSON(http.MethodPatch, triggersBase+"/"+created.ID, UpdateTriggerRequest{
 		Match: &TriggerMatchPatchSpec{
 			Rules: &compiledRules,
-			Form:  &newFormRaw,
+			Form:  TriggerMatchFormPatch{Set: true, Raw: newFormRaw},
 		},
 	})
 	require.Equal(t, http.StatusOK, patchReapplyRec.Code, patchReapplyRec.Body.String())
@@ -524,7 +524,98 @@ func TestTriggerPresets_MatchFormRoundTripAndPatchClear(t *testing.T) {
 	require.NoError(t, json.Unmarshal(patchExprRec.Body.Bytes(), &afterExpr))
 	assert.Empty(t, afterExpr.Match.Form, "PATCH of scalar match.expr must clear match.form")
 
-	// 7. Invalid match.form (non-object array) returns 400.
+	// 7. Re-apply form, then explicit PATCH {"match":{"form":null}} clears it (O1).
+	patchSetFormRec := doJSON(http.MethodPatch, triggersBase+"/"+created.ID, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{
+			Form: TriggerMatchFormPatch{Set: true, Raw: newFormRaw},
+		},
+	})
+	require.Equal(t, http.StatusOK, patchSetFormRec.Code, patchSetFormRec.Body.String())
+	var afterSetForm TriggerResponse
+	require.NoError(t, json.Unmarshal(patchSetFormRec.Body.Bytes(), &afterSetForm))
+	assert.JSONEq(t, string(newFormRaw), string(afterSetForm.Match.Form))
+
+	nullFormReq := httptest.NewRequest(http.MethodPatch, triggersBase+"/"+created.ID, bytes.NewReader([]byte(`{"match":{"form":null}}`)))
+	nullFormReq.Header.Set("Content-Type", "application/json")
+	nullFormReq = nullFormReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(ctx, adminAuth),
+		CredentialContext{Kind: CredentialKindInteractive},
+	))
+	nullFormRec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(nullFormRec, nullFormReq)
+	require.Equal(t, http.StatusOK, nullFormRec.Code, nullFormRec.Body.String())
+	var afterNullForm TriggerResponse
+	require.NoError(t, json.Unmarshal(nullFormRec.Body.Bytes(), &afterNullForm))
+	assert.Empty(t, afterNullForm.Match.Form, "explicit PATCH match.form: null must clear match.form")
+
+	getAfterNullRec := doJSON(http.MethodGet, triggersBase+"/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getAfterNullRec.Code)
+	var fetchedAfterNull TriggerResponse
+	require.NoError(t, json.Unmarshal(getAfterNullRec.Body.Bytes(), &fetchedAfterNull))
+	assert.Empty(t, fetchedAfterNull.Match.Form)
+
+	// 8. Re-apply form, then PATCH changing only match.types clears match.form (O3).
+	patchSetForm2Rec := doJSON(http.MethodPatch, triggersBase+"/"+created.ID, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{
+			Form: TriggerMatchFormPatch{Set: true, Raw: newFormRaw},
+		},
+	})
+	require.Equal(t, http.StatusOK, patchSetForm2Rec.Code, patchSetForm2Rec.Body.String())
+
+	editedTypes := []string{"github.issue_comment.created"}
+	patchTypesRec := doJSON(http.MethodPatch, triggersBase+"/"+created.ID, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{
+			Types: &editedTypes,
+		},
+	})
+	require.Equal(t, http.StatusOK, patchTypesRec.Code, patchTypesRec.Body.String())
+	var afterTypes TriggerResponse
+	require.NoError(t, json.Unmarshal(patchTypesRec.Body.Bytes(), &afterTypes))
+	assert.Empty(t, afterTypes.Match.Form, "PATCH changing only match.types must clear match.form")
+
+	// 9. 16 KiB maxTriggerMatchFormBytes boundary: exact limit accepted, limit+1 refused (O3).
+	const formPrefix = `{"p":"`
+	const formSuffix = `"}`
+	exactForm := json.RawMessage(formPrefix + strings.Repeat("a", maxTriggerMatchFormBytes-len(formPrefix)-len(formSuffix)) + formSuffix)
+	require.Len(t, exactForm, maxTriggerMatchFormBytes)
+	atLimitRec := doJSON(http.MethodPost, triggersBase, CreateTriggerRequest{
+		Name:   "preset-form-at-limit",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: compiled.Match.Types,
+			Rules: compiledRules,
+			Form:  exactForm,
+		},
+		Action: TriggerActionSpec{
+			Type:    store.TriggerActionMessage,
+			AgentID: targetAgentID,
+			Message: "hi",
+		},
+	})
+	require.Equal(t, http.StatusCreated, atLimitRec.Code, atLimitRec.Body.String())
+	var atLimitResp TriggerResponse
+	require.NoError(t, json.Unmarshal(atLimitRec.Body.Bytes(), &atLimitResp))
+	assert.JSONEq(t, string(exactForm), string(atLimitResp.Match.Form))
+
+	overLimitForm := json.RawMessage(formPrefix + strings.Repeat("a", maxTriggerMatchFormBytes-len(formPrefix)-len(formSuffix)+1) + formSuffix)
+	require.Len(t, overLimitForm, maxTriggerMatchFormBytes+1)
+	overLimitRec := doJSON(http.MethodPost, triggersBase, CreateTriggerRequest{
+		Name:   "preset-form-over-limit",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match: &TriggerMatchSpec{
+			Types: compiled.Match.Types,
+			Rules: compiledRules,
+			Form:  overLimitForm,
+		},
+		Action: TriggerActionSpec{
+			Type:    store.TriggerActionMessage,
+			AgentID: targetAgentID,
+			Message: "hi",
+		},
+	})
+	assert.Equal(t, http.StatusBadRequest, overLimitRec.Code, overLimitRec.Body.String())
+
+	// 10. Invalid match.form (non-object array and non-UTF-8 bytes) returns 400 (O3).
 	badRec := doJSON(http.MethodPost, triggersBase, CreateTriggerRequest{
 		Name:   "preset-bad-form",
 		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
@@ -540,4 +631,20 @@ func TestTriggerPresets_MatchFormRoundTripAndPatchClear(t *testing.T) {
 		},
 	})
 	assert.Equal(t, http.StatusBadRequest, badRec.Code, badRec.Body.String())
+
+	_, utf8Err := validateTriggerMatchForm(json.RawMessage("{\"k\":\"\xff\"}"))
+	require.Error(t, utf8Err)
+	assert.Contains(t, utf8Err.Error(), "UTF-8")
+
+	nonUTF8Body := append([]byte(`{"name":"preset-non-utf8","source":{"kind":"github","id":""},"match":{"types":["github.issue_comment.created"],"form":{"k":"`), 0xff)
+	nonUTF8Body = append(nonUTF8Body, []byte(`"}},"action":{"type":"message","agentId":"`+targetAgentID+`","message":"hi"}}`)...)
+	nonUTF8Req := httptest.NewRequest(http.MethodPost, triggersBase, bytes.NewReader(nonUTF8Body))
+	nonUTF8Req.Header.Set("Content-Type", "application/json")
+	nonUTF8Req = nonUTF8Req.WithContext(contextWithCredentialContext(
+		contextWithIdentity(ctx, adminAuth),
+		CredentialContext{Kind: CredentialKindInteractive},
+	))
+	nonUTF8Rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(nonUTF8Rec, nonUTF8Req)
+	assert.Equal(t, http.StatusBadRequest, nonUTF8Rec.Code, nonUTF8Rec.Body.String())
 }

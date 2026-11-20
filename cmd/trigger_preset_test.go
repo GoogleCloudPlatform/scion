@@ -283,3 +283,68 @@ func TestTriggerPresetCLI_ApplyDryRunFieldCoercionAndActionValidation(t *testing
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid boolean value")
 }
+
+func TestTriggerPresetCLI_ApplyRefusesReuseAndCoalesceWindow(t *testing.T) {
+	resetTriggerPresetFlags(t)
+
+	var createCalled bool
+	schema := hubclient.TriggerPreset{
+		ID:      "github.pr_updated",
+		Source:  "github",
+		Version: 1,
+		Title:   "PR updated",
+	}
+	compiledResp := hubclient.CompiledTriggerPreset{
+		Match: hubclient.CompiledTriggerMatch{
+			Types: []string{"github.pull_request.synchronize"},
+			Rules: []hubclient.CompiledTriggerRule{
+				{Dialect: "cel", Expr: "event.attributes.sender_type != 'Bot'"},
+			},
+		},
+		Subject: hubclient.CompiledTriggerSubject{
+			Mode:           "reuse",
+			CoalesceWindow: "30s",
+		},
+		Form: hubclient.CompiledTriggerForm{
+			Preset:  "github.pr_updated",
+			Version: 1,
+			Fields:  map[string]any{"coalesce_window": "30s"},
+		},
+	}
+
+	withMockTriggerPresetHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trigger-presets":
+			_ = json.NewEncoder(w).Encode([]hubclient.TriggerPreset{schema})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/trigger-presets/compile":
+			_ = json.NewEncoder(w).Encode(compiledResp)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+			createCalled = true
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.Trigger{ID: "tr-1"})
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindOAuth)
+
+	// --dry-run still works to preview the compiled rule.
+	triggerPresetApplyDryRun = true
+	dryOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.pr_updated"}))
+	})
+	assert.Contains(t, dryOut, "mode=reuse, coalesce_window=30s")
+	assert.False(t, createCalled)
+
+	// Applying without --dry-run refuses client-side before calling Create.
+	triggerPresetApplyDryRun = false
+	triggerPresetApplyName = "pr-updated-trigger"
+	triggerPresetApplyAgent = "lead"
+	triggerPresetApplyMessage = "Handle PR update"
+	err := runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.pr_updated"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not yet supported")
+	assert.Contains(t, err.Error(), "reuse")
+	assert.Contains(t, err.Error(), "30s")
+	assert.False(t, createCalled, "apply must refuse client-side before calling Create")
+}

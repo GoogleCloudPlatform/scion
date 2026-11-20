@@ -72,13 +72,42 @@ type CreateTriggerRequest struct {
 	Subject     *TriggerSubjectSpec `json:"subject,omitempty"`
 }
 
+// TriggerMatchFormPatch tracks explicit presence of match.form in PATCH
+// requests so {"form": null} is distinguished from an omitted "form" field.
+type TriggerMatchFormPatch struct {
+	Set bool
+	Raw json.RawMessage
+}
+
+// IsZero reports whether the form patch field was omitted.
+func (p TriggerMatchFormPatch) IsZero() bool {
+	return !p.Set
+}
+
+// UnmarshalJSON records that match.form was explicitly present in the request,
+// including when its JSON value is null.
+func (p *TriggerMatchFormPatch) UnmarshalJSON(data []byte) error {
+	p.Set = true
+	p.Raw = append(p.Raw[:0], data...)
+	return nil
+}
+
+// MarshalJSON encodes an explicitly set match.form value (defaulting to null
+// when Set is true and Raw is empty).
+func (p TriggerMatchFormPatch) MarshalJSON() ([]byte, error) {
+	if !p.Set || len(p.Raw) == 0 {
+		return []byte("null"), nil
+	}
+	return p.Raw, nil
+}
+
 // TriggerMatchPatchSpec holds partial updates to a trigger's match block.
 type TriggerMatchPatchSpec struct {
 	Types   *[]string               `json:"types,omitempty"`
 	Dialect *string                 `json:"dialect,omitempty"`
 	Expr    *string                 `json:"expr,omitempty"`
 	Rules   *[]TriggerMatchRuleSpec `json:"rules,omitempty"`
-	Form    *json.RawMessage        `json:"form,omitempty"`
+	Form    TriggerMatchFormPatch   `json:"form,omitzero"`
 }
 
 // TriggerSubjectPatchSpec holds partial updates to a trigger's subject block.
@@ -768,8 +797,8 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			fields.MatchDialect = true
 			fields.MatchRule = true
 		}
-		if req.Match.Form != nil {
-			validatedForm, fErr := validateTriggerMatchForm(*req.Match.Form)
+		if req.Match.Form.Set {
+			validatedForm, fErr := validateTriggerMatchForm(req.Match.Form.Raw)
 			if fErr != nil {
 				ValidationError(w, fErr.Error(), nil)
 				return

@@ -510,6 +510,15 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	if compiled.Subject.Mode == "reuse" || strings.TrimSpace(compiled.Subject.CoalesceWindow) != "" {
+		return newUsageError(
+			"preset %q compiles to subject policy (mode=%q, coalesce_window=%q) which is not yet supported; use --dry-run to inspect the compiled rule",
+			triggerTerminalText(presetID, false),
+			triggerTerminalText(compiled.Subject.Mode, false),
+			triggerTerminalText(compiled.Subject.CoalesceWindow, false),
+		)
+	}
+
 	sourceKind := ""
 	if schema != nil {
 		sourceKind = strings.TrimSpace(schema.Source)
