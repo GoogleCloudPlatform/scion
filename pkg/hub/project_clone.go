@@ -336,6 +336,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	if err := s.cloneProjectHarnessConfigs(ctx, src.ID, clone, &rollback); err != nil {
 		slog.Error("project clone: harness config copy failed",
 			"source_id", src.ID, "clone_id", clone.ID, "error", err)
+		if writeHarnessConfigSlugReserved(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to copy harness configs: "+err.Error(), nil)
 		return
@@ -568,6 +571,9 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 	})
 
 	for _, srcHC := range result.Items {
+		if err := s.checkHarnessConfigSlugNotGlobal(ctx, store.HarnessConfigScopeProject, srcHC.Slug); err != nil {
+			return err
+		}
 		// Harness is the fallback for a config.yaml that sets none; Config
 		// is never copied: the commit below re-derives Harness and Config
 		// from the copied files (ptone/scion#4219).

@@ -850,11 +850,16 @@ func (p *harnessConfigPersistence) GetBySlug(ctx context.Context, slug, scope, s
 	return harnessConfigToRecord(hc), nil
 }
 
-// Create writes the pending row. It carries no files and no derived Config:
+// Create writes the pending row. On a hosted hub a project-scope row cannot
+// take the slug of a global harness config (checkHarnessConfigSlugNotGlobal).
+// It carries no files and no derived Config:
 // the Update that follows the upload commits both through
 // commitHarnessConfigFiles. Harness is set because the column is non-empty;
 // the commit replaces it with the derived value.
 func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceRecord, cd *collectedDir) error {
+	if err := p.s.checkHarnessConfigSlugNotGlobal(ctx, rec.Scope, rec.Slug); err != nil {
+		return err
+	}
 	harnessType := p.harness
 	if idx := deriveHarnessConfigIndexFromCollected(cd, rec.Name); idx.Harness != "" {
 		harnessType = idx.Harness
