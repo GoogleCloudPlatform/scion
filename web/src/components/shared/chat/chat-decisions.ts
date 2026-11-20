@@ -66,7 +66,7 @@ import {
   answerDecision,
   answerDecisionSet,
   answerabilityFromDenial,
-  dismissAvailableAtMs,
+  dismissAvailableAtMsForDecisions,
   dismissDecisionPrompt,
   fetchAskerAnswerability,
   isClosedUnanswered,
@@ -1557,7 +1557,10 @@ export class ScionChatDecisions extends LitElement {
   }
 
   private get dismissAvailableAtMsEffective(): number {
-    return Math.max(dismissAvailableAtMs(this.createdAt), this.dismissAvailableAtOverrideMs);
+    return Math.max(
+      dismissAvailableAtMsForDecisions(this.views, this.createdAt),
+      this.dismissAvailableAtOverrideMs
+    );
   }
 
   private get dismissRemainingMin(): number {

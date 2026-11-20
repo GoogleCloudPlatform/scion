@@ -34,6 +34,7 @@ const {
   applyDecisionHistoryMaps,
   carryDecisionFields,
   dismissAvailableAtMs,
+  dismissAvailableAtMsForDecisions,
   dismissDecisionPrompt,
   dismissDialogRows,
   dismissRemainingMinutes,
@@ -654,6 +655,37 @@ describe('dismissRemainingMinutes and dismissDecisionPrompt', () => {
     expect(dismissRemainingMinutes(created, createdMs + 4 * 60_000 + 59_000)).toBe(1);
     expect(dismissRemainingMinutes(created, createdMs + 5 * 60_000)).toBe(0);
     expect(dismissRemainingMinutes('not-a-date', createdMs)).toBe(0);
+  });
+
+  it('prefers hub-provided DecisionView.dismissAvailableAt and falls back to createdAt + 5m', () => {
+    const created = '2026-11-16T09:00:00Z';
+    const createdMs = Date.parse(created);
+    const shortAvail = '2026-11-16T09:00:10Z';
+    const laterAvail = '2026-11-16T09:00:20Z';
+
+    // Falls back to createdAt + DISMISS_MIN_AGE_MS when no decision carries dismissAvailableAt.
+    expect(dismissAvailableAtMsForDecisions([view()], created)).toBe(
+      createdMs + DISMISS_MIN_AGE_MS
+    );
+    expect(dismissAvailableAtMsForDecisions(undefined, created)).toBe(
+      createdMs + DISMISS_MIN_AGE_MS
+    );
+
+    // Prefers earliest open decision's hub-computed dismissAvailableAt over fallback.
+    expect(
+      dismissAvailableAtMsForDecisions(
+        [
+          view({
+            rowId: 'r-closed',
+            status: 'decided',
+            dismissAvailableAt: '2026-11-16T09:00:05Z',
+          }),
+          view({ rowId: 'r-open-2', status: 'pending', dismissAvailableAt: laterAvail }),
+          view({ rowId: 'r-open-1', status: 'pending', dismissAvailableAt: shortAvail }),
+        ],
+        created
+      )
+    ).toBe(Date.parse(shortAvail));
   });
 
   it('posts trimmed reason and surface to /dismiss and reads 200 response', async () => {

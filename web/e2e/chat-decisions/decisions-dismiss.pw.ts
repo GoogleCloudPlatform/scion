@@ -16,10 +16,10 @@
  * Real-hub end-to-end Playwright scenario for user decision dismissal
  * (ptone/scion#8216, ptone/scion#8217, ptone/scion#8218, parent ptone/scion#8194):
  *   1. All scenario prompts (a 3-row set in a topic, a single topic prompt, and
- *      a 2-row DM set) are asked up front at t=0 so the fixed 5-minute
- *      `store.DecisionDismissMinAge` window is traversed once against an
- *      unmodified hub binary (no test clock hook exists in production).
- *   2. Inside the 5-minute grace window: verifies disabled UI state + countdown
+ *      a 2-row DM set) are asked up front at t=0 against a test-mode hub whose
+ *      `--test-decision-dismiss-min-age=10s` shortens the grace window for E2E
+ *      (ptone/scion#8582; production enforces 5 minutes).
+ *   2. Inside the grace window: verifies disabled UI state + countdown
  *      tooltip on both surfaces, hub `409 too_recent` with `availableAt`, and
  *      DM dismissal refusal (`404`) for a non-participant admin (acceptance 12).
  *   3. Once `availableAt` arrives: verifies live timer unlock without reload,
@@ -233,9 +233,6 @@ async function fetchDecisionsBellRow(
 }
 
 test.describe('Dismiss decisions on real hub (ptone/scion#8216, ptone/scion#8217, ptone/scion#8218)', () => {
-  // Traverses the real 5-minute DecisionDismissMinAge window once for all seeded prompts.
-  test.setTimeout(600_000);
-
   let hub!: HubState;
   let projectId = '';
   let topicId = '';

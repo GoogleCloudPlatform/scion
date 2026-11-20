@@ -27,7 +27,7 @@ import { css, html, nothing, type CSSResult, type TemplateResult } from 'lit';
 import { repeat } from 'lit/directives/repeat.js';
 
 import {
-  dismissAvailableAtMs,
+  dismissAvailableAtMsForDecisions,
   isOtherAnswer,
   type DecisionAnsweredDetail,
 } from '../../client/decision-prompts.js';
@@ -867,7 +867,8 @@ export function renderPromptCard(
       : null;
   const mode = p.answerMode === 'set' || p.answerMode === 'single' ? p.answerMode : undefined;
   const remainingMin = opts.dismissRemainingMin ?? 0;
-  const availMs = opts.dismissAvailableAtMs ?? dismissAvailableAtMs(p.createdAt);
+  const availMs =
+    opts.dismissAvailableAtMs ?? dismissAvailableAtMsForDecisions(p.decisions, p.createdAt);
   const isSelected = Boolean(opts.selected);
   const canDismissAnyRow =
     opts.canSelect ?? promptWaitingOnViewerRows(p, opts.currentUserId).length > 0;

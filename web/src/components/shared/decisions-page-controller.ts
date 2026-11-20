@@ -27,7 +27,7 @@ import type { DecisionView, PageData } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
 import {
   actionableReason,
-  dismissAvailableAtMs,
+  dismissAvailableAtMsForDecisions,
   dismissDecisionPrompt,
   fetchAskerAnswerability,
   newerDecisionView,
@@ -1553,7 +1553,10 @@ export class DecisionsPageController implements ReactiveController {
 
   promptDismissAvailableAtMs = (prompt: ProjectDecisionPromptView): number => {
     const overrideMs = this.dismissAvailableAtOverrides.get(prompt.promptMessageId) ?? 0;
-    return Math.max(dismissAvailableAtMs(prompt.createdAt), overrideMs);
+    return Math.max(
+      dismissAvailableAtMsForDecisions(prompt.decisions, prompt.createdAt),
+      overrideMs
+    );
   };
 
   promptDismissRemainingMinutes = (prompt: ProjectDecisionPromptView): number => {
@@ -1574,8 +1577,7 @@ export class DecisionsPageController implements ReactiveController {
     for (const p of this.pendingPrompts) {
       if (!p.waitingOnYou || !p.canAnswer) continue;
       if (promptWaitingOnViewerRows(p, this.currentUserId).length === 0) continue;
-      const overrideMs = this.dismissAvailableAtOverrides.get(p.promptMessageId) ?? 0;
-      const availMs = Math.max(dismissAvailableAtMs(p.createdAt), overrideMs);
+      const availMs = this.promptDismissAvailableAtMs(p);
       if (availMs > nowMs && availMs < earliestMs) {
         earliestMs = availMs;
       }

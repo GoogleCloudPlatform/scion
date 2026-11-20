@@ -1886,6 +1886,8 @@ export interface DecisionView {
   replacedBy?: DecisionReplacedBy;
   withdrawn?: DecisionWithdrawn;
   dismissed?: DecisionDismissed;
+  /** Hub-computed RFC3339 timestamp when this decision reaches the dismiss minimum age. */
+  dismissAvailableAt?: string;
   /** The effective answer; absent while pending, withdrawn, or dismissed. */
   decision?: AnswerView;
 }
