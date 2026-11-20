@@ -61,7 +61,7 @@ func (s *Server) authenticateBrokerUpgrade(w http.ResponseWriter, r *http.Reques
 	}
 	if _, err := s.brokerAuthService.ValidateBrokerSignature(r.Context(), r); err != nil {
 		slog.Error("HMAC validation failed for broker", "brokerID", brokerID, "error", err)
-		if errors.Is(err, errBrokerAuthBodyTooLarge) {
+		if errors.Is(err, errBrokerAuthBodyTooLarge) || errors.Is(err, errBrokerAuthUnknownBroker) {
 			writeBrokerAuthFailure(w, err)
 			return "", false
 		}
@@ -111,7 +111,7 @@ func (s *Server) decideConduitBroker(w http.ResponseWriter, r *http.Request, for
 	broker, err := s.store.GetRuntimeBroker(r.Context(), brokerID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Runtime broker no longer exists", nil)
+			writeError(w, http.StatusUnauthorized, ErrCodeBrokerDeregistered, "Runtime broker no longer exists", nil)
 			return conduitAdmission{}, false
 		}
 		writeErrorFromErr(w, err, "")

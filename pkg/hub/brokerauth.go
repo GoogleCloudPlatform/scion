@@ -1668,7 +1668,9 @@ func writeBrokerAuthError(w http.ResponseWriter, message string) {
 }
 
 // writeBrokerAuthFailure answers a failed broker signature check: 413 for a
-// body over apiclient.MaxSignedRequestBodyBytes, otherwise the 401 of
+// body over apiclient.MaxSignedRequestBodyBytes, 401 broker_deregistered for
+// an unknown/deregistered broker (so the broker treats it as terminal and
+// stops retrying), otherwise the 401 broker_auth_failed of
 // writeBrokerAuthError.
 // The HTTP error code "payload_too_large" follows the hub's existing 413
 // responses; the audit failure code for the same refusal is "malformed"
@@ -1676,6 +1678,10 @@ func writeBrokerAuthError(w http.ResponseWriter, message string) {
 func writeBrokerAuthFailure(w http.ResponseWriter, err error) {
 	if errors.Is(err, errBrokerAuthBodyTooLarge) {
 		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", err.Error(), nil)
+		return
+	}
+	if errors.Is(err, errBrokerAuthUnknownBroker) {
+		writeError(w, http.StatusUnauthorized, ErrCodeBrokerDeregistered, err.Error(), nil)
 		return
 	}
 	writeBrokerAuthError(w, err.Error())

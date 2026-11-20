@@ -288,8 +288,9 @@ func (d *ConduitDialer) decide(end conduit.End, delay time.Duration) (time.Durat
 	if errors.As(end.DialErr, &pre) {
 		// A pre-upgrade refusal is a fallback, not a session failure:
 		// it uses the probe backoff and leaves the session backoff alone.
+		// A broker_deregistered refusal is terminal and stops the dialer.
 		d.session.Reset()
-		return d.fallback(pre), nil
+		return d.fallback(pre)
 	}
 	if end.DialErr == nil {
 		// A session was established: the next refusal probes from the
@@ -320,17 +321,23 @@ func (d *ConduitDialer) decide(end conduit.End, delay time.Duration) (time.Durat
 	return delay, nil
 }
 
-// fallback logs a pre-upgrade refusal and returns the re-probe delay.
-func (d *ConduitDialer) fallback(e *conduitPreUpgradeError) time.Duration {
+// fallback logs a pre-upgrade refusal and returns the re-probe delay, or a
+// terminal error when the hub answered that the broker is deregistered.
+func (d *ConduitDialer) fallback(e *conduitPreUpgradeError) (time.Duration, error) {
 	refusal := parseHubRefusal(e.StatusCode, []byte(e.Body))
+	if refusal.brokerDeregistered() {
+		d.log.Error("Conduit: broker is deregistered on the Hub; stopping conduit reconnects. Re-register the broker to reconnect.",
+			"broker_id", d.cfg.BrokerID, "status", e.StatusCode, "error", refusal.Message)
+		return 0, errBrokerDeregistered
+	}
 	d.transportRefused.Store(refusal.transportPolicy())
 	switch {
 	case e.StatusCode == http.StatusNotFound:
 		d.log.Info("Conduit: hub does not serve conduit sessions (HTTP 404); using the control channel only", "retry_in", conduitProbeMax)
-		return conduitProbeMax
+		return conduitProbeMax, nil
 	case e.agentsOnly():
 		d.log.Info("Conduit: hub admits agent principals only (HTTP 403); using the control channel only", "retry_in", conduitProbeMax)
-		return conduitProbeMax
+		return conduitProbeMax, nil
 	}
 	delay := d.probe.Next()
 	switch {
@@ -342,7 +349,7 @@ func (d *ConduitDialer) fallback(e *conduitPreUpgradeError) time.Duration {
 	default:
 		d.log.Warn("Conduit: connect failed; using the control channel only", "error", e.DialError, "retry_in", delay)
 	}
-	return delay
+	return delay, nil
 }
 
 func conduitEndCause(end conduit.End) string {
