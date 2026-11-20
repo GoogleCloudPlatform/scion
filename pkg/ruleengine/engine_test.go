@@ -1440,10 +1440,11 @@ func TestDenyByDefault_DialectForEnforcesAllFiveReasons(t *testing.T) {
 }
 
 type budgetProbeDialect struct {
-	name        string
-	maxEvalTime time.Duration
-	waitCtxDone bool
-	evalCalls   atomic.Int32
+	name                 string
+	maxEvalTime          time.Duration
+	waitCtxDone          bool
+	returnBeforeDeadline time.Duration
+	evalCalls            atomic.Int32
 }
 
 func (d *budgetProbeDialect) Name() string { return d.name }
@@ -1458,6 +1459,22 @@ func (d *budgetProbeDialect) Compile(_ context.Context, rule string, kind ruleen
 }
 func (d *budgetProbeDialect) Evaluate(ctx context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
 	d.evalCalls.Add(1)
+	if d.returnBeforeDeadline > 0 {
+		if deadline, ok := ctx.Deadline(); ok {
+			if wait := time.Until(deadline) - d.returnBeforeDeadline; wait > 0 {
+				timer := time.NewTimer(wait)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+				}
+			}
+		}
+		return ruleengine.Decision{}, &ruleengine.FailedError{
+			Reason: celengine.ReasonTimeout,
+			Cause:  context.DeadlineExceeded,
+		}
+	}
 	if d.waitCtxDone {
 		<-ctx.Done()
 		return ruleengine.Decision{}, &ruleengine.FailedError{
@@ -1625,5 +1642,58 @@ func TestEvaluate_BoundFromTrackerTimeoutExhaustsTracker(t *testing.T) {
 	}
 	if wideTracker.Exhausted() || wideTracker.Remaining() <= 0 {
 		t.Fatalf("wideTracker unexpectedly exhausted on dialect timeout: Exhausted=%v Remaining=%s", wideTracker.Exhausted(), wideTracker.Remaining())
+	}
+}
+
+func TestEvaluate_MarginWindowTimeoutExhaustsTracker(t *testing.T) {
+	eng := ruleengine.NewEngine()
+	// Tracker limit 200ms (< 500ms dialect MaxEvalTime => boundFromTracker is true).
+	// EngineDeadlineMargin(200ms) is 10ms, so returning 5ms before evalCtx.Deadline()
+	// lands inside [190ms, 200ms): elapsed >= evalTimeout - margin while elapsed < evalTimeout.
+	// Charge(elapsed) alone would leave ~5ms remaining, so this test directly guards
+	// budget.Tracker.Exhaust() on the margin-window exhaustion path.
+	const trackerLimit = 200 * time.Millisecond
+	margin := ruleengine.EngineDeadlineMargin(trackerLimit)
+	marginDialect := &budgetProbeDialect{
+		name:                 "margin_timeout",
+		maxEvalTime:          500 * time.Millisecond,
+		returnBeforeDeadline: margin / 2,
+	}
+	if err := eng.Register(marginDialect); err != nil {
+		t.Fatalf("Register margin_timeout: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("triggers", ruleengine.Grant("margin_timeout")); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
+	comp, err := eng.Compile(context.Background(), "margin_timeout", "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "triggers",
+		Name:     "test",
+	})
+	if err != nil {
+		t.Fatalf("Compile margin_timeout: %v", err)
+	}
+
+	tracker := ruleengine.NewBudgetTracker(trackerLimit)
+	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
+	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("margin-window timeout err = %v, want ErrBudgetExhausted", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("margin-window timeout err = %v, want errors.Is(context.DeadlineExceeded)", err)
+	}
+	if !tracker.Exhausted() || tracker.Remaining() != 0 {
+		t.Fatalf("tracker must be exhausted on margin-window timeout: Exhausted=%v Remaining=%s", tracker.Exhausted(), tracker.Remaining())
+	}
+	if got := marginDialect.evalCalls.Load(); got != 1 {
+		t.Fatalf("evalCalls = %d, want 1", got)
+	}
+
+	// Subsequent call on the same tracker must short-circuit without invoking the dialect.
+	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
+	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("subsequent Evaluate err = %v, want ErrBudgetExhausted", err)
+	}
+	if got := marginDialect.evalCalls.Load(); got != 1 {
+		t.Fatalf("dialect invoked after margin-window exhaustion: evalCalls = %d, want 1", got)
 	}
 }
