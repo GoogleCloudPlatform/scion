@@ -295,6 +295,11 @@ type Agent struct {
 	// this snapshot. Populated by MarkAgentDelivery so hub callers do not
 	// compare store-clock leases against replica wall clocks.
 	IdleSuspendClaimActive bool `json:"-"`
+	// IdleSuspendClaimLeaseActive is the strict form: the lease itself is
+	// unexpired on the store clock. Delivery paths use IdleSuspendClaimActive;
+	// paths that may act on an agent whose idle stop never landed (the
+	// intent-stop backstop) use this one.
+	IdleSuspendClaimLeaseActive bool `json:"-"`
 
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a

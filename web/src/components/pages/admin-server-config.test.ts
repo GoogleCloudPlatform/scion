@@ -848,7 +848,8 @@ describe('scion-page-admin-server-config', () => {
         );
       expect(text('idle-suspend-after-hint')).toContain('Minimum 5m');
       expect(text('auto-suspend-idle-hint')).toContain('lifecycle.idle_suspend');
-      expect(text('auto-suspend-idle-hint')).toContain('Not yet safe for production');
+      expect(text('auto-suspend-idle-hint')).not.toContain('Not yet safe for production');
+      expect(text('auto-suspend-idle-hint')).toContain('completed or abandoned');
     });
 
     it('auto_provide shows as on when GET omits it', async () => {

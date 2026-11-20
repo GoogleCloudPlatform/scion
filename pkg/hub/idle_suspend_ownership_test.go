@@ -481,7 +481,7 @@ func TestIdleSuspend_OwnershipMatrix_ClaimHolderAndRollback(t *testing.T) {
 
 		srvA.SetDispatcher(&isoCallbackDispatcher{
 			onStop: func(_ context.Context, _ *store.Agent) error {
-				return errors.New("broker unreachable")
+				return fmt.Errorf("broker unreachable: %w", errStartBrokerNotConnected)
 			},
 		})
 		srvA.agentIdleSuspendHandler()(ctx)
@@ -506,7 +506,7 @@ func TestIdleSuspend_OwnershipMatrix_ClaimHolderAndRollback(t *testing.T) {
 			onStop: func(_ context.Context, a *store.Agent) error {
 				rec := requestAsIdentity(t, srvB, authUser(u), http.MethodPost, "/api/v1/agents/"+a.ID+"/stop", nil)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-				return errors.New("idle stop failed after user stop")
+				return fmt.Errorf("idle stop failed after user stop: %w", errStartBrokerNotConnected)
 			},
 		})
 		srvA.agentIdleSuspendHandler()(ctx)
@@ -528,7 +528,7 @@ func TestIdleSuspend_OwnershipMatrix_ClaimHolderAndRollback(t *testing.T) {
 
 		disp := &isoCallbackDispatcher{
 			onStop: func(_ context.Context, _ *store.Agent) error {
-				return errors.New("broker stop failed during user stop")
+				return fmt.Errorf("broker stop failed during user stop: %w", errStartBrokerNotConnected)
 			},
 		}
 		srvA.SetDispatcher(disp)
@@ -1023,7 +1023,7 @@ func TestIdleSuspend_OwnershipMatrix_MembershipHoldYieldsWithoutStranding(t *tes
 				f.dropBindings(f.userID)
 				require.NoError(t, enqueueMembershipLossTx(ctx, f.s, f.userID, f.projectID, store.MembershipLossTriggerMemberRemove, AuditActor{}))
 				srvB.drainMembershipLossChecks(ctx)
-				return errors.New("idle stop failed")
+				return fmt.Errorf("idle stop failed: %w", errStartBrokerNotConnected)
 			},
 		})
 

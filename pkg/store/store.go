@@ -887,9 +887,12 @@ type AgentStore interface {
 	// activity_since ascending (and id ascending as tiebreaker). When after is
 	// non-nil, only rows strictly after (after.ActivitySince, after.ID) are
 	// returned so sweeps can advance past non-resumable or already-queued rows.
+	// Rows whose idle_suspend_claim_until is at or after backoffCutoff are not
+	// returned: an abandoned idle suspend leaves its stamp (run_intent back to
+	// running) as the backoff marker. A zero backoffCutoff disables that skip.
 	// Offline agents and rows with a NULL activity_since are never returned. A
 	// positive limit bounds the number of rows returned.
-	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, after *IdleSuspendCursor, limit int) ([]Agent, error)
+	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *IdleSuspendCursor, limit int) ([]Agent, error)
 
 	// ClaimIdleSuspend atomically checks that agentID still satisfies cond on
 	// the locked row (phase=running, matching run_id/activity/activity_since
@@ -899,6 +902,35 @@ type AgentStore interface {
 	// idle_suspend_claim_until to storeNow+cond.ClaimTTL (returned as
 	// claimUntil). Returns ErrIdleSuspendPrecondition when any guard fails.
 	ClaimIdleSuspend(ctx context.Context, agentID string, cond IdleSuspendCondition) (prior RunIntent, at time.Time, claimUntil time.Time, err error)
+
+	// ListExpiredIdleSuspendClaims returns non-deleted agents whose
+	// idle_suspend_claim_until is set and has expired on the store clock, with
+	// run_intent=stopped and phase stopping, stopped or error: idle suspends
+	// whose stop landed but whose suspended(idle) record did not (commit write
+	// failure, hub restart, unknown stop outcome). Ordered by claim expiry, then
+	// id. A positive limit bounds the rows returned. The caller records each one
+	// with AgentStatusUpdate.IfIdleSuspendRecover.
+	ListExpiredIdleSuspendClaims(ctx context.Context, limit int) ([]Agent, error)
+
+	// ListAbandonedIdleSuspendClaims returns non-deleted agents still in phase
+	// running whose idle_suspend_claim_until expired at least expiredFor ago on
+	// the store clock, with run_intent=stopped: idle suspends whose stop never
+	// landed. Ordered by claim expiry, then id; a positive limit bounds the
+	// rows. Only rows with a heartbeat (last_seen) after the claim stamp are
+	// returned: a heartbeat since proves the container is alive. The caller
+	// abandons each with AbandonIdleSuspend.
+	ListAbandonedIdleSuspendClaims(ctx context.Context, expiredFor time.Duration, limit int) ([]Agent, error)
+
+	// AbandonIdleSuspend gives up an idle suspend whose stop never landed, under
+	// the row lock and the store clock: it requires the exact claimUntil stamp,
+	// expired at least expiredFor ago, the same runID, phase running,
+	// run_intent=stopped written at intentAt (a newer stopped intent, for
+	// example a membership hold's, is not reverted), no start claim,
+	// reincarnation or deletion; then it reverts run_intent to running and
+	// records message on the row. The stamp is KEPT as the backoff marker
+	// (ClaimIdleSuspend and ListIdleSuspendCandidates skip a row whose stamp is
+	// newer than the backoff); any user or hub lifecycle write clears it. Otherwise ErrIdleSuspendPrecondition, nothing written.
+	AbandonIdleSuspend(ctx context.Context, agentID string, claimUntil time.Time, runID string, intentAt time.Time, expiredFor time.Duration, message string) error
 
 	// ClearIdleSuspendClaim clears idle_suspend_claim_until on agentID.
 	ClearIdleSuspendClaim(ctx context.Context, agentID string) error
@@ -1639,6 +1671,14 @@ type AgentStatusUpdate struct {
 	// run); otherwise UpdateAgentStatus returns ErrIdleSuspendPrecondition and
 	// writes nothing. Internal to the hub — json:"-".
 	IfIdleSuspendCommit *time.Time `json:"-"`
+	// IfIdleSuspendRecover, when non-nil, guards the sweep's recovery write of
+	// an idle auto-suspend whose claim lease has expired without the commit
+	// landing: the same row conditions as IfIdleSuspendCommit, but the exact
+	// idle_suspend_claim_until must have expired on the store clock, and the
+	// phase must be stopping, stopped or error (never running). The write clears
+	// the claim. Otherwise ErrIdleSuspendPrecondition, nothing written.
+	// Internal to the hub — json:"-".
+	IfIdleSuspendRecover *time.Time `json:"-"`
 	// RetainedActivity, when non-empty on a Phase=suspended update, supplies
 	// the pre-stop retained activity (idle, completed or harness_error) to
 	// preserve if a container or runtime shutdown report already transitioned

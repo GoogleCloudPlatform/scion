@@ -329,7 +329,7 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
 // erring towards "not empty" only means the store write runs.
 // The exceptions are the preconditions IfPhase, IfRunID, IfIdleSuspendCommit,
-// IfNoStartClaim, IfNoActiveIdleClaim, IfAutoWakeReason, StartWrite,
+// IfIdleSuspendRecover, IfNoStartClaim, IfNoActiveIdleClaim, IfAutoWakeReason, StartWrite,
 // GuardReincarnation, ReportSource, ReportRunID, ReportAgentToken, Restore,
 // SuspendReason and RetainedActivity, and the output Result: they only
 // condition or qualify a Phase write or report on it, and persist nothing

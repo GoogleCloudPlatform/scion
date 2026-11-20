@@ -51,6 +51,10 @@ import (
 // the start of its write and uses that value through commit.
 type lifecycleObserverSlot struct {
 	p atomic.Pointer[observerBox]
+	// idleGate is the hub's "idle suspend recovery is active" check
+	// (SetIdleSuspendInProgressGate); it rides in this shared slot so the
+	// transactional copies of the store see it. Nil means off (lease-only).
+	idleGate atomic.Pointer[func() bool]
 }
 
 type observerBox struct{ o store.AgentWriteObserver }
@@ -67,6 +71,28 @@ func (s *lifecycleObserverSlot) load() store.AgentWriteObserver {
 		return b.o
 	}
 	return nil
+}
+
+// SetIdleSuspendInProgressGate installs the check that tells the store whether
+// an idle suspend whose lease expired still counts as in progress
+// (store.Agent.SetIdleSuspendFlags): the hub passes "lifecycle.idle_suspend is
+// on". Not part of store.Store; the hub type-asserts for it.
+func (s *AgentStore) SetIdleSuspendInProgressGate(fn func() bool) {
+	if fn == nil {
+		s.lifecycle.idleGate.Store(nil)
+		return
+	}
+	s.lifecycle.idleGate.Store(&fn)
+}
+
+func (s *AgentStore) idleSuspendExtended() bool {
+	if s.lifecycle == nil {
+		return false
+	}
+	if fn := s.lifecycle.idleGate.Load(); fn != nil {
+		return (*fn)()
+	}
+	return false
 }
 
 // SetAgentWriteObserver installs o as the observer of every observed agent

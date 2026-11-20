@@ -469,10 +469,7 @@ const ReincarnateHarnessSwitch = "hub.reincarnate_harness_switch"
 // it, and the idle auto-suspend sweep (server.hub.auto_suspend_idle,
 // server.hub.idle_suspend_after). It is checked in hub server code.
 // While it is off, suspend_reason is still recorded and shown, and nothing
-// is idle-suspended or woken without an explicit wake. Not yet safe to
-// enable server.hub.auto_suspend_idle with lifecycle.idle_suspend on in
-// production: failure recovery for in-flight idle suspends is not
-// implemented yet.
+// is idle-suspended or woken without an explicit wake.
 const IdleSuspend = "lifecycle.idle_suspend"
 
 // ImageTagVersionDefault gates the version default of image_tag
@@ -1025,7 +1022,7 @@ var compiled = []Experiment{
 	{
 		Name:        IdleSuspend,
 		Title:       "Idle suspend and auto-wake",
-		Description: "An agent the hub suspended (because it was idle or stalled) is resumed automatically when a direct message, mention, notification or scheduled message arrives for it, with no --wake needed; the sender only needs permission to message it. Also gates the idle auto-suspend sweep (server.hub.auto_suspend_idle and server.hub.idle_suspend_after) and converting a hub suspension to a user suspension via suspend. Agents a user suspended are never woken this way, and held agents never are. While it is off, nothing is idle-suspended or woken without an explicit wake. Not yet safe to enable server.hub.auto_suspend_idle with lifecycle.idle_suspend on in production: failure recovery for in-flight idle suspends (post-stop commit failure, hub crash, and stop-timeout recovery) is not implemented yet. The web layer offers Keep suspended on an agent the hub suspended.",
+		Description: "An agent the hub suspended (because it was idle or stalled) is resumed automatically when a direct message, mention, notification or scheduled message arrives for it, with no --wake needed; the sender only needs permission to message it. Also gates the idle auto-suspend sweep (server.hub.auto_suspend_idle and server.hub.idle_suspend_after) and converting a hub suspension to a user suspension via suspend. Agents a user suspended are never woken this way, and held agents never are. While it is off, nothing is idle-suspended or woken without an explicit wake. The web layer offers Keep suspended on an agent the hub suspended.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,

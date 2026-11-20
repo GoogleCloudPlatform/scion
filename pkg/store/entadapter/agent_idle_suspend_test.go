@@ -62,7 +62,7 @@ func TestAgentStore_ListIdleSuspendCandidates_Activities(t *testing.T) {
 	}
 	require.Len(t, wantIDs, 3, "expected idle, completed, and harness_error to be eligible")
 
-	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, nil, 0)
+	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0)
 	require.NoError(t, err)
 
 	gotIDs := map[string]string{}
@@ -166,7 +166,7 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
-	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, nil, 0)
+	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0)
 	require.NoError(t, err)
 	gotIDs := []string{}
 	for _, a := range got {
@@ -179,12 +179,12 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 	tieA := makeIdle("tie-a", now.Add(-30*time.Second))
 	setSince(tieA.ID, &past)
 
-	allOrdered, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, nil, 0)
+	allOrdered, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 0)
 	require.NoError(t, err)
 	require.Len(t, allOrdered, 3)
 	assert.Equal(t, eligible.ID, allOrdered[0].ID)
 
-	limited, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, nil, 1)
+	limited, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, nil, 1)
 	require.NoError(t, err)
 	require.Len(t, limited, 1)
 	assert.Equal(t, eligible.ID, limited[0].ID)
@@ -192,7 +192,7 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 	var pagedIDs []string
 	var cursor *store.IdleSuspendCursor
 	for {
-		page, perr := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, cursor, 1)
+		page, perr := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, time.Time{}, cursor, 1)
 		require.NoError(t, perr)
 		if len(page) == 0 {
 			break
@@ -613,14 +613,16 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 
 		_, err = s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
 			SetIdleSuspendClaimUntil(time.Now().UTC().Add(-time.Second)).
+			SetRunIntentAt(time.Now().UTC().Add(-time.Minute)).SetRunIntentMarkedAt(time.Now().UTC().Add(-time.Minute)).
 			Save(ctx)
 		require.NoError(t, err)
 		expiredByID, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		assert.False(t, expiredByID.IdleSuspendClaimActive)
+		assert.False(t, expiredByID.IdleSuspendClaimLeaseActive)
+		assert.True(t, expiredByID.IdleSuspendClaimActive, "expired stamp with run_intent=stopped is an idle suspend in progress")
 		expiredBySlug, err := s.GetAgentBySlug(ctx, a.ProjectID, a.Slug)
 		require.NoError(t, err)
-		assert.False(t, expiredBySlug.IdleSuspendClaimActive)
+		assert.False(t, expiredBySlug.IdleSuspendClaimLeaseActive)
 	})
 
 	t.Run("IfNoStartClaim and IfAutoWakeReason guard conversion CAS", func(t *testing.T) {
@@ -868,6 +870,10 @@ func TestAgentStore_ClaimAgentStartWakeYieldsToActiveIdleClaim(t *testing.T) {
 		ReportSource: store.StatusReportSourceRuntime,
 		ReportRunID:  aExpiredFilter.RunID,
 	}))
+	// An expired stamp on a row already recorded suspended is not in progress.
+	aExpiredSuspended, _ := makeClaimed("stopall-expired-suspended", 5*time.Millisecond)
+	_, err = s.client.Agent.UpdateOneID(uuid.MustParse(aExpiredSuspended.ID)).SetPhase(string(state.PhaseSuspended)).Save(ctx)
+	require.NoError(t, err)
 	time.Sleep(15 * time.Millisecond)
 
 	listed, err := s.ListAgents(ctx, store.AgentFilter{
@@ -883,7 +889,8 @@ func TestAgentStore_ClaimAgentStartWakeYieldsToActiveIdleClaim(t *testing.T) {
 	}
 	require.Contains(t, listedMap, aActiveFilter.ID, "active idle claim must be matched by stop-all filter")
 	assert.True(t, listedMap[aActiveFilter.ID].IdleSuspendClaimActive, "ListAgents must populate IdleSuspendClaimActive")
-	assert.NotContains(t, listedMap, aExpiredFilter.ID, "expired idle claim must NOT be matched by stop-all filter")
+	assert.Contains(t, listedMap, aExpiredFilter.ID, "an expired claim whose suspend is still in progress (intent stopped, not suspended) must be matched by stop-all")
+	assert.NotContains(t, listedMap, aExpiredSuspended.ID, "an expired claim on a suspended row must NOT be matched by stop-all filter")
 
 	// With OrActiveIdleClaim=false (lifecycle.idle_suspend off), ListAgents skips
 	// the active-claim OR branch and incurs no extra store-clock query.

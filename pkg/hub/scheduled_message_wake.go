@@ -224,6 +224,14 @@ func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Ag
 		if !claimActive {
 			return nil
 		}
+		s.recoverExpiredIdleClaimOnDemand(ctx, fresh)
+		if !fresh.IdleSuspendClaimLeaseActive && state.Phase(fresh.Phase) == state.PhaseRunning {
+			// The lease expired and the row still runs: the stop never
+			// landed, so waiting cannot help. Fail fast with the suspending
+			// refusal; the sweep abandons the suspend after
+			// idleSuspendAbandonAfter and the agent is deliverable again.
+			return errIdleSuspendInProgressNotSettled
+		}
 		select {
 		case <-ctx.Done():
 			return errIdleSuspendInProgressNotSettled

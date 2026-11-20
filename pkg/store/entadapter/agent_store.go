@@ -1531,9 +1531,10 @@ func (s *AgentStore) populateListIdleSuspendClaimActive(ctx context.Context, ite
 		return err
 	}
 	now = claimTime(now)
+	extended := s.idleSuspendExtended()
 	for i := range items {
 		if items[i].IdleSuspendClaimUntil != nil {
-			items[i].IdleSuspendClaimActive = now.Before(*items[i].IdleSuspendClaimUntil)
+			items[i].SetIdleSuspendFlags(now, extended)
 		}
 	}
 	return nil
@@ -1597,12 +1598,23 @@ func (s *AgentStore) agentFilterPredicates(ctx context.Context, filter store.Age
 			if err != nil {
 				return nil, err
 			}
+			// An idle suspend still in progress after its lease expired
+			// (store.Agent.SetIdleSuspendFlags) counts too: a user stop-all
+			// must clear it, or recovery would convert the row it just
+			// stopped.
+			inProgress := []predicate.Agent{agent.IdleSuspendClaimUntilGT(claimTime(now))}
+			if s.idleSuspendExtended() {
+				inProgress = append(inProgress, agent.And(
+					agent.RunIntentEQ(string(store.RunIntentStopped)),
+					agent.PhaseIn(string(state.PhaseRunning), string(state.PhaseStopping), string(state.PhaseStopped), string(state.PhaseError)),
+				))
+			}
 			preds = append(preds, agent.Or(
 				agent.PhaseEQ(filter.Phase),
 				agent.RunIntentEQ(filter.OrRunIntent),
 				agent.And(
 					agent.IdleSuspendClaimUntilNotNil(),
-					agent.IdleSuspendClaimUntilGT(claimTime(now)),
+					agent.Or(inProgress...),
 				),
 			))
 		} else {
@@ -1770,11 +1782,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return store.ErrPhaseMismatch
 	}
 	clearSuspendReasonForHold := false
-	if su.IfNoStartClaim || su.IfNoActiveIdleClaim || su.IfIdleSuspendCommit != nil {
+	if su.IfNoStartClaim || su.IfNoActiveIdleClaim || su.IfIdleSuspendCommit != nil || su.IfIdleSuspendRecover != nil {
 		if su.IfNoStartClaim && heldClaimError(current) != nil {
 			return store.ErrClaimPredicate
 		}
-		if current.IdleSuspendClaimUntil != nil || su.IfIdleSuspendCommit != nil {
+		if current.IdleSuspendClaimUntil != nil || su.IfIdleSuspendCommit != nil || su.IfIdleSuspendRecover != nil {
 			storeClock, err := entTxStoreNow(ctx, tx, s.dialect() == dialect.Postgres)
 			if err != nil {
 				return err
@@ -1783,8 +1795,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			if (su.IfNoActiveIdleClaim || su.IfNoStartClaim) && idleActive {
 				return store.ErrClaimPredicate
 			}
-			if su.IfIdleSuspendCommit != nil {
-				if !checkIdleSuspendCommit(current, *su.IfIdleSuspendCommit, storeClock) {
+			if su.IfIdleSuspendCommit != nil || su.IfIdleSuspendRecover != nil {
+				if su.IfIdleSuspendCommit != nil && !checkIdleSuspendCommit(current, *su.IfIdleSuspendCommit, storeClock) {
+					return store.ErrIdleSuspendPrecondition
+				}
+				if su.IfIdleSuspendRecover != nil && !checkIdleSuspendRecover(current, *su.IfIdleSuspendRecover, storeClock) {
 					return store.ErrIdleSuspendPrecondition
 				}
 				// If a membership-loss hold took effect while the idle claim's
@@ -3296,7 +3311,7 @@ func entTxStoreNow(ctx context.Context, tx *ent.Tx, isPostgres bool) (time.Time,
 }
 
 // ListIdleSuspendCandidates implements store.AgentStore.
-func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, after *store.IdleSuspendCursor, limit int) ([]store.Agent, error) {
+func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff, backoffCutoff time.Time, after *store.IdleSuspendCursor, limit int) ([]store.Agent, error) {
 	q := s.client.Agent.Query().Where(
 		agent.DeletedAtIsNil(),
 		agent.PhaseEQ(string(state.PhaseRunning)),
@@ -3310,6 +3325,12 @@ func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, hear
 			agent.LastLiveProcessAtLT(liveWorkCutoff.UTC()),
 		),
 	)
+	if !backoffCutoff.IsZero() {
+		q = q.Where(agent.Or(
+			agent.IdleSuspendClaimUntilIsNil(),
+			agent.IdleSuspendClaimUntilLT(backoffCutoff.UTC()),
+		))
+	}
 	if after != nil {
 		afterUID, err := parseUUID(after.ID)
 		if err != nil {
