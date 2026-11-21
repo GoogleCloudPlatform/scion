@@ -71,7 +71,7 @@ func TestFormatSkippedSecretWarning(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, formatSkippedSecretWarning(tc.skipped, tc.verb, tc.owner))
+			assert.Equal(t, tc.want, formatSkippedSecretWarningFor(tc.skipped, tc.verb, tc.owner, tc.owner))
 		})
 	}
 }

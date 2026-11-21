@@ -73,12 +73,6 @@ func skippedSecretScopeKind(scope string) (kind string, ok bool) {
 // entries in.
 var skippedSecretCountOrder = []string{"hub", "broker", "user", "agent"}
 
-// formatSkippedSecretWarning is formatSkippedSecretWarningFor where
-// audienceCanEditAgent equals audienceIsOwner.
-func formatSkippedSecretWarning(skipped []skippedSecret, verb string, audienceIsOwner bool) string {
-	return formatSkippedSecretWarningFor(skipped, verb, audienceIsOwner, audienceIsOwner)
-}
-
 // formatSkippedSecretWarningFor is the only producer of the skipped-secret
 // warning text. It returns "" when nothing was skipped. An item whose scope
 // is none of the five kinds is left out (the WARN log still lists it). verb is "started",
