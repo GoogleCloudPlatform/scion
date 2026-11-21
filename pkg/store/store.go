@@ -4012,6 +4012,21 @@ type MessageStore interface {
 	// (e.g. an unconditional filter added to ListProjects) turns that
 	// test red.
 	CountUnreachableUnbackfilledMessages(ctx context.Context) (int, error)
+
+	// ConversationHeadSeq returns the current last_message_seq of a conversation.
+	// Returns ErrNotFound if the conversation does not exist.
+	ConversationHeadSeq(ctx context.Context, conversationID string) (int64, error)
+
+	// MessageConversationSeq returns the conversation_seq of a specific message
+	// within the given conversation. Returns ErrNotFound if the message does not
+	// exist in that conversation or has no assigned sequence.
+	MessageConversationSeq(ctx context.Context, conversationID, messageID string) (int64, error)
+
+	// ListConversationFeed returns messages in a conversation with
+	// conversation_seq strictly greater than q.AfterSeq, up to the current
+	// conversation head, filtered by q.Filter in SQL and ordered ascending by
+	// conversation_seq.
+	ListConversationFeed(ctx context.Context, q ConversationFeedQuery) (ConversationFeedPage, error)
 }
 
 // =============================================================================

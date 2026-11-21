@@ -211,6 +211,18 @@ func (m *mockMessageStore) CountUnreachableUnbackfilledMessages(_ context.Contex
 	return 0, nil
 }
 
+func (m *mockMessageStore) ConversationHeadSeq(_ context.Context, _ string) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockMessageStore) MessageConversationSeq(_ context.Context, _, _ string) (int64, error) {
+	return 0, store.ErrNotFound
+}
+
+func (m *mockMessageStore) ListConversationFeed(_ context.Context, _ store.ConversationFeedQuery) (store.ConversationFeedPage, error) {
+	return store.ConversationFeedPage{}, nil
+}
+
 // mockConversationStore is an in-memory ConversationStore used by backfill tests.
 type mockConversationStore struct {
 	mu            sync.Mutex

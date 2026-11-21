@@ -207,6 +207,12 @@ func (c *CompositeStore) SetRelayRole(role string) {
 	c.relayRole = role
 }
 
+// SetMessagePublisher attaches a post-commit MessagePublisher to the embedded
+// MessageStore using MessageStore.WithPublisher (ptone/scion#8136).
+func (c *CompositeStore) SetMessagePublisher(p MessagePublisher) {
+	c.MessageStore = c.MessageStore.WithPublisher(p)
+}
+
 // SetBeforeFKReconcile makes Migrate pass fn to entc.AutoMigrate, which
 // calls it on SQLite just before the foreign key reconcile changes rows
 // (after PreMigrate); an error from fn aborts Migrate before the reconcile
@@ -291,6 +297,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.MembershipLossCheckStore.inTx = true
 	txStore.AgentHoldStore.inTx = true
 	txStore.ConversationStore.inTx = true
+	txStore.MessageStore.inTx = true
 	txStore.ThreadGroupStore.inTx = true
 	txStore.ScheduleStore.inTx = true
 	txStore.SecretStore.inTx = true
@@ -1055,6 +1062,9 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	}
 	if err := c.BackfillDecisionChatKeys(ctx); err != nil {
 		return fmt.Errorf("decision chat_key backfill: %w", err)
+	}
+	if err := c.BackfillConversationMessageSeqs(ctx); err != nil {
+		return fmt.Errorf("conversation message seq backfill: %w", err)
 	}
 	return c.SeedMaintenanceOperations(ctx)
 }

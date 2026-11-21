@@ -3771,6 +3771,11 @@ type Message struct {
 	NotReachedAt     *time.Time `json:"-"`
 	ScheduledEventID string     `json:"-"`
 
+	// ConversationSeq is the commit-ordered per-conversation sequence number
+	// allocated in CreateMessage (ptone/scion#8136). Internal store field only;
+	// API responses expose opaque cursors instead.
+	ConversationSeq int64 `json:"-"`
+
 	// DeferredAttachments is never stored. For a deferred message, the
 	// conversation messages route lists its attachments stored as
 	// artifacts here, to a reader only, so catch-up can say they were not
@@ -3822,6 +3827,38 @@ type MessageFilter struct {
 type LatestMessageOptions struct {
 	Channel     string // Only messages on this channel
 	ExcludeType string // Ignore messages of this type
+}
+
+// ConversationFeedFilter selects which messages in a conversation a feed query returns.
+type ConversationFeedFilter string
+
+const (
+	// ConversationFeedFilterOthers returns messages not sent by the caller.
+	ConversationFeedFilterOthers ConversationFeedFilter = "others"
+	// ConversationFeedFilterAll returns all messages, including the caller's own sends.
+	ConversationFeedFilterAll ConversationFeedFilter = "all"
+	// ConversationFeedFilterAddressed returns messages not sent by the caller
+	// where the caller is a recipient or addressee.
+	ConversationFeedFilterAddressed ConversationFeedFilter = "addressed"
+)
+
+// ConversationFeedQuery describes a feed read over a single conversation
+// ordered by ascending conversation_seq (ptone/scion#8136).
+type ConversationFeedQuery struct {
+	ConversationID string
+	AfterSeq       int64
+	Limit          int
+	Filter         ConversationFeedFilter
+	PrincipalKind  string // "user" or "agent"
+	PrincipalID    string // principal UUID
+}
+
+// ConversationFeedPage is the result of ListConversationFeed.
+type ConversationFeedPage struct {
+	Messages  []Message
+	ScannedTo int64 // highest seq scanned (last returned seq when HasMore, else head)
+	HasMore   bool  // more matching rows exist at or below head
+	Truncated bool  // rows between AfterSeq and first surviving seq > AfterSeq were deleted
 }
 
 // =============================================================================

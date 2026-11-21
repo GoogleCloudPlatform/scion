@@ -27,6 +27,7 @@ import (
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -52,6 +53,7 @@ type MessagePublisher interface {
 // MessageStore implements store.MessageStore using the Ent ORM.
 type MessageStore struct {
 	client *ent.Client
+	inTx   bool
 	// publisher, when non-nil, is notified after each successful CreateMessage.
 	// See MessagePublisher.
 	publisher MessagePublisher
@@ -83,6 +85,11 @@ func entMessageToStore(e *ent.Message) *store.Message {
 	senderProjectID := uuidPtrToStringPtr(e.SenderProjectID)
 	recipientProjectID := uuidPtrToStringPtr(e.RecipientProjectID)
 
+	var conversationSeq int64
+	if e.ConversationSeq != nil {
+		conversationSeq = *e.ConversationSeq
+	}
+
 	return &store.Message{
 		ID:                    e.ID.String(),
 		ProjectID:             e.ProjectID.String(),
@@ -100,6 +107,7 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		Channel:               e.Channel,
 		ThreadID:              e.ThreadID,
 		ConversationID:        conversationID,
+		ConversationSeq:       conversationSeq,
 		CreatedAt:             e.Created,
 		SenderProjectID:       senderProjectID,
 		RecipientProjectID:    recipientProjectID,
@@ -153,34 +161,22 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		return err
 	}
 
-	create := s.client.Message.Create().
-		SetID(uid).
-		SetProjectID(pid).
-		SetSender(msg.Sender).
-		SetSenderID(msg.SenderID).
-		SetRecipient(msg.Recipient).
-		SetRecipientID(msg.RecipientID).
-		SetMsg(msg.Msg).
-		SetType(msg.Type).
-		SetUrgent(msg.Urgent).
-		SetBroadcasted(msg.Broadcasted).
-		SetRead(msg.Read).
-		SetAgentID(msg.AgentID).
-		SetGroupID(msg.GroupID)
-
-	if msg.Channel != "" {
-		create.SetChannel(msg.Channel)
-	}
-	if msg.ThreadID != "" {
-		create.SetThreadID(msg.ThreadID)
-	}
+	var (
+		hasConvID bool
+		convUUID  uuid.UUID
+	)
 	if msg.ConversationID != "" {
 		cid, err := parseUUID(msg.ConversationID)
 		if err != nil {
 			return err
 		}
-		create.SetConversationID(cid)
+		hasConvID = true
+		convUUID = cid
 	}
+	var (
+		hasSenderProj bool
+		senderProjID  uuid.UUID
+	)
 	// Cross-project provenance (ptone/scion#2282). An absent or empty stamp
 	// persists as NULL; a malformed one is rejected like any other bad ID.
 	if msg.SenderProjectID != nil && *msg.SenderProjectID != "" {
@@ -188,76 +184,188 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		if err != nil {
 			return err
 		}
-		create.SetSenderProjectID(spid)
+		hasSenderProj = true
+		senderProjID = spid
 	}
+	var (
+		hasRecipientProj bool
+		recipientProjID  uuid.UUID
+	)
 	if msg.RecipientProjectID != nil && *msg.RecipientProjectID != "" {
 		rpid, err := parseUUID(*msg.RecipientProjectID)
 		if err != nil {
 			return err
 		}
-		create.SetRecipientProjectID(rpid)
+		hasRecipientProj = true
+		recipientProjID = rpid
 	}
-	// Delegated-send attribution (.design/agent-delegation.md §14.5). An
-	// empty value persists as NULL.
-	if msg.AuthorizingUserID != "" {
-		create.SetAuthorizingUserID(msg.AuthorizingUserID)
-	}
-	if msg.DelegationGrantID != "" {
-		create.SetDelegationGrantID(msg.DelegationGrantID)
-	}
-	if msg.Type == "" {
-		create.SetType("instruction")
-	}
+
 	// An empty DispatchState takes the schema default ("pending"); that row is
 	// logged below once it is persisted.
 	defaulted := msg.DispatchState == ""
-	if msg.DispatchState != "" {
-		create.SetDispatchState(msg.DispatchState)
-	}
-	if msg.DispatchedAt != nil {
-		create.SetDispatchedAt(*msg.DispatchedAt)
-	}
-	// A row may be born failed (e.g. a group member that is not
-	// deliverable), so its reason must persist with the same write.
-	if msg.DispatchFailureReason != nil {
-		create.SetDispatchFailureReason(*msg.DispatchFailureReason)
-	}
-	if msg.HoldUntil != nil {
-		create.SetHoldUntil(*msg.HoldUntil)
-	}
-	if msg.HoldLaunchID != "" {
-		create.SetHoldLaunchID(msg.HoldLaunchID)
-	}
-	if msg.NotReached != "" {
-		create.SetNotReached(msg.NotReached)
-	}
-	if msg.NotReachedAt != nil {
-		create.SetNotReachedAt(*msg.NotReachedAt)
-	}
-	if msg.ScheduledEventID != "" {
-		create.SetScheduledEventID(msg.ScheduledEventID)
-	}
-	if !msg.CreatedAt.IsZero() {
-		create.SetCreated(msg.CreatedAt)
+
+	buildCreate := func(mc *ent.MessageClient, seq int64, hasSeq bool) *ent.MessageCreate {
+		create := mc.Create().
+			SetID(uid).
+			SetProjectID(pid).
+			SetSender(msg.Sender).
+			SetSenderID(msg.SenderID).
+			SetRecipient(msg.Recipient).
+			SetRecipientID(msg.RecipientID).
+			SetMsg(msg.Msg).
+			SetType(msg.Type).
+			SetUrgent(msg.Urgent).
+			SetBroadcasted(msg.Broadcasted).
+			SetRead(msg.Read).
+			SetAgentID(msg.AgentID).
+			SetGroupID(msg.GroupID)
+
+		if msg.Channel != "" {
+			create.SetChannel(msg.Channel)
+		}
+		if msg.ThreadID != "" {
+			create.SetThreadID(msg.ThreadID)
+		}
+		if hasConvID {
+			create.SetConversationID(convUUID)
+		}
+		if hasSeq {
+			create.SetConversationSeq(seq)
+		}
+		if hasSenderProj {
+			create.SetSenderProjectID(senderProjID)
+		}
+		if hasRecipientProj {
+			create.SetRecipientProjectID(recipientProjID)
+		}
+		// Delegated-send attribution (.design/agent-delegation.md §14.5). An
+		// empty value persists as NULL.
+		if msg.AuthorizingUserID != "" {
+			create.SetAuthorizingUserID(msg.AuthorizingUserID)
+		}
+		if msg.DelegationGrantID != "" {
+			create.SetDelegationGrantID(msg.DelegationGrantID)
+		}
+		if msg.Type == "" {
+			create.SetType("instruction")
+		}
+		if msg.DispatchState != "" {
+			create.SetDispatchState(msg.DispatchState)
+		}
+		if msg.DispatchedAt != nil {
+			create.SetDispatchedAt(*msg.DispatchedAt)
+		}
+		// A row may be born failed (e.g. a group member that is not
+		// deliverable), so its reason must persist with the same write.
+		if msg.DispatchFailureReason != nil {
+			create.SetDispatchFailureReason(*msg.DispatchFailureReason)
+		}
+		if msg.HoldUntil != nil {
+			create.SetHoldUntil(*msg.HoldUntil)
+		}
+		if msg.HoldLaunchID != "" {
+			create.SetHoldLaunchID(msg.HoldLaunchID)
+		}
+		if msg.NotReached != "" {
+			create.SetNotReached(msg.NotReached)
+		}
+		if msg.NotReachedAt != nil {
+			create.SetNotReachedAt(*msg.NotReachedAt)
+		}
+		if msg.ScheduledEventID != "" {
+			create.SetScheduledEventID(msg.ScheduledEventID)
+		}
+		if !msg.CreatedAt.IsZero() {
+			create.SetCreated(msg.CreatedAt)
+		}
+		return create
 	}
 
-	created, err := create.Save(ctx)
-	if err != nil {
-		return mapError(err)
+	var created *ent.Message
+	if hasConvID && !s.inTx {
+		// Allocate conversation_seq and insert the message in one transaction
+		// so the conversation row lock is held until commit and seq order
+		// equals commit order (ptone/scion#8136 §3.2).
+		tx, txErr := s.client.Tx(ctx)
+		if txErr != nil {
+			return markTransient(fmt.Errorf("begin create message tx: %w", txErr))
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		seq, hasSeq, bumpErr := bumpConversationSeq(ctx, tx.Client().Driver(), convUUID)
+		if bumpErr != nil {
+			return markTransient(mapError(bumpErr))
+		}
+		created, err = buildCreate(tx.Message, seq, hasSeq).Save(ctx)
+		if err != nil {
+			return markTransient(mapError(err))
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return markTransient(fmt.Errorf("commit create message tx: %w", commitErr))
+		}
+	} else {
+		var (
+			seq    int64
+			hasSeq bool
+		)
+		if hasConvID {
+			var bumpErr error
+			seq, hasSeq, bumpErr = bumpConversationSeq(ctx, s.client.Driver(), convUUID)
+			if bumpErr != nil {
+				return markTransient(mapError(bumpErr))
+			}
+		}
+		created, err = buildCreate(s.client.Message, seq, hasSeq).Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
 	}
+
 	msg.CreatedAt = created.Created
 	msg.Type = created.Type
 	msg.DispatchState = created.DispatchState
+	if created.ConversationSeq != nil {
+		msg.ConversationSeq = *created.ConversationSeq
+	}
 	if defaulted && created.DispatchState == store.MessageDispatchPending {
 		s.logDefaultedPending(msg)
 	}
 
-	// Design-in: announce the new message for LISTEN/NOTIFY subscribers.
-	// Best-effort — a publish failure must not fail the write that succeeded.
+	// Design-in: announce the new message after commit for LISTEN/NOTIFY /
+	// feed wakeup subscribers. Best-effort — a publish failure must not fail
+	// the write that succeeded.
 	if s.publisher != nil {
 		_ = s.publisher.PublishUserMessage(ctx, msg)
 	}
 	return nil
+}
+
+// bumpConversationSeq atomically increments conversations.last_message_seq for
+// cid and returns the new sequence number. When no conversation row exists for
+// cid (for example synthetic messages in tests that do not seed a conversation),
+// it returns (0, false, nil) so CreateMessage leaves conversation_seq NULL.
+func bumpConversationSeq(ctx context.Context, drv dialect.Driver, cid uuid.UUID) (int64, bool, error) {
+	ph := "?"
+	if drv.Dialect() == dialect.Postgres {
+		ph = "$1"
+	}
+	query := "UPDATE " + conversation.Table + " SET " + conversation.FieldLastMessageSeq + " = " + conversation.FieldLastMessageSeq + " + 1 WHERE " + conversation.FieldID + " = " + ph + " RETURNING " + conversation.FieldLastMessageSeq
+	var rows entsql.Rows
+	if err := drv.Query(ctx, query, []any{cid}, &rows); err != nil {
+		return 0, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, false, err
+		}
+		return 0, false, nil
+	}
+	var seq int64
+	if err := rows.Scan(&seq); err != nil {
+		return 0, false, err
+	}
+	return seq, true, nil
 }
 
 // GetMessage returns a single message by ID.
