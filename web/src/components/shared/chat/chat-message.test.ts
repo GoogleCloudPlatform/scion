@@ -1145,6 +1145,96 @@ describe('scion-chat-message delivery state', () => {
     expect(state?.textContent).toContain('Agent unreachable');
   });
 
+  it('shows deleted-agent label and tooltip when reason ends in (deleted)', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: 'agent_unreachable',
+      routedTo: 'worker-1',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Not delivered — @worker-1 was deleted');
+    expect(state?.classList.contains('failed')).toBe(true);
+    const tooltip = el.shadowRoot?.querySelector('sl-tooltip');
+    expect(tooltip?.getAttribute('content')).toBe('Mention a live agent with @ to resend.');
+  });
+
+  it('shows deleted-agent label on history rows without a dispatchFailureCode', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: '',
+      routedTo: 'worker-2',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Not delivered — @worker-2 was deleted');
+  });
+
+  it('renders failed delivery state for other human viewers when sender is human', async () => {
+    const el = await mountOutbound({
+      fromAgent: true,
+      senderIsAgent: false,
+      sender: 'user:alice',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: 'agent_unreachable',
+      routedTo: 'worker-1',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Not delivered — @worker-1 was deleted');
+  });
+
+  it('never renders failed delivery state on agent-sent messages', async () => {
+    const byFlag = await mountOutbound({
+      fromAgent: true,
+      senderIsAgent: true,
+      sender: 'agent:worker-1',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: 'agent_unreachable',
+    });
+    expect(deliveryState(byFlag)).toBeNull();
+
+    const byPrefix = await mountOutbound({
+      fromAgent: true,
+      senderIsAgent: false,
+      sender: 'agent:worker-1',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: 'agent_unreachable',
+    });
+    expect(deliveryState(byPrefix)).toBeNull();
+  });
+
+  it('keeps non-failed delivery states hidden for other human viewers', async () => {
+    for (const dispatchState of ['dispatched', 'deferred', 'no_recipient', 'pending']) {
+      const el = await mountOutbound({
+        fromAgent: true,
+        senderIsAgent: false,
+        sender: 'user:alice',
+        dispatchState,
+      });
+      expect(deliveryState(el)).toBeNull();
+    }
+  });
+
+  it('keeps failed delivery state hidden on deleted messages for all viewers', async () => {
+    const el = await mountOutbound({
+      fromAgent: true,
+      senderIsAgent: false,
+      sender: 'user:alice',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: 'agent_unreachable',
+      routedTo: 'worker-1',
+      deletedAt: '2026-11-21T12:00:00Z',
+    });
+    expect(deliveryState(el)).toBeNull();
+  });
+
   it('keeps the generic "Failed" label for a non-unreachable dispatch error', async () => {
     const el = await mountOutbound({
       dispatchState: 'failed',

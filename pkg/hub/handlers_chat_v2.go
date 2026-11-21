@@ -1586,10 +1586,14 @@ var unreachablePhases = map[string]bool{
 	string(state.PhaseHalted):    true,
 }
 
-// agentGoneReason is the failure reason recorded when the primary agent no
-// longer resolves to a live agent. A soft-deleted agent and an agent whose
-// record is missing get this same reason, so the two cases read alike.
+// agentGoneReason is the failure reason recorded when an agent no longer
+// resolves to a live agent on paths that do not distinguish deletion (such as
+// decision answers).
 const agentGoneReason = "Agent unreachable"
+
+// agentDeletedReason is the failure reason recorded in chat v2 when the target
+// agent has been deleted (soft-deleted or missing from the store).
+const agentDeletedReason = "Agent unreachable (deleted)"
 
 // agentUnreachableReason returns the failure reason for an unreachable
 // primary given the suffix from isAgentUnreachable.
@@ -1603,15 +1607,15 @@ func agentUnreachableReason(suffix string) string {
 // isAgentUnreachable reports whether agent is unreachable for chat v2 primary
 // dispatch: soft-deleted, or in a phase whose container cannot accept a
 // buffered message (suspended, stopping, stopped, error). The returned string
-// is a short reason suffix for agentUnreachableReason: the phase name, or
-// empty for a soft-deleted agent (reported like a missing one) and when
+// is a short reason suffix for agentUnreachableReason: "deleted" for a
+// soft-deleted agent, the phase name for an unreachable phase, or empty when
 // reachable.
 func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	if agent == nil {
 		return false, ""
 	}
 	if !agent.DeletedAt.IsZero() {
-		return true, ""
+		return true, "deleted"
 	}
 	if unreachablePhases[agent.Phase] {
 		return true, agent.Phase

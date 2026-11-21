@@ -1810,6 +1810,45 @@ describe('scion-chat-thread dispatch state from send response', () => {
     expect(msg?.dispatchFailureReason).toBe('Agent unreachable (suspended)');
     expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
   });
+
+  it('renders deleted-agent failed delivery label for both sender and a second human viewer', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-viewer';
+
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'sse-deleted-reply-1',
+      msg: 'approved!',
+      sender: 'user:alice@example.com',
+      senderId: 'user-sender',
+      recipient: 'agent:gone-worker',
+      recipientId: 'gone-worker-id',
+      type: 'reply',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: 'agent_unreachable',
+    });
+
+    await vi.waitFor(() => {
+      const bubble = el.shadowRoot?.querySelector('#msg-sse-deleted-reply-1') as
+        | (HTMLElement & { updateComplete: Promise<boolean> })
+        | null;
+      expect(bubble).not.toBeNull();
+      const state = bubble?.shadowRoot?.querySelector('.delivery-state.failed');
+      expect(state?.textContent).toContain('Not delivered — @gone-worker was deleted');
+    });
+
+    // Switch viewer to the sender: same label renders for the sender too.
+    el.currentUserId = 'user-sender';
+    await el.updateComplete;
+    const bubble = el.shadowRoot?.querySelector('#msg-sse-deleted-reply-1') as
+      | (HTMLElement & { updateComplete: Promise<boolean> })
+      | null;
+    await bubble?.updateComplete;
+    const state = bubble?.shadowRoot?.querySelector('.delivery-state.failed');
+    expect(state?.textContent).toContain('Not delivered — @gone-worker was deleted');
+  });
 });
 
 describe('scion-chat-thread stale send and the sending state', () => {

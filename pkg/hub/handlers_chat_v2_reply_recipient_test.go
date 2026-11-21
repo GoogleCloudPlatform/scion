@@ -246,7 +246,21 @@ func TestReplyRecipient_DeletedSender_Unreachable(t *testing.T) {
 		t.Fatalf("UpdateAgent (delete): %v", err)
 	}
 
-	body := map[string]string{"content": "replying to you", "reply_to_id": origMsgID}
+	// Wire a real ChannelEventPublisher and subscribe to the project chat SSE
+	// subject before posting so we verify the published event carries the
+	// deleted failure reason and code as well.
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	srv.events = pub
+	sseCh, sseUnsub := pub.Subscribe("project." + proj.ID + ".chat.message")
+	defer sseUnsub()
+
+	idemKey := "idem-reply-deleted-sender"
+	body := map[string]string{
+		"content":         "replying to you",
+		"reply_to_id":     origMsgID,
+		"idempotency_key": idemKey,
+	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
@@ -259,11 +273,78 @@ func TestReplyRecipient_DeletedSender_Unreachable(t *testing.T) {
 	if resp["dispatchState"] != "failed" {
 		t.Fatalf("expected dispatchState=failed, got %v", resp)
 	}
+	if resp["dispatchFailureReason"] != agentDeletedReason {
+		t.Fatalf("expected dispatchFailureReason=%q, got %v", agentDeletedReason, resp)
+	}
 	if resp["dispatchFailureCode"] != dispatchFailureCodeAgentUnreachable {
 		t.Fatalf("expected dispatchFailureCode=%q, got %v", dispatchFailureCodeAgentUnreachable, resp)
 	}
 	if len(dispatcher.getMessages()) != 0 {
 		t.Fatalf("expected zero dispatches (must not fall back to thread default), got %d", len(dispatcher.getMessages()))
+	}
+
+	// Verify SSE carries the same failed state, reason, and code.
+	select {
+	case evt := <-sseCh:
+		var ssePayload UserMessageEvent
+		if err := json.Unmarshal(evt.Data, &ssePayload); err != nil {
+			t.Fatalf("unmarshal SSE payload: %v", err)
+		}
+		if ssePayload.DispatchState != store.MessageDispatchFailed {
+			t.Fatalf("SSE dispatchState = %q, want %q", ssePayload.DispatchState, store.MessageDispatchFailed)
+		}
+		if ssePayload.DispatchFailureReason != agentDeletedReason {
+			t.Fatalf("SSE dispatchFailureReason = %q, want %q", ssePayload.DispatchFailureReason, agentDeletedReason)
+		}
+		if ssePayload.DispatchFailureCode != dispatchFailureCodeAgentUnreachable {
+			t.Fatalf("SSE dispatchFailureCode = %q, want %q", ssePayload.DispatchFailureCode, dispatchFailureCodeAgentUnreachable)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for SSE event")
+	}
+
+	// Verify idempotent replay returns the same failed state, reason, and code.
+	replayRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if replayRec.Code != http.StatusOK && replayRec.Code != http.StatusCreated {
+		t.Fatalf("replay expected 200/201, got %d: %s", replayRec.Code, replayRec.Body.String())
+	}
+	var replayResp map[string]any
+	if err := json.Unmarshal(replayRec.Body.Bytes(), &replayResp); err != nil {
+		t.Fatalf("decode replay response: %v", err)
+	}
+	if replayResp["dispatchState"] != "failed" ||
+		replayResp["dispatchFailureReason"] != agentDeletedReason ||
+		replayResp["dispatchFailureCode"] != dispatchFailureCodeAgentUnreachable {
+		t.Fatalf("replay mismatch: got %v", replayResp)
+	}
+
+	// Verify history GET carries the failed state and deleted reason.
+	histRec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+topicID+"/messages", nil)
+	if histRec.Code != http.StatusOK {
+		t.Fatalf("history GET expected 200, got %d: %s", histRec.Code, histRec.Body.String())
+	}
+	var histResp struct {
+		Messages []store.Message `json:"messages"`
+	}
+	if err := json.Unmarshal(histRec.Body.Bytes(), &histResp); err != nil {
+		t.Fatalf("decode history response: %v", err)
+	}
+	replyID, _ := resp["id"].(string)
+	var found *store.Message
+	for i := range histResp.Messages {
+		if histResp.Messages[i].ID == replyID {
+			found = &histResp.Messages[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("reply message %q not found in history", replyID)
+	}
+	if found.DispatchState != store.MessageDispatchFailed {
+		t.Fatalf("history dispatchState = %q, want %q", found.DispatchState, store.MessageDispatchFailed)
+	}
+	if found.DispatchFailureReason == nil || *found.DispatchFailureReason != agentDeletedReason {
+		t.Fatalf("history dispatchFailureReason = %v, want %q", found.DispatchFailureReason, agentDeletedReason)
 	}
 }
 
@@ -412,7 +493,21 @@ func TestReplyRecipient_HardDeletedSender_Unreachable(t *testing.T) {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 
-	body := map[string]string{"content": "replying to you", "reply_to_id": origMsgID}
+	// Wire a real ChannelEventPublisher and subscribe to the project chat SSE
+	// subject before posting so we verify the published event carries the
+	// deleted failure reason and code as well.
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	srv.events = pub
+	sseCh, sseUnsub := pub.Subscribe("project." + proj.ID + ".chat.message")
+	defer sseUnsub()
+
+	idemKey := "idem-reply-deleted-sender"
+	body := map[string]string{
+		"content":         "replying to you",
+		"reply_to_id":     origMsgID,
+		"idempotency_key": idemKey,
+	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
@@ -425,11 +520,78 @@ func TestReplyRecipient_HardDeletedSender_Unreachable(t *testing.T) {
 	if resp["dispatchState"] != "failed" {
 		t.Fatalf("expected dispatchState=failed, got %v", resp)
 	}
+	if resp["dispatchFailureReason"] != agentDeletedReason {
+		t.Fatalf("expected dispatchFailureReason=%q, got %v", agentDeletedReason, resp)
+	}
 	if resp["dispatchFailureCode"] != dispatchFailureCodeAgentUnreachable {
 		t.Fatalf("expected dispatchFailureCode=%q, got %v", dispatchFailureCodeAgentUnreachable, resp)
 	}
 	if len(dispatcher.getMessages()) != 0 {
 		t.Fatalf("expected zero dispatches (must not fall back to thread default), got %d", len(dispatcher.getMessages()))
+	}
+
+	// Verify SSE carries the same failed state, reason, and code.
+	select {
+	case evt := <-sseCh:
+		var ssePayload UserMessageEvent
+		if err := json.Unmarshal(evt.Data, &ssePayload); err != nil {
+			t.Fatalf("unmarshal SSE payload: %v", err)
+		}
+		if ssePayload.DispatchState != store.MessageDispatchFailed {
+			t.Fatalf("SSE dispatchState = %q, want %q", ssePayload.DispatchState, store.MessageDispatchFailed)
+		}
+		if ssePayload.DispatchFailureReason != agentDeletedReason {
+			t.Fatalf("SSE dispatchFailureReason = %q, want %q", ssePayload.DispatchFailureReason, agentDeletedReason)
+		}
+		if ssePayload.DispatchFailureCode != dispatchFailureCodeAgentUnreachable {
+			t.Fatalf("SSE dispatchFailureCode = %q, want %q", ssePayload.DispatchFailureCode, dispatchFailureCodeAgentUnreachable)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for SSE event")
+	}
+
+	// Verify idempotent replay returns the same failed state, reason, and code.
+	replayRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages", body)
+	if replayRec.Code != http.StatusOK && replayRec.Code != http.StatusCreated {
+		t.Fatalf("replay expected 200/201, got %d: %s", replayRec.Code, replayRec.Body.String())
+	}
+	var replayResp map[string]any
+	if err := json.Unmarshal(replayRec.Body.Bytes(), &replayResp); err != nil {
+		t.Fatalf("decode replay response: %v", err)
+	}
+	if replayResp["dispatchState"] != "failed" ||
+		replayResp["dispatchFailureReason"] != agentDeletedReason ||
+		replayResp["dispatchFailureCode"] != dispatchFailureCodeAgentUnreachable {
+		t.Fatalf("replay mismatch: got %v", replayResp)
+	}
+
+	// Verify history GET carries the failed state and deleted reason.
+	histRec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+topicID+"/messages", nil)
+	if histRec.Code != http.StatusOK {
+		t.Fatalf("history GET expected 200, got %d: %s", histRec.Code, histRec.Body.String())
+	}
+	var histResp struct {
+		Messages []store.Message `json:"messages"`
+	}
+	if err := json.Unmarshal(histRec.Body.Bytes(), &histResp); err != nil {
+		t.Fatalf("decode history response: %v", err)
+	}
+	replyID, _ := resp["id"].(string)
+	var found *store.Message
+	for i := range histResp.Messages {
+		if histResp.Messages[i].ID == replyID {
+			found = &histResp.Messages[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("reply message %q not found in history", replyID)
+	}
+	if found.DispatchState != store.MessageDispatchFailed {
+		t.Fatalf("history dispatchState = %q, want %q", found.DispatchState, store.MessageDispatchFailed)
+	}
+	if found.DispatchFailureReason == nil || *found.DispatchFailureReason != agentDeletedReason {
+		t.Fatalf("history dispatchFailureReason = %v, want %q", found.DispatchFailureReason, agentDeletedReason)
 	}
 }
 

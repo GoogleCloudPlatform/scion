@@ -962,7 +962,7 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 			&unreachableAgentOverride{
 				AgentSlug: unresolvedDefaultAgent.Slug,
 				AgentID:   unresolvedDefaultAgent.ID,
-				Reason:    agentGoneReason,
+				Reason:    agentDeletedReason,
 				Code:      dispatchFailureCodeAgentUnreachable,
 			})
 	}
