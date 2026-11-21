@@ -873,6 +873,11 @@ func (c *Client) ListSecrets(ctx context.Context) (*ListSecretsResponse, error) 
 	return c.ListSecretsWithScope(ctx, "")
 }
 
+// ErrAgentScopeUnavailable is returned by ListSecretsWithScope when the Hub
+// rejects the requested scope with HTTP 400 (for example, when hub.agent_secrets
+// is not enabled on the Hub).
+var ErrAgentScopeUnavailable = errors.New("agent secret scope is not enabled on this hub")
+
 // ListSecretsWithScope lists metadata for secrets accessible to the agent,
 // optionally filtered by scope ("agent", "project", "user", or "all").
 func (c *Client) ListSecretsWithScope(ctx context.Context, scope string) (*ListSecretsResponse, error) {
@@ -905,6 +910,9 @@ func (c *Client) ListSecretsWithScope(ctx context.Context, scope string) (*ListS
 
 	respBody, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode == http.StatusBadRequest && (scope == "agent" || scope == "all") {
+		return nil, fmt.Errorf("%w: %s", ErrAgentScopeUnavailable, string(respBody))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	}

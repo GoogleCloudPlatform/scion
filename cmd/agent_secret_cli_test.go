@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -89,8 +90,10 @@ func TestAgentSecretGetValue_WithScopeFlag(t *testing.T) {
 }
 
 func TestAgentSecretList_InsideAgentShowsScopeColumn(t *testing.T) {
+	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/api/v1/agents/"+secretGetTestAgentID+"/secrets", r.URL.Path)
+		gotQuery = r.URL.RawQuery
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"secrets": []map[string]string{
 				{"key": "AGENT_KEY", "type": "environment", "target": "AGENT_KEY", "scope": "agent"},
@@ -111,12 +114,105 @@ func TestAgentSecretList_InsideAgentShowsScopeColumn(t *testing.T) {
 	c.SetOut(&out)
 	require.NoError(t, runAgentSecretList(c, nil))
 
+	assert.Equal(t, "scope=all", gotQuery)
 	text := out.String()
 	assert.Contains(t, text, "SCOPE")
 	assert.Contains(t, text, "AGENT_KEY")
 	assert.Contains(t, text, "agent")
 	assert.Contains(t, text, "PROJ_KEY")
 	assert.Contains(t, text, "project")
+}
+
+func TestAgentSecretList_ExperimentOffFallsBackToProjectList(t *testing.T) {
+	// When hub.agent_secrets is off, /api/v1/agents/{id}/secrets?scope=all
+	// returns HTTP 400 (ErrAgentScopeUnavailable) and scion secret list falls
+	// back to the pre-existing project-scoped /api/v1/secrets endpoint.
+	var agentEndpointHit, projectEndpointHit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.URL.Path == "/api/v1/agents/"+secretGetTestAgentID+"/secrets":
+			agentEndpointHit = true
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]string{"code": "validation_error", "message": "scope must be \"project\" or \"user\""},
+			})
+		case r.URL.Path == "/api/v1/secrets":
+			projectEndpointHit = true
+			assert.Equal(t, "project", r.URL.Query().Get("scope"))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"secrets": []map[string]any{
+					{"key": "PROJ_ONLY", "type": "environment", "version": 1},
+				},
+				"scope": "project",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	state := saveSecretTestState()
+	t.Cleanup(state.restore)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_PROJECT_ID", "test-project-id")
+	projectPath = setupSecretProject(t, home, srv.URL)
+
+	useSecretGetHub(t, srv)
+	origListScope := agentSecretListScope
+	t.Cleanup(func() { agentSecretListScope = origListScope })
+	agentSecretListScope = ""
+
+	c := &cobra.Command{}
+	c.SetContext(context.Background())
+	out := captureStdout(t, func() {
+		require.NoError(t, runAgentSecretList(c, nil))
+	})
+	assert.True(t, agentEndpointHit, "expected probe of agent secrets endpoint")
+	assert.True(t, projectEndpointHit, "expected fallback to project secrets endpoint when experiment is off")
+	assert.Contains(t, out, "VERSION")
+	assert.Contains(t, out, "UPDATED")
+	assert.Contains(t, out, "PROJ_ONLY")
+	assert.NotContains(t, out, "SCOPE")
+}
+
+func TestResolveAgentScopeID_PaginatesAndDetectsAmbiguity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/agents" && r.URL.Query().Get("cursor") == "":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"agents":     []map[string]string{{"id": "11111111-1111-1111-1111-111111111111", "slug": "dup-agent", "name": "dup-agent"}},
+				"nextCursor": "page-2",
+			})
+		case r.URL.Path == "/api/v1/agents" && r.URL.Query().Get("cursor") == "page-2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"agents": []map[string]string{
+					{"id": "22222222-2222-2222-2222-222222222222", "slug": "page2-agent", "name": "page2-agent"},
+					{"id": "33333333-3333-3333-3333-333333333333", "slug": "dup-agent", "name": "dup-agent"},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	// Finds agent on page 2.
+	id, err := resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "page2-agent")
+	require.NoError(t, err)
+	assert.Equal(t, "22222222-2222-2222-2222-222222222222", id)
+
+	// Detects ambiguity across pages.
+	_, err = resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "dup-agent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "matches multiple agents")
 }
 
 func TestAgentSecretList_InvalidScopeFlag(t *testing.T) {

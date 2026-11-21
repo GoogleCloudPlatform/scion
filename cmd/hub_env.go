@@ -286,35 +286,30 @@ func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID
 		}
 		return broker.ID, nil
 	case "agent":
-		return resolveAgentScopeID(ctx, client, scopeID)
+		return resolveAgentScopeID(ctx, client, nil, uat, scopeID)
 	}
 	return scopeID, nil
 }
 
 // resolveAgentScopeID resolves an agent name, slug, or ID to its UUID.
-func resolveAgentScopeID(ctx context.Context, client hubclient.Client, agentRef string) (string, error) {
-	if agent, err := client.Agents().Get(ctx, agentRef); err == nil && agent != nil && agent.ID != "" {
-		return agent.ID, nil
+// When a project can be inferred from settings/context, resolution is scoped
+// to that project (paginating through all agents in the project); otherwise
+// it paginates across all accessible agents and detects same-name ambiguity.
+func resolveAgentScopeID(ctx context.Context, client hubclient.Client, settings *config.Settings, uat bool, agentRef string) (string, error) {
+	if _, err := uuid.Parse(agentRef); err == nil {
+		return agentRef, nil
 	}
-	resp, err := client.Agents().List(ctx, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve agent %q: %w", agentRef, err)
-	}
-	var matches []*hubclient.Agent
-	for i := range resp.Agents {
-		a := &resp.Agents[i]
-		if a.ID == agentRef || a.Slug == agentRef || a.Name == agentRef {
-			matches = append(matches, a)
+	agentSvc := client.Agents()
+	if projRef, _, err := inferScopeProject(settings); err == nil && projRef != "" {
+		if proj, perr := resolveProjectByNameOrID(ctx, client, projRef, uat); perr == nil && proj != nil && proj.ID != "" {
+			agentSvc = client.ProjectAgents(proj.ID)
 		}
 	}
-	switch len(matches) {
-	case 0:
-		return "", fmt.Errorf("agent %q not found", agentRef)
-	case 1:
-		return matches[0].ID, nil
-	default:
-		return "", fmt.Errorf("agent %q is ambiguous (%d matches across projects); specify the agent UUID instead", agentRef, len(matches))
+	agent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
+	if err != nil {
+		return "", err
 	}
+	return agent.ID, nil
 }
 
 func runEnvSet(cmd *cobra.Command, args []string) error {

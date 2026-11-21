@@ -226,56 +226,73 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 		return s.hubID, true
 
 	case store.ScopeAgent:
-		// Agent scope is secrets-only (not plain env vars) and gated on hub.agent_secrets.
-		if !s.experimentEnabled(experiments.AgentSecrets) || !strings.HasPrefix(r.URL.Path, "/api/v1/secrets") {
-			BadRequest(w, "invalid scope: "+scope)
-			return "", false
-		}
-		if clientScopeID == "" {
-			BadRequest(w, "scopeId is required for agent scope")
-			return "", false
-		}
-		agent, err := s.store.GetAgent(ctx, clientScopeID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				NotFound(w, "Agent")
-			} else {
-				writeErrorFromErr(w, err, "")
-			}
-			return "", false
-		}
-		identity := GetIdentityFromContext(ctx)
-		if identity == nil {
-			Unauthorized(w)
-			return "", false
-		}
-		userIdent, ok := identity.(UserIdentity)
-		if !ok {
-			// Agents access their own secrets via /api/v1/agents/{id}/secrets.
-			Forbidden(w)
-			return "", false
-		}
-		action := ActionRead
-		if isWrite {
-			action = ActionUpdate
-		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:       "agent",
-			ID:         agent.ID,
-			OwnerID:    agent.OwnerID,
-			ParentType: "project",
-			ParentID:   agent.ProjectID,
-		}, action)
-		if !decision.Allowed {
-			Forbidden(w)
-			return "", false
-		}
-		return agent.ID, true
+		scopeID, _, ok := s.resolveAgentSecretAccess(w, r, scope, clientScopeID, isWrite)
+		return scopeID, ok
 
 	default:
 		BadRequest(w, "invalid scope: "+scope)
 		return "", false
 	}
+}
+
+// resolveEnvSecretAccessWithAgent is resolveEnvSecretAccess that also returns
+// the loaded *store.Agent when scope == store.ScopeAgent, so setSecret can
+// attach ProjectID without re-fetching the agent.
+func (s *Server) resolveEnvSecretAccessWithAgent(w http.ResponseWriter, r *http.Request, scope, clientScopeID string, isWrite bool) (string, *store.Agent, bool) {
+	if scope == store.ScopeAgent {
+		return s.resolveAgentSecretAccess(w, r, scope, clientScopeID, isWrite)
+	}
+	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, clientScopeID, isWrite)
+	return scopeID, nil, ok
+}
+
+func (s *Server) resolveAgentSecretAccess(w http.ResponseWriter, r *http.Request, scope, clientScopeID string, isWrite bool) (string, *store.Agent, bool) {
+	ctx := r.Context()
+	// Agent scope is secrets-only (not plain env vars) and gated on hub.agent_secrets.
+	if !s.experimentEnabled(experiments.AgentSecrets) || !strings.HasPrefix(r.URL.Path, "/api/v1/secrets") {
+		BadRequest(w, "invalid scope: "+scope)
+		return "", nil, false
+	}
+	if clientScopeID == "" {
+		BadRequest(w, "scopeId is required for agent scope")
+		return "", nil, false
+	}
+	agent, err := s.store.GetAgent(ctx, clientScopeID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Agent")
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
+		return "", nil, false
+	}
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return "", nil, false
+	}
+	userIdent, ok := identity.(UserIdentity)
+	if !ok {
+		// Agents access their own secrets via /api/v1/agents/{id}/secrets.
+		Forbidden(w)
+		return "", nil, false
+	}
+	action := ActionRead
+	if isWrite {
+		action = ActionUpdate
+	}
+	decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+		Type:       "agent",
+		ID:         agent.ID,
+		OwnerID:    agent.OwnerID,
+		ParentType: "project",
+		ParentID:   agent.ProjectID,
+	}, action)
+	if !decision.Allowed {
+		Forbidden(w)
+		return "", nil, false
+	}
+	return agent.ID, agent, true
 }
 
 // envSecretSessionRequiredMessage is the refusal message for a user access
@@ -1251,7 +1268,7 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		scope = store.ScopeUser
 	}
 
-	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, req.ScopeID, true)
+	scopeID, resolvedAgent, ok := s.resolveEnvSecretAccessWithAgent(w, r, scope, req.ScopeID, true)
 	if !ok {
 		return
 	}
@@ -1297,10 +1314,8 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 			input.UserEmail = userIdent.Email()
 		}
 	}
-	if scope == store.ScopeAgent {
-		if agent, err := s.store.GetAgent(ctx, scopeID); err == nil && agent != nil {
-			input.ProjectID = agent.ProjectID
-		}
+	if scope == store.ScopeAgent && resolvedAgent != nil {
+		input.ProjectID = resolvedAgent.ProjectID
 	}
 
 	created, meta, err := s.secretBackend.Set(ctx, input)

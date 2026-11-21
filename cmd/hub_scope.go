@@ -218,6 +218,14 @@ func resolveHubScopeWith(
 		_, _ = fmt.Fprintf(notice, "Using project %s%s\n", projectLabel(project), target.fromSuffix())
 		return client, scope, project.ID, ctx, cancel, nil
 	}
+	if scope == "agent" {
+		scopeID, err = resolveAgentScopeID(ctx, client, settings, uat, scopeID)
+		if err != nil {
+			cancel()
+			return nil, "", "", nil, nil, err
+		}
+		return client, scope, scopeID, ctx, cancel, nil
+	}
 	scopeID, err = resolveScopeID(ctx, client, scope, scopeID, uat)
 	if err != nil {
 		cancel()

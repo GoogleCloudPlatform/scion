@@ -602,3 +602,224 @@ func TestAgentSecrets_ProjectDeletionRemovesAgentSecretsAndCallsExternalCleanup(
 	_, err = s.GetSecret(ctx, "OTHER_KEEP_KEY", store.ScopeAgent, otherAgent.ID)
 	require.NoError(t, err, "other project's agent secret must not be affected")
 }
+
+// TestAgentSecrets_AsNeededEnvVarBeatsAgentSecret is the R1 regression test:
+// a stored as_needed env var wins over an as_needed agent-scope secret for the
+// same key (matching the always path and envGatherSourceLabel), while agent
+// scope still beats lower secret scopes for keys only in the secret store.
+func TestAgentSecrets_AsNeededEnvVarBeatsAgentSecret(t *testing.T) {
+	srv, s, _, _, project, agentX, _ := setupAgentSecretsTestFixture(t, true)
+	ctx := context.Background()
+
+	// Project-scope as_needed plain env var REVIEW_FOO.
+	_, err := s.UpsertEnvVar(ctx, &store.EnvVar{
+		ID:            api.NewUUID(),
+		Key:           "REVIEW_FOO",
+		Value:         "env-val",
+		Scope:         store.ScopeProject,
+		ScopeID:       project.ID,
+		InjectionMode: store.InjectionModeAsNeeded,
+	})
+	require.NoError(t, err)
+
+	// Agent-scope as_needed secret REVIEW_FOO must NOT overwrite the env var.
+	_, _, err = srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name:          "REVIEW_FOO",
+		Value:         "agent-secret-val",
+		Scope:         store.ScopeAgent,
+		ScopeID:       agentX.ID,
+		ProjectID:     project.ID,
+		InjectionMode: store.InjectionModeAsNeeded,
+	})
+	require.NoError(t, err)
+
+	// For a key only in secrets, agent scope still overrides project scope.
+	_, _, err = srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name:          "SECRET_ONLY",
+		Value:         "proj-secret-val",
+		Scope:         store.ScopeProject,
+		ScopeID:       project.ID,
+		InjectionMode: store.InjectionModeAsNeeded,
+	})
+	require.NoError(t, err)
+	_, _, err = srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name:          "SECRET_ONLY",
+		Value:         "agent-secret-only-val",
+		Scope:         store.ScopeAgent,
+		ScopeID:       agentX.ID,
+		ProjectID:     project.ID,
+		InjectionMode: store.InjectionModeAsNeeded,
+	})
+	require.NoError(t, err)
+
+	d := NewHTTPAgentDispatcher(s, false, nil)
+	d.SetSecretBackend(srv.secretBackend)
+	d.SetAuthzService(srv.authzService)
+	d.SetAgentSecretsEnabledProvider(func() bool { return srv.experimentEnabled(experiments.AgentSecrets) })
+
+	got, err := d.resolveAsNeededForKeys(ctx, agentX, []string{"REVIEW_FOO", "SECRET_ONLY"}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "env-val", got["REVIEW_FOO"], "stored env var must win over as_needed agent-scope secret")
+	assert.Equal(t, "agent-secret-only-val", got["SECRET_ONLY"], "agent-scope secret must still beat project-scope secret")
+}
+
+// TestAgentSecrets_ScopedTokens pins the UAT bearer disposition of
+// agent.secret.read and agent.secret.write on /api/v1/secrets?scope=agent:
+// agent:read admits metadata reads, agent:update admits writes, unrelated
+// selectors are refused, and tokens bounded to another project are refused.
+func TestAgentSecrets_ScopedTokens(t *testing.T) {
+	srv, s, owner, _, project, agentX, _ := setupAgentSecretsTestFixture(t, true)
+	ctx := context.Background()
+
+	otherProject := &store.Project{
+		ID:      api.NewUUID(),
+		Name:    "other-uat-proj",
+		Slug:    "other-uat-proj",
+		OwnerID: owner.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, "project-owner", store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               api.NewUUID(),
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      owner.ID,
+		RoleDefinitionID: ownerRD.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          otherProject.ID,
+	})
+	require.NoError(t, err)
+
+	mint := func(name string, boundary TokenBoundary, scopes ...string) string {
+		t.Helper()
+		key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(owner.ID), CreateTokenParams{
+			UserID:   owner.ID,
+			Name:     name,
+			Boundary: boundary,
+			Scopes:   scopes,
+		})
+		require.NoError(t, err)
+		return key
+	}
+
+	doUAT := func(key, method, target string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		var buf bytes.Buffer
+		if body != nil {
+			require.NoError(t, json.NewEncoder(&buf).Encode(body))
+		}
+		req := httptest.NewRequest(method, target, &buf)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+
+	readTok := mint("agent-read-tok", projectBoundary(project.ID), "agent:read")
+	writeTok := mint("agent-write-tok", projectBoundary(project.ID), "agent:update")
+	unrelatedTok := mint("unrelated-tok", projectBoundary(project.ID), "project:read")
+	otherProjReadTok := mint("other-proj-read-tok", projectBoundary(otherProject.ID), "agent:read")
+	otherProjWriteTok := mint("other-proj-write-tok", projectBoundary(otherProject.ID), "agent:update")
+
+	// agent:update admits PUT.
+	rr := doUAT(writeTok, http.MethodPut, "/api/v1/secrets/UAT_KEY", SetSecretRequest{
+		Value: "uat-val", Encoding: "raw", Scope: store.ScopeAgent, ScopeID: agentX.ID,
+	})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	// agent:read refuses PUT, PATCH, DELETE; admits GET list & GET key.
+	rr = doUAT(readTok, http.MethodPut, "/api/v1/secrets/UAT_KEY2", SetSecretRequest{
+		Value: "v", Encoding: "raw", Scope: store.ScopeAgent, ScopeID: agentX.ID,
+	})
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+
+	rr = doUAT(readTok, http.MethodGet, "/api/v1/secrets?scope=agent&scopeId="+agentX.ID, nil)
+	assert.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	rr = doUAT(readTok, http.MethodGet, "/api/v1/secrets/UAT_KEY?scope=agent&scopeId="+agentX.ID, nil)
+	assert.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+
+	desc := "updated-by-uat"
+	rr = doUAT(readTok, http.MethodPatch, "/api/v1/secrets/UAT_KEY?scope=agent&scopeId="+agentX.ID, PatchSecretRequest{Description: &desc})
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+
+	rr = doUAT(readTok, http.MethodDelete, "/api/v1/secrets/UAT_KEY?scope=agent&scopeId="+agentX.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+
+	// Unrelated selector refused on read and write.
+	rr = doUAT(unrelatedTok, http.MethodGet, "/api/v1/secrets?scope=agent&scopeId="+agentX.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	rr = doUAT(unrelatedTok, http.MethodPut, "/api/v1/secrets/UAT_KEY3", SetSecretRequest{
+		Value: "v", Encoding: "raw", Scope: store.ScopeAgent, ScopeID: agentX.ID,
+	})
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+
+	// Token bounded to another project refused on read and write.
+	rr = doUAT(otherProjReadTok, http.MethodGet, "/api/v1/secrets?scope=agent&scopeId="+agentX.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	rr = doUAT(otherProjWriteTok, http.MethodPut, "/api/v1/secrets/UAT_KEY4", SetSecretRequest{
+		Value: "v", Encoding: "raw", Scope: store.ScopeAgent, ScopeID: agentX.ID,
+	})
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+
+	// agent:update admits PATCH and DELETE.
+	rr = doUAT(writeTok, http.MethodPatch, "/api/v1/secrets/UAT_KEY?scope=agent&scopeId="+agentX.ID, PatchSecretRequest{Description: &desc})
+	assert.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	rr = doUAT(writeTok, http.MethodDelete, "/api/v1/secrets/UAT_KEY?scope=agent&scopeId="+agentX.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rr.Code)
+}
+
+// TestAgentSecrets_HardDeleteRouteAndPurgeExpiredAgentsCallExternalCleanup
+// exercises the real hard-delete DELETE route (deletionEngine.finish) and
+// purgeExpiredAgents call sites with a spy backend, proving that both remove
+// DB rows and invoke backend.Delete for agent-scoped secrets.
+func TestAgentSecrets_HardDeleteRouteAndPurgeExpiredAgentsCallExternalCleanup(t *testing.T) {
+	srv, s, owner, _, project, agentX, agentY := setupAgentSecretsTestFixture(t, true)
+	ctx := context.Background()
+
+	spy := &spyDeleteSecretBackend{SecretBackend: srv.GetSecretBackend()}
+	srv.SetSecretBackend(spy)
+
+	_, _, err := spy.Set(ctx, &secret.SetSecretInput{
+		Name: "HARD_DEL_KEY", Value: "v1", Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
+	})
+	require.NoError(t, err)
+	_, _, err = spy.Set(ctx, &secret.SetSecretInput{
+		Name: "PURGE_EXP_KEY", Value: "v2", Scope: store.ScopeAgent, ScopeID: agentY.ID, ProjectID: project.ID,
+	})
+	require.NoError(t, err)
+
+	// 1. Hard delete agentX through the real DELETE /api/v1/agents/{id} route
+	// (default soft_delete_retention is 0 -> hard delete via deletionEngine.finish).
+	rr := doRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/agents/"+agentX.ID+"?deleteFiles=true", nil)
+	require.True(t, rr.Code == http.StatusNoContent || rr.Code == http.StatusOK,
+		"expected 204 or 200 on agent hard delete, got %d: %s", rr.Code, rr.Body.String())
+
+	_, err = s.GetSecret(ctx, "HARD_DEL_KEY", store.ScopeAgent, agentX.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "hard delete route must remove agent-scope DB row")
+
+	spy.mu.Lock()
+	deletedAfterHard := append([]string(nil), spy.deleted...)
+	spy.mu.Unlock()
+	assert.Contains(t, deletedAfterHard, store.ScopeAgent+"/"+agentX.ID+"/HARD_DEL_KEY",
+		"hard delete route must invoke post-commit backend.Delete via deletionEngine.finish")
+
+	// 2. Retention purge of soft-deleted agentY through purgeExpiredAgents.
+	agentY.DeletedAt = time.Now().Add(-48 * time.Hour)
+	require.NoError(t, s.UpdateAgent(ctx, agentY))
+	purged, err := srv.purgeExpiredAgents(ctx, time.Now().Add(-24*time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 1, purged)
+
+	_, err = s.GetSecret(ctx, "PURGE_EXP_KEY", store.ScopeAgent, agentY.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "purgeExpiredAgents must remove agent-scope DB row")
+
+	spy.mu.Lock()
+	deletedAfterPurge := append([]string(nil), spy.deleted...)
+	spy.mu.Unlock()
+	assert.Contains(t, deletedAfterPurge, store.ScopeAgent+"/"+agentY.ID+"/PURGE_EXP_KEY",
+		"purgeExpiredAgents must invoke post-commit backend.Delete")
+}

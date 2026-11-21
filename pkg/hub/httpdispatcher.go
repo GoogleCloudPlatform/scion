@@ -3594,7 +3594,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 					if secret.IsReservedEnvTarget(resultKey) {
 						continue
 					}
-					if _, alreadySet := result[resultKey]; !alreadySet || sv.Scope == store.ScopeAgent {
+					if _, alreadySet := result[resultKey]; !alreadySet {
 						result[resultKey] = sv.Value
 					}
 				}
